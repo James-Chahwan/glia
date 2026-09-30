@@ -5,10 +5,12 @@
 //! payloads is CLI-only; nothing here does network I/O. Directory-module slot,
 //! reached by module path (`glia_engine::shared_cache::<item>`): its owners add
 //! their files (key.rs, export.rs, import.rs, layout.rs) and declare them here.
-//! Filled by CE.2a.
+//! Filled by CE.2a (keys, export) and CE.2b (import).
 
 mod export;
+mod import;
 mod key;
 
 pub use export::{CacheRow, CacheRows, Export, ExportedEntry, cache_rows, export_entries};
+pub use import::{ImportOptions, ImportSummary, Verify, Wanted, import_entries, wanted};
 pub use key::{CacheKey, file_key};

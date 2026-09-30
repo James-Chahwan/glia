@@ -1,20 +1,34 @@
-//! CE.2a gate: the shared parse cache's engine half, keys and export.
+//! CE.2a / CE.2b gate: the shared parse cache's engine half, keys, export and
+//! the verified import.
 //!
 //! A cached parse is addressed by a blake3 key over every input the build's
 //! language branch reads (build stamp, repo identity, language, path, MODULE
 //! form, the go.mod set for a Go file, the content), and a checkout exports the
 //! sidecar entries a build of it would reuse, each as the entry's own bytes.
+//! Another checkout imports them (CE.2b) only for the files it lacks, only when
+//! each payload is of the checked-out content, language and MODULE form, and
+//! only when a re-parse of a random sample matches byte for byte.
 //! The fixture repo is a.py, b.go + go.mod and the same-stem pair util.ts +
 //! util.js (LB.13 names both MODULEs by file name), so the Go context and the
-//! module form are both exercised.
+//! module form are both exercised. The import tests write one copy per side at
+//! `<tmp>/<side>/repo`, so every copy's identity is `dir:repo`.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use glia_code_domain::FileParse;
 use glia_code_domain::walk_gating::repo_identity;
-use glia_engine::shared_cache::{CacheKey, CacheRows, cache_rows, export_entries, file_key};
-use glia_engine::{BUILD_STAMP, GoModules, generate_one_incremental};
+use glia_core::NodeId;
+use glia_engine::cache::CacheDiff;
+use glia_engine::shared_cache::{
+    CacheKey, CacheRows, ImportOptions, ImportSummary, Verify, cache_rows, export_entries,
+    file_key, import_entries, wanted,
+};
+use glia_engine::{
+    BUILD_STAMP, GoModules, ParseCache, generate_one, generate_one_incremental,
+    generate_one_with_cache,
+};
+use glia_store::write_merged_sharded;
 
 const FILES: &[(&str, &str)] = &[
     ("a.py", "def a():\n    return 1\n"),
@@ -373,4 +387,328 @@ fn rows_are_deterministic() {
     let export = export_entries(s(&repo)).expect("export without a sidecar");
     assert_eq!((export.entries.len(), export.stale), (0, 4));
     assert!(cache_rows(s(&tmp.path().join("absent"))).is_err());
+}
+
+// ---- CE.2b: wanted rows and the verified import ----
+
+fn opts(verify: Verify) -> ImportOptions {
+    ImportOptions::default().with_verify(verify)
+}
+
+/// A fresh, unbuilt copy of the fixture at `<tmp>/<side>/repo`.
+fn copy(tmp: &Path, side: &str) -> PathBuf {
+    let repo = tmp.join(side).join("repo");
+    write_repo(&repo);
+    repo
+}
+
+/// Build side `a` (`<tmp>/a/repo`) and export its sidecar: `(path, key,
+/// payload)` per entry, path order.
+fn exported(tmp: &Path) -> (PathBuf, Vec<(String, CacheKey, Vec<u8>)>) {
+    let a = built(&tmp.join("a"), "repo");
+    let export = export_entries(s(&a)).expect("export a");
+    assert_eq!((export.entries.len(), export.stale), (4, 0), "{export:?}");
+    let entries = export
+        .entries
+        .into_iter()
+        .map(|e| (e.path, e.key, e.payload))
+        .collect();
+    (a, entries)
+}
+
+fn pairs(entries: &[(String, CacheKey, Vec<u8>)]) -> Vec<(CacheKey, Vec<u8>)> {
+    entries.iter().map(|(_, k, p)| (*k, p.clone())).collect()
+}
+
+fn entry<'a>(entries: &'a [(String, CacheKey, Vec<u8>)], path: &str) -> &'a (String, CacheKey, Vec<u8>) {
+    entries
+        .iter()
+        .find(|(p, _, _)| p == path)
+        .unwrap_or_else(|| panic!("{path} not exported"))
+}
+
+/// A payload's fields, decoded as the entry's derived shape.
+fn unpack(payload: &[u8]) -> (u64, String, FileParse) {
+    bincode::deserialize(payload).expect("decode payload")
+}
+
+fn pack(hash: u64, lang: &str, parse: &FileParse) -> Vec<u8> {
+    bincode::serialize(&(hash, lang, parse)).expect("encode payload")
+}
+
+/// `(offered, accepted, rejected, verified, written)`.
+fn counts(s: &ImportSummary) -> (usize, usize, usize, usize, bool) {
+    (s.offered, s.accepted, s.rejected, s.verified, s.written)
+}
+
+fn wanted_paths(repo: &Path) -> (Vec<String>, usize) {
+    let w = wanted(s(repo)).expect("wanted");
+    assert_eq!((w.stamp, w.repo_label.as_str()), (BUILD_STAMP, "repo"));
+    (w.rows.into_iter().map(|r| r.path).collect(), w.local_hits)
+}
+
+/// An incremental build of `repo` from its sidecar, as `generate_one_incremental`
+/// runs it: the build's file diff, with the graph written to `out`.
+fn warm_build(repo: &Path, out: &Path) -> CacheDiff {
+    let mut cache = ParseCache::load(s(repo));
+    let result = generate_one_with_cache(s(repo), &mut cache).expect("incremental build");
+    write_merged_sharded(&result.merged, out).expect("write warm graph");
+    cache.last_diff().expect("the build recorded a diff").clone()
+}
+
+fn cold_build(repo: &Path, out: &Path) {
+    let result = generate_one(s(repo)).expect("cold build");
+    write_merged_sharded(&result.merged, out).expect("write cold graph");
+}
+
+/// Every file of a written graph dir, by name.
+fn dir_bytes(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(dir)
+        .expect("read graph dir")
+        .flatten()
+        .map(|e| {
+            let bytes = std::fs::read(e.path()).expect("read graph file");
+            (e.file_name().to_string_lossy().into_owned(), bytes)
+        })
+        .collect()
+}
+
+fn strings(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| (*s).to_string()).collect()
+}
+
+#[test]
+fn import_into_a_fresh_copy_reuses_every_parse() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (a, entries) = exported(tmp.path());
+    let b = copy(tmp.path(), "b");
+
+    // Same identity (`dir:repo`), same bytes: b wants exactly a's four keys.
+    let w = wanted(s(&b)).expect("wanted");
+    assert_eq!(w.local_hits, 0);
+    let want: Vec<(&str, CacheKey)> = w.rows.iter().map(|r| (r.path.as_str(), r.key)).collect();
+    let have: Vec<(&str, CacheKey)> = entries.iter().map(|(p, k, _)| (p.as_str(), *k)).collect();
+    assert_eq!(want, have, "b's wanted rows are not a's exported keys");
+
+    let summary = import_entries(s(&b), pairs(&entries), &opts(Verify::Count(0))).expect("import");
+    assert_eq!(counts(&summary), (4, 4, 0, 0, true));
+    assert_eq!(
+        std::fs::read(sidecar_path(&b)).expect("b's sidecar"),
+        std::fs::read(sidecar_path(&a)).expect("a's sidecar"),
+        "the imported sidecar is not the one a's build wrote"
+    );
+    assert_eq!(wanted_paths(&b), (vec![], 4), "b still wants files");
+
+    // The next incremental build reparses nothing and builds the cold graph.
+    let diff = warm_build(&b, &tmp.path().join("warm"));
+    assert_eq!(
+        diff,
+        CacheDiff {
+            reused: strings(&["a.py", "b.go", "util.js", "util.ts"]),
+            reparsed: vec![],
+            evicted: vec![],
+        }
+    );
+    cold_build(&b, &tmp.path().join("cold"));
+    assert_eq!(
+        dir_bytes(&tmp.path().join("warm")),
+        dir_bytes(&tmp.path().join("cold")),
+        "the graph built on imported parses differs from a cold build"
+    );
+
+    // Offered again, nothing is wanted: all rejected, the sidecar not rewritten.
+    let again = import_entries(s(&b), pairs(&entries), &opts(Verify::All)).expect("re-import");
+    assert_eq!(counts(&again), (4, 0, 4, 0, false));
+}
+
+#[test]
+fn a_poisoned_payload_is_caught_by_the_sample() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_a, mut entries) = exported(tmp.path());
+
+    // util.ts's payload with one forged node: right key, content hash,
+    // language and MODULE form, so only a re-parse can tell.
+    let slot = entries
+        .iter_mut()
+        .find(|(p, _, _)| p == "util.ts")
+        .expect("util.ts exported");
+    let (hash, lang, mut parse) = unpack(&slot.2);
+    let mut forged = parse.nodes.last().expect("util.ts has nodes").clone();
+    forged.id = NodeId(forged.id.0 ^ 0x5eed);
+    parse.nodes.push(forged);
+    slot.2 = pack(hash, &lang, &parse);
+
+    // The cheap checks pass it: with no sample it is written (the unsigned
+    // store's documented limit; CE.2c's MAC is the defence).
+    let c = copy(tmp.path(), "c");
+    let trusted = import_entries(s(&c), pairs(&entries), &opts(Verify::Count(0))).expect("import");
+    assert_eq!(counts(&trusted), (4, 4, 0, 0, true));
+
+    // Re-parsing every entry catches it, and nothing is written.
+    let b = copy(tmp.path(), "b");
+    let err = import_entries(s(&b), pairs(&entries), &opts(Verify::All))
+        .expect_err("a poisoned payload passed the full re-parse");
+    assert!(err.contains("util.ts") && err.contains("differs from a local parse"), "{err}");
+    assert!(!sidecar_path(&b).exists(), "a failed import wrote the sidecar");
+    assert!(!glia_store::default_gmap_dir(&b).exists(), "a failed import created the layout dir");
+}
+
+#[test]
+fn mismatched_payloads_are_rejected() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (a, entries) = exported(tmp.path());
+    let (_, a_py_key, a_py) = entry(&entries, "a.py");
+    let (_, b_go_key, b_go) = entry(&entries, "b.go");
+    let (_, util_js_key, util_js) = entry(&entries, "util.js");
+    let (_, util_ts_key, _) = entry(&entries, "util.ts");
+
+    // a.py's parse with a stale content hash; b.go's relabelled as python.
+    let (hash, lang, parse) = unpack(a_py);
+    let stale = pack(hash ^ 1, &lang, &parse);
+    let (hash, _, parse) = unpack(b_go);
+    let relabelled = pack(hash, "python", &parse);
+
+    let b = copy(tmp.path(), "b");
+    let offered = vec![
+        // util.js's payload under util.ts's key: another row's parse.
+        (*util_ts_key, util_js.clone()),
+        (*a_py_key, stale),
+        (*b_go_key, relabelled),
+        (*util_js_key, util_js.clone()),
+    ];
+    let summary = import_entries(s(&b), offered, &opts(Verify::All)).expect("import");
+    assert_eq!(counts(&summary), (4, 1, 3, 1, true));
+    assert_eq!(
+        wanted_paths(&b),
+        (strings(&["a.py", "b.go", "util.ts"]), 1),
+        "only util.js was imported"
+    );
+    let on_disk = sidecar_entries(&b);
+    assert_eq!(on_disk.keys().collect::<Vec<_>>(), ["util.js"]);
+    assert_eq!(on_disk.get("util.js"), sidecar_entries(&a).get("util.js"));
+
+    // What else a store can offer: a key this checkout never wants, bytes
+    // that are no payload, a payload cut short or padded, a key offered twice.
+    let c = copy(tmp.path(), "c");
+    let mut cut = util_js.clone();
+    cut.pop();
+    let mut padded = util_js.clone();
+    padded.push(0);
+    let offered = vec![
+        (CacheKey::from_bytes([7; 32]), util_js.clone()),
+        (*a_py_key, b"not a payload".to_vec()),
+        (*util_js_key, cut),
+        (*util_js_key, padded),
+        (*util_js_key, util_js.clone()),
+        (*util_js_key, util_js.clone()),
+    ];
+    let summary = import_entries(s(&c), offered, &opts(Verify::All)).expect("import");
+    assert_eq!(counts(&summary), (6, 1, 5, 1, true));
+}
+
+#[test]
+fn module_form_change_misses() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_a, entries) = exported(tmp.path());
+
+    // a.ts beside a.py: a cross-language stem, so a.py's MODULE turns from
+    // `a` to the file-name form `a.py` (LB.9b) and its key moves; the other
+    // three keep theirs.
+    let b = copy(tmp.path(), "b");
+    std::fs::write(b.join("a.ts"), "export const aTs = 1;\n").expect("write a.ts");
+    let w = wanted(s(&b)).expect("wanted");
+    let rows: Vec<(&str, &str)> = w
+        .rows
+        .iter()
+        .map(|r| (r.path.as_str(), r.module_qname.as_str()))
+        .collect();
+    assert_eq!(
+        rows,
+        [("a.py", "a.py"), ("a.ts", "a.ts"), ("b.go", "b"), ("util.js", "util.js"), ("util.ts", "util.ts")]
+    );
+    let (_, a_py_key, a_py) = entry(&entries, "a.py");
+    let b_a_py = w.rows.iter().find(|r| r.path == "a.py").expect("a.py row");
+    assert_ne!(b_a_py.key, *a_py_key, "a.py's key ignored its MODULE form");
+
+    // a's a.py payload: under a's key it names nothing b wants; under b's
+    // key it is the other MODULE form.
+    let mut offered = pairs(&entries);
+    offered.push((b_a_py.key, a_py.clone()));
+    let summary = import_entries(s(&b), offered, &opts(Verify::All)).expect("import");
+    assert_eq!(counts(&summary), (5, 3, 2, 3, true));
+    assert_eq!(wanted_paths(&b), (strings(&["a.py", "a.ts"]), 3));
+
+    let diff = warm_build(&b, &tmp.path().join("warm"));
+    assert_eq!(
+        diff,
+        CacheDiff {
+            reused: strings(&["b.go", "util.js", "util.ts"]),
+            reparsed: strings(&["a.py", "a.ts"]),
+            evicted: vec![],
+        }
+    );
+}
+
+#[test]
+fn parse_for_cache_matches_the_build() {
+    // A cold incremental build wrote a's sidecar through the router; a full
+    // re-parse of every file through `route::parse_for_cache` (the import's
+    // verification) must give the very same entry bytes, file by file.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (a, entries) = exported(tmp.path());
+    let on_disk = sidecar_entries(&a);
+    for (path, _, payload) in &entries {
+        assert_eq!(Some(payload), on_disk.get(path), "{path}: export is not the sidecar entry");
+    }
+    let b = copy(tmp.path(), "b");
+    let summary = import_entries(s(&b), pairs(&entries), &opts(Verify::All)).expect("verified import");
+    assert_eq!(counts(&summary), (4, 4, 0, 4, true));
+    assert_eq!(sidecar_entries(&b), on_disk);
+}
+
+#[test]
+fn verify_sample_is_bounded() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_a, entries) = exported(tmp.path());
+
+    let sampled = copy(tmp.path(), "b");
+    let summary =
+        import_entries(s(&sampled), pairs(&entries), &opts(Verify::Count(2))).expect("sampled import");
+    assert_eq!(counts(&summary), (4, 4, 0, 2, true));
+
+    let all = copy(tmp.path(), "c");
+    let summary = import_entries(s(&all), pairs(&entries), &opts(Verify::All)).expect("full import");
+    assert_eq!(counts(&summary), (4, 4, 0, 4, true));
+
+    // A sample larger than what was accepted checks what there is.
+    let over = copy(tmp.path(), "d");
+    let summary =
+        import_entries(s(&over), pairs(&entries), &opts(Verify::Count(99))).expect("oversized sample");
+    assert_eq!(counts(&summary), (4, 4, 0, 4, true));
+
+    // The sample changes what is checked, never what is written.
+    let sidecar = |repo: &Path| std::fs::read(sidecar_path(repo)).expect("read sidecar");
+    assert_eq!(sidecar(&sampled), sidecar(&all));
+    assert_eq!(sidecar(&over), sidecar(&all));
+}
+
+#[test]
+fn import_follows_the_checkout_not_the_offer() {
+    // A file edited after `wanted` ran: its key moved, so the payload fetched
+    // for the old bytes names nothing, and the rest still import.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (_a, entries) = exported(tmp.path());
+    let b = copy(tmp.path(), "b");
+    assert_eq!(wanted(s(&b)).expect("wanted").rows.len(), 4);
+    std::fs::write(b.join("a.py"), "def a():\n    return 3\n").expect("edit a.py");
+    let summary = import_entries(s(&b), pairs(&entries), &opts(Verify::All)).expect("import");
+    assert_eq!(counts(&summary), (4, 3, 1, 3, true));
+    assert_eq!(wanted_paths(&b), (strings(&["a.py"]), 3));
+
+    // Nothing accepted writes nothing: no layout dir appears.
+    let c = copy(tmp.path(), "c");
+    let summary = import_entries(s(&c), vec![], &opts(Verify::All)).expect("empty import");
+    assert_eq!(counts(&summary), (0, 0, 0, 0, false));
+    assert!(!glia_store::default_gmap_dir(&c).exists());
+    assert!(import_entries(s(&tmp.path().join("absent")), vec![], &opts(Verify::All)).is_err());
 }

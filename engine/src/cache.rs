@@ -233,12 +233,55 @@ pub fn content_hash(source: &str) -> u64 {
     h.finish()
 }
 
+/// One cached parse: what the sidecar holds per path, and (its bincode, see
+/// [`CacheEntry::payload`]) what the shared cache moves between checkouts.
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
-struct CacheEntry {
-    content_hash: u64,
-    lang: String,
+pub(crate) struct CacheEntry {
+    /// [`content_hash`] of the source the parse was built from.
+    pub(crate) content_hash: u64,
+    /// The language tag the file was parsed as.
+    pub(crate) lang: String,
     #[serde(serialize_with = "canonical_parse")]
-    parse: FileParse,
+    pub(crate) parse: FileParse,
+}
+
+impl CacheEntry {
+    /// The entry of a fresh parse of content hash `content_hash` as `lang`.
+    pub(crate) fn new(content_hash: u64, lang: &str, parse: FileParse) -> Self {
+        Self {
+            content_hash,
+            lang: lang.to_string(),
+            parse,
+        }
+    }
+
+    /// The shared-cache payload of this entry (CE.2a export, CE.2b import):
+    /// exactly `bincode::serialize` of it (`content_hash`, `lang`, the parse
+    /// through [`canonical_parse`]), the bytes the sidecar holds for it inside
+    /// its frame. Canonical, so equal parses give equal bytes: an import
+    /// compares a local re-parse's payload with an offered one byte for byte.
+    pub(crate) fn payload(&self) -> Result<Vec<u8>, String> {
+        bincode::serialize(self).map_err(|e| format!("payload: {e}"))
+    }
+
+    /// Decode a payload another machine wrote (CE.2b). The wire format is
+    /// [`CacheEntry::payload`]'s (`bincode::serialize`: fixint, little-endian),
+    /// read under two bounds a trusted local sidecar does not need: a limit of
+    /// the payload's own length, so no length prefix inside it can make the
+    /// decoder allocate past the bytes actually offered, and no trailing bytes,
+    /// which no [`CacheEntry::payload`] ever has. A decoded entry is only as
+    /// good as its checks: the caller compares its content hash, language and
+    /// MODULE form with the checked-out file before it is put.
+    pub(crate) fn from_payload(payload: &[u8]) -> Result<Self, String> {
+        use bincode::Options;
+        let limit = u64::try_from(payload.len()).map_err(|_| "payload too large".to_string())?;
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(limit)
+            .reject_trailing_bytes()
+            .deserialize(payload)
+            .map_err(|e| format!("undecodable payload ({e})"))
+    }
 }
 
 /// `FileParse` serialized with every hash container in key order (LC.11).
@@ -487,7 +530,7 @@ impl ParseCache {
         lang: &str,
     ) -> Result<Option<Vec<u8>>, String> {
         self.entry(path, hash, lang)
-            .map(|e| bincode::serialize(e).map_err(|err| format!("{path}: payload: {err}")))
+            .map(|e| e.payload().map_err(|err| format!("{path}: {err}")))
             .transpose()
     }
 
@@ -500,10 +543,14 @@ impl ParseCache {
 
     /// Record a freshly-parsed file.
     pub fn put(&mut self, path: String, hash: u64, lang: &str, parse: FileParse) {
-        self.entries.insert(
-            path,
-            CacheEntry { content_hash: hash, lang: lang.to_string(), parse },
-        );
+        self.put_entry(path, CacheEntry::new(hash, lang, parse));
+    }
+
+    /// Record an entry decoded from a shared-cache payload
+    /// ([`CacheEntry::from_payload`]) once the import has checked it against
+    /// the checked-out file (CE.2b).
+    pub(crate) fn put_entry(&mut self, path: String, entry: CacheEntry) {
+        self.entries.insert(path, entry);
     }
 
     /// Drop entries for files no longer present this build (deletions / files
@@ -640,6 +687,13 @@ impl ParseCache {
     /// canonical order, and an lz4 block is a pure function of its input, so
     /// an unchanged cache frames to the same bytes.
     pub fn save(&self, repo_path: &str) -> std::io::Result<()> {
+        self.save_changed(repo_path).map(|_| ())
+    }
+
+    /// [`ParseCache::save`], saying whether the sidecar was written: `false`
+    /// when the file on disk already held these bytes (LC.11). The shared-cache
+    /// import reports it (CE.2b).
+    pub(crate) fn save_changed(&self, repo_path: &str) -> std::io::Result<bool> {
         let dir = gmap_dir(repo_path);
         std::fs::create_dir_all(&dir)?;
         crate::persist::write_self_ignore(&dir)?;
@@ -650,7 +704,7 @@ impl ParseCache {
                 "[incremental] unchanged {} entries - parse_cache.bin not rewritten",
                 self.entries.len()
             );
-            return Ok(());
+            return Ok(false);
         }
         let tmp = dir.join(tmp_name());
         std::fs::write(&tmp, &bytes)?;
@@ -662,7 +716,7 @@ impl ParseCache {
             bytes.len(),
             tmp.file_name().unwrap_or_default().to_string_lossy()
         );
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -1251,5 +1305,32 @@ mod tests {
         let header = FRAME_MAGIC.len() + 8 + CACHE_VERSION.len();
         assert_eq!(decode(&good[..header + 4]).err(), Some(Discard::Corrupt("truncated header")));
         assert_eq!(decode(&good[..header - 1]).err(), Some(Discard::Corrupt("bad frame stamp")));
+    }
+
+    /// CE.2b: a payload decodes back to the entry that wrote it, and an
+    /// offered payload cannot make the decoder read or allocate past its own
+    /// bytes: a length prefix claiming more is refused, as are trailing bytes
+    /// and a truncation.
+    #[test]
+    fn payload_decode_is_bounded() {
+        let e = CacheEntry::new(0xfeed, "python", rich_parse(4, &[3, 1, 0, 2]));
+        let bytes = e.payload().expect("payload");
+        let back = CacheEntry::from_payload(&bytes).expect("decode");
+        assert_eq!((back.content_hash, back.lang.as_str()), (0xfeed, "python"));
+        assert_eq!(back.payload().expect("payload again"), bytes, "decode + encode moved the bytes");
+        // The same entry through the sidecar's own path (`put`, `entry_payload`).
+        let mut c = ParseCache::new();
+        c.put_entry("a.py".into(), back);
+        assert_eq!(c.entry_payload("a.py", 0xfeed, "python"), Ok(Some(bytes.clone())));
+
+        // `lang`'s length prefix (bytes 8..16) claims 1 TiB: refused, nothing allocated.
+        let mut huge = bytes.clone();
+        huge[8..16].copy_from_slice(&(1u64 << 40).to_le_bytes());
+        assert!(CacheEntry::from_payload(&huge).is_err());
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(CacheEntry::from_payload(&trailing).is_err(), "trailing bytes accepted");
+        assert!(CacheEntry::from_payload(&bytes[..bytes.len() - 1]).is_err(), "truncation accepted");
+        assert!(CacheEntry::from_payload(&[]).is_err());
     }
 }

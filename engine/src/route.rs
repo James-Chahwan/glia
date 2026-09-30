@@ -1009,33 +1009,8 @@ fn route_branches(
     // kill an N-file repo build — log it, skip it, keep going. Its own
     // `quiet` inside `route_one`'s, so a parse panic keeps the hash and the
     // LB.9b rejection the fold needs.
-    let parse_result = crate::parallel::quiet(|| {
-        let mut fp = parse_one_as(source, path, lang, repo, ctx.go, &module_qname)?;
-        // LC.3a: the edges present now are the parser's own. Stamped here,
-        // inside the closure and before the extractors, so the parse cache
-        // stores the stamp and a cache hit replays it.
-        evidence::stamp_missing(&mut fp.edges, &format!("parser:{lang}"));
-        let module_id = modules.module_id(path, repo);
-        // LB.9b: a MODULE named by its file name keeps its stem as nav
-        // name (`user` for `api::user.py`), the name `bare_module_qname`
-        // reads the bare path back from. Before the cache put, so a cache
-        // hit replays it.
-        if modules.is_qualified(path)
-            && let Some(name) = fp.nav.name_by_id.get_mut(&module_id)
-        {
-            *name = module_stem(path);
-        }
-        let mut stats = ExtractStats::default();
-        apply_cross_cutting_extractors(&mut fp, source, path, lang, module_id, repo, &mut stats);
-        // G15: denormalize the file's library names onto every node as an
-        // IMPORTS cell (one place, all languages). This is the RAW list:
-        // telling a dependency from the repo's own module needs the whole
-        // repo, so `build::grafts::filter_imports_cells` rewrites it in place after
-        // the cache (A16.4). The cell also marks a language-parser parse —
-        // synthetic parses above never get one.
-        glia_code_domain::attach_imports_cell(&mut fp, lang);
-        Ok::<_, String>((fp, stats))
-    });
+    let parse_result =
+        crate::parallel::quiet(|| parse_for_cache(source, path, lang, repo, ctx.go, modules));
     let outcome = match parse_result {
         Ok(Ok((fp, stats))) => CodeOutcome::Parsed(fp, stats),
         Ok(Err(e)) => CodeOutcome::Failed(format!("{path}: {e}")),
@@ -1050,6 +1025,48 @@ fn route_branches(
         requalified,
         outcome,
     }
+}
+
+/// The language branch's parse of one file: exactly the `FileParse` the parse
+/// cache stores for it (and the build uses), plus the extractors' counters
+/// for the build's markers. [`route_branches`] runs it on a cache miss; the
+/// shared-cache import (CE.2b) runs it to re-parse a sampled payload, so a
+/// verified payload is checked against the build's own parse code, not a
+/// copy of it. Panics are the caller's to isolate: both run it inside
+/// `parallel::quiet`.
+pub(crate) fn parse_for_cache(
+    source: &str,
+    path: &str,
+    lang: &str,
+    repo: RepoId,
+    go: &GoModules,
+    modules: &ModuleQnames,
+) -> Result<(FileParse, ExtractStats), String> {
+    let mut fp = parse_one_as(source, path, lang, repo, go, &modules.module_qname(path))?;
+    // LC.3a: the edges present now are the parser's own. Stamped here,
+    // before the extractors, so the parse cache stores the stamp and a cache
+    // hit replays it.
+    evidence::stamp_missing(&mut fp.edges, &format!("parser:{lang}"));
+    let module_id = modules.module_id(path, repo);
+    // LB.9b: a MODULE named by its file name keeps its stem as nav
+    // name (`user` for `api::user.py`), the name `bare_module_qname`
+    // reads the bare path back from. Before the cache put, so a cache
+    // hit replays it.
+    if modules.is_qualified(path)
+        && let Some(name) = fp.nav.name_by_id.get_mut(&module_id)
+    {
+        *name = module_stem(path);
+    }
+    let mut stats = ExtractStats::default();
+    apply_cross_cutting_extractors(&mut fp, source, path, lang, module_id, repo, &mut stats);
+    // G15: denormalize the file's library names onto every node as an
+    // IMPORTS cell (one place, all languages). This is the RAW list:
+    // telling a dependency from the repo's own module needs the whole
+    // repo, so `build::grafts::filter_imports_cells` rewrites it in place after
+    // the cache (A16.4). The cell also marks a language-parser parse —
+    // synthetic parses never get one.
+    glia_code_domain::attach_imports_cell(&mut fp, lang);
+    Ok((fp, stats))
 }
 
 /// Where the router sends `path`: the language tag iff [`parse_repo_files`]
