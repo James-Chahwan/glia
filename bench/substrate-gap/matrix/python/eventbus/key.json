@@ -1,0 +1,38 @@
+{
+  "framework": "python-blinker-signal",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "eventbus",
+  "cells": [
+    "python/eventbus"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "order-placed"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "order-placed"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "order-placed",
+      "to": "order-placed",
+      "category": "EVENT_FLOWS",
+      "note": "in-process bus: EventBusResolver pairs inside one project, so one dir"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "send",
+      "max_nodes": 0
+    }
+  ],
+  "note": "blinker named signal (Flask's signal library): signal('order-placed').send / .connect || CF.1 baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=1/1) via=None. Predicted extractor gap (backlog, not fixed by the probe): blinker named signals (`signal('x').send` / `@sig.connect`) have no row in parsers/code/extractors/src/eventbus.rs (pyee `EventEmitter` is the only Python bus it reads)."
+}

@@ -1,0 +1,43 @@
+{
+  "framework": "python-two-pyproject-monorepo",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "subproject",
+  "cells": [
+    "python/subproject"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "PROJECT",
+      "name": "project:services/api"
+    },
+    {
+      "kind": "PROJECT",
+      "name": "project:services/worker"
+    }
+  ],
+  "expect_edges": [],
+  "expect_cells": [
+    {
+      "kind": "PROJECT",
+      "node": "project:services/api",
+      "cell": "ORIGIN",
+      "contains": "orders-api"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "PROJECT",
+      "name": "project:services/api",
+      "max_nodes": 1
+    },
+    {
+      "kind": "MODULE",
+      "name": "services/api/app",
+      "max_nodes": 1
+    }
+  ],
+  "note": "two pyproject.toml roots with colliding app.py basenames || CF.1 baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=2/2 literal=2/2 route=0/0 forbid=1/1) via=project. Nothing to fix: the cell is covered at HEAD."
+}

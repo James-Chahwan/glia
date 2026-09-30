@@ -1,0 +1,31 @@
+{
+  "framework": "python-eventbus_django",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "eventbus",
+  "cells": [
+    "python/eventbus"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "order_placed"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "order_placed"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "order_placed",
+      "to": "order_placed",
+      "category": "EVENT_FLOWS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Django signals: django.dispatch.Signal() + @receiver(sig) + sig.send(..) || CF.1 baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): Django signals (`Signal()` + `@receiver(sig)` + `sig.send(..)`) have no row in parsers/code/extractors/src/eventbus.rs; the event identity is the signal VARIABLE, not a string."
+}

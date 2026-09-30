@@ -1,0 +1,31 @@
+{
+  "framework": "python-eventbus_pyee",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "eventbus",
+  "cells": [
+    "python/eventbus"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "order-placed"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "order-placed"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "order-placed",
+      "to": "order-placed",
+      "category": "EVENT_FLOWS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "pyee EventEmitter (the Python bus eventbus.rs does read): @ee.on('x') / ee.emit('x'); the path-proof beside the canonical blinker probe || CF.1 baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=2/2 literal=2/2 route=1/1 forbid=0/0) via=eventbus. Nothing to fix: the cell is covered at HEAD."
+}
