@@ -44,6 +44,18 @@ pub(crate) enum QueryCmd {
     /// snapshot (`glia history sync [--blame]`). Tier heuristic. Exits 0 with
     /// rows, 1 with none (the absence says why), 2 on an error.
     Hotspots(hotspots::Args),
+    /// Hubs (CD.4c): the nodes that carry the most structural load, in three
+    /// ranked lists — fan-in (many callers: the utilities every blast radius
+    /// runs through), fan-out (many callees: orchestrators) and cross-service
+    /// (callers or callees in two or more `glia arch` services). A fan-in or
+    /// fan-out hub has at least max(--min-degree, p99 of the non-zero
+    /// degrees) counted edges that way; counted edges are every carry edge
+    /// but test coverage, docs and manifest dependencies, or one
+    /// `--category`. Test nodes are left out unless `--include-tests`. Each
+    /// row is labelled utility / orchestrator / bottleneck / connector,
+    /// located, with its HITS authority and hub scores; tier derived. Exits 0
+    /// with rows, 1 with none (the absence says why), 2 on an error.
+    Hubs(hubs::Args),
     /// Implementors (LD.7c): who implements or extends a type, or overrides a
     /// method, over IMPLEMENTS / INHERITS_FROM — the whole hierarchy unless
     /// `--direct`, the supertypes with `--up`. Each row is located, names the
@@ -76,6 +88,7 @@ pub(crate) fn run(c: QueryCmd) -> i32 {
         QueryCmd::Find(a) => find::run(a),
         QueryCmd::Flows(a) => flows::run(a),
         QueryCmd::Hotspots(a) => hotspots::run(a),
+        QueryCmd::Hubs(a) => hubs::run(a),
         QueryCmd::Implementors(a) => implementors::run(a),
         QueryCmd::Pages(a) => pages::run(a),
         QueryCmd::Serves(a) => serves::run(a),

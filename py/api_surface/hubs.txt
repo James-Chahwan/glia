@@ -1,0 +1,2 @@
+# pyo3 surface of py/src/hubs.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.hubs(scope: Option<String> = None, top: usize = 20, category: Option<String> = None, min_degree: u32 = 5, include_tests: bool = false) -> PyResult<Py<PyAny>>
