@@ -42,6 +42,12 @@ use crate::types::RepoGraph;
 /// with two stacked `ROUTE_METHOD` cells for one verb, yields one edge per
 /// (endpoint, route) pair, never one per entry.
 ///
+/// CB.23: a client path behind an opaque base (`${ADMIN_BASE}/users/${id}`
+/// -> `/{}/users/{}`) whose folded path no route serves as given pairs with
+/// the ONE route that ends with it behind literal mount segments
+/// (`/admin/users/:id`), as base_fold; two such routes pair with neither
+/// (`[http] mount-segment folds: paired=<p> ambiguous=<a>`).
+///
 /// LF.2d: [`HttpStackResolver::resolve_with_mounts`] also indexes every ROUTE
 /// at the gateway paths a [`RouteMounts`] names for it. The trait's `resolve`
 /// is that call with no mounts.
@@ -167,6 +173,7 @@ impl HttpStackResolver {
         let mut rules = RuleTally::new("http", &MatchTier::RULES);
         let (index, stripped, owners) =
             build_route_index(&merged.graphs, &prefixes, mounts, &mut stats);
+        let tails = build_mount_tails(&index);
         stats.report_nav_excluded();
         // A11.4: built from nodes, never from cross-edges, so where this
         // resolver sits in the Resolve stage of CODE_PASSES does not matter.
@@ -193,7 +200,8 @@ impl HttpStackResolver {
             stats.count_folds(raw_path);
             stats.count_client_normalised(ep.cells.iter().copied());
             let norm = normalise_http_path(raw_path);
-            let mut hits = lookup_route(&index, &stripped, &method, &norm, &prefixes);
+            let (mut hits, fold) =
+                lookup_route(&index, &stripped, &tails, &method, &norm, &prefixes);
             let hosts = hit_hosts(ep.cells.iter().copied());
             match narrow_by_host(&aliases, hosts.as_deref(), &mut hits) {
                 Narrowed::No => {}
@@ -202,6 +210,11 @@ impl HttpStackResolver {
                     stats.host_narrowed += 1;
                     stats.owner_narrowed += 1;
                 }
+            }
+            match fold {
+                MountFold::Unused => {}
+                MountFold::Paired => stats.mount_folds += hits.len(),
+                MountFold::Ambiguous => stats.mount_ambiguous += 1,
             }
             for (target, tier) in hits {
                 stats.record(tier);
@@ -221,6 +234,7 @@ impl HttpStackResolver {
         merged.cross_edges.extend(edges);
         rules.report();
         stats.report();
+        stats.report_mount_folds();
         stats.qnames.report();
         stats.report_placeholder_folds();
         stats.report_client_normalised();
@@ -378,7 +392,10 @@ enum MatchTier {
     RoutePrefix,
     /// The client path began with an interpolated segment, i.e. a base URL
     /// (`` `${environment.apiUrl}/users` `` -> `/{}/users`), which was folded
-    /// away before matching.
+    /// away before matching. CB.23: also the mount-segment fold, where the
+    /// folded path is the tail of exactly one route behind literal mount
+    /// segments (`/{}/users/{}/status` -> `/admin/users/:id/status`,
+    /// [`lookup_mount_tail`]).
     BaseFold,
     /// Base-URL path whose tail matched a shorter route suffix. Double-gated
     /// and the weakest thing this resolver will emit.
@@ -466,6 +483,11 @@ struct HttpMatchStats {
     /// names a public host outside the build, and those hosts.
     external: usize,
     external_hosts: BTreeSet<String>,
+    /// CB.23: the edges the mount-segment fold emitted (counted under `base`
+    /// too) and the ENDPOINT nodes it left unpaired because their folded
+    /// path is the tail of more than one route.
+    mount_folds: usize,
+    mount_ambiguous: usize,
 }
 
 /// LB.5's permanent detector: ROUTE / ENDPOINT qnames whose path part is not
@@ -628,6 +650,20 @@ impl HttpMatchStats {
         eprintln!(
             "[http] overlay mounts: routes={} keys={} paired={}",
             self.mount_routes, self.mount_keys, self.mount_hits,
+        );
+    }
+
+    /// CB.23 fired_on marker, a line of its own so the A3.1 line above never
+    /// changes shape (its `base=` already counts the fold's edges). Printed
+    /// only when the mount-segment fold paired or bailed on an endpoint:
+    ///   `[http] mount-segment folds: paired=<edges> ambiguous=<endpoints>`
+    fn report_mount_folds(&self) {
+        if self.mount_folds + self.mount_ambiguous == 0 {
+            return;
+        }
+        eprintln!(
+            "[http] mount-segment folds: paired={} ambiguous={}",
+            self.mount_folds, self.mount_ambiguous,
         );
     }
 
@@ -1234,17 +1270,19 @@ fn strip_api_prefixes(norm_path: &str, prefixes: &[String]) -> Vec<String> {
 const SUFFIX_TIER: bool = true;
 
 /// The tier ladder. Returns the targets from the FIRST tier that yields
-/// anything, tagged with that tier — never a union across tiers.
+/// anything, tagged with that tier — never a union across tiers — and what the
+/// mount-segment fold (CB.23, inside tier 5) did, for its marker.
 fn lookup_route(
     index: &RouteIndex,
     stripped: &RouteIndex,
+    tails: &MountTailIndex,
     method: &str,
     norm_path: &str,
     prefixes: &[String],
-) -> Vec<(RouteTarget, MatchTier)> {
+) -> (Vec<(RouteTarget, MatchTier)>, MountFold) {
     // Tiers 1-4.
     if let Some(hit) = lookup_direct(index, stripped, method, norm_path, prefixes) {
-        return hit;
+        return (hit, MountFold::Unused);
     }
 
     // Tiers 5-6 are gated on a LEADING `{}` segment. `` `${environment.apiUrl}/users` ``
@@ -1253,7 +1291,7 @@ fn lookup_route(
     // resource. An ordinary path can never reach these tiers, so `/users/{}`
     // cannot suffix-match its way onto an unrelated route.
     let Some(folded) = norm_path.strip_prefix("/{}") else {
-        return Vec::new();
+        return (Vec::new(), MountFold::Unused);
     };
     let folded = if folded.is_empty() { "/" } else { folded };
 
@@ -1261,8 +1299,22 @@ fn lookup_route(
     // REPORTED is BaseFold whatever matched inside, because the fold itself is
     // the inference being made.
     if let Some(hit) = lookup_direct(index, stripped, method, folded, prefixes) {
-        return retier(hit, MatchTier::BaseFold);
+        return (retier(hit, MatchTier::BaseFold), MountFold::Unused);
     }
+
+    // Tier 5, CB.23 — the mount-segment fold: an opaque base can hide any
+    // mount, not only an API prefix (Kina's `${ADMIN_BASE}` is `<host>/admin`),
+    // so the folded path also pairs with the ONE route it is the tail of,
+    // behind literal mount segments. Ambiguity falls through to tier 6 exactly
+    // as a miss does, so tier 6 sees every endpoint it saw before.
+    let fold = match lookup_mount_tail(index, tails, method, folded) {
+        MountTail::Unique(targets) => {
+            let hit = targets.into_iter().map(|t| (t, MatchTier::BaseFold)).collect();
+            return (hit, MountFold::Paired);
+        }
+        MountTail::Ambiguous => MountFold::Ambiguous,
+        MountTail::Miss => MountFold::Unused,
+    };
 
     // Tier 6 — suffix fallback, double-gated: the leading-`{}` condition above,
     // plus a suffix that retains at least one literal segment, plus an
@@ -1271,18 +1323,121 @@ fn lookup_route(
         for cand in literal_suffixes(folded) {
             if let Some(hit) = lookup_direct(index, stripped, method, &cand, prefixes) {
                 if hit.len() > MAX_SUFFIX_TARGETS {
-                    return Vec::new();
+                    return (Vec::new(), fold);
                 }
-                return retier(hit, MatchTier::Suffix);
+                return (retier(hit, MatchTier::Suffix), fold);
             }
         }
     }
-    Vec::new()
+    (Vec::new(), fold)
 }
 
 /// A suffix key matching more routes than this is ambiguous; tier 6 abandons
 /// rather than emitting them all.
 const MAX_SUFFIX_TARGETS: usize = 3;
+
+/// CB.23: the mount-segment fold's counterpart of [`MAX_SUFFIX_TARGETS`], and
+/// stricter: a folded path that is the tail of more than this many ROUTE
+/// nodes is ambiguous (`/{}/reports` against `/admin/reports` and
+/// `/ops/reports` cannot say which mount the base names), and the fold pairs
+/// with none of them.
+const MAX_MOUNT_FOLD_TARGETS: usize = 1;
+
+/// CB.23: what the mount-segment fold did for one endpoint, for the
+/// `[http] mount-segment folds` marker. `Unused` when the ladder paired above
+/// it, the path has no leading `{}`, or no route ends with the folded path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MountFold {
+    Unused,
+    Paired,
+    Ambiguous,
+}
+
+/// CB.23: one mount-segment fold lookup.
+#[derive(Debug)]
+enum MountTail {
+    /// The folded path is the tail of exactly one ROUTE: its target.
+    Unique(Vec<RouteTarget>),
+    /// It is the tail of more than [`MAX_MOUNT_FOLD_TARGETS`] ROUTEs.
+    Ambiguous,
+    Miss,
+}
+
+/// CB.23: `(METHOD, tail)` -> the strong index's route paths that END with
+/// `tail` behind one or more literal mount segments ([`mount_tails`]). A
+/// sorted set, so a lookup is independent of the index's HashMap order.
+type MountTailIndex = HashMap<(String, String), BTreeSet<String>>;
+
+/// CB.23: the mount-segment fold's index over every key of the strong
+/// `index` (a route's own path, and its LF.2d gateway paths).
+fn build_mount_tails(index: &RouteIndex) -> MountTailIndex {
+    let mut out: MountTailIndex = HashMap::new();
+    for (method, path) in index.keys() {
+        for tail in mount_tails(path) {
+            out.entry((method.clone(), tail)).or_default().insert(path.clone());
+        }
+    }
+    out
+}
+
+/// CB.23: the tails of a normalised route path behind one or more LITERAL
+/// leading segments, shortest mount first: `/admin/users/{}/status` ->
+/// `/users/{}/status`, `/{}/status`. A mount segment holding a placeholder
+/// ends the walk (a `{}` is a path parameter, never a mount), and a tail made
+/// only of `{}` wildcards is never one (it would match any client path).
+fn mount_tails(path: &str) -> Vec<String> {
+    let segs: Vec<&str> = path
+        .trim_start_matches('/')
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+    let mut out = Vec::new();
+    for start in 1..segs.len() {
+        if segs[start - 1].contains('{') {
+            break;
+        }
+        let tail = &segs[start..];
+        if tail.iter().all(|s| *s == "{}") {
+            break;
+        }
+        out.push(format!("/{}", tail.join("/")));
+    }
+    out
+}
+
+/// CB.23: the mount-segment fold for one folded client path: the route whose
+/// path ends with `folded` behind literal mount segments, the method's own
+/// routes first, then `ANY` ones, as tiers 1-3 order them. Unique only
+/// ([`MAX_MOUNT_FOLD_TARGETS`], counted in ROUTE nodes: one route reached
+/// through its own path and a gateway path is one); an ambiguous method
+/// stops the lookup rather than falling to `ANY`.
+fn lookup_mount_tail(
+    index: &RouteIndex,
+    tails: &MountTailIndex,
+    method: &str,
+    folded: &str,
+) -> MountTail {
+    let method = method.to_ascii_uppercase();
+    for m in [method.as_str(), ANY] {
+        let Some(paths) = tails.get(&(m.to_string(), folded.to_string())) else {
+            continue;
+        };
+        let mut targets: Vec<RouteTarget> = Vec::new();
+        for path in paths {
+            for t in index.get(&(m.to_string(), path.clone())).into_iter().flatten() {
+                push_target(&mut targets, *t);
+            }
+        }
+        if targets.is_empty() {
+            continue;
+        }
+        if targets.len() > MAX_MOUNT_FOLD_TARGETS {
+            return MountTail::Ambiguous;
+        }
+        return MountTail::Unique(targets);
+    }
+    MountTail::Miss
+}
 
 /// Tiers 1-4 against one candidate path, in the mandated order:
 /// exact → endpoint-side strip → ANY → route-side strip.
@@ -2382,5 +2537,155 @@ mod tests {
 
         // The contract matcher pairs declared paths only.
         assert!(HttpRouteMatcher::new(&mounted.graphs).lookup("GET", "/orders-svc/users").is_empty());
+    }
+
+    // ---- CB.23 mount-segment fold ----------------------------------------
+
+    #[test]
+    fn mount_tails_stop_at_placeholder_mounts_and_wildcard_tails() {
+        let tails = |p: &str| mount_tails(p);
+        assert_eq!(tails("/admin/users/{}/status"), ["/users/{}/status", "/{}/status"]);
+        assert_eq!(
+            tails("/back/office/audit/log"),
+            ["/office/audit/log", "/audit/log", "/log"]
+        );
+        // A placeholder is a path parameter, never a mount: the walk stops.
+        assert!(tails("/{}/users").is_empty());
+        assert_eq!(tails("/tenants/{}/users"), ["/{}/users"]);
+        // An all-wildcard tail would match any client path.
+        assert!(tails("/admin/{}").is_empty());
+        assert!(tails("/admin/{}/{}").is_empty());
+        // A one-segment route has no mount to strip.
+        assert!(tails("/users").is_empty());
+        assert!(tails("/").is_empty());
+    }
+
+    /// The ladder over one repo of `routes`, keyed as the resolver keys it
+    /// (API prefix `api`), plus LF.2d gateway `mounts` by route index.
+    fn fold_ladder(
+        routes: &[&str],
+        mounts: &[(usize, &str)],
+    ) -> impl Fn(&str, &str) -> (Vec<(String, &'static str)>, MountFold) {
+        let specs = routes.iter().map(|q| (node_kind::ROUTE, *q, vec![])).collect();
+        let (g, ids) = repo_graph(RepoId(610), specs);
+        let mut gateway = RouteMounts::default();
+        for (i, prefix) in mounts {
+            gateway.add(ids[*i], prefix, Confidence::Weak);
+        }
+        let prefixes = vec!["api".to_string()];
+        let mut stats = HttpMatchStats::default();
+        let (index, stripped, _) =
+            build_route_index(std::slice::from_ref(&g), &prefixes, &gateway, &mut stats);
+        let tails = build_mount_tails(&index);
+        let qnames = g.nav.qname_by_id.clone();
+        move |method, path| {
+            let norm = normalise_http_path(path);
+            let (hits, fold) = lookup_route(&index, &stripped, &tails, method, &norm, &prefixes);
+            let hits = hits
+                .into_iter()
+                .map(|(t, tier)| (qnames.get(&t.route_id).cloned().unwrap_or_default(), tier.rule()))
+                .collect();
+            (hits, fold)
+        }
+    }
+
+    #[test]
+    fn mount_segment_fold_pairs_the_one_route_behind_literal_mounts() {
+        let ladder = fold_ladder(
+            &[
+                "POST /admin/users/:id/status",
+                "GET /back/office/audit/log",
+                "GET /admin/reports",
+                "GET /ops/reports",
+                "GET /health",
+                "GET /admin/health",
+                "ANY /auth/sessions",
+                "GET /tenants/:t/users",
+            ],
+            &[],
+        );
+        let one = |q: &str| vec![(q.to_string(), "base_fold")];
+        // One literal mount segment, reported as base_fold.
+        assert_eq!(
+            ladder("POST", "${…}/users/${…}/status"),
+            (one("POST /admin/users/:id/status"), MountFold::Paired)
+        );
+        // Two literal mount segments.
+        assert_eq!(
+            ladder("GET", "${…}/audit/log"),
+            (one("GET /back/office/audit/log"), MountFold::Paired)
+        );
+        // The method is part of the key; ANY is reached after it.
+        assert_eq!(ladder("DELETE", "${…}/users/${…}/status"), (vec![], MountFold::Unused));
+        assert_eq!(
+            ladder("DELETE", "${…}/sessions"),
+            (one("ANY /auth/sessions"), MountFold::Paired)
+        );
+        // Ambiguous: `/reports` is served behind two mounts, so neither.
+        assert_eq!(ladder("GET", "${…}/reports"), (vec![], MountFold::Ambiguous));
+        // The folded path is itself a route: tier 5's own lookup wins.
+        assert_eq!(ladder("GET", "${…}/health"), (one("GET /health"), MountFold::Unused));
+        // No leading interpolation: never folded, however the tail reads.
+        assert_eq!(ladder("POST", "/users/${…}/status"), (vec![], MountFold::Unused));
+        // A placeholder segment is never a mount, and a wildcard-only folded
+        // path is never a tail.
+        assert_eq!(ladder("GET", "${…}/users"), (vec![], MountFold::Unused));
+        assert_eq!(ladder("GET", "${…}/${…}"), (vec![], MountFold::Unused));
+    }
+
+    #[test]
+    fn mount_segment_fold_leaves_tier_six_and_counts_one_route_once() {
+        // Ambiguity falls through to tier 6 exactly as a miss does.
+        let ladder = fold_ladder(&["GET /admin/a/reports", "GET /ops/a/reports", "GET /reports"], &[]);
+        assert_eq!(
+            ladder("GET", "${…}/a/reports"),
+            (vec![("GET /reports".to_string(), "suffix")], MountFold::Ambiguous)
+        );
+        // A route reached through its own path and an LF.2d gateway path is
+        // one route: still unique.
+        let ladder = fold_ladder(&["POST /admin/users/:id/status"], &[(0, "/gw")]);
+        assert_eq!(
+            ladder("POST", "${…}/users/${…}/status"),
+            (
+                vec![("POST /admin/users/:id/status".to_string(), "base_fold")],
+                MountFold::Paired
+            )
+        );
+    }
+
+    /// End to end: the fold's HTTP_CALLS edges carry the base_fold rule and
+    /// the tier's Medium ceiling; the ambiguous endpoint pairs with nothing.
+    #[test]
+    fn resolver_emits_mount_segment_folds_as_base_fold() {
+        let (web, e) = repo_graph(
+            RepoId(620),
+            vec![
+                (node_kind::ENDPOINT, "endpoint:POST:${…}/users/${…}/status", vec![]),
+                (node_kind::ENDPOINT, "endpoint:GET:${…}/reports", vec![]),
+            ],
+        );
+        let (api, r) = repo_graph(
+            RepoId(621),
+            vec![
+                (node_kind::ROUTE, "POST /admin/users/:id/status", vec![]),
+                (node_kind::ROUTE, "GET /admin/reports", vec![]),
+                (node_kind::ROUTE, "GET /ops/reports", vec![]),
+            ],
+        );
+        let mut merged = MergedGraph::new(vec![web, api]);
+        HttpStackResolver.resolve(&mut merged);
+        let got: Vec<(NodeId, NodeId, Confidence, Option<String>)> = merged
+            .cross_edges
+            .iter()
+            .filter(|x| x.category == edge_category::HTTP_CALLS)
+            .map(|x| {
+                let rule = glia_code_domain::evidence::Evidence::of(x).and_then(|ev| ev.rule);
+                (x.from, x.to, x.confidence, rule)
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![(e[0], r[0], Confidence::Medium, Some("base_fold".to_string()))]
+        );
     }
 }

@@ -27,7 +27,9 @@ PAIR = ("version = 1\n\n[[edge]]\nfrom = \"endpoint:GET:<unresolved>\"\n"
 # CD.3b's suspected_edges fixture (engine/tests/suspected_edges.rs): an Angular
 # client whose list() / count() pair through the HTTP resolver, so (ENDPOINT,
 # HTTP_CALLS, ROUTE) is learned, and whose markAllRead() posts through a
-# class-field `${environment.apiUrl}` base no resolver pairs; an Express API.
+# class-field `${environment.apiUrl}` base no resolver pairs; an Express API
+# serving the read-all routes behind a `/:tenant` path parameter, which the
+# resolver's mount-segment fold (CB.23) never strips.
 SUSPECTED = {
     "web/src/notifications.service.ts": (
         "import { Injectable } from '@angular/core';\n"
@@ -50,8 +52,8 @@ SUSPECTED = {
         "function getOne(req, res) { res.json({}); }\n"
         "function listAll(req, res) { res.json([]); }\n"
         "function countAll(req, res) { res.json(0); }\n\n"
-        "router.post('/notifications/read-all', markAll);\n"
-        "router.get('/notifications/read-all', getOne);\n"
+        "router.post('/:tenant/notifications/read-all', markAll);\n"
+        "router.get('/:tenant/notifications/read-all', getOne);\n"
         "router.get('/notifications', listAll);\n"
         "router.get('/notifications/count', countAll);\n\n"
         "export default router;\n"),
@@ -151,7 +153,7 @@ def main() -> int:
         c.check("draft pairs the orphan with the POST route",
                 type(draft) is str
                 and f'from = "{ORPHAN}"' in draft.splitlines()
-                and 'to = "POST /notifications/read-all @api"' in draft.splitlines()
+                and 'to = "POST /:tenant/notifications/read-all @api"' in draft.splitlines()
                 and 'category = "HTTP_CALLS"' in draft.splitlines()
                 and not any(line.startswith("gap = ") for line in draft.splitlines()), draft)
         c.check("suspected marker", " suspected_edge=1 " in err and " surface=py" in err,

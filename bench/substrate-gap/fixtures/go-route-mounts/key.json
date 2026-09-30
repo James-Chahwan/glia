@@ -1,0 +1,65 @@
+{
+  "framework": "go-route-mounts",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-c2 (IDENTITY BREAK): a Go group prefix reaches a route only inside one function body (collect_routes_in's prefix_map), so a router handed to a function as a parameter, or stored on a struct field in another file, registers its routes WITHOUT the prefix. A function mounted twice (/api/v1, /api/v2) gets one ROUTE per mount; a register function no caller mounts keeps its local path. Measured on HEAD 2170ff8: GET /users, GET /me/profile, GET /healthz; nothing for s.admin.GET. At cdf5b3e (after CB.11) s.admin.GET mints GET /stats: nodes 1/6, edges 0/3, FORBID VIOLATIONS 3.",
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /api/v2/users"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /api/v1/users"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /api/v2/me/profile"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /api/v1/me/profile"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /admin/stats"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /healthz"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "GET /api/v2/users",
+      "to": "api::users::listUsers",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "GET /api/v1/users",
+      "to": "api::users::listUsers",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "GET /admin/stats",
+      "to": "api::admin_routes::Server::stats",
+      "category": "HANDLED_BY"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /users"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /me/profile"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /stats"
+    }
+  ]
+}

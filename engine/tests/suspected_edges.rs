@@ -8,6 +8,10 @@
 //! (ENDPOINT, HTTP_CALLS, ROUTE) is seen twice; `markAllRead()` posts to
 //! `${environment.apiUrl}/notifications/read-all` through a class-field base,
 //! which the resolver cannot pair: the orphan `endpoint:POST:${…}/read-all @web`.
+//! The read-all routes sit behind a `/:tenant` path parameter: a parameter is
+//! never a mount, so the resolver's mount-segment fold (CB.23), which pairs
+//! `/{}/read-all` with the one route ending `/<literal mounts>/read-all`,
+//! leaves the orphan to this heuristic.
 
 use std::path::Path;
 
@@ -70,8 +74,8 @@ function getOne(req, res) { res.json({}); }
 function listAll(req, res) { res.json([]); }
 function countAll(req, res) { res.json(0); }
 
-router.post('/notifications/read-all', markAll);
-router.get('/notifications/read-all', getOne);
+router.post('/:tenant/notifications/read-all', markAll);
+router.get('/:tenant/notifications/read-all', getOne);
 router.get('/notifications', listAll);
 router.get('/notifications/count', countAll);
 
@@ -80,8 +84,8 @@ export default router;
 const API_PACKAGE: &str = "{\"name\":\"api\",\"dependencies\":{\"express\":\"4.18.0\"}}\n";
 
 const ORPHAN: &str = "endpoint:POST:${…}/read-all @web";
-const TARGET: &str = "POST /notifications/read-all @api";
-const WRONG_METHOD: &str = "GET /notifications/read-all @api";
+const TARGET: &str = "POST /:tenant/notifications/read-all @api";
+const WRONG_METHOD: &str = "GET /:tenant/notifications/read-all @api";
 
 fn write(root: &Path, rel: &str, body: &str) {
     let path = root.join(rel);
@@ -208,7 +212,7 @@ fn proposes_the_read_all_pair() {
     assert_eq!(ids(&rep), ids(&again), "the id is stable across builds");
 }
 
-/// (2) `GET /notifications/read-all` shares every token with the orphan but
+/// (2) `GET /:tenant/notifications/read-all` shares every token with the orphan but
 /// not its method: never proposed.
 #[test]
 fn method_mismatch_is_not_proposed() {

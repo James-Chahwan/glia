@@ -258,7 +258,8 @@ fn overlay_delta_keeps_a_data_wrapper_that_pairs_no_orphan() {
 /// pair through the HTTP resolver, so (ENDPOINT, HTTP_CALLS, ROUTE) is
 /// learned, and whose `markAllRead()` posts through a class-field
 /// `${environment.apiUrl}` base the resolver cannot pair; an Express API
-/// (`api/`) serving all three.
+/// (`api/`) serving all three, the read-all routes behind a `/:tenant` path
+/// parameter the mount-segment fold (CB.23) never strips.
 fn suspected(tag: &str) -> PathBuf {
     const SERVICE_TS: &str = "import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
@@ -293,8 +294,8 @@ function getOne(req, res) { res.json({}); }
 function listAll(req, res) { res.json([]); }
 function countAll(req, res) { res.json(0); }
 
-router.post('/notifications/read-all', markAll);
-router.get('/notifications/read-all', getOne);
+router.post('/:tenant/notifications/read-all', markAll);
+router.get('/:tenant/notifications/read-all', getOne);
 router.get('/notifications', listAll);
 router.get('/notifications/count', countAll);
 
@@ -384,7 +385,7 @@ fn suspected_edge_prints_stanza() {
     for line in [
         "category = \"HTTP_CALLS\"",
         "from = \"endpoint:POST:${…}/read-all @web\"",
-        "to = \"POST /notifications/read-all @api\"",
+        "to = \"POST /:tenant/notifications/read-all @api\"",
     ] {
         assert!(block.lines().any(|l| l == line), "{line:?} in {block}");
     }

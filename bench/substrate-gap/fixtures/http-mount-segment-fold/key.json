@@ -1,0 +1,33 @@
+{
+  "framework": "http-mount-segment-fold",
+  "language": "typescript+go",
+  "dirs": ["client", "server"],
+  "note": "CB.23 (tier-5 mount-segment fold): a client path behind an opaque base (`${ADMIN}/users/${id}/status` -> `/{}/users/{}/status`) pairs with the one route whose path ENDS with the folded path behind one or more LITERAL mount segments (`POST /admin/users/:id/status`, `GET /back/office/audit/log`), reported as base_fold. Before CB.23 the Go routes were minted unprefixed and the fold paired them at their local path; once the mounts are resolved, the fold that only stripped API prefixes reached none of them (Kina: 29 admin pairings). Unique target only: a tail served behind two mounts (`/admin/reports`, `/ops/reports`) pairs with neither. A folded path that is itself a route keeps the old tier (`GET /health`, never `/admin/health`).",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:POST:${…}/users/${…}/status"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:${…}/audit/log"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:${…}/reports"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:${…}/health"},
+    {"kind": "ROUTE", "name": "POST /admin/users/:id/status"},
+    {"kind": "ROUTE", "name": "GET /back/office/audit/log"},
+    {"kind": "ROUTE", "name": "GET /admin/reports"},
+    {"kind": "ROUTE", "name": "GET /ops/reports"},
+    {"kind": "ROUTE", "name": "GET /health"},
+    {"kind": "ROUTE", "name": "GET /admin/health"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:POST:${…}/users/${…}/status", "to": "POST /admin/users/:id/status", "category": "HTTP_CALLS",
+     "note": "one literal mount segment"},
+    {"from": "endpoint:GET:${…}/audit/log", "to": "GET /back/office/audit/log", "category": "HTTP_CALLS",
+     "note": "two literal mount segments"},
+    {"from": "endpoint:GET:${…}/health", "to": "GET /health", "category": "HTTP_CALLS",
+     "note": "control: the folded path is a route, the existing base-fold tier wins"}
+  ],
+  "forbid": [
+    {"from": "endpoint:GET:${…}/reports", "to": "GET /admin/reports", "category": "HTTP_CALLS"},
+    {"from": "endpoint:GET:${…}/reports", "to": "GET /ops/reports", "category": "HTTP_CALLS"},
+    {"from": "endpoint:GET:${…}/health", "to": "GET /admin/health", "category": "HTTP_CALLS"},
+    {"kind": "ROUTE", "name": "POST /users/:id/status"},
+    {"kind": "ROUTE", "name": "GET /reports"}
+  ]
+}
