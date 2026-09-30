@@ -1,0 +1,68 @@
+{
+  "framework": "cpp-declarations",
+  "language": "c_cpp",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-C1/C3: parsers/code/c_cpp/src/lib.rs visit_one has no arm for linkage_specification (extern \"C\"), template_declaration or union_specifier, returns early on an anonymous namespace, and visit_members reads only function_definition (no nested type); collect_include records an #include inside a namespace from the namespace PACKAGE's qname, so the import never binds (the LA.40 class). DECISION: extern \"C\" and anonymous-namespace blocks are transparent (their contents keep the enclosing scope; an anonymous namespace's members are file-scoped like any .cpp free function); a template's inner declaration is the entity (no template arguments in the qname); a union is a STRUCT; a nested type is `<Outer qname>::<Inner>`. Measured on HEAD 2170ff8: no Box / Number / Cart::Line / clamp / legacy_entry, no IMPORTS src::cart.hpp -> src::detail.hpp.",
+  "expect_nodes": [
+    {
+      "kind": "CLASS",
+      "name": "shop::Box"
+    },
+    {
+      "kind": "METHOD",
+      "name": "shop::Box::get"
+    },
+    {
+      "kind": "STRUCT",
+      "name": "shop::Number"
+    },
+    {
+      "kind": "STRUCT",
+      "name": "shop::Cart::Line"
+    },
+    {
+      "kind": "METHOD",
+      "name": "shop::Cart::Line::total"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::cart.cpp::clamp"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "src::cart.cpp::legacy_entry"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "src::cart.hpp",
+      "to": "src::detail.hpp",
+      "category": "IMPORTS",
+      "note": "an #include inside namespace shop is the file's"
+    },
+    {
+      "from": "shop::Cart::add",
+      "to": "src::cart.cpp::clamp",
+      "category": "CALLS"
+    },
+    {
+      "from": "src::cart.cpp::legacy_entry",
+      "to": "src::cart.cpp::clamp",
+      "category": "CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "METHOD",
+      "name": "Cart::Line::total",
+      "note": "the provisional qname an unjoined nested member would keep"
+    },
+    {
+      "from": "src::cart.hpp::shop",
+      "to": "src::detail.hpp",
+      "category": "IMPORTS"
+    }
+  ]
+}
