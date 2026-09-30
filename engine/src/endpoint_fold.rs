@@ -51,8 +51,23 @@
 //! `"overlay":"const:<KEY>[,<KEY>...]"` and the node takes the pin's
 //! confidence ([`pin_confidence`], Weak), so every pairing it makes is at most
 //! Weak. An entry no pin reached is untouched.
+//!
+//! EXTERNAL CALL SITES (CG.4a). After every parse of the repo is folded,
+//! [`mark_external`] appends `"external":true` to the ENDPOINT_HIT of a call
+//! site whose host (1) is recorded, (2) is written in the call's own literal
+//! ([`host_is_literal`]: no template, or the template's text before its
+//! first `${` spells the whole authority), (3) is a public DNS name
+//! ([`is_public_host`]: dotted, not an IP literal, not an internal TLD, not an
+//! RFC 2606 documentation name) and (4) whose site ([`site_of`]) the repo's
+//! configuration does not name ([`configured_sites`]: every URL a
+//! config-shaped or overlay-pinned constant holds, and every host a
+//! const-sourced call site folded to). quokka's nominatim lookups are marked;
+//! Kina's `${environment.apiUrl}` calls to its own public backend are not.
+//! The sites are collected into a set over EVERY parse before any entry is
+//! marked, so the order the build hands the parses in never matters. Only
+//! the payload of a marked entry changes; every other entry is byte-identical.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 use glia_code_domain::endpoint::{endpoint_qname, url_split};
@@ -80,6 +95,10 @@ pub(crate) struct FoldStats {
     /// `host` when they reached the pass (written by the parser). Disjoint
     /// from `hosts`: the pass never re-records a pre-set host.
     pub preset: usize,
+    /// CG.4a: ENDPOINT node entries (call sites) marked `"external":true`.
+    pub external: usize,
+    /// CG.4a: distinct sites the repo's configuration names.
+    pub configured: usize,
 }
 
 impl FoldStats {
@@ -87,6 +106,8 @@ impl FoldStats {
         self.folded += other.folded;
         self.hosts += other.hosts;
         self.preset += other.preset;
+        self.external += other.external;
+        self.configured += other.configured;
     }
 
     /// The fired_on markers, once per repo, each only when non-zero:
@@ -108,19 +129,29 @@ impl FoldStats {
                 self.preset, self.hosts
             );
         }
+        if self.external > 0 {
+            eprintln!(
+                "[endpoint-external] {} client endpoint sites name a public host outside \
+                 the repo's configuration (configured sites={}) repo={repo_label}",
+                self.external, self.configured
+            );
+        }
     }
 }
 
-/// Fold every FileParse of one repo.
+/// Fold every FileParse of one repo, then mark its external call sites
+/// (CG.4a) over the same parses.
 pub(crate) fn fold_repo<'a>(
     parses: impl IntoIterator<Item = &'a mut FileParse>,
     consts: &ConstTable,
     repo: RepoId,
 ) -> FoldStats {
+    let mut parses: Vec<&mut FileParse> = parses.into_iter().collect();
     let mut stats = FoldStats::default();
-    for fp in parses {
+    for fp in parses.iter_mut() {
         stats.add(fold_endpoint_paths(fp, consts, repo));
     }
+    stats.add(mark_external(&mut parses, consts));
     stats
 }
 
@@ -216,17 +247,7 @@ pub(crate) fn fold_endpoint_paths(
 fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> Option<Plan> {
     let qname = nav.qname_by_id.get(&node.id)?;
     let (method, qpath) = qname.strip_prefix("endpoint:")?.split_once(':')?;
-    let mut hits = node
-        .cells
-        .iter()
-        .filter(|c| c.kind == cell_type::ENDPOINT_HIT);
-    let (Some(cell), None) = (hits.next(), hits.next()) else {
-        return None;
-    };
-    let CellPayload::Json(json) = &cell.payload else {
-        return None;
-    };
-    let mut fields: Fields = serde_json::from_str(json).ok()?;
+    let (_, mut fields) = single_hit(node)?;
 
     let folded = fields
         .str("template")
@@ -418,6 +439,213 @@ fn update_nav(
     }
 }
 
+/// The one JSON ENDPOINT_HIT cell of a node, with its index in `cells`, or
+/// None when the node carries none, several, or a non-JSON one: the shape
+/// every client emitter writes, and the only one the fold touches.
+fn single_hit(node: &Node) -> Option<(usize, Fields)> {
+    let mut hits = node
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.kind == cell_type::ENDPOINT_HIT);
+    let (Some((idx, cell)), None) = (hits.next(), hits.next()) else {
+        return None;
+    };
+    let CellPayload::Json(json) = &cell.payload else {
+        return None;
+    };
+    Some((idx, serde_json::from_str(json).ok()?))
+}
+
+// ============================================================================
+// CG.4a: external call sites
+// ============================================================================
+
+/// TLDs no public DNS name ends in: loopback, mDNS, cluster and home-network
+/// names, and the RFC 2606 / 6761 reserved TLDs. `.home.arpa` is checked on
+/// its own.
+const INTERNAL_TLDS: &[&str] = &[
+    "localhost",
+    "local",
+    "internal",
+    "lan",
+    "test",
+    "example",
+    "invalid",
+    "svc",
+    "localdomain",
+];
+
+/// RFC 2606 reserved documentation sites: the bench fixtures' and most docs'
+/// `api.example.com` names nobody's service.
+const RESERVED_SITES: &[&str] = &["example.com", "example.net", "example.org"];
+
+/// Second-level labels a two-letter ccTLD registry sells names under
+/// (`co.uk`, `com.au`, `ac.jp`). Label-based, not a public-suffix list: an
+/// SLD missing here falls back to two labels, which only widens a site.
+const REGISTRY_SLDS: &[&str] = &["co", "com", "net", "org", "gov", "edu", "ac"];
+
+/// Every ENDPOINT node entry of `fp` with its single JSON ENDPOINT_HIT, as
+/// `(node index, cell index, fields)`. The nav-kind gate keeps CB.21's
+/// WS_CLIENT / GRPC_CLIENT hits, which carry a `host` too, out.
+fn endpoint_hits(fp: &FileParse) -> impl Iterator<Item = (usize, usize, Fields)> + '_ {
+    fp.nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::ENDPOINT))
+        .filter_map(|(i, n)| single_hit(n).map(|(c, f)| (i, c, f)))
+}
+
+/// `[user@]host[:port]` -> `host`, lower-cased, a trailing root `.` dropped.
+/// A bracketed IPv6 literal keeps its brackets. The engine's twin of
+/// glia-graph's crate-private `host::host_name`; ASCII splits only.
+fn host_only(authority: &str) -> String {
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host.rsplit_once(':') {
+        Some((name, port)) if port.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => host,
+    };
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// The registrable site of a host name: its last two labels, or its last
+/// three when the TLD has two letters and the label before it is a registry
+/// label (`a.b.co.uk` -> `b.co.uk`). A name of one or two labels is itself.
+fn site_of(host: &str) -> String {
+    let labels: Vec<&str> = host.split('.').collect();
+    let n = labels.len();
+    let registry = n >= 3
+        && labels.get(n - 1).is_some_and(|tld| tld.len() == 2)
+        && labels.get(n - 2).is_some_and(|sld| REGISTRY_SLDS.contains(sld));
+    let keep = if registry { 3 } else { 2 };
+    labels.get(n.saturating_sub(keep)..).unwrap_or_default().join(".")
+}
+
+/// A host name (already [`host_only`]) that can only be a public DNS name:
+/// dotted, not an IPv4 / IPv6 literal, no internal TLD, not under
+/// `.home.arpa`, and not an RFC 2606 documentation site.
+fn is_public_host(host: &str) -> bool {
+    if !host.contains('.') || host.starts_with('[') || host.contains(':') {
+        return false;
+    }
+    if host.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return false;
+    }
+    let tld = host.rsplit('.').next().unwrap_or_default();
+    if INTERNAL_TLDS.contains(&tld) || host == "home.arpa" || host.ends_with(".home.arpa") {
+        return false;
+    }
+    !RESERVED_SITES.contains(&site_of(host).as_str())
+}
+
+/// The recorded host was written in the call's own literal: no `template`
+/// (a `raw` literal, or a host the parser wrote at extraction, A11.5), or a
+/// template whose text before its first `${` spells the whole authority
+/// (`https://nominatim.openstreetmap.org/search?q=${q}`). A template that
+/// starts with a base (`${environment.apiUrl}/x`) or interpolates into the
+/// authority (`https://${API_HOST}/x`) is const-sourced.
+fn host_is_literal(fields: &Fields) -> bool {
+    let Some(template) = fields.str("template") else {
+        return true;
+    };
+    let head = template.split("${").next().unwrap_or_default();
+    let Some((_, after)) = head.split_once("://") else {
+        return false;
+    };
+    let authority = after.split(['/', '?', '#']).next().unwrap_or_default();
+    fields
+        .str("host")
+        .is_some_and(|h| !authority.is_empty() && host_only(authority) == host_only(h))
+}
+
+/// A constant key that names configuration, not a local: dotted
+/// (`environment.apiBaseUrl`), SCREAMING_CASE (`API_BASE_URL`), or pinned by
+/// `.glia/overlay.toml [constants]` (the user's escape hatch, LF.2d).
+fn config_shaped(key: &str, consts: &ConstTable) -> bool {
+    let screaming = key
+        .bytes()
+        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        && key.bytes().any(|b| b.is_ascii_uppercase());
+    key.contains('.') || screaming || consts.is_pinned(key)
+}
+
+/// Add the site of one authority to `sites`.
+fn insert_site(sites: &mut BTreeSet<String>, authority: &str) {
+    let host = host_only(authority);
+    if !host.is_empty() && !host.contains("${") {
+        sites.insert(site_of(&host));
+    }
+}
+
+/// The sites the repo's configuration names: the authority of every URL a
+/// config-shaped constant holds (every deployment binding, overlay pins
+/// included), and every `host` / `hosts` entry of a call site whose host is
+/// const-sourced. A BTreeSet over every parse, so no parse order shows.
+fn configured_sites(parses: &[&mut FileParse], consts: &ConstTable) -> BTreeSet<String> {
+    let mut sites = BTreeSet::new();
+    for (key, value) in consts.entries() {
+        if !value.contains("://") || !config_shaped(key, consts) {
+            continue;
+        }
+        if let (Some(authority), _) = url_split(value) {
+            insert_site(&mut sites, &authority);
+        }
+    }
+    for fp in parses {
+        for (_, _, fields) in endpoint_hits(fp) {
+            if host_is_literal(&fields) {
+                continue;
+            }
+            if let Some(h) = fields.str("host") {
+                insert_site(&mut sites, h);
+            }
+            for h in fields.strs("hosts") {
+                insert_site(&mut sites, h);
+            }
+        }
+    }
+    sites
+}
+
+/// One call site is external: it is not marked yet, its host is literal and
+/// public, and its site is not configured.
+fn is_external(fields: &Fields, sites: &BTreeSet<String>) -> bool {
+    if fields.has("external") || !host_is_literal(fields) {
+        return false;
+    }
+    let Some(host) = fields.str("host").map(host_only) else {
+        return false;
+    };
+    is_public_host(&host) && !sites.contains(&site_of(&host))
+}
+
+/// CG.4a: append `"external":true` to the ENDPOINT_HIT of every external
+/// call site of the repo. Runs after the fold, so it sees every host the fold
+/// recorded; changes nothing but the payload of a marked entry.
+fn mark_external(parses: &mut [&mut FileParse], consts: &ConstTable) -> FoldStats {
+    let sites = configured_sites(parses, consts);
+    let mut stats = FoldStats {
+        configured: sites.len(),
+        ..FoldStats::default()
+    };
+    for fp in parses.iter_mut() {
+        let marks: Vec<(usize, usize, String)> = endpoint_hits(fp)
+            .filter(|(_, _, fields)| is_external(fields, &sites))
+            .filter_map(|(node, cell, mut fields)| {
+                fields.set("external", Value::Bool(true));
+                Some((node, cell, serde_json::to_string(&fields).ok()?))
+            })
+            .collect();
+        for (node, cell, payload) in marks {
+            if let Some(c) = fp.nodes.get_mut(node).and_then(|n| n.cells.get_mut(cell)) {
+                c.payload = CellPayload::Json(payload);
+                stats.external += 1;
+            }
+        }
+    }
+    stats
+}
+
 /// A JSON object that keeps its key order through a rewrite. The workspace
 /// builds serde_json without `preserve_order`, so a `serde_json::Value`
 /// round trip would sort the keys of every folded payload. Unknown fields
@@ -430,6 +658,20 @@ impl Fields {
             .iter()
             .find(|(k, _)| k == key)
             .and_then(|(_, v)| v.as_str())
+    }
+
+    fn has(&self, key: &str) -> bool {
+        self.0.iter().any(|(k, _)| k == key)
+    }
+
+    /// The string entries of an array field; empty when absent or not one.
+    fn strs(&self, key: &str) -> Vec<&str> {
+        self.0
+            .iter()
+            .find(|(k, _)| k == key)
+            .and_then(|(_, v)| v.as_array())
+            .map(|a| a.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
     }
 
     /// Replace `key` in place, or append it.
@@ -617,7 +859,8 @@ mod tests {
             FoldStats {
                 folded: 1,
                 hosts: 1,
-                preset: 0
+                preset: 0,
+                ..FoldStats::default()
             }
         );
 
@@ -675,7 +918,8 @@ mod tests {
             FoldStats {
                 folded: 0,
                 hosts: 1,
-                preset: 0
+                preset: 0,
+                ..FoldStats::default()
             }
         );
         assert_eq!(fp.nodes[1].id, id);
@@ -721,7 +965,8 @@ mod tests {
             FoldStats {
                 folded: 0,
                 hosts: 0,
-                preset: 2
+                preset: 2,
+                ..FoldStats::default()
             }
         );
         assert!(same(&fp, &before), "a pre-set host must not be re-recorded");
@@ -755,7 +1000,8 @@ mod tests {
             FoldStats {
                 folded: 1,
                 hosts: 1,
-                preset: 0
+                preset: 0,
+                ..FoldStats::default()
             }
         );
         assert_eq!(
@@ -855,7 +1101,8 @@ mod tests {
             FoldStats {
                 folded: 1,
                 hosts: 1,
-                preset: 0
+                preset: 0,
+                ..FoldStats::default()
             }
         );
         let new = ep_id("GET", "/users");
@@ -1023,5 +1270,241 @@ mod tests {
         let mut t = table();
         assert!(t.pin("GATEWAY", "/orders-svc"));
         t
+    }
+
+    // ---- CG.4a: external call sites ----------------------------------------
+
+    /// Fold one file the way the build does, marking included.
+    fn fold_one(fp: &mut FileParse, consts: &ConstTable) -> FoldStats {
+        fold_repo(std::iter::once(fp), consts, repo())
+    }
+
+    fn ts_table(src: &str) -> ConstTable {
+        ConstTable::scan_file(src, "typescript")
+    }
+
+    /// quokka's nominatim call: the template's authority is literal, so the
+    /// fold records `host` off `raw` and the mark appends `"external":true`.
+    /// Nothing else about the entry moves.
+    #[test]
+    fn literal_public_host_is_marked() {
+        let mut fp = file();
+        let id = push_call(
+            &mut fp,
+            "/search",
+            r#"{"method":"GET","path":"/search","file":"geo.ts","line":3,"col":5,"confidence":"medium","template":"https://nominatim.openstreetmap.org/search?q=${q}&format=json","raw":"https://nominatim.openstreetmap.org/search?q=${…}&format=json"}"#,
+        );
+        let edges = fp.edges.clone();
+        let nav = fp.nav.qname_by_id.clone();
+        let stats = fold_one(&mut fp, &ConstTable::default());
+        assert_eq!((stats.hosts, stats.external, stats.configured), (1, 1, 0));
+        assert_eq!(fp.nodes[1].id, id);
+        assert_eq!(fp.nodes[1].confidence, Confidence::Medium);
+        assert_eq!(
+            payload(&fp, 1),
+            r#"{"method":"GET","path":"/search","file":"geo.ts","line":3,"col":5,"confidence":"medium","template":"https://nominatim.openstreetmap.org/search?q=${q}&format=json","raw":"https://nominatim.openstreetmap.org/search?q=${…}&format=json","host":"nominatim.openstreetmap.org","external":true}"#
+        );
+        assert_eq!(fp.edges, edges);
+        assert_eq!(fp.nav.qname_by_id, nav);
+    }
+
+    /// Kina's shape: the host comes out of `${environment.apiUrl}`, bound in a
+    /// config file. A const-sourced host is never external, even when the key
+    /// that bound it is not config-shaped (a bare `base`).
+    #[test]
+    fn const_sourced_host_is_never_marked() {
+        for (src, template) in [
+            (
+                "export const environment = {\n  apiUrl: 'https://api.kinaswap.com/api',\n};\n",
+                "${environment.apiUrl}/trades",
+            ),
+            ("const base = 'https://api.kinaswap.com/api';\n", "${base}/trades"),
+        ] {
+            let mut fp = file();
+            push_call(
+                &mut fp,
+                "${…}/trades",
+                &format!(
+                    r#"{{"method":"GET","path":"${{…}}/trades","file":"a.ts","line":1,"col":1,"confidence":"medium","template":"{template}"}}"#
+                ),
+            );
+            let stats = fold_one(&mut fp, &ts_table(src));
+            assert_eq!((stats.folded, stats.hosts, stats.external), (1, 1, 0), "{src}");
+            assert!(payload(&fp, 1).contains(r#""host":"api.kinaswap.com""#));
+            assert!(!payload(&fp, 1).contains("external"), "{}", payload(&fp, 1));
+        }
+    }
+
+    /// A literal host whose site a config-shaped constant names is the repo's
+    /// own backend. A bare local `url` holding the same site configures
+    /// nothing: any file can bind a local URL constant.
+    #[test]
+    fn configured_site_is_not_external() {
+        let json = r#"{"method":"GET","path":"/orders","file":"a.ts","line":1,"col":1,"confidence":"strong","raw":"https://api.shop.io/orders"}"#;
+        let configured = ts_table("export const environment = {\n  apiUrl: 'https://api.shop.io',\n};\n");
+        let mut fp = file();
+        push_call(&mut fp, "/orders", json);
+        let stats = fold_one(&mut fp, &configured);
+        assert_eq!((stats.hosts, stats.external, stats.configured), (1, 0, 1));
+        assert!(!payload(&fp, 1).contains("external"));
+
+        // SCREAMING_CASE is config-shaped too, and the site covers every
+        // host under it.
+        let screaming = ts_table("export const API_BASE_URL = 'https://gateway.shop.io/v1';\n");
+        let mut fp = file();
+        push_call(&mut fp, "/orders", json);
+        assert_eq!(fold_one(&mut fp, &screaming).external, 0);
+
+        let local = ts_table("const url = 'https://api.shop.io';\n");
+        assert_eq!(local.get("url"), Some("https://api.shop.io"));
+        let mut fp = file();
+        push_call(&mut fp, "/orders", json);
+        let stats = fold_one(&mut fp, &local);
+        assert_eq!((stats.external, stats.configured), (1, 0));
+        assert!(payload(&fp, 1).ends_with(r#""host":"api.shop.io","external":true}"#));
+    }
+
+    /// A11.5: a host the parser wrote from the literal it saw (Dart, Go ...)
+    /// has no template, so it is literal.
+    #[test]
+    fn preset_host_is_literal() {
+        let json = r#"{"method":"POST","path":"/v1/charges","file":"lib/pay.dart","line":3,"col":5,"confidence":"strong","raw":"https://api.stripe.com/v1/charges","host":"api.stripe.com"}"#;
+        let mut fp = file();
+        push_call(&mut fp, "/v1/charges", json);
+        let stats = fold_one(&mut fp, &ConstTable::default());
+        assert_eq!((stats.preset, stats.hosts, stats.external), (1, 0, 1));
+        assert_eq!(
+            payload(&fp, 1),
+            format!("{},\"external\":true}}", json.strip_suffix('}').unwrap())
+        );
+    }
+
+    /// Local, private, cluster-internal and reserved documentation hosts are
+    /// never public, so none is marked: the bench fixtures' api.example.com
+    /// keeps pairing with its own server.
+    #[test]
+    fn internal_and_reserved_hosts_are_not_public() {
+        let mut fp = file();
+        for (i, raw) in [
+            "http://localhost:3701/x",
+            "http://10.0.0.5/x",
+            "http://users-svc/x",
+            "http://users.default.svc.cluster.local/x",
+            "https://api.example.com/x",
+            "http://x.test/x",
+            "http://[::1]:8080/x",
+            "http://db.internal/x",
+            "http://nas.home.arpa/x",
+            "http://printer.lan/x",
+            "https://docs.example.org/x",
+        ]
+        .iter()
+        .enumerate()
+        {
+            push_call(
+                &mut fp,
+                "/x",
+                &format!(r#"{{"method":"GET","path":"/x","line":{i},"raw":"{raw}"}}"#),
+            );
+        }
+        let stats = fold_one(&mut fp, &ConstTable::default());
+        assert_eq!((stats.hosts, stats.external), (11, 0));
+        assert!(fp.nodes.iter().skip(1).all(|n| match &n.cells[0].payload {
+            CellPayload::Json(s) => !s.contains("external"),
+            _ => false,
+        }));
+        for h in [
+            "localhost", "10.0.0.5", "users-svc", "api.example.com", "example.net", "x.test",
+            "[::1]", "fe80::1", "a.localdomain", "home.arpa", "x.invalid", "x.example", "",
+        ] {
+            assert!(!is_public_host(h), "{h}");
+        }
+        for h in ["nominatim.openstreetmap.org", "api.stripe.com", "a.b.co.uk", "example.io"] {
+            assert!(is_public_host(h), "{h}");
+        }
+    }
+
+    #[test]
+    fn site_of_handles_registry_slds() {
+        assert_eq!(site_of("a.b.co.uk"), "b.co.uk");
+        assert_eq!(site_of("api.kinaswap.com"), "kinaswap.com");
+        assert_eq!(site_of("openstreetmap.org"), "openstreetmap.org");
+        assert_eq!(site_of("nominatim.openstreetmap.org"), "openstreetmap.org");
+        assert_eq!(site_of("www.gov.au"), "www.gov.au");
+        assert_eq!(site_of("x.y.com.au"), "y.com.au");
+        assert_eq!(site_of("x.y.ab.uk"), "ab.uk", "an unknown SLD falls back to two labels");
+        assert_eq!(site_of("localhost"), "localhost");
+        assert_eq!(host_only("u:p@API.Shop.io:8443"), "api.shop.io");
+        assert_eq!(host_only("[::1]:8080"), "[::1]");
+        assert_eq!(host_only("api.shop.io."), "api.shop.io");
+    }
+
+    /// `.glia/overlay.toml [constants]` is the escape hatch: a pinned URL
+    /// configures its site whatever the key looks like.
+    #[test]
+    fn overlay_pin_configures_a_host() {
+        let json = r#"{"method":"GET","path":"/search","file":"geo.ts","line":3,"col":5,"raw":"https://nominatim.openstreetmap.org/search?q=1"}"#;
+        for key in ["GEO_BASE", "geoBase"] {
+            let mut consts = ConstTable::default();
+            assert!(consts.pin(key, "https://nominatim.openstreetmap.org"));
+            let mut fp = file();
+            push_call(&mut fp, "/search", json);
+            let stats = fold_one(&mut fp, &consts);
+            assert_eq!((stats.external, stats.configured), (0, 1), "{key}");
+            assert!(!payload(&fp, 1).contains("external"));
+        }
+        // Without the pin, a lower-case key configures nothing.
+        let mut fp = file();
+        push_call(&mut fp, "/search", json);
+        assert_eq!(fold_one(&mut fp, &ts_table("const geoBase = 'https://nominatim.openstreetmap.org';\n")).external, 1);
+    }
+
+    /// Sites come from EVERY parse of the repo before any entry is marked, so
+    /// the build's HashMap-ordered parses mark the same entries in any order.
+    /// Marking twice changes nothing.
+    #[test]
+    fn marking_is_order_independent_and_idempotent() {
+        let literal = r#"{"method":"GET","path":"/orders","raw":"https://api.shop.io/orders"}"#;
+        let sourced = r#"{"method":"GET","path":"${…}/users","template":"${base}/users"}"#;
+        let consts = ts_table("const base = 'https://gw.shop.io';\n");
+        for flip in [false, true] {
+            let mut a = file();
+            push_call(&mut a, "/orders", literal);
+            let mut b = file();
+            push_call(&mut b, "${…}/users", sourced);
+            let parses: Vec<&mut FileParse> = if flip { vec![&mut b, &mut a] } else { vec![&mut a, &mut b] };
+            let stats = fold_repo(parses, &consts, repo());
+            assert_eq!((stats.external, stats.configured), (0, 1), "flip={flip}");
+            assert!(!payload(&a, 1).contains("external"));
+        }
+
+        let mut fp = file();
+        push_call(&mut fp, "/orders", literal);
+        assert_eq!(fold_one(&mut fp, &ConstTable::default()).external, 1);
+        let once = fp.clone();
+        let again = mark_external(&mut [&mut fp], &ConstTable::default());
+        assert_eq!(again.external, 0);
+        assert!(same(&fp, &once));
+    }
+
+    /// CB.21 puts `host` on WS_CLIENT / GRPC_CLIENT ENDPOINT_HITs: only an
+    /// ENDPOINT entry is an HTTP call site, so nothing else is marked.
+    #[test]
+    fn only_endpoint_entries_are_marked() {
+        let mut fp = file();
+        let ws = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::WS_CLIENT, "ws_client:/stream");
+        fp.nodes.push(Node {
+            id: ws,
+            repo: repo(),
+            confidence: Confidence::Medium,
+            cells: vec![Cell {
+                kind: cell_type::ENDPOINT_HIT,
+                payload: CellPayload::Json(r#"{"via":"ws","host":"stream.binance.com"}"#.into()),
+            }],
+        });
+        fp.nav.record(ws, "/stream", "ws_client:/stream", node_kind::WS_CLIENT, Some(func()));
+        let before = fp.clone();
+        assert_eq!(fold_one(&mut fp, &ConstTable::default()), FoldStats::default());
+        assert!(same(&fp, &before));
     }
 }

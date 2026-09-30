@@ -186,6 +186,20 @@ impl ConstTable {
         first.chain(rest.map(String::as_str)).collect()
     }
 
+    /// CG.4a: every binding as `(key, value)`: each key's first value in key
+    /// order, then every alternative value under its key, keys in order and
+    /// alternatives in the order they were seen. Deterministic (BTreeMap), so
+    /// a consumer that collects a set from it (the endpoint fold's configured
+    /// sites) needs no sort of its own. A pinned key yields its one value.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, &str)> + '_ {
+        let first = self.by_key.iter().map(|(k, v)| (k.as_str(), v.as_str()));
+        let rest = self
+            .alternatives
+            .iter()
+            .flat_map(|(k, alts)| alts.iter().map(move |v| (k.as_str(), v.as_str())));
+        first.chain(rest)
+    }
+
     pub fn len(&self) -> usize {
         self.by_key.len()
     }
@@ -1269,5 +1283,52 @@ export const PAGE = 'p';
         assert!(repo.pinned_keys_in("${OTHER}/users").is_empty());
         assert!(repo.pinned_keys_in("/users").is_empty());
         assert!(repo.pinned_keys_in("${GATEWAY").is_empty(), "unclosed span");
+    }
+
+    /// CG.4a: every binding, first values in key order, then each key's
+    /// alternatives in the order they were seen, so a consumer sees every
+    /// deployment's value deterministically. A pin is its key's one value.
+    #[test]
+    fn entries_yields_first_values_then_alternatives() {
+        let mut repo = scan("export const environment = { apiUrl: 'http://localhost:3701' };\n", "typescript");
+        for src in [
+            "export const environment = { apiUrl: 'https://api.kinaswap.com' };\n",
+            "export const environment = { apiUrl: 'https://staging.kinaswap.com' };\n",
+            "export const API_BASE = 'https://b.io';\nconst a = 'x';\n",
+            "export const API_BASE = 'https://c.io';\n",
+        ] {
+            repo.merge_from(&scan(src, "typescript"));
+        }
+        let got: Vec<(&str, &str)> = repo.entries().collect();
+        assert_eq!(
+            got,
+            [
+                ("API_BASE", "https://b.io"),
+                ("a", "x"),
+                // The object walk binds the member's bare name too.
+                ("apiUrl", "http://localhost:3701"),
+                ("environment.apiUrl", "http://localhost:3701"),
+                ("API_BASE", "https://c.io"),
+                ("apiUrl", "https://api.kinaswap.com"),
+                ("apiUrl", "https://staging.kinaswap.com"),
+                ("environment.apiUrl", "https://api.kinaswap.com"),
+                ("environment.apiUrl", "https://staging.kinaswap.com"),
+            ]
+        );
+        assert!(repo.pin("environment.apiUrl", "https://gw.io"));
+        let got: Vec<(&str, &str)> = repo.entries().collect();
+        assert_eq!(
+            got,
+            [
+                ("API_BASE", "https://b.io"),
+                ("a", "x"),
+                ("apiUrl", "http://localhost:3701"),
+                ("environment.apiUrl", "https://gw.io"),
+                ("API_BASE", "https://c.io"),
+                ("apiUrl", "https://api.kinaswap.com"),
+                ("apiUrl", "https://staging.kinaswap.com"),
+            ]
+        );
+        assert_eq!(ConstTable::default().entries().count(), 0);
     }
 }
