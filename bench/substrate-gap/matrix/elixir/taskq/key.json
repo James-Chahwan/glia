@@ -1,0 +1,33 @@
+{
+  "framework": "elixir-oban",
+  "language": "elixir",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "taskq",
+  "cells": [
+    "elixir/taskq"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "MailerWorker"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "MailerWorker"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "MailerWorker",
+      "to": "MailerWorker",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Oban.Worker + Worker.new |> Oban.insert (pipe form) || CF.11a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=2/2 literal=1/2 route=0/1 forbid=0/0) via=queue. Predicted extractor gap (backlog, not fixed by the probe): consumer fires (`use Oban.Worker`); producer pipe form `%{..} |> Worker.new() |> Oban.insert()` defeats the ArgReceiver rule (`Oban.insert(` has no argument) -> `unresolved:oban`."
+}

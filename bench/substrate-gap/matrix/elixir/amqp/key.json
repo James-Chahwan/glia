@@ -1,0 +1,33 @@
+{
+  "framework": "elixir-amqp",
+  "language": "elixir",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "amqp",
+  "cells": [
+    "elixir/amqp"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "amqp hex: AMQP.Basic.publish(chan, exchange, routing_key, payload) / AMQP.Basic.consume(chan, queue) || CF.11a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=1/2 literal=1/2 route=0/1 forbid=0/0) via=queue. Predicted extractor gap (backlog, not fixed by the probe): producer fires (`AMQP.Basic.publish(chan, \"\", \"x\", ..)`); consumer `AMQP.Basic.consume(chan, \"x\")` has no row in parsers/code/extractors/src/queues.rs."
+}

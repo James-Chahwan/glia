@@ -1,0 +1,33 @@
+{
+  "framework": "elixir-tortoise311",
+  "language": "elixir",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "mqtt",
+  "cells": [
+    "elixir/mqtt"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "sensors/temp"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "sensors/temp"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "sensors/temp",
+      "to": "sensors/temp",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "tortoise311: publish(client_id, topic, payload) / subscriptions: [{topic, qos}] || CF.11a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): tortoise311 `Tortoise311.publish(id, \"x\", ..)` / `subscriptions: [{\"x\", 0}]`: the MQTT gate wants the word `mqtt` / `paho`, which a Tortoise file does not contain."
+}

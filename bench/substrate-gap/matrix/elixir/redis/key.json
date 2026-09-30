@@ -1,0 +1,33 @@
+{
+  "framework": "elixir-redix-pubsub",
+  "language": "elixir",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "redis",
+  "cells": [
+    "elixir/redis"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Redix.PubSub.subscribe + Redix.command([\"PUBLISH\", ..]) || CF.11a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=eventbus. Predicted extractor gap (backlog, not fixed by the probe): Redix: the file never spells `redis` (`Redix.PubSub`), so the RedisPubSub gate misses and parsers/code/extractors/src/eventbus.rs mints a verb-fallback `event_handle:subscribe` phantom (CB-g); `Redix.command(conn, [\"PUBLISH\", \"x\", ..])` has no producer row."
+}
