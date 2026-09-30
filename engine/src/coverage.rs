@@ -193,7 +193,8 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     // kotlin-{entities,spring,ktor,retrofit,flip-guard}. A14.6 rewrote them
     // once the Kotlin chain (calls + heritage A14.3, Spring / JPA A14.4, Ktor
     // A14.5, HTTP clients + Android A14.6) had landed: each row names only
-    // what that chain still does not extract.
+    // what that chain still does not extract. CA.6a narrowed the CALLS row:
+    // typed parameters and typed / constructor-initialised locals bind.
     CoverageCaveat {
         language: "kotlin",
         edge_category: "*",
@@ -203,7 +204,7 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     CoverageCaveat {
         language: "kotlin",
         edge_category: "CALLS",
-        note: "Kotlin calls are extracted from declared function bodies, but a call on a variable binds only when the variable is a property with a declared type: a parameter-typed receiver (`fun f(store: ItemStore) { store.all() }`) stays unresolved, as do bare calls in an INTERFACE default method, inherited methods called bare, calls inside a lambda with receiver (`with(x) { m() }`, `apply { }`), calls outside a function body (init blocks, secondary-constructor bodies, property initializers / accessors, default argument values) and a same-package call into another file with no import",
+        note: "Kotlin calls are extracted from declared function bodies; a call on a variable binds when the variable is a typed property, a typed parameter, a typed `val` / `var` or one initialised by a constructor call (`val r = Repo()`); a local initialised any other way, a lambda parameter, bare calls in an INTERFACE default method, inherited methods called bare, calls inside a lambda with receiver (`with(x) { m() }`, `apply { }`), calls outside a function body (init blocks, secondary-constructor bodies, property initializers / accessors, default argument values) and a same-package call into another file with no import stay unresolved",
         verify: "grep the callee name across *.kt",
     },
     CoverageCaveat {
@@ -619,7 +620,10 @@ mod tests {
         assert!(!note("INHERITS_FROM").contains("not extracted yet"));
         assert!(!note("HTTP_CALLS").contains("emit no ENDPOINT, so"));
         // The residuals the correction names.
-        assert!(note("CALLS").contains("parameter-typed receiver"));
+        // CA.6a: a typed parameter / `val` binds; an untyped lambda parameter
+        // is the residual.
+        assert!(note("CALLS").contains("typed parameter"));
+        assert!(note("CALLS").contains("lambda parameter"));
         assert!(note("CALLS").contains("INTERFACE default method"));
         assert!(note("HTTP_CALLS").contains("Retrofit") && note("HTTP_CALLS").contains("OkHttp"));
         assert!(note("HTTP_CALLS").contains("Ktor-client"));

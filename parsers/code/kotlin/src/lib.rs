@@ -11,7 +11,8 @@
 //! `@Entity` / `@Document` DATA_ENTITYs, repository ACCESSES_DATA), and the
 //! call sites, supertypes and field types of [`calls`] (A14.3: every call in
 //! a declared function's body, `: Base()` INHERITS_FROM / `: Iface`
-//! IMPLEMENTS refs, primary-constructor and typed properties as field types),
+//! IMPLEMENTS refs, primary-constructor and typed properties as field types;
+//! CA.6a: parameter / `val` / `var` receiver types as local types),
 //! and the client ENDPOINTs and Android components of [`android`] (A14.6:
 //! Retrofit interface methods and Spring RestTemplate / WebClient calls as
 //! ENDPOINT + CALLS, Android framework classes as a ROLE COMPONENT cell).
@@ -158,6 +159,7 @@ fn parse_all(
         route_prefix: "",
         is_bean: false,
         members: &no_members,
+        fields: &no_members,
     };
     walk_members(root, &file, top, &mut acc);
     // After the walk: `fn_ids` names every declared function a Ktor route can
@@ -201,6 +203,13 @@ fn parse_all(
 /// them receiver-less member calls (`SelfMethod`), `A` / `B` INHERITS_FROM /
 /// IMPLEMENTS refs, `F` recorded property types (see [`calls`]).
 ///
+/// CA.6a adds the local-types line right after it, off the same parses:
+///   `[kotlin] local types: scopes=S typed=T unknown=U repo=<label>`
+/// `glia analyze <repo> 2>&1 | grep '\[kotlin\] local types:'` — `S` function
+/// bodies that bind a local, `T` locals with a receiver type (a typed
+/// parameter / `val`, a constructor `val`, a property alias), `U` locals of
+/// unknown type, which shadow a same-named property (see [`calls`]).
+///
 /// A14.5 adds the Ktor line, from the same kind of process-global bank:
 ///   `[kotlin/ktor] ast routes=R handled_by=H (text_scan_would_find=N) repo=<label>`
 /// `glia analyze <repo> 2>&1 | grep '\[kotlin/ktor\]'` — `N` is the retired
@@ -232,6 +241,7 @@ pub fn trace(parses: &[FileParse], repo_label: &str) {
         parses.len()
     );
     eprintln!("{}", calls::marker(parses, repo_label));
+    eprintln!("{}", calls::local_types_marker(parses, repo_label));
     eprintln!("{}", spring::marker(spring::take(), repo_label));
     eprintln!("{}", routes::marker(routes::take(), repo_label));
     eprintln!("{}", android::marker(android::take(), repo_label));
@@ -296,6 +306,9 @@ struct Owner<'a> {
     /// a receiver-less call to one is a self call (A14.3). Empty at the top
     /// level.
     members: &'a HashSet<String>,
+    /// The properties the type declares (CA.6a): a local initialised from one
+    /// aliases it. Empty at the top level.
+    fields: &'a HashSet<String>,
 }
 
 /// Visit every declaration directly inside `container` (the `source_file`, a
@@ -351,6 +364,7 @@ fn visit_type(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
     calls::record_ctor_field_types(node, id, file, acc);
     if let Some(body) = body {
         let members = calls::member_fn_names(body, file.src);
+        let fields = calls::member_prop_names(node, body, file.src);
         let inner = Owner {
             id,
             qname: &qname,
@@ -359,6 +373,7 @@ fn visit_type(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
             route_prefix: &spring.prefix,
             is_bean: spring.is_bean,
             members: &members,
+            fields: &fields,
         };
         walk_members(body, file, inner, acc);
     }
@@ -385,6 +400,7 @@ fn visit_function(node: TsNode, file: &File, owner: Owner, acc: &mut Acc) {
     }
     let scope = calls::CallScope {
         members: owner.members,
+        fields: owner.fields,
         type_name: owner
             .in_type
             .then(|| owner.qname.rsplit("::").next().unwrap_or(owner.qname)),

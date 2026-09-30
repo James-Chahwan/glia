@@ -1,0 +1,16 @@
+{
+  "framework": "kotlin-local-receivers",
+  "language": "kotlin",
+  "dirs": ["."],
+  "note": "CA-6: a Kotlin receiver typed by a function parameter (`store: ItemStore`), a typed `val log: AuditLog` or a constructor-initialised `val log = AuditLog()` binds the method on that type through LA.35a's local_types. ItemStore and AuditLog both declare write(), so no repo-unique name can bind it. `val log = store` has no declared or constructed type: it is a local of unknown type and binds nothing.",
+  "expect_edges": [
+    {"from": "listAll", "to": "ItemStore::all", "category": "CALLS", "note": "parameter-typed receiver"},
+    {"from": "audited", "to": "AuditLog::write", "category": "CALLS", "note": "typed val"},
+    {"from": "inferred", "to": "AuditLog::write", "category": "CALLS", "note": "constructor-initialised val"}
+  ],
+  "forbid": [
+    {"from": "audited", "to": "ItemStore::write", "category": "CALLS"},
+    {"from": "inferred", "to": "ItemStore::write", "category": "CALLS"},
+    {"from": "shadowed", "to": "AuditLog::write", "category": "CALLS", "note": "an untyped alias is a local of unknown type"}
+  ]
+}

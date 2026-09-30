@@ -2,7 +2,7 @@
   "framework": "kotlin-ktor",
   "language": "kotlin",
   "dirs": ["."],
-  "note": "A14.1 baseline: Ktor DSL routes. A14.5: the routes come off the Kotlin AST (no text scan), each bound HANDLED_BY to the enclosing declared function and carrying a POSITION cell at its `get(...)` call. A14.3: the calls inside the route lambdas are collected as CallSites of itemRoutes (the `get` / `post` heads are ROUTEs, never calls), but CALLS itemRoutes -> all stays 0/1 by design: `store` is a function PARAMETER, and receiver-type inference reads only declared property types (A6.2a field_types), so `store.all()` has no type to bind through — the declared parameter-typed-receiver residual.",
+  "note": "A14.1 baseline: Ktor DSL routes. A14.5: the routes come off the Kotlin AST (no text scan), each bound HANDLED_BY to the enclosing declared function and carrying a POSITION cell at its `get(...)` call. A14.3: the calls inside the route lambdas are collected as CallSites of itemRoutes (the `get` / `post` heads are ROUTEs, never calls). CA.6a: `store` is a function PARAMETER typed `ItemStore`; the Kotlin parser records it as a local type of itemRoutes (LA.35a's local_types, marker `[kotlin] local types: scopes=2 typed=1 unknown=1`), which the receiver-type pass reads before property types, so `store.all()` binds ItemStore::all through `import com.acme.store.ItemStore` — CALLS 0/1 -> 1/1, no longer the parameter-typed-receiver residual.",
   "expect_nodes": [
     {"kind": "ROUTE",    "name": "GET /api/items", "note": "regression guard — the AST scan keeps the text scanner's `{METHOD} {path}` name and NodeId"},
     {"kind": "FUNCTION", "name": "itemRoutes",     "note": "extension fun — the HANDLED_BY target"},
@@ -12,7 +12,7 @@
   "expect_edges": [
     {"from": "GET /api/items",  "to": "itemRoutes", "category": "HANDLED_BY", "note": "A14.5: route -> enclosing declared function (Ktor handlers are anonymous lambdas)"},
     {"from": "POST /api/items", "to": "itemRoutes", "category": "HANDLED_BY", "note": "A14.5: same enclosing function"},
-    {"from": "itemRoutes",      "to": "all",        "category": "CALLS",      "note": "store.all() inside the lambda: collected by A14.3 as Attribute{store, all}; unresolved until receiver-type inference reads enclosing-function parameter types (store: ItemStore is a parameter, not a field)"},
+    {"from": "itemRoutes",      "to": "all",        "category": "CALLS",      "note": "store.all() inside the lambda: collected by A14.3 as Attribute{store, all}; CA.6a binds it through the parameter's declared type (store: ItemStore, a local type of itemRoutes)"},
     {"from": "app",             "to": "ItemStore",  "category": "IMPORTS",    "note": "import com.acme.store.ItemStore"}
   ],
   "expect_cells": [
