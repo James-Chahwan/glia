@@ -21,6 +21,7 @@
 //! | `tag_only_queue` | a QUEUE_PRODUCER / QUEUE_CONSUMER whose topic is a framework tag (`queues::is_framework_tag`) | fact | `constants\|wrapper` |
 //! | `dead_symbol` | a FUNCTION / METHOD / CLASS outside `entrypoint_reachable`, with no incoming carry edge, not ORIGIN `test_fixture` | heuristic | `entrypoints` |
 //! | `cochange_no_edge` | a file pair git history says changes together (a CO_CHANGES edge, LF.5b) that no static link joins ([`cochange_gaps`]); the row is the first file's MODULE, `detail` names the other file, the counts and the languages | heuristic (co-change is history, not proof of coupling) | `edge` |
+//! | `suspected_edge` | CD.3b: an orphan of a learned (kind, category, kind) triple (a cross-service pairing the build already made at least twice) and a target its channel tokens match: `detail` names the category, the target qname in backticks and its location, then `score= channel= aa= ra= cochange= target_unpaired= triple=<KIND>-<CATEGORY>-><KIND> seen <n>x`; the row is the orphan, one per kept target (at most three); `draft` holds the paste-ready `[[edge]]` stanza (engine `suspected`) | heuristic (a suggestion: the overlay loop is its verifier) | `edge` |
 //! | `orphaned_rule` | a qname-bearing overlay stanza (`[[edge]]` from / to, `[[constraint]]` / `[[decision]]` / `[[note]]` anchor, `[entrypoints]` qname) that binds no node | fact | `remove` |
 //! | `redundant_rule` | an `[[edge]]` equal to an edge whose ORIGIN is not the overlay (the extractor caught up) | fact | `remove` |
 //! | `orphaned_cell` | a `.glia/cells.jsonl` / `.glia/vectors.jsonl` row whose qname + hint bind nothing | fact | `glia cell ls --check --rekey` |
@@ -39,8 +40,17 @@
 //! |---|---|
 //! | node rows (the endpoint / route / queue / dead-symbol / wrapped-sink categories) | the node's NodeId in decimal (path-independent since LB.1, distinct across repos) |
 //! | `cochange_no_edge` | `module_a` NodeId `\x1f` the other file |
+//! | `suspected_edge` | the orphan's NodeId `\x1f` the target's NodeId |
 //! | `orphaned_rule` / `redundant_rule` | repo id `\x1f` section `\x1f` the stanza's identity: `[[edge]]` from `\x1f` to `\x1f` category; `[[constraint]]` / `[[decision]]` id; `[[note]]` id, else anchor `\x1f` text; `[entrypoints]` the pattern |
 //! | `orphaned_cell` | repo id `\x1f` sidecar file `\x1f` cell type `\x1f` qname `\x1f` kind `\x1f` hint |
+//!
+//! `draft` (CD.3b) is set on `suspected_edge` rows only (left out of the
+//! JSON on every other row): a `# gap: <id>` comment line, then one
+//! `[[edge]]` stanza (from / to the two qnames as the overlay edge stage binds
+//! them, the category, a `note` with the score), pasteable into
+//! `.glia/overlay.toml` as is. `suspected_edge` is a graph category, so
+//! [`verdict`] counts it: an accepted edge that teaches a new triple can raise
+//! it elsewhere (a `review`, not a `keep`).
 //!
 //! Two rows with one key (two identical `[[edge]]` stanzas, two identical
 //! sidecar rows) are told apart by their rank among the rows sharing that key
@@ -80,6 +90,8 @@
 //!   once per co-change audit: per [`cochange_gaps`] call (`coverage`, the
 //!   `glia coverage` section) and per report that computes
 //!   `cochange_no_edge` (`gaps`);
+//! - `[suspected] triples=T orphans=O candidates=C kept=K by=<CATEGORY:n,...>`
+//!   once per report that computes `suspected_edge` (and per [`graph_counts`]);
 //! - `[overlay] <rules> rules, +<M> edges, orphans <K>→<J>, gaps <G0>→<G1>, verdict=<keep|review|drop>`
 //!   once per [`overlay_delta`], the review's accept-loop line; `G` is the
 //!   sum of [`GraphCounts::gaps_by_category`].
@@ -116,12 +128,13 @@ pub const UNPAIRED_ROUTE: &str = "unpaired_route";
 pub const TAG_ONLY_QUEUE: &str = "tag_only_queue";
 pub const DEAD_SYMBOL: &str = "dead_symbol";
 pub const COCHANGE_NO_EDGE: &str = "cochange_no_edge";
+pub const SUSPECTED_EDGE: &str = "suspected_edge";
 pub const ORPHANED_RULE: &str = "orphaned_rule";
 pub const REDUNDANT_RULE: &str = "redundant_rule";
 pub const ORPHANED_CELL: &str = "orphaned_cell";
 
 /// Every category, in report order.
-pub const CATEGORIES: [&str; 11] = [
+pub const CATEGORIES: [&str; 12] = [
     UNPAIRED_ENDPOINT,
     AMBIGUOUS_ENDPOINT,
     UNRESOLVED_ENDPOINT,
@@ -130,6 +143,7 @@ pub const CATEGORIES: [&str; 11] = [
     TAG_ONLY_QUEUE,
     DEAD_SYMBOL,
     COCHANGE_NO_EDGE,
+    SUSPECTED_EDGE,
     ORPHANED_RULE,
     REDUNDANT_RULE,
     ORPHANED_CELL,
@@ -142,7 +156,7 @@ const ROOT_CATEGORIES: [&str; 4] = [WRAPPED_SINK, ORPHANED_RULE, REDUNDANT_RULE,
 /// [`ROOT_CATEGORIES`], what [`graph_counts`] counts. A root category reads
 /// the overlay file on disk, not the overlay a build applied, so it cannot
 /// measure a candidate overlay.
-const GRAPH_CATEGORIES: [&str; 7] = [
+const GRAPH_CATEGORIES: [&str; 8] = [
     UNPAIRED_ENDPOINT,
     AMBIGUOUS_ENDPOINT,
     UNRESOLVED_ENDPOINT,
@@ -150,6 +164,7 @@ const GRAPH_CATEGORIES: [&str; 7] = [
     TAG_ONLY_QUEUE,
     DEAD_SYMBOL,
     COCHANGE_NO_EDGE,
+    SUSPECTED_EDGE,
 ];
 
 /// [`verdict`]: some gap category fell or the graph grew, and no gap category rose.
@@ -198,6 +213,11 @@ pub struct GapRow {
     pub suggest: &'static str,
     /// [`FACT`] or [`HEURISTIC`].
     pub tier: &'static str,
+    /// `suspected_edge` rows only (CD.3b): the paste-ready overlay stanza, a
+    /// `# gap: <id>` comment then one `[[edge]]`. Left out of the JSON when
+    /// unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft: Option<String>,
 }
 
 /// [`gaps_report`]'s answer.
@@ -281,7 +301,8 @@ impl GraphCounts {
 /// Count `merged` whole: its distinct nodes by kind (a node id counted once,
 /// as the report sees it), its edges by category, and what [`gaps_report`]
 /// with no roots counts per category. Read-only, prints no `[gaps]` marker
-/// (the co-change audit still prints its `[cochange] ... surface=gaps`).
+/// (the co-change audit still prints its `[cochange] ... surface=gaps`, and
+/// the suspected-edge pass its `[suspected]` line).
 pub fn graph_counts(merged: &MergedGraph) -> GraphCounts {
     let mut nodes_by_kind: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
@@ -529,12 +550,12 @@ fn gap_id(category: &str, key: &str) -> String {
 /// and later rows sharing a (category, key) keyed `key \x1f <rank>` (rank 2,
 /// 3, ... in collection order) so twins stay distinct.
 #[derive(Default)]
-struct Ids {
+pub(crate) struct Ids {
     seen: HashMap<(&'static str, String), usize>,
 }
 
 impl Ids {
-    fn id(&mut self, category: &'static str, key: String) -> String {
+    pub(crate) fn id(&mut self, category: &'static str, key: String) -> String {
         let n = self.seen.entry((category, key.clone())).or_default();
         *n += 1;
         if *n == 1 {
@@ -839,6 +860,7 @@ fn collect_rows(
                     detail,
                     suggest,
                     tier,
+                    draft: None,
                 }
             };
         match n.kind {
@@ -1033,8 +1055,14 @@ fn collect_rows(
                 file: Some(p.gap.file_a),
                 suggest: "edge",
                 tier: HEURISTIC,
+                draft: None,
             });
         }
+    }
+
+    if want(SUSPECTED_EDGE) {
+        let (suspected, _) = crate::suspected::suspected_rows(merged, &loc, &mut ids);
+        rows.extend(suspected);
     }
 
     if want(ORPHANED_RULE) || want(REDUNDANT_RULE) || want(ORPHANED_CELL) {
@@ -1474,6 +1502,7 @@ impl RootCtx<'_> {
                 detail: format!("repo={label} {detail}"),
                 suggest: "remove",
                 tier: FACT,
+                draft: None,
             };
         let want_orphans = self.want.contains(&ORPHANED_RULE);
         let want_redundant = self.want.contains(&REDUNDANT_RULE);
@@ -1505,6 +1534,7 @@ impl RootCtx<'_> {
                             ),
                             suggest: "remove",
                             tier: FACT,
+                            draft: None,
                         });
                     }
                 }
@@ -1669,6 +1699,7 @@ impl RootCtx<'_> {
                 detail,
                 suggest: "glia cell ls --check --rekey",
                 tier: FACT,
+                draft: None,
             });
         };
         for (line, r) in numbered_rows::<CellRow>(&cells_path) {

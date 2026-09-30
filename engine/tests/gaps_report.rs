@@ -15,9 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use glia_engine::gaps::{
     AMBIGUOUS_ENDPOINT, CATEGORIES, COCHANGE_NO_EDGE, DEAD_SYMBOL, DROP, FACT, GapRow, GapsOptions,
-    GapsReport, HEURISTIC, KEEP, ORPHANED_CELL, ORPHANED_RULE, REDUNDANT_RULE, TAG_ONLY_QUEUE,
-    UNPAIRED_ENDPOINT, UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT, WRAPPED_SINK, gaps_report,
-    graph_counts, overlay_delta,
+    GapsReport, HEURISTIC, KEEP, ORPHANED_CELL, ORPHANED_RULE, REDUNDANT_RULE, SUSPECTED_EDGE,
+    TAG_ONLY_QUEUE, UNPAIRED_ENDPOINT, UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT, WRAPPED_SINK,
+    gaps_report, graph_counts, overlay_delta,
 };
 use glia_engine::{GenerateResult, generate_many, generate_one};
 
@@ -104,6 +104,7 @@ fn reports_the_probe_r1_shapes() {
             (TAG_ONLY_QUEUE, 0),
             (DEAD_SYMBOL, 1),
             (COCHANGE_NO_EDGE, 0),
+            (SUSPECTED_EDGE, 0),
             (ORPHANED_RULE, 0),
             (REDUNDANT_RULE, 0),
             (ORPHANED_CELL, 0),

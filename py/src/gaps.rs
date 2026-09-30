@@ -42,7 +42,8 @@ impl PyGraph {
     /// `{counts, skipped, rows}` — the prompt material of an overlay agent.
     ///
     /// `rows`: `{id, category, qname, kind, file, line, detail, suggest,
-    /// tier}`, `line` 1-based, sorted by (category, file, line, qname). `id`
+    /// tier}` (+ `draft` on a `suspected_edge` row), `line` 1-based, sorted
+    /// by (category, file, line, qname). `id`
     /// (CE.3a) is `gap:<16 hex>`, unique in the report and stable across
     /// rebuilds: keyed by the node / stanza / sidecar row, never by a line or
     /// an ordinal, so a stanza can name the gap it targets. Categories, in
@@ -51,6 +52,9 @@ impl PyGraph {
     /// a declared `[[wrapper]]`: informational), `unpaired_route`,
     /// `tag_only_queue`, `dead_symbol`, `cochange_no_edge` (LF.5c: a file
     /// pair git history says changes together with no static link; heuristic),
+    /// `suspected_edge` (CD.3b: an orphan of a pairing the build already made
+    /// twice, and a target whose channel tokens match; heuristic; its `draft`
+    /// is a paste-ready `# gap: <id>` + `[[edge]]` overlay stanza),
     /// then the overlay's own rot —
     /// `orphaned_rule`, `redundant_rule`, `orphaned_cell`. `wrapped_sink` and
     /// the last three read each repo's files through `repo_roots` (listed in
@@ -126,7 +130,7 @@ mod tests {
             gaps_of(&MergedGraph::new(Vec::new()), &BTreeMap::new(), None, None).expect("report");
         assert_eq!(
             serde_json::to_string(&empty).expect("json"),
-            r#"{"counts":{"ambiguous_endpoint":0,"cochange_no_edge":0,"dead_symbol":0,"tag_only_queue":0,"unpaired_endpoint":0,"unpaired_route":0,"unresolved_endpoint":0},"skipped":["wrapped_sink","orphaned_rule","redundant_rule","orphaned_cell"],"rows":[]}"#
+            r#"{"counts":{"ambiguous_endpoint":0,"cochange_no_edge":0,"dead_symbol":0,"suspected_edge":0,"tag_only_queue":0,"unpaired_endpoint":0,"unpaired_route":0,"unresolved_endpoint":0},"skipped":["wrapped_sink","orphaned_rule","redundant_rule","orphaned_cell"],"rows":[]}"#
         );
         assert!(
             gaps_of(
