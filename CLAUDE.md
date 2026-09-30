@@ -238,6 +238,13 @@ still reach the embedding app's hook. fired_on, on stderr:
 `[parallel] <repo>: const-scan <c> files, rpc-needles <r> files, <g> language graphs on <t> threads`
 once per repo. Per-language builder markers interleave at default threads;
 `GLIA_THREADS=1` keeps them in sequential order.
+Per-phase timers (CA.9, `engine/src/build/timing.rs`; wall time on the orchestrating thread,
+milliseconds truncated to one decimal, stderr only — never a cache, `.gmap`, manifest, stdout
+or answer): `[timing] repo=<label> walk=<ms> parse=<ms> const_scan=<ms> grafts=<ms> language_build=<ms>`
+once per built repo, `[timing] build repos=<n> resolve=<ms> post=<ms> finalize=<ms> external_cells=<ms> total=<ms> slowest_pass=<name>:<ms>`
+once per build (a layout merge prints no `external_cells=`; the stage and per-pass times are
+`PassReport::elapsed` / `pass_elapsed`), and `[timing] persist writer=<w> <ms> dir=<dir>` once
+per layout write.
 
 ## Parser-vs-Graph Split (locked at v0.4.3b)
 

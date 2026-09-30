@@ -23,6 +23,7 @@
 //! domain declares it in a `const`.
 
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use glia_core::CellTypeId;
 
@@ -164,12 +165,17 @@ impl<G: 'static, C: 'static> PassRegistry<G, C> {
     }
 
     /// Run every pass over `g` in [`Self::order`], handing each the build
-    /// context `ctx`. Prints nothing: the caller owns the marker.
+    /// context `ctx`, and time each one (wall time on the calling thread,
+    /// CA.9). Prints nothing: the caller owns the marker.
     pub fn run(&self, g: &mut G, ctx: &C) -> PassReport {
         let mut report = PassReport::default();
         for spec in self.order() {
+            let started = Instant::now();
             (spec.run)(g, ctx);
+            let took = started.elapsed();
             report.ran.push(spec.name);
+            report.elapsed[stage_index(spec.stage)] += took;
+            report.pass_elapsed.push((spec.name, took));
             match spec.stage {
                 Stage::Resolve => report.resolve += 1,
                 Stage::Post => report.post += 1,
@@ -180,8 +186,20 @@ impl<G: 'static, C: 'static> PassRegistry<G, C> {
     }
 }
 
-/// What [`PassRegistry::run`] ran: the pass names in run order and the count
-/// per stage.
+/// A stage's slot in [`PassReport::elapsed`]: its position in run order.
+const fn stage_index(stage: Stage) -> usize {
+    match stage {
+        Stage::Resolve => 0,
+        Stage::Post => 1,
+        Stage::Finalize => 2,
+    }
+}
+
+/// What [`PassRegistry::run`] ran: the pass names in run order, the count
+/// per stage, and what each pass and each stage took (CA.9).
+///
+/// The times are wall-clock, so two runs of one registry over one graph
+/// differ in them: compare `ran` and the counts, never whole reports.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PassReport {
@@ -189,6 +207,30 @@ pub struct PassReport {
     pub resolve: usize,
     pub post: usize,
     pub finalize: usize,
+    /// Time per stage, indexed `[Resolve, Post, Finalize]`; read one through
+    /// [`PassReport::stage_elapsed`].
+    pub elapsed: [Duration; 3],
+    /// Each pass and what it took, in run order (the order of `ran`).
+    pub pass_elapsed: Vec<(&'static str, Duration)>,
+}
+
+impl PassReport {
+    /// What the passes of `stage` took together.
+    pub fn stage_elapsed(&self, stage: Stage) -> Duration {
+        self.elapsed[stage_index(stage)]
+    }
+
+    /// The pass that took longest and its time; on a tie the one that ran
+    /// first. `None` when no pass ran.
+    pub fn slowest(&self) -> Option<(&'static str, Duration)> {
+        self.pass_elapsed
+            .iter()
+            .copied()
+            .fold(None, |best, (name, took)| match best {
+                Some((_, b)) if b >= took => best,
+                _ => Some((name, took)),
+            })
+    }
 }
 
 #[cfg(test)]
@@ -305,5 +347,41 @@ mod tests {
         assert_eq!((report.resolve, report.post, report.finalize), (1, 1, 1));
         assert_eq!(R.specs()[2].populates, [CellTypeId(7)]);
         assert_eq!(Stage::Finalize.as_str(), "finalize");
+    }
+
+    #[test]
+    fn run_times_each_stage() {
+        const R: PassRegistry<Log> = PassRegistry::new(&[
+            PassSpec {
+                name: "sleep",
+                stage: Stage::Post,
+                after: &[],
+                populates: &[],
+                run: |_, _| std::thread::sleep(Duration::from_millis(5)),
+            },
+            spec("pair", Stage::Resolve, &[]),
+            spec("sort", Stage::Finalize, &[]),
+        ]);
+        let report = R.run(&mut Vec::new(), &());
+        let post = report.stage_elapsed(Stage::Post);
+        assert!(post >= Duration::from_millis(5), "{report:?}");
+        assert!(report.stage_elapsed(Stage::Resolve) < post, "{report:?}");
+        assert!(report.stage_elapsed(Stage::Finalize) < post, "{report:?}");
+        assert_eq!(report.elapsed[1], post);
+        let names: Vec<&str> = report.pass_elapsed.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, report.ran, "one entry per pass, in run order");
+        assert_eq!(names, ["pair", "sleep", "sort"]);
+        let (slowest, took) = report.slowest().expect("three passes ran");
+        assert_eq!(slowest, "sleep");
+        assert_eq!(took, post, "the stage's only pass");
+        assert_eq!(PassRegistry::<Log>::empty().run(&mut Vec::new(), &()).slowest(), None);
+    }
+
+    #[test]
+    fn slowest_breaks_ties_by_run_order() {
+        let mut report = PassReport::default();
+        let ms = Duration::from_millis;
+        report.pass_elapsed = vec![("a", ms(1)), ("b", ms(3)), ("c", ms(3)), ("d", ms(2))];
+        assert_eq!(report.slowest(), Some(("b", ms(3))));
     }
 }

@@ -34,12 +34,17 @@
 //! `[merge] members=<n> (gmap=<g> repo=<r>) repos=<k> code_shards=<s> foreign_shards=<f> cross_edges=<c> kept_member_edges=<e> labels_stored=<l>`,
 //! plus `[merge] caveat: <text>` per caveat and, from [`persist_merge`],
 //! `[merge] wrote <dir> writer=<w> shards=<s> foreign=<f> members=<n>`.
+//! CA.9: `[timing] build repos=<k> resolve=<ms> post=<ms> finalize=<ms> total=<ms> slowest_pass=<name>:<ms>`
+//! once per merge (no `external_cells=`: a merge runs no external-cell
+//! stage), and `[timing] persist writer=<w> <ms> dir=<dir>` from
+//! [`persist_merge`].
 //!
 //! Module slot declared by L0.2: reached as `glia_engine::merge::<item>`,
 //! never flattened into the crate root.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::node_kind;
@@ -53,6 +58,7 @@ use glia_store::{
 pub use glia_store::ForeignShard;
 
 use crate::arch::repo_label_map;
+use crate::build::timing::{BuildTimes, persist_marker};
 use crate::persist::{
     LoadOutcome, default_layout_dir, layout_meta, load_layout, load_or_rebuild, write_self_ignore,
 };
@@ -238,6 +244,7 @@ fn is_recomputed(e: &Edge) -> bool {
 /// layouts built separately from one checkout identity, LB.1, would fuse
 /// silently otherwise), a bad or repeated member name.
 pub fn merge_layouts(members: &[MergeMember]) -> Result<MergeResult, String> {
+    let started = Instant::now();
     check_names(members)?;
     let mut loaded = Vec::with_capacity(members.len());
     for m in members {
@@ -307,7 +314,7 @@ pub fn merge_layouts(members: &[MergeMember]) -> Result<MergeResult, String> {
 
     let code_shards = graphs.len();
     let mut merged = MergedGraph::new(graphs);
-    run_code_passes(&mut merged);
+    let report = run_code_passes(&mut merged);
     let kept_member_edges = kept.len();
     merged.cross_edges.extend(kept);
     merged.sort_cross_edges();
@@ -328,6 +335,10 @@ pub fn merge_layouts(members: &[MergeMember]) -> Result<MergeResult, String> {
         foreign.len(),
         merged.cross_edges.len(),
     );
+    // CA.9: the merge's build line. A member layout is loaded, not walked or
+    // parsed (one rebuilt first prints its own lines), and its external cells
+    // are already in it, so the line has passes and a total only.
+    eprintln!("{}", BuildTimes::new(owner.len(), &report, None, started.elapsed()).marker());
     Ok(MergeResult {
         result: GenerateResult {
             merged,
@@ -442,6 +453,7 @@ fn caveats_for(members: &[MergeMember], loaded: &[Loaded]) -> Vec<String> {
 /// does not (a re-merge with fewer members), nothing else. `writer` names the
 /// caller in the marker and the error text.
 pub fn persist_merge(r: &MergeResult, dir: &Path, writer: &str) -> Result<(), String> {
+    let started = Instant::now();
     let fail = |e: &dyn std::fmt::Display| format!("{writer}: persist merge to {}: {e}", dir.display());
     std::fs::create_dir_all(dir).map_err(|e| fail(&e))?;
     write_self_ignore(dir).map_err(|e| fail(&e))?;
@@ -464,6 +476,7 @@ pub fn persist_merge(r: &MergeResult, dir: &Path, writer: &str) -> Result<(), St
         r.foreign.len(),
         r.members.len()
     );
+    eprintln!("{}", persist_marker(writer, started.elapsed(), dir));
     Ok(())
 }
 

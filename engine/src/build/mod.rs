@@ -10,6 +10,8 @@
 //! - [`rpc_needles`] — the build-wide proto service set and the gRPC
 //!   client / server needle passes.
 //! - [`lang_build`] — the deterministic per-language `build_*` dispatch.
+//! - [`timing`] — the per-phase timers' `[timing]` stderr lines (CA.9): one
+//!   per built repo, one per build, one per layout write. Stderr only.
 //!
 //! The build tail (cross-graph resolvers, the external edges, post-passes,
 //! evidence fill, the determinism sort) is the code domain's pass registry,
@@ -29,8 +31,10 @@ mod assemble;
 mod grafts;
 mod lang_build;
 mod rpc_needles;
+pub(crate) mod timing;
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use glia_code_domain::project_roots::ProjectRoot;
 use glia_code_domain::walk_gating::{RepoIdentity, repo_identity};
@@ -47,6 +51,7 @@ use crate::walk::{WalkResult, build_project_graph, build_region_graph, walk_sour
 use assemble::{RepoBuildCtx, build_graphs_for_repo};
 use lang_build::TsAliasSet;
 use rpc_needles::RpcContext;
+use timing::BuildTimes;
 
 /// One build's output. Outside this crate it comes from [`generate_one`] /
 /// [`generate_many`] and their variants, never from a struct literal, so a new
@@ -187,6 +192,7 @@ fn generate_one_inner(
     mut cache: Option<&mut ParseCache>,
     opts: &BuildOptions,
 ) -> Result<GenerateResult, String> {
+    let started = Instant::now();
     let root = PathBuf::from(repo_path);
     if !root.is_dir() {
         return Err(format!("not a directory: {repo_path}"));
@@ -200,7 +206,9 @@ fn generate_one_inner(
     let repo_roots = std::collections::BTreeMap::from([(repo.0, identity_root.to_string())]);
     // Project roots (A8.4) become PROJECT nodes below (A8.5); each root's
     // go.mod joins the repo's Go module map (A8.7 / LA.13).
+    let walk_started = Instant::now();
     let (files, regions, md, roots) = walk_source_files(&root);
+    let walk = walk_started.elapsed();
     // External inputs (LF.1a): `.glia/overlay.toml` loaded once, before any
     // graph is built.
     let inputs = vec![repo_inputs(repo, root.clone(), repo_path.to_string())];
@@ -225,7 +233,8 @@ fn generate_one_inner(
         config: inputs.first().and_then(|i| i.config.as_ref()),
         opts,
     };
-    let (mut graphs, mut parse_errors) = build_graphs_for_repo(&files, cache, &ctx);
+    let (mut graphs, mut parse_errors, mut times) = build_graphs_for_repo(&files, cache, &ctx);
+    times.walk = walk;
     // Slot order is regions, then projects, then docs. It fixes the shard index,
     // so generate_many_inner must use the same order.
     if !regions.is_empty() {
@@ -239,14 +248,16 @@ fn generate_one_inner(
     if let Some(docs) = build_docs_graph(&doc_records, repo) {
         graphs.push(docs);
     }
+    eprintln!("{}", times.repo_marker(repo_path));
     let mut merged = MergedGraph::new(graphs);
     let ctx = CodeBuildCtx::new(inputs, opts);
-    run_code_passes_with(&mut merged, &ctx);
-    apply_external_cells(&mut merged, &ctx.inputs);
+    let report = run_code_passes_with(&mut merged, &ctx);
+    let external = timed(|| apply_external_cells(&mut merged, &ctx.inputs));
     let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
     let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
         + merged.cross_edges.len();
     parse_errors.shrink_to_fit();
+    eprintln!("{}", BuildTimes::new(1, &report, Some(external), started.elapsed()).marker());
     Ok(GenerateResult {
         merged,
         total_nodes,
@@ -287,22 +298,26 @@ pub fn generate_many_incremental(repo_paths: &[String]) -> Result<GenerateResult
 }
 
 /// One walked input of a multi-repo build: the path as given, its root, its
-/// walk, and its identity (disambiguated before phase 2 mints any RepoId).
-type Walked<'a> = (&'a String, PathBuf, WalkResult, RepoIdentity);
+/// walk, its identity (disambiguated before phase 2 mints any RepoId) and
+/// what the walk took (CA.9's `walk=`).
+type Walked<'a> = (&'a String, PathBuf, WalkResult, RepoIdentity, Duration);
 
 fn generate_many_inner(
     repo_paths: &[String],
     incremental: bool,
     opts: &BuildOptions,
 ) -> Result<GenerateResult, String> {
+    let started = Instant::now();
     let Assembled { mut merged, parse_errors, label_inputs, repo_roots, inputs } =
         assemble_many_with(repo_paths, incremental, opts)?;
     let ctx = CodeBuildCtx::new(inputs, opts);
-    run_code_passes_with(&mut merged, &ctx);
-    apply_external_cells(&mut merged, &ctx.inputs);
+    let report = run_code_passes_with(&mut merged, &ctx);
+    let external = timed(|| apply_external_cells(&mut merged, &ctx.inputs));
     let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
     let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
         + merged.cross_edges.len();
+    let times = BuildTimes::new(label_inputs.len(), &report, Some(external), started.elapsed());
+    eprintln!("{}", times.marker());
     Ok(GenerateResult {
         merged,
         total_nodes,
@@ -361,20 +376,23 @@ pub(crate) fn assemble_many_with(
     // reads its files on the same pool); the results come back in argument
     // order and the proto service set is folded from them in that order. Walk
     // markers of different repos may interleave; each repo's lines keep their
-    // order.
+    // order. CA.9: each walk is timed inside its own closure, so a repo's
+    // `walk=` is its walk alone even while the walks overlap.
     let (walks, _threads) = crate::parallel::par_map_ordered(repo_paths, |path| {
         let root = PathBuf::from(path);
         if !root.is_dir() {
             return Err(format!("not a directory: {path}"));
         }
+        let started = Instant::now();
         let walk = walk_source_files(&root);
+        let took = started.elapsed();
         let ident = repo_identity(&root);
-        Ok((root, walk, ident))
+        Ok((root, walk, ident, took))
     });
     let mut walked: Vec<Result<Walked<'_>, String>> = repo_paths
         .iter()
         .zip(walks)
-        .map(|(path, w)| w.map(|(root, walk, ident)| (path, root, walk, ident)))
+        .map(|(path, w)| w.map(|(root, walk, ident, took)| (path, root, walk, ident, took)))
         .collect();
     let mut rpc = RpcContext::default();
     for w in walked.iter().flatten() {
@@ -391,7 +409,7 @@ pub(crate) fn assemble_many_with(
 
     // Phase 2 — build each repo against the union.
     for entry in walked {
-        let (path, root, (files, regions, md, roots), ident) = match entry {
+        let (path, root, (files, regions, md, roots), ident, walk) = match entry {
             Ok(w) => w,
             Err(e) => {
                 all_errors.push(e);
@@ -425,7 +443,8 @@ pub(crate) fn assemble_many_with(
             config: input.config.as_ref(),
             opts,
         };
-        let (graphs, parse_errors) = build_graphs_for_repo(&files, cache.as_mut(), &ctx);
+        let (graphs, parse_errors, mut times) = build_graphs_for_repo(&files, cache.as_mut(), &ctx);
+        times.walk = walk;
         inputs.push(input);
         if let Some(c) = cache.as_ref()
             && let Err(e) = c.save(path)
@@ -446,6 +465,7 @@ pub(crate) fn assemble_many_with(
             all_graphs.push(docs);
         }
         all_errors.extend(parse_errors);
+        eprintln!("{}", times.repo_marker(path));
     }
     if all_graphs.is_empty() {
         return Err(format!(
@@ -461,6 +481,13 @@ pub(crate) fn assemble_many_with(
         repo_roots,
         inputs,
     })
+}
+
+/// Run `f` and return what it took (CA.9).
+fn timed(f: impl FnOnce()) -> Duration {
+    let started = Instant::now();
+    f();
+    started.elapsed()
 }
 
 /// LB.1 fired_on marker, one line per repo per build:

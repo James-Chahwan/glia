@@ -53,7 +53,10 @@
 //! and `[gmap] removed <k> orphan shard(s) from <dir>` when they apply, and
 //! `[gmap] loaded <dir>: repos=<r> labeled=<l> parse_errors=<p> properties=<q> pass_undo=<u>`
 //! from [`load_layout`], and `[gmap] rebuilt <dir> (<reason>)` from
-//! [`load_or_rebuild`] each time it rebuilds (written or not).
+//! [`load_or_rebuild`] each time it rebuilds (written or not). CA.9: after a
+//! write, `[timing] persist writer=<w> <ms> dir=<dir>` from [`persist_layout`]
+//! and from [`persist_graph`] (its time includes the legacy sweep and the
+//! orphan cleanup).
 //!
 //! Module slot declared by L0.2: reached as `glia_engine::persist::<item>`,
 //! never flattened into the crate root.
@@ -61,7 +64,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use glia_graph::MergedGraph;
 use glia_store::{
@@ -70,6 +73,7 @@ use glia_store::{
     read_manifest_lenient, read_merged_sharded_meta, write_merged_sharded_meta,
 };
 
+use crate::build::timing::persist_marker;
 use crate::{BUILD_STAMP, GenerateResult, generate_many, generate_one, generate_one_incremental};
 
 /// Why [`load_layout`] or [`load_or_rebuild`] could not serve a layout.
@@ -160,7 +164,10 @@ pub fn persist_layout(
     dir: &Path,
     writer: &str,
 ) -> Result<(), String> {
-    write_layout(merged, meta, dir, writer).map(|_| ())
+    let started = Instant::now();
+    write_layout(merged, meta, dir, writer)?;
+    eprintln!("{}", persist_marker(writer, started.elapsed(), dir));
+    Ok(())
 }
 
 /// [`persist_layout`], handing back the manifest the store wrote.
@@ -211,6 +218,7 @@ pub fn persist_graph(
     dir: &Path,
     writer: &str,
 ) -> Result<(), String> {
+    let started = Instant::now();
     let fail = |e: &dyn fmt::Display| format!("{writer}: persist to {}: {e}", dir.display());
     std::fs::create_dir_all(dir).map_err(|e| fail(&e))?;
     // First, so a layout interrupted mid-write is already invisible to git.
@@ -261,6 +269,7 @@ pub fn persist_graph(
         merged.cross_edges.len(),
     );
     remove_orphan_shards(dir, &live);
+    eprintln!("{}", persist_marker(writer, started.elapsed(), dir));
     Ok(())
 }
 

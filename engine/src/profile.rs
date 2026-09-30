@@ -42,7 +42,7 @@
 //! GRAPHQL_RESOLVER, CRON_JOB), and [`entry_kinds`] lists its kinds for the
 //! consumers that kept their own copy.
 
-use glia_activation::passes::{PassRegistry, PassSpec, Stage};
+use glia_activation::passes::{PassRegistry, PassReport, PassSpec, Stage};
 use glia_activation::profile::DomainProfile;
 use glia_code_domain::{cell_type, evidence, node_kind};
 use glia_core::NodeKindId;
@@ -273,15 +273,19 @@ pub fn entry_kinds() -> Vec<(NodeKindId, &'static str)> {
 ///   `[passes] domain=code resolve=<r> post=<p> finalize=<f>`
 /// (grep token `[passes] domain=code`), then LC.2's
 /// `[edge-cells] intra=<n> cross=<c> with_cells=<k>`.
-pub(crate) fn run_code_passes_with(merged: &mut MergedGraph, ctx: &CodeBuildCtx) {
-    CODE_PROFILE.run_passes(merged, ctx);
+///
+/// Returns the registry's [`PassReport`]: what ran and what each pass and
+/// stage took, which the caller's `[timing] build` line reads (CA.9).
+pub(crate) fn run_code_passes_with(merged: &mut MergedGraph, ctx: &CodeBuildCtx) -> PassReport {
+    let report = CODE_PROFILE.run_passes(merged, ctx);
     passes::edge_cells_marker(merged);
+    report
 }
 
 /// [`run_code_passes_with`] and no external inputs: the tail of a layout
 /// merge, whose members' external edges are already in their layouts.
-pub(crate) fn run_code_passes(merged: &mut MergedGraph) {
-    run_code_passes_with(merged, &CodeBuildCtx::empty());
+pub(crate) fn run_code_passes(merged: &mut MergedGraph) -> PassReport {
+    run_code_passes_with(merged, &CodeBuildCtx::empty())
 }
 
 #[cfg(test)]

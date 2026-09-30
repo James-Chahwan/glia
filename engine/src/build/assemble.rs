@@ -9,10 +9,13 @@ use glia_code_domain::{cell_type, di_stats, node_kind};
 use glia_code_extractors::constants::ConstTable;
 use glia_core::RepoId;
 
+use std::time::Instant;
+
 use super::BuildOptions;
 use super::grafts;
 use super::lang_build::{self, TsAliasSet};
 use super::rpc_needles::RpcContext;
+use super::timing::PhaseTimes;
 use crate::cache::ParseCache;
 use crate::extract::{GoModules, detect_language};
 use crate::route::parse_repo_files;
@@ -132,11 +135,16 @@ pub(super) struct RepoBuildCtx<'a> {
 
 /// Parse, graft and build one repo's graphs from its walked `files`, reusing
 /// `cache` when given, under the per-repo context `ctx` ([`RepoBuildCtx`]).
+///
+/// Also returns what its phases took (CA.9): `parse`, `const_scan` (the
+/// table, its `[const]` line and the LF.2d pins), `grafts` (the Cargo-package
+/// read and `grafts::apply_post_cache`) and `language_build`. `walk` is left
+/// zero for the caller, which ran the walk, to fill.
 pub(super) fn build_graphs_for_repo(
     files: &[(String, String)],
     cache: Option<&mut ParseCache>,
     ctx: &RepoBuildCtx<'_>,
-) -> (Vec<glia_graph::RepoGraph>, Vec<String>) {
+) -> (Vec<glia_graph::RepoGraph>, Vec<String>, PhaseTimes) {
     let RepoBuildCtx { repo, repo_label, go, ts_aliases, rpc, roots, config, opts } = *ctx;
     // Keep caught per-file panics off stderr: the default hook would print
     // (with a backtrace) for every bad file even though it becomes a
@@ -149,12 +157,16 @@ pub(super) fn build_graphs_for_repo(
     // A7.0: shape counters describe only the detectors that run in THIS build.
     di_stats::reset();
 
+    let mut times = PhaseTimes::default();
+    let started = Instant::now();
     let (mut parses_by_lang, mut parse_errors) =
         parse_repo_files(files, repo, go, cache, repo_label);
+    times.parse = started.elapsed();
 
     // A11.1 fired_on marker, once per repo. Post-cache passes that read the
     // table (A11.2 endpoint fold, queue-topic const fold) take `&const_table`
     // and live in `grafts::apply_post_cache`, beside `apply_rpc_needles`.
+    let started = Instant::now();
     let (mut const_table, const_files, threads) = build_const_table(files, &mut parse_errors);
     if !const_table.is_empty() {
         eprintln!(
@@ -167,8 +179,10 @@ pub(super) fn build_graphs_for_repo(
     // LF.2d: overlay constants, after every source binding and after the
     // `[const]` line (which keeps describing the source alone).
     pin_overlay_constants(&mut const_table, config, opts, repo_label);
+    times.const_scan = started.elapsed();
     // LA.1a / LA.1b: the Cargo packages, read by the A16.4 IMPORTS filter
     // (a sibling crate is not a dependency) and by `build_rust`.
+    let started = Instant::now();
     let rust_crates = lang_build::rust_crates(files, roots);
     // LF.2e (http), A11.2, LA.6d, LA.4, LF.2e (queue), A5.2 / A5.3, A5.8,
     // LB.4a / LB.8, A16.4: the post-cache grafts, in that order. The overlay
@@ -186,7 +200,9 @@ pub(super) fn build_graphs_for_repo(
         &mut parse_errors,
         repo_label,
     );
+    times.grafts = started.elapsed();
 
+    let started = Instant::now();
     let lang_build::LanguageGraphs {
         graphs,
         di_refs,
@@ -199,6 +215,7 @@ pub(super) fn build_graphs_for_repo(
         ts_aliases,
         &mut parse_errors,
     );
+    times.language_build = started.elapsed();
 
     // A7.0 fired_on marker, once per repo: `[di] injects refs: … repo=<label>`.
     di_stats::flush_marker(&di_refs, repo_label);
@@ -216,7 +233,7 @@ pub(super) fn build_graphs_for_repo(
         rpc_added.files
     );
 
-    (graphs, parse_errors)
+    (graphs, parse_errors, times)
 }
 
 /// A12.1 fired_on marker, once per repo that holds a queue node:
