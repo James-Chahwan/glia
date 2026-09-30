@@ -32,6 +32,7 @@ pub fn parse_file(
     let mut acc = Acc {
         eloquent: Eloquent::prescan(root, src),
         module_qname: module_qname.to_string(),
+        own_types: declared_types(root, src),
         ..Acc::default()
     };
 
@@ -76,6 +77,12 @@ pub fn parse_file(
         eprintln!(
             "[php-use] {} braced-namespace uses bound to the file module {module_qname} file={file_rel_path}",
             acc.scoped_uses
+        );
+    }
+    if acc.shadowed_uses > 0 && bind_debug_enabled() {
+        eprintln!(
+            "[php-use] {} use clauses shadowed by the file's own type name skipped file={file_rel_path}",
+            acc.shadowed_uses
         );
     }
 
@@ -162,6 +169,11 @@ struct Acc {
     /// LA.40b: `use` statements found inside a braced `namespace X { }` body
     /// (bound to the file module, not the namespace) — the `[php-use]` count.
     scoped_uses: usize,
+    /// CB.7: the types this file declares ([`declared_types`]), read up front.
+    own_types: Vec<OwnType>,
+    /// CB.7: class `use` clauses dropped because they name one of `own_types`
+    /// from another namespace — the `[php-use] ... shadowed` count.
+    shadowed_uses: usize,
     /// ENDPOINT ids already minted in THIS file — `push_client_endpoint` dedups
     /// the node through it while still pushing one CALLS edge per call site.
     endpoint_seen: std::collections::HashSet<NodeId>,
@@ -1306,33 +1318,229 @@ fn extract_laravel_handler(after_path: &str) -> Option<CallQualifier> {
 /// nodes only: the namespace PACKAGE would drop the statement (and every call
 /// binding through it). Two blocks of one file binding the same name: the later
 /// `use` wins, in source order (LA.40b).
+///
+/// A class clause whose short name is a type this file declares under ANOTHER
+/// namespace records nothing (CB.7): PHP resolves the clause to its full path,
+/// so the file's own type is never the target, yet the graph's unique-short-name
+/// fallback would bind exactly it. Laravel's `use Illuminate\Foundation\Auth\User
+/// as Authenticatable; class User extends Authenticatable` is the shape: the
+/// alias exists because the names collide. An in-repo target of that name
+/// cannot bind through the fallback either (two types share the name).
 fn collect_use(node: TsNode, src: &[u8], acc: &mut Acc) {
-    let text = text_of(node, src).trim().to_string();
-    let path = text.trim_start_matches("use ").trim_end_matches(';').trim();
+    let imports = use_imports(node, src, &acc.module_qname, line_at(node), &acc.own_types);
+    let recordable = use_clauses(node, src)
+        .iter()
+        .filter(|c| c.kind != UseKind::Const)
+        .count();
+    acc.shadowed_uses += recordable.saturating_sub(imports.len());
+    acc.imports.extend(imports);
+}
 
-    if let Some(last_bs) = path.rfind('\\') {
-        let module_part = &path[..last_bs];
-        let name = &path[last_bs + 1..];
-        acc.imports.push(ImportStmt {
-            from_module: acc.module_qname.clone(),
-            target: ImportTarget::Symbol {
-                module: module_part.replace('\\', "::"),
-                name: name.to_string(),
-                alias: None,
-                level: 0,
-            },
-            line: line_at(node),
-        });
-    } else {
-        acc.imports.push(ImportStmt {
-            from_module: acc.module_qname.clone(),
-            target: ImportTarget::Module {
-                path: path.replace('\\', "::"),
-                alias: None,
-            },
-            line: line_at(node),
+/// The types (class / interface / trait / enum) a file declares, each with
+/// its declared PHP namespace, `::`-joined (not the LB.7b qname scope): the
+/// semicolon form scopes every later sibling, the braced form its body.
+fn declared_types(root: TsNode, src: &[u8]) -> Vec<OwnType> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        if child.kind() != "namespace_definition" {
+            push_declared_type(child, src, &current, &mut out);
+            continue;
+        }
+        let namespace = child
+            .child_by_field_name("name")
+            .map(|n| {
+                text_of(n, src)
+                    .trim()
+                    .trim_start_matches('\\')
+                    .replace('\\', "::")
+            })
+            .unwrap_or_default();
+        match child.child_by_field_name("body") {
+            Some(body) => {
+                let mut bc = body.walk();
+                for item in body.named_children(&mut bc) {
+                    push_declared_type(item, src, &namespace, &mut out);
+                }
+            }
+            None => current = namespace,
+        }
+    }
+    out
+}
+
+fn push_declared_type(item: TsNode, src: &[u8], namespace: &str, out: &mut Vec<OwnType>) {
+    if !matches!(
+        item.kind(),
+        "class_declaration" | "interface_declaration" | "trait_declaration" | "enum_declaration"
+    ) {
+        return;
+    }
+    if let Some(name) = item.child_by_field_name("name") {
+        out.push(OwnType {
+            namespace: namespace.to_string(),
+            name: text_of(name, src).trim().to_string(),
         });
     }
+}
+
+/// One type a file declares: its `::`-joined PHP namespace and short name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnType {
+    namespace: String,
+    name: String,
+}
+
+/// True when a class clause's `namespace` / `name` is not, but shares its short
+/// name with, a type in `own` (PHP class names compare case-insensitively).
+fn shadows_own_type(namespace: &str, name: &str, own: &[OwnType]) -> bool {
+    own.iter()
+        .any(|t| t.name.eq_ignore_ascii_case(name) && !t.namespace.eq_ignore_ascii_case(namespace))
+}
+
+/// What one `use` clause imports: `use Foo`, `use function foo`, `use const FOO`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UseKind {
+    Class,
+    Function,
+    Const,
+}
+
+impl UseKind {
+    /// The `type` field of a declaration or clause (`function` / `const`), if any.
+    fn of(node: TsNode) -> Option<Self> {
+        match node.child_by_field_name("type")?.kind() {
+            "function" => Some(Self::Function),
+            "const" => Some(Self::Const),
+            _ => None,
+        }
+    }
+}
+
+/// One clause of a `namespace_use_declaration`, read from the AST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UseClause {
+    /// Fully qualified, `\`-separated, leading `\` stripped: `App\Billing\Ledger`.
+    path: String,
+    /// The `as X` name, if any.
+    alias: Option<String>,
+    kind: UseKind,
+}
+
+/// Every clause one `use` statement introduces, in source order — the ONE
+/// reader both the import list ([`use_imports`]) and the Eloquent alias table
+/// ([`PhpScope::add_uses`]) go through, so the two can never disagree.
+///
+/// Covers `use A\B, C\D as E;` (several clauses), `use A\{B, C as D};` (a
+/// group: the sibling `namespace_name` prefixes each clause), `use function` /
+/// `use const` (the declaration's `type` applies to every clause unless a clause
+/// carries its own, as in a mixed group `use A\{function f, const C, D};`) and a
+/// leading `\`, which is stripped (a `use` path is always absolute).
+fn use_clauses(decl: TsNode, src: &[u8]) -> Vec<UseClause> {
+    // A declaration the grammar could not parse (tree-sitter-php 0.24 has no
+    // rule for a group behind a leading `\`: `use \A\{B};`) holds ERROR
+    // nodes, and its recovered clauses name a fragment (`\A`), not the import.
+    if decl.has_error() {
+        return Vec::new();
+    }
+    let default_kind = UseKind::of(decl).unwrap_or(UseKind::Class);
+    let mut cursor = decl.walk();
+    let kids: Vec<TsNode> = decl.named_children(&mut cursor).collect();
+    let prefix = kids
+        .iter()
+        .find(|k| k.kind() == "namespace_name")
+        .map(|p| text_of(*p, src).trim().trim_start_matches('\\').to_string());
+    let mut out = Vec::new();
+    for kid in &kids {
+        match kid.kind() {
+            "namespace_use_clause" => out.extend(use_clause(*kid, src, None, default_kind)),
+            "namespace_use_group" => {
+                let mut gc = kid.walk();
+                for clause in kid.named_children(&mut gc) {
+                    if clause.kind() == "namespace_use_clause" {
+                        out.extend(use_clause(clause, src, prefix.as_deref(), default_kind));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// One `namespace_use_clause`: its target name (never the alias), joined onto
+/// the group `prefix` when it sits in a group.
+fn use_clause(
+    clause: TsNode,
+    src: &[u8],
+    prefix: Option<&str>,
+    default_kind: UseKind,
+) -> Option<UseClause> {
+    let kind = UseKind::of(clause).unwrap_or(default_kind);
+    let alias = clause.child_by_field_name("alias");
+    let alias_id = alias.map(|a| a.id());
+    let mut cursor = clause.walk();
+    let target = clause
+        .named_children(&mut cursor)
+        .find(|c| matches!(c.kind(), "name" | "qualified_name") && Some(c.id()) != alias_id)?;
+    let written = text_of(target, src).trim().trim_start_matches('\\');
+    let path = match prefix {
+        Some(p) if !p.is_empty() => format!("{p}\\{written}"),
+        _ => written.to_string(),
+    };
+    if path.is_empty() {
+        return None;
+    }
+    let alias = alias
+        .map(|a| text_of(a, src).trim().to_string())
+        .filter(|a| !a.is_empty());
+    Some(UseClause { path, alias, kind })
+}
+
+/// The imports one `use` declaration records: one per class / function clause,
+/// from `from_module` (the FILE module, LA.40b), each on the statement's row.
+/// `App\Billing\Ledger as Book` is `Symbol { App::Billing, Ledger, Some(Book) }`,
+/// so the graph binds `Book`; a path with no namespace (`use Foo;`) is a
+/// `Module`. A `use const` clause records nothing: no node kind holds a PHP
+/// constant, and neither does a class clause that [`shadows_own_type`] of
+/// `own_types` (the file's [`declared_types`]).
+fn use_imports(
+    decl: TsNode,
+    src: &[u8],
+    from_module: &str,
+    line: u32,
+    own_types: &[OwnType],
+) -> Vec<ImportStmt> {
+    use_clauses(decl, src)
+        .into_iter()
+        .filter(|c| c.kind != UseKind::Const)
+        .filter_map(|c| {
+            let (namespace, name) = c.path.rsplit_once('\\').unwrap_or(("", &c.path));
+            let namespace = namespace.replace('\\', "::");
+            if c.kind == UseKind::Class && shadows_own_type(&namespace, name, own_types) {
+                return None;
+            }
+            let target = if namespace.is_empty() {
+                ImportTarget::Module {
+                    path: c.path.clone(),
+                    alias: c.alias,
+                }
+            } else {
+                ImportTarget::Symbol {
+                    module: namespace,
+                    name: name.to_string(),
+                    alias: c.alias,
+                    level: 0,
+                }
+            };
+            Some(ImportStmt {
+                from_module: from_module.to_string(),
+                target,
+                line,
+            })
+        })
+        .collect()
 }
 
 /// `GLIA_PHP_DEBUG=1` turns on the `[php-local-bind]` marker, read once. Off by
@@ -1658,60 +1866,27 @@ impl PhpScope {
         }
     }
 
-    /// Record every class alias one `namespace_use_declaration` introduces.
-    /// Function / const imports (`use function …`) name no class and are skipped.
+    /// Record every class alias one `namespace_use_declaration` introduces,
+    /// read through the shared [`use_clauses`]. Function / const imports
+    /// (`use function …`, a `const` clause of a mixed group) name no class and
+    /// are skipped.
     fn add_uses(&mut self, decl: TsNode, src: &[u8]) {
-        if decl.child_by_field_name("type").is_some() {
-            return;
-        }
-        let mut cursor = decl.walk();
-        let kids: Vec<TsNode> = decl.named_children(&mut cursor).collect();
-        // Group form `use App\Models\{User, Post as P};` puts the shared prefix
-        // in a `namespace_name` beside the `namespace_use_group` body.
-        let prefix = kids
-            .iter()
-            .find(|k| k.kind() == "namespace_name")
-            .map(|p| text_of(*p, src).trim().trim_start_matches('\\').to_string());
-        for kid in &kids {
-            match kid.kind() {
-                "namespace_use_clause" => self.add_clause(*kid, src, None),
-                "namespace_use_group" => {
-                    let mut gc = kid.walk();
-                    for clause in kid.named_children(&mut gc) {
-                        if clause.kind() == "namespace_use_clause" {
-                            self.add_clause(clause, src, prefix.as_deref());
-                        }
-                    }
-                }
-                _ => {}
+        for clause in use_clauses(decl, src) {
+            if clause.kind != UseKind::Class {
+                continue;
             }
-        }
-    }
-
-    fn add_clause(&mut self, clause: TsNode, src: &[u8], prefix: Option<&str>) {
-        if clause.child_by_field_name("type").is_some() {
-            return;
-        }
-        let alias = clause.child_by_field_name("alias");
-        let alias_id = alias.map(|a| a.id());
-        let mut cursor = clause.walk();
-        let Some(target) = clause
-            .named_children(&mut cursor)
-            .find(|c| matches!(c.kind(), "name" | "qualified_name") && Some(c.id()) != alias_id)
-        else {
-            return;
-        };
-        let path = text_of(target, src).trim().trim_start_matches('\\');
-        let fqcn = match prefix {
-            Some(p) if !p.is_empty() => format!("{p}\\{path}"),
-            _ => path.to_string(),
-        };
-        let key = match alias {
-            Some(a) => text_of(a, src).trim().to_string(),
-            None => fqcn.rsplit('\\').next().unwrap_or(&fqcn).to_string(),
-        };
-        if !key.is_empty() && !fqcn.is_empty() {
-            self.uses.insert(key.to_ascii_lowercase(), fqcn);
+            let key = match clause.alias {
+                Some(a) => a,
+                None => clause
+                    .path
+                    .rsplit('\\')
+                    .next()
+                    .unwrap_or(&clause.path)
+                    .to_string(),
+            };
+            if !key.is_empty() {
+                self.uses.insert(key.to_ascii_lowercase(), clause.path);
+            }
         }
     }
 }
@@ -2597,6 +2772,195 @@ use Illuminate\Http\Request;
             "statement-form use belongs to the file module: {:?}",
             fp.imports
         );
+    }
+
+    /// The import targets of one PHP file, in source order (CB.7).
+    fn use_targets(source: &str) -> Vec<ImportTarget> {
+        let fp = parse_file(
+            source,
+            "src/Orders/OrderService.php",
+            "src::Orders::OrderService",
+            repo(),
+        )
+        .unwrap();
+        assert!(
+            fp.imports
+                .iter()
+                .all(|i| i.from_module == "src::Orders::OrderService"),
+            "{:?}",
+            fp.imports
+        );
+        fp.imports.into_iter().map(|i| i.target).collect()
+    }
+
+    fn sym(module: &str, name: &str, alias: Option<&str>) -> ImportTarget {
+        ImportTarget::Symbol {
+            module: module.to_string(),
+            name: name.to_string(),
+            alias: alias.map(str::to_string),
+            level: 0,
+        }
+    }
+
+    /// CB.7: a grouped `use A\{B, C as D};` is one import per clause, each
+    /// prefixed with the group's namespace, on the statement's row.
+    #[test]
+    fn grouped_use_yields_one_import_per_clause() {
+        let source =
+            "<?php\nnamespace App\\Orders;\n\nuse App\\Billing\\{Invoicer, Ledger as Book};\n";
+        let fp = parse_file(
+            source,
+            "src/Orders/OrderService.php",
+            "src::Orders::OrderService",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            fp.imports
+                .iter()
+                .map(|i| i.target.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                sym("App::Billing", "Invoicer", None),
+                sym("App::Billing", "Ledger", Some("Book")),
+            ]
+        );
+        assert!(fp.imports.iter().all(|i| i.line == 3), "{:?}", fp.imports);
+    }
+
+    /// CB.7: `as Inv` is the alias, never part of the imported name.
+    #[test]
+    fn aliased_use_binds_the_alias() {
+        let source = "<?php\nuse App\\Billing\\Invoicer as Inv;\n";
+        assert_eq!(
+            use_targets(source),
+            vec![sym("App::Billing", "Invoicer", Some("Inv"))]
+        );
+    }
+
+    /// CB.7: `use function` imports the function by name; `function` never
+    /// leaks into the module path.
+    #[test]
+    fn use_function_is_a_symbol_import() {
+        let source = "<?php\nuse function App\\Util\\money_format;\nuse function App\\Util\\{slug, clamp as bound};\n";
+        assert_eq!(
+            use_targets(source),
+            vec![
+                sym("App::Util", "money_format", None),
+                sym("App::Util", "slug", None),
+                sym("App::Util", "clamp", Some("bound")),
+            ]
+        );
+    }
+
+    /// CB.7: a constant has no node kind, so `use const` records nothing — also
+    /// a `const` clause inside a mixed group, whose `function` / class clauses
+    /// still import. The Eloquent alias table reads the same clauses and keeps
+    /// only the class one.
+    #[test]
+    fn use_const_is_skipped() {
+        assert_eq!(
+            use_targets("<?php\nuse const App\\Config\\LIMIT;\n"),
+            vec![]
+        );
+        let mixed = "<?php\nuse App\\Util\\{function money_format, const LIMIT, Helper};\n";
+        assert_eq!(
+            use_targets(mixed),
+            vec![
+                sym("App::Util", "money_format", None),
+                sym("App::Util", "Helper", None),
+            ]
+        );
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_php::LANGUAGE_PHP.into())
+            .unwrap();
+        let tree = parser.parse(mixed, None).unwrap();
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        let decl = root
+            .named_children(&mut cursor)
+            .find(|n| n.kind() == "namespace_use_declaration")
+            .unwrap();
+        let mut scope = PhpScope::new(0, usize::MAX, String::new());
+        scope.add_uses(decl, mixed.as_bytes());
+        assert_eq!(
+            scope.uses,
+            HashMap::from([("helper".to_string(), "App\\Util\\Helper".to_string())])
+        );
+    }
+
+    /// CB.7: a leading `\` is stripped — a `use` path is always absolute.
+    /// tree-sitter-php 0.24 cannot parse a group behind a leading `\`
+    /// (`use \App\Billing\{Ledger};` is an ERROR node): that statement
+    /// records the right import or nothing, never the recovered `\App`.
+    #[test]
+    fn leading_backslash_is_stripped() {
+        let source = "<?php\nuse \\App\\Models\\Customer;\nuse \\A\\B, \\C\\D as E;\n";
+        assert_eq!(
+            use_targets(source),
+            vec![
+                sym("App::Models", "Customer", None),
+                sym("A", "B", None),
+                sym("C", "D", Some("E")),
+            ]
+        );
+        let group = use_targets("<?php\nuse \\App\\Billing\\{Ledger};\n");
+        assert!(
+            group.is_empty() || group == vec![sym("App::Billing", "Ledger", None)],
+            "{group:?}"
+        );
+    }
+
+    /// CB.7: `use A\B, C\D as E;` is two imports; a clause with no namespace
+    /// stays a Module import.
+    #[test]
+    fn several_clauses_per_statement() {
+        let source = "<?php\nuse A\\B, C\\D as E, Vendor;\n";
+        assert_eq!(
+            use_targets(source),
+            vec![
+                sym("A", "B", None),
+                sym("C", "D", Some("E")),
+                ImportTarget::Module {
+                    path: "Vendor".to_string(),
+                    alias: None,
+                },
+            ]
+        );
+    }
+
+    /// CB.7: a class clause sharing its short name with a type the file
+    /// declares under another namespace names a different class, so it records
+    /// nothing — the graph's unique-name fallback would bind the file's own
+    /// type. The same name from the type's own namespace, and a `use function`
+    /// of that name, still record.
+    #[test]
+    fn use_of_the_files_own_type_name_from_another_namespace_is_skipped() {
+        let source = r#"<?php
+namespace App\Models;
+
+use Illuminate\Foundation\Auth\User as Authenticatable;
+use App\Models\User as Me;
+use function Vendor\Util\user;
+
+class User extends Authenticatable {}
+"#;
+        assert_eq!(
+            use_targets(source),
+            vec![
+                sym("App::Models", "User", Some("Me")),
+                sym("Vendor::Util", "user", None),
+            ]
+        );
+        let braced = r#"<?php
+namespace A { class Kernel {} }
+namespace B {
+    use A\Kernel;
+    use C\Kernel as CKernel;
+}
+"#;
+        assert_eq!(use_targets(braced), vec![sym("A", "Kernel", None)]);
     }
 
     /// LA.40b: a `use` inside a braced namespace body is recorded with the FILE

@@ -1,0 +1,48 @@
+{
+  "framework": "php-use-forms",
+  "language": "php",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-N2: parsers/code/php/src/lib.rs collect_use splits the declaration text at the last backslash, so a grouped `use App\\Billing\\{Invoicer, Ledger as Book};` becomes one Symbol named `{Invoicer, Ledger as Book}`, `use function App\\Util\\money_format;` keeps `function ` in its module path, and a leading `\\` survives into the module name. Measured on HEAD 2170ff8.",
+  "expect_edges": [
+    {
+      "from": "src::Orders::OrderService",
+      "to": "src::Billing::Invoicer",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "src::Orders::OrderService",
+      "to": "src::Billing::Ledger",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "src::Orders::OrderService",
+      "to": "src::Models::Customer",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "src::Orders::OrderService::place",
+      "to": "src::Billing::Invoicer::issue",
+      "category": "CALLS"
+    },
+    {
+      "from": "src::Orders::OrderService::place",
+      "to": "src::Billing::Ledger::post",
+      "category": "CALLS",
+      "note": "through the `as Book` alias"
+    },
+    {
+      "from": "src::Orders::OrderService::place",
+      "to": "src::Models::Customer::find",
+      "category": "CALLS",
+      "note": "leading backslash stripped"
+    },
+    {
+      "from": "src::Orders::OrderService::place",
+      "to": "money_format",
+      "category": "CALLS",
+      "note": "`use function` binds the function"
+    }
+  ]
+}
