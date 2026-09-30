@@ -20,6 +20,12 @@
 //! `[docs] sync source=mediawiki ...` line. Pre-fix (HEAD c6726b5):
 //! `glia docs sync /tmp --source mediawiki` -> `error: invalid value
 //! 'mediawiki' for '--source <SOURCE>'`, exit 2.
+//!
+//! CE.4e adds `--source notion` (`notion_sync_then_build`), a Notion API
+//! (version 2025-09-03, data sources) played by the same stub; its fired_on
+//! marker is the `[docs] sync source=notion ...` line. Pre-fix (HEAD 83b9eaf):
+//! `glia docs sync /tmp --source notion` -> `error: invalid value 'notion'
+//! for '--source <SOURCE>'`, exit 2.
 
 // The acceptance wiki holds a symlink out of the checkout.
 #![cfg(unix)]
@@ -56,6 +62,7 @@ fn glia(cwd: &Path, args: &[&str]) -> Output {
         .env_remove("CONFLUENCE_EMAIL")
         .env_remove("CONFLUENCE_TOKEN")
         .env_remove("MEDIAWIKI_TOKEN")
+        .env_remove("NOTION_TOKEN")
         .env("GLIA_NO_PERSIST", "1")
         .output()
         .expect("glia runs");
@@ -248,7 +255,7 @@ fn source_flags_do_not_cross() {
     let scratch = Scratch::new("cross");
     let (repo, wiki) = repo_and_wiki(&scratch.0);
     let (repo_arg, wiki_arg) = (repo.to_str().expect("UTF-8"), wiki.to_str().expect("UTF-8"));
-    let cases: [(&[&str], &str); 11] = [
+    let cases: [(&[&str], &str); 16] = [
         (
             &["--source", "dir"],
             "--path <DIR> is required with --source dir",
@@ -265,7 +272,39 @@ fn source_flags_do_not_cross() {
             &["--source", "dir", "--path", wiki_arg, "--container", "a/b"],
             "--container",
         ),
-        (&["--source", "notion"], "invalid value 'notion'"),
+        (
+            &["--source", "notion"],
+            "--database <ID> is required with --source notion",
+        ),
+        (
+            &["--source", "notion", "--database", "db1"],
+            "missing NOTION_TOKEN",
+        ),
+        (
+            &[
+                "--source",
+                "notion",
+                "--database",
+                "db1",
+                "--token",
+                "t",
+                "--api",
+                "http://notion.example",
+            ],
+            "refusing plain http://",
+        ),
+        (
+            &["--source", "notion", "--database", "../v1/users", "--token", "t"],
+            "--database takes a Notion database id",
+        ),
+        (
+            &["--source", "dir", "--path", wiki_arg, "--database", "db1"],
+            "--database applies only to --source notion",
+        ),
+        (
+            &["--source", "notion", "--database", "db1", "--container", "c"],
+            "--container applies only to --source dir or --source mediawiki",
+        ),
         (
             &["--source", "mediawiki", "--namespace", "0"],
             "--api <URL> is required with --source mediawiki",
@@ -299,7 +338,7 @@ fn source_flags_do_not_cross() {
                 "--api",
                 "https://w.example/w/api.php",
             ],
-            "--api applies only to --source mediawiki",
+            "--api applies only to --source mediawiki or --source notion",
         ),
         (
             &["--space", "K", "--container", "c"],
@@ -606,5 +645,188 @@ fn mediawiki_sync_then_build() {
             && e["from"] == flow["id"]
             && e["to"] == class["id"]),
         "no Order Flow § Flow -DOCUMENTS-> OrderService"
+    );
+}
+
+/// One Notion rich-text span (API version 2025-09-03 shape).
+fn notion_span(content: &str, code: bool) -> serde_json::Value {
+    serde_json::json!({
+        "type": "text",
+        "text": { "content": content, "link": null },
+        "annotations": { "bold": false, "italic": false, "strikethrough": false,
+                         "underline": false, "code": code, "color": "default" },
+        "plain_text": content,
+        "href": null,
+    })
+}
+
+/// A data source query result: a page titled `title`.
+fn notion_page(id: &str, title: &str, created: &str) -> serde_json::Value {
+    serde_json::json!({
+        "object": "page",
+        "id": id,
+        "created_time": created,
+        "last_edited_time": "2026-09-20T10:00:00.000Z",
+        "archived": false,
+        "in_trash": false,
+        "url": format!("https://www.notion.so/{}", id.replace('-', "")),
+        "properties": { "Name": { "id": "title", "type": "title",
+                                  "title": [notion_span(title, false)] } },
+    })
+}
+
+fn notion_list(results: Vec<serde_json::Value>, next: Option<&str>) -> Canned {
+    Canned::ok(
+        serde_json::json!({
+            "object": "list",
+            "results": results,
+            "has_more": next.is_some(),
+            "next_cursor": next,
+        })
+        .to_string(),
+    )
+}
+
+/// A page body: `## <heading>`, a paragraph of `spans`, a python code block.
+fn notion_blocks(heading: &str, spans: Vec<serde_json::Value>) -> Canned {
+    notion_list(
+        vec![
+            serde_json::json!({ "object": "block", "type": "heading_2",
+                "heading_2": { "rich_text": [notion_span(heading, false)] } }),
+            serde_json::json!({ "object": "block", "type": "paragraph",
+                "paragraph": { "rich_text": spans } }),
+            serde_json::json!({ "object": "block", "type": "code",
+                "code": { "language": "python",
+                          "rich_text": [notion_span("svc.place(order)\n", false)] } }),
+        ],
+        None,
+    )
+}
+
+#[test]
+fn notion_sync_then_build() {
+    let scratch = Scratch::new("notion");
+    let (repo, _) = repo_and_wiki(&scratch.0);
+    let repo_arg = repo.to_str().expect("UTF-8");
+    let (flow_id, ship_id) = (
+        "1a2b3c4d-0000-4000-8000-00000000000a",
+        "1a2b3c4d-0000-4000-8000-00000000000b",
+    );
+
+    let stub = StubServer::start(vec![
+        Canned::ok(
+            serde_json::json!({ "object": "database", "id": "db1",
+                "data_sources": [{ "id": "ds1", "name": "Docs" }] })
+            .to_string(),
+        ),
+        notion_list(
+            vec![notion_page(flow_id, "Order Flow", "2026-09-01T00:00:00.000Z")],
+            Some("c2"),
+        ),
+        notion_list(
+            vec![notion_page(ship_id, "Shipping", "2026-09-02T00:00:00.000Z")],
+            None,
+        ),
+        notion_blocks(
+            "Orders",
+            vec![
+                notion_span("The ", false),
+                notion_span("OrderService", true),
+                notion_span(" takes orders. Calls ", false),
+                notion_span("OrderService.place", true),
+            ],
+        ),
+        notion_blocks("Carriers", vec![notion_span("Ships the order.", false)]),
+    ])
+    .expect("stub binds");
+    let origin = stub.origin();
+    let out = glia(
+        &scratch.0,
+        &[
+            "docs",
+            "sync",
+            repo_arg,
+            "--source",
+            "notion",
+            "--database",
+            "db1",
+            "--token",
+            "secret_t",
+            "--api",
+            &origin,
+        ],
+    );
+    let seen = stub.finish();
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(
+        out.status.success(),
+        "docs sync exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status
+    );
+    assert!(
+        stderr.contains(
+            "[docs] sync source=notion database=db1 data_sources=1 fetched=2 kept=2 blocks=6 unsupported=0 requests=5"
+        ),
+        "fired_on marker missing:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "[docs] snapshot source=notion container=db1 records=2 kept_other=0 replaced=0 redacted=0"
+        ),
+        "stderr:\n{stderr}"
+    );
+    assert!(!stderr.contains("secret_t") && !stdout.contains("secret_t"));
+    assert_eq!(seen.len(), 5);
+    assert!(
+        seen.iter().all(|r| r.header("notion-version") == Some("2025-09-03")
+            && r.header("authorization") == Some("Bearer secret_t")),
+        "every request pins the version and carries the token"
+    );
+    assert!(seen[2].body.contains("\"start_cursor\":\"c2\""), "{}", seen[2].body);
+    assert_eq!(
+        manifest_paths(&repo),
+        ["notion/db1/order-flow.md", "notion/db1/shipping.md"]
+    );
+
+    let out = glia(&scratch.0, &["analyze", repo_arg, "--format", "json"]);
+    assert!(
+        out.status.success(),
+        "analyze exited {:?}\nstderr:\n{}",
+        out.status,
+        text(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("analyze stdout is JSON");
+    let nodes = v["nodes"].as_array().expect("nodes array");
+    let edges = v["edges"].as_array().expect("edges array");
+    let node = |kind: &str, qname: &str| {
+        nodes
+            .iter()
+            .find(|n| n["kind_name"] == kind && n["qname"] == qname)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no {kind} {qname}; qnames: {:?}",
+                    nodes.iter().map(|n| &n["qname"]).collect::<Vec<_>>()
+                )
+            })
+    };
+    let space = node("DOC_SPACE", "docspace::notion::db1");
+    let orders = node("DOC_SECTION", "docs::notion::db1::order-flow::orders");
+    assert!(
+        edges.iter().any(|e| e["category"] == "CONTAINS"
+            && e["from"] == space["id"]
+            && e["to"] == orders["id"]),
+        "the Notion database space contains the Orders section"
+    );
+    let class = node("CLASS", "svc::orders::OrderService");
+    let method = node("METHOD", "svc::orders::OrderService::place");
+    let documents = |target: &serde_json::Value| {
+        edges.iter().any(|e| {
+            e["category"] == "DOCUMENTS" && e["from"] == orders["id"] && e["to"] == target["id"]
+        })
+    };
+    assert!(documents(class), "no Order Flow § Orders -DOCUMENTS-> OrderService");
+    assert!(
+        documents(method),
+        "no Order Flow § Orders -DOCUMENTS-> OrderService::place"
     );
 }

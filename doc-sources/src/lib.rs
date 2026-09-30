@@ -23,13 +23,17 @@
 //! MediaWiki markup → markdown converter that keeps headings and code spans
 //! (CE.4c). [`mediawiki`] pulls one namespace or category of a live MediaWiki
 //! through its Action API into wikitext [`Page`]s (CE.4d, `--source mediawiki`),
-//! never by following links.
+//! never by following links. [`notion`] pulls one Notion database's pages
+//! through the Notion API (version 2025-09-03, data sources), and
+//! [`notion_md`] renders their blocks as Markdown (CE.4e, `--source notion`).
 
 pub mod confluence;
 pub mod confluence_rest;
 pub mod filter;
 pub mod markdown;
 pub mod mediawiki;
+pub mod notion;
+pub mod notion_md;
 pub mod snapshot;
 #[doc(hidden)]
 pub mod stub;
