@@ -1,0 +1,33 @@
+{
+  "framework": "ruby-bunny",
+  "language": "ruby",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "amqp",
+  "cells": [
+    "ruby/amqp"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Bunny: ch.queue(\"orders\").subscribe / default_exchange.publish(routing_key:) || CF.6a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): Bunny `ch.queue(\"x\").subscribe` / `default_exchange.publish(body, routing_key: \"x\")`: the RabbitMQ rows are gated on amqp/amqplib/rabbitmq (a Bunny file names none) and read `channel.publish` / `basic_publish(`."
+}
