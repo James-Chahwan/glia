@@ -1,0 +1,38 @@
+{
+  "framework": "elixir-fun-with-flags",
+  "language": "elixir",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "flags",
+  "cells": [
+    "elixir/flags"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "new-checkout"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "checkout",
+      "to": "new-checkout",
+      "category": "READS_CONFIG"
+    },
+    {
+      "from": "features",
+      "to": "new-checkout",
+      "category": "DEFINES_CONFIG"
+    },
+    {
+      "from": "new-checkout",
+      "to": "new-checkout",
+      "category": "SHARES_CONFIG"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "FunWithFlags.enabled? (the Elixir flag library) + Flipt define side || CF.11c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=1/1 literal=1/1 route=1/3 forbid=0/0) via=config. Predicted extractor gap (backlog, not fixed by the probe): FunWithFlags `FunWithFlags.enabled?(:key, for: user)` has no provider row in parsers/code/extractors/src/secrets_flags.rs; only the Flipt define side fires."
+}

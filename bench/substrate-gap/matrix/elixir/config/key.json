@@ -1,0 +1,51 @@
+{
+  "framework": "elixir-system-get-env-dockerfile",
+  "language": "elixir",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "config",
+  "cells": [
+    "elixir/config"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "DATABASE_URL"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "runtime",
+      "to": "DATABASE_URL",
+      "category": "READS_CONFIG"
+    },
+    {
+      "from": "Dockerfile",
+      "to": "DATABASE_URL",
+      "category": "DEFINES_CONFIG"
+    },
+    {
+      "from": "DATABASE_URL",
+      "to": "DATABASE_URL",
+      "category": "SHARES_CONFIG"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "CONFIG_KEY",
+      "node": "DATABASE_URL",
+      "cell": "ENV",
+      "contains": "db.internal:5432"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "postgres://db.internal:5432/app",
+      "max_nodes": 0
+    }
+  ],
+  "note": "config/runtime.exs System.get_env + Dockerfile ENV define || CF.11c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=1/1 literal=1/1 route=1/3 forbid=1/1) via=config. Predicted extractor gap (backlog, not fixed by the probe): `System.get_env(\"X\")` / `System.fetch_env!(\"X\")` are not read needles in parsers/code/extractors/src/config.rs."
+}

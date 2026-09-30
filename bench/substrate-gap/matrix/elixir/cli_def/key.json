@@ -1,0 +1,28 @@
+{
+  "framework": "elixir-mix-task",
+  "language": "elixir",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_def",
+  "cells": [
+    "elixir/cli_def"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "shop.sync"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli_invoke:mix",
+      "to": "cli:shop.sync",
+      "category": "CLI_INVOKES"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Mix.Tasks.Shop.Sync is the task `mix shop.sync` || CF.11c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/1 literal=0/1 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): a Mix task (`defmodule Mix.Tasks.Shop.Sync do use Mix.Task`) is the command `mix shop.sync`; no CLI_COMMAND row in parsers/code/extractors/src/cli.rs."
+}

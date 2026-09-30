@@ -1,0 +1,31 @@
+{
+  "framework": "elixir-umbrella",
+  "language": "elixir",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "subproject",
+  "cells": [
+    "elixir/subproject"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "PROJECT",
+      "name": "project:apps/api"
+    },
+    {
+      "kind": "PROJECT",
+      "name": "project:apps/worker"
+    }
+  ],
+  "expect_edges": [],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "PROJECT",
+      "name": "project:apps/api",
+      "max_nodes": 1
+    }
+  ],
+  "note": "umbrella apps/* each with a mix.exs || CF.11c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=2/2 literal=2/2 route=0/0 forbid=1/1) via=project. Nothing to fix: the cell is covered at HEAD."
+}
