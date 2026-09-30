@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 314,
+  "fixtures": 317,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -501,6 +501,13 @@
         "CALLS": 1.0
       }
     },
+    "event-const-literal": {
+      "framework": "event-const-literal",
+      "language": "typescript",
+      "per_category": {
+        "EVENT_FLOWS": 1.0
+      }
+    },
     "event-monorepo-process": {
       "framework": "event-monorepo-process",
       "language": "typescript",
@@ -665,6 +672,13 @@
         "CALLS": 1.0
       }
     },
+    "go-receiver-method-handlers": {
+      "framework": "go-receiver-method-handlers",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
     "go-return-type-receivers": {
       "framework": "go-return-type-receivers",
       "language": "go",
@@ -780,6 +794,14 @@
       "framework": "http-dart-nav-precision",
       "language": "dart",
       "per_category": {}
+    },
+    "http-external-host": {
+      "framework": "http-external-host",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
     },
     "http-monorepo-owner": {
       "framework": "http-monorepo-owner",

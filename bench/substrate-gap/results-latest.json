@@ -2689,13 +2689,14 @@
     },
     "go/http_server": {
       "extract": [
-        10,
-        10
+        11,
+        11
       ],
       "fixtures": [
         "fixtures/angular-http-calls",
         "fixtures/dart-http-dio",
         "fixtures/go-handled-by",
+        "fixtures/go-receiver-method-handlers",
         "fixtures/http-base-prefix",
         "fixtures/react-http_calls",
         "fixtures/swift-http",
@@ -2704,18 +2705,20 @@
         "fixtures/xstack-ts-go-http"
       ],
       "forbid": [
-        1,
-        1
+        3,
+        3
       ],
       "level": "full",
       "literal": [
         10,
         10
       ],
-      "reasons": [],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
       "route": [
-        12,
-        12
+        16,
+        16
       ],
       "via": "http"
     },
@@ -8149,31 +8152,34 @@
     },
     "typescript/http_client": {
       "extract": [
-        9,
-        9
+        10,
+        10
       ],
       "fixtures": [
         "fixtures/angular-http-calls",
         "fixtures/http-any-method",
         "fixtures/http-base-prefix",
+        "fixtures/http-external-host",
         "fixtures/react-http_calls",
         "fixtures/ts-http-fetch",
         "fixtures/vue-http-calls",
         "fixtures/xstack-ts-go-http"
       ],
       "forbid": [
-        0,
-        0
+        1,
+        1
       ],
       "level": "full",
       "literal": [
         9,
         9
       ],
-      "reasons": [],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
       "route": [
-        9,
-        9
+        11,
+        11
       ],
       "via": "http"
     },
@@ -8656,6 +8662,7 @@
     "fixtures/elixir-docs",
     "fixtures/elixir-xmodule-calls",
     "fixtures/enum-owned-methods",
+    "fixtures/event-const-literal",
     "fixtures/event-monorepo-process",
     "fixtures/event-name-shape",
     "fixtures/event-publish-precision",
