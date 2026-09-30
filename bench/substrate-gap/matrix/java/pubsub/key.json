@@ -1,0 +1,33 @@
+{
+  "framework": "java-spring-cloud-gcp-pubsub",
+  "language": "java",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "pubsub",
+  "cells": [
+    "java/pubsub"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Spring Cloud GCP PubSubTemplate.publish / .subscribe || CF.4a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): Spring Cloud GCP `pubSubTemplate.publish(\"x\", ..)` / `.subscribe(\"x\", ..)` have no row in parsers/code/extractors/src/queues.rs."
+}
