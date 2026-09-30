@@ -1,0 +1,2 @@
+# pyo3 surface of py/src/duplicate_flows.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.duplicate_flows(scope: Option<String> = None, depth: usize = 6, threshold: f64 = 0.8, min_size: usize = 3, include_tests: bool = false, keep_hubs: bool = false) -> PyResult<Py<PyAny>>

@@ -34,6 +34,16 @@ pub(crate) enum QueryCmd {
     /// communities (edges and categories). Tier heuristic. A report: exits 0
     /// whatever it finds (an empty answer says why), 2 on an error.
     Communities(communities::Args),
+    /// Duplicate flows (CD.4f): entry points whose forward flows over the
+    /// carry edges reach the same nodes — exact groups (tier derived: one
+    /// reached set, e.g. an aliased route or a v1 / v2 pair never retired)
+    /// and near groups (tier heuristic: MinHash / LSH candidates verified at
+    /// Jaccard >= `--threshold`, copies drifting apart). Utility hubs and
+    /// test entries are left out unless `--keep-hubs` / `--include-tests`.
+    /// Each group lists its entries located, its `glia arch` services and the
+    /// nodes it differs by. A report: exits 0 whatever it finds (an empty
+    /// answer says why), 2 on an error or a `--threshold` outside (0, 1].
+    DuplicateFlows(duplicate_flows::Args),
     /// Find (LD.3b): the ranked, located nodes a symbol, qname or fragment
     /// names. Each row says which tier matched it — exact_qname, exact_name,
     /// exact_ci, qname_suffix, name_prefix, name_word, name_substring,
@@ -117,6 +127,7 @@ pub(crate) enum QueryCmd {
 pub(crate) fn run(c: QueryCmd) -> i32 {
     match c {
         QueryCmd::Communities(a) => communities::run(a),
+        QueryCmd::DuplicateFlows(a) => duplicate_flows::run(a),
         QueryCmd::Find(a) => find::run(a),
         QueryCmd::Flows(a) => flows::run(a),
         QueryCmd::Hotspots(a) => hotspots::run(a),
