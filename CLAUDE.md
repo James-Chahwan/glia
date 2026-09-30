@@ -32,7 +32,12 @@ activation/         Spreading activation — domain-agnostic PPR with configurab
                     PassRegistry) — build-time, so PARSER_STAMP hashes it — and `algo`:
                     GraphSource, CategorySet, the CSR Adjacency index, `algo::reach`
                     (bfs / reachable / reachable_by, O(V+E) per walk), `algo::delta`
-                    (graph delta) and `algo::cycles` (Tarjan SCC); `plan` (one
+                    (graph delta), `algo::cycles` (Tarjan SCC), and the 0.5.1 slots
+                    `algo::community` (label propagation, seeded Leiden, CD.1a/b),
+                    `algo::cut` (Stoer-Wagner / Dinic, CD.2a), `algo::linkpred`
+                    (CD.3a), `algo::hubs` (degree / HITS, CD.4a), `algo::minhash`
+                    (MinHash + LSH, CD.4d), `algo::timeline` (validity intervals,
+                    CD.5a); `plan` (one
                     ActivationPlan over the RankingSignal / FilterPredicate / SynthHook
                     hooks) and `profile` (DomainTables / DomainProfile)
 parsers/code/

@@ -1,6 +1,14 @@
 //! Domain-agnostic graph algorithms (LD.15a): the home of reachability
 //! ([`reach`](crate::algo::reach)), graph delta ([`delta`](crate::algo::delta),
-//! LE.1a) and cycles ([`cycles`](crate::algo::cycles), LE.6a).
+//! LE.1a) and cycles ([`cycles`](crate::algo::cycles), LE.6a). 0.5.1 adds
+//! communities ([`community`](crate::algo::community): label propagation,
+//! seeded Leiden and modularity, CD.1a / CD.1b), minimum cuts
+//! ([`cut`](crate::algo::cut): Stoer-Wagner / Dinic, CD.2a), link prediction
+//! ([`linkpred`](crate::algo::linkpred): Adamic-Adar / resource allocation,
+//! CD.3a), hubs ([`hubs`](crate::algo::hubs): degree / HITS, CD.4a), MinHash
+//! signatures ([`minhash`](crate::algo::minhash): LSH banding, CD.4d) and
+//! validity intervals ([`timeline`](crate::algo::timeline): folded over
+//! snapshots, CD.5a).
 //!
 //! This crate depends on `core` only, so nothing here can name a domain's
 //! node kind or edge category: an algorithm takes the categories it follows
@@ -22,9 +30,15 @@ use glia_core::{Edge, EdgeCategoryId, NodeId};
 
 use crate::profile::DomainTables;
 
+pub mod community;
+pub mod cut;
 pub mod cycles;
 pub mod delta;
+pub mod hubs;
+pub mod linkpred;
+pub mod minhash;
 pub mod reach;
+pub mod timeline;
 
 /// A graph the algorithms can index: its node ids and its edges, each in a
 /// stable order. Results that depend on order (a BFS's discovery order, the
