@@ -29,11 +29,19 @@ pub(crate) enum StoreCmd {
     /// build's resolver and exits 1 when a row is ambiguous, orphaned or
     /// rejected; `--rekey` rewrites rows a moved node re-bound.
     Cell(cell::Args),
+    /// Shared parse cache (CE-2): push the parse cache of a built checkout to
+    /// an object store, pull what another checkout is missing into
+    /// <repo>/.glia/graph/parse_cache.bin (the next build reuses it; the build
+    /// itself never touches the network), gc a directory store. Objects are
+    /// signed with GLIA_CACHE_KEY / --key-file; an unsigned store needs
+    /// --unsigned and is re-parse-sampled on pull.
+    Cache(cache::Args),
 }
 
 pub(crate) fn run(c: StoreCmd) -> i32 {
     match c {
         StoreCmd::Inspect(a) => inspect::run(a),
         StoreCmd::Cell(a) => cell::run(a),
+        StoreCmd::Cache(a) => cache::run(a),
     }
 }

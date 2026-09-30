@@ -1,0 +1,29 @@
+# CLI surface of `glia cache`. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface
+cmd glia cache subcommand_required
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+cmd glia cache gc
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
+  arg keep_stamps pos=- long=keep-stamps short=- required=false num_args=1 action=Set default=2 value_names=KEEP_STAMPS global=false hidden=false
+  arg max_bytes pos=- long=max-bytes short=- required=false num_args=1 action=Set default=- value_names=BYTES global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+  arg store pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=STORE global=false hidden=false
+cmd glia cache pull
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg jobs pos=- long=jobs short=- required=false num_args=1 action=Set default=8 value_names=JOBS global=false hidden=false
+  arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
+  arg key_file pos=- long=key-file short=- required=false num_args=1 action=Set default=- value_names=FILE global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+  arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
+  arg store pos=2 long=- short=- required=true num_args=1 action=Set default=- value_names=STORE global=false hidden=false
+  arg unsigned pos=- long=unsigned short=- required=false num_args=0 action=SetTrue default=false value_names=UNSIGNED global=false hidden=false
+  arg verify pos=- long=verify short=- required=false num_args=1 action=Set default=- value_names=N|all global=false hidden=false
+cmd glia cache push
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
+  arg key_file pos=- long=key-file short=- required=false num_args=1 action=Set default=- value_names=FILE global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+  arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
+  arg store pos=2 long=- short=- required=true num_args=1 action=Set default=- value_names=STORE global=false hidden=false
+  arg unsigned pos=- long=unsigned short=- required=false num_args=0 action=SetTrue default=false value_names=UNSIGNED global=false hidden=false
