@@ -368,7 +368,14 @@ fn merge_parses(
     let mut all_refs: Vec<UnresolvedRef> = Vec::new();
     let mut index: HashMap<NodeId, usize> = HashMap::new();
 
+    // CB.15: a PACKAGE several files open is one node under its first file
+    // (merge_nav), so each member records the file that declared it, read
+    // from its own parse before the nav merges.
+    let shared = shared_packages(&parses);
     for p in parses {
+        if !shared.is_empty() {
+            record_home_modules(&p.nav, &shared, &mut g.symbols.home_module);
+        }
         for n in p.nodes {
             if let Some(&idx) = index.get(&n.id) {
                 // Duplicate NodeId — append cells onto the existing node.
@@ -384,6 +391,13 @@ fn merge_parses(
         all_calls.extend(p.calls);
         all_refs.extend(p.refs);
         g.properties.extend(p.properties);
+    }
+    if !shared.is_empty() {
+        eprintln!(
+            "[home-module] shared packages={} members={}",
+            shared.len(),
+            g.symbols.home_module.len()
+        );
     }
 
     // LB.3a: fold framework role overlays (SERVICE / COMPONENT / HOOK / ...)
@@ -402,6 +416,68 @@ fn append_cells(existing: &mut Vec<Cell>, incoming: Vec<Cell>) {
     existing.extend(incoming);
 }
 
+/// CB.15: the PACKAGE ids that more than one parse records - a C#
+/// `namespace Shop.Orders { }` or a braced PHP `namespace App\Orders { }`
+/// opened in two files. Every other language's PACKAGE qname carries its
+/// file (Ruby / Elixir / Rust / Terraform / Solidity, C++ `<file>::ns`), so
+/// this is empty for them and [`merge_parses`] records no home modules.
+fn shared_packages(parses: &[FileParse]) -> HashSet<NodeId> {
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut shared: HashSet<NodeId> = HashSet::new();
+    for p in parses {
+        for (id, kind) in &p.nav.kind_by_id {
+            if *kind == node_kind::PACKAGE && !seen.insert(*id) {
+                shared.insert(*id);
+            }
+        }
+    }
+    shared
+}
+
+/// CB.15: `homes[node] = the MODULE of this parse` for every non-MODULE,
+/// non-PACKAGE node of one parse whose PARSE-LOCAL nav chain crosses a
+/// `shared` PACKAGE before it reaches that MODULE. Such a node's merged
+/// chain runs through the one PACKAGE node, whose parent is the first file
+/// that opened it; the entry keeps the node in its own file for call
+/// resolution ([`crate::calls::enclosing_home_module`]). Every such node gets
+/// its own entry, not only the PACKAGE's direct children: a C# partial class
+/// is one CLASS id across files (first entry wins), and a METHOD declared in
+/// the second file still resolves through the second file's `using`s. A
+/// chain under per-file packages only records nothing, so C++ out-of-line
+/// members keep LB.10c's header scope. Within a parse each node is visited
+/// once, so the HashMap order never shows; across parses, file order.
+fn record_home_modules(
+    nav: &CodeNav,
+    shared: &HashSet<NodeId>,
+    homes: &mut HashMap<NodeId, NodeId>,
+) {
+    for (&id, &kind) in &nav.kind_by_id {
+        if kind == node_kind::MODULE || kind == node_kind::PACKAGE {
+            continue;
+        }
+        if let Some(module) = declaring_module(nav, id, shared) {
+            homes.entry(id).or_insert(module);
+        }
+    }
+}
+
+/// The MODULE `id`'s parse-local chain ends at, when a `shared` PACKAGE lies
+/// on the way; `None` otherwise, or when the chain reaches no MODULE (a
+/// synthetic parse). Bounded by the nav's size, so a malformed cycle ends.
+fn declaring_module(nav: &CodeNav, id: NodeId, shared: &HashSet<NodeId>) -> Option<NodeId> {
+    let mut crossed = false;
+    let mut cur = id;
+    for _ in 0..=nav.parent_of.len() {
+        cur = *nav.parent_of.get(&cur)?;
+        match nav.kind_by_id.get(&cur).copied() {
+            Some(k) if k == node_kind::MODULE => return crossed.then_some(cur),
+            Some(k) if k == node_kind::PACKAGE => crossed |= shared.contains(&cur),
+            _ => {}
+        }
+    }
+    None
+}
+
 // ============================================================================
 // Nav merge
 // ============================================================================
@@ -410,7 +486,17 @@ fn merge_nav(dst: &mut CodeNav, src: CodeNav) {
     dst.name_by_id.extend(src.name_by_id);
     dst.qname_by_id.extend(src.qname_by_id);
     dst.kind_by_id.extend(src.kind_by_id);
-    dst.parent_of.extend(src.parent_of);
+    // CB.15: a PACKAGE several files open (C# `namespace`, braced PHP
+    // `namespace { }`) keeps its FIRST file as nav parent, the file its first
+    // POSITION cell names (append_cells keeps that one first); every other
+    // record is last-wins. `children_of` still lists it under every file.
+    for (k, v) in src.parent_of {
+        if dst.kind_by_id.get(&k) == Some(&node_kind::PACKAGE) {
+            dst.parent_of.entry(k).or_insert(v);
+        } else {
+            dst.parent_of.insert(k, v);
+        }
+    }
     for (k, v) in src.children_of {
         dst.children_of.entry(k).or_default().extend(v);
     }
@@ -2539,7 +2625,8 @@ fn place_out_of_line(g: &RepoGraph, stats: &mut OutOfLineStats) -> Vec<Placement
 /// pairs in candidate order; a node's id is `NodeId::from_parts(kind,
 /// qname)`, so a kind or qname change moves every place the id lives: the
 /// node record, every edge's `from` / `to`, the pending `calls` and `refs`
-/// (`from`, `from_module`), the unresolved lists, `properties`, and the nav
+/// (`from`, `from_module`), the unresolved lists, `properties`, the symbol
+/// table's `home_module` keys and values (CB.15), and the nav
 /// (name / qname / kind / parent records, `parent_of` values, `children_of`
 /// keys and entries, deduped keeping the first occurrence, the field /
 /// local type tables, the per-scope `nav_facts`, deduped likewise, and the
@@ -2644,6 +2731,21 @@ pub(crate) fn rename_nodes(
             .into_iter()
             .map(map)
             .collect();
+    }
+    // CB.15's home modules: a renamed node keeps its file, the new id's own
+    // entry kept when both have one.
+    if !g.symbols.home_module.is_empty() {
+        for &(old, new) in renames {
+            if old == new {
+                continue;
+            }
+            if let Some(m) = g.symbols.home_module.remove(&old) {
+                g.symbols.home_module.entry(new).or_insert(m);
+            }
+        }
+        for m in g.symbols.home_module.values_mut() {
+            *m = map(*m);
+        }
     }
 
     // Nav.
@@ -5109,5 +5211,284 @@ mod tests {
                 .iter()
                 .any(|n| n.id == gid(node_kind::FUNCTION, "src::gadget.cpp::Gone::x"))
         );
+    }
+
+    // ---- CB.15: a namespace PACKAGE several files open ------------------------
+
+    /// One file shaped the way the PHP / C# parsers emit a block namespace
+    /// (`namespace App\Orders { }`, `namespace Shop.Orders { }`): MODULE
+    /// `module`, PACKAGE `package` under it, then [`go_file`]'s items with a
+    /// `None` parent meaning the PACKAGE; `(namespace, Name)` `use` imports
+    /// of the file and `(from, Base, m)` calls `Base::m()`.
+    fn namespaced_file(
+        module: &str,
+        package: &str,
+        items: &[(NodeKindId, &str, Option<&str>)],
+        uses: &[(&str, &str)],
+        calls: &[(&str, &str, &str)],
+    ) -> FileParse {
+        let mut all = vec![(node_kind::PACKAGE, package, None)];
+        all.extend(items.iter().map(|&(k, q, p)| (k, q, Some(p.unwrap_or(package)))));
+        let mut fp = go_file(module, &all);
+        fp.imports = uses
+            .iter()
+            .map(|&(ns, name)| ImportStmt {
+                from_module: module.to_string(),
+                target: ImportTarget::Symbol {
+                    module: ns.to_string(),
+                    name: name.to_string(),
+                    alias: None,
+                    level: 0,
+                },
+                line: 0,
+            })
+            .collect();
+        fp.calls = calls
+            .iter()
+            .map(|&(from, base, name)| CallSite {
+                from: gid(node_kind::METHOD, from),
+                qualifier: CallQualifier::Attribute { base: base.to_string(), name: name.to_string() },
+                line: 0,
+            })
+            .collect();
+        fp
+    }
+
+    /// A class `<package>::<class>` with one METHOD `m`, as `namespaced_file` items.
+    fn class_with<'a>(class: &'a str, method: &'a str) -> [(NodeKindId, &'a str, Option<&'a str>); 2] {
+        [(node_kind::CLASS, class, None), (node_kind::METHOD, method, Some(class))]
+    }
+
+    /// bench/substrate-gap/fixtures/php-shared-namespace-bindings: two files
+    /// open `App\Billing` (Invoicer, Ledger) and two open `App\Orders`, each
+    /// importing a different billing class.
+    fn php_shared_namespace_shape() -> Vec<FileParse> {
+        vec![
+            namespaced_file(
+                "src::Billing::Invoicer",
+                "App::Billing",
+                &class_with("App::Billing::Invoicer", "App::Billing::Invoicer::issue"),
+                &[],
+                &[],
+            ),
+            namespaced_file(
+                "src::Billing::Ledger",
+                "App::Billing",
+                &class_with("App::Billing::Ledger", "App::Billing::Ledger::issue"),
+                &[],
+                &[],
+            ),
+            namespaced_file(
+                "src::Orders::OrderService",
+                "App::Orders",
+                &class_with("App::Orders::OrderService", "App::Orders::OrderService::place"),
+                &[("App::Billing", "Invoicer")],
+                &[("App::Orders::OrderService::place", "Invoicer", "issue")],
+            ),
+            namespaced_file(
+                "src::Orders::ShipmentService",
+                "App::Orders",
+                &class_with("App::Orders::ShipmentService", "App::Orders::ShipmentService::ship"),
+                &[("App::Billing", "Ledger")],
+                &[("App::Orders::ShipmentService::ship", "Ledger", "issue")],
+            ),
+        ]
+    }
+
+    /// Each member of a namespace two files open resolves its calls through
+    /// its OWN file's `use`: `OrderService::place` binds `Invoicer::issue`
+    /// (HEAD read ShipmentService.php's bindings, the last file merged, and
+    /// bound nothing), and never the other file's `Ledger::issue`.
+    #[test]
+    fn shared_namespace_member_uses_its_own_file_bindings() {
+        let g = build_dotted(repo(), php_shared_namespace_shape()).unwrap();
+        let (place, ship) = (
+            gid(node_kind::METHOD, "App::Orders::OrderService::place"),
+            gid(node_kind::METHOD, "App::Orders::ShipmentService::ship"),
+        );
+        let (invoicer_issue, ledger_issue) = (
+            gid(node_kind::METHOD, "App::Billing::Invoicer::issue"),
+            gid(node_kind::METHOD, "App::Billing::Ledger::issue"),
+        );
+        assert!(has_edge(&g, place, invoicer_issue, edge_category::CALLS), "own file's use");
+        assert!(has_edge(&g, ship, ledger_issue, edge_category::CALLS), "control");
+        assert!(!has_edge(&g, place, ledger_issue, edge_category::CALLS), "another file's use");
+        assert!(g.unresolved_calls.is_empty());
+        let order_file = gid(node_kind::MODULE, "src::Orders::OrderService");
+        assert_eq!(g.symbols.home_module.get(&place), Some(&order_file));
+        assert_eq!(
+            g.symbols.home_module.get(&gid(node_kind::CLASS, "App::Orders::OrderService")),
+            Some(&order_file)
+        );
+        assert_eq!(crate::calls::enclosing_home_module(&g, place), Some(order_file));
+    }
+
+    /// A PACKAGE two files open hangs under the FIRST file merged (the one
+    /// its first POSITION names; HEAD: the last), and both files still list
+    /// it as a nav child. Merge order decides, so the reverse order flips it.
+    #[test]
+    fn shared_package_parent_is_the_first_file() {
+        let orders = gid(node_kind::PACKAGE, "App::Orders");
+        let (first, second) = (
+            gid(node_kind::MODULE, "src::Orders::OrderService"),
+            gid(node_kind::MODULE, "src::Orders::ShipmentService"),
+        );
+        let (g, _, _, _) = merge_parses(repo(), php_shared_namespace_shape());
+        assert_eq!(g.nav.parent_of[&orders], first);
+        assert_eq!(
+            g.nav.parent_of[&gid(node_kind::PACKAGE, "App::Billing")],
+            gid(node_kind::MODULE, "src::Billing::Invoicer")
+        );
+        for file in [first, second] {
+            assert!(g.nav.children_of[&file].contains(&orders), "every file lists it");
+        }
+        let mut reversed = php_shared_namespace_shape();
+        reversed.reverse();
+        let (g, _, _, _) = merge_parses(repo(), reversed);
+        assert_eq!(g.nav.parent_of[&orders], second);
+    }
+
+    /// A C# block namespace only one file opens: no home module is recorded,
+    /// every node's call scope is `enclosing_module`'s, the nav is the
+    /// parse's own, and the `using`-bound call resolves as on HEAD.
+    #[test]
+    fn single_file_namespace_unchanged() {
+        let parses = || {
+            vec![
+                namespaced_file(
+                    "Billing::Invoicer",
+                    "Shop::Billing",
+                    &class_with("Shop::Billing::Invoicer", "Shop::Billing::Invoicer::Issue"),
+                    &[],
+                    &[],
+                ),
+                namespaced_file(
+                    "Orders::OrderService",
+                    "Shop::Orders",
+                    &class_with("Shop::Orders::OrderService", "Shop::Orders::OrderService::Place"),
+                    &[("Shop::Billing", "Invoicer")],
+                    &[("Shop::Orders::OrderService::Place", "Invoicer", "Issue")],
+                ),
+            ]
+        };
+        let g = build_dotted(repo(), parses()).unwrap();
+        assert!(g.symbols.home_module.is_empty());
+        for id in g.nav.kind_by_id.keys() {
+            assert_eq!(
+                crate::calls::enclosing_home_module(&g, *id),
+                enclosing_module(&g.nav, *id)
+            );
+        }
+        let mut parse_nav: HashMap<NodeId, NodeId> = HashMap::new();
+        for p in parses() {
+            parse_nav.extend(p.nav.parent_of);
+        }
+        assert_eq!(g.nav.parent_of, parse_nav);
+        assert!(has_edge(
+            &g,
+            gid(node_kind::METHOD, "Shop::Orders::OrderService::Place"),
+            gid(node_kind::METHOD, "Shop::Billing::Invoicer::Issue"),
+            edge_category::CALLS
+        ));
+    }
+
+    /// Only a member under a SHARED package gets an entry: a Python-shaped
+    /// class directly under its MODULE and a class under a per-file PACKAGE
+    /// (a Ruby `module`, a C++ `<file>::ns`) record nothing, even in a build
+    /// where another namespace is shared; the PACKAGEs and MODULEs themselves
+    /// never do.
+    #[test]
+    fn home_module_skips_non_package_parents() {
+        let mut parses = php_shared_namespace_shape();
+        parses.push(go_file(
+            "app::models",
+            &[
+                (node_kind::CLASS, "app::models::User", None),
+                (node_kind::METHOD, "app::models::User::save", Some("app::models::User")),
+            ],
+        ));
+        parses.push(namespaced_file(
+            "app::shop",
+            "app::shop::Shop",
+            &class_with("app::shop::Shop::Cart", "app::shop::Shop::Cart::total"),
+            &[],
+            &[],
+        ));
+        let (g, _, _, _) = merge_parses(repo(), parses);
+        for q in [
+            (node_kind::CLASS, "app::models::User"),
+            (node_kind::METHOD, "app::models::User::save"),
+            (node_kind::CLASS, "app::shop::Shop::Cart"),
+            (node_kind::METHOD, "app::shop::Shop::Cart::total"),
+            (node_kind::PACKAGE, "App::Orders"),
+            (node_kind::MODULE, "src::Orders::OrderService"),
+        ] {
+            assert!(!g.symbols.home_module.contains_key(&gid(q.0, q.1)), "{q:?}");
+        }
+        // The eight members of the two shared namespaces: 4 classes, 4 methods.
+        assert_eq!(g.symbols.home_module.len(), 8);
+    }
+
+    /// A C# partial class two files declare is one CLASS id (its entry: the
+    /// first file), and a METHOD the second file declares still resolves
+    /// through the second file's `using` - its own entry is found before the
+    /// walk reaches the class.
+    #[test]
+    fn partial_class_member_keeps_its_own_file() {
+        let class = "Shop::Orders::OrderService";
+        let parses = vec![
+            namespaced_file(
+                "Billing::Invoicer",
+                "Shop::Billing",
+                &class_with("Shop::Billing::Invoicer", "Shop::Billing::Invoicer::Issue"),
+                &[],
+                &[],
+            ),
+            namespaced_file(
+                "Billing::Ledger",
+                "Shop::Billing",
+                &class_with("Shop::Billing::Ledger", "Shop::Billing::Ledger::Issue"),
+                &[],
+                &[],
+            ),
+            namespaced_file(
+                "Orders::OrderService",
+                "Shop::Orders",
+                &class_with(class, "Shop::Orders::OrderService::Place"),
+                &[("Shop::Billing", "Invoicer")],
+                &[("Shop::Orders::OrderService::Place", "Invoicer", "Issue")],
+            ),
+            namespaced_file(
+                "Orders::OrderService.Shipping",
+                "Shop::Orders",
+                &class_with(class, "Shop::Orders::OrderService::Ship"),
+                &[("Shop::Billing", "Ledger")],
+                &[("Shop::Orders::OrderService::Ship", "Ledger", "Issue")],
+            ),
+        ];
+        let g = build_dotted(repo(), parses).unwrap();
+        let (place, ship) = (
+            gid(node_kind::METHOD, "Shop::Orders::OrderService::Place"),
+            gid(node_kind::METHOD, "Shop::Orders::OrderService::Ship"),
+        );
+        let (first, second) = (
+            gid(node_kind::MODULE, "Orders::OrderService"),
+            gid(node_kind::MODULE, "Orders::OrderService.Shipping"),
+        );
+        assert_eq!(g.symbols.home_module.get(&gid(node_kind::CLASS, class)), Some(&first));
+        assert_eq!(g.symbols.home_module.get(&ship), Some(&second));
+        assert!(has_edge(
+            &g,
+            place,
+            gid(node_kind::METHOD, "Shop::Billing::Invoicer::Issue"),
+            edge_category::CALLS
+        ));
+        assert!(has_edge(
+            &g,
+            ship,
+            gid(node_kind::METHOD, "Shop::Billing::Ledger::Issue"),
+            edge_category::CALLS
+        ));
+        assert!(g.unresolved_calls.is_empty());
     }
 }

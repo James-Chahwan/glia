@@ -212,6 +212,8 @@ impl CodeNavStore {
 }
 
 impl SymbolTableStore {
+    /// `sym.home_module` (CB.15) is not persisted: it only steers call
+    /// resolution, which is over before a graph is written.
     pub fn from_owned(sym: &SymbolTable) -> Self {
         let mut module_by_qname: Vec<_> = sym
             .module_by_qname
@@ -272,6 +274,10 @@ impl SymbolTableStore {
             class_methods: to_map(&self.class_methods),
             interface_methods: to_map(&self.interface_methods),
             module_import_bindings: to_map(&self.module_import_bindings),
+            // CB.15: build-time only. Call resolution has finished before a
+            // graph is written, so `from_owned` skips it and a loaded graph
+            // carries none; the store format is unchanged.
+            home_module: HashMap::new(),
         }
     }
 }

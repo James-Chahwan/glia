@@ -168,7 +168,9 @@ pub(crate) fn resolve_calls<H>(
     // them (a field-typed receiver, or a statically-qualified `IFoo.m()`).
     let (mut iface_recv, mut iface_static) = (0usize, 0usize);
     for site in calls {
-        let Some(from_module) = enclosing_module(&g.nav, site.from) else {
+        // CB.15: the caller's OWN file, also for a member of a namespace
+        // several files open; `enclosing_package` below still walks the nav.
+        let Some(from_module) = enclosing_home_module(g, site.from) else {
             g.unresolved_calls.push(site.clone());
             continue;
         };
@@ -755,6 +757,28 @@ pub(crate) fn enclosing_module(nav: &CodeNav, mut id: NodeId) -> Option<NodeId> 
         }
         id = *nav.parent_of.get(&id)?;
     }
+}
+
+/// The file whose `use` / `using` bindings and top-level symbols a call from
+/// `id` resolves through (CB.15): [`enclosing_module`]'s walk, stopping at
+/// the first visited node with a `SymbolTable::home_module` entry. A member
+/// of a PACKAGE several files open (C# `namespace`, braced PHP `namespace
+/// { }`) has one, naming its own file; the PACKAGE node itself hangs under
+/// the first file only. Without an entry on the way (every language whose
+/// PACKAGEs are per file) this is exactly [`enclosing_module`]. Bounded by
+/// the nav's size, so a malformed parent cycle ends.
+pub(crate) fn enclosing_home_module(g: &RepoGraph, mut id: NodeId) -> Option<NodeId> {
+    let nav = &g.nav;
+    for _ in 0..=nav.parent_of.len() {
+        if let Some(module) = g.symbols.home_module.get(&id) {
+            return Some(*module);
+        }
+        if nav.kind_by_id.get(&id) == Some(&node_kind::MODULE) {
+            return Some(id);
+        }
+        id = *nav.parent_of.get(&id)?;
+    }
+    None
 }
 
 /// Nearest enclosing PACKAGE (namespace / defmodule). Elixir `def`s live under a

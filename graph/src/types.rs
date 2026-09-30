@@ -53,6 +53,18 @@ pub struct SymbolTable {
     /// Module node id → (bound name in that module → target node id).
     /// Populated from resolved imports. Powers cross-file call resolution.
     pub module_import_bindings: HashMap<NodeId, HashMap<String, NodeId>>,
+    /// Node id → the file MODULE that declared it, for every node whose
+    /// declaring file's nav chain crosses a PACKAGE that another file also
+    /// opens (a C# `namespace Shop.Orders` or a braced PHP `namespace
+    /// App\Orders { }` in two files, CB.15). Such a PACKAGE is one node with
+    /// one nav parent (its first file), so walking `parent_of` from a member
+    /// of the second file reaches the wrong file; call resolution reads this
+    /// entry instead (`calls::enclosing_home_module`) and resolves through the
+    /// member's own file's `use` / `using` bindings. First file wins for an id
+    /// two files both declare (a C# partial class). Empty for every language
+    /// whose PACKAGEs are per file. Build-time only: the store does not
+    /// persist it, so a graph loaded from a `.gmap` carries an empty table.
+    pub home_module: HashMap<NodeId, NodeId>,
 }
 
 // ============================================================================

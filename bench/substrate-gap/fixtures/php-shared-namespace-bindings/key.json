@@ -1,0 +1,29 @@
+{
+  "framework": "php-shared-namespace-bindings",
+  "language": "php",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-N1: two files open the braced `namespace App\\Orders { }`, so their classes hang off ONE PACKAGE App::Orders. graph/src/build.rs merge_nav extended parent_of, so the package's nav parent was the LAST merged file, and graph/src/calls.rs enclosing_module walked class -> package -> that file: OrderService::place resolved `Invoicer::issue` against ShipmentService.php's `use` bindings (Ledger only) and bound nothing. Measured on HEAD 2170ff8 (three runs, stable): both IMPORTS edges, CALLS ShipmentService::ship -> Ledger::issue only. CB.15: every member of the package resolves through its own file's `use` bindings (SymbolTable.home_module), and the package hangs under its first file.",
+  "expect_edges": [
+    {
+      "from": "App::Orders::OrderService::place",
+      "to": "App::Billing::Invoicer::issue",
+      "category": "CALLS",
+      "note": "resolved against its own file's use"
+    },
+    {
+      "from": "App::Orders::ShipmentService::ship",
+      "to": "App::Billing::Ledger::issue",
+      "category": "CALLS",
+      "note": "control"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "App::Orders::OrderService::place",
+      "to": "App::Billing::Ledger::issue",
+      "category": "CALLS"
+    }
+  ]
+}
