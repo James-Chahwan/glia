@@ -1,0 +1,27 @@
+{
+  "framework": "ruby-inheritance-mixin",
+  "language": "ruby",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "impl",
+  "cells": [
+    "ruby/impl"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLASS",
+      "name": "BaseRepository"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "UserRepository",
+      "to": "BaseRepository",
+      "category": "INHERITS_FROM"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "class UserRepository < BaseRepository || CF.6b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=1/1 literal=1/1 route=0/1 forbid=0/0) via=type. Predicted extractor gap (backlog, not fixed by the probe): `class UserRepository < BaseRepository` emits no INHERITS_FROM, same file or across files (measured both): the Ruby parser records no superclass ref."
+}

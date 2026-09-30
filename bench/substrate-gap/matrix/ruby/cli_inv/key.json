@@ -1,0 +1,34 @@
+{
+  "framework": "ruby-system-invocation",
+  "language": "ruby",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_inv",
+  "cells": [
+    "ruby/cli_inv"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "mytool"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli_invoke:mytool",
+      "to": "cli:mytool",
+      "category": "CLI_INVOKES"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "sync",
+      "max_nodes": 0
+    }
+  ],
+  "note": "Kernel#system argv form + a Thor CLI whose gemspec ships the mytool executable || CF.6b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=1/1 literal=1/1 route=0/1 forbid=1/1) via=cli. Predicted extractor gap (backlog, not fixed by the probe): the invocation fires (`system(\"mytool\", ..)`) but the gemspec `executables = [\"mytool\"]` is not read as a binary name (LA.20c reads pyproject / package.json / Cargo), so CLI_INVOKES pairs only the Weak subcommand path."
+}
