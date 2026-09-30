@@ -1,6 +1,6 @@
-//! `glia docs sync|push` — the doc-source sync step (Confluence over the
-//! network, or a local wiki checkout); the snapshot it writes feeds the
-//! offline, byte-identical build.
+//! `glia docs sync|push` — the doc-source sync step (Confluence or a
+//! MediaWiki over the network, or a local wiki checkout); the snapshot it
+//! writes feeds the offline, byte-identical build.
 
 use std::path::Path;
 
@@ -20,16 +20,33 @@ enum SyncSource {
     /// A local directory of Markdown pages: a GitHub / GitLab wiki checkout
     /// (`--path`, optional `--container` / `--url-base`).
     Dir,
+    /// A MediaWiki through its Action API (`--api`, one of `--namespace` /
+    /// `--category`, optional `--container` / `--max-pages` / `--token`).
+    #[value(name = "mediawiki")]
+    MediaWiki,
+}
+
+impl SyncSource {
+    fn name(self) -> &'static str {
+        match self {
+            SyncSource::Confluence => "confluence",
+            SyncSource::Dir => "dir",
+            SyncSource::MediaWiki => "mediawiki",
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
 enum DocsCmd {
     /// Pull external doc pages into `<repo>/.glia/docs-snapshot`: every page
-    /// in a Confluence space (the default), or with `--source dir` every
-    /// Markdown page of a local wiki checkout. Then `glia build <repo>`
-    /// ingests it (DOC_SPACE + DOC_SECTION + doc→code DOCUMENTS links).
+    /// in a Confluence space (the default), with `--source dir` every
+    /// Markdown page of a local wiki checkout, or with `--source mediawiki`
+    /// one namespace or category of a MediaWiki, read through its Action API
+    /// (never by following links). Then `glia build <repo>` ingests it
+    /// (DOC_SPACE + DOC_SECTION + doc→code DOCUMENTS links).
     /// Confluence credentials resolve flag → env → `./.env`
-    /// (CONFLUENCE_SITE / CONFLUENCE_EMAIL / CONFLUENCE_TOKEN).
+    /// (CONFLUENCE_SITE / CONFLUENCE_EMAIL / CONFLUENCE_TOKEN); a MediaWiki
+    /// bearer token flag → env → `./.env` (MEDIAWIKI_TOKEN).
     Sync {
         /// Repo whose snapshot to write.
         repo: String,
@@ -44,8 +61,9 @@ enum DocsCmd {
         /// its dot-entries, `_Sidebar.md`-style files or symlinks.
         #[arg(long, value_name = "DIR")]
         path: Option<String>,
-        /// `--source dir`: the container the pages are filed under
-        /// (`docspace::wiki::<container>`). Defaults to the directory's name.
+        /// `--source dir` / `mediawiki`: the container the pages are filed
+        /// under (`docspace::wiki::<container>`). Defaults to the directory's
+        /// name, or the api host.
         #[arg(long, value_name = "NAME")]
         container: Option<String>,
         /// `--source dir`: the wiki's web root; a page's url becomes
@@ -63,10 +81,31 @@ enum DocsCmd {
         /// `--include`, and wins over it.
         #[arg(long, value_name = "PATTERN")]
         exclude: Vec<String>,
+        /// `--source mediawiki`: the wiki's api.php URL
+        /// (`https://wiki.example/w/api.php`); https, or plain http to
+        /// loopback only. It is the only URL requested: no page URL is
+        /// fetched, no link or redirect followed.
+        #[arg(long, value_name = "URL")]
+        api: Option<String>,
+        /// `--source mediawiki`: pull every page of this namespace id (0 is
+        /// the main namespace; redirects left out).
+        #[arg(long, value_name = "N", conflicts_with = "category")]
+        namespace: Option<u32>,
+        /// `--source mediawiki`: pull the pages in this category (`Runbooks`
+        /// or `Category:Runbooks`; subcategories are not descended into).
+        #[arg(long, value_name = "NAME")]
+        category: Option<String>,
+        /// `--source mediawiki`: stop after this many listed pages
+        /// (default 5000).
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+        max_pages: Option<u32>,
         #[arg(long)]
         site: Option<String>,
         #[arg(long)]
         email: Option<String>,
+        /// Confluence API token; with `--source mediawiki` a bearer token
+        /// (an OAuth 2 owner-only consumer's access token). Cookie / password
+        /// login is not supported.
         #[arg(long)]
         token: Option<String>,
     },
@@ -115,22 +154,41 @@ fn cmd_docs(action: DocsCmd) -> i32 {
             url_base,
             include,
             exclude,
+            api,
+            namespace,
+            category,
+            max_pages,
             site,
             email,
             token,
         } => {
+            use SyncSource::{Confluence, Dir, MediaWiki};
             let filter = glia_doc_sources::TitleFilter::new(&include, &exclude);
+            // Every source-specific flag, in the order it is reported, with
+            // the sources that take it.
+            let given: [(&str, bool, &[SyncSource]); 11] = [
+                ("--space", space.is_some(), &[Confluence]),
+                ("--site", site.is_some(), &[Confluence]),
+                ("--email", email.is_some(), &[Confluence]),
+                ("--token", token.is_some(), &[Confluence, MediaWiki]),
+                ("--path", path.is_some(), &[Dir]),
+                ("--container", container.is_some(), &[Dir, MediaWiki]),
+                ("--url-base", url_base.is_some(), &[Dir]),
+                ("--api", api.is_some(), &[MediaWiki]),
+                ("--namespace", namespace.is_some(), &[MediaWiki]),
+                ("--category", category.is_some(), &[MediaWiki]),
+                ("--max-pages", max_pages.is_some(), &[MediaWiki]),
+            ];
+            if let Some((flag, _, takes)) =
+                given.iter().find(|(_, set, takes)| *set && !takes.contains(&source))
+            {
+                let takes: Vec<String> =
+                    takes.iter().map(|s| format!("--source {}", s.name())).collect();
+                eprintln!("error: {flag} applies only to {}", takes.join(" or "));
+                return 2;
+            }
             match source {
                 SyncSource::Confluence => {
-                    let dir_only = [
-                        ("--path", path.is_some()),
-                        ("--container", container.is_some()),
-                        ("--url-base", url_base.is_some()),
-                    ];
-                    if let Some((flag, _)) = dir_only.iter().find(|(_, set)| *set) {
-                        eprintln!("error: {flag} applies only to --source dir");
-                        return 2;
-                    }
                     let Some(space) = space else {
                         eprintln!(
                             "error: --space <SPACE> is required with --source confluence (the default); \
@@ -148,21 +206,44 @@ fn cmd_docs(action: DocsCmd) -> i32 {
                     sync_confluence(&repo, &space, &cfg, &filter, include.len(), exclude.len())
                 }
                 SyncSource::Dir => {
-                    let confluence_only = [
-                        ("--space", space.is_some()),
-                        ("--site", site.is_some()),
-                        ("--email", email.is_some()),
-                        ("--token", token.is_some()),
-                    ];
-                    if let Some((flag, _)) = confluence_only.iter().find(|(_, set)| *set) {
-                        eprintln!("error: {flag} applies only to --source confluence");
-                        return 2;
-                    }
                     let Some(path) = path else {
                         eprintln!("error: --path <DIR> is required with --source dir");
                         return 2;
                     };
                     sync_dir(&repo, &path, container, url_base.as_deref(), &filter)
+                }
+                SyncSource::MediaWiki => {
+                    use glia_doc_sources::mediawiki::{self, Selection};
+                    let Some(api) = api else {
+                        eprintln!(
+                            "error: --api <URL> is required with --source mediawiki (the wiki's api.php, e.g. https://wiki.example/w/api.php)"
+                        );
+                        return 2;
+                    };
+                    let selection = match (namespace, category) {
+                        (Some(n), _) => Selection::Namespace(n),
+                        (None, Some(c)) => Selection::Category(c),
+                        (None, None) => {
+                            eprintln!(
+                                "error: one of --namespace <N> or --category <NAME> is required with --source mediawiki"
+                            );
+                            return 2;
+                        }
+                    };
+                    let cfg = match mediawiki::Config::resolve(
+                        &api,
+                        token,
+                        container,
+                        glia_engine::RELEASE,
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            return 2;
+                        }
+                    };
+                    let max_pages = max_pages.map_or(mediawiki::DEFAULT_MAX_PAGES, |n| n as usize);
+                    sync_mediawiki(&repo, &cfg, &selection, max_pages, &filter)
                 }
             }
         }
@@ -333,6 +414,88 @@ fn sync_dir(
             println!(
                 "synced {} page(s) from wiki dir {path} (container {container}) → {}",
                 w.written,
+                w.path.display()
+            );
+            println!("run `glia build {repo}` to ingest.");
+            0
+        }
+        Err(e) => {
+            eprintln!("error: writing snapshot: {e}");
+            1
+        }
+    }
+}
+
+/// `--source mediawiki` (CE.4d): pull one namespace or category through the
+/// Action API, filter, redact, and merge it into the snapshot as one `wiki`
+/// container. Prints the fired_on marker
+/// `[docs] sync source=mediawiki api=<scheme://host> selection=<ns:N|category:C>
+/// fetched=<f> kept=<k> skipped=<s> requests=<r> retries=<t>` (no token, no
+/// path), then CE.4c's `[docs] wikitext` line.
+fn sync_mediawiki(
+    repo: &str,
+    cfg: &glia_doc_sources::mediawiki::Config,
+    selection: &glia_doc_sources::mediawiki::Selection,
+    max_pages: usize,
+    filter: &glia_doc_sources::TitleFilter,
+) -> i32 {
+    let label = selection.label();
+    let origin = match cfg.origin() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
+    let (pages, stats) = match glia_doc_sources::mediawiki::pull(cfg, selection, max_pages) {
+        Ok(pulled) => pulled,
+        Err(e) => {
+            eprintln!("error: pulling {label} from {origin}: {e}");
+            return 1;
+        }
+    };
+    let pages: Vec<_> = pages.into_iter().filter(|p| filter.keep(&p.title)).collect();
+    eprintln!(
+        "[docs] sync source=mediawiki api={origin} selection={label} fetched={} kept={} skipped={} requests={} retries={}",
+        stats.fetched,
+        pages.len(),
+        stats.skipped(),
+        stats.requests,
+        stats.retries
+    );
+    if let Some(marker) = stats.wikitext_marker() {
+        eprintln!("{marker}");
+    }
+    if stats.truncated {
+        eprintln!(
+            "[docs] warning: stopped at --max-pages {max_pages}; the rest of {label} was not pulled"
+        );
+    }
+    if pages.is_empty() {
+        if stats.pages > 0 {
+            eprintln!(
+                "error: every one of {} page(s) was filtered out; refusing to overwrite the snapshot with an empty manifest",
+                stats.pages
+            );
+        } else {
+            eprintln!(
+                "error: no wikitext pages in {label} ({} listed, {} skipped); nothing to sync",
+                stats.fetched,
+                stats.skipped()
+            );
+        }
+        return 1;
+    }
+    let source = glia_doc_sources::SnapshotSource {
+        kind: glia_code_domain::DocSourceKind::Wiki,
+        container: cfg.container.clone(),
+    };
+    match write_pages(repo, &source, &pages) {
+        Ok(w) => {
+            println!(
+                "synced {} page(s) from {origin} {label} (container {}) → {}",
+                w.written,
+                cfg.container,
                 w.path.display()
             );
             println!("run `glia build {repo}` to ingest.");

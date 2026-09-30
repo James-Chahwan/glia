@@ -21,12 +21,15 @@
 //! GitHub / GitLab wiki checkout's Markdown pages (CE.4b, `--source dir`), and
 //! its `.mediawiki` / `.wiki` pages through [`wikitext`], a dependency-free
 //! MediaWiki markup → markdown converter that keeps headings and code spans
-//! (CE.4c).
+//! (CE.4c). [`mediawiki`] pulls one namespace or category of a live MediaWiki
+//! through its Action API into wikitext [`Page`]s (CE.4d, `--source mediawiki`),
+//! never by following links.
 
 pub mod confluence;
 pub mod confluence_rest;
 pub mod filter;
 pub mod markdown;
+pub mod mediawiki;
 pub mod snapshot;
 #[doc(hidden)]
 pub mod stub;
