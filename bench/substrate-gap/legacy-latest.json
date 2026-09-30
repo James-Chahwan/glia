@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 317,
+  "fixtures": 319,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -701,6 +701,13 @@
         "HANDLED_BY": 1.0
       }
     },
+    "go-route-struct-routers": {
+      "framework": "go-route-struct-routers",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
     "go-split-receiver": {
       "framework": "go-split-receiver",
       "language": "go",
@@ -1189,6 +1196,13 @@
       "per_category": {
         "HANDLED_BY": 1.0,
         "HTTP_CALLS": 1.0
+      }
+    },
+    "php-shared-namespace-bindings": {
+      "framework": "php-shared-namespace-bindings",
+      "language": "php",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "php-symfony-composed": {
