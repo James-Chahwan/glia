@@ -18,8 +18,8 @@
   "expect_edges": [
     {"from": "Api::status", "to": "endpoint:GET:/status", "category": "CALLS",
      "note": "a getter body is credited to the getter"},
-    {"from": "lib::app::Api", "to": "endpoint:GET:/boot", "category": "CALLS",
-     "note": "a constructor has no node of its own: its body is credited to the enclosing type (the forbid below pins that it is not the previous method)"},
+    {"from": "lib::app::Api::Api", "to": "endpoint:GET:/boot", "category": "CALLS",
+     "note": "CB.9: the constructor `Api()` is the METHOD Api::Api owning its body (the forbids below pin that it is neither the previous method nor the class)"},
     {"from": "Greets::greet", "to": "Greets::hello", "category": "CALLS",
      "note": "mixin self-call (LA.34 member scope)"},
     {"from": "Shout::shout", "to": "Shout::twice", "category": "CALLS",
@@ -36,6 +36,8 @@
   "forbid": [
     {"from": "lib::app::Api::warm", "to": "endpoint:GET:/boot", "category": "CALLS",
      "note": "PRECISION: the constructor body is not the previous method's (HEAD credits it to warm via acc.nodes.last())"},
+    {"from": "lib::app::Api", "to": "endpoint:GET:/boot", "category": "CALLS",
+     "note": "PRECISION (CB.9): nor the class's - LA.37b credited it to Api before constructors were METHODs"},
     {"from": "endpoint:GET:/boot", "to": "endpoint:GET:/status", "category": "CALLS",
      "note": "PRECISION: a getter body is never credited to an ENDPOINT node (HEAD does)"},
     {"from": "lib::app::Api::compute", "to": "lib::app::Api::compute", "category": "CALLS",

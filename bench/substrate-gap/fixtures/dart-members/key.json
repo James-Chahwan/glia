@@ -1,0 +1,84 @@
+{
+  "framework": "dart-members",
+  "language": "dart",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-D1/D2/D3: parsers/code/dart/src/lib.rs mints no node for a constructor, a factory or an operator (their bodies' calls are credited to the CLASS), none for an abstract member (only a method with a body is read), and keeps enum constants as names only. DECISION: the unnamed constructor is METHOD `<Class>::<Class>` (the Java / C# constructor qname), a named constructor or factory `C.name` is METHOD `<Class>::name` (it is called as `C.name(...)`, so `Money.zero()` binds through class_methods), an operator is METHOD `<Class>::operator<op>` (`operator+`, `operator[]=`). Measured on HEAD 2170ff8: CALLS lib::src::money::Money -> round2 is the only edge out of the class.",
+  "expect_nodes": [
+    {
+      "kind": "METHOD",
+      "name": "lib::src::money::Money::Money"
+    },
+    {
+      "kind": "METHOD",
+      "name": "lib::src::money::Money::zero"
+    },
+    {
+      "kind": "METHOD",
+      "name": "lib::src::money::Money::parse"
+    },
+    {
+      "kind": "METHOD",
+      "name": "lib::src::money::Money::operator+"
+    },
+    {
+      "kind": "METHOD",
+      "name": "lib::src::money::Repo::load"
+    },
+    {
+      "kind": "METHOD",
+      "name": "lib::src::money::Repo::save"
+    },
+    {
+      "kind": "ATTRIBUTE",
+      "name": "lib::src::money::Currency::aud"
+    },
+    {
+      "kind": "ATTRIBUTE",
+      "name": "lib::src::money::Currency::usd"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "lib::src::money::Money::Money",
+      "to": "lib::src::money::Money::validate",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::src::money::Money::zero",
+      "to": "lib::src::money::round2",
+      "category": "CALLS",
+      "note": "initializer list call"
+    },
+    {
+      "from": "lib::src::money::Money::operator+",
+      "to": "lib::src::money::round2",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::src::money::total",
+      "to": "lib::src::money::Money::zero",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::src::money::total",
+      "to": "lib::src::money::Money::parse",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::src::money::Currency",
+      "to": "lib::src::money::Currency::aud",
+      "category": "HAS_ATTRIBUTE",
+      "note": "enum constant under its ENUM (the Rust / TypeScript / Java enum-member edge)"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "lib::src::money::Money",
+      "to": "lib::src::money::round2",
+      "category": "CALLS",
+      "note": "a CLASS makes no calls; its members do"
+    }
+  ]
+}

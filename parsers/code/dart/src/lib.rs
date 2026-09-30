@@ -58,6 +58,15 @@ pub fn parse_file(
         );
     }
 
+    // CB.9 stopgap marker (GLIA_DART_DEBUG=1): `Type.member(..)` calls on a
+    // type this file declares, bound through the receiver-type pass.
+    if dart_debug_enabled() && acc.type_receivers > 0 {
+        eprintln!(
+            "[dart-type-receivers] recorded={} file={file_rel_path}",
+            acc.type_receivers
+        );
+    }
+
     // LA.37a fired_on marker (GLIA_DART_DEBUG=1): this file declared top-level
     // functions / getters / setters, whose sibling bodies were walked.
     let t = &acc.top_level;
@@ -68,22 +77,26 @@ pub fn parse_file(
         );
     }
 
-    // LA.37b fired_on marker (GLIA_DART_DEBUG=1): this file declared member
-    // containers beyond a plain class, or member bodies that HEAD credited to
-    // `acc.nodes.last()` (getters / setters, constructors / factories /
-    // operators).
+    // LA.37b / CB.9 fired_on marker (GLIA_DART_DEBUG=1): this file declared
+    // member containers beyond a plain class, getter / setter bodies, or the
+    // members CB.9 made METHODs (constructors / factories, operators,
+    // bodiless members) and enum constants it made ATTRIBUTEs.
     let m = &acc.members;
     if dart_debug_enabled() && m.fired() {
         eprintln!(
             "[dart-members] mixins={} extensions={} extension_types={} unnamed_ext_skipped={} \
-             enum_members={} accessors={} ctor_bodies={} file={file_rel_path}",
+             enum_members={} accessors={} ctors={} operators={} abstract={} enum_constants={} \
+             file={file_rel_path}",
             m.mixins,
             m.extensions,
             m.extension_types,
             m.unnamed_ext_skipped,
             m.enum_members,
             m.accessors,
-            m.ctor_bodies
+            m.ctors,
+            m.operators,
+            m.bodiless,
+            m.enum_constants
         );
     }
 
@@ -124,6 +137,13 @@ struct Acc {
     /// LA.37b: this file's member containers and member bodies, for the
     /// `[dart-members]` marker.
     members: MemberStats,
+    /// CB.9 stopgap ([`record_type_receiver`]): the class / mixin / enum /
+    /// extension-type names this file declares. Lookup-only.
+    type_names: HashSet<String>,
+    /// CB.9 stopgap: `Type.member(..)` call sites whose same-file type base
+    /// was recorded as a typed name of the caller's scope, for the
+    /// `[dart-type-receivers]` marker.
+    type_receivers: usize,
 }
 
 #[derive(Default)]
@@ -137,12 +157,21 @@ struct MemberStats {
     extension_types: usize,
     /// Unnamed extensions on a type this file does not declare: no node.
     unnamed_ext_skipped: usize,
-    /// Enum members that declared a METHOD.
+    /// Enum members that declared a METHOD (constructors included).
     enum_members: usize,
     /// Member getter / setter bodies, each credited to its METHOD.
     accessors: usize,
-    /// Constructor / factory / operator bodies, credited to the owner type.
-    ctor_bodies: usize,
+    /// CB.9: constructor / factory members, each a METHOD `<T>::<T>` or
+    /// `<T>::<name>`, with a body or without.
+    ctors: usize,
+    /// CB.9: operator members, each a METHOD `<T>::operator<op>`.
+    operators: usize,
+    /// CB.9: bodiless non-constructor members (abstract or `external`
+    /// methods, getters, setters and operators), each a METHOD with no calls.
+    /// The marker's `abstract=` field.
+    bodiless: usize,
+    /// CB.9: enum constants, each an ATTRIBUTE `<Enum>::<constant>`.
+    enum_constants: usize,
 }
 
 impl MemberStats {
@@ -153,8 +182,24 @@ impl MemberStats {
             + self.unnamed_ext_skipped
             + self.enum_members
             + self.accessors
-            + self.ctor_bodies
+            + self.ctors
+            + self.operators
+            + self.bodiless
+            + self.enum_constants
             > 0
+    }
+
+    /// Count one declared member of `kind`; `bodiless` when it came from a
+    /// `declaration` (a member with no `function_body`).
+    fn count(&mut self, kind: MemberKind, bodiless: bool) {
+        match kind {
+            MemberKind::Ctor => self.ctors += 1,
+            MemberKind::Operator => self.operators += 1,
+            MemberKind::Method | MemberKind::Accessor => {}
+        }
+        if bodiless && kind != MemberKind::Ctor {
+            self.bodiless += 1;
+        }
     }
 }
 
@@ -203,6 +248,7 @@ fn visit_top(
         types: declared_types(node, src, parent_qname, repo),
         library: library_names(node, src),
     };
+    acc.type_names = file_types.types.keys().cloned().collect();
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         match child.kind() {
@@ -302,8 +348,7 @@ fn visit_class(
 //
 // One member walker ([`visit_members`]) serves every body that holds
 // `class_member`s: class_body (class, mixin, extension type), extension_body
-// and enum_body. Each container is the OWNER its member bodies are credited
-// to:
+// and enum_body. Each container is the OWNER its member METHODs hang on:
 //
 //   mixin M { }              CLASS <module>::M (it carries implementation, and
 //                            SelfMethod resolution walks to CLASS / STRUCT /
@@ -320,8 +365,9 @@ fn visit_class(
 //
 // Mixin heritage (`on` / `implements`) is not emitted here.
 
-/// The type a member body is credited to, and LA.34's names an unqualified
-/// call in that body reaches before library scope.
+/// The type that owns a member (its METHODs hang on `id`; CB.9: every member
+/// body is credited to its own METHOD, never to the owner), and LA.34's names
+/// an unqualified call in a member body reaches before library scope.
 struct Owner<'a> {
     qname: &'a str,
     id: NodeId,
@@ -575,25 +621,79 @@ fn visit_members(
     declared
 }
 
-/// The name a `class_member`'s `method_signature` declares, and whether it is
-/// a getter / setter: the `name` of its function / getter / setter signature.
-/// None for a constructor / factory / operator signature - its body belongs
-/// to the owner type.
-fn member_name(sig: TsNode, src: &[u8]) -> Option<(String, bool)> {
+/// What one `class_member` declares (CB.9). Every kind is a METHOD
+/// `<owner>::<name>`; the kind picks the name ([`member_name`]) and the
+/// `[dart-members]` counter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemberKind {
+    /// A method, instance or static (`function_signature`).
+    Method,
+    /// A getter or setter: a getter + setter pair is one METHOD.
+    Accessor,
+    /// A generative, `const`, factory or redirecting-factory constructor.
+    Ctor,
+    /// `operator <op>`.
+    Operator,
+}
+
+/// The member a `class_member`'s `method_signature` (a member with a body) or
+/// `declaration` (a bodiless one) declares, and its kind (CB.9):
+///
+///   `m(..)` / `get g` / `set s(..)`   its `name`
+///   `C(..)`, `C.new(..)`, `factory C(..)`   `C`, the class name (the Java /
+///                                     C# constructor qname `<T>::<T>`)
+///   `C.name(..)`, `factory C.name(..)`, `const C.name(..)`   `name`: Dart
+///                                     calls it `C.name(..)`, like a static
+///                                     method, and forbids a static member of
+///                                     the same name
+///   `operator +`, `operator []=`      `operator+`, `operator[]=`: the token
+///                                     verbatim, no space (unary and binary
+///                                     `-` are one `operator-`)
+///
+/// None for a field declaration, which declares no METHOD.
+fn member_name(sig: TsNode, src: &[u8]) -> Option<(String, MemberKind)> {
     let mut cursor = sig.walk();
     for part in sig.named_children(&mut cursor) {
-        let accessor = match part.kind() {
-            "function_signature" => false,
-            "getter_signature" | "setter_signature" => true,
+        let kind = match part.kind() {
+            "function_signature" => MemberKind::Method,
+            "getter_signature" | "setter_signature" => MemberKind::Accessor,
+            "constructor_signature"
+            | "constant_constructor_signature"
+            | "factory_constructor_signature"
+            | "redirecting_factory_constructor_signature" => {
+                return constructor_name(part, src).map(|n| (n, MemberKind::Ctor));
+            }
+            "operator_signature" => {
+                let op: String = text_of(part.child_by_field_name("operator")?, src)
+                    .split_whitespace()
+                    .collect();
+                return (!op.is_empty()).then(|| (format!("operator{op}"), MemberKind::Operator));
+            }
             _ => continue,
         };
         let name = part
             .child_by_field_name("name")
             .map(|n| text_of(n, src).to_string())
             .or_else(|| find_identifier(part, src))?;
-        return Some((name, accessor));
+        return Some((name, kind));
     }
     None
+}
+
+/// A constructor signature's member name. tree-sitter-dart 0.1.0's `name`
+/// field spans several nodes - the class `identifier`, then optionally `.`
+/// and an `identifier` or the `new` keyword - so it is read with
+/// `children_by_field_name` (`child_by_field_name` sees only the first):
+/// `C` / `C.new` -> `C`, `C.name` -> `name`.
+fn constructor_name(sig: TsNode, src: &[u8]) -> Option<String> {
+    let mut cursor = sig.walk();
+    let parts: Vec<TsNode> = sig.children_by_field_name("name", &mut cursor).collect();
+    let class = parts.first().filter(|p| p.kind() == "identifier")?;
+    let name = match parts.last() {
+        Some(last) if last.id() != class.id() && last.kind() == "identifier" => *last,
+        _ => *class,
+    };
+    Some(text_of(name, src).to_string()).filter(|n| !n.is_empty())
 }
 
 /// G12.5: class heritage. The `superclass` field holds `extends <type>` plus an
@@ -700,15 +800,19 @@ fn emit_heritage_ref(
     });
 }
 
-/// One `class_member` of any container (LA.37b). A method / getter / setter
-/// signature declares the METHOD `<owner>::<name>` once per file (LA.37a's
-/// `declared_ids`), so a getter + setter pair - or an unnamed extension member
-/// re-declaring its on-type's - is one Node and one DEFINES edge; its
-/// `function_body` is credited to that METHOD. A constructor / factory /
-/// operator signature declares no node: its body is credited to the owner
-/// type, never to whatever node was pushed last. Every body's unqualified
-/// calls go through LA.34's scope (`owner.members`, then its own locals).
-/// Returns true when the member declared a METHOD.
+/// One `class_member` of any container (LA.37b, CB.9). Every member with a
+/// name declares the METHOD `<owner>::<name>` ([`member_name`]) once per file
+/// (LA.37a's `declared_ids`), so a getter + setter pair - or an unnamed
+/// extension member re-declaring its on-type's - is one Node and one DEFINES
+/// edge. A `method_signature` is followed by its `function_body`; a
+/// `declaration` is a bodiless member (abstract, `external`, a constructor
+/// ending in `;`, a redirecting factory) or a field, which declares nothing
+/// here. A constructor's initializer list (`: x = f(v), super(g(v))`) and
+/// redirection (`: this(h())`) run as part of it: their calls, and every
+/// body call, come from the member's own METHOD, never from the owner type.
+/// Every unqualified call goes through LA.34's scope (`owner.members`, then
+/// the member's parameters and locals). Returns true when the member
+/// declared a METHOD.
 fn visit_class_member(
     node: TsNode,
     src: &[u8],
@@ -717,75 +821,102 @@ fn visit_class_member(
     repo: RepoId,
     acc: &mut Acc,
 ) -> bool {
-    let mut member_id: Option<NodeId> = None;
-    let mut accessor = false;
+    let mut member: Option<(NodeId, MemberKind)> = None;
     // LA.34: the signature that declared it, whose parameters are locals.
     let mut signature: Option<TsNode> = None;
     let mut c = node.walk();
     for child in node.named_children(&mut c) {
         match child.kind() {
-            "method_signature" => {
-                signature = Some(child);
-                let Some((name, is_accessor)) = member_name(child, src) else {
+            "method_signature" | "declaration" => {
+                let Some((name, kind)) = member_name(child, src) else {
                     continue;
                 };
-                accessor = is_accessor;
-                let qname = format!("{}::{name}", owner.qname);
-                let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &qname);
-                if acc.declared_ids.insert(id) {
-                    acc.nodes.push(Node {
-                        id,
-                        repo,
-                        confidence: Confidence::Strong,
-                        cells: entity_cells(&node, src, file_rel),
-                    });
-                    acc.edges.push(Edge {
-                        from: owner.id,
-                        to: id,
-                        category: edge_category::DEFINES,
-                        confidence: Confidence::Strong,
-                        cells: Vec::new(),
-                    });
-                    acc.nav
-                        .record(id, &name, &qname, node_kind::METHOD, Some(owner.id));
-                }
-                member_id = Some(id);
+                let id = declare_member(node, &name, owner, repo, file_rel, src, acc);
+                acc.members.count(kind, child.kind() == "declaration");
+                signature = Some(child);
+                member = Some((id, kind));
+                visit_initializers(child, id, owner, src, repo, file_rel, acc);
             }
             "function_body" => {
-                let from = match member_id {
-                    Some(id) => {
-                        if accessor {
-                            acc.members.accessors += 1;
-                        }
-                        id
-                    }
-                    None => {
-                        acc.members.ctor_bodies += 1;
-                        owner.id
-                    }
+                // Every body follows the signature that names its member; a
+                // body whose signature named nothing (a parse error) is
+                // credited to no node.
+                let Some((id, kind)) = member else {
+                    continue;
                 };
+                if kind == MemberKind::Accessor {
+                    acc.members.accessors += 1;
+                }
                 let scope = CallScope {
                     members: owner.members,
                     locals: local_names(signature, child, src),
                 };
-                let first = acc.calls.len();
-                collect_calls_in(child, src, from, &scope, repo, file_rel, acc);
-                if member_id.is_none() {
-                    // `factory T.fromJson(..) { return T(..); }`: a bare call
-                    // of the owner's own name inside its constructor / factory
-                    // body constructs the owner, a CLASS -> same-CLASS
-                    // self-loop that says nothing. Dropped.
-                    let own = owner.qname.rsplit("::").next().unwrap_or(owner.qname);
-                    let tail = acc.calls.split_off(first);
-                    acc.calls.extend(tail.into_iter().filter(|c| {
-                        !matches!(&c.qualifier, CallQualifier::Bare(n) if n == own)
-                    }));
-                }
+                collect_calls_in(child, src, id, &scope, repo, file_rel, acc);
             }
             _ => {}
         }
     }
-    member_id.is_some()
+    member.is_some()
+}
+
+/// The METHOD `<owner>::<name>` for one `class_member` (`node`): its Node
+/// (the member's CODE / POSITION), the owner's DEFINES edge and its nav
+/// record, pushed once per file (LA.37a's `declared_ids`). Returns its id.
+fn declare_member(
+    node: TsNode,
+    name: &str,
+    owner: &Owner,
+    repo: RepoId,
+    file_rel: &str,
+    src: &[u8],
+    acc: &mut Acc,
+) -> NodeId {
+    let qname = format!("{}::{name}", owner.qname);
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &qname);
+    if acc.declared_ids.insert(id) {
+        acc.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: entity_cells(&node, src, file_rel),
+        });
+        acc.edges.push(Edge {
+            from: owner.id,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
+        acc.nav
+            .record(id, name, &qname, node_kind::METHOD, Some(owner.id));
+    }
+    id
+}
+
+/// CB.9: a constructor's `initializers` (`Money.zero() : cents = round2(0)`,
+/// `super(g(v))`, `assert(..)`) and `redirection` (`: this(h())`), children
+/// of its `method_signature` or `declaration`, walked for calls from the
+/// constructor METHOD `from`, the constructor's parameters as locals.
+fn visit_initializers(
+    sig: TsNode,
+    from: NodeId,
+    owner: &Owner,
+    src: &[u8],
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) {
+    let mut cursor = sig.walk();
+    for part in sig.named_children(&mut cursor) {
+        if !matches!(part.kind(), "initializers" | "redirection") {
+            continue;
+        }
+        let scope = CallScope {
+            members: owner.members,
+            locals: local_names(Some(sig), part, src),
+        };
+        collect_calls_in(part, src, from, &scope, repo, file_rel, acc);
+    }
 }
 
 fn visit_enum(
@@ -833,8 +964,68 @@ fn visit_enum(
             id,
             members: &members,
         };
+        let mut cursor = body.walk();
+        for constant in body.named_children(&mut cursor) {
+            if constant.kind() == "enum_constant" {
+                visit_enum_constant(constant, src, file_rel, &owner, repo, acc);
+            }
+        }
         acc.members.enum_members += visit_members(body, src, file_rel, &owner, repo, acc);
         collect_dart_field_types(body, src, id, acc);
+    }
+}
+
+/// CB.9: one enum constant -> the ATTRIBUTE `<Enum>::<constant>` under its
+/// ENUM (HAS_ATTRIBUTE, nav parent the ENUM): the Rust-variant / TypeScript /
+/// Java enum-member shape that graph/src/calls.rs `enum_member` binds
+/// `Enum.member` uses against. An enhanced-enum constant's arguments
+/// (`aud(1)`, `usd.named(2)`) are walked for calls from the ATTRIBUTE, under
+/// the enum's member scope.
+fn visit_enum_constant(
+    node: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    owner: &Owner,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(name_node) = node.child_by_field_name("name") else {
+        return;
+    };
+    let name = text_of(name_node, src);
+    if name.is_empty() {
+        return;
+    }
+    let qname = format!("{}::{name}", owner.qname);
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ATTRIBUTE, &qname);
+    if acc.declared_ids.insert(id) {
+        acc.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: entity_cells(&node, src, file_rel),
+        });
+        acc.edges.push(Edge {
+            from: owner.id,
+            to: id,
+            category: edge_category::HAS_ATTRIBUTE,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
+        acc.nav
+            .record(id, name, &qname, node_kind::ATTRIBUTE, Some(owner.id));
+    }
+    acc.members.enum_constants += 1;
+    let mut cursor = node.walk();
+    for args in node.named_children(&mut cursor) {
+        if !matches!(args.kind(), "arguments" | "argument_part") {
+            continue;
+        }
+        let scope = CallScope {
+            members: owner.members,
+            locals: HashSet::new(),
+        };
+        collect_calls_in(args, src, id, &scope, repo, file_rel, acc);
     }
 }
 
@@ -1065,9 +1256,10 @@ fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
 
 /// Walk a body for Pattern A endpoints and the call sites of every selector
 /// chain in it (LA.23e), its unqualified calls classified by `scope`
-/// (LA.34), all credited to `from` - the body's own METHOD / FUNCTION, or
-/// the owner type for a constructor / factory / operator body (LA.37b).
-/// Nested closures and local functions are not entered.
+/// (LA.34), all credited to `from` - the body's own METHOD / FUNCTION (a
+/// constructor / factory / operator is its own METHOD since CB.9, which also
+/// walks a constructor's initializer list and an enum constant's arguments
+/// through here). Nested closures and local functions are not entered.
 fn collect_calls_in(
     node: TsNode,
     src: &[u8],
@@ -1185,10 +1377,43 @@ fn push_selector_chain_calls(
         i += 1 + selectors.len();
         for (qualifier, line) in chain_call_sites(primary, &selectors, src) {
             if let Some(qualifier) = scope.classify(qualifier, &mut acc.bare_calls) {
+                record_type_receiver(&qualifier, from, scope, acc);
                 acc.calls.push(CallSite { from, qualifier, line });
             }
         }
     }
+}
+
+/// CB.9 STOPGAP - `Money.zero()` / `Money.parse(..)` / `Color.pick()` on a
+/// type THIS file declares. The call site is `Attribute { base: "Money", .. }`
+/// and graph/src/calls.rs `resolve_attribute_target` binds an Attribute base
+/// only through the caller module's import bindings: a Dart library's own
+/// declarations are never bound there (nor are an `import 'x.dart'`'s
+/// names), so a named constructor, factory or static member called on its
+/// class never binds. Here the parser records, for the caller's scope, that
+/// the name `Money` denotes the type `Money` (`CodeNav::record_local_type`,
+/// the A6.2a / LA.35a receiver table), so the graph's receiver-type pass
+/// resolves `Money` through the caller module's own symbols and binds
+/// `zero` in that CLASS / ENUM's `class_methods` - the member METHOD this
+/// packet declares. Only a type this file declares, and only when no local
+/// and no member of the enclosing type in `scope` shadows the name.
+///
+/// REMOVAL PATH: once the graph binds a Dart library-scope type as an
+/// Attribute base itself (resolve_attribute_target falling back to the
+/// caller module's own type symbols, and to the names a Dart
+/// `import 'x.dart'` brings in), delete this function, its one call in
+/// [`push_selector_chain_calls`], `Acc::type_names` / `Acc::type_receivers`,
+/// the `[dart-type-receivers]` marker and the
+/// `same_file_type_member_calls_record_the_type` test.
+fn record_type_receiver(qualifier: &CallQualifier, from: NodeId, scope: &CallScope, acc: &mut Acc) {
+    let CallQualifier::Attribute { base, .. } = qualifier else {
+        return;
+    };
+    if !acc.type_names.contains(base) || scope.locals.contains(base) || scope.members.contains(base) {
+        return;
+    }
+    acc.nav.record_local_type(from, base, base);
+    acc.type_receivers += 1;
 }
 
 /// The call sites of one primary + selector chain, in source order.
@@ -1365,9 +1590,10 @@ fn class_member_names(class_body: TsNode, src: &[u8]) -> HashSet<String> {
 fn local_names(signature: Option<TsNode>, body: TsNode, src: &[u8]) -> HashSet<String> {
     let mut names = HashSet::new();
     if let Some(sig) = signature {
-        // A class member passes its `method_signature` wrapper; a top-level
-        // function / setter (LA.37a) passes the signature itself. LA.37b: a
-        // constructor / factory / operator body is walked too, and its
+        // A class member passes its `method_signature` / `declaration`
+        // wrapper; a top-level function / setter (LA.37a) passes the
+        // signature itself. LA.37b / CB.9: a constructor / factory / operator
+        // body and a constructor's initializer list are walked too, and its
         // parameters are locals (`this.x` field formals bind nothing here).
         let parts: Vec<TsNode> = if matches!(sig.kind(), "function_signature" | "setter_signature") {
             vec![sig]
@@ -1381,6 +1607,7 @@ fn local_names(signature: Option<TsNode>, body: TsNode, src: &[u8]) -> HashSet<S
                 "function_signature"
                     | "setter_signature"
                     | "constructor_signature"
+                    | "constant_constructor_signature"
                     | "factory_constructor_signature"
                     | "operator_signature"
             ) {
@@ -2655,9 +2882,10 @@ class ApiClient {
         );
     }
 
-    /// LA.37b: a constructor body is credited to its class and a getter body
-    /// to the getter's own METHOD - never lent to the member before it
-    /// (LA.23e emitted no call site for either).
+    /// LA.37b / CB.9: a constructor body is credited to the constructor's
+    /// own METHOD and a getter body to the getter's - never lent to the
+    /// member before it (LA.23e emitted no call site for either), and never
+    /// to the class.
     #[test]
     fn body_is_credited_to_its_owner_not_the_previous_member() {
         let source = r#"class A {
@@ -2670,11 +2898,10 @@ class ApiClient {
 "#;
         let fp = parse_file(source, "lib/a.dart", "lib::a", repo()).unwrap();
         let class = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "lib::a::A");
-        let ctor: Vec<&CallQualifier> =
-            fp.calls.iter().filter(|c| c.from == class).map(|c| &c.qualifier).collect();
-        assert_eq!(ctor, vec![&attr("repo", "init")], "{:?}", fp.calls);
+        assert_eq!(calls_from(&fp, "lib::a::A::A"), vec![attr("repo", "init")]);
         assert_eq!(calls_from(&fp, "lib::a::A::name"), vec![attr("repo", "name")]);
         assert_eq!(calls_from(&fp, "lib::a::A::first"), vec![]);
+        assert!(!fp.calls.iter().any(|c| c.from == class), "{:?}", fp.calls);
         assert_eq!(fp.calls.len(), 2, "{:?}", fp.calls);
     }
 
@@ -3484,10 +3711,13 @@ extension on Api {
         assert_eq!(calls_from(&fp, "lib::a::A::v"), vec![]);
     }
 
+    /// CB.9 (was LA.37b's constructor_body_is_credited_to_the_type): a
+    /// constructor, factory and operator body is its own METHOD's, never the
+    /// class's; their parameters are locals.
     #[test]
-    fn constructor_body_is_credited_to_the_type() {
+    fn constructor_bodies_are_their_own_methods() {
         let fp = body_owners();
-        let api = class_id("lib::app::Api");
+        let api_ctor = method_id("lib::app::Api::Api");
         let warm = method_id("lib::app::Api::warm");
         let boot = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENDPOINT, "endpoint:GET:/boot");
         let calls_to_boot: Vec<NodeId> = fp
@@ -3496,7 +3726,8 @@ extension on Api {
             .filter(|e| e.to == boot && e.category == edge_category::CALLS)
             .map(|e| e.from)
             .collect();
-        assert_eq!(calls_to_boot, vec![api]);
+        assert_eq!(calls_to_boot, vec![api_ctor]);
+        assert_eq!(parent(&fp, api_ctor), Some(class_id("lib::app::Api")));
         assert!(!fp.edges.iter().any(|e| e.from == warm), "{:?}", fp.edges);
         // Factory and operator bodies too; their parameters are locals.
         let source = r#"void helper() {}
@@ -3508,21 +3739,13 @@ class Box {
 }
 "#;
         let fp = parse_file(source, "lib/b.dart", "lib::b", repo()).unwrap();
-        let box_id = class_id("lib::b::Box");
-        let mut from_box: Vec<CallQualifier> = fp
-            .calls
-            .iter()
-            .filter(|c| c.from == box_id)
-            .map(|c| c.qualifier.clone())
-            .collect();
-        from_box.sort_by_key(|q| format!("{q:?}"));
-        // `cb()` / `f()` call parameters; `Box(helper)` passes `helper`, and
-        // the factory constructing its own class would be a Box -> Box
-        // self-loop, so it is dropped.
-        assert_eq!(from_box, vec![bare("helper"), bare("helper")]);
+        // `cb()` / `f()` call parameters and emit nothing; `Box(helper)`
+        // passes `helper` and constructs the class, a call of its own.
+        assert_eq!(calls_from(&fp, "lib::b::Box::Box"), vec![bare("helper")]);
+        assert_eq!(calls_from(&fp, "lib::b::Box::make"), vec![bare("Box")]);
+        assert_eq!(calls_from(&fp, "lib::b::Box::operator+"), vec![bare("helper")]);
         assert_eq!(calls_from(&fp, "lib::b::Box::first"), vec![]);
-        // No constructor / factory / operator mints a node.
-        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::METHOD).count(), 1);
+        assert!(!fp.calls.iter().any(|c| c.from == class_id("lib::b::Box")), "{:?}", fp.calls);
     }
 
     #[test]
@@ -3541,7 +3764,8 @@ class Box {
     }
 
     /// Every member body in the fixture has an owner: the nine member nodes
-    /// the key expects, and nothing credited to `acc.nodes.last()`.
+    /// the key expects, the constructor `Api()` (CB.9), and nothing credited
+    /// to `acc.nodes.last()`.
     #[test]
     fn body_owners_fixture_members() {
         let fp = body_owners();
@@ -3556,6 +3780,7 @@ class Box {
         assert_eq!(
             methods,
             vec![
+                "lib::app::Api::Api",
                 "lib::app::Api::area",
                 "lib::app::Api::compute",
                 "lib::app::Api::doubled",
@@ -3572,5 +3797,301 @@ class Box {
                 "lib::app::Shout::twice",
             ]
         );
+    }
+
+    // ---- CB.9: constructors, operators, bodiless members, enum constants --
+
+    /// The committed `dart-members` fixture's file.
+    const MEMBERS_FIXTURE: &str =
+        include_str!("../../../../bench/substrate-gap/fixtures/dart-members/lib/src/money.dart");
+
+    fn members() -> FileParse {
+        parse_file(MEMBERS_FIXTURE, "lib/src/money.dart", "lib::src::money", repo()).unwrap()
+    }
+
+    fn attribute_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ATTRIBUTE, qname)
+    }
+
+    fn has_edge(fp: &FileParse, from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> bool {
+        fp.edges.iter().any(|e| e.from == from && e.to == to && e.category == category)
+    }
+
+    /// The unnamed constructor is `<T>::<T>`, a named constructor or factory
+    /// `C.name` is `<T>::name`; each a METHOD named for its last segment, once
+    /// under its class.
+    #[test]
+    fn constructors_are_methods() {
+        let fp = members();
+        let money = class_id("lib::src::money::Money");
+        for (q, name) in [
+            ("lib::src::money::Money::Money", "Money"),
+            ("lib::src::money::Money::zero", "zero"),
+            ("lib::src::money::Money::parse", "parse"),
+        ] {
+            let id = method_id(q);
+            assert_eq!(fp.nav.kind_by_id.get(&id), Some(&node_kind::METHOD), "{q}");
+            assert_eq!(fp.nav.name_by_id.get(&id).map(String::as_str), Some(name), "{q}");
+            assert_eq!(parent(&fp, id), Some(money), "{q}");
+            assert_eq!(defines(&fp, money, id), 1, "{q}");
+            assert_eq!(fp.nodes.iter().filter(|n| n.id == id).count(), 1, "{q}");
+        }
+        assert_eq!(calls_from(&fp, "lib::src::money::Money::Money"), vec![self_m("validate")]);
+        // `Money(int.parse(s))` constructs the class; `int.parse` is a call too.
+        assert_eq!(
+            calls_from(&fp, "lib::src::money::Money::parse"),
+            sorted(vec![bare("Money"), attr("int", "parse")])
+        );
+        // `C.new(..)` is the unnamed constructor; an external factory is a
+        // constructor with no body.
+        let source = "class C {\n  C.new();\n  external factory C.ext();\n}\n";
+        let fp = parse_file(source, "lib/c.dart", "lib::c", repo()).unwrap();
+        let mut methods: Vec<&str> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::METHOD)
+            .filter_map(|(id, _)| fp.nav.qname_by_id.get(id).map(String::as_str))
+            .collect();
+        methods.sort();
+        assert_eq!(methods, vec!["lib::c::C::C", "lib::c::C::ext"]);
+    }
+
+    /// A constructor's initializer list, `super(..)` / `this(..)` arguments
+    /// and body are all the constructor's; its parameters are locals there.
+    #[test]
+    fn initializer_list_calls_come_from_the_constructor() {
+        let fp = members();
+        assert_eq!(calls_from(&fp, "lib::src::money::Money::zero"), vec![bare("round2")]);
+        let money = class_id("lib::src::money::Money");
+        assert!(!fp.calls.iter().any(|c| c.from == money), "{:?}", fp.calls);
+        let source = r#"class A extends B {
+  final int x;
+  A.s(int v) : x = f(v), super(g(v)) { h(); }
+  A.p(int Function() k) : x = k();
+  A.r() : this.s(mk());
+  A.q(int v) : assert(ok(v)), x = v;
+}
+"#;
+        let fp = parse_file(source, "lib/a.dart", "lib::a", repo()).unwrap();
+        assert_eq!(calls_from(&fp, "lib::a::A::s"), sorted(vec![bare("f"), bare("g"), bare("h")]));
+        assert_eq!(calls_from(&fp, "lib::a::A::p"), vec![]);
+        assert_eq!(calls_from(&fp, "lib::a::A::r"), vec![bare("mk")]);
+        assert_eq!(calls_from(&fp, "lib::a::A::q"), vec![bare("ok")]);
+        assert!(!fp.calls.iter().any(|c| c.from == class_id("lib::a::A")), "{:?}", fp.calls);
+    }
+
+    /// An operator is `<T>::operator<op>`, the token verbatim with no space.
+    /// Unary and binary `-` are one METHOD whose calls stack.
+    #[test]
+    fn operators_are_methods() {
+        let fp = members();
+        let plus = method_id("lib::src::money::Money::operator+");
+        assert_eq!(fp.nav.kind_by_id.get(&plus), Some(&node_kind::METHOD));
+        assert_eq!(fp.nav.name_by_id.get(&plus).map(String::as_str), Some("operator+"));
+        assert_eq!(
+            calls_from(&fp, "lib::src::money::Money::operator+"),
+            sorted(vec![bare("Money"), bare("round2")])
+        );
+        let source = r#"class V {
+  V operator [](int i) => at(i);
+  void operator []=(int i, V v) { put(i, v); }
+  bool operator ==(Object o) => same(o);
+  V operator ~/(V o) => div(o);
+  V operator ~() => inv();
+  V operator -() => neg();
+  V operator -(V o) => sub(o);
+}
+"#;
+        let fp = parse_file(source, "lib/v.dart", "lib::v", repo()).unwrap();
+        let v = class_id("lib::v::V");
+        for (op, calls) in [
+            ("operator[]", vec![bare("at")]),
+            ("operator[]=", vec![bare("put")]),
+            ("operator==", vec![bare("same")]),
+            ("operator~/", vec![bare("div")]),
+            ("operator~", vec![bare("inv")]),
+            ("operator-", sorted(vec![bare("neg"), bare("sub")])),
+        ] {
+            let q = format!("lib::v::V::{op}");
+            assert_eq!(fp.nav.kind_by_id.get(&method_id(&q)), Some(&node_kind::METHOD), "{q}");
+            assert_eq!(parent(&fp, method_id(&q)), Some(v), "{q}");
+            assert_eq!(calls_from(&fp, &q), calls, "{q}");
+        }
+        let minus = method_id("lib::v::V::operator-");
+        assert_eq!(fp.nodes.iter().filter(|n| n.id == minus).count(), 1);
+        assert_eq!(defines(&fp, v, minus), 1);
+    }
+
+    /// A bodiless member (abstract or `external`: method, getter, setter,
+    /// operator) is a METHOD under its owner with no calls.
+    #[test]
+    fn abstract_members_are_methods() {
+        let fp = members();
+        let repo_class = class_id("lib::src::money::Repo");
+        for q in ["lib::src::money::Repo::load", "lib::src::money::Repo::save"] {
+            assert_eq!(fp.nav.kind_by_id.get(&method_id(q)), Some(&node_kind::METHOD), "{q}");
+            assert_eq!(parent(&fp, method_id(q)), Some(repo_class), "{q}");
+            assert_eq!(defines(&fp, repo_class, method_id(q)), 1, "{q}");
+            assert_eq!(calls_from(&fp, q), vec![], "{q}");
+        }
+        assert_eq!(
+            cell_text(&fp, method_id("lib::src::money::Repo::load"), cell_type::CODE),
+            "Money load();"
+        );
+        let source = r#"abstract mixin class M {
+  int get level;
+  set level(int v);
+  M operator +(M o);
+  external void ext();
+  static final int field = 1;
+}
+"#;
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        let mut methods: Vec<&str> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::METHOD)
+            .filter_map(|(id, _)| fp.nav.qname_by_id.get(id).map(String::as_str))
+            .collect();
+        methods.sort();
+        // The getter + setter pair is one METHOD; the field is no METHOD.
+        assert_eq!(methods, vec!["lib::m::M::ext", "lib::m::M::level", "lib::m::M::operator+"]);
+        assert!(fp.calls.is_empty(), "{:?}", fp.calls);
+    }
+
+    /// `const` constructors and redirecting factories end in `;`: a METHOD
+    /// with no body, spanning the member.
+    #[test]
+    fn const_constructor_without_body() {
+        let source = r#"class Point {
+  final int x, y;
+  const Point(this.x, this.y);
+  const Point.origin() : x = 0, y = 0;
+  factory Point.polar(int r) = PolarPoint;
+}
+"#;
+        let fp = parse_file(source, "lib/p.dart", "lib::p", repo()).unwrap();
+        let point = class_id("lib::p::Point");
+        for q in ["lib::p::Point::Point", "lib::p::Point::origin", "lib::p::Point::polar"] {
+            assert_eq!(fp.nav.kind_by_id.get(&method_id(q)), Some(&node_kind::METHOD), "{q}");
+            assert_eq!(defines(&fp, point, method_id(q)), 1, "{q}");
+        }
+        assert_eq!(
+            cell_text(&fp, method_id("lib::p::Point::Point"), cell_type::CODE),
+            "const Point(this.x, this.y);"
+        );
+        assert_eq!(
+            cell_text(&fp, method_id("lib::p::Point::origin"), cell_type::POSITION),
+            r#"{"file":"lib/p.dart","start_line":3,"end_line":3}"#
+        );
+        assert!(fp.calls.is_empty(), "{:?}", fp.calls);
+        // The field list stays a field: field types still record, no METHOD.
+        assert!(!fp.nav.qname_by_id.values().any(|q| q == "lib::p::Point::x"));
+    }
+
+    /// Each enum constant is an ATTRIBUTE `<Enum>::<constant>` under its ENUM
+    /// (HAS_ATTRIBUTE, the Rust / TypeScript / Java enum-member edge - no
+    /// DEFINES); an enhanced-enum constant's arguments are its calls.
+    #[test]
+    fn enum_constants_are_attributes() {
+        let fp = members();
+        let currency = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENUM, "lib::src::money::Currency");
+        for (q, name) in [("lib::src::money::Currency::aud", "aud"), ("lib::src::money::Currency::usd", "usd")] {
+            let id = attribute_id(q);
+            assert_eq!(fp.nav.kind_by_id.get(&id), Some(&node_kind::ATTRIBUTE), "{q}");
+            assert_eq!(fp.nav.name_by_id.get(&id).map(String::as_str), Some(name), "{q}");
+            assert_eq!(parent(&fp, id), Some(currency), "{q}");
+            assert!(has_edge(&fp, currency, id, edge_category::HAS_ATTRIBUTE), "{q}");
+            assert!(!has_edge(&fp, currency, id, edge_category::DEFINES), "{q}");
+            assert!(cell_text(&fp, id, cell_type::POSITION).contains(r#""start_line":20"#), "{q}");
+        }
+        let source = r#"int round2(int v) => v;
+enum E {
+  aud(round2(1)),
+  usd.named(2);
+  const E(this.v);
+  const E.named(this.v);
+  final int v;
+}
+"#;
+        let fp = parse_file(source, "lib/e.dart", "lib::e", repo()).unwrap();
+        let e = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ENUM, "lib::e::E");
+        let aud = attribute_id("lib::e::E::aud");
+        let aud_calls: Vec<&CallQualifier> =
+            fp.calls.iter().filter(|c| c.from == aud).map(|c| &c.qualifier).collect();
+        assert_eq!(aud_calls, vec![&bare("round2")]);
+        assert!(has_edge(&fp, e, attribute_id("lib::e::E::usd"), edge_category::HAS_ATTRIBUTE));
+        // The enum's constructors are METHODs; its field is not.
+        for q in ["lib::e::E::E", "lib::e::E::named"] {
+            assert_eq!(parent(&fp, method_id(q)), Some(e), "{q}");
+        }
+        assert_eq!(fp.nav.kind_by_id.values().filter(|k| **k == node_kind::METHOD).count(), 2);
+        assert_eq!(fp.calls.len(), 1, "{:?}", fp.calls);
+    }
+
+    /// `Money.zero()` / `Money.parse('1')` are Attribute calls on the class;
+    /// the METHODs they name are the class's `zero` / `parse` children, the
+    /// `class_methods` keys the graph binds them through (end-to-end in
+    /// engine/tests/dart_body_owners.rs and the `dart-members` fixture).
+    #[test]
+    fn named_constructor_call_binds() {
+        let fp = members();
+        let total = function_id("lib::src::money::total");
+        let mut calls: Vec<CallQualifier> =
+            fp.calls.iter().filter(|c| c.from == total).map(|c| c.qualifier.clone()).collect();
+        calls.sort_by_key(|q| format!("{q:?}"));
+        assert_eq!(calls, sorted(vec![attr("Money", "zero"), attr("Money", "parse")]));
+        let money = class_id("lib::src::money::Money");
+        let children: Vec<&str> = fp.nav.children_of[&money]
+            .iter()
+            .filter(|c| fp.nav.kind_by_id.get(c) == Some(&node_kind::METHOD))
+            .filter_map(|c| fp.nav.name_by_id.get(c).map(String::as_str))
+            .collect();
+        for name in ["zero", "parse"] {
+            assert!(children.contains(&name), "{name}: {children:?}");
+        }
+    }
+
+    /// CB.9 stopgap ([`record_type_receiver`]): an Attribute call on a type
+    /// this file declares records the name as that type in the caller's
+    /// scope, unless a parameter, local or member shadows it; a type from
+    /// elsewhere or a plain receiver records nothing.
+    #[test]
+    fn same_file_type_member_calls_record_the_type() {
+        let fp = members();
+        let total = function_id("lib::src::money::total");
+        assert_eq!(
+            fp.nav.local_types.get(&total).and_then(|l| l.get("Money")).map(String::as_str),
+            Some("Money")
+        );
+        let source = r#"class Money { static Money make() => Money(); }
+enum Color { red; static Color pick() => red; }
+Money a() => Money.make();
+Color b() => Color.pick();
+Money c(Money Money) => Money.make();
+Other d() => Other.make();
+Money e(Money m) => m.make();
+class Wallet {
+  int Money = 0;
+  void f() { Money.make(); }
+  void g() { Money2.make(); }
+}
+"#;
+        let fp = parse_file(source, "lib/w.dart", "lib::w", repo()).unwrap();
+        let typed = |scope: NodeId, name: &str| {
+            fp.nav.local_types.get(&scope).and_then(|l| l.get(name)).cloned()
+        };
+        assert_eq!(typed(function_id("lib::w::a"), "Money").as_deref(), Some("Money"));
+        assert_eq!(typed(function_id("lib::w::b"), "Color").as_deref(), Some("Color"));
+        // A parameter named `Money` shadows the class.
+        assert_eq!(typed(function_id("lib::w::c"), "Money"), None);
+        // `Other` is declared elsewhere; `m` is a plain receiver.
+        assert_eq!(typed(function_id("lib::w::d"), "Other"), None);
+        assert_eq!(typed(function_id("lib::w::e"), "m"), None);
+        // A member field named `Money` shadows the class inside `Wallet`.
+        assert_eq!(typed(method_id("lib::w::Wallet::f"), "Money"), None);
+        assert!(!fp.nav.local_types.contains_key(&method_id("lib::w::Wallet::g")));
     }
 }
