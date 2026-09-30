@@ -18,7 +18,6 @@
 
 use std::path::{Path, PathBuf};
 
-use glia_code_domain::snapshots::TESTS_DEFAULT_WINDOW;
 use glia_snapshots::{
     HistoryOptions, HistorySummary, TestsIngestOptions, TestsSummary, history_sync, tests_ingest,
 };
@@ -170,6 +169,8 @@ inventory::submit! { ModuleFns { name: "snapshots", add: register } }
 mod tests {
     use std::path::PathBuf;
     use std::process::Command;
+
+    use glia_code_domain::snapshots::TESTS_DEFAULT_WINDOW;
 
     use super::*;
 
