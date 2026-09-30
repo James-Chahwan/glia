@@ -12,6 +12,9 @@ glia cache pull <REPO> <STORE> [--unsigned] [--key-file <FILE>] [--verify <N|all
 glia cache gc <STORE> [--keep-stamps <N>] [--max-bytes <BYTES>] [--json]
 ```
 
+`<STORE>` is a directory, or an `https://` URL (see [HTTPS store](#https-store));
+`gc` takes a directory only.
+
 `--layout` also moves the whole finished layout of a clean checkout (see
 [Whole-layout objects](#whole-layout-objects)), so a fresh clone of a commit CI
 already built skips the build entirely, not just the parse.
@@ -22,7 +25,8 @@ applies to its own cache (build stamp, repo identity, go.mod module set, content
 hash, MODULE form). The engine and the glia-py wheel contain no transport. They
 only produce keys and payloads and run the verified import
 (`glia_engine::shared_cache`). Moving and authenticating bytes is done by the
-`glia` binary alone.
+`glia` binary alone, and it is the only glia artefact that links an HTTP
+client.
 
 ## What a key covers
 
@@ -139,8 +143,8 @@ a directory). `--json` prints the summary as one JSON object.
 Markers (stderr), after the engine's `[cache] export` / `[cache] import` lines:
 
 ```text
-[cache] push store=<dir> repo=<label> entries=<n> uploaded=<u> present=<p> stale=<s> signed=<yes|no>
-[cache] pull store=<dir> repo=<label> files=<n> local_hits=<h> fetched=<f> missing=<m> rejected=<r> verified=<v> signed=<yes|no>
+[cache] push store=<dir|url> repo=<label> entries=<n> uploaded=<u> present=<p> stale=<s> signed=<yes|no>
+[cache] pull store=<dir|url> repo=<label> files=<n> local_hits=<h> fetched=<f> missing=<m> rejected=<r> verified=<v> signed=<yes|no>
 [cache] rejected <v1/...>: <reason>          (first 20 per pull)
 [cache] gc store=<dir> stamps_kept=<k> stamps_removed=<r> objects_removed=<o> bytes=<before>-><after>
 ```
@@ -263,9 +267,81 @@ that could not put the previous layout back, exits 1. The two steps are
 independent: a layout installed before a per-file pull fails stays installed
 (it was verified on its own).
 
-## Not included
+## HTTPS store
 
-There is no HTTP(S) store yet. A `http://` / `https://` STORE exits 2 with
-`unsupported store <s>` and makes no network request. It will be added as a
-separate step (CE.2e), behind the same store interface and the same object
-format.
+Any HTTP server that serves files on `GET` / `HEAD` and stores a request body
+on `PUT` is a store: nginx with the WebDAV module's `PUT`, a static file server
+with an upload handler, or an S3 bucket behind a proxy that adds the bucket
+credentials. The object at `v1/<stamp>/<aa>/<key>.gpc` (or a layout part,
+`v1/<stamp>/layout/<key>[.<i>].gla`) is `<url>/<that path>`, the same names a
+directory store uses.
+
+```sh
+glia cache push <REPO> https://cache.example/glia
+glia cache pull <REPO> https://cache.example/glia --jobs 16
+```
+
+| Operation | Request | Answer |
+|---|---|---|
+| does the store hold it (push) | `HEAD <url>/<path>` | 200 yes, 404 no |
+| upload (push) | `PUT <url>/<path>`, `Content-Type: application/octet-stream` | 200, 201 or 204 |
+| fetch (pull) | `GET <url>/<path>` | 200 the object, 404 missing |
+
+Any other status, a redirect (3xx, never followed) or a connection failure is
+a store failure: the command exits 1, and a failed pull writes nothing. Every
+object is checked exactly as from a directory: the body is read at most one
+byte past the 64 MiB bound, and a server answering 200 with an error page is
+refused as malformed, never parsed.
+
+**Authentication.** `GLIA_CACHE_TOKEN`, when set, is sent as
+`Authorization: Bearer <token>` on every request (printable ASCII, no spaces;
+anything else is a usage error). Every request also carries
+`User-Agent: glia/<release>`. The token is never printed. Credentials in the
+URL (`https://user:pass@host`) are refused; so are a query string and a
+fragment. The token decides who may read and write the store; the cache key
+(`GLIA_CACHE_KEY`) still decides which objects a pull trusts, whoever wrote
+them.
+
+**Plain http.** `http://` is accepted only for a loopback host (`127.0.0.1`,
+`localhost`, `[::1]`, with an optional port), such as a local server or a test.
+Any other host exits 2 with `refusing plain http:// to non-loopback host <host>`
+before any request is made, because the token and the objects would travel in
+cleartext. Any other scheme (`s3://`, `ftp://`) exits 2 with
+`unsupported store <scheme>://`.
+
+Timeouts: 10 s to connect, 60 s per read or write. `--jobs` pull workers share
+one connection pool. A slow store makes `pull` slow; it never slows a build,
+which never reads a store.
+
+**GC.** `glia cache gc` prunes a directory only; a URL exits 2 (`gc a remote
+store on the server`). On the server, prune the same way gc does: drop whole
+`v1/<stamp>/` directories of old releases (a release never reads another
+stamp's objects), or expire objects by age.
+
+Marker (stderr), last, once per push or pull through an HTTP store, whether it
+succeeded or not. It names the scheme and host only, never the path or the
+token:
+
+```text
+[cache] store=<scheme>://<host> transport=<https|http-loopback> requests=<n> (get=<g> head=<h> put=<p>) status_4xx=<a> status_5xx=<b>
+```
+
+A push's `HEAD` of an object the store lacks counts as a 4xx.
+
+### CI recipe
+
+CI builds each commit and pushes; developers and other jobs pull. Store
+`GLIA_CACHE_KEY` (64 hex characters) and `GLIA_CACHE_TOKEN` as CI secrets.
+
+```sh
+# CI, after checkout (GLIA_CACHE_KEY and GLIA_CACHE_TOKEN from secrets)
+glia build . && glia cache push . https://cache.example/glia
+
+# a developer or a later job, with the same key and a token that can read
+glia cache pull . https://cache.example/glia
+glia build .                 # [incremental] <repo>: reused N, reparsed 0, evicted 0
+```
+
+Add `--layout` to both commands to move the whole layout of a clean checkout
+too (see [Whole-layout objects](#whole-layout-objects)). A token that can only
+read belongs on developer machines; the one that can `PUT` stays in CI.

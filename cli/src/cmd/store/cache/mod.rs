@@ -23,8 +23,14 @@
 //! Trust: objects carry a blake3 keyed MAC (`object.rs`) under the key in
 //! `--key-file` or `GLIA_CACHE_KEY`; without one a push or pull needs
 //! `--unsigned` (the store is trusted as-is and pulls are re-parse-sampled).
-//! The key is never printed. Stores: a directory (`store.rs`); an `http://` /
-//! `https://` store is refused until CE.2e adds it.
+//! The key is never printed.
+//!
+//! Stores (the STORE argument): an `https://` URL is an HTTP object store
+//! (`http.rs`, CE.2e: GET / HEAD / PUT, `Authorization: Bearer` from
+//! `GLIA_CACHE_TOKEN`); a plain `http://` URL is one only when its host is
+//! loopback, and any other is refused before a request is made, as is any
+//! other `<scheme>://`; anything else is a directory (`store.rs`). `gc`
+//! prunes a directory only: a remote store is pruned on its server.
 //!
 //! Exit codes: 0 ok; 1 a store or verification failure (a failed pull writes
 //! nothing); 2 a usage error (bad store, no or bad key, not a repo).
@@ -36,8 +42,11 @@
 //! `[cache] gc store=<dir> stamps_kept=<k> stamps_removed=<r> objects_removed=<o> bytes=<before>-><after>`
 //! `[cache] layout <push|pull> repo=<label> key=<12 hex|-> tree=<12 hex|-> result=<pushed|present|stale|dirty|hit|miss|rejected>`
 //! (before the per-file line, with `--layout`)
+//! `[cache] store=<scheme>://<host> transport=<https|http-loopback> requests=<n> (get=<g> head=<h> put=<p>) status_4xx=<a> status_5xx=<b>`
+//! (last, once per push or pull through an HTTP store, succeeded or not)
 
 mod gc;
+mod http;
 mod layout;
 mod object;
 mod store;
@@ -51,6 +60,7 @@ use glia_engine::shared_cache::{
 use serde_json::json;
 
 use gc::{GcOptions, gc};
+use http::{HttpStore, StoreUrl, token_from_env};
 use object::{KEY_ENV, Reject, Signing, decode, encode, object_rel};
 use store::{DirStore, ObjectStore};
 
@@ -72,14 +82,16 @@ pub(crate) struct Args {
 
 #[derive(Subcommand, Debug)]
 enum CacheCmd {
-    /// Upload the parse cache of a built checkout: every entry of
-    /// `<repo>/.glia/graph/parse_cache.bin` a build of the checkout as it is
-    /// now would reuse, one object per content address, skipping objects the
-    /// store already holds. With `--layout`, first the whole layout.
+    /// Upload the parse cache of a built checkout to a directory or HTTPS
+    /// object store: every entry of `<repo>/.glia/graph/parse_cache.bin` a
+    /// build of the checkout as it is now would reuse, one object per content
+    /// address, skipping objects the store already holds. With `--layout`,
+    /// first the whole layout.
     Push(PushArgs),
-    /// Fetch the parses the checkout's cache lacks from the store, check each
-    /// object (size, key, MAC), import them through the engine's checks and
-    /// re-parse sample, and write `<repo>/.glia/graph/parse_cache.bin`. Exits
+    /// Fetch the parses the checkout's cache lacks from a directory or HTTPS
+    /// object store, check each object (size, key, MAC), import them through
+    /// the engine's checks and re-parse sample, and write
+    /// `<repo>/.glia/graph/parse_cache.bin`. Exits
     /// 1 and writes nothing when a sampled payload differs from a local parse.
     /// With `--layout`, first install the whole layout for the checkout.
     Pull(PullArgs),
@@ -106,7 +118,9 @@ struct KeyArgs {
 struct PushArgs {
     /// Path to the built repo (its `.glia/graph/parse_cache.bin` is read).
     repo: String,
-    /// The store: a directory (created when missing).
+    /// The store: a directory (created when missing), or an `https://` URL
+    /// (PUT; `Authorization: Bearer $GLIA_CACHE_TOKEN` when set). Plain
+    /// `http://` only to a loopback host.
     store: String,
     #[command(flatten)]
     key: KeyArgs,
@@ -126,7 +140,9 @@ struct PullArgs {
     /// Path to the checkout to fill (its `.glia/graph/parse_cache.bin` is
     /// written).
     repo: String,
-    /// The store: an existing directory.
+    /// The store: an existing directory, or an `https://` URL (GET;
+    /// `Authorization: Bearer $GLIA_CACHE_TOKEN` when set). Plain `http://`
+    /// only to a loopback host.
     store: String,
     #[command(flatten)]
     key: KeyArgs,
@@ -151,7 +167,7 @@ struct PullArgs {
 
 #[derive(clap::Args, Debug)]
 struct GcArgs {
-    /// The directory store to prune.
+    /// The directory store to prune (a remote store is pruned on its server).
     store: String,
     /// How many build stamps to keep, newest first by last upload.
     #[arg(long, default_value_t = 2)]
@@ -236,21 +252,81 @@ fn yes_no(b: bool) -> &'static str {
     if b { "yes" } else { "no" }
 }
 
-/// The directory a STORE argument names, or the usage error for a URL store
-/// (CE.2e adds the HTTPS store; until then no network is attempted).
-fn store_dir(s: &str) -> Result<PathBuf, String> {
-    let is_url = s.split_once("://").is_some_and(|(scheme, _)| {
+/// What a STORE argument names.
+#[derive(Debug, PartialEq, Eq)]
+enum StoreArg {
+    Dir(PathBuf),
+    Url(StoreUrl),
+}
+
+/// Classify a STORE argument without touching the network: `https://` (and
+/// `http://` to a loopback host) is an HTTP store, plain `http://` to any
+/// other host and any other `<scheme>://` are usage errors (the message names
+/// the host or scheme, never the whole URL), anything else is a directory.
+fn store_arg(s: &str) -> Result<StoreArg, String> {
+    let url = s.split_once("://").filter(|(scheme, _)| {
         !scheme.is_empty()
             && scheme
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '+')
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
     });
-    if is_url {
-        return Err(format!(
-            "unsupported store {s}: only a directory store is available"
-        ));
+    match url {
+        None => Ok(StoreArg::Dir(PathBuf::from(s))),
+        Some((scheme, rest))
+            if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http") =>
+        {
+            StoreUrl::parse(scheme, rest).map(StoreArg::Url)
+        }
+        Some((scheme, _)) => Err(format!(
+            "unsupported store {scheme}://: a store is a directory or an https:// URL"
+        )),
     }
-    Ok(PathBuf::from(s))
+}
+
+/// An opened store.
+enum Store {
+    Dir(DirStore),
+    Http(HttpStore),
+}
+
+impl Store {
+    fn object_store(&self) -> &dyn ObjectStore {
+        match self {
+            Store::Dir(d) => d,
+            Store::Http(h) => h,
+        }
+    }
+
+    /// Print the HTTP store's fired_on marker (a directory store has none).
+    fn report(&self) {
+        if let Store::Http(h) = self {
+            eprintln!("{}", h.marker());
+        }
+    }
+}
+
+/// Open a checked STORE: a directory (created when `create`, else it must
+/// exist), or the HTTP store with `GLIA_CACHE_TOKEN`. `Err` is the exit code
+/// of the error it printed.
+fn open(arg: StoreArg, create: bool) -> Result<Store, i32> {
+    match arg {
+        StoreArg::Dir(dir) => {
+            if create {
+                std::fs::create_dir_all(&dir)
+                    .map_err(|e| failed(&format!("store {}: {e}", dir.display())))?;
+            } else if !dir.is_dir() {
+                return Err(usage(&format!(
+                    "store {} is not a directory",
+                    dir.display()
+                )));
+            }
+            Ok(Store::Dir(DirStore::new(&dir)))
+        }
+        StoreArg::Url(url) => {
+            let token = token_from_env().map_err(|e| usage(&e))?;
+            Ok(Store::Http(HttpStore::new(url, token)))
+        }
+    }
 }
 
 /// The signing key of a push or pull: `--key-file`, else `GLIA_CACHE_KEY`,
@@ -297,26 +373,32 @@ fn read_key_file(path: &Path) -> Result<Signing, String> {
 
 /// The checks every push / pull makes before any work: the store, the key,
 /// the repo. Any failure is a usage error.
-fn prepare(repo: &str, store: &str, key: &KeyArgs) -> Result<(PathBuf, Signing), String> {
-    let dir = store_dir(store)?;
+fn prepare(repo: &str, store: &str, key: &KeyArgs) -> Result<(StoreArg, Signing), String> {
+    let arg = store_arg(store)?;
     let signing = signing(key)?;
     if !Path::new(repo).is_dir() {
         return Err(format!("not a directory: {repo}"));
     }
-    Ok((dir, signing))
+    Ok((arg, signing))
 }
 
 fn push(a: PushArgs) -> i32 {
-    let (dir, signing) = match prepare(&a.repo, &a.store, &a.key) {
+    let (arg, signing) = match prepare(&a.repo, &a.store, &a.key) {
         Ok(p) => p,
         Err(e) => return usage(&e),
     };
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        return failed(&format!("store {}: {e}", dir.display()));
-    }
-    let store = DirStore::new(&dir);
+    let store = match open(arg, true) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let code = push_to(&a, store.object_store(), &signing);
+    store.report();
+    code
+}
+
+fn push_to(a: &PushArgs, store: &dyn ObjectStore, signing: &Signing) -> i32 {
     let layout = if a.layout {
-        match layout::push(&a.repo, &store, &signing) {
+        match layout::push(&a.repo, store, signing) {
             Ok(o) => Some(o),
             Err(e) => return failed(&format!("layout push to {}: {e}", store.label())),
         }
@@ -337,7 +419,7 @@ fn push(a: PushArgs) -> i32 {
                 "present"
             }
             Ok(false) => {
-                if let Err(err) = store.put(&rel, &encode(&e.key, &e.payload, &signing)) {
+                if let Err(err) = store.put(&rel, &encode(&e.key, &e.payload, signing)) {
                     return failed(&format!("push to {}: {err}", store.label()));
                 }
                 uploaded += 1;
@@ -440,14 +522,20 @@ fn fetch_all(
 }
 
 fn pull(a: PullArgs) -> i32 {
-    let (dir, signing) = match prepare(&a.repo, &a.store, &a.key) {
+    let (arg, signing) = match prepare(&a.repo, &a.store, &a.key) {
         Ok(p) => p,
         Err(e) => return usage(&e),
     };
-    if !dir.is_dir() {
-        return usage(&format!("store {} is not a directory", dir.display()));
-    }
-    let store = DirStore::new(&dir);
+    let store = match open(arg, false) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let code = pull_from(&a, store.object_store(), &signing);
+    store.report();
+    code
+}
+
+fn pull_from(a: &PullArgs, store: &dyn ObjectStore, signing: &Signing) -> i32 {
     let signed = signing.is_signed();
     let sample = a.verify.unwrap_or(if signed {
         Sample::Count(0)
@@ -455,7 +543,7 @@ fn pull(a: PullArgs) -> i32 {
         Sample::Count(UNSIGNED_SAMPLE)
     });
     let layout = if a.layout {
-        match layout::pull(&a.repo, &store, &signing) {
+        match layout::pull(&a.repo, store, signing) {
             Ok(o) => Some(o),
             Err(e) => return failed(&format!("layout pull from {}: {e}", store.label())),
         }
@@ -468,7 +556,7 @@ fn pull(a: PullArgs) -> i32 {
     };
     let rels: Vec<String> = w.rows.iter().map(|r| object_rel(w.stamp, &r.key)).collect();
     let keys: Vec<CacheKey> = w.rows.iter().map(|r| r.key).collect();
-    let results = fetch_all(&store, &rels, &keys, &signing, usize::from(a.jobs));
+    let results = fetch_all(store, &rels, &keys, signing, usize::from(a.jobs));
 
     // Fold in row order.
     let (mut missing, mut rejected) = (0usize, 0usize);
@@ -550,8 +638,11 @@ fn pull(a: PullArgs) -> i32 {
 }
 
 fn run_gc(a: GcArgs) -> i32 {
-    let dir = match store_dir(&a.store) {
-        Ok(d) => d,
+    let dir = match store_arg(&a.store) {
+        Ok(StoreArg::Dir(d)) => d,
+        Ok(StoreArg::Url(_)) => {
+            return usage("gc takes a directory store; gc a remote store on the server");
+        }
         Err(e) => return usage(&e),
     };
     if !dir.is_dir() {
@@ -606,13 +697,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn url_stores_are_refused_and_paths_pass() {
-        for url in ["https://example.com/x", "http://h/x", "s3://bucket/x"] {
-            let err = store_dir(url).expect_err(url);
-            assert!(err.starts_with("unsupported store "), "{err}");
+    fn store_args_classify_without_the_network() {
+        assert_eq!(
+            store_arg("/srv/cache"),
+            Ok(StoreArg::Dir(PathBuf::from("/srv/cache")))
+        );
+        assert_eq!(
+            store_arg("rel/dir"),
+            Ok(StoreArg::Dir(PathBuf::from("rel/dir")))
+        );
+        for url in ["https://example.com/x", "HTTPS://h", "http://127.0.0.1:9/x"] {
+            assert!(matches!(store_arg(url), Ok(StoreArg::Url(_))), "{url}");
         }
-        assert_eq!(store_dir("/srv/cache"), Ok(PathBuf::from("/srv/cache")));
-        assert_eq!(store_dir("rel/dir"), Ok(PathBuf::from("rel/dir")));
+        let err = store_arg("http://h/x").expect_err("plain http");
+        assert!(
+            err.starts_with("refusing plain http:// to non-loopback host h:"),
+            "{err}"
+        );
+        let err = store_arg("s3://key:secret@bucket/x").expect_err("s3");
+        assert!(err.starts_with("unsupported store s3://"), "{err}");
+        assert!(!err.contains("secret"), "{err}");
     }
 
     #[test]

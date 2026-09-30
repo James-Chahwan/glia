@@ -559,8 +559,11 @@ fn gc_prunes() {
     assert_eq!(missing.code, 2, "{}", missing.stderr);
 }
 
+/// CE.2e: plain `http://` reaches only a loopback host, refused before any
+/// request (no `[cache] store=` marker, which counts requests); gc takes a
+/// directory only; a scheme glia does not speak is refused too.
 #[test]
-fn a_url_store_is_refused_until_ce_2e() {
+fn plain_http_to_a_remote_host_is_refused() {
     let t = Scratch::new("url");
     let repo = t.repo("a");
     let run = glia(
@@ -568,16 +571,49 @@ fn a_url_store_is_refused_until_ce_2e() {
             "cache",
             "pull",
             s(&repo),
-            "https://example.com/x",
+            "http://example.com/x",
             "--unsigned",
         ],
-        &[],
+        &[("GLIA_CACHE_TOKEN", "t0k")],
     );
     assert_eq!(run.code, 2, "{}", run.stderr);
-    assert!(run.stderr.contains("unsupported store"), "{}", run.stderr);
     assert!(
-        !run.stderr.contains("[cache] pull "),
-        "a URL store ran a pull"
+        run.stderr
+            .contains("refusing plain http:// to non-loopback host example.com"),
+        "{}",
+        run.stderr
+    );
+    for line in ["[cache] pull ", "[cache] store="] {
+        assert!(!run.stderr.contains(line), "{line}: {}", run.stderr);
+    }
+    assert!(!run.stderr.contains("t0k"), "{}", run.stderr);
+    assert!(
+        !repo.join(".glia").exists(),
+        "a refused pull wrote under .glia"
+    );
+
+    let gc = glia(&["cache", "gc", "https://x"], &[]);
+    assert_eq!(gc.code, 2, "{}", gc.stderr);
+    assert!(
+        gc.stderr.contains("gc a remote store on the server"),
+        "{}",
+        gc.stderr
+    );
+    assert!(!gc.stderr.contains("[cache] gc "), "{}", gc.stderr);
+
+    let s3 = glia(
+        &["cache", "push", s(&repo), "s3://bucket/x", "--unsigned"],
+        &[],
+    );
+    assert_eq!(s3.code, 2, "{}", s3.stderr);
+    assert!(
+        s3.stderr.contains("unsupported store s3://"),
+        "{}",
+        s3.stderr
+    );
+    assert!(
+        !Path::new("s3:").exists(),
+        "an s3:// store became a directory"
     );
 }
 
