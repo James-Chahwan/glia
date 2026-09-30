@@ -57,6 +57,13 @@ pub fn parse_file(
             acc.self_calls, acc.super_calls
         );
     }
+    if acc.members.any() && swift_debug() {
+        let m = &acc.members;
+        eprintln!(
+            "[swift] members init={} deinit={} subscript={} computed={} fields={} infix_calls={} file={file_rel_path}",
+            m.init, m.deinit, m.subscript, m.computed, m.fields, m.infix_calls
+        );
+    }
 
     scan_vapor_routes(source, repo, &mut acc);
 
@@ -67,8 +74,32 @@ pub fn parse_file(
         calls: acc.calls,
         refs: acc.refs,
         nav: acc.nav,
-        properties: Default::default(),
+        properties: acc.properties,
     })
+}
+
+/// CB.10: per-file counts for the `[swift] members` marker. `init` /
+/// `deinit` / `subscript` / `computed` count the member declarations minted
+/// as METHODs (overloads each count; `computed` is every property METHOD, a
+/// computed property or a stored one with willSet / didSet observers),
+/// `fields` the stored-property types recorded, `infix_calls` the call sites
+/// whose callee or receiver was read through an infix expression's right
+/// operand.
+#[derive(Default)]
+struct MemberCounts {
+    init: usize,
+    deinit: usize,
+    subscript: usize,
+    computed: usize,
+    fields: usize,
+    infix_calls: usize,
+}
+
+impl MemberCounts {
+    fn any(&self) -> bool {
+        self.init + self.deinit + self.subscript + self.computed + self.fields + self.infix_calls
+            > 0
+    }
 }
 
 #[derive(Default)]
@@ -90,6 +121,17 @@ struct Acc {
     /// sites of this file, for the `[swift-calls]` marker only.
     self_calls: usize,
     super_calls: usize,
+    /// CB.10: member METHODs (`init` / `deinit` / `subscript` / a property)
+    /// already emitted by this file, so an overload (two `init`s) or a
+    /// same-file extension's member folds onto one node, as `type_seen`
+    /// folds types. Lookup only.
+    member_seen: HashSet<NodeId>,
+    /// CB.10: property METHOD ids (a computed property, or a stored one with
+    /// observers): read as `x`, never called as `x()`. Becomes
+    /// `FileParse::properties`.
+    properties: HashSet<NodeId>,
+    /// CB.10: the `[swift] members` marker's counts.
+    members: MemberCounts,
 }
 
 /// LB.7c: a Swift type belongs to its MODULE (the target directory), not its
@@ -126,9 +168,11 @@ fn qname_debug() -> bool {
 }
 
 /// `GLIA_SWIFT_DEBUG=1` turns on the per-file `[swift-calls]` marker (self /
-/// super call sites), read once. Off by default: nearly every Swift file has
-/// self calls.
+/// super call sites) and the CB.10 `[swift] members` marker (member METHODs,
+/// field types, infix-read calls), read once. Off by default: nearly every
+/// Swift file has self calls.
 ///   `GLIA_SWIFT_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[swift-calls\]'`
+///   `GLIA_SWIFT_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[swift\] members'`
 fn swift_debug() -> bool {
     static DEBUG: OnceLock<bool> = OnceLock::new();
     *DEBUG.get_or_init(|| {
@@ -327,6 +371,11 @@ fn visit_type(
             .find(|ch| ch.kind().ends_with("_body"))
     };
     if let Some(body) = body {
+        // CB.10: a protocol body's `init` / `subscript` are bodiless
+        // requirements (its funcs are `protocol_function_declaration`s, never
+        // minted), so members are read from class / enum / extension bodies.
+        let members = body.kind() != "protocol_body";
+        let owner = Owner { qname: &qname, id, repo, file_rel };
         let mut cursor = body.walk();
         for child in body.named_children(&mut cursor) {
             match child.kind() {
@@ -337,11 +386,193 @@ fn visit_type(
                     let nested_kind = swift_type_kind(child);
                     visit_type(child, src, file_rel, &qname, id, repo, nested_kind, acc);
                 }
+                "init_declaration" if members => {
+                    acc.members.init += 1;
+                    let body = child.child_by_field_name("body");
+                    visit_member(child, "init", body, &owner, src, acc);
+                }
+                "deinit_declaration" if members => {
+                    acc.members.deinit += 1;
+                    let body = child.child_by_field_name("body");
+                    visit_member(child, "deinit", body, &owner, src, acc);
+                }
+                "subscript_declaration" if members => {
+                    acc.members.subscript += 1;
+                    let body = first_named_child_of_kind(child, "computed_property");
+                    visit_member(child, "subscript", body, &owner, src, acc);
+                }
+                "property_declaration" if members => {
+                    visit_property(child, &owner, src, acc);
+                }
                 _ => {}
             }
         }
     }
     true
+}
+
+/// CB.10: the type a member hangs off (its qname and node id), with the
+/// repo and file every member node of it is minted in.
+struct Owner<'a> {
+    qname: &'a str,
+    id: NodeId,
+    repo: RepoId,
+    file_rel: &'a str,
+}
+
+/// CB.10 (S3): emit one member of a type as the METHOD `<Type>::<name>`
+/// (`init`, `deinit`, `subscript` or a property's name) with a DEFINES edge
+/// from the type, its declaration's CODE / POSITION / DOC cells, and the calls
+/// and client endpoints of `body`. Every overload (and a same-file
+/// extension's same-named member) folds onto one node: its cells stack in
+/// source order, and no second DEFINES edge or nav entry is written. Returns
+/// the member's id.
+fn visit_member(
+    node: TsNode,
+    name: &str,
+    body: Option<TsNode>,
+    owner: &Owner,
+    src: &[u8],
+    acc: &mut Acc,
+) -> NodeId {
+    let (repo, file_rel) = (owner.repo, owner.file_rel);
+    let qname = format!("{}::{name}", owner.qname);
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &qname);
+    let cells = entity_cells(&node, src, file_rel);
+    if acc.member_seen.insert(id) {
+        acc.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells,
+        });
+        acc.edges.push(Edge {
+            from: owner.id,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
+        acc.nav
+            .record(id, name, &qname, node_kind::METHOD, Some(owner.id));
+    } else if let Some(existing) = acc.nodes.iter_mut().find(|n| n.id == id) {
+        existing.cells.extend(cells);
+    }
+    if let Some(body) = body {
+        collect_calls_in(body, src, id, acc);
+        collect_client_endpoints_in(body, src, id, repo, file_rel, acc);
+    }
+    id
+}
+
+/// CB.10: a `property_declaration` in a type body.
+/// - S3: a computed property (`var total: Int { … }`, a `computed_value`)
+///   or a stored one with willSet / didSet observers is the METHOD
+///   `<Type>::<name>`, tagged in `FileParse::properties` (read as `total`,
+///   never `total()`), whose body is its getter / setter / observer blocks.
+/// - S4: every stored binding records its simple type on the type through
+///   `record_field_type`, so `self.repo.load()` binds through `repo`'s type.
+fn visit_property(node: TsNode, owner: &Owner, src: &[u8], acc: &mut Acc) {
+    let body = node
+        .child_by_field_name("computed_value")
+        .or_else(|| first_named_child_of_kind(node, "willset_didset_block"));
+    let computed = node.child_by_field_name("computed_value").is_some();
+    if let Some(body) = body
+        && let Some(name) = node
+            .child_by_field_name("name")
+            .and_then(|p| p.child_by_field_name("bound_identifier"))
+            .map(|n| text_of(n, src))
+            .filter(|n| !n.is_empty())
+    {
+        acc.members.computed += 1;
+        let id = visit_member(node, name, Some(body), owner, src, acc);
+        acc.properties.insert(id);
+    }
+    if !computed {
+        record_stored_field_types(node, owner.id, src, acc);
+    }
+}
+
+/// CB.10 (S4): the declared type of each binding of a stored
+/// `property_declaration` (`let a: Repo, b = Service()` binds two). Children
+/// are read in source order: a `name` pattern opens a binding, its
+/// `type_annotation` or, failing that, its `value` gives the type. The type
+/// is [`simple_type_name`] of the annotation, or the callee of a
+/// constructor-shaped value (`= Repo()`, a Capitalised identifier: Swift's
+/// type-naming convention). Anything else records nothing.
+fn record_stored_field_types(node: TsNode, owner: NodeId, src: &[u8], acc: &mut Acc) {
+    let mut binding: Option<&str> = None;
+    let mut typed = false;
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return;
+    }
+    loop {
+        let child = cursor.node();
+        let ty = match (cursor.field_name(), child.kind()) {
+            (Some("name"), _) => {
+                binding = child
+                    .child_by_field_name("bound_identifier")
+                    .map(|n| text_of(n, src))
+                    .filter(|n| !n.is_empty());
+                typed = false;
+                None
+            }
+            (_, "type_annotation") => {
+                typed = true;
+                child
+                    .child_by_field_name("name")
+                    .and_then(|t| simple_type_name(t, src))
+            }
+            (Some("value"), _) if !typed => constructor_name(child, src),
+            _ => None,
+        };
+        if let (Some(name), Some(ty)) = (binding, ty) {
+            acc.nav.record_field_type(owner, name, ty);
+            acc.members.fields += 1;
+        }
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+}
+
+/// CB.10 (S4): the simple name of a declared type: a `user_type`'s last
+/// `type_identifier` (module qualifiers and generic arguments dropped:
+/// `Foundation.Date` -> `Date`, `Box<Int>` -> `Box`), through an
+/// `optional_type` (`Repo?`; an implicitly unwrapped `Repo!` is already a
+/// plain `user_type`). Arrays, dictionaries, tuples and function types name
+/// no single type: None.
+fn simple_type_name<'a>(ty: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    match ty.kind() {
+        "user_type" => {
+            let mut cursor = ty.walk();
+            ty.named_children(&mut cursor)
+                .filter(|c| c.kind() == "type_identifier")
+                .last()
+                .map(|c| text_of(c, src))
+                .filter(|t| !t.is_empty())
+        }
+        "optional_type" => simple_type_name(ty.child_by_field_name("wrapped")?, src),
+        _ => None,
+    }
+}
+
+/// CB.10 (S4): `Repo()` / `Repo(x: 1)` -> `Repo`: a call whose callee is a
+/// Capitalised plain identifier. None for anything else.
+fn constructor_name<'a>(value: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    if value.kind() != "call_expression" {
+        return None;
+    }
+    let callee = value.named_child(0)?;
+    let name = text_of(callee, src);
+    (callee.kind() == "simple_identifier" && name.chars().next().is_some_and(char::is_uppercase))
+        .then_some(name)
+}
+
+fn first_named_child_of_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).find(|c| c.kind() == kind)
 }
 
 fn visit_function(
@@ -420,9 +651,16 @@ fn visit_method(
     }
 }
 
+/// CB.10 (S6): the imported path is the declaration's `identifier` child, read
+/// from the AST: attributes (`@testable import App` -> `App`) and the import
+/// kind keyword (`import struct Foundation.Date` -> `Foundation.Date`) are
+/// never part of it. The trimmed text is the fallback for a declaration the
+/// grammar gives no identifier.
 fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
-    let text = text_of(node, src).trim().to_string();
-    let path = text.trim_start_matches("import ").trim();
+    let path = first_named_child_of_kind(node, "identifier").map_or_else(
+        || text_of(node, src).trim().trim_start_matches("import ").trim(),
+        |ident| text_of(ident, src).trim(),
+    );
     acc.imports.push(ImportStmt {
         from_module: from_module.to_string(),
         target: ImportTarget::Module {
@@ -439,12 +677,13 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
         if n.kind() == "call_expression"
             && let Some(func) = n.named_child(0)
         {
-            let qualifier = classify_call(func, src);
+            let (qualifier, through_infix) = classify_call(func, src);
             match qualifier {
                 CallQualifier::SelfMethod(_) => acc.self_calls += 1,
                 CallQualifier::SuperMethod(_) => acc.super_calls += 1,
                 _ => {}
             }
+            acc.members.infix_calls += usize::from(through_infix);
             acc.calls.push(CallSite { from, qualifier, line: line_at(n) });
         }
         let mut cursor = n.walk();
@@ -459,6 +698,67 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     }
 }
 
+/// CB.10 (S2): the binary-operator expressions of tree-sitter-swift 0.7, each
+/// with the field holding its right operand. The grammar binds a postfix call
+/// or navigation LOOSER than an infix operator, so `1 + tax(3)` parses as
+/// `call_expression(additive_expression(1, tax), call_suffix)` and
+/// `base + self.repo.load()` as a navigation chain whose innermost target is
+/// `additive_expression(base, self)`. Swift binds the postfix to the right
+/// operand, so the callee / receiver is read from there.
+const INFIX_RHS: &[(&str, &str)] = &[
+    ("additive_expression", "rhs"),
+    ("multiplicative_expression", "rhs"),
+    ("comparison_expression", "rhs"),
+    ("equality_expression", "rhs"),
+    ("conjunction_expression", "rhs"),
+    ("disjunction_expression", "rhs"),
+    ("bitwise_operation", "rhs"),
+    ("infix_expression", "rhs"),
+    ("nil_coalescing_expression", "if_nil"),
+    ("range_expression", "end"),
+];
+
+/// The right-most operand of an infix expression, through nested right
+/// operands (`a + b * f` -> `f`); None when `node` is no infix expression.
+fn infix_rhs(node: TsNode) -> Option<TsNode> {
+    let mut cur = node;
+    let mut moved = false;
+    while let Some((_, field)) = INFIX_RHS.iter().find(|(kind, _)| *kind == cur.kind()) {
+        let Some(rhs) = cur.child_by_field_name(field) else {
+            break;
+        };
+        cur = rhs;
+        moved = true;
+    }
+    moved.then_some(cur)
+}
+
+/// CB.10 (S2): where the real receiver starts when an infix expression sits
+/// at the bottom of a receiver's left-most chain (navigation targets, call
+/// callees): `base + self.repo` -> the `self` node, `q + foo()` -> `foo`.
+/// None when no infix sits there.
+fn infix_receiver_start(receiver: TsNode) -> Option<TsNode> {
+    let mut cur = receiver;
+    loop {
+        if let Some(rhs) = infix_rhs(cur) {
+            return Some(rhs);
+        }
+        cur = match cur.kind() {
+            "navigation_expression" => cur.child_by_field_name("target")?,
+            "call_expression" => cur.named_child(0)?,
+            _ => return None,
+        };
+    }
+}
+
+/// The source text from byte `start` to byte `end` (node boundaries, so
+/// always on char boundaries); `""` if either is out of range.
+fn text_between(src: &[u8], start: usize, end: usize) -> &str {
+    src.get(start..end)
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .unwrap_or("")
+}
+
 /// LA.36a: a navigation callee is classified by the KIND of its target node,
 /// and every qualifier carries the bare member name (`helper`, never
 /// `.helper`):
@@ -471,36 +771,61 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
 ///
 /// A suffix with no readable name falls back to the whole-callee
 /// `ComplexReceiver`, as a non-navigation callee does.
-fn classify_call(func_node: TsNode, src: &[u8]) -> CallQualifier {
+///
+/// CB.10 (S2): an infix callee is its right operand ([`infix_rhs`]:
+/// `1 + tax(3)` -> `Bare(tax)`), an infix navigation target likewise
+/// (`n + self.m()` -> `SelfMethod(m)`), and a receiver chain that bottoms out
+/// in an infix starts at its right operand ([`infix_receiver_start`]:
+/// `base + self.repo.load()` -> `ComplexReceiver { self.repo, load }`). The
+/// bool is whether an infix was read through (the `[swift] members` marker's
+/// `infix_calls`).
+fn classify_call(func_node: TsNode, src: &[u8]) -> (CallQualifier, bool) {
+    let (callee, mut through_infix) = match infix_rhs(func_node) {
+        Some(rhs) => (rhs, true),
+        None => (func_node, false),
+    };
     let whole_callee = || CallQualifier::ComplexReceiver {
-        receiver: text_of(func_node, src).to_string(),
+        receiver: text_of(callee, src).to_string(),
         name: String::new(),
     };
-    match func_node.kind() {
-        "simple_identifier" => CallQualifier::Bare(text_of(func_node, src).to_string()),
+    let qualifier = match callee.kind() {
+        "simple_identifier" => CallQualifier::Bare(text_of(callee, src).to_string()),
         "navigation_expression" => {
-            let name = nav_member_name(func_node, src);
-            let Some(target) = func_node.named_child(0).filter(|_| !name.is_empty()) else {
-                return whole_callee();
-            };
-            let name = name.to_string();
-            let target_text = text_of(target, src);
-            match target.kind() {
-                "self_expression" => CallQualifier::SelfMethod(name),
-                "super_expression" => CallQualifier::SuperMethod(name),
-                "simple_identifier" if target_text == "Self" => CallQualifier::SelfMethod(name),
-                "simple_identifier" => CallQualifier::Attribute {
-                    base: target_text.to_string(),
-                    name,
-                },
-                _ => CallQualifier::ComplexReceiver {
-                    receiver: target_text.to_string(),
-                    name,
-                },
+            let name = nav_member_name(callee, src);
+            match callee.named_child(0).filter(|_| !name.is_empty()) {
+                None => whole_callee(),
+                Some(target) => {
+                    let (target, target_text) = if let Some(rhs) = infix_rhs(target) {
+                        through_infix = true;
+                        (rhs, text_of(rhs, src))
+                    } else if let Some(start) = infix_receiver_start(target) {
+                        through_infix = true;
+                        (target, text_between(src, start.start_byte(), target.end_byte()))
+                    } else {
+                        (target, text_of(target, src))
+                    };
+                    let name = name.to_string();
+                    match target.kind() {
+                        "self_expression" => CallQualifier::SelfMethod(name),
+                        "super_expression" => CallQualifier::SuperMethod(name),
+                        "simple_identifier" if target_text == "Self" => {
+                            CallQualifier::SelfMethod(name)
+                        }
+                        "simple_identifier" => CallQualifier::Attribute {
+                            base: target_text.to_string(),
+                            name,
+                        },
+                        _ => CallQualifier::ComplexReceiver {
+                            receiver: target_text.to_string(),
+                            name,
+                        },
+                    }
+                }
             }
         }
         _ => whole_callee(),
-    }
+    };
+    (qualifier, through_infix)
 }
 
 /// tree-sitter-swift's `navigation_suffix` spans the dot (`.helper`); the
@@ -1231,5 +1556,237 @@ func listOrders(base: String) {
                 name: "map".into()
             }]
         );
+    }
+
+    // ---- CB.10: infix callees, members as METHODs, field types, imports ----
+
+    /// The call qualifiers emitted from the node `from` (a repo-root file,
+    /// `W.swift`), in source order.
+    fn calls_of(fp: &FileParse, from: NodeId) -> Vec<CallQualifier> {
+        let mut sites: Vec<&CallSite> = fp.calls.iter().filter(|c| c.from == from).collect();
+        sites.sort_by_key(|c| c.line);
+        sites.into_iter().map(|c| c.qualifier.clone()).collect()
+    }
+
+    fn bare(name: &str) -> CallQualifier {
+        CallQualifier::Bare(name.into())
+    }
+
+    fn self_method(name: &str) -> CallQualifier {
+        CallQualifier::SelfMethod(name.into())
+    }
+
+    #[test]
+    fn infix_callee_is_its_rhs() {
+        let source = "func tax(_ x: Int) -> Int { return x }\n\
+            func f(_ items: [Int]) -> Int {\n\
+            let b = 1 + tax(3)\n\
+            let c = items.reduce(0, +) + tax(items.count)\n\
+            let d = g(1) - h(2)\n\
+            return b + c + d\n\
+            }\n";
+        let fp = parse_file(source, "W.swift", "W", repo()).unwrap();
+        let calls = calls_of(&fp, id(node_kind::FUNCTION, "W::f"));
+        assert_eq!(calls.iter().filter(|c| **c == bare("tax")).count(), 2, "{calls:?}");
+        for want in [bare("g"), bare("h")] {
+            assert!(calls.contains(&want), "{want:?} in {calls:?}");
+        }
+        assert!(
+            calls.contains(&CallQualifier::Attribute { base: "items".into(), name: "reduce".into() }),
+            "{calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| matches!(c, CallQualifier::ComplexReceiver { name, .. } if name.is_empty())),
+            "no whole-callee fallback left: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn nested_infix() {
+        let source = "func m() -> Bool {\n let a = x + b * f(y)\n return a > 0 && ok(z)\n}\n";
+        let fp = parse_file(source, "W.swift", "W", repo()).unwrap();
+        assert_eq!(calls_of(&fp, id(node_kind::FUNCTION, "W::m")), vec![bare("f"), bare("ok")]);
+    }
+
+    /// `base + self.repo.load()`: the infix is the innermost target of the
+    /// navigation chain, so the receiver starts at its right operand.
+    #[test]
+    fn infix_receiver_chain_starts_at_its_rhs() {
+        let source = "class W {\n\
+            let repo: Repo\n\
+            func a() -> Int { return base + self.repo.load() }\n\
+            func b() -> Int { return n + self.c() }\n\
+            func d() -> Int { return q + foo().bar() }\n\
+            }\n";
+        assert_eq!(
+            calls_from(source, "a"),
+            vec![CallQualifier::ComplexReceiver { receiver: "self.repo".into(), name: "load".into() }]
+        );
+        assert_eq!(calls_from(source, "b"), vec![self_method("c")]);
+        let d = calls_from(source, "d");
+        assert!(d.contains(&bare("foo")), "{d:?}");
+        assert!(
+            d.contains(&CallQualifier::ComplexReceiver { receiver: "foo()".into(), name: "bar".into() }),
+            "{d:?}"
+        );
+    }
+
+    #[test]
+    fn init_deinit_subscript_are_methods() {
+        let source = "class W {\n\
+            init() { self.a() }\n\
+            init(x: Int) { self.b() }\n\
+            deinit { self.c() }\n\
+            subscript(i: Int) -> Int { return self.d() }\n\
+            func a() {}\n\
+            }\n\
+            protocol P {\n init(x: Int)\n subscript(i: Int) -> Int { get }\n}\n";
+        let fp = parse_file(source, "W.swift", "W", repo()).unwrap();
+        let class = id(node_kind::CLASS, "W");
+        let init = id(node_kind::METHOD, "W::init");
+        assert_eq!(node_count(&fp, init), 1, "two overloads fold onto one node");
+        assert_eq!(start_lines(&fp, init), vec!["1", "2"], "each overload's POSITION, in order");
+        let defines = fp
+            .edges
+            .iter()
+            .filter(|e| e.from == class && e.to == init && e.category == edge_category::DEFINES)
+            .count();
+        assert_eq!(defines, 1);
+        assert_eq!(calls_from(source, "init"), vec![self_method("a"), self_method("b")]);
+        assert_eq!(calls_from(source, "deinit"), vec![self_method("c")]);
+        assert_eq!(calls_from(source, "subscript"), vec![self_method("d")]);
+        for m in ["init", "deinit", "subscript"] {
+            let mid = id(node_kind::METHOD, &format!("W::{m}"));
+            assert_eq!(fp.nav.parent_of.get(&mid), Some(&class), "{m}");
+            assert_eq!(fp.nav.name_by_id.get(&mid).map(String::as_str), Some(m));
+        }
+        // A protocol's bodiless requirements mint nothing.
+        for m in ["P::init", "P::subscript"] {
+            assert_eq!(node_count(&fp, id(node_kind::METHOD, m)), 0, "{m}");
+        }
+        assert!(fp.properties.is_empty(), "{:?}", fp.properties);
+    }
+
+    #[test]
+    fn computed_property_is_a_property_method() {
+        let source = "class W {\n\
+            var total: Int { return tax(1) }\n\
+            var gs: Int {\n get { return self.a() }\n set { self.b() }\n }\n\
+            var w: Int = 0 { didSet { self.c() } }\n\
+            var plain: Int = 0\n\
+            }\n";
+        let fp = parse_file(source, "W.swift", "W", repo()).unwrap();
+        let class = id(node_kind::CLASS, "W");
+        for p in ["total", "gs", "w"] {
+            let pid = id(node_kind::METHOD, &format!("W::{p}"));
+            assert!(fp.properties.contains(&pid), "{p}");
+            assert_eq!(fp.nav.parent_of.get(&pid), Some(&class), "{p}");
+        }
+        assert_eq!(fp.properties.len(), 3);
+        assert_eq!(node_count(&fp, id(node_kind::METHOD, "W::plain")), 0, "stored: no node");
+        assert_eq!(calls_from(source, "total"), vec![bare("tax")]);
+        assert_eq!(
+            calls_of(&fp, id(node_kind::METHOD, "W::gs")),
+            vec![self_method("a"), self_method("b")]
+        );
+        assert_eq!(calls_from(source, "w"), vec![self_method("c")]);
+        // An observed property is stored: its type is recorded; a computed one's is not.
+        let fields = &fp.nav.field_types[&class];
+        assert_eq!(fields.get("w").map(String::as_str), Some("Int"));
+        assert_eq!(fields.get("plain").map(String::as_str), Some("Int"));
+        assert!(!fields.contains_key("total") && !fields.contains_key("gs"), "{fields:?}");
+    }
+
+    #[test]
+    fn stored_property_records_its_type() {
+        let source = "class W {\n\
+            let repo: Repo\n\
+            var s = Service()\n\
+            var o: Repo?\n\
+            var u: Repo!\n\
+            private(set) var d: Foundation.Date\n\
+            var g: Box<Int>\n\
+            let x: Repo, y = Service(\"a\")\n\
+            var items: [Int] = []\n\
+            var map: [String: Int] = [:]\n\
+            var t: (Int, Int)\n\
+            var fn: () -> Void\n\
+            var lower = make()\n\
+            var total: Cart { return Cart() }\n\
+            func m() { let local: Repo = Repo() }\n\
+            }\n";
+        let fp = parse_file(source, "W.swift", "W", repo()).unwrap();
+        let class = id(node_kind::CLASS, "W");
+        let mut fields: Vec<(&str, &str)> = fp.nav.field_types[&class]
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            vec![
+                ("d", "Date"),
+                ("g", "Box"),
+                ("o", "Repo"),
+                ("repo", "Repo"),
+                ("s", "Service"),
+                ("u", "Repo"),
+                ("x", "Repo"),
+                ("y", "Service"),
+            ]
+        );
+        assert_eq!(fp.nav.field_types.len(), 1, "only the type records fields");
+    }
+
+    #[test]
+    fn testable_import_path() {
+        let source = "@testable import App\nimport struct Foundation.Date\nimport XCTest\n";
+        let fp = parse_file(source, "Tests/AppTests/T.swift", "Tests::AppTests::T", repo()).unwrap();
+        let paths: Vec<&str> = fp
+            .imports
+            .iter()
+            .map(|i| match &i.target {
+                ImportTarget::Module { path, .. } => path.as_str(),
+                other => panic!("not a module import: {other:?}"),
+            })
+            .collect();
+        assert_eq!(paths, vec!["App", "Foundation.Date", "XCTest"]);
+        assert_eq!(
+            fp.imports[0].target,
+            ImportTarget::Module { path: "App".into(), alias: None }
+        );
+    }
+
+    #[test]
+    fn extension_members_hang_on_the_type() {
+        let source = "class Cart {\n\
+            init() { self.a() }\n\
+            func a() {}\n\
+            }\n\
+            extension Cart {\n\
+            convenience init(x: Int) { self.init() }\n\
+            var count: Int { return 0 }\n\
+            }\n";
+        let fp = parse_file(source, "Sources/Shop/Cart.swift", "Sources::Shop::Cart", repo()).unwrap();
+        let class = id(node_kind::CLASS, "Sources::Shop::Cart");
+        let init = id(node_kind::METHOD, "Sources::Shop::Cart::init");
+        assert_eq!(node_count(&fp, init), 1);
+        assert_eq!(start_lines(&fp, init), vec!["1", "5"]);
+        assert_eq!(fp.nav.parent_of.get(&init), Some(&class));
+        assert_eq!(calls_of(&fp, init), vec![self_method("a"), self_method("init")]);
+        let count = id(node_kind::METHOD, "Sources::Shop::Cart::count");
+        assert_eq!(fp.nav.parent_of.get(&count), Some(&class));
+        assert!(fp.properties.contains(&count));
+
+        // A cross-file extension's init mints the same id under the same type.
+        let other = parse_file(
+            "extension Cart {\n init(y: Int) { self.a() }\n}\n",
+            "Sources/Shop/Cart+More.swift",
+            "Sources::Shop::Cart+More",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(node_count(&other, init), 1);
+        assert_eq!(other.nav.parent_of.get(&init), Some(&class));
     }
 }

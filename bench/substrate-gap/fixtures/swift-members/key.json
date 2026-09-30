@@ -1,0 +1,81 @@
+{
+  "framework": "swift-members",
+  "language": "swift",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-S2 / S3 / S4 / S6 (parsers/code/swift/src/lib.rs), measured on HEAD 2170ff8. S2: tree-sitter-swift parses `1 + tax(3)` as call_expression(additive_expression(1, tax), call_suffix) and classify_call reads the additive_expression as a whole-callee ComplexReceiver, so the call is lost. S3: visit_type's body loop reads only function_declaration / class_declaration, so init / deinit / subscript / computed-property bodies mint no METHOD and their calls vanish. S4: no field type is recorded, so `self.repo.load()` has no receiver type. S6: collect_import keeps the text `@testable import App` as the import path, so the test module's IMPORTS cell reads [\"@testable import App\",\"XCTest\"]. Member calls here use explicit `self.` (SelfMethod) so this fixture does not depend on CB-S1's implicit self.",
+  "expect_nodes": [
+    {
+      "kind": "METHOD",
+      "name": "Sources::App::Cart::init"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Sources::App::Cart::deinit"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Sources::App::Cart::subscript"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Sources::App::Cart::total",
+      "note": "computed property"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Sources::App::Cart::checkout",
+      "to": "Sources::App::Pricing::tax",
+      "category": "CALLS",
+      "note": "`1 + tax(3)`"
+    },
+    {
+      "from": "Sources::App::Cart::checkout",
+      "to": "Sources::App::Repo::load",
+      "category": "CALLS",
+      "note": "self.repo typed by the stored property"
+    },
+    {
+      "from": "Sources::App::Cart::total",
+      "to": "Sources::App::Pricing::tax",
+      "category": "CALLS",
+      "note": "computed property body, infix rhs"
+    },
+    {
+      "from": "Sources::App::Cart::subscript",
+      "to": "Sources::App::Cart::scale",
+      "category": "CALLS",
+      "note": "subscript body"
+    },
+    {
+      "from": "Sources::App::Cart::init",
+      "to": "Sources::App::Cart::reset",
+      "category": "CALLS",
+      "note": "initialiser body"
+    },
+    {
+      "from": "Sources::App::Cart::deinit",
+      "to": "Sources::App::Cart::reset",
+      "category": "CALLS",
+      "note": "deinitialiser body"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "MODULE",
+      "node": "Tests::AppTests::CartTests",
+      "cell": "IMPORTS",
+      "contains": "\"XCTest\"",
+      "note": "control"
+    },
+    {
+      "kind": "MODULE",
+      "node": "Tests::AppTests::CartTests",
+      "cell": "IMPORTS",
+      "contains": "\"App\"",
+      "note": "`@testable import App` is the module App (HEAD stores the whole text)"
+    }
+  ]
+}
