@@ -25,7 +25,10 @@ pub fn parse_file(
     let src = source.as_bytes();
     let root = tree.root_node();
 
-    let mut acc = Acc::default();
+    let mut acc = Acc {
+        module_qname: module_qname.to_string(),
+        ..Acc::default()
+    };
 
     let module_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, module_qname);
     acc.nodes.push(Node {
@@ -73,6 +76,12 @@ pub fn parse_file(
 
 #[derive(Default)]
 struct Acc {
+    /// The file MODULE's qname, set once by `parse_file`. Every `require` /
+    /// `require_relative` is the file's import wherever it sits (file level,
+    /// class body, module body), so [`collect_require`] records it from here,
+    /// never from the enclosing CLASS / PACKAGE qname, which no MODULE carries
+    /// and `graph/src/imports.rs` would drop (CB.16, the LA.40 class).
+    module_qname: String,
     nodes: Vec<Node>,
     edges: Vec<Edge>,
     imports: Vec<ImportStmt>,
@@ -119,7 +128,7 @@ fn visit_body(
                 visit_method(child, src, file_rel, parent_qname, parent_id, repo, acc);
             }
             "call" => {
-                collect_require(child, src, parent_qname, acc);
+                collect_require(child, src, acc);
                 collect_call(child, src, parent_id, false, acc);
             }
             _ => {}
@@ -403,7 +412,10 @@ fn flush_ivar_types(acc: &mut Acc) {
     }
 }
 
-fn collect_require(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
+/// Record a `require` / `require_relative` call as an import of the file
+/// MODULE (`acc.module_qname`), whichever body it sits in. The path is kept
+/// verbatim, as written.
+fn collect_require(node: TsNode, src: &[u8], acc: &mut Acc) {
     let method_name = node
         .child_by_field_name("method")
         .map(|n| text_of(n, src))
@@ -420,7 +432,7 @@ fn collect_require(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
             let raw = text_of(arg, src);
             let path = raw.trim_matches(|c| c == '\'' || c == '"');
             acc.imports.push(ImportStmt {
-                from_module: from_module.to_string(),
+                from_module: acc.module_qname.clone(),
                 target: ImportTarget::Module {
                     path: path.to_string(),
                     alias: None,
@@ -1482,6 +1494,54 @@ require_relative '../helpers/auth'
 "#;
         let fp = parse_file(source, "app/service.rb", "app::service", repo()).unwrap();
         assert_eq!(fp.imports.len(), 2);
+    }
+
+    /// (from_module, path) for every import, in source order.
+    fn import_pairs(fp: &FileParse) -> Vec<(String, String)> {
+        fp.imports
+            .iter()
+            .map(|i| match &i.target {
+                ImportTarget::Module { path, .. } => (i.from_module.clone(), path.clone()),
+                other => (i.from_module.clone(), format!("{other:?}")),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn require_inside_module_is_the_files() {
+        let source = "module Shop\n  require_relative 'pricing'\n\n  def self.go; end\nend\n";
+        let fp = parse_file(source, "cart.rb", "cart", repo()).unwrap();
+        assert_eq!(
+            import_pairs(&fp),
+            vec![("cart".to_string(), "pricing".to_string())]
+        );
+        assert_eq!(fp.imports[0].line, 1);
+    }
+
+    #[test]
+    fn require_inside_class_is_the_files() {
+        let source = "module Shop\n  class Cart\n    require 'ledger'\n\n    def total(x)\n      x\n    end\n  end\nend\n";
+        let fp = parse_file(source, "cart.rb", "cart", repo()).unwrap();
+        assert_eq!(
+            import_pairs(&fp),
+            vec![("cart".to_string(), "ledger".to_string())]
+        );
+        assert_eq!(fp.imports[0].line, 2);
+    }
+
+    #[test]
+    fn top_level_require_unchanged() {
+        // The fixtures/ruby-rails-imports shape: from the module, path verbatim.
+        let source = "require_relative \"util\"\nrequire 'lib/helpers/auth'\n\ndef run\n  shared_util\nend\n";
+        let fp = parse_file(source, "main.rb", "main", repo()).unwrap();
+        assert_eq!(
+            import_pairs(&fp),
+            vec![
+                ("main".to_string(), "util".to_string()),
+                ("main".to_string(), "lib/helpers/auth".to_string()),
+            ]
+        );
+        assert_eq!(fp.imports[0].line, 0);
     }
 
     fn route_id(method: &str, path: &str) -> NodeId {

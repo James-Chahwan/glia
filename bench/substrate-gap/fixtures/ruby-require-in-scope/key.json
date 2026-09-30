@@ -1,0 +1,28 @@
+{
+  "framework": "ruby-require-in-scope",
+  "language": "ruby",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-N3: parsers/code/ruby/src/lib.rs visit_body hands collect_require the enclosing scope's qname, so a `require` / `require_relative` inside `module Shop` or `class Cart` is recorded from `cart::Shop` / `cart::Shop::Cart`; no MODULE has that qname and graph/src/imports.rs drops the statement (the LA.40 class, fixed for PHP braced namespaces by LA.40b). HEAD 2170ff8: only the top-level control (order -> pricing) binds. Files sit at the repo root so the paths resolve verbatim: require_relative against a subdirectory and the lib/ load path are a separate gap.",
+  "expect_edges": [
+    {
+      "from": "cart",
+      "to": "pricing",
+      "category": "IMPORTS",
+      "note": "require_relative inside `module Shop` belongs to the file"
+    },
+    {
+      "from": "cart",
+      "to": "ledger",
+      "category": "IMPORTS",
+      "note": "require inside `class Cart` belongs to the file"
+    },
+    {
+      "from": "order",
+      "to": "pricing",
+      "category": "IMPORTS",
+      "note": "control: a top-level require_relative binds on HEAD"
+    }
+  ]
+}
