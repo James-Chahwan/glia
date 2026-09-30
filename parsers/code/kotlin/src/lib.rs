@@ -15,7 +15,8 @@
 //! CA.6a: parameter / `val` / `var` receiver types as local types),
 //! and the client ENDPOINTs and Android components of [`android`] (A14.6:
 //! Retrofit interface methods and Spring RestTemplate / WebClient calls as
-//! ENDPOINT + CALLS, Android framework classes as a ROLE COMPONENT cell).
+//! ENDPOINT + CALLS, Android framework classes as a ROLE COMPONENT cell;
+//! CA.6b: Ktor-client verb calls in a file importing `io.ktor.client`).
 //! Parsers extract, the graph crate resolves: imports leave as
 //! [`ImportStmt`]s for `build_dotted`'s dotted resolver, which the engine runs
 //! over the Java and Kotlin parses of a repo as ONE graph (the JVM family), so
@@ -220,6 +221,12 @@ fn parse_all(
 /// `glia analyze <repo> 2>&1 | grep '\[kotlin/retrofit\]'` — `E` Retrofit
 /// ENDPOINTs, `C` Android component classes, `K` Spring RestTemplate /
 /// WebClient ENDPOINTs (see [`android`]).
+///
+/// CA.6b adds the Ktor-client line right after it, from the same bank read:
+///   `[kotlin-ktor-client] endpoints=M repo=<label>`
+/// `glia analyze <repo> 2>&1 | grep '^\[kotlin-ktor-client\]'` — `M` Ktor-client
+/// ENDPOINT emissions (`client.get(url)`, `client.request(url) { method = .. }`
+/// in a file importing `io.ktor.client`, see [`calls`]).
 pub fn trace(parses: &[FileParse], repo_label: &str) {
     let (mut types, mut fns, mut props, mut routes) = (0usize, 0usize, 0usize, 0usize);
     for fp in parses {
@@ -244,7 +251,9 @@ pub fn trace(parses: &[FileParse], repo_label: &str) {
     eprintln!("{}", calls::local_types_marker(parses, repo_label));
     eprintln!("{}", spring::marker(spring::take(), repo_label));
     eprintln!("{}", routes::marker(routes::take(), repo_label));
-    eprintln!("{}", android::marker(android::take(), repo_label));
+    let clients = android::take();
+    eprintln!("{}", android::marker(clients, repo_label));
+    eprintln!("{}", android::ktor_marker(clients, repo_label));
 }
 
 #[derive(Default)]

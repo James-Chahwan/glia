@@ -79,6 +79,14 @@
 //! `call_expression [call_expression run(x), annotated_lambda]`) is that one
 //! inner call: only the inner node mints a CallSite.
 //!
+//! # HTTP client calls
+//!
+//! Two per-call detectors turn a client call into a client ENDPOINT + CALLS
+//! from the enclosing function, through [`android`]'s shared sink: Spring's
+//! RestTemplate / WebClient chain ([`spring_client`], A14.6) and, when that
+//! did not fire, a Ktor-client verb call ([`ktor_client`], CA.6b) in a file
+//! importing `io.ktor.client`. Both keep the call's ordinary CallSite.
+//!
 //! # Supertypes (tree-sitter-kotlin-ng 1.1.0, measured)
 //!
 //! `delegation_specifiers > delegation_specifier >`
@@ -250,7 +258,9 @@ pub(crate) fn visit_call(call: TsNode, ctx: &Body, file: &File, acc: &mut Acc) {
             line: line_at(call),
         });
     }
-    spring_client(call, ctx.from, file, acc);
+    if !spring_client(call, ctx.from, file, acc) {
+        ktor_client(call, ctx.from, file, acc);
+    }
 }
 
 /// A14.6: a Spring HTTP client call → a client ENDPOINT + CALLS from the
@@ -272,13 +282,16 @@ pub(crate) fn visit_call(call: TsNode, ctx: &Body, file: &File, acc: &mut Acc) {
 /// concatenation (Medium, interpolations as `${…}`); its path must start
 /// with `/` after the authority is split off (`endpoint::client_url_split`,
 /// the Java rule), so `map.put("k", v)` never emits.
-fn spring_client(call: TsNode, from: NodeId, file: &File, acc: &mut Acc) {
+///
+/// Returns whether it emitted, so [`visit_call`] never reads the same call as
+/// a Ktor-client call too (`restClient.delete("/x")` in a Ktor-importing file).
+fn spring_client(call: TsNode, from: NodeId, file: &File, acc: &mut Acc) -> bool {
     let src = file.src;
     let Some(head) = call.named_child(0).filter(|h| h.kind() == "navigation_expression") else {
-        return;
+        return false;
     };
     let Some((base, name)) = nav_parts(head, src) else {
-        return;
+        return false;
     };
     let args = named_child_of_kind(call, &["value_arguments"]);
     let verb = match name {
@@ -288,20 +301,167 @@ fn spring_client(call: TsNode, from: NodeId, file: &File, acc: &mut Acc) {
         other => endpoint::rest_template_verb(other),
     };
     let Some(verb) = verb else {
-        return;
+        return false;
     };
-    let Some((raw, strong)) = args
-        .and_then(first_arg_value)
-        .and_then(|arg| android::client_url(arg, src))
+    if !emit_url_endpoint(call, verb, args, from, file, acc) {
+        return false;
+    }
+    acc.clients.spring_clients += 1;
+    true
+}
+
+/// CA.6b: a Ktor-client call → a client ENDPOINT + CALLS from the enclosing
+/// function `from`, in a file importing `io.ktor.client`
+/// ([`android::imports_ktor_client`]; without it nothing fires, so a Map's
+/// `get`, Javalin's `app.get("/x", h)` and a Ktor server route are all
+/// outside the gate).
+///
+/// - The call has a receiver: its head is a `navigation_expression`
+///   (`client.get(..)`, `HttpClient().post(..)`). The server DSL's
+///   `get("/x") { }` is receiver-less and stays a ROUTE ([`routes::ktor_call`]).
+/// - The verb comes from the member name ([`ktor_verb`]): `get` / `post` /
+///   `put` / `delete` / `patch` / `head` / `options` and their `prepare*`
+///   forms; `request` / `prepareRequest` read the trailing lambda's
+///   `method = HttpMethod.<X>` ([`ktor_block_method`]), GET (Ktor's default)
+///   when it sets none, nothing when it sets one the parser cannot read.
+/// - The URL is the first positional argument, read like Spring's: a literal
+///   (Strong), a template or `+` concatenation (Medium, interpolations as
+///   `${…}`), a path that must start with `/` after the authority is split
+///   off. The builder form `client.get { url("..") }` has no positional URL
+///   and emits nothing.
+///
+/// The trailing lambda of `client.post("/x") { .. }` is not a child of this
+/// call: the grammar parses it as `call_expression [call_expression
+/// client.post("/x"), annotated_lambda]`, so it is read off the parent.
+fn ktor_client(call: TsNode, from: NodeId, file: &File, acc: &mut Acc) {
+    let src = file.src;
+    let Some(head) = call
+        .named_child(0)
+        .filter(|h| h.kind() == "navigation_expression")
     else {
         return;
     };
-    let (host, path) = endpoint::client_url_split(&raw);
-    let Some(path) = path else {
+    let Some((_, name)) = nav_parts(head, src) else {
         return;
     };
+    let Some(form) = ktor_verb(name) else {
+        return;
+    };
+    if !android::imports_ktor_client(acc) {
+        return;
+    }
+    let verb = match form {
+        KtorVerb::Named(verb) => verb,
+        KtorVerb::FromBlock => {
+            match trailing_lambda(call).and_then(|l| ktor_block_method(l, src)) {
+                None => "GET",
+                Some(Some(verb)) => verb,
+                Some(None) => return,
+            }
+        }
+    };
+    let args = named_child_of_kind(call, &["value_arguments"]);
+    if emit_url_endpoint(call, verb, args, from, file, acc) {
+        acc.clients.ktor_clients += 1;
+    }
+}
+
+/// How a Ktor-client member name gives its HTTP verb.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KtorVerb {
+    /// The name is the verb: `get` / `prepareGet` → `GET`.
+    Named(&'static str),
+    /// `request` / `prepareRequest`: the verb is the block's `method =`.
+    FromBlock,
+}
+
+/// The verb form of a Ktor-client request function: `get`, `post`, `put`,
+/// `delete`, `patch`, `head`, `options` (lower-case, Ktor's spelling), the
+/// same with a `prepare` prefix (`prepareGet`, …), and `request` /
+/// `prepareRequest`. `None` for anything else (`submitForm`, `webSocket`,
+/// `getForObject`, an upper-case `GET`).
+fn ktor_verb(name: &str) -> Option<KtorVerb> {
+    let bare = match name.strip_prefix("prepare") {
+        Some(rest) => {
+            let mut chars = rest.chars();
+            let first = chars.next().filter(char::is_ascii_uppercase)?;
+            format!("{}{}", first.to_ascii_lowercase(), chars.as_str())
+        }
+        None => name.to_string(),
+    };
+    if bare == "request" {
+        return Some(KtorVerb::FromBlock);
+    }
+    if bare.chars().any(|c| c.is_ascii_uppercase()) {
+        return None;
+    }
+    endpoint::jaxrs_verb(&bare.to_ascii_uppercase()).map(KtorVerb::Named)
+}
+
+/// The `annotated_lambda` a call is completed by: its own child, or — the
+/// grammar's shape for `recv.m(args) { .. }` — its parent's, when the parent
+/// is a `call_expression` headed by this call.
+fn trailing_lambda(call: TsNode) -> Option<TsNode> {
+    if let Some(own) = named_child_of_kind(call, &["annotated_lambda"]) {
+        return Some(own);
+    }
+    let parent = call.parent().filter(|p| p.kind() == "call_expression")?;
+    if parent.named_child(0)?.id() != call.id() {
+        return None;
+    }
+    named_child_of_kind(parent, &["annotated_lambda"])
+}
+
+/// The last `method = …` statement of a Ktor request block (the lambda's own
+/// statements, never a nested lambda's): `None` when it sets no method,
+/// `Some(Some(verb))` for `method = HttpMethod.Put` (the Java / Spring
+/// `HttpMethod.<X>` reader, case-folded), `Some(None)` for a value the parser
+/// cannot read (`method = m`, `HttpMethod("PURGE")`).
+fn ktor_block_method(lambda: TsNode, src: &[u8]) -> Option<Option<&'static str>> {
+    // tree-sitter-kotlin-ng 1.1: a `lambda_literal`'s statements are its
+    // direct children (there is no `statements` wrapper).
+    let body = named_child_of_kind(lambda, &["lambda_literal"])?;
+    let mut cursor = body.walk();
+    body.named_children(&mut cursor)
+        .filter(|stmt| stmt.kind() == "assignment")
+        .filter(|stmt| {
+            stmt.child_by_field_name("operator")
+                .is_some_and(|op| op.kind() == "=")
+                && stmt
+                    .child_by_field_name("left")
+                    .is_some_and(|l| matches!(text_of(l, src), "method" | "this.method"))
+        })
+        .last()
+        .map(|stmt| {
+            stmt.child_by_field_name("right")
+                .and_then(|r| endpoint::http_method_ref_verb(text_of(r, src)))
+        })
+}
+
+/// The client ENDPOINT a call's first positional argument names, emitted with
+/// `verb` (+ CALLS from `from`) — the URL rules [`spring_client`] and
+/// [`ktor_client`] share. `false` when the argument is no readable URL or its
+/// path does not start with `/` after the authority is split off.
+fn emit_url_endpoint(
+    call: TsNode,
+    verb: &str,
+    args: Option<TsNode>,
+    from: NodeId,
+    file: &File,
+    acc: &mut Acc,
+) -> bool {
+    let Some((raw, strong)) = args
+        .and_then(first_arg_value)
+        .and_then(|arg| android::client_url(arg, file.src))
+    else {
+        return false;
+    };
+    let (host, path) = endpoint::client_url_split(&raw);
+    let Some(path) = path else {
+        return false;
+    };
     android::emit_client_endpoint(call, verb, path, host.as_deref(), strong, from, file, acc);
-    acc.clients.spring_clients += 1;
+    true
 }
 
 /// `(receiver, method name)` of a `navigation_expression` call head: `a.b.m`
@@ -1303,6 +1463,188 @@ fun main() {
 "#,
         );
         assert!(endpoint_calls(&fp).is_empty(), "{:?}", endpoint_calls(&fp));
+    }
+
+    /// The ENDPOINT_HIT JSON of the ENDPOINT `qname`.
+    fn hit_of(fp: &FileParse, qname: &str) -> serde_json::Value {
+        let node = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == id(node_kind::ENDPOINT, qname))
+            .unwrap_or_else(|| panic!("no endpoint {qname}"));
+        match &node.cells[0].payload {
+            glia_core::CellPayload::Json(s) => serde_json::from_str(s).unwrap(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn owned(want: &[(&str, &str)]) -> Vec<(String, String)> {
+        want.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    }
+
+    /// CA.6b: the kotlin-ktor-client fixture's OrdersClient.kt.
+    const ORDERS_CLIENT: &str = r#"
+package com.acme.client
+
+import io.ktor.client.HttpClient
+import io.ktor.client.call.body
+import io.ktor.client.request.get
+import io.ktor.client.request.post
+import io.ktor.client.request.setBody
+
+class OrdersClient(private val client: HttpClient) {
+    suspend fun listOrders(): String = client.get("http://orders:8080/api/orders").body()
+
+    suspend fun createOrder(body: String): String =
+        client.post("/api/orders") { setBody(body) }.body()
+
+    suspend fun getOrder(id: String): String = client.get("/api/orders/$id").body()
+}
+"#;
+
+    #[test]
+    fn ktor_client_verbs_emit_endpoints() {
+        let fp = parse(ORDERS_CLIENT);
+        assert_eq!(
+            endpoint_calls(&fp),
+            owned(&[
+                ("endpoint:GET:/api/orders", "OrdersClient::listOrders"),
+                ("endpoint:POST:/api/orders", "OrdersClient::createOrder"),
+                ("endpoint:GET:/api/orders/${…}", "OrdersClient::getOrder"),
+            ])
+        );
+        // The ordinary CallSite stays beside the ENDPOINT edge.
+        assert!(calls_of(&fp, id(node_kind::METHOD, "OrdersClient::listOrders"))
+            .contains(&attr("client", "get")));
+        // The literal authority rides as `host`; a literal is Strong, a
+        // template Medium; the line is the call's, 1-based.
+        let list = hit_of(&fp, "endpoint:GET:/api/orders");
+        assert_eq!(list["host"], "orders:8080");
+        assert_eq!(list["confidence"], "strong");
+        assert_eq!(list["line"], 11);
+        assert!(hit_of(&fp, "endpoint:POST:/api/orders").get("host").is_none());
+        assert_eq!(hit_of(&fp, "endpoint:GET:/api/orders/${…}")["confidence"], "medium");
+        // No ROUTE: a client call is never a server route.
+        assert!(!fp.nav.kind_by_id.values().any(|k| *k == node_kind::ROUTE));
+        let counts = crate::parse_all(ORDERS_CLIENT, "o.kt", "o", RepoId(1)).unwrap().clients;
+        assert_eq!((counts.ktor_clients, counts.spring_clients), (3, 0));
+    }
+
+    #[test]
+    fn ktor_request_reads_the_method() {
+        let fp = parse(
+            r#"
+import io.ktor.client.*
+import io.ktor.client.request.*
+import io.ktor.http.HttpMethod
+
+fun calls(client: HttpClient, m: HttpMethod) {
+    client.request("/x") { method = HttpMethod.Put }
+    client.request("/y")
+    client.prepareRequest("/z") {
+        header("A", "b")
+        method = HttpMethod.Delete
+    }
+    client.request("/unread") { method = m }
+    client.preparePost("/p").execute()
+    HttpClient().patch("https://api.acme.io/items/${m.value}")
+    client.get { url("/builder") }
+    client.submitForm("/form", parameters)
+    client.GET("/upper")
+    client.get("relative")
+    restClient.delete("/both")
+}
+"#,
+        );
+        assert_eq!(
+            endpoint_calls(&fp),
+            owned(&[
+                ("endpoint:PUT:/x", "svc::calls"),
+                ("endpoint:GET:/y", "svc::calls"),
+                ("endpoint:DELETE:/z", "svc::calls"),
+                ("endpoint:POST:/p", "svc::calls"),
+                ("endpoint:PATCH:/items/${…}", "svc::calls"),
+                ("endpoint:DELETE:/both", "svc::calls"),
+            ])
+        );
+        assert_eq!(hit_of(&fp, "endpoint:PATCH:/items/${…}")["host"], "api.acme.io");
+        // `restClient.delete` is Spring's (a rest-named receiver): counted
+        // once, never as a Ktor call too.
+        let src = "import io.ktor.client.HttpClient\n\nfun f() {\n    restClient.delete(\"/both\")\n    client.delete(\"/k\")\n}\n";
+        let counts = crate::parse_all(src, "f.kt", "f", RepoId(1)).unwrap().clients;
+        assert_eq!((counts.spring_clients, counts.ktor_clients), (1, 1));
+    }
+
+    #[test]
+    fn no_ktor_import_no_endpoint() {
+        // The fixture's Cache.kt: a map's get / put, no io.ktor.client import.
+        let fp = parse(
+            r#"
+package com.acme.client
+
+class Cache(private val entries: MutableMap<String, String>) {
+    fun get(key: String): String? = entries.get("/api/orders")
+    fun post(key: String, v: String) { entries.put(key, v) }
+    fun more(client: Any) { client.post("/api/orders") }
+}
+"#,
+        );
+        assert!(endpoint_calls(&fp).is_empty(), "{:?}", endpoint_calls(&fp));
+        // Only the server artifact imported: still no client.
+        let server = parse(
+            "import io.ktor.server.routing.*\n\nfun f(client: Any) {\n    client.get(\"/api/orders\")\n}\n",
+        );
+        assert!(endpoint_calls(&server).is_empty(), "{:?}", endpoint_calls(&server));
+    }
+
+    #[test]
+    fn server_dsl_is_not_a_client() {
+        // A server that proxies upstream: the receiver-less `get("/x") { }`
+        // is its ROUTE, `client.get(..)` inside the handler its client call,
+        // and `call.parameters.get("id")` (no `/` path) neither.
+        let fp = parse(
+            r#"
+import io.ktor.client.HttpClient
+import io.ktor.client.request.get
+import io.ktor.server.application.Application
+import io.ktor.server.routing.get
+import io.ktor.server.routing.routing
+
+fun Application.proxy(client: HttpClient) {
+    routing {
+        get("/x") {
+            val id = call.parameters.get("id")
+            call.respond(client.get("/upstream/$id").body<String>())
+        }
+        post("/y") { call.respond("ok") }
+    }
+}
+"#,
+        );
+        assert_eq!(
+            endpoint_calls(&fp),
+            owned(&[("endpoint:GET:/upstream/${…}", "svc::proxy")])
+        );
+        for route in ["GET /x", "POST /y"] {
+            assert!(
+                fp.nodes.iter().any(|n| n.id == id(node_kind::ROUTE, route)),
+                "{route} stays a ROUTE"
+            );
+        }
+        assert!(!fp.nav.qname_by_id.values().any(|q| q == "endpoint:GET:/x"));
+    }
+
+    #[test]
+    fn ktor_verb_names() {
+        use super::{KtorVerb, ktor_verb};
+        assert_eq!(ktor_verb("get"), Some(KtorVerb::Named("GET")));
+        assert_eq!(ktor_verb("options"), Some(KtorVerb::Named("OPTIONS")));
+        assert_eq!(ktor_verb("prepareHead"), Some(KtorVerb::Named("HEAD")));
+        assert_eq!(ktor_verb("request"), Some(KtorVerb::FromBlock));
+        assert_eq!(ktor_verb("prepareRequest"), Some(KtorVerb::FromBlock));
+        for no in ["GET", "Get", "prepare", "prepareget", "preparerequest", "getForObject", "submitForm", "webSocket", "body"] {
+            assert_eq!(ktor_verb(no), None, "{no}");
+        }
     }
 
     /// `(name, type)` of the locals `local_types` records for `scope`, sorted.

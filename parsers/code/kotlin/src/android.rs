@@ -9,9 +9,12 @@
 //!   `listUsers -> GET /api/users` pairs with the server's route across
 //!   repos. Ktorfit's `@GET("x")` interfaces read the same.
 //! - **Spring clients** (`restTemplate.getForObject("/x", …)`,
-//!   `webClient.post().uri("/x")`) are detected by the call walker
-//!   ([`crate::calls`]); they share this module's ENDPOINT sink
-//!   ([`emit_client_endpoint`]) and URL reconstruction ([`client_url`]).
+//!   `webClient.post().uri("/x")`) and **Ktor-client calls** (CA.6b:
+//!   `client.get("/x")`, `client.request("/x") { method = HttpMethod.Put }`
+//!   in a file importing `io.ktor.client`, gated by [`imports_ktor_client`])
+//!   are detected by the call walker ([`crate::calls`]); they share this
+//!   module's ENDPOINT sink ([`emit_client_endpoint`]) and URL reconstruction
+//!   ([`client_url`]).
 //! - **Android components.** A class whose superclass is an Android framework
 //!   entry type (`AppCompatActivity`, `Fragment`, `ViewModel`, `Service`, …)
 //!   in a file importing `android.*` / `androidx.*`, or that carries a Hilt
@@ -54,7 +57,8 @@
 //!
 //! Classes that extend an app's own base (`class Main : BaseActivity()`), since
 //! the base is matched by name, not by resolved hierarchy; WorkManager workers
-//! and `@Composable` functions; OkHttp and Ktor-client calls.
+//! and `@Composable` functions; OkHttp, java.net.http and Fuel calls; a
+//! Ktor-client builder call with no positional URL (`client.get { url(..) }`).
 //!
 //! # fired_on
 //!
@@ -65,6 +69,11 @@
 //! classes, `K` Spring client ENDPOINT emissions. Like the `[kotlin/spring]`
 //! line these are what the detectors did while THIS process parsed: a file
 //! served from the engine's parse cache is not counted.
+//!
+//! CA.6b adds `[kotlin-ktor-client] endpoints=M repo=<label>` right after it,
+//! from the same bank ([`ktor_marker`]): `M` counts Ktor-client ENDPOINT
+//! emissions. A separate line keeps the `[kotlin/retrofit]` shape unchanged:
+//! `glia analyze <repo> 2>&1 | grep '^\[kotlin-ktor-client\]'`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -108,17 +117,20 @@ pub(crate) struct ClientCounts {
     pub(crate) components: usize,
     /// Spring RestTemplate / WebClient ENDPOINT emissions ([`crate::calls`]).
     pub(crate) spring_clients: usize,
+    /// Ktor-client verb-call ENDPOINT emissions ([`crate::calls`], CA.6b).
+    pub(crate) ktor_clients: usize,
 }
 
-/// The process-global bank the marker reads: endpoints, components,
-/// spring_clients. Diagnostics only: nothing here reaches the graph.
-static COUNTS: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
+/// The process-global bank the markers read: endpoints, components,
+/// spring_clients, ktor_clients. Diagnostics only: nothing here reaches the
+/// graph.
+static COUNTS: [AtomicUsize; 4] = [const { AtomicUsize::new(0) }; 4];
 
 /// Add one file's counts to the bank (end of `parse_file`).
 pub(crate) fn publish(c: ClientCounts) {
     for (slot, n) in COUNTS
         .iter()
-        .zip([c.endpoints, c.components, c.spring_clients])
+        .zip([c.endpoints, c.components, c.spring_clients, c.ktor_clients])
     {
         if n > 0 {
             slot.fetch_add(n, Ordering::Relaxed);
@@ -128,12 +140,13 @@ pub(crate) fn publish(c: ClientCounts) {
 
 /// Read and zero the bank, so the next repo's line starts clean.
 pub(crate) fn take() -> ClientCounts {
-    let [endpoints, components, spring_clients] =
+    let [endpoints, components, spring_clients, ktor_clients] =
         COUNTS.each_ref().map(|c| c.swap(0, Ordering::Relaxed));
     ClientCounts {
         endpoints,
         components,
         spring_clients,
+        ktor_clients,
     }
 }
 
@@ -143,6 +156,12 @@ pub(crate) fn marker(c: ClientCounts, repo_label: &str) -> String {
         "[kotlin/retrofit] endpoints={} components={} spring_clients={} repo={repo_label}",
         c.endpoints, c.components, c.spring_clients
     )
+}
+
+/// The `[kotlin-ktor-client]` marker line (CA.6b), printed right after the
+/// `[kotlin/retrofit]` line from the same [`take`].
+pub(crate) fn ktor_marker(c: ClientCounts, repo_label: &str) -> String {
+    format!("[kotlin-ktor-client] endpoints={} repo={repo_label}", c.ktor_clients)
 }
 
 /// A member function of an INTERFACE: when it is a Retrofit mapping (see the
@@ -264,6 +283,26 @@ fn imports_android(acc: &Acc) -> bool {
             ImportTarget::Module { path, .. } => path.as_str(),
         };
         matches!(path.split("::").next(), Some("android" | "androidx"))
+    })
+}
+
+/// Whether the file imports anything under `io.ktor.client` — the Ktor client
+/// artifact's namespace (the server DSL lives in `io.ktor.server`), the gate
+/// every Ktor-client call detector ([`crate::calls`]) sits behind. Imports
+/// precede every declaration in a Kotlin file, so they are all collected
+/// before any function body is walked. `import io.ktor.client.request.get`
+/// (a Symbol under `io::ktor::client::request`), `import
+/// io.ktor.client.HttpClient` and `import io.ktor.client.*` all count.
+pub(crate) fn imports_ktor_client(acc: &Acc) -> bool {
+    acc.imports.iter().any(|i| {
+        let (path, last) = match &i.target {
+            ImportTarget::Symbol { module, name, .. } => (module.as_str(), Some(name.as_str())),
+            ImportTarget::Module { path, .. } => (path.as_str(), None),
+        };
+        let mut segments = path.split("::").chain(last);
+        segments.next() == Some("io")
+            && segments.next() == Some("ktor")
+            && segments.next() == Some("client")
     })
 }
 
@@ -702,10 +741,44 @@ class HomeFragment : Fragment()
             endpoints: 2,
             components: 0,
             spring_clients: 1,
+            ktor_clients: 4,
         };
+        // CA.6b: the Ktor-client count rides on its own line, never this one.
         assert_eq!(
             marker(c, "fixtures/kotlin-retrofit/client"),
             "[kotlin/retrofit] endpoints=2 components=0 spring_clients=1 repo=fixtures/kotlin-retrofit/client"
         );
+    }
+
+    #[test]
+    fn ktor_marker_line_shape() {
+        let c = ClientCounts {
+            endpoints: 2,
+            spring_clients: 1,
+            ktor_clients: 3,
+            ..ClientCounts::default()
+        };
+        assert_eq!(
+            ktor_marker(c, "fixtures/kotlin-ktor-client/client"),
+            "[kotlin-ktor-client] endpoints=3 repo=fixtures/kotlin-ktor-client/client"
+        );
+    }
+
+    #[test]
+    fn ktor_client_import_gate() {
+        let gate = |src: &str| {
+            let acc = Acc {
+                imports: parse(src).imports,
+                ..Acc::default()
+            };
+            imports_ktor_client(&acc)
+        };
+        assert!(gate("import io.ktor.client.HttpClient\n"));
+        assert!(gate("import io.ktor.client.request.get\n"));
+        assert!(gate("import io.ktor.client.*\n"));
+        assert!(!gate("import io.ktor.server.routing.get\n"));
+        assert!(!gate("import io.ktor.http.HttpMethod\n"));
+        assert!(!gate("import com.acme.io.ktor.client.Fake\n"));
+        assert!(!gate("package x\n"));
     }
 }

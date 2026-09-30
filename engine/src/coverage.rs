@@ -194,11 +194,13 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     // once the Kotlin chain (calls + heritage A14.3, Spring / JPA A14.4, Ktor
     // A14.5, HTTP clients + Android A14.6) had landed: each row names only
     // what that chain still does not extract. CA.6a narrowed the CALLS row:
-    // typed parameters and typed / constructor-initialised locals bind.
+    // typed parameters and typed / constructor-initialised locals bind. CA.6b
+    // narrowed the HTTP_CALLS and `*` rows: Ktor-client verb calls are
+    // client ENDPOINTs.
     CoverageCaveat {
         language: "kotlin",
         edge_category: "*",
-        note: "Kotlin is extracted by a dedicated parser: declarations and imports, calls and supertypes, Spring / Micronaut / JAX-RS annotation routes with HANDLED_BY, stereotype / @Inject constructor and field INJECTS, JPA @Entity DATA_ENTITY and repository ACCESSES_DATA, Ktor routes, Retrofit / RestTemplate / WebClient client ENDPOINTs, and Android components (a class extending an Android framework type in a file importing android / androidx, or carrying @AndroidEntryPoint / @HiltViewModel / @HiltAndroidApp, is an entrypoint). Not read: `.kts` scripts (Gradle KTS) are never parsed; a class extending the app's own base (`: BaseActivity()`), WorkManager workers and @Composable functions are not classified as entrypoints.",
+        note: "Kotlin is extracted by a dedicated parser: declarations and imports, calls and supertypes, Spring / Micronaut / JAX-RS annotation routes with HANDLED_BY, stereotype / @Inject constructor and field INJECTS, JPA @Entity DATA_ENTITY and repository ACCESSES_DATA, Ktor routes, Retrofit / RestTemplate / WebClient / Ktor-client client ENDPOINTs, and Android components (a class extending an Android framework type in a file importing android / androidx, or carrying @AndroidEntryPoint / @HiltViewModel / @HiltAndroidApp, is an entrypoint). Not read: `.kts` scripts (Gradle KTS) are never parsed; a class extending the app's own base (`: BaseActivity()`), WorkManager workers and @Composable functions are not classified as entrypoints.",
         verify: "grep the symbol across *.kt; for an unclassified Android screen, grep its superclass chain",
     },
     CoverageCaveat {
@@ -228,8 +230,8 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     CoverageCaveat {
         language: "kotlin",
         edge_category: "HTTP_CALLS",
-        note: "Kotlin client ENDPOINTs come from Retrofit interface methods and Spring RestTemplate / WebClient / RestClient calls with a literal or templated URL. OkHttp, Ktor-client (`HttpClient().get(...)`), java.net.http and Fuel calls emit no ENDPOINT; a URL held in a variable is not read; the Retrofit builder's `baseUrl(...)` is not read, so a Retrofit path is taken as root-relative and a base URL carrying a path prefix (`baseUrl(\"https://x/api/\")`) pairs only through the resolver's route-prefix fallback (Medium), or not at all for a prefix outside its API-prefix list",
-        verify: "grep OkHttpClient / HttpClient( / Request.Builder / baseUrl( across *.kt",
+        note: "Kotlin client ENDPOINTs come from Retrofit interface methods, Spring RestTemplate / WebClient / RestClient calls and Ktor-client verb calls (`client.get(url)`, `client.request(url) { method = HttpMethod.Post }`, in a file importing io.ktor.client) with a literal or templated URL. OkHttp, java.net.http and Fuel calls emit no ENDPOINT; a Ktor builder call without a positional URL (`client.get { url(..) }`), a Ktor `request` whose `method =` is not an `HttpMethod.<X>` constant, and a URL held in a variable are not read; the Retrofit builder's `baseUrl(...)` is not read, so a Retrofit path is taken as root-relative and a base URL carrying a path prefix (`baseUrl(\"https://x/api/\")`) pairs only through the resolver's route-prefix fallback (Medium), or not at all for a prefix outside its API-prefix list",
+        verify: "grep OkHttpClient / HttpClient( / Request.Builder / baseUrl( / url( across *.kt",
     },
 ];
 
@@ -626,7 +628,10 @@ mod tests {
         assert!(note("CALLS").contains("lambda parameter"));
         assert!(note("CALLS").contains("INTERFACE default method"));
         assert!(note("HTTP_CALLS").contains("Retrofit") && note("HTTP_CALLS").contains("OkHttp"));
-        assert!(note("HTTP_CALLS").contains("Ktor-client"));
+        // CA.6b: Ktor-client verb calls are read; OkHttp stays the residual.
+        assert!(note("HTTP_CALLS").contains("Ktor-client verb calls"));
+        assert!(!note("HTTP_CALLS").contains("Ktor-client (`HttpClient().get(...)`)"));
+        assert!(note("*").contains("Ktor-client client ENDPOINTs"));
         assert!(note("*").contains("`.kts` scripts"));
         assert!(kotlin.iter().all(|n| n.edges_found == 0));
         // Every non-`*` row names a category that exists, so edges_found can count it.

@@ -1,0 +1,65 @@
+{
+  "framework": "kotlin-ktor-client",
+  "language": "kotlin",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "note": "CA-6: a Ktor-client call (`client.get(url)`, `client.post(url) { .. }`) in a file importing io.ktor.client is a client ENDPOINT the enclosing function CALLS, paired to the Ktor server ROUTE by HttpStackResolver. A map's `get(\"/api/orders\")` in a file without the import mints nothing. Caveat engine/src/coverage.rs kotlin HTTP_CALLS names Ktor-client as unread at 0.5.0.",
+  "expect_nodes": [
+    {
+      "kind": "ENDPOINT",
+      "name": "GET /api/orders"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "POST /api/orders"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "GET /api/orders/${…}"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /api/orders",
+      "note": "CONTROL: the Ktor server route (A14.5)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "listOrders",
+      "to": "GET /api/orders",
+      "category": "CALLS"
+    },
+    {
+      "from": "createOrder",
+      "to": "POST /api/orders",
+      "category": "CALLS"
+    },
+    {
+      "from": "GET /api/orders",
+      "to": "GET /api/orders",
+      "category": "HTTP_CALLS",
+      "note": "ENDPOINT -> ROUTE across client/ and server/"
+    },
+    {
+      "from": "POST /api/orders",
+      "to": "POST /api/orders",
+      "category": "HTTP_CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /api/orders",
+      "max_nodes": 1,
+      "note": "a client call is never a second server ROUTE"
+    },
+    {
+      "from": "get",
+      "to": "GET /api/orders",
+      "category": "CALLS",
+      "note": "Cache.get's map lookup (no io.ktor.client import) is no client call"
+    }
+  ]
+}
