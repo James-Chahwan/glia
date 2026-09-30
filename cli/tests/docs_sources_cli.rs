@@ -26,6 +26,13 @@
 //! marker is the `[docs] sync source=notion ...` line. Pre-fix (HEAD 83b9eaf):
 //! `glia docs sync /tmp --source notion` -> `error: invalid value 'notion'
 //! for '--source <SOURCE>'`, exit 2.
+//!
+//! CE.4f adds `--page <ID>` (`notion_page_tree_sync_then_build`): a root page
+//! and its sub-pages, nested blocks read, a 429 retried; its fired_on marker
+//! is `[docs] sync source=notion root=<id> ... retries=<t> depth_capped=<c>`,
+//! and the database marker gains the same two fields. Pre-fix (HEAD d85f32f):
+//! `glia docs sync /tmp --source notion --database db1 --page p1 --token t` ->
+//! `error: unexpected argument '--page' found`, exit 2.
 
 // The acceptance wiki holds a symlink out of the checkout.
 #![cfg(unix)]
@@ -255,7 +262,7 @@ fn source_flags_do_not_cross() {
     let scratch = Scratch::new("cross");
     let (repo, wiki) = repo_and_wiki(&scratch.0);
     let (repo_arg, wiki_arg) = (repo.to_str().expect("UTF-8"), wiki.to_str().expect("UTF-8"));
-    let cases: [(&[&str], &str); 16] = [
+    let cases: [(&[&str], &str); 19] = [
         (
             &["--source", "dir"],
             "--path <DIR> is required with --source dir",
@@ -274,7 +281,19 @@ fn source_flags_do_not_cross() {
         ),
         (
             &["--source", "notion"],
-            "--database <ID> is required with --source notion",
+            "one of --database <ID> or --page <ID> is required with --source notion",
+        ),
+        (
+            &["--source", "notion", "--database", "db1", "--page", "p1", "--token", "t"],
+            "cannot be used with",
+        ),
+        (
+            &["--source", "notion", "--page", "../v1/users", "--token", "t"],
+            "--page takes a Notion page id",
+        ),
+        (
+            &["--source", "dir", "--path", wiki_arg, "--page", "p1"],
+            "--page applies only to --source notion",
         ),
         (
             &["--source", "notion", "--database", "db1"],
@@ -765,7 +784,7 @@ fn notion_sync_then_build() {
     );
     assert!(
         stderr.contains(
-            "[docs] sync source=notion database=db1 data_sources=1 fetched=2 kept=2 blocks=6 unsupported=0 requests=5"
+            "[docs] sync source=notion database=db1 data_sources=1 fetched=2 kept=2 blocks=6 unsupported=0 requests=5 retries=0 depth_capped=0"
         ),
         "fired_on marker missing:\n{stderr}"
     );
@@ -829,4 +848,148 @@ fn notion_sync_then_build() {
         documents(method),
         "no Order Flow § Orders -DOCUMENTS-> OrderService::place"
     );
+}
+
+/// `GET /v1/pages/{id}`: a page titled `title`.
+fn notion_page_object(id: &str, title: &str) -> Canned {
+    Canned::ok(
+        serde_json::json!({
+            "object": "page",
+            "id": id,
+            "last_edited_time": "2026-09-21T08:00:00.000Z",
+            "archived": false,
+            "in_trash": false,
+            "url": format!("https://www.notion.so/{}", id.replace('-', "")),
+            "properties": { "title": { "id": "title", "type": "title",
+                                       "title": [notion_span(title, false)] } },
+        })
+        .to_string(),
+    )
+}
+
+/// A block of `kind` whose children are read by another request.
+fn notion_parent(id: &str, kind: &str, body: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "object": "block", "id": id, "type": kind, "has_children": true, kind: body })
+}
+
+#[test]
+fn notion_page_tree_sync_then_build() {
+    let scratch = Scratch::new("notion-tree");
+    let (repo, _) = repo_and_wiki(&scratch.0);
+    let repo_arg = repo.to_str().expect("UTF-8");
+    let (root_id, flow_id, ship_id, toggle_id) = (
+        "2b000000-0000-4000-8000-000000000001",
+        "2b000000-0000-4000-8000-000000000002",
+        "2b000000-0000-4000-8000-000000000003",
+        "3c000000-0000-4000-8000-0000000000aa",
+    );
+    let paragraph = |spans: Vec<serde_json::Value>| {
+        serde_json::json!({ "object": "block", "type": "paragraph", "paragraph": { "rich_text": spans } })
+    };
+
+    let stub = StubServer::start(vec![
+        notion_page_object(root_id, "Engineering"),
+        notion_list(
+            vec![
+                paragraph(vec![notion_span("Start here.", false)]),
+                notion_parent(flow_id, "child_page", serde_json::json!({ "title": "Order Flow" })),
+                notion_parent(ship_id, "child_page", serde_json::json!({ "title": "Shipping" })),
+            ],
+            None,
+        ),
+        Canned::status(
+            429,
+            serde_json::json!({ "object": "error", "status": 429, "code": "rate_limited",
+                                "message": "You have been rate limited." })
+            .to_string(),
+        )
+        .with_header("Retry-After", "0"),
+        notion_page_object(flow_id, "Order Flow"),
+        notion_list(
+            vec![
+                serde_json::json!({ "object": "block", "type": "heading_2",
+                    "heading_2": { "rich_text": [notion_span("Orders", false)] } }),
+                notion_parent(toggle_id, "toggle",
+                    serde_json::json!({ "rich_text": [notion_span("Details", false)] })),
+            ],
+            None,
+        ),
+        // The code spans the linker needs sit inside the toggle.
+        notion_list(
+            vec![paragraph(vec![
+                notion_span("The ", false),
+                notion_span("OrderService", true),
+                notion_span(" takes orders. Calls ", false),
+                notion_span("OrderService.place", true),
+            ])],
+            None,
+        ),
+        notion_page_object(ship_id, "Shipping"),
+        notion_list(vec![paragraph(vec![notion_span("Ships the order.", false)])], None),
+    ])
+    .expect("stub binds");
+    let origin = stub.origin();
+    let out = glia(
+        &scratch.0,
+        &[
+            "docs", "sync", repo_arg, "--source", "notion", "--page", root_id, "--token", "secret_t",
+            "--api", &origin,
+        ],
+    );
+    let seen = stub.finish();
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert!(
+        out.status.success(),
+        "docs sync exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        out.status
+    );
+    let root = "2b000000000040008000000000000001";
+    assert!(
+        stderr.contains(&format!(
+            "[docs] sync source=notion root={root} data_sources=0 fetched=3 kept=3 blocks=7 unsupported=0 requests=8 retries=1 depth_capped=0"
+        )),
+        "fired_on marker missing:\n{stderr}"
+    );
+    assert!(!stderr.contains("secret_t") && !stdout.contains("secret_t"));
+    assert_eq!(seen.len(), 8);
+    assert_eq!(seen[5].target, format!("/v1/blocks/{toggle_id}/children?page_size=100"));
+    let mut paths = manifest_paths(&repo);
+    paths.sort();
+    assert_eq!(
+        paths,
+        [
+            format!("notion/{root}/engineering.md"),
+            format!("notion/{root}/order-flow.md"),
+            format!("notion/{root}/shipping.md"),
+        ]
+    );
+
+    let out = glia(&scratch.0, &["analyze", repo_arg, "--format", "json"]);
+    assert!(out.status.success(), "analyze stderr:\n{}", text(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("analyze stdout is JSON");
+    let nodes = v["nodes"].as_array().expect("nodes array");
+    let edges = v["edges"].as_array().expect("edges array");
+    let node = |kind: &str, qname: &str| {
+        nodes
+            .iter()
+            .find(|n| n["kind_name"] == kind && n["qname"] == qname)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no {kind} {qname}; qnames: {:?}",
+                    nodes.iter().map(|n| &n["qname"]).collect::<Vec<_>>()
+                )
+            })
+    };
+    node("DOC_SPACE", &format!("docspace::notion::{root}"));
+    let orders = node("DOC_SECTION", &format!("docs::notion::{root}::order-flow::orders"));
+    let documents = |target: &serde_json::Value| {
+        edges.iter().any(|e| {
+            e["category"] == "DOCUMENTS" && e["from"] == orders["id"] && e["to"] == target["id"]
+        })
+    };
+    assert!(
+        documents(node("CLASS", "svc::orders::OrderService")),
+        "no Order Flow § Orders -DOCUMENTS-> OrderService (its code spans sit inside a toggle)"
+    );
+    assert!(documents(node("METHOD", "svc::orders::OrderService::place")));
 }

@@ -1,6 +1,6 @@
-//! `glia docs sync|push` — the doc-source sync step (Confluence, a MediaWiki
-//! or a Notion database over the network, or a local wiki checkout); the
-//! snapshot it writes feeds the offline, byte-identical build.
+//! `glia docs sync|push` — the doc-source sync step (Confluence, a MediaWiki,
+//! a Notion database or page tree over the network, or a local wiki
+//! checkout); the snapshot it writes feeds the offline, byte-identical build.
 
 use std::path::Path;
 
@@ -24,8 +24,8 @@ enum SyncSource {
     /// `--category`, optional `--container` / `--max-pages` / `--token`).
     #[value(name = "mediawiki")]
     MediaWiki,
-    /// A Notion database through the Notion API (`--database`, a token;
-    /// optional `--max-pages` / `--api`).
+    /// A Notion database or page tree through the Notion API (`--database`
+    /// or `--page`, a token; optional `--max-pages` / `--api`).
     Notion,
 }
 
@@ -47,7 +47,8 @@ enum DocsCmd {
     /// Markdown page of a local wiki checkout, with `--source mediawiki`
     /// one namespace or category of a MediaWiki, read through its Action API
     /// (never by following links), or with `--source notion` every page of a
-    /// Notion database, its blocks converted to Markdown. Then
+    /// Notion database (`--database`) or a page and its sub-pages (`--page`),
+    /// their blocks, nested ones included, converted to Markdown. Then
     /// `glia build <repo>` ingests it (DOC_SPACE + DOC_SECTION + doc→code
     /// DOCUMENTS links). Confluence credentials resolve flag → env → `./.env`
     /// (CONFLUENCE_SITE / CONFLUENCE_EMAIL / CONFLUENCE_TOKEN); a MediaWiki
@@ -114,6 +115,13 @@ enum DocsCmd {
         /// shared with the integration.
         #[arg(long, value_name = "ID")]
         database: Option<String>,
+        /// `--source notion`, instead of `--database`: a root page id (from
+        /// its URL). The page and its sub-pages (`child_page` blocks, up to 5
+        /// levels down, at most `--max-pages`) are read, breadth-first, and
+        /// filed under `docspace::notion::<root id without hyphens>`. The page
+        /// must be shared with the integration.
+        #[arg(long, value_name = "ID", conflicts_with = "database")]
+        page: Option<String>,
         #[arg(long)]
         site: Option<String>,
         #[arg(long)]
@@ -175,6 +183,7 @@ fn cmd_docs(action: DocsCmd) -> i32 {
             category,
             max_pages,
             database,
+            page,
             site,
             email,
             token,
@@ -183,7 +192,7 @@ fn cmd_docs(action: DocsCmd) -> i32 {
             let filter = glia_doc_sources::TitleFilter::new(&include, &exclude);
             // Every source-specific flag, in the order it is reported, with
             // the sources that take it.
-            let given: [(&str, bool, &[SyncSource]); 12] = [
+            let given: [(&str, bool, &[SyncSource]); 13] = [
                 ("--space", space.is_some(), &[Confluence]),
                 ("--site", site.is_some(), &[Confluence]),
                 ("--email", email.is_some(), &[Confluence]),
@@ -196,6 +205,7 @@ fn cmd_docs(action: DocsCmd) -> i32 {
                 ("--category", category.is_some(), &[MediaWiki]),
                 ("--max-pages", max_pages.is_some(), &[MediaWiki, Notion]),
                 ("--database", database.is_some(), &[Notion]),
+                ("--page", page.is_some(), &[Notion]),
             ];
             if let Some((flag, _, takes)) =
                 given.iter().find(|(_, set, takes)| *set && !takes.contains(&source))
@@ -265,13 +275,21 @@ fn cmd_docs(action: DocsCmd) -> i32 {
                 }
                 SyncSource::Notion => {
                     use glia_doc_sources::notion;
-                    let Some(database) = database else {
-                        eprintln!(
-                            "error: --database <ID> is required with --source notion (the database id from its URL)"
-                        );
-                        return 2;
+                    let target = match (database, page) {
+                        (Some(id), _) => NotionTarget::Database(id),
+                        (None, Some(id)) => NotionTarget::Page(id),
+                        (None, None) => {
+                            eprintln!(
+                                "error: one of --database <ID> or --page <ID> is required with --source notion (a database id, or a root page id, from its URL)"
+                            );
+                            return 2;
+                        }
                     };
-                    let container = match notion::database_container(&database) {
+                    let container = match &target {
+                        NotionTarget::Database(id) => notion::database_container(id),
+                        NotionTarget::Page(id) => notion::page_container(id),
+                    };
+                    let container = match container {
                         Ok(c) => c,
                         Err(e) => {
                             eprintln!("error: {e}");
@@ -286,7 +304,7 @@ fn cmd_docs(action: DocsCmd) -> i32 {
                         }
                     };
                     let max_pages = max_pages.map_or(notion::DEFAULT_MAX_PAGES, |n| n as usize);
-                    sync_notion(&repo, &cfg, &database, &container, max_pages, &filter)
+                    sync_notion(&repo, &cfg, &target, &container, max_pages, &filter)
                 }
             }
         }
@@ -551,37 +569,67 @@ fn sync_mediawiki(
     }
 }
 
-/// `--source notion` (CE.4e): pull one database's pages through the Notion
-/// API, filter, redact, and merge them into the snapshot as one `notion`
-/// container. Prints the fired_on marker
+/// What `--source notion` pulls: a database (`--database`) or a root page
+/// and its sub-pages (`--page`), by the id the user gave.
+enum NotionTarget {
+    Database(String),
+    Page(String),
+}
+
+/// `--source notion` (CE.4e, CE.4f): pull one database's pages, or one page
+/// tree, through the Notion API, filter, redact, and merge them into the
+/// snapshot as one `notion` container. Prints the fired_on marker
 /// `[docs] sync source=notion database=<container> data_sources=<d>
-/// fetched=<f> kept=<k> blocks=<b> unsupported=<u> requests=<r>` (no token),
-/// then `[docs] notion unsupported <type>=<n> ...` when a block type was
-/// skipped.
+/// fetched=<f> kept=<k> blocks=<b> unsupported=<u> requests=<r> retries=<t>
+/// depth_capped=<c>` (no token; `root=<container>` in place of `database=`
+/// for a page tree), then `[docs] notion unsupported <type>=<n> ...` when a
+/// block type was skipped.
 fn sync_notion(
     repo: &str,
     cfg: &glia_doc_sources::notion::Config,
-    database: &str,
+    target: &NotionTarget,
     container: &str,
     max_pages: usize,
     filter: &glia_doc_sources::TitleFilter,
 ) -> i32 {
-    let (pages, stats) =
-        match glia_doc_sources::notion::pull_database(cfg, database, max_pages) {
-            Ok(pulled) => pulled,
-            Err(e) => {
-                eprintln!("error: pulling Notion database {container}: {e}");
-                return 1;
-            }
-        };
+    use glia_doc_sources::notion;
+    let (what, pulled) = match target {
+        NotionTarget::Database(id) => ("database", notion::pull_database(cfg, id, max_pages)),
+        NotionTarget::Page(id) => ("page tree", notion::pull_page_tree(cfg, id, max_pages)),
+    };
+    let (pages, stats) = match pulled {
+        Ok(pulled) => pulled,
+        Err(e) => {
+            eprintln!("error: pulling Notion {what} {container}: {e}");
+            return 1;
+        }
+    };
     let pages: Vec<_> = pages.into_iter().filter(|p| filter.keep(&p.title)).collect();
-    eprintln!("{}", stats.sync_marker(container, pages.len()));
+    let marker = match target {
+        NotionTarget::Database(_) => stats.sync_marker(container, pages.len()),
+        NotionTarget::Page(_) => stats.tree_marker(container, pages.len()),
+    };
+    eprintln!("{marker}");
     if let Some(marker) = stats.unsupported_marker() {
         eprintln!("{marker}");
     }
     if stats.truncated {
         eprintln!(
-            "[docs] warning: stopped at --max-pages {max_pages}; the rest of database {container} was not pulled"
+            "[docs] warning: stopped at --max-pages {max_pages}; the rest of {what} {container} was not pulled"
+        );
+    }
+    if stats.depth_capped > 0 {
+        eprintln!(
+            "[docs] warning: {} nested block(s) or sub-page(s) lie past the depth cap ({} block levels, {} page levels) and were not read",
+            stats.depth_capped,
+            notion::MAX_BLOCK_DEPTH,
+            notion::MAX_PAGE_DEPTH
+        );
+    }
+    if stats.unreadable > 0 {
+        eprintln!(
+            "[docs] warning: {} synced block original(s) or sub-page(s) are not shared with the integration and were skipped",
+            stats.unreadable
         );
     }
     if pages.is_empty() {
@@ -592,7 +640,7 @@ fn sync_notion(
             );
         } else {
             eprintln!(
-                "error: no pages in Notion database {container} ({} listed, {} archived or trashed); nothing to sync",
+                "error: no pages in Notion {what} {container} ({} listed, {} archived or trashed); nothing to sync",
                 stats.fetched, stats.skipped_archived
             );
         }
@@ -605,7 +653,7 @@ fn sync_notion(
     match write_pages(repo, &source, &pages) {
         Ok(w) => {
             println!(
-                "synced {} page(s) from Notion database {container} → {}",
+                "synced {} page(s) from Notion {what} {container} → {}",
                 w.written,
                 w.path.display()
             );

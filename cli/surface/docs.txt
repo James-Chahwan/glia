@@ -25,6 +25,7 @@ cmd glia docs sync
   arg max_pages pos=- long=max-pages short=- required=false num_args=1 action=Set default=- value_names=N global=false hidden=false
   arg namespace pos=- long=namespace short=- required=false num_args=1 action=Set default=- value_names=N global=false hidden=false
   arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+  arg page pos=- long=page short=- required=false num_args=1 action=Set default=- value_names=ID global=false hidden=false
   arg path pos=- long=path short=- required=false num_args=1 action=Set default=- value_names=DIR global=false hidden=false
   arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
   arg site pos=- long=site short=- required=false num_args=1 action=Set default=- value_names=SITE global=false hidden=false
