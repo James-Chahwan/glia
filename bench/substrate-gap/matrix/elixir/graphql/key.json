@@ -1,0 +1,32 @@
+{
+  "framework": "elixir-absinthe",
+  "language": "elixir",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "graphql",
+  "cells": [
+    "elixir/graphql"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "orders"
+    },
+    {
+      "kind": "GRAPHQL_OPERATION",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "GRAPHQL_CALLS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Absinthe query do field :orders + Apollo TS client || CF.11b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=1/2 literal=1/2 route=0/1 forbid=0/0) via=graphql. Predicted extractor gap (backlog, not fixed by the probe): Absinthe `query do field :orders, .. end` has no resolver row in parsers/code/extractors/src/graphql.rs; the Apollo TS client side is found."
+}

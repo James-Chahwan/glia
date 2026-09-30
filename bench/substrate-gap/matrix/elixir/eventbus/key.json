@@ -1,0 +1,31 @@
+{
+  "framework": "elixir-phoenix-pubsub",
+  "language": "elixir",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "eventbus",
+  "cells": [
+    "elixir/eventbus"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "order_placed"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "order_placed"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "order_placed",
+      "to": "order_placed",
+      "category": "EVENT_FLOWS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Phoenix.PubSub.broadcast / subscribe on a topic string || CF.11b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=1/2 literal=0/2 route=0/1 forbid=0/0) via=eventbus. Predicted extractor gap (backlog, not fixed by the probe): Phoenix.PubSub: `subscribe(Shop.PubSub, \"x\")` (topic is arg #1) mints a verb-fallback `event_handle:subscribe` (CB-g); `broadcast(` is not an emitter verb in parsers/code/extractors/src/eventbus.rs."
+}

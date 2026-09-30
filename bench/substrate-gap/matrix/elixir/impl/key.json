@@ -1,0 +1,27 @@
+{
+  "framework": "elixir-behaviour",
+  "language": "elixir",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "impl",
+  "cells": [
+    "elixir/impl"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "INTERFACE",
+      "name": "Shop.Notifier"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Shop.EmailNotifier",
+      "to": "Shop.Notifier",
+      "category": "IMPLEMENTS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "a behaviour (@callback) and a module declaring @behaviour for it || CF.11b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/1 literal=0/1 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): `@behaviour Shop.Notifier` (+ `@callback` in the behaviour) emits neither an INTERFACE node nor IMPLEMENTS in the Elixir parser."
+}

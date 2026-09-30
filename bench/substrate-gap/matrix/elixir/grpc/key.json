@@ -1,0 +1,37 @@
+{
+  "framework": "elixir-grpc",
+  "language": "elixir",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "grpc",
+  "cells": [
+    "elixir/grpc"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "GRPC_SERVICE",
+      "name": "shop.OrderService"
+    },
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "OrderService"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "OrderService",
+      "to": "grpc:shop.OrderService",
+      "category": "GRPC_CALLS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "GRPC_SERVICE",
+      "max_nodes": 1
+    }
+  ],
+  "note": "elixir-grpc GRPC.Server + Shop.OrderService.Stub || CF.11b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=1/2 literal=1/2 route=0/1 forbid=1/1) via=grpc. Predicted extractor gap (backlog, not fixed by the probe): server fires (proto service); elixir-grpc client `Shop.OrderService.Stub.get_order(channel, ..)` has no GRPC_CLIENT row in parsers/code/extractors/src/grpc.rs."
+}

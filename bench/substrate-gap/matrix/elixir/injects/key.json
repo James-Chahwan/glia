@@ -1,0 +1,29 @@
+{
+  "framework": "elixir-compile-env-behaviour",
+  "language": "elixir",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "injects",
+  "cells": [
+    "elixir/injects"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "INTERFACE",
+      "name": "UserRepo",
+      "note": "the injected contract: a behaviour (@callback), the type the consumer depends on"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Accounts",
+      "to": "UserRepo",
+      "category": "INJECTS",
+      "note": "INTENDED: Shop.Accounts takes its repository from Application.compile_env(:shop, :user_repo, Shop.PgUserRepo), the explicit-contract DI idiom (config picks the implementation, Mox swaps it in tests); the default implementation declares @behaviour Shop.UserRepo"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Elixir's DI idiom: a module attribute read from Application.compile_env with a default implementation that declares @behaviour of the contract (Mox 'explicit contracts'). CF.11b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/1 literal=0/1 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): Elixir modules are PACKAGE nodes and a behaviour is not an INTERFACE (the elixir/impl probe measures the same gap), and there is no Elixir DI rule reading Application.compile_env / Application.get_env module attributes."
+}

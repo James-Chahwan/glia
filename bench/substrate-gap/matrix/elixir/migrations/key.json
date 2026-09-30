@@ -1,0 +1,27 @@
+{
+  "framework": "elixir-ecto-migration",
+  "language": "elixir",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "migrations",
+  "cells": [
+    "elixir/migrations"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "DATA_ENTITY",
+      "name": "users"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "20240101000000_create_users",
+      "to": "users",
+      "category": "ACCESSES_DATA"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Ecto.Migration create table(:users) || CF.11b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/1 literal=0/1 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): Ecto.Migration `create table(:users)` in priv/repo/migrations/*.exs is not one of the migration DSLs parsers/code/extractors/src/migrations.rs reads."
+}
