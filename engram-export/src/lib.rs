@@ -565,6 +565,30 @@ fn code_cell(cells: &[Cell]) -> Option<String> {
     })
 }
 
+/// A DOC_SECTION's Proposition text: at most 500 bytes, cut back to the last
+/// sentence end inside them. This is the rule glia's doc ingest applied to
+/// the CODE cell itself before CG.3; glia now stores the whole section (so its
+/// doc linker sees every backticked mention), and the exporter keeps the cap
+/// so Engram's Proposition text stays what it was before CG.3. To hand Engram
+/// the whole section, drop this call in `build_gmap`'s doc branch.
+fn cap_prose(s: &str) -> String {
+    const MAX: usize = 500;
+    let s = s.trim();
+    if s.len() <= MAX {
+        return s.to_string();
+    }
+    let mut end = MAX;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let slice = &s[..end];
+    // prefer the last sentence end within the cap
+    if let Some(dot) = slice.rfind(". ") {
+        return slice[..=dot].trim().to_string();
+    }
+    slice.trim_end().to_string()
+}
+
 /// External library names from a node's IMPORTS cell (JSON array), if the
 /// parser emitted one. (glia-v5 G15)
 fn imports_cell(cells: &[Cell]) -> Option<Vec<String>> {
@@ -1010,7 +1034,9 @@ pub fn build_gmap(
             }
             let short = natspec.as_ref().map(|_| name.clone());
             let (content, concept_hint) = if is_doc {
-                let prose = code_cell(&n.cells).unwrap_or_else(|| name.clone());
+                // CG.3: glia's CODE cell is the whole section; the Proposition
+                // keeps the pre-CG.3 500-byte cap.
+                let prose = cap_prose(&code_cell(&n.cells).unwrap_or_else(|| name.clone()));
                 // concept_hint = `docs::<stem>` (key minus the section slug).
                 let ch = qname.rsplit_once("::").map(|(h, _)| h.to_string());
                 // v6: anchored whenever the section has a POSITION.
@@ -1346,6 +1372,59 @@ mod tests {
         // Cap at 500 chars (Python docstrings can be long).
         let long = "a".repeat(800);
         assert_eq!(clean_and_cap_doc(long).unwrap().len(), DOC_MAX);
+    }
+
+    /// CG.3: glia's DOC_SECTION CODE cell holds the whole section now; the
+    /// exported Proposition text is what glia stored before - the first 500
+    /// bytes, cut at the last sentence end - and a short section is whole.
+    #[test]
+    fn doc_proposition_text_is_capped_at_export() {
+        let long = "## Refunds\n\nRefunds are the slowest part of the order lifecycle, and most of the \
+            support load comes from them. A customer asks for a refund through the help centre, an agent \
+            checks the order history, and the finance team approves anything above the automatic \
+            threshold. The threshold is reviewed every quarter and is deliberately conservative, because \
+            a refund that is issued twice is very hard to claw back once the card network has settled \
+            it. Agents must never issue a refund by hand from the payment provider dashboard, since that \
+            bypasses the audit trail the finance team relies on at the end of each month.\n\nEvery refund \
+            goes through `OrderService.refund`, which records the reason and the approving agent before \
+            it calls the payment provider.\n\nA refunded order keeps its Shipment record so that returns \
+            can still be traced.";
+        assert!(long.len() > 800, "{}", long.len());
+        let short = "## Placing orders\n\nCall `OrderService.place` to place an order.";
+        let repo = RepoId(1);
+        let (refunds, placing) = (NodeId(30), NodeId(31));
+        let mut nav = CodeNav::default();
+        nav.record(refunds, "refunds", "docs::docs::orders::refunds", node_kind::DOC_SECTION, None);
+        nav.record(placing, "placing-orders", "docs::docs::orders::placing-orders", node_kind::DOC_SECTION, None);
+        let doc = |id: NodeId, text: &str| Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: vec![Cell { kind: cell_type::CODE, payload: CellPayload::Text(text.to_string()) }],
+        };
+        let g = RepoGraph {
+            repo,
+            nodes: vec![doc(refunds, long), doc(placing, short)],
+            edges: Vec::new(),
+            nav,
+            symbols: Default::default(),
+            unresolved_calls: Vec::new(),
+            unresolved_refs: Vec::new(),
+            properties: Default::default(),
+        };
+        let merged = MergedGraph::new(vec![g]);
+        let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
+        assert_eq!(stats.propositions, 2);
+        let text = |key: &str| match gmap.nodes.iter().find(|n| n.key == key).map(|n| &n.content) {
+            Some(Content::Proposition { text, .. }) => text.clone(),
+            other => panic!("{key}: expected a Proposition, got {other:?}"),
+        };
+        let capped = text("docs::docs::orders::refunds");
+        assert!(capped.len() <= 500, "{}", capped.len());
+        assert_eq!(capped, cap_prose(long));
+        assert!(capped.ends_with("once the card network has settled it."), "{capped:?}");
+        assert!(!capped.contains("OrderService.refund"));
+        assert_eq!(text("docs::docs::orders::placing-orders"), short);
     }
 
     #[test]

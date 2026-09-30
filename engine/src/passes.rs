@@ -228,6 +228,9 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
     const MAX_LINKS_PER_DOC: usize = 25;
     let mut new_edges: Vec<Edge> = Vec::new();
     let (mut strong, mut medium, mut weak, mut doc_sections) = (0usize, 0usize, 0usize, 0usize);
+    // CG.3: sections whose links stopped at MAX_LINKS_PER_DOC. A section's CODE
+    // is its whole text now (not its first 500 bytes), so the cap can bind.
+    let mut capped = 0usize;
     for g in &merged.graphs {
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id).copied() != Some(node_kind::DOC_SECTION) {
@@ -244,6 +247,12 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
             // Iterate RAW spans: `identifier_from_span` would throw away the
             // qualifier the doc author supplied, which is the whole signal.
             for span in backtick_spans(text) {
+                // CG.3: an inline mention is one line. A multi-line span is a
+                // fenced block's body (its three backticks leave it at an odd
+                // split index) or a runaway span, and its tail is no mention.
+                if span.contains('\n') {
+                    continue;
+                }
                 let Some((sym, confidence, rule)) = resolve_doc_mention(span, &idx) else {
                     continue;
                 };
@@ -260,6 +269,7 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
                         .with_cell(Evidence::emitter("pass:doclink").rule(rule).to_cell()),
                 );
                 if seen.len() >= MAX_LINKS_PER_DOC {
+                    capped += 1;
                     break;
                 }
             }
@@ -271,6 +281,9 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
              weak={weak} ambiguous) over {doc_sections} doc sections",
             new_edges.len()
         );
+    }
+    if capped > 0 {
+        eprintln!("[doclink] {capped} sections reached the {MAX_LINKS_PER_DOC}-link cap");
     }
     merged.cross_edges.extend(new_edges);
 }
@@ -720,8 +733,10 @@ fn is_doc_linkable_symbol(kind: glia_core::NodeKindId) -> bool {
         || kind == nk::DATA_ENTITY
 }
 
-/// Contents of single-backtick inline-code spans in markdown, unreduced. Triple-
-/// backtick fenced blocks fall on even split segments and are skipped.
+/// Contents of single-backtick inline-code spans in markdown, unreduced: the
+/// odd segments of a split on `` ` ``. A triple-backtick fenced block's body
+/// also lands on an odd segment, as one multi-line span; `link_doc_sections`
+/// skips every span holding a `\n` (CG.3).
 fn backtick_spans(text: &str) -> Vec<&str> {
     text.split('`')
         .enumerate()
@@ -1679,6 +1694,44 @@ mod passes_tests {
             .filter(|e| e.from == from && e.category == edge_category::DOCUMENTS)
             .map(|e| (e.to, e.confidence))
             .collect()
+    }
+
+    /// CG.3: a DOC_SECTION's CODE is its whole section now, fenced blocks
+    /// included. An inline mention past byte 500 links (Strong, qualified);
+    /// the fenced block's body - one multi-line backtick span - never does
+    /// (HEAD: tier 2 read `cancel` off its tail and linked it Medium), and a
+    /// prose word never does.
+    #[test]
+    fn doc_mention_skips_fenced_blocks() {
+        let mut h = Hand::new("test://doclink/fence");
+        let refund = h.add(node_kind::METHOD, "refund", "app::orders::OrderService::refund", vec![]);
+        let cancel = h.add(node_kind::METHOD, "cancel", "app::orders::OrderService::cancel", vec![]);
+        let shipment = h.add(node_kind::CLASS, "Shipment", "app::orders::Shipment", vec![]);
+        let mut text = String::from("## Refunds\n\n");
+        while text.len() < 620 {
+            text.push_str("Refunds are slow, and the finance team approves the large ones. ");
+        }
+        text.push_str("\n\nEvery refund goes through `OrderService.refund`.\n\n");
+        let at = text.find("`OrderService.refund`").unwrap_or(0);
+        assert!(at > 600, "the inline mention sits past the old 500-byte cap: {at}");
+        text.push_str("```python\nOrderService.cancel\n```\n\nA refunded order keeps its Shipment record.");
+        assert!((650..800).contains(&text.len()), "{}", text.len());
+        let code = Cell { kind: cell_type::CODE, payload: CellPayload::Text(text) };
+        let doc = h.add(node_kind::DOC_SECTION, "refunds", "docs::docs::orders::refunds", vec![code]);
+        let mut merged = MergedGraph::new(vec![h.graph()]);
+
+        link_doc_sections(&mut merged);
+        assert_eq!(documents(&merged.cross_edges, doc), vec![(refund, Confidence::Strong)]);
+        let targets: Vec<NodeId> = merged.cross_edges.iter().map(|e| e.to).collect();
+        assert!(!targets.contains(&cancel), "a fenced block's body is no mention");
+        assert!(!targets.contains(&shipment), "a prose word is no mention");
+        let rule = merged
+            .cross_edges
+            .iter()
+            .find(|e| e.to == refund)
+            .and_then(Evidence::of)
+            .and_then(|ev| ev.rule);
+        assert_eq!(rule.as_deref(), Some("qualified"));
     }
 
     #[test]

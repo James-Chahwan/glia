@@ -84,23 +84,37 @@ fn heading_slug(heading: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
-/// Cap to 500 chars, truncating at a sentence boundary when possible.
-fn cap_prose(s: &str) -> String {
-    const MAX: usize = 500;
+/// CG.3: the most text one DOC_SECTION's CODE cell keeps. A section is prose
+/// the doc linker reads in full (every backticked mention, not only those in
+/// its first 500 bytes, which is where the pre-CG.3 `cap_prose` cut); past this
+/// bound it is a data dump (a pasted log, a generated table), cut at a line end.
+const SECTION_TEXT_CAP: usize = 64 * 1024;
+
+/// Sections whose stored text is longer than this are counted by the
+/// `[docs] section text:` marker: the length the pre-CG.3 cap cut at.
+const OLD_PROSE_CAP: usize = 500;
+
+/// A section's stored text and whether it was truncated (CG.3): trimmed, and
+/// whole up to [`SECTION_TEXT_CAP`] bytes. A longer one is cut at the last char
+/// boundary at or below the cap, then back to the last `\n` before that, so
+/// the text ends at a line end (a single line longer than the cap keeps the
+/// char-boundary cut). A section of <= 500 bytes is exactly what the pre-CG.3
+/// `cap_prose` stored (it returned such a section trimmed and whole).
+fn bound_section(s: &str) -> (String, bool) {
     let s = s.trim();
-    if s.len() <= MAX {
-        return s.to_string();
+    if s.len() <= SECTION_TEXT_CAP {
+        return (s.to_string(), false);
     }
-    let mut end = MAX;
+    let mut end = SECTION_TEXT_CAP;
     while !s.is_char_boundary(end) {
         end -= 1;
     }
     let slice = &s[..end];
-    // prefer the last sentence end within the cap
-    if let Some(dot) = slice.rfind(". ") {
-        return slice[..=dot].trim().to_string();
-    }
-    slice.trim_end().to_string()
+    let slice = match slice.rfind('\n') {
+        Some(nl) => &slice[..nl],
+        None => slice,
+    };
+    (slice.trim_end().to_string(), true)
 }
 
 /// One heading-delimited markdown chunk. Rows are `str::lines()` indices, so a
@@ -116,6 +130,8 @@ struct DocChunk {
     /// A heading followed directly by another heading ends on its own row; the
     /// blank rows before the next heading (or EOF) are not part of the chunk.
     end_line: u32,
+    /// CG.3: `text` was cut at [`SECTION_TEXT_CAP`] ([`bound_section`]).
+    truncated: bool,
 }
 
 /// GitHub-style anchor dedupe within one document (CE.4a): the first `billing`
@@ -156,7 +172,9 @@ fn fence_marker(line: &str) -> Option<&'static str> {
 }
 
 /// Split markdown at `#`/`##` headings into chunks. Falls back to one chunk
-/// (first 500 chars) when the file has no headings.
+/// of the whole file when the file has no headings. Each chunk's text is the
+/// whole trimmed section, bounded at [`SECTION_TEXT_CAP`] (CG.3; the pre-CG.3
+/// cap kept its first 500 bytes).
 ///
 /// CE.4a: a `#` line inside a fenced code block (a shell or Python comment) is
 /// text of the enclosing section, not a heading: a fence opens on a line
@@ -185,7 +203,7 @@ fn chunk_markdown(text: &str) -> Vec<DocChunk> {
                  start: u32,
                  end: u32,
                  seq: &mut u32| {
-        let body = cap_prose(&buf.join("\n"));
+        let (body, truncated) = bound_section(&buf.join("\n"));
         if body.is_empty() {
             return;
         }
@@ -199,7 +217,7 @@ fn chunk_markdown(text: &str) -> Vec<DocChunk> {
             s
         });
         let slug = slugs.unique(slug);
-        chunks.push(DocChunk { slug, text: body, start_line: start, end_line: end });
+        chunks.push(DocChunk { slug, text: body, start_line: start, end_line: end, truncated });
     };
 
     for (i, line) in lines.iter().enumerate() {
@@ -231,12 +249,13 @@ fn chunk_markdown(text: &str) -> Vec<DocChunk> {
     flush(&mut chunks, &mut slugs, &cur_slug, &buf, cur_start, end, &mut seq);
 
     // Fallback: no headings → one chunk of the whole file, ending on its last
-    // non-blank row (0 for an all-blank file, which `cap_prose` already drops).
+    // non-blank row (0 for an all-blank file, which `bound_section` already
+    // trims to nothing and drops).
     if chunks.is_empty() {
-        let body = cap_prose(text);
+        let (body, truncated) = bound_section(text);
         if !body.is_empty() {
             let end_line = lines.iter().rposition(|l| !l.trim().is_empty()).unwrap_or(0) as u32;
-            chunks.push(DocChunk { slug: "overview".into(), text: body, start_line: 0, end_line });
+            chunks.push(DocChunk { slug: "overview".into(), text: body, start_line: 0, end_line, truncated });
         }
     }
     chunks
@@ -340,6 +359,9 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<gl
     let mut sections = 0usize;
     let mut section_docs = 0usize;
     let mut dir_scoped = 0usize;
+    // CG.3 `[docs] section text:` marker: sections stored longer than the
+    // pre-CG.3 500-byte cap, the longest stored text, and those cut at 64 KiB.
+    let (mut long_sections, mut longest, mut truncated_sections) = (0usize, 0usize, 0usize);
 
     for rec in records {
         let (path, text) = (&rec.rel_path, &rec.text);
@@ -412,6 +434,11 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<gl
             }
         }
         for chunk in chunks {
+            if chunk.text.len() > OLD_PROSE_CAP {
+                long_sections += 1;
+                longest = longest.max(chunk.text.len());
+            }
+            truncated_sections += usize::from(chunk.truncated);
             let qname = format!("docs::{scope}::{}", chunk.slug);
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DOC_SECTION, &qname);
             let pos = format!(
@@ -455,6 +482,13 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<gl
     if sections > 0 {
         eprintln!(
             "[docs] sections={sections} from {section_docs} doc(s) (rows 0-indexed, end inclusive) dir_scoped={dir_scoped}"
+        );
+    }
+    // CG.3 fired_on marker: `... 2>&1 | grep '^\[docs\] section text:'`
+    if long_sections > 0 {
+        eprintln!(
+            "[docs] section text: {long_sections} sections longer than {OLD_PROSE_CAP} bytes kept whole \
+             (longest={longest} bytes, truncated_at_64k={truncated_sections})"
         );
     }
     if nodes.is_empty() {
@@ -517,6 +551,112 @@ mod docs_tests {
         assert!(include_doc("docs/architecture.md"));
         assert!(!include_doc("LICENSE.md"));
         assert!(!include_doc("src/notes.md")); // not root-wellknown / docs/ / .ai/
+    }
+
+    /// The pre-CG.3 section rule, verbatim: 500 bytes, cut back to the last
+    /// sentence end inside them. Kept here only to pin that a short section
+    /// stores exactly what it stored before.
+    fn old_cap_prose(s: &str) -> String {
+        const MAX: usize = 500;
+        let s = s.trim();
+        if s.len() <= MAX {
+            return s.to_string();
+        }
+        let mut end = MAX;
+        while !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        let slice = &s[..end];
+        if let Some(dot) = slice.rfind(". ") {
+            return slice[..=dot].trim().to_string();
+        }
+        slice.trim_end().to_string()
+    }
+
+    /// CG.3: a DOC_SECTION's text is the whole section (HEAD: its first 500
+    /// bytes, cut at a sentence end), so the linker sees the `refunds`
+    /// section's `OrderService.refund` at byte 640. The fixture's short
+    /// sections are byte-identical to the old cap.
+    #[test]
+    fn a_long_section_keeps_its_whole_text() {
+        let md = include_str!("../../bench/substrate-gap/fixtures/docs-link-past-cap/docs/orders.md");
+        let chunks = chunk_markdown(md);
+        let slugs: Vec<&str> = chunks.iter().map(|c| c.slug.as_str()).collect();
+        assert_eq!(slugs, ["orders", "placing-orders", "refunds"]);
+        let refunds = &chunks[2];
+        assert!(refunds.text.len() > 500, "{}", refunds.text.len());
+        assert!(refunds.text.starts_with("## Refunds\n"), "{:?}", refunds.text);
+        assert!(refunds.text.ends_with("can still be traced."), "{:?}", refunds.text);
+        assert!(refunds.text.contains("`OrderService.refund`"));
+        assert!(!refunds.truncated);
+        assert!(
+            !old_cap_prose(&refunds.text).contains("`OrderService.refund`"),
+            "the mention sits past the old cap"
+        );
+        let placing = &chunks[1];
+        assert_eq!(placing.text, "## Placing orders\n\nCall `OrderService.place` to place an order.");
+        for c in &chunks[..2] {
+            assert_eq!(c.text, old_cap_prose(&c.text), "{}: a short section is unchanged", c.slug);
+            assert!(!c.truncated);
+        }
+        // The section's rows are unchanged: its POSITION already spanned it.
+        assert_eq!((refunds.start_line, refunds.end_line), (8, 14));
+
+        let rec = DocRecord {
+            rel_path: "docs/orders.md".to_string(),
+            text: md.to_string(),
+            provenance: DocProvenance::file(),
+        };
+        let Some(g) = build_docs_graph(&[rec], RepoId(11)) else {
+            panic!("a doc with sections builds a graph");
+        };
+        let id = NodeId::from_parts(GRAPH_TYPE, RepoId(11), node_kind::DOC_SECTION, "docs::docs::orders::refunds");
+        let code = g
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(|n| {
+                n.cells.iter().find_map(|c| match &c.payload {
+                    glia_core::CellPayload::Text(t) if c.kind == glia_code_domain::cell_type::CODE => {
+                        Some(t.as_str())
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap_or_default();
+        assert_eq!(code, refunds.text);
+    }
+
+    /// CG.3: only a section longer than 64 KiB is cut, at a line end at or
+    /// below the bound; a single over-long line keeps a char-boundary cut.
+    #[test]
+    fn bound_section_cuts_only_past_64k() {
+        let mut md = String::from("# Dump\n\n");
+        let mut row = 0usize;
+        while md.len() < 70_000 {
+            md.push_str(&format!("row {row:05} value {}\n", "x".repeat(20)));
+            row += 1;
+        }
+        let chunks = chunk_markdown(&md);
+        assert_eq!(chunks.len(), 1);
+        let c = &chunks[0];
+        assert!(c.truncated);
+        assert!(c.text.len() <= SECTION_TEXT_CAP, "{}", c.text.len());
+        assert!(c.text.len() > SECTION_TEXT_CAP - 64, "cut near the bound: {}", c.text.len());
+        // It ends where a line of the document ended.
+        assert!(md.contains(&format!("{}\n", c.text)), "cut at a line end");
+        assert!(c.text.ends_with(&"x".repeat(20)), "{:?}", &c.text[c.text.len() - 40..]);
+
+        // At the bound: whole, not truncated.
+        let at = "y".repeat(SECTION_TEXT_CAP);
+        assert_eq!(bound_section(&at), (at.clone(), false));
+        // One line of 3-byte chars, no `\n`: cut at the char boundary below it.
+        let (cut, truncated) = bound_section(&"\u{20ac}".repeat(30_000));
+        assert!(truncated);
+        assert_eq!(cut.len(), SECTION_TEXT_CAP - SECTION_TEXT_CAP % 3);
+        // Short text is trimmed, never cut.
+        assert_eq!(bound_section("  a b.  "), ("a b.".to_string(), false));
+        assert_eq!(bound_section(" \n "), (String::new(), false));
     }
 
     /// LF.4b: ADR directories are admitted - adr-tools' `doc/adr`, a root

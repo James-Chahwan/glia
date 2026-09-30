@@ -1,0 +1,39 @@
+{
+  "framework": "docs-link-past-cap",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "note": "CA-12 (CG.3): the doc linker reads a DOC_SECTION's CODE cell, which docs.rs cap_prose truncated to 500 bytes, so a backticked mention later in a long section never linked (quokka: 154 of 182 resolvable mentions in ingested docs sat past the cap). After the fix the CODE cell is the whole section and the linker sees every backticked span. Precision: prose words never link - only backticked spans do, before and after the fix. Baseline (HEAD 83b9eaf, leap wheel): DOCUMENTS 1/2 (the control), CODE 0/1, forbid 0 violated; a canary that backticks `Shipment` inside the first 500 bytes fires the forbid (matched=1), so the row is live.",
+  "expect_edges": [
+    {
+      "from": "docs::docs::orders::placing-orders",
+      "to": "OrderService/place",
+      "category": "DOCUMENTS",
+      "note": "CONTROL: a mention inside the first 500 bytes links at HEAD"
+    },
+    {
+      "from": "docs::docs::orders::refunds",
+      "to": "OrderService/refund",
+      "category": "DOCUMENTS",
+      "note": "a backticked mention past byte 500 of its section (byte 640 of 830)"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "DOC_SECTION",
+      "node": "docs::docs::orders::refunds",
+      "cell": "CODE",
+      "contains": "keeps its Shipment record",
+      "note": "the CODE cell holds the whole section, not its first 500 bytes"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "docs::docs::orders::refunds",
+      "to": "app::orders::Shipment",
+      "category": "DOCUMENTS",
+      "note": "PRECISION: `Shipment` appears only as a prose word (no backticks); prose never links"
+    }
+  ]
+}
