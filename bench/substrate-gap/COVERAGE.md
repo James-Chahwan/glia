@@ -36,7 +36,7 @@ the splice partitions on the FIRST marker it finds, so a literal marker inside
 the prose would make the preamble eat itself.)
 
 <!-- BEGIN generated: matrix.py --emit -->
-Engine `0.5.0` · vocabulary digest `916e9fb659ff` · schema 1
+Engine `0.5.0` · vocabulary digest `916e9fb659ff` · schema 2
 
 Columns, left to right (the review's own abbreviations):
 
@@ -72,7 +72,7 @@ Columns, left to right (the review's own abbreviations):
 - `subproj` — **subproject** (topology)
 
 ```
-LEGEND ● full  ◐ partial  · none (fixture exists, nothing emitted)  ? unknown (no fixture)  ! error
+LEGEND ● full  ◐ partial  · none (fixture exists, nothing emitted)  ? unknown (no fixture)  - n/a (see Not applicable)  ! error
            http_cl http_sr   kafka    amqp sqs/sns  pubsub azure_s    nats   redis    mqtt   taskq    grpc graphql      ws eventbu      db    migr  config secrets   flags    cron cli_def cli_inv   calls imports injects    impl   tests service subproj
 python           ●       ●       ●       ◐       ●       ◐       ●       ●       ●       ●       ·       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 go               ●       ●       ◐       ·       ·       ·       ·       ●       ·       ●       ·       ●       ·       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ◐       ●       ●
@@ -83,68 +83,68 @@ ruby             ●       ●       ·       ·       ·       ·       ?      
 php              ●       ●       ◐       ◐       ·       ·       ?       ·       ·       ·       ·       ●       ●       ·       ·       ●       ●       ◐       ·       ◐       ●       ●       ·       ●       ●       ●       ◐       ◐       ●       ●
 swift            ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?
 c_cpp            ·       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
-scala            ●       ◐       ·       ·       ·       ·       ·       ●       ◐       ●       ·       ●       ·       ·       ·       ·       ●       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ?       ●       ?
+scala            ●       ◐       ·       ·       ·       ·       ·       ●       ◐       ●       ·       ●       ·       ·       ·       ·       ●       ◐       ●       ●       ·       ·       ·       ●       ●       ●       ●       ◐       ●       ◐
 clojure          ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
-dart             ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ◐       ●       ?       ●       ?
-elixir           ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?       ●       ?       ?       ●       ●       ?       ?       ?       ●       ?
+dart             ●       ◐       ◐       ·       ·       ·       ?       ·       ·       ·       ·       ●       ◐       ·       ·       ·       ●       ◐       ◐       ●       ●       ·       ·       ●       ●       ◐       ●       ◐       ●       ●
+elixir           ●       ●       ·       ·       ·       ·       ?       ·       ·       ·       ◐       ·       ·       ●       ·       ·       ·       ◐       ◐       ◐       ●       ·       ·       ●       ●       ·       ·       ◐       ●       ●
 rust             ●       ●       ●       ·       ·       ·       ·       ·       ●       ●       ·       ●       ·       ·       ·       ●       ●       ●       ·       ◐       ·       ●       ●       ●       ●       ◐       ◐       ◐       ●       ●
-solidity         ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ●       ?       ?       ?
-terraform        ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?
+solidity         -       -       -       -       -       -       -       -       -       -       -       -       -       -       ●       -       -       -       -       -       -       -       -       ●       ●       ?       ●       ?       ?       ?
+terraform        ?       ?       ?       ?       ?       ?       ?       ?       -       ?       -       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       -       ?       -       ?       -       -       ?       ?       ?
 
 PER-MECHANISM  across 16 languages:
-  http_client  ● 13  ◐ 0   · 1   ? 2   ! 0
-  http_server  ● 9   ◐ 4   · 0   ? 3   ! 0
-  kafka        ● 5   ◐ 2   · 2   ? 7   ! 0
-  amqp         ● 1   ◐ 4   · 4   ? 7   ! 0
-  sqs_sns      ● 3   ◐ 1   · 5   ? 7   ! 0
-  pubsub       ● 0   ◐ 2   · 7   ? 7   ! 0
-  azure_sb     ● 3   ◐ 0   · 4   ? 9   ! 0
-  nats         ● 6   ◐ 1   · 2   ? 7   ! 0
-  redis        ● 5   ◐ 1   · 3   ? 7   ! 0
-  mqtt         ● 7   ◐ 0   · 2   ? 7   ! 0
-  taskq        ● 1   ◐ 1   · 7   ? 7   ! 0
-  grpc         ● 9   ◐ 0   · 0   ? 7   ! 0
-  graphql      ● 4   ◐ 0   · 5   ? 7   ! 0
-  ws           ● 6   ◐ 1   · 3   ? 6   ! 0
-  eventbus     ● 4   ◐ 0   · 6   ? 6   ! 0
-  db           ● 7   ◐ 1   · 1   ? 7   ! 0
-  migrations   ● 9   ◐ 0   · 0   ? 7   ! 0
-  config       ● 6   ◐ 2   · 0   ? 8   ! 0
-  secrets      ● 4   ◐ 0   · 4   ? 8   ! 0
-  flags        ● 5   ◐ 3   · 0   ? 8   ! 0
-  cron         ● 7   ◐ 0   · 2   ? 7   ! 0
-  cli_def      ● 8   ◐ 0   · 0   ? 8   ! 0
-  cli_inv      ● 5   ◐ 1   · 2   ? 8   ! 0
-  calls        ● 15  ◐ 0   · 0   ? 1   ! 0
-  imports      ● 14  ◐ 0   · 0   ? 2   ! 0
-  injects      ● 7   ◐ 3   · 0   ? 6   ! 0
-  impl         ● 8   ◐ 3   · 0   ? 5   ! 0
-  tests        ● 2   ◐ 6   · 0   ? 8   ! 0
-  service      ● 11  ◐ 0   · 0   ? 5   ! 0
-  subproject   ● 8   ◐ 0   · 0   ? 8   ! 0
+  http_client  ● 13  ◐ 0   · 1   ? 1   - 1   ! 0
+  http_server  ● 9   ◐ 4   · 0   ? 2   - 1   ! 0
+  kafka        ● 5   ◐ 3   · 3   ? 4   - 1   ! 0
+  amqp         ● 1   ◐ 4   · 6   ? 4   - 1   ! 0
+  sqs_sns      ● 3   ◐ 1   · 7   ? 4   - 1   ! 0
+  pubsub       ● 0   ◐ 2   · 9   ? 4   - 1   ! 0
+  azure_sb     ● 3   ◐ 0   · 4   ? 8   - 1   ! 0
+  nats         ● 6   ◐ 1   · 4   ? 4   - 1   ! 0
+  redis        ● 5   ◐ 1   · 5   ? 3   - 2   ! 0
+  mqtt         ● 7   ◐ 0   · 4   ? 4   - 1   ! 0
+  taskq        ● 1   ◐ 2   · 8   ? 3   - 2   ! 0
+  grpc         ● 10  ◐ 0   · 1   ? 4   - 1   ! 0
+  graphql      ● 4   ◐ 1   · 6   ? 4   - 1   ! 0
+  ws           ● 6   ◐ 1   · 4   ? 4   - 1   ! 0
+  eventbus     ● 4   ◐ 0   · 8   ? 4   - 0   ! 0
+  db           ● 7   ◐ 1   · 3   ? 4   - 1   ! 0
+  migrations   ● 10  ◐ 0   · 1   ? 4   - 1   ! 0
+  config       ● 6   ◐ 5   · 0   ? 4   - 1   ! 0
+  secrets      ● 5   ◐ 2   · 4   ? 4   - 1   ! 0
+  flags        ● 7   ◐ 4   · 0   ? 4   - 1   ! 0
+  cron         ● 8   ◐ 0   · 3   ? 4   - 1   ! 0
+  cli_def      ● 8   ◐ 0   · 3   ? 3   - 2   ! 0
+  cli_inv      ● 5   ◐ 1   · 5   ? 4   - 1   ! 0
+  calls        ● 15  ◐ 0   · 0   ? 0   - 1   ! 0
+  imports      ● 14  ◐ 0   · 0   ? 2   - 0   ! 0
+  injects      ● 7   ◐ 3   · 1   ? 4   - 1   ! 0
+  impl         ● 8   ◐ 3   · 1   ? 3   - 1   ! 0
+  tests        ● 2   ◐ 9   · 0   ? 5   - 0   ! 0
+  service      ● 11  ◐ 0   · 0   ? 5   - 0   ! 0
+  subproject   ● 10  ◐ 1   · 0   ? 5   - 0   ! 0
 
 PER-LANGUAGE  across 30 mechanisms:
-  python       ● 26  ◐ 2   · 2   ? 0   ! 0
-  go           ● 20  ◐ 2   · 8   ? 0   ! 0
-  typescript   ● 25  ◐ 4   · 1   ? 0   ! 0
-  java         ● 23  ◐ 2   · 5   ? 0   ! 0
-  csharp       ● 20  ◐ 5   · 5   ? 0   ! 0
-  ruby         ● 17  ◐ 5   · 7   ? 1   ! 0
-  php          ● 13  ◐ 6   · 10  ? 1   ! 0
-  swift        ● 2   ◐ 1   · 0   ? 27  ! 0
-  c_cpp        ● 2   ◐ 0   · 1   ? 27  ! 0
-  scala        ● 10  ◐ 2   · 10  ? 8   ! 0
-  clojure      ● 3   ◐ 1   · 0   ? 26  ! 0
-  dart         ● 5   ◐ 2   · 0   ? 23  ! 0
-  elixir       ● 7   ◐ 0   · 0   ? 23  ! 0
-  rust         ● 15  ◐ 4   · 11  ? 0   ! 0
-  solidity     ● 4   ◐ 0   · 0   ? 26  ! 0
-  terraform    ● 0   ◐ 0   · 0   ? 30  ! 0
+  python       ● 26  ◐ 2   · 2   ? 0   - 0   ! 0
+  go           ● 20  ◐ 2   · 8   ? 0   - 0   ! 0
+  typescript   ● 25  ◐ 4   · 1   ? 0   - 0   ! 0
+  java         ● 23  ◐ 2   · 5   ? 0   - 0   ! 0
+  csharp       ● 20  ◐ 5   · 5   ? 0   - 0   ! 0
+  ruby         ● 17  ◐ 5   · 7   ? 1   - 0   ! 0
+  php          ● 13  ◐ 6   · 10  ? 1   - 0   ! 0
+  swift        ● 2   ◐ 1   · 0   ? 27  - 0   ! 0
+  c_cpp        ● 2   ◐ 0   · 1   ? 27  - 0   ! 0
+  scala        ● 12  ◐ 5   · 13  ? 0   - 0   ! 0
+  clojure      ● 3   ◐ 1   · 0   ? 26  - 0   ! 0
+  dart         ● 10  ◐ 7   · 12  ? 1   - 0   ! 0
+  elixir       ● 8   ◐ 5   · 16  ? 1   - 0   ! 0
+  rust         ● 15  ◐ 4   · 11  ? 0   - 0   ! 0
+  solidity     ● 4   ◐ 0   · 0   ? 4   - 22  ! 0
+  terraform    ● 0   ◐ 0   · 0   ? 24  - 6   ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 288/480 cells have a fixture (60.0%) — 192 full, 36 partial, 60 none, 192 unknown, 0 error.
+COVERAGE OF THE COVERAGE: 340/452 applicable cells have a fixture (75.2%) — 200 full, 49 partial, 91 none, 112 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 165
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 170
 
 ## Cells routed via an alternative mechanism
 
@@ -155,6 +155,8 @@ A `●` here does not mean the intended path fired — it means SOME path did. T
 | `csharp/azure_sb` | ● full | `queue` | `eventbus` |
 | `csharp/redis` | ● full | `queue` | `eventbus` |
 | `csharp/sqs_sns` | ● full | `queue` | `eventbus` |
+| `dart/mqtt` | · none | `queue` | `eventbus` |
+| `dart/redis` | · none | `queue` | `eventbus` |
 | `go/mqtt` | ● full | `queue` | `eventbus` |
 | `java/mqtt` | ● full | `queue` | `eventbus` |
 | `java/sqs_sns` | ◐ partial | `queue` | `eventbus` |
@@ -178,4 +180,39 @@ A `●` here does not mean the intended path fired — it means SOME path did. T
 ## Cell errors
 
 _None._
+
+## Not applicable
+
+`-` cells: the language or runtime cannot express the mechanism (`matrix_vocab.NOT_APPLICABLE`, digest `6e1c8eedbe15`), so they leave the coverage denominator. A fixture that claims one is a cell error: delete the entry in the commit that adds it.
+
+| cell | class | reason |
+|---|---|---|
+| `solidity/amqp` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/azure_sb` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/cli_def` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/cli_inv` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/config` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/cron` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/db` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/flags` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/graphql` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/grpc` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/http_client` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/http_server` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/kafka` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/migrations` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/mqtt` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/nats` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/pubsub` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/redis` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/secrets` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/sqs_sns` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/taskq` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `solidity/ws` | structural | an on-chain Solidity contract has no network, broker, filesystem, environment or process access; the off-chain tooling around it (hardhat / foundry scripts, subgraphs) is TypeScript / YAML and scores on those rows |
+| `terraform/calls` | structural | Terraform has no user-defined functions; built-in and provider functions are not resolved callee qnames, and a module block is the imports column |
+| `terraform/cli_def` | structural | Terraform declares no command-line interface |
+| `terraform/impl` | structural | Terraform declares no types, so nothing implements or inherits |
+| `terraform/injects` | structural | Terraform declares no types, so nothing is injected |
+| `terraform/redis` | structural | no Terraform construct publishes to or subscribes on a Redis channel or list; ElastiCache resources declare the store only |
+| `terraform/taskq` | structural | no Terraform construct names, enqueues or processes a task; a Cloud Tasks queue resource declares the queue only |
 <!-- END generated -->

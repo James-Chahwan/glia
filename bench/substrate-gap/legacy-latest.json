@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 304,
+  "fixtures": 310,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -205,6 +205,14 @@
       "framework": "cpp-header-impl-files",
       "language": "c_cpp",
       "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
+    "cpp-include-paths": {
+      "framework": "cpp-include-paths",
+      "language": "c_cpp",
+      "per_category": {
+        "CALLS": 1.0,
         "IMPORTS": 1.0
       }
     },
@@ -692,6 +700,14 @@
       "language": "typescript",
       "per_category": {}
     },
+    "graphql-rpc-host-narrowing": {
+      "framework": "graphql-rpc-host-narrowing",
+      "language": "typescript",
+      "per_category": {
+        "GRAPHQL_CALLS": 1.0,
+        "RPC_CALLS": 1.0
+      }
+    },
     "graphql-sdl-literal-scope": {
       "framework": "graphql-sdl-literal-scope",
       "language": "typescript",
@@ -1147,6 +1163,14 @@
         "INJECTS": 1.0
       }
     },
+    "php-use-forms": {
+      "framework": "php-use-forms",
+      "language": "php",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
     "prisma-schema": {
       "framework": "prisma-schema",
       "language": "prisma+typescript",
@@ -1469,6 +1493,13 @@
         "CALLS": 1.0
       }
     },
+    "scip-python-dict-dispatch": {
+      "framework": "scip-ingest",
+      "language": "python",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
     "sdd-quokka-feature": {
       "framework": "sdd-quokka-feature",
       "language": "go",
@@ -1588,6 +1619,11 @@
         "INFRA_REFERENCES": 1.0
       }
     },
+    "test-fixture-paths": {
+      "framework": "test-fixture-paths",
+      "language": "typescript",
+      "per_category": {}
+    },
     "test-reports-coverage": {
       "framework": "test-reports-coverage",
       "language": "python",
@@ -1617,6 +1653,14 @@
       "language": "typescript",
       "per_category": {
         "INJECTS": 1.0
+      }
+    },
+    "ts-arrow-class-fields": {
+      "framework": "ts-arrow-class-fields",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "DEFINES": 1.0
       }
     },
     "ts-calls": {
