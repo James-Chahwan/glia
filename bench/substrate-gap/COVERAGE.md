@@ -90,38 +90,39 @@ elixir           ●       ●       ·       ·       ·       ·       ?      
 rust             ●       ●       ●       ·       ·       ·       ·       ·       ●       ●       ·       ●       ·       ·       ·       ●       ●       ●       ·       ◐       ·       ●       ●       ●       ●       ◐       ◐       ◐       ●       ●
 solidity         -       -       -       -       -       -       -       -       -       -       -       -       -       -       ●       -       -       -       -       -       -       -       -       ●       ●       ?       ●       ?       ?       ?
 terraform        ?       ?       ?       ?       ?       ?       ?       ?       -       ?       -       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       -       ?       -       ?       -       -       ?       ?       ?
+kotlin           ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ?       ?       ?
 
-PER-MECHANISM  across 16 languages:
-  http_client  ● 13  ◐ 0   · 1   ? 1   - 1   ! 0
-  http_server  ● 9   ◐ 4   · 0   ? 2   - 1   ! 0
-  kafka        ● 5   ◐ 3   · 3   ? 4   - 1   ! 0
-  amqp         ● 1   ◐ 4   · 6   ? 4   - 1   ! 0
-  sqs_sns      ● 3   ◐ 1   · 7   ? 4   - 1   ! 0
-  pubsub       ● 0   ◐ 2   · 9   ? 4   - 1   ! 0
-  azure_sb     ● 3   ◐ 0   · 4   ? 8   - 1   ! 0
-  nats         ● 6   ◐ 1   · 4   ? 4   - 1   ! 0
-  redis        ● 5   ◐ 1   · 5   ? 3   - 2   ! 0
-  mqtt         ● 7   ◐ 0   · 4   ? 4   - 1   ! 0
-  taskq        ● 1   ◐ 2   · 8   ? 3   - 2   ! 0
-  grpc         ● 10  ◐ 0   · 1   ? 4   - 1   ! 0
-  graphql      ● 4   ◐ 1   · 6   ? 4   - 1   ! 0
-  ws           ● 6   ◐ 1   · 4   ? 4   - 1   ! 0
-  eventbus     ● 4   ◐ 0   · 8   ? 4   - 0   ! 0
-  db           ● 7   ◐ 1   · 3   ? 4   - 1   ! 0
-  migrations   ● 10  ◐ 0   · 1   ? 4   - 1   ! 0
-  config       ● 6   ◐ 5   · 0   ? 4   - 1   ! 0
-  secrets      ● 5   ◐ 2   · 4   ? 4   - 1   ! 0
-  flags        ● 7   ◐ 4   · 0   ? 4   - 1   ! 0
-  cron         ● 8   ◐ 0   · 3   ? 4   - 1   ! 0
-  cli_def      ● 8   ◐ 0   · 3   ? 3   - 2   ! 0
-  cli_inv      ● 5   ◐ 1   · 5   ? 4   - 1   ! 0
-  calls        ● 15  ◐ 0   · 0   ? 0   - 1   ! 0
-  imports      ● 14  ◐ 0   · 0   ? 2   - 0   ! 0
-  injects      ● 7   ◐ 3   · 1   ? 4   - 1   ! 0
-  impl         ● 8   ◐ 3   · 1   ? 3   - 1   ! 0
-  tests        ● 2   ◐ 9   · 0   ? 5   - 0   ! 0
-  service      ● 11  ◐ 0   · 0   ? 5   - 0   ! 0
-  subproject   ● 10  ◐ 1   · 0   ? 5   - 0   ! 0
+PER-MECHANISM  across 17 languages:
+  http_client  ● 14  ◐ 0   · 1   ? 1   - 1   ! 0
+  http_server  ● 10  ◐ 4   · 0   ? 2   - 1   ! 0
+  kafka        ● 5   ◐ 3   · 3   ? 5   - 1   ! 0
+  amqp         ● 1   ◐ 4   · 6   ? 5   - 1   ! 0
+  sqs_sns      ● 3   ◐ 1   · 7   ? 5   - 1   ! 0
+  pubsub       ● 0   ◐ 2   · 9   ? 5   - 1   ! 0
+  azure_sb     ● 3   ◐ 0   · 4   ? 9   - 1   ! 0
+  nats         ● 6   ◐ 1   · 4   ? 5   - 1   ! 0
+  redis        ● 5   ◐ 1   · 5   ? 4   - 2   ! 0
+  mqtt         ● 7   ◐ 0   · 4   ? 5   - 1   ! 0
+  taskq        ● 1   ◐ 2   · 8   ? 4   - 2   ! 0
+  grpc         ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
+  graphql      ● 4   ◐ 1   · 6   ? 5   - 1   ! 0
+  ws           ● 6   ◐ 1   · 4   ? 5   - 1   ! 0
+  eventbus     ● 4   ◐ 0   · 8   ? 5   - 0   ! 0
+  db           ● 7   ◐ 1   · 3   ? 5   - 1   ! 0
+  migrations   ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
+  config       ● 6   ◐ 5   · 0   ? 5   - 1   ! 0
+  secrets      ● 5   ◐ 2   · 4   ? 5   - 1   ! 0
+  flags        ● 7   ◐ 4   · 0   ? 5   - 1   ! 0
+  cron         ● 8   ◐ 0   · 3   ? 5   - 1   ! 0
+  cli_def      ● 8   ◐ 0   · 3   ? 4   - 2   ! 0
+  cli_inv      ● 5   ◐ 1   · 5   ? 5   - 1   ! 0
+  calls        ● 16  ◐ 0   · 0   ? 0   - 1   ! 0
+  imports      ● 15  ◐ 0   · 0   ? 2   - 0   ! 0
+  injects      ● 8   ◐ 3   · 1   ? 4   - 1   ! 0
+  impl         ● 9   ◐ 3   · 1   ? 3   - 1   ! 0
+  tests        ● 2   ◐ 9   · 0   ? 6   - 0   ! 0
+  service      ● 11  ◐ 0   · 0   ? 6   - 0   ! 0
+  subproject   ● 10  ◐ 1   · 0   ? 6   - 0   ! 0
 
 PER-LANGUAGE  across 30 mechanisms:
   python       ● 26  ◐ 2   · 2   ? 0   - 0   ! 0
@@ -140,11 +141,12 @@ PER-LANGUAGE  across 30 mechanisms:
   rust         ● 15  ◐ 4   · 11  ? 0   - 0   ! 0
   solidity     ● 4   ◐ 0   · 0   ? 4   - 22  ! 0
   terraform    ● 0   ◐ 0   · 0   ? 24  - 6   ! 0
+  kotlin       ● 6   ◐ 0   · 0   ? 24  - 0   ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 340/452 applicable cells have a fixture (75.2%) — 200 full, 49 partial, 91 none, 112 unknown, 0 error, 28 n/a.
+COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 206 full, 49 partial, 91 none, 136 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 170
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 169
 
 ## Cells routed via an alternative mechanism
 

@@ -1821,7 +1821,7 @@
     },
     "elixir/eventbus": {
       "extract": [
-        1,
+        0,
         2
       ],
       "fixtures": [
@@ -1836,14 +1836,12 @@
         0,
         2
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
         0,
         1
       ],
-      "via": "eventbus"
+      "via": null
     },
     "elixir/flags": {
       "extract": [
@@ -2185,7 +2183,7 @@
         0,
         1
       ],
-      "via": "eventbus"
+      "via": null
     },
     "elixir/secrets": {
       "extract": [
@@ -2599,8 +2597,8 @@
         "matrix/go/flags"
       ],
       "forbid": [
-        2,
-        2
+        3,
+        3
       ],
       "level": "full",
       "literal": [
@@ -2723,16 +2721,17 @@
     },
     "go/impl": {
       "extract": [
-        3,
-        3
+        4,
+        4
       ],
       "fixtures": [
         "fixtures/go-iface-embed",
+        "fixtures/go-iface-scope",
         "fixtures/go-implicit-iface"
       ],
       "forbid": [
-        1,
-        1
+        6,
+        6
       ],
       "level": "full",
       "literal": [
@@ -2743,8 +2742,8 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        5,
-        5
+        9,
+        9
       ],
       "via": "type"
     },
@@ -3861,6 +3860,154 @@
       ],
       "via": "websocket"
     },
+    "kotlin/calls": {
+      "extract": [
+        4,
+        4
+      ],
+      "fixtures": [
+        "fixtures/kotlin-entities",
+        "fixtures/kotlin-ktor"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        4,
+        4
+      ],
+      "reasons": [],
+      "route": [
+        3,
+        3
+      ],
+      "via": "call"
+    },
+    "kotlin/http_client": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/kotlin-retrofit"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "http"
+    },
+    "kotlin/http_server": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/kotlin-ktor",
+        "fixtures/kotlin-spring"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        3,
+        3
+      ],
+      "via": "http"
+    },
+    "kotlin/impl": {
+      "extract": [
+        4,
+        4
+      ],
+      "fixtures": [
+        "fixtures/kotlin-entities"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        4,
+        4
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "type"
+    },
+    "kotlin/imports": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/kotlin-entities"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        0,
+        0
+      ],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
+      "route": [
+        1,
+        1
+      ],
+      "via": "import"
+    },
+    "kotlin/injects": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/kotlin-spring"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "di"
+    },
     "php/amqp": {
       "extract": [
         2,
@@ -4814,8 +4961,8 @@
         "matrix/python/flags"
       ],
       "forbid": [
-        2,
-        2
+        3,
+        3
       ],
       "level": "full",
       "literal": [
@@ -6584,7 +6731,7 @@
         0,
         1
       ],
-      "via": "eventbus"
+      "via": null
     },
     "rust/redis": {
       "extract": [
@@ -7937,8 +8084,8 @@
         "matrix/typescript/flags"
       ],
       "forbid": [
-        2,
-        2
+        3,
+        3
       ],
       "level": "full",
       "literal": [
@@ -8504,6 +8651,7 @@
     "fixtures/dart-members",
     "fixtures/data-entity-literal-shape",
     "fixtures/docs-adr-decision",
+    "fixtures/docs-link-past-cap",
     "fixtures/docs-md-section-lines",
     "fixtures/elixir-docs",
     "fixtures/elixir-xmodule-calls",
@@ -8511,6 +8659,7 @@
     "fixtures/event-monorepo-process",
     "fixtures/event-name-shape",
     "fixtures/event-publish-precision",
+    "fixtures/event-verb-fallback",
     "fixtures/event-verb-receivers",
     "fixtures/external-cells-sidecar",
     "fixtures/go-closure-handled_by",
@@ -8543,13 +8692,9 @@
     "fixtures/java-package-qnames",
     "fixtures/java-spring-kafka-msgtype",
     "fixtures/k8s-multidoc-cron",
-    "fixtures/kotlin-entities",
     "fixtures/kotlin-flip-guard",
-    "fixtures/kotlin-ktor",
     "fixtures/kotlin-ktor-client",
     "fixtures/kotlin-local-receivers",
-    "fixtures/kotlin-retrofit",
-    "fixtures/kotlin-spring",
     "fixtures/module-cross-language",
     "fixtures/module-same-group",
     "fixtures/module-synthetic-filename",
@@ -8607,6 +8752,7 @@
     "fixtures/xcut-config-env-value",
     "fixtures/xcut-connect-rpc",
     "fixtures/xcut-data-access-fn",
+    "fixtures/xcut-flag-read-fn",
     "fixtures/xcut-graphql-precision",
     "fixtures/xcut-graphql-sdl",
     "fixtures/xcut-overlay-const-mount",
@@ -8753,18 +8899,18 @@
   },
   "schema": 2,
   "totals": {
-    "covered": 340,
+    "covered": 346,
     "error": 0,
-    "full": 200,
-    "grid": 480,
+    "full": 206,
+    "grid": 510,
     "n/a": 28,
     "none": 91,
     "partial": 49,
-    "unknown": 112
+    "unknown": 136
   },
   "vocabulary": {
     "digest": "916e9fb659ff",
-    "languages": 16,
+    "languages": 17,
     "mechanisms": 30,
     "na_digest": "6e1c8eedbe15",
     "not_applicable": 28

@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 310,
+  "fixtures": 314,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -440,6 +440,13 @@
         "DOCUMENTS": 1.0
       }
     },
+    "docs-link-past-cap": {
+      "framework": "docs-link-past-cap",
+      "language": "python",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
+    },
     "docs-md-section-lines": {
       "framework": "docs-md-section-lines",
       "language": "markdown",
@@ -511,6 +518,13 @@
     "event-publish-precision": {
       "framework": "event-publish-precision",
       "language": "python",
+      "per_category": {
+        "EVENT_FLOWS": 1.0
+      }
+    },
+    "event-verb-fallback": {
+      "framework": "event-verb-fallback",
+      "language": "typescript",
       "per_category": {
         "EVENT_FLOWS": 1.0
       }
@@ -592,6 +606,13 @@
       "per_category": {
         "IMPLEMENTS": 1.0,
         "INHERITS_FROM": 1.0
+      }
+    },
+    "go-iface-scope": {
+      "framework": "go-iface-scope",
+      "language": "go",
+      "per_category": {
+        "IMPLEMENTS": 1.0
       }
     },
     "go-implicit-iface": {
@@ -1874,6 +1895,13 @@
         "EVENT_FLOWS": 1.0
       }
     },
+    "xcut-flag-read-fn": {
+      "framework": "xcut-flag-read-fn",
+      "language": "python",
+      "per_category": {
+        "READS_CONFIG": 1.0
+      }
+    },
     "xcut-graphql-graphql_calls": {
       "framework": "xcut-graphql",
       "language": "typescript",
@@ -2232,5 +2260,5 @@
     "missing_nodes": [],
     "partial_cells": []
   },
-  "view": "run.py: per-fixture edge recall over fixtures/* plus its summary sections; the 16x30 language x mechanism grid is results-latest.json"
+  "view": "run.py: per-fixture edge recall over fixtures/* plus its summary sections; the language x mechanism grid is results-latest.json"
 }
