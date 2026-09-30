@@ -81,6 +81,7 @@ use glia_graph::normalise_http_path;
 
 use crate::answers::{Locator, entrypoint_reachable};
 use crate::build::{BuildOptions, generate_many_opts, generate_one_opts};
+use crate::external::signals;
 use crate::profile::CODE_PROFILE;
 
 pub const UNPAIRED_ENDPOINT: &str = "unpaired_endpoint";
@@ -1018,27 +1019,6 @@ fn position_file(c: &Cell) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `(cochanges, ratio_permille)` from a CO_CHANGES edge's ATTN cell (LF.5b's
-/// `{"cochanges":n,"ratio_permille":r,"window_commits":w}`); 0 when absent.
-fn pair_counts(cells: &[Cell]) -> (u32, u32) {
-    let v = cells
-        .iter()
-        .filter(|c| c.kind == cell_type::ATTN)
-        .find_map(|c| match &c.payload {
-            CellPayload::Json(s) | CellPayload::Text(s) => {
-                serde_json::from_str::<serde_json::Value>(s).ok()
-            }
-            _ => None,
-        });
-    let int = |k: &str| {
-        v.as_ref()
-            .and_then(|v| v.get(k))
-            .and_then(serde_json::Value::as_u64)
-            .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX))
-    };
-    (int("cochanges"), int("ratio_permille"))
-}
-
 /// How a pair's two files are joined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Link {
@@ -1111,7 +1091,13 @@ fn cochange_audit(merged: &MergedGraph, surface: &str) -> Vec<PairGap> {
             if fa == fb {
                 continue;
             }
-            let (cochanges, ratio) = pair_counts(&e.cells);
+            // The edge's ATTN through the one reader (CC.2); (0, 0) without it.
+            let (cochanges, ratio) = signals::pair_counts(&e.cells).map_or((0, 0), |p| {
+                (
+                    p.cochanges,
+                    u32::try_from(p.ratio_permille).unwrap_or(u32::MAX),
+                )
+            });
             let (fa, fb, ma, mb) = if fa < fb {
                 (fa, fb, e.from, e.to)
             } else {

@@ -8,6 +8,10 @@
 //! Directory-module slot declared by L0.2 so its owners edit only this
 //! directory. Crate-private: cross-module items are `pub(crate)`.
 //!
+//! [`signals`] (CC.2) is not a stage: it is the one reader of the ATTN and
+//! FAIL cells the history and test-report stages write, for the answers
+//! that rank by them.
+//!
 //! Per repo, a build makes one [`RepoInputs`] right after the walk (before
 //! any graph is built, so the build stages can read the overlay). The code
 //! passes receive every repo's inputs in the build context
@@ -51,6 +55,7 @@ pub(crate) mod declared;
 mod entrypoints;
 mod history;
 mod overlay;
+pub(crate) mod signals;
 mod test_reports;
 mod wrappers;
 

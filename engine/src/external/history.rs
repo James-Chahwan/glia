@@ -120,39 +120,48 @@ impl Ingest {
     }
 }
 
+/// The `source` of a module churn ATTN ([`ModuleAttn`]).
+pub(super) const SOURCE_GIT: &str = "git";
+
+/// The `source` of a symbol blame ATTN ([`SymbolAttn`]).
+pub(super) const SOURCE_BLAME: &str = "git-blame";
+
+// The three payloads are `pub(super)` so `super::signals`, their one reader
+// (CC.2), round-trips these bytes in its tests.
+
 /// The module churn payload, in this field order.
 #[derive(serde::Serialize)]
-struct ModuleAttn<'a> {
-    source: &'a str,
-    commits: u32,
-    lines_added: u64,
-    lines_deleted: u64,
-    first: i64,
-    last: i64,
-    window_commits: usize,
-    head: &'a str,
+pub(super) struct ModuleAttn<'a> {
+    pub(super) source: &'a str,
+    pub(super) commits: u32,
+    pub(super) lines_added: u64,
+    pub(super) lines_deleted: u64,
+    pub(super) first: i64,
+    pub(super) last: i64,
+    pub(super) window_commits: usize,
+    pub(super) head: &'a str,
 }
 
 /// The symbol blame payload, in this field order.
 #[derive(serde::Serialize)]
-struct SymbolAttn<'a> {
-    source: &'a str,
-    last: i64,
-    span_changes: usize,
-    head: &'a str,
+pub(super) struct SymbolAttn<'a> {
+    pub(super) source: &'a str,
+    pub(super) last: i64,
+    pub(super) span_changes: usize,
+    pub(super) head: &'a str,
 }
 
 /// The CO_CHANGES edge-cell payload, in this field order.
 #[derive(serde::Serialize)]
-struct PairAttn {
-    cochanges: u32,
-    ratio_permille: u64,
-    window_commits: usize,
+pub(super) struct PairAttn {
+    pub(super) cochanges: u32,
+    pub(super) ratio_permille: u64,
+    pub(super) window_commits: usize,
 }
 
 /// Compact JSON of a payload of integers and plain strings, which cannot
 /// fail to serialise; `{}` would read as an empty payload rather than lie.
-fn json<T: serde::Serialize>(v: &T) -> String {
+pub(super) fn json<T: serde::Serialize>(v: &T) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| String::from("{}"))
 }
 
@@ -304,7 +313,7 @@ pub(super) fn history_cells(merged: &mut MergedGraph, input: &RepoInputs) -> boo
     for (path, c) in &ing.churn {
         let Some(id) = ing.modules.get(path) else { continue };
         let payload = ModuleAttn {
-            source: "git",
+            source: SOURCE_GIT,
             commits: c.commits,
             lines_added: c.added,
             lines_deleted: c.deleted,
@@ -375,7 +384,7 @@ fn blame_cells(merged: &MergedGraph, repo: RepoId, ing: &Ingest) -> BTreeMap<u64
                 .map(|[_, _, t]| *t)
                 .collect();
             let Some(&last) = times.last() else { continue };
-            let payload = SymbolAttn { source: "git-blame", last, span_changes: times.len(), head: &ing.head };
+            let payload = SymbolAttn { source: SOURCE_BLAME, last, span_changes: times.len(), head: &ing.head };
             out.insert(n.id.0, json(&payload));
         }
     }
