@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 301,
+  "fixtures": 304,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -187,6 +187,14 @@
     },
     "cpp-declarations": {
       "framework": "cpp-declarations",
+      "language": "c_cpp",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
+    "cpp-header-extensions": {
+      "framework": "cpp-header-extensions",
       "language": "c_cpp",
       "per_category": {
         "CALLS": 1.0,
@@ -628,6 +636,13 @@
         "CALLS": 1.0
       }
     },
+    "go-return-type-receivers": {
+      "framework": "go-return-type-receivers",
+      "language": "go",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
     "go-route-per-method": {
       "framework": "go-route-per-method",
       "language": "go",
@@ -681,6 +696,13 @@
       "framework": "graphql-sdl-literal-scope",
       "language": "typescript",
       "per_category": {}
+    },
+    "grpc-host-narrowing": {
+      "framework": "grpc-host-narrowing",
+      "language": "go",
+      "per_category": {
+        "GRPC_CALLS": 1.0
+      }
     },
     "history-cochange": {
       "framework": "history-cochange",

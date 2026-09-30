@@ -272,6 +272,56 @@
       ],
       "via": "cli"
     },
+    "csharp/cli_inv": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/csharp/cli_inv"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "cli"
+    },
+    "csharp/config": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/csharp/config"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "routing edge missing"
+      ],
+      "route": [
+        1,
+        3
+      ],
+      "via": "config"
+    },
     "csharp/cron": {
       "extract": [
         2,
@@ -321,6 +371,78 @@
         0
       ],
       "via": "db"
+    },
+    "csharp/eventbus": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/csharp/eventbus"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "eventbus"
+    },
+    "csharp/flags": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/csharp/flags"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        3,
+        3
+      ],
+      "via": "config"
+    },
+    "csharp/graphql": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/csharp/graphql"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
     },
     "csharp/grpc": {
       "extract": [
@@ -499,6 +621,30 @@
       ],
       "via": "queue"
     },
+    "csharp/migrations": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/csharp/migrations"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "db"
+    },
     "csharp/mqtt": {
       "extract": [
         0,
@@ -671,6 +817,32 @@
         1
       ],
       "via": "queue"
+    },
+    "csharp/subproject": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/csharp/subproject"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [
+        "anchor mechanism: routing not applicable"
+      ],
+      "route": [
+        0,
+        0
+      ],
+      "via": "project"
     },
     "csharp/taskq": {
       "extract": [
@@ -1147,18 +1319,19 @@
     },
     "go/calls": {
       "extract": [
-        6,
-        6
+        7,
+        7
       ],
       "fixtures": [
         "fixtures/go-calls",
         "fixtures/go-closure-calls",
         "fixtures/go-field-dispatch",
-        "fixtures/go-package-multifile-calls"
+        "fixtures/go-package-multifile-calls",
+        "fixtures/go-return-type-receivers"
       ],
       "forbid": [
-        1,
-        1
+        4,
+        4
       ],
       "level": "full",
       "literal": [
@@ -1169,8 +1342,8 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        12,
-        12
+        17,
+        17
       ],
       "via": "call"
     },
@@ -1346,7 +1519,7 @@
     },
     "go/graphql": {
       "extract": [
-        0,
+        1,
         2
       ],
       "fixtures": [
@@ -1358,15 +1531,17 @@
       ],
       "level": "none",
       "literal": [
-        0,
+        1,
         2
       ],
-      "reasons": [],
+      "reasons": [
+        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
+      ],
       "route": [
         0,
         1
       ],
-      "via": null
+      "via": "graphql"
     },
     "go/grpc": {
       "extract": [
@@ -2093,7 +2268,7 @@
     },
     "java/graphql": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -2103,14 +2278,14 @@
         2,
         2
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "graphql"
@@ -2589,6 +2764,33 @@
       ],
       "via": "websocket"
     },
+    "php/amqp": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/php/amqp"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "literal lost",
+        "routing edge missing"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "queue"
+    },
     "php/calls": {
       "extract": [
         2,
@@ -2637,6 +2839,56 @@
       ],
       "via": "cli"
     },
+    "php/cli_inv": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/php/cli_inv"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "php/config": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/php/config"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "routing edge missing"
+      ],
+      "route": [
+        1,
+        3
+      ],
+      "via": "config"
+    },
     "php/cron": {
       "extract": [
         3,
@@ -2660,6 +2912,128 @@
         1
       ],
       "via": "cron"
+    },
+    "php/db": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "fixtures/php-eloquent"
+      ],
+      "forbid": [
+        3,
+        3
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        2,
+        2
+      ],
+      "via": "db"
+    },
+    "php/eventbus": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/php/eventbus"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "php/flags": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/php/flags"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "routing edge missing"
+      ],
+      "route": [
+        1,
+        3
+      ],
+      "via": "config"
+    },
+    "php/graphql": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/php/graphql"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "graphql"
+    },
+    "php/grpc": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/php/grpc"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "grpc"
     },
     "php/http_client": {
       "extract": [
@@ -2710,6 +3084,58 @@
       ],
       "via": "http"
     },
+    "php/impl": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/php/impl"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "routing edge missing"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "type"
+    },
+    "php/imports": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "fixtures/php-braced-use"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        0,
+        0
+      ],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
+      "route": [
+        2,
+        2
+      ],
+      "via": "import"
+    },
     "php/injects": {
       "extract": [
         4,
@@ -2734,6 +3160,177 @@
         2
       ],
       "via": "di"
+    },
+    "php/kafka": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/php/kafka"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "literal lost",
+        "routing edge missing"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "queue"
+    },
+    "php/migrations": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/php/migrations"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "db"
+    },
+    "php/mqtt": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/php/mqtt"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "php/nats": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/php/nats"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "php/pubsub": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/php/pubsub"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "php/redis": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/php/redis"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "php/secrets": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/php/secrets"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
     },
     "php/service": {
       "extract": [
@@ -2761,6 +3358,80 @@
       ],
       "via": "service"
     },
+    "php/sqs_sns": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/php/sqs_sns"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "php/subproject": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/php/subproject"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [
+        "anchor mechanism: routing not applicable"
+      ],
+      "route": [
+        0,
+        0
+      ],
+      "via": "project"
+    },
+    "php/taskq": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/php/taskq"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
     "php/tests": {
       "extract": [
         2,
@@ -2786,6 +3457,32 @@
         2
       ],
       "via": "test"
+    },
+    "php/ws": {
+      "extract": [
+        1,
+        2
+      ],
+      "fixtures": [
+        "matrix/php/ws"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "websocket"
     },
     "python/amqp": {
       "extract": [
@@ -3530,6 +4227,30 @@
       ],
       "via": "websocket"
     },
+    "ruby/amqp": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/ruby/amqp"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
     "ruby/calls": {
       "extract": [
         3,
@@ -3581,6 +4302,56 @@
       ],
       "via": "cli"
     },
+    "ruby/cli_inv": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/ruby/cli_inv"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "routing edge missing"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "cli"
+    },
+    "ruby/config": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/ruby/config"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        3,
+        3
+      ],
+      "via": "config"
+    },
     "ruby/cron": {
       "extract": [
         3,
@@ -3631,6 +4402,108 @@
       ],
       "via": "db"
     },
+    "ruby/eventbus": {
+      "extract": [
+        1,
+        2
+      ],
+      "fixtures": [
+        "matrix/ruby/eventbus"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "eventbus"
+    },
+    "ruby/flags": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/ruby/flags"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "routing edge missing"
+      ],
+      "route": [
+        1,
+        3
+      ],
+      "via": "config"
+    },
+    "ruby/graphql": {
+      "extract": [
+        1,
+        2
+      ],
+      "fixtures": [
+        "matrix/ruby/graphql"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "graphql"
+    },
+    "ruby/grpc": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/ruby/grpc"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "grpc"
+    },
     "ruby/http_client": {
       "extract": [
         2,
@@ -3679,6 +4552,32 @@
         3
       ],
       "via": "http"
+    },
+    "ruby/impl": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/ruby/impl"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "routing edge missing"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "type"
     },
     "ruby/imports": {
       "extract": [
@@ -3730,6 +4629,32 @@
       ],
       "via": "di"
     },
+    "ruby/kafka": {
+      "extract": [
+        1,
+        2
+      ],
+      "fixtures": [
+        "matrix/ruby/kafka"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "queue"
+    },
     "ruby/migrations": {
       "extract": [
         1,
@@ -3753,6 +4678,126 @@
         1
       ],
       "via": "db"
+    },
+    "ruby/mqtt": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/ruby/mqtt"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
+    },
+    "ruby/nats": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/ruby/nats"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
+    },
+    "ruby/pubsub": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/ruby/pubsub"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "ruby/redis": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/ruby/redis"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
+    },
+    "ruby/secrets": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/ruby/secrets"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
     },
     "ruby/service": {
       "extract": [
@@ -3779,6 +4824,56 @@
         1
       ],
       "via": "service"
+    },
+    "ruby/sqs_sns": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/ruby/sqs_sns"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "ruby/subproject": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/ruby/subproject"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [
+        "anchor mechanism: routing not applicable"
+      ],
+      "route": [
+        0,
+        0
+      ],
+      "via": "project"
     },
     "ruby/taskq": {
       "extract": [
@@ -3854,6 +4949,54 @@
       ],
       "via": "websocket"
     },
+    "rust/amqp": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/rust/amqp"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "rust/azure_sb": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/rust/azure_sb"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
     "rust/calls": {
       "extract": [
         15,
@@ -3905,6 +5048,202 @@
         1
       ],
       "via": "cli"
+    },
+    "rust/cli_inv": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/rust/cli_inv"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "cli"
+    },
+    "rust/config": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/rust/config"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        3,
+        3
+      ],
+      "via": "config"
+    },
+    "rust/cron": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/rust/cron"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "rust/db": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/rust/db"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "db"
+    },
+    "rust/eventbus": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/rust/eventbus"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "rust/flags": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/rust/flags"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "routing edge missing"
+      ],
+      "route": [
+        1,
+        3
+      ],
+      "via": "config"
+    },
+    "rust/graphql": {
+      "extract": [
+        1,
+        2
+      ],
+      "fixtures": [
+        "matrix/rust/graphql"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "graphql"
+    },
+    "rust/grpc": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/rust/grpc"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "grpc"
     },
     "rust/http_client": {
       "extract": [
@@ -4004,6 +5343,200 @@
       ],
       "via": "import"
     },
+    "rust/injects": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/rust/injects"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "partial",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [
+        "routing edge missing"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "di"
+    },
+    "rust/kafka": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/rust/kafka"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
+    },
+    "rust/migrations": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/rust/migrations"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "db"
+    },
+    "rust/mqtt": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/rust/mqtt"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
+    },
+    "rust/nats": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/rust/nats"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "rust/pubsub": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/rust/pubsub"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": "eventbus"
+    },
+    "rust/redis": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/rust/redis"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
+    },
+    "rust/secrets": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/rust/secrets"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
     "rust/service": {
       "extract": [
         1,
@@ -4029,6 +5562,80 @@
         1
       ],
       "via": "service"
+    },
+    "rust/sqs_sns": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/rust/sqs_sns"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "rust/subproject": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/rust/subproject"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [
+        "anchor mechanism: routing not applicable"
+      ],
+      "route": [
+        0,
+        0
+      ],
+      "via": "project"
+    },
+    "rust/taskq": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/rust/taskq"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
     },
     "rust/tests": {
       "extract": [
@@ -4056,6 +5663,80 @@
       ],
       "via": "test"
     },
+    "rust/ws": {
+      "extract": [
+        1,
+        2
+      ],
+      "fixtures": [
+        "matrix/rust/ws"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "websocket"
+    },
+    "scala/amqp": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/scala/amqp"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "scala/azure_sb": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/scala/azure_sb"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
     "scala/calls": {
       "extract": [
         2,
@@ -4079,6 +5760,104 @@
         1
       ],
       "via": "call"
+    },
+    "scala/db": {
+      "extract": [
+        0,
+        1
+      ],
+      "fixtures": [
+        "matrix/scala/db"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "scala/eventbus": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/scala/eventbus"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "scala/graphql": {
+      "extract": [
+        1,
+        2
+      ],
+      "fixtures": [
+        "matrix/scala/graphql"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "graphql"
+    },
+    "scala/grpc": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/scala/grpc"
+      ],
+      "forbid": [
+        1,
+        1
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "grpc"
     },
     "scala/http_client": {
       "extract": [
@@ -4204,6 +5983,155 @@
       ],
       "via": "di"
     },
+    "scala/kafka": {
+      "extract": [
+        1,
+        2
+      ],
+      "fixtures": [
+        "matrix/scala/kafka"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "queue"
+    },
+    "scala/migrations": {
+      "extract": [
+        1,
+        1
+      ],
+      "fixtures": [
+        "matrix/scala/migrations"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        1,
+        1
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "db"
+    },
+    "scala/mqtt": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/scala/mqtt"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
+    },
+    "scala/nats": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/scala/nats"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "full",
+      "literal": [
+        2,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        1,
+        1
+      ],
+      "via": "queue"
+    },
+    "scala/pubsub": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/scala/pubsub"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": "eventbus"
+    },
+    "scala/redis": {
+      "extract": [
+        2,
+        2
+      ],
+      "fixtures": [
+        "matrix/scala/redis"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "partial",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [
+        "literal lost",
+        "routing edge missing"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "queue"
+    },
     "scala/service": {
       "extract": [
         1,
@@ -4229,6 +6157,80 @@
         1
       ],
       "via": "service"
+    },
+    "scala/sqs_sns": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/scala/sqs_sns"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "scala/taskq": {
+      "extract": [
+        0,
+        2
+      ],
+      "fixtures": [
+        "matrix/scala/taskq"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        0,
+        2
+      ],
+      "reasons": [],
+      "route": [
+        0,
+        1
+      ],
+      "via": null
+    },
+    "scala/ws": {
+      "extract": [
+        1,
+        2
+      ],
+      "fixtures": [
+        "matrix/scala/ws"
+      ],
+      "forbid": [
+        0,
+        0
+      ],
+      "level": "none",
+      "literal": [
+        1,
+        2
+      ],
+      "reasons": [
+        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
+      ],
+      "route": [
+        0,
+        1
+      ],
+      "via": "websocket"
     },
     "solidity/calls": {
       "extract": [
@@ -5187,6 +7189,7 @@
     "fixtures/contract-pact",
     "fixtures/contract-per-file-identity",
     "fixtures/cpp-declarations",
+    "fixtures/cpp-header-extensions",
     "fixtures/cpp-header-impl-files",
     "fixtures/cpp-namespace-qnames",
     "fixtures/cpp-out-of-line-members",
@@ -5223,6 +7226,7 @@
     "fixtures/graphql-decorator-scope",
     "fixtures/graphql-op-needle-precision",
     "fixtures/graphql-sdl-literal-scope",
+    "fixtures/grpc-host-narrowing",
     "fixtures/history-cochange",
     "fixtures/http-absolute-url-client",
     "fixtures/http-client-not-route",
@@ -5260,9 +7264,7 @@
     "fixtures/openapi-pact-fields",
     "fixtures/overlay-declared-cells",
     "fixtures/overlay-entrypoints",
-    "fixtures/php-braced-use",
     "fixtures/php-dir-qnames",
-    "fixtures/php-eloquent",
     "fixtures/php-laravel-prefix",
     "fixtures/prisma-schema",
     "fixtures/proto-field-drift",
@@ -5335,13 +7337,13 @@
   ],
   "schema": 1,
   "totals": {
-    "covered": 207,
+    "covered": 288,
     "error": 0,
-    "full": 161,
+    "full": 192,
     "grid": 480,
-    "none": 22,
-    "partial": 24,
-    "unknown": 273
+    "none": 60,
+    "partial": 36,
+    "unknown": 192
   },
   "vocabulary": {
     "digest": "916e9fb659ff",
