@@ -22,10 +22,11 @@ impl PyGraph {
     ///
     /// Returns a dict `{rules, checked, unchecked, errors, violations,
     /// reflexion}`:
-    /// `rules` read, `checked` evaluated (forbid_edge + no_cycle),
-    /// `unchecked` the ids of the rules no query evaluates (invariant),
-    /// `errors` `[rule_id, message]` pairs for a rule that could not be
-    /// evaluated (an unknown edge category, a scope no node sits in).
+    /// `rules` read, `checked` evaluated (forbid_edge + no_cycle, plus the
+    /// allows of an evaluated model), `unchecked` the ids of the rules no
+    /// query evaluates (invariant), `errors` `[rule_id, message]` pairs for
+    /// a rule that could not be evaluated (an unknown edge category, a scope
+    /// no node sits in, an allow naming an undeclared component).
     /// `violations`, sorted by rule id: `{rule_id, rule_kind, decl, severity,
     /// tier, count, evidence}` — a forbid_edge rule's direct edges from scope
     /// `from` into scope `to` (`count` every edge, evidence at most 100,
@@ -56,7 +57,9 @@ impl PyGraph {
     /// blind extraction looks like an absence); `unmapped` `{files, nodes,
     /// edges_to_mapped, sample}` for the code no component owns. Each
     /// divergence is also a violation, `rule_id` `reflexion:<from>-><to>`,
-    /// `rule_kind` `divergence`, evidence as forbid_edge's.
+    /// `rule_kind` `divergence`, `decl` the `from` component's stanza,
+    /// `count` and evidence as forbid_edge's. `glia check` renders the model
+    /// as its `## reflexion model` section (CC.5c).
     fn check(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         to_py(py, check_json(&self.merged))
     }

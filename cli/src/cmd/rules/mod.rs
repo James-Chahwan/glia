@@ -25,9 +25,15 @@ pub(crate) enum RulesCmd {
     /// file sits under that path (or it is a PROJECT there): a node with no
     /// file never matches. Scopes are repo-relative, so with --with a rule
     /// is evaluated against every merged repo's nodes at that path.
+    /// A reflexion model (`[[component]]` paths, `[[layer]]`s, `kind =
+    /// "allow"` rules; CC.5b) prints first: its components, the component
+    /// dependency matrix (convergence / divergence, or observed when no
+    /// layer or allow closes it), each allow no edge realises with its
+    /// coverage caveats, and the files no component owns. A divergence is a
+    /// violation, listed per edge.
     /// Exit codes for CI: 0 no violations, 1 violations, 2 a build error or
     /// a rule that could not be evaluated (unknown edge category, a scope no
-    /// node sits in).
+    /// node sits in, an allow naming an undeclared component).
     Check(check::Args),
     /// Cycles (LE.6b): cross-service event loops first (a node-level loop
     /// through queue / event hops, with a located witness), then call loops,
