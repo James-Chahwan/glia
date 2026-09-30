@@ -1,6 +1,6 @@
 # `matrix/` — the per-cell coverage corpus
 
-One directory per cell of the 16-language × 30-mechanism coverage matrix, in the
+One directory per cell of the 17-language × 30-mechanism coverage matrix, in the
 canonical layout `matrix/<language>/<mechanism>/key.json`, spelled exactly as
 [`../matrix_vocab.py`](../matrix_vocab.py) spells them.
 

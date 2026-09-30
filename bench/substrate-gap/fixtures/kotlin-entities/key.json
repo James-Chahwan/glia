@@ -2,6 +2,7 @@
   "framework": "kotlin",
   "language": "kotlin",
   "dirs": ["."],
+  "cells": ["kotlin/calls", "kotlin/imports", "kotlin/impl"],
   "note": "A14.1 baseline: no Kotlin parser; .kt went through the Java grammar — 4 nodes / 2 edges, only INTERFACE Auditable found, every edge cell 0.00. A14.2 (kotlin parser): 19 nodes / 19 edges, all six nodes found, DEFINES and IMPORTS 1.00; CALLS / INHERITS_FROM / IMPLEMENTS stay 0.00 for A14.3. A14.4: api.kt's @GetMapping mints ROUTE GET /users/{id}. A14.3 (parsers/code/kotlin/src/calls.rs): CALLS 2/2, INHERITS_FROM 1/1, IMPLEMENTS 1/1 — function bodies emit CallSites, supertypes emit Bare heritage refs, and the primary-constructor `val userService: UserService` is a recorded field type; marker `[kotlin] refs: calls=4 self=1 inherits=1 implements=1 field_types=1`.",
   "expect_nodes": [
     {"kind": "CLASS",     "name": "UserController", "note": "primary constructor killed the class node under the java grammar; found since A14.2"},

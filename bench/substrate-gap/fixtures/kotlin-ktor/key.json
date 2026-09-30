@@ -2,6 +2,7 @@
   "framework": "kotlin-ktor",
   "language": "kotlin",
   "dirs": ["."],
+  "cells": ["kotlin/http_server", "kotlin/calls"],
   "note": "A14.1 baseline: Ktor DSL routes. A14.5: the routes come off the Kotlin AST (no text scan), each bound HANDLED_BY to the enclosing declared function and carrying a POSITION cell at its `get(...)` call. A14.3: the calls inside the route lambdas are collected as CallSites of itemRoutes (the `get` / `post` heads are ROUTEs, never calls). CA.6a: `store` is a function PARAMETER typed `ItemStore`; the Kotlin parser records it as a local type of itemRoutes (LA.35a's local_types, marker `[kotlin] local types: scopes=2 typed=1 unknown=1`), which the receiver-type pass reads before property types, so `store.all()` binds ItemStore::all through `import com.acme.store.ItemStore` — CALLS 0/1 -> 1/1, no longer the parameter-typed-receiver residual.",
   "expect_nodes": [
     {"kind": "ROUTE",    "name": "GET /api/items", "note": "regression guard — the AST scan keeps the text scanner's `{METHOD} {path}` name and NodeId"},

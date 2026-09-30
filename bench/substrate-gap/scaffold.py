@@ -3,8 +3,9 @@
 
     python3 scaffold.py <language> <mechanism> [--force]
 
-16 x 30 = 480 cells is far past hand-authoring, and six corpus packets follow
-this one. Every fixture needs four decisions the vocabulary ALREADY holds:
+The full grid (every matrix_vocab.LANGUAGES row x every MECHANISM_IDS column)
+is far past hand-authoring, and six corpus packets follow this one. Every
+fixture needs four decisions the vocabulary ALREADY holds:
 
     how many dirs   `cross_repo` -- True means the column is about a
                     cross-service flow and gets dirs ["client", "server"];
@@ -46,7 +47,7 @@ from pathlib import Path
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 from matrix_vocab import (  # noqa: E402
-    ROLE_CELL, mechanism, normalize_language, not_applicable,
+    LANGUAGES, MECHANISM_IDS, ROLE_CELL, mechanism, normalize_language, not_applicable,
 )
 
 MATRIX = HERE / "matrix"
@@ -86,6 +87,7 @@ LANGS = {
     "rust":       (".rs",     "//", ""),
     "solidity":   (".sol",    "//", "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.0;\n\n"),
     "terraform":  (".tf",     "#",  ""),
+    "kotlin":     (".kt",     "//", ""),
 }
 
 # family -> ((basename, role), (basename, role)). Index 0 lands in dirs[0].
@@ -250,7 +252,7 @@ def scaffold(language, mech_id, force=False):
     if reason is not None:
         raise ValueError(f"{lang}/{mech['id']} is NOT_APPLICABLE ({reason}); delete that "
                          f"entry in the same commit as the fixture")
-    if lang not in LANGS:  # pragma: no cover - LANGS covers all 16 rows
+    if lang not in LANGS:  # pragma: no cover - LANGS covers every LANGUAGES row
         raise ValueError(f"no file template for language {lang!r}")
     ext, comment, preamble = LANGS[lang]
 
@@ -289,8 +291,10 @@ def scaffold(language, mech_id, force=False):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("language", nargs="?", help="one of the 16 matrix rows")
-    ap.add_argument("mechanism", nargs="?", help="one of the 30 matrix columns")
+    ap.add_argument("language", nargs="?",
+                    help=f"one of the {len(LANGUAGES)} matrix rows")
+    ap.add_argument("mechanism", nargs="?",
+                    help=f"one of the {len(MECHANISM_IDS)} matrix columns")
     ap.add_argument("--force", action="store_true",
                     help="overwrite an existing cell dir (DESTROYS an authored key)")
     ap.add_argument("--template", action="store_true",

@@ -1,7 +1,10 @@
 # Authoring one matrix cell
 
-The coverage matrix is 16 languages × 30 mechanisms = **480 cells**. That is far
-past hand-authoring, and six corpus packets follow this one. This file is the
+The coverage matrix is 17 languages × 30 mechanisms = **510 cells**. That is far
+past hand-authoring, and six corpus packets follow this one. The 17th row,
+`kotlin`, is not one of the review's 16: Kotlin shares the JVM graph build with
+Java but has its own parser (`parsers/code/kotlin`), and rows are per language
+parser, so it gets its own row (CF.13b). This file is the
 per-cell recipe, so the cost per fixture is low and — more importantly —
 **uniform**: six parallel authors should produce six fixtures that make the same
 choices, not six conventions.
@@ -219,7 +222,7 @@ the intended queue path had.
 
 - **Naming.** The directory *is* the cell: `matrix/<language>/<mechanism>/`,
   spelled exactly as `matrix_vocab.py` spells them (`normalize_language` accepts
-  `ts`/`js`/`c++`/`c#` and raises on anything that is not one of the 16 rows).
+  `ts`/`js`/`c++`/`c#`/`kt` and raises on anything that is not one of the 17 rows).
 - **One fixture, one cell.** `cells` holds a single `"<lang>/<mech>"`. The
   exception is a genuinely cross-language fixture — a TypeScript client calling a
   Go server — which declares both cells and tags each assertion with the `cell`

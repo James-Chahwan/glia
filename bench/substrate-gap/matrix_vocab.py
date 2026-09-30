@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Machine-readable contract for the 16-language x 30-mechanism coverage matrix.
+"""Machine-readable contract for the 17-language x 30-mechanism coverage matrix.
 
 The review (dev-notes/review-2026-09-15-coverage-and-issues.md:127-143) states the
 matrix as a markdown code block: a human reads a fixture, judges it, and writes a
@@ -77,12 +77,18 @@ The list is module level, NOT a MECHANISMS field, so the scoring ruler's digest
 import sys
 
 # ---------------------------------------------------------------------------
-# Languages -- the 16 review rows at review:128-143, in review order.
+# Languages -- the 16 review rows at review:128-143, in review order, then
+# `kotlin` (CF.13b). The 17th row is NOT a review row: Kotlin has its own
+# parser (parsers/code/kotlin) and only shares the JVM graph build with java,
+# and rows are per language parser (scala and java are separate rows for the
+# same reason). It is APPENDED so every review row, the column geometry and the
+# review-order diff stay put.
 # ---------------------------------------------------------------------------
 
 LANGUAGES = [
     "python", "go", "typescript", "java", "csharp", "ruby", "php", "swift",
     "c_cpp", "scala", "clojure", "dart", "elixir", "rust", "solidity", "terraform",
+    "kotlin",
 ]
 
 # Spelling variants only. Composite legacy values (`typescript+go`, `proto+go`)
@@ -91,7 +97,7 @@ LANGUAGES = [
 LANGUAGE_ALIASES = {
     "c++": "c_cpp", "cpp": "c_cpp", "c#": "csharp", "cs": "csharp",
     "ts": "typescript", "js": "typescript", "javascript": "typescript",
-    "tsx": "typescript",
+    "tsx": "typescript", "kt": "kotlin", "kts": "kotlin",
 }
 
 # ---------------------------------------------------------------------------
@@ -350,10 +356,10 @@ NOT_APPLICABLE = {
 # ---------------------------------------------------------------------------
 
 def normalize_language(name):
-    """Map a language spelling onto one of the 16 matrix rows.
+    """Map a language spelling onto one of the LANGUAGES matrix rows.
 
-    Raises ValueError naming all 16 rows on anything else, so a typo cannot
-    silently mint a 17th row in the matrix.
+    Raises ValueError naming every row on anything else, so a typo cannot
+    silently mint a new row in the matrix.
     """
     key = str(name).strip().lower()
     key = LANGUAGE_ALIASES.get(key, key)
@@ -420,9 +426,9 @@ def _selftest():
         f"mechanism order drifted from review:127\n  got {MECHANISM_IDS}\n  want {expected_ids}"
     )
     assert len(MECHANISMS) == 30, f"expected 30 mechanisms, got {len(MECHANISMS)}"
-    assert len(LANGUAGES) == 16, f"expected 16 languages, got {len(LANGUAGES)}"
+    assert len(LANGUAGES) == 17, f"expected 17 languages, got {len(LANGUAGES)}"
     assert len(set(MECHANISM_IDS)) == 30, "duplicate mechanism id"
-    assert len(set(LANGUAGES)) == 16, "duplicate language row"
+    assert len(set(LANGUAGES)) == 17, "duplicate language row"
 
     known_kinds = set(dict(rg.kind_names()).values())
     known_cats = set(dict(rg.category_names()).values())
@@ -485,7 +491,11 @@ def _selftest():
 
     assert normalize_language("c++") == "c_cpp"
     assert normalize_language("TS") == "typescript"
-    for bad in ("kotlin", "typescript+go", "proto+go"):
+    assert normalize_language("kt") == "kotlin"
+    assert normalize_language("kts") == "kotlin"
+    # `kotlin+java` stays composite like the others: the JVM family builds one
+    # graph, but a fixture spanning both names each row per assertion via `cells`.
+    for bad in ("kotlin+java", "typescript+go", "proto+go"):
         try:
             normalize_language(bad)
         except ValueError:

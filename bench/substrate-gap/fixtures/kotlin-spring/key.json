@@ -2,6 +2,7 @@
   "framework": "kotlin-spring",
   "language": "kotlin",
   "dirs": ["."],
+  "cells": ["kotlin/http_server", "kotlin/injects"],
   "note": "A14.1 baseline: Spring on Kotlin. IMPORTS and the @Service role are already green through the Java path and must stay green through the Kotlin parser flip. LB.3a folds the services.rs SERVICE overlay into its CLASS as a ROLE cell, so the @Service bean is CLASS UserService + ROLE SERVICE, not a SERVICE node. A14.4 (parsers/code/kotlin/src/spring.rs): @GetMapping mints ROUTE GET /users HANDLED_BY list through the shared JVM route recipe, and the @RestController primary constructor INJECTS UserService; CALLS stays 0.00 for A14.3. UserController is also a services.rs SERVICE twin (@RestController), folded like UserService, so it is not forbidden.",
   "expect_nodes": [
     {"kind": "CLASS",   "name": "UserService",    "note": "ALREADY FOUND (plain `class X {` is java-parseable) — the @Service bean, one node after the LB.3a fold; MUST survive the flip"},

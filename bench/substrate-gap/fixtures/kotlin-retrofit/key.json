@@ -2,6 +2,7 @@
   "framework": "kotlin-retrofit",
   "language": "kotlin",
   "dirs": ["client", "server"],
+  "cells": ["kotlin/http_client"],
   "note": "A14.1 baseline: Kotlin Retrofit client paired to a Go net/http server; the Go ROUTE side and INTERFACE UserApi were already found, so the gap was isolated to Kotlin ENDPOINT extraction. A14.6: each Retrofit interface method is a client ENDPOINT it CALLS, and the HttpStackResolver pairs the ENDPOINT to the Go ROUTE (HTTP_CALLS runs endpoint -> route, the xstack-go-http / csharp-refit-http shape; the A14.1 row `listUsers -> /api/users` named an edge the resolver never emits and could not flip). Baseline at f16faa9 (installed wheel): ENDPOINTs and CALLS 0, HTTP_CALLS 0/2.",
   "expect_nodes": [
     {"kind": "ENDPOINT",  "name": "GET /api/users",  "note": "client-side endpoint from @GET on a Retrofit interface fun"},

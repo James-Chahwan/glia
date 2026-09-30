@@ -189,7 +189,7 @@ difference, one line per change (`recall.<fixture>.per_category.<CAT>: <committe
 -> <measured>`; summary lines as `- <line>` only in the committed file, `+ <line>`
 only in the fresh run). Markers go to stderr: `[substrate-gap] wrote legacy-latest.json
 — …` and `[substrate-gap] check: OK|DRIFT …`. Emit from a tree whose `fixtures/`
-matches HEAD — an uncommitted fixture is graded like any other. The 16x30 language x
+matches HEAD — an uncommitted fixture is graded like any other. The 17x30 language x
 mechanism grid is a different view with a different schema: `results-latest.json` +
 `COVERAGE.md`, owned by `matrix.py --emit/--check`. `test_run.py` pins the drift gate.
 Its glyphs: `●` full, `◐` partial, `·` none (a fixture exists, nothing emitted),

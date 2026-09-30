@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Derive the 16-language x 30-mechanism coverage matrix from graded fixtures.
+"""Derive the language x mechanism coverage matrix from graded fixtures.
 
 The review's section-3 table (dev-notes/review-2026-09-15-coverage-and-issues.md:127-143)
 is a hand-made snapshot: a human reads a fixture, judges it, writes a glyph. It
@@ -98,7 +98,8 @@ Usage:
   python3 matrix.py --check              # exit 1 if those artefacts are stale
 
 --emit / --check write and verify bench/substrate-gap/results-latest.json and
-COVERAGE.md (see matrix_emit.py). They always cover the FULL 16x30 grid, so they
+COVERAGE.md (see matrix_emit.py). They always cover the FULL grid (every
+matrix_vocab.LANGUAGES row x every MECHANISM_IDS column), so they
 refuse to run alongside --cell/--language/--mechanism: a committed artefact
 rendered through a filter would silently claim every excluded cell is unknown.
 """
@@ -479,7 +480,8 @@ def main(argv=None):
     # a lie the committed file would then carry until someone re-emitted unfiltered.
     if (args.emit or args.check) and (args.cell or args.language or args.mechanism
                                       or args.json):
-        print("[matrix] --emit/--check cover the full 16x30 grid and cannot be "
+        print(f"[matrix] --emit/--check cover the full "
+              f"{len(vocab.LANGUAGES)}x{len(vocab.MECHANISM_IDS)} grid and cannot be "
               "combined with --cell/--language/--mechanism/--json", file=sys.stderr)
         return 2
 
@@ -497,7 +499,7 @@ def main(argv=None):
     pairs = [(lg, m) for lg in languages for m in mechanisms]
     tally = _counts(cells, pairs)
     # The prefix and the first four fields are a contract (closeout.py's regex,
-    # test_the_fired_on_marker_is_a_whole_line_at_16x30): the n/a count APPENDS.
+    # test_the_fired_on_marker_is_a_whole_line_at_17x30): the n/a count APPENDS.
     print(f"[matrix] {len(languages)} languages x {len(mechanisms)} mechanisms, "
           f"{tally['full']} full, {tally['partial']} partial, {tally['none']} none, "
           f"{tally['unknown']} unknown, {tally[vocab.NA_LEVEL]} n/a", file=sys.stderr)

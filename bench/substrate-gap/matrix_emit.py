@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic, COMMITTED artefacts for the 16x30 coverage matrix.
+"""Deterministic, COMMITTED artefacts for the language x mechanism coverage matrix.
 
 `results.jsonl` is machine-local (.gitignore:36 ignores that one file), so the
 matrix has so far been invisible to review and to the next session: the only
@@ -82,7 +82,7 @@ LEVELS = ("full", "partial", "none", "unknown", vocab.NA_LEVEL, "error")
 LANG_W = 11
 COL_W = 7
 
-PREAMBLE = f"""# Coverage — 16 languages x 30 mechanisms
+PREAMBLE = f"""# Coverage — {len(vocab.LANGUAGES)} languages x {len(vocab.MECHANISM_IDS)} mechanisms
 
 **Generated. Do not hand-edit the block below.** Run
 

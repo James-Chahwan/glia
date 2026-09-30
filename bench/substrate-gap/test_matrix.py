@@ -16,6 +16,9 @@ Two halves, deliberately kept apart:
       clojure/kafka => unknown
       go/subproject => full via=project   (LA.9: an ANCHOR mechanism, graded
                                            with route not-applicable)
+      kotlin/http_client => full via=http, kotlin/injects => full via=di
+                                          (CF.13b: the 17th row reads the
+                                           tagged legacy kotlin fixtures)
   The first three need fixtures that later corpus packets (A15.6 legacy `cells`
   tags, A15.7 matrix/ authoring) still have to land. Until then each SKIPS with
   a line naming exactly what is missing — never a silent pass, and never a
@@ -52,6 +55,10 @@ ANCHOR_SOURCE = {
                      "non-vocabulary cell 'csharp/queue' today, so it scores nothing"),
     "go/subproject": ("matrix/go/subproject — LA.9 re-authored it against the "
                       "PROJECT anchor (node_kind 45)"),
+    "kotlin/http_client": ("fixtures/kotlin-retrofit — CF.13b tags it "
+                           "\"cells\": [\"kotlin/http_client\"]"),
+    "kotlin/injects": ("fixtures/kotlin-spring — CF.13b tags it "
+                       "\"cells\": [\"kotlin/http_server\", \"kotlin/injects\"]"),
 }
 
 
@@ -128,7 +135,14 @@ def _write_key(root, rel, cells, framework=None, language="go"):
 def test_vocab_is_the_only_vocabulary():
     src = (HERE / "matrix.py").read_text()
     assert "import matrix_vocab" in src, "matrix.py must consume matrix_vocab"
-    assert len(vocab.LANGUAGES) == 16 and len(vocab.MECHANISM_IDS) == 30
+    assert len(vocab.LANGUAGES) == 17 and len(vocab.MECHANISM_IDS) == 30
+    # the 17th row (CF.13b) is appended, so the 16 review rows keep their order
+    assert vocab.LANGUAGES[-1] == "kotlin", vocab.LANGUAGES
+    # scaffold.py carries a file template for every row, or a new row's cells
+    # would fail to stamp at the `no file template` guard
+    import scaffold
+    assert set(scaffold.LANGS) == set(vocab.LANGUAGES), (
+        sorted(set(scaffold.LANGS) ^ set(vocab.LANGUAGES)))
     # No second copy of the column list smuggled in as a literal.
     for mid in ("http_client", "sqs_sns", "subproject"):
         assert f'"{mid}"' not in src and f"'{mid}'" not in src, (
@@ -138,7 +152,8 @@ def test_vocab_is_the_only_vocabulary():
 def test_parse_cell():
     assert matrix.parse_cell("python/kafka") == ("python", "kafka")
     assert matrix.parse_cell("ts/ws") == ("typescript", "ws")       # alias row
-    for bad in ("python", "python/queue", "kotlin/kafka", ""):
+    assert matrix.parse_cell("kt/calls") == ("kotlin", "calls")     # CF.13b row + alias
+    for bad in ("python", "python/queue", "kotlinx/kafka", "kotlin+java/calls", ""):
         try:
             matrix.parse_cell(bad)
         except ValueError:
@@ -474,7 +489,7 @@ def test_render_uses_the_review_glyphs_and_prints_all_four_counts():
         assert glyph in text, f"rollups must always print {glyph}"
 
 
-def test_the_fired_on_marker_is_a_whole_line_at_16x30():
+def test_the_fired_on_marker_is_a_whole_line_at_17x30():
     err = io.StringIO()
     out = io.StringIO()
     real_err, real_out = sys.stderr, sys.stdout
@@ -485,7 +500,7 @@ def test_the_fired_on_marker_is_a_whole_line_at_16x30():
         sys.stderr, sys.stdout = real_err, real_out
     assert rc == 0, rc
     hits = [ln for ln in err.getvalue().splitlines()
-            if ln.startswith("[matrix] 16 languages x 30 mechanisms")]
+            if ln.startswith("[matrix] 17 languages x 30 mechanisms")]
     assert len(hits) == 1, err.getvalue()
     assert "full," in hits[0] and "unknown" in hits[0], hits[0]
 
@@ -751,6 +766,17 @@ def test_anchor_go_subproject_is_full():
     # go.mod roots. Re-authored against PROJECT; the vendored go.mod under
     # svc-a/vendor is the forbid that keeps the cell honest.
     _anchor("go/subproject", "full", "project")
+
+
+def test_anchor_kotlin_row_reads_the_legacy_fixtures():
+    # CF.13b appended the kotlin row and tagged four legacy kotlin fixtures.
+    # Two cells are pinned: a Retrofit interface's ENDPOINTs paired to the Go
+    # ROUTEs, and the Spring primary constructor's INJECTS. kotlin/calls is
+    # deliberately NOT pinned: it is CA-6's cell (CA.6a's parameter-typed
+    # receivers took kotlin-ktor's CALLS from 0/1 to 1/1 before this row
+    # existed), and receiver work on it must never have to edit this test.
+    _anchor("kotlin/http_client", "full", "http")
+    _anchor("kotlin/injects", "full", "di")
 
 
 def test_anchor_clojure_kafka_is_unknown():

@@ -20,7 +20,7 @@ fixture edge recall + the five summary sections), written ONLY on `--emit` and
 verified by `--check`. It is deliberately NOT rewritten on every run: agents
 grade constantly for baselines, and a committed file that changed on every run
 would dirty the tree for every sibling mid-wave. It is deterministic (no
-timestamp, no build stamp, sort_keys) so `git diff` is the signal. The 16x30
+timestamp, no build stamp, sort_keys) so `git diff` is the signal. The
 language x mechanism grid is a DIFFERENT view with a different schema, owned by
 matrix.py (results-latest.json + COVERAGE.md); the two never share a file.
 
@@ -51,7 +51,7 @@ LEGACY_PATH = HERE / "legacy-latest.json"
 # be mistaken for the other by a reader keying on `schema`.
 LEGACY_SCHEMA = "substrate-gap-legacy/1"
 LEGACY_VIEW = ("run.py: per-fixture edge recall over fixtures/* plus its summary "
-               "sections; the 16x30 language x mechanism grid is results-latest.json")
+               "sections; the language x mechanism grid is results-latest.json")
 SUMMARY_KEYS = ("blind_spots", "missing_nodes", "partial_cells", "forbid_violations",
                 "missing_cells", "grader_errors")
 
