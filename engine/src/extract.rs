@@ -374,16 +374,25 @@ pub(crate) fn apply_cross_cutting_extractors(
     // A13.8: secrets-manager refs (`config:secret:<provider>/<ref>`) and
     // feature-flag checks (`config:flag:<key>`), language-blind, so every
     // code file of every language is scanned. Per-file marker, printed only
-    // when the file captured one.
-    {
+    // when the file captured one. CC.7a: the flag checks' call sites
+    // (0-indexed lines here) are kept for the re-home below; secrets have
+    // none and stay on the module.
+    let flag_sites = {
         let secrets = secrets_flags::extract_secret_refs(source, module_id, repo);
-        let flags = secrets_flags::extract_feature_flags(source, module_id, repo);
+        let mut flags = secrets_flags::extract_feature_flags(source, module_id, repo);
         if let Some(marker) = secrets_flags::marker(&[&secrets, &flags], lang) {
             eprintln!("{marker} path={path}");
         }
+        let flag_sites = sites_at(
+            source,
+            std::mem::take(&mut flags.sites)
+                .into_iter()
+                .map(|(key, offset)| (key, offset, None)),
+        );
         run_with_edges!("secrets_flags", secrets);
         run_with_edges!("secrets_flags", flags);
-    }
+        flag_sites
+    };
 
     if matches!(lang, "typescript" | "react" | "angular" | "vue") {
         // A3.5: not `run!` — the routes also carry HANDLED_BY refs for named
@@ -551,6 +560,21 @@ pub(crate) fn apply_cross_cutting_extractors(
         anchor::CONFIG_EMITTER,
     );
 
+    // CC.7a: every feature-flag check's `module -> config:flag:<key>`
+    // READS_CONFIG edge moves the same way, to the innermost function /
+    // method making the check; a check at module scope keeps the module
+    // edge. Same owner index, same cache rule; the build-level `[flag-read]`
+    // marker counts it post-cache.
+    anchor::rehome_to_owner(
+        fp,
+        path,
+        module_id,
+        edge_category::READS_CONFIG,
+        &flag_sites,
+        &[],
+        anchor::FLAGS_EMITTER,
+    );
+
     // LA.33: a consumer is HANDLED_BY the callback it passes, on top of the
     // subscribing function above: `this.x` / a method value bound in-file
     // (stamped `extractor:queue_callbacks`), a name or member as a HANDLED_BY
@@ -574,7 +598,7 @@ pub(crate) fn apply_cross_cutting_extractors(
     }
 }
 
-/// LE.4a / LE.4b: an extractor's `(target, byte offset, mode)` sites as
+/// LE.4a / LE.4b / CC.7a: an extractor's `(target, byte offset, mode)` sites as
 /// `anchor::Site`s, each offset turned into its 0-indexed line
 /// (`anchor::line_of`'s count) through one newline index, so a file with many
 /// statements is not rescanned per site.

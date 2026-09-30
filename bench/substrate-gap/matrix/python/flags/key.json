@@ -9,8 +9,8 @@
      "note": "`client.is_enabled(\"new_checkout\")` names a feature flag — A13.8 keys `config:flag:new_checkout` on the ARGUMENT (the snake_case UnleashClient needle), gated on the file mentioning `unleash`."}
   ],
   "expect_edges": [
-    {"from": "reader", "to": "new_checkout", "category": "READS_CONFIG",
-     "note": "an SDK flag check is a config read (A13.8)"},
+    {"from": "checkout", "to": "new_checkout", "category": "READS_CONFIG",
+     "note": "an SDK flag check is a config read (A13.8), from the function that makes it: `client.is_enabled` sits inside `checkout`, so CC.7a re-homes the edge from the module `reader` to `reader::checkout`"},
     {"from": "features", "to": "new_checkout", "category": "DEFINES_CONFIG",
      "note": "the Flipt-style features.yml is the define side: its top-level `flags:` list item `- key:` (A13.8, config.rs extract_yaml_env_defs)"},
     {"from": "new_checkout", "to": "new_checkout", "category": "SHARES_CONFIG",
@@ -24,7 +24,9 @@
     {"kind": "CONFIG_KEY", "name": "is_enabled", "max_nodes": 0,
      "note": "precision, forward-looking: when a flag needle lands it must key on the ARGUMENT, not the SDK method — the framework_tag() fallback failure mode queues.rs already has"},
     {"kind": "CONFIG_KEY", "name": "UnleashClient", "max_nodes": 0,
-     "note": "precision: the provider name is not a flag key"}
+     "note": "precision: the provider name is not a flag key"},
+    {"from": "reader", "to": "config:flag:new_checkout", "category": "READS_CONFIG",
+     "note": "CC.7a: every read of the flag lies inside `checkout`, so the module `reader` (exact: not the function reader::checkout) keeps no READS_CONFIG edge"}
   ],
   "note": "ZERO-EVERYWHERE PROBE (A15.11), closed by A13.8. Baseline 2026-09-16 on the installed 0.4.18 wheel: 2 nodes / 1 edge, CONFIG_KEY 0 — both halves were blind, the SDK call site AND the features.yml declaration. After A13.8: 5 nodes / 4 edges (READS / DEFINES / SHARES_CONFIG)."
 }

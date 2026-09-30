@@ -7,6 +7,14 @@
 //! path. The ENV cell records the provider and `"redacted":true` — a read
 //! site states no value, and a secret's value must never reach the graph.
 //!
+//! CC.7a: a flag check also reports its call site ([`ConfigNodes::sites`]:
+//! the key's id and the needle's byte offset), and the engine re-homes each
+//! `module -> config:flag:<key>` edge to the innermost FUNCTION / METHOD
+//! holding its checks (`anchor::rehome_to_owner` with
+//! `anchor::FLAGS_EMITTER`), exactly as LE.4b re-homes env reads: "who reads
+//! this flag" is a property of the function, not the file. A check at module
+//! scope keeps the module edge. Secrets stay on the module.
+//!
 //! Both scanners are language-blind string scans, the established shape for
 //! this crate (data_sources.rs documents the trade-off): the same SDK idiom
 //! crosses languages, and a tree-sitter pass per language would cost more
@@ -25,9 +33,10 @@
 //! `flags:` definitions — lives in config.rs's `extract_yaml_env_defs`, which
 //! already walks every yaml file once.
 
+use glia_code_domain::{GRAPH_TYPE, node_kind};
 use glia_core::{NodeId, RepoId};
 
-use crate::config::{ConfigDef, ConfigNodes, Side, build_nodes};
+use crate::config::{ConfigDef, ConfigNodes, Flavor, Side, build_nodes};
 
 /// How the key is read off a matched call.
 #[derive(Clone, Copy)]
@@ -184,23 +193,40 @@ const FLAG_ROWS: &[Row] = &[
 ];
 
 /// Secrets-manager references read in a code file:
-/// `config:secret:<provider>/<ref>`, `READS_CONFIG` from `module_id`.
+/// `config:secret:<provider>/<ref>`, `READS_CONFIG` from `module_id`. No
+/// [`ConfigNodes::sites`]: a secret reference stays on the module.
 pub fn extract_secret_refs(source: &str, module_id: NodeId, repo: RepoId) -> ConfigNodes {
     let defs = scan(source, SECRET_ROWS)
         .into_iter()
-        .map(|(name, provider)| ConfigDef::secret(name, provider))
+        .map(|(name, provider, _)| ConfigDef::secret(name, provider))
         .collect();
     build_nodes(defs, Side::Read, module_id, repo)
 }
 
 /// Feature-flag checks in a code file: `config:flag:<key>`, `READS_CONFIG`
 /// from `module_id`, the SDK named on the ENV cell's `source`.
+///
+/// CC.7a: plus one [`ConfigNodes::sites`] entry per accepted check, as
+/// `(CONFIG_KEY id, byte offset of the matched needle)` in scan order, so the
+/// engine can re-home the module edge to the function holding the check (the
+/// LE.4b shape of `config::extract_config_reads`).
 pub fn extract_feature_flags(source: &str, module_id: NodeId, repo: RepoId) -> ConfigNodes {
-    let defs = scan(source, FLAG_ROWS)
-        .into_iter()
-        .map(|(name, provider)| ConfigDef::flag(name, provider))
-        .collect();
-    build_nodes(defs, Side::Read, module_id, repo)
+    let mut sites = Vec::new();
+    let mut defs = Vec::new();
+    for (name, provider, offset) in scan(source, FLAG_ROWS) {
+        let def = ConfigDef::flag(name, provider);
+        // The same validator and qname `build_nodes` applies, so a site
+        // always names a node this call emits.
+        if Flavor::Flag.accepts(&def) {
+            let qname = Flavor::Flag.qname(&def);
+            let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CONFIG_KEY, &qname);
+            sites.push((id, offset));
+        }
+        defs.push(def);
+    }
+    let mut out = build_nodes(defs, Side::Read, module_id, repo);
+    out.sites = sites;
+    out
 }
 
 /// The per-file `[secrets]` fired-on marker over what one file produced, or
@@ -247,9 +273,11 @@ pub fn marker(outs: &[&ConfigNodes], src: &str) -> Option<String> {
 // Scanner
 // ----------------------------------------------------------------------------
 
-/// Every `(key, provider)` the rows capture in `source`, in source order per
-/// row. A row whose provider tokens are absent from the file never runs.
-fn scan(source: &str, rows: &[Row]) -> Vec<(String, &'static str)> {
+/// Every `(key, provider, offset)` the rows capture in `source`, in source
+/// order per row. `offset` is the byte offset where the matched needle starts
+/// (CC.7a's call site): the needles are ASCII, so `find` lands it on a char
+/// boundary. A row whose provider tokens are absent from the file never runs.
+fn scan(source: &str, rows: &[Row]) -> Vec<(String, &'static str, usize)> {
     let mut lower: Option<String> = None;
     let mut out = Vec::new();
     for row in rows {
@@ -262,7 +290,8 @@ fn scan(source: &str, rows: &[Row]) -> Vec<(String, &'static str)> {
         }
         let mut from = 0;
         while let Some(rel) = source[from..].find(row.needle) {
-            let after = from + rel + row.needle.len();
+            let at = from + rel;
+            let after = at + row.needle.len();
             // A needle ending in `(` ends ON the opener; any other needle
             // (`GetSecretValueInput`) is followed by one.
             let call = if row.needle.ends_with('(') {
@@ -271,7 +300,7 @@ fn scan(source: &str, rows: &[Row]) -> Vec<(String, &'static str)> {
                 call_opener(&source[after..]).map(|o| &source[after + o..])
             };
             if let Some(key) = call.and_then(|c| capture(c, row)) {
-                out.push((key, row.provider));
+                out.push((key, row.provider, at));
             }
             from = after;
         }
@@ -728,6 +757,40 @@ mod tests {
         // A generic `isEnabled` in a file that never mentions a flag SDK.
         let src = "if (feature.isEnabled(\"x-y\")) { run(); }\n";
         assert!(flags(src).nodes.is_empty());
+    }
+
+    /// CC.7a: a flag check reports its call site (the key's id and the
+    /// needle's byte offset) so the engine can re-home the module edge; a
+    /// secret reference reports none.
+    #[test]
+    fn flag_sites_point_at_the_call() {
+        const SRC: &str = "import ldclient\nclient = ldclient.get()\n\ndef f(u):\n    return client.variation(\"new-checkout\", u, False)\n";
+        let repo = RepoId(1);
+        let m = module_id(repo);
+        let key = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::CONFIG_KEY,
+            "config:flag:new-checkout",
+        );
+        assert_eq!(
+            extract_feature_flags(SRC, m, repo).sites,
+            vec![(key, SRC.find(".variation(").unwrap())]
+        );
+        assert!(extract_secret_refs(SRC, m, repo).sites.is_empty());
+        // A rejected key (one char) gives no site, and every site names a node
+        // the call emitted; a key checked twice has two sites.
+        let twice = concat!(
+            "import ldclient\n",
+            "a = client.variation(\"a\", u, False)\n",
+            "b = client.variation(\"beta-ui\", u, False)\n",
+            "def g(u):\n    return client.variation(\"beta-ui\", u, False)\n",
+        );
+        let out = extract_feature_flags(twice, m, repo);
+        let ids: Vec<NodeId> = out.nodes.iter().map(|n| n.id).collect();
+        assert_eq!(out.sites.len(), 2, "{:?}", out.sites);
+        assert!(out.sites.iter().all(|(t, _)| ids.contains(t)));
+        assert!(out.sites.iter().all(|(_, o)| twice[*o..].starts_with(".variation(")));
     }
 
     #[test]

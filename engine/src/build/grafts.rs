@@ -162,6 +162,10 @@ pub(super) fn apply_post_cache(
     // config-extractor env-read edge:
     //   `[config-read] rehomed fn={F} module_kept={M} repo=<label>`
     anchor::report_config_read(access, repo_label);
+    // CC.7a fired_on marker, from the same census, once per repo that holds
+    // a feature-flag check edge:
+    //   `[flag-read] rehomed fn={F} module_kept={M} repo=<label>`
+    anchor::report_flag_read(access, repo_label);
 
     // LB.4a / LB.8: qualify every owned node under a nested project root with
     // ` @<project path>` (see the ordering rule above). After the endpoint

@@ -1,0 +1,13 @@
+{
+  "framework": "xcut-flag-read-fn",
+  "language": "python",
+  "dirs": ["."],
+  "note": "CC.7a (flag reads to functions, CC-4 stale flags): the SDK check inside checkout is READS_CONFIG from checkout (re-homed from the module by anchor::rehome_to_owner, EVIDENCE extractor:secrets_flags at the call line); the module-scope BANNER read keeps the module edge.",
+  "expect_edges": [
+    {"from": "svc::checkout::checkout", "to": "config:flag:new-checkout", "category": "READS_CONFIG", "note": "client.variation(\"new-checkout\") inside checkout: the function's qname, so the module svc::checkout (a substring match for plain `checkout`) cannot satisfy it"},
+    {"from": "svc::checkout", "to": "config:flag:promo-banner", "category": "READS_CONFIG", "exact": true, "note": "module-scope BANNER keeps the module edge; exact, so the function svc::checkout::checkout cannot satisfy it"}
+  ],
+  "forbid": [
+    {"from": "svc::checkout", "to": "config:flag:new-checkout", "category": "READS_CONFIG", "note": "every new-checkout read lies inside checkout, so the module edge is re-homed"}
+  ]
+}

@@ -63,6 +63,14 @@
 //! scope keeps the module edge. The same census counts them apart
 //! (`config_fn` / `config_module`) for the sibling `[config-read]` marker
 //! ([`report_config_read`]).
+//!
+//! CC.7a: flags are re-homed like env reads; secrets stay on the module. The
+//! secrets / flags stage reports one site per SDK flag check, and each
+//! `module -> config:flag:<key>` READS_CONFIG edge moves to the function that
+//! makes the check ([`FLAGS_EMITTER`]), so a stale-flag question ("who reads
+//! this flag?") names a function, not a file. The census counts them in
+//! `flag_fn` / `flag_module` for the `[flag-read]` marker
+//! ([`report_flag_read`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -454,8 +462,8 @@ pub struct Site {
 /// LE.4a: how the data-access edges of one file (or one repo) ended up.
 /// Returned by [`rehome_to_owner`] for the edges it touched, and recounted
 /// from a finished parse by [`access_census`]. LE.4b: READS_CONFIG edges
-/// count in `config_fn` / `config_module` only, never in the data-access
-/// fields.
+/// count in `config_fn` / `config_module` (CC.7a: a flag check's in
+/// `flag_fn` / `flag_module`), never in the data-access fields.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AccessStats {
     /// Function / method edges with an access site (re-homed, or a parser's
@@ -474,6 +482,12 @@ pub struct AccessStats {
     /// LE.4b: config-extractor READS_CONFIG edges kept on the MODULE (a read
     /// at module scope).
     pub config_module: usize,
+    /// CC.7a: flag-check READS_CONFIG edges ([`FLAGS_EMITTER`], into a
+    /// `config:flag:` key) from a FUNCTION / METHOD.
+    pub flag_fn: usize,
+    /// CC.7a: flag-check READS_CONFIG edges kept on the MODULE (a check at
+    /// module scope).
+    pub flag_module: usize,
 }
 
 impl AccessStats {
@@ -486,23 +500,26 @@ impl AccessStats {
         self.unknown += other.unknown;
         self.config_fn += other.config_fn;
         self.config_module += other.config_module;
+        self.flag_fn += other.flag_fn;
+        self.flag_module += other.flag_module;
     }
 
-    /// One function edge of `category` whose ACCESS_MODE is `mode`.
-    fn count_owner(&mut self, category: EdgeCategoryId, mode: Option<&str>) {
-        if category == edge_category::READS_CONFIG {
-            self.config_fn += 1;
-        } else {
-            self.count_fn(mode);
+    /// One function edge of `category`, re-homed for `emitter`, whose
+    /// ACCESS_MODE is `mode`.
+    fn count_owner(&mut self, category: EdgeCategoryId, emitter: &str, mode: Option<&str>) {
+        match (category == edge_category::READS_CONFIG, emitter == FLAGS_EMITTER) {
+            (true, true) => self.flag_fn += 1,
+            (true, false) => self.config_fn += 1,
+            (false, _) => self.count_fn(mode),
         }
     }
 
-    /// One module edge of `category` kept.
-    fn count_kept(&mut self, category: EdgeCategoryId) {
-        if category == edge_category::READS_CONFIG {
-            self.config_module += 1;
-        } else {
-            self.module_kept += 1;
+    /// One module edge of `category`, re-homed for `emitter`, kept.
+    fn count_kept(&mut self, category: EdgeCategoryId, emitter: &str) {
+        match (category == edge_category::READS_CONFIG, emitter == FLAGS_EMITTER) {
+            (true, true) => self.flag_module += 1,
+            (true, false) => self.config_module += 1,
+            (false, _) => self.module_kept += 1,
         }
     }
 
@@ -577,7 +594,8 @@ fn set_mode(e: &mut Edge, mode: &'static str) {
 /// function of the file's content and is safe to cache with the parse.
 /// Generic over the category on purpose: LE.4b re-homes READS_CONFIG here
 /// (with mode-less sites, so no ACCESS_MODE cell), and the returned stats
-/// count those edges in `config_fn` / `config_module`, exactly as
+/// count those edges in `config_fn` / `config_module` — CC.7a: in `flag_fn`
+/// / `flag_module` when `emitter` is [`FLAGS_EMITTER`] — exactly as
 /// [`access_census`] recounts them.
 pub fn rehome_to_owner(
     fp: &mut FileParse,
@@ -631,7 +649,7 @@ pub fn rehome_to_owner(
         }
         if at.contains_key(&(module_id, target)) {
             if at_module || owners.is_empty() || keep_module.contains(&target) {
-                stats.count_kept(category);
+                stats.count_kept(category, emitter);
             } else {
                 drop_module.insert(target);
             }
@@ -642,7 +660,7 @@ pub fn rehome_to_owner(
                     if let Some(m) = mode {
                         set_mode(e, m);
                     }
-                    stats.count_owner(category, mode_of(e));
+                    stats.count_owner(category, emitter, mode_of(e));
                 }
                 None => {
                     let mut e = Edge::new(owner, target, category, Confidence::Medium);
@@ -650,7 +668,7 @@ pub fn rehome_to_owner(
                         set_mode(&mut e, m);
                     }
                     evidence::attach(&mut e, Evidence::emitter(emitter).at(path, line));
-                    stats.count_owner(category, mode);
+                    stats.count_owner(category, emitter, mode);
                     fresh.push(e);
                 }
             }
@@ -681,23 +699,39 @@ fn emitter_of(e: &Edge) -> Option<String> {
 ///
 /// LE.4b: READS_CONFIG edges into a CONFIG_KEY that the `extractor:config`
 /// stage emitted (its module edges and the ones [`rehome_to_owner`] adds for
-/// it) count in `config_fn` / `config_module` by the same source rule. The
-/// secrets / flags stage's READS_CONFIG edges are never re-homed, so they
-/// do not count.
+/// it) count in `config_fn` / `config_module` by the same source rule.
+///
+/// CC.7a: flags are re-homed like env reads; secrets stay on the module. A
+/// READS_CONFIG edge into a `config:flag:` CONFIG_KEY that the
+/// [`FLAGS_EMITTER`] stage emitted counts in `flag_fn` / `flag_module` by the
+/// same source rule; its secret references never count.
 pub fn access_census(fp: &FileParse) -> AccessStats {
     let mut stats = AccessStats::default();
     for e in &fp.edges {
         if e.category == edge_category::READS_CONFIG {
-            if fp.nav.kind_by_id.get(&e.to) == Some(&node_kind::CONFIG_KEY)
-                && emitter_of(e).as_deref() == Some(CONFIG_EMITTER)
-            {
-                match fp.nav.kind_by_id.get(&e.from) {
-                    Some(k) if *k == node_kind::FUNCTION || *k == node_kind::METHOD => {
-                        stats.config_fn += 1;
-                    }
-                    Some(k) if *k == node_kind::MODULE => stats.config_module += 1,
-                    _ => {}
+            if fp.nav.kind_by_id.get(&e.to) != Some(&node_kind::CONFIG_KEY) {
+                continue;
+            }
+            let emitter = emitter_of(e);
+            let flag = emitter.as_deref() == Some(FLAGS_EMITTER)
+                && fp
+                    .nav
+                    .qname_by_id
+                    .get(&e.to)
+                    .is_some_and(|q| q.starts_with("config:flag:"));
+            if !flag && emitter.as_deref() != Some(CONFIG_EMITTER) {
+                continue;
+            }
+            match (fp.nav.kind_by_id.get(&e.from), flag) {
+                (Some(k), true) if *k == node_kind::FUNCTION || *k == node_kind::METHOD => {
+                    stats.flag_fn += 1;
                 }
+                (Some(k), false) if *k == node_kind::FUNCTION || *k == node_kind::METHOD => {
+                    stats.config_fn += 1;
+                }
+                (Some(k), true) if *k == node_kind::MODULE => stats.flag_module += 1,
+                (Some(k), false) if *k == node_kind::MODULE => stats.config_module += 1,
+                _ => {}
             }
             continue;
         }
@@ -730,6 +764,12 @@ pub const DATA_ENTITIES_EMITTER: &str = "extractor:data_entities";
 /// module edges (stamped by the engine's `run_with_edges!("config", ..)`) and
 /// the edges [`rehome_to_owner`] adds for it.
 pub const CONFIG_EMITTER: &str = "extractor:config";
+
+/// CC.7a: the evidence emitter of the secrets / flags stage's edges: its
+/// module edges (stamped by the engine's `run_with_edges!("secrets_flags",
+/// ..)`) and the flag-check edges [`rehome_to_owner`] adds for it. Only the
+/// `config:flag:` keys are re-homed and counted; secrets stay on the module.
+pub const FLAGS_EMITTER: &str = "extractor:secrets_flags";
 
 /// The LE.4a fired_on marker line for `stats`, or `None` when the repo holds
 /// no counted data-access edge:
@@ -768,6 +808,27 @@ pub fn report_config_read_line(stats: AccessStats, repo_label: &str) -> Option<S
 /// edge.
 pub fn report_config_read(stats: AccessStats, repo_label: &str) {
     if let Some(line) = report_config_read_line(stats, repo_label) {
+        eprintln!("{line}");
+    }
+}
+
+/// The CC.7a fired_on marker line for `stats`, or `None` when the repo holds
+/// no counted flag-check edge:
+///   `[flag-read] rehomed fn={F} module_kept={M} repo=<label>`
+pub fn report_flag_read_line(stats: AccessStats, repo_label: &str) -> Option<String> {
+    if stats.flag_fn + stats.flag_module == 0 {
+        return None;
+    }
+    Some(format!(
+        "[flag-read] rehomed fn={} module_kept={} repo={repo_label}",
+        stats.flag_fn, stats.flag_module
+    ))
+}
+
+/// Print [`report_flag_read_line`], once per repo that holds a flag-check
+/// edge.
+pub fn report_flag_read(stats: AccessStats, repo_label: &str) {
+    if let Some(line) = report_flag_read_line(stats, repo_label) {
         eprintln!("{line}");
     }
 }
@@ -1654,7 +1715,8 @@ mod tests {
 
     /// LE.4b: a read inside `send` moves its key's module edge to `send`
     /// (EVIDENCE at the read line, no ACCESS_MODE); a module-scope read keeps
-    /// its module edge; a secrets / flags READS_CONFIG edge is never counted;
+    /// its module edge. CC.7a: a flag check inside `send` moves the same way
+    /// (EVIDENCE `extractor:secrets_flags`), a secret reference never counts;
     /// the returned stats equal the census and never touch the data-access
     /// fields.
     #[test]
@@ -1664,10 +1726,12 @@ mod tests {
         let notify = id(node_kind::CONFIG_KEY, "config:env:NOTIFY_URL");
         let mode = id(node_kind::CONFIG_KEY, "config:env:RUNTIME_MODE");
         let flag = id(node_kind::CONFIG_KEY, "config:flag:new-checkout");
+        let secret = id(node_kind::CONFIG_KEY, "config:secret:vault/secret/api");
         for (t, q, emitter) in [
             (notify, "config:env:NOTIFY_URL", CONFIG_EMITTER),
             (mode, "config:env:RUNTIME_MODE", CONFIG_EMITTER),
-            (flag, "config:flag:new-checkout", "extractor:secrets_flags"),
+            (flag, "config:flag:new-checkout", FLAGS_EMITTER),
+            (secret, "config:secret:vault/secret/api", FLAGS_EMITTER),
         ] {
             fp.nodes.push(node(t, vec![]));
             fp.nav.record(t, q, q, node_kind::CONFIG_KEY, Some(module));
@@ -1675,7 +1739,7 @@ mod tests {
             evidence::attach(&mut e, Evidence::emitter(emitter));
             fp.edges.push(e);
         }
-        let returned = rehome_to_owner(
+        let mut returned = rehome_to_owner(
             &mut fp,
             "svc/settings.ts",
             module,
@@ -1684,29 +1748,50 @@ mod tests {
             &[],
             CONFIG_EMITTER,
         );
-        let reads = |to: NodeId| -> Vec<NodeId> {
+        returned.add(rehome_to_owner(
+            &mut fp,
+            "svc/settings.ts",
+            module,
+            edge_category::READS_CONFIG,
+            &[site(flag, 4, None)],
+            &[],
+            FLAGS_EMITTER,
+        ));
+        let reads = |fp: &FileParse, to: NodeId| -> Vec<NodeId> {
             fp.edges
                 .iter()
                 .filter(|e| e.to == to && e.category == edge_category::READS_CONFIG)
                 .map(|e| e.from)
                 .collect()
         };
-        assert_eq!(reads(notify), vec![send]);
-        assert_eq!(reads(mode), vec![module]);
-        assert_eq!(reads(flag), vec![module]);
-        let e = fp.edges.iter().find(|e| e.from == send).unwrap();
-        assert!(e.cell(cell_type::ACCESS_MODE).is_none());
-        let ev = Evidence::of(e).unwrap();
+        assert_eq!(reads(&fp, notify), vec![send]);
+        assert_eq!(reads(&fp, mode), vec![module]);
+        assert_eq!(reads(&fp, flag), vec![send]);
+        assert_eq!(reads(&fp, secret), vec![module]);
+        let evidence_of = |to: NodeId| {
+            let e = fp.edges.iter().find(|e| e.from == send && e.to == to).unwrap();
+            assert!(e.cell(cell_type::ACCESS_MODE).is_none());
+            Evidence::of(e).unwrap()
+        };
+        let ev = evidence_of(notify);
         assert_eq!(ev.emitter, CONFIG_EMITTER);
         assert_eq!(
             (ev.file.as_deref(), ev.line),
             (Some("svc/settings.ts"), Some(5))
         );
         assert_eq!(ev.basis, evidence::Basis::Site);
+        let ev = evidence_of(flag);
+        assert_eq!(ev.emitter, FLAGS_EMITTER);
+        assert_eq!(
+            (ev.file.as_deref(), ev.line),
+            (Some("svc/settings.ts"), Some(4))
+        );
+        assert_eq!(ev.basis, evidence::Basis::Site);
 
         let expected = AccessStats {
             config_fn: 1,
             config_module: 1,
+            flag_fn: 1,
             ..AccessStats::default()
         };
         assert_eq!(returned, expected);
@@ -1719,7 +1804,42 @@ mod tests {
             report_config_read_line(expected, "r").as_deref(),
             Some("[config-read] rehomed fn=1 module_kept=1 repo=r")
         );
+        assert_eq!(
+            report_flag_read_line(expected, "r").as_deref(),
+            Some("[flag-read] rehomed fn=1 module_kept=0 repo=r")
+        );
         assert_eq!(report_access_line(expected, "r"), None);
         assert_eq!(report_config_read_line(AccessStats::default(), "r"), None);
+        assert_eq!(report_flag_read_line(AccessStats::default(), "r"), None);
+
+        // A module-scope flag check (line 1, outside `send`) keeps its
+        // module edge, and counts in `flag_module`.
+        let (mut fp, module) = parse_with(&[(node_kind::FUNCTION, "send", Some((3, 6)))]);
+        fp.nodes.push(node(flag, vec![]));
+        let q = "config:flag:new-checkout";
+        fp.nav.record(flag, q, q, node_kind::CONFIG_KEY, Some(module));
+        let mut e = Edge::new(module, flag, edge_category::READS_CONFIG, Confidence::Medium);
+        evidence::attach(&mut e, Evidence::emitter(FLAGS_EMITTER));
+        fp.edges.push(e);
+        let kept = rehome_to_owner(
+            &mut fp,
+            "svc/settings.ts",
+            module,
+            edge_category::READS_CONFIG,
+            &[site(flag, 1, None)],
+            &[],
+            FLAGS_EMITTER,
+        );
+        assert_eq!(reads(&fp, flag), vec![module]);
+        let expected = AccessStats {
+            flag_module: 1,
+            ..AccessStats::default()
+        };
+        assert_eq!(kept, expected);
+        assert_eq!(access_census(&fp), expected);
+        assert_eq!(
+            report_flag_read_line(expected, "r").as_deref(),
+            Some("[flag-read] rehomed fn=0 module_kept=1 repo=r")
+        );
     }
 }

@@ -5,7 +5,9 @@
 //!   - `READS_CONFIG`  — code module → key  (`os.environ['DB_URL']` etc.);
 //!     the engine then re-homes it to the innermost FUNCTION / METHOD holding
 //!     the read (LE.4b, `anchor::rehome_to_owner` over [`ConfigNodes::sites`]),
-//!     so only a read at module scope keeps the module edge.
+//!     so only a read at module scope keeps the module edge. A feature-flag
+//!     check takes the same path (CC.7a); a secret reference stays on the
+//!     module.
 //!   - `DEFINES_CONFIG` — source module → key (Dockerfile `ENV`, `.env`, k8s)
 //!
 //! Single qname per name across the merged graph: `config:<flavor>:<rest>`.
@@ -66,8 +68,10 @@ pub struct ConfigNodes {
     /// `(CONFIG_KEY id, byte offset of the read expression)`, in scan order
     /// (one per match, so a key read twice has two sites). The engine turns
     /// the offsets into lines and re-homes each `module -> key` READS_CONFIG
-    /// edge to the function holding its reads. Empty on the define side and
-    /// for secrets / flags.
+    /// edge to the function holding its reads. CC.7a: the flag checks
+    /// `secrets_flags::extract_feature_flags` kept fill it the same way (the
+    /// offset is the SDK call's needle). Empty on the define side and for
+    /// secrets.
     pub sites: Vec<(NodeId, usize)>,
 }
 
@@ -91,7 +95,7 @@ pub(crate) enum Flavor {
 }
 
 impl Flavor {
-    fn accepts(self, def: &ConfigDef) -> bool {
+    pub(crate) fn accepts(self, def: &ConfigDef) -> bool {
         match self {
             Flavor::Env => is_valid_env_name(&def.name),
             Flavor::Secret => !def.source.is_empty() && is_valid_secret_ref(&def.name),
@@ -99,7 +103,7 @@ impl Flavor {
         }
     }
 
-    fn qname(self, def: &ConfigDef) -> String {
+    pub(crate) fn qname(self, def: &ConfigDef) -> String {
         format!("config:{}:{}", self.segment(), self.display_name(def))
     }
 
