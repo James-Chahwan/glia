@@ -434,11 +434,10 @@ fn json_string_field(json: &str, key: &str) -> Option<String> {
 
 /// Type-named keys fold: `OrderPlacedEvent` and `OrderPlaced` are one event.
 /// Applied ONLY to keys that look like a TYPE — a plain identifier starting
-/// uppercase — so string topics (`user.created`) and the extractor's tag
-/// fallbacks (`emit`, `on`, `@OnEvent`, `Subject.next`) keep matching
-/// byte-exactly. There is deliberately NO separator folding: `user.created`
-/// must not become `usercreated`, which is the all-to-all shape the queue side
-/// just closed.
+/// uppercase — so string topics (`user.created`) and dotted constant paths
+/// (`OrderEvents.Created`) keep matching byte-exactly. There is deliberately
+/// NO separator folding: `user.created` must not become `usercreated`, which
+/// is the all-to-all shape the queue side just closed.
 fn normalise_event_key(raw: &str) -> String {
     let is_type = raw.chars().next().is_some_and(char::is_uppercase)
         && raw.chars().all(|c| c.is_alphanumeric() || c == '_');

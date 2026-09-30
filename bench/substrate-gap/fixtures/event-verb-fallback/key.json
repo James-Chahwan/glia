@@ -1,0 +1,58 @@
+{
+  "framework": "event-verb-fallback",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-g: parsers/code/extractors/src/eventbus.rs names an event after the NEEDLE when no quoted literal follows (verb_name): an RxJS `this.itemsSubject.next(items)` mints event_emit:Subject.next, a constant-keyed NestJS pair `emit(OrderEvents.Created, ..)` / `@OnEvent(OrderEvents.Created)` mints event_emit:emit and event_handle:@OnEvent (which never pair), an EventBridge putEvents is event_emit:eventBridge.putEvents whatever its DetailType, and every Phoenix LiveView handle_event is event_handle:handle_event. Measured on HEAD 2170ff8: those five verb nodes, 0 EVENT_FLOWS. A site now reads a real name (a quoted literal, a constant reference, the DetailType, the LiveView event literal) or mints nothing.",
+  "expect_nodes": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:OrderEvents.Created"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:OrderEvents.Created"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:OrderPlaced",
+      "note": "the putEvents entry's DetailType"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:inc",
+      "note": "LiveView def handle_event(\"inc\", ...)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "event_emit:OrderEvents.Created",
+      "to": "event_handle:OrderEvents.Created",
+      "category": "EVENT_FLOWS",
+      "note": "both sides key on the same constant reference"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:Subject.next"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:emit"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:@OnEvent"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:eventBridge.putEvents"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:handle_event"
+    }
+  ]
+}

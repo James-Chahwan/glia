@@ -14,7 +14,12 @@ pub struct EventNodes {
     pub anchors: Vec<Anchor>,
 }
 
-/// (needle, extract_name, broker_ambiguous, gate).
+/// (needle, name_rule, broker_ambiguous, gate).
+///
+/// `name_rule` ([`NameRule`], CB.3a) says where an occurrence reads its event
+/// name. A site names a REAL event or mints nothing: there is no fallback to
+/// the needle's verb, which named the API (`event_emit:emit`,
+/// `event_emit:Subject.next`, `event_handle:@OnEvent`) and never paired.
 ///
 /// `broker_ambiguous` (A2.9) marks the verbs a message-broker client shares with
 /// an in-process bus: `publish(`, `.subscribe(`, `.on(`. In a file that imports
@@ -30,32 +35,49 @@ pub struct EventNodes {
 /// `publish(` / `.subscribe(` need a bus or a pub/sub import (LA.29), the
 /// DOM / jQuery / store / Node event verbs need an in-process bus as their
 /// receiver (LA.39), and the rest count wherever they occur.
-const EMITTER_PATTERNS: &[(&str, bool, bool, VerbGate)] = &[
-    (".emit(", true, false, VerbGate::Receiver),
-    (".dispatch(", true, false, VerbGate::Receiver),
-    ("Subject.next(", true, false, VerbGate::Open),
-    ("EventBridge.putEvents", false, false, VerbGate::Open),
-    ("eventBridge.putEvents", false, false, VerbGate::Open),
-    ("publish(", true, true, VerbGate::Bus),
-    (".trigger(", true, false, VerbGate::Receiver),
-    ("dispatchEvent(", true, false, VerbGate::Receiver),
+const EMITTER_PATTERNS: &[(&str, NameRule, bool, VerbGate)] = &[
+    (".emit(", NameRule::Literal, false, VerbGate::Receiver),
+    (".dispatch(", NameRule::Literal, false, VerbGate::Receiver),
+    ("Subject.next(", NameRule::Literal, false, VerbGate::Open),
+    ("EventBridge.putEvents", NameRule::DetailType, false, VerbGate::Open),
+    ("eventBridge.putEvents", NameRule::DetailType, false, VerbGate::Open),
+    ("publish(", NameRule::Literal, true, VerbGate::Bus),
+    (".trigger(", NameRule::Literal, false, VerbGate::Receiver),
+    ("dispatchEvent(", NameRule::Literal, false, VerbGate::Receiver),
 ];
 
-const HANDLER_PATTERNS: &[(&str, bool, bool, VerbGate)] = &[
-    (".on(", true, true, VerbGate::Receiver),
-    (".addEventListener(", true, false, VerbGate::Receiver),
-    (".subscribe(", true, true, VerbGate::Bus),
-    ("@EventPattern(", true, false, VerbGate::Open),
-    ("@OnEvent(", true, false, VerbGate::Open),
-    ("handle_event", false, false, VerbGate::Open),
-    (".addListener(", true, false, VerbGate::Receiver),
+const HANDLER_PATTERNS: &[(&str, NameRule, bool, VerbGate)] = &[
+    (".on(", NameRule::Literal, true, VerbGate::Receiver),
+    (".addEventListener(", NameRule::Literal, false, VerbGate::Receiver),
+    (".subscribe(", NameRule::Literal, true, VerbGate::Bus),
+    ("@EventPattern(", NameRule::Literal, false, VerbGate::Open),
+    ("@OnEvent(", NameRule::Literal, false, VerbGate::Open),
+    // Phoenix LiveView's callback clause, its event literal first (CB.3a).
+    // The bare token `handle_event` — a Python / Home Assistant method, a
+    // Ruby hook — is no needle.
+    ("def handle_event(", NameRule::Literal, false, VerbGate::Open),
+    (".addListener(", NameRule::Literal, false, VerbGate::Receiver),
 ];
+
+/// Where an occurrence of a string-keyed needle reads its event name (CB.3a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameRule {
+    /// The argument right after the needle: a quoted literal (LA.41), else a
+    /// constant reference ([`constant_ref_after`]: `OrderEvents.Created`,
+    /// `Events::ORDER_PLACED`, `ORDER_PLACED`), else nothing.
+    Literal,
+    /// AWS EventBridge `putEvents({ Entries: [{ DetailType: "OrderPlaced" }] })`:
+    /// the entry's `DetailType` literal inside the call's argument span
+    /// ([`detail_type_in`]), else nothing. The v3 `PutEventsCommand` shape is
+    /// not a needle (LA.29 skips `.send(new` in `@aws-sdk/` files).
+    DetailType,
+}
 
 /// How [`find_gated`] judges one occurrence of a string-keyed needle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VerbGate {
     /// Every occurrence is a site: the decorator needles, `Subject.next`,
-    /// `handle_event`, `EventBridge.putEvents`.
+    /// `def handle_event(`, `EventBridge.putEvents`.
     Open,
     /// LA.29: `publish(` and `.subscribe(`, the two broker-ambiguous verbs that
     /// name a pub/sub channel. A function named `publish`, an RxJS
@@ -341,9 +363,8 @@ pub fn extract_event_emitter_nodes(source: &str, module_id: NodeId, repo: RepoId
     }
 
     let mut ctx = VerbCtx::default();
-    for &(pattern, extract_name, ambiguous, gate) in EMITTER_PATTERNS {
-        let Some((idx, event_name)) = find_gated(source, pattern, extract_name, gate, &mut ctx)
-        else {
+    for &(pattern, rule, ambiguous, gate) in EMITTER_PATTERNS {
+        let Some((idx, event_name)) = find_gated(source, pattern, rule, gate, &mut ctx) else {
             continue;
         };
         if ambiguous && ctx.broker_present(source) {
@@ -395,9 +416,8 @@ pub fn extract_event_handler_nodes(source: &str, module_id: NodeId, repo: RepoId
     }
 
     let mut ctx = VerbCtx::default();
-    for &(pattern, extract_name, ambiguous, gate) in HANDLER_PATTERNS {
-        let Some((idx, event_name)) = find_gated(source, pattern, extract_name, gate, &mut ctx)
-        else {
+    for &(pattern, rule, ambiguous, gate) in HANDLER_PATTERNS {
+        let Some((idx, event_name)) = find_gated(source, pattern, rule, gate, &mut ctx) else {
             continue;
         };
         if ambiguous && ctx.broker_present(source) {
@@ -461,25 +481,203 @@ fn mark_transport(nodes: &mut [Node], id: NodeId, via: &str) {
     });
 }
 
-/// The event the occurrence of a string-keyed needle at `idx` names (LA.41):
-/// the quoted literal after it when that literal is a name, else — when there
-/// is no quoted literal at all — the needle word itself (`publish`,
-/// `subscribe`). `None` when a quoted literal is there but malformed: that
-/// occurrence is not an event site, and [`find_gated`] walks on.
-fn event_name_at(source: &str, pattern: &str, idx: usize, extract_name: bool) -> Option<String> {
-    if !extract_name {
-        return Some(verb_name(pattern));
-    }
-    match literal_after(source, idx + pattern.len()) {
-        LiteralAt::Name(name) => Some(name),
-        LiteralAt::Absent => Some(verb_name(pattern)),
-        LiteralAt::Malformed => None,
+/// What the occurrence of a string-keyed needle names ([`event_name_at`]).
+#[derive(Debug, PartialEq, Eq)]
+enum SiteName {
+    /// A quoted literal that reads like a name (LA.41): the argument after the
+    /// needle, or a putEvents entry's `DetailType`.
+    Literal(String),
+    /// CB.3a: a constant reference argument ([`constant_ref_after`]), kept as
+    /// its path (`OrderEvents.Created`) — the name both sides of a
+    /// constant-keyed bus share. This is the site's FALLBACK identity: CB.3b
+    /// folds it to the constant's literal through the engine's repo const
+    /// table, and this variant is the one place a constant site is named.
+    Constant(String),
+    /// LA.41: a quoted literal that is not name-shaped. Not a site.
+    Malformed,
+    /// CB.3a: no literal and no constant reference — a variable
+    /// (`subject.next(items)`), a template, an object, a call, a putEvents
+    /// without a `DetailType`. Not a site: the needle's verb names the API,
+    /// not an event.
+    Unnamed,
+}
+
+/// The event the occurrence of a string-keyed needle at `idx` names, by the
+/// needle's [`NameRule`]. [`find_gated`] walks on past a
+/// [`SiteName::Malformed`] or [`SiteName::Unnamed`] occurrence.
+fn event_name_at(source: &str, pattern: &str, idx: usize, rule: NameRule) -> SiteName {
+    let past = idx + pattern.len();
+    let lit = match rule {
+        NameRule::Literal => literal_after(source, past),
+        NameRule::DetailType => detail_type_in(source, past),
+    };
+    match lit {
+        LiteralAt::Name(name) => SiteName::Literal(name),
+        LiteralAt::Malformed => SiteName::Malformed,
+        LiteralAt::Absent if rule == NameRule::Literal => {
+            constant_ref_after(source, past).map_or(SiteName::Unnamed, SiteName::Constant)
+        }
+        LiteralAt::Absent => SiteName::Unnamed,
     }
 }
 
-/// The fallback event name: the needle's verb (`.subscribe(` -> `subscribe`).
-fn verb_name(pattern: &str) -> String {
-    pattern.trim_matches('.').trim_end_matches('(').to_string()
+/// The most segments a constant reference may have (`A.B.C.D`).
+const CONSTANT_MAX_SEGMENTS: usize = 4;
+
+/// CB.3a: the constant reference that is the whole argument at byte `at` (just
+/// past a needle's `(`), verbatim. Whitespace and line breaks before it are
+/// skipped; it is an identifier path over `[A-Za-z0-9_$]` segments joined by
+/// `.` or `::` (at most [`CONSTANT_MAX_SEGMENTS`], none starting with a
+/// digit), followed — after whitespace — by `,` or `)`. It counts when it has
+/// two or more segments and the first starts with an ASCII uppercase letter
+/// (`OrderEvents.Created`, `Events::ORDER_PLACED`), or is one segment of
+/// `[A-Z0-9_]` with at least one letter (`ORDER_PLACED`). So `this.x`,
+/// `payload.type`, `event`, `items`, a call (`name()`), a member of a call
+/// (`Foo.bar()`), a template, a number and a PascalCase class name
+/// (`OrderPlaced`) name nothing. Nor does a path whose last segment is
+/// bus-shaped ([`is_bus_receiver`], the collection nouns `events` /
+/// `notifications` not counted): `Phoenix.PubSub.subscribe(Shop.PubSub,
+/// "orders")` names the PubSub SERVER first and its topic second, and keying
+/// the site by the server would make every topic one event. The path is kept
+/// as written (`.` and `::` alike), so both sides of a constant-keyed pair
+/// produce one key, which the EventBusResolver's type-name fold leaves alone
+/// unless it is one UPPER_SNAKE segment, which folds alike on both sides.
+/// Walks ASCII bytes and slices only at ASCII positions.
+fn constant_ref_after(source: &str, at: usize) -> Option<String> {
+    let b = source.as_bytes();
+    let mut i = at;
+    while b.get(i).is_some_and(u8::is_ascii_whitespace) {
+        i += 1;
+    }
+    let start = i;
+    let mut segments: Vec<(usize, usize)> = Vec::new();
+    loop {
+        let seg = i;
+        if b.get(seg).is_some_and(u8::is_ascii_digit) {
+            return None;
+        }
+        while b.get(i).copied().is_some_and(is_ident_byte) {
+            i += 1;
+        }
+        if i == seg || segments.len() == CONSTANT_MAX_SEGMENTS {
+            return None;
+        }
+        segments.push((seg, i));
+        if b.get(i) == Some(&b'.') {
+            i += 1;
+        } else if b.get(i..i + 2) == Some(b"::".as_slice()) {
+            i += 2;
+        } else {
+            break;
+        }
+    }
+    let end = i;
+    while b.get(i).is_some_and(u8::is_ascii_whitespace) {
+        i += 1;
+    }
+    if !matches!(b.get(i), Some(b',' | b')')) {
+        return None;
+    }
+    let first = &b[segments[0].0..segments[0].1];
+    let constant = if segments.len() >= 2 {
+        first[0].is_ascii_uppercase()
+    } else {
+        first
+            .iter()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
+            && first.iter().any(u8::is_ascii_uppercase)
+    };
+    let (last_start, last_end) = segments[segments.len() - 1];
+    let names_a_bus = is_bus_receiver(&source[last_start..last_end], true);
+    (constant && !names_a_bus).then(|| source[start..end].to_string())
+}
+
+/// The key an EventBridge entry names its event type by.
+const DETAIL_TYPE: &[u8] = b"DetailType";
+
+/// CB.3a: the `DetailType` literal of a `putEvents(..)` call whose needle ends
+/// at byte `at`. The needle must be followed (after whitespace) by `(`; its
+/// balanced argument span — brackets counted, quoted strings skipped — is
+/// searched for the first `DetailType` key, bare (`DetailType: "X"`, a TS / JS
+/// object; `DetailType="X"`, Python keyword arguments) or quoted
+/// (`"DetailType": "X"`), and its value read with [`literal_after`]. A value
+/// that is not a quoted literal, no `DetailType` in the span, or a needle with
+/// no call is [`LiteralAt::Absent`]. Byte walk; every slice [`literal_after`]
+/// takes starts just past an ASCII byte.
+fn detail_type_in(source: &str, at: usize) -> LiteralAt {
+    let b = source.as_bytes();
+    let mut i = at;
+    while b.get(i).is_some_and(u8::is_ascii_whitespace) {
+        i += 1;
+    }
+    if b.get(i) != Some(&b'(') {
+        return LiteralAt::Absent;
+    }
+    let mut depth = 0usize;
+    let mut quote: Option<u8> = None;
+    while let Some(&c) = b.get(i) {
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return LiteralAt::Absent;
+                }
+            }
+            b'\'' | b'"' | b'`' => {
+                let key_end = i + 1 + DETAIL_TYPE.len();
+                if b[i + 1..].starts_with(DETAIL_TYPE)
+                    && b.get(key_end) == Some(&c)
+                    && let Some(lit) = detail_value(source, key_end + 1)
+                {
+                    return lit;
+                }
+                quote = Some(c);
+            }
+            _ if b[i..].starts_with(DETAIL_TYPE)
+                && (i == 0 || !is_ident_byte(b[i - 1]))
+                && !b
+                    .get(i + DETAIL_TYPE.len())
+                    .copied()
+                    .is_some_and(is_ident_byte) =>
+            {
+                if let Some(lit) = detail_value(source, i + DETAIL_TYPE.len()) {
+                    return lit;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    LiteralAt::Absent
+}
+
+/// The value after a `DetailType` key ending at byte `at`: `None` when no
+/// `:` or `=` (not `==` / `=>`) follows, so the scan goes on; else what
+/// [`literal_after`] reads there.
+fn detail_value(source: &str, at: usize) -> Option<LiteralAt> {
+    let b = source.as_bytes();
+    let mut i = at;
+    while matches!(b.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+    match b.get(i) {
+        Some(b':') => {}
+        Some(b'=') if !matches!(b.get(i + 1), Some(b'=' | b'>')) => {}
+        _ => return None,
+    }
+    Some(literal_after(source, i + 1))
 }
 
 /// Per-extract-call file facts the verb gates (LA.29, LA.39) and the broker
@@ -607,11 +805,13 @@ fn suppressed(side: &str, needle: &str, name: &str) {
     }
 }
 
-/// fired_on marker for the verb gate (LA.29) and the event-name shape rule
-/// (LA.41), the queues.rs `debug_enabled` pattern under its own switch:
+/// fired_on marker for the verb gate (LA.29), the event-name shape rule
+/// (LA.41) and the real-name rule (CB.3a), the queues.rs `debug_enabled`
+/// pattern under its own switch:
 ///   `GLIA_EVENT_DEBUG=1 ... 2>&1 | grep '\[eventbus\] verb-gate'`
 ///   `GLIA_EVENT_DEBUG=1 ... 2>&1 | grep '\[eventbus\] aws-sdk command skipped'`
 ///   `GLIA_EVENT_DEBUG=1 ... 2>&1 | grep '\[eventbus\] bad-name'`
+///   `GLIA_EVENT_DEBUG=1 ... 2>&1 | grep '\[eventbus\] unnamed'`
 fn event_debug() -> bool {
     static DEBUG: OnceLock<bool> = OnceLock::new();
     *DEBUG.get_or_init(|| {
@@ -648,20 +848,20 @@ struct GateTally {
 /// Occurrences are walked in order; one is the site when it is not
 /// queue-owned, when its `gate` keeps it — [`judge_verb`] for
 /// [`VerbGate::Bus`], [`receiver_admits`] for [`VerbGate::Receiver`] — and
-/// when [`event_name_at`] reads a name there (LA.41): a quoted literal that
-/// is not name-shaped skips that occurrence and the walk goes on, so a needle
-/// table's `"@OnEvent(", "x"` never decides the file's node and a later
-/// `@OnEvent('order.shipped')` does, anchored there. A file whose first
-/// `publish(` is a declaration and a later one a bus call anchors at the bus
-/// call (LA.29); a file whose first `.addEventListener(` is on a DOM element
-/// and a later one on a bus anchors at the bus call (LA.39). Needles that
-/// extract no name (`handle_event`, `EventBridge.putEvents`) keep their first
-/// ungated occurrence. Broker suppression (A2.9) is the caller's, after this
-/// walk.
+/// when [`event_name_at`] reads a name there: a quoted literal that is not
+/// name-shaped (LA.41) or an argument that names nothing (CB.3a: a variable,
+/// a template, a putEvents without a `DetailType`) skips that occurrence and
+/// the walk goes on, so a needle table's `"@OnEvent(", "x"` never decides the
+/// file's node and a later `@OnEvent('order.shipped')` does, anchored there,
+/// and a file's `emit(x)` then `emit("user.created", u)` mints `user.created`.
+/// A file whose first `publish(` is a declaration and a later one a bus call
+/// anchors at the bus call (LA.29); a file whose first `.addEventListener(` is
+/// on a DOM element and a later one on a bus anchors at the bus call (LA.39).
+/// Broker suppression (A2.9) is the caller's, after this walk.
 fn find_gated(
     source: &str,
     pattern: &str,
-    extract_name: bool,
+    rule: NameRule,
     gate: VerbGate,
     ctx: &mut VerbCtx,
 ) -> Option<(usize, String)> {
@@ -669,6 +869,10 @@ fn find_gated(
     let mut tally = GateTally::default();
     let mut via: Option<Via> = None;
     let mut bad_name = 0usize;
+    // CB.3a: occurrences that named nothing, and whether the site found was
+    // named through a constant reference.
+    let mut unnamed = 0usize;
+    let mut constant = 0usize;
     let mut found = None;
     let mut from = 0usize;
     while let Some(rel) = source[from..].find(pattern) {
@@ -702,9 +906,20 @@ fn find_gated(
                 }
             }
         }
-        let Some(name) = event_name_at(source, pattern, at, extract_name) else {
-            bad_name += 1;
-            continue;
+        let name = match event_name_at(source, pattern, at, rule) {
+            SiteName::Literal(name) => name,
+            SiteName::Constant(path) => {
+                constant += 1;
+                path
+            }
+            SiteName::Malformed => {
+                bad_name += 1;
+                continue;
+            }
+            SiteName::Unnamed => {
+                unnamed += 1;
+                continue;
+            }
         };
         if gated {
             tally.kept = 1;
@@ -714,9 +929,12 @@ fn find_gated(
         break;
     }
     if event_debug() {
-        // A gated occurrence the gate kept but whose literal was malformed is
-        // counted by the bad-name line, not the verb-gate one.
-        if gated && tally.kept + tally.decl + tally.no_bus + tally.type_site + bad_name > 0 {
+        // A gated occurrence the gate kept but whose literal was malformed, or
+        // which named nothing, is counted by the bad-name / unnamed line, not
+        // the verb-gate one.
+        if gated
+            && tally.kept + tally.decl + tally.no_bus + tally.type_site + bad_name + unnamed > 0
+        {
             eprintln!(
                 "[eventbus] verb-gate needle='{pattern}' kept={} rejected decl={} no_bus={} type_site={} via={}",
                 tally.kept,
@@ -730,6 +948,11 @@ fn find_gated(
             eprintln!(
                 "[eventbus] bad-name needle='{pattern}' skipped={bad_name} kept={}",
                 usize::from(found.is_some())
+            );
+        }
+        if unnamed + constant > 0 {
+            eprintln!(
+                "[eventbus] unnamed needle='{pattern}' skipped={unnamed} constant={constant}"
             );
         }
     }
@@ -1333,8 +1556,9 @@ enum LiteralAt {
     /// name-shaped (`", "` between two strings of a needle table). The
     /// occurrence is not an event site.
     Malformed,
-    /// No quoted literal: a variable, a backtick template, an object. The
-    /// caller falls back to the needle's verb.
+    /// No quoted literal: a variable, a constant, a backtick template, an
+    /// object. The caller tries a constant reference ([`constant_ref_after`]),
+    /// else the occurrence names nothing (CB.3a).
     Absent,
 }
 
@@ -2147,11 +2371,16 @@ mod tests {
             vec![(s("event_emit:order_shipped"), transport("nestjs-microservices"))]
         );
 
+        // CB.3a: a putEvents names its entry's DetailType; with none it names
+        // nothing (HEAD: event_emit:eventBridge.putEvents).
         let bridge = "await eventBridge.putEvents({ Entries: [] }).promise();";
+        let out = extract_event_emitter_nodes(bridge, module_id(), repo());
+        assert_eq!(origins(&out), vec![]);
+        let bridge = "await eventBridge.putEvents({ Entries: [{ DetailType: \"OrderPlaced\" }] }).promise();";
         let out = extract_event_emitter_nodes(bridge, module_id(), repo());
         assert_eq!(
             origins(&out),
-            vec![(s("event_emit:eventBridge.putEvents"), transport("aws-eventbridge"))]
+            vec![(s("event_emit:OrderPlaced"), transport("aws-eventbridge"))]
         );
 
         let local = "import { EventEmitter } from 'events';\nconst bus = new EventEmitter();\nbus.emit('x', 1);";
@@ -2177,5 +2406,196 @@ mod tests {
 
     fn s(v: &str) -> String {
         v.to_string()
+    }
+
+    // ---- CB.3a: a site reads a real name or mints nothing ----------------
+    // Needles in this test data are split with `concat!` (LA.41's rule) so
+    // glia's own build does not read them as event sites in this file.
+
+    #[test]
+    fn constant_reference_names_both_sides() {
+        // HEAD: event_emit:emit and event_handle:@OnEvent, which never pair.
+        assert_eq!(
+            emitted(concat!("this.eventEmitter.em", "it(OrderEvents.Created, {id})")),
+            vec!["event_emit:OrderEvents.Created"]
+        );
+        assert_eq!(
+            handled(concat!("@On", "Event(OrderEvents.Created)\naudit(p) {}")),
+            vec!["event_handle:OrderEvents.Created"]
+        );
+        // Across lines, `::` paths, and up to four segments, kept verbatim.
+        assert_eq!(
+            handled(concat!("@On", "Event(\n  OrderEvents.Created\n)")),
+            vec!["event_handle:OrderEvents.Created"]
+        );
+        assert_eq!(
+            emitted(concat!("bus.pub", "lish(Events::ORDER_PLACED, order)")),
+            vec!["event_emit:Events::ORDER_PLACED"]
+        );
+        assert_eq!(
+            emitted(concat!("bus.em", "it(Shop.Orders.Events.Created, o)")),
+            vec!["event_emit:Shop.Orders.Events.Created"]
+        );
+        // The path at the byte just past a needle's `(`.
+        assert_eq!(
+            constant_ref_after("(OrderEvents.Created)", 1),
+            Some(s("OrderEvents.Created"))
+        );
+        assert_eq!(
+            constant_ref_after("(  Events::Placed , x)", 1),
+            Some(s("Events::Placed"))
+        );
+    }
+
+    #[test]
+    fn upper_snake_constant() {
+        assert_eq!(
+            emitted(concat!("bus.em", "it(ORDER_PLACED, x)")),
+            vec!["event_emit:ORDER_PLACED"]
+        );
+        assert_eq!(
+            handled(concat!("bus.o", "n(V2_READY, h)")),
+            vec!["event_handle:V2_READY"]
+        );
+        assert_eq!(constant_ref_after("(ORDER_PLACED)", 1), Some(s("ORDER_PLACED")));
+        // A collection noun is not a bus name here: `ORDER_EVENTS` is a topic.
+        assert_eq!(constant_ref_after("(ORDER_EVENTS, x)", 1), Some(s("ORDER_EVENTS")));
+        // No letter: not a constant.
+        assert_eq!(constant_ref_after("(1_000)", 1), None);
+    }
+
+    #[test]
+    fn a_value_argument_mints_nothing() {
+        // HEAD: event_emit:Subject.next, event_emit:emit, event_handle:@OnEvent.
+        assert_eq!(
+            emitted(concat!("this.itemsSubj", "ect.next(items);")),
+            Vec::<String>::new()
+        );
+        assert_eq!(emitted(concat!("emitter.em", "it(evt);")), Vec::<String>::new());
+        assert_eq!(
+            handled(concat!("@On", "Event(name)\nh() {}")),
+            Vec::<String>::new()
+        );
+        // The topic is Phoenix.PubSub's SECOND argument (HEAD:
+        // event_handle:subscribe, the CF.11b elixir/eventbus probe).
+        assert_eq!(
+            handled(concat!("Phoenix.PubSub.subsc", "ribe(Shop.PubSub, \"order_placed\")")),
+            Vec::<String>::new()
+        );
+        for arg in [
+            "this.x, 1",
+            "payload.type, p",
+            "Foo.bar(), 1",
+            "name(), 1",
+            "OrderPlaced, 1",
+            "`order.${id}`, 1",
+            "1",
+            "1.5, x",
+            "A.B.C.D.E, 1",
+            "OrderEvents.Created as string, x",
+            "OrderEvents?.Created, x",
+            "Events[0], x",
+            // The bus itself, not an event: Phoenix.PubSub's server argument.
+            "Shop.PubSub, \"orders\"",
+            "App::EventBus, x",
+            "...args",
+            "{ type: 'x' }",
+            "",
+        ] {
+            assert_eq!(constant_ref_after(&format!("({arg})"), 1), None, "{arg}");
+        }
+    }
+
+    #[test]
+    fn eventbridge_detail_type() {
+        let bridge = concat!(
+            "await eventBridge.put",
+            "Events({ Entries: [{ Source: \"shop\", DetailType: \"OrderPlaced\" }] }).promise();"
+        );
+        assert_eq!(emitted(bridge), vec!["event_emit:OrderPlaced"]);
+        // The capitalised receiver, a quoted key, a `)` inside an earlier
+        // string, and the key on a later line.
+        for src in [
+            concat!("EventBridge.put", "Events({ Entries: [{ DetailType: 'OrderPlaced' }] });"),
+            concat!("eventBridge.put", "Events({ \"Entries\": [{ \"DetailType\": \"OrderPlaced\" }] });"),
+            concat!("eventBridge.put", "Events({ Entries: [{ Source: \"a)b\", DetailType: \"OrderPlaced\" }] });"),
+            concat!("eventBridge.put", "Events({\n  Entries: [{\n    DetailType: \"OrderPlaced\",\n  }],\n});"),
+        ] {
+            assert_eq!(emitted(src), vec!["event_emit:OrderPlaced"], "{src}");
+        }
+        // boto3's put_events is not a needle; no DetailType, a variable
+        // DetailType, a DetailType outside the call and a needle that is no
+        // call all name nothing (HEAD: event_emit:eventBridge.putEvents).
+        for src in [
+            "events.put_events(Entries=[{'Source': 'shop', 'DetailType': 'OrderPlaced'}])",
+            concat!("await eventBridge.put", "Events({ Entries: [] }).promise();"),
+            concat!("await eventBridge.put", "Events(params).promise();"),
+            concat!("eventBridge.put", "Events({ Entries: [{ DetailType: kind }] });"),
+            concat!("eventBridge.put", "Events(p);\nconst e = { DetailType: \"Other\" };"),
+            concat!("// announce with eventBridge.put", "Events, DetailType: \"Other\""),
+            concat!("eventBridge.put", "Events({ Entries: [{ MyDetailType: \"Other\" }] });"),
+        ] {
+            assert_eq!(emitted(src), Vec::<String>::new(), "{src}");
+        }
+        // Python keyword arguments read too.
+        assert_eq!(
+            detail_type_in("(Entries=[dict(Source='s', DetailType='OrderPlaced')])", 0),
+            LiteralAt::Name(s("OrderPlaced"))
+        );
+        assert_eq!(detail_type_in("({ DetailType: 'a\nb' })", 0), LiteralAt::Malformed);
+    }
+
+    #[test]
+    fn liveview_handle_event() {
+        let live = concat!(
+            "defmodule ShopWeb.CounterLive do\n  use Phoenix.LiveView\n\n  def handle",
+            "_event(\"inc\", _params, socket) do\n    {:noreply, socket}\n  end\nend\n"
+        );
+        assert_eq!(handled(live), vec!["event_handle:inc"]);
+        // HEAD: event_handle:handle_event for each.
+        for src in [
+            concat!("class Listener:\n    def handle", "_event(self, event):\n        pass\n"),
+            concat!("self.handle", "_event(event)"),
+            concat!("def handle", "_event(event)\n  log(event)\nend"),
+        ] {
+            assert_eq!(handled(src), Vec::<String>::new(), "{src}");
+        }
+    }
+
+    #[test]
+    fn first_named_occurrence_wins() {
+        // HEAD: event_emit:emit from the first occurrence.
+        let src = concat!("bus.em", "it(x);\nbus.em", "it(\"user.created\", u);");
+        assert_eq!(emitted(src), vec!["event_emit:user.created"]);
+        let out = extract_event_emitter_nodes(src, module_id(), repo());
+        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 1 }]);
+        // A constant reference is a name like a literal.
+        let src = concat!("bus.em", "it(x);\nbus.em", "it(OrderEvents.Created, u);");
+        assert_eq!(emitted(src), vec!["event_emit:OrderEvents.Created"]);
+    }
+
+    #[test]
+    fn malformed_literal_still_skips() {
+        // LA.41 unchanged: a malformed literal is not a site, and it never
+        // falls back to a constant or the verb.
+        for src in [
+            concat!("bus.em", "it(', ', x);"),
+            concat!("bus.em", "it('order.\nshipped');"),
+            concat!("bus.em", "it('order.shipped"),
+        ] {
+            assert_eq!(emitted(src), Vec::<String>::new(), "{src}");
+        }
+        let src = concat!("bus.em", "it(', ');\nbus.em", "it(OrderEvents.Created, x);");
+        assert_eq!(emitted(src), vec!["event_emit:OrderEvents.Created"]);
+        assert_eq!(event_name_at("(', ')", "", 1, NameRule::Literal), SiteName::Malformed);
+        assert_eq!(event_name_at("(x)", "", 1, NameRule::Literal), SiteName::Unnamed);
+        assert_eq!(
+            event_name_at("(X.Y)", "", 1, NameRule::Literal),
+            SiteName::Constant(s("X.Y"))
+        );
+        assert_eq!(
+            event_name_at("('a.b')", "", 1, NameRule::Literal),
+            SiteName::Literal(s("a.b"))
+        );
     }
 }
