@@ -37,7 +37,8 @@ every contract at once.
 
 - **Answers, not just a graph.** `blast_radius` (multi-seed), `diff_impact`,
   `graph_delta`, `tests_for`, `effects`, `why`, `cycles`, `check`, `spec_status`,
-  `serves`, `implementors`, `entry_flows`, `feature_flows`, `patterns_experimental`,
+  `serves`, `implementors`, `entry_flows`, `feature_flows`, `patterns` (`patterns_experimental` is a
+  deprecated alias for one release),
   `gaps` and `page_flow`. Each returns located rows with a confidence tier, a
   `live` flag, and an `absence` that says what the graph could not see.
 - **Evidence on every edge.** Each edge records the extractor, parser, resolver
