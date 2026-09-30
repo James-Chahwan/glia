@@ -87,12 +87,29 @@
 //!   module-level site, a second site in one function) is a `duplicate`; a
 //!   node it already holds is re-used and keeps its cells.
 //!
+//! INFERRED STANZAS (CA.4). Besides the overlay's stanzas, the stage takes
+//! the Go collection wrappers `infer_wrappers::infer_entity_wrappers` found
+//! in the code (a function handing its own parameter to the driver's
+//! `.Collection(name)`, or to another such function): each is a
+//! `kind = "data_entity"`, `flavor = "nosql"`, `languages = ["go"]` stanza
+//! at the parameter's index, read and minted exactly like an overlay one.
+//! Stanzas run in a fixed order, the overlay's first, then the inferred ones
+//! sorted by (call, definition file). An overlay stanza naming the same
+//! `call` shadows the inferred one (`shadowed_by_overlay`), so a repo whose
+//! overlay already declares the wrapper builds byte-identical. The inference
+//! is code-derived, not overlay: it runs under `--no-overlay` too.
+//!
 //! A minted node takes the stanza's confidence (`Origin::confidence`: `llm`
 //! Weak, `human` Medium) and an ORIGIN cell
 //! `{"provenance":"overlay:<llm|human>","rule":"wrapper#<n>"}` (`<n>`: the
 //! stanza's 1-based position among the file's `[[wrapper]]` stanzas, the
 //! loader-dropped ones counted, as `edge#<n>`); a minted edge carries EVIDENCE
-//! emitter [`EMITTER`], rule `wrapper#<n>`, at the site (basis `site`). A
+//! emitter [`EMITTER`], rule `wrapper#<n>`, at the site (basis `site`).
+//! An inferred stanza's node is Medium with the ORIGIN cell
+//! `{"provenance":"inferred:wrapper","rule":"inferred:<call>","def":"<file>:<1-based line>"}`
+//! (the wrapper's `func` line), and its edge carries EVIDENCE emitter
+//! [`INFERRED_EMITTER`] (stage `pass`: a rule inference, tiered DERIVED),
+//! rule `inferred:<call>`, at the site. A
 //! sink the file's parse already holds for the SAME identity at the SAME line
 //! (an extractor caught the call, or two stanzas match one call) is a
 //! `duplicate` and adds nothing; one it holds at another line is re-used (the
@@ -106,19 +123,25 @@
 //! (`Phase::Queue`) half too. All above the LB.8 owner pass, so minted
 //! nodes are owner-qualified, and above the A16.4 IMPORTS filter, which
 //! rewrites the raw IMPORTS cell they take here. Post-cache, so cached parses
-//! get it too and the cache never holds a wrapper node. Only when the build
-//! applies the overlay: `--no-overlay` skips it (the edge stage prints the
-//! `[overlay] disabled` line). Each file's scan and each file's mint run
-//! under `catch_unwind`; a panic pushes `<path>: PANIC (overlay wrappers)`.
+//! get it too and the cache never holds a wrapper node. The overlay's
+//! stanzas only when the build applies the overlay: `--no-overlay` drops them
+//! (the edge stage prints the `[overlay] disabled` line) and keeps the
+//! inferred ones. Each file's scan and each file's mint run under
+//! `catch_unwind`; a panic pushes `<path>: PANIC (overlay wrappers)`.
 //!
-//! Marker, once per repo whose overlay keeps a `[[wrapper]]` stanza (the
-//! fired_on line):
+//! Markers (the fired_on lines), counting each stanza source's own sites:
+//! once per repo whose overlay keeps a `[[wrapper]]` stanza,
 //!   `[overlay] wrappers repo=<label> stanzas=<s> sites=<n> minted=<m> duplicate=<d> skipped_nonliteral=<x> skipped_comment=<c> skipped_invalid=<i> (http=<h> queue_producer=<p> queue_consumer=<q> data_entity=<e> receiver=<r>)`
+//! and once per repo where the inference found a candidate wrapper,
+//!   `[wrappers] inferred repo=<label> wrappers=<w> (direct=<d> forwarding=<f>) sites=<n> minted=<m> duplicate=<u> skipped_nonliteral=<x> skipped_comment=<c> skipped_invalid=<i> shadowed_by_overlay=<s> skipped_ambiguous=<a> skipped_unparsed=<p>`
+//! (`wrappers` counts the kept inferred wrappers, shadowed ones included;
+//! see `infer_wrappers` for the last three). In both,
 //! `sites = minted + duplicate + skipped_*`; `minted` counts sites that added
 //! a sink (a node, or an edge to one), split by kind; `receiver` counts the
 //! http ones read through a client receiver; `skipped_invalid` also counts
 //! identity sites in a file with no parse to hang a node on.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -135,12 +158,20 @@ use glia_core::{
     Cell, CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, RepoId,
 };
 
+use super::infer_wrappers::InferredWrappers;
 use crate::extract::detect_language;
 use crate::route::ModuleQnames;
 
-/// The EVIDENCE emitter of every edge this stage adds: stage `overlay`,
-/// component the `[[wrapper]]` section.
+/// The EVIDENCE emitter of every edge an overlay stanza adds: stage
+/// `overlay`, component the `[[wrapper]]` section.
 pub(crate) const EMITTER: &str = "overlay:wrapper";
+
+/// The EVIDENCE emitter of every edge an inferred stanza adds (CA.4): stage
+/// `pass`, a rule inference rather than a read site or a declaration.
+pub(crate) const INFERRED_EMITTER: &str = "pass:inferred_wrapper";
+
+/// The ORIGIN provenance of every node an inferred stanza mints (CA.4).
+pub(crate) const INFERRED_PROVENANCE: &str = "inferred:wrapper";
 
 /// Identifier tokens that make `<token> <call>(` a definition.
 const DEF_KEYWORDS: &[&str] = &["function", "def", "fn", "func", "fun"];
@@ -168,17 +199,73 @@ pub(crate) enum Phase {
     Queue,
 }
 
-/// One kept `[[wrapper]]` stanza.
+/// Where a [`Stanza`] came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StanzaSource {
+    /// A kept `[[wrapper]]` stanza of the overlay; `ordinal` is 1-based,
+    /// counting the loader-dropped stanzas.
+    Overlay { ordinal: usize },
+    /// A wrapper the code declares (CA.4): the function is defined at 0-based
+    /// line `def_line0` of the walked file `def_file`.
+    Inferred { def_file: String, def_line0: u32 },
+}
+
+/// One stanza the stage reads: a kept `[[wrapper]]` stanza (borrowed from the
+/// loaded config) or an inferred one (owned).
 struct Stanza<'c> {
-    decl: &'c WrapperDecl,
+    decl: Cow<'c, WrapperDecl>,
     kind: WrapperKind,
-    /// 1-based, counting the loader-dropped stanzas.
-    ordinal: usize,
+    source: StanzaSource,
 }
 
 impl Stanza<'_> {
+    /// `wrapper#<n>` for an overlay stanza, `inferred:<call>` for an inferred
+    /// one: the EVIDENCE rule and the ORIGIN `rule`.
     fn rule(&self) -> String {
-        format!("wrapper#{}", self.ordinal)
+        match &self.source {
+            StanzaSource::Overlay { ordinal } => format!("wrapper#{ordinal}"),
+            StanzaSource::Inferred { .. } => format!("inferred:{}", self.decl.call),
+        }
+    }
+
+    fn is_inferred(&self) -> bool {
+        matches!(self.source, StanzaSource::Inferred { .. })
+    }
+
+    /// The confidence of every node and edge the stanza mints: the overlay
+    /// origin's (`llm` Weak, `human` Medium), Medium for an inferred one.
+    fn confidence(&self) -> Confidence {
+        match self.source {
+            StanzaSource::Overlay { .. } => self.decl.origin.confidence(),
+            StanzaSource::Inferred { .. } => Confidence::Medium,
+        }
+    }
+
+    /// The ORIGIN cell of a node the stanza mints (see the module doc).
+    fn origin_cell(&self) -> Cell {
+        match &self.source {
+            StanzaSource::Overlay { .. } => origin_cell(self.decl.origin, &self.rule()),
+            StanzaSource::Inferred {
+                def_file,
+                def_line0,
+            } => Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(format!(
+                    r#"{{"provenance":"{INFERRED_PROVENANCE}","rule":{},"def":{}}}"#,
+                    json_str(&self.rule()),
+                    json_str(&format!("{def_file}:{}", u64::from(*def_line0) + 1))
+                )),
+            },
+        }
+    }
+
+    /// The EVIDENCE of an edge the stanza mints at 0-based `line0` of `path`.
+    fn evidence(&self, path: &str, line0: u32) -> Evidence {
+        let emitter = match self.source {
+            StanzaSource::Overlay { .. } => EMITTER,
+            StanzaSource::Inferred { .. } => INFERRED_EMITTER,
+        };
+        Evidence::emitter(emitter).rule(self.rule()).at(path, line0)
     }
 
     /// The data_entity sites mint in the late half: the grafts call only
@@ -243,7 +330,8 @@ struct FileSites {
     sites: Vec<Site>,
 }
 
-/// The counts of the `[overlay] wrappers` marker.
+/// The counts of one stanza source's marker (`[overlay] wrappers` or
+/// `[wrappers] inferred`).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WrapperTally {
     pub(crate) stanzas: usize,
@@ -283,50 +371,140 @@ impl WrapperTally {
     }
 }
 
+/// One [`WrapperTally`] per stanza source, so each marker counts only its
+/// own stanzas' sites.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Tallies {
+    overlay: WrapperTally,
+    inferred: WrapperTally,
+}
+
+impl Tallies {
+    fn of(&mut self, st: &Stanza<'_>) -> &mut WrapperTally {
+        if st.is_inferred() {
+            &mut self.inferred
+        } else {
+            &mut self.overlay
+        }
+    }
+
+    fn add_mint(&mut self, m: Tallies) {
+        self.overlay.add_mint(m.overlay);
+        self.inferred.add_mint(m.inferred);
+    }
+}
+
+/// What the CA.4 inference reported beyond its stanzas: the counts of the
+/// `[wrappers] inferred` marker that no site produces.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct InferenceCounts {
+    /// Kept inferred wrappers, shadowed ones included.
+    wrappers: usize,
+    direct: usize,
+    forwarding: usize,
+    shadowed_by_overlay: usize,
+    skipped_ambiguous: usize,
+    skipped_unparsed: usize,
+}
+
+impl InferenceCounts {
+    /// The inference found a candidate wrapper (kept or skipped).
+    fn any(&self) -> bool {
+        self.wrappers + self.skipped_ambiguous + self.skipped_unparsed > 0
+    }
+}
+
 /// One repo's wrapper stage: the scanned sites, minted in two phases.
 pub(crate) struct WrapperPass<'c> {
     stanzas: Vec<Stanza<'c>>,
     files: Vec<FileSites>,
-    tally: WrapperTally,
+    tally: Tallies,
+    /// The overlay keeps a `[[wrapper]]` stanza: the `[overlay] wrappers`
+    /// marker prints.
+    overlay_declared: bool,
+    inference: InferenceCounts,
 }
 
 impl<'c> WrapperPass<'c> {
-    /// Read every call site of `config`'s `[[wrapper]]` stanzas in `files`.
-    /// Changes no graph. `None` when there is no config or it keeps no
-    /// `[[wrapper]]` stanza (the caller passes `None` for a build without
-    /// the overlay).
+    /// Read every call site of `config`'s `[[wrapper]]` stanzas and of the
+    /// `inferred` wrappers no overlay stanza shadows in `files`. Changes no
+    /// graph. `None` when neither source holds a stanza (the caller passes
+    /// `None` for `config` on a build without the overlay) and the inference
+    /// found no candidate.
     pub(crate) fn scan(
         config: Option<&'c LoadedConfig>,
+        inferred: InferredWrappers,
         files: &[(String, String)],
         parse_errors: &mut Vec<String>,
     ) -> Option<Self> {
-        let cfg = config?;
-        if cfg.config.wrapper.is_empty() {
+        let cfg = config.filter(|c| !c.config.wrapper.is_empty());
+        let mut stanzas: Vec<Stanza<'c>> = Vec::new();
+        if let Some(cfg) = cfg {
+            let rejected = rejected_wrapper_lines(cfg);
+            stanzas.extend(
+                cfg.config
+                    .wrapper
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(kept, s)| {
+                        let line = cfg.line_of(s.span());
+                        let ordinal = 1 + kept + rejected.iter().filter(|l| **l < line).count();
+                        Some(Stanza {
+                            decl: Cow::Borrowed(s.get_ref()),
+                            kind: s.get_ref().wrapper_kind()?,
+                            source: StanzaSource::Overlay { ordinal },
+                        })
+                    }),
+            );
+        }
+        let overlay_stanzas = stanzas.len();
+        let mut inference = InferenceCounts {
+            wrappers: inferred.wrappers.len(),
+            direct: inferred.direct(),
+            forwarding: inferred.forwarding(),
+            skipped_ambiguous: inferred.skipped_ambiguous,
+            skipped_unparsed: inferred.skipped_unparsed,
+            ..InferenceCounts::default()
+        };
+        for w in inferred.wrappers {
+            if stanzas
+                .iter()
+                .take(overlay_stanzas)
+                .any(|s| s.decl.call == w.decl.call)
+            {
+                inference.shadowed_by_overlay += 1;
+                continue;
+            }
+            let Some(kind) = w.decl.wrapper_kind() else {
+                continue;
+            };
+            stanzas.push(Stanza {
+                decl: Cow::Owned(w.decl),
+                kind,
+                source: StanzaSource::Inferred {
+                    def_file: w.def_file,
+                    def_line0: w.def_line0,
+                },
+            });
+        }
+        if cfg.is_none() && !inference.any() {
             return None;
         }
-        let rejected = rejected_wrapper_lines(cfg);
-        let stanzas: Vec<Stanza<'c>> = cfg
-            .config
-            .wrapper
-            .iter()
-            .enumerate()
-            .filter_map(|(kept, s)| {
-                let line = cfg.line_of(s.span());
-                let ordinal = 1 + kept + rejected.iter().filter(|l| **l < line).count();
-                Some(Stanza {
-                    decl: s.get_ref(),
-                    kind: s.get_ref().wrapper_kind()?,
-                    ordinal,
-                })
-            })
-            .collect();
         let mut pass = WrapperPass {
-            tally: WrapperTally {
-                stanzas: stanzas.len(),
-                ..WrapperTally::default()
+            tally: Tallies {
+                overlay: WrapperTally {
+                    stanzas: overlay_stanzas,
+                    ..WrapperTally::default()
+                },
+                inferred: WrapperTally {
+                    stanzas: stanzas.len() - overlay_stanzas,
+                    ..WrapperTally::default()
+                },
             },
             stanzas,
             files: Vec::new(),
+            overlay_declared: cfg.is_some(),
+            inference,
         };
         for (i, (path, source)) in files.iter().enumerate() {
             let Some(lang) = detect_language(path) else {
@@ -343,7 +521,9 @@ impl<'c> WrapperPass<'c> {
             match catch_unwind(AssertUnwindSafe(|| scan_file(source, lang, &pass.stanzas))) {
                 Ok(sites) if !sites.is_empty() => {
                     for s in &sites {
-                        pass.tally.count_read(&s.read);
+                        if let Some(st) = pass.stanzas.get(s.stanza) {
+                            pass.tally.of(st).count_read(&s.read);
+                        }
                     }
                     pass.files.push(FileSites {
                         file: i,
@@ -397,7 +577,11 @@ impl<'c> WrapperPass<'c> {
             });
             let Some(fp) = fp else {
                 // The file failed to parse: no module to hang a sink on.
-                self.tally.skipped_invalid += sites.len();
+                for s in &sites {
+                    if let Some(st) = self.stanzas.get(s.stanza) {
+                        self.tally.of(st).skipped_invalid += 1;
+                    }
+                }
                 continue;
             };
             let at = FileAt {
@@ -422,24 +606,47 @@ impl<'c> WrapperPass<'c> {
         }
     }
 
-    /// The fired_on marker (see the module doc).
+    /// The fired_on markers (see the module doc): `[overlay] wrappers` when
+    /// the overlay keeps a `[[wrapper]]` stanza, `[wrappers] inferred` when
+    /// the inference found a candidate.
     pub(crate) fn report(&self, repo_label: &str) {
-        let t = &self.tally;
-        eprintln!(
-            "[overlay] wrappers repo={repo_label} stanzas={} sites={} minted={} duplicate={} skipped_nonliteral={} skipped_comment={} skipped_invalid={} (http={} queue_producer={} queue_consumer={} data_entity={} receiver={})",
-            t.stanzas,
-            t.sites,
-            t.minted,
-            t.duplicate,
-            t.skipped_nonliteral,
-            t.skipped_comment,
-            t.skipped_invalid,
-            t.http,
-            t.queue_producer,
-            t.queue_consumer,
-            t.data_entity,
-            t.receiver
-        );
+        if self.overlay_declared {
+            let t = &self.tally.overlay;
+            eprintln!(
+                "[overlay] wrappers repo={repo_label} stanzas={} sites={} minted={} duplicate={} skipped_nonliteral={} skipped_comment={} skipped_invalid={} (http={} queue_producer={} queue_consumer={} data_entity={} receiver={})",
+                t.stanzas,
+                t.sites,
+                t.minted,
+                t.duplicate,
+                t.skipped_nonliteral,
+                t.skipped_comment,
+                t.skipped_invalid,
+                t.http,
+                t.queue_producer,
+                t.queue_consumer,
+                t.data_entity,
+                t.receiver
+            );
+        }
+        let inf = &self.inference;
+        if inf.any() {
+            let t = &self.tally.inferred;
+            eprintln!(
+                "[wrappers] inferred repo={repo_label} wrappers={} (direct={} forwarding={}) sites={} minted={} duplicate={} skipped_nonliteral={} skipped_comment={} skipped_invalid={} shadowed_by_overlay={} skipped_ambiguous={} skipped_unparsed={}",
+                inf.wrappers,
+                inf.direct,
+                inf.forwarding,
+                t.sites,
+                t.minted,
+                t.duplicate,
+                t.skipped_nonliteral,
+                t.skipped_comment,
+                t.skipped_invalid,
+                inf.shadowed_by_overlay,
+                inf.skipped_ambiguous,
+                inf.skipped_unparsed
+            );
+        }
     }
 }
 
@@ -591,13 +798,41 @@ fn skip_type_args(b: &[u8], at: usize) -> Option<usize> {
     None
 }
 
-/// The site at `hit`, or `None` when the hit is a definition.
-fn read_site(source: &str, hit: &Hit, stanza: usize, st: &Stanza<'_>) -> Option<Site> {
+/// The start of the line holding byte `at`, and that line's text up to `at`.
+fn line_prefix(source: &str, at: usize) -> (usize, &str) {
     let line_start = source
-        .get(..hit.start)
+        .get(..at)
         .and_then(|s| s.rfind('\n'))
         .map_or(0, |i| i + 1);
-    let prefix = source.get(line_start..hit.start).unwrap_or("");
+    (line_start, source.get(line_start..at).unwrap_or(""))
+}
+
+/// CA.4: the text before byte `at` on its line reads as a comment (the
+/// COMMENTED rule of the module doc).
+pub(super) fn commented_at(source: &str, at: usize) -> bool {
+    is_commented(line_prefix(source, at).1)
+}
+
+/// CA.4: every live `call(` site in `source` (the plain form, generic list
+/// allowed; not a definition, not commented), as the callee's byte offset
+/// and its depth-0 split arguments: the inference's forwarding reader, the
+/// same site rules a stanza's scan applies.
+pub(super) fn live_call_args<'s>(source: &'s str, call: &str) -> Vec<(usize, Vec<&'s str>)> {
+    call_hits(source, call, false)
+        .into_iter()
+        .filter_map(|hit| {
+            let prefix = line_prefix(source, hit.start).1;
+            let (region, close) = arg_region(source, hit.open + 1);
+            let after = close.and_then(|c| source.get(c + 1..)).unwrap_or("");
+            (!is_definition(prefix, region, after) && !is_commented(prefix))
+                .then(|| (hit.start, split_args(region)))
+        })
+        .collect()
+}
+
+/// The site at `hit`, or `None` when the hit is a definition.
+fn read_site(source: &str, hit: &Hit, stanza: usize, st: &Stanza<'_>) -> Option<Site> {
+    let (line_start, prefix) = line_prefix(source, hit.start);
     let (region, close) = arg_region(source, hit.open + 1);
     let after = close.and_then(|c| source.get(c + 1..)).unwrap_or("");
     if is_definition(prefix, region, after) {
@@ -621,7 +856,7 @@ fn read_site(source: &str, hit: &Hit, stanza: usize, st: &Stanza<'_>) -> Option<
 /// The argument region after the `(` at `from - 1` and the offset of its
 /// closing `)` (`None` when it is not closed within `MAX_REGION` bytes):
 /// quote- and escape-aware, nested brackets counted.
-fn arg_region(source: &str, from: usize) -> (&str, Option<usize>) {
+pub(super) fn arg_region(source: &str, from: usize) -> (&str, Option<usize>) {
     let rest = source.get(from..).unwrap_or("");
     let b = rest.as_bytes();
     let limit = b.len().min(queue_topic::MAX_REGION);
@@ -869,7 +1104,7 @@ fn placeholder_path(body: &str) -> Option<String> {
 }
 
 /// Split an argument region on depth-0 commas (quote- and escape-aware).
-fn split_args(region: &str) -> Vec<&str> {
+pub(super) fn split_args(region: &str) -> Vec<&str> {
     let b = region.as_bytes();
     let mut out = Vec::new();
     let (mut depth, mut quote, mut start, mut i) = (0i32, None::<u8>, 0usize, 0usize);
@@ -978,6 +1213,11 @@ struct FileAt<'a> {
     repo: RepoId,
 }
 
+/// `s` as a JSON string literal, quotes included.
+fn json_str(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 fn origin_cell(origin: Origin, rule: &str) -> Cell {
     Cell {
         kind: cell_type::ORIGIN,
@@ -1051,8 +1291,8 @@ fn mint_http(
     sites: &[&Site],
     stanzas: &[Stanza<'_>],
     at: &FileAt<'_>,
-) -> WrapperTally {
-    let mut t = WrapperTally::default();
+) -> Tallies {
+    let mut t = Tallies::default();
     let idx = anchor::build_owner_index(&fp.nodes, &fp.nav);
     let endpoints: Vec<&Node> = fp
         .nodes
@@ -1084,18 +1324,17 @@ fn mint_http(
             .unwrap_or(usize::MAX)
             .saturating_add(1);
         if !held.insert((id, line1)) {
-            t.duplicate += 1;
+            t.of(st).duplicate += 1;
             continue;
         }
         let owner = anchor::owner_of_line(&idx, site.line0).unwrap_or(at.module_id);
-        let origin = st.decl.origin;
         let ep = ClientEndpoint {
             method: method.clone(),
             path: path.clone(),
             file: at.path.to_string(),
             line: line1,
             col: site.col1,
-            confidence: origin.confidence(),
+            confidence: st.confidence(),
         };
         let pushed = fresh.len();
         let extras = HitExtras {
@@ -1113,12 +1352,7 @@ fn mint_http(
             &mut seen,
         );
         if let Some(e) = fp.edges.last_mut() {
-            evidence::attach(
-                e,
-                Evidence::emitter(EMITTER)
-                    .rule(st.rule())
-                    .at(at.path, site.line0),
-            );
+            evidence::attach(e, st.evidence(at.path, site.line0));
         }
         if fresh.len() > pushed
             && let Some(n) = fresh.last_mut()
@@ -1126,8 +1360,9 @@ fn mint_http(
             if let Some(tpl) = template {
                 add_template(n, tpl);
             }
-            n.cells.push(origin_cell(origin, &st.rule()));
+            n.cells.push(st.origin_cell());
         }
+        let t = t.of(st);
         t.minted += 1;
         t.http += 1;
         t.receiver += usize::from(site.receiver);
@@ -1184,8 +1419,8 @@ fn mint_queue(
     sites: &[&Site],
     stanzas: &[Stanza<'_>],
     at: &FileAt<'_>,
-) -> WrapperTally {
-    let mut t = WrapperTally::default();
+) -> Tallies {
+    let mut t = Tallies::default();
     let idx = anchor::build_owner_index(&fp.nodes, &fp.nav);
     let existing: HashSet<NodeId> = fp.nodes.iter().map(|n| n.id).collect();
     let mut held: HashSet<(NodeId, u32)> =
@@ -1217,7 +1452,7 @@ fn mint_queue(
         let qname = format!("{prefix}{topic}");
         let id = NodeId::from_parts(GRAPH_TYPE, at.repo, kind, &qname);
         if !held.insert((id, site.line0)) {
-            t.duplicate += 1;
+            t.of(st).duplicate += 1;
             continue;
         }
         if !existing.contains(&id) {
@@ -1237,15 +1472,11 @@ fn mint_queue(
             && let Some(mut e) = anchor::owner_edge(kind, id, owner)
             && edge_keys.insert((e.from, e.to, e.category))
         {
-            e.confidence = st.decl.origin.confidence();
-            evidence::attach(
-                &mut e,
-                Evidence::emitter(EMITTER)
-                    .rule(st.rule())
-                    .at(at.path, site.line0),
-            );
+            e.confidence = st.confidence();
+            evidence::attach(&mut e, st.evidence(at.path, site.line0));
             owner_edges.push(e);
         }
+        let t = t.of(st);
         t.minted += 1;
         match kind {
             k if k == node_kind::QUEUE_PRODUCER => t.queue_producer += 1,
@@ -1278,14 +1509,14 @@ fn mint_queue(
         fresh.push(Node {
             id: p.id,
             repo: at.repo,
-            confidence: st.decl.origin.confidence(),
+            confidence: st.confidence(),
             cells: vec![
                 anchor::position_cell(at.path, first),
                 Cell {
                     kind: cell_type::CODE,
                     payload: CellPayload::Json(code),
                 },
-                origin_cell(st.decl.origin, &st.rule()),
+                st.origin_cell(),
             ],
         });
         fp.nav
@@ -1298,12 +1529,7 @@ fn mint_queue(
                 confidence: Confidence::Medium,
                 cells: Vec::new(),
             };
-            evidence::attach(
-                &mut e,
-                Evidence::emitter(EMITTER)
-                    .rule(st.rule())
-                    .at(at.path, first),
-            );
+            evidence::attach(&mut e, st.evidence(at.path, first));
             fp.edges.push(e);
         }
     }
@@ -1320,8 +1546,8 @@ fn mint_entities(
     sites: &[&Site],
     stanzas: &[Stanza<'_>],
     at: &FileAt<'_>,
-) -> WrapperTally {
-    let mut t = WrapperTally::default();
+) -> Tallies {
+    let mut t = Tallies::default();
     let idx = anchor::build_owner_index(&fp.nodes, &fp.nav);
     let mut known: HashSet<NodeId> = fp.nodes.iter().map(|n| n.id).collect();
     let mut owned: HashSet<(NodeId, NodeId)> = fp
@@ -1337,38 +1563,30 @@ fn mint_entities(
         };
         // The loader drops a stanza whose flavor is not one of the three.
         let Some(flavor) = st.decl.entity_flavor() else {
-            t.skipped_invalid += 1;
+            t.of(st).skipped_invalid += 1;
             continue;
         };
         let qname = format!("data_entity:{flavor}:{name}");
         let id = NodeId::from_parts(GRAPH_TYPE, at.repo, node_kind::DATA_ENTITY, &qname);
         let owner = anchor::owner_of_line(&idx, site.line0).unwrap_or(at.module_id);
         if !owned.insert((owner, id)) {
-            t.duplicate += 1;
+            t.of(st).duplicate += 1;
             continue;
         }
-        let origin = st.decl.origin;
         if known.insert(id) {
             fresh.push(Node {
                 id,
                 repo: at.repo,
-                confidence: origin.confidence(),
-                cells: vec![
-                    anchor::position_cell(at.path, site.line0),
-                    origin_cell(origin, &st.rule()),
-                ],
+                confidence: st.confidence(),
+                cells: vec![anchor::position_cell(at.path, site.line0), st.origin_cell()],
             });
             fp.nav
                 .record(id, name, &qname, node_kind::DATA_ENTITY, Some(at.module_id));
         }
-        let mut e = Edge::new(owner, id, edge_category::ACCESSES_DATA, origin.confidence());
-        evidence::attach(
-            &mut e,
-            Evidence::emitter(EMITTER)
-                .rule(st.rule())
-                .at(at.path, site.line0),
-        );
+        let mut e = Edge::new(owner, id, edge_category::ACCESSES_DATA, st.confidence());
+        evidence::attach(&mut e, st.evidence(at.path, site.line0));
         fp.edges.push(e);
+        let t = t.of(st);
         t.minted += 1;
         t.data_entity += 1;
     }
@@ -1391,7 +1609,8 @@ mod tests {
         };
         let files = vec![(format!("src/a.{ext}"), source.to_string())];
         let mut errors = Vec::new();
-        let pass = WrapperPass::scan(Some(&cfg), &files, &mut errors).expect("a wrapper stanza");
+        let pass = WrapperPass::scan(Some(&cfg), InferredWrappers::default(), &files, &mut errors)
+            .expect("a wrapper stanza");
         assert!(errors.is_empty(), "{errors:?}");
         pass.files.into_iter().flat_map(|f| f.sites).collect()
     }
@@ -1519,7 +1738,13 @@ mod tests {
         // The language filter: a TypeScript file is not scanned.
         let cfg = parse_str(overlay);
         let files = vec![("src/a.ts".to_string(), src.to_string())];
-        let pass = WrapperPass::scan(Some(&cfg), &files, &mut Vec::new()).expect("stanza");
+        let pass = WrapperPass::scan(
+            Some(&cfg),
+            InferredWrappers::default(),
+            &files,
+            &mut Vec::new(),
+        )
+        .expect("stanza");
         assert!(pass.files.is_empty());
     }
 
@@ -1613,7 +1838,13 @@ mod tests {
         let cfg = parse_str(overlay);
         assert_eq!(cfg.errors.len(), 1, "{:?}", cfg.errors);
         let files = vec![("src/a.ts".to_string(), "request('/x');\n".to_string())];
-        let pass = WrapperPass::scan(Some(&cfg), &files, &mut Vec::new()).expect("stanza");
+        let pass = WrapperPass::scan(
+            Some(&cfg),
+            InferredWrappers::default(),
+            &files,
+            &mut Vec::new(),
+        )
+        .expect("stanza");
         assert_eq!(
             pass.stanzas.first().map(Stanza::rule).as_deref(),
             Some("wrapper#2")

@@ -35,6 +35,10 @@
 //!   [`wrappers`]: unlike the edge stage it runs inside the per-repo build,
 //!   from `build::grafts::apply_post_cache`, because the sinks it mints
 //!   must reach the endpoint fold, the owner pass and the resolvers);
+//! - `[wrappers] inferred repo=<label> wrappers=<w> (direct=<d> forwarding=<f>) sites=<n> minted=<m> duplicate=<u> skipped_nonliteral=<x> skipped_comment=<c> skipped_invalid=<i> shadowed_by_overlay=<s> skipped_ambiguous=<a> skipped_unparsed=<p>`
+//!   once per repo where [`infer_wrappers`] (CA.4) found a Go collection
+//!   wrapper candidate: code-derived stanzas the same stage reads, overlay
+//!   or not;
 //! - `[history] ingest repo=<label> head=<12 hex> commits=<n> modules=<m> unmapped=<u> attn=<a> blame_symbols=<b> cochange_pairs=<p> (support>=3 ratio>=300 max_files=30)`
 //!   once per repo with a complete `.glia/history-snapshot/` (see [`history`]);
 //! - `[declared] repo=<label> constraint=<c> decision=<d> note=<n> anchored=<a> orphaned=<o> (anchor_qname=<q> anchor_project=<p>)`
@@ -54,11 +58,13 @@ mod cells;
 pub(crate) mod declared;
 mod entrypoints;
 mod history;
+mod infer_wrappers;
 mod overlay;
 pub(crate) mod signals;
 mod test_reports;
 mod wrappers;
 
+pub(crate) use infer_wrappers::infer_entity_wrappers;
 pub(crate) use wrappers::{Phase as WrapperPhase, WrapperPass};
 
 use std::path::PathBuf;

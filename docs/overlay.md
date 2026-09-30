@@ -156,6 +156,23 @@ With `call = "NewCollection"`, `kind = "data_entity"`, `name_arg = 2`, the call 
 node, and the cross-service DB resolver pairs it like any other entity. A `sql` wrapper
 works the same way (`Table("orders")` -> `data_entity:sql:orders`).
 
+In Go you do not need the stanza for `NewCollection`: a function that hands its own
+parameter to a driver collection call (`.Collection(name)`, `.GetCollection(name)`, ...) is
+inferred as a `data_entity` wrapper with no overlay file, at that parameter's index, and so
+is a function that hands its own parameter on to an inferred wrapper
+(`NewNamedCollection(c, db, name)` calling `NewCollection[T](c, db, name)`, up to three
+hops). Its call sites mint exactly what the stanza above would, except for provenance:
+the node's ORIGIN is
+`{"provenance":"inferred:wrapper","rule":"inferred:NewCollection","def":"<file>:<line>"}`
+(the wrapper's `func` line), the node and edge are medium confidence, and the edge's
+evidence emitter is `pass:inferred_wrapper`, which `glia why` ranks as derived. A wrapper
+name shorter than 3 characters, or one that two Go functions or methods share, is not
+inferred. Inference is read from the code, so it runs under `--no-overlay` too. A stanza
+that names the same `call` shadows the inferred wrapper, so a repo that already declares
+it builds exactly as before. Every build that finds a candidate prints one line:
+`[wrappers] inferred repo=<label> wrappers=<w> (direct=<d> forwarding=<f>) sites=<n> minted=<m> duplicate=<u> skipped_nonliteral=<x> skipped_comment=<c> skipped_invalid=<i> shadowed_by_overlay=<s> skipped_ambiguous=<a> skipped_unparsed=<p>`.
+Wrappers in other languages still need the stanza.
+
 Rules shared by every kind:
 
 - A generic argument list between the name and the paren is stepped over:

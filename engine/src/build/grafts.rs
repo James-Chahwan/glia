@@ -22,7 +22,7 @@ use glia_graph::rust_paths::RustCrate;
 use super::lang_build::TsAliasSet;
 use super::rpc_needles::{RpcContext, RpcNeedleCounts, apply_rpc_needles};
 use crate::endpoint_fold;
-use crate::external::{WrapperPass, WrapperPhase};
+use crate::external::{WrapperPass, WrapperPhase, infer_entity_wrappers};
 use crate::extract::{detect_language, merge_nav};
 use crate::http_owner;
 use crate::route::ModuleQnames;
@@ -40,9 +40,10 @@ use crate::route::ModuleQnames;
 /// `ts_aliases` key matches (A6.8). `wrappers` is the repo's
 /// `.glia/overlay.toml` when the build applies the overlay (`None` under
 /// `--no-overlay`): its `[[wrapper]]` stanzas feed the LF.2e stage
-/// (`external::WrapperPass`). Returns the RPC needle pass's counts
-/// (`apply_rpc_needles`), whose `files` the caller's `[parallel]` line reads
-/// (LG.1c).
+/// (`external::WrapperPass`), after the CA.4 inferred Go collection wrappers
+/// (`external::infer_entity_wrappers`), which run either way. Returns the
+/// RPC needle pass's counts (`apply_rpc_needles`), whose `files` the
+/// caller's `[parallel]` line reads (LG.1c).
 ///
 /// ORDERING RULE (LB.8). The owner pass (`http_owner::qualify_repo`) is the
 /// LAST step that may mint or re-key an owned kind: ROUTE / ENDPOINT / page
@@ -69,10 +70,13 @@ pub(super) fn apply_post_cache(
     // (a pure function of it), so every graft below finds a file's parse by
     // the MODULE id the router gave it.
     let modules = ModuleQnames::plan(files);
-    // LF.2e: the overlay `[[wrapper]]` call sites. The http half mints its
-    // ENDPOINTs BEFORE the endpoint fold, so a `${X}` wrapper path folds
-    // through the const table like any other client call.
-    let mut wrappers = WrapperPass::scan(wrappers, files, parse_errors);
+    // LF.2e: the overlay `[[wrapper]]` call sites, plus (CA.4) the Go
+    // collection wrappers the code itself declares, inferred with or without
+    // the overlay (an overlay stanza naming the same call shadows one). The
+    // http half mints its ENDPOINTs BEFORE the endpoint fold, so a `${X}`
+    // wrapper path folds through the const table like any other client call.
+    let inferred = infer_entity_wrappers(parses_by_lang, files, &modules, repo, parse_errors);
+    let mut wrappers = WrapperPass::scan(wrappers, inferred, files, parse_errors);
     if let Some(w) = wrappers.as_mut() {
         w.mint(WrapperPhase::Http, parses_by_lang, files, repo, &modules, parse_errors);
     }

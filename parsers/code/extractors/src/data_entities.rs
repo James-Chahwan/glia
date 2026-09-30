@@ -2326,7 +2326,64 @@ struct CollectionHit {
 /// the call chained onto it ([`collection_verb`]).
 fn collection_calls(source: &str) -> Vec<CollectionHit> {
     let bytes = source.as_bytes();
-    let mut hits: Vec<CollectionHit> = Vec::new();
+    let mut hits: Vec<CollectionHit> = collection_opens(source)
+        .into_iter()
+        .filter_map(|(pos, open)| {
+            let (name, delim) = collection_arg(source, open)?;
+            let verb = collection_verb(bytes, delim);
+            Some(CollectionHit { pos, name, verb })
+        })
+        .collect();
+    // Source order across needles.
+    hits.sort_by_key(|hit| hit.pos);
+    hits
+}
+
+/// CA.4: every driver collection call ([`COLLECTION_NEEDLES`]) whose first
+/// argument is a bare identifier (`client.Database(db).Collection(name)`),
+/// as `(needle offset, identifier)` in source order: the calls
+/// [`collection_arg`] reads no name from because the name arrives as a
+/// variable. The engine's wrapper inference (`external::infer_wrappers`)
+/// keeps those whose identifier is a parameter of the enclosing function,
+/// which makes that function a collection constructor whose call sites carry
+/// the name. A literal, an expression (`prefix + "_x"`, `cfg.Name`, `f(x)`)
+/// or an empty argument list is not a bare identifier.
+pub fn collection_param_calls(source: &str) -> Vec<(usize, String)> {
+    let b = source.as_bytes();
+    let mut out: Vec<(usize, String)> = collection_opens(source)
+        .into_iter()
+        .filter_map(|(pos, open)| {
+            let mut k = open;
+            while b.get(k).is_some_and(u8::is_ascii_whitespace) {
+                k += 1;
+            }
+            let start = k;
+            if !b
+                .get(k)
+                .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+            {
+                return None;
+            }
+            while b.get(k).is_some_and(|c| is_word_byte(*c)) {
+                k += 1;
+            }
+            let ident = source.get(start..k)?;
+            while b.get(k).is_some_and(u8::is_ascii_whitespace) {
+                k += 1;
+            }
+            matches!(b.get(k), Some(b',' | b')')).then(|| (pos, ident.to_string()))
+        })
+        .collect();
+    out.sort_by_key(|(pos, _)| *pos);
+    out
+}
+
+/// `(needle offset, offset just past the call's '(')` of every
+/// [`COLLECTION_NEEDLES`] call, per needle in needle order: the receiver
+/// gate and the `.GetCollection<T>(` type-argument step both readers share.
+fn collection_opens(source: &str) -> Vec<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let mut out: Vec<(usize, usize)> = Vec::new();
     for needle in COLLECTION_NEEDLES {
         let mut search_from = 0;
         while let Some(rel) = source[search_from..].find(needle) {
@@ -2355,15 +2412,10 @@ fn collection_calls(source: &str) -> Vec<CollectionHit> {
                 }
                 open = k + 1;
             }
-            if let Some((name, delim)) = collection_arg(source, open) {
-                let verb = collection_verb(bytes, delim);
-                hits.push(CollectionHit { pos, name, verb });
-            }
+            out.push((pos, open));
         }
     }
-    // Source order across needles.
-    hits.sort_by_key(|hit| hit.pos);
-    hits
+    out
 }
 
 /// LE.4a: the verb of the driver method chained onto a collection call whose
@@ -4055,6 +4107,35 @@ console.log("SELECT email FROM users WHERE email LIKE 'demo-%@x.com' ORDER BY em
             sorted_qnames("// so `someother.collection(` matches but `_collection(` does not.\n"),
             Vec::<String>::new()
         );
+    }
+
+    // ---- CA.4: a driver call handed a bare identifier ----------------------
+
+    #[test]
+    fn collection_param_calls_read_bare_identifiers_only() {
+        let src = "return &Collection[T]{col: client.Database(database).Collection(name)}\n\
+                   db.collection( coll , opts);\n\
+                   db.collection('users');\n\
+                   db.Collection(prefix + \"_x\");\n\
+                   db.Collection(cfg.Name);\n\
+                   db.Collection(f(x));\n\
+                   db.Collection();\n\
+                   db.GetCollection<User>(tableName);\n\
+                   collection(bare);\n";
+        let got: Vec<(String, String)> = collection_param_calls(src)
+            .into_iter()
+            .map(|(pos, ident)| (src[pos..].chars().take(12).collect(), ident))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (".Collection(".to_string(), "name".to_string()),
+                (".collection(".to_string(), "coll".to_string()),
+                (".GetCollecti".to_string(), "tableName".to_string()),
+            ]
+        );
+        // The literal reader is unchanged by the shared needle walk.
+        assert_eq!(scan_collection_calls(src), ["users"]);
     }
 
     #[test]

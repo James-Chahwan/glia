@@ -818,7 +818,9 @@ fn commented_and_definition_sites_mint_nothing() {
             "chat_previews".to_string()
         )]
     );
-    // Without the overlay the constructor names nothing at all.
+    // Without the overlay, CA.4 infers the constructor (it hands its own
+    // `name` to `.Collection(name)`): the same one entity, with the inferred
+    // ORIGIN; the definition and the commented call still mint nothing.
     let off = build_repo(
         "entity-off",
         &[
@@ -827,7 +829,28 @@ fn commented_and_definition_sites_mint_nothing() {
         ],
         None,
     );
-    assert!(entities(&off).is_empty(), "{:?}", entities(&off));
+    assert_inferred_chat_previews(&off);
+}
+
+/// CA.4: the COLLECTION_GO / REPOSITORY_GO pair with no applied stanza mints
+/// exactly `data_entity:nosql:chat_previews`, through the inferred
+/// `NewCollection` (defined at collection.go:11).
+fn assert_inferred_chat_previews(r: &GenerateResult) {
+    let q = "data_entity:nosql:chat_previews";
+    assert_eq!(
+        entities(r),
+        [(q.to_string(), "chat_previews".to_string())],
+        "no legacy_previews / name / database"
+    );
+    let (n, _) = node(r, q).expect("node");
+    assert_eq!(
+        json_cells(&n.cells, cell_type::ORIGIN),
+        [serde_json::json!({
+            "provenance": "inferred:wrapper",
+            "rule": "inferred:NewCollection",
+            "def": "collection.go:11"
+        })]
+    );
 }
 
 #[test]
@@ -853,6 +876,8 @@ fn missing_name_arg_is_a_config_error() {
         cfg.errors[0]
     );
     assert!(cfg.config.wrapper.is_empty(), "the stanza is dropped");
+    // The dropped stanza applies nothing; CA.4's inference still reads the
+    // constructor from the code.
     let r = build_repo(
         "entity-noarg",
         &[
@@ -861,7 +886,7 @@ fn missing_name_arg_is_a_config_error() {
         ],
         Some(overlay),
     );
-    assert!(entities(&r).is_empty(), "{:?}", entities(&r));
+    assert_inferred_chat_previews(&r);
 }
 
 /// The substrate-gap fixture `go-overlay-data-wrapper`, built here so its

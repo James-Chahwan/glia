@@ -1,0 +1,24 @@
+{
+  "framework": "go-inferred-collection-wrapper",
+  "language": "go",
+  "dirs": ["."],
+  "mechanism": "db",
+  "cells": ["go/db"],
+  "note": "CA-4: with NO overlay file, a project-local function that passes its own parameter into a driver collection call (`client.Database(db).Collection(name)` inside NewCollection[T], quokka turps/Services/Repositories/collection.go) is inferred as a data_entity wrapper; each call site's literal at that parameter mints data_entity:nosql:<name> with a function-level ACCESSES_DATA. NewNamedCollection forwards its own `name` into NewCollection, so it is a wrapper too (two hops). The commented call and the definitions mint nothing.",
+  "expect_nodes": [
+    {"kind": "DATA_ENTITY", "name": "data_entity:nosql:chat_previews"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:nosql:users"}
+  ],
+  "expect_edges": [
+    {"from": "NewChatPreviewRepository", "to": "data_entity:nosql:chat_previews", "category": "ACCESSES_DATA"},
+    {"from": "NewUserRepository", "to": "data_entity:nosql:users", "category": "ACCESSES_DATA", "note": "through the forwarding wrapper"}
+  ],
+  "expect_cells": [
+    {"kind": "DATA_ENTITY", "node": "data_entity:nosql:chat_previews", "cell": "ORIGIN", "contains": "inferred"}
+  ],
+  "forbid": [
+    {"kind": "DATA_ENTITY", "name": "data_entity:nosql:legacy_previews", "note": "commented-out call"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:nosql:name", "note": "the definition's own parameter"},
+    {"kind": "DATA_ENTITY", "name": "data_entity:nosql:database"}
+  ]
+}
