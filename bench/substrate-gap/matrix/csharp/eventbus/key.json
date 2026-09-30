@@ -1,0 +1,31 @@
+{
+  "framework": "csharp-mediatr-notification",
+  "language": "csharp",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "eventbus",
+  "cells": [
+    "csharp/eventbus"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "OrderPlaced"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "OrderPlaced"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "OrderPlaced",
+      "to": "OrderPlaced",
+      "category": "EVENT_FLOWS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "MediatR INotification: _mediator.Publish(new OrderPlaced(..)) -> INotificationHandler<OrderPlaced> || CF.5b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=2/2 literal=2/2 route=1/1 forbid=0/0) via=eventbus. Nothing to fix: the cell is covered at HEAD."
+}

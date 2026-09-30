@@ -1,0 +1,31 @@
+{
+  "framework": "csharp-sln-two-csproj",
+  "language": "csharp",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "subproject",
+  "cells": [
+    "csharp/subproject"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "PROJECT",
+      "name": "project:src/Api"
+    },
+    {
+      "kind": "PROJECT",
+      "name": "project:src/Worker"
+    }
+  ],
+  "expect_edges": [],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "PROJECT",
+      "name": "project:src/Api",
+      "max_nodes": 1
+    }
+  ],
+  "note": "two .csproj project roots under one solution || CF.5b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=2/2 literal=2/2 route=0/0 forbid=1/1) via=project. Nothing to fix: the cell is covered at HEAD."
+}

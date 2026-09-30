@@ -1,0 +1,35 @@
+{
+  "framework": "csharp-process-start-invocation",
+  "language": "csharp",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_inv",
+  "cells": [
+    "csharp/cli_inv"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "billing"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli_invoke:billing",
+      "to": "cli:reconcile",
+      "category": "CLI_INVOKES",
+      "note": "RootCommand carries only a description, so the subcommand path binds (csharp/cli_def)"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "reconcile",
+      "max_nodes": 0
+    }
+  ],
+  "note": "Process.Start(\"billing\", \"reconcile\") against the System.CommandLine tool from csharp/cli_def || CF.5b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=1/1 literal=1/1 route=1/1 forbid=1/1) via=cli. Nothing to fix: the cell is covered at HEAD."
+}

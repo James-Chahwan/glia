@@ -1,0 +1,32 @@
+{
+  "framework": "csharp-hotchocolate-graphqlclient",
+  "language": "csharp",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "graphql",
+  "cells": [
+    "csharp/graphql"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "books"
+    },
+    {
+      "kind": "GRAPHQL_OPERATION",
+      "name": "books"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "books",
+      "to": "books",
+      "category": "GRAPHQL_CALLS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "HotChocolate code-first Query.GetBooks (field `books`) + GraphQL.Client GraphQLRequest || CF.5b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): HotChocolate code-first `class Query { GetBooks() }` + `AddQueryType<Query>()` and GraphQL.Client `new GraphQLRequest { Query = \"..\" }` have no rows in parsers/code/extractors/src/graphql.rs."
+}

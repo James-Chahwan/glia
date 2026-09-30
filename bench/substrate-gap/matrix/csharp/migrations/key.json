@@ -1,0 +1,27 @@
+{
+  "framework": "csharp-efcore-migration",
+  "language": "csharp",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "migrations",
+  "cells": [
+    "csharp/migrations"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "DATA_ENTITY",
+      "name": "Users"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "20240101000000_CreateUsers",
+      "to": "Users",
+      "category": "ACCESSES_DATA"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "EF Core migration: migrationBuilder.CreateTable(name: \"Users\", ...) || CF.5b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=1/1 literal=1/1 route=1/1 forbid=0/0) via=db. Nothing to fix: the cell is covered at HEAD."
+}
