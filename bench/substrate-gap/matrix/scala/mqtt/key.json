@@ -1,0 +1,33 @@
+{
+  "framework": "scala-paho",
+  "language": "scala",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "mqtt",
+  "cells": [
+    "scala/mqtt"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "sensors/temp"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "sensors/temp"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "sensors/temp",
+      "to": "sensors/temp",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Paho Java client from Scala || CF.9a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=2/2 literal=2/2 route=1/1 forbid=0/0) via=queue. Nothing to fix: the cell is covered at HEAD."
+}

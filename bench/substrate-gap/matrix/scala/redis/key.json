@@ -1,0 +1,33 @@
+{
+  "framework": "scala-redis4cats-pubsub",
+  "language": "scala",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "redis",
+  "cells": [
+    "scala/redis"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "redis4cats PubSub publish / subscribe(RedisChannel(\"orders\")) || CF.9a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=2/2 literal=0/2 route=0/1 forbid=0/0) via=queue. Predicted extractor gap (backlog, not fixed by the probe): redis4cats `pubSub.publish(RedisChannel(\"x\"))` / `.subscribe(RedisChannel(\"x\"))`: the RedisPubSub rows read a literal only when it LEADS arg #0, so both sides fall back to `unresolved:redis`."
+}
