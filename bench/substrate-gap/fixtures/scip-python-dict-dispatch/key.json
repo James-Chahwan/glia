@@ -1,0 +1,12 @@
+{
+  "framework": "scip-ingest",
+  "language": "python",
+  "dirs": ["."],
+  "note": "CE.1d: a committed .glia/scip-snapshot/ (scip-python shape, written by engine/tests/scip_ingest.rs write_dict_dispatch_fixture) binds definitions by position + name and adds FACT CALLS for references glia cannot resolve statically: `repo` is typed only by the value of a dict literal behind an unannotated factory, so the parser binds handle -> get_repo and nothing on `repo.save`. The SCIP ref on svc/handlers.py editor line 6 (0-based row 5, a call) names UserRepo#save(); OrderRepo#save() (same name, other class) must stay unbound. Baseline 2026-09-30 (HEAD 2170ff8) and 2026-10-01 (HEAD 8c7d368, grade.py CALLS 0/1): no CALLS handle -> UserRepo::save (only IMPORTS handlers->repos, CALLS handle->get_repo, CALLS repos->UserRepo).",
+  "expect_edges": [
+    {"from": "svc::handlers::handle", "to": "svc::repos::UserRepo::save", "category": "CALLS"}
+  ],
+  "forbid": [
+    {"from": "svc::handlers::handle", "to": "svc::repos::OrderRepo::save", "category": "CALLS"}
+  ]
+}

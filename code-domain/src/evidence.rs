@@ -23,7 +23,10 @@
 //!   - `resolver`  — a cross-graph resolver (`resolver:http`, ...);
 //!   - `pass`      — an engine post-pass (`pass:doclink`, `pass:tests`, ...);
 //!   - `docs`      — doc ingestion (`docs:<source tag>`);
-//!   - `overlay` / `history` — the LF stages (user overlay, git history).
+//!   - `overlay` / `history` — the LF stages (user overlay, git history);
+//!   - `scip`      — a compiler-grade SCIP index's resolved references, read
+//!     from `.glia/scip-snapshot/` (CE.1d: `scip:<indexer>`, e.g.
+//!     `scip:scip-python`).
 //! - `rule` — optional sub-path of the emitter: which resolution branch or
 //!   tier asserted the edge.
 //! - `file` — repo-relative, `/` separators.
@@ -58,6 +61,8 @@ pub const STAGES: &[&str] = &[
     // LF: the `.glia/overlay.toml` edges (LF.2b) and git-history edges (LF.5b).
     "overlay",
     "history",
+    // CE.1d: references a SCIP index resolved (`.glia/scip-snapshot/`).
+    "scip",
 ];
 
 /// How an [`Evidence`]'s location was obtained: the FACT / DERIVED tier the

@@ -276,11 +276,19 @@ at build time, like rule scopes: rebuild after adding a project.
 
 1. `glia gaps <repo>` lists the blind spots: unpaired endpoints and routes, `<unresolved>`
    endpoint sinks, tag-only queues, dead-flagged symbols, and overlay rules that no longer
-   bind. Each row suggests a section to fill.
+   bind. Each row suggests a section to fill, and carries an `id` (`gap:<16 hex>`) that stays
+   the same across rebuilds: it is keyed by the node, stanza or sidecar row, never by a line
+   or an ordinal, so a stanza can name the gap it targets and a re-run shows it gone.
 2. An agent or a person writes stanzas for those rows into `.glia/overlay.toml` (repo-graph
    hands the gaps to its agent and writes the file back).
-3. `glia gaps <repo> --overlay-delta` builds with and without the overlay and prints
-   `[overlay] N rules, +M edges, orphans K→J`. Keep the change only if pairings rise.
+3. `glia gaps <repo> --overlay-delta` builds without and then with the overlay, counts each
+   build whole (nodes by kind, edges by category, gaps by category for the categories that
+   need no repo root) and prints
+   `[overlay] N rules, +M edges, orphans K→J, gaps G0→G1, verdict=<keep|review|drop>`.
+   The verdict: the overlay *improved* the graph when some gap category fell, or some node
+   kind or edge category other than `DEFINES` / `CONTAINS` rose; it *regressed* it when some
+   gap category rose. `keep` = improved and not regressed, `review` = both (a person decides),
+   `drop` = not improved. The verdict measures; it cannot tell whether an added edge is right.
    Rules that `gaps` reports as orphaned or redundant (the extractor has caught up) should
    be removed.
 
@@ -331,10 +339,21 @@ document: a document whose file no longer hashes to the bytes the import read is
 so an index never places facts on code edited since; the other documents still apply. What the
 build makes of the snapshot:
 
-- references bound to a definition become `CALLS` (a call of a function or method, rule
-  `call_site`) or `USES` (`callable_ref`, `reference`, `reference_write`), emitter
-  `scip:<tool>`, tier FACT (CE.1d). An edge glia already has between the same nodes keeps its
-  category: when the index would classify it differently, glia's classification stands.
+- a definition binds the innermost glia function, method, type, attribute or state variable
+  whose span holds its line and whose name is exactly the identifier the import read there; a
+  definition that binds nothing is counted `unbound`, and a symbol whose definitions bind two
+  different nodes is counted `ambiguous` and never used.
+- references to a bound definition become `CALLS` (a call of a function or method, rule `call_site`)
+  or `USES` (`callable_ref` for a function or method used as a value, else `reference`,
+  `reference_write` on a write), emitter `scip:<tool>` (the indexer's name, lowercased, other
+  characters than `a-z0-9_-` as `_`), tier FACT (CE.1d), from the innermost function or method
+  holding the reference, else the innermost type, else the file's module. Import references add
+  nothing (the parser's `IMPORTS` are already FACT), and a node's reference to itself adds nothing
+  unless it is a call (recursion, kept; the rest counted `self_refs`). One edge per (from, to,
+  category), located at its first reference. An edge glia already has between the same nodes keeps
+  its category: the same category counts as `confirmed`, and when glia joins the two by any other
+  category (`DEFINES` and `INHERITS_FROM` included) its classification stands and nothing is added
+  (`category_differs`).
 - a name-only or unlocated glia edge from the parser, extractor or graph stages that the index
   confirms is re-stamped `scip:<tool>` with rule `confirms:<old emitter>[/<old rule>]` and tier
   FACT; resolver and pass edges are never re-stamped (a merge recomputes them). The index's
@@ -356,5 +375,6 @@ The import prints `[scip] decoded index=<file> documents=N occurrences=N symbols
 external_symbols=N unknown_fields=N malformed_ranges=N` after a clean decode, then `[scip] import
 repo=<label> tool=<tool>@<version> documents=N skipped=N defs=N refs=N calls=N symbols=N locals=N
 forward=N bad_ranges=N encoding_unspecified=N surface=cli` on stderr (one line each), and a build
-that reads the snapshot prints `[scip] ingest repo=<label> ...` and `[scip] confirm repo=<label>
-...`.
+that reads the snapshot prints `[scip] ingest repo=<label> tool=<tool> documents=N stale=N defs=N
+bound=N unbound=N ambiguous=N refs=N imports=N unowned=N added=N (calls=N uses=N) confirmed=N
+category_differs=N self_refs=N` and `[scip] confirm repo=<label> ...`.

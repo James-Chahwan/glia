@@ -172,8 +172,9 @@ fn attn(payload: String) -> Cell {
 }
 
 /// A node's first POSITION cell: `(file, start_line, end_line)`, 0-based rows
-/// (the first POSITION wins, as everywhere a node is located).
-fn position(n: &Node) -> Option<(String, Option<i64>, Option<i64>)> {
+/// (the first POSITION wins, as everywhere a node is located). Shared with the
+/// SCIP stage (`super::scip`, CE.1d): the stage's one POSITION reader.
+pub(super) fn position(n: &Node) -> Option<(String, Option<i64>, Option<i64>)> {
     let c = n.cells.iter().find(|c| c.kind == cell_type::POSITION)?;
     let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
         return None;
@@ -185,8 +186,8 @@ fn position(n: &Node) -> Option<(String, Option<i64>, Option<i64>)> {
 }
 
 /// `repo`'s MODULE nodes by the file of their POSITION; several on one file
-/// bind the smallest NodeId.
-fn module_files(merged: &MergedGraph, repo: RepoId) -> BTreeMap<String, NodeId> {
+/// bind the smallest NodeId. Shared with the SCIP stage (`super::scip`).
+pub(super) fn module_files(merged: &MergedGraph, repo: RepoId) -> BTreeMap<String, NodeId> {
     let mut out: BTreeMap<String, NodeId> = BTreeMap::new();
     for g in merged.graphs.iter().filter(|g| g.repo == repo) {
         for n in &g.nodes {

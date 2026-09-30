@@ -43,6 +43,8 @@
 //!   or not;
 //! - `[history] ingest repo=<label> head=<12 hex> commits=<n> modules=<m> unmapped=<u> attn=<a> blame_symbols=<b> cochange_pairs=<p> (support>=3 ratio>=300 max_files=30)`
 //!   once per repo with a complete `.glia/history-snapshot/` (see [`history`]);
+//! - `[scip] ingest repo=<label> tool=<tool> documents=<d> stale=<s> defs=<n> bound=<b> unbound=<u> ambiguous=<a> refs=<r> imports=<i> unowned=<o> added=<e> (calls=<c> uses=<x>) confirmed=<f> category_differs=<k> self_refs=<z>`
+//!   once per repo with a complete `.glia/scip-snapshot/` (see [`scip`]);
 //! - `[declared] repo=<label> constraint=<c> decision=<d> note=<n> anchored=<a> orphaned=<o> (anchor_qname=<q> anchor_project=<p>)`
 //!   once per repo whose overlay declares a `[[constraint]]` / `[[decision]]`
 //!   / `[[note]]`, and `[declared] rules=<r> (forbid_edge=<f> no_cycle=<c> invariant=<i>)`
@@ -62,6 +64,7 @@ mod entrypoints;
 mod history;
 mod infer_wrappers;
 mod overlay;
+mod scip;
 pub(crate) mod signals;
 mod test_reports;
 mod wrappers;
@@ -126,11 +129,12 @@ pub(crate) fn repo_inputs(repo: RepoId, root: PathBuf, label: String) -> RepoInp
 ///
 /// Per input in argument order and, within a repo, the stages in a FIXED
 /// order: the overlay `[[edge]]` stanzas (LF.2b) first, then the git-history
-/// CO_CHANGES edges (LF.5b, [`history::history_edges`]). Only the OVERLAY
+/// CO_CHANGES edges (LF.5b, [`history::history_edges`]), then the SCIP
+/// index's CALLS / USES edges (CE.1d, [`scip::scip_edges`]). Only the OVERLAY
 /// stage is switched by `overlay` (`BuildOptions::overlay`, the CLI's
 /// `--no-overlay`, pyo3's `overlay=False`): without it, a repo whose file has
 /// an overlay section prints `[overlay] disabled (--no-overlay) repo=<label>`
-/// and that stage is skipped, while fact inputs (history) still run.
+/// and that stage is skipped, while fact inputs (history, SCIP) still run.
 /// User-config and declared sections are never read here, so the switch
 /// cannot touch them.
 pub(crate) fn apply_external_edges(merged: &mut MergedGraph, inputs: &[RepoInputs], overlay: bool) {
@@ -145,8 +149,9 @@ pub(crate) fn apply_external_edges(merged: &mut MergedGraph, inputs: &[RepoInput
             }
             _ => {}
         }
-        // History is a fact input: never gated by `overlay`.
+        // History and SCIP are fact inputs: never gated by `overlay`.
         history::history_edges(merged, input);
+        scip::scip_edges(merged, input);
     }
 }
 

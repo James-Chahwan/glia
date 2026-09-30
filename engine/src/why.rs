@@ -24,6 +24,7 @@
 //! | stage | tier |
 //! |---|---|
 //! | `parser`, `extractor`, `docs`, `graph` | fact — read at a site in the source, or bound from an extracted reference |
+//! | `scip` | fact — bound by a type-aware SCIP indexer, the call / non-call split read at the site (CE.1d); note `resolved by a SCIP index (<tool>)` |
 //! | `resolver`, `pass` | derived — paired by name / path / topic / convention |
 //! | `overlay`, `history` | heuristic — declared by a person or a model, or co-change in git |
 //!
@@ -477,7 +478,9 @@ fn explain_edge(
 /// documented vocabulary.
 fn stage_tier(stage: &str) -> Option<&'static str> {
     match stage {
-        "parser" | "extractor" | "docs" | "graph" => Some(FACT),
+        // `scip` (CE.1d): the target is bound by a type-aware indexer and the
+        // call / non-call split is read at the site.
+        "parser" | "extractor" | "docs" | "graph" | "scip" => Some(FACT),
         "resolver" | "pass" => Some(DERIVED),
         "overlay" | "history" => Some(HEURISTIC),
         _ => None,
@@ -522,6 +525,10 @@ pub(crate) fn tier_of(ev: Option<&Evidence>, e: &Edge) -> (&'static str, Option<
     let note = match stage {
         "overlay" => Some(overlay_note(ev, e)),
         "history" => Some("files change together in git history; not a code reference".to_string()),
+        "scip" => Some(format!(
+            "resolved by a SCIP index ({})",
+            ev.emitter.split_once(':').map_or("index", |(_, tool)| tool)
+        )),
         _ => None,
     };
     (tier, note)
@@ -658,6 +665,17 @@ mod tests {
         assert_eq!(
             tier(&unplaced, Confidence::Medium),
             (DERIVED, Some("no location recorded".to_string()))
+        );
+    }
+
+    /// CE.1d: a SCIP edge is a located fact, noted with its indexer.
+    #[test]
+    fn scip_edge_is_fact_with_its_tool() {
+        let edge = Edge::new(NodeId(1), NodeId(2), edge_category::CALLS, Confidence::Strong);
+        let ev = Evidence::emitter("scip:scip-python").rule("call_site").at("svc/h.py", 5);
+        assert_eq!(
+            tier_of(Some(&ev), &edge),
+            (FACT, Some("resolved by a SCIP index (scip-python)".to_string()))
         );
     }
 

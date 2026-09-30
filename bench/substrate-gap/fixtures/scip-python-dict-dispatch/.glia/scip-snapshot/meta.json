@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "generator": "glia scip import",
+  "tool": "scip-python",
+  "tool_version": "0.6.0",
+  "project_root": "",
+  "documents": 2,
+  "symbols": 2,
+  "skipped_documents": 0,
+  "data_hash": "ffa272c920768218"
+}
