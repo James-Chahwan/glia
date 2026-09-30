@@ -14,6 +14,7 @@ use crate::calls::{
     EvidenceTally, emit_method_level_implements, enclosing_class_or_struct, enclosing_module,
     graph_evidence, push_edge, resolve_calls, resolve_refs, unique_global_type,
 };
+use crate::go_mounts::MountStats;
 use crate::imports::{
     SameStem, resolve_imports_go, resolve_imports_python, resolve_imports_slash,
     resolve_imports_ts, same_stem_table,
@@ -70,9 +71,18 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// a local / parameter, a package var or a struct-field chain on that
 /// receiver's type ([`GoPackages::typed_receiver`]); `[go-receivers]` prints
 /// what it bound.
+///
+/// CB.20: once calls are bound, every provisional mount ROUTE (a route on a
+/// parameter- or field-held router group) is re-keyed to each prefix its
+/// group receives through the resolved calls, one ROUTE per mount, before
+/// the refs resolve ([`crate::go_mounts::bind`]); `[go-mounts]` prints what
+/// it did.
 pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
-    let (g, split, implicit, packages, receivers) = build_go_passes(repo, parses);
+    let (g, split, implicit, packages, receivers, mounts) = build_go_passes(repo, parses);
     if let Some(line) = split.marker() {
+        eprintln!("{line}");
+    }
+    if let Some(line) = mounts.marker() {
         eprintln!("{line}");
     }
     if let Some(stats) = implicit {
@@ -130,12 +140,24 @@ fn go_types_marker(nav: &CodeNav) -> String {
     )
 }
 
-/// [`build_go`]'s passes, returning the stats its markers print.
-fn build_go_passes(
+/// [`build_go`]'s graph with the CB.20 mount stats, for the go_mounts tests.
+#[cfg(test)]
+pub(crate) fn build_go_with_mounts(
     repo: RepoId,
     parses: Vec<FileParse>,
-) -> (RepoGraph, SplitStats, Option<GoImplicitStats>, GoPackageStats, ReceiverTally) {
-    let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
+) -> (RepoGraph, MountStats) {
+    let (g, _, _, _, _, mounts) = build_go_passes(repo, parses);
+    (g, mounts)
+}
+
+/// What [`build_go_passes`] returns: the graph and the stats its markers
+/// print.
+type GoPasses =
+    (RepoGraph, SplitStats, Option<GoImplicitStats>, GoPackageStats, ReceiverTally, MountStats);
+
+/// [`build_go`]'s passes, returning the stats its markers print.
+fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
+    let (mut g, all_imports, all_calls, mut all_refs) = merge_parses(repo, parses);
     let split = bind_split_go_receivers(&mut g);
     build_symbol_table(&mut g);
     let packages = GoPackages::build(&g, &all_imports);
@@ -145,6 +167,9 @@ fn build_go_passes(
     resolve_go_calls(&mut g, &all_calls, &split, hook, &mut tally);
     let package_stats = packages.stats(dir_bound_imports);
     let receivers = packages.tally.clone();
+    // CB.20: reads the CALLS edges just bound; moves the provisional ROUTEs'
+    // HANDLED_BY refs (and copies them to each extra mount) before they resolve.
+    let mounts = crate::go_mounts::bind(&mut g, &mut all_refs);
     let (embeds, refs): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
         all_refs.into_iter().partition(|r| is_go_embed(&g.nav, r));
     resolve_refs(&mut g, &refs, &mut tally);
@@ -152,7 +177,7 @@ fn build_go_passes(
     let implicit = emit_go_implicit_implements(&mut g, &packages);
     emit_method_level_implements(&mut g);
     tally.report();
-    (g, split, implicit, package_stats, receivers)
+    (g, split, implicit, package_stats, receivers, mounts)
 }
 
 /// Build a per-repo TypeScript graph. TS import sources are raw strings
@@ -2526,7 +2551,7 @@ fn place_out_of_line(g: &RepoGraph, stats: &mut OutOfLineStats) -> Vec<Placement
 /// edge equal to another edge, cells included (the file's DEFINES of a
 /// member two parses both emitted), is dropped: two sites of one key stay
 /// two edges. Every other edge keeps its place and cells.
-fn rename_nodes(
+pub(crate) fn rename_nodes(
     g: &mut RepoGraph,
     calls: &mut [CallSite],
     refs: &mut [UnresolvedRef],
@@ -3365,7 +3390,7 @@ mod tests {
 
     /// `build_go` with the implicit pass's stats.
     fn go_implicit(parses: Vec<FileParse>) -> (RepoGraph, Option<GoImplicitStats>) {
-        let (g, _, stats, _, _) = build_go_passes(repo(), parses);
+        let (g, _, stats, _, _, _) = build_go_passes(repo(), parses);
         (g, stats)
     }
 
@@ -3989,7 +4014,7 @@ mod tests {
     /// bound in a sibling file; the fixture prints the packet's marker.
     #[test]
     fn go_package_stats_and_marker() {
-        let (g, _, _, stats, receivers) = build_go_passes(repo(), multifile_package_shape());
+        let (g, _, _, stats, receivers, _) = build_go_passes(repo(), multifile_package_shape());
         assert_eq!(
             stats,
             GoPackageStats { dirs: 2, multi_file: 1, dir_bound_imports: 1, sibling_calls: 2 }
@@ -4010,7 +4035,7 @@ mod tests {
             "package calls are not typed-receiver binds"
         );
 
-        let (_, _, _, empty, _) = build_go_passes(repo(), vec![]);
+        let (_, _, _, empty, _, _) = build_go_passes(repo(), vec![]);
         assert_eq!(empty.marker(), None, "no MODULE, no marker");
     }
 
@@ -4080,7 +4105,7 @@ mod tests {
             glia_parser_go::parse_file(&src, rel, &qname, "example.com/shop", repo()).expect("parse")
         })
         .collect();
-        let (_, _, _, _, receivers) = build_go_passes(repo(), parses);
+        let (_, _, _, _, receivers, _) = build_go_passes(repo(), parses);
         assert_eq!(
             receivers.marker(),
             "[go-receivers] bound=4 (return=1 local=2 package_var=1 field_chain=0) typed_unbound=0"
@@ -4213,7 +4238,7 @@ mod tests {
     fn go_packages_read_a_file_named_module_once_by_its_bare_form() {
         // `infra/main.go` + `infra/main.tf`, `infra/main_test.go` + `.py`:
         // one member each, the test file still a test, the alias not a member.
-        let (g, _, _, stats, _) = build_go_passes(
+        let (g, _, _, stats, _, _) = build_go_passes(
             repo(),
             vec![
                 named_module("infra::main.go", "main", &[]),
