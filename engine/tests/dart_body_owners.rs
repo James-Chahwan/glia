@@ -3,8 +3,9 @@
 //!
 //! Mixins, named extensions and extension types are CLASS nodes owning their
 //! members; an enhanced enum owns its members; an unnamed extension on a type
-//! the file declares hangs its members on that type, and one on a foreign
-//! type mints nothing. A getter / setter is a METHOD owning its body; a
+//! the file declares hangs its members on that type, and (CB.17) one on a
+//! foreign type is its own CLASS `<module>::extension<T>` owning its members,
+//! never a node for the foreign type. A getter / setter is a METHOD owning its body; a
 //! constructor is a METHOD `<T>::<T>` owning its body (CB.9). No CALLS edge
 //! starts at an ENDPOINT, and no body is credited to the member declared
 //! before it.
@@ -13,6 +14,12 @@
 //! factories, operators and abstract members are METHODs, enum constants
 //! ATTRIBUTEs under their ENUM; every call comes from a member, none from a
 //! CLASS; a named constructor / factory called on its class binds.
+//!
+//! CB.17, on a real build of the `dart-extensions-imports` fixture: unnamed
+//! extensions on an import-prefixed and a core type are CLASS containers
+//! `<module>::extension<T>`; a top-level `final` initialiser and a `var`
+//! list entry call FROM their STATE_VAR; `import 'money.dart' as m show ..`
+//! is an IMPORTS edge whose prefix binds `m.round2(..)`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -54,6 +61,8 @@ fn member_bodies_are_credited_to_their_owner() {
         (node_kind::METHOD, "lib::app::Api::doubled"),
         (node_kind::CLASS, "lib::app::Meters"),
         (node_kind::METHOD, "lib::app::Meters::plus"),
+        (node_kind::CLASS, "lib::app::extension<String>"),
+        (node_kind::METHOD, "lib::app::extension<String>::whisper"),
     ] {
         assert!(nodes.contains(&(k, q)), "expected node {q}");
     }
@@ -97,8 +106,8 @@ fn member_bodies_are_credited_to_their_owner() {
     assert!(from_endpoint.is_empty(), "CALLS from an ENDPOINT: {from_endpoint:?}");
 }
 
-/// The qname and kind of every node, and the CALLS / HAS_ATTRIBUTE edges as
-/// (category, from qname, to qname), of one fixture's real build.
+/// The qname and kind of every node, and the CALLS / HAS_ATTRIBUTE / IMPORTS
+/// edges as (category, from qname, to qname), of one fixture's real build.
 struct Built {
     nodes: HashSet<(glia_core::NodeKindId, String)>,
     kind_of: HashMap<String, glia_core::NodeKindId>,
@@ -121,7 +130,11 @@ fn build(fixture: &str) -> Built {
     let edges = r
         .merged
         .all_edges()
-        .filter(|e| e.category == edge_category::CALLS || e.category == edge_category::HAS_ATTRIBUTE)
+        .filter(|e| {
+            e.category == edge_category::CALLS
+                || e.category == edge_category::HAS_ATTRIBUTE
+                || e.category == edge_category::IMPORTS
+        })
         .map(|e| (e.category, name(&e.from), name(&e.to)))
         .collect();
     let kind_of: HashMap<String, glia_core::NodeKindId> = qname
@@ -181,4 +194,36 @@ fn constructors_operators_abstract_members_and_enum_constants_are_nodes() {
         "{:?}",
         b.edges
     );
+}
+
+#[test]
+fn unnamed_extension_containers_initialisers_and_import_prefixes_resolve() {
+    let b = build("fixtures/dart-extensions-imports");
+    for (k, q) in [
+        (node_kind::CLASS, "lib::src::ext::extension<Money>"),
+        (node_kind::METHOD, "lib::src::ext::extension<Money>::doubled"),
+        (node_kind::CLASS, "lib::src::ext::extension<String>"),
+        (node_kind::METHOD, "lib::src::ext::extension<String>::toCents"),
+        (node_kind::STATE_VAR, "lib::src::money::defaultTax"),
+        (node_kind::STATE_VAR, "lib::src::money::cache"),
+        (node_kind::STATE_VAR, "lib::src::money::hits"),
+    ] {
+        assert!(b.nodes.contains(&(k, q.to_string())), "expected node {q}");
+    }
+    // No node for the on-types themselves in ext.dart.
+    for q in ["lib::src::ext::Money", "lib::src::ext::String"] {
+        assert!(!b.kind_of.contains_key(q), "no phantom {q}");
+    }
+    let has = |cat, from: &str, to: &str| b.edges.iter().any(|(c, f, t)| *c == cat && f == from && t == to);
+    for (cat, from, to) in [
+        (edge_category::IMPORTS, "lib::src::ext", "lib::src::money"),
+        (edge_category::CALLS, "lib::src::ext::total", "lib::src::money::round2"),
+        (edge_category::CALLS, "lib::src::ext::extension<Money>::doubled", "lib::src::money::round2"),
+        (edge_category::CALLS, "lib::src::ext::extension<Money>::doubled", "lib::src::money::Money"),
+        (edge_category::CALLS, "lib::src::ext::extension<String>::toCents", "lib::src::money::round2"),
+        (edge_category::CALLS, "lib::src::money::defaultTax", "lib::src::money::seed"),
+        (edge_category::CALLS, "lib::src::money::hits", "lib::src::money::round2"),
+    ] {
+        assert!(has(cat, from, to), "expected {cat:?} {from} -> {to}; edges = {:?}", b.edges);
+    }
 }

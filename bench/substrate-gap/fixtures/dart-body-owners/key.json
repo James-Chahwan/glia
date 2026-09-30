@@ -3,7 +3,7 @@
   "language": "dart",
   "dirs": ["."],
   "cells": ["dart/calls"],
-  "note": "LA.37b: every Dart member body is credited to its owner. HEAD: visit_top has no arm for mixin_declaration, extension_declaration or extension_type_declaration and visit_enum never reads enum_body, so none of their members is emitted; visit_class_member emits a METHOD only for a function_signature and walks every function_body with `acc.nodes.last()` as the caller, so a getter / setter / constructor body is credited to whatever node was pushed last - the previous method, or an ENDPOINT (HEAD emits CALLS warm -> GET /boot and GET /boot -> GET /status). Named extensions, mixins and extension types are CLASS nodes; an unnamed extension on a type this file declares hangs its members on that type; one on a type declared elsewhere is skipped (counted), never an invented node.",
+  "note": "LA.37b: every Dart member body is credited to its owner. HEAD: visit_top has no arm for mixin_declaration, extension_declaration or extension_type_declaration and visit_enum never reads enum_body, so none of their members is emitted; visit_class_member emits a METHOD only for a function_signature and walks every function_body with `acc.nodes.last()` as the caller, so a getter / setter / constructor body is credited to whatever node was pushed last - the previous method, or an ENDPOINT (HEAD emits CALLS warm -> GET /boot and GET /boot -> GET /status). Named extensions, mixins and extension types are CLASS nodes; an unnamed extension on a type this file declares hangs its members on that type; CB.17: one on a type declared elsewhere is its own CLASS container `<module>::extension<T>` owning its members, never a node for the foreign type.",
   "expect_nodes": [
     {"kind": "CLASS", "name": "lib::app::Greets", "note": "mixin -> CLASS"},
     {"kind": "METHOD", "name": "Greets::greet"},
@@ -13,7 +13,9 @@
     {"kind": "METHOD", "name": "Api::status", "note": "getter -> METHOD"},
     {"kind": "METHOD", "name": "Api::doubled", "note": "unnamed extension on a same-file type"},
     {"kind": "CLASS", "name": "lib::app::Meters", "note": "extension type -> CLASS"},
-    {"kind": "METHOD", "name": "Meters::plus"}
+    {"kind": "METHOD", "name": "Meters::plus"},
+    {"kind": "CLASS", "name": "lib::app::extension<String>",
+     "note": "CB.17: an unnamed extension on a type declared elsewhere is its own container"}
   ],
   "expect_edges": [
     {"from": "Api::status", "to": "endpoint:GET:/status", "category": "CALLS",
@@ -43,8 +45,8 @@
     {"from": "lib::app::Api::compute", "to": "lib::app::Api::compute", "category": "CALLS",
      "note": "PRECISION: the getter area's body is not credited to the previous method compute"},
     {"kind": "CLASS", "name": "lib::app::String",
-     "note": "PRECISION: an unnamed extension on a type this file does not declare mints no phantom type"},
+     "note": "PRECISION: an unnamed extension on a type this file does not declare mints no phantom type - its container is CLASS lib::app::extension<String> (CB.17)"},
     {"kind": "METHOD", "name": "lib::app::String::whisper",
-     "note": "PRECISION: its members are skipped (counted in the marker), not hung on an invented node"}
+     "note": "PRECISION: its members hang on the container (METHOD lib::app::extension<String>::whisper, CB.17), never on an invented String node"}
   ]
 }

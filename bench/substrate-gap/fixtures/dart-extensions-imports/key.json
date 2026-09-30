@@ -1,0 +1,56 @@
+{
+  "framework": "dart-extensions-imports",
+  "language": "dart",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-D4/D5/D6: an unnamed extension on a type this file does not declare (an import-prefixed type, a core type) is skipped (members.unnamed_ext_skipped); a top-level initialiser's calls are never walked and a `var` list is not read; collect_import keeps the raw text after `import `, so `import 'money.dart' as m show Money, round2;` resolves nothing. DECISION: an unnamed extension on a type declared elsewhere is its own CLASS container `<module>::extension<T>` (T the on-type's simple name, prefix and type arguments dropped), its members METHODs under it; a top-level initialiser's calls come FROM its STATE_VAR. Measured on HEAD 2170ff8: 0 IMPORTS, 0 edges out of ext.dart, no CALLS from defaultTax.",
+  "expect_nodes": [
+    {
+      "kind": "CLASS",
+      "name": "lib::src::ext::extension<Money>"
+    },
+    {
+      "kind": "METHOD",
+      "name": "lib::src::ext::extension<Money>::doubled"
+    },
+    {
+      "kind": "CLASS",
+      "name": "lib::src::ext::extension<String>"
+    },
+    {
+      "kind": "STATE_VAR",
+      "name": "lib::src::money::hits"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "lib::src::ext",
+      "to": "lib::src::money",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "lib::src::ext::total",
+      "to": "lib::src::money::round2",
+      "category": "CALLS",
+      "note": "m.round2 through the `as m` prefix"
+    },
+    {
+      "from": "lib::src::ext::extension<Money>::doubled",
+      "to": "lib::src::money::round2",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::src::money::defaultTax",
+      "to": "lib::src::money::seed",
+      "category": "CALLS",
+      "note": "a top-level initialiser"
+    },
+    {
+      "from": "lib::src::money::hits",
+      "to": "lib::src::money::round2",
+      "category": "CALLS",
+      "note": "a `var` list entry"
+    }
+  ]
+}

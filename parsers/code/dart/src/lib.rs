@@ -68,29 +68,32 @@ pub fn parse_file(
     }
 
     // LA.37a fired_on marker (GLIA_DART_DEBUG=1): this file declared top-level
-    // functions / getters / setters, whose sibling bodies were walked.
+    // functions / getters / setters, whose sibling bodies were walked, or
+    // (CB.17) top-level variables whose initialisers were walked.
     let t = &acc.top_level;
-    if dart_debug_enabled() && t.bodies + t.bodyless > 0 {
+    if dart_debug_enabled() && t.bodies + t.bodyless + t.initialisers > 0 {
         eprintln!(
-            "[dart-top-level] bodies={} accessors={} bodyless={} file={file_rel_path}",
-            t.bodies, t.accessors, t.bodyless
+            "[dart-top-level] bodies={} accessors={} bodyless={} initialisers={} \
+             file={file_rel_path}",
+            t.bodies, t.accessors, t.bodyless, t.initialisers
         );
     }
 
-    // LA.37b / CB.9 fired_on marker (GLIA_DART_DEBUG=1): this file declared
-    // member containers beyond a plain class, getter / setter bodies, or the
-    // members CB.9 made METHODs (constructors / factories, operators,
+    // LA.37b / CB.9 / CB.17 fired_on marker (GLIA_DART_DEBUG=1): this file
+    // declared member containers beyond a plain class (CB.17: an unnamed
+    // extension on a type declared elsewhere is one), getter / setter bodies,
+    // or the members CB.9 made METHODs (constructors / factories, operators,
     // bodiless members) and enum constants it made ATTRIBUTEs.
     let m = &acc.members;
     if dart_debug_enabled() && m.fired() {
         eprintln!(
-            "[dart-members] mixins={} extensions={} extension_types={} unnamed_ext_skipped={} \
+            "[dart-members] mixins={} extensions={} extension_types={} unnamed_ext_containers={} \
              enum_members={} accessors={} ctors={} operators={} abstract={} enum_constants={} \
              file={file_rel_path}",
             m.mixins,
             m.extensions,
             m.extension_types,
-            m.unnamed_ext_skipped,
+            m.unnamed_ext_containers,
             m.enum_members,
             m.accessors,
             m.ctors,
@@ -155,8 +158,9 @@ struct MemberStats {
     extensions: usize,
     /// `extension type T(..) { }` declarations emitted as a CLASS.
     extension_types: usize,
-    /// Unnamed extensions on a type this file does not declare: no node.
-    unnamed_ext_skipped: usize,
+    /// CB.17: unnamed extensions on a type this file does not declare, each a
+    /// CLASS container `<module>::extension<T>` ([`visit_extension`]).
+    unnamed_ext_containers: usize,
     /// Enum members that declared a METHOD (constructors included).
     enum_members: usize,
     /// Member getter / setter bodies, each credited to its METHOD.
@@ -179,7 +183,7 @@ impl MemberStats {
         self.mixins
             + self.extensions
             + self.extension_types
-            + self.unnamed_ext_skipped
+            + self.unnamed_ext_containers
             + self.enum_members
             + self.accessors
             + self.ctors
@@ -211,6 +215,10 @@ struct TopLevelStats {
     accessors: usize,
     /// Top-level signatures with no body (`external`).
     bodyless: usize,
+    /// CB.17: top-level variables (`const` / `final` G19 lists and `var` /
+    /// typed / `late` lists) whose initialiser was walked for calls from
+    /// their STATE_VAR.
+    initialisers: usize,
 }
 
 /// `GLIA_DART_DEBUG=1` turns on the `[dart-top-level]` and `[dart-members]`
@@ -280,6 +288,12 @@ fn visit_top(
             // direct children of the program root.
             "static_final_declaration_list" => {
                 visit_top_level_consts(child, src, file_rel, parent_qname, parent_id, repo, acc);
+            }
+            // CB.17 — library-level `var a = .., b = f();`, and the typed /
+            // `late` / `late final` forms, which the grammar puts in this
+            // list (beside their keyword / type tokens), not the G19 one.
+            "initialized_identifier_list" => {
+                visit_top_level_vars(child, src, file_rel, parent_qname, parent_id, repo, acc);
             }
             _ => {}
         }
@@ -359,8 +373,9 @@ fn visit_class(
 //   extension type X(..) { } CLASS <module>::X
 //   extension on T { }       T's own node when this file declares T (an
 //                            unnamed extension is library-private and its
-//                            members act as T's members here); otherwise the
-//                            members are skipped and counted - no invented node
+//                            members act as T's members here); otherwise
+//                            (CB.17) its own CLASS <module>::extension<T>, T the
+//                            on-type's simple name - never a node for T itself
 //   enum E { ..; m() {} }    the ENUM
 //
 // Mixin heritage (`on` / `implements`) is not emitted here.
@@ -505,6 +520,30 @@ fn visit_container(
     let (Some(name), Some(body)) = (decl_name(node, src), node.child_by_field_name("body")) else {
         return;
     };
+    match node.kind() {
+        "mixin_declaration" => acc.members.mixins += 1,
+        "extension_declaration" => acc.members.extensions += 1,
+        _ => acc.members.extension_types += 1,
+    }
+    emit_container(node, body, &name, src, file_rel, parent_qname, parent_id, repo, acc);
+}
+
+/// The CLASS `<module>::<name>` a member container declaration `node` mints
+/// (its Node once per file, DEFINES from the module, nav), and the walk of
+/// its `body`'s members under it. `name` is the declared name, or CB.17's
+/// `extension<T>` for an unnamed extension on a type declared elsewhere.
+#[allow(clippy::too_many_arguments)]
+fn emit_container(
+    node: TsNode,
+    body: TsNode,
+    name: &str,
+    src: &[u8],
+    file_rel: &str,
+    parent_qname: &str,
+    parent_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, &qname);
     if acc.declared_ids.insert(id) {
@@ -521,12 +560,7 @@ fn visit_container(
             confidence: Confidence::Strong,
             cells: Vec::new(),
         });
-        acc.nav.record(id, &name, &qname, node_kind::CLASS, Some(parent_id));
-    }
-    match node.kind() {
-        "mixin_declaration" => acc.members.mixins += 1,
-        "extension_declaration" => acc.members.extensions += 1,
-        _ => acc.members.extension_types += 1,
+        acc.nav.record(id, name, &qname, node_kind::CLASS, Some(parent_id));
     }
     let members = container_member_names(node, body, src);
     let owner = Owner {
@@ -542,8 +576,15 @@ fn visit_container(
 
 /// An extension declaration. A named one is its own CLASS
 /// ([`visit_container`]). An unnamed one on a type this file declares hangs
-/// its members on that type's node; on any other type (declared elsewhere,
-/// import-prefixed, a core type) its members are skipped and counted.
+/// its members on that type's node (LA.37b). CB.17: an unnamed one on any
+/// other type (declared in another file, import-prefixed, a core type, a
+/// type parameter, a function or record type) is its own CLASS container
+/// `<module>::extension<T>` ([`extension_display_type`]) owning its members,
+/// which see only the extension's own members before library scope: the
+/// on-type's are unknown here. `<` / `>` never occur in a Dart identifier, so
+/// no declared type can take that qname; two unnamed extensions on one type
+/// in one file share it (the first declaration's cells, both bodies' members).
+/// The qname is not Dart's positional `_extension#0`, which moves under edits.
 #[allow(clippy::too_many_arguments)]
 fn visit_extension(
     node: TsNode,
@@ -563,7 +604,13 @@ fn visit_extension(
         return;
     };
     let Some(ty) = extension_on_type(node, src).and_then(|t| file_types.types.get(t)) else {
-        acc.members.unnamed_ext_skipped += 1;
+        // A parse error can leave the `on` clause empty: no type, no name.
+        let Some(on) = extension_display_type(node, src) else {
+            return;
+        };
+        acc.members.unnamed_ext_containers += 1;
+        let name = format!("extension<{on}>");
+        emit_container(node, body, &name, src, file_rel, parent_qname, parent_id, repo, acc);
         return;
     };
     // The extension's own members, then the on-type's that no library-level
@@ -598,6 +645,26 @@ fn extension_on_type<'a>(node: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
     let head = parts.first().filter(|p| p.kind() == "type_identifier")?;
     let text = text_of(*head, src);
     Some(text.split('<').next().unwrap_or(text).trim())
+}
+
+/// CB.17: the `T` of an unnamed extension's container `extension<T>` - the
+/// on-type's simple name with its import prefix, type arguments and `?`
+/// dropped (`on m.Money` -> `Money`, `on List<int>?` -> `List`, `on T` ->
+/// `T`), `Function` for a function type, `Record` for a record type, `void`
+/// for `void`. None when the declaration names no type (a parse error).
+fn extension_display_type(node: TsNode, src: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    let parts: Vec<TsNode> = node.children_by_field_name("class", &mut cursor).collect();
+    match parts.first()?.kind() {
+        "function_type" | "Function" => return Some("Function".to_string()),
+        "record_type" => return Some("Record".to_string()),
+        "void_type" => return Some("void".to_string()),
+        _ => {}
+    }
+    // The type_identifiers directly in the field are the prefix and the
+    // name (`m` `.` `Money`); type arguments are one nested node.
+    let name = parts.iter().rev().find(|p| p.kind() == "type_identifier")?;
+    Some(text_of(*name, src).trim().to_string()).filter(|n| !n.is_empty())
 }
 
 /// Walk one body's `class_member`s (class_body, extension_body, enum_body)
@@ -1107,7 +1174,8 @@ fn visit_function(
 
 /// G19: library-level `const`/`final` constants. The list holds one
 /// `static_final_declaration` per declarator (`name = value`). Emits a STATE_VAR
-/// node + DEFINES edge module→const for each.
+/// node + DEFINES edge module→const for each ([`emit_top_level_var`]), and
+/// (CB.17) walks its initialiser for calls from it.
 ///
 /// Noise gate: skip when undocumented AND the initializer is a primitive literal
 /// (number / string / bool). Documented or non-trivial initializers are kept.
@@ -1125,37 +1193,120 @@ fn visit_top_level_consts(
     // Anchor doc detection at that keyword so `leading_doc` reaches the comment.
     let doc_anchor = const_keyword_sibling(list).unwrap_or(list);
     let doc = glia_doc::leading_doc(&doc_anchor, src);
-    let has_doc = doc.is_some();
-
     let mut cursor = list.walk();
     for decl in list.named_children(&mut cursor) {
-        if decl.kind() != "static_final_declaration" {
-            continue;
+        if decl.kind() == "static_final_declaration" {
+            emit_top_level_var(decl, doc.as_deref(), src, file_rel, parent_qname, parent_id, repo, acc);
         }
-        let Some(name_node) = decl.child_by_field_name("name") else {
-            continue;
-        };
-        // Noise gate: undocumented + literal-primitive initializer → skip.
-        if !has_doc
-            && let Some(value) = decl.child_by_field_name("value")
-            && is_primitive_literal(value.kind())
-        {
-            continue;
-        }
-        let name = text_of(name_node, src);
-        let qname = format!("{parent_qname}::{name}");
-        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::STATE_VAR, &qname);
+    }
+}
 
-        // entity_cells gives CODE + POSITION (+ DOC when leading_doc sees it from
-        // the node itself). Top-level consts carry the doc above the keyword, so
-        // splice in the doc we resolved from the keyword anchor when present.
+/// CB.17: a library-level `var a = .., b = f();` - or a typed (`int n;`),
+/// `late` or `late final` one, which the grammar also shapes as an
+/// `initialized_identifier_list` beside its keyword / type tokens. One
+/// STATE_VAR per `initialized_identifier` (`name`, optional `value`), the
+/// same emission, noise gate and initialiser walk as G19's
+/// [`visit_top_level_consts`]; the doc is the `///` above the declaration's
+/// first token ([`declaration_head`]).
+fn visit_top_level_vars(
+    list: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    parent_qname: &str,
+    parent_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let doc = glia_doc::leading_doc(&declaration_head(list), src);
+    let mut cursor = list.walk();
+    for decl in list.named_children(&mut cursor) {
+        if decl.kind() == "initialized_identifier" {
+            emit_top_level_var(decl, doc.as_deref(), src, file_rel, parent_qname, parent_id, repo, acc);
+        }
+    }
+}
+
+/// The first token of the top-level variable declaration `list` belongs to:
+/// walks back over the keywords and the type (`late final Map<K, V>? x`,
+/// `p.Type x`) to the token after the previous declaration, so the doc
+/// comment above the declaration is the one found. `list` itself when
+/// nothing precedes it.
+fn declaration_head(list: TsNode) -> TsNode {
+    let mut head = list;
+    while let Some(prev) = head.prev_sibling() {
+        let part_of_head = matches!(
+            prev.kind(),
+            "var"
+                | "final"
+                | "const"
+                | "late"
+                | "external"
+                | "static"
+                | "covariant"
+                | "type_identifier"
+                | "type_arguments"
+                | "?"
+                | "."
+                | "function_type"
+                | "record_type"
+                | "void_type"
+                | "inferred_type"
+                | "nullable_type"
+                | "Function"
+        );
+        if !part_of_head {
+            break;
+        }
+        head = prev;
+    }
+    head
+}
+
+/// One library-level variable `decl` (a `static_final_declaration` or an
+/// `initialized_identifier`, both `name` + optional `value`): the STATE_VAR
+/// `<module>::<name>` (G19) - CODE / POSITION of the declarator, `doc` the
+/// declaration's - its DEFINES edge from the module and its nav record,
+/// pushed once per file. Noise gate: undocumented + a primitive-literal
+/// initialiser emits nothing. CB.17: the initialiser is walked for calls and
+/// client ENDPOINTs FROM the STATE_VAR, under library scope (no members, no
+/// locals; closures are not entered, as in every body walk).
+#[allow(clippy::too_many_arguments)]
+fn emit_top_level_var(
+    decl: TsNode,
+    doc: Option<&str>,
+    src: &[u8],
+    file_rel: &str,
+    parent_qname: &str,
+    parent_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(name_node) = decl.child_by_field_name("name") else {
+        return;
+    };
+    let value = decl.child_by_field_name("value");
+    // Noise gate: undocumented + literal-primitive initializer → skip.
+    if doc.is_none() && value.is_some_and(|v| is_primitive_literal(v.kind())) {
+        return;
+    }
+    let name = text_of(name_node, src);
+    if name.is_empty() {
+        return;
+    }
+    let qname = format!("{parent_qname}::{name}");
+    let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::STATE_VAR, &qname);
+
+    if acc.declared_ids.insert(id) {
+        // entity_cells gives CODE + POSITION (+ DOC when leading_doc sees it
+        // from the node itself). A top-level variable carries the doc above
+        // its keyword, so splice in the doc resolved from there when present.
         let mut cells = entity_cells(&decl, src, file_rel);
-        if let Some(ref d) = doc
+        if let Some(d) = doc
             && !cells.iter().any(|c| c.kind == cell_type::DOC)
         {
             cells.push(Cell {
                 kind: cell_type::DOC,
-                payload: CellPayload::Text(d.clone()),
+                payload: CellPayload::Text(d.to_string()),
             });
         }
         acc.nodes.push(Node {
@@ -1174,6 +1325,20 @@ fn visit_top_level_consts(
         acc.nav
             .record(id, name, &qname, node_kind::STATE_VAR, Some(parent_id));
     }
+
+    // The value is a primary + its SIBLING selectors (`seed` `()`), all
+    // children of `decl` beside the name, so the chain walk runs over `decl`:
+    // the name is followed by `=`, never a selector, and emits nothing.
+    if value.is_none() {
+        return;
+    }
+    acc.top_level.initialisers += 1;
+    let no_members = HashSet::new();
+    let scope = CallScope {
+        members: &no_members,
+        locals: HashSet::new(),
+    };
+    collect_calls_in(decl, src, id, &scope, repo, file_rel, acc);
 }
 
 /// Walk prev-siblings of a top-level declaration list to the `const`/`final`/
@@ -1233,25 +1398,111 @@ fn find_method_name<'a>(node: TsNode<'a>, src: &'a [u8]) -> Option<String> {
     None
 }
 
+/// CB.17 (D6): one `import` directive, read from the AST - the
+/// `import_specification` under `import_or_export` / `library_import`, with
+/// its `uri`, its `alias` field (`as p`, `deferred as p`) and its `show` /
+/// `hide` combinators:
+///
+///   `import 'a.dart' as p ..;`         Module { a.dart, Some(p) }: the
+///                                      prefix is what the code writes
+///                                      (`p.f()`), whatever it shows
+///   `import 'a.dart' show X, y;`       one Symbol { a.dart, name } per name
+///                                      the combinators leave visible
+///   `import 'a.dart';` / `hide Z;`     Module { a.dart, None }
+///
+/// The uri is the string's text without its quotes; a conditional import's
+/// (`'a.dart' if (dart.library.io) 'b.dart'`) is its default, the first
+/// `uri`. `export` directives are not read.
 fn collect_import(node: TsNode, src: &[u8], from_module: &str, acc: &mut Acc) {
-    let text = text_of(node, src).trim().to_string();
-    if !text.starts_with("import") {
+    let Some(spec) = named_child_of_kind(node, "library_import")
+        .and_then(|lib| named_child_of_kind(lib, "import_specification"))
+    else {
         return;
+    };
+    let Some(path) = spec.child_by_field_name("uri").and_then(|u| import_uri(u, src)) else {
+        return;
+    };
+    let alias = spec
+        .child_by_field_name("alias")
+        .map(|a| text_of(a, src).to_string())
+        .filter(|a| !a.is_empty());
+    let line = line_at(node);
+    let mut push = |target: ImportTarget| {
+        acc.imports.push(ImportStmt {
+            from_module: from_module.to_string(),
+            target,
+            line,
+        });
+    };
+    match (alias, shown_names(spec, src)) {
+        (None, Some(names)) if !names.is_empty() => {
+            for name in names {
+                push(ImportTarget::Symbol {
+                    module: path.clone(),
+                    name,
+                    alias: None,
+                    level: 0,
+                });
+            }
+        }
+        (alias, _) => push(ImportTarget::Module { path, alias }),
     }
-    let path = text
-        .trim_start_matches("import ")
-        .trim_end_matches(';')
+}
+
+/// The first named child of `node` of `kind`.
+fn named_child_of_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).find(|c| c.kind() == kind)
+}
+
+/// An import's uri string without quotes: the `uri` itself, or a
+/// `configurable_uri`'s first (default) `uri`. None for an empty string.
+fn import_uri(uri: TsNode, src: &[u8]) -> Option<String> {
+    let uri = if uri.kind() == "configurable_uri" {
+        named_child_of_kind(uri, "uri")?
+    } else {
+        uri
+    };
+    let text = text_of(uri, src)
         .trim()
-        .trim_matches('\'')
-        .trim_matches('"');
-    acc.imports.push(ImportStmt {
-        from_module: from_module.to_string(),
-        target: ImportTarget::Module {
-            path: path.to_string(),
-            alias: None,
-        },
-        line: line_at(node),
-    });
+        .trim_matches(|c| c == '\'' || c == '"')
+        .to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+/// The names an import's combinators leave visible, in source order, when
+/// some `show` limits them: each `show` keeps only the names it lists (so
+/// two narrow each other), each `hide` drops its names from a `show` list.
+/// None when no `show` appears: every public name is visible, `hide` or not.
+fn shown_names(spec: TsNode, src: &[u8]) -> Option<Vec<String>> {
+    let mut shown: Option<Vec<String>> = None;
+    let mut cursor = spec.walk();
+    for comb in spec.named_children(&mut cursor) {
+        if comb.kind() != "combinator" {
+            continue;
+        }
+        let mut ids = comb.walk();
+        let names: Vec<String> = comb
+            .named_children(&mut ids)
+            .filter(|i| i.kind() == "identifier")
+            .map(|i| text_of(i, src).to_string())
+            .collect();
+        match comb.child(0).map(|t| t.kind()) {
+            Some("show") => {
+                shown = Some(match shown {
+                    Some(prev) => prev.into_iter().filter(|n| names.contains(n)).collect(),
+                    None => names,
+                });
+            }
+            Some("hide") => {
+                if let Some(list) = shown.as_mut() {
+                    list.retain(|n| !names.contains(n));
+                }
+            }
+            _ => {}
+        }
+    }
+    shown
 }
 
 /// Walk a body for Pattern A endpoints and the call sites of every selector
@@ -3623,8 +3874,12 @@ extension on Api {
         assert_eq!(calls_from(&fp, "lib::m::Api::c"), vec![self_m("own")]);
     }
 
+    /// CB.17 (was LA.37b's unnamed_extension_on_a_foreign_type_is_skipped):
+    /// an unnamed extension on a type this file does not declare is its own
+    /// CLASS `<module>::extension<T>` owning its members - never a node for
+    /// the on-type itself.
     #[test]
-    fn unnamed_extension_on_a_foreign_type_is_skipped() {
+    fn unnamed_extension_on_a_foreign_type_is_a_container() {
         let fp = body_owners();
         for (kind, q) in [
             (node_kind::CLASS, "lib::app::String"),
@@ -3633,13 +3888,25 @@ extension on Api {
             let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, q);
             assert!(!fp.nodes.iter().any(|n| n.id == id), "{q}");
         }
-        assert!(!fp.nav.name_by_id.values().any(|n| n == "whisper" || n == "String"));
-        assert!(!fp.calls.iter().any(|c| c.qualifier == bare("toLowerCase")), "{:?}", fp.calls);
+        assert!(!fp.nav.name_by_id.values().any(|n| n == "String"));
+        let container = class_id("lib::app::extension<String>");
+        let whisper = method_id("lib::app::extension<String>::whisper");
+        assert_eq!(fp.nav.kind_by_id.get(&container), Some(&node_kind::CLASS));
+        assert_eq!(fp.nav.name_by_id.get(&container).map(String::as_str), Some("extension<String>"));
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::app");
+        assert_eq!(defines(&fp, module, container), 1);
+        assert_eq!(defines(&fp, container, whisper), 1);
+        assert_eq!(parent(&fp, whisper), Some(container));
+        // `toLowerCase` is the on-type's member, unknown here: library scope.
+        assert_eq!(calls_from(&fp, "lib::app::extension<String>::whisper"), vec![bare("toLowerCase")]);
         // An import-prefixed on-type is never this file's, even when this
-        // file declares a type of the same simple name.
+        // file declares a type of the same simple name; a type argument of a
+        // foreign type does not make it this file's either.
         let source = "class Api {}\nextension on p.Api { void q() {} }\nextension on List<Api> { void r() {} }\n";
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
-        assert!(!fp.nav.name_by_id.values().any(|n| n == "q" || n == "r"), "{:?}", fp.nav.name_by_id);
+        assert!(!fp.nodes.iter().any(|n| n.id == method_id("lib::m::Api::q")), "{:?}", fp.nav.qname_by_id);
+        assert_eq!(parent(&fp, method_id("lib::m::extension<Api>::q")), Some(class_id("lib::m::extension<Api>")));
+        assert_eq!(parent(&fp, method_id("lib::m::extension<List>::r")), Some(class_id("lib::m::extension<List>")));
         // A generic / nullable spelling of a same-file type still hangs on it.
         let source = "class Box<T> {}\nextension on Box<int>? { void s() {} }\n";
         let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
@@ -3764,8 +4031,9 @@ class Box {
     }
 
     /// Every member body in the fixture has an owner: the nine member nodes
-    /// the key expects, the constructor `Api()` (CB.9), and nothing credited
-    /// to `acc.nodes.last()`.
+    /// the key expects, the constructor `Api()` (CB.9), the unnamed
+    /// extension on `String`'s `whisper` under its container (CB.17), and
+    /// nothing credited to `acc.nodes.last()`.
     #[test]
     fn body_owners_fixture_members() {
         let fp = body_owners();
@@ -3795,6 +4063,7 @@ class Box {
                 "lib::app::Meters::twicePlus",
                 "lib::app::Shout::shout",
                 "lib::app::Shout::twice",
+                "lib::app::extension<String>::whisper",
             ]
         );
     }
@@ -4093,5 +4362,228 @@ class Wallet {
         // A member field named `Money` shadows the class inside `Wallet`.
         assert_eq!(typed(method_id("lib::w::Wallet::f"), "Money"), None);
         assert!(!fp.nav.local_types.contains_key(&method_id("lib::w::Wallet::g")));
+    }
+
+    // ---- CB.17: unnamed-extension containers, top-level initialisers, import combinators
+
+    /// The committed `dart-extensions-imports` fixture's two files.
+    const EXT_FIXTURE: &str =
+        include_str!("../../../../bench/substrate-gap/fixtures/dart-extensions-imports/lib/src/ext.dart");
+    const MONEY_FIXTURE: &str =
+        include_str!("../../../../bench/substrate-gap/fixtures/dart-extensions-imports/lib/src/money.dart");
+
+    fn state_var_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, qname)
+    }
+
+    /// The call qualifiers emitted from the node `id`, sorted.
+    fn calls_of(fp: &FileParse, id: NodeId) -> Vec<CallQualifier> {
+        let mut out: Vec<CallQualifier> =
+            fp.calls.iter().filter(|c| c.from == id).map(|c| c.qualifier.clone()).collect();
+        out.sort_by_key(|q| format!("{q:?}"));
+        out
+    }
+
+    fn module(path: &str, alias: Option<&str>) -> ImportTarget {
+        ImportTarget::Module {
+            path: path.to_string(),
+            alias: alias.map(str::to_string),
+        }
+    }
+
+    fn symbol(module: &str, name: &str) -> ImportTarget {
+        ImportTarget::Symbol {
+            module: module.to_string(),
+            name: name.to_string(),
+            alias: None,
+            level: 0,
+        }
+    }
+
+    fn import_targets(source: &str) -> Vec<ImportTarget> {
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        fp.imports.into_iter().map(|i| i.target).collect()
+    }
+
+    /// D4: `extension on m.Money` (the fixture's ext.dart) is the CLASS
+    /// `lib::src::ext::extension<Money>`, its member a METHOD under it whose
+    /// body's calls are its own; the import prefix and the on-type's generic
+    /// arguments / `?` never reach the name.
+    #[test]
+    fn unnamed_extension_on_imported_type_is_a_container() {
+        let fp = parse_file(EXT_FIXTURE, "lib/src/ext.dart", "lib::src::ext", repo()).unwrap();
+        let container = class_id("lib::src::ext::extension<Money>");
+        let doubled = method_id("lib::src::ext::extension<Money>::doubled");
+        assert_eq!(fp.nav.kind_by_id.get(&container), Some(&node_kind::CLASS));
+        assert_eq!(fp.nav.kind_by_id.get(&doubled), Some(&node_kind::METHOD));
+        assert_eq!(parent(&fp, doubled), Some(container));
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::src::ext");
+        assert_eq!(defines(&fp, module, container), 1);
+        assert_eq!(defines(&fp, container, doubled), 1);
+        assert_eq!(
+            calls_from(&fp, "lib::src::ext::extension<Money>::doubled"),
+            vec![attr("m", "Money"), attr("m", "round2")]
+        );
+        // Never a node for the prefix or the on-type itself.
+        for q in ["lib::src::ext::Money", "lib::src::ext::m", "lib::src::ext::m::Money"] {
+            assert!(!fp.nodes.iter().any(|n| n.id == class_id(q)), "{q}");
+        }
+        assert_eq!(fp.nodes.iter().filter(|n| n.id == container).count(), 1);
+        // Generic and nullable spellings, function and record on-types.
+        let source = "extension on p.Api<int>? { void a() {} }\nextension on void Function(int) { void b() {} }\n\
+                      extension on (int, String) { void c() {} }\nextension <T> on T { void d() {} }\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        for (owner, m) in [
+            ("lib::m::extension<Api>", "a"),
+            ("lib::m::extension<Function>", "b"),
+            ("lib::m::extension<Record>", "c"),
+            ("lib::m::extension<T>", "d"),
+        ] {
+            assert_eq!(parent(&fp, method_id(&format!("{owner}::{m}"))), Some(class_id(owner)), "{owner}");
+        }
+    }
+
+    /// D4: an unnamed extension on a core type is a container too; its own
+    /// members are its member scope, the on-type's (`length`) are not known.
+    /// Two unnamed extensions on one type in one file share the container.
+    #[test]
+    fn unnamed_extension_on_core_type() {
+        let fp = parse_file(EXT_FIXTURE, "lib/src/ext.dart", "lib::src::ext", repo()).unwrap();
+        let container = class_id("lib::src::ext::extension<String>");
+        let to_cents = method_id("lib::src::ext::extension<String>::toCents");
+        assert_eq!(fp.nav.name_by_id.get(&container).map(String::as_str), Some("extension<String>"));
+        assert_eq!(parent(&fp, to_cents), Some(container));
+        assert_eq!(calls_from(&fp, "lib::src::ext::extension<String>::toCents"), vec![attr("m", "round2")]);
+        let source = "int twice() => 2;\nextension on String { int a() => twice(); int twice() => 1; }\n\
+                      extension on String { int b() => a(); }\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        let container = class_id("lib::m::extension<String>");
+        assert_eq!(fp.nodes.iter().filter(|n| n.id == container).count(), 1);
+        assert_eq!(defines(&fp, NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::m"), container), 1);
+        for m in ["a", "twice", "b"] {
+            assert_eq!(parent(&fp, method_id(&format!("lib::m::extension<String>::{m}"))), Some(container), "{m}");
+        }
+        // The extension's own `twice` wins over the top-level one; each
+        // extension's member scope is its own body's.
+        assert_eq!(calls_from(&fp, "lib::m::extension<String>::a"), vec![self_m("twice")]);
+        assert_eq!(calls_from(&fp, "lib::m::extension<String>::b"), vec![bare("a")]);
+    }
+
+    /// LA.37b control: an unnamed extension on a type this file declares
+    /// still hangs its members on that type - no container.
+    #[test]
+    fn same_file_unnamed_extension_unchanged() {
+        let source = "class Money { int cents = 0; int half() => cents ~/ 2; }\n\
+                      extension on Money { int quarter() => half() ~/ 2; }\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        let money = class_id("lib::m::Money");
+        assert_eq!(parent(&fp, method_id("lib::m::Money::quarter")), Some(money));
+        assert_eq!(calls_from(&fp, "lib::m::Money::quarter"), vec![self_m("half")]);
+        assert!(!fp.nav.qname_by_id.values().any(|q| q.contains("extension<")), "{:?}", fp.nav.qname_by_id);
+        let fp = body_owners();
+        assert_eq!(parent(&fp, method_id("lib::app::Api::doubled")), Some(class_id("lib::app::Api")));
+        assert!(!fp.nav.qname_by_id.values().any(|q| q.contains("extension<Api>")));
+    }
+
+    /// D5: a `final` / `const` top-level initialiser's calls come FROM its
+    /// STATE_VAR (G19 minted the node and never walked the value).
+    #[test]
+    fn final_initialiser_calls_from_its_state_var() {
+        let fp = parse_file(MONEY_FIXTURE, "lib/src/money.dart", "lib::src::money", repo()).unwrap();
+        let tax = state_var_id("lib::src::money::defaultTax");
+        assert_eq!(fp.nav.kind_by_id.get(&tax), Some(&node_kind::STATE_VAR));
+        assert_eq!(calls_of(&fp, tax), vec![bare("seed")]);
+        let source = "const k = h();\nfinal client = Dio();\nfinal f = () => g();\nfinal r = a.b().c(d());\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(calls_of(&fp, state_var_id("lib::m::k")), vec![bare("h")]);
+        assert_eq!(calls_of(&fp, state_var_id("lib::m::client")), vec![bare("Dio")]);
+        // A closure's body is not the initialiser's call.
+        assert_eq!(calls_of(&fp, state_var_id("lib::m::f")), vec![]);
+        assert_eq!(
+            calls_of(&fp, state_var_id("lib::m::r")),
+            sorted(vec![attr("a", "b"), complex("a.b()", "c"), bare("d")])
+        );
+        // The declared name is never a call; the noise gate still holds.
+        assert!(!fp.calls.iter().any(|c| matches!(&c.qualifier, CallQualifier::Bare(n) if n == "k" || n == "r")));
+        let fp = parse_file("const k = 1;\n", "lib/m.dart", "lib::m", repo()).unwrap();
+        assert!(fp.nodes.iter().all(|n| n.id != state_var_id("lib::m::k")));
+    }
+
+    /// D5: a top-level `var` list (and a typed / `late` one) is one STATE_VAR
+    /// per declarator, its initialiser walked the same way; the doc above
+    /// the declaration's first token is carried, and an undocumented
+    /// primitive literal is gated as G19 gates it.
+    #[test]
+    fn var_list_entries_are_state_vars() {
+        let fp = parse_file(MONEY_FIXTURE, "lib/src/money.dart", "lib::src::money", repo()).unwrap();
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::src::money");
+        for q in ["lib::src::money::cache", "lib::src::money::hits"] {
+            let id = state_var_id(q);
+            assert_eq!(fp.nav.kind_by_id.get(&id), Some(&node_kind::STATE_VAR), "{q}");
+            assert_eq!(defines(&fp, module, id), 1, "{q}");
+        }
+        assert_eq!(calls_of(&fp, state_var_id("lib::src::money::hits")), vec![bare("round2")]);
+        assert_eq!(calls_of(&fp, state_var_id("lib::src::money::cache")), vec![]);
+        assert_eq!(
+            cell_text(&fp, state_var_id("lib::src::money::hits"), cell_type::POSITION),
+            r#"{"file":"lib/src/money.dart","start_line":4,"end_line":4}"#
+        );
+        let source = "late final String z = f();\nint counter;\nString a = 'x', b = g();\n\
+                      /// Documented.\nvar documented = 3;\nvar plain = 4;\n";
+        let fp = parse_file(source, "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(calls_of(&fp, state_var_id("lib::m::z")), vec![bare("f")]);
+        assert_eq!(calls_of(&fp, state_var_id("lib::m::b")), vec![bare("g")]);
+        assert!(fp.nodes.iter().any(|n| n.id == state_var_id("lib::m::counter")));
+        assert_eq!(cell_text(&fp, state_var_id("lib::m::documented"), cell_type::DOC), "Documented.");
+        for gated in ["lib::m::a", "lib::m::plain"] {
+            assert!(fp.nodes.iter().all(|n| n.id != state_var_id(gated)), "{gated}");
+        }
+        // The doc of one declaration never reaches the next.
+        assert_eq!(cell_text(&fp, state_var_id("lib::m::counter"), cell_type::DOC), "");
+    }
+
+    /// D6: `as` binds the prefix (whatever it shows), `show` without a prefix
+    /// binds each shown name, `hide` binds nothing extra; the uri is the
+    /// string without quotes; `export` is not an import.
+    #[test]
+    fn import_as_show_hide() {
+        assert_eq!(import_targets("import 'a.dart' as m show X;\n"), vec![module("a.dart", Some("m"))]);
+        assert_eq!(
+            import_targets("import 'a.dart' show X, y;\n"),
+            vec![symbol("a.dart", "X"), symbol("a.dart", "y")]
+        );
+        assert_eq!(import_targets("import 'a.dart' hide Z;\n"), vec![module("a.dart", None)]);
+        assert_eq!(import_targets("import 'b.dart' deferred as d;\n"), vec![module("b.dart", Some("d"))]);
+        // `show A, B hide B` / `show A, B show B` narrow the shown names.
+        assert_eq!(import_targets("import 'a.dart' show A, B hide B;\n"), vec![symbol("a.dart", "A")]);
+        assert_eq!(import_targets("import 'a.dart' show A, B show B;\n"), vec![symbol("a.dart", "B")]);
+        // A conditional import is its default uri.
+        assert_eq!(
+            import_targets("import 'c.dart' if (dart.library.io) 'c_io.dart' as c;\n"),
+            vec![module("c.dart", Some("c"))]
+        );
+        assert_eq!(import_targets("export 'e.dart' show E;\n"), vec![]);
+        // The fixture's `import 'money.dart' as m show Money, round2;`.
+        let fp = parse_file(EXT_FIXTURE, "lib/src/ext.dart", "lib::src::ext", repo()).unwrap();
+        assert_eq!(fp.imports.len(), 1);
+        assert_eq!(fp.imports[0].target, module("money.dart", Some("m")));
+        assert_eq!(fp.imports[0].from_module, "lib::src::ext");
+        assert_eq!(fp.imports[0].line, 0);
+    }
+
+    /// D6 control: a plain import keeps today's shape, Module { uri, None },
+    /// single- or double-quoted.
+    #[test]
+    fn plain_import_unchanged() {
+        assert_eq!(
+            import_targets("import 'package:flutter/material.dart';\nimport \"dart:async\";\nimport 'models.dart';\n"),
+            vec![
+                module("package:flutter/material.dart", None),
+                module("dart:async", None),
+                module("models.dart", None),
+            ]
+        );
+        let fp = parse_file("\n\nimport 'models.dart';\n", "lib/m.dart", "lib::m", repo()).unwrap();
+        assert_eq!(fp.imports[0].line, 2);
     }
 }
