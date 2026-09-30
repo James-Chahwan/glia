@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{
-    CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget,
+    CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, NavFact,
     UnresolvedRef, bare_module_qname, edge_category, node_kind,
 };
 use glia_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
@@ -345,6 +345,25 @@ fn merge_nav(dst: &mut CodeNav, src: CodeNav) {
     // file; `extend` only matters for a fn id two parses share.
     for (scope, locals) in src.local_types {
         dst.local_types.entry(scope).or_default().extend(locals);
+    }
+    // CB.6: per-scope merge in parser order. A scope comes from one file, so
+    // its list moves whole; a fact already recorded for a scope two parses
+    // share is kept once, as `CodeNav::record_fact` keeps it within a parse.
+    for (scope, facts) in src.nav_facts {
+        append_facts(dst.nav_facts.entry(scope).or_default(), facts);
+    }
+}
+
+/// Append `facts` to a scope's list, dropping one already on it (CB.6).
+fn append_facts(list: &mut Vec<NavFact>, facts: Vec<NavFact>) {
+    if list.is_empty() {
+        *list = facts;
+        return;
+    }
+    for f in facts {
+        if !list.contains(&f) {
+            list.push(f);
+        }
     }
 }
 
@@ -1662,8 +1681,8 @@ fn place_out_of_line(g: &RepoGraph, stats: &mut OutOfLineStats) -> Vec<Placement
 /// node record, every edge's `from` / `to`, the pending `calls` and `refs`
 /// (`from`, `from_module`), the unresolved lists, `properties`, and the nav
 /// (name / qname / kind / parent records, `parent_of` values, `children_of`
-/// keys and entries, deduped keeping the first occurrence, and the
-/// field / local type tables).
+/// keys and entries, deduped keeping the first occurrence, the field /
+/// local type tables, and the per-scope `nav_facts`, deduped likewise).
 ///
 /// A new id that already exists absorbs the renamed record: its cells are
 /// appended to the existing node's (merge_parses' duplicate rule) and the
@@ -1803,6 +1822,9 @@ fn rename_nodes(
         }
         if let Some(locals) = nav.local_types.remove(&old) {
             nav.local_types.entry(new).or_default().extend(locals);
+        }
+        if let Some(facts) = nav.nav_facts.remove(&old) {
+            append_facts(nav.nav_facts.entry(new).or_default(), facts);
         }
     }
     for parent in nav.parent_of.values_mut() {
@@ -3158,6 +3180,36 @@ mod tests {
         (ev.emitter, ev.rule)
     }
 
+    /// CB.6: `nav_facts` merge per scope in parse order, a fact two parses
+    /// both recorded for one scope kept once, and a renamed scope's facts
+    /// follow it onto the new id after that id's own.
+    #[test]
+    fn nav_facts_merge_per_scope_and_follow_a_rename() {
+        let fact = |name: &str| NavFact::DeclaresFn {
+            ns: String::new(),
+            name: name.to_string(),
+        };
+        let (s, t) = (NodeId(11), NodeId(12));
+        let mut a = FileParse::default();
+        a.nav.record_fact(s, fact("a"));
+        a.nav.record_fact(s, fact("b"));
+        let mut b = FileParse::default();
+        b.nav.record_fact(s, fact("b"));
+        b.nav.record_fact(s, fact("c"));
+        b.nav.record_fact(t, fact("a"));
+        b.nav.record_fact(t, fact("d"));
+        let (mut g, _, mut calls, mut refs) = merge_parses(repo(), vec![a, b]);
+        assert_eq!(g.nav.nav_facts[&s], [fact("a"), fact("b"), fact("c")]);
+        assert_eq!(g.nav.nav_facts[&t], [fact("a"), fact("d")]);
+
+        rename_nodes(&mut g, &mut calls, &mut refs, &[(t, s)]);
+        assert!(!g.nav.nav_facts.contains_key(&t), "the old scope's facts moved");
+        assert_eq!(
+            g.nav.nav_facts[&s],
+            [fact("a"), fact("b"), fact("c"), fact("d")]
+        );
+    }
+
     /// No trace of `old` anywhere an id lives.
     fn assert_gone(g: &RepoGraph, old: NodeId) {
         assert!(g.nodes.iter().all(|n| n.id != old), "node record");
@@ -3178,6 +3230,7 @@ mod tests {
             "children_of entries"
         );
         assert!(!nav.local_types.contains_key(&old) && !g.properties.contains(&old));
+        assert!(!nav.nav_facts.contains_key(&old), "nav_facts key");
         assert!(
             g.unresolved_calls.iter().all(|c| c.from != old),
             "unresolved calls"

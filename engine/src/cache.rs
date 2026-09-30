@@ -115,7 +115,7 @@ struct CacheEntry {
 
 /// `FileParse` serialized with every hash container in key order (LC.11).
 ///
-/// `FileParse::properties` and `CodeNav`'s seven maps are std hash
+/// `FileParse::properties` and `CodeNav`'s eight maps are std hash
 /// containers, which iterate in a per-instance RandomState order, so the
 /// derived serializer wrote the same parse as different bytes on every build
 /// and [`ParseCache::save`] could never find the sidecar unchanged. This is
@@ -124,7 +124,8 @@ struct CacheEntry {
 /// `FileParse`'s own `Deserialize` reads this back; the cache format and
 /// [`CACHE_VERSION`] are unchanged. The destructuring below names every
 /// field, so a field added to `FileParse` or `CodeNav` fails to compile here
-/// rather than drop out of the cache. Vec fields keep their parser order.
+/// rather than drop out of the cache. Vec fields keep their parser order (a
+/// `nav_facts` scope's fact list included).
 /// Removal path: once `CodeNav` and `properties` are ordered containers
 /// (BTreeMap / BTreeSet in code-domain), the derived serializer is canonical
 /// and this function and its helpers go.
@@ -158,8 +159,9 @@ impl serde::Serialize for CanonicalNav<'_> {
             children_of,
             field_types,
             local_types,
+            nav_facts,
         } = self.0;
-        let mut st = s.serialize_struct("CodeNav", 7)?;
+        let mut st = s.serialize_struct("CodeNav", 8)?;
         st.serialize_field("name_by_id", &by_id(name_by_id, |v| v))?;
         st.serialize_field("qname_by_id", &by_id(qname_by_id, |v| v))?;
         st.serialize_field("kind_by_id", &by_id(kind_by_id, |v| v))?;
@@ -167,6 +169,7 @@ impl serde::Serialize for CanonicalNav<'_> {
         st.serialize_field("children_of", &by_id(children_of, |v| v))?;
         st.serialize_field("field_types", &by_id(field_types, by_name))?;
         st.serialize_field("local_types", &by_id(local_types, by_name))?;
+        st.serialize_field("nav_facts", &by_id(nav_facts, |v| v))?;
         st.end()
     }
 }
@@ -480,6 +483,7 @@ impl ParseCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glia_code_domain::{Mount, NavFact};
 
     /// A cache with `n` entries inserted in a fixed order, under a fixed build
     /// context. Every `FileParse` is `default()` (empty vecs/maps), so the only
@@ -636,9 +640,110 @@ mod tests {
                 p.nav.field_types.entry(id).or_default().insert(format!("f{j}"), format!("T{j}"));
                 p.nav.local_types.entry(id).or_default().insert(format!("l{j}"), format!("U{j}"));
             }
+            // CB.6: one fact per scope; its Vec keeps parser order.
+            let fact = NavFact::DeclaresFn { ns: format!("ns{i}"), name: format!("proto{i}") };
+            p.nav.record_fact(id, fact);
             p.properties.insert(id);
         }
         p
+    }
+
+    /// Every [`NavFact`] variant, each [`Mount`] shape among them, in the
+    /// order a parser would record them on one scope.
+    fn every_nav_fact() -> Vec<NavFact> {
+        vec![
+            NavFact::DeclaresFn {
+                ns: String::new(),
+                name: "codec_encode".into(),
+            },
+            NavFact::UsingNamespace {
+                within: String::new(),
+                ns: "shop".into(),
+            },
+            NavFact::UsingName {
+                within: "app".into(),
+                ns: "shop".into(),
+                name: "total".into(),
+            },
+            NavFact::MountArg {
+                line: 12,
+                callee: "RegisterUsers".into(),
+                arg: 0,
+                mount: Mount::Const("/api/v2".into()),
+            },
+            NavFact::MountArg {
+                line: 13,
+                callee: "RegisterAdmin".into(),
+                arg: 2,
+                mount: Mount::Param {
+                    fn_qname: "api::server::NewServer".into(),
+                    index: 1,
+                    suffix: "/admin".into(),
+                },
+            },
+            NavFact::FieldMount {
+                owner: "api::Server".into(),
+                field: "admin".into(),
+                mount: Mount::Field {
+                    owner: "api::Server".into(),
+                    field: "root".into(),
+                    suffix: "/x".into(),
+                },
+            },
+            NavFact::InternalLinkage {
+                name: "clamp".into(),
+            },
+            NavFact::ClientHost {
+                via: "graphql".into(),
+                host: "api.example.com".into(),
+                line: 4,
+            },
+        ]
+    }
+
+    /// CB.6: `CodeNav::nav_facts` (build-time, never in the store) survives a
+    /// save and a load of the parse cache with every variant, per scope and
+    /// in parser order, and the sidecar bytes do not depend on the order the
+    /// scopes went into the map.
+    #[test]
+    fn nav_facts_survive_the_parse_cache() {
+        let facts = every_nav_fact();
+        let fill = |order: &[u64]| {
+            let mut p = FileParse::default();
+            for &i in order {
+                for f in &facts[..=(i as usize % facts.len())] {
+                    p.nav.record_fact(NodeId(500 + i), f.clone());
+                }
+            }
+            p
+        };
+        let fwd: Vec<u64> = (0..16).collect();
+        let rev: Vec<u64> = (0..16).rev().collect();
+        let parse = fill(&fwd);
+        assert_eq!(
+            parse.nav.nav_facts[&NodeId(507)],
+            facts,
+            "one scope holds every variant"
+        );
+
+        let d = tempfile::tempdir().expect("tempdir");
+        let repo = d.path().to_string_lossy().into_owned();
+        let mut c = ParseCache::new();
+        c.put("src/codec.cpp".into(), 7, "cpp", parse.clone());
+        c.save(&repo).expect("save");
+        let loaded = ParseCache::load(&repo);
+        let got = loaded
+            .get("src/codec.cpp", 7, "cpp")
+            .expect("the cached parse loads");
+        assert_eq!(got.nav.nav_facts, parse.nav.nav_facts);
+
+        let mut other = ParseCache::new();
+        other.put("src/codec.cpp".into(), 7, "cpp", fill(&rev));
+        assert!(
+            bincode::serialize(&other).expect("ser rev")
+                == std::fs::read(sidecar(d.path())).expect("read sidecar"),
+            "nav_facts filled in another scope order serialized to other bytes"
+        );
     }
 
     /// LC.11: equal parses serialize to equal bytes whatever order their hash
@@ -693,6 +798,7 @@ mod tests {
         assert_eq!(got.nav.children_of, many.nav.children_of);
         assert_eq!(got.nav.field_types, many.nav.field_types);
         assert_eq!(got.nav.local_types, many.nav.local_types);
+        assert_eq!(got.nav.nav_facts, many.nav.nav_facts);
         assert_eq!(got.properties, many.properties);
         assert_eq!((&got.nodes, &got.edges, &got.imports), (&many.nodes, &many.edges, &many.imports));
         assert_eq!((&got.calls, &got.refs), (&many.calls, &many.refs));

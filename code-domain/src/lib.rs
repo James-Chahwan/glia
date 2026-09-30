@@ -1349,9 +1349,79 @@ pub struct CodeNav {
     ///
     /// Build-time only, like `field_types`: never mirrored into the store.
     pub local_types: HashMap<NodeId, HashMap<String, String>>,
+    /// Per-scope language facts that are neither a node, an edge, an import
+    /// nor a call site: scope (a MODULE, or a fn / METHOD) -> its [`NavFact`]s
+    /// in the order the parser recorded them. Filled through
+    /// [`CodeNav::record_fact`] (CB.6); each variant is read by one builder.
+    ///
+    /// Build-time only, like `field_types`: never mirrored into the store. A
+    /// reader walks scopes in a fixed order (`g.nodes`), never this map's.
+    pub nav_facts: HashMap<NodeId, Vec<NavFact>>,
+}
+
+/// A build-time fact a parser records for a scope (a MODULE, or a fn / METHOD)
+/// that is not a node, edge, import or call site. Read by one builder each;
+/// never mirrored into the store (resolution finishes before the .gmap is
+/// written). A new variant goes at the END, so the old variants keep their
+/// bincode tags (the parse cache discards on any PARSER_STAMP move anyway).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum NavFact {
+    /// C/C++ (CB.19 -> CB.25): a function prototype declared, not defined, at
+    /// file / namespace scope of this MODULE; `ns` is the enclosing C++
+    /// namespace path (`""` = global).
+    DeclaresFn { ns: String, name: String },
+    /// C++ (CB.19 -> CB.25): `using namespace <ns>;` in this MODULE (at file
+    /// scope, `within` = `""`, or inside the namespace `within`).
+    UsingNamespace { within: String, ns: String },
+    /// C++ (CB.19 -> CB.25): `using <ns>::<name>;`.
+    UsingName { within: String, ns: String, name: String },
+    /// Go (CB.23 -> CB.20): the call on 0-based row `line` of this fn passes a
+    /// router mount as argument `arg` (0-based, receiver excluded) of the
+    /// function or method named `callee`.
+    MountArg { line: u32, callee: String, arg: u32, mount: Mount },
+    /// Go (CB.23 -> CB.20): this fn assigns a router mount to field `field` of
+    /// struct `owner`, named `<package dir qname>::<Type>` (`api::Server`): a
+    /// Go package is its directory (LA.13b), and a struct's methods may sit in
+    /// other files of it, whose file-module qnames differ.
+    FieldMount { owner: String, field: String, mount: Mount },
+    /// C/C++ (CB.19 -> CB.25): a function this MODULE defines with internal
+    /// linkage (`static` in C / C++, or inside an anonymous namespace): never
+    /// the definition a prototype in another file names.
+    InternalLinkage { name: String },
+    /// GraphQL / tRPC (CB.24): this MODULE builds a client whose base URL has
+    /// the literal authority `host` (`via` = `"graphql"` | `"rpc"`), on 0-based
+    /// row `line`; the post-cache graft spreads it to its project's
+    /// GRAPHQL_OPERATION / RPC_CALL sides.
+    ClientHost { via: String, host: String, line: u32 },
+}
+
+/// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,
+/// resolved by CB.20). A provisional ROUTE on a Param / Field mount is named
+/// by [`endpoint::mount_route_qname`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub enum Mount {
+    /// A literal prefix known in the file (`/api/v2`; `""` = a router root).
+    Const(String),
+    /// Parameter `index` of the enclosing fn `fn_qname` (receiver excluded),
+    /// then `suffix`.
+    Param { fn_qname: String, index: u32, suffix: String },
+    /// Field `field` of struct `owner` (`<package dir qname>::<Type>`), then
+    /// `suffix`.
+    Field { owner: String, field: String, suffix: String },
 }
 
 impl CodeNav {
+    /// Record `fact` for `scope` (CB.6), after the scope's earlier facts. A
+    /// fact equal to one already recorded for that scope is dropped, so a
+    /// scope visited twice (a C++ MODULE walked through both branches of an
+    /// `#ifdef`) records each fact once.
+    pub fn record_fact(&mut self, scope: NodeId, fact: NavFact) {
+        let facts = self.nav_facts.entry(scope).or_default();
+        if !facts.contains(&fact) {
+            facts.push(fact);
+        }
+    }
+
     /// Record that `scope` (a fn / METHOD) binds a local `name` of simple type
     /// `ty` (`""` = a local whose type is unknown). An empty `name` is
     /// ignored. The first record stores `ty`; a later record of a DIFFERENT
@@ -1808,6 +1878,90 @@ pub mod endpoint {
     /// census counts.
     pub fn route_qname(method: &str, path: &str) -> String {
         format!("{method} {}", canonical_http_path(path))
+    }
+
+    /// Opens the mount token of a provisional mount ROUTE qname
+    /// ([`mount_route_qname`]).
+    const MOUNT_OPEN: &str = "<mount:";
+
+    /// CB.6: the qname of a Go ROUTE registered on a router group whose prefix
+    /// the parser cannot read in the file (a parameter- or field-held group):
+    /// `<METHOD> <mount:<token>><path>`, token `param:<fn_qname>#<index>` or
+    /// `field:<owner>.<field>`, `<path>` the mount's suffix joined with
+    /// `local_path` ([`join_path`]), canonical. A canonical path starts with
+    /// `/` or `${`, is empty or is the `<unresolved>` placeholder, never
+    /// `<mount:`, so no real ROUTE collides with one; the build's mount pass
+    /// (CB.20) rewrites every provisional before the language graph is
+    /// returned, so the HTTP resolver never sees one. A token never holds a
+    /// `>`: a Go qname is identifiers and directory names.
+    ///
+    /// A Const mount is never provisional: it returns the plain ROUTE qname,
+    /// `route_qname(method, join_path(prefix, local_path))`, byte for byte
+    /// what the Go parser builds for a group whose prefix it reads.
+    ///
+    /// ```text
+    /// Param { Register, 0, "" },    "/u"  -> "GET <mount:param:api::routes::Register#0>/u"
+    /// Param { Register, 0, "/me" }, "p"   -> "GET <mount:param:api::routes::Register#0>/me/p"
+    /// Field { api::Server, admin, "" }, "/x" -> "GET <mount:field:api::Server.admin>/x"
+    /// Const("/api/v2"),             "users" -> "GET /api/v2/users"
+    /// ```
+    pub fn mount_route_qname(method: &str, mount: &super::Mount, local_path: &str) -> String {
+        use super::Mount;
+        let (token, suffix) = match mount {
+            Mount::Const(prefix) => return route_qname(method, &join_path(prefix, local_path)),
+            Mount::Param {
+                fn_qname,
+                index,
+                suffix,
+            } => (format!("param:{fn_qname}#{index}"), suffix),
+            Mount::Field {
+                owner,
+                field,
+                suffix,
+            } => (format!("field:{owner}.{field}"), suffix),
+        };
+        let path = canonical_http_path(&join_path(suffix, local_path)).into_owned();
+        format!("{method} {MOUNT_OPEN}{token}>{path}")
+    }
+
+    /// CB.6: the inverse of [`mount_route_qname`] for a provisional qname:
+    /// `(method, mount, path)`. The mount's suffix was folded into the path
+    /// when the qname was built, so the mount comes back with an empty suffix
+    /// and `path` holds suffix and local path together (one route, however it
+    /// was reached). `None` for anything else, a canonical `<METHOD> <path>`
+    /// ROUTE qname included. The caller strips an LB.4a owner first with
+    /// [`split_owner`]: this reads the whole tail as the path.
+    pub fn parse_mount_route_qname(q: &str) -> Option<(String, super::Mount, String)> {
+        use super::Mount;
+        let (method, rest) = q.split_once(' ')?;
+        if method.is_empty() {
+            return None;
+        }
+        let (token, path) = rest.strip_prefix(MOUNT_OPEN)?.split_once('>')?;
+        let mount = if let Some(p) = token.strip_prefix("param:") {
+            let (fn_qname, index) = p.rsplit_once('#')?;
+            if fn_qname.is_empty() || index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit())
+            {
+                return None;
+            }
+            Mount::Param {
+                fn_qname: fn_qname.to_string(),
+                index: index.parse().ok()?,
+                suffix: String::new(),
+            }
+        } else {
+            // A Go field name holds no `.`; an owner's directory may.
+            let (owner, field) = token.strip_prefix("field:")?.rsplit_once('.')?;
+            if owner.is_empty() || field.is_empty() {
+                return None;
+            }
+            Mount::Field {
+                owner: owner.to_string(),
+                field: field.to_string(),
+                suffix: String::new(),
+            }
+        };
+        Some((method.to_string(), mount, path.to_string()))
     }
 
     /// ENDPOINT qname `endpoint:<METHOD>:<path>`, with the path canonical —
@@ -3570,6 +3724,194 @@ mod tests {
         // An empty or whitespace-bearing tail is not an owner.
         assert_eq!(split_owner("GET /x @"), ("GET /x @", None));
         assert_eq!(split_owner("GET /x @a b"), ("GET /x @a b", None));
+    }
+
+    /// CB.6: a fact recorded twice for one scope is kept once (a C++ MODULE
+    /// walked through both branches of an `#ifdef` records its prototype
+    /// twice), in first-record order; scopes stay apart, and a fact that
+    /// differs in any field is a second fact.
+    #[test]
+    fn nav_fact_record_is_idempotent() {
+        let mut nav = CodeNav::default();
+        let (module, func) = (NodeId(1), NodeId(2));
+        let proto = NavFact::DeclaresFn {
+            ns: String::new(),
+            name: "codec_encode".into(),
+        };
+        let using = NavFact::UsingNamespace {
+            within: String::new(),
+            ns: "shop".into(),
+        };
+        nav.record_fact(module, proto.clone());
+        nav.record_fact(module, using.clone());
+        nav.record_fact(module, proto.clone());
+        nav.record_fact(func, proto.clone());
+        assert_eq!(nav.nav_facts[&module], vec![proto.clone(), using.clone()]);
+        assert_eq!(nav.nav_facts[&func], vec![proto.clone()]);
+
+        let in_ns = NavFact::DeclaresFn {
+            ns: "shop".into(),
+            name: "codec_encode".into(),
+        };
+        nav.record_fact(module, in_ns.clone());
+        assert_eq!(nav.nav_facts[&module], vec![proto, using, in_ns]);
+
+        // Two calls on two rows passing one mount are two call sites.
+        let mount = Mount::Const("/api/v2".into());
+        let at = |line| NavFact::MountArg {
+            line,
+            callee: "RegisterUsers".into(),
+            arg: 0,
+            mount: mount.clone(),
+        };
+        nav.record_fact(func, at(4));
+        nav.record_fact(func, at(4));
+        nav.record_fact(func, at(9));
+        assert_eq!(nav.nav_facts[&func][1..], [at(4), at(9)]);
+    }
+
+    /// CB.6: a provisional mount ROUTE qname reads back as the method, the
+    /// mount and the local path. A mount's suffix is folded into the local
+    /// path (canonical), so the parsed mount carries an empty suffix; a Const
+    /// mount is never provisional and builds the plain ROUTE qname.
+    #[test]
+    fn mount_route_qname_round_trips() {
+        use endpoint::{
+            mount_route_qname, parse_mount_route_qname, route_qname, split_owner, with_owner,
+        };
+        let param = Mount::Param {
+            fn_qname: "api::routes::Register".into(),
+            index: 1,
+            suffix: String::new(),
+        };
+        let q = mount_route_qname("GET", &param, "/users");
+        assert_eq!(q, "GET <mount:param:api::routes::Register#1>/users");
+        assert_eq!(
+            parse_mount_route_qname(&q),
+            Some(("GET".into(), param.clone(), "/users".into()))
+        );
+
+        let field = Mount::Field {
+            owner: "api::Server".into(),
+            field: "admin".into(),
+            suffix: String::new(),
+        };
+        let q = mount_route_qname("POST", &field, "/users/:id");
+        assert_eq!(q, "POST <mount:field:api::Server.admin>/users/:id");
+        assert_eq!(
+            parse_mount_route_qname(&q),
+            Some(("POST".into(), field, "/users/:id".into()))
+        );
+
+        // `me := rg.Group("/me"); me.GET("p", h)`: the suffix joins the local
+        // path through `join_path`, then the path is canonical.
+        let me = Mount::Param {
+            fn_qname: "api::routes::Register".into(),
+            index: 0,
+            suffix: "/me".into(),
+        };
+        let q = mount_route_qname("GET", &me, "p");
+        assert_eq!(q, "GET <mount:param:api::routes::Register#0>/me/p");
+        let bare = Mount::Param {
+            fn_qname: "api::routes::Register".into(),
+            index: 0,
+            suffix: String::new(),
+        };
+        assert_eq!(
+            parse_mount_route_qname(&q),
+            Some(("GET".into(), bare.clone(), "/me/p".into()))
+        );
+        assert_eq!(
+            mount_route_qname("GET", &bare, "/me/p"),
+            q,
+            "suffix + local and the folded path are one route"
+        );
+
+        // A group's index route is the group; an owner dir with a dot splits
+        // at the LAST `.` (a Go field name has none).
+        let dotted = Mount::Field {
+            owner: "v1.2::api::Server".into(),
+            field: "grp".into(),
+            suffix: "/x".into(),
+        };
+        let q = mount_route_qname("ANY", &dotted, "/");
+        assert_eq!(q, "ANY <mount:field:v1.2::api::Server.grp>/x");
+        let parsed = Mount::Field {
+            owner: "v1.2::api::Server".into(),
+            field: "grp".into(),
+            suffix: String::new(),
+        };
+        assert_eq!(
+            parse_mount_route_qname(&q),
+            Some(("ANY".into(), parsed, "/x".into()))
+        );
+
+        // Const: exactly the Go parser's `route_qname(join_path(prefix, local))`.
+        assert_eq!(
+            mount_route_qname("GET", &Mount::Const("/api/v2".into()), "users"),
+            "GET /api/v2/users"
+        );
+        assert_eq!(
+            mount_route_qname("GET", &Mount::Const("/api/".into()), "/"),
+            route_qname("GET", "/api/")
+        );
+        assert_eq!(
+            mount_route_qname("GET", &Mount::Const(String::new()), "users"),
+            "GET /users"
+        );
+        assert_eq!(
+            parse_mount_route_qname(&mount_route_qname("GET", &Mount::Const("/a".into()), "/b")),
+            None
+        );
+
+        // LB.4a's owner suffix: the caller strips it with split_owner first.
+        let q = with_owner(&mount_route_qname("GET", &param, "/users"), "turps");
+        assert_eq!(q, "GET <mount:param:api::routes::Register#1>/users @turps");
+        let (base, owner) = split_owner(&q);
+        assert_eq!(owner, Some("turps"));
+        assert_eq!(
+            parse_mount_route_qname(base),
+            Some(("GET".into(), param, "/users".into()))
+        );
+    }
+
+    /// CB.6: a canonical ROUTE qname, and anything not in the exact
+    /// provisional shape, parses to None, so the mount pass never touches a
+    /// real route.
+    #[test]
+    fn a_plain_route_qname_is_not_a_mount() {
+        use endpoint::{parse_mount_route_qname, route_qname};
+        assert_eq!(parse_mount_route_qname(&route_qname("GET", "/users")), None);
+        assert_eq!(
+            parse_mount_route_qname(&route_qname("GET", "<unresolved>")),
+            None
+        );
+        for q in [
+            "GET /users",
+            "ANY /",
+            "GET /users @turps",
+            "GET <unresolved>",
+            "route:/users",
+            "endpoint:GET:/users",
+            "page:/users",
+            "",
+            "GET",
+            "<mount:param:f#0>/x",
+            " <mount:param:f#0>/x",
+            "GET <mount:param:f#0/x",
+            "GET <mount:param:f>/x",
+            "GET <mount:param:f#>/x",
+            "GET <mount:param:f#x>/x",
+            "GET <mount:param:f#+1>/x",
+            "GET <mount:param:#0>/x",
+            "GET <mount:field:Server>/x",
+            "GET <mount:field:.grp>/x",
+            "GET <mount:field:api::Server.>/x",
+            "GET <mount:const:/api>/x",
+            "GET /x<mount:param:f#0>/y",
+        ] {
+            assert_eq!(parse_mount_route_qname(q), None, "{q:?}");
+        }
     }
 
     /// LB.5 — a relative client path becomes the canonical node, carries the
