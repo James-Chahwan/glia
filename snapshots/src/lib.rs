@@ -14,11 +14,18 @@
 //! [`tests_ingest`] reads test reports a CI run produced — JUnit XML, CI logs,
 //! lcov — and writes `<repo>/.glia/test-snapshot/`. It spawns nothing and
 //! reads only the files it is given.
+//!
+//! [`ScipImporter`] (CE.1b) takes a SCIP index's documents, decoded by its
+//! caller, reads each one's source inside the repo and writes
+//! `<repo>/.glia/scip-snapshot/`: definition names, reference lines with a
+//! call flag, and symbol ids in string order. It spawns nothing and has no
+//! protobuf dependency.
 
 mod ci_log;
 mod git_history;
 mod junit;
 mod lcov;
+mod scip;
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -31,6 +38,10 @@ pub use ci_log::parse_ci_log;
 pub use git_history::{HistoryOptions, HistorySummary};
 pub use junit::{JunitCounts, parse_junit};
 pub use lcov::parse_lcov;
+pub use scip::{
+    PositionEncoding, ScipDocumentIn, ScipImportOptions, ScipImportSummary, ScipImporter, ScipIndexInfo,
+    ScipOccurrenceIn, ScipSymbolIn, next_is_call, unit_offset_to_byte,
+};
 
 /// Largest report file read: CI XML and logs can be huge, and a report past
 /// this is skipped with an error rather than read into memory.
@@ -38,13 +49,16 @@ pub(crate) const MAX_REPORT_BYTES: usize = 50 << 20;
 
 /// `.glia/.gitignore`, created when absent: the control dir's local,
 /// regenerable inputs. The graph layout dir ignores itself (its own `*`), and
-/// the checked-in inputs (`overlay.toml`, `cells.jsonl`) are not listed.
+/// the checked-in inputs (`overlay.toml`, `cells.jsonl`) are not listed. The
+/// SCIP snapshot dir also ignores itself, since a repo whose `.gitignore`
+/// predates it never gets this line.
 const GLIA_GITIGNORE: &str = "\
 # Local, regenerable glia inputs (written by glia; safe to delete).
 vectors.jsonl
 docs-snapshot/
 history-snapshot/
 test-snapshot/
+scip-snapshot/
 ";
 
 /// Read the git history of the repo at `repo_root` and write it to
@@ -321,6 +335,9 @@ mod tests {
     #[test]
     fn gitignore_lists_only_regenerable_inputs() {
         let lines: Vec<&str> = GLIA_GITIGNORE.lines().filter(|l| !l.starts_with('#')).collect();
-        assert_eq!(lines, ["vectors.jsonl", "docs-snapshot/", "history-snapshot/", "test-snapshot/"]);
+        assert_eq!(
+            lines,
+            ["vectors.jsonl", "docs-snapshot/", "history-snapshot/", "test-snapshot/", "scip-snapshot/"]
+        );
     }
 }
