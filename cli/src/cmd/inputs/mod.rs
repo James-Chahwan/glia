@@ -33,6 +33,13 @@ pub(crate) enum InputsCmd {
     /// COVERAGE cells); the build itself never ingests. A malformed report is
     /// a `warning:` and is skipped; exits 1 only when no report could be read.
     Tests(tests::Args),
+    /// Overlay loop (CE-3): `propose` lists the gaps an overlay could close,
+    /// with ids and source snippets; `try` builds a candidate stanza file
+    /// against the repo and reports what each stanza changes (leave-one-out)
+    /// with a keep / review / drop verdict; `accept` merges chosen stanzas
+    /// into .glia/overlay.toml, or removes rules by gap id, after validating
+    /// the result. Only accept writes, and only that file.
+    Overlay(overlay::Args),
     /// SCIP index snapshot (CE-1): decode a compiler-grade SCIP index
     /// (scip-python, scip-typescript, scip-java, scip-go, rust-analyzer scip)
     /// and write `<repo>/.glia/scip-snapshot/`, which the next build ingests
@@ -47,6 +54,7 @@ pub(crate) fn run(c: InputsCmd) -> i32 {
         InputsCmd::Gaps(a) => gaps::run(a),
         InputsCmd::History(a) => history::run(a),
         InputsCmd::Tests(a) => tests::run(a),
+        InputsCmd::Overlay(a) => overlay::run(a),
         InputsCmd::Scip(a) => scip::run(a),
     }
 }
