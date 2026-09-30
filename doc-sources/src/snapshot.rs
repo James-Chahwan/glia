@@ -13,6 +13,7 @@
 //! manifest instead of overwriting every other container's records.
 
 use crate::confluence::storage_to_markdown;
+use crate::wikitext::wikitext_to_markdown;
 use glia_code_domain::snapshots::redact_untrusted;
 use glia_code_domain::{DocProvenance, DocRecord, DocSourceKind};
 use std::collections::HashSet;
@@ -24,6 +25,9 @@ pub enum PageBody {
     ConfluenceStorage(String),
     /// Markdown, taken as-is (a wiki checkout's `.md` page, a converted Notion page).
     Markdown(String),
+    /// MediaWiki wikitext (a wiki checkout's `.mediawiki` / `.wiki` page),
+    /// converted by `wikitext_to_markdown` (CE.4c).
+    Wikitext(String),
 }
 
 /// A page fetched from an external source, pre-conversion.
@@ -106,10 +110,11 @@ fn opens_with_heading(markdown: &str, title_slug: &str) -> bool {
 /// Convert one fetched page to a `DocRecord`, and count the secret-shaped
 /// spans redacted from its text.
 ///
-/// The body becomes markdown (`storage_to_markdown` for Confluence storage, as
-/// is for markdown) so code spans survive for the doc→code linker. The title is
-/// prepended as an H1 (Confluence keeps it out of the body) so the chunker
-/// emits a titled top-level DOC_SECTION, unless the body already opens with a
+/// The body becomes markdown (`storage_to_markdown` for Confluence storage,
+/// `wikitext_to_markdown` for wikitext, as is for markdown) so code spans
+/// survive for the doc→code linker. The title is prepended as an H1
+/// (Confluence keeps it out of the body) so the chunker emits a titled
+/// top-level DOC_SECTION, unless the body already opens with a
 /// `#` / `##` heading of the same slug: a second one would give two sections
 /// one qname. The text then goes through [`redact_untrusted`] — external doc
 /// text is untrusted (SECURITY.md) — and the count is returned for the
@@ -119,6 +124,7 @@ pub fn record_from_page(p: &Page) -> (DocRecord, usize) {
     let body_md = match &p.body {
         PageBody::ConfluenceStorage(storage) => storage_to_markdown(storage),
         PageBody::Markdown(md) => md.clone(),
+        PageBody::Wikitext(src) => wikitext_to_markdown(src).0,
     };
     let title = p.title.trim();
     let text = if opens_with_heading(&body_md, &slug(title)) {

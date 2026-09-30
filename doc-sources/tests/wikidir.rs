@@ -53,7 +53,9 @@ fn acme_wiki(root: &Path) {
 fn body(p: &glia_doc_sources::Page) -> &str {
     match &p.body {
         PageBody::Markdown(md) => md,
-        PageBody::ConfluenceStorage(_) => panic!("a wiki page is markdown"),
+        PageBody::ConfluenceStorage(_) | PageBody::Wikitext(_) => {
+            panic!("a wiki `.md` page is markdown")
+        }
     }
 }
 
@@ -239,4 +241,82 @@ fn a_bad_dir_or_container_is_an_error() {
             .and_then(|n| n.to_str())
             .expect("UTF-8 name")
     );
+}
+
+/// CE.4c — a wiki checkout's `.mediawiki` / `.wiki` pages are read as wikitext
+/// and converted to markdown that keeps their headings and code spans.
+///
+/// Pre-fix (HEAD b0882a8, target/debug/glia): `glia docs sync <repo> --source
+/// dir --path <wiki>` over a wiki holding only `Deploy.mediawiki` ->
+/// `[docs] sync source=dir ... files=1 pages=0 kept=0 skipped=1` and `error: no
+/// Markdown pages under <wiki>`, exit 1: the page was skipped as not Markdown.
+#[test]
+fn mediawiki_pages_convert() {
+    let s = Scratch::new("mediawiki");
+    write(
+        &s.0.join("Deploy.mediawiki"),
+        "== Deploy ==\n<code>deploy_all</code>\n",
+    );
+    write(&s.0.join("Home.md"), "Welcome.\n");
+    let (pages, stats) = read_wiki_dir(&s.0, "acme-wiki", None).expect("read_wiki_dir");
+
+    let titles: Vec<&str> = pages.iter().map(|p| p.title.as_str()).collect();
+    assert_eq!(titles, ["Deploy", "Home"]);
+    assert!(
+        matches!(&pages[0].body, PageBody::Wikitext(t) if t.starts_with("== Deploy ==")),
+        "a .mediawiki page keeps its wikitext until record_from_page"
+    );
+    assert_eq!((stats.files, stats.pages, stats.wikitext_pages), (2, 2, 1));
+
+    // The converted body opens with the title's own `##` heading, so no H1 is
+    // prepended; the code span survives for the linker.
+    let (record, redacted) = record_from_page(&pages[0]);
+    assert_eq!(record.rel_path, "wiki/acme-wiki/deploy.md");
+    assert_eq!(record.text, "## Deploy\n`deploy_all`\n");
+    assert_eq!(redacted, 0);
+
+    // The marker read_wiki_dir printed on stderr, counting the wikitext page only.
+    assert_eq!(
+        stats.wikitext_marker().as_deref(),
+        Some(
+            "[docs] wikitext pages=1 headings=1 code_blocks=0 inline_code=1 links=0 templates_dropped=0 unbalanced=0"
+        )
+    );
+}
+
+#[test]
+fn wiki_extension_pages_sum_their_stats() {
+    let s = Scratch::new("wiki-ext");
+    write(
+        &s.0.join("guides/Runbook.WIKI"),
+        "{{Infobox|svc}}\n== Restart ==\n<syntaxhighlight lang=\"bash\">\n# drain first\nsystemctl restart api\n</syntaxhighlight>\nSee [[Deploy|the deploy page]].\n",
+    );
+    write(
+        &s.0.join("Deploy.wiki"),
+        "= Deploy =\nRun <tt>deploy_all</tt> {{unclosed\n",
+    );
+    let (pages, stats) = read_wiki_dir(&s.0, "ops", None).expect("read_wiki_dir");
+    assert_eq!(stats.wikitext_pages, 2);
+    assert_eq!(
+        stats.wikitext_marker().as_deref(),
+        Some(
+            "[docs] wikitext pages=2 headings=2 code_blocks=1 inline_code=1 links=1 templates_dropped=2 unbalanced=1"
+        )
+    );
+    let records: Vec<DocRecord> = pages.iter().map(|p| record_from_page(p).0).collect();
+    // `= Deploy =` is the title's own H1; the runbook's `== Restart ==` is not
+    // its title, so the title H1 is prepended. The `#` comment stays inside the
+    // fence, where the chunker does not read it as a heading.
+    assert_eq!(records[0].text, "# Deploy\nRun `deploy_all`\n");
+    assert_eq!(
+        records[1].text,
+        "# Runbook\n\n## Restart\n```bash\n# drain first\nsystemctl restart api\n```\nSee the deploy page.\n"
+    );
+    assert_eq!(records[1].rel_path, "wiki/ops/guides-runbook.md");
+
+    // A Markdown-only wiki prints no wikitext marker.
+    let md_only = Scratch::new("md-only");
+    write(&md_only.0.join("Home.md"), "x\n");
+    let (_, stats) = read_wiki_dir(&md_only.0, "w", None).expect("read");
+    assert_eq!(stats.wikitext_marker(), None);
 }

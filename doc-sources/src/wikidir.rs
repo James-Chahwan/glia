@@ -11,8 +11,14 @@
 //! [`MAX_DEPTH`] directories deep, in sorted name order, never follows a
 //! symlink (a hostile wiki cannot pull `/etc` into the snapshot), skips
 //! dot-entries (`.git` included) and `_`-prefixed files (GitHub's `_Sidebar.md`
-//! / `_Footer.md` navigation), takes `*.md` / `*.markdown` regular files of at
-//! most [`MAX_PAGE_BYTES`], and stops after [`MAX_PAGES`] pages.
+//! / `_Footer.md` navigation), takes `*.md` / `*.markdown` and (CE.4c)
+//! `*.mediawiki` / `*.wiki` regular files of at most [`MAX_PAGE_BYTES`], and
+//! stops after [`MAX_PAGES`] pages.
+//!
+//! A wikitext page becomes a [`PageBody::Wikitext`], converted to markdown by
+//! [`record_from_page`](crate::record_from_page); the walk converts it once
+//! more for its [`WikitextStats`], summed into [`DirStats::wikitext`], and
+//! prints [`DirStats::wikitext_marker`] when it read at least one.
 
 use std::path::Path;
 
@@ -20,6 +26,7 @@ use glia_code_domain::DocSourceKind;
 use glia_code_domain::snapshots::data_hash;
 
 use crate::snapshot::{Page, PageBody};
+use crate::wikitext::{WikitextStats, wikitext_to_markdown};
 
 /// Directories below the wiki root the walk descends into; a deeper one is
 /// skipped and counted in [`DirStats::skipped_deep`].
@@ -37,7 +44,7 @@ pub struct DirStats {
     /// Entries examined (a skipped directory, `.git` say, counts once and is
     /// never read).
     pub files: usize,
-    /// Markdown pages read.
+    /// Pages read: Markdown and wikitext.
     pub pages: usize,
     /// Dot-entries: `.git`, `.gitignore`, any hidden file or directory.
     pub skipped_hidden: usize,
@@ -45,8 +52,9 @@ pub struct DirStats {
     pub skipped_underscore: usize,
     /// Symlinks, never followed.
     pub skipped_symlink: usize,
-    /// Regular files that are not `*.md` / `*.markdown` (images, uploads), and
-    /// entries that are neither a file nor a directory.
+    /// Regular files that are not `*.md` / `*.markdown` / `*.mediawiki` /
+    /// `*.wiki` (images, uploads), and entries that are neither a file nor a
+    /// directory.
     pub skipped_not_markdown: usize,
     /// Pages larger than [`MAX_PAGE_BYTES`].
     pub skipped_large: usize,
@@ -58,6 +66,10 @@ pub struct DirStats {
     pub skipped_unreadable: usize,
     /// The walk stopped at [`MAX_PAGES`]; later entries were not examined.
     pub truncated: bool,
+    /// Of `pages`, the `*.mediawiki` / `*.wiki` pages read as wikitext.
+    pub wikitext_pages: usize,
+    /// What converting those pages kept and dropped, summed.
+    pub wikitext: WikitextStats,
 }
 
 impl DirStats {
@@ -71,6 +83,27 @@ impl DirStats {
             + self.skipped_non_utf8
             + self.skipped_deep
             + self.skipped_unreadable
+    }
+
+    /// The line [`read_wiki_dir`] prints on stderr when it read at least one
+    /// wikitext page (before any title filter):
+    /// `[docs] wikitext pages=<n> headings=<h> code_blocks=<c> inline_code=<i>
+    /// links=<l> templates_dropped=<t> unbalanced=<u>`. Template output is not
+    /// rendered, so `templates_dropped` is content the snapshot lacks.
+    pub fn wikitext_marker(&self) -> Option<String> {
+        let w = &self.wikitext;
+        (self.wikitext_pages > 0).then(|| {
+            format!(
+                "[docs] wikitext pages={} headings={} code_blocks={} inline_code={} links={} templates_dropped={} unbalanced={}",
+                self.wikitext_pages,
+                w.headings,
+                w.code_blocks,
+                w.inline_code,
+                w.links,
+                w.templates_dropped,
+                w.unbalanced
+            )
+        })
     }
 }
 
@@ -118,9 +151,9 @@ pub fn default_container(dir: &Path) -> Result<String, String> {
     Ok(name.to_string())
 }
 
-/// Read every Markdown page of the wiki checkout at `dir` as a [`Page`] of
-/// [`DocSourceKind::Wiki`] in `container`, in walk order (sorted names, depth
-/// first), with what the walk saw.
+/// Read every Markdown and wikitext page of the wiki checkout at `dir` as a
+/// [`Page`] of [`DocSourceKind::Wiki`] in `container`, in walk order (sorted
+/// names, depth first), with what the walk saw.
 ///
 /// Per page: `rel` is its path under `dir` without the extension, `/`-joined
 /// (`guides/Setup`); the title is the file stem with `-` and `_` read as
@@ -169,6 +202,9 @@ fn read_with(
             limits.pages,
             walk.pages.len()
         );
+    }
+    if let Some(marker) = walk.stats.wikitext_marker() {
+        eprintln!("{marker}");
     }
     Ok((walk.pages, walk.stats))
 }
@@ -258,7 +294,7 @@ impl Walk<'_> {
             self.skip(|s| &mut s.skipped_underscore);
             return;
         }
-        let Some(stem) = markdown_stem(name) else {
+        let Some((stem, format)) = page_stem(name) else {
             self.skip(|s| &mut s.skipped_not_markdown);
             return;
         };
@@ -292,13 +328,21 @@ impl Walk<'_> {
         };
         self.stats.files += 1;
         self.stats.pages += 1;
+        let body = match format {
+            PageFormat::Markdown => PageBody::Markdown(text),
+            PageFormat::Wikitext => {
+                self.stats.wikitext_pages += 1;
+                self.stats.wikitext.add(&wikitext_to_markdown(&text).1);
+                PageBody::Wikitext(text)
+            }
+        };
         self.pages.push(Page {
             kind: DocSourceKind::Wiki,
             container: self.container.to_string(),
             title: stem.replace(['-', '_'], " "),
             url,
             version,
-            body: PageBody::Markdown(text),
+            body,
             slug_hint: Some(rel_path),
         });
     }
@@ -309,13 +353,29 @@ impl Walk<'_> {
     }
 }
 
-/// The stem of a `*.md` / `*.markdown` file name (extension matched without
-/// case), or `None` for any other name. A bare `.md` has no stem and is a
-/// dot-entry anyway.
-fn markdown_stem(name: &str) -> Option<&str> {
+/// The markup a page file is written in, by its extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageFormat {
+    /// `*.md` / `*.markdown`.
+    Markdown,
+    /// `*.mediawiki` / `*.wiki` (MediaWiki markup, as GitHub wikis read it).
+    Wikitext,
+}
+
+/// The stem and format of a page file name (extension matched without case),
+/// or `None` for any other name. A bare `.md` has no stem and is a dot-entry
+/// anyway.
+fn page_stem(name: &str) -> Option<(&str, PageFormat)> {
     let (stem, ext) = name.rsplit_once('.')?;
-    let is_md = ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown");
-    (is_md && !stem.is_empty()).then_some(stem)
+    let is = |e: &str| ext.eq_ignore_ascii_case(e);
+    let format = if is("md") || is("markdown") {
+        PageFormat::Markdown
+    } else if is("mediawiki") || is("wiki") {
+        PageFormat::Wikitext
+    } else {
+        return None;
+    };
+    (!stem.is_empty()).then_some((stem, format))
 }
 
 #[cfg(test)]
@@ -377,14 +437,19 @@ mod tests {
     }
 
     #[test]
-    fn markdown_stems() {
-        assert_eq!(markdown_stem("Home.md"), Some("Home"));
-        assert_eq!(markdown_stem("Order-Flow.markdown"), Some("Order-Flow"));
-        assert_eq!(markdown_stem("README.MD"), Some("README"));
-        assert_eq!(markdown_stem("v1.2-notes.md"), Some("v1.2-notes"));
-        assert_eq!(markdown_stem("logo.png"), None);
-        assert_eq!(markdown_stem("Makefile"), None);
-        assert_eq!(markdown_stem(".md"), None);
+    fn page_stems() {
+        let md = PageFormat::Markdown;
+        let wiki = PageFormat::Wikitext;
+        assert_eq!(page_stem("Home.md"), Some(("Home", md)));
+        assert_eq!(page_stem("Order-Flow.markdown"), Some(("Order-Flow", md)));
+        assert_eq!(page_stem("README.MD"), Some(("README", md)));
+        assert_eq!(page_stem("v1.2-notes.md"), Some(("v1.2-notes", md)));
+        assert_eq!(page_stem("Deploy.mediawiki"), Some(("Deploy", wiki)));
+        assert_eq!(page_stem("Runbook.WIKI"), Some(("Runbook", wiki)));
+        assert_eq!(page_stem("logo.png"), None);
+        assert_eq!(page_stem("Makefile"), None);
+        assert_eq!(page_stem(".md"), None);
+        assert_eq!(page_stem(".wiki"), None);
     }
 
     #[test]

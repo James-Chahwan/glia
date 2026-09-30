@@ -18,7 +18,10 @@
 //! [`Page`] of any [`glia_code_domain::DocSourceKind`], redacted, merged into
 //! the manifest by (source, container)); [`transport`] holds the origin /
 //! credential / base64 helpers the adapters share. [`wikidir`] reads a local
-//! GitHub / GitLab wiki checkout's Markdown pages (CE.4b, `--source dir`).
+//! GitHub / GitLab wiki checkout's Markdown pages (CE.4b, `--source dir`), and
+//! its `.mediawiki` / `.wiki` pages through [`wikitext`], a dependency-free
+//! MediaWiki markup → markdown converter that keeps headings and code spans
+//! (CE.4c).
 
 pub mod confluence;
 pub mod confluence_rest;
@@ -29,6 +32,7 @@ pub mod snapshot;
 pub mod stub;
 pub mod transport;
 pub mod wikidir;
+pub mod wikitext;
 
 pub use filter::TitleFilter;
 pub use snapshot::{
