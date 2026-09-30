@@ -1,0 +1,46 @@
+{
+  "framework": "go-route-struct-routers",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-c1: parsers/code/go/src/lib.rs emit_route_from_call returns unless the receiver is a plain identifier, so a router held on a struct field (`s.router.GET`, `s.v1.GET`) mints nothing. A field's group prefix assigned in the same file (`s.v1 = s.router.Group(\"/v1\")`, s typed by `s := &Server{..}`) prefixes its routes. `s.client.Get(\"/upstream\")` is an HTTP client call, not a route (precision). Measured on HEAD 2170ff8: no ROUTE.",
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /health"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /v1/orders"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "POST /v1/orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "GET /health",
+      "to": "api::server::Server::health",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "GET /v1/orders",
+      "to": "api::server::Server::listOrders",
+      "category": "HANDLED_BY"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /orders",
+      "note": "the field's /v1 prefix is known in-file"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /upstream",
+      "note": "a client-shaped field is not a router"
+    }
+  ]
+}

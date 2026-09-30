@@ -15,7 +15,7 @@
 //! resolver to wire up. All Go imports are `ImportTarget::Module` (Go has no
 //! named symbol imports).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
@@ -116,6 +116,11 @@ pub fn parse_file_with_modules(
         }
     }
 
+    // CB.11: the router groups this file assigns to struct fields, read before
+    // any route walk so a registration on `s.v1` finds the group whatever
+    // function assigned it.
+    acc.field_prefixes = scan_field_prefixes(root, src);
+
     // Second pass: everything else.
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
@@ -192,13 +197,14 @@ pub fn parse_file_with_modules(
     let forms = &acc.route_forms;
     if forms.registrations > 0 {
         eprintln!(
-            "[go-routes] registrations={} positioned={} forms(handle={} any={} match={} pattern={}) in {file_rel_path} nodes={} paths={}",
+            "[go-routes] registrations={} positioned={} forms(handle={} any={} match={} pattern={} field={}) in {file_rel_path} nodes={} paths={}",
             forms.registrations,
             forms.positioned,
             forms.handle,
             forms.any,
             forms.matched,
             forms.pattern,
+            forms.field_calls.len(),
             acc.route_qnames.len(),
             acc.route_paths.len()
         );
@@ -294,6 +300,10 @@ struct Acc {
     /// the receiver's TYPE. Set and cleared by `visit_method` around its route
     /// walk; `None` inside a function.
     route_receiver: Option<(String, String)>,
+    /// CB.11: this file's struct-field router groups and each callable's
+    /// variable types ([`scan_field_prefixes`]), filled before the second
+    /// pass; `collect_routes_in` lends it to the route walk.
+    field_prefixes: FieldPrefixes,
     /// CA.5a: HANDLED_BY refs whose base was rewritten from the receiver var
     /// to its type in this file — the `[go-routes] receiver-method` marker.
     receiver_handlers: usize,
@@ -350,6 +360,10 @@ struct RouteFormCounts {
     matched: usize,
     /// Go 1.22 ServeMux `"<VERB> /path"` patterns.
     pattern: usize,
+    /// CB.11: start bytes of the registration calls whose receiver is a
+    /// struct field (`s.router.GET(..)`), so a multi-verb call counts once;
+    /// the marker's `field=` is its size. Only counted, never iterated.
+    field_calls: BTreeSet<usize>,
 }
 
 // ============================================================================
@@ -2858,10 +2872,12 @@ fn canonical_sql_table(raw: &str) -> Option<String> {
 // ============================================================================
 //
 // Walks the enclosing fn body once. For each statement of the form
-// `x := y.Group("/prefix")`, records `x` → concatenated prefix in `prefix_map`.
-// For each recognised registration call, builds the full path by prepending
-// `prefix_map[recv]` and emits a Route node with one ROUTE_METHOD cell plus an
-// `UnresolvedRef` (category=HANDLED_BY) for the handler.
+// `x := y.Group("/prefix")`, records `x` → concatenated prefix in the
+// `RouteScope`'s groups. For each recognised registration call, builds the
+// full path by prepending the receiver's prefix and emits a Route node with one
+// ROUTE_METHOD cell plus an `UnresolvedRef` (category=HANDLED_BY) for the
+// handler. CB.11: a receiver may be a struct field (`s.v1.GET(..)`), whose
+// prefix is the group the same file assigns that field ([`FieldPrefixes`]).
 //
 // Recognised shapes:
 //   `<recv>.GET("/path", h)` / `<recv>.Get("/path", h)`  → method = GET
@@ -2961,6 +2977,472 @@ fn method_list_literal(node: TsNode, src: &[u8]) -> Option<Vec<&'static str>> {
     (!verbs.is_empty()).then_some(verbs)
 }
 
+// ----------------------------------------------------------------------------
+// CB.11: routers held on a struct field
+// ----------------------------------------------------------------------------
+//
+// `type Server struct { router *gin.Engine; v1 *gin.RouterGroup }` registers
+// on `s.router.GET(..)` / `s.v1.POST(..)`, and the group a field holds is
+// assigned in some other function of the file (`s.v1 = s.router.Group("/v1")`
+// in `NewServer`). One scan per file, before any route walk, types each
+// callable's variables and records every group the file assigns to a field;
+// the route walk then prefixes a field receiver's routes with that group. A
+// field assigned in another file is CB.23's provisional mount.
+
+/// CB.11: one router group as a file spells it: the struct field its chain
+/// starts from (`None` = the engine itself, a local group, or a receiver the
+/// file cannot type, all rooted at `""` as the route walk roots them) and the
+/// `Group` literals joined onto it, in order.
+#[derive(Debug, Clone, Default)]
+struct GroupPath {
+    field: Option<(String, String)>,
+    segs: Vec<String>,
+}
+
+impl GroupPath {
+    /// This group's `.Group(lit)`.
+    fn then(mut self, lit: String) -> GroupPath {
+        self.segs.push(lit);
+        self
+    }
+}
+
+/// CB.11: the router groups one Go file assigns to struct fields, and the
+/// struct type each callable's variables name. Built by
+/// [`scan_field_prefixes`]; only looked up, never iterated into output.
+#[derive(Debug, Default)]
+struct FieldPrefixes {
+    /// `(struct simple name, field)` -> the group prefix every assignment in
+    /// the file agrees on (`("Server", "v1")` -> `"/v1"`). A field two
+    /// assignments disagree on, or whose chain loops, is absent: unknown beats
+    /// wrong.
+    known: BTreeMap<(String, String), String>,
+    /// A callable body's start byte -> its variable -> struct type map
+    /// ([`scope_types`]). Empty for a file whose text never says `Group`
+    /// (it can hold no field group, so no field prefix is looked up).
+    scopes: HashMap<usize, BTreeMap<String, String>>,
+}
+
+impl FieldPrefixes {
+    /// The group prefix of field `field` of struct `ty`, when the file
+    /// assigns it one consistent group.
+    fn get(&self, ty: &str, field: &str) -> Option<&str> {
+        self.known
+            .get(&(ty.to_string(), field.to_string()))
+            .map(String::as_str)
+    }
+}
+
+/// CB.11: read one file's struct-field router groups: for every function and
+/// method body, with its [`scope_types`], an assignment `x.f = <recv>.Group(
+/// "<lit>")` (or `x.f = g`, `g` a local group) records `(type of x, f)`, and
+/// a keyed composite literal `&T{f: <recv>.Group("<lit>")}` records `(T, f)`.
+/// `<recv>` is a local group var, another struct field (resolved after the
+/// scan, so the functions may come in any order) or anything else (the engine
+/// itself, `""`). A file that never says `Group` holds no field group, and
+/// is skipped.
+fn scan_field_prefixes(root: TsNode, src: &[u8]) -> FieldPrefixes {
+    let mut out = FieldPrefixes::default();
+    if !src.windows(5).any(|w| w == b"Group") {
+        return out;
+    }
+    let mut facts: BTreeMap<(String, String), Vec<GroupPath>> = BTreeMap::new();
+    let mut cursor = root.walk();
+    for decl in root.named_children(&mut cursor) {
+        if !matches!(decl.kind(), "function_declaration" | "method_declaration") {
+            continue;
+        }
+        let Some(body) = decl.child_by_field_name("body") else {
+            continue;
+        };
+        let types = scope_types(decl, body, src);
+        let mut groups = HashMap::new();
+        scan_field_groups(body, src, &types, &mut groups, &mut facts);
+        out.scopes.insert(body.start_byte(), types);
+    }
+    let mut memo = BTreeMap::new();
+    for key in facts.keys() {
+        let mut visiting = BTreeSet::new();
+        if let Some(prefix) = resolve_field_prefix(key, &facts, &mut memo, &mut visiting) {
+            out.known.insert(key.clone(), prefix);
+        }
+    }
+    out
+}
+
+/// CB.11: one body's field-group facts, in source order. Local groups
+/// (`g := r.Group("/x")`) follow `record_group_assignment`'s rule, so a
+/// field assigned `g` holds the prefix the route walk gives `g`. Func
+/// literals are skipped, as the route walk skips them.
+fn scan_field_groups(
+    n: TsNode,
+    src: &[u8],
+    types: &BTreeMap<String, String>,
+    groups: &mut HashMap<String, GroupPath>,
+    facts: &mut BTreeMap<(String, String), Vec<GroupPath>>,
+) {
+    match n.kind() {
+        "func_literal" => return,
+        "short_var_declaration" => {
+            let names = named_kids(n.child_by_field_name("left"));
+            let values = named_kids(n.child_by_field_name("right"));
+            if let ([name], [value]) = (names.as_slice(), values.as_slice())
+                && name.kind() == "identifier"
+                && let Some(group) = group_call_path(*value, src, types, groups)
+            {
+                groups.insert(text_of(*name, src).to_string(), group);
+            }
+        }
+        "assignment_statement"
+            if n.child_by_field_name("operator")
+                .is_some_and(|op| op.kind() == "=") =>
+        {
+            let targets = named_kids(n.child_by_field_name("left"));
+            let values = named_kids(n.child_by_field_name("right"));
+            if targets.len() == values.len() {
+                for (target, value) in targets.iter().zip(&values) {
+                    if let Some(key) = field_key(*target, src, types)
+                        && let Some(group) = group_value(*value, src, types, groups)
+                    {
+                        facts.entry(key).or_default().push(group);
+                    }
+                }
+            }
+        }
+        "composite_literal" => {
+            let owner = n
+                .child_by_field_name("type")
+                .and_then(|t| struct_type_name(t, src));
+            if let Some(owner) = owner {
+                for el in named_kids(n.child_by_field_name("body")) {
+                    if el.kind() != "keyed_element" {
+                        continue;
+                    }
+                    let key = el
+                        .child_by_field_name("key")
+                        .and_then(|k| k.named_child(0))
+                        .filter(|k| k.kind() == "identifier");
+                    let value = el
+                        .child_by_field_name("value")
+                        .and_then(|v| v.named_child(0));
+                    if let (Some(key), Some(value)) = (key, value)
+                        && let Some(group) = group_value(value, src, types, groups)
+                    {
+                        let key = (owner.clone(), text_of(key, src).to_string());
+                        facts.entry(key).or_default().push(group);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = n.walk();
+    for child in n.named_children(&mut cursor) {
+        scan_field_groups(child, src, types, groups, facts);
+    }
+}
+
+/// CB.11: the group a field is assigned: a `.Group("<lit>")` call, or a local
+/// group var. Anything else (the engine, a parameter) records nothing.
+fn group_value(
+    value: TsNode,
+    src: &[u8],
+    types: &BTreeMap<String, String>,
+    groups: &HashMap<String, GroupPath>,
+) -> Option<GroupPath> {
+    match value.kind() {
+        "identifier" => groups.get(text_of(value, src)).cloned(),
+        _ => group_call_path(value, src, types, groups),
+    }
+}
+
+/// CB.11: `<recv>.Group("<lit>")` as a [`GroupPath`]: `<recv>` a local group
+/// var continues that group, `x.f` with a typed `x` starts from field
+/// `(type of x, f)`, anything else from the root.
+fn group_call_path(
+    call: TsNode,
+    src: &[u8],
+    types: &BTreeMap<String, String>,
+    groups: &HashMap<String, GroupPath>,
+) -> Option<GroupPath> {
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let func = call
+        .child_by_field_name("function")
+        .filter(|f| f.kind() == "selector_expression")?;
+    if text_of(func.child_by_field_name("field")?, src) != "Group" {
+        return None;
+    }
+    let args = call.child_by_field_name("arguments")?;
+    let lit = string_literal_text(args.named_child(0)?, src)?;
+    let recv = func.child_by_field_name("operand")?;
+    let base = match recv.kind() {
+        "identifier" => groups.get(text_of(recv, src)).cloned().unwrap_or_default(),
+        _ => GroupPath {
+            field: field_key(recv, src, types),
+            segs: Vec::new(),
+        },
+    };
+    Some(base.then(lit))
+}
+
+/// CB.11: `x.f` with an `x` this scope types -> `(type of x, f)`.
+fn field_key(
+    sel: TsNode,
+    src: &[u8],
+    types: &BTreeMap<String, String>,
+) -> Option<(String, String)> {
+    if sel.kind() != "selector_expression" {
+        return None;
+    }
+    let x = sel
+        .child_by_field_name("operand")
+        .filter(|o| o.kind() == "identifier")?;
+    let ty = types.get(text_of(x, src))?;
+    let f = sel.child_by_field_name("field")?;
+    Some((ty.clone(), text_of(f, src).to_string()))
+}
+
+/// CB.11: the prefix of field `key`: its every assignment's group, resolved
+/// through the fields they start from, when all agree. A field the file
+/// assigns no group is the engine itself (`""`); a disagreement, or a chain
+/// that loops back through `visiting`, is `None`.
+fn resolve_field_prefix(
+    key: &(String, String),
+    facts: &BTreeMap<(String, String), Vec<GroupPath>>,
+    memo: &mut BTreeMap<(String, String), Option<String>>,
+    visiting: &mut BTreeSet<(String, String)>,
+) -> Option<String> {
+    if let Some(done) = memo.get(key) {
+        return done.clone();
+    }
+    let Some(paths) = facts.get(key) else {
+        return Some(String::new());
+    };
+    if !visiting.insert(key.clone()) {
+        return None;
+    }
+    let mut agreed: Option<String> = None;
+    let mut consistent = true;
+    for path in paths {
+        let base = match &path.field {
+            None => Some(String::new()),
+            Some(field) => resolve_field_prefix(field, facts, memo, visiting),
+        };
+        let Some(base) = base else {
+            consistent = false;
+            break;
+        };
+        let prefix = path.segs.iter().fold(base, |acc, seg| join_path(&acc, seg));
+        match &agreed {
+            None => agreed = Some(prefix),
+            Some(seen) if *seen == prefix => {}
+            Some(_) => {
+                consistent = false;
+                break;
+            }
+        }
+    }
+    visiting.remove(key);
+    let out = agreed.filter(|_| consistent);
+    memo.insert(key.clone(), out.clone());
+    out
+}
+
+/// CB.11: the struct type each variable of one callable names: the method
+/// receiver, parameters typed `T` / `*T` / `pkg.T`, and locals bound by
+/// `x := &T{..}`, `x := T{..}`, `x := new(T)`, `var x T` (the simple name,
+/// pointer stripped). A name bound twice to different types, or once to
+/// something else (`s := NewServer()`, a range variable), is left out:
+/// unknown beats wrong. Route-only, read at parse time: not
+/// `CodeNav.local_types`, which records call-chain text for the graph's
+/// receiver pass (CA.2a).
+fn scope_types(decl: TsNode, body: TsNode, src: &[u8]) -> BTreeMap<String, String> {
+    let mut scope = ScopeTypes::default();
+    if let Some(receiver) = decl.child_by_field_name("receiver")
+        && let (Some(var), ty) = parse_receiver(receiver, src)
+    {
+        scope.bind(&var, ty.filter(|t| !t.is_empty()));
+    }
+    for param in named_kids(decl.child_by_field_name("parameters")) {
+        let ty = match param.kind() {
+            "parameter_declaration" => param
+                .child_by_field_name("type")
+                .and_then(|t| struct_type_name(t, src)),
+            "variadic_parameter_declaration" => None,
+            _ => continue,
+        };
+        let mut c = param.walk();
+        for name in param.children_by_field_name("name", &mut c) {
+            scope.bind(text_of(name, src), ty.clone());
+        }
+    }
+    bind_scope_locals(body, src, &mut scope);
+    scope.types
+}
+
+/// CB.11: [`scope_types`]' accumulator.
+#[derive(Default)]
+struct ScopeTypes {
+    types: BTreeMap<String, String>,
+    /// Names bound to two types, or to something untyped.
+    unknown: BTreeSet<String>,
+}
+
+impl ScopeTypes {
+    fn bind(&mut self, var: &str, ty: Option<String>) {
+        if var == "_" || self.unknown.contains(var) {
+            return;
+        }
+        match (self.types.get(var), ty) {
+            (None, Some(ty)) => {
+                self.types.insert(var.to_string(), ty);
+            }
+            (Some(seen), Some(ty)) if *seen == ty => {}
+            _ => {
+                self.types.remove(var);
+                self.unknown.insert(var.to_string());
+            }
+        }
+    }
+}
+
+/// CB.11: the locals one body declares, in any nested block (func literals
+/// skipped, as the route walk skips them).
+fn bind_scope_locals(n: TsNode, src: &[u8], scope: &mut ScopeTypes) {
+    match n.kind() {
+        "func_literal" => return,
+        "short_var_declaration" => {
+            let names = named_kids(n.child_by_field_name("left"));
+            let values = named_kids(n.child_by_field_name("right"));
+            for (i, name) in names.iter().enumerate() {
+                if name.kind() == "identifier" {
+                    let ty =
+                        paired(&values, names.len(), i).and_then(|v| value_struct_type(v, src));
+                    scope.bind(text_of(*name, src), ty);
+                }
+            }
+        }
+        "var_spec" => {
+            let mut c = n.walk();
+            let names: Vec<TsNode> = n.children_by_field_name("name", &mut c).collect();
+            let declared = n
+                .child_by_field_name("type")
+                .map(|t| struct_type_name(t, src));
+            let values = named_kids(n.child_by_field_name("value"));
+            for (i, name) in names.iter().enumerate() {
+                let ty = match &declared {
+                    Some(ty) => ty.clone(),
+                    None => paired(&values, names.len(), i).and_then(|v| value_struct_type(v, src)),
+                };
+                scope.bind(text_of(*name, src), ty);
+            }
+        }
+        "range_clause" | "receive_statement" if declares(n) => {
+            for name in named_kids(n.child_by_field_name("left")) {
+                if name.kind() == "identifier" {
+                    scope.bind(text_of(name, src), None);
+                }
+            }
+        }
+        "type_switch_statement" => {
+            for name in named_kids(n.child_by_field_name("alias")) {
+                if name.kind() == "identifier" {
+                    scope.bind(text_of(name, src), None);
+                }
+            }
+        }
+        _ => {}
+    }
+    let mut cursor = n.walk();
+    for child in n.named_children(&mut cursor) {
+        bind_scope_locals(child, src, scope);
+    }
+}
+
+/// CB.11: the struct an initialiser builds: `T{..}`, `&T{..}`, `new(T)`
+/// (and `pkg.T` forms, by `T`); anything else names none.
+fn value_struct_type(value: TsNode, src: &[u8]) -> Option<String> {
+    match value.kind() {
+        "composite_literal" => struct_type_name(value.child_by_field_name("type")?, src),
+        "unary_expression" => {
+            let op = value.child_by_field_name("operator")?;
+            let inner = value.child_by_field_name("operand")?;
+            if op.kind() == "&" && inner.kind() == "composite_literal" {
+                value_struct_type(inner, src)
+            } else {
+                None
+            }
+        }
+        "call_expression" => {
+            let func = value.child_by_field_name("function")?;
+            if func.kind() != "identifier" || text_of(func, src) != "new" {
+                return None;
+            }
+            let arg = value.child_by_field_name("arguments")?.named_child(0)?;
+            match arg.kind() {
+                "identifier" => Some(text_of(arg, src).to_string()),
+                "selector_expression" => {
+                    Some(text_of(arg.child_by_field_name("field")?, src).to_string())
+                }
+                _ => struct_type_name(arg, src),
+            }
+        }
+        "parenthesized_expression" => value_struct_type(value.named_child(0)?, src),
+        _ => None,
+    }
+}
+
+/// CB.11: a named type's simple name: `T`, `*T`, `pkg.T`, `T[U]` -> `T`.
+/// Slices, maps, funcs and anonymous structs name no struct.
+fn struct_type_name(ty: TsNode, src: &[u8]) -> Option<String> {
+    let name = match ty.kind() {
+        "type_identifier" => text_of(ty, src),
+        "qualified_type" => text_of(ty.child_by_field_name("name")?, src),
+        "pointer_type" => return struct_type_name(ty.named_child(0)?, src),
+        "generic_type" => return struct_type_name(ty.child_by_field_name("type")?, src),
+        _ => return None,
+    };
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// The route walk's view of one callable body: its local router groups and,
+/// for CB.11, the struct type each of its variables names plus the file's
+/// struct-field groups.
+struct RouteScope<'a> {
+    /// Local group var -> its prefix (`api := r.Group("/api")`), filled in
+    /// walk order. Only looked up, never iterated.
+    groups: HashMap<String, String>,
+    /// CB.11: this body's variable -> struct type ([`scope_types`]); `None`
+    /// in a file that never says `Group` (every field prefix is then `""`).
+    types: Option<&'a BTreeMap<String, String>>,
+    /// CB.11: the file's struct-field router groups.
+    fields: &'a FieldPrefixes,
+}
+
+impl RouteScope<'_> {
+    /// CB.11: the prefix a struct-field receiver `x.f` holds: the file's
+    /// group for (type of `x`, `f`), else `""` (the HEAD-equivalent
+    /// unprefixed path: a field the file assigns no group, a conflicting one,
+    /// or an `x` it cannot type). `None` unless `sel` is `<identifier>.<field>`.
+    fn field_prefix(&self, sel: TsNode, src: &[u8]) -> Option<String> {
+        if sel.kind() != "selector_expression" {
+            return None;
+        }
+        let x = sel
+            .child_by_field_name("operand")
+            .filter(|o| o.kind() == "identifier")?;
+        let f = sel.child_by_field_name("field")?;
+        let prefix = self
+            .types
+            .and_then(|t| t.get(text_of(x, src)))
+            .and_then(|ty| self.fields.get(ty, text_of(f, src)))
+            .unwrap_or_default();
+        Some(prefix.to_string())
+    }
+}
+
 fn collect_routes_in(
     body: TsNode,
     src: &[u8],
@@ -2969,8 +3451,16 @@ fn collect_routes_in(
     repo: RepoId,
     acc: &mut Acc,
 ) {
-    let mut prefix_map: HashMap<String, String> = HashMap::new();
-    walk_routes(body, src, file_rel, module_id, repo, &mut prefix_map, acc);
+    // CB.11: the field groups are lent out of `acc` for the walk, which
+    // mutates `acc` as it emits.
+    let fields = std::mem::take(&mut acc.field_prefixes);
+    let mut scope = RouteScope {
+        groups: HashMap::new(),
+        types: fields.scopes.get(&body.start_byte()),
+        fields: &fields,
+    };
+    walk_routes(body, src, file_rel, module_id, repo, &mut scope, acc);
+    acc.field_prefixes = fields;
 }
 
 fn walk_routes(
@@ -2979,7 +3469,7 @@ fn walk_routes(
     file_rel: &str,
     module_id: NodeId,
     repo: RepoId,
-    prefix_map: &mut HashMap<String, String>,
+    scope: &mut RouteScope,
     acc: &mut Acc,
 ) {
     // Closure bodies run as handlers at request time; anything registered inside
@@ -2988,22 +3478,18 @@ fn walk_routes(
         return;
     }
     if n.kind() == "short_var_declaration" {
-        record_group_assignment(n, src, prefix_map);
+        record_group_assignment(n, src, scope);
     }
     if n.kind() == "call_expression" {
-        try_emit_route(n, src, file_rel, module_id, repo, prefix_map, acc);
+        try_emit_route(n, src, file_rel, module_id, repo, scope, acc);
     }
     let mut cursor = n.walk();
     for child in n.named_children(&mut cursor) {
-        walk_routes(child, src, file_rel, module_id, repo, prefix_map, acc);
+        walk_routes(child, src, file_rel, module_id, repo, scope, acc);
     }
 }
 
-fn record_group_assignment(
-    decl: TsNode,
-    src: &[u8],
-    prefix_map: &mut HashMap<String, String>,
-) {
+fn record_group_assignment(decl: TsNode, src: &[u8], scope: &mut RouteScope) {
     let Some(left) = decl.child_by_field_name("left") else {
         return;
     };
@@ -3040,13 +3526,15 @@ fn record_group_assignment(
     let Some(operand) = func.child_by_field_name("operand") else {
         return;
     };
+    // CB.11: `y := s.v1.Group("/x")` starts from the field's group.
     let parent_prefix = if operand.kind() == "identifier" {
-        prefix_map
+        scope
+            .groups
             .get(text_of(operand, src))
             .cloned()
             .unwrap_or_default()
     } else {
-        String::new()
+        scope.field_prefix(operand, src).unwrap_or_default()
     };
     let Some(args) = rhs.child_by_field_name("arguments") else {
         return;
@@ -3058,7 +3546,9 @@ fn record_group_assignment(
         return;
     };
     let full_prefix = join_path(&parent_prefix, &path_literal);
-    prefix_map.insert(text_of(lhs, src).to_string(), full_prefix);
+    scope
+        .groups
+        .insert(text_of(lhs, src).to_string(), full_prefix);
 }
 
 fn try_emit_route(
@@ -3067,7 +3557,7 @@ fn try_emit_route(
     file_rel: &str,
     module_id: NodeId,
     repo: RepoId,
-    prefix_map: &HashMap<String, String>,
+    scope: &RouteScope,
     acc: &mut Acc,
 ) {
     let Some(func) = call.child_by_field_name("function") else {
@@ -3084,7 +3574,7 @@ fn try_emit_route(
     // Gorilla Mux: `r.HandleFunc("/u", h).Methods("GET", "POST")` — promote
     // the inner registration to one route per method.
     if method_name == "Methods" {
-        try_emit_gorilla_methods_chain(call, src, file_rel, module_id, repo, prefix_map, acc);
+        try_emit_gorilla_methods_chain(call, src, file_rel, module_id, repo, scope, acc);
         return;
     }
 
@@ -3111,7 +3601,7 @@ fn try_emit_route(
         && arg_is_url_path(args, 1, src)
     {
         if emit_route_from_call(
-            call, verb, 1, 2, None, src, file_rel, module_id, repo, prefix_map, acc,
+            call, verb, 1, 2, None, src, file_rel, module_id, repo, scope, acc,
         ) {
             acc.route_forms.handle += 1;
         }
@@ -3129,7 +3619,7 @@ fn try_emit_route(
             let mut emitted = false;
             for verb in verbs {
                 emitted |= emit_route_from_call(
-                    call, verb, 1, 2, None, src, file_rel, module_id, repo, prefix_map, acc,
+                    call, verb, 1, 2, None, src, file_rel, module_id, repo, scope, acc,
                 );
             }
             if emitted {
@@ -3146,7 +3636,7 @@ fn try_emit_route(
         // path, never a path. A host pattern matches neither arm below.
         if let Some((verb, path)) = args.named_child(0).and_then(|a| method_pattern(a, src)) {
             if emit_route_from_call(
-                call, verb, 0, 1, Some(&path), src, file_rel, module_id, repo, prefix_map, acc,
+                call, verb, 0, 1, Some(&path), src, file_rel, module_id, repo, scope, acc,
             ) {
                 acc.route_forms.pattern += 1;
             }
@@ -3156,7 +3646,7 @@ fn try_emit_route(
             return;
         }
         emit_route_from_call(
-            call, "ANY", 0, 1, None, src, file_rel, module_id, repo, prefix_map, acc,
+            call, "ANY", 0, 1, None, src, file_rel, module_id, repo, scope, acc,
         );
         return;
     }
@@ -3170,11 +3660,16 @@ fn try_emit_route(
     };
     // A client HTTP call (`client.Get("/x")`) has the same verb shape but is an
     // outbound ENDPOINT (handled by try_detect_go_endpoint); skip its receiver
-    // here so it isn't mis-emitted as a phantom server ROUTE.
-    if let Some(operand) = func.child_by_field_name("operand")
-        && operand.kind() == "identifier"
-        && is_http_client_receiver(text_of(operand, src))
-    {
+    // here so it isn't mis-emitted as a phantom server ROUTE. CB.11: a struct
+    // field receiver (`s.client.Get("/x")`) is judged by its field name.
+    let receiver_name = func
+        .child_by_field_name("operand")
+        .and_then(|operand| match operand.kind() {
+            "identifier" => Some(operand),
+            "selector_expression" => operand.child_by_field_name("field"),
+            _ => None,
+        });
+    if receiver_name.is_some_and(|name| is_http_client_receiver(text_of(name, src))) {
         return;
     }
     let is_title_case = method_name
@@ -3187,7 +3682,7 @@ fn try_emit_route(
         return;
     }
     if emit_route_from_call(
-        call, canonical, 0, 1, None, src, file_rel, module_id, repo, prefix_map, acc,
+        call, canonical, 0, 1, None, src, file_rel, module_id, repo, scope, acc,
     ) && method_name == "Any"
     {
         acc.route_forms.any += 1;
@@ -3235,7 +3730,7 @@ fn try_emit_gorilla_methods_chain(
     file_rel: &str,
     module_id: NodeId,
     repo: RepoId,
-    prefix_map: &HashMap<String, String>,
+    scope: &RouteScope,
     acc: &mut Acc,
 ) {
     let Some(func) = outer.child_by_field_name("function") else {
@@ -3280,7 +3775,7 @@ fn try_emit_gorilla_methods_chain(
             file_rel,
             module_id,
             repo,
-            prefix_map,
+            scope,
             acc,
         );
     }
@@ -3304,7 +3799,7 @@ fn emit_route_from_call(
     file_rel: &str,
     module_id: NodeId,
     repo: RepoId,
-    prefix_map: &HashMap<String, String>,
+    scope: &RouteScope,
     acc: &mut Acc,
 ) -> bool {
     let Some(func) = call.child_by_field_name("function") else {
@@ -3313,10 +3808,24 @@ fn emit_route_from_call(
     let Some(operand) = func.child_by_field_name("operand") else {
         return false;
     };
-    if operand.kind() != "identifier" {
-        return false;
-    }
-    let receiver = text_of(operand, src);
+    // The receiver's group prefix: a local group var's, or (CB.11) a struct
+    // field's (`s.v1.GET(..)`; `""` when the file assigns the field no
+    // group). Any other receiver (a call, an index, a deeper chain) is no
+    // registration.
+    let (prefix, on_field) = match operand.kind() {
+        "identifier" => (
+            scope
+                .groups
+                .get(text_of(operand, src))
+                .cloned()
+                .unwrap_or_default(),
+            false,
+        ),
+        _ => match scope.field_prefix(operand, src) {
+            Some(prefix) => (prefix, true),
+            None => return false,
+        },
+    };
     let Some(args) = call.child_by_field_name("arguments") else {
         return false;
     };
@@ -3333,7 +3842,6 @@ fn emit_route_from_call(
         }
     };
 
-    let prefix = prefix_map.get(receiver).cloned().unwrap_or_default();
     // LB.5: `join_path` deliberately keeps an unprefixed relative literal
     // relative; the qname builder adds the one canonical leading `/`.
     let full_path = canonical_http_path(&join_path(&prefix, &path_literal)).into_owned();
@@ -3396,6 +3904,9 @@ fn emit_route_from_call(
     // carries both spans.
     let cells = vec![position_cell(call, file_rel), cell];
     acc.route_forms.registrations += 1;
+    if on_field {
+        acc.route_forms.field_calls.insert(call.start_byte());
+    }
     acc.route_forms.positioned += cells
         .iter()
         .filter(|c| c.kind == cell_type::POSITION)
@@ -6477,5 +6988,307 @@ func (p *Plain) Close() error { return nil }
             sigs_of(&parse),
             pairs(&[("app::Closer::Close", "()(error)"), ("app::Plain::Close", "()(error)")])
         );
+    }
+
+    // ---- CB.11: routers held on a struct field ----
+
+    /// Every ROUTE qname of a Go source parsed as `api/server.go`.
+    fn field_routes(source: &str) -> (FileParse, Vec<String>) {
+        let parse = parse_file(
+            source,
+            "api/server.go",
+            "api::server",
+            "example.com/shop",
+            repo(),
+        )
+        .unwrap();
+        let routes = route_qnames(&parse);
+        (parse, routes)
+    }
+
+    #[test]
+    fn field_router_registers() {
+        let source = r#"package api
+
+import "github.com/gin-gonic/gin"
+
+type Server struct {
+    router *gin.Engine
+}
+
+func (s *Server) routes() {
+    s.router.GET("/health", s.health)
+}
+
+func (s *Server) health(c *gin.Context) {}
+"#;
+        let (parse, routes) = field_routes(source);
+        assert_eq!(routes, vec!["GET /health".to_string()]);
+        let health = route_id(repo(), "GET", "/health");
+        // CA.5a's rewrite applies unchanged: `s` is the receiver of `routes`.
+        assert_eq!(handled_by(&parse, health), vec![attr("Server", "health")]);
+        assert_eq!(
+            route_handlers(&parse, health),
+            vec![Some("s.health".to_string())]
+        );
+        assert_eq!(route_positions(&parse, health).len(), 1);
+    }
+
+    #[test]
+    fn field_group_prefix_from_constructor() {
+        let source = r#"package api
+
+import "github.com/gin-gonic/gin"
+
+type Server struct {
+    router *gin.Engine
+    v1     *gin.RouterGroup
+}
+
+func NewServer() *Server {
+    s := &Server{router: gin.New()}
+    s.v1 = s.router.Group("/v1")
+    s.routes()
+    return s
+}
+
+func (s *Server) routes() {
+    s.router.GET("/health", s.health)
+    s.v1.GET("/orders", s.listOrders)
+    s.v1.POST("/orders", s.createOrder)
+}
+"#;
+        let (parse, routes) = field_routes(source);
+        assert_eq!(
+            routes,
+            vec![
+                "GET /health".to_string(),
+                "GET /v1/orders".to_string(),
+                "POST /v1/orders".to_string(),
+            ]
+        );
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "GET", "/v1/orders")),
+            vec![attr("Server", "listOrders")]
+        );
+    }
+
+    #[test]
+    fn composite_literal_field_group() {
+        let source = r#"package api
+
+import "github.com/gin-gonic/gin"
+
+type Server struct {
+    api *gin.RouterGroup
+}
+
+func NewServer(r *gin.Engine) *Server {
+    return &Server{api: r.Group("/api")}
+}
+
+func (s *Server) routes() {
+    s.api.GET("/users", s.listUsers)
+}
+"#;
+        let (_, routes) = field_routes(source);
+        assert_eq!(routes, vec!["GET /api/users".to_string()]);
+    }
+
+    #[test]
+    fn group_from_a_field() {
+        let source = r#"package api
+
+import "github.com/gin-gonic/gin"
+
+type Server struct {
+    router *gin.Engine
+    v1     *gin.RouterGroup
+}
+
+func NewServer() *Server {
+    s := new(Server)
+    s.v1 = s.router.Group("/v1")
+    return s
+}
+
+func (s *Server) routes() {
+    g := s.v1.Group("/x")
+    g.GET("/y", s.y)
+}
+"#;
+        let (_, routes) = field_routes(source);
+        assert_eq!(routes, vec!["GET /v1/x/y".to_string()]);
+    }
+
+    #[test]
+    fn client_field_is_not_a_router() {
+        let source = r#"package api
+
+type Server struct {
+    client     *Client
+    httpClient *http.Client
+}
+
+func (s *Server) sync() {
+    s.client.Get("/x")
+    s.httpClient.Post("/y", "application/json", nil)
+    s.client.GET("/z")
+}
+"#;
+        let (_, routes) = field_routes(source);
+        assert!(
+            routes.is_empty(),
+            "a client-shaped field is no router: {routes:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_field_is_unprefixed() {
+        let source = r#"package api
+
+import "github.com/gin-gonic/gin"
+
+type Server struct {
+    other *gin.RouterGroup
+    v1    *gin.RouterGroup
+}
+
+func (s *Server) routes() {
+    s.other.GET("/z", s.z)
+    // A deeper chain or a call receiver stays no registration.
+    s.deps.router.GET("/deep", s.z)
+    router().GET("/call", s.z)
+}
+"#;
+        let (_, routes) = field_routes(source);
+        assert_eq!(routes, vec!["GET /z".to_string()]);
+    }
+
+    #[test]
+    fn conflicting_field_groups_are_unprefixed() {
+        // Two assignments that disagree record nothing for the field: unknown
+        // beats wrong. A field typed through a parameter still records.
+        let source = r#"package api
+
+import "github.com/gin-gonic/gin"
+
+type Server struct {
+    router *gin.Engine
+    v1     *gin.RouterGroup
+    admin  *gin.RouterGroup
+}
+
+func NewServer() *Server {
+    s := &Server{router: gin.New()}
+    s.v1 = s.router.Group("/v1")
+    return s
+}
+
+func NewLegacy() *Server {
+    s := &Server{router: gin.New()}
+    s.v1 = s.router.Group("/legacy")
+    return s
+}
+
+func mountAdmin(s *Server) {
+    s.admin = s.router.Group("/admin")
+}
+
+func (s *Server) routes() {
+    s.v1.GET("/orders", s.list)
+    s.admin.DELETE("/users/:id", s.remove)
+}
+"#;
+        let (_, routes) = field_routes(source);
+        assert_eq!(
+            routes,
+            vec![
+                "DELETE /admin/users/:id".to_string(),
+                "GET /orders".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn field_group_chain_resolves_in_any_function_order() {
+        // `v2` is assigned from `api` before the file assigns `api`, and a
+        // local group handed to a field keeps its prefix. The stdlib mux and
+        // a Gorilla chain on a field register too.
+        let source = r#"package api
+
+import "github.com/gin-gonic/gin"
+
+type Server struct {
+    router *gin.Engine
+    api    *gin.RouterGroup
+    v2     *gin.RouterGroup
+    admin  *gin.RouterGroup
+    mux    *http.ServeMux
+}
+
+func (s *Server) versions() {
+    s.v2 = s.api.Group("/v2")
+    grp := s.router.Group("/admin")
+    s.admin = grp
+}
+
+func NewServer() *Server {
+    var s Server
+    s.api = s.router.Group("/api")
+    return &s
+}
+
+func (s *Server) routes() {
+    s.v2.GET("/items", s.items)
+    s.admin.GET("/stats", s.stats)
+    s.mux.HandleFunc("/metrics", s.metrics)
+}
+"#;
+        let (_, routes) = field_routes(source);
+        assert_eq!(
+            routes,
+            vec![
+                "ANY /metrics".to_string(),
+                "GET /admin/stats".to_string(),
+                "GET /api/v2/items".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn shadowed_receiver_type_is_unknown() {
+        // `s` is the receiver AND a local of another type in one body: the
+        // walk cannot tell which `s.v1` a registration means, so it is
+        // unprefixed rather than guessed.
+        let source = r#"package api
+
+import "github.com/gin-gonic/gin"
+
+type Server struct {
+    router *gin.Engine
+    v1     *gin.RouterGroup
+}
+
+type Other struct {
+    v1 *gin.RouterGroup
+}
+
+func NewServer() *Server {
+    s := &Server{router: gin.New()}
+    s.v1 = s.router.Group("/v1")
+    return s
+}
+
+func (s *Server) routes() {
+    if true {
+        s := &Other{}
+        _ = s
+    }
+    s.v1.GET("/orders", s.list)
+}
+"#;
+        let (_, routes) = field_routes(source);
+        assert_eq!(routes, vec!["GET /orders".to_string()]);
     }
 }
