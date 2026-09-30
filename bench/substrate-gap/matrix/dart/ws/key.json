@@ -1,0 +1,32 @@
+{
+  "framework": "dart-web-socket-channel",
+  "language": "dart",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "ws",
+  "cells": [
+    "dart/ws"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "WS_HANDLER",
+      "name": "/ws/chat"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "/ws/chat"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "/ws/chat",
+      "to": "/ws/chat",
+      "category": "WS_CONNECTS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "web_socket_channel client against a FastAPI websocket server (known-good side, python/ws) || CF.10c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=1/2 literal=1/2 route=0/1 forbid=0/0) via=websocket. Predicted extractor gap (backlog, not fixed by the probe): client side missing: `WebSocketChannel.connect(Uri.parse('ws://..'))` has no row in parsers/code/extractors/src/websocket.rs; the FastAPI server side is found."
+}

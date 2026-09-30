@@ -1,0 +1,32 @@
+{
+  "framework": "dart-graphql-flutter-client",
+  "language": "dart",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "graphql",
+  "cells": [
+    "dart/graphql"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "orders"
+    },
+    {
+      "kind": "GRAPHQL_OPERATION",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "GRAPHQL_CALLS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "package:graphql client (graphql_flutter's core) against a NestJS @Query resolver (known-good side) || CF.10c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=2/2 literal=1/2 route=0/1 forbid=0/0) via=graphql. Predicted extractor gap (backlog, not fixed by the probe): client side loses the literal: package:graphql `client.query(QueryOptions(document: gql(listOrders)))` mints `graphql_op:client.query` (the call), the operation text in the `r\"\"\"..\"\"\"` const is not read (parsers/code/extractors/src/graphql.rs); the NestJS server side is found."
+}
