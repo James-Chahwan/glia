@@ -1,0 +1,38 @@
+{
+  "framework": "php-launchdarkly",
+  "language": "php",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "flags",
+  "cells": [
+    "php/flags"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "new-checkout"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Checkout",
+      "to": "new-checkout",
+      "category": "READS_CONFIG"
+    },
+    {
+      "from": "features",
+      "to": "new-checkout",
+      "category": "DEFINES_CONFIG"
+    },
+    {
+      "from": "new-checkout",
+      "to": "new-checkout",
+      "category": "SHARES_CONFIG"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "LaunchDarkly PHP SDK ->variation() + Flipt define side || CF.7c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=1/1 literal=1/1 route=1/3 forbid=0/0) via=config. Predicted extractor gap (backlog, not fixed by the probe): LaunchDarkly PHP `$client->variation('x', ..)`: the `.variation(` row needs a `.` receiver (`Variation(` is capitalised); only the Flipt define side fires."
+}

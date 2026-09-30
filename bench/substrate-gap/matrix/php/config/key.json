@@ -1,0 +1,38 @@
+{
+  "framework": "php-laravel-env",
+  "language": "php",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "config",
+  "cells": [
+    "php/config"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "DB_URL"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "database",
+      "to": "DB_URL",
+      "category": "READS_CONFIG"
+    },
+    {
+      "from": ".env",
+      "to": "DB_URL",
+      "category": "DEFINES_CONFIG"
+    },
+    {
+      "from": "DB_URL",
+      "to": "DB_URL",
+      "category": "SHARES_CONFIG"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Laravel config/database.php env('DB_URL') + deploy .env || CF.7c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=1/1 literal=1/1 route=1/3 forbid=0/0) via=config. Predicted extractor gap (backlog, not fixed by the probe): Laravel `env('DB_URL')` is not a read needle in parsers/code/extractors/src/config.rs (only `getenv(` / `$_ENV[` / `$_SERVER[`); the `.env` define side fires."
+}
