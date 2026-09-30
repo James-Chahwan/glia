@@ -57,7 +57,9 @@ The eleven fields below are the **complete and only** vocabulary:
   // ---- RECALL: what MUST be emitted ----
   "expect_nodes": [ {"kind": "SERVICE", "name": "ApiService", "note": "…"} ],
   "expect_edges": [ {"from": "AppComponent", "to": "ApiService",
-                     "category": "INJECTS", "note": "…"} ],
+                     "category": "INJECTS", "note": "…"},
+                    {"from": "get_user", "to": "helper", "category": "CALLS",
+                     "exact": true} ],   // optional on nodes / edges: strict identity
   "expect_cells": [ {"kind": "ENDPOINT", "node": "GET /users",
                      "cell": "POSITION", "contains": "app.ts", "note": "…"} ],
 
@@ -109,12 +111,20 @@ need something this vocabulary cannot express, extend `TOP_FIELDS` in `grade.py`
 
 Semantics:
 
-- **Identity matching** is lenient (case-folded substring over name **or** qname,
-  `::`/`.` normalised to `/`) and strict on kind/category id. We measure "did an
-  edge of the right category between the right two entities get emitted at all."
-- **`forbid` uses the exact same matcher** as `expect_edges` / `expect_nodes`. A
-  precision gate that matched more loosely than the recall gate would be
-  unfalsifiable. A violation is `matched > max_nodes` (default `0`); edge entries
+- **Identity matching** in `expect_nodes` / `expect_edges` is lenient
+  (case-folded substring over name **or** qname, `::`/`.` normalised to `/`)
+  unless the entry sets `"exact": true`, which requires the normalised pattern to
+  EQUAL the name or the qname; kind / category are always strict. We measure "did
+  an edge of the right category between the right two entities get emitted at
+  all." Lenient is the default and stays right where leniency is the point
+  (recall across renamed or re-nested qnames). Set `exact` when the key must pin
+  WHICH of two same-prefixed nodes carries the edge: lenient `get_user -> helper`
+  is satisfied by `get_user_impl -> helper`, exact is not. `exact` must be a JSON
+  boolean (`"true"` raises). A fixture that uses it prints `[substrate-gap] exact
+  identity rows=<n> in <fixture>` on stderr, and each such row prints `[exact]`
+  after its kind / category.
+- **`forbid` always matches exactly** (see *Precision gates match exactly*
+  below). A violation is `matched > max_nodes` (default `0`); edge entries
   have no cap. Violations are reported per fixture as `FORBID VIOLATIONS: n` and
   do **not** move the recall matrix — a fixture can read `1.00` and still be
   violating, which is precisely why the section is printed separately.
@@ -251,7 +261,7 @@ DIVERGENT; …)`.
 
 `forbid` uses **strict** identity — the normalised pattern must EQUAL the node's
 name or its qname — while `expect_nodes` / `expect_edges` keep the lenient
-substring matcher.
+substring matcher unless an entry opts into the strict one with `"exact": true`.
 
 This asymmetry is deliberate. Leniency in a *recall* gate can only turn a miss
 into a hit, so it is safe. Leniency in a *precision* gate turns it into a false
@@ -260,4 +270,7 @@ is `UserController::UserController::getUser`, and the harness reported a
 violation against a correct graph (wave 2, `java-spring-composed`).
 
 `test_grade.py` pins both directions — the strict matcher must not match an
-ancestor qname segment, and must still catch a real violation.
+ancestor qname segment, and must still catch a real violation — and the `exact`
+recall entries: the lenient over-match, its exact rejection, the true edge found
+by name and by qname, a non-boolean `exact` raising, and an entry without `exact`
+grading as before.

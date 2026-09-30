@@ -29,8 +29,10 @@ key.json schema:
     ],
     "expect_edges": [                      # edge-extraction ground truth
       {"from": "AppComponent", "to": "ApiService",
-       "category": "INJECTS", "note": "constructor DI"}
-    ],
+       "category": "INJECTS", "note": "constructor DI"},
+      {"from": "get_user", "to": "helper", "category": "CALLS",
+       "exact": true}                      # optional on expect_nodes /
+    ],                                     #   expect_edges: strict identity
     "forbid": [                            # PRECISION: must NOT be emitted
       {"kind": "ROUTE", "name": "/users"},                 # no such node
       {"kind": "ROUTE", "name": "/users", "max_nodes": 1}, # at most N such
@@ -60,10 +62,16 @@ spelling of `forbid` (no forbid_edges / expect_absent_edges /
 expect_absent_nodes / expect_literals) — extend the allow-lists below and
 document it in README.md.
 
-Matching is deliberately lenient on identity (case-folded substring over name OR
-qname, with `::`/`.` normalised to `/`) and STRICT on kind/category id. We are
-measuring "did the edge of the right category between the right two entities get
-emitted at all", not exact-qname bookkeeping.
+Recall matching is deliberately lenient on identity (case-folded substring over
+name OR qname, with `::`/`.` normalised to `/`) and STRICT on kind/category id. We
+are measuring "did the edge of the right category between the right two entities
+get emitted at all", not exact-qname bookkeeping. An expect_nodes / expect_edges
+entry with `"exact": true` (a JSON boolean; anything else raises) uses the forbid
+gate's strict matcher instead: the normalised pattern must EQUAL the name or the
+qname, so `get_user -> helper` is no longer satisfied by `get_user_impl -> helper`.
+A fixture that uses it prints `[substrate-gap] exact identity rows=<n> in
+<fixture>` on stderr. `forbid` is always strict; expect_cells' `node` is always
+lenient.
 
 Usage:
   python3 grade.py fixtures/py-calls            # grade one fixture (verbose)
@@ -98,8 +106,8 @@ TOP_FIELDS = {
     "mechanism", "cells",                # matrix binding (echoed, not graded)
     "note",                              # commentary
 }
-NODE_FIELDS = {"kind", "name", "note"}
-EDGE_FIELDS = {"from", "to", "category", "note"}
+NODE_FIELDS = {"kind", "name", "exact", "note"}
+EDGE_FIELDS = {"from", "to", "category", "exact", "note"}
 FORBID_NODE_FIELDS = {"kind", "name", "max_nodes", "note"}
 FORBID_EDGE_FIELDS = {"from", "to", "category", "note"}
 CELL_FIELDS = {"kind", "node", "cell", "contains", "note"}
@@ -235,6 +243,47 @@ def _node_matches_exact(node, pattern):
     return p == _norm(node.get("name", "")) or p == _norm(node.get("qname", ""))
 
 
+def _exact(fixture, exp, where):
+    """An entry's `exact` flag: False when absent, else it MUST be a JSON boolean.
+
+    `"true"`, `"false"`, `1` and `"yes"` raise: a string is truthy in Python, so
+    reading one as-is would pick a matcher from a typo.
+    """
+    if "exact" not in exp:
+        return False
+    val = exp["exact"]
+    if not isinstance(val, bool):
+        raise ValueError(f"{fixture}: {where} field 'exact' must be true or false, got {val!r}")
+    return val
+
+
+def _recall_node_hit(fixture, where, nodes, kind_id, exp):
+    """Recall for one expect_nodes entry: some node of `kind_id` matches `name`.
+
+    Lenient (`_node_matches`) unless the entry sets `"exact": true`, which uses
+    `_node_matches_exact` so a key can pin WHICH of two same-prefixed nodes
+    exists. The kind id is strict either way.
+    """
+    match = _node_matches_exact if _exact(fixture, exp, where) else _node_matches
+    return any(n["kind"] == kind_id and match(n, exp["name"]) for n in nodes)
+
+
+def _recall_edge_hit(fixture, where, edges, by_id, cat_id, exp):
+    """Recall for one expect_edges entry: some `cat_id` edge matches both ends.
+
+    `"exact": true` applies the strict matcher to `from` AND `to`, so
+    `get_user -> helper` is not satisfied by `get_user_impl -> helper`.
+    """
+    match = _node_matches_exact if _exact(fixture, exp, where) else _node_matches
+    for e in edges:
+        if e["category"] != cat_id:
+            continue
+        fr, to = by_id.get(e["from"]), by_id.get(e["to"])
+        if fr and to and match(fr, exp["from"]) and match(to, exp["to"]):
+            return True
+    return False
+
+
 def _grade_forbid(fixture, key, nodes, edges, by_id):
     """PRECISION gate: things that must NOT be emitted.
 
@@ -322,31 +371,31 @@ def grade_fixture(fixture_dir):
     # ---- node-level extraction recall (per kind) ----
     node_results = []
     for i, exp in enumerate(key.get("expect_nodes", [])):
-        _reject_unknown(fixture, exp, NODE_FIELDS, f"key.json field in expect_nodes[{i}]")
-        _require(fixture, exp, ("kind", "name"), f"expect_nodes[{i}]")
+        where = f"expect_nodes[{i}]"
+        _reject_unknown(fixture, exp, NODE_FIELDS, f"key.json field in {where}")
+        _require(fixture, exp, ("kind", "name"), where)
         kind_id = _KIND_BY_NAME.get(exp["kind"])
         if kind_id is None:
             raise ValueError(f"{fixture_dir.name}: unknown kind {exp['kind']!r}")
-        hit = any(n["kind"] == kind_id and _node_matches(n, exp["name"]) for n in nodes)
+        hit = _recall_node_hit(fixture, where, nodes, kind_id, exp)
         node_results.append({**exp, "found": hit})
 
     # ---- edge-level extraction recall (per category) ----
     edge_results = []
     for i, exp in enumerate(key.get("expect_edges", [])):
-        _reject_unknown(fixture, exp, EDGE_FIELDS, f"key.json field in expect_edges[{i}]")
-        _require(fixture, exp, ("from", "to", "category"), f"expect_edges[{i}]")
+        where = f"expect_edges[{i}]"
+        _reject_unknown(fixture, exp, EDGE_FIELDS, f"key.json field in {where}")
+        _require(fixture, exp, ("from", "to", "category"), where)
         cat_id = _CAT_BY_NAME.get(exp["category"])
         if cat_id is None:
             raise ValueError(f"{fixture_dir.name}: unknown category {exp['category']!r}")
-        hit = False
-        for e in edges:
-            if e["category"] != cat_id:
-                continue
-            fr, to = by_id.get(e["from"]), by_id.get(e["to"])
-            if fr and to and _node_matches(fr, exp["from"]) and _node_matches(to, exp["to"]):
-                hit = True
-                break
+        hit = _recall_edge_hit(fixture, where, edges, by_id, cat_id, exp)
         edge_results.append({**exp, "found": hit})
+
+    # fired_on: which fixtures rely on strict recall identity (`"exact": true`).
+    exact_rows = sum(1 for r in node_results + edge_results if r.get("exact") is True)
+    if exact_rows:
+        print(f"[substrate-gap] exact identity rows={exact_rows} in {fixture}", file=sys.stderr)
 
     per_cat = {}
     for r in edge_results:
@@ -419,12 +468,15 @@ def _print_verbose(res):
         print("  nodes:")
         for r in res["node_recall"]:
             mark = "OK " if r["found"] else "XX "
-            print(f"    {mark} {r['kind']:<10} {r['name']!r}  — {r.get('note','')}")
+            tag = " [exact]" if r.get("exact") is True else ""
+            print(f"    {mark} {r['kind']:<10}{tag} {r['name']!r}  — {r.get('note','')}")
     if res["edge_recall"]:
         print("  edges:")
         for r in res["edge_recall"]:
             mark = "OK " if r["found"] else "XX "
-            print(f"    {mark} {r['category']:<14} {r['from']!r} -> {r['to']!r}  — {r.get('note','')}")
+            tag = " [exact]" if r.get("exact") is True else ""
+            print(f"    {mark} {r['category']:<14}{tag} {r['from']!r} -> {r['to']!r}"
+                  f"  — {r.get('note','')}")
     if res["cell_recall"]:
         print("  cells:")
         for r in res["cell_recall"]:

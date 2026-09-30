@@ -133,7 +133,8 @@ this.
 ### 5. Assert the literal — and mind the two identity gotchas
 
 The literal assertion **is** an `expect_nodes` entry whose `name` is the literal:
-the matcher is a case-folded substring over name **or** qname. There is no
+the matcher is a case-folded substring over name **or** qname (`"exact": true`
+makes it equality, README Semantics). There is no
 `expect_literals` field; inventing one makes the fixture raise and vanish from
 the matrix.
 
@@ -219,4 +220,6 @@ the intended queue path had.
 - **Frozen vocabulary.** `framework`, `language`, `dirs`, `expect_nodes`,
   `expect_edges`, `expect_cells`, `forbid`, `materialize`, `mechanism`, `cells`,
   `note` — and nothing else. `grade.py` raises `ValueError` on any other
-  top-level field, and a raising fixture drops out of the matrix entirely.
+  top-level field, and a raising fixture drops out of the matrix entirely. An
+  `expect_nodes` / `expect_edges` entry may also carry `"exact": true` (a JSON
+  boolean) for strict identity, when two nodes share a name prefix.
