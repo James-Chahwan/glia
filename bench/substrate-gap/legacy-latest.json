@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 319,
+  "fixtures": 322,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -686,6 +686,13 @@
         "CALLS": 1.0
       }
     },
+    "go-route-mounts": {
+      "framework": "go-route-mounts",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
     "go-route-per-method": {
       "framework": "go-route-per-method",
       "language": "go",
@@ -815,6 +822,13 @@
       "language": "python+typescript",
       "per_category": {
         "HANDLED_BY": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "http-mount-segment-fold": {
+      "framework": "http-mount-segment-fold",
+      "language": "typescript+go",
+      "per_category": {
         "HTTP_CALLS": 1.0
       }
     },
@@ -1636,6 +1650,13 @@
       "language": "swift",
       "per_category": {
         "HTTP_CALLS": 1.0
+      }
+    },
+    "swift-implicit-self": {
+      "framework": "swift-implicit-self",
+      "language": "swift",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "swift-imports": {
