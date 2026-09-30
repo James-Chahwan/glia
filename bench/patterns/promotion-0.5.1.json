@@ -21,7 +21,7 @@
       "pass": true
     }
   },
-  "glia": "glia 0.5.0 (build 0.5.0+p08b9201adb2e1650)",
+  "glia": "glia 0.5.0 (build 0.5.0+pebcf8d2db286bb21)",
   "promote": true,
   "repos": [
     {

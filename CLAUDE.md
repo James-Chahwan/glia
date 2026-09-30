@@ -371,8 +371,9 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   `implementors` (LD.7c), `serves <repo> <channel> [--mechanism auto|http|queue]`
   (LD.8b), `why <repo> <from> <to>` (LE.5; exits 1 when not found).
 - change: `delta [--base <rev>] [--edges-only] [--category <NAME>]...` (LE.1c),
-  `diff-impact` (LE.2), `tests-for` (LE.3b), `patterns --experimental` (LE.7b). A git
-  or build error exits 2.
+  `diff-impact` (LE.2), `tests-for` (LE.3b), `patterns` (LE.7b; out of experimental
+  since CC.12b, `--experimental` hidden and accepted until 0.5.2). A git or build
+  error exits 2.
 - rules: `effects` (LE.4d), `cycles` (LE.6b), `check` (LE.8; exits 0 clean, 1 on
   violations, 2 on an error), `spec-status` (LE.9b).
 - store: `inspect <path>` (LC.4), `cell set|rm|ls` (LF.1c).
@@ -385,14 +386,16 @@ pyo3 (`PyGraph`): `blast_radius`, `cross_stack_trace`, `entry_flows`,
 `feature_flows` / `write_feature_flows`, `resolve`, `find`, `coverage`,
 `governing_docs`, `page_flow`, `service_map`, `contracts`, `contract_fields`,
 `implementors`, `serves`, `why`, `diff_impact`, `tests_for` / `tests_for_diff`,
-`effects`, `cycles`, `check`, `spec_status`, `gaps`, `patterns_experimental`,
+`effects`, `cycles`, `check`, `spec_status`, `gaps`, `patterns` (CC.12b; the 0.5.0
+`patterns_experimental` stays until 0.5.2 as a DeprecationWarning alias),
 traversal — `neighbours(node_id, direction="out", categories=None)` -> `(id, category,
 "out"|"in")`, `bfs`, `predecessors`, `reachable_by`, `shortest_path` (categories=None is
 every category, DEFINES included; LD.3c) — `set_cell` / `remove_cell` (+ `activate`,
 `node_cells`, `dense_text*`, `nodes_json` / `edges_json`, `save_to*`). Module functions:
 `generate` / `generate_many`, `load_from_gmap` (rebuilds a stale or old layout, LC.8),
 `is_stale`, `merge_gmaps`, `graph_delta`, `diff_impact_vs_rev`, `tests_for_rev`,
-`patterns_vs_rev_experimental`, `overlay_delta`, `history_sync`, `tests_ingest`,
+`patterns_vs_rev` (alias `patterns_vs_rev_experimental`, deprecated, until 0.5.2),
+`overlay_delta`, `history_sync`, `tests_ingest`,
 `write_cell` / `remove_cell`, `kind_names` / `category_names` / `cell_type_names` /
 `entry_kinds`. An answer is a native dict / list; only `*_json` returns JSON text (LD.2).
 The committed surface is `py/api_surface/<module>.txt`.

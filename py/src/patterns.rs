@@ -1,28 +1,34 @@
-//! **patterns** (LE.7b, EXPERIMENTAL): the pattern-conformance engine
-//! (`glia_engine::patterns`, LE.7a) — route handlers grouped per
-//! service, each handler's role chain to its first effect sink as a
-//! signature, a population's most frequent signature as its convention, and
-//! every handler off it a located DIVERGENCE (tier heuristic).
+//! **patterns** (LE.7b, promoted out of experimental by CC.12b): the
+//! pattern-conformance engine (`glia_engine::patterns`, LE.7a) — route
+//! handlers grouped per service, each handler's role chain to its first
+//! effect sink as a signature, a population's most frequent signature as its
+//! convention, and every handler off it a located DIVERGENCE (tier
+//! heuristic).
 //!
-//! Both names carry `experimental`, so no consumer adopts the answer by
-//! accident before it is promoted (a promotion is a rename):
-//! `PyGraph.patterns_experimental(..)` judges a built graph;
-//! the module function `patterns_vs_rev_experimental(repo_path, base="HEAD",
-//! ..)` builds the working tree and the rev itself (LE.1b's graph delta) and
-//! lists only the divergences the change touched. Each returns the engine's
-//! `PatternReport` as a native dict (LD.2); a `min_share` above 100, a
-//! `group_by` other than `"service"` / `"package"` (CA.5b) or an engine `Err`
-//! raises `ValueError`.
+//! `PyGraph.patterns(..)` judges a built graph; the module function
+//! `patterns_vs_rev(repo_path, base="HEAD", ..)` builds the working tree and
+//! the rev itself (LE.1b's graph delta) and lists only the divergences the
+//! change touched. Each returns the engine's `PatternReport` as a native dict
+//! (LD.2); a `min_share` above 100, a `group_by` other than `"service"` /
+//! `"package"` (CA.5b) or an engine `Err` raises `ValueError`.
+//!
+//! 0.5.0 named them `patterns_experimental` / `patterns_vs_rev_experimental`
+//! so no consumer adopted the answer before the engine met its promotion
+//! criterion (the engine module docs, "Promotion criterion"). Those names stay
+//! until 0.5.2 as aliases: the same parameters, the same helper, the same
+//! dict, after a `DeprecationWarning` naming the new name (an error under
+//! `warnings.simplefilter("error")`, so nothing is computed then). Removing
+//! them in 0.5.2 is deleting the two alias fns and their snapshot lines.
 //!
 //! Transport only: populations, signatures, verdicts and locations live in
 //! the engine. The helpers the pyo3 entry points delegate to are pyo3-free,
 //! so `cargo test -p glia-py` covers them (see the crate doc); they
-//! print this surface's marker,
-//! `[patterns] experimental surface=pyo3 mode=<graph|delta>`.
+//! print this surface's marker, `[patterns] surface=pyo3 mode=<graph|delta>`
+//! (0.5.0: `[patterns] experimental surface=pyo3 ..`).
 
 use std::collections::BTreeMap;
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyDeprecationWarning, PyValueError};
 use pyo3::prelude::*;
 
 use glia_engine::delta::graph_delta_vs_rev;
@@ -60,7 +66,7 @@ fn options(
     Ok(p)
 }
 
-/// The body of [`PyGraph::patterns_experimental`], minus pyo3.
+/// The body of [`PyGraph::patterns`] (and its alias), minus pyo3.
 fn graph_report(
     merged: &MergedGraph,
     repo_labels: &BTreeMap<u64, String>,
@@ -71,11 +77,11 @@ fn graph_report(
 ) -> Result<PatternReport, String> {
     let p = options(min_support, min_share, scope, group_by)?;
     let report = pattern_conformance(merged, repo_labels, &p);
-    eprintln!("[patterns] experimental surface=pyo3 mode=graph");
+    eprintln!("[patterns] surface=pyo3 mode=graph");
     Ok(report)
 }
 
-/// The body of [`patterns_vs_rev_experimental`], minus pyo3. `Err` is a bad
+/// The body of [`patterns_vs_rev`] (and its alias), minus pyo3. `Err` is a bad
 /// `min_share` or `group_by`, or the engine's message (not a directory, git missing, not a
 /// git work tree, an unknown rev, a failed build).
 fn rev_report(
@@ -89,47 +95,59 @@ fn rev_report(
     let p = options(min_support, min_share, scope, group_by)?;
     let d = graph_delta_vs_rev(repo_path, base)?;
     let report = pattern_conformance_delta(&d.after.merged, &d.after.repo_labels, &d.delta, &p);
-    eprintln!("[patterns] experimental surface=pyo3 mode=delta");
+    eprintln!("[patterns] surface=pyo3 mode=delta");
     Ok(report)
+}
+
+/// A pre-promotion alias's `DeprecationWarning`, naming its replacement.
+const GRAPH_ALIAS_WARNING: &std::ffi::CStr =
+    c"patterns_experimental is deprecated: use patterns (removed in 0.5.2)";
+/// [`patterns_vs_rev_experimental`]'s warning.
+const REV_ALIAS_WARNING: &std::ffi::CStr =
+    c"patterns_vs_rev_experimental is deprecated: use patterns_vs_rev (removed in 0.5.2)";
+
+/// Emit a pre-promotion alias's `DeprecationWarning` at the caller's line;
+/// `Err` when the warning filter turns it into an exception.
+fn deprecated(py: Python<'_>, message: &std::ffi::CStr) -> PyResult<()> {
+    PyErr::warn(py, py.get_type::<PyDeprecationWarning>().as_any(), message, 1)
 }
 
 #[pymethods]
 impl PyGraph {
-    /// **patterns_experimental** (LE.7b, EXPERIMENTAL: the name changes when
-    /// the engine is promoted): pattern conformance over this graph. The
-    /// route handlers of each service (the services `service_map` shows) form
-    /// a population; each handler's signature is its role chain to the first
-    /// effect sink (`handler>service>repository>db`, `handler>(no effect)`
-    /// when the graph follows none); a population of at least `min_support`
-    /// handlers whose most frequent sink-reaching signature holds `min_share`
-    /// percent of its SIGHTED handlers has that signature as its convention,
-    /// and every sighted handler off it is a DIVERGENCE (tier `heuristic`:
-    /// observed, never a rule). A BLIND handler (`handler>(no effect)`, the
-    /// graph follows no chain from it) counts toward the size, not the share,
-    /// and is listed in the population's `blind`, never as a divergence; a
+    /// **patterns** (LE.7b; out of experimental since CC.12b): pattern
+    /// conformance over this graph. The route handlers of each service (the
+    /// services `service_map` shows) form a population; each handler's
+    /// signature is its role chain to the first effect sink
+    /// (`handler>service>repository>db`, `handler>(no effect)` when the graph
+    /// follows none); a population of at least `min_support` handlers whose
+    /// most frequent sink-reaching signature holds `min_share` percent of its
+    /// SIGHTED handlers has that signature as its convention, and every
+    /// sighted handler off it is a DIVERGENCE (tier `heuristic`: observed,
+    /// never a rule). A BLIND handler (`handler>(no effect)`, the graph
+    /// follows no chain from it) counts toward the size, not the share, and
+    /// is listed in the population's `blind`, never as a divergence; a
     /// population with fewer than `min_support` sighted handlers reads
     /// `blind`. `scope` (a path or project label) keeps only the handlers
     /// located under it; `group_by="package"` keys populations by (service,
     /// the handler file's directory) instead of the service alone.
     ///
-    /// Returns a dict `{experimental, delta_mode, handlers, judged,
-    /// skipped_small, excluded, role_sources, populations, divergences,
-    /// blind}`: `experimental` is always True; `excluded` counts the handlers
-    /// left out by reason (`test_fixture`, `generated`, `generated_proto`,
-    /// `unplaced`, `out_of_scope`); `blind` counts the blind handlers listed;
-    /// each population `{service, package, role, size, sighted, status,
-    /// convention, matching, verdict, signatures, role_sources, exceptions,
-    /// blind}` has `status` `judged` | `no_convention` | `blind` |
-    /// `too_small`, `package` None unless `group_by="package"`, `verdict`
-    /// `matching/sighted`, and `blind` a located `{handler, file, line,
-    /// route_method, route_path}` per blind handler; each divergence
-    /// `{verdict, tier, service, handler, file, line, route_method,
-    /// route_path, signature, convention, matching, population, path,
-    /// role_sources}` is located (lines 1-based), `path` its hops to the sink.
-    /// Raises ValueError on a `min_share` above 100 or a `group_by` other
-    /// than `"service"` / `"package"`.
+    /// Returns a dict `{delta_mode, handlers, judged, skipped_small,
+    /// excluded, role_sources, populations, divergences, blind}`: `excluded`
+    /// counts the handlers left out by reason (`test_fixture`, `generated`,
+    /// `generated_proto`, `unplaced`, `out_of_scope`); `blind` counts the
+    /// blind handlers listed; each population `{service, package, role, size,
+    /// sighted, status, convention, matching, verdict, signatures,
+    /// role_sources, exceptions, blind}` has `status` `judged` |
+    /// `no_convention` | `blind` | `too_small`, `package` None unless
+    /// `group_by="package"`, `verdict` `matching/sighted`, and `blind` a
+    /// located `{handler, file, line, route_method, route_path}` per blind
+    /// handler; each divergence `{verdict, tier, service, handler, file,
+    /// line, route_method, route_path, signature, convention, matching,
+    /// population, path, role_sources}` is located (lines 1-based), `path`
+    /// its hops to the sink. Raises ValueError on a `min_share` above 100 or
+    /// a `group_by` other than `"service"` / `"package"`.
     #[pyo3(signature = (min_support=5, min_share=75, scope=None, group_by="service"))]
-    fn patterns_experimental(
+    fn patterns(
         &self,
         py: Python<'_>,
         min_support: usize,
@@ -142,17 +160,34 @@ impl PyGraph {
                 .map_err(PyValueError::new_err)?;
         to_py(py, serde_json::to_string(&report))
     }
+
+    /// **patterns_experimental** (DEPRECATED, removed in 0.5.2): the 0.5.0
+    /// name of `patterns`. Same parameters and dict, after a
+    /// `DeprecationWarning` (raised as an exception, before any work, under
+    /// `warnings.simplefilter("error")`).
+    #[pyo3(signature = (min_support=5, min_share=75, scope=None, group_by="service"))]
+    fn patterns_experimental(
+        &self,
+        py: Python<'_>,
+        min_support: usize,
+        min_share: usize,
+        scope: Option<&str>,
+        group_by: &str,
+    ) -> PyResult<Py<PyAny>> {
+        deprecated(py, GRAPH_ALIAS_WARNING)?;
+        self.patterns(py, min_support, min_share, scope, group_by)
+    }
 }
 
-/// **patterns_vs_rev_experimental** (LE.7b, EXPERIMENTAL): pattern
-/// conformance on the working tree's change against git rev `base` (a branch,
-/// tag, sha or `"HEAD~N"`; default `"HEAD"`) of the repo at `repo_path`.
-/// Populations and conventions come from the whole working-tree graph;
-/// `divergences` lists only the exceptions the change touched (the handler or
-/// a node on its path added, modified or moved, or a hop of its path an added
-/// edge), while each population's `exceptions` still lists them all; a
-/// population's `blind` keeps only the touched blind handlers. Same keywords
-/// and dict as `PyGraph.patterns_experimental`, with `delta_mode` True.
+/// **patterns_vs_rev** (LE.7b; out of experimental since CC.12b): pattern
+/// conformance on the working tree's change against git rev `base` (a
+/// branch, tag, sha or `"HEAD~N"`; default `"HEAD"`) of the repo at
+/// `repo_path`. Populations and conventions come from the whole working-tree
+/// graph; `divergences` lists only the exceptions the change touched (the
+/// handler or a node on its path added, modified or moved, or a hop of its
+/// path an added edge), while each population's `exceptions` still lists
+/// them all; a population's `blind` keeps only the touched blind handlers.
+/// Same keywords and dict as `PyGraph.patterns`, with `delta_mode` True.
 /// Builds both sides itself and saves the parse-cache sidecar
 /// (`<repo>/.glia/graph/parse_cache.bin`, self-gitignored) as
 /// `generate(incremental=True)` does, never a `.gmap` layout. Raises
@@ -160,7 +195,7 @@ impl PyGraph {
 /// `"service"` / `"package"`, or a git or build failure.
 #[pyfunction]
 #[pyo3(signature = (repo_path, base="HEAD", min_support=5, min_share=75, scope=None, group_by="service"))]
-fn patterns_vs_rev_experimental(
+fn patterns_vs_rev(
     py: Python<'_>,
     repo_path: &str,
     base: &str,
@@ -174,7 +209,27 @@ fn patterns_vs_rev_experimental(
     to_py(py, serde_json::to_string(&report))
 }
 
+/// **patterns_vs_rev_experimental** (DEPRECATED, removed in 0.5.2): the
+/// 0.5.0 name of `patterns_vs_rev`. Same parameters and dict, after a
+/// `DeprecationWarning` (raised as an exception, before any work, under
+/// `warnings.simplefilter("error")`).
+#[pyfunction]
+#[pyo3(signature = (repo_path, base="HEAD", min_support=5, min_share=75, scope=None, group_by="service"))]
+fn patterns_vs_rev_experimental(
+    py: Python<'_>,
+    repo_path: &str,
+    base: &str,
+    min_support: usize,
+    min_share: usize,
+    scope: Option<&str>,
+    group_by: &str,
+) -> PyResult<Py<PyAny>> {
+    deprecated(py, REV_ALIAS_WARNING)?;
+    patterns_vs_rev(py, repo_path, base, min_support, min_share, scope, group_by)
+}
+
 fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(patterns_vs_rev, m)?)?;
     m.add_function(wrap_pyfunction!(patterns_vs_rev_experimental, m)?)?;
     Ok(())
 }
@@ -293,26 +348,28 @@ mod tests {
             .env_remove("GIT_WORK_TREE")
             .env_remove("GIT_INDEX_FILE")
             .output()
-            .unwrap_or_else(|e| panic!("LE.7b patterns_vs_rev_experimental test needs a `git` binary: {e}"));
+            .unwrap_or_else(|e| panic!("LE.7b patterns_vs_rev test needs a `git` binary: {e}"));
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
 
-    /// LE.7b: the helper behind `PyGraph.patterns_experimental` returns the
-    /// engine's report with the documented keys, `experimental` true, the
-    /// one located divergence, and the keywords reach the engine. The
-    /// conformance itself is covered by `engine/tests/patterns.rs`.
+    /// LE.7b: the helper behind `PyGraph.patterns` (and its deprecated
+    /// alias) returns the engine's report with the documented keys and no
+    /// `experimental` key (CC.12b), the one located divergence, and the
+    /// keywords reach the engine. The conformance itself is covered by
+    /// `engine/tests/patterns.rs`.
     #[test]
     fn graph_helper_returns_the_documented_object() {
         let (_scratch, top) = shop("graph", 6);
         let built = glia_engine::generate_one(top.to_str().expect("utf-8")).expect("build");
         let r = graph_report(&built.merged, &built.repo_labels, 5, 75, None, "service").expect("report");
         let v = value(&r);
-        for key in ["experimental", "populations", "divergences", "skipped_small", "delta_mode"] {
+        for key in ["populations", "divergences", "skipped_small", "delta_mode"] {
             assert!(v.get(key).is_some(), "{key} missing: {v}");
         }
+        assert!(v.get("experimental").is_none(), "promoted (CC.12b): {v}");
         let text = serde_json::to_string(&r).expect("serialises");
+        assert!(text.starts_with("{\"delta_mode\":"), "{text}");
         let order: Vec<usize> = [
-            "\"experimental\":",
             "\"delta_mode\":",
             "\"handlers\":",
             "\"judged\":",
@@ -327,7 +384,6 @@ mod tests {
         .map(|k| text.find(k).unwrap_or(usize::MAX))
         .collect();
         assert!(order.windows(2).all(|w| w[0] < w[1]), "field order: {text}");
-        assert_eq!(v["experimental"], true);
         assert_eq!(v["delta_mode"], false);
         assert_eq!(v["skipped_small"], 0);
         assert_eq!(divergent(&v), [DIRECT]);
@@ -363,7 +419,7 @@ mod tests {
         assert!(err.contains("\"service\" or \"package\"") && err.contains("\"dir\""), "{err}");
     }
 
-    /// LE.7b: the helper behind `patterns_vs_rev_experimental` judges the
+    /// LE.7b: the helper behind `patterns_vs_rev` (and its alias) judges the
     /// working tree and lists only the divergence the change added; an
     /// unknown rev is the engine's error.
     #[test]
@@ -377,7 +433,8 @@ mod tests {
         write_shop(&top, 6);
         let repo = top.to_str().expect("utf-8");
         let v = value(&rev_report(repo, "HEAD", 5, 75, None, "service").expect("report"));
-        assert_eq!((v["experimental"].as_bool(), v["delta_mode"].as_bool()), (Some(true), Some(true)));
+        assert!(v.get("experimental").is_none(), "{v}");
+        assert_eq!(v["delta_mode"].as_bool(), Some(true));
         assert_eq!(divergent(&v), [DIRECT]);
         assert_eq!(v["populations"][0]["verdict"], "5/6");
 

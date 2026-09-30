@@ -1,12 +1,12 @@
-//! Pattern conformance (LE.7a, EXPERIMENTAL): does a route handler follow the
+//! Pattern conformance (LE.7a; promoted out of experimental by CC.12b under
+//! the criterion below, "Promotion criterion"): does a route handler follow the
 //! call chain the other handlers of its service follow? "38 of 40 handlers go
 //! handler > service > repository > db; this one goes handler > repository >
 //! db." The answer is an aggregate over every handler of a service, which is
 //! exactly what a reader writing the next one does not look at. A divergence
 //! is an observation, never a rule and never "wrong": the verdict is
 //! `DIVERGENCE`, tier `heuristic` (an explicit rule's `VIOLATION` is LE.8's).
-//! Every report carries `experimental: true` and there is no score anywhere:
-//! verdicts are counts.
+//! There is no score anywhere: verdicts are counts.
 //!
 //! # Roles
 //!
@@ -111,13 +111,15 @@
 //!
 //! # Promotion criterion (0.5.1)
 //!
-//! Pattern conformance leaves EXPERIMENTAL only when
-//! `bench/patterns/promotion.py` (CC.12a) says so. The script measures
-//! git-archive copies of quokka-stack (a77d4cb), lapse (c0ece02) and Kina
-//! (a448fb3), never the live checkouts, with `GLIA_NO_PERSIST=1` on every
-//! call, through the default invocation `glia patterns <copy> --experimental
-//! --json` (service keying, `min_support` 5, `min_share` 75), and judges five
-//! fixed criteria:
+//! Pattern conformance shipped EXPERIMENTAL in 0.5.0 (LE.7a / LE.7b: the CLI
+//! refused without `--experimental`, the pyo3 names carried `_experimental`,
+//! every report said `experimental: true`) and left it in 0.5.1 (CC.12b)
+//! because `bench/patterns/promotion.py` (CC.12a) says so. The script
+//! measures git-archive copies of quokka-stack (a77d4cb), lapse (c0ece02) and
+//! Kina (a448fb3), never the live checkouts, with `GLIA_NO_PERSIST=1` on
+//! every call, through the default invocation `glia patterns <copy> --json`
+//! (service keying, `min_support` 5, `min_share` 75), and judges five fixed
+//! criteria:
 //!
 //! - C1: at least 2 of the 3 repos have a judged population;
 //! - C2: in every judged population the blind count (its `blind` list) is at
@@ -134,11 +136,16 @@
 //! <binary> [--work-dir <dir on disk>]` (exit 0 iff promote, 1 on a failed
 //! criterion, 2 on a measurement error; `--self-test` judges canned reports
 //! without a build). It writes `bench/patterns/promotion-0.5.1.json`, one row
-//! per repo and a verdict with its detail per criterion: the evidence James
-//! reviews before CC.12b drops `--experimental`. Recorded on a build of
-//! 7425636 (CA.1, CA.2b, CA.4, CA.5a, CA.5b landed), all five pass; the same
-//! script on a pre-CA build (2170ff8) reads 0 of 3 repos judged, the numbers
-//! LE.7a's module docs started from.
+//! per repo and a verdict with its detail per criterion: the evidence the
+//! promotion rests on. First recorded on a build of 7425636 (CA.1, CA.2b,
+//! CA.4, CA.5a, CA.5b landed), all five pass; re-recorded by CC.12b before the
+//! rename on the end-of-wave-8 build (3f33c1c), all five pass with the same
+//! numbers; the same script on a pre-CA build (2170ff8) reads 0 of 3 repos
+//! judged, the numbers LE.7a's module docs started from. The promotion is a
+//! rename, never a change of verdict: the report is the 0.5.0 one without its
+//! `experimental` key. The surfaces keep the pre-promotion spellings until
+//! 0.5.2: `glia patterns --experimental` (hidden, prints a note) and the
+//! pyo3 `_experimental` names (DeprecationWarning aliases).
 //!
 //! # Security
 //!
@@ -151,8 +158,9 @@
 //! crate root.
 //!
 //! fired_on marker, one line per answer:
-//! `[patterns] experimental populations=<P> judged=<J> handlers=<H> divergences=<D> skipped_small=<S> role_sources edge=<E> kind=<K> name=<N> blind=<B> group_by=<service|package>`
-//! (grep `^\[patterns\] experimental`; `blind` is the report's `blind`), plus in delta mode
+//! `[patterns] populations=<P> judged=<J> handlers=<H> divergences=<D> skipped_small=<S> role_sources edge=<E> kind=<K> name=<N> blind=<B> group_by=<service|package>`
+//! (grep `^\[patterns\] populations=`; `blind` is the report's `blind`; 0.5.0
+//! printed `[patterns] experimental populations=..`), plus in delta mode
 //! `[patterns] delta touched_nodes=<T> added_edges=<A> exceptions=<X> divergences=<D>`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -391,8 +399,6 @@ pub struct Population {
 #[non_exhaustive]
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct PatternReport {
-    /// Always `true`.
-    pub experimental: bool,
     pub delta_mode: bool,
     /// Handlers in a population.
     pub handlers: usize,
@@ -738,7 +744,7 @@ fn report(
         .count();
     let count = |s: &str| role_sources.get(s).copied().unwrap_or(0);
     eprintln!(
-        "[patterns] experimental populations={} judged={judged} handlers={handlers} divergences={} skipped_small={skipped_small} role_sources edge={} kind={} name={} blind={blind_count} group_by={}",
+        "[patterns] populations={} judged={judged} handlers={handlers} divergences={} skipped_small={skipped_small} role_sources edge={} kind={} name={} blind={blind_count} group_by={}",
         populations.len(),
         divergences.len(),
         count(EDGE),
@@ -756,7 +762,6 @@ fn report(
     }
 
     PatternReport {
-        experimental: true,
         delta_mode: delta.is_some(),
         handlers,
         judged,

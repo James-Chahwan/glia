@@ -1,16 +1,19 @@
-//! LE.7b — `glia patterns --experimental`, the CLI surface of the engine's
-//! pattern conformance (LE.7a), driving the real binary over the Go shop of
+//! LE.7b — `glia patterns`, the CLI surface of the engine's pattern
+//! conformance (LE.7a), driving the real binary over the Go shop of
 //! `engine/tests/patterns.rs` in a scratch dir: gin routes in
 //! `handlers/handlers.go`, service functions in `service/service.go`, raw SQL
 //! in `repository/repository.go`. Five handlers go handler > service >
 //! repository > db; `RawOrderHandler` goes straight to the repository.
 //! CA.5b adds a blind health check (`handler>(no effect)`), listed apart from
-//! the divergences, and `--group-by package`.
+//! the divergences, and `--group-by package`. CC.12b promoted the command out
+//! of experimental: it runs without a flag, `--experimental` is hidden,
+//! accepted until 0.5.2 and prints a note, and neither the report nor a
+//! marker says `experimental`.
 //!
-//! This surface's `[patterns] experimental surface=cli mode=<graph|delta>`
-//! stderr line is the fired_on marker; asserting it here makes it a tested
-//! contract. Grep it from a run:
-//! `glia patterns <repo> --experimental --base HEAD 2>&1 >/dev/null | grep '^\[patterns\] experimental surface='`.
+//! This surface's `[patterns] surface=cli mode=<graph|delta>` stderr line is
+//! the fired_on marker, beside the engine's `[patterns] populations=..`;
+//! asserting both here makes them a tested contract. Grep them from a run:
+//! `glia patterns <repo> --base HEAD 2>&1 >/dev/null | grep -E '^\[patterns\] (surface|populations)='`.
 //!
 //! The delta test needs a `git` binary: without one it FAILS with a message
 //! saying so, never skips. Its git calls run hermetically (fixed identity, no
@@ -22,12 +25,13 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
-const REFUSAL: &str = "patterns is experimental: pass --experimental (output format may change)";
+/// What `--experimental` prints since the promotion (CC.12b), verbatim.
+const NOTE: &str = "[patterns] note: --experimental is no longer needed (accepted until 0.5.2)";
 const CONVENTION: &str = "handler>service>repository>db";
 const DIRECT_SIGNATURE: &str = "handler>repository>db";
 const DIRECT: &str = "handlers::handlers::RawOrderHandler";
-const GRAPH_MARKER: &str = "[patterns] experimental surface=cli mode=graph";
-const DELTA_MARKER: &str = "[patterns] experimental surface=cli mode=delta";
+const GRAPH_MARKER: &str = "[patterns] surface=cli mode=graph";
+const DELTA_MARKER: &str = "[patterns] surface=cli mode=delta";
 
 /// `(name, gin registration, service fn or None for a direct call,
 /// repository fn, SQL)` per handler; the last one skips the service layer.
@@ -183,35 +187,62 @@ fn line_of(text: &str, needle: &str) -> usize {
     text.lines().position(|l| l.contains(needle)).expect("needle in fixture") + 1
 }
 
-/// Without `--experimental` the command refuses, before building anything:
-/// exit 2, the message on stderr, nothing on stdout, no marker.
-#[test]
-fn refuses_without_flag() {
-    let s = Scratch::shop("refuse", 6);
-    for args in [&[][..], &["--json"][..], &["--base", "HEAD"][..]] {
-        let out = s.patterns(args);
-        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr(&out));
-        assert_eq!(stderr(&out).trim_end(), REFUSAL, "{args:?}");
-        assert!(stdout(&out).is_empty(), "{args:?}: {}", stdout(&out));
-    }
-    // Even a path that does not exist is refused on the flag, not the build.
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_glia"));
-    let out = cmd.args(["patterns", "/no/such/glia-le7b-repo"]).output().expect("run glia");
-    assert_eq!(out.status.code(), Some(2));
-    assert_eq!(stderr(&out).trim_end(), REFUSAL);
+/// No line of `err` carries the pre-promotion word (CC.12b).
+fn no_experimental_word(err: &str) {
+    assert!(!err.lines().any(|l| l.starts_with("[patterns] experimental")), "{err}");
 }
 
-/// `--experimental --json` on the whole graph: exit 0, the engine's report
-/// with `experimental` true, one population judged 5/6 and the one located
+/// CC.12b: `glia patterns <dir>` runs without a flag (exit 0, the report,
+/// both markers, no note). `--experimental` is still accepted until 0.5.2:
+/// exit 0, the same report byte for byte, and the note on stderr. A path that
+/// does not exist is now the build's error (exit 2), not a refusal on a flag.
+#[test]
+fn runs_without_flag_and_notes_the_old_one() {
+    let s = Scratch::shop("noflag", 6);
+    let plain = s.patterns(&["--json"]);
+    let err = stderr(&plain);
+    assert_eq!(plain.status.code(), Some(0), "{err}");
+    assert_eq!(json(&plain)["judged"].as_u64(), Some(1), "{}", stdout(&plain));
+    assert!(err.lines().any(|l| l == GRAPH_MARKER), "{err}");
+    assert!(err.lines().any(|l| l.starts_with("[patterns] populations=1 judged=1 handlers=6 divergences=1")), "{err}");
+    assert!(!err.contains(NOTE), "{err}");
+    no_experimental_word(&err);
+
+    let flagged = s.patterns(&["--experimental", "--json"]);
+    let err = stderr(&flagged);
+    assert_eq!(flagged.status.code(), Some(0), "{err}");
+    assert_eq!(err.lines().filter(|l| *l == NOTE).count(), 1, "{err}");
+    assert_eq!(stdout(&flagged), stdout(&plain));
+    no_experimental_word(&err);
+
+    let table = s.patterns(&[]);
+    assert_eq!(table.status.code(), Some(0), "{}", stderr(&table));
+    assert!(stdout(&table).starts_with(&format!("# glia patterns `{}` (whole graph)\n", s.path())), "{}", stdout(&table));
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_glia"));
+    let out = cmd
+        .args(["patterns", "/no/such/glia-le7b-repo"])
+        .env("GLIA_NO_PERSIST", "1")
+        .output()
+        .expect("run glia");
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("error: "), "{}", stderr(&out));
+    assert!(!stderr(&out).contains("pass --experimental"), "{}", stderr(&out));
+    assert!(stdout(&out).is_empty(), "{}", stdout(&out));
+}
+
+/// `--json` on the whole graph: exit 0, the engine's report with no
+/// `experimental` key (CC.12b), one population judged 5/6 and the one located
 /// divergence; the surface marker beside the engine's.
 #[test]
-fn json_has_experimental_true() {
+fn json_has_no_experimental_key() {
     let s = Scratch::shop("json", 6);
-    let out = s.patterns(&["--experimental", "--json"]);
+    let out = s.patterns(&["--json"]);
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(0), "{err}");
     let v = json(&out);
-    assert_eq!(v["experimental"], true, "{v}");
+    assert!(v.get("experimental").is_none(), "{v}");
+    no_experimental_word(&err);
     assert_eq!(v["delta_mode"], false);
     assert_eq!((v["handlers"].as_u64(), v["judged"].as_u64()), (Some(6), Some(1)), "{v}");
     assert_eq!(divergent(&v), [DIRECT]);
@@ -225,8 +256,8 @@ fn json_has_experimental_true() {
     let p = &v["populations"][0];
     assert_eq!((p["status"].as_str(), p["verdict"].as_str()), (Some("judged"), Some("5/6")), "{p}");
     assert!(err.lines().any(|l| l == GRAPH_MARKER), "{err}");
-    assert!(err.lines().any(|l| l.starts_with("[patterns] experimental populations=1 judged=1 handlers=6 divergences=1")), "{err}");
-    assert!(err.lines().any(|l| l.starts_with("[patterns] experimental populations=") && l.ends_with(" blind=0 group_by=service")), "{err}");
+    assert!(err.lines().any(|l| l.starts_with("[patterns] populations=1 judged=1 handlers=6 divergences=1")), "{err}");
+    assert!(err.lines().any(|l| l.starts_with("[patterns] populations=") && l.ends_with(" blind=0 group_by=service")), "{err}");
     assert_eq!((p["package"].clone(), p["sighted"].as_u64(), v["blind"].as_u64()), (Value::Null, Some(6), Some(0)), "{v}");
 }
 
@@ -236,10 +267,10 @@ fn json_has_experimental_true() {
 #[test]
 fn table_names_the_population_and_its_status() {
     let s = Scratch::shop("table", 6);
-    let out = s.patterns(&["--experimental"]);
+    let out = s.patterns(&[]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
-    assert!(text.starts_with(&format!("# glia patterns `{}` (experimental, whole graph)\n", s.path())), "{text}");
+    assert!(text.starts_with(&format!("# glia patterns `{}` (whole graph)\n", s.path())), "{text}");
     assert!(text.contains("- handlers: 6 in 1 populations; judged: 1; below min support (5): 0; divergences: 1; blind: 0\n"), "{text}");
     assert!(text.contains("- excluded handlers: none\n"), "{text}");
     assert!(text.contains(&format!("## handlers - 5/6 sighted handlers follow `{CONVENTION}`\n")), "{text}");
@@ -248,17 +279,17 @@ fn table_names_the_population_and_its_status() {
     let row = format!("| `{DIRECT}` | POST /orders | `{DIRECT_SIGNATURE}` | handlers/handlers.go:{line} |");
     assert!(text.lines().any(|l| l == row), "no row {row} in:\n{text}");
 
-    let small = s.patterns(&["--experimental", "--min-support", "7"]);
+    let small = s.patterns(&["--min-support", "7"]);
     assert_eq!(small.status.code(), Some(0), "{}", stderr(&small));
     let text = stdout(&small);
     assert!(text.contains("_(population below min support: `handlers` has 6 handlers, fewer than 7)_"), "{text}");
     assert!(!text.contains("| handler |"), "{text}");
 
-    let split = s.patterns(&["--experimental", "--min-share", "90"]);
+    let split = s.patterns(&["--min-share", "90"]);
     assert_eq!(split.status.code(), Some(0), "{}", stderr(&split));
     assert!(stdout(&split).contains("## handlers - no convention: no signature holds 90% of 6 sighted handlers"), "{}", stdout(&split));
 
-    let bad = s.patterns(&["--experimental", "--min-share", "101"]);
+    let bad = s.patterns(&["--min-share", "101"]);
     assert_eq!(bad.status.code(), Some(2));
     assert!(stderr(&bad).contains("--min-share is a percentage (0-100), got 101"), "{}", stderr(&bad));
 }
@@ -269,7 +300,7 @@ fn table_names_the_population_and_its_status() {
 fn base_with_with_is_rejected() {
     let s = Scratch::shop("with", 6);
     let other = Scratch::shop("with-other", 5);
-    let out = s.patterns(&["--experimental", "--base", "HEAD", "--with", other.path()]);
+    let out = s.patterns(&["--base", "HEAD", "--with", other.path()]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
     assert!(stderr(&out).contains("--with needs whole-graph mode"), "{}", stderr(&out));
     assert!(stdout(&out).is_empty());
@@ -288,11 +319,12 @@ fn base_lists_only_touched_divergences() {
     s.git(&["add", "-A"]);
     s.git(&["commit", "-q", "-m", "five layered handlers"]);
     s.write_shop(6);
-    let out = s.patterns(&["--experimental", "--base", "HEAD", "--json"]);
+    let out = s.patterns(&["--base", "HEAD", "--json"]);
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(0), "{err}");
     let v = json(&out);
-    assert_eq!((v["experimental"].as_bool(), v["delta_mode"].as_bool()), (Some(true), Some(true)), "{v}");
+    assert!(v.get("experimental").is_none(), "{v}");
+    assert_eq!(v["delta_mode"].as_bool(), Some(true), "{v}");
     assert_eq!(divergent(&v), [DIRECT]);
     assert_eq!(v["populations"][0]["verdict"], "5/6");
     assert!(err.lines().any(|l| l == DELTA_MARKER), "{err}");
@@ -301,14 +333,14 @@ fn base_lists_only_touched_divergences() {
     s.git(&["add", "-A"]);
     s.git(&["commit", "-q", "-m", "six handlers"]);
     s.write("util/util.go", "package util\n\nfunc Clamp(v int) int {\n\treturn v\n}\n");
-    let out = s.patterns(&["--experimental", "--base", "HEAD"]);
+    let out = s.patterns(&["--base", "HEAD"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
-    assert!(text.starts_with(&format!("# glia patterns `{}` (experimental, delta vs `HEAD`)\n", s.path())), "{text}");
+    assert!(text.starts_with(&format!("# glia patterns `{}` (delta vs `HEAD`)\n", s.path())), "{text}");
     assert!(text.contains("divergences touched by the change: 0; blind touched by the change: 0\n"), "{text}");
     assert!(text.contains("_(no divergence touched by the change; 1 in the whole graph)_"), "{text}");
 
-    let bad = s.patterns(&["--experimental", "--base", "no-such-rev"]);
+    let bad = s.patterns(&["--base", "no-such-rev"]);
     assert_eq!(bad.status.code(), Some(2));
     assert!(stderr(&bad).contains("no-such-rev"), "{}", stderr(&bad));
 }
@@ -321,7 +353,7 @@ fn no_handlers_says_nothing_to_judge() {
         std::fs::remove_file(Path::new(s.path()).join(rel)).expect("remove");
     }
     s.write("util/util.go", "package util\n\nfunc Clamp(v int) int {\n\treturn v\n}\n");
-    let out = s.patterns(&["--experimental"]);
+    let out = s.patterns(&[]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(stdout(&out).contains("_(no route handler placed in any population: nothing to judge)_"), "{}", stdout(&out));
 }
@@ -349,7 +381,7 @@ fn blind_handler_is_listed_not_divergent() {
     let s = Scratch::shop("blind", 6);
     let src = handlers_with_health();
     s.write("handlers/handlers.go", &src);
-    let out = s.patterns(&["--experimental", "--json"]);
+    let out = s.patterns(&["--json"]);
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(0), "{err}");
     let v = json(&out);
@@ -362,9 +394,9 @@ fn blind_handler_is_listed_not_divergent() {
     assert_eq!((b["route_method"].as_str(), b["route_path"].as_str()), (Some("GET"), Some("/health")));
     let line = line_of(&src, "func HealthHandler(");
     assert_eq!((b["file"].as_str(), b["line"].as_u64()), (Some("handlers/handlers.go"), Some(line as u64)));
-    assert!(err.lines().any(|l| l.starts_with("[patterns] experimental populations=1 judged=1 handlers=7 divergences=1") && l.ends_with(" blind=1 group_by=service")), "{err}");
+    assert!(err.lines().any(|l| l.starts_with("[patterns] populations=1 judged=1 handlers=7 divergences=1") && l.ends_with(" blind=1 group_by=service")), "{err}");
 
-    let out = s.patterns(&["--experimental"]);
+    let out = s.patterns(&[]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("; divergences: 1; blind: 1\n"), "{text}");
@@ -374,7 +406,7 @@ fn blind_handler_is_listed_not_divergent() {
     assert!(text.lines().any(|l| l == row), "no row {row} in:\n{text}");
 
     // Above the six sighted: the population reads blind, nothing diverges.
-    let out = s.patterns(&["--experimental", "--min-support", "7"]);
+    let out = s.patterns(&["--min-support", "7"]);
     let text = stdout(&out);
     assert!(text.contains("## handlers - blind: 6 of 7 handlers reach a sink, fewer than 7\n"), "{text}");
     assert!(!text.contains("| handler | route | signature |"), "{text}");
@@ -387,7 +419,7 @@ fn blind_handler_is_listed_not_divergent() {
 #[test]
 fn group_by_package_keys_populations_by_directory() {
     let s = Scratch::shop("group-by", 6);
-    let out = s.patterns(&["--experimental", "--group-by", "package", "--json"]);
+    let out = s.patterns(&["--group-by", "package", "--json"]);
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(0), "{err}");
     let v = json(&out);
@@ -398,9 +430,9 @@ fn group_by_package_keys_populations_by_directory() {
     }
     assert_eq!((pops[0]["service"].as_str(), pops[0]["package"].as_str()), (Some("handlers"), Some("handlers")), "{v}");
     assert_eq!(divergent(&v), [DIRECT]);
-    assert!(err.lines().any(|l| l.starts_with("[patterns] experimental populations=1 ") && l.ends_with(" group_by=package")), "{err}");
+    assert!(err.lines().any(|l| l.starts_with("[patterns] populations=1 ") && l.ends_with(" group_by=package")), "{err}");
 
-    let out = s.patterns(&["--experimental", "--group-by", "package"]);
+    let out = s.patterns(&["--group-by", "package"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.contains(&format!("## handlers / handlers - 5/6 sighted handlers follow `{CONVENTION}`\n")), "{text}");
@@ -408,7 +440,7 @@ fn group_by_package_keys_populations_by_directory() {
     let row = format!("| `{DIRECT}` | POST /orders | `{DIRECT_SIGNATURE}` | handlers/handlers.go:{line} |");
     assert!(text.lines().any(|l| l == row), "no row {row} in:\n{text}");
 
-    let bad = s.patterns(&["--experimental", "--group-by", "directory"]);
+    let bad = s.patterns(&["--group-by", "directory"]);
     assert_eq!(bad.status.code(), Some(2), "{}", stderr(&bad));
     assert!(stderr(&bad).contains("--group-by"), "{}", stderr(&bad));
     assert!(stdout(&bad).is_empty());

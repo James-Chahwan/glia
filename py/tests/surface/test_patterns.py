@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""pyo3 surface, py/src/patterns.rs (LE.7b, EXPERIMENTAL):
-`PyGraph.patterns_experimental(min_support=5, min_share=75, scope=None,
-group_by="service")` and the module function
-`patterns_vs_rev_experimental(repo_path, base="HEAD", min_support=5,
-min_share=75, scope=None, group_by="service")` return the pattern-conformance
-report as a native dict {experimental, delta_mode, handlers, judged,
+"""pyo3 surface, py/src/patterns.rs (LE.7b, promoted by CC.12b):
+`PyGraph.patterns(min_support=5, min_share=75, scope=None, group_by="service")`
+and the module function `patterns_vs_rev(repo_path, base="HEAD",
+min_support=5, min_share=75, scope=None, group_by="service")` return the
+pattern-conformance report as a native dict {delta_mode, handlers, judged,
 skipped_small, excluded, role_sources, populations, divergences, blind}: route
 handlers grouped per service (or per service and directory with
 group_by="package", CA.5b), the most frequent role chain of the sighted
 handlers as a population's convention, each sighted handler off it a located
 DIVERGENCE (lines 1-based), each blind one (`handler>(no effect)`) listed in
-the population's `blind`. Both names carry `experimental` and no unsuffixed
-alias exists. A min_share above 100, a group_by other than "service" /
-"package" or an engine error raises ValueError. The rev function needs a
-`git` binary. Shared helpers: test_build.py."""
+the population's `blind`. No key and no marker says `experimental`. The
+pre-promotion names `PyGraph.patterns_experimental` / `patterns_vs_rev_experimental`
+stay until 0.5.2 as aliases: same parameters, the same dict, and a
+DeprecationWarning naming the new name (raised under
+`warnings.simplefilter("error")`). A min_share above 100, a group_by other
+than "service" / "package" or an engine error raises ValueError. The rev
+function needs a `git` binary. Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import os
@@ -21,6 +23,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import warnings
 
 from test_build import Checks, params, rg, stderr_of
 
@@ -36,15 +39,15 @@ HANDLERS = [
 CONVENTION = "handler>service>repository>db"
 DIRECT_SIGNATURE = "handler>repository>db"
 DIRECT = "handlers::handlers::RawOrderHandler"
-KEYS = ["experimental", "delta_mode", "handlers", "judged", "skipped_small", "excluded", "role_sources",
+KEYS = ["delta_mode", "handlers", "judged", "skipped_small", "excluded", "role_sources",
         "populations", "divergences", "blind"]
 POP_KEYS = ["service", "package", "role", "size", "sighted", "status", "convention", "matching", "verdict",
             "signatures", "role_sources", "exceptions", "blind"]
 DIV_KEYS = ["verdict", "tier", "service", "handler", "file", "line", "route_method", "route_path", "signature",
             "convention", "matching", "population", "path", "role_sources"]
 KW = [("min_support", 5), ("min_share", 75), ("scope", None), ("group_by", "service")]
-GRAPH_MARKER = "[patterns] experimental surface=pyo3 mode=graph"
-DELTA_MARKER = "[patterns] experimental surface=pyo3 mode=delta"
+GRAPH_MARKER = "[patterns] surface=pyo3 mode=graph"
+DELTA_MARKER = "[patterns] surface=pyo3 mode=delta"
 
 
 def handlers_go(n: int) -> str:
@@ -90,18 +93,31 @@ def git(top: pathlib.Path, *args: str) -> None:
                    env=env, check=True, capture_output=True, text=True)
 
 
+def deprecated(fn):
+    """(fn(), the DeprecationWarnings it emitted) under the default filters."""
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        out = fn()
+    return out, [w for w in seen if issubclass(w.category, DeprecationWarning)]
+
+
 def main() -> int:
     c = Checks("patterns")
-    method = getattr(rg.PyGraph, "patterns_experimental", None)
-    fn = getattr(rg, "patterns_vs_rev_experimental", None)
-    c.check("PyGraph.patterns_experimental exists", method is not None)
-    c.check("patterns_vs_rev_experimental exists", fn is not None)
-    c.check("no unsuffixed alias", not hasattr(rg.PyGraph, "patterns") and not hasattr(rg, "patterns_vs_rev"))
-    if method is None or fn is None:
+    method = getattr(rg.PyGraph, "patterns", None)
+    fn = getattr(rg, "patterns_vs_rev", None)
+    old_method = getattr(rg.PyGraph, "patterns_experimental", None)
+    old_fn = getattr(rg, "patterns_vs_rev_experimental", None)
+    c.check("PyGraph.patterns exists", method is not None)
+    c.check("patterns_vs_rev exists", fn is not None)
+    c.check("PyGraph.patterns_experimental alias kept until 0.5.2", old_method is not None)
+    c.check("patterns_vs_rev_experimental alias kept until 0.5.2", old_fn is not None)
+    if None in (method, fn, old_method, old_fn):
         return c.done()
-    c.check("patterns_experimental params", params(method) == KW, params(method))
-    c.check("patterns_vs_rev_experimental params",
-            params(fn) == [("repo_path", None), ("base", "HEAD"), *KW], params(fn))
+    rev_params = [("repo_path", None), ("base", "HEAD"), *KW]
+    c.check("patterns params", params(method) == KW, params(method))
+    c.check("patterns_vs_rev params", params(fn) == rev_params, params(fn))
+    c.check("alias params match", params(old_method) == KW and params(old_fn) == rev_params,
+            (params(old_method), params(old_fn)))
 
     with tempfile.TemporaryDirectory(prefix="glia-surface-patterns-") as tmp:
         gitconfig = pathlib.Path(tmp) / "gitconfig"
@@ -113,11 +129,11 @@ def main() -> int:
         write_shop(top, 6)
         g = rg.generate(str(top))
 
-        r, err = stderr_of(lambda: g.patterns_experimental())
-        c.check("patterns_experimental -> dict in field order", type(r) is dict and list(r) == KEYS,
+        r, err = stderr_of(lambda: g.patterns())
+        c.check("patterns -> dict in field order", type(r) is dict and list(r) == KEYS,
                 type(r) is dict and list(r))
         r = r if type(r) is dict else {}
-        c.check("experimental is True", r.get("experimental") is True, r.get("experimental"))
+        c.check("no experimental key", "experimental" not in r, list(r))
         c.check("whole-graph mode", r.get("delta_mode") is False)
         c.check("counts", (r.get("handlers"), r.get("judged"), r.get("skipped_small")) == (6, 1, 0), r)
         c.check("nothing excluded", r.get("excluded") == {}, r.get("excluded"))
@@ -144,28 +160,41 @@ def main() -> int:
         hops = [(h.get("from_qname"), h.get("category")) for h in d.get("path", [])]
         c.check("path hops", hops == [(DIRECT, "CALLS"), ("repository::repository::SaveOrder", "ACCESSES_DATA")], hops)
         c.check("surface marker", GRAPH_MARKER in err, err[-400:])
-        c.check("engine marker", "[patterns] experimental populations=1 judged=1 handlers=6 divergences=1" in err,
+        c.check("engine marker", "[patterns] populations=1 judged=1 handlers=6 divergences=1" in err,
                 err[-400:])
         c.check("engine marker ends in blind and group_by", " blind=0 group_by=service\n" in err, err[-400:])
+        c.check("no marker says experimental", "[patterns] experimental" not in err, err[-400:])
 
-        by_pkg, err = stderr_of(lambda: g.patterns_experimental(group_by="package"))
+        (old, seen), old_err = stderr_of(lambda: deprecated(lambda: g.patterns_experimental()))
+        c.check("patterns_experimental returns the same dict", old == r, old)
+        c.check("patterns_experimental warns once",
+                len(seen) == 1 and "use patterns (removed in 0.5.2)" in str(seen[0].message),
+                [str(w.message) for w in seen])
+        c.check("patterns_experimental marker is the pyo3 one", GRAPH_MARKER in old_err, old_err[-400:])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            c.raises("patterns_experimental raises DeprecationWarning under error filter", DeprecationWarning,
+                     lambda: g.patterns_experimental(), "patterns_experimental is deprecated")
+            c.check("patterns() does not warn under error filter", g.patterns() == r)
+
+        by_pkg, err = stderr_of(lambda: g.patterns(group_by="package"))
         c.check("group_by=package keys every population by directory",
                 [(p.get("service"), p.get("package")) for p in by_pkg.get("populations", [])]
                 == [("handlers", "handlers")], by_pkg)
         c.check("group_by=package marker", " group_by=package\n" in err, err[-400:])
         c.raises("group_by other than service / package raises", ValueError,
-                 lambda: g.patterns_experimental(group_by="dir"), '"service" or "package"')
+                 lambda: g.patterns(group_by="dir"), '"service" or "package"')
 
-        small = g.patterns_experimental(min_support=7)
+        small = g.patterns(min_support=7)
         c.check("min_support: too small", small["skipped_small"] == 1
                 and small["populations"][0]["status"] == "too_small" and not small["divergences"], small)
-        split = g.patterns_experimental(min_share=90)
+        split = g.patterns(min_share=90)
         c.check("min_share: no convention",
                 split["populations"][0]["status"] == "no_convention" and not split["divergences"], split)
-        scoped = g.patterns_experimental(scope="service")
+        scoped = g.patterns(scope="service")
         c.check("scope excludes handlers outside it",
                 scoped["excluded"] == {"out_of_scope": 6} and scoped["handlers"] == 0, scoped)
-        c.raises("min_share above 100 raises", ValueError, lambda: g.patterns_experimental(min_share=101), "101")
+        c.raises("min_share above 100 raises", ValueError, lambda: g.patterns(min_share=101), "101")
 
         rev_top = pathlib.Path(tmp) / "revshop"
         write_shop(rev_top, 5)
@@ -173,16 +202,27 @@ def main() -> int:
         git(rev_top, "add", "-A")
         git(rev_top, "commit", "-q", "-m", "five layered handlers")
         write_shop(rev_top, 6)
-        rv, err = stderr_of(lambda: rg.patterns_vs_rev_experimental(str(rev_top)))
+        rv, err = stderr_of(lambda: rg.patterns_vs_rev(str(rev_top)))
         c.check("rev mode -> dict in field order", type(rv) is dict and list(rv) == KEYS, type(rv) is dict and list(rv))
         rv = rv if type(rv) is dict else {}
-        c.check("rev mode is delta mode", rv.get("experimental") is True and rv.get("delta_mode") is True, rv)
+        c.check("rev mode is delta mode", "experimental" not in rv and rv.get("delta_mode") is True, rv)
         c.check("rev mode lists the added divergence", divergent(rv) == [DIRECT], divergent(rv))
         c.check("rev mode conventions from the working tree",
                 (rv.get("populations") or [{}])[0].get("verdict") == "5/6", rv.get("populations"))
         c.check("rev surface marker", DELTA_MARKER in err, err[-400:])
         c.raises("unknown rev raises", ValueError,
-                 lambda: rg.patterns_vs_rev_experimental(str(rev_top), base="no-such-rev"), "no-such-rev")
+                 lambda: rg.patterns_vs_rev(str(rev_top), base="no-such-rev"), "no-such-rev")
+
+        old_rv, seen = deprecated(lambda: rg.patterns_vs_rev_experimental(str(rev_top)))
+        c.check("patterns_vs_rev_experimental returns the same dict", old_rv == rv, old_rv)
+        c.check("patterns_vs_rev_experimental warns once",
+                len(seen) == 1 and "use patterns_vs_rev (removed in 0.5.2)" in str(seen[0].message),
+                [str(w.message) for w in seen])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            c.raises("patterns_vs_rev_experimental raises DeprecationWarning under error filter",
+                     DeprecationWarning, lambda: rg.patterns_vs_rev_experimental(str(rev_top)),
+                     "patterns_vs_rev_experimental is deprecated")
     return c.done()
 
 

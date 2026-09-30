@@ -1,4 +1,4 @@
-//! LE.7a — pattern conformance (experimental): route handlers grouped by the
+//! LE.7a — pattern conformance: route handlers grouped by the
 //! service they sit in, each handler's role chain down its calls to the first
 //! effect sink as a signature, the population's most frequent signature as its
 //! convention, and every other handler as a located DIVERGENCE (heuristic: a
@@ -14,8 +14,10 @@
 //! sighted members fall below `min_support` reads `blind`, blind handlers are
 //! listed in `Population.blind` and never as divergences, and
 //! `GroupBy::Package` keys populations by (service, the handler's directory).
-//! The engine prints `[patterns] experimental populations=.. blind=<B>
-//! group_by=<g>` per answer; run with `--nocapture` to see it.
+//! The engine prints `[patterns] populations=.. blind=<B> group_by=<g>` per
+//! answer (the word `experimental` dropped by CC.12b's promotion, as was the
+//! report's `experimental` key); run with `--nocapture` to see it. The CLI
+//! test (`cli/tests/patterns_cli.rs`) asserts the line.
 
 mod git_fixture;
 
@@ -252,7 +254,8 @@ fn line_of(text: &str, needle: &str) -> i64 {
 fn go_handler_convention_5_of_6() {
     let repo = shop(&six());
     let r = whole(&repo);
-    assert!(r.experimental);
+    let v = serde_json::to_value(&r).expect("json");
+    assert!(v.get("experimental").is_none(), "promoted (CC.12b): {v}");
     assert!(!r.delta_mode);
     assert_eq!((r.handlers, r.judged, r.skipped_small), (6, 1, 0), "{r:#?}");
     assert_eq!(r.populations.len(), 1, "{r:#?}");
@@ -951,7 +954,8 @@ fn deterministic() {
         let c = serde_json::to_string(&pattern_conformance(&m2, &l2, &args)).expect("json");
         assert_eq!(a, b);
         assert_eq!(a, c);
-        assert!(a.contains("\"experimental\":true"), "{a}");
+        assert!(!a.contains("experimental"), "{a}");
+        assert!(a.starts_with("{\"delta_mode\":false,"), "{a}");
         assert!(a.contains("\"blind\":1}"), "{a}");
     }
 }

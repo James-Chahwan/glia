@@ -1,13 +1,16 @@
-//! `glia patterns` (LE.7b, EXPERIMENTAL) — the human surface over the engine's
+//! `glia patterns` (LE.7b, promoted by CC.12b) — the human surface over the engine's
 //! `patterns::{pattern_conformance, pattern_conformance_delta}` (LE.7a): route
 //! handlers grouped per service, each handler's role chain to its first effect
 //! sink as a signature, a population's most frequent signature as its
 //! convention, and every handler off it a located DIVERGENCE (tier heuristic:
 //! an observed convention, never a rule).
 //!
-//! The command refuses to run without `--experimental` (exit 2): the output
-//! format may change until the engine is promoted, and the flag keeps anyone
-//! from adopting it by accident.
+//! The command runs without a flag. 0.5.0 refused without `--experimental`
+//! until the engine met its promotion criterion (the engine module docs,
+//! "Promotion criterion"); CC.12b promoted it, so `--experimental` is hidden,
+//! still accepted until 0.5.2 and prints
+//! `[patterns] note: --experimental is no longer needed (accepted until 0.5.2)`
+//! on stderr before anything else, the answer unchanged.
 //!
 //! Two modes. Whole graph (the default): a fresh build of the repo (`--with`
 //! merges more repos in) and every exception listed. Delta (`--base <rev>`):
@@ -37,20 +40,19 @@
 //! fewer than <min_support>` in the heading, then the blind rows),
 //! `too_small` (one `_(population below min support: ...)_` line). A repo
 //! with no placed handler says so instead of printing an empty report.
-//! `--json` prints the engine's `PatternReport` (`{experimental, delta_mode,
-//! handlers, judged, skipped_small, excluded, role_sources, populations,
-//! divergences, blind}`). Every `file:line` is 1-based (LD.1).
+//! `--json` prints the engine's `PatternReport` (`{delta_mode, handlers,
+//! judged, skipped_small, excluded, role_sources, populations, divergences,
+//! blind}`). Every `file:line` is 1-based (LD.1).
 //!
-//! Exit 0 on an answer, 2 without `--experimental`, on a usage error, or a git
-//! / build failure with the engine's message. Delta mode saves the working
-//! tree's parse-cache sidecar (`<repo>/.glia/graph/parse_cache.bin`,
-//! self-gitignored) as an incremental build does, under `GLIA_NO_PERSIST=1`
-//! too; never a `.gmap` layout.
+//! Exit 0 on an answer, 2 on a usage error or a git / build failure with the
+//! engine's message. Delta mode saves the working tree's parse-cache sidecar
+//! (`<repo>/.glia/graph/parse_cache.bin`, self-gitignored) as an incremental
+//! build does, under `GLIA_NO_PERSIST=1` too; never a `.gmap` layout.
 //!
-//! Fired-on marker: this surface's
-//! `[patterns] experimental surface=cli mode=<graph|delta>` once the answer is
-//! in, beside the engine's `[patterns] experimental populations=..` line (and
-//! `[patterns] delta touched_nodes=..` in delta mode).
+//! Fired-on marker: this surface's `[patterns] surface=cli mode=<graph|delta>`
+//! once the answer is in, beside the engine's `[patterns] populations=..` line
+//! (and `[patterns] delta touched_nodes=..` in delta mode). 0.5.0 spelled both
+//! `[patterns] experimental ..`.
 
 use glia_engine::delta::graph_delta_vs_rev;
 use glia_engine::patterns::{
@@ -60,9 +62,9 @@ use glia_engine::patterns::{
 
 use crate::common::{build_options, generate_for};
 
-/// The refusal without `--experimental`, verbatim.
-const NOT_EXPERIMENTAL: &str =
-    "patterns is experimental: pass --experimental (output format may change)";
+/// What `--experimental` prints since the promotion (CC.12b), verbatim.
+const EXPERIMENTAL_NOTE: &str =
+    "[patterns] note: --experimental is no longer needed (accepted until 0.5.2)";
 
 /// `--group-by`: what keys a population (the engine's `GroupBy`).
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -78,9 +80,9 @@ pub(crate) enum GroupByArg {
 pub(crate) struct Args {
     /// Path to the repo root (a git work tree with `--base`).
     repo: String,
-    /// Required: acknowledges the command is experimental and its output
-    /// format may change.
-    #[arg(long)]
+    /// Accepted until 0.5.2 and ignored but for a note on stderr: the
+    /// command left experimental in 0.5.1 (CC.12b).
+    #[arg(long, hide = true)]
     experimental: bool,
     /// Delta mode: judge the working tree's graph, listing only the
     /// divergences the change against this git rev (a branch, tag, sha or
@@ -147,9 +149,8 @@ fn answer(args: &Args, p: &PatternArgs) -> Result<(PatternReport, &'static str),
 }
 
 pub(crate) fn run(args: Args) -> i32 {
-    if !args.experimental {
-        eprintln!("{NOT_EXPERIMENTAL}");
-        return 2;
+    if args.experimental {
+        eprintln!("{EXPERIMENTAL_NOTE}");
     }
     let p = match pattern_args(&args) {
         Ok(p) => p,
@@ -165,7 +166,7 @@ pub(crate) fn run(args: Args) -> i32 {
             return 2;
         }
     };
-    eprintln!("[patterns] experimental surface=cli mode={mode}");
+    eprintln!("[patterns] surface=cli mode={mode}");
     if args.json {
         println!("{}", serde_json::to_string(&report).unwrap_or_default());
     } else {
@@ -206,7 +207,7 @@ fn render(repo: &str, base: Option<&str>, p: &PatternArgs, r: &PatternReport) ->
         Some(b) => format!("delta vs `{b}`"),
         None => "whole graph".to_string(),
     };
-    out.push_str(&format!("# glia patterns `{repo}` (experimental, {mode})\n\n"));
+    out.push_str(&format!("# glia patterns `{repo}` ({mode})\n\n"));
     out.push_str(&format!(
         "- handlers: {} in {} populations; judged: {}; below min support ({}): {}; divergences{}: {}; blind{}: {}\n",
         r.handlers,

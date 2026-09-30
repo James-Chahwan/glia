@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """The promotion criterion for `glia patterns` (CC.12a), written and executable.
 
-Pattern conformance (LE.7a / LE.7b) ships EXPERIMENTAL: the CLI refuses to run
-without --experimental, the pyo3 names carry `_experimental` and every report
-says `experimental: true`. This script is the one place that decides whether it
-may drop that: it measures three real repos against five FIXED criteria and
-records the numbers, pass or fail. The thresholds below are the criterion; they
+Pattern conformance (LE.7a / LE.7b) shipped EXPERIMENTAL in 0.5.0: the CLI
+refused to run without --experimental, the pyo3 names carried `_experimental`
+and every report said `experimental: true`. This script is the one place that
+decides whether it may drop that: it measures three real repos against five
+FIXED criteria and records the numbers, pass or fail. Its promote=true record
+is what CC.12b promoted the command on (0.5.1); a later run keeps guarding it. The thresholds below are the criterion; they
 are never tuned to make a run pass, and changing one is a reviewed diff with its
 reason in the commit.
 
@@ -20,8 +21,7 @@ reason in the commit.
       `glia why <copy> <from> <to> --category <CAT> --json` exits 0 with
       `found: true` (a backward IMPLEMENTS hop is asked the way the edge runs,
       implementation -> interface method).
-  C5  two runs of `glia patterns <copy> --experimental --json` print
-      byte-identical JSON.
+  C5  two runs of `glia patterns <copy> --json` print byte-identical JSON.
 
 promote = C1 and C2 and C3 and C4 and C5.
 
@@ -39,9 +39,15 @@ Exit 0 iff promote, 1 when a criterion fails, 2 on a measurement error (a glia
 call failing, the engine's marker disagreeing with its JSON). /tmp may be a RAM
 disk: pass --work-dir (or TMPDIR) to keep the copies on disk.
 
+A build from before CC.12b refuses `glia patterns` without `--experimental`
+(exit 2, "pass --experimental"): run_patterns then retries with the flag, so the
+recorded builds (2170ff8, 7425636, the end-of-wave-8 3f33c1c) can still be
+re-measured.
+
 The engine's fired_on line, parsed and cross-checked against the JSON once per
-repo per run:
-  [patterns] experimental populations=<P> judged=<J> handlers=<H> divergences=<D> skipped_small=<S> role_sources edge=<E> kind=<K> name=<N> blind=<B> group_by=<g>
+repo per run (a pre-CC.12b build spells it `[patterns] experimental populations=..`;
+both are read):
+  [patterns] populations=<P> judged=<J> handlers=<H> divergences=<D> skipped_small=<S> role_sources edge=<E> kind=<K> name=<N> blind=<B> group_by=<g>
 This script's, on stderr, once per repo and once for the verdict
 (grep `^\\[promotion\\] `):
   [promotion] repo=<name> sha=<sha> judged=<J> blind=<b> -> C1=<pass|fail> C2=.. C3=.. C4=.. C5=.. promote=<true|false>
@@ -72,9 +78,10 @@ REPOS = [
     ("Kina", "a448fb3"),
 ]
 
-# 0.5.0's line ends at `name=<N>`; CA.5b added `blind=` and `group_by=`.
+# 0.5.0's line ends at `name=<N>`; CA.5b added `blind=` and `group_by=`;
+# CC.12b dropped the `experimental ` word.
 MARKER = re.compile(
-    r"^\[patterns\] experimental populations=(\d+) judged=(\d+) handlers=(\d+) "
+    r"^\[patterns\] (?:experimental )?populations=(\d+) judged=(\d+) handlers=(\d+) "
     r"divergences=(\d+) skipped_small=(\d+) role_sources edge=\d+ kind=\d+ name=\d+"
     r"(?: blind=(\d+))?(?: group_by=\S+)?$",
     re.M,
@@ -206,7 +213,7 @@ def check_marker(line, report):
     """The engine's marker must say what its JSON says."""
     m = MARKER.search(line)
     if not m:
-        raise MeasureError("no `[patterns] experimental populations=` line on stderr")
+        raise MeasureError("no `[patterns] populations=` line on stderr")
     p, j, h, d, s, b = m.groups()
     want = [
         ("populations", int(p), len(report["populations"])),
@@ -243,12 +250,17 @@ def extract(repo, sha, dest):
         raise MeasureError(f"git archive {repo.name}@{sha} | tar failed")
 
 
+# What a pre-CC.12b build prints when `glia patterns` runs without the flag.
+PRE_PROMOTION_REFUSAL = "pass --experimental"
+
+
 def run_patterns(glia, copy):
-    p = subprocess.run(
-        [glia, "patterns", str(copy), "--experimental", "--json"],
-        capture_output=True,
-        env=glia_env(),
-    )
+    """`glia patterns <copy> --json`; a pre-CC.12b build refuses it without
+    `--experimental`, so the call is retried with the flag (module docs)."""
+    cmd = [glia, "patterns", str(copy), "--json"]
+    p = subprocess.run(cmd, capture_output=True, env=glia_env())
+    if p.returncode == 2 and PRE_PROMOTION_REFUSAL in p.stderr.decode(errors="replace"):
+        p = subprocess.run(cmd + ["--experimental"], capture_output=True, env=glia_env())
     if p.returncode != 0:
         tail = p.stderr.decode(errors="replace").strip().splitlines()[-1:]
         raise MeasureError(f"glia patterns {copy.name} exited {p.returncode}: {tail}")
@@ -448,9 +460,13 @@ def self_test():
         failures += 1
         print("[promotion] self-test FAIL: C1 detail does not say `0 of 3 repos`", file=sys.stderr)
 
-    # The marker cross-check, on the 0.5.0 and the CA.5b line.
+    # The marker cross-check, on the 0.5.0, the CA.5b and the CC.12b line.
     rep = judged_set(2)[0]["report"]
     for line, bad in [
+        ("[patterns] populations=1 judged=1 handlers=10 divergences=1 "
+         "skipped_small=0 role_sources edge=1 kind=2 name=0 blind=2 group_by=service", False),
+        ("[patterns] populations=1 judged=0 handlers=10 divergences=1 "
+         "skipped_small=0 role_sources edge=1 kind=2 name=0 blind=2 group_by=service", True),
         ("[patterns] experimental populations=1 judged=1 handlers=10 divergences=1 "
          "skipped_small=0 role_sources edge=1 kind=2 name=0 blind=2 group_by=service", False),
         ("[patterns] experimental populations=1 judged=1 handlers=10 divergences=1 "
