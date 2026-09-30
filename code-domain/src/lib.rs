@@ -45,6 +45,11 @@ pub mod profile;
 /// Git-history / test-report snapshot records and `data_hash`. (LF.5a)
 pub mod snapshots;
 
+// 0.5.1 slot (C0.1): declared here so its owner edits only its own file.
+
+/// CODE cells stored as spans into the source: the CodeSpan codec. (CD.7c)
+pub mod code_span;
+
 // ============================================================================
 // Node kinds
 // ============================================================================

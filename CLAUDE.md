@@ -138,7 +138,7 @@ code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_ty
                             are allocated here and nowhere else; walk_gating, project_roots
   public slots:     data_entity A13.1   evidence LC.3a   external_inputs LF.1a (+LF.4a)
                     glia_config LF.2a (+LG.3d)   profile LD.14a (+LD.14b, LD.6, LE.4d)
-                    snapshots LF.5a (+LF.6a)
+                    snapshots LF.5a (+LF.6a)   code_span CD.7c
 
 py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by name,
                             then add_class PyGraph — never edited for a new API
