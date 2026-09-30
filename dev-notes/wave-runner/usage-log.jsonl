@@ -102,3 +102,5 @@
 {"wave": "R051-W8", "event": "end", "pct": 33, "resets_at": 1790809800, "ts": 1790803062}
 {"wave": "R051-W9", "event": "start", "pct": 33, "resets_at": 1790809800, "ts": 1790803070}
 {"wave": "R051-W9", "event": "end", "pct": 36, "resets_at": 1790809800, "ts": 1790804992}
+{"wave": "R051-W10", "event": "start", "pct": 36, "resets_at": 1790809800, "ts": 1790805000}
+{"wave": "R051-W10", "event": "end", "pct": 38, "resets_at": 1790809800, "ts": 1790805987}
