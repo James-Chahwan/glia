@@ -13,10 +13,13 @@ mod git_fixture;
 use std::path::Path;
 
 use git_fixture::GitRepo;
-use glia_engine::generate_one;
+use glia_engine::delta::graph_delta_vs_rev;
+use glia_engine::diff_impact::diff_impact_from_delta;
 use glia_engine::tests_for::{
-    MAX_SEEDS, TestHit, TestsFor, TestsForArgs, tests_for, tests_for_diff, tests_for_rev,
+    MAX_SEEDS, TestHit, TestsFor, TestsForArgs, tests_for, tests_for_delta, tests_for_diff,
+    tests_for_rev,
 };
+use glia_engine::{BlastOptions, generate_one};
 
 const SERVICE_PY: &str = "def price(order):\n    return sum(i[\"p\"] for i in order[\"items\"])\n\n\n\
 def place(order):\n    total = price(order)\n    return {\"total\": total}\n";
@@ -483,6 +486,36 @@ fn rev_mode_via_git_fixture() {
     assert!(clean.seeds.is_empty() && clean.tests.is_empty());
     assert_eq!(clean.absence.as_ref().map(|x| x.reason), Some("no_match"));
     assert!(tests_for_rev(repo.path(), "no-such-rev", &TestsForArgs::default()).is_err());
+}
+
+/// CC.1: one precomputed rev delta answers tests-for AND diff-impact. The
+/// tests answer is exactly `tests_for_rev`'s (that wrapper builds its own
+/// delta, then calls `tests_for_delta`), and the impact answer over the SAME
+/// delta seeds the same node. Run with `--nocapture`, stderr shows ONE
+/// `[delta] base=HEAD` line before both `[tests-for] seeds=` and
+/// `[diff-impact] mode=rev base=HEAD`; the comparison call then prints its own.
+#[test]
+fn tests_for_delta_matches_rev_and_shares_one_delta() {
+    let repo = committed_shop();
+    repo.write("shop/orders/service.py", SERVICE_PY_EDITED);
+    let rev = graph_delta_vs_rev(repo.path(), "HEAD").expect("delta");
+    let a = tests_for_delta(&rev, &TestsForArgs::default()).expect("answer");
+    let impact = diff_impact_from_delta(&rev, &BlastOptions::default());
+    assert_price_answer(&a);
+    let seeds: Vec<&str> = impact
+        .impact
+        .seeds
+        .iter()
+        .map(|s| s.qname.as_str())
+        .collect();
+    assert_eq!(seeds, [PRICE]);
+    assert_eq!(impact.base.as_deref(), Some("HEAD"));
+
+    let b = tests_for_rev(repo.path(), "HEAD", &TestsForArgs::default()).expect("answer");
+    assert_eq!(
+        serde_json::to_string(&a).expect("json"),
+        serde_json::to_string(&b).expect("json")
+    );
 }
 
 #[test]

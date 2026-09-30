@@ -13,6 +13,13 @@
 //!   `MergedGraph::resolve_signals`, left unchanged because repo-graph's
 //!   `find` depends on it.
 //!
+//! Rev mode's answer is [`diff_impact_from_delta`] of a `RevDelta` the caller
+//! already holds; `diff_impact_vs_rev` is that call on a fresh
+//! `graph_delta_vs_rev`. A caller answering impact AND tests for one change
+//! (CC.1) computes the delta once and passes it to both
+//! `diff_impact_from_delta` and `tests_for::tests_for_delta`: one
+//! before + after build pair, one `[delta] base=` line, not two.
+//!
 //! # Seeds
 //!
 //! Rev mode seeds the added and moved nodes (their working-tree ids), the
@@ -124,9 +131,18 @@ pub struct DiffImpact {
 /// saves the working tree's parse-cache sidecar, never a layout.
 pub fn diff_impact_vs_rev(repo_path: &str, base: &str, opts: &BlastOptions) -> Result<DiffImpact, String> {
     let rev = graph_delta_vs_rev(repo_path, base)?;
+    Ok(diff_impact_from_delta(&rev, opts))
+}
+
+/// The impact of an already computed rev delta (module docs: rev mode).
+/// Nothing is built: the radius runs over `rev.after`, and the answer's
+/// `base` is `rev.answer.base`, the rev as `graph_delta_vs_rev` was given it.
+/// `rev` holds both sides' graphs, so a caller that keeps it alive to ask
+/// more questions (`tests_for::tests_for_delta`) holds two graphs in memory.
+pub fn diff_impact_from_delta(rev: &RevDelta, opts: &BlastOptions) -> DiffImpact {
     let after = &rev.after.merged;
     let loc = Locator::new(after);
-    let candidates = present(after, rev_candidates(&rev));
+    let candidates = present(after, rev_candidates(rev));
     let seeds = seed_list(&loc, &candidates);
     let is_seed: HashSet<NodeId> = seeds.iter().map(|&(_, id)| id).collect();
 
@@ -185,7 +201,7 @@ pub fn diff_impact_vs_rev(repo_path: &str, base: &str, opts: &BlastOptions) -> R
         unresolved_diff_files: Vec::new(),
     };
     marker("rev", &answer, seeds.len());
-    Ok(answer)
+    answer
 }
 
 /// The impact of a pasted unified diff, or a changed-file list, over

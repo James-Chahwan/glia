@@ -22,6 +22,13 @@
 //!   removed edge, walked in the working tree's graph. A deleted test makes the
 //!   node it called a seed, so the tests still reaching it are listed.
 //!
+//! Rev mode's answer is [`tests_for_delta`] of a `RevDelta` the caller already
+//! holds; `tests_for_rev` is that call on a fresh `graph_delta_vs_rev`. A
+//! caller answering tests AND impact for one change (CC.1) computes the delta
+//! once and passes it to both `tests_for_delta` and
+//! `diff_impact::diff_impact_from_delta`: one before + after build pair, one
+//! `[delta] base=` line, not two.
+//!
 //! # The walk
 //!
 //! One [`Adjacency`] over [`TEST_REACH`] (CALLS, USES, INJECTS, IMPLEMENTS,
@@ -289,8 +296,22 @@ pub fn tests_for_diff(
 /// tree, an unknown rev, a failed build) and beyond [`MAX_SEEDS`] seeds.
 pub fn tests_for_rev(repo_path: &str, base: &str, args: &TestsForArgs) -> Result<TestsFor, String> {
     let rev = crate::delta::graph_delta_vs_rev(repo_path, base)?;
-    let ids = rev_seeds(&rev);
+    tests_for_delta(&rev, args)
+}
+
+/// The tests for an already computed rev delta (module docs), walked in
+/// `rev.after`'s graph. Nothing is built; the absence query is
+/// `rev <rev.answer.base>`, the rev as `graph_delta_vs_rev` was given it.
+/// `Err` beyond [`MAX_SEEDS`] seeds only. `rev` holds both sides' graphs, so
+/// a caller that keeps it alive to ask more questions
+/// (`diff_impact::diff_impact_from_delta`) holds two graphs in memory.
+pub fn tests_for_delta(
+    rev: &crate::delta::RevDelta,
+    args: &TestsForArgs,
+) -> Result<TestsFor, String> {
+    let ids = rev_seeds(rev);
     let merged = &rev.after.merged;
+    let base = &rev.answer.base;
     let query = format!("rev {base}");
     answer_for(merged, &ids, &query, args, |merged| {
         let note = format!(

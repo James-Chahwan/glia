@@ -10,7 +10,9 @@
 mod git_fixture;
 
 use git_fixture::GitRepo;
-use glia_engine::diff_impact::{ChangedNode, DiffImpact, diff_impact_from_diff, diff_impact_vs_rev};
+use glia_engine::diff_impact::{
+    ChangedNode, DiffImpact, diff_impact_from_delta, diff_impact_from_diff, diff_impact_vs_rev,
+};
 use glia_engine::{BlastOptions, generate_one};
 use glia_graph::Reach;
 
@@ -266,4 +268,23 @@ fn changed_file_list_seeds_files_and_lists_unplaced_ones() {
     assert_eq!(d.unresolved_diff_files, ["docs/notes.md"]);
     assert!(d.changed.iter().any(|c| c.qname == CHECKOUT && c.seed), "{:#?}", d.changed);
     assert!(rows(&d).iter().any(|(q, _, s)| q == PLACE && s == CHECKOUT), "{:?}", rows(&d));
+}
+
+/// CC.1: one precomputed rev delta answers exactly what `diff_impact_vs_rev`
+/// answers (that wrapper builds its own delta, then calls
+/// `diff_impact_from_delta`); nothing is rebuilt from the delta.
+#[test]
+fn from_delta_matches_vs_rev() {
+    let repo = committed_shop();
+    repo.write("shop/a.py", A_PY_EDITED);
+    let rev = glia_engine::delta::graph_delta_vs_rev(repo.path(), "HEAD").expect("delta");
+    let a = diff_impact_from_delta(&rev, &opts(Reach::Backward));
+    let b = diff_impact_vs_rev(repo.path(), "HEAD", &opts(Reach::Backward)).expect("diff impact");
+    assert_eq!(serde_json::to_string(&a).expect("json"), serde_json::to_string(&b).expect("json"));
+    assert_eq!(a.base.as_deref(), Some("HEAD"));
+    assert_eq!(seed_qnames(&a), [PRICE]);
+    assert_eq!(
+        rows(&a),
+        [(PLACE.to_string(), 1, PRICE.to_string()), (CHECKOUT.to_string(), 2, PRICE.to_string())]
+    );
 }
