@@ -274,23 +274,69 @@ at build time, like rule scopes: rebuild after adding a project.
 
 ## The loop: gaps -> overlay -> overlay delta
 
-1. `glia gaps <repo>` lists the blind spots: unpaired endpoints and routes, `<unresolved>`
+glia never calls a model. Three commands run the loop that writes this file, and the model step
+between them (reading the code, writing stanzas) is an agent's or a person's. The `glia-overlay`
+skill (`skills/glia-overlay/SKILL.md`; copy it to `~/.claude/skills/glia-overlay/`) gives an agent
+the loop's commands and its rules.
+
+1. **Gaps.** `glia gaps <repo>` lists the blind spots: unpaired endpoints and routes, `<unresolved>`
    endpoint sinks, tag-only queues, dead-flagged symbols, and overlay rules that no longer
    bind. Each row suggests a section to fill, and carries an `id` (`gap:<16 hex>`) that stays
    the same across rebuilds: it is keyed by the node, stanza or sidecar row, never by a line
    or an ordinal, so a stanza can name the gap it targets and a re-run shows it gone.
-2. An agent or a person writes stanzas for those rows into `.glia/overlay.toml` (repo-graph
-   hands the gaps to its agent and writes the file back).
-3. `glia gaps <repo> --overlay-delta` builds without and then with the overlay, counts each
-   build whole (nodes by kind, edges by category, gaps by category for the categories that
-   need no repo root) and prints
-   `[overlay] N rules, +M edges, orphans K→J, gaps G0→G1, verdict=<keep|review|drop>`.
-   The verdict: the overlay *improved* the graph when some gap category fell, or some node
-   kind or edge category other than `DEFINES` / `CONTAINS` rose; it *regressed* it when some
-   gap category rose. `keep` = improved and not regressed, `review` = both (a person decides),
-   `drop` = not improved. The verdict measures; it cannot tell whether an added edge is right.
-   Rules that `gaps` reports as orphaned or redundant (the extractor has caught up) should
-   be removed.
+2. **Propose.** `glia overlay propose <repo>` is the work list: the rows a stanza could close
+   (every category but `wrapped_sink` unless `--category` narrows it), each with the source lines
+   around it (`--snippet-lines`, default 3) and, on a `suspected_edge` row, a paste-ready `[[edge]]`
+   draft. Its `guide` points each `suggest` value at its section of this file. It writes nothing.
+3. **Candidate.** The model step writes a candidate file holding only `[constants]`,
+   `[entrypoints]`, `[[route_prefix]]`, `[[wrapper]]` and `[[edge]]` (plus an optional
+   `version = 1`), each stanza under `# gap: <id>` comment lines naming the rows it targets
+   (above a constant's key, or above a pattern's item in a multi-line `qnames` array). A gap line
+   holds ids only. The links are comments, so a candidate is plain overlay text, and it is
+   all-valid or refused. Keep it outside `.glia/`, whose files are fingerprinted build inputs.
+4. **Try.** `glia overlay try <repo> --candidate <file>` builds the tree with the overlay as it is
+   (base), with every candidate stanza merged in (with) and, per stanza, with every stanza but
+   that one. It reports each node kind, edge category and gap category that moved, and per stanza
+   (`wrapper#1`, `edge#2`, `constants.GATEWAY`, `entrypoints#1`) its marginal effect (with, minus
+   the build without it), the linked gaps it `closes` (closed by it alone: back when it is left
+   out; the report's `closed` also counts gaps several stanzas close together) and a verdict. An
+   overlay never changes a parse, so every build reuses the cached parses; `builds` counts the
+   distinct overlay texts, at most N + 2 for N stanzas. `--no-leave-one-out` builds base and with
+   only: the totals and the verdict, no per-stanza rows. It writes only the parse cache.
+5. **Accept.** `glia overlay accept <repo> --candidate <file> --only <stanza>` (repeatable; default
+   every stanza) is the only writer of `.glia/overlay.toml`. It merges the chosen stanzas with their
+   `# gap:` lines and keeps the file's own comments and layout, refuses any result the loader would
+   not load as validated, and writes atomically. A constant or pattern the file already holds is a
+   duplicate and writes nothing. `--dry-run` prints the diff and writes nothing. Exit 0 when written
+   (or a dry run, or nothing changed), 1 when the result would not validate (nothing written), 2 on
+   a usage or build error.
+6. **Prune rot.** A rule that `gaps` reports as an `orphaned_rule` (it binds nothing: the code was
+   renamed or deleted) or a `redundant_rule` (the extractor now emits the same edge) is removed by
+   its gap id: `glia overlay accept <repo> --remove <gap id>`. The row's stanza is found by its
+   identity (an `[[edge]]`'s from / to / category, a `[[constraint]]` / `[[decision]]` / `[[note]]`
+   id, an `[entrypoints]` pattern), never by a line, and every stanza with that identity goes.
+   `--candidate` and `--remove` combine, so a renamed rule is replaced in one write. A
+   `[[wrapper]]`, `[[route_prefix]]` or constant is never a rule row: a person removes one that
+   stopped doing anything.
+
+The verdict. `try` (per stanza and for the whole candidate) and `glia gaps <repo> --overlay-delta`
+(for the whole file) judge by one rule. The overlay *improved* the graph when some gap category
+fell, or some node kind or edge category other than `DEFINES` / `CONTAINS` rose; it *regressed* it
+when some gap category rose. `keep` = improved and not regressed, `review` = both (a person
+decides), `drop` = not improved. A stanza that closes a gap it links, and raises no gap category, is
+a `keep`. Accept only what the verdict keeps. The verdict measures; it cannot tell whether an added
+edge is right, which is why a stanza is written from the code it cites.
+
+`glia gaps <repo> --overlay-delta` builds without and then with the overlay, counts each build
+whole (nodes by kind, edges by category, gaps by category for the categories that need no repo
+root) and prints `[overlay] N rules, +M edges, orphans K→J, gaps G0→G1, verdict=<keep|review|drop>`.
+`[entrypoints]` is user config that `--no-overlay` still applies, so this delta does not see it;
+`try` does.
+
+Each step prints one stderr line: `[overlay] propose repo=<label> rows=<n> ...`,
+`[overlay] candidate file=<path> stanzas=<n> (...) gap_links=<g> errors=<e>`,
+`[overlay] try repo=<label> stanzas=<n> builds=<b> verdicts keep=<k> review=<r> drop=<d> ...` and
+`[overlay] accept repo=<label> added=<a> (...) removed=<r> duplicates=<u> ... dry_run=<bool> ...`.
 
 On every build that finds the file, stderr carries
 `[overlay] loaded .glia/overlay.toml repo=<label> version=1 (walk=N project=N entrypoints=N constants=N route_prefix=N wrapper=N edge=N constraint=N decision=N note=N component=N layer=N) errors=E`.
