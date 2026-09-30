@@ -25,15 +25,28 @@ use crate::convert::to_py;
 use crate::graph::PyGraph;
 use crate::registry::ModuleFns;
 
-/// The engine's options from the keyword arguments every entry point takes.
-/// The pyo3 signatures spell `depth`'s default as the literal `6`, so Python
-/// introspection shows it (a constant renders as `...`); the unit test pins it
-/// to the engine's `DEFAULT_MAX_DEPTH`.
-fn options(depth: usize, scope: Option<&str>, module_level: bool) -> TestsForArgs {
+/// The keyword arguments every entry point takes, as the pyo3 layer hands
+/// them over.
+#[derive(Clone, Copy)]
+struct Keywords<'a> {
+    depth: usize,
+    scope: Option<&'a str>,
+    module_level: bool,
+    limit: Option<usize>,
+    signals: bool,
+}
+
+/// The engine's options from the keyword arguments. The pyo3 signatures
+/// spell `depth`'s default as the literal `6`, so Python introspection shows
+/// it (a constant renders as `...`); the unit test pins it to the engine's
+/// `DEFAULT_MAX_DEPTH`.
+fn options(kw: Keywords<'_>) -> TestsForArgs {
     let mut args = TestsForArgs::default();
-    args.max_depth = depth;
-    args.scope = scope.map(str::to_string);
-    args.module_level = module_level;
+    args.max_depth = kw.depth;
+    args.scope = kw.scope.map(str::to_string);
+    args.module_level = kw.module_level;
+    args.limit = kw.limit;
+    args.signals = kw.signals;
     args
 }
 
@@ -41,34 +54,24 @@ fn options(depth: usize, scope: Option<&str>, module_level: bool) -> TestsForArg
 fn qname_answer(
     merged: &MergedGraph,
     qnames: &[String],
-    depth: usize,
-    scope: Option<&str>,
-    module_level: bool,
+    kw: Keywords<'_>,
 ) -> Result<TestsFor, String> {
     let names: Vec<&str> = qnames.iter().map(String::as_str).collect();
-    tests_for(merged, &names, &options(depth, scope, module_level))
+    tests_for(merged, &names, &options(kw))
 }
 
 /// The body of [`PyGraph::tests_for_diff`], minus pyo3.
 fn diff_answer(
     merged: &MergedGraph,
     diff_text: &str,
-    depth: usize,
-    scope: Option<&str>,
-    module_level: bool,
+    kw: Keywords<'_>,
 ) -> Result<TestsFor, String> {
-    tests_for_diff(merged, diff_text, &options(depth, scope, module_level))
+    tests_for_diff(merged, diff_text, &options(kw))
 }
 
 /// The body of [`tests_for_rev_py`], minus pyo3.
-fn rev_answer(
-    repo_path: &str,
-    base: &str,
-    depth: usize,
-    scope: Option<&str>,
-    module_level: bool,
-) -> Result<TestsFor, String> {
-    tests_for_rev(repo_path, base, &options(depth, scope, module_level))
+fn rev_answer(repo_path: &str, base: &str, kw: Keywords<'_>) -> Result<TestsFor, String> {
+    tests_for_rev(repo_path, base, &options(kw))
 }
 
 #[pymethods]
@@ -78,20 +81,32 @@ impl PyGraph {
     /// within `depth` hops over calls, TESTS edges and the cross-service
     /// links (an integration test's HTTP call to a changed handler's route).
     /// `scope` (a path or project label) keeps the tests under it;
-    /// `module_level=False` leaves out the heuristic tier.
+    /// `module_level=False` leaves out the heuristic module pairing;
+    /// `limit=N` keeps the first N rows after ranking; `signals=False` reads
+    /// no test failure or git co-change (the structural order, no co-change
+    /// row).
     ///
-    /// Returns a dict `{seeds, tests, test_files, untested, unresolved,
-    /// absence}`: `tests` rows `{qname, name, kind, file, line, tier, reason,
-    /// depth, covers, path}` ordered fact, derived, heuristic, then by depth;
-    /// `tier` is `fact` (a TESTS edge straight to the seed, or the seed is a
-    /// test), `derived` (reached through other edges) or `heuristic` (a test
-    /// module paired by name with a seed's module); `path` is the witness as
-    /// `[qname, category]` hops from the test to its nearest seed; lines are
-    /// 1-based. `test_files` is the sorted files of the rows; `untested` the
-    /// seeds no test case reaches; `unresolved` the names no node has;
-    /// `absence` is set exactly when `tests` is empty. Raises ValueError on
-    /// an empty `qnames` or more seeds than the engine walks from.
-    #[pyo3(signature = (qnames, depth=6, scope=None, module_level=true))]
+    /// Returns a dict `{seeds, tests, omitted, test_files, untested,
+    /// unresolved, absence}`: `tests` rows `{qname, name, kind, file, line,
+    /// tier, reason, depth, covers, path, signals, cochange_permille}`
+    /// ordered: failed in the latest ingested test run first, then covering a
+    /// seed on a failing trace, then fact, derived, heuristic, then by
+    /// co-change confidence and depth. `signals` lists `failed_last_run`,
+    /// `seed_on_failing_trace` and `cochange` (the test's file changes with a
+    /// seed's in git history; `cochange_permille` is the share of the seed
+    /// file's commits that changed it too). `tier` is `fact` (a TESTS edge
+    /// straight to the seed, or the seed is a test), `derived` (reached
+    /// through other edges) or `heuristic` (a test module paired by name
+    /// with a seed's module, or, reason `cochange`, one that only co-changes
+    /// with it); `path` is the witness as `[qname, category]` hops from the
+    /// test to its nearest seed; lines are 1-based. `omitted` counts the rows
+    /// `limit` cut; `test_files` is the sorted files of the kept rows;
+    /// `untested` the seeds no test case reaches; `unresolved` the names no
+    /// node has; `absence` is set exactly when `tests` is empty. Raises
+    /// ValueError on an empty `qnames`, `limit=0` or more seeds than the
+    /// engine walks from.
+    #[pyo3(signature = (qnames, depth=6, scope=None, module_level=true, limit=None, signals=true))]
+    #[allow(clippy::too_many_arguments)]
     fn tests_for(
         &self,
         py: Python<'_>,
@@ -99,9 +114,17 @@ impl PyGraph {
         depth: usize,
         scope: Option<&str>,
         module_level: bool,
+        limit: Option<usize>,
+        signals: bool,
     ) -> PyResult<Py<PyAny>> {
-        let answer = qname_answer(&self.merged, &qnames, depth, scope, module_level)
-            .map_err(PyValueError::new_err)?;
+        let kw = Keywords {
+            depth,
+            scope,
+            module_level,
+            limit,
+            signals,
+        };
+        let answer = qname_answer(&self.merged, &qnames, kw).map_err(PyValueError::new_err)?;
         to_py(py, serde_json::to_string(&answer))
     }
 
@@ -109,7 +132,8 @@ impl PyGraph {
     /// added lines (each resolved to the narrowest node spanning it), or by a
     /// changed-file list (one path per line: every node of each file). Same
     /// keywords and dict as `tests_for`.
-    #[pyo3(signature = (diff_text, depth=6, scope=None, module_level=true))]
+    #[pyo3(signature = (diff_text, depth=6, scope=None, module_level=true, limit=None, signals=true))]
+    #[allow(clippy::too_many_arguments)]
     fn tests_for_diff(
         &self,
         py: Python<'_>,
@@ -117,9 +141,17 @@ impl PyGraph {
         depth: usize,
         scope: Option<&str>,
         module_level: bool,
+        limit: Option<usize>,
+        signals: bool,
     ) -> PyResult<Py<PyAny>> {
-        let answer = diff_answer(&self.merged, diff_text, depth, scope, module_level)
-            .map_err(PyValueError::new_err)?;
+        let kw = Keywords {
+            depth,
+            scope,
+            module_level,
+            limit,
+            signals,
+        };
+        let answer = diff_answer(&self.merged, diff_text, kw).map_err(PyValueError::new_err)?;
         to_py(py, serde_json::to_string(&answer))
     }
 }
@@ -134,7 +166,8 @@ impl PyGraph {
 /// `generate(incremental=True)` does, never a `.gmap` layout. Same keywords
 /// and dict as `tests_for`; raises ValueError on a git or build failure.
 #[pyfunction]
-#[pyo3(name = "tests_for_rev", signature = (repo_path, base="HEAD", depth=6, scope=None, module_level=true))]
+#[pyo3(name = "tests_for_rev", signature = (repo_path, base="HEAD", depth=6, scope=None, module_level=true, limit=None, signals=true))]
+#[allow(clippy::too_many_arguments)]
 fn tests_for_rev_py(
     py: Python<'_>,
     repo_path: &str,
@@ -142,9 +175,17 @@ fn tests_for_rev_py(
     depth: usize,
     scope: Option<&str>,
     module_level: bool,
+    limit: Option<usize>,
+    signals: bool,
 ) -> PyResult<Py<PyAny>> {
-    let answer =
-        rev_answer(repo_path, base, depth, scope, module_level).map_err(PyValueError::new_err)?;
+    let kw = Keywords {
+        depth,
+        scope,
+        module_level,
+        limit,
+        signals,
+    };
+    let answer = rev_answer(repo_path, base, kw).map_err(PyValueError::new_err)?;
     to_py(py, serde_json::to_string(&answer))
 }
 
@@ -233,6 +274,17 @@ def place(order):\n    return price(order)\n";
         );
     }
 
+    /// The pyo3 signatures' defaults.
+    fn defaults() -> Keywords<'static> {
+        Keywords {
+            depth: DEFAULT_MAX_DEPTH,
+            scope: None,
+            module_level: true,
+            limit: None,
+            signals: true,
+        }
+    }
+
     /// LE.3b: the helpers behind pyo3 `tests_for` / `tests_for_diff` return
     /// the documented object in field order, the keywords reach the engine,
     /// and an empty seed list is the engine's error. The walk itself is
@@ -241,19 +293,13 @@ def place(order):\n    return price(order)\n";
     fn graph_helpers_return_the_documented_object() {
         let (_scratch, top) = shop("graph");
         let built = glia_engine::generate_one(top.to_str().expect("utf-8")).expect("build");
-        let a = qname_answer(
-            &built.merged,
-            &["price".to_string()],
-            DEFAULT_MAX_DEPTH,
-            None,
-            true,
-        )
-        .expect("answer");
+        let a = qname_answer(&built.merged, &["price".to_string()], defaults()).expect("answer");
         let v = value(&a);
         let text = serde_json::to_string(&a).expect("serialises");
         let order: Vec<usize> = [
             "\"seeds\":",
             "\"tests\":",
+            "\"omitted\":",
             "\"test_files\":",
             "\"untested\":",
             "\"unresolved\":",
@@ -270,6 +316,10 @@ def place(order):\n    return price(order)\n";
             (first["tier"].as_str(), first["line"].as_i64()),
             (Some("fact"), Some(4))
         );
+        // CC.9a: no failure or history ingested: no signal, nothing omitted.
+        assert_eq!(first["signals"], serde_json::json!([]));
+        assert!(first["cochange_permille"].is_null());
+        assert_eq!(v["omitted"], 0);
         assert_eq!(
             v["test_files"],
             serde_json::json!(["shop/tests/test_service.py"])
@@ -277,22 +327,17 @@ def place(order):\n    return price(order)\n";
 
         // Nothing calls place: its module's name pairing is its only row,
         // and module_level=false leaves the answer empty, with its absence.
-        let paired = qname_answer(
-            &built.merged,
-            &["place".to_string()],
-            DEFAULT_MAX_DEPTH,
-            None,
-            true,
-        )
-        .expect("answer");
+        let paired =
+            qname_answer(&built.merged, &["place".to_string()], defaults()).expect("answer");
         assert_eq!(value(&paired)["tests"][0]["tier"], "heuristic");
         assert_eq!(paired.untested, ["shop::service::place"]);
         let cases = qname_answer(
             &built.merged,
             &["place".to_string()],
-            DEFAULT_MAX_DEPTH,
-            None,
-            false,
+            Keywords {
+                module_level: false,
+                ..defaults()
+            },
         )
         .expect("answer");
         assert!(cases.tests.is_empty(), "{:?}", cases.tests);
@@ -301,10 +346,53 @@ def place(order):\n    return price(order)\n";
             DEFAULT_MAX_DEPTH, 6,
             "the pyo3 signatures' literal depth default"
         );
-        let o = options(2, Some("shop"), false);
+        let o = options(Keywords {
+            depth: 2,
+            scope: Some("shop"),
+            module_level: false,
+            limit: Some(3),
+            signals: false,
+        });
         assert_eq!(
-            (o.max_depth, o.scope.as_deref(), o.module_level),
-            (2, Some("shop"), false)
+            (
+                o.max_depth,
+                o.scope.as_deref(),
+                o.module_level,
+                o.limit,
+                o.signals
+            ),
+            (2, Some("shop"), false, Some(3), false)
+        );
+        let d = TestsForArgs::default();
+        assert_eq!((d.limit, d.signals), (None, true), "the pyo3 defaults");
+
+        // limit=1 keeps the first row of price's two (the fact row, then the
+        // module pairing); limit=0 is the engine's error.
+        let one = qname_answer(
+            &built.merged,
+            &["price".to_string()],
+            Keywords {
+                limit: Some(1),
+                ..defaults()
+            },
+        )
+        .expect("answer");
+        assert_eq!(
+            (one.tests.len(), one.omitted),
+            (1, a.tests.len() - 1),
+            "{:?}",
+            one.tests
+        );
+        assert!(
+            qname_answer(
+                &built.merged,
+                &["price".to_string()],
+                Keywords {
+                    limit: Some(0),
+                    ..defaults()
+                },
+            )
+            .is_err()
         );
 
         let diff = "--- a/shop/service.py\n+++ b/shop/service.py\n@@ -1,2 +1,2 @@\n def price(order):\n\
@@ -312,15 +400,16 @@ def place(order):\n    return price(order)\n";
         let d = diff_answer(
             &built.merged,
             diff,
-            DEFAULT_MAX_DEPTH,
-            Some("shop/tests"),
-            true,
+            Keywords {
+                scope: Some("shop/tests"),
+                ..defaults()
+            },
         )
         .expect("answer");
         assert_eq!(d.seeds, ["shop::service::price"]);
         assert_eq!(d.test_files, ["shop/tests/test_service.py"]);
 
-        assert!(qname_answer(&built.merged, &[], DEFAULT_MAX_DEPTH, None, true).is_err());
+        assert!(qname_answer(&built.merged, &[], defaults()).is_err());
     }
 
     /// LE.3b: the helper behind the module function `tests_for_rev` seeds
@@ -340,11 +429,10 @@ def place(order):\n    return price(order)\n";
         )
         .expect("edit");
         let repo = top.to_str().expect("utf-8");
-        let a = rev_answer(repo, "HEAD", DEFAULT_MAX_DEPTH, None, true).expect("answer");
+        let a = rev_answer(repo, "HEAD", defaults()).expect("answer");
         assert_eq!(a.seeds, ["shop::service::price"]);
         assert_eq!(a.test_files, ["shop/tests/test_service.py"]);
-        let err = rev_answer(repo, "no-such-rev", DEFAULT_MAX_DEPTH, None, true)
-            .expect_err("unknown rev");
+        let err = rev_answer(repo, "no-such-rev", defaults()).expect_err("unknown rev");
         assert!(err.contains("no-such-rev"), "{err}");
     }
 }

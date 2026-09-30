@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""pyo3 surface, py/src/tests_for.rs (LE.3b): `PyGraph.tests_for(qnames,
-depth=6, scope=None, module_level=True)`, `PyGraph.tests_for_diff(diff_text,
-...)` and the module function `tests_for_rev(repo_path, base="HEAD", ...)`
-return the tests to run for a change as a native dict {seeds, tests,
-test_files, untested, unresolved, absence}, every row tiered fact / derived /
-heuristic and located on a 1-based line; an engine error raises ValueError.
-`tests_for_rev` needs a `git` binary. Shared helpers: test_build.py."""
+"""pyo3 surface, py/src/tests_for.rs (LE.3b, CC.9a): `PyGraph.tests_for(qnames,
+depth=6, scope=None, module_level=True, limit=None, signals=True)`,
+`PyGraph.tests_for_diff(diff_text, ...)` and the module function
+`tests_for_rev(repo_path, base="HEAD", ...)` return the tests to run for a
+change as a native dict {seeds, tests, omitted, test_files, untested,
+unresolved, absence}, every row tiered fact / derived / heuristic, carrying
+its signals and co-change confidence, and located on a 1-based line; an
+engine error raises ValueError. `tests_for_rev` needs a `git` binary. Shared
+helpers: test_build.py."""
 from __future__ import annotations
 
 import os
@@ -28,18 +30,20 @@ FILES = {
                                  'def test_audited_place():\n    assert audited_place({"items": []})["total"] == 0\n'),
 }
 PRICE = "shop::orders::service::price"
-KEYS = ["seeds", "tests", "test_files", "untested", "unresolved", "absence"]
-ROW_KEYS = ["qname", "name", "kind", "file", "line", "tier", "reason", "depth", "covers", "path"]
+KEYS = ["seeds", "tests", "omitted", "test_files", "untested", "unresolved", "absence"]
+ROW_KEYS = ["qname", "name", "kind", "file", "line", "tier", "reason", "depth", "covers", "path",
+            "signals", "cochange_permille"]
 SHAPE = [("shop::tests::test_service::test_price", "fact", 1),
          ("shop::tests::test_audit::test_audited_place", "derived", 3),
          ("shop::tests::test_service", "heuristic", 2)]
 TWO_FILES = ["shop/tests/test_audit.py", "shop/tests/test_service.py"]
 MARKER = "[tests-for] seeds=1 tests=3 fact=1 derived=1 heuristic=1 untested=0 files=2"
+SIGNALS = "[tests-for] signals failed_last_run=0 on_failing_trace=0 cochange=0 cochange_only=0 omitted=0"
 DIFF = ("--- a/shop/orders/service.py\n+++ b/shop/orders/service.py\n@@ -1,2 +1,2 @@\n"
         " def price(order):\n"
         '-    return sum(i["p"] for i in order["items"])\n'
         '+    return sum(i["p"] * 1 for i in order["items"])\n')
-KW = [("depth", 6), ("scope", None), ("module_level", True)]
+KW = [("depth", 6), ("scope", None), ("module_level", True), ("limit", None), ("signals", True)]
 
 
 def shape(d) -> list:
@@ -93,11 +97,22 @@ def main() -> int:
         c.check("test files", type(d) is dict and d.get("test_files") == TWO_FILES, d)
         c.check("no absence", type(d) is dict and d.get("absence") is None, d)
         c.check("engine marker", MARKER in err, err[-400:])
+        c.check("signals marker", SIGNALS in err, err[-400:])
+        c.check("no signal on any row", type(d) is dict and all(t.get("signals") == [] and t.get("cochange_permille")
+                                                                  is None for t in d.get("tests", [])), d)
+        c.check("nothing omitted", type(d) is dict and d.get("omitted") == 0, d)
 
         c.check("bare name, no module level",
                 shape(g.tests_for(["price"], module_level=False)) == SHAPE[:2])
         c.check("depth bound", shape(g.tests_for([PRICE], depth=2, module_level=False)) == SHAPE[:1])
         c.check("scope", shape(g.tests_for([PRICE], scope="shop/tests/test_audit.py")) == SHAPE[1:2])
+        top1 = g.tests_for([PRICE], limit=1)
+        c.check("limit keeps the first row", shape(top1) == SHAPE[:1] and top1.get("omitted") == 2
+                and top1.get("test_files") == ["shop/tests/test_service.py"], top1)
+        c.raises("limit=0 raises", ValueError, lambda: g.tests_for([PRICE], limit=0), "limit of 0")
+        plain, err = stderr_of(lambda: g.tests_for([PRICE], signals=False))
+        c.check("signals=False: same rows, no signals line", shape(plain) == SHAPE
+                and "[tests-for] signals" not in err, err[-400:])
         nobody = g.tests_for(["no_such_symbol"])
         c.check("unknown name -> unresolved + absence",
                 nobody.get("unresolved") == ["no_such_symbol"]

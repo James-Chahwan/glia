@@ -6,6 +6,7 @@
 //! The engine's `[tests-for] seeds=.. tests=..` stderr line is the fired_on
 //! marker; asserting it here makes it a tested contract. Grep it from a run:
 //! `glia tests-for <repo> <qname> 2>&1 >/dev/null | grep '^\[tests-for\] seeds='`.
+//! CC.9a's `[tests-for] signals ..` line follows it unless `--no-signals`.
 //!
 //! The `--base` test needs a `git` binary: without one it FAILS with a
 //! message saying so, never skips. Its git calls run hermetically (fixed
@@ -42,6 +43,16 @@ def test_audited_place():\n    assert audited_place({\"items\": []})[\"total\"] 
 
 const PRICE: &str = "shop::orders::service::price";
 const MARKER: &str = "[tests-for] seeds=1 tests=3 fact=1 derived=1 heuristic=1 untested=0 files=2";
+/// CC.9a: the signal pass ran and found nothing to rank by.
+const NO_SIGNALS: &str =
+    "[tests-for] signals failed_last_run=0 on_failing_trace=0 cochange=0 cochange_only=0 omitted=0";
+/// A JUnit report where test_audited_place (shop/tests/test_audit.py:4) failed.
+const AUDIT_FAILED_JUNIT: &str = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+<testsuites><testsuite name=\"pytest\" tests=\"2\" failures=\"1\">\n\
+<testcase classname=\"shop.tests.test_audit\" name=\"test_audited_place\" file=\"shop/tests/test_audit.py\" line=\"4\">\
+<failure message=\"KeyError: total\">shop/tests/test_audit.py:5: KeyError</failure></testcase>\n\
+<testcase classname=\"shop.tests.test_service\" name=\"test_price\" file=\"shop/tests/test_service.py\" line=\"4\"/>\n\
+</testsuite></testsuites>\n";
 const TWO_FILES: &str = "shop/tests/test_audit.py\nshop/tests/test_service.py\n";
 /// A unified diff editing `price`'s body.
 const PRICE_DIFF: &str = "--- a/shop/orders/service.py\n+++ b/shop/orders/service.py\n@@ -1,2 +1,2 @@\n \
@@ -141,6 +152,18 @@ impl Scratch {
         cmd.arg("tests-for").arg(self.path()).args(args);
         self.hermetic(cmd).output().expect("run glia")
     }
+
+    /// `glia tests ingest <repo> --junit <report>`, the report written
+    /// beside the repo from `xml`.
+    fn ingest_junit(&self, xml: &str) {
+        let report = self.root.join("junit.xml");
+        std::fs::write(&report, xml).expect("write the report");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_glia"));
+        cmd.args(["tests", "ingest", self.path(), "--junit"])
+            .arg(&report);
+        let out = self.hermetic(cmd).output().expect("run glia tests ingest");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    }
 }
 
 fn stdout(o: &Output) -> String {
@@ -179,6 +202,7 @@ fn json_parses_into_the_answer() {
     let mut want = vec![
         "seeds",
         "tests",
+        "omitted",
         "test_files",
         "untested",
         "unresolved",
@@ -211,6 +235,63 @@ fn json_parses_into_the_answer() {
     assert_eq!(v["tests"][0]["path"], serde_json::json!([[PRICE, "TESTS"]]));
     assert_eq!(v["tests"][0]["line"], 4);
     assert!(v["absence"].is_null());
+    // CC.9a: no failure or history ingested, so no row carries a signal.
+    assert_eq!(v["omitted"], 0);
+    assert_eq!(v["tests"][0]["signals"], serde_json::json!([]));
+    assert!(v["tests"][0]["cochange_permille"].is_null());
+    assert!(
+        stderr(&out).lines().any(|l| l == NO_SIGNALS),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// CC.9a: a failure ingested with `glia tests ingest` ranks its test first,
+/// and `--limit 1` keeps exactly that row: one table row, its file alone
+/// under `--files-only`, the cut counted in the signals line.
+#[test]
+fn limit_keeps_the_failing_test() {
+    let s = Scratch::shop("limit");
+    s.ingest_junit(AUDIT_FAILED_JUNIT);
+
+    let out = s.tests_for(&[PRICE, "--limit", "1"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    let rows: Vec<&str> = text.lines().filter(|l| l.starts_with("| 1 ") || l.starts_with("| 2 ")).collect();
+    assert_eq!(rows.len(), 1, "{text}");
+    assert!(
+        rows[0].starts_with("| 1 | derived | `shop::tests::test_audit::test_audited_place` | FUNCTION | shop/tests/test_audit.py:4 | 3 | failed_last_run |"),
+        "{text}"
+    );
+    assert!(text.contains("- omitted: 2 (past --limit)"), "{text}");
+    let err = stderr(&out);
+    assert!(
+        err.lines().any(|l| l == "[tests-for] seeds=1 tests=1 fact=0 derived=1 heuristic=0 untested=0 files=1"),
+        "{err}"
+    );
+    assert!(
+        err.lines().any(|l| l == "[tests-for] signals failed_last_run=1 on_failing_trace=0 cochange=0 cochange_only=0 omitted=2"),
+        "{err}"
+    );
+
+    let out = s.tests_for(&[PRICE, "--limit", "1", "--files-only"]);
+    assert_eq!(stdout(&out), "shop/tests/test_audit.py\n", "{}", stderr(&out));
+
+    // --no-signals: the structural order, no signals line; the pinned
+    // marker still reads the same.
+    let out = s.tests_for(&[PRICE, "--no-signals", "--json"]);
+    let v: Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
+    assert_eq!(
+        v["tests"][0]["qname"],
+        "shop::tests::test_service::test_price"
+    );
+    let err = stderr(&out);
+    assert!(err.lines().any(|l| l == MARKER), "{err}");
+    assert!(!err.contains("[tests-for] signals"), "{err}");
+
+    let out = s.tests_for(&[PRICE, "--limit", "0"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(stderr(&out).contains("limit of 0"), "{}", stderr(&out));
 }
 
 #[test]

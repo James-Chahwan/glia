@@ -13,6 +13,10 @@ mod git_fixture;
 use std::path::Path;
 
 use git_fixture::GitRepo;
+use glia_code_domain::snapshots::{
+    HistoryCommit, HistoryFile, HistoryMeta, SOURCE_JUNIT, STATUS_FAILED, TestCaseRecord,
+    TestsMeta, write_history, write_tests,
+};
 use glia_engine::delta::graph_delta_vs_rev;
 use glia_engine::diff_impact::diff_impact_from_delta;
 use glia_engine::tests_for::{
@@ -562,6 +566,366 @@ fn rev_mode_deleted_test_seeds_its_target_and_moved_test_is_a_row() {
         a.tests
     );
     assert_eq!(a.test_files, ["shop/tests/test_audit_flow.py"]);
+}
+
+// CC.9a: predictive test selection. The `pts` tree: shop/a.py `price` and
+// `place` (place calls price), tests/test_price.py `test_price_doubles` calls
+// price (a pytest TESTS edge: fact), tests/test_place.py `test_place_prices`
+// calls place (derived, depth 2).
+
+const PTS_A_PY: &str = "def price(o):\n    return o * 2\n\n\ndef place(o):\n    return price(o)\n";
+const PTS_TEST_PRICE_PY: &str =
+    "from shop.a import price\n\n\ndef test_price_doubles():\n    assert price(2) == 4\n";
+const PTS_TEST_PLACE_PY: &str =
+    "from shop.a import place\n\n\ndef test_place_prices():\n    assert place(2) == 4\n";
+const PTS_PRICE: &str = "shop::a::price";
+const TEST_PRICE_DOUBLES: &str = "tests::test_price::test_price_doubles";
+const TEST_PLACE_PRICES: &str = "tests::test_place::test_place_prices";
+
+fn pts_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("shop/a.py", PTS_A_PY),
+        ("tests/test_price.py", PTS_TEST_PRICE_PY),
+        ("tests/test_place.py", PTS_TEST_PLACE_PY),
+    ]
+}
+
+/// A tempdir holding `files`, `snapshot` run on its root before the build.
+fn build_with(
+    files: &[(&str, &str)],
+    snapshot: impl FnOnce(&Path),
+) -> (tempfile::TempDir, glia_engine::GenerateResult) {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write_all(dir.path(), files);
+    snapshot(dir.path());
+    let g = generate_one(dir.path().to_str().expect("utf-8 temp path")).expect("build");
+    (dir, g)
+}
+
+/// A failed JUnit case.
+fn failed_case(
+    classname: &str,
+    name: &str,
+    file: Option<&str>,
+    line: Option<u32>,
+    trace: Option<&str>,
+) -> TestCaseRecord {
+    TestCaseRecord {
+        source: SOURCE_JUNIT.into(),
+        report: "junit.xml".into(),
+        suite: Some("pytest".into()),
+        classname: Some(classname.into()),
+        name: name.into(),
+        file: file.map(str::to_string),
+        line,
+        status: STATUS_FAILED.into(),
+        message: Some("assert 5 == 4".into()),
+        trace: trace.map(str::to_string),
+        redacted: false,
+    }
+}
+
+/// A one-run test snapshot of `cases` under `root`.
+fn fail_snapshot(root: &Path, cases: &[TestCaseRecord]) {
+    let meta = TestsMeta::new(Some("ci-2".into()), vec!["junit.xml".into()], 0, 1);
+    write_tests(root, meta, cases, &[]).expect("write the test snapshot");
+}
+
+/// The rationale's run: `tests.test_place::test_place_prices` failed at
+/// tests/test_place.py:4 (its def line: a `file_line` mapping).
+fn place_prices_failed(root: &Path) {
+    fail_snapshot(
+        root,
+        &[failed_case(
+            "tests.test_place",
+            "test_place_prices",
+            Some("tests/test_place.py"),
+            Some(4),
+            None,
+        )],
+    );
+}
+
+/// `(qname, tier, signals)` per row, in answer order.
+fn signal_shape(a: &TestsFor) -> Vec<(String, &'static str, Vec<&'static str>)> {
+    a.tests
+        .iter()
+        .map(|t| (t.qname.clone(), t.tier, t.signals.clone()))
+        .collect()
+}
+
+#[test]
+fn failed_test_ranks_first() {
+    let (_dir, g) = build_with(&pts_files(), place_prices_failed);
+    let a = tests_for(&g.merged, &[PTS_PRICE], &TestsForArgs::default()).expect("answer");
+    assert_eq!(
+        signal_shape(&a),
+        [
+            (
+                TEST_PLACE_PRICES.to_string(),
+                "derived",
+                vec!["failed_last_run"]
+            ),
+            (TEST_PRICE_DOUBLES.to_string(), "fact", vec![]),
+        ],
+        "{:#?}",
+        a.tests
+    );
+    assert_eq!(row(&a, TEST_PLACE_PRICES).depth, 2);
+    assert!(a.tests.iter().all(|t| t.cochange_permille.is_none()));
+    assert_eq!(a.omitted, 0);
+    assert_eq!(a.test_files, ["tests/test_place.py", "tests/test_price.py"]);
+
+    // --no-signals: HEAD's structural order, no signal read.
+    let mut args = TestsForArgs::default();
+    args.signals = false;
+    let plain = tests_for(&g.merged, &[PTS_PRICE], &args).expect("answer");
+    assert_eq!(
+        signal_shape(&plain),
+        [
+            (TEST_PRICE_DOUBLES.to_string(), "fact", vec![]),
+            (TEST_PLACE_PRICES.to_string(), "derived", vec![]),
+        ]
+    );
+}
+
+#[test]
+fn failing_trace_ranks_its_tests() {
+    // A failure no test node maps to (no file, a name no function has) whose
+    // trace runs through shop/a.py price: price carries an implicated entry.
+    let trace = "tests/test_gone.py:5: in test_gone\n    assert price(2) == 4\n\
+shop/a.py:2: in price\n    return o * 2\nE   AssertionError";
+    let (_dir, g) = build_with(&pts_files(), |root| {
+        fail_snapshot(
+            root,
+            &[failed_case(
+                "tests.test_gone",
+                "test_gone",
+                None,
+                None,
+                Some(trace),
+            )],
+        );
+    });
+    let a = tests_for(&g.merged, &[PTS_PRICE], &TestsForArgs::default()).expect("answer");
+    // Both rows cover price: both gain the signal, and the order falls back
+    // to the tier.
+    assert_eq!(
+        signal_shape(&a),
+        [
+            (
+                TEST_PRICE_DOUBLES.to_string(),
+                "fact",
+                vec!["seed_on_failing_trace"]
+            ),
+            (
+                TEST_PLACE_PRICES.to_string(),
+                "derived",
+                vec!["seed_on_failing_trace"]
+            ),
+        ],
+        "{:#?}",
+        a.tests
+    );
+
+    // A seed off the trace: place's own tests carry nothing.
+    let b = tests_for(&g.merged, &["shop::a::place"], &TestsForArgs::default()).expect("answer");
+    assert!(b.tests.iter().all(|t| t.signals.is_empty()), "{:#?}", b.tests);
+}
+
+const T0: i64 = 1_767_225_600;
+
+/// History commits, newest first, one per entry of `files`.
+fn history(files: &[&[&str]]) -> Vec<HistoryCommit> {
+    files
+        .iter()
+        .enumerate()
+        .map(|(i, paths)| HistoryCommit {
+            c: format!("{:02}{}", files.len() - i, "0".repeat(38)),
+            t: T0 - i64::try_from(i).expect("small") * 86_400,
+            files: paths
+                .iter()
+                .map(|p| HistoryFile {
+                    p: (*p).to_string(),
+                    a: Some(1),
+                    d: Some(0),
+                    from: None,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+#[test]
+fn cochange_row_and_permille() {
+    const LEGACY: &str = "def test_old():\n    assert True\n";
+    let mut files = pts_files();
+    files.push(("tests/test_legacy.py", LEGACY));
+    // shop/a.py changes in 5 commits: tests/test_legacy.py (a test module no
+    // call reaches) with it in 4, tests/test_place.py in 3.
+    let commits = history(&[
+        &["shop/a.py", "tests/test_legacy.py", "tests/test_place.py"],
+        &["shop/a.py", "tests/test_legacy.py", "tests/test_place.py"],
+        &["shop/a.py", "tests/test_legacy.py", "tests/test_place.py"],
+        &["shop/a.py", "tests/test_legacy.py"],
+        &["shop/a.py"],
+    ]);
+    let (_dir, g) = build_with(&files, |root| {
+        let head = commits[0].c.clone();
+        write_history(
+            root,
+            HistoryMeta::new(head, 2000, None, String::new()),
+            &commits,
+            &[],
+        )
+        .expect("write the history snapshot");
+    });
+    let a = tests_for(&g.merged, &[PTS_PRICE], &TestsForArgs::default()).expect("answer");
+    assert_eq!(
+        signal_shape(&a),
+        [
+            (TEST_PRICE_DOUBLES.to_string(), "fact", vec![]),
+            (TEST_PLACE_PRICES.to_string(), "derived", vec!["cochange"]),
+            ("tests::test_legacy".to_string(), "heuristic", vec!["cochange"]),
+        ],
+        "{:#?}",
+        a.tests
+    );
+    // test_place.py co-changed in 3 of shop/a.py's 5 commits.
+    assert_eq!(row(&a, TEST_PLACE_PRICES).cochange_permille, Some(600));
+    let legacy = row(&a, "tests::test_legacy");
+    assert_eq!(
+        (legacy.kind, legacy.reason, legacy.cochange_permille),
+        ("MODULE", "cochange", Some(800))
+    );
+    assert_eq!(legacy.file.as_deref(), Some("tests/test_legacy.py"));
+    assert_eq!(legacy.covers, [PTS_PRICE]);
+    // The co-change hop onto the seed's module, then down to the seed.
+    assert_eq!(
+        legacy.path,
+        [
+            ("shop::a".to_string(), "CO_CHANGES"),
+            (PTS_PRICE.to_string(), "DEFINES")
+        ]
+    );
+    assert_eq!(legacy.depth, legacy.path.len());
+    // test_place.py already has a row: no co-change-only row for its module.
+    assert!(
+        a.tests.iter().all(|t| t.qname != "tests::test_place"),
+        "{:#?}",
+        a.tests
+    );
+    assert_eq!(
+        a.test_files,
+        [
+            "tests/test_legacy.py",
+            "tests/test_place.py",
+            "tests/test_price.py"
+        ]
+    );
+    assert!(a.untested.is_empty() && a.absence.is_none());
+
+    // --no-signals: no co-change row, no signal.
+    let mut args = TestsForArgs::default();
+    args.signals = false;
+    let plain = tests_for(&g.merged, &[PTS_PRICE], &args).expect("answer");
+    assert_eq!(
+        signal_shape(&plain),
+        [
+            (TEST_PRICE_DOUBLES.to_string(), "fact", vec![]),
+            (TEST_PLACE_PRICES.to_string(), "derived", vec![]),
+        ]
+    );
+}
+
+#[test]
+fn cochange_only_seed_stays_untested() {
+    const LEGACY: &str = "def test_old():\n    assert True\n";
+    let files = vec![
+        ("shop/b.py", "def refund(o):\n    return 0\n"),
+        ("tests/test_legacy.py", LEGACY),
+    ];
+    let commits = history(&[
+        &["shop/b.py", "tests/test_legacy.py"],
+        &["shop/b.py", "tests/test_legacy.py"],
+        &["shop/b.py", "tests/test_legacy.py"],
+    ]);
+    let (_dir, g) = build_with(&files, |root| {
+        let head = commits[0].c.clone();
+        write_history(
+            root,
+            HistoryMeta::new(head, 2000, None, String::new()),
+            &commits,
+            &[],
+        )
+        .expect("write the history snapshot");
+    });
+    let a = tests_for(&g.merged, &["shop::b::refund"], &TestsForArgs::default()).expect("answer");
+    assert_eq!(
+        signal_shape(&a),
+        [("tests::test_legacy".to_string(), "heuristic", vec!["cochange"])],
+        "{:#?}",
+        a.tests
+    );
+    assert_eq!(row(&a, "tests::test_legacy").cochange_permille, Some(1000));
+    assert_eq!(a.untested, ["shop::b::refund"]);
+    assert!(a.absence.is_none());
+}
+
+#[test]
+fn limit_cuts_after_ranking() {
+    let (_dir, g) = build_with(&pts_files(), place_prices_failed);
+    let mut args = TestsForArgs::default();
+    args.limit = Some(1);
+    let a = tests_for(&g.merged, &[PTS_PRICE], &args).expect("answer");
+    assert_eq!(
+        a.tests.iter().map(|t| t.qname.as_str()).collect::<Vec<_>>(),
+        [TEST_PLACE_PRICES]
+    );
+    assert_eq!(a.omitted, 1);
+    assert_eq!(a.test_files, ["tests/test_place.py"]);
+    // Untested is the graph's fact, computed before the cut.
+    assert!(a.untested.is_empty() && a.absence.is_none());
+
+    // A limit above the row count cuts nothing; zero is an error.
+    args.limit = Some(5);
+    assert_eq!(
+        tests_for(&g.merged, &[PTS_PRICE], &args)
+            .expect("answer")
+            .omitted,
+        0
+    );
+    args.limit = Some(0);
+    assert!(tests_for(&g.merged, &[PTS_PRICE], &args).is_err());
+}
+
+#[test]
+fn failing_test_marks_its_module_row() {
+    // `discount` is reached by no case: test_service's module pairing is its
+    // one row, a MODULE that defines the failing test_price.
+    let mut files = shop_files();
+    files.retain(|(rel, _)| *rel != "shop/orders/service.py");
+    files.push(("shop/orders/service.py", SERVICE_PY_DISCOUNT));
+    let (_dir, g) = build_with(&files, |root| {
+        fail_snapshot(
+            root,
+            &[failed_case(
+                "shop.tests.test_service",
+                "test_price",
+                Some("shop/tests/test_service.py"),
+                Some(4),
+                None,
+            )],
+        );
+    });
+    const DISCOUNT: &str = "shop::orders::service::discount";
+    let a = tests_for(&g.merged, &[DISCOUNT], &TestsForArgs::default()).expect("answer");
+    assert_eq!(
+        signal_shape(&a),
+        [(TEST_SERVICE.to_string(), "heuristic", vec!["failed_last_run"])],
+        "{:#?}",
+        a.tests
+    );
 }
 
 #[test]

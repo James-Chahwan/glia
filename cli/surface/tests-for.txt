@@ -6,8 +6,10 @@ cmd glia tests-for
   arg files_only pos=- long=files-only short=- required=false num_args=0 action=SetTrue default=false value_names=FILES_ONLY global=false hidden=false
   arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
   arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
+  arg limit pos=- long=limit short=- required=false num_args=1 action=Set default=- value_names=N global=false hidden=false
   arg no_module_level pos=- long=no-module-level short=- required=false num_args=0 action=SetTrue default=false value_names=NO_MODULE_LEVEL global=false hidden=false
   arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+  arg no_signals pos=- long=no-signals short=- required=false num_args=0 action=SetTrue default=false value_names=NO_SIGNALS global=false hidden=false
   arg qnames pos=2 long=- short=- required=false num_args=1.. action=Append default=- value_names=QNAMES global=false hidden=false
   arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
   arg scope pos=- long=scope short=- required=false num_args=1 action=Set default=- value_names=SCOPE global=false hidden=false

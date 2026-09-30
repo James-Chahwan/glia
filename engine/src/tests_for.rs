@@ -76,7 +76,9 @@
 //!   on the seed's nav parent chain (the seed itself when it is one) is the
 //!   target of a module TESTS edge. Reported as the test MODULE itself, never
 //!   expanded into its cases, and never promoted: it is name-convention
-//!   pairing.
+//!   pairing;
+//! - `heuristic` / `cochange` (`signals`, default on): a test MODULE whose
+//!   file changes with a seed's file in git history (# Signals below).
 //!
 //! A test reached from several seeds is one row: `covers` lists every seed it
 //! covers (qnames, sorted), `tier` / `reason` / `depth` / `path` are its best
@@ -86,22 +88,60 @@
 //! the seed. A heuristic row's path is the module TESTS hop, then the nav
 //! parent -> child hops down to the seed, labelled DEFINES.
 //!
-//! Rows are ordered by (tier: fact, derived, heuristic; depth; file, an
-//! unlocated row last; qname), located through one LD.1 `Locator` (1-based
-//! lines). `scope` keeps the rows whose file is under it, with
-//! `node_in_scope`'s rules (a path or project label; an unlocatable row is
-//! kept). `test_files` is the distinct files of the rows, sorted — what
-//! `glia tests-for --files-only` hands a test runner. `untested` is the seeds
-//! no test case reaches: a heuristic module pairing alone does not count, and
-//! it is computed before `scope` (a seed tested only outside the scope is
-//! still tested). `absence` (LD.8a) is `Some` exactly when `tests` is empty.
+//! # Signals (CC.9a)
+//!
+//! With `signals` on (the default), one pass over the graph's FAIL cells
+//! (LF.6b, read through `external::signals::fail_entries`), module churn ATTN
+//! (`module_churn`) and CO_CHANGES edges (LF.5b, `pair_counts`) marks each row
+//! with what predicts a failure, in this order:
+//!
+//! - [`FAILED_LAST_RUN`]: the test node carries a FAIL entry with role `test`
+//!   (a MODULE row: a FUNCTION / METHOD it defines, at any depth, does). A v1
+//!   test snapshot holds one run, so every such entry is the latest run's;
+//! - [`SEED_ON_FAILING_TRACE`]: a seed the row covers carries a FAIL entry
+//!   with role `implicated` (a frame of a failing test's trace);
+//! - [`COCHANGE`]: a MODULE on the test's nav parent chain (the node itself
+//!   when it is one) and a MODULE on a covered seed's chain are joined by a
+//!   CO_CHANGES edge. `cochange_permille` is `1000 * cochanges / commits` of
+//!   the seed's module (its churn ATTN): "when the seed's file changed, this
+//!   test file changed too", the best over the covered seeds; `None` when no
+//!   covered seed's module carries churn.
+//!
+//! Co-change also adds rows: for each seed's module, every CO_CHANGES
+//! neighbour MODULE with ORIGIN provenance `test_fixture` that is no row and
+//! holds no row yet becomes one: the MODULE itself (co-change is file-level,
+//! like the module TESTS pairing), tier `heuristic`, reason `cochange`, its
+//! path the CO_CHANGES hop onto the seed's module, then the nav parent ->
+//! child hops down to the seed, labelled DEFINES. Never promoted, and never
+//! counted as testing its seed: history is not a code reference.
+//!
+//! # Order, scope and limit
+//!
+//! Rows are ordered by (failed_last_run first, seed_on_failing_trace first,
+//! tier: fact, derived, heuristic; cochange_permille, highest first and
+//! `None` last; depth; file, an unlocated row last; qname), located through
+//! one LD.1 `Locator` (1-based lines). With no FAIL / ATTN / CO_CHANGES in the
+//! graph, or `signals` off, the first four keys are equal on every row and the
+//! order is the structural (tier, depth, file, qname). `scope` keeps the rows
+//! whose file is under it, with `node_in_scope`'s rules (a path or project
+//! label; an unlocatable row is kept). `limit` then keeps the first N rows
+//! (`Some(0)` is an error) and `omitted` counts the rest. `test_files` is the
+//! distinct files of the kept rows, sorted — what `glia tests-for
+//! --files-only` hands a test runner. `untested` is the seeds no test case
+//! reaches: a heuristic module pairing or a co-change alone does not count,
+//! and it is computed before `scope` and `limit` (a seed tested only outside
+//! the scope is still tested). `absence` (LD.8a) is `Some` exactly when
+//! `tests` is empty.
 //!
 //! Seeds are deduplicated and ordered by (qname, id). More than
 //! [`MAX_SEEDS`] is an error, never a silent cut.
 //!
-//! fired_on marker, one line per answer:
+//! fired_on markers, per answer: always
 //! `[tests-for] seeds=<S> tests=<T> fact=<F> derived=<D> heuristic=<H> untested=<U> files=<N>`
-//! — grep `^\[tests-for\] seeds=`.
+//! — grep `^\[tests-for\] seeds=` — then, when the signal pass ran,
+//! `[tests-for] signals failed_last_run=<A> on_failing_trace=<B> cochange=<C> cochange_only=<D> omitted=<E>`
+//! — grep `^\[tests-for\] signals `. Both count the rows returned (after
+//! `scope` and `limit`); `omitted` is what `limit` cut.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -113,6 +153,7 @@ use glia_graph::MergedGraph;
 
 use crate::absence::{self, Absence};
 use crate::answers::{Locator, in_scope, resolve_scope};
+use crate::external::signals::{self, FailRole};
 use crate::find::{self, FindOptions, FoundNode};
 
 /// [`TestsForArgs::default`]'s `max_depth`.
@@ -145,6 +186,16 @@ pub const FACT: &str = "fact";
 pub const DERIVED: &str = "derived";
 pub const HEURISTIC: &str = "heuristic";
 
+/// A row signal (module docs): the test failed in the latest ingested run.
+pub const FAILED_LAST_RUN: &str = "failed_last_run";
+/// A row signal: a seed it covers is a frame of a failing test's trace.
+pub const SEED_ON_FAILING_TRACE: &str = "seed_on_failing_trace";
+/// A row signal: its file changes with a covered seed's file in git history.
+pub const COCHANGE: &str = "cochange";
+
+/// The reason of a co-change-only row.
+const COCHANGE_REASON: &str = "cochange";
+
 /// How far and how wide [`tests_for`] looks. Start from `default()` and set
 /// fields: `#[non_exhaustive]` rules out a struct literal outside this crate.
 #[non_exhaustive]
@@ -157,6 +208,12 @@ pub struct TestsForArgs {
     /// Add the heuristic tier: the test MODULEs a module TESTS edge pairs with
     /// a seed's module (default `true`).
     pub module_level: bool,
+    /// Keep the first N rows after ranking and `scope` (`None`: every row;
+    /// `Some(0)` is an error). The rest are counted in [`TestsFor::omitted`].
+    pub limit: Option<usize>,
+    /// Read the FAIL / churn ATTN / CO_CHANGES signals, rank by them and add
+    /// the co-change-only rows (default `true`; module docs).
+    pub signals: bool,
 }
 
 impl Default for TestsForArgs {
@@ -165,6 +222,8 @@ impl Default for TestsForArgs {
             max_depth: DEFAULT_MAX_DEPTH,
             scope: None,
             module_level: true,
+            limit: None,
+            signals: true,
         }
     }
 }
@@ -183,13 +242,20 @@ pub struct TestHit {
     pub line: Option<i64>,
     /// `fact` | `derived` | `heuristic`.
     pub tier: &'static str,
-    /// `tests_edge` | `reaches` | `module_tests_edge` | `changed_test`.
+    /// `tests_edge` | `reaches` | `module_tests_edge` | `changed_test` |
+    /// `cochange`.
     pub reason: &'static str,
     pub depth: usize,
     /// The seeds this test covers, qnames sorted.
     pub covers: Vec<String>,
     /// `(qname, category)` per hop, from the test to its best-hit seed.
     pub path: Vec<(String, &'static str)>,
+    /// The signals the row carries, in the order [`FAILED_LAST_RUN`],
+    /// [`SEED_ON_FAILING_TRACE`], [`COCHANGE`]; empty with `signals` off.
+    pub signals: Vec<&'static str>,
+    /// With [`COCHANGE`]: per mille of the covered seed's module commits
+    /// that also changed this test's file, the best over covered seeds.
+    pub cochange_permille: Option<u32>,
 }
 
 /// The answer (module docs).
@@ -199,6 +265,8 @@ pub struct TestsFor {
     /// The seed qnames, ordered by (qname, id).
     pub seeds: Vec<String>,
     pub tests: Vec<TestHit>,
+    /// Rows ranked and in scope that `limit` cut.
+    pub omitted: usize,
     /// The distinct files of `tests`, sorted.
     pub test_files: Vec<String>,
     /// Seeds no test case reaches (heuristic pairings do not count).
@@ -458,11 +526,36 @@ struct Hit {
 }
 
 /// A row being merged: its best hit, keyed with the seed qname, and every
-/// seed it covers.
+/// seed it covers (qnames for the answer, ids for the signal pass).
 struct Row {
     best: (u8, usize, String),
     hit: Hit,
     covers: BTreeSet<String>,
+    seed_ids: BTreeSet<u64>,
+}
+
+/// Merge `hit` of `test` on the seed `(qname, id)` into `rows`: the seed is
+/// covered, and the hit replaces the row's best when its (tier, depth, seed
+/// qname) is lower.
+fn add_hit(rows: &mut BTreeMap<u64, Row>, test: NodeId, seed: (&str, NodeId), hit: Hit) {
+    let key = (hit.rank, hit.depth, seed.0.to_string());
+    let row = rows.entry(test.0).or_insert_with(|| Row {
+        best: (u8::MAX, usize::MAX, String::new()),
+        hit: Hit {
+            rank: u8::MAX,
+            depth: 0,
+            reason: "",
+            path: Vec::new(),
+        },
+        covers: BTreeSet::new(),
+        seed_ids: BTreeSet::new(),
+    });
+    row.covers.insert(seed.0.to_string());
+    row.seed_ids.insert(seed.1.0);
+    if key < row.best {
+        row.best = key;
+        row.hit = hit;
+    }
 }
 
 /// The answer over resolved seed ids; `no_seed` builds the absence when
@@ -474,6 +567,9 @@ fn answer_for(
     args: &TestsForArgs,
     no_seed: impl FnOnce(&MergedGraph) -> Absence,
 ) -> Result<TestsFor, String> {
+    if args.limit == Some(0) {
+        return Err("tests_for: a limit of 0 keeps no test; give 1 or more".to_string());
+    }
     let loc = Locator::new(merged);
     let mut seeds: Vec<(String, NodeId)> = Vec::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
@@ -495,31 +591,15 @@ fn answer_for(
     let adj = Adjacency::build(&source, &CategorySet::of(&TEST_REACH));
 
     let mut rows: BTreeMap<u64, Row> = BTreeMap::new();
-    let mut add = |test: NodeId, seed: &str, hit: Hit| {
-        let key = (hit.rank, hit.depth, seed.to_string());
-        let row = rows.entry(test.0).or_insert_with(|| Row {
-            best: (u8::MAX, usize::MAX, String::new()),
-            hit: Hit {
-                rank: u8::MAX,
-                depth: 0,
-                reason: "",
-                path: Vec::new(),
-            },
-            covers: BTreeSet::new(),
-        });
-        row.covers.insert(seed.to_string());
-        if key < row.best {
-            row.best = key;
-            row.hit = hit;
-        }
-    };
     let mut untested: Vec<String> = Vec::new();
     for (qname, seed) in &seeds {
+        let seed_key = (qname.as_str(), *seed);
         let mut tested = false;
         if idx.is_case(*seed) {
-            add(
+            add_hit(
+                &mut rows,
                 *seed,
-                qname,
+                seed_key,
                 Hit {
                     rank: 0,
                     depth: 0,
@@ -532,9 +612,10 @@ fn answer_for(
         for &test in idx.tests_into.get(seed).map(Vec::as_slice).unwrap_or(&[]) {
             if idx.is_case(test) {
                 let path = vec![(*seed, edge_category::TESTS)];
-                add(
+                add_hit(
+                    &mut rows,
                     test,
-                    qname,
+                    seed_key,
                     Hit {
                         rank: 0,
                         depth: 1,
@@ -566,9 +647,10 @@ fn answer_for(
                 path.push((next, via));
                 at = next;
             }
-            add(
+            add_hit(
+                &mut rows,
                 r.id,
-                qname,
+                seed_key,
                 Hit {
                     rank: 1,
                     depth: r.depth,
@@ -589,9 +671,10 @@ fn answer_for(
                     let mut path = vec![(module, edge_category::TESTS)];
                     path.extend(below.iter().rev().map(|&n| (n, edge_category::DEFINES)));
                     let depth = path.len();
-                    add(
+                    add_hit(
+                        &mut rows,
                         test,
-                        qname,
+                        seed_key,
                         Hit {
                             rank: 2,
                             depth,
@@ -607,10 +690,20 @@ fn answer_for(
         }
     }
 
+    let sig = args.signals.then(|| Signals::build(merged, &idx));
+    if let Some(sig) = &sig {
+        sig.add_cochange_rows(&idx, &seeds, &mut rows);
+    }
+
     let mut tests: Vec<TestHit> = rows
         .into_iter()
         .map(|(id, row)| {
-            let at = loc.locate(NodeId(id));
+            let test = NodeId(id);
+            let (signals, cochange_permille) = match &sig {
+                Some(sig) => sig.of_row(&idx, test, &row.seed_ids),
+                None => (Vec::new(), None),
+            };
+            let at = loc.locate(test);
             let path = row
                 .hit
                 .path
@@ -628,6 +721,8 @@ fn answer_for(
                 depth: row.hit.depth,
                 covers: row.covers.into_iter().collect(),
                 path,
+                signals,
+                cochange_permille,
             }
         })
         .collect();
@@ -636,22 +731,15 @@ fn answer_for(
         let scope = resolve_scope(merged, raw);
         tests.retain(|t| t.file.as_deref().is_none_or(|f| in_scope(f, &scope)));
     }
-    tests.sort_by(|a, b| {
-        (
-            tier_rank(a.tier),
-            a.depth,
-            a.file.is_none(),
-            &a.file,
-            &a.qname,
-        )
-            .cmp(&(
-                tier_rank(b.tier),
-                b.depth,
-                b.file.is_none(),
-                &b.file,
-                &b.qname,
-            ))
-    });
+    tests.sort_by(row_order);
+    let omitted = match args.limit {
+        Some(n) if tests.len() > n => {
+            let cut = tests.len() - n;
+            tests.truncate(n);
+            cut
+        }
+        _ => 0,
+    };
     let test_files: Vec<String> = tests
         .iter()
         .filter_map(|t| t.file.clone())
@@ -669,6 +757,16 @@ fn answer_for(
         untested.len(),
         test_files.len()
     );
+    if sig.is_some() {
+        let with = |signal: &str| tests.iter().filter(|t| t.signals.contains(&signal)).count();
+        eprintln!(
+            "[tests-for] signals failed_last_run={} on_failing_trace={} cochange={} cochange_only={} omitted={omitted}",
+            with(FAILED_LAST_RUN),
+            with(SEED_ON_FAILING_TRACE),
+            with(COCHANGE),
+            tests.iter().filter(|t| t.reason == COCHANGE_REASON).count(),
+        );
+    }
     let absence = if !tests.is_empty() {
         None
     } else if seeds.is_empty() {
@@ -704,11 +802,186 @@ fn answer_for(
     Ok(TestsFor {
         seeds: seeds.into_iter().map(|(q, _)| q).collect(),
         tests,
+        omitted,
         test_files,
         untested,
         unresolved: Vec::new(),
         absence,
     })
+}
+
+/// The row order (module docs): failed in the last run, then a covered seed
+/// on a failing trace, then tier, co-change confidence (highest first, `None`
+/// last), depth, file (an unlocated row last) and qname. Total: it ends on
+/// the qname, and one row per node.
+fn row_order(a: &TestHit, b: &TestHit) -> std::cmp::Ordering {
+    let lacks = |t: &TestHit, signal: &str| !t.signals.contains(&signal);
+    (lacks(a, FAILED_LAST_RUN), lacks(a, SEED_ON_FAILING_TRACE))
+        .cmp(&(lacks(b, FAILED_LAST_RUN), lacks(b, SEED_ON_FAILING_TRACE)))
+        .then_with(|| tier_rank(a.tier).cmp(&tier_rank(b.tier)))
+        .then_with(|| b.cochange_permille.cmp(&a.cochange_permille))
+        .then_with(|| {
+            (a.depth, a.file.is_none(), &a.file, &a.qname).cmp(&(
+                b.depth,
+                b.file.is_none(),
+                &b.file,
+                &b.qname,
+            ))
+        })
+}
+
+/// What the signal pass reads (module docs), in one pass over the nodes and
+/// one over the edges. Every map is keyed by id, so no output depends on
+/// hash order.
+struct Signals {
+    /// Nodes carrying a FAIL entry with role `test`.
+    failed: HashSet<NodeId>,
+    /// The MODULEs on a failed node's nav parent chain: a MODULE row holding
+    /// a failing test.
+    failing_modules: HashSet<NodeId>,
+    /// Nodes carrying a FAIL entry with role `implicated`.
+    implicated: HashSet<NodeId>,
+    /// MODULE -> each CO_CHANGES neighbour MODULE -> the pair's co-changes
+    /// (either edge direction; the most over parallel edges).
+    cochange: HashMap<NodeId, BTreeMap<u64, u32>>,
+    /// MODULE -> the commits of its churn ATTN (the first graph's copy).
+    commits: HashMap<NodeId, u32>,
+}
+
+impl Signals {
+    fn build(merged: &MergedGraph, idx: &TestIndex) -> Self {
+        let mut failed: HashSet<NodeId> = HashSet::new();
+        let mut implicated: HashSet<NodeId> = HashSet::new();
+        let mut commits: HashMap<NodeId, u32> = HashMap::new();
+        for g in &merged.graphs {
+            for n in &g.nodes {
+                for e in signals::fail_entries(&n.cells) {
+                    match e.role {
+                        FailRole::Test => failed.insert(n.id),
+                        FailRole::Implicated => implicated.insert(n.id),
+                    };
+                }
+                if idx.kind.get(&n.id) == Some(&node_kind::MODULE)
+                    && let Some(c) = signals::module_churn(&n.cells)
+                {
+                    commits.entry(n.id).or_insert(c.commits);
+                }
+            }
+        }
+        let failing_modules: HashSet<NodeId> = failed
+            .iter()
+            .flat_map(|&f| idx.module_chain(f))
+            .map(|(m, _)| m)
+            .collect();
+        let mut cochange: HashMap<NodeId, BTreeMap<u64, u32>> = HashMap::new();
+        for e in merged.all_edges() {
+            if e.category != edge_category::CO_CHANGES || e.from == e.to {
+                continue;
+            }
+            let Some(p) = signals::pair_counts(&e.cells) else {
+                continue;
+            };
+            for (a, b) in [(e.from, e.to), (e.to, e.from)] {
+                let n = cochange.entry(a).or_default().entry(b.0).or_insert(0);
+                *n = (*n).max(p.cochanges);
+            }
+        }
+        Signals {
+            failed,
+            failing_modules,
+            implicated,
+            cochange,
+            commits,
+        }
+    }
+
+    /// Add a `cochange` row for every test MODULE a seed's module co-changes
+    /// with that no structural row is, or sits in (module docs).
+    fn add_cochange_rows(
+        &self,
+        idx: &TestIndex,
+        seeds: &[(String, NodeId)],
+        rows: &mut BTreeMap<u64, Row>,
+    ) {
+        let held: HashSet<NodeId> = rows
+            .keys()
+            .flat_map(|&id| idx.module_chain(NodeId(id)))
+            .map(|(m, _)| m)
+            .collect();
+        for (qname, seed) in seeds {
+            for (module, below) in idx.module_chain(*seed) {
+                for &nb in self.cochange.get(&module).into_iter().flat_map(BTreeMap::keys) {
+                    let nb = NodeId(nb);
+                    if idx.kind.get(&nb) != Some(&node_kind::MODULE)
+                        || !idx.fixture.contains(&nb)
+                        || held.contains(&nb)
+                    {
+                        continue;
+                    }
+                    let mut path = vec![(module, edge_category::CO_CHANGES)];
+                    path.extend(below.iter().rev().map(|&n| (n, edge_category::DEFINES)));
+                    let depth = path.len();
+                    add_hit(
+                        rows,
+                        nb,
+                        (qname.as_str(), *seed),
+                        Hit {
+                            rank: 2,
+                            depth,
+                            reason: COCHANGE_REASON,
+                            path,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    /// The signals of the row for `test`, covering `seed_ids`, and its
+    /// co-change confidence.
+    fn of_row(
+        &self,
+        idx: &TestIndex,
+        test: NodeId,
+        seed_ids: &BTreeSet<u64>,
+    ) -> (Vec<&'static str>, Option<u32>) {
+        let mut out = Vec::new();
+        let is_module = idx.kind.get(&test) == Some(&node_kind::MODULE);
+        if self.failed.contains(&test) || (is_module && self.failing_modules.contains(&test)) {
+            out.push(FAILED_LAST_RUN);
+        }
+        if seed_ids.iter().any(|s| self.implicated.contains(&NodeId(*s))) {
+            out.push(SEED_ON_FAILING_TRACE);
+        }
+        let test_modules: Vec<NodeId> = idx.module_chain(test).into_iter().map(|(m, _)| m).collect();
+        let mut cochange = false;
+        let mut best: Option<u32> = None;
+        for &seed in seed_ids {
+            for (module, _) in idx.module_chain(NodeId(seed)) {
+                let Some(pairs) = self.cochange.get(&module) else {
+                    continue;
+                };
+                for tm in &test_modules {
+                    let Some(&n) = pairs.get(&tm.0) else {
+                        continue;
+                    };
+                    cochange = true;
+                    let permille = self
+                        .commits
+                        .get(&module)
+                        .filter(|&&c| c > 0)
+                        .map(|&c| (u64::from(n) * 1000 / u64::from(c)).min(1000));
+                    if let Some(p) = permille.and_then(|p| u32::try_from(p).ok()) {
+                        best = Some(best.map_or(p, |b| b.max(p)));
+                    }
+                }
+            }
+        }
+        if cochange {
+            out.push(COCHANGE);
+        }
+        (out, best)
+    }
 }
 
 fn tier_name(rank: u8) -> &'static str {

@@ -6,29 +6,41 @@
 //! <file>` (`-` reads stdin; a unified diff or a changed-file list), or
 //! `--base <rev>` (the working tree's change against a git rev). Table mode
 //! prints the seeds, then one row per test (tier, test, kind, `file:line`,
-//! depth, the seeds it covers and the witness chain), the test files, and the
-//! untested / unresolved seeds; an empty answer prints its absence note.
-//! `--files-only` prints the test files one per line and nothing else, to
-//! pipe into a runner (`pytest $(glia tests-for . --base main --files-only)`).
-//! `--json` prints the engine's `TestsFor`.
+//! depth, its signals, the seeds it covers and the witness chain), the test
+//! files, and the untested / unresolved seeds; an empty answer prints its
+//! absence note. `--files-only` prints the test files one per line and
+//! nothing else, to pipe into a runner (`pytest $(glia tests-for . --base main
+//! --files-only)`). `--json` prints the engine's `TestsFor`.
+//!
+//! Rows rank by the signals the build ingested (CC.9a): a test that failed in
+//! the latest ingested run (`glia tests ingest`) first, then a test covering a
+//! seed on a failing trace, then by tier and by how often the test's file
+//! changed with the seed's (`glia history sync`); a test module that only
+//! co-changes adds a heuristic `cochange` row. `--no-signals` reads none of
+//! them (the structural order). `--limit N` keeps the first N rows after
+//! ranking, so a CI budget cuts the least likely tests, and `--files-only`
+//! prints the kept rows' files.
 //!
 //! Exit 0 on an answer (an empty one included: this is a report, not a gate),
 //! 2 on a usage error (no seed source or two, `--base` with `--with` or
-//! `--no-overlay`), an unreadable `--diff`, a git / build failure or more
-//! seeds than the engine walks from.
+//! `--no-overlay`, `--limit 0`), an unreadable `--diff`, a git / build failure
+//! or more seeds than the engine walks from.
 //!
 //! `--base` builds through the engine's graph delta (LE.1b), which saves the
 //! working tree's parse-cache sidecar (`<repo>/.glia/graph/parse_cache.bin`,
 //! self-gitignored) as an incremental build does, under `GLIA_NO_PERSIST=1`
 //! too; never a `.gmap` layout.
 //!
-//! Fired-on marker: the engine's
-//! `[tests-for] seeds=<S> tests=<T> fact=<F> derived=<D> heuristic=<H> untested=<U> files=<N>`.
+//! Fired-on markers: the engine's
+//! `[tests-for] seeds=<S> tests=<T> fact=<F> derived=<D> heuristic=<H> untested=<U> files=<N>`,
+//! then, unless `--no-signals`,
+//! `[tests-for] signals failed_last_run=<A> on_failing_trace=<B> cochange=<C> cochange_only=<D> omitted=<E>`.
 
 use std::io::Read;
 
 use glia_engine::tests_for::{
-    DEFAULT_MAX_DEPTH, TestHit, TestsFor, TestsForArgs, tests_for, tests_for_diff, tests_for_rev,
+    COCHANGE, DEFAULT_MAX_DEPTH, TestHit, TestsFor, TestsForArgs, tests_for, tests_for_diff,
+    tests_for_rev,
 };
 
 use crate::common::{build_options, generate_for};
@@ -57,6 +69,14 @@ pub(crate) struct Args {
     /// Keep only tests whose file is under this path or project label.
     #[arg(long)]
     scope: Option<String>,
+    /// Keep the first N tests after ranking (a CI budget); `--files-only`
+    /// prints their files.
+    #[arg(long, value_name = "N")]
+    limit: Option<usize>,
+    /// Rank structurally only: read no test failure or git co-change and add
+    /// no co-change row.
+    #[arg(long)]
+    no_signals: bool,
     /// Additional repos to merge in (cross-service). Repeatable. Not with
     /// `--base`.
     #[arg(long)]
@@ -91,6 +111,22 @@ fn chain(t: &TestHit) -> String {
     out
 }
 
+/// The row's signals, comma-joined (`cochange` with its per-mille
+/// confidence), or `—`.
+fn signals(t: &TestHit) -> String {
+    if t.signals.is_empty() {
+        return "—".to_string();
+    }
+    t.signals
+        .iter()
+        .map(|s| match (*s, t.cochange_permille) {
+            (COCHANGE, Some(p)) => format!("{s} {p}‰"),
+            _ => s.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn names(v: &[String]) -> String {
     if v.is_empty() {
         "none".to_string()
@@ -115,6 +151,9 @@ fn print_table(repo: &str, a: &TestsFor) {
         count("heuristic"),
         a.test_files.len()
     );
+    if a.omitted > 0 {
+        println!("- omitted: {} (past --limit)", a.omitted);
+    }
     println!("- untested: {}", names(&a.untested));
     if !a.unresolved.is_empty() {
         println!("- unresolved: {}", names(&a.unresolved));
@@ -127,17 +166,18 @@ fn print_table(repo: &str, a: &TestsFor) {
         }
         return;
     }
-    println!("| # | tier | test | kind | at | depth | covers | via |");
-    println!("|--:|---|---|---|---|--:|---|---|");
+    println!("| # | tier | test | kind | at | depth | signals | covers | via |");
+    println!("|--:|---|---|---|---|--:|---|---|---|");
     for (i, t) in a.tests.iter().enumerate() {
         println!(
-            "| {} | {} | `{}` | {} | {} | {} | {} | {} |",
+            "| {} | {} | `{}` | {} | {} | {} | {} | {} | {} |",
             i + 1,
             t.tier,
             t.qname,
             t.kind,
             at(t),
             t.depth,
+            signals(t),
             names(&t.covers),
             chain(t)
         );
@@ -204,6 +244,8 @@ pub(crate) fn run(args: Args) -> i32 {
     opts.max_depth = args.depth;
     opts.scope = args.scope.clone();
     opts.module_level = !args.no_module_level;
+    opts.limit = args.limit;
+    opts.signals = !args.no_signals;
     let a = match answer(&args, &opts) {
         Ok(a) => a,
         Err(e) => {
