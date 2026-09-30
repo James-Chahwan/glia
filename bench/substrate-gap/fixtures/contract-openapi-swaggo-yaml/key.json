@@ -1,0 +1,37 @@
+{
+  "framework": "contract-openapi-swaggo-yaml",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-b: swaggo generates docs/swagger.yaml with keys in alphabetical order (basePath, definitions, host, info, paths, ..., swagger), so the indent-0 `swagger: \"2.0\"` marker is the LAST line; parsers/code/extractors/src/contracts.rs sniff() reads only SNIFF_LINES = 64 and the file declares nothing. config/application.yml is the precision control: an indent-0 `swagger:` MAP key (no version) past line 64 is a config section, not a contract. Measured on HEAD 2170ff8.",
+  "expect_nodes": [
+    {
+      "kind": "DOC_SECTION",
+      "name": "contract::docs::swagger::GET:/api/orders"
+    },
+    {
+      "kind": "DOC_SECTION",
+      "name": "contract::docs::swagger::GET:/api/orders/{id}"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "contract::docs::swagger::GET:/api/orders",
+      "to": "GET /api/orders",
+      "category": "DOCUMENTS"
+    },
+    {
+      "from": "contract::docs::swagger::GET:/api/orders/{id}",
+      "to": "GET /api/orders/:id",
+      "category": "DOCUMENTS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "DOC_SECTION",
+      "name": "contract::config::application::GET:/internal",
+      "note": "a `swagger:` map key with no version value is not a contract marker"
+    }
+  ]
+}

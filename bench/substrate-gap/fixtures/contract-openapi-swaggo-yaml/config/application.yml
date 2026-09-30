@@ -1,0 +1,81 @@
+server:
+  port: 8080
+spring:
+  application:
+    name: shop
+  setting0: value0
+  setting1: value1
+  setting2: value2
+  setting3: value3
+  setting4: value4
+  setting5: value5
+  setting6: value6
+  setting7: value7
+  setting8: value8
+  setting9: value9
+  setting10: value10
+  setting11: value11
+  setting12: value12
+  setting13: value13
+  setting14: value14
+  setting15: value15
+  setting16: value16
+  setting17: value17
+  setting18: value18
+  setting19: value19
+  setting20: value20
+  setting21: value21
+  setting22: value22
+  setting23: value23
+  setting24: value24
+  setting25: value25
+  setting26: value26
+  setting27: value27
+  setting28: value28
+  setting29: value29
+  setting30: value30
+  setting31: value31
+  setting32: value32
+  setting33: value33
+  setting34: value34
+  setting35: value35
+  setting36: value36
+  setting37: value37
+  setting38: value38
+  setting39: value39
+  setting40: value40
+  setting41: value41
+  setting42: value42
+  setting43: value43
+  setting44: value44
+  setting45: value45
+  setting46: value46
+  setting47: value47
+  setting48: value48
+  setting49: value49
+  setting50: value50
+  setting51: value51
+  setting52: value52
+  setting53: value53
+  setting54: value54
+  setting55: value55
+  setting56: value56
+  setting57: value57
+  setting58: value58
+  setting59: value59
+  setting60: value60
+  setting61: value61
+  setting62: value62
+  setting63: value63
+  setting64: value64
+  setting65: value65
+  setting66: value66
+  setting67: value67
+  setting68: value68
+  setting69: value69
+swagger:
+  enabled: true
+paths:
+  /internal:
+    get:
+      summary: a config map that happens to use these keys

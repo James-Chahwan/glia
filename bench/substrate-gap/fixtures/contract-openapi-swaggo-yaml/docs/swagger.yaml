@@ -1,0 +1,110 @@
+basePath: /api
+definitions:
+  model.Thing0:
+    properties:
+      id:
+        type: string
+      name:
+        type: string
+    type: object
+  model.Thing1:
+    properties:
+      id:
+        type: string
+      name:
+        type: string
+    type: object
+  model.Thing2:
+    properties:
+      id:
+        type: string
+      name:
+        type: string
+    type: object
+  model.Thing3:
+    properties:
+      id:
+        type: string
+      name:
+        type: string
+    type: object
+  model.Thing4:
+    properties:
+      id:
+        type: string
+      name:
+        type: string
+    type: object
+  model.Thing5:
+    properties:
+      id:
+        type: string
+      name:
+        type: string
+    type: object
+  model.Thing6:
+    properties:
+      id:
+        type: string
+      name:
+        type: string
+    type: object
+  model.Thing7:
+    properties:
+      id:
+        type: string
+      name:
+        type: string
+    type: object
+  model.Thing8:
+    properties:
+      id:
+        type: string
+      name:
+        type: string
+    type: object
+  model.Thing9:
+    properties:
+      id:
+        type: string
+      name:
+        type: string
+    type: object
+  model.Thing10:
+    properties:
+      id:
+        type: string
+      name:
+        type: string
+    type: object
+  model.Thing11:
+    properties:
+      id:
+        type: string
+      name:
+        type: string
+    type: object
+host: localhost:8080
+info:
+  contact: {}
+  title: Shop API
+  version: "1.0"
+paths:
+  /orders:
+    get:
+      operationId: listOrders
+      responses:
+        "200":
+          description: OK
+  /orders/{id}:
+    get:
+      operationId: getOrder
+      parameters:
+      - in: path
+        name: id
+        required: true
+        type: string
+      responses:
+        "200":
+          description: OK
+swagger: "2.0"

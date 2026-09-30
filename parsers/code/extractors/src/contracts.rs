@@ -175,9 +175,6 @@ pub const METHODS: &[&str] = &[
 /// Never let a pathological file blow the node budget.
 const MAX_OPS: usize = 2000;
 
-/// How far into the file the `openapi:` / `swagger:` marker may sit.
-const SNIFF_LINES: usize = 64;
-
 pub(crate) fn esc(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -278,23 +275,43 @@ enum Sniffed {
     AsyncApi,
 }
 
-/// Cheap sniff: is this an API contract at all, and which kind? Scans at most
-/// the first [`SNIFF_LINES`] lines for an indent-0 `openapi:` / `swagger:` /
-/// `asyncapi:` key, and allocates nothing.
+/// Cheap sniff: is this an API contract at all, and which kind? Walks every
+/// indent-0 line for an `openapi:` / `swagger:` / `asyncapi:` key whose value
+/// is a version ([`version_value`]); the first such line wins, in file order.
+/// One pass, no allocation.
+///
+/// CB.2: the whole file, because a document's key order is not its meaning.
+/// swaggo writes `docs/swagger.yaml` through ghodss/yaml, which sorts keys, so
+/// `swagger: "2.0"` is the LAST line, after every model under `definitions:`.
+/// The version rule is what keeps an application config's `swagger:` map key
+/// (Spring Boot `swagger:\n  enabled: true`) from sniffing as a contract.
 fn sniff(source: &str) -> Option<Sniffed> {
-    for line in source.lines().take(SNIFF_LINES) {
+    source.lines().find_map(|line| {
         if is_skippable(line) || indent_of(line) != 0 {
-            continue;
+            return None;
         }
-        let t = line.trim_end();
-        if t.starts_with("openapi:") || t.starts_with("swagger:") {
-            return Some(Sniffed::OpenApi);
+        let (key, value) = split_key(line)?;
+        if !version_value(value) {
+            return None;
         }
-        if t.starts_with("asyncapi:") {
-            return Some(Sniffed::AsyncApi);
+        match key {
+            "openapi" | "swagger" => Some(Sniffed::OpenApi),
+            "asyncapi" => Some(Sniffed::AsyncApi),
+            _ => None,
         }
-    }
-    None
+    })
+}
+
+/// Whether a format marker's raw value is a version: a trailing ` #` comment
+/// dropped, one pair of matching quotes stripped, then an ASCII digit first
+/// (`2.0`, `3.0.3`, `"3.1.0"`, `'2.6.0'`). An empty value (the key opens a
+/// block), `true`, `~`, a template (`${VERSION}`) or text is not a marker.
+fn version_value(raw: &str) -> bool {
+    let v = match raw.split_once(" #") {
+        Some((head, _)) => head,
+        None => raw,
+    };
+    unquote(v).starts_with(|c: char| c.is_ascii_digit())
 }
 
 /// Indentation scan of the `paths:` block. Returns operations in declaration
@@ -482,14 +499,16 @@ fn first_child_indent(lines: &[&str], start: usize) -> Option<usize> {
         .filter(|i| *i > 0)
 }
 
-/// The `asyncapi:` version's major component (`"2.6.0"` → `"2"`).
+/// The `asyncapi:` version's major component (`"2.6.0"` → `"2"`), read off
+/// the first indent-0 `asyncapi:` line anywhere in the file whose value is a
+/// version ([`version_value`]) — the same rule [`sniff`] applies.
 fn asyncapi_major<'a>(lines: &[&'a str]) -> Option<&'a str> {
-    lines.iter().take(SNIFF_LINES).find_map(|l| {
+    lines.iter().find_map(|l| {
         if is_skippable(l) || indent_of(l) != 0 {
             return None;
         }
-        let (k, _) = split_key(l)?;
-        (k == "asyncapi").then(|| value_of(l).split('.').next().unwrap_or(""))
+        let (k, v) = split_key(l)?;
+        (k == "asyncapi" && version_value(v)).then(|| value_of(l).split('.').next().unwrap_or(""))
     })
 }
 
@@ -4462,5 +4481,149 @@ data_model:
                 "contract::features::activities::feature::POST:/api/protected/activity/:id/leave",
             ]
         );
+    }
+
+    // ------------------------------------------------------------------
+    // CB.2 — the sniff reads every indent-0 line; a marker needs a version
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn swaggo_alphabetical_swagger_yaml_is_sniffed() {
+        // swaggo's ghodss/yaml output sorts keys: `swagger: "2.0"` is line 110.
+        let src = include_str!(
+            "../../../../bench/substrate-gap/fixtures/contract-openapi-swaggo-yaml/docs/swagger.yaml"
+        );
+        let marker = src.lines().position(|l| l.starts_with("swagger:"));
+        assert_eq!(
+            marker,
+            Some(109),
+            "the marker is the last line, far past line 64"
+        );
+        assert_eq!(sniff(src), Some(Sniffed::OpenApi));
+
+        let ops = scan_openapi(src);
+        let got: Vec<(&str, &str, &str, Option<&str>)> = ops
+            .iter()
+            .map(|o| {
+                (
+                    o.method.as_str(),
+                    o.path.as_str(),
+                    o.raw_path.as_str(),
+                    o.operation_id.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("GET", "/api/orders", "/orders", Some("listOrders")),
+                ("GET", "/api/orders/{id}", "/orders/{id}", Some("getOrder")),
+            ],
+            "basePath /api folds onto both paths"
+        );
+
+        let out = extract_yaml_contracts(src, "docs/swagger.yaml", module_id(), repo());
+        assert_eq!(out.source, Some(ContractSource::OpenApi));
+        let qnames: Vec<&str> = out
+            .nodes
+            .iter()
+            .map(|n| out.nav.qname_by_id[&n.id].as_str())
+            .collect();
+        assert_eq!(
+            qnames,
+            [
+                "contract::docs::swagger::GET:/api/orders",
+                "contract::docs::swagger::GET:/api/orders/{id}",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_config_swagger_map_key_is_not_a_contract() {
+        // The fixture's Spring Boot config: `swagger:` at line 76 opens a map
+        // (no version), and a `paths:` block follows.
+        let src = include_str!(
+            "../../../../bench/substrate-gap/fixtures/contract-openapi-swaggo-yaml/config/application.yml"
+        );
+        assert_eq!(src.lines().position(|l| l == "swagger:"), Some(75));
+        assert_eq!(sniff(src), None);
+        let out = extract_yaml_contracts(src, "config/application.yml", module_id(), repo());
+        assert!(
+            out.nodes.is_empty(),
+            "a config section mints no contract op"
+        );
+        assert_eq!(out.source, None);
+
+        // The same block at line 1: the version rule decides, not the line count.
+        let head = "swagger:\n  enabled: true\npaths:\n  /internal:\n    get:\n      summary: x\n";
+        assert_eq!(sniff(head), None);
+        assert!(
+            extract_yaml_contracts(head, "config/application.yml", module_id(), repo())
+                .nodes
+                .is_empty()
+        );
+        for no_version in [
+            "openapi: true\n",
+            "openapi: ~\n",
+            "asyncapi: latest\n",
+            "swagger: ${V}\n",
+        ] {
+            assert_eq!(sniff(no_version), None, "{no_version:?}");
+        }
+    }
+
+    #[test]
+    fn asyncapi_marker_after_line_64() {
+        let mut prefix = String::new();
+        for i in 0..70 {
+            prefix.push_str(&format!("x-ext{i}: value{i}\n"));
+        }
+        let v2 = format!(
+            "{prefix}asyncapi: 2.6.0\ninfo:\n  title: Orders\n  version: 1.0.0\nchannels:\n  orders:\n    publish:\n      operationId: publishOrder\n      message: {{}}\n    subscribe:\n      message: {{}}\n"
+        );
+        assert_eq!(sniff(&v2), Some(Sniffed::AsyncApi));
+        let out = extract_yaml_contracts(&v2, "events/asyncapi.yaml", module_id(), repo());
+        assert_eq!(out.source, Some(ContractSource::AsyncApi));
+        let qnames: Vec<&str> = out
+            .nodes
+            .iter()
+            .map(|n| out.nav.qname_by_id[&n.id].as_str())
+            .collect();
+        assert_eq!(
+            qnames,
+            [
+                "contract::events::asyncapi::publish:orders",
+                "contract::events::asyncapi::subscribe:orders",
+            ]
+        );
+
+        // v3 past line 64: asyncapi_major must still read the marker, or the
+        // doc falls through to the v2 scanner and yields nothing.
+        let v3 = format!(
+            "{prefix}asyncapi: 3.0.0\nchannels:\n  orders:\n    address: 'orders.created'\noperations:\n  sendOrder:\n    action: send\n    channel:\n      $ref: '#/channels/orders'\n"
+        );
+        let lines: Vec<&str> = v3.lines().collect();
+        assert_eq!(asyncapi_major(&lines), Some("3"));
+        let ops = scan_asyncapi(&v3);
+        let got: Vec<(&str, &str)> = ops.iter().map(|o| (o.action, o.channel.as_str())).collect();
+        assert_eq!(got, [("publish", "orders.created")]);
+    }
+
+    #[test]
+    fn a_quoted_version_counts() {
+        let src = "openapi: '3.0.3'\npaths:\n  /a:\n    get:\n      summary: x\n";
+        assert_eq!(sniff(src), Some(Sniffed::OpenApi));
+        assert_eq!(scan_openapi(src).len(), 1);
+        for marker in [
+            "openapi: \"3.1.0\"",
+            "swagger: '2.0'",
+            "openapi: 3.0.3 # the spec version",
+            "openapi: \"3.0.3\" # quoted, then a comment",
+        ] {
+            assert_eq!(sniff(marker), Some(Sniffed::OpenApi), "{marker:?}");
+        }
+        assert_eq!(sniff("asyncapi: '2.6.0'\n"), Some(Sniffed::AsyncApi));
+        let lines = ["asyncapi: \"3.0.0\""];
+        assert_eq!(asyncapi_major(&lines), Some("3"));
     }
 }
