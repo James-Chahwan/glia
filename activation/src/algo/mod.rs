@@ -317,6 +317,7 @@ mod tests {
         effect_sinks: &[],
         activation_weights: &[],
         activation_presets: &[],
+        community_weights: &[],
     };
 
     fn ids(adj: &Adjacency, xs: &[Inc]) -> Vec<(u64, u32)> {

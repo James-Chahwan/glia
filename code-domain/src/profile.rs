@@ -31,6 +31,14 @@
 //! EVENT_EMITTER, GRPC_CLIENT, RPC_CALL, WS_CLIENT, GRAPHQL_OPERATION, reached
 //! over USES; RPC_CALL also over CALLS) and the outbound HTTP ENDPOINT
 //! (reached over the CALLS the HTTP client extractor anchors, or USES).
+//!
+//! CD.1c: `community_weights` is the integer table communities and split
+//! cuts group by, kept apart from the PPR `activation_weights` so a ranking
+//! retune never moves community structure. Code that calls, handles or
+//! messages other code binds hardest; DEFINES glues a symbol to its module
+//! at 1; every edge that would glue unrelated code through a shared hub (a
+//! PROJECT's CONTAINS, a package, a doc, a test, a shared schema / config /
+//! entity, git history) is left out, so weighs 0.
 
 use glia_activation::profile::{
     ActivationPreset, DomainTables, EffectSink, EntryRule, NamedEntry, Registries,
@@ -212,6 +220,46 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             ],
         },
     ],
+    // CD.1c: every category of `ec::ALL` in its order, weighted or left out
+    // (weight 0) with the reason. The guard test below pins the left-out set.
+    community_weights: &[
+        (ec::DEFINES, 1),
+        // CONTAINS out: a PROJECT / directory contains everything under it.
+        (ec::IMPORTS, 1),
+        (ec::CALLS, 4),
+        (ec::USES, 2),
+        // DOCUMENTS out: one doc names many unrelated symbols.
+        // TESTS out: a test suite touches whatever it tests, across modules.
+        (ec::INJECTS, 3),
+        (ec::HANDLED_BY, 4),
+        (ec::HTTP_CALLS, 3),
+        (ec::GRPC_CALLS, 3),
+        (ec::QUEUE_FLOWS, 3),
+        (ec::GRAPHQL_CALLS, 3),
+        (ec::WS_CONNECTS, 3),
+        (ec::EVENT_FLOWS, 3),
+        // SHARES_SCHEMA out: a shared schema pairs services, not their code.
+        (ec::CLI_INVOKES, 2),
+        (ec::ACCESSES_DATA, 2),
+        (ec::HAS_ATTRIBUTE, 1),
+        (ec::INHERITS_FROM, 2),
+        (ec::RETURNS_TYPE, 1),
+        // SHARES_DATA_ENTITY out: a shared table is an operational fact.
+        (ec::SCHEDULES, 2),
+        // SHARES_CRON_SCHEDULE out: one schedule string, no code link.
+        (ec::READS_CONFIG, 1),
+        (ec::DEFINES_CONFIG, 1),
+        // SHARES_CONFIG out: one config key read in two places, no code link.
+        (ec::INFRA_REFERENCES, 1),
+        // SHARES_INFRA_REF out: one infra name in two places, no code link.
+        // DEPENDS_ON out: a package manifest depends on whole libraries.
+        // SHARES_DEPENDENCY out: two manifests naming one library.
+        (ec::IMPLEMENTS, 2),
+        // SHARES_DATA_SOURCE out: a shared database, as for blast radius.
+        (ec::RPC_CALLS, 3),
+        (ec::NAVIGATES_TO, 2),
+        // CO_CHANGES out: git history is a heuristic, never structure.
+    ],
 };
 
 #[cfg(test)]
@@ -267,6 +315,56 @@ mod tests {
             let w = CODE_TABLES.activation_config(preset).edge_weights.get(&ec::CO_CHANGES).copied();
             assert_eq!(w, Some(0.0), "preset {preset:?}");
         }
+    }
+
+    /// CD.1c: communities group by what code does to code. Structure
+    /// (CONTAINS, DEPENDS_ON), docs, tests, git history and every SHARES_*
+    /// pairing weigh 0 - each would glue unrelated code through one hub - and
+    /// exactly those: every other registered category is listed, so a new
+    /// category must be weighed or added here.
+    #[test]
+    fn community_weights_exclude_structure_history_and_docs() {
+        assert_eq!(CODE_TABLES.validate(), Ok(()));
+        let w = |c| CODE_TABLES.community_weight(c);
+        for c in [ec::CONTAINS, ec::DOCUMENTS, ec::TESTS, ec::DEPENDS_ON, ec::CO_CHANGES] {
+            assert_eq!(w(c), 0, "{} is left out", ec::name(c));
+        }
+        let shares: Vec<_> =
+            ec::ALL.iter().filter(|(_, n)| n.starts_with("SHARES_")).map(|(c, _)| *c).collect();
+        assert_eq!(shares.len(), 7, "{shares:?}");
+        for c in &shares {
+            assert_eq!(w(*c), 0, "{} is left out", ec::name(*c));
+        }
+        for c in [ec::CALLS, ec::HANDLED_BY, ec::DEFINES, ec::HTTP_CALLS, ec::QUEUE_FLOWS] {
+            assert!(w(c) > 0, "{} groups", ec::name(c));
+        }
+        assert!(w(ec::CALLS) > w(ec::DEFINES), "a call binds harder than a definition");
+
+        let left_out: Vec<&str> =
+            ec::ALL.iter().filter(|(c, _)| w(*c) == 0).map(|(_, n)| *n).collect();
+        assert_eq!(
+            left_out,
+            [
+                "CONTAINS",
+                "DOCUMENTS",
+                "TESTS",
+                "SHARES_SCHEMA",
+                "SHARES_DATA_ENTITY",
+                "SHARES_CRON_SCHEDULE",
+                "SHARES_CONFIG",
+                "SHARES_INFRA_REF",
+                "DEPENDS_ON",
+                "SHARES_DEPENDENCY",
+                "SHARES_DATA_SOURCE",
+                "CO_CHANGES",
+            ]
+        );
+        assert_eq!(CODE_TABLES.community_weights.len() + left_out.len(), ec::ALL.len());
+        // The table is laid out in `ec::ALL` order.
+        let listed: Vec<_> = CODE_TABLES.community_weights.iter().map(|(c, _)| *c).collect();
+        let in_all: Vec<_> =
+            ec::ALL.iter().map(|(c, _)| *c).filter(|c| listed.contains(c)).collect();
+        assert_eq!(listed, in_all);
     }
 
     /// The presets are real lenses (moved from `graph::activation`, LD.14b):

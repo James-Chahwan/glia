@@ -5,9 +5,10 @@
 //! - [`DomainTables`] is the data half — no generics, const-constructible:
 //!   the id registries, which nodes are entrypoints ([`EntryRule`]), which
 //!   edges carry reachability / blast radius, the effect sinks
-//!   ([`EffectSink`]), and the activation weights with their named presets. Query consumers (blast
-//!   radius, liveness, PPR seeding) need only this, so a crate that cannot
-//!   name the domain's graph type still reads it.
+//!   ([`EffectSink`]), the activation weights with their named presets, and
+//!   the integer community weights (CD.1c). Query consumers (blast radius,
+//!   liveness, PPR seeding, communities) need only this, so a crate that
+//!   cannot name the domain's graph type still reads it.
 //! - [`DomainProfile<G, C>`] is the tables plus the domain's build passes
 //!   ([`PassRegistry<G, C>`], LD.13), over the domain's graph `G` and build
 //!   context `C`.
@@ -211,6 +212,13 @@ pub struct DomainTables {
     /// (the [`ActivationConfig`] default).
     pub activation_weights: &'static [(EdgeCategoryId, f64)],
     pub activation_presets: &'static [ActivationPreset],
+    /// Integer weight per edge category for grouping: communities and split
+    /// cuts build their [`WeightedGraph`](crate::algo::community::WeightedGraph)
+    /// from it (CD.1c). A category not listed weighs 0 and is left out of
+    /// every grouping, so a listed weight is `>= 1`. Apart from
+    /// `activation_weights` on purpose: those are PPR ranking dials, and a
+    /// ranking retune must not move community structure.
+    pub community_weights: &'static [(EdgeCategoryId, u32)],
 }
 
 impl DomainTables {
@@ -235,6 +243,14 @@ impl DomainTables {
         self.carry_edges.contains(&c)
     }
 
+    /// Category `c`'s community weight: its `community_weights` row (the
+    /// first, as `WeightedGraph::from_source` reads it), or 0 - left out of
+    /// every grouping - when it has none. A linear find: the table holds at
+    /// most one row per registered category.
+    pub fn community_weight(&self, c: EdgeCategoryId) -> u32 {
+        self.community_weights.iter().find(|(k, _)| *k == c).map_or(0, |(_, w)| *w)
+    }
+
     /// The effect sink (with its table index) that reaching a `kind` node over
     /// a `via` edge is, first match in table order; `None` when it is no
     /// effect.
@@ -253,7 +269,10 @@ impl DomainTables {
     /// unique; a named entry can match something; effect sink classes are
     /// non-empty and unique, each sink names a kind and a category, and no
     /// (kind, category) pair belongs to two sinks (the first would hide the
-    /// second).
+    /// second); every `community_weights` row names a registered category
+    /// no earlier row names, with a weight `>= 1` (a 0 row is refused as
+    /// ambiguous: leaving a category out already weighs it 0). Each
+    /// `community_weights` error names its row, `community_weights[i]`.
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
         if self.graph_type.is_empty() {
@@ -351,6 +370,23 @@ impl DomainTables {
                 errors.push(format!("activation preset {:?} is declared more than once", p.name));
             }
             weights(&format!("activation preset {:?}", p.name), p.overrides, &mut errors);
+        }
+
+        for (i, (c, w)) in self.community_weights.iter().enumerate() {
+            let field = format!("community_weights[{i}]");
+            if r.category_name(*c).is_none() {
+                errors
+                    .push(format!("{field} holds edge category {}, which is not registered", c.0));
+            }
+            if self.community_weights[..i].iter().any(|(prior, _)| prior == c) {
+                errors.push(format!("{field} lists edge category {} more than once", c.0));
+            }
+            if *w == 0 {
+                errors.push(format!(
+                    "{field} weighs edge category {} 0: a community weight is >= 1, and a category left out weighs 0",
+                    c.0
+                ));
+            }
         }
 
         if errors.is_empty() { Ok(()) } else { Err(errors) }
@@ -479,6 +515,7 @@ mod tests {
             ActivationPreset { name: "repair", overrides: &[(CALLS, 8.0), (CONTAINS, 2.0)] },
             ActivationPreset { name: "wide", overrides: &[(IMPORTS, 0.0)] },
         ],
+        community_weights: &[(CALLS, 3), (IMPORTS, 1)],
     };
 
     #[test]
@@ -636,6 +673,61 @@ mod tests {
                 "effect_sinks[2] (\"db\") overlaps effect_sinks[1] (\"db\") on node kind 1 over edge category 1: the first would hide the second",
             ]
         );
+    }
+
+    #[test]
+    fn validate_rejects_bad_community_weights() {
+        let rows: [(&[(EdgeCategoryId, u32)], &str); 3] = [
+            (
+                &[(CALLS, 2), (EdgeCategoryId(999), 1)],
+                "community_weights[1] holds edge category 999, which is not registered",
+            ),
+            (
+                &[(CALLS, 2), (IMPORTS, 1), (CALLS, 3)],
+                "community_weights[2] lists edge category 1 more than once",
+            ),
+            (
+                &[(IMPORTS, 0), (CALLS, 2)],
+                "community_weights[0] weighs edge category 2 0: a community weight is >= 1, and a category left out weighs 0",
+            ),
+        ];
+        for (weights, error) in rows {
+            let bad = DomainTables { community_weights: weights, ..TABLES };
+            assert_eq!(bad.validate().unwrap_err(), [error], "{weights:?}");
+        }
+        // Each problem is reported against its own row, in row order.
+        let bad = DomainTables {
+            community_weights: &[(CALLS, 0), (EdgeCategoryId(7), 2), (CALLS, 1)],
+            ..TABLES
+        };
+        assert_eq!(
+            bad.validate().unwrap_err(),
+            [
+                "community_weights[0] weighs edge category 1 0: a community weight is >= 1, and a category left out weighs 0",
+                "community_weights[1] holds edge category 7, which is not registered",
+                "community_weights[2] lists edge category 1 more than once",
+            ]
+        );
+        // No rows is a domain that groups nothing: legal.
+        assert_eq!(DomainTables { community_weights: &[], ..TABLES }.validate(), Ok(()));
+    }
+
+    #[test]
+    fn community_weight_defaults_to_zero() {
+        assert_eq!(TABLES.community_weight(CALLS), 3);
+        assert_eq!(TABLES.community_weight(IMPORTS), 1);
+        assert_eq!(TABLES.community_weight(CONTAINS), 0, "registered, not listed");
+        assert_eq!(TABLES.community_weight(EdgeCategoryId(999)), 0, "not registered");
+        let none = DomainTables { community_weights: &[], ..TABLES };
+        assert_eq!(none.community_weight(CALLS), 0);
+        // Independent of the PPR weights: IMPORTS weighs 3.0 there and 1
+        // here, and `repair` adds CONTAINS at 2.0 there while it stays 0 here.
+        assert_eq!(TABLES.activation_config(None).edge_weights.get(&IMPORTS), Some(&3.0));
+        assert_eq!(
+            TABLES.activation_config(Some("repair")).edge_weights.get(&CONTAINS),
+            Some(&2.0)
+        );
+        assert_eq!(TABLES.community_weight(CONTAINS), 0);
     }
 
     /// A toy graph: the passes that touched it, in order.

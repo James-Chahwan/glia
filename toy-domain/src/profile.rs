@@ -23,7 +23,9 @@ use crate::registry::edge_category::{self as ec, CONTAINS_SHOT, FEATURES, NEXT_S
 use crate::registry::node_kind::{self as nk, OBJECT, SCENE, SHOT};
 
 /// The domain's tables. Scenes are the entrypoints (nodes have no names, so no
-/// named rule); every edge carries reachability; the domain has no effects.
+/// named rule); every edge carries reachability; the domain has no effects;
+/// every edge groups communities (CD.1c), weighted as its activation weight:
+/// the same object seen twice binds hardest, a scene's shot list loosest.
 pub const TOY_TABLES: DomainTables = DomainTables {
     graph_type: GRAPH_TYPE,
     registries: Registries {
@@ -48,6 +50,12 @@ pub const TOY_TABLES: DomainTables = DomainTables {
         name: "objects",
         overrides: &[(SAME_OBJECT, 8.0)],
     }],
+    community_weights: &[
+        (NEXT_SHOT, 3),
+        (FEATURES, 2),
+        (SAME_OBJECT, 4),
+        (CONTAINS_SHOT, 1),
+    ],
 };
 
 /// The domain's build passes, over a built [`ToyGraph`], no build context.

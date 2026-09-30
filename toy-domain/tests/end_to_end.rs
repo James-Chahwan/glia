@@ -14,10 +14,14 @@
 //!   [toy] reel: wrote sections=1 bytes=<n>
 //!   [toy] reel: read graph_type=toy-reel kinds=3
 //!   [toy] reel: activated kept=3 synth=3
+//!
+//! `toy_reel_communities` (CD.1c), grep token `[toy] reel: communities=`:
+//!   [toy] reel: communities=<k> method=leiden pairs=10
 
 use std::collections::HashSet;
 use std::path::Path;
 
+use glia_activation::algo::community::{CommunityOptions, Method, WeightedGraph, communities};
 use glia_activation::algo::reach::reachable;
 use glia_activation::algo::{Adjacency, Walk};
 use glia_activation::{ActivatedView, ActivationPlan, Direction};
@@ -270,6 +274,71 @@ fn reel_end_to_end() {
         "[toy] reel: activated kept={} synth={}",
         view.scores.len(),
         view.synth.len()
+    );
+}
+
+/// CD.1c: communities over the toy reel, weighted by the domain's own
+/// `community_weights` - the community algorithm runs on a non-code domain.
+/// Shot 9 and the bird (object 9) share no edge with scene 0's nodes, so
+/// they form a community of their own and never mix with scene 0's.
+#[test]
+fn toy_reel_communities() {
+    let g = built_and_passed();
+    assert_eq!(TOY_TABLES.validate(), Ok(()));
+    let view = WeightedGraph::from_source(&g, TOY_TABLES.community_weights);
+    // Every node of the reel, and every edge: 3 CONTAINS_SHOT (1) +
+    // 2 NEXT_SHOT (3) + 4 FEATURES (2) + 1 SAME_OBJECT (4) = 21, so 2m = 42.
+    assert_eq!(
+        (view.len(), view.pair_count(), view.total_weight()),
+        (9, 10, 42)
+    );
+
+    let opts = CommunityOptions::default();
+    let part = communities(&view, &opts);
+    assert_eq!(
+        part.method,
+        Method::Leiden,
+        "a 10-pair view is under the Leiden cap"
+    );
+    assert_eq!(part.membership.len(), 9);
+    let community_of = |n: NodeId| {
+        let ix = view
+            .index_of(n)
+            .unwrap_or_else(|| panic!("{n:?} is in the view"));
+        part.membership[ix as usize]
+    };
+    let (shot9, bird) = (id(&g, SHOT, 9), id(&g, OBJECT, 9));
+    let stray = community_of(shot9);
+    assert_eq!(community_of(bird), stray, "shot 9 features the bird");
+    let members: HashSet<NodeId> = (0..view.len() as u32)
+        .filter(|&ix| part.membership[ix as usize] == stray)
+        .map(|ix| view.id(ix))
+        .collect();
+    assert_eq!(members, [shot9, bird].into_iter().collect::<HashSet<_>>());
+    let scene0 = [
+        id(&g, SCENE, 0),
+        id(&g, SHOT, 0),
+        id(&g, SHOT, 1),
+        id(&g, SHOT, 2),
+        id(&g, OBJECT, 0),
+        id(&g, OBJECT, 1),
+        id(&g, OBJECT, 2),
+    ];
+    for n in scene0 {
+        assert_ne!(
+            community_of(n),
+            stray,
+            "{n:?} is scene 0's, never the stray shot's"
+        );
+    }
+    assert!(part.communities >= 2 && part.modularity > 0.0, "{part:?}");
+    // One seed, one answer.
+    assert_eq!(communities(&view, &opts), part);
+    eprintln!(
+        "[toy] reel: communities={} method={} pairs={}",
+        part.communities,
+        part.method.name(),
+        view.pair_count()
     );
 }
 
