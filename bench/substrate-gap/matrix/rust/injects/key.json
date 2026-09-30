@@ -1,0 +1,27 @@
+{
+  "framework": "rust-axum-state-trait",
+  "language": "rust",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "injects",
+  "cells": [
+    "rust/injects"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "INTERFACE",
+      "name": "UserRepository"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "list_users",
+      "to": "UserRepository",
+      "category": "INJECTS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "axum State<Arc<dyn UserRepository>> extractor: the router injects the shared repository (a trait object) into the handler || CF.8c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=1/1 literal=1/1 route=0/1 forbid=0/0) via=di. Predicted extractor gap (backlog, not fixed by the probe): axum `State<Arc<dyn UserRepository>>` extractor emits no INJECTS: the Rust parser has no DI rule (the handler parameter type is the injected trait)."
+}

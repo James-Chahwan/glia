@@ -1,0 +1,27 @@
+{
+  "framework": "rust-tokio-cron-scheduler",
+  "language": "rust",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "cron",
+  "cells": [
+    "rust/cron"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CRON_JOB",
+      "name": "0 0 3 * * *"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "jobs",
+      "to": "0 0 3 * * *",
+      "category": "SCHEDULES"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "tokio-cron-scheduler Job::new_async(\"0 0 3 * * *\", ..) || CF.8c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/1 literal=0/1 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): tokio-cron-scheduler `Job::new_async(\"0 0 3 * * *\", ..)` has no row in parsers/code/extractors/src/cron.rs."
+}

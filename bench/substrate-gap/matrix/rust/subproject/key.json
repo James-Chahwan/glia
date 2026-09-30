@@ -1,0 +1,31 @@
+{
+  "framework": "rust-cargo-workspace",
+  "language": "rust",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "subproject",
+  "cells": [
+    "rust/subproject"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "PROJECT",
+      "name": "project:crates/api"
+    },
+    {
+      "kind": "PROJECT",
+      "name": "project:crates/worker"
+    }
+  ],
+  "expect_edges": [],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "PROJECT",
+      "name": "project:crates/api",
+      "max_nodes": 1
+    }
+  ],
+  "note": "cargo workspace with two member crates || CF.8c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=2/2 literal=2/2 route=0/0 forbid=1/1) via=project. Nothing to fix: the cell is covered at HEAD."
+}

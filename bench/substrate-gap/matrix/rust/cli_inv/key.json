@@ -1,0 +1,34 @@
+{
+  "framework": "rust-std-process-command",
+  "language": "rust",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_inv",
+  "cells": [
+    "rust/cli_inv"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "mytool"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli_invoke:mytool",
+      "to": "cli:mytool",
+      "category": "CLI_INVOKES"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "sync",
+      "max_nodes": 0
+    }
+  ],
+  "note": "std::process::Command::new against a clap derive binary named mytool || CF.8c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=1/1 literal=1/1 route=1/1 forbid=1/1) via=cli. Nothing to fix: the cell is covered at HEAD."
+}
