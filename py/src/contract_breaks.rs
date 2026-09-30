@@ -3,8 +3,11 @@
 //! pyo3 twin of `glia contract-breaks`.
 //!
 //! The module function `contract_breaks_vs_rev(repo_path, base="HEAD",
-//! avro="backward", breaking_only=False)` builds the repo's working tree and
-//! the rev itself (LE.1b's graph delta), so it takes a path, and returns the
+//! avro="backward", breaking_only=False, with_repos=None)` builds the repo's
+//! working tree and the rev itself (LE.1b's graph delta), so it takes a path;
+//! `with_repos` (CC.8c) lists client repos built beside the provider on both
+//! sides (`contract_breaks_vs_rev_with`), so a client in another repo that
+//! lost its provider is an orphan too. It returns the
 //! engine's `ContractBreaks` as a native dict (LD.2): `{base, schemas,
 //! orphaned_clients, breaking, absence}`. An `avro` mode outside the engine's
 //! `AVRO_MODES` or an engine `Err` (not a git work tree, an unknown rev, a
@@ -19,7 +22,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use glia_engine::contract_breaks::{
-    AVRO_MODES, ContractBreakArgs, ContractBreaks, contract_breaks_vs_rev,
+    AVRO_MODES, ContractBreakArgs, ContractBreaks, contract_breaks_vs_rev_with,
 };
 
 use crate::convert::to_py;
@@ -41,15 +44,16 @@ fn engine_args(avro: &str, breaking_only: bool) -> Result<ContractBreakArgs, Str
 }
 
 /// The body of [`contract_breaks_vs_rev_py`], minus pyo3. The mode is checked
-/// before anything is built.
+/// before anything is built; no `with_repos` is none.
 fn rev_answer(
     repo_path: &str,
     base: &str,
     avro: &str,
     breaking_only: bool,
+    with_repos: Option<&[String]>,
 ) -> Result<ContractBreaks, String> {
     let args = engine_args(avro, breaking_only)?;
-    contract_breaks_vs_rev(repo_path, base, &args)
+    contract_breaks_vs_rev_with(repo_path, base, with_repos.unwrap_or_default(), &args)
 }
 
 /// **contract_breaks_vs_rev** (CC.8b): did the working tree's change against
@@ -72,21 +76,28 @@ fn rev_answer(
 /// clients (a CI gate fails when it is above 0); `absence` a dict saying why
 /// when nothing is listed, else `None`. `breaking_only=True` lists only the
 /// breaking schema rows; `breaking` and the orphans are the same either way.
+/// `with_repos` (a list of paths, default `None`) adds client repos: both
+/// sides are then built as multi-repo merges, the provider at the rev and at
+/// its working tree, each beside the same clients at their own trees, so a
+/// client in another repo that lost its provider is in `orphaned_clients`.
+/// Every client is built twice, once per side.
 /// Lines are 1-based. Builds both sides itself and saves the parse-cache
-/// sidecar (`<repo>/.glia/graph/parse_cache.bin`, self-gitignored) as
-/// `generate(incremental=True)` does, never a `.gmap` layout. Raises
-/// ValueError on a bad `avro` mode or a git or build failure.
+/// sidecar (`<repo>/.glia/graph/parse_cache.bin`, self-gitignored) of the
+/// repo and of every client as `generate(incremental=True)` does, never a
+/// `.gmap` layout. Raises ValueError on a bad `avro` mode, a client that is
+/// not a directory, or a git or build failure.
 #[pyfunction]
-#[pyo3(name = "contract_breaks_vs_rev", signature = (repo_path, base="HEAD", avro="backward", breaking_only=false))]
+#[pyo3(name = "contract_breaks_vs_rev", signature = (repo_path, base="HEAD", avro="backward", breaking_only=false, with_repos=None))]
 fn contract_breaks_vs_rev_py(
     py: Python<'_>,
     repo_path: &str,
     base: &str,
     avro: &str,
     breaking_only: bool,
+    with_repos: Option<Vec<String>>,
 ) -> PyResult<Py<PyAny>> {
-    let answer =
-        rev_answer(repo_path, base, avro, breaking_only).map_err(PyValueError::new_err)?;
+    let answer = rev_answer(repo_path, base, avro, breaking_only, with_repos.as_deref())
+        .map_err(PyValueError::new_err)?;
     to_py(py, serde_json::to_string(&answer))
 }
 
@@ -147,9 +158,9 @@ mod tests {
             let a = engine_args(mode, false).expect("an engine mode");
             assert_eq!(a.avro_mode, *mode);
         }
-        let err = rev_answer("/nonexistent/cc8b", "HEAD", "x", false).expect_err("bad mode");
+        let err = rev_answer("/nonexistent/cc8b", "HEAD", "x", false, None).expect_err("bad mode");
         assert_eq!(err, "unknown avro mode `x`: expected one of backward, forward, full");
-        let err = rev_answer("/nonexistent/cc8b", "HEAD", "backward", false)
+        let err = rev_answer("/nonexistent/cc8b", "HEAD", "backward", false, None)
             .expect_err("not a directory");
         assert!(!err.contains("avro"), "the mode passed; the engine refused the path: {err}");
     }
@@ -174,7 +185,7 @@ mod tests {
         std::fs::write(top.join("openapi.yaml"), ORDERS_V1.replace(TOTAL, "")).expect("write v2");
 
         let repo = top.to_str().expect("utf-8");
-        let a = rev_answer(repo, "HEAD", "backward", false).expect("answer");
+        let a = rev_answer(repo, "HEAD", "backward", false, None).expect("answer");
         let text = serde_json::to_string(&a).expect("serialises");
         let order: Vec<usize> = ["\"base\":", "\"schemas\":", "\"orphaned_clients\":", "\"breaking\":", "\"absence\":"]
             .iter()
@@ -199,10 +210,61 @@ mod tests {
             format!("{ORDERS_V1}                  currency:\n                    type: string\n"),
         )
         .expect("write v3");
-        let all = value(&rev_answer(repo, "HEAD", "backward", false).expect("compatible"));
+        let all = value(&rev_answer(repo, "HEAD", "backward", false, None).expect("compatible"));
         assert_eq!((all["breaking"].as_u64(), all["schemas"][0]["status"].as_str()), (Some(0), Some("compatible")));
-        let only = value(&rev_answer(repo, "HEAD", "full", true).expect("breaking only"));
+        let only = value(&rev_answer(repo, "HEAD", "full", true, None).expect("breaking only"));
         assert_eq!(only["schemas"], serde_json::json!([]), "{only}");
         assert_eq!(only["absence"]["reason"], "no_match", "{only}");
+    }
+
+    /// CC.8c: `with_repos` reaches the engine. The provider (a git repo)
+    /// drops the route a client in a separate, plain dir calls: with the
+    /// client the call is an orphaned client, without it nothing is reported,
+    /// and a client that is not a directory is refused before any build.
+    #[test]
+    fn with_repos_reports_a_client_in_another_repo() {
+        let root = std::env::temp_dir().join(format!("glia-cc8c-py-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _scratch = Scratch(root.clone());
+        let top = root.join("provider");
+        let web = root.join("client").join("web");
+        std::fs::create_dir_all(top.join("services/api")).expect("provider dir");
+        std::fs::create_dir_all(&web).expect("client dir");
+        let gitconfig = root.join("gitconfig");
+        std::fs::write(&gitconfig, "").expect("empty gitconfig");
+        std::fs::write(top.join("services/api/pyproject.toml"), "[project]\nname = \"api\"\n")
+            .expect("write pyproject");
+        std::fs::write(
+            top.join("services/api/app.py"),
+            "from flask import Flask\n\napp = Flask(__name__)\n\n\n@app.route(\"/orders\")\ndef orders():\n    return []\n",
+        )
+        .expect("write the route");
+        std::fs::write(
+            web.join("client.py"),
+            "import requests\n\n\ndef list_orders():\n    return requests.get(\"http://api/orders\")\n",
+        )
+        .expect("write the client");
+        git(&top, &gitconfig, &["init", "-q"]);
+        git(&top, &gitconfig, &["add", "-A"]);
+        git(&top, &gitconfig, &["commit", "-q", "-m", "service"]);
+        std::fs::remove_file(top.join("services/api/app.py")).expect("remove the route");
+
+        let repo = top.to_str().expect("utf-8");
+        let clients = [root.join("client").to_str().expect("utf-8").to_string()];
+        let v = value(&rev_answer(repo, "HEAD", "backward", false, Some(&clients)).expect("answer"));
+        assert_eq!(v["breaking"], 1, "{v}");
+        let o = &v["orphaned_clients"][0];
+        assert_eq!(
+            (o["client_qname"].as_str(), o["category"].as_str(), o["reason"].as_str(), o["file"].as_str()),
+            (Some("endpoint:GET:/orders"), Some("HTTP_CALLS"), Some("target_removed"), Some("web/client.py")),
+            "{v}"
+        );
+        let alone = value(&rev_answer(repo, "HEAD", "backward", false, None).expect("alone"));
+        assert_eq!(alone["orphaned_clients"], serde_json::json!([]), "{alone}");
+        let none = value(&rev_answer(repo, "HEAD", "backward", false, Some(&[])).expect("empty list"));
+        assert_eq!(none["orphaned_clients"], serde_json::json!([]), "an empty list is no client: {none}");
+        let missing = ["/nonexistent/cc8c-client".to_string()];
+        let err = rev_answer(repo, "HEAD", "backward", false, Some(&missing)).expect_err("no such client");
+        assert_eq!(err, "not a directory: /nonexistent/cc8c-client");
     }
 }

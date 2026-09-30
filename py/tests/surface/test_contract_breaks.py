@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """pyo3 surface, py/src/contract_breaks.rs (CC.8b): the module function
 `contract_breaks_vs_rev(repo_path, base="HEAD", avro="backward",
-breaking_only=False)` builds the git rev `base` and the working tree of the
-repo at `repo_path` and returns the engine's contract breaks as a native dict
+breaking_only=False, with_repos=None)` builds the git rev `base` and the
+working tree of the repo at `repo_path` (with `with_repos`, CC.8c, each side
+beside the same client repos) and returns the engine's contract breaks as a native dict
 {base, schemas, orphaned_clients, breaking, absence}: every contract paired old
 -> new and judged by its format's evolution rules, one `changes` entry per
 declared difference, lines 1-based; `breaking` counts the breaking schema rows
@@ -46,9 +47,15 @@ KEYS = ["base", "schemas", "orphaned_clients", "breaking", "absence"]
 ROW_KEYS = ["kind", "key", "format", "before", "after", "status", "change", "tier", "note", "changes"]
 CHANGE_KEYS = ["section", "field", "change", "producer", "consumer", "rule", "breaking"]
 SIDE_KEYS = ["repo_id", "qname", "format", "file", "line"]
-KW = [("repo_path", None), ("base", "HEAD"), ("avro", "backward"), ("breaking_only", False)]
+KW = [("repo_path", None), ("base", "HEAD"), ("avro", "backward"), ("breaking_only", False),
+      ("with_repos", None)]
 MARKER = ("[contract-breaks] base=HEAD pairs=1 breaking=1 compatible=0 unknown=0 "
           "removed=0 added=0 orphaned_clients=0")
+WITH_MARKER = "[contract-breaks] clients=1 built_twice=1"
+APP_PY = ("from flask import Flask\n\napp = Flask(__name__)\n\n\n"
+          "@app.route(\"/orders\")\ndef orders():\n    return []\n")
+CLIENT_PY = ("import requests\n\n\ndef list_orders():\n"
+             "    return requests.get(\"http://api/orders\")\n")
 
 
 def git(top: pathlib.Path, *args: str) -> None:
@@ -130,6 +137,34 @@ def main() -> int:
         plain.mkdir()
         c.raises("not a git work tree raises", ValueError, lambda: rg.contract_breaks_vs_rev(str(plain)),
                  "not a git work tree")
+
+        # CC.8c: a client in another repo loses its provider.
+        api = pathlib.Path(tmp) / "provider"
+        (api / "services" / "api").mkdir(parents=True)
+        (api / "services" / "api" / "pyproject.toml").write_text("[project]\nname = \"api\"\n")
+        (api / "services" / "api" / "app.py").write_text(APP_PY)
+        git(api, "init", "-q")
+        git(api, "add", "-A")
+        git(api, "commit", "-q", "-m", "service")
+        (api / "services" / "api" / "app.py").unlink()
+        client = pathlib.Path(tmp) / "client"
+        (client / "web").mkdir(parents=True)
+        (client / "web" / "client.py").write_text(CLIENT_PY)
+        w, err = stderr_of(lambda: rg.contract_breaks_vs_rev(str(api), with_repos=[str(client)]))
+        w = w if type(w) is dict else {}
+        orphans = w.get("orphaned_clients") or [{}]
+        c.check("with_repos: the other repo's client is orphaned",
+                w.get("breaking") == 1 and len(orphans) == 1
+                and (orphans[0].get("client_qname"), orphans[0].get("category"), orphans[0].get("reason"),
+                     orphans[0].get("file"), orphans[0].get("line"))
+                == ("endpoint:GET:/orders", "HTTP_CALLS", "target_removed", "web/client.py", 5), w)
+        c.check("with_repos marker", WITH_MARKER in err, err[-400:])
+        alone = rg.contract_breaks_vs_rev(str(api))
+        c.check("without with_repos the client is invisible",
+                alone.get("orphaned_clients") == [] and alone.get("breaking") == 0, alone)
+        c.raises("a client that is not a directory raises", ValueError,
+                 lambda: rg.contract_breaks_vs_rev(str(api), with_repos=[str(pathlib.Path(tmp) / "nope")]),
+                 "not a directory")
     return c.done()
 
 

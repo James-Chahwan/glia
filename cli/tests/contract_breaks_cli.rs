@@ -2,6 +2,8 @@
 //! breaks (`glia_engine::contract_breaks::contract_breaks_vs_rev`, CC.8a),
 //! driving the real binary over temporary git repos. These tests need a `git`
 //! binary: without one they FAIL with a message saying so, never skip.
+//! CC.8c adds `--with <client repo>` (`contract_breaks_vs_rev_with`): a
+//! client in another repo that loses its provider is an orphaned client.
 //!
 //! Every git call — the fixture's and the binary's — runs hermetically: a
 //! fixed identity, no signing, `main` as the initial branch, no system or
@@ -366,6 +368,61 @@ fn orphaned_client_fails_the_gate() {
         assert!(rows[0].contains(want), "orphan row lacks `{want}`\n{}", show(&o));
     }
     assert!(markers(&o)[0].ends_with("orphaned_clients=1"), "{}", show(&o));
+}
+
+/// CC.8c: `--with <client>` builds a client repo beside the provider on
+/// both sides. The provider (a git repo) drops the route the client, a plain
+/// dir, calls: the call is an orphaned client and the gate fails; without
+/// `--with` the client is invisible and the gate passes.
+#[test]
+fn with_client_repo_orphans_its_call() {
+    let s = Scratch::git_repo("with-client");
+    s.write("services/api/pyproject.toml", "[project]\nname = \"api\"\n");
+    s.write("services/api/app.py", APP_PY);
+    s.commit("service");
+    std::fs::remove_file(s.top.join("services/api/app.py")).expect("remove the route");
+    let client = s.root.join("client");
+    std::fs::create_dir_all(client.join("web")).expect("client dir");
+    std::fs::write(client.join("web/client.py"), CLIENT_PY).expect("client write");
+    let client = client.to_str().expect("utf-8 scratch path");
+
+    let o = s.breaks(&["--with", client]);
+    assert_eq!(o.status.code(), Some(1), "the other repo's client is orphaned\n{}", show(&o));
+    let rows = section_rows(&stdout(&o), "orphaned clients");
+    assert_eq!(rows.len(), 1, "{}", show(&o));
+    for want in [
+        "`endpoint:GET:/orders`",
+        "web/client.py:5",
+        "HTTP_CALLS",
+        "`GET /orders @services/api`",
+        "target_removed",
+        "fact",
+    ] {
+        assert!(rows[0].contains(want), "orphan row lacks `{want}`\n{}", show(&o));
+    }
+    assert!(markers(&o)[0].ends_with("orphaned_clients=1"), "{}", show(&o));
+    assert!(
+        stderr(&o).lines().any(|l| l == "[contract-breaks] clients=1 built_twice=1"),
+        "the --with marker\n{}",
+        show(&o)
+    );
+
+    let o = s.breaks(&["--with", client, "--json"]);
+    assert_eq!(o.status.code(), Some(1), "{}", show(&o));
+    let v = json(&o);
+    assert_eq!(v["orphaned_clients"][0]["client_qname"], "endpoint:GET:/orders", "{v}");
+
+    let o = s.breaks(&[]);
+    assert_eq!(o.status.code(), Some(0), "without --with the client is not built\n{}", show(&o));
+    assert!(!stderr(&o).contains("[contract-breaks] clients="), "{}", show(&o));
+
+    let o = s.breaks(&["--with", "/nonexistent/cc8c-client"]);
+    assert_eq!(o.status.code(), Some(2), "{}", show(&o));
+    assert!(
+        stderr(&o).contains("error: not a directory: /nonexistent/cc8c-client"),
+        "{}",
+        show(&o)
+    );
 }
 
 #[test]

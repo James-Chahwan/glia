@@ -9,6 +9,19 @@
 //! (`delta::graph_delta_vs_rev`, LE.1b); [`contract_breaks`] answers from an
 //! already built [`RevDelta`].
 //!
+//! CLIENTS IN OTHER REPOS (CC.8c). [`contract_breaks_vs_rev_with`] builds
+//! each side as one multi-repo merge: the provider's working tree plus the
+//! client repos, then the provider's rev (materialised as the delta does,
+//! built under the working tree's identity) plus the SAME client repos, each
+//! at its own tree on both sides, so only the provider moves. The clients'
+//! NodeIds are identical across the pair, so every client edge the delta
+//! removed was removed by the provider's change: a client in another repo
+//! whose route, operation or channel went away is an orphan like one inside
+//! the provider. The cost is building every client twice (each side's parse
+//! cache is loaded from the client's sidecar, so the second build reparses
+//! nothing). A client whose path is the provider's, or repeats an earlier
+//! client, is built once, as the provider or as that client.
+//!
 //! PAIRING. The holders are LE.10c's: every MESSAGE_TYPE (proto, Avro, JSON
 //! Schema) and every OpenAPI / AsyncAPI contract op, read on both sides with
 //! their SCHEMA_FIELDS. A Pact interaction is the CONSUMER's contract and a
@@ -73,10 +86,15 @@
 //! Fired-on marker, one per answer:
 //! `[contract-breaks] base=<rev> pairs=<P> breaking=<B> compatible=<C> unknown=<U> removed=<R> added=<A> orphaned_clients=<O>`
 //! (`pairs` counts every paired contract, identical ones included; the
-//! status counts are schema rows before `breaking_only` filters them).
+//! status counts are schema rows before `breaking_only` filters them), and,
+//! after it, once per [`contract_breaks_vs_rev_with`] call given at least one
+//! client: `[contract-breaks] clients=<given> built_twice=<distinct clients
+//! built on both sides>`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
+use glia_activation::algo::delta::GraphDelta;
 use glia_code_domain::edge_category;
 use glia_core::{EdgeCategoryId, NodeId};
 use glia_graph::MergedGraph;
@@ -87,7 +105,9 @@ use crate::contract_fields::{
     Diff, Field, FieldChange, FieldSide, Gap, Holder, Schema, TypeChange, UNKNOWN, ancestors,
     avro_rules, collect_holders, is_ref, json_type_change, proto_rules, qualified_name,
 };
-use crate::delta::{RevDelta, graph_delta_vs_rev};
+use crate::build::{BuildOptions, GenerateResult, generate_many_as};
+use crate::delta::{RevDelta, graph_delta_vs_rev, located_delta_with};
+use crate::git_rev;
 
 /// The accepted [`ContractBreakArgs::avro_mode`] values, default first.
 pub const AVRO_MODES: &[&str] = &["backward", "forward", "full"];
@@ -203,25 +223,123 @@ pub fn contract_breaks_vs_rev(
     base: &str,
     args: &ContractBreakArgs,
 ) -> Result<ContractBreaks, String> {
-    if !AVRO_MODES.contains(&args.avro_mode) {
-        return Err(format!(
-            "unknown avro mode `{}`: expected one of {}",
-            args.avro_mode,
-            AVRO_MODES.join(", ")
-        ));
-    }
+    check_mode(args)?;
     let rev = graph_delta_vs_rev(repo_path, base)?;
     Ok(contract_breaks(&rev, args))
+}
+
+/// [`contract_breaks_vs_rev`] with the client repos at `clients` built beside
+/// the provider on both sides (module docs, CLIENTS IN OTHER REPOS), so a
+/// client in another repo that lost its provider is an orphan. No clients is
+/// exactly [`contract_breaks_vs_rev`]. `Err` as that does, and when a client
+/// is not a directory (checked, with the mode and the rev, before anything is
+/// built). Saves the parse-cache sidecar of the provider's working tree and of
+/// every client (`<repo>/.glia/graph/parse_cache.bin`), as an incremental
+/// multi-repo build does; never a layout. The provider's rev is materialised
+/// into a temp dir that is removed before this returns, on every path.
+pub fn contract_breaks_vs_rev_with(
+    repo_path: &str,
+    base: &str,
+    clients: &[String],
+    args: &ContractBreakArgs,
+) -> Result<ContractBreaks, String> {
+    if clients.is_empty() {
+        return contract_breaks_vs_rev(repo_path, base, args);
+    }
+    check_mode(args)?;
+    let repo = Path::new(repo_path);
+    if !repo.is_dir() {
+        return Err(format!("not a directory: {repo_path}"));
+    }
+    let distinct = distinct_clients(repo_path, clients)?;
+    let marker = || {
+        eprintln!(
+            "[contract-breaks] clients={} built_twice={}",
+            clients.len(),
+            distinct.len()
+        );
+    };
+    if distinct.is_empty() {
+        // Every client was the provider itself: the single-repo answer.
+        let answer = contract_breaks_vs_rev(repo_path, base, args)?;
+        marker();
+        return Ok(answer);
+    }
+    let rev = git_rev::resolve_rev(repo, base)?;
+    let mut pairs: Vec<(String, String)> = vec![(repo_path.to_string(), repo_path.to_string())];
+    pairs.extend(distinct.iter().map(|c| (c.clone(), c.clone())));
+    let opts = BuildOptions::default();
+    let after = generate_many_as(&pairs, &opts)?;
+    let tree = git_rev::materialize_rev(repo, &rev)?;
+    let tmp = tree
+        .dir
+        .path()
+        .to_str()
+        .ok_or_else(|| format!("temp dir is not valid UTF-8: {}", tree.dir.path().display()))?;
+    pairs[0].0 = tmp.to_string();
+    let before = generate_many_as(&pairs, &opts)?;
+    drop(tree);
+    let renames = git_rev::declared_renames(repo, &rev);
+    let (delta, _, _) = located_delta_with(&before.merged, &after.merged, &renames);
+    let answer = breaks_of(&rev.given, &before.merged, &after, &delta, args);
+    marker();
+    Ok(answer)
+}
+
+/// `Err` naming a mode outside [`AVRO_MODES`].
+fn check_mode(args: &ContractBreakArgs) -> Result<(), String> {
+    if AVRO_MODES.contains(&args.avro_mode) {
+        return Ok(());
+    }
+    Err(format!(
+        "unknown avro mode `{}`: expected one of {}",
+        args.avro_mode,
+        AVRO_MODES.join(", ")
+    ))
+}
+
+/// The client paths to build, as given and in argument order, without the
+/// provider and without repeats (compared by canonical path, so `./web` and
+/// `web/` are one client). `Err` names the first client that is not a
+/// directory.
+fn distinct_clients(repo_path: &str, clients: &[String]) -> Result<Vec<String>, String> {
+    let canonical = |p: &str| -> Option<PathBuf> {
+        Path::new(p).is_dir().then(|| std::fs::canonicalize(p).ok()).flatten()
+    };
+    let mut seen: Vec<PathBuf> = canonical(repo_path).into_iter().collect();
+    let mut out = Vec::new();
+    for c in clients {
+        let Some(at) = canonical(c) else {
+            return Err(format!("not a directory: {c}"));
+        };
+        if !seen.contains(&at) {
+            seen.push(at);
+            out.push(c.clone());
+        }
+    }
+    Ok(out)
 }
 
 /// The contract breaks of an already computed rev delta (module docs).
 /// Nothing is built; `base` is `rev.answer.base`.
 pub fn contract_breaks(rev: &RevDelta, args: &ContractBreakArgs) -> ContractBreaks {
-    let (before, after) = (&rev.before.merged, &rev.after.merged);
+    breaks_of(&rev.answer.base, &rev.before.merged, &rev.after, &rev.delta, args)
+}
+
+/// The answer over a rev pair (module docs): `before` is the rev's graph,
+/// `after_build` the working tree's build, `delta` the id-level delta
+/// `after - before`. One body for the single-repo and the `--with` pair.
+fn breaks_of(
+    base: &str,
+    before: &MergedGraph,
+    after_build: &GenerateResult,
+    delta: &GraphDelta,
+    args: &ContractBreakArgs,
+) -> ContractBreaks {
+    let after = &after_build.merged;
     let (old, new) = (contract_holders(before), contract_holders(after));
     let (then, now) = (Locator::new(before), Locator::new(after));
-    let moved: HashMap<u64, u64> = rev
-        .delta
+    let moved: HashMap<u64, u64> = delta
         .moved_nodes
         .iter()
         .map(|&(b, a)| (b.0, a.0))
@@ -292,7 +410,7 @@ pub fn contract_breaks(rev: &RevDelta, args: &ContractBreakArgs) -> ContractBrea
     }
     rows.sort_by(|x, y| row_key(x).cmp(&row_key(y)));
 
-    let removed_nodes: HashSet<u64> = rev.delta.removed_nodes.iter().map(|id| id.0).collect();
+    let removed_nodes: HashSet<u64> = delta.removed_nodes.iter().map(|id| id.0).collect();
     let present: HashSet<u64> = after
         .graphs
         .iter()
@@ -303,8 +421,7 @@ pub fn contract_breaks(rev: &RevDelta, args: &ContractBreakArgs) -> ContractBrea
         .filter(|e| CLIENT_CATEGORIES.contains(&e.category))
         .map(|e| (e.from.0, e.category.0))
         .collect();
-    let lost: Vec<RemovedCall> = rev
-        .delta
+    let lost: Vec<RemovedCall> = delta
         .removed_edges
         .iter()
         .filter(|k| CLIENT_CATEGORIES.contains(&k.category))
@@ -353,7 +470,7 @@ pub fn contract_breaks(rev: &RevDelta, args: &ContractBreakArgs) -> ContractBrea
         count(&|r| r.change == "removed"),
         count(&|r| r.change == "added"),
     );
-    let base = rev.answer.base.clone();
+    let base = base.to_string();
     eprintln!(
         "[contract-breaks] base={base} pairs={} breaking={n_breaking} compatible={n_compatible} unknown={n_unknown} removed={n_removed} added={n_added} orphaned_clients={}",
         pairing.pairs.len(),
@@ -385,7 +502,7 @@ pub fn contract_breaks(rev: &RevDelta, args: &ContractBreakArgs) -> ContractBrea
         };
         let mechanisms: Vec<&'static str> = CLIENT_CATEGORIES.iter().map(|&c| edge_category::name(c)).collect();
         let mut a = absence::empty(after, PRIMITIVE, &format!("rev {base}"), "no_match", note, &mechanisms, None);
-        a.unparsed_files = rev.after.parse_errors.len();
+        a.unparsed_files = after_build.parse_errors.len();
         a
     });
     ContractBreaks {

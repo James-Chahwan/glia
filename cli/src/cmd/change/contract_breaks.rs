@@ -6,6 +6,12 @@
 //! new and judged by its format's evolution rules, and every client the change
 //! left without a provider is listed.
 //!
+//! `--with <repo>` (repeatable, CC.8c) adds client repos: both sides are then
+//! built as multi-repo merges (`contract_breaks_vs_rev_with`), the provider
+//! at the rev and at its working tree, each beside the same clients at their
+//! own trees, so a client in another repo that lost its provider is an
+//! orphaned client too. Every client is built twice, once per side.
+//!
 //! Table mode prints `# glia contract-breaks <repo> vs <rev>`, a summary line,
 //! then `## breaking` and, unless `--breaking-only` left them out, `## unknown`
 //! and `## compatible` (a section with no row is omitted, bar `## breaking`),
@@ -29,15 +35,16 @@
 //!
 //! Writes: the working tree's parse-cache sidecar
 //! (`<repo>/.glia/graph/parse_cache.bin`, self-gitignored), as `glia delta`
-//! does, under `GLIA_NO_PERSIST=1` too; never a `.gmap` layout.
+//! does, and each `--with` client's, as `glia merge --incremental` does,
+//! under `GLIA_NO_PERSIST=1` too; never a `.gmap` layout.
 //!
 //! Fired-on marker: the engine's
 //! `[contract-breaks] base=<rev> pairs=<P> breaking=<B> compatible=<C> unknown=<U> removed=<R> added=<A> orphaned_clients=<O>`,
-//! once per run.
+//! once per run, then with `--with` `[contract-breaks] clients=<N> built_twice=<N>`.
 
 use glia_engine::contract_breaks::{
     AVRO_MODES, ContractBreakArgs, ContractBreaks, OrphanedClient, SchemaChange,
-    contract_breaks_vs_rev,
+    contract_breaks_vs_rev_with,
 };
 use glia_engine::contract_fields::{FieldChange, FieldSide};
 
@@ -66,6 +73,12 @@ pub(crate) struct Args {
     /// orphaned clients are the same either way).
     #[arg(long)]
     breaking_only: bool,
+    /// A client repo to build beside the provider on both sides, so its
+    /// calls that lose their provider are orphaned clients. Repeatable. Each
+    /// client is built twice (once at the rev's side, once at the working
+    /// tree's), always at its own working tree.
+    #[arg(long, value_name = "REPO")]
+    with: Vec<String>,
     /// Emit JSON (`{base, schemas, orphaned_clients, breaking, absence}`)
     /// instead of tables.
     #[arg(long)]
@@ -261,7 +274,7 @@ pub(crate) fn run(args: Args) -> i32 {
             return 2;
         }
     };
-    let answer = match contract_breaks_vs_rev(&args.repo, &args.base, &engine) {
+    let answer = match contract_breaks_vs_rev_with(&args.repo, &args.base, &args.with, &engine) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("error: {e}");

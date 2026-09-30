@@ -273,7 +273,7 @@ fn generate_one_inner(
 /// substrate-eval entry). Always a cold build that writes nothing into the
 /// repos: `bench/substrate-gap` grades every multi-dir fixture through here.
 pub fn generate_many(repo_paths: &[String]) -> Result<GenerateResult, String> {
-    generate_many_inner(repo_paths, false, &BuildOptions::default())
+    generate_many_inner(&self_pairs(repo_paths), false, &BuildOptions::default())
 }
 
 /// [`generate_many`] (`incremental = false`) or [`generate_many_incremental`]
@@ -283,7 +283,7 @@ pub fn generate_many_opts(
     incremental: bool,
     opts: &BuildOptions,
 ) -> Result<GenerateResult, String> {
-    generate_many_inner(repo_paths, incremental, opts)
+    generate_many_inner(&self_pairs(repo_paths), incremental, opts)
 }
 
 /// Disk-backed incremental multi-repo build: each path gets its OWN
@@ -294,22 +294,45 @@ pub fn generate_many_opts(
 /// fatal. Backs pyo3 `generate_many(incremental=True)` and
 /// `glia merge --incremental`.
 pub fn generate_many_incremental(repo_paths: &[String]) -> Result<GenerateResult, String> {
-    generate_many_inner(repo_paths, true, &BuildOptions::default())
+    generate_many_inner(&self_pairs(repo_paths), true, &BuildOptions::default())
 }
 
-/// One walked input of a multi-repo build: the path as given, its root, its
-/// walk, its identity (disambiguated before phase 2 mints any RepoId) and
-/// what the walk took (CA.9's `walk=`).
-type Walked<'a> = (&'a String, PathBuf, WalkResult, RepoIdentity, Duration);
+/// A multi-repo build where each input's tree at `pair.0` is built under the
+/// identity of `pair.1` (CC.8c): the multi-repo twin of [`generate_one_as`].
+/// The walk, the file reads and the `.glia` inputs come from `pair.0`; the
+/// RepoId, the repo label and root, and the parse cache (loaded from, and
+/// context-checked against, `pair.1`) from `pair.1`. So a materialised git
+/// rev (a temp dir with no `.git`) builds beside other repos with the working
+/// tree's NodeIds. Incremental: every input loads `pair.1`'s parse-cache
+/// sidecar, and only an input with `pair.0 == pair.1` saves it back, so the
+/// sidecar keeps the working-tree state (LE.1b's rule). All pairs `(p, p)`
+/// is exactly [`generate_many_opts`]`(paths, true, opts)`.
+pub(crate) fn generate_many_as(
+    pairs: &[(String, String)],
+    opts: &BuildOptions,
+) -> Result<GenerateResult, String> {
+    generate_many_inner(pairs, true, opts)
+}
+
+/// Every path built under its own identity: `(p, p)`, in argument order.
+fn self_pairs(repo_paths: &[String]) -> Vec<(String, String)> {
+    repo_paths.iter().map(|p| (p.clone(), p.clone())).collect()
+}
+
+/// One walked input of a multi-repo build: the `(root, identity root)` pair
+/// as given, its root, its walk, its identity (the identity root's,
+/// disambiguated before phase 2 mints any RepoId) and what the walk took
+/// (CA.9's `walk=`).
+type Walked<'a> = (&'a (String, String), PathBuf, WalkResult, RepoIdentity, Duration);
 
 fn generate_many_inner(
-    repo_paths: &[String],
+    pairs: &[(String, String)],
     incremental: bool,
     opts: &BuildOptions,
 ) -> Result<GenerateResult, String> {
     let started = Instant::now();
     let Assembled { mut merged, parse_errors, label_inputs, repo_roots, inputs } =
-        assemble_many_with(repo_paths, incremental, opts)?;
+        assemble_many_with(pairs, incremental, opts)?;
     let ctx = CodeBuildCtx::new(inputs, opts);
     let report = run_code_passes_with(&mut merged, &ctx);
     let external = timed(|| apply_external_cells(&mut merged, &ctx.inputs));
@@ -335,8 +358,8 @@ fn generate_many_inner(
 pub(crate) struct Assembled {
     pub(crate) merged: MergedGraph,
     pub(crate) parse_errors: Vec<String>,
-    /// `(RepoId.0, path as given)` per built repo, in argument order: the
-    /// input of [`crate::arch::repo_label_map`].
+    /// `(RepoId.0, identity root as given)` per built repo, in argument
+    /// order: the input of [`crate::arch::repo_label_map`].
     pub(crate) label_inputs: Vec<(u64, String)>,
     pub(crate) repo_roots: std::collections::BTreeMap<u64, String>,
     /// Each built repo's external inputs (LF.1a), in argument order.
@@ -349,13 +372,19 @@ pub(crate) struct Assembled {
 /// a time. Errs when no path produced a graph.
 #[cfg(test)]
 pub(crate) fn assemble_many(repo_paths: &[String], incremental: bool) -> Result<Assembled, String> {
-    assemble_many_with(repo_paths, incremental, &BuildOptions::default())
+    assemble_many_with(&self_pairs(repo_paths), incremental, &BuildOptions::default())
 }
 
-/// `assemble_many` built with `opts`: the overlay stages that run before a
-/// graph is built (LF.2d's constant pins) read `opts.overlay`.
+/// `assemble_many` over `(root, identity root)` pairs, built with `opts`: the
+/// overlay stages that run before a graph is built (LF.2d's constant pins)
+/// read `opts.overlay`. Each pair's walk, `.glia` inputs, file reads and
+/// markers use its root; its identity (and so its RepoId and the path
+/// disambiguation of a shared key), label, repo root and parse cache use its
+/// identity root. With `incremental`, the cache is loaded from the identity
+/// root and saved back only when the two are the same path (CC.8c,
+/// [`generate_many_as`]).
 pub(crate) fn assemble_many_with(
-    repo_paths: &[String],
+    pairs: &[(String, String)],
     incremental: bool,
     opts: &BuildOptions,
 ) -> Result<Assembled, String> {
@@ -378,7 +407,7 @@ pub(crate) fn assemble_many_with(
     // markers of different repos may interleave; each repo's lines keep their
     // order. CA.9: each walk is timed inside its own closure, so a repo's
     // `walk=` is its walk alone even while the walks overlap.
-    let (walks, _threads) = crate::parallel::par_map_ordered(repo_paths, |path| {
+    let (walks, _threads) = crate::parallel::par_map_ordered(pairs, |(path, identity_root)| {
         let root = PathBuf::from(path);
         if !root.is_dir() {
             return Err(format!("not a directory: {path}"));
@@ -386,20 +415,23 @@ pub(crate) fn assemble_many_with(
         let started = Instant::now();
         let walk = walk_source_files(&root);
         let took = started.elapsed();
-        let ident = repo_identity(&root);
+        let ident = repo_identity(Path::new(identity_root));
         Ok((root, walk, ident, took))
     });
-    let mut walked: Vec<Result<Walked<'_>, String>> = repo_paths
+    let mut walked: Vec<Result<Walked<'_>, String>> = pairs
         .iter()
         .zip(walks)
-        .map(|(path, w)| w.map(|(root, walk, ident, took)| (path, root, walk, ident, took)))
+        .map(|(pair, w)| w.map(|(root, walk, ident, took)| (pair, root, walk, ident, took)))
         .collect();
     let mut rpc = RpcContext::default();
     for w in walked.iter().flatten() {
         rpc.add_files(&w.2.0);
     }
     let mut idents: Vec<RepoIdentity> = walked.iter().flatten().map(|w| w.3.clone()).collect();
-    let abs_paths: Vec<String> = walked.iter().flatten().map(|w| canonical_display(&w.1)).collect();
+    // A shared key is disambiguated by the IDENTITY root's path, so a rev
+    // built in a temp dir keeps its working tree's disambiguated key.
+    let abs_paths: Vec<String> =
+        walked.iter().flatten().map(|w| canonical_display(Path::new(&w.0.1))).collect();
     for line in disambiguate(&mut idents, &abs_paths) {
         eprintln!("{line}");
     }
@@ -409,7 +441,7 @@ pub(crate) fn assemble_many_with(
 
     // Phase 2 — build each repo against the union.
     for entry in walked {
-        let (path, root, (files, regions, md, roots), ident, walk) = match entry {
+        let ((path, identity_root), root, (files, regions, md, roots), ident, walk) = match entry {
             Ok(w) => w,
             Err(e) => {
                 all_errors.push(e);
@@ -421,14 +453,14 @@ pub(crate) fn assemble_many_with(
         // written under another identity must be discarded (#2). A re-spelled
         // or moved path keeps the key, so its sidecar is reused.
         let repo = RepoId::from_canonical(&ident.key);
-        repo_id_marker(&ident, path);
+        repo_id_marker(&ident, identity_root);
         let input = repo_inputs(repo, root.clone(), path.clone());
-        label_inputs.push((repo.0, path.clone()));
+        label_inputs.push((repo.0, identity_root.clone()));
         // First path wins, like `repo_label_map` (inputs sharing a key are
         // disambiguated above, so a repeat is the same repo given twice).
-        repo_roots.entry(repo.0).or_insert_with(|| path.clone());
+        repo_roots.entry(repo.0).or_insert_with(|| identity_root.clone());
         let go = go_modules_for(&root, &roots, path);
-        let mut cache = incremental.then(|| ParseCache::load(path));
+        let mut cache = incremental.then(|| ParseCache::load(identity_root));
         if let Some(c) = cache.as_mut() {
             c.validate_context(&ident.key, &go.context_key());
         }
@@ -446,10 +478,13 @@ pub(crate) fn assemble_many_with(
         let (graphs, parse_errors, mut times) = build_graphs_for_repo(&files, cache.as_mut(), &ctx);
         times.walk = walk;
         inputs.push(input);
-        if let Some(c) = cache.as_ref()
-            && let Err(e) = c.save(path)
+        // A tree built under another's identity (a materialised rev) never
+        // overwrites that identity's sidecar: it keeps the working tree's state.
+        if path == identity_root
+            && let Some(c) = cache.as_ref()
+            && let Err(e) = c.save(identity_root)
         {
-            eprintln!("[incremental] {path}: warning: failed to save parse cache: {e}");
+            eprintln!("[incremental] {identity_root}: warning: failed to save parse cache: {e}");
         }
         all_graphs.extend(graphs);
         // Same slot order as generate_one_inner: regions, projects, docs.
@@ -470,7 +505,7 @@ pub(crate) fn assemble_many_with(
     if all_graphs.is_empty() {
         return Err(format!(
             "no graphs produced from {} paths; first error: {}",
-            repo_paths.len(),
+            pairs.len(),
             all_errors.first().cloned().unwrap_or_default(),
         ));
     }

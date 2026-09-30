@@ -4,12 +4,18 @@
 //! side is the old schema, the after side the new one), and every client the
 //! change left without a provider is listed. Each case is a real git repo
 //! built through the shared two-commit harness.
+//!
+//! CC.8c: `contract_breaks_vs_rev_with` builds the rev pair as two multi-repo
+//! merges (the provider at the rev and at its working tree, each with the
+//! client repos), so a client in ANOTHER repo that loses its provider is an
+//! orphan too.
 
 mod git_fixture;
 
 use git_fixture::GitRepo;
 use glia_engine::contract_breaks::{
     ContractBreakArgs, ContractBreaks, SchemaChange, contract_breaks_vs_rev,
+    contract_breaks_vs_rev_with,
 };
 use glia_engine::contract_fields::FieldChange;
 
@@ -547,4 +553,105 @@ fn no_contracts_absence() {
         .expect("no contract on either side: an absence");
     assert_eq!((a.tier, a.reason), ("FACT", "no_match"));
     assert!(a.note.contains("no contract"), "{}", a.note);
+}
+
+/// CC.8c: the provider is a git repo, the client a separate plain dir (no
+/// git) built beside it. At the rev and in the working tree alike the client
+/// is built at its own tree, so its NodeIds match across the pair and only
+/// the provider's change moves an edge: deleting the route leaves the
+/// other repo's client orphaned. Without `--with` the client is invisible.
+#[test]
+fn client_in_another_repo_is_orphaned() {
+    let provider = GitRepo::init();
+    provider.write("services/api/pyproject.toml", "[project]\nname = \"api\"\n");
+    provider.write("services/api/app.py", APP_PY);
+    // An unchanged contract: the rev side is built under the working tree's
+    // identity, so it pairs with itself and lists nothing. Built under the
+    // temp dir's own identity it would come out removed + added.
+    provider.write("services/api/openapi.yaml", ORDERS_V1);
+    provider.commit("service");
+    let client_dir = tempfile::tempdir().expect("temp dir for the client repo");
+    let web = client_dir.path().join("web");
+    std::fs::create_dir_all(&web).expect("client web dir");
+    std::fs::write(web.join("client.py"), CLIENT_PY).expect("client write");
+    let clients = [client_dir.path().to_str().expect("utf-8 temp path").to_string()];
+
+    let clean = contract_breaks_vs_rev_with(provider.path(), "HEAD", &clients, &backward())
+        .unwrap_or_else(|e| panic!("contract breaks --with vs HEAD: {e}"));
+    assert!(
+        clean.orphaned_clients.is_empty() && clean.schemas.is_empty(),
+        "the committed route serves the other repo's client:\n{}",
+        dump(&clean)
+    );
+    assert_eq!(clean.breaking, 0);
+    assert!(clean.absence.is_some(), "an empty answer says why");
+
+    provider.remove("services/api/app.py");
+    let b = contract_breaks_vs_rev_with(provider.path(), "HEAD", &clients, &backward())
+        .unwrap_or_else(|e| panic!("contract breaks --with vs HEAD: {e}"));
+    assert!(b.schemas.is_empty(), "{}", dump(&b));
+    assert_eq!(b.orphaned_clients.len(), 1, "{}", dump(&b));
+    let o = &b.orphaned_clients[0];
+    assert_eq!(
+        o.client_qname, "endpoint:GET:/orders",
+        "the merged build's client name: the client repo has no project root"
+    );
+    assert_eq!(o.category, "HTTP_CALLS");
+    assert_eq!(o.target_qname, "GET /orders @services/api");
+    assert_eq!((o.reason, o.tier), ("target_removed", "fact"));
+    assert_eq!(
+        (o.file.as_deref(), o.line),
+        (Some("web/client.py"), Some(5)),
+        "located in the client repo's tree, 1-based"
+    );
+    assert_eq!(b.breaking, 1);
+    assert_eq!(b.base, "HEAD");
+    assert!(b.absence.is_none());
+
+    let alone = breaks(&provider, &backward());
+    assert!(
+        alone.orphaned_clients.is_empty(),
+        "built alone, the provider has no client to orphan:\n{}",
+        dump(&alone)
+    );
+    assert_eq!(alone.breaking, 0);
+
+    let err = contract_breaks_vs_rev_with(provider.path(), "HEAD", &clients, &avro("sideways"))
+        .expect_err("an unknown mode is refused before any build");
+    assert!(err.contains("sideways"), "{err}");
+}
+
+/// CC.8c: a client repo that is itself a git work tree is built at its
+/// working tree on BOTH sides: only the provider moves. The client's call is
+/// uncommitted, so rolling the client back to its own HEAD would hide it;
+/// built as it stands, it loses its provider. Both fixtures are `<tmp>/repo`
+/// checkouts without a remote, so they share the identity key `gitdir:repo`
+/// and are disambiguated by path, the same way on both sides.
+#[test]
+fn client_git_work_tree_is_not_rolled_back() {
+    let provider = GitRepo::init();
+    provider.write("services/api/pyproject.toml", "[project]\nname = \"api\"\n");
+    provider.write("services/api/app.py", APP_PY);
+    provider.commit("service");
+    let client = GitRepo::init();
+    client.write("web/README.md", "# web\n");
+    client.commit("client skeleton");
+    client.write("web/client.py", CLIENT_PY);
+    let clients = [client.path().to_string()];
+    provider.remove("services/api/app.py");
+    let b = contract_breaks_vs_rev_with(provider.path(), "HEAD", &clients, &backward())
+        .unwrap_or_else(|e| panic!("contract breaks --with vs HEAD: {e}"));
+    assert!(b.schemas.is_empty(), "{}", dump(&b));
+    assert_eq!(
+        b.orphaned_clients.len(),
+        1,
+        "the client's uncommitted call is on both sides and loses its provider:\n{}",
+        dump(&b)
+    );
+    let o = &b.orphaned_clients[0];
+    assert_eq!(
+        (o.client_qname.as_str(), o.target_qname.as_str(), o.reason),
+        ("endpoint:GET:/orders", "GET /orders @services/api", "target_removed")
+    );
+    assert_eq!(b.breaking, 1);
 }
