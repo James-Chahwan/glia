@@ -30,11 +30,15 @@ pub enum Dialect {
 impl Dialect {
     /// The dialect of a file by its extension; anything that is not a C or
     /// C++ source / header extension (`.h`, no extension) is a
-    /// [`Dialect::Header`].
+    /// [`Dialect::Header`]. CB.1: `.inl` / `.ipp` / `.tpp` hold C++ template
+    /// and inline implementation code, so they take the C++ grammar; the
+    /// C-vs-C++ auto-detect (LB.10a) stays for `.h` alone.
     pub fn from_path(path: &str) -> Self {
         match Path::new(path).extension().and_then(|e| e.to_str()) {
             Some("c") => Dialect::C,
-            Some("cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx") => Dialect::Cpp,
+            Some("cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" | "inl" | "ipp" | "tpp") => {
+                Dialect::Cpp
+            }
             _ => Dialect::Header,
         }
     }
@@ -313,11 +317,13 @@ fn join(a: &str, b: &str) -> String {
 }
 
 /// A header by extension (LB.10b). Only the extension decides, never the
-/// grammar LB.10a picked for a `.h`.
+/// grammar LB.10a picked for a `.h`. CB.1: `.inl` / `.ipp` / `.tpp` are
+/// `#include`d like a header, so a type they declare is the same type in every
+/// includer and takes the header rule.
 fn is_header_path(path: &str) -> bool {
     matches!(
         Path::new(path).extension().and_then(|e| e.to_str()),
-        Some("h" | "hh" | "hpp" | "hxx")
+        Some("h" | "hh" | "hpp" | "hxx" | "inl" | "ipp" | "tpp")
     )
 }
 
@@ -1691,6 +1697,9 @@ namespace app {
             ("a.hpp", Dialect::Cpp),
             ("a.hh", Dialect::Cpp),
             ("a.hxx", Dialect::Cpp),
+            ("a.inl", Dialect::Cpp),
+            ("a.ipp", Dialect::Cpp),
+            ("a.tpp", Dialect::Cpp),
             ("a.h", Dialect::Header),
             ("src/dir.v2/a.h", Dialect::Header),
         ] {
@@ -1881,6 +1890,30 @@ namespace app {
         assert!(node_at(&fp, node_kind::STRUCT, "c::p.c::p").is_some(), "{:?}", all_qnames(&fp));
         let fp = parse_file("static inline int sq(int x) { return x * x; }\n", "src/a.h", "src::a.h", Dialect::Header, repo()).unwrap();
         assert!(node_at(&fp, node_kind::FUNCTION, "src::a.h::sq").is_some(), "{:?}", all_qnames(&fp));
+    }
+
+    /// CB.1: `.inl` / `.ipp` / `.tpp` are included implementation files:
+    /// parsed with the C++ grammar and named by the header rule, so a global
+    /// type takes its directory (`src::P`), while the same type in a `.cpp`
+    /// keeps its file scope. Their free functions keep the file scope, like a
+    /// header's.
+    #[test]
+    fn included_implementation_files_take_the_header_rule() {
+        let source = "struct P {};\ntemplate <typename T> inline T twice(T v) { return v * 2; }\n";
+        for (file, module) in [("src/x.inl", "src::x.inl"), ("src/x.ipp", "src::x.ipp"), ("src/x.tpp", "src::x.tpp")] {
+            let dialect = Dialect::from_path(file);
+            assert_eq!(dialect, Dialect::Cpp, "{file}");
+            let fp = parse_file(source, file, module, dialect, repo()).unwrap();
+            assert!(node_at(&fp, node_kind::STRUCT, "src::P").is_some(), "{file}: {:?}", all_qnames(&fp));
+            assert!(
+                node_at(&fp, node_kind::FUNCTION, &format!("{module}::twice")).is_some(),
+                "{file}: {:?}",
+                all_qnames(&fp)
+            );
+        }
+        let fp = parse_file(source, "src/x.cpp", "src::x.cpp", Dialect::from_path("src/x.cpp"), repo()).unwrap();
+        assert!(node_at(&fp, node_kind::STRUCT, "src::x.cpp::P").is_some(), "{:?}", all_qnames(&fp));
+        assert!(node_at(&fp, node_kind::STRUCT, "src::P").is_none(), "{:?}", all_qnames(&fp));
     }
 
     /// LB.10b: an out-of-line member binds to a class this file defines
@@ -2390,6 +2423,9 @@ int twice(int);
             ("a.hh", true),
             ("a.hpp", true),
             ("a.hxx", true),
+            ("a.inl", true),
+            ("a.ipp", true),
+            ("a.tpp", true),
             ("a.c", false),
             ("a.cc", false),
             ("a.cpp", false),

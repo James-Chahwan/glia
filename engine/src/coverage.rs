@@ -76,8 +76,8 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     CoverageCaveat {
         language: "*",
         edge_category: "GRAPHQL_CALLS",
-        note: "GraphQL SDL embedded in code is read only from a GraphQL-marked literal: a gql / graphql tag or call, a buildSchema / MustParseSchema / ParseSchema / from_definition argument, a /* GraphQL */ or #graphql literal, a GRAPHQL / GQL heredoc, or a literal bound to a variable or key named typeDefs / type_defs. SDL kept unmarked in a differently named variable (a plain template in `const schema = ...`, a Go string passed to MustParseSchema by name) is not read: its root types and fields mint no GRAPHQL_RESOLVER, so its clients' operations pair with nothing. `.graphql` / `.gql` files are read whole.",
-        verify: "grep 'type Query {' / 'type Mutation {' outside .graphql / .gql files and read the variable that holds it",
+        note: "GraphQL SDL embedded in code is read only from a GraphQL-marked literal: a gql / graphql tag or call, a buildSchema / MustParseSchema / ParseSchema / from_definition argument, a /* GraphQL */ or #graphql literal, a GRAPHQL / GQL heredoc, or a literal bound to a variable or key named typeDefs / type_defs. SDL kept unmarked in a differently named variable (a plain template in `const schema = ...`, a Go string passed to MustParseSchema by name) is not read: its root types and fields mint no GRAPHQL_RESOLVER, so its clients' operations pair with nothing. `.graphql` / `.graphqls` / `.gql` files are read whole.",
+        verify: "grep 'type Query {' / 'type Mutation {' outside .graphql / .graphqls / .gql files and read the variable that holds it",
     },
     // LA.18b: a path-less upgrade handler (gorilla, nhooyr, raw ASP.NET) pairs
     // only through the routes that reach its upgrading function, and a client

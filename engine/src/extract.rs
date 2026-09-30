@@ -38,7 +38,12 @@ pub(crate) fn detect_language(path: &str) -> Option<&'static str> {
         "rb" => Some("ruby"),
         "php" => Some("php"),
         "swift" => Some("swift"),
-        "c" | "cpp" | "cc" | "cxx" | "h" | "hpp" => Some("c_cpp"),
+        // CB.1: `.hh` / `.hxx` headers and the `.inl` / `.ipp` / `.tpp`
+        // implementation files a header `#include`s (the set
+        // code-domain's `local_lookup_key` resolves an include against).
+        "c" | "cpp" | "cc" | "cxx" | "h" | "hh" | "hpp" | "hxx" | "inl" | "ipp" | "tpp" => {
+            Some("c_cpp")
+        }
         "scala" => Some("scala"),
         "clj" | "cljs" | "cljc" => Some("clojure"),
         "dart" => Some("dart"),
@@ -47,8 +52,9 @@ pub(crate) fn detect_language(path: &str) -> Option<&'static str> {
         "tf" | "hcl" => Some("terraform"),
         "proto" => Some("proto"),
         // A10.4: a standalone GraphQL schema. Routed to the SDL resolver scan
-        // in `route.rs`, never to a language parser.
-        "graphql" | "gql" => Some("graphql"),
+        // in `route.rs`, never to a language parser. CB.1: `.graphqls` is the
+        // schema extension Spring for GraphQL and gqlgen default to.
+        "graphql" | "graphqls" | "gql" => Some("graphql"),
         // A10.6: an Avro schema. Routed to the MESSAGE_TYPE scan in
         // `route.rs` by extension, never through A10.8's `.json` sniff.
         "avsc" => Some("avro"),

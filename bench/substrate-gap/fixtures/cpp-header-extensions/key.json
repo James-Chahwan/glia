@@ -1,0 +1,76 @@
+{
+  "framework": "cpp-header-extensions",
+  "language": "c_cpp",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-C2: .hh / .hxx / .inl / .ipp are C++ files, but engine/src/extract.rs detect_language maps only c|cpp|cc|cxx|h|hpp, so the walk never admits them: no MODULE, no class, and an out-of-line member whose class lives in a .hh stays an unbound FUNCTION src::widget.cc::Widget::run (LB.10c's unknown-qualifier rule) instead of joining include::Widget as a METHOD. Measured on HEAD 2170ff8.",
+  "expect_nodes": [
+    {
+      "kind": "MODULE",
+      "name": "include::widget.hh"
+    },
+    {
+      "kind": "MODULE",
+      "name": "src::detail.inl"
+    },
+    {
+      "kind": "MODULE",
+      "name": "src::impl.ipp"
+    },
+    {
+      "kind": "MODULE",
+      "name": "src::pair.hxx"
+    },
+    {
+      "kind": "CLASS",
+      "name": "include::Widget",
+      "note": "header type, directory-scoped (LB.10b)"
+    },
+    {
+      "kind": "STRUCT",
+      "name": "src::Pair"
+    },
+    {
+      "kind": "METHOD",
+      "name": "include::Widget::run",
+      "note": "the out-of-line definition joins the .hh class (LB.10c)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "src::widget.cc",
+      "to": "include::widget.hh",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "src::widget.cc",
+      "to": "src::detail.inl",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "include::Widget::run",
+      "to": "include::Widget::size",
+      "category": "CALLS",
+      "note": "this->size() through the joined class"
+    },
+    {
+      "from": "include::Widget::run",
+      "to": "src::detail.inl::detail_helper",
+      "category": "CALLS",
+      "note": "bare call through a direct #include (LB.10a)"
+    },
+    {
+      "from": "include::Widget::run",
+      "to": "src::impl.ipp::impl_twice",
+      "category": "CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "FUNCTION",
+      "name": "src::widget.cc::Widget::run",
+      "note": "what HEAD mints: LB.10c finds no class Widget (its .hh is never walked) and leaves the definition a FUNCTION of its file named Widget::run"
+    }
+  ]
+}

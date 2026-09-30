@@ -303,9 +303,10 @@ pub(crate) fn parse_repo_files(
         );
     }
 
-    // A10.4 fired_on marker: `.graphql` / `.gql` files are walked and their
-    // SDL fields are GRAPHQL_RESOLVER nodes. `files` counts every schema
-    // file routed, so `resolvers=0` flags operation-only documents.
+    // A10.4 fired_on marker: `.graphql` / `.graphqls` / `.gql` files are
+    // walked and their SDL fields are GRAPHQL_RESOLVER nodes. `files` counts
+    // every schema file routed, so `resolvers=0` flags operation-only
+    // documents.
     if sdl_files > 0 {
         eprintln!("[graphql-sdl] files={sdl_files} resolvers={sdl_resolvers}");
     }
@@ -911,12 +912,12 @@ fn route_branches(
         return Routed::NonCode { key: "proto", fp, tally: t };
     }
 
-    // A10.4: a `.graphql` / `.gql` schema reaches the SDL field scan, so a
-    // schema-first service has resolvers for its clients' operations to
-    // pair with. LA.27: the file is read whole as SDL; a code file reads
-    // SDL only inside a GraphQL-marked literal. Resolver side only: a
-    // schema declares server fields, and the operation needles would mint
-    // client ops from its keywords.
+    // A10.4: a `.graphql` / `.graphqls` / `.gql` schema reaches the SDL
+    // field scan, so a schema-first service has resolvers for its clients'
+    // operations to pair with. LA.27: the file is read whole as SDL; a code
+    // file reads SDL only inside a GraphQL-marked literal. Resolver side
+    // only: a schema declares server fields, and the operation needles would
+    // mint client ops from its keywords.
     if lang == "graphql" {
         *branch = "graphql";
         let module_id = synthetic_module_id(repo, path);
@@ -1131,7 +1132,7 @@ pub(crate) struct ModuleQnames {
     same_group: BTreeMap<&'static str, usize>,
     /// LB.10a: C/C++ files, all named by file name ...
     c_cpp_files: usize,
-    /// ... of which headers (`.h` / `.hh` / `.hpp` / `.hxx`).
+    /// ... of which headers ([`is_c_cpp_header`]).
     c_cpp_headers: usize,
 }
 
@@ -1241,11 +1242,13 @@ impl ModuleQnames {
     }
 }
 
-/// A C/C++ header by extension (the LB.10a marker's `headers` count).
+/// A C/C++ header by extension (the LB.10a marker's `headers` count). CB.1:
+/// `.inl` / `.ipp` / `.tpp` count too: they are `#include`d like a header,
+/// never compiled alone.
 fn is_c_cpp_header(path: &str) -> bool {
     matches!(
         std::path::Path::new(path).extension().and_then(|e| e.to_str()),
-        Some("h" | "hh" | "hpp" | "hxx")
+        Some("h" | "hh" | "hpp" | "hxx" | "inl" | "ipp" | "tpp")
     )
 }
 
@@ -1534,6 +1537,63 @@ mod tests {
             !fp.nav.kind_by_id.values().any(|k| *k == node_kind::GRAPHQL_OPERATION),
             "a schema declares no client operations"
         );
+    }
+
+    /// CB.1: `.graphqls` (Spring for GraphQL's and gqlgen's schema
+    /// extension) takes the `.graphql` branch: a MODULE named by its full file
+    /// name (LB.9a) and a GRAPHQL_RESOLVER per root field.
+    #[test]
+    fn graphqls_schema_files_route_to_the_sdl_scan() {
+        assert_eq!(detect_language("schema/schema.graphqls"), Some("graphql"));
+        assert_eq!(parser_route("schema/schema.graphqls"), None, "never a code parser");
+
+        let sdl = "type Query {\n  user: User\n}\n\ntype User {\n  id: ID!\n}\n";
+        let parses = route("server/schema.graphqls", sdl);
+        assert_eq!(parses.keys().copied().collect::<Vec<_>>(), ["graphql"]);
+        let fp = &parses["graphql"][0];
+        let module_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::MODULE,
+            "server::schema.graphqls",
+        );
+        assert_eq!(fp.nodes[0].id, module_id, "the schema file is a MODULE");
+        let user = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::GRAPHQL_RESOLVER,
+            "graphql_resolver:user",
+        );
+        assert_eq!(fp.nav.kind_by_id.get(&user), Some(&node_kind::GRAPHQL_RESOLVER));
+        assert!(fp.edges.iter().any(|e| e.from == module_id
+            && e.to == user
+            && e.category == edge_category::CONTAINS));
+    }
+
+    /// CB.1: every C/C++ extension routes to the c_cpp parser - `.hh` /
+    /// `.hxx` headers and the `.inl` / `.ipp` / `.tpp` files a header
+    /// `#include`s - and each is a code file named by its file name.
+    #[test]
+    fn c_cpp_header_extensions_route_to_the_c_cpp_parser() {
+        for path in [
+            "a.c", "a.cc", "a.cpp", "a.cxx", "a.h", "a.hh", "a.hpp", "a.hxx", "a.inl", "a.ipp",
+            "a.tpp",
+        ] {
+            assert_eq!(detect_language(path), Some("c_cpp"), "{path}");
+            assert_eq!(parser_route(path), Some("c_cpp"), "{path}");
+        }
+        let parses = route("src/detail.inl", "inline int detail_helper() { return 1; }\n");
+        let fp = &parses["c_cpp"][0];
+        let module_id =
+            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "src::detail.inl");
+        assert_eq!(fp.nodes[0].id, module_id, "a .inl is a MODULE named by file name");
+        let helper = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::FUNCTION,
+            "src::detail.inl::detail_helper",
+        );
+        assert!(fp.nodes.iter().any(|n| n.id == helper), "its inline function is walked");
     }
 
     #[test]
@@ -1943,11 +2003,17 @@ mod tests {
         let plan = ModuleQnames::plan(&files_of(&["native/w.cpp", "native/w.dart"]));
         assert_eq!(plan.module_qname("native/w.dart"), "native::w");
         assert_eq!(plan.marker("r"), None);
-        // `.hh` / `.hxx` are headers by extension but the walk never routes
-        // them (`detect_language`), so they are not counted.
+        // CB.1: `.hh` is a routed header (`detect_language`), counted like
+        // `.h` / `.hpp`; `.inl` / `.ipp` / `.tpp` are included, so headers too.
         let plan = ModuleQnames::plan(&files_of(&["a.h", "b.hpp", "c.c", "d.hh"]));
-        assert_eq!((plan.c_cpp_files, plan.c_cpp_headers), (3, 2));
-        assert!(is_c_cpp_header("x/d.hh") && is_c_cpp_header("d.hxx") && !is_c_cpp_header("d.cc"));
+        assert_eq!((plan.c_cpp_files, plan.c_cpp_headers), (4, 3));
+        let plan = ModuleQnames::plan(&files_of(&["a.hxx", "b.inl", "c.ipp", "d.tpp", "e.cc"]));
+        assert_eq!((plan.c_cpp_files, plan.c_cpp_headers), (5, 4));
+        assert_eq!(plan.module_qname("b.inl"), "b.inl", "named by file name");
+        for header in ["x/d.hh", "d.hxx", "d.inl", "d.ipp", "d.tpp"] {
+            assert!(is_c_cpp_header(header), "{header}");
+        }
+        assert!(!is_c_cpp_header("d.cc") && !is_c_cpp_header("d.cxx"));
     }
 
     /// LB.10a through the router: a header + implementation pair parses to
