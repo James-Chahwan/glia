@@ -69,6 +69,13 @@ def journal_results(run):
     return out
 
 
+def packet_id(field):
+    """The packet id an agent reports. Agents sometimes append the title after an em dash, an
+    en dash or a plain ` - ` (0.5.1 W7's CB.15 did), so take the leading id token, not a split."""
+    m = re.match(r"\s*([A-Z][A-Z0-9]?\d*\.\d+[a-z]?)", field)
+    return m.group(1) if m else field.split("—")[0].strip()
+
+
 def section(text, head):
     m = re.search(rf"^{re.escape(head)}[^\n]*?(\d+)\)?:?\s*(\d+)?\s*$", text, re.M)
     if not m:
@@ -131,7 +138,7 @@ def main():
     got = {}
     for run in runs:
         for r in journal_results(run):
-            got[r["packet"].split("—")[0].strip()] = r
+            got[packet_id(r["packet"])] = r
     res = list(got.values())
     say(f"== wave {wave}: {len(res)}/{len(ids)} returned")
     for i in ids:
@@ -277,7 +284,7 @@ def main():
     cf = json.loads(cp.read_text())
     folded = {}
     for r in res:
-        src = r["packet"].split("—")[0].strip()
+        src = packet_id(r["packet"])
         for t in r.get("followups") or []:
             for tgt in set(pat.findall(t)) & rem:
                 note = f"HANDOFF FROM {src} (w{wave}): {t.strip()}"
