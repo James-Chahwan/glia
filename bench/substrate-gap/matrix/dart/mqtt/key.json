@@ -1,0 +1,33 @@
+{
+  "framework": "dart-mqtt-client",
+  "language": "dart",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "mqtt",
+  "cells": [
+    "dart/mqtt"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "sensors/temp"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "sensors/temp"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "sensors/temp",
+      "to": "sensors/temp",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "mqtt_client (Flutter IoT): subscribe / publishMessage || CF.10a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=1/2 literal=1/2 route=0/1 forbid=0/0) via=queue. Predicted extractor gap (backlog, not fixed by the probe): consumer fires (`client.subscribe('x', qos)`); producer `client.publishMessage('x', qos, payload)` has no row in parsers/code/extractors/src/queues.rs."
+}

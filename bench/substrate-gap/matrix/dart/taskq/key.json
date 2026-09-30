@@ -1,0 +1,32 @@
+{
+  "framework": "dart-redis-task-queue",
+  "language": "dart",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "taskq",
+  "cells": [
+    "dart/taskq"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "email:welcome"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "email:welcome"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "email:welcome",
+      "to": "email:welcome",
+      "category": "QUEUE_FLOWS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "redis_task_queue (Redis-backed task queue for server-side Dart, pub.dev; API from its README): QueueClient.enqueue(Task('email:welcome', ..)) / worker.handle('email:welcome', ..) || CF.10a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): no Dart task-queue row in parsers/code/extractors/src/queues.rs; the shape is Go asynq's (task type string on both sides, the go/taskq gap)."
+}

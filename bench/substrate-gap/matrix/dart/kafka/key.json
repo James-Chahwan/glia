@@ -1,0 +1,32 @@
+{
+  "framework": "dart-kafka-dart",
+  "language": "dart",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "kafka",
+  "cells": [
+    "dart/kafka"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "kafka_dart (librdkafka binding, pub.dev; API from its README): KafkaFactory.createAndInitializeConsumer + consumer.subscribe(['orders']) / KafkaFactory.createAndInitializeProducer + producer.sendMessage(topic: 'orders', ..) || CF.10a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=2/2 literal=1/2 route=0/1 forbid=0/0) via=queue. Predicted extractor gap (backlog, not fixed by the probe): the consumer fires (consumer.subscribe with a leading list literal); the `producer.send` row (KeyedOrArg topic) prefix-matches `producer.sendMessage(` and reads no topic from its named `topic:` argument, so the producer collapses to queue_producer:unresolved:kafka and nothing pairs."
+}

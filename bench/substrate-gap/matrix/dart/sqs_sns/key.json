@@ -1,0 +1,33 @@
+{
+  "framework": "dart-aws-sqs-api",
+  "language": "dart",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "sqs_sns",
+  "cells": [
+    "dart/sqs_sns"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "aws_sqs_api (agilord aws_client, the Dart AWS SDK): sendMessage / receiveMessage(queueUrl:) || CF.10a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): aws_sqs_api `sqs.sendMessage(queueUrl: ..)`: the `.sendMessage(` row's gate lists no Dart package."
+}
