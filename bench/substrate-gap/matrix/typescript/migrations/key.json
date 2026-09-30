@@ -1,0 +1,33 @@
+{
+  "framework": "ts-knex-migration",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "migrations",
+  "cells": [
+    "typescript/migrations"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "DATA_ENTITY",
+      "name": "users"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "20240101_create_users",
+      "to": "users",
+      "category": "ACCESSES_DATA"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "DATA_ENTITY",
+      "name": "email",
+      "max_nodes": 0
+    }
+  ],
+  "note": "knex migration in TypeScript: knex.schema.createTable('users', ...) || CF.3 baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=1/1 literal=1/1 route=1/1 forbid=1/1) via=db. Nothing to fix: the cell is covered at HEAD."
+}

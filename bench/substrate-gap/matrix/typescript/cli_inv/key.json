@@ -1,0 +1,34 @@
+{
+  "framework": "ts-child-process-invocation",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_inv",
+  "cells": [
+    "typescript/cli_inv"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "shipit"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli_invoke:shipit",
+      "to": "cli:shipit",
+      "category": "CLI_INVOKES"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "deploy",
+      "max_nodes": 0
+    }
+  ],
+  "note": "node:child_process spawnSync argv form against the commander bin from typescript/cli_def || CF.3 baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=1/1 literal=1/1 route=1/1 forbid=1/1) via=cli. Nothing to fix: the cell is covered at HEAD."
+}

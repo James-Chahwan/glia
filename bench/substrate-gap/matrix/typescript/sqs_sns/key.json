@@ -1,0 +1,39 @@
+{
+  "framework": "ts-aws-sdk-v3-sqs",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "sqs_sns",
+  "cells": [
+    "typescript/sqs_sns"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "SendMessageCommand",
+      "max_nodes": 0
+    }
+  ],
+  "note": "AWS SDK v3 command objects; LA.29 keeps the MediatR .send(new needle off @aws-sdk files || CF.3 baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=2/2 literal=2/2 route=1/1 forbid=1/1) via=queue. Nothing to fix: the cell is covered at HEAD."
+}

@@ -1,4 +1,5 @@
 {
+  "cells": ["typescript/config"],
   "framework": "xcut-config-read-fn",
   "language": "typescript",
   "dirs": ["."],
