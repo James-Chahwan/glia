@@ -1,0 +1,15 @@
+{
+  "framework": "test-fixture-paths",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "CA-11: path-based test / fixture provenance. A node whose POSITION file sits under a test-tree directory segment (e2e, cypress, fixtures, __fixtures__, testdata, __mocks__, integration_test, and test / tests / __tests__ at ANY depth including the first segment, case-insensitive) or whose file ends in a test suffix (.test.tsx, .spec.jsx, .cy.ts, ...) carries ORIGIN provenance test_fixture, which tests_for, gaps, patterns and engram-export already read. Kina frontend/e2e/push-prompt.js writePrefs and glia's bench/substrate-gap/fixtures/** are the dogfood cases. src/cart.ts addItem is the app-code control (engine unit test pins it untagged: key.json has no forbid form for a cell). Baseline (leap wheel, at 2170ff8 and again at 0f449e5 before CG.2a): ORIGIN 1/7 (only the MODULE control).",
+  "expect_cells": [
+    {"kind": "FUNCTION", "node": "e2e::checkout::writePrefs", "cell": "ORIGIN", "contains": "test_fixture", "note": "Playwright script under a top-level e2e/"},
+    {"kind": "FUNCTION", "node": "cypress::e2e::login.cy::loginAs", "cell": "ORIGIN", "contains": "test_fixture", "note": "Cypress spec"},
+    {"kind": "FUNCTION", "node": "bench::fixtures::shop::orders::get_order", "cell": "ORIGIN", "contains": "test_fixture", "note": "a bench fixture tree (glia's substrate-gap shape)"},
+    {"kind": "FUNCTION", "node": "testdata::seed::Seed", "cell": "ORIGIN", "contains": "test_fixture", "note": "Go testdata/"},
+    {"kind": "FUNCTION", "node": "__mocks__::api::mockFetch", "cell": "ORIGIN", "contains": "test_fixture", "note": "Jest __mocks__/"},
+    {"kind": "FUNCTION", "node": "src::cart.test::renderCart", "cell": "ORIGIN", "contains": "test_fixture", "note": "a co-located .test.tsx: today its MODULE is tagged (qname tail .test) but its functions are not"},
+    {"kind": "MODULE", "node": "src::cart.test", "cell": "ORIGIN", "contains": "test_fixture", "note": "CONTROL: tagged at HEAD by the qname rule"}
+  ]
+}

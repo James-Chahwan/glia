@@ -105,6 +105,18 @@ fn fail(m: &MergedGraph, qname: &str) -> Vec<Value> {
     serde_json::from_str::<Vec<Value>>(s).expect("FAIL is an entry array")
 }
 
+/// True when the node named `qname` (any copy) carries ORIGIN provenance
+/// `test_fixture`.
+fn origin_is_test_fixture(m: &MergedGraph, qname: &str) -> bool {
+    let ids = ids_of(m, qname);
+    m.graphs.iter().flat_map(|g| g.nodes.iter().filter(|n| ids.contains(&n.id))).any(|n| {
+        n.cells.iter().any(|c| {
+            c.kind == cell_type::ORIGIN
+                && matches!(&c.payload, CellPayload::Json(s) if s.contains(r#""provenance":"test_fixture""#))
+        })
+    })
+}
+
 /// Every node carrying a FAIL cell, by qname, sorted.
 fn failing(m: &MergedGraph) -> Vec<String> {
     let mut out: Vec<String> = m
@@ -216,39 +228,45 @@ fn ambiguous_bare_name_is_not_guessed() {
 #[test]
 fn trace_implicates_non_test_frames() {
     // The test calls a helper in its own file (not a test-shaped name, not
-    // under tests/: only the same-file rule leaves it out), which calls a
-    // conftest helper (ORIGIN test_fixture), which calls into the app.
+    // under tests/, not a test_*.py file: only the same-file rule leaves it
+    // out), which calls a conftest helper (ORIGIN test_fixture), which calls
+    // into the app.
     let test_py = "from tests.conftest import make_orders\n\ndef build_orders():\n    return make_orders()\n\ndef test_list_orders():\n    assert build_orders() == []\n";
     let conftest = "def make_orders():\n    return list_orders()\n";
-    let d = tree(&[("api/app.py", APP_PY), ("checks/test_app.py", test_py), ("tests/conftest.py", conftest)]);
-    let trace = "checks/test_app.py:7: in test_list_orders\n    assert build_orders() == []\n\
-                 checks/test_app.py:4: in build_orders\n    return make_orders()\n\
+    let d = tree(&[("api/app.py", APP_PY), ("checks/app_checks.py", test_py), ("tests/conftest.py", conftest)]);
+    let trace = "checks/app_checks.py:7: in test_list_orders\n    assert build_orders() == []\n\
+                 checks/app_checks.py:4: in build_orders\n    return make_orders()\n\
                  tests/conftest.py:2: in make_orders\n    return list_orders()\n\
                  /ci/work/repo/api/app.py:2: in list_orders\n    return helper()\n\
                  api/app.py:5: in helper\n    raise ValueError(\"boom\")\nE   ValueError: boom";
     let case = TestCaseRecord {
-        file: Some("checks/test_app.py".into()),
+        file: Some("checks/app_checks.py".into()),
         line: Some(6),
         message: Some("ValueError: boom".into()),
         trace: Some(trace.into()),
-        ..failed(Some("checks.test_app"), "test_list_orders")
+        ..failed(Some("checks.app_checks"), "test_list_orders")
     };
     snapshot(d.path(), None, &[case]);
     let m = build(d.path());
+    // Neither the path rule nor the qname rule tags build_orders: the
+    // same-file rule is the only one that can leave frame 1 out (CG.2a).
+    assert!(!ids_of(&m, "checks::app_checks::build_orders").is_empty());
+    assert!(!origin_is_test_fixture(&m, "checks::app_checks::build_orders"));
+    assert!(origin_is_test_fixture(&m, "tests::conftest::make_orders"));
     // Frames 1 (build_orders, the test's file) and 2 (make_orders, a test
     // fixture) are not implicated.
-    assert_eq!(failing(&m), ["api::app::helper", "api::app::list_orders", "checks::test_app::test_list_orders"]);
+    assert_eq!(failing(&m), ["api::app::helper", "api::app::list_orders", "checks::app_checks::test_list_orders"]);
     for (qname, frame) in [("api::app::list_orders", 3), ("api::app::helper", 4)] {
         let entries = fail(&m, qname);
         assert_eq!(entries.len(), 1, "{qname}: {entries:?}");
         let e = &entries[0];
         assert_eq!(e["role"], "implicated", "{qname}");
         assert_eq!(e["frame"], frame, "{qname}");
-        assert_eq!(e["id"], format!("checks.test_app::test_list_orders#{frame}"));
+        assert_eq!(e["id"], format!("checks.app_checks::test_list_orders#{frame}"));
         assert_eq!(e["message"], "ValueError: boom");
         assert!(e.get("via").is_none(), "{e}");
     }
-    let t = &fail(&m, "checks::test_app::test_list_orders")[0];
+    let t = &fail(&m, "checks::app_checks::test_list_orders")[0];
     assert_eq!((&t["role"], &t["via"]), (&"test".into(), &"file_line".into()));
 }
 

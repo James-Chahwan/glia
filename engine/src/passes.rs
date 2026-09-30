@@ -768,6 +768,7 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph) {
     use glia_code_domain::{cell_type, node_kind};
     use glia_core::{Cell, CellPayload};
 
+    let mut stats = ProvenanceStats::default();
     for g in &mut merged.graphs {
         let nodes = &mut g.nodes;
         let nav = &g.nav;
@@ -801,16 +802,71 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph) {
                 "generated_proto"
             } else if is_test_fixture(&file, qname) {
                 // test files + seeders/load-testers — droppable by default at
-                // recall, opt-in via engram's --include-tests. (glia-v3 #6)
+                // recall, opt-in via engram's --include-tests. (glia-v3 #6;
+                // the path rule, CG.2a, counted apart from a qname-only hit)
+                if is_test_path(&file).is_some() {
+                    stats.test_fixture_path += 1;
+                } else {
+                    stats.test_fixture_qname += 1;
+                }
                 "test_fixture"
             } else {
                 continue;
             };
+            stats.count(provenance);
             n.cells.push(Cell {
                 kind: cell_type::ORIGIN,
                 payload: CellPayload::Json(format!(r#"{{"provenance":"{provenance}"}}"#)),
             });
         }
+    }
+    if let Some(line) = stats.marker() {
+        eprintln!("{line}");
+    }
+}
+
+/// ORIGIN cells one `tag_synthetic_provenance` run stamped, by provenance;
+/// `test_fixture` split by whether the path rule fired or only the qname rule.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ProvenanceStats {
+    test_fixture_path: usize,
+    test_fixture_qname: usize,
+    generated_proto: usize,
+    generated: usize,
+    dependency: usize,
+    synthetic: usize,
+}
+
+impl ProvenanceStats {
+    /// Count one stamped provenance; `test_fixture` is counted by its rule
+    /// at the stamp site.
+    fn count(&mut self, provenance: &str) {
+        match provenance {
+            "generated_proto" => self.generated_proto += 1,
+            "generated" => self.generated += 1,
+            "dependency" => self.dependency += 1,
+            "synthetic" => self.synthetic += 1,
+            _ => {}
+        }
+    }
+
+    /// The fired_on line, `None` when the run stamped nothing.
+    fn marker(&self) -> Option<String> {
+        let test_fixture = self.test_fixture_path + self.test_fixture_qname;
+        let total =
+            test_fixture + self.generated_proto + self.generated + self.dependency + self.synthetic;
+        (total > 0).then(|| {
+            format!(
+                "[provenance] test_fixture={test_fixture} (path={} qname={}) generated_proto={} \
+                 generated={} dependency={} synthetic={}",
+                self.test_fixture_path,
+                self.test_fixture_qname,
+                self.generated_proto,
+                self.generated,
+                self.dependency,
+                self.synthetic,
+            )
+        })
     }
 }
 
@@ -850,20 +906,83 @@ fn is_generated_proto(file: &str) -> bool {
         || file.contains(".pb.")
 }
 
-/// Test / fixture / seeder code, by file path or qname shape. (glia-v3 #6)
+/// Test / fixture / seeder code, by file path or qname shape. (glia-v3 #6;
+/// the path half is `is_test_path`, CG.2a)
 fn is_test_fixture(file: &str, qname: &str) -> bool {
-    file.ends_with("_test.go")
-        || file.ends_with("_test.dart")
-        || file.ends_with(".spec.ts")
-        || file.ends_with(".test.ts")
-        || file.ends_with(".spec.js")
-        || file.ends_with(".test.js")
-        || file.ends_with("_test.py")
-        || file.ends_with("_spec.rb")
-        || file.contains("/tests/")
-        || file.contains("/__tests__/")
-        || file.contains("/test/")
-        || is_test_qname(qname)
+    is_test_path(file).is_some() || is_test_qname(qname)
+}
+
+/// Directory names that make every file beneath them test / fixture code
+/// (CG.2a): matched as a whole path SEGMENT at any depth, the first segment
+/// included, ASCII case-folded — never as a substring, so `latest/`,
+/// `contest/` and `fixtures-view/` stay app code. Deliberately absent:
+/// `spec` / `specs` (spec-kit feature docs; Ruby `spec/` keeps its qname
+/// rule), `bench` (real tooling), `examples` (runnable programs) and `mocks`
+/// (dev-server mock data as often as test doubles).
+const TEST_DIR_SEGMENTS: &[&str] = &[
+    "test",
+    "tests",
+    "__tests__",
+    "e2e",
+    "cypress",
+    "integration_test",
+    "testdata",
+    "fixtures",
+    "__fixtures__",
+    "__mocks__",
+];
+
+/// File-name endings of a test file, matched against the lower-cased base
+/// name. The first eight are the glia-v3 #6 list.
+const TEST_FILE_SUFFIXES: &[&str] = &[
+    "_test.go",
+    "_test.dart",
+    "_test.py",
+    "_spec.rb",
+    ".spec.ts",
+    ".test.ts",
+    ".spec.js",
+    ".test.js",
+    ".spec.tsx",
+    ".test.tsx",
+    ".spec.jsx",
+    ".test.jsx",
+    ".spec.mjs",
+    ".test.mjs",
+    ".cy.ts",
+    ".cy.js",
+    ".e2e-spec.ts",
+    ".e2e-spec.js",
+];
+
+/// Which path rule classed a file as test code — the `[provenance]` marker
+/// counts the path rule apart from the qname rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestPathRule {
+    /// The base name ends in a `TEST_FILE_SUFFIXES` entry.
+    Suffix,
+    /// A pytest module: `test_*.py`.
+    Prefix,
+    /// A directory component is one of `TEST_DIR_SEGMENTS`.
+    Dir,
+}
+
+/// Classify a repo-relative POSITION file as test / fixture code by its path
+/// alone (CG.2a). Components split on `/` (a `\` counts as one); the base name
+/// is tested for a suffix, then the `test_*.py` prefix, then every earlier
+/// component for a test-tree directory segment.
+fn is_test_path(file: &str) -> Option<TestPathRule> {
+    let mut parts = file.rsplit(['/', '\\']);
+    let base = parts.next().unwrap_or_default().to_ascii_lowercase();
+    if TEST_FILE_SUFFIXES.iter().any(|s| base.ends_with(s)) {
+        return Some(TestPathRule::Suffix);
+    }
+    if base.starts_with("test_") && base.ends_with(".py") {
+        return Some(TestPathRule::Prefix);
+    }
+    parts
+        .any(|seg| TEST_DIR_SEGMENTS.iter().any(|d| seg.eq_ignore_ascii_case(d)))
+        .then_some(TestPathRule::Dir)
 }
 
 // ----------------------------------------------------------------------------
@@ -1870,6 +1989,79 @@ mod passes_tests {
         assert!(is_test_fixture("app/login.spec.ts", "quokka_web::login"));
         assert!(is_test_fixture("pkg/foo.go", "pkg::tests::seed_users"));
         assert!(!is_test_fixture("services/auth.go", "turps::auth::HashPassword"));
+    }
+
+    #[test]
+    fn test_fixture_paths_by_segment_and_suffix() {
+        // CG.2a: a test-tree directory segment at any depth (the first one
+        // included, any case) or a test-file suffix / prefix tags the node,
+        // whatever its qname says.
+        for (file, qname) in [
+            ("frontend/e2e/push-prompt.js", "frontend::e2e::push-prompt::writePrefs"),
+            (
+                "bench/substrate-gap/fixtures/csharp-aspnet-composed/server/OrdersController.cs",
+                "Shop::Controllers::OrdersController::GetOrder",
+            ),
+            ("e2e/checkout.js", "e2e::checkout"),
+            ("cypress/e2e/login.cy.ts", "cypress::e2e::login.cy::loginAs"),
+            ("testdata/seed.go", "x::Seed"),
+            ("__mocks__/api.ts", "__mocks__::api::mockFetch"),
+            ("tests/fixtures/arch_monorepo/api/main.go", "api::main"),
+            ("Tests/AppTests/FooTests.swift", "AppTests::FooTests"),
+            ("src/cart.test.tsx", "src::cart.test::renderCart"),
+            ("app/test_orders.py", "app::test_orders::helper"),
+            ("test/app.e2e-spec.ts", "app::bootstraps"),
+            ("integration_test/app_test.dart", "app::main"),
+            ("web\\__fixtures__\\user.json.ts", "web::user"),
+        ] {
+            assert!(is_test_fixture(file, qname), "{file} / {qname} must be test_fixture");
+        }
+        // App code: a test word only as a substring of a segment, the
+        // deliberately absent segments (specs, examples, bench, mocks), and a
+        // plain source file.
+        for (file, qname) in [
+            ("src/cart.ts", "src::cart::addItem"),
+            ("src/app/features/home/home.component.ts", "src::app::features::home::HomeComponent"),
+            ("specs/001-orders/plan.ts", "specs::001-orders::plan::x"),
+            ("examples/hello/main.go", "examples::hello::main"),
+            ("src/latest/x.ts", "src::latest::x::run"),
+            ("src/contest/x.go", "src::contest::x::Run"),
+            ("src/attestation.ts", "src::attestation::verify"),
+            ("bench/lens/src/main.rs", "bench::lens::main"),
+            ("src/fixtures-view/list.ts", "src::fixtures-view::list::render"),
+            ("src/mocks/handlers.ts", "src::mocks::handlers::handlers"),
+            ("src/testing.py", "src::testing::helper"),
+        ] {
+            assert!(!is_test_fixture(file, qname), "{file} / {qname} must stay app code");
+        }
+        // The rule that fired: suffix before prefix before directory.
+        assert_eq!(is_test_path("frontend/e2e/a.js"), Some(TestPathRule::Dir));
+        assert_eq!(is_test_path("src/a.test.tsx"), Some(TestPathRule::Suffix));
+        assert_eq!(is_test_path("app/test_x.py"), Some(TestPathRule::Prefix));
+        assert_eq!(is_test_path("tests/test_x.py"), Some(TestPathRule::Prefix));
+        assert_eq!(is_test_path("e2e/app.E2E-SPEC.TS"), Some(TestPathRule::Suffix));
+        assert_eq!(is_test_path("TEST/app.go"), Some(TestPathRule::Dir));
+        // A base name is never a directory segment; nothing is not a path.
+        assert_eq!(is_test_path("e2e"), None);
+        assert_eq!(is_test_path("fixtures.ts"), None);
+        assert_eq!(is_test_path("src/test_x.pyc"), None);
+        assert_eq!(is_test_path(""), None);
+    }
+
+    #[test]
+    fn provenance_marker_counts_path_apart_from_qname() {
+        assert_eq!(ProvenanceStats::default().marker(), None);
+        let mut s = ProvenanceStats { test_fixture_path: 3, test_fixture_qname: 2, ..Default::default() };
+        for p in ["generated_proto", "generated", "generated", "dependency", "synthetic", "test_fixture"] {
+            s.count(p);
+        }
+        assert_eq!(
+            s.marker().as_deref(),
+            Some(
+                "[provenance] test_fixture=5 (path=3 qname=2) generated_proto=1 generated=2 \
+                 dependency=1 synthetic=1"
+            )
+        );
     }
 
     #[test]
