@@ -164,7 +164,9 @@ def main():
         say(f"!! the repo disk has only {free_repo:.1f}G free — largest build dirs:\n{big.rstrip()}\n"
             "   (target/debug/incremental and old isolated target dirs are safe to delete)")
         gates.append(f"repo disk free {free_repo:.1f}G < 40G")
-    out, _ = sh("cargo test --workspace --quiet 2>&1", timeout=2400)
+    # --no-fail-fast: without it cargo stops at the first failing test binary, so one red binary hides
+    # every other and the passed count is a fraction of the suite (0.5.1 W2: 262 of ~3,400 ran).
+    out, _ = sh("cargo test --workspace --no-fail-fast --quiet 2>&1", timeout=2400)
     # Keep the full output: a one-line count cannot say which test or crate failed.
     (Path("/tmp/claude-1000/-home-ivy-Code-glia/wf") / f"ws-test-{'r051-' if release else 'leap-' if leap else ''}w{wave}.log").write_text(out)
     passed = sum(int(m) for m in re.findall(r"test result: ok\. (\d+) passed", out))
