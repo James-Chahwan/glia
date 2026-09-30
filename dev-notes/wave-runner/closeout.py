@@ -155,6 +155,15 @@ def main():
         big, _ = sh("du -xsh /tmp/claude-1000/*/*/scratchpad/* 2>/dev/null | sort -h | tail -5")
         say(f"!! /tmp has only {free_gb:.1f}G free — largest scratch dirs:\n{big.rstrip()}")
         gates.append(f"/tmp free {free_gb:.1f}G < 8G")
+    # The target dirs live on the repo's own disk: 0.5.1's W1 close-out hit "No space left on device"
+    # there (target/ had grown to 219G, engram-export/target to 59G) and reported 26 phantom compile
+    # errors. Fail up front instead, naming the largest build dirs.
+    free_repo = shutil.disk_usage(str(ROOT)).free / 2**30
+    if free_repo < 40:
+        big, _ = sh("du -xsh target/* target/debug/* engram-export/target/debug/* ~/.cache/glia-* 2>/dev/null | sort -h | tail -6")
+        say(f"!! the repo disk has only {free_repo:.1f}G free — largest build dirs:\n{big.rstrip()}\n"
+            "   (target/debug/incremental and old isolated target dirs are safe to delete)")
+        gates.append(f"repo disk free {free_repo:.1f}G < 40G")
     out, _ = sh("cargo test --workspace --quiet 2>&1", timeout=2400)
     # Keep the full output: a one-line count cannot say which test or crate failed.
     (Path("/tmp/claude-1000/-home-ivy-Code-glia/wf") / f"ws-test-{'r051-' if release else 'leap-' if leap else ''}w{wave}.log").write_text(out)
