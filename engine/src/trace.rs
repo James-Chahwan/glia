@@ -536,17 +536,18 @@ fn slug(s: &str) -> String {
     s.to_lowercase().replace([' ', '-'], "_")
 }
 
-/// One entry point: the node, its name and qname.
-struct Entry<'a> {
-    id: NodeId,
-    name: &'a str,
-    qname: &'a str,
+/// One entry point: the node, its name and qname. Crate-visible so CD.4e's
+/// `duplicate_flows` compares exactly the entries `glia flows` lists.
+pub(crate) struct Entry<'a> {
+    pub(crate) id: NodeId,
+    pub(crate) name: &'a str,
+    pub(crate) qname: &'a str,
 }
 
 /// Every entry point of `merged` — `CODE_PROFILE.tables.entry` over kind,
 /// name and roles, the rule liveness seeds from — in graph then node order,
 /// each id once.
-fn entries(merged: &MergedGraph) -> Vec<Entry<'_>> {
+pub(crate) fn entries(merged: &MergedGraph) -> Vec<Entry<'_>> {
     let rule = &CODE_PROFILE.tables.entry;
     let mut seen: HashSet<NodeId> = HashSet::new();
     let mut out: Vec<Entry<'_>> = Vec::new();
