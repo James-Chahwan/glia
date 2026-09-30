@@ -636,8 +636,8 @@
         "matrix/dart/calls"
       ],
       "forbid": [
-        6,
-        6
+        7,
+        7
       ],
       "level": "full",
       "literal": [
@@ -1000,17 +1000,18 @@
     },
     "go/calls": {
       "extract": [
-        5,
-        5
+        6,
+        6
       ],
       "fixtures": [
         "fixtures/go-calls",
+        "fixtures/go-closure-calls",
         "fixtures/go-field-dispatch",
         "fixtures/go-package-multifile-calls"
       ],
       "forbid": [
-        0,
-        0
+        1,
+        1
       ],
       "level": "full",
       "literal": [
@@ -1021,8 +1022,8 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        6,
-        6
+        12,
+        12
       ],
       "via": "call"
     },
@@ -4429,6 +4430,7 @@
     "fixtures/contract-annot-swashbuckle",
     "fixtures/contract-asyncapi-nats",
     "fixtures/contract-openapi-json",
+    "fixtures/contract-openapi-swaggo-yaml",
     "fixtures/contract-openapi-yaml",
     "fixtures/contract-pact",
     "fixtures/contract-per-file-identity",
@@ -4444,12 +4446,14 @@
     "fixtures/csharp-namespace-qnames",
     "fixtures/cypher-label-precision",
     "fixtures/dart-bare-calls",
+    "fixtures/dart-members",
     "fixtures/data-entity-literal-shape",
     "fixtures/docs-adr-decision",
     "fixtures/docs-md-section-lines",
     "fixtures/elixir-docs",
     "fixtures/elixir-xmodule-calls",
     "fixtures/enum-owned-methods",
+    "fixtures/event-monorepo-process",
     "fixtures/event-name-shape",
     "fixtures/event-publish-precision",
     "fixtures/event-verb-receivers",
@@ -4485,6 +4489,7 @@
     "fixtures/kotlin-entities",
     "fixtures/kotlin-flip-guard",
     "fixtures/kotlin-ktor",
+    "fixtures/kotlin-local-receivers",
     "fixtures/kotlin-retrofit",
     "fixtures/kotlin-spring",
     "fixtures/module-cross-language",
@@ -4513,6 +4518,7 @@
     "fixtures/rpc-event-monorepo-owner",
     "fixtures/ruby-ar-tablename",
     "fixtures/ruby-rails-scope",
+    "fixtures/ruby-require-in-scope",
     "fixtures/rust-typed-receivers",
     "fixtures/scala-package-qnames",
     "fixtures/sdd-quokka-feature",
@@ -4521,11 +4527,14 @@
     "fixtures/solidity-state_var",
     "fixtures/sql-migration-ddl",
     "fixtures/swift-imports",
+    "fixtures/swift-members",
     "fixtures/swift-module-qnames",
     "fixtures/terraform-depends_on",
     "fixtures/terraform-infra_references",
     "fixtures/test-reports-coverage",
     "fixtures/test-reports-fail",
+    "fixtures/trpc-create-caller",
+    "fixtures/ts-decorator-anchor",
     "fixtures/ts-enum-members",
     "fixtures/ts-route-per-method",
     "fixtures/ts-typeorm",

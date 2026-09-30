@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 287,
+  "fixtures": 296,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -153,6 +153,13 @@
     "contract-openapi-json": {
       "framework": "contract-openapi-json",
       "language": "json+python",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
+    },
+    "contract-openapi-swaggo-yaml": {
+      "framework": "contract-openapi-swaggo-yaml",
+      "language": "go",
       "per_category": {
         "DOCUMENTS": 1.0
       }
@@ -372,6 +379,14 @@
         "IMPORTS": 1.0
       }
     },
+    "dart-members": {
+      "framework": "dart-members",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0,
+        "HAS_ATTRIBUTE": 1.0
+      }
+    },
     "dart-top-level-bodies": {
       "framework": "dart-top-level-bodies",
       "language": "dart",
@@ -447,11 +462,18 @@
         "CALLS": 1.0
       }
     },
+    "event-monorepo-process": {
+      "framework": "event-monorepo-process",
+      "language": "typescript",
+      "per_category": {
+        "EVENT_FLOWS": 1.0
+      }
+    },
     "event-name-shape": {
       "framework": "event-name-shape",
       "language": "python",
       "per_category": {
-        "CONTAINS": 1.0
+        "HANDLED_BY": 1.0
       }
     },
     "event-publish-precision": {
@@ -487,6 +509,14 @@
       "language": "go",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "go-closure-calls": {
+      "framework": "go-closure-calls",
+      "language": "go",
+      "per_category": {
+        "CALLS": 1.0,
+        "HANDLED_BY": 1.0
       }
     },
     "go-closure-handled_by": {
@@ -875,9 +905,16 @@
       "framework": "kotlin-ktor",
       "language": "kotlin",
       "per_category": {
-        "CALLS": 0.0,
+        "CALLS": 1.0,
         "HANDLED_BY": 1.0,
         "IMPORTS": 1.0
+      }
+    },
+    "kotlin-local-receivers": {
+      "framework": "kotlin-local-receivers",
+      "language": "kotlin",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "kotlin-retrofit": {
@@ -1253,6 +1290,13 @@
         "HTTP_CALLS": 1.0
       }
     },
+    "ruby-require-in-scope": {
+      "framework": "ruby-require-in-scope",
+      "language": "ruby",
+      "per_category": {
+        "IMPORTS": 1.0
+      }
+    },
     "rust-axum-calls": {
       "framework": "rust-axum",
       "language": "rust",
@@ -1450,6 +1494,13 @@
       "language": "swift",
       "per_category": {}
     },
+    "swift-members": {
+      "framework": "swift-members",
+      "language": "swift",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
     "swift-module-qnames": {
       "framework": "swift-module-qnames",
       "language": "swift",
@@ -1486,6 +1537,13 @@
       "language": "python",
       "per_category": {}
     },
+    "trpc-create-caller": {
+      "framework": "trpc-create-caller",
+      "language": "typescript",
+      "per_category": {
+        "RPC_CALLS": 1.0
+      }
+    },
     "ts-angular-di": {
       "framework": "ts-angular-di",
       "language": "typescript",
@@ -1505,6 +1563,14 @@
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "ts-decorator-anchor": {
+      "framework": "ts-decorator-anchor",
+      "language": "typescript",
+      "per_category": {
+        "CONTAINS": 1.0,
+        "HANDLED_BY": 1.0
       }
     },
     "ts-enum-members": {
@@ -2054,9 +2120,7 @@
   },
   "schema": "substrate-gap-legacy/1",
   "summary": {
-    "blind_spots": [
-      "kotlin-ktor: CALLS"
-    ],
+    "blind_spots": [],
     "forbid_violations": [],
     "grader_errors": [],
     "missing_cells": [],
