@@ -192,6 +192,10 @@ only in the fresh run). Markers go to stderr: `[substrate-gap] wrote legacy-late
 matches HEAD — an uncommitted fixture is graded like any other. The 16x30 language x
 mechanism grid is a different view with a different schema: `results-latest.json` +
 `COVERAGE.md`, owned by `matrix.py --emit/--check`. `test_run.py` pins the drift gate.
+Its glyphs: `●` full, `◐` partial, `·` none (a fixture exists, nothing emitted),
+`?` unknown (no fixture), `-` n/a (listed in `matrix_vocab.NOT_APPLICABLE`: the
+language cannot express the mechanism; a fixture claiming one is an error) and `!`
+error. The coverage line divides by the applicable cells (grid minus n/a).
 
 ## Incremental transparency guard (`incremental_check.py`, A1.7)
 

@@ -246,14 +246,19 @@ def main():
     if lchk:
         gates.append("run.py --check (legacy-latest.json)")
     mo, _ = sh(f"{py} matrix.py --emit 2>&1", cwd=SG)
-    m = re.search(r"(\d+) full, (\d+) partial, (\d+) none, (\d+) unknown", mo)
+    # CF.13a: the summary APPENDS `, <n> n/a` (matrix_vocab.NOT_APPLICABLE cells with no fixture);
+    # optional, so a pre-CF.13a matrix.py still parses as 0 n/a.
+    m = re.search(r"(\d+) full, (\d+) partial, (\d+) none, (\d+) unknown(?:, (\d+) n/a)?", mo)
     _, chk = sh(f"{py} matrix.py --check >/dev/null 2>&1", cwd=SG)
     tm, _ = sh(f"{py} test_matrix.py 2>&1 | tail -1", cwd=SG)
     tg, _ = sh(f"{py} test_grade.py 2>&1 | tail -1", cwd=SG)
-    full, part, none_, unk = map(int, m.groups()) if m else (0, 0, 0, 0)
+    full, part, none_, unk = map(int, m.groups()[:4]) if m else (0, 0, 0, 0)
+    na = int(m.group(5) or 0) if m else 0
+    # grid = the APPLICABLE cells: the n/a cells are neither covered nor work left, so they stay
+    # out of both numbers and are reported alongside.
     grid = full + part + none_ + unk
-    covered = grid - unk
-    say(f"== matrix: {full} full, {part} partial, {none_} none, {unk} unknown = {covered}/{grid} | check={chk} | legacy check={lchk} | test_matrix: {tm.strip()} | test_grade: {tg.strip()}")
+    covered = full + part + none_
+    say(f"== matrix: {full} full, {part} partial, {none_} none, {unk} unknown, {na} n/a = {covered}/{grid} | check={chk} | legacy check={lchk} | test_matrix: {tm.strip()} | test_grade: {tg.strip()}")
     if chk:
         gates.append("matrix --check")
     if " 0 failed" not in tm:
@@ -292,7 +297,7 @@ def main():
                            "blind_spot_detail": f"blind: {bsl}; missing nodes: {mnl}; missing cells: {mcl}. "
                                                 "Those present at wave start are deliberate baselines for later packets unless your packet owns them."})
     base["matrix_py"] = {"full": full, "partial": part, "none": none_, "unknown": unk, "covered": covered,
-                         "grid": grid, "invalid_cell_declarations": 0, "check_exit": chk}
+                         "grid": grid, "n/a": na, "invalid_cell_declarations": 0, "check_exit": chk}
     base["test_matrix_py"] = tm.strip()
     base["test_grade_py"] = tg.strip()
     (HERE / "baseline.json").write_text(json.dumps(base, indent=2))
@@ -329,7 +334,8 @@ def main():
         say(f"!! NOT COMMITTING — gates failed: {gates}")
         sys.exit(1)
     what = f"0.5.1 wave W{wave}" if release else f"leap wave W{wave}" if leap else f"wave {wave}"
-    msg = (f"bench+plan: {what} landed — {passed} tests, {fixtures} fixtures, matrix {covered}/{grid}\n\n"
+    msg = (f"bench+plan: {what} landed — {passed} tests, {fixtures} fixtures, matrix {covered}/{grid}"
+           + (f", {na} n/a" if na else "") + "\n\n"
            + "\n".join(lines) + "\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"
            + "Claude-Session: https://claude.ai/code/session_01U92Fg6cfqUfbvx14qoM6iw\n")
     Path("/tmp/claude-1000/-home-ivy-Code-glia/closeout.msg").write_text(msg)

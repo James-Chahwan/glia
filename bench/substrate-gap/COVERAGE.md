@@ -24,6 +24,12 @@ the right kind was emitted — a MEASURED blind spot. `?` means no fixture claim
 the cell, so no claim is made in either direction. The review's blanks could not
 tell those apart, which is what made them unfalsifiable.
 
+`-` is not a `?` either. `-` means the language or runtime cannot express the
+mechanism at all (`matrix_vocab.NOT_APPLICABLE`, listed under "Not applicable"
+below with its reason), so the cell is left out of the coverage denominator. The
+list is falsifiable: a fixture that claims a `-` cell is a cell error until its
+entry is deleted in the same commit.
+
 Prose outside the generated block below is hand-maintained and survives
 regeneration. (This paragraph deliberately does not quote the marker strings:
 the splice partitions on the FIRST marker it finds, so a literal marker inside

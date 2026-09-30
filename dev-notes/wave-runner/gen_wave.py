@@ -62,7 +62,7 @@ def render_baseline(b):
     return f"""=== BASELINE, MEASURED AT HEAD {b['measured_at_head']} AFTER WAVE {b['after_wave']} (take as given) ===
 - `cargo test --workspace` = {b['cargo_test_workspace']['passed']} passing, {b['cargo_test_workspace']['failed']} failing. It has moved every wave ({hist}). NEVER gate on a literal count.
 - `python3 bench/substrate-gap/run.py --no-log` = {r['fixtures']} fixtures; PARTIAL {r['partial']}, FORBID VIOLATIONS {r['forbid_violations']}, MISSING CELLS {r['missing_cells']}, GRADER ERRORS {r['grader_errors']}; BLIND SPOTS {r['blind_spots']} — {r['blind_spot_detail']}. Not regressions, not yours unless your packet is one of those.
-- `python3 bench/substrate-gap/matrix.py` = {m['full']} full, {m['partial']} partial, {m['none']} none, {m['unknown']} unknown; {m['covered']}/{m['grid']} cells; INVALID CELL DECLARATIONS {m['invalid_cell_declarations']}; `--check` exits {m['check_exit']}.
+- `python3 bench/substrate-gap/matrix.py` = {m['full']} full, {m['partial']} partial, {m['none']} none, {m['unknown']} unknown, {m.get('n/a', 0)} n/a; {m['covered']}/{m['grid']} cells; INVALID CELL DECLARATIONS {m['invalid_cell_declarations']}; `--check` exits {m['check_exit']}.
 - `test_matrix.py` {b['test_matrix_py']}. `test_grade.py` {b['test_grade_py']}."""
 
 

@@ -20,7 +20,12 @@ The two trees are graded by different tools, on purpose.
   be able to move those numbers.
 - `matrix.py` discovers **both** — `fixtures/*/key.json` as `legacy_only` and
   `matrix/*/*/key.json` as canonical — and reports per-cell levels
-  (`full` / `partial` / `none` / `unknown` / `error`).
+  (`full` ● / `partial` ◐ / `none` · / `unknown` ? / `n/a` - / `error` !).
+  `n/a` is a cell in `../matrix_vocab.py`'s `NOT_APPLICABLE` list that no
+  fixture claims: the language cannot express the mechanism (Solidity x
+  brokers, Terraform x calls, ...). A directory here for such a cell makes it an
+  `error` until the same commit deletes the entry, and `scaffold.py` refuses to
+  stamp one.
 
 A new cell here is *supposed* to start red. That is the whole method: record the
 `0.00` baseline first, then close it. Keeping those baselines out of `run.py`'s

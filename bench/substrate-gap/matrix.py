@@ -12,6 +12,11 @@ The decisive distinction it buys is `none` vs `unknown`:
              emitted. A measured blind spot.
   `unknown`  no fixture claims this cell. No claim is made, in either direction.
 The hand-made table could not tell those apart, so its blanks were unfalsifiable.
+  `n/a`      no fixture claims this cell AND matrix_vocab.NOT_APPLICABLE says the
+             language cannot express the mechanism (glyph `-`). Counted apart
+             from `unknown`, so `unknown` keeps meaning "work left". A fixture
+             that claims a listed cell turns it into an `error`
+             (apply_not_applicable): the list is falsified, never trusted.
 
 FOUR GRADED ASSERTIONS per (fixture, cell), all from ONE grade_fixture() call:
 
@@ -59,6 +64,12 @@ row, when its `contains` names one of the mechanism's `role_cells`. A fixture
 declaring two cells whose mechanisms differ therefore splits cleanly; one declaring two
 cells on the SAME mechanism in two languages grades both identically, which is
 honest -- one fixture genuinely proves the same thing about both rows.
+
+NOT APPLICABLE runs AFTER aggregation (apply_not_applicable, called by main):
+collect() and aggregate() grade a fixture on a listed cell exactly as any other,
+then the contradiction is recorded on the cell as an `error` whose first reason
+starts `n/a contradicted:`, so `--fail-on-error` exits 1 and CELL ERRORS names it
+until the entry is deleted in the commit that adds the fixture.
 
 AGGREGATION is MIN: when several fixtures claim one cell the WORST level wins
 (error > none > partial > full). The matrix is a blind-spot map, so a cell is
@@ -331,21 +342,46 @@ def aggregate(records):
     return cells
 
 
+def apply_not_applicable(cells):
+    """A fixture on a NOT_APPLICABLE cell falsifies the entry: make it an error.
+
+    Mutates and returns `cells` (aggregate()'s output). Every other cell is left
+    untouched. The contradiction reason goes FIRST so CELL ERRORS leads with it.
+    """
+    for (lang, mech), slot in sorted(cells.items()):
+        reason = vocab.not_applicable(lang, mech)
+        if reason is None:
+            continue
+        slot["level"] = "error"
+        slot["reasons"] = [f"n/a contradicted: {reason} - remove the NOT_APPLICABLE "
+                           f"entry in the commit that adds the fixture"] + slot["reasons"]
+    return cells
+
+
 # --------------------------------------------------------------------------
 # Render
 # --------------------------------------------------------------------------
 
+def _level(cells, pair):
+    """A cell's level: graded, else `n/a` when listed, else `unknown`."""
+    slot = cells.get(pair)
+    if slot is not None:
+        return slot["level"]
+    return vocab.NA_LEVEL if vocab.not_applicable(*pair) is not None else "unknown"
+
+
 def _counts(cells, pairs):
-    tally = {"full": 0, "partial": 0, "none": 0, "unknown": 0, "error": 0}
+    tally = {level: 0 for level in matrix_emit.LEVELS}
     for pair in pairs:
-        tally[cells.get(pair, {}).get("level", "unknown")] += 1
+        tally[_level(cells, pair)] += 1
     return tally
 
 
 def _rollup(tally):
+    na = vocab.NA_LEVEL
     return (f"{GLYPH['full']} {tally['full']:<3} {GLYPH['partial']} {tally['partial']:<3} "
             f"{GLYPH['none']} {tally['none']:<3} {GLYPH['unknown']} {tally['unknown']:<3} "
-            f"{GLYPH['error']} {tally['error']}")
+            f"{GLYPH[na]} {tally[na]:<3} {GLYPH['error']} {tally['error']}")
 
 
 def render(cells, languages, mechanisms, bad, legacy_only, out=None):
@@ -360,8 +396,7 @@ def render(cells, languages, mechanisms, bad, legacy_only, out=None):
               file=out)
     print("-" * (pad + 2 + 2 * len(mechanisms) - 1), file=out)
     for lang in languages:
-        row = " ".join(GLYPH[cells.get((lang, m), {}).get("level", "unknown")]
-                       for m in mechanisms)
+        row = " ".join(GLYPH[_level(cells, (lang, m))] for m in mechanisms)
         print(lang.ljust(pad) + "  " + row, file=out)
     print("-" * (pad + 2 + 2 * len(mechanisms) - 1), file=out)
 
@@ -373,11 +408,15 @@ def render(cells, languages, mechanisms, bad, legacy_only, out=None):
         print(f"  {lang:<12} " + _rollup(_counts(cells, [(lang, m) for m in mechanisms])),
               file=out)
 
-    total = len(languages) * len(mechanisms)
+    # The denominator is the APPLICABLE cells: an n/a cell (listed, no fixture)
+    # is not work left. A listed cell WITH a fixture is an error, so it counts.
+    na = sum(1 for lang in languages for m in mechanisms
+             if _level(cells, (lang, m)) == vocab.NA_LEVEL)
+    total = len(languages) * len(mechanisms) - na
     have = sum(1 for lang in languages for m in mechanisms if (lang, m) in cells)
     pct = (100.0 * have / total) if total else 0.0
-    print(f"\nCOVERAGE OF THE COVERAGE: {have}/{total} cells have a fixture ({pct:.1f}%)",
-          file=out)
+    print(f"\nCOVERAGE OF THE COVERAGE: {have}/{total} cells have a fixture ({pct:.1f}%)"
+          + (f"; {na} n/a" if na else ""), file=out)
     print(f"legacy_only (no `cells`, graded by run.py only): {len(legacy_only)}", file=out)
     print(f"\nINVALID CELL DECLARATIONS: {len(bad)}", file=out)
     for rel, msg in bad:
@@ -394,10 +433,11 @@ def cell_marker(pair, slot=None):
 
     A cell with NO fixture still gets one (`= unknown`, empty fixtures), so a
     packet can grep for its own cell before its fixture lands and see the
-    measurement move, rather than grepping for silence.
+    measurement move, rather than grepping for silence. A NOT_APPLICABLE cell
+    with no fixture reads `= n/a` in the same layout.
     """
     lang, mech = pair
-    slot = slot or {"level": "unknown", "via": None, "fixtures": [],
+    slot = slot or {"level": _level({}, pair), "via": None, "fixtures": [],
                     "extract": [0, 0], "literal": [0, 0],
                     "route": [0, 0], "forbid": [0, 0]}
     return (f"[matrix] cell {lang}/{mech} = {slot['level']} "
@@ -452,12 +492,15 @@ def main(argv=None):
         return 2
 
     records, bad, legacy_only = collect()
-    cells = aggregate(records)
+    cells = apply_not_applicable(aggregate(records))
 
-    tally = _counts(cells, [(lg, m) for lg in languages for m in mechanisms])
+    pairs = [(lg, m) for lg in languages for m in mechanisms]
+    tally = _counts(cells, pairs)
+    # The prefix and the first four fields are a contract (closeout.py's regex,
+    # test_the_fired_on_marker_is_a_whole_line_at_16x30): the n/a count APPENDS.
     print(f"[matrix] {len(languages)} languages x {len(mechanisms)} mechanisms, "
           f"{tally['full']} full, {tally['partial']} partial, {tally['none']} none, "
-          f"{tally['unknown']} unknown", file=sys.stderr)
+          f"{tally['unknown']} unknown, {tally[vocab.NA_LEVEL]} n/a", file=sys.stderr)
 
     if args.emit or args.check:
         payload = matrix_emit.build_payload(cells, legacy_only)
@@ -480,6 +523,7 @@ def main(argv=None):
         return 1
 
     if args.json:
+        selected = set(pairs)
         print(json.dumps({
             "languages": languages, "mechanisms": mechanisms,
             "cells": {f"{lg}/{m}": {k: v for k, v in s.items() if k != "contributions"}
@@ -487,14 +531,21 @@ def main(argv=None):
                       if lg in languages and m in mechanisms},
             "invalid_cell_declarations": [{"fixture": f, "error": e} for f, e in bad],
             "legacy_only": legacy_only, "totals": tally,
+            "not_applicable": {
+                label: {"class": cls, "reason": reason}
+                for label, (cls, reason) in vocab.NOT_APPLICABLE.items()
+                if tuple(label.split("/", 1)) in selected},
         }, indent=2, sort_keys=True))
     elif args.cell:
         pair = (languages[0], mechanisms[0])
         slot = cells.get(pair)
         print(cell_marker(pair, slot), file=sys.stderr)
-        print(f"{pair[0]}/{pair[1]} = {slot['level'] if slot else 'unknown'}  "
+        print(f"{pair[0]}/{pair[1]} = {_level(cells, pair)}  "
               f"via={slot['via'] if slot else None}")
-        if slot is None:
+        listed = vocab.NOT_APPLICABLE.get(f"{pair[0]}/{pair[1]}")
+        if slot is None and listed is not None:
+            print(f"  reason   not applicable ({listed[0]}): {listed[1]}")
+        elif slot is None:
             print("  reason   no fixture declares this cell")
         else:
             for field in ("extract", "literal", "route", "forbid"):

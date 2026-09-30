@@ -51,11 +51,27 @@ cannot drift from code-domain/src/lib.rs. Only SHIPPED registry entries may be
 named: a reserved-but-unemitted id is absent from the installed wheel's tables and
 will fail the self-test.
 
-DELIBERATE NON-DECISION -- there is NO not-applicable list. Cells like
-terraform x calls or solidity x grpc are not enumerated as n/a. `unknown` already
-carries exactly the "we make no claim" semantics, and an n/a list would re-import
-the human judgement this harness exists to delete. Such cells simply stay
-`unknown` forever, because nobody ever authors a fixture for them.
+NOT APPLICABLE -- `NOT_APPLICABLE` below lists the (language, mechanism) cells
+the language or runtime cannot express at all: an on-chain Solidity contract has
+no network, broker or process access; Terraform declares no functions, types or
+CLI. Such a cell reads `n/a` (glyph `-`), not `unknown`, so the unknown count
+keeps meaning "work left". This reverses the earlier recorded non-decision (no
+list, such cells stay `unknown` forever) -- James 2026-09-30, CF.13a. Two rules
+keep the list from re-importing the judgement this harness exists to delete:
+
+  structural only  an entry says the mechanism CANNOT be expressed. A cell whose
+                   language merely lacks a client library today (ruby / php /
+                   dart / elixir x azure_sb) is never listed and stays `unknown`:
+                   a client can appear, and a wrong n/a hides a measurable cell,
+                   while a wrong `unknown` costs nothing.
+  falsifiable      a fixture that claims a listed cell is a CELL ERROR
+                   (matrix.apply_not_applicable), and scaffold.py refuses to stamp
+                   one. Proving a cell applicable therefore forces deleting its
+                   entry in the same commit as the fixture.
+
+The list is module level, NOT a MECHANISMS field, so the scoring ruler's digest
+(matrix_emit.vocabulary_digest) does not move with it; it has its own
+(matrix_emit.na_digest).
 """
 
 import sys
@@ -272,6 +288,64 @@ ROLE_CELL = "ROLE"
 
 
 # ---------------------------------------------------------------------------
+# Not applicable -- cell label -> (class, reason). See the module docstring:
+# structural only, and falsified by any fixture that claims the cell. Written
+# sorted; the self-test and test_matrix.py hold every row to a canonical
+# LANGUAGES row and MECHANISM_IDS column. Consumers iterate it sorted, so an emit
+# is byte-identical across processes. A cell whose language merely lacks a
+# client library (ruby / php / dart / elixir azure_sb) is deliberately absent.
+# ---------------------------------------------------------------------------
+
+NA_LEVEL = "n/a"
+NA_STRUCTURAL = "structural"
+
+_SOLIDITY_ONCHAIN = (
+    "an on-chain Solidity contract has no network, broker, filesystem, environment "
+    "or process access; the off-chain tooling around it (hardhat / foundry scripts, "
+    "subgraphs) is TypeScript / YAML and scores on those rows")
+
+NOT_APPLICABLE = {
+    "solidity/amqp": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/azure_sb": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/cli_def": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/cli_inv": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/config": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/cron": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/db": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/flags": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/graphql": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/grpc": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/http_client": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/http_server": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/kafka": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/migrations": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/mqtt": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/nats": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/pubsub": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/redis": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/secrets": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/sqs_sns": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/taskq": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "solidity/ws": (NA_STRUCTURAL, _SOLIDITY_ONCHAIN),
+    "terraform/calls": (NA_STRUCTURAL,
+                        "Terraform has no user-defined functions; built-in and provider "
+                        "functions are not resolved callee qnames, and a module block is "
+                        "the imports column"),
+    "terraform/cli_def": (NA_STRUCTURAL, "Terraform declares no command-line interface"),
+    "terraform/impl": (NA_STRUCTURAL,
+                       "Terraform declares no types, so nothing implements or inherits"),
+    "terraform/injects": (NA_STRUCTURAL,
+                          "Terraform declares no types, so nothing is injected"),
+    "terraform/redis": (NA_STRUCTURAL,
+                        "no Terraform construct publishes to or subscribes on a Redis "
+                        "channel or list; ElastiCache resources declare the store only"),
+    "terraform/taskq": (NA_STRUCTURAL,
+                        "no Terraform construct names, enqueues or processes a task; a "
+                        "Cloud Tasks queue resource declares the queue only"),
+}
+
+
+# ---------------------------------------------------------------------------
 # Accessors
 # ---------------------------------------------------------------------------
 
@@ -300,6 +374,16 @@ def mechanism(mid):
             f"the {len(MECHANISMS)} matrix columns are: {', '.join(MECHANISM_IDS)}"
         )
     return m
+
+
+def not_applicable(lang, mech):
+    """The reason `<lang>/<mech>` is NOT_APPLICABLE, or None when it is not listed.
+
+    Takes the canonical row and column ids (what matrix.parse_cell returns); an
+    alias spelling is simply not listed, so it reads None.
+    """
+    entry = NOT_APPLICABLE.get(f"{lang}/{mech}")
+    return entry[1] if entry else None
 
 
 def resolve_via(mid, present_kinds):
@@ -418,10 +502,30 @@ def _selftest():
     assert resolve_via("mqtt", ["QUEUE_PRODUCER"]) == "queue"
     assert resolve_via("mqtt", ["CLASS"]) is None
 
+    assert list(NOT_APPLICABLE) == sorted(NOT_APPLICABLE), "NOT_APPLICABLE must be written sorted"
+    for label, entry in NOT_APPLICABLE.items():
+        lang, sep, mech = label.partition("/")
+        assert sep and normalize_language(lang) == lang, (
+            f"NOT_APPLICABLE {label!r}: the row must be a canonical LANGUAGES id")
+        assert mech in MECHANISM_IDS, (
+            f"NOT_APPLICABLE {label!r}: {mech!r} is not a MECHANISM_IDS column")
+        assert isinstance(entry, tuple) and len(entry) == 2, (
+            f"NOT_APPLICABLE {label!r}: an entry is (class, reason)")
+        cls, reason = entry
+        assert cls == NA_STRUCTURAL, (
+            f"NOT_APPLICABLE {label!r}: class {cls!r}; only {NA_STRUCTURAL!r} is listed "
+            f"(a missing client library is not a reason: that cell stays unknown)")
+        assert isinstance(reason, str) and len(reason) >= 20, (
+            f"NOT_APPLICABLE {label!r}: the reason must say why, in >= 20 chars")
+        assert not_applicable(lang, mech) == reason
+    # the unknown anchor test_matrix.py measures must stay measurable
+    assert "clojure/kafka" not in NOT_APPLICABLE
+    assert not_applicable("clojure", "kafka") is None
+
     print(
         f"[matrix] vocab: {len(MECHANISMS)} mechanisms, {len(LANGUAGES)} languages, "
         f"{len(kinds_seen)} kinds referenced, {len(cats_seen)} categories referenced, "
-        f"anchor={anchors} role_cells={roled}",
+        f"anchor={anchors} role_cells={roled} not_applicable={len(NOT_APPLICABLE)}",
         file=sys.stderr,
     )
 

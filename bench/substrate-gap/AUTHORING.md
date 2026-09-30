@@ -51,6 +51,16 @@ first four rows are pinned by `test_matrix.py`
 The scaffolder **refuses to overwrite** an existing cell without `--force`,
 because `--force` destroys an authored key and its baseline.
 
+It also **refuses a NOT_APPLICABLE cell** (exit 2): the 28 cells in
+`matrix_vocab.NOT_APPLICABLE` (Solidity x every broker / network / process
+column, Terraform x calls / cli_def / impl / injects / redis / taskq) read `-`
+because the language cannot express the mechanism at all. The list is
+falsifiable, not trusted: a fixture that proves one applicable deletes its entry
+**in the same commit**, and until it does `matrix.py` grades that cell `error`
+(`n/a contradicted: ...`). A cell whose language merely lacks a client library
+(ruby / php / dart / elixir x azure_sb) is never listed; it stays `?` and can be
+scaffolded like any other.
+
 ### 2. Write the smallest source a real repo would contain
 
 Budget: **≤ 2 files per dir, ≤ 20 lines per file**. Use the real library's

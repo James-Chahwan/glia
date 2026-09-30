@@ -32,11 +32,18 @@ diff-as-signal property that is the entire point. Therefore:
 vocabulary edit -- a changed `kinds` group, a new `category` -- would silently
 re-score every cell and the diff would show only the moved glyphs, with no
 statement that the ruler itself changed. With it, the ruler is in the diff.
+`vocabulary.na_digest` does the same for matrix_vocab.NOT_APPLICABLE (schema 2,
+CF.13a), which is kept out of the ruler's digest: listing a cell n/a scores
+nothing, so it must not read as a re-scored vocabulary.
 
   covered = full + partial + none + error = the number of cells with a fixture,
   i.e. exactly len(cells). `error` is counted as covered because a cell whose
   fixture blew up HAS a fixture; dropping it would make `covered` disagree with
   the cell list it sits next to.
+  n/a     = the NOT_APPLICABLE cells with no fixture. It is counted apart from
+  `unknown`, so `unknown` stays "work left"; the coverage line divides `covered`
+  by the applicable cells (grid - n/a). A listed cell WITH a fixture is not n/a:
+  matrix.apply_not_applicable has already made it an `error`, so it is covered.
 
 COVERAGE.md is spliced, never overwritten: everything before BEGIN and after END
 is hand-maintained prose that regeneration must not eat. A file with no markers
@@ -57,14 +64,16 @@ HERE = Path(__file__).parent
 RESULTS_PATH = HERE / "results-latest.json"
 COVERAGE_PATH = HERE / "COVERAGE.md"
 
-SCHEMA = 1
+SCHEMA = 2
 BEGIN = "<!-- BEGIN generated: matrix.py --emit -->"
 END = "<!-- END generated -->"
 
 # The review's glyph set (review:134 LEGEND), plus `?` unknown and `!` error --
-# the two verdicts the hand-made table could not express.
-GLYPH = {"full": "●", "partial": "◐", "none": "·", "unknown": "?", "error": "!"}
-LEVELS = ("full", "partial", "none", "unknown", "error")
+# the two verdicts the hand-made table could not express -- and `-` n/a, a cell
+# matrix_vocab.NOT_APPLICABLE says the language cannot express (CF.13a).
+GLYPH = {"full": "●", "partial": "◐", "none": "·", "unknown": "?",
+         vocab.NA_LEVEL: "-", "error": "!"}
+LEVELS = ("full", "partial", "none", "unknown", vocab.NA_LEVEL, "error")
 
 # Column geometry, reverse-engineered from the review's own block so a rendered
 # header is byte-identical to review:135 and the two tables diff against each
@@ -99,6 +108,12 @@ the right kind was emitted — a MEASURED blind spot. `?` means no fixture claim
 the cell, so no claim is made in either direction. The review's blanks could not
 tell those apart, which is what made them unfalsifiable.
 
+`-` is not a `?` either. `-` means the language or runtime cannot express the
+mechanism at all (`matrix_vocab.NOT_APPLICABLE`, listed under "Not applicable"
+below with its reason), so the cell is left out of the coverage denominator. The
+list is falsifiable: a fixture that claims a `-` cell is a cell error until its
+entry is deleted in the same commit.
+
 Prose outside the generated block below is hand-maintained and survives
 regeneration. (This paragraph deliberately does not quote the marker strings:
 the splice partitions on the FIRST marker it finds, so a literal marker inside
@@ -116,6 +131,16 @@ the prose would make the preamble eat itself.)
 def vocabulary_digest():
     """sha256 over the MECHANISMS table, 12 hex — the ruler, in the diff."""
     blob = json.dumps(vocab.MECHANISMS, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+
+
+def na_digest():
+    """sha256 over matrix_vocab.NOT_APPLICABLE, 12 hex — the n/a list, in the diff.
+
+    Its own digest, not part of vocabulary_digest(): listing a cell n/a changes
+    no cell's score, so it must not read as a re-scored ruler.
+    """
+    blob = json.dumps(vocab.NOT_APPLICABLE, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 
@@ -141,9 +166,18 @@ def build_payload(cells, legacy_only, languages=None, mechanisms=None,
     grid = len(languages) * len(mechanisms)
 
     totals = {level: 0 for level in LEVELS}
+    not_applicable = {}
     for lang in languages:
         for mech in mechanisms:
-            totals[cells.get((lang, mech), {}).get("level", "unknown")] += 1
+            label = f"{lang}/{mech}"
+            entry = vocab.NOT_APPLICABLE.get(label)
+            if entry is not None:
+                not_applicable[label] = {"class": entry[0], "reason": entry[1]}
+            # A listed cell WITH a fixture counts at its graded level (an error,
+            # once matrix.apply_not_applicable ran), never as n/a.
+            slot = cells.get((lang, mech))
+            totals[slot["level"] if slot is not None
+                   else vocab.NA_LEVEL if entry is not None else "unknown"] += 1
 
     out_cells = {}
     for (lang, mech), slot in sorted(cells.items()):
@@ -164,9 +198,12 @@ def build_payload(cells, legacy_only, languages=None, mechanisms=None,
         "schema": SCHEMA,
         "engine": engine if engine is not None else engine_version(),
         "vocabulary": {"mechanisms": len(mechanisms), "languages": len(languages),
-                       "digest": vocabulary_digest()},
+                       "digest": vocabulary_digest(),
+                       "not_applicable": len(vocab.NOT_APPLICABLE),
+                       "na_digest": na_digest()},
         "totals": totals,
         "cells": out_cells,
+        "not_applicable": {k: not_applicable[k] for k in sorted(not_applicable)},
         "legacy_only": sorted(legacy_only),
     }
 
@@ -181,15 +218,24 @@ def render_results(payload):
 # ---------------------------------------------------------------------------
 
 def _rollup(tally):
+    na = vocab.NA_LEVEL
     return (f"{GLYPH['full']} {tally['full']:<3} {GLYPH['partial']} {tally['partial']:<3} "
             f"{GLYPH['none']} {tally['none']:<3} {GLYPH['unknown']} {tally['unknown']:<3} "
-            f"{GLYPH['error']} {tally['error']}")
+            f"{GLYPH[na]} {tally[na]:<3} {GLYPH['error']} {tally['error']}")
+
+
+def _level(payload, lang, mech):
+    """A cell's level: graded, else `n/a` when listed, else `unknown`."""
+    label = f"{lang}/{mech}"
+    if label in payload["cells"]:
+        return payload["cells"][label]["level"]
+    return vocab.NA_LEVEL if label in payload.get("not_applicable", {}) else "unknown"
 
 
 def _tally(payload, pairs):
     tally = {level: 0 for level in LEVELS}
     for lang, mech in pairs:
-        tally[payload["cells"].get(f"{lang}/{mech}", {}).get("level", "unknown")] += 1
+        tally[_level(payload, lang, mech)] += 1
     return tally
 
 
@@ -230,12 +276,12 @@ def render_markdown(payload, languages=None, mechanisms=None):
     lines.append("```")
     lines.append(f"LEGEND {GLYPH['full']} full  {GLYPH['partial']} partial  "
                  f"{GLYPH['none']} none (fixture exists, nothing emitted)  "
-                 f"{GLYPH['unknown']} unknown (no fixture)  {GLYPH['error']} error")
+                 f"{GLYPH['unknown']} unknown (no fixture)  "
+                 f"{GLYPH[vocab.NA_LEVEL]} n/a (see Not applicable)  {GLYPH['error']} error")
     lines.append(" " * LANG_W
                  + " ".join(vocab.mechanism(m)["label"].rjust(COL_W) for m in mechanisms))
     for lang in languages:
-        glyphs = (GLYPH[payload["cells"].get(f"{lang}/{m}", {}).get("level", "unknown")]
-                  for m in mechanisms)
+        glyphs = (GLYPH[_level(payload, lang, m)] for m in mechanisms)
         lines.append(lang.ljust(LANG_W) + " ".join(g.rjust(COL_W) for g in glyphs))
     lines.append("")
     lines.append(f"PER-MECHANISM  across {len(languages)} languages:")
@@ -251,12 +297,13 @@ def render_markdown(payload, languages=None, mechanisms=None):
     lines.append("")
 
     totals = payload["totals"]
-    covered, grid = totals["covered"], totals["grid"]
-    pct = (100.0 * covered / grid) if grid else 0.0
-    lines.append(f"COVERAGE OF THE COVERAGE: {covered}/{grid} cells have a fixture "
-                 f"({pct:.1f}%) — {totals['full']} full, {totals['partial']} partial, "
+    na = totals.get(vocab.NA_LEVEL, 0)
+    covered, applicable = totals["covered"], totals["grid"] - na
+    pct = (100.0 * covered / applicable) if applicable else 0.0
+    lines.append(f"COVERAGE OF THE COVERAGE: {covered}/{applicable} applicable cells have a "
+                 f"fixture ({pct:.1f}%) — {totals['full']} full, {totals['partial']} partial, "
                  f"{totals['none']} none, {totals['unknown']} unknown, "
-                 f"{totals['error']} error.")
+                 f"{totals['error']} error, {na} n/a.")
     lines.append("")
     lines.append(f"`legacy_only` (fixtures with no `cells`, graded by run.py only): "
                  f"{len(payload['legacy_only'])}")
@@ -286,6 +333,24 @@ def render_markdown(payload, languages=None, mechanisms=None):
             lines.append(f"- `{label}`: {reasons}")
     else:
         lines.append("_None._")
+    lines.append("")
+
+    lines.append("## Not applicable")
+    lines.append("")
+    lines.append(f"`{GLYPH[vocab.NA_LEVEL]}` cells: the language or runtime cannot express "
+                 "the mechanism (`matrix_vocab.NOT_APPLICABLE`, digest "
+                 f"`{payload['vocabulary'].get('na_digest', '')}`), so they leave the "
+                 "coverage denominator. A fixture that claims one is a cell error: delete "
+                 "the entry in the commit that adds it.")
+    lines.append("")
+    listed = payload.get("not_applicable", {})
+    if listed:
+        lines.append("| cell | class | reason |")
+        lines.append("|---|---|---|")
+        for label in sorted(listed):
+            lines.append(f"| `{label}` | {listed[label]['class']} | {listed[label]['reason']} |")
+    else:
+        lines.append("_None in this selection._")
     lines.append("")
     return "\n".join(lines)
 
@@ -331,16 +396,31 @@ def level_drift(committed, payload):
     """Per-cell level changes, `<lang>/<mech>: <committed> -> <measured>`.
 
     A cell that gained or lost its fixture reads `(absent)` on that side, so an
-    emit someone forgot to commit is as loud as a regression.
+    emit someone forgot to commit is as loud as a regression. A cell entering
+    or leaving matrix_vocab.NOT_APPLICABLE is drift too: `unknown -> n/a` /
+    `n/a -> unknown`, or `n/a -> <level>` when its entry went in the commit
+    that added its fixture. A schema-1 file carries no list, so every listed
+    cell reads `unknown -> n/a` against it.
     """
-    old = (committed or {}).get("cells", {}) if isinstance(committed, dict) else {}
-    new = payload["cells"]
+    committed = committed if isinstance(committed, dict) else {}
+    old, new = committed.get("cells") or {}, payload["cells"]
+    old_na = committed.get("not_applicable") or {}
+    new_na = payload.get("not_applicable") or {}
+
+    def state(cells, na, label):
+        if label in cells:
+            return cells[label].get("level", "(absent)")
+        return vocab.NA_LEVEL if label in na else "(absent)"
+
     lines = []
-    for label in sorted(set(old) | set(new)):
-        was = old.get(label, {}).get("level", "(absent)") if label in old else "(absent)"
-        now = new.get(label, {}).get("level", "(absent)") if label in new else "(absent)"
-        if was != now:
-            lines.append(f"{label}: {was} -> {now}")
+    for label in sorted(set(old) | set(new) | set(old_na) | set(new_na)):
+        was, now = state(old, old_na, label), state(new, new_na, label)
+        if was == now:
+            continue
+        if vocab.NA_LEVEL in (was, now):
+            # an unlisted cell with no fixture is `unknown` in the n/a vocabulary
+            was, now = (("unknown" if s == "(absent)" else s) for s in (was, now))
+        lines.append(f"{label}: {was} -> {now}")
     return lines
 
 

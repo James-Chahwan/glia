@@ -496,6 +496,139 @@ def test_an_unknown_cell_still_gets_a_marker():
                     "route=0/0 forbid=0/0) via=None fixtures="), line
 
 
+# ---------------------------------------------------------------------------
+# Not applicable (CF.13a): matrix_vocab.NOT_APPLICABLE, falsified by a fixture
+# ---------------------------------------------------------------------------
+
+# The 4 azure_sb cells whose language lacks a client library: NOT listed (James
+# 2026-09-30). A client can appear, and a wrong n/a hides a measurable cell.
+NO_CLIENT_CELLS = ("ruby/azure_sb", "php/azure_sb", "dart/azure_sb", "elixir/azure_sb")
+
+
+def test_na_list_names_canonical_cells_with_reasons():
+    na = vocab.NOT_APPLICABLE
+    assert len(na) == 28, len(na)
+    assert list(na) == sorted(na), "NOT_APPLICABLE rows must be written sorted"
+    per_lang = {}
+    for label, entry in na.items():
+        # parse_cell normalizes and raises on a bad row or column; a canonical
+        # key must survive the round trip unchanged (no alias spellings).
+        lang, mech = matrix.parse_cell(label)
+        assert f"{lang}/{mech}" == label, (label, lang, mech)
+        cls, reason = entry
+        assert cls == "structural", (label, cls)
+        assert isinstance(reason, str) and len(reason) >= 20, (label, reason)
+        assert vocab.not_applicable(lang, mech) == reason, label
+        per_lang[lang] = per_lang.get(lang, 0) + 1
+    assert per_lang == {"solidity": 22, "terraform": 6}, per_lang
+    # the unknown anchor and the no-client cells stay measurable
+    assert "clojure/kafka" not in na
+    for label in NO_CLIENT_CELLS:
+        assert label not in na, label
+        assert vocab.not_applicable(*label.split("/")) is None, label
+    assert vocab.NA_LEVEL == "n/a"
+
+
+def test_an_na_cell_reads_na_not_unknown():
+    assert matrix.cell_marker(("solidity", "kafka")) == (
+        "[matrix] cell solidity/kafka = n/a (extract=0/0 literal=0/0 "
+        "route=0/0 forbid=0/0) via=None fixtures="), matrix.cell_marker(("solidity", "kafka"))
+    assert "= unknown" in matrix.cell_marker(("dart", "azure_sb"))
+    tally = matrix._counts({}, [("solidity", "kafka"), ("dart", "azure_sb")])
+    assert tally["n/a"] == 1 and tally["unknown"] == 1, tally
+    out = io.StringIO()
+    matrix.render({}, ["solidity"], ["kafka"], [], [], out=out)
+    text = out.getvalue()
+    rows = {ln.split()[0]: ln.split()[1:] for ln in text.splitlines()
+            if ln[:1].isalpha() and ln.split()[1:]
+            and set(ln.split()[1:]) <= set("●◐·?-!")}
+    assert rows.get("solidity") == ["-"], text
+    # the coverage line divides by APPLICABLE cells and names the n/a count
+    assert "COVERAGE OF THE COVERAGE: 0/0 cells have a fixture (0.0%); 1 n/a" in text, text
+
+
+def test_a_fixture_on_an_na_cell_is_an_error():
+    tmp = Path(tempfile.mkdtemp(prefix="matrix-test-"))
+    try:
+        _write_key(tmp, "matrix/solidity/kafka", ["solidity/kafka"], language="solidity")
+        _write_key(tmp, "matrix/go/nats", ["go/nats"])
+        good = (_res([PRODUCED, CONSUMED], [FLOWS]), QUEUE_KINDS)
+        stub = StubGrader({"kafka": good, "nats": good})
+        records, bad, _ = matrix.collect(root=tmp, grader=stub)
+        assert bad == [], bad
+        cells = matrix.aggregate(records)
+        # graded as usual: the list does not change how a fixture scores ...
+        assert cells[("solidity", "kafka")]["level"] == "full", cells
+        matrix.apply_not_applicable(cells)
+        # ... but a fixture claiming an n/a cell contradicts the list: an error
+        slot = cells[("solidity", "kafka")]
+        assert slot["level"] == "error", slot
+        assert slot["reasons"][0].startswith("n/a contradicted: "), slot["reasons"]
+        assert "remove the NOT_APPLICABLE entry" in slot["reasons"][0], slot["reasons"]
+        assert cells[("go", "nats")]["level"] == "full", cells  # unlisted: untouched
+        tally = matrix._counts(cells, [("solidity", "kafka"), ("go", "nats")])
+        assert tally["error"] == 1 and tally["n/a"] == 0, tally
+        out = io.StringIO()
+        matrix.render(cells, ["solidity"], ["kafka"], [], [], out=out)
+        assert "  - solidity/kafka: n/a contradicted: " in out.getvalue(), out.getvalue()
+    finally:
+        shutil.rmtree(tmp)
+
+
+def test_emit_counts_na_apart_from_unknown():
+    import matrix_emit
+    payload = matrix_emit.build_payload({}, [], languages=["solidity"],
+                                        mechanisms=["kafka", "calls"], engine="test")
+    assert payload["schema"] == 2, payload["schema"]
+    totals = payload["totals"]
+    assert totals["n/a"] == 1 and totals["unknown"] == 1, totals
+    assert totals["covered"] == 0 and totals["grid"] == 2, totals
+    assert list(payload["not_applicable"]) == ["solidity/kafka"], payload["not_applicable"]
+    assert payload["not_applicable"]["solidity/kafka"]["class"] == "structural"
+    voc = payload["vocabulary"]
+    assert voc["not_applicable"] == 28, voc
+    assert len(voc["na_digest"]) == 12 and voc["na_digest"] == matrix_emit.na_digest(), voc
+    # the n/a list has its own digest: the scoring ruler does not move with it
+    assert voc["digest"] == matrix_emit.vocabulary_digest(), voc
+    md = matrix_emit.render_markdown(payload, ["solidity"], ["kafka", "calls"])
+    assert "0/1 applicable cells have a fixture" in md and ", 1 n/a" in md, md
+    assert "## Not applicable" in md and "| `solidity/kafka` | structural |" in md, md
+    grid_row = next(ln for ln in md.splitlines() if ln.startswith("solidity "))
+    assert grid_row.split() == ["solidity", "-", "?"], grid_row
+    # a cell entering the list is drift; a schema-1 payload has no list at all
+    old = {k: v for k, v in payload.items() if k != "not_applicable"}
+    assert matrix_emit.level_drift(old, payload) == ["solidity/kafka: unknown -> n/a"]
+    assert matrix_emit.level_drift(payload, old) == ["solidity/kafka: n/a -> unknown"]
+    assert matrix_emit.level_drift(payload, payload) == []
+    # dropped from the list in the commit that adds its fixture
+    measured = {**payload, "not_applicable": {},
+                "cells": {"solidity/kafka": {"level": "full"}}}
+    assert matrix_emit.level_drift(payload, measured) == ["solidity/kafka: n/a -> full"]
+
+
+def test_scaffold_refuses_an_na_cell():
+    import scaffold
+    tmp = Path(tempfile.mkdtemp(prefix="matrix-test-"))
+    # scaffold() writes under the module-level MATRIX: point it at a temp tree
+    # so neither outcome can touch the real matrix/ corpus.
+    real = (scaffold.MATRIX, sys.stderr, sys.stdout)
+    scaffold.MATRIX, sys.stderr, sys.stdout = tmp, io.StringIO(), io.StringIO()
+    try:
+        rc = scaffold.main(["solidity", "kafka"])
+        err = sys.stderr.getvalue()
+        written = sorted(p.relative_to(tmp).as_posix() for p in tmp.rglob("*"))
+        # an applicable cell still scaffolds (proves the redirect took effect)
+        ok = scaffold.main(["dart", "azure_sb"])
+        ok_written = (tmp / "dart" / "azure_sb" / "key.json").exists()
+    finally:
+        scaffold.MATRIX, sys.stderr, sys.stdout = real
+        shutil.rmtree(tmp)
+    assert rc == 2, (rc, err)
+    assert "NOT_APPLICABLE" in err and "solidity/kafka" in err, err
+    assert written == [], written
+    assert ok == 0 and ok_written, ok
+
+
 def test_a_bad_cli_selection_exits_2_without_grading():
     err = io.StringIO()
     real = sys.stderr

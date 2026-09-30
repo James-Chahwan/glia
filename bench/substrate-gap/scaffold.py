@@ -32,6 +32,10 @@ the matrix. In particular there is no `expect_literals`: a literal assertion IS
 an `expect_nodes` entry whose `name` is the literal, because the identity
 matcher is a case-folded substring over name OR qname.
 
+A cell listed in matrix_vocab.NOT_APPLICABLE (the language cannot express the
+mechanism) is REFUSED, exit 2: a fixture proving it applicable must delete that
+entry in the same commit, or matrix.py reports the cell as an error.
+
 See AUTHORING.md for the six-step per-cell recipe this skeleton feeds.
 """
 import argparse
@@ -41,7 +45,9 @@ from pathlib import Path
 
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
-from matrix_vocab import ROLE_CELL, mechanism, normalize_language  # noqa: E402
+from matrix_vocab import (  # noqa: E402
+    ROLE_CELL, mechanism, normalize_language, not_applicable,
+)
 
 MATRIX = HERE / "matrix"
 
@@ -240,6 +246,10 @@ def build_stub(lang, mech, rel, role, comment, preamble):
 def scaffold(language, mech_id, force=False):
     lang = normalize_language(language)
     mech = mechanism(mech_id)
+    reason = not_applicable(lang, mech["id"])
+    if reason is not None:
+        raise ValueError(f"{lang}/{mech['id']} is NOT_APPLICABLE ({reason}); delete that "
+                         f"entry in the same commit as the fixture")
     if lang not in LANGS:  # pragma: no cover - LANGS covers all 16 rows
         raise ValueError(f"no file template for language {lang!r}")
     ext, comment, preamble = LANGS[lang]
