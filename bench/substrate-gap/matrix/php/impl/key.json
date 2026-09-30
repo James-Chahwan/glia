@@ -1,0 +1,27 @@
+{
+  "framework": "php-implements-interface",
+  "language": "php",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "impl",
+  "cells": [
+    "php/impl"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "INTERFACE",
+      "name": "UserRepository"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "EloquentUserRepository",
+      "to": "UserRepository",
+      "category": "IMPLEMENTS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "class X implements UserRepository || CF.7b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=1/1 literal=1/1 route=0/1 forbid=0/0) via=type. Predicted extractor gap (backlog, not fixed by the probe): `class X implements UserRepository` emits no IMPLEMENTS, same file or across files (measured both): the PHP parser records no base-interface ref."
+}

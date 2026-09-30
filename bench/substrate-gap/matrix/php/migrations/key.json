@@ -1,0 +1,27 @@
+{
+  "framework": "php-laravel-migration",
+  "language": "php",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "migrations",
+  "cells": [
+    "php/migrations"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "DATA_ENTITY",
+      "name": "users"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "2024_01_01_000000_create_users_table",
+      "to": "users",
+      "category": "ACCESSES_DATA"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Laravel Schema::create('users') || CF.7b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=1/1 literal=1/1 route=1/1 forbid=0/0) via=db. Nothing to fix: the cell is covered at HEAD."
+}

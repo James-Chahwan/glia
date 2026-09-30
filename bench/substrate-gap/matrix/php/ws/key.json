@@ -1,0 +1,32 @@
+{
+  "framework": "php-ratchet",
+  "language": "php",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "ws",
+  "cells": [
+    "php/ws"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "WS_HANDLER",
+      "name": "/ws/chat"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "/ws/chat"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "/ws/chat",
+      "to": "/ws/chat",
+      "category": "WS_CONNECTS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Ratchet App->route('/ws/chat', new Chat) + a browser WebSocket client || CF.7b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=1/2 literal=1/2 route=0/1 forbid=0/0) via=websocket. Predicted extractor gap (backlog, not fixed by the probe): server side missing: Ratchet `$app->route('/ws/chat', new Chat)` / `MessageComponentInterface` has no row in parsers/code/extractors/src/websocket.rs; the browser client side is found."
+}

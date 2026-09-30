@@ -1,4 +1,5 @@
 {
+  "cells": ["php/imports"],
   "framework": "php-braced-use",
   "language": "php",
   "dirs": [

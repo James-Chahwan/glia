@@ -1,0 +1,32 @@
+{
+  "framework": "php-lighthouse",
+  "language": "php",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "graphql",
+  "cells": [
+    "php/graphql"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "orders"
+    },
+    {
+      "kind": "GRAPHQL_OPERATION",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "GRAPHQL_CALLS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Laravel Lighthouse schema-first graphql/schema.graphql + Apollo TS client || CF.7b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=2/2 literal=2/2 route=1/1 forbid=0/0) via=graphql. Nothing to fix: the cell is covered at HEAD."
+}
