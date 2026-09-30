@@ -14,12 +14,16 @@ cmd glia docs push
   arg title pos=- long=title short=- required=true num_args=1 action=Set default=- value_names=TITLE global=false hidden=false
   arg token pos=- long=token short=- required=false num_args=1 action=Set default=- value_names=TOKEN global=false hidden=false
 cmd glia docs sync
+  arg container pos=- long=container short=- required=false num_args=1 action=Set default=- value_names=NAME global=false hidden=false
   arg email pos=- long=email short=- required=false num_args=1 action=Set default=- value_names=EMAIL global=false hidden=false
   arg exclude pos=- long=exclude short=- required=false num_args=1 action=Append default=- value_names=PATTERN global=false hidden=false
   arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
   arg include pos=- long=include short=- required=false num_args=1 action=Append default=- value_names=PATTERN global=false hidden=false
   arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+  arg path pos=- long=path short=- required=false num_args=1 action=Set default=- value_names=DIR global=false hidden=false
   arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
   arg site pos=- long=site short=- required=false num_args=1 action=Set default=- value_names=SITE global=false hidden=false
-  arg space pos=- long=space short=- required=true num_args=1 action=Set default=- value_names=SPACE global=false hidden=false
+  arg source pos=- long=source short=- required=false num_args=1 action=Set default=confluence value_names=SOURCE global=false hidden=false values=confluence,dir
+  arg space pos=- long=space short=- required=false num_args=1 action=Set default=- value_names=SPACE global=false hidden=false
   arg token pos=- long=token short=- required=false num_args=1 action=Set default=- value_names=TOKEN global=false hidden=false
+  arg url_base pos=- long=url-base short=- required=false num_args=1 action=Set default=- value_names=URL global=false hidden=false

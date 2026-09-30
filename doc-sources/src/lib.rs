@@ -17,7 +17,8 @@
 //! [`snapshot`] is the source-neutral seam every adapter writes through (a
 //! [`Page`] of any [`glia_code_domain::DocSourceKind`], redacted, merged into
 //! the manifest by (source, container)); [`transport`] holds the origin /
-//! credential / base64 helpers the adapters share.
+//! credential / base64 helpers the adapters share. [`wikidir`] reads a local
+//! GitHub / GitLab wiki checkout's Markdown pages (CE.4b, `--source dir`).
 
 pub mod confluence;
 pub mod confluence_rest;
@@ -27,6 +28,7 @@ pub mod snapshot;
 #[doc(hidden)]
 pub mod stub;
 pub mod transport;
+pub mod wikidir;
 
 pub use filter::TitleFilter;
 pub use snapshot::{
