@@ -8,6 +8,11 @@
 
 pub mod composition;
 
+/// The fidelity ladder (CC.4a): one node at full / preview / outline / qname,
+/// a pack renderer over `(node, fidelity)` picks, and `code_text`, the CODE
+/// text accessor the ladder and `render_prose` share.
+pub mod ladder;
+
 /// The synth passes as `activation::plan::SynthHook`s (LD.12b): the access-path
 /// hook is ungated, the research-only ones sit behind `research`.
 pub mod hooks;
@@ -129,20 +134,11 @@ pub fn render_prose(m: &MergedGraph) -> String {
     out
 }
 
-/// Doc text for a node if it has one, else a preview of its code cell.
+/// Doc text for a node if it has one (its first `Text` DOC cell), else its
+/// code, read through [`ladder::code_text`] (so a CD.7c `code_span` payload is
+/// no code here).
 fn node_doc_or_code(node: &glia_core::Node) -> Option<&str> {
-    let mut code = None;
-    for c in &node.cells {
-        if let glia_core::CellPayload::Text(s) = &c.payload {
-            if c.kind == cell_type::DOC {
-                return Some(s.as_str());
-            }
-            if c.kind == cell_type::CODE && code.is_none() {
-                code = Some(s.as_str());
-            }
-        }
-    }
-    code
+    ladder::doc_text(node).or_else(|| ladder::code_text(node))
 }
 
 fn render(graphs: &[&RepoGraph], cross_edges: &[Edge], full_bodies: bool) -> String {
