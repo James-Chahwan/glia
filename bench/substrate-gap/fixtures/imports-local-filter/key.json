@@ -11,7 +11,7 @@
     {"kind": "MODULE", "node": "myapp::auth", "cell": "IMPORTS", "contains": "[\"yaml\"]", "note": "the repo's own package `myapp` drops; the real dependency stays"},
     {"kind": "MODULE", "node": "jvm::App", "cell": "IMPORTS", "contains": "[\"org::slf4j\"]", "note": "com.example.util has no PACKAGE node; the uniquely declared class Helper places it in the repo"},
     {"kind": "MODULE", "node": "php::Http::HomeController", "cell": "IMPORTS", "contains": "[\"GuzzleHttp\"]", "note": "App is the prefix of the declared namespace App\\Services"},
-    {"kind": "MODULE", "node": "c::main", "cell": "IMPORTS", "contains": "[]", "note": "#include \"mathutil.h\" is the repo's own header c/mathutil.h"},
+    {"kind": "MODULE", "node": "c::main", "cell": "IMPORTS", "contains": "[\"stdio.h\"]", "note": "#include \"mathutil.h\" is the repo's own header (dropped); <stdio.h> is a library (CB.22)"},
     {"kind": "MODULE", "node": "cs::Controllers::UsersController", "cell": "IMPORTS", "contains": "[\"System::Threading\"]", "note": "Shop is the prefix of the declared namespace Shop.Services"},
     {"kind": "MODULE", "node": "ex::controller", "cell": "IMPORTS", "contains": "[\"Plug.Conn\"]", "note": "MyApp.Repo is declared by defmodule in ex/repo.ex"},
     {"kind": "MODULE", "node": "svc::server", "cell": "IMPORTS", "contains": "[\"github.com/x/y\"]", "note": "control: an external go module path survives the filter"}

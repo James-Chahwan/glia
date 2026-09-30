@@ -12,6 +12,7 @@ use glia_core::RepoId;
 use std::time::Instant;
 
 use super::BuildOptions;
+use super::c_includes::IncludeRoots;
 use super::grafts;
 use super::lang_build::{self, TsAliasSet};
 use super::rpc_needles::RpcContext;
@@ -120,6 +121,9 @@ pub(super) struct RepoBuildCtx<'a> {
     /// The repo's tsconfig `paths` aliases per project dir (A6.8): the TS
     /// family's import resolver and the IMPORTS-cell filter read them.
     pub(super) ts_aliases: &'a TsAliasSet,
+    /// The repo's C/C++ include search roots (CB.22): `build_c_cpp`'s include
+    /// resolver reads them after the parse cache, so the cache needs no key.
+    pub(super) c_includes: &'a IncludeRoots,
     /// The build-wide proto service set (A5.2).
     pub(super) rpc: &'a RpcContext,
     /// The walk's project roots (A8.4), the owner vocabulary of the LB.4a HTTP
@@ -145,7 +149,17 @@ pub(super) fn build_graphs_for_repo(
     cache: Option<&mut ParseCache>,
     ctx: &RepoBuildCtx<'_>,
 ) -> (Vec<glia_graph::RepoGraph>, Vec<String>, PhaseTimes) {
-    let RepoBuildCtx { repo, repo_label, go, ts_aliases, rpc, roots, config, opts } = *ctx;
+    let RepoBuildCtx {
+        repo,
+        repo_label,
+        go,
+        ts_aliases,
+        c_includes,
+        rpc,
+        roots,
+        config,
+        opts,
+    } = *ctx;
     // Keep caught per-file panics off stderr: the default hook would print
     // (with a backtrace) for every bad file even though it becomes a
     // parse_errors line. LG.1a: the flag is per thread (`parallel`), so this
@@ -213,6 +227,7 @@ pub(super) fn build_graphs_for_repo(
         repo_label,
         &rust_crates,
         ts_aliases,
+        c_includes,
         &mut parse_errors,
     );
     times.language_build = started.elapsed();

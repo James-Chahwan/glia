@@ -161,7 +161,7 @@ fn header_and_impl_are_two_modules() {
         assert!(imports.contains(&pair(from, to)), "{from} -> {to} missing: {imports:?}");
     }
     assert!(imports.iter().all(|(f, t)| f != t), "self-IMPORTS: {imports:?}");
-    // `<stdlib.h>` is an angle include: no edge.
+    // `<stdlib.h>` is an angle include naming no repo file: no edge (CB.22).
     assert_eq!(imports.len(), 3, "{imports:?}");
     // Every IMPORTS edge is a located site (LC.3b evidence, carried through).
     for e in merged.all_edges().filter(|e| e.category == edge_category::IMPORTS) {
@@ -198,8 +198,14 @@ fn header_and_impl_are_two_modules() {
 
     // (6) The IMPORTS-cell local filter still knows every quoted include is
     // the repo's own header: the file-named MODULE keeps its stem as nav
-    // name, so the index holds the bare `c::point` / `src::Widget`.
-    for module in ["c::point.c", "src::main.cpp", "src::Widget.cpp"] {
+    // name, so the index holds the bare `c::point` / `src::Widget`. An angle
+    // include is a library (CB.22): `c/point.c`'s `<stdlib.h>` is its one
+    // entry; the C++ files' only include is their quoted own header.
+    for (module, want) in [
+        ("c::point.c", r#"["stdlib.h"]"#),
+        ("src::main.cpp", "[]"),
+        ("src::Widget.cpp", "[]"),
+    ] {
         let id = nav
             .iter()
             .find(|(_, (q, _, k))| q == module && *k == node_kind::MODULE)
@@ -217,7 +223,7 @@ fn header_and_impl_are_two_modules() {
                 _ => None,
             })
             .collect();
-        assert_eq!(cells, ["[]"], "{module}");
+        assert_eq!(cells, [want], "{module}");
     }
 }
 

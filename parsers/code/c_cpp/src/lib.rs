@@ -1148,24 +1148,38 @@ fn extract_func_name(declarator: TsNode, src: &[u8]) -> String {
     }
 }
 
-/// `#include "local.h"` (local includes only), from the file MODULE
+/// `#include "local.h"` and `#include <proj/x.h>`, from the file MODULE
 /// whatever scope it sits in (CB.19: `namespace shop { #include ".." }`).
+/// A quoted path is recorded unquoted (`local.h`); an angle path keeps its
+/// brackets (`<proj/x.h>`) as the marker the engine's include resolver reads
+/// (CB.22: an angle include searches the include roots only, never the
+/// includer's directory). An angle include naming no repo file (`<vector>`)
+/// resolves to nothing and binds nothing. A macro-named include
+/// (`#include CONFIG_H`) names no path.
 fn collect_include(node: TsNode, src: &[u8], acc: &mut Acc) {
     let Some(path_node) = node.child_by_field_name("path") else {
         return;
     };
     let path = text_of(path_node, src);
-    if path.starts_with('"') {
-        let cleaned = path.trim_matches('"');
-        acc.imports.push(ImportStmt {
-            from_module: acc.module_qname.clone(),
-            target: ImportTarget::Module {
-                path: cleaned.to_string(),
-                alias: None,
-            },
-            line: line_at(node),
-        });
-    }
+    let path = if path.starts_with('"') {
+        path.trim_matches('"')
+    } else if path_node.kind() == "system_lib_string"
+        && path.starts_with('<')
+        && path.ends_with('>')
+        && !path[1..path.len() - 1].trim().is_empty()
+    {
+        path
+    } else {
+        return;
+    };
+    acc.imports.push(ImportStmt {
+        from_module: acc.module_qname.clone(),
+        target: ImportTarget::Module {
+            path: path.to_string(),
+            alias: None,
+        },
+        line: line_at(node),
+    });
 }
 
 fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
@@ -2279,6 +2293,55 @@ int shop::Cart::Line::twice() const { return total() * 2; }
         let line = node_at(&fp, node_kind::STRUCT, "shop::Cart::Line").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         let total = node_at(&fp, node_kind::METHOD, "shop::Cart::Line::total").unwrap_or_else(|| panic!("{:?}", all_qnames(&fp)));
         assert_eq!(fp.nav.parent_of[&total], line);
+    }
+
+    /// CB.22: an angle include is recorded with its brackets (the engine's
+    /// search-root marker), a quoted one unquoted, in source order; a
+    /// macro-named include records nothing.
+    #[test]
+    fn angle_includes_are_recorded() {
+        let source = "#include <shop/cart.hpp>\n#include \"shop/util.hpp\"\n#include <vector>\n#include CONFIG_H\n";
+        let fp = parse_file(
+            source,
+            "src/cart.cpp",
+            "src::cart.cpp",
+            Dialect::Cpp,
+            repo(),
+        )
+        .unwrap();
+        let got: Vec<(&str, &str, u32)> = fp
+            .imports
+            .iter()
+            .map(|i| match &i.target {
+                ImportTarget::Module { path, .. } => {
+                    (i.from_module.as_str(), path.as_str(), i.line)
+                }
+                ImportTarget::Symbol { module, .. } => {
+                    (i.from_module.as_str(), module.as_str(), i.line)
+                }
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("src::cart.cpp", "<shop/cart.hpp>", 0),
+                ("src::cart.cpp", "shop/util.hpp", 1),
+                ("src::cart.cpp", "<vector>", 2),
+            ]
+        );
+        let c = parse_file(
+            "#include <stdio.h>\n#include \"x.h\"\n",
+            "c/main.c",
+            "c::main.c",
+            Dialect::C,
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            c.imports.len(),
+            2,
+            "the C grammar keeps the angle include too"
+        );
     }
 
     /// CB.19 (C3): an `#include` inside a namespace block is the file's:

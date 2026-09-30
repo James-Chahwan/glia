@@ -28,6 +28,7 @@
 //! Python threads at once.
 
 mod assemble;
+mod c_includes;
 mod grafts;
 mod lang_build;
 mod rpc_needles;
@@ -49,6 +50,7 @@ use crate::profile::{CodeBuildCtx, run_code_passes_with};
 use crate::walk::{WalkResult, build_project_graph, build_region_graph, walk_source_files};
 
 use assemble::{RepoBuildCtx, build_graphs_for_repo};
+use c_includes::IncludeRoots;
 use lang_build::TsAliasSet;
 use rpc_needles::RpcContext;
 use timing::BuildTimes;
@@ -221,6 +223,9 @@ fn generate_one_inner(
     // A6.8: tsconfig `paths`, read per project dir. Consumed after the parse
     // cache (graph build, IMPORTS-cell filter), so the cache needs no key.
     let ts_aliases = TsAliasSet::read(&root, &roots, repo_path);
+    // CB.22: the C/C++ include search roots, read the same way (off the walk
+    // and the disk) and consumed by the C/C++ graph build.
+    let c_includes = IncludeRoots::read(&root, &files, &roots, repo_path);
     let mut rpc = RpcContext::default();
     rpc.add_files(&files);
     let ctx = RepoBuildCtx {
@@ -228,6 +233,7 @@ fn generate_one_inner(
         repo_label: repo_path,
         go: &go,
         ts_aliases: &ts_aliases,
+        c_includes: &c_includes,
         rpc: &rpc,
         roots: &roots,
         config: inputs.first().and_then(|i| i.config.as_ref()),
@@ -465,11 +471,13 @@ pub(crate) fn assemble_many_with(
             c.validate_context(&ident.key, &go.context_key());
         }
         let ts_aliases = TsAliasSet::read(&root, &roots, path);
+        let c_includes = IncludeRoots::read(&root, &files, &roots, path);
         let ctx = RepoBuildCtx {
             repo,
             repo_label: path,
             go: &go,
             ts_aliases: &ts_aliases,
+            c_includes: &c_includes,
             rpc: &rpc,
             roots: &roots,
             config: input.config.as_ref(),

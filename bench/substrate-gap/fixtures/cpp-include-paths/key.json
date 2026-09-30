@@ -1,0 +1,27 @@
+{
+  "framework": "cpp-include-paths",
+  "language": "c_cpp",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-C4: the parser keeps quoted includes only (an angle `#include <shop/cart.hpp>` is dropped) and engine/src/build/lang_build.rs resolve_include_source resolves a path only against the includer's directory, so an include through a -I search path (CMake target_include_directories, compile_commands.json, a conventional include/ root) never resolves. Measured on HEAD 2170ff8: 0 IMPORTS out of src::cart.cpp. `<vector>` names no repo file and stays unresolved (precision).",
+  "expect_edges": [
+    {
+      "from": "src::cart.cpp",
+      "to": "include::shop::cart.hpp",
+      "category": "IMPORTS",
+      "note": "angle include through target_include_directories(include)"
+    },
+    {
+      "from": "src::cart.cpp",
+      "to": "include::shop::util.hpp",
+      "category": "IMPORTS",
+      "note": "quoted include that misses the includer's dir falls back to the search path"
+    },
+    {
+      "from": "src::cart.cpp::shop::cart_count",
+      "to": "include::shop::util.hpp::util_twice",
+      "category": "CALLS"
+    }
+  ]
+}

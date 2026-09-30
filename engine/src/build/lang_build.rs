@@ -1,8 +1,9 @@
 //! The per-language graph build of `build_graphs_for_repo`: a deterministic
 //! language order, the `build_*` dispatch, one shared TS-family graph, and the
 //! import resolvers the `build_typescript` arm takes (relative, plus the A6.8
-//! tsconfig `paths` aliases for the TS family) and the `#include` resolver
-//! `build_c_cpp` takes.
+//! tsconfig `paths` aliases for the TS family) and the includer-relative
+//! step of the `#include` resolver `build_c_cpp` takes (its search roots are
+//! [`super::c_includes`], CB.22).
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
@@ -17,6 +18,8 @@ use glia_graph::{GraphError, RepoGraph};
 use glia_graph::rust_paths::RustCrate;
 
 use crate::extract::{TS_FAMILY, build_group, path_to_qname};
+
+use super::c_includes::{IncludeRoots, angle_includes, c_cpp_module_qnames};
 
 // TS-family lang tags (typescript/angular/react/vue, `extract::TS_FAMILY`)
 // share ONE module + symbol space in a repo: an Angular component
@@ -64,7 +67,8 @@ pub(super) struct LanguageGraphs {
 /// `[recv]` and A6.3 `[heritage]` markers for `repo_label`.
 /// `rust_crates` ([`rust_crates`]) feeds `build_rust`'s path resolver (LA.1a);
 /// `ts_aliases` the TS family's import resolver ([`resolve_ts_source_aliased`],
-/// A6.8).
+/// A6.8); `c_includes` the C/C++ include resolver over the repo's include
+/// search roots (CB.22, [`IncludeRoots::resolver`]).
 ///
 /// LG.1c: every build group builds on the engine pool
 /// ([`crate::parallel::par_map_owned`]), one [`build_one`] per group; CA.7
@@ -83,6 +87,7 @@ pub(super) fn build_language_graphs(
     repo_label: &str,
     rust_crates: &[RustCrate],
     ts_aliases: &TsAliasSet,
+    c_includes: &IncludeRoots,
     parse_errors: &mut Vec<String>,
 ) -> LanguageGraphs {
     let mut graphs = Vec::new();
@@ -160,7 +165,7 @@ pub(super) fn build_language_graphs(
                 })
             } else {
                 build_one(lang, parses, |parses| {
-                    build_solo(lang, parses, repo, rust_crates)
+                    build_solo(lang, parses, repo, repo_label, rust_crates, c_includes)
                 })
             }
         })
@@ -189,12 +194,16 @@ pub(super) fn build_language_graphs(
     }
 }
 
-/// One non-TS build group's graph: the `build_*` its language takes.
+/// One non-TS build group's graph: the `build_*` its language takes. The
+/// C/C++ build prints CB.22's `[c-includes]` line after it
+/// ([`IncludeRoots::marker`]), on the thread that ran it.
 fn build_solo(
     lang: &'static str,
     parses: Vec<FileParse>,
     repo: RepoId,
+    repo_label: &str,
     rust_crates: &[RustCrate],
+    c_includes: &IncludeRoots,
 ) -> Result<RepoGraph, GraphError> {
     match lang {
         "python" => glia_graph::build_python(repo, parses),
@@ -204,7 +213,15 @@ fn build_solo(
         }
         "rust" => glia_graph::build_rust(repo, parses, rust_crates),
         "ruby" => glia_graph::build_ruby(repo, parses),
-        "c_cpp" => glia_graph::build_c_cpp(repo, parses, resolve_include_source),
+        "c_cpp" => {
+            let modules = c_cpp_module_qnames(&parses);
+            let angle = angle_includes(&parses);
+            let resolver = c_includes.resolver(&modules);
+            let graph =
+                glia_graph::build_c_cpp(repo, parses, |from, spec| resolver.resolve(from, spec));
+            eprintln!("{}", c_includes.marker(angle, resolver.bound_via_roots(), repo_label));
+            graph
+        }
         _ => glia_graph::build_typescript(repo, parses, resolve_relative_source),
     }
 }
@@ -879,9 +896,10 @@ fn resolve_relative_source(from_module: &str, specifier: &str) -> Option<String>
 /// file's directory, and every C/C++ MODULE is `<dir>::<file name>`
 /// (`route::ModuleQnames`), so the target keeps its extension. An absolute
 /// path, or one that climbs above the repo root, is outside the repo → None.
-/// Angle includes never reach here (the parser keeps quoted ones only);
-/// includes found through `-I` search paths stay unresolved.
-fn resolve_include_source(from_module: &str, specifier: &str) -> Option<String> {
+/// The includer-relative first step of CB.22's
+/// [`super::c_includes::IncludeResolver`], which searches the repo's include
+/// roots after it (and alone for an angle include).
+pub(super) fn resolve_include_source(from_module: &str, specifier: &str) -> Option<String> {
     let spec = specifier.trim().trim_matches('"');
     if spec.is_empty() || spec.starts_with(['/', '\\']) {
         return None;
