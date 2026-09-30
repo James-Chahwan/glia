@@ -50,6 +50,21 @@ glia-store = { path = "../store" }
 # skewed file sizes, a worker stack size we set. Its crossbeam deps were
 # already in the lock through `ignore`.
 rayon = "1"
+# 0.5.1 dependencies, added together by C0.7 so Cargo.lock and PARSER_STAMP move
+# once; each owner packet only `use`s its crate.
+# CC.4b: the fidelity ladder (`pack`) renders through the dense-text projection.
+# One-way: projection-text depends on core, code-domain, graph and activation,
+# never on the engine; its `research` feature stays off.
+glia-projection-text = { path = "../projection-text" }
+# CD.7a: the parse-cache sidecar frame. Block API only (no frame format), and the
+# safe-* / checked-decode features keep it free of unsafe on untrusted bytes.
+lz4_flex = { version = "0.11", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"] }
+# CE.2a: the content-addressed shared-cache keys. `pure` compiles no C or
+# assembly, so the glia-py wheel matrix needs no assembler.
+blake3 = { version = "1", features = ["pure"] }
+# CE.3b: the format-preserving overlay writer. The same 0.22 line toml's parser
+# already locks (code-domain); `display` adds toml_write.
+toml_edit = { version = "0.22", default-features = false, features = ["parse", "display"] }
 
 [dev-dependencies]
 tempfile = "3"

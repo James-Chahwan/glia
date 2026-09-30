@@ -26,3 +26,12 @@ glia-doc-sources = { path = "../doc-sources" }
 glia-snapshots = { path = "../snapshots" }
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"
+# 0.5.1 dependencies, added by C0.7 with the engine's so Cargo.lock moves once.
+# The shared-cache transport is CLI-only: no HTTP crate enters the engine or the
+# glia-py wheel.
+# CE.2c: the cache object MAC; the same blake3 package the engine locks for its
+# content-addressed keys (CE.2a). `pure` compiles no C or assembly.
+blake3 = { version = "1", features = ["pure"] }
+# CE.2e: the https store transport. Default features, as doc-sources; already
+# locked through glia-doc-sources.
+ureq = "2"
