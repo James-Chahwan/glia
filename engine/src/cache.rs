@@ -243,7 +243,7 @@ struct CacheEntry {
 
 /// `FileParse` serialized with every hash container in key order (LC.11).
 ///
-/// `FileParse::properties` and `CodeNav`'s nine maps are std hash
+/// `FileParse::properties` and `CodeNav`'s ten maps are std hash
 /// containers, which iterate in a per-instance RandomState order, so the
 /// derived serializer wrote the same parse as different bytes on every build
 /// and [`ParseCache::save`] could never find the sidecar unchanged. This is
@@ -289,8 +289,9 @@ impl serde::Serialize for CanonicalNav<'_> {
             local_types,
             nav_facts,
             return_types,
+            method_sigs,
         } = self.0;
-        let mut st = s.serialize_struct("CodeNav", 9)?;
+        let mut st = s.serialize_struct("CodeNav", 10)?;
         st.serialize_field("name_by_id", &by_id(name_by_id, |v| v))?;
         st.serialize_field("qname_by_id", &by_id(qname_by_id, |v| v))?;
         st.serialize_field("kind_by_id", &by_id(kind_by_id, |v| v))?;
@@ -300,6 +301,7 @@ impl serde::Serialize for CanonicalNav<'_> {
         st.serialize_field("local_types", &by_id(local_types, by_name))?;
         st.serialize_field("nav_facts", &by_id(nav_facts, |v| v))?;
         st.serialize_field("return_types", &by_id(return_types, |v| v))?;
+        st.serialize_field("method_sigs", &by_id(method_sigs, |v| v))?;
         st.end()
     }
 }
@@ -797,6 +799,8 @@ mod tests {
             p.nav.record_fact(id, fact);
             // CA.2a: one result type per callable.
             p.nav.record_return_type(id, &format!("pkg.R{i}"));
+            // CA.3a: one normalised signature per METHOD.
+            p.nav.record_method_sig(id, &format!("(T{i})(error)"));
             p.properties.insert(id);
         }
         p
@@ -953,6 +957,7 @@ mod tests {
         assert_eq!(got.nav.local_types, many.nav.local_types);
         assert_eq!(got.nav.nav_facts, many.nav.nav_facts);
         assert_eq!(got.nav.return_types, many.nav.return_types);
+        assert_eq!(got.nav.method_sigs, many.nav.method_sigs);
         assert_eq!(got.properties, many.properties);
         assert_eq!((&got.nodes, &got.edges, &got.imports), (&many.nodes, &many.edges, &many.imports));
         assert_eq!((&got.calls, &got.refs), (&many.calls, &many.refs));

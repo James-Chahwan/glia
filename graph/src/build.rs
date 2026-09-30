@@ -82,7 +82,29 @@ pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Graph
     }
     eprintln!("{}", receivers.marker());
     eprintln!("{}", go_types_marker(&g.nav));
+    if let Some(line) = go_sigs_marker(&g.nav) {
+        eprintln!("{line}");
+    }
     Ok(g)
+}
+
+/// CA.3a: `[go-sigs] methods=<M> with_signature=<S>` over a Go graph's merged
+/// nav: M METHOD nodes (struct, split-receiver and interface methods), S of
+/// them with a recorded normalised signature (a generic receiver's methods
+/// and a generic interface's elements record none). `None` for a graph with
+/// no METHOD. The facts the implicit-IMPLEMENTS signature check (CA.3b)
+/// compares; only counted.
+fn go_sigs_marker(nav: &CodeNav) -> Option<String> {
+    let methods = nav
+        .kind_by_id
+        .iter()
+        .filter(|(_, k)| **k == node_kind::METHOD);
+    let (mut m, mut s) = (0usize, 0usize);
+    for (id, _) in methods {
+        m += 1;
+        s += usize::from(nav.method_sigs.contains_key(id));
+    }
+    (m > 0).then(|| format!("[go-sigs] methods={m} with_signature={s}"))
 }
 
 /// CA.2a: `[go-types] return_types=<R> local_scopes=<L> locals=<N>
@@ -385,6 +407,11 @@ fn merge_nav(dst: &mut CodeNav, src: CodeNav) {
     // the first parse's, as `rename_nodes` keeps the surviving id's.
     for (f, ty) in src.return_types {
         dst.return_types.entry(f).or_insert(ty);
+    }
+    // CA.3a: one signature per METHOD; a METHOD two parses share keeps the
+    // first parse's, as `rename_nodes` keeps the surviving id's.
+    for (m, sig) in src.method_sigs {
+        dst.method_sigs.entry(m).or_insert(sig);
     }
 }
 
@@ -2397,6 +2424,9 @@ fn rename_nodes(
         if let Some(ty) = nav.return_types.remove(&old) {
             nav.return_types.entry(new).or_insert(ty);
         }
+        if let Some(sig) = nav.method_sigs.remove(&old) {
+            nav.method_sigs.entry(new).or_insert(sig);
+        }
     }
     for parent in nav.parent_of.values_mut() {
         *parent = map(*parent);
@@ -3892,6 +3922,58 @@ mod tests {
         );
     }
 
+    /// CA.3a: `[go-sigs]` counts the METHOD nodes of a Go build and those
+    /// with a recorded signature: a generic receiver's method records none,
+    /// and a method split from its struct into another file keeps its own.
+    #[test]
+    fn go_sigs_marker_counts() {
+        let parse = |rel: &str, src: &str| {
+            let qname = rel.trim_end_matches(".go").replace('/', "::");
+            glia_parser_go::parse_file(src, rel, &qname, "example.com/shop", repo()).expect("parse")
+        };
+        let store = "package store\n\ntype Store struct{}\n\ntype Box[T any] struct{}\n\n\
+                     func (s *Store) Get(key string) string { return key }\n\n\
+                     func (b *Box[T]) Put(v T) {}\n";
+        let g = build_go(repo(), vec![parse("store/store.go", store)]).expect("build");
+        assert_eq!(
+            go_sigs_marker(&g.nav).as_deref(),
+            Some("[go-sigs] methods=2 with_signature=1")
+        );
+        let split = "package store\n\nfunc (s *Store) Del(key string) error { return nil }\n";
+        let g = build_go(
+            repo(),
+            vec![parse("store/store.go", store), parse("store/del.go", split)],
+        )
+        .expect("build");
+        assert_eq!(
+            go_sigs_marker(&g.nav).as_deref(),
+            Some("[go-sigs] methods=3 with_signature=2")
+        );
+        let del = gid(node_kind::METHOD, "store::del::Store::Del");
+        assert_eq!(g.nav.method_sigs[&del], "(string)(error)");
+        assert_eq!(go_sigs_marker(&CodeNav::default()), None);
+    }
+
+    /// CA.3a: `method_sigs` merge keeping the first parse's entry for a
+    /// METHOD two parses share, and a renamed METHOD's signature follows it
+    /// unless the surviving id already holds one.
+    #[test]
+    fn method_sigs_merge_first_and_follow_a_rename() {
+        let (s, t, u) = (NodeId(21), NodeId(22), NodeId(23));
+        let mut a = FileParse::default();
+        a.nav.record_method_sig(s, "(string)(string)");
+        let mut b = FileParse::default();
+        b.nav.record_method_sig(s, "(int)(int)");
+        b.nav.record_method_sig(t, "()(error)");
+        b.nav.record_method_sig(u, "()()");
+        let (mut g, _, mut calls, mut refs) = merge_parses(repo(), vec![a, b]);
+        assert_eq!(g.nav.method_sigs[&s], "(string)(string)");
+        rename_nodes(&mut g, &mut calls, &mut refs, &[(t, s), (u, NodeId(24))]);
+        assert!(!g.nav.method_sigs.contains_key(&t) && !g.nav.method_sigs.contains_key(&u));
+        assert_eq!(g.nav.method_sigs[&s], "(string)(string)", "the survivor keeps its own");
+        assert_eq!(g.nav.method_sigs[&NodeId(24)], "()()");
+    }
+
     /// No trace of `old` anywhere an id lives.
     fn assert_gone(g: &RepoGraph, old: NodeId) {
         assert!(g.nodes.iter().all(|n| n.id != old), "node record");
@@ -3914,6 +3996,7 @@ mod tests {
         assert!(!nav.local_types.contains_key(&old) && !g.properties.contains(&old));
         assert!(!nav.nav_facts.contains_key(&old), "nav_facts key");
         assert!(!nav.return_types.contains_key(&old), "return_types key");
+        assert!(!nav.method_sigs.contains_key(&old), "method_sigs key");
         assert!(
             g.unresolved_calls.iter().all(|c| c.from != old),
             "unresolved calls"
@@ -4121,6 +4204,7 @@ mod tests {
             w.properties.insert(old);
             w.nav.record_local_type(old, "w", "Widget");
             w.nav.record_return_type(old, "Widget");
+            w.nav.record_method_sig(old, "()()");
             vec![h, w]
         };
         assert_eq!(
@@ -4166,6 +4250,7 @@ mod tests {
         assert!(g.properties.contains(&run));
         assert_eq!(g.nav.local_types[&run]["w"], "Widget");
         assert_eq!(g.nav.return_types[&run], "Widget");
+        assert_eq!(g.nav.method_sigs[&run], "()()");
     }
 
     /// Two global `Widget` classes (a/, b/) and a definition in c/: neither

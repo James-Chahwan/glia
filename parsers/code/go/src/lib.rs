@@ -425,13 +425,13 @@ fn collect_interface_elems(
     repo: RepoId,
     acc: &mut Acc,
 ) {
-    let iface_params = type_param_names(
-        iface
-            .parent()
-            .filter(|spec| spec.kind() == "type_spec")
-            .and_then(|spec| spec.child_by_field_name("type_parameters")),
-        src,
-    );
+    let type_parameters = iface
+        .parent()
+        .filter(|spec| spec.kind() == "type_spec")
+        .and_then(|spec| spec.child_by_field_name("type_parameters"));
+    // CA.3a: an interface with type parameters records no signature.
+    let generic = type_parameters.is_some();
+    let iface_params = type_param_names(type_parameters, src);
     let mut cursor = iface.walk();
     for elem in iface.named_children(&mut cursor) {
         match elem.kind() {
@@ -465,6 +465,15 @@ fn collect_interface_elems(
                     result_type(elem.child_by_field_name("result"), src, &iface_params)
                 {
                     acc.nav.record_return_type(id, &ty);
+                }
+                // CA.3a: the element's normalised signature, the same text
+                // an implementation in another package records.
+                let sig = (!generic)
+                    .then(|| elem.child_by_field_name("parameters"))
+                    .flatten()
+                    .and_then(|p| go_signature(p, elem.child_by_field_name("result"), src));
+                if let Some(sig) = sig {
+                    acc.nav.record_method_sig(id, &sig);
                 }
             }
             "type_elem" => {
@@ -926,6 +935,16 @@ fn visit_method(
     acc.type_params = receiver_type_params(receiver, src);
     if let Some(ty) = result_type(decl.child_by_field_name("result"), src, &acc.type_params) {
         acc.nav.record_return_type(id, &ty);
+    }
+    // CA.3a: the normalised signature, unless the receiver is generic (its
+    // type parameters stand for whatever an instantiation picks).
+    if !receiver_is_generic(receiver) {
+        let sig = decl
+            .child_by_field_name("parameters")
+            .and_then(|p| go_signature(p, decl.child_by_field_name("result"), src));
+        if let Some(sig) = sig {
+            acc.nav.record_method_sig(id, &sig);
+        }
     }
     record_params(decl.child_by_field_name("parameters"), src, id, acc);
 
@@ -1636,6 +1655,296 @@ fn record_params(params: Option<TsNode>, src: &[u8], scope: NodeId, acc: &mut Ac
             record_local(acc, scope, text_of(name, src), &ty);
         }
     }
+}
+
+// ============================================================================
+// Method signatures (CA.3a)
+// ============================================================================
+
+/// The normalised signature of a method whose `parameters` / `result` fields
+/// are `params` / `result` (CA.3a): `(<p1>,<p2>,..)(<r1>,..)`, every entry a
+/// [`type_shape`]. A parameter declaration contributes its type once per name
+/// it declares (`a, b int` -> `int,int`) and once when unnamed; a variadic
+/// `...T` contributes `...<T>`. The result is a parameter list (the same
+/// rule), one type, or absent (`()`). Names never appear, so the
+/// implementation `Get(key string) string` and the interface element
+/// `Get(string) string` both give `(string)(string)`.
+///
+/// `None` when either side holds a parse error: the signature is then
+/// unknown, never wrong.
+fn go_signature(params: TsNode, result: Option<TsNode>, src: &[u8]) -> Option<String> {
+    if params.has_error() || result.is_some_and(|r| r.has_error()) {
+        return None;
+    }
+    let (params, results) = (type_list(params, src), result_list(result, src));
+    Some(format!("({})({})", params.join(","), results.join(",")))
+}
+
+/// The result entries of a callable whose `result` field is `result`: a
+/// parameter list's entries ([`type_list`]), one type, or none.
+fn result_list(result: Option<TsNode>, src: &[u8]) -> Vec<String> {
+    match result {
+        Some(r) if r.kind() == "parameter_list" => type_list(r, src),
+        Some(r) => vec![type_shape(r, src)],
+        None => Vec::new(),
+    }
+}
+
+/// The entry types of a `parameter_list`, in order, as [`go_signature`]
+/// counts them. A comment in the list contributes nothing.
+fn type_list(list: TsNode, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut c = list.walk();
+    for param in list.named_children(&mut c) {
+        let Some(ty) = param.child_by_field_name("type") else {
+            continue;
+        };
+        match param.kind() {
+            "parameter_declaration" => {
+                let shape = type_shape(ty, src);
+                let mut nc = param.walk();
+                let names = param.children_by_field_name("name", &mut nc).count();
+                out.extend(std::iter::repeat_n(shape, names.max(1)));
+            }
+            "variadic_parameter_declaration" => out.push(format!("...{}", type_shape(ty, src))),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A Go type as a signature entry (CA.3a): every package qualifier dropped
+/// (`*mongo.Collection` -> `*Collection`), no whitespace, the empty interface
+/// written `any`, a parenthesised type unwrapped, and the pointer / slice /
+/// array / map / chan / func / generic structure kept (`map[string][]*pb.X`
+/// -> `map[string][]*X`, `func(ctx context.Context) error` ->
+/// `func(Context)error`). A func type's single result is written bare and a
+/// longer list in parentheses, so `func() (err error)` and `func() error`
+/// agree. A channel's element is parenthesised (`<-chan struct{}` ->
+/// `<-chan(struct{})`) and a named struct field's type too
+/// (`struct{a, b int}` -> `struct{a,b(int)}`), both of which Go reads the
+/// same, so no space is needed. An inline interface lists its elements
+/// sorted. The two sides of an implicit implementation are written in
+/// different packages; qualifiers dropped, two same-named types of two
+/// packages compare equal (a missed rejection, never a false one).
+///
+/// Every identifier comes from its node's text: UTF-8 safe.
+fn type_shape(node: TsNode, src: &[u8]) -> String {
+    let mut out = String::new();
+    push_type_shape(node, src, &mut out);
+    out
+}
+
+fn push_type_shape(node: TsNode, src: &[u8], out: &mut String) {
+    let field = |name: &str| node.child_by_field_name(name);
+    let push_field = |name: &str, out: &mut String| match field(name) {
+        Some(n) => push_type_shape(n, src, out),
+        None => push_compact(node, src, out),
+    };
+    match node.kind() {
+        "qualified_type" => match field("name") {
+            Some(n) => out.push_str(text_of(n, src)),
+            None => push_compact(node, src, out),
+        },
+        "pointer_type" | "parenthesized_type" | "negated_type" => {
+            match node.kind() {
+                "pointer_type" => out.push('*'),
+                "negated_type" => out.push('~'),
+                _ => {}
+            }
+            match first_type_child(node) {
+                Some(inner) => push_type_shape(inner, src, out),
+                None => push_compact(node, src, out),
+            }
+        }
+        "slice_type" => {
+            out.push_str("[]");
+            push_field("element", out);
+        }
+        "array_type" => {
+            out.push('[');
+            if let Some(len) = field("length") {
+                // `[sha256.Size]byte`: a qualified constant, like a type.
+                let len = match len.kind() {
+                    "selector_expression" => len.child_by_field_name("field").unwrap_or(len),
+                    _ => len,
+                };
+                push_compact(len, src, out);
+            }
+            out.push(']');
+            push_field("element", out);
+        }
+        "implicit_length_array_type" => {
+            out.push_str("[...]");
+            push_field("element", out);
+        }
+        "map_type" => {
+            out.push_str("map[");
+            push_field("key", out);
+            out.push(']');
+            push_field("value", out);
+        }
+        "channel_type" => {
+            out.push_str(channel_direction(node));
+            out.push('(');
+            push_field("value", out);
+            out.push(')');
+        }
+        "function_type" => {
+            out.push_str("func");
+            push_func_tail(field("parameters"), field("result"), src, out);
+        }
+        "generic_type" => {
+            push_field("type", out);
+            out.push('[');
+            if let Some(args) = field("type_arguments") {
+                let mut c = args.walk();
+                let shapes: Vec<String> = args
+                    .named_children(&mut c)
+                    .filter(|a| a.kind() != "comment")
+                    .map(|a| type_elem_shape(a, src))
+                    .collect();
+                out.push_str(&shapes.join(","));
+            }
+            out.push(']');
+        }
+        "interface_type" => {
+            let mut c = node.walk();
+            let mut elems: Vec<String> = Vec::new();
+            for elem in node.named_children(&mut c) {
+                match elem.kind() {
+                    "method_elem" => {
+                        let mut s = elem
+                            .child_by_field_name("name")
+                            .map(|n| text_of(n, src).to_string())
+                            .unwrap_or_default();
+                        let params = elem.child_by_field_name("parameters");
+                        push_func_tail(params, elem.child_by_field_name("result"), src, &mut s);
+                        elems.push(s);
+                    }
+                    "type_elem" => elems.push(type_elem_shape(elem, src)),
+                    _ => {}
+                }
+            }
+            if elems.is_empty() {
+                out.push_str("any");
+            } else {
+                elems.sort();
+                out.push_str("interface{");
+                out.push_str(&elems.join(";"));
+                out.push('}');
+            }
+        }
+        "struct_type" => {
+            let mut fields: Vec<String> = Vec::new();
+            let mut c = node.walk();
+            for list in node.named_children(&mut c) {
+                let mut lc = list.walk();
+                for decl in list.named_children(&mut lc) {
+                    let Some(ty) = decl.child_by_field_name("type") else {
+                        continue;
+                    };
+                    let mut nc = decl.walk();
+                    let names: Vec<&str> = decl
+                        .children_by_field_name("name", &mut nc)
+                        .map(|n| text_of(n, src))
+                        .collect();
+                    let shape = type_shape(ty, src);
+                    fields.push(if names.is_empty() {
+                        shape
+                    } else {
+                        format!("{}({shape})", names.join(","))
+                    });
+                }
+            }
+            out.push_str("struct{");
+            out.push_str(&fields.join(";"));
+            out.push('}');
+        }
+        _ => push_compact(node, src, out),
+    }
+}
+
+/// `(<params>)<result>` of a func type or an inline interface's method: a
+/// single result bare, none empty, more in parentheses.
+fn push_func_tail(params: Option<TsNode>, result: Option<TsNode>, src: &[u8], out: &mut String) {
+    let params = params.map(|p| type_list(p, src)).unwrap_or_default();
+    out.push('(');
+    out.push_str(&params.join(","));
+    out.push(')');
+    match result_list(result, src).as_slice() {
+        [] => {}
+        [one] => out.push_str(one),
+        more => {
+            out.push('(');
+            out.push_str(&more.join(","));
+            out.push(')');
+        }
+    }
+}
+
+/// A `type_elem` (a type argument, or an inline interface's embedded /
+/// union term): its terms joined by `|`. Any other node is one type.
+fn type_elem_shape(elem: TsNode, src: &[u8]) -> String {
+    if elem.kind() != "type_elem" {
+        return type_shape(elem, src);
+    }
+    let mut c = elem.walk();
+    let terms: Vec<String> = elem
+        .named_children(&mut c)
+        .filter(|t| t.kind() != "comment")
+        .map(|t| type_shape(t, src))
+        .collect();
+    terms.join("|")
+}
+
+/// The one type inside a pointer / parenthesised / negated type.
+fn first_type_child(node: TsNode) -> Option<TsNode> {
+    let mut c = node.walk();
+    node.named_children(&mut c).find(|n| n.kind() != "comment")
+}
+
+/// `chan`, `<-chan` (receive-only) or `chan<-` (send-only), from where the
+/// arrow token sits relative to the `chan` keyword.
+fn channel_direction(node: TsNode) -> &'static str {
+    let mut c = node.walk();
+    let tokens: Vec<&str> = node
+        .children(&mut c)
+        .filter(|t| !t.is_named())
+        .map(|t| t.kind())
+        .collect();
+    let arrow = tokens.iter().position(|t| *t == "<-");
+    let chan = tokens.iter().position(|t| *t == "chan");
+    match (arrow, chan) {
+        (Some(a), Some(k)) if a < k => "<-chan",
+        (Some(_), Some(_)) => "chan<-",
+        _ => "chan",
+    }
+}
+
+/// `node`'s source text with every whitespace character dropped.
+fn push_compact(node: TsNode, src: &[u8], out: &mut String) {
+    out.extend(text_of(node, src).chars().filter(|c| !c.is_whitespace()));
+}
+
+/// Whether a method's receiver names a generic type (`(c *Collection[T])`):
+/// its signature mentions type parameters, whose meaning depends on the
+/// instantiation, so CA.3a records none.
+fn receiver_is_generic(receiver: TsNode) -> bool {
+    let mut rc = receiver.walk();
+    receiver.named_children(&mut rc).any(|param| {
+        let Some(mut ty) = param.child_by_field_name("type") else {
+            return false;
+        };
+        loop {
+            ty = unwrap_pointer(ty);
+            match (ty.kind() == "parenthesized_type").then(|| first_type_child(ty)).flatten() {
+                Some(inner) => ty = inner,
+                None => break,
+            }
+        }
+        ty.kind() == "generic_type"
+    })
 }
 
 /// Go's builtin functions whose result owns no in-repo method (a `new(T)` is
@@ -5877,5 +6186,159 @@ func Routes(r *gin.Engine) {
         let raw = parse_file(MAIN, "svc/cmd/main.go", "svc::cmd::main", "", repo()).unwrap();
         assert!(raw.imports.iter().any(|i| matches!(&i.target,
             ImportTarget::Module { path, .. } if path == "example.com::svc::internal::store")));
+    }
+
+    // ---- CA.3a: normalised method signatures ----
+
+    /// Every recorded method signature as sorted `(qname, signature)` pairs.
+    fn sigs_of(parse: &FileParse) -> Vec<(String, String)> {
+        let mut got: Vec<(String, String)> = parse
+            .nav
+            .method_sigs
+            .iter()
+            .map(|(id, sig)| (parse.nav.qname_by_id[id].clone(), sig.clone()))
+            .collect();
+        got.sort();
+        got
+    }
+
+    #[test]
+    fn go_signatures_drop_names_and_qualifiers() {
+        let source = r#"package app
+
+import (
+    "context"
+    "encoding/json"
+
+    "example.com/app/balancer"
+    "example.com/app/base"
+    "example.com/app/credentials"
+    "example.com/app/x"
+)
+
+type R struct{}
+
+type bb struct{}
+
+type Getter interface {
+    Get(string) string
+    Put(string, string) error
+    Done() <-chan struct{}
+}
+
+type PickerBuilder interface {
+    Build(PickerBuildInfo) Picker
+}
+
+func (r *R) Get(key string) string { return key }
+
+func (r *R) Put(key, value string) error { return nil }
+
+func (r *R) Build(config json.RawMessage) (credentials.Bundle, func(), error) {
+    return nil, nil, nil
+}
+
+func (r *R) Log(format string, args ...any) {}
+
+func (r *R) Close() {}
+
+func (r *R) Walk(fn func(ctx context.Context) error) map[string]*x.Y { return nil }
+
+func (r R) Any(v interface{}, ch chan<- []byte, arr [4]byte, p (int)) (n int, err error) {
+    return 0, nil
+}
+
+func (r *R) Done() <-chan struct{} { return nil }
+
+func (r *R) Page(q x.Query[x.User], f func() (err error)) (*Page[User], error) {
+    return nil, nil
+}
+
+func (r *R) Meta(o interface {
+    Name() string
+    Apply(*x.Cfg) error
+}) struct {
+    A, B int
+    x.Base
+} {
+    return struct {
+        A, B int
+        x.Base
+    }{}
+}
+
+func (b *bb) Build(info base.PickerBuildInfo) balancer.Picker { return nil }
+"#;
+        let parse = parse_file(source, "app/app.go", "app", "example.com/app", repo()).unwrap();
+        assert_eq!(
+            sigs_of(&parse),
+            pairs(&[
+                ("app::Getter::Done", "()(<-chan(struct{}))"),
+                ("app::Getter::Get", "(string)(string)"),
+                ("app::Getter::Put", "(string,string)(error)"),
+                ("app::PickerBuilder::Build", "(PickerBuildInfo)(Picker)"),
+                ("app::R::Any", "(any,chan<-([]byte),[4]byte,int)(int,error)"),
+                ("app::R::Build", "(RawMessage)(Bundle,func(),error)"),
+                ("app::R::Close", "()()"),
+                ("app::R::Done", "()(<-chan(struct{}))"),
+                ("app::R::Get", "(string)(string)"),
+                ("app::R::Log", "(string,...any)()"),
+                (
+                    "app::R::Meta",
+                    "(interface{Apply(*Cfg)error;Name()string})(struct{A,B(int);Base})",
+                ),
+                ("app::R::Page", "(Query[User],func()error)(*Page[User],error)"),
+                ("app::R::Put", "(string,string)(error)"),
+                ("app::R::Walk", "(func(Context)error)(map[string]*Y)"),
+                ("app::bb::Build", "(PickerBuildInfo)(Picker)"),
+            ])
+        );
+        // The implementation and the interface element compare equal, names
+        // and qualifiers dropped on whichever side wrote them.
+        let sig = |q: &str| parse.nav.method_sigs[&method_id(q)].clone();
+        for (imp, iface) in [
+            ("app::R::Get", "app::Getter::Get"),
+            ("app::R::Put", "app::Getter::Put"),
+            ("app::R::Done", "app::Getter::Done"),
+            ("app::bb::Build", "app::PickerBuilder::Build"),
+        ] {
+            assert_eq!(sig(imp), sig(iface), "{imp} vs {iface}");
+        }
+        assert_ne!(sig("app::R::Build"), sig("app::PickerBuilder::Build"));
+    }
+
+    #[test]
+    fn go_signatures_skip_generics() {
+        let source = r#"package app
+
+type Collection[T any] struct{}
+
+type Plain struct{}
+
+type Repo[T any] interface {
+    Get(id string) (T, error)
+    All() []T
+}
+
+type Closer interface {
+    Close() error
+}
+
+func (c *Collection[T]) InsertOne(doc T) error { return nil }
+
+func (c Collection[T]) Count() int { return 0 }
+
+func (p *Plain) Close() error { return nil }
+"#;
+        let parse = parse_file(source, "app/app.go", "app", "example.com/app", repo()).unwrap();
+        // The generic receiver's and the generic interface's methods are
+        // nodes still; they record no signature.
+        for q in ["app::Collection::InsertOne", "app::Collection::Count", "app::Repo::Get", "app::Repo::All"] {
+            assert!(parse.nav.qname_by_id.contains_key(&method_id(q)), "{q} is a METHOD");
+        }
+        assert_eq!(
+            sigs_of(&parse),
+            pairs(&[("app::Closer::Close", "()(error)"), ("app::Plain::Close", "()(error)")])
+        );
     }
 }

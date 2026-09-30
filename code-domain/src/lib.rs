@@ -1394,6 +1394,19 @@ pub struct CodeNav {
     ///
     /// Build-time only, like `field_types`: never mirrored into the store.
     pub return_types: HashMap<NodeId, String>,
+    /// The normalised signature of a METHOD (a struct method or an interface
+    /// method element): its parameter types then its result types, each list
+    /// in parentheses, parameter names and package qualifiers dropped and no
+    /// whitespace (Go: `func (r *R) Build(cfg json.RawMessage) (*x.Bundle,
+    /// error)` -> `(RawMessage)(*Bundle,error)`). An implementation and the
+    /// interface method it satisfies, written in different packages, record
+    /// the same text. A method on a generic receiver, or an element of an
+    /// interface with type parameters, records nothing (unknown). Filled
+    /// through [`CodeNav::record_method_sig`] (Go, CA.3a); read by the Go
+    /// implicit-IMPLEMENTS pass (CA.3b).
+    ///
+    /// Build-time only, like `field_types`: never mirrored into the store.
+    pub method_sigs: HashMap<NodeId, String>,
 }
 
 /// A build-time fact a parser records for a scope (a MODULE, or a fn / METHOD)
@@ -1486,6 +1499,16 @@ impl CodeNav {
             return;
         }
         self.return_types.insert(f, ty.to_string());
+    }
+
+    /// Record that the METHOD `m` has the normalised signature `sig` (CA.3a).
+    /// An empty `sig` is ignored (a signature always holds its two
+    /// parenthesised lists); a second record for `m` replaces the first.
+    pub fn record_method_sig(&mut self, m: NodeId, sig: &str) {
+        if sig.is_empty() {
+            return;
+        }
+        self.method_sigs.insert(m, sig.to_string());
     }
 
     /// Record that `owner` (a CLASS / STRUCT) declares a field or property
@@ -4663,6 +4686,23 @@ mod tests {
         nav.record_return_type(f, "Bundle");
         assert_eq!(nav.return_types[&f], "Bundle");
         assert!(!nav.return_types.contains_key(&g));
+    }
+
+    /// CA.3a: one signature per METHOD; an empty signature records nothing,
+    /// a re-record replaces.
+    #[test]
+    fn record_method_sig_ignores_an_empty_signature() {
+        let r = glia_core::RepoId(1);
+        let m = NodeId::from_parts(GRAPH_TYPE, r, node_kind::METHOD, "m::T::Get");
+        let n = NodeId::from_parts(GRAPH_TYPE, r, node_kind::METHOD, "m::T::Put");
+        let mut nav = CodeNav::default();
+        nav.record_method_sig(m, "(string)(string)");
+        nav.record_method_sig(n, "");
+        assert_eq!(nav.method_sigs.len(), 1);
+        assert_eq!(nav.method_sigs[&m], "(string)(string)");
+        nav.record_method_sig(m, "()()");
+        assert_eq!(nav.method_sigs[&m], "()()");
+        assert!(!nav.method_sigs.contains_key(&n));
     }
 
     #[test]
