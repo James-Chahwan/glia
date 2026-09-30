@@ -27,6 +27,9 @@ mod config;
 mod iac;
 mod package;
 mod cli;
+// CB.12: host narrowing (the service alias index and `narrow_by_host`),
+// shared by the channel resolvers. Not a resolver; nothing in it is public.
+mod host;
 
 pub use http::HttpStackResolver;
 pub use grpc::GrpcStackResolver;
