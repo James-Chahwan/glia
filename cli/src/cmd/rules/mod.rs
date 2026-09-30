@@ -49,6 +49,16 @@ pub(crate) enum RulesCmd {
     /// --cross-service the walk continues past each send into the receiving
     /// handler. A report: exits 0 whatever it finds.
     Effects(effects::Args),
+    /// Flags (CC.7c): the stale feature-flag report - every flag (a
+    /// LaunchDarkly / OpenFeature / Unleash / Flagsmith / Split read, a Flipt
+    /// `flags:` definition) with its readers and definitions, and one table
+    /// per finding: dead (defined, never read), undefined (read, defined in
+    /// none of the repo's flag definition files), single_site (one reading
+    /// function) and quiet (every reader unchanged for --quiet-days before
+    /// the history snapshot's newest change; needs `glia history sync
+    /// --blame`). Each finding is tiered. A report: exits 0 whatever it
+    /// finds.
+    Flags(flags::Args),
     /// Spec status (LE.9b): per feature, the declared API ops (OpenAPI,
     /// quokka feature.yaml) that a route implements and the ones still
     /// missing, then the routes of governed services no op declares. Pact and
@@ -62,6 +72,7 @@ pub(crate) fn run(c: RulesCmd) -> i32 {
         RulesCmd::Check(a) => check::run(a),
         RulesCmd::Cycles(a) => cycles::run(a),
         RulesCmd::Effects(a) => effects::run(a),
+        RulesCmd::Flags(a) => flags::run(a),
         RulesCmd::SpecStatus(a) => spec_status::run(a),
     }
 }
