@@ -209,7 +209,7 @@ pub(super) fn build_graphs_for_repo(
     // language), `r` = files the RPC needle pass ran on (text-gated, with a
     // parse; 0 when the build knows no proto service; `apply_post_cache`
     // returns it), `g` = the per-language graph builds mapped on the pool
-    // (every build group but the TS family, which builds last on this thread),
+    // (every build group, the TS family's one graph the last of them, CA.7),
     // `t` = the pool that ran all three.
     eprintln!(
         "[parallel] {repo_label}: const-scan {const_files} files, rpc-needles {} files, {pooled} language graphs on {threads} threads",

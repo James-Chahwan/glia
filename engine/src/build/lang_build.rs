@@ -26,9 +26,9 @@ use crate::extract::{TS_FAMILY, build_group, path_to_qname};
 // resolution works across the tag boundary (Pattern E DI, Pattern B imports).
 // The `c_cpp` arm and the other `_`-arm langs (dart/swift/solidity/terraform)
 // keep separate graphs — distinct symbol spaces that must not cross-resolve.
-// ts_family accumulates in the sorted lang order and is built last, so
-// graph/shard order stays deterministic. The LB.9b module plan reads the same
-// `build_group`.
+// ts_family accumulates in the sorted lang order and is the last pooled build
+// (CA.7), so graph/shard order stays deterministic. The LB.9b module plan
+// reads the same `build_group`.
 
 /// A14.2: the JVM family. `.kt` parses under its own `kotlin` tag (its own
 /// parser), but Kotlin and Java share one symbol space — a Kotlin controller
@@ -42,14 +42,19 @@ use crate::extract::{TS_FAMILY, build_group, path_to_qname};
 const JVM_HOST: &str = "java";
 const JVM_GUEST: &str = "kotlin";
 
+/// The TS family's build group ([`build_group`]), and the key its one pooled
+/// build carries (CA.7).
+const TS_GROUP: &str = "typescript";
+
 /// What [`build_language_graphs`] hands back to `build_graphs_for_repo`.
 pub(super) struct LanguageGraphs {
     /// The per-language graphs, in sorted language order, the TS family last.
     pub(super) graphs: Vec<RepoGraph>,
     /// The A7.0 `[di]` marker input: INJECTS refs per matrix row.
     pub(super) di_refs: Vec<(&'static str, usize)>,
-    /// LG.1c: the language builds mapped on the engine pool (every build
-    /// group but the TS family), for the `[parallel]` line.
+    /// LG.1c: the language builds mapped on the engine pool, for the
+    /// `[parallel]` line: every build group, the TS family's one graph
+    /// included (CA.7).
     pub(super) pooled: usize,
 }
 
@@ -61,16 +66,17 @@ pub(super) struct LanguageGraphs {
 /// `ts_aliases` the TS family's import resolver ([`resolve_ts_source_aliased`],
 /// A6.8).
 ///
-/// LG.1c: every build group but the TS family builds on the engine pool
-/// ([`crate::parallel::par_map_owned`]), one [`build_one`] per language; the
-/// TS family then builds on this thread, last, as before. The builds are
-/// folded in that order (graphs, errors, the `[recv]` and `[heritage]`
-/// counts), so the graphs and the per-repo `[recv]` / `[heritage]` lines are
-/// the sequential build's. The per-build lines (`[evidence-lines]`, and the
-/// graph crate's own) print on the thread that ran the build, right after
-/// it: under `GLIA_THREADS=1` in the sequential order, on a pool interleaved
-/// across languages. A panicking pool build is re-raised here, the first in
-/// language order, as the inline build let it propagate.
+/// LG.1c: every build group builds on the engine pool
+/// ([`crate::parallel::par_map_owned`]), one [`build_one`] per group; CA.7
+/// made the TS family's one graph the pool map's LAST item, so it is still
+/// folded last. The builds are folded in input order (graphs, errors, the
+/// `[recv]` and `[heritage]` counts), so the graphs and the per-repo
+/// `[recv]` / `[heritage]` lines are the sequential build's. The per-build
+/// lines (`[evidence-lines]`, and the graph crate's own) print on the thread
+/// that ran the build, right after it: under `GLIA_THREADS=1` in the
+/// sequential order, on a pool interleaved across languages. A panicking
+/// build is re-raised here, the first in fold order, as the inline build let
+/// it propagate.
 pub(super) fn build_language_graphs(
     parses_by_lang: HashMap<&'static str, Vec<FileParse>>,
     repo: RepoId,
@@ -130,16 +136,33 @@ pub(super) fn build_language_graphs(
     let mut ts_family: Vec<FileParse> = Vec::new();
     let mut pool_builds: Vec<(&'static str, Vec<FileParse>)> = Vec::new();
     for (lang, parses) in parses_by_lang {
-        if build_group(lang) == "typescript" {
+        if build_group(lang) == TS_GROUP {
             ts_family.extend(parses);
         } else {
             pool_builds.push((lang, parses));
         }
     }
+    // CA.7: the TS family is the LAST pool item; `par_map_owned` hands the
+    // results back in input order, so it still folds last. Its key is the
+    // build group, not a language tag of `pool_builds` (no tag of the family
+    // reaches the loop's `else` arm), and it takes the aliased resolver.
+    if !ts_family.is_empty() {
+        pool_builds.push((TS_GROUP, ts_family));
+    }
     let pooled = pool_builds.len();
     let (built, _threads) = crate::parallel::par_map_owned(pool_builds, |(lang, parses)| {
         crate::parallel::quiet(|| {
-            build_one(lang, parses, |parses| build_solo(lang, parses, repo, rust_crates))
+            if lang == TS_GROUP {
+                build_one(lang, parses, |parses| {
+                    glia_graph::build_typescript(repo, parses, |from, spec| {
+                        resolve_ts_source_aliased(from, spec, ts_aliases)
+                    })
+                })
+            } else {
+                build_one(lang, parses, |parses| {
+                    build_solo(lang, parses, repo, rust_crates)
+                })
+            }
         })
     });
     for build in built {
@@ -147,14 +170,6 @@ pub(super) fn build_language_graphs(
             Ok(build) => build.fold(&mut graphs, &mut recv_bound, &mut heritage, parse_errors),
             Err(payload) => std::panic::resume_unwind(payload),
         }
-    }
-    if !ts_family.is_empty() {
-        build_one("typescript", ts_family, |parses| {
-            glia_graph::build_typescript(repo, parses, |from, spec| {
-                resolve_ts_source_aliased(from, spec, ts_aliases)
-            })
-        })
-        .fold(&mut graphs, &mut recv_bound, &mut heritage, parse_errors);
     }
     // A6.2a fired_on marker, once per repo, every `recv_stats::LANGS` row
     // zero-filled (LA.35a adds `rust`: bound = the field- and local-typed

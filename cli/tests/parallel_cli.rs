@@ -11,6 +11,9 @@
 //!
 //! LG.1c: the per-language graph builds run on the pool too, and the
 //! const-scan line counts them: `..., <g> language graphs on <t> threads`.
+//!
+//! CA.7: the TS family's one graph is a pooled build as well, the last item
+//! of the pool map, so `<g>` counts it and the output does not move.
 
 use std::path::PathBuf;
 use std::process::Output;
@@ -27,14 +30,18 @@ fn fixture(name: &str) -> String {
 }
 
 fn analyze(threads: &str) -> Output {
+    analyze_fixture("py_smoke", threads)
+}
+
+fn analyze_fixture(name: &str, threads: &str) -> Output {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_glia"))
-        .args(["analyze", &fixture("py_smoke"), "--format", "json"])
+        .args(["analyze", &fixture(name), "--format", "json"])
         .env("GLIA_THREADS", threads)
         .output()
         .expect("glia runs");
     assert!(
         out.status.success(),
-        "glia analyze (GLIA_THREADS={threads}) exited {:?}\nstderr:\n{}",
+        "glia analyze {name} (GLIA_THREADS={threads}) exited {:?}\nstderr:\n{}",
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
@@ -92,5 +99,40 @@ fn analyze_reports_parallel_routing() {
     assert!(
         four.stdout == one.stdout,
         "the analyze JSON must not depend on the pool size"
+    );
+}
+
+/// CA.7: the TS family (typescript / angular / react / vue, one build group)
+/// builds on the engine pool as the last pooled item, so the const-scan line
+/// counts it among the language graphs, and the pool size still never
+/// reaches the output.
+#[test]
+fn ts_family_is_a_pooled_graph() {
+    // ts_smoke is all TypeScript: its one graph is the TS family's.
+    let four = analyze_fixture("ts_smoke", "4");
+    let consts = parallel_line(&four, ": const-scan ");
+    assert!(consts.contains(" 1 language graphs on 4 threads"), "{consts}");
+    let one = analyze_fixture("ts_smoke", "1");
+    assert!(
+        parallel_line(&one, ": const-scan ").contains(" 1 language graphs on 1 threads")
+    );
+    assert!(!four.stdout.is_empty());
+    assert!(
+        four.stdout == one.stdout,
+        "ts_smoke: the analyze JSON must not depend on the pool size"
+    );
+
+    // http_stack_smoke is Go + TypeScript: two graphs, both pooled.
+    let four = analyze_fixture("http_stack_smoke", "4");
+    let consts = parallel_line(&four, ": const-scan ");
+    assert!(consts.contains(" 2 language graphs on 4 threads"), "{consts}");
+    let one = analyze_fixture("http_stack_smoke", "1");
+    assert!(
+        parallel_line(&one, ": const-scan ").contains(" 2 language graphs on 1 threads")
+    );
+    assert!(!four.stdout.is_empty());
+    assert!(
+        four.stdout == one.stdout,
+        "http_stack_smoke: the analyze JSON must not depend on the pool size"
     );
 }

@@ -226,7 +226,7 @@ source files
 
 **Parallel build (LG.1a–c).** The walk's reads, the per-file route / parse / extract, the
 const-table scan, the RPC needle pass, a multi-repo build's per-repo walks and the per-language
-graph builds (every build group but the TS family, which builds last on the calling thread)
+graph builds (every build group; the TS family's one graph is the last pooled item, CA.7)
 run on the engine's own rayon pool (`engine/src/parallel.rs`, 16 MiB worker stacks), each
 through an order-preserving map folded in input order, so a build is byte-identical at any
 pool size (`--test byte_identical`, `--test parallel_build`). `GLIA_THREADS` sets the size:
