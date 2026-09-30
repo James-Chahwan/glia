@@ -1,0 +1,32 @@
+{
+  "framework": "scala-scopt",
+  "language": "scala",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_def",
+  "cells": [
+    "scala/cli_def"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_COMMAND",
+      "name": "invctl"
+    },
+    {
+      "kind": "CLI_COMMAND",
+      "name": "export"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli_invoke:invctl",
+      "to": "cli:invctl",
+      "category": "CLI_INVOKES"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "scopt OParser programName + cmd(\"export\") || CF.9c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): scopt `OParser.sequence(programName(\"x\"), cmd(\"y\"))` has no CLI_COMMAND row in parsers/code/extractors/src/cli.rs."
+}

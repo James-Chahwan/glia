@@ -1,0 +1,31 @@
+{
+  "framework": "scala-sbt-multiproject",
+  "language": "scala",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "subproject",
+  "cells": [
+    "scala/subproject"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "PROJECT",
+      "name": "project:api"
+    },
+    {
+      "kind": "PROJECT",
+      "name": "project:worker"
+    }
+  ],
+  "expect_edges": [],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "PROJECT",
+      "name": "project:api",
+      "max_nodes": 1
+    }
+  ],
+  "note": "the canonical sbt multi-project: ONE root build.sbt declaring api and worker (sub-dirs carry no build.sbt) || CF.9c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=2/2 literal=0/2 route=0/0 forbid=1/1) via=project. Predicted extractor gap (backlog, not fixed by the probe): sbt multi-project: sub-projects are declared in ONE root build.sbt (`project.in(file(\"api\"))`) and carry no build.sbt of their own, so code-domain/src/project_roots.rs finds only the root."
+}

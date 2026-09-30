@@ -1,0 +1,34 @@
+{
+  "framework": "scala-sys-process",
+  "language": "scala",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "cli_inv",
+  "cells": [
+    "scala/cli_inv"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "invctl"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "cli_invoke:invctl",
+      "to": "cli:invctl",
+      "category": "CLI_INVOKES"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "CLI_INVOCATION",
+      "name": "export",
+      "max_nodes": 0
+    }
+  ],
+  "note": "scala.sys.process Seq(..).! against a picocli tool (known-good definer) || CF.9c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/1 literal=0/1 route=0/1 forbid=1/1) via=None. Predicted extractor gap (backlog, not fixed by the probe): `scala.sys.process` `Seq(\"tool\", ..).!` / `\"tool ..\".!` are not INVOCATION_PATTERNS in parsers/code/extractors/src/cli.rs."
+}

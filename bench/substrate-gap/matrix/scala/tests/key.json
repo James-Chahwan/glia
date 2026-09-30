@@ -1,0 +1,34 @@
+{
+  "framework": "scala-scalatest",
+  "language": "scala",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "tests",
+  "cells": [
+    "scala/tests"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "METHOD",
+      "name": "total"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "OrderServiceSpec",
+      "to": "total",
+      "category": "TESTS",
+      "note": "INTENDED: the function-level TESTS edge (Python / TypeScript only at HEAD)"
+    },
+    {
+      "from": "OrderServiceSpec",
+      "to": "OrderService",
+      "category": "TESTS",
+      "note": "module-level"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "ScalaTest AnyFlatSpec calling the service under test || CF.9c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=1/1 literal=1/1 route=1/2 forbid=0/0) via=test. Predicted extractor gap (backlog, not fixed by the probe): the module-level TESTS edge pairs (`OrderServiceSpec` -> `OrderService`); the function-level TESTS edge exists only for Python / TypeScript (engine/src/passes.rs emit_tests_edges)."
+}
