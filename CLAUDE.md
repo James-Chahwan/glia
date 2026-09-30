@@ -165,6 +165,10 @@ py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by na
               diff_impact LE.2   tests_for LE.3b   effects LE.4d   why LE.5   cycles LE.6b
               patterns LE.7b   check LE.8   spec_status LE.9b   cells LF.1b   gaps LF.2c
               snapshots LF.5d, LF.6d   merge LC.10c   feature_flows LG.3c
+  0.5.1 private slots (C0.4): pack CC.4c   review CC.6b   flags CC.7c
+              contract_breaks CC.8b (+CC.8c)   hotspots CC.10b   cochange CC.11c
+              communities CD.1e   splits CD.2d   hubs CD.4c   duplicate_flows CD.4f
+              timeline CD.5d
 
 cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
               common.rs     shared helpers (generate_for, print_json, node lookup,
