@@ -72,6 +72,16 @@ pub(crate) enum QueryCmd {
     /// e.g. Go method sets) or HEURISTIC, the weakest edge on its path.
     /// Nothing found is a FACT with the language's heritage caveats: exits 0.
     Implementors(implementors::Args),
+    /// Pack (CC.4c): the context for a query packed to a token budget, ready
+    /// to paste — the seeds `glia find` matches, then their callers and
+    /// callees by personalised PageRank, each at the most detail the budget
+    /// buys (full source, a preview, an outline line or a bare qname; no
+    /// neighbour in more detail than a seed), located, with the links between
+    /// them. stdout is the pack text only; a summary goes to stderr.
+    /// `--json` is the whole pack with its manifest. Tokens are estimated at
+    /// `--bytes-per-token` (default 3.7). Exits 0 with nodes, 1 when the pack
+    /// is empty (the absence says why, on stderr), 2 on an error.
+    Pack(pack::Args),
     /// Pages (LA.6e): the frontend's client-router pages with their handlers,
     /// the navigation links between them, dead deep links (a router link no
     /// route serves, with the catch-all that absorbs it) and pages no in-repo
@@ -100,6 +110,7 @@ pub(crate) fn run(c: QueryCmd) -> i32 {
         QueryCmd::Hotspots(a) => hotspots::run(a),
         QueryCmd::Hubs(a) => hubs::run(a),
         QueryCmd::Implementors(a) => implementors::run(a),
+        QueryCmd::Pack(a) => pack::run(a),
         QueryCmd::Pages(a) => pages::run(a),
         QueryCmd::Serves(a) => serves::run(a),
         QueryCmd::Why(a) => why::run(a),
