@@ -1,0 +1,33 @@
+{
+  "framework": "php-aws-sdk-sqs",
+  "language": "php",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "sqs_sns",
+  "cells": [
+    "php/sqs_sns"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "aws-sdk-php SqsClient->sendMessage / ->receiveMessage(['QueueUrl' => ...]) || CF.7a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): aws-sdk-php `$sqs->sendMessage(['QueueUrl' => ..])`: the `.sendMessage(` row needs a `.` receiver and the gate lists no PHP package (`aws\\\\sqs`)."
+}

@@ -1,0 +1,33 @@
+{
+  "framework": "php-rdkafka",
+  "language": "php",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "kafka",
+  "cells": [
+    "php/kafka"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "php-rdkafka: newTopic(\"orders\")->produce / KafkaConsumer->subscribe(['orders']) || CF.7a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=2/2 literal=1/2 route=0/1 forbid=0/0) via=queue. Predicted extractor gap (backlog, not fixed by the probe): producer fires (`->newTopic(\"x\")`); consumer `$consumer->subscribe(['x'])` collapses to a tag: the Kafka `consumer.subscribe` row wants a `.` receiver and a leading literal, PHP passes an array after `->`."
+}
