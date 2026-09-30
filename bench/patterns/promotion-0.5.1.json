@@ -1,0 +1,180 @@
+{
+  "criteria": {
+    "C1": {
+      "detail": "2 of 3 repos have a judged population (need >= 2): quokka-stack judged=1; lapse judged=0; Kina judged=1",
+      "pass": true
+    },
+    "C2": {
+      "detail": "blind <= 25% of size in every judged population: quokka-stack/turps blind 8/59; Kina/backend blind 8/89",
+      "pass": true
+    },
+    "C3": {
+      "detail": "`handler>(no effect)` is no population's convention",
+      "pass": true
+    },
+    "C4": {
+      "detail": "56/56 divergence path hops are edges (glia why --category)",
+      "pass": true
+    },
+    "C5": {
+      "detail": "3/3 repos: two patterns runs byte-identical",
+      "pass": true
+    }
+  },
+  "glia": "glia 0.5.0 (build 0.5.0+p08b9201adb2e1650)",
+  "promote": true,
+  "repos": [
+    {
+      "blind": 8,
+      "divergences": 2,
+      "handlers": 59,
+      "hops_checked": 5,
+      "judged": 1,
+      "marker": "[patterns] experimental populations=1 judged=1 handlers=59 divergences=2 skipped_small=0 role_sources edge=4 kind=0 name=5 blind=8 group_by=service",
+      "name": "quokka-stack",
+      "population_detail": [
+        {
+          "blind": 8,
+          "convention": "handler>repository>db",
+          "package": null,
+          "service": "turps",
+          "sighted": 51,
+          "size": 59,
+          "status": "judged",
+          "verdict": "49/51"
+        }
+      ],
+      "populations": 1,
+      "sha": "a77d4cb",
+      "top_signatures": [
+        [
+          "handler>repository>db",
+          49
+        ],
+        [
+          "handler>(no effect)",
+          8
+        ],
+        [
+          "handler>rpc_call",
+          1
+        ],
+        [
+          "handler>service>repository>db",
+          1
+        ]
+      ],
+      "verdicts": {
+        "C1": "pass",
+        "C2": "pass",
+        "C3": "pass",
+        "C4": "pass",
+        "C5": "pass"
+      }
+    },
+    {
+      "blind": 5,
+      "divergences": 0,
+      "handlers": 65,
+      "hops_checked": 0,
+      "judged": 0,
+      "marker": "[patterns] experimental populations=1 judged=0 handlers=65 divergences=0 skipped_small=0 role_sources edge=3 kind=31 name=0 blind=5 group_by=service",
+      "name": "lapse",
+      "population_detail": [
+        {
+          "blind": 5,
+          "convention": null,
+          "package": null,
+          "service": "(outside projects)",
+          "sighted": 60,
+          "size": 65,
+          "status": "no_convention",
+          "verdict": null
+        }
+      ],
+      "populations": 1,
+      "sha": "c0ece02",
+      "top_signatures": [
+        [
+          "handler>service>db",
+          38
+        ],
+        [
+          "handler>db",
+          17
+        ],
+        [
+          "handler>(no effect)",
+          5
+        ],
+        [
+          "handler>repository>db",
+          4
+        ],
+        [
+          "handler>http_call",
+          1
+        ]
+      ],
+      "verdicts": {
+        "C1": "fail",
+        "C2": "pass",
+        "C3": "pass",
+        "C4": "pass",
+        "C5": "pass"
+      }
+    },
+    {
+      "blind": 8,
+      "divergences": 15,
+      "handlers": 89,
+      "hops_checked": 51,
+      "judged": 1,
+      "marker": "[patterns] experimental populations=1 judged=1 handlers=89 divergences=15 skipped_small=0 role_sources edge=5 kind=140 name=11 blind=8 group_by=service",
+      "name": "Kina",
+      "population_detail": [
+        {
+          "blind": 8,
+          "convention": "handler>service>db",
+          "package": null,
+          "service": "backend",
+          "sighted": 81,
+          "size": 89,
+          "status": "judged",
+          "verdict": "66/81"
+        }
+      ],
+      "populations": 1,
+      "sha": "a448fb3",
+      "top_signatures": [
+        [
+          "handler>service>db",
+          66
+        ],
+        [
+          "handler>service>repository>service>db",
+          9
+        ],
+        [
+          "handler>(no effect)",
+          8
+        ],
+        [
+          "handler>service>repository>db",
+          5
+        ],
+        [
+          "handler>repository>db",
+          1
+        ]
+      ],
+      "verdicts": {
+        "C1": "pass",
+        "C2": "pass",
+        "C3": "pass",
+        "C4": "pass",
+        "C5": "pass"
+      }
+    }
+  ]
+}

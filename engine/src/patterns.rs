@@ -109,6 +109,37 @@
 //! resolve across a package's files and into imported packages (LA.13b);
 //! receivers are typed only by what the parser records (CA.2).
 //!
+//! # Promotion criterion (0.5.1)
+//!
+//! Pattern conformance leaves EXPERIMENTAL only when
+//! `bench/patterns/promotion.py` (CC.12a) says so. The script measures
+//! git-archive copies of quokka-stack (a77d4cb), lapse (c0ece02) and Kina
+//! (a448fb3), never the live checkouts, with `GLIA_NO_PERSIST=1` on every
+//! call, through the default invocation `glia patterns <copy> --experimental
+//! --json` (service keying, `min_support` 5, `min_share` 75), and judges five
+//! fixed criteria:
+//!
+//! - C1: at least 2 of the 3 repos have a judged population;
+//! - C2: in every judged population the blind count (its `blind` list) is at
+//!   most 25% of its `size`;
+//! - C3: `handler>(no effect)` is never a convention;
+//! - C4: every hop of every divergence's path is an edge: `glia why <copy>
+//!   <from> <to> --category <CAT> --json` finds it (a backward hop is asked
+//!   the way the IMPLEMENTS edge runs, implementation to interface method);
+//! - C5: two runs of the command print byte-identical JSON.
+//!
+//! Promotion needs all five. The thresholds and the repo SHAs are the
+//! criterion, never tuned to pass: changing one is a reviewed diff. Re-run
+//! with `~/.venvs/glia-leap/bin/python bench/patterns/promotion.py --glia
+//! <binary> [--work-dir <dir on disk>]` (exit 0 iff promote, 1 on a failed
+//! criterion, 2 on a measurement error; `--self-test` judges canned reports
+//! without a build). It writes `bench/patterns/promotion-0.5.1.json`, one row
+//! per repo and a verdict with its detail per criterion: the evidence James
+//! reviews before CC.12b drops `--experimental`. Recorded on a build of
+//! 7425636 (CA.1, CA.2b, CA.4, CA.5a, CA.5b landed), all five pass; the same
+//! script on a pre-CA build (2170ff8) reads 0 of 3 repos judged, the numbers
+//! LE.7a's module docs started from.
+//!
 //! # Security
 //!
 //! Structural reachability over edges the build holds: no taint or value
