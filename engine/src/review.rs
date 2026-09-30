@@ -82,6 +82,31 @@
 //! forbidden edge uncapped, a cycle's member set), read that and delete
 //! `RuleIndex`, `Scopes` and `Sub`.
 //!
+//! # Markdown (CC.6b)
+//!
+//! [`render_markdown`] is the PR report `glia review` prints and pyo3
+//! `review_vs_rev(format="markdown")` returns: GitHub / GitLab flavoured and
+//! a function of the [`Review`] and [`MarkdownOptions`] alone (two renders
+//! are byte-identical; nothing is printed). ``## glia review vs `<base>` ``
+//! and a headline of the counts, then `### New violations (blocking)` (only
+//! when one exists: a `#### <rule id> (<kind>, <decl>)` table per
+//! violation), `### Check errors` (when any: the working tree's rule errors
+//! and the rules only partly compared), `### Tests to run`, `### Impact`,
+//! `### Edge changes` (grouped by tier, facts first), `### Changed nodes` and
+//! `### Resolved violations` (when any).
+//!
+//! Every location is `file:line`, 1-based; a removed edge or node and a
+//! resolved violation's row are marked `(at <base>)`, where they are
+//! located. Each table keeps [`MarkdownOptions::max_rows`] rows and a cut
+//! one is followed by `_(<shown> of <total>)_`, the total uncut by
+//! `max_impact` / `max_tests` (a violation's: its `count`, beyond the
+//! `check::MAX_EVIDENCE` rows it lists). One escape serves every cell: text
+//! backslash-escapes `\`, `|`, backticks, `*`, `<` and a `_` that is not
+//! inside a word (`__init__.py`); a code span escapes `|` and widens its
+//! fence past any backtick run; a line break is a space. A review with no
+//! graph change renders the impact absence's note as a sentence: `No graph
+//! change vs <base>.`
+//!
 //! # Markers
 //!
 //! Once per review:
@@ -241,7 +266,9 @@ pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
     impact.results.truncate(args.max_impact);
 
     let mut tests = tests_for_delta(rev, &args.tests)?;
-    let tests_total = tests.tests.len();
+    // `omitted` is what a caller's `args.tests.limit` cut (CC.9a): the
+    // count stays the uncut total either way.
+    let tests_total = tests.tests.len() + tests.omitted;
     if tests.tests.len() > args.max_tests {
         tests.tests.truncate(args.max_tests);
         let files: BTreeSet<&str> = tests
@@ -349,6 +376,381 @@ fn marker(r: &Review) {
         c.resolved_violations,
         r.blocking,
     );
+}
+
+// ============================================================================
+// markdown (module docs "Markdown")
+// ============================================================================
+
+/// [`MarkdownOptions::default`]'s `max_rows`.
+pub const DEFAULT_MARKDOWN_ROWS: usize = 20;
+
+/// How [`render_markdown`] cuts its tables. Start from `default()` and set
+/// fields: `#[non_exhaustive]` rules out a struct literal outside this crate.
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub struct MarkdownOptions {
+    /// Rows kept per table ([`DEFAULT_MARKDOWN_ROWS`]); a cut table is
+    /// followed by `_(<shown> of <total>)_`. 0 keeps no row, only that line.
+    pub max_rows: usize,
+}
+
+impl Default for MarkdownOptions {
+    fn default() -> Self {
+        MarkdownOptions {
+            max_rows: DEFAULT_MARKDOWN_ROWS,
+        }
+    }
+}
+
+/// The review as a markdown PR report (module docs "Markdown").
+pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
+    let c = &r.counts;
+    let max = opts.max_rows;
+    let mut blocks: Vec<String> = vec![format!(
+        "## glia review vs {}\n**{} new violation(s)** | {} resolved | {} changed nodes | impact {} | tests {} ({} seeds untested) | edges +{} -{}",
+        code(&r.base),
+        c.new_violations,
+        c.resolved_violations,
+        c.nodes_changed,
+        c.impact,
+        c.tests,
+        c.untested_seeds,
+        c.edges_added,
+        c.edges_removed,
+    )];
+    let unchanged = r.changed.is_empty()
+        && r.edges.is_empty()
+        && r.new_violations.is_empty()
+        && r.resolved_violations.is_empty();
+    if unchanged {
+        let note = r.impact.absence.as_ref().map_or_else(
+            || format!("no graph change vs {}", r.base),
+            |a| a.note.clone(),
+        );
+        blocks.push(sentence(&note));
+        check_errors_md(&mut blocks, r, max);
+        return finish(blocks);
+    }
+    if !r.new_violations.is_empty() {
+        blocks.push("### New violations (blocking)".to_string());
+        for v in &r.new_violations {
+            violation_md(&mut blocks, v, max, None);
+        }
+    }
+    check_errors_md(&mut blocks, r, max);
+
+    blocks.push("### Tests to run".to_string());
+    if c.tests == 0 {
+        blocks.push(none(r.tests.absence.as_ref().map(|a| a.note.as_str())));
+    }
+    push_table(
+        &mut blocks,
+        &["test", "tier", "reason", "at", "covers"],
+        r.tests.tests.iter().map(|t| {
+            let covers: Vec<String> = t.covers.iter().map(|q| code(q)).collect();
+            vec![
+                code(&t.qname),
+                text(t.tier),
+                text(t.reason),
+                at(t.file.as_deref(), t.line),
+                if covers.is_empty() {
+                    DASH.to_string()
+                } else {
+                    covers.join(", ")
+                },
+            ]
+        }),
+        c.tests,
+        max,
+    );
+
+    blocks.push("### Impact".to_string());
+    if c.impact == 0 {
+        blocks.push(none(r.impact.absence.as_ref().map(|a| a.note.as_str())));
+    }
+    push_table(
+        &mut blocks,
+        &["node", "depth", "via", "seed", "at", "live"],
+        r.impact.results.iter().map(|b| {
+            vec![
+                code(&b.qname),
+                b.depth.to_string(),
+                text(b.reason),
+                code(&b.seed),
+                at(b.file.as_deref(), b.line),
+                yes_no(b.live),
+            ]
+        }),
+        c.impact,
+        max,
+    );
+
+    blocks.push("### Edge changes".to_string());
+    edges_md(&mut blocks, r, max);
+
+    blocks.push("### Changed nodes".to_string());
+    if r.changed.is_empty() {
+        blocks.push(none(None));
+    }
+    push_table(
+        &mut blocks,
+        &["change", "node", "kind", "at", "seed"],
+        r.changed.iter().map(|n| {
+            let mut loc = at(n.file.as_deref(), n.line);
+            if n.change == REMOVED {
+                loc.push_str(&format!(" (at {})", text(&r.base)));
+            }
+            vec![
+                text(n.change),
+                code(&n.qname),
+                text(n.kind),
+                loc,
+                yes_no(n.seed),
+            ]
+        }),
+        r.changed.len(),
+        max,
+    );
+
+    if !r.resolved_violations.is_empty() {
+        blocks.push("### Resolved violations".to_string());
+        for v in &r.resolved_violations {
+            violation_md(&mut blocks, v, max, Some(&r.base));
+        }
+    }
+    finish(blocks)
+}
+
+/// The blocks, one blank line apart, ending in one newline.
+fn finish(blocks: Vec<String>) -> String {
+    let mut out = blocks.join("\n\n");
+    out.push('\n');
+    out
+}
+
+/// A missing cell.
+const DASH: &str = "—";
+
+/// `_(<note>)_`, or `_(none)_` without one.
+fn none(note: Option<&str>) -> String {
+    format!("_({})_", note.map_or_else(|| "none".to_string(), flat))
+}
+
+/// A note as a sentence: one line, capitalised, ending in a full stop.
+fn sentence(note: &str) -> String {
+    let flat = flat(note);
+    let mut chars = flat.chars();
+    let mut out: String = match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    };
+    if !out.ends_with('.') {
+        out.push('.');
+    }
+    out
+}
+
+fn yes_no(b: bool) -> String {
+    if b { "yes" } else { "no" }.to_string()
+}
+
+/// A table of at most `max` of `rows` under `header`, then `_(<shown> of
+/// <total>)_` when it shows fewer than `total`. No row, no table.
+fn push_table<I>(blocks: &mut Vec<String>, header: &[&str], rows: I, total: usize, max: usize)
+where
+    I: IntoIterator<Item = Vec<String>>,
+{
+    let rows: Vec<Vec<String>> = rows.into_iter().take(max).collect();
+    if !rows.is_empty() {
+        let mut t = format!(
+            "| {} |\n|{}",
+            header.join(" | "),
+            "---|".repeat(header.len())
+        );
+        for row in &rows {
+            t.push_str("\n| ");
+            t.push_str(&row.join(" | "));
+            t.push_str(" |");
+        }
+        blocks.push(t);
+    }
+    if rows.len() < total {
+        blocks.push(format!("_({} of {total})_", rows.len()));
+    }
+}
+
+/// One violation: its heading and its evidence rows. A per-edge kind's total
+/// is its `count` (the rows beyond `check::MAX_EVIDENCE` included); a
+/// no_cycle's rows are one shortest cycle through its `count` members.
+/// `located_at`: the rev a resolved violation's rows are located in.
+fn violation_md(blocks: &mut Vec<String>, v: &Violation, max: usize, located_at: Option<&str>) {
+    blocks.push(match v.decl.as_deref() {
+        Some(decl) => format!(
+            "#### {} ({}, {})",
+            text(&v.rule_id),
+            text(v.rule_kind),
+            text(decl)
+        ),
+        None => format!("#### {} ({})", text(&v.rule_id), text(v.rule_kind)),
+    });
+    let total = if v.rule_kind == NO_CYCLE {
+        blocks.push(format!(
+            "_(one shortest cycle through the {} members of its strongly-connected component)_",
+            v.count
+        ));
+        v.evidence.len()
+    } else {
+        v.count.max(v.evidence.len())
+    };
+    push_table(
+        blocks,
+        &["category", "from", "to", "at", "tier"],
+        v.evidence.iter().map(|e| {
+            let mut loc = at(e.file.as_deref(), e.line);
+            if let Some(rev) = located_at.filter(|_| e.file.is_some()) {
+                loc.push_str(&format!(" (at {})", text(rev)));
+            }
+            vec![
+                text(e.category),
+                code(&e.from_qname),
+                code(&e.to_qname),
+                loc,
+                text(e.tier),
+            ]
+        }),
+        total,
+        max,
+    );
+}
+
+/// `### Check errors`: the working tree's rule errors and the rules only
+/// partly compared (`Review::check_errors`); nothing when there are none.
+fn check_errors_md(blocks: &mut Vec<String>, r: &Review, max: usize) {
+    if r.check_errors.is_empty() {
+        return;
+    }
+    blocks.push("### Check errors".to_string());
+    push_table(
+        blocks,
+        &["rule", "message"],
+        r.check_errors
+            .iter()
+            .map(|(id, msg)| vec![text(id), text(msg)]),
+        r.check_errors.len(),
+        max,
+    );
+}
+
+/// `### Edge changes`' body: the tier counts, then the first `max` rows
+/// grouped by tier under `#### <tier>` (the rows come sorted tier-first).
+fn edges_md(blocks: &mut Vec<String>, r: &Review, max: usize) {
+    if r.edges.is_empty() {
+        blocks.push(none(None));
+        return;
+    }
+    let mut tiers: Vec<(&str, usize)> = r
+        .counts
+        .edges_by_tier
+        .iter()
+        .map(|(t, n)| (*t, *n))
+        .collect();
+    tiers.sort_by_key(|(t, _)| (tier_rank(t), *t));
+    let by_tier: Vec<String> = tiers
+        .iter()
+        .map(|(t, n)| format!("{} {n}", text(t)))
+        .collect();
+    blocks.push(format!("_by tier: {}_", by_tier.join(", ")));
+    let shown = &r.edges[..r.edges.len().min(max)];
+    for group in shown.chunk_by(|a, b| a.tier == b.tier) {
+        blocks.push(format!("#### {}", text(group[0].tier)));
+        push_table(
+            blocks,
+            &["+/-", "category", "from", "to", "at", "emitter"],
+            group.iter().map(|e| {
+                let sign = match e.change {
+                    ADDED => "+",
+                    REMOVED => "-",
+                    _ => "~",
+                };
+                let mut loc = at(e.site_file.as_deref(), e.site_line);
+                if e.change == REMOVED && e.site_file.is_some() {
+                    loc.push_str(&format!(" (at {})", text(&r.base)));
+                }
+                vec![
+                    sign.to_string(),
+                    text(e.category),
+                    code(&e.from_qname),
+                    code(&e.to_qname),
+                    loc,
+                    e.emitter.as_deref().map_or_else(|| DASH.to_string(), text),
+                ]
+            }),
+            group.len(),
+            max,
+        );
+    }
+    if shown.len() < r.edges.len() {
+        blocks.push(format!("_({} of {})_", shown.len(), r.edges.len()));
+    }
+}
+
+/// `file:line`, `file`, or a dash, as table text.
+fn at(file: Option<&str>, line: Option<i64>) -> String {
+    match (file, line) {
+        (Some(f), Some(l)) => text(&format!("{f}:{l}")),
+        (Some(f), None) => text(f),
+        _ => DASH.to_string(),
+    }
+}
+
+/// `s` on one line: every line break a space.
+fn flat(s: &str) -> String {
+    s.replace("\r\n", " ").replace(['\n', '\r'], " ")
+}
+
+/// A table cell's text (module docs "Markdown"): one line, with `\`, `|`,
+/// backticks, `*`, `<` and every `_` not inside a word backslash-escaped, so
+/// no character splits the row or opens a span.
+fn text(s: &str) -> String {
+    let chars: Vec<char> = flat(s).chars().collect();
+    let word = |i: Option<usize>| {
+        i.and_then(|i| chars.get(i))
+            .is_some_and(|c| c.is_alphanumeric())
+    };
+    let mut out = String::with_capacity(chars.len());
+    for (i, &c) in chars.iter().enumerate() {
+        let escape = match c {
+            '\\' | '|' | '`' | '*' | '<' => true,
+            '_' => !(word(i.checked_sub(1)) && word(Some(i + 1))),
+            _ => false,
+        };
+        if escape {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A code span holding `s` in a table cell (module docs "Markdown"): one
+/// line, `|` escaped, fenced by one backtick more than its longest run.
+fn code(s: &str) -> String {
+    if s.is_empty() {
+        return DASH.to_string();
+    }
+    let body = flat(s).replace('|', "\\|");
+    let (mut longest, mut run) = (0usize, 0usize);
+    for c in body.chars() {
+        run = if c == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat(longest + 1);
+    if longest == 0 {
+        format!("{fence}{body}{fence}")
+    } else {
+        format!("{fence} {body} {fence}")
+    }
 }
 
 // ============================================================================

@@ -1,0 +1,2 @@
+# pyo3 surface of py/src/review.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+fn review_vs_rev(repo_path: &str, base: &str = "HEAD", format: &str = "dict", markdown_rows: usize = 20, depth: usize = 4, max_tests: usize = 50, max_impact: usize = 50) -> PyResult<Py<PyAny>>

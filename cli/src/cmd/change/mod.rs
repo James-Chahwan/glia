@@ -68,6 +68,16 @@ pub(crate) enum ChangeCmd {
     /// orphaned, 0 otherwise (a compatible change passes), 2 on a usage, git
     /// or build error.
     ContractBreaks(contract_breaks::Args),
+    /// Review (CC.6b): the PR report for the working tree's change against a
+    /// git rev (`--base`, default HEAD), in one call — the changed nodes,
+    /// their ranked impact, the tests to run, every added / removed edge with
+    /// its tier (fact, derived, heuristic), and the repo's declared rules
+    /// checked on both sides, each violation new or resolved. Prints markdown
+    /// for a PR comment (`--json`: the review). Saves the parse-cache sidecar
+    /// as `delta` does, never a layout. A CI gate: exits 1 when the change
+    /// adds a violation (one the base already had passes), 0 otherwise, 2 on
+    /// a usage, git or build error.
+    Review(review::Args),
 }
 
 pub(crate) fn run(c: ChangeCmd) -> i32 {
@@ -77,5 +87,6 @@ pub(crate) fn run(c: ChangeCmd) -> i32 {
         ChangeCmd::TestsFor(a) => tests_for::run(a),
         ChangeCmd::Patterns(a) => patterns::run(a),
         ChangeCmd::ContractBreaks(a) => contract_breaks::run(a),
+        ChangeCmd::Review(a) => review::run(a),
     }
 }

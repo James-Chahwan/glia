@@ -10,6 +10,11 @@
 //! committed through the LE.1b git fixture. The engine prints
 //! `[review] base=.. changed=.. seeds=.. impact=.. tests=.. untested=.. edges +a -r (..) violations new=.. resolved=.. blocking=..`
 //! once per review.
+//!
+//! CC.6b — `render_markdown`, the PR report the CLI and pyo3 print: the
+//! `markdown_*` tests pin the whole document of the new-violation change,
+//! the cell escaping, the per-table row cap with its `_(shown of total)_`
+//! footer, the resolved-only and empty reviews, and determinism.
 
 mod git_fixture;
 
@@ -18,7 +23,9 @@ use std::collections::BTreeMap;
 use git_fixture::GitRepo;
 use glia_engine::check::Violation;
 use glia_engine::delta::graph_delta_vs_rev;
-use glia_engine::review::{Review, ReviewArgs, review, review_vs_rev};
+use glia_engine::review::{
+    MarkdownOptions, Review, ReviewArgs, render_markdown, review, review_vs_rev,
+};
 
 const MANIFESTS: [(&str, &str); 2] = [
     ("web/pyproject.toml", "[project]\nname = \"web\"\n"),
@@ -458,4 +465,236 @@ fn a_deleted_violating_file_resolves() {
 
 fn json_counts(r: &Review) -> String {
     serde_json::to_string(&r.counts).expect("serialise the counts")
+}
+
+// ============================================================================
+// CC.6b: the markdown PR report
+// ============================================================================
+
+fn md(r: &Review) -> String {
+    render_markdown(r, &MarkdownOptions::default())
+}
+
+/// The whole report of the new-violation change (`markdown_golden`).
+const GOLDEN_NEW: &str = "## glia review vs `HEAD`
+**1 new violation(s)** | 0 resolved | 3 changed nodes | impact 1 | tests 1 (1 seeds untested) | edges +2 -0
+
+### New violations (blocking)
+
+#### web-no-api-internals (forbid_edge, .glia/overlay.toml:3)
+
+| category | from | to | at | tier |
+|---|---|---|---|---|
+| IMPORTS | `web::app` | `services::api::internal` | web/app.py:1 | fact |
+| CALLS | `web::app::pay` | `services::api::internal::charge` | web/app.py:5 | fact |
+
+### Tests to run
+
+| test | tier | reason | at | covers |
+|---|---|---|---|---|
+| `tests::test_pay::test_pay` | fact | tests_edge | tests/test_pay.py:4 | `services::api::internal::charge`, `web::app::pay` |
+
+### Impact
+
+| node | depth | via | seed | at | live |
+|---|---|---|---|---|---|
+| `tests::test_pay::test_pay` | 1 | CALLS | `web::app::pay` | tests/test_pay.py:4 | yes |
+
+### Edge changes
+
+_by tier: fact 2_
+
+#### fact
+
+| +/- | category | from | to | at | emitter |
+|---|---|---|---|---|---|
+| + | CALLS | `web::app::pay` | `services::api::internal::charge` | web/app.py:5 | graph:calls |
+| + | IMPORTS | `web::app` | `services::api::internal` | web/app.py:1 | graph:imports |
+
+### Changed nodes
+
+| change | node | kind | at | seed |
+|---|---|---|---|---|
+| modified | `web::app` | MODULE | web/app.py:1 | no |
+| modified | `web::app::pay` | FUNCTION | web/app.py:4 | yes |
+| edge_endpoint | `services::api::internal::charge` | FUNCTION | services/api/internal.py:1 | yes |
+";
+
+/// The `#`-headings of a report, in order.
+fn headings(text: &str) -> Vec<&str> {
+    text.lines().filter(|l| l.starts_with('#')).collect()
+}
+
+/// The new-violation change renders its headline, the blocking violation
+/// with its located fact rows, and the four answer sections, byte for byte;
+/// two renders are identical.
+#[test]
+fn markdown_golden() {
+    let repo = committed(WEB_APP_CLEAN);
+    repo.write("web/app.py", WEB_APP);
+    let r = run(&repo);
+    let text = md(&r);
+    assert!(
+        text.starts_with("## glia review vs `HEAD`\n**1 new violation(s)**"),
+        "{text}"
+    );
+    for want in [
+        "### New violations (blocking)",
+        "#### web-no-api-internals (forbid_edge, .glia/overlay.toml:3)",
+        "| IMPORTS | `web::app` | `services::api::internal` | web/app.py:1 | fact |",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+    assert_eq!(text, GOLDEN_NEW);
+    assert_eq!(text, md(&r), "two renders differ");
+}
+
+/// A `|` in a qname (a Rust closure path) is escaped inside its code span,
+/// a backtick widens the span's fence, text escapes `|`, backticks and a
+/// `_` outside a word, and a newline in a note is a space.
+#[test]
+fn markdown_escapes_cells() {
+    let repo = committed(WEB_APP_CLEAN);
+    repo.write("web/app.py", WEB_APP);
+    let mut r = run(&repo);
+    r.new_violations[0].evidence[0].from_qname = "web::app::{closure|x|}".to_string();
+    r.new_violations[0].evidence[1].to_qname = "a`b".to_string();
+    r.new_violations[0].evidence[1].file = Some("web/__init__.py".to_string());
+    r.check_errors
+        .push(("r|1".to_string(), "line one\nline `two`".to_string()));
+    let text = md(&r);
+    for want in [
+        "| IMPORTS | `web::app::{closure\\|x\\|}` | `services::api::internal` | web/app.py:1 | fact |",
+        "| CALLS | `web::app::pay` | `` a`b `` | web/\\_\\_init\\_\\_.py:5 | fact |",
+        "### Check errors\n\n| rule | message |\n|---|---|\n| r\\|1 | line one line \\`two\\` |\n\n### Tests to run",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+    assert!(
+        text.contains("| tests_edge |"),
+        "a `_` inside a word stays:\n{text}"
+    );
+}
+
+/// `max_rows` cuts every table, each cut one followed by its
+/// `_(<shown> of <total>)_`; a violation's total is its `count`, and the
+/// edge section's the whole edge list.
+#[test]
+fn markdown_rows_are_capped_with_the_total() {
+    let repo = committed(WEB_APP_CLEAN);
+    repo.write("web/app.py", WEB_APP);
+    let r = run(&repo);
+    let mut one = MarkdownOptions::default();
+    one.max_rows = 1;
+    let text = render_markdown(&r, &one);
+    let footers: Vec<&str> = text.lines().filter(|l| l.starts_with("_(")).collect();
+    assert_eq!(
+        footers,
+        ["_(1 of 2)_", "_(1 of 2)_", "_(1 of 3)_"],
+        "{text}"
+    );
+    assert!(
+        text.contains("| IMPORTS | `web::app` | `services::api::internal` | web/app.py:1 | fact |\n\n_(1 of 2)_\n\n### Tests to run"),
+        "{text}"
+    );
+    assert!(
+        !text.contains(
+            "| CALLS | `web::app::pay` | `services::api::internal::charge` | web/app.py:5 | fact |"
+        ),
+        "{text}"
+    );
+    assert_eq!(
+        headings(&text),
+        headings(&md(&r)),
+        "a cut keeps every section"
+    );
+
+    let mut zero = MarkdownOptions::default();
+    zero.max_rows = 0;
+    let text = render_markdown(&r, &zero);
+    assert!(!text.contains("|---|"), "no table at 0 rows:\n{text}");
+    let footers: Vec<&str> = text.lines().filter(|l| l.starts_with("_(")).collect();
+    assert_eq!(
+        footers,
+        [
+            "_(0 of 2)_",
+            "_(0 of 1)_",
+            "_(0 of 1)_",
+            "_(0 of 2)_",
+            "_(0 of 3)_"
+        ],
+        "{text}"
+    );
+
+    // The engine's own caps: the counts stay the totals.
+    let mut args = ReviewArgs::default();
+    args.max_tests = 0;
+    args.max_impact = 0;
+    let cut = review_vs_rev(repo.path(), "HEAD", &args).expect("review");
+    let text = md(&cut);
+    assert!(
+        text.contains(
+            "### Tests to run\n\n_(0 of 1)_\n\n### Impact\n\n_(0 of 1)_\n\n### Edge changes"
+        ),
+        "{text}"
+    );
+}
+
+/// A resolved-only change: no blocking section, the resolved violation last,
+/// its rows and the removed edges marked with the base they are located in.
+#[test]
+fn markdown_resolved_only() {
+    let repo = committed(WEB_APP);
+    repo.write("web/app.py", WEB_APP_CLEAN);
+    let text = md(&run(&repo));
+    assert!(
+        text.starts_with("## glia review vs `HEAD`\n**0 new violation(s)** | 1 resolved |"),
+        "{text}"
+    );
+    assert_eq!(
+        headings(&text),
+        [
+            "## glia review vs `HEAD`",
+            "### Tests to run",
+            "### Impact",
+            "### Edge changes",
+            "#### fact",
+            "### Changed nodes",
+            "### Resolved violations",
+            "#### web-no-api-internals (forbid_edge, .glia/overlay.toml:3)",
+        ],
+        "{text}"
+    );
+    for want in [
+        "| - | CALLS | `web::app::pay` | `services::api::internal::charge` | web/app.py:5 (at HEAD) | graph:calls |",
+        "| IMPORTS | `web::app` | `services::api::internal` | web/app.py:1 (at HEAD) | fact |\n| CALLS | `web::app::pay` | `services::api::internal::charge` | web/app.py:5 (at HEAD) | fact |\n",
+    ] {
+        assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    }
+    assert!(text.ends_with("fact |\n"), "{text}");
+}
+
+/// A new no_cycle violation names its component's size above its witness.
+#[test]
+fn markdown_new_cycle() {
+    let repo = committed_api(API_B);
+    repo.write("services/api/b.py", API_B_CYCLE);
+    let text = md(&run(&repo));
+    assert!(
+        text.contains("#### api-acyclic (no_cycle, .glia/overlay.toml:10)\n\n_(one shortest cycle through the 2 members of its strongly-connected component)_\n\n| category | from | to | at | tier |\n|---|---|---|---|---|\n| IMPORTS | `services::api::a` | `services::api::b` | services/api/a.py:1 | fact |\n| IMPORTS | `services::api::b` | `services::api::a` | services/api/b.py:1 | fact |\n"),
+        "{text}"
+    );
+}
+
+/// No graph change: the headline and the impact absence's note, as a
+/// sentence.
+#[test]
+fn markdown_empty_review() {
+    let repo = committed(WEB_APP_CLEAN);
+    let r = run(&repo);
+    assert!(r.changed.is_empty() && r.edges.is_empty(), "{r:#?}");
+    assert_eq!(
+        md(&r),
+        "## glia review vs `HEAD`\n**0 new violation(s)** | 0 resolved | 0 changed nodes | impact 0 | tests 0 (0 seeds untested) | edges +0 -0\n\nNo graph change vs HEAD.\n"
+    );
 }
