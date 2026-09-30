@@ -1,7 +1,8 @@
 //! CD.2b — `splits` (global mode): the module or community quotient of a
 //! scope, bisected by Stoer-Wagner at the ratio-best phase cut above a balance
 //! floor, recursive to N parts, cut edges located at their evidence sites and
-//! each part diffed against `glia arch`.
+//! each part diffed against `glia arch`. CD.2c — the anchored s-t mode and the
+//! blockers: shared-write data entities and cycles between parts.
 //!
 //! One Python repo, three packages. `orders/` and `billing/` hold four
 //! modules each; a module defines two functions, and each function calls both
@@ -19,6 +20,13 @@
 //! and the balanced cut is the seam, by construction. The three `__init__.py`
 //! files are empty modules with no weighted edge, so they stay out: 9 units.
 //!
+//! CD.2c's sqlite tables ([`SQL`]): `orders.repo.save` INSERTs into `orders`
+//! and `billing.ledger.post` UPDATEs it (one table both sides write: the
+//! shared write); `billing.report.summary` only SELECTs `ledger` (one part
+//! only: no blocker). The data entities are data nodes, never members, so
+//! every CD.2b count above holds. The two seam calls run both ways between
+//! the parts: one cycle between parts.
+//!
 //! The fired_on marker is read from a child process: `child_splits` re-runs
 //! this test binary on one tree with `--nocapture` and the parent reads its
 //! stderr (the `communities.rs` way).
@@ -27,8 +35,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::process::Command;
 
-use glia_code_domain::{edge_category, node_kind};
-use glia_core::NodeId;
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, NodeId};
 use glia_engine::generate_one;
 use glia_engine::profile::CODE_PROFILE;
 use glia_engine::splits::{SplitAnswer, SplitArgs, SplitPart, splits};
@@ -36,6 +44,12 @@ use glia_graph::MergedGraph;
 
 /// Set on the child run: the tree `child_splits` builds.
 const CHILD_ENV: &str = "GLIA_CD2B_CHILD_DIR";
+/// Set on the child run to `st`: `child_splits` runs the anchored mode
+/// between [`ST_SOURCE`] and [`ST_SINK`].
+const CHILD_MODE_ENV: &str = "GLIA_CD2C_CHILD_MODE";
+/// The anchored mode's source and sink: `create`'s and `post`'s modules.
+const ST_SOURCE: &str = "orders::api::create";
+const ST_SINK: &str = "billing::ledger::post";
 
 type Package = [(&'static str, [&'static str; 2]); 4];
 
@@ -68,17 +82,41 @@ const CROSSING: [(Site, Site); 3] = [
     (("orders", "cart", "total"), ("util", "fmt", "money")),
 ];
 
+/// The statement a function runs after its calls (CD.2c): `(package, module,
+/// function, SQL)`, as `conn.execute("<SQL>")`.
+const SQL: [(&str, &str, &str, &str); 3] = [
+    (
+        "orders",
+        "repo",
+        "save",
+        "INSERT INTO orders (id) VALUES (1)",
+    ),
+    (
+        "billing",
+        "ledger",
+        "post",
+        "UPDATE orders SET paid = 1 WHERE id = 1",
+    ),
+    ("billing", "report", "summary", "SELECT * FROM ledger"),
+];
+
 /// The source of `<pkg>/<module>.py`: its imports (sorted by module, names
 /// sorted), then its two functions. `prefix` is the dotted package root
-/// (`app.`) or empty.
-fn module_py(pkg: &str, package: &Package, module: &str, prefix: &str) -> String {
+/// (`app.`) or empty; `crossing` are the calls that leave a package.
+fn module_py(
+    pkg: &str,
+    package: &Package,
+    module: &str,
+    prefix: &str,
+    crossing: &[(Site, Site)],
+) -> String {
     let fns = package
         .iter()
         .find(|(m, _)| *m == module)
         .map(|(_, f)| *f)
         .expect("a module of the package");
     let mut imports: BTreeMap<(String, String), BTreeSet<&str>> = BTreeMap::new();
-    let mut bodies: Vec<Vec<&str>> = Vec::new();
+    let mut bodies: Vec<Vec<String>> = Vec::new();
     for f in fns.iter() {
         let mut body = Vec::new();
         for (other, ofns) in package.iter().filter(|(m, _)| *m != module) {
@@ -86,15 +124,20 @@ fn module_py(pkg: &str, package: &Package, module: &str, prefix: &str) -> String
                 .entry((pkg.to_string(), other.to_string()))
                 .or_default()
                 .extend(ofns);
-            body.extend(ofns);
+            body.extend(ofns.iter().map(|c| format!("    {c}()")));
         }
-        for ((fp, fm, ff), (tp, tm, tf)) in CROSSING {
+        for &((fp, fm, ff), (tp, tm, tf)) in crossing {
             if (fp, fm, ff) == (pkg, module, *f) {
                 imports
                     .entry((tp.to_string(), tm.to_string()))
                     .or_default()
                     .insert(tf);
-                body.push(tf);
+                body.push(format!("    {tf}()"));
+            }
+        }
+        for (sp, sm, sf, sql) in SQL {
+            if (sp, sm, sf) == (pkg, module, *f) {
+                body.push(format!("    conn.execute(\"{sql}\")"));
             }
         }
         bodies.push(body);
@@ -109,8 +152,9 @@ fn module_py(pkg: &str, package: &Package, module: &str, prefix: &str) -> String
     }
     for (f, body) in fns.iter().zip(&bodies) {
         src.push_str(&format!("\n\ndef {f}():\n"));
-        for callee in body {
-            src.push_str(&format!("    {callee}()\n"));
+        for line in body {
+            src.push_str(line);
+            src.push('\n');
         }
     }
     src
@@ -118,6 +162,11 @@ fn module_py(pkg: &str, package: &Package, module: &str, prefix: &str) -> String
 
 /// Every file of the fixture, repo-relative, under `dir` (`app/` or empty).
 fn sources(dir: &str) -> Vec<(String, String)> {
+    sources_with(dir, &CROSSING)
+}
+
+/// [`sources`] with `crossing` as the calls that leave a package.
+fn sources_with(dir: &str, crossing: &[(Site, Site)]) -> Vec<(String, String)> {
     let prefix = dir.trim_end_matches('/').replace('/', ".");
     let prefix = if prefix.is_empty() {
         prefix
@@ -130,7 +179,7 @@ fn sources(dir: &str) -> Vec<(String, String)> {
         for (m, _) in package.iter() {
             files.push((
                 format!("{dir}{pkg}/{m}.py"),
-                module_py(pkg, package, m, &prefix),
+                module_py(pkg, package, m, &prefix, crossing),
             ));
         }
     }
@@ -143,7 +192,11 @@ fn sources(dir: &str) -> Vec<(String, String)> {
 }
 
 fn write_fixture(root: &Path, dir: &str) {
-    for (rel, src) in sources(dir) {
+    write_files(root, sources(dir));
+}
+
+fn write_files(root: &Path, files: Vec<(String, String)>) {
+    for (rel, src) in files {
         let p = root.join(rel);
         std::fs::create_dir_all(p.parent().expect("a parent dir")).expect("mkdir");
         std::fs::write(p, src).expect("write source");
@@ -166,6 +219,30 @@ fn fixture_in(dir: &str) -> (tempfile::TempDir, MergedGraph, BTreeMap<u64, Strin
 
 fn fixture() -> (tempfile::TempDir, MergedGraph, BTreeMap<u64, String>) {
     fixture_in("")
+}
+
+/// The fixture with `crossing` as the calls that leave a package.
+fn fixture_with(
+    crossing: &[(Site, Site)],
+) -> (tempfile::TempDir, MergedGraph, BTreeMap<u64, String>) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("fixture");
+    write_files(&root, sources_with("", crossing));
+    let (m, labels) = build(&root);
+    (tmp, m, labels)
+}
+
+/// The anchored mode between `source` and `sink`.
+fn run_st(
+    m: &MergedGraph,
+    labels: &BTreeMap<u64, String>,
+    source: &str,
+    sink: &str,
+) -> SplitAnswer {
+    run(m, labels, |a| {
+        a.source = Some(source.to_string());
+        a.sink = Some(sink.to_string());
+    })
 }
 
 fn run(
@@ -221,24 +298,35 @@ fn part_with<'a>(a: &'a SplitAnswer, module: &str) -> &'a SplitPart {
         .unwrap_or_else(|| panic!("no part holds {module}: {a:#?}"))
 }
 
-/// Each node's part, by its enclosing MODULE's label in a part's `modules`:
-/// the answer's grouping recomputed from the graph.
-fn node_parts(m: &MergedGraph, a: &SplitAnswer) -> HashMap<NodeId, u32> {
-    let part_of_module: HashMap<&str, u32> = a
-        .parts
+/// The data-node kinds (the domain's `db` effect sink): never a member.
+fn data_kinds() -> &'static [glia_core::NodeKindId] {
+    CODE_PROFILE
+        .tables
+        .effect_sinks
         .iter()
-        .flat_map(|p| p.modules.iter().map(move |q| (q.as_str(), p.id)))
-        .collect();
+        .find(|s| s.class == "db")
+        .map_or(&[], |s| s.kinds)
+}
+
+/// Each non-data node's enclosing MODULE label (the node itself when it is
+/// one), first graph wins.
+fn module_labels(m: &MergedGraph) -> HashMap<NodeId, String> {
+    let data = data_kinds();
     let mut out = HashMap::new();
     for g in &m.graphs {
         for n in &g.nodes {
+            if g.nav
+                .kind_by_id
+                .get(&n.id)
+                .is_some_and(|k| data.contains(k))
+            {
+                continue;
+            }
             let mut cur = n.id;
             for _ in 0..64 {
                 if g.nav.kind_by_id.get(&cur) == Some(&node_kind::MODULE) {
                     let q = g.nav.qname_by_id.get(&cur).map_or("", String::as_str);
-                    if let Some(&p) = part_of_module.get(q) {
-                        out.entry(n.id).or_insert(p);
-                    }
+                    out.entry(n.id).or_insert_with(|| q.to_string());
                     break;
                 }
                 match g.nav.parent_of.get(&cur) {
@@ -249,6 +337,76 @@ fn node_parts(m: &MergedGraph, a: &SplitAnswer) -> HashMap<NodeId, u32> {
         }
     }
     out
+}
+
+/// Each node's part, by its enclosing MODULE's label in a part's `modules`:
+/// the answer's grouping recomputed from the graph.
+fn node_parts(m: &MergedGraph, a: &SplitAnswer) -> HashMap<NodeId, u32> {
+    let part_of_module: HashMap<&str, u32> = a
+        .parts
+        .iter()
+        .flat_map(|p| p.modules.iter().map(move |q| (q.as_str(), p.id)))
+        .collect();
+    module_labels(m)
+        .into_iter()
+        .filter_map(|(id, q)| part_of_module.get(q.as_str()).map(|&p| (id, p)))
+        .collect()
+}
+
+/// The least weight of any cut of the module graph (every weighted edge
+/// between two non-data nodes of two modules) that puts the `sources`
+/// modules on one side and the `sinks` on the other, by enumerating every
+/// such cut.
+fn brute_st_min(m: &MergedGraph, sources: &[&str], sinks: &[&str]) -> u64 {
+    let module = module_labels(m);
+    let mut pairs: BTreeMap<(String, String), u64> = BTreeMap::new();
+    for e in m.all_edges() {
+        let w = u64::from(CODE_PROFILE.tables.community_weight(e.category));
+        if w == 0 {
+            continue;
+        }
+        if let (Some(a), Some(b)) = (module.get(&e.from), module.get(&e.to))
+            && a != b
+        {
+            let key = if a < b {
+                (a.clone(), b.clone())
+            } else {
+                (b.clone(), a.clone())
+            };
+            *pairs.entry(key).or_default() += w;
+        }
+    }
+    let units: Vec<&str> = pairs
+        .keys()
+        .flat_map(|(a, b)| [a.as_str(), b.as_str()])
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert!(units.len() <= 16, "brute force over {} units", units.len());
+    let at = |q: &str| units.iter().position(|u| *u == q).expect("a unit");
+    let bits = |qs: &[&str]| qs.iter().fold(0u32, |b, q| b | 1 << at(q));
+    let (s, t) = (bits(sources), bits(sinks));
+    let mut best = u64::MAX;
+    for mask in 0u32..(1 << units.len()) {
+        if mask & s != s || mask & t != 0 {
+            continue;
+        }
+        let w: u64 = pairs
+            .iter()
+            .filter(|((a, b), _)| (mask >> at(a) & 1) != (mask >> at(b) & 1))
+            .map(|(_, w)| *w)
+            .sum();
+        best = best.min(w);
+    }
+    best
+}
+
+/// The node whose qname is `q`.
+fn id_of(m: &MergedGraph, q: &str) -> NodeId {
+    m.qnames_exact(q)
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("no node {q}"))
 }
 
 /// `(summed community weight, edges)` of every graph edge between two parts.
@@ -497,6 +655,10 @@ fn deterministic() {
             assert_eq!(first, json(&m2, &l2), "{quotient} x{parts}: two builds");
         }
     }
+    let st = |m: &MergedGraph, l: &BTreeMap<u64, String>| {
+        serde_json::to_string(&run_st(m, l, ST_SOURCE, ST_SINK)).expect("serialise")
+    };
+    assert_eq!(st(&m1, &l1), st(&m2, &l2), "st: two builds");
 }
 
 #[test]
@@ -528,27 +690,34 @@ fn empty_scope_absence() {
 }
 
 /// Child half of `marker_line`: runs the answer on the tree in [`CHILD_ENV`]
-/// and prints it; a no-op in a normal test run.
+/// (the anchored mode when [`CHILD_MODE_ENV`] is `st`) and prints it; a no-op
+/// in a normal test run.
 #[test]
 fn child_splits() {
     if let Ok(dir) = std::env::var(CHILD_ENV) {
         let (m, labels) = build(Path::new(&dir));
-        let a = splits(&m, &labels, &SplitArgs::default());
+        let mut args = SplitArgs::default();
+        if std::env::var(CHILD_MODE_ENV).as_deref() == Ok("st") {
+            args.source = Some(ST_SOURCE.to_string());
+            args.sink = Some(ST_SINK.to_string());
+        }
+        let a = splits(&m, &labels, &args);
         println!("{}", serde_json::to_string(&a).expect("serialise"));
     }
 }
 
-#[test]
-fn marker_line() {
+/// The child's answer (as JSON) and its stderr, in `mode` (`global` | `st`).
+fn child_run(mode: &str) -> (serde_json::Value, String) {
     let tmp = tempfile::tempdir().expect("tempdir");
     write_fixture(tmp.path(), "");
     let exe = std::env::current_exe().expect("test binary path");
     let out = Command::new(exe)
         .args(["--exact", "child_splits", "--nocapture", "--test-threads=1"])
         .env(CHILD_ENV, tmp.path())
+        .env(CHILD_MODE_ENV, mode)
         .output()
         .expect("re-run the test binary");
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     let stdout = String::from_utf8_lossy(&out.stdout);
     // libtest prints `test child_splits ... ` before the child's own line.
     let json = stdout
@@ -556,17 +725,284 @@ fn marker_line() {
         .find_map(|l| l.find("{\"mode\"").map(|i| &l[i..]))
         .unwrap_or_else(|| panic!("no answer on the child's stdout: {stdout}"));
     let a: serde_json::Value = serde_json::from_str(json).expect("the answer is JSON");
-    let want = format!(
-        "[splits] mode=global quotient=module units={} parts={} cut_weight={} global_min={} balanced={} cut_edges={} surface=engine",
+    (a, stderr)
+}
+
+/// The marker line the answer `a` prints.
+fn marker_of(a: &serde_json::Value) -> String {
+    let len = |k: &str| a[k].as_array().map_or(0, Vec::len);
+    format!(
+        "[splits] mode={} quotient=module units={} parts={} cut_weight={} global_min={} balanced={} cut_edges={} shared_writes={} part_cycles={} surface=engine",
+        a["mode"].as_str().unwrap_or_default(),
         a["units"],
-        a["parts"].as_array().map_or(0, Vec::len),
+        len("parts"),
         a["cut_weight"],
         a["global_min_weight"],
         a["balanced"],
         a["cut_edges_total"],
+        len("shared_writes"),
+        len("cycles"),
+    )
+}
+
+#[test]
+fn marker_line() {
+    for mode in ["global", "st"] {
+        let (a, stderr) = child_run(mode);
+        assert_eq!(a["mode"], mode);
+        let want = marker_of(&a);
+        assert!(
+            stderr.lines().any(|l| l == want),
+            "no `{want}` on the child's stderr:\n{stderr}"
+        );
+        assert!(
+            want.contains(" shared_writes=1 part_cycles=1 "),
+            "one shared write and one cycle in {mode} mode: {want}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CD.2c: the blockers and the anchored mode
+// ---------------------------------------------------------------------------
+
+/// The ACCESS_MODE text of `from -> to`'s ACCESSES_DATA edge.
+fn access_mode(m: &MergedGraph, from: NodeId, to: NodeId) -> Option<String> {
+    m.all_edges()
+        .find(|e| e.category == edge_category::ACCESSES_DATA && e.from == from && e.to == to)
+        .and_then(|e| e.cell(cell_type::ACCESS_MODE))
+        .and_then(|c| match &c.payload {
+            CellPayload::Text(t) | CellPayload::Json(t) => Some(t.clone()),
+            CellPayload::Bytes(_) => None,
+        })
+}
+
+/// Rewrite (or, with `None`, drop) the ACCESS_MODE cell of `from -> to`'s
+/// ACCESSES_DATA edge.
+fn set_access_mode(m: &mut MergedGraph, from: NodeId, to: NodeId, mode: Option<&str>) {
+    let mut hit = 0;
+    for g in &mut m.graphs {
+        for e in &mut g.edges {
+            if e.category == edge_category::ACCESSES_DATA && e.from == from && e.to == to {
+                e.cells.retain(|c| c.kind != cell_type::ACCESS_MODE);
+                if let Some(mode) = mode {
+                    e.cells.push(glia_core::Cell {
+                        kind: cell_type::ACCESS_MODE,
+                        payload: CellPayload::Text(mode.to_string()),
+                    });
+                }
+                hit += 1;
+            }
+        }
+    }
+    assert_eq!(hit, 1, "one ACCESSES_DATA edge {from:?} -> {to:?}");
+}
+
+#[test]
+fn shared_write_reported() {
+    let (_tmp, mut m, labels) = fixture();
+    let orders = id_of(&m, "data_entity:sql:orders");
+    let ledger = id_of(&m, "data_entity:sql:ledger");
+    let save = id_of(&m, "orders::repo::save");
+    let post = id_of(&m, "billing::ledger::post");
+    let summary = id_of(&m, "billing::report::summary");
+    // The fixture mints the ACCESS_MODE cells this answer reads.
+    assert_eq!(access_mode(&m, save, orders).as_deref(), Some("write"));
+    assert_eq!(access_mode(&m, post, orders).as_deref(), Some("write"));
+    assert_eq!(access_mode(&m, summary, ledger).as_deref(), Some("read"));
+
+    for quotient in ["module", "community"] {
+        let a = run(&m, &labels, |a| a.quotient = quotient.to_string());
+        assert!(a.absence.is_none(), "{:?}", a.absence);
+        let (po, pb) = (
+            part_with(&a, "orders::repo").id,
+            part_with(&a, "billing::ledger").id,
+        );
+        assert_eq!((po, pb), (0, 1), "{quotient}");
+        assert_eq!(
+            a.shared_writes.len(),
+            1,
+            "{quotient}: {:#?}",
+            a.shared_writes
+        );
+        let w = &a.shared_writes[0];
+        assert_eq!(w.entity.qname, "data_entity:sql:orders");
+        assert_eq!(w.kind, "DATA_ENTITY");
+        assert_eq!(w.parts, [0, 1]);
+        assert_eq!(w.modes, [(0, "write"), (1, "write")]);
+        assert_eq!(w.tier, "derived", "every mode is known");
+        let writers: Vec<&str> = w.writers.iter().map(|l| l.qname.as_str()).collect();
+        assert_eq!(writers, ["orders::repo::save", "billing::ledger::post"]);
+        assert_eq!(w.writers_total, 2);
+        assert!(
+            !a.shared_writes
+                .iter()
+                .any(|w| w.entity.qname == "data_entity:sql:ledger"),
+            "ledger is read from one part only"
+        );
+    }
+
+    // A write with no mode is `unknown`, never a read: still a blocker, but
+    // heuristic.
+    set_access_mode(&mut m, post, orders, None);
+    let a = run(&m, &labels, |_| {});
+    assert_eq!(a.shared_writes.len(), 1, "{:#?}", a.shared_writes);
+    assert_eq!(a.shared_writes[0].modes, [(0, "write"), (1, "unknown")]);
+    assert_eq!(a.shared_writes[0].tier, "heuristic");
+    // One side only reads: no two writers, no blocker.
+    set_access_mode(&mut m, post, orders, Some("read"));
+    let a = run(&m, &labels, |_| {});
+    assert!(a.shared_writes.is_empty(), "{:#?}", a.shared_writes);
+    // A read and a write in one part fold to read_write.
+    set_access_mode(&mut m, post, orders, Some("read_write"));
+    let a = run(&m, &labels, |_| {});
+    assert_eq!(a.shared_writes[0].modes, [(0, "write"), (1, "read_write")]);
+    assert_eq!(a.shared_writes[0].tier, "derived");
+}
+
+#[test]
+fn part_cycle_reported() {
+    let (_tmp, m, labels) = fixture();
+    let a = run(&m, &labels, |_| {});
+    assert_eq!(a.cycles.len(), 1, "{:#?}", a.cycles);
+    let c = &a.cycles[0];
+    assert_eq!(c.parts, [0, 1]);
+    assert_eq!(c.tier, "derived");
+    assert_eq!(
+        c.witness.len(),
+        2,
+        "one edge per direction: {:#?}",
+        c.witness
+    );
+    let want = [
+        (
+            "orders::api::checkout",
+            "billing::charge::charge",
+            (0, 1),
+            "orders/api.py",
+            "checkout",
+            "charge",
+        ),
+        (
+            "billing::charge::refund",
+            "orders::repo::reopen",
+            (1, 0),
+            "billing/charge.py",
+            "refund",
+            "reopen",
+        ),
+    ];
+    for (w, (from, to, parts, file, caller, callee)) in c.witness.iter().zip(want) {
+        assert_eq!((w.from_qname.as_str(), w.to_qname.as_str()), (from, to));
+        assert_eq!((w.from_part, w.to_part), parts);
+        assert_eq!(w.category, "CALLS");
+        assert_eq!(w.file.as_deref(), Some(file));
+        assert_eq!(w.line, Some(call_line(&source_of(file), caller, callee)));
+        assert_eq!(w.basis, Some("site"));
+    }
+
+    // Without refund's call the parts depend one way only.
+    let one_way: Vec<(Site, Site)> = CROSSING
+        .iter()
+        .copied()
+        .filter(|((_, _, f), _)| *f != "refund")
+        .collect();
+    let (_tmp2, m2, labels2) = fixture_with(&one_way);
+    let b = run(&m2, &labels2, |_| {});
+    assert!(b.absence.is_none(), "{:?}", b.absence);
+    assert_eq!(b.parts.len(), 2);
+    assert!(b.cycles.is_empty(), "{:#?}", b.cycles);
+    assert_eq!(b.shared_writes.len(), 1, "the blockers are independent");
+}
+
+#[test]
+fn st_mode() {
+    let (_tmp, m, labels) = fixture();
+    let a = run_st(&m, &labels, ST_SOURCE, ST_SINK);
+    assert!(a.absence.is_none(), "{:?}", a.absence);
+    assert_eq!((a.mode, a.quotient, a.tier), ("st", "module", "heuristic"));
+    assert_eq!(a.units, 9);
+    assert_eq!(a.parts.len(), 2);
+    assert!(
+        a.parts[0].modules.iter().any(|q| q == "orders::api"),
+        "part 0 is the source side: {a:#?}"
+    );
+    assert!(a.parts[1].modules.iter().any(|q| q == "billing::ledger"));
+    assert_eq!(
+        a.cut_weight,
+        brute_st_min(&m, &["orders::api"], &["billing::ledger"]),
+        "the least cut between the two modules, by enumeration"
+    );
+    let (weight, edges) = crossing(&m, &a);
+    assert_eq!((a.cut_weight, a.cut_edges_total), (weight, edges));
+    let global = run(&m, &labels, |_| {});
+    assert_eq!(a.global_min_weight, global.global_min_weight);
+    assert!(a.balanced, "14 nodes against 12");
+    assert_eq!((a.shared_writes.len(), a.cycles.len()), (1, 1));
+    assert_eq!(a.arch.len(), 2);
+
+    // A path side is every unit with a member under it; part 0 keeps the
+    // source side even when it is the smaller one.
+    let b = run_st(&m, &labels, "billing", "orders/api.py");
+    assert!(b.absence.is_none(), "{:?}", b.absence);
+    assert_eq!(b.mode, "st");
+    assert_eq!(b.parts[0].modules, modules_of("billing", &BILLING, ""));
+    assert!(b.parts[1].modules.iter().any(|q| q == "orders::api"));
+    let billing = modules_of("billing", &BILLING, "");
+    let billing: Vec<&str> = billing.iter().map(String::as_str).collect();
+    assert_eq!(b.cut_weight, brute_st_min(&m, &billing, &["orders::api"]));
+    let (weight, edges) = crossing(&m, &b);
+    assert_eq!((b.cut_weight, b.cut_edges_total), (weight, edges));
+
+    // The anchored question is not the global one: separating util/ from
+    // orders.cart cuts the leaf, not the seam, and says it is unbalanced.
+    let c = run_st(&m, &labels, "util", "orders::cart::total");
+    assert!(c.absence.is_none(), "{:?}", c.absence);
+    assert_eq!(c.parts[0].modules, ["util::fmt"]);
+    assert_eq!(c.parts[0].nodes, 2);
+    assert_eq!(
+        c.cut_weight,
+        brute_st_min(&m, &["util::fmt"], &["orders::cart"])
     );
     assert!(
-        stderr.lines().any(|l| l == want),
-        "no `{want}` on the child's stderr:\n{stderr}"
+        c.cut_weight < a.cut_weight,
+        "{} vs {}",
+        c.cut_weight,
+        a.cut_weight
     );
+    assert_eq!(
+        c.global_min_weight, c.cut_weight,
+        "the leaf is the global minimum"
+    );
+    assert!(!c.balanced, "2 of 26 nodes is under the 0.1 floor");
+    assert!(c.cycles.is_empty(), "util/ never calls back into orders/");
+    assert!(c.shared_writes.is_empty(), "util/ touches no table");
+}
+
+#[test]
+fn st_overlap_is_an_absence() {
+    let (_tmp, m, labels) = fixture();
+    let a = run_st(&m, &labels, ST_SOURCE, "orders::api::checkout");
+    assert_eq!(a.mode, "st");
+    assert!(a.parts.is_empty() && a.cut_edges.is_empty());
+    assert!(a.shared_writes.is_empty() && a.cycles.is_empty());
+    let why = a.absence.as_ref().expect("one module on both sides");
+    assert_eq!(why.reason, "no_match");
+    assert!(why.note.contains("share"), "{}", why.note);
+    assert!(why.note.contains("orders::api"), "{}", why.note);
+
+    // A side that names nothing, and a side left out.
+    let b = run_st(&m, &labels, ST_SOURCE, "nowhere::at_all");
+    let why = b.absence.as_ref().expect("an unknown sink");
+    assert_eq!(why.reason, "no_match");
+    assert!(
+        why.note.starts_with("sink `nowhere::at_all`"),
+        "{}",
+        why.note
+    );
+    let c = run(&m, &labels, |a| a.source = Some(ST_SOURCE.to_string()));
+    assert_eq!(c.mode, "st");
+    let why = c.absence.as_ref().expect("no sink");
+    assert_eq!(why.reason, "no_match");
+    assert!(why.note.contains("sink"), "{}", why.note);
 }

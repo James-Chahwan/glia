@@ -64,29 +64,70 @@
 //! `spans_services` (two or more), `unplaced` (no located member). Every part
 //! is tier [`HEURISTIC`]: a suggested cut, never a verdict.
 //!
+//! ANCHORED (CD.2c). With [`SplitArgs::source`] or [`SplitArgs::sink`] set
+//! the mode is `st`: "separate this from that at the least coupling", a
+//! minimum s-t cut (`algo::cut::min_st_cut`, Dinic) on the same unit graph,
+//! which Stoer-Wagner cannot answer. Each side is read as a path (or project
+//! label, `answers::resolve_scope`) when a located member sits under it, and
+//! is then every unit with such a member (`services/payments`, `orders`,
+//! `orders/api.py`); otherwise as the node it names (`answers::resolve_seed`,
+//! preferring one under the scope), whose unit is its own or, for a node
+//! outside the quotient, its enclosing MODULE's. Both sides must be set, name
+//! a unit and share none. The answer has two parts: part 0 is the source side
+//! (the residual source-reachable units), part 1 the rest, whatever their
+//! sizes; [`SplitArgs::parts`] is not read. `global_min_weight` is still the
+//! scope's Stoer-Wagner minimum, and `balanced` says the smaller side holds
+//! at least [`SplitArgs::min_share`] of the nodes. Everything else (cut
+//! edges, parts, the arch diff) is the global mode's.
+//!
+//! THE BLOCKERS (CD.2c), computed in both modes over the final parts. What
+//! stops a split once the cut is drawn:
+//! - `shared_writes`: a data node (the `db` kinds above, which never join
+//!   the quotient) that members of two or more parts access over
+//!   ACCESSES_DATA, where at least two parts write it or may. Per part the
+//!   LE.4a ACCESS_MODE cells of its accessing edges fold: read + write is
+//!   `read_write`; an edge with no cell is `unknown`, which never reads as a
+//!   read (read + unknown stays `unknown`; write + unknown is `write`, a
+//!   write is known). A part counts as writing when its mode is not `read`.
+//!   `writers` are the members whose access is not a known read, by part
+//!   then qname, the first [`MAX_WRITERS`]. Tier [`DERIVED`] when no part's
+//!   mode is `unknown`, else [`HEURISTIC`]. Rows sort by parts, then writers,
+//!   descending, then entity qname. The SQL verb at the access site is all
+//!   that is read: nothing here follows a value.
+//! - `cycles`: the parts as a directed graph, one synthetic node per part
+//!   and one edge per direction any carry edge (the domain's
+//!   `carry_edges`) between two members of two parts runs, fed to
+//!   `algo::cycles::strongly_connected`. Each non-trivial component is a
+//!   [`PartCycle`]: its parts, and per direction inside it the heaviest such
+//!   edge (community weight, then the cut-edge order), located as a cut edge
+//!   is. Tier [`DERIVED`]: every witness is an edge the graph holds.
+//!
 //! EMPTY. An unknown quotient name, fewer than two units, or more than
 //! [`MAX_UNITS`] (Stoer-Wagner is O(V E log V) and its phase sides hold
 //! O(V^2) ids: CD.2a measured ~5 s and ~50 MB at 5,000 units, over a minute
 //! and 800 MB at 20,000) is an absence `no_match` through `absence::empty`,
-//! with no cut.
+//! with no cut; so, in the `st` mode, is a side not set, a side that names no
+//! unit, or two sides sharing a unit (the note names the side).
 //!
 //! fired_on marker, once per call:
-//! `[splits] mode=global quotient=<module|community> units=<U> parts=<P> cut_weight=<W> global_min=<G> balanced=<true|false> cut_edges=<E> surface=<engine|cli|py>`
+//! `[splits] mode=<global|st> quotient=<module|community> units=<U> parts=<P> cut_weight=<W> global_min=<G> balanced=<true|false> cut_edges=<E> shared_writes=<S> part_cycles=<C> surface=<engine|cli|py>`
 //! (`cut_edges` is `cut_edges_total`; `quotient=none` when the name was
 //! refused).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_activation::algo::community::{CommunityOptions, Resolution, WeightedGraph};
-use glia_activation::algo::cut::stoer_wagner;
+use glia_activation::algo::cut::{min_st_cut, stoer_wagner};
+use glia_activation::algo::cycles::strongly_connected;
+use glia_activation::algo::{Adjacency, CategorySet, GraphSource};
 use glia_code_domain::evidence::{Basis, Evidence};
-use glia_code_domain::{edge_category, node_kind};
-use glia_core::{Edge, NodeId, NodeKindId};
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, Confidence, Edge, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
 use glia_graph::roles::roles_in;
 
 use crate::absence::{self, Absence};
-use crate::answers::{Located, Locator, in_scope, is_declared_entry, resolve_scope};
+use crate::answers::{Located, Locator, in_scope, is_declared_entry, resolve_scope, resolve_seed};
 use crate::arch::{default_keying, service_of};
 use crate::communities::{self, partition_of};
 use crate::profile::CODE_PROFILE;
@@ -107,13 +148,22 @@ pub const MAX_UNITS: usize = 5_000;
 pub const MAX_MODULES: usize = 20;
 /// Top members listed per part at most.
 pub const TOP_MEMBERS: usize = 10;
-/// [`SplitAnswer::tier`].
+/// [`SplitAnswer::tier`]; a [`SharedWrite`] with an `unknown` mode.
 pub const HEURISTIC: &str = "heuristic";
+/// A [`SharedWrite`] whose every mode is known; every [`PartCycle`].
+pub const DERIVED: &str = "derived";
+/// [`SharedWrite::writers`] listed at most.
+pub const MAX_WRITERS: usize = 5;
 /// [`SplitArgs::surface`] when the engine is called directly.
 pub const SURFACE_ENGINE: &str = "engine";
 
 const PRIMITIVE: &str = "splits";
 const MODE_GLOBAL: &str = "global";
+const MODE_ST: &str = "st";
+/// A part's access mode when no accessing edge carries one it can fold.
+const UNKNOWN: &str = "unknown";
+/// Units a side's `share` absence note names at most.
+const MAX_NOTED_UNITS: usize = 5;
 const QUOTIENT_MODULE: &str = "module";
 const QUOTIENT_COMMUNITY: &str = "community";
 /// The effect-sink class whose kinds are data nodes.
@@ -146,6 +196,12 @@ pub struct SplitArgs {
     /// Who asked, for the marker: [`SURFACE_ENGINE`], `cli` or `py` (empty
     /// reads as [`SURFACE_ENGINE`]).
     pub surface: &'static str,
+    /// The s-t mode's source side: a path or project label, else a node's
+    /// qname or name (see the module doc). Either of `source` / `sink` set
+    /// selects the s-t mode, which needs both.
+    pub source: Option<String>,
+    /// The s-t mode's sink side, read as [`Self::source`] is.
+    pub sink: Option<String>,
 }
 
 impl Default for SplitArgs {
@@ -158,6 +214,8 @@ impl Default for SplitArgs {
             seed: DEFAULT_SEED,
             max_cut_edges: DEFAULT_MAX_CUT_EDGES,
             surface: SURFACE_ENGINE,
+            source: None,
+            sink: None,
         }
     }
 }
@@ -211,48 +269,90 @@ pub struct ArchDiff {
     pub verdict: &'static str,
 }
 
+/// A data node two or more parts write, or may write (see the module doc).
+#[non_exhaustive]
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct SharedWrite {
+    pub entity: Located,
+    /// The entity's node kind (`DATA_ENTITY`, `DATABASE`, ...).
+    pub kind: &'static str,
+    /// The parts whose members access it, ascending.
+    pub parts: Vec<u32>,
+    /// Per part in `parts`: `read` | `write` | `read_write` | `unknown`.
+    pub modes: Vec<(u32, &'static str)>,
+    /// The first [`MAX_WRITERS`] members whose access is not a known read, by
+    /// part then qname.
+    pub writers: Vec<Located>,
+    /// Members whose access is not a known read.
+    pub writers_total: usize,
+    /// [`DERIVED`] when no mode is `unknown`, else [`HEURISTIC`].
+    pub tier: &'static str,
+}
+
+/// Parts that depend on each other both ways: a distributed cycle once split.
+#[non_exhaustive]
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct PartCycle {
+    /// Two or more parts, ascending.
+    pub parts: Vec<u32>,
+    /// Per direction between two of `parts`, the heaviest carry edge that way,
+    /// by (from part, to part).
+    pub witness: Vec<CutEdge>,
+    /// Always [`DERIVED`].
+    pub tier: &'static str,
+}
+
 /// The splits answer.
 #[non_exhaustive]
 #[derive(serde::Serialize, Clone, Debug)]
 pub struct SplitAnswer {
-    /// `global`.
+    /// `global`, or `st` when a source or sink was given.
     pub mode: &'static str,
     /// `module` or `community` (`none` when the name was refused).
     pub quotient: &'static str,
     /// Units in scope.
     pub units: usize,
-    /// In id order; empty iff `absence`.
+    /// In id order; empty iff `absence`. Under `st`, part 0 is the source
+    /// side.
     pub parts: Vec<SplitPart>,
     /// Summed community weight of every edge between two parts.
     pub cut_weight: u64,
     /// The whole scope's Stoer-Wagner minimum cut weight.
     pub global_min_weight: u64,
-    /// Every bisection cleared the balance floor.
+    /// `global`: every bisection cleared the balance floor. `st`: the
+    /// smaller side holds at least [`SplitArgs::min_share`] of the nodes.
     pub balanced: bool,
     /// Edges between two parts.
     pub cut_edges_total: usize,
     /// The first [`SplitArgs::max_cut_edges`] of them.
     pub cut_edges: Vec<CutEdge>,
     pub arch: Vec<ArchDiff>,
+    /// Data nodes two or more parts write (see the module doc).
+    pub shared_writes: Vec<SharedWrite>,
+    /// Parts that depend on each other both ways.
+    pub cycles: Vec<PartCycle>,
     /// Always [`HEURISTIC`].
     pub tier: &'static str,
     pub absence: Option<Absence>,
 }
 
 /// Suggest where `args.scope` of the code graph splits into
-/// [`SplitArgs::parts`] services. `repo_labels` name the services exactly as
-/// `glia arch` names them (`GenerateResult::repo_labels`).
+/// [`SplitArgs::parts`] services, or, with a source or sink, where it
+/// separates the two at the least coupling; with the blockers either way.
+/// `repo_labels` name the services exactly as `glia arch` names them
+/// (`GenerateResult::repo_labels`).
 pub fn splits(
     merged: &MergedGraph,
     repo_labels: &BTreeMap<u64, String>,
     args: &SplitArgs,
 ) -> SplitAnswer {
+    let mode = mode_of(args);
     let Some(quotient) = quotient_name(&args.quotient) else {
         let note = format!(
             "no split quotient is named `{}`; use module or community",
             args.quotient.trim()
         );
-        return finish(empty(merged, args, "none", 0, note), args);
+        return finish(empty(merged, args, mode, "none", 0, note), args);
     };
     let loc = Locator::new(merged);
     let scope = args.scope.as_deref().map(|s| resolve_scope(merged, s));
@@ -275,7 +375,7 @@ pub fn splits(
                 "too many units ({units}) for Stoer-Wagner (at most {MAX_UNITS}); narrow --scope"
             )
         };
-        return finish(empty(merged, args, quotient, units, note), args);
+        return finish(empty(merged, args, mode, quotient, units, note), args);
     }
 
     let mut unit_nodes = vec![0usize; units];
@@ -289,13 +389,26 @@ pub fn splits(
         .filter(|&(a, b, _)| a != b)
         .collect();
     let unit_graph = WeightedGraph::from_pairs(units, &pairs);
-    let cut = cut_units(
-        &unit_graph,
-        &unit_nodes,
-        args.parts.clamp(2, MAX_PARTS),
-        min_share(args.min_share),
-    );
-    let parts = number_parts(cut.parts, &unit_nodes, &q.unit_labels);
+    let cut = if mode == MODE_ST {
+        match anchored(merged, &q, &unit_graph, &unit_nodes, args) {
+            Ok(cut) => cut,
+            Err(note) => {
+                return finish(empty(merged, args, mode, quotient, units, note), args);
+            }
+        }
+    } else {
+        let cut = cut_units(
+            &unit_graph,
+            &unit_nodes,
+            args.parts.clamp(2, MAX_PARTS),
+            min_share(args.min_share),
+        );
+        UnitCut {
+            parts: number_parts(cut.parts, &unit_nodes, &q.unit_labels),
+            ..cut
+        }
+    };
+    let parts = cut.parts;
     let mut part_of_unit = vec![0u32; units];
     for (p, us) in parts.iter().enumerate() {
         for &u in us {
@@ -307,9 +420,11 @@ pub fn splits(
     let (cut_weight, cut_edges_total, cut_edges) = cut_edges(&q, &part, &loc, args.max_cut_edges);
     let split_parts = describe_parts(merged, &q, &part, &parts, &loc, repo_labels);
     let arch = arch_diff(&split_parts);
+    let shared_writes = shared_writes(merged, &q, &part, &loc);
+    let cycles = part_cycles(merged, &q, &part, parts.len(), &loc);
     finish(
         SplitAnswer {
-            mode: MODE_GLOBAL,
+            mode,
             quotient,
             units,
             parts: split_parts,
@@ -319,11 +434,22 @@ pub fn splits(
             cut_edges_total,
             cut_edges,
             arch,
+            shared_writes,
+            cycles,
             tier: HEURISTIC,
             absence: None,
         },
         args,
     )
+}
+
+/// `st` when a source or a sink is set, else `global`.
+fn mode_of(args: &SplitArgs) -> &'static str {
+    if args.source.is_some() || args.sink.is_some() {
+        MODE_ST
+    } else {
+        MODE_GLOBAL
+    }
 }
 
 /// The quotient `name` names (ASCII case and surrounding space ignored; empty
@@ -888,6 +1014,117 @@ fn refine(sub: &WeightedGraph, nodes: &[usize], side: &mut [bool], floor: f64) {
     }
 }
 
+/// The s-t cut between the two sides of `args` on the unit graph `g`: part 0
+/// the source side, part 1 the rest (see the module doc). `Err` is the
+/// absence note.
+fn anchored(
+    merged: &MergedGraph,
+    q: &Quotient<'_>,
+    g: &WeightedGraph,
+    unit_nodes: &[usize],
+    args: &SplitArgs,
+) -> Result<UnitCut, String> {
+    let (Some(source), Some(sink)) = (args.source.as_deref(), args.sink.as_deref()) else {
+        let missing = if args.source.is_none() {
+            "source"
+        } else {
+            "sink"
+        };
+        return Err(format!(
+            "an s-t split needs both a source and a sink; the {missing} is not set"
+        ));
+    };
+    let first = first_graphs(merged);
+    let side = |which: &str, raw: &str| {
+        side_units(merged, q, &first, raw, args.scope.as_deref()).ok_or_else(|| {
+            format!(
+                "{which} `{}` names no unit in scope: no member is located under it as a path, and no node it names has a unit",
+                raw.trim()
+            )
+        })
+    };
+    let sources = side("source", source)?;
+    let sinks = side("sink", sink)?;
+    let shared: Vec<&str> = sources
+        .iter()
+        .filter(|u| sinks.binary_search(u).is_ok())
+        .map(|&u| q.unit_labels[u as usize])
+        .collect();
+    if !shared.is_empty() {
+        let more = shared.len().saturating_sub(MAX_NOTED_UNITS);
+        let tail = if more > 0 {
+            format!(" (+{more} more)")
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "source `{}` and sink `{}` share {} unit(s): {}{tail}",
+            source.trim(),
+            sink.trim(),
+            shared.len(),
+            shared[..shared.len().min(MAX_NOTED_UNITS)].join(", ")
+        ));
+    }
+    let Some(st) = min_st_cut(g, &sources, &sinks) else {
+        return Err(format!(
+            "no s-t cut separates source `{}` from sink `{}`",
+            source.trim(),
+            sink.trim()
+        ));
+    };
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    for (u, &on_source) in st.source_side.iter().enumerate() {
+        if on_source {
+            a.push(u as u32);
+        } else {
+            b.push(u as u32);
+        }
+    }
+    let total: usize = unit_nodes.iter().sum();
+    let side_nodes: usize = a.iter().map(|&u| unit_nodes[u as usize]).sum();
+    let small = side_nodes.min(total - side_nodes);
+    let balanced = small > 0 && small as f64 >= min_share(args.min_share) * total as f64;
+    Ok(UnitCut {
+        parts: vec![a, b],
+        global_min: stoer_wagner(g).map_or(0, |c| c.weight),
+        balanced,
+    })
+}
+
+/// The units one side of an s-t split names, sorted: every unit with a
+/// member located under `raw` read as a path or project label, else the unit
+/// of the node `raw` names (`resolve_seed`, preferring one under `scope`),
+/// else of that node's enclosing MODULE. `None` when neither reading names a
+/// unit.
+fn side_units(
+    merged: &MergedGraph,
+    q: &Quotient<'_>,
+    first: &HashMap<NodeId, usize>,
+    raw: &str,
+    scope: Option<&str>,
+) -> Option<Vec<u32>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = resolve_scope(merged, raw);
+    let by_path: BTreeSet<u32> = q
+        .members
+        .iter()
+        .zip(&q.unit)
+        .filter(|(m, _)| m.file.as_deref().is_some_and(|f| in_scope(f, &path)))
+        .map(|(_, &u)| u)
+        .collect();
+    if !by_path.is_empty() {
+        return Some(by_path.into_iter().collect());
+    }
+    let unit_of = |id: NodeId| q.members.iter().position(|m| m.id == id).map(|i| q.unit[i]);
+    let id = resolve_seed(merged, raw, scope)?;
+    let unit = unit_of(id)
+        .or_else(|| module_of(merged, first, id).and_then(|(module, _, _)| unit_of(module)))?;
+    Some(vec![unit])
+}
+
 /// The parts in id order: nodes descending, then smallest unit label, then
 /// smallest unit.
 fn number_parts(mut parts: Vec<Vec<u32>>, unit_nodes: &[usize], labels: &[&str]) -> Vec<Vec<u32>> {
@@ -935,22 +1172,265 @@ fn cut_edges(
     let listed = crossing
         .into_iter()
         .take(take)
-        .map(|&(a, b, w, e)| {
-            let (file, line, basis) = site_of(loc, e);
-            CutEdge {
-                from_qname: q.members[a as usize].qname.to_string(),
-                to_qname: q.members[b as usize].qname.to_string(),
-                category: edge_category::name(e.category),
-                from_part: part[a as usize],
-                to_part: part[b as usize],
-                weight: w,
-                file,
-                line,
-                basis,
-            }
-        })
+        .map(|&(a, b, w, e)| cut_edge(q, part, loc, (a, b, w, e)))
         .collect();
     (weight, total, listed)
+}
+
+/// The edge `e` from member `a` to member `b`, of community weight `w`,
+/// located at its evidence site.
+fn cut_edge(q: &Quotient<'_>, part: &[u32], loc: &Locator<'_>, link: Link<'_>) -> CutEdge {
+    let (a, b, w, e) = link;
+    let (file, line, basis) = site_of(loc, e);
+    CutEdge {
+        from_qname: q.members[a as usize].qname.to_string(),
+        to_qname: q.members[b as usize].qname.to_string(),
+        category: edge_category::name(e.category),
+        from_part: part[a as usize],
+        to_part: part[b as usize],
+        weight: w,
+        file,
+        line,
+        basis,
+    }
+}
+
+/// Each member's index in `q`.
+fn member_index(q: &Quotient<'_>) -> HashMap<NodeId, u32> {
+    q.members
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (m.id, i as u32))
+        .collect()
+}
+
+/// The kind of `id` in the first graph naming it.
+fn kind_of(merged: &MergedGraph, id: NodeId) -> Option<NodeKindId> {
+    merged
+        .graphs
+        .iter()
+        .find_map(|g| g.nav.kind_by_id.get(&id).copied())
+}
+
+/// The ACCESS_MODE an edge carries (LE.4a), as its `'static` spelling.
+fn access_mode(e: &Edge) -> Option<&'static str> {
+    let cell = e.cell(cell_type::ACCESS_MODE)?;
+    let (CellPayload::Text(t) | CellPayload::Json(t)) = &cell.payload else {
+        return None;
+    };
+    ["read", "write", "read_write"]
+        .into_iter()
+        .find(|m| *m == t.as_str())
+}
+
+/// How one part accesses one data node, over every accessing edge.
+#[derive(Default, Clone, Copy)]
+struct Access {
+    read: bool,
+    write: bool,
+    /// An edge with no ACCESS_MODE it can read.
+    unknown: bool,
+}
+
+impl Access {
+    fn add(&mut self, mode: Option<&str>) {
+        match mode {
+            Some("read") => self.read = true,
+            Some("write") => self.write = true,
+            Some(_) => {
+                self.read = true;
+                self.write = true;
+            }
+            None => self.unknown = true,
+        }
+    }
+
+    /// The folded mode: read + write is `read_write`, and an unknown edge
+    /// never reads as a read (see the module doc).
+    fn mode(self) -> &'static str {
+        match (self.read, self.write, self.unknown) {
+            (true, true, _) => "read_write",
+            (false, true, _) => "write",
+            (true, false, false) => "read",
+            (_, false, _) => UNKNOWN,
+        }
+    }
+}
+
+/// Per data node: its parts' accesses, and its possible writers as `(part,
+/// qname, member)`.
+type DataAccess<'g> = (BTreeMap<u32, Access>, BTreeSet<(u32, &'g str, u32)>);
+
+/// The data nodes two or more parts write or may write (see the module doc).
+fn shared_writes(
+    merged: &MergedGraph,
+    q: &Quotient<'_>,
+    part: &[u32],
+    loc: &Locator<'_>,
+) -> Vec<SharedWrite> {
+    let data = data_kinds();
+    let at = member_index(q);
+    let mut kinds: HashMap<NodeId, Option<NodeKindId>> = HashMap::new();
+    let mut by_entity: HashMap<NodeId, DataAccess<'_>> = HashMap::new();
+    for e in merged.all_edges() {
+        if e.category != edge_category::ACCESSES_DATA {
+            continue;
+        }
+        let Some(&m) = at.get(&e.from) else {
+            continue;
+        };
+        let kind = *kinds.entry(e.to).or_insert_with(|| kind_of(merged, e.to));
+        if !kind.is_some_and(|k| data.contains(&k)) {
+            continue;
+        }
+        let p = part[m as usize];
+        let mode = access_mode(e);
+        let (parts, writers) = by_entity.entry(e.to).or_default();
+        parts.entry(p).or_default().add(mode);
+        if mode != Some("read") {
+            writers.insert((p, q.members[m as usize].qname, m));
+        }
+    }
+    let mut rows: Vec<SharedWrite> = by_entity
+        .into_iter()
+        .filter_map(|(entity, (parts, writers))| {
+            let modes: Vec<(u32, &'static str)> =
+                parts.iter().map(|(&p, a)| (p, a.mode())).collect();
+            let writing = modes.iter().filter(|(_, m)| *m != "read").count();
+            if modes.len() < 2 || writing < 2 {
+                return None;
+            }
+            let tier = if modes.iter().any(|(_, m)| *m == UNKNOWN) {
+                HEURISTIC
+            } else {
+                DERIVED
+            };
+            Some(SharedWrite {
+                entity: loc.locate(entity),
+                kind: kinds
+                    .get(&entity)
+                    .copied()
+                    .flatten()
+                    .map_or("UNKNOWN", node_kind::name),
+                parts: parts.keys().copied().collect(),
+                modes,
+                writers: writers
+                    .iter()
+                    .take(MAX_WRITERS)
+                    .map(|&(_, _, m)| loc.locate(q.members[m as usize].id))
+                    .collect(),
+                writers_total: writers.len(),
+                tier,
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        b.parts
+            .len()
+            .cmp(&a.parts.len())
+            .then(b.writers_total.cmp(&a.writers_total))
+            .then(a.entity.qname.cmp(&b.entity.qname))
+            .then(a.entity.id.cmp(&b.entity.id))
+    });
+    rows
+}
+
+/// The parts as a graph over synthetic ids: part `p` is `NodeId(p)`, one edge
+/// per direction between two parts.
+struct PartGraph {
+    nodes: Vec<NodeId>,
+    edges: Vec<Edge>,
+}
+
+impl GraphSource for PartGraph {
+    fn node_ids(&self) -> Vec<NodeId> {
+        self.nodes.clone()
+    }
+
+    fn edges(&self) -> Box<dyn Iterator<Item = &Edge> + '_> {
+        Box::new(self.edges.iter())
+    }
+}
+
+/// `x` goes before `y` in the cut-edge order: heavier, then category name,
+/// then from qname, then to qname.
+fn heavier(q: &Quotient<'_>, x: &Link<'_>, y: &Link<'_>) -> bool {
+    let key = |l: &Link<'_>| {
+        (
+            std::cmp::Reverse(l.2),
+            edge_category::name(l.3.category),
+            q.members[l.0 as usize].qname,
+            q.members[l.1 as usize].qname,
+        )
+    };
+    key(x) < key(y)
+}
+
+/// The cycles between `parts` parts (see the module doc).
+fn part_cycles(
+    merged: &MergedGraph,
+    q: &Quotient<'_>,
+    part: &[u32],
+    parts: usize,
+    loc: &Locator<'_>,
+) -> Vec<PartCycle> {
+    let tables = &CODE_PROFILE.tables;
+    let carry = CategorySet::of(tables.carry_edges);
+    let at = member_index(q);
+    // (from part, to part) -> the heaviest carry edge that way; the first in
+    // edge order wins a full tie.
+    let mut heaviest: BTreeMap<(u32, u32), Link<'_>> = BTreeMap::new();
+    for e in merged.all_edges() {
+        if !carry.contains(e.category) {
+            continue;
+        }
+        let (Some(&a), Some(&b)) = (at.get(&e.from), at.get(&e.to)) else {
+            continue;
+        };
+        let (pa, pb) = (part[a as usize], part[b as usize]);
+        if pa == pb {
+            continue;
+        }
+        let link: Link<'_> = (a, b, tables.community_weight(e.category), e);
+        let slot = heaviest.entry((pa, pb)).or_insert(link);
+        if heavier(q, &link, slot) {
+            *slot = link;
+        }
+    }
+    if heaviest.len() < 2 {
+        return Vec::new();
+    }
+    let graph = PartGraph {
+        nodes: (0..parts as u64).map(NodeId).collect(),
+        edges: heaviest
+            .iter()
+            .map(|(&(a, b), l)| {
+                Edge::new(
+                    NodeId(u64::from(a)),
+                    NodeId(u64::from(b)),
+                    l.3.category,
+                    Confidence::Strong,
+                )
+            })
+            .collect(),
+    };
+    let adj = Adjacency::build(&graph, &CategorySet::all());
+    strongly_connected(&adj)
+        .into_iter()
+        .map(|comp| {
+            let ps: Vec<u32> = comp.iter().map(|id| id.0 as u32).collect();
+            let witness = heaviest
+                .iter()
+                .filter(|((a, b), _)| ps.binary_search(a).is_ok() && ps.binary_search(b).is_ok())
+                .map(|(_, &l)| cut_edge(q, part, loc, l))
+                .collect();
+            PartCycle {
+                parts: ps,
+                witness,
+                tier: DERIVED,
+            }
+        })
+        .collect()
 }
 
 /// Where `e` is asserted: its EVIDENCE site (the one 0-based to 1-based step
@@ -1124,12 +1604,19 @@ fn query(args: &SplitArgs) -> String {
         .as_deref()
         .map(|s| format!(" scope={s}"))
         .unwrap_or_default();
+    let anchor = |name: &str, side: &Option<String>| {
+        side.as_deref()
+            .map(|s| format!(" {name}={}", s.trim()))
+            .unwrap_or_default()
+    };
     format!(
-        "quotient={} parts={} min_share={} seed={}{scope}",
+        "quotient={} parts={} min_share={} seed={}{scope}{}{}",
         args.quotient.trim(),
         args.parts,
         args.min_share,
-        args.seed
+        args.seed,
+        anchor("source", &args.source),
+        anchor("sink", &args.sink),
     )
 }
 
@@ -1137,6 +1624,7 @@ fn query(args: &SplitArgs) -> String {
 fn empty(
     merged: &MergedGraph,
     args: &SplitArgs,
+    mode: &'static str,
     quotient: &'static str,
     units: usize,
     note: String,
@@ -1157,7 +1645,7 @@ fn empty(
         None,
     );
     SplitAnswer {
-        mode: MODE_GLOBAL,
+        mode,
         quotient,
         units,
         parts: Vec::new(),
@@ -1167,12 +1655,14 @@ fn empty(
         cut_edges_total: 0,
         cut_edges: Vec::new(),
         arch: Vec::new(),
+        shared_writes: Vec::new(),
+        cycles: Vec::new(),
         tier: HEURISTIC,
         absence: Some(absence),
     }
 }
 
-/// Print the CD.2b fired_on line and hand the answer back.
+/// Print the CD.2b / CD.2c fired_on line and hand the answer back.
 fn finish(a: SplitAnswer, args: &SplitArgs) -> SplitAnswer {
     let surface = if args.surface.is_empty() {
         SURFACE_ENGINE
@@ -1180,7 +1670,7 @@ fn finish(a: SplitAnswer, args: &SplitArgs) -> SplitAnswer {
         args.surface
     };
     eprintln!(
-        "[splits] mode={} quotient={} units={} parts={} cut_weight={} global_min={} balanced={} cut_edges={} surface={surface}",
+        "[splits] mode={} quotient={} units={} parts={} cut_weight={} global_min={} balanced={} cut_edges={} shared_writes={} part_cycles={} surface={surface}",
         a.mode,
         a.quotient,
         a.units,
@@ -1189,6 +1679,8 @@ fn finish(a: SplitAnswer, args: &SplitArgs) -> SplitAnswer {
         a.global_min_weight,
         a.balanced,
         a.cut_edges_total,
+        a.shared_writes.len(),
+        a.cycles.len(),
     );
     a
 }
@@ -1299,6 +1791,25 @@ mod tests {
         let mut unit = vec![Some(0), Some(1), None, None, None];
         attach(&mut unit, &edges);
         assert_eq!(unit, [Some(0), Some(1), Some(0), Some(0), None]);
+    }
+
+    #[test]
+    fn access_modes_fold_and_unknown_never_reads() {
+        let fold = |modes: &[Option<&str>]| {
+            let mut a = Access::default();
+            for &m in modes {
+                a.add(m);
+            }
+            a.mode()
+        };
+        assert_eq!(fold(&[Some("read")]), "read");
+        assert_eq!(fold(&[Some("write"), Some("write")]), "write");
+        assert_eq!(fold(&[Some("read"), Some("write")]), "read_write");
+        assert_eq!(fold(&[Some("read_write")]), "read_write");
+        assert_eq!(fold(&[None]), UNKNOWN);
+        assert_eq!(fold(&[Some("read"), None]), UNKNOWN, "never a read");
+        assert_eq!(fold(&[Some("write"), None]), "write");
+        assert_eq!(fold(&[]), UNKNOWN);
     }
 
     #[test]
