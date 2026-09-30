@@ -8,11 +8,13 @@ files, renames, binary, blame_files, runs}; it raises ValueError when the sync
 fails. The next generate() ingests the snapshot (CO_CHANGES). Needs a `git`
 binary.
 
-`tests_ingest(repo_path, junit=None, logs=None, lcov=None, run=None)` reads
-one CI run's JUnit XML / CI logs / lcov and writes
-`<repo>/.glia/test-snapshot/`; it returns a native dict (the TestsSummary,
-skipped reports in `report_errors`) and raises ValueError when no report is
-given or none could be read. Shared helpers: test_build.py."""
+`tests_ingest(repo_path, junit=None, logs=None, lcov=None, run=None,
+window=10, reset=False)` reads one CI run's JUnit XML / CI logs / lcov and
+adds it as the newest run of `<repo>/.glia/test-snapshot/`, which keeps the
+last `window` runs (CC.9b; `reset` starts over at seq 0); it returns a native
+dict (the TestsSummary, `runs` / `seq` for the window, skipped reports in
+`report_errors`) and raises ValueError when no report is given, none could be
+read or `window` is 0. Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import json
@@ -71,14 +73,15 @@ LCOV = "TN:\nSF:app.py\nDA:1,1\nDA:2,0\nend_of_record\n"
 CI_LOG = "FAILED tests/test_app.py::test_boom - ValueError: boom\n"
 TESTS_SNAPSHOT_FILES = ["cases.jsonl", "lcov.jsonl", "meta.json"]
 TESTS_SUMMARY_KEYS = ["reports", "junit_files", "log_files", "lcov_files", "cases", "failed", "errors",
-                      "skipped", "passed", "stored", "redacted", "covered_files", "report_errors"]
+                      "skipped", "passed", "stored", "redacted", "covered_files", "runs", "seq", "report_errors"]
 
 
 def check_tests_ingest(c: Checks) -> None:
     """LF.6d: tests_ingest over reports written outside a one-file repo."""
     c.check("tests_ingest signature",
             getattr(rg, "tests_ingest", None) is not None
-            and rg.tests_ingest.__text_signature__ == "(repo_path, junit=None, logs=None, lcov=None, run=None)",
+            and rg.tests_ingest.__text_signature__
+            == "(repo_path, junit=None, logs=None, lcov=None, run=None, window=10, reset=False)",
             getattr(getattr(rg, "tests_ingest", None), "__text_signature__", "missing"))
     if getattr(rg, "tests_ingest", None) is None:
         return
@@ -112,15 +115,27 @@ def check_tests_ingest(c: Checks) -> None:
         c.check("run label stored", meta.get("run") == "ci-42", meta)
         c.check("fired_on marker",
                 "junit_files=1 log_files=0 lcov_files=1 cases=3 failed=1 errors=0 skipped=0 passed=2 stored=1 "
-                "surface=pyo3" in err, err[-400:])
+                "runs=1 window=10 seq=0 surface=pyo3" in err, err[-400:])
+        c.check("one run, seq 0", type(s) is dict and (s.get("runs"), s.get("seq")) == (1, 0), s)
         c.check("skip marker", f"[tests] skip report={cut} " in err, err[-400:])
 
         s, err = stderr_of(lambda: rg.tests_ingest(str(top), logs=[str(log)]))
         c.check("logs reach the ingest",
                 type(s) is dict and (s.get("log_files"), s.get("stored"), s.get("junit_files")) == (1, 1, 0), s)
         meta = json.loads((snap / "meta.json").read_text()) if (snap / "meta.json").is_file() else {}
-        c.check("a re-ingest replaces the snapshot", meta.get("run") is None and meta.get("reports") == [str(log)],
-                meta)
+        c.check("a re-ingest is the next run; the top level is the newest",
+                meta.get("run") is None and meta.get("reports") == [str(log)]
+                and [r.get("seq") for r in meta.get("runs", [])] == [0, 1], meta)
+
+        s, err = stderr_of(lambda: rg.tests_ingest(str(top), junit=[junit], window=3))
+        c.check("window=3 keeps every run so far", type(s) is dict and (s.get("runs"), s.get("seq")) == (3, 2), s)
+        c.check("window in the marker", " runs=3 window=3 seq=2 surface=pyo3" in err, err[-400:])
+        s, err = stderr_of(lambda: rg.tests_ingest(str(top), junit=[junit], window=2))
+        c.check("window=2 drops the oldest", type(s) is dict and (s.get("runs"), s.get("seq")) == (2, 3), s)
+        s, err = stderr_of(lambda: rg.tests_ingest(str(top), junit=[junit], reset=True))
+        c.check("reset starts over at seq 0", type(s) is dict and (s.get("runs"), s.get("seq")) == (1, 0), s)
+        c.raises("window=0 raises", ValueError, lambda: rg.tests_ingest(str(top), junit=[junit], window=0),
+                 "at least 1 run")
 
         g, err = stderr_of(lambda: rg.generate(str(top)))
         c.check("generate() still builds after an ingest", len(node_ids(g)) > 0, err[-400:])

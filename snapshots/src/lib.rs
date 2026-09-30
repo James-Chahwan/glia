@@ -12,8 +12,9 @@
 //! emails are never captured.
 //!
 //! [`tests_ingest`] reads test reports a CI run produced — JUnit XML, CI logs,
-//! lcov — and writes `<repo>/.glia/test-snapshot/`. It spawns nothing and
-//! reads only the files it is given.
+//! lcov — and adds them as one run to `<repo>/.glia/test-snapshot/`, which
+//! keeps the last [`TestsIngestOptions::window`] runs (CC.9b). It spawns
+//! nothing and reads only the files it is given.
 //!
 //! [`ScipImporter`] (CE.1b) takes a SCIP index's documents, decoded by its
 //! caller, reads each one's source inside the repo and writes
@@ -30,7 +31,9 @@ mod scip;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use glia_code_domain::snapshots::{TestCaseRecord, TestsMeta, write_history, write_tests};
+use glia_code_domain::snapshots::{
+    TESTS_DEFAULT_WINDOW, TestCaseRecord, TestsMeta, append_tests_run, write_history,
+};
 use glia_code_domain::walk_gating::CONTROL_DIR;
 use serde::Serialize;
 
@@ -99,7 +102,8 @@ fn sync_marker(label: &str, s: &HistorySummary, opts: &HistoryOptions) -> String
     )
 }
 
-/// Options for [`tests_ingest`]: the reports one CI run produced.
+/// Options for [`tests_ingest`]: the reports one CI run produced, and how
+/// many runs the snapshot keeps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestsIngestOptions {
     /// JUnit XML reports.
@@ -110,13 +114,27 @@ pub struct TestsIngestOptions {
     pub lcov: Vec<PathBuf>,
     /// A label for the run (a CI run id), stored verbatim in the meta.
     pub run: Option<String>,
+    /// The most runs the snapshot keeps, this one included
+    /// ([`TESTS_DEFAULT_WINDOW`]); 1 replaces the snapshot, as 0.5.0 did. 0
+    /// is an error.
+    pub window: usize,
+    /// Drop every earlier run first: this run is seq 0.
+    pub reset: bool,
     /// Which surface called the ingest (`lib`, `cli`, `pyo3`); the marker names it.
     pub surface: &'static str,
 }
 
 impl Default for TestsIngestOptions {
     fn default() -> Self {
-        Self { junit: Vec::new(), logs: Vec::new(), lcov: Vec::new(), run: None, surface: "lib" }
+        Self {
+            junit: Vec::new(),
+            logs: Vec::new(),
+            lcov: Vec::new(),
+            run: None,
+            window: TESTS_DEFAULT_WINDOW,
+            reset: false,
+            surface: "lib",
+        }
     }
 }
 
@@ -151,21 +169,28 @@ pub struct TestsSummary {
     pub redacted: usize,
     /// Rows of `lcov.jsonl` (source files with line coverage).
     pub covered_files: usize,
+    /// Runs the snapshot holds now, this one included.
+    pub runs: usize,
+    /// This run's seq: 0 for the first run (or after a reset), then one more
+    /// per ingest.
+    pub seq: u32,
     /// Reports skipped as unreadable or malformed.
     pub report_errors: Vec<ReportError>,
 }
 
-/// Read the test reports of one CI run and write them to
-/// `<repo_root>/.glia/test-snapshot/`, replacing any earlier snapshot:
-/// `cases.jsonl` (failed and errored cases, secrets redacted, messages and
-/// traces capped), `lcov.jsonl` (line hits per source file) and `meta.json`.
-/// Creates `.glia/.gitignore` when absent, never overwriting one.
+/// Read the test reports of one CI run and add them as the newest run of
+/// `<repo_root>/.glia/test-snapshot/` (`append_tests_run`): `cases.jsonl`
+/// (every kept run's failed and errored cases, secrets redacted, messages and
+/// traces capped), `lcov.jsonl` (this run's line hits per source file) and
+/// `meta.json`. The snapshot keeps the last `opts.window` runs, this one
+/// included; `opts.reset` drops the earlier ones first. Creates
+/// `.glia/.gitignore` when absent, never overwriting one.
 ///
 /// A report that cannot be read, is over 50 MiB or is malformed is skipped
 /// with a `[tests] skip report=… reason=…` line on stderr and listed in
 /// [`TestsSummary::report_errors`]; the rest are still ingested. No reports
-/// given, or none readable, is an error and writes nothing. On success prints
-/// the `[tests] ingest` marker on stderr.
+/// given, none readable, or a window of 0 is an error and writes nothing. On
+/// success prints the `[tests] ingest` marker on stderr.
 pub fn tests_ingest(repo_root: &Path, opts: &TestsIngestOptions) -> Result<TestsSummary, String> {
     if !repo_root.is_dir() {
         return Err(format!("not a directory: {}", repo_root.display()));
@@ -225,9 +250,11 @@ pub fn tests_ingest(repo_root: &Path, opts: &TestsIngestOptions) -> Result<Tests
         case.sanitize();
     }
     let meta = TestsMeta::new(opts.run.clone(), summary.reports.clone(), skipped_passed.0, skipped_passed.1);
-    let written = write_tests(repo_root, meta, &cases, &lcov::merge(coverage))?;
+    let written = append_tests_run(repo_root, meta, &cases, &lcov::merge(coverage), opts.window, opts.reset)?;
     ensure_glia_gitignore(repo_root)?;
 
+    summary.runs = written.runs.len();
+    summary.seq = written.latest_seq().unwrap_or(0);
     summary.reports = written.reports;
     summary.cases = written.cases_total;
     summary.failed = written.failed;
@@ -237,7 +264,7 @@ pub fn tests_ingest(repo_root: &Path, opts: &TestsIngestOptions) -> Result<Tests
     summary.stored = cases.len();
     summary.redacted = cases.iter().filter(|c| c.redacted).count();
     summary.covered_files = written.lcov_files;
-    eprintln!("{}", ingest_marker(&repo_label(repo_root), &summary, opts.surface));
+    eprintln!("{}", ingest_marker(&repo_label(repo_root), &summary, opts.window, opts.surface));
     Ok(summary)
 }
 
@@ -267,12 +294,15 @@ fn skip_report(summary: &mut TestsSummary, report: String, reason: String) {
 }
 
 /// `[tests] ingest repo=<label> junit_files=N log_files=N lcov_files=N cases=N
-/// failed=N errors=N skipped=N passed=N stored=N surface=<surface>`.
-fn ingest_marker(label: &str, s: &TestsSummary, surface: &str) -> String {
+/// failed=N errors=N skipped=N passed=N stored=N runs=<R> window=<W> seq=<S>
+/// surface=<surface>`: the counts are this run's, `runs` the runs the
+/// snapshot holds now, `window` the most it keeps and `seq` this run's.
+fn ingest_marker(label: &str, s: &TestsSummary, window: usize, surface: &str) -> String {
     format!(
         "[tests] ingest repo={label} junit_files={} log_files={} lcov_files={} cases={} failed={} errors={} \
-         skipped={} passed={} stored={} surface={surface}",
-        s.junit_files, s.log_files, s.lcov_files, s.cases, s.failed, s.errors, s.skipped, s.passed, s.stored
+         skipped={} passed={} stored={} runs={} window={window} seq={} surface={surface}",
+        s.junit_files, s.log_files, s.lcov_files, s.cases, s.failed, s.errors, s.skipped, s.passed, s.stored, s.runs,
+        s.seq
     )
 }
 
@@ -323,12 +353,19 @@ mod tests {
             failed: 1,
             passed: 2,
             stored: 1,
+            runs: 1,
             ..TestsSummary::default()
         };
         assert_eq!(
-            ingest_marker("g1", &summary, "lib"),
+            ingest_marker("g1", &summary, 10, "lib"),
             "[tests] ingest repo=g1 junit_files=1 log_files=0 lcov_files=1 cases=3 failed=1 errors=0 \
-             skipped=0 passed=2 stored=1 surface=lib"
+             skipped=0 passed=2 stored=1 runs=1 window=10 seq=0 surface=lib"
+        );
+        // The packet's fired_on line: the third run of a window of 10.
+        let third = TestsSummary { lcov_files: 0, cases: 2, passed: 1, runs: 3, seq: 2, ..summary };
+        assert!(
+            ingest_marker("g1", &third, 10, "cli")
+                .ends_with(" cases=2 failed=1 errors=0 skipped=0 passed=1 stored=1 runs=3 window=10 seq=2 surface=cli")
         );
     }
 

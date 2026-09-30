@@ -1,8 +1,10 @@
 //! `glia tests ingest` (LF.6d) — the CLI surface of the test-report snapshot
 //! step, `glia_snapshots::tests_ingest`: read the reports one CI run produced
-//! (JUnit XML, CI logs, lcov tracefiles) and write
-//! `<repo>/.glia/test-snapshot/` (cases.jsonl, lcov.jsonl, meta.json). The
-//! next `glia build` ingests it (LF.6b / LF.6c: FAIL and COVERAGE cells).
+//! (JUnit XML, CI logs, lcov tracefiles) and add them as the newest run of
+//! `<repo>/.glia/test-snapshot/` (cases.jsonl, lcov.jsonl, meta.json), which
+//! keeps the last `--window` runs (CC.9b; `--reset` starts over). The next
+//! `glia build` ingests it (LF.6b / LF.6c: FAIL and COVERAGE cells, a
+//! failure counted over the window).
 //!
 //! The build never ingests on its own: it stays offline and deterministic and
 //! reads whatever snapshot is on disk, the way `glia history sync` feeds it
@@ -19,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 use glia_snapshots::{TestsIngestOptions, TestsSummary, tests_ingest};
-use glia_code_domain::snapshots::tests_dir;
+use glia_code_domain::snapshots::{TESTS_DEFAULT_WINDOW, tests_dir};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -29,13 +31,14 @@ pub(crate) struct Args {
 
 #[derive(Subcommand, Debug)]
 enum TestsCmd {
-    /// Read one CI run's test reports and write `<repo>/.glia/test-snapshot/`,
-    /// replacing any earlier snapshot. Then `glia build <repo>` ingests it.
-    /// Give the repo first: each report flag takes every path after it, so a
-    /// shell glob (`--junit reports/*.xml`) passes all its matches.
+    /// Read one CI run's test reports and add them as the newest run of
+    /// `<repo>/.glia/test-snapshot/`, which keeps the last `--window` runs.
+    /// Then `glia build <repo>` ingests it. Give the repo first: each report
+    /// flag takes every path after it, so a shell glob (`--junit
+    /// reports/*.xml`) passes all its matches.
     #[command(
         group = clap::ArgGroup::new("reports").required(true).multiple(true),
-        override_usage = "glia tests ingest <REPO> <--junit <PATH>...|--log <PATH>...|--lcov <PATH>...> [--run <LABEL>]"
+        override_usage = "glia tests ingest <REPO> <--junit <PATH>...|--log <PATH>...|--lcov <PATH>...> [--run <LABEL>] [--window <N>] [--reset]"
     )]
     Ingest {
         /// Repo the reports belong to.
@@ -53,6 +56,18 @@ enum TestsCmd {
         /// A label for the run (a CI run id), stored verbatim in the meta.
         #[arg(long, value_name = "LABEL")]
         run: Option<String>,
+        /// The most runs the snapshot keeps, this one included; older runs
+        /// are dropped. 1 replaces the snapshot.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = TESTS_DEFAULT_WINDOW,
+            value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+        )]
+        window: usize,
+        /// Drop every earlier run first: this run is seq 0.
+        #[arg(long)]
+        reset: bool,
     },
 }
 
@@ -64,12 +79,16 @@ pub(crate) fn run(args: Args) -> i32 {
             log,
             lcov,
             run,
+            window,
+            reset,
         } => {
             let opts = TestsIngestOptions {
                 junit,
                 logs: log,
                 lcov,
                 run,
+                window,
+                reset,
                 surface: "cli",
             };
             ingest(&repo, &opts)
@@ -84,7 +103,7 @@ fn ingest(repo: &str, opts: &TestsIngestOptions) -> i32 {
             for line in warning_lines(&summary) {
                 eprintln!("{line}");
             }
-            for line in report_lines(&summary, root, repo) {
+            for line in report_lines(&summary, root, repo, opts.window) {
                 println!("{line}");
             }
             0
@@ -106,8 +125,9 @@ fn warning_lines(s: &TestsSummary) -> Vec<String> {
 }
 
 /// The stdout of a successful ingest: `read <report>` per report read, then
-/// what was stored and where, then how to use it.
-fn report_lines(s: &TestsSummary, root: &Path, repo: &str) -> Vec<String> {
+/// what was stored and where, then the run's seq and the runs kept, then how
+/// to use it.
+fn report_lines(s: &TestsSummary, root: &Path, repo: &str, window: usize) -> Vec<String> {
     let mut lines: Vec<String> = s.reports.iter().map(|r| format!("read {r}")).collect();
     lines.push(format!(
         "ingested {} failing case(s) and {} lcov file(s) -> {}",
@@ -115,6 +135,7 @@ fn report_lines(s: &TestsSummary, root: &Path, repo: &str) -> Vec<String> {
         s.lcov_files,
         tests_dir(root).display()
     ));
+    lines.push(format!("this run is seq {}; the snapshot holds {} run(s) (window {window})", s.seq, s.runs));
     lines.push(format!("run `glia build {repo}` to ingest."));
     lines
 }
@@ -140,16 +161,27 @@ mod unit {
 
         let args = parse(&["ingest", "repo", "--junit", "a.xml", "b.xml", "--lcov", "c.lcov", "--junit", "d.xml"])
             .expect("parses");
-        let TestsCmd::Ingest { repo, junit, log, lcov, run } = args.action;
+        let TestsCmd::Ingest { repo, junit, log, lcov, run, window, reset } = args.action;
         assert_eq!(repo, "repo");
         assert_eq!(junit, [PathBuf::from("a.xml"), PathBuf::from("b.xml"), PathBuf::from("d.xml")]);
         assert!(log.is_empty());
         assert_eq!(lcov, [PathBuf::from("c.lcov")]);
         assert_eq!(run, None);
+        assert_eq!((window, reset), (TESTS_DEFAULT_WINDOW, false), "the library's defaults");
 
         let args = parse(&["ingest", "repo", "--log", "ci.log", "--run", "ci-42"]).expect("parses");
         let TestsCmd::Ingest { log, run, .. } = args.action;
         assert_eq!((log, run.as_deref()), (vec![PathBuf::from("ci.log")], Some("ci-42")));
+    }
+
+    #[test]
+    fn window_and_reset_parse_and_zero_is_a_usage_error() {
+        let args = parse(&["ingest", "repo", "--junit", "a.xml", "--window", "3", "--reset"]).expect("parses");
+        let TestsCmd::Ingest { window, reset, .. } = args.action;
+        assert_eq!((window, reset), (3, true));
+        let err = parse(&["ingest", "repo", "--junit", "a.xml", "--window", "0"]).expect_err("0 keeps no run");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(parse(&["ingest", "repo", "--reset"]).is_err(), "--reset alone is not a report");
     }
 
     #[test]
@@ -159,17 +191,20 @@ mod unit {
             junit_files: 1,
             lcov_files: 1,
             stored: 2,
+            runs: 3,
+            seq: 2,
             report_errors: vec![ReportError { report: "bad.xml".into(), reason: "malformed XML".into() }],
             ..TestsSummary::default()
         };
         assert_eq!(warning_lines(&summary), ["warning: skipped bad.xml: malformed XML"]);
         let root = Path::new("/r");
         assert_eq!(
-            report_lines(&summary, root, "/r"),
+            report_lines(&summary, root, "/r", 10),
             [
                 "read a.xml".to_string(),
                 "read cov.lcov".to_string(),
                 format!("ingested 2 failing case(s) and 1 lcov file(s) -> {}", tests_dir(root).display()),
+                "this run is seq 2; the snapshot holds 3 run(s) (window 10)".to_string(),
                 "run `glia build /r` to ingest.".to_string(),
             ]
         );

@@ -196,6 +196,8 @@ impl LogParser<'_> {
 
     fn push(&mut self, file: Option<String>, classname: Option<String>, name: &str, status: &str) -> usize {
         self.records.push(TestCaseRecord {
+            // `append_tests_run` stamps the run's seq.
+            seq: 0,
             source: SOURCE_LOG.to_string(),
             report: self.report.to_string(),
             suite: None,

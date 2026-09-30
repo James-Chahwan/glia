@@ -18,14 +18,23 @@
 //! (team ownership) is out of scope. Every file is written `<file>.tmp` then
 //! renamed; the store's input fingerprint (LF.1d) skips `*.tmp`.
 //!
-//! The test-report snapshot (LF.6a) is `<repo>/.glia/test-snapshot/`, and it
-//! describes ONE run: a re-ingest replaces it whole.
-//! - `cases.jsonl` — one [`TestCaseRecord`] per failed or errored test case,
-//!   sorted by (report, suite, classname, name);
-//! - `lcov.jsonl` — one [`LcovFileRecord`] per covered source file, sorted by
+//! The test-report snapshot (LF.6a) is `<repo>/.glia/test-snapshot/`. Since
+//! CC.9b (version 2) it is a rolling window of runs: each ingest is one
+//! [`TestRun`] with the next `seq`, and runs older than the window are dropped
+//! ([`append_tests_run`]).
+//! - `cases.jsonl` — one [`TestCaseRecord`] per failed or errored test case of
+//!   every run in the window, each with its run's `seq`, sorted by (seq,
+//!   report, suite, classname, name);
+//! - `lcov.jsonl` — the newest run's coverage only (coverage is a snapshot,
+//!   not a history): one [`LcovFileRecord`] per covered source file, sorted by
 //!   its repo-relative path (else its `SF:` path);
-//! - `meta.json` — the [`TestsMeta`], written LAST, `data_hash` over
-//!   `cases.jsonl` then `lcov.jsonl` ([`read_tests`] checks it).
+//! - `meta.json` — the [`TestsMeta`], written LAST: the runs, oldest first,
+//!   the newest run's fields at the top level, and `data_hash` over
+//!   `cases.jsonl` then `lcov.jsonl` ([`read_tests`] checks it, and every
+//!   run's counts against its rows).
+//!
+//! A version 1 snapshot (0.5.0: one run, no `runs`, no `seq`) reads as one run,
+//! seq 0; the next ingest appends to it and writes version 2.
 //!
 //! Test output is untrusted text: a failing assertion can print a token. Every
 //! free-text field of a case passes through [`redact_untrusted`] (A13.7's key
@@ -334,8 +343,14 @@ pub const TESTS_DIR: &str = "test-snapshot";
 pub const TESTS_CASES_FILE: &str = "cases.jsonl";
 /// `lcov.jsonl`: one [`LcovFileRecord`] per covered source file.
 pub const TESTS_LCOV_FILE: &str = "lcov.jsonl";
-/// [`TestsMeta::version`] this module writes and accepts.
-pub const TESTS_VERSION: u32 = 1;
+/// [`TestsMeta::version`] this module writes: the rolling window of runs
+/// (CC.9b). [`read_tests`] also accepts [`TESTS_VERSION_V1`].
+pub const TESTS_VERSION: u32 = 2;
+/// The 0.5.0 layout (LF.6a): one run, no [`TestsMeta::runs`], no
+/// [`TestCaseRecord::seq`]. [`read_tests`] reads it as one run, seq 0.
+pub const TESTS_VERSION_V1: u32 = 1;
+/// How many runs an ingest keeps unless it is given a window.
+pub const TESTS_DEFAULT_WINDOW: usize = 10;
 /// [`TestCaseRecord::source`] of a case read from a JUnit XML report.
 pub const SOURCE_JUNIT: &str = "junit";
 /// [`TestCaseRecord::source`] of a case read from a CI log's summary lines.
@@ -349,12 +364,18 @@ pub const MESSAGE_CAP: usize = 300;
 /// Longest [`TestCaseRecord::trace`] kept, in chars.
 pub const TRACE_CAP: usize = 4096;
 
-/// `.glia/test-snapshot/meta.json`.
+/// `.glia/test-snapshot/meta.json`. The top-level run fields (`run` through
+/// `passed`) describe the NEWEST run, the last of [`TestsMeta::runs`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TestsMeta {
-    /// [`TESTS_VERSION`]; any other value reads as an incomplete snapshot.
+    /// [`TESTS_VERSION`], or [`TESTS_VERSION_V1`] as read from a 0.5.0
+    /// snapshot; any other value reads as an incomplete snapshot.
     pub version: u32,
+    /// The most runs the last write kept (its window); `runs.len()` is at
+    /// most this. A v1 snapshot reads as 1.
+    #[serde(default)]
+    pub window: usize,
     /// The caller's label for the run (a CI run id), verbatim.
     #[serde(default)]
     pub run: Option<String>,
@@ -372,17 +393,24 @@ pub struct TestsMeta {
     pub passed: usize,
     /// Rows of `lcov.jsonl` (source files with line coverage).
     pub lcov_files: usize,
+    /// Every run in the snapshot, oldest first, seqs increasing; the last one
+    /// is the run the top-level fields describe. A v1 snapshot has none on
+    /// disk and reads as one run, seq 0.
+    #[serde(default)]
+    pub runs: Vec<TestRun>,
     /// [`data_hash`] over `cases.jsonl` then `lcov.jsonl`.
     pub data_hash: String,
 }
 
 impl TestsMeta {
-    /// A meta for one run. The derived fields (`cases_total`, `failed`,
-    /// `errors`, `lcov_files`, `data_hash`) are left empty: [`write_tests`]
-    /// fills them from the rows it writes.
+    /// A meta for one run. The derived fields (`window`, `cases_total`,
+    /// `failed`, `errors`, `lcov_files`, `runs`, `data_hash`) are left empty:
+    /// [`append_tests_run`] (and [`write_tests`]) fill them from the rows it
+    /// writes.
     pub fn new(run: Option<String>, reports: Vec<String>, skipped: usize, passed: usize) -> Self {
         Self {
             version: TESTS_VERSION,
+            window: 1,
             run,
             reports,
             cases_total: 0,
@@ -391,7 +419,53 @@ impl TestsMeta {
             skipped,
             passed,
             lcov_files: 0,
+            runs: Vec::new(),
             data_hash: String::new(),
+        }
+    }
+
+    /// The newest run's seq; `None` only for a meta no writer produced.
+    pub fn latest_seq(&self) -> Option<u32> {
+        self.runs.last().map(|r| r.seq)
+    }
+}
+
+/// One ingested run of a test-report snapshot (CC.9b): its seq and the counts
+/// its reports gave. Its failed and errored cases are the `cases.jsonl` rows
+/// carrying its `seq`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestRun {
+    /// 0 for the first run of a snapshot (or after a reset), then one more
+    /// per ingest.
+    pub seq: u32,
+    /// The caller's label for the run (a CI run id), verbatim.
+    #[serde(default)]
+    pub run: Option<String>,
+    /// Every report read, sorted.
+    pub reports: Vec<String>,
+    /// `failed + errors + skipped + passed`.
+    pub cases_total: usize,
+    pub failed: usize,
+    pub errors: usize,
+    /// Skipped cases: counted, never stored.
+    pub skipped: usize,
+    /// Passed cases: counted, never stored.
+    pub passed: usize,
+}
+
+impl TestRun {
+    /// The run `meta`'s top-level fields describe, numbered `seq`.
+    pub fn of_meta(seq: u32, meta: &TestsMeta) -> Self {
+        Self {
+            seq,
+            run: meta.run.clone(),
+            reports: meta.reports.clone(),
+            cases_total: meta.cases_total,
+            failed: meta.failed,
+            errors: meta.errors,
+            skipped: meta.skipped,
+            passed: meta.passed,
         }
     }
 }
@@ -400,6 +474,10 @@ impl TestsMeta {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TestCaseRecord {
+    /// The [`TestRun::seq`] of the run it failed in. The parsers leave it 0;
+    /// [`append_tests_run`] stamps the run's seq. A v1 row has none: 0.
+    #[serde(default)]
+    pub seq: u32,
     /// [`SOURCE_JUNIT`] or [`SOURCE_LOG`].
     pub source: String,
     /// The report it came from: repo-relative when under the repo, else as given.
@@ -503,25 +581,54 @@ pub fn tests_dir(root: &Path) -> PathBuf {
     root.join(CONTROL_DIR).join(TESTS_DIR)
 }
 
-/// Write a test-report snapshot under `<root>/.glia/test-snapshot/`, replacing
-/// any earlier one: `cases.jsonl` (each case sanitized, then sorted by
-/// report, suite, classname, name), `lcov.jsonl` (sorted by [`LcovFileRecord::key`]),
-/// then `meta.json` LAST. The old `meta.json` is removed first, so a write
-/// that stops part-way leaves a snapshot [`read_tests`] rejects.
+/// Write a ONE-run test-report snapshot under `<root>/.glia/test-snapshot/`,
+/// replacing any earlier one: [`append_tests_run`] with a window of 1 and a
+/// reset, so the run is seq 0 and `meta.window` is 1.
+pub fn write_tests(
+    root: &Path,
+    meta: TestsMeta,
+    cases: &[TestCaseRecord],
+    lcov: &[LcovFileRecord],
+) -> Result<TestsMeta, String> {
+    append_tests_run(root, meta, cases, lcov, 1, true)
+}
+
+/// Add one run to the test-report snapshot under `<root>/.glia/test-snapshot/`
+/// and keep the last `window` runs (CC.9b).
+///
+/// The existing snapshot is read first ([`read_tests`]: a v1 snapshot is one
+/// run, seq 0; an incomplete one prints its `[tests] snapshot incomplete`
+/// line and counts as none); `reset` ignores it. The new run's seq is the
+/// newest run's plus one, 0 when there is none; the runs with `seq >
+/// new_seq - window` stay, with their cases, and the rest are dropped. So a
+/// `window` of 1 replaces the snapshot, as a 0.5.0 ingest did.
+///
+/// Then `cases.jsonl` (the new run's cases sanitized and stamped with its
+/// seq, plus the kept runs' cases, sorted by seq, report, suite, classname,
+/// name), `lcov.jsonl` (the new run's coverage only, sorted by
+/// [`LcovFileRecord::key`]) and `meta.json` LAST. The old `meta.json` is
+/// removed first, so a write that stops part-way leaves a snapshot
+/// [`read_tests`] rejects.
 ///
 /// A case whose status is neither [`STATUS_FAILED`] nor [`STATUS_ERROR`] is
-/// an error: passed and skipped cases are counted in the meta, never stored.
-/// `meta.cases_total`, `failed`, `errors`, `lcov_files` and `data_hash` are
-/// derived here from the rows, and `meta.reports` is sorted and deduplicated.
-/// Returns the meta as written.
-pub fn write_tests(
+/// an error, and so is a `window` of 0; nothing is written then. Passed and
+/// skipped cases are counted in the meta, never stored. `meta.version`,
+/// `window`, `cases_total`, `failed`, `errors`, `lcov_files`, `runs` and
+/// `data_hash` are derived here, and `meta.reports` is sorted and
+/// deduplicated. Returns the meta as written.
+pub fn append_tests_run(
     root: &Path,
     mut meta: TestsMeta,
     cases: &[TestCaseRecord],
     lcov: &[LcovFileRecord],
+    window: usize,
+    reset: bool,
 ) -> Result<TestsMeta, String> {
-    let mut rows = cases.to_vec();
-    for row in &mut rows {
+    if window == 0 {
+        return Err("the test-run window must keep at least 1 run".to_string());
+    }
+    let mut fresh = cases.to_vec();
+    for row in &mut fresh {
         if row.status != STATUS_FAILED && row.status != STATUS_ERROR {
             return Err(format!(
                 "case {:?}: status {:?} is not stored (only {STATUS_FAILED} and {STATUS_ERROR} are)",
@@ -530,6 +637,35 @@ pub fn write_tests(
         }
         row.sanitize();
     }
+    let prior = if reset { None } else { read_tests(root) };
+    let seq = match prior.as_ref().and_then(|p| p.meta.latest_seq()) {
+        None => 0,
+        Some(last) => last
+            .checked_add(1)
+            .ok_or_else(|| format!("the newest run is seq {last}: ingest with a reset to start over at 0"))?,
+    };
+    // `window` counts the new run: the prior runs within `window - 1` of it stay.
+    let keep = |s: u32| u64::from(s) + window as u64 > u64::from(seq);
+    let (mut runs, mut rows) = match prior {
+        Some(p) => (
+            p.meta.runs.into_iter().filter(|r| keep(r.seq)).collect::<Vec<_>>(),
+            p.cases.into_iter().filter(|c| keep(c.seq)).collect::<Vec<_>>(),
+        ),
+        None => (Vec::new(), Vec::new()),
+    };
+    for row in &mut fresh {
+        row.seq = seq;
+    }
+    let (failed, errors) = status_counts(&fresh)?;
+    meta.version = TESTS_VERSION;
+    meta.window = window;
+    meta.failed = failed;
+    meta.errors = errors;
+    meta.cases_total = failed + errors + meta.skipped + meta.passed;
+    meta.reports.sort();
+    meta.reports.dedup();
+    runs.push(TestRun::of_meta(seq, &meta));
+    rows.extend(fresh);
     rows.sort_by(case_order);
     let mut coverage: Vec<&LcovFileRecord> = lcov.iter().collect();
     coverage.sort_by(|a, b| a.key().cmp(b.key()).then_with(|| a.sf.cmp(&b.sf)));
@@ -543,13 +679,8 @@ pub fn write_tests(
     write_atomic(&dir.join(TESTS_CASES_FILE), &cases_bytes)?;
     write_atomic(&dir.join(TESTS_LCOV_FILE), &lcov_bytes)?;
 
-    let (failed, errors) = status_counts(&rows)?;
-    meta.failed = failed;
-    meta.errors = errors;
-    meta.cases_total = failed + errors + meta.skipped + meta.passed;
     meta.lcov_files = coverage.len();
-    meta.reports.sort();
-    meta.reports.dedup();
+    meta.runs = runs;
     meta.data_hash = data_hash(&[&cases_bytes, &lcov_bytes]);
     write_atomic(&meta_path, &meta_bytes(&meta)?)?;
     Ok(meta)
@@ -558,11 +689,16 @@ pub fn write_tests(
 /// The test-report snapshot under `<root>/.glia/test-snapshot/`, or `None`.
 ///
 /// No snapshot directory is the normal "never ingested" case: `None`,
-/// silently. A directory whose `meta.json` is absent, unreadable or of another
-/// version, whose `cases.jsonl` or `lcov.jsonl` is missing, whose data does not
-/// hash to `meta.data_hash`, whose rows do not parse or whose counts disagree
-/// with the meta is an incomplete snapshot: `None` and one
-/// `[tests] snapshot incomplete` line on stderr naming the reason.
+/// silently. A directory whose `meta.json` is absent, unreadable or of
+/// another version, whose `cases.jsonl` or `lcov.jsonl` is missing, whose
+/// data does not hash to `meta.data_hash`, whose rows do not parse, whose
+/// runs are not one to `window` runs in increasing seq order, or whose counts
+/// disagree with the meta (per run, and the top-level fields with the newest
+/// run) is an incomplete snapshot: `None` and one `[tests] snapshot
+/// incomplete` line on stderr naming the reason.
+///
+/// A version 1 snapshot comes back as one run: `meta.runs` is that run as
+/// seq 0, `meta.window` 1, every case seq 0; `meta.version` stays 1.
 ///
 /// Every case comes back sanitized ([`TestCaseRecord::sanitize`]), whatever
 /// the file holds.
@@ -581,11 +717,17 @@ pub fn read_tests(root: &Path) -> Option<TestsSnapshot> {
 }
 
 fn load_tests(dir: &Path) -> Result<TestsSnapshot, String> {
-    let meta: TestsMeta = serde_json::from_slice(&read_required(&dir.join(META_FILE))?)
+    let mut meta: TestsMeta = serde_json::from_slice(&read_required(&dir.join(META_FILE))?)
         .map_err(|e| format!("{META_FILE}: {e}"))?;
-    if meta.version != TESTS_VERSION {
-        return Err(format!("{META_FILE}: version {} (reader wants {TESTS_VERSION})", meta.version));
-    }
+    let v1 = match meta.version {
+        TESTS_VERSION => false,
+        TESTS_VERSION_V1 => true,
+        other => {
+            return Err(format!(
+                "{META_FILE}: version {other} (reader wants {TESTS_VERSION} or {TESTS_VERSION_V1})"
+            ));
+        }
+    };
     let cases_bytes = read_required(&dir.join(TESTS_CASES_FILE))?;
     let lcov_bytes = read_required(&dir.join(TESTS_LCOV_FILE))?;
     let got = data_hash(&[&cases_bytes, &lcov_bytes]);
@@ -594,23 +736,62 @@ fn load_tests(dir: &Path) -> Result<TestsSnapshot, String> {
     }
     let mut cases: Vec<TestCaseRecord> = parse_jsonl(&cases_bytes, TESTS_CASES_FILE)?;
     let lcov: Vec<LcovFileRecord> = parse_jsonl(&lcov_bytes, TESTS_LCOV_FILE)?;
-    let (failed, errors) = status_counts(&cases)?;
-    let total = failed + errors + meta.skipped + meta.passed;
-    if failed != meta.failed || errors != meta.errors || total != meta.cases_total || lcov.len() != meta.lcov_files {
-        return Err(format!(
-            "row counts failed={failed} errors={errors} cases_total={total} lcov_files={} != meta \
-             failed={} errors={} cases_total={} lcov_files={}",
-            lcov.len(),
-            meta.failed,
-            meta.errors,
-            meta.cases_total,
-            meta.lcov_files
-        ));
+    if v1 {
+        // 0.5.0 wrote one run and no `runs` / `window` / `seq`.
+        meta.window = 1;
+        meta.runs = vec![TestRun::of_meta(0, &meta)];
+    }
+    check_runs(&meta, &cases)?;
+    if lcov.len() != meta.lcov_files {
+        return Err(format!("lcov rows {} != meta lcov_files={}", lcov.len(), meta.lcov_files));
     }
     for case in &mut cases {
         case.sanitize();
     }
     Ok(TestsSnapshot { meta, cases, lcov })
+}
+
+/// The meta's runs against the rows: at least one run, at most `window`,
+/// seqs increasing; per run, its `failed` / `errors` equal its rows' and its
+/// `cases_total` their sum with `skipped` and `passed`; no row of a run the
+/// meta does not list; and the top-level fields equal the newest run's.
+fn check_runs(meta: &TestsMeta, cases: &[TestCaseRecord]) -> Result<(), String> {
+    let Some(newest) = meta.runs.last() else {
+        return Err(format!("{META_FILE}: no run"));
+    };
+    if meta.runs.len() > meta.window {
+        return Err(format!("{META_FILE}: {} runs exceed the window of {}", meta.runs.len(), meta.window));
+    }
+    if meta.runs.windows(2).any(|w| w[0].seq >= w[1].seq) {
+        return Err(format!("{META_FILE}: run seqs are not increasing"));
+    }
+    let mut counts: std::collections::BTreeMap<u32, (usize, usize)> = std::collections::BTreeMap::new();
+    for case in cases {
+        let slot = counts.entry(case.seq).or_default();
+        match case.status.as_str() {
+            STATUS_FAILED => slot.0 += 1,
+            STATUS_ERROR => slot.1 += 1,
+            other => return Err(format!("{TESTS_CASES_FILE}: case {:?} has status {other:?}", case.name)),
+        }
+    }
+    for run in &meta.runs {
+        let (failed, errors) = counts.remove(&run.seq).unwrap_or_default();
+        let total = failed + errors + run.skipped + run.passed;
+        if failed != run.failed || errors != run.errors || total != run.cases_total {
+            return Err(format!(
+                "run {} row counts failed={failed} errors={errors} cases_total={total} != meta \
+                 failed={} errors={} cases_total={}",
+                run.seq, run.failed, run.errors, run.cases_total
+            ));
+        }
+    }
+    if let Some(seq) = counts.keys().next() {
+        return Err(format!("{TESTS_CASES_FILE}: rows of run {seq}, which {META_FILE} does not list"));
+    }
+    if TestRun::of_meta(newest.seq, meta) != *newest {
+        return Err(format!("{META_FILE}: the top-level fields are not the newest run's (seq {})", newest.seq));
+    }
+    Ok(())
 }
 
 /// `(failed, errors)` among `cases`; any other status is an error.
@@ -626,12 +807,12 @@ fn status_counts(cases: &[TestCaseRecord]) -> Result<(usize, usize), String> {
     Ok((failed, errors))
 }
 
-/// The `cases.jsonl` order: (report, suite, classname, name), then every other
-/// field, so equal keys still sort one way.
+/// The `cases.jsonl` order: (seq, report, suite, classname, name), then every
+/// other field, so equal keys still sort one way.
 fn case_order(a: &TestCaseRecord, b: &TestCaseRecord) -> std::cmp::Ordering {
     fn key(r: &TestCaseRecord) -> impl Ord + '_ {
         (
-            (&r.report, &r.suite, &r.classname, &r.name),
+            (r.seq, &r.report, &r.suite, &r.classname, &r.name),
             (&r.file, r.line, &r.status, &r.source),
             (&r.message, &r.trace, r.redacted),
         )
@@ -1362,6 +1543,7 @@ mod tests {
 
     fn case(report: &str, name: &str, status: &str) -> TestCaseRecord {
         TestCaseRecord {
+            seq: 0,
             source: SOURCE_JUNIT.into(),
             report: report.into(),
             suite: None,
@@ -1399,8 +1581,12 @@ mod tests {
         assert_eq!(written.cases_total, 9);
         assert_eq!(written.lcov_files, 2);
         assert_eq!(written.reports, ["a.xml", "b.xml"]);
+        // One run, seq 0, whose counts are the top-level ones.
+        assert_eq!((written.version, written.window), (TESTS_VERSION, 1));
+        assert_eq!(written.runs, [TestRun::of_meta(0, &written)]);
         let snap = read_tests(&root).expect("complete snapshot");
         assert_eq!(snap.meta, written);
+        assert!(snap.cases.iter().all(|c| c.seq == 0));
         let names: Vec<&str> = snap.cases.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["test_x", "test_y", "test_z"], "sorted by (report, suite, classname, name)");
         let rels: Vec<&str> = snap.lcov.iter().map(LcovFileRecord::key).collect();
@@ -1480,11 +1666,210 @@ mod tests {
         let mut meta = TestsMeta::new(None, vec!["ci.log".into()], 0, 0);
         meta.failed = 1;
         meta.cases_total = 1;
+        meta.runs = vec![TestRun::of_meta(0, &meta)];
         meta.data_hash = data_hash(&[&cases_bytes, b""]);
         std::fs::write(dir.join(META_FILE), serde_json::to_vec(&meta).unwrap()).unwrap();
         let snap = read_tests(&root).expect("hand-written snapshot");
         assert_eq!(snap.cases[0].message.as_deref(), Some("got ***"));
         assert!(snap.cases[0].redacted);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // --- rolling window of runs (CC.9b) ---
+
+    /// One run's meta: `passed` passed cases, labelled `run`.
+    fn run_meta(run: &str, passed: usize) -> TestsMeta {
+        TestsMeta::new(Some(run.into()), vec![format!("{run}.xml")], 0, passed)
+    }
+
+    /// `(seq, name)` of every stored case, in file order.
+    fn seq_names(snap: &TestsSnapshot) -> Vec<(u32, &str)> {
+        snap.cases.iter().map(|c| (c.seq, c.name.as_str())).collect()
+    }
+
+    #[test]
+    fn window_keeps_the_last_n_runs() {
+        let root = tmp_root("tests-window");
+        let lcov = |sf: &str| vec![LcovFileRecord { sf: sf.into(), rel: Some(sf.into()), lines: vec![[1, 1]] }];
+        for (i, name) in ["test_a", "test_b", "test_c"].into_iter().enumerate() {
+            let meta = run_meta(&format!("ci-{i}"), i);
+            let written = append_tests_run(
+                &root,
+                meta,
+                &[case(&format!("ci-{i}.xml"), name, STATUS_FAILED)],
+                &lcov(&format!("f{i}.py")),
+                2,
+                false,
+            )
+            .unwrap();
+            assert_eq!(written.latest_seq(), Some(i as u32));
+            assert_eq!(written.window, 2);
+        }
+        let snap = read_tests(&root).expect("complete snapshot");
+        let seqs: Vec<u32> = snap.meta.runs.iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, [1, 2], "run 0 aged out of a window of 2");
+        assert_eq!(seq_names(&snap), [(1, "test_b"), (2, "test_c")], "only the kept runs' cases");
+        let passed: Vec<usize> = snap.meta.runs.iter().map(|r| r.passed).collect();
+        assert_eq!(passed, [1, 2], "each run keeps its own counts");
+        // The top level is the newest run; coverage is the newest run's only.
+        assert_eq!((snap.meta.run.as_deref(), snap.meta.passed), (Some("ci-2"), 2));
+        assert_eq!(snap.meta.reports, ["ci-2.xml"]);
+        assert_eq!(snap.lcov.iter().map(LcovFileRecord::key).collect::<Vec<_>>(), ["f2.py"]);
+
+        // A wider window on the next ingest keeps what is still there.
+        append_tests_run(&root, run_meta("ci-3", 0), &[], &[], 10, false).unwrap();
+        let snap = read_tests(&root).unwrap();
+        assert_eq!(snap.meta.runs.iter().map(|r| r.seq).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(snap.meta.window, 10);
+        // A window of 1 is a replace, and the seq keeps counting.
+        append_tests_run(&root, run_meta("ci-4", 0), &[case("x.xml", "test_d", STATUS_ERROR)], &[], 1, false).unwrap();
+        let snap = read_tests(&root).unwrap();
+        assert_eq!(snap.meta.runs.iter().map(|r| r.seq).collect::<Vec<_>>(), [4]);
+        assert_eq!(seq_names(&snap), [(4, "test_d")]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn window_zero_writes_nothing() {
+        let root = tmp_root("tests-window-zero");
+        let err = append_tests_run(&root, run_meta("ci-0", 0), &[], &[], 0, false).unwrap_err();
+        assert!(err.contains("at least 1 run"), "{err}");
+        assert!(!tests_dir(&root).exists(), "nothing written");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `meta.json` and `cases.jsonl` as 0.5.0 wrote them (LF.6a, version 1):
+    /// no `window`, no `runs`, no `seq` on a row.
+    const V1_META: &str = r#"{
+  "version": 1,
+  "run": "ci-41",
+  "reports": [
+    "reports/junit.xml"
+  ],
+  "cases_total": 3,
+  "failed": 1,
+  "errors": 0,
+  "skipped": 0,
+  "passed": 2,
+  "lcov_files": 0,
+  "data_hash": "HASH"
+}
+"#;
+    const V1_CASES: &str = r#"{"source":"junit","report":"reports/junit.xml","suite":"pytest","classname":"tests.test_app","name":"test_list_orders","file":"tests/test_app.py","line":4,"status":"failed","message":"ValueError: boom"}
+"#;
+
+    /// Write the v1 literals under `root`, `data_hash` filled in.
+    fn write_v1(root: &Path) {
+        let dir = tests_dir(root);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(TESTS_CASES_FILE), V1_CASES).unwrap();
+        std::fs::write(dir.join(TESTS_LCOV_FILE), b"").unwrap();
+        let meta = V1_META.replace("HASH", &data_hash(&[V1_CASES.as_bytes(), b""]));
+        std::fs::write(dir.join(META_FILE), meta).unwrap();
+    }
+
+    #[test]
+    fn v1_reads_as_one_run() {
+        let root = tmp_root("tests-v1");
+        write_v1(&root);
+        let snap = read_tests(&root).expect("a 0.5.0 snapshot reads");
+        assert_eq!((snap.meta.version, snap.meta.window), (TESTS_VERSION_V1, 1));
+        assert_eq!(
+            snap.meta.runs,
+            [TestRun {
+                seq: 0,
+                run: Some("ci-41".into()),
+                reports: vec!["reports/junit.xml".into()],
+                cases_total: 3,
+                failed: 1,
+                errors: 0,
+                skipped: 0,
+                passed: 2,
+            }]
+        );
+        assert_eq!(seq_names(&snap), [(0, "test_list_orders")]);
+
+        // The next ingest upgrades it: run 0 kept, the new run is seq 1.
+        let written =
+            append_tests_run(&root, run_meta("ci-42", 3), &[case("ci-42.xml", "test_x", STATUS_FAILED)], &[], 10, false)
+                .unwrap();
+        assert_eq!(written.version, TESTS_VERSION);
+        let snap = read_tests(&root).unwrap();
+        let runs: Vec<(u32, Option<&str>)> = snap.meta.runs.iter().map(|r| (r.seq, r.run.as_deref())).collect();
+        assert_eq!(runs, [(0, Some("ci-41")), (1, Some("ci-42"))]);
+        assert_eq!(seq_names(&snap), [(0, "test_list_orders"), (1, "test_x")]);
+        let text = std::fs::read_to_string(tests_dir(&root).join(TESTS_CASES_FILE)).unwrap();
+        assert!(text.lines().all(|l| l.starts_with(r#"{"seq":"#)), "every v2 row carries its seq: {text}");
+
+        // A version this reader does not know is incomplete.
+        let dir = tests_dir(&root);
+        let meta = std::fs::read_to_string(dir.join(META_FILE)).unwrap();
+        std::fs::write(dir.join(META_FILE), meta.replace("\"version\": 2", "\"version\": 3")).unwrap();
+        assert_eq!(read_tests(&root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reset_starts_at_seq_zero() {
+        let root = tmp_root("tests-reset");
+        for i in 0..3 {
+            append_tests_run(&root, run_meta(&format!("ci-{i}"), 1), &[case("r.xml", "test_a", STATUS_FAILED)], &[], 10, false)
+                .unwrap();
+        }
+        assert_eq!(read_tests(&root).unwrap().meta.latest_seq(), Some(2));
+        let written =
+            append_tests_run(&root, run_meta("ci-9", 1), &[case("r.xml", "test_b", STATUS_FAILED)], &[], 10, true).unwrap();
+        assert_eq!(written.runs.iter().map(|r| r.seq).collect::<Vec<_>>(), [0]);
+        assert_eq!(written.window, 10, "a reset keeps the window it was given");
+        assert_eq!(seq_names(&read_tests(&root).unwrap()), [(0, "test_b")]);
+        // write_tests is a one-run replace: seq 0, window 1.
+        let written = write_tests(&root, run_meta("ci-10", 0), &[], &[]).unwrap();
+        assert_eq!((written.latest_seq(), written.window, written.runs.len()), (Some(0), 1, 1));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn per_run_counts_reject_a_tampered_snapshot() {
+        let root = tmp_root("tests-tampered");
+        let dir = tests_dir(&root);
+        let two_runs = |root: &Path| {
+            append_tests_run(root, run_meta("ci-0", 0), &[case("r.xml", "test_a", STATUS_FAILED)], &[], 10, true).unwrap();
+            append_tests_run(root, run_meta("ci-1", 0), &[case("r.xml", "test_b", STATUS_FAILED)], &[], 10, false)
+                .unwrap()
+        };
+        // Rewrite `file` with `edit`, re-hashing the meta so only the counts can catch it.
+        let tamper = |file: &str, edit: &dyn Fn(String) -> String| {
+            let text = edit(std::fs::read_to_string(dir.join(file)).unwrap());
+            std::fs::write(dir.join(file), &text).unwrap();
+            let cases = std::fs::read(dir.join(TESTS_CASES_FILE)).unwrap();
+            let lcov = std::fs::read(dir.join(TESTS_LCOV_FILE)).unwrap();
+            let mut meta: TestsMeta = serde_json::from_slice(&std::fs::read(dir.join(META_FILE)).unwrap()).unwrap();
+            meta.data_hash = data_hash(&[&cases, &lcov]);
+            std::fs::write(dir.join(META_FILE), serde_json::to_vec(&meta).unwrap()).unwrap();
+        };
+        two_runs(&root);
+        assert!(read_tests(&root).is_some(), "control: the untouched snapshot reads");
+
+        // test_a moved from run 0 to run 1: both runs' counts are off.
+        tamper(TESTS_CASES_FILE, &|t| t.replacen(r#"{"seq":0,"#, r#"{"seq":1,"#, 1));
+        assert_eq!(read_tests(&root), None, "run 0 lost a row, run 1 gained one");
+
+        // A row of a run the meta does not list.
+        two_runs(&root);
+        tamper(TESTS_CASES_FILE, &|t| t.replacen(r#"{"seq":0,"#, r#"{"seq":7,"#, 1));
+        assert_eq!(read_tests(&root), None, "run 7 is not listed");
+
+        // A top level that is not the newest run.
+        let written = two_runs(&root);
+        let lying = TestsMeta { run: Some("ci-0".into()), ..written };
+        std::fs::write(dir.join(META_FILE), serde_json::to_vec(&lying).unwrap()).unwrap();
+        assert_eq!(read_tests(&root), None, "the top level names run 0");
+
+        // More runs than the window.
+        let written = two_runs(&root);
+        let lying = TestsMeta { window: 1, ..written };
+        std::fs::write(dir.join(META_FILE), serde_json::to_vec(&lying).unwrap()).unwrap();
+        assert_eq!(read_tests(&root), None, "two runs in a window of one");
         let _ = std::fs::remove_dir_all(&root);
     }
 

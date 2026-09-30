@@ -96,10 +96,15 @@
 //! with what predicts a failure, in this order:
 //!
 //! - [`FAILED_LAST_RUN`]: the test node carries a FAIL entry with role `test`
-//!   (a MODULE row: a FUNCTION / METHOD it defines, at any depth, does). A v1
-//!   test snapshot holds one run, so every such entry is the latest run's;
+//!   whose newest failure is the newest ingested run's (a MODULE row: a
+//!   FUNCTION / METHOD it defines, at any depth, does). The test snapshot
+//!   keeps a window of runs (CC.9b): an entry's `last_failed_seq` equals its
+//!   `latest_seq` (`FailEntry::failed_latest`; a 0.5.0 entry, from a one-run
+//!   snapshot, always does). The row's `fails` / `window` are the test's own
+//!   entries' most runs failed in and the runs the snapshot held;
 //! - [`SEED_ON_FAILING_TRACE`]: a seed the row covers carries a FAIL entry
-//!   with role `implicated` (a frame of a failing test's trace);
+//!   with role `implicated` (a frame of a failing test's trace, in any run of
+//!   the window);
 //! - [`COCHANGE`]: a MODULE on the test's nav parent chain (the node itself
 //!   when it is one) and a MODULE on a covered seed's chain are joined by a
 //!   CO_CHANGES edge. `cochange_permille` is `1000 * cochanges / commits` of
@@ -117,12 +122,14 @@
 //!
 //! # Order, scope and limit
 //!
-//! Rows are ordered by (failed_last_run first, seed_on_failing_trace first,
-//! tier: fact, derived, heuristic; cochange_permille, highest first and
-//! `None` last; depth; file, an unlocated row last; qname), located through
-//! one LD.1 `Locator` (1-based lines). With no FAIL / ATTN / CO_CHANGES in the
-//! graph, or `signals` off, the first four keys are equal on every row and the
-//! order is the structural (tier, depth, file, qname). `scope` keeps the rows
+//! Rows are ordered by (failed_last_run first; fails, highest first and
+//! `None` last; seed_on_failing_trace first; tier: fact, derived, heuristic;
+//! cochange_permille, highest first and `None` last; depth; file, an
+//! unlocated row last; qname), located through one LD.1 `Locator` (1-based
+//! lines). With no FAIL / ATTN / CO_CHANGES in the graph, or `signals` off,
+//! the signal keys (failed_last_run, fails, seed_on_failing_trace,
+//! cochange_permille) are equal on every row and the order is the structural
+//! (tier, depth, file, qname). `scope` keeps the rows
 //! whose file is under it, with `node_in_scope`'s rules (a path or project
 //! label; an unlocatable row is kept). `limit` then keeps the first N rows
 //! (`Some(0)` is an error) and `omitted` counts the rest. `test_files` is the
@@ -186,7 +193,7 @@ pub const FACT: &str = "fact";
 pub const DERIVED: &str = "derived";
 pub const HEURISTIC: &str = "heuristic";
 
-/// A row signal (module docs): the test failed in the latest ingested run.
+/// A row signal (module docs): the test failed in the newest ingested run.
 pub const FAILED_LAST_RUN: &str = "failed_last_run";
 /// A row signal: a seed it covers is a frame of a failing test's trace.
 pub const SEED_ON_FAILING_TRACE: &str = "seed_on_failing_trace";
@@ -256,6 +263,12 @@ pub struct TestHit {
     /// With [`COCHANGE`]: per mille of the covered seed's module commits
     /// that also changed this test's file, the best over covered seeds.
     pub cochange_permille: Option<u32>,
+    /// With a FAIL entry of role `test` on the row's own node (CC.9b): the
+    /// most runs of the test snapshot's window one of its failures happened
+    /// in. `None` with no failure ingested for it, or `signals` off.
+    pub fails: Option<u32>,
+    /// With `fails`: the runs the test snapshot held.
+    pub window: Option<u32>,
 }
 
 /// The answer (module docs).
@@ -703,6 +716,10 @@ fn answer_for(
                 Some(sig) => sig.of_row(&idx, test, &row.seed_ids),
                 None => (Vec::new(), None),
             };
+            let (fails, window) = sig
+                .as_ref()
+                .and_then(|sig| sig.fails.get(&test))
+                .map_or((None, None), |&(f, w)| (Some(f), Some(w)));
             let at = loc.locate(test);
             let path = row
                 .hit
@@ -723,6 +740,8 @@ fn answer_for(
                 path,
                 signals,
                 cochange_permille,
+                fails,
+                window,
             }
         })
         .collect();
@@ -810,14 +829,17 @@ fn answer_for(
     })
 }
 
-/// The row order (module docs): failed in the last run, then a covered seed
-/// on a failing trace, then tier, co-change confidence (highest first, `None`
+/// The row order (module docs): failed in the last run, then the runs of the
+/// window it failed in (most first, `None` last), then a covered seed on a
+/// failing trace, then tier, co-change confidence (highest first, `None`
 /// last), depth, file (an unlocated row last) and qname. Total: it ends on
 /// the qname, and one row per node.
 fn row_order(a: &TestHit, b: &TestHit) -> std::cmp::Ordering {
     let lacks = |t: &TestHit, signal: &str| !t.signals.contains(&signal);
-    (lacks(a, FAILED_LAST_RUN), lacks(a, SEED_ON_FAILING_TRACE))
-        .cmp(&(lacks(b, FAILED_LAST_RUN), lacks(b, SEED_ON_FAILING_TRACE)))
+    lacks(a, FAILED_LAST_RUN)
+        .cmp(&lacks(b, FAILED_LAST_RUN))
+        .then_with(|| b.fails.cmp(&a.fails))
+        .then_with(|| lacks(a, SEED_ON_FAILING_TRACE).cmp(&lacks(b, SEED_ON_FAILING_TRACE)))
         .then_with(|| tier_rank(a.tier).cmp(&tier_rank(b.tier)))
         .then_with(|| b.cochange_permille.cmp(&a.cochange_permille))
         .then_with(|| {
@@ -834,8 +856,12 @@ fn row_order(a: &TestHit, b: &TestHit) -> std::cmp::Ordering {
 /// one over the edges. Every map is keyed by id, so no output depends on
 /// hash order.
 struct Signals {
-    /// Nodes carrying a FAIL entry with role `test`.
+    /// Nodes carrying a FAIL entry with role `test` that failed in the
+    /// newest ingested run.
     failed: HashSet<NodeId>,
+    /// Nodes carrying a FAIL entry with role `test` -> the most `fails` over
+    /// those entries and that entry's `window` (the larger window on a tie).
+    fails: HashMap<NodeId, (u32, u32)>,
     /// The MODULEs on a failed node's nav parent chain: a MODULE row holding
     /// a failing test.
     failing_modules: HashSet<NodeId>,
@@ -851,15 +877,24 @@ struct Signals {
 impl Signals {
     fn build(merged: &MergedGraph, idx: &TestIndex) -> Self {
         let mut failed: HashSet<NodeId> = HashSet::new();
+        let mut fails: HashMap<NodeId, (u32, u32)> = HashMap::new();
         let mut implicated: HashSet<NodeId> = HashSet::new();
         let mut commits: HashMap<NodeId, u32> = HashMap::new();
         for g in &merged.graphs {
             for n in &g.nodes {
                 for e in signals::fail_entries(&n.cells) {
                     match e.role {
-                        FailRole::Test => failed.insert(n.id),
-                        FailRole::Implicated => implicated.insert(n.id),
-                    };
+                        FailRole::Test => {
+                            if e.failed_latest() {
+                                failed.insert(n.id);
+                            }
+                            let most = fails.entry(n.id).or_insert((0, 0));
+                            *most = (*most).max((e.fails, e.window));
+                        }
+                        FailRole::Implicated => {
+                            implicated.insert(n.id);
+                        }
+                    }
                 }
                 if idx.kind.get(&n.id) == Some(&node_kind::MODULE)
                     && let Some(c) = signals::module_churn(&n.cells)
@@ -888,6 +923,7 @@ impl Signals {
         }
         Signals {
             failed,
+            fails,
             failing_modules,
             implicated,
             cochange,

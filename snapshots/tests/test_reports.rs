@@ -266,16 +266,32 @@ fn ingest_is_byte_identical_for_same_inputs() {
     opts.junit.push(r.join("reports/go.xml"));
     tests_ingest(r, &opts).unwrap();
     let first = snapshot_bytes(r);
-    // Same reports, given in another order.
+    // Same reports, given in another order, re-ingested from scratch.
     opts.junit.reverse();
+    opts.reset = true;
     tests_ingest(r, &opts).unwrap();
     assert_eq!(first, snapshot_bytes(r));
-    // A re-ingest describes one run: it replaces the snapshot.
+    let first_run = read_tests(r).unwrap().cases.len();
+    // CC.9b: a re-ingest is the next run of the window; the top level and
+    // the coverage are the newest run's.
     let only_go = TestsIngestOptions { junit: vec![r.join("reports/go.xml")], ..Default::default() };
-    tests_ingest(r, &only_go).unwrap();
+    let summary = tests_ingest(r, &only_go).unwrap();
+    assert_eq!((summary.runs, summary.seq, summary.stored), (2, 1, 3));
     let snap = read_tests(r).unwrap();
     assert_eq!(snap.meta.reports, ["reports/go.xml"]);
+    assert_eq!(snap.meta.runs.iter().map(|r| r.seq).collect::<Vec<_>>(), [0, 1]);
+    assert_eq!((snap.cases.len(), snap.lcov.len()), (first_run + 3, 0));
+    // A window of 1 replaces the snapshot, as 0.5.0 did; the seq keeps counting.
+    let replace = TestsIngestOptions { window: 1, ..only_go.clone() };
+    let summary = tests_ingest(r, &replace).unwrap();
+    assert_eq!((summary.runs, summary.seq), (1, 2));
+    let snap = read_tests(r).unwrap();
     assert_eq!((snap.cases.len(), snap.lcov.len()), (3, 0));
+    // A window of 0 is an error, and the snapshot is left alone.
+    let before = snapshot_bytes(r);
+    let err = tests_ingest(r, &TestsIngestOptions { window: 0, ..only_go }).unwrap_err();
+    assert!(err.contains("at least 1 run"), "{err}");
+    assert_eq!(before, snapshot_bytes(r));
 }
 
 #[test]

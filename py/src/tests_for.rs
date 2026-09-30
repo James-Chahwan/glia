@@ -88,13 +88,16 @@ impl PyGraph {
     ///
     /// Returns a dict `{seeds, tests, omitted, test_files, untested,
     /// unresolved, absence}`: `tests` rows `{qname, name, kind, file, line,
-    /// tier, reason, depth, covers, path, signals, cochange_permille}`
-    /// ordered: failed in the latest ingested test run first, then covering a
-    /// seed on a failing trace, then fact, derived, heuristic, then by
-    /// co-change confidence and depth. `signals` lists `failed_last_run`,
-    /// `seed_on_failing_trace` and `cochange` (the test's file changes with a
-    /// seed's in git history; `cochange_permille` is the share of the seed
-    /// file's commits that changed it too). `tier` is `fact` (a TESTS edge
+    /// tier, reason, depth, covers, path, signals, cochange_permille, fails,
+    /// window}` ordered: failed in the latest ingested test run first, then
+    /// by how many runs of the test snapshot's window it failed in, then
+    /// covering a seed on a failing trace, then fact, derived, heuristic,
+    /// then by co-change confidence and depth. `signals` lists
+    /// `failed_last_run`, `seed_on_failing_trace` and `cochange` (the test's
+    /// file changes with a seed's in git history; `cochange_permille` is the
+    /// share of the seed file's commits that changed it too). `fails` /
+    /// `window` are the runs the test failed in and the runs the snapshot
+    /// held (`None` when no failure of it was ingested). `tier` is `fact` (a TESTS edge
     /// straight to the seed, or the seed is a test), `derived` (reached
     /// through other edges) or `heuristic` (a test module paired by name
     /// with a seed's module, or, reason `cochange`, one that only co-changes

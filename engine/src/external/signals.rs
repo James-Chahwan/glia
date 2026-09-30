@@ -19,7 +19,7 @@
 //! | [`module_churn`] | ATTN on a MODULE | `{"source":"git","commits","lines_added","lines_deleted","first","last","window_commits","head"}` | `source == "git"` |
 //! | [`symbol_blame`] | ATTN on a FUNCTION / METHOD / CLASS | `{"source":"git-blame","last","span_changes","head"}` | `source == "git-blame"` |
 //! | [`pair_counts`] | ATTN on a CO_CHANGES edge | `{"cochanges","ratio_permille","window_commits"}` | has `cochanges` (no `source` key) |
-//! | [`fail_entries`] | FAIL on a test or an implicated node | the canonical entry array of `external_inputs::merge_entry` | `role` is `test` or `implicated` |
+//! | [`fail_entries`] | FAIL on a test or an implicated node | the canonical entry array of `external_inputs::merge_entry`; since CC.9b each entry aggregates a test's failures over the test snapshot's window of runs (`fails`, `window`, `latest_seq`, `last_failed_seq`) | `role` is `test` or `implicated` |
 //!
 //! The history payloads hold integers only and no age relative to now (the
 //! consumer computes recency): [`history_now`] is the one reference time, the
@@ -81,11 +81,15 @@ pub(crate) enum FailRole {
     Implicated,
 }
 
-/// One FAIL entry (LF.6b), in the fields a ranking reads; `report`,
+/// One FAIL entry (LF.6b, CC.9b), in the fields a ranking reads; `report`,
 /// `message` and `redacted` stay in the cell.
+///
+/// A v1 entry (0.5.0: one per run, no window keys) reads as one failure in a
+/// window of one run, both seqs `None`: the only run it knew was the latest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FailEntry {
-    /// `<run|latest>:<test>`, plus `#<frame>` on an implicated entry.
+    /// `<test>` (v1: `<run|latest>:<test>`), plus `#<frame>` on an
+    /// implicated entry.
     pub(crate) id: String,
     pub(crate) role: FailRole,
     /// `<classname>::<name>`, or the bare name.
@@ -100,6 +104,27 @@ pub(crate) struct FailEntry {
     pub(crate) frame: Option<u32>,
     /// How the test was mapped (`file_line`, `qname`, `name`); test entries only.
     pub(crate) via: Option<String>,
+    /// Runs of the window this failure happened in (v1: 1).
+    pub(crate) fails: u32,
+    /// Runs the test snapshot held (v1: 1).
+    pub(crate) window: u32,
+    /// The newest run's seq (v1: `None`).
+    pub(crate) latest_seq: Option<u32>,
+    /// The newest run this failure happened in (v1: `None`).
+    pub(crate) last_failed_seq: Option<u32>,
+}
+
+impl FailEntry {
+    /// True when the failure happened in the newest ingested run: its
+    /// `last_failed_seq` is the `latest_seq`, or it is a v1 entry (whose one
+    /// run was the latest). An entry with one seq and not the other was
+    /// written by no writer; it counts as latest, the v1 reading.
+    pub(crate) fn failed_latest(&self) -> bool {
+        match (self.latest_seq, self.last_failed_seq) {
+            (Some(latest), Some(last)) => latest == last,
+            _ => true,
+        }
+    }
 }
 
 /// The module ATTN, field for field with `history::ModuleAttn`.
@@ -130,7 +155,8 @@ struct PairAttnIn {
     window_commits: usize,
 }
 
-/// One FAIL entry; the optional fields are the ones the writer may omit.
+/// One FAIL entry; the optional fields are the ones the writer may omit, or
+/// that a v1 entry (no window keys) lacks.
 #[derive(serde::Deserialize)]
 struct FailEntryIn {
     id: String,
@@ -141,6 +167,10 @@ struct FailEntryIn {
     run: Option<String>,
     frame: Option<u32>,
     via: Option<String>,
+    fails: Option<u32>,
+    window: Option<u32>,
+    latest_seq: Option<u32>,
+    last_failed_seq: Option<u32>,
 }
 
 /// The text of the first `kind` cell of `cells`: a Json or Text payload.
@@ -203,7 +233,8 @@ pub(crate) fn pair_counts(cells: &[Cell]) -> Option<PairCounts> {
 /// Every well-formed entry of the first FAIL cell (LF.6b), in stored order:
 /// an object with string `id` / `role` / `test` / `source` / `status` and a
 /// `role` of `test` or `implicated`. Anything else is skipped; a payload
-/// that is not an entry array reads as no entry.
+/// that is not an entry array reads as no entry. A missing `fails` /
+/// `window` reads as 1 (a v1 entry).
 pub(crate) fn fail_entries(cells: &[Cell]) -> Vec<FailEntry> {
     let Some(Value::Array(entries)) =
         first_payload(cells, cell_type::FAIL).and_then(|s| serde_json::from_str::<Value>(s).ok())
@@ -228,6 +259,10 @@ pub(crate) fn fail_entries(cells: &[Cell]) -> Vec<FailEntry> {
                 run: e.run,
                 frame: e.frame,
                 via: e.via,
+                fails: e.fails.unwrap_or(1),
+                window: e.window.unwrap_or(1),
+                latest_seq: e.latest_seq,
+                last_failed_seq: e.last_failed_seq,
             })
         })
         .collect()
@@ -421,6 +456,31 @@ mod tests {
         assert_eq!(entries.len(), 1, "{entries:?}");
         assert_eq!(entries[0].run.as_deref(), Some("r1"));
         assert_eq!(entries[0].status, "error");
+    }
+
+    #[test]
+    fn fail_entries_reads_the_window_and_v1_as_one_run() {
+        // CC.9b: failed in runs 0 and 2 of three, the newest being 2; and a
+        // failure whose newest run is 1 of the same window.
+        let payload = r#"[{"fails":2,"id":"t::a","last_failed_seq":2,"latest_seq":2,"report":"r.xml","role":"test","run":"ci-2","source":"junit","status":"failed","test":"t::a","via":"qname","window":3},{"fails":1,"id":"t::b","last_failed_seq":1,"latest_seq":2,"report":"r.xml","role":"test","source":"junit","status":"failed","test":"t::b","via":"qname","window":3}]"#;
+        let entries = fail_entries(&[cell(cell_type::FAIL, payload.into())]);
+        let got: Vec<_> = entries
+            .iter()
+            .map(|e| (e.id.as_str(), e.fails, e.window, e.latest_seq, e.last_failed_seq, e.failed_latest()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("t::a", 2, 3, Some(2), Some(2), true),
+                ("t::b", 1, 3, Some(2), Some(1), false)
+            ]
+        );
+
+        // A v1 entry: one failure in its one run, which was the latest.
+        let v1 = r#"[{"id":"latest:t::a","report":"r.xml","role":"test","source":"junit","status":"failed","test":"t::a","via":"qname"}]"#;
+        let e = &fail_entries(&[cell(cell_type::FAIL, v1.into())])[0];
+        assert_eq!((e.fails, e.window, e.latest_seq, e.last_failed_seq), (1, 1, None, None));
+        assert!(e.failed_latest());
     }
 
     /// One graph of `nodes` (kind, cells), ids 1.. in order.

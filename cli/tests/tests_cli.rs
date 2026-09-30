@@ -5,7 +5,8 @@
 //!
 //! The `[tests] ingest ... surface=cli` stderr line is the fired_on marker;
 //! asserting it here makes it a tested contract. Grep it with
-//! `cargo test -p glia-cli --test tests_cli -- --nocapture 2>&1 | grep -o '\[tests\] ingest .*surface=cli'`.
+//! `cargo test -p glia-cli --test tests_cli -- --nocapture 2>&1 | grep -o '\[tests\] ingest .*surface=cli'`
+//! (since CC.9b the line ends `stored=N runs=<R> window=<W> seq=<S> surface=cli`).
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -140,13 +141,15 @@ fn ingest_writes_the_snapshot_and_names_the_cli_surface() {
             format!("read {}", reports[0]),
             format!("read {}", reports[1]),
             format!("ingested 1 failing case(s) and 1 lcov file(s) -> {}", snapshot.display()),
+            "this run is seq 0; the snapshot holds 1 run(s) (window 10)".to_string(),
             format!("run `glia build {}` to ingest.", r.path()),
         ],
     );
     let marker = ingest_marker(&stderr);
     assert!(
         marker.ends_with(
-            " junit_files=1 log_files=0 lcov_files=1 cases=3 failed=1 errors=0 skipped=0 passed=2 stored=1 surface=cli"
+            " junit_files=1 log_files=0 lcov_files=1 cases=3 failed=1 errors=0 skipped=0 passed=2 stored=1 \
+             runs=1 window=10 seq=0 surface=cli"
         ),
         "{marker}"
     );
@@ -164,6 +167,51 @@ fn ingest_writes_the_snapshot_and_names_the_cli_surface() {
     assert_eq!(meta["run"], "ci-42", "{meta}");
     assert_eq!(meta["reports"], serde_json::json!(reports), "{meta}");
     assert_eq!((meta["cases_total"].as_u64(), meta["passed"].as_u64()), (Some(3), Some(2)), "{meta}");
+    // CC.9b: a version 2 snapshot, one run in a window of 10.
+    assert_eq!((meta["version"].as_u64(), meta["window"].as_u64()), (Some(2), Some(10)), "{meta}");
+    assert_eq!(meta["runs"].as_array().map(|r| r.len()), Some(1), "{meta}");
+    assert_eq!((meta["runs"][0]["seq"].as_u64(), meta["runs"][0]["run"].as_str()), (Some(0), Some("ci-42")), "{meta}");
+    assert_eq!(case["seq"], 0, "{case}");
+}
+
+/// CC.9b: each ingest is the next run of the snapshot's window; `--window N`
+/// keeps the last N runs, `--reset` starts over at seq 0, and `--window 0`
+/// is a usage error that writes nothing.
+#[test]
+fn window_keeps_the_last_runs_and_reset_starts_over() {
+    let r = Scratch::new("window");
+    let junit = r.report("pytest-junit.xml", PYTEST_JUNIT);
+    let out = r.glia(&["tests", "ingest", r.path(), "--junit", &junit, "--window", "0"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(!r.top.join(".glia").exists(), "a usage error writes nothing");
+
+    let seqs = |r: &Scratch| -> Vec<u64> {
+        let meta: Value = serde_json::from_str(&r.snapshot_file(META_FILE)).expect("meta.json parses");
+        meta["runs"].as_array().into_iter().flatten().filter_map(|run| run["seq"].as_u64()).collect()
+    };
+    for (i, window) in ["3", "3", "3", "3"].into_iter().enumerate() {
+        let label = format!("ci-{i}");
+        let out = r.glia(&["tests", "ingest", r.path(), "--junit", &junit, "--run", &label, "--window", window]);
+        let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+        assert_eq!(out.status.code(), Some(0), "stdout:\n{stdout}\nstderr:\n{stderr}");
+        let runs = (i + 1).min(3);
+        assert!(
+            ingest_marker(&stderr).ends_with(&format!(" stored=1 runs={runs} window=3 seq={i} surface=cli")),
+            "{stderr}"
+        );
+        assert!(
+            stdout.contains(&format!("this run is seq {i}; the snapshot holds {runs} run(s) (window 3)")),
+            "{stdout}"
+        );
+    }
+    assert_eq!(seqs(&r), [1, 2, 3], "run 0 aged out of a window of 3");
+    assert_eq!(r.snapshot_file(TESTS_CASES_FILE).lines().count(), 3, "one failing case per kept run");
+
+    let out = r.glia(&["tests", "ingest", r.path(), "--junit", &junit, "--reset"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(ingest_marker(&stderr).ends_with(" stored=1 runs=1 window=10 seq=0 surface=cli"), "{stderr}");
+    assert_eq!(seqs(&r), [0]);
 }
 
 #[test]
@@ -264,20 +312,29 @@ fn path_flags_repeat_and_take_a_glob_expansion() {
     let marker = ingest_marker(&stderr);
     assert!(
         marker.ends_with(
-            " junit_files=2 log_files=1 lcov_files=0 cases=6 failed=2 errors=1 skipped=1 passed=2 stored=3 surface=cli"
+            " junit_files=2 log_files=1 lcov_files=0 cases=6 failed=2 errors=1 skipped=1 passed=2 stored=3 \
+             runs=1 window=10 seq=0 surface=cli"
         ),
         "{marker}"
     );
     assert!(stdout.contains("ingested 3 failing case(s) and 0 lcov file(s) -> "), "{stdout}");
 
     // The same reports as repeated flags, in another order, plus lcov: a
-    // re-ingest replaces the earlier snapshot.
+    // re-ingest is the next run of the window (CC.9b), so both runs' failing
+    // cases are kept.
     let out = r.glia(&["tests", "ingest", r.path(), "--lcov", &lcov, "--junit", &b, "--junit", &a]);
     let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
     assert_eq!(out.status.code(), Some(0), "{stderr}");
     let marker = ingest_marker(&stderr);
     assert!(marker.contains(" junit_files=2 log_files=0 lcov_files=1 ") && marker.contains(" stored=2 "), "{marker}");
+    assert!(marker.ends_with(" runs=2 window=10 seq=1 surface=cli"), "{marker}");
     assert!(stdout.contains("ingested 2 failing case(s) and 1 lcov file(s) -> "), "{stdout}");
+    assert_eq!(r.snapshot_file(TESTS_CASES_FILE).lines().count(), 5);
+
+    // `--window 1` replaces the snapshot, as 0.5.0 did.
+    let out = r.glia(&["tests", "ingest", r.path(), "--junit", &a, &b, "--window", "1"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(ingest_marker(&text(&out.stderr)).ends_with(" runs=1 window=1 seq=2 surface=cli"));
     assert_eq!(r.snapshot_file(TESTS_CASES_FILE).lines().count(), 2);
 }
 

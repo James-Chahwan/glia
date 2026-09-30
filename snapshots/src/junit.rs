@@ -226,6 +226,8 @@ impl State {
             .filter(|m| !m.is_empty())
             .or_else(|| body.lines().map(str::trim).find(|l| !l.is_empty()).map(str::to_string));
         let mut record = TestCaseRecord {
+            // `append_tests_run` stamps the run's seq.
+            seq: 0,
             source: SOURCE_JUNIT.to_string(),
             report: report.to_string(),
             suite: case.suite,

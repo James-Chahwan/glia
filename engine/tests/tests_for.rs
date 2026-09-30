@@ -15,7 +15,7 @@ use std::path::Path;
 use git_fixture::GitRepo;
 use glia_code_domain::snapshots::{
     HistoryCommit, HistoryFile, HistoryMeta, SOURCE_JUNIT, STATUS_FAILED, TestCaseRecord,
-    TestsMeta, write_history, write_tests,
+    TestsMeta, append_tests_run, write_history, write_tests,
 };
 use glia_engine::delta::graph_delta_vs_rev;
 use glia_engine::diff_impact::diff_impact_from_delta;
@@ -611,6 +611,7 @@ fn failed_case(
     trace: Option<&str>,
 ) -> TestCaseRecord {
     TestCaseRecord {
+        seq: 0,
         source: SOURCE_JUNIT.into(),
         report: "junit.xml".into(),
         suite: Some("pytest".into()),
@@ -672,6 +673,11 @@ fn failed_test_ranks_first() {
         a.tests
     );
     assert_eq!(row(&a, TEST_PLACE_PRICES).depth, 2);
+    // CC.9b: a one-run snapshot: failed once in a window of one.
+    let place = row(&a, TEST_PLACE_PRICES);
+    assert_eq!((place.fails, place.window), (Some(1), Some(1)));
+    let doubles = row(&a, TEST_PRICE_DOUBLES);
+    assert_eq!((doubles.fails, doubles.window), (None, None));
     assert!(a.tests.iter().all(|t| t.cochange_permille.is_none()));
     assert_eq!(a.omitted, 0);
     assert_eq!(a.test_files, ["tests/test_place.py", "tests/test_price.py"]);
@@ -731,6 +737,107 @@ shop/a.py:2: in price\n    return o * 2\nE   AssertionError";
     // A seed off the trace: place's own tests carry nothing.
     let b = tests_for(&g.merged, &["shop::a::place"], &TestsForArgs::default()).expect("answer");
     assert!(b.tests.iter().all(|t| t.signals.is_empty()), "{:#?}", b.tests);
+}
+
+/// A pts failure at its def line whose trace runs through `price`.
+fn pts_failure(module: &str, name: &str) -> TestCaseRecord {
+    let trace = format!(
+        "tests/{module}.py:5: in {name}\n    assert x\nshop/a.py:2: in price\n    return o * 2\nE   AssertionError"
+    );
+    failed_case(
+        &format!("tests.{module}"),
+        name,
+        Some(&format!("tests/{module}.py")),
+        Some(4),
+        Some(&trace),
+    )
+}
+
+/// One run per entry of `runs` (the `(module, name)` failures of each),
+/// appended to the test snapshot under `root`, window 10.
+fn window_snapshot(root: &Path, runs: &[&[(&str, &str)]]) {
+    for (i, failures) in runs.iter().enumerate() {
+        let cases: Vec<TestCaseRecord> = failures.iter().map(|(m, n)| pts_failure(m, n)).collect();
+        let meta = TestsMeta::new(Some(format!("ci-{i}")), vec!["junit.xml".into()], 0, 1);
+        append_tests_run(root, meta, &cases, &[], 10, false).expect("append a run");
+    }
+}
+
+/// `(qname, signals, fails, window)` per row, in answer order.
+fn fail_shape(a: &TestsFor) -> Vec<(String, Vec<&'static str>, Option<u32>, Option<u32>)> {
+    a.tests
+        .iter()
+        .map(|t| (t.qname.clone(), t.signals.clone(), t.fails, t.window))
+        .collect()
+}
+
+#[test]
+fn window_ranks_by_failure() {
+    // CC.9b's three runs: test_place_prices fails in runs 0 and 2 (the
+    // newest), test_price_doubles in run 1 only.
+    let place: &[(&str, &str)] = &[("test_place", "test_place_prices")];
+    let doubles: &[(&str, &str)] = &[("test_price", "test_price_doubles")];
+    let (_dir, g) = build_with(&pts_files(), |root| window_snapshot(root, &[place, doubles, place]));
+    let a = tests_for(&g.merged, &[PTS_PRICE], &TestsForArgs::default()).expect("answer");
+    assert_eq!(
+        fail_shape(&a),
+        [
+            (
+                TEST_PLACE_PRICES.to_string(),
+                vec!["failed_last_run", "seed_on_failing_trace"],
+                Some(2),
+                Some(3)
+            ),
+            (
+                TEST_PRICE_DOUBLES.to_string(),
+                vec!["seed_on_failing_trace"],
+                Some(1),
+                Some(3)
+            ),
+        ],
+        "{:#?}",
+        a.tests
+    );
+
+    // Neither failed in the newest run: the failure count outranks the
+    // tier (test_place_prices is derived, test_price_doubles a fact).
+    let both: &[(&str, &str)] = &[
+        ("test_place", "test_place_prices"),
+        ("test_price", "test_price_doubles"),
+    ];
+    let (_dir, g) = build_with(&pts_files(), |root| window_snapshot(root, &[place, both, &[]]));
+    let a = tests_for(&g.merged, &[PTS_PRICE], &TestsForArgs::default()).expect("answer");
+    assert_eq!(
+        fail_shape(&a),
+        [
+            (
+                TEST_PLACE_PRICES.to_string(),
+                vec!["seed_on_failing_trace"],
+                Some(2),
+                Some(3)
+            ),
+            (
+                TEST_PRICE_DOUBLES.to_string(),
+                vec!["seed_on_failing_trace"],
+                Some(1),
+                Some(3)
+            ),
+        ],
+        "{:#?}",
+        a.tests
+    );
+
+    // --no-signals reads no failure: no fails, the structural order.
+    let mut args = TestsForArgs::default();
+    args.signals = false;
+    let plain = tests_for(&g.merged, &[PTS_PRICE], &args).expect("answer");
+    assert_eq!(
+        fail_shape(&plain),
+        [
+            (TEST_PRICE_DOUBLES.to_string(), vec![], None, None),
+            (TEST_PLACE_PRICES.to_string(), vec![], None, None),
+        ]
+    );
 }
 
 const T0: i64 = 1_767_225_600;

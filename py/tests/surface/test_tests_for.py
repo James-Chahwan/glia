@@ -32,7 +32,7 @@ FILES = {
 PRICE = "shop::orders::service::price"
 KEYS = ["seeds", "tests", "omitted", "test_files", "untested", "unresolved", "absence"]
 ROW_KEYS = ["qname", "name", "kind", "file", "line", "tier", "reason", "depth", "covers", "path",
-            "signals", "cochange_permille"]
+            "signals", "cochange_permille", "fails", "window"]
 SHAPE = [("shop::tests::test_service::test_price", "fact", 1),
          ("shop::tests::test_audit::test_audited_place", "derived", 3),
          ("shop::tests::test_service", "heuristic", 2)]

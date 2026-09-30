@@ -31,10 +31,12 @@
 //!    / METHOD of the repo carries it.
 //!
 //! Only the repo's own nodes map. A case the ladder misses is counted
-//! `unmapped`. A failure reported more than once is kept once, the JUnit copy
-//! first: cases with one classname + name (a JUnit case and its CI-log copy,
-//! or one test in two reports of the run), and a JUnit and a log case of one
-//! name that map to the same test (a log line that gave no classname).
+//! `unmapped`. Within one run, a failure reported more than once is kept
+//! once, the JUnit copy first: cases with one classname + name (a JUnit case
+//! and its CI-log copy, or one test in two reports of the run), and a JUnit
+//! and a log case of one name that map to the same test (a log line that
+//! gave no classname). Every case of every run in the snapshot's window
+//! (CC.9b) is resolved in the one batch, each distinct item once.
 //!
 //! IMPLICATED (FACT given the trace): the case's trace resolved as a
 //! stacktrace; its nodes in resolution order (index = `frame`), keeping those
@@ -43,16 +45,27 @@
 //! which also tags `tests::`-rooted qnames), at most [`MAX_IMPLICATED`] per
 //! case. A case whose test did not map still implicates its frames.
 //!
+//! WINDOW (CC.9b). The snapshot holds the last N runs. A test's failures
+//! across them are ONE entry per (mapped test node, `<classname>::<name>`);
+//! a frame's, one per (implicated node, test, frame). `fails` counts the runs
+//! the failure happened in, `window` the runs the snapshot holds,
+//! `latest_seq` is the newest run's seq and `last_failed_seq` the newest run
+//! the failure happened in; `message`, `status`, `report`, `source`, `via`
+//! and `run` (that run's label) are its newest failure's.
+//!
 //! PAYLOAD. FAIL (cell 9) is the canonical entry array of
 //! `external_inputs::merge_entry` (sorted by `(source, id)`, compact, sorted
 //! keys). It is not in `external_inputs::WRITABLE`: this stage is its only
 //! writer. The failing test's entry:
-//! `{"id":"<run|latest>:<classname>::<name>","message"?,"redacted"?,"report","role":"test","run"?,"source":"junit|log","status":"failed|error","test":"<classname>::<name>","via":"file_line|qname|name"}`;
+//! `{"fails":k,"id":"<classname>::<name>","last_failed_seq":s,"latest_seq":L,"message"?,"redacted"?,"report","role":"test","run"?,"source":"junit|log","status":"failed|error","test":"<classname>::<name>","via":"file_line|qname|name","window":W}`;
 //! each implicated node's: the same id plus `#<frame>`, `"role":"implicated"`,
-//! `"frame":<frame>` and no `via`. `redacted: true` is set when the case's
-//! text was redacted (A13.7's cell convention). A node keeps at most
-//! [`MAX_ENTRIES_PER_NODE`] entries, the lowest `(source, id)` first; the
-//! rest are counted `dropped`.
+//! `"frame":<frame>` and no `via`. (0.5.0 wrote one entry per run, id
+//! `<run|latest>:<classname>::<name>`, and no window keys; the one reader,
+//! `external::signals::fail_entries`, reads both.) `redacted: true` is set
+//! when the newest failure's text or its run's label was redacted (A13.7's
+//! cell convention). A node keeps at most [`MAX_ENTRIES_PER_NODE`] entries,
+//! the lowest `(source, id)` first, so distinct tests, not runs; the rest
+//! are counted `dropped`.
 //!
 //! LINE COVERAGE (LF.6c, [`plan_coverage`]): the snapshot's `lcov.jsonl`
 //! (FACT) becomes COVERAGE cells (23). A record maps to ONE repo file, a
@@ -72,9 +85,11 @@
 //!
 //! Markers, once per repo with a complete snapshot (the fired_on lines):
 //!   `[tests] fail-cells repo=<label> cases=<n> mapped=<m> (file_line=<a> qname=<b> name=<c>) unmapped=<u> implicated=<i> fail_cells=<f> dropped=<d>`
-//! where `cases` counts distinct failures (`mapped + unmapped`), `implicated`
-//! the implicated entries and `fail_cells` the nodes whose FAIL cell this
-//! stage wrote. When a repeated case was folded, one more line follows:
+//! where `cases` counts distinct failing tests over the window (`mapped +
+//! unmapped`; a mapped test by its newest failure's rung), `implicated` the
+//! implicated entries and `fail_cells` the nodes whose FAIL cell this stage
+//! wrote. When a repeated case was folded within a run, one more line
+//! follows:
 //!   `[tests] fail-cells deduplicated <n> repeated case(s) repo=<label>`.
 //! Then the coverage line:
 //!   `[tests] lcov repo=<label> files=<n> matched=<m> unmatched=<u> coverage_nodes=<c>`
@@ -85,7 +100,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use glia_code_domain::external_inputs::merge_entry;
 use glia_code_domain::snapshots::{
-    LcovFileRecord, SOURCE_JUNIT, TestCaseRecord, read_tests, redact_untrusted,
+    LcovFileRecord, SOURCE_JUNIT, TestCaseRecord, TestsMeta, read_tests, redact_untrusted,
 };
 use glia_code_domain::{cell_type, node_kind};
 use glia_core::{Cell, CellPayload, Node, NodeId, NodeKindId};
@@ -220,6 +235,32 @@ impl Tally {
     }
 }
 
+/// The snapshot's runs, as the FAIL entries name them (CC.9b).
+struct RunWindow {
+    /// Run seq -> its label, redacted, and how many spans were.
+    labels: BTreeMap<u32, (String, usize)>,
+    /// The newest run's seq.
+    latest: u32,
+    /// Runs the snapshot holds.
+    runs: usize,
+}
+
+impl RunWindow {
+    fn new(meta: &TestsMeta) -> Self {
+        let labels = meta
+            .runs
+            .iter()
+            .filter_map(|r| r.run.as_deref().map(|label| (r.seq, redact_untrusted(label))))
+            .collect();
+        RunWindow { labels, latest: meta.latest_seq().unwrap_or(0), runs: meta.runs.len() }
+    }
+
+    /// Run `seq`'s redacted label and its redacted-span count.
+    fn label(&self, seq: u32) -> Option<(&str, usize)> {
+        self.labels.get(&seq).map(|(label, spans)| (label.as_str(), *spans))
+    }
+}
+
 /// Apply `input`'s test-report snapshot: FAIL cells on the repo's failing
 /// tests and on the nodes their traces implicate, COVERAGE cells from its
 /// lcov rows ([`ingest_lcov`]), then the stage markers. True when a cell was
@@ -228,11 +269,13 @@ pub(super) fn ingest_test_reports(merged: &mut MergedGraph, input: &RepoInputs) 
     let Some(snapshot) = read_tests(&input.root) else {
         return false;
     };
+    let window = RunWindow::new(&snapshot.meta);
+    // The coverage is the newest run's: its label is the top-level one.
     let run = snapshot.meta.run.as_deref().map(redact_untrusted);
     let run = run.as_ref().map(|(r, spans)| (r.as_str(), *spans));
     // One index serves both plans; neither write touches what it reads.
     let index = RepoIndex::new(merged, input);
-    let (plan, mut tally) = plan_fail_cells(merged, &index, &snapshot.cases, run);
+    let (plan, mut tally) = plan_fail_cells(merged, &index, &snapshot.cases, &window);
     let coverage = plan_coverage(&index, &snapshot.lcov, run);
     drop(index);
     write_fail_cells(merged, input, plan, &mut tally);
@@ -259,100 +302,131 @@ pub(super) fn ingest_test_reports(merged: &mut MergedGraph, input: &RepoInputs) 
     tally.fail_cells > 0 || coverage_nodes > 0
 }
 
+/// The resolve batch: each distinct `(text, kind)` item once, in first-seen
+/// order (a test failing in several runs repeats its items).
+#[derive(Default)]
+struct Batch {
+    items: Vec<(String, &'static str)>,
+    at: HashMap<(String, &'static str), usize>,
+}
+
+impl Batch {
+    /// The index of the `(text, kind)` item, added when new.
+    fn item(&mut self, text: String, kind: &'static str) -> usize {
+        let items = &mut self.items;
+        *self.at.entry((text.clone(), kind)).or_insert_with(|| {
+            items.push((text, kind));
+            items.len() - 1
+        })
+    }
+
+    /// Every item resolved, in index order: one `resolve_signals` call.
+    fn resolve(&self, merged: &MergedGraph) -> Vec<Vec<NodeId>> {
+        let batch: Vec<(&str, &str)> = self.items.iter().map(|(t, k)| (t.as_str(), *k)).collect();
+        if batch.is_empty() { Vec::new() } else { merged.resolve_signals(&batch) }
+    }
+}
+
+/// One FAIL entry's failures over the window.
+struct Agg<'c> {
+    /// The runs it failed in.
+    seqs: BTreeSet<u32>,
+    /// Its newest failure: the first copy kept at the highest seq.
+    newest: &'c TestCaseRecord,
+    /// How the newest failure's test mapped; test entries only.
+    via: Option<Via>,
+}
+
+/// Count `case` (one run's failure) into the entry `key` of `map`.
+fn note<'c, K: Ord>(map: &mut BTreeMap<K, Agg<'c>>, key: K, case: &'c TestCaseRecord, via: Option<Via>) {
+    match map.entry(key) {
+        std::collections::btree_map::Entry::Vacant(slot) => {
+            slot.insert(Agg { seqs: BTreeSet::from([case.seq]), newest: case, via });
+        }
+        std::collections::btree_map::Entry::Occupied(slot) => {
+            let agg = slot.into_mut();
+            agg.seqs.insert(case.seq);
+            if case.seq > agg.newest.seq {
+                agg.newest = case;
+                agg.via = via;
+            }
+        }
+    }
+}
+
+/// `<classname>::<name>`, or the bare name.
+fn test_of(case: &TestCaseRecord) -> String {
+    match &case.classname {
+        Some(c) => format!("{c}::{}", case.name),
+        None => case.name.clone(),
+    }
+}
+
 /// Node id -> the FAIL entries it takes, plus the mapping counts.
 fn plan_fail_cells(
     merged: &MergedGraph,
     index: &RepoIndex<'_>,
     cases: &[TestCaseRecord],
-    run: Option<(&str, usize)>,
+    window: &RunWindow,
 ) -> (BTreeMap<u64, Vec<Value>>, Tally) {
     let mut tally = Tally::default();
-    let cases = dedup_by_classname(cases, &mut tally);
+    // Per run, one copy of each repeated failure; runs oldest first.
+    let mut by_run: BTreeMap<u32, Vec<&TestCaseRecord>> = BTreeMap::new();
+    for case in cases {
+        by_run.entry(case.seq).or_default().push(case);
+    }
+    let cases: Vec<&TestCaseRecord> =
+        by_run.values().flat_map(|run| dedup_by_classname(run, &mut tally)).collect();
 
     // One batch for every case's items.
-    let mut items: Vec<(String, &'static str)> = Vec::new();
+    let mut batch = Batch::default();
     let mut per_case: Vec<CaseItems> = Vec::with_capacity(cases.len());
     for case in &cases {
         let mut ci = CaseItems::default();
         if let (Some(file), Some(line)) = (case.file.as_deref(), case.line) {
-            ci.file_line = Some(items.len());
-            items.push((format!("File \"{file}\", line {line}"), "stacktrace"));
+            ci.file_line = Some(batch.item(format!("File \"{file}\", line {line}"), "stacktrace"));
         }
         for token in qname_tokens(case) {
-            ci.tokens.push((token.clone(), items.len()));
-            items.push((token, "test"));
+            let item = batch.item(token.clone(), "test");
+            ci.tokens.push((token, item));
         }
         if let Some(trace) = case.trace.as_deref().filter(|t| !t.trim().is_empty()) {
-            ci.trace = Some(items.len());
-            items.push((trace.to_string(), "stacktrace"));
+            ci.trace = Some(batch.item(trace.to_string(), "stacktrace"));
         }
         per_case.push(ci);
     }
-    let batch: Vec<(&str, &str)> = items.iter().map(|(t, k)| (t.as_str(), *k)).collect();
-    let resolved = if batch.is_empty() { Vec::new() } else { merged.resolve_signals(&batch) };
+    let resolved = batch.resolve(merged);
     let first_hit = |item: usize| resolved.get(item).and_then(|ids| ids.first()).copied();
 
-    let mut plan: BTreeMap<u64, Vec<Value>> = BTreeMap::new();
-    // (test node, name) -> the source that reported it: a log copy of a
+    // (run, test node, name) -> the source that reported it: a log copy of a
     // JUnit case with no classname folds here, once both mapped.
-    let mut seen_tests: BTreeMap<(u64, &str), &str> = BTreeMap::new();
-    for (case, ci) in cases.iter().zip(&per_case) {
+    let mut seen_tests: BTreeMap<(u32, u64, &str), &str> = BTreeMap::new();
+    // (test node, test) and (implicated node, test, frame) -> the failures.
+    let mut tests: BTreeMap<(u64, String), Agg<'_>> = BTreeMap::new();
+    let mut frames_of: BTreeMap<(u64, String, usize), Agg<'_>> = BTreeMap::new();
+    let mut unmapped: BTreeSet<String> = BTreeSet::new();
+    for (&case, ci) in cases.iter().zip(&per_case) {
         let mapped = map_test(merged, index, case, ci, &first_hit);
         if let Some((node, _)) = mapped {
-            match seen_tests.get(&(node.0, case.name.as_str())) {
+            match seen_tests.get(&(case.seq, node.0, case.name.as_str())) {
                 Some(&source) if source != case.source => {
                     tally.deduplicated += 1;
                     continue;
                 }
                 Some(_) => {}
                 None => {
-                    seen_tests.insert((node.0, case.name.as_str()), case.source.as_str());
+                    seen_tests.insert((case.seq, node.0, case.name.as_str()), case.source.as_str());
                 }
             }
         }
-        tally.cases += 1;
-        let (source, source_redacted) = redact_untrusted(&case.source);
-        let (report, report_redacted) = redact_untrusted(&case.report);
-        let redacted = case.redacted || source_redacted + report_redacted + run.map_or(0, |(_, n)| n) > 0;
-        let test = match &case.classname {
-            Some(c) => format!("{c}::{}", case.name),
-            None => case.name.clone(),
-        };
-        let id = format!("{}:{test}", run.map_or("latest", |(r, _)| r));
-        let base = |id: String| {
-            let mut m = Map::new();
-            m.insert("source".into(), Value::from(source.clone()));
-            m.insert("id".into(), Value::from(id));
-            if let Some((r, _)) = run {
-                m.insert("run".into(), Value::from(r));
-            }
-            m.insert("report".into(), Value::from(report.clone()));
-            m.insert("test".into(), Value::from(test.clone()));
-            m.insert("status".into(), Value::from(case.status.clone()));
-            if let Some(message) = &case.message {
-                m.insert("message".into(), Value::from(message.clone()));
-            }
-            if redacted {
-                m.insert("redacted".into(), Value::Bool(true));
-            }
-            m
-        };
-
+        let test = test_of(case);
         let test_node = match mapped {
             Some((node, via)) => {
-                match via {
-                    Via::FileLine => tally.file_line += 1,
-                    Via::Qname => tally.qname += 1,
-                    Via::Name => tally.name += 1,
-                }
-                let mut e = base(id.clone());
-                e.insert("role".into(), Value::from("test"));
-                e.insert("via".into(), Value::from(via.as_str()));
-                plan.entry(node.0).or_default().push(Value::Object(e));
+                note(&mut tests, (node.0, test.clone()), case, Some(via));
                 Some(node)
             }
             None => {
-                tally.unmapped += 1;
+                unmapped.insert(test.clone());
                 None
             }
         };
@@ -368,15 +442,71 @@ fn plan_fail_cells(
             if Some(node) == test_node || f.fixture || (test_file.is_some() && f.file.as_deref() == test_file) {
                 continue;
             }
-            let mut e = base(format!("{id}#{frame}"));
-            e.insert("role".into(), Value::from("implicated"));
-            e.insert("frame".into(), Value::from(frame));
-            plan.entry(node.0).or_default().push(Value::Object(e));
-            tally.implicated += 1;
+            note(&mut frames_of, (node.0, test.clone(), frame), case, None);
             kept += 1;
         }
     }
+
+    // A test that mapped in some run is not unmapped for missing in another.
+    let mapped_tests: BTreeSet<&str> = tests.keys().map(|(_, t)| t.as_str()).collect();
+    tally.unmapped = unmapped.iter().filter(|t| !mapped_tests.contains(t.as_str())).count();
+    for agg in tests.values() {
+        match agg.via {
+            Some(Via::FileLine) => tally.file_line += 1,
+            Some(Via::Qname) => tally.qname += 1,
+            Some(Via::Name) => tally.name += 1,
+            None => {}
+        }
+    }
+    tally.cases = tally.mapped() + tally.unmapped;
+    tally.implicated = frames_of.len();
+
+    let mut plan: BTreeMap<u64, Vec<Value>> = BTreeMap::new();
+    for ((node, test), agg) in &tests {
+        let mut e = fail_entry(test, test.clone(), agg, window);
+        e.insert("role".into(), Value::from("test"));
+        if let Some(via) = agg.via {
+            e.insert("via".into(), Value::from(via.as_str()));
+        }
+        plan.entry(*node).or_default().push(Value::Object(e));
+    }
+    for ((node, test, frame), agg) in &frames_of {
+        let mut e = fail_entry(test, format!("{test}#{frame}"), agg, window);
+        e.insert("role".into(), Value::from("implicated"));
+        e.insert("frame".into(), Value::from(*frame));
+        plan.entry(*node).or_default().push(Value::Object(e));
+    }
     (plan, tally)
+}
+
+/// The fields every FAIL entry carries (module docs), from its newest
+/// failure and the window.
+fn fail_entry(test: &str, id: String, agg: &Agg<'_>, window: &RunWindow) -> Map<String, Value> {
+    let case = agg.newest;
+    let (source, source_redacted) = redact_untrusted(&case.source);
+    let (report, report_redacted) = redact_untrusted(&case.report);
+    let label = window.label(case.seq);
+    let redacted = case.redacted || source_redacted + report_redacted + label.map_or(0, |(_, n)| n) > 0;
+    let mut m = Map::new();
+    m.insert("source".into(), Value::from(source));
+    m.insert("id".into(), Value::from(id));
+    if let Some((r, _)) = label {
+        m.insert("run".into(), Value::from(r));
+    }
+    m.insert("report".into(), Value::from(report));
+    m.insert("test".into(), Value::from(test));
+    m.insert("status".into(), Value::from(case.status.clone()));
+    if let Some(message) = &case.message {
+        m.insert("message".into(), Value::from(message.clone()));
+    }
+    if redacted {
+        m.insert("redacted".into(), Value::Bool(true));
+    }
+    m.insert("fails".into(), Value::from(agg.seqs.len()));
+    m.insert("window".into(), Value::from(window.runs));
+    m.insert("latest_seq".into(), Value::from(window.latest));
+    m.insert("last_failed_seq".into(), Value::from(case.seq));
+    m
 }
 
 /// The ladder: `file_line`, then `qname`, then `name` (see the module doc).
@@ -475,12 +605,12 @@ fn base_name(name: &str) -> &str {
     }
 }
 
-/// `cases` with one copy per `(classname, name)`, the JUnit copy first,
-/// then JUnit cases before log cases, each in snapshot order.
-fn dedup_by_classname<'c>(cases: &'c [TestCaseRecord], tally: &mut Tally) -> Vec<&'c TestCaseRecord> {
+/// One run's `cases` with one copy per `(classname, name)`, the JUnit copy
+/// first, then JUnit cases before log cases, each in snapshot order.
+fn dedup_by_classname<'c>(cases: &[&'c TestCaseRecord], tally: &mut Tally) -> Vec<&'c TestCaseRecord> {
     let mut kept: Vec<&TestCaseRecord> = Vec::new();
     let mut at: BTreeMap<(&str, &str), usize> = BTreeMap::new();
-    for case in cases {
+    for &case in cases {
         let key = (case.classname.as_deref().unwrap_or(""), case.name.as_str());
         match at.get(&key) {
             Some(&i) => {
@@ -780,6 +910,7 @@ mod tests {
 
     fn case(classname: Option<&str>, name: &str) -> TestCaseRecord {
         TestCaseRecord {
+            seq: 0,
             source: SOURCE_JUNIT.into(),
             report: "r.xml".into(),
             suite: None,
@@ -825,7 +956,7 @@ mod tests {
         log.report = "ci.log".into();
         let junit = case(Some("tests.test_app"), "test_x");
         let other = case(Some("tests.test_app"), "test_y");
-        let cases = [log, junit.clone(), other.clone()];
+        let cases = [&log, &junit, &other];
         let mut tally = Tally::default();
         let kept = dedup_by_classname(&cases, &mut tally);
         assert_eq!(kept, [&junit, &other]);
@@ -846,7 +977,7 @@ mod tests {
     fn cap_keeps_the_lowest_ids() {
         let mut payload: Option<CellPayload> = None;
         for i in (0..25).rev() {
-            let e = serde_json::json!({"source": "junit", "id": format!("latest:t{i:02}")});
+            let e = serde_json::json!({"source": "junit", "id": format!("t{i:02}")});
             payload = Some(merge_entry(payload.as_ref(), &e).unwrap());
         }
         let (capped, dropped) = cap_entries(payload.unwrap());
@@ -854,7 +985,7 @@ mod tests {
         let CellPayload::Json(s) = capped else { panic!("json") };
         let v: Vec<Value> = serde_json::from_str(&s).unwrap();
         assert_eq!(v.len(), MAX_ENTRIES_PER_NODE);
-        assert_eq!(v[0]["id"], "latest:t00");
-        assert_eq!(v[19]["id"], "latest:t19");
+        assert_eq!(v[0]["id"], "t00");
+        assert_eq!(v[19]["id"], "t19");
     }
 }

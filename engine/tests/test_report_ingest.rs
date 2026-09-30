@@ -3,16 +3,18 @@
 //! frames its trace implicates, capped per node, deterministic, and with no
 //! secret from a report reaching the graph or the `.gmap`.
 //!
-//! Snapshots are written directly: through `code_domain::snapshots::write_tests`,
-//! or, for the leak gate, as hand-edited bytes whose `data_hash` is computed
-//! with `snapshots::data_hash`. `fixture_graph_matches_the_key` builds the
-//! committed substrate-gap fixture `test-reports-fail` itself.
+//! Snapshots are written directly: through `code_domain::snapshots::write_tests`
+//! (one run) or `append_tests_run` (a window of runs, CC.9b), or, for the
+//! leak gate, as hand-edited bytes whose `data_hash` is computed with
+//! `snapshots::data_hash`. `fixture_graph_matches_the_key` builds the
+//! committed substrate-gap fixture `test-reports-fail` itself: a version 1
+//! (0.5.0) snapshot, read as one run.
 
 use std::path::Path;
 
 use glia_code_domain::snapshots::{
     META_FILE, SOURCE_JUNIT, SOURCE_LOG, STATUS_FAILED, TESTS_CASES_FILE, TESTS_LCOV_FILE, TestCaseRecord,
-    TestsMeta, data_hash, tests_dir, write_tests,
+    TestRun, TestsMeta, append_tests_run, data_hash, tests_dir, write_tests,
 };
 use glia_code_domain::{cell_type, node_kind};
 use glia_core::{CellPayload, NodeId};
@@ -50,6 +52,7 @@ fn pytest_tree() -> tempfile::TempDir {
 
 fn failed(classname: Option<&str>, name: &str) -> TestCaseRecord {
     TestCaseRecord {
+        seq: 0,
         source: SOURCE_JUNIT.into(),
         report: "reports/junit.xml".into(),
         suite: Some("pytest".into()),
@@ -129,8 +132,10 @@ fn pytest_case_maps_by_file_line() {
     assert_eq!(e["via"], "file_line");
     assert_eq!(e["role"], "test");
     assert_eq!(e["message"], "ValueError: boom");
-    assert_eq!(e["id"], "latest:tests.test_app::test_list_orders");
+    assert_eq!(e["id"], "tests.test_app::test_list_orders");
     assert_eq!(e["test"], "tests.test_app::test_list_orders");
+    // One run: failed once, in it.
+    assert_eq!((&e["fails"], &e["window"], &e["latest_seq"], &e["last_failed_seq"]), (&1.into(), &1.into(), &0.into(), &0.into()));
     assert_eq!((&e["source"], &e["status"], &e["report"]), (&"junit".into(), &"failed".into(), &"reports/junit.xml".into()));
     assert!(e.get("run").is_none() && e.get("redacted").is_none() && e.get("trace").is_none(), "{e}");
 
@@ -140,10 +145,10 @@ fn pytest_case_maps_by_file_line() {
         .merged;
     assert_eq!(fail(&no_overlay, "tests::test_app::test_list_orders"), entries);
 
-    // A named run keys the ids by it.
+    // A named run is the entry's `run`; the id stays the test's.
     snapshot(d.path(), Some("ci-812"), &[list_orders_case()]);
     let e = &fail(&build(d.path()), "tests::test_app::test_list_orders")[0];
-    assert_eq!((&e["id"], &e["run"]), (&"ci-812:tests.test_app::test_list_orders".into(), &"ci-812".into()));
+    assert_eq!((&e["id"], &e["run"]), (&"tests.test_app::test_list_orders".into(), &"ci-812".into()));
 }
 
 #[test]
@@ -239,7 +244,7 @@ fn trace_implicates_non_test_frames() {
         let e = &entries[0];
         assert_eq!(e["role"], "implicated", "{qname}");
         assert_eq!(e["frame"], frame, "{qname}");
-        assert_eq!(e["id"], format!("latest:checks.test_app::test_list_orders#{frame}"));
+        assert_eq!(e["id"], format!("checks.test_app::test_list_orders#{frame}"));
         assert_eq!(e["message"], "ValueError: boom");
         assert!(e.get("via").is_none(), "{e}");
     }
@@ -262,7 +267,7 @@ fn per_node_cap() {
     let entries = fail(&m, "api::app::helper");
     assert_eq!(entries.len(), 20);
     let ids: Vec<&str> = entries.iter().map(|e| e["id"].as_str().expect("id")).collect();
-    let want: Vec<String> = (0..20).map(|i| format!("latest:tests.test_gone::test_{i:02}#0")).collect();
+    let want: Vec<String> = (0..20).map(|i| format!("tests.test_gone::test_{i:02}#0")).collect();
     assert_eq!(ids, want, "the lowest ids stay");
     assert!(entries.iter().all(|e| e["role"] == "implicated"));
 }
@@ -338,12 +343,13 @@ fn secrets_in_a_report_never_reach_the_graph_or_the_gmap() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(TESTS_CASES_FILE), &cases).unwrap();
     std::fs::write(dir.join(TESTS_LCOV_FILE), b"").unwrap();
-    let meta = TestsMeta {
+    let mut meta = TestsMeta {
         cases_total: 1,
         failed: 1,
         data_hash: data_hash(&[&cases, b""]),
         ..TestsMeta::new(None, vec!["reports/junit.xml".into()], 0, 0)
     };
+    meta.runs = vec![TestRun::of_meta(0, &meta)];
     std::fs::write(dir.join(META_FILE), serde_json::to_vec_pretty(&meta).unwrap()).unwrap();
 
     let m = build(d.path());
@@ -392,4 +398,85 @@ fn fixture_graph_matches_the_key() {
         let e = &fail(&m, qname)[0];
         assert_eq!((&e["role"], &e["frame"]), (&"implicated".into(), &frame.into()), "{qname}");
     }
+}
+
+/// CC.9b's `pts` tree: shop/a.py `price` and `place` (place calls price),
+/// tests/test_price.py `test_price_doubles`, tests/test_place.py
+/// `test_place_prices`.
+fn pts_tree() -> tempfile::TempDir {
+    tree(&[
+        ("shop/a.py", "def price(o):\n    return o * 2\n\n\ndef place(o):\n    return price(o)\n"),
+        ("tests/test_price.py", "from shop.a import price\n\n\ndef test_price_doubles():\n    assert price(2) == 4\n"),
+        ("tests/test_place.py", "from shop.a import place\n\n\ndef test_place_prices():\n    assert place(2) == 4\n"),
+    ])
+}
+
+/// A pts failure at its def line (a `file_line` mapping) whose trace runs
+/// through `price`.
+fn pts_failure(module: &str, name: &str, message: &str) -> TestCaseRecord {
+    TestCaseRecord {
+        file: Some(format!("tests/{module}.py")),
+        line: Some(4),
+        message: Some(message.into()),
+        trace: Some(format!("tests/{module}.py:5: in {name}\n    assert x\nshop/a.py:2: in price\n    return o * 2\nE   AssertionError")),
+        ..failed(Some(&format!("tests.{module}")), name)
+    }
+}
+
+/// Three runs, window 10: test_place_prices fails in runs 0 and 2,
+/// test_price_doubles in run 1 only.
+fn three_runs(root: &Path) {
+    let runs: [&[(&str, &str)]; 3] = [
+        &[("test_place", "test_place_prices")],
+        &[("test_price", "test_price_doubles")],
+        &[("test_place", "test_place_prices")],
+    ];
+    for (i, failures) in runs.into_iter().enumerate() {
+        let cases: Vec<TestCaseRecord> =
+            failures.iter().map(|(m, n)| pts_failure(m, n, &format!("assert {i} == 4"))).collect();
+        let meta = TestsMeta::new(Some(format!("ci-{i}")), vec!["reports/junit.xml".into()], 0, 1);
+        append_tests_run(root, meta, &cases, &[], 10, false).expect("append a run");
+    }
+}
+
+#[test]
+fn fail_counts_over_the_window() {
+    let d = pts_tree();
+    three_runs(d.path());
+    let m = build(d.path());
+    let place = fail(&m, "tests::test_place::test_place_prices");
+    assert_eq!(place.len(), 1, "one entry per test, not per run: {place:?}");
+    let e = &place[0];
+    assert_eq!(e["id"], "tests.test_place::test_place_prices");
+    assert_eq!((&e["fails"], &e["window"], &e["latest_seq"], &e["last_failed_seq"]), (&2.into(), &3.into(), &2.into(), &2.into()));
+    // The newest failure's run, message and mapping.
+    assert_eq!((&e["run"], &e["message"], &e["via"]), (&"ci-2".into(), &"assert 2 == 4".into(), &"file_line".into()));
+
+    let doubles = fail(&m, "tests::test_price::test_price_doubles");
+    assert_eq!(doubles.len(), 1, "{doubles:?}");
+    let e = &doubles[0];
+    assert_eq!((&e["fails"], &e["window"], &e["latest_seq"], &e["last_failed_seq"]), (&1.into(), &3.into(), &2.into(), &1.into()));
+    assert_eq!(e["run"], "ci-1");
+
+    // price is on both traces: one implicated entry per test, each counted over the window.
+    let price: Vec<(String, u64, u64)> = fail(&m, "shop::a::price")
+        .iter()
+        .map(|e| (e["id"].as_str().unwrap_or_default().to_string(), e["fails"].as_u64().unwrap_or(0), e["last_failed_seq"].as_u64().unwrap_or(9)))
+        .collect();
+    assert_eq!(
+        price,
+        [("tests.test_place::test_place_prices#1".to_string(), 2, 2), ("tests.test_price::test_price_doubles#1".to_string(), 1, 1)]
+    );
+
+    // Deterministic, and a window of 2 drops run 0: test_place_prices failed once.
+    let cells = |m: &MergedGraph| -> Vec<Vec<Vec<glia_core::Cell>>> {
+        m.graphs.iter().map(|g| g.nodes.iter().map(|n| n.cells.clone()).collect()).collect()
+    };
+    assert_eq!(cells(&build(d.path())), cells(&m));
+    let meta = TestsMeta::new(Some("ci-3".into()), vec!["reports/junit.xml".into()], 0, 2);
+    append_tests_run(d.path(), meta, &[], &[], 2, false).expect("append a passing run");
+    let m = build(d.path());
+    let e = &fail(&m, "tests::test_place::test_place_prices")[0];
+    assert_eq!((&e["fails"], &e["window"], &e["latest_seq"], &e["last_failed_seq"]), (&1.into(), &2.into(), &3.into(), &2.into()));
+    assert!(fail(&m, "tests::test_price::test_price_doubles").is_empty(), "run 1 aged out");
 }
