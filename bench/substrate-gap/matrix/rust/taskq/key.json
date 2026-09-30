@@ -1,0 +1,33 @@
+{
+  "framework": "rust-apalis",
+  "language": "rust",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "taskq",
+  "cells": [
+    "rust/taskq"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "WelcomeEmail"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "WelcomeEmail"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "WelcomeEmail",
+      "to": "WelcomeEmail",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "apalis: typed job pushed to storage, worker built over it (the nearest Rust task-queue framework) || CF.8a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): no Rust task-queue row in parsers/code/extractors/src/queues.rs: apalis typed jobs (`storage.push(Job{..})` + `WorkerBuilder::new(..)`)."
+}

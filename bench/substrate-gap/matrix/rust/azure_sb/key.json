@@ -1,0 +1,32 @@
+{
+  "framework": "rust-azservicebus",
+  "language": "rust",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "azure_sb",
+  "cells": [
+    "rust/azure_sb"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "azservicebus crate (0.25, the Rust Service Bus client; API from its docs.rs examples): client.create_sender(\"orders\", ..) / client.create_receiver_for_queue(\"orders\", ..) || CF.8a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): the Service Bus rows in parsers/code/extractors/src/queues.rs are C# (CreateSender / CreateReceiver), JS (.createSender / .createReceiver) and Python (get_queue_sender / get_queue_receiver) only, gated on their packages; Rust `create_sender(\"x\")` / `create_receiver_for_queue(\"x\")` and an `azservicebus` gate have no row."
+}

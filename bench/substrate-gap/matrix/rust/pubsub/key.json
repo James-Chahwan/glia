@@ -1,0 +1,33 @@
+{
+  "framework": "rust-google-cloud-pubsub",
+  "language": "rust",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "pubsub",
+  "cells": [
+    "rust/pubsub"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "google-cloud-pubsub crate: client.topic(\"orders\") / client.subscription(\"orders\") || CF.8a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=eventbus. Predicted extractor gap (backlog, not fixed by the probe): google-cloud-pubsub crate `client.topic(\"x\")` / `client.subscription(\"x\")`: rows gated to JS / Python; `publisher.publish(..)` instead mints a verb-fallback EVENT_EMITTER (receiver suffix `publisher`), a phantom (CB-g)."
+}

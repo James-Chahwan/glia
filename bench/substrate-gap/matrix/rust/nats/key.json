@@ -1,0 +1,33 @@
+{
+  "framework": "rust-async-nats",
+  "language": "rust",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "nats",
+  "cells": [
+    "rust/nats"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "async-nats client.publish / client.subscribe (README shape) || CF.8a baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): async-nats `client.publish(\"x\", ..)` / `client.subscribe(\"x\")`: the NATS rows need the receiver spelled `nc`."
+}
