@@ -1,0 +1,22 @@
+{
+  "framework": "grpc-host-narrowing",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-e (gRPC): two nested services each declare a proto `UserService` (packages users.v1 and admin.v1); the gateway stub carries no package evidence (no generated-package import), so graph/src/resolvers/grpc.rs pick_targets returns Ambiguous and emits nothing. The stub's connection is dialled at users-svc:50051 in the same function: after, the dial host names services/users (the project that owns users.v1's proto file) and the call pairs with grpc:users.v1.UserService. Measured on HEAD 2170ff8.",
+  "expect_edges": [
+    {
+      "from": "grpc_client:UserService @services/gateway",
+      "to": "grpc:users.v1.UserService",
+      "category": "GRPC_CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "grpc_client:UserService @services/gateway",
+      "to": "grpc:admin.v1.UserService",
+      "category": "GRPC_CALLS"
+    }
+  ]
+}

@@ -502,6 +502,22 @@ pub mod cell_type {
     pub const POSITION: CellTypeId = CellTypeId(3);
     pub const INTENT: CellTypeId = CellTypeId(4);
     pub const ROUTE_METHOD: CellTypeId = CellTypeId(5);
+    /// One client call site, a compact JSON cell stacked once per site (the
+    /// graph builder appends the cells of every copy of a node), so a side's
+    /// cells are the union of its sites. Two payloads:
+    ///
+    /// - HTTP, on an ENDPOINT: `{"method","path","file","line","col",
+    ///   "confidence"[,"raw"][,"host"]}` (`endpoint::endpoint_hit_json`;
+    ///   `hosts` / `template` added by the engine's endpoint fold and the
+    ///   wrapper stage). ROUTE / ENDPOINT readers (the Locator, `glia arch`
+    ///   `node_file`, `http_node_span`, gaps) key on `file` or on the kind.
+    /// - Channel client, on a WS_CLIENT or GRPC_CLIENT (CB.21):
+    ///   `{"via":"ws"|"grpc"[,"host":"<host[:port]>"]}`
+    ///   (`endpoint::channel_hit_cell`). `host` is the authority the site
+    ///   dials (a ws URL's, a gRPC dial target's), present only when the
+    ///   source spells it as a literal. No `file`, so every file-keyed reader
+    ///   skips it; the channel resolvers' host narrowing reads `host` exactly
+    ///   as the HTTP resolver's does, and a hostless site blocks narrowing.
     pub const ENDPOINT_HIT: CellTypeId = CellTypeId(6);
     /// The tests that cover a node DIRECTLY: the sources of the TESTS edges
     /// into it (the Python parser's function-level edges, the engine's module
@@ -2219,6 +2235,24 @@ pub mod endpoint {
                 })
         });
         (host, path)
+    }
+
+    /// CB.21: the ENDPOINT_HIT a channel CLIENT site carries (see
+    /// [`cell_type::ENDPOINT_HIT`]): `{"via":"<via>","host":"<host>"}`, or
+    /// `{"via":"<via>"}` when the site names no literal authority. The one
+    /// writer of that payload, shared by the WebSocket and gRPC client
+    /// extractors; `via` is the channel (`ws`, `grpc`). A hostless cell is
+    /// written on purpose: it is what tells host narrowing that one site
+    /// dials somewhere unknown.
+    pub fn channel_hit_cell(via: &str, host: Option<&str>) -> Cell {
+        let payload = match host {
+            Some(h) => format!(r#"{{"via":"{}","host":"{}"}}"#, esc(via), esc(h)),
+            None => format!(r#"{{"via":"{}"}}"#, esc(via)),
+        };
+        Cell {
+            kind: cell_type::ENDPOINT_HIT,
+            payload: CellPayload::Json(payload),
+        }
     }
 
     /// Request path for a CLIENT call literal, for parsers that reconstruct
@@ -4163,6 +4197,25 @@ mod tests {
             nodes[0].cells[0].payload,
             CellPayload::Json(payload(None))
         );
+    }
+
+    /// CB.21 — a channel client's ENDPOINT_HIT: `via` first, `host` only when
+    /// given, escaped; never a `file`, so the file-keyed readers skip it.
+    #[test]
+    fn channel_hit_cell_carries_via_and_an_optional_host() {
+        let json = |c: Cell| match c.payload {
+            CellPayload::Json(j) => j,
+            other => panic!("not JSON: {other:?}"),
+        };
+        let c = endpoint::channel_hit_cell("ws", Some("chat-svc:8080"));
+        assert_eq!(c.kind, cell_type::ENDPOINT_HIT);
+        assert_eq!(json(c), r#"{"via":"ws","host":"chat-svc:8080"}"#);
+        assert_eq!(json(endpoint::channel_hit_cell("grpc", None)), r#"{"via":"grpc"}"#);
+        assert_eq!(
+            json(endpoint::channel_hit_cell("grpc", Some("a\"b"))),
+            r#"{"via":"grpc","host":"a\"b"}"#
+        );
+        assert_eq!(endpoint::http_node_span(&[endpoint::channel_hit_cell("ws", Some("h"))]), None);
     }
 
     /// A11.5 — `host` rides on ENDPOINT_HIT only when given, after `raw`; the

@@ -28,18 +28,32 @@
 //!   pattern minus its `*` — `room:*` reaches `room:lobby`, never
 //!   `lobby:room`. A bare `*` catch-all asserts nothing and never pairs.
 //!
+//! - **Host narrowing (CB.21).** A client whose URL names a service (the
+//!   ENDPOINT_HIT `host` each site records, `ws://chat-svc:8080/ws`) and that
+//!   matches two or more handlers keeps only the handlers of the project or
+//!   repo that host names (`host::narrow_by_host`, A11.4 / LB.4b's rule: any
+//!   hostless site, an unknown host or a named scope with no handler leaves
+//!   every match). A handler is scoped by its LB.8 ` @owner` segment. Such a
+//!   pair's evidence rule is `host`, whatever tier it matched at.
+//!
 //! fired_on marker, once per build that pairs or drops anything:
-//!   `[ws-resolve] 2 pairs (exact=1 suffix=0 param=0 inherited=0 wildcard=1) dropped-generic=0`
+//!   `[ws-resolve] 2 pairs (exact=1 suffix=0 param=0 inherited=0 wildcard=1 host=0) dropped-generic=0 narrowed-by-host=0`
 //! A pair with a generic handler counts `inherited` whatever tier its
-//! inherited path matched at. `dropped-generic` counts (client, handler)
-//! combinations that a generic side was part of and that did not pair.
+//! inherited path matched at, and a host-narrowed pair counts `host` whatever
+//! tier it matched at. `dropped-generic` counts (client, handler)
+//! combinations that a generic side was part of and that did not pair;
+//! `narrowed-by-host` counts clients whose handlers a host narrowed.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::{edge_category, node_kind};
-use glia_core::{Confidence, Edge, NodeId};
+use glia_core::{Cell, Confidence, Edge, NodeId, RepoId};
 
+use super::host::{
+    AliasIndex, HostScoped, Narrowed, Owners, build_service_alias_index, hit_hosts, narrow_by_host,
+    owner_from_qname_suffix,
+};
 use super::http::route_path;
 use super::{CrossGraphResolver, RuleTally, rule_evidence, weakest};
 use crate::merged::MergedGraph;
@@ -60,13 +74,15 @@ impl CrossGraphResolver for WebSocketStackResolver {
         if pairs > 0 || stats.dropped_generic > 0 {
             eprintln!(
                 "[ws-resolve] {pairs} pairs (exact={} suffix={} param={} inherited={} \
-                 wildcard={}) dropped-generic={}",
+                 wildcard={} host={}) dropped-generic={} narrowed-by-host={}",
                 stats.exact,
                 stats.suffix,
                 stats.param,
                 stats.inherited,
                 stats.wildcard,
-                stats.dropped_generic
+                stats.host,
+                stats.dropped_generic,
+                stats.narrowed_by_host
             );
         }
     }
@@ -80,21 +96,27 @@ struct WsStats {
     param: usize,
     inherited: usize,
     wildcard: usize,
+    /// CB.21: pairs a host narrowing kept, whatever tier they matched at.
+    host: usize,
     dropped_generic: usize,
+    /// CB.21: clients whose matched handlers a host narrowed.
+    narrowed_by_host: usize,
 }
 
 impl WsStats {
     fn pairs(&self) -> usize {
-        self.exact + self.suffix + self.param + self.inherited + self.wildcard
+        self.exact + self.suffix + self.param + self.inherited + self.wildcard + self.host
     }
 
-    /// Count one pair under its tier and return its evidence rule (LC.3c):
-    /// `inherited` for a generic handler whatever tier its inherited route
-    /// path matched at, the tier's own name otherwise. `None`, counting
-    /// nothing, for a dropped pair.
-    fn record(&mut self, generic: bool, tier: WsPair) -> Option<&'static str> {
+    /// Count one pair under its rule and return that evidence rule (LC.3c):
+    /// `host` for a pair a host narrowing kept (CB.21), else `inherited` for
+    /// a generic handler whatever tier its inherited route path matched at,
+    /// the tier's own name otherwise. `None`, counting nothing, for a dropped
+    /// pair.
+    fn record(&mut self, generic: bool, tier: WsPair, narrowed: bool) -> Option<&'static str> {
         let (counter, rule) = match (generic, tier) {
             (_, WsPair::No) => return None,
+            _ if narrowed => (&mut self.host, "host"),
             (true, _) => (&mut self.inherited, "inherited"),
             (false, WsPair::Exact) => (&mut self.exact, "exact"),
             (false, WsPair::Suffix) => (&mut self.suffix, "suffix"),
@@ -116,6 +138,7 @@ impl WsStats {
             self.param,
             self.inherited,
             self.wildcard,
+            self.host,
         ]) {
             t.add(rule, n);
         }
@@ -123,13 +146,18 @@ impl WsStats {
     }
 }
 
-/// LC.3c: the WS_CONNECTS evidence rules, in `[ws-resolve]` order.
-const WS_RULES: [&str; 5] = ["exact", "suffix", "param", "inherited", "wildcard"];
+/// LC.3c: the WS_CONNECTS evidence rules, in `[ws-resolve]` order (`host`,
+/// CB.21's host-narrowed pair, last).
+const WS_RULES: [&str; 6] = ["exact", "suffix", "param", "inherited", "wildcard", "host"];
 
 /// One WS_HANDLER node, with the path(s) clients are paired against.
 struct Handler {
     id: NodeId,
     confidence: Confidence,
+    /// CB.21: the repo it lives in and its LB.8 owner, interned in the
+    /// resolve's [`Owners`] (`None` outside every nested project).
+    repo: RepoId,
+    owner: Option<u32>,
     /// The key was a fallback name: `paths` are the inherited route paths
     /// (possibly none), never the name itself. A bare `*` catch-all topic is
     /// generic with no paths at all: it has no mount to inherit.
@@ -139,116 +167,195 @@ struct Handler {
     paths: Vec<Vec<String>>,
 }
 
-/// Every WS_CONNECTS edge of the build, in client-node order then
-/// handler-node order (graph order both), each (client, handler) once.
-fn pair_all(graphs: &[RepoGraph]) -> (Vec<Edge>, WsStats) {
-    let mut stats = WsStats::default();
-    let handlers = collect_handlers(graphs);
-    let mut edges = Vec::new();
-    if handlers.is_empty() {
-        return (edges, stats);
-    }
-    let mut seen_clients: HashSet<NodeId> = HashSet::new();
+/// One WS_CLIENT node, however many graph entries carry it.
+struct Client<'g> {
+    id: NodeId,
+    /// The first entry's confidence (the pre-CB.21 pairing read only it).
+    confidence: Confidence,
+    /// The owner-free key (`/ws`), from the first entry's qname.
+    key: &'g str,
+    /// Every entry's cells, so host narrowing reads every call site.
+    cells: Vec<&'g Cell>,
+}
+
+/// Every WS_CLIENT node of the merge, once per NodeId, in first-seen order.
+/// A node with no readable `ws_client:` key is skipped.
+fn collect_clients(graphs: &[RepoGraph]) -> Vec<Client<'_>> {
+    let mut out: Vec<Client<'_>> = Vec::new();
+    let mut at: HashMap<NodeId, Option<usize>> = HashMap::new();
     for g in graphs {
         for n in &g.nodes {
-            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::WS_CLIENT)
-                || !seen_clients.insert(n.id)
-            {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::WS_CLIENT) {
                 continue;
             }
+            match at.get(&n.id) {
+                Some(Some(i)) => {
+                    if let Some(c) = out.get_mut(*i) {
+                        c.cells.extend(&n.cells);
+                    }
+                    continue;
+                }
+                Some(None) => continue,
+                None => {}
+            }
             // LB.8: the owner segment names the connecting project, not the
-            // path; a client pairs every same-path handler, whoever owns it.
+            // path; the key is the path alone.
             let Some(key) = g
                 .nav
                 .qname_by_id
                 .get(&n.id)
                 .and_then(|q| split_owner(q).0.strip_prefix("ws_client:"))
             else {
+                at.insert(n.id, None);
                 continue;
             };
-            if is_generic_ws_key(key) {
-                // The client's URL was unreadable: it asserts no path, so it
-                // pairs nothing — not even another fallback name.
-                stats.dropped_generic += handlers.len();
+            at.insert(n.id, Some(out.len()));
+            out.push(Client {
+                id: n.id,
+                confidence: n.confidence,
+                key,
+                cells: n.cells.iter().collect(),
+            });
+        }
+    }
+    out
+}
+
+/// One handler a client matched: which, at what tier, and the scope host
+/// narrowing reads (CB.21).
+#[derive(Debug, Clone, Copy)]
+struct WsTarget {
+    handler: usize,
+    tier: WsPair,
+    repo: RepoId,
+    owner: Option<u32>,
+}
+
+impl HostScoped for WsTarget {
+    fn repo(&self) -> RepoId {
+        self.repo
+    }
+    fn owner(&self) -> Option<u32> {
+        self.owner
+    }
+}
+
+/// Every WS_CONNECTS edge of the build, in client-node order then
+/// handler-node order (graph order both), each (client, handler) once.
+///
+/// CB.21: a client that matches two or more handlers is narrowed by its
+/// hosts first ([`narrow_by_host`] over the handlers' LB.8 owners); the alias
+/// index is built once, on the first client that needs it.
+fn pair_all(graphs: &[RepoGraph]) -> (Vec<Edge>, WsStats) {
+    let mut stats = WsStats::default();
+    let (handlers, owners) = collect_handlers(graphs);
+    let mut edges = Vec::new();
+    if handlers.is_empty() {
+        return (edges, stats);
+    }
+    let mut aliases: Option<AliasIndex> = None;
+    for client in collect_clients(graphs) {
+        if is_generic_ws_key(client.key) {
+            // The client's URL was unreadable: it asserts no path, so it
+            // pairs nothing — not even another fallback name.
+            stats.dropped_generic += handlers.len();
+            continue;
+        }
+        let c = ws_segments(client.key);
+        let mut matched: Vec<WsTarget> = Vec::new();
+        for (i, h) in handlers.iter().enumerate() {
+            match h
+                .paths
+                .iter()
+                .map(|p| ws_pair(&c, p))
+                .find(|t| *t != WsPair::No)
+            {
+                Some(tier) => matched.push(WsTarget {
+                    handler: i,
+                    tier,
+                    repo: h.repo,
+                    owner: h.owner,
+                }),
+                None if h.generic => stats.dropped_generic += 1,
+                None => {}
+            }
+        }
+        let mut narrowed = false;
+        if matched.len() >= 2
+            && let Some(hosts) = hit_hosts(client.cells.iter().copied())
+        {
+            let aliases =
+                aliases.get_or_insert_with(|| build_service_alias_index(graphs, &owners).0);
+            narrowed = narrow_by_host(aliases, Some(&hosts), &mut matched) != Narrowed::No;
+            stats.narrowed_by_host += usize::from(narrowed);
+        }
+        for t in matched {
+            let Some(h) = handlers.get(t.handler) else {
                 continue;
-            }
-            let c = ws_segments(key);
-            for h in &handlers {
-                let Some(tier) = h
-                    .paths
-                    .iter()
-                    .map(|p| ws_pair(&c, p))
-                    .find(|t| *t != WsPair::No)
-                else {
-                    if h.generic {
-                        stats.dropped_generic += 1;
-                    }
-                    continue;
-                };
-                let Some(rule) = stats.record(h.generic, tier) else {
-                    continue;
-                };
-                // LC.3c: the edge's evidence names the tier it counted under.
-                let confidence = weakest(n.confidence, h.confidence);
-                edges.push(
-                    Edge::new(n.id, h.id, edge_category::WS_CONNECTS, confidence)
-                        .with_cell(rule_evidence("websocket", rule).to_cell()),
-                );
-            }
+            };
+            let Some(rule) = stats.record(h.generic, t.tier, narrowed) else {
+                continue;
+            };
+            // LC.3c: the edge's evidence names the rule it counted under.
+            let confidence = weakest(client.confidence, h.confidence);
+            edges.push(
+                Edge::new(client.id, h.id, edge_category::WS_CONNECTS, confidence)
+                    .with_cell(rule_evidence("websocket", rule).to_cell()),
+            );
         }
     }
     (edges, stats)
 }
 
-/// Every WS_HANDLER node once, in graph order. A handler that names its own
+/// Every WS_HANDLER node once, in graph order, and the [`Owners`] their LB.8
+/// owner segments intern to (in that order). A handler that names its own
 /// path pairs by it; a generic one gets its inherited route paths (the join
 /// is only built when a generic handler exists).
-fn collect_handlers(graphs: &[RepoGraph]) -> Vec<Handler> {
+fn collect_handlers(graphs: &[RepoGraph]) -> (Vec<Handler>, Owners) {
     let mut seen: HashSet<NodeId> = HashSet::new();
-    let mut found: Vec<(NodeId, Confidence, &str)> = Vec::new();
+    let mut owners = Owners::default();
+    let mut found: Vec<(NodeId, Confidence, &str, RepoId, Option<u32>)> = Vec::new();
     for g in graphs {
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::WS_HANDLER) || !seen.insert(n.id) {
                 continue;
             }
-            if let Some(key) = g
-                .nav
-                .qname_by_id
-                .get(&n.id)
-                .and_then(|q| split_owner(q).0.strip_prefix("ws:"))
-            {
-                found.push((n.id, n.confidence, key));
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
+            if let Some(key) = split_owner(qname).0.strip_prefix("ws:") {
+                let owner = owner_from_qname_suffix(qname).and_then(|o| owners.intern(o));
+                found.push((n.id, n.confidence, key, g.repo, owner));
             }
         }
     }
     let inherits = |key: &str| is_generic_ws_key(key) && !is_catch_all_key(key);
     let reach = found
         .iter()
-        .any(|(_, _, key)| inherits(key))
+        .any(|(_, _, key, _, _)| inherits(key))
         .then(|| RouteReach::new(graphs));
-    found
+    let handlers = found
         .into_iter()
-        .map(|(id, confidence, key)| match &reach {
-            _ if is_catch_all_key(key) => Handler {
+        .map(|(id, confidence, key, repo, owner)| {
+            let (generic, paths) = match &reach {
+                _ if is_catch_all_key(key) => (true, Vec::new()),
+                Some(reach) if inherits(key) => (
+                    true,
+                    reach.paths_of(id).iter().map(|p| ws_segments(p)).collect(),
+                ),
+                _ => (false, vec![ws_segments(key)]),
+            };
+            Handler {
                 id,
                 confidence,
-                generic: true,
-                paths: Vec::new(),
-            },
-            Some(reach) if inherits(key) => Handler {
-                id,
-                confidence,
-                generic: true,
-                paths: reach.paths_of(id).iter().map(|p| ws_segments(p)).collect(),
-            },
-            _ => Handler {
-                id,
-                confidence,
-                generic: false,
-                paths: vec![ws_segments(key)],
-            },
+                repo,
+                owner,
+                generic,
+                paths,
+            }
         })
-        .collect()
+        .collect();
+    (handlers, owners)
 }
 
 /// The route join for generic handlers, built from each graph's own edges
@@ -715,6 +822,123 @@ mod tests {
         assert_eq!(edges.len(), 1, "{edges:?}");
         assert!(connects(&edges, ids[0], ws));
         assert_eq!(stats.inherited, 1);
+    }
+
+    // ---- CB.21: host narrowing -------------------------------------------
+
+    fn hit(json: &str) -> Cell {
+        Cell {
+            kind: glia_code_domain::cell_type::ENDPOINT_HIT,
+            payload: glia_core::CellPayload::Json(json.into()),
+        }
+    }
+
+    /// The channel-monorepo-owner shape: one repo, the `chat` and `notify`
+    /// projects each serving `/ws`, and the `web` project's client carrying
+    /// `cells`. Returns (graph, client, chat handler, notify handler).
+    fn ws_monorepo(cells: Vec<Cell>) -> (RepoGraph, NodeId, NodeId, NodeId) {
+        let mut g = G::new("mono");
+        for (rel, label) in [
+            ("services/chat", "chat"),
+            ("services/notify", "notify"),
+            ("web", "web"),
+        ] {
+            let id = g.node(node_kind::PROJECT, &format!("project:{rel}"));
+            g.nav.name_by_id.insert(id, label.to_string());
+        }
+        let chat = g.node(node_kind::WS_HANDLER, "ws:/ws @services/chat");
+        let notify = g.node(node_kind::WS_HANDLER, "ws:/ws @services/notify");
+        let client = g.node(node_kind::WS_CLIENT, "ws_client:/ws @web");
+        if let Some(n) = g.nodes.last_mut() {
+            n.cells = cells;
+        }
+        (g.build(), client, chat, notify)
+    }
+
+    fn rule_of(e: &Edge) -> String {
+        e.cells
+            .iter()
+            .find_map(|c| match &c.payload {
+                glia_core::CellPayload::Json(j)
+                    if c.kind == glia_code_domain::cell_type::EVIDENCE =>
+                {
+                    Some(j.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// CB.21: `new WebSocket("ws://chat-svc:8080/ws")` keeps the chat
+    /// handler only; the edge's rule is `host`. Two sites naming the same
+    /// service narrow the same way.
+    #[test]
+    fn ws_host_narrows_to_the_named_project() {
+        for cells in [
+            vec![hit(r#"{"via":"ws","host":"chat-svc:8080"}"#)],
+            vec![
+                hit(r#"{"via":"ws","host":"chat-svc:8080"}"#),
+                hit(r#"{"via":"ws","host":"chat"}"#),
+            ],
+        ] {
+            let (g, client, chat, notify) = ws_monorepo(cells);
+            let (edges, stats) = pair_all(&[g]);
+            assert!(connects(&edges, client, chat), "{edges:?}");
+            assert!(!connects(&edges, client, notify), "{edges:?}");
+            assert_eq!(edges.len(), 1);
+            assert_eq!(
+                stats,
+                WsStats {
+                    host: 1,
+                    narrowed_by_host: 1,
+                    ..WsStats::default()
+                }
+            );
+            assert!(
+                rule_of(&edges[0]).contains(r#""rule":"host""#),
+                "{}",
+                rule_of(&edges[0])
+            );
+        }
+    }
+
+    /// CB.21: no cell, a hostless site among hosted ones, an unknown host, or
+    /// hosts naming both services: both handlers pair, at their tier.
+    #[test]
+    fn ws_no_host_keeps_both() {
+        for cells in [
+            vec![],
+            vec![hit(r#"{"via":"ws"}"#)],
+            vec![
+                hit(r#"{"via":"ws","host":"chat-svc:8080"}"#),
+                hit(r#"{"via":"ws"}"#),
+            ],
+            vec![hit(r#"{"via":"ws","host":"api.example.com"}"#)],
+            vec![
+                hit(r#"{"via":"ws","host":"chat-svc"}"#),
+                hit(r#"{"via":"ws","host":"notify"}"#),
+            ],
+        ] {
+            let (g, client, chat, notify) = ws_monorepo(cells.clone());
+            let (edges, stats) = pair_all(&[g]);
+            assert!(
+                connects(&edges, client, chat) && connects(&edges, client, notify),
+                "{cells:?}: {edges:?}"
+            );
+            assert_eq!(
+                stats,
+                WsStats {
+                    exact: 2,
+                    ..WsStats::default()
+                },
+                "{cells:?}"
+            );
+            assert!(
+                edges
+                    .iter()
+                    .all(|e| rule_of(e).contains(r#""rule":"exact""#))
+            );
+        }
     }
 
     // ---- LA.18c: channel-keyed frameworks --------------------------------

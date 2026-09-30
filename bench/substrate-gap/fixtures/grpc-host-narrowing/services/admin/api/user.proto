@@ -1,0 +1,6 @@
+syntax = "proto3";
+package admin.v1;
+option go_package = "example.com/admin/api";
+service UserService { rpc GetUser (GetUserRequest) returns (User); }
+message GetUserRequest { string id = 1; }
+message User { string id = 1; }

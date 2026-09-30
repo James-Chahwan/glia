@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use glia_code_domain::endpoint::channel_hit_cell;
 use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
@@ -462,6 +463,10 @@ fn suffix_pattern_hits(source: &str) -> Vec<(String, Vec<usize>)> {
 
 /// Push one GRPC_CLIENT and an anchor for each of its construction `sites`
 /// (byte offsets into `source`). Both client passes go through here.
+///
+/// CB.21: each site also stacks one ENDPOINT_HIT, `{"via":"grpc","host":..}`
+/// with the target its channel dials ([`dial_host`]), `{"via":"grpc"}` when
+/// the site's function names none. Returns how many sites named a host.
 fn push_client_node(
     out: &mut GrpcNodes,
     source: &str,
@@ -470,14 +475,21 @@ fn push_client_node(
     module_id: NodeId,
     repo: RepoId,
     evidence: Option<&Cell>,
-) {
+) -> usize {
     let qname = format!("grpc_client:{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRPC_CLIENT, &qname);
+    let mut cells: Vec<Cell> = evidence.cloned().into_iter().collect();
+    let mut hosted = 0usize;
+    for &at in sites {
+        let host = dial_host(source, at);
+        hosted += usize::from(host.is_some());
+        cells.push(channel_hit_cell("grpc", host.as_deref()));
+    }
     out.nodes.push(Node {
         id,
         repo,
         confidence: Confidence::Medium,
-        cells: evidence.cloned().into_iter().collect(),
+        cells,
     });
     out.nav
         .record(id, name, &qname, node_kind::GRPC_CLIENT, Some(module_id));
@@ -485,6 +497,294 @@ fn push_client_node(
         node: id,
         line: line_of(source, at),
     }));
+    hosted
+}
+
+// ---- CB.21: the host a client's channel dials -------------------------------
+
+/// How many lines above a client construction site [`dial_target_before`]
+/// reads, at most: the site's function, or this much of it.
+const DIAL_LOOKBACK_LINES: usize = 60;
+
+/// Longest argument region a dial or constructor read walks, in bytes.
+const DIAL_MAX_ARGS: usize = 512;
+
+/// How far past a construction site its own `(` may sit (the needle's length
+/// bounds it; this only keeps a malformed read short).
+const DIAL_MAX_NEEDLE: usize = 128;
+
+/// Calls that open a gRPC channel, `(needle, host_port)`: the target is the
+/// call's first string-literal argument, and with `host_port` the argument
+/// after it is the port (`forAddress("users", 50051)` -> `users:50051`).
+const DIAL_CALLS: &[(&str, bool)] = &[
+    // Go
+    ("grpc.Dial(", false),
+    ("grpc.DialContext(", false),
+    ("grpc.NewClient(", false),
+    // Python, sync and asyncio
+    ("grpc.insecure_channel(", false),
+    ("grpc.secure_channel(", false),
+    ("grpc.aio.insecure_channel(", false),
+    ("grpc.aio.secure_channel(", false),
+    // Java / Kotlin: ManagedChannelBuilder, NettyChannelBuilder, OkHttp..., Grpc
+    (".forTarget(", false),
+    (".forAddress(", true),
+    ("Grpc.newChannelBuilder(", false),
+    ("Grpc.newChannelBuilderForAddress(", true),
+    // C#: Grpc.Net.Client and Grpc.Core
+    ("GrpcChannel.ForAddress(", false),
+    ("new Channel(", false),
+    // Rust tonic
+    ("Channel::from_static(", false),
+    ("Endpoint::from_static(", false),
+    // Dart
+    ("ClientChannel(", false),
+];
+
+/// The target one client construction site dials, as `host[:port]`, or `None`.
+///
+/// The constructor's own arguments first: a dial call nested in them
+/// (`FooStub(grpc.insecure_channel("users:50051"))`), else a first argument
+/// that is itself a string literal (Node `new pb.FooClient("users:50051",
+/// creds)`, Ruby `Foo::Stub.new('users:50051', ..)`, tonic
+/// `FooClient::connect("http://users:50051")`). Then the nearest dial call
+/// above the site in its function ([`dial_target_before`]).
+fn dial_host(source: &str, site: usize) -> Option<String> {
+    let own = source
+        .get(site..)
+        .and_then(|rest| rest.find('('))
+        .filter(|&i| i <= DIAL_MAX_NEEDLE)
+        .and_then(|i| call_args(source, site + i));
+    if let Some(args) = own {
+        // The site's own arguments decide when they hold its channel: a
+        // nested dial, or a literal target. Either may name no host (a
+        // variable target, a unix socket); an earlier dial is then not it.
+        if let Some(target) = nearest_dial(args) {
+            return target;
+        }
+        if let Some(lit) = split_args(args).first().and_then(|a| string_literal(a)) {
+            return dial_authority(lit);
+        }
+    }
+    dial_target_before(source, site).flatten()
+}
+
+/// CB.21: the target of the nearest dial call ([`DIAL_CALLS`]) above `site`,
+/// searching back to the start of the site's function: the nearest preceding
+/// line at a lower indent that opens a function or method
+/// ([`opens_function`]), and never more than [`DIAL_LOOKBACK_LINES`] lines.
+/// A connection built in another function (a factory, a field) is not seen:
+/// the site then records no host. `None` when no dial call is in the window,
+/// `Some(None)` when the nearest one's target is not a literal host.
+fn dial_target_before(source: &str, site: usize) -> Option<Option<String>> {
+    let site_line_start = source.get(..site)?.rfind('\n').map_or(0, |nl| nl + 1);
+    let site_indent = indent_of(source.get(site_line_start..)?);
+    let mut start = site_line_start;
+    for _ in 0..DIAL_LOOKBACK_LINES {
+        if start == 0 {
+            break;
+        }
+        let prev_start = source.get(..start - 1)?.rfind('\n').map_or(0, |nl| nl + 1);
+        let line = source.get(prev_start..start - 1)?;
+        start = prev_start;
+        if !line.trim().is_empty() && indent_of(line) < site_indent && opens_function(line) {
+            break;
+        }
+    }
+    nearest_dial(source.get(start..site)?)
+}
+
+/// The LAST dial call in `text` and its target: `None` when `text` holds no
+/// dial call, `Some(None)` when the nearest one's target is not a literal
+/// host. Only the nearest counts: it is the channel the site was handed, so
+/// an unreadable target never falls back to an older dial.
+fn nearest_dial(text: &str) -> Option<Option<String>> {
+    let bytes = text.as_bytes();
+    let mut calls: Vec<(usize, &str, bool)> = Vec::new();
+    for &(needle, host_port) in DIAL_CALLS {
+        let bounded = needle.as_bytes().first().is_some_and(|b| is_ident_byte(*b));
+        for (at, _) in text.match_indices(needle) {
+            if bounded && at > 0 && bytes.get(at - 1).is_some_and(|b| is_ident_byte(*b)) {
+                continue;
+            }
+            calls.push((at, needle, host_port));
+        }
+    }
+    // Nearest first; the needle breaks a tie so the order is total.
+    calls.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.len().cmp(&a.1.len())));
+    let &(at, needle, host_port) = calls.first()?;
+    Some(call_args(text, at + needle.len() - 1).and_then(|args| dial_target(args, host_port)))
+}
+
+/// The dial target in one channel call's arguments: the first top-level
+/// argument that is a string literal, plus the next one as the port for a
+/// `host_port` call.
+fn dial_target(args: &str, host_port: bool) -> Option<String> {
+    let parts = split_args(args);
+    let (i, lit) = parts
+        .iter()
+        .enumerate()
+        .find_map(|(i, a)| string_literal(a).map(|l| (i, l)))?;
+    if host_port {
+        let port = parts.get(i + 1).map(|p| p.trim()).filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+        return match port {
+            Some(port) => dial_authority(&format!("{lit}:{port}")),
+            None => dial_authority(lit),
+        };
+    }
+    dial_authority(lit)
+}
+
+/// gRPC name-resolver schemes that name no service host: a socket path, an
+/// xDS service name, or IP literals, which no service alias can match.
+const NON_HOST_SCHEMES: &[&str] = &["unix:", "unix-abstract:", "vsock:", "xds:", "ipv4:", "ipv6:"];
+
+/// A dial target as `host[:port]`: a `dns:///` / `dns:` / `passthrough:///`
+/// resolver prefix or an `http(s)://` scheme stripped, any path dropped, and
+/// the rest accepted only as a literal authority (ASCII letters, digits and
+/// `.-_~:[]`, the `client_url_split` rule). Any other `scheme://` and the
+/// [`NON_HOST_SCHEMES`] name no host.
+fn dial_authority(target: &str) -> Option<String> {
+    let t = target.trim();
+    let rest = if let Some(r) = t.strip_prefix("dns:///") {
+        r
+    } else if let Some(r) = t.strip_prefix("dns://") {
+        // `dns://<dns server>/<host:port>`: the authority is the DNS server.
+        r.split_once('/')?.1
+    } else if let Some(r) = t.strip_prefix("passthrough:///") {
+        r
+    } else if let Some(r) = t.strip_prefix("http://").or_else(|| t.strip_prefix("https://")) {
+        r
+    } else if let Some(r) = t.strip_prefix("dns:") {
+        r
+    } else if t.contains("://") || NON_HOST_SCHEMES.iter().any(|p| t.starts_with(p)) {
+        return None;
+    } else {
+        t
+    };
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let literal = !authority.is_empty()
+        && authority
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '~' | ':' | '[' | ']'));
+    literal.then(|| authority.to_string())
+}
+
+/// The argument text of the call whose `(` is at `open`, bounded by
+/// [`DIAL_MAX_ARGS`]; `None` when it is not closed within the bound.
+fn call_args(source: &str, open: usize) -> Option<&str> {
+    let end = (open + DIAL_MAX_ARGS).min(source.len());
+    let bytes = source.as_bytes().get(..end)?;
+    let close = matching_paren(bytes, open)?;
+    source.get(open + 1..close)
+}
+
+/// `args` split at every top-level `,` (outside brackets and quotes).
+fn split_args(args: &str) -> Vec<&str> {
+    let b = args.as_bytes();
+    let mut out = Vec::new();
+    let (mut depth, mut quote, mut start, mut i) = (0i32, None::<u8>, 0usize, 0usize);
+    while i < b.len() {
+        let c = b[i];
+        match quote {
+            Some(_) if c == b'\\' => i += 1,
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None => match c {
+                b'"' | b'\'' | b'`' => quote = Some(c),
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b',' if depth == 0 => {
+                    out.extend(args.get(start..i));
+                    start = i + 1;
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    out.extend(args.get(start..));
+    out
+}
+
+/// An argument that is exactly one string literal (`"x"`, `'x'`, or a
+/// backtick literal without `${`), optionally a `name=` / `name:` keyword
+/// argument: its content.
+fn string_literal(arg: &str) -> Option<&str> {
+    let mut a = arg.trim();
+    let ident_end = a.bytes().position(|b| !is_ident_byte(b)).unwrap_or(a.len());
+    if ident_end > 0 {
+        let after = a.get(ident_end..)?.trim_start();
+        let keyword = (after.starts_with('=') && !after.starts_with("=="))
+            || (after.starts_with(':') && !after.starts_with("::"));
+        if keyword {
+            a = after.get(1..)?.trim_start();
+        }
+    }
+    let q = *a.as_bytes().first()?;
+    if !matches!(q, b'"' | b'\'' | b'`') || a.len() < 2 || a.as_bytes().last() != Some(&q) {
+        return None;
+    }
+    let body = a.get(1..a.len() - 1)?;
+    (!body.contains(q as char) && !body.contains("${")).then_some(body)
+}
+
+/// Leading whitespace of `line`, in bytes (a tab counts one).
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// Words that may precede a declaration's keyword or return type.
+const DECL_MODIFIERS: &[&str] = &[
+    "pub", "pub(crate)", "pub(super)", "async", "private", "public", "protected", "internal",
+    "static", "override", "suspend", "final", "abstract", "virtual", "export", "default",
+    "open", "unsafe", "extern", "inline", "sealed", "partial", "readonly",
+];
+
+/// Keywords that open a function in the languages the client passes read.
+const FUNCTION_WORDS: &[&str] = &["func", "def", "function", "fn", "fun"];
+
+/// Words that open a block that is not a function (or a statement that is
+/// not a declaration): a line starting with one never bounds the search.
+const BLOCK_WORDS: &[&str] = &[
+    "if", "else", "elif", "for", "foreach", "while", "do", "switch", "match", "case", "try",
+    "catch", "except", "finally", "with", "using", "lock", "synchronized", "select", "go",
+    "defer", "return", "throw", "await", "yield", "new", "var", "let", "const", "val",
+];
+
+/// Whether `line` opens a function or method: a function keyword after any
+/// modifiers (`func`, `def`, `async def`, `function`, `fn`, `fun`), an arrow
+/// function opening a block, or a C-family method / constructor header
+/// (`public void run() {`, `async Task<User> Get(int id)`). Only lines at a
+/// lower indent than the site are asked, so an `if (..) {` never is one.
+fn opens_function(line: &str) -> bool {
+    let t = line.trim();
+    if t.starts_with('}') || t.starts_with("//") || t.starts_with('#') || t.starts_with('*') {
+        return false;
+    }
+    let Some(first) = t.split_whitespace().find(|w| !DECL_MODIFIERS.contains(w)) else {
+        return false;
+    };
+    let word = first.split(['(', '<', ':']).next().unwrap_or(first);
+    if FUNCTION_WORDS.contains(&word) {
+        return true;
+    }
+    if t.contains("=>") && t.ends_with('{') {
+        return true;
+    }
+    if BLOCK_WORDS.contains(&word) || t.ends_with(';') {
+        return false;
+    }
+    let Some(paren) = t.find('(') else {
+        return false;
+    };
+    let before = t.get(..paren).unwrap_or("").trim();
+    !before.is_empty()
+        && (t.ends_with('{') || t.ends_with(')'))
+        && before
+            .bytes()
+            .all(|b| is_ident_byte(b) || b" <>[],.?:*&".contains(&b))
 }
 
 /// How far into a client file the package-evidence scan reads. Every binding
@@ -680,8 +980,10 @@ pub fn extract_grpc_client_nodes(source: &str, module_id: NodeId, repo: RepoId) 
         return out;
     }
     let evidence = client_evidence_cell(source);
+    let (mut sites_seen, mut hosted) = (0usize, 0usize);
     for (canonical, sites) in hits {
-        push_client_node(
+        sites_seen += sites.len();
+        hosted += push_client_node(
             &mut out,
             source,
             &sites,
@@ -691,7 +993,16 @@ pub fn extract_grpc_client_nodes(source: &str, module_id: NodeId, repo: RepoId) 
             evidence.as_ref(),
         );
     }
+    report_dial_hosts("suffix", hosted, sites_seen);
     out
+}
+
+/// CB.21 fired_on marker, once per client pass over a file whose sites
+/// named a dial host: `[grpc-client] dial hosts pass=suffix sites=1/1`.
+fn report_dial_hosts(pass: &str, hosted: usize, sites: usize) {
+    if hosted > 0 {
+        eprintln!("[grpc-client] dial hosts pass={pass} sites={hosted}/{sites}");
+    }
 }
 
 /// One gRPC service a `.proto` in the build declares: the key the data-driven
@@ -844,6 +1155,7 @@ pub fn extract_known_grpc_client_nodes(
     let bytes = source.as_bytes();
     // Computed on the first hit only: most gRPC-context files mint no client here.
     let mut evidence: Option<Option<Cell>> = None;
+    let (mut sites_seen, mut hosted) = (0usize, 0usize);
     for name in names {
         if seen.contains(name) {
             continue;
@@ -867,9 +1179,11 @@ pub fn extract_known_grpc_client_nodes(
             sites.dedup();
             seen.insert(name.to_string());
             let cell = evidence.get_or_insert_with(|| client_evidence_cell(source));
-            push_client_node(&mut out, source, &sites, name, module_id, repo, cell.as_ref());
+            sites_seen += sites.len();
+            hosted += push_client_node(&mut out, source, &sites, name, module_id, repo, cell.as_ref());
         }
     }
+    report_dial_hosts("known", hosted, sites_seen);
     out
 }
 
@@ -2586,7 +2900,155 @@ let db = makeDbClient(uri);
         // A stub with no import line at all carries no RPC_PACKAGE cell.
         let bare = extract_grpc_client_nodes("c := pb.NewOrderServiceClient(conn)", module_id(), repo());
         assert_eq!(bare.nodes.len(), 1);
-        assert!(bare.nodes[0].cells.is_empty(), "null-free: no evidence, no cell");
+        assert!(evidence_of(&bare).is_empty(), "null-free: no evidence, no cell");
+        // CB.21: the site's hostless ENDPOINT_HIT is its only cell.
+        assert_eq!(dial_hits(&bare), vec![vec![r#"{"via":"grpc"}"#.to_string()]]);
+    }
+
+    // ---- CB.21: the dial host ---------------------------------------------
+
+    /// The ENDPOINT_HIT payloads of each node, in node order.
+    fn dial_hits(out: &GrpcNodes) -> Vec<Vec<String>> {
+        out.nodes
+            .iter()
+            .map(|n| {
+                n.cells
+                    .iter()
+                    .filter(|c| c.kind == glia_code_domain::cell_type::ENDPOINT_HIT)
+                    .map(|c| match &c.payload {
+                        CellPayload::Json(j) => j.clone(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn host(h: &str) -> String {
+        format!(r#"{{"via":"grpc","host":"{h}"}}"#)
+    }
+
+    /// The fixture's gateway: `grpc.Dial` two lines above the stub, in its
+    /// function. A factory that takes the connection records no host, and the
+    /// search never crosses into the previous function.
+    #[test]
+    fn grpc_dial_host_go() {
+        let go = "package main\n\nimport \"google.golang.org/grpc\"\n\n\
+                  func FetchUser(id string) {\n\
+                  \tconn, err := grpc.Dial(\"users-svc:50051\", grpc.WithInsecure())\n\
+                  \tif err != nil {\n\t\tlog.Fatal(err)\n\t}\n\
+                  \tclient := NewUserServiceClient(conn)\n\
+                  \t_ = client\n}\n\
+                  func Other(conn *grpc.ClientConn) {\n\
+                  \tc := pb.NewUserServiceClient(conn)\n\
+                  \t_ = c\n}\n";
+        let out = extract_grpc_client_nodes(go, module_id(), repo());
+        assert_eq!(client_qnames(&out), vec!["grpc_client:UserService".to_string()]);
+        assert_eq!(dial_hits(&out), vec![vec![host("users-svc:50051"), r#"{"via":"grpc"}"#.to_string()]]);
+        // DialContext's target is its first string literal; dns:/// is stripped;
+        // the nearest dial wins.
+        let ctx = "func f(ctx context.Context) {\n\
+                   \told, _ := grpc.Dial(\"legacy:1\")\n\
+                   \tconn, _ := grpc.DialContext(ctx, \"dns:///orders-svc:9000\", opts...)\n\
+                   \tc := pb.NewOrderServiceClient(conn)\n}\n";
+        assert_eq!(dial_hits(&extract_grpc_client_nodes(ctx, module_id(), repo())), vec![vec![host("orders-svc:9000")]]);
+        // A dynamic target names nothing.
+        let dynamic = "func f(addr string) {\n\tconn, _ := grpc.NewClient(addr)\n\tc := pb.NewOrderServiceClient(conn)\n}\n";
+        assert_eq!(dial_hits(&extract_grpc_client_nodes(dynamic, module_id(), repo())), vec![vec![r#"{"via":"grpc"}"#.to_string()]]);
+    }
+
+    #[test]
+    fn grpc_dial_host_python() {
+        let py = "import grpc\n\
+                  import users_pb2_grpc\n\n\
+                  def run():\n\
+                  \x20   with grpc.insecure_channel('users-svc:50051') as channel:\n\
+                  \x20       stub = users_pb2_grpc.UserServiceStub(channel)\n\
+                  \x20       stub.GetUser(None)\n\n\
+                  async def run_aio():\n\
+                  \x20   stub = users_pb2_grpc.UserServiceStub(grpc.aio.insecure_channel(target=\"http://admin-svc:8443/x\"))\n";
+        let out = extract_grpc_client_nodes(py, module_id(), repo());
+        assert_eq!(dial_hits(&out), vec![vec![host("users-svc:50051"), host("admin-svc:8443")]]);
+        // A formatted target is not a literal authority.
+        let fmt = "def run(h):\n    channel = grpc.insecure_channel('%s:50051' % h)\n    stub = pb.UserServiceStub(channel)\n";
+        assert_eq!(dial_hits(&extract_grpc_client_nodes(fmt, module_id(), repo())), vec![vec![r#"{"via":"grpc"}"#.to_string()]]);
+    }
+
+    #[test]
+    fn grpc_dial_host_java_for_address() {
+        let java = "import io.grpc.ManagedChannelBuilder;\n\
+                    public class Client {\n\
+                    \x20 public User fetch(String id) {\n\
+                    \x20   ManagedChannel ch = ManagedChannelBuilder.forAddress(\"users-svc\", 50051).usePlaintext().build();\n\
+                    \x20   if (id != null) {\n\
+                    \x20     UserServiceGrpc.UserServiceBlockingStub s = UserServiceGrpc.newBlockingStub(ch);\n\
+                    \x20   }\n\
+                    \x20   return null;\n\
+                    \x20 }\n\
+                    \x20 public void other(ManagedChannel ch) {\n\
+                    \x20   var t = UserServiceGrpc.newBlockingStub(ch);\n\
+                    \x20 }\n}\n";
+        let out = extract_grpc_client_nodes(java, module_id(), repo());
+        assert_eq!(dial_hits(&out), vec![vec![host("users-svc:50051"), r#"{"via":"grpc"}"#.to_string()]]);
+        let target = "void f() {\n  var ch = ManagedChannelBuilder.forTarget(\"dns:///users-svc:443\").build();\n  var s = UserServiceGrpc.newStub(ch);\n}\n";
+        assert_eq!(dial_hits(&extract_grpc_client_nodes(target, module_id(), repo())), vec![vec![host("users-svc:443")]]);
+    }
+
+    #[test]
+    fn grpc_dial_host_node_ctor_arg() {
+        let js = "const grpc = require('@grpc/grpc-js');\n\
+                  const client = new proto.UserServiceClient('users-svc:50051', grpc.credentials.createInsecure());\n\
+                  const other = new proto.UserServiceClient(address, grpc.credentials.createInsecure());\n";
+        let out = extract_grpc_client_nodes(js, module_id(), repo());
+        assert_eq!(dial_hits(&out), vec![vec![host("users-svc:50051"), r#"{"via":"grpc"}"#.to_string()]]);
+        // The data-driven pass reads the same way; a unix socket names no host.
+        let cs = "using Grpc.Net.Client;\nvar a = new Greeter.GreeterClient(GrpcChannel.ForAddress(\"https://greeter-svc:5001\"));\nvar b = new Greeter.GreeterClient(\"unix:///tmp/g.sock\");\n";
+        let known = extract_known_grpc_client_nodes(cs, module_id(), repo(), &[svc("Greeter")]);
+        assert_eq!(dial_hits(&known), vec![vec![host("greeter-svc:5001"), r#"{"via":"grpc"}"#.to_string()]]);
+    }
+
+    #[test]
+    fn dial_authority_strips_resolvers_and_rejects_non_hosts() {
+        assert_eq!(dial_authority("users:50051").as_deref(), Some("users:50051"));
+        assert_eq!(dial_authority("dns:///users:50051").as_deref(), Some("users:50051"));
+        assert_eq!(dial_authority("dns://8.8.8.8/users:50051").as_deref(), Some("users:50051"));
+        assert_eq!(dial_authority("dns:users").as_deref(), Some("users"));
+        assert_eq!(dial_authority("passthrough:///users:1").as_deref(), Some("users:1"));
+        assert_eq!(dial_authority("https://u:p@users:443/api").as_deref(), Some("users:443"));
+        for none in ["unix:///tmp/s", "unix:s", "xds:///users", "vsock:3:50051", "ftp://x/y", "", "${host}:1", "%s:%d"] {
+            assert_eq!(dial_authority(none), None, "{none}");
+        }
+    }
+
+    #[test]
+    fn opens_function_bounds_the_dial_search() {
+        for yes in [
+            "func FetchUser(id string) {",
+            "func (s *Server) Get(ctx context.Context) error {",
+            "def run():",
+            "async def run():",
+            "export async function load(id) {",
+            "pub fn main() {",
+            "fun main() {",
+            "public static void main(String[] args) {",
+            "async Task<User> GetAsync(int id)",
+            "const load = async (id) => {",
+        ] {
+            assert!(opens_function(yes), "{yes}");
+        }
+        for no in [
+            "if (id != null) {",
+            "} else {",
+            "with grpc.insecure_channel('x') as channel:",
+            "for _, x := range xs {",
+            "go func() {",
+            "ManagedChannel ch = ManagedChannelBuilder.forTarget(\"x\").build();",
+            "conn, err := grpc.Dial(\"x\")",
+            "// func commented() {",
+            "try (ManagedChannel ch = build()) {",
+        ] {
+            assert!(!opens_function(no), "{no}");
+        }
     }
 
     #[test]

@@ -15,6 +15,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
+use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, NodeId, RepoId};
 
@@ -98,6 +99,58 @@ pub(crate) fn owner_of_file<'r>(rels: &[&'r str], file: &str) -> Option<&'r str>
         .copied()
         .filter(|r| file == *r || file.strip_prefix(*r).is_some_and(|rest| rest.starts_with('/')))
         .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)))
+}
+
+/// CB.21: the owner segment of an owner-qualified qname (`ws:/ws
+/// @services/chat` -> `services/chat`), spelled as the engine wrote it (so
+/// [`Owners::intern`] of it meets [`Owners::id_of`] of the PROJECT rel), or
+/// `None` for a qname outside every nested project.
+pub(crate) fn owner_from_qname_suffix(qname: &str) -> Option<&str> {
+    split_owner(qname).1
+}
+
+/// CB.21: the nested PROJECT rels of every repo in the merge, for targets
+/// whose qname carries no owner segment (a GRPC_SERVICE is never owned,
+/// LB.8): such a target's owner is the project its declaring file lies in.
+#[derive(Debug, Default)]
+pub(crate) struct ProjectFiles {
+    rels: HashMap<RepoId, Vec<String>>,
+}
+
+impl ProjectFiles {
+    /// Every `project:<rel>` PROJECT of `graphs` but the repo root, per repo,
+    /// in graph order (first copy of a rel only).
+    pub(crate) fn of(graphs: &[RepoGraph]) -> Self {
+        let mut rels: HashMap<RepoId, Vec<String>> = HashMap::new();
+        for g in graphs {
+            for n in &g.nodes {
+                if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::PROJECT) {
+                    continue;
+                }
+                let Some(rel) = g
+                    .nav
+                    .qname_by_id
+                    .get(&n.id)
+                    .and_then(|q| q.strip_prefix("project:"))
+                    .filter(|rel| !rel.is_empty() && *rel != ".")
+                else {
+                    continue;
+                };
+                let list = rels.entry(g.repo).or_default();
+                if !list.iter().any(|r| r == rel) {
+                    list.push(rel.to_string());
+                }
+            }
+        }
+        Self { rels }
+    }
+
+    /// The nested project of `repo` that encloses `file` (repo-relative), as
+    /// [`owner_of_file`] picks it: the longest segment-bounded rel.
+    pub(crate) fn owner_of(&self, repo: RepoId, file: &str) -> Option<&str> {
+        let rels: Vec<&str> = self.rels.get(&repo)?.iter().map(String::as_str).collect();
+        owner_of_file(&rels, file)
+    }
 }
 
 // ============================================================================
@@ -409,6 +462,17 @@ pub(crate) trait HostScoped {
     fn owner(&self) -> Option<u32>;
 }
 
+/// A borrowed target narrows as its target does (CB.21: the gRPC resolver
+/// narrows a `Vec<&GrpcTarget>` picked out of its index).
+impl<T: HostScoped> HostScoped for &T {
+    fn repo(&self) -> RepoId {
+        (*self).repo()
+    }
+    fn owner(&self) -> Option<u32> {
+        (*self).owner()
+    }
+}
+
 /// What [`narrow_by_host`] did to one side's target list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Narrowed {
@@ -679,6 +743,38 @@ mod tests {
         assert_eq!(hit_hosts(&[]), None);
         assert_eq!(str_field(r#"{"host":"a"}"#, "host"), Some("a"));
         assert_eq!(str_field(r#"{"hosts":["a"]}"#, "host"), None);
+    }
+
+    /// CB.21: an owner-qualified qname yields its owner; a bare one none.
+    #[test]
+    fn owner_from_qname_suffix_reads_the_owner_segment() {
+        assert_eq!(owner_from_qname_suffix("ws:/ws @services/chat"), Some("services/chat"));
+        assert_eq!(owner_from_qname_suffix("ws:/ws"), None);
+        assert_eq!(owner_from_qname_suffix("ws:/pkg/@scope"), None, "an npm scope is no owner");
+        assert_eq!(owner_from_qname_suffix("ws:/ws @my%20app"), Some("my%20app"));
+    }
+
+    /// CB.21: nested PROJECT rels per repo, the repo root skipped; a file's
+    /// owner is the longest segment-bounded rel of ITS repo only.
+    #[test]
+    fn project_files_scope_a_file_by_its_repo() {
+        let a = channel_graph(
+            "pf-a",
+            &[
+                (node_kind::PROJECT, "project:."),
+                (node_kind::PROJECT, "project:services"),
+                (node_kind::PROJECT, "project:services/users"),
+                (node_kind::GRPC_SERVICE, "grpc:users.v1.UserService"),
+            ],
+        );
+        let b = channel_graph("pf-b", &[(node_kind::PROJECT, "project:api")]);
+        let (ra, rb) = (a.repo, b.repo);
+        let pf = ProjectFiles::of(&[a, b]);
+        assert_eq!(pf.owner_of(ra, "services/users/api/user.proto"), Some("services/users"));
+        assert_eq!(pf.owner_of(ra, "services/admin/user.proto"), Some("services"));
+        assert_eq!(pf.owner_of(ra, "proto/user.proto"), None);
+        assert_eq!(pf.owner_of(ra, "api/x.proto"), None, "another repo's project");
+        assert_eq!(pf.owner_of(rb, "api/x.proto"), Some("api"));
     }
 
     /// A target that is not an HTTP route: one id, its repo and its owner.

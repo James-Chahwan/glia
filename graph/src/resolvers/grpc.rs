@@ -14,14 +14,32 @@
 //! minted where a class extends / embeds / registers the generated base) is
 //! paired back to its service as `service --HANDLED_BY--> marker`, through the
 //! same index and the same package narrowing.
+//!
+//! CB.21 adds host narrowing on the client half. A client stub records the
+//! target its channel dials (ENDPOINT_HIT `host`, one cell per construction
+//! site). When the stub's name reaches two or more services (a Pick::All
+//! over one package's copies, or the Ambiguous case above) its hosts narrow
+//! the services to the project or repo they name (`host::narrow_by_host`,
+//! A11.4 / LB.4b's rule), a service being scoped by the nested project its
+//! `.proto` lies in (a GRPC_SERVICE is never owner-qualified, LB.8). An
+//! Ambiguous stub whose hosts leave exactly one package pairs with it; the
+//! rule is `host`. Package evidence (Pick::Narrowed) is never re-narrowed,
+//! and a stub with any hostless site keeps today's behaviour exactly.
+//!
+//! fired_on marker, once per resolve that sees a service or a client:
+//!   `[grpc-index] 2 services (2 qualified, 0 bare) -> 1 edges, 0 dropped ambiguous, 0 narrowed by package evidence, 1 narrowed by host`
 
 use std::collections::{HashMap, HashSet};
 
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_code_extractors::grpc::RpcPackageCell;
-use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
 
+use super::host::{
+    AliasIndex, HostScoped, Narrowed, Owners, ProjectFiles, build_service_alias_index, hit_hosts,
+    narrow_by_host, owner_spelling, str_field,
+};
 use super::{CrossGraphResolver, RuleTally, weakest};
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
@@ -34,10 +52,12 @@ pub struct GrpcStackResolver;
 
 impl CrossGraphResolver for GrpcStackResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
-        let index = build_grpc_service_index(&merged.graphs);
+        let (index, owners) = build_grpc_service_index(&merged.graphs);
         let mut stats = PairStats::default();
         let mut rules = RuleTally::new("grpc", &GRPC_RULES);
         let mut edges = Vec::new();
+        let hits = client_hits(&merged.graphs);
+        let mut aliases: Option<AliasIndex> = None;
         for g in &merged.graphs {
             for n in &g.nodes {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::GRPC_CLIENT) {
@@ -56,17 +76,44 @@ impl CrossGraphResolver for GrpcStackResolver {
                 else {
                     continue;
                 };
-                // LC.3c: the rule is the Pick that chose the targets.
+                // CB.21: narrow a multi-target pick by the stub's dial hosts.
+                let mut by_host = |all: &mut Vec<&GrpcTarget>| {
+                    if all.len() < 2 || all.iter().any(|t| t.mixed_owner) {
+                        return false;
+                    }
+                    let Some(hosts) = hits.get(&n.id).and_then(|c| hit_hosts(c.iter().copied())) else {
+                        return false;
+                    };
+                    let aliases = aliases
+                        .get_or_insert_with(|| build_service_alias_index(&merged.graphs, &owners).0);
+                    narrow_by_host(aliases, Some(&hosts), all) != Narrowed::No
+                };
+                // LC.3c: the rule is the Pick that chose the targets, or
+                // `host` when the stub's hosts did (CB.21).
                 let (chosen, rule): (Vec<&GrpcTarget>, &'static str) =
                     match pick_targets(targets, name_pkg.as_deref(), &client_evidence(&n.cells)) {
-                        Pick::All => (targets.iter().collect(), "all"),
+                        Pick::All => {
+                            let mut all: Vec<&GrpcTarget> = targets.iter().collect();
+                            if by_host(&mut all) {
+                                stats.host += 1;
+                                (all, "host")
+                            } else {
+                                (all, "all")
+                            }
+                        }
                         Pick::Narrowed(v) => {
                             stats.narrowed += 1;
                             (v, "narrowed")
                         }
                         Pick::Ambiguous => {
-                            stats.ambiguous += 1;
-                            continue;
+                            let mut all: Vec<&GrpcTarget> = targets.iter().collect();
+                            if by_host(&mut all) && one_package(&all) {
+                                stats.host += 1;
+                                (all, "host")
+                            } else {
+                                stats.ambiguous += 1;
+                                continue;
+                            }
                         }
                     };
                 for t in chosen {
@@ -81,13 +128,14 @@ impl CrossGraphResolver for GrpcStackResolver {
         // A5.4 fired_on marker, once per resolve. Silent on a build with no gRPC.
         if index.services > 0 || stats.clients > 0 {
             eprintln!(
-                "[grpc-index] {} services ({} qualified, {} bare) -> {} edges, {} dropped ambiguous, {} narrowed by package evidence",
+                "[grpc-index] {} services ({} qualified, {} bare) -> {} edges, {} dropped ambiguous, {} narrowed by package evidence, {} narrowed by host",
                 index.services,
                 index.qualified,
                 index.services - index.qualified,
                 edges.len(),
                 stats.ambiguous,
-                stats.narrowed
+                stats.narrowed,
+                stats.host
             );
         }
         merged.cross_edges.extend(edges);
@@ -98,8 +146,34 @@ impl CrossGraphResolver for GrpcStackResolver {
 }
 
 /// LC.3c: the gRPC evidence rules, in `[evidence-rules]` order — the client
-/// half's [`Pick`] (`all` / `narrowed`), then the server half's.
-const GRPC_RULES: [&str; 4] = ["all", "narrowed", "server_all", "server_narrowed"];
+/// half's [`Pick`] (`all` / `narrowed`) and CB.21's `host`, then the server
+/// half's.
+const GRPC_RULES: [&str; 5] = ["all", "narrowed", "host", "server_all", "server_narrowed"];
+
+/// CB.21: the ENDPOINT_HIT cells of every GRPC_CLIENT copy in the merge, per
+/// node id, so one hostless site in any copy blocks host narrowing.
+fn client_hits(graphs: &[RepoGraph]) -> HashMap<NodeId, Vec<&Cell>> {
+    let mut out: HashMap<NodeId, Vec<&Cell>> = HashMap::new();
+    for g in graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::GRPC_CLIENT) {
+                continue;
+            }
+            out.entry(n.id)
+                .or_default()
+                .extend(n.cells.iter().filter(|c| c.kind == cell_type::ENDPOINT_HIT));
+        }
+    }
+    out
+}
+
+/// CB.21: every target in one proto package, so a host-narrowed Ambiguous
+/// pick names one service.
+fn one_package(targets: &[&GrpcTarget]) -> bool {
+    targets
+        .windows(2)
+        .all(|w| w[0].pkg.package == w[1].pkg.package)
+}
 
 /// A5.3: `grpc:<Service> --HANDLED_BY--> grpc_server:<Service>` for every
 /// server-impl marker, keyed on the same index and narrowed by the same package
@@ -162,6 +236,8 @@ struct PairStats {
     clients: usize,
     ambiguous: usize,
     narrowed: usize,
+    /// CB.21: clients whose targets their dial hosts chose.
+    host: usize,
 }
 
 /// One indexed GRPC_SERVICE, with the package identity its RPC_PACKAGE cell
@@ -171,6 +247,43 @@ struct GrpcTarget {
     id: NodeId,
     confidence: Confidence,
     pkg: RpcPackageCell,
+    /// CB.21: the repo it lives in, and the nested project its `.proto`
+    /// lies in, interned in the index's [`Owners`] (`None` outside every
+    /// nested project).
+    repo: RepoId,
+    owner: Option<u32>,
+    /// CB.21: its declaring files lie in different projects (one node for a
+    /// `.proto` vendored into two), so it has no one owner and a host never
+    /// narrows over it.
+    mixed_owner: bool,
+}
+
+impl HostScoped for GrpcTarget {
+    fn repo(&self) -> RepoId {
+        self.repo
+    }
+    fn owner(&self) -> Option<u32> {
+        self.owner
+    }
+}
+
+/// CB.21: the nested projects the POSITION files of a service lie in, one
+/// entry per distinct owner in cell order (`None` for a file outside every
+/// project). Empty for a service that carries no POSITION.
+fn declaring_owners<'p>(cells: &[Cell], repo: RepoId, projects: &'p ProjectFiles) -> Vec<Option<&'p str>> {
+    let mut out: Vec<Option<&str>> = Vec::new();
+    for c in cells {
+        let CellPayload::Json(json) = &c.payload else { continue };
+        if c.kind != cell_type::POSITION {
+            continue;
+        }
+        let Some(file) = str_field(json, "file") else { continue };
+        let owner = projects.owner_of(repo, file);
+        if !out.contains(&owner) {
+            out.push(owner);
+        }
+    }
+    out
 }
 
 struct GrpcIndex {
@@ -211,12 +324,16 @@ fn rpc_package_cells(cells: &[Cell]) -> impl Iterator<Item = RpcPackageCell> + '
     })
 }
 
-fn build_grpc_service_index(graphs: &[RepoGraph]) -> GrpcIndex {
+/// Every GRPC_SERVICE by lookup key, and the [`Owners`] their declaring
+/// projects intern to, in graph order (CB.21).
+fn build_grpc_service_index(graphs: &[RepoGraph]) -> (GrpcIndex, Owners) {
     let mut index = GrpcIndex {
         by_key: HashMap::new(),
         services: 0,
         qualified: 0,
     };
+    let projects = ProjectFiles::of(graphs);
+    let mut owners = Owners::default();
     for g in graphs {
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::GRPC_SERVICE) {
@@ -231,10 +348,18 @@ fn build_grpc_service_index(graphs: &[RepoGraph]) -> GrpcIndex {
             if pkg.package.is_none() {
                 pkg.package = svc_name.rsplit_once('.').map(|(p, _)| p.to_string());
             }
+            let declared = declaring_owners(&n.cells, g.repo, &projects);
+            let owner = match declared.as_slice() {
+                [Some(rel)] => owners.intern(&owner_spelling(rel)),
+                _ => None,
+            };
             let target = GrpcTarget {
                 id: n.id,
                 confidence: n.confidence,
                 pkg,
+                repo: g.repo,
+                owner,
+                mixed_owner: declared.len() > 1,
             };
             index.services += 1;
             // A5.1: proto service qnames are package-qualified
@@ -251,7 +376,7 @@ fn build_grpc_service_index(graphs: &[RepoGraph]) -> GrpcIndex {
             index.by_key.entry(svc_name.to_string()).or_default().push(target);
         }
     }
-    index
+    (index, owners)
 }
 
 /// One lookup key for a client name, plus the package the client's own name
@@ -434,6 +559,98 @@ mod tests {
             cross_pairs(&m, edge_category::HANDLED_BY),
             [s("grpc:user.UserService", "grpc_server:UserService @services/users")]
         );
+    }
+
+    /// CB.21, the grpc-host-narrowing fixture's shape: `users` and `admin`
+    /// each declare a `UserService` in their own package, and the gateway's
+    /// stub names no package. Its dial host picks the users service where the
+    /// package evidence alone drops the pair as ambiguous; with no host, a
+    /// hostless site or an unknown host it stays dropped.
+    #[test]
+    fn grpc_host_resolves_an_ambiguous_pair() {
+        let hit = |json: &str| Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Json(json.into()) };
+        let position = |file: &str| Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":3,"end_line":3}}"#)),
+        };
+        let graph = |client_cells: Vec<Cell>| {
+            let mut g = channel_graph(
+                "grpc-host",
+                &[
+                    (node_kind::PROJECT, "project:services/users"),
+                    (node_kind::PROJECT, "project:services/admin"),
+                    (node_kind::PROJECT, "project:services/gateway"),
+                    (node_kind::GRPC_SERVICE, "grpc:users.v1.UserService"),
+                    (node_kind::GRPC_SERVICE, "grpc:admin.v1.UserService"),
+                    (node_kind::GRPC_CLIENT, "grpc_client:UserService @services/gateway"),
+                ],
+            );
+            let ids: Vec<NodeId> = g.nodes.iter().map(|n| n.id).collect();
+            for (id, label) in ids.iter().zip(["example.com/users", "example.com/admin", "example.com/gateway"]) {
+                g.nav.name_by_id.insert(*id, label.to_string());
+            }
+            g.nodes[3].cells = vec![position("services/users/api/user.proto")];
+            g.nodes[4].cells = vec![position("services/admin/api/user.proto")];
+            g.nodes[5].cells = client_cells;
+            g
+        };
+        let pairs = |cells: Vec<Cell>| {
+            let mut m = MergedGraph::new(vec![graph(cells)]);
+            GrpcStackResolver.resolve(&mut m);
+            let rules: Vec<String> = m
+                .cross_edges
+                .iter()
+                .flat_map(|e| e.cells.iter())
+                .filter_map(|c| match &c.payload {
+                    CellPayload::Json(j) if c.kind == cell_type::EVIDENCE => Some(j.clone()),
+                    _ => None,
+                })
+                .collect();
+            (cross_pairs(&m, edge_category::GRPC_CALLS), rules)
+        };
+        let (got, rules) = pairs(vec![hit(r#"{"via":"grpc","host":"users-svc:50051"}"#)]);
+        assert_eq!(
+            got,
+            [("grpc_client:UserService @services/gateway".to_string(), "grpc:users.v1.UserService".to_string())]
+        );
+        assert!(rules.iter().all(|r| r.contains(r#""rule":"host""#)), "{rules:?}");
+        for cells in [
+            vec![],
+            vec![hit(r#"{"via":"grpc"}"#)],
+            vec![hit(r#"{"via":"grpc","host":"users-svc:50051"}"#), hit(r#"{"via":"grpc"}"#)],
+            vec![hit(r#"{"via":"grpc","host":"billing:9000"}"#)],
+            vec![hit(r#"{"via":"grpc","host":"users"}"#), hit(r#"{"via":"grpc","host":"admin-svc"}"#)],
+        ] {
+            assert!(pairs(cells.clone()).0.is_empty(), "{cells:?}");
+        }
+    }
+
+    /// CB.21: one package's service vendored into two projects is one node
+    /// with two declaring owners, so a host never narrows over it.
+    #[test]
+    fn a_service_declared_in_two_projects_has_no_one_owner() {
+        let mut g = channel_graph(
+            "grpc-mixed",
+            &[
+                (node_kind::PROJECT, "project:services/users"),
+                (node_kind::PROJECT, "project:services/admin"),
+                (node_kind::GRPC_SERVICE, "grpc:user.UserService"),
+            ],
+        );
+        let pos = |file: &str| Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":0,"end_line":0}}"#)),
+        };
+        g.nodes[2].cells = vec![pos("services/users/user.proto"), pos("services/admin/user.proto")];
+        let (index, owners) = build_grpc_service_index(std::slice::from_ref(&g));
+        let t = &index.by_key["UserService"][0];
+        assert!(t.mixed_owner && t.owner.is_none());
+        assert_eq!(owners.len(), 0);
+        g.nodes[2].cells = vec![pos("services/users/user.proto"), pos("services/users/copy.proto")];
+        let (index, owners) = build_grpc_service_index(std::slice::from_ref(&g));
+        let t = &index.by_key["UserService"][0];
+        assert!(!t.mixed_owner);
+        assert_eq!(t.owner.and_then(|o| owners.name(o)), Some("services/users"));
     }
 
     fn keys(name: &str) -> Vec<(String, Option<String>)> {

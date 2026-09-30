@@ -4,7 +4,7 @@
   "dirs": [
     "."
   ],
-  "note": "LB.8 (legacy-only). One repo, eleven manifest-rooted services. Each channel SIDE (queue producer / consumer, ws handler / client, graphql resolver / operation, grpc client) is owned by the project its file sits in and carries the LB.4a ` @<project path>` owner suffix; the channel itself (topic, ws path, graphql field, proto service) stays the pairing key, and the proto GRPC_SERVICE contract stays one shared node (proto/ sits under no project root). Before LB.8: one QUEUE_PRODUCER / one QUEUE_CONSUMER for orders.created, one GRPC_CLIENT, one GRAPHQL_RESOLVER getUser HANDLED_BY both services' methods, one WS_HANDLER for both FastAPI apps, and `glia arch` attributed each collapsed side to one project. After: every producer pairs every consumer (2 x 2 QUEUE_FLOWS), each grpc client calls the shared service, the web op reaches both resolvers and the web client both handlers (no host narrowing outside HTTP).",
+  "note": "LB.8 (legacy-only). One repo, eleven manifest-rooted services. Each channel SIDE (queue producer / consumer, ws handler / client, graphql resolver / operation, grpc client) is owned by the project its file sits in and carries the LB.4a ` @<project path>` owner suffix; the channel itself (topic, ws path, graphql field, proto service) stays the pairing key, and the proto GRPC_SERVICE contract stays one shared node (proto/ sits under no project root). Before LB.8: one QUEUE_PRODUCER / one QUEUE_CONSUMER for orders.created, one GRPC_CLIENT, one GRAPHQL_RESOLVER getUser HANDLED_BY both services' methods, one WS_HANDLER for both FastAPI apps, and `glia arch` attributed each collapsed side to one project. After: every producer pairs every consumer (2 x 2 QUEUE_FLOWS), each grpc client calls the shared service, the web op reaches both resolvers (graphql has no host narrowing). CB.21: the web client's `new WebSocket(\"ws://chat-svc:8080/ws\")` records its dial host (ENDPOINT_HIT `host` on the WS_CLIENT), and the ws resolver keeps only the same-path handler of the project that host names (chat-svc -> services/chat); before CB.21 it paired both handlers.",
   "expect_nodes": [
     {
       "kind": "QUEUE_PRODUCER",
@@ -89,8 +89,9 @@
     },
     {
       "from": "ws_client:/ws @web",
-      "to": "ws:/ws @services/notify",
-      "category": "WS_CONNECTS"
+      "to": "ws:/ws @services/chat",
+      "category": "WS_CONNECTS",
+      "note": "CB.21: the dial host chat-svc names services/chat, so only its handler pairs"
     }
   ],
   "forbid": [
@@ -119,6 +120,12 @@
     {
       "kind": "GRAPHQL_RESOLVER",
       "name": "graphql_resolver:getUser"
+    },
+    {
+      "from": "ws_client:/ws @web",
+      "to": "ws:/ws @services/notify",
+      "category": "WS_CONNECTS",
+      "note": "CB.21: the host names chat, not notify"
     }
   ]
 }

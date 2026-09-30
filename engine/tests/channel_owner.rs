@@ -197,17 +197,17 @@ fn every_owner_pairs_by_the_shared_channel() {
             (s("graphql_op:getUser @web"), s("graphql_resolver:getUser @services/users")),
         ]
     );
+    // CB.21: the web client dials `ws://chat-svc:8080/ws`, so of the two
+    // `/ws` handlers only the chat project's pairs (before: both).
     assert_eq!(
         edges(m, edge_category::WS_CONNECTS),
-        [
-            (s("ws_client:/ws @web"), s("ws:/ws @services/chat")),
-            (s("ws_client:/ws @web"), s("ws:/ws @services/notify")),
-        ]
+        [(s("ws_client:/ws @web"), s("ws:/ws @services/chat"))]
     );
 }
 
-/// `glia arch` sees every link the collapse hid: 10, where HEAD printed 4.
-/// Channels read owner-free.
+/// `glia arch` sees every link the collapse hid: 10, where HEAD printed 4,
+/// less the web -> services/notify WS link CB.21's host narrowing removed
+/// (the client dials chat-svc): 9. Channels read owner-free.
 #[test]
 fn service_map_shows_every_side() {
     let (_td, r) = monorepo();
@@ -230,11 +230,9 @@ fn service_map_shows_every_side() {
     for t in ["services/users", "services/catalog"] {
         want.insert((s("web"), s(t), "GRAPHQL_CALLS", s("getUser")));
     }
-    for t in ["services/chat", "services/notify"] {
-        want.insert((s("web"), s(t), "WS_CONNECTS", s("/ws")));
-    }
+    want.insert((s("web"), s("services/chat"), "WS_CONNECTS", s("/ws")));
     assert_eq!(links, want);
-    assert_eq!(map.links.len(), 10);
+    assert_eq!(map.links.len(), 9);
 }
 
 /// One contract row per resolver-made pair, each on the bare topic; the side

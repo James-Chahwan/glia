@@ -41,12 +41,20 @@
 //! ([`AnchorAt::NextDef`]), because a Python FUNCTION span starts at its
 //! `def`, not at the decorator above it.
 //!
+//! Hosts (CB.21): every CLIENT site stacks one ENDPOINT_HIT on its node,
+//! `{"via":"ws","host":"chat-svc:8080"}` when the URL's static head names a
+//! literal authority ([`client_host`]), `{"via":"ws"}` otherwise. The graph
+//! crate's ws resolver narrows a client's same-path handlers to the service
+//! its hosts name; one hostless site blocks that, as on the HTTP side.
+//!
 //! fired_on marker, one line per file per framework that yielded a node, `n`
 //! = distinct nodes that framework's sites read, path repo-relative:
 //!   `[ws] handlers framework=fastapi n=2 in app.py`
 //!   `[ws] clients framework=browser n=2 in live.ts`
 //!   `[ws] handlers framework=phoenix n=1 in lib/app_web/channels/user_socket.ex`
 //!   `[ws] clients framework=actioncable n=1 in chat.js`
+//! and one per file whose client sites named a host (CB.21):
+//!   `[ws] client hosts sites=1 in web/chat.ts`
 //!
 //! The call-argument reader here ([`call_region`], [`split_top`]) is a local
 //! copy of the shape `queue_topic.rs` keeps private (that file belongs to
@@ -55,6 +63,7 @@
 
 use std::collections::HashMap;
 
+use glia_code_domain::endpoint::{channel_hit_cell, client_url_split};
 use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use glia_core::{Confidence, Node, NodeId, NodeKindId, RepoId};
 
@@ -364,6 +373,7 @@ pub fn extract_ws_handler_nodes(
             kind: node_kind::WS_HANDLER,
             prefix: "ws:",
             label: "handlers",
+            hits: false,
         },
     )
 }
@@ -384,6 +394,7 @@ pub fn extract_ws_client_nodes(
             kind: node_kind::WS_CLIENT,
             prefix: "ws_client:",
             label: "clients",
+            hits: true,
         },
     )
 }
@@ -393,6 +404,9 @@ struct Side {
     kind: NodeKindId,
     prefix: &'static str,
     label: &'static str,
+    /// CB.21: every site stacks one ENDPOINT_HIT on its node, `host` when the
+    /// site's URL names a literal authority ([`site_host`]). Clients only.
+    hits: bool,
 }
 
 /// Rows in table order, sites in byte order: node order and anchor order are
@@ -402,9 +416,11 @@ fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
     let mut anchors = Vec::new();
-    let mut by_name: HashMap<String, NodeId> = HashMap::new();
+    let mut by_name: HashMap<String, usize> = HashMap::new();
     // (framework, distinct nodes its sites read), in first-seen order.
     let mut per_framework: Vec<(&'static str, Vec<NodeId>)> = Vec::new();
+    // CB.21: client sites whose ENDPOINT_HIT names a host.
+    let mut hosted = 0usize;
 
     for r in side.rows {
         if !gate_holds(source, r.gate) {
@@ -416,8 +432,8 @@ fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -
             else {
                 continue;
             };
-            let id = match by_name.get(&name) {
-                Some(id) => *id,
+            let at = match by_name.get(&name) {
+                Some(at) => *at,
                 None => {
                     let qname = format!("{}{name}", side.prefix);
                     let id = NodeId::from_parts(GRAPH_TYPE, repo, side.kind, &qname);
@@ -428,10 +444,21 @@ fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -
                         cells: vec![],
                     });
                     nav.record(id, &name, &qname, side.kind, Some(module_id));
-                    by_name.insert(name, id);
-                    id
+                    by_name.insert(name, nodes.len() - 1);
+                    nodes.len() - 1
                 }
             };
+            let Some(node) = nodes.get_mut(at) else {
+                continue;
+            };
+            let id = node.id;
+            if side.hits {
+                let host = site_host(source, offset, r);
+                if host.is_some() {
+                    hosted += 1;
+                }
+                node.cells.push(channel_hit_cell("ws", host.as_deref()));
+            }
             anchors.push(Anchor {
                 node: id,
                 line: anchor_line(source, offset, r.anchor),
@@ -459,6 +486,9 @@ fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -
                 ids.len()
             );
         }
+    }
+    if hosted > 0 {
+        eprintln!("[ws] client hosts sites={hosted} in {path}");
     }
 
     WsNodes {
@@ -799,9 +829,9 @@ fn after_angle(source: &str, start: usize) -> Option<usize> {
 }
 
 /// The request path a client URL argument names, or `None` when it cannot be
-/// read. The argument is split into top-level `+` pieces: a string literal is
-/// static text, a template literal is static text with each `${...}` span a
-/// dynamic piece, anything else is dynamic. With a dynamic piece, the text
+/// read. The argument is split into top-level `+` pieces ([`client_text`]): a
+/// string literal is static text, a template literal is static text with each
+/// `${...}` span a dynamic piece, anything else is dynamic. With a dynamic piece, the text
 /// after the LAST one is the path when it starts with `/`; otherwise a static
 /// head that is a full `scheme://host/path` URL is. The scheme + authority are
 /// stripped and a query / fragment is dropped; only a result starting with
@@ -811,6 +841,32 @@ fn after_angle(source: &str, start: usize) -> Option<usize> {
 /// `` `${base}/ws/admin` `` -> `/ws/admin`,
 /// `"wss://api.example.com/echo"` -> `/echo`, `url` -> `None`.
 fn client_path(arg: &str) -> Option<String> {
+    let text = client_text(arg)?;
+    let candidate = match (text.find(DYNAMIC), text.rfind(DYNAMIC)) {
+        (Some(first), Some(last)) => {
+            let tail = text.get(last + DYNAMIC.len_utf8()..).unwrap_or("");
+            let head = text.get(..first).unwrap_or("");
+            if tail.starts_with('/') {
+                tail.to_string()
+            } else if head.contains("://") {
+                head.to_string()
+            } else {
+                return None;
+            }
+        }
+        _ => text,
+    };
+    let path = normalise_ws_path(&candidate);
+    let path = path.split(['?', '#']).next().unwrap_or("");
+    path.starts_with('/').then(|| path.to_string())
+}
+
+/// A client URL argument as text: split into top-level `+` pieces, a string
+/// literal is static text, a template literal is static text with each
+/// `${...}` span a [`DYNAMIC`], anything else is one [`DYNAMIC`]. `None` for an
+/// empty argument. Shared by [`client_path`] and [`client_host`], so the two
+/// read one argument identically.
+fn client_text(arg: &str) -> Option<String> {
     let arg = arg.trim();
     if arg.is_empty() {
         return None;
@@ -829,23 +885,51 @@ fn client_path(arg: &str) -> Option<String> {
             _ => text.push(DYNAMIC),
         }
     }
-    let candidate = match (text.find(DYNAMIC), text.rfind(DYNAMIC)) {
-        (Some(first), Some(last)) => {
-            let tail = text.get(last + DYNAMIC.len_utf8()..).unwrap_or("");
-            let head = text.get(..first).unwrap_or("");
-            if tail.starts_with('/') {
-                tail.to_string()
-            } else if head.contains("://") {
-                head.to_string()
-            } else {
-                return None;
-            }
-        }
-        _ => text,
+    Some(text)
+}
+
+/// The URL schemes a client argument's static head may start with for its
+/// authority to be read ([`client_host`]), the ones [`normalise_ws_path`]
+/// strips.
+const WS_SCHEMES: [&str; 4] = ["ws://", "wss://", "http://", "https://"];
+
+/// CB.21: the authority a client URL argument dials, `host[:port]` with any
+/// userinfo dropped, or `None` when the source does not spell it.
+///
+/// Read off the argument's STATIC HEAD, the text before its first dynamic
+/// piece (the whole argument when it is one literal), which must start with
+/// one of [`WS_SCHEMES`]. With a dynamic piece after the head, the authority
+/// must END inside it (a `/`, `?` or `#` follows it), so a port or host glued
+/// to a variable is not a host. The authority itself goes through
+/// `code_domain::endpoint::client_url_split`, the HTTP clients' rule, which
+/// accepts only a literal `host[:port]`.
+///
+/// `"ws://chat-svc:8080/ws"` -> `chat-svc:8080`,
+/// `"wss://api.example.com/ws?token=" + t` -> `api.example.com`,
+/// `"ws://" + location.host + "/ws"` -> `None`, `` `${base}/ws` `` -> `None`,
+/// `"ws://chat-svc:" + port + "/ws"` -> `None`.
+fn client_host(arg: &str) -> Option<String> {
+    let text = client_text(arg)?;
+    let (head, dynamic) = match text.find(DYNAMIC) {
+        Some(i) => (text.get(..i)?, true),
+        None => (text.as_str(), false),
     };
-    let path = normalise_ws_path(&candidate);
-    let path = path.split(['?', '#']).next().unwrap_or("");
-    path.starts_with('/').then(|| path.to_string())
+    let rest = WS_SCHEMES.iter().find_map(|s| head.strip_prefix(s))?;
+    if dynamic && !rest.contains(['/', '?', '#']) {
+        return None;
+    }
+    client_url_split(head).0
+}
+
+/// CB.21: the host one client site dials. Only a row that reads a client URL
+/// ([`PathRead::Client`]) can name one; every other client row (a channel
+/// class, a topic, an import line) records none.
+fn site_host(source: &str, offset: usize, r: &WsRow) -> Option<String> {
+    let PathRead::Client(n) = r.read else {
+        return None;
+    };
+    let after = offset.checked_add(r.needle.len())?;
+    client_host(split_top(call_region(source, after)?, b',').get(n)?)
 }
 
 /// Template-literal content into `out`, each `${...}` span as [`DYNAMIC`].
@@ -1488,6 +1572,88 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The ENDPOINT_HIT payloads on each node, in node order.
+    fn hits(out: &WsNodes) -> Vec<(String, Vec<String>)> {
+        out.nodes
+            .iter()
+            .map(|n| {
+                let payloads = n
+                    .cells
+                    .iter()
+                    .filter(|c| c.kind == glia_code_domain::cell_type::ENDPOINT_HIT)
+                    .map(|c| match &c.payload {
+                        glia_core::CellPayload::Json(j) => j.clone(),
+                        other => format!("{other:?}"),
+                    })
+                    .collect();
+                (out.nav.qname_by_id[&n.id].clone(), payloads)
+            })
+            .collect()
+    }
+
+    /// CB.21: a literal ws / http URL names its authority, userinfo dropped and
+    /// the port kept, one cell per site; a second site on the same path stacks
+    /// its own cell.
+    #[test]
+    fn ws_client_host_from_a_literal_url() {
+        let src = "export function connectChat(): WebSocket {\n\
+                   \x20 const ws = new WebSocket(\"ws://chat-svc:8080/ws\");\n\
+                   \x20 return ws;\n}\n\
+                   export function again() {\n\
+                   \x20 return new WebSocket(\"wss://u:p@chat-svc/ws?token=\" + token);\n}\n";
+        let out = clients(src);
+        assert_eq!(
+            hits(&out),
+            vec![(
+                "ws_client:/ws".to_string(),
+                vec![
+                    r#"{"via":"ws","host":"chat-svc:8080"}"#.to_string(),
+                    r#"{"via":"ws","host":"chat-svc"}"#.to_string(),
+                ]
+            )]
+        );
+        assert_eq!(client_host("\"https://api.example.com/hubs/chat\""), Some("api.example.com".into()));
+        assert_eq!(client_host("`ws://notify:9000/live`"), Some("notify:9000".into()));
+        let go = "import \"github.com/gorilla/websocket\"\n\
+                  c, _, _ := websocket.DefaultDialer.DialContext(ctx, \"ws://chat-svc/ws\", nil)\n";
+        assert_eq!(
+            hits(&clients(go)),
+            vec![("ws_client:/ws".to_string(), vec![r#"{"via":"ws","host":"chat-svc"}"#.to_string()])]
+        );
+    }
+
+    /// CB.21: a dynamic authority, a relative path, a variable URL and a
+    /// non-URL row all record a hostless cell, never a guessed host.
+    #[test]
+    fn ws_client_host_dynamic_is_absent() {
+        for arg in [
+            "\"ws://\" + location.host + \"/ws\"",
+            "`${proto}://${location.host}/live`",
+            "`ws://${host}/ws`",
+            "\"ws://chat-svc:\" + port + \"/ws\"",
+            "\"ws://\" + host + \":8080\"",
+            "\"/ws\"",
+            "url",
+            "\"ws://${…}/ws\"",
+            "\"\"",
+        ] {
+            assert_eq!(client_host(arg), None, "{arg}");
+        }
+        let src = "const a = new WebSocket(\"ws://\" + location.host + \"/ws\");\n\
+                   const b = new WebSocket(url);\n\
+                   App.cable.subscriptions.create({ channel: \"ChatChannel\" });\n";
+        assert_eq!(
+            hits(&clients(src)),
+            vec![
+                ("ws_client:/ws".to_string(), vec![r#"{"via":"ws"}"#.to_string()]),
+                ("ws_client:ws".to_string(), vec![r#"{"via":"ws"}"#.to_string()]),
+                ("ws_client:ChatChannel".to_string(), vec![r#"{"via":"ws"}"#.to_string()]),
+            ]
+        );
+        // A handler never carries one.
+        assert!(handlers(FASTAPI).nodes.iter().all(|n| n.cells.is_empty()));
     }
 
     #[test]
