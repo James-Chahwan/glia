@@ -6,14 +6,30 @@
 //! op name falls back to the needle text) paired with the decorator-noun
 //! `Query` resolver node — all-to-all fan-out on the busiest node in a GraphQL
 //! repo.
+//!
+//! HOST NARROWING (CB.24). The resolver index is owner-free (LB.8b), so an
+//! operation pairs every same-field resolver whichever project serves it. A
+//! project that builds its GraphQL client on a literal base URL (`new
+//! ApolloClient({ uri: "http://users-svc/graphql" })`) has that authority
+//! stamped on its operations as an ENDPOINT_HIT `hosts` by the engine's
+//! client-host graft; an operation matching two or more resolvers keeps only
+//! those of the project or repo the host names (`host::SideNarrowing`, A11.4 /
+//! LB.4b's rule: no host, an unknown one or a named scope with no resolver
+//! keeps every pair). Such a pair's evidence rule is `host`; every other pair
+//! keeps the engine's emitter-only stamp.
+//!
+//! fired_on marker, once per build with GraphQL to resolve:
+//!   `[graphql-resolve] 2 pairs; dropped: type-level=2, unkeyable=0, no-match=0; narrowed-by-host=1`
+//! `narrowed-by-host` counts operations whose resolvers a host narrowed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::{edge_category, node_kind};
-use glia_core::Edge;
+use glia_core::{Edge, NodeId};
 
-use super::{CrossGraphResolver, build_kind_index, weakest};
+use super::host::SideNarrowing;
+use super::{CrossGraphResolver, RuleTally, build_kind_index, weakest};
 use crate::merged::MergedGraph;
 
 // ============================================================================
@@ -45,6 +61,15 @@ impl CrossGraphResolver for GraphQLStackResolver {
         }
 
         let (mut pairs, mut unkeyable, mut no_match) = (0usize, 0usize, 0usize);
+        // CB.24: an operation's hosts narrow its resolvers; the operations
+        // narrowed (distinct ids) and the `host` rule's tally.
+        let mut narrowing = SideNarrowing::new(
+            &merged.graphs,
+            node_kind::GRAPHQL_OPERATION,
+            node_kind::GRAPHQL_RESOLVER,
+        );
+        let mut narrowed: HashSet<NodeId> = HashSet::new();
+        let mut rules = RuleTally::new("graphql", &["host"]);
         for g in &merged.graphs {
             for n in &g.nodes {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::GRAPHQL_OPERATION) {
@@ -64,25 +89,36 @@ impl CrossGraphResolver for GraphQLStackResolver {
                     no_match += 1;
                     continue;
                 };
+                let mut targets = targets.clone();
+                let by_host = narrowing.narrow(n.id, &mut targets, |t| t.id);
+                if by_host {
+                    narrowed.insert(n.id);
+                }
                 for t in targets {
-                    merged.cross_edges.push(Edge {
+                    let mut edge = Edge {
                         from: n.id,
                         to: t.id,
                         category: edge_category::GRAPHQL_CALLS,
                         confidence: weakest(n.confidence, t.confidence),
                         cells: Vec::new(),
-                    });
+                    };
+                    if by_host {
+                        edge.cells.push(rules.cell("host"));
+                    }
+                    merged.cross_edges.push(edge);
                     pairs += 1;
                 }
             }
         }
+        rules.report();
 
         // One line per build, and only when there was GraphQL to resolve —
         // the `[ws-resolve]` house style.
         if pairs + type_level + unkeyable + no_match > 0 {
             eprintln!(
                 "[graphql-resolve] {pairs} pairs; dropped: type-level={type_level}, \
-                 unkeyable={unkeyable}, no-match={no_match}"
+                 unkeyable={unkeyable}, no-match={no_match}; narrowed-by-host={}",
+                narrowed.len()
             );
         }
     }
@@ -169,6 +205,103 @@ fn gql_key(raw: &str) -> Option<String> {
         return None;
     }
     Some(key.to_string())
+}
+
+#[cfg(test)]
+mod host_tests {
+    use super::super::tests::{channel_graph, cross_pairs};
+    use super::*;
+    use glia_code_domain::cell_type;
+    use glia_code_domain::evidence::Evidence;
+    use glia_core::{Cell, CellPayload};
+
+    /// CB.24: a monorepo where `services/users` and `services/catalog` both
+    /// serve `getUser`, with the calling projects' operations; `hits` puts an
+    /// ENDPOINT_HIT on the `@apps/web` operation.
+    fn two_servers(tag: &str, hits: &[&str]) -> crate::types::RepoGraph {
+        let mut g = channel_graph(
+            tag,
+            &[
+                (node_kind::PROJECT, "project:services/users"),
+                (node_kind::PROJECT, "project:services/catalog"),
+                (node_kind::PROJECT, "project:apps/web"),
+                (node_kind::PROJECT, "project:apps/admin"),
+                (node_kind::GRAPHQL_RESOLVER, "graphql_resolver:getUser @services/users"),
+                (node_kind::GRAPHQL_RESOLVER, "graphql_resolver:getUser @services/catalog"),
+                (node_kind::GRAPHQL_OPERATION, "graphql_op:getUser @apps/web"),
+                (node_kind::GRAPHQL_OPERATION, "graphql_op:getUser @apps/admin"),
+            ],
+        );
+        let ids: Vec<NodeId> = g.nodes.iter().map(|n| n.id).collect();
+        for (id, label) in ids.iter().zip(["users-svc", "catalog-svc", "web", "admin"]) {
+            g.nav.name_by_id.insert(*id, label.to_string());
+        }
+        g.nodes[6].cells = hits
+            .iter()
+            .map(|j| Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Json((*j).into()) })
+            .collect();
+        g
+    }
+
+    fn pair(from: &str, to: &str) -> (String, String) {
+        (format!("graphql_op:getUser @{from}"), format!("graphql_resolver:getUser @{to}"))
+    }
+
+    /// CB.24: the web app's client names users-svc, so its operation keeps
+    /// the users resolver only, with rule `host`; the admin app (no client
+    /// host) still pairs both. A second graph copy of the web operation with
+    /// no stamp of its own is narrowed through the first copy's hit.
+    #[test]
+    fn graphql_host_narrows_to_the_named_project() {
+        let g = two_servers("gql-host", &[r#"{"via":"graphql","hosts":["users-svc"]}"#]);
+        let copy = channel_graph("gql-host", &[(node_kind::GRAPHQL_OPERATION, "graphql_op:getUser @apps/web")]);
+        let mut merged = MergedGraph::new(vec![g, copy]);
+        merged.run(&GraphQLStackResolver);
+        assert_eq!(
+            cross_pairs(&merged, edge_category::GRAPHQL_CALLS),
+            vec![
+                pair("apps/admin", "services/catalog"),
+                pair("apps/admin", "services/users"),
+                pair("apps/web", "services/users"),
+                pair("apps/web", "services/users"),
+            ]
+        );
+        let rules: Vec<Option<String>> = merged
+            .cross_edges
+            .iter()
+            .map(|e| Evidence::read(&e.cells).and_then(|ev| ev.rule))
+            .collect();
+        assert_eq!(rules.iter().filter(|r| r.as_deref() == Some("host")).count(), 2, "{rules:?}");
+        assert_eq!(rules.iter().filter(|r| r.is_none()).count(), 2, "unnarrowed pairs stay bare");
+    }
+
+    /// CB.24: without positive evidence nothing narrows: no hit, a hostless
+    /// hit, an unknown host, a host naming a project that serves no resolver
+    /// (`web`), and hosts naming both servers.
+    #[test]
+    fn no_host_keeps_every_target() {
+        for hits in [
+            &[][..],
+            &[r#"{"via":"graphql"}"#][..],
+            &[r#"{"via":"graphql","hosts":["billing:9000"]}"#][..],
+            &[r#"{"via":"graphql","hosts":["web"]}"#][..],
+            &[r#"{"via":"graphql","hosts":["catalog-svc","users-svc"]}"#][..],
+            &[r#"{"via":"graphql","hosts":["users-svc"]}"#, r#"{"via":"graphql"}"#][..],
+        ] {
+            let mut merged = MergedGraph::new(vec![two_servers("gql-no-host", hits)]);
+            merged.run(&GraphQLStackResolver);
+            let web: Vec<(String, String)> = cross_pairs(&merged, edge_category::GRAPHQL_CALLS)
+                .into_iter()
+                .filter(|(f, _)| f.ends_with("@apps/web"))
+                .collect();
+            assert_eq!(
+                web,
+                vec![pair("apps/web", "services/catalog"), pair("apps/web", "services/users")],
+                "{hits:?}"
+            );
+            assert!(merged.cross_edges.iter().all(|e| e.cells.is_empty()), "{hits:?}");
+        }
+    }
 }
 
 #[cfg(test)]

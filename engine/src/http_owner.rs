@@ -112,8 +112,9 @@ impl OwnerIndex {
     }
 
     /// The longest owner enclosing `file` (segment-bounded: `webx/a.ts` is not
-    /// under `web`), or `None` for a file under no nested root.
-    fn owner_of(&self, file: &str) -> Option<&str> {
+    /// under `web`), or `None` for a file under no nested root. CB.24's
+    /// `stamp_client_hosts` graft (build/grafts.rs) groups client hosts by it.
+    pub(crate) fn owner_of(&self, file: &str) -> Option<&str> {
         self.0
             .iter()
             .filter(|r| {
@@ -539,8 +540,9 @@ fn plan_parse<'o>(
     moves
 }
 
-/// The file of the parse's first MODULE node that names one.
-fn module_file(fp: &FileParse) -> Option<String> {
+/// The file of the parse's first MODULE node that names one: the owner pass's
+/// fallback for a node with no file of its own (and CB.24's client-host graft's).
+pub(crate) fn module_file(fp: &FileParse) -> Option<String> {
     fp.nodes
         .iter()
         .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::MODULE))

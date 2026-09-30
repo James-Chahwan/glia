@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use glia_code_domain::{CodeNav, FileParse, edge_category, evidence};
+use glia_code_domain::{CodeNav, FileParse, NavFact, edge_category, evidence};
 use glia_core::{NodeId, RepoId};
 
 /// The repo's `go.mod` set (LA.13), what [`parse_one_with_go_modules`] maps
@@ -426,6 +426,20 @@ pub(crate) fn apply_cross_cutting_extractors(
         }
         run_marked!(procs);
         run_marked!(calls);
+        // CB.24: the base URL each GraphQL / tRPC client of this file is
+        // built with, as a `ClientHost` fact on the file MODULE. Recorded on
+        // `fp.nav` itself: `merge_nav` copies no build-time table, so a fact
+        // on an extractor's own nav would be dropped. Cached with the parse;
+        // the post-cache `stamp_client_hosts` graft (build/grafts.rs) spreads
+        // it to the project's GRAPHQL_OPERATION / RPC_CALL sides.
+        for (via, hosts) in [
+            ("graphql", graphql::graphql_client_hosts(source)),
+            ("rpc", trpc::trpc_client_hosts(source)),
+        ] {
+            for (host, line) in hosts {
+                fp.nav.record_fact(module_id, NavFact::ClientHost { via: via.into(), host, line });
+            }
+        }
         // LA.6b: Angular Router / React Router / vue-router tables, ONE walk
         // per file (the three framework extractors below used to scan `path:`
         // each, minting one literal up to three times on a plain `.ts`). Not

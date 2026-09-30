@@ -188,6 +188,34 @@ pub fn is_trpc_client_line(line: &str) -> bool {
         && !scan_client_calls(line, &Scan::new(line), &[]).is_empty()
 }
 
+/// CB.24: the tRPC links a client is built with; their options name the
+/// server's base URL under `url`. `unstable_httpBatchStreamLink` is v10's name
+/// for the v11 `httpBatchStreamLink`.
+const TRPC_LINKS: &[&str] = &[
+    "httpBatchLink",
+    "httpLink",
+    "httpBatchStreamLink",
+    "unstable_httpBatchStreamLink",
+];
+
+/// CB.24: the literal authority (`host[:port]`) of every tRPC client base URL
+/// `source` builds, with the 0-based row of its literal, in source order: the
+/// `url:` of a [`TRPC_LINKS`] call's options object, when it is ONE string
+/// literal (a template without `${`) with a literal `scheme://authority`. A
+/// relative `/api/trpc` (a same-origin Next.js app) or a computed
+/// `getBaseUrl() + ..` names no service and yields nothing. The object scan is
+/// the GraphQL client scan's (`graphql::client_option_urls`).
+pub fn trpc_client_hosts(source: &str) -> Vec<(String, u32)> {
+    if !TRPC_LINKS.iter().any(|l| source.contains(l)) {
+        return Vec::new();
+    }
+    let mut sites = Vec::new();
+    for link in TRPC_LINKS {
+        sites.extend(crate::graphql::client_option_urls(source, link, false, &["url"]));
+    }
+    crate::graphql::client_sites_in_order(source, sites)
+}
+
 /// Push one node (no cells: POSITION comes from the anchor pass) and return
 /// its id.
 fn push_node(
@@ -887,6 +915,32 @@ mod tests {
             .iter()
             .filter_map(|n| out.nav.qname_by_id.get(&n.id).cloned())
             .collect()
+    }
+
+    fn hosts(v: &[(&str, u32)]) -> Vec<(String, u32)> {
+        v.iter().map(|&(h, l)| (h.to_string(), l)).collect()
+    }
+
+    /// CB.24: a link's `url:` literal names the tRPC server; each link of a
+    /// client is its own site, in source order.
+    #[test]
+    fn trpc_http_batch_link_url() {
+        let src = "import { createTRPCProxyClient, httpBatchLink } from \"@trpc/client\";\n\nexport const api = createTRPCProxyClient({ links: [httpBatchLink({ url: \"http://catalog-svc/api/trpc\" })] });\n";
+        assert_eq!(trpc_client_hosts(src), hosts(&[("catalog-svc", 2)]));
+        let many = "const client = createTRPCClient({\n  links: [\n    splitLink({\n      condition: (op) => op.type === 'subscription',\n      true: httpLink({ url: 'http://users-svc:3000/trpc' }),\n      false: unstable_httpBatchStreamLink({\n        url: `https://catalog-svc/trpc`,\n      }),\n    }),\n  ],\n});\n";
+        assert_eq!(
+            trpc_client_hosts(many),
+            hosts(&[("users-svc:3000", 4), ("catalog-svc", 6)])
+        );
+        for dynamic in [
+            "httpBatchLink({ url: '/api/trpc' })",
+            "httpBatchLink({ url: getBaseUrl() + '/api/trpc' })",
+            "httpBatchLink({ url: `${getBaseUrl()}/api/trpc` })",
+            "httpBatchLink({ url })",
+            "myhttpBatchLink({ url: 'http://users-svc/trpc' })",
+        ] {
+            assert!(trpc_client_hosts(dynamic).is_empty(), "{dynamic}");
+        }
     }
 
     const T3_ROUTER: &str = r#"import { z } from "zod";

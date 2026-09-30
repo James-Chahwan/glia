@@ -1760,6 +1760,289 @@ fn extract_operation_from_body(body: &str) -> Option<String> {
     None
 }
 
+// ============================================================================
+// CB.24 — the base URL a GraphQL client is built with
+// ============================================================================
+
+/// GraphQL client constructors whose options object names the base URL under
+/// `uri` / `url`: `(callee, called with new)`. Apollo's `ApolloClient`,
+/// `HttpLink` and `createHttpLink`; urql's `createClient` and `Client`.
+const GQL_CLIENT_CTORS: &[(&str, bool)] = &[
+    ("ApolloClient", true),
+    ("HttpLink", true),
+    ("createHttpLink", false),
+    ("createClient", false),
+    ("Client", true),
+];
+
+/// graphql-request's client, whose FIRST positional argument is the URL.
+const GQL_REQUEST_CTOR: &str = "GraphQLClient";
+
+/// The option keys a GraphQL client constructor reads its base URL from.
+const GQL_URL_KEYS: &[&str] = &["uri", "url"];
+
+/// CB.24: the literal authority (`host[:port]`) of every GraphQL client base
+/// URL `source` builds, with the 0-based row of its literal, in source order.
+///
+/// A site is a [`GQL_CLIENT_CTORS`] call whose first argument is an object
+/// literal holding a top-level `uri:` / `url:` key, or `new GraphQLClient(..)`
+/// with a first positional argument, whose value is ONE string literal (a
+/// template without `${`) with a literal `scheme://authority`
+/// (`code_domain::endpoint::client_url_split`). A relative `/graphql`, an
+/// env var, a concatenation or an interpolated host names no service and
+/// yields nothing. `createClient` and `Client` are everyday names (a Redis
+/// client is built as `createClient({ url })` too), so nothing is read from a
+/// file that imports no GraphQL client package ([`gql_context`]).
+pub fn graphql_client_hosts(source: &str) -> Vec<(String, u32)> {
+    let named = GQL_CLIENT_CTORS.iter().any(|(c, _)| source.contains(c))
+        || source.contains(GQL_REQUEST_CTOR);
+    if !named {
+        return Vec::new();
+    }
+    let ctx = gql_context(source);
+    if !ctx.client_import && !ctx.graphql_request {
+        return Vec::new();
+    }
+    let mut sites = Vec::new();
+    for &(callee, new) in GQL_CLIENT_CTORS {
+        sites.extend(client_option_urls(source, callee, new, GQL_URL_KEYS));
+    }
+    sites.extend(client_positional_urls(source, GQL_REQUEST_CTOR));
+    client_sites_in_order(source, sites)
+}
+
+/// CB.24: `(literal offset, authority)` of every `callee(` call (`new
+/// callee(` when `new`, a TS type argument list allowed before the paren)
+/// whose first argument is an object literal holding one of `keys` at its top
+/// level, bound to a single absolute-URL literal. Shared with the tRPC link
+/// scan (`trpc::trpc_client_hosts`).
+pub(crate) fn client_option_urls(
+    source: &str,
+    callee: &str,
+    new: bool,
+    keys: &[&str],
+) -> Vec<(usize, String)> {
+    let b = source.as_bytes();
+    let mut out = Vec::new();
+    for (at, _) in source.match_indices(callee) {
+        if ident_byte_before(b, at) || in_line_comment(b, at) || (new && !preceded_by_new(b, at)) {
+            continue;
+        }
+        let Some(open) = call_open(b, at + callee.len()) else {
+            continue;
+        };
+        let arg = skip_ascii_ws(b, open + 1);
+        if b.get(arg) != Some(&b'{') {
+            continue;
+        }
+        let Some(close) = matching_close(b, arg) else {
+            continue;
+        };
+        if let Some(site) = top_level_url(source, arg, close, keys) {
+            out.push(site);
+        }
+    }
+    out
+}
+
+/// CB.24: `(literal offset, authority)` of every `new callee(` call whose
+/// first positional argument is a single absolute-URL literal.
+fn client_positional_urls(source: &str, callee: &str) -> Vec<(usize, String)> {
+    let b = source.as_bytes();
+    source
+        .match_indices(callee)
+        .filter(|&(at, _)| !ident_byte_before(b, at) && !in_line_comment(b, at) && preceded_by_new(b, at))
+        .filter_map(|(at, _)| {
+            let open = call_open(b, at + callee.len())?;
+            single_url_literal(source, skip_ascii_ws(b, open + 1))
+        })
+        .collect()
+}
+
+/// CB.24: sites in source order, one per literal, as `(authority, 0-based row)`.
+pub(crate) fn client_sites_in_order(source: &str, mut sites: Vec<(usize, String)>) -> Vec<(String, u32)> {
+    sites.sort_by_key(|&(at, _)| at);
+    sites.dedup_by_key(|&mut (at, _)| at);
+    sites
+        .into_iter()
+        .map(|(at, host)| (host, line_of(source, at)))
+        .collect()
+}
+
+/// True when `at` sits on a line that is a comment (`//`, `/*` or a `*`
+/// continuation line) up to it.
+fn in_line_comment(b: &[u8], at: usize) -> bool {
+    let start = b[..at.min(b.len())]
+        .iter()
+        .rposition(|&c| c == b'\n')
+        .map_or(0, |i| i + 1);
+    let head = skip_ascii_ws(b, start);
+    head < at && matches!(b.get(head), Some(b'/' | b'*'))
+}
+
+/// True when the token before `at` (across whitespace, at least one byte of
+/// it) is the keyword `new`.
+fn preceded_by_new(b: &[u8], at: usize) -> bool {
+    let end = b[..at.min(b.len())]
+        .iter()
+        .rposition(|c| !c.is_ascii_whitespace())
+        .map_or(0, |i| i + 1);
+    end < at
+        && end >= 3
+        && b.get(end - 3..end) == Some(b"new")
+        && !ident_byte_before(b, end - 3)
+}
+
+/// The `(` of a call whose callee ends at `from`: whitespace and one TS type
+/// argument list (`<NormalizedCacheObject>`) may come first.
+fn call_open(b: &[u8], from: usize) -> Option<usize> {
+    let mut i = skip_ascii_ws(b, from);
+    if b.get(i) == Some(&b'<') {
+        let mut depth = 0usize;
+        loop {
+            match *b.get(i)? {
+                b'<' => depth += 1,
+                b'>' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                b'(' | b')' | b';' | b'{' | b'}' => return None,
+                _ => {}
+            }
+            i += 1;
+        }
+        i = skip_ascii_ws(b, i + 1);
+    }
+    (b.get(i) == Some(&b'(')).then_some(i)
+}
+
+/// The index just past the string literal whose opening quote is at `at`
+/// (`'`, `"` or a backtick template), or `None` when it is unterminated. A
+/// quoted string ends at the line's end; a template may span lines.
+fn skip_js_literal(b: &[u8], at: usize) -> Option<usize> {
+    let quote = *b.get(at)?;
+    let mut i = at + 1;
+    while let Some(&c) = b.get(i) {
+        match c {
+            b'\\' => i += 2,
+            b'\n' if quote != b'`' => return None,
+            _ if c == quote => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// The index of the bracket closing the one opened at `open`, over any mix
+/// of `()[]{}`, skipping string literals and comments.
+fn matching_close(b: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while let Some(&c) = b.get(i) {
+        match c {
+            b'"' | b'\'' | b'`' => {
+                i = skip_js_literal(b, i)?;
+                continue;
+            }
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                i = b[i..].iter().position(|&x| x == b'\n').map_or(b.len(), |p| i + p);
+                continue;
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i = find_close(b, i + 2, b"*/", false).map_or(b.len(), |p| p + 2);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The first top-level `key: <literal>` of the object literal spanning
+/// `open..=close` whose key is one of `keys`: `(literal offset, authority)`.
+/// A key is an identifier right after the `{` or a `,`; a matching key bound
+/// to anything but one absolute-URL literal ends the search with `None`.
+fn top_level_url(source: &str, open: usize, close: usize, keys: &[&str]) -> Option<(usize, String)> {
+    let b = source.as_bytes();
+    let mut depth = 0usize;
+    let mut expect_key = true;
+    let mut i = open + 1;
+    while i < close {
+        let c = b[i];
+        match c {
+            b'"' | b'\'' | b'`' => {
+                i = skip_js_literal(b, i)?;
+                expect_key = false;
+                continue;
+            }
+            b'/' if matches!(b.get(i + 1), Some(b'/' | b'*')) => {
+                i = if b[i + 1] == b'/' {
+                    b[i..].iter().position(|&x| x == b'\n').map_or(close, |p| i + p)
+                } else {
+                    find_close(b, i + 2, b"*/", false).map_or(close, |p| p + 2)
+                };
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                expect_key = true;
+                i += 1;
+                continue;
+            }
+            _ if c.is_ascii_whitespace() => {
+                i += 1;
+                continue;
+            }
+            _ if depth == 0 && expect_key && is_ident_byte(c) => {
+                let end = i + b[i..close].iter().take_while(|&&x| is_ident_byte(x)).count();
+                let colon = skip_ascii_ws(b, end);
+                if keys.contains(&&source[i..end]) && b.get(colon) == Some(&b':') {
+                    return single_url_literal(source, skip_ascii_ws(b, colon + 1));
+                }
+                i = end;
+                expect_key = false;
+                continue;
+            }
+            _ => {}
+        }
+        expect_key = false;
+        i += 1;
+    }
+    None
+}
+
+/// `(offset, authority)` when a single string literal starts at `at` (a
+/// template without `${`), is followed by `,` / `}` / `)` (so not a
+/// concatenation or a method call), and has a literal `scheme://authority`.
+fn single_url_literal(source: &str, at: usize) -> Option<(usize, String)> {
+    let b = source.as_bytes();
+    let quote = *b.get(at)?;
+    if !matches!(quote, b'"' | b'\'' | b'`') {
+        return None;
+    }
+    let end = skip_js_literal(b, at)?;
+    let body = source.get(at + 1..end - 1)?;
+    if quote == b'`' && body.contains("${") {
+        return None;
+    }
+    if !matches!(b.get(skip_ascii_ws(b, end)), Some(b',' | b'}' | b')')) {
+        return None;
+    }
+    let host = glia_code_domain::endpoint::client_url_split(body).0?;
+    Some((at, host))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1769,6 +2052,72 @@ mod tests {
     }
     fn module_id() -> NodeId {
         NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "test")
+    }
+
+    fn hosts(v: &[(&str, u32)]) -> Vec<(String, u32)> {
+        v.iter().map(|&(h, l)| (h.to_string(), l)).collect()
+    }
+
+    /// CB.24: Apollo's client options name the base URL under `uri`; a TS
+    /// type argument list may sit before the paren.
+    #[test]
+    fn apollo_client_uri() {
+        let src = "import { ApolloClient, InMemoryCache } from \"@apollo/client\";\n\nexport const client = new ApolloClient({ uri: \"http://users-svc/graphql\", cache: new InMemoryCache() });\n";
+        assert_eq!(graphql_client_hosts(src), hosts(&[("users-svc", 2)]));
+        let generic = "import { ApolloClient } from '@apollo/client/core';\nconst c = new ApolloClient<NormalizedCacheObject>({\n  cache,\n  uri: 'https://users.internal:4000/graphql',\n});\n";
+        assert_eq!(graphql_client_hosts(generic), hosts(&[("users.internal:4000", 3)]));
+    }
+
+    /// CB.24: `new HttpLink({ uri })` and `createHttpLink({ uri })`; a link
+    /// nested in the client's options is one site, read once.
+    #[test]
+    fn http_link_uri() {
+        let src = "import { ApolloClient, HttpLink, createHttpLink } from '@apollo/client';\nconst a = new ApolloClient({\n  link: new HttpLink({ uri: `http://users-svc:4000/graphql` }),\n  cache,\n});\nconst b = createHttpLink({ uri: \"http://catalog-svc/graphql\" });\n";
+        assert_eq!(
+            graphql_client_hosts(src),
+            hosts(&[("users-svc:4000", 2), ("catalog-svc", 5)])
+        );
+    }
+
+    /// CB.24: urql's `createClient({ url })` / `new Client({ url })`; the
+    /// same call in a file with no GraphQL client import (a Redis client)
+    /// names nothing.
+    #[test]
+    fn urql_create_client_url() {
+        let src = "import { createClient, cacheExchange, fetchExchange } from 'urql';\nexport const client = createClient({\n  url: 'http://catalog-svc/graphql',\n  exchanges: [cacheExchange, fetchExchange],\n});\n";
+        assert_eq!(graphql_client_hosts(src), hosts(&[("catalog-svc", 2)]));
+        let core = "import { Client } from '@urql/core';\nconst c = new Client({ exchanges: [], url: \"http://users-svc/graphql\" });\n";
+        assert_eq!(graphql_client_hosts(core), hosts(&[("users-svc", 1)]));
+        let redis = "import { createClient } from 'redis';\nconst r = createClient({ url: 'redis://cache:6379' });\n";
+        assert!(graphql_client_hosts(redis).is_empty());
+    }
+
+    /// CB.24: graphql-request's `new GraphQLClient(url, opts)`.
+    #[test]
+    fn graphql_request_ctor() {
+        let src = "import { GraphQLClient } from 'graphql-request';\n\nconst gql = new GraphQLClient(\"http://users-svc/graphql\", { headers: {} });\n";
+        assert_eq!(graphql_client_hosts(src), hosts(&[("users-svc", 2)]));
+    }
+
+    /// CB.24: a relative path, an env var, an interpolated or concatenated
+    /// URL, a shorthand key, a nested (non-top-level) key and a commented-out
+    /// client name no host.
+    #[test]
+    fn relative_or_dynamic_url_is_none() {
+        for body in [
+            "new ApolloClient({ uri: '/graphql' })",
+            "new ApolloClient({ uri: process.env.GRAPHQL_URL })",
+            "new ApolloClient({ uri: `http://${host}/graphql` })",
+            "new ApolloClient({ uri: 'http://' + host + '/graphql' })",
+            "new ApolloClient({ uri })",
+            "new ApolloClient({ cache, headers: { uri: 'http://users-svc/graphql' } })",
+            "// new ApolloClient({ uri: 'http://users-svc/graphql' })",
+            "ApolloClient({ uri: 'http://users-svc/graphql' })",
+            "new GraphQLClient(endpoint)",
+        ] {
+            let src = format!("import {{ ApolloClient }} from '@apollo/client';\n{body}\n");
+            assert!(graphql_client_hosts(&src).is_empty(), "{body}");
+        }
     }
 
     #[test]

@@ -1,0 +1,32 @@
+{
+  "framework": "graphql-rpc-host-narrowing",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-e (GraphQL + tRPC): two nested services serve the same GraphQL field getUser and the same tRPC procedure item.list; the web app's Apollo client is built with uri http://users-svc/graphql and its tRPC client with url http://catalog-svc/api/trpc. graph/src/resolvers/graphql.rs and rpc.rs strip the owner and pair every same-key target (LB.8b), and no client host is recorded, so each op pairs BOTH services. Measured on HEAD 2170ff8. After: a project's client base URL narrows its ops / calls through the HTTP resolver's alias index (A11.4 / LB.4b), only on positive evidence.",
+  "expect_edges": [
+    {
+      "from": "graphql_op:getUser @apps/web",
+      "to": "graphql_resolver:getUser @services/users",
+      "category": "GRAPHQL_CALLS"
+    },
+    {
+      "from": "rpc_call:item.list @apps/web",
+      "to": "rpc:item.list @services/catalog",
+      "category": "RPC_CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "graphql_op:getUser @apps/web",
+      "to": "graphql_resolver:getUser @services/catalog",
+      "category": "GRAPHQL_CALLS"
+    },
+    {
+      "from": "rpc_call:item.list @apps/web",
+      "to": "rpc:item.list @services/users",
+      "category": "RPC_CALLS"
+    }
+  ]
+}

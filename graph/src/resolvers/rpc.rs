@@ -27,6 +27,16 @@
 //! GRPC_SERVER / GRPC_CLIENT, so the owner is stripped on both ends (the
 //! procedure index is `build_kind_index`, owner-free since LB.8) and every
 //! call pairs every same-path procedure, whichever project holds it.
+//!
+//! HOST NARROWING (CB.24). A project that builds its tRPC client on a literal
+//! base URL (`httpBatchLink({ url: "http://catalog-svc/api/trpc" })`) has that
+//! authority stamped on its RPC_CALLs as an ENDPOINT_HIT `hosts` by the
+//! engine's client-host graft. A call matching two or more procedures keeps
+//! only those of the project or repo the host names (`host::SideNarrowing`,
+//! A11.4 / LB.4b's rule: no host, an unknown one or a named scope with no
+//! procedure keeps every pair). Such a pair's evidence rule is `host`; every
+//! other pair keeps the engine's emitter-only stamp. `narrowed-by-host` on the
+//! `[trpc-link]` line counts calls a host narrowed.
 
 use std::collections::HashSet;
 
@@ -34,7 +44,8 @@ use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::{edge_category, node_kind};
 use glia_core::{Edge, NodeId};
 
-use super::{CrossGraphResolver, build_kind_index, weakest};
+use super::host::SideNarrowing;
+use super::{CrossGraphResolver, RuleTally, build_kind_index, weakest};
 use crate::merged::MergedGraph;
 
 pub struct RpcStackResolver;
@@ -47,6 +58,12 @@ impl CrossGraphResolver for RpcStackResolver {
         // A node id shared by two graphs indexes twice; one edge per pair.
         let mut seen: HashSet<(NodeId, NodeId)> = HashSet::new();
         let mut edges = Vec::new();
+        // CB.24: a call's hosts narrow its procedures; the calls narrowed
+        // (distinct ids) and the `host` rule's tally.
+        let mut narrowing =
+            SideNarrowing::new(&merged.graphs, node_kind::RPC_CALL, node_kind::RPC_PROCEDURE);
+        let mut narrowed: HashSet<NodeId> = HashSet::new();
+        let mut rules = RuleTally::new("rpc", &["host"]);
         for g in &merged.graphs {
             for n in &g.nodes {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::RPC_CALL) {
@@ -57,24 +74,35 @@ impl CrossGraphResolver for RpcStackResolver {
                 calls += 1;
                 let Some(targets) = index.get(path) else { continue };
                 paired += 1;
+                let mut targets = targets.clone();
+                let by_host = narrowing.narrow(n.id, &mut targets, |t| t.id);
+                if by_host {
+                    narrowed.insert(n.id);
+                }
                 for t in targets {
                     if seen.insert((n.id, t.id)) {
-                        edges.push(Edge {
+                        let mut edge = Edge {
                             from: n.id,
                             to: t.id,
                             category: edge_category::RPC_CALLS,
                             confidence: weakest(n.confidence, t.confidence),
                             cells: Vec::new(),
-                        });
+                        };
+                        if by_host {
+                            edge.cells.push(rules.cell("host"));
+                        }
+                        edges.push(edge);
                     }
                 }
             }
         }
+        rules.report();
         // A10.10 fired_on marker, once per resolve. Silent on a build with no RPC.
         if calls > 0 || procedures > 0 {
             eprintln!(
-                "[trpc-link] calls={calls} paired={paired} procedures={procedures} edges={}",
-                edges.len()
+                "[trpc-link] calls={calls} paired={paired} procedures={procedures} edges={} narrowed-by-host={}",
+                edges.len(),
+                narrowed.len()
             );
         }
         merged.cross_edges.extend(edges);
@@ -206,6 +234,55 @@ mod tests {
             ],
             "one edge per same-path procedure, across owners; user.byId untouched"
         );
+    }
+
+    /// CB.24: `services/users` and `services/catalog` both serve
+    /// `item.list`; the web app's tRPC client names catalog-svc (with a
+    /// port), so its call keeps the catalog procedure only, with rule `host`.
+    /// The LB.8b owner strip still pairs a hostless call with both.
+    #[test]
+    fn rpc_host_narrows_to_the_named_project() {
+        use super::super::tests::{channel_graph, cross_pairs};
+        use glia_code_domain::cell_type;
+        use glia_code_domain::evidence::Evidence;
+        use glia_core::{Cell, CellPayload};
+
+        let mut g = channel_graph(
+            "rpc-host",
+            &[
+                (node_kind::PROJECT, "project:services/users"),
+                (node_kind::PROJECT, "project:services/catalog"),
+                (PROC, "rpc:item.list @services/users"),
+                (PROC, "rpc:item.list @services/catalog"),
+                (CALL, "rpc_call:item.list @apps/web"),
+                (CALL, "rpc_call:item.list @apps/admin"),
+            ],
+        );
+        let ids: Vec<NodeId> = g.nodes.iter().map(|n| n.id).collect();
+        for (id, label) in ids.iter().zip(["users-svc", "catalog-svc"]) {
+            g.nav.name_by_id.insert(*id, label.to_string());
+        }
+        g.nodes[4].cells.push(Cell {
+            kind: cell_type::ENDPOINT_HIT,
+            payload: CellPayload::Json(r#"{"via":"rpc","hosts":["catalog-svc:3000"]}"#.into()),
+        });
+        let mut merged = MergedGraph::new(vec![g]);
+        merged.run(&RpcStackResolver);
+        let pair = |from: &str, to: &str| (format!("rpc_call:item.list @{from}"), format!("rpc:item.list @{to}"));
+        assert_eq!(
+            cross_pairs(&merged, edge_category::RPC_CALLS),
+            vec![
+                pair("apps/admin", "services/catalog"),
+                pair("apps/admin", "services/users"),
+                pair("apps/web", "services/catalog"),
+            ]
+        );
+        let host_rule: Vec<bool> = merged
+            .cross_edges
+            .iter()
+            .map(|e| Evidence::read(&e.cells).and_then(|ev| ev.rule).as_deref() == Some("host"))
+            .collect();
+        assert_eq!(host_rule.iter().filter(|h| **h).count(), 1, "only the narrowed pair: {host_rule:?}");
     }
 
     #[test]

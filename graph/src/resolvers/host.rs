@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::{cell_type, edge_category, node_kind};
-use glia_core::{Cell, CellPayload, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, NodeId, NodeKindId, RepoId};
 
 use crate::types::RepoGraph;
 
@@ -529,6 +529,102 @@ pub(crate) fn narrow_by_host<T: HostScoped>(
     let within_repo = hits.iter().any(|t| !keeps(t) && kept_repos.contains(&t.repo()));
     hits.retain(|t| keeps(t));
     if within_repo { Narrowed::Owner } else { Narrowed::Repo }
+}
+
+// ============================================================================
+// CB.24 — narrowing a keyed side's targets
+// ============================================================================
+
+/// CB.24: host narrowing for a resolver that pairs a SIDE (a GraphQL
+/// operation, an RPC call) with every same-key TARGET whatever project holds
+/// it. Built once per resolve over the two kinds: each target's repo and LB.8
+/// owner (its qname's owner segment, interned in graph order), and each
+/// side's cells over every graph copy of it, so a stamp on one copy (the
+/// engine's client-host graft stamps one per id) narrows them all. The alias
+/// index is built on the first side that needs it.
+pub(crate) struct SideNarrowing<'g> {
+    graphs: &'g [RepoGraph],
+    owners: Owners,
+    scopes: HashMap<NodeId, (RepoId, Option<u32>)>,
+    cells: HashMap<NodeId, Vec<&'g Cell>>,
+    aliases: Option<AliasIndex>,
+}
+
+/// One target of a side, as [`narrow_by_host`] scopes it: its index in the
+/// caller's list.
+struct Scoped {
+    at: usize,
+    repo: RepoId,
+    owner: Option<u32>,
+}
+
+impl HostScoped for Scoped {
+    fn repo(&self) -> RepoId {
+        self.repo
+    }
+    fn owner(&self) -> Option<u32> {
+        self.owner
+    }
+}
+
+impl<'g> SideNarrowing<'g> {
+    /// Index `graphs`' `side` nodes' cells and `target` nodes' scopes.
+    pub(crate) fn new(graphs: &'g [RepoGraph], side: NodeKindId, target: NodeKindId) -> Self {
+        let mut owners = Owners::default();
+        let mut scopes: HashMap<NodeId, (RepoId, Option<u32>)> = HashMap::new();
+        let mut cells: HashMap<NodeId, Vec<&'g Cell>> = HashMap::new();
+        for g in graphs {
+            for n in &g.nodes {
+                let kind = g.nav.kind_by_id.get(&n.id);
+                if kind == Some(&side) {
+                    cells.entry(n.id).or_default().extend(&n.cells);
+                } else if kind == Some(&target) && !scopes.contains_key(&n.id) {
+                    let owner = g
+                        .nav
+                        .qname_by_id
+                        .get(&n.id)
+                        .and_then(|q| owner_from_qname_suffix(q))
+                        .and_then(|o| owners.intern(o));
+                    scopes.insert(n.id, (g.repo, owner));
+                }
+            }
+        }
+        Self { graphs, owners, scopes, cells, aliases: None }
+    }
+
+    /// Keep only the `targets` of the side `from` that live in the project or
+    /// repo its ENDPOINT_HIT hosts name ([`narrow_by_host`]); `id` reads a
+    /// target's node id. True when targets were dropped. Nothing narrows
+    /// under two targets, without a host on every hit, for a target with no
+    /// indexed scope, or without a kept target.
+    pub(crate) fn narrow<T>(&mut self, from: NodeId, targets: &mut Vec<T>, id: impl Fn(&T) -> NodeId) -> bool {
+        if targets.len() < 2 {
+            return false;
+        }
+        let Some(hosts) = self.cells.get(&from).and_then(|c| hit_hosts(c.iter().copied())) else {
+            return false;
+        };
+        let mut scoped: Vec<Scoped> = Vec::with_capacity(targets.len());
+        for (at, t) in targets.iter().enumerate() {
+            let Some(&(repo, owner)) = self.scopes.get(&id(t)) else {
+                return false;
+            };
+            scoped.push(Scoped { at, repo, owner });
+        }
+        let (graphs, owners) = (self.graphs, &self.owners);
+        let aliases = self.aliases.get_or_insert_with(|| build_service_alias_index(graphs, owners).0);
+        if narrow_by_host(aliases, Some(&hosts), &mut scoped) == Narrowed::No {
+            return false;
+        }
+        let keep: HashSet<usize> = scoped.iter().map(|s| s.at).collect();
+        let mut at = 0usize;
+        targets.retain(|_| {
+            let kept = keep.contains(&at);
+            at += 1;
+            kept
+        });
+        true
+    }
 }
 
 #[cfg(test)]

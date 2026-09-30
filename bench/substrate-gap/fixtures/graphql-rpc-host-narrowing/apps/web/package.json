@@ -1,0 +1,1 @@
+{ "name": "web", "dependencies": { "@apollo/client": "3.8.0", "@trpc/client": "10.0.0" } }
