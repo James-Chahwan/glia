@@ -14,32 +14,41 @@ use glia_engine::{ParseCache, generate_one_incremental};
 
 const RELEASE: &str = env!("CARGO_PKG_VERSION");
 
-/// Decode the leading bincode `String` of `parse_cache.bin`: bincode 1.x writes
-/// a `u64` little-endian byte length followed by the UTF-8 bytes. `stamp` is the
-/// first serialized field of `ParseCache`, so it sits at offset 0.
+/// The parse-cache frame's magic (CD.7a) and the offset of the stamp after it
+/// and its `u64` length.
+const FRAME_MAGIC: &[u8] = b"GLIAPCZ1";
+const STAMP_AT: usize = FRAME_MAGIC.len() + 8;
+
+/// Read the build stamp from the `parse_cache.bin` frame header (CD.7a):
+/// `b"GLIAPCZ1"`, then a `u64` little-endian byte length and the UTF-8 stamp,
+/// uncompressed, so `ParseCache::load` can compare it without decompressing.
 fn read_sidecar_stamp(bytes: &[u8]) -> String {
     assert!(
-        bytes.len() > 8,
-        "parse_cache.bin is {} bytes — too short to hold a bincode length prefix",
+        bytes.len() > STAMP_AT,
+        "parse_cache.bin is {} bytes — too short to hold the frame magic and a stamp length",
         bytes.len()
     );
-    let len = u64::from_le_bytes(bytes[0..8].try_into().expect("8 bytes")) as usize;
+    assert_eq!(
+        &bytes[..FRAME_MAGIC.len()],
+        FRAME_MAGIC,
+        "parse_cache.bin does not open with the GLIAPCZ1 frame magic"
+    );
+    let len = u64::from_le_bytes(bytes[FRAME_MAGIC.len()..STAMP_AT].try_into().expect("8 bytes")) as usize;
     assert!(
         len > 0 && len < 64,
-        "leading bincode string length is {len} — not a plausible build stamp; \
-         the first serialized field of ParseCache is no longer the stamp"
+        "frame header stamp length is {len} — not a plausible build stamp"
     );
     assert!(
-        bytes.len() >= 8 + len,
+        bytes.len() >= STAMP_AT + len,
         "parse_cache.bin is truncated: need {} bytes, have {}",
-        8 + len,
+        STAMP_AT + len,
         bytes.len()
     );
-    let s = std::str::from_utf8(&bytes[8..8 + len])
-        .expect("leading bincode string is not valid UTF-8");
+    let s = std::str::from_utf8(&bytes[STAMP_AT..STAMP_AT + len])
+        .expect("frame header stamp is not valid UTF-8");
     assert!(
         s.chars().all(|c| c.is_ascii_graphic() || c == ' '),
-        "leading bincode string {s:?} is not ASCII-printable — this is not the stamp field"
+        "frame header stamp {s:?} is not ASCII-printable — this is not the stamp field"
     );
     s.to_string()
 }
@@ -87,10 +96,10 @@ fn cache_stamp_binds_to_parser_sources_not_just_release() {
         "a freshly written cache did not load back — the stamp check rejects its own output"
     );
 
-    // (4) The parser component is load-bearing: flip ONE hex digit in place
-    // (same byte length, so the bincode framing stays valid) and the cache must
-    // be rejected.
-    let flip_at = 8 + stamp.len() - 1;
+    // (4) The parser component is load-bearing: flip ONE hex digit of the
+    // header stamp in place (same byte length, so the frame stays valid) and
+    // the cache must be rejected.
+    let flip_at = STAMP_AT + stamp.len() - 1;
     let mut tampered = bytes.clone();
     tampered[flip_at] = if tampered[flip_at] == b'0' { b'1' } else { b'0' };
     std::fs::write(&sidecar, &tampered).expect("rewrite tampered sidecar");

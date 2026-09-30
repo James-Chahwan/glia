@@ -18,11 +18,13 @@
 //!   sidecar path LC.9 reads, is an empty cache, and an incremental build over
 //!   it reuses nothing, is byte-identical to a clean one and rewrites the
 //!   sidecar under this build's stamp: a `ParseCache` layout change (LA.12)
-//!   can never mis-decode old bytes into reused parses. The discard is not
-//!   announced by `[incremental] cache stamp mismatch`: 0.4.18's bytes no
-//!   longer decode as this build's `ParseCache` (its `FileParse` moved), and
-//!   `ParseCache::load` drops an undecodable sidecar without a line, before
-//!   the stamp is compared. The child prints which branch it took
+//!   can never mis-decode old bytes into reused parses. Since the CD.7a
+//!   frame, the 0.4.18 file (raw bincode, no `GLIAPCZ1` magic) is never
+//!   decoded as a `ParseCache` at all: `ParseCache::load` reads only its
+//!   leading bincode string, the stamp, and announces the discard as
+//!   `[incremental] cache stamp mismatch (disk=0.4.18+p3d23e8828e7ba01a ...)`.
+//!   The rewritten sidecar is a frame whose header carries this build's
+//!   stamp. The child still prints whether the old bytes would decode
 //!   (`[lg6c] pre-leap sidecar decodes as this build's ParseCache: <bool>`).
 //!
 //! Stderr markers are only visible outside libtest's capture, so every
@@ -221,10 +223,18 @@ fn legacy_dir(repo: &Path) {
     assert_fresh(&outcome, "second load of the rewritten legacy dir");
 }
 
-/// The leading bincode string of a parse-cache sidecar: its build stamp
-/// (`ParseCache`'s first serialized field; bincode 1 allows trailing bytes).
+/// The leading bincode string of a pre-CD.7a (unframed) parse-cache sidecar:
+/// its build stamp (`ParseCache`'s first serialized field; bincode 1 allows
+/// trailing bytes).
 fn sidecar_stamp(bytes: &[u8]) -> String {
     bincode::deserialize::<String>(bytes).expect("a parse-cache sidecar opens with its stamp")
+}
+
+/// The build stamp in a CD.7a parse-cache frame's header: after the
+/// `GLIAPCZ1` magic, in the same `u64`-length-prefixed encoding.
+fn framed_sidecar_stamp(bytes: &[u8]) -> String {
+    let rest = bytes.strip_prefix(b"GLIAPCZ1").expect("the sidecar opens with the GLIAPCZ1 frame magic");
+    sidecar_stamp(rest)
 }
 
 /// The captured 0.4.18 sidecar sits where LC.9 reads it.
@@ -346,10 +356,14 @@ fn pre_leap_parse_cache_is_discarded() {
     assert_eq!(reuse.len(), 1, "{stderr}");
     assert!(reuse[0].contains(": reused 0, reparsed "), "parses reused from the pre-leap cache: {}", reuse[0]);
     assert!(!reuse[0].contains(", reparsed 0,"), "nothing was parsed: {}", reuse[0]);
+    // The discard is announced from the unframed file's leading stamp alone.
+    let mismatch =
+        format!("[incremental] cache stamp mismatch (disk={PRE_LEAP_STAMP} build={BUILD_STAMP}) — full reparse");
+    assert!(stderr.lines().any(|l| l == mismatch), "no stamp-mismatch line for the pre-leap cache:\n{stderr}");
     assert_eq!(
-        sidecar_stamp(&std::fs::read(&sidecar).expect("sidecar")),
+        framed_sidecar_stamp(&std::fs::read(&sidecar).expect("sidecar")),
         BUILD_STAMP,
-        "the sidecar was not rewritten under this build's stamp"
+        "the sidecar was not rewritten as a frame under this build's stamp"
     );
 
     let want = clean_shards(&m.clean, &m.root.join("clean-layout"));

@@ -6,6 +6,22 @@
 //! byte-identical to a clean build — the cache only elides the expensive *parse*
 //! step, never the (cheap, global) resolve/merge step. See
 //! `dev-notes/incremental_gmap_plan.md`.
+//!
+//! On disk (CD.7a) the sidecar is a frame around the bincode of [`ParseCache`]:
+//!
+//! ```text
+//! [0..8) b"GLIAPCZ1" | u64 LE stamp_len | stamp | u64 LE raw_len | lz4 block(bincode)
+//! ```
+//!
+//! The header is uncompressed, so [`ParseCache::load`] rejects a cache written
+//! under another build stamp from the file's first bytes, without reading or
+//! decompressing its body (every parser change moves the stamp, so this is the
+//! common discard). The body is an `lz4_flex` block (pure Rust, deterministic
+//! for equal input), which is what keeps `save`'s write-if-unchanged (LC.11)
+//! exact on the framed bytes. A sidecar without the magic is one from before
+//! the frame: only its leading bincode string (the stamp) is read, to announce
+//! the mismatch, and it is discarded. The frame wraps whatever `ParseCache`
+//! serializes, so a field added there needs no frame change.
 
 // BTreeMap, not HashMap: `bincode::serialize` walks the map in iteration
 // order, and a HashMap walks a per-instance RandomState, so two runs over
@@ -42,6 +58,118 @@ use glia_core::NodeId;
 /// hash of every graph-shaping source, so a parser change invalidates on its own.
 pub(crate) const CACHE_VERSION: &str = glia_stamp::BUILD_STAMP;
 const CACHE_FILE: &str = "parse_cache.bin";
+
+/// First bytes of a framed sidecar (see the module doc). The trailing `1` is
+/// the frame's own version: a different body codec is a different magic.
+const FRAME_MAGIC: &[u8; 8] = b"GLIAPCZ1";
+/// Longest stamp a header may carry. A build stamp is `<release>+p<16 hex>`,
+/// about 25 bytes; the bound keeps a hostile length field from reaching far.
+const MAX_STAMP: usize = 256;
+/// Most bytes the header check reads: magic, stamp length, stamp, raw length.
+/// Also covers an unframed sidecar's leading bincode string (8 + stamp).
+const HEADER_MAX: usize = FRAME_MAGIC.len() + 8 + MAX_STAMP + 8;
+/// A frame whose raw length exceeds this many times its lz4 body is refused
+/// before anything is allocated. A parse cache compresses about 3-4x (every
+/// entry carries an incompressible path and content hash), so no real one
+/// comes near it, and a truncated or hostile file never allocates unbounded
+/// memory.
+const MAX_RATIO: u64 = 64;
+/// Hard ceiling on a frame's raw length, whatever its body size.
+const MAX_RAW: u64 = 4 << 30;
+
+/// Why a sidecar on disk was not reused. Every discard is announced
+/// ([`Discard::line`]): each one explains a slow build.
+#[derive(Debug, PartialEq, Eq)]
+enum Discard {
+    /// Written under another build identity: the stamp it carries.
+    StampMismatch(String),
+    /// Unreadable as a frame of this build: why.
+    Corrupt(&'static str),
+}
+
+impl Discard {
+    /// The `[incremental]` line `load` prints for this discard. The stamp
+    /// mismatch keeps its pre-frame wording.
+    fn line(&self) -> String {
+        match self {
+            Discard::StampMismatch(disk) => format!(
+                "[incremental] cache stamp mismatch (disk={disk} build={CACHE_VERSION}) — full reparse"
+            ),
+            Discard::Corrupt(why) => {
+                format!("[incremental] {CACHE_FILE} unreadable ({why}) — full reparse")
+            }
+        }
+    }
+}
+
+/// A little-endian `u64` and the bytes after it.
+fn split_u64(b: &[u8]) -> Option<(u64, &[u8])> {
+    let (n, rest) = b.split_first_chunk::<8>()?;
+    Some((u64::from_le_bytes(*n), rest))
+}
+
+/// A `u64`-length-prefixed stamp (bincode's `String` encoding, which the
+/// frame header reuses) and the bytes after it. `None` unless it is 1 to
+/// [`MAX_STAMP`] printable ASCII bytes, so nothing else is ever echoed to
+/// stderr as a stamp.
+fn split_stamp(b: &[u8]) -> Option<(&str, &[u8])> {
+    let (len, rest) = split_u64(b)?;
+    let len = usize::try_from(len).ok().filter(|l| (1..=MAX_STAMP).contains(l))?;
+    let (s, rest) = rest.split_at_checked(len)?;
+    let s = std::str::from_utf8(s).ok().filter(|s| s.bytes().all(|c| c.is_ascii_graphic()))?;
+    Some((s, rest))
+}
+
+/// Check a sidecar's leading bytes (the whole file, or at least its first
+/// [`HEADER_MAX`]) against this build's stamp, and return what follows the
+/// frame's stamp. Reads no body: a stale frame is refused here.
+fn fresh_frame(bytes: &[u8]) -> Result<&[u8], Discard> {
+    let Some(rest) = bytes.strip_prefix(FRAME_MAGIC) else {
+        // Unframed: raw bincode from before CD.7a, stamp first. Read just the
+        // stamp, to say why it is dropped; never the body.
+        return Err(match split_stamp(bytes) {
+            Some((disk, _)) if disk != CACHE_VERSION => Discard::StampMismatch(disk.to_string()),
+            _ => Discard::Corrupt("no frame header"),
+        });
+    };
+    match split_stamp(rest) {
+        Some((disk, _)) if disk != CACHE_VERSION => Err(Discard::StampMismatch(disk.to_string())),
+        Some((_, after)) => Ok(after),
+        None => Err(Discard::Corrupt("bad frame stamp")),
+    }
+}
+
+/// Frame the bincode `raw` of a cache written under `stamp`.
+fn frame(stamp: &str, raw: &[u8]) -> Vec<u8> {
+    let body = lz4_flex::block::compress(raw);
+    let mut out = Vec::with_capacity(FRAME_MAGIC.len() + 8 + stamp.len() + 8 + body.len());
+    out.extend_from_slice(FRAME_MAGIC);
+    out.extend_from_slice(&(stamp.len() as u64).to_le_bytes());
+    out.extend_from_slice(stamp.as_bytes());
+    out.extend_from_slice(&(raw.len() as u64).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Decode a whole framed sidecar: header, bounds, lz4 body, bincode. The
+/// stamp is compared before anything is decompressed.
+fn decode(bytes: &[u8]) -> Result<ParseCache, Discard> {
+    let (raw_len, body) = split_u64(fresh_frame(bytes)?).ok_or(Discard::Corrupt("truncated header"))?;
+    if raw_len > MAX_RAW || raw_len > MAX_RATIO.saturating_mul(body.len() as u64) {
+        return Err(Discard::Corrupt("raw length out of bounds"));
+    }
+    let raw_len = usize::try_from(raw_len).map_err(|_| Discard::Corrupt("raw length out of bounds"))?;
+    let mut raw = vec![0u8; raw_len];
+    match lz4_flex::block::decompress_into(body, &mut raw) {
+        Ok(n) if n == raw_len => {}
+        _ => return Err(Discard::Corrupt("lz4 body")),
+    }
+    let cache: ParseCache = bincode::deserialize(&raw).map_err(|_| Discard::Corrupt("bincode body"))?;
+    if cache.stamp != CACHE_VERSION {
+        return Err(Discard::Corrupt("header and body stamps differ"));
+    }
+    Ok(cache)
+}
 
 /// Staging file name `save` writes through before the atomic rename.
 ///
@@ -250,7 +378,8 @@ pub struct CacheDiff {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ParseCache {
     /// Build identity this cache was written under (`CACHE_VERSION`). First
-    /// serialized field, so it is the leading bincode string on disk.
+    /// serialized field; the frame header repeats it uncompressed (CD.7a), and
+    /// it is the leading bincode string of an unframed pre-CD.7a sidecar.
     stamp: String,
     /// Repo identity key the cached parses were built under — the exact string
     /// fed to `RepoId::from_canonical`: `git:<remote>[/<rel>]`,
@@ -408,25 +537,33 @@ impl ParseCache {
 
     /// Load `<repo>/.glia/graph/parse_cache.bin`. Returns an empty cache if
     /// missing, unreadable, corrupt, or written by a different build identity.
+    ///
+    /// The frame header is read first, alone: a cache written under another
+    /// stamp (every parser change moves it) costs one read of at most
+    /// [`HEADER_MAX`] bytes and no decompression. A discard of a file that
+    /// exists is never silent ([`Discard::line`]): a stamp mismatch is the
+    /// parse cache doing its job, and it explains a slow build.
     pub fn load(repo_path: &str) -> ParseCache {
+        use std::io::Read;
         let path = gmap_dir(repo_path).join(CACHE_FILE);
-        let Ok(bytes) = std::fs::read(&path) else {
+        let Ok(mut f) = std::fs::File::open(&path) else {
             return ParseCache::new();
         };
-        match bincode::deserialize::<ParseCache>(&bytes) {
-            Ok(c) if c.stamp == CACHE_VERSION => c,
-            // A stamp mismatch is the parse cache doing its job, and it is the
-            // one discard a human needs to see (it explains a slow build), so it
-            // is never silent.
-            Ok(c) => {
-                eprintln!(
-                    "[incremental] cache stamp mismatch (disk={} build={CACHE_VERSION}) — full reparse",
-                    c.stamp
-                );
-                ParseCache::new()
-            }
-            Err(_) => ParseCache::new(),
+        let mut bytes = Vec::new();
+        if f.by_ref().take(HEADER_MAX as u64).read_to_end(&mut bytes).is_err() {
+            return ParseCache::new();
         }
+        let discard = |d: Discard| {
+            eprintln!("{}", d.line());
+            ParseCache::new()
+        };
+        if let Err(d) = fresh_frame(&bytes) {
+            return discard(d);
+        }
+        if f.read_to_end(&mut bytes).is_err() {
+            return ParseCache::new();
+        }
+        decode(&bytes).unwrap_or_else(discard)
     }
 
     /// Delete the on-disk sidecar. Called when the user explicitly asks for a
@@ -458,11 +595,17 @@ impl ParseCache {
     /// since, and then ours is written, as before. The mtime staying put
     /// cannot make a layout look stale: `store::scan_for_newer` skips the
     /// layout directory by prefix.
+    ///
+    /// What is written is the frame (CD.7a, see the module doc), and the
+    /// comparison runs on the framed bytes: the bincode is in `BTreeMap` and
+    /// canonical order, and an lz4 block is a pure function of its input, so
+    /// an unchanged cache frames to the same bytes.
     pub fn save(&self, repo_path: &str) -> std::io::Result<()> {
         let dir = gmap_dir(repo_path);
         std::fs::create_dir_all(&dir)?;
         crate::persist::write_self_ignore(&dir)?;
-        let bytes = bincode::serialize(self).map_err(std::io::Error::other)?;
+        let raw = bincode::serialize(self).map_err(std::io::Error::other)?;
+        let bytes = frame(&self.stamp, &raw);
         if on_disk_equals(&dir.join(CACHE_FILE), &bytes) {
             eprintln!(
                 "[incremental] unchanged {} entries - parse_cache.bin not rewritten",
@@ -474,8 +617,10 @@ impl ParseCache {
         std::fs::write(&tmp, &bytes)?;
         std::fs::rename(&tmp, dir.join(CACHE_FILE))?;
         eprintln!(
-            "[incremental] saved {} entries (btree) via {}",
+            "[incremental] saved {} entries (btree, lz4 {} -> {} bytes) via {}",
             self.entries.len(),
+            raw.len(),
+            bytes.len(),
             tmp.file_name().unwrap_or_default().to_string_lossy()
         );
         Ok(())
@@ -501,6 +646,11 @@ mod tests {
 
     fn sidecar(dir: &Path) -> PathBuf {
         gmap_dir(dir.to_string_lossy().as_ref()).join(CACHE_FILE)
+    }
+
+    /// The bytes `save` writes for `c`: its bincode, framed.
+    fn framed(c: &ParseCache) -> Vec<u8> {
+        frame(&c.stamp, &bincode::serialize(c).expect("serialize"))
     }
 
     /// Sidecar hygiene (NOT a `.gmap` determinism fix — graph order comes from
@@ -744,8 +894,7 @@ mod tests {
         let mut other = ParseCache::new();
         other.put("src/codec.cpp".into(), 7, "cpp", fill(&rev));
         assert!(
-            bincode::serialize(&other).expect("ser rev")
-                == std::fs::read(sidecar(d.path())).expect("read sidecar"),
+            framed(&other) == std::fs::read(sidecar(d.path())).expect("read sidecar"),
             "nav_facts filled in another scope order serialized to other bytes"
         );
     }
@@ -851,12 +1000,22 @@ mod tests {
         c.save(&repo).expect("first save");
         let old = std::fs::read(sidecar(d.path())).expect("read first");
 
-        c.put("src/f03.rs".to_string(), 999, "rust", FileParse::default());
+        // lz4 may spend more or fewer bytes on a changed hash, so take the
+        // first new content hash for f03 whose frame keeps the length.
+        let with = |h: u64| {
+            let mut t = filled(8);
+            t.put("src/f03.rs".to_string(), h, "rust", FileParse::default());
+            t
+        };
+        let hash = (999..9_999)
+            .find(|&h| framed(&with(h)).len() == old.len())
+            .expect("a changed hash whose frame keeps the length");
+        c.put("src/f03.rs".to_string(), hash, "rust", FileParse::default());
         c.save(&repo).expect("second save");
         let new = std::fs::read(sidecar(d.path())).expect("read second");
         assert_eq!(new.len(), old.len(), "fixture must keep the length so the bytes decide");
         assert_ne!(new, old, "the changed cache was not written");
-        assert_eq!(new, bincode::serialize(&c).expect("serialize"), "disk != the new serialization");
+        assert_eq!(new, framed(&c), "disk != the new frame");
     }
 
     /// Another writer replaced the sidecar with other bytes of the same
@@ -875,6 +1034,180 @@ mod tests {
 
         c.save(&repo).expect("second save");
         let now = std::fs::read(&path).expect("read back");
-        assert_eq!(now, bincode::serialize(&c).expect("serialize"), "the differing sidecar was kept");
+        assert_eq!(now, framed(&c), "the differing sidecar was kept");
+    }
+
+    /// A stamp another build wrote: the one HEAD carried before CD.7a.
+    const OTHER_STAMP: &str = "0.5.0+pf997988d3445fad5";
+
+    /// Two caches hold the same content when their (canonical, LC.11)
+    /// bincode is equal; `ParseCache` has no `PartialEq`.
+    fn same(a: &ParseCache, b: &ParseCache) -> bool {
+        bincode::serialize(a).expect("a") == bincode::serialize(b).expect("b")
+    }
+
+    /// A frame by hand: `stamp` in the header, `raw_len` claimed, `body` as is.
+    fn hand_frame(stamp: &str, raw_len: u64, body: &[u8]) -> Vec<u8> {
+        let mut out = FRAME_MAGIC.to_vec();
+        out.extend((stamp.len() as u64).to_le_bytes());
+        out.extend(stamp.as_bytes());
+        out.extend(raw_len.to_le_bytes());
+        out.extend(body);
+        out
+    }
+
+    /// `bytes` as the sidecar of a fresh repo dir, loaded.
+    fn load_bytes(bytes: &[u8]) -> ParseCache {
+        let d = tempfile::tempdir().expect("tempdir");
+        let path = sidecar(d.path());
+        std::fs::create_dir_all(path.parent().expect("layout dir")).expect("mkdir layout dir");
+        std::fs::write(&path, bytes).expect("write sidecar");
+        ParseCache::load(d.path().to_string_lossy().as_ref())
+    }
+
+    /// CD.7a: `save` writes the frame, `load` reads it back to the same cache.
+    #[test]
+    fn framed_round_trip() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let repo = d.path().to_string_lossy().into_owned();
+        let mut c = filled(4);
+        let order: Vec<u64> = (0..24).rev().collect();
+        c.put("src/rich.rs".into(), 77, "rust", rich_parse(24, &order));
+        c.save(&repo).expect("save");
+        let bytes = std::fs::read(sidecar(d.path())).expect("read sidecar");
+        assert!(bytes.starts_with(b"GLIAPCZ1"), "the sidecar does not open with the frame magic");
+        assert_eq!(bytes, framed(&c), "disk != the frame of the cache");
+        let back = ParseCache::load(&repo);
+        assert_eq!(back.len(), c.len());
+        assert!(same(&back, &c), "the loaded cache differs from the saved one");
+        assert!(back.get("src/rich.rs", 77, "rust").is_some());
+
+        // A degenerate but legitimate cache (200 empty parses, the most
+        // compressible shape a real one takes) stays inside MAX_RATIO.
+        let e = tempfile::tempdir().expect("tempdir");
+        let empties = e.path().to_string_lossy().into_owned();
+        filled(200).save(&empties).expect("save empties");
+        assert_eq!(ParseCache::load(&empties).len(), 200, "a legitimate cache was refused");
+    }
+
+    /// Four nodes of a Python view module: hash-like ids (incompressible, as
+    /// real `NodeId`s are), source text cells, names and qnames.
+    fn source_like(i: u64) -> FileParse {
+        use glia_code_domain::node_kind;
+        use glia_core::{Cell, CellPayload, CellTypeId, Confidence, Node, RepoId};
+        let mut p = FileParse::default();
+        for j in 0..4u64 {
+            let id = NodeId((i * 4 + j + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let code = format!(
+                "def handle_{i}_{j}(request, user_id):\n    order = Order.objects.get(pk=user_id)\n    \
+                 return render(request, \"orders/detail_{j}.html\", {{\"order\": order}})\n"
+            );
+            let cell = Cell { kind: CellTypeId(1), payload: CellPayload::Text(code) };
+            p.nodes.push(Node { id, repo: RepoId(7), confidence: Confidence::Strong, cells: vec![cell] });
+            p.nav.name_by_id.insert(id, format!("handle_{i}_{j}"));
+            p.nav.qname_by_id.insert(id, format!("app::views::handler_{i:03}::handle_{i}_{j}"));
+            p.nav.kind_by_id.insert(id, node_kind::FUNCTION);
+        }
+        p
+    }
+
+    /// CD.7a: repeated source-like text compresses to at most 40% on disk.
+    #[test]
+    fn compresses() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let repo = d.path().to_string_lossy().into_owned();
+        let mut c = ParseCache::new();
+        c.validate_context("dir:cd7a", "");
+        for i in 0..200u64 {
+            let hash = (i + 1).wrapping_mul(0xD1B5_4A32_D192_ED03);
+            c.put(format!("app/views/handler_{i:03}.py"), hash, "python", source_like(i));
+        }
+        let raw = bincode::serialize(&c).expect("serialize").len();
+        c.save(&repo).expect("save");
+        let disk = std::fs::metadata(sidecar(d.path())).expect("stat sidecar").len() as usize;
+        assert!(disk * 100 <= raw * 40, "{disk} bytes on disk for {raw} bytes of bincode (> 40%)");
+        assert!(same(&ParseCache::load(&repo), &c));
+    }
+
+    /// CD.7a: a frame under another stamp is refused from its header. Its body
+    /// is garbage that fails to decompress under this build's stamp (the
+    /// control), so the mismatch proves no decompression happened.
+    #[test]
+    fn stale_stamp_skips_decompression() {
+        assert_ne!(OTHER_STAMP, CACHE_VERSION);
+        // A literal run claimed longer than the input: lz4 refuses it.
+        let garbage = [0xF0u8; 64];
+        let stale = hand_frame(OTHER_STAMP, 1024, &garbage);
+        assert_eq!(decode(&stale).err(), Some(Discard::StampMismatch(OTHER_STAMP.into())));
+        assert_eq!(fresh_frame(&stale[..HEADER_MAX.min(stale.len())]).err(), decode(&stale).err());
+        let control = hand_frame(CACHE_VERSION, 1024, &garbage);
+        assert_eq!(decode(&control).err(), Some(Discard::Corrupt("lz4 body")));
+        assert!(load_bytes(&stale).is_empty(), "a stale frame was reused");
+        assert_eq!(
+            Discard::StampMismatch(OTHER_STAMP.into()).line(),
+            format!("[incremental] cache stamp mismatch (disk={OTHER_STAMP} build={CACHE_VERSION}) — full reparse")
+        );
+
+        // The header vouches for this build but the body was written by
+        // another: refused, not trusted on the header's word.
+        let mut other = filled(2);
+        other.stamp = OTHER_STAMP.to_string();
+        let raw = bincode::serialize(&other).expect("serialize");
+        let forged = frame(CACHE_VERSION, &raw);
+        assert_eq!(decode(&forged).err(), Some(Discard::Corrupt("header and body stamps differ")));
+        assert!(load_bytes(&forged).is_empty());
+    }
+
+    /// CD.7a: an unframed sidecar (raw bincode, the format up to 0.5.0) is a
+    /// stamp mismatch read from its leading bincode string, and discarded.
+    #[test]
+    fn raw_0_5_0_sidecar_is_a_mismatch() {
+        let mut old = filled(8);
+        old.stamp = OTHER_STAMP.to_string();
+        let raw = bincode::serialize(&old).expect("serialize");
+        assert!(!raw.starts_with(FRAME_MAGIC));
+        assert_eq!(decode(&raw).err(), Some(Discard::StampMismatch(OTHER_STAMP.into())));
+        assert!(load_bytes(&raw).is_empty(), "an unframed 0.5.0 sidecar was reused");
+
+        // Unframed under this build's own stamp (nothing writes one): not reused.
+        let raw_now = bincode::serialize(&filled(8)).expect("serialize");
+        assert_eq!(decode(&raw_now).err(), Some(Discard::Corrupt("no frame header")));
+        assert!(load_bytes(&raw_now).is_empty());
+
+        // Neither a frame nor a stamp: nothing is echoed as one.
+        let junks: [&[u8]; 3] = [b"", b"not a parse cache", &[0x05, 0, 0, 0, 0, 0, 0, 0, 0x07, 0x1B, b'[', b'2', b'J']];
+        for junk in junks {
+            assert_eq!(decode(junk).err(), Some(Discard::Corrupt("no frame header")), "{junk:?}");
+        }
+    }
+
+    /// CD.7a: a raw length the body cannot hold is refused before anything
+    /// is allocated; one the body does not decompress to exactly is corrupt.
+    #[test]
+    fn oversized_raw_len_is_refused() {
+        let c = filled(8);
+        let raw = bincode::serialize(&c).expect("serialize");
+        let body = lz4_flex::block::compress(&raw);
+        let good = hand_frame(CACHE_VERSION, raw.len() as u64, &body);
+        assert_eq!(good, framed(&c), "hand_frame is not the frame save writes");
+        assert!(decode(&good).is_ok());
+
+        let claim = |n: u64| decode(&hand_frame(CACHE_VERSION, n, &body)).err();
+        let bounds = Some(Discard::Corrupt("raw length out of bounds"));
+        let bound = MAX_RATIO * body.len() as u64;
+        assert_eq!(claim(bound + 1), bounds);
+        assert_eq!(claim(MAX_RAW + 1), bounds);
+        assert_eq!(claim(u64::MAX), bounds);
+        assert!(load_bytes(&hand_frame(CACHE_VERSION, bound + 1, &body)).is_empty());
+
+        let lz4 = Some(Discard::Corrupt("lz4 body"));
+        assert_eq!(claim(raw.len() as u64 + 1), lz4, "a short decompression was accepted");
+        assert_eq!(claim(raw.len() as u64 - 1), lz4, "an overlong decompression was accepted");
+        let cut = hand_frame(CACHE_VERSION, raw.len() as u64, &body[..body.len() / 2]);
+        assert_eq!(decode(&cut).err(), lz4, "a truncated body was accepted");
+
+        let header = FRAME_MAGIC.len() + 8 + CACHE_VERSION.len();
+        assert_eq!(decode(&good[..header + 4]).err(), Some(Discard::Corrupt("truncated header")));
+        assert_eq!(decode(&good[..header - 1]).err(), Some(Discard::Corrupt("bad frame stamp")));
     }
 }
