@@ -8,7 +8,9 @@
 //! tokens without Confluence scopes 403). Credentials resolve, in order:
 //! explicit args → process env → a `.env` in the current directory.
 
-use crate::snapshot::Page;
+use crate::snapshot::{Page, PageBody};
+use crate::transport::{b64, load_dotenv, pick};
+use glia_code_domain::DocSourceKind;
 
 /// Resolved Confluence credentials + site.
 pub struct Config {
@@ -25,15 +27,11 @@ impl Config {
         token: Option<String>,
     ) -> Result<Config, String> {
         let dot = load_dotenv();
-        let pick = |flag: Option<String>, key: &str| -> Option<String> {
-            flag.or_else(|| std::env::var(key).ok())
-                .or_else(|| dot.get(key).cloned())
-        };
         let miss = |k: &str| format!("missing {k} (pass --{}, or set it in env / ./.env)", k.to_ascii_lowercase().replace("confluence_", ""));
         let cfg = Config {
-            site: pick(site, "CONFLUENCE_SITE").ok_or_else(|| miss("CONFLUENCE_SITE"))?,
-            email: pick(email, "CONFLUENCE_EMAIL").ok_or_else(|| miss("CONFLUENCE_EMAIL"))?,
-            token: pick(token, "CONFLUENCE_TOKEN").ok_or_else(|| miss("CONFLUENCE_TOKEN"))?,
+            site: pick(site, "CONFLUENCE_SITE", &dot).ok_or_else(|| miss("CONFLUENCE_SITE"))?,
+            email: pick(email, "CONFLUENCE_EMAIL", &dot).ok_or_else(|| miss("CONFLUENCE_EMAIL"))?,
+            token: pick(token, "CONFLUENCE_TOKEN", &dot).ok_or_else(|| miss("CONFLUENCE_TOKEN"))?,
         };
         let origin = cfg.checked_origin()?;
         let transport = if origin.starts_with("http://") { "plain http, loopback" } else { "https" };
@@ -65,15 +63,10 @@ impl Config {
         format!("https://{}", self.site)
     }
 
-    /// [`Config::origin`], refused when it is plain http to a non-loopback host.
+    /// [`Config::origin`], refused when it is plain http to a non-loopback
+    /// host ([`crate::transport::checked_origin`], the rule every adapter shares).
     fn checked_origin(&self) -> Result<String, String> {
-        let origin = self.origin();
-        match origin.strip_prefix("http://") {
-            Some(authority) if !is_loopback_authority(authority) => Err(format!(
-                "refusing plain http:// to non-loopback host {authority}: Basic credentials would travel in cleartext"
-            )),
-            _ => Ok(origin),
-        }
+        crate::transport::checked_origin(&self.origin())
     }
 
     fn base(&self) -> Result<String, String> {
@@ -114,11 +107,15 @@ pub fn pull_space(cfg: &Config, space: &str) -> Result<Vec<Page>, String> {
         for p in &results {
             let webui = p["_links"]["webui"].as_str().unwrap_or("");
             out.push(Page {
-                space: space.to_string(),
+                kind: DocSourceKind::Confluence,
+                container: space.to_string(),
                 title: p["title"].as_str().unwrap_or("").to_string(),
                 url: format!("{}/wiki{}", cfg.origin(), webui),
                 version: p["version"]["number"].as_i64().unwrap_or(1).to_string(),
-                storage: p["body"]["storage"]["value"].as_str().unwrap_or("").to_string(),
+                body: PageBody::ConfluenceStorage(
+                    p["body"]["storage"]["value"].as_str().unwrap_or("").to_string(),
+                ),
+                slug_hint: None,
             });
         }
         if n < limit {
@@ -135,11 +132,15 @@ pub fn fetch_page(cfg: &Config, id: &str) -> Result<Page, String> {
     let v = get_json(cfg, &url)?;
     let webui = v["_links"]["webui"].as_str().unwrap_or("");
     Ok(Page {
-        space: v["space"]["key"].as_str().unwrap_or("").to_string(),
+        kind: DocSourceKind::Confluence,
+        container: v["space"]["key"].as_str().unwrap_or("").to_string(),
         title: v["title"].as_str().unwrap_or("").to_string(),
         url: format!("{}/wiki{}", cfg.origin(), webui),
         version: v["version"]["number"].as_i64().unwrap_or(1).to_string(),
-        storage: v["body"]["storage"]["value"].as_str().unwrap_or("").to_string(),
+        body: PageBody::ConfluenceStorage(
+            v["body"]["storage"]["value"].as_str().unwrap_or("").to_string(),
+        ),
+        slug_hint: None,
     })
 }
 
@@ -187,28 +188,6 @@ fn page_ref(cfg: &Config, v: &serde_json::Value) -> Result<PageRef, String> {
     })
 }
 
-/// `host[:port]` where host is `127.0.0.1`, `localhost` or `[::1]` (any case)
-/// and the port, when present, is all digits. Anything else — a path, userinfo
-/// (`127.0.0.1:80@evil.example`), a look-alike (`127.0.0.1.evil.example`) — is
-/// not loopback.
-fn is_loopback_authority(authority: &str) -> bool {
-    let (host, port) = match authority.strip_prefix('[') {
-        Some(v6) => match v6.split_once(']') {
-            Some((inner, after)) => (format!("[{inner}]"), after),
-            None => return false,
-        },
-        None => match authority.find(':') {
-            Some(i) => (authority[..i].to_string(), &authority[i..]),
-            None => (authority.to_string(), ""),
-        },
-    };
-    let port_ok = match port.strip_prefix(':') {
-        Some(digits) => !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()),
-        None => port.is_empty(),
-    };
-    port_ok && ["127.0.0.1", "localhost", "[::1]"].contains(&host.to_ascii_lowercase().as_str())
-}
-
 // ---- HTTP helpers ---------------------------------------------------------
 
 fn get_json(cfg: &Config, url: &str) -> Result<serde_json::Value, String> {
@@ -240,57 +219,5 @@ fn into_json(resp: Result<ureq::Response, ureq::Error>) -> Result<serde_json::Va
             Err(format!("HTTP {code}: {}", body.chars().take(300).collect::<String>()))
         }
         Err(e) => Err(format!("request failed: {e}")),
-    }
-}
-
-/// Load `./.env` into a map (best-effort; missing file → empty). `KEY=value`,
-/// `#` comments and blank lines skipped. Does not touch the process env.
-fn load_dotenv() -> std::collections::HashMap<String, String> {
-    let mut m = std::collections::HashMap::new();
-    if let Ok(text) = std::fs::read_to_string(".env") {
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((k, v)) = line.split_once('=') {
-                m.insert(k.trim().to_string(), v.trim().to_string());
-            }
-        }
-    }
-    m
-}
-
-/// Minimal standard base64 (no deps) for the Basic-auth header.
-fn b64(input: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        out.push(T[(n >> 18 & 63) as usize] as char);
-        out.push(T[(n >> 12 & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6 & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::b64;
-    #[test]
-    fn base64_matches_rfc_vectors() {
-        assert_eq!(b64(b""), "");
-        assert_eq!(b64(b"f"), "Zg==");
-        assert_eq!(b64(b"fo"), "Zm8=");
-        assert_eq!(b64(b"foo"), "Zm9v");
-        assert_eq!(b64(b"foob"), "Zm9vYg==");
-        assert_eq!(b64(b"fooba"), "Zm9vYmE=");
-        assert_eq!(b64(b"foobar"), "Zm9vYmFy");
     }
 }

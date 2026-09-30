@@ -119,6 +119,12 @@ fn docs_sync_through_stub_feeds_documents_edge() {
         repo.join(".glia/docs-snapshot/manifest.jsonl").is_file(),
         "snapshot manifest written"
     );
+    assert!(
+        stderr.contains(
+            "[docs] snapshot source=confluence container=K records=1 kept_other=0 replaced=0 redacted=0 -> .glia/docs-snapshot/manifest.jsonl"
+        ),
+        "CE.4a snapshot marker missing:\n{stderr}"
+    );
 
     // The snapshot feeds the offline build: DOC_SPACE + DOC_SECTION + a
     // DOCUMENTS link from the page to the function its code span names.
@@ -154,6 +160,110 @@ fn docs_sync_through_stub_feeds_documents_edge() {
     assert!(
         documented,
         "no DOC_SECTION -DOCUMENTS-> shop::orders::place_order edge"
+    );
+}
+
+/// `glia docs sync <repo> --space <space>` against a stub serving `page`.
+fn sync_space(scratch: &Path, repo: &str, space: &str, page: serde_json::Value) -> (Output, String) {
+    let stub = StubServer::start(vec![Canned::ok(serde_json::json!({ "results": [page] }).to_string())])
+        .expect("stub binds");
+    let origin = stub.origin();
+    let out = glia(
+        scratch,
+        &["docs", "sync", repo, "--space", space, "--site", &origin, "--email", "e", "--token", "t"],
+    );
+    stub.finish();
+    let stderr = text(&out.stderr);
+    assert!(
+        out.status.success(),
+        "docs sync {space} exited {:?}\nstderr:\n{stderr}",
+        out.status
+    );
+    (out, stderr)
+}
+
+/// CE.4a: syncing a second space keeps the first space's records (HEAD: the
+/// second sync overwrote the manifest, leaving 1 record), and a page whose
+/// body opens with its own title builds ONE DOC_SECTION with one CONTAINS
+/// edge (HEAD: `docs::OPS::billing::billing` twice, NodeId 733198665780254940,
+/// with two identical CONTAINS edges from `docspace::confluence::OPS`).
+#[test]
+fn docs_sync_second_space_keeps_the_first() {
+    let scratch = Scratch::new("two-spaces");
+    let repo = scratch.0.join("repo");
+    std::fs::create_dir_all(repo.join("shop")).expect("mkdir shop");
+    std::fs::write(
+        repo.join("shop/orders.py"),
+        "def place_order(order):\n    return order\n\nclass BillingService:\n    pass\n",
+    )
+    .expect("write orders.py");
+    let repo_arg = repo.to_str().expect("scratch path is UTF-8");
+
+    let page = |id: &str, title: &str, storage: &str, space: &str| {
+        serde_json::json!({
+            "id": id,
+            "title": title,
+            "version": { "number": 1 },
+            "body": { "storage": { "value": storage } },
+            "_links": { "webui": format!("/spaces/{space}/pages/{id}") },
+        })
+    };
+    sync_space(
+        &scratch.0,
+        repo_arg,
+        "ENG",
+        page("1", "Orders", "<p>Call <code>place_order</code>.</p>", "ENG"),
+    );
+    let (_, stderr) = sync_space(
+        &scratch.0,
+        repo_arg,
+        "OPS",
+        page("2", "Billing", "<h2>Billing</h2><p>see <code>BillingService</code></p>", "OPS"),
+    );
+    assert!(
+        stderr.contains(
+            "[docs] snapshot source=confluence container=OPS records=1 kept_other=1 replaced=0 redacted=0 -> .glia/docs-snapshot/manifest.jsonl"
+        ),
+        "stderr:\n{stderr}"
+    );
+    let manifest = std::fs::read_to_string(repo.join(".glia/docs-snapshot/manifest.jsonl"))
+        .expect("manifest written");
+    let paths: Vec<String> = manifest
+        .lines()
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).expect("a DocRecord line");
+            v["rel_path"].as_str().unwrap_or("").to_string()
+        })
+        .collect();
+    assert_eq!(paths, ["confluence/ENG/orders.md", "confluence/OPS/billing.md"]);
+
+    let out = glia(&scratch.0, &["analyze", repo_arg, "--format", "json"]);
+    assert!(out.status.success(), "analyze stderr:\n{}", text(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("analyze stdout is JSON");
+    let nodes = v["nodes"].as_array().expect("nodes array");
+    let edges = v["edges"].as_array().expect("edges array");
+    let mut ids: Vec<u64> = nodes.iter().filter_map(|n| n["id"].as_u64()).collect();
+    let total = ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), total, "every node id is distinct");
+    let billing: Vec<&serde_json::Value> = nodes
+        .iter()
+        .filter(|n| n["kind_name"] == "DOC_SECTION" && n["qname"] == "docs::OPS::billing::billing")
+        .collect();
+    assert_eq!(billing.len(), 1, "one billing section");
+    let into_billing: Vec<&serde_json::Value> = edges
+        .iter()
+        .filter(|e| e["category"] == "CONTAINS" && e["to"] == billing[0]["id"])
+        .collect();
+    assert_eq!(into_billing.len(), 1, "one CONTAINS edge into it");
+    assert!(
+        nodes.iter().any(|n| n["id"] == into_billing[0]["from"] && n["qname"] == "docspace::confluence::OPS"),
+        "the OPS space contains it"
+    );
+    assert!(
+        nodes.iter().any(|n| n["kind_name"] == "DOC_SECTION" && n["qname"] == "docs::ENG::orders::orders"),
+        "the ENG space's page survives the OPS sync"
     );
 }
 

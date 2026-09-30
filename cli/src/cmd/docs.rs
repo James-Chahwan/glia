@@ -106,10 +106,26 @@ fn cmd_docs(action: DocsCmd) -> i32 {
                 );
                 return 1;
             }
-            let records: Vec<_> = pages.iter().map(glia_doc_sources::record_from_page).collect();
-            match glia_doc_sources::write_snapshot(Path::new(&repo), &records) {
-                Ok(manifest) => {
-                    println!("synced {} page(s) from space {space} → {}", records.len(), manifest.display());
+            // CE.4a: every page is redacted on its way into the snapshot, and the
+            // write merges this space into the manifest (other spaces kept). An
+            // empty fetch is refused by write_snapshot rather than deleting the
+            // space's records.
+            let mut redacted = 0usize;
+            let records: Vec<_> = pages
+                .iter()
+                .map(|p| {
+                    let (record, n) = glia_doc_sources::record_from_page(p);
+                    redacted += n;
+                    record
+                })
+                .collect();
+            let source = glia_doc_sources::SnapshotSource {
+                kind: glia_code_domain::DocSourceKind::Confluence,
+                container: space.clone(),
+            };
+            match glia_doc_sources::write_snapshot(Path::new(&repo), &source, &records, redacted) {
+                Ok(w) => {
+                    println!("synced {} page(s) from space {space} → {}", w.written, w.path.display());
                     println!("run `glia build {repo}` to ingest.");
                     0
                 }

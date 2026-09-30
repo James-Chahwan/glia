@@ -26,15 +26,31 @@ const MAX_HEAD: usize = 64 * 1024;
 pub struct Canned {
     pub status: u16,
     pub body: String,
+    /// Extra response headers (e.g. `Retry-After`), sent in order before
+    /// `Content-Length`. A `Content-Type` here replaces the default
+    /// `application/json`.
+    pub headers: Vec<(String, String)>,
 }
 
 impl Canned {
     /// A `200` with `body` (a JSON document in every Confluence exchange).
     pub fn ok(body: impl Into<String>) -> Canned {
+        Canned::status(200, body)
+    }
+
+    /// Any status with `body` and no extra headers (a 404 page, a 429 throttle).
+    pub fn status(code: u16, body: impl Into<String>) -> Canned {
         Canned {
-            status: 200,
+            status: code,
             body: body.into(),
+            headers: Vec::new(),
         }
+    }
+
+    /// Add one response header.
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
     }
 }
 
@@ -191,11 +207,17 @@ fn read_request(stream: &mut TcpStream) -> io::Result<Recorded> {
 /// `Connection: close` so the client opens a fresh connection per request —
 /// the stub serves exactly one request per accepted connection.
 fn write_response(stream: &mut TcpStream, canned: &Canned) -> io::Result<()> {
-    let head = format!(
-        "HTTP/1.1 {} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        canned.status,
+    let mut head = format!("HTTP/1.1 {} X\r\n", canned.status);
+    if !canned.headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
+        head.push_str("Content-Type: application/json\r\n");
+    }
+    for (name, value) in &canned.headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str(&format!(
+        "Content-Length: {}\r\nConnection: close\r\n\r\n",
         canned.body.len()
-    );
+    ));
     stream.write_all(head.as_bytes())?;
     stream.write_all(canned.body.as_bytes())?;
     stream.flush()

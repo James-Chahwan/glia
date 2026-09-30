@@ -118,8 +118,52 @@ struct DocChunk {
     end_line: u32,
 }
 
+/// GitHub-style anchor dedupe within one document (CE.4a): the first `billing`
+/// keeps its slug, the second becomes `billing-1`, the third `billing-2`; a
+/// candidate that is itself taken (a literal `billing-1` heading earlier) moves
+/// on to the next number, so every slug a document hands out is distinct.
+#[derive(Default)]
+struct SlugDedupe {
+    /// Per base slug, the last `-N` suffix handed out; a key present = taken.
+    taken: HashMap<String, u32>,
+}
+
+impl SlugDedupe {
+    fn unique(&mut self, base: String) -> String {
+        let mut slug = base.clone();
+        while self.taken.contains_key(&slug) {
+            let n = self.taken.entry(base.clone()).or_insert(0);
+            *n += 1;
+            slug = format!("{base}-{n}");
+        }
+        self.taken.insert(slug.clone(), 0);
+        slug
+    }
+}
+
+/// The fence marker a line opens or closes: its trimmed start is ```` ``` ````
+/// or `~~~` (CommonMark's rule, simplified to the fence char - neither the
+/// fence length nor the info string is checked).
+fn fence_marker(line: &str) -> Option<&'static str> {
+    let t = line.trim_start();
+    if t.starts_with("```") {
+        Some("```")
+    } else if t.starts_with("~~~") {
+        Some("~~~")
+    } else {
+        None
+    }
+}
+
 /// Split markdown at `#`/`##` headings into chunks. Falls back to one chunk
 /// (first 500 chars) when the file has no headings.
+///
+/// CE.4a: a `#` line inside a fenced code block (a shell or Python comment) is
+/// text of the enclosing section, not a heading: a fence opens on a line
+/// starting ```` ``` ```` / `~~~` and closes on the next line starting with the
+/// same marker, and an unclosed fence runs to the end of the document. Slugs
+/// are deduped within the document ([`SlugDedupe`]), so a repeated heading
+/// gets `-1`, `-2` instead of a second node with the first one's NodeId.
 fn chunk_markdown(text: &str) -> Vec<DocChunk> {
     let lines: Vec<&str> = text.lines().collect();
     let mut chunks: Vec<DocChunk> = Vec::new();
@@ -130,8 +174,12 @@ fn chunk_markdown(text: &str) -> Vec<DocChunk> {
     // `None` while `buf` holds only blank lines. Reset together with `buf`.
     let mut last_content: Option<u32> = None;
     let mut seq = 0u32;
+    let mut slugs = SlugDedupe::default();
+    // The marker of the fence the current line sits in, if any.
+    let mut fence: Option<&'static str> = None;
 
     let flush = |chunks: &mut Vec<DocChunk>,
+                 slugs: &mut SlugDedupe,
                  slug: &Option<String>,
                  buf: &[&str],
                  start: u32,
@@ -150,15 +198,22 @@ fn chunk_markdown(text: &str) -> Vec<DocChunk> {
             *seq += 1;
             s
         });
+        let slug = slugs.unique(slug);
         chunks.push(DocChunk { slug, text: body, start_line: start, end_line: end });
     };
 
     for (i, line) in lines.iter().enumerate() {
         let row = i as u32;
         let t = line.trim_start();
-        if t.starts_with("# ") || t.starts_with("## ") {
+        let in_fence = fence.is_some();
+        match fence {
+            Some(open) if t.starts_with(open) => fence = None,
+            Some(_) => {}
+            None => fence = fence_marker(line),
+        }
+        if !in_fence && (t.starts_with("# ") || t.starts_with("## ")) {
             let end = last_content.unwrap_or(cur_start);
-            flush(&mut chunks, &cur_slug, &buf, cur_start, end, &mut seq);
+            flush(&mut chunks, &mut slugs, &cur_slug, &buf, cur_start, end, &mut seq);
             buf.clear();
             last_content = None;
             // An emoji/punctuation-only heading slugs to "" — fall through to the
@@ -173,7 +228,7 @@ fn chunk_markdown(text: &str) -> Vec<DocChunk> {
         }
     }
     let end = last_content.unwrap_or(cur_start);
-    flush(&mut chunks, &cur_slug, &buf, cur_start, end, &mut seq);
+    flush(&mut chunks, &mut slugs, &cur_slug, &buf, cur_start, end, &mut seq);
 
     // Fallback: no headings → one chunk of the whole file, ending on its last
     // non-blank row (0 for an all-blank file, which `cap_prose` already drops).
@@ -328,13 +383,22 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<gl
         // `docs::README::<slug>`. An external record is scoped by its
         // container (the DOC_SPACE) + stem, as before: its `rel_path`
         // directories (`confluence/<space>/`) only restate the container.
+        // CE.4a: a Notion or wiki record's scope leads with its source tag
+        // (`docs::notion::<db>::<stem>::<slug>`), so a Notion database and a
+        // wiki sharing a container name and page slug keep their own nodes;
+        // Confluence's shape is the one users' graphs already hold.
         let scope = match rec.provenance.container.as_deref() {
             Some(container) => {
                 let stem = std::path::Path::new(path)
                     .file_stem()
                     .and_then(|s| s.to_str())
                     .unwrap_or("doc");
-                format!("{container}::{stem}")
+                match rec.provenance.kind {
+                    DocSourceKind::Notion | DocSourceKind::Wiki => {
+                        format!("{}::{container}::{stem}", source_tag(rec.provenance.kind))
+                    }
+                    DocSourceKind::File | DocSourceKind::Confluence => format!("{container}::{stem}"),
+                }
             }
             None => glia_code_domain::dir_stem_qname(path),
         };
@@ -547,5 +611,156 @@ mod docs_tests {
         let b = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::DOC_SECTION, "docs::docs::b::guide::setup");
         assert_ne!(a, b);
         assert!(g.nav.qname_by_id.contains_key(&a) && g.nav.qname_by_id.contains_key(&b));
+    }
+
+    fn slugs(md: &str) -> Vec<String> {
+        chunk_markdown(md).into_iter().map(|c| c.slug).collect()
+    }
+
+    /// The sorted qname of every DOC_SECTION, and whether any NodeId repeats.
+    fn sections(g: &glia_graph::RepoGraph) -> (Vec<String>, bool) {
+        let mut q: Vec<String> = g
+            .nodes
+            .iter()
+            .filter(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::DOC_SECTION))
+            .filter_map(|n| g.nav.qname_by_id.get(&n.id).cloned())
+            .collect();
+        q.sort();
+        let mut ids: Vec<u64> = g.nodes.iter().map(|n| n.id.0).collect();
+        let total = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        (q, ids.len() != total)
+    }
+
+    /// CE.4a: a repeated heading slug gets GitHub's `-N` suffix (HEAD: every
+    /// `## B` slugged `b`, one NodeId pushed three times).
+    #[test]
+    fn repeated_headings_get_distinct_slugs() {
+        assert_eq!(slugs("# A\n## B\n## B\n## B"), ["a", "b", "b-1", "b-2"]);
+        // A literal `b-1` heading is taken, so the next repeat moves on.
+        assert_eq!(slugs("## B\n## B-1\n## B\n"), ["b", "b-1", "b-2"]);
+        // The preamble's `overview` fallback and an `Overview` heading are two slugs.
+        assert_eq!(slugs("lead-in\n# Overview\nbody\n"), ["overview", "overview-1"]);
+        // An empty-slug heading keeps the ordinal fallback.
+        assert_eq!(slugs("# A\n## !!\ntext\n## ??\nmore\n"), ["a", "overview", "section-1"]);
+    }
+
+    /// CE.4a: `#` lines inside a fenced block are the enclosing section's text
+    /// (HEAD: each became a DOC_SECTION of its own).
+    #[test]
+    fn fenced_comments_are_not_headings() {
+        let c = chunk_markdown("# T\n```bash\n# run it\nmake\n```\n## U");
+        assert_eq!(c.iter().map(|c| c.slug.as_str()).collect::<Vec<_>>(), ["t", "u"]);
+        assert!(c[0].text.contains("# run it"), "{:?}", c[0].text);
+        assert_eq!((c[0].start_line, c[0].end_line), (0, 4));
+        // `~~~` fences too, and a ``` line does not close a ~~~ fence.
+        assert_eq!(slugs("# T\n~~~\n# a\n```\n## b\n~~~\n## U\n"), ["t", "u"]);
+        // An unclosed fence runs to the end of the document.
+        assert_eq!(slugs("# T\n```py\n# x\n## still code\n"), ["t"]);
+        // The skills/glia/SKILL.md shape: four `# xstack-go-http...` comment
+        // lines, two identical, inside one fence under one `##` heading.
+        let md = "# Skill\n\n## Worked examples\n\n```bash\n\
+                  # xstack-go-http; match tiers run exact_qname > subsequence\n\
+                  glia find . users --json\n\n\
+                  # xstack-go-http\n\
+                  glia blast-radius . client::client::FetchUsers --json\n\n\
+                  # xstack-go-http; \"key\" is the word trace takes\n\
+                  glia flows . --json\n\n\
+                  # xstack-go-http\n\
+                  glia serves . \"GET /users\" --json\n\
+                  ```\n\n## After\ntext\n";
+        assert_eq!(slugs(md), ["skill", "worked-examples", "after"]);
+        let rec = DocRecord {
+            rel_path: "docs/skill.md".to_string(),
+            text: md.to_string(),
+            provenance: DocProvenance::file(),
+        };
+        let Some(g) = build_docs_graph(&[rec], RepoId(3)) else {
+            panic!("a doc with sections builds a graph");
+        };
+        let (q, dup) = sections(&g);
+        assert!(!dup, "no two nodes share a NodeId: {q:?}");
+        assert!(q.iter().all(|q| !q.contains("xstack-go-http")), "{q:?}");
+        assert_eq!(
+            q,
+            ["docs::docs::skill::after", "docs::docs::skill::skill", "docs::docs::skill::worked-examples"]
+        );
+    }
+
+    /// CE.4a: Notion and wiki sections lead with their source tag; a
+    /// Confluence page keeps `docs::<space>::<stem>::<slug>`.
+    #[test]
+    fn notion_and_wiki_scopes_carry_the_tag() {
+        use glia_code_domain::DocSourceKind;
+        let ext = |kind: DocSourceKind, tag: &str, container: &str, stem: &str| DocRecord {
+            rel_path: format!("{tag}/{container}/{stem}.md"),
+            text: "# Orders\nplace them\n".to_string(),
+            provenance: DocProvenance {
+                kind,
+                url: Some(format!("https://x/{tag}/{stem}")),
+                container: Some(container.to_string()),
+                version: Some("1".to_string()),
+            },
+        };
+        let records = [
+            ext(DocSourceKind::Notion, "notion", "db1", "orders"),
+            ext(DocSourceKind::Wiki, "wiki", "db1", "orders"),
+            ext(DocSourceKind::Confluence, "confluence", "ENG", "orders"),
+        ];
+        let Some(g) = build_docs_graph(&records, RepoId(5)) else {
+            panic!("three pages, no graph");
+        };
+        let (q, dup) = sections(&g);
+        assert!(!dup, "{q:?}");
+        assert_eq!(
+            q,
+            ["docs::ENG::orders::orders", "docs::notion::db1::orders::orders", "docs::wiki::db1::orders::orders"]
+        );
+        let mut spaces: Vec<&str> = g
+            .nav
+            .qname_by_id
+            .values()
+            .map(String::as_str)
+            .filter(|q| q.starts_with("docspace::"))
+            .collect();
+        spaces.sort();
+        assert_eq!(spaces, ["docspace::confluence::ENG", "docspace::notion::db1", "docspace::wiki::db1"]);
+    }
+
+    /// CE.4a: a snapshot written before the fix (`# Billing` prepended to a
+    /// body opening `## Billing`) no longer pushes one NodeId twice - the
+    /// probe's `docs::OPS::billing::billing` x2 with two identical CONTAINS
+    /// edges. doc-sources now writes the body alone; either way each section
+    /// is one node with one CONTAINS edge.
+    #[test]
+    fn a_title_repeated_in_the_body_is_two_sections_or_one_never_one_id_twice() {
+        use glia_code_domain::DocSourceKind;
+        let page = |text: &str| DocRecord {
+            rel_path: "confluence/OPS/billing.md".to_string(),
+            text: text.to_string(),
+            provenance: DocProvenance {
+                kind: DocSourceKind::Confluence,
+                url: Some("https://x/wiki/OPS/2".to_string()),
+                container: Some("OPS".to_string()),
+                version: Some("1".to_string()),
+            },
+        };
+        for (text, want) in [
+            ("# Billing\n\n## Billing\n\nsee `BillingService`", vec!["docs::OPS::billing::billing", "docs::OPS::billing::billing-1"]),
+            ("## Billing\n\nsee `BillingService`", vec!["docs::OPS::billing::billing"]),
+        ] {
+            let Some(g) = build_docs_graph(&[page(text)], RepoId(9)) else {
+                panic!("one page, no graph");
+            };
+            let (q, dup) = sections(&g);
+            assert!(!dup, "{text:?}: {q:?}");
+            assert_eq!(q, want, "{text:?}");
+            let mut contains: Vec<(u64, u64)> = g.edges.iter().map(|e| (e.from.0, e.to.0)).collect();
+            let n = contains.len();
+            contains.sort_unstable();
+            contains.dedup();
+            assert_eq!((n, contains.len()), (want.len(), want.len()), "one CONTAINS per section");
+        }
     }
 }

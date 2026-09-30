@@ -6,6 +6,8 @@
 //! Credentials are always passed explicitly, so neither the process env nor a
 //! `./.env` can steer a test at a real site.
 
+use glia_code_domain::DocSourceKind;
+use glia_doc_sources::PageBody;
 use glia_doc_sources::confluence_rest::{self, Config};
 use glia_doc_sources::stub::{Canned, StubServer};
 
@@ -62,8 +64,13 @@ fn pull_space_paginates_and_sends_basic_auth() {
     }
     assert_eq!(pages.len(), 101);
     assert_eq!(pages[100].title, "Page 100");
-    assert_eq!(pages[100].space, "K");
-    assert_eq!(pages[100].storage, "<p>body 100</p>");
+    assert_eq!(pages[100].container, "K");
+    assert_eq!(pages[100].kind, DocSourceKind::Confluence);
+    assert!(pages[100].slug_hint.is_none());
+    assert!(
+        matches!(&pages[100].body, PageBody::ConfluenceStorage(s) if s == "<p>body 100</p>"),
+        "the storage body is carried as ConfluenceStorage"
+    );
     assert_eq!(pages[100].url, format!("{origin}/wiki/spaces/K/pages/100"));
 }
 
@@ -83,10 +90,11 @@ fn fetch_page_decodes_version_and_space() {
         "/wiki/rest/api/content/42?expand=body.storage,version,space"
     );
     assert_eq!(seen[0].header("authorization"), Some(AUTH));
-    assert_eq!(page.space, "K");
+    assert_eq!(page.container, "K");
+    assert_eq!(page.kind, DocSourceKind::Confluence);
     assert_eq!(page.version, "7");
     assert_eq!(page.title, "Page 42");
-    assert_eq!(page.storage, "<p>body 42</p>");
+    assert!(matches!(&page.body, PageBody::ConfluenceStorage(s) if s == "<p>body 42</p>"));
     assert_eq!(page.url, format!("{origin}/wiki/spaces/K/pages/42"));
 }
 
@@ -169,6 +177,7 @@ fn http_error_is_reported_with_status() {
     let stub = StubServer::start(vec![Canned {
         status: 404,
         body: "Site temporarily unavailable".into(),
+        headers: vec![],
     }])
     .expect("stub binds");
     let origin = stub.origin();
@@ -254,4 +263,35 @@ fn bare_host_still_means_https() {
     assert_eq!(with("http://127.0.0.1:9/").origin(), "http://127.0.0.1:9");
     assert!(cfg("acme.atlassian.net").is_ok());
     assert!(cfg("https://acme.atlassian.net").is_ok());
+}
+
+/// CE.4a: a canned response carries headers (a throttle's `Retry-After`), sent
+/// before `Content-Length`; `Canned::status` builds any non-200.
+#[test]
+fn canned_headers_reach_the_client() {
+    let stub = StubServer::start(vec![
+        Canned::status(429, "slow down").with_header("Retry-After", "3"),
+        Canned::ok("{}").with_header("Content-Type", "text/plain"),
+    ])
+    .expect("stub binds");
+    let origin = stub.origin();
+    let throttled = ureq::get(&format!("{origin}/a")).call();
+    let plain = ureq::get(&format!("{origin}/b")).call();
+    let seen = stub.finish();
+    assert_eq!(seen.len(), 2);
+    match throttled {
+        Err(ureq::Error::Status(code, resp)) => {
+            assert_eq!(code, 429);
+            assert_eq!(resp.header("retry-after"), Some("3"));
+            assert_eq!(resp.header("content-type"), Some("application/json"));
+            assert_eq!(resp.into_string().unwrap_or_default(), "slow down");
+        }
+        other => panic!("a 429 must be a status error, got {:?}", other.map(|r| r.status())),
+    }
+    let plain = plain.expect("a 200");
+    assert_eq!(
+        plain.header("content-type"),
+        Some("text/plain"),
+        "a canned Content-Type replaces the default"
+    );
 }

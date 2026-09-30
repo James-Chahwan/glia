@@ -11,9 +11,14 @@
 //!   {"space":"DEV","title":"Ordering Service","url":"https://…/pages/123",
 //!    "version":"3","body_file":"ordering.xhtml"}
 //! `body_file` is resolved relative to the `pages.jsonl` file.
+//!
+//! Each space in the file is merged into the snapshot on its own (CE.4a):
+//! that space's previous records are replaced, every other space's are kept.
 
-use glia_doc_sources::{Page, record_from_page, write_snapshot};
+use glia_code_domain::{DocRecord, DocSourceKind};
+use glia_doc_sources::{Page, PageBody, SnapshotSource, record_from_page, write_snapshot};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Deserialize)]
@@ -44,7 +49,8 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    let mut records = Vec::new();
+    // space -> (records, redactions); a BTreeMap so spaces write in name order.
+    let mut by_space: BTreeMap<String, (Vec<DocRecord>, usize)> = BTreeMap::new();
     for (i, line) in pages_src.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -64,23 +70,37 @@ fn main() -> std::process::ExitCode {
                 return std::process::ExitCode::FAILURE;
             }
         };
-        records.push(record_from_page(&Page {
-            space: spec.space,
+        let (record, redacted) = record_from_page(&Page {
+            kind: DocSourceKind::Confluence,
+            container: spec.space.clone(),
             title: spec.title,
             url: spec.url,
             version: spec.version,
-            storage,
-        }));
+            body: PageBody::ConfluenceStorage(storage),
+            slug_hint: None,
+        });
+        let entry = by_space.entry(spec.space).or_default();
+        entry.0.push(record);
+        entry.1 += redacted;
     }
 
-    match write_snapshot(&repo_root, &records) {
-        Ok(manifest) => {
-            eprintln!("docsync: wrote {} record(s) → {}", records.len(), manifest.display());
-            std::process::ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::ExitCode::FAILURE
+    if by_space.is_empty() {
+        eprintln!("docsync: no pages in {}; snapshot unchanged", pages_path.display());
+    }
+    for (space, (records, redacted)) in by_space {
+        let source = SnapshotSource { kind: DocSourceKind::Confluence, container: space };
+        match write_snapshot(&repo_root, &source, &records, redacted) {
+            Ok(w) => eprintln!(
+                "docsync: wrote {} record(s) for space {} → {}",
+                w.written,
+                source.container,
+                w.path.display()
+            ),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return std::process::ExitCode::FAILURE;
+            }
         }
     }
+    std::process::ExitCode::SUCCESS
 }

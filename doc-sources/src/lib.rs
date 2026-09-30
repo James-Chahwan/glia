@@ -13,6 +13,11 @@
 //! also pure and offline-testable, round-trip-pinned to `storage_to_markdown`.
 //! It is what lets `glia docs push --markdown` take a plain `.md` file instead
 //! of hand-written `ac:`/`ri:` macro XHTML.
+//!
+//! [`snapshot`] is the source-neutral seam every adapter writes through (a
+//! [`Page`] of any [`glia_code_domain::DocSourceKind`], redacted, merged into
+//! the manifest by (source, container)); [`transport`] holds the origin /
+//! credential / base64 helpers the adapters share.
 
 pub mod confluence;
 pub mod confluence_rest;
@@ -21,6 +26,9 @@ pub mod markdown;
 pub mod snapshot;
 #[doc(hidden)]
 pub mod stub;
+pub mod transport;
 
 pub use filter::TitleFilter;
-pub use snapshot::{Page, record_from_page, slug, write_snapshot};
+pub use snapshot::{
+    Page, PageBody, SnapshotSource, SnapshotWrite, record_from_page, slug, write_snapshot,
+};
