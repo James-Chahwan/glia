@@ -734,16 +734,42 @@ fn push_root(roots: &mut Vec<(&'static str, u32)>, root: &'static str, line: usi
 }
 
 /// LA.38: the root types NestJS / TypeGraphQL decorators name, from lines that
-/// start with `@Query(` / `@Mutation(` / `@Subscription(`.
+/// start with `@Query(` / `@Mutation(` / `@Subscription(`. CB.4: a root noun is
+/// type-level, so it anchors at its class declaration line
+/// ([`class_line_before`]), inside the class and outside every method: the
+/// TypeScript parser's span of a decorated method opens at its first
+/// decorator, so the `@Query(` line itself now lies inside the field method.
 fn ts_root_decorators(lines: &[&str]) -> Vec<(&'static str, u32)> {
     let mut roots = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim_start();
         if let Some(&(_, root)) = ROOT_DECORATORS.iter().find(|(d, _)| t.starts_with(d)) {
-            push_root(&mut roots, root, i);
+            push_root(&mut roots, root, class_line_before(lines, i));
         }
     }
     roots
+}
+
+/// CB.4: the nearest line at or above `i` that declares a class
+/// ([`is_class_line`]), or `i` when none does (a decorator outside any class).
+/// A line scan: this extractor reads text, not an AST.
+fn class_line_before(lines: &[&str], i: usize) -> usize {
+    lines
+        .get(..=i)
+        .and_then(|above| above.iter().rposition(|l| is_class_line(l)))
+        .unwrap_or(i)
+}
+
+/// A TypeScript class declaration line: trimmed, past any of `export `,
+/// `default `, `abstract ` (in that order), it starts with `class `.
+fn is_class_line(line: &str) -> bool {
+    let mut t = line.trim_start();
+    for word in ["export ", "default ", "abstract "] {
+        if let Some(rest) = t.strip_prefix(word) {
+            t = rest.trim_start();
+        }
+    }
+    t.starts_with("class ")
 }
 
 /// LA.38: the root types Python classes declare, anchored at the class line.
@@ -1385,6 +1411,48 @@ mod tests {
     }
 
     #[test]
+    fn root_noun_anchors_at_its_class_line() {
+        // CB.4: a NestJS resolver whose first method carries `@Query(...)`.
+        let src = "import { Resolver, Query } from \"@nestjs/graphql\";\n\n@Resolver()\n@Injectable()\nexport class OrdersGateway {\n  /** Records a shipped order. */\n  @OnEvent(\"order.shipped\")\n  onShipped() {}\n\n  @Query(() => String)\n  order() {\n    return \"x\";\n  }\n}";
+        let out = extract_graphql_resolver_nodes(src, "typescript", module_id(), repo());
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:Query"),
+            Some(4),
+            "the `export class` line"
+        );
+        assert_eq!(
+            anchor_line(&out, "graphql_resolver:order"),
+            Some(10),
+            "a field keeps its method line"
+        );
+        // Every class declaration spelling anchors the root at row 1.
+        for header in [
+            "class R {",
+            "export class R {",
+            "export default class R {",
+            "abstract class R {",
+            "export abstract class R {",
+        ] {
+            let src = format!(
+                "import {{ Query }} from '@nestjs/graphql';\n{header}\n  @Query(() => X)\n  q() {{}}\n}}"
+            );
+            let out = extract_graphql_resolver_nodes(&src, "typescript", module_id(), repo());
+            assert_eq!(
+                anchor_line(&out, "graphql_resolver:Query"),
+                Some(1),
+                "{header}"
+            );
+        }
+        // No class above: the decorator line, as before.
+        let bare =
+            "import { Query } from '@nestjs/graphql';\n@Query(() => [User])\nasync users() {}";
+        let out = extract_graphql_resolver_nodes(bare, "typescript", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(1));
+        // `classify` is not a class keyword.
+        assert!(!is_class_line("  classify(x) {"));
+    }
+
+    #[test]
     fn anchors_operations_at_their_minting_line() {
         let src = "const GET_USER = gql`\n  query getUser { u }\n`;\n\nexport function P() {\n  const { data } = useQuery(GET_USER);\n}\nconst OTHER = gql`query listUsers { u }`;";
         let out = extract_graphql_operation_nodes(src, module_id(), repo());
@@ -1400,7 +1468,8 @@ mod tests {
         let src = "import { Resolver, Query } from '@nestjs/graphql';\n@Resolver('User')\nexport class R {\n  @Query(() => User)\n  async getUser(id: string) {\n    return 1;\n  }\n}";
         let out = extract_graphql_resolver_nodes(src, "typescript", module_id(), repo());
         assert_eq!(anchor_line(&out, "graphql_resolver:getUser"), Some(4));
-        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(3));
+        // CB.4: the root noun anchors at its class line, not at `@Query(`.
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(2));
         // LA.38: `@Resolver(` is a decorator name, never a node.
         assert_eq!(anchor_line(&out, "graphql_resolver:Resolver"), None);
 
@@ -1755,8 +1824,10 @@ mod tests {
         let source = "import { Resolver, ResolveField, Query, Subscription } from '@nestjs/graphql';\n@Resolver(() => Recipe)\nexport class R {\n  @Query(() => [Recipe])\n  recipes() {}\n  @Subscription(() => Recipe)\n  added() {}\n  @ResolveField()\n  author() {}\n}";
         assert_resolvers(source, "typescript", &["Query", "Subscription", "added", "author", "recipes"]);
         let out = extract_graphql_resolver_nodes(source, "typescript", module_id(), repo());
-        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(3));
-        assert_eq!(anchor_line(&out, "graphql_resolver:Subscription"), Some(5));
+        // CB.4: both root nouns anchor at `export class R {`; fields keep
+        // their method lines.
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(2));
+        assert_eq!(anchor_line(&out, "graphql_resolver:Subscription"), Some(2));
         assert_eq!(anchor_line(&out, "graphql_resolver:author"), Some(8));
     }
 

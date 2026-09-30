@@ -928,7 +928,9 @@ fn visit_method(
         id: method_id,
         repo,
         confidence: Confidence::Strong,
-        cells: build_cells(&n, src, file_rel),
+        // CB.4: a decorated method's span opens at its first decorator, so a
+        // decorator-line marker (`@OnEvent(...)`) anchors to the method.
+        cells: build_cells_from(&n, first_decorator(n), src, file_rel),
     });
     acc.edges.push(Edge {
         from: class_id,
@@ -1078,7 +1080,7 @@ fn visit_exported_const(
             },
             Cell {
                 kind: cell_type::POSITION,
-                payload: CellPayload::Json(position_json(&declarator, file_rel)),
+                payload: CellPayload::Json(glia_doc::position_json(&declarator, file_rel)),
             },
         ];
         if let Some(ref d) = doc {
@@ -2274,13 +2276,28 @@ fn build_alias_set(imports: &[ImportStmt]) -> std::collections::HashSet<&str> {
 // ============================================================================
 
 fn build_cells(n: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
+    build_cells_from(n, None, src, file_rel)
+}
+
+/// The CODE / POSITION / DOC cells of `n`, its CODE and POSITION starting at
+/// `first` when given (CB.4: a decorated method's first decorator, which
+/// tree-sitter-typescript puts BESIDE the `method_definition` in `class_body`,
+/// not inside it). DOC is `n`'s leading doc either way:
+/// [`glia_doc::leading_doc`] steps over the decorators to the JSDoc above them.
+fn build_cells_from(n: &TsNode, first: Option<TsNode>, src: &[u8], file_rel: &str) -> Vec<Cell> {
+    let start = first.as_ref().unwrap_or(n);
     let code = Cell {
         kind: cell_type::CODE,
-        payload: CellPayload::Text(slice(n, src).to_string()),
+        payload: CellPayload::Text(
+            src.get(start.start_byte()..n.end_byte())
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .unwrap_or("")
+                .to_string(),
+        ),
     };
     let pos = Cell {
         kind: cell_type::POSITION,
-        payload: CellPayload::Json(position_json(n, file_rel)),
+        payload: CellPayload::Json(glia_doc::position_json_span(start, n, file_rel)),
     };
     let mut cells = vec![code, pos];
     if let Some(doc) = glia_doc::leading_doc(n, src) {
@@ -2292,15 +2309,18 @@ fn build_cells(n: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
     cells
 }
 
-fn position_json(n: &TsNode, file_rel: &str) -> String {
-    let start = n.start_position();
-    let end = n.end_position();
-    format!(
-        "{{\"file\":\"{}\",\"start_line\":{},\"end_line\":{}}}",
-        file_rel.replace('\\', "\\\\").replace('"', "\\\""),
-        start.row,
-        end.row
-    )
+/// CB.4: the earliest of the decorators directly above a class-body
+/// `method_definition` (its contiguous run of `decorator` previous named
+/// siblings), or `None` for an undecorated method. A comment between two
+/// decorators ends the run, leaving the upper decorators outside the span.
+fn first_decorator(n: TsNode) -> Option<TsNode> {
+    let mut first = None;
+    let mut cur = n.prev_named_sibling();
+    while let Some(sib) = cur.filter(|s| s.kind() == "decorator") {
+        first = Some(sib);
+        cur = sib.prev_named_sibling();
+    }
+    first
 }
 
 fn strip_string_quotes(s: &str) -> String {
@@ -4054,5 +4074,90 @@ export class PhotoService {
                 .iter()
                 .any(|e| e.category == edge_category::ACCESSES_DATA)
         );
+    }
+
+    /// CB.4: the CODE / POSITION / DOC cells of the METHOD `qname`.
+    fn method_cells(parse: &FileParse, qname: &str) -> (String, String, Option<String>) {
+        let m = id(node_kind::METHOD, qname);
+        let node = parse
+            .nodes
+            .iter()
+            .find(|n| n.id == m)
+            .unwrap_or_else(|| panic!("METHOD {qname} missing"));
+        let text = |kind| {
+            node.cells.iter().find_map(|c| match &c.payload {
+                CellPayload::Text(t) | CellPayload::Json(t) if c.kind == kind => Some(t.clone()),
+                _ => None,
+            })
+        };
+        (
+            text(cell_type::CODE).expect("CODE"),
+            text(cell_type::POSITION).expect("POSITION"),
+            text(cell_type::DOC),
+        )
+    }
+
+    const DECORATED: &str = "\
+import { OnEvent } from \"@nestjs/event-emitter\";
+
+export class Listener {
+  @OnEvent('x')
+  @Other()
+  onX() {}
+
+  plain() {
+    return 1;
+  }
+
+  /** Handles y. */
+  @OnEvent('y')
+  onY() {}
+}
+";
+
+    /// CB.4: tree-sitter-typescript puts a method's decorators beside its
+    /// `method_definition`; the method's CODE and POSITION still open at the
+    /// first of them.
+    #[test]
+    fn a_decorated_method_starts_at_its_first_decorator() {
+        let parse = parse_file(DECORATED, "src/listener.ts", "src::listener", repo()).unwrap();
+        let (code, pos, _) = method_cells(&parse, "src::listener::Listener::onX");
+        assert_eq!(
+            pos, r#"{"file":"src/listener.ts","start_line":3,"end_line":5}"#,
+            "`@OnEvent('x')` is row 3"
+        );
+        assert!(code.starts_with("@OnEvent('x')"), "CODE: {code}");
+        assert!(code.ends_with("onX() {}"), "CODE: {code}");
+        assert!(
+            code.contains("@Other()"),
+            "every decorator of the group: {code}"
+        );
+    }
+
+    #[test]
+    fn an_undecorated_method_is_unchanged() {
+        let parse = parse_file(DECORATED, "src/listener.ts", "src::listener", repo()).unwrap();
+        let (code, pos, doc) = method_cells(&parse, "src::listener::Listener::plain");
+        assert_eq!(
+            pos,
+            r#"{"file":"src/listener.ts","start_line":7,"end_line":9}"#
+        );
+        assert!(code.starts_with("plain()"), "CODE: {code}");
+        assert_eq!(doc, None);
+    }
+
+    #[test]
+    fn jsdoc_above_decorators_is_still_the_doc() {
+        let parse = parse_file(DECORATED, "src/listener.ts", "src::listener", repo()).unwrap();
+        let (code, pos, doc) = method_cells(&parse, "src::listener::Listener::onY");
+        assert_eq!(
+            pos,
+            r#"{"file":"src/listener.ts","start_line":12,"end_line":13}"#
+        );
+        assert!(
+            code.starts_with("@OnEvent('y')"),
+            "the JSDoc is DOC, not CODE: {code}"
+        );
+        assert_eq!(doc.as_deref(), Some("Handles y."));
     }
 }

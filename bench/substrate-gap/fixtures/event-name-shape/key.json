@@ -4,7 +4,7 @@
   "dirs": [
     "."
   ],
-  "note": "LA.41. extract_event_name (parsers/code/extractors/src/eventbus.rs) takes whatever sits between the first quote after an event needle and the next same quote, across lines and punctuation, so a needle table (scripts/effect_needles.py) mints event_handle:`, ` and event_handle:`,\\n    `, and an unterminated literal falls back to the verb (event_emit:Subject.next). The glia self-build mints event_emit / event_handle:`, true, false),\\n    (` from eventbus.rs's own pattern table. An event name must close on its line and read like a name; a malformed literal skips that occurrence. svc/orders.listener.ts (@OnEvent / @EventPattern) is the control. No cells binding: a precision guard.",
+  "note": "LA.41. extract_event_name (parsers/code/extractors/src/eventbus.rs) takes whatever sits between the first quote after an event needle and the next same quote, across lines and punctuation, so a needle table (scripts/effect_needles.py) mints event_handle:`, ` and event_handle:`,\\n    `, and an unterminated literal falls back to the verb (event_emit:Subject.next). The glia self-build mints event_emit / event_handle:`, true, false),\\n    (` from eventbus.rs's own pattern table. An event name must close on its line and read like a name; a malformed literal skips that occurrence. svc/orders.listener.ts (@OnEvent / @EventPattern) is the control. CB.4: a decorated TypeScript method's POSITION starts at its first decorator, so the @OnEvent marker is HANDLED_BY onShipped instead of CONTAINS from the module. No cells binding: a precision guard.",
   "expect_nodes": [
     {
       "kind": "EVENT_HANDLER",
@@ -19,10 +19,10 @@
   ],
   "expect_edges": [
     {
-      "from": "svc::orders.listener",
-      "to": "event_handle:order.shipped",
-      "category": "CONTAINS",
-      "note": "control stays anchored"
+      "from": "event_handle:order.shipped",
+      "to": "svc::orders.listener::OrdersListener::onShipped",
+      "category": "HANDLED_BY",
+      "note": "control stays anchored, on the method its decorator sits on (CB.4)"
     }
   ],
   "forbid": [

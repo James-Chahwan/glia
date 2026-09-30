@@ -1,0 +1,50 @@
+{
+  "framework": "ts-decorator-anchor",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-h: tree-sitter-typescript puts a method's decorators BESIDE its method_definition in class_body, so the TypeScript parser's POSITION span for onShipped starts at the name line, not at `@OnEvent(...)`. The A5.8 anchor pass finds no method span holding the decorator line and falls back to the module CONTAINS edge. Measured on HEAD 2170ff8: CONTAINS src::orders.gateway -> event_handle:order.shipped, `[marker-anchor] 1 anchored to methods, 2 to module`. The graphql root noun `Query` is type-level and keeps its module CONTAINS (control).",
+  "expect_edges": [
+    {
+      "from": "event_handle:order.shipped",
+      "to": "src::orders.gateway::OrdersGateway::onShipped",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "graphql_resolver:order",
+      "to": "src::orders.gateway::OrdersGateway::order",
+      "category": "HANDLED_BY",
+      "note": "control: already anchored on HEAD"
+    },
+    {
+      "from": "src::orders.gateway",
+      "to": "graphql_resolver:Query",
+      "category": "CONTAINS",
+      "note": "control: a root noun stays on the module"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "METHOD",
+      "node": "src::orders.gateway::OrdersGateway::onShipped",
+      "cell": "POSITION",
+      "contains": "\"start_line\":8,",
+      "note": "0-based row of the first decorator; HEAD writes 9 (the name line)"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src::orders.gateway",
+      "to": "event_handle:order.shipped",
+      "category": "CONTAINS",
+      "note": "the module fallback HEAD takes"
+    },
+    {
+      "from": "graphql_resolver:Query",
+      "to": "src::orders.gateway::OrdersGateway::order",
+      "category": "HANDLED_BY",
+      "note": "a root noun never lands on the first decorated method"
+    }
+  ]
+}
