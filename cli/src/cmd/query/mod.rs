@@ -25,6 +25,15 @@ mod why;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum QueryCmd {
+    /// Communities (CD.1e): the graph's communities by seeded Leiden (label
+    /// propagation above Leiden's pair cap, or exactly `--method`), largest
+    /// first. A header gives the method, modularity, communities listed of
+    /// those found and the isolated nodes; each community block its size,
+    /// cohesion, node kinds, `glia arch` services, effect sinks, located entry
+    /// points, top members by internal weight and heaviest links to other
+    /// communities (edges and categories). Tier heuristic. A report: exits 0
+    /// whatever it finds (an empty answer says why), 2 on an error.
+    Communities(communities::Args),
     /// Find (LD.3b): the ranked, located nodes a symbol, qname or fragment
     /// names. Each row says which tier matched it — exact_qname, exact_name,
     /// exact_ci, qname_suffix, name_prefix, name_word, name_substring,
@@ -85,6 +94,7 @@ pub(crate) enum QueryCmd {
 
 pub(crate) fn run(c: QueryCmd) -> i32 {
     match c {
+        QueryCmd::Communities(a) => communities::run(a),
         QueryCmd::Find(a) => find::run(a),
         QueryCmd::Flows(a) => flows::run(a),
         QueryCmd::Hotspots(a) => hotspots::run(a),

@@ -1,0 +1,2 @@
+# pyo3 surface of py/src/communities.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.communities(scope: Option<String> = None, seed: u64 = 42, resolution: f64 = 1.0, top: usize = 30, members: usize = 10, method: Option<String> = None) -> PyResult<Py<PyAny>>
