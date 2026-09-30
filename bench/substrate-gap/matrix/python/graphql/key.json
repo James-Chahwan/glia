@@ -14,6 +14,11 @@
       "kind": "GRAPHQL_RESOLVER",
       "name": "graphql_resolver:user",
       "note": "the strawberry field `@strawberry.field def user(...)` on `@strawberry.type class Query`"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:currentUser",
+      "note": "the sibling field, schema spelling (CB.14 decision)"
     }
   ],
   "expect_edges": [
@@ -26,16 +31,21 @@
   ],
   "forbid": [
     {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:current_user",
+      "note": "the Python spelling is not the schema field"
+    },
+    {
       "from": "graphql_op:User",
       "to": "graphql_resolver:current_user",
       "category": "GRAPHQL_CALLS",
-      "note": "decoy, source spelling (`def current_user`)"
+      "note": "decoy, source spelling (`def current_user`); CB.14 never mints it (see the node forbid)"
     },
     {
       "from": "graphql_op:User",
       "to": "graphql_resolver:currentUser",
       "category": "GRAPHQL_CALLS",
-      "note": "decoy, schema spelling (strawberry auto-camelCases to `currentUser`); both spellings are forbidden because the future extractor's choice is not yet made"
+      "note": "decoy, schema spelling (strawberry auto-camelCases `def current_user` to `currentUser`, the name CB.14 mints); its key `currentuser` never equals the op key `user`"
     },
     {
       "from": "graphql_op:User",
@@ -44,5 +54,5 @@
       "note": "LA.38: the type-level node for `@strawberry.type class Query` is graphql_resolver:Query (it was graphql_resolver:strawberry.type); it names no field and must never pair (A5.5 regression guard)"
     }
   ],
-  "note": "strawberry server (code-first, no SDL file). BASELINE (0.4.18 wheel): the only GRAPHQL_RESOLVER is the type-level `graphql_resolver:strawberry.type` from RESOLVER_PATTERNS (measured at 0.4.18; since LA.38 that node is graphql_resolver:Query). RESOLVER_FIELD_DECORATORS has no `@strawberry.field`, so neither `user` nor `current_user` is extracted, and `[graphql-resolve] 0 pairs; dropped: type-level=1, no-match=1`. Cell reads partial (kind present, literal lost, no routing). The two decoy forbids are vacuous until strawberry fields are extracted; the type-level forbid is live now. DECOY: `currentUser` is a sibling root field whose key CONTAINS the op key `user`, so the pre-A5.5 bidirectional-substring rule would pair User -> currentUser. It is named `currentUser` rather than the spec's `userSettings` because the RECALL matcher is a substring match: `graphql_resolver:user` would be satisfied by `graphql_resolver:userSettings` alone and the literal would pass on the decoy. client/user.ts is Apollo Client, `client.query({ query: USER })` with gql`query User($id: ID!) { user(id: $id) { name } }` -> graphql_op:User (key `user`). It is the counterparty only: no GRAPHQL_OPERATION row is scoped here, so this cell measures the server's resolver extraction and the pairing, not TypeScript's op extraction (typescript/graphql owns that)."
+  "note": "strawberry server (code-first, no SDL file). BASELINE (0.4.18 wheel): the only GRAPHQL_RESOLVER is the type-level `graphql_resolver:strawberry.type` from RESOLVER_PATTERNS (measured at 0.4.18; since LA.38 that node is graphql_resolver:Query). RESOLVER_FIELD_DECORATORS has no `@strawberry.field`, so neither `user` nor `current_user` is extracted, and `[graphql-resolve] 0 pairs; dropped: type-level=1, no-match=1`. CB.14 DECISION (it closes the camelCase question this key used to defer): a Python field resolver is minted under its SCHEMA name - strawberry's auto_camel_case and graphene's auto_camelcase are on by default, the SDL scan mints the schema name for the same field, and the resolver's gql_key lowercases before an exact match, so the snake spelling `current_user` could never pair with a client's `currentUser`. An explicit `name=` wins; a file that sets `auto_camel_case=False` / `auto_camelcase=False` keeps the Python name. So `def current_user` mints graphql_resolver:currentUser (expected) and never graphql_resolver:current_user (forbidden). BASELINE with this key (installed 0.5.0 wheel, before CB.14): nodes 0/2, edges 0/1, FORBID VIOLATIONS 0. After CB.14: nodes 2/2, edges 1/1, FORBID VIOLATIONS 0. DECOY: `currentUser` is a sibling root field whose key CONTAINS the op key `user`, so the pre-A5.5 bidirectional-substring rule would pair User -> currentUser; the exact-key rule never does, and both decoy-edge forbids stay live. It is named `currentUser` rather than the spec's `userSettings` because the RECALL matcher is a substring match: `graphql_resolver:user` would be satisfied by `graphql_resolver:userSettings` alone and the literal would pass on the decoy. The type-level forbid guards graphql_resolver:Query. client/user.ts is Apollo Client, `client.query({ query: USER })` with gql`query User($id: ID!) { user(id: $id) { name } }` -> graphql_op:User (key `user`). It is the counterparty only: no GRAPHQL_OPERATION row is scoped here, so this cell measures the server's resolver extraction and the pairing, not TypeScript's op extraction (typescript/graphql owns that)."
 }

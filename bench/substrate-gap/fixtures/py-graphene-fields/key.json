@@ -1,0 +1,44 @@
+{
+  "framework": "py-graphene",
+  "language": "python",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "note": "CB-i: graphene declares root fields as class attributes (`all_users = graphene.List(User)`) resolved by `resolve_<field>` methods, and auto-camelCases the schema name (allUsers). parsers/code/extractors/src/graphql.rs reads Python root classes only (py_root_classes), so the only resolver is the type-level graphql_resolver:Query and the op pairs nothing. DECISION: a Python field resolver is minted under its SCHEMA name (camelCase unless an explicit name= or auto_camelcase=False says otherwise), the name the SDL scan would mint for the same field and the one a client operation keys on. Measured on HEAD 2170ff8: nodes 0/2, edges 0/2.",
+  "expect_nodes": [
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:allUsers"
+    },
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:userById"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "graphql_op:AllUsers",
+      "to": "graphql_resolver:allUsers",
+      "category": "GRAPHQL_CALLS"
+    },
+    {
+      "from": "graphql_resolver:allUsers",
+      "to": "schema::Query::resolve_all_users",
+      "category": "HANDLED_BY",
+      "note": "anchored at the resolve_ method"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "GRAPHQL_RESOLVER",
+      "name": "graphql_resolver:all_users",
+      "note": "the Python spelling is not the schema field"
+    },
+    {
+      "from": "graphql_op:AllUsers",
+      "to": "graphql_resolver:userById",
+      "category": "GRAPHQL_CALLS"
+    }
+  ]
+}

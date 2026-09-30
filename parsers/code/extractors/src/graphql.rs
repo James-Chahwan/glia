@@ -394,7 +394,7 @@ const PY_SERVER_PACKAGES: &[(&str, GqlLib)] = &[
 enum DecoratorFamily {
     /// NestJS / TypeGraphQL decorators.
     Ts,
-    /// strawberry / graphene root classes.
+    /// strawberry / graphene root classes and their fields (CB.14).
     Py,
 }
 
@@ -430,7 +430,8 @@ struct DecoratorCensus {
     lib: Option<GqlLib>,
     /// Root nouns kept, in line order.
     roots: Vec<&'static str>,
-    /// Methods read under a field decorator.
+    /// Field resolvers read: TypeScript methods under a field decorator,
+    /// Python root-class fields (CB.14).
     fields: usize,
     rej_lang: usize,
     rej_import: usize,
@@ -612,7 +613,9 @@ pub fn extract_graphql_resolver_nodes(
 ///   `@Mutation(` / `@Subscription(` names that root type, and the method
 ///   under a field decorator ([`decorator_method_names`]) is a field;
 /// - Python: `@strawberry.type` on `class Query:`, or graphene
-///   `class Query(graphene.ObjectType):`, names that root type.
+///   `class Query(graphene.ObjectType):`, names that root type, and the
+///   root class's field resolvers ([`py_field_resolvers`], CB.14) are fields
+///   under their schema names.
 ///
 /// Every noun is a root type: `@Resolver(`, `@ResolveField(`,
 /// `@strawberry.type`, `@strawberry.mutation` and `ObjectType` name nothing.
@@ -641,11 +644,12 @@ fn decorator_scan(source: &str, lang: &str) -> (Vec<(String, u32)>, DecoratorCen
         .into_iter()
         .map(|(root, line)| (root.to_string(), line))
         .collect();
-    if family == DecoratorFamily::Ts {
-        let fields = decorator_method_names(source);
-        census.fields = fields.len();
-        names.extend(fields);
-    }
+    let fields = match family {
+        DecoratorFamily::Ts => decorator_method_names(source),
+        DecoratorFamily::Py => py_field_resolvers(&lines, lib),
+    };
+    census.fields = fields.len();
+    names.extend(fields);
     names.sort_by_key(|&(_, line)| line);
     (names, census)
 }
@@ -772,12 +776,22 @@ fn is_class_line(line: &str) -> bool {
     t.starts_with("class ")
 }
 
-/// LA.38: the root types Python classes declare, anchored at the class line.
-/// strawberry: `@strawberry.type` (bare or called), then within 4 lines, past
-/// blank lines and further decorators, `class <Root>`. graphene:
-/// `class <Root>(...)` whose base list holds the token `ObjectType`.
+/// LA.38: the root types Python classes declare, anchored at the class line
+/// of each root's first declaration ([`py_root_class_sites`]).
 fn py_root_classes(lines: &[&str], lib: GqlLib) -> Vec<(&'static str, u32)> {
     let mut roots = Vec::new();
+    for (root, line) in py_root_class_sites(lines, lib) {
+        push_root(&mut roots, root, line);
+    }
+    roots
+}
+
+/// LA.38: every Python root class declaration, as (root, 0-indexed class
+/// line) in line order. strawberry: `@strawberry.type` (bare or called), then
+/// within 4 lines, past blank lines and further decorators, `class <Root>`.
+/// graphene: `class <Root>(...)` whose base list holds the token `ObjectType`.
+fn py_root_class_sites(lines: &[&str], lib: GqlLib) -> Vec<(&'static str, usize)> {
+    let mut sites = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
         match lib {
@@ -800,18 +814,18 @@ fn py_root_classes(lines: &[&str], lib: GqlLib) -> Vec<(&'static str, u32)> {
                 if let Some((j, l)) = class_line
                     && let Some((root, _)) = class_root(l.trim())
                 {
-                    push_root(&mut roots, root, j);
+                    sites.push((root, j));
                 }
             }
             GqlLib::Graphene => {
                 if let Some(root) = graphene_root(t) {
-                    push_root(&mut roots, root, i);
+                    sites.push((root, i));
                 }
             }
             GqlLib::NestGraphql | GqlLib::TypeGraphql => {}
         }
     }
-    roots
+    sites
 }
 
 /// The root type a trimmed `class <Ident>` line declares, and the text after
@@ -842,6 +856,456 @@ fn graphene_root(t: &str) -> Option<&'static str> {
             !ident_byte_before(b, at) && !b.get(at + token.len()).is_some_and(|&c| is_ident_byte(c))
         })
         .then_some(root)
+}
+
+/// CB.14: strawberry decorators and attribute calls that declare a field.
+const STRAWBERRY_FIELD_CALLS: &[&str] = &[
+    "strawberry.field",
+    "strawberry.mutation",
+    "strawberry.subscription",
+];
+
+/// CB.14: graphene field types a root class mounts as an attribute, called
+/// bare (`String(`) or as `graphene.<Type>(`. Any callee whose last segment
+/// is `Field` (`graphene.Field(`, a mutation's `CreateUser.Field()`,
+/// `relay.Node.Field()`) or ends in `ConnectionField` (graphene's relay
+/// `ConnectionField` and the graphene-django / graphene-sqlalchemy
+/// subclasses) is a field too, whatever its prefix.
+const GRAPHENE_FIELD_TYPES: &[&str] = &[
+    "Field",
+    "List",
+    "NonNull",
+    "String",
+    "Int",
+    "Float",
+    "Boolean",
+    "ID",
+    "JSONString",
+    "DateTime",
+    "Date",
+    "Time",
+    "Decimal",
+    "UUID",
+    "BigInt",
+    "Base64",
+    "Dynamic",
+];
+
+/// CB.14: the schema-config spellings that turn camelCasing off, compared
+/// with whitespace removed: strawberry's `StrawberryConfig(auto_camel_case=
+/// False)` and graphene's `Schema(..., auto_camelcase=False)`.
+const PY_CAMEL_OFF: &[&str] = &["auto_camel_case=False", "auto_camelcase=False"];
+
+/// CB.14: how many lines a multi-line decorator or field call is read for
+/// its `name=` keyword before the scan gives up on an unbalanced bracket.
+const PY_CALL_WINDOW: usize = 32;
+
+/// CB.14: the field resolvers of a Python file's root classes
+/// ([`py_root_class_sites`]), as (schema field name, 0-indexed anchor line)
+/// in line order. Only a class body's first-level members count
+/// ([`py_class_members`]); an object type (`class User`) mints nothing.
+/// - strawberry: a `@strawberry.field` / `.mutation` / `.subscription`
+///   member (bare or called) followed, past further decorators, by
+///   `def <name>(` or `async def <name>(`, anchored at that `def` line (the
+///   Python parser's method POSITION opens at `def`, not at its decorators,
+///   so the anchor lands inside the method); and an attribute
+///   `<name>[: T] = strawberry.field(...)`, anchored at its line.
+/// - graphene: an attribute `<name> = <field type>(...)`
+///   ([`graphene_field_call`]), anchored at the block's
+///   `def resolve_<name>(` when there is one (so HANDLED_BY lands on the
+///   resolver method), else at the attribute line.
+///
+/// The name is the schema field ([`schema_name`]): an explicit `name="..."`
+/// keyword, else the camelCased Python name unless the file turns camelCasing
+/// off ([`PY_CAMEL_OFF`]).
+fn py_field_resolvers(lines: &[&str], lib: GqlLib) -> Vec<(String, u32)> {
+    let camel = !lines.iter().any(|l| {
+        let compact: String = l.chars().filter(|c| !c.is_whitespace()).collect();
+        PY_CAMEL_OFF.iter().any(|off| compact.contains(off))
+    });
+    let mut class_lines: Vec<usize> = py_root_class_sites(lines, lib)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect();
+    class_lines.sort_unstable();
+    class_lines.dedup();
+    let mut fields = Vec::new();
+    for class_line in class_lines {
+        let members = py_class_members(lines, class_line);
+        match lib {
+            GqlLib::Strawberry => strawberry_fields(lines, &members, camel, &mut fields),
+            GqlLib::Graphene => graphene_fields(lines, &members, camel, &mut fields),
+            GqlLib::NestGraphql | GqlLib::TypeGraphql => {}
+        }
+    }
+    fields.sort_by_key(|&(_, line)| line);
+    fields
+}
+
+/// CB.14: strawberry field methods and attributes among a root class's
+/// first-level `members`.
+fn strawberry_fields(
+    lines: &[&str],
+    members: &[usize],
+    camel: bool,
+    out: &mut Vec<(String, u32)>,
+) {
+    for (m, &i) in members.iter().enumerate() {
+        let Some(t) = lines.get(i).map(|l| l.trim()) else {
+            continue;
+        };
+        if let Some(after) = t.strip_prefix('@') {
+            let Some(rest) = strawberry_call(after) else {
+                continue;
+            };
+            if !(rest.is_empty() || rest.starts_with(['(', ' ', '\t', '#'])) {
+                continue;
+            }
+            // Past stacked decorators, the next member is the method.
+            let def = members
+                .get(m + 1..)
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|&j| Some((j, lines.get(j)?.trim())))
+                .find(|(_, l)| !l.starts_with('@'));
+            let Some((j, name)) = def.and_then(|(j, l)| Some((j, py_def_name(l)?))) else {
+                continue;
+            };
+            let explicit = call_name_kwarg(lines, i, rest);
+            out.push((schema_name(&name, explicit, camel), line_u32(j)));
+        } else if let Some((name, rhs)) = py_assignment(t)
+            && let Some(rest) = strawberry_call(rhs)
+            && rest.trim_start().starts_with('(')
+        {
+            let explicit = call_name_kwarg(lines, i, rest.trim_start());
+            out.push((schema_name(name, explicit, camel), line_u32(i)));
+        }
+    }
+}
+
+/// The text after a [`STRAWBERRY_FIELD_CALLS`] prefix, when `s` starts with
+/// one as a whole dotted name (`strawberry.field_x` is not one).
+fn strawberry_call(s: &str) -> Option<&str> {
+    STRAWBERRY_FIELD_CALLS.iter().find_map(|call| {
+        s.strip_prefix(call)
+            .filter(|rest| !rest.bytes().next().is_some_and(|c| is_ident_byte(c) || c == b'.'))
+    })
+}
+
+/// CB.14: graphene field attributes among a root class's first-level
+/// `members`, each anchored at its `resolve_<name>` method when the block
+/// has one.
+fn graphene_fields(lines: &[&str], members: &[usize], camel: bool, out: &mut Vec<(String, u32)>) {
+    let resolvers: Vec<(String, usize)> = members
+        .iter()
+        .filter_map(|&j| {
+            let name = py_def_name(lines.get(j)?.trim())?;
+            Some((name.strip_prefix("resolve_")?.to_string(), j))
+        })
+        .collect();
+    for &i in members {
+        let Some(t) = lines.get(i).map(|l| l.trim()) else {
+            continue;
+        };
+        let Some((name, rhs)) = py_assignment(t) else {
+            continue;
+        };
+        let Some((callee, call)) = py_callee(rhs) else {
+            continue;
+        };
+        if !graphene_field_call(callee) {
+            continue;
+        }
+        let explicit = call_name_kwarg(lines, i, call);
+        let anchor = resolvers
+            .iter()
+            .find(|(field, _)| field == name)
+            .map_or(i, |&(_, j)| j);
+        out.push((schema_name(name, explicit, camel), line_u32(anchor)));
+    }
+}
+
+/// CB.14: a dotted callee graphene mounts as a field ([`GRAPHENE_FIELD_TYPES`]).
+fn graphene_field_call(callee: &str) -> bool {
+    let (prefix, last) = callee.rsplit_once('.').unwrap_or(("", callee));
+    last == "Field"
+        || last.ends_with("ConnectionField")
+        || ((prefix.is_empty() || prefix == "graphene") && GRAPHENE_FIELD_TYPES.contains(&last))
+}
+
+/// CB.14: the schema name of a Python field: the explicit `name=` when
+/// given, else [`camel_case`] of the Python name, or the Python name itself
+/// when the file turns camelCasing off.
+fn schema_name(py_name: &str, explicit: Option<String>, camel: bool) -> String {
+    match explicit {
+        Some(name) => name,
+        None if camel => camel_case(py_name),
+        None => py_name.to_string(),
+    }
+}
+
+/// CB.14: strawberry's and graphene's `to_camel_case`, which are the same
+/// function: split on `_`, keep the first component as written, capitalise
+/// every later one (first char upper, the rest lower, Python's
+/// `str.capitalize`) and write an empty one as `_`. So `current_user` ->
+/// `currentUser`, `field_2` -> `field2`, `user_ID` -> `userId`, `_private` ->
+/// `Private`, `a__b` -> `a_B`.
+fn camel_case(s: &str) -> String {
+    let mut parts = s.split('_');
+    let mut out = parts.next().unwrap_or_default().to_string();
+    for part in parts {
+        let mut chars = part.chars();
+        match chars.next() {
+            None => out.push('_'),
+            Some(first) => {
+                out.extend(first.to_uppercase());
+                out.extend(chars.flat_map(char::to_lowercase));
+            }
+        }
+    }
+    out
+}
+
+/// CB.14: the 0-indexed lines of a class body's first-level members: the
+/// lines after `class_line` indented deeper than it, up to the first
+/// non-blank, non-comment line at or above its indent, at the indent of the
+/// body's first statement. Continuation lines of a bracketed expression and
+/// the inside of a triple-quoted string neither end the body nor count. A
+/// line scan: indent is the width of the leading whitespace, tabs and spaces
+/// alike.
+fn py_class_members(lines: &[&str], class_line: usize) -> Vec<usize> {
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let Some(class_indent) = lines.get(class_line).map(|l| indent(l)) else {
+        return Vec::new();
+    };
+    let mut members = Vec::new();
+    let mut member_indent = None;
+    let mut depth = 0i32;
+    let mut in_triple: Option<&str> = None;
+    for (j, l) in lines.iter().enumerate().skip(class_line + 1) {
+        if let Some(quote) = in_triple {
+            if let Some(at) = l.find(quote) {
+                in_triple = None;
+                depth = (depth + py_bracket_delta(l.get(at + quote.len()..).unwrap_or_default())).max(0);
+            }
+            continue;
+        }
+        if depth > 0 {
+            depth = (depth + py_bracket_delta(l)).max(0);
+            in_triple = open_triple_quote(l);
+            continue;
+        }
+        let t = l.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let ind = indent(l);
+        if ind <= class_indent {
+            break;
+        }
+        if *member_indent.get_or_insert(ind) == ind {
+            members.push(j);
+        }
+        depth = py_bracket_delta(l).max(0);
+        in_triple = open_triple_quote(l);
+    }
+    members
+}
+
+/// The triple quote a line leaves open: an odd count of `"""` (or `'''`).
+fn open_triple_quote(line: &str) -> Option<&'static str> {
+    ["\"\"\"", "'''"]
+        .into_iter()
+        .find(|q| line.matches(q).count() % 2 == 1)
+}
+
+/// The net bracket depth one line of Python opens, ignoring brackets inside a
+/// one-line string literal and after a `#` comment.
+fn py_bracket_delta(line: &str) -> i32 {
+    let b = line.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while let Some(&c) = b.get(i) {
+        match c {
+            b'#' => break,
+            b'\'' | b'"' => i = skip_py_string(b, i),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    depth
+}
+
+/// The offset of the quote closing the string literal that opens at `at`
+/// (a backslash escapes the next byte), or the last offset when it does not
+/// close.
+fn skip_py_string(b: &[u8], at: usize) -> usize {
+    let Some(&quote) = b.get(at) else {
+        return at;
+    };
+    let mut i = at + 1;
+    while let Some(&c) = b.get(i) {
+        if c == b'\\' {
+            i += 2;
+            continue;
+        }
+        if c == quote {
+            return i;
+        }
+        i += 1;
+    }
+    b.len().saturating_sub(1)
+}
+
+/// `def <name>(` or `async def <name>(` on a trimmed line: the name.
+fn py_def_name(t: &str) -> Option<String> {
+    let t = t
+        .strip_prefix("async")
+        .filter(|rest| rest.starts_with([' ', '\t']))
+        .map_or(t, str::trim_start);
+    let rest = t.strip_prefix("def")?;
+    if !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let (name, after) = py_ident(rest.trim_start())?;
+    after.trim_start().starts_with('(').then(|| name.to_string())
+}
+
+/// The Python identifier `s` starts with, and the text after it.
+fn py_ident(s: &str) -> Option<(&str, &str)> {
+    let end = s
+        .bytes()
+        .position(|c| !(c.is_ascii_alphanumeric() || c == b'_'))
+        .unwrap_or(s.len());
+    if end == 0 || s.bytes().next().is_some_and(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((s.get(..end)?, s.get(end..)?))
+}
+
+/// A trimmed assignment `<name> = <rhs>` or `<name>: <T> = <rhs>`: the name
+/// and the trimmed right-hand side. `==` is a comparison, not one.
+fn py_assignment(t: &str) -> Option<(&str, &str)> {
+    let (name, rest) = py_ident(t)?;
+    let rest = rest.trim_start();
+    let b = rest.as_bytes();
+    let eq = if rest.starts_with(':') {
+        // The annotation runs to the first `=` outside its brackets.
+        let mut depth = 0i32;
+        let mut found = None;
+        for (i, &c) in b.iter().enumerate() {
+            match c {
+                b'[' | b'(' | b'{' => depth += 1,
+                b']' | b')' | b'}' => depth -= 1,
+                b'=' if depth == 0 => {
+                    found = Some(i);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        found?
+    } else if rest.starts_with('=') {
+        0
+    } else {
+        return None;
+    };
+    if b.get(eq + 1) == Some(&b'=') {
+        return None;
+    }
+    Some((name, rest.get(eq + 1..)?.trim_start()))
+}
+
+/// A call on a trimmed right-hand side: the dotted callee and the text from
+/// its `(` on.
+fn py_callee(rhs: &str) -> Option<(&str, &str)> {
+    let end = rhs
+        .bytes()
+        .position(|c| !(c.is_ascii_alphanumeric() || c == b'_' || c == b'.'))
+        .unwrap_or(rhs.len());
+    let callee = rhs.get(..end)?;
+    let call = rhs.get(end..)?.trim_start();
+    let valid = callee
+        .split('.')
+        .all(|seg| py_ident(seg).is_some_and(|(_, after)| after.is_empty()));
+    (valid && call.starts_with('(')).then_some((callee, call))
+}
+
+/// CB.14: the quoted `name="..."` keyword of the call on line `i` whose text
+/// from `(` on is `first`, read across its continuation lines (at most
+/// [`PY_CALL_WINDOW`]). `None` when there is no call, no such keyword, or its
+/// value is no GraphQL name.
+fn call_name_kwarg(lines: &[&str], i: usize, first: &str) -> Option<String> {
+    if !first.starts_with('(') {
+        return None;
+    }
+    let mut text = first.to_string();
+    let mut depth = py_bracket_delta(first);
+    for l in lines.iter().skip(i + 1).take(PY_CALL_WINDOW) {
+        if depth <= 0 {
+            break;
+        }
+        text.push('\n');
+        text.push_str(l);
+        depth += py_bracket_delta(l);
+    }
+    py_name_kwarg(&text)
+}
+
+/// The `name=` keyword argument of the call `call` opens (it starts at `(`),
+/// read at the call's own bracket depth, when its value is a quoted GraphQL
+/// name: `(User, name="me")` -> `me`; a `name=` inside a nested call, a
+/// comment or a string, `first_name=`, and `name=some_var` are not it.
+fn py_name_kwarg(call: &str) -> Option<String> {
+    let b = call.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while let Some(&c) = b.get(i) {
+        match c {
+            b'#' => {
+                i = b.iter().skip(i).position(|&x| x == b'\n').map_or(b.len(), |p| i + p);
+                continue;
+            }
+            b'\'' | b'"' => i = skip_py_string(b, i),
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                if depth <= 0 {
+                    return None;
+                }
+            }
+            _ if depth == 1 && is_ident_byte(c) && !ident_byte_before(b, i) => {
+                let (ident, after) = py_ident(call.get(i..)?).unwrap_or(("", ""));
+                if ident == "name"
+                    && let Some(value) = after.trim_start().strip_prefix('=')
+                    && !value.starts_with('=')
+                {
+                    // The call's own `name=`: its quoted literal, or no
+                    // explicit name at all (`name=some_var`).
+                    return quoted_literal(value.trim_start())
+                        .filter(|l| py_ident(l).is_some_and(|(_, rest)| rest.is_empty()))
+                        .map(str::to_string);
+                }
+                i += ident.len().max(1);
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The body of the one-line quoted literal `s` opens (`"me"` / `'me'`).
+fn quoted_literal(s: &str) -> Option<&str> {
+    let b = s.as_bytes();
+    let quote = b.first().copied().filter(|&q| q == b'"' || q == b'\'')?;
+    let close = skip_py_string(b, 0);
+    (close > 0 && b.get(close) == Some(&quote))
+        .then(|| s.get(1..close))
+        .flatten()
 }
 
 /// WHOLE-FILE mode for a routed `.graphql` / `.gql` schema
@@ -1834,14 +2298,15 @@ mod tests {
     #[test]
     fn strawberry_and_graphene_root_classes() {
         let strawberry = "import strawberry\n\n@strawberry.type\nclass Recipe:\n    title: str\n\n@strawberry.type\nclass Query:\n    @strawberry.field\n    def recipe(self) -> Recipe: ...\n\n@strawberry.type\nclass Mutation:\n    @strawberry.mutation\n    def add(self) -> Recipe: ...";
-        // HEAD: strawberry.type + strawberry.mutation.
-        assert_resolvers(strawberry, "python", &["Mutation", "Query"]);
+        // HEAD: strawberry.type + strawberry.mutation. CB.14: the root
+        // classes' fields too.
+        assert_resolvers(strawberry, "python", &["Mutation", "Query", "add", "recipe"]);
         let out = extract_graphql_resolver_nodes(strawberry, "python", module_id(), repo());
         assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(7));
         assert_eq!(anchor_line(&out, "graphql_resolver:Mutation"), Some(12));
         // HEAD: ObjectType.
         let graphene = "import graphene\nclass User(graphene.ObjectType):\n    name = graphene.String()\nclass Query(graphene.ObjectType):\n    user = graphene.Field(User)";
-        assert_resolvers(graphene, "python", &["Query"]);
+        assert_resolvers(graphene, "python", &["Query", "user"]);
         let out = extract_graphql_resolver_nodes(graphene, "python", module_id(), repo());
         assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(3));
         // Without its import the strawberry source mints nothing.
@@ -1886,5 +2351,130 @@ mod tests {
         );
         // No needle, no marker line.
         assert_eq!(census("const x = 1;", "typescript").marker("typescript"), None);
+    }
+
+    // CB.14. Python root-class field resolvers, named by their schema field.
+
+    #[test]
+    fn strawberry_field_methods() {
+        // A nested decorated function inside a resolver body is not a
+        // first-level member, and a stacked decorator is skipped.
+        let source = "import strawberry\n\n@strawberry.type\nclass Query:\n    @strawberry.field\n    def user(self, id: strawberry.ID) -> User:\n        @strawberry.field\n        def inner(self) -> int:\n            return 1\n        return User()\n\n    @strawberry.field\n    @cached\n    async def current_user(self) -> User:\n        return User()\n\n    # a comment at the member indent\n    def helper(self) -> None: ...\n";
+        assert_resolvers(source, "python", &["Query", "currentUser", "user"]);
+        let out = extract_graphql_resolver_nodes(source, "python", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:user"), Some(5), "the `def` line");
+        assert_eq!(anchor_line(&out, "graphql_resolver:currentUser"), Some(13), "past `@cached`");
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(3));
+        // Mutation and Subscription roots read the same way.
+        let roots = "import strawberry\n@strawberry.type\nclass Mutation:\n    @strawberry.mutation\n    def add_book(self, title: str) -> Book: ...\n@strawberry.type\nclass Subscription:\n    @strawberry.subscription\n    async def book_added(self) -> AsyncGenerator[Book, None]: ...\n";
+        assert_resolvers(roots, "python", &["Mutation", "Subscription", "addBook", "bookAdded"]);
+        // A decorator whose next member is no method names nothing.
+        let dangling = "import strawberry\n@strawberry.type\nclass Query:\n    @strawberry.field\n    x: int\n";
+        assert_resolvers(dangling, "python", &["Query"]);
+    }
+
+    #[test]
+    fn strawberry_explicit_name() {
+        let source = "import strawberry\n@strawberry.type\nclass Query:\n    @strawberry.field(name=\"me\")\n    def current_user(self) -> User: ...\n";
+        assert_resolvers(source, "python", &["Query", "me"]);
+        // A multi-line call, a bracket inside a string, single quotes.
+        let multi = "import strawberry\n@strawberry.type\nclass Query:\n    @strawberry.field(\n        description=\"the (viewer\",\n        name='viewer',\n    )\n    def who_am_i(self) -> User: ...\n";
+        assert_resolvers(multi, "python", &["Query", "viewer"]);
+        let out = extract_graphql_resolver_nodes(multi, "python", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:viewer"), Some(7));
+        // A `name=` of a nested call, in a string or a comment, a longer
+        // keyword and a non-literal value are not the field's name.
+        let decoys = "import strawberry\n@strawberry.type\nclass Mutation:\n    @strawberry.mutation(permission_classes=[P(name=\"x\")], description=\"name='y'\")\n    def add_book(self) -> Book: ...\n    @strawberry.mutation(graphql_name=\"z\")  # name=\"w\"\n    def drop_book(self) -> Book: ...\n    @strawberry.mutation(name=NAME)\n    def lend_book(self) -> Book: ...\n";
+        assert_resolvers(decoys, "python", &["Mutation", "addBook", "dropBook", "lendBook"]);
+        assert_eq!(py_name_kwarg("(User, name=\"me\")").as_deref(), Some("me"));
+        assert_eq!(py_name_kwarg("(name == \"x\", name=\"y\")").as_deref(), Some("y"));
+        assert_eq!(py_name_kwarg("(name=\"not-a-name\")"), None);
+        assert_eq!(py_name_kwarg("(name=\"unterminated"), None);
+    }
+
+    #[test]
+    fn strawberry_attribute_field() {
+        let source = "import strawberry\n@strawberry.type\nclass Query:\n    users: list[User] = strawberry.field(resolver=get_users)\n    top_user: User = strawberry.field(resolver=get_top, name=\"best\")\n    all_books = strawberry.field(resolver=get_books)\n    count: int = 0\n    title: str\n    flag: bool = strawberry.field_x()\n";
+        assert_resolvers(source, "python", &["Query", "allBooks", "best", "users"]);
+        let out = extract_graphql_resolver_nodes(source, "python", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:users"), Some(3));
+        assert_eq!(anchor_line(&out, "graphql_resolver:best"), Some(4));
+    }
+
+    const GRAPHENE_SCHEMA: &str = "import graphene\n\n\nclass User(graphene.ObjectType):\n    id = graphene.ID()\n    name = graphene.String()\n\n\nclass Query(graphene.ObjectType):\n    all_users = graphene.List(User)\n    user_by_id = graphene.Field(User, id=graphene.ID(required=True))\n\n    def resolve_all_users(root, info):\n        return []\n\n    def resolve_user_by_id(root, info, id):\n        return None\n\n\nschema = graphene.Schema(query=Query)\n";
+
+    #[test]
+    fn graphene_fields_anchor_at_resolve() {
+        // bench/substrate-gap/fixtures/py-graphene-fields/server/schema.py.
+        assert_resolvers(GRAPHENE_SCHEMA, "python", &["Query", "allUsers", "userById"]);
+        let out = extract_graphql_resolver_nodes(GRAPHENE_SCHEMA, "python", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:allUsers"), Some(12), "resolve_all_users");
+        assert_eq!(anchor_line(&out, "graphql_resolver:userById"), Some(15), "resolve_user_by_id");
+        assert_eq!(
+            decorator_scan(GRAPHENE_SCHEMA, "python").1.marker("python").as_deref(),
+            Some("[graphql-decorators] lang=python import=graphene roots=Query fields=2 rejected lang=0 import=0 position=0")
+        );
+        // No resolve_ method: the attribute line. Bare types, relay fields,
+        // a multi-line call with an explicit name, and a non-field call.
+        let shapes = "from graphene import ObjectType, String, List, relay\nclass Query(ObjectType):\n    node = relay.Node.Field()\n    version = String()\n    all_posts = relay.ConnectionField(PostConnection)\n    viewer = graphene.Field(\n        User,\n        name=\"me\",\n    )\n    cache = make_cache()\n    enum = graphene.Enum('E', [])\n\n    @staticmethod\n    async def resolve_version(root, info):\n        return \"1\"\n";
+        assert_resolvers(shapes, "python", &["Query", "allPosts", "me", "node", "version"]);
+        let out = extract_graphql_resolver_nodes(shapes, "python", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:node"), Some(2));
+        assert_eq!(anchor_line(&out, "graphql_resolver:version"), Some(13), "async resolve_version");
+        assert_eq!(anchor_line(&out, "graphql_resolver:me"), Some(5));
+    }
+
+    #[test]
+    fn graphene_mutation_field() {
+        let source = "import graphene\n\nclass CreateUser(graphene.Mutation):\n    class Arguments:\n        name = graphene.String()\n\n    ok = graphene.Boolean()\n\n    def mutate(root, info, name):\n        return CreateUser(ok=True)\n\n\nclass Mutation(graphene.ObjectType):\n    create_user = CreateUser.Field()\n";
+        assert_resolvers(source, "python", &["Mutation", "createUser"]);
+        let out = extract_graphql_resolver_nodes(source, "python", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:createUser"), Some(13));
+    }
+
+    #[test]
+    fn auto_camel_case_off() {
+        let strawberry = "import strawberry\nfrom strawberry.schema.config import StrawberryConfig\n@strawberry.type\nclass Query:\n    @strawberry.field\n    def current_user(self) -> User: ...\n    @strawberry.field(name=\"allUsers\")\n    def all_users(self) -> list[User]: ...\n\nschema = strawberry.Schema(query=Query, config=StrawberryConfig(auto_camel_case=False))\n";
+        assert_resolvers(strawberry, "python", &["Query", "allUsers", "current_user"]);
+        let graphene = "import graphene\nclass Query(graphene.ObjectType):\n    all_users = graphene.List(User)\n\nschema = graphene.Schema(query=Query, auto_camelcase = False)\n";
+        assert_resolvers(graphene, "python", &["Query", "all_users"]);
+    }
+
+    #[test]
+    fn non_root_class_fields_ignored() {
+        let graphene = "import graphene\nclass User(graphene.ObjectType):\n    name = graphene.String()\n    posts = graphene.List(Post)\n\n    def resolve_posts(root, info):\n        return []\n";
+        assert_resolvers(graphene, "python", &[]);
+        let strawberry = "import strawberry\n@strawberry.type\nclass User:\n    @strawberry.field\n    def full_name(self) -> str: ...\n";
+        assert_resolvers(strawberry, "python", &[]);
+    }
+
+    #[test]
+    fn root_class_body_bounds() {
+        // The root body ends at the next line at the class's indent.
+        let after = "import graphene\nclass Query(graphene.ObjectType):\n    me = graphene.Field(User)\nclass Other(graphene.ObjectType):\n    them = graphene.Field(User)\nthose = graphene.Field(User)\n";
+        assert_resolvers(after, "python", &["Query", "me"]);
+        // A triple-quoted string and a bracketed continuation at column 0
+        // stay inside the body.
+        let docstring = "import graphene\nclass Query(graphene.ObjectType):\n    \"\"\"Root.\n\nMore text at column 0.\n\"\"\"\n    items = graphene.List(\n        Item,\n)\n    total = graphene.Int()\n";
+        assert_resolvers(docstring, "python", &["Query", "items", "total"]);
+    }
+
+    #[test]
+    fn camel_case_follows_the_libraries() {
+        for (py, schema) in [
+            ("current_user", "currentUser"),
+            ("user_by_id", "userById"),
+            ("field_2", "field2"),
+            ("user_ID", "userId"),
+            ("_private", "Private"),
+            ("a__b", "a_B"),
+            ("trailing_", "trailing_"),
+            ("already", "already"),
+            ("camelCase", "camelCase"),
+        ] {
+            assert_eq!(camel_case(py), schema, "{py}");
+        }
+        assert_eq!(schema_name("current_user", Some("me".into()), true), "me");
+        assert_eq!(schema_name("current_user", None, false), "current_user");
     }
 }
