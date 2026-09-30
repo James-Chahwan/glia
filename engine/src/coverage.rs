@@ -73,28 +73,39 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     },
     // LA.27 (James's call): SDL inside code is read only from GraphQL-marked
     // literals, so unmarked SDL is a declared recall gap, not a silent one.
+    // CB.1 names `.graphqls`; CB.24 adds the client base-URL narrowing rule.
     CoverageCaveat {
         language: "*",
         edge_category: "GRAPHQL_CALLS",
-        note: "GraphQL SDL embedded in code is read only from a GraphQL-marked literal: a gql / graphql tag or call, a buildSchema / MustParseSchema / ParseSchema / from_definition argument, a /* GraphQL */ or #graphql literal, a GRAPHQL / GQL heredoc, or a literal bound to a variable or key named typeDefs / type_defs. SDL kept unmarked in a differently named variable (a plain template in `const schema = ...`, a Go string passed to MustParseSchema by name) is not read: its root types and fields mint no GRAPHQL_RESOLVER, so its clients' operations pair with nothing. `.graphql` / `.graphqls` / `.gql` files are read whole.",
-        verify: "grep 'type Query {' / 'type Mutation {' outside .graphql / .graphqls / .gql files and read the variable that holds it",
+        note: "GraphQL SDL embedded in code is read only from a GraphQL-marked literal: a gql / graphql tag or call, a buildSchema / MustParseSchema / ParseSchema / from_definition argument, a /* GraphQL */ or #graphql literal, a GRAPHQL / GQL heredoc, or a literal bound to a variable or key named typeDefs / type_defs. SDL kept unmarked in a differently named variable (a plain template in `const schema = ...`, a Go string passed to MustParseSchema by name) is not read: its root types and fields mint no GRAPHQL_RESOLVER, so its clients' operations pair with nothing. `.graphql` / `.graphqls` / `.gql` files are read whole. A client's base URL narrows its project's operations to one server only when it is one literal absolute URL (Apollo `uri`, HttpLink / createHttpLink, urql createClient / new Client, graphql-request GraphQLClient) whose host names a nested project or an IaC service; a relative, env-var or interpolated URL leaves an operation paired with every server that declares the field.",
+        verify: "grep 'type Query {' / 'type Mutation {' outside .graphql / .graphqls / .gql files and read the variable that holds it; for an operation paired with several servers, read the client's uri / url",
     },
     // LA.18b: a path-less upgrade handler (gorilla, nhooyr, raw ASP.NET) pairs
     // only through the routes that reach its upgrading function, and a client
-    // whose URL the extractor could not read pairs nothing.
+    // whose URL the extractor could not read pairs nothing. CB.21: the host
+    // narrowing a client's literal URL allows.
     CoverageCaveat {
         language: "*",
         edge_category: "WS_CONNECTS",
-        note: "a WebSocket upgrade whose route is registered more than one call away from the upgrading function, or through a router glia does not extract, stays unpaired; a client whose URL has no static path is not paired",
-        verify: "grep the upgrade call and the route registration",
+        note: "a WebSocket upgrade whose route is registered more than one call away from the upgrading function, or through a router glia does not extract, stays unpaired; a client whose URL has no static path is not paired; a client matching several same-path handlers narrows to one service only when its URL's static head carries a literal host naming a nested project or an IaC service (compose / Kubernetes service, deployment, statefulset, image), otherwise it pairs with all of them",
+        verify: "grep the upgrade call and the route registration; for a client paired with several handlers, read its URL",
+    },
+    // CB.21: a gRPC stub's dial host narrows same-named services, read only
+    // from a literal target.
+    CoverageCaveat {
+        language: "*",
+        edge_category: "GRPC_CALLS",
+        note: "a gRPC client stub whose service several projects declare narrows to one only when its dial target is a literal (the constructor's own argument, or the nearest dial above it in the same function: grpc.Dial / DialContext / NewClient, grpc(.aio).*_channel, forTarget / forAddress, GrpcChannel.ForAddress, tonic from_static, ClientChannel) whose host names a nested project or an IaC service; a target read from config or env, or a unix: / xds: target, names no host, so the stub stays unnarrowed: paired with every such service, or with none when the pick is ambiguous",
+        verify: "grep the dial call and the address it is given",
     },
     // LA.17: Connect / Twirp procedures come from the build's .proto set and
-    // calls from the bound client variable, both read per file.
+    // calls from the bound client variable, both read per file. CB.24: a tRPC
+    // link URL narrows like a GraphQL client's.
     CoverageCaveat {
         language: "*",
         edge_category: "RPC_CALLS",
-        note: "Connect/Twirp procedures and calls are read only when the service's .proto is in the build; a client stored in one file and called from another, and connect-node / non-Go Twirp code, are not extracted; a procedure whose implementing type lives in another file than its registration is contained by the module, not HANDLED_BY the method",
-        verify: "grep New<Service>Client / createClient(<Service> and the method name",
+        note: "Connect/Twirp procedures and calls are read only when the service's .proto is in the build; a client stored in one file and called from another, and connect-node / non-Go Twirp code, are not extracted; a procedure whose implementing type lives in another file than its registration is contained by the module, not HANDLED_BY the method; a tRPC call narrows to one server's procedure only when its link's `url` (httpBatchLink / httpLink / httpBatchStreamLink) is one literal absolute URL whose host names a nested project or an IaC service, otherwise it pairs with every same-named procedure",
+        verify: "grep New<Service>Client / createClient(<Service> and the method name; for a tRPC call paired twice, read the link's url",
     },
     // LA.33: a consumer is HANDLED_BY its callback only for these client
     // shapes; every other consumer keeps LE.4c's subscribing-function edge.
@@ -159,6 +170,14 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "implicit interface satisfaction is inferred (Medium, DERIVED) from method names and, where the parser read both, signatures (parameter and result types; package qualifiers, parameter names and a type alias are not resolved); a one-method interface, or a pair with a side in a _test.go file, pairs only across an import path (same package, a transitive import either way, or a package importing both); an import of the repository-root package is not recorded, so a root-package side is assumed reachable; a method on a generic type and an interface with type parameters are matched by name only; pointer and value receivers are merged; methods promoted through an embedded struct field are not seen; an interface embedding one that does not bind is skipped as open; constraint type terms are ignored",
         verify: "check the method signatures and receivers against the interface",
     },
+    // CB.11 / CB.20 / CB.23: struct-held routers and group mounts, measured
+    // on fixtures/go-route-struct-routers and go-route-mounts.
+    CoverageCaveat {
+        language: "go",
+        edge_category: "HANDLED_BY",
+        note: "a Go route takes its group's prefix when the group is built from a string literal (`g := r.Group(\"/api\")`), held in a struct field the package assigns it to, or passed through a parameter or a struct field by a call the build has resolved (one ROUTE per mount); a prefix held in a constant or a variable or built at run time (fmt.Sprintf, os.Getenv), a group returned by a function, and a group passed through a call that is not resolved (a function value, a loop over registrars) are not read, so the route keeps its local path and pairs with a client only through the HTTP resolver's prefix folds",
+        verify: "grep .Group( / .Route( / .Mount( and follow the group to its registrations",
+    },
     CoverageCaveat {
         language: "php",
         edge_category: "IMPLEMENTS",
@@ -170,6 +189,14 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         edge_category: "INHERITS_FROM",
         note: "`class X extends Base` and `interface A extends B` clauses are not extracted, and traits (`use T;` in a class) are not nodes: no PHP type has an INHERITS_FROM edge",
         verify: "grep 'extends' / 'use' for the type or trait name",
+    },
+    // CB.10 / CB.18: the Swift call scope, measured on fixtures/swift-members
+    // and swift-implicit-self plus a receiver probe of each shape below.
+    CoverageCaveat {
+        language: "swift",
+        edge_category: "CALLS",
+        note: "Swift calls bind: a bare call inside a type to the type's own member (implicit self, across its extensions in other files) before a same-named free function, else to a function of the same file; a static call or construction (`T.m()`, `T()`) on a type declared in the same module; a method call through a stored property's declared type, optional chaining included (init, deinit, subscripts and computed properties are METHOD nodes). Not bound: a receiver typed by a parameter or a local (`let r: Repo = ..`, `let r = Repo()`), a function's return value or a chain (`make().load()`), a protocol-typed receiver (a protocol's requirements are not nodes), a closure-held function (`let f = { .. }; f()`), a free function declared in another file of the module, and anything declared in another module (an `import`ed target)",
+        verify: "grep the callee name across *.swift",
     },
     CoverageCaveat {
         language: "swift",
@@ -188,6 +215,30 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         edge_category: "HTTP_CALLS",
         note: "dio / http client verbs are extracted; other HTTP libraries are not",
         verify: "grep the HTTP client class name",
+    },
+    // CB.9 / CB.17: constructors, operators and extension members are nodes;
+    // measured on fixtures/dart-members, dart-extensions-imports and a probe
+    // of each receiver shape below.
+    CoverageCaveat {
+        language: "dart",
+        edge_category: "CALLS",
+        note: "Dart constructors, factories, operators, abstract members and extension members are METHOD nodes. Calls bind: a bare call inside a class to its own member (implicit this) before a top-level function of the library; a call through a typed field (`final Repo repo;`, `final _r = Repo()`); a same-file type's constructions and statics; and, through an import with a `show` list or an `as` prefix, the imported library's functions, constructors and statics. Not bound: a bare call, construction or static call into a library pulled in by a plain `import 'x.dart';` (no `show` / `as`), a receiver typed by a parameter or a local, a function's return value or a chain (`make().value()`), a `dynamic` receiver, an extension-method call and an operator expression (`a + b`) at the call site, and a closure-held function",
+        verify: "grep the callee name across *.dart",
+    },
+    // CB.19 / CB.22 / CB.25: the C/C++ residual, measured on fixtures/
+    // cpp-declarations, cpp-include-paths and cpp-call-scope plus a probe of
+    // each shape below. Keyed "c_cpp", the detect_language tag.
+    CoverageCaveat {
+        language: "c_cpp",
+        edge_category: "CALLS",
+        note: "C/C++ calls resolve by name, and a qname carries no signature, so an overload set is one node. A bare call in a member binds the class's own (or an inherited) member first; `Type::m()` / `ns::f()` bind through C++ name lookup; a call on a receiver binds through the declared type of a field, parameter or typed local (`using` applied), and a virtual call binds that static type's member, never an override. A function in another file is reached only through an include glia resolves (see IMPORTS); one reached through a header prototype binds when exactly one non-static definition of it sits in a .c / .cc / .cpp / .cxx file, or, among several, the one beside the declaring header. Not bound: a call through a function pointer or a variable holding a lambda, a template-dependent call (`t.f()` on a template parameter), a macro-expanded call, a call inside a lambda body, and a receiver declared `auto` or reached through a chain or a function's return (`make().f()`)",
+        verify: "grep the callee name across the .c / .cc / .cpp / .h / .hpp files",
+    },
+    CoverageCaveat {
+        language: "c_cpp",
+        edge_category: "IMPORTS",
+        note: "a quoted include resolves against the includer's directory, then the repo's search roots; an angle include through the search roots only. The roots: the -I / -isystem / -iquote dirs of a compile_commands.json at the repo root or in its depth-1 build* / out / cmake-build-* dirs (and the same under each CMake project root), CMake include_directories / target_include_directories in the CMakeLists.txt beside the walked files (an argument holding a generator expression `$<..>`, or a variable other than the list's own dir and the project / source root, is skipped), and include/ under the repo root and each project root; a root outside the repo, or holding no walked C/C++ file, is dropped. Other build systems (Bazel, Meson, Make CFLAGS, autotools) are not read, and a macro-named include (`#include HDR`) records nothing. A system or third-party header is no node: its first path segment is listed in the MODULE's IMPORTS cell",
+        verify: "grep '#include' in the file and read the build's -I flags (compile_commands.json, CMakeLists.txt, Makefile, BUILD)",
     },
     // A14.1 / A14.2 — the Kotlin rows. `.kt` has its own parser since A14.2
     // (`parsers/code/kotlin`, one JVM graph with Java), so these describe the
@@ -260,6 +311,10 @@ pub fn coverage_report(merged: &MergedGraph) -> Vec<CoverageNote> {
     let langs = languages_present(merged);
     if langs.contains("kotlin") {
         eprintln!("[coverage] kotlin: residual rows declared for calls/heritage/imports/routes/http clients");
+    }
+    // CB.26: a C/C++ repo is told its CALLS / IMPORTS residual.
+    if langs.contains("c_cpp") {
+        eprintln!("[coverage] c_cpp: residual rows declared for calls/imports");
     }
     notes(merged, |c| c.language == "*" || langs.contains(c.language))
 }
@@ -347,6 +402,10 @@ pub(crate) fn ext_to_language(path: &str) -> Option<&'static str> {
         "swift" => "swift",
         "scala" | "sc" => "scala",
         "sol" => "solidity",
+        // CB.26: every extension `detect_language` sends to the C/C++ parser
+        // (CB.1 added the `.hh` / `.hxx` / `.inl` / `.ipp` / `.tpp` set), under
+        // its tag, so a caveat keyed "c_cpp" reaches a C/C++ repo.
+        "c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "inl" | "ipp" | "tpp" => "c_cpp",
         // A14.1: `.kt` only. `.kts` never passes the walk's read gate
         // (`detect_language`), so an arm for it could never fire.
         "kt" => "kotlin",
@@ -659,5 +718,162 @@ mod tests {
         // `.kts` never reaches the walk, so it maps to no language.
         assert_eq!(ext_to_language("build.gradle.kts"), None);
         assert_eq!(ext_to_language("app/Main.kt"), Some("kotlin"));
+    }
+
+    /// The `(language, edge_category)` rows a repo holding only `file` gets
+    /// for `lang`, sorted.
+    fn lang_rows(file: &str, lang: &str) -> Vec<(&'static str, &'static str)> {
+        let mut r: Vec<_> = coverage_report(&graph_with_file(file))
+            .iter()
+            .filter(|n| n.language == lang)
+            .map(|n| (n.language, n.edge_category))
+            .collect();
+        r.sort_unstable();
+        r
+    }
+
+    /// The note of the `lang` row for `category` in a repo holding only `file`.
+    fn row_note(file: &str, lang: &str, category: &str) -> &'static str {
+        coverage_report(&graph_with_file(file))
+            .iter()
+            .find(|n| n.language == lang && n.edge_category == category)
+            .map(|n| n.note)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn c_cpp_files_get_their_caveats() {
+        // CB.26: every extension detect_language routes to the C/C++ parser
+        // maps to its tag, so a caveat keyed "c_cpp" reaches a C/C++ repo.
+        for ext in ["c", "h", "cc", "cpp", "cxx", "hh", "hpp", "hxx", "inl", "ipp", "tpp"] {
+            let path = format!("src/a.{ext}");
+            assert_eq!(crate::extract::detect_language(&path), Some("c_cpp"), "{path}");
+            assert_eq!(ext_to_language(&path), Some("c_cpp"), "{path}");
+        }
+        let want = [("c_cpp", "CALLS"), ("c_cpp", "IMPORTS")];
+        assert_eq!(lang_rows("src/a.cpp", "c_cpp"), want);
+        assert_eq!(lang_rows("include/a.hh", "c_cpp"), want);
+        assert_eq!(lang_rows("lib/codec.c", "c_cpp"), want);
+        // Control: a repo with no C/C++ file gets no c_cpp row.
+        assert!(lang_rows("main.go", "c_cpp").is_empty());
+        // CALLS names the residual CB.19 / CB.25 leave, measured.
+        let calls = row_note("src/a.cpp", "c_cpp", "CALLS");
+        for gap in [
+            "overload set is one node",
+            "function pointer",
+            "never an override",
+            "template parameter",
+            "macro",
+            "lambda body",
+            "`auto`",
+            "exactly one non-static definition",
+            "only through an include",
+        ] {
+            assert!(calls.contains(gap), "{gap}: {calls}");
+        }
+        // IMPORTS names the search roots CB.22 reads and what it does not.
+        let imports = row_note("include/a.hh", "c_cpp", "IMPORTS");
+        for part in [
+            "includer's directory",
+            "compile_commands.json",
+            "target_include_directories",
+            "include/",
+            "generator expression",
+            "Bazel",
+            "Meson",
+            "Make",
+        ] {
+            assert!(imports.contains(part), "{part}: {imports}");
+        }
+    }
+
+    #[test]
+    fn swift_and_dart_calls_caveats_name_the_cb_residual() {
+        // CB.10 / CB.18: members, extension members and same-module statics
+        // bind; the row names the receivers that still do not.
+        assert!(lang_rows("Sources/App/Cart.swift", "swift").contains(&("swift", "CALLS")));
+        let swift = row_note("Sources/App/Cart.swift", "swift", "CALLS");
+        for part in [
+            "extension",
+            "stored property",
+            "protocol",
+            "closure",
+            "a parameter or a local",
+            "another file",
+            "another module",
+        ] {
+            assert!(swift.contains(part), "{part}: {swift}");
+        }
+        // CB.9 / CB.17: constructors, operators and extension members are
+        // nodes; the row names the plain-import and receiver residual.
+        assert!(lang_rows("lib/app.dart", "dart").contains(&("dart", "CALLS")));
+        let dart = row_note("lib/app.dart", "dart", "CALLS");
+        for part in [
+            "constructors",
+            "operators",
+            "extension",
+            "`show`",
+            "`as`",
+            "plain `import",
+            "`dynamic`",
+            "a parameter or a local",
+        ] {
+            assert!(dart.contains(part), "{part}: {dart}");
+        }
+        // Control: neither row reaches a repo without the language.
+        assert!(lang_rows("main.go", "swift").is_empty());
+        assert!(lang_rows("main.go", "dart").is_empty());
+    }
+
+    #[test]
+    fn go_route_mount_caveat_names_the_unread_prefixes() {
+        // CB.11 / CB.20 / CB.23: a literal group reaches routes through
+        // parameters and fields when the passing call binds; the row says so.
+        assert!(lang_rows("main.go", "go").contains(&("go", "HANDLED_BY")));
+        let note = row_note("main.go", "go", "HANDLED_BY");
+        for part in ["struct field", "string literal", "resolved", "constant", "function value"] {
+            assert!(note.contains(part), "{part}: {note}");
+        }
+        assert!(lang_rows("src/lib.rs", "go").is_empty());
+    }
+
+    #[test]
+    fn host_narrowing_caveats_are_universal() {
+        // CB.21 / CB.24: every channel resolver narrows same-key targets only
+        // on a literal host naming a project or an IaC service; each `*` row
+        // of those mechanisms says so on every repo.
+        let report = coverage_report(&MergedGraph::new(Vec::new()));
+        let note = |cat: &str| -> Vec<&'static str> {
+            report
+                .iter()
+                .filter(|n| n.language == "*" && n.edge_category == cat)
+                .map(|n| n.note)
+                .collect()
+        };
+        let gql = note("GRAPHQL_CALLS");
+        assert_eq!(gql.len(), 1);
+        assert!(gql[0].contains("literal absolute URL"), "{}", gql[0]);
+        // CB.1's handoff: `.graphqls` stays named in both note and verify.
+        assert!(gql[0].contains(".graphqls"), "{}", gql[0]);
+        let gql_verify = report
+            .iter()
+            .find(|n| n.edge_category == "GRAPHQL_CALLS")
+            .map(|n| n.verify)
+            .unwrap_or_default();
+        assert!(gql_verify.contains(".graphqls"), "{gql_verify}");
+        let ws = note("WS_CONNECTS");
+        assert_eq!(ws.len(), 1);
+        assert!(ws[0].contains("literal") && ws[0].contains("IaC"), "{}", ws[0]);
+        let rpc = note("RPC_CALLS");
+        assert_eq!(rpc.len(), 1);
+        assert!(rpc[0].contains("tRPC") && rpc[0].contains("literal absolute URL"), "{}", rpc[0]);
+        let grpc = note("GRPC_CALLS");
+        assert_eq!(grpc.len(), 1, "the gRPC row is keyed by its own mechanism");
+        assert!(grpc[0].contains("dial target") && grpc[0].contains("IaC"), "{}", grpc[0]);
+        assert_eq!(
+            edge_category::name(edge_category::GRPC_CALLS),
+            "GRPC_CALLS",
+            "edges_found is keyed by this spelling"
+        );
     }
 }

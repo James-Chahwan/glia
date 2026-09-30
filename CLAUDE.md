@@ -102,6 +102,8 @@ engine/src/   lib.rs        facade (rules above)
                             rpc_needles.rs RpcContext, apply_rpc_needles, graft_rpc_markers
                             lang_build.rs  build_language_graphs — per-language build + markers;
                                            rust_crates (the Cargo packages build_rust resolves against)
+                            c_includes.rs  IncludeRoots / IncludeResolver — C/C++ include search
+                                           roots (compile_commands.json, CMake, include/; CB.22)
               docs.rs       markdown ingest          passes.rs    doc-linker, TESTS edge, the post-pass fns
               profile.rs    CODE_PASSES — every build pass in run order (15 resolvers, 6 post-passes,
                             evidence fill + determinism sort); run_code_passes is the whole build tail
@@ -135,9 +137,11 @@ engine/src/   lib.rs        facade (rules above)
 graph/src/    lib.rs        facade (rules above)
               types.rs build.rs imports.rs calls.rs merged.rs traversal.rs
               blast.rs signal.rs
-              resolvers/    one module per mechanism (http, grpc, queue, graphql,
-                            websocket, eventbus, shared_schema, db, cron, config,
-                            iac, package, cli) + mod.rs
+              resolvers/    one module per mechanism (http, grpc, rpc, queue, graphql,
+                            websocket, eventbus, shared_schema, message_schema, db,
+                            cron, config, iac, package, cli) + mod.rs; host.rs is the
+                            shared host narrowing (service alias index, narrow_by_host)
+                            the http / websocket / grpc / graphql / rpc resolvers use (CB.12)
   public slots (glia_graph::<slot>::<item>):
               rust_paths LA.1a (+LA.1b, LA.3)   roles LB.3a (+LA.21a)
               identity LB.6                     cells LF.1a
@@ -438,8 +442,7 @@ questions over one graph computes `entrypoint_reachable` once.
   dist `glia-py`, module `glia_py`, wheel `glia_py-<ver>-cp311-abi3-*.whl` (LD.11b,
   `--python`). The repo-graph MCP wrapper still imports the old module until its own
   session moves to `glia-py` (LG.5a), so both wheels stay installed side by side.
-- **After 0.5.0:** the leap doc's §6 "Later" list (`.graphqls` routing, struct-held Go
-  routers, ws / graphql / grpc client host narrowing, communities, duplicate flows,
+- **After 0.5.0:** the leap doc's §6 "Later" list (communities, duplicate flows,
   dominators once middleware is extracted and the security gate is ruled on, hubs,
   RuntimeZone, cross-repo node dedupe, Notion / wiki adapters, LSP, per-graph-area
   rebuilds if a big repo is slow after LG.1) and its §7.6 per-language backlog. The
