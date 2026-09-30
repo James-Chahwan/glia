@@ -116,9 +116,19 @@ engine/src/   lib.rs        facade (rules above)
               delta LE.1b              diff_impact LE.2     tests_for LE.3b   effects LE.4d
               why LE.5                 cycles LE.6b         patterns LE.7a    check LE.8
               spec_status LE.9b        gaps LF.2c (+LF.2e, LF.5c)   feature_flows LG.3a
+  0.5.1 public slots (C0.2), owner (+ extenders):
+              pack CC.4b               review CC.6a (+CC.6b)   flags CC.7b
+              contract_breaks CC.8a (+CC.8c)   hotspots CC.10a   cochange CC.11a (+CC.11b)
+              communities CD.1d        splits CD.2b (+CD.2c)   hubs CD.4b
+              duplicate_flows CD.4e    timeline CD.5c
+              shared_cache/ CE.2a (+CE.2b, CE.2d) — directory module, engine half only
+                        (the transport is CLI-only); key.rs, export.rs, import.rs, layout.rs
+              overlay_loop/ CE.3b (+CE.3c, CE.3d) — directory module; writer.rs, trial.rs,
+                        propose.rs, accept.rs, each declared in its mod.rs
   private slots (items pub(crate)):
               http_owner LB.4a         rekey LB.4a (LC.2 edits)   git_rev LE.1b
               adr LF.4b                parallel LG.1a (+LG.1b, LG.1c)
+              suspected CD.3b (0.5.1, C0.2)
               external/ LF.1a — directory module; LF.2b, LF.2e, LF.3b, LF.4a, LF.5b, LF.6b
                         add their stage files and declare them in external/mod.rs
 

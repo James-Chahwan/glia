@@ -55,6 +55,25 @@ mod http_owner;
 mod parallel;
 mod rekey;
 
+// 0.5.1 primitives: one public module each, reached by module path
+// (`glia_engine::pack::pack`); each owner fills its file.
+pub mod cochange;
+pub mod communities;
+pub mod contract_breaks;
+pub mod duplicate_flows;
+pub mod flags;
+pub mod hotspots;
+pub mod hubs;
+pub mod overlay_loop;
+pub mod pack;
+pub mod review;
+pub mod shared_cache;
+pub mod splits;
+pub mod timeline;
+
+// 0.5.1 internals: crate-private slots, cross-module items `pub(crate)`.
+mod suspected;
+
 pub use glia_graph::MergedGraph as ReExportedMergedGraph;
 
 pub use arch::{
