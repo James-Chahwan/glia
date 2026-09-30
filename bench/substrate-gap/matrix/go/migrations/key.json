@@ -1,0 +1,33 @@
+{
+  "framework": "go-golang-migrate",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "migrations",
+  "cells": [
+    "go/migrations"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "DATA_ENTITY",
+      "name": "users"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "000001_create_users.up",
+      "to": "users",
+      "category": "ACCESSES_DATA"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "DATA_ENTITY",
+      "name": "IF",
+      "max_nodes": 0
+    }
+  ],
+  "note": "golang-migrate: numbered up/down .sql files beside the migrate.New(\"file://migrations\") runner || CF.2b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=1/1 literal=1/1 route=1/1 forbid=1/1) via=db. Nothing to fix: the cell is covered at HEAD."
+}

@@ -1,0 +1,51 @@
+{
+  "framework": "go-getenv-dockerfile",
+  "language": "go",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "config",
+  "cells": [
+    "go/config"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "DATABASE_URL"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "reader",
+      "to": "DATABASE_URL",
+      "category": "READS_CONFIG"
+    },
+    {
+      "from": "Dockerfile",
+      "to": "DATABASE_URL",
+      "category": "DEFINES_CONFIG"
+    },
+    {
+      "from": "DATABASE_URL",
+      "to": "DATABASE_URL",
+      "category": "SHARES_CONFIG"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "CONFIG_KEY",
+      "node": "DATABASE_URL",
+      "cell": "ENV",
+      "contains": "db.internal:5432"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "CONFIG_KEY",
+      "name": "postgres://db.internal:5432/app",
+      "max_nodes": 0
+    }
+  ],
+  "note": "os.Getenv read + Dockerfile ENV define || CF.2b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=1/1 literal=1/1 route=3/3 forbid=1/1) via=config. Nothing to fix: the cell is covered at HEAD."
+}

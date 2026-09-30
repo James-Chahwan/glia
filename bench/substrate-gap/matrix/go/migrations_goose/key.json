@@ -1,0 +1,27 @@
+{
+  "framework": "go-goose-go-migration",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "migrations",
+  "cells": [
+    "go/migrations"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "DATA_ENTITY",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "00002_add_orders",
+      "to": "orders",
+      "category": "ACCESSES_DATA"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "pressure/goose Go-function migration: DDL inside tx.ExecContext || CF.2b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): FULL (extract=1/1 literal=1/1 route=1/1 forbid=0/0) via=db. Nothing to fix: the cell is covered at HEAD."
+}
