@@ -1,0 +1,24 @@
+# CLI surface of `glia timeline`. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface
+cmd glia timeline subcommand_required
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+cmd glia timeline as-of
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+  arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
+  arg rev pos=2 long=- short=- required=true num_args=1 action=Set default=- value_names=REV global=false hidden=false
+cmd glia timeline build
+  arg head pos=- long=head short=- required=false num_args=1 action=Set default=HEAD value_names=HEAD global=false hidden=false
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+  arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
+  arg revs pos=- long=revs short=- required=false num_args=1 action=Set default=20 value_names=REVS global=false hidden=false
+cmd glia timeline history
+  arg category pos=- long=category short=- required=false num_args=1 action=Set default=- value_names=CATEGORY global=false hidden=false
+  arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
+  arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
+  arg qname pos=2 long=- short=- required=true num_args=1 action=Set default=- value_names=QNAME global=false hidden=false
+  arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false

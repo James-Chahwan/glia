@@ -1,0 +1,4 @@
+# pyo3 surface of py/src/timeline.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+fn timeline_as_of(repo_path: &str, rev: &str) -> PyResult<Py<PyAny>>
+fn timeline_build(repo_path: &str, revs: usize = 20, head: &str = "HEAD") -> PyResult<Py<PyAny>>
+fn timeline_history(repo_path: &str, qname: &str, category: Option<&str> = None) -> PyResult<Py<PyAny>>

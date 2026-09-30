@@ -88,6 +88,18 @@ pub(crate) enum ChangeCmd {
     /// heuristic. Exits 0 with rows, 1 with none (the absence says why), 2 on
     /// a usage, git or build error.
     Cochange(cochange::Args),
+    /// Timeline (CD.5d): the time-travel graph. `build` builds the last
+    /// `--revs` commits (default 20, at most 200) of `--head`'s first-parent
+    /// chain and writes the sidecar `<repo>/.glia/graph/timeline.gmap` (not
+    /// under `GLIA_NO_PERSIST=1`); `history <qname>` lists every edge span
+    /// that ever touched the node, since which rev and until which rev or
+    /// still present, a file move followed; `as-of <rev>` is the graph at
+    /// one rev of the window (an index or a commit id prefix), its counts by
+    /// category. `history` and `as-of` read the sidecar and never rebuild a
+    /// rev. Exits 0 on an answer (`history` before any build prints the note
+    /// naming `glia timeline build`), 2 on a git or build error, an unknown
+    /// rev or a missing sidecar for `as-of`.
+    Timeline(timeline::Args),
 }
 
 pub(crate) fn run(c: ChangeCmd) -> i32 {
@@ -99,5 +111,6 @@ pub(crate) fn run(c: ChangeCmd) -> i32 {
         ChangeCmd::ContractBreaks(a) => contract_breaks::run(a),
         ChangeCmd::Review(a) => review::run(a),
         ChangeCmd::Cochange(a) => cochange::run(a),
+        ChangeCmd::Timeline(a) => timeline::run(a),
     }
 }
