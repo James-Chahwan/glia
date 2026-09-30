@@ -28,7 +28,7 @@ FILES = (
 
 REPORT_KEYS = ["rules", "checked", "unchecked", "errors", "violations"]
 VIOLATION_KEYS = ["rule_id", "rule_kind", "decl", "severity", "tier", "count", "evidence"]
-EDGE_KEYS = ["from_qname", "to_qname", "category", "file", "line", "emitter"]
+EDGE_KEYS = ["from_qname", "to_qname", "category", "file", "line", "emitter", "tier", "note"]
 
 
 def main() -> int:
@@ -44,6 +44,7 @@ def main() -> int:
         report, err = stderr_of(g.check)
         c.check("marker", "[check] rules=3 checked=2 violations=2 (forbid_edge=1 no_cycle=1) "
                 "unchecked=1 errors=0" in err, err[-400:])
+        c.check("tiers marker (CC.3)", "[check] tiers fact=1 derived=1 heuristic=0" in err, err[-400:])
         c.check("check -> dict", type(report) is dict, type(report))
         c.check("report keys in engine field order", list(report) == REPORT_KEYS, list(report))
         c.check("counts are ints", type(report.get("rules")) is int and report.get("rules") == 3
@@ -71,6 +72,9 @@ def main() -> int:
                 == [("IMPORTS", "web/app.py", 1), ("CALLS", "web/app.py", 5)], fe.get("evidence"))
         c.check("emitters named", all(e.get("emitter", "").startswith("graph:")
                                       for e in fe.get("evidence", [])), fe.get("evidence"))
+        c.check("evidence rows carry why's tier (CC.3)",
+                [(e.get("tier"), e.get("note")) for e in fe.get("evidence", [])] == [("fact", None), ("fact", None)]
+                and [h.get("tier") for h in w] == ["fact", "fact"], (fe.get("evidence"), w))
     return c.done()
 
 

@@ -27,14 +27,24 @@
 //! | `resolver`, `pass` | derived — paired by name / path / topic / convention |
 //! | `overlay`, `history` | heuristic — declared by a person or a model, or co-change in git |
 //!
-//! Exceptions, each with a row `note`: a `graph` edge bound by a name-only
-//! guess (LC.3d: `graph:refs` `global_unique` / `global_unique_method`,
-//! `graph:imports` `tail_unique`, `graph:rust_paths` `unique_in_crate` /
-//! `tail_unique`, `graph:nav` `suffix` / `href_suffix`) is heuristic; a fact
-//! whose evidence has basis `none` is derived ("no location recorded"); an
-//! edge with no EVIDENCE cell (a `.gmap` from before LC.3a) is derived ("no
-//! evidence recorded"); a stage outside the vocabulary is derived ("unknown
-//! emitter stage"). Nothing is ever shown as fact without its evidence.
+//! Exceptions, each with a row `note` (the first three tried in this order,
+//! each only on a fact-stage edge): a `graph` edge
+//! bound by a name-only guess (LC.3d: `graph:refs` `global_unique` /
+//! `global_unique_method`, `graph:imports` `tail_unique`, `graph:rust_paths`
+//! `unique_in_crate` / `tail_unique`, `graph:nav` `suffix` / `href_suffix`)
+//! is heuristic; a fact whose evidence has basis `none` is derived ("no
+//! location recorded"); a `graph` edge emitted below Strong confidence is
+//! derived (`inferred binding (<rule>, <confidence> confidence)`, CC.3: Go
+//! implicit IMPLEMENTS by method set, `graph:nav` param / scoped links — the
+//! graph crate inferred it, the source never spells it out; parser, extractor
+//! and docs edges are read at a site and keep fact); an edge with no
+//! EVIDENCE cell (a `.gmap` from before LC.3a) is derived ("no evidence
+//! recorded"); a stage outside the vocabulary is derived ("unknown emitter
+//! stage"). Nothing is ever shown as fact without its evidence.
+//!
+//! `tier_of` is the one tiering rule: `check` (LE.8, CC.3) tiers each
+//! forbidden edge and cycle hop with it, so the CI gate and the explanation
+//! never disagree on an edge.
 //!
 //! # No direct edge
 //!
@@ -72,9 +82,9 @@ pub const MAX_ENDPOINTS: usize = 8;
 /// Longest witness path, in carry hops.
 pub const MAX_PATH_HOPS: usize = 6;
 
-const FACT: &str = "fact";
-const DERIVED: &str = "derived";
-const HEURISTIC: &str = "heuristic";
+pub(crate) const FACT: &str = "fact";
+pub(crate) const DERIVED: &str = "derived";
+pub(crate) const HEURISTIC: &str = "heuristic";
 
 /// `(emitter, rule)` pairs that bind by a name alone (LC.3d's handoff): the
 /// only candidate with that name, not a binding the source spells out.
@@ -474,8 +484,10 @@ fn stage_tier(stage: &str) -> Option<&'static str> {
     }
 }
 
-/// `(tier, note)` for an edge's evidence (module doc).
-fn tier_of(ev: Option<&Evidence>, e: &Edge) -> (&'static str, Option<String>) {
+/// `(tier, note)` for an edge's evidence (module doc). `e` is the edge the
+/// evidence came from: its confidence tiers an inferred `graph` binding and
+/// its ORIGIN cell names who declared an overlay edge.
+pub(crate) fn tier_of(ev: Option<&Evidence>, e: &Edge) -> (&'static str, Option<String>) {
     let Some(ev) = ev else {
         return (DERIVED, Some("no evidence recorded".to_string()));
     };
@@ -494,6 +506,18 @@ fn tier_of(ev: Option<&Evidence>, e: &Edge) -> (&'static str, Option<String>) {
     }
     if tier == FACT && ev.basis == Basis::None {
         return (DERIVED, Some("no location recorded".to_string()));
+    }
+    // Only the graph stage infers: parser / extractor / docs edges are read
+    // at a site the source spells out, whatever confidence they carry.
+    if tier == FACT && stage == "graph" && e.confidence != Confidence::Strong {
+        return (
+            DERIVED,
+            Some(format!(
+                "inferred binding ({}, {} confidence)",
+                rule.unwrap_or("-"),
+                confidence_name(e.confidence)
+            )),
+        );
     }
     let note = match stage {
         "overlay" => Some(overlay_note(ev, e)),
@@ -586,6 +610,55 @@ mod tests {
             let stage = emitter.split(':').next().unwrap_or("");
             assert_eq!(stage_tier(stage), Some(FACT), "{emitter}");
         }
+    }
+
+    /// CC.3: confidence demotes only an inferred `graph` binding; a parser
+    /// edge is read at its site whatever its confidence, and a name-only
+    /// rule or a missing location keeps its own (earlier) exception.
+    #[test]
+    fn below_strong_graph_edge_is_derived() {
+        let edge = |c: Confidence| Edge::new(NodeId(1), NodeId(2), edge_category::CALLS, c);
+        let at = |em: &str, rule: Option<&str>| {
+            let ev = Evidence::emitter(em).at("m.py", 3);
+            match rule {
+                Some(r) => ev.rule(r),
+                None => ev,
+            }
+        };
+        let tier = |ev: &Evidence, c: Confidence| tier_of(Some(ev), &edge(c));
+
+        let iface = at("graph:iface", Some("method_set"));
+        assert_eq!(
+            tier(&iface, Confidence::Medium),
+            (
+                DERIVED,
+                Some("inferred binding (method_set, medium confidence)".to_string())
+            )
+        );
+        assert_eq!(tier(&iface, Confidence::Strong), (FACT, None));
+        assert_eq!(
+            tier(&at("graph:nav", None), Confidence::Weak),
+            (
+                DERIVED,
+                Some("inferred binding (-, weak confidence)".to_string())
+            )
+        );
+        assert_eq!(
+            tier(&at("parser:python", None), Confidence::Weak),
+            (FACT, None)
+        );
+        assert_eq!(
+            tier(&at("graph:refs", Some("global_unique")), Confidence::Weak),
+            (
+                HEURISTIC,
+                Some("name-only binding (global_unique)".to_string())
+            )
+        );
+        let unplaced = Evidence::emitter("graph:calls").rule("import_binding");
+        assert_eq!(
+            tier(&unplaced, Confidence::Medium),
+            (DERIVED, Some("no location recorded".to_string()))
+        );
     }
 
     #[test]

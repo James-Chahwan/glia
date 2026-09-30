@@ -15,19 +15,43 @@
 //!   The set is the rule's `categories` (edge category NAMES), else
 //!   [`default_forbid_categories`]: IMPORTS plus the code profile's carry
 //!   edges, minus TESTS and DOCUMENTS (a test or a doc legitimately crosses
-//!   a boundary). One [`Violation`] per rule, tier [`FACT`]; evidence sorted
-//!   by `(file, line, category)`, capped at [`MAX_EVIDENCE`] with `count` the
+//!   a boundary). One [`Violation`] per rule; evidence sorted by `(tier,
+//!   file, line, category)`, capped at [`MAX_EVIDENCE`] with `count` the
 //!   full number.
 //! - `no_cycle {scope}`: `categories` empty or exactly `[IMPORTS]` checks the
 //!   module import graph (`cycles::module_import_graph`, LE.6b) restricted to
 //!   the modules in scope; any other set checks the node-level graph of those
 //!   categories restricted to the nodes in scope. One [`Violation`] per
-//!   strongly-connected component, tier [`DERIVED`] (every hop is an observed
-//!   edge, only the cycle is computed), its evidence a shortest witness cycle
-//!   and its `count` the component's size. An unscoped rule checks the whole
+//!   strongly-connected component, its evidence a shortest witness cycle and
+//!   its `count` the component's size. An unscoped rule checks the whole
 //!   graph.
 //! - `invariant {text}` (and any kind this crate cannot evaluate): listed in
 //!   [`CheckReport::unchecked`], never dropped.
+//!
+//! # Tiers (CC.3)
+//!
+//! Every evidence row carries the tier `why` gives the same edge
+//! (`why::tier_of`, one rule for both surfaces): a parser / graph binding the
+//! source spells out is [`FACT`]; a resolver- or pass-paired edge, a graph
+//! edge inferred below Strong confidence (Go implicit IMPLEMENTS) or one with
+//! no location is [`DERIVED`]; an overlay declaration, a git co-change or a
+//! name-only guess is [`HEURISTIC`]. The row's `note` says why when the tier
+//! is not the stage's plain one, or where an overlay edge was declared.
+//!
+//! - forbid_edge: the Violation takes its STRONGEST row's tier. One observed
+//!   edge proves the forbidden dependency exists; a rule broken only by
+//!   resolver-paired edges is derived, only by declared or name-only edges
+//!   heuristic. Rows sort tier-first, so the truncation keeps the facts.
+//! - no_cycle: the Violation is [`DERIVED`] (the cycle is computed) unless a
+//!   hop is [`HEURISTIC`], then heuristic: every hop is needed for the cycle,
+//!   so its weakest hop bounds it. A node-level hop is tiered over the real
+//!   graph edge; an import hop over the lifted module edge, which carries the
+//!   first import's evidence and confidence but no ORIGIN cell (an overlay
+//!   import keeps its heuristic tier; its note names the stanza, not who
+//!   declared it).
+//!
+//! Exit codes do not read the tier: a heuristic-only violation still fails
+//! CI; the tier tells the reader how sure the graph is.
 //!
 //! SCOPE MEMBERSHIP IS STRICT. A node is in scope `X` only when the file one
 //! [`Locator`] places it in sits under `X` on a path-segment boundary (`web`
@@ -43,10 +67,13 @@
 //!
 //! Architecture rules only: nothing here carries auth or security semantics.
 //!
-//! Fired-on marker, one line per call:
+//! Fired-on marker, one line per call (two when a rule is violated):
 //! `[check] rules=<R> checked=<C> violations=<V> (forbid_edge=<F> no_cycle=<N>) unchecked=<U> errors=<E>`,
 //! where `V` counts [`Violation`] records (a forbid_edge rule makes at most
-//! one, a no_cycle rule one per cycle) and `F` / `N` split them by kind.
+//! one, a no_cycle rule one per cycle) and `F` / `N` split them by kind; when
+//! `V` > 0 a second line
+//! `[check] tiers fact=<F> derived=<D> heuristic=<H>` splits them by tier
+//! (CC.3) — grep `^\[check\] tiers`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -62,6 +89,7 @@ use crate::answers::{Locator, in_scope, project_roots};
 use crate::cycles::module_import_graph;
 use crate::external::declared::declared_constraints;
 use crate::profile::CODE_PROFILE;
+use crate::why::tier_of;
 
 /// [`Violation::rule_kind`] of a forbidden-edge rule.
 pub const FORBID_EDGE: &str = "forbid_edge";
@@ -70,10 +98,14 @@ pub const NO_CYCLE: &str = "no_cycle";
 /// [`Violation::severity`]: an explicit human rule is broken (an observed
 /// convention that is broken is a DIVERGENCE, LE.7's business).
 pub const VIOLATION: &str = "VIOLATION";
-/// [`Violation::tier`]: the evidence is the observed edges themselves.
+/// A tier (module doc "Tiers"): read at a site the source spells out.
 pub const FACT: &str = "fact";
-/// [`Violation::tier`]: every hop is an observed edge; the cycle is computed.
+/// A tier: paired or inferred by the build (a resolver, a pass, a graph
+/// binding below Strong confidence), or a computed cycle.
 pub const DERIVED: &str = "derived";
+/// A tier: declared by a person or a model, co-change in git, or a name-only
+/// guess.
+pub const HEURISTIC: &str = "heuristic";
 /// Evidence rows kept per [`Violation`]; `count` keeps the full number.
 pub const MAX_EVIDENCE: usize = 100;
 
@@ -93,6 +125,12 @@ pub struct ViolationEdge {
     /// The `<stage>:<name>` that put the edge in the graph (`graph:calls`),
     /// when the edge carries EVIDENCE.
     pub emitter: Option<String>,
+    /// [`FACT`] | [`DERIVED`] | [`HEURISTIC`]: the tier `why` gives this
+    /// edge (module doc "Tiers").
+    pub tier: &'static str,
+    /// Why the tier is not the emitter stage's plain one, or where an overlay
+    /// edge was declared; `why`'s row note.
+    pub note: Option<String>,
 }
 
 /// One broken rule: all of a forbid_edge rule's edges, or one cycle of a
@@ -107,7 +145,8 @@ pub struct Violation {
     pub decl: Option<String>,
     /// Always [`VIOLATION`].
     pub severity: &'static str,
-    /// [`FACT`] (forbid_edge) or [`DERIVED`] (no_cycle).
+    /// forbid_edge: its strongest evidence row's tier. no_cycle: [`DERIVED`],
+    /// or [`HEURISTIC`] when a hop of the witness is (module doc "Tiers").
     pub tier: &'static str,
     /// forbid_edge: the forbidden edges, all of them (the evidence lists at
     /// most [`MAX_EVIDENCE`]). no_cycle: the nodes (modules, for an import
@@ -148,7 +187,13 @@ pub fn default_forbid_categories() -> Vec<EdgeCategoryId> {
 
 /// Evaluate every rule [`declared_constraints`] reads from `merged`.
 pub fn check(merged: &MergedGraph) -> CheckReport {
-    let rules = declared_constraints(merged);
+    check_rules(merged, &declared_constraints(merged))
+}
+
+/// Evaluate `rules` (as [`declared_constraints`] returns them: anchor node,
+/// rule) against `merged`, whichever graph they were read from: a review
+/// checks the working tree's rules against the base graph. Emits the marker.
+pub(crate) fn check_rules(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule)]) -> CheckReport {
     let mut report = CheckReport {
         rules: rules.len(),
         checked: 0,
@@ -158,7 +203,7 @@ pub fn check(merged: &MergedGraph) -> CheckReport {
     };
     if !rules.is_empty() {
         let mut ctx = Ctx::new(merged);
-        for (_, rule) in &rules {
+        for (_, rule) in rules {
             match evaluate(&mut ctx, rule) {
                 Outcome::Unchecked => report.unchecked.push(rule.id.clone()),
                 Outcome::Error(msg) => report.errors.push((rule.id.clone(), msg)),
@@ -188,7 +233,26 @@ pub fn check(merged: &MergedGraph) -> CheckReport {
         report.unchecked.len(),
         report.errors.len(),
     );
+    if !report.violations.is_empty() {
+        let tier = |t: &str| report.violations.iter().filter(|v| v.tier == t).count();
+        eprintln!(
+            "[check] tiers fact={} derived={} heuristic={}",
+            tier(FACT),
+            tier(DERIVED),
+            tier(HEURISTIC),
+        );
+    }
     report
+}
+
+/// Sort rank of a tier, strongest first; an unknown spelling sorts last.
+fn tier_rank(t: &str) -> u8 {
+    match t {
+        FACT => 0,
+        DERIVED => 1,
+        HEURISTIC => 2,
+        _ => 3,
+    }
 }
 
 enum Outcome {
@@ -334,13 +398,15 @@ impl<'a> Ctx<'a> {
     }
 
     /// One located evidence row: at the edge's EVIDENCE site when it names a
-    /// file, else at the `from` node.
+    /// file, else at the `from` node. `(tier, note)` is `why::tier_of` over
+    /// the edge, computed by the caller that holds it.
     fn row(
         &mut self,
         from: NodeId,
         category: EdgeCategoryId,
         to: NodeId,
         ev: Option<&Evidence>,
+        (tier, note): (&'static str, Option<String>),
     ) -> ViolationEdge {
         let f = self.loc.locate(from);
         let site = ev.and_then(|e| {
@@ -356,6 +422,8 @@ impl<'a> Ctx<'a> {
             file,
             line,
             emitter: ev.map(|e| e.emitter.clone()),
+            tier,
+            note,
         }
     }
 }
@@ -414,14 +482,17 @@ fn forbid_edge(
         if !seen.insert(key) {
             continue;
         }
-        rows.push(ctx.row(e.from, e.category, e.to, ev.as_ref()));
+        let tier = tier_of(ev.as_ref(), e);
+        rows.push(ctx.row(e.from, e.category, e.to, ev.as_ref(), tier));
     }
     if rows.is_empty() {
         return Ok(None);
     }
-    // Located rows first, by (file, line, category); qnames break the rest.
+    // Strongest tier first (so the MAX_EVIDENCE cut keeps the facts), then
+    // located rows by (file, line, category); qnames break the rest.
     rows.sort_by(|a, b| {
         (
+            tier_rank(a.tier),
             a.file.is_none(),
             &a.file,
             a.line.is_none(),
@@ -429,6 +500,7 @@ fn forbid_edge(
             a.category,
         )
             .cmp(&(
+                tier_rank(b.tier),
                 b.file.is_none(),
                 &b.file,
                 b.line.is_none(),
@@ -438,8 +510,10 @@ fn forbid_edge(
             .then_with(|| a.from_qname.cmp(&b.from_qname))
             .then_with(|| a.to_qname.cmp(&b.to_qname))
     });
+    // Sorted tier-first: the first row holds the strongest tier.
+    let tier = rows.first().map_or(FACT, |r| r.tier);
     let count = rows.len();
-    Ok(Some(violation(rule, FORBID_EDGE, FACT, count, rows)))
+    Ok(Some(violation(rule, FORBID_EDGE, tier, count, rows)))
 }
 
 // ============================================================================
@@ -462,8 +536,9 @@ impl GraphSource for Sub {
     }
 }
 
-/// Where a hop of a sub-graph edge was asserted.
-type Sites = BTreeMap<(u64, u32, u64), Option<Evidence>>;
+/// Where a hop of a sub-graph edge was asserted, and its `why` tier and note,
+/// computed from the edge the hop stands for when it is recorded.
+type Sites = BTreeMap<(u64, u32, u64), (Option<Evidence>, &'static str, Option<String>)>;
 
 fn no_cycle(
     ctx: &mut Ctx<'_>,
@@ -499,9 +574,15 @@ fn no_cycle(
             add_node(&mut sub, e.to);
             sub.edges
                 .push(Edge::new(e.from, e.to, e.category, e.confidence));
+            // The lifted edge carries the first import's evidence and
+            // confidence, not its ORIGIN cell (module doc "Tiers").
             sites
                 .entry((e.from.0, e.category.0, e.to.0))
-                .or_insert_with(|| imports.evidence(e.from, e.to).cloned());
+                .or_insert_with(|| {
+                    let ev = imports.evidence(e.from, e.to);
+                    let (tier, note) = tier_of(ev, e);
+                    (ev.cloned(), tier, note)
+                });
         }
     } else {
         for e in ctx.merged.all_edges() {
@@ -514,7 +595,11 @@ fn no_cycle(
                 .push(Edge::new(e.from, e.to, e.category, e.confidence));
             sites
                 .entry((e.from.0, e.category.0, e.to.0))
-                .or_insert_with(|| Evidence::of(e));
+                .or_insert_with(|| {
+                    let ev = Evidence::of(e);
+                    let (tier, note) = tier_of(ev.as_ref(), e);
+                    (ev, tier, note)
+                });
         }
     }
 
@@ -532,14 +617,22 @@ fn no_cycle(
         let evidence: Vec<ViolationEdge> = witness_cycle(&adj, &comp, start)
             .into_iter()
             .map(|(f, c, t)| {
-                let ev = sites.get(&(f.0, c.0, t.0)).and_then(Option::as_ref);
-                ctx.row(f, c, t, ev)
+                // Every witness hop is a sub edge, so it has a site; the
+                // fallback only keeps a missing one honest.
+                let (ev, tier) = match sites.get(&(f.0, c.0, t.0)) {
+                    Some((ev, tier, note)) => (ev.as_ref(), (*tier, note.clone())),
+                    None => (None, (DERIVED, Some("no evidence recorded".to_string()))),
+                };
+                ctx.row(f, c, t, ev, tier)
             })
             .collect();
-        cycles.push((
-            first,
-            violation(rule, NO_CYCLE, DERIVED, comp.len(), evidence),
-        ));
+        // Every hop is needed for the cycle: its weakest hop bounds it.
+        let tier = if evidence.iter().any(|e| e.tier == HEURISTIC) {
+            HEURISTIC
+        } else {
+            DERIVED
+        };
+        cycles.push((first, violation(rule, NO_CYCLE, tier, comp.len(), evidence)));
     }
     cycles.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(cycles.into_iter().map(|(_, v)| v).collect())
@@ -582,6 +675,13 @@ mod tests {
         );
         let one = categories_of(&["NOPE".into()]).expect_err("unknown name");
         assert!(one.contains("category `NOPE`"), "{one}");
+    }
+
+    #[test]
+    fn tier_rank_orders_strongest_first() {
+        let mut t = vec![HEURISTIC, "other", FACT, DERIVED];
+        t.sort_by_key(|x| tier_rank(x));
+        assert_eq!(t, [FACT, DERIVED, HEURISTIC, "other"]);
     }
 
     #[test]

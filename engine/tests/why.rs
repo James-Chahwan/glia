@@ -428,3 +428,63 @@ fn two_call_sites_are_two_rows() {
         .collect();
     assert_eq!(lines, [Some(6), Some(7)], "{a:?}");
 }
+
+/// CC.3: a graph-stage edge the graph crate INFERRED below Strong confidence
+/// is derived, not fact. Go implicit interface satisfaction is inferred from
+/// the method-name set (`graph:iface` rule `method_set`, Medium); the
+/// method-level pair it rests on is bound by name and signature at Strong
+/// (`same_name`) and stays a fact. The rule reads confidence, never a list
+/// of rule names.
+#[test]
+fn medium_graph_edge_is_derived() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures/go-implicit-iface");
+    let files: Vec<(String, String)> = ["go.mod", "store.go", "mem.go"]
+        .iter()
+        .map(|f| {
+            let src = std::fs::read_to_string(fixture.join(f)).expect("read fixture file");
+            ((*f).to_string(), src)
+        })
+        .collect();
+    let refs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(f, s)| (f.as_str(), s.as_str()))
+        .collect();
+    let (_tmp, m) = build(&refs);
+
+    let a = why(&m, "mem::MemStore", "store::Store", None);
+    assert_eq!(a.edges.len(), 1, "{a:?}");
+    let r = &a.edges[0];
+    assert_eq!(
+        (
+            r.category,
+            r.tier,
+            r.confidence,
+            r.emitter.as_deref(),
+            r.rule.as_deref()
+        ),
+        (
+            "IMPLEMENTS",
+            "derived",
+            "medium",
+            Some("graph:iface"),
+            Some("method_set")
+        ),
+        "{r:?}"
+    );
+    let note = r.note.as_deref().unwrap_or("");
+    assert!(
+        note.contains("inferred binding (method_set, medium confidence)"),
+        "{r:?}"
+    );
+
+    let m_get = why(&m, "mem::MemStore::Get", "store::Store::Get", None);
+    assert_eq!(m_get.edges.len(), 1, "{m_get:?}");
+    let r = &m_get.edges[0];
+    assert_eq!(
+        (r.category, r.tier, r.confidence, r.rule.as_deref()),
+        ("IMPLEMENTS", "fact", "strong", Some("same_name")),
+        "{r:?}"
+    );
+    assert!(r.note.is_none(), "{r:?}");
+}

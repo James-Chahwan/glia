@@ -2,6 +2,8 @@
 //! declared `[[constraint]]` rule evaluated, one section per violated rule
 //! with its located evidence. Exit 0 clean, 1 on a violation, 2 on a build
 //! failure or a rule that could not be evaluated. `--json` is the report.
+//! Each evidence row carries the tier `glia why` gives that edge (CC.3), its
+//! note in parentheses; the exit code never reads the tier.
 
 use glia_engine::check::{
     CheckReport, FORBID_EDGE, MAX_EVIDENCE, Violation, ViolationEdge, check,
@@ -42,18 +44,27 @@ fn at(e: &ViolationEdge) -> String {
     }
 }
 
+/// The row's tier, with its note in parentheses when it has one.
+fn tier(e: &ViolationEdge) -> String {
+    match e.note.as_deref() {
+        Some(n) => format!("{} ({n})", e.tier),
+        None => e.tier.to_string(),
+    }
+}
+
 fn print_edges(rows: &[ViolationEdge]) {
-    println!("| # | category | from | to | at | emitter |");
-    println!("|--:|---|---|---|---|---|");
+    println!("| # | category | from | to | at | emitter | tier |");
+    println!("|--:|---|---|---|---|---|---|");
     for (i, e) in rows.iter().enumerate() {
         println!(
-            "| {} | {} | `{}` | `{}` | {} | {} |",
+            "| {} | {} | `{}` | `{}` | {} | {} | {} |",
             i + 1,
             e.category,
             e.from_qname,
             e.to_qname,
             at(e),
             e.emitter.as_deref().unwrap_or("—"),
+            tier(e),
         );
     }
     println!();

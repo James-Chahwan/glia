@@ -2,8 +2,9 @@
 //! contract. 1 when a declared rule is violated, 0 when every rule holds (or
 //! none is declared), 2 when a rule cannot be evaluated.
 //!
-//! The `[check]` stderr line is the LE.8 fired_on marker; asserting it here
-//! makes its counts a tested contract, and relaying it lets
+//! The `[check]` stderr line is the LE.8 fired_on marker, followed on a
+//! violation by CC.3's `[check] tiers ..` line; asserting them here makes
+//! their counts a tested contract, and relaying them lets
 //! `cargo test -p glia-cli --test check_cli -- --nocapture 2>&1 | grep '^\[check\]'`
 //! show it.
 
@@ -123,7 +124,8 @@ fn violations_exit_1_with_located_tables() {
     assert_eq!(
         markers,
         vec![
-            "[check] rules=3 checked=2 violations=2 (forbid_edge=1 no_cycle=1) unchecked=1 errors=0"
+            "[check] rules=3 checked=2 violations=2 (forbid_edge=1 no_cycle=1) unchecked=1 errors=0",
+            "[check] tiers fact=1 derived=1 heuristic=0",
         ]
     );
     assert!(
@@ -133,14 +135,18 @@ fn violations_exit_1_with_located_tables() {
         "{stdout}"
     );
     assert!(
+        stdout.contains("| # | category | from | to | at | emitter | tier |"),
+        "{stdout}"
+    );
+    assert!(
         stdout.contains(
-            "| 1 | IMPORTS | `web::app` | `services::api::internal` | web/app.py:1 | graph:imports |"
+            "| 1 | IMPORTS | `web::app` | `services::api::internal` | web/app.py:1 | graph:imports | fact |"
         ),
         "{stdout}"
     );
     assert!(
         stdout.contains(
-            "| 2 | CALLS | `web::app::pay` | `services::api::internal::charge` | web/app.py:5 | graph:calls |"
+            "| 2 | CALLS | `web::app::pay` | `services::api::internal::charge` | web/app.py:5 | graph:calls | fact |"
         ),
         "{stdout}"
     );
@@ -170,6 +176,8 @@ fn violations_exit_1_with_located_tables() {
     assert_eq!(v["violations"][1]["rule_id"], "web-no-api-internals");
     assert_eq!(v["violations"][1]["count"], 2);
     assert_eq!(v["violations"][1]["evidence"][1]["line"], 5);
+    assert_eq!(v["violations"][1]["evidence"][1]["tier"], "fact");
+    assert_eq!(v["violations"][0]["tier"], "derived");
 }
 
 #[test]

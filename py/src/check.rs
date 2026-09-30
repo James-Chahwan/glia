@@ -27,12 +27,18 @@ impl PyGraph {
     /// evaluated (an unknown edge category, a scope no node sits in).
     /// `violations`, sorted by rule id: `{rule_id, rule_kind, decl, severity,
     /// tier, count, evidence}` — a forbid_edge rule's direct edges from scope
-    /// `from` into scope `to` (tier `fact`, `count` every edge, evidence at
-    /// most 100), or one no_cycle cycle (tier `derived`, `count` the nodes in
-    /// its component, evidence a shortest cycle). Evidence rows are
-    /// `{from_qname, to_qname, category, file, line, emitter}` with 1-based
-    /// lines. A node is in a scope only when its file sits under that path
-    /// (or it is a PROJECT there): a node with no file never matches.
+    /// `from` into scope `to` (`count` every edge, evidence at most 100,
+    /// strongest tier first), or one no_cycle cycle (`count` the nodes in its
+    /// component, evidence a shortest cycle). Evidence rows are
+    /// `{from_qname, to_qname, category, file, line, emitter, tier, note}`
+    /// with 1-based lines; `tier` is the one `why()` gives that edge (`fact`
+    /// read at a site, `derived` paired by a resolver or pass or inferred
+    /// below strong confidence, `heuristic` declared, co-changed or guessed
+    /// by name) and `note` says why when it is not the stage's plain tier.
+    /// A forbid_edge violation's `tier` is its strongest row's; a no_cycle
+    /// violation is `derived` unless a hop is `heuristic`. A node is in a
+    /// scope only when its file sits under that path (or it is a PROJECT
+    /// there): a node with no file never matches.
     fn check(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         to_py(py, check_json(&self.merged))
     }
@@ -89,5 +95,12 @@ mod tests {
         assert_eq!(row["decl"], ".glia/overlay.toml:3", "{json}");
         assert_eq!(row["evidence"].as_array().map(Vec::len), Some(2), "{json}");
         assert_eq!(row["evidence"][0]["line"], 1, "{json}");
+        // CC.3: every row carries why's tier and note; two observed imports
+        // are facts, and the computed cycle is derived.
+        assert_eq!(row["tier"], "derived", "{json}");
+        for hop in row["evidence"].as_array().into_iter().flatten() {
+            assert_eq!(hop["tier"], "fact", "{json}");
+            assert!(hop["note"].is_null(), "{json}");
+        }
     }
 }
