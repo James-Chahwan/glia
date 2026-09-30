@@ -15,8 +15,16 @@
 //! ```text
 //! bash scripts/check-engram-export.sh
 //! engram-export/target/debug/glia-export-engram <repo> --out <file> \
-//!     [--since <prior>] [--no-persist] [--include-noise] [--exclude <glob>]...
+//!     [--since <prior>] [--no-persist] [--include-noise] \
+//!     [--exclude <glob>]... [--exclude-path <glob>]...
 //! ```
+//!
+//! `--exclude` drops nodes by KEY (the qname); `--exclude-path` drops every
+//! node whose POSITION file (repo-relative, `/`-separated) matches, and leaves
+//! those files out of the export's file table - the way to drop a directory
+//! tree whose code is keyed by namespace, not path (C#, Java), without
+//! removing it from glia's graph. In both, `*` matches any run of characters,
+//! `/` included.
 //!
 //! The build is the persisted incremental one by default: the repo's parse
 //! cache (`<repo>/.glia/graph/parse_cache.bin`, beside the layout; the file
@@ -88,6 +96,12 @@ struct Args {
     /// Drop nodes whose key matches this glob (`*` wildcard). Repeatable.
     #[arg(long = "exclude")]
     exclude: Vec<String>,
+    /// Drop nodes whose POSITION file (repo-relative, `/`-separated) matches
+    /// this glob, and leave those files out of the file table (`*` matches
+    /// any run, `/` included: `bench/*` covers every file under bench/).
+    /// Repeatable.
+    #[arg(long = "exclude-path")]
+    exclude_path: Vec<String>,
 }
 
 fn main() {
@@ -218,6 +232,7 @@ fn run(args: &Args) -> i32 {
     let opts = ExportOptions {
         include_noise: args.include_noise,
         exclude: args.exclude.clone(),
+        exclude_paths: args.exclude_path.clone(),
         file_identity,
         prior_files: prior.as_ref().map(|p| p.gmap.files.clone()),
     };
@@ -362,6 +377,15 @@ fn run(args: &Args) -> i32 {
             stats.dropped_noise,
             if args.include_noise { " (kept: --include-noise)" } else { "" },
             stats.dropped_excluded,
+        );
+    }
+    // The CG.2b path-exclusion marker, printed whenever the flag was given
+    // (a zero is a real zero: no positioned node sat under the patterns).
+    if !args.exclude_path.is_empty() {
+        eprintln!(
+            "[engram-export] exclude-path: dropped {} node(s) positioned under {} pattern(s)",
+            stats.dropped_excluded_path,
+            args.exclude_path.len(),
         );
     }
     if stats.unreadable_files > 0 {

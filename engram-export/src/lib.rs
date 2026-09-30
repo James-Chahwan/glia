@@ -144,6 +144,9 @@ pub struct ExportStats {
     pub dropped_noise: usize,
     /// Nodes dropped by a caller `--exclude <glob>` pattern. (glia-v2 G15)
     pub dropped_excluded: usize,
+    /// Nodes dropped by a caller `--exclude-path <glob>` pattern: their
+    /// POSITION file matched, and no `--exclude` key glob did. (CG.2b)
+    pub dropped_excluded_path: usize,
     /// Emitted Symbols documented by a natspec DOC_TAGS cell, facts or not.
     /// (LG.12)
     pub natspec_symbols: usize,
@@ -172,6 +175,14 @@ pub struct ExportOptions {
     pub include_noise: bool,
     /// Glob patterns (matched against node keys); any match drops the node.
     pub exclude: Vec<String>,
+    /// Glob patterns matched against a node's POSITION `file` (repo-relative,
+    /// `/`-separated; the first parseable POSITION, as [`position_paths`]
+    /// reads it). Any match drops the node, and a matched file gets no id, is
+    /// never read, and is absent from the file table. `*` matches any run of
+    /// characters INCLUDING `/`, so `bench/*` also drops `bench/lens/src/..`.
+    /// A node with no POSITION is never path-excluded; the key globs in
+    /// [`exclude`](Self::exclude) run first. (CG.2b)
+    pub exclude_paths: Vec<String>,
     /// POSITION path -> file token for the `identity_hint`s: the token a
     /// `--since` chain carried for the file (LB.6 `carry_file_tokens` over
     /// [`prior_tokens`]). A path it does not name is its own token, so the
@@ -212,20 +223,36 @@ fn origin_provenance(cells: &[Cell]) -> Option<String> {
 enum Filtered {
     /// A caller `--exclude` glob matched its key.
     Excluded,
+    /// A caller `--exclude-path` glob matched its POSITION file. (CG.2b)
+    ExcludedPath,
     /// Its ORIGIN provenance is in [`DROP_PROVENANCE`] and noise is not kept.
     Noise,
 }
 
 /// The export filters, in order: caller exclude globs first (explicit
-/// intent), then the default noise drop.
-fn filtered(qname: &str, provenance: Option<&str>, opts: &ExportOptions) -> Option<Filtered> {
+/// intent) - the key globs, then the path globs over the node's POSITION
+/// `file` - then the default noise drop.
+fn filtered(
+    qname: &str,
+    provenance: Option<&str>,
+    file: Option<&str>,
+    opts: &ExportOptions,
+) -> Option<Filtered> {
     if opts.exclude.iter().any(|p| glob_match(p, qname)) {
         return Some(Filtered::Excluded);
+    }
+    if file.is_some_and(|f| path_excluded(f, opts)) {
+        return Some(Filtered::ExcludedPath);
     }
     if !opts.include_noise && provenance.is_some_and(|p| DROP_PROVENANCE.contains(&p)) {
         return Some(Filtered::Noise);
     }
     None
+}
+
+/// Whether a caller `--exclude-path` glob matches the POSITION `file`.
+fn path_excluded(file: &str, opts: &ExportOptions) -> bool {
+    opts.exclude_paths.iter().any(|p| glob_match(p, file))
 }
 
 /// `(has a POSITION, is not a MODULE, has a DOC cell, lowest NodeId)`.
@@ -247,8 +274,10 @@ fn key_rank(n: &Node, kind: Option<NodeKindId>) -> KeyRank {
     )
 }
 
-/// Minimal glob match supporting `*` (any run of chars, including none). Used
-/// for `--exclude` patterns against node keys; avoids pulling a glob crate.
+/// Minimal glob match supporting `*` (any run of chars, including none, `/`
+/// and `::` too). Used for `--exclude` patterns against node keys and
+/// `--exclude-path` patterns against POSITION files; avoids pulling a glob
+/// crate.
 fn glob_match(pattern: &str, text: &str) -> bool {
     // Split on '*'; each literal segment must appear in order. A leading/
     // trailing empty segment (from a `*` at the edge) anchors loosely.
@@ -813,7 +842,12 @@ pub fn build_gmap(
     let mut stats = ExportStats::default();
 
     // Pass 1 — intern distinct POSITION file paths to stable, 1-based ids.
-    let paths = position_paths(merged);
+    // A path an `--exclude-path` glob matches is left out: every node it
+    // positions is dropped below, so it is never read and gets no id.
+    let mut paths = position_paths(merged);
+    if !opts.exclude_paths.is_empty() {
+        paths.retain(|p| !path_excluded(p, opts));
+    }
     let id_to_path = intern_files(&paths, opts.prior_files.as_ref());
     let file_id: HashMap<&str, FileId> =
         id_to_path.iter().map(|(id, p)| (p.as_str(), *id)).collect();
@@ -854,7 +888,16 @@ pub fn build_gmap(
             let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
                 continue;
             };
-            if filtered(qname, origin_provenance(&n.cells).as_deref(), opts).is_some() {
+            // The POSITION file only matters to a path glob: skip its parse
+            // when none was given.
+            let file = if opts.exclude_paths.is_empty() {
+                None
+            } else {
+                position_of(&n.cells).map(|(f, _, _)| f)
+            };
+            if filtered(qname, origin_provenance(&n.cells).as_deref(), file.as_deref(), opts)
+                .is_some()
+            {
                 continue;
             }
             let rank = (key_rank(n, g.nav.kind_by_id.get(&n.id).copied()), Reverse((gi, ni)));
@@ -880,15 +923,21 @@ pub fn build_gmap(
                 stats.skipped_nodes += 1;
                 continue;
             };
-            // Caller exclude globs win first — explicit intent. Then the
-            // default drop of substrate-only synthetic pseudo-nodes (npm deps,
-            // event names, generated stubs) unless the caller asked to keep
-            // them. Region anchors are NOT in the drop set, so the spatial map
-            // survives.
+            // Caller exclude globs win first — explicit intent: by key, then
+            // by POSITION file. Then the default drop of substrate-only
+            // synthetic pseudo-nodes (npm deps, event names, generated stubs)
+            // unless the caller asked to keep them. Region anchors are NOT in
+            // the drop set, so the spatial map survives.
             let provenance = origin_provenance(&n.cells);
-            match filtered(qname, provenance.as_deref(), opts) {
+            let pos = position_of(&n.cells);
+            let file = pos.as_ref().map(|(f, _, _)| f.as_str());
+            match filtered(qname, provenance.as_deref(), file, opts) {
                 Some(Filtered::Excluded) => {
                     stats.dropped_excluded += 1;
+                    continue;
+                }
+                Some(Filtered::ExcludedPath) => {
+                    stats.dropped_excluded_path += 1;
                     continue;
                 }
                 Some(Filtered::Noise) => {
@@ -909,7 +958,6 @@ pub fn build_gmap(
                 .unwrap_or_else(|| qname.rsplit("::").next().unwrap_or(qname).to_string());
             // One SpanRef per node, for either content kind: bytes from the
             // read file (0..0 when unreadable), lines from the rows (v6).
-            let pos = position_of(&n.cells);
             let span = match &pos {
                 Some((file, sr, er)) => {
                     let fid = file_id.get(file.as_str()).copied().unwrap_or(0);
@@ -1559,6 +1607,82 @@ mod tests {
         assert!(!keys.contains(&"region:www"));
         assert!(keys.contains(&"package:npm:react")); // include_noise kept the dep
         assert_eq!(stats.dropped_excluded, 1);
+    }
+
+    /// `--exclude-path` (CG.2b): a node positioned under the glob is dropped
+    /// whatever its key (C# code is keyed by namespace, not by path), its
+    /// edges go with it, and its file is neither read nor interned.
+    #[test]
+    fn exclude_path_drops_by_position_file() {
+        let mut merged = located_graph(&[
+            (
+                1,
+                "Shop::Controllers::OrdersController::GetOrder",
+                node_kind::METHOD,
+                "bench/substrate-gap/fixtures/cs/server/OrdersController.cs",
+                3,
+            ),
+            (2, "app::orders::get_order", node_kind::FUNCTION, "app/orders.py", 0),
+        ]);
+        merged.cross_edges.push(glia_core::Edge {
+            from: NodeId(2),
+            to: NodeId(1),
+            category: ec::CALLS,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
+        // A root holding neither file: every file build_gmap reads is unreadable.
+        let root = std::env::temp_dir().join(format!("glia_cg2b_no_root_{}", std::process::id()));
+        let opts = ExportOptions {
+            exclude_paths: vec!["bench/substrate-gap/fixtures/*".to_string()],
+            ..Default::default()
+        };
+        let (gmap, files, stats) = build_gmap(&merged, &root, &opts);
+        let keys: Vec<&str> = gmap.nodes.iter().map(|n| n.key.as_str()).collect();
+        assert_eq!(keys, ["app::orders::get_order"]);
+        assert_eq!(stats.dropped_excluded_path, 1);
+        assert_eq!(stats.dropped_excluded, 0);
+        assert_eq!(files, BTreeMap::from([(1, "app/orders.py".to_string())]));
+        assert_eq!(gmap.files, files);
+        assert_eq!(stats.files, 1);
+        // Only the kept file was read: the excluded one is not even tried.
+        assert_eq!(stats.unreadable_files, 1);
+        assert!(gmap.edges.is_empty());
+        assert_eq!(stats.skipped_edges, 1);
+
+        // Without the flag both nodes, both files and the edge export.
+        let (gmap, files, stats) = build_gmap(&merged, &root, &ExportOptions::default());
+        assert_eq!(gmap.nodes.len(), 2);
+        assert_eq!(files.len(), 2);
+        assert_eq!(gmap.edges.len(), 1);
+        assert_eq!(stats.dropped_excluded_path, 0);
+    }
+
+    /// A node with no POSITION is never path-excluded, even by `*`; the key
+    /// globs run first, so a node both rules match counts as `--exclude`.
+    #[test]
+    fn exclude_path_leaves_unpositioned_and_key_rules_alone() {
+        let merged = three_node_graph();
+        let root = std::env::temp_dir();
+        let opts = ExportOptions { exclude_paths: vec!["*".to_string()], ..Default::default() };
+        let (gmap, files, stats) = build_gmap(&merged, &root, &opts);
+        let keys: Vec<&str> = gmap.nodes.iter().map(|n| n.key.as_str()).collect();
+        assert_eq!(keys, ["app::login", "region:www"]);
+        assert_eq!(stats.dropped_excluded_path, 0);
+        assert!(files.is_empty());
+
+        let opts = ExportOptions { exclude: vec!["region:*".to_string()], ..opts };
+        let (gmap, _, stats) = build_gmap(&merged, &root, &opts);
+        let keys: Vec<&str> = gmap.nodes.iter().map(|n| n.key.as_str()).collect();
+        assert_eq!(keys, ["app::login"]);
+        assert_eq!(stats.dropped_excluded, 1);
+        assert_eq!(stats.dropped_excluded_path, 0);
+
+        // Positioned, and matched by both a key and a path glob: key first.
+        let located = located_graph(&[(1, "region:www", node_kind::MODULE, "www/index.html", 0)]);
+        let (gmap, _, stats) = build_gmap(&located, &root, &opts);
+        assert!(gmap.nodes.is_empty());
+        assert_eq!((stats.dropped_excluded, stats.dropped_excluded_path), (1, 0));
     }
 
     /// One graph of `(id, qname, kind, POSITION file, start row)` rows.
