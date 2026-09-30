@@ -21,10 +21,28 @@
 //! delta ([`GraphDelta`]), each stanza's marginal effect and the target gaps
 //! it closes ([`StanzaTrial`]), and a keep / review / drop verdict
 //! ([`TryReport`]). It writes nothing but the parse cache.
+//!
+//! `propose` (CE.3d): [`propose`] is the model step's work list - every gap
+//! an overlay could close (`glia gaps` rows, ids included), each with the
+//! source lines around it ([`Snippet`]) read from the one root that holds
+//! its file, and a [`Proposal::guide`] to the docs/overlay.md section per
+//! `suggest` value. It writes nothing.
+//!
+//! `accept` (CE.3d): [`accept`] is the only writer of `.glia/overlay.toml`:
+//! it merges a candidate's chosen stanzas, removes orphaned / redundant rules
+//! by gap id (by their identity, never a line), refuses any text the loader
+//! would not load as validated, writes atomically and returns the diff
+//! ([`AcceptSummary`]).
 
+mod accept;
+mod propose;
 mod trial;
 mod writer;
 
+pub use accept::{AcceptOptions, AcceptSummary, accept};
+pub use propose::{
+    DEFAULT_SNIPPET_LINES, DEFAULT_TOP_K, Proposal, ProposeOptions, ProposedGap, Snippet, propose,
+};
 pub use trial::{GraphDelta, StanzaTrial, TryOptions, TryReport, try_candidate};
 pub use writer::{
     Candidate, Location, Merged, StanzaRef, merge, parse_candidate, report_candidate, without,

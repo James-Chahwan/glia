@@ -15,6 +15,14 @@
 //! CE.3c's baseline (HEAD 1da2539): the trial tests do not compile -
 //! `glia_engine::overlay_loop` has no `try_candidate`; `gaps::overlay_delta`
 //! judges the whole file only, so no stanza's effect is attributed.
+//!
+//! Propose and accept (CE.3d): `propose` is the gap work list with each
+//! row's source snippet, `accept` the only writer of `.glia/overlay.toml`
+//! (chosen candidate stanzas in, orphaned / redundant rules out by gap id,
+//! validated by the loader, written atomically). CE.3d's baseline (HEAD
+//! 7425636): these tests do not compile - `glia_engine::overlay_loop` has no
+//! `propose` / `accept`, and `glia overlay propose /tmp` is
+//! `error: unrecognized subcommand 'overlay'`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,14 +30,18 @@ use std::process::Command;
 
 use glia_code_domain::glia_config::{self, LoadedConfig};
 use glia_code_domain::{edge_category, node_kind};
-use glia_engine::gaps::{DROP, GapsOptions, KEEP, UNRESOLVED_ENDPOINT, gaps_report};
+use glia_engine::gaps::{
+    DEAD_SYMBOL, DROP, GapRow, GapsOptions, GapsReport, KEEP, ORPHANED_RULE, REDUNDANT_RULE,
+    UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT, WRAPPED_SINK, gaps_report,
+};
 use glia_engine::overlay_loop::{
-    Location, StanzaRef, StanzaTrial, TryOptions, TryReport, merge, parse_candidate,
-    report_candidate, try_candidate, without,
+    AcceptOptions, Location, Proposal, ProposeOptions, StanzaRef, StanzaTrial, TryOptions,
+    TryReport, accept, merge, parse_candidate, propose, report_candidate, try_candidate, without,
 };
 use glia_engine::persist::{default_layout_dir, persist_result};
 use glia_engine::{
-    BuildOptions, GenerateResult, generate_many_opts, generate_one_incremental, generate_one_opts,
+    BuildOptions, GenerateResult, generate_many_opts, generate_one, generate_one_incremental,
+    generate_one_opts,
 };
 
 const CHAT_REPO_GO: &str = include_str!(
@@ -813,5 +825,571 @@ fn deterministic() {
     let first = run();
     assert_eq!(first, run());
     assert!(first.contains("\"verdict\":\"keep\""), "{first}");
+    std::fs::remove_dir_all(root).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Propose and accept (CE.3d)
+// ---------------------------------------------------------------------------
+
+/// Probe r1's web side: a hand-rolled `request()` whose `fetch(path)` is an
+/// `<unresolved>` sink (line 2).
+const R1_CLIENT_TS: &str = "export function request(method: string, path: string) {\n  return fetch(path, { method });\n}\n\nexport async function loadUsers() {\n  return request('GET', '/users');\n}\n";
+/// Probe r1's api side: two flask routes nothing in the build pairs to.
+const R1_API_PY: &str = "from flask import Flask\n\napp = Flask(__name__)\n\n\n@app.route(\"/users\", methods=[\"GET\"])\ndef list_users():\n    return []\n\n\n@app.route(\"/orders\", methods=[\"GET\"])\ndef list_orders():\n    return []\n";
+
+fn write_file(root: &Path, rel: &str, body: &str) {
+    let path = root.join(rel);
+    std::fs::create_dir_all(path.parent().expect("a parent dir")).expect("mkdir");
+    std::fs::write(path, body).expect("write");
+}
+
+/// Probe r1 as two repos under `root`: `[web, api]`.
+fn r1_pair(root: &Path) -> Vec<String> {
+    write_file(root, "web/src/client.ts", R1_CLIENT_TS);
+    write_file(root, "api/app.py", R1_API_PY);
+    ["web", "api"]
+        .iter()
+        .map(|d| root.join(d).to_str().expect("utf-8").to_string())
+        .collect()
+}
+
+fn proposed<'p>(p: &'p Proposal, category: &str) -> Vec<&'p GapRow> {
+    p.rows
+        .iter()
+        .filter(|r| r.gap.category == category)
+        .map(|r| &r.gap)
+        .collect()
+}
+
+#[test]
+fn propose_lists_rows_with_snippets() {
+    let root = tmp("propose");
+    let repos = r1_pair(&root);
+    let full = propose(&repos, &ProposeOptions::default()).expect("propose");
+
+    assert!(!full.rows.is_empty());
+    for r in &full.rows {
+        assert!(
+            r.gap.id.starts_with("gap:") && r.gap.id.len() == 20,
+            "{r:#?}"
+        );
+        assert_ne!(r.gap.category, WRAPPED_SINK, "wrapped_sink suggests none");
+    }
+    assert!(!full.counts.contains_key(WRAPPED_SINK), "{:?}", full.counts);
+
+    let sink: Vec<_> = full
+        .rows
+        .iter()
+        .filter(|r| r.gap.category == UNRESOLVED_ENDPOINT)
+        .collect();
+    assert_eq!(sink.len(), 1, "{:#?}", full.rows);
+    assert_eq!(
+        (sink[0].gap.file.as_deref(), sink[0].gap.line),
+        (Some("src/client.ts"), Some(2))
+    );
+    let snippet = sink[0]
+        .snippet
+        .as_ref()
+        .expect("one root holds src/client.ts");
+    assert_eq!(snippet.file, "src/client.ts");
+    assert_eq!(snippet.start_line, 1, "2 - 3, clamped at the file start");
+    let want: Vec<&str> = R1_CLIENT_TS.lines().take(5).collect();
+    assert_eq!(snippet.lines, want, "lines 1-5");
+    assert_eq!(snippet.lines[1], "  return fetch(path, { method });");
+
+    // Every located row in one root carries its snippet.
+    for r in &full.rows {
+        if r.gap.file.is_some() && r.gap.line.is_some() {
+            assert!(r.snippet.is_some(), "{r:#?}");
+        }
+    }
+    let with_snippet = full.rows.iter().filter(|r| r.snippet.is_some()).count();
+    assert_eq!(full.snippets, with_snippet);
+    assert_eq!(full.ambiguous_root, 0);
+    assert!(full.guide.contains("docs/overlay.md"), "{}", full.guide);
+    assert_eq!(
+        full.counts.get(UNPAIRED_ROUTE),
+        Some(&2),
+        "{:?}",
+        full.counts
+    );
+
+    // top_k 1 cuts rows per category; the counts stay the totals.
+    let mut one = ProposeOptions::default();
+    one.top_k = 1;
+    let cut = propose(&repos, &one).expect("propose");
+    assert_eq!(cut.counts, full.counts);
+    assert_eq!(proposed(&cut, UNPAIRED_ROUTE).len(), 1);
+    for c in full.counts.keys() {
+        assert!(proposed(&cut, c).len() <= 1, "{c}");
+    }
+    assert!(cut.rows.len() < full.rows.len());
+
+    // A category list keeps only those categories; an unknown one is an error.
+    let mut only = ProposeOptions::default();
+    only.categories = vec![UNRESOLVED_ENDPOINT.to_string()];
+    let sinks = propose(&repos, &only).expect("propose");
+    assert_eq!(sinks.rows.len(), 1);
+    assert_eq!(
+        sinks.counts.keys().copied().collect::<Vec<_>>(),
+        [UNRESOLVED_ENDPOINT]
+    );
+    let mut bad = ProposeOptions::default();
+    bad.categories = vec!["no_such_category".to_string()];
+    let err = propose(&repos, &bad).expect_err("unknown category");
+    assert!(
+        err.contains("no_such_category") && err.contains(UNRESOLVED_ENDPOINT),
+        "{err}"
+    );
+
+    // The same relative file in both roots: no guess, the snippet is omitted.
+    write_file(&root, "api/src/client.ts", "export const VERSION = 1;\n");
+    let amb = propose(&repos, &ProposeOptions::default()).expect("propose");
+    let in_both: Vec<_> = amb
+        .rows
+        .iter()
+        .filter(|r| r.gap.file.as_deref() == Some("src/client.ts"))
+        .collect();
+    assert!(
+        in_both
+            .iter()
+            .any(|r| r.gap.category == UNRESOLVED_ENDPOINT),
+        "{:#?}",
+        amb.rows
+    );
+    assert!(in_both.iter().all(|r| r.snippet.is_none()), "{in_both:#?}");
+    assert_eq!(amb.ambiguous_root, in_both.len());
+    for r in amb
+        .rows
+        .iter()
+        .filter(|r| r.gap.file.as_deref() == Some("app.py"))
+    {
+        assert!(r.snippet.is_some(), "{r:#?}");
+    }
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// A linked gap id for the wrapper stanza (any well-formed id).
+const WRAPPER_GAP: &str = "gap:00000000000000a1";
+
+/// The user's own overlay: comments, a pinned constant.
+const TEAM_OVERLAY: &str = "\
+# team overlay: reviewed by hand
+version = 1
+
+# pinned by hand
+[constants]
+REGION = \"/eu\"  # the EU gateway
+";
+
+/// The fixture's wrapper with its `# gap:` link, a pattern and an edge:
+/// `wrapper#1`, `entrypoints#1`, `edge#1`.
+fn linked_three() -> String {
+    format!(
+        "# gap: {WRAPPER_GAP}\n{}\n{ENTRYPOINT_AND_EDGE}",
+        wrapper_stanza()
+    )
+}
+
+fn wrapper_only() -> AcceptOptions {
+    let mut o = AcceptOptions::default();
+    o.only = vec!["wrapper#1".to_string()];
+    o
+}
+
+fn overlay_of(repo: &str) -> PathBuf {
+    Path::new(repo).join(".glia/overlay.toml")
+}
+
+#[test]
+fn accept_writes_the_chosen_stanzas() {
+    let root = tmp("accept");
+    let repo = nightly_repo(&root.join("repo"));
+    let file = overlay_of(&repo);
+    std::fs::create_dir_all(file.parent().expect("dir")).expect("mkdir");
+    std::fs::write(&file, TEAM_OVERLAY).expect("write");
+
+    let summary = accept(&repo, Some(&linked_three()), &wrapper_only()).expect("accept");
+    assert_eq!(summary.added, BTreeMap::from([("wrapper", 1)]));
+    assert_eq!((summary.removed, summary.duplicates), (0, 0));
+    assert!(!summary.dry_run && summary.written);
+    assert_eq!(summary.file, file.display().to_string());
+
+    let text = std::fs::read_to_string(&file).expect("read");
+    assert!(
+        text.starts_with(TEAM_OVERLAY),
+        "the user's text, comments included, is kept: {text}"
+    );
+    assert!(
+        text.contains(&format!("# gap: {WRAPPER_GAP}\n[[wrapper]]\n")),
+        "{text}"
+    );
+    assert!(text.contains("call = \"NewCollection\""), "{text}");
+    assert!(
+        !text.contains("[[edge]]") && !text.contains("[entrypoints]"),
+        "only wrapper#1 is written: {text}"
+    );
+    let loaded = glia_config::parse_str(&text);
+    assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+    assert_eq!(
+        (count(&loaded, "wrapper"), count(&loaded, "constants")),
+        (1, 1)
+    );
+    assert!(
+        summary.diff.contains("\n+[[wrapper]]\n"),
+        "{}",
+        summary.diff
+    );
+    assert!(
+        !summary
+            .diff
+            .lines()
+            .any(|l| l.starts_with('-') && !l.starts_with("---")),
+        "nothing removed: {}",
+        summary.diff
+    );
+
+    // The next build applies it.
+    let built = generate_one(&repo).expect("build");
+    assert_eq!(entity_repos(&built), [repo.as_str()]);
+    assert_eq!(entity_accesses(&built).len(), 1);
+    std::fs::remove_dir_all(root).ok();
+}
+
+const CHILD_ACCEPT_ENV: &str = "GLIA_CE3D_CHILD_ACCEPT";
+
+/// The child half of [`accept_stderr`]: a no-op unless the parent set
+/// [`CHILD_ACCEPT_ENV`], in which case it proposes, accepts `wrapper#1` of
+/// [`linked_three`] and builds, so its stderr carries the markers.
+#[test]
+fn child_accept_for_stderr() {
+    if let Ok(dir) = std::env::var(CHILD_ACCEPT_ENV) {
+        propose(std::slice::from_ref(&dir), &ProposeOptions::default()).expect("propose");
+        accept(&dir, Some(&linked_three()), &wrapper_only()).expect("accept");
+        generate_one(&dir).expect("build");
+    }
+}
+
+/// The stderr lines of one [`child_accept_for_stderr`] over `dir`.
+fn accept_stderr(dir: &str) -> Vec<String> {
+    let exe = std::env::current_exe().expect("test binary path");
+    let out = Command::new(exe)
+        .args([
+            "--exact",
+            "child_accept_for_stderr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_ACCEPT_ENV, dir)
+        .output()
+        .expect("re-run the test binary");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "child accept failed: {stderr}");
+    stderr.lines().map(String::from).collect()
+}
+
+#[test]
+fn accept_and_propose_markers() {
+    let root = tmp("markers");
+    let repo = nightly_repo(&root.join("repo"));
+    let lines = accept_stderr(&repo);
+    let propose_lines: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.starts_with("[overlay] propose "))
+        .collect();
+    assert_eq!(propose_lines.len(), 1, "{lines:#?}");
+    assert!(
+        propose_lines[0].starts_with(&format!("[overlay] propose repo={repo} rows="))
+            && propose_lines[0].ends_with(" ambiguous_root=0 surface=engine"),
+        "{}",
+        propose_lines[0]
+    );
+    let accept_lines: Vec<&String> = lines
+        .iter()
+        .filter(|l| l.starts_with("[overlay] accept "))
+        .collect();
+    assert_eq!(
+        accept_lines,
+        [&format!(
+            "[overlay] accept repo={repo} added=1 (route_prefix=0 wrapper=1 edge=0 constants=0 entrypoints=0) removed=0 duplicates=0 file=.glia/overlay.toml dry_run=false surface=engine"
+        )]
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("[overlay] wrappers ") && l.contains(" minted=1 ")),
+        "the next build applies the accepted wrapper: {lines:#?}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+fn rule_report(repo: &str) -> GapsReport {
+    let built = generate_one(repo).expect("build");
+    let roots: Vec<(u64, PathBuf)> = built
+        .repo_roots
+        .iter()
+        .map(|(id, p)| (*id, PathBuf::from(p)))
+        .collect();
+    gaps_report(&built.merged, &roots, &GapsOptions::default()).expect("gaps")
+}
+
+fn row_of<'r>(rep: &'r GapsReport, category: &str, kind: &str) -> &'r GapRow {
+    let found: Vec<&GapRow> = rep
+        .rows
+        .iter()
+        .filter(|r| r.category == category && r.kind == kind)
+        .collect();
+    assert_eq!(found.len(), 1, "one {category} {kind}: {:#?}", rep.rows);
+    found[0]
+}
+
+fn remove(ids: &[&str]) -> AcceptOptions {
+    let mut o = AcceptOptions::default();
+    o.remove = ids.iter().map(|s| s.to_string()).collect();
+    o
+}
+
+/// The head of [`rot_overlay`]: comments, a pattern that binds and one that
+/// does not, and the data wrapper.
+fn rot_head() -> String {
+    format!(
+        "# team overlay\nversion = 1\n\n# started by cron\n[entrypoints]\nqnames = [\n    \"nightly::Nightly\",\n    \"gone::*\",\n]\n\n# the collection helper\n{}",
+        wrapper_stanza()
+    )
+}
+
+/// An [[edge]] between two qnames that do not exist.
+const ORPHAN_EDGE: &str = "\n# a call that no longer exists\n[[edge]]\nfrom = \"nowhere::Caller\"\nto = \"nowhere::Callee\"\ncategory = \"CALLS\"\n";
+/// A note anchored nowhere, then the file's closing comment.
+const NOTE_AND_TAIL: &str =
+    "\n[[note]]\nanchor = \"nowhere::Thing\"\ntext = \"retries are safe\"\n\n# end of overlay\n";
+
+/// An [[edge]] equal to the CALLS edge the extractor already emits.
+fn redundant_edge(from: &str, to: &str) -> String {
+    format!(
+        "\n# declared before the extractor caught up\n[[edge]]\nfrom = \"{from}\"\nto = \"{to}\"\ncategory = \"CALLS\"\n"
+    )
+}
+
+/// `(from, to)` qnames of one CALLS edge the build extracts.
+fn extracted_call(repo: &str) -> (String, String) {
+    let built = generate_one(repo).expect("build");
+    let mut calls: Vec<(String, String)> = built
+        .merged
+        .all_edges()
+        .filter(|e| e.category == edge_category::CALLS)
+        .map(|e| (qname_of(&built, e.from), qname_of(&built, e.to)))
+        .filter(|(f, t)| !f.is_empty() && !t.is_empty())
+        .collect();
+    calls.sort();
+    calls.into_iter().next().expect("jobs.go calls cleanup")
+}
+
+#[test]
+fn accept_removes_rot_by_gap_id() {
+    let root = tmp("rot");
+    let repo = nightly_repo(&root.join("repo"));
+    std::fs::write(
+        root.join("repo/jobs.go"),
+        "package repositories\n\nfunc RunJobs() {\n\tcleanup()\n}\n\nfunc cleanup() {}\n",
+    )
+    .expect("write");
+    let (from, to) = extracted_call(&repo);
+    let redundant = redundant_edge(&from, &to);
+    let base = format!("{}{ORPHAN_EDGE}{redundant}{NOTE_AND_TAIL}", rot_head());
+    let file = overlay_of(&repo);
+    std::fs::create_dir_all(file.parent().expect("dir")).expect("mkdir");
+    std::fs::write(&file, &base).expect("write");
+    assert!(glia_config::parse_str(&base).errors.is_empty());
+
+    let before = rule_report(&repo);
+    let orphan_edge = row_of(&before, ORPHANED_RULE, "edge").id.clone();
+    let orphan_note = row_of(&before, ORPHANED_RULE, "note").id.clone();
+    let orphan_pattern = row_of(&before, ORPHANED_RULE, "entrypoint");
+    assert_eq!(orphan_pattern.qname, "gone::*");
+    let orphan_pattern = orphan_pattern.id.clone();
+    let redundant_id = row_of(&before, REDUNDANT_RULE, "edge").id.clone();
+
+    // An unknown id, and an id of another category, are refused; nothing written.
+    let err = accept(&repo, None, &remove(&["gap:0000000000000000"])).expect_err("unknown id");
+    assert!(err.contains("gap:0000000000000000"), "{err}");
+    let dead = before
+        .rows
+        .iter()
+        .find(|r| r.category == DEAD_SYMBOL)
+        .expect("the Go sources have a dead symbol");
+    let err = accept(&repo, None, &remove(&[&dead.id])).expect_err("not a rule row");
+    assert!(err.contains(&dead.id) && err.contains(DEAD_SYMBOL), "{err}");
+    assert_eq!(std::fs::read_to_string(&file).expect("read"), base);
+
+    // The orphaned [[edge]] goes, by its identity, and nothing else does.
+    let summary = accept(&repo, None, &remove(&[&orphan_edge])).expect("accept");
+    assert_eq!((summary.removed, summary.added.len()), (1, 0));
+    let after = std::fs::read_to_string(&file).expect("read");
+    assert_eq!(
+        after,
+        format!("{}{redundant}{NOTE_AND_TAIL}", rot_head()),
+        "exactly the stanza and its comment are gone"
+    );
+    let rerun = rule_report(&repo);
+    assert!(rerun.rows.iter().all(|r| r.id != orphan_edge), "{rerun:#?}");
+    for id in [&orphan_note, &orphan_pattern, &redundant_id] {
+        assert!(rerun.rows.iter().any(|r| &r.id == id), "{id} stays");
+    }
+
+    // The rest of the rot in one call.
+    let summary = accept(
+        &repo,
+        None,
+        &remove(&[&redundant_id, &orphan_note, &orphan_pattern]),
+    )
+    .expect("accept");
+    assert_eq!(summary.removed, 3);
+    let text = std::fs::read_to_string(&file).expect("read");
+    let loaded = glia_config::parse_str(&text);
+    assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+    assert_eq!(
+        (
+            count(&loaded, "edge"),
+            count(&loaded, "note"),
+            count(&loaded, "entrypoints"),
+            count(&loaded, "wrapper"),
+        ),
+        (0, 0, 1, 1)
+    );
+    assert!(
+        text.starts_with("# team overlay\nversion = 1\n\n# started by cron\n[entrypoints]\n"),
+        "{text}"
+    );
+    assert!(text.contains("\"nightly::Nightly\"") && !text.contains("gone::*"));
+    assert!(text.ends_with("# end of overlay\n"), "{text}");
+    let clean = rule_report(&repo);
+    assert_eq!(
+        (clean.count(ORPHANED_RULE), clean.count(REDUNDANT_RULE)),
+        (0, 0),
+        "{clean:#?}"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn accept_removes_twins_together() {
+    let root = tmp("twins");
+    let repo = nightly_repo(&root.join("repo"));
+    let base = format!("version = 1\n{ORPHAN_EDGE}{ORPHAN_EDGE}");
+    let file = overlay_of(&repo);
+    std::fs::create_dir_all(file.parent().expect("dir")).expect("mkdir");
+    std::fs::write(&file, &base).expect("write");
+    let before = rule_report(&repo);
+    let twins: Vec<&str> = before
+        .rows
+        .iter()
+        .filter(|r| r.category == ORPHANED_RULE)
+        .map(|r| r.id.as_str())
+        .collect();
+    assert_eq!(twins.len(), 2, "{before:#?}");
+    assert_ne!(twins[0], twins[1]);
+
+    // One id names the identity: both identical stanzas go, both counted.
+    let summary = accept(&repo, None, &remove(&[twins[0]])).expect("accept");
+    assert_eq!(summary.removed, 2);
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("read"),
+        "version = 1\n"
+    );
+    assert_eq!(rule_report(&repo).count(ORPHANED_RULE), 0);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn accept_refuses_a_bad_candidate() {
+    let root = tmp("refuse");
+    let repo = nightly_repo(&root.join("repo"));
+    let file = overlay_of(&repo);
+    std::fs::create_dir_all(file.parent().expect("dir")).expect("mkdir");
+    std::fs::write(&file, TEAM_OVERLAY).expect("write");
+
+    // The loader drops a route_prefix without a leading `/`: refused, quoted.
+    let bad = "[[route_prefix]]\nscope = \"orders\"\nprefix = \"orders\"\n";
+    let err = accept(&repo, Some(bad), &AcceptOptions::default()).expect_err("refused");
+    assert!(
+        err.contains("prefix \"orders\" must start with '/'"),
+        "the loader's own words: {err}"
+    );
+    assert_eq!(std::fs::read(&file).expect("read"), TEAM_OVERLAY.as_bytes());
+
+    // An unknown `only` ref lists the candidate's refs.
+    let mut unknown = AcceptOptions::default();
+    unknown.only = vec!["wrapper#9".to_string()];
+    let err = accept(&repo, Some(&linked_three()), &unknown).expect_err("unknown ref");
+    assert!(
+        err.contains("wrapper#9")
+            && err.contains("wrapper#1")
+            && err.contains("entrypoints#1")
+            && err.contains("edge#1"),
+        "{err}"
+    );
+
+    // Nothing to accept.
+    let err = accept(&repo, None, &AcceptOptions::default()).expect_err("no input");
+    assert!(err.contains("nothing to accept"), "{err}");
+
+    // A dry run returns the diff and writes nothing.
+    let mut dry = wrapper_only();
+    dry.dry_run = true;
+    let summary = accept(&repo, Some(&linked_three()), &dry).expect("dry run");
+    assert!(summary.dry_run && !summary.written);
+    assert_eq!(summary.added, BTreeMap::from([("wrapper", 1)]));
+    assert!(
+        summary
+            .diff
+            .starts_with("--- a/.glia/overlay.toml\n+++ b/.glia/overlay.toml\n@@ "),
+        "{}",
+        summary.diff
+    );
+    assert!(
+        summary.diff.contains("\n+[[wrapper]]\n"),
+        "{}",
+        summary.diff
+    );
+    assert_eq!(std::fs::read(&file).expect("read"), TEAM_OVERLAY.as_bytes());
+    assert_eq!(
+        std::fs::read_dir(file.parent().expect("dir"))
+            .expect("read dir")
+            .count(),
+        1,
+        "no temp file left behind"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn accept_creates_the_file() {
+    let root = tmp("create");
+    let repo = nightly_repo(&root.join("repo"));
+    assert!(!Path::new(&repo).join(".glia").exists());
+    let cand = format!("# gap: {WRAPPER_GAP}\n{}", wrapper_stanza());
+    let summary = accept(&repo, Some(&cand), &AcceptOptions::default()).expect("accept");
+    assert!(summary.written);
+    assert_eq!(summary.added, BTreeMap::from([("wrapper", 1)]));
+    assert!(
+        summary
+            .diff
+            .starts_with("--- /dev/null\n+++ b/.glia/overlay.toml\n@@ -0,0 +1,"),
+        "{}",
+        summary.diff
+    );
+    let file = overlay_of(&repo);
+    let text = std::fs::read_to_string(&file).expect("the file was created");
+    assert!(text.starts_with("version = 1"), "{text}");
+    let loaded = glia_config::parse_str(&text);
+    assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+    assert_eq!(count(&loaded, "wrapper"), 1);
+    let names: Vec<String> = std::fs::read_dir(file.parent().expect("dir"))
+        .expect("read dir")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["overlay.toml"], "no temp file left behind");
     std::fs::remove_dir_all(root).ok();
 }
