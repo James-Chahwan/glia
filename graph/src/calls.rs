@@ -73,10 +73,11 @@ enum Branch {
     GlobalUnique,
     EnumMember,
     GlobalUniqueMethod,
+    TypeMethod,
 }
 
 impl Branch {
-    const COUNT: usize = 9;
+    const COUNT: usize = 10;
 
     fn rule(self) -> &'static str {
         match self {
@@ -89,6 +90,7 @@ impl Branch {
             Branch::GlobalUnique => "global_unique",
             Branch::EnumMember => "enum_member",
             Branch::GlobalUniqueMethod => "global_unique_method",
+            Branch::TypeMethod => "type_method",
         }
     }
 }
@@ -491,12 +493,28 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
                     }
                     _ => None,
                 });
+                // CA.5a: a HANDLED_BY base naming a STRUCT / CLASS the
+                // registering module itself declares binds that type's own
+                // method. The Go parser writes a receiver method value
+                // (`h.List` inside `func (h *TokensHandler) RegisterRoutes`)
+                // with the receiver's TYPE as its base, so a second type with
+                // a `List` cannot make it ambiguous.
+                let hit = hit.or_else(|| {
+                    if r.category == edge_category::HANDLED_BY {
+                        module_type_method(g, r.from_module, base, name)
+                            .map(|to| (to, Branch::TypeMethod))
+                    } else {
+                        None
+                    }
+                });
                 // Global fallback for HANDLED_BY: in Go, route handlers
                 // are usually written `h.GetProfile` where `h` is a local
                 // struct-receiver variable (`h *Handlers`), not an import
                 // binding. So binding lookup fails. Scan all class_methods
                 // across the graph for a method matching `name`; emit
-                // only when exactly one match exists.
+                // only when exactly one match exists. A receiver type
+                // declared in another file of its package misses the arm
+                // above and lands here.
                 hit.or_else(|| {
                     if r.category == edge_category::HANDLED_BY {
                         unique_global_method(g, name).map(|to| (to, Branch::GlobalUniqueMethod))
@@ -618,6 +636,20 @@ fn enum_member(g: &RepoGraph, enum_id: NodeId, name: &str) -> Option<NodeId> {
         }
     }
     hit
+}
+
+/// CA.5a: the method `name` of the STRUCT / CLASS named `ty` among
+/// `module`'s own top-level defs. Only a method OF that type is ever returned,
+/// so a same-named method of another type cannot bind; a promoted method (an
+/// embedded struct's) is not in `class_methods` and misses.
+fn module_type_method(g: &RepoGraph, module: NodeId, ty: &str, name: &str) -> Option<NodeId> {
+    let type_id = *g.symbols.module_symbols.get(&module)?.get(ty)?;
+    match g.nav.kind_by_id.get(&type_id).copied() {
+        Some(k) if k == node_kind::STRUCT || k == node_kind::CLASS => {
+            g.symbols.class_methods.get(&type_id)?.get(name).copied()
+        }
+        _ => None,
+    }
 }
 
 /// Search every class/struct's method map for a method named `name`.
@@ -2028,6 +2060,103 @@ mod tests {
             evidence_rule(&g, routes, handler, edge_category::HANDLED_BY),
             Some(("graph:refs".to_string(), Some("global_unique".to_string())))
         );
+    }
+
+    // ---- CA.5a: a type-qualified HANDLED_BY base binds its own method -----
+
+    /// A HANDLED_BY ref `Attribute { base: ty, name }` from `route` in `module`.
+    fn type_handler(route: NodeId, module: NodeId, ty: &str, name: &str) -> UnresolvedRef {
+        UnresolvedRef {
+            from: route,
+            from_module: module,
+            qualifier: CallQualifier::Attribute { base: ty.to_string(), name: name.to_string() },
+            category: edge_category::HANDLED_BY,
+            line: 7,
+        }
+    }
+
+    fn refs_rule(rule: &str) -> Option<(String, Option<String>)> {
+        Some(("graph:refs".to_string(), Some(rule.to_string())))
+    }
+
+    /// Kina's shape: two handler types in two files of one package, each with
+    /// `List`, each registering `h.List` in its own `RegisterRoutes`. The
+    /// repo-unique method fallback binds neither (two `List`s); the type the
+    /// registering module declares binds each route to its own type's method.
+    #[test]
+    fn type_qualified_handler_binds_its_own_method() {
+        let mut t = Shape::new();
+        let tm = t.add(node_kind::MODULE, "handlers::tokens", None);
+        let tokens = t.add(node_kind::STRUCT, "handlers::tokens::TokensHandler", Some(tm));
+        let tokens_list =
+            t.add(node_kind::METHOD, "handlers::tokens::TokensHandler::List", Some(tokens));
+        let get_tokens = t.add(node_kind::ROUTE, "GET /tokens", None);
+        let tokens_file =
+            t.file(vec![], vec![], vec![type_handler(get_tokens, tm, "TokensHandler", "List")]);
+
+        let mut o = Shape::new();
+        let om = o.add(node_kind::MODULE, "handlers::offers", None);
+        let offers = o.add(node_kind::STRUCT, "handlers::offers::OffersHandler", Some(om));
+        let offers_list =
+            o.add(node_kind::METHOD, "handlers::offers::OffersHandler::List", Some(offers));
+        let get_offers = o.add(node_kind::ROUTE, "GET /offers", None);
+        let offers_file =
+            o.file(vec![], vec![], vec![type_handler(get_offers, om, "OffersHandler", "List")]);
+
+        let g = crate::build::build_go(repo(), vec![tokens_file, offers_file]).unwrap();
+        let handled: Vec<(NodeId, NodeId)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::HANDLED_BY)
+            .map(|e| (e.from, e.to))
+            .collect();
+        assert_eq!(handled.len(), 2, "{handled:?}");
+        assert!(handled.contains(&(get_tokens, tokens_list)));
+        assert!(handled.contains(&(get_offers, offers_list)));
+        assert_eq!(
+            evidence_rule(&g, get_tokens, tokens_list, edge_category::HANDLED_BY),
+            refs_rule("type_method")
+        );
+        assert_eq!(
+            evidence_rule(&g, get_offers, offers_list, edge_category::HANDLED_BY),
+            refs_rule("type_method")
+        );
+        assert!(g.unresolved_refs.is_empty());
+    }
+
+    /// A type the registering module does not declare (a split receiver: the
+    /// struct lives in another file) takes the repo-unique method fallback
+    /// exactly as before, and a base naming a FUNCTION there is no type.
+    #[test]
+    fn type_qualified_handler_falls_back_when_the_type_is_elsewhere() {
+        let mut s = Shape::new();
+        let sm = s.add(node_kind::MODULE, "handlers::users", None);
+        let users = s.add(node_kind::STRUCT, "handlers::users::UsersHandler", Some(sm));
+        let show = s.add(node_kind::METHOD, "handlers::users::UsersHandler::Show", Some(users));
+        let types_file = s.file(vec![], vec![], vec![]);
+
+        let mut r = Shape::new();
+        let rm = r.add(node_kind::MODULE, "handlers::routes", None);
+        // A same-module FUNCTION named like the type is not a receiver type.
+        r.add(node_kind::FUNCTION, "handlers::routes::Other", Some(rm));
+        let get_user = r.add(node_kind::ROUTE, "GET /users/{id}", None);
+        let get_other = r.add(node_kind::ROUTE, "GET /other", None);
+        let routes_file = r.file(
+            vec![],
+            vec![],
+            vec![
+                type_handler(get_user, rm, "UsersHandler", "Show"),
+                type_handler(get_other, rm, "Other", "Missing"),
+            ],
+        );
+
+        let g = crate::build::build_go(repo(), vec![types_file, routes_file]).unwrap();
+        assert_eq!(
+            evidence_rule(&g, get_user, show, edge_category::HANDLED_BY),
+            refs_rule("global_unique_method")
+        );
+        assert_eq!(g.unresolved_refs.len(), 1);
+        assert_eq!(g.unresolved_refs[0].from, get_other);
     }
 
     /// The `[evidence-graph]` marker: silent until a call resolves, then every

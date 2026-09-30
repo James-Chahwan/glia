@@ -1,0 +1,18 @@
+{
+  "framework": "go-receiver-method-handlers",
+  "language": "go",
+  "dirs": ["."],
+  "mechanism": "http_server",
+  "cells": ["go/http_server"],
+  "note": "CA-5: a route registered inside a method with its receiver's method value (`public.GET(\"/tokens\", h.List)` in `func (h *TokensHandler) RegisterRoutes`, Kina's 88 registrations) is HANDLED_BY that method of the receiver's type. Two handler types share List / Create, so the repo-unique method fallback binds none of them.",
+  "expect_edges": [
+    {"from": "GET /tokens", "to": "handlers::tokens::TokensHandler::List", "category": "HANDLED_BY"},
+    {"from": "POST /tokens", "to": "handlers::tokens::TokensHandler::Create", "category": "HANDLED_BY"},
+    {"from": "GET /offers", "to": "handlers::offers::OffersHandler::List", "category": "HANDLED_BY"},
+    {"from": "POST /offers", "to": "handlers::offers::OffersHandler::Create", "category": "HANDLED_BY"}
+  ],
+  "forbid": [
+    {"from": "GET /tokens", "to": "handlers::offers::OffersHandler::List", "category": "HANDLED_BY"},
+    {"from": "GET /offers", "to": "handlers::tokens::TokensHandler::List", "category": "HANDLED_BY"}
+  ]
+}

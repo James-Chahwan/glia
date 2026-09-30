@@ -183,6 +183,12 @@ pub fn parse_file_with_modules(
             acc.closure_bodies, acc.closure_calls, acc.route_literals_skipped
         );
     }
+    if acc.receiver_handlers > 0 {
+        eprintln!(
+            "[go-routes] receiver-method handlers={} in {file_rel_path}",
+            acc.receiver_handlers
+        );
+    }
     let forms = &acc.route_forms;
     if forms.registrations > 0 {
         eprintln!(
@@ -282,6 +288,15 @@ struct Acc {
     /// fact never types a local or result by one. Set and cleared by
     /// `visit_function` / `visit_method`.
     type_params: Vec<String>,
+    /// CA.5a: `(receiver var, receiver type)` of the method whose body
+    /// `collect_routes_in` is walking (`func (h *TokensHandler) RegisterRoutes`
+    /// -> `("h", "TokensHandler")`), so a method-value handler `h.List` names
+    /// the receiver's TYPE. Set and cleared by `visit_method` around its route
+    /// walk; `None` inside a function.
+    route_receiver: Option<(String, String)>,
+    /// CA.5a: HANDLED_BY refs whose base was rewritten from the receiver var
+    /// to its type in this file — the `[go-routes] receiver-method` marker.
+    receiver_handlers: usize,
     /// LA.32a: route registrations emitted in this file, the POSITION cells
     /// pushed for them, and the method-bearing forms among them — the
     /// `[go-routes] registrations=` marker's counters.
@@ -961,7 +976,12 @@ fn visit_method(
             acc,
             &mut closures,
         );
+        // CA.5a: a route registered here with the receiver's method value
+        // (`public.GET("/tokens", h.List)`) is handled by that method of the
+        // receiver's type.
+        acc.route_receiver = receiver_var.map(|v| (v.to_string(), receiver_type.clone()));
         collect_routes_in(body, src, file_rel, module_id, repo, acc);
+        acc.route_receiver = None;
         collect_closure_calls(closures, src, id, receiver_var, repo, file_rel, acc);
     }
     acc.type_params.clear();
@@ -3340,7 +3360,20 @@ fn emit_route_from_call(
                     (Some(o), Some(f)) if o.kind() == "identifier" => {
                         let base = text_of(o, src).to_string();
                         let name = text_of(f, src).to_string();
+                        // The display is the source text (`h.List`), so the
+                        // ROUTE_METHOD cell does not change.
                         let display = format!("{base}.{name}");
+                        // CA.5a: `h.List` where `h` is the registering
+                        // method's receiver names the receiver's TYPE, which
+                        // the graph binds to that type's own method; any
+                        // other base (a package, a local) stays a name.
+                        let base = match &acc.route_receiver {
+                            Some((var, ty)) if *var == base => {
+                                acc.receiver_handlers += 1;
+                                ty.clone()
+                            }
+                            _ => base,
+                        };
                         (Some(display), Some(CallQualifier::Attribute { base, name }))
                     }
                     _ => (None, None),
@@ -5261,6 +5294,110 @@ var ProviderSet = wire.NewSet(NewA, NewB)
             base: base.to_string(),
             name: name.to_string(),
         }
+    }
+
+    // ---- CA.5a: a receiver method value names the receiver's type ----
+
+    /// The `handler` field of `route`'s ROUTE_METHOD cells, in push order.
+    fn route_handlers(parse: &FileParse, route: NodeId) -> Vec<Option<String>> {
+        parse
+            .nodes
+            .iter()
+            .filter(|n| n.id == route)
+            .flat_map(|n| n.cells.iter())
+            .filter(|c| c.kind == cell_type::ROUTE_METHOD)
+            .filter_map(|c| match &c.payload {
+                CellPayload::Json(s) => serde_json::from_str::<serde_json::Value>(s).ok(),
+                _ => None,
+            })
+            .map(|v| v.get("handler").and_then(|h| h.as_str()).map(String::from))
+            .collect()
+    }
+
+    #[test]
+    fn receiver_method_handler_names_the_receiver_type() {
+        // Kina's shape: the handler type registers its own method values.
+        let source = r#"package handlers
+
+import (
+    "github.com/gin-gonic/gin"
+    "example.com/kina/health"
+)
+
+type TokensHandler struct{}
+
+func (h *TokensHandler) RegisterRoutes(public *gin.RouterGroup) {
+    public.GET("/tokens", h.List)
+    public.POST("/tokens", h.Create)
+    public.GET("/health", health.Check)
+}
+
+func (h *TokensHandler) List(c *gin.Context)   {}
+func (h *TokensHandler) Create(c *gin.Context) {}
+"#;
+        let parse = parse_file(
+            source,
+            "handlers/tokens.go",
+            "handlers::tokens",
+            "example.com/kina",
+            repo(),
+        )
+        .unwrap();
+        let list = route_id(repo(), "GET", "/tokens");
+        let create = route_id(repo(), "POST", "/tokens");
+        assert_eq!(handled_by(&parse, list), vec![attr("TokensHandler", "List")]);
+        assert_eq!(handled_by(&parse, create), vec![attr("TokensHandler", "Create")]);
+        // The ROUTE_METHOD cell keeps the source text of the handler.
+        assert_eq!(route_handlers(&parse, list), vec![Some("h.List".to_string())]);
+        assert_eq!(route_handlers(&parse, create), vec![Some("h.Create".to_string())]);
+        // A package-qualified handler in the same method is untouched.
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "GET", "/health")),
+            vec![attr("health", "Check")]
+        );
+        let module_id =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "handlers::tokens");
+        assert!(parse
+            .refs
+            .iter()
+            .filter(|r| r.from == list || r.from == create)
+            .all(|r| r.from_module == module_id));
+    }
+
+    #[test]
+    fn local_var_handler_is_unchanged() {
+        // A local `h` in a FUNCTION, a local `h` in a method whose receiver is
+        // `s`, and a function after a receiver method (the receiver is cleared).
+        let source = r#"package server
+
+import "github.com/gin-gonic/gin"
+
+type Server struct{}
+
+func (s *Server) Routes(r *gin.Engine) {
+    h := NewUsers()
+    r.GET("/users", h.List)
+}
+
+func setup(r *gin.Engine) {
+    h := NewItems()
+    r.GET("/items", h.List)
+}
+"#;
+        let parse =
+            parse_file(source, "server/server.go", "server", "example.com/app", repo()).unwrap();
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "GET", "/users")),
+            vec![attr("h", "List")]
+        );
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "GET", "/items")),
+            vec![attr("h", "List")]
+        );
+        assert_eq!(
+            route_handlers(&parse, route_id(repo(), "GET", "/items")),
+            vec![Some("h.List".to_string())]
+        );
     }
 
     #[test]
