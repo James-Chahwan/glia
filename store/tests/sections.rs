@@ -13,9 +13,9 @@ use glia_core::{CellPayload, CellTypeId, Confidence, Node, NodeId, NodeKindId, R
 use glia_graph::{RepoGraph, build_go};
 use glia_parser_go::parse_file;
 use glia_store::{
-    CODE_SECTION, Container, EncodedSection, Header, MmapContainer, RegistryEntry, StoreError,
-    code_section_of, decode_repo_graph, encode_repo_graph, encode_section, qname_of, read_to_owned,
-    remove_cell, upsert_cell, write_container,
+    CODE_SECTION, Container, EncodedSection, Header, MmapContainer, RegistryEntry, STRINGS_SECTION,
+    StoreError, code_section_of, decode_repo_graph, encode_repo_graph, encode_section, qname_of,
+    read_to_owned, remove_cell, upsert_cell, write_container,
 };
 
 /// A second domain's navigation state, defined here and nowhere in the store.
@@ -264,10 +264,18 @@ fn code_round_trip_unchanged() {
     std::fs::write(&path, &bytes).unwrap();
     assert_eq!(bytes, encode_repo_graph(&g).unwrap(), "encoding is deterministic");
 
+    // CD.7b: the Go backend's edges carry EVIDENCE, stored interned against a
+    // "strings" section written after the code section.
+    let evidence = glia_code_domain::cell_type::EVIDENCE;
+    assert!(g.edges.iter().any(|e| e.cell(evidence).is_some()), "fixture edges carry no EVIDENCE");
+    assert!(
+        !bytes.windows(12).any(|w| w == br#"{"emitter":""#),
+        "an EVIDENCE cell was written as JSON"
+    );
     let m = MmapContainer::open(&path).unwrap();
     assert_eq!(
         m.section_names().unwrap().iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
-        vec![CODE_SECTION]
+        vec![CODE_SECTION, STRINGS_SECTION]
     );
     assert_eq!(m.archived().unwrap().header.graph_type.as_str(), "code");
     assert_eq!(m.archived().unwrap().node_kinds.len(), g.nav.kind_by_id.len());

@@ -6,15 +6,17 @@
 //! This is the v0.4.5a acceptance test — if this stays green, the store
 //! crate's write + mmap + zero-copy access contract is working.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use glia_code_domain::node_kind;
-use glia_core::{NodeId, RepoId};
-use glia_graph::build_go;
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
+use glia_core::{CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_graph::{MergedGraph, RepoGraph, SymbolTable, build_go};
 use glia_parser_go::parse_file;
 use glia_store::{
-    CODE_SECTION, FORMAT_VERSION, MmapContainer, StoreError, code_section_of, qname_of,
-    write_repo_graph,
+    CODE_SECTION, CROSS_STACK_NAME, FORMAT_VERSION, MANIFEST_NAME, MmapContainer, STRINGS_SECTION,
+    StoreError, code_section_of, decode_repo_graph, qname_of, read_merged_sharded,
+    upsert_cell_sharded, write_merged_sharded, write_repo_graph,
 };
 
 const MODULE_PREFIX: &str = "example.com/backend";
@@ -151,4 +153,147 @@ fn opening_a_non_gmap_file_fails_with_old_format() {
         Err(e) => panic!("garbage file: expected OldFormat{{None}}, got {e:?}"),
         Ok(_) => panic!("garbage file should not open as a gmap"),
     }
+}
+
+// ----------------------------------------------------------------------------
+// CD.7b: EVIDENCE is stored interned (format 3) and read back as its JSON
+// ----------------------------------------------------------------------------
+
+/// The on-disk JSON form of an EVIDENCE payload: no format-3 file carries one.
+const EVIDENCE_JSON: &[u8] = br#"{"emitter":"#;
+
+fn has_evidence_json(bytes: &[u8]) -> bool {
+    bytes.windows(EVIDENCE_JSON.len()).any(|w| w == EVIDENCE_JSON)
+}
+
+fn client_repo() -> RepoId {
+    RepoId::from_canonical("test://http_stack_smoke/frontend")
+}
+
+/// A client repo (one ENDPOINT calling a helper, both with canonical
+/// EVIDENCE, edge_cells.rs's shape) and one cross HTTP edge from its endpoint
+/// to the backend's first ROUTE, carrying `resolver:http` EVIDENCE.
+fn with_client(backend: RepoGraph) -> MergedGraph {
+    let route = backend
+        .nav
+        .qname_by_id
+        .keys()
+        .copied()
+        .filter(|id| backend.nav.kind_by_id.get(id) == Some(&node_kind::ROUTE))
+        .min_by_key(|id| id.0)
+        .expect("backend fixture has a ROUTE");
+    let repo = client_repo();
+    let mut nav = CodeNav::default();
+    let mut node = |kind, qname: &str| {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, qname);
+        nav.record(id, qname.rsplit("::").next().unwrap_or(qname), qname, kind, None);
+        Node { id, repo, confidence: Confidence::Strong, cells: Vec::new() }
+    };
+    let caller = node(node_kind::FUNCTION, "web::api::loadUsers");
+    let ep = node(node_kind::ENDPOINT, "endpoint:GET:/health");
+    let (c, e) = (caller.id, ep.id);
+    let client = RepoGraph {
+        repo,
+        nodes: vec![caller, ep],
+        edges: vec![
+            Edge::new(c, e, edge_category::HTTP_CALLS, Confidence::Strong).with_cell(
+                Evidence::emitter("extractor:http").rule("fetch").at("web/api.ts", 3).to_cell(),
+            ),
+            Edge::new(c, e, edge_category::CALLS, Confidence::Strong)
+                .with_cell(Evidence::emitter("parser:typescript").rule("intra_file").at("web/api.ts", 9).to_cell()),
+        ],
+        nav,
+        symbols: SymbolTable::default(),
+        unresolved_calls: Vec::new(),
+        unresolved_refs: Vec::new(),
+        properties: Default::default(),
+    };
+    let mut merged = MergedGraph::new(vec![backend, client]);
+    merged.cross_edges = vec![
+        Edge::new(e, route, edge_category::HTTP_CALLS, Confidence::Strong)
+            .with_cell(Evidence::emitter("resolver:http").rule("exact").at("web/api.ts", 3).to_cell()),
+    ];
+    merged
+}
+
+/// The `.gmap` files `dir`'s manifest names, shards then cross.
+fn layout_files(dir: &Path) -> Vec<PathBuf> {
+    let m: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_NAME)).unwrap()).unwrap();
+    m["shards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(m.get("cross"))
+        .map(|e| dir.join(e["path"].as_str().unwrap()))
+        .collect()
+}
+
+#[test]
+fn evidence_interned_round_trip() {
+    // (a) One file: the Go backend through write_repo_graph / decode_repo_graph.
+    let g = build();
+    let with_evidence = g.edges.iter().filter(|e| e.cell(cell_type::EVIDENCE).is_some()).count();
+    assert!(with_evidence > 0, "the backend fixture's edges carry no EVIDENCE");
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("backend.gmap");
+    write_repo_graph(&g, &path).unwrap();
+    let raw = std::fs::read(&path).unwrap();
+    assert!(!has_evidence_json(&raw), "backend.gmap stores EVIDENCE as JSON");
+    let m = MmapContainer::open(&path).unwrap();
+    assert!(m.section_bytes(STRINGS_SECTION).unwrap().is_some(), "no strings section");
+    // The archived core holds every EVIDENCE cell in the compact form ...
+    let archived = m.archived().unwrap();
+    let interned = archived
+        .edges
+        .iter()
+        .flat_map(|e| e.cells.iter())
+        .filter(|c| c.kind.0.to_native() == cell_type::EVIDENCE.0)
+        .filter(|c| matches!(c.payload, glia_core::ArchivedCellPayload::Bytes(_)))
+        .count();
+    assert_eq!(interned, with_evidence, "an EVIDENCE cell was not interned");
+    // ... and the decoded graph is the one written, every EVIDENCE JSON byte-identical.
+    let back = decode_repo_graph(&m).unwrap();
+    assert_eq!(back.edges.len(), g.edges.len());
+    for (a, b) in back.edges.iter().zip(&g.edges) {
+        assert_eq!(a.cells, b.cells, "edge {} -> {}: cells differ after the round trip", b.from.0, b.to.0);
+    }
+    assert_eq!(back.edges, g.edges);
+
+    // (b) A layout: the backend and a client repo, and one cross edge.
+    let merged = with_client(g);
+    let dir = tmp.path().join("layout");
+    write_merged_sharded(&merged, &dir).unwrap();
+    let files = layout_files(&dir);
+    assert_eq!(files.len(), 3, "two shards and cross_stack: {files:?}");
+    for p in &files {
+        let bytes = std::fs::read(p).unwrap();
+        assert!(!has_evidence_json(&bytes), "{}: stores EVIDENCE as JSON", p.display());
+        let names = MmapContainer::open(p).unwrap().section_names().unwrap();
+        assert!(names.iter().any(|(n, _)| n == STRINGS_SECTION), "{}: {names:?}", p.display());
+    }
+    assert!(files.iter().any(|p| p.ends_with(CROSS_STACK_NAME)));
+    let loaded = read_merged_sharded(&dir).unwrap();
+    for (a, b) in loaded.graphs.iter().zip(&merged.graphs) {
+        assert_eq!(a.edges, b.edges, "repo {}: edges, cells included", b.repo.0);
+    }
+    assert_eq!(loaded.cross_edges, merged.cross_edges, "cross edges, cells included");
+    let json = |e: &Edge| match &e.cell(cell_type::EVIDENCE).unwrap().payload {
+        CellPayload::Json(s) => s.clone(),
+        other => panic!("EVIDENCE read back as {other:?}"),
+    };
+    assert_eq!(
+        json(&loaded.cross_edges[0]),
+        r#"{"emitter":"resolver:http","rule":"exact","file":"web/api.ts","line":3,"basis":"site"}"#
+    );
+
+    // (c) A cell upsert rewrites the shard raw: the interned payloads stay valid
+    // against the strings section copied back beside them.
+    let target = merged.graphs[0].nodes[0].id;
+    upsert_cell_sharded(&dir, target, cell_type::INTENT, CellPayload::Text("cd7b".into())).unwrap();
+    let again = read_merged_sharded(&dir).unwrap();
+    for (a, b) in again.graphs.iter().zip(&merged.graphs) {
+        assert_eq!(a.edges, b.edges, "repo {}: edges after an upsert", b.repo.0);
+    }
+    assert_eq!(again.cross_edges, merged.cross_edges);
 }

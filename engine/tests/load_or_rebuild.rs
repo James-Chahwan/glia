@@ -13,6 +13,10 @@
 //! `repo/*` -> `D/`, `layout-ai-repo-graph/*` -> `D/.ai/repo-graph/`,
 //! `layout-glia-build/*` -> `D/.glia/`. Shard names are read from the files,
 //! never hard-coded, and staleness is keyed on the manifest, not on mtimes.
+//!
+//! The 0.5.0 layout (format 2) is CD.7b's committed `tests/fixtures/gmap_v050`,
+//! materialised the same way: `gmap_pre_leap/repo/*` -> `D/`, `layout/*` ->
+//! `D/.glia/graph/`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -23,7 +27,7 @@ use glia_engine::persist::{
     LoadOutcome, default_layout_dir, load_or_rebuild, persist_result,
 };
 use glia_engine::{BUILD_STAMP, GenerateResult, generate_many, generate_one};
-use glia_store::{MANIFEST_VERSION, read_manifest_lenient};
+use glia_store::{FORMAT_VERSION, MANIFEST_VERSION, MmapContainer, read_manifest_lenient};
 
 /// `GLIA_NO_PERSIST` is process-global and the rebuild reads it, so every test
 /// in this binary holds this lock for its whole run.
@@ -424,4 +428,59 @@ fn missing_root_is_named_and_nothing_is_written() {
     assert!(text.contains(&*missing.to_string_lossy()), "{text}");
     assert!(text.contains("does not exist"), "{text}");
     assert_eq!(snapshot(&dir), before, "never a partial layout");
+}
+
+/// CD.7b: a layout as 0.5.0 left it at `<repo>/.glia/graph` (format 2 shards,
+/// manifest schema 2, root recorded as `../..`) rebuilds once with no repo
+/// path. The manifest schema did not change, so the build-stamp check names
+/// the reason before any shard is opened.
+#[test]
+fn v050_layout_rebuilds() {
+    let _env = env_guard(false);
+    let tmp = tempfile::tempdir().unwrap();
+    let d = sources(tmp.path());
+    let dir = default_layout_dir(&d);
+    copy_dir(&fixture().join("../gmap_v050/layout"), &dir);
+    let old = read_manifest_lenient(&dir).unwrap();
+    assert_eq!(old.schema_version, MANIFEST_VERSION, "0.5.0 wrote the current manifest schema");
+    assert_eq!(old.build_stamp, "0.5.0+p5fa8bd06e59848d5");
+    for name in manifest_gmaps(&dir) {
+        let b = std::fs::read(dir.join(&name)).unwrap();
+        assert_eq!(&b[8..12], &2u32.to_le_bytes(), "{name}: the fixture is not format 2");
+    }
+
+    let (r, outcome) = load_or_rebuild(&dir, None, true).unwrap();
+    assert_eq!(rebuilt_reason(outcome), "written by another glia build (0.5.0+p5fa8bd06e59848d5)");
+
+    // The graph served is a cold build of the same sources, edge cells included.
+    let cold = generate_one(d.to_str().unwrap()).unwrap();
+    assert_eq!((r.total_nodes, r.total_edges), (cold.total_nodes, cold.total_edges));
+    assert!(r.total_edges > 0);
+    assert_eq!(r.merged.graphs.len(), cold.merged.graphs.len());
+    for (a, b) in r.merged.graphs.iter().zip(&cold.merged.graphs) {
+        assert_eq!(a.nodes, b.nodes);
+        assert_eq!(a.edges, b.edges);
+    }
+    assert_eq!(r.merged.cross_edges, cold.merged.cross_edges);
+    assert_eq!(r.merged.cross_edges.len(), 1, "the fixture's one TS -> Go HTTP pairing");
+
+    // Rewritten in place as this build's format; nothing of 0.5.0's is left.
+    let new = read_manifest_lenient(&dir).unwrap();
+    assert_eq!(new.build_stamp, BUILD_STAMP);
+    assert_eq!(gmap_names(&dir), manifest_gmaps(&dir));
+    for name in manifest_gmaps(&dir) {
+        let path = dir.join(&name);
+        let b = std::fs::read(&path).unwrap();
+        assert_eq!(&b[8..12], &FORMAT_VERSION.to_le_bytes(), "{name}: not rewritten");
+        assert_eq!(FORMAT_VERSION, 3);
+        MmapContainer::open(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+    }
+
+    // Served as it is from now on, and the load equals the rebuild.
+    let (again, outcome) = load_or_rebuild(&dir, None, true).unwrap();
+    assert_fresh(&outcome);
+    for (a, b) in again.merged.graphs.iter().zip(&r.merged.graphs) {
+        assert_eq!(a.edges, b.edges, "a fresh load expands the interned EVIDENCE back");
+    }
+    assert_eq!(again.merged.cross_edges, r.merged.cross_edges);
 }

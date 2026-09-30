@@ -1,5 +1,6 @@
-//! LC.1: `.gmap` FORMAT_VERSION 2 / manifest schema 2, and what an old,
-//! future or foreign file reports.
+//! LC.1: `.gmap` preamble / manifest schema 2, and what an old, future or
+//! foreign file reports. The current format is 3 (CD.7b, interned EVIDENCE);
+//! a 0.5.0 (format 2) layout is `store/tests/gmap_v050.rs`'s.
 //!
 //! Every `.gmap` now opens with a fixed 32-byte preamble (`GLIAGMAP`, format
 //! version, flags, core offset, core length) read BEFORE rkyv touches the
@@ -90,9 +91,9 @@ fn graph(canonical: &str, ids: &[u64]) -> RepoGraph {
     }
 }
 
-/// A freshly written v2 single-file `.gmap`.
-fn write_v2_file(dir: &Path) -> PathBuf {
-    let path = dir.join("v2.gmap");
+/// A freshly written single-file `.gmap` of this build's format.
+fn write_current_file(dir: &Path) -> PathBuf {
+    let path = dir.join("current.gmap");
     write_repo_graph(&graph("test://lc1-file", &[1, 2, 3]), &path).unwrap();
     path
 }
@@ -198,9 +199,9 @@ fn old_format_reason_names_the_old_writer() {
 #[test]
 fn preamble_v1_is_old_format() {
     let tmp = tempfile::tempdir().unwrap();
-    let path = write_v2_file(tmp.path());
+    let path = write_current_file(tmp.path());
     // Control: the unpatched file opens.
-    MmapContainer::open(&path).expect("fresh v2 file");
+    MmapContainer::open(&path).expect("fresh current-format file");
 
     patch(&path, VERSION_AT, &1u32.to_le_bytes());
     match MmapContainer::open(&path) {
@@ -208,17 +209,27 @@ fn preamble_v1_is_old_format() {
         other => panic!("preamble v1: expected OldFormat{{Some(1)}}, got {:?}", other.err()),
     }
 
-    patch(&path, VERSION_AT, &3u32.to_le_bytes());
+    // CD.7b: 0.5.0's format is old now.
+    patch(&path, VERSION_AT, &2u32.to_le_bytes());
     match MmapContainer::open(&path) {
-        Err(ref e @ StoreError::FutureFormat { found: 3 }) => assert_readable(e),
-        other => panic!("preamble v3: expected FutureFormat{{3}}, got {:?}", other.err()),
+        Err(ref e @ StoreError::OldFormat { found: Some(2) }) => {
+            assert_readable(e);
+            assert_eq!(e.rebuild_reason().as_deref(), Some("old format v2 (this build reads v3)"));
+        }
+        other => panic!("preamble v2: expected OldFormat{{Some(2)}}, got {:?}", other.err()),
+    }
+
+    patch(&path, VERSION_AT, &4u32.to_le_bytes());
+    match MmapContainer::open(&path) {
+        Err(ref e @ StoreError::FutureFormat { found: 4 }) => assert_readable(e),
+        other => panic!("preamble v4: expected FutureFormat{{4}}, got {:?}", other.err()),
     }
 }
 
 #[test]
 fn same_version_other_layout_is_corrupt_not_rkyv() {
     let tmp = tempfile::tempdir().unwrap();
-    let path = write_v2_file(tmp.path());
+    let path = write_current_file(tmp.path());
     let mut bytes = std::fs::read(&path).unwrap();
     let mut len = [0u8; 8];
     len.copy_from_slice(&bytes[CORE_LEN_AT..CORE_LEN_AT + 8]);
@@ -246,7 +257,7 @@ fn same_version_other_layout_is_corrupt_not_rkyv() {
 #[test]
 fn misaligned_core_offset_is_corrupt() {
     let tmp = tempfile::tempdir().unwrap();
-    let path = write_v2_file(tmp.path());
+    let path = write_current_file(tmp.path());
     patch(&path, 16, &40u64.to_le_bytes());
     match MmapContainer::open(&path) {
         Err(ref e @ StoreError::Corrupt { .. }) => assert_readable(e),
@@ -255,7 +266,7 @@ fn misaligned_core_offset_is_corrupt() {
 }
 
 #[test]
-fn v2_round_trips() {
+fn v3_round_trips() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("layout");
     let merged = MergedGraph {
@@ -271,8 +282,8 @@ fn v2_round_trips() {
     };
     let manifest = write_merged_sharded(&merged, &dir).unwrap();
     assert_eq!(manifest.schema_version, 2);
-    assert_eq!(MANIFEST_VERSION, 2);
-    assert_eq!(FORMAT_VERSION, 2);
+    assert_eq!(MANIFEST_VERSION, 2, "CD.7b changes the shards, not the manifest shape");
+    assert_eq!(FORMAT_VERSION, 3);
 
     let on_disk: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_NAME)).unwrap()).unwrap();
@@ -283,7 +294,7 @@ fn v2_round_trips() {
     for p in &files {
         let b = std::fs::read(p).unwrap();
         assert!(b.starts_with(PREAMBLE_MAGIC), "{}: no GLIAGMAP preamble", p.display());
-        assert_eq!(&b[VERSION_AT..VERSION_AT + 4], &2u32.to_le_bytes());
+        assert_eq!(&b[VERSION_AT..VERSION_AT + 4], &3u32.to_le_bytes());
         assert_eq!(&b[16..24], &32u64.to_le_bytes(), "core_offset");
     }
 

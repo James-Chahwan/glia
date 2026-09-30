@@ -8,14 +8,25 @@
 //! Node kinds are not here: they are core state (`Container::node_kinds`), so
 //! `CodeNavStore` carries no `kind_by_id` and `CodeNavStore::to_owned` rebuilds
 //! `CodeNav::kind_by_id` from the core index.
+//!
+//! EVIDENCE interning (format 3, CD.7b): every edge's EVIDENCE cell is a JSON
+//! object whose three strings (emitter, rule, file) repeat across thousands of
+//! edges. The writer stores each canonical one as a compact `Bytes` payload
+//! pointing into the file's `"strings"` section (`StringTable`,
+//! `intern_evidence`), and every reader that hands out an owned graph
+//! (`decode_repo_graph`, the layout's cross-stack read) expands it back to the
+//! exact JSON (`expand_evidence`), so the in-memory graph is byte for byte the
+//! pre-3 graph. Both a code shard and `cross_stack.gmap` carry the section when
+//! they hold any interned payload.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use glia_code_domain::evidence::{Basis, Evidence};
 use glia_code_domain::{
     CallSite, CodeNav, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category, node_kind,
 };
-use glia_core::{CellTypeId, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
+use glia_core::{CellPayload, CellTypeId, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 use glia_graph::{RepoGraph, SymbolTable};
 
 use crate::container::{
@@ -25,6 +36,11 @@ use crate::error::StoreError;
 
 /// Name of the code domain's section in a `.gmap`.
 pub const CODE_SECTION: &str = "code";
+
+/// Name of the per-file string table section (format 3, CD.7b): the strings
+/// the file's interned edge-cell payloads index into. Written only when it has
+/// entries, after the `"code"` section.
+pub const STRINGS_SECTION: &str = "strings";
 
 /// Everything the code domain persists beyond the core: navigation maps, the
 /// symbol table, the references resolution left unbound, and the accessor set.
@@ -263,7 +279,8 @@ impl Container {
     /// Build a `Container` carrying only cross-repo edges. Used by the sharded
     /// layout to write `cross_stack.gmap` — nodes and kinds are empty and no
     /// code section is written, because every cross-edge's endpoints live in
-    /// some other shard. The synthetic `repo` comes from
+    /// some other shard; the layout writer interns the edges' EVIDENCE and
+    /// adds the `"strings"` section they need (format 3). The synthetic `repo` comes from
     /// `RepoId::from_canonical("cross_stack")` so the file is self-identifying
     /// without needing a new container variant.
     pub fn for_cross_edges(edges: Vec<Edge>) -> Self {
@@ -306,12 +323,353 @@ impl Header {
 }
 
 // ============================================================================
-// RepoGraph codec — core + "code" section
+// EVIDENCE interning — the "strings" section (format 3, CD.7b)
 // ============================================================================
 
-/// Encode `g` as the bytes of one `.gmap`, and say whether a code section was
-/// written (the `[gmap] layout` marker counts them).
-pub(crate) fn encode_repo_graph_counted(g: &RepoGraph) -> Result<(Vec<u8>, bool), StoreError> {
+/// Tag byte that opens an interned EVIDENCE payload. Only VECTOR cells carry
+/// `Bytes` otherwise, so an EVIDENCE cell with a `Bytes` payload opening with
+/// this tag is unambiguous on disk (a writer refuses one in memory:
+/// [`encode_repo_graph`]).
+const EVIDENCE_TAG: u8 = 0x01;
+
+/// The per-file string table (`STRINGS_SECTION`): every string an interned
+/// payload of the file indexes, in first-seen order. Filled while the edges
+/// are walked in their stored (sorted build) order, so an identical graph
+/// writes an identical table.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[rkyv(derive(Debug))]
+pub struct StringTable {
+    pub strings: Vec<String>,
+}
+
+impl StringTable {
+    /// True when the table holds no string (such a table is not written).
+    pub fn is_empty(&self) -> bool {
+        self.strings.is_empty()
+    }
+}
+
+/// What [`intern_evidence`] did to a slice of edges: `interned` EVIDENCE
+/// cells now carry the compact payload, `kept_json` were left as written
+/// (not canonical JSON, see [`intern_evidence`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct InternStats {
+    pub interned: usize,
+    pub kept_json: usize,
+}
+
+impl InternStats {
+    fn absorb(&mut self, other: InternStats) {
+        self.interned += other.interned;
+        self.kept_json += other.kept_json;
+    }
+}
+
+/// Index of each string already in a table, so interning is one hash lookup.
+struct Interner<'t> {
+    table: &'t mut StringTable,
+    index: HashMap<String, u64>,
+}
+
+impl<'t> Interner<'t> {
+    fn new(table: &'t mut StringTable) -> Self {
+        let mut index = HashMap::with_capacity(table.strings.len());
+        for (i, s) in table.strings.iter().enumerate() {
+            index.entry(s.clone()).or_insert(i as u64);
+        }
+        Self { table, index }
+    }
+
+    fn ix(&mut self, s: &str) -> u64 {
+        if let Some(&i) = self.index.get(s) {
+            return i;
+        }
+        let i = self.table.strings.len() as u64;
+        self.table.strings.push(s.to_string());
+        self.index.insert(s.to_string(), i);
+        i
+    }
+}
+
+/// The evidence `payload` holds when interning it is lossless: a JSON payload
+/// that parses as [`Evidence`] AND that `Evidence::to_cell` writes back byte
+/// for byte (field order, no extra fields, no whitespace). `None` otherwise.
+fn canonical_evidence(payload: &CellPayload) -> Option<Evidence> {
+    let CellPayload::Json(s) = payload else {
+        return None;
+    };
+    let ev: Evidence = serde_json::from_str(s).ok()?;
+    (ev.to_cell().payload == *payload).then_some(ev)
+}
+
+fn basis_byte(b: Basis) -> u8 {
+    match b {
+        Basis::None => 0,
+        Basis::Site => 1,
+        Basis::FromNode => 2,
+        Basis::ToNode => 3,
+        Basis::File => 4,
+    }
+}
+
+fn basis_of(b: u8) -> Option<Basis> {
+    Some(match b {
+        0 => Basis::None,
+        1 => Basis::Site,
+        2 => Basis::FromNode,
+        3 => Basis::ToNode,
+        4 => Basis::File,
+        _ => return None,
+    })
+}
+
+/// Unsigned LEB128.
+fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+    while v >= 0x80 {
+        out.push((v as u8) | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+
+/// Read one unsigned LEB128 at `*at`, advancing it. `what` names the field
+/// for the error.
+fn take_varint(bytes: &[u8], at: &mut usize, what: &str) -> Result<u64, String> {
+    let mut v = 0u64;
+    for shift in (0..64).step_by(7) {
+        let Some(&b) = bytes.get(*at) else {
+            return Err(format!("truncated varint ({what}) at byte {at}"));
+        };
+        *at += 1;
+        let low = u64::from(b & 0x7f);
+        if shift == 63 && low > 1 {
+            return Err(format!("varint ({what}) overflows u64"));
+        }
+        v |= low << shift;
+        if b & 0x80 == 0 {
+            return Ok(v);
+        }
+    }
+    Err(format!("varint ({what}) overflows u64"))
+}
+
+/// `[0x01, varint(emitter), varint(rule + 1 | 0), varint(file + 1 | 0),
+/// varint(line + 1 | 0), basis]`: string fields are table indices, an absent
+/// optional field is 0.
+fn encode_evidence(ev: &Evidence, strings: &mut Interner<'_>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(12);
+    out.push(EVIDENCE_TAG);
+    let emitter = strings.ix(&ev.emitter);
+    put_varint(&mut out, emitter);
+    let rule = ev.rule.as_deref().map_or(0, |r| strings.ix(r) + 1);
+    put_varint(&mut out, rule);
+    let file = ev.file.as_deref().map_or(0, |f| strings.ix(f) + 1);
+    put_varint(&mut out, file);
+    put_varint(&mut out, ev.line.map_or(0, |l| u64::from(l) + 1));
+    out.push(basis_byte(ev.basis));
+    out
+}
+
+/// The inverse of [`encode_evidence`]; `string(i)` is table entry `i`. Any
+/// malformed payload (truncated, an index outside the table, a line past
+/// `u32`, an unknown basis, trailing bytes) is a reason string.
+fn decode_evidence<'s>(
+    bytes: &[u8],
+    table_len: usize,
+    string: &impl Fn(usize) -> Option<&'s str>,
+) -> Result<Evidence, String> {
+    let mut at = 1usize;
+    let lookup = |ix: u64, what: &str| -> Result<String, String> {
+        usize::try_from(ix)
+            .ok()
+            .and_then(string)
+            .map(str::to_string)
+            .ok_or_else(|| format!("{what} index {ix} outside the {table_len}-entry strings table"))
+    };
+    let emitter = lookup(take_varint(bytes, &mut at, "emitter")?, "emitter")?;
+    let rule = match take_varint(bytes, &mut at, "rule")? {
+        0 => None,
+        i => Some(lookup(i - 1, "rule")?),
+    };
+    let file = match take_varint(bytes, &mut at, "file")? {
+        0 => None,
+        i => Some(lookup(i - 1, "file")?),
+    };
+    let line = match take_varint(bytes, &mut at, "line")? {
+        0 => None,
+        l => Some(u32::try_from(l - 1).map_err(|_| format!("line {} past u32", l - 1))?),
+    };
+    let Some(&b) = bytes.get(at) else {
+        return Err(format!("truncated payload: no basis byte at byte {at}"));
+    };
+    let basis = basis_of(b).ok_or_else(|| format!("unknown basis byte {b}"))?;
+    if at + 1 != bytes.len() {
+        return Err(format!("{} trailing byte(s)", bytes.len() - at - 1));
+    }
+    Ok(Evidence { emitter, rule, file, line, basis })
+}
+
+/// Intern every canonical EVIDENCE cell of `edges` into `table`, in edge
+/// order (emitter, then rule, then file of each), replacing its JSON payload
+/// with the compact `Bytes` form. A payload is interned only when it parses as
+/// [`Evidence`] AND `Evidence::to_cell` reproduces it byte for byte, so the
+/// round trip is lossless by construction; any other EVIDENCE cell (a `Text`
+/// payload, JSON in another field order or with extra fields) is left as
+/// written and counted `kept_json`. Strings already in `table` are reused.
+pub fn intern_evidence(edges: &mut [Edge], table: &mut StringTable) -> InternStats {
+    let mut strings = Interner::new(table);
+    let mut stats = InternStats::default();
+    for e in edges.iter_mut() {
+        for c in e.cells.iter_mut().filter(|c| c.kind == cell_type::EVIDENCE) {
+            match canonical_evidence(&c.payload) {
+                Some(ev) => {
+                    c.payload = CellPayload::Bytes(encode_evidence(&ev, &mut strings));
+                    stats.interned += 1;
+                }
+                None => stats.kept_json += 1,
+            }
+        }
+    }
+    stats
+}
+
+/// Expand every interned EVIDENCE cell of `edges` back to the exact JSON
+/// `Evidence::to_cell` wrote before interning, reading its strings from
+/// `table` (the file's `"strings"` section). Cells that were never interned
+/// are untouched. A payload that does not decode (truncated, an index outside
+/// the table) is `StoreError::Corrupt` naming the edge; a caller reading a
+/// layout adds the shard's name.
+pub fn expand_evidence(edges: &mut [Edge], table: &ArchivedStringTable) -> Result<(), StoreError> {
+    let strings = &table.strings;
+    expand_with(edges, strings.len(), &|i| strings.get(i).map(|s| s.as_str()))
+}
+
+fn expand_with<'s>(
+    edges: &mut [Edge],
+    table_len: usize,
+    string: &impl Fn(usize) -> Option<&'s str>,
+) -> Result<(), StoreError> {
+    for (i, e) in edges.iter_mut().enumerate() {
+        let (from, to) = (e.from.0, e.to.0);
+        for c in e.cells.iter_mut().filter(|c| c.kind == cell_type::EVIDENCE) {
+            let CellPayload::Bytes(b) = &c.payload else {
+                continue;
+            };
+            if b.first() != Some(&EVIDENCE_TAG) {
+                continue;
+            }
+            let ev = decode_evidence(b, table_len, string).map_err(|why| StoreError::Corrupt {
+                detail: format!("interned EVIDENCE of edge {i} ({from} -> {to}): {why}"),
+            })?;
+            *c = ev.to_cell();
+        }
+    }
+    Ok(())
+}
+
+/// Expand the interned EVIDENCE of `edges`, read from the file `m`, with the
+/// file's own string table. A file with no `"strings"` section expands
+/// against an empty table, so an interned payload in it is `Corrupt`.
+pub(crate) fn expand_file_evidence(
+    m: &MmapContainer,
+    edges: &mut [Edge],
+) -> Result<(), StoreError> {
+    match m.section::<ArchivedStringTable>(STRINGS_SECTION)? {
+        Some(table) => expand_evidence(edges, table),
+        None => expand_with(edges, 0, &|_| None),
+    }
+}
+
+/// Intern `edges` in place for writing and return the `"strings"` section to
+/// write beside them (`None` when nothing was interned) with the counts.
+/// `intern` false (a test's baseline) leaves every cell as written. An
+/// in-memory EVIDENCE cell that already holds an interned-looking payload is
+/// `Invalid`: its strings are not in this file's table, so it would read back
+/// as something else (or as `Corrupt`).
+fn intern_for_write(
+    edges: &mut [Edge],
+    intern: bool,
+) -> Result<(Option<EncodedSection>, InternStats), StoreError> {
+    let raw = edges.iter().position(|e| {
+        e.cells.iter().any(|c| {
+            c.kind == cell_type::EVIDENCE
+                && matches!(&c.payload, CellPayload::Bytes(b) if b.first() == Some(&EVIDENCE_TAG))
+        })
+    });
+    if let Some(i) = raw {
+        return Err(StoreError::Invalid(format!(
+            "edge {i} carries an EVIDENCE cell in the store's interned Bytes form (tag \
+             {EVIDENCE_TAG:#04x}); EVIDENCE is JSON in memory (code-domain evidence.rs), and \
+             read_to_owned's raw form is only written back through its own file"
+        )));
+    }
+    if !intern {
+        let kept_json = edges
+            .iter()
+            .flat_map(|e| &e.cells)
+            .filter(|c| c.kind == cell_type::EVIDENCE)
+            .count();
+        return Ok((None, InternStats { interned: 0, kept_json }));
+    }
+    let mut table = StringTable::default();
+    let stats = intern_evidence(edges, &mut table);
+    let section = if table.is_empty() {
+        None
+    } else {
+        Some(encode_section(STRINGS_SECTION, &table)?)
+    };
+    Ok((section, stats))
+}
+
+// ============================================================================
+// RepoGraph codec — core + "code" section + "strings" section
+// ============================================================================
+
+/// One encoded file, and what the `[gmap] layout` marker counts about it.
+pub(crate) struct EncodedFile {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) has_code: bool,
+    pub(crate) has_strings: bool,
+    pub(crate) evidence: InternStats,
+}
+
+impl EncodedFile {
+    /// Fold this file's counts into a layout's running totals.
+    pub(crate) fn count_into(
+        &self,
+        code: &mut usize,
+        strings: &mut usize,
+        evidence: &mut InternStats,
+    ) {
+        *code += usize::from(self.has_code);
+        *strings += usize::from(self.has_strings);
+        evidence.absorb(self.evidence);
+    }
+}
+
+/// Encode `g` as the bytes of one `.gmap`, with what the `[gmap] layout`
+/// marker counts (code / strings sections written, EVIDENCE interned / kept).
+pub(crate) fn encode_repo_graph_counted(g: &RepoGraph) -> Result<EncodedFile, StoreError> {
+    encode_shard(g, true)
+}
+
+/// `cross_stack.gmap`'s bytes: a core of `edges` (no nodes, no code section)
+/// plus the `"strings"` section their interned EVIDENCE needs.
+pub(crate) fn encode_cross_edges(edges: &[Edge]) -> Result<EncodedFile, StoreError> {
+    let mut core = Container::for_cross_edges(edges.to_vec());
+    let (strings, evidence) = intern_for_write(&mut core.edges, true)?;
+    let sections: Vec<EncodedSection> = strings.into_iter().collect();
+    Ok(EncodedFile {
+        bytes: encode_file(&mut core, &sections)?,
+        has_code: false,
+        has_strings: !sections.is_empty(),
+        evidence,
+    })
+}
+
+fn encode_shard(g: &RepoGraph, intern: bool) -> Result<EncodedFile, StoreError> {
     let mut core = code_core(g);
     let code = CodeSection::from_repo_graph(g);
     // LC.6 marker, un-gated: one line per encoded shard that carries an
@@ -325,31 +683,40 @@ pub(crate) fn encode_repo_graph_counted(g: &RepoGraph) -> Result<(Vec<u8>, bool)
             iface.len(),
         );
     }
-    let sections: Vec<EncodedSection> = if code.is_empty() {
-        Vec::new()
-    } else {
-        vec![encode_section(CODE_SECTION, &code)?]
-    };
+    let mut sections: Vec<EncodedSection> = Vec::new();
+    if !code.is_empty() {
+        sections.push(encode_section(CODE_SECTION, &code)?);
+    }
     let has_code = !sections.is_empty();
-    Ok((encode_file(&mut core, &sections)?, has_code))
+    let (strings, evidence) = intern_for_write(&mut core.edges, intern)?;
+    let has_strings = strings.is_some();
+    sections.extend(strings);
+    Ok(EncodedFile { bytes: encode_file(&mut core, &sections)?, has_code, has_strings, evidence })
 }
 
 /// Encode a `RepoGraph` as the bytes of one `.gmap`: the domain-free core
 /// (code header, nodes, edges, `node_kinds` from `g.nav.kind_by_id`) plus the
-/// `"code"` section (nav maps, symbols, unresolved calls / refs, properties).
-/// A graph with nothing for the section (no nav, symbols, unresolved refs or
-/// properties) is written as its core alone. Deterministic: every map and set
-/// is flattened sorted by key.
+/// `"code"` section (nav maps, symbols, unresolved calls / refs, properties)
+/// and, since format 3, the `"strings"` section of its interned EVIDENCE
+/// ([`intern_evidence`]). A graph with nothing for a section (no nav, symbols,
+/// unresolved refs or properties; no canonical EVIDENCE) is written without
+/// it. Deterministic: every map and set is flattened sorted by key, and the
+/// string table is filled in edge order. An edge whose EVIDENCE cell already
+/// holds the interned `Bytes` form (`read_to_owned`'s raw core, taken out of
+/// its file) is `StoreError::Invalid`.
 pub fn encode_repo_graph(g: &RepoGraph) -> Result<Vec<u8>, StoreError> {
-    Ok(encode_repo_graph_counted(g)?.0)
+    Ok(encode_repo_graph_counted(g)?.bytes)
 }
 
 /// The inverse of `encode_repo_graph`: the core's nodes, edges and kinds plus
-/// the `"code"` section, `properties` included (LC.7). A file without a code
-/// section (a nav-less graph, or `cross_stack.gmap`) decodes with empty nav /
-/// symbols / unresolved refs / properties.
+/// the `"code"` section, `properties` included (LC.7), with every interned
+/// EVIDENCE cell expanded back to its JSON ([`expand_evidence`]), so the graph
+/// equals the one written. A file without a code section (a nav-less graph, or
+/// `cross_stack.gmap`) decodes with empty nav / symbols / unresolved refs /
+/// properties. An interned payload that does not decode is `Corrupt`.
 pub fn decode_repo_graph(m: &MmapContainer) -> Result<RepoGraph, StoreError> {
-    let core: Container = rkyv::deserialize::<Container, rkyv::rancor::Error>(m.archived()?)?;
+    let mut core: Container = rkyv::deserialize::<Container, rkyv::rancor::Error>(m.archived()?)?;
+    expand_file_evidence(m, &mut core.edges)?;
     let code: CodeSection = match code_section_of(m)? {
         Some(archived) => rkyv::deserialize::<CodeSection, rkyv::rancor::Error>(archived)?,
         None => CodeSection::default(),
@@ -380,8 +747,8 @@ pub fn qname_of(m: &MmapContainer, id: NodeId) -> Result<Option<String>, StoreEr
     Ok(code_section_of(m)?.and_then(|s| s.qname(id)).map(str::to_string))
 }
 
-/// Serialise a `RepoGraph` to a `.gmap` file (preamble + code section + rkyv
-/// core, see `FORMAT_VERSION`). Writes to `<path>.tmp` first, then atomically
+/// Serialise a `RepoGraph` to a `.gmap` file (preamble + code and strings
+/// sections + rkyv core, see `FORMAT_VERSION`). Writes to `<path>.tmp` first, then atomically
 /// renames over `<path>` so a crash mid-write never leaves a half-written file
 /// in place. Existing readers' mmaps stay valid against the old inode until
 /// they re-open.
@@ -470,5 +837,193 @@ mod tests {
         write_repo_graph(&g, &path).unwrap();
         let back = decode_repo_graph(&MmapContainer::open(&path).unwrap()).unwrap();
         assert_eq!(back.properties, g.properties);
+    }
+
+    // ------------------------------------------------------------------------
+    // CD.7b: EVIDENCE interning
+    // ------------------------------------------------------------------------
+
+    /// The #[cfg(test)] switch: `g` encoded exactly as the interning writer
+    /// does, with interning disabled (every EVIDENCE cell stays JSON, no
+    /// `"strings"` section) - the pre-format-3 shard of the same graph.
+    fn encode_repo_graph_uninterned(g: &RepoGraph) -> Vec<u8> {
+        encode_shard(g, false).unwrap().bytes
+    }
+
+    /// `n` edges over 5 emitters, 7 rules and 50 files, every basis, lines up
+    /// to 3 varint bytes, some optional fields absent - the shape a real
+    /// shard's EVIDENCE has.
+    fn evidence_graph(n: u64) -> RepoGraph {
+        use glia_core::{Confidence, Node};
+        let repo = RepoId::from_canonical("test://cd7b-shrink");
+        let emitters = ["graph:calls", "graph:imports", "parser:rust", "graph:nav", "pass:tests"];
+        let rules = [
+            "import_binding",
+            "module_symbol",
+            "receiver_type",
+            "self_method",
+            "intra_file",
+            "global_unique",
+            "enum_member",
+        ];
+        let bases = [Basis::Site, Basis::FromNode, Basis::ToNode, Basis::File, Basis::None];
+        let nodes: Vec<Node> = (0..n + 1)
+            .map(|i| Node { id: NodeId(i), repo, confidence: Confidence::Strong, cells: vec![] })
+            .collect();
+        let edges = (0..n)
+            .map(|i| {
+                let mut ev = Evidence::emitter(emitters[(i % 5) as usize]);
+                if i % 4 != 0 {
+                    ev = ev.rule(rules[(i % 7) as usize]);
+                }
+                if i % 9 != 0 {
+                    let file = format!("crates/engine/src/module_{:02}/file_{}.rs", i % 50, i % 50);
+                    ev = ev.at(file, (i * 37 % 40_000) as u32);
+                }
+                ev.basis = bases[(i % 5) as usize];
+                Edge::new(NodeId(i), NodeId(i + 1), edge_category::CALLS, Confidence::Strong)
+                    .with_cell(ev.to_cell())
+            })
+            .collect();
+        RepoGraph {
+            repo,
+            nodes,
+            edges,
+            nav: CodeNav::default(),
+            symbols: SymbolTable::default(),
+            unresolved_calls: vec![],
+            unresolved_refs: vec![],
+            properties: Default::default(),
+        }
+    }
+
+    #[test]
+    fn evidence_bytes_shrink() {
+        let g = evidence_graph(10_000);
+        let plain = encode_repo_graph_uninterned(&g);
+        let encoded = encode_repo_graph_counted(&g).unwrap();
+        assert_eq!(encoded.evidence, InternStats { interned: 10_000, kept_json: 0 });
+        assert!(encoded.has_strings && !encoded.has_code);
+        let json_bytes: usize = g
+            .edges
+            .iter()
+            .map(|e| match &e.cells[0].payload {
+                CellPayload::Json(s) => s.len(),
+                other => panic!("fixture EVIDENCE is not JSON: {other:?}"),
+            })
+            .sum();
+        let saved = plain.len() - encoded.bytes.len();
+        eprintln!(
+            "[cd7b] shrink: edges=10000 json={json_bytes}B uninterned={}B interned={}B \
+             saved={saved}B ({} per edge)",
+            plain.len(),
+            encoded.bytes.len(),
+            saved / 10_000
+        );
+        assert!(json_bytes / 10_000 >= 80, "fixture payloads are not real-sized: {json_bytes}");
+        assert!(saved >= 700_000, "interning saved only {saved} bytes over 10,000 edges");
+
+        // The smaller file is the same graph.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("shrink.gmap");
+        std::fs::write(&path, &encoded.bytes).unwrap();
+        assert_eq!(decode_repo_graph(&MmapContainer::open(&path).unwrap()).unwrap().edges, g.edges);
+    }
+
+    #[test]
+    fn varints_round_trip_at_every_width() {
+        for v in [0u64, 1, 127, 128, 16_383, 16_384, u64::from(u32::MAX), u64::MAX - 1, u64::MAX] {
+            let mut out = Vec::new();
+            put_varint(&mut out, v);
+            let mut at = 0;
+            assert_eq!(take_varint(&out, &mut at, "v"), Ok(v), "{v}");
+            assert_eq!(at, out.len(), "{v}: every byte consumed");
+            let mut at = 0;
+            assert!(take_varint(&out[..out.len() - 1], &mut at, "v").is_err(), "{v}: truncated");
+        }
+        let mut at = 0;
+        assert!(take_varint(&[0xff; 11], &mut at, "v").unwrap_err().contains("overflows"));
+    }
+
+    /// The table is filled in first-seen edge order and shared by every
+    /// payload; an absent rule / file / line is index 0 and costs one byte.
+    #[test]
+    fn interning_is_first_seen_and_compact() {
+        let cell = |ev: Evidence| ev.to_cell();
+        let mut edges = vec![
+            Edge::new(NodeId(1), NodeId(2), edge_category::CALLS, glia_core::Confidence::Strong)
+                .with_cell(cell(
+                    Evidence::emitter("graph:calls").rule("module_symbol").at("a.rs", 4),
+                )),
+            Edge::new(NodeId(2), NodeId(3), edge_category::CALLS, glia_core::Confidence::Strong)
+                .with_cell(cell(Evidence::emitter("graph:nav"))),
+            Edge::new(NodeId(3), NodeId(4), edge_category::CALLS, glia_core::Confidence::Strong)
+                .with_cell(cell(Evidence::emitter("graph:calls").at("a.rs", 0))),
+        ];
+        let before = edges.clone();
+        let mut table = StringTable::default();
+        let stats = intern_evidence(&mut edges, &mut table);
+        assert_eq!(stats, InternStats { interned: 3, kept_json: 0 });
+        assert_eq!(table.strings, vec!["graph:calls", "module_symbol", "a.rs", "graph:nav"]);
+        let bytes = |e: &Edge| match &e.cells[0].payload {
+            CellPayload::Bytes(b) => b.clone(),
+            other => panic!("not interned: {other:?}"),
+        };
+        assert_eq!(bytes(&edges[0]), vec![0x01, 0, 2, 3, 5, basis_byte(Basis::Site)]);
+        assert_eq!(bytes(&edges[1]), vec![0x01, 3, 0, 0, 0, basis_byte(Basis::None)]);
+        assert_eq!(bytes(&edges[2]), vec![0x01, 0, 0, 3, 1, basis_byte(Basis::Site)]);
+
+        // Expanding against the same table gives the exact JSON back.
+        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&table).unwrap();
+        let t = rkyv::access::<ArchivedStringTable, rkyv::rancor::Error>(&archived).unwrap();
+        expand_evidence(&mut edges, t).unwrap();
+        assert_eq!(edges, before);
+    }
+
+    /// A payload the writer did not produce never decodes to something else:
+    /// every malformation is a reason, never a panic or a wrong evidence.
+    #[test]
+    fn malformed_payloads_are_reasons() {
+        let table = ["graph:calls"];
+        let get = |i: usize| table.get(i).copied();
+        for (bytes, why) in [
+            (vec![0x01], "truncated varint (emitter)"),
+            (vec![0x01, 1, 0, 0, 0, 1], "emitter index 1 outside the 1-entry strings table"),
+            (vec![0x01, 0, 2, 0, 0, 1], "rule index 1 outside"),
+            (vec![0x01, 0, 0, 0, 0], "no basis byte"),
+            (vec![0x01, 0, 0, 0, 0, 9], "unknown basis byte 9"),
+            (vec![0x01, 0, 0, 0, 0, 1, 0], "1 trailing byte(s)"),
+            (vec![0x01, 0, 0, 0, 0x81, 0x80, 0x80, 0x80, 0x10, 1], "past u32"),
+        ] {
+            let got = decode_evidence(&bytes, 1, &get).unwrap_err();
+            assert!(got.contains(why), "{bytes:?}: {got}");
+        }
+        assert_eq!(
+            decode_evidence(&[0x01, 0, 0, 0, 0, 1], 1, &get).unwrap().to_cell().payload,
+            CellPayload::Json(r#"{"emitter":"graph:calls","basis":"site"}"#.into())
+        );
+    }
+
+    /// An EVIDENCE cell that already holds the interned form (a raw core taken
+    /// out of its file) is refused at write time, never written against the
+    /// wrong table; a VECTOR `Bytes` cell with the same first byte is not
+    /// EVIDENCE and is written as is.
+    #[test]
+    fn raw_interned_evidence_is_not_written() {
+        let mut g = evidence_graph(2);
+        g.edges[1].cells[0].payload = CellPayload::Bytes(vec![0x01, 0, 0, 0, 0, 1]);
+        match encode_repo_graph(&g) {
+            Err(StoreError::Invalid(why)) => assert!(why.contains("edge 1"), "{why}"),
+            other => panic!("expected Invalid, got {:?}", other.map(|b| b.len())),
+        }
+        let mut g = evidence_graph(2);
+        g.edges[1].cells.push(glia_core::Cell {
+            kind: cell_type::VECTOR,
+            payload: CellPayload::Bytes(vec![0x01, 7, 7]),
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vector.gmap");
+        write_repo_graph(&g, &path).unwrap();
+        assert_eq!(decode_repo_graph(&MmapContainer::open(&path).unwrap()).unwrap().edges, g.edges);
     }
 }

@@ -12,6 +12,9 @@
 //! with no pre-leap leftovers, and a parse cache the next build reuses whole.
 //! `[gmap] ` and `[incremental] ` stderr lines are relayed:
 //! `cargo test -p glia-cli --test gmap_compat_cli -- --nocapture 2>&1 | grep -E '^\[(gmap|incremental)\] '`
+//!
+//! CD.7b: `glia inspect` over a 0.5.0 layout (`tests/fixtures/gmap_v050`,
+//! format 2) exits 1 and says rebuild, for one shard and for the directory.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -190,4 +193,36 @@ fn build_over_a_pre_leap_repo() {
     assert!(lines_with(&again, "[incremental] cache stamp mismatch").is_empty(), "{again}");
     assert_same_gmaps(&gmaps_in(&layout), &upgraded, "second build over the upgraded repo");
     assert!(files_in(&legacy) == legacy_before, "the second build modified the legacy layout");
+}
+
+fn v050_layout() -> PathBuf {
+    fixture().parent().expect("fixtures dir").join("gmap_v050/layout")
+}
+
+/// `glia inspect <path>`: exit code and stderr.
+fn inspect(path: &Path) -> (Option<i32>, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_glia"))
+        .args(["inspect", path.to_str().expect("scratch path is UTF-8")])
+        .output()
+        .expect("glia runs");
+    (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+#[test]
+fn inspect_a_v050_layout_says_rebuild() {
+    let s = Scratch::new("inspect-v050");
+    let layout = s.0.join("repo").join(".glia").join("graph");
+    copy_tree(&v050_layout(), &layout);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(layout.join("manifest.json")).expect("manifest"))
+            .expect("manifest json");
+    let shard = layout.join(manifest["shards"][0]["path"].as_str().expect("a shard path"));
+    let cross = layout.join("cross_stack.gmap");
+    for path in [&shard, &cross, &layout] {
+        let (code, stderr) = inspect(path);
+        assert_eq!(code, Some(1), "glia inspect {}: {stderr}", path.display());
+        let want = format!("error: {}: old format v2 (this build reads v3) - rebuild the graph", path.display());
+        assert!(stderr.lines().any(|l| l == want), "glia inspect {}:\n{stderr}", path.display());
+        assert!(!stderr.contains("[inspect] "), "a 0.5.0 file was inspected:\n{stderr}");
+    }
 }

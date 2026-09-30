@@ -38,7 +38,11 @@ pub const MAGIC: [u8; 4] = *b"GMAP";
 /// touches anything, so an old or foreign file reports `OldFormat` /
 /// `FutureFormat` instead of an rkyv validation error) and the archived
 /// `Header.version` (checked again after validation). Version 2 (0.5.0) added
-/// the preamble; every 0.4.x file has none. The file layout:
+/// the preamble; every 0.4.x file has none. Version 3 (0.5.1, CD.7b) stores
+/// every canonical EVIDENCE edge cell interned: a compact `Bytes` payload whose
+/// strings live in the file's `"strings"` section (`STRINGS_SECTION`,
+/// `intern_evidence` / `expand_evidence`), expanded back to the exact JSON on
+/// read. The file layout:
 ///
 /// ```text
 /// [0..8)   PREAMBLE_MAGIC = b"GLIAGMAP"
@@ -57,7 +61,7 @@ pub const MAGIC: [u8; 4] = *b"GMAP";
 /// every future version: a reader must always be able to name the version of a
 /// file it cannot read. This number is glia's store format and is unrelated to
 /// engram-core's `GMAP_FORMAT_VERSION`.
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 
 /// First 8 bytes of every `.gmap` since format 2.
 pub(crate) const PREAMBLE_MAGIC: [u8; 8] = *b"GLIAGMAP";
@@ -586,6 +590,13 @@ impl MmapContainer {
 /// Deserialize a `.gmap` back to owned form: the core, and every section's
 /// bytes copied out verbatim in table order. Used by mutation operations that
 /// modify the core and re-write the file with its sections untouched.
+///
+/// This is the RAW on-disk form (format 3, CD.7b): a code shard's EVIDENCE
+/// edge cells come back as the interned `CellPayload::Bytes` whose strings are
+/// in the `"strings"` section beside them, exactly as written, so a
+/// read-modify-write keeps the core and that table consistent. The expanded
+/// form, every EVIDENCE cell back as its JSON, is `decode_repo_graph` (and
+/// `read_merged_sharded` for a layout).
 pub fn read_to_owned(path: &Path) -> Result<OwnedFile, StoreError> {
     let mmap = MmapContainer::open(path)?;
     owned_file(&mmap)

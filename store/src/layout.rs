@@ -16,7 +16,10 @@ use glia_code_domain::{GRAPH_TYPE, walk_gating};
 use glia_core::{CellPayload, CellTypeId, Confidence, Edge, EdgeCategoryId, NodeId};
 use glia_graph::RepoGraph;
 
-use crate::code_section::{decode_repo_graph, encode_repo_graph_counted};
+use crate::code_section::{
+    InternStats, decode_repo_graph, encode_cross_edges, encode_repo_graph_counted,
+    expand_file_evidence,
+};
 use crate::container::{
     Container, FORMAT_VERSION, MmapContainer, encode_file, hex_xxhash64, read_to_owned, set_cell,
     write_atomic,
@@ -399,10 +402,14 @@ fn check_foreign(f: &ForeignShard, taken: &[&str]) -> Result<(), StoreError> {
 /// Write a sharded `.gmap` layout: one `<name>.gmap` per input graph plus a
 /// `cross_stack.gmap` if `cross_edges` is non-empty, plus a `manifest.json`.
 /// Returns the manifest that was written so callers can inspect hashes. Each
-/// per-graph shard is `encode_repo_graph` (core + `"code"` section);
-/// `cross_stack.gmap` is a core with no section. Prints one un-gated
-/// `[gmap] layout <dir>: shards=<n> format=<v> sections=code:<k>` line per
-/// write, `k` = shards carrying a code section.
+/// per-graph shard is `encode_repo_graph` (core + `"code"` section + the
+/// `"strings"` section of its interned EVIDENCE); `cross_stack.gmap` is a
+/// core with no code section, plus its own `"strings"` section. Prints one
+/// un-gated `[gmap] layout <dir>: shards=<n> format=<v> sections=code:<k>
+/// strings:<s> evidence=<interned>/<kept_json>` line per write: `k` / `s` =
+/// files carrying a code / strings section, `interned` / `kept_json` = the
+/// EVIDENCE cells of every encoded file stored interned / left as written
+/// (CD.7b).
 ///
 /// Shard names must be unique and non-empty — duplicates produce a manifest
 /// whose loader will reject it. Records no layout metadata: see
@@ -468,12 +475,14 @@ fn write_sharded_with(
 
     let mut entries = Vec::with_capacity(shards.len());
     let mut shards_skipped = 0usize;
-    let mut code_sections = 0usize;
+    let (mut code_sections, mut strings_sections) = (0usize, 0usize);
+    let mut evidence = InternStats::default();
     for (name, g) in shards {
         let file_name = format!("{name}.gmap");
         let shard_path = dir.join(&file_name);
-        let (bytes, has_code) = encode_repo_graph_counted(g)?;
-        code_sections += usize::from(has_code);
+        let encoded = encode_repo_graph_counted(g)?;
+        encoded.count_into(&mut code_sections, &mut strings_sections, &mut evidence);
+        let bytes = encoded.bytes;
         let content_hash = hex_xxhash64(&bytes);
 
         // Skip-when-unchanged: write only if the prior manifest didn't
@@ -524,8 +533,9 @@ fn write_sharded_with(
         None
     } else {
         let shard_path = dir.join(CROSS_STACK_NAME);
-        let mut container = Container::for_cross_edges(cross_edges.to_vec());
-        let bytes = encode_file(&mut container, &[])?;
+        let encoded = encode_cross_edges(cross_edges)?;
+        encoded.count_into(&mut code_sections, &mut strings_sections, &mut evidence);
+        let bytes = encoded.bytes;
         let content_hash = hex_xxhash64(&bytes);
         let unchanged = prior_manifest
             .as_ref()
@@ -573,10 +583,15 @@ fn write_sharded_with(
         write_atomic(&manifest_path, &manifest_bytes)?;
     }
     // LC.5b marker, un-gated: one line per layout write naming how many files
-    // carry the code domain's section (cross_stack.gmap never does).
+    // carry the code domain's section (cross_stack.gmap never does) and, since
+    // CD.7b, the strings section, and how many EVIDENCE cells were interned /
+    // left as written across every encoded file.
     eprintln!(
-        "[gmap] layout {}: shards={shard_files} format={FORMAT_VERSION} sections=code:{code_sections}",
-        dir.display()
+        "[gmap] layout {}: shards={shard_files} format={FORMAT_VERSION} \
+         sections=code:{code_sections} strings:{strings_sections} evidence={}/{}",
+        dir.display(),
+        evidence.interned,
+        evidence.kept_json,
     );
     // Diagnostic: emit how many shards were skipped (env-gated to keep
     // hot-path output clean by default; opt in via GLIA_STORE_VERBOSE=1).
@@ -834,8 +849,10 @@ fn write_merged_with(
 /// Read a sharded directory back into an owned `MergedGraph`. Reconstructs
 /// every per-language `RepoGraph` from its archived shard (core + code
 /// section, `properties` included since LC.7), then attaches the cross-stack
-/// edges and the post-pass undo record (LC.10a). Drops the layout metadata:
-/// see [`read_merged_sharded_meta`].
+/// edges and the post-pass undo record (LC.10a). Every interned EVIDENCE cell,
+/// in a shard or in `cross_stack.gmap`, comes back as its JSON (format 3,
+/// CD.7b); one that does not decode is `Corrupt` naming its shard. Drops the
+/// layout metadata: see [`read_merged_sharded_meta`].
 ///
 /// When the layout cannot be served (`StoreError::needs_rebuild`) it prints one
 /// `[gmap] needs rebuild: <dir>: <reason>` line before returning the error, so
@@ -892,16 +909,18 @@ fn read_merged_sharded_inner(
 ) -> Result<(glia_graph::MergedGraph, LayoutMeta), StoreError> {
     let sharded = ShardedMmap::open(dir)?;
     let mut graphs = Vec::with_capacity(sharded.shards.len());
-    for (_name, mmap) in &sharded.shards {
-        graphs.push(decode_repo_graph(mmap)?);
+    for (name, mmap) in &sharded.shards {
+        graphs.push(decode_repo_graph(mmap).map_err(|e| in_shard(name, e))?);
     }
     for entry in sharded.manifest.shards.iter().filter(|e| !e.is_code()) {
         eprintln!("[gmap] skipped foreign shard {} graph_type={}", entry.name, entry.graph_type);
     }
     let cross_edges = if let Some(cross_mmap) = &sharded.cross {
         let archived = cross_mmap.archived()?;
-        let owned: Container =
+        let mut owned: Container =
             rkyv::deserialize::<Container, rkyv::rancor::Error>(archived)?;
+        expand_file_evidence(cross_mmap, &mut owned.edges)
+            .map_err(|e| in_shard("cross_stack", e))?;
         owned.edges
     } else {
         Vec::new()
@@ -919,6 +938,18 @@ fn read_merged_sharded_inner(
         },
         meta,
     ))
+}
+
+/// `e` with the shard it came from named, when it is `Corrupt` (a code or
+/// strings section that does not validate, an interned EVIDENCE payload that
+/// does not decode): the detail alone names only the edge.
+fn in_shard(name: &str, e: StoreError) -> StoreError {
+    match e {
+        StoreError::Corrupt { detail } => {
+            StoreError::Corrupt { detail: format!("shard {name}: {detail}") }
+        }
+        other => other,
+    }
 }
 
 /// Cheap freshness check: is anything under `repo_path` that the BUILDER would
@@ -1244,7 +1275,9 @@ fn scan_for_newer(
 /// Upsert a cell in a sharded layout. Scans each shard for the target node,
 /// deserializes only the matching shard, mutates, and re-writes that shard
 /// (its sections copied verbatim) plus the manifest (updated content hash).
-/// Other shards stay untouched.
+/// Other shards stay untouched. The shard is read raw (`read_to_owned`), so
+/// its interned EVIDENCE stays interned against the `"strings"` section that
+/// is copied back beside it (format 3).
 pub fn upsert_cell_sharded(
     dir: &Path,
     node_id: NodeId,
