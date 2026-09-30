@@ -93,6 +93,18 @@ pub(crate) enum QueryCmd {
     /// reached it and its handlers; nothing serving it is a FACT with the
     /// mechanism's caveats and near misses. An answer either way: exits 0.
     Serves(serves::Args),
+    /// Splits (CD.2d): where a scope splits into services at the least
+    /// coupling — the module (or community) quotient cut by Stoer-Wagner into
+    /// `--parts` parts above a balance floor, or with `--from` / `--to` the
+    /// minimum cut separating one side (part 0) from the other. A heading
+    /// gives the mode, quotient, cut weight against the global minimum and
+    /// whether it is balanced; then the parts (label, nodes, units, `glia
+    /// arch` services, entrypoints, modules), the cut edges located at their
+    /// evidence sites, the blockers (data entities two or more parts write,
+    /// cycles between parts) and each part against `glia arch`. Tier
+    /// heuristic: a suggestion, never a verdict. Exits 0 with a cut, 1 with
+    /// none (the absence says why), 2 on an error or a refused argument.
+    Splits(splits::Args),
     /// Why (LE.5): every edge from one node to another, each with the
     /// extractor or resolver that emitted it, its rule, call site and
     /// confidence, tiered fact (read at a site), derived (paired by a resolver
@@ -113,6 +125,7 @@ pub(crate) fn run(c: QueryCmd) -> i32 {
         QueryCmd::Pack(a) => pack::run(a),
         QueryCmd::Pages(a) => pages::run(a),
         QueryCmd::Serves(a) => serves::run(a),
+        QueryCmd::Splits(a) => splits::run(a),
         QueryCmd::Why(a) => why::run(a),
     }
 }

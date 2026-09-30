@@ -1,0 +1,2 @@
+# pyo3 surface of py/src/splits.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.splits(scope: Option<String> = None, parts: usize = 2, quotient: &str = "module", source: Option<String> = None, sink: Option<String> = None, min_share: f64 = 0.1, seed: u64 = 42) -> PyResult<Py<PyAny>>
