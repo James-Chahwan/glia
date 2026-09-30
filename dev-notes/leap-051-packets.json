@@ -8960,6 +8960,624 @@
    "spec_group": "CF"
   },
   {
+   "id": "CG.1",
+   "title": "TypeScript / JavaScript class fields whose value is an arrow function or a function expression are METHOD nodes (qname <Class>::<field>) that carry their body's calls, so `private handleX = (e) => { this.stop() }` and `this.handleX()` join the call graph in Angular, React and Vue classes alike",
+   "batch": "CG",
+   "area": "CA-10 TS arrow-function class fields",
+   "loc": 240,
+   "rationale": "VERIFIER (HEAD 90d1076, after CB.4 84a3581 and CB.12 f683e2b landed): visit_class (parsers/code/typescript/src/lib.rs:294) still sends `public_field_definition` only to visit_field (:342 -> :569); visit_method (:913) now builds its cells with build_cells_from(&n, first_decorator(n), ..) (CB.4). Re-measured: target/debug/glia (built 01:32 from this tree) `analyze --format json` on the probe fixture lists METHODs ngAfterViewInit / stopAnimation / renderFrame / persist / bump / render / notify and no field METHOD; the leap wheel grades METHOD 0/6, CALLS 0/6, DEFINES 0/1, FORBID VIOLATIONS 0 (identical to 2170ff8). The member survey re-run on the git-archive copies gives quokka_web 5 and Kina frontend 11 arrow fields, as below. Graph query: repo-graph find `visit_field` (TS :569, Java / C# visit_field_decl).\nparsers/code/typescript/src/lib.rs visit_class (:294 at 2170ff8) sends a `method_definition` member to visit_method (:913), which mints the METHOD, its DEFINES edge, the `class_methods` entry that `this.m()` binds through, and walks the body with collect_calls_in(body, method_id, Some(class_id)) (:959). A `public_field_definition` member goes to visit_field (:342 -> :569), which only records a class-typed field type (A6.2b) or an `inject(T)` candidate (A7.1) and returns: it mints no node and never walks the value, so an arrow-function field's body calls belong to nobody (not even the class).\nMEASURED at HEAD (target/debug/glia, GLIA_NO_PERSIST=1 analyze --format json on git-archive copies under the scratchpad probe dir CA-engram): quokka a77d4cb - `...ascii-quokka-hero.component::AsciiQuokkaHeroComponent` has 13 METHOD children and no node for applyAsciiColor (ascii-quokka-hero.component.ts:445) or handleMotionPreferenceChange (:470); the CLASS has only DEFINES out-edges; stopAnimation's callers are ngOnDestroy and setupObservers only (the :474 call is lost), and `this.applyAsciiColor()` in ngAfterViewInit (:92) binds to nothing. Survey of class members of the shape `[modifiers] name = [async] (...) =>`: quokka_web 5 (ascii-quokka-hero 2, hero-wave-shader 3), Kina frontend 11 (trade-view.component.ts isBuyer / isSeller / isParty / canCancel / canClaimTimeout ... 9, ui-kit noop, kyc trackBy).\nSTACKED PARSERS: parsers/code/react, angular and vue are thin wrappers over glia_parser_typescript::parse_file (vue passes the <script> block); .js / .jsx route to `typescript` (engine/src/extract.rs detect_language). The framework extractors (extractors/src/react.rs scan_component_names / scan_hook_names, angular.rs, vue.rs) scan top-level declaration lines and mint COMPONENT / HOOK overlays; none reads class members. So one visitor in the TS parser covers Angular components, React class components (probe: a `class Counter extends React.Component { handleClick = () => { this.bump(); } ... render() { return <button .../> } }` in a .jsx parses to CLASS + bump + render METHODs today, handleClick missing) and Vue class components.\nProbe fixture ts-arrow-class-fields graded at HEAD with the leap wheel: METHOD 0/6, CALLS 0/6, DEFINES 0/1, FORBID VIOLATIONS 0 (all five forbid rows are regression guards; their qnames are the exact ones the dump prints).\nGraph queries run: repo-graph find `visit_field` (parsers/code/typescript/src/lib.rs:569, plus the Java / C# visit_field_decl), read of the TS visitors; no in-repo fixture holds an arrow class field (grep of bench/substrate-gap/fixtures, engine/tests, parsers).",
+   "entry_points": [
+    "parsers/code/typescript/src/lib.rs:294 visit_class - collect the class body's method_definition names first; the `public_field_definition` arm (:342) calls visit_field as today, then the new visit_function_field",
+    "parsers/code/typescript/src/lib.rs (new fn) visit_function_field - an arrow_function / function_expression / generator_function field value becomes a METHOD <class_qname>::<field> with DEFINES, class_methods entry, nav record and a collect_calls_in walk of its body",
+    "parsers/code/typescript/src/lib.rs:93 struct Acc - new FnFieldStats counters (arrow, function, calls, shadowed) for the marker",
+    "parsers/code/typescript/src/lib.rs:35 parse_file - the per-file `[ts-fields]` marker beside the `[orm-typeorm]` line",
+    "parsers/code/typescript/src/lib.rs:2340 mod tests - seven new tests",
+    "engine/tests/ts_function_fields.rs (new) - end-to-end CALLS / EVIDENCE / ENDPOINT attribution through generate_one",
+    "bench/substrate-gap/fixtures/ts-arrow-class-fields/ (new) - package.json, hero.component.ts, store.js, Counter.jsx, key.json"
+   ],
+   "files_touched": [
+    "parsers/code/typescript/src/lib.rs",
+    "engine/tests/ts_function_fields.rs",
+    "bench/substrate-gap/fixtures/ts-arrow-class-fields/Counter.jsx",
+    "bench/substrate-gap/fixtures/ts-arrow-class-fields/hero.component.ts",
+    "bench/substrate-gap/fixtures/ts-arrow-class-fields/package.json",
+    "bench/substrate-gap/fixtures/ts-arrow-class-fields/store.js",
+    "bench/substrate-gap/fixtures/ts-arrow-class-fields/key.json"
+   ],
+   "implementation": "DESIGN: a function-valued class field IS a method for every consumer (it is called as `this.f()`, passed as a handler, and holds behaviour), so it takes the METHOD kind and the exact treatment visit_method gives a method; no new kind, category or cell. Alternatives weighed: attributing the field body's calls to the CLASS (loses the handler as a unit, and the class would 'call' every handler's callees) or to the constructor (field initialisers run there, but a handler's body runs later, on the event) - both wrong for the Engram / trace question 'what does this handler do'.\n1. visit_class: before the member loop, `let method_names: HashSet<&str>` = the `name` text of every `method_definition` child of the body. In the loop, the `public_field_definition` arm becomes `{ visit_field(member, src, module_id, class_id, acc); visit_function_field(member, src, file_rel, &class_qname, class_id, repo, &method_names, acc); }` (visit_field first and unchanged, so A6.2b field types and A7.1 inject() candidates are exactly as today).\n2. `fn visit_function_field(field, src, file_rel, class_qname, class_id, repo, method_names, acc)`: value = field.child_by_field_name(\"value\"); return unless value.kind() is `arrow_function`, `function_expression` or `generator_function`. name node = field.child_by_field_name(\"name\"), kind `property_identifier` or `private_property_identifier` (a computed `[k]`, string or number name mints nothing); name = its text (`#tick` keeps its `#`, as visit_method already does for `#m() {}`). If method_names contains name, or acc.class_methods already holds (class_id, name): acc.fn_fields.shadowed += 1 and return (a same-named method keeps its node; TS rejects both, a JS class would let the field shadow the prototype method at runtime, and one NodeId must not be pushed twice). Else: method_qname = format!(\"{class_qname}::{name}\"); method_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &method_qname); push Node { cells: build_cells(&field, src, file_rel) } - the FIELD node's span: tree-sitter-typescript puts a field's decorators INSIDE public_field_definition (collect_inject_repository already reads `@InjectRepository(User) repo` off the field node), so CB.4's first_decorator widening, which exists because a method_definition's decorators are class_body siblings, does not apply; DEFINES class -> method with empty cells (as visit_method; fill_evidence_sites stamps it); acc.class_methods.insert((class_id, name), method_id); acc.nav.record(method_id, name, &method_qname, node_kind::METHOD, Some(class_id)); then `if let Some(body) = value.child_by_field_name(\"body\") { collect_calls_in(body, src, method_id, Some(class_id), acc) }` - an expression body (`isBuyer = () => this.trade()?.buyerId === ...`) or a statement_block alike; nested callbacks descend as in any method; parameters are not walked (visit_method walks none either). Counters: arrow / function (function_expression + generator_function), calls = acc.unresolved.len() + acc.endpoints.len() delta across the body walk.\n3. Because the field METHOD sits in class_methods before resolve_intra_file runs, `this.applyColor()` from any method of the class (declared before or after the field) resolves in-file as SelfMethod -> an intra_file CALLS edge with the call row (LC.3b), and calls in the field body (`this.stopAnimation()`) resolve the same way from the field METHOD. try_detect_endpoint / try_detect_typeorm_access / record_member_ref inside the body get from = the field METHOD.\n4. Marker (per file, only when fields + shadowed > 0), printed in parse_file after the typeorm line: `[ts-fields] function fields=<n> (arrow=<a> function=<f>) calls=<c> shadowed=<s> file=<file_rel>`.\n5. Unchanged on purpose: non-function field values (`rafId = 0`, `state = {..}`, `users$ = this.api.list()`, `form = this.fb.group(..)`, `x = computed(() => ..)`) mint no node and their calls stay unattributed (reported as an open question with counts, not taken here); object-literal methods, class_expression bodies and abstract_class_declaration are outside visit_class today and stay so.\n6. TESTS (parsers/code/typescript/src/lib.rs mod tests, `repo()` helper, NodeId::from_parts lookups):\n(a) arrow_field_is_a_method_with_its_calls - `class Hero {\\n  stopAnimation(): void {}\\n  renderFrame(t: number): void {}\\n  private handleMotionPreferenceChange = (event: MediaQueryListEvent): void => {\\n    if (event.matches) {\\n      this.stopAnimation();\\n      this.renderFrame(performance.now());\\n    }\\n  };\\n}` in src/hero.component.ts: a METHOD node `src::hero::Hero::handleMotionPreferenceChange` exists, a DEFINES edge from the CLASS, intra_file CALLS edges to stopAnimation and renderFrame whose Evidence line is the row of each call (5 and 6), and its POSITION start_line is the field's row (3).\n(b) this_call_binds_to_an_arrow_field - `ngAfterViewInit(): void { this.applyColor(); }` declared ABOVE `private applyColor = (): void => {};`: CALLS ngAfterViewInit -> applyColor.\n(c) function_expression_and_generator_fields - `onSave = function (this: C) { this.persist(); };` and `items = function* (this: C) { yield this.persist(); };` -> METHODs onSave / items, each CALLS persist.\n(d) static_and_private_fields - plain JS `class Store { notify() {} #tick = () => this.notify(); static create = () => new Store(); }` in src/store.js -> METHODs `src::store::Store::#tick` (CALLS notify) and `src::store::Store::create` (no CALLS).\n(e) non_function_fields_mint_nothing - `rafId = 0; label = 'x'; state = { n: 0 }; users$ = this.api.list(); private api = inject(ApiService);` with `import { inject } from '@angular/core'`: no METHOD for any of them, no CallSite from any node for `list`, and the A7.1 INJECTS ref for ApiService is still emitted.\n(f) shadowed_field_keeps_the_method - `class K { f = () => a(); f() { b(); } }`: exactly one node with the METHOD id `..::K::f`, its CallSites name only `b`, and the marker counters report shadowed=1 (assert on the Acc-derived stats through a test-only accessor returning (fields, shadowed)).\n(g) arrow_field_http_call_is_the_fields - `class UsersService { constructor(private http: HttpClient) {} load = () => this.http.get('/api/users'); }`: the ENDPOINT `endpoint:GET:/api/users` has its CALLS edge from `..::UsersService::load` (not from the class or module).\nengine/tests/ts_function_fields.rs (same tempfile + generate_one pattern as engine/tests/call_site_lines.rs `build`): package.json + src/hero.component.ts (an @Component class whose `private onResize = (): void => {` body calls `this.stopAnimation();` two rows below the declaration and `this.http.get('/api/profile')`, with `constructor(private http: HttpClient) {}`): (1) the merged graph has METHOD `src::hero.component::HeroComponent::onResize`; (2) its CALLS edge to stopAnimation carries EVIDENCE basis Site whose line's source text contains `stopAnimation()`; (3) the ENDPOINT `endpoint:GET:/api/profile`'s CALLS in-edge comes from onResize; (4) liveness (entrypoint_reachable) is unchanged for the other methods (no assertion on the new node's liveness: a handler registered by value has no caller, see risks).",
+   "acceptance": "PRE-FIX BASELINE (measured at 2170ff8, fixture grade and HEAD-binary dump re-measured unchanged at 90d1076): fixture ts-arrow-class-fields graded with the leap wheel -> METHOD 0/6, CALLS 0/6, DEFINES 0/1, FORBID VIOLATIONS 0; quokka copy -> no node named handleMotionPreferenceChange or applyAsciiColor, AsciiQuokkaHeroComponent has no CALLS out-edge and stopAnimation has 2 CALLS in-edges (ngOnDestroy, setupObservers). AFTER: (1) `cargo test -p glia-parser-typescript -- arrow_field this_call_binds function_expression static_and_private non_function shadowed` green; (a), (b), (c), (d), (f), (g) fail at HEAD (no METHOD node / no edge). (2) `cargo test -p glia-engine --test ts_function_fields` green (fails at HEAD: no onResize node). (3) grade.py on bench/substrate-gap/fixtures/ts-arrow-class-fields: METHOD 6/6, CALLS 6/6, DEFINES 1/1, FORBID VIOLATIONS 0. (4) `python3 bench/substrate-gap/run.py --no-log --check` names no fixture other than ts-arrow-class-fields as changed. (5) quokka copy: METHOD `quokka_web::src::app::features::marketing::components::ascii-quokka-hero::ascii-quokka-hero.component::AsciiQuokkaHeroComponent::handleMotionPreferenceChange` exists with CALLS to that class's stopAnimation, renderFrame and startAnimation; ngAfterViewInit CALLS applyAsciiColor; stopAnimation has 3 CALLS in-edges; stderr shows `[ts-fields] function fields=2 (arrow=2 function=0)` for ascii-quokka-hero.component.ts and `function fields=3` for hero-wave-shader.component.ts. Kina copy: the `[ts-fields]` lines sum to at least 11 fields, trade-view.component.ts alone at least 9, and `...TradeViewComponent::isParty` CALLS isBuyer and isSeller. (6) `cargo test -p glia-engine --test byte_identical` and `--test parallel_build` green.",
+   "fixtures": [
+    {
+     "name": "ts-arrow-class-fields",
+     "purpose": "CA-10 recall: arrow / function-expression / static / private class fields are METHODs with their body's CALLS, `this.field()` binds to them, across an Angular component, a plain JS class and a React class component (.jsx); precision: data fields stay non-nodes and the class never takes the field body's calls",
+     "source_sketch": "--- Counter.jsx\nimport React from 'react';\n\nexport class Counter extends React.Component {\n  state = { n: 0 };\n\n  handleClick = () => {\n    this.bump();\n  };\n\n  bump() {\n    this.setState({ n: this.state.n + 1 });\n  }\n\n  render() {\n    return <button onClick={this.handleClick}>{this.state.n}</button>;\n  }\n}\n\n--- hero.component.ts\nimport { Component } from '@angular/core';\n\n@Component({ selector: 'app-hero', template: '<div></div>' })\nexport class HeroComponent {\n  private rafId = 0;\n  private readonly label = 'hero';\n\n  ngAfterViewInit(): void {\n    this.applyColor();\n    window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change', this.handleMotionChange);\n  }\n\n  stopAnimation(): void {\n    this.rafId = 0;\n  }\n\n  renderFrame(): void {}\n\n  persist(): void {}\n\n  private applyColor = (): void => {\n    this.renderFrame();\n  };\n\n  private handleMotionChange = (event: MediaQueryListEvent): void => {\n    if (event.matches) {\n      this.stopAnimation();\n    }\n  };\n\n  onSave = function (this: HeroComponent): void {\n    this.persist();\n  };\n}\n\n--- package.json\n{\"name\": \"arrow-fields\", \"version\": \"1.0.0\", \"dependencies\": {\"@angular/core\": \"^17.0.0\", \"react\": \"^18.0.0\"}}\n--- store.js\nexport class Store {\n  #count = 0;\n\n  notify() {}\n\n  increment = () => {\n    this.#count += 1;\n    this.notify();\n  };\n\n  static create = () => new Store();\n}\n",
+     "key_json": {
+      "framework": "ts-arrow-class-fields",
+      "language": "typescript",
+      "dirs": [
+       "."
+      ],
+      "mechanism": "calls",
+      "cells": [
+       "typescript/calls"
+      ],
+      "note": "CA-10: an arrow-function or function-expression class field (`private handleX = (e) => {...}`, `onSave = function () {...}`, `static create = () => ...`, a React class component's `handleClick = () => {...}`) is a METHOD of its class (qname Class::field) whose body's calls are CALLS from it, and `this.field()` binds to it like a method. Non-function fields (`rafId = 0`, `label = 'hero'`, `#count = 0`, `state = {...}`) stay non-nodes. Angular / React / Vue files all parse through the TypeScript parser, so one visitor covers them. Dogfood: quokka ascii-quokka-hero.component.ts:470 handleMotionPreferenceChange -> stopAnimation (:474). Baseline (HEAD 2170ff8, leap wheel): METHOD 0/6, CALLS 0/6, DEFINES 0/1, forbid 0.",
+      "expect_nodes": [
+       {
+        "kind": "METHOD",
+        "name": "HeroComponent/applyColor",
+        "note": "private arrow field"
+       },
+       {
+        "kind": "METHOD",
+        "name": "HeroComponent/handleMotionChange",
+        "note": "private arrow field with a parameter (quokka :470 shape)"
+       },
+       {
+        "kind": "METHOD",
+        "name": "HeroComponent/onSave",
+        "note": "function-expression field"
+       },
+       {
+        "kind": "METHOD",
+        "name": "Store/increment",
+        "note": "plain JS class, arrow field"
+       },
+       {
+        "kind": "METHOD",
+        "name": "Store/create",
+        "note": "static arrow field"
+       },
+       {
+        "kind": "METHOD",
+        "name": "Counter/handleClick",
+        "note": "React class component event handler (.jsx)"
+       }
+      ],
+      "expect_edges": [
+       {
+        "from": "HeroComponent/handleMotionChange",
+        "to": "HeroComponent/stopAnimation",
+        "category": "CALLS",
+        "note": "the dogfood edge: arrow-field body -> method"
+       },
+       {
+        "from": "HeroComponent/applyColor",
+        "to": "HeroComponent/renderFrame",
+        "category": "CALLS",
+        "note": "arrow-field body -> method"
+       },
+       {
+        "from": "HeroComponent/ngAfterViewInit",
+        "to": "HeroComponent/applyColor",
+        "category": "CALLS",
+        "note": "this.applyColor() binds to the field METHOD"
+       },
+       {
+        "from": "HeroComponent/onSave",
+        "to": "HeroComponent/persist",
+        "category": "CALLS",
+        "note": "function-expression field body"
+       },
+       {
+        "from": "Store/increment",
+        "to": "Store/notify",
+        "category": "CALLS",
+        "note": "JS class arrow field"
+       },
+       {
+        "from": "Counter/handleClick",
+        "to": "Counter/bump",
+        "category": "CALLS",
+        "note": "React class arrow handler body"
+       },
+       {
+        "from": "HeroComponent",
+        "to": "HeroComponent/handleMotionChange",
+        "category": "DEFINES",
+        "note": "the class DEFINES the field METHOD"
+       }
+      ],
+      "forbid": [
+       {
+        "kind": "METHOD",
+        "name": "hero.component::HeroComponent::rafId",
+        "note": "a number-valued field is not a METHOD"
+       },
+       {
+        "kind": "METHOD",
+        "name": "hero.component::HeroComponent::label",
+        "note": "a string-valued field is not a METHOD"
+       },
+       {
+        "kind": "METHOD",
+        "name": "store::Store::#count",
+        "note": "a private data field is not a METHOD"
+       },
+       {
+        "kind": "METHOD",
+        "name": "Counter::Counter::state",
+        "note": "React state object field is not a METHOD"
+       },
+       {
+        "from": "hero.component::HeroComponent",
+        "to": "hero.component::HeroComponent::stopAnimation",
+        "category": "CALLS",
+        "note": "the field body's calls belong to the field METHOD, never to the class"
+       }
+      ]
+     }
+    }
+   ],
+   "fired_on_marker": "[ts-fields] function fields=<n> (arrow=<a> function=<f>) calls=<c> shadowed=<s> file=<file>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "edge_removal",
+     "cli_output"
+    ],
+    "what_changes": "Graph content, TS / JS / Angular / React / Vue: every arrow-function / function-expression / generator class field becomes a METHOD node `<module>::<Class>::<field>` (new NodeIds; POSITION / CODE = the field declaration, DOC from its JSDoc) with DEFINES from its class and CALLS for its body; a `this.<field>()` call that bound to nothing now CALLS it; a client ENDPOINT, TypeORM ACCESSES_DATA or enum USES found in a field body is attributed to the field METHOD. Anchored markers (EVENT_* / WS_* / GRPC_CLIENT / queue / tRPC, extractors/src/anchor.rs owner_of_line) and re-homed ACCESSES_DATA / READS_CONFIG (rehome_to_owner) whose site sits in a field body move from the MODULE to the field METHOD: old `module -CONTAINS-> marker` (or `module -ACCESSES_DATA-> entity`) -> new `field METHOD -USES/HANDLED_BY-> marker` (`field METHOD -ACCESSES_DATA-> entity`). `glia gaps` dead_symbol grows by each field METHOD nothing calls (a handler only passed by value: 4 of quokka's 5). New `[ts-fields]` stderr line.",
+    "in_repo_consumers": [
+     "parsers/code/typescript/src/lib.rs tests - seven new; existing field tests (A6.2b field types, A7.1 inject, A13.15 @InjectRepository) must stay green unchanged",
+     "engine/tests/ts_function_fields.rs - new",
+     "bench/substrate-gap/fixtures/ts-arrow-class-fields - new; no existing fixture holds a function-valued class field (grep), so run.py --check stays clean",
+     "engine/tests/byte_identical.rs, engine/tests/parallel_build.rs - must stay green"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/repo-graph/repo_graph/server.py - find / impact / trace / read now reach the field METHODs; no code change",
+     "/home/ivy/Code/neuropil - additive METHOD nodes keyed by their new qnames; no existing qname moves",
+     "/home/ivy/Code/Engram - new Symbols with identity_hints (additive: Engram keys facts by identity_hint, none of the existing hints change); the recall battery's marketing-ascii-hero query gains handleMotionPreferenceChange",
+     "engram-export/ - exports the new METHODs as Symbols; no code change"
+    ]
+   },
+   "depends_on": [
+    "CB.4"
+   ],
+   "risks": "A handler registered by value (`addEventListener('change', this.handleX)`, Angular template `(click)=\"onSave()\"`) has no in-edge, so the new METHOD reads as dead (gaps dead_symbol, blast `⊘`); the value reference is not extracted today for methods either (open question). A field whose value is an arrow returning JSX in a .tsx / .jsx file parses only as well as the TS grammar recovers JSX (tree-sitter-typescript, no TSX grammar is used): members after a badly recovered region can be lost, exactly as methods are today. Duplicate-id safety: the shadow check covers method-before-field and method-after-field (pre-scan) and field-after-field (class_methods probe), so no NodeId is pushed twice. Determinism: members in source order; method_names / class_methods are only probed, never iterated. UTF-8: names and spans are node text / node boundaries, no byte arithmetic. PARSER_STAMP moves (parsers/ is hashed): every parse cache is invalidated once. CB.4 landed (84a3581): build_cells(&n, src, file_rel) is the undecorated form and the field node is passed as is. visit_function_field takes 8 arguments: #[allow(clippy::too_many_arguments)] like visit_method.",
+   "spec_group": "CG"
+  },
+  {
+   "id": "CG.2a",
+   "title": "Path-based test / fixture provenance: a node under an e2e, cypress, fixtures, __fixtures__, testdata, __mocks__ or integration_test directory, under test / tests / __tests__ at any depth (first segment and any case included), or in a .test.tsx / .spec.jsx / .cy.ts / .e2e-spec.ts / test_*.py file carries ORIGIN provenance test_fixture",
+   "batch": "CG",
+   "area": "CA-11 test / fixture provenance by path",
+   "loc": 150,
+   "rationale": "VERIFIER (HEAD 90d1076): is_test_fixture (engine/src/passes.rs:854) and tag_synthetic_provenance (:767) are unchanged since 2170ff8; the readers were re-listed by grep of `test_fixture` over engine/src, py/src, engram-export/src (tests_for.rs:763 / :854, gaps.rs:797, patterns.rs:156, external/test_reports.rs:757 and its exclusion at :368, engram-export lib.rs:939). The draft's simulation (probe/CA-engram/testpath_sim.py over the leap-wheel layouts) was re-run: Kina +50 (all frontend/e2e/), quokka +0. New in-repo consumer found: engine/tests/test_report_ingest.rs trace_implicates_non_test_frames builds its test file at checks/test_app.py precisely because that path is NOT test-shaped today ('only the same-file rule leaves it out'); the new `test_*.py` rule tags it, which leaves the same-file rule unproven, so the test's file moves (implementation step 6). A scan of every bench fixture and matrix probe for files the new rule tags found py-tests, java-camel-tests, csharp-camel-tests, xschema-jsonschema-shared (testdata/settings.json), module-cross-language, py-test-cells, test-reports-fail, trpc-create-caller, swift-members (Tests/) and matrix/rust/tests: none has an expect_cells ORIGIN row on a node the rule reaches (xschema's ORIGIN row is a contract node, kept by the skip-if-ORIGIN rule).\nWHAT EXISTS (verified at 2170ff8): engine/src/passes.rs tag_synthetic_provenance (:767; the Post PassSpec `tag_synthetic_provenance` in engine/src/profile.rs, populates ORIGIN) writes `{\"provenance\":\"test_fixture\"}` on a node with no ORIGIN when is_test_fixture(file, qname) (:854) holds: 8 file suffixes (_test.go, _test.dart, .spec.ts, .test.ts, .spec.js, .test.js, _test.py, _spec.rb), the substrings `/tests/`, `/__tests__/`, `/test/` (a leading `/` is required and the match is case-sensitive, so a FIRST-segment `tests/` or a Swift `Tests/` never matches), or is_test_qname (:1333: `::tests::` / `::test::` / `::__tests__::` / `::spec::`, `tests::` / `test::` / `spec::` prefixes, tails test_* / *_test / *_spec / *.test / *.spec). Every downstream reader consumes that one ORIGIN value: tests_for.rs TestIndex (:742 - fixture callables no fixture calls are the test cases), gaps.rs dead_symbol (:796 excludes them), patterns.rs EXCLUDED_PROVENANCE (:156), external/test_reports.rs is_fixture (:757), engram-export (lib.rs :939 skips their docs / imports and carries `provenance` on every Symbol), Engram (crates/engram-mcp/src/main.rs:57 and engram-live quokka_recall.rs:47 drop test_fixture by default; --include-tests re-admits), and 0.5.1's CD.4b hubs. The other test signals are not provenance: TESTS module edges pair by name affix (is_test_module_qname, deliberately separate - A6.7), CODE_TABLES' entry rule names test* / Test* FUNCTION / METHOD (code-domain/src/profile.rs:76, a liveness seed), graph/src/roles.rs has no test role, passes.rs qname_is_noncritical_path (:1321, e2e / fixtures / examples / mocks / testdata) only feeds the HTTP demotion (downgrade_test_paths), and projection-text/src/bin/seeds.rs keeps a private bench-only is_test_path.\nGAP MEASURED (glia build of git-archive copies, leap wheel load_from_gmap with GLIA_NO_PERSIST=1): Kina a448fb3 - all 50 nodes whose POSITION file is under frontend/e2e/ (e.g. frontend::e2e::push-prompt::writePrefs, frontend/e2e/push-prompt.js:41) carry no ORIGIN; glia 2170ff8 - 2248 nodes under bench/substrate-gap/fixtures/ carry none (e.g. Shop::Controllers::OrdersController::GetOrder at bench/substrate-gap/fixtures/csharp-aspnet-composed/server/OrdersController.cs: a C# namespace qname never says `tests`), plus 19 under tests/fixtures/ and 38 in bench/substrate-gap/test_*.py; a co-located React test's MODULE is tagged (qname tail `.test`) but its functions are not (probe: src::cart.test::renderCart). Simulating the rule below over the same three graphs tags exactly: Kina +50 (all frontend/e2e/), glia +2305 (fixtures 2248, test_*.py 38, tests/fixtures 19), quokka +0 (control: nothing new). engram-export --exclude matches node KEYS only, and fixture code is keyed by its namespace, so Engram cannot drop it without this (CG.2b adds the path filter as the explicit escape hatch).\nProbe fixture test-fixture-paths graded at HEAD: ORIGIN 1/7 (only the MODULE control).\nDECISION - where the rule lives: engine/src/passes.rs beside its single writer, not the domain tables. (1) Every reader consumes the ORIGIN cell, so one writer already makes it one rule for answers and engram-export. (2) DomainTables (activation/src/profile.rs, filled by code-domain/src/profile.rs CODE_TABLES) carries activation / liveness / blast dials; a directory-name list is none of those and would pull a code-only concept into the domain-agnostic struct and toy-domain. (3) No slot, dependency or id. The rule is a directory SEGMENT match (never a substring: `latest/`, `contest/`, `attestation.ts` stay app code) with ASCII case folding over every directory component including the first. Deliberately NOT segments: `spec` / `specs` (spec-kit feature docs live in Kina specs/ and quokka docs/superpowers/specs/; Ruby spec/ keeps its qname rule), `bench` (real tooling: glia bench/lens), `examples` (runnable programs, grpc-go examples/), `mocks` (dev-server mock data as often as test doubles). Graph query run: repo-graph find `is_test_fixture` (two: passes.rs:854, tests_for.rs:833) and read of both.",
+   "entry_points": [
+    "engine/src/passes.rs:854 is_test_fixture - becomes `is_test_path(file).is_some() || is_test_qname(qname)`",
+    "engine/src/passes.rs (new, beside :854) TEST_DIR_SEGMENTS, TEST_FILE_SUFFIXES, enum TestPathRule { Suffix, Prefix, Dir }, fn is_test_path",
+    "engine/src/passes.rs:767 tag_synthetic_provenance - per-provenance and per-rule counters and the `[provenance]` marker",
+    "engine/src/passes.rs:1860 passes_tests::proto_and_test_fixture_detection - kept; new test test_fixture_paths_by_segment_and_suffix beside it",
+    "bench/substrate-gap/fixtures/test-fixture-paths/ (new)",
+    "engine/tests/test_report_ingest.rs:212 trace_implicates_non_test_frames - its test file moves from checks/test_app.py to checks/app_checks.py so the same-file rule stays the only rule that leaves frame 1 out"
+   ],
+   "files_touched": [
+    "engine/src/passes.rs",
+    "engine/tests/test_report_ingest.rs",
+    "bench/substrate-gap/fixtures/test-fixture-paths/__mocks__/api.ts",
+    "bench/substrate-gap/fixtures/test-fixture-paths/bench/fixtures/shop/orders.py",
+    "bench/substrate-gap/fixtures/test-fixture-paths/cypress/e2e/login.cy.ts",
+    "bench/substrate-gap/fixtures/test-fixture-paths/e2e/checkout.js",
+    "bench/substrate-gap/fixtures/test-fixture-paths/package.json",
+    "bench/substrate-gap/fixtures/test-fixture-paths/src/cart.test.tsx",
+    "bench/substrate-gap/fixtures/test-fixture-paths/src/cart.ts",
+    "bench/substrate-gap/fixtures/test-fixture-paths/testdata/seed.go",
+    "bench/substrate-gap/fixtures/test-fixture-paths/key.json"
+   ],
+   "implementation": "1. `const TEST_DIR_SEGMENTS: &[&str] = &[\"test\", \"tests\", \"__tests__\", \"e2e\", \"cypress\", \"integration_test\", \"testdata\", \"fixtures\", \"__fixtures__\", \"__mocks__\"];` and `const TEST_FILE_SUFFIXES: &[&str] = &[\"_test.go\", \"_test.dart\", \"_test.py\", \"_spec.rb\", \".spec.ts\", \".test.ts\", \".spec.tsx\", \".test.tsx\", \".spec.js\", \".test.js\", \".spec.jsx\", \".test.jsx\", \".spec.mjs\", \".test.mjs\", \".cy.ts\", \".cy.js\", \".e2e-spec.ts\", \".e2e-spec.js\"];` (the first eight are today's list verbatim).\n2. `fn is_test_path(file: &str) -> Option<TestPathRule>`: split on `/` (POSITION files are repo-relative with `/`; a `\\\\` is treated as `/`); base = last component ASCII-lowercased: ends_with any suffix -> Suffix; starts_with \"test_\" && ends_with \".py\" -> Prefix; any EARLIER component that eq_ignore_ascii_case one of TEST_DIR_SEGMENTS -> Dir; else None. is_test_fixture(file, qname) = is_test_path(file).is_some() || is_test_qname(qname). is_test_qname / is_test_module_qname / strip_test_affixes are untouched, so TESTS pairing and every TESTS edge are unchanged.\n3. tag_synthetic_provenance: count each stamped provenance (dependency, synthetic, generated, generated_proto, test_fixture) and, for test_fixture, whether the path rule or only the qname rule fired. Marker once per build after the loop, only when any count > 0: `[provenance] test_fixture=<t> (path=<p> qname=<q>) generated_proto=<g> generated=<x> dependency=<d> synthetic=<s>`. Precedence and the skip-if-ORIGIN rule are unchanged (a contract / nav_route / documentation / overlay node under a test directory keeps its own provenance).\n4. Consequences, all through the existing readers (no reader changes): tests_for treats an e2e / fixture / testdata function no other fixture calls as a test case; gaps' dead_symbol no longer lists them; patterns never puts a fixture handler in a population; test_reports treats them as fixtures; engram-export skips their docs / imports and exports `provenance: test_fixture`, which Engram drops by default.\n5. TEST engine/src/passes.rs test_fixture_paths_by_segment_and_suffix: true for (\"frontend/e2e/push-prompt.js\", \"frontend::e2e::push-prompt::writePrefs\"), (\"bench/substrate-gap/fixtures/csharp-aspnet-composed/server/OrdersController.cs\", \"Shop::Controllers::OrdersController::GetOrder\"), (\"e2e/checkout.js\", \"e2e::checkout\"), (\"cypress/e2e/login.cy.ts\", ..), (\"testdata/seed.go\", \"x::Seed\"), (\"__mocks__/api.ts\", ..), (\"tests/fixtures/arch_monorepo/api/main.go\", \"api::main\"), (\"Tests/AppTests/FooTests.swift\", \"AppTests::FooTests\"), (\"src/cart.test.tsx\", \"src::cart.test::renderCart\"), (\"app/test_orders.py\", \"app::test_orders::helper\"), (\"test/app.e2e-spec.ts\", ..), (\"integration_test/app_test.dart\", ..); false for (\"src/cart.ts\", \"src::cart::addItem\"), (\"src/app/features/home/home.component.ts\", ..), (\"specs/001-orders/plan.ts\", \"specs::001-orders::plan::x\"), (\"examples/hello/main.go\", ..), (\"src/latest/x.ts\", ..), (\"src/contest/x.go\", ..), (\"src/attestation.ts\", ..), (\"bench/lens/src/main.rs\", \"bench::lens::main\"), (\"src/fixtures-view/list.ts\", ..), (\"src/mocks/handlers.ts\", ..); and is_test_path(\"frontend/e2e/a.js\") == Some(Dir), (\"src/a.test.tsx\") == Some(Suffix), (\"app/test_x.py\") == Some(Prefix). proto_and_test_fixture_detection keeps every existing assert (including `!is_test_fixture(\"src/Foo.java\", \"src::FooTest\")`).\n6. engine/tests/test_report_ingest.rs trace_implicates_non_test_frames: its tree's `checks/test_app.py` becomes test_fixture under the new `test_*.py` rule, so `checks::test_app::build_orders` would be left out by the fixture rule as well as by the same-file rule the test exists to pin. Rename the file to `checks/app_checks.py` (tree entry, TestCaseRecord file and classname `checks.app_checks`, the three `checks/test_app.py:<n>` trace frames, the expected `checks::app_checks::test_list_orders` in failing(..), and the entry ids `latest:checks.app_checks::test_list_orders#<frame>`), and add `assert!(!origin_is_test_fixture(&m, \"checks::app_checks::build_orders\"))` (a 6-line helper over node_cells in that test file) so the same-file rule is again the only thing excluding frame 1. Every other test_report_ingest / tests_for / tests_cli tree already sits under tests/ (tagged by the qname rule today), so their assertions do not move.",
+   "acceptance": "PRE-FIX BASELINE (measured at 2170ff8; fixture grade and the Kina / quokka simulation re-run unchanged at 90d1076): fixture test-fixture-paths ORIGIN 1/7; Kina copy 50 untagged nodes under frontend/e2e/; glia copy 2248 untagged nodes under bench/substrate-gap/fixtures/. AFTER: (1) `cargo test -p glia-engine --lib -- passes::passes_tests::test_fixture_paths_by_segment_and_suffix passes::passes_tests::proto_and_test_fixture_detection` green; the new test fails at HEAD (e2e / fixtures / first-segment / .test.tsx rows). (2) grade.py on bench/substrate-gap/fixtures/test-fixture-paths: ORIGIN 7/7. (3) Kina copy (glia build --out to the scratchpad, load_from_gmap with GLIA_NO_PERSIST=1): every node whose POSITION file starts `frontend/e2e/` carries ORIGIN test_fixture, and the set of newly tagged nodes (tagged after, untagged before) is exactly those 50; quokka copy: the newly tagged set is empty; glia copy: the 2248 bench/substrate-gap/fixtures nodes are tagged, no node under bench/lens/, engine/src/ (outside `mod tests` qnames) or cli/src/ is newly tagged; stderr shows the `[provenance] test_fixture=` line once per build. (4) `cargo test -p glia-engine` (tests_for, gaps_report, patterns, test_report_ingest suites) green, including trace_implicates_non_test_frames with its renamed file and the new not-test_fixture assertion on build_orders. (5) `python3 bench/substrate-gap/run.py --no-log --check` names no fixture other than test-fixture-paths as changed. (6) byte_identical and parallel_build green.",
+   "fixtures": [
+    {
+     "name": "test-fixture-paths",
+     "purpose": "CA-11 recall: ORIGIN test_fixture by directory segment at any depth (e2e, cypress/e2e, bench/fixtures, testdata, __mocks__) and by file suffix (.test.tsx functions); the MODULE of a co-located test is the HEAD control; app code (src/cart.ts) is pinned untagged by the engine unit test because key.json has no forbid form for a cell",
+     "source_sketch": "--- __mocks__/api.ts\nexport function mockFetch(): null {\n  return null;\n}\n\n--- bench/fixtures/shop/orders.py\ndef get_order(order_id):\n    return order_id\n\n--- cypress/e2e/login.cy.ts\nfunction loginAs(user: string): string {\n  return user;\n}\n\nloginAs('admin');\n\n--- e2e/checkout.js\n// Playwright drive: checkout flow.\nasync function writePrefs(page) {\n  return page;\n}\n\nwritePrefs(null);\n\n--- package.json\n{\"name\":\"shop-web\",\"version\":\"1.0.0\"}\n\n--- src/cart.test.tsx\nimport { addItem } from './cart';\n\nexport function renderCart(): number {\n  return addItem('sku-1');\n}\n\n--- src/cart.ts\nexport function addItem(sku: string): number {\n  return sku.length;\n}\n\n--- testdata/seed.go\npackage testdata\n\nfunc Seed() int { return 1 }\n",
+     "key_json": {
+      "framework": "test-fixture-paths",
+      "language": "typescript",
+      "dirs": [
+       "."
+      ],
+      "note": "CA-11: path-based test / fixture provenance. A node whose POSITION file sits under a test-tree directory segment (e2e, cypress, fixtures, __fixtures__, testdata, __mocks__, integration_test, and test / tests / __tests__ at ANY depth including the first segment, case-insensitive) or whose file ends in a test suffix (.test.tsx, .spec.jsx, .cy.ts, ...) carries ORIGIN provenance test_fixture, which tests_for, gaps, patterns and engram-export already read. Kina frontend/e2e/push-prompt.js writePrefs and glia's bench/substrate-gap/fixtures/** are the dogfood cases. src/cart.ts addItem is the app-code control (engine unit test pins it untagged: key.json has no forbid form for a cell). Baseline (HEAD 2170ff8, leap wheel): ORIGIN 1/7 (only the MODULE control).",
+      "expect_cells": [
+       {
+        "kind": "FUNCTION",
+        "node": "e2e::checkout::writePrefs",
+        "cell": "ORIGIN",
+        "contains": "test_fixture",
+        "note": "Playwright script under a top-level e2e/"
+       },
+       {
+        "kind": "FUNCTION",
+        "node": "cypress::e2e::login.cy::loginAs",
+        "cell": "ORIGIN",
+        "contains": "test_fixture",
+        "note": "Cypress spec"
+       },
+       {
+        "kind": "FUNCTION",
+        "node": "bench::fixtures::shop::orders::get_order",
+        "cell": "ORIGIN",
+        "contains": "test_fixture",
+        "note": "a bench fixture tree (glia's substrate-gap shape)"
+       },
+       {
+        "kind": "FUNCTION",
+        "node": "testdata::seed::Seed",
+        "cell": "ORIGIN",
+        "contains": "test_fixture",
+        "note": "Go testdata/"
+       },
+       {
+        "kind": "FUNCTION",
+        "node": "__mocks__::api::mockFetch",
+        "cell": "ORIGIN",
+        "contains": "test_fixture",
+        "note": "Jest __mocks__/"
+       },
+       {
+        "kind": "FUNCTION",
+        "node": "src::cart.test::renderCart",
+        "cell": "ORIGIN",
+        "contains": "test_fixture",
+        "note": "a co-located .test.tsx: today its MODULE is tagged (qname tail .test) but its functions are not"
+       },
+       {
+        "kind": "MODULE",
+        "node": "src::cart.test",
+        "cell": "ORIGIN",
+        "contains": "test_fixture",
+        "note": "CONTROL: tagged at HEAD by the qname rule"
+       }
+      ]
+     }
+    }
+   ],
+   "fired_on_marker": "[provenance] test_fixture=<t> (path=<p> qname=<q>) generated_proto=<g> generated=<x> dependency=<d> synthetic=<s>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cell_value",
+     "cli_output"
+    ],
+    "what_changes": "Graph content: nodes whose POSITION file sits under e2e/, cypress/, fixtures/, __fixtures__/, testdata/, __mocks__/, integration_test/ (any depth), under a first-segment or capitalised test/ tests/ __tests__/ directory, or in a .test.tsx / .spec.tsx / .test.jsx / .spec.jsx / .test.mjs / .spec.mjs / .cy.ts / .cy.js / .e2e-spec.ts / .e2e-spec.js / test_*.py file gain ORIGIN `{\"provenance\":\"test_fixture\"}` (old: no ORIGIN cell). Answers built on it move: tests-for lists those functions as test cases (old: absent), gaps drops them from dead_symbol, patterns excludes such handlers from populations, test-report ingest treats them as fixtures; on glia's own graph 2305 nodes move, on Kina 50. New `[provenance]` stderr line.",
+    "in_repo_consumers": [
+     "engine/src/passes.rs tests - new test; proto_and_test_fixture_detection unchanged",
+     "engine/tests/test_report_ingest.rs - trace_implicates_non_test_frames: its checks/test_app.py tree file becomes checks/app_checks.py (same commit), so the same-file rule stays pinned",
+     "engine/tests/tests_for*.rs, engine/tests/gaps_report.rs, engine/tests/patterns.rs, engine/tests/test_reports*.rs - re-run; their temp repos put tests under paths the old rule already tagged, so no assertion moves (verify in the same commit)",
+     "bench/substrate-gap/fixtures/* - graded per fixture with fixture-relative paths; the fixtures with inner test dirs (csharp-camel-tests, java-camel-tests, module-cross-language, py-test-cells, test-reports-fail, trpc-create-caller, xschema-jsonschema-shared/testdata) grade no provenance, and every expect_cells ORIGIN row sits on a node with its own contract / overlay provenance (run.py --check)",
+     "bench/substrate-gap/fixtures/test-fixture-paths - new"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/Engram - drops test_fixture by default at load (engram-mcp default_drop_provenance): Kina's frontend/e2e Playwright scripts and glia's bench fixtures leave default recall; `--include-tests` restores them. Identity hints unchanged (no qname or id moves)",
+     "engram-export/ - carries the provenance and already skips docs / imports for test_fixture nodes; no code change (CG.2b adds --exclude-path for trees the rule does not cover)",
+     "/home/ivy/Code/repo-graph/repo_graph/server.py - does not read ORIGIN; tests-for / gaps answers it relays change as above; no code change",
+     "/home/ivy/Code/neuropil - no reader of ORIGIN provenance in crates/ (grep `provenance` / `test_fixture`: 0 hits); no change"
+    ]
+   },
+   "depends_on": [],
+   "risks": "An application directory literally named `fixtures`, `e2e` or `testdata` (a sports app's `features/fixtures/`) would be classed test code; the survey of ~/Code (repo-graph, glia, glia-eval, neuropil, Kina, quokka-stack, grpc-go, astroTurf, webplatformfrontend, splorts) found every such directory to hold test or example data. A `[walk] skip` or CG.2b's --exclude-path covers trees the list misses; there is deliberately no per-repo un-tag. Precedence unchanged: a generated proto under testdata/ stays generated_proto. Determinism: pure per-node string tests in graph order; counters only. UTF-8: ASCII case folding and `/` splitting only. PARSER_STAMP moves (engine is hashed).",
+   "spec_group": "CG"
+  },
+  {
+   "id": "CG.2b",
+   "title": "engram-export --exclude-path <glob>: drop every node whose POSITION file matches the glob (repo-relative, `*` spans `/`) and leave those files out of the export's file table, beside the key-only --exclude",
+   "batch": "CG",
+   "area": "CA-11 engram-export exclude by path",
+   "loc": 110,
+   "rationale": "VERIFIER (HEAD 90d1076): ExportOptions (engram-export/src/lib.rs:169, derives Default), ExportStats (:106), enum Filtered (:212), filtered (:221), glob_match (:252), position_paths (:480), position_of (:604), build_gmap (:808; winners loop and pass 2 both call filtered), the bin's Args (:89 `--exclude`), its ExportOptions literal (:218) and the `filtered:` stderr block (:346) are as described. Every other ExportOptions literal uses ..Default::default() (lib.rs tests :1541 / :1550 / :1683 / :1735 / :1842, tests/identity_v6.rs:448), so only the bin's literal moves. The 57-test baseline is engram-export/target/check-last.log's `test result` lines (34+4+2+9+3+3+2). No other 0.5.1 packet lists an engram-export file in files_touched.\nengram-export/src/lib.rs filtered (:221) applies ExportOptions.exclude (:174, `--exclude <glob>` in engram-export/src/bin/glia-export-engram.rs :89) to the node KEY (its qname) only, via glob_match (:252, `*` = any run). Fixture and test code is keyed by its language namespace, not its path - glia's bench/substrate-gap/fixtures/csharp-aspnet-composed/server/OrdersController.cs exports as `Shop::Controllers::OrdersController::GetOrder`, Kina's frontend/e2e/push-prompt.js as `frontend::e2e::push-prompt::writePrefs` - so a key glob cannot name a directory tree in general (the Engram session reported `[walk] skip` works, but that removes the files from glia's graph too). build_gmap (:806) already reads every node's POSITION (position_of :604) and interns every POSITION file (position_paths :480) whether or not the node is exported. CG.2a tags the common test trees; this flag is the explicit, per-export escape hatch for any other tree (a vendored demo, a corpus directory) without changing glia's graph.\nBaseline: 57 engram-export tests pass (engram-export/target/check-last.log, `test result` lines summed); no `--exclude-path` flag (`glia-export-engram --help` lists --exclude only).",
+   "entry_points": [
+    "engram-export/src/lib.rs:169 struct ExportOptions - new field `exclude_paths: Vec<String>`",
+    "engram-export/src/lib.rs:106 struct ExportStats - new counter `dropped_excluded_path: usize`",
+    "engram-export/src/lib.rs:221 filtered - takes the node's POSITION file; a new Filtered::ExcludedPath arm after the key globs",
+    "engram-export/src/lib.rs:808 build_gmap - pass 1 interns only the POSITION files no exclude_paths glob matches; winners and pass 2 hand the file to filtered and count ExcludedPath",
+    "engram-export/src/bin/glia-export-engram.rs:89 Args - `#[arg(long = \"exclude-path\")] exclude_path: Vec<String>`; :218 ExportOptions literal; the doc comment's usage line; the new marker",
+    "engram-export/src/lib.rs:1172 mod tests - two new tests beside exclude_glob_drops_by_key (:1548), using located_graph (:1563)"
+   ],
+   "files_touched": [
+    "engram-export/src/lib.rs",
+    "engram-export/src/bin/glia-export-engram.rs"
+   ],
+   "implementation": "1. ExportOptions gains `pub exclude_paths: Vec<String>` (doc: globs over a node's POSITION `file`, repo-relative with `/`; `*` matches any run including `/`; a node with no POSITION is never path-excluded). Default derives empty, so every `..Default::default()` literal compiles unchanged; the bin's full literal gains the field.\n2. `enum Filtered { Excluded, ExcludedPath, Noise }`; `fn filtered(qname, provenance, file: Option<&str>, opts)`: key globs first (as today), then `file.is_some_and(|f| opts.exclude_paths.iter().any(|p| glob_match(p, f)))` -> ExcludedPath, then noise. Both callers (the winners loop :857 and pass 2 :889) pass `position_of(&n.cells).map(|(f, _, _)| f)`; pass 2 counts `stats.dropped_excluded_path`.\n3. Pass 1: `let paths = position_paths(merged)` is filtered with `retain(|p| !opts.exclude_paths.iter().any(|g| glob_match(g, p)))` before intern_files / the line cache, so an excluded file gets no FileId, is never read, and is absent from `<out>.files.json`. Key-excluded nodes keep today's behaviour (their files stay interned) - unchanged on purpose.\n4. Edges touching an excluded node are skipped by the existing unknown-endpoint rule (counted in skipped_edges), exactly as for --exclude.\n5. Bin: the new arg, `exclude_paths: args.exclude_path.clone()` in the literal, the usage line `[--exclude <glob>]... [--exclude-path <glob>]...`, and after the `filtered:` block a marker printed only when the flag was given: `[engram-export] exclude-path: dropped <n> node(s) positioned under <k> pattern(s)` (n = stats.dropped_excluded_path, k = patterns given).\n6. TESTS (engram-export/src/lib.rs mod tests): exclude_path_drops_by_position_file - located_graph with rows (1, \"Shop::Controllers::OrdersController::GetOrder\", METHOD, \"bench/substrate-gap/fixtures/cs/server/OrdersController.cs\", 3) and (2, \"app::orders::get_order\", FUNCTION, \"app/orders.py\", 0); opts.exclude_paths = [\"bench/substrate-gap/fixtures/*\"]: exported keys == [\"app::orders::get_order\"], stats.dropped_excluded_path == 1, stats.dropped_excluded == 0, and the returned file table holds only app/orders.py; exclude_path_leaves_unpositioned_and_key_rules_alone - a node with no POSITION and key `region:www` survives `exclude_paths = [\"*\"]`, and with `exclude = [\"region:*\"]` added it counts in dropped_excluded, not dropped_excluded_path.",
+   "acceptance": "PRE-FIX BASELINE: 57 engram-export tests (last check log); `glia-export-engram --exclude-path x` is rejected by clap (unknown argument). AFTER: (1) `bash scripts/check-engram-export.sh` ends `[engram-export] check: ok - build + <N+2> tests passed against engram-core GMAP_FORMAT_VERSION=<V>`, N being the count the same check reported just before this packet (57 at 2170ff8; CG.3 and CG.4b each add one engram-export test, so N depends on landing order); the two new tests do not compile at HEAD (no field `exclude_paths`). (2) Real repo: on a `git archive HEAD` copy of glia under the scratchpad, `engram-export/target/debug/glia-export-engram <copy> --out <scratch>/g.gmap --no-persist --exclude-path 'bench/substrate-gap/fixtures/*'` prints `[engram-export] exclude-path: dropped <n> node(s) positioned under 1 pattern(s)` with n >= 2248, and `<scratch>/g.gmap.files.json` names no path starting `bench/substrate-gap/fixtures/`; the same run without the flag names them.",
+   "fired_on_marker": "[engram-export] exclude-path: dropped <n> node(s) positioned under <k> pattern(s)",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "api_signature"
+    ],
+    "what_changes": "engram-export only (the excluded in-repo crate): ExportOptions gains `exclude_paths` and ExportStats `dropped_excluded_path` (a full struct literal must name the new field: the bin's, updated in the same commit); the binary gains `--exclude-path <glob>`. No glia graph, gmap or default export byte changes: without the flag the output is byte-identical.",
+    "in_repo_consumers": [
+     "engram-export/src/bin/glia-export-engram.rs - ExportOptions literal (same commit)",
+     "engram-export/src/lib.rs tests - every ExportOptions literal uses ..Default::default() or names fields covered by Default (unchanged)",
+     "scripts/check-engram-export.sh - the gate (no change)"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/Engram - its export scripts may add `--exclude-path` (e.g. 'bench/substrate-gap/fixtures/*' for glia); nothing required",
+     "repo-graph, neuropil - do not use engram-export"
+    ]
+   },
+   "depends_on": [],
+   "risks": "glob_match's `*` spans `/`, so `bench/*` also drops bench/lens/src: the doc says so and the marker shows the count. A pattern that matches every file drops every positioned node (the marker makes it loud). Determinism: filters are pure per node; BTreeSet file order unchanged. Build only through scripts/check-engram-export.sh (engram-export is excluded from the workspace and path-depends on ../Engram).",
+   "spec_group": "CG"
+  },
+  {
+   "id": "CG.3",
+   "title": "The doc linker sees the whole section: a markdown DOC_SECTION's CODE cell holds the full section text instead of its first 500 bytes, so backticked mentions past byte 500 link (quokka 28 -> ~178 DOCUMENTS edges); Engram's Proposition text keeps the 500-byte cap at export",
+   "batch": "CG",
+   "area": "CA-12 doc-mention linker",
+   "loc": 160,
+   "rationale": "VERIFIER (HEAD 90d1076): cap_prose (engine/src/docs.rs:88, 500 bytes / last `. `) is called by chunk_markdown's flush (:140) and no-heading fallback (:181); link_doc_sections (engine/src/passes.rs:205) reads the DOC_SECTION's CODE Text and walks backtick_spans (:725, a plain split on '`'). No test pins the cap (docs_tests has three tests, none on length). The draft's doclink simulation (probe/CA-engram/doclink_sim2.py) was re-run: capped it reproduces HEAD's `[doclink]` counts exactly (quokka 28 = strong 1 / medium 19 / weak 8; Kina 1 weak), whole sections give quokka 179 and Kina 4. The named Engram misses were re-checked on the quokka dump: its 278 DOC_SECTIONs are contract ops 141, .ai 117, docs 16, CLAUDE.md 4 - nothing under turps/ or features/ - and EnsureUserReadyForChat's one DOCUMENTS in-edge is .ai/design-philosophy/naming.md's service-methods section. Sampling 30 of the 151 links whole sections add on quokka: genuine symbol mentions (`JWTAuthMiddleware()`, `GetGroupsByClaimsHandler`, `ActivityMapComponent.recenter()`, ...) plus ambiguous-name ones the existing tiers already mark Weak (`pick`, `ngOnInit`); ONE (of 151) is a fenced ```go block that the backtick split reads as a single multi-line span whose tail resolves (.ai/design-philosophy/services.md -> ActivityRepository), while none of HEAD's capped links on quokka / Kina / glia comes from a multi-line span - hence the fence guard in step 3. adr.rs adr_status's fallback scans the head sections' lines for a `Status:` label, so a label past byte 500 of an ADR's first heading section now counts (no fixture or test ADR has one). A scan of every bench fixture / matrix probe markdown file the build ingests found no section over 500 bytes.\nWHY EACH NAMED MISS HAPPENS (quokka a77d4cb copy, re-read line by line): all four mentions are backticked (`EnsureUserReadyForChat(ctx, userIdentifier)` at features/chat/backend.md:296, `ChatOps.EnsureUserReadyForChat` at turps/README.md:50, `EnsureUserReadyForChat` at turps/design-philosophy.md:339 and .ai/design-philosophy/naming.md:20). The three misses are FILE ROUTING, not the linker: engine/src/docs.rs include_doc (:32) admits only repo-root well-known files (is_wellknown_doc :15, exact paths like `README.md`), anything under a top-level docs/ or .ai/, and LF.4b ADR directories; turps/README.md (a sub-project README), turps/design-philosophy.md and features/chat/backend.md produce zero DOC_SECTION nodes (the graph's 278 DOC_SECTIONs come from .ai/, docs/, CLAUDE.md and contract ops only). That exclusion is deliberate - the unit test pins `!include_doc(\"src/notes.md\")` and LF.4b's widening is documented 'ADR-only' - so it is reported as not-needed here, with the ingestion-scope question raised separately.\nTHE REAL LINKER GAP found while tracing: link_doc_sections (engine/src/passes.rs:205) scans the DOC_SECTION's CODE cell, and chunk_markdown (docs.rs:123) stores `cap_prose(buf.join(\"\\n\"))` (:140; the no-heading fallback :181), cap_prose (:88) cutting at 500 bytes / the last sentence end. The POSITION cell already spans the whole section (LG.10a), so DOC_SECTION is the one node kind whose CODE is a truncated prefix of its POSITION span, and every backticked mention after byte ~500 never reaches the linker. naming.md:20 links only because it sits inside the first 500 bytes of `## Service Methods`.\nMEASURED: a Python re-implementation of the linker's rules (backtick spans, tier 1 qualified `A.b` / `A::b` via tail2, tiers 2-3 bare name, linkable kinds, per-section target dedupe, 25-link cap; probe script doclink_sim2.py) reproduces HEAD's `[doclink]` lines EXACTLY on three repos - quokka 28 (strong=1 medium=19 weak=8), Kina 1 (weak=1), glia 37 (strong=1 medium=19 weak=17) - and over whole sections gives quokka 179 (strong=5 medium=111 weak=63), Kina 4, glia 227: about 84% of the resolvable backticked mentions in ingested docs are dropped by the cap today. Sampled newly-linked spans are genuine symbol mentions (`JWTAuthMiddleware()`, `GetGroupsByClaimsHandler`, `ActivityListComponent`, `Services.ActivityRepository()`); ambiguous names stay Weak, as today.\nProbe fixture docs-link-past-cap graded at HEAD: DOCUMENTS 1/2 (the in-cap control), CODE 0/1, forbid 0; a canary copy that backticks `Shipment` inside the first 500 bytes fires the forbid (matched=1), so the precision row is live. Consumers of DOC_SECTION CODE re-checked: link_doc_sections (wants the whole text), adr.rs find_adrs (reads status / title near the top: unaffected), projection-text dense text (one-line preview unless full bodies), engram-export (Proposition text: capped at export below), governing_docs / docs-for (located rows, no text).",
+   "entry_points": [
+    "engine/src/docs.rs:123 chunk_markdown - `flush` (:134) stores the whole trimmed section (bounded at 64 KiB) instead of cap_prose; the no-heading fallback (:181) likewise",
+    "engine/src/docs.rs:88 cap_prose - removed (no caller left); new SECTION_TEXT_CAP and fn bound_section",
+    "engine/src/docs.rs:261 build_docs_graph - section-length counters and the `[docs] section text:` marker",
+    "engine/src/passes.rs:205 link_doc_sections - skip a multi-line span (a fenced block); count sections that reach MAX_LINKS_PER_DOC; `[doclink] <k> sections reached the 25-link cap` line",
+    "engram-export/src/lib.rs:965 pass 2 is_doc branch - `prose` goes through a local cap_prose (the pre-CG.3 rule) so Proposition text is byte-identical",
+    "engine/src/docs.rs:413 docs_tests - new tests; bench/substrate-gap/fixtures/docs-link-past-cap/ (new)"
+   ],
+   "files_touched": [
+    "engine/src/docs.rs",
+    "engine/src/passes.rs",
+    "engram-export/src/lib.rs",
+    "bench/substrate-gap/fixtures/docs-link-past-cap/app/__init__.py",
+    "bench/substrate-gap/fixtures/docs-link-past-cap/app/orders.py",
+    "bench/substrate-gap/fixtures/docs-link-past-cap/docs/orders.md",
+    "bench/substrate-gap/fixtures/docs-link-past-cap/key.json"
+   ],
+   "implementation": "DESIGN: make the CODE cell what the POSITION already says - the whole section - rather than teach the linker to re-read files: `glia merge` drops pass-made edges and re-runs link_doc_sections over loaded layouts (engine/src/merge.rs module doc), and external (Confluence / wiki) sections have no file to re-read, so the text the linker needs must be in the stored graph. After CD.7c (CODE cells as spans) a whole-section CODE cell of a repo file is stored as a span, so the store does not grow for file docs.\n1. docs.rs: `const SECTION_TEXT_CAP: usize = 64 * 1024;` and `fn bound_section(s: &str) -> (String, bool)`: trim; if len <= cap return it whole; else cut at the last char boundary <= cap, then at the last `\\n` before it, and report truncated=true (a data dump, not prose). flush stores bound_section(&buf.join(\"\\n\")).0 (empty after trim -> no chunk, as today); the fallback stores bound_section(text).0. cap_prose is deleted. A section of <= 500 bytes is byte-identical to today (cap_prose returned it trimmed and whole).\n2. build_docs_graph counts sections whose stored text exceeds 500 bytes, the longest length and the truncated ones; marker once per build when the first count > 0: `[docs] section text: <n> sections longer than 500 bytes kept whole (longest=<b> bytes, truncated_at_64k=<t>)`.\n3. passes.rs link_doc_sections: unchanged matching (backtick spans only, tiers, linkable kinds, MAX_LINKS_PER_DOC = 25) with ONE guard the wider text needs: a span containing `\\n` is skipped (`if span.contains('\\n') { continue; }`) - backtick_spans returns a fenced block's whole body (three backticks leave it at an odd index) or a runaway span as one multi-line segment, never an inline mention; the guard drops no link HEAD makes (0 multi-line spans among quokka / Kina / glia's current links) and the one fence link whole sections would add on quokka. Also add a counter of sections that hit the 25 cap and, when > 0, print `[doclink] <k> sections reached the 25-link cap` after the existing line (the existing `[doclink] N DOCUMENTS edges (...)` line keeps its format).\n4. engram-export/src/lib.rs: `fn cap_prose(s: &str) -> String` - the removed engine rule verbatim (500 bytes, char-boundary safe, last `. ` inside the cap) with a doc line saying it keeps Engram's Proposition text what it was before CG.3; pass 2's is_doc branch uses `cap_prose(&code_cell(&n.cells).unwrap_or_else(|| name.clone()))`. Engram therefore gets byte-identical Propositions and only the extra Documents edges.\n5. TESTS: docs.rs `a_long_section_keeps_its_whole_text` - chunk_markdown over the fixture's docs/orders.md: the `refunds` chunk text ends with `can still be traced.` and is > 500 bytes, the `placing-orders` chunk equals its old capped text; `bound_section_cuts_only_past_64k` - a 70,000-byte single-section doc stores <= 65,536 bytes ending at a line end and reports truncated; markdown_chunking_and_include_rules keeps its include asserts unchanged. passes.rs passes_tests `doc_mention_skips_fenced_blocks` - a merge built with the existing `Hand` harness (Hand::add with a CODE Text cell) holding one DOC_SECTION whose CODE is ~700 bytes: inline `OrderService.refund` at byte ~640, a fenced block \"```python\\nOrderService.cancel\\n```\" and the prose word Shipment, plus METHODs `app::orders::OrderService::refund` / `::cancel` and CLASS `app::orders::Shipment`: exactly one DOCUMENTS edge, to refund (Strong, rule qualified); none to cancel (fails at HEAD: tier 2 reads `cancel` off the fence body's tail and links it Medium) and none to Shipment. (A passes-level test cannot show the cap itself, which lives in chunk_markdown: a_long_section_keeps_its_whole_text and the fixture do.) engram-export `doc_proposition_text_is_capped_at_export` - a DOC_SECTION with an 831-byte CODE exports Proposition text of <= 500 bytes equal to the old cap.",
+   "acceptance": "PRE-FIX BASELINE (measured at 2170ff8; the fixture grade and the simulation's capped counts re-checked unchanged at 90d1076): fixture docs-link-past-cap DOCUMENTS 1/2, CODE 0/1, forbid 0; quokka copy `[doclink] 28 DOCUMENTS edges (strong=1 qualified, medium=19 unique, weak=8 ambiguous) over 278 doc sections`, Kina `[doclink] 1 ...`, glia `[doclink] 37 ...`; quokka's ingested docs hold 71 sections over 500 bytes (longest 30,174). AFTER: (1) `cargo test -p glia-engine --lib -- docs::docs_tests passes::passes_tests::doc_mention_skips_fenced_blocks` green; a_long_section_keeps_its_whole_text and bound_section_cuts_only_past_64k fail at HEAD (capped text / no bound_section) and doc_mention_skips_fenced_blocks fails at HEAD (the fence links cancel). (2) grade.py on bench/substrate-gap/fixtures/docs-link-past-cap: DOCUMENTS 2/2, CODE 1/1, FORBID VIOLATIONS 0. (3) quokka copy: `[doclink]` total >= 150 (the simulation predicts 178: 179 whole-section links minus the one fenced block), glia copy >= 190 (predicted 227), Kina 4; the `[docs] section text:` line reports about 71 sections kept whole on quokka (longest about 30,174 bytes, truncated_at_64k=0; CE.4a's fence-aware chunking may shift the count slightly); `turps::Services::chat::ChatOps::ChatOps::EnsureUserReadyForChat` still has exactly one DOCUMENTS in-edge (naming.md's service-methods section: ingestion scope unchanged). (4) `bash scripts/check-engram-export.sh` green including doc_proposition_text_is_capped_at_export. (5) `cargo test -p glia-engine --test adr_decisions --test merge_layouts --test edge_evidence --test absence` and cli/tests/line_numbers.rs green; `python3 bench/substrate-gap/run.py --no-log --check` names no fixture other than docs-link-past-cap (no fixture doc section exceeds 500 bytes: scanned). (6) byte_identical and parallel_build green.",
+   "fixtures": [
+    {
+     "name": "docs-link-past-cap",
+     "purpose": "CA-12 recall: a backticked mention past byte 500 of its section links, and the CODE cell holds the whole section; precision: a symbol named only as a prose word (Shipment) never links",
+     "source_sketch": "--- app/__init__.py\n\n--- app/orders.py\nclass OrderService:\n    def place(self, order):\n        return order\n\n    def refund(self, order):\n        return order\n\n\nclass Shipment:\n    pass\n\n--- docs/orders.md\n# Orders\n\nHow orders move through the shop.\n\n## Placing orders\n\nCall `OrderService.place` to place an order.\n\n## Refunds\n\nRefunds are the slowest part of the order lifecycle, and most of the support load comes from them. A customer asks for a refund through the help centre, an agent checks the order history, and the finance team approves anything above the automatic threshold. The threshold is reviewed every quarter and is deliberately conservative, because a refund that is issued twice is very hard to claw back once the card network has settled it. Agents must never issue a refund by hand from the payment provider dashboard, since that bypasses the audit trail the finance team relies on at the end of each month.\n\nEvery refund goes through `OrderService.refund`, which records the reason and the approving agent before it calls the payment provider.\n\nA refunded order keeps its Shipment record so that returns can still be traced.\n",
+     "key_json": {
+      "framework": "docs-link-past-cap",
+      "language": "python",
+      "dirs": [
+       "."
+      ],
+      "note": "CA-12: the doc linker reads a DOC_SECTION's CODE cell, which docs.rs cap_prose truncates to 500 bytes, so a backticked mention later in a long section never links (quokka: 154 of 182 resolvable mentions in ingested docs sit past the cap). After the fix the CODE cell is the whole section and the linker sees every backticked span. Precision: prose words never link - only backticked spans do, before and after the fix. Baseline (HEAD 2170ff8, leap wheel): DOCUMENTS 1/2 (the control), CODE 0/1, forbid 0 violated; a canary that backticks `Shipment` inside the first 500 bytes fires the forbid (matched=1), so the row is live.",
+      "expect_edges": [
+       {
+        "from": "docs::docs::orders::placing-orders",
+        "to": "OrderService/place",
+        "category": "DOCUMENTS",
+        "note": "CONTROL: a mention inside the first 500 bytes links at HEAD"
+       },
+       {
+        "from": "docs::docs::orders::refunds",
+        "to": "OrderService/refund",
+        "category": "DOCUMENTS",
+        "note": "a backticked mention past byte 500 of its section"
+       }
+      ],
+      "expect_cells": [
+       {
+        "kind": "DOC_SECTION",
+        "node": "docs::docs::orders::refunds",
+        "cell": "CODE",
+        "contains": "keeps its Shipment record",
+        "note": "the CODE cell holds the whole section, not its first 500 bytes"
+       }
+      ],
+      "forbid": [
+       {
+        "from": "docs::docs::orders::refunds",
+        "to": "app::orders::Shipment",
+        "category": "DOCUMENTS",
+        "note": "PRECISION: `Shipment` appears only as a prose word (no backticks); prose never links"
+       }
+      ]
+     }
+    }
+   ],
+   "fired_on_marker": "[docs] section text: <n> sections longer than 500 bytes kept whole (longest=<b> bytes, truncated_at_64k=<t>)",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cell_value",
+     "cli_output"
+    ],
+    "what_changes": "Graph content: a markdown DOC_SECTION's CODE cell (repo file or docs snapshot) holds the whole trimmed section, up to 64 KiB (old: <= 500 bytes, cut at a sentence end); every section of <= 500 bytes is byte-identical. DOCUMENTS edges grow (quokka 28 -> ~178, glia 37 -> ~227); a backtick span containing a newline (a fenced block's body) never links (none of HEAD's links is one), LF.4b's DECISION cells land on every symbol a long ADR section mentions past byte 500, and adr_status's fallback reads a `Status:` label anywhere in an ADR's head sections (old: only in their first 500 bytes). dense_text with full bodies prints whole sections. `[doclink]` counts grow; new `[docs] section text:` and `[doclink] ... 25-link cap` lines. Engram Proposition text unchanged (capped at export).",
+    "in_repo_consumers": [
+     "engine/src/docs.rs docs_tests - new tests; the chunking row / include asserts stay",
+     "engine/src/passes.rs passes_tests - new doc_mention_skips_fenced_blocks; the doc_mention_* tier tests unchanged",
+     "engine/tests/adr_decisions.rs, merge_layouts.rs, edge_evidence.rs, absence.rs; cli/tests/line_numbers.rs - re-run (their docs are short)",
+     "engram-export/src/lib.rs - export cap + test (same commit)",
+     "bench/substrate-gap/fixtures/docs-link-past-cap - new"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/repo-graph/repo_graph/server.py - `read`'s 'governed by (docs)' footer lists more sections; no code change",
+     "/home/ivy/Code/neuropil - a DOC_SECTION's CODE text is the whole section (a doc viewer shows more); no qname change",
+     "/home/ivy/Code/Engram - more Documents edges; Proposition text and identity hints byte-identical (to take the whole text later, drop engram-export's cap)",
+     "engram-export/ - keeps the 500-byte Proposition cap itself (this packet)"
+    ]
+   },
+   "depends_on": [
+    "CE.4a"
+   ],
+   "risks": "More Weak (ambiguous-name) DOCUMENTS edges: quokka weak 8 -> ~63; the tiers are unchanged, so a consumer filtering on confidence sees the same precision per tier. The 25-link cap now binds on long sections (the new line counts them). Before CD.7c lands, whole sections are stored inline: quokka's ingested docs are ~141 KB of markdown in total (glia's ~132 KB; quokka's longest section 30,174 bytes, 71 sections over 500 bytes), Confluence snapshots add their page bodies. CE.4a rewrites chunk_markdown first (fence-aware headings, deduped slugs); this packet only replaces the cap call inside its flush / fallback. Determinism: pure string functions; no HashMap iteration added. UTF-8: the 64 KiB cut walks back to a char boundary before searching for `\\n`. PARSER_STAMP moves (engine is hashed).",
+   "spec_group": "CG"
+  },
+  {
+   "id": "CG.4a",
+   "title": "The endpoint fold marks an external call site: a client ENDPOINT_HIT whose host is written in the call's own literal, is a public DNS name (not an IP, single-label, internal-TLD or RFC 2606 example host) and names no site the client repo's configuration names gains `\"external\":true`",
+   "batch": "CG",
+   "area": "CA-13 external HTTP endpoints (1/2: per-site mark)",
+   "loc": 210,
+   "rationale": "VERIFIER (HEAD 90d1076): fold_repo (engine/src/endpoint_fold.rs:115) is called once per repo from engine/src/build/grafts.rs:82 over `parses_by_lang.values_mut().flatten()` - a HashMap<&str, Vec<FileParse>>, so the language order is per-process random; mark_external is order-independent because configured sites are collected into a BTreeSet over every parse before any entry is marked. plan_entry (:216) and Fields (:425, append-on-set) are as described; ConstTable (parsers/code/extractors/src/constants.rs:58) has by_key / alternatives BTreeMaps, is_pinned (:239), pinned_keys_in (:247), candidates (:180) and no iterator over its entries. graph's host::host_name is pub(crate) in glia-graph, so the engine needs its own authority-to-host helper. Re-measured ENDPOINT_HIT hosts on the leap-wheel layouts of the git-archive copies: quokka 3 sites, all literal nominatim.openstreetmap.org (template authority `https://nominatim...`); Kina 56 const-sourced api.kinaswap.com (template `${environment.apiUrl}...`, never literal) + 2 literal localhost:3701 (not public) -> 0 marked. The fixture's three ENDPOINT_HIT payloads at HEAD: /search `raw`+`template`+`host` nominatim, /products `template ${environment.apiUrl}/products` + folded host api.shop.io, /orders `raw https://api.shop.io/orders` + host. CB.21 / CB.24 put `host` / `hosts` on WS_CLIENT / GRPC_CLIENT / GRAPHQL_OPERATION / RPC_CALL cells, never on ENDPOINT, so the nav-kind ENDPOINT gate keeps them out of this rule.\nWHAT GLIA RECORDS ABOUT A CLIENT'S HOST TODAY (verified): the ENDPOINT_HIT cell carries `host` - captured by engine/src/endpoint_fold.rs plan_entry (:218) from a folded `template` or the `raw` literal (A11.2), or written at extraction by the Go / Python / Java / Swift / Dart parsers from the literal they saw (A11.5, counted as `preset`) - and `hosts` (every deployment binding of a folded base, A11.4 deployment_hosts); `raw`, `template`, `folded_from` and `overlay` record where the path came from. HTTP host narrowing (A11.4 / LB.4b, graph/src/resolvers/http.rs narrow_by_host, moving to host.rs in CB.12) acts only on POSITIVE evidence: a host that normalises to a known service / project alias cuts a multi-target list; an unknown host leaves every target (so an external host that shares a path with an app route pairs with it). gaps.rs tiers an unpaired endpoint HEURISTIC when it has a host ('it may be a third-party API', :16) - nothing marks one external. 0.5.1's CB.21 / CB.24 reuse ENDPOINT_HIT `host` for WS / gRPC / GraphQL / tRPC clients (James 2026-09-30: no CLIENT_HOST cell).\nMEASURED (quokka a77d4cb copy): `endpoint:GET:/search @quokka_web` has three ENDPOINT_HIT sites (activities.component.ts:312, complete-profile.component.ts:252, profile.component.ts:419), each `\"host\":\"nominatim.openstreetmap.org\"` from a template whose authority is literal (`https://nominatim.openstreetmap.org/search?q=${q}...`); it is unpaired only because turps serves no `/search`. The probe fixture http-external-host (the same call beside an Express `app.get('/search')`) pairs it: HTTP_CALLS endpoint:GET:/search -> GET /search (FORBID VIOLATIONS 1 at HEAD).\nWHY 'names no service / project of the build' ALONE IS UNSAFE (measured, and the reason for the configured-site rule): Kina a448fb3 - 50 ENDPOINTs carry host api.kinaswap.com (with hosts [localhost:3701, api.kinaswap.com]) and 45 of them pair with Kina's own routes; api.kinaswap.com names no project alias (A11.4 leaves public dotted names whole). Its host comes from `${environment.apiUrl}` folded through the ConstTable, bound in frontend/src/environments/environment.prod.ts - configuration. Three bench fixtures (http-absolute-url-client, swift-http, xstack-go-http) call `https://api.example.com/users` and must keep pairing with their own server. And a bare local `const url = `https://nominatim.../reverse?...``` (complete-profile.component.ts:266) IS bound in the TS ConstTable (constants.rs binding -> decl takes any single-line `const|let|var <name> = <literal>` of a TS file at any indentation, and build_const_table scans every source file), so 'any URL constant' would wrongly configure nominatim; only config-shaped keys count.\nRULE (per site, per repo, at fold time - the only place the ConstTable is): external iff (1) the site has a `host`; (2) the host is LITERAL - no `template`, or the template's text before its first `${` contains `://` (Kina's `${environment.apiUrl}/...` is const-sourced and never external); (3) the host is public - host_name has a `.`, is not an IPv4 / IPv6 literal, its TLD is not localhost / local / internal / lan / test / example / invalid / svc / localdomain (nor ends .home.arpa), and its site is not example.com / example.net / example.org (RFC 2606 / 6761 reserved documentation names); (4) its site (last two labels; last three when the TLD has two letters and the second-level label is a registry label such as co / com / net / org / gov / edu / ac) is not CONFIGURED: the sites of every URL value in the repo ConstTable whose key is config-shaped (contains a `.`, e.g. `environment.apiBaseUrl`, or is SCREAMING_CASE, e.g. `API_BASE_URL`), plus every host / hosts entry of the repo's const-sourced ENDPOINT sites, plus `.glia/overlay.toml [constants]` pins (they are table entries, LF.2d) - the user's escape hatch. Simulated on the three copies: quokka marks exactly the 3 nominatim sites; Kina marks none (every host is const-sourced; api.kinaswap.com is configured); glia's own ENDPOINT hosts (api, users-svc, orders-svc) are single-label and its fixtures' api.example.com is reserved: none.",
+   "entry_points": [
+    "engine/src/endpoint_fold.rs:115 fold_repo - collect the parses once, fold as today, then mark_external over the same parses with the repo's configured sites",
+    "engine/src/endpoint_fold.rs (new fns) configured_sites, host_is_literal, is_public_host, site_of, mark_external",
+    "engine/src/endpoint_fold.rs:73 FoldStats - `external: usize` and `configured: usize`; :98 report prints `[endpoint-external]`",
+    "engine/src/endpoint_fold.rs:425 Fields - reused to append `\"external\":true` to a marked site's ENDPOINT_HIT",
+    "parsers/code/extractors/src/constants.rs:58 ConstTable - new `pub fn entries(&self) -> impl Iterator<Item = (&str, &str)>` over every binding (first values, then alternatives, BTreeMap order)",
+    "engine/src/endpoint_fold.rs:470 mod tests and parsers/code/extractors/src/constants.rs:849 mod tests - new tests"
+   ],
+   "files_touched": [
+    "engine/src/endpoint_fold.rs",
+    "parsers/code/extractors/src/constants.rs"
+   ],
+   "implementation": "1. constants.rs: `pub fn entries(&self) -> impl Iterator<Item = (&str, &str)> + '_` yielding by_key pairs, then each alternatives value under its key; deterministic (BTreeMap).\n2. endpoint_fold.rs: `fold_repo(parses, consts, repo)` keeps its signature: `let mut parses: Vec<&mut FileParse> = parses.into_iter().collect();` fold each exactly as today (stats.add(fold_endpoint_paths(..))), then `stats.add(mark_external(&mut parses, consts))`.\n3. `fn configured_sites(parses: &[&mut FileParse], consts: &ConstTable) -> BTreeSet<String>`: for (key, value) in consts.entries() with config_shaped(key) (`key.contains('.')`, or every char is ASCII upper / digit / `_` with at least one letter, or consts.is_pinned(key) - an overlay [constants] pin always counts): if let (Some(h), _) = url_split(value) and value contains `://` -> insert site_of(host_name(&h)); then for every ENDPOINT entry's single JSON ENDPOINT_HIT (the plan_entry rule: exactly one) that is NOT literal-hosted: insert site_of of `host` and of each `hosts` entry that is non-empty. host_only (a private fn here: glia-graph's host::host_name is crate-private) = strip `user@`, a trailing `:port` of digits; lowercase.\n4. `fn host_is_literal(fields: &Fields) -> bool` = fields.str(\"template\").map_or(true, |t| t.split(\"${\").next().is_some_and(|head| head.contains(\"://\")))`. `fn is_public_host(h: &str) -> bool` per the rule (IPv4 = only digits and dots; IPv6 = starts `[` or holds `:`; single label = no `.`; INTERNAL_TLDS; RESERVED_SITES). `fn site_of(h) -> String` per the rule.\n5. `fn mark_external(parses, consts) -> FoldStats`: sites = configured_sites(..); for every ENDPOINT entry (nav kind ENDPOINT) with exactly one JSON ENDPOINT_HIT: parse Fields; skip if it already has `external`; if `host` is Some(h) and host_is_literal and is_public_host(host_name(h)) and !sites.contains(site_of(..)) -> fields.set(\"external\", Value::Bool(true)), rewrite the cell payload (serde_json::to_string(&fields)), stats.external += 1. stats.configured = sites.len(). Nothing else of the entry changes (id, qname, confidence, edges); an unmarked entry is byte-identical.\n6. FoldStats::report: when external > 0, `[endpoint-external] <n> client endpoint sites name a public host outside the repo's configuration (configured sites=<k>) repo=<label>`.\n7. TESTS (endpoint_fold.rs mod tests, over FileParse fixtures built like the existing fold tests): literal_public_host_is_marked (template `https://nominatim.openstreetmap.org/search?q=${q}` -> ENDPOINT_HIT gains \"external\":true, id / qname unchanged); const_sourced_host_is_never_marked (template `${environment.apiUrl}/trades`, table environment.apiUrl = https://api.kinaswap.com/api -> unmarked); configured_site_is_not_external (raw `https://api.shop.io/orders` with table environment.apiUrl = https://api.shop.io -> unmarked; the same with a bare local key `url` -> MARKED, pinning the config-shaped rule); preset_host_is_literal (a Dart-style cell with only `raw` + `host` api.stripe.com -> marked); internal_and_reserved_hosts_are_not_public (localhost:3701, 10.0.0.5, users-svc, users.default.svc.cluster.local, api.example.com, x.test, [::1] -> none marked); site_of_handles_registry_slds (a.b.co.uk -> b.co.uk, api.kinaswap.com -> kinaswap.com, openstreetmap.org -> openstreetmap.org); overlay_pin_configures_a_host (ConstTable::pin(\"GEO_BASE\", \"https://nominatim.openstreetmap.org\") -> unmarked). constants.rs `entries_yields_first_values_then_alternatives`.\n8. FoldStats gains `external` and `configured` (FoldStats::add sums them). The five full `FoldStats { folded, hosts, preset }` literals in this file's tests (:617, :675, :721, :755, :855) gain `..FoldStats::default()`; their assertions are unchanged because they call fold_endpoint_paths, never fold_repo, so mark_external does not run in them.",
+   "acceptance": "PRE-FIX BASELINE (measured at 2170ff8; host survey and fixture payloads re-checked at 90d1076): no ENDPOINT_HIT carries an `external` field in the quokka, Kina or glia copies; fixture http-external-host ENDPOINT_HIT `\"external\":true` row 0/1 (graded with CG.4b's key). AFTER: (1) `cargo test -p glia-engine --lib -- endpoint_fold::tests` and `cargo test -p glia-code-extractors -- constants::tests::entries_yields_first_values_then_alternatives` green (the seven new fold tests fail at HEAD: no field / no fn). (2) quokka copy (glia build --out + load_from_gmap, GLIA_NO_PERSIST=1): each of the three ENDPOINT_HIT cells of `endpoint:GET:/search @quokka_web` contains `\"external\":true`; no other ENDPOINT_HIT in quokka does; stderr has `[endpoint-external] 3 client endpoint sites ...` once. (3) Kina copy: no ENDPOINT_HIT contains `external`, no `[endpoint-external]` line, and the number of ENDPOINTs with an HTTP_CALLS out-edge equals the same copy's pre-change build (captured before-file; 89 of 113 at 2170ff8). (4) glia copy: no ENDPOINT_HIT contains `external`. (5) `python3 bench/substrate-gap/run.py --no-log --check`: no fixture changes (http-absolute-url-client, swift-http and xstack-go-http keep pairing: example.com is reserved). (6) byte_identical and parallel_build green.",
+   "fired_on_marker": "[endpoint-external] <n> client endpoint sites name a public host outside the repo's configuration (configured sites=<k>) repo=<label>",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "cell_value",
+     "cli_output"
+    ],
+    "what_changes": "Graph content: the ENDPOINT_HIT cell of a client call site whose literal host is public and unconfigured gains `\"external\":true` appended (old: no such field; quokka: the 3 nominatim sites). Every other ENDPOINT_HIT is byte-identical. New `[endpoint-external]` stderr line. No pairing changes until CG.4b.",
+    "in_repo_consumers": [
+     "engine/src/endpoint_fold.rs tests - new; the five existing FoldStats literals gain `..FoldStats::default()` (same commit), their assertions unchanged (A11.2 / A11.4 / A11.5 / LF.2d)",
+     "parsers/code/extractors/src/constants.rs tests - new",
+     "every ENDPOINT_HIT reader (http.rs / host.rs hit_hosts, gaps endpoint_host, arch node_file, evidence::locate, endpoint_fold itself, external/wrappers, http_owner) reads named fields and ignores an unknown one (re-checked: str_field / serde lookups by key)"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/repo-graph/repo_graph/server.py _cell_text - renders the first six ENDPOINT_HIT fields; `external` is appended after them, so the footer is unchanged",
+     "/home/ivy/Code/Engram, engram-export/ - ENDPOINT_HIT is not exported; nothing until CG.4b's ORIGIN",
+     "/home/ivy/Code/neuropil - an extra field in a cell payload it does not parse"
+    ]
+   },
+   "depends_on": [],
+   "risks": "A client that hard-codes its OWN backend's public URL with no config-shaped constant naming it anywhere in the repo is marked external (and CG.4b then leaves it unpaired): quokka and Kina route their own backend through environment files, and the three bench fixtures use reserved example.com; the escape hatch is one `[constants]` pin in .glia/overlay.toml (a table entry, test overlay_pin_configures_a_host) or an `[[edge]]` stanza. A third-party base URL held in a config-shaped constant (`environment.stripeUrl`) is configured and stays unmarked: a miss, never a lost pair. Site comparison is label-based, not a public-suffix list (no crawling or registry data): an exotic ccSLD falls back to two labels, which only widens 'configured'. Determinism: BTreeSet sites, parses in walk order, entries in BTreeMap order. UTF-8: host strings are split on ASCII `.` / `:` / `@` only. The fold runs post-cache on every build, so the mark follows constants changed in other files. PARSER_STAMP moves (engine and extractors are hashed). parses_by_lang is a HashMap: nothing in mark_external may depend on the order parses arrive in (sites first into a BTreeSet, then a per-entry predicate; counters are sums).",
+   "spec_group": "CG"
+  },
+  {
+   "id": "CG.4b",
+   "title": "External HTTP endpoints stay out of pairing and say so: the HTTP resolver skips an ENDPOINT whose every site is marked external and whose hosts name no service / project alias of the build, tag_synthetic_provenance stamps such an unpaired ENDPOINT ORIGIN `external`, gaps stops listing it as an unpaired endpoint, and engram-export carries the provenance",
+   "batch": "CG",
+   "area": "CA-13 external HTTP endpoints (2/2: pairing, provenance, export)",
+   "loc": 320,
+   "rationale": "VERIFIER (HEAD 90d1076): CB.12 landed (f683e2b): graph/src/resolvers/host.rs holds AliasIndex (:152), build_service_alias_index (:198), normalise_alias (:315), host_name (:333) and hit_hosts (:375), all pub(crate) in glia-graph, and http.rs resolve_with_mounts (:132) imports them; its endpoint loop skips `<unresolved>` (:152) BEFORE `stats.endpoints += 1`, so the new skip there also leaves external endpoints out of the `[http] ... endpoints=` count. tag_synthetic_provenance is the Post PassSpec at engine/src/profile.rs:209 with `after: &[]`; it now reads HTTP_CALLS, so it declares `after: [\"http\", \"external_edges\"]` like demote_unmatched_http_nodes (PassRegistry::validate checks both exist and run earlier). gaps.rs unpaired_endpoint branch is at :682 (targets.is_empty()). Re-measured on the quokka copy with the HEAD binary: `glia gaps --category unpaired_endpoint` -> rows=2 (endpoint:PUT:/protected/settings/account @quokka_android fact, endpoint:GET:/search @quokka_web heuristic). Engram's engram-mcp default_drop_provenance (crates/engram-mcp/src/main.rs:49) holds test_fixture / generated_proto / ..., not `external`. CD.3b (not landed) makes an ENDPOINT with no HTTP_CALLS an orphan and scores it against same-token routes, so without a guard the external /search would come back as a HEURISTIC suspected_edge to GET /search: this packet adds that guard in engine/src/suspected.rs and therefore lands after CD.3b.\ngraph/src/resolvers/http.rs resolve_with_mounts (:130 at 2170ff8) pairs every ENDPOINT except `<unresolved>` (:150); host narrowing only ever cuts a list on a known alias, so an external host with a path the app also serves pairs (probe fixture http-external-host: endpoint:GET:/search -> GET /search, FORBID VIOLATIONS 1 at HEAD). Nothing tells a consumer that `endpoint:GET:/search @quokka_web` is OpenStreetMap Nominatim: the Engram battery's gen-client-endpoint-2af99703 query ('Which HTTP endpoint does CompleteProfileComponent::forwardGeocode request?') expects `GET:/search` with no hint it is third-party, and `glia gaps` lists it as unpaired_endpoint (HEURISTIC, 'may be a third-party API'; measured on the quokka copy: 2 unpaired_endpoint rows, this one and the android PUT). CG.4a writes the per-site fact (`\"external\":true` on ENDPOINT_HIT); this packet turns it into the node-level verdict every consumer already reads: ORIGIN provenance, the one coordinate engram-export (origin_provenance :197 -> GmapNode.provenance) and neuropil filter on, and Engram's default drop list does not include (so it is kept and labelled, not dropped).\n'Matches no service / project of the build' is checked where the whole build is visible: the resolver's alias index (host.rs build_service_alias_index after CB.12: nested PROJECT labels and directories, IaC service / deployment / statefulset / image names). A public host's non-generic labels are compared with the alias keys, so `api.kinaswap.com` would name Kina's `kinaswap` project even with no config constant; nominatim.openstreetmap.org names nothing in quokka (aliases quokka-android, android, app, quokka-web, deps, turps).\nProbe fixture http-external-host graded at HEAD: HTTP_CALLS 2/2 (the two api.shop.io controls), CALLS 1/1, ENDPOINT_HIT 0/1, ORIGIN 0/1, FORBID VIOLATIONS 1. Graph queries run: repo-graph find `fold_endpoint_paths` (engine/src/endpoint_fold.rs:148), impact on tag_synthetic_provenance (it runs through a PassSpec fn pointer, so no CALLS in-edge: the read confirmed its Post-stage slot in engine/src/profile.rs populates ORIGIN).",
+   "entry_points": [
+    "graph/src/resolvers/http.rs:130 resolve_with_mounts - after the `<unresolved>` skip (:150): an endpoint whose every ENDPOINT_HIT carries `\"external\":true` and none of whose hosts' non-generic labels is an alias key is counted and skipped",
+    "graph/src/resolvers/http.rs (new fns) all_sites_external, host_names_an_alias; :326 HttpMatchStats `external` + distinct host count; new report_external after report_host_narrowed (:573)",
+    "engine/src/passes.rs:767 tag_synthetic_provenance - precomputes HTTP_CALLS sources and the per-id all-sites-external verdict, stamps `{\"provenance\":\"external\"}` on unpaired external ENDPOINTs; the CG.2a `[provenance]` line gains `external=<e>`",
+    "engine/src/gaps.rs:682 unpaired_endpoint branch - skips provenance external; the module doc table row (:16) says so",
+    "engram-export/src/lib.rs:1172 mod tests - external_endpoint_keeps_its_provenance",
+    "engine/tests/http_external.rs (new); bench/substrate-gap/fixtures/http-external-host/ (new)",
+    "engine/src/profile.rs:209 tag_synthetic_provenance PassSpec - `after: &[\"http\", \"external_edges\"]` (it now reads HTTP_CALLS)",
+    "engine/src/suspected.rs (CD.3b) orphan filter - an ENDPOINT whose ORIGIN provenance is `external` is not an orphan, beside CD.3b's `<unresolved>` skip"
+   ],
+   "files_touched": [
+    "graph/src/resolvers/http.rs",
+    "engine/src/passes.rs",
+    "engine/src/profile.rs",
+    "engine/src/gaps.rs",
+    "engine/src/suspected.rs",
+    "engram-export/src/lib.rs",
+    "engine/tests/http_external.rs",
+    "bench/substrate-gap/fixtures/http-external-host/server/app.js",
+    "bench/substrate-gap/fixtures/http-external-host/server/package.json",
+    "bench/substrate-gap/fixtures/http-external-host/web/package.json",
+    "bench/substrate-gap/fixtures/http-external-host/web/src/environments/environment.ts",
+    "bench/substrate-gap/fixtures/http-external-host/web/src/geo.ts",
+    "bench/substrate-gap/fixtures/http-external-host/key.json"
+   ],
+   "implementation": "1. http.rs: `fn all_sites_external<'c>(cells: impl IntoIterator<Item = &'c Cell>) -> bool` = at least one ENDPOINT_HIT and every ENDPOINT_HIT payload is Json containing `\"external\":true` (the key CG.4a writes). `const GENERIC_HOST_LABELS: &[&str] = &[\"api\", \"www\", \"app\", \"web\", \"cdn\", \"static\", \"gateway\", \"backend\", \"server\", \"service\"];` `fn host_names_an_alias(aliases: &AliasIndex, host: &str) -> bool`: labels of host_name(host) lowercased, the last (TLD) dropped, generic ones dropped, any `aliases.contains_key(&normalise_alias(label))` (host.rs helpers after CB.12). In the endpoint loop, after `if raw_path == UNRESOLVED_PATH { continue; }`: `if all_sites_external(ep.cells.iter().copied()) && !hit_hosts(ep.cells.iter().copied()).unwrap_or_default().iter().any(|h| host_names_an_alias(&aliases, h)) { stats.external += 1; stats.external_hosts.insert(host) for each; continue; }` (external_hosts: BTreeSet<String>). report_external: when external > 0, `[http-external] <n> endpoints left unpaired: every call site names a host outside the build (hosts=<k>)`.\n2. passes.rs tag_synthetic_provenance: before the mutable loop, `let paired: HashSet<NodeId>` = `from` of every HTTP_CALLS edge in merged.all_edges() (resolver edges and overlay [[edge]] stanzas alike), and `let mut external: HashMap<NodeId, bool>` over every graph's ENDPOINT nodes: entry(id).and(all hits of THIS entry external), i.e. the union over every entry of the id (an id can sit in several graphs of a repo, LB.5) with the same predicate as the resolver (a private 8-line twin in passes.rs pinned by a test on the same literal payload). In the per-node loop, after the dependency / synthetic arms: `else if kind == Some(node_kind::ENDPOINT) && external.get(&n.id) == Some(&true) && !paired.contains(&n.id) { \"external\" }`. A node that already has an ORIGIN (an overlay wrapper ENDPOINT) keeps it. The `[provenance]` marker (CG.2a) gains `external=<e>`.\n3. gaps.rs: in the `targets.is_empty()` arm, `if provenance_is(n.cells, \"external\") { skip }` before building the unpaired_endpoint row; the module doc table's unpaired_endpoint row gains 'not one whose ORIGIN provenance is external (every call site names a public host outside the build, CA.13)'.\n4. engram-export: no code change - origin_provenance already exports `external` as GmapNode.provenance and DROP_PROVENANCE (dependency / synthetic / generated) does not drop it. Test external_endpoint_keeps_its_provenance: a graph with ENDPOINT `endpoint:GET:/search` carrying origin_cell(\"external\") exports that key with provenance Some(\"external\") and dropped_noise == 0.\n5a. profile.rs: the tag_synthetic_provenance PassSpec gains `after: &[\"http\", \"external_edges\"]` - it now reads HTTP_CALLS, resolver and overlay `[[edge]]` alike (list order already satisfies it; the `after` makes the dependency checked by PassRegistry::validate). code_passes_order_is_head_order and populates_is_exact are unaffected (order and populates unchanged).\n5b. suspected.rs (after CD.3b): in the orphan filter, beside `for an ENDPOINT also not <unresolved>`, an ENDPOINT whose ORIGIN provenance is `external` is skipped too (a 6-line ORIGIN reader like gaps.rs provenance_is, or CD.3b's own if it has one): a third-party endpoint is not a missing edge.\n5. TESTS: http.rs mod tests `external_endpoint_is_left_unpaired` (two RepoGraphs: a ROUTE `GET /search` and an ENDPOINT `endpoint:GET:/search` whose ENDPOINT_HIT is `{\"method\":\"GET\",\"path\":\"/search\",\"host\":\"nominatim.openstreetmap.org\",\"external\":true}` -> zero HTTP_CALLS; the same without `external` -> one; the same with host `api.shop.io` and a nested PROJECT labelled `shop` -> one, host_names_an_alias); passes.rs passes_tests `external_endpoint_origin_needs_every_site_and_no_pair` (the Hand harness) (all-external unpaired -> ORIGIN external; one site unmarked -> none; all external but an HTTP_CALLS edge from it -> none). engine/tests/http_external.rs (tempfile + generate_one over one repo holding web/ and server/ nested projects shaped like the fixture): endpoint:GET:/search has no HTTP_CALLS and ORIGIN external, /products and /orders pair, gaps_report's unpaired_endpoint rows exclude /search; gaps_report with category `suspected_edge` has no row whose qname starts `endpoint:GET:/search` (fails without step 5b: /products and /orders give CD.3b the ENDPOINT-HTTP_CALLS->ROUTE triple at support 2, and /search scores channel 1.0 against the unpaired GET /search); and with `.glia/overlay.toml` `[constants]\\nGEO_BASE = \"https://nominatim.openstreetmap.org\"` written into the temp repo, /search is neither marked nor external and pairs with GET /search (the escape hatch end to end).",
+   "acceptance": "PRE-FIX BASELINE (measured at 2170ff8; the fixture grade and quokka `glia gaps` re-measured unchanged at 90d1076): fixture http-external-host - HTTP_CALLS 2/2, CALLS 1/1, ENDPOINT_HIT 0/1, ORIGIN 0/1, FORBID VIOLATIONS 1; quokka copy `glia gaps` unpaired_endpoint=2 (includes endpoint:GET:/search @quokka_web, heuristic, host=nominatim.openstreetmap.org). AFTER: (1) `cargo test -p glia-graph -- resolvers::http::tests::external_endpoint_is_left_unpaired`, `cargo test -p glia-engine --lib -- passes::passes_tests::external_endpoint_origin_needs_every_site_and_no_pair`, `cargo test -p glia-engine --test http_external` green (each fails at HEAD). (2) grade.py on bench/substrate-gap/fixtures/http-external-host: HTTP_CALLS 2/2, CALLS 1/1, ENDPOINT_HIT 1/1, ORIGIN 1/1, FORBID VIOLATIONS 0. (3) quokka copy: `endpoint:GET:/search @quokka_web` carries ORIGIN `{\"provenance\":\"external\"}` and still has its three CALLS in-edges; `glia gaps` unpaired_endpoint=1 (the android PUT); `[http-external] 1 endpoints left unpaired ... (hosts=1)`. Kina copy: no ENDPOINT carries ORIGIN external and the HTTP_CALLS count equals HEAD's. (4) `bash scripts/check-engram-export.sh` green including external_endpoint_keeps_its_provenance. (5) run.py --check names no fixture other than http-external-host; engine/tests/gaps_report.rs, engine/tests/suspected_edges.rs, cli/tests/gaps_cli.rs, py/tests/surface/test_gaps.py and `cargo test -p glia-engine --lib -- profile::` (code_passes_order_is_head_order, populates_is_exact) green. (6) byte_identical and parallel_build green.",
+   "fixtures": [
+    {
+     "name": "http-external-host",
+     "purpose": "CA-13 precision: a literal public third-party host (nominatim) is marked external, stays unpaired although the app serves GET /search, and carries ORIGIN external; controls: a host folded from environment.apiUrl and the same host written literally both pair",
+     "source_sketch": "--- server/app.js\nconst express = require('express');\n\nconst app = express();\n\napp.get('/search', (req, res) => res.json([]));\napp.get('/products', (req, res) => res.json([]));\napp.get('/orders', (req, res) => res.json([]));\n\napp.listen(3000);\n\n--- server/package.json\n{\"name\":\"server\",\"version\":\"1.0.0\",\"dependencies\":{\"express\":\"^4.18.0\"}}\n\n--- web/package.json\n{\"name\":\"web\",\"version\":\"1.0.0\"}\n\n--- web/src/environments/environment.ts\nexport const environment = {\n  apiUrl: 'https://api.shop.io',\n};\n\n--- web/src/geo.ts\nimport { environment } from './environments/environment';\n\nexport async function forwardGeocode(q: string) {\n  return fetch(`https://nominatim.openstreetmap.org/search?q=${q}&format=json`);\n}\n\nexport async function listProducts() {\n  return fetch(`${environment.apiUrl}/products`);\n}\n\nexport async function listOrders() {\n  return fetch('https://api.shop.io/orders');\n}\n",
+     "key_json": {
+      "framework": "http-external-host",
+      "language": "typescript",
+      "dirs": [
+       "web",
+       "server"
+      ],
+      "mechanism": "http_client",
+      "cells": [
+       "typescript/http_client"
+      ],
+      "note": "CA-13: a client call whose own literal names a public host that no service / project of the build and no URL constant of the client's repo names (quokka's forwardGeocode -> nominatim.openstreetmap.org/search) is an external endpoint: its ENDPOINT_HIT gains \"external\":true, the HTTP resolver leaves it unpaired even when the app serves the same path, and it carries ORIGIN provenance external (engram-export exports the provenance). Controls: a host folded from environment.apiUrl, and the same host written literally, both pair as today. Baseline (HEAD 2170ff8, leap wheel): HTTP_CALLS 2/2, CALLS 1/1, ENDPOINT_HIT 0/1, ORIGIN 0/1, FORBID VIOLATIONS 1 (the external endpoint pairs with the app's GET /search).",
+      "expect_edges": [
+       {
+        "from": "endpoint:GET:/products",
+        "to": "GET /products",
+        "category": "HTTP_CALLS",
+        "note": "CONTROL: host from a configured constant (environment.apiUrl)"
+       },
+       {
+        "from": "endpoint:GET:/orders",
+        "to": "GET /orders",
+        "category": "HTTP_CALLS",
+        "note": "CONTROL: literal host that the repo's configuration names (api.shop.io)"
+       },
+       {
+        "from": "src::geo::forwardGeocode",
+        "to": "endpoint:GET:/search",
+        "category": "CALLS",
+        "note": "the external endpoint keeps its caller"
+       }
+      ],
+      "expect_cells": [
+       {
+        "kind": "ENDPOINT",
+        "node": "endpoint:GET:/search",
+        "cell": "ORIGIN",
+        "contains": "external",
+        "note": "provenance external"
+       },
+       {
+        "kind": "ENDPOINT",
+        "node": "endpoint:GET:/search",
+        "cell": "ENDPOINT_HIT",
+        "contains": "\"external\":true",
+        "note": "the per-site mark the resolver reads"
+       }
+      ],
+      "forbid": [
+       {
+        "from": "endpoint:GET:/search",
+        "to": "GET /search",
+        "category": "HTTP_CALLS",
+        "note": "PRECISION: nominatim's /search is not the app's GET /search route"
+       }
+      ]
+     }
+    }
+   ],
+   "fired_on_marker": "[http-external] <n> endpoints left unpaired: every call site names a host outside the build (hosts=<k>)",
+   "breaking": {
+    "is_breaking": true,
+    "kind": [
+     "edge_removal",
+     "cell_value",
+     "cli_output"
+    ],
+    "what_changes": "Graph content: an ENDPOINT whose every call site CG.4a marked external, and whose hosts name no service / project alias of the build, gets no HTTP_CALLS (old: paired with any same-path route: the fixture's endpoint:GET:/search -> GET /search is removed) and carries ORIGIN `{\"provenance\":\"external\"}` when nothing pairs it (quokka: endpoint:GET:/search @quokka_web). `glia gaps` stops listing such endpoints as unpaired_endpoint (quokka 2 -> 1) and CD.3b's suspected_edge never proposes one. The `[http] routes=.. endpoints=..` line no longer counts them (they are skipped before the count, like `<unresolved>`). New `[http-external]` line; the `[provenance]` line gains external=.",
+    "in_repo_consumers": [
+     "graph/src/resolvers/http.rs tests - new; host narrowing tests unchanged (no external field in them)",
+     "engine/src/passes.rs tests - new",
+     "engine/tests/http_external.rs - new",
+     "engine/tests/gaps_report.rs, cli/tests/gaps_cli.rs, py/tests/surface/test_gaps.py - their probes carry no external host; re-run",
+     "engram-export/src/lib.rs tests - new test",
+     "bench/substrate-gap/fixtures/http-external-host - new",
+     "engine/src/profile.rs - tag_synthetic_provenance's `after` (same commit); order / populates tests unchanged",
+     "engine/src/suspected.rs - the external-orphan guard (same commit, after CD.3b); engine/tests/suspected_edges.rs re-run (its probes carry no external host)"
+    ],
+    "out_of_repo_consumers": [
+     "/home/ivy/Code/Engram - Symbols for third-party endpoints carry provenance `external` (not in its default drop list, so kept and distinguishable); identity hints unchanged",
+     "engram-export/ - exports the provenance through origin_provenance; test only",
+     "/home/ivy/Code/repo-graph/repo_graph/server.py - trace / impact no longer hop from an external endpoint into a same-path app route; no code change",
+     "/home/ivy/Code/neuropil - no reader of ORIGIN provenance in crates/ (grep: 0 hits); the removed false HTTP_CALLS links drop out of its imported edges"
+    ]
+   },
+   "depends_on": [
+    "CG.4a",
+    "CG.2a",
+    "CB.12",
+    "CD.3b"
+   ],
+   "risks": "Everything CG.4a marks wrongly (a hard-coded own backend with no config constant and no project named like any of its labels) loses its pairing here; the overlay [constants] pin and [[edge]] stanzas restore it, and http_external.rs tests the pin end to end. CD.3b's suspected_edge orphan scan would propose a third-party endpoint as a suspected edge to a same-token route; step 5b guards it, which is why this packet depends_on CD.3b. The Post stamp checks 'no HTTP_CALLS' over every edge, so a user `[[edge]]` wins over the mark. Determinism: `paired` / `external` are probed only; the stamp loop runs in graph order; external_hosts is a BTreeSet. CB.12 landed (host.rs helpers used as is); CG.2a first (same function and marker); CD.3b first (suspected.rs holds its orphan filter). PARSER_STAMP moves (engine and graph are hashed).",
+   "spec_group": "CG"
+  },
+  {
    "id": "CZ.1",
    "title": "Release docs close-out 1/2: README.md `## CLI` gains every 0.5.1 command and flag and `## Roadmap` the 0.5.1 section; a new cli/tests/readme_surface.rs keeps README's usage lines true to cli/surface/",
    "batch": "CZ",
@@ -9130,7 +9748,13 @@
     "CF.8c",
     "CF.9a",
     "CF.9b",
-    "CF.9c"
+    "CF.9c",
+    "CG.1",
+    "CG.2a",
+    "CG.2b",
+    "CG.3",
+    "CG.4a",
+    "CG.4b"
    ],
    "risks": "Writing usage lines from the landed snapshots, never from packet specs (flags drift during implementation). The test must not pin description prose (only commands, flags and value sets), or every help-text tweak breaks it. Keep README's non-CLI sections untouched except `## Roadmap`. Runs last (depends on every packet); CZ.2 runs in the same wave (disjoint files).",
    "spec_group": "CZ"
@@ -9308,7 +9932,13 @@
     "CF.8c",
     "CF.9a",
     "CF.9b",
-    "CF.9c"
+    "CF.9c",
+    "CG.1",
+    "CG.2a",
+    "CG.2b",
+    "CG.3",
+    "CG.4a",
+    "CG.4b"
    ],
    "risks": "CLAUDE.md is the architecture of record for the next session: every symbol named must exist (grep each). SKILL.md examples must be runnable against a real repo. Runs last beside CZ.1 (disjoint files).",
    "spec_group": "CZ"
@@ -10735,7 +11365,9 @@
    "elixir/secrets PARTIAL (CF.11c): `System.fetch_env!(\"SECRET_KEY_BASE\")` not a read needle",
    "elixir/flags PARTIAL (CF.11c): FunWithFlags no provider row",
    "elixir/cli_def NONE (CF.11c): Mix tasks no CLI_COMMAND row",
-   "elixir/cli_inv NONE (CF.11c): `System.cmd(..)` not an INVOCATION_PATTERN"
+   "elixir/cli_inv NONE (CF.11c): `System.cmd(..)` not an INVOCATION_PATTERN",
+   "TypeScript <unresolved> client endpoints: URL-builder wrappers whose only literal is a template collapse to endpoint:<M>:<unresolved> (find_first_string_literal, parsers/code/typescript/src/lib.rs, accepts only `string` nodes); this.<field>.<verb>(<non-literal>) on non-HTTP receivers mints ENDPOINTs (quokka 31, Kina 15 CALLS into <unresolved>). From the Engram findings spec, 2026-10-01.",
+   "TypeScript `abstract class` declarations mint no CLASS and no METHOD nodes: visit_top matches only class_declaration, so abstract_class_declaration falls through (probe at 90d1076). From the Engram findings spec, 2026-10-01."
   ],
   "harness_and_unverified": [
    "C0.7 (was CD.7a) needs crates.io network once for lz4_flex (not in ~/.cargo/registry); blake3 1.8.5 and toml_write 0.1.2 are cached",
@@ -10793,6 +11425,9 @@
   ],
   "dropped": [
    "CD.6b, CD.6c: James 2026-09-30, no consumer; wasm64 is tier 3 in Rust"
+  ],
+  "late_additions": [
+   "2026-10-01: group CG = the Engram session's findings (wf_506df58f-7ab spec -> verify; drafted as CA.10-CA.13, renumbered CG so the ids sort after W1's capped 26 and cannot reorder it): CG.1 TS arrow-function class fields as METHOD nodes; CG.2a path-based test_fixture provenance; CG.2b engram-export --exclude-path; CG.3 doc CODE text uncapped (the 500-byte cap) + fenced-span guard; CG.4a / CG.4b external HTTP endpoints marked and kept out of pairing. CA-12's three named misses are ingestion scope (not a linker gap) -> a question for James; draft CA.13c dropped (outside the item text)."
   ]
  }
 }

@@ -251,3 +251,22 @@ CF.13a not-applicable matrix cells; CF.13b a Kotlin matrix row; the qname / Node
 span; CB.21 / CB.24 client-host cell; CE-1 SCIP decoder + tier; CE-2 cache placement, whole-layout cache, trust
 model; CE.4a Confluence CODE redaction; CC.12a promotion thresholds; the `tier_of` fix in CC.3; the wasm32 target
 install for CD.6c.
+
+### 7.3 Late addition: group CG, the Engram session's findings (2026-10-01)
+
+The Engram session ran a 480-query recall battery on glia 0.5.0 exports of quokka-stack and Kina.
+- Three of its gaps were already packets. Their exact cases became corrections:
+  - calls inside returned Go closures → CA.1;
+  - locals typed from a call's return → CA.2b;
+  - name-only Go IMPLEMENTS → CA.3b.
+- The rest became group CG (wf_506df58f-7ab spec → verify; 6 packets, 1,190 LOC; still 12 waves; W1 unchanged):
+  - CG.1: TS arrow-function class fields as METHOD nodes.
+  - CG.2a: path-based test_fixture provenance (e2e / cypress / fixtures / testdata / __mocks__ / test_*.py ...; glia +2,305 nodes, Kina +50).
+  - CG.2b: `engram-export --exclude-path`.
+  - CG.3: doc CODE text no longer capped at 500 bytes, plus a fenced-span guard.
+  - CG.4a / CG.4b: HTTP endpoints whose literal host matches no service are marked `external` and kept out of pairing.
+- CG ids sort after W1's capped 26 packets, so adding them could not reorder a landed wave.
+- The three doc mentions Engram named are not a linker gap: those files are outside doc ingestion by design (`include_doc`). Widening ingestion is a question for James.
+- New gaps with no owner:
+  - TS `abstract class` declarations mint no CLASS / METHOD nodes;
+  - TS URL-builder wrappers collapse to `<unresolved>` endpoints.
