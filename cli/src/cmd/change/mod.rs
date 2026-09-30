@@ -78,6 +78,16 @@ pub(crate) enum ChangeCmd {
     /// adds a violation (one the base already had passes), 0 otherwise, 2 on
     /// a usage, git or build error.
     Review(review::Args),
+    /// Cochange (CC.11c): what else usually changes with this change — for
+    /// the given files (repo-relative) or the working tree's change against a
+    /// git rev (`--base`), the files git history says change with them, each
+    /// with a directional confidence (`0.80 (4/5)`: 4 of the antecedent's 5
+    /// commits also changed it), its support, the antecedent file(s) and
+    /// whether a static link joins them (`none`: a blind spot, or coupling
+    /// outside code). Needs a `glia history sync` snapshot. Every row is
+    /// heuristic. Exits 0 with rows, 1 with none (the absence says why), 2 on
+    /// a usage, git or build error.
+    Cochange(cochange::Args),
 }
 
 pub(crate) fn run(c: ChangeCmd) -> i32 {
@@ -88,5 +98,6 @@ pub(crate) fn run(c: ChangeCmd) -> i32 {
         ChangeCmd::Patterns(a) => patterns::run(a),
         ChangeCmd::ContractBreaks(a) => contract_breaks::run(a),
         ChangeCmd::Review(a) => review::run(a),
+        ChangeCmd::Cochange(a) => cochange::run(a),
     }
 }
