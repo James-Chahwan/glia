@@ -1,0 +1,2 @@
+# pyo3 surface of py/src/contract_breaks.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+fn contract_breaks_vs_rev(repo_path: &str, base: &str = "HEAD", avro: &str = "backward", breaking_only: bool = false) -> PyResult<Py<PyAny>>

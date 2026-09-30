@@ -57,6 +57,17 @@ pub(crate) enum ChangeCmd {
     /// touched. Exits 0 on an answer, 2 without `--experimental`, on a usage
     /// error, or a git or build error.
     Patterns(patterns::Args),
+    /// Contract-breaks (CC.8b): did the working tree's change against a git
+    /// rev (`--base`, default HEAD) break a client? Every contract (an
+    /// OpenAPI / AsyncAPI op, a proto / Avro / JSON Schema message type) is
+    /// paired old -> new and judged by its format's evolution rules
+    /// (`--avro` picks Avro's direction), one row per field change, each
+    /// breaking, compatible or unknown; every client whose call lost its
+    /// provider is an orphaned client. `--breaking-only` lists the breaking
+    /// rows only. A CI gate: exits 1 when a change is breaking or a client is
+    /// orphaned, 0 otherwise (a compatible change passes), 2 on a usage, git
+    /// or build error.
+    ContractBreaks(contract_breaks::Args),
 }
 
 pub(crate) fn run(c: ChangeCmd) -> i32 {
@@ -65,5 +76,6 @@ pub(crate) fn run(c: ChangeCmd) -> i32 {
         ChangeCmd::DiffImpact(a) => diff_impact::run(a),
         ChangeCmd::TestsFor(a) => tests_for::run(a),
         ChangeCmd::Patterns(a) => patterns::run(a),
+        ChangeCmd::ContractBreaks(a) => contract_breaks::run(a),
     }
 }
