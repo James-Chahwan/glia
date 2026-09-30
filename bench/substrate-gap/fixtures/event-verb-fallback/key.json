@@ -4,15 +4,17 @@
   "dirs": [
     "."
   ],
-  "note": "CB-g: parsers/code/extractors/src/eventbus.rs names an event after the NEEDLE when no quoted literal follows (verb_name): an RxJS `this.itemsSubject.next(items)` mints event_emit:Subject.next, a constant-keyed NestJS pair `emit(OrderEvents.Created, ..)` / `@OnEvent(OrderEvents.Created)` mints event_emit:emit and event_handle:@OnEvent (which never pair), an EventBridge putEvents is event_emit:eventBridge.putEvents whatever its DetailType, and every Phoenix LiveView handle_event is event_handle:handle_event. Measured on HEAD 2170ff8: those five verb nodes, 0 EVENT_FLOWS. A site now reads a real name (a quoted literal, a constant reference, the DetailType, the LiveView event literal) or mints nothing.",
+  "note": "CB-g: parsers/code/extractors/src/eventbus.rs names an event after the NEEDLE when no quoted literal follows (verb_name): an RxJS `this.itemsSubject.next(items)` mints event_emit:Subject.next, a constant-keyed NestJS pair `emit(OrderEvents.Created, ..)` / `@OnEvent(OrderEvents.Created)` mints event_emit:emit and event_handle:@OnEvent (which never pair), an EventBridge putEvents is event_emit:eventBridge.putEvents whatever its DetailType, and every Phoenix LiveView handle_event is event_handle:handle_event. Measured on HEAD 2170ff8: those five verb nodes, 0 EVENT_FLOWS. A site now reads a real name (a quoted literal, a constant reference, the DetailType, the LiveView event literal) or mints nothing. CB.3b folds the constant pair through the repo const table: OrderEvents.Created is bound to \"order.created\" in src/orders.events.ts, so both sides are keyed event_emit:order.created / event_handle:order.created, not by the constant path.",
   "expect_nodes": [
     {
       "kind": "EVENT_EMITTER",
-      "name": "event_emit:OrderEvents.Created"
+      "name": "event_emit:order.created",
+      "note": "the constant's literal (CB.3b), bound in src/orders.events.ts"
     },
     {
       "kind": "EVENT_HANDLER",
-      "name": "event_handle:OrderEvents.Created"
+      "name": "event_handle:order.created",
+      "note": "the constant's literal (CB.3b), bound in src/orders.events.ts"
     },
     {
       "kind": "EVENT_EMITTER",
@@ -27,10 +29,10 @@
   ],
   "expect_edges": [
     {
-      "from": "event_emit:OrderEvents.Created",
-      "to": "event_handle:OrderEvents.Created",
+      "from": "event_emit:order.created",
+      "to": "event_handle:order.created",
       "category": "EVENT_FLOWS",
-      "note": "both sides key on the same constant reference"
+      "note": "both sides key on the same constant reference, folded to its literal"
     }
   ],
   "forbid": [
@@ -53,6 +55,14 @@
     {
       "kind": "EVENT_HANDLER",
       "name": "event_handle:handle_event"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:OrderEvents.Created"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:OrderEvents.Created"
     }
   ]
 }

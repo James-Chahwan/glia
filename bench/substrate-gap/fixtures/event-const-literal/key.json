@@ -1,0 +1,67 @@
+{
+  "framework": "event-const-literal",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "CB.3b (James 2026-09-30): an event keyed by a constant is keyed by the constant's resolved literal through the repo const table (A11.1, folded post-cache like LA.4's queue topics), else by the constant path. orders.service.ts emits OrderEvents.Created (bound to \"order.created\" in orders.events.ts) and audit.listener.ts handles the literal \"order.created\": they pair. payments.service.ts and billing.listener.ts key OrderEvents.Paid on both sides: both fold to order.paid. unbound.service.ts emits Unbound.Thing, which no file binds: it keeps its path. Measured on HEAD 2170ff8 (debug CLI analyze): event_handle:order.created, event_handle:@OnEvent, event_emit:emit and 0 EVENT_FLOWS.",
+  "expect_nodes": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:order.created"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:order.created"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:order.paid"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:order.paid"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:Unbound.Thing",
+      "note": "no file binds Unbound.Thing: the constant path is the fallback identity"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "event_emit:order.created",
+      "to": "event_handle:order.created",
+      "category": "EVENT_FLOWS",
+      "note": "a constant on one side, its literal on the other"
+    },
+    {
+      "from": "event_emit:order.paid",
+      "to": "event_handle:order.paid",
+      "category": "EVENT_FLOWS",
+      "note": "the constant on both sides, folded on both"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:OrderEvents.Created"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:OrderEvents.Paid"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:OrderEvents.Paid"
+    },
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "event_emit:emit"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "event_handle:@OnEvent"
+    }
+  ]
+}

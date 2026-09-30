@@ -1,9 +1,12 @@
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
-use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+use glia_code_domain::{CodeNav, FileParse, GRAPH_TYPE, cell_type, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, NodeKindId, RepoId};
 
 use crate::anchor::{Anchor, line_of};
+use crate::marker_swap;
+use crate::queues::ConstFoldCounts;
 
 pub struct EventNodes {
     pub nodes: Vec<Node>,
@@ -338,23 +341,190 @@ fn push_event_node(
     (id, true)
 }
 
+/// One side of the bus: what [`emit_event_nodes`] mints, from which needles.
+struct EventSide {
+    /// `emitter` / `handler`: the A2.9 suppression and CB.3b fold markers.
+    label: &'static str,
+    kind: NodeKindId,
+    prefix: &'static str,
+    /// The type-keyed pass ([`scan_type_needles`] over the side's needles).
+    typed: fn(&str) -> Vec<(String, usize)>,
+    patterns: &'static [(&'static str, NameRule, bool, VerbGate)],
+}
+
+const EMITTER_SIDE: EventSide = EventSide {
+    label: "emitter",
+    kind: node_kind::EVENT_EMITTER,
+    prefix: "event_emit:",
+    typed: typed_emitters,
+    patterns: EMITTER_PATTERNS,
+};
+
+const HANDLER_SIDE: EventSide = EventSide {
+    label: "handler",
+    kind: node_kind::EVENT_HANDLER,
+    prefix: "event_handle:",
+    typed: typed_handlers,
+    patterns: HANDLER_PATTERNS,
+};
+
+fn typed_emitters(source: &str) -> Vec<(String, usize)> {
+    scan_type_needles(source, TYPE_EMITTER_NEEDLES.iter().map(|n| (*n, None)))
+}
+
+fn typed_handlers(source: &str) -> Vec<(String, usize)> {
+    scan_type_needles(source, TYPE_HANDLER_NEEDLES.iter().copied())
+}
+
+/// CB.3b: turns a constant path (`OrderEvents.Created`) into the literal it
+/// holds, or `None`. The engine closes it over the file's own const table and
+/// the repo's; the per-file extractors pass none.
+type ConstResolver<'a> = &'a dyn Fn(&str) -> Option<String>;
+
 pub fn extract_event_emitter_nodes(source: &str, module_id: NodeId, repo: RepoId) -> EventNodes {
+    emit_event_nodes(
+        source,
+        module_id,
+        repo,
+        &EMITTER_SIDE,
+        None,
+        &mut ConstFoldCounts::default(),
+    )
+}
+
+pub fn extract_event_handler_nodes(source: &str, module_id: NodeId, repo: RepoId) -> EventNodes {
+    emit_event_nodes(
+        source,
+        module_id,
+        repo,
+        &HANDLER_SIDE,
+        None,
+        &mut ConstFoldCounts::default(),
+    )
+}
+
+/// CB.3b: both sides of one file's event nodes, re-emitted with a resolver.
+pub struct EventFold {
+    pub emitters: EventNodes,
+    pub handlers: EventNodes,
+    /// Constant-keyed sites whose constant resolved to a name (`folded`) or
+    /// kept its path (`unresolved`: unbound, ambiguous, a lower-case binding
+    /// in another file, or a value the LA.41 name rule rejects).
+    pub counts: ConstFoldCounts,
+    /// The file the nodes were read from, which [`replace_event_nodes`] hands
+    /// [`crate::anchor::attach`] when it re-anchors them.
+    pub path: String,
+}
+
+/// CB.3b: the file's event nodes, both sides, emitted exactly as
+/// [`extract_event_emitter_nodes`] + [`extract_event_handler_nodes`] emit
+/// them, except that a site keyed by a constant ([`SiteName::Constant`]) is
+/// named by the value `resolve` turns its path into, when the LA.41 name rule
+/// ([`is_event_name`]) accepts it. So `emit(OrderEvents.Created, ..)` mints
+/// `event_emit:order.created` and pairs with `@OnEvent("order.created")`.
+///
+/// Resolution needs the whole repo's const table, which is not a function of
+/// this file, so the engine calls this AFTER the parse cache (never inside the
+/// per-file extractors) and swaps the file's event nodes with
+/// [`replace_event_nodes`] only when `counts.folded > 0`.
+pub fn extract_event_nodes_with_consts(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> EventFold {
+    let mut counts = ConstFoldCounts::default();
+    let emitters = emit_event_nodes(source, module_id, repo, &EMITTER_SIDE, Some(resolve), &mut counts);
+    let handlers = emit_event_nodes(source, module_id, repo, &HANDLER_SIDE, Some(resolve), &mut counts);
+    EventFold {
+        emitters,
+        handlers,
+        counts,
+        path: path.to_string(),
+    }
+}
+
+/// CB.3b: is this node an event SITE this module mints (`event_emit:` /
+/// `event_handle:`, before the engine's owner pass qualifies it)? A Solidity
+/// `event` declaration is an EVENT_EMITTER under its code qname and is not.
+pub fn is_event_site(kind: NodeKindId, qname: &str) -> bool {
+    (kind == node_kind::EVENT_EMITTER && qname.starts_with("event_emit:"))
+        || (kind == node_kind::EVENT_HANDLER && qname.starts_with("event_handle:"))
+}
+
+/// CB.3b: swap every event site of one file's parse ([`is_event_site`]) for
+/// `fold`'s, emitters then handlers — the order the per-file pass adds them —
+/// through the swap LA.4's queue fold shares ([`marker_swap::swap`]): the old
+/// nodes, their module CONTAINS and owner edges, nav entries and every edge /
+/// ref naming a gone id (a constant path that resolved) go; the fold's nodes
+/// go back in place, carrying their transport marks as the per-file pass sets
+/// them, re-anchored (POSITION, then the owner edge or the module CONTAINS
+/// fallback, stamped `extractor:anchor` rule `const_fold`), and the IMPORTS
+/// cell re-attached when the old nodes carried it. Event nodes carry no edges
+/// of their own and no callbacks, so there is nothing to re-bind.
+pub fn replace_event_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fold: EventFold) {
+    let old: HashSet<NodeId> = fp
+        .nav
+        .kind_by_id
+        .iter()
+        .filter(|(id, k)| {
+            fp.nav
+                .qname_by_id
+                .get(id)
+                .is_some_and(|q| is_event_site(**k, q))
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    let EventFold {
+        emitters,
+        handlers,
+        path,
+        ..
+    } = fold;
+    let mut nodes = emitters.nodes;
+    nodes.extend(handlers.nodes);
+    let mut anchors = emitters.anchors;
+    anchors.extend(handlers.anchors);
+    let fresh = marker_swap::MarkerNodes {
+        nodes,
+        edges: Vec::new(),
+        navs: vec![emitters.nav, handlers.nav],
+        anchors,
+    };
+    marker_swap::swap(fp, module_id, lang, &old, fresh, &path, |_| {});
+}
+
+/// The shared emit loop for both sides. Type-keyed FIRST: it is stronger
+/// evidence (a real type name, not a framework tag), so when both passes see
+/// the same event the Medium confidence is the one that lands. Then each
+/// string-keyed needle's first named site ([`find_gated`]), unless A2.9's
+/// broker gate suppresses it, named by [`site_name`].
+///
+/// CB.3b: `resolve` is `None` on the per-file (cached) path, which is then
+/// byte-identical to CB.3a; the engine's post-cache fold passes one, and
+/// `counts` tallies the constant-keyed sites it folded or left on their path.
+fn emit_event_nodes(
+    source: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    side: &EventSide,
+    resolve: Option<ConstResolver<'_>>,
+    counts: &mut ConstFoldCounts,
+) -> EventNodes {
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
     let mut anchors = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
 
-    // Type-keyed FIRST: it is stronger evidence (a real type name, not a
-    // framework tag), so when both passes see the same event the Medium
-    // confidence is the one that lands.
-    for (name, at) in scan_type_needles(source, TYPE_EMITTER_NEEDLES.iter().map(|n| (*n, None))) {
+    for (name, at) in (side.typed)(source) {
         let (id, _) = push_event_node(
             &mut nodes,
             &mut nav,
             &mut seen,
             &name,
-            node_kind::EVENT_EMITTER,
-            "event_emit:",
+            side.kind,
+            side.prefix,
             Confidence::Medium,
             module_id,
             repo,
@@ -363,22 +533,23 @@ pub fn extract_event_emitter_nodes(source: &str, module_id: NodeId, repo: RepoId
     }
 
     let mut ctx = VerbCtx::default();
-    for &(pattern, rule, ambiguous, gate) in EMITTER_PATTERNS {
-        let Some((idx, event_name)) = find_gated(source, pattern, rule, gate, &mut ctx) else {
+    for &(pattern, rule, ambiguous, gate) in side.patterns {
+        let Some((idx, key)) = find_gated(source, pattern, rule, gate, &mut ctx) else {
             continue;
         };
         if ambiguous && ctx.broker_present(source) {
-            suppressed("emitter", pattern, &event_name);
+            suppressed(side.label, pattern, key.raw());
             continue;
         }
+        let event_name = site_name(key, side.label, pattern, resolve, counts);
 
         let (id, minted) = push_event_node(
             &mut nodes,
             &mut nav,
             &mut seen,
             &event_name,
-            node_kind::EVENT_EMITTER,
-            "event_emit:",
+            side.kind,
+            side.prefix,
             Confidence::Weak,
             module_id,
             repo,
@@ -394,57 +565,64 @@ pub fn extract_event_emitter_nodes(source: &str, module_id: NodeId, repo: RepoId
     EventNodes { nodes, nav, anchors }
 }
 
-pub fn extract_event_handler_nodes(source: &str, module_id: NodeId, repo: RepoId) -> EventNodes {
-    let mut nodes = Vec::new();
-    let mut nav = CodeNav::default();
-    let mut anchors = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+/// What a found string-keyed site read ([`find_gated`]): the two
+/// [`SiteName`]s that name a site.
+#[derive(Debug, PartialEq, Eq)]
+enum SiteKey {
+    Literal(String),
+    /// CB.3a's constant path, which [`site_name`] may fold (CB.3b).
+    Constant(String),
+}
 
-    for (name, at) in scan_type_needles(source, TYPE_HANDLER_NEEDLES.iter().copied()) {
-        let (id, _) = push_event_node(
-            &mut nodes,
-            &mut nav,
-            &mut seen,
-            &name,
-            node_kind::EVENT_HANDLER,
-            "event_handle:",
-            Confidence::Medium,
-            module_id,
-            repo,
-        );
-        anchors.push(Anchor { node: id, line: line_of(source, at) });
-    }
-
-    let mut ctx = VerbCtx::default();
-    for &(pattern, rule, ambiguous, gate) in HANDLER_PATTERNS {
-        let Some((idx, event_name)) = find_gated(source, pattern, rule, gate, &mut ctx) else {
-            continue;
-        };
-        if ambiguous && ctx.broker_present(source) {
-            suppressed("handler", pattern, &event_name);
-            continue;
-        }
-
-        let (id, minted) = push_event_node(
-            &mut nodes,
-            &mut nav,
-            &mut seen,
-            &event_name,
-            node_kind::EVENT_HANDLER,
-            "event_handle:",
-            Confidence::Weak,
-            module_id,
-            repo,
-        );
-        if minted {
-            anchors.push(Anchor { node: id, line: line_of(source, idx) });
-        }
-        if let Some(via) = transport_via(pattern, source, &mut ctx) {
-            mark_transport(&mut nodes, id, via);
+impl SiteKey {
+    /// The name as the site wrote it: the literal, or the constant path.
+    fn raw(&self) -> &str {
+        match self {
+            SiteKey::Literal(s) | SiteKey::Constant(s) => s,
         }
     }
+}
 
-    EventNodes { nodes, nav, anchors }
+/// CB.3b: the name a found site mints under. A quoted literal is never
+/// re-resolved. A constant path is folded through `resolve` when one is
+/// given: a value the LA.41 name rule ([`is_event_name`]) accepts names the
+/// site and counts `folded`; no value, or a rejected one, leaves the site on
+/// its path (CB.3a's fallback identity) and counts `unresolved`. With no
+/// resolver (the per-file pass) the path is the name and nothing is counted.
+///
+/// fired_on marker, per folded or unresolved site:
+///   `GLIA_EVENT_DEBUG=1 ... 2>&1 | grep '\[eventbus\] const-fold'`
+fn site_name(
+    key: SiteKey,
+    side: &str,
+    needle: &str,
+    resolve: Option<ConstResolver<'_>>,
+    counts: &mut ConstFoldCounts,
+) -> String {
+    let path = match key {
+        SiteKey::Literal(name) => return name,
+        SiteKey::Constant(path) => path,
+    };
+    let Some(resolve) = resolve else {
+        return path;
+    };
+    let folded = resolve(&path).filter(|v| is_event_name(v));
+    if event_debug() {
+        eprintln!(
+            "[eventbus] const-fold {side} needle='{needle}' path={path} -> {}",
+            folded.as_deref().unwrap_or("(unresolved)")
+        );
+    }
+    match folded {
+        Some(value) => {
+            counts.folded += 1;
+            value
+        }
+        None => {
+            counts.unresolved += 1;
+            path
+        }
+    }
 }
 
 /// LB.8b: the delivery scope of a string-keyed needle's site, when it is a
@@ -491,7 +669,8 @@ enum SiteName {
     /// its path (`OrderEvents.Created`) — the name both sides of a
     /// constant-keyed bus share. This is the site's FALLBACK identity: CB.3b
     /// folds it to the constant's literal through the engine's repo const
-    /// table, and this variant is the one place a constant site is named.
+    /// table ([`site_name`], post-cache), and this variant is the one place a
+    /// constant site is named.
     Constant(String),
     /// LA.41: a quoted literal that is not name-shaped. Not a site.
     Malformed,
@@ -864,7 +1043,7 @@ fn find_gated(
     rule: NameRule,
     gate: VerbGate,
     ctx: &mut VerbCtx,
-) -> Option<(usize, String)> {
+) -> Option<(usize, SiteKey)> {
     let gated = gate != VerbGate::Open;
     let mut tally = GateTally::default();
     let mut via: Option<Via> = None;
@@ -907,10 +1086,10 @@ fn find_gated(
             }
         }
         let name = match event_name_at(source, pattern, at, rule) {
-            SiteName::Literal(name) => name,
+            SiteName::Literal(name) => SiteKey::Literal(name),
             SiteName::Constant(path) => {
                 constant += 1;
-                path
+                SiteKey::Constant(path)
             }
             SiteName::Malformed => {
                 bad_name += 1;
@@ -2597,5 +2776,325 @@ mod tests {
             event_name_at("('a.b')", "", 1, NameRule::Literal),
             SiteName::Literal(s("a.b"))
         );
+    }
+
+    // ---- CB.3b: a constant-keyed site folds to its resolved literal -------
+    // Needles split with `concat!`, as above.
+
+    /// A resolver over a fixed table, the engine's shape.
+    fn table(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |expr: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == expr)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    fn folded(src: &str, pairs: &'static [(&'static str, &'static str)]) -> EventFold {
+        extract_event_nodes_with_consts(src, PATH, module_id(), repo(), &table(pairs))
+    }
+
+    fn qnames(out: &EventNodes) -> Vec<String> {
+        let mut v: Vec<String> = out.nav.qname_by_id.values().cloned().collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn constant_sites_fold_on_both_sides() {
+        let src = concat!(
+            "this.eventEmitter.em", "it(OrderEvents.Created, { id });\n",
+            "@On", "Event(OrderEvents.Paid)\nonPaid(p) {}\n",
+            "@On", "Event(ORDER_PLACED)\nonPlaced(p) {}\n"
+        );
+        let fold = folded(
+            src,
+            &[
+                ("OrderEvents.Created", "order.created"),
+                ("OrderEvents.Paid", "order.paid"),
+                ("ORDER_PLACED", "order.placed"),
+            ],
+        );
+        assert_eq!(qnames(&fold.emitters), vec!["event_emit:order.created"]);
+        // `@OnEvent(` is one needle: its first named site wins (CB.3a's rule).
+        assert_eq!(qnames(&fold.handlers), vec!["event_handle:order.paid"]);
+        assert_eq!(fold.counts, ConstFoldCounts { folded: 2, unresolved: 0 });
+        assert_eq!(fold.path, PATH);
+        // `Events::ORDER_PLACED` reaches the resolver as written.
+        let fold = folded(
+            concat!("bus.pub", "lish(Events::ORDER_PLACED, order)"),
+            &[("Events::ORDER_PLACED", "order.placed")],
+        );
+        assert_eq!(qnames(&fold.emitters), vec!["event_emit:order.placed"]);
+    }
+
+    #[test]
+    fn resolver_none_is_cb3a_output() {
+        // A resolver that names nothing re-emits exactly the per-file pass's
+        // nodes (the constant path is the fallback), counting each constant
+        // site unresolved; the per-file pass itself counts nothing.
+        for (src, constants) in [
+            (concat!("this.eventEmitter.em", "it(OrderEvents.Created, {id})"), 1),
+            (concat!("@On", "Event(OrderEvents.Created)\naudit(p) {}"), 1),
+            (concat!("bus.em", "it('user.created', u);\nbus.o", "n(V2_READY, h)"), 1),
+            (
+                concat!(
+                    "import { ClientProxy } from '@nestjs/microservices';\nthis.client.em",
+                    "it(Topics.ORDER, o);\n@Event",
+                    "Pattern(Topics.ORDER)\nh(d) {}"
+                ),
+                2,
+            ),
+            (concat!("publisher.publishEv", "ent(new OrderPlacedEvent(id));"), 0),
+        ] {
+            let fold = extract_event_nodes_with_consts(src, PATH, module_id(), repo(), &|_| None);
+            let emitters = extract_event_emitter_nodes(src, module_id(), repo());
+            let handlers = extract_event_handler_nodes(src, module_id(), repo());
+            assert_eq!(fold.emitters.nodes, emitters.nodes, "{src}");
+            assert_eq!(fold.emitters.anchors, emitters.anchors, "{src}");
+            assert_eq!(fold.emitters.nav.qname_by_id, emitters.nav.qname_by_id, "{src}");
+            assert_eq!(fold.handlers.nodes, handlers.nodes, "{src}");
+            assert_eq!(fold.handlers.anchors, handlers.anchors, "{src}");
+            assert_eq!(fold.handlers.nav.qname_by_id, handlers.nav.qname_by_id, "{src}");
+            assert_eq!(
+                fold.counts,
+                ConstFoldCounts { folded: 0, unresolved: constants },
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quoted_literal_is_never_re_resolved() {
+        let src = concat!(
+            "bus.em", "it('order.created', x);\n",
+            "@On", "Event(\"order.created\")\nh(p) {}"
+        );
+        let fold = folded(src, &[("order.created", "other.event")]);
+        assert_eq!(qnames(&fold.emitters), vec!["event_emit:order.created"]);
+        assert_eq!(qnames(&fold.handlers), vec!["event_handle:order.created"]);
+        assert_eq!(fold.counts, ConstFoldCounts::default());
+        // A variable argument is no site, so the resolver never sees it.
+        let fold = folded(concat!("bus.em", "it(evt, x);"), &[("evt", "order.created")]);
+        assert!(fold.emitters.nodes.is_empty());
+        assert_eq!(fold.counts, ConstFoldCounts::default());
+    }
+
+    #[test]
+    fn a_rejected_value_keeps_the_path() {
+        // LA.41's name rule refuses the value (a comma, a doubled space, an
+        // empty string): the site keeps its constant path and counts
+        // unresolved. A single inner space (`MY TOPIC`) is a name.
+        for value in ["a, b", "a  b", ""] {
+            let resolve = move |_: &str| Some(value.to_string());
+            let fold = extract_event_nodes_with_consts(
+                concat!("bus.em", "it(OrderEvents.Created, x);"),
+                PATH,
+                module_id(),
+                repo(),
+                &resolve,
+            );
+            assert_eq!(qnames(&fold.emitters), vec!["event_emit:OrderEvents.Created"], "{value:?}");
+            assert_eq!(fold.counts, ConstFoldCounts { folded: 0, unresolved: 1 }, "{value:?}");
+        }
+        let fold = folded(
+            concat!("bus.em", "it(OrderEvents.Created, x);"),
+            &[("OrderEvents.Created", "MY TOPIC")],
+        );
+        assert_eq!(qnames(&fold.emitters), vec!["event_emit:MY TOPIC"]);
+    }
+
+    #[test]
+    fn a_suppressed_site_is_not_counted() {
+        // A2.9: `publish(` in a broker file is queue traffic; the fold never
+        // reaches it, so it counts neither way.
+        let src = concat!(
+            "import { connect } from 'nats';\nbus.pub",
+            "lish(Topics.ORDER, o);"
+        );
+        let fold = folded(src, &[("Topics.ORDER", "order")]);
+        assert!(fold.emitters.nodes.is_empty());
+        assert_eq!(fold.counts, ConstFoldCounts::default());
+    }
+
+    #[test]
+    fn a_transport_site_keeps_its_mark_when_folded() {
+        let src = concat!(
+            "import { ClientProxy } from '@nestjs/microservices';\nthis.client.em",
+            "it(Topics.ORDER, o);"
+        );
+        let fold = folded(src, &[("Topics.ORDER", "order_shipped")]);
+        assert_eq!(
+            origins(&fold.emitters),
+            vec![(s("event_emit:order_shipped"), transport("nestjs-microservices"))]
+        );
+    }
+
+    // ---- CB.3b: replace_event_nodes over the shared marker swap ----------
+
+    const PATH: &str = "src/orders.ts";
+
+    fn function_id() -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "test::create")
+    }
+
+    /// The engine's `merge_nav`, for the hand-assembled parse.
+    fn merge(dst: &mut CodeNav, src: CodeNav) {
+        dst.name_by_id.extend(src.name_by_id);
+        dst.qname_by_id.extend(src.qname_by_id);
+        dst.kind_by_id.extend(src.kind_by_id);
+        dst.parent_of.extend(src.parent_of);
+        for (k, v) in src.children_of {
+            dst.children_of.entry(k).or_default().extend(v);
+        }
+    }
+
+    /// The per-file pass over `src`: a MODULE, a FUNCTION spanning line 1
+    /// (0-indexed), the two event extractors, the anchor pass and then the
+    /// router's IMPORTS cell, as `apply_cross_cutting_extractors` and the
+    /// router lay them out.
+    fn event_parse(src: &str) -> FileParse {
+        let module = module_id();
+        let func = function_id();
+        let node = |id, cells| Node {
+            id,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells,
+        };
+        let span = Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{PATH}","start_line":1,"end_line":1}}"#
+            )),
+        };
+        let mut fp = FileParse {
+            nodes: vec![node(module, vec![]), node(func, vec![span])],
+            ..Default::default()
+        };
+        fp.nav.record(module, "test", "test", node_kind::MODULE, None);
+        fp.nav
+            .record(func, "create", "test::create", node_kind::FUNCTION, Some(module));
+        let mut anchors = Vec::new();
+        for out in [
+            extract_event_emitter_nodes(src, module, repo()),
+            extract_event_handler_nodes(src, module, repo()),
+        ] {
+            fp.nodes.extend(out.nodes);
+            anchors.extend(out.anchors);
+            merge(&mut fp.nav, out.nav);
+        }
+        crate::anchor::attach(&mut fp, PATH, module, &mut anchors);
+        fp.imports.push(glia_code_domain::ImportStmt {
+            from_module: "test".into(),
+            target: glia_code_domain::ImportTarget::Module {
+                path: "@nestjs/event-emitter".into(),
+                alias: None,
+            },
+            line: 0,
+        });
+        glia_code_domain::attach_imports_cell(&mut fp, "typescript");
+        fp
+    }
+
+    /// The constant spelling and the literal spelling of one file: the
+    /// emitter inside the function (line 1), the handler at module scope.
+    const CONST_SRC: &str = concat!(
+        "import { OnEvent } from '@nestjs/event-emitter';\n",
+        "  this.eventEmitter.em", "it(OrderEvents.Created, { id });\n",
+        "@On", "Event(OrderEvents.Paid)\n"
+    );
+    const LITERAL_SRC: &str = concat!(
+        "import { OnEvent } from '@nestjs/event-emitter';\n",
+        "  this.eventEmitter.em", "it('order.created', { id });\n",
+        "@On", "Event('order.paid')\n"
+    );
+    const BINDINGS: &[(&str, &str)] = &[
+        ("OrderEvents.Created", "order.created"),
+        ("OrderEvents.Paid", "order.paid"),
+    ];
+
+    type Triple = (NodeId, NodeId, glia_core::EdgeCategoryId);
+
+    fn triples(fp: &FileParse) -> Vec<Triple> {
+        fp.edges.iter().map(|e| (e.from, e.to, e.category)).collect()
+    }
+
+    #[test]
+    fn replace_event_nodes_lays_out_as_the_literal_file() {
+        use glia_code_domain::{edge_category, evidence};
+        let mut fp = event_parse(CONST_SRC);
+        let old_emit = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::EVENT_EMITTER,
+            "event_emit:OrderEvents.Created",
+        );
+        assert!(fp.nav.kind_by_id.contains_key(&old_emit));
+        let fold = folded(CONST_SRC, BINDINGS);
+        assert_eq!(fold.counts, ConstFoldCounts { folded: 2, unresolved: 0 });
+        replace_event_nodes(&mut fp, module_id(), "typescript", fold);
+        let literal = event_parse(LITERAL_SRC);
+
+        // Nodes (cells in the per-file order: POSITION, then IMPORTS), nav
+        // and child order are the literal file's.
+        assert_eq!(fp.nodes, literal.nodes);
+        assert_eq!(fp.nav.qname_by_id, literal.nav.qname_by_id);
+        assert_eq!(fp.nav.name_by_id, literal.nav.name_by_id);
+        assert_eq!(fp.nav.kind_by_id, literal.nav.kind_by_id);
+        assert_eq!(fp.nav.parent_of, literal.nav.parent_of);
+        assert_eq!(fp.nav.children_of, literal.nav.children_of);
+        // The emitter is USED by the function; the module-scope handler takes
+        // the module CONTAINS fallback; nothing names a gone id.
+        let emit = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::EVENT_EMITTER, "event_emit:order.created");
+        let handle = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::EVENT_HANDLER, "event_handle:order.paid");
+        assert_eq!(triples(&fp), triples(&literal));
+        assert_eq!(
+            triples(&fp),
+            vec![
+                (function_id(), emit, edge_category::USES),
+                (module_id(), handle, edge_category::CONTAINS),
+            ]
+        );
+        assert!(!fp.edges.iter().any(|e| e.from == old_emit || e.to == old_emit));
+        // Re-anchored post-cache: `extractor:anchor` rule `const_fold`.
+        assert!(fp.edges.iter().all(|e| evidence::Evidence::of(e).is_some_and(
+            |ev| ev.emitter == "extractor:anchor" && ev.rule.as_deref() == Some("const_fold")
+        )));
+        assert_eq!(crate::anchor::census(&fp), crate::anchor::census(&literal));
+        // One IMPORTS cell per folded node, last.
+        for n in fp.nodes.iter().filter(|n| n.id == emit || n.id == handle) {
+            assert_eq!(n.cells.iter().filter(|c| c.kind == cell_type::IMPORTS).count(), 1);
+            assert_eq!(n.cells.last().map(|c| c.kind), Some(cell_type::IMPORTS));
+        }
+    }
+
+    #[test]
+    fn replace_event_nodes_leaves_other_nodes_and_code_qname_events_alone() {
+        // A Solidity-style EVENT_EMITTER under a code qname is no event site:
+        // the swap never removes it.
+        let mut fp = event_parse(CONST_SRC);
+        let declared = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::EVENT_EMITTER,
+            "Token::Transfer",
+        );
+        fp.nodes.push(Node {
+            id: declared,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: vec![],
+        });
+        fp.nav.record(declared, "Transfer", "Token::Transfer", node_kind::EVENT_EMITTER, Some(module_id()));
+        assert!(!is_event_site(node_kind::EVENT_EMITTER, "Token::Transfer"));
+        assert!(is_event_site(node_kind::EVENT_EMITTER, "event_emit:x"));
+        assert!(!is_event_site(node_kind::EVENT_HANDLER, "event_emit:x"));
+        replace_event_nodes(&mut fp, module_id(), "typescript", folded(CONST_SRC, BINDINGS));
+        assert!(fp.nodes.iter().any(|n| n.id == declared));
+        assert_eq!(fp.nav.qname_by_id.get(&declared).map(String::as_str), Some("Token::Transfer"));
+        assert_eq!(fp.nodes.first().map(|n| n.id), Some(module_id()));
+        assert_eq!(fp.nodes.last().map(|n| n.id), Some(declared));
     }
 }

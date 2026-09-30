@@ -11,11 +11,12 @@ use glia_code_domain::evidence::{self, Evidence};
 use glia_code_domain::glia_config::LoadedConfig;
 use glia_code_domain::project_roots::ProjectRoot;
 use glia_code_domain::{
-    FileParse, LocalModuleIndex, NavFact, attach_imports_cell_filtered, cell_type, node_kind,
+    CodeNav, FileParse, LocalModuleIndex, NavFact, attach_imports_cell_filtered, cell_type,
+    node_kind,
 };
 use glia_code_extractors::constants::ConstTable;
 use glia_code_extractors::next_pages::{self, NextRoots, PageRouter};
-use glia_code_extractors::{anchor, queue_topic, queues};
+use glia_code_extractors::{anchor, eventbus, queue_topic, queues};
 use glia_core::{Cell, CellPayload, NodeId, NodeKindId, RepoId};
 use glia_graph::rust_paths::RustCrate;
 
@@ -30,8 +31,9 @@ use crate::route::ModuleQnames;
 
 /// Run every post-cache graft over one repo's parses, in order: the LF.2e
 /// overlay wrapper scan and its http half, the A11.2 endpoint fold, the LA.6d
-/// Next.js page graft, the LA.4 queue-topic const fold, the LF.2e wrappers'
-/// queue half, the A5.2 / A5.3 / LA.17 RPC needles with their `[grpc-client]` /
+/// Next.js page graft, the LA.4 queue-topic const fold, the CB.3b event-name
+/// const fold, the LF.2e wrappers' queue half, the A5.2 / A5.3 / LA.17 RPC
+/// needles with their `[grpc-client]` /
 /// `[grpc-server-impl]` / `[proto-rpc]` markers, the A5.8 `[marker-anchor]`
 /// census and the LE.4a `[data-access]` census, the LB.4a / LB.8 owner
 /// segment, the CB.24 client-host stamp, then the A16.4 IMPORTS-cell
@@ -93,6 +95,12 @@ pub(super) fn apply_post_cache(
     // cache rule as the endpoint fold; runs before the A16.4 filter, which then
     // rewrites the folded nodes' IMPORTS cell like every other node's.
     apply_queue_const_topics(parses_by_lang, files, repo, &modules, const_table, parse_errors)
+        .report(repo_label);
+    // CB.3b: event sites keyed by a constant fold to its literal through the
+    // same tables and the same cache rule. Above the owner pass, which
+    // qualifies EVENT_EMITTER / EVENT_HANDLER like every owned kind, and
+    // before the A16.4 filter, which rewrites the folded nodes' IMPORTS cell.
+    apply_event_const_names(parses_by_lang, files, repo, &modules, const_table, parse_errors)
         .report(repo_label);
     // LF.2e: the wrappers' queue half, AFTER the const fold (which rebuilds a
     // folded file's queue nodes from the queue scan and would drop a wrapper
@@ -552,7 +560,7 @@ fn apply_queue_const_topics(
         let Some(&at) = candidates.iter().find(|&&i| {
             parses
                 .get(i)
-                .is_some_and(|fp| queue_nodes_read_from(fp, &position))
+                .is_some_and(|fp| nodes_read_from(fp, &position, is_queue_node))
         }) else {
             continue;
         };
@@ -590,19 +598,170 @@ fn apply_queue_const_topics(
     stats
 }
 
-/// Does one of `fp`'s queue nodes carry a POSITION cell opening with
-/// `position` (`{"file":"<escaped path>",`)?
-fn queue_nodes_read_from(fp: &FileParse, position: &str) -> bool {
+/// Does one of `fp`'s marker nodes (those `is_marker` selects) carry a
+/// POSITION cell opening with `position` (`{"file":"<escaped path>",`)?
+fn nodes_read_from(
+    fp: &FileParse,
+    position: &str,
+    is_marker: impl Fn(&CodeNav, NodeId) -> bool,
+) -> bool {
     fp.nodes.iter().any(|n| {
-        fp.nav
-            .kind_by_id
-            .get(&n.id)
-            .is_some_and(|k| *k == node_kind::QUEUE_PRODUCER || *k == node_kind::QUEUE_CONSUMER)
+        is_marker(&fp.nav, n.id)
             && n.cells.iter().any(|c| {
                 c.kind == cell_type::POSITION
                     && matches!(&c.payload, CellPayload::Json(p) if p.starts_with(position))
             })
     })
+}
+
+/// LA.4: a QUEUE_PRODUCER / QUEUE_CONSUMER node.
+fn is_queue_node(nav: &CodeNav, id: NodeId) -> bool {
+    nav.kind_by_id
+        .get(&id)
+        .is_some_and(|k| *k == node_kind::QUEUE_PRODUCER || *k == node_kind::QUEUE_CONSUMER)
+}
+
+/// CB.3b: an event site the eventbus extractor mints (`event_emit:` /
+/// `event_handle:`), never a Solidity `event` declaration under its code qname.
+fn is_event_site_node(nav: &CodeNav, id: NodeId) -> bool {
+    match (nav.kind_by_id.get(&id), nav.qname_by_id.get(&id)) {
+        (Some(k), Some(q)) => eventbus::is_event_site(*k, q),
+        _ => false,
+    }
+}
+
+/// CB.3b: per-repo tallies of the event-name const fold.
+#[derive(Debug, Default)]
+struct EventConstStats {
+    /// Files whose event nodes were swapped (at least one site folded).
+    files: usize,
+    /// Event sites a constant keyed and the const tables resolved to a name.
+    folded: usize,
+    /// Event sites a constant keyed that kept the constant path.
+    unresolved: usize,
+}
+
+impl EventConstStats {
+    /// fired_on marker, once per repo where any event site read a constant:
+    ///   `[event-const] folded {n} event sites in {f} files (unresolved={u}) repo=<label>`
+    fn report(&self, repo_label: &str) {
+        if self.folded + self.unresolved > 0 {
+            eprintln!(
+                "[event-const] folded {} event sites in {} files (unresolved={}) repo={repo_label}",
+                self.folded, self.files, self.unresolved
+            );
+        }
+    }
+}
+
+/// CB.3b (James 2026-09-30): an event keyed by a constant is keyed by the
+/// constant's resolved literal, falling back to the constant path, so
+/// `emit(OrderEvents.Created, ..)` pairs with `@OnEvent("order.created")`.
+///
+/// The per-file eventbus extractor names a constant-keyed site by its path
+/// (CB.3a) but cannot resolve it: a lookup reads other files, and the
+/// extractor's output is cached by the file's own hash (the constants.rs cache
+/// rule). So this pass re-runs the text-only event scan — no tree-sitter —
+/// with a resolver, for the files whose parse already holds an event site
+/// (every constant-keyed site minted one), cached parses included; the cache
+/// keeps CB.3a's pre-fold parse and the fold re-runs every build, so an edit
+/// to the constant's file re-keys its users without re-parsing them.
+///
+/// The resolver is LA.4's, verbatim: a SAME-FILE binding at any shape, a
+/// binding in another file only when the path is constant-shaped (dotted or
+/// SCREAMING_CASE, `ConstTable::resolve_identity`), a `.glia/overlay.toml`
+/// `[constants]` pin (already in `consts`), an ambiguous key never. A value
+/// the LA.41 name rule rejects keeps the path. A wrong name manufactures a
+/// false EVENT_FLOWS edge; the path does not.
+///
+/// A file's event nodes are swapped (`eventbus::replace_event_nodes`) only
+/// when at least one site folded. `files` is walk-sorted and the parse index
+/// is keyed by (language, module), so the result does not depend on HashMap
+/// order.
+fn apply_event_const_names(
+    parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
+    files: &[(String, String)],
+    repo: RepoId,
+    modules: &ModuleQnames,
+    consts: &ConstTable,
+    parse_errors: &mut Vec<String>,
+) -> EventConstStats {
+    let mut stats = EventConstStats::default();
+    // (language, module) -> the parses holding an event site under that
+    // module, in walk order. The module is the event nodes' parent: the id the
+    // router handed the extractors.
+    let mut holders: HashMap<(&'static str, NodeId), Vec<usize>> = HashMap::new();
+    for (lang, parses) in parses_by_lang.iter() {
+        for (i, fp) in parses.iter().enumerate() {
+            let module = fp
+                .nav
+                .kind_by_id
+                .keys()
+                .find(|id| is_event_site_node(&fp.nav, **id))
+                .and_then(|id| fp.nav.parent_of.get(id));
+            if let Some(module) = module {
+                holders.entry((*lang, *module)).or_default().push(i);
+            }
+        }
+    }
+    if holders.is_empty() {
+        return stats;
+    }
+    for (path, source) in files {
+        let Some(lang) = detect_language(path) else {
+            continue;
+        };
+        let module_id = modules.module_id(path, repo);
+        let Some(candidates) = holders.get(&(lang, module_id)) else {
+            continue;
+        };
+        let Some(parses) = parses_by_lang.get_mut(lang) else {
+            continue;
+        };
+        // `a.ts` and `a.js` share a module id; an event node's POSITION
+        // (`anchor::position_cell`, a JSON-encoded file) names the file it
+        // was read from, so a fold never lands on a sibling.
+        let Ok(file) = serde_json::to_string(path) else {
+            continue;
+        };
+        let position = format!(r#"{{"file":{file},"#);
+        let Some(&at) = candidates.iter().find(|&&i| {
+            parses
+                .get(i)
+                .is_some_and(|fp| nodes_read_from(fp, &position, is_event_site_node))
+        }) else {
+            continue;
+        };
+        let Some(fp) = parses.get_mut(at) else {
+            continue;
+        };
+        let fold = catch_unwind(AssertUnwindSafe(|| {
+            let local = ConstTable::scan_file(source, lang);
+            let resolve = |expr: &str| {
+                local
+                    .resolve_expr_strict(expr)
+                    .or_else(|| consts.resolve_identity(expr))
+                    .map(str::to_string)
+            };
+            eventbus::extract_event_nodes_with_consts(source, path, module_id, repo, &resolve)
+        }));
+        match fold {
+            Ok(fold) => {
+                stats.folded += fold.counts.folded;
+                stats.unresolved += fold.counts.unresolved;
+                if fold.counts.folded > 0 {
+                    stats.files += 1;
+                    // Event nodes carry no edges of their own (their module
+                    // and owner edges are the anchor pass's), so there is no
+                    // extractor edge to stamp: the swap stamps what it
+                    // re-anchors `extractor:anchor` rule `const_fold`.
+                    eventbus::replace_event_nodes(fp, module_id, lang, fold);
+                }
+            }
+            Err(_) => parse_errors.push(format!("{path}: PANIC (event const fold)")),
+        }
+    }
+    stats
 }
 
 /// A16.4 (audit 2026-06-10 #12): rewrite each file's IMPORTS cell without the

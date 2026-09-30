@@ -2,12 +2,12 @@ use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use glia_code_domain::{
-    CodeNav, FileParse, GRAPH_TYPE, attach_imports_cell, cell_type, edge_category, evidence,
-    node_kind,
+    CodeNav, FileParse, GRAPH_TYPE, cell_type, edge_category, evidence, node_kind,
 };
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
 
 use crate::anchor::{self, Anchor};
+use crate::marker_swap;
 use crate::queue_topic::{self, TopicForm, TopicRule};
 
 pub struct QueueConsumer {
@@ -694,30 +694,18 @@ pub fn extract_queue_nodes_with_consts(
 /// LA.4: swap every QUEUE_CONSUMER / QUEUE_PRODUCER node of one file's parse
 /// for `fold`'s, consumers then producers. Only this module mints those kinds.
 ///
-/// Removed: the nodes, the `module -> node` CONTAINS edges, their name /
-/// qname / kind / parent entries and their ids in `children_of[module_id]`.
-/// The replacements go back IN PLACE — at the index the first removed node,
-/// edge and child id held — so a folded file's parse is laid out exactly as
-/// the per-file pass lays out a literal-topic file.
-///
-/// The router gave every node of a language-parser parse the raw G15 IMPORTS
-/// cell before the cache stored it. When the removed nodes carried it, the new
-/// ones get it too, last, via `attach_imports_cell` on a scratch parse (the
-/// `graft_rpc_markers` precedent), so the A16.4 filter then rewrites them like
-/// every other node. `lang` is the engine's language tag for that cell.
-///
-/// LE.4c: the removed nodes' owner edges (`function -USES-> producer`,
-/// `consumer -HANDLED_BY-> function`, emitted by the per-file anchor pass)
-/// go too, and [`anchor::attach`] re-anchors the fold's nodes from the fold's
-/// own sites. The new owner edges take the removed ones' place (the end, when
-/// there were none) and are stamped `extractor:anchor` rule `const_fold`, the
-/// post-cache counterpart of the per-file `extractor:anchor` stamp.
-///
-/// LA.33: an old queue id the fold does not re-emit is GONE: every edge that
-/// touches it and every ref from it is dropped (the owner sweep already takes
-/// its HANDLED_BY callback edges). Then [`bind_consumer_callbacks`] re-binds
-/// the fold's consumer callbacks; the direct edges land with the new owner
-/// edges, and a same-id consumer's surviving refs are not doubled.
+/// The swap itself is kind-agnostic and shared with CB.3b's event fold
+/// ([`marker_swap::swap`]): the old nodes, their module CONTAINS edges, nav
+/// entries, owner edges and every edge / ref naming a gone id (a sentinel
+/// whose sites all folded) go; the fold's nodes, CONTAINS edges and child ids
+/// go back IN PLACE, so a folded file's parse is laid out exactly as the
+/// per-file pass lays out a literal-topic file; the raw IMPORTS cell is
+/// re-attached when the old nodes carried it; [`anchor::attach`] re-anchors
+/// the fold's nodes (LE.4c), its edges stamped `extractor:anchor` rule
+/// `const_fold`. What stays here is the queue half: the old set, and (LA.33)
+/// [`bind_consumer_callbacks`] re-binding the fold's consumer callbacks once
+/// the nodes are anchored — the direct edges land with the new owner edges,
+/// and a same-id consumer's surviving refs are not doubled.
 pub fn replace_queue_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fold: ConstFold) {
     let is_queue =
         |k: &NodeKindId| *k == node_kind::QUEUE_CONSUMER || *k == node_kind::QUEUE_PRODUCER;
@@ -728,130 +716,28 @@ pub fn replace_queue_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fo
         .filter(|(_, k)| is_queue(k))
         .map(|(id, _)| *id)
         .collect();
-    let owned_edge = |e: &Edge| {
-        e.from == module_id && e.category == edge_category::CONTAINS && old.contains(&e.to)
-    };
-    let had_imports = fp
-        .nodes
-        .iter()
-        .any(|n| old.contains(&n.id) && n.cells.iter().any(|c| c.kind == cell_type::IMPORTS));
-
-    let node_at = fp
-        .nodes
-        .iter()
-        .position(|n| old.contains(&n.id))
-        .unwrap_or(fp.nodes.len());
-    fp.nodes.retain(|n| !old.contains(&n.id));
-    let edge_at = fp
-        .edges
-        .iter()
-        .position(&owned_edge)
-        .unwrap_or(fp.edges.len());
-    fp.edges.retain(|e| !owned_edge(e));
-    for id in &old {
-        fp.nav.name_by_id.remove(id);
-        fp.nav.qname_by_id.remove(id);
-        fp.nav.kind_by_id.remove(id);
-        fp.nav.parent_of.remove(id);
-    }
-    let child_at = match fp.nav.children_of.get_mut(&module_id) {
-        Some(children) => {
-            let at = children
-                .iter()
-                .position(|c| old.contains(c))
-                .unwrap_or(children.len());
-            children.retain(|c| !old.contains(c));
-            at
-        }
-        None => 0,
-    };
-
     let ConstFold {
         consumers,
         producers,
         path,
         ..
     } = fold;
-    // LA.33: a literal-topic node comes back with the SAME id; only the ids
-    // the fold did not re-emit (a sentinel whose sites all folded) are gone,
-    // and nothing may keep naming them.
-    let fresh_ids: HashSet<NodeId> = consumers
-        .nodes
-        .iter()
-        .chain(&producers.nodes)
-        .map(|n| n.id)
-        .collect();
-    let gone: HashSet<NodeId> = old.difference(&fresh_ids).copied().collect();
     let callbacks = consumers.callbacks;
+    let mut nodes = consumers.nodes;
+    nodes.extend(producers.nodes);
+    let mut edges = consumers.edges;
+    edges.extend(producers.edges);
     let mut anchors = consumers.anchors;
     anchors.extend(producers.anchors);
-    let mut fresh = FileParse {
-        nodes: consumers.nodes,
-        imports: if had_imports {
-            fp.imports.clone()
-        } else {
-            Vec::new()
-        },
-        ..Default::default()
+    let fresh = marker_swap::MarkerNodes {
+        nodes,
+        edges,
+        navs: vec![consumers.nav, producers.nav],
+        anchors,
     };
-    fresh.nodes.extend(producers.nodes);
-    if had_imports {
-        attach_imports_cell(&mut fresh, lang);
-    }
-    fp.nodes.splice(node_at..node_at, fresh.nodes);
-    fp.edges.splice(
-        edge_at..edge_at,
-        consumers.edges.into_iter().chain(producers.edges),
-    );
-    let mut child_at = child_at;
-    for nav in [consumers.nav, producers.nav] {
-        fp.nav.name_by_id.extend(nav.name_by_id);
-        fp.nav.qname_by_id.extend(nav.qname_by_id);
-        fp.nav.kind_by_id.extend(nav.kind_by_id);
-        fp.nav.parent_of.extend(nav.parent_of);
-        for (parent, ids) in nav.children_of {
-            let dst = fp.nav.children_of.entry(parent).or_default();
-            if parent == module_id {
-                let at = child_at.min(dst.len());
-                let added = ids.len();
-                dst.splice(at..at, ids);
-                child_at = at + added;
-            } else {
-                dst.extend(ids);
-            }
-        }
-    }
-
-    // LE.4c: re-anchor. The old owner edges name ids that may be gone (the
-    // sentinel a fold replaces), and a folded site is a new owner.
-    let old_owner = |e: &Edge| {
-        (e.category == edge_category::USES && old.contains(&e.to))
-            || (e.category == edge_category::HANDLED_BY && old.contains(&e.from))
-    };
-    let owner_at = fp
-        .edges
-        .iter()
-        .position(&old_owner)
-        .unwrap_or(fp.edges.len());
-    fp.edges.retain(|e| !old_owner(e));
-    // LA.33: the owner sweep above already took the old consumers' callback
-    // edges (HANDLED_BY from a queue id); no other edge and no ref may name
-    // a gone id either. A same-id consumer's refs stay, and the re-bind
-    // below dedupes against them.
-    fp.edges
-        .retain(|e| !gone.contains(&e.from) && !gone.contains(&e.to));
-    fp.refs.retain(|r| !gone.contains(&r.from));
-    let tail = fp.edges.len();
-    anchor::attach(fp, &path, module_id, &mut anchors);
-    // LA.33: the fold's consumers re-bind their callbacks; the direct edges
-    // join the re-anchored owner edges (already stamped, so the const-fold
-    // anchor stamp below leaves them be), the refs append.
-    bind_consumer_callbacks(fp, module_id, &callbacks);
-    let mut added = fp.edges.split_off(tail);
-    let ev = evidence::Evidence::emitter("extractor:anchor").rule("const_fold");
-    evidence::stamp_missing_with(&mut added, &ev);
-    let at = owner_at.min(fp.edges.len());
-    fp.edges.splice(at..at, added);
+    marker_swap::swap(fp, module_id, lang, &old, fresh, &path, |fp| {
+        bind_consumer_callbacks(fp, module_id, &callbacks);
+    });
 }
 
 /// Shared emit loop for both sides.
@@ -2239,6 +2125,7 @@ pub(crate) fn debug_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glia_code_domain::attach_imports_cell;
 
     fn repo() -> RepoId {
         RepoId(1)
