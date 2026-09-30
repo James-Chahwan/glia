@@ -1,0 +1,51 @@
+{
+  "framework": "trpc-create-caller",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-d: a server-side tRPC caller (`appRouter.createCaller(ctx)` in v10, `createCallerFactory(appRouter)(ctx)` in v11) invokes a procedure directly: `caller.post.all()`, no hook. parsers/code/extractors/src/trpc.rs scan_client_calls needs a root in CLIENT_ROOTS (trpc|api|client) AND a hook, so no RPC_CALL is minted (`[trpc] ... calls=0`). Measured on HEAD 2170ff8: 3 procedures, 0 calls, 0 RPC_CALLS.",
+  "expect_nodes": [
+    {
+      "kind": "RPC_CALL",
+      "name": "rpc_call:post.all"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "rpc_call:post.byId"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "rpc_call:health"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "rpc_call:post.all",
+      "to": "rpc:post.all",
+      "category": "RPC_CALLS"
+    },
+    {
+      "from": "rpc_call:post.byId",
+      "to": "rpc:post.byId",
+      "category": "RPC_CALLS"
+    },
+    {
+      "from": "rpc_call:health",
+      "to": "rpc:health",
+      "category": "RPC_CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "RPC_CALL",
+      "max_nodes": 3,
+      "note": "exactly the three direct calls; `createCaller(` and `createCallerFactory(` are not procedures"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "rpc_call:post",
+      "note": "a router namespace is not a call"
+    }
+  ]
+}

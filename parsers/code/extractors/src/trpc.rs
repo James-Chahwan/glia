@@ -42,6 +42,16 @@
 //! never match. The same recogniser backs [`is_trpc_client_line`], which the
 //! GraphQL operation scan uses to stop tRPC hooks minting phantom
 //! `graphql_op:useQuery` nodes.
+//!
+//! Server-side callers (CB.13): a root bound IN THE SAME FILE to a caller —
+//! v10 `<router>.createCaller(ctx)`, a `createCaller(ctx)` call (T3's export),
+//! or a `createCallerFactory(..)` product called with a context (v11) — invokes
+//! a procedure directly, with no hook: `await caller.post.all()` is an
+//! `RPC_CALL` `rpc_call:post.all`, every dotted segment part of the path (see
+//! [`caller_roots`]). The binding is a `const` / `let` / `var` declaration
+//! (with or without a `: Type`) or a bare assignment (`caller = ..` in a
+//! `beforeEach`), optionally `await`ed. A caller passed in as a parameter or
+//! imported from another module is not read: the extractor sees one file.
 
 use std::collections::HashSet;
 
@@ -60,6 +70,10 @@ pub struct TrpcNodes {
     /// LA.31: one per procedure key / call site, for the engine's A5.8 anchor
     /// pass (POSITION + owner edge). Several anchors may name one node.
     pub anchors: Vec<Anchor>,
+    /// CB.13: call sites found through a server-side caller root (a
+    /// `createCaller` product) rather than a client hook — the `callers=`
+    /// count of the engine's `[trpc]` marker. Always 0 for procedures.
+    pub callers: usize,
 }
 
 /// Cheap whole-file gate: without one of these the file declares no router.
@@ -82,6 +96,15 @@ const CLIENT_HOOKS: &[&str] = &[
 
 /// A chain through one of these is a cache/utility accessor, not a call.
 const CACHE_SEGMENTS: &[&str] = &["useUtils", "useContext", "useQueries", "useSuspenseQueries"];
+
+/// tRPC's caller constructors: v10's `<router>.createCaller(ctx)` (also T3's
+/// exported `createCaller`) and v11's `createCallerFactory(router)`. Neither is
+/// ever a procedure segment of a caller path.
+const CREATE_CALLER: &str = "createCaller";
+const CREATE_CALLER_FACTORY: &str = "createCallerFactory";
+
+/// Most dotted segments read after a root (the hook scan's 4-plus-1 overflow).
+const MAX_SEGMENTS: usize = 5;
 
 /// Nesting guard for inline routers and in-file mount chains.
 const MAX_DEPTH: usize = 8;
@@ -125,16 +148,18 @@ pub fn extract_trpc_procedure_nodes(source: &str, module_id: NodeId, repo: RepoI
 
 pub fn extract_trpc_call_nodes(source: &str, module_id: NodeId, repo: RepoId) -> TrpcNodes {
     let mut out = TrpcNodes::default();
-    if !CLIENT_ROOTS.iter().any(|r| source.contains(r)) {
+    if !CLIENT_ROOTS.iter().any(|r| source.contains(r)) && !source.contains(CREATE_CALLER) {
         return out;
     }
+    let scan = Scan::new(source);
+    let callers = caller_roots(source, &scan);
     let mut seen = HashSet::new();
-    for (path, root_offset) in scan_client_calls(source) {
-        let qname = format!("rpc_call:{path}");
+    for site in scan_client_calls(source, &scan, &callers) {
+        let qname = format!("rpc_call:{}", site.path);
         let id = if seen.insert(qname.clone()) {
             push_node(
                 &mut out,
-                &path,
+                &site.path,
                 &qname,
                 node_kind::RPC_CALL,
                 Confidence::Medium,
@@ -144,10 +169,11 @@ pub fn extract_trpc_call_nodes(source: &str, module_id: NodeId, repo: RepoId) ->
         } else {
             NodeId::from_parts(GRAPH_TYPE, repo, node_kind::RPC_CALL, &qname)
         };
+        out.callers += usize::from(site.direct);
         // Every site, not just the first: each calling function gets its USES.
         out.anchors.push(Anchor {
             node: id,
-            line: anchor::line_of(source, root_offset),
+            line: anchor::line_of(source, site.offset),
         });
     }
     out
@@ -155,9 +181,11 @@ pub fn extract_trpc_call_nodes(source: &str, module_id: NodeId, repo: RepoId) ->
 
 /// True when `line` holds a tRPC client call (`api.user.list.useQuery(`). A
 /// bare `useQuery(GET_USERS)` or Apollo `client.query(` has no procedure
-/// segment and is NOT a tRPC line.
+/// segment and is NOT a tRPC line. One line carries no file bindings, so a
+/// server-side caller call (`caller.post.all()`) is not a client line.
 pub fn is_trpc_client_line(line: &str) -> bool {
-    CLIENT_ROOTS.iter().any(|r| line.contains(r)) && !scan_client_calls(line).is_empty()
+    CLIENT_ROOTS.iter().any(|r| line.contains(r))
+        && !scan_client_calls(line, &Scan::new(line), &[]).is_empty()
 }
 
 /// Push one node (no cells: POSITION comes from the anchor pass) and return
@@ -562,12 +590,23 @@ fn join_path(prefix: &str, key: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Client side: `<root>.<seg>(.<seg>){0,2}.<hook>(`.
+// Client side: `<root>.<seg>(.<seg>){0,2}.<hook>(`, and a server-side caller's
+// direct `<caller>(.<seg>){1,4}(`.
 // ---------------------------------------------------------------------------
 
-/// `(procedure path, byte offset of the root identifier)` per call site.
-fn scan_client_calls(src: &str) -> Vec<(String, usize)> {
-    let scan = Scan::new(src);
+/// One call site: the procedure path, the byte offset of its root identifier,
+/// and whether it was read through a server-side caller root (no hook).
+struct CallSite {
+    path: String,
+    offset: usize,
+    direct: bool,
+}
+
+/// Every call site in `src`. A root in `callers` (see [`caller_roots`]) is read
+/// in caller mode — every segment is the path and no hook is taken off, since
+/// a caller never carries hooks — even when it is also a [`CLIENT_ROOTS`] name
+/// (a caller named `api`). Any other [`CLIENT_ROOTS`] root is read in hook mode.
+fn scan_client_calls(src: &str, scan: &Scan, callers: &[String]) -> Vec<CallSite> {
     let b = src.as_bytes();
     let mut out = Vec::new();
     let mut i = 0;
@@ -578,35 +617,235 @@ fn scan_client_calls(src: &str) -> Vec<(String, usize)> {
             continue;
         }
         let root_end = i + ident_prefix_len(&src[i..]);
+        let root = &src[i..root_end];
         let mut j = root_end;
-        if CLIENT_ROOTS.contains(&&src[i..root_end]) {
-            let mut segs: Vec<&str> = Vec::new();
-            while segs.len() <= 4 {
-                let dot = skip_ws(b, j);
-                if b.get(dot) != Some(&b'.') {
-                    break;
-                }
-                let start = skip_ws(b, dot + 1);
-                let len = ident_prefix_len(&src[start..]);
-                if len == 0 {
-                    break;
-                }
-                segs.push(&src[start..start + len]);
-                j = start + len;
+        if callers.iter().any(|c| c == root) {
+            let (segs, end) = dotted_segments(src, root_end);
+            j = end;
+            let rejected = |s: &&str| {
+                CACHE_SEGMENTS.contains(s) || *s == CREATE_CALLER || *s == CREATE_CALLER_FACTORY
+            };
+            if b.get(skip_ws(b, j)) == Some(&b'(')
+                && (1..=4).contains(&segs.len())
+                && !segs.iter().any(rejected)
+            {
+                out.push(CallSite {
+                    path: segs.join("."),
+                    offset: i,
+                    direct: true,
+                });
             }
-            if b.get(skip_ws(b, j)) == Some(&b'(') && (2..=4).contains(&segs.len()) {
-                if let Some((hook, path)) = segs.split_last() {
-                    if CLIENT_HOOKS.contains(hook)
-                        && !path.iter().any(|s| CACHE_SEGMENTS.contains(s))
-                    {
-                        out.push((path.join("."), i));
-                    }
-                }
+        } else if CLIENT_ROOTS.contains(&root) {
+            let (segs, end) = dotted_segments(src, root_end);
+            j = end;
+            if b.get(skip_ws(b, j)) == Some(&b'(')
+                && (2..=4).contains(&segs.len())
+                && let Some((hook, path)) = segs.split_last()
+                && CLIENT_HOOKS.contains(hook)
+                && !path.iter().any(|s| CACHE_SEGMENTS.contains(s))
+            {
+                out.push(CallSite {
+                    path: path.join("."),
+                    offset: i,
+                    direct: false,
+                });
             }
         }
         i = j.max(i + 1);
     }
     out
+}
+
+/// Up to [`MAX_SEGMENTS`] `.<ident>` segments after byte `from` (whitespace
+/// allowed around each dot), and the offset just past the last one read.
+fn dotted_segments(src: &str, from: usize) -> (Vec<&str>, usize) {
+    let b = src.as_bytes();
+    let mut segs = Vec::new();
+    let mut j = from;
+    while segs.len() < MAX_SEGMENTS {
+        let dot = skip_ws(b, j);
+        if b.get(dot) != Some(&b'.') {
+            break;
+        }
+        let start = skip_ws(b, dot + 1);
+        let len = src.get(start..).map_or(0, ident_prefix_len);
+        if len == 0 {
+            break;
+        }
+        segs.push(&src[start..start + len]);
+        j = start + len;
+    }
+    (segs, j)
+}
+
+/// The right-hand side of one binding, read at its first code byte (after an
+/// optional `await`): the dotted identifier chain, whether it is called, and
+/// whether that call's result is called again (`createCallerFactory(r)(ctx)`).
+struct Rhs<'a> {
+    chain: Vec<&'a str>,
+    called: bool,
+    called_twice: bool,
+}
+
+impl Rhs<'_> {
+    /// The chain is exactly one identifier.
+    fn single(&self) -> Option<&str> {
+        match self.chain.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        }
+    }
+
+    fn last_is(&self, name: &str) -> bool {
+        self.chain.last() == Some(&name)
+    }
+}
+
+/// Identifiers bound in `src` to a server-side tRPC caller, sorted and deduped.
+///
+/// Three passes over the file's bindings (`const|let|var <x> [: T] =` and bare
+/// `<x> =`), so a use may precede its binding in the text:
+/// 1. makers: `createCallerFactory` itself, and every alias of it —
+///    `= t.createCallerFactory` / `= createCallerFactory` with no call;
+/// 2. factories: `createCaller` itself (T3's export), every maker product —
+///    `= createCallerFactory(appRouter)`, `= t.createCallerFactory(..)`,
+///    `= <maker>(..)` — and every uncalled `= <router>.createCaller` alias;
+/// 3. callers: `= <router>.createCaller(..)`, `= <factory>(..)` and an inline
+///    `= createCallerFactory(appRouter)(ctx)`, each optionally `await`ed.
+fn caller_roots(src: &str, scan: &Scan) -> Vec<String> {
+    if !src.contains(CREATE_CALLER) {
+        return Vec::new();
+    }
+    let bindings = bindings(src, scan);
+
+    let mut makers: Vec<&str> = vec![CREATE_CALLER_FACTORY];
+    for (lhs, rhs) in &bindings {
+        if !rhs.called && rhs.last_is(CREATE_CALLER_FACTORY) {
+            makers.push(*lhs);
+        }
+    }
+    let is_maker_call = |rhs: &Rhs| {
+        rhs.called
+            && (rhs.last_is(CREATE_CALLER_FACTORY)
+                || rhs.single().is_some_and(|s| makers.contains(&s)))
+    };
+
+    let mut factories: Vec<&str> = vec![CREATE_CALLER];
+    for (lhs, rhs) in &bindings {
+        let product = is_maker_call(rhs) && !rhs.called_twice;
+        let alias = !rhs.called && rhs.chain.len() > 1 && rhs.last_is(CREATE_CALLER);
+        if product || alias {
+            factories.push(*lhs);
+        }
+    }
+
+    let mut callers: Vec<String> = Vec::new();
+    for (lhs, rhs) in &bindings {
+        let v10 = rhs.called && rhs.chain.len() > 1 && rhs.last_is(CREATE_CALLER);
+        let from_factory = rhs.called && rhs.single().is_some_and(|s| factories.contains(&s));
+        let inline = is_maker_call(rhs) && rhs.called_twice;
+        if v10 || from_factory || inline {
+            callers.push((*lhs).to_string());
+        }
+    }
+    callers.sort();
+    callers.dedup();
+    callers
+}
+
+/// Every `(bound identifier, right-hand side)` in `src`: a `const` / `let` /
+/// `var` declaration of one identifier (an optional `: Type` runs to the first
+/// assignment `=` on its line) or a bare `<x> = ..` assignment. Only code bytes
+/// count, so bindings inside strings and comments are skipped; member targets
+/// (`this.x = ..`) and destructuring are not bindings of a root.
+fn bindings<'a>(src: &'a str, scan: &Scan) -> Vec<(&'a str, Rhs<'a>)> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let boundary = i == 0 || !(is_ident_byte(b[i - 1]) || b[i - 1] == b'.');
+        if !boundary || !scan.code(i) || !is_ident_start(b[i]) {
+            i += 1;
+            continue;
+        }
+        let word_end = i + ident_prefix_len(&src[i..]);
+        let word = &src[i..word_end];
+        let declared = matches!(word, "const" | "let" | "var");
+        let (lhs, lhs_end) = if declared {
+            let start = skip_ws(b, word_end);
+            let len = src.get(start..).map_or(0, ident_prefix_len);
+            if start == word_end || len == 0 {
+                i = word_end;
+                continue;
+            }
+            (&src[start..start + len], start + len)
+        } else {
+            (word, word_end)
+        };
+        let after = skip_ws(b, lhs_end);
+        // A `:` after a bare word is an object key or a label, never a type.
+        let eq = match b.get(after) {
+            Some(b'=') => Some(after),
+            Some(b':') if declared => annotation_assign(b, scan, after + 1),
+            _ => None,
+        };
+        i = match eq.filter(|&e| is_assign(b, e)) {
+            Some(eq) => {
+                if let Some(rhs) = read_rhs(src, scan, eq + 1) {
+                    out.push((lhs, rhs));
+                }
+                // Past the `=`: a `: Type` annotation's names bind nothing.
+                eq + 1
+            }
+            None => lhs_end,
+        };
+    }
+    out
+}
+
+/// The assignment `=` closing a `: Type` annotation that starts at `from`,
+/// before the line or statement ends (`const c: Caller = ..`); `None` for a
+/// declaration with no initialiser (`let c: Caller;`) or a multi-line type.
+fn annotation_assign(b: &[u8], scan: &Scan, from: usize) -> Option<usize> {
+    (from..b.len())
+        .take_while(|&k| b[k] != b'\n' && b[k] != b';')
+        .find(|&k| scan.code(k) && is_assign(b, k))
+}
+
+/// `b[at]` is a lone assignment `=`: not `==`, `===`, `=>`, `!=`, `<=`, `>=`,
+/// nor a compound `+=` / `-=` / ...
+fn is_assign(b: &[u8], at: usize) -> bool {
+    let prev_ok = at == 0 || !b"=!<>+-*/%&|^?".contains(&b[at - 1]);
+    b.get(at) == Some(&b'=') && prev_ok && !matches!(b.get(at + 1), Some(b'=' | b'>'))
+}
+
+/// The binding's right-hand side at `from` (whitespace and one `await` skipped).
+fn read_rhs<'a>(src: &'a str, scan: &Scan, from: usize) -> Option<Rhs<'a>> {
+    let b = src.as_bytes();
+    let mut at = skip_ws(b, from);
+    if src.get(at..).is_some_and(|s| s.starts_with("await")) {
+        let past = at + "await".len();
+        if b.get(past).is_some_and(|c| c.is_ascii_whitespace()) {
+            at = skip_ws(b, past);
+        }
+    }
+    let head = src.get(at..).map_or(0, ident_prefix_len);
+    if head == 0 || !scan.code(at) {
+        return None;
+    }
+    let (mut chain, end) = dotted_segments(src, at + head);
+    chain.insert(0, &src[at..at + head]);
+    let open = skip_ws(b, end);
+    let called = b.get(open) == Some(&b'(');
+    let called_twice = called
+        && scan
+            .close_of(open)
+            .is_some_and(|close| b.get(skip_ws(b, close + 1)) == Some(&b'('));
+    Some(Rhs {
+        chain,
+        called,
+        called_twice,
+    })
 }
 
 fn skip_ws(b: &[u8], mut i: usize) -> usize {
@@ -917,6 +1156,163 @@ export function Count() {
         );
         let none = extract_trpc_call_nodes("// api.user.list.useQuery();", module_id(), repo());
         assert!(none.anchors.is_empty() && none.nodes.is_empty());
+    }
+
+    // --- CB.13: server-side callers ---------------------------------------
+
+    #[test]
+    fn v10_create_caller() {
+        let src = "const caller = appRouter.createCaller({});\nawait caller.post.all();\n";
+        let out = extract_trpc_call_nodes(src, module_id(), repo());
+        assert_eq!(qnames(&out), vec!["rpc_call:post.all"]);
+        assert!(out.nodes.iter().all(|n| n.confidence == Confidence::Medium));
+        assert_eq!(out.callers, 1);
+        assert_eq!(anchor_rows(&out), rows(&[("rpc_call:post.all", 1)]));
+    }
+
+    #[test]
+    fn v11_factory() {
+        let src = "const createCaller = createCallerFactory(appRouter);\n\
+                   const api = createCaller({});\n\
+                   api.post.byId({ id });\n";
+        let out = extract_trpc_call_nodes(src, module_id(), repo());
+        assert_eq!(qnames(&out), vec!["rpc_call:post.byId"]);
+        assert_eq!(out.callers, 1);
+    }
+
+    #[test]
+    fn root_level_procedure() {
+        let src = "const api = createCaller({});\nconst ok = await api.health();\n";
+        let out = extract_trpc_call_nodes(src, module_id(), repo());
+        assert_eq!(qnames(&out), vec!["rpc_call:health"]);
+    }
+
+    #[test]
+    fn the_factory_itself_is_not_a_call() {
+        for src in [
+            "const createCaller = createCallerFactory(appRouter);",
+            "export const createCallerFactory = t.createCallerFactory;",
+            "const caller = createCaller({});",
+            "const caller = appRouter.createCaller({ session: null });",
+            "createCallerFactory(appRouter);\ncreateCaller({});",
+        ] {
+            let out = extract_trpc_call_nodes(src, module_id(), repo());
+            assert!(out.nodes.is_empty(), "{src} -> {:?}", qnames(&out));
+            assert_eq!(out.callers, 0);
+        }
+        // A caller's own constructor is never a procedure segment.
+        let src = "const caller = createCaller({});\ncaller.createCaller({});\n";
+        assert!(
+            extract_trpc_call_nodes(src, module_id(), repo())
+                .nodes
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn hook_mode_unchanged() {
+        // bench/substrate-gap/fixtures/xcut-trpc/client/users.tsx's call.
+        let src = "import { api } from \"../utils/api\";\n\
+                   export function Users() {\n  const { data } = api.user.list.useQuery();\n}\n";
+        let out = extract_trpc_call_nodes(src, module_id(), repo());
+        assert_eq!(qnames(&out), vec!["rpc_call:user.list"]);
+        assert_eq!(out.callers, 0, "a hook call is not a caller site");
+        // The same line in a file that ALSO builds a caller keeps hook mode
+        // for a root the file does not bind.
+        let mixed = format!("{src}const caller = createCaller({{}});\n");
+        let out = extract_trpc_call_nodes(&mixed, module_id(), repo());
+        assert_eq!(qnames(&out), vec!["rpc_call:user.list"]);
+    }
+
+    #[test]
+    fn an_unbound_root_is_not_a_caller() {
+        for src in [
+            "await caller.post.all();",
+            // A parameter or an import is not a binding the extractor reads.
+            "export async function run(caller: Caller) { await caller.post.all(); }",
+            "import { caller } from \"./caller\";\nawait caller.post.all();",
+            // A binding inside a string or comment binds nothing.
+            "// const caller = appRouter.createCaller({});\nawait caller.post.all();",
+            "const s = \"const caller = createCaller({})\";\ncaller.post.all();",
+        ] {
+            let out = extract_trpc_call_nodes(src, module_id(), repo());
+            assert!(out.nodes.is_empty(), "{src} -> {:?}", qnames(&out));
+        }
+    }
+
+    #[test]
+    fn caller_binding_forms() {
+        let src = r#"import { createCallerFactory } from "~/server/api/trpc";
+const f = t.createCallerFactory;
+const make = f(appRouter);
+let shared: Awaited<ReturnType<typeof make>>;
+beforeEach(async () => {
+  shared = await make({ session: null });
+});
+const typed: Caller = appRouter.createCaller(ctx);
+const inline = createCallerFactory(appRouter)(ctx);
+test("x", async () => {
+  await shared.user.list();
+  await typed.admin.users.ban({ id });
+  await inline.search.query({ q });
+  this.inline.post.all();
+  expect(make).toBeDefined();
+});
+"#;
+        let scan = Scan::new(src);
+        assert_eq!(caller_roots(src, &scan), vec!["inline", "shared", "typed"]);
+        let out = extract_trpc_call_nodes(src, module_id(), repo());
+        assert_eq!(
+            qnames(&out),
+            vec![
+                "rpc_call:user.list",
+                "rpc_call:admin.users.ban",
+                "rpc_call:search.query"
+            ],
+            "every segment is the path; a caller's `query` is a procedure, not a hook"
+        );
+        assert_eq!(out.callers, 3);
+    }
+
+    #[test]
+    fn caller_named_like_a_client_root_takes_caller_mode() {
+        let src = "const api = createCaller(ctx);\nawait api.post.list.query();\n";
+        let out = extract_trpc_call_nodes(src, module_id(), repo());
+        assert_eq!(qnames(&out), vec!["rpc_call:post.list.query"]);
+        // The GraphQL guard sees one line and no bindings: hook mode only.
+        assert!(!is_trpc_client_line("await caller.post.all();"));
+    }
+
+    /// bench/substrate-gap/fixtures/trpc-create-caller/test/post.test.ts,
+    /// verbatim: the `[trpc] ... calls=3 callers=3 anchors=3` marker's counts.
+    #[test]
+    fn fixture_test_file_counts() {
+        let src = r#"import { appRouter, createCallerFactory } from "../src/server/router";
+
+test("lists posts", async () => {
+  const caller = appRouter.createCaller({});
+  const posts = await caller.post.all();
+  expect(posts).toEqual([]);
+});
+
+test("reads one post through the factory", async () => {
+  const createCaller = createCallerFactory(appRouter);
+  const api = createCaller({});
+  const one = await api.post.byId({ id: "1" });
+  const ok = await api.health();
+  expect(one.id).toBe("1");
+});
+"#;
+        let out = extract_trpc_call_nodes(src, module_id(), repo());
+        assert_eq!(
+            anchor_rows(&out),
+            rows(&[
+                ("rpc_call:post.all", 4),
+                ("rpc_call:post.byId", 11),
+                ("rpc_call:health", 12)
+            ])
+        );
+        assert_eq!((out.nodes.len(), out.callers), (3, 3));
     }
 
     #[test]
