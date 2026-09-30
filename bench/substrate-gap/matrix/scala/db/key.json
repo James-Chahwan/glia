@@ -1,0 +1,27 @@
+{
+  "framework": "scala-slick",
+  "language": "scala",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "db",
+  "cells": [
+    "scala/db"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "DATA_ENTITY",
+      "name": "users"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Users",
+      "to": "users",
+      "category": "ACCESSES_DATA"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [],
+  "note": "Slick Table[...](tag, \"users\") || CF.9b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/1 literal=0/1 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): Slick `class Users(tag: Tag) extends Table[..](tag, \"users\")` has no DATA_ENTITY row in parsers/code/extractors/src/data_entities.rs."
+}
