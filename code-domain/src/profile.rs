@@ -198,6 +198,19 @@ pub const CODE_TABLES: DomainTables = DomainTables {
                 (ec::DOCUMENTS, 3.0),
             ],
         },
+        // CC.10a: what much depends on, for one global PageRank (hotspots).
+        // Every module DEFINES / CONTAINS what it declares, a heavily tested
+        // function is not more depended on and a doc is no dependant, so
+        // none of them makes code central.
+        ActivationPreset {
+            name: "centrality",
+            overrides: &[
+                (ec::DEFINES, 0.0),
+                (ec::CONTAINS, 0.0),
+                (ec::DOCUMENTS, 0.0),
+                (ec::TESTS, 0.0),
+            ],
+        },
     ],
 };
 
@@ -250,7 +263,7 @@ mod tests {
         // would weigh 1.0 and reshape every ranking in a repo with history).
         assert!(!CODE_TABLES.carries(ec::CO_CHANGES), "CO_CHANGES must stay OUT of carry_edges");
         assert!(!CODE_TABLES.effect_sinks.iter().any(|s| s.via.contains(&ec::CO_CHANGES)));
-        for preset in [None, Some("repair"), Some("review"), Some("onboard")] {
+        for preset in [None, Some("repair"), Some("review"), Some("onboard"), Some("centrality")] {
             let w = CODE_TABLES.activation_config(preset).edge_weights.get(&ec::CO_CHANGES).copied();
             assert_eq!(w, Some(0.0), "preset {preset:?}");
         }
@@ -267,6 +280,17 @@ mod tests {
         assert!(repair.edge_weights[&ec::CALLS] > base.edge_weights[&ec::CALLS]);
         assert!(onboard.edge_weights[&ec::CONTAINS] > base.edge_weights[&ec::CONTAINS]);
         assert_ne!(repair.edge_weights, onboard.edge_weights, "the presets differ");
+        // CC.10a: `centrality` zeroes structure, tests and docs, and keeps
+        // every other base weight.
+        let centrality = CODE_TABLES.activation_config(Some("centrality"));
+        for c in [ec::DEFINES, ec::CONTAINS, ec::DOCUMENTS, ec::TESTS] {
+            assert_eq!(centrality.edge_weights[&c], 0.0, "category {}", c.0);
+        }
+        for (c, w) in &base.edge_weights {
+            if ![ec::DEFINES, ec::CONTAINS, ec::DOCUMENTS, ec::TESTS].contains(c) {
+                assert_eq!(centrality.edge_weights[c], *w, "category {}", c.0);
+            }
+        }
         for name in ["default", "nonsense"] {
             assert_eq!(
                 CODE_TABLES.activation_config(Some(name)).edge_weights,

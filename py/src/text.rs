@@ -43,8 +43,10 @@ impl PyGraph {
     }
 
     /// Spreading activation (PPR) from `seed_ids`. `profile` (WP-F / GR-5)
-    /// selects an edge-weight preset — "default", "repair", "review", or
-    /// "onboard" — so the same engine serves different agent tasks. Returns
+    /// selects an edge-weight preset — "default", "repair", "review",
+    /// "onboard", or "centrality" (structure, tests and docs weigh 0; the
+    /// lens hotspots rank by, CC.10a) — so the same engine serves different
+    /// agent tasks. Returns
     /// `(id, score)` pairs, score-sorted, capped at `top_k`.
     #[pyo3(signature = (seed_ids, top_k=None, profile=None))]
     fn activate(

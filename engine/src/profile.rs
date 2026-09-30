@@ -438,10 +438,25 @@ mod tests {
                     (ec::DEFINES, 3.0),
                     (ec::DOCUMENTS, 3.0),
                 ],
+                // CC.10a: hotspots' PageRank lens, added after LD.14b.
+                Some("centrality") => &[
+                    (ec::DEFINES, 0.0),
+                    (ec::CONTAINS, 0.0),
+                    (ec::DOCUMENTS, 0.0),
+                    (ec::TESTS, 0.0),
+                ],
                 _ => &[],
             }
         };
-        for p in [None, Some("default"), Some("repair"), Some("review"), Some("onboard"), Some("nonsense")] {
+        for p in [
+            None,
+            Some("default"),
+            Some("repair"),
+            Some("review"),
+            Some("onboard"),
+            Some("centrality"),
+            Some("nonsense"),
+        ] {
             let mut weights: HashMap<EdgeCategoryId, f64> = HEAD_WEIGHTS.into_iter().collect();
             weights.extend(head_overrides(p).iter().copied());
             let head = ActivationConfig {
@@ -465,7 +480,7 @@ mod tests {
         assert_eq!(t.activation_weights, HEAD_WEIGHTS);
         let presets: Vec<(&str, usize)> =
             t.activation_presets.iter().map(|p| (p.name, p.overrides.len())).collect();
-        assert_eq!(presets, [("repair", 6), ("review", 5), ("onboard", 5)]);
+        assert_eq!(presets, [("repair", 6), ("review", 5), ("onboard", 5), ("centrality", 4)]);
         for p in t.activation_presets {
             assert_eq!(p.overrides, head_overrides(Some(p.name)), "preset {}", p.name);
         }
