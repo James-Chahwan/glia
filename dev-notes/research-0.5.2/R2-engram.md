@@ -259,3 +259,18 @@ https://arxiv.org/html/2502.14802 · https://proceedings.mlr.press/v267/gutierre
 https://github.com/osu-nlp-group/hipporag · Andersen, Chung & Lang, "Local Graph Partitioning using PageRank
 Vectors", FOCS 2006, https://www.math.ucsd.edu/~fan/wp/localpartition.pdf (push-based approximate PPR, if
 per-read cost ever matters).
+
+## Addendum 2026-10-01 — measurements from the Engram session (engram-6c)
+
+Engram's 480-query recall battery on quokka-stack and Kina, dev split, paired, glia 0.5.0 exports:
+- Lookups: a flat dense-cosine store over each fact's FULL text (bge-small) beats Engram's current read 78 vs 54 of
+  100 (26–2, p<0.0001). The whole gap is paraphrased queries (named lookups: 41 vs 40 of 44). Cause: Engram embeds
+  name + qname only; flat store full text vs short text is +22 / −1. glia's leading_doc capture is the load-bearing
+  signal for paraphrase retrieval — keep doc quality high.
+- Relational: Engram's printed outgoing edges answer "what does X call" 32/35 and "which endpoint does X request"
+  19/19; the flat store 2/35 and 8/19.
+- "Who calls X": Engram 7/35, flat store 5/35. Engram does not surface incoming edges yet (next on its list). PPR over
+  incoming edges is where the graph should help most; glia gaps cap caller recall directly: Go calls inside returned
+  closures (0.5.1 CA.1), Go receivers typed from a call's return (CA.2a/b), TS arrow-function class fields (new).
+- False Go IMPLEMENTS (name-only matching) pollute any PPR over the graph; Engram skips Go implements for now (CA.3b).
+- The glia-store hybrid seed that failed twice was a Voyage connect timeout in Engram's own adapter — not glia.
