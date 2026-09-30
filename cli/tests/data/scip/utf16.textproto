@@ -1,0 +1,21 @@
+# CE.1c UTF-16 index (text format of scip.Index; scip.proto beside it).
+# Encoded to utf16.scip, committed as bytes, with:
+#   protoc --proto_path=cli/tests/data/scip --encode=scip.Index scip.proto \
+#     < cli/tests/data/scip/utf16.textproto > cli/tests/data/scip/utf16.scip
+# The source it indexes (cli/tests/scip_cli.rs UTF16_APP_TS), web/app.ts:
+#   0: function f🚀(x: number) { return x; }
+#   1: export const é = f🚀(1);
+# Line 1's reference to `f🚀` counts UTF-16 code units: `export const ` is
+# 13, `é` 1, ` = ` 3, so `f🚀` spans 17..20 (the rocket is a surrogate
+# pair). Read as UTF-8 bytes, 20 would land inside the rocket.
+metadata {
+  tool_info { name: "scip-typescript" version: "0.3.14" }
+  project_root: "file:///work/web-probe"
+  text_document_encoding: UTF8
+}
+documents {
+  language: "typescript"
+  relative_path: "web/app.ts"
+  position_encoding: UTF16CodeUnitOffsetFromLineStart
+  occurrences { single_line_range { line: 1 start_character: 17 end_character: 20 } symbol: "scip-typescript npm app 1.0 web/`app.ts`/`f🚀`()." symbol_roles: 8 }
+}

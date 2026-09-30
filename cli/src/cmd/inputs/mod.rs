@@ -33,6 +33,13 @@ pub(crate) enum InputsCmd {
     /// COVERAGE cells); the build itself never ingests. A malformed report is
     /// a `warning:` and is skipped; exits 1 only when no report could be read.
     Tests(tests::Args),
+    /// SCIP index snapshot (CE-1): decode a compiler-grade SCIP index
+    /// (scip-python, scip-typescript, scip-java, scip-go, rust-analyzer scip)
+    /// and write `<repo>/.glia/scip-snapshot/`, which the next build ingests
+    /// as FACT-tier CALLS / USES / IMPLEMENTS / INHERITS_FROM evidence; the
+    /// build itself never reads the index. Exits 1 when the index cannot be
+    /// decoded (nothing written).
+    Scip(scip::Args),
 }
 
 pub(crate) fn run(c: InputsCmd) -> i32 {
@@ -40,5 +47,6 @@ pub(crate) fn run(c: InputsCmd) -> i32 {
         InputsCmd::Gaps(a) => gaps::run(a),
         InputsCmd::History(a) => history::run(a),
         InputsCmd::Tests(a) => tests::run(a),
+        InputsCmd::Scip(a) => scip::run(a),
     }
 }

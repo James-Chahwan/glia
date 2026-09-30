@@ -1,0 +1,18 @@
+scip.proto in this directory is a verbatim copy of the SCIP schema from the
+SCIP Code Intelligence Protocol project:
+
+  https://github.com/scip-code/scip
+  file:    scip.proto
+  commit:  e01e97efac2f6b8c266b4d04825f1f1eab7b8f6c
+           ("schema: Add Odin language (#441)", 2026-07-06)
+  sha256:  b38021b65ef90cbbf6af9c829ff75192859ad9b5da05439ef154bea4ceb2bf03
+
+It is licensed under the Apache License, Version 2.0:
+https://www.apache.org/licenses/LICENSE-2.0 (the upstream repository's LICENSE
+file). The upstream repository carries no NOTICE file of its own.
+
+It is test data only: glia's CLI decodes the SCIP wire format by hand
+(cli/src/cmd/inputs/scip/wire.rs) and never compiles this schema. The file is
+here so `protoc --encode=scip.Index scip.proto` can re-encode the *.textproto
+fixtures beside it, an encoder independent of glia's decoder. glia's own
+licence (PolyForm Noncommercial) does not cover this file.

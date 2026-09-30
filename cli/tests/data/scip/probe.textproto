@@ -1,0 +1,40 @@
+# CE.1c probe index (text format of scip.Index; scip.proto beside it).
+# Encoded to probe.scip, committed as bytes, with:
+#   protoc --proto_path=cli/tests/data/scip --encode=scip.Index scip.proto \
+#     < cli/tests/data/scip/probe.textproto > cli/tests/data/scip/probe.scip
+# The sources it indexes are CE.1b's probe repo (snapshots/tests/scip_import.rs
+# REPOS_PY / HANDLERS_PY): svc/repos.py defines UserRepo.save and
+# OrderRepo.save, svc/handlers.py calls repo.save(row) on a UserRepo.
+# svc/repos.py uses the deprecated packed `range`, svc/handlers.py the typed
+# single_line_range; one SymbolInformation carries an is_implementation
+# relationship and one external symbol rides along, so every field the
+# decoder reads is present.
+metadata {
+  version: UnspecifiedProtocolVersion
+  tool_info { name: "scip-python" version: "0.6.0" }
+  project_root: "file:///work/svc-probe"
+  text_document_encoding: UTF8
+}
+documents {
+  language: "python"
+  relative_path: "svc/repos.py"
+  occurrences { range: [1, 8, 12] symbol: "scip-python python svc 0.1 `svc.repos`/UserRepo#save()." symbol_roles: 1 }
+  occurrences { range: [6, 8, 12] symbol: "scip-python python svc 0.1 `svc.repos`/OrderRepo#save()." symbol_roles: 1 }
+  symbols {
+    symbol: "scip-python python svc 0.1 `svc.repos`/UserRepo#save()."
+    kind: Method
+    display_name: "save"
+    relationships { symbol: "scip-python python repokit 1.2 `repokit.base`/Repository#save()." is_implementation: true }
+  }
+}
+documents {
+  language: "python"
+  relative_path: "svc/handlers.py"
+  position_encoding: UTF8CodeUnitOffsetFromLineStart
+  occurrences { single_line_range { line: 5 start_character: 16 end_character: 20 } symbol: "scip-python python svc 0.1 `svc.repos`/UserRepo#save()." symbol_roles: 8 }
+}
+external_symbols {
+  symbol: "scip-python python repokit 1.2 `repokit.base`/Repository#save()."
+  kind: Method
+  display_name: "save"
+}

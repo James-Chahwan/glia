@@ -304,3 +304,57 @@ moves. Flags: `--max-commits N` (default 2000), `--since <date>` (passed to `git
 The sync prints `[history] sync repo=<label> head=<12 hex> commits=N files=N renames=N binary=N
 blame_files=N runs=N window=max:N[,since:<date>] surface=cli|pyo3` on stderr (one line), and a
 build that reads the snapshot prints `[history] ingest repo=<label> ...`.
+
+## SCIP snapshot
+
+A compiler-grade SCIP index is a build input the same way: read once by a CLI step, stored as a
+snapshot, never read by the build itself. Run the language's indexer (scip-python,
+scip-typescript, scip-java, scip-go, rust-analyzer's `scip`), then
+`glia scip import <repo> <index.scip> [--prefix <dir>]`. The import decodes the index (a
+hand-written protobuf reader: no protobuf dependency, fields the schema adds later are skipped
+and counted, one document in memory at a time, at most 256 MiB each) and writes
+`.glia/scip-snapshot/` (`documents.jsonl`, `symbols.jsonl`, `meta.json`), replacing the previous
+one. Nothing is written when the index cannot be decoded, or when no document of it was kept.
+
+What the snapshot holds is read against the repo's own source at import, never at build: the
+identifier text at every definition (the build binds a definition by position and checks it by
+that name), whether each reference is followed by a call paren (SCIP has no call role), and a hash
+of every document's bytes. Offsets are converted in the document's position encoding (UTF-8,
+UTF-16 or UTF-32 code units; unspecified reads as UTF-16). Document-local symbols and forward
+definitions are dropped, and so is any document whose path leaves the repo. Document paths are
+relative to `--prefix` (a directory in the repo, `.` for its root) when given, else to the
+index's `project_root`; a root outside the repo (an index made in a container or on another
+machine) reads them as repo-relative, with one `[scip] warning:` line.
+
+The build never runs an indexer, so re-index and re-import when the code moves. Staleness is per
+document: a document whose file no longer hashes to the bytes the import read is skipped whole,
+so an index never places facts on code edited since; the other documents still apply. What the
+build makes of the snapshot:
+
+- references bound to a definition become `CALLS` (a call of a function or method, rule
+  `call_site`) or `USES` (`callable_ref`, `reference`, `reference_write`), emitter
+  `scip:<tool>`, tier FACT (CE.1d). An edge glia already has between the same nodes keeps its
+  category: when the index would classify it differently, glia's classification stands.
+- a name-only or unlocated glia edge from the parser, extractor or graph stages that the index
+  confirms is re-stamped `scip:<tool>` with rule `confirms:<old emitter>[/<old rule>]` and tier
+  FACT; resolver and pass edges are never re-stamped (a merge recomputes them). The index's
+  `is_implementation` relationships add the `IMPLEMENTS` / `INHERITS_FROM` edges glia lacks
+  (rule `implementation`), and a heuristic edge the index contradicts is counted and printed,
+  never removed (CE.1e).
+
+Delta caveat: `glia delta` and `diff-impact` build the base rev with the same untracked snapshot,
+and the per-document hash check skips every file that differs from the indexed bytes, so a file
+changed between the rev and the working tree carries SCIP edges only on the side the index was
+made for. Those edges then show as added (or removed) in the delta.
+
+The snapshot is local and regenerable: its directory holds a `.gitignore` of `*`, so it ignores
+itself even in a repo whose `.glia/.gitignore` predates it, and the import creates
+`.glia/.gitignore` when it is absent. Exits 0 on a written snapshot, 1 when the index cannot be
+decoded or nothing was kept, 2 on a usage error.
+
+The import prints `[scip] decoded index=<file> documents=N occurrences=N symbols=N
+external_symbols=N unknown_fields=N malformed_ranges=N` after a clean decode, then `[scip] import
+repo=<label> tool=<tool>@<version> documents=N skipped=N defs=N refs=N calls=N symbols=N locals=N
+forward=N bad_ranges=N encoding_unspecified=N surface=cli` on stderr (one line each), and a build
+that reads the snapshot prints `[scip] ingest repo=<label> ...` and `[scip] confirm repo=<label>
+...`.

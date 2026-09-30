@@ -1,0 +1,10 @@
+
+0
+scip-python0.6.0file:///work/svc-probe ¥
+svc/repos.py@
+7scip-python python svc 0.1 `svc.repos`/UserRepo#save().A
+8scip-python python svc 0.1 `svc.repos`/OrderRepo#save().‡
+7scip-python python svc 0.1 `svc.repos`/UserRepo#save()."D
+@scip-python python repokit 1.2 `repokit.base`/Repository#save().(2save"python`
+svc/handlers.pyC7scip-python python svc 0.1 `svc.repos`/UserRepo#save().B"python0J
+@scip-python python repokit 1.2 `repokit.base`/Repository#save().(2save
