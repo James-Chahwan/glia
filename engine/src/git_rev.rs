@@ -583,6 +583,88 @@ fn packed_ref(common: &Path, name: &str) -> Option<String> {
         })
 }
 
+/// One commit of a first-parent window (CD.5c): its full id, committer time
+/// (unix seconds) and subject as git prints it (`%s`: the title paragraph on
+/// one line). The subject is user text, returned verbatim: the timeline
+/// stores it only through `glia_store::timeline_subject`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RevInfo {
+    pub(crate) sha: String,
+    pub(crate) time: i64,
+    pub(crate) subject: String,
+}
+
+/// The last `n` commits of `head`'s first-parent chain, OLDEST first (CD.5c,
+/// the timeline's window): `rev-list --first-parent --max-count=<n>` for the
+/// ids in order, then one `log --no-walk=unsorted` over them for each id's
+/// committer time and subject (NUL-separated, so no subject can split a
+/// record). Both plumbing-safe: no signature check, no colour, no pager.
+/// Fewer than `n` when the history is shorter. `Err` when git is missing or
+/// either command fails.
+pub(crate) fn first_parent_log(repo: &Path, head: &Rev, n: usize) -> Result<Vec<RevInfo>, String> {
+    let max = format!("--max-count={n}");
+    let listed = git_output(repo, &["rev-list", "--first-parent", &max, &head.sha, "--"])?
+        .ok_or_else(|| format!("git rev-list {} failed in {}", head.given, repo.display()))?;
+    let shas: Vec<String> = String::from_utf8_lossy(&listed)
+        .lines()
+        .filter_map(|l| object_id(l.trim()))
+        .collect();
+    if shas.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec!["log", "--no-walk=unsorted", "--no-show-signature", "--no-color", "--format=%H%x00%ct%x00%s", "-z"];
+    args.extend(shas.iter().map(String::as_str));
+    args.push("--");
+    let out = git_output(repo, &args)?.ok_or_else(|| format!("git log failed in {}", repo.display()))?;
+    let records = parse_log_records(&out);
+    let mut revs = Vec::with_capacity(shas.len());
+    for sha in shas.iter().rev() {
+        let rec = records
+            .iter()
+            .find(|r| &r.sha == sha)
+            .ok_or_else(|| format!("git log did not list commit {sha} in {}", repo.display()))?;
+        revs.push(rec.clone());
+    }
+    Ok(revs)
+}
+
+/// The `%H NUL %ct NUL %s` records of a `log -z` listing (records NUL
+/// terminated too), in listing order. A record whose id is not an object id
+/// or whose time is not an integer is dropped, so its commit reads as
+/// unlisted.
+fn parse_log_records(out: &[u8]) -> Vec<RevInfo> {
+    let mut fields: Vec<&[u8]> = out.split(|b| *b == 0).collect();
+    // The last record's terminator leaves one empty field behind.
+    if fields.len() % 3 == 1 && fields.last().is_some_and(|f| f.is_empty()) {
+        fields.pop();
+    }
+    fields
+        .chunks_exact(3)
+        .filter_map(|r| {
+            let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+            let sha = object_id(text(r[0]).trim())?;
+            let time = text(r[1]).trim().parse::<i64>().ok()?;
+            Some(RevInfo { sha, time, subject: text(r[2]) })
+        })
+        .collect()
+}
+
+/// The renames git sees from commit `a` to commit `b`, as `(old_path,
+/// new_path)` relative to `repo` (`diff --relative -M`, the
+/// [`declared_renames`] listing between two commits): the declared tier of
+/// `glia_graph::identity::detect_moves_with` for one timeline step (CD.5c).
+/// Empty when the diff fails.
+pub(crate) fn renames_between(repo: &Path, a: &str, b: &str) -> Vec<(String, String)> {
+    if a.starts_with('-') || b.starts_with('-') {
+        return Vec::new();
+    }
+    let args = ["diff", "--relative", "-M", "--name-status", "-z", "--no-color", a, b, "--"];
+    match git_output(repo, &args) {
+        Ok(Some(out)) => parse_name_status(&out),
+        _ => Vec::new(),
+    }
+}
+
 /// The `R<score>` pairs of a `--name-status -z` listing.
 fn parse_name_status(out: &[u8]) -> Vec<(String, String)> {
     let mut fields = out.split(|b| *b == 0).map(|f| String::from_utf8_lossy(f).into_owned());
@@ -821,6 +903,33 @@ mod tests {
             std::os::unix::fs::symlink(tmp.path().join("outside"), other.join(".git/HEAD")).expect("symlink");
             assert_eq!(head_commit(&other), None, "a symlinked HEAD");
         }
+    }
+
+    #[test]
+    fn log_records_parse_with_empty_and_odd_subjects() {
+        let sha_b = "b".repeat(40);
+        let out = format!("{SHA_A}\x001700000000\x00first line\x00{sha_b}\x001700000100\x00\x00");
+        let r = parse_log_records(out.as_bytes());
+        assert_eq!(r.len(), 2, "{r:?}");
+        assert_eq!((r[0].sha.as_str(), r[0].time, r[0].subject.as_str()), (SHA_A, 1_700_000_000, "first line"));
+        assert_eq!((r[1].sha.as_str(), r[1].time, r[1].subject.as_str()), (sha_b.as_str(), 1_700_000_100, ""));
+        // No trailing terminator parses the same.
+        let bare = &out[..out.len() - 1];
+        assert_eq!(parse_log_records(bare.as_bytes()), r);
+        // A subject holding tabs and a would-be separator stays one field.
+        let odd = format!("{SHA_A}\x001\x00fix: a\tb \x1e c\x00");
+        assert_eq!(parse_log_records(odd.as_bytes())[0].subject, "fix: a\tb \x1e c");
+        // A malformed record is dropped, never guessed.
+        assert!(parse_log_records(b"nothex\x00x\x00s\x00").is_empty());
+        assert!(parse_log_records(format!("{SHA_A}\x00soon\x00s\x00").as_bytes()).is_empty());
+        assert!(parse_log_records(b"").is_empty());
+    }
+
+    #[test]
+    fn renames_between_refuses_an_option() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        assert!(renames_between(tmp.path(), "--output=x", "HEAD").is_empty());
+        assert!(renames_between(tmp.path(), "HEAD", "-p").is_empty());
     }
 
     #[test]
