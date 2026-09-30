@@ -7,8 +7,10 @@
 //! SCIP is a FACT input, like history: it runs with or without `--no-overlay`.
 //! A repo with no snapshot directory is a no-op that prints nothing (the build
 //! stays byte-identical); an incomplete snapshot is `read_scip`'s
-//! `[scip] snapshot incomplete` line and a no-op. The stage adds edges only,
-//! never a node or a node cell, and runs in the single-threaded `Post` stage.
+//! `[scip] snapshot incomplete` line and a no-op. The stage adds edges and
+//! re-stamps the EVIDENCE cell and confidence of edges glia bound weakly
+//! (CE.1e); it never adds a node or a node cell, never removes an edge, and
+//! runs in the single-threaded `Post` stage.
 //!
 //! - STALE. A document whose file (`<root>/<path>`) is unreadable, or no longer
 //!   hashes (`code_domain::snapshots::source_hash`) to the bytes the import
@@ -38,37 +40,83 @@
 //!   keeping the smallest `(file, line)`: documents come in path order and
 //!   rows in line order (`read_scip` rejects any other), so the first seen
 //!   wins.
-//! - EXISTING. A candidate whose `(owner, T, category)` edge glia already has
-//!   (any repo graph edge or cross edge) is `confirmed`; one whose `(owner, T)`
-//!   pair glia already joins by another category (DEFINES and INHERITS_FROM
-//!   included) is `category_differs`: glia's own classification stands and
-//!   nothing is added. Otherwise the stage pushes one cross edge, Strong, with
-//!   ONE EVIDENCE cell: emitter `scip:<tool>` ([`tool_tag`]), the rule, the
-//!   reference's repo-relative file and 0-based line, basis `site`. The
-//!   Finalize fill leaves a located evidence alone and the cross-edge sort
-//!   orders the edges.
+//! - HERITAGE (CE.1e). Per symbol `A` bound to node `a` and per id `B` of its
+//!   `implements` (the index's `is_implementation` relationships) bound to a
+//!   node `b != a`, one `(a, b)` relationship: IMPLEMENTS when both are
+//!   FUNCTION / METHOD (a method implementing an interface method), or `b` is
+//!   an INTERFACE and `a` a CLASS / STRUCT / ENUM; INHERITS_FROM for any other
+//!   pair of type kinds (an interface extending an interface included, glia's
+//!   own LD.7a shape). Any other pair of kinds (an attribute implementing an
+//!   interface property, say) is counted `other_kinds` and adds nothing.
+//!   Relationships dedup on `(a, b, category)`, located at `A`'s first
+//!   definition row.
+//! - EXISTING. Relationships go first, then reference candidates, each
+//!   against every repo graph edge and cross edge between its two nodes. A
+//!   triple glia already has goes through CONFIRM (a reference candidate
+//!   also counts `confirmed`). Otherwise, a reference candidate whose
+//!   `(owner, T)` pair glia already joins by any other category (DEFINES and
+//!   INHERITS_FROM included, and a heritage edge a relationship just added)
+//!   and a relationship whose pair glia joins by the OTHER heritage category
+//!   count `category_differs`: glia's own classification stands and nothing is
+//!   added. Otherwise the stage pushes one cross edge, Strong, with ONE
+//!   EVIDENCE cell: emitter `scip:<tool>` ([`tool_tag`]), the rule
+//!   ([`RULE_IMPLEMENTATION`] for a relationship), the repo-relative file and
+//!   0-based line, basis `site`. The Finalize fill leaves a located evidence
+//!   alone and the cross-edge sort orders the edges.
+//! - CONFIRM (CE.1e). Each glia edge on a confirmed triple, by its EVIDENCE:
+//!   none, or an emitter stage outside [`RESTAMP_STAGES`] (resolver, pass,
+//!   docs, overlay, history, scip), is `confirmed_other` and untouched: a
+//!   layout merge drops and recomputes resolver / pass edges by emitter, so a
+//!   re-stamped one would come back twice. Otherwise the evidence is settled
+//!   as the Finalize fill will leave it (a file-less one placed from its
+//!   endpoints, [`settle`]) and tiered by `why::tier_of`: `fact` is
+//!   `confirmed_fact` and untouched; `heuristic` or `derived` (a name-only
+//!   rule, an inferred below-Strong `graph` binding, no location) is
+//!   `upgraded`: its ONE EVIDENCE cell is replaced (`evidence::attach`) by
+//!   emitter `scip:<tool>`, rule `confirms:<old emitter>[/<old rule>]`, at the
+//!   edge's own site when the index binds its target there, else at the
+//!   triple's, basis `site`, and its confidence becomes Strong. Every glia
+//!   edge on one triple is judged alone. Re-stamps are collected with their
+//!   [`EdgePos`], sorted, and applied after every lookup.
+//! - CONTRADICT (CE.1e). A glia edge of the repo (its graphs' edges, and the
+//!   cross edges leaving a repo node) that is not re-stamped, is CALLS / USES /
+//!   INHERITS_FROM / IMPLEMENTS, tiers `heuristic`, has a settled site
+//!   `(file, line)` in a fresh document, and whose `to` the index binds to some
+//!   symbol, is `contradicted` when the index binds, at that exact row,
+//!   another node and not `to` ([`site_targets`]: call references for CALLS,
+//!   references for USES, what `from`'s definition there implements for
+//!   heritage). Counted and printed, never removed or changed.
 //!
 //! Determinism: every output-bearing iteration is over the snapshot's sorted
-//! rows, BTreeMaps or sorted Vecs; the existing-edge HashMap is lookup-only.
+//! rows, BTreeMaps or sorted Vecs; the existing-edge HashMap is lookup-only,
+//! re-stamps apply in [`EdgePos`] order and contradiction lines sort by
+//! `(file, line)` then text.
 //!
-//! Marker, once per repo with a complete snapshot (the fired_on line):
+//! Markers, once per repo with a complete snapshot, in this order (the first
+//! two are the fired_on lines):
 //!   `[scip] ingest repo=<label> tool=<tool> documents=<d> stale=<s> defs=<n> bound=<b> unbound=<u> ambiguous=<a> refs=<r> imports=<i> unowned=<o> added=<e> (calls=<c> uses=<x>) confirmed=<f> category_differs=<k> self_refs=<z>`
 //! where `defs` / `unbound` count definition rows of fresh documents, `bound`
 //! / `ambiguous` count symbols, `refs` counts the reference rows of fresh
 //! documents whose symbol is bound (`imports`, `unowned` and `self_refs`
-//! among them) and `added` / `confirmed` / `category_differs` count distinct
-//! `(owner, T, category)` candidates.
+//! among them), `added` / `confirmed` count distinct `(owner, T, category)`
+//! candidates and `category_differs` those candidates plus relationships;
+//!   `[scip] confirm repo=<label> upgraded=<u> confirmed_fact=<f> confirmed_other=<o> relationships=<r> added_implements=<i> added_inherits=<h> contradicted=<c> other_kinds=<k>`
+//! where `upgraded` / `confirmed_fact` / `confirmed_other` / `contradicted`
+//! count glia edges and `relationships` / `added_*` / `other_kinds` distinct
+//! relationship pairs; then at most [`MAX_CONTRADICTION_LINES`] of
+//!   `[scip] contradicts <from qname> -[<CAT> <emitter>[/<rule>]]-> <to qname> at <file>:<line+1>; index says <qname>`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use glia_code_domain::evidence::Evidence;
-use glia_code_domain::snapshots::{ScipDocumentRecord, read_scip, source_hash};
+use glia_code_domain::evidence::{self, Basis, Evidence, Location};
+use glia_code_domain::snapshots::{ScipDocumentRecord, ScipSymbolRecord, read_scip, source_hash};
 use glia_code_domain::{edge_category, node_kind};
 use glia_core::{Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 use glia_graph::MergedGraph;
 
 use super::RepoInputs;
 use super::history::{module_files, position};
+use crate::why;
 
 /// The EVIDENCE stage of every edge this module adds: emitter `scip:<tool>`.
 pub(crate) const STAGE: &str = "scip";
@@ -81,6 +129,23 @@ pub(crate) const RULE_CALLABLE_REF: &str = "callable_ref";
 pub(crate) const RULE_REFERENCE: &str = "reference";
 /// ... that the index marks a write access.
 pub(crate) const RULE_REFERENCE_WRITE: &str = "reference_write";
+/// A heritage edge added from the index's `is_implementation` relationship.
+pub(crate) const RULE_IMPLEMENTATION: &str = "implementation";
+/// The rule prefix of a glia edge the index confirmed:
+/// `confirms:<old emitter>[/<old rule>]` (`why::tier_of` reads it back).
+pub(crate) const RULE_CONFIRMS: &str = "confirms:";
+
+/// The emitter stages whose edges a confirmation may re-stamp: the ones a
+/// layout merge keeps once (`merge::is_recomputed` drops `resolver:` /
+/// `pass:` edges and recomputes them by emitter).
+const RESTAMP_STAGES: [&str; 3] = ["parser", "extractor", "graph"];
+
+/// The categories a contradiction is looked for on.
+const CONTRADICT_CATEGORIES: [EdgeCategoryId; 4] =
+    [edge_category::CALLS, edge_category::USES, edge_category::INHERITS_FROM, edge_category::IMPLEMENTS];
+
+/// Most `[scip] contradicts` lines one repo prints; the marker counts all.
+const MAX_CONTRADICTION_LINES: usize = 20;
 
 /// The node kinds a definition row may bind.
 const DEF_KINDS: [NodeKindId; 8] = [
@@ -119,6 +184,14 @@ pub(super) struct ScipTally {
     pub(super) uses: usize,
     pub(super) confirmed: usize,
     pub(super) category_differs: usize,
+    pub(super) upgraded: usize,
+    pub(super) confirmed_fact: usize,
+    pub(super) confirmed_other: usize,
+    pub(super) relationships: usize,
+    pub(super) other_kinds: usize,
+    pub(super) added_implements: usize,
+    pub(super) added_inherits: usize,
+    pub(super) contradicted: usize,
 }
 
 /// One located node: its POSITION rows (0-based, inclusive), id and kind.
@@ -240,7 +313,8 @@ struct Fresh<'a> {
     lines: usize,
 }
 
-/// One edge the snapshot asserts, before the existing-edge check.
+/// One edge the snapshot asserts (a reference candidate or a heritage
+/// relationship), before the existing-edge check.
 struct Candidate<'a> {
     from: NodeId,
     to: NodeId,
@@ -250,30 +324,41 @@ struct Candidate<'a> {
     line: u32,
 }
 
+/// A bound symbol: its node and kind, and its first definition row (the
+/// documents in path order, rows in line order).
+#[derive(Debug, Clone, Copy)]
+struct Bound<'a> {
+    id: NodeId,
+    kind: NodeKindId,
+    file: &'a str,
+    line: u32,
+}
+
 /// Bind every definition row of `fresh` (module doc: BIND). Symbol id ->
-/// its node and kind.
-fn bind_defs(fresh: &[Fresh<'_>], index: &SpanIndex, tally: &mut ScipTally) -> BTreeMap<u32, (NodeId, NodeKindId)> {
+/// its node, kind and first definition row.
+fn bind_defs<'a>(fresh: &[Fresh<'a>], index: &SpanIndex, tally: &mut ScipTally) -> BTreeMap<u32, Bound<'a>> {
     // Symbol -> the distinct nodes its rows bind, in first-seen order.
-    let mut seen: BTreeMap<u32, Vec<Span>> = BTreeMap::new();
+    let mut seen: BTreeMap<u32, Vec<Bound<'a>>> = BTreeMap::new();
     for f in fresh {
-        for row in &f.doc.defs {
+        let doc: &'a ScipDocumentRecord = f.doc;
+        for row in &doc.defs {
             tally.defs += 1;
-            match index.def_at(&f.doc.path, &row.name, row.line) {
+            match index.def_at(&doc.path, &row.name, row.line) {
                 None => tally.unbound += 1,
                 Some(span) => {
                     let nodes = seen.entry(row.s).or_default();
                     if !nodes.iter().any(|n| n.id == span.id) {
-                        nodes.push(span);
+                        nodes.push(Bound { id: span.id, kind: span.kind, file: doc.path.as_str(), line: row.line });
                     }
                 }
             }
         }
     }
-    let mut bound: BTreeMap<u32, (NodeId, NodeKindId)> = BTreeMap::new();
+    let mut bound: BTreeMap<u32, Bound<'a>> = BTreeMap::new();
     for (symbol, nodes) in seen {
         match nodes.as_slice() {
             [one] => {
-                bound.insert(symbol, (one.id, one.kind));
+                bound.insert(symbol, *one);
             }
             _ => tally.ambiguous += 1,
         }
@@ -282,12 +367,358 @@ fn bind_defs(fresh: &[Fresh<'_>], index: &SpanIndex, tally: &mut ScipTally) -> B
     bound
 }
 
+/// The heritage category of `a` implementing or extending `b` (module doc:
+/// HERITAGE); `None` for a pair of kinds that is no heritage shape.
+fn heritage_category(a: NodeKindId, b: NodeKindId) -> Option<EdgeCategoryId> {
+    let callable = |k: NodeKindId| CALLABLE_KINDS.contains(&k);
+    let is_type = |k: NodeKindId| TYPE_KINDS.contains(&k);
+    if callable(a) && callable(b) {
+        Some(edge_category::IMPLEMENTS)
+    } else if is_type(a) && is_type(b) {
+        Some(if b == node_kind::INTERFACE && a != node_kind::INTERFACE {
+            edge_category::IMPLEMENTS
+        } else {
+            edge_category::INHERITS_FROM
+        })
+    } else {
+        None
+    }
+}
+
+fn is_heritage(c: EdgeCategoryId) -> bool {
+    c == edge_category::IMPLEMENTS || c == edge_category::INHERITS_FROM
+}
+
+/// Every `is_implementation` relationship between two bound symbols, as
+/// deduped candidates keyed `(a, b, category)` (module doc: HERITAGE).
+fn relationships<'a>(
+    symbols: &[ScipSymbolRecord],
+    bound: &BTreeMap<u32, Bound<'a>>,
+    tally: &mut ScipTally,
+) -> BTreeMap<(u64, u64, u32), Candidate<'a>> {
+    let mut out: BTreeMap<(u64, u64, u32), Candidate<'a>> = BTreeMap::new();
+    let mut other: BTreeSet<(u64, u64)> = BTreeSet::new();
+    for sym in symbols {
+        let Some(a) = bound.get(&sym.id) else { continue };
+        for b in sym.implements.iter().filter_map(|id| bound.get(id)) {
+            if a.id == b.id {
+                continue;
+            }
+            let Some(category) = heritage_category(a.kind, b.kind) else {
+                other.insert((a.id.0, b.id.0));
+                continue;
+            };
+            let at = (a.file, a.line);
+            out.entry((a.id.0, b.id.0, category.0))
+                .and_modify(|c| {
+                    if at < (c.file, c.line) {
+                        (c.file, c.line) = at;
+                    }
+                })
+                .or_insert(Candidate {
+                    from: a.id,
+                    to: b.id,
+                    category,
+                    rule: RULE_IMPLEMENTATION,
+                    file: a.file,
+                    line: a.line,
+                });
+        }
+    }
+    tally.relationships = out.len();
+    tally.other_kinds = other.len();
+    out
+}
+
+/// What the index binds at one row of a fresh document: a reference's target
+/// (`call` when a call paren follows), or a symbol the row's definition
+/// implements (`heritage`, `from` its definer).
+#[derive(Debug, Clone, Copy)]
+struct SiteRow {
+    node: NodeId,
+    from: Option<NodeId>,
+    call: bool,
+    heritage: bool,
+}
+
+/// file -> 0-based line -> the rows there.
+type SiteRows<'a> = BTreeMap<&'a str, BTreeMap<u32, Vec<SiteRow>>>;
+
+/// Every non-import reference to a bound symbol, and every bound symbol a
+/// bound definition implements, by `(file, line)`.
+fn site_rows<'a>(fresh: &[Fresh<'a>], symbols: &[ScipSymbolRecord], bound: &BTreeMap<u32, Bound<'a>>) -> SiteRows<'a> {
+    let mut out: SiteRows<'a> = BTreeMap::new();
+    for f in fresh {
+        let doc: &'a ScipDocumentRecord = f.doc;
+        let lines = out.entry(doc.path.as_str()).or_default();
+        for row in doc.refs.iter().filter(|r| !r.import) {
+            if let Some(b) = bound.get(&row.s) {
+                lines.entry(row.line).or_default().push(SiteRow {
+                    node: b.id,
+                    from: None,
+                    call: row.call,
+                    heritage: false,
+                });
+            }
+        }
+        for row in &doc.defs {
+            let (Some(a), Some(sym)) = (bound.get(&row.s), symbols.get(row.s as usize)) else { continue };
+            for b in sym.implements.iter().filter_map(|id| bound.get(id)) {
+                lines.entry(row.line).or_default().push(SiteRow {
+                    node: b.id,
+                    from: Some(a.id),
+                    call: false,
+                    heritage: true,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// The rows at `(file, line)`; empty for a stale or unknown document.
+fn rows_at<'s>(sites: &'s SiteRows<'_>, file: &str, line: u32) -> &'s [SiteRow] {
+    sites.get(file).and_then(|lines| lines.get(&line)).map_or(&[], Vec::as_slice)
+}
+
+/// The nodes `rows` bind for an edge `from -[category]->`: call references
+/// for CALLS, every reference for USES, what `from`'s definition there
+/// implements for IMPLEMENTS / INHERITS_FROM.
+fn site_targets(rows: &[SiteRow], from: NodeId, category: EdgeCategoryId) -> impl Iterator<Item = NodeId> + '_ {
+    let heritage = is_heritage(category);
+    rows.iter()
+        .filter(move |r| {
+            if heritage {
+                r.heritage && r.from == Some(from)
+            } else {
+                !r.heritage && (r.call || category != edge_category::CALLS)
+            }
+        })
+        .map(|r| r.node)
+}
+
+/// Where a glia edge sits: lookup and mutation only, never output order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum EdgePos {
+    /// `merged.graphs[graph].edges[edge]`.
+    Intra { graph: usize, edge: usize },
+    /// `merged.cross_edges[i]`.
+    Cross(usize),
+    /// An edge this stage pushed: it joins its pair for the later
+    /// category checks and is never re-stamped.
+    Added,
+}
+
+fn edge_at(merged: &MergedGraph, pos: EdgePos) -> Option<&Edge> {
+    match pos {
+        EdgePos::Intra { graph, edge } => merged.graphs.get(graph)?.edges.get(edge),
+        EdgePos::Cross(i) => merged.cross_edges.get(i),
+        EdgePos::Added => None,
+    }
+}
+
+fn edge_at_mut(merged: &mut MergedGraph, pos: EdgePos) -> Option<&mut Edge> {
+    match pos {
+        EdgePos::Intra { graph, edge } => merged.graphs.get_mut(graph)?.edges.get_mut(edge),
+        EdgePos::Cross(i) => merged.cross_edges.get_mut(i),
+        EdgePos::Added => None,
+    }
+}
+
+/// Node -> its location and kind, first graph first: the Finalize fill's view
+/// of an endpoint (`passes::fill_evidence_sites`).
+type NodeAt = HashMap<NodeId, (Option<Location>, Option<NodeKindId>)>;
+
+fn node_at(merged: &MergedGraph) -> NodeAt {
+    let mut at = NodeAt::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            at.entry(n.id).or_insert_with(|| (evidence::locate(&n.cells), g.nav.kind_by_id.get(&n.id).copied()));
+        }
+    }
+    at
+}
+
+/// `ev` as the Finalize fill will leave it on `e`: a file-less evidence placed
+/// from the endpoints' locations (`Evidence::fill`), so a stage that runs
+/// before the fill tiers an edge as `why` will. The fill's LB.9b fallback
+/// (an unlocated non-code MODULE's file) is not replayed: it applies only when
+/// neither endpoint is located, and a triple's target is always a located,
+/// bound node.
+fn settle(ev: &Evidence, e: &Edge, at: &NodeAt) -> Evidence {
+    let mut ev = ev.clone();
+    if ev.file.is_none() {
+        let from = at.get(&e.from);
+        let to = at.get(&e.to);
+        ev.fill(e.category, to.and_then(|t| t.1), from.and_then(|f| f.0.as_ref()), to.and_then(|t| t.0.as_ref()));
+    }
+    ev
+}
+
+/// What one asserted triple met among glia's edges.
+enum Outcome {
+    /// Glia has the triple: every edge on it went through CONFIRM.
+    Confirmed,
+    /// Glia joins the pair by a blocking category: nothing added.
+    Differs,
+    /// Pushed as a new cross edge.
+    Added,
+}
+
+/// The existing-edge check and the confirm rule (module doc: EXISTING,
+/// CONFIRM). Reads the graph only; the re-stamps and new edges it collects are
+/// applied by [`scip_edges`] after every lookup.
+struct Confirm<'c, 'a> {
+    merged: &'c MergedGraph,
+    emitter: &'c str,
+    at: &'c NodeAt,
+    sites: &'c SiteRows<'a>,
+    /// Pair -> glia's edges between the two, in graph-then-cross scan order.
+    existing: HashMap<(NodeId, NodeId), Vec<(EdgeCategoryId, EdgePos)>>,
+    restamp: Vec<(EdgePos, Evidence)>,
+    added: Vec<Edge>,
+}
+
+impl Confirm<'_, '_> {
+    /// Confirm `c` when glia has its triple; else add it unless glia joins the
+    /// pair by a category `blocks` accepts.
+    fn confirm_or_add(&mut self, c: &Candidate<'_>, blocks: fn(EdgeCategoryId) -> bool, tally: &mut ScipTally) -> Outcome {
+        let (same, blocked) = {
+            let entries = self.existing.get(&(c.from, c.to)).map_or(&[][..], Vec::as_slice);
+            let same: Option<Vec<EdgePos>> = entries.iter().any(|(k, _)| *k == c.category).then(|| {
+                entries.iter().filter(|(k, p)| *k == c.category && *p != EdgePos::Added).map(|(_, p)| *p).collect()
+            });
+            (same, entries.iter().any(|(k, _)| blocks(*k)))
+        };
+        if let Some(positions) = same {
+            for pos in positions {
+                self.confirm(pos, c, tally);
+            }
+            return Outcome::Confirmed;
+        }
+        if blocked {
+            return Outcome::Differs;
+        }
+        let ev = Evidence::emitter(self.emitter).rule(c.rule).at(c.file, c.line);
+        self.added.push(Edge::new(c.from, c.to, c.category, Confidence::Strong).with_cell(ev.to_cell()));
+        self.existing.entry((c.from, c.to)).or_default().push((c.category, EdgePos::Added));
+        Outcome::Added
+    }
+
+    /// The confirm rule on the glia edge at `pos`, which carries `c`'s triple.
+    fn confirm(&mut self, pos: EdgePos, c: &Candidate<'_>, tally: &mut ScipTally) {
+        let Some(e) = edge_at(self.merged, pos) else { return };
+        let Some(old) = Evidence::of(e) else {
+            tally.confirmed_other += 1;
+            return;
+        };
+        let stage = old.emitter.split(':').next().unwrap_or("");
+        if !RESTAMP_STAGES.contains(&stage) {
+            tally.confirmed_other += 1;
+            return;
+        }
+        let settled = settle(&old, e, self.at);
+        if why::tier_of(Some(&settled), e).0 == why::FACT {
+            tally.confirmed_fact += 1;
+            return;
+        }
+        // The edge's own site when the index binds its target there (two
+        // call sites stay two sites), else the triple's.
+        let own = match (&settled.file, settled.line, settled.basis) {
+            (Some(file), Some(line), Basis::Site)
+                if site_targets(rows_at(self.sites, file, line), e.from, e.category).any(|n| n == e.to) =>
+            {
+                Some((file.clone(), line))
+            }
+            _ => None,
+        };
+        let (file, line) = own.unwrap_or_else(|| (c.file.to_string(), c.line));
+        let rule = match &old.rule {
+            Some(r) => format!("{RULE_CONFIRMS}{}/{r}", old.emitter),
+            None => format!("{RULE_CONFIRMS}{}", old.emitter),
+        };
+        self.restamp.push((pos, Evidence::emitter(self.emitter).rule(rule).at(file, line)));
+        tally.upgraded += 1;
+    }
+}
+
+/// The qname of `id` in the first graph that names it.
+fn qname_of(merged: &MergedGraph, id: NodeId) -> String {
+    merged
+        .graphs
+        .iter()
+        .find_map(|g| g.nav.qname_by_id.get(&id))
+        .cloned()
+        .unwrap_or_else(|| format!("#{}", id.0))
+}
+
+/// The `[scip] contradicts` lines of the repo's heuristic edges the index
+/// binds elsewhere (module doc: CONTRADICT), sorted by `(file, line)` then
+/// text. `restamped` edges are confirmed, never contradicted.
+fn contradictions(
+    merged: &MergedGraph,
+    repo: RepoId,
+    at: &NodeAt,
+    sites: &SiteRows<'_>,
+    known: &HashSet<NodeId>,
+    restamped: &HashSet<EdgePos>,
+) -> Vec<(String, u32, String)> {
+    let repo_nodes: HashSet<NodeId> = merged
+        .graphs
+        .iter()
+        .filter(|g| g.repo == repo)
+        .flat_map(|g| g.nav.kind_by_id.keys().copied())
+        .collect();
+    let intra = merged
+        .graphs
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| g.repo == repo)
+        .flat_map(|(gi, g)| g.edges.iter().enumerate().map(move |(ei, e)| (EdgePos::Intra { graph: gi, edge: ei }, e)));
+    let cross = merged
+        .cross_edges
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| repo_nodes.contains(&e.from))
+        .map(|(i, e)| (EdgePos::Cross(i), e));
+    let mut out: Vec<(String, u32, String)> = Vec::new();
+    for (pos, e) in intra.chain(cross) {
+        if !CONTRADICT_CATEGORIES.contains(&e.category) || !known.contains(&e.to) || restamped.contains(&pos) {
+            continue;
+        }
+        let Some(ev) = Evidence::of(e) else { continue };
+        let ev = settle(&ev, e, at);
+        if why::tier_of(Some(&ev), e).0 != why::HEURISTIC {
+            continue;
+        }
+        let (Some(file), Some(line), Basis::Site) = (&ev.file, ev.line, ev.basis) else { continue };
+        let targets: Vec<NodeId> = site_targets(rows_at(sites, file, line), e.from, e.category).collect();
+        let Some(&says) = targets.first() else { continue };
+        if targets.contains(&e.to) {
+            continue;
+        }
+        let rule = ev.rule.as_deref().map(|r| format!("/{r}")).unwrap_or_default();
+        let text = format!(
+            "[scip] contradicts {} -[{} {}{rule}]-> {} at {file}:{}; index says {}",
+            qname_of(merged, e.from),
+            edge_category::name(e.category),
+            ev.emitter,
+            qname_of(merged, e.to),
+            u64::from(line) + 1,
+            qname_of(merged, says),
+        );
+        out.push((file.clone(), line, text));
+    }
+    out.sort();
+    out
+}
+
 /// Every reference row of `fresh` to a bound symbol, as deduped candidates
 /// keyed `(owner, T, category)` (module doc: OWNER, EDGES).
 fn ref_candidates<'a>(
     fresh: &[Fresh<'a>],
     index: &SpanIndex,
-    bound: &BTreeMap<u32, (NodeId, NodeKindId)>,
+    bound: &BTreeMap<u32, Bound<'_>>,
     tally: &mut ScipTally,
 ) -> BTreeMap<(u64, u64, u32), Candidate<'a>> {
     let mut out: BTreeMap<(u64, u64, u32), Candidate<'a>> = BTreeMap::new();
@@ -297,7 +728,7 @@ fn ref_candidates<'a>(
         // Built on the document's first owned reference.
         let mut table: Option<Vec<Option<NodeId>>> = None;
         for row in &f.doc.refs {
-            let Some(&(target, target_kind)) = bound.get(&row.s) else { continue };
+            let Some(&Bound { id: target, kind: target_kind, .. }) = bound.get(&row.s) else { continue };
             tally.refs += 1;
             if row.import {
                 tally.imports += 1;
@@ -361,41 +792,72 @@ pub(super) fn scip_edges(merged: &mut MergedGraph, input: &RepoInputs) -> Option
     let index = SpanIndex::build(merged, input.repo);
     let bound = bind_defs(&fresh, &index, &mut tally);
     let candidates = ref_candidates(&fresh, &index, &bound, &mut tally);
+    let relations = relationships(&snap.symbols, &bound, &mut tally);
+    let sites = site_rows(&fresh, &snap.symbols, &bound);
 
-    // The categories glia already joins each candidate pair by: one pass over
-    // the repo's edges and every cross edge, lookup-only.
-    let mut existing: HashMap<(NodeId, NodeId), Vec<EdgeCategoryId>> =
-        candidates.values().map(|c| ((c.from, c.to), Vec::new())).collect();
+    // Glia's edges between each asserted pair: one pass over the repo's
+    // edges and every cross edge, lookup-only.
+    let mut existing: HashMap<(NodeId, NodeId), Vec<(EdgeCategoryId, EdgePos)>> =
+        candidates.values().chain(relations.values()).map(|c| ((c.from, c.to), Vec::new())).collect();
     if !existing.is_empty() {
-        let repo_edges = merged.graphs.iter().filter(|g| g.repo == input.repo).flat_map(|g| g.edges.iter());
-        for e in repo_edges.chain(merged.cross_edges.iter()) {
-            if let Some(categories) = existing.get_mut(&(e.from, e.to)) {
-                categories.push(e.category);
+        for (gi, g) in merged.graphs.iter().enumerate().filter(|(_, g)| g.repo == input.repo) {
+            for (ei, e) in g.edges.iter().enumerate() {
+                if let Some(v) = existing.get_mut(&(e.from, e.to)) {
+                    v.push((e.category, EdgePos::Intra { graph: gi, edge: ei }));
+                }
+            }
+        }
+        for (i, e) in merged.cross_edges.iter().enumerate() {
+            if let Some(v) = existing.get_mut(&(e.from, e.to)) {
+                v.push((e.category, EdgePos::Cross(i)));
             }
         }
     }
 
     let emitter = format!("{STAGE}:{tool}");
-    let mut added: Vec<Edge> = Vec::new();
-    for c in candidates.values() {
-        let categories = existing.get(&(c.from, c.to)).map_or(&[][..], Vec::as_slice);
-        if categories.contains(&c.category) {
-            tally.confirmed += 1;
-            continue;
-        }
-        if !categories.is_empty() {
-            tally.category_differs += 1;
-            continue;
-        }
-        let evidence = Evidence::emitter(emitter.as_str()).rule(c.rule).at(c.file, c.line);
-        added.push(Edge::new(c.from, c.to, c.category, Confidence::Strong).with_cell(evidence.to_cell()));
-        if c.category == edge_category::CALLS {
-            tally.calls += 1;
-        } else {
-            tally.uses += 1;
+    let at = node_at(merged);
+    let mut stage = Confirm {
+        merged: &*merged,
+        emitter: emitter.as_str(),
+        at: &at,
+        sites: &sites,
+        existing,
+        restamp: Vec::new(),
+        added: Vec::new(),
+    };
+    // Heritage first, so the class-header reference a relationship explains
+    // meets its heritage edge and adds no USES beside it.
+    for r in relations.values() {
+        match stage.confirm_or_add(r, is_heritage, &mut tally) {
+            Outcome::Confirmed => {}
+            Outcome::Differs => tally.category_differs += 1,
+            Outcome::Added if r.category == edge_category::IMPLEMENTS => tally.added_implements += 1,
+            Outcome::Added => tally.added_inherits += 1,
         }
     }
-    tally.added = added.len();
+    for c in candidates.values() {
+        match stage.confirm_or_add(c, |_| true, &mut tally) {
+            Outcome::Confirmed => tally.confirmed += 1,
+            Outcome::Differs => tally.category_differs += 1,
+            Outcome::Added if c.category == edge_category::CALLS => tally.calls += 1,
+            Outcome::Added => tally.uses += 1,
+        }
+    }
+    let Confirm { mut restamp, added, .. } = stage;
+    tally.added = tally.calls + tally.uses;
+
+    let restamped: HashSet<EdgePos> = restamp.iter().map(|(p, _)| *p).collect();
+    let known: HashSet<NodeId> = bound.values().map(|b| b.id).collect();
+    let contradicts = contradictions(merged, input.repo, &at, &sites, &known, &restamped);
+    tally.contradicted = contradicts.len();
+
+    restamp.sort_by_key(|(p, _)| *p);
+    for (pos, ev) in restamp {
+        if let Some(e) = edge_at_mut(merged, pos) {
+            evidence::attach(e, ev);
+            e.confidence = Confidence::Strong;
+        }
+    }
     merged.cross_edges.extend(added);
 
     eprintln!(
@@ -418,6 +880,21 @@ pub(super) fn scip_edges(merged: &mut MergedGraph, input: &RepoInputs) -> Option
         tally.category_differs,
         tally.self_refs,
     );
+    eprintln!(
+        "[scip] confirm repo={} upgraded={} confirmed_fact={} confirmed_other={} relationships={} added_implements={} added_inherits={} contradicted={} other_kinds={}",
+        input.label,
+        tally.upgraded,
+        tally.confirmed_fact,
+        tally.confirmed_other,
+        tally.relationships,
+        tally.added_implements,
+        tally.added_inherits,
+        tally.contradicted,
+        tally.other_kinds,
+    );
+    for (_, _, line) in contradicts.iter().take(MAX_CONTRADICTION_LINES) {
+        eprintln!("{line}");
+    }
     Some(tally)
 }
 
@@ -513,9 +990,11 @@ mod tests {
 
     const A_PY: &str = "def run():\n    helper()\n    return helper\n\ndef helper():\n    run()\n";
 
-    #[test]
-    fn existing_category_stands_and_the_rest_is_added() {
-        let dir = std::env::temp_dir().join(format!("glia_scip_stage_{}", std::process::id()));
+    /// A snapshot of `A_PY` in a fresh temp dir named after `tag`: `run`
+    /// (row 0) and `helper` (row 4) defined, and `refs` of `(symbol, row,
+    /// call)` (symbol 0 is helper, 1 is run).
+    fn a_py_snapshot(tag: &str, refs: &[(u32, u32, bool)]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("glia_scip_{tag}_{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.py"), A_PY).unwrap();
@@ -523,20 +1002,24 @@ mod tests {
             ScipSymbolRecord { id: 0, symbol: "scip-python python app 0.1 `a`/helper().".into(), implements: vec![] },
             ScipSymbolRecord { id: 1, symbol: "scip-python python app 0.1 `a`/run().".into(), implements: vec![] },
         ];
-        let rref = |s, line, call| ScipRefRow { s, line, call, write: false, import: false };
         let documents = vec![ScipDocumentRecord {
             path: "a.py".into(),
             language: "python".into(),
             source_hash: source_hash(A_PY.as_bytes()),
             defs: vec![ScipDefRow { s: 1, line: 0, name: "run".into() }, ScipDefRow { s: 0, line: 4, name: "helper".into() }],
-            // run calls helper (row 1: glia has USES run -> helper, so the
-            // CALLS differs), references it (row 2: confirms that USES), and
-            // helper calls run (row 5: added).
-            refs: vec![rref(0, 1, true), rref(0, 2, false), rref(1, 5, true)],
+            refs: refs.iter().map(|&(s, line, call)| ScipRefRow { s, line, call, write: false, import: false }).collect(),
         }];
         let meta = ScipMeta::new("scip-python".into(), "0.6.0".into(), String::new(), 0);
         write_scip(&dir, meta, &documents, &symbols).unwrap();
+        dir
+    }
 
+    #[test]
+    fn existing_category_stands_and_the_rest_is_added() {
+        // run calls helper (row 1: glia has USES run -> helper, so the CALLS
+        // differs), references it (row 2: confirms that USES), and helper
+        // calls run (row 5: added).
+        let dir = a_py_snapshot("stage", &[(0, 1, true), (0, 2, false), (1, 5, true)]);
         let repo = RepoId::from_canonical("test://scip-stage");
         let mut merged = graph(repo);
         let input = RepoInputs { repo, root: dir.clone(), label: "stage".into(), config: None };
@@ -548,6 +1031,9 @@ mod tests {
             (2, 2, 3, 1, 1, 1, 1),
             "{tally:?}"
         );
+        // The confirmed USES carries no EVIDENCE cell: its emitter is unknown,
+        // so it is never re-stamped.
+        assert_eq!((tally.confirmed_other, tally.upgraded), (1, 0), "{tally:?}");
         assert_eq!(merged.cross_edges.len(), 1);
         let e = &merged.cross_edges[0];
         assert_eq!((e.from, e.to, e.category), (NodeId(3), NodeId(2), edge_category::CALLS));
@@ -555,5 +1041,74 @@ mod tests {
             Evidence::of(e),
             Some(Evidence::emitter("scip:scip-python").rule(RULE_CALL).at("a.py", 5))
         );
+    }
+
+    /// CE.1e: a resolver's CALLS the index confirms keeps its evidence and
+    /// confidence (a merge recomputes it by emitter; a `scip:` re-stamp would
+    /// come back twice). No resolver emits CALLS from real sources, so the
+    /// edge is built by hand.
+    #[test]
+    fn resolver_edges_are_never_restamped() {
+        let dir = a_py_snapshot("resolver", &[(1, 5, true)]);
+        let repo = RepoId::from_canonical("test://scip-resolver");
+        let mut merged = graph(repo);
+        let ev = Evidence::emitter("resolver:rpc").rule("exact");
+        merged
+            .cross_edges
+            .push(Edge::new(NodeId(3), NodeId(2), edge_category::CALLS, Confidence::Medium).with_cell(ev.to_cell()));
+        let before = merged.cross_edges.clone();
+        let input = RepoInputs { repo, root: dir.clone(), label: "resolver".into(), config: None };
+        let tally = scip_edges(&mut merged, &input).expect("a complete snapshot");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(merged.cross_edges, before, "a resolver edge was changed");
+        assert_eq!(
+            (tally.confirmed, tally.confirmed_other, tally.confirmed_fact, tally.upgraded, tally.added),
+            (1, 1, 0, 0, 0),
+            "{tally:?}"
+        );
+    }
+
+    /// CE.1e: a name-only graph edge is re-stamped at its own site, keeping
+    /// its first emitter and rule in the `confirms:` rule; a located fact is
+    /// untouched.
+    #[test]
+    fn name_only_edge_is_upgraded_and_fact_is_kept() {
+        let dir = a_py_snapshot("upgrade", &[(0, 1, true), (1, 5, true)]);
+        let repo = RepoId::from_canonical("test://scip-upgrade");
+        let mut merged = graph(repo);
+        let name_only = Evidence::emitter("graph:refs").rule("global_unique_method").at("a.py", 1);
+        let fact = Evidence::emitter("graph:calls").rule("import_binding").at("a.py", 5);
+        merged.graphs[0].edges = vec![
+            Edge::new(NodeId(2), NodeId(3), edge_category::CALLS, Confidence::Medium).with_cell(name_only.to_cell()),
+            Edge::new(NodeId(3), NodeId(2), edge_category::CALLS, Confidence::Strong).with_cell(fact.to_cell()),
+        ];
+        let input = RepoInputs { repo, root: dir.clone(), label: "upgrade".into(), config: None };
+        let tally = scip_edges(&mut merged, &input).expect("a complete snapshot");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!((tally.upgraded, tally.confirmed_fact, tally.added), (1, 1, 0), "{tally:?}");
+        let [up, kept] = merged.graphs[0].edges.as_slice() else { panic!("two edges") };
+        assert_eq!(up.confidence, Confidence::Strong);
+        assert_eq!(
+            Evidence::of(up),
+            Some(Evidence::emitter("scip:scip-python").rule("confirms:graph:refs/global_unique_method").at("a.py", 1))
+        );
+        assert_eq!(Evidence::of(kept), Some(fact));
+    }
+
+    #[test]
+    fn heritage_category_follows_the_kinds() {
+        use edge_category::{IMPLEMENTS, INHERITS_FROM};
+        use node_kind::{ATTRIBUTE, CLASS, ENUM, FUNCTION, INTERFACE, METHOD, STRUCT};
+        assert_eq!(heritage_category(CLASS, CLASS), Some(INHERITS_FROM));
+        assert_eq!(heritage_category(CLASS, INTERFACE), Some(IMPLEMENTS));
+        assert_eq!(heritage_category(STRUCT, INTERFACE), Some(IMPLEMENTS));
+        assert_eq!(heritage_category(ENUM, INTERFACE), Some(IMPLEMENTS));
+        assert_eq!(heritage_category(INTERFACE, INTERFACE), Some(INHERITS_FROM));
+        assert_eq!(heritage_category(METHOD, METHOD), Some(IMPLEMENTS));
+        assert_eq!(heritage_category(FUNCTION, METHOD), Some(IMPLEMENTS));
+        assert_eq!(heritage_category(ATTRIBUTE, ATTRIBUTE), None);
+        assert_eq!(heritage_category(CLASS, METHOD), None);
     }
 }

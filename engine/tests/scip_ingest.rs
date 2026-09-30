@@ -10,9 +10,16 @@
 //! fixture's committed snapshot to its sources; regenerate it with
 //! `cargo test -p glia-engine --test scip_ingest -- --ignored write_dict_dispatch_fixture`.
 //!
+//! CE.1e (the tests after `write_dict_dispatch_fixture`): a name-only glia
+//! edge the index confirms is re-stamped `scip:<tool>` / `confirms:<old>`, a
+//! located fact is left alone, an `is_implementation` relationship adds the
+//! heritage edge glia missed, and a heuristic edge the index binds elsewhere is
+//! counted, never changed. Their sources are the spec's `nameonly` /
+//! `heritage` probes, inline.
+//!
 //! The fired_on markers are read from a child process: `child_for_stderr`
 //! re-runs this binary on one tree with `--nocapture` and the parent reads its
-//! stderr (`grep '^\[scip\] ingest'`).
+//! stderr (`grep '^\[scip\] ingest'`, `grep '^\[scip\] confirm'`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -361,4 +368,278 @@ fn fixture_snapshot_is_current() {
 fn write_dict_dispatch_fixture() {
     let root = fixture_root();
     snapshot(&root, fixture_defs(), vec![call(USER, 5)]);
+}
+
+// ---- CE.1e: confirmation, heritage and contradictions ----
+
+/// `Admin` inherits `Base` through a star import: glia binds the base class by
+/// name alone (`graph:refs` `global_unique`, tier heuristic).
+const NAMEONLY: &[(&str, &str)] = &[
+    ("app/admin.py", "from app.star import *\n\n\nclass Admin(Base):\n    def go(self):\n        return 2\n"),
+    ("app/base.py", "class Base:\n    def run(self):\n        return 1\n"),
+    ("app/star.py", "from app.base import Base\n"),
+];
+
+/// `Admin`'s base is an attribute of a module object: glia binds no base at
+/// all, and two classes are named `Base`.
+const HERITAGE: &[(&str, &str)] = &[
+    (
+        "app/admin.py",
+        "import importlib\n\nbase_mod = importlib.import_module(\"app.base\")\n\n\nclass Admin(base_mod.Base):\n    def go(self):\n        return 2\n",
+    ),
+    ("app/base.py", "class Base:\n    def run(self):\n        return 1\n"),
+    ("app/other.py", "class Base:\n    def other(self):\n        return 3\n"),
+];
+
+/// A same-file call (`parser:python` `intra_file`) and an imported one
+/// (`graph:calls` `import_binding`): both located facts.
+const FACTS: &[(&str, &str)] = &[
+    ("app/m.py", "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n"),
+    ("app/n.py", "from app.m import helper\n\n\ndef go():\n    return helper()\n"),
+];
+
+const ADMIN: &str = "app::admin::Admin";
+const BASE: &str = "app::base::Base";
+
+/// A temp tree holding `files`.
+fn tree_of(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let d = tempfile::tempdir().expect("tempdir");
+    for (p, text) in files {
+        let path = d.path().join(p);
+        std::fs::create_dir_all(path.parent().expect("a file in a directory")).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    d
+}
+
+/// A scip-python symbol string of package `app`.
+fn sym(descriptor: &str) -> String {
+    format!("scip-python python app 0.1 {descriptor}")
+}
+
+/// Write a snapshot over `root`'s current sources. `symbols` are
+/// `(descriptor, implements)` in ascending descriptor order (the ids are
+/// their row numbers); `docs` are `(path, defs, refs)` in path order.
+fn snapshot_of(root: &Path, symbols: &[(&str, &[u32])], docs: Vec<(&str, Vec<ScipDefRow>, Vec<ScipRefRow>)>) {
+    let symbols: Vec<ScipSymbolRecord> = symbols
+        .iter()
+        .enumerate()
+        .map(|(id, (d, implements))| ScipSymbolRecord { id: id as u32, symbol: sym(d), implements: implements.to_vec() })
+        .collect();
+    let documents: Vec<ScipDocumentRecord> = docs
+        .into_iter()
+        .map(|(path, defs, refs)| ScipDocumentRecord {
+            path: path.to_string(),
+            language: "python".to_string(),
+            source_hash: source_hash(&std::fs::read(root.join(path)).expect("source")),
+            defs,
+            refs,
+        })
+        .collect();
+    write_scip(root, meta(), &documents, &symbols).expect("write snapshot");
+}
+
+fn import(s: u32, line: u32) -> ScipRefRow {
+    ScipRefRow { import: true, ..value(s, line) }
+}
+
+/// Every `[scip]` stderr line of one build of `root`, `repo=<label> ` cut.
+fn scip_lines(root: &Path) -> Vec<String> {
+    let label = root.to_string_lossy().to_string();
+    let head = format!("repo={label} ");
+    child_stderr(&["build", &label], "[scip]").into_iter().map(|l| l.replacen(&head, "", 1)).collect()
+}
+
+/// The one line of `lines` starting with `prefix`, the prefix cut.
+fn line_after<'a>(lines: &'a [String], prefix: &str) -> &'a str {
+    let hits: Vec<&String> = lines.iter().filter(|l| l.starts_with(prefix)).collect();
+    assert_eq!(hits.len(), 1, "{prefix}: {lines:?}");
+    &hits[0][prefix.len()..]
+}
+
+fn evidence_cells(e: &Edge) -> usize {
+    e.cells.iter().filter(|c| c.kind == glia_code_domain::cell_type::EVIDENCE).count()
+}
+
+/// The spec probe: a name-only INHERITS_FROM the index confirms becomes a
+/// located SCIP fact that still names its first emitter; it stays one edge
+/// with one EVIDENCE cell.
+#[test]
+fn name_only_inherits_is_confirmed() {
+    let d = tree_of(NAMEONLY);
+    let before = build(d.path());
+    let old = edges(&before, ADMIN, BASE, edge_category::INHERITS_FROM);
+    assert_eq!(old.len(), 1, "{old:?}");
+    let old_ev = Evidence::of(old[0]).expect("evidence");
+    assert_eq!((old_ev.emitter.as_str(), old_ev.rule.as_deref()), ("graph:refs", Some("global_unique")));
+
+    // Admin (id 0, row 3) implements Base (id 1, row 0); the base-class
+    // expression is a reference on Admin's row, and star.py imports Base.
+    snapshot_of(
+        d.path(),
+        &[("`app.admin`/Admin#", &[1]), ("`app.base`/Base#", &[])],
+        vec![
+            ("app/admin.py", vec![def(0, 3, "Admin")], vec![value(1, 3)]),
+            ("app/base.py", vec![def(1, 0, "Base")], vec![]),
+            ("app/star.py", vec![], vec![import(1, 0)]),
+        ],
+    );
+    let m = build(d.path());
+    let inherits = edges(&m, ADMIN, BASE, edge_category::INHERITS_FROM);
+    assert_eq!(inherits.len(), 1, "{inherits:?}");
+    let e = inherits[0];
+    assert_eq!(evidence_cells(e), 1);
+    assert_eq!(e.confidence, Confidence::Strong);
+    assert_eq!(
+        Evidence::of(e),
+        Some(Evidence {
+            emitter: "scip:scip-python".to_string(),
+            rule: Some("confirms:graph:refs/global_unique".to_string()),
+            file: Some("app/admin.py".to_string()),
+            line: Some(3),
+            basis: Basis::Site,
+        })
+    );
+    // The class-header reference is the heritage itself: no USES besides it.
+    assert!(edges(&m, ADMIN, BASE, edge_category::USES).is_empty());
+
+    let why = why_edge(&m, ADMIN, BASE, Some("INHERITS_FROM")).expect("why");
+    assert_eq!(why.edges.len(), 1);
+    let row = &why.edges[0];
+    assert_eq!(row.tier, "fact");
+    let note = row.note.as_deref().unwrap_or_default();
+    assert_eq!(
+        note,
+        "confirmed by a SCIP index (scip-python) at app/admin.py:4; first emitted by graph:refs (global_unique)"
+    );
+    assert!(note.contains("first emitted by graph:refs (global_unique)"), "{note}");
+
+    let lines = scip_lines(d.path());
+    assert_eq!(
+        line_after(&lines, "[scip] ingest "),
+        "tool=scip-python documents=3 stale=0 defs=2 bound=2 unbound=0 ambiguous=0 refs=2 imports=1 unowned=0 added=0 (calls=0 uses=0) confirmed=0 category_differs=1 self_refs=0"
+    );
+    assert_eq!(
+        line_after(&lines, "[scip] confirm "),
+        "upgraded=1 confirmed_fact=0 confirmed_other=0 relationships=1 added_implements=0 added_inherits=0 contradicted=0 other_kinds=0"
+    );
+}
+
+/// The index's relationship adds the base glia never bound, to the one of the
+/// two same-named classes it names, and the class-header reference adds no
+/// USES beside it.
+#[test]
+fn missing_heritage_is_added() {
+    let d = tree_of(HERITAGE);
+    let other = "app::other::Base";
+    assert!(edges(&build(d.path()), ADMIN, BASE, edge_category::INHERITS_FROM).is_empty());
+
+    snapshot_of(
+        d.path(),
+        &[("`app.admin`/Admin#", &[1]), ("`app.base`/Base#", &[]), ("`app.other`/Base#", &[])],
+        vec![
+            ("app/admin.py", vec![def(0, 5, "Admin")], vec![value(1, 5)]),
+            ("app/base.py", vec![def(1, 0, "Base")], vec![]),
+            ("app/other.py", vec![def(2, 0, "Base")], vec![]),
+        ],
+    );
+    let m = build(d.path());
+    let inherits = edges(&m, ADMIN, BASE, edge_category::INHERITS_FROM);
+    assert_eq!(inherits.len(), 1, "{inherits:?}");
+    let e = inherits[0];
+    assert_eq!(e.confidence, Confidence::Strong);
+    assert_eq!(evidence_cells(e), 1);
+    assert_eq!(
+        Evidence::of(e),
+        Some(Evidence::emitter("scip:scip-python").rule("implementation").at("app/admin.py", 5))
+    );
+    assert!(edges(&m, ADMIN, other, edge_category::INHERITS_FROM).is_empty());
+    let (admin, other_id) = (id_of(&m, ADMIN), id_of(&m, other));
+    assert!(!m.all_edges().any(|e| e.from == admin && e.to == other_id), "an edge to app::other::Base");
+    assert!(edges(&m, ADMIN, BASE, edge_category::USES).is_empty());
+
+    let why = why_edge(&m, ADMIN, BASE, None).expect("why");
+    assert!(why.found);
+    assert_eq!(why.edges.len(), 1);
+    assert_eq!((why.edges[0].tier, why.edges[0].rule.as_deref()), ("fact", Some("implementation")));
+
+    let lines = scip_lines(d.path());
+    assert!(line_after(&lines, "[scip] ingest ").contains(" added=0 (calls=0 uses=0) confirmed=0 category_differs=1 "));
+    assert_eq!(
+        line_after(&lines, "[scip] confirm "),
+        "upgraded=0 confirmed_fact=0 confirmed_other=0 relationships=1 added_implements=0 added_inherits=1 contradicted=0 other_kinds=0"
+    );
+}
+
+/// Located fact edges the index agrees with keep their own evidence: the
+/// build is the no-snapshot build, byte for byte.
+#[test]
+fn fact_edges_are_untouched() {
+    let d = tree_of(FACTS);
+    let bare = build(d.path());
+    for (from, emitter) in [("app::m::run", "parser:python"), ("app::n::go", "graph:calls")] {
+        let calls = edges(&bare, from, "app::m::helper", edge_category::CALLS);
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let ev = Evidence::of(calls[0]).expect("evidence");
+        assert_eq!((ev.emitter.as_str(), ev.basis), (emitter, Basis::Site));
+    }
+    snapshot_of(
+        d.path(),
+        &[("`app.m`/helper().", &[]), ("`app.m`/run().", &[]), ("`app.n`/go().", &[])],
+        vec![
+            ("app/m.py", vec![def(0, 0, "helper"), def(1, 4, "run")], vec![call(0, 5)]),
+            ("app/n.py", vec![def(2, 3, "go")], vec![import(0, 0), call(0, 4)]),
+        ],
+    );
+    let m = build(d.path());
+    assert_eq!(store_bytes(&bare), store_bytes(&m), "a confirmed fact changed the store");
+    let lines = scip_lines(d.path());
+    assert!(line_after(&lines, "[scip] ingest ").contains(" added=0 (calls=0 uses=0) confirmed=2 "));
+    assert_eq!(
+        line_after(&lines, "[scip] confirm "),
+        "upgraded=0 confirmed_fact=2 confirmed_other=0 relationships=0 added_implements=0 added_inherits=0 contradicted=0 other_kinds=0"
+    );
+}
+
+/// The index names another class at the site of a name-only edge: counted and
+/// printed, and the glia edge stays as it was.
+#[test]
+fn contradiction_is_counted_not_applied() {
+    let mut files = NAMEONLY.to_vec();
+    files.push(("app/other.py", "class Other:\n    pass\n"));
+    let d = tree_of(&files);
+    let before = build(d.path());
+    let old: Vec<Vec<u8>> = edges(&before, ADMIN, BASE, edge_category::INHERITS_FROM)
+        .iter()
+        .map(|e| serde_json::to_vec(&Evidence::of(e)).unwrap())
+        .collect();
+    assert_eq!(old.len(), 1);
+
+    snapshot_of(
+        d.path(),
+        &[("`app.admin`/Admin#", &[2]), ("`app.base`/Base#", &[]), ("`app.other`/Other#", &[])],
+        vec![
+            ("app/admin.py", vec![def(0, 3, "Admin")], vec![]),
+            ("app/base.py", vec![def(1, 0, "Base")], vec![]),
+            ("app/other.py", vec![def(2, 0, "Other")], vec![]),
+        ],
+    );
+    let m = build(d.path());
+    let kept: Vec<Vec<u8>> = edges(&m, ADMIN, BASE, edge_category::INHERITS_FROM)
+        .iter()
+        .map(|e| serde_json::to_vec(&Evidence::of(e)).unwrap())
+        .collect();
+    assert_eq!(kept, old, "a contradicted edge is never changed");
+    // The index's own relationship is still added.
+    assert_eq!(edges(&m, ADMIN, "app::other::Other", edge_category::INHERITS_FROM).len(), 1);
+
+    let lines = scip_lines(d.path());
+    assert_eq!(
+        line_after(&lines, "[scip] confirm "),
+        "upgraded=0 confirmed_fact=0 confirmed_other=0 relationships=1 added_implements=0 added_inherits=1 contradicted=1 other_kinds=0"
+    );
+    assert_eq!(
+        line_after(&lines, "[scip] contradicts "),
+        "app::admin::Admin -[INHERITS_FROM graph:refs/global_unique]-> app::base::Base at app/admin.py:4; index says app::other::Other"
+    );
 }

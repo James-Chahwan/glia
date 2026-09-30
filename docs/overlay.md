@@ -352,14 +352,27 @@ build makes of the snapshot:
   unless it is a call (recursion, kept; the rest counted `self_refs`). One edge per (from, to,
   category), located at its first reference. An edge glia already has between the same nodes keeps
   its category: the same category counts as `confirmed`, and when glia joins the two by any other
-  category (`DEFINES` and `INHERITS_FROM` included) its classification stands and nothing is added
-  (`category_differs`).
-- a name-only or unlocated glia edge from the parser, extractor or graph stages that the index
-  confirms is re-stamped `scip:<tool>` with rule `confirms:<old emitter>[/<old rule>]` and tier
-  FACT; resolver and pass edges are never re-stamped (a merge recomputes them). The index's
-  `is_implementation` relationships add the `IMPLEMENTS` / `INHERITS_FROM` edges glia lacks
-  (rule `implementation`), and a heuristic edge the index contradicts is counted and printed,
-  never removed (CE.1e).
+  category (`DEFINES` and `INHERITS_FROM` included, and a heritage edge the index's relationship
+  just added) its classification stands and nothing is added (`category_differs`).
+- the index's `is_implementation` relationships between two bound definitions add the heritage
+  edges glia lacks, before the references are read (so a class header's reference to its base adds
+  no `USES` beside the heritage edge): `IMPLEMENTS` for a method implementing a method, or a class,
+  struct or enum implementing an interface; `INHERITS_FROM` for any other pair of types (an
+  interface extending an interface included, glia's own shape); rule `implementation`, located at
+  the implementing definition. A relationship between other kinds (an attribute implementing an
+  interface property) adds nothing and is counted `other_kinds`; one whose pair glia already joins
+  by the other heritage category counts `category_differs`.
+- a glia edge the index confirms (a reference or relationship on the same nodes and category) keeps
+  its evidence when it is already a located FACT (`confirmed_fact`), and when its emitter is not
+  the parser, extractor or graph stage (`confirmed_other`: a merge recomputes resolver and pass
+  edges by emitter, so a re-stamped one would come back twice). A name-only, below-Strong inferred
+  or unlocated one (tier HEURISTIC or DERIVED) is re-stamped `scip:<tool>` with rule
+  `confirms:<old emitter>[/<old rule>]`, at its own site when the index binds its target there,
+  else at the index's, confidence Strong, tier FACT (`upgraded`); `why` notes `confirmed by a SCIP
+  index (<tool>) at <file>:<line>; first emitted by <old emitter> (<old rule>)` (CE.1e).
+- a heuristic `CALLS` / `USES` / `INHERITS_FROM` / `IMPLEMENTS` edge whose site the index binds to
+  another node, and not to the edge's target (which the index must know), is counted
+  `contradicted` and printed, never removed or changed (CE.1e).
 
 Delta caveat: `glia delta` and `diff-impact` build the base rev with the same untracked snapshot,
 and the per-document hash check skips every file that differs from the indexed bytes, so a file
@@ -377,4 +390,7 @@ repo=<label> tool=<tool>@<version> documents=N skipped=N defs=N refs=N calls=N s
 forward=N bad_ranges=N encoding_unspecified=N surface=cli` on stderr (one line each), and a build
 that reads the snapshot prints `[scip] ingest repo=<label> tool=<tool> documents=N stale=N defs=N
 bound=N unbound=N ambiguous=N refs=N imports=N unowned=N added=N (calls=N uses=N) confirmed=N
-category_differs=N self_refs=N` and `[scip] confirm repo=<label> ...`.
+category_differs=N self_refs=N` and `[scip] confirm repo=<label> upgraded=N confirmed_fact=N
+confirmed_other=N relationships=N added_implements=N added_inherits=N contradicted=N
+other_kinds=N`, then at most 20 `[scip] contradicts <from> -[<CATEGORY> <emitter>/<rule>]-> <to>
+at <file>:<line>; index says <qname>` lines, sorted by file and line.

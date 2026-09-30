@@ -40,9 +40,11 @@ impl PyGraph {
     /// to_qname, category, confidence, tier, emitter, rule, basis, site,
     /// cross_repo, note}`: `emitter` / `rule` / `basis` from the edge's
     /// EVIDENCE cell, `site` `{file, line}` (1-based) where it was asserted,
-    /// `tier` `fact` (read at a site) / `derived` (paired by a resolver or
-    /// pass; also any edge without evidence) / `heuristic` (a name-only
-    /// guess, an overlay declaration, git co-change). When `found` is False,
+    /// `tier` `fact` (read at a site, or bound or confirmed by a SCIP index)
+    /// / `derived` (paired by a resolver or pass; also any edge without
+    /// evidence, or a graph edge inferred below strong confidence, noted
+    /// `inferred binding (..)`) / `heuristic` (a name-only guess, an overlay
+    /// declaration, git co-change). When `found` is False,
     /// `path` is a shortest carry path explained hop by hop (empty when none
     /// is within 6 hops) and `absence` the FACT-tier `no_edges` dict with
     /// `unparsed_files` set. An unknown node or category raises ValueError.

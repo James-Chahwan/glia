@@ -24,7 +24,7 @@
 //! | stage | tier |
 //! |---|---|
 //! | `parser`, `extractor`, `docs`, `graph` | fact — read at a site in the source, or bound from an extracted reference |
-//! | `scip` | fact — bound by a type-aware SCIP indexer, the call / non-call split read at the site (CE.1d); note `resolved by a SCIP index (<tool>)` |
+//! | `scip` | fact — bound by a type-aware SCIP indexer, the call / non-call split read at the site (CE.1d); note `resolved by a SCIP index (<tool>)`, or, for a name-only, inferred or unlocated parser / extractor / graph edge the index confirmed (rule `confirms:<old emitter>[/<old rule>]`, CE.1e), `confirmed by a SCIP index (<tool>) at <file>:<line>; first emitted by <old emitter>[ (<old rule>)]` |
 //! | `resolver`, `pass` | derived — paired by name / path / topic / convention |
 //! | `overlay`, `history` | heuristic — declared by a person or a model, or co-change in git |
 //!
@@ -525,13 +525,31 @@ pub(crate) fn tier_of(ev: Option<&Evidence>, e: &Edge) -> (&'static str, Option<
     let note = match stage {
         "overlay" => Some(overlay_note(ev, e)),
         "history" => Some("files change together in git history; not a code reference".to_string()),
-        "scip" => Some(format!(
-            "resolved by a SCIP index ({})",
-            ev.emitter.split_once(':').map_or("index", |(_, tool)| tool)
-        )),
+        "scip" => Some(scip_note(ev)),
         _ => None,
     };
     (tier, note)
+}
+
+/// The note of a `scip:<tool>` edge: one the stage added from the index
+/// (CE.1d), or a glia edge the index confirmed, whose rule
+/// `confirms:<old emitter>[/<old rule>]` names who emitted it first (CE.1e).
+fn scip_note(ev: &Evidence) -> String {
+    let tool = ev.emitter.split_once(':').map_or("index", |(_, tool)| tool);
+    let Some(first) = ev.rule.as_deref().and_then(|r| r.strip_prefix("confirms:")) else {
+        return format!("resolved by a SCIP index ({tool})");
+    };
+    // Emitters are `<stage>:<name>` with no `/`: the first `/` ends it.
+    let first = match first.split_once('/') {
+        Some((emitter, rule)) => format!("{emitter} ({rule})"),
+        None => first.to_string(),
+    };
+    let at = match (&ev.file, ev.line) {
+        (Some(f), Some(l)) => format!(" at {f}:{}", u64::from(l) + 1),
+        (Some(f), None) => format!(" at {f}"),
+        _ => String::new(),
+    };
+    format!("confirmed by a SCIP index ({tool}){at}; first emitted by {first}")
 }
 
 /// Where and by whom an overlay edge was declared (LF.2b): the stanza's line
@@ -676,6 +694,33 @@ mod tests {
         assert_eq!(
             tier_of(Some(&ev), &edge),
             (FACT, Some("resolved by a SCIP index (scip-python)".to_string()))
+        );
+    }
+
+    /// CE.1e: a glia edge the index confirmed is a fact at the SCIP site that
+    /// still names its first emitter and rule.
+    #[test]
+    fn scip_confirmed_edge_names_its_first_emitter() {
+        let edge = Edge::new(NodeId(1), NodeId(2), edge_category::INHERITS_FROM, Confidence::Strong);
+        let ev = Evidence::emitter("scip:scip-python")
+            .rule("confirms:graph:refs/global_unique")
+            .at("app/admin.py", 3);
+        assert_eq!(
+            tier_of(Some(&ev), &edge),
+            (
+                FACT,
+                Some(
+                    "confirmed by a SCIP index (scip-python) at app/admin.py:4; first emitted by graph:refs (global_unique)"
+                        .to_string()
+                )
+            )
+        );
+        let ruleless = Evidence::emitter("scip:rust-analyzer")
+            .rule("confirms:parser:rust")
+            .at("src/lib.rs", 0);
+        assert_eq!(
+            tier_of(Some(&ruleless), &edge).1.as_deref(),
+            Some("confirmed by a SCIP index (rust-analyzer) at src/lib.rs:1; first emitted by parser:rust")
         );
     }
 
