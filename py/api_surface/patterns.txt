@@ -1,3 +1,3 @@
 # pyo3 surface of py/src/patterns.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
-method PyGraph.patterns_experimental(min_support: usize = 5, min_share: usize = 75, scope: Option<&str> = None) -> PyResult<Py<PyAny>>
-fn patterns_vs_rev_experimental(repo_path: &str, base: &str = "HEAD", min_support: usize = 5, min_share: usize = 75, scope: Option<&str> = None) -> PyResult<Py<PyAny>>
+method PyGraph.patterns_experimental(min_support: usize = 5, min_share: usize = 75, scope: Option<&str> = None, group_by: &str = "service") -> PyResult<Py<PyAny>>
+fn patterns_vs_rev_experimental(repo_path: &str, base: &str = "HEAD", min_support: usize = 5, min_share: usize = 75, scope: Option<&str> = None, group_by: &str = "service") -> PyResult<Py<PyAny>>

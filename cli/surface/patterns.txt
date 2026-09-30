@@ -2,6 +2,7 @@
 cmd glia patterns
   arg base pos=- long=base short=- required=false num_args=1 action=Set default=- value_names=REV global=false hidden=false
   arg experimental pos=- long=experimental short=- required=false num_args=0 action=SetTrue default=false value_names=EXPERIMENTAL global=false hidden=false
+  arg group_by pos=- long=group-by short=- required=false num_args=1 action=Set default=service value_names=GROUP_BY global=false hidden=false values=service,package
   arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
   arg json pos=- long=json short=- required=false num_args=0 action=SetTrue default=false value_names=JSON global=false hidden=false
   arg min_share pos=- long=min-share short=- required=false num_args=1 action=Set default=75 value_names=MIN_SHARE global=false hidden=false

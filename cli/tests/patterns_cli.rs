@@ -4,6 +4,8 @@
 //! `handlers/handlers.go`, service functions in `service/service.go`, raw SQL
 //! in `repository/repository.go`. Five handlers go handler > service >
 //! repository > db; `RawOrderHandler` goes straight to the repository.
+//! CA.5b adds a blind health check (`handler>(no effect)`), listed apart from
+//! the divergences, and `--group-by package`.
 //!
 //! This surface's `[patterns] experimental surface=cli mode=<graph|delta>`
 //! stderr line is the fired_on marker; asserting it here makes it a tested
@@ -224,6 +226,8 @@ fn json_has_experimental_true() {
     assert_eq!((p["status"].as_str(), p["verdict"].as_str()), (Some("judged"), Some("5/6")), "{p}");
     assert!(err.lines().any(|l| l == GRAPH_MARKER), "{err}");
     assert!(err.lines().any(|l| l.starts_with("[patterns] experimental populations=1 judged=1 handlers=6 divergences=1")), "{err}");
+    assert!(err.lines().any(|l| l.starts_with("[patterns] experimental populations=") && l.ends_with(" blind=0 group_by=service")), "{err}");
+    assert_eq!((p["package"].clone(), p["sighted"].as_u64(), v["blind"].as_u64()), (Value::Null, Some(6), Some(0)), "{v}");
 }
 
 /// Table mode: the counts, then the population's heading with its verdict and
@@ -236,9 +240,10 @@ fn table_names_the_population_and_its_status() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.starts_with(&format!("# glia patterns `{}` (experimental, whole graph)\n", s.path())), "{text}");
-    assert!(text.contains("- handlers: 6 in 1 populations; judged: 1; below min support (5): 0; divergences: 1\n"), "{text}");
+    assert!(text.contains("- handlers: 6 in 1 populations; judged: 1; below min support (5): 0; divergences: 1; blind: 0\n"), "{text}");
     assert!(text.contains("- excluded handlers: none\n"), "{text}");
-    assert!(text.contains(&format!("## handlers - 5/6 follow `{CONVENTION}`\n")), "{text}");
+    assert!(text.contains(&format!("## handlers - 5/6 sighted handlers follow `{CONVENTION}`\n")), "{text}");
+    assert!(!text.contains("- blind (the graph follows no chain)"), "{text}");
     let line = line_of(&handlers_go(6), "func RawOrderHandler(");
     let row = format!("| `{DIRECT}` | POST /orders | `{DIRECT_SIGNATURE}` | handlers/handlers.go:{line} |");
     assert!(text.lines().any(|l| l == row), "no row {row} in:\n{text}");
@@ -251,7 +256,7 @@ fn table_names_the_population_and_its_status() {
 
     let split = s.patterns(&["--experimental", "--min-share", "90"]);
     assert_eq!(split.status.code(), Some(0), "{}", stderr(&split));
-    assert!(stdout(&split).contains("## handlers - no convention: no signature holds 90% of 6 handlers"), "{}", stdout(&split));
+    assert!(stdout(&split).contains("## handlers - no convention: no signature holds 90% of 6 sighted handlers"), "{}", stdout(&split));
 
     let bad = s.patterns(&["--experimental", "--min-share", "101"]);
     assert_eq!(bad.status.code(), Some(2));
@@ -300,7 +305,7 @@ fn base_lists_only_touched_divergences() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);
     assert!(text.starts_with(&format!("# glia patterns `{}` (experimental, delta vs `HEAD`)\n", s.path())), "{text}");
-    assert!(text.contains("divergences touched by the change: 0\n"), "{text}");
+    assert!(text.contains("divergences touched by the change: 0; blind touched by the change: 0\n"), "{text}");
     assert!(text.contains("_(no divergence touched by the change; 1 in the whole graph)_"), "{text}");
 
     let bad = s.patterns(&["--experimental", "--base", "no-such-rev"]);
@@ -319,4 +324,92 @@ fn no_handlers_says_nothing_to_judge() {
     let out = s.patterns(&["--experimental"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(stdout(&out).contains("_(no route handler placed in any population: nothing to judge)_"), "{}", stdout(&out));
+}
+
+/// The blind health check's qname.
+const HEALTH: &str = "handlers::handlers::HealthHandler";
+
+/// `handlers.go` for all six handlers plus a health check the graph follows
+/// no chain from (`handler>(no effect)`).
+fn handlers_with_health() -> String {
+    let src = handlers_go(6);
+    let (head, tail) = src.split_once("func Register(r *gin.Engine) {\n").expect("Register");
+    let (body, rest) = tail.split_once("}\n").expect("Register's end");
+    format!(
+        "{head}func Register(r *gin.Engine) {{\n{body}\tr.GET(\"/health\", HealthHandler)\n}}\n{rest}\nfunc HealthHandler(c *gin.Context) {{\n\tc.JSON(http.StatusOK, \"ok\")\n}}\n"
+    )
+}
+
+/// CA.5b: a blind handler counts toward the size, not the share: the verdict
+/// stays 5/6 over the six sighted handlers, the health check is listed as
+/// blind (located, with its route) and is no divergence; the marker ends in
+/// ` blind=1 group_by=service`.
+#[test]
+fn blind_handler_is_listed_not_divergent() {
+    let s = Scratch::shop("blind", 6);
+    let src = handlers_with_health();
+    s.write("handlers/handlers.go", &src);
+    let out = s.patterns(&["--experimental", "--json"]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    let v = json(&out);
+    let p = &v["populations"][0];
+    assert_eq!((p["size"].as_u64(), p["sighted"].as_u64(), p["verdict"].as_str()), (Some(7), Some(6), Some("5/6")), "{p}");
+    assert_eq!(divergent(&v), [DIRECT]);
+    assert_eq!(v["blind"].as_u64(), Some(1), "{v}");
+    let b = &p["blind"][0];
+    assert_eq!(b["handler"], HEALTH);
+    assert_eq!((b["route_method"].as_str(), b["route_path"].as_str()), (Some("GET"), Some("/health")));
+    let line = line_of(&src, "func HealthHandler(");
+    assert_eq!((b["file"].as_str(), b["line"].as_u64()), (Some("handlers/handlers.go"), Some(line as u64)));
+    assert!(err.lines().any(|l| l.starts_with("[patterns] experimental populations=1 judged=1 handlers=7 divergences=1") && l.ends_with(" blind=1 group_by=service")), "{err}");
+
+    let out = s.patterns(&["--experimental"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("; divergences: 1; blind: 1\n"), "{text}");
+    assert!(text.contains(&format!("## handlers - 5/6 sighted handlers follow `{CONVENTION}`\n")), "{text}");
+    assert!(text.contains("- blind (the graph follows no chain): 1\n"), "{text}");
+    let row = format!("| `{HEALTH}` | GET /health | handlers/handlers.go:{line} |");
+    assert!(text.lines().any(|l| l == row), "no row {row} in:\n{text}");
+
+    // Above the six sighted: the population reads blind, nothing diverges.
+    let out = s.patterns(&["--experimental", "--min-support", "7"]);
+    let text = stdout(&out);
+    assert!(text.contains("## handlers - blind: 6 of 7 handlers reach a sink, fewer than 7\n"), "{text}");
+    assert!(!text.contains("| handler | route | signature |"), "{text}");
+}
+
+/// CA.5b: `--group-by package --json` keys every population by its handlers'
+/// directory (the shop's handlers all sit in `handlers/`) and the marker says
+/// so; the table heads the population `## <service> / <package>`. A value
+/// other than `service` / `package` is a usage error (exit 2).
+#[test]
+fn group_by_package_keys_populations_by_directory() {
+    let s = Scratch::shop("group-by", 6);
+    let out = s.patterns(&["--experimental", "--group-by", "package", "--json"]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    let v = json(&out);
+    let pops = v["populations"].as_array().expect("populations");
+    assert!(!pops.is_empty(), "{v}");
+    for p in pops {
+        assert!(p["package"].is_string(), "no package on {p}");
+    }
+    assert_eq!((pops[0]["service"].as_str(), pops[0]["package"].as_str()), (Some("handlers"), Some("handlers")), "{v}");
+    assert_eq!(divergent(&v), [DIRECT]);
+    assert!(err.lines().any(|l| l.starts_with("[patterns] experimental populations=1 ") && l.ends_with(" group_by=package")), "{err}");
+
+    let out = s.patterns(&["--experimental", "--group-by", "package"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains(&format!("## handlers / handlers - 5/6 sighted handlers follow `{CONVENTION}`\n")), "{text}");
+    let line = line_of(&handlers_go(6), "func RawOrderHandler(");
+    let row = format!("| `{DIRECT}` | POST /orders | `{DIRECT_SIGNATURE}` | handlers/handlers.go:{line} |");
+    assert!(text.lines().any(|l| l == row), "no row {row} in:\n{text}");
+
+    let bad = s.patterns(&["--experimental", "--group-by", "directory"]);
+    assert_eq!(bad.status.code(), Some(2), "{}", stderr(&bad));
+    assert!(stderr(&bad).contains("--group-by"), "{}", stderr(&bad));
+    assert!(stdout(&bad).is_empty());
 }

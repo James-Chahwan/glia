@@ -7,11 +7,15 @@
 //!
 //! The Go shop: `handlers/handlers.go` (gin routes registered in `Register`),
 //! `service/service.go` (functions calling the repository) and
-//! `repository/repository.go` (raw SQL through `database/sql`). File stems
-//! equal package names: Go cross-package calls resolve by file stem, so a
-//! `repository/repo.go` would lose every call into it (the LA-core gap LE.7a
-//! records). The engine prints `[patterns] experimental populations=..` per
-//! answer; run with `--nocapture` to see it.
+//! `repository/repository.go` (raw SQL through `database/sql`).
+//!
+//! CA.5b: a handler the graph follows no chain from (`handler>(no effect)`)
+//! is BLIND. The share is over the sighted members only, a population whose
+//! sighted members fall below `min_support` reads `blind`, blind handlers are
+//! listed in `Population.blind` and never as divergences, and
+//! `GroupBy::Package` keys populations by (service, the handler's directory).
+//! The engine prints `[patterns] experimental populations=.. blind=<B>
+//! group_by=<g>` per answer; run with `--nocapture` to see it.
 
 mod git_fixture;
 
@@ -25,7 +29,7 @@ use glia_core::{
 use glia_engine::delta::graph_delta_vs_rev;
 use glia_engine::generate_one;
 use glia_engine::patterns::{
-    Divergence, PatternArgs, PatternReport, Population, pattern_conformance,
+    BlindHandler, Divergence, GroupBy, PatternArgs, PatternReport, Population, pattern_conformance,
     pattern_conformance_delta,
 };
 use glia_graph::{MergedGraph, RepoGraph, SymbolTable};
@@ -575,9 +579,14 @@ fn fan_graph(seen: usize, blind: usize) -> MergedGraph {
     g.merged()
 }
 
+fn blind_of(bs: &[BlindHandler]) -> Vec<&str> {
+    bs.iter().map(|b| b.handler.as_str()).collect()
+}
+
 /// (4b) `handler>(no effect)` is never the convention: five blind handlers and
-/// one the graph follows is no convention, not "the followed one diverges".
-/// Under a real convention a blind handler (a health check) is still listed.
+/// one the graph follows is not "the followed one diverges" but a population
+/// the graph cannot judge (`blind`). Under a real convention a blind handler
+/// (a health check) is listed as blind, located, and is no divergence.
 #[test]
 fn blind_chains_are_never_the_convention() {
     let labels = BTreeMap::new();
@@ -585,9 +594,12 @@ fn blind_chains_are_never_the_convention() {
 
     let r = pattern_conformance(&fan_graph(1, 5), &labels, &args);
     let p = population(&r, "api");
-    assert_eq!(p.status, "no_convention", "{r:#?}");
+    assert_eq!(p.status, "blind", "{r:#?}");
+    assert_eq!((p.size, p.sighted), (6, 1));
     assert_eq!(p.convention, None);
+    assert_eq!(p.verdict, None);
     assert!(r.divergences.is_empty(), "{r:#?}");
+    assert!(p.exceptions.is_empty(), "{r:#?}");
     assert_eq!(
         p.signatures,
         vec![
@@ -599,16 +611,174 @@ fn blind_chains_are_never_the_convention() {
     let r = pattern_conformance(&fan_graph(5, 1), &labels, &args);
     let p = population(&r, "api");
     assert_eq!(p.convention.as_deref(), Some(DIRECT_SIGNATURE), "{r:#?}");
-    assert_eq!(p.verdict.as_deref(), Some("5/6"));
-    assert_eq!(handlers_of(&r.divergences), ["api::handlers::H5"]);
-    let d = &r.divergences[0];
-    assert_eq!(d.signature, "handler>(no effect)");
-    assert!(d.path.is_empty());
-    assert_eq!(d.route_path.as_deref(), Some("/r5"));
+    assert_eq!(p.verdict.as_deref(), Some("5/5"));
+    assert_eq!((p.size, p.sighted, p.matching), (6, 5, 5));
+    assert!(r.divergences.is_empty(), "{r:#?}");
+    assert!(p.exceptions.is_empty(), "{r:#?}");
+    assert_eq!(blind_of(&p.blind), ["api::handlers::H5"]);
+    assert_eq!(r.blind, 1);
+    let b = &p.blind[0];
+    assert_eq!(b.route_path.as_deref(), Some("/r5"));
+    assert_eq!(b.route_method.as_deref(), Some("GET"));
     assert_eq!(
-        (d.file.as_deref(), d.line),
+        (b.file.as_deref(), b.line),
         (Some("api/handlers.go"), Some(21))
     );
+    assert_eq!(
+        p.signatures,
+        vec![
+            (DIRECT_SIGNATURE.to_string(), 5),
+            ("handler>(no effect)".to_string(), 1)
+        ]
+    );
+}
+
+/// (4c) CA.5b: five handlers the graph follows and three it does not. At
+/// HEAD the blind three counted against the share (5/8 = 62%, no
+/// convention); over the sighted it is 5/5, judged, and the blind three are
+/// listed, not divergences.
+#[test]
+fn blind_handlers_do_not_count_against_the_share() {
+    let r = pattern_conformance(&fan_graph(5, 3), &BTreeMap::new(), &PatternArgs::default());
+    let p = population(&r, "api");
+    assert_eq!(p.status, "judged", "{r:#?}");
+    assert_eq!(p.verdict.as_deref(), Some("5/5"));
+    assert_eq!(p.convention.as_deref(), Some(DIRECT_SIGNATURE));
+    assert_eq!((p.size, p.sighted, p.matching), (8, 5, 5));
+    assert_eq!(p.blind.len(), 3);
+    assert_eq!(
+        blind_of(&p.blind),
+        [
+            "api::handlers::H5",
+            "api::handlers::H6",
+            "api::handlers::H7"
+        ]
+    );
+    assert!(p.exceptions.is_empty(), "{r:#?}");
+    assert!(r.divergences.is_empty(), "{r:#?}");
+    assert_eq!((r.handlers, r.judged, r.blind), (8, 1, 3));
+}
+
+/// (4d) CA.5b: one handler the graph follows and five it does not is at
+/// least `min_support` in size but only one sighted: `blind`, no convention
+/// and no divergence, every blind handler listed.
+#[test]
+fn mostly_blind_population_reads_blind() {
+    let r = pattern_conformance(&fan_graph(1, 5), &BTreeMap::new(), &PatternArgs::default());
+    let p = population(&r, "api");
+    assert_eq!(p.status, "blind", "{r:#?}");
+    assert_eq!((p.size, p.sighted, p.matching), (6, 1, 0));
+    assert_eq!(
+        (p.convention.as_deref(), p.verdict.as_deref()),
+        (None, None)
+    );
+    assert!(p.exceptions.is_empty(), "{r:#?}");
+    assert!(r.divergences.is_empty(), "{r:#?}");
+    assert_eq!(p.blind.len(), 5);
+    assert_eq!((r.judged, r.skipped_small, r.blind), (0, 0, 5));
+    // Below min_support in size it is still too_small, whatever is blind.
+    let mut args = PatternArgs::default();
+    args.min_support = 7;
+    let r = pattern_conformance(&fan_graph(1, 5), &BTreeMap::new(), &args);
+    assert_eq!(population(&r, "api").status, "too_small", "{r:#?}");
+    assert_eq!(r.skipped_small, 1);
+}
+
+/// One service `api`, two directories: five handlers in `api/a/` calling
+/// `Writer::save` straight (`handler>repository>db`), five in `api/b/`
+/// calling `OrderService::run`, which calls it
+/// (`handler>service>repository>db`).
+fn split_graph() -> MergedGraph {
+    let mut g = G::default();
+    let save = g.node(
+        node_kind::FUNCTION,
+        "core::db::Writer::save",
+        Some(("core/db.go", 1)),
+    );
+    let table = g.node(node_kind::DATA_ENTITY, "data_entity:sql:foo", None);
+    g.edge(save, table, edge_category::ACCESSES_DATA);
+    let run = g.node(
+        node_kind::METHOD,
+        "core::svc::OrderService::run",
+        Some(("core/svc.go", 1)),
+    );
+    g.edge(run, save, edge_category::CALLS);
+    for (dir, callee) in [("a", save), ("b", run)] {
+        for i in 0..5_i64 {
+            let route = g.node(node_kind::ROUTE, &format!("GET /{dir}/r{i}"), None);
+            let handler = g.node(
+                node_kind::FUNCTION,
+                &format!("api::{dir}::handlers::H{i}"),
+                Some((&format!("api/{dir}/handlers.go"), i * 4)),
+            );
+            g.edge(route, handler, edge_category::HANDLED_BY);
+            g.edge(handler, callee, edge_category::CALLS);
+        }
+    }
+    g.merged()
+}
+
+/// (4e) CA.5b: `GroupBy::Package` splits one service by the handlers'
+/// directory. By service the ten handlers split 5/5 (no convention); by
+/// package each directory is judged on its own convention.
+#[test]
+fn group_by_package_splits_a_service() {
+    let labels = BTreeMap::new();
+    let merged = split_graph();
+
+    let r = pattern_conformance(&merged, &labels, &PatternArgs::default());
+    assert_eq!(r.populations.len(), 1, "{r:#?}");
+    let p = population(&r, "api");
+    assert_eq!(p.package, None);
+    assert_eq!(
+        (p.status, p.size, p.sighted),
+        ("no_convention", 10, 10),
+        "{r:#?}"
+    );
+
+    let mut args = PatternArgs::default();
+    args.group_by = GroupBy::Package;
+    let r = pattern_conformance(&merged, &labels, &args);
+    let keys: Vec<String> = r
+        .populations
+        .iter()
+        .map(|p| {
+            format!(
+                "{} / {} {} {} {}",
+                p.service,
+                p.package.as_deref().unwrap_or("-"),
+                p.status,
+                p.verdict.as_deref().unwrap_or("-"),
+                p.convention.as_deref().unwrap_or("-"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            format!("api / api/a judged 5/5 {DIRECT_SIGNATURE}"),
+            format!("api / api/b judged 5/5 {CONVENTION}"),
+        ],
+        "{r:#?}"
+    );
+    assert_eq!((r.handlers, r.judged, r.blind), (10, 2, 0));
+    assert!(r.divergences.is_empty(), "{r:#?}");
+}
+
+/// A root-level handler file keys package `.`; `GroupBy` spells its choices.
+#[test]
+fn package_of_is_the_parent_directory() {
+    use glia_engine::patterns::package_of;
+    assert_eq!(package_of("internal/api/handlers.go"), "internal/api");
+    assert_eq!(package_of("main.go"), ".");
+    assert_eq!(GroupBy::default(), GroupBy::Service);
+    assert_eq!(GroupBy::parse("package"), Some(GroupBy::Package));
+    assert_eq!(
+        GroupBy::parse("service").map(GroupBy::as_str),
+        Some("service")
+    );
+    assert_eq!(GroupBy::parse("dir"), None);
+    assert_eq!(GroupBy::CHOICES, ["service", "package"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -707,18 +877,81 @@ fn delta_mode_path_edit_is_touched() {
     );
 }
 
+/// The blind health check's qname in the shop.
+const HEALTH: &str = "handlers::handlers::HealthHandler";
+
+/// `handlers.go` with a health check registered too: it answers without a
+/// call the graph follows, so its signature is `handler>(no effect)`.
+fn with_health(handlers: &str) -> String {
+    let (head, tail) = handlers
+        .split_once("func Register(r *gin.Engine) {\n")
+        .expect("Register");
+    let (body, rest) = tail.split_once("}\n").expect("Register's end");
+    format!(
+        "{head}func Register(r *gin.Engine) {{\n{body}\tr.GET(\"/health\", HealthHandler)\n}}\n{rest}\nfunc HealthHandler(c *gin.Context) {{\n\tc.JSON(http.StatusOK, \"ok\")\n}}\n"
+    )
+}
+
+/// (5d) CA.5b: delta mode keeps a population's touched blind handlers only.
+/// A health check committed beside the six handlers and an unrelated change:
+/// the whole graph lists it as blind (the verdict stays 5/6 over the six
+/// sighted), delta mode lists none. The health check added in the working
+/// tree: delta mode lists it.
+#[test]
+fn delta_mode_lists_only_touched_blind_handlers() {
+    let repo = shop(&six());
+    repo.write("handlers/handlers.go", &with_health(&handlers_go(&six())));
+    repo.write("util/util.go", UTIL_GO);
+    repo.commit("six handlers and a health check");
+    repo.remove("util/util.go");
+    let (delta, whole) = delta_report(&repo);
+    let p = population(&whole, "handlers");
+    assert_eq!(
+        (p.size, p.sighted, p.status, p.verdict.as_deref()),
+        (7, 6, "judged", Some("5/6")),
+        "{whole:#?}"
+    );
+    assert_eq!(blind_of(&p.blind), [HEALTH]);
+    assert_eq!(p.blind[0].route_path.as_deref(), Some("/health"));
+    assert_eq!(whole.blind, 1);
+    assert_eq!(
+        handlers_of(&whole.divergences),
+        ["handlers::handlers::RawOrderHandler"]
+    );
+    let p = population(&delta, "handlers");
+    assert_eq!((p.size, p.sighted), (7, 6), "{delta:#?}");
+    assert!(p.blind.is_empty(), "{delta:#?}");
+    assert_eq!(delta.blind, 0);
+
+    let repo = shop(&six());
+    repo.commit("six handlers");
+    repo.write("handlers/handlers.go", &with_health(&handlers_go(&six())));
+    let (delta, _) = delta_report(&repo);
+    assert_eq!(
+        blind_of(&population(&delta, "handlers").blind),
+        [HEALTH],
+        "{delta:#?}"
+    );
+    assert_eq!(delta.blind, 1);
+}
+
 /// (6) Two builds of one tree, and two answers over one build, serialise to
-/// the same bytes.
+/// the same bytes, grouped either way.
 #[test]
 fn deterministic() {
     let repo = shop(&six());
+    repo.write("handlers/handlers.go", &with_health(&handlers_go(&six())));
     let (m1, l1) = build(&repo);
     let (m2, l2) = build(&repo);
-    let args = PatternArgs::default();
-    let a = serde_json::to_string(&pattern_conformance(&m1, &l1, &args)).expect("json");
-    let b = serde_json::to_string(&pattern_conformance(&m1, &l1, &args)).expect("json");
-    let c = serde_json::to_string(&pattern_conformance(&m2, &l2, &args)).expect("json");
-    assert_eq!(a, b);
-    assert_eq!(a, c);
-    assert!(a.contains("\"experimental\":true"), "{a}");
+    for group_by in [GroupBy::Service, GroupBy::Package] {
+        let mut args = PatternArgs::default();
+        args.group_by = group_by;
+        let a = serde_json::to_string(&pattern_conformance(&m1, &l1, &args)).expect("json");
+        let b = serde_json::to_string(&pattern_conformance(&m1, &l1, &args)).expect("json");
+        let c = serde_json::to_string(&pattern_conformance(&m2, &l2, &args)).expect("json");
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        assert!(a.contains("\"experimental\":true"), "{a}");
+        assert!(a.contains("\"blind\":1}"), "{a}");
+    }
 }

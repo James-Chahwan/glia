@@ -10,8 +10,9 @@
 //! the module function `patterns_vs_rev_experimental(repo_path, base="HEAD",
 //! ..)` builds the working tree and the rev itself (LE.1b's graph delta) and
 //! lists only the divergences the change touched. Each returns the engine's
-//! `PatternReport` as a native dict (LD.2); a `min_share` above 100 or an
-//! engine `Err` raises `ValueError`.
+//! `PatternReport` as a native dict (LD.2); a `min_share` above 100, a
+//! `group_by` other than `"service"` / `"package"` (CA.5b) or an engine `Err`
+//! raises `ValueError`.
 //!
 //! Transport only: populations, signatures, verdicts and locations live in
 //! the engine. The helpers the pyo3 entry points delegate to are pyo3-free,
@@ -26,7 +27,7 @@ use pyo3::prelude::*;
 
 use glia_engine::delta::graph_delta_vs_rev;
 use glia_engine::patterns::{
-    PatternArgs, PatternReport, pattern_conformance, pattern_conformance_delta,
+    GroupBy, PatternArgs, PatternReport, pattern_conformance, pattern_conformance_delta,
 };
 use glia_graph::MergedGraph;
 
@@ -35,15 +36,27 @@ use crate::graph::PyGraph;
 use crate::registry::ModuleFns;
 
 /// The engine's options from the keyword arguments; `Err` names a
-/// `min_share` that is no percentage.
-fn options(min_support: usize, min_share: usize, scope: Option<&str>) -> Result<PatternArgs, String> {
+/// `min_share` that is no percentage or a `group_by` that is neither choice.
+fn options(
+    min_support: usize,
+    min_share: usize,
+    scope: Option<&str>,
+    group_by: &str,
+) -> Result<PatternArgs, String> {
     if min_share > 100 {
         return Err(format!("min_share is a percentage (0-100), got {min_share}"));
     }
+    let Some(group_by) = GroupBy::parse(group_by) else {
+        return Err(format!(
+            "group_by is {}, got {group_by:?}",
+            GroupBy::CHOICES.map(|c| format!("{c:?}")).join(" or ")
+        ));
+    };
     let mut p = PatternArgs::default();
     p.min_support = min_support;
     p.min_share_pct = min_share;
     p.scope = scope.map(str::to_string);
+    p.group_by = group_by;
     Ok(p)
 }
 
@@ -54,15 +67,16 @@ fn graph_report(
     min_support: usize,
     min_share: usize,
     scope: Option<&str>,
+    group_by: &str,
 ) -> Result<PatternReport, String> {
-    let p = options(min_support, min_share, scope)?;
+    let p = options(min_support, min_share, scope, group_by)?;
     let report = pattern_conformance(merged, repo_labels, &p);
     eprintln!("[patterns] experimental surface=pyo3 mode=graph");
     Ok(report)
 }
 
 /// The body of [`patterns_vs_rev_experimental`], minus pyo3. `Err` is a bad
-/// `min_share` or the engine's message (not a directory, git missing, not a
+/// `min_share` or `group_by`, or the engine's message (not a directory, git missing, not a
 /// git work tree, an unknown rev, a failed build).
 fn rev_report(
     repo_path: &str,
@@ -70,8 +84,9 @@ fn rev_report(
     min_support: usize,
     min_share: usize,
     scope: Option<&str>,
+    group_by: &str,
 ) -> Result<PatternReport, String> {
-    let p = options(min_support, min_share, scope)?;
+    let p = options(min_support, min_share, scope, group_by)?;
     let d = graph_delta_vs_rev(repo_path, base)?;
     let report = pattern_conformance_delta(&d.after.merged, &d.after.repo_labels, &d.delta, &p);
     eprintln!("[patterns] experimental surface=pyo3 mode=delta");
@@ -87,32 +102,44 @@ impl PyGraph {
     /// effect sink (`handler>service>repository>db`, `handler>(no effect)`
     /// when the graph follows none); a population of at least `min_support`
     /// handlers whose most frequent sink-reaching signature holds `min_share`
-    /// percent of it has that signature as its convention, and every handler
-    /// off it is a DIVERGENCE (tier `heuristic`: observed, never a rule).
-    /// `scope` (a path or project label) keeps only the handlers located
-    /// under it.
+    /// percent of its SIGHTED handlers has that signature as its convention,
+    /// and every sighted handler off it is a DIVERGENCE (tier `heuristic`:
+    /// observed, never a rule). A BLIND handler (`handler>(no effect)`, the
+    /// graph follows no chain from it) counts toward the size, not the share,
+    /// and is listed in the population's `blind`, never as a divergence; a
+    /// population with fewer than `min_support` sighted handlers reads
+    /// `blind`. `scope` (a path or project label) keeps only the handlers
+    /// located under it; `group_by="package"` keys populations by (service,
+    /// the handler file's directory) instead of the service alone.
     ///
     /// Returns a dict `{experimental, delta_mode, handlers, judged,
-    /// skipped_small, excluded, role_sources, populations, divergences}`:
-    /// `experimental` is always True; `excluded` counts the handlers left out
-    /// by reason (`test_fixture`, `generated`, `generated_proto`, `unplaced`,
-    /// `out_of_scope`); each population `{service, role, size, status,
-    /// convention, matching, verdict, signatures, role_sources, exceptions}`
-    /// has `status` `judged` | `no_convention` | `too_small`; each divergence
+    /// skipped_small, excluded, role_sources, populations, divergences,
+    /// blind}`: `experimental` is always True; `excluded` counts the handlers
+    /// left out by reason (`test_fixture`, `generated`, `generated_proto`,
+    /// `unplaced`, `out_of_scope`); `blind` counts the blind handlers listed;
+    /// each population `{service, package, role, size, sighted, status,
+    /// convention, matching, verdict, signatures, role_sources, exceptions,
+    /// blind}` has `status` `judged` | `no_convention` | `blind` |
+    /// `too_small`, `package` None unless `group_by="package"`, `verdict`
+    /// `matching/sighted`, and `blind` a located `{handler, file, line,
+    /// route_method, route_path}` per blind handler; each divergence
     /// `{verdict, tier, service, handler, file, line, route_method,
     /// route_path, signature, convention, matching, population, path,
     /// role_sources}` is located (lines 1-based), `path` its hops to the sink.
-    /// Raises ValueError on a `min_share` above 100.
-    #[pyo3(signature = (min_support=5, min_share=75, scope=None))]
+    /// Raises ValueError on a `min_share` above 100 or a `group_by` other
+    /// than `"service"` / `"package"`.
+    #[pyo3(signature = (min_support=5, min_share=75, scope=None, group_by="service"))]
     fn patterns_experimental(
         &self,
         py: Python<'_>,
         min_support: usize,
         min_share: usize,
         scope: Option<&str>,
+        group_by: &str,
     ) -> PyResult<Py<PyAny>> {
-        let report = graph_report(&self.merged, &self.repo_labels, min_support, min_share, scope)
-            .map_err(PyValueError::new_err)?;
+        let report =
+            graph_report(&self.merged, &self.repo_labels, min_support, min_share, scope, group_by)
+                .map_err(PyValueError::new_err)?;
         to_py(py, serde_json::to_string(&report))
     }
 }
@@ -123,14 +150,16 @@ impl PyGraph {
 /// Populations and conventions come from the whole working-tree graph;
 /// `divergences` lists only the exceptions the change touched (the handler or
 /// a node on its path added, modified or moved, or a hop of its path an added
-/// edge), while each population's `exceptions` still lists them all. Same
-/// keywords and dict as `PyGraph.patterns_experimental`, with `delta_mode`
-/// True. Builds both sides itself and saves the parse-cache sidecar
+/// edge), while each population's `exceptions` still lists them all; a
+/// population's `blind` keeps only the touched blind handlers. Same keywords
+/// and dict as `PyGraph.patterns_experimental`, with `delta_mode` True.
+/// Builds both sides itself and saves the parse-cache sidecar
 /// (`<repo>/.glia/graph/parse_cache.bin`, self-gitignored) as
 /// `generate(incremental=True)` does, never a `.gmap` layout. Raises
-/// ValueError on a `min_share` above 100 or a git or build failure.
+/// ValueError on a `min_share` above 100, a `group_by` other than
+/// `"service"` / `"package"`, or a git or build failure.
 #[pyfunction]
-#[pyo3(signature = (repo_path, base="HEAD", min_support=5, min_share=75, scope=None))]
+#[pyo3(signature = (repo_path, base="HEAD", min_support=5, min_share=75, scope=None, group_by="service"))]
 fn patterns_vs_rev_experimental(
     py: Python<'_>,
     repo_path: &str,
@@ -138,8 +167,9 @@ fn patterns_vs_rev_experimental(
     min_support: usize,
     min_share: usize,
     scope: Option<&str>,
+    group_by: &str,
 ) -> PyResult<Py<PyAny>> {
-    let report = rev_report(repo_path, base, min_support, min_share, scope)
+    let report = rev_report(repo_path, base, min_support, min_share, scope, group_by)
         .map_err(PyValueError::new_err)?;
     to_py(py, serde_json::to_string(&report))
 }
@@ -275,7 +305,7 @@ mod tests {
     fn graph_helper_returns_the_documented_object() {
         let (_scratch, top) = shop("graph", 6);
         let built = glia_engine::generate_one(top.to_str().expect("utf-8")).expect("build");
-        let r = graph_report(&built.merged, &built.repo_labels, 5, 75, None).expect("report");
+        let r = graph_report(&built.merged, &built.repo_labels, 5, 75, None, "service").expect("report");
         let v = value(&r);
         for key in ["experimental", "populations", "divergences", "skipped_small", "delta_mode"] {
             assert!(v.get(key).is_some(), "{key} missing: {v}");
@@ -291,6 +321,7 @@ mod tests {
             "\"role_sources\":",
             "\"populations\":",
             "\"divergences\":",
+            "\"blind\":0}",
         ]
         .iter()
         .map(|k| text.find(k).unwrap_or(usize::MAX))
@@ -307,21 +338,29 @@ mod tests {
         assert_eq!(v["divergences"][0]["route_path"], "/orders");
 
         // min_support above the population: too small, nothing judged.
-        let small = value(&graph_report(&built.merged, &built.repo_labels, 7, 75, None).expect("report"));
+        let small = value(&graph_report(&built.merged, &built.repo_labels, 7, 75, None, "service").expect("report"));
         assert_eq!((small["skipped_small"].as_u64(), small["judged"].as_u64()), (Some(1), Some(0)));
         assert_eq!(small["populations"][0]["status"], "too_small");
         assert!(divergent(&small).is_empty());
         // A 5/6 share is below 90%: no convention.
-        let split = value(&graph_report(&built.merged, &built.repo_labels, 5, 90, None).expect("report"));
+        let split = value(&graph_report(&built.merged, &built.repo_labels, 5, 90, None, "service").expect("report"));
         assert_eq!(split["populations"][0]["status"], "no_convention");
         assert!(divergent(&split).is_empty());
         // A scope no handler sits under: every handler excluded.
-        let scoped = value(&graph_report(&built.merged, &built.repo_labels, 5, 75, Some("service")).expect("report"));
+        let scoped = value(&graph_report(&built.merged, &built.repo_labels, 5, 75, Some("service"), "service").expect("report"));
         assert_eq!(scoped["excluded"]["out_of_scope"], 6, "{scoped}");
         assert_eq!(scoped["handlers"], 0);
 
-        let err = graph_report(&built.merged, &built.repo_labels, 5, 101, None).expect_err("bad share");
+        let err = graph_report(&built.merged, &built.repo_labels, 5, 101, None, "service").expect_err("bad share");
         assert!(err.contains("101"), "{err}");
+
+        // CA.5b: group_by reaches the engine; any other value names the two.
+        let by_pkg =
+            value(&graph_report(&built.merged, &built.repo_labels, 5, 75, None, "package").expect("report"));
+        assert_eq!(by_pkg["populations"][0]["package"], "handlers", "{by_pkg}");
+        assert_eq!(v["populations"][0]["package"], serde_json::Value::Null, "{v}");
+        let err = graph_report(&built.merged, &built.repo_labels, 5, 75, None, "dir").expect_err("bad group_by");
+        assert!(err.contains("\"service\" or \"package\"") && err.contains("\"dir\""), "{err}");
     }
 
     /// LE.7b: the helper behind `patterns_vs_rev_experimental` judges the
@@ -337,14 +376,14 @@ mod tests {
         git(&top, &gitconfig, &["commit", "-q", "-m", "five layered handlers"]);
         write_shop(&top, 6);
         let repo = top.to_str().expect("utf-8");
-        let v = value(&rev_report(repo, "HEAD", 5, 75, None).expect("report"));
+        let v = value(&rev_report(repo, "HEAD", 5, 75, None, "service").expect("report"));
         assert_eq!((v["experimental"].as_bool(), v["delta_mode"].as_bool()), (Some(true), Some(true)));
         assert_eq!(divergent(&v), [DIRECT]);
         assert_eq!(v["populations"][0]["verdict"], "5/6");
 
-        let err = rev_report(repo, "no-such-rev", 5, 75, None).expect_err("unknown rev");
+        let err = rev_report(repo, "no-such-rev", 5, 75, None, "service").expect_err("unknown rev");
         assert!(err.contains("no-such-rev"), "{err}");
-        let err = rev_report(repo, "HEAD", 5, 200, None).expect_err("bad share");
+        let err = rev_report(repo, "HEAD", 5, 200, None, "service").expect_err("bad share");
         assert!(err.contains("200"), "{err}");
     }
 }

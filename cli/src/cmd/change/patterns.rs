@@ -17,16 +17,29 @@
 //! with `--base` is a usage error, and so is `--no-overlay` (both sides are
 //! built with the repo's overlay).
 //!
+//! `--group-by service` (the default) keys a population by the service
+//! `glia arch` shows; `--group-by package` by (service, the handler file's
+//! directory), which splits a one-directory Go service into its packages
+//! (CA.5b). A BLIND handler, one the graph follows no chain from
+//! (`handler>(no effect)`), counts toward a population's size but not its
+//! share: the verdict is over the sighted handlers, and a blind handler is
+//! listed, never a divergence.
+//!
 //! Table mode prints the counts (with the handlers left out of every
-//! population, by reason), then one section per population carrying its
-//! status: `judged` (`## <service> - <matching>/<size> follow <convention>`
-//! and a `| handler | route | signature | location |` row per divergence),
-//! `no_convention` (the top signature and its share), `too_small` (one
-//! `_(population below min support: ...)_` line). A repo with no placed
-//! handler says so instead of printing an empty report. `--json` prints the
-//! engine's `PatternReport` (`{experimental, delta_mode, handlers, judged,
-//! skipped_small, excluded, role_sources, populations, divergences}`). Every
-//! `file:line` is 1-based (LD.1).
+//! population, by reason), then one section per population, headed
+//! `## <service>[ / <package>]`, carrying its status: `judged`
+//! (`- <matching>/<sighted> sighted handlers follow <convention>` in the
+//! heading, a `| handler | route | signature | location |` row per
+//! divergence, then `- blind (the graph follows no chain): <n>` and a
+//! `| handler | route | location |` row per blind handler), `no_convention`
+//! (the top signature and its share over the sighted handlers, then the
+//! blind rows), `blind` (`- blind: <sighted> of <size> handlers reach a sink,
+//! fewer than <min_support>` in the heading, then the blind rows),
+//! `too_small` (one `_(population below min support: ...)_` line). A repo
+//! with no placed handler says so instead of printing an empty report.
+//! `--json` prints the engine's `PatternReport` (`{experimental, delta_mode,
+//! handlers, judged, skipped_small, excluded, role_sources, populations,
+//! divergences, blind}`). Every `file:line` is 1-based (LD.1).
 //!
 //! Exit 0 on an answer, 2 without `--experimental`, on a usage error, or a git
 //! / build failure with the engine's message. Delta mode saves the working
@@ -41,8 +54,8 @@
 
 use glia_engine::delta::graph_delta_vs_rev;
 use glia_engine::patterns::{
-    DEFAULT_MIN_SHARE_PCT, DEFAULT_MIN_SUPPORT, Divergence, PatternArgs, PatternReport, Population,
-    pattern_conformance, pattern_conformance_delta,
+    DEFAULT_MIN_SHARE_PCT, DEFAULT_MIN_SUPPORT, Divergence, GroupBy, PatternArgs,
+    PatternReport, Population, pattern_conformance, pattern_conformance_delta,
 };
 
 use crate::common::{build_options, generate_for};
@@ -50,6 +63,16 @@ use crate::common::{build_options, generate_for};
 /// The refusal without `--experimental`, verbatim.
 const NOT_EXPERIMENTAL: &str =
     "patterns is experimental: pass --experimental (output format may change)";
+
+/// `--group-by`: what keys a population (the engine's `GroupBy`).
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+pub(crate) enum GroupByArg {
+    /// The service `glia arch` shows.
+    Service,
+    /// The service and the handler file's repo-relative directory (a Go
+    /// package).
+    Package,
+}
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -75,6 +98,10 @@ pub(crate) struct Args {
     /// label.
     #[arg(long)]
     scope: Option<String>,
+    /// What keys a population: its service, or its service and the handler
+    /// file's directory (a Go package).
+    #[arg(long, value_enum, default_value_t = GroupByArg::Service)]
+    group_by: GroupByArg,
     /// Additional repos to merge in (cross-service). Repeatable; whole-graph
     /// mode only.
     #[arg(long)]
@@ -93,6 +120,10 @@ fn pattern_args(args: &Args) -> Result<PatternArgs, String> {
     p.min_support = args.min_support;
     p.min_share_pct = args.min_share;
     p.scope = args.scope.clone();
+    p.group_by = match args.group_by {
+        GroupByArg::Service => GroupBy::Service,
+        GroupByArg::Package => GroupBy::Package,
+    };
     Ok(p)
 }
 
@@ -153,8 +184,8 @@ fn at(file: Option<&str>, line: Option<i64>) -> String {
 }
 
 /// `METHOD path`, whichever half is known, or `—`.
-fn route(d: &Divergence) -> String {
-    match (d.route_method.as_deref(), d.route_path.as_deref()) {
+fn route(method: Option<&str>, path: Option<&str>) -> String {
+    match (method, path) {
         (Some(m), Some(p)) => format!("{m} {p}"),
         (None, Some(p)) => p.to_string(),
         (Some(m), None) => m.to_string(),
@@ -177,7 +208,7 @@ fn render(repo: &str, base: Option<&str>, p: &PatternArgs, r: &PatternReport) ->
     };
     out.push_str(&format!("# glia patterns `{repo}` (experimental, {mode})\n\n"));
     out.push_str(&format!(
-        "- handlers: {} in {} populations; judged: {}; below min support ({}): {}; divergences{}: {}\n",
+        "- handlers: {} in {} populations; judged: {}; below min support ({}): {}; divergences{}: {}; blind{}: {}\n",
         r.handlers,
         r.populations.len(),
         r.judged,
@@ -185,6 +216,8 @@ fn render(repo: &str, base: Option<&str>, p: &PatternArgs, r: &PatternReport) ->
         r.skipped_small,
         if r.delta_mode { " touched by the change" } else { "" },
         r.divergences.len(),
+        if r.delta_mode { " touched by the change" } else { "" },
+        r.blind,
     ));
     out.push_str(&format!("- excluded handlers: {}\n", counts(&r.excluded)));
     out.push_str(&format!("- role sources: {}\n\n", counts(&r.role_sources)));
@@ -200,31 +233,50 @@ fn render(repo: &str, base: Option<&str>, p: &PatternArgs, r: &PatternReport) ->
 
 fn population(out: &mut String, pop: &Population, r: &PatternReport, p: &PatternArgs) {
     let sigs: Vec<String> = pop.signatures.iter().map(|(s, n)| format!("`{s}` ×{n}")).collect();
+    let name = match &pop.package {
+        Some(pkg) => format!("{} / {pkg}", pop.service),
+        None => pop.service.clone(),
+    };
     match pop.status {
         "too_small" => {
             out.push_str(&format!(
-                "_(population below min support: `{}` has {} handlers, fewer than {})_\n\n",
-                pop.service, pop.size, p.min_support
+                "_(population below min support: `{name}` has {} handlers, fewer than {})_\n\n",
+                pop.size, p.min_support
             ));
             return;
         }
         "judged" => out.push_str(&format!(
-            "## {} - {}/{} follow `{}`\n\n",
-            pop.service,
+            "## {name} - {}/{} sighted handlers follow `{}`\n\n",
             pop.matching,
-            pop.size,
+            pop.sighted,
             pop.convention.as_deref().unwrap_or_default()
         )),
+        "blind" => out.push_str(&format!(
+            "## {name} - blind: {} of {} handlers reach a sink, fewer than {}\n\n",
+            pop.sighted, pop.size, p.min_support
+        )),
         _ => out.push_str(&format!(
-            "## {} - no convention: no signature holds {}% of {} handlers\n\n",
-            pop.service, p.min_share_pct, pop.size
+            "## {name} - no convention: no signature holds {}% of {} sighted handlers\n\n",
+            p.min_share_pct, pop.sighted
         )),
     }
     out.push_str(&format!("- signatures: {}\n\n", sigs.join(", ")));
-    if pop.status != "judged" {
-        return;
+    if pop.status == "judged" {
+        divergence_rows(out, pop, r);
     }
-    let rows: Vec<&Divergence> = r.divergences.iter().filter(|d| d.service == pop.service).collect();
+    blind_rows(out, pop, r);
+}
+
+/// The population's divergences the report lists (delta mode: the touched
+/// ones): its exceptions that are among the report's divergences, so the rows
+/// match the population's (service, package), not the service alone.
+fn divergence_rows(out: &mut String, pop: &Population, r: &PatternReport) {
+    let listed = |e: &Divergence| {
+        r.divergences.iter().any(|d| {
+            d.service == e.service && d.handler == e.handler && d.file == e.file && d.line == e.line
+        })
+    };
+    let rows: Vec<&Divergence> = pop.exceptions.iter().filter(|e| listed(e)).collect();
     if rows.is_empty() {
         if r.delta_mode && !pop.exceptions.is_empty() {
             out.push_str(&format!(
@@ -241,10 +293,36 @@ fn population(out: &mut String, pop: &Population, r: &PatternReport, p: &Pattern
         out.push_str(&format!(
             "| `{}` | {} | `{}` | {} |\n",
             d.handler,
-            route(d),
+            route(d.route_method.as_deref(), d.route_path.as_deref()),
             d.signature,
             at(d.file.as_deref(), d.line)
         ));
+    }
+    out.push('\n');
+}
+
+/// The blind handlers: their count, then a row each the report lists (delta
+/// mode: the touched ones).
+fn blind_rows(out: &mut String, pop: &Population, r: &PatternReport) {
+    let blind = pop.size.saturating_sub(pop.sighted);
+    if blind == 0 {
+        return;
+    }
+    if r.delta_mode {
+        out.push_str(&format!(
+            "- blind (the graph follows no chain): {blind}; touched by the change: {}\n\n",
+            pop.blind.len()
+        ));
+    } else {
+        out.push_str(&format!("- blind (the graph follows no chain): {blind}\n\n"));
+    }
+    if pop.blind.is_empty() {
+        return;
+    }
+    out.push_str("| handler | route | location |\n|---|---|---|\n");
+    for b in &pop.blind {
+        let route = route(b.route_method.as_deref(), b.route_path.as_deref());
+        out.push_str(&format!("| `{}` | {route} | {} |\n", b.handler, at(b.file.as_deref(), b.line)));
     }
     out.push('\n');
 }

@@ -55,44 +55,59 @@
 //!
 //! # Populations and verdicts
 //!
-//! Handlers are grouped by `arch::service_of` under `arch::default_keying`
-//! (the services `glia arch` shows). A handler with ORIGIN provenance
+//! Handlers are grouped by [`GroupBy`]. `Service` (the default) keys a
+//! population by `arch::service_of` under `arch::default_keying` (the
+//! services `glia arch` shows); `Package` keys it by (that service, the
+//! handler file's repo-relative parent directory, `.` at the root): for Go the
+//! package, for other languages the handler's directory. Service stays the
+//! default so a one-directory-per-module service (NestJS) does not split into
+//! populations too small to judge. A handler with ORIGIN provenance
 //! `test_fixture`, `generated` or `generated_proto`, one with no located
 //! file, and one outside `scope` (strict: its located file under the resolved
-//! path) is counted in `excluded` and belongs to no population. A population
-//! below `min_support` gets no verdict (`too_small`, counted in
-//! `skipped_small`). Otherwise its convention is the most frequent signature
-//! that reaches a sink (ties: the lexicographically smallest), declared only
-//! when `count * 100 >= min_share_pct * size` (`judged`, verdict
-//! `matching/size`), else `no_convention`. Every judged handler whose
-//! signature differs is an exception, listed however legitimate it looks (a
-//! health check included).
+//! path) is counted in `excluded` and belongs to no population.
 //!
-//! `handler>(no effect)` is never the convention, whatever its count: it says
-//! the graph followed no chain (an unbound receiver, an unextracted data
-//! access), so as a convention it would turn the one handler the graph CAN
-//! follow into the divergence. It still counts toward the population's size,
-//! and under a declared convention a blind handler is an exception like any
-//! other. (Measured on quokka-stack: 58 of its 59 Go handlers are blind,
-//! `userRepo := Services.UserRepository()` binds no receiver, and LE.4d's
-//! `effects` agrees no sink is reachable from them.)
+//! A member whose signature is `handler>(no effect)` is BLIND: the graph
+//! followed no chain from it (an unbound receiver, an unextracted data
+//! access). The rest are SIGHTED, `sighted = size - blind`. The verdict is
+//! over the sighted members only:
+//!
+//! - `too_small`: `size < min_support` (counted in `skipped_small`);
+//! - `blind`: `sighted < min_support` (or no member is sighted): the graph
+//!   sees too few of the population's chains to name a convention;
+//! - `judged`: the most frequent signature that reaches a sink (ties: the
+//!   lexicographically smallest) holds `count * 100 >= min_share_pct *
+//!   sighted`; it is the convention, verdict `matching/sighted`;
+//! - `no_convention` otherwise.
+//!
+//! Every sighted member of a judged population whose signature differs is an
+//! exception, listed however legitimate it looks (a health check included).
+//! Blind members are never exceptions: a blind handler is "the graph cannot
+//! see", not "this handler differs", so it would count AGAINST a convention it
+//! may well follow. They are listed in the population's `blind` (a
+//! [`BlindHandler`] each, located, by handler qname) whatever its status, and
+//! `handler>(no effect)` keeps its count in `signatures` but is never the
+//! convention. (Measured on quokka-stack a77d4cb, one `turps` population of 59
+//! Go handlers: counted against the share, its 8 blind handlers were 8 of 10
+//! divergences of a 49/59 verdict; over the sighted it is 49/51 with 2.)
 //!
 //! # Delta mode
 //!
 //! [`pattern_conformance_delta`] takes populations and conventions from the
 //! whole after graph and lists as `divergences` only the exceptions a change
 //! touched: the handler, or a node on its path, is added, modified or moved
-//! in the delta, or a hop of its path is an added edge. [`pattern_conformance`]
-//! lists every exception. Populations are ordered by service, exceptions by
-//! (signature, handler qname).
+//! in the delta, or a hop of its path is an added edge; a population's `blind`
+//! keeps only the touched blind handlers (the handler itself added, modified
+//! or moved: a blind handler has no path). [`pattern_conformance`] lists every
+//! exception and every blind handler. Populations are ordered by (service,
+//! package), exceptions by (signature, handler qname).
 //!
 //! # Limits
 //!
 //! Receiver-typed calls (`this.svc.find()`) bind only where Batch C's receiver
 //! typing (A6.2a/b/c) does; an unbound chain stops at the handler and lands in
-//! `handler>(no effect)`, visible in the report. Go cross-package calls
-//! resolve by file stem, so a repository in `repository/repo.go` loses every
-//! call into it and its handlers' chains are incomplete.
+//! `handler>(no effect)`, visible in the report as a blind handler. Go calls
+//! resolve across a package's files and into imported packages (LA.13b);
+//! receivers are typed only by what the parser records (CA.2).
 //!
 //! # Security
 //!
@@ -105,8 +120,8 @@
 //! crate root.
 //!
 //! fired_on marker, one line per answer:
-//! `[patterns] experimental populations=<P> judged=<J> handlers=<H> divergences=<D> skipped_small=<S> role_sources edge=<E> kind=<K> name=<N>`
-//! (grep `^\[patterns\] experimental`), plus in delta mode
+//! `[patterns] experimental populations=<P> judged=<J> handlers=<H> divergences=<D> skipped_small=<S> role_sources edge=<E> kind=<K> name=<N> blind=<B> group_by=<service|package>`
+//! (grep `^\[patterns\] experimental`; `blind` is the report's `blind`), plus in delta mode
 //! `[patterns] delta touched_nodes=<T> added_edges=<A> exceptions=<X> divergences=<D>`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -183,6 +198,8 @@ pub struct PatternArgs {
     pub max_depth: usize,
     /// Keep only handlers located under this path or project label.
     pub scope: Option<String>,
+    /// What keys a population ([`GroupBy::Service`]).
+    pub group_by: GroupBy,
 }
 
 impl Default for PatternArgs {
@@ -192,7 +209,50 @@ impl Default for PatternArgs {
             min_share_pct: DEFAULT_MIN_SHARE_PCT,
             max_depth: DEFAULT_MAX_DEPTH,
             scope: None,
+            group_by: GroupBy::Service,
         }
+    }
+}
+
+/// What keys a population (module docs).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GroupBy {
+    /// The service `glia arch` shows (`arch::service_of`).
+    #[default]
+    Service,
+    /// (service, the handler file's repo-relative parent directory).
+    Package,
+}
+
+impl GroupBy {
+    /// Every choice, in [`GroupBy::as_str`] spelling.
+    pub const CHOICES: [&'static str; 2] = ["service", "package"];
+
+    /// `service` | `package`: the marker's and the surfaces' spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GroupBy::Service => "service",
+            GroupBy::Package => "package",
+        }
+    }
+
+    /// The choice spelled `s` ([`GroupBy::as_str`]), or `None`.
+    pub fn parse(s: &str) -> Option<GroupBy> {
+        match s {
+            "service" => Some(GroupBy::Service),
+            "package" => Some(GroupBy::Package),
+            _ => None,
+        }
+    }
+}
+
+/// The repo-relative parent directory of a handler's file, `.` at the root:
+/// the population key [`GroupBy::Package`] adds.
+pub fn package_of(file: &str) -> String {
+    match file.rsplit_once('/') {
+        Some((dir, _)) if !dir.is_empty() => dir.to_string(),
+        _ => ".".to_string(),
     }
 }
 
@@ -250,28 +310,50 @@ pub struct Divergence {
     pub role_sources: Vec<RoleSource>,
 }
 
-/// The handlers of one service and its verdict.
+/// A handler the graph follows no chain from (`handler>(no effect)`): listed,
+/// never a divergence (module docs).
+#[non_exhaustive]
+#[derive(serde::Serialize, Debug, Clone)]
+pub struct BlindHandler {
+    /// The handler's qname.
+    pub handler: String,
+    pub file: Option<String>,
+    /// 1-based.
+    pub line: Option<i64>,
+    /// From the first ROUTE (in edge order) HANDLED_BY this handler.
+    pub route_method: Option<String>,
+    pub route_path: Option<String>,
+}
+
+/// The handlers of one service (or one package of it) and its verdict.
 #[non_exhaustive]
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct Population {
     pub service: String,
+    /// The handlers' repo-relative directory under [`GroupBy::Package`]
+    /// (`.` at the root); `None` under [`GroupBy::Service`].
+    pub package: Option<String>,
     /// Always `handler`.
     pub role: &'static str,
     pub size: usize,
-    /// `judged` | `no_convention` | `too_small`.
+    /// Members the graph follows a chain from: `size` minus the blind ones.
+    pub sighted: usize,
+    /// `judged` | `no_convention` | `blind` | `too_small`.
     pub status: &'static str,
     pub convention: Option<String>,
     /// Handlers holding the convention; 0 when none is declared.
     pub matching: usize,
-    /// `matching/size` when judged.
+    /// `matching/sighted` when judged.
     pub verdict: Option<String>,
     /// Every signature with its count, by count (descending) then signature.
     pub signatures: Vec<(String, usize)>,
     /// Role -> source -> distinct nodes playing it on the population's paths
     /// (the handlers themselves are not counted).
     pub role_sources: BTreeMap<&'static str, BTreeMap<&'static str, usize>>,
-    /// Every handler off the convention, by (signature, handler qname).
+    /// Every sighted handler off the convention, by (signature, handler qname).
     pub exceptions: Vec<Divergence>,
+    /// Every blind handler, by qname; delta mode: the touched ones.
+    pub blind: Vec<BlindHandler>,
 }
 
 /// [`pattern_conformance`]'s answer.
@@ -295,6 +377,9 @@ pub struct PatternReport {
     pub populations: Vec<Population>,
     /// Whole graph: every exception. Delta mode: the touched ones.
     pub divergences: Vec<Divergence>,
+    /// Blind handlers listed across the populations (whole graph: every one;
+    /// delta mode: the touched ones).
+    pub blind: usize,
 }
 
 /// Pattern conformance over the whole graph (module docs). `repo_labels` keys
@@ -342,7 +427,8 @@ fn report(
     let scope = args.scope.as_deref().map(|s| resolve_scope(merged, s));
 
     let mut excluded: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let mut groups: BTreeMap<String, Vec<Member>> = BTreeMap::new();
+    // (service, package) -> members; the package is `None` under Service.
+    let mut groups: BTreeMap<(String, Option<String>), Vec<Member>> = BTreeMap::new();
     for &(handler, route) in &facts.handlers {
         let Some(fact) = facts.at.get(&handler) else {
             // A HANDLED_BY target no graph's nav names: nothing places it.
@@ -365,8 +451,12 @@ fn report(
             continue;
         }
         let service = service_of(&file, fact.repo, &keying, labels);
+        let package = match args.group_by {
+            GroupBy::Service => None,
+            GroupBy::Package => Some(package_of(&file)),
+        };
         let sig = signature(&adj, &walk, &facts, handler, args.max_depth);
-        groups.entry(service).or_default().push(Member {
+        groups.entry((service, package)).or_default().push(Member {
             handler,
             route,
             sig,
@@ -376,15 +466,16 @@ fn report(
     // Verdicts: per population, its signature counts, convention and the
     // members off it.
     struct Judged {
-        service: String,
         status: &'static str,
         convention: Option<String>,
         matching: usize,
+        sighted: usize,
         signatures: Vec<(String, usize)>,
         exceptions: Vec<usize>,
+        blind: Vec<usize>,
     }
     let mut judged_rows: Vec<Judged> = Vec::new();
-    for (service, members) in &groups {
+    for members in groups.values() {
         let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
         for m in members {
             *counts.entry(m.sig.text.as_str()).or_insert(0) += 1;
@@ -393,33 +484,46 @@ fn report(
             counts.iter().map(|(s, n)| (s.to_string(), *n)).collect();
         signatures.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let size = members.len();
-        // A blind chain is never the convention (module docs).
+        let mut blind: Vec<usize> = (0..size).filter(|&i| members[i].sig.is_blind()).collect();
+        let sighted = size - blind.len();
+        // A blind chain is never the convention, and the share is over the
+        // sighted members (module docs).
         let top = signatures
             .iter()
             .find(|(s, _)| !s.ends_with(NO_EFFECT))
             .cloned();
         let (status, convention, matching) = match top {
             _ if size < args.min_support => ("too_small", None, 0),
-            Some((sig, n)) if n.saturating_mul(100) >= args.min_share_pct.saturating_mul(size) => {
+            _ if sighted == 0 || sighted < args.min_support => ("blind", None, 0),
+            Some((sig, n))
+                if n.saturating_mul(100) >= args.min_share_pct.saturating_mul(sighted) =>
+            {
                 ("judged", Some(sig), n)
             }
             _ => ("no_convention", None, 0),
         };
         let mut exceptions: Vec<usize> = match &convention {
-            Some(c) => (0..size).filter(|&i| members[i].sig.text != *c).collect(),
+            Some(c) => (0..size)
+                .filter(|&i| !members[i].sig.is_blind() && members[i].sig.text != *c)
+                .collect(),
             None => Vec::new(),
         };
         exceptions.sort_by(|&a, &b| {
             (&members[a].sig.text, facts.qname(members[a].handler))
                 .cmp(&(&members[b].sig.text, facts.qname(members[b].handler)))
         });
+        blind.sort_by(|&a, &b| {
+            (facts.qname(members[a].handler), members[a].handler.0)
+                .cmp(&(facts.qname(members[b].handler), members[b].handler.0))
+        });
         judged_rows.push(Judged {
-            service: service.clone(),
             status,
             convention,
             matching,
+            sighted,
             signatures,
             exceptions,
+            blind,
         });
     }
 
@@ -472,7 +576,8 @@ fn report(
     let mut divergences: Vec<Divergence> = Vec::new();
     let mut all_roles: HashMap<NodeId, &'static str> = HashMap::new();
     let mut exception_count = 0usize;
-    for (j, members) in judged_rows.into_iter().zip(groups.values()) {
+    let mut blind_count = 0usize;
+    for (j, ((service, package), members)) in judged_rows.into_iter().zip(&groups) {
         let mut role_nodes: BTreeMap<u64, (&'static str, &'static str)> = BTreeMap::new();
         for m in members {
             for &(id, role, source) in &m.sig.roles {
@@ -531,7 +636,7 @@ fn report(
             let d = Divergence {
                 verdict: "DIVERGENCE",
                 tier: "heuristic",
-                service: j.service.clone(),
+                service: service.clone(),
                 handler: at.qname,
                 file: at.file,
                 line: at.line,
@@ -550,17 +655,42 @@ fn report(
             exceptions.push(d);
         }
         exception_count += exceptions.len();
+        let blind: Vec<BlindHandler> = j
+            .blind
+            .iter()
+            .map(|&i| &members[i])
+            .filter(|m| is_touched(m))
+            .map(|m| {
+                let at = loc.locate(m.handler);
+                let (route_method, route_path) = facts
+                    .at
+                    .get(&m.route)
+                    .map(|r| route_of(r.qname, r.cells))
+                    .unwrap_or((None, None));
+                BlindHandler {
+                    handler: at.qname,
+                    file: at.file,
+                    line: at.line,
+                    route_method,
+                    route_path,
+                }
+            })
+            .collect();
+        blind_count += blind.len();
         populations.push(Population {
-            service: j.service,
+            service: service.clone(),
+            package: package.clone(),
             role: HANDLER,
             size,
+            sighted: j.sighted,
             status: j.status,
-            verdict: (j.status == "judged").then(|| format!("{}/{size}", j.matching)),
+            verdict: (j.status == "judged").then(|| format!("{}/{}", j.matching, j.sighted)),
             convention: j.convention,
             matching: j.matching,
             signatures: j.signatures,
             role_sources,
             exceptions,
+            blind,
         });
     }
 
@@ -577,12 +707,13 @@ fn report(
         .count();
     let count = |s: &str| role_sources.get(s).copied().unwrap_or(0);
     eprintln!(
-        "[patterns] experimental populations={} judged={judged} handlers={handlers} divergences={} skipped_small={skipped_small} role_sources edge={} kind={} name={}",
+        "[patterns] experimental populations={} judged={judged} handlers={handlers} divergences={} skipped_small={skipped_small} role_sources edge={} kind={} name={} blind={blind_count} group_by={}",
         populations.len(),
         divergences.len(),
         count(EDGE),
         count(KIND),
-        count(NAME)
+        count(NAME),
+        args.group_by.as_str()
     );
     if let Some((nodes, edges)) = &touched {
         eprintln!(
@@ -603,6 +734,7 @@ fn report(
         role_sources,
         populations,
         divergences,
+        blind: blind_count,
     }
 }
 
@@ -638,6 +770,13 @@ struct Signature {
     text: String,
     hops: Vec<Hop>,
     roles: Vec<(NodeId, &'static str, &'static str)>,
+}
+
+impl Signature {
+    /// `handler>(no effect)`: the walk reached no sink (module docs).
+    fn is_blind(&self) -> bool {
+        self.text.ends_with(NO_EFFECT)
+    }
 }
 
 /// The walk from `handler` to its first sink (module docs).

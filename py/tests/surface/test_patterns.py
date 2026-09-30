@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """pyo3 surface, py/src/patterns.rs (LE.7b, EXPERIMENTAL):
-`PyGraph.patterns_experimental(min_support=5, min_share=75, scope=None)` and
-the module function `patterns_vs_rev_experimental(repo_path, base="HEAD",
-min_support=5, min_share=75, scope=None)` return the pattern-conformance
+`PyGraph.patterns_experimental(min_support=5, min_share=75, scope=None,
+group_by="service")` and the module function
+`patterns_vs_rev_experimental(repo_path, base="HEAD", min_support=5,
+min_share=75, scope=None, group_by="service")` return the pattern-conformance
 report as a native dict {experimental, delta_mode, handlers, judged,
-skipped_small, excluded, role_sources, populations, divergences}: route
-handlers grouped per service, the most frequent role chain as a population's
-convention, each handler off it a located DIVERGENCE (lines 1-based). Both
-names carry `experimental` and no unsuffixed alias exists. A min_share above
-100 or an engine error raises ValueError. The rev function needs a `git`
-binary. Shared helpers: test_build.py."""
+skipped_small, excluded, role_sources, populations, divergences, blind}: route
+handlers grouped per service (or per service and directory with
+group_by="package", CA.5b), the most frequent role chain of the sighted
+handlers as a population's convention, each sighted handler off it a located
+DIVERGENCE (lines 1-based), each blind one (`handler>(no effect)`) listed in
+the population's `blind`. Both names carry `experimental` and no unsuffixed
+alias exists. A min_share above 100, a group_by other than "service" /
+"package" or an engine error raises ValueError. The rev function needs a
+`git` binary. Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import os
@@ -33,12 +37,12 @@ CONVENTION = "handler>service>repository>db"
 DIRECT_SIGNATURE = "handler>repository>db"
 DIRECT = "handlers::handlers::RawOrderHandler"
 KEYS = ["experimental", "delta_mode", "handlers", "judged", "skipped_small", "excluded", "role_sources",
-        "populations", "divergences"]
-POP_KEYS = ["service", "role", "size", "status", "convention", "matching", "verdict", "signatures",
-            "role_sources", "exceptions"]
+        "populations", "divergences", "blind"]
+POP_KEYS = ["service", "package", "role", "size", "sighted", "status", "convention", "matching", "verdict",
+            "signatures", "role_sources", "exceptions", "blind"]
 DIV_KEYS = ["verdict", "tier", "service", "handler", "file", "line", "route_method", "route_path", "signature",
             "convention", "matching", "population", "path", "role_sources"]
-KW = [("min_support", 5), ("min_share", 75), ("scope", None)]
+KW = [("min_support", 5), ("min_share", 75), ("scope", None), ("group_by", "service")]
 GRAPH_MARKER = "[patterns] experimental surface=pyo3 mode=graph"
 DELTA_MARKER = "[patterns] experimental surface=pyo3 mode=delta"
 
@@ -123,6 +127,9 @@ def main() -> int:
         c.check("population judged 5/6",
                 (pop.get("service"), pop.get("status"), pop.get("verdict"), pop.get("convention"))
                 == ("handlers", "judged", "5/6", CONVENTION), pop)
+        c.check("population keyed by service, every handler sighted",
+                (pop.get("package"), pop.get("size"), pop.get("sighted"), pop.get("blind"), r.get("blind"))
+                == (None, 6, 6, [], 0), pop)
         c.check("signatures are pairs",
                 pop.get("signatures") == [[CONVENTION, 5], [DIRECT_SIGNATURE, 1]], pop.get("signatures"))
         c.check("one divergence", divergent(r) == [DIRECT], divergent(r))
@@ -139,6 +146,15 @@ def main() -> int:
         c.check("surface marker", GRAPH_MARKER in err, err[-400:])
         c.check("engine marker", "[patterns] experimental populations=1 judged=1 handlers=6 divergences=1" in err,
                 err[-400:])
+        c.check("engine marker ends in blind and group_by", " blind=0 group_by=service\n" in err, err[-400:])
+
+        by_pkg, err = stderr_of(lambda: g.patterns_experimental(group_by="package"))
+        c.check("group_by=package keys every population by directory",
+                [(p.get("service"), p.get("package")) for p in by_pkg.get("populations", [])]
+                == [("handlers", "handlers")], by_pkg)
+        c.check("group_by=package marker", " group_by=package\n" in err, err[-400:])
+        c.raises("group_by other than service / package raises", ValueError,
+                 lambda: g.patterns_experimental(group_by="dir"), '"service" or "package"')
 
         small = g.patterns_experimental(min_support=7)
         c.check("min_support: too small", small["skipped_small"] == 1
