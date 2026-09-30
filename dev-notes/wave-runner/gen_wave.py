@@ -6,12 +6,17 @@ wave-runner/{shared_brief.md,baseline.json}, and schedule.py's waves.
 
     python3 gen_wave.py 6 /path/to/wave6.js
     python3 gen_wave.py --leap 0 /path/to/leap-w0.js     # the 0.5.0 leap
+    python3 gen_wave.py --release 051 0 /path/to/r051-w0.js   # the 0.5.1 catch-up leap
 
 --leap reads leap-packets.json through leap_schedule.py and briefs agents with
 shared_brief_leap.md. A Batch C packet's CORRECTION is its standing
 packet-corrections.json entry, then its leap re-verification correction, then
 its leap-corrections.json entry. Wave 0 (the serial splits) and any wave the
 scheduler gives a single packet render as a sequential script.
+
+--release 051 reads leap-051-packets.json through schedule_051.py, briefs agents with
+shared_brief_051.md, and takes each packet's CORRECTION from leap-051-corrections.json.
+Wave 0 (the serial C0 packets) and single-packet waves render sequentially.
 
 Refuses to render a wave whose packets are not all file-disjoint, and prints
 which packets carry no correction so a missing one is a decision, not an
@@ -85,14 +90,36 @@ def leap_inputs(wave):
     return P, claims, waves, ids, corr, brief, serial_run
 
 
+def r051_inputs(wave):
+    import schedule_051
+    P, claims, waves = schedule_051.waves()
+    ids = waves[wave]
+    corr = json.loads((ROOT / "dev-notes" / "leap-051-corrections.json").read_text())["corrections"]
+    brief = ((HERE / "shared_brief_051.md").read_text()
+             .replace("{{WAVE}}", str(wave))
+             .replace("{{LAST}}", str(len(waves) - 1)))
+    return P, claims, waves, ids, {i: corr.get(i) for i in ids}, brief, wave == 0 or len(ids) == 1
+
+
 def main():
     args = sys.argv[1:]
     leap = "--leap" in args
     if leap:
         args.remove("--leap")
+    release = None
+    if "--release" in args:
+        k = args.index("--release")
+        release = args[k + 1]
+        del args[k:k + 2]
+        if release != "051":
+            sys.exit(f"unknown release {release!r} (known: 051)")
     wave, out = int(args[0]), Path(args[1])
     base = json.loads((HERE / "baseline.json").read_text())
-    if leap:
+    if release:
+        P, claims, waves, ids, corr, brief, serial_run = r051_inputs(wave)
+        brief = brief.replace("{{BASELINE}}", render_baseline(base))
+        name, total = f"glia-051-w{wave}", f"W0..W{len(waves) - 1}"
+    elif leap:
         P, claims, waves, ids, corr, brief, serial_run = leap_inputs(wave)
         brief = brief.replace("{{BASELINE}}", render_baseline(base))
         name, total = f"glia-leap-w{wave}", f"W0..W{len(waves) - 1}"

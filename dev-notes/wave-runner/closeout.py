@@ -5,6 +5,8 @@
     python3 closeout.py --leap <wave> <run-id>        the 0.5.0 leap (waves W0..)
     python3 closeout.py --leap <wave> <run1>,<run2>   a packet re-run merged over its wave (later wins)
     python3 closeout.py --leap <wave> --plan-only     print the wave's packets and exit
+    python3 closeout.py --release 051 <wave> <run-id> the 0.5.1 catch-up leap: schedule_051.py,
+                                                      leap-051-corrections.json (ids C*.*), the leap venv
 
 --leap schedules through leap_schedule.py, records the wave's 5-hour usage
 cost (usage_gate.py --end) and prints whether the next wave can start, folds followups into
@@ -92,9 +94,20 @@ def main():
     leap = "--leap" in args
     if leap:
         args.remove("--leap")
+    release = None
+    if "--release" in args:
+        k = args.index("--release")
+        release = args[k + 1]
+        del args[k:k + 2]
+        if release != "051":
+            sys.exit(f"unknown release {release!r} (known: 051)")
     sys.path.insert(0, str(HERE))
     wave = int(args[0])
-    if leap:
+    if release:
+        import schedule_051
+        _, _, waves = schedule_051.waves()
+        ids, remaining = waves[wave], waves[wave + 1:]
+    elif leap:
         import leap_schedule
         waves = leap_schedule.schedule(*leap_schedule.load())
         ids, remaining = waves[wave], waves[wave + 1:]
@@ -113,7 +126,7 @@ def main():
     gates, lines = [], []
     say = lambda s: (print(s), lines.append(s))
     engine_pkg, py_pkg = package_name("engine"), package_name("py")
-    py = LEAP_PY if leap else "python3"   # every command that imports the wheel (glia_py)
+    py = LEAP_PY if (leap or release) else "python3"   # every command that imports the wheel (glia_py)
 
     got = {}
     for run in runs:
@@ -130,6 +143,7 @@ def main():
 
     dirty, _ = sh("git status --short")
     dirty = [l for l in dirty.splitlines() if l.strip() and "packet-corrections.json" not in l
+             and "leap-051-corrections.json" not in l
              and "usage-log.jsonl" not in l]
     if dirty:
         gates.append(f"uncommitted paths: {dirty[:6]}")
@@ -143,7 +157,7 @@ def main():
         gates.append(f"/tmp free {free_gb:.1f}G < 8G")
     out, _ = sh("cargo test --workspace --quiet 2>&1", timeout=2400)
     # Keep the full output: a one-line count cannot say which test or crate failed.
-    (Path("/tmp/claude-1000/-home-ivy-Code-glia/wf") / f"ws-test-{'leap-' if leap else ''}w{wave}.log").write_text(out)
+    (Path("/tmp/claude-1000/-home-ivy-Code-glia/wf") / f"ws-test-{'r051-' if release else 'leap-' if leap else ''}w{wave}.log").write_text(out)
     passed = sum(int(m) for m in re.findall(r"test result: ok\. (\d+) passed", out))
     failed = sum(int(m) for m in re.findall(r"(\d+) failed", out))
     comp = len(re.findall(r"^error(\[E\d+\])?:", out, re.M))
@@ -226,8 +240,9 @@ def main():
     tm, _ = sh(f"{py} test_matrix.py 2>&1 | tail -1", cwd=SG)
     tg, _ = sh(f"{py} test_grade.py 2>&1 | tail -1", cwd=SG)
     full, part, none_, unk = map(int, m.groups()) if m else (0, 0, 0, 0)
-    covered = 480 - unk
-    say(f"== matrix: {full} full, {part} partial, {none_} none, {unk} unknown = {covered}/480 | check={chk} | legacy check={lchk} | test_matrix: {tm.strip()} | test_grade: {tg.strip()}")
+    grid = full + part + none_ + unk
+    covered = grid - unk
+    say(f"== matrix: {full} full, {part} partial, {none_} none, {unk} unknown = {covered}/{grid} | check={chk} | legacy check={lchk} | test_matrix: {tm.strip()} | test_grade: {tg.strip()}")
     if chk:
         gates.append("matrix --check")
     if " 0 failed" not in tm:
@@ -237,8 +252,12 @@ def main():
 
     # fold followups into remaining packets
     rem = {p for w in remaining for p in w}
-    pat = re.compile(r"\b(A\d+\.\d+[a-z]?|L[A-G0]\.\d+[a-z]?)\b" if leap else r"\b(A\d+\.\d+[a-c]?)\b")
-    cp = ROOT / ("dev-notes/leap-corrections.json" if leap else "dev-notes/packet-corrections.json")
+    if release:
+        pat = re.compile(r"\b(C[0A-Z]\.\d+[a-z]?)\b")
+        cp = ROOT / "dev-notes/leap-051-corrections.json"
+    else:
+        pat = re.compile(r"\b(A\d+\.\d+[a-z]?|L[A-G0]\.\d+[a-z]?)\b" if leap else r"\b(A\d+\.\d+[a-c]?)\b")
+        cp = ROOT / ("dev-notes/leap-corrections.json" if leap else "dev-notes/packet-corrections.json")
     cf = json.loads(cp.read_text())
     folded = {}
     for r in res:
@@ -262,14 +281,14 @@ def main():
                            "blind_spot_detail": f"blind: {bsl}; missing nodes: {mnl}; missing cells: {mcl}. "
                                                 "Those present at wave start are deliberate baselines for later packets unless your packet owns them."})
     base["matrix_py"] = {"full": full, "partial": part, "none": none_, "unknown": unk, "covered": covered,
-                         "grid": 480, "invalid_cell_declarations": 0, "check_exit": chk}
+                         "grid": grid, "invalid_cell_declarations": 0, "check_exit": chk}
     base["test_matrix_py"] = tm.strip()
     base["test_grade_py"] = tg.strip()
     (HERE / "baseline.json").write_text(json.dumps(base, indent=2))
 
-    sp = HERE / ("leap_schedule.py" if leap else "schedule.py")
+    sp = HERE / ("schedule_051.py" if release else "leap_schedule.py" if leap else "schedule.py")
     s = sp.read_text()
-    if leap:
+    if leap or release:
         m = re.search(r"^LANDED = \{(.*?)\}$", s, re.M | re.S)
         if f"    {wave}: " not in m.group(1):
             body = m.group(1).rstrip("\n") + f'\n    {wave}: "{" ".join(ids)}",\n'
@@ -284,11 +303,12 @@ def main():
         gates.append("schedule --verify")
 
     if remaining:
-        flag = "--leap " if leap else ""
-        out, _ = sh(f"python3 dev-notes/wave-runner/gen_wave.py {flag}{wave+1} /tmp/claude-1000/-home-ivy-Code-glia/wf/{'leap-' if leap else ''}wave{wave+1}.js")
+        flag = "--release 051 " if release else "--leap " if leap else ""
+        tag = "r051-" if release else "leap-" if leap else ""
+        out, _ = sh(f"python3 dev-notes/wave-runner/gen_wave.py {flag}{wave+1} /tmp/claude-1000/-home-ivy-Code-glia/wf/{tag}wave{wave+1}.js")
         say("== " + out.strip().replace("\n", " | "))
 
-    if leap:
+    if leap or release:
         # Record this wave's 5-hour usage cost and say whether the next wave can start (usage_gate.py).
         sh(f"python3 dev-notes/wave-runner/usage_gate.py --end W{wave}")
         out, _ = sh("python3 dev-notes/wave-runner/usage_gate.py")
@@ -297,13 +317,13 @@ def main():
     if gates:
         say(f"!! NOT COMMITTING — gates failed: {gates}")
         sys.exit(1)
-    what = f"leap wave W{wave}" if leap else f"wave {wave}"
-    msg = (f"bench+plan: {what} landed — {passed} tests, {fixtures} fixtures, matrix {covered}/480\n\n"
-           + "\n".join(lines) + "\n\nCo-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>\n"
-           + "Claude-Session: https://claude.ai/code/session_01DeZg4LEQveWWZQ1ZL1bZvd\n")
+    what = f"0.5.1 wave W{wave}" if release else f"leap wave W{wave}" if leap else f"wave {wave}"
+    msg = (f"bench+plan: {what} landed — {passed} tests, {fixtures} fixtures, matrix {covered}/{grid}\n\n"
+           + "\n".join(lines) + "\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"
+           + "Claude-Session: https://claude.ai/code/session_01U92Fg6cfqUfbvx14qoM6iw\n")
     Path("/tmp/claude-1000/-home-ivy-Code-glia/closeout.msg").write_text(msg)
     out, rc = sh("git add bench/substrate-gap/results-latest.json bench/substrate-gap/COVERAGE.md bench/substrate-gap/legacy-latest.json "
-                 "dev-notes/packet-corrections.json dev-notes/leap-corrections.json dev-notes/wave-runner && "
+                 "dev-notes/packet-corrections.json dev-notes/leap-corrections.json dev-notes/leap-051-corrections.json dev-notes/wave-runner && "
                  "git -c user.name='james chahwan' commit -q -F /tmp/claude-1000/-home-ivy-Code-glia/closeout.msg && git log --oneline -1")
     say(f"== committed: {out.strip()}" if rc == 0 else f"!! commit failed: {out}")
 

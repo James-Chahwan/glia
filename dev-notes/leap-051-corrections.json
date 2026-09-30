@@ -1,0 +1,8 @@
+{
+ "generated": "2026-09-30",
+ "applies_to": "dev-notes/leap-051-packets.json (glia 0.5.1 catch-up leap)",
+ "rule": "A correction OVERRIDES its packet's spec wherever they disagree. closeout.py --release 051 folds each landed packet's followups that name a later C*.* packet in here.",
+ "corrections": {
+  "CF.13a": "ORCHESTRATOR (2026-09-30, after the spec): dev-notes/wave-runner/closeout.py no longer hardcodes 480. It computes `grid = full + part + none_ + unk` from matrix.py's summary counts, so `grep -n '480' closeout.py` already prints nothing at HEAD. Your closeout edit is to parse the appended `, <n> n/a` count and keep the n/a cells out of `covered` (covered = full + part + none), reporting `covered/(grid)` with the n/a count alongside. The `--release 051` mode is also new there; leave it as it is."
+ }
+}
