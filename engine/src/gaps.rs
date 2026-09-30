@@ -13,7 +13,7 @@
 //!
 //! | category | what | tier | suggest |
 //! |---|---|---|---|
-//! | `unpaired_endpoint` | an ENDPOINT (not `<unresolved>`) with no outgoing HTTP_CALLS | fact; heuristic when its ENDPOINT_HIT records a `host` (it may be a third-party API) | `constants` for a `${…}` / `/{}` path, `route_prefix\|edge` when a route of its method (or `ANY`) has a path that is a proper suffix of it (`detail` names it), else `edge` |
+//! | `unpaired_endpoint` | an ENDPOINT (not `<unresolved>`) with no outgoing HTTP_CALLS, and not one whose ORIGIN provenance is `external` (every call site names a public host outside the build, CA-13: a third-party API is not a gap) | fact; heuristic when its ENDPOINT_HIT records a `host` (it may be a third-party API) | `constants` for a `${…}` / `/{}` path, `route_prefix\|edge` when a route of its method (or `ANY`) has a path that is a proper suffix of it (`detail` names it), else `edge` |
 //! | `ambiguous_endpoint` | an ENDPOINT whose HTTP_CALLS targets span >= 2 repos or >= 2 project roots | fact | `constants\|route_prefix` |
 //! | `unresolved_endpoint` | `endpoint:<M>:<unresolved>` with no outgoing HTTP_CALLS; `detail` names its owner (the CALLS / USES predecessor) | fact | `wrapper` |
 //! | `wrapped_sink` | an `unresolved_endpoint` whose every owner is named like a declared http `[[wrapper]]` (the owner's last qname segment equals the stanza's `call` after its last `.` / `::`, in the owner's repo): the sink is real, its identity now lives at the wrapper's call sites (LF.2e mints them); informational | fact | `none` |
@@ -912,7 +912,8 @@ fn collect_rows(
                         None => {}
                     }
                 } else if targets.is_empty() {
-                    if want(UNPAIRED_ENDPOINT) {
+                    // CG.4b: a third-party endpoint is labelled, not missing.
+                    if want(UNPAIRED_ENDPOINT) && !provenance_is(n.cells, "external") {
                         let norm = normalise_http_path(path);
                         let suffix = routes
                             .iter()

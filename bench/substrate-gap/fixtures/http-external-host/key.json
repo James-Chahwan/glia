@@ -1,0 +1,57 @@
+{
+  "framework": "http-external-host",
+  "language": "typescript",
+  "dirs": [
+    "web",
+    "server"
+  ],
+  "mechanism": "http_client",
+  "cells": [
+    "typescript/http_client"
+  ],
+  "note": "CA-13: a client call whose own literal names a public host that no service / project of the build and no URL constant of the client's repo names (quokka's forwardGeocode -> nominatim.openstreetmap.org/search) is an external endpoint: its ENDPOINT_HIT gains \"external\":true, the HTTP resolver leaves it unpaired even when the app serves the same path, and it carries ORIGIN provenance external (engram-export exports the provenance). Controls: a host folded from environment.apiUrl, and the same host written literally, both pair as today. Baseline (HEAD 2170ff8, leap wheel): HTTP_CALLS 2/2, CALLS 1/1, ENDPOINT_HIT 0/1, ORIGIN 0/1, FORBID VIOLATIONS 1 (the external endpoint pairs with the app's GET /search).",
+  "expect_edges": [
+    {
+      "from": "endpoint:GET:/products",
+      "to": "GET /products",
+      "category": "HTTP_CALLS",
+      "note": "CONTROL: host from a configured constant (environment.apiUrl)"
+    },
+    {
+      "from": "endpoint:GET:/orders",
+      "to": "GET /orders",
+      "category": "HTTP_CALLS",
+      "note": "CONTROL: literal host that the repo's configuration names (api.shop.io)"
+    },
+    {
+      "from": "src::geo::forwardGeocode",
+      "to": "endpoint:GET:/search",
+      "category": "CALLS",
+      "note": "the external endpoint keeps its caller"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "ENDPOINT",
+      "node": "endpoint:GET:/search",
+      "cell": "ORIGIN",
+      "contains": "external",
+      "note": "provenance external"
+    },
+    {
+      "kind": "ENDPOINT",
+      "node": "endpoint:GET:/search",
+      "cell": "ENDPOINT_HIT",
+      "contains": "\"external\":true",
+      "note": "the per-site mark the resolver reads"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "endpoint:GET:/search",
+      "to": "GET /search",
+      "category": "HTTP_CALLS",
+      "note": "PRECISION: nominatim's /search is not the app's GET /search route"
+    }
+  ]
+}

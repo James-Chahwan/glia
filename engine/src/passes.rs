@@ -779,20 +779,51 @@ fn is_identifier(s: &str) -> bool {
 /// the cross-repo resolvers (`PackageResolver` pairs `package:npm:*`,
 /// `EventBusResolver` pairs `event_*`), so they are NOT dropped here — only
 /// categorised. (glia-v2 G6/G9/G11)
+///
+/// CG.4b (CA-13): an ENDPOINT the HTTP resolver left out of pairing as a
+/// third-party call (every call site marked external by the endpoint fold,
+/// no host naming a service / project of the build:
+/// `HttpStackResolver::third_party_endpoints`) that nothing else pairs
+/// either (no HTTP_CALLS edge from it at all, resolver or overlay `[[edge]]`)
+/// is stamped `external`. That is the one coordinate engram-export and
+/// neuropil read, and Engram's default drop list keeps it: labelled, not
+/// dropped. It is the last arm, so an external endpoint only a test file
+/// calls stays `test_fixture`. It is the one provenance that depends on
+/// which repos were built together, so a stamp of it that no longer holds
+/// (a layout merge, LC.10b, that brings the host's project) is removed
+/// before the stamping, on every entry of the id.
 pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph) {
+    use std::collections::HashSet;
+
     use glia_code_domain::{cell_type, node_kind};
     use glia_core::{Cell, CellPayload};
+
+    let third_party = glia_graph::HttpStackResolver::third_party_endpoints(&merged.graphs);
+    // Only probed; not built at all when no endpoint is third-party.
+    let paired: HashSet<NodeId> = if third_party.is_empty() {
+        HashSet::new()
+    } else {
+        merged
+            .all_edges()
+            .filter(|e| e.category == edge_category::HTTP_CALLS)
+            .map(|e| e.from)
+            .collect()
+    };
+    let external = |id: &NodeId| third_party.contains(id) && !paired.contains(id);
 
     let mut stats = ProvenanceStats::default();
     for g in &mut merged.graphs {
         let nodes = &mut g.nodes;
         let nav = &g.nav;
         for n in nodes.iter_mut() {
+            let kind = nav.kind_by_id.get(&n.id).copied();
+            if kind == Some(node_kind::ENDPOINT) && !external(&n.id) {
+                n.cells.retain(|c| !is_external_origin(c));
+            }
             // Don't double-tag (region anchors are tagged at creation).
             if n.cells.iter().any(|c| c.kind == cell_type::ORIGIN) {
                 continue;
             }
-            let kind = nav.kind_by_id.get(&n.id).copied();
             let qname = nav.qname_by_id.get(&n.id).map(String::as_str).unwrap_or("");
             let file = position_file(&n.cells).unwrap_or_default();
             let provenance = if matches!(kind, Some(node_kind::PACKAGE_DEP)) {
@@ -825,6 +856,9 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph) {
                     stats.test_fixture_qname += 1;
                 }
                 "test_fixture"
+            } else if kind == Some(node_kind::ENDPOINT) && external(&n.id) {
+                // A third-party HTTP endpoint (CG.4b, see the doc above).
+                EXTERNAL
             } else {
                 continue;
             };
@@ -840,6 +874,18 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph) {
     }
 }
 
+/// The provenance of a third-party HTTP endpoint (CG.4b).
+const EXTERNAL: &str = "external";
+
+/// The ORIGIN cell `tag_synthetic_provenance` writes for [`EXTERNAL`], and
+/// only that cell: an ORIGIN another stage wrote is never taken for it.
+fn is_external_origin(c: &glia_core::Cell) -> bool {
+    use glia_code_domain::cell_type;
+    use glia_core::CellPayload;
+    c.kind == cell_type::ORIGIN
+        && matches!(&c.payload, CellPayload::Json(j) if j == r#"{"provenance":"external"}"#)
+}
+
 /// ORIGIN cells one `tag_synthetic_provenance` run stamped, by provenance;
 /// `test_fixture` split by whether the path rule fired or only the qname rule.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -850,6 +896,9 @@ struct ProvenanceStats {
     generated: usize,
     dependency: usize,
     synthetic: usize,
+    /// CG.4b: node ENTRIES stamped `external` (an id in two graphs of a repo
+    /// counts twice, like every other provenance here).
+    external: usize,
 }
 
 impl ProvenanceStats {
@@ -861,6 +910,7 @@ impl ProvenanceStats {
             "generated" => self.generated += 1,
             "dependency" => self.dependency += 1,
             "synthetic" => self.synthetic += 1,
+            EXTERNAL => self.external += 1,
             _ => {}
         }
     }
@@ -868,18 +918,23 @@ impl ProvenanceStats {
     /// The fired_on line, `None` when the run stamped nothing.
     fn marker(&self) -> Option<String> {
         let test_fixture = self.test_fixture_path + self.test_fixture_qname;
-        let total =
-            test_fixture + self.generated_proto + self.generated + self.dependency + self.synthetic;
+        let total = test_fixture
+            + self.generated_proto
+            + self.generated
+            + self.dependency
+            + self.synthetic
+            + self.external;
         (total > 0).then(|| {
             format!(
                 "[provenance] test_fixture={test_fixture} (path={} qname={}) generated_proto={} \
-                 generated={} dependency={} synthetic={}",
+                 generated={} dependency={} synthetic={} external={}",
                 self.test_fixture_path,
                 self.test_fixture_qname,
                 self.generated_proto,
                 self.generated,
                 self.dependency,
                 self.synthetic,
+                self.external,
             )
         })
     }
@@ -2105,16 +2160,97 @@ mod passes_tests {
     fn provenance_marker_counts_path_apart_from_qname() {
         assert_eq!(ProvenanceStats::default().marker(), None);
         let mut s = ProvenanceStats { test_fixture_path: 3, test_fixture_qname: 2, ..Default::default() };
-        for p in ["generated_proto", "generated", "generated", "dependency", "synthetic", "test_fixture"] {
+        for p in ["generated_proto", "generated", "generated", "dependency", "synthetic", "test_fixture", "external"] {
             s.count(p);
         }
         assert_eq!(
             s.marker().as_deref(),
             Some(
                 "[provenance] test_fixture=5 (path=3 qname=2) generated_proto=1 generated=2 \
-                 dependency=1 synthetic=1"
+                 dependency=1 synthetic=1 external=1"
             )
         );
+        let only_external = ProvenanceStats { external: 2, ..Default::default() };
+        assert!(only_external.marker().is_some_and(|m| m.ends_with(" external=2")));
+    }
+
+    /// The ORIGIN payloads of every entry of `id`.
+    fn origins(m: &MergedGraph, id: NodeId) -> Vec<String> {
+        m.graphs
+            .iter()
+            .flat_map(|g| &g.nodes)
+            .filter(|n| n.id == id)
+            .flat_map(|n| &n.cells)
+            .filter(|c| c.kind == cell_type::ORIGIN)
+            .filter_map(|c| match &c.payload {
+                CellPayload::Json(j) => Some(j.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// CG.4b: ORIGIN `external` needs every call site marked (the literal
+    /// payload CG.4a's endpoint fold writes), a host naming nothing in the
+    /// build, and no HTTP_CALLS from the node, resolver or overlay alike. A
+    /// test-file endpoint stays `test_fixture`, and a stamp that no longer
+    /// holds (a merge paired it) is taken back, on every entry.
+    #[test]
+    fn external_endpoint_origin_needs_every_site_and_no_pair() {
+        const EXT: &str = r#"{"method":"GET","path":"/search","file":"src/geo.ts","line":4,"col":10,"confidence":"strong","raw":"https://nominatim.openstreetmap.org/search?q=${…}&format=json","host":"nominatim.openstreetmap.org","external":true}"#;
+        const PLAIN: &str = r#"{"method":"GET","path":"/geo","file":"src/geo.ts","line":9,"col":10,"confidence":"strong","raw":"https://nominatim.openstreetmap.org/geo","host":"nominatim.openstreetmap.org"}"#;
+        let hit = |j: &str| Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Json(j.into()) };
+        let stamped = || Cell {
+            kind: cell_type::ORIGIN,
+            payload: CellPayload::Json(r#"{"provenance":"external"}"#.into()),
+        };
+        let spec_file = Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(r#"{"file":"src/geo.spec.ts","start_line":3,"end_line":3}"#.into()),
+        };
+        let ep = node_kind::ENDPOINT;
+
+        let mut web = Hand::new("test://cg4b-web");
+        let all = web.add(ep, "endpoint:GET:/search", "endpoint:GET:/search", vec![hit(EXT), hit(EXT)]);
+        let mixed = web.add(ep, "endpoint:GET:/geo", "endpoint:GET:/geo", vec![hit(EXT)]);
+        let wired = web.add(ep, "endpoint:GET:/lookup", "endpoint:GET:/lookup", vec![hit(EXT)]);
+        let in_test = web.add(ep, "endpoint:GET:/reverse", "endpoint:GET:/reverse", vec![hit(EXT), spec_file]);
+        let merged_in =
+            web.add(ep, "endpoint:GET:/status", "endpoint:GET:/status", vec![hit(EXT), stamped()]);
+        let kept = web.add(ep, "endpoint:GET:/place", "endpoint:GET:/place", vec![hit(EXT), stamped()]);
+        let web = web.graph();
+        // A second graph of the same repo holds /geo's unmarked site alone,
+        // and a second entry of the stale /status stamp.
+        let mut twin = Hand::new("test://cg4b-web");
+        twin.add(ep, "endpoint:GET:/search", "endpoint:GET:/search", vec![hit(EXT)]);
+        twin.add(ep, "endpoint:GET:/geo", "endpoint:GET:/geo", vec![hit(PLAIN)]);
+        twin.add(ep, "endpoint:GET:/status", "endpoint:GET:/status", vec![hit(EXT), stamped()]);
+        let mut server = Hand::new("test://cg4b-server");
+        let route = server.route("GET", "/lookup");
+        let mut m = MergedGraph::new(vec![web, twin.graph(), server.graph()]);
+        for from in [wired, merged_in] {
+            m.cross_edges.push(Edge::new(from, route, edge_category::HTTP_CALLS, Confidence::Weak));
+        }
+
+        tag_synthetic_provenance(&mut m);
+        let external = vec![r#"{"provenance":"external"}"#.to_string()];
+        assert_eq!(origins(&m, all), [external.clone(), external.clone()].concat(), "both entries");
+        assert!(origins(&m, mixed).is_empty(), "one unmarked site, on the other entry");
+        assert!(origins(&m, wired).is_empty(), "an HTTP_CALLS edge pairs it");
+        assert_eq!(origins(&m, in_test), vec![r#"{"provenance":"test_fixture"}"#.to_string()]);
+        assert!(origins(&m, merged_in).is_empty(), "the stale stamp is taken back on both entries");
+        assert_eq!(origins(&m, kept), external, "a stamp that holds is kept, never doubled");
+
+        // A re-run changes nothing.
+        let before: Vec<Vec<String>> = [all, mixed, wired, in_test, merged_in, kept]
+            .iter()
+            .map(|id| origins(&m, *id))
+            .collect();
+        tag_synthetic_provenance(&mut m);
+        let after: Vec<Vec<String>> = [all, mixed, wired, in_test, merged_in, kept]
+            .iter()
+            .map(|id| origins(&m, *id))
+            .collect();
+        assert_eq!(before, after);
     }
 
     #[test]

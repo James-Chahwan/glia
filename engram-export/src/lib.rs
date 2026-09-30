@@ -1673,6 +1673,32 @@ mod tests {
         assert_eq!(stats.dropped_noise, 0);
     }
 
+    /// CG.4b: a third-party HTTP endpoint (ORIGIN `external`, stamped by the
+    /// engine's provenance pass) is exported by default and carries its
+    /// provenance, so Engram keeps it and can tell it apart.
+    #[test]
+    fn external_endpoint_keeps_its_provenance() {
+        let repo = RepoId(1);
+        let id = NodeId(7);
+        let mut nav = CodeNav::default();
+        nav.record(id, "endpoint:GET:/search", "endpoint:GET:/search", node_kind::ENDPOINT, None);
+        let g = RepoGraph {
+            repo,
+            nodes: vec![Node { id, repo, confidence: Confidence::Medium, cells: vec![origin_cell("external")] }],
+            edges: vec![],
+            nav,
+            symbols: Default::default(),
+            unresolved_calls: Vec::new(),
+            unresolved_refs: Vec::new(),
+            properties: Default::default(),
+        };
+        let merged = MergedGraph::new(vec![g]);
+        let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
+        let ep = gmap.nodes.iter().find(|n| n.key == "endpoint:GET:/search");
+        assert_eq!(ep.and_then(|n| n.provenance.as_deref()), Some("external"), "{:?}", gmap.nodes);
+        assert_eq!(stats.dropped_noise, 0);
+    }
+
     #[test]
     fn exclude_glob_drops_by_key() {
         let merged = three_node_graph();

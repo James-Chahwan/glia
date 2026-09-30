@@ -1,14 +1,15 @@
 //! HTTP stack resolver — frontend Endpoint → backend Route by
 //! (method, normalised path).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_code_domain::endpoint::{is_canonical_http_path, split_owner};
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
 
 use super::host::{
-    HostScoped, Narrowed, Owners, build_service_alias_index, hit_hosts, narrow_by_host, raw_field,
+    AliasIndex, HostScoped, Narrowed, Owners, build_service_alias_index, hit_hosts, host_name,
+    narrow_by_host, normalise_alias, raw_field,
 };
 use super::{CrossGraphResolver, RuleTally, weakest};
 use crate::merged::MergedGraph;
@@ -44,6 +45,14 @@ use crate::types::RepoGraph;
 /// LF.2d: [`HttpStackResolver::resolve_with_mounts`] also indexes every ROUTE
 /// at the gateway paths a [`RouteMounts`] names for it. The trait's `resolve`
 /// is that call with no mounts.
+///
+/// CG.4b (CA-13): an ENDPOINT whose every call site the engine marked
+/// external (`"external":true` on each ENDPOINT_HIT, CG.4a) and none of whose
+/// hosts names a service / project alias of the build (`host_names_an_alias`)
+/// is a third-party call: it pairs with nothing and is left out of the
+/// `[http] endpoints=` count, like `<unresolved>`. fired_on, when one was:
+/// `[http-external] <n> endpoints left unpaired: every call site names a host outside the build (hosts=<k>)`.
+/// The engine's `tag_synthetic_provenance` then stamps it ORIGIN `external`.
 pub struct HttpStackResolver;
 
 impl CrossGraphResolver for HttpStackResolver {
@@ -111,6 +120,26 @@ impl CrossGraphResolver for MountedHttpResolver<'_> {
 }
 
 impl HttpStackResolver {
+    /// CG.4b (CA-13): the ENDPOINT ids this resolver leaves out of pairing as
+    /// third-party calls (see the type doc), by the one predicate the resolver
+    /// applies, so a post-pass can label them without a second copy of it
+    /// (the engine's `tag_synthetic_provenance` stamps ORIGIN `external` on
+    /// the ones nothing else paired). Only probed: no order is promised.
+    ///
+    /// The alias index is built with no route owners: owners scope an alias,
+    /// they never add or remove one, and only the alias NAMES are read here.
+    pub fn third_party_endpoints(graphs: &[RepoGraph]) -> HashSet<NodeId> {
+        let (aliases, _) = build_service_alias_index(graphs, &Owners::default());
+        collect_endpoints(graphs)
+            .into_iter()
+            .filter(|ep| {
+                parse_endpoint_qname(ep.qname).is_some_and(|(_, path)| path != UNRESOLVED_PATH)
+                    && third_party_hosts(&aliases, &ep.cells).is_some()
+            })
+            .map(|ep| ep.id)
+            .collect()
+    }
+
     /// This resolver with `mounts` applied, as a [`CrossGraphResolver`].
     pub fn with_mounts(mounts: &RouteMounts) -> MountedHttpResolver<'_> {
         MountedHttpResolver { mounts }
@@ -152,6 +181,14 @@ impl HttpStackResolver {
             if raw_path == UNRESOLVED_PATH {
                 continue;
             }
+            // CA-13: a third-party call pairs with nothing, even when the app
+            // serves the same path. Skipped before it is counted, like
+            // `<unresolved>`.
+            if let Some(external) = third_party_hosts(&aliases, &ep.cells) {
+                stats.external += 1;
+                stats.external_hosts.extend(external);
+                continue;
+            }
             stats.endpoints += 1;
             stats.count_folds(raw_path);
             stats.count_client_normalised(ep.cells.iter().copied());
@@ -189,9 +226,70 @@ impl HttpStackResolver {
         stats.report_client_normalised();
         stats.report_mounts(mounts);
         stats.report_host_narrowed(aliases.len());
+        stats.report_external();
         stats.report_owner_narrowed(project_aliases);
         stats.report_owners(&owners);
     }
+}
+
+/// CA-13 (CG.4b): every call site of a client ENDPOINT is a third-party
+/// call: at least one ENDPOINT_HIT, and every ENDPOINT_HIT payload carries the
+/// `"external":true` mark the engine's endpoint fold writes (CG.4a: a host
+/// written in the call's own literal, public, and named by no URL constant of
+/// the client's repo). One unmarked site, or a non-JSON hit, and it is not.
+fn all_sites_external<'c>(cells: impl IntoIterator<Item = &'c Cell>) -> bool {
+    let mut seen = false;
+    for c in cells {
+        if c.kind != cell_type::ENDPOINT_HIT {
+            continue;
+        }
+        match &c.payload {
+            CellPayload::Json(json) if json.contains(EXTERNAL_MARK) => seen = true,
+            _ => return false,
+        }
+    }
+    seen
+}
+
+/// CA-13: the hosts of a third-party ENDPOINT, or None when it is not one.
+/// It is one when [`all_sites_external`] holds for its call sites and none of
+/// their hosts names a service / project of the build
+/// ([`host_names_an_alias`]).
+fn third_party_hosts(aliases: &AliasIndex, cells: &[&Cell]) -> Option<Vec<String>> {
+    if !all_sites_external(cells.iter().copied()) {
+        return None;
+    }
+    let hosts = hit_hosts(cells.iter().copied()).unwrap_or_default();
+    (!hosts.iter().any(|h| host_names_an_alias(aliases, h))).then_some(hosts)
+}
+
+/// The key CG.4a appends to an external site's ENDPOINT_HIT payload.
+const EXTERNAL_MARK: &str = "\"external\":true";
+
+/// Host labels that name no service: a public host's `api.` / `www.` says
+/// nothing about WHOSE api it is, so they are never compared with the alias
+/// keys (quokka's `app` project would otherwise claim `app.example.io`).
+const GENERIC_HOST_LABELS: &[&str] = &[
+    "api", "www", "app", "web", "cdn", "static", "gateway", "backend", "server", "service",
+];
+
+/// CA-13: does a public `host` name a service or project of this build? The
+/// whole host is looked up as [`narrow_by_host`] does, then every label of it
+/// but the last (the TLD) that is not in [`GENERIC_HOST_LABELS`], each through
+/// [`normalise_alias`]: `api.kinaswap.com` names a project called `kinaswap`
+/// even with no URL constant; `nominatim.openstreetmap.org` names nothing in
+/// a build without an `openstreetmap` / `nominatim` project.
+fn host_names_an_alias(aliases: &AliasIndex, host: &str) -> bool {
+    let host = host_name(host).to_ascii_lowercase();
+    if aliases.contains_key(&normalise_alias(&host)) {
+        return true;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    let named = labels.len().saturating_sub(1);
+    labels[..named]
+        .iter()
+        .filter(|l| !l.is_empty() && !GENERIC_HOST_LABELS.contains(l))
+        .any(|l| aliases.contains_key(&normalise_alias(l)))
 }
 
 /// One client ENDPOINT node, however many graph entries carry it.
@@ -364,6 +462,10 @@ struct HttpMatchStats {
     mount_routes: usize,
     mount_keys: usize,
     mount_hits: usize,
+    /// CA-13 (CG.4b): ENDPOINT nodes left unpaired because every call site
+    /// names a public host outside the build, and those hosts.
+    external: usize,
+    external_hosts: BTreeSet<String>,
 }
 
 /// LB.5's permanent detector: ROUTE / ENDPOINT qnames whose path part is not
@@ -579,6 +681,19 @@ impl HttpMatchStats {
         eprintln!(
             "[http-host] narrowed {} endpoint pairings by service host ({aliases} aliases)",
             self.host_narrowed,
+        );
+    }
+
+    /// CG.4b fired_on marker. Printed only when an endpoint was left out of
+    /// pairing as a third-party call, so every build without one is silent.
+    fn report_external(&self) {
+        if self.external == 0 {
+            return;
+        }
+        eprintln!(
+            "[http-external] {} endpoints left unpaired: every call site names a host outside the build (hosts={})",
+            self.external,
+            self.external_hosts.len(),
         );
     }
 
@@ -2015,6 +2130,90 @@ mod tests {
         let (index, _, _) = build_route_index(&merged.graphs, &[], &RouteMounts::default(), &mut stats);
         assert_eq!(stats.routes, 1);
         assert_eq!(index.get(&("GET".to_string(), "/user/2fa".to_string())).map(Vec::len), Some(1));
+    }
+
+    /// CG.4b (CA-13): a web repo whose ENDPOINT `endpoint:GET:/search` carries
+    /// `hits`, and a server repo serving `GET /search` beside a nested
+    /// PROJECT labelled `project`. Returns the HTTP_CALLS count and what
+    /// [`third_party_hosts`] said of the endpoint over the same alias index.
+    fn pair_search(hits: Vec<Cell>, project: &str) -> (usize, Option<Vec<String>>) {
+        let (web, _) = repo_graph(RepoId(501), vec![(node_kind::ENDPOINT, "endpoint:GET:/search", hits)]);
+        let (mut server, ids) = repo_graph(
+            RepoId(502),
+            vec![
+                (node_kind::ROUTE, "GET /search", vec![text_get()]),
+                (node_kind::PROJECT, "project:apps/backend", vec![]),
+            ],
+        );
+        server.nav.name_by_id.insert(ids[1], project.to_string());
+        let mut merged = MergedGraph::new(vec![web, server]);
+        HttpStackResolver.resolve(&mut merged);
+        let calls = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::HTTP_CALLS)
+            .count();
+        let (aliases, _) = build_service_alias_index(&merged.graphs, &Owners::default());
+        let endpoints = collect_endpoints(&merged.graphs);
+        let verdict = third_party_hosts(&aliases, &endpoints[0].cells);
+        assert_eq!(
+            HttpStackResolver::third_party_endpoints(&merged.graphs).contains(&endpoints[0].id),
+            verdict.is_some(),
+            "the public set is the resolver's own predicate"
+        );
+        (calls, verdict)
+    }
+
+    /// CG.4b: an endpoint whose every call site is marked external, with a
+    /// host naming nothing in the build, pairs with nothing although the app
+    /// serves the path; unmarked, or with a host whose label names a project
+    /// of the build, it pairs as before.
+    #[test]
+    fn external_endpoint_is_left_unpaired() {
+        let nominatim = r#"{"method":"GET","path":"/search","host":"nominatim.openstreetmap.org","external":true}"#;
+        let (calls, hosts) = pair_search(vec![hit(nominatim), hit(nominatim)], "backend");
+        assert_eq!(calls, 0, "a third-party /search is not the app's GET /search");
+        assert_eq!(hosts, Some(vec!["nominatim.openstreetmap.org".to_string()]), "hosts once");
+
+        // The same site without the mark pairs.
+        let plain = r#"{"method":"GET","path":"/search","host":"nominatim.openstreetmap.org"}"#;
+        assert_eq!(pair_search(vec![hit(plain)], "backend"), (1, None));
+
+        // One marked site and one unmarked: not every site is external.
+        assert_eq!(pair_search(vec![hit(nominatim), hit(plain)], "backend"), (1, None));
+
+        // A marked host whose non-generic label names a project of the build
+        // (`api.shop.io` -> `shop`) is the build's own backend.
+        let shop = r#"{"method":"GET","path":"/search","host":"api.shop.io","external":true}"#;
+        assert_eq!(pair_search(vec![hit(shop)], "shop"), (1, None));
+        // ... and a project named like the generic label claims nothing.
+        assert_eq!(pair_search(vec![hit(shop)], "api").0, 0);
+
+        // `<unresolved>` is skipped before the mark is read, as it always was.
+        let (g, _) = repo_graph(
+            RepoId(503),
+            vec![(node_kind::ENDPOINT, "endpoint:GET:<unresolved>", vec![hit(nominatim)])],
+        );
+        assert!(HttpStackResolver::third_party_endpoints(&[g]).is_empty());
+
+        // A non-JSON hit is never a marked site.
+        let text = Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Text("external".into()) };
+        assert!(!all_sites_external(&[text]));
+        assert!(!all_sites_external(&[]), "no hit, no mark");
+    }
+
+    #[test]
+    fn host_names_an_alias_reads_non_generic_labels() {
+        let aliases = alias_index(&[("shop", &[]), ("users", &[(RepoId(1), None)])]);
+        assert!(host_names_an_alias(&aliases, "api.shop.io"));
+        assert!(host_names_an_alias(&aliases, "www.SHOP.com:443"));
+        assert!(host_names_an_alias(&aliases, "users-api.example.io"), "normalised: users-api -> users");
+        assert!(host_names_an_alias(&aliases, "users"), "the whole host, as narrowing reads it");
+        assert!(!host_names_an_alias(&aliases, "nominatim.openstreetmap.org"));
+        assert!(!host_names_an_alias(&aliases, "api.example.shop"), "the TLD is never a name");
+        let generic = alias_index(&[("app", &[]), ("api", &[])]);
+        assert!(!host_names_an_alias(&generic, "app.acme.io"));
+        assert!(!host_names_an_alias(&generic, "api.acme.io"));
     }
 
     /// A3.3 — the marker counts NODES per bucket, not cells: a node with two

@@ -205,10 +205,13 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
         populates: &[],
         run: |m, _| passes::link_contract_routes(m),
     },
+    // CG.4b: reads the HTTP_CALLS edges, resolver and overlay `[[edge]]`
+    // alike - an ENDPOINT nothing pairs is stamped `external` when every call
+    // site names a third-party host.
     PassSpec {
         name: "tag_synthetic_provenance",
         stage: Stage::Post,
-        after: &[],
+        after: &["http", "external_edges"],
         populates: &[cell_type::ORIGIN],
         run: |m, _| passes::tag_synthetic_provenance(m),
     },
