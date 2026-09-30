@@ -1,0 +1,20 @@
+{
+  "framework": "go-closure-calls",
+  "language": "go",
+  "dirs": ["."],
+  "mechanism": "calls",
+  "cells": ["go/calls"],
+  "note": "CA.1 (Go calls inside closures): a call inside a func literal (sync.Once.Do, go func, defer func, errgroup.Go, a returned middleware closure) is a CALLS of the enclosing function; a func-literal ROUTE handler keeps LA.18d's HANDLED_BY and adds no CALLS to the registering function. Baseline 2026-10-01 (HEAD 3ff7791, leap-venv 0.5.0 wheel): CALLS 1/6 (only the main -> Routes control), HANDLED_BY 1/1, FORBID VIOLATIONS 0.",
+  "expect_edges": [
+    {"from": "app::Provider", "to": "app::NewRepo", "category": "CALLS", "note": "inside once.Do(func() {...})"},
+    {"from": "app::Start", "to": "app::worker", "category": "CALLS", "note": "inside go func() {...}()"},
+    {"from": "app::Start", "to": "app::cleanup", "category": "CALLS", "note": "inside defer func() {...}()"},
+    {"from": "app::Start", "to": "app::flush", "category": "CALLS", "note": "inside g.Go(func() error {...})"},
+    {"from": "app::Auth", "to": "app::parseToken", "category": "CALLS", "note": "inside a returned middleware closure (Engram correction: Kina JWTAuthMiddleware -> ParseToken)"},
+    {"from": "ANY /health", "to": "app::writeHealth", "category": "HANDLED_BY", "note": "CONTROL: LA.18d unchanged"},
+    {"from": "app::main", "to": "app::Routes", "category": "CALLS", "note": "CONTROL: a plain call"}
+  ],
+  "forbid": [
+    {"from": "app::Routes", "to": "app::writeHealth", "category": "CALLS", "note": "a route-handler literal's callee is its route's, not the registering function's"}
+  ]
+}

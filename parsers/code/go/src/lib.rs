@@ -177,6 +177,12 @@ pub fn parse_file_with_modules(
             acc.func_literal_refs
         );
     }
+    if acc.closure_bodies + acc.route_literals_skipped > 0 {
+        eprintln!(
+            "[go-calls] func-literal bodies={} calls={} route-literal bodies skipped={} in {file_rel_path}",
+            acc.closure_bodies, acc.closure_calls, acc.route_literals_skipped
+        );
+    }
     let forms = &acc.route_forms;
     if forms.registrations > 0 {
         eprintln!(
@@ -265,6 +271,12 @@ struct Acc {
     func_literal_expanded: std::collections::HashSet<(usize, NodeId)>,
     /// LA.18d: HANDLED_BY refs pushed from func-literal handlers in this file.
     func_literal_refs: usize,
+    /// CA.1: non-route func-literal bodies walked for their enclosing
+    /// function's calls, the CallSites pushed from them, and the route-handler
+    /// literals left to LA.18d — the `[go-calls] func-literal` marker's counters.
+    closure_bodies: usize,
+    closure_calls: usize,
+    route_literals_skipped: usize,
     /// LA.32a: route registrations emitted in this file, the POSITION cells
     /// pushed for them, and the method-bearing forms among them — the
     /// `[go-routes] registrations=` marker's counters.
@@ -797,8 +809,10 @@ fn visit_function(
     });
 
     if let Some(body) = decl.child_by_field_name("body") {
-        collect_calls_in(body, src, id, None, repo, file_rel, acc);
+        let mut closures = Vec::new();
+        collect_calls_in(body, src, id, None, repo, file_rel, acc, &mut closures);
         collect_routes_in(body, src, file_rel, module_id, repo, acc);
+        collect_closure_calls(closures, src, id, None, repo, file_rel, acc);
     }
 }
 
@@ -858,8 +872,20 @@ fn visit_method(
     }
 
     if let Some(body) = decl.child_by_field_name("body") {
-        collect_calls_in(body, src, id, receiver_var.as_deref(), repo, file_rel, acc);
+        let receiver_var = receiver_var.as_deref();
+        let mut closures = Vec::new();
+        collect_calls_in(
+            body,
+            src,
+            id,
+            receiver_var,
+            repo,
+            file_rel,
+            acc,
+            &mut closures,
+        );
         collect_routes_in(body, src, file_rel, module_id, repo, acc);
+        collect_closure_calls(closures, src, id, receiver_var, repo, file_rel, acc);
     }
 }
 
@@ -1231,15 +1257,20 @@ fn import_local_names(path: &str) -> Vec<&str> {
 // Call collection
 // ============================================================================
 
+/// The calls under `node`, as CallSites `from` the enclosing function. A
+/// `func_literal` child is not entered: it is queued on `closures` (tree order)
+/// for [`collect_closure_calls`], which runs after `collect_routes_in` has
+/// marked the route-handler literals (CA.1).
 #[allow(clippy::too_many_arguments)]
-fn collect_calls_in(
-    node: TsNode,
+fn collect_calls_in<'t>(
+    node: TsNode<'t>,
     src: &[u8],
     from: NodeId,
     receiver_var: Option<&str>,
     repo: RepoId,
     file_rel: &str,
     acc: &mut Acc,
+    closures: &mut Vec<TsNode<'t>>,
 ) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
@@ -1265,10 +1296,68 @@ fn collect_calls_in(
             // from the injector (`from`) to each provider (A7.6).
             try_detect_go_provider_set(child, src, from, acc);
         }
-        if child.kind() != "func_literal" {
-            collect_calls_in(child, src, from, receiver_var, repo, file_rel, acc);
+        if child.kind() == "func_literal" {
+            closures.push(child);
+        } else {
+            collect_calls_in(
+                child,
+                src,
+                from,
+                receiver_var,
+                repo,
+                file_rel,
+                acc,
+                closures,
+            );
         }
     }
+}
+
+/// CA.1: the calls inside a function's func literals (`once.Do(func() {..})`,
+/// `go func() {..}()`, `defer func() {..}()`, `g.Go(func() error {..})`, a
+/// returned middleware closure) are CallSites of the enclosing function, at
+/// each call's own row, with the same receiver variable. A route-handler
+/// literal (LA.18d: its start byte is in `func_literal_handlers`, filled by
+/// `collect_routes_in`, which runs first) is skipped whole, nested literals
+/// included: its callees are its route's HANDLED_BY, not the registrar's
+/// calls. Drained FIFO (breadth-first, each level in source order), after
+/// every CallSite of the body proper, so a function without a closure parses
+/// to the same FileParse as before.
+#[allow(clippy::too_many_arguments)]
+fn collect_closure_calls(
+    closures: Vec<TsNode>,
+    src: &[u8],
+    from: NodeId,
+    receiver_var: Option<&str>,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+) {
+    let calls_before = acc.calls.len();
+    let mut queue: std::collections::VecDeque<TsNode> = closures.into();
+    while let Some(lit) = queue.pop_front() {
+        if acc.func_literal_handlers.contains(&lit.start_byte()) {
+            acc.route_literals_skipped += 1;
+            continue;
+        }
+        acc.closure_bodies += 1;
+        let Some(body) = lit.child_by_field_name("body") else {
+            continue;
+        };
+        let mut nested = Vec::new();
+        collect_calls_in(
+            body,
+            src,
+            from,
+            receiver_var,
+            repo,
+            file_rel,
+            acc,
+            &mut nested,
+        );
+        queue.extend(nested);
+    }
+    acc.closure_calls += acc.calls.len() - calls_before;
 }
 
 fn classify_call(call: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option<CallQualifier> {
@@ -4517,6 +4606,131 @@ func main() {
         assert_eq!(
             handled_by(&parse, route_id(repo(), "ANY", "/n")),
             vec![bare("serve")]
+        );
+        // CA.1: nothing inside the route literal, nested closures included,
+        // is a call of the function that registers it.
+        let from_main = calls_from(&parse, func_id("main::main"));
+        for name in ["cleanup", "background", "serve"] {
+            assert!(
+                !from_main.iter().any(|(q, _)| *q == bare(name)),
+                "main::main must not call {name}: {from_main:?}"
+            );
+        }
+    }
+
+    // ---- CA.1: calls inside func literals belong to the enclosing function ----
+
+    /// The CallSites from `from`, in emission order, with their 0-based rows.
+    fn calls_from(parse: &FileParse, from: NodeId) -> Vec<(CallQualifier, u32)> {
+        parse
+            .calls
+            .iter()
+            .filter(|c| c.from == from)
+            .map(|c| (c.qualifier.clone(), c.line))
+            .collect()
+    }
+
+    /// The bench fixture's source (`go-closure-calls`), so the unit tests and
+    /// the graded fixture describe one program.
+    const CLOSURE_APP: &str =
+        include_str!("../../../../bench/substrate-gap/fixtures/go-closure-calls/app.go");
+
+    fn closure_app() -> FileParse {
+        parse_file(CLOSURE_APP, "app.go", "app", "example.com/closures", repo()).unwrap()
+    }
+
+    fn row_of(source: &str, needle: &str) -> u32 {
+        let row = source.lines().position(|l| l.contains(needle));
+        u32::try_from(row.expect("needle in source")).unwrap()
+    }
+
+    #[test]
+    fn closure_calls_belong_to_the_enclosing_function() {
+        let parse = closure_app();
+        let provider = calls_from(&parse, func_id("app::Provider"));
+        assert!(
+            provider.contains(&(bare("NewRepo"), row_of(CLOSURE_APP, "repo = NewRepo()"))),
+            "once.Do closure: {provider:?}"
+        );
+        let start = calls_from(&parse, func_id("app::Start"));
+        for (name, site) in [
+            ("worker", "\t\tworker()"),
+            ("cleanup", "\t\tcleanup()"),
+            ("flush", "return flush()"),
+        ] {
+            assert!(
+                start.contains(&(bare(name), row_of(CLOSURE_APP, site))),
+                "go / defer / g.Go closure must call {name}: {start:?}"
+            );
+        }
+        // The returned middleware closure (Kina JWTAuthMiddleware shape).
+        let auth = calls_from(&parse, func_id("app::Auth"));
+        assert!(
+            auth.contains(&(bare("parseToken"), row_of(CLOSURE_APP, "!parseToken(r)"))),
+            "returned closure: {auth:?}"
+        );
+    }
+
+    #[test]
+    fn route_literal_callees_are_not_calls_of_the_registrar() {
+        let parse = closure_app();
+        let routes = calls_from(&parse, func_id("app::Routes"));
+        assert!(
+            !routes.iter().any(|(q, _)| *q == bare("writeHealth")),
+            "{routes:?}"
+        );
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "ANY", "/health")),
+            vec![bare("writeHealth")]
+        );
+    }
+
+    #[test]
+    fn nested_closures_are_walked() {
+        let source = r#"package app
+
+func flush() {}
+
+func Run() {
+    go func() {
+        defer func() {
+            flush()
+        }()
+    }()
+}
+"#;
+        let parse = parse_file(source, "app/run.go", "app", "", repo()).unwrap();
+        assert_eq!(
+            calls_from(&parse, func_id("app::Run")),
+            vec![(bare("flush"), row_of(source, "        flush()"))]
+        );
+    }
+
+    #[test]
+    fn method_closure_keeps_the_receiver() {
+        let source = r#"package svc
+
+import "sync"
+
+type Svc struct{ once sync.Once }
+
+func (s *Svc) init() {}
+
+func (s *Svc) Boot() {
+    s.once.Do(func() {
+        s.init()
+    })
+}
+"#;
+        let parse = parse_file(source, "svc/svc.go", "svc", "", repo()).unwrap();
+        let boot = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "svc::Svc::Boot");
+        let calls = calls_from(&parse, boot);
+        assert!(
+            calls.contains(&(
+                CallQualifier::SelfMethod("init".to_string()),
+                row_of(source, "s.init()")
+            )),
+            "{calls:?}"
         );
     }
 

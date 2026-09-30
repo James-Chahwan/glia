@@ -531,3 +531,39 @@ fn every_call_edge_points_at_its_call_expression() {
     eprintln!("[call-site-lines]\n  {}", report.join("\n  "));
     assert!(failures.is_empty(), "{} failures:\n  {}", failures.len(), failures.join("\n  "));
 }
+
+/// CA.1: a call inside a Go func literal (`once.Do(func() { local() })`) is a
+/// CALLS edge of the enclosing function whose site evidence names the
+/// closure's row, not the enclosing declaration's.
+#[test]
+fn go_closure_call_carries_its_site_line() {
+    let (_tmp, repo, m) = build(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        (
+            "main.go",
+            "package main\n\nimport \"sync\"\n\n\
+             func local() int {\n\treturn 2\n}\n\n\
+             func run() {\n\tvar once sync.Once\n\tonce.Do(func() {\n\t\tlocal()\n\t})\n}\n",
+        ),
+    ]);
+    let nodes = node_index(&m);
+    let name = |id: &NodeId| nodes.get(id).map(|n| n.1.clone()).unwrap_or_default();
+    let calls: Vec<&Edge> = m
+        .all_edges()
+        .filter(|e| e.category == edge_category::CALLS && name(&e.from) == "run")
+        .collect();
+    let shown: Vec<(String, String)> = calls.iter().map(|e| (name(&e.from), name(&e.to))).collect();
+    assert_eq!(
+        shown,
+        vec![("run".to_string(), "local".to_string())],
+        "CALLS out of run"
+    );
+    let (file, line) = site_of(calls[0]).unwrap();
+    let text = source_line(&repo, &file, line).unwrap();
+    // Exact: `func local() int {` also names `local()`.
+    assert_eq!(
+        text.trim(),
+        "local()",
+        "{file}:{line} is not the closure's call row"
+    );
+}
