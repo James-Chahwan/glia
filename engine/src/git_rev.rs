@@ -30,6 +30,10 @@
 //! [`head_commit`] (CD.5b) is the one reader here that runs no git process:
 //! a build records the commit a layout was built at (`RepoMeta.rev`) from the
 //! `.git` files alone, so a build never spawns git.
+//!
+//! [`clean_head_tree`] and [`tracked_paths`] (CE.2d) tell the whole-layout
+//! cache whether a work tree is exactly its `HEAD` tree, and which files the
+//! index tracks: a `rev-parse`, a `status` and an `ls-files`, read-only.
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -663,6 +667,52 @@ pub(crate) fn renames_between(repo: &Path, a: &str, b: &str) -> Vec<(String, Str
         Ok(Some(out)) => parse_name_status(&out),
         _ => Vec::new(),
     }
+}
+
+/// The tree `HEAD` points at, when the work tree under `repo` is exactly it
+/// (CE.2d, the whole-layout key): `rev-parse HEAD^{tree}`, then `Some(tree)`
+/// only when `status --porcelain=v1 -z --untracked-files=normal
+/// --ignore-submodules=dirty -- . :(exclude).glia` prints nothing (no staged,
+/// unstaged, deleted, unmerged or untracked path, and no gitlink moved).
+/// `.glia` is left out whole: the walk never enters it and the layout key
+/// hashes its inputs by content (`external_inputs_fingerprint`), the layout
+/// dir `.glia/graph` among them excluded. A submodule's own work tree is not
+/// looked at: the walk collapses it into a REGION without reading inside.
+/// The tree id is the whole repository's, also when `repo` is a subdirectory
+/// of it (the status is scoped to `repo`). `Err` when git is missing, `repo`
+/// is not in a git work tree or `HEAD` has no commit yet.
+pub(crate) fn clean_head_tree(repo: &Path) -> Result<Option<String>, String> {
+    let out = git_output(repo, &["rev-parse", "--verify", "--quiet", "HEAD^{tree}"])?
+        .ok_or_else(|| format!("no commit to key by: {} is not a git work tree with a HEAD", repo.display()))?;
+    let tree = String::from_utf8_lossy(&out).trim().to_string();
+    if object_id(&tree).is_none() {
+        return Err(format!("git rev-parse HEAD^{{tree}} printed no tree id in {}", repo.display()));
+    }
+    let status = [
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=normal",
+        "--ignore-submodules=dirty",
+        "--",
+        ".",
+        ":(exclude).glia",
+    ];
+    let listed = git_output(repo, &status)?.ok_or_else(|| format!("git status failed in {}", repo.display()))?;
+    Ok(listed.is_empty().then_some(tree))
+}
+
+/// Every path the index tracks under `repo`, relative to it (`ls-files -z`),
+/// `/`-separated as git spells it (CE.2d: a walked file that is not among them
+/// is untracked however git's own excludes hide it from `status`).
+pub(crate) fn tracked_paths(repo: &Path) -> Result<BTreeSet<String>, String> {
+    let out = git_output(repo, &["ls-files", "-z"])?
+        .ok_or_else(|| format!("git ls-files failed in {}", repo.display()))?;
+    Ok(out
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect())
 }
 
 /// The `R<score>` pairs of a `--name-status -z` listing.

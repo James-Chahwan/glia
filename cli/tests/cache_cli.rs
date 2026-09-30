@@ -580,3 +580,275 @@ fn a_url_store_is_refused_until_ce_2e() {
         "a URL store ran a pull"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CE.2d: `--layout`, the whole-layout object. Needs git (the layout key is the
+// checkout's HEAD tree); without it each test prints a note and passes.
+// ---------------------------------------------------------------------------
+
+/// Is a `git` binary on PATH?
+fn has_git() -> bool {
+    Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// One hermetic git command in `dir` (no system or global config, a fixed
+/// identity, HOME inside the scratch dir); panics on failure.
+fn git(t: &Scratch, dir: &Path, args: &[&str]) {
+    let home = t.0.join("home");
+    std::fs::create_dir_all(&home).expect("git home");
+    let out = Command::new("git")
+        .args([
+            "-c",
+            "user.name=glia",
+            "-c",
+            "user.email=glia@example.invalid",
+        ])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("HOME", &home)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A git origin holding the fixture in one commit, cloned to
+/// `<scratch>/<side>/repo` for each side (one remote: one repo identity, and
+/// every side labelled `repo`). `None`, with a note, without git.
+fn clones(t: &Scratch, sides: &[&str]) -> Option<Vec<PathBuf>> {
+    if !has_git() {
+        eprintln!("note: no git binary on PATH; skipping the --layout test");
+        return None;
+    }
+    let origin = t.0.join("origin");
+    std::fs::create_dir_all(&origin).expect("origin dir");
+    git(t, &origin, &["init", "-q"]);
+    for (name, text) in FILES {
+        std::fs::write(origin.join(name), text).expect("write fixture file");
+    }
+    git(t, &origin, &["add", "-A"]);
+    git(t, &origin, &["commit", "-q", "-m", "fixture"]);
+    let mut out = Vec::new();
+    for side in sides {
+        let dest = t.0.join(side).join("repo");
+        std::fs::create_dir_all(dest.parent().expect("side dir")).expect("side dir");
+        git(t, &t.0, &["clone", "-q", s(&origin), s(&dest)]);
+        out.push(dest);
+    }
+    Some(out)
+}
+
+/// The layout object files under `<store>/v1/<stamp>/layout/`, sorted.
+fn layout_objects(store: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> =
+        std::fs::read_dir(store.join("v1").join(BUILD_STAMP).join("layout"))
+            .map(|rd| rd.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+    out.sort();
+    out
+}
+
+#[test]
+fn layout_round_trip() {
+    let t = Scratch::new("layout");
+    let Some(sides) = clones(&t, &["a", "b", "c"]) else {
+        return;
+    };
+    let (a, b, c) = (&sides[0], &sides[1], &sides[2]);
+    let store = t.0.join("store");
+    let key = t.key_file("k.hex", KEY, 0o600);
+    build(a);
+
+    let push = glia(
+        &[
+            "cache",
+            "push",
+            s(a),
+            s(&store),
+            "--key-file",
+            s(&key),
+            "--layout",
+        ],
+        &[],
+    );
+    assert_eq!(push.code, 0, "{}", push.stderr);
+    let m = marker(&push, "[cache] layout push ");
+    assert_fields(&m, &[("repo", "repo"), ("result", "pushed")], &push);
+    let (k12, tree12) = (m["key"].clone(), m["tree"].clone());
+    for v in [&k12, &tree12] {
+        assert!(
+            v.len() == 12 && v.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{m:?}"
+        );
+    }
+    // The per-file push ran too.
+    assert_fields(&marker(&push, "[cache] push "), &[("uploaded", "4")], &push);
+    let objs = layout_objects(&store);
+    assert_eq!(objs.len(), 1, "{objs:?}");
+    let name = objs[0].file_name().and_then(|n| n.to_str()).expect("name");
+    assert!(name.starts_with(&k12) && name.ends_with(".gla"), "{name}");
+
+    let again = glia(
+        &[
+            "cache",
+            "push",
+            s(a),
+            s(&store),
+            "--key-file",
+            s(&key),
+            "--layout",
+        ],
+        &[],
+    );
+    assert_eq!(again.code, 0, "{}", again.stderr);
+    assert_fields(
+        &marker(&again, "[cache] layout push "),
+        &[("result", "present"), ("key", &k12)],
+        &again,
+    );
+
+    let pull = glia(
+        &[
+            "cache",
+            "pull",
+            s(b),
+            s(&store),
+            "--key-file",
+            s(&key),
+            "--layout",
+            "--json",
+        ],
+        &[],
+    );
+    assert_eq!(pull.code, 0, "{}", pull.stderr);
+    assert_fields(
+        &marker(&pull, "[cache] layout pull "),
+        &[
+            ("repo", "repo"),
+            ("key", &k12),
+            ("tree", &tree12),
+            ("result", "hit"),
+        ],
+        &pull,
+    );
+    assert_fields(&marker(&pull, "[cache] pull "), &[("fetched", "4")], &pull);
+    let json: serde_json::Value = serde_json::from_str(pull.stdout.trim()).expect("pull --json");
+    assert_eq!(json["layout"]["result"], "hit", "{json}");
+    // b holds a's shards byte for byte, and the parse cache the per-file pull wrote.
+    let (a_dir, b_dir) = (a.join(".glia/graph"), b.join(".glia/graph"));
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(b_dir.join("manifest.json")).expect("b manifest"))
+            .expect("manifest json");
+    let shards = manifest["shards"].as_array().expect("shards");
+    assert!(!shards.is_empty());
+    for shard in shards {
+        let p = shard["path"].as_str().expect("path");
+        assert_eq!(
+            std::fs::read(b_dir.join(p)).expect("b shard"),
+            std::fs::read(a_dir.join(p)).expect("a shard"),
+            "{p}"
+        );
+    }
+    assert!(sidecar(b).is_file());
+
+    // A dirty checkout pulls no layout; the per-file pull still runs.
+    std::fs::write(c.join("extra.py"), "x = 1\n").expect("untracked file");
+    let dirty = glia(
+        &[
+            "cache",
+            "pull",
+            s(c),
+            s(&store),
+            "--key-file",
+            s(&key),
+            "--layout",
+        ],
+        &[],
+    );
+    assert_eq!(dirty.code, 0, "{}", dirty.stderr);
+    assert_fields(
+        &marker(&dirty, "[cache] layout pull "),
+        &[("key", "-"), ("tree", "-"), ("result", "dirty")],
+        &dirty,
+    );
+    assert!(dirty.stderr.contains("[cache] pull "), "{}", dirty.stderr);
+    assert!(!c.join(".glia/graph/manifest.json").exists());
+}
+
+#[test]
+fn layout_object_mac_is_checked() {
+    let t = Scratch::new("layout-mac");
+    let Some(sides) = clones(&t, &["a", "b"]) else {
+        return;
+    };
+    let (a, b) = (&sides[0], &sides[1]);
+    let store = t.0.join("store");
+    let key = t.key_file("k.hex", KEY, 0o600);
+    build(a);
+    let push = glia(
+        &[
+            "cache",
+            "push",
+            s(a),
+            s(&store),
+            "--key-file",
+            s(&key),
+            "--layout",
+        ],
+        &[],
+    );
+    assert_eq!(push.code, 0, "{}", push.stderr);
+    let objs = layout_objects(&store);
+    assert_eq!(objs.len(), 1, "{objs:?}");
+    let mut bytes = std::fs::read(&objs[0]).expect("layout object");
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 1;
+    std::fs::write(&objs[0], &bytes).expect("flip a byte");
+
+    let pull = glia(
+        &[
+            "cache",
+            "pull",
+            s(b),
+            s(&store),
+            "--key-file",
+            s(&key),
+            "--layout",
+        ],
+        &[],
+    );
+    assert_eq!(pull.code, 0, "{}", pull.stderr);
+    assert_fields(
+        &marker(&pull, "[cache] layout pull "),
+        &[("result", "rejected")],
+        &pull,
+    );
+    assert!(
+        pull.stderr
+            .lines()
+            .any(|l| l.starts_with("[cache] rejected v1/")
+                && l.contains("/layout/")
+                && l.contains("MAC does not verify")),
+        "{}",
+        pull.stderr
+    );
+    assert!(
+        !b.join(".glia/graph/manifest.json").exists(),
+        "a rejected layout was installed"
+    );
+}

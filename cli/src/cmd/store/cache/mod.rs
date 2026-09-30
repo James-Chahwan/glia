@@ -15,6 +15,10 @@
 //!   default 0 for a keyed store, 32 for `--unsigned`). A poisoned sample
 //!   exits 1 and nothing is written.
 //! - `gc <store>` prunes a directory store (`gc.rs`).
+//! - `--layout` on push and pull (CE.2d, `layout.rs`) moves the whole
+//!   `.glia/graph/` layout of a clean checkout at a known git tree as one
+//!   object in parts: push uploads it unless the store holds it, pull installs
+//!   it through the engine's verified install, then runs the per-file pull.
 //!
 //! Trust: objects carry a blake3 keyed MAC (`object.rs`) under the key in
 //! `--key-file` or `GLIA_CACHE_KEY`; without one a push or pull needs
@@ -30,8 +34,11 @@
 //! `[cache] push store=<label> repo=<label> entries=<n> uploaded=<u> present=<p> stale=<s> signed=<yes|no>`
 //! `[cache] pull store=<label> repo=<label> files=<n> local_hits=<h> fetched=<f> missing=<m> rejected=<r> verified=<v> signed=<yes|no>`
 //! `[cache] gc store=<dir> stamps_kept=<k> stamps_removed=<r> objects_removed=<o> bytes=<before>-><after>`
+//! `[cache] layout <push|pull> repo=<label> key=<12 hex|-> tree=<12 hex|-> result=<pushed|present|stale|dirty|hit|miss|rejected>`
+//! (before the per-file line, with `--layout`)
 
 mod gc;
+mod layout;
 mod object;
 mod store;
 
@@ -68,12 +75,13 @@ enum CacheCmd {
     /// Upload the parse cache of a built checkout: every entry of
     /// `<repo>/.glia/graph/parse_cache.bin` a build of the checkout as it is
     /// now would reuse, one object per content address, skipping objects the
-    /// store already holds.
+    /// store already holds. With `--layout`, first the whole layout.
     Push(PushArgs),
     /// Fetch the parses the checkout's cache lacks from the store, check each
     /// object (size, key, MAC), import them through the engine's checks and
     /// re-parse sample, and write `<repo>/.glia/graph/parse_cache.bin`. Exits
     /// 1 and writes nothing when a sampled payload differs from a local parse.
+    /// With `--layout`, first install the whole layout for the checkout.
     Pull(PullArgs),
     /// Prune a directory store: keep the newest `--keep-stamps` build stamps
     /// (by last upload), then delete the oldest objects over `--max-bytes`,
@@ -102,6 +110,12 @@ struct PushArgs {
     store: String,
     #[command(flatten)]
     key: KeyArgs,
+    /// Also upload the whole `.glia/graph/` layout (manifest and shards) of a
+    /// clean checkout whose layout is fresh, keyed by the build stamp, repo
+    /// identity, HEAD tree, `.glia` inputs and target, unless the store holds
+    /// it. A dirty checkout or a stale layout is reported and skipped.
+    #[arg(long)]
+    layout: bool,
     /// Print the summary as JSON.
     #[arg(long)]
     json: bool,
@@ -124,6 +138,12 @@ struct PullArgs {
     /// Parallel object fetches.
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..=256))]
     jobs: u16,
+    /// First install the whole `.glia/graph/` layout the store holds for this
+    /// clean checkout's key, checked (size, key, MAC) and then verified by the
+    /// engine (key re-derived, names, a fresh load) before it replaces the
+    /// current layout; then pull the per-file cache as usual.
+    #[arg(long)]
+    layout: bool,
     /// Print the summary as JSON.
     #[arg(long)]
     json: bool,
@@ -295,6 +315,14 @@ fn push(a: PushArgs) -> i32 {
         return failed(&format!("store {}: {e}", dir.display()));
     }
     let store = DirStore::new(&dir);
+    let layout = if a.layout {
+        match layout::push(&a.repo, &store, &signing) {
+            Ok(o) => Some(o),
+            Err(e) => return failed(&format!("layout push to {}: {e}", store.label())),
+        }
+    } else {
+        None
+    };
     let export = match export_entries(&a.repo) {
         Ok(x) => x,
         Err(e) => return failed(&e),
@@ -329,7 +357,7 @@ fn push(a: PushArgs) -> i32 {
         yes_no(signed)
     );
     if a.json {
-        let out = json!({
+        let mut out = json!({
             "store": store.label(),
             "repo": export.repo_label,
             "stamp": export.stamp,
@@ -340,8 +368,14 @@ fn push(a: PushArgs) -> i32 {
             "signed": signed,
             "objects": objects,
         });
+        if let Some(l) = &layout {
+            out["layout"] = l.json();
+        }
         println!("{out}");
     } else {
+        if let Some(l) = &layout {
+            println!("{}", l.line(&export.repo_label, &store.label()));
+        }
         println!(
             "push {} -> {}: {} entries, {uploaded} uploaded, {present} already present, {} stale ({})",
             export.repo_label,
@@ -420,6 +454,14 @@ fn pull(a: PullArgs) -> i32 {
     } else {
         Sample::Count(UNSIGNED_SAMPLE)
     });
+    let layout = if a.layout {
+        match layout::pull(&a.repo, &store, &signing) {
+            Ok(o) => Some(o),
+            Err(e) => return failed(&format!("layout pull from {}: {e}", store.label())),
+        }
+    } else {
+        None
+    };
     let w = match wanted(&a.repo) {
         Ok(w) => w,
         Err(e) => return failed(&e),
@@ -472,7 +514,7 @@ fn pull(a: PullArgs) -> i32 {
         yes_no(signed)
     );
     if a.json {
-        let out = json!({
+        let mut out = json!({
             "store": store.label(),
             "repo": w.repo_label,
             "stamp": w.stamp,
@@ -486,8 +528,14 @@ fn pull(a: PullArgs) -> i32 {
             "signed": signed,
             "import": summary,
         });
+        if let Some(l) = &layout {
+            out["layout"] = l.json();
+        }
         println!("{out}");
     } else {
+        if let Some(l) = &layout {
+            println!("{}", l.line(&w.repo_label, &store.label()));
+        }
         println!(
             "pull {} <- {}: {files} files, {} local, {fetched} fetched, {} imported, {missing} missing, {rejected} rejected, {} verified ({})",
             w.repo_label,

@@ -7,10 +7,14 @@ The shared cache lets such a checkout fetch the parses another machine already
 made for the same bytes.
 
 ```text
-glia cache push <REPO> <STORE> [--unsigned] [--key-file <FILE>] [--json]
-glia cache pull <REPO> <STORE> [--unsigned] [--key-file <FILE>] [--verify <N|all>] [--jobs <N>] [--json]
+glia cache push <REPO> <STORE> [--unsigned] [--key-file <FILE>] [--layout] [--json]
+glia cache pull <REPO> <STORE> [--unsigned] [--key-file <FILE>] [--verify <N|all>] [--jobs <N>] [--layout] [--json]
 glia cache gc <STORE> [--keep-stamps <N>] [--max-bytes <BYTES>] [--json]
 ```
+
+`--layout` also moves the whole finished layout of a clean checkout (see
+[Whole-layout objects](#whole-layout-objects)), so a fresh clone of a commit CI
+already built skips the build entirely, not just the parse.
 
 The build stays offline. `glia build` never reads a store. `pull` is a separate step:
 it writes the sidecar, and the next build reuses it through the same checks it
@@ -159,7 +163,105 @@ key, MAC) and the import's own rejections.
 3. It removes staging files (`*.tmp`) older than an hour, left by a crashed
    push. A newer one belongs to a push still in progress and is left alone.
 
-Only `.gpc` objects count toward the byte totals.
+Only `.gpc` objects count toward the byte totals. Whole-layout parts
+(`layout/*.gla`) go with their stamp and are outside `--max-bytes`.
+
+## Whole-layout objects
+
+Sharing parses saves only the parse phase: the walk, the per-language graph
+builds, the 15 resolvers and the post-passes still run. A clean checkout at a
+commit another machine already built can skip all of them. `push --layout`
+uploads the finished `.glia/graph/` layout, and `pull --layout` installs it
+before the per-file pull runs (so a later edit still starts warm).
+
+```sh
+# CI, after building the commit
+glia build "$REPO" && glia cache push "$REPO" /mnt/team/glia-cache --layout
+
+# a fresh clone of the same commit
+glia cache pull ~/work/shop /mnt/team/glia-cache --layout
+# [cache] layout pull repo=shop key=<12 hex> tree=<12 hex> result=hit
+```
+
+**Clean work trees only.** A layout is keyed, pushed and installed only when
+`git status` (tracked and untracked files, `.glia` excluded) prints nothing, so
+the tracked files are exactly `HEAD^{tree}`. Otherwise the result is `dirty` and
+the step is skipped; the per-file push or pull still runs.
+
+**What the key covers.** A blake3 `derive_key("glia layout object v1")` over:
+
+- the build stamp;
+- the repo identity key (two clones of one remote agree);
+- the `HEAD` tree id;
+- the `.glia` input fingerprint (the map the manifest records: overlay, docs,
+  history and test snapshots, by content);
+- the target: CPU architecture, pointer width, endianness and path separator
+  (shards are rkyv archives, reused only on the same target);
+- `overlay=on` (the default layout dir always holds the overlay-applied graph);
+- a digest of what the build sees beyond the tracked tree: the REGION nodes of
+  every gated directory on disk (a gitignored `target/`, an empty `dist/`, a
+  checked-out submodule), the project roots, and every `compile_commands.json`
+  in the repo root, a project root or a child directory of either (the C/C++
+  build reads it from gitignored build dirs). A source or doc file the walk
+  reads but git does not track (hidden from `git status` by `.git/info/exclude`
+  or a global excludes file) makes the checkout dirty.
+
+Not covered: other reads of gitignored files outside the walk (a tsconfig
+`extends` resolved into `node_modules`). Submodule content is not walked.
+
+**What travels.** `manifest.json` and every file it names (the shards,
+`cross_stack.gmap`, foreign shards), each checked against its manifest hash
+when exported. The parse cache travels per file, the timeline sidecar names
+commits rather than a tree and stays home, and `.gitignore` is written by the
+install. `push` refuses (`result=stale`) a layout that is missing, older than
+the checkout (`is_gmap_stale`), mid-write, or not this repo's alone (a
+multi-repo or merged layout).
+
+**Install.** The engine re-derives the key from the checkout and refuses
+another one (`key mismatch`), accepts only plain `manifest.json` / `*.gmap`
+names the manifest names (no path can leave the layout dir), and rewrites the
+manifest's `repos` to what a local build writes: this checkout's label (its
+directory name, which differs between machines), its root relative to the
+layout dir, and its `HEAD` commit. The files are staged in
+`.glia/graph.pull.<pid>.tmp/` and moved in shards first and `manifest.json`
+last; every file they replace or orphan is kept aside there, so the disk holds
+two layouts until the check. The check is a full load with rebuilding off
+(`load_or_rebuild(dir, repo, false)`): build stamp, `.glia` inputs, source
+mtimes, every shard's hash, every CODE span. If it fails, the new files are
+removed, the old ones restored byte for byte, and the result is `rejected`.
+
+**Object.** The layout is one body split into parts, each an ordinary signed
+cache object, so a layout larger than the 64 MiB object bound still moves:
+
+```text
+body   = b"GLIALY01" | entry_count u32 LE | per entry: name_len u16 LE | name | data_len u64 LE | data
+part i = part_count u32 LE | body_len u64 LE | the i-th 48 MiB of the body,
+         stored as the object of key blake3 derive_key("glia layout object part v1", key | i u32 LE)
+store  = <store>/v1/<stamp>/layout/<key>.gla (part 0), <key>.<i>.gla (i >= 1)
+```
+
+A part's key binds it to its layout and index, so the MAC refuses a part
+served for another layout or index; every part repeats the part count and body
+length, so a dropped or truncated part is refused; a push writes part 0 last.
+Caps are checked before any length is used: at most 4096 files, 128-byte
+names, 512 MiB per file and 1 GiB in all. Without a key, `--layout` needs
+`--unsigned` like any pull, and then the store is trusted as-is: there is no
+re-parse sample for a layout, only the install's checks.
+
+Markers (stderr), before the per-file line:
+
+```text
+[cache] layout push repo=<label> key=<12 hex|-> tree=<12 hex|-> result=<pushed|present|stale|dirty>
+[cache] layout pull repo=<label> key=<12 hex|-> tree=<12 hex|-> result=<hit|miss|rejected|dirty>
+[cache] rejected v1/<stamp>/layout/<key>.gla: <reason>
+```
+
+`--json` adds a `layout` object (`result`, `key`, `tree`, `reason`, `files`,
+`bytes`, `parts`). A layout that is `stale`, `dirty`, `miss` or `rejected` is not
+a failure: the exit code is the per-file step's. A store error, or an install
+that could not put the previous layout back, exits 1. The two steps are
+independent: a layout installed before a per-file pull fails stays installed
+(it was verified on its own).
 
 ## Not included
 
