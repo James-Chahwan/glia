@@ -267,12 +267,21 @@ fn pass_undo_from_entries(entries: &[PassUndo]) -> Result<Vec<(NodeId, Confidenc
 /// path and still resolves after a clone. It is absolute only when no
 /// relative path exists (another Windows drive), and absent when the writer
 /// did not know it.
+///
+/// `rev` (CD.5b) is the commit the repo's work tree had checked out when the
+/// layout was written (its `HEAD`, read from the `.git` files, no git
+/// process): the point in history the layout ties to. The graph is built from
+/// the work tree, so uncommitted edits are in it too. Absent for a root that is
+/// not in a git work tree, has no commit yet or was not known, so a non-git
+/// layout writes the same manifest bytes as before; additive under schema 2.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RepoMeta {
     pub id: u64,
     pub label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rev: Option<String>,
 }
 
 /// The layout-level metadata a sharded write records beside the shards and a
@@ -646,8 +655,9 @@ fn write_sharded_with(
 }
 
 /// Does `path` hold exactly `bytes`? The length is checked before the read,
-/// so a changed shard of another size costs one `stat`.
-fn on_disk_is(path: &Path, bytes: &[u8]) -> bool {
+/// so a changed shard of another size costs one `stat`. Also the timeline
+/// sidecar's skip-when-unchanged check (`write_timeline`).
+pub(crate) fn on_disk_is(path: &Path, bytes: &[u8]) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.len() == bytes.len() as u64)
         && std::fs::read(path).is_ok_and(|b| b == bytes)
 }
@@ -1522,8 +1532,13 @@ mod tests {
         let merged = glia_graph::MergedGraph { graphs: vec![g], ..Default::default() };
         let meta = LayoutMeta {
             repos: vec![
-                RepoMeta { id: 9, label: "web".into(), root: Some("../web".into()) },
-                RepoMeta { id: 3, label: "api".into(), root: None },
+                RepoMeta {
+                    id: 9,
+                    label: "web".into(),
+                    root: Some("../web".into()),
+                    rev: Some("0123456789abcdef0123456789abcdef01234567".into()),
+                },
+                RepoMeta { id: 3, label: "api".into(), root: None, rev: None },
             ],
             parse_errors: vec!["b.py: second".into(), "a.py: first".into()],
             code_spans_unresolved: 0,
@@ -1537,6 +1552,10 @@ mod tests {
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_NAME)).unwrap()).unwrap();
         assert!(json["repos"][0].get("root").is_none(), "an unknown root is omitted: {json}");
+        // CD.5b: a recorded rev rides the manifest; an unknown one is omitted.
+        assert!(json["repos"][0].get("rev").is_none(), "an unknown rev is omitted: {json}");
+        assert_eq!(json["repos"][1]["rev"], "0123456789abcdef0123456789abcdef01234567");
+        assert_eq!(back.repos[1].rev.as_deref(), Some("0123456789abcdef0123456789abcdef01234567"));
 
         let bare = tmp.path().join("bare");
         write_merged_sharded(&merged, &bare).unwrap();
@@ -1545,6 +1564,25 @@ mod tests {
         assert!(json.get("repos").is_none() && json.get("parse_errors").is_none(), "{json}");
         let (_, empty) = read_merged_sharded_meta(&bare).unwrap();
         assert_eq!(empty, LayoutMeta::default());
+    }
+
+    /// CD.5b: `rev` is additive. A repo without one serialises to exactly the
+    /// bytes it did before the field existed, and a manifest entry written
+    /// before it reads back with `rev: None`.
+    #[test]
+    fn repo_meta_rev_is_additive() {
+        let bare = RepoMeta { id: 7, label: "api".into(), root: Some("../..".into()), rev: None };
+        assert_eq!(
+            serde_json::to_string(&bare).unwrap(),
+            r#"{"id":7,"label":"api","root":"../.."}"#
+        );
+        let old: RepoMeta = serde_json::from_str(r#"{"id":7,"label":"api","root":"../.."}"#).unwrap();
+        assert_eq!(old, bare);
+        let sha = "89abcdef0123456789abcdef0123456789abcdef";
+        let with = RepoMeta { rev: Some(sha.into()), ..bare };
+        let text = serde_json::to_string(&with).unwrap();
+        assert_eq!(text, format!(r#"{{"id":7,"label":"api","root":"../..","rev":"{sha}"}}"#));
+        assert_eq!(serde_json::from_str::<RepoMeta>(&text).unwrap(), with);
     }
 
     /// LC.10a: the post-pass undo record rides the manifest, written sorted
@@ -1614,7 +1652,7 @@ mod tests {
         let g = empty_graph("test://lc8-lenient");
         let merged = glia_graph::MergedGraph { graphs: vec![g], ..Default::default() };
         let meta = LayoutMeta {
-            repos: vec![RepoMeta { id: 3, label: "api".into(), root: Some("../api".into()) }],
+            repos: vec![RepoMeta { id: 3, label: "api".into(), root: Some("../api".into()), rev: None }],
             parse_errors: vec![],
             code_spans_unresolved: 0,
         };
@@ -2194,7 +2232,7 @@ mod tests {
         // So does metadata naming exactly one root (LC.7 records it relative
         // to the layout dir), which is what the engine's writer passes.
         let meta = LayoutMeta {
-            repos: vec![RepoMeta { id: 1, label: "repo".into(), root: Some("../repo".into()) }],
+            repos: vec![RepoMeta { id: 1, label: "repo".into(), root: Some("../repo".into()), rev: None }],
             parse_errors: vec![],
             code_spans_unresolved: 0,
         };
@@ -2223,7 +2261,12 @@ mod tests {
             repos: ["a", "b", "c"]
                 .iter()
                 .enumerate()
-                .map(|(i, n)| RepoMeta { id: i as u64 + 1, label: n.to_string(), root: Some(format!("../{n}")) })
+                .map(|(i, n)| RepoMeta {
+                    id: i as u64 + 1,
+                    label: n.to_string(),
+                    root: Some(format!("../{n}")),
+                    rev: None,
+                })
                 .collect(),
             parse_errors: vec![],
             code_spans_unresolved: 0,

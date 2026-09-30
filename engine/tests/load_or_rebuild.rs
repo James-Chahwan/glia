@@ -579,6 +579,7 @@ fn unresolved_code_span_rebuilds() {
             id: id.0,
             label: "backend".into(),
             root: Some("../repo".into()),
+            rev: None,
         }],
         parse_errors: vec![],
         code_spans_unresolved: 0,

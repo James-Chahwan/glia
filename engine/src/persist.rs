@@ -32,6 +32,12 @@
 //! - repo labels and roots, and the build's parse errors describe the LAYOUT
 //!   (a multi-repo build has several repos and one error list), so they go in
 //!   `manifest.json` ([`glia_store::LayoutMeta`]);
+//! - each rooted repo's `rev` (CD.5b), the commit its work tree had checked
+//!   out when the layout was written, read from `.git` by [`layout_meta`]
+//!   (no git process); omitted for a root outside git, so a non-git layout's
+//!   manifest bytes do not change. The sweep below leaves the timeline sidecar
+//!   (`timeline.gmap`, `glia_store::write_timeline`) in the layout dir alone:
+//!   it is not a shard name;
 //! - `RepoGraph.properties` is per-graph code state, so it goes in each
 //!   shard's code section beside nav and symbols;
 //! - `MergedGraph::pass_undo` (LC.10a), the confidences a set-dependent
@@ -45,7 +51,7 @@
 //! against the dir it loads from.
 //!
 //! Markers, one line per call:
-//! `[gmap] meta: repos=<r> labeled=<l> rooted=<o> parse_errors=<p> properties=<q> pass_undo=<u> writer=<w>`
+//! `[gmap] meta: repos=<r> labeled=<l> rooted=<o> rev_recorded=<v> parse_errors=<p> properties=<q> pass_undo=<u> writer=<w>`
 //! from [`persist_layout`] (the store's own `[gmap] layout` line follows it),
 //! `[gmap] wrote <dir> writer=<w> shards=<n> cross=<c> bytes=<b>` from
 //! [`persist_result`] (`n` per-graph shards, `c` cross edges, `b` the bytes of
@@ -129,8 +135,10 @@ impl std::error::Error for LoadError {}
 
 /// The layout metadata of one build, for a layout written to `dir`: one
 /// [`RepoMeta`] per repo id in `labels` or `roots` (sorted by id), each root
-/// made relative to `dir`, and `parse_errors` in build order. `dir` need not
-/// exist yet.
+/// made relative to `dir` and, when it sits in a git work tree with a commit,
+/// the commit it has checked out (`rev`, CD.5b: read from the `.git` files by
+/// `git_rev::head_commit`, no git process), and `parse_errors` in build order.
+/// `dir` need not exist yet.
 pub fn layout_meta(
     labels: &BTreeMap<u64, String>,
     roots: &BTreeMap<u64, String>,
@@ -150,6 +158,7 @@ pub fn layout_meta(
                 relative_root(dir, root)
                     .unwrap_or_else(|| lenient_absolute(root).to_string_lossy().into_owned())
             }),
+            rev: roots.get(&id).and_then(|root| crate::git_rev::head_commit(Path::new(root))),
         })
         .collect();
     LayoutMeta { repos, parse_errors: parse_errors.to_vec(), code_spans_unresolved: 0 }
@@ -179,8 +188,9 @@ fn write_layout(
 ) -> Result<Manifest, String> {
     let labeled = meta.repos.iter().filter(|r| !r.label.is_empty()).count();
     let rooted = meta.repos.iter().filter(|r| r.root.is_some()).count();
+    let rev_recorded = meta.repos.iter().filter(|r| r.rev.is_some()).count();
     eprintln!(
-        "[gmap] meta: repos={} labeled={labeled} rooted={rooted} parse_errors={} properties={} pass_undo={} writer={writer}",
+        "[gmap] meta: repos={} labeled={labeled} rooted={rooted} rev_recorded={rev_recorded} parse_errors={} properties={} pass_undo={} writer={writer}",
         meta.repos.len(),
         meta.parse_errors.len(),
         property_count(merged),

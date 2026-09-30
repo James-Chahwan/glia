@@ -46,6 +46,9 @@
 //! - `cells` — the cell write API (LF.1b): `write_cell` / `remove_cell_entry`
 //!   upsert the `.glia` cell sidecars under a lock and write through into a
 //!   layout only while it is fresh.
+//! - `timeline` — the timeline sidecar (CD.5b): `TimelineStore`, written as
+//!   `<layout>/timeline.gmap` by `write_timeline`, read back by
+//!   `read_timeline` / `decode_timeline` (FS-free).
 
 mod error;
 mod container;
@@ -53,6 +56,7 @@ mod code_section;
 mod layout;
 mod inspect;
 mod cells;
+mod timeline;
 
 pub use error::*;
 pub use container::*;
@@ -60,3 +64,4 @@ pub use code_section::*;
 pub use layout::*;
 pub use inspect::*;
 pub use cells::*;
+pub use timeline::*;

@@ -26,6 +26,10 @@
 //!
 //! [`changed_files`] (CC.11b) lists the working tree's change against a rev
 //! (a name-only `diff` plus the untracked files), with the same helpers.
+//!
+//! [`head_commit`] (CD.5b) is the one reader here that runs no git process:
+//! a build records the commit a layout was built at (`RepoMeta.rev`) from the
+//! `.git` files alone, so a build never spawns git.
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -453,6 +457,132 @@ fn changed_paths(listings: &[&[u8]]) -> Vec<String> {
     set.into_iter().collect()
 }
 
+/// Most `ref:` hops [`head_commit`] follows from `HEAD` (git's own limit).
+const MAX_SYMREF_HOPS: usize = 5;
+/// Most bytes read from `HEAD`, a loose ref, `commondir` or a `.git` file:
+/// each is one short line.
+const SMALL_FILE_CAP: u64 = 4096;
+
+/// The commit the work tree at `root` has checked out (CD.5b, the manifest's
+/// `RepoMeta.rev`), read from the `.git` files alone: no git process runs.
+///
+/// Discovery is git's: from `root` (canonicalised) up through its ancestors,
+/// the first `.git` that is a directory holding a `HEAD` file, or a file
+/// reading `gitdir: <path>` (a worktree or a submodule; `path` relative to the
+/// file's directory), names the gitdir. `<gitdir>/commondir`, when present,
+/// names the shared dir (relative to the gitdir), else it is the gitdir.
+/// `HEAD` then resolves: a 40- or 64-hex id (detached) as is, lowercased;
+/// `ref: <name>` through `<gitdir>/<name>`, else `<commondir>/<name>`, else the
+/// `<commondir>/packed-refs` line naming it (comment and peeled `^` lines
+/// skipped), at most [`MAX_SYMREF_HOPS`] symbolic hops.
+///
+/// `None` for a root in no git work tree, an unborn branch (no commit yet), a
+/// ref name that is not a plain `refs/...` path (no `..`, `.` or empty
+/// component, so a ref never reads outside the gitdir chain), a `HEAD`, ref,
+/// `commondir`, `packed-refs` or `.git` file that is a symlink or anything
+/// else unreadable, and the reftable ref backend (its `HEAD` names no real
+/// ref).
+pub(crate) fn head_commit(root: &Path) -> Option<String> {
+    let start = std::fs::canonicalize(root).ok()?;
+    for dir in start.ancestors() {
+        let dot_git = dir.join(".git");
+        let Ok(meta) = std::fs::symlink_metadata(&dot_git) else {
+            continue;
+        };
+        let gitdir = if meta.is_file() {
+            // A gitfile: git stops here whether it is valid or not.
+            return gitdir_of_file(&dot_git, dir).and_then(|g| commit_of_gitdir(&g));
+        } else if meta.is_dir() || (meta.is_symlink() && dot_git.is_dir()) {
+            dot_git
+        } else {
+            return None;
+        };
+        // A `.git` directory without `HEAD` is not a repository: git keeps
+        // looking further up, and so does this.
+        if regular_file(&gitdir.join("HEAD")) {
+            return commit_of_gitdir(&gitdir);
+        }
+    }
+    None
+}
+
+/// Is `path` a regular file (a symlink is not followed, so never one)?
+fn regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
+}
+
+/// The first line of the small regular file at `path`, trimmed.
+fn first_line(path: &Path) -> Option<String> {
+    use std::io::Read;
+    if !regular_file(path) {
+        return None;
+    }
+    let mut text = String::new();
+    std::fs::File::open(path).ok()?.take(SMALL_FILE_CAP).read_to_string(&mut text).ok()?;
+    Some(text.lines().next().unwrap_or("").trim().to_string())
+}
+
+/// The gitdir a `.git` file at `dot_git` (in the work tree `dir`) names.
+fn gitdir_of_file(dot_git: &Path, dir: &Path) -> Option<PathBuf> {
+    let line = first_line(dot_git)?;
+    let named = line.strip_prefix("gitdir:")?.trim();
+    if named.is_empty() {
+        return None;
+    }
+    let gitdir = dir.join(named);
+    gitdir.is_dir().then_some(gitdir)
+}
+
+/// `HEAD` of `gitdir` resolved to a commit id (see [`head_commit`]).
+fn commit_of_gitdir(gitdir: &Path) -> Option<String> {
+    let common = match first_line(&gitdir.join("commondir")) {
+        Some(c) if !c.is_empty() => gitdir.join(c),
+        _ => gitdir.to_path_buf(),
+    };
+    let mut target = first_line(&gitdir.join("HEAD"))?;
+    for _ in 0..=MAX_SYMREF_HOPS {
+        let Some(name) = target.strip_prefix("ref:").map(str::trim) else {
+            return object_id(&target);
+        };
+        if !is_ref_name(name) {
+            return None;
+        }
+        match first_line(&gitdir.join(name)).or_else(|| first_line(&common.join(name))) {
+            Some(next) => target = next,
+            None => return packed_ref(&common, name),
+        }
+    }
+    None
+}
+
+/// A plain ref path: `refs/` then only normal, non-empty components, so it
+/// joins onto a gitdir without leaving it.
+fn is_ref_name(name: &str) -> bool {
+    name.starts_with("refs/")
+        && !name.contains(['\\', '\0'])
+        && name.split('/').all(|c| !matches!(c, "" | "." | ".."))
+}
+
+/// A full object id (40 hex, sha-1; 64 hex, sha-256), lowercased.
+fn object_id(s: &str) -> Option<String> {
+    (matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_hexdigit())).then(|| s.to_ascii_lowercase())
+}
+
+/// The id `<common>/packed-refs` records for `name`.
+fn packed_ref(common: &Path, name: &str) -> Option<String> {
+    let path = common.join("packed-refs");
+    if !regular_file(&path) {
+        return None;
+    }
+    let text = std::fs::read_to_string(&path).ok()?;
+    text.lines()
+        .filter(|l| !l.starts_with('#') && !l.starts_with('^'))
+        .find_map(|l| {
+            let (id, refname) = l.trim_end().split_once(' ')?;
+            (refname == name).then(|| object_id(id))?
+        })
+}
+
 /// The `R<score>` pairs of a `--name-status -z` listing.
 fn parse_name_status(out: &[u8]) -> Vec<(String, String)> {
     let mut fields = out.split(|b| *b == 0).map(|f| String::from_utf8_lossy(f).into_owned());
@@ -544,6 +674,153 @@ mod tests {
         assert_eq!(read_frame(&mut r, "aaaa").expect("first"), b"x\nbbbb blob 1");
         assert_eq!(read_frame(&mut r, "bbbb").expect("second"), b"");
         assert!(read_frame(&mut BufReader::new(&b"cccc missing\n"[..]), "cccc").is_err());
+    }
+
+    const SHA_A: &str = "1111111111111111111111111111111111111111";
+    const SHA_B: &str = "2222222222222222222222222222222222222222";
+    const SHA_C: &str = "3333333333333333333333333333333333333333";
+
+    /// Write `text` at `root/rel`, creating parent dirs.
+    fn put(root: &Path, rel: &str, text: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::fs::write(p, text).expect("write");
+    }
+
+    /// A work tree at `<tmp>/<name>` whose `.git` holds `HEAD` = `head`.
+    fn repo_with_head(tmp: &Path, name: &str, head: &str) -> PathBuf {
+        let root = tmp.join(name);
+        put(&root, ".git/HEAD", head);
+        std::fs::create_dir_all(root.join(".git/refs/heads")).expect("refs");
+        root
+    }
+
+    #[test]
+    fn head_commit_reads_loose_ref() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = repo_with_head(tmp.path(), "r", "ref: refs/heads/main\n");
+        put(&root, ".git/refs/heads/main", &format!("{SHA_A}\n"));
+        assert_eq!(head_commit(&root).as_deref(), Some(SHA_A));
+        // A subdirectory of the work tree finds the same `.git` above it.
+        std::fs::create_dir_all(root.join("src/pkg")).expect("subdir");
+        assert_eq!(head_commit(&root.join("src/pkg")).as_deref(), Some(SHA_A));
+        // A branch nested in a directory, and a symbolic ref to it.
+        put(&root, ".git/refs/heads/feat/x", &format!("{SHA_B}\n"));
+        put(&root, ".git/refs/heads/alias", "ref: refs/heads/feat/x\n");
+        put(&root, ".git/HEAD", "ref: refs/heads/alias\n");
+        assert_eq!(head_commit(&root).as_deref(), Some(SHA_B));
+        // An unborn branch (a fresh `git init`) has no commit.
+        put(&root, ".git/HEAD", "ref: refs/heads/none\n");
+        assert_eq!(head_commit(&root), None);
+    }
+
+    #[test]
+    fn head_commit_reads_packed_ref() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = repo_with_head(tmp.path(), "r", "ref: refs/heads/dev\n");
+        put(
+            &root,
+            ".git/packed-refs",
+            &format!(
+                "# pack-refs with: peeled fully-peeled sorted \n{SHA_A} refs/heads/main\n\
+                 {SHA_C} refs/tags/v1\n^{SHA_A}\n{SHA_B} refs/heads/dev\n"
+            ),
+        );
+        assert_eq!(head_commit(&root).as_deref(), Some(SHA_B));
+        // A loose ref overrides its packed line.
+        put(&root, ".git/refs/heads/dev", &format!("{SHA_C}\n"));
+        assert_eq!(head_commit(&root).as_deref(), Some(SHA_C));
+        // A name only a peeled line or a prefix matches is not found.
+        put(&root, ".git/HEAD", "ref: refs/heads/ma\n");
+        assert_eq!(head_commit(&root), None);
+    }
+
+    #[test]
+    fn head_commit_detached() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = repo_with_head(tmp.path(), "r", &format!("{SHA_A}\n"));
+        assert_eq!(head_commit(&root).as_deref(), Some(SHA_A));
+        // sha-256 repositories; an upper-case id is lowercased.
+        let sha256 = "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        put(&root, ".git/HEAD", &format!("{sha256}\n"));
+        assert_eq!(head_commit(&root), Some(sha256.to_ascii_lowercase()));
+        for bad in ["", "1111", "not a commit id at all, forty chars long.", "ref: HEAD"] {
+            put(&root, ".git/HEAD", bad);
+            assert_eq!(head_commit(&root), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn head_commit_worktree_gitdir_file() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let main = repo_with_head(tmp.path(), "main", "ref: refs/heads/main\n");
+        put(&main, ".git/refs/heads/main", &format!("{SHA_A}\n"));
+        put(&main, ".git/packed-refs", &format!("{SHA_B} refs/heads/feature\n"));
+        // `git worktree add ../wt feature`: a gitfile to a per-worktree gitdir
+        // whose `commondir` leads back to the main `.git`.
+        let wt = tmp.path().join("wt");
+        let wt_gitdir = main.join(".git/worktrees/wt");
+        put(&wt, ".git", &format!("gitdir: {}\n", wt_gitdir.display()));
+        put(&wt_gitdir, "HEAD", "ref: refs/heads/feature\n");
+        put(&wt_gitdir, "commondir", "../..\n");
+        assert_eq!(head_commit(&wt).as_deref(), Some(SHA_B), "the branch, packed in the common dir");
+        assert_eq!(head_commit(&main).as_deref(), Some(SHA_A), "the main tree keeps its own HEAD");
+        // A submodule: a relative gitfile into the superproject's modules dir.
+        let sub = main.join("vendor/sub");
+        put(&sub, ".git", "gitdir: ../../.git/modules/vendor/sub\n");
+        put(&main, ".git/modules/vendor/sub/HEAD", &format!("{SHA_C}\n"));
+        assert_eq!(head_commit(&sub).as_deref(), Some(SHA_C));
+        // A gitfile that names nothing stops the search (git does too).
+        put(&sub, ".git", "gitdir: ../../nowhere\n");
+        assert_eq!(head_commit(&sub), None);
+        put(&sub, ".git", "not a gitfile\n");
+        assert_eq!(head_commit(&sub), None);
+    }
+
+    #[test]
+    fn head_commit_non_git_is_none() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let plain = tmp.path().join("plain");
+        std::fs::create_dir_all(plain.join("src")).expect("mkdir");
+        assert!(
+            tmp.path().ancestors().all(|a| !a.join(".git").exists()),
+            "precondition: the temp dir {} must not sit inside a git work tree",
+            tmp.path().display()
+        );
+        assert_eq!(head_commit(&plain), None);
+        assert_eq!(head_commit(&tmp.path().join("missing")), None);
+        // A `.git` directory with no HEAD is not a repository: none here, and
+        // one below a real work tree defers to the work tree above it.
+        std::fs::create_dir_all(plain.join(".git/refs")).expect("empty .git");
+        assert_eq!(head_commit(&plain), None);
+        let outer = repo_with_head(tmp.path(), "outer", &format!("{SHA_A}\n"));
+        std::fs::create_dir_all(outer.join("inner/.git")).expect("empty inner .git");
+        assert_eq!(head_commit(&outer.join("inner")).as_deref(), Some(SHA_A));
+    }
+
+    #[test]
+    fn head_commit_never_reads_outside_the_gitdir() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        // A ref name that climbs out of the gitdir is refused before any read.
+        put(tmp.path(), "outside", &format!("{SHA_A}\n"));
+        let root = repo_with_head(tmp.path(), "r", "ref: refs/../../../outside\n");
+        assert_eq!(head_commit(&root), None);
+        for bad in ["ref: refs//heads/x", "ref: refs/./heads", "ref: heads/main", "ref: /etc/passwd"] {
+            put(&root, ".git/HEAD", bad);
+            assert_eq!(head_commit(&root), None, "{bad:?}");
+        }
+        // A symlinked ref or HEAD is not followed.
+        #[cfg(unix)]
+        {
+            put(&root, ".git/HEAD", "ref: refs/heads/main\n");
+            std::os::unix::fs::symlink(tmp.path().join("outside"), root.join(".git/refs/heads/main"))
+                .expect("symlink");
+            assert_eq!(head_commit(&root), None, "a symlinked loose ref");
+            let other = repo_with_head(tmp.path(), "o", "");
+            std::fs::remove_file(other.join(".git/HEAD")).expect("rm");
+            std::os::unix::fs::symlink(tmp.path().join("outside"), other.join(".git/HEAD")).expect("symlink");
+            assert_eq!(head_commit(&other), None, "a symlinked HEAD");
+        }
     }
 
     #[test]

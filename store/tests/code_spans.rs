@@ -76,7 +76,12 @@ fn build(repo: &Path) -> RepoGraph {
 /// The layout's metadata: the one repo, rooted at `../repo` from `<tmp>/<name>`.
 fn meta() -> LayoutMeta {
     LayoutMeta {
-        repos: vec![RepoMeta { id: repo_id().0, label: "backend".into(), root: Some("../repo".into()) }],
+        repos: vec![RepoMeta {
+            id: repo_id().0,
+            label: "backend".into(),
+            root: Some("../repo".into()),
+            rev: None,
+        }],
         parse_errors: vec![],
         code_spans_unresolved: 0,
     }
