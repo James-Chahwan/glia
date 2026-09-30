@@ -1,0 +1,60 @@
+{
+  "framework": "cpp-call-scope",
+  "language": "c_cpp",
+  "dirs": [
+    "."
+  ],
+  "note": "CB.25 (CB-C5/C6/C7), graph/src/cpp_scope.rs. Implicit this (a bare reset() inside a member binds the class's member), a static Type::m call (Cart::count() through C++ lookup from shop::Cart), a field-typed receiver (box.get()), a free function through a header prototype two includes away (codec_encode is DECLARED in codec.h, reached through cart.hpp, and DEFINED in codec.c beside a static shift), and a local `Cart c` under `using namespace shop` with legacy::Cart also included. HEAD e072dce (installed wheel): CALLS 1/6, only box.get() (Box is the one class of that short name); the rest stay unresolved because no pass reads class scope, C++ qualified names, the include closure, prototypes or using directives.",
+  "expect_edges": [
+    {
+      "from": "shop::Cart::clear",
+      "to": "shop::Cart::reset",
+      "category": "CALLS",
+      "note": "implicit this, inline member"
+    },
+    {
+      "from": "shop::Cart::add",
+      "to": "shop::Cart::reset",
+      "category": "CALLS",
+      "note": "implicit this, out-of-line member"
+    },
+    {
+      "from": "shop::Cart::add",
+      "to": "shop::Cart::count",
+      "category": "CALLS",
+      "note": "static call Type::m"
+    },
+    {
+      "from": "shop::Cart::add",
+      "to": "shop::Box::get",
+      "category": "CALLS",
+      "note": "field-typed receiver"
+    },
+    {
+      "from": "shop::Cart::add",
+      "to": "src::codec.c::codec_encode",
+      "category": "CALLS",
+      "note": "through the header prototype, via an include of an include"
+    },
+    {
+      "from": "src::cart.cpp::run",
+      "to": "shop::Cart::add",
+      "category": "CALLS",
+      "note": "local `Cart c` under `using namespace shop`"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "shop::Cart::add",
+      "to": "src::codec.c::shift",
+      "category": "CALLS",
+      "note": "a static (file-local) function is never reached through a prototype"
+    },
+    {
+      "from": "src::cart.cpp::run",
+      "to": "legacy::Cart::add",
+      "category": "CALLS",
+      "note": "`using namespace shop` picks shop::Cart over the included legacy::Cart"
+    }
+  ]
+}

@@ -14,6 +14,7 @@ use crate::calls::{
     EvidenceTally, emit_method_level_implements, enclosing_class_or_struct, enclosing_module,
     graph_evidence, push_edge, resolve_calls, resolve_refs, unique_global_type,
 };
+use crate::cpp_scope::{CppScope, implicit_this};
 use crate::go_mounts::MountStats;
 use crate::imports::{
     SameStem, resolve_imports_go, resolve_imports_python, resolve_imports_slash,
@@ -350,6 +351,15 @@ pub fn build_ruby(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Gra
 /// definition's own file ([`CppCallScope`]): a Bare call of a bound member is
 /// looked up in the file that defines it, then every Bare call the generic
 /// pass missed in the headers its file directly `#include`s.
+///
+/// CB.25 ([`crate::cpp_scope`]): before `resolve_calls`, [`implicit_this`]
+/// rewrites a bare call inside a member that names a member of its class
+/// (or of a base) into a self call, so the member wins over a same-named
+/// free function (C++ class-scope lookup). The hook then tries
+/// [`CppScope::resolve`] after [`CppCallScope`]: `Type::m()` / `ns::f()`
+/// through C++ name lookup, a typed receiver through `using`, a free
+/// function through a header prototype, a bare call through `using`.
+/// Prints the `[cpp-scope]` marker once.
 pub fn build_c_cpp<R>(
     repo: RepoId,
     parses: Vec<FileParse>,
@@ -362,13 +372,21 @@ where
     let (defining, members) = bind_out_of_line(&mut g, &mut all_calls, &mut all_refs);
     build_symbol_table(&mut g);
     resolve_imports_ts(&mut g, &all_imports, &resolve_source, &mut SameStem::default());
+    let cpp = CppScope::new(&g, &defining);
+    let rewritten = implicit_this(&g, &cpp, &mut all_calls);
     let scope = CppCallScope::new(&g, defining);
     let mut tally = EvidenceTally::default();
-    resolve_calls(&mut g, &all_calls, |g, site| scope.resolve(g, site), &mut tally);
+    resolve_calls(
+        &mut g,
+        &all_calls,
+        |g, site| scope.resolve(g, site).or_else(|| cpp.resolve(g, site)),
+        &mut tally,
+    );
     resolve_refs(&mut g, &all_refs, &mut tally);
     emit_method_level_implements(&mut g);
     members.report();
     scope.report();
+    eprintln!("{}", cpp.marker(rewritten));
     tally.report();
     Ok(g)
 }
@@ -2383,7 +2401,7 @@ impl CppTypes {
 /// PACKAGE ancestors up to the MODULE, then its own (a PACKAGE name may
 /// itself be `a::b`). `shop::Cart`, `Widget`, `Outer::Inner`. Bounded by the
 /// nav's size, so a malformed parent cycle ends.
-fn cpp_name(nav: &CodeNav, id: NodeId) -> String {
+pub(crate) fn cpp_name(nav: &CodeNav, id: NodeId) -> String {
     let mut segs: Vec<&str> = Vec::new();
     let mut cur = Some(id);
     for _ in 0..=nav.parent_of.len() {
@@ -2404,7 +2422,7 @@ fn cpp_name(nav: &CodeNav, id: NodeId) -> String {
 }
 
 /// `a::b`, or `b` alone when `a` is empty.
-fn cpp_join(a: &str, b: &str) -> String {
+pub(crate) fn cpp_join(a: &str, b: &str) -> String {
     if a.is_empty() {
         b.to_string()
     } else {
@@ -2414,7 +2432,7 @@ fn cpp_join(a: &str, b: &str) -> String {
 
 /// The scopes C++ searches for a qualified definition's qualifier, innermost
 /// first: `a::b` -> `a::b`, `a`, "" (the global namespace).
-fn cpp_ns_prefixes(ns: &str) -> Vec<&str> {
+pub(crate) fn cpp_ns_prefixes(ns: &str) -> Vec<&str> {
     let mut out = vec![ns];
     let mut cur = ns;
     while let Some((outer, _)) = cur.rsplit_once("::") {
@@ -2446,7 +2464,7 @@ struct Placement {
 }
 
 /// True for a node kind that owns C++ members.
-fn is_cpp_type(nav: &CodeNav, id: NodeId) -> bool {
+pub(crate) fn is_cpp_type(nav: &CodeNav, id: NodeId) -> bool {
     nav.kind_by_id
         .get(&id)
         .is_some_and(|k| *k == node_kind::CLASS || *k == node_kind::STRUCT)
