@@ -6,10 +6,12 @@ publish = false
 
 [dependencies]
 glia-core = { path = "../core" }
-glia-parser-python = { path = "../parsers/code/python" }
-glia-parser-go = { path = "../parsers/code/go" }
-glia-parser-typescript = { path = "../parsers/code/typescript" }
 glia-code-domain = { path = "../code-domain" }
 glia-code-extractors = { path = "../parsers/code/extractors" }
 glia-activation = { path = "../activation" }
 thiserror = "2"
+
+[dev-dependencies]
+glia-parser-python = { path = "../parsers/code/python" }
+glia-parser-go = { path = "../parsers/code/go" }
+glia-parser-typescript = { path = "../parsers/code/typescript" }

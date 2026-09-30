@@ -405,9 +405,6 @@ dependencies = [
  "glia-code-domain",
  "glia-code-extractors",
  "glia-core",
- "glia-parser-go",
- "glia-parser-python",
- "glia-parser-typescript",
  "thiserror",
 ]
 
