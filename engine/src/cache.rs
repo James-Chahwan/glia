@@ -457,8 +457,45 @@ impl ParseCache {
     /// Reuse an unchanged parse for `path` (content hash + language must match),
     /// cloned so the caller can hand it to the builder. `None` on miss.
     pub fn get(&self, path: &str, hash: u64, lang: &str) -> Option<FileParse> {
-        let e = self.entries.get(path)?;
-        (e.content_hash == hash && e.lang == lang).then(|| e.parse.clone())
+        self.entry(path, hash, lang).map(|e| e.parse.clone())
+    }
+
+    /// The entry of `path` iff it was cached from content hash `hash` as
+    /// `lang` ([`ParseCache::get`]'s test, without the clone).
+    fn entry(&self, path: &str, hash: u64, lang: &str) -> Option<&CacheEntry> {
+        self.entries
+            .get(path)
+            .filter(|e| e.content_hash == hash && e.lang == lang)
+    }
+
+    /// The cached parse of `path` under `get`'s test, borrowed: the shared
+    /// cache (CE.2a) checks its MODULE form before exporting it.
+    pub(crate) fn peek(&self, path: &str, hash: u64, lang: &str) -> Option<&FileParse> {
+        self.entry(path, hash, lang).map(|e| &e.parse)
+    }
+
+    /// The shared-cache payload of `path`'s entry (CE.2a): exactly
+    /// `bincode::serialize` of the [`CacheEntry`] (`content_hash`, `lang`, the
+    /// parse through [`canonical_parse`]), the bytes the sidecar holds for it
+    /// inside its frame. Per entry, so the sidecar's whole-file lz4 frame
+    /// (CD.7a) never changes it, and canonical, so equal parses give equal
+    /// bytes. `Ok(None)` unless the entry passes `get`'s test.
+    pub(crate) fn entry_payload(
+        &self,
+        path: &str,
+        hash: u64,
+        lang: &str,
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.entry(path, hash, lang)
+            .map(|e| bincode::serialize(e).map_err(|err| format!("{path}: payload: {err}")))
+            .transpose()
+    }
+
+    /// The build context the entries were cached under: the repo identity key
+    /// and the go.mod module-set key ([`ParseCache::validate_context`]).
+    /// `("", "")` for a cache no build has used.
+    pub(crate) fn context(&self) -> (&str, &str) {
+        (&self.repo_canonical, &self.go_modules)
     }
 
     /// Record a freshly-parsed file.

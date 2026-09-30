@@ -6,3 +6,9 @@
 //! reached by module path (`glia_engine::shared_cache::<item>`): its owners add
 //! their files (key.rs, export.rs, import.rs, layout.rs) and declare them here.
 //! Filled by CE.2a.
+
+mod export;
+mod key;
+
+pub use export::{CacheRow, CacheRows, Export, ExportedEntry, cache_rows, export_entries};
+pub use key::{CacheKey, file_key};

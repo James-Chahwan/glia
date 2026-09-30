@@ -601,7 +601,10 @@ fn disambiguate(idents: &mut [RepoIdentity], abs_paths: &[String]) -> Vec<String
 /// fired_on marker, once per repo with at least one module (the first four,
 /// then `+K more`; the repo root's dir prints as `.`):
 ///   `[go-modules] N module roots (svc=example.com/svc svc-b=example.com/svc-b) repo=<label>`
-fn go_modules_for(
+///
+/// `pub(crate)` for the shared cache (CE.2a), whose keys hash this module set
+/// for a Go file exactly as the build's parse cache checks it.
+pub(crate) fn go_modules_for(
     root: &Path,
     roots: &[ProjectRoot],
     repo_label: &str,

@@ -1273,12 +1273,48 @@ fn angular_component_source(template: &str, modules: &ModuleQnames) -> String {
     }
 }
 
+/// One language-parser file of a repo's walk as the parse cache sees it
+/// ([`cache_plan`]): what [`route_branches`]'s language branch reads besides
+/// the repo identity and the Go module set.
+#[derive(Debug)]
+pub(crate) struct PlanRow<'a> {
+    /// Repo-relative path, as walked.
+    pub(crate) path: &'a str,
+    /// The language tag [`parser_route`] sends it to.
+    pub(crate) lang: &'static str,
+    /// The MODULE qname the LB.9b plan gives it this build.
+    pub(crate) module_qname: String,
+    /// The walked source text.
+    pub(crate) source: &'a str,
+}
+
+/// The parse-cache view of one repo's walked `files` (CE.2a): every file the
+/// language branch parses, with the MODULE qname the build would give it,
+/// from the same [`ModuleQnames::plan`] and [`parser_route`] the router runs,
+/// so a shared-cache key names exactly the form a build's cache lookup
+/// checks. Parses nothing. Walk order.
+pub(crate) fn cache_plan(files: &[(String, String)]) -> Vec<PlanRow<'_>> {
+    let modules = ModuleQnames::plan(files);
+    files
+        .iter()
+        .filter_map(|(path, source)| {
+            let lang = parser_route(path)?;
+            Some(PlanRow {
+                path,
+                lang,
+                module_qname: modules.module_qname(path),
+                source,
+            })
+        })
+        .collect()
+}
+
 /// Was `fp`, the cached parse of `path`, built under the MODULE form the LB.9b
 /// plan did NOT pick this build (its first node, the MODULE, is
 /// `api::user.py` where the plan now says `api::user`, or back)? Only the
 /// plan's own renaming is checked: the cache stays keyed on (path, content
 /// hash, language) and trusts everything else it holds.
-fn cached_under_other_form(fp: &FileParse, path: &str, planned: &str) -> bool {
+pub(crate) fn cached_under_other_form(fp: &FileParse, path: &str, planned: &str) -> bool {
     let code_form = path_to_qname(path);
     let other = if planned == code_form {
         synthetic_module_qname(path)
