@@ -1,0 +1,24 @@
+{
+  "framework": "event-monorepo-process",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "CB-f: apps/api depends on the workspace library @shop/orders (package.json DEPENDS_ON package:npm:@shop/orders), so the library's in-process EventEmitter2 emit and the app's @OnEvent handler run in ONE process. graph/src/resolvers/eventbus.rs pairing() sees two owners (libs/orders, apps/api) and drops the pair: `[eventbus-owner] same-owner=0 unowned-side=0 transport=0 cross-owner-dropped=2` on HEAD 2170ff8, 0 EVENT_FLOWS. services/billing does not depend on the library: its handler is another process and stays unpaired (precision).",
+  "expect_edges": [
+    {
+      "from": "event_emit:order.placed @libs/orders",
+      "to": "event_handle:order.placed @apps/api",
+      "category": "EVENT_FLOWS",
+      "note": "one process: apps/api links libs/orders"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "event_emit:order.placed @libs/orders",
+      "to": "event_handle:order.placed @services/billing",
+      "category": "EVENT_FLOWS",
+      "note": "billing never links the library"
+    }
+  ]
+}

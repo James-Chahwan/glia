@@ -287,7 +287,9 @@ fn monorepo_markers_count_every_side_and_pair() {
     );
     assert_eq!(
         build_stderr(td.path(), "[eventbus-owner]"),
-        ["[eventbus-owner] same-owner=2 unowned-side=2 transport=1 cross-owner-dropped=2"]
+        // CB.5: `same-process=` counts pairs a workspace dependency keeps;
+        // this fixture's service manifests declare none.
+        ["[eventbus-owner] same-owner=2 unowned-side=2 transport=1 same-process=0 cross-owner-dropped=2"]
     );
 }
 

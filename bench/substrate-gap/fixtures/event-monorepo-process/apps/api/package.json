@@ -1,0 +1,1 @@
+{ "name": "@shop/api", "dependencies": { "@shop/orders": "workspace:*", "@nestjs/event-emitter": "^2.0.0" } }
