@@ -22,11 +22,14 @@
 //! same inputs to [`apply_external_cells`].
 //! `.glia/overlay.toml` is loaded ONCE here, through LF.2a's loader; the walk
 //! and the store's stale scan read only its `[walk]` / `[[project]]`
-//! sections, through `code_domain::walk_gating` (LF.3a).
+//! sections, through `code_domain::walk_gating` (LF.3a). A build given an
+//! overlay text (`BuildOptions::overlay_text`, CE.3b: the overlay loop's
+//! candidate builds) parses that text here instead, for its primary repo.
 //!
-//! Markers, once per repo that has the file:
+//! Markers, once per repo that has the file (or is given a text):
 //! - `[overlay] loaded .glia/overlay.toml repo=<label> version=<v> (walk=<n> project=<n> ... note=<n>) errors=<e>`
-//!   plus one `[overlay] error: <loader error>` line per error;
+//!   (`loaded overlay_text` for a given text) plus one
+//!   `[overlay] error: <loader error>` line per error;
 //! - `[cells] sidecar repo=<label> rows=<r> bound=<b> rekeyed=<k> ambiguous=<a> orphaned=<o> rejected=<x> (CONSTRAINT=<n> DECISION=<n> CONV=<n> VECTOR=<n>)`
 //!   (see [`cells`]);
 //! - `[overlay] edges repo=<label> declared=<d> applied=<a> redundant=<r> orphaned=<o> rejected=<x> (llm=<l> human=<h>)`
@@ -89,20 +92,22 @@ pub(crate) struct RepoInputs {
     /// The path as given: the `repo=` of every marker.
     pub(crate) label: String,
     /// `.glia/overlay.toml`, loaded once; `None` when the file is absent.
+    /// With a given overlay text, that text parsed (never `None`).
     pub(crate) config: Option<LoadedConfig>,
 }
 
 impl RepoInputs {
     /// The `[overlay] loaded` marker and one `[overlay] error:` line per
-    /// loader error, when the repo has an overlay file.
-    fn report_overlay(&self) {
+    /// loader error, when the repo has an overlay file or was given a text
+    /// (`source`: the file's path, or `overlay_text`).
+    fn report_overlay(&self, source: &str) {
         let Some(cfg) = &self.config else {
             return;
         };
         let counts: Vec<String> =
             cfg.section_counts().iter().map(|(section, n)| format!("{section}={n}")).collect();
         eprintln!(
-            "[overlay] loaded {OVERLAY_FILE} repo={} version={} ({}) errors={}",
+            "[overlay] loaded {source} repo={} version={} ({}) errors={}",
             self.label,
             cfg.config.version,
             counts.join(" "),
@@ -114,11 +119,21 @@ impl RepoInputs {
     }
 }
 
-/// Load `root`'s external inputs and print the overlay marker.
-pub(crate) fn repo_inputs(repo: RepoId, root: PathBuf, label: String) -> RepoInputs {
-    let config = glia_config::load(&root);
+/// Load `root`'s external inputs and print the overlay marker. With
+/// `overlay_text` (`BuildOptions::overlay_text`, CE.3b) that text is parsed in
+/// place of `root`'s `.glia/overlay.toml`, which is then not read at all.
+pub(crate) fn repo_inputs(
+    repo: RepoId,
+    root: PathBuf,
+    label: String,
+    overlay_text: Option<&str>,
+) -> RepoInputs {
+    let (config, source) = match overlay_text {
+        Some(text) => (Some(glia_config::parse_str(text)), "overlay_text"),
+        None => (glia_config::load(&root), OVERLAY_FILE),
+    };
     let inputs = RepoInputs { repo, root, label, config };
-    inputs.report_overlay();
+    inputs.report_overlay(source);
     inputs
 }
 
@@ -216,18 +231,29 @@ mod tests {
         let repo = RepoId::from_canonical("test://inputs");
 
         let ok = root("ok", Some("version = 1\n\n[walk]\nskip = [\"gen/\"]\n"));
-        let inputs = repo_inputs(repo, ok.clone(), "ok".into());
+        let inputs = repo_inputs(repo, ok.clone(), "ok".into(), None);
         let cfg = inputs.config.as_ref().expect("an overlay file loads");
         assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
         assert_eq!(cfg.config.walk.skip, ["gen/"]);
 
         let none = root("none", None);
-        assert!(repo_inputs(repo, none.clone(), "none".into()).config.is_none());
+        assert!(repo_inputs(repo, none.clone(), "none".into(), None).config.is_none());
 
         let bad = root("bad", Some("version = 1\n[[edge]\n"));
-        let inputs = repo_inputs(repo, bad.clone(), "bad".into());
+        let inputs = repo_inputs(repo, bad.clone(), "bad".into(), None);
         let cfg = inputs.config.as_ref().expect("a malformed overlay is Some, with its error");
         assert_eq!(cfg.errors.len(), 1, "{:?}", cfg.errors);
+
+        // CE.3b: a given text replaces the file, present or absent, errors included.
+        let text = "version = 1\n\n[constants]\nGATEWAY = \"/gw\"\n";
+        let over_ok = repo_inputs(repo, ok.clone(), "ok".into(), Some(text));
+        let cfg = over_ok.config.as_ref().expect("a text is always Some");
+        assert!(cfg.config.walk.skip.is_empty(), "the file's [walk] is not read");
+        assert_eq!(cfg.config.constants.len(), 1);
+        let over_none = repo_inputs(repo, none.clone(), "none".into(), Some(text));
+        assert_eq!(over_none.config.as_ref().map(|c| c.config.constants.len()), Some(1));
+        let over_bad = repo_inputs(repo, ok.clone(), "ok".into(), Some("version = 1\n[[edge]\n"));
+        assert_eq!(over_bad.config.as_ref().map(|c| c.errors.len()), Some(1));
 
         for d in [ok, none, bad] {
             std::fs::remove_dir_all(d).ok();

@@ -14,8 +14,9 @@ serde_json = "1"
 thiserror = "2"
 rkyv = { version = "0.8", features = ["bytecheck"] }
 ignore = "0.4"
-# `.glia/overlay.toml` loader (LF.2a). `parse` only: the `display` writer
-# (toml_edit's serializer) is never compiled.
+# `.glia/overlay.toml` loader (LF.2a). `parse` only: this crate never writes
+# TOML. The one writer is the engine's format-preserving overlay writer (CE.3b,
+# `glia_engine::overlay_loop`), which turns on toml_edit's `display` itself.
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 # `snapshots::data_hash` (LF.5a): xxhash64 over a snapshot's data files, the
 # same hash and hex form the store uses for shard and input fingerprints.

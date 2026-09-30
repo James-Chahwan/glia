@@ -22,10 +22,11 @@
 //! stage ([`crate::external::apply_external_cells`], LF.1a) applies the same
 //! inputs.
 //!
-//! [`BuildOptions`] is how a caller switches a build (LF.2b): today only
-//! `overlay`, whether the `.glia/overlay.toml` overlay sections apply. It is a
-//! build option, not an env var, because pyo3 `generate()` may run on several
-//! Python threads at once.
+//! [`BuildOptions`] is how a caller switches a build (LF.2b): `overlay`,
+//! whether the `.glia/overlay.toml` overlay sections apply, and (CE.3b)
+//! `overlay_text`, the primary repo's overlay given as text in place of its
+//! file. It is a build option, not an env var, because pyo3 `generate()` may
+//! run on several Python threads at once.
 
 mod assemble;
 mod c_includes;
@@ -104,15 +105,31 @@ pub struct GenerateResult {
 ///   sections are not affected. A graph built without the overlay must never
 ///   be written to a repo's default layout dir, which holds the
 ///   overlay-applied graph: the CLI and pyo3 refuse it.
+/// - `overlay_text` (default `None`, CE.3b): the PRIMARY repo's overlay as
+///   text, parsed in place of its `.glia/overlay.toml` (the file is not read
+///   for it; a missing file is no matter). The primary repo is
+///   [`generate_one`]'s repo, or [`generate_many`]'s first path: a candidate
+///   targets one repo's file, and every other repo reads its own. Every build
+///   reader of the overlay (constant pins, wrappers, edges, route prefixes,
+///   declared knowledge, entrypoints) sees the text; only the walk still reads
+///   `[walk]` / `[[project]]` from the file on disk, sections an overlay-loop
+///   candidate never carries. Parse errors print the same `[overlay] error:`
+///   lines as the file's. `overlay` still switches the overlay sections of the
+///   text. Only [`crate::overlay_loop`] sets it (no CLI flag, no pyo3
+///   parameter), to build the tree with the overlay that WOULD be written. A
+///   graph built with `overlay_text` must never be written to a repo's default
+///   layout dir, which holds the graph of the file as it is (the rule
+///   `--no-overlay` builds follow): the overlay loop never persists one.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuildOptions {
     pub overlay: bool,
+    pub overlay_text: Option<String>,
 }
 
 impl Default for BuildOptions {
     fn default() -> Self {
-        Self { overlay: true }
+        Self { overlay: true, overlay_text: None }
     }
 }
 
@@ -120,6 +137,13 @@ impl BuildOptions {
     /// `self` with the overlay switched on or off.
     pub fn with_overlay(mut self, on: bool) -> Self {
         self.overlay = on;
+        self
+    }
+
+    /// `self` building the primary repo with `text` as its overlay, in place
+    /// of its `.glia/overlay.toml` (see [`BuildOptions`]).
+    pub fn with_overlay_text(mut self, text: String) -> Self {
+        self.overlay_text = Some(text);
         self
     }
 }
@@ -211,9 +235,10 @@ fn generate_one_inner(
     let walk_started = Instant::now();
     let (files, regions, md, roots) = walk_source_files(&root);
     let walk = walk_started.elapsed();
-    // External inputs (LF.1a): `.glia/overlay.toml` loaded once, before any
-    // graph is built.
-    let inputs = vec![repo_inputs(repo, root.clone(), repo_path.to_string())];
+    // External inputs (LF.1a): `.glia/overlay.toml` (or the given overlay
+    // text, CE.3b) loaded once, before any graph is built.
+    let overlay_text = opts.overlay_text.as_deref();
+    let inputs = vec![repo_inputs(repo, root.clone(), repo_path.to_string(), overlay_text)];
     let go = go_modules_for(&root, &roots, repo_path);
     // Cached parses are only valid under the exact repo identity + go.mod
     // set they were built with — neither is visible to per-file hashes.
@@ -383,7 +408,8 @@ pub(crate) fn assemble_many(repo_paths: &[String], incremental: bool) -> Result<
 
 /// `assemble_many` over `(root, identity root)` pairs, built with `opts`: the
 /// overlay stages that run before a graph is built (LF.2d's constant pins)
-/// read `opts.overlay`. Each pair's walk, `.glia` inputs, file reads and
+/// read `opts.overlay`, and the first pair's inputs parse `opts.overlay_text`
+/// when it is set (CE.3b). Each pair's walk, `.glia` inputs, file reads and
 /// markers use its root; its identity (and so its RepoId and the path
 /// disambiguation of a shared key), label, repo root and parse cache use its
 /// identity root. With `incremental`, the cache is loaded from the identity
@@ -445,8 +471,9 @@ pub(crate) fn assemble_many_with(
         w.3 = ident;
     }
 
-    // Phase 2 — build each repo against the union.
-    for entry in walked {
+    // Phase 2 — build each repo against the union. `walked` keeps a slot per
+    // pair, so index 0 is the first path: the only repo `overlay_text` is for.
+    for (slot, entry) in walked.into_iter().enumerate() {
         let ((path, identity_root), root, (files, regions, md, roots), ident, walk) = match entry {
             Ok(w) => w,
             Err(e) => {
@@ -460,7 +487,8 @@ pub(crate) fn assemble_many_with(
         // or moved path keeps the key, so its sidecar is reused.
         let repo = RepoId::from_canonical(&ident.key);
         repo_id_marker(&ident, identity_root);
-        let input = repo_inputs(repo, root.clone(), path.clone());
+        let overlay_text = if slot == 0 { opts.overlay_text.as_deref() } else { None };
+        let input = repo_inputs(repo, root.clone(), path.clone(), overlay_text);
         label_inputs.push((repo.0, identity_root.clone()));
         // First path wins, like `repo_label_map` (inputs sharing a key are
         // disambiguated above, so a repeat is the same repo given twice).
