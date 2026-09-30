@@ -17,15 +17,20 @@ core/               Node, Edge, QName, shared primitives (no domain assumptions)
 code-domain/        Code-specific registries: NodeKind, EdgeCategory, CellType (u32 IDs)
                     + the code DomainTables (profile.rs)
 graph/              Per-repo graph builder, universal resolver, cross-graph resolvers
-                    src/ is MODULES, not one lib.rs (see "Module layout" below)
+                    src/ is MODULES, not one lib.rs (see "Module layout" below). Its parser
+                    crates (python, go, typescript) are [dev-dependencies] only (CD.6a):
+                    glia-graph's normal dependency tree holds no tree-sitter
 engine/             Orchestration: walk → parse → extract → build → merge → resolve.
                     Owns every parser dependency. src/ is MODULES; lib.rs is a facade
 cli/                The `glia` binary
-doc-sources/        Tier-4 doc ingestion (Confluence REST + local snapshot)
-snapshots/          External-input snapshot writers (git history, test reports) - the only
-                    crates that shell out; the build reads their output through
+doc-sources/        Tier-4 doc ingestion: Confluence REST, Notion, MediaWiki, a local wiki
+                    checkout (`glia docs sync --source confluence|notion|mediawiki|dir`)
+                    + the local snapshot
+snapshots/          External-input snapshot writers (git history, test reports, SCIP
+                    indexes); a build never runs them and reads their output through
                     code-domain::snapshots
-store/              .gmap binary format — rkyv + mmap, sharded layout
+store/              .gmap binary format — rkyv + mmap, sharded layout (format 3), and the
+                    timeline.gmap sidecar
 projection-text/    Dense sigil text output (scopes, defaults, module dedup)
 activation/         Spreading activation — domain-agnostic PPR with configurable direction/weights;
                     also the domain-free build-pass registry (`passes`: Stage, PassSpec,
@@ -74,16 +79,20 @@ The facade rules:
    items (engine `walk`/`route`/`passes`/`docs`/`endpoint_fold`; graph `calls`/`imports`/
    `signal`/`traversal`) are not globbed. `engine::arch` and `engine::cache` are
    `pub mod` with an explicit, partial flat list.
-2. **Every new 0.5.0 primitive is a public module slot**, reached by module path —
-   `glia_engine::delta::graph_delta_vs_rev`, `::persist::load_layout`,
-   `::profile::CODE_PROFILE`, `glia_graph::roles::roles_in` — never flattened into
-   the root. The slot's owner fills its file; no later packet edits a facade (only
-   LD.11a, the crate rename, touches `engine/src/lib.rs`).
+2. **Every new 0.5.0 / 0.5.1 primitive is a public module slot**, reached by module
+   path — `glia_engine::delta::graph_delta_vs_rev`, `::persist::load_layout`,
+   `::profile::CODE_PROFILE`, `::pack::pack`, `glia_graph::roles::roles_in` — never
+   flattened into the root. The slot's owner fills its file; no later packet edits a
+   facade (in 0.5.0 only LD.11a, the crate rename, touched `engine/src/lib.rs` after
+   wave 0; in 0.5.1 only the wave-0 C0.* packets touched the engine, graph and py
+   facades).
 3. **A spec step "FACADE: `pub use x::{..}`" or "`mod x;`" is already done** — skip it
    and call the item by its module path from `cli` / `py`.
 4. Two globbed modules exporting one name raise `ambiguous_glob_reexports`: rename,
-   never `#[allow]`. A slot still doc-only at release is dead weight — LG.4b's docs
-   refresh fails on any slot file whose only lines are `//!`.
+   never `#[allow]`. A slot still doc-only at release is dead weight: the release docs
+   packet (LG.4b in 0.5.0, CZ.2 in 0.5.1) fails on any slot file whose only lines are
+   `//!` (`grep -v '^//!' <file> | grep -c .` is 0), and a dropped owner's slot is
+   deleted with its `mod` line. At 0.5.1 every tracked `.rs` file has code.
 
 ```
 engine/src/   lib.rs        facade (rules above)
@@ -104,11 +113,13 @@ engine/src/   lib.rs        facade (rules above)
                                            rust_crates (the Cargo packages build_rust resolves against)
                             c_includes.rs  IncludeRoots / IncludeResolver — C/C++ include search
                                            roots (compile_commands.json, CMake, include/; CB.22)
+                            timing.rs      the per-phase `[timing]` stderr timers (CA.9)
               docs.rs       markdown ingest          passes.rs    doc-linker, TESTS edge, the post-pass fns
-              profile.rs    CODE_PASSES — every build pass in run order (15 resolvers, 6 post-passes,
+              profile.rs    CODE_PASSES — every build pass in run order (15 resolvers, 9 post-passes,
                             evidence fill + determinism sort); run_code_passes is the whole build tail
               coverage.rs   coverage_report          answers.rs   the P3 primitives
-              cache.rs      incremental parse cache  arch.rs      service_map (glia arch)
+              cache.rs      incremental parse cache (the GLIAPCZ1 lz4 frame, CD.7a)
+              arch.rs       service_map (glia arch)
               endpoint_fold.rs  client base-URL fold onto the ENDPOINT path
   public slots (glia_engine::<slot>::<item>), owner (+ extenders):
               pages LA.6e              persist LC.7 (+LC.8, LC.9, LC.10a)   merge LC.10b
@@ -132,7 +143,9 @@ engine/src/   lib.rs        facade (rules above)
               adr LF.4b                parallel LG.1a (+LG.1b, LG.1c)
               suspected CD.3b (0.5.1, C0.2)
               external/ LF.1a — directory module; LF.2b, LF.2e, LF.3b, LF.4a, LF.5b, LF.6b
-                        add their stage files and declare them in external/mod.rs
+                        add their stage files and declare them in external/mod.rs; 0.5.1
+                        adds signals.rs (CC.2: the one typed reader of ATTN / FAIL cells),
+                        infer_wrappers.rs (CA.4) and scip.rs (CE.1d, the SCIP build stage)
 
 graph/src/    lib.rs        facade (rules above)
               types.rs build.rs imports.rs calls.rs merged.rs traversal.rs
@@ -148,7 +161,8 @@ graph/src/    lib.rs        facade (rules above)
               nav LA.6a   is_nav_route / nav_route_path, and the NAVIGATES_TO resolver
                           + page-component lift that calls::resolve_refs runs last
   private slots (items pub(crate)):
-              go_mounts CB.20   swift_scope CB.18   cpp_scope CB.25
+              go_mounts CB.20 (Go group mounts)   swift_scope CB.18 (SwiftModuleTypes, the
+              Swift call hook)   cpp_scope CB.25 (CppScope, C++ name lookup)
 
 code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_type) — ids
                             are allocated here and nowhere else; walk_gating, project_roots
@@ -205,9 +219,10 @@ cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
   there stops the unit tests linking.
 - **cli:** a new command adds one variant and one match arm to its area's `mod.rs` and
   its own `cli/src/cmd/<area>/<name>.rs` (`Args` + `run`). The 0.5.1 command files
-  (C0.5) are declared as doc-only slots (`mod <name>;` plus one `//!` paragraph, no
-  items); the owner adds `Args`, `run`, its variant `<Name>(<module>::Args)` (the doc
-  comment is clap's about) and its arm, and regenerates `cli/surface/<cmd>.txt`.
+  (C0.5) were declared as doc-only slots (`mod <name>;` plus one `//!` paragraph, no
+  items); each owner added `Args`, `run`, its variant `<Name>(<module>::Args)` (the doc
+  comment is clap's about) and its arm, and regenerated `cli/surface/<cmd>.txt`. All 14
+  are filled.
 - **Snapshot ownership:** the packet that claims `py/src/<m>.rs` owns
   `py/api_surface/<m>.txt` and `py/tests/surface/test_<m>.py`; the packet that claims
   `cli/src/cmd/<..>/<c>.rs` owns `cli/surface/<c>.txt` (global options:
@@ -256,27 +271,50 @@ Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems`
 
 - `SelfMethod` walks to the enclosing `CLASS` / `STRUCT` / equivalent.
 - An `extra_hook` seam on `resolve_calls` lets a language contribute resolution the generic
-  walker misses; it is consulted only after every generic lookup failed. Three builders use it:
+  walker misses; it is consulted only after every generic lookup failed. Four builders use it:
   `build_rust` hands it the path resolver in `graph/src/rust_paths.rs` (`crate::` / `self::` /
   `super::` / `Self::` / workspace-crate paths), fed the walk's Cargo packages as `RustCrate`s by
   `lang_build::rust_crates` (LA.1a); `build_go` hands it `GoPackages` (a package is its
-  directory, LA.13b); `build_c_cpp` hands it `CppCallScope` (out-of-line members and directly
-  `#include`d headers, LB.10c).
+  directory, LA.13b; typed receivers, CA.2b); `build_c_cpp` hands it `CppCallScope` (out-of-line
+  members and directly `#include`d headers, LB.10c), then `CppScope` (`graph/src/cpp_scope.rs`:
+  C++ name lookup, CB.25); `build_swift` hands it `SwiftModuleTypes`
+  (`graph/src/swift_scope.rs`: implicit self across extensions, cross-file static calls, CB.18).
+  Every other builder passes `|_, _| None`.
 - Parsers must not short-circuit this: extract what the AST makes available; don't cap at what old regex heuristics happened to capture.
 
 ## Format Spec — `.gmap`
 
 Zero-copy rkyv serialisation with memory-mapped read. Sharded by kind to keep hot paths local. Write-once, rebuild-whole-file — no in-place mutation. Owned vs Archived types are the mental model: loaded views are `Archived<T>`, writes go through `Owned<T>` then serialise.
 
-Lives at `<repo>/.glia/graph/` (manifest + shards + cross_stack + parse cache), the one layout
-`glia build`, the install-hooks hooks and pyo3 all write (LC.9). `FORMAT_VERSION` 2 and
-`MANIFEST_VERSION` 2 (LC.1): every file opens with a `GLIAGMAP` preamble, so an old, future or
-foreign file reports OldFormat / FutureFormat / Corrupt ("rebuild the graph"), and
-`load_from_gmap` rebuilds such a layout from its repo root instead of raising (LC.8). The header
-names its own node-kind / edge-category / cell-type registries (LC.4, read by `glia inspect`);
-the container is a domain-free core plus named domain sections (`code`: nav, symbols,
-interface methods; LC.5b, LC.6); edges carry cells (LC.2), every edge one EVIDENCE cell with its
-emitter, rule, file and 0-based line (LC.3).
+Lives at `<repo>/.glia/graph/` (manifest + shards + cross_stack + parse cache, and the
+`timeline.gmap` sidecar once `glia timeline build` ran), the one layout `glia build`, the
+install-hooks hooks and pyo3 all write (LC.9). `FORMAT_VERSION` 3 (0.5.1; format 2 was 0.5.0,
+LC.1) and `MANIFEST_VERSION` 2: every file opens with a `GLIAGMAP` preamble whose first 12 bytes
+(magic + version) are frozen, so an old, future or foreign file reports OldFormat / FutureFormat
+/ Corrupt ("rebuild the graph"), and `load_from_gmap` rebuilds such a layout from its repo root
+instead of raising (LC.8). The header names its own node-kind / edge-category / cell-type
+registries (LC.4, read by `glia inspect`); the container is a domain-free core plus named domain
+sections (`code`: nav, symbols, interface methods; LC.5b, LC.6); edges carry cells (LC.2), every
+edge one EVIDENCE cell with its emitter, rule, file and 0-based line (LC.3).
+
+Format 3 (0.5.1) is compression, no new ids:
+- **EVIDENCE interning (CD.7b).** Every canonical EVIDENCE edge cell is stored as a compact
+  `Bytes` payload (tag `0x01`) whose strings live in the file's `"strings"` section
+  (`intern_evidence` / `expand_evidence` in `store/src/code_section.rs`), expanded back to the exact
+  JSON on read.
+- **CODE cells as spans (CD.7c).** A CODE cell that is a verbatim slice of its POSITION file is
+  stored as a `CodeSpan` (`code-domain/src/code_span.rs`: tag `0x02`, file index into the same
+  strings table, byte range, xxh64), and re-read from the source under the recorded repo root on
+  load. A span whose file moved, changed or is gone reads back as `{"code_span":{file, start,
+  end, xxh64}}` JSON and is counted; `persist::load_or_rebuild` treats any as the rebuild reason
+  `source changed since the layout was written: <n> code spans unresolved`.
+- **Parse cache frame (CD.7a).** `parse_cache.bin` is `GLIAPCZ1` + the build stamp, uncompressed,
+  then an `lz4_flex` block of the bincode (`engine/src/cache.rs`), so a stale cache is rejected
+  from its first bytes without decompressing; a pre-frame cache is discarded.
+- **Timeline sidecar (CD.5b).** `timeline.gmap` is a preamble'd container with one `timeline`
+  section (revs, strings, node and edge validity spans; `glia_store::write_timeline`), written
+  by `glia timeline build` and read by `timeline history` / `as-of`; `RepoMeta.rev` records the
+  commit a layout was built at, read from `.git` with no git process.
 
 Projections on top of the store:
 - **Binary** — the `.gmap` itself, consumed by activation and the pyo3 layer
@@ -344,11 +382,11 @@ WebSocket, EventBus, SharedSchema, MessageSchema, CLI, DB, Cron, Config, IaC, Pa
 - **Tree-sitter, not regex.** 0.4.x moved to AST extraction; 0.2.0 regex is not a ceiling.
 - **Zero-copy store.** rkyv + mmap; writes rebuild the whole file.
 - **Domain-agnostic core.** `core` and `activation` know nothing about code. Code lives in `code-domain` and the parsers.
-- **Generic graph algorithms live in `activation::algo`, over `GraphSource`, never in engine.** Reachability (`algo::reach`, LD.15a), graph delta (`algo::delta`, LE.1a) and Tarjan SCC (`algo::cycles`, LE.6a); a graph type opts in by implementing `GraphSource`, and a walk runs over a per-query CSR `Adjacency`, never a scan of the edge list per visited node.
+- **Generic graph algorithms live in `activation::algo`, over `GraphSource`, never in engine.** Reachability (`algo::reach`, LD.15a), graph delta (`algo::delta`, LE.1a) and Tarjan SCC (`algo::cycles`, LE.6a); 0.5.1 adds label propagation and seeded Leiden with `modularity` (`algo::community`, CD.1a/b), Stoer-Wagner and the minimum s-t cut (`algo::cut`, CD.2a), neighbourhood pair scoring (`algo::linkpred::score_pairs`, CD.3a), degree tables and HITS (`algo::hubs`, CD.4a), MinHash + LSH (`algo::minhash`, CD.4d) and validity spans over consecutive snapshots (`algo::timeline::TimelineBuilder`, CD.5a). A graph type opts in by implementing `GraphSource`, and a walk runs over a per-query CSR `Adjacency`, never a scan of the edge list per visited node; the engine answers that use them (`communities`, `splits`, `hubs`, `duplicate_flows`, `timeline`, the `suspected_edge` gap) add the code-domain reading on top: labels, services, located rows, tiers.
 - **Publish gate.** Only `py/` publishes to PyPI (as `glia-py`, imported as `glia_py`). Everything else is internal workspace.
 - **No Python fallback.** After v0.4.10c, Python is a thin pyo3 wrapper; there is no parallel Python implementation to keep in sync.
 
-## Query & Answer Surface (v6 P2/P3, 0.5.0)
+## Query & Answer Surface (v6 P2/P3, 0.5.0, 0.5.1)
 
 Answer-shaped primitives live in the **engine** (shared by CLI + pyo3/MCP + future
 TUI), not composed by the consumer. Each is one call: complete, ranked, located.
@@ -358,7 +396,9 @@ the only place that converts (LD.1). A list answer that can come back empty is
 `Answer { results, absence }`: the absence is a FACT-tier reason plus the coverage
 caveats of the mechanisms it depended on (LD.8a, `engine::absence`). Rows carry an
 evidence tier — FACT (read at a site), DERIVED (paired by a resolver or pass) or
-HEURISTIC (a name guess, an overlay, git history) — never an unexplained score.
+HEURISTIC (a name guess, an overlay, git history, a clustering or a model) — never an
+unexplained score; where an answer ranks by two signals (hotspots) it shows both ranks,
+never a blend.
 
 CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surface/`
 (regenerate: `GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface`). Most take
@@ -369,53 +409,100 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   `--include-shared`), `projects`, `contracts` (`--fields [--breaking-only]`, LE.10d),
   `impact`, `blast-radius` (many seeds are one walk and one ranking, LD.5), `trace`
   (ranked distinct paths, `--to`, `--max-paths`, LD.4a), `resolve`, `coverage` (+ the
-  co-change audit, LF.5c), `docs-for`, `docs sync|push`, `merge` (`--gmap`,
-  `--workspace`, `--layout`, LC.10c), `build`, `install-hooks` (`--pair`, LG.2).
+  co-change audit, LF.5c), `docs-for`, `docs sync|push` (`sync --source
+  confluence|notion|mediawiki|dir`, CE.4b-CE.4f), `merge` (`--gmap`, `--workspace`,
+  `--layout`, LC.10c), `build`, `install-hooks` (`--pair`, LG.2).
 - query: `pages` (LA.6e), `find` (LD.3b), `flows` (LD.4b; `--features` / `--out`, LG.3c),
   `implementors` (LD.7c), `serves <repo> <channel> [--mechanism auto|http|queue]`
-  (LD.8b), `why <repo> <from> <to>` (LE.5; exits 1 when not found).
+  (LD.8b), `why <repo> <from> <to>` (LE.5; exits 1 when not found). 0.5.1:
+  `pack <repo> <query> [--budget <tokens>] [--preset repair|review|onboard|centrality]`
+  (CC.4c; the context for a query packed to a token budget, each node at the most detail
+  the budget buys; stdout is the pack text alone), `hotspots [--level module|symbol|both]`
+  (CC.10b; git churn rank beside PageRank centrality rank), `communities [--method
+  leiden|lpa]` (CD.1e), `splits [--parts <n> | --from <side> --to <side>] [--quotient
+  module|community]` (CD.2d; the least-coupling cut, a suggestion), `hubs [--category
+  <NAME>]` (CD.4c; fan-in, fan-out and cross-service lists), `duplicate-flows
+  [--threshold <jaccard>]` (CD.4f; exact and near groups of entry flows). `pack`,
+  `hotspots`, `hubs` and `splits` exit 1 on an empty answer.
 - change: `delta [--base <rev>] [--edges-only] [--category <NAME>]...` (LE.1c),
-  `diff-impact` (LE.2), `tests-for` (LE.3b), `patterns` (LE.7b; out of experimental
-  since CC.12b, `--experimental` hidden and accepted until 0.5.2). A git or build
-  error exits 2.
+  `diff-impact` (LE.2), `tests-for` (LE.3b; ranked by failure count, failing trace and
+  co-change, `--limit`, `--no-signals`, CC.9a / CC.9b), `patterns` (LE.7b; out of experimental
+  since CC.12b, `--experimental` hidden and accepted until 0.5.2; `--group-by
+  service|package`, CA.5b). 0.5.1: `review [--base <rev>]` (CC.6b; the PR report in one
+  call: changed nodes, ranked impact, tests to run, edges by tier, rule violations new and
+  resolved; markdown for a PR comment, exits 1 when the change adds a violation),
+  `contract-breaks [--base <rev>] [--avro backward|forward|full] [--breaking-only]
+  [--with <repo>]` (CC.8b / CC.8c; every contract judged against itself across the
+  change, plus the clients left with no provider; exits 1 on either), `cochange
+  [<file>...] [--base <rev>]` (CC.11c; what usually changes with the change, a
+  directional confidence and whether a static link joins them; exits 1 with no rows),
+  `timeline build|history|as-of` (CD.5d; the last `--revs` commits as edge validity
+  spans in the `timeline.gmap` sidecar). A git or build error exits 2.
 - rules: `effects` (LE.4d), `cycles` (LE.6b), `check` (LE.8; exits 0 clean, 1 on
-  violations, 2 on an error), `spec-status` (LE.9b).
-- store: `inspect <path>` (LC.4), `cell set|rm|ls` (LF.1c).
+  violations, 2 on an error; renders the reflexion model — `[[component]]`, `[[layer]]`,
+  `kind = "allow"` — as a `## reflexion model` section, CC.5b / CC.5c), `spec-status`
+  (LE.9b). 0.5.1: `flags [--status dead|undefined|single_site|quiet]` (CC.7c; the
+  stale feature-flag report, exits 0).
+- store: `inspect <path>` (LC.4), `cell set|rm|ls` (LF.1c). 0.5.1: `cache push|pull|gc`
+  (CE.2c; the shared parse cache over a directory or HTTPS object store, objects signed
+  with a blake3 keyed MAC; `--layout` moves a whole `.glia/graph/` layout, CE.2d; HTTPS
+  through `ureq`, CE.2e). The transport lives in the glia binary only: neither
+  glia-engine nor glia-py has `ureq` in its normal dependency tree.
 - inputs: `gaps [--overlay-delta]` (LF.2c; `cochange_no_edge` rows carry no repo, so a
-  merge with one relative path in two repos gives two alike rows), `history sync`
-  (LF.5d), `tests ingest` (LF.6d). A snapshot step never runs inside a build.
+  merge with one relative path in two repos gives two alike rows; `suspected_edge` rows
+  carry a paste-ready `[[edge]]` draft, CD.3b), `history sync` (LF.5d), `tests ingest`
+  (LF.6d; a rolling window of runs, `--window`, `--reset`, CC.9b). 0.5.1: `overlay
+  propose|try|accept` (CE.3e; the overlay loop, `skills/glia-overlay/SKILL.md`), `scip
+  import <repo> <index.scip>` (CE.1c; writes `.glia/scip-snapshot/`, which the CE.1d
+  build stage reads as FACT-tier CALLS / USES / IMPLEMENTS / INHERITS_FROM). A snapshot
+  step never runs inside a build.
 - hidden: `hook pre-commit|commit-msg`, the runners `install-hooks --pair` writes.
 
 pyo3 (`PyGraph`): `blast_radius`, `cross_stack_trace`, `entry_flows`,
 `feature_flows` / `write_feature_flows`, `resolve`, `find`, `coverage`,
 `governing_docs`, `page_flow`, `service_map`, `contracts`, `contract_fields`,
-`implementors`, `serves`, `why`, `diff_impact`, `tests_for` / `tests_for_diff`,
-`effects`, `cycles`, `check`, `spec_status`, `gaps`, `patterns` (CC.12b; the 0.5.0
-`patterns_experimental` stays until 0.5.2 as a DeprecationWarning alias),
-traversal — `neighbours(node_id, direction="out", categories=None)` -> `(id, category,
+`implementors`, `serves`, `why`, `diff_impact`, `tests_for` / `tests_for_diff`
+(`limit=`, `signals=`), `effects`, `cycles`, `check`, `spec_status`, `gaps`, `patterns`
+(CC.12b; the 0.5.0 `patterns_experimental` stays until 0.5.2 as a DeprecationWarning
+alias), and 0.5.1's `pack` / `pack_ids`, `flags`, `hotspots`, `cochange`,
+`communities`, `splits`, `hubs`, `duplicate_flows`; traversal —
+`neighbours(node_id, direction="out", categories=None)` -> `(id, category,
 "out"|"in")`, `bfs`, `predecessors`, `reachable_by`, `shortest_path` (categories=None is
 every category, DEFINES included; LD.3c) — `set_cell` / `remove_cell` (+ `activate`,
 `node_cells`, `dense_text*`, `nodes_json` / `edges_json`, `save_to*`). Module functions:
 `generate` / `generate_many`, `load_from_gmap` (rebuilds a stale or old layout, LC.8),
 `is_stale`, `merge_gmaps`, `graph_delta`, `diff_impact_vs_rev`, `tests_for_rev`,
 `patterns_vs_rev` (alias `patterns_vs_rev_experimental`, deprecated, until 0.5.2),
-`overlay_delta`, `history_sync`, `tests_ingest`,
-`write_cell` / `remove_cell`, `kind_names` / `category_names` / `cell_type_names` /
-`entry_kinds`. An answer is a native dict / list; only `*_json` returns JSON text (LD.2).
-The committed surface is `py/api_surface/<module>.txt`.
+`overlay_delta`, `history_sync`, `tests_ingest`, `write_cell` / `remove_cell`,
+`kind_names` / `category_names` / `cell_type_names` / `entry_kinds`, and 0.5.1's
+`review_vs_rev` (`format="dict"|"markdown"`), `contract_breaks_vs_rev` (`with_repos=`),
+`cochange_vs_rev`, `timeline_build` / `timeline_history` / `timeline_as_of`. The cache
+transport, the overlay loop and `scip import` are CLI-only. An answer is a native dict /
+list; only `*_json` returns JSON text (LD.2). The committed surface is
+`py/api_surface/<module>.txt`.
 
 Engine entry points — flat: `blast_radius`, `resolve_signal_located`,
 `coverage_report`, `governing_docs`, `entrypoint_reachable`, `locate_node`,
 `service_map` / `service_map_with`; by module path: `trace::{cross_stack_trace,
 entry_flows}`, `find::find_nodes`, `pages::page_flow`, `implementors::implementors`,
 `serves::serves`, `why::why_edge`, `delta::graph_delta_vs_rev`,
-`diff_impact::{diff_impact_vs_rev, diff_impact_from_diff}`,
-`tests_for::{tests_for, tests_for_diff, tests_for_rev}`, `effects::effects`,
-`cycles::cycles`, `check::check`, `spec_status::spec_status`,
+`diff_impact::{diff_impact_vs_rev, diff_impact_from_diff, diff_impact_from_delta}`,
+`tests_for::{tests_for, tests_for_diff, tests_for_rev, tests_for_delta}`,
+`effects::effects`, `cycles::cycles`, `check::check`, `spec_status::spec_status`,
 `patterns::{pattern_conformance, pattern_conformance_delta}`,
 `gaps::{gaps_report, overlay_delta}`, `contract_fields::contract_fields`,
 `feature_flows::{feature_flows, write_feature_flows}`,
 `merge::{merge_layouts, read_workspace}`, `persist::{load_layout, load_or_rebuild}`.
+0.5.1, by module path: `pack::{pack, pack_ids}`, `review::{review_vs_rev, review,
+render_markdown}`, `flags::flags`, `contract_breaks::{contract_breaks,
+contract_breaks_vs_rev, contract_breaks_vs_rev_with, AVRO_MODES}` (the delta's content
+cells are CODE plus SCHEMA_FIELDS), `hotspots::hotspots`, `cochange::{cochange,
+cochange_multi, cochange_vs_rev}`, `communities::communities`, `splits::splits`,
+`hubs::hubs`, `duplicate_flows::duplicate_flows`, `timeline::{build_timeline,
+load_timeline, edge_history, as_of}`, `shared_cache::{file_key, export_entries,
+cache_rows, wanted, import_entries, layout_key, export_layout, install_layout}` (the
+engine half of the shared cache: keys, export, verified import; no transport) and
+`overlay_loop::{propose, try_candidate, accept, parse_candidate, merge, without}`.
 A `*_with_live` variant takes a precomputed liveness set, so a caller answering several
 questions over one graph computes `entrypoint_reachable` once.
 
@@ -425,28 +512,49 @@ questions over one graph computes `entrypoint_reachable` once.
   `bench/substrate-gap`), P2 coverage signaling, P3 answer-shaped primitives
   (above). P4 (collapse ~13 MCP tools → ~4) is repo-graph's job; these primitives
   are its enabler.
-- **0.5.0 — complete on local `main`, version bumped, awaiting the tag.** The 2026-09 programme (unreleased
-  since v0.4.18; there is no 0.4.19) plus the leap, waves A–G of
-  `dev-notes/next-leap-0.5.0.md`, packets in `dev-notes/leap-packets.json`: every id /
-  qname / format / API break at once. It is cross-domain *prep* — header registries,
-  domain container sections, the domain profile, pass composition, `activation::algo`,
-  the test-only `toy-domain/` — and ships no second domain. README.md `## Roadmap` lists
-  what landed by packet id. All 41 waves landed (251 packets, 3,185 tests); the
-  Cargo workspace and `py/pyproject.toml` are at 0.5.0, so the wheel builds as
-  `glia_py-0.5.0-*.whl`. What remains is release mechanics: James walks the commits, a PyPI
-  pending trusted publisher for `glia-py`, then push → tag `v0.5.0` → PyPI (the leap doc's
-  §1 checklist), and the consumers apply their handoffs.
-  The rename is done, table-driven by `dev-notes/rename-0.5.0.py` (`--check` lists anything
-  left on the old names): the repo, the `glia` binary (`cli/Cargo.toml`), every library
-  crate — packages `glia-*`, Rust paths `glia_*` (LD.11a) — and the Python package: PyPI
-  dist `glia-py`, module `glia_py`, wheel `glia_py-<ver>-cp311-abi3-*.whl` (LD.11b,
-  `--python`). The repo-graph MCP wrapper still imports the old module until its own
-  session moves to `glia-py` (LG.5a), so both wheels stay installed side by side.
-- **After 0.5.0:** the leap doc's §6 "Later" list (communities, duplicate flows,
-  dominators once middleware is extracted and the security gate is ruled on, hubs,
-  RuntimeZone, cross-repo node dedupe, Notion / wiki adapters, LSP, per-graph-area
-  rebuilds if a big repo is slow after LG.1) and its §7.6 per-language backlog. The
-  §6 "Gated" items stay out (`SECURITY.md`).
+- **0.5.0 — released 2026-09-20** (tag `v0.5.0` at `2170ff8`, `glia-py` 0.5.0 on PyPI).
+  The 2026-09 programme (unreleased since v0.4.18; there is no 0.4.19) plus the leap, waves
+  A–G of `dev-notes/next-leap-0.5.0.md`, packets in `dev-notes/leap-packets.json` (251
+  packets, 41 waves): every id / qname / format / API break at once. It is cross-domain
+  *prep* — header registries, domain container sections, the domain profile, pass
+  composition, `activation::algo`, the test-only `toy-domain/` — and ships no second
+  domain. The rename, table-driven by `dev-notes/rename-0.5.0.py` (`--check` lists
+  anything left on the old names): the repo, the `glia` binary (`cli/Cargo.toml`), every
+  library crate — packages `glia-*`, Rust paths `glia_*` (LD.11a) — and the Python
+  package: PyPI dist `glia-py`, module `glia_py`, wheel
+  `glia_py-<ver>-cp311-abi3-*.whl` (LD.11b, `--python`).
+- **0.5.1 — the catch-up leap, on local `main`, not yet tagged.** Scope in
+  `dev-notes/next-leap-0.5.1.md` (§7.2 is James's rulings), packets in
+  `dev-notes/leap-051-packets.json`, overrides in `dev-notes/leap-051-corrections.json`,
+  schedule and LANDED waves in `dev-notes/wave-runner/schedule_051.py`: 155 packets in
+  waves W0–W11. The name stays 0.5.1 and consumers pin it exactly, so it may break
+  contracts, each break declared by its packet. Groups: C0 wave-0 slots and the one
+  dependency commit; CA dogfood fixes (Go closure calls, typed receivers, signature-checked
+  implicit IMPLEMENTS, patterns on real repos, Kotlin receivers, the pooled TS build,
+  `[timing]` phase timers); CB the language / HTTP / RPC / event backlog (Swift and C++
+  call scope, Go route mounts, C/C++ include roots, client host narrowing); CC the new
+  answers (`pack`, `review`, `flags`, `contract-breaks`, `hotspots`, `cochange`, the
+  reflexion model in `check`, tests-for ranking, `patterns` out of experimental); CD
+  graph algorithms (`communities`, `splits`, `hubs`, `duplicate-flows`, the
+  `suspected_edge` gap, `timeline`) and `FORMAT_VERSION` 3; CE external inputs and caches
+  (SCIP import, the shared parse cache, the overlay loop, Notion / MediaWiki / wiki-dir
+  doc sources); CF the coverage-matrix probes (a Kotlin row, 28 not-applicable cells);
+  CG the Engram session's findings (TS field methods, test-fixture provenance,
+  `--exclude-path`, full doc CODE text, external endpoints); CZ the release docs. No
+  registry id is allocated (the next free ids stay node 50 / edge 37 / cell 26); the
+  WASM reader was dropped (CD.6b / CD.6c). What remains is release mechanics, James's:
+  the version bump (the Cargo workspace and `py/pyproject.toml` still read 0.5.0), the
+  handoff docs (repo-graph, neuropil, Engram: each with the exact pin and every declared
+  break), then push → tag `v0.5.1` → PyPI.
+- **After 0.5.1** (the leap doc's §1 train): **0.5.2** the four bets — `glia watch`, a
+  Datalog rule layer (with a GQL front-end), cross-repo identity, Engram PPR memory;
+  research in `dev-notes/research-0.5.2/`, packets after 0.5.1 lands. **0.5.3** scale —
+  Stack Graphs-style incremental resolution, build-target graphs (the likely first real
+  non-code domain). **0.5.4** proof — precision rate on real repos, agent before/after,
+  big-repo per-phase timings, calibrated confidence, `decide/` and `glia judge` on our own
+  model. Still later from the 0.5.0 list: dominators (once middleware is extracted and the
+  security gate is ruled on), RuntimeZone, LSP, per-graph-area rebuilds. The §6 "Gated"
+  items stay out (`SECURITY.md`).
 
 ## Memory
 
