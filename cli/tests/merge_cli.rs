@@ -28,7 +28,7 @@ use glia_store::{MANIFEST_NAME, MANIFEST_VERSION};
 const JOINT_SUMMARY: &str = "# glia analyze
 
 - nodes: 26
-- edges (intra-repo): 27
+- edges (intra-repo): 30
 - cross-edges: 3
 
 ## Node kinds
@@ -50,7 +50,7 @@ const JOINT_SUMMARY: &str = "# glia analyze
 | Category | Count |
 |---|---|
 | DEFINES | 16 |
-| CALLS | 7 |
+| CALLS | 10 |
 | HANDLED_BY | 3 |
 | HTTP_CALLS | 3 |
 | IMPORTS | 1 |
