@@ -39,18 +39,19 @@ pub fn parse_file(
     module_qname: &str,
     repo: RepoId,
 ) -> Result<FileParse, ParseError> {
-    parse_file_stats(source, file_rel_path, module_qname, repo).map(|(parse, _, _)| parse)
+    parse_file_stats(source, file_rel_path, module_qname, repo).map(|(parse, ..)| parse)
 }
 
 /// [`parse_file`], plus the file's CG.1 function-field counters (the
-/// `[ts-fields]` marker's numbers) and its CH.1 abstract-class counters (the
-/// `[ts-abstract]` marker's numbers), which the tests read back.
+/// `[ts-fields]` marker's numbers), its CH.1 abstract-class counters (the
+/// `[ts-abstract]` marker's numbers) and its CH.2 call-initialised field
+/// counters (the `[ts-state]` marker's numbers), which the tests read back.
 fn parse_file_stats(
     source: &str,
     file_rel_path: &str,
     module_qname: &str,
     repo: RepoId,
-) -> Result<(FileParse, FnFieldStats, AbstractStats), ParseError> {
+) -> Result<(FileParse, FnFieldStats, AbstractStats, StateFieldStats), ParseError> {
     let mut parser = Parser::new();
     let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
     parser
@@ -107,6 +108,17 @@ fn parse_file_stats(
             ff.shadowed
         );
     }
+    // CH.2: call-initialised class fields minted as STATE_VARs, per file.
+    let sf = acc.state_fields;
+    if sf.fields > 0 {
+        eprintln!(
+            "[ts-state] call fields={} (signal={} other={}) calls={} file={file_rel_path}",
+            sf.fields,
+            sf.signal,
+            sf.fields.saturating_sub(sf.signal),
+            sf.calls
+        );
+    }
     // CH.1: `abstract class` declarations and their bodiless members, per file.
     let ab = acc.abstract_stats;
     if ab.classes + ab.methods > 0 {
@@ -116,7 +128,7 @@ fn parse_file_stats(
         );
     }
 
-    resolve_intra_file(acc).map(|parse| (parse, ff, ab))
+    resolve_intra_file(acc).map(|parse| (parse, ff, ab, sf))
 }
 
 // ============================================================================
@@ -164,6 +176,22 @@ struct Acc {
     fn_fields: FnFieldStats,
     /// CH.1: the `[ts-abstract]` counters.
     abstract_stats: AbstractStats,
+    /// CH.2: the `[ts-state]` counters.
+    state_fields: StateFieldStats,
+}
+
+/// CH.2: what one file's call-initialised class fields gave the graph (the
+/// `[ts-state]` marker).
+#[derive(Default, Clone, Copy)]
+struct StateFieldStats {
+    /// `x = f(…)` fields minted as STATE_VARs.
+    fields: usize,
+    /// Of those, fields whose factory is an Angular signal primitive
+    /// ([`SIGNAL_FACTORIES`]); the rest print as `other=`.
+    signal: usize,
+    /// Call sites (resolved or not) and client HTTP calls found in their
+    /// initializers, the factory call itself included.
+    calls: usize,
 }
 
 /// CH.1: what one file's `abstract class` declarations gave the graph (the
@@ -433,10 +461,21 @@ fn visit_class(
                 visit_abstract_method(member, src, file_rel, &class_qname, class_id, repo, acc);
             }
             // `visit_field` reads a field's type and DI shape; a function-valued
-            // field is also a METHOD (CG.1).
+            // field is also a METHOD (CG.1), a call-initialised one a
+            // STATE_VAR (CH.2).
             "public_field_definition" => {
                 visit_field(member, src, module_id, class_id, acc);
                 visit_function_field(
+                    member,
+                    src,
+                    file_rel,
+                    &class_qname,
+                    class_id,
+                    repo,
+                    &method_names,
+                    acc,
+                );
+                visit_state_field(
                     member,
                     src,
                     file_rel,
@@ -754,8 +793,9 @@ fn visit_field(field: TsNode, src: &[u8], module_id: NodeId, class_id: NodeId, a
 /// keeps a field's decorators INSIDE `public_field_definition`, so CB.4's
 /// [`first_decorator`] widening (for a `method_definition`, whose decorators
 /// are `class_body` siblings) does not apply. A computed, string or number
-/// name mints nothing, nor does any other value (`rafId = 0`, `users$ =
-/// this.api.list()`, `x = computed(() => …)`). A name a method of the class
+/// name mints nothing here, nor does any other value (`rafId = 0`, `users$ =
+/// this.api.list()`, `x = computed(() => …)`; the call-initialised two are
+/// [`visit_state_field`]'s STATE_VARs, CH.2). A name a method of the class
 /// holds (`method_names`, collected before the member walk) or an earlier
 /// field took keeps that node and counts as `shadowed`, so no NodeId is
 /// pushed twice.
@@ -829,6 +869,172 @@ fn visit_function_field(
         acc.fn_fields.arrow += 1;
     } else {
         acc.fn_fields.function += 1;
+    }
+}
+
+/// CH.2: the Angular factories a signal-shaped field is initialised by, for the
+/// `[ts-state]` marker's `signal=` count only: every call-initialised field
+/// mints the same STATE_VAR whichever factory it names. `input.required` /
+/// `model.required` / `viewChild.required` count by their object.
+const SIGNAL_FACTORIES: &[&str] = &[
+    "signal",
+    "computed",
+    "linkedSignal",
+    "toSignal",
+    "effect",
+    "input",
+    "model",
+    "output",
+    "outputFromObservable",
+    "viewChild",
+    "viewChildren",
+    "contentChild",
+    "contentChildren",
+    "resource",
+    "rxResource",
+    "httpResource",
+];
+
+/// CH.2: a class field initialised by a call — `readonly page = signal(1)`,
+/// `total = computed(() => this.rows().length)`, `rows = input.required<T>()`,
+/// `countries = toSignal(this.api.list())`, `logger = effect(() => …)`,
+/// `users$ = this.subject.asObservable()`, any call but `x = inject(T)` — is
+/// state its class owns: a STATE_VAR `<class>::<field>` (the kind Java / C#
+/// class constants and Dart top-level vars take), DEFINED by the class. Its
+/// initializer runs code, so the WHOLE initializer is walked for calls from
+/// the STATE_VAR: the factory call itself (an ordinary library CallSite), the
+/// calls in an arrow / function argument (a computed's or effect's body), a
+/// client HTTP call's ENDPOINT, TypeORM sites and enum member reads. It takes
+/// the `class_methods` entry `this.<field>()` binds through, so a signal read
+/// (`this.page()`, from a method or another field's initializer, declared
+/// above or below it) is an intra-file CALLS into the STATE_VAR; the graph
+/// crate's `enclosing_class_or_struct` walks STATE_VAR -> CLASS, so A6.2a's
+/// receiver typing binds `this.api.list()` in an initializer on `api`'s type.
+///
+/// Only the kind test peels `(…)`, `as T`, `satisfies T` and `!` off the
+/// value. `x = inject(T)` — the callee `inject`, or a local binding of an
+/// `inject` import collected before the class (`import { inject as di }`,
+/// A7.1's rule) — is DI, not state: [`visit_field`] keeps its INJECTS
+/// candidate and field type, and no node is minted. A `new X()`, literal,
+/// object, arrow or function value mints nothing here (the last two are
+/// CG.1's METHODs). A computed, string or number name mints nothing; `#x`
+/// keeps its `#`. A name a method of the class holds (`method_names`, every
+/// method of the body) or an earlier field took keeps that node, so no NodeId
+/// is pushed twice. CODE / POSITION / DOC are the field node's own (its
+/// decorators sit inside `public_field_definition`, CG.1's finding).
+#[allow(clippy::too_many_arguments)]
+fn visit_state_field(
+    field: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    class_qname: &str,
+    class_id: NodeId,
+    repo: RepoId,
+    method_names: &HashSet<&str>,
+    acc: &mut Acc,
+) {
+    let Some(value) = field.child_by_field_name("value") else {
+        return;
+    };
+    let mut inner = value;
+    while matches!(
+        inner.kind(),
+        "parenthesized_expression"
+            | "as_expression"
+            | "satisfies_expression"
+            | "non_null_expression"
+    ) {
+        let mut ic = inner.walk();
+        let Some(next) = inner
+            .named_children(&mut ic)
+            .find(|c| c.kind() != "comment")
+        else {
+            return;
+        };
+        inner = next;
+    }
+    if inner.kind() != "call_expression" {
+        return;
+    }
+    let callee = inner.child_by_field_name("function");
+    if let Some(f) = callee
+        && f.kind() == "identifier"
+    {
+        let name = text(f, src);
+        if name == "inject" || inject_import_bindings(&acc.imports).contains(name) {
+            return;
+        }
+    }
+    let Some(name_node) = field.child_by_field_name("name") else {
+        return;
+    };
+    if !matches!(
+        name_node.kind(),
+        "property_identifier" | "private_property_identifier"
+    ) {
+        return;
+    }
+    let name = text(name_node, src);
+    if method_names.contains(name)
+        || acc
+            .class_methods
+            .contains_key(&(class_id, name.to_string()))
+    {
+        return;
+    }
+    let state_qname = format!("{class_qname}::{name}");
+    let state_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::STATE_VAR, &state_qname);
+    acc.nodes.push(Node {
+        id: state_id,
+        repo,
+        confidence: Confidence::Strong,
+        cells: build_cells(&field, src, file_rel),
+    });
+    acc.edges.push(Edge {
+        from: class_id,
+        to: state_id,
+        category: edge_category::DEFINES,
+        confidence: Confidence::Strong,
+        cells: Vec::new(),
+    });
+    acc.class_methods
+        .insert((class_id, name.to_string()), state_id);
+    acc.nav.record(
+        state_id,
+        name,
+        &state_qname,
+        node_kind::STATE_VAR,
+        Some(class_id),
+    );
+
+    let before = acc.unresolved.len() + acc.endpoints.len();
+    collect_calls_in(value, src, state_id, Some(class_id), acc);
+    let after = acc.unresolved.len() + acc.endpoints.len();
+    let stats = &mut acc.state_fields;
+    stats.calls += after.saturating_sub(before);
+    stats.fields += 1;
+    if callee
+        .and_then(|f| signal_factory_name(f, src))
+        .is_some_and(|n| SIGNAL_FACTORIES.contains(&n))
+    {
+        stats.signal += 1;
+    }
+}
+
+/// CH.2: the factory name a field initializer's callee names, for the
+/// `signal=` count: `signal` for `signal(…)` / `signal<T>(…)`, `input` for
+/// `input.required<T>()`. Any other member call (`this.subject.asObservable()`,
+/// `Array.from(…)`) names none.
+fn signal_factory_name<'a>(callee: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    match callee.kind() {
+        "identifier" => Some(text(callee, src)),
+        "member_expression" => {
+            let object = callee.child_by_field_name("object")?;
+            let property = callee.child_by_field_name("property")?;
+            (object.kind() == "identifier" && text(property, src) == "required")
+                .then(|| text(object, src))
+        }
+        _ => None,
     }
 }
 
@@ -4455,7 +4661,7 @@ export class Listener {
 
     /// The `[ts-fields]` counters of one parse, as `(fields, shadowed)`.
     fn fn_field_counts(src: &str, path: &str, module: &str) -> (usize, usize) {
-        let (_, stats, _) = parse_file_stats(src, path, module, repo()).unwrap();
+        let (_, stats, ..) = parse_file_stats(src, path, module, repo()).unwrap();
         (stats.fields(), stats.shadowed)
     }
 
@@ -4537,7 +4743,7 @@ class C {
             assert!(has_node(&parse, m), "{field} is a METHOD");
             assert!(has_edge(&parse, m, persist, edge_category::CALLS), "{field} -> persist");
         }
-        let (_, stats, _) = parse_file_stats(src, "src/c.ts", "src::c", repo()).unwrap();
+        let (_, stats, ..) = parse_file_stats(src, "src/c.ts", "src::c", repo()).unwrap();
         assert_eq!((stats.arrow, stats.function, stats.calls), (0, 2, 2));
     }
 
@@ -4577,15 +4783,23 @@ export class K {
             let m = id(node_kind::METHOD, &format!("src::k::K::{field}"));
             assert!(!has_node(&parse, m), "{field} is data, not a METHOD");
         }
-        assert!(
-            !parse.calls.iter().any(|c| matches!(
+        // CH.2: the call-initialised `users$` is a STATE_VAR that owns the
+        // `list` call; the literal fields and the inject() field mint none.
+        let users = id(node_kind::STATE_VAR, "src::k::K::users$");
+        let list = parse
+            .calls
+            .iter()
+            .find(|c| matches!(
                 &c.qualifier,
                 CallQualifier::ComplexReceiver { name, .. } | CallQualifier::Attribute { name, .. }
                     if name == "list"
-            )),
-            "a data field's initialiser is not walked: {:?}",
-            parse.calls
-        );
+            ))
+            .unwrap_or_else(|| panic!("the `list` CallSite: {:?}", parse.calls));
+        assert_eq!(list.from, users, "the STATE_VAR makes the `list` call");
+        for field in ["rafId", "label", "state", "api"] {
+            let v = id(node_kind::STATE_VAR, &format!("src::k::K::{field}"));
+            assert!(!has_node(&parse, v), "{field} is no STATE_VAR");
+        }
         assert_eq!(inject_targets(&parse, "src::k", "src::k::K"), vec!["ApiService".to_string()]);
         assert_eq!(fn_field_counts(src, "src/k.component.ts", "src::k"), (0, 0));
     }
@@ -4628,11 +4842,260 @@ export class UsersService {
         assert_eq!(froms, vec![load], "the field METHOD makes the HTTP call");
     }
 
+    // ---- CH.2: call-initialised class fields ----------------------------------
+
+    /// The `[ts-state]` counters of one parse, as `(fields, signal, calls)`.
+    fn state_field_counts(src: &str, path: &str, module: &str) -> (usize, usize, usize) {
+        let (_, _, _, stats) = parse_file_stats(src, path, module, repo()).unwrap();
+        (stats.fields, stats.signal, stats.calls)
+    }
+
+    /// The POSITION cell of the STATE_VAR `qname`.
+    fn state_position(parse: &FileParse, qname: &str) -> String {
+        let v = id(node_kind::STATE_VAR, qname);
+        let node = parse
+            .nodes
+            .iter()
+            .find(|n| n.id == v)
+            .unwrap_or_else(|| panic!("STATE_VAR {qname} missing"));
+        node.cells
+            .iter()
+            .find_map(|c| match &c.payload {
+                CellPayload::Json(t) if c.kind == cell_type::POSITION => Some(t.clone()),
+                _ => None,
+            })
+            .expect("POSITION")
+    }
+
+    /// The intra-file CALLS edge `from -> to`, its evidence checked: the
+    /// call's own 0-based row, a site, the `intra_file` rule.
+    fn assert_intra_call(parse: &FileParse, from: NodeId, to: NodeId, row: u32, what: &str) {
+        use glia_code_domain::evidence::{Basis, Evidence};
+        let edge = parse
+            .edges
+            .iter()
+            .find(|e| e.from == from && e.to == to && e.category == edge_category::CALLS)
+            .unwrap_or_else(|| panic!("{what} resolves in-file, edges {:?}", parse.edges));
+        let ev = Evidence::of(edge).expect("intra-file CALLS carries evidence");
+        assert_eq!((ev.line, ev.basis), (Some(row), Basis::Site), "{what}");
+        assert_eq!(ev.rule.as_deref(), Some("intra_file"), "{what}");
+    }
+
+    const GRID: &str = "\
+import { computed, input, signal } from '@angular/core';
+
+export class Grid {
+  readonly rows = input.required<string[]>();
+  readonly page = signal(1);
+  readonly total = computed(() => this.rows().length * this.page());
+  readonly isLong = computed(() => this.longest(this.rows()) > 10);
+  longest(rows: string[]): number { return rows.length; }
+  next(): void {
+    this.page.set(this.page() + 1);
+  }
+}
+";
+
+    #[test]
+    fn signal_and_computed_fields_are_state_vars() {
+        let parse = parse_file(GRID, "src/grid.component.ts", "src::grid", repo()).unwrap();
+        let class = id(node_kind::CLASS, "src::grid::Grid");
+        for (field, row) in [("rows", 3), ("page", 4), ("total", 5), ("isLong", 6)] {
+            let qname = format!("src::grid::Grid::{field}");
+            let v = id(node_kind::STATE_VAR, &qname);
+            assert!(has_node(&parse, v), "{field} is a STATE_VAR");
+            assert_eq!(parse.nodes.iter().filter(|n| n.id == v).count(), 1, "{field} once");
+            assert!(has_edge(&parse, class, v, edge_category::DEFINES), "DEFINES {field}");
+            assert!(
+                !has_node(&parse, id(node_kind::METHOD, &qname)),
+                "{field} is no METHOD"
+            );
+            let pos = state_position(&parse, &qname);
+            assert!(pos.contains(&format!("\"start_line\":{row},")), "{field}: {pos}");
+            assert_eq!(parse.nav.kind_by_id.get(&v), Some(&node_kind::STATE_VAR));
+            assert_eq!(parse.nav.parent_of.get(&v), Some(&class), "{field}'s nav parent");
+        }
+        assert_eq!(
+            state_field_counts(GRID, "src/grid.component.ts", "src::grid"),
+            (4, 4, 8),
+            "rows / page / total / isLong are signal factories; calls: 4 factories, \
+             rows + page in total, longest + rows in isLong"
+        );
+    }
+
+    #[test]
+    fn computed_body_calls_and_signal_reads_bind() {
+        let parse = parse_file(GRID, "src/grid.component.ts", "src::grid", repo()).unwrap();
+        let v = |f: &str| id(node_kind::STATE_VAR, &format!("src::grid::Grid::{f}"));
+        let m = |f: &str| id(node_kind::METHOD, &format!("src::grid::Grid::{f}"));
+        assert_intra_call(&parse, v("total"), v("rows"), 5, "total -> rows");
+        assert_intra_call(&parse, v("total"), v("page"), 5, "total -> page");
+        assert_intra_call(&parse, v("isLong"), m("longest"), 6, "isLong -> longest (declared below)");
+        assert_intra_call(&parse, v("isLong"), v("rows"), 6, "isLong -> rows");
+        assert_intra_call(&parse, m("next"), v("page"), 9, "next -> page (a method's signal read)");
+        // The factory call is an ordinary library CallSite of the field.
+        assert_eq!(call_site_names(&parse, v("total")), vec!["computed".to_string()]);
+        assert_eq!(call_site_names(&parse, v("rows")), vec!["required".to_string()]);
+        assert_eq!(call_site_names(&parse, m("next")), vec!["set".to_string()]);
+        let class = id(node_kind::CLASS, "src::grid::Grid");
+        assert!(
+            !parse.edges.iter().any(|e| e.from == class && e.category == edge_category::CALLS),
+            "the class takes none of the initializers' calls"
+        );
+        assert!(
+            !parse.calls.iter().any(|c| c.from == class),
+            "nor their CallSites: {:?}",
+            parse.calls
+        );
+    }
+
+    #[test]
+    fn inject_new_and_literal_fields_mint_nothing() {
+        let src = "\
+import { inject, inject as di } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { BehaviorSubject } from 'rxjs';
+import { Store } from './store';
+
+export class K {
+  private readonly http = inject(HttpClient);
+  private readonly store = di(Store);
+  private readonly subject = new BehaviorSubject(0);
+  private rafId = 0;
+  state = { n: 0 };
+}
+";
+        let parse = parse_file(src, "src/k.component.ts", "src::k", repo()).unwrap();
+        for field in ["http", "store", "subject", "rafId", "state"] {
+            let qname = format!("src::k::K::{field}");
+            assert!(!has_node(&parse, id(node_kind::STATE_VAR, &qname)), "{field} is no STATE_VAR");
+            assert!(!has_node(&parse, id(node_kind::METHOD, &qname)), "{field} is no METHOD");
+        }
+        assert_eq!(
+            inject_targets(&parse, "src::k", "src::k::K"),
+            vec!["HttpClient".to_string(), "Store".to_string()],
+            "both inject() fields keep their INJECTS"
+        );
+        assert_eq!(state_field_counts(src, "src/k.component.ts", "src::k"), (0, 0, 0));
+    }
+
+    #[test]
+    fn field_http_call_is_the_state_vars() {
+        let src = "\
+import { inject } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { toSignal } from '@angular/core/rxjs-interop';
+
+export class ProfileComponent {
+  private readonly http = inject(HttpClient);
+  readonly profile = toSignal(this.http.get<string>('/api/profile'));
+}
+";
+        let parse =
+            parse_file(src, "src/profile.component.ts", "src::profile", repo()).unwrap();
+        let ep = endpoint_id(repo(), "GET", "/api/profile");
+        assert!(has_node(&parse, ep), "the client call in a field is an ENDPOINT");
+        let profile = id(node_kind::STATE_VAR, "src::profile::ProfileComponent::profile");
+        let froms: Vec<NodeId> = parse
+            .edges
+            .iter()
+            .filter(|e| e.to == ep && e.category == edge_category::CALLS)
+            .map(|e| e.from)
+            .collect();
+        assert_eq!(froms, vec![profile], "the STATE_VAR makes the HTTP call");
+        assert_eq!(
+            state_field_counts(src, "src/profile.component.ts", "src::profile"),
+            (1, 1, 3),
+            "toSignal is a signal factory; calls: toSignal, http.get and its ENDPOINT"
+        );
+    }
+
+    #[test]
+    fn observable_data_field() {
+        let src = "\
+import { BehaviorSubject } from 'rxjs';
+
+export class FriendService {
+  private subject = new BehaviorSubject<number>(0);
+  readonly count$ = this.subject.asObservable();
+}
+";
+        let parse = parse_file(src, "src/friend.service.ts", "src::friend", repo()).unwrap();
+        let count = id(node_kind::STATE_VAR, "src::friend::FriendService::count$");
+        assert!(has_node(&parse, count), "`count$` is a STATE_VAR");
+        let site = parse
+            .calls
+            .iter()
+            .find(|c| c.from == count)
+            .unwrap_or_else(|| panic!("a CallSite from count$: {:?}", parse.calls));
+        assert_eq!(
+            site.qualifier,
+            CallQualifier::ComplexReceiver {
+                receiver: "this.subject".to_string(),
+                name: "asObservable".to_string(),
+            }
+        );
+        assert_eq!(site.line, 4, "the call's row");
+        assert_eq!(state_field_counts(src, "src/friend.service.ts", "src::friend"), (1, 0, 1));
+    }
+
+    #[test]
+    fn static_and_private_call_fields() {
+        let src = "class Store { static readonly FALLBACK = Object.freeze(['AU']); #ticks = interval(1000); }\n";
+        let parse = parse_file(src, "src/store.ts", "src::store", repo()).unwrap();
+        let class = id(node_kind::CLASS, "src::store::Store");
+        for field in ["FALLBACK", "#ticks"] {
+            let v = id(node_kind::STATE_VAR, &format!("src::store::Store::{field}"));
+            assert!(has_node(&parse, v), "{field} is a STATE_VAR");
+            assert!(has_edge(&parse, class, v, edge_category::DEFINES), "DEFINES {field}");
+        }
+        let ticks = id(node_kind::STATE_VAR, "src::store::Store::#ticks");
+        assert_eq!(call_site_names(&parse, ticks), vec!["interval".to_string()]);
+        assert_eq!(state_field_counts(src, "src/store.ts", "src::store"), (2, 0, 2));
+    }
+
+    #[test]
+    fn wrapped_and_shadowed_call_fields() {
+        let src = "\
+class W {
+  a = signal(1) as WritableSignal<number>;
+  b = (load())!;
+  c = compute() satisfies Thing;
+  d = new Map();
+  e = (0 as number);
+  f = signal(2);
+  f(): number { return 0; }
+  g = load();
+  g = again();
+  h = () => load();
+}
+";
+        let parse = parse_file(src, "src/w.ts", "src::w", repo()).unwrap();
+        let v = |f: &str| id(node_kind::STATE_VAR, &format!("src::w::W::{f}"));
+        for field in ["a", "b", "c", "g"] {
+            assert!(has_node(&parse, v(field)), "{field} is a STATE_VAR");
+        }
+        for field in ["d", "e", "f", "h"] {
+            assert!(!has_node(&parse, v(field)), "{field} is no STATE_VAR");
+        }
+        assert_eq!(parse.nodes.iter().filter(|n| n.id == v("g")).count(), 1, "one node for `g`");
+        assert_eq!(call_site_names(&parse, v("g")), vec!["load".to_string()], "the first `g` only");
+        let f = id(node_kind::METHOD, "src::w::W::f");
+        assert!(has_node(&parse, f), "the method `f` keeps its node");
+        assert!(
+            !parse.calls.iter().any(|c| matches!(&c.qualifier, CallQualifier::Bare(n) if n == "signal" && c.line == 6)),
+            "a shadowed field's initializer is not walked: {:?}",
+            parse.calls
+        );
+        assert!(has_node(&parse, id(node_kind::METHOD, "src::w::W::h")), "CG.1 keeps the arrow");
+        assert_eq!(state_field_counts(src, "src/w.ts", "src::w"), (4, 1, 4));
+    }
+
     // ---- CH.1: abstract classes ---------------------------------------------
 
     /// The `[ts-abstract]` counters of one parse, as `(classes, methods)`.
     fn abstract_counts(src: &str, path: &str, module: &str) -> (usize, usize) {
-        let (_, _, stats) = parse_file_stats(src, path, module, repo()).unwrap();
+        let (_, _, stats, _) = parse_file_stats(src, path, module, repo()).unwrap();
         (stats.classes, stats.methods)
     }
 

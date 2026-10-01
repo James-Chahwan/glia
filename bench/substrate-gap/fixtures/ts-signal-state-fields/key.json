@@ -1,0 +1,128 @@
+{
+  "framework": "ts-signal-state-fields",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "CH-2: a class field initialised by a call (Angular signal / computed / toSignal / effect / input / model, `this.subject.asObservable()`, any call but `inject(...)`) is a STATE_VAR `<Class>::<field>` DEFINED by its class, whose initializer (arrow bodies passed to computed / effect included) is walked for calls: CALLS from the STATE_VAR, `this.m()` binding in-file, a client HTTP call's ENDPOINT CALLS from it, and `this.<signal>()` reads binding to the signal's STATE_VAR. `inject(T)` fields (A7.1 DI), `new X()` and literal fields stay non-nodes. Kina frontend: 487 computed / 432 signal / 30 toSignal fields; quokka_web 13 `this.x.asObservable()` fields. Baseline (HEAD f8a46c0, leap wheel): no STATE_VAR and no edge from any field.",
+  "expect_nodes": [
+    {
+      "kind": "STATE_VAR",
+      "name": "TradeComponent/rows",
+      "note": "input.required<T>() field"
+    },
+    {
+      "kind": "STATE_VAR",
+      "name": "TradeComponent/page",
+      "note": "signal(1) field"
+    },
+    {
+      "kind": "STATE_VAR",
+      "name": "TradeComponent/total",
+      "note": "computed field"
+    },
+    {
+      "kind": "STATE_VAR",
+      "name": "TradeComponent/countries",
+      "note": "toSignal field"
+    },
+    {
+      "kind": "STATE_VAR",
+      "name": "TradeComponent/profile",
+      "note": "toSignal over an HttpClient call"
+    },
+    {
+      "kind": "STATE_VAR",
+      "name": "TradeComponent/count$",
+      "note": "call-initialised data field (quokka's 13 `x$ = this.subject.asObservable()`)"
+    },
+    {
+      "kind": "STATE_VAR",
+      "name": "TradeComponent/logTotal",
+      "note": "effect field"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "GET /api/profile",
+      "note": "a client call inside a field initializer is extracted at all"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "TradeComponent",
+      "to": "TradeComponent/total",
+      "category": "DEFINES",
+      "note": "the class DEFINES its state field"
+    },
+    {
+      "from": "TradeComponent/isLong",
+      "to": "TradeComponent/longest",
+      "category": "CALLS",
+      "note": "computed arrow body -> method, in-file SelfMethod"
+    },
+    {
+      "from": "TradeComponent/logTotal",
+      "to": "TradeComponent/log",
+      "category": "CALLS",
+      "note": "effect arrow body -> method"
+    },
+    {
+      "from": "TradeComponent/total",
+      "to": "TradeComponent/rows",
+      "category": "CALLS",
+      "note": "a signal read `this.rows()` binds to the input's STATE_VAR"
+    },
+    {
+      "from": "TradeComponent/total",
+      "to": "TradeComponent/page",
+      "category": "CALLS",
+      "note": "signal read inside computed"
+    },
+    {
+      "from": "TradeComponent/next",
+      "to": "TradeComponent/page",
+      "category": "CALLS",
+      "note": "a method's signal read binds the same way"
+    },
+    {
+      "from": "TradeComponent/countries",
+      "to": "CountriesService/list",
+      "category": "CALLS",
+      "note": "inject() field type (A7.1 / A6.2b) binds the receiver across files"
+    },
+    {
+      "from": "TradeComponent/profile",
+      "to": "GET /api/profile",
+      "category": "CALLS",
+      "note": "the ENDPOINT's caller is the STATE_VAR"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "STATE_VAR",
+      "name": "src/trade.component/TradeComponent/http",
+      "note": "an inject() field is DI, not state (A7.1 keeps its INJECTS)"
+    },
+    {
+      "kind": "STATE_VAR",
+      "name": "src/trade.component/TradeComponent/countriesApi",
+      "note": "inject() field"
+    },
+    {
+      "kind": "STATE_VAR",
+      "name": "src/trade.component/TradeComponent/subject",
+      "note": "a `new X()` field is not call-initialised"
+    },
+    {
+      "kind": "STATE_VAR",
+      "name": "src/trade.component/TradeComponent/rafId",
+      "note": "a literal field"
+    },
+    {
+      "from": "src/trade.component/TradeComponent",
+      "to": "src/trade.component/TradeComponent/longest",
+      "category": "CALLS",
+      "note": "initializer calls belong to the field, never the class"
+    }
+  ]
+}
