@@ -79,6 +79,14 @@ impl<'a> CodeGuard<'a> {
         self.map.literal_start(pos)
     }
 
+    /// CJ.1c: true when a literal opens AT `pos` (its opening quote is byte
+    /// `pos`). A quoted-key needle (Celery beat's `'schedule':`) is a real
+    /// dict key only when the literal holding it starts at the needle; inside
+    /// a larger string, a comment or (Rust) a char-less `'..'` it is not.
+    pub(crate) fn opens_literal(&self, pos: usize) -> bool {
+        self.literal_start(pos) == Some(pos)
+    }
+
     /// `rust` or `python`.
     pub(crate) fn lang(&self) -> &'static str {
         self.lang
@@ -144,12 +152,26 @@ impl<'a> LazyGuard<'a> {
     /// the file has no guard, or `pos` is code ([`CodeGuard::is_code`]). A
     /// refusal is counted for [`LazyGuard::report`].
     pub(crate) fn admits(&mut self, pos: usize) -> bool {
+        self.check(pos, CodeGuard::is_code)
+    }
+
+    /// CJ.1c: [`LazyGuard::admits`] for a needle that is itself a quoted key
+    /// (`'schedule':`): true when the file has no guard or the literal holding
+    /// `pos` opens at `pos` ([`CodeGuard::opens_literal`]). A refusal is
+    /// counted for [`LazyGuard::report`].
+    pub(crate) fn admits_key(&mut self, pos: usize) -> bool {
+        self.check(pos, CodeGuard::opens_literal)
+    }
+
+    /// True when the file has no guard or `rule` accepts `pos`; builds the
+    /// guard on first use and counts a refusal.
+    fn check(&mut self, pos: usize, rule: fn(&CodeGuard<'a>, usize) -> bool) -> bool {
         let (path, source) = (self.path, self.source);
         let guard = self
             .built
             .get_or_insert_with(|| CodeGuard::for_path(path, source));
         match guard {
-            Some(g) if !g.is_code(pos) => {
+            Some(g) if !rule(g, pos) => {
                 self.dropped += 1;
                 false
             }
@@ -336,6 +358,38 @@ mod tests {
         let mut none = LazyGuard::new("", src);
         assert!(none.admits(3));
         assert_eq!(none.dropped, 0);
+    }
+
+    #[test]
+    fn quoted_key_must_open_its_literal() {
+        // Python: a dict key opens its own literal; the same key inside a
+        // larger string or a comment does not.
+        let py = "S = {'schedule': 1}\nT = \"{'schedule': 2}\"\n# 'schedule': 3\n";
+        let at: Vec<usize> = py.match_indices("'schedule':").map(|(i, _)| i).collect();
+        let g = CodeGuard::for_path("x.py", py).expect("a guard");
+        assert_eq!(
+            at.iter().map(|&i| g.opens_literal(i)).collect::<Vec<_>>(),
+            [true, false, false]
+        );
+        // Rust: `"schedule":` opens a literal; a `'schedule':` lexes as code
+        // (no char literal), and one inside a string or comment is held by it.
+        let rs = "let a = json!({\"schedule\": 1});\nlet b = 'schedule':;\nlet c = \"'schedule':\";\n// \"schedule\":\n";
+        let g = CodeGuard::for_path("x.rs", rs).expect("a guard");
+        let dq: Vec<usize> = rs.match_indices("\"schedule\":").map(|(i, _)| i).collect();
+        let sq: Vec<usize> = rs.match_indices("'schedule':").map(|(i, _)| i).collect();
+        assert!(g.opens_literal(dq[0]));
+        assert!(!g.opens_literal(dq[1]), "inside a // comment");
+        assert!(!g.opens_literal(sq[0]), "a bare 'schedule': is code in Rust");
+        assert!(!g.opens_literal(sq[1]), "inside a string");
+        // No guard admits every key; a refusal is counted.
+        let mut none = LazyGuard::new("app.ts", "x = \"{'schedule': 1}\"");
+        assert!(none.admits_key(6));
+        assert_eq!(none.dropped, 0);
+        let mut guard = LazyGuard::new("x.py", py);
+        assert!(guard.admits_key(at[0]));
+        assert!(!guard.admits_key(at[1]));
+        assert!(!guard.admits_key(at[2]));
+        assert_eq!(guard.dropped, 2);
     }
 
     #[test]

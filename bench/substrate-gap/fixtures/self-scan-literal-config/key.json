@@ -1,0 +1,20 @@
+{
+  "framework": "self-scan-literal-config",
+  "language": "rust",
+  "dirs": ["."],
+  "note": "CJ-1 (CJ.1c). In .rs / .py files a node-cron / Celery-beat / env-read / flag / data-source needle that starts inside a string literal or comment mints nothing; a Celery `'schedule':` / `\"schedule\":` key counts there only when it opens its own literal; a Python f-string's replacement fields are code (CJ.1a). Controls: Rust std::env::var, Python os.getenv (plain and inside an f-string), a redis client, a real Celery beat dict. Baseline (HEAD 0889f8c, grade.py on the W13 wheel): expect 5/5, FORBID VIOLATIONS 5 (JWT_SECRET, beta-search, mongodb, cron:*/5 * * * *:tick, cron:crontab(minute=0):tasks.cleanup - all from scanner/src/needles.rs's test literals).",
+  "expect_nodes": [
+    {"kind": "CONFIG_KEY", "name": "APP_MODE", "note": "std::env::var in Rust code"},
+    {"kind": "CONFIG_KEY", "name": "DB_URL", "note": "os.getenv in Python code"},
+    {"kind": "CONFIG_KEY", "name": "REDIS_HOST", "note": "os.getenv inside a Python f-string replacement field: code, not literal"},
+    {"kind": "CACHE", "name": "redis", "note": "redis client in Python code"},
+    {"kind": "CRON_JOB", "name": "nightly_report", "note": "a real Celery beat dict: the \"schedule\": key opens its own literal"}
+  ],
+  "forbid": [
+    {"kind": "CONFIG_KEY", "name": "JWT_SECRET", "note": "os.getenv inside a Rust test literal"},
+    {"kind": "CONFIG_KEY", "name": "beta-search", "note": "ldClient.variation inside a Rust test literal"},
+    {"kind": "DATABASE", "name": "mongodb", "note": "new MongoClient inside a Rust test literal"},
+    {"kind": "CRON_JOB", "name": "cron:*/5 * * * *:tick", "note": "node-cron inside a Rust test literal"},
+    {"kind": "CRON_JOB", "name": "cron:crontab(minute=0):tasks.cleanup", "note": "a Celery beat key inside a Rust test literal"}
+  ]
+}

@@ -60,6 +60,8 @@
 use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
+use crate::code_guard::LazyGuard;
+
 pub struct ConfigNodes {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
@@ -169,8 +171,16 @@ impl ConfigDef {
 /// Emits one `module -> key` READS_CONFIG edge per key, plus one
 /// [`ConfigNodes::sites`] entry per valid read so the engine can re-home the
 /// edge to the reading function (LE.4b).
+///
+/// CJ.1c: `path` picks the literal / comment guard ([`LazyGuard`]; `""` = no
+/// guard). In a Rust or Python file a read whose needle starts inside a string
+/// literal or comment (a scanner's own test source, a doc line) is dropped
+/// before any node, edge or site is built; a Python f-string's replacement
+/// fields are code, so `f"{os.getenv('X')}"` stays a read. Every other
+/// language is unchanged. fired_on: `[code-guard] config lang=.. dropped=..`.
 pub fn extract_config_reads(
     source: &str,
+    path: &str,
     module_id: NodeId,
     repo: RepoId,
 ) -> ConfigNodes {
@@ -182,6 +192,11 @@ pub fn extract_config_reads(
     reads.extend(scan_ruby_env(source));
     reads.extend(scan_java_system_getenv(source));
     reads.extend(scan_php_env(source));
+    // Each offset is the read needle's start (capture_first_string_arg / the
+    // process.env scan), so the guard tests the read expression itself.
+    let mut guard = LazyGuard::new(path, source);
+    reads.retain(|(_, offset)| guard.admits(*offset));
+    guard.report("config");
     let mut sites = Vec::new();
     let mut defs = Vec::with_capacity(reads.len());
     for (name, offset) in reads {
@@ -1057,7 +1072,7 @@ db_url = os.environ['DATABASE_URL']
 key = os.environ.get("API_KEY", "default")
 secret = os.getenv('JWT_SECRET')
 "#;
-        let out = extract_config_reads(src, module_id(repo), repo);
+        let out = extract_config_reads(src, "", module_id(repo), repo);
         let keys = config_keys(&out);
         assert!(keys.contains(&"config:env:DATABASE_URL".to_string()));
         assert!(keys.contains(&"config:env:API_KEY".to_string()));
@@ -1072,7 +1087,7 @@ const db = process.env.DATABASE_URL;
 const key = process.env['API_KEY'];
 const flag = import.meta.env.VITE_FEATURE_X;
 "#;
-        let out = extract_config_reads(src, module_id(repo), repo);
+        let out = extract_config_reads(src, "", module_id(repo), repo);
         let keys = config_keys(&out);
         assert!(keys.contains(&"config:env:DATABASE_URL".to_string()));
         assert!(keys.contains(&"config:env:API_KEY".to_string()));
@@ -1086,7 +1101,7 @@ const flag = import.meta.env.VITE_FEATURE_X;
 let url = std::env::var("DATABASE_URL").unwrap();
 let key = env::var("API_KEY").ok();
 "#;
-        let out = extract_config_reads(src, module_id(repo), repo);
+        let out = extract_config_reads(src, "", module_id(repo), repo);
         let keys = config_keys(&out);
         assert!(keys.contains(&"config:env:DATABASE_URL".to_string()));
         assert!(keys.contains(&"config:env:API_KEY".to_string()));
@@ -1099,7 +1114,7 @@ let key = env::var("API_KEY").ok();
 url := os.Getenv("DATABASE_URL")
 key, ok := os.LookupEnv("API_KEY")
 "#;
-        let out = extract_config_reads(src, module_id(repo), repo);
+        let out = extract_config_reads(src, "", module_id(repo), repo);
         let keys = config_keys(&out);
         assert!(keys.contains(&"config:env:DATABASE_URL".to_string()));
         assert!(keys.contains(&"config:env:API_KEY".to_string()));
@@ -1113,7 +1128,7 @@ db = ENV['DATABASE_URL']
 key = ENV.fetch('API_KEY')
 secret = ENV.fetch!('REQUIRED_SECRET')
 "#;
-        let out = extract_config_reads(src, module_id(repo), repo);
+        let out = extract_config_reads(src, "", module_id(repo), repo);
         let keys = config_keys(&out);
         assert!(keys.contains(&"config:env:DATABASE_URL".to_string()));
         assert!(keys.contains(&"config:env:API_KEY".to_string()));
@@ -1127,7 +1142,7 @@ secret = ENV.fetch!('REQUIRED_SECRET')
 String url = System.getenv("DATABASE_URL");
 String key = System.getenv("API_KEY");
 "#;
-        let out = extract_config_reads(src, module_id(repo), repo);
+        let out = extract_config_reads(src, "", module_id(repo), repo);
         let keys = config_keys(&out);
         assert!(keys.contains(&"config:env:DATABASE_URL".to_string()));
         assert!(keys.contains(&"config:env:API_KEY".to_string()));
@@ -1141,7 +1156,7 @@ String key = System.getenv("API_KEY");
 $db = getenv('DATABASE_URL');
 $key = $_ENV['API_KEY'];
 "#;
-        let out = extract_config_reads(src, module_id(repo), repo);
+        let out = extract_config_reads(src, "", module_id(repo), repo);
         let keys = config_keys(&out);
         assert!(keys.contains(&"config:env:DATABASE_URL".to_string()));
         assert!(keys.contains(&"config:env:API_KEY".to_string()));
@@ -1157,7 +1172,7 @@ const a = process.env['1bad'];
 const b = process.env['has-dash'];
 const c = process.env.GOOD_NAME;
 "#;
-        let out = extract_config_reads(src, module_id(repo), repo);
+        let out = extract_config_reads(src, "", module_id(repo), repo);
         let keys = config_keys(&out);
         assert!(keys.contains(&"config:env:GOOD_NAME".to_string()));
         assert!(!keys.contains(&"config:env:1bad".to_string()));
@@ -1597,7 +1612,7 @@ services:
     fn read_side_config_key_has_no_env_cell() {
         let repo = RepoId(1);
         let src = "import os\nurl = os.environ['API_URL']\nkey = os.getenv('DB_PASSWORD')\n";
-        let out = extract_config_reads(src, module_id(repo), repo);
+        let out = extract_config_reads(src, "", module_id(repo), repo);
         assert_eq!(out.nodes.len(), 2);
         assert!(
             out.nodes.iter().all(|n| n.cells.is_empty()),
@@ -1627,7 +1642,7 @@ services:
             ("PHP_KEY", "$_ENV['PHP_KEY']"),
         ];
         let src: String = cases.iter().map(|(_, e)| format!("v = {e};\n")).collect();
-        let out = extract_config_reads(&src, module_id(repo), repo);
+        let out = extract_config_reads(&src, "", module_id(repo), repo);
         for (key, expr) in cases {
             let start = src.find(expr).unwrap();
             let offs: Vec<usize> = out
@@ -1661,7 +1676,7 @@ services:
             "  return process.env.TWICE + process.env['9BAD'];\n",
             "}\n",
         );
-        let out = extract_config_reads(src, module_id(repo), repo);
+        let out = extract_config_reads(src, "", module_id(repo), repo);
         let twice: Vec<usize> = out
             .sites
             .iter()
@@ -1676,6 +1691,49 @@ services:
         );
         assert_eq!(out.sites.len(), 2, "the invalid name gives no site: {:?}", out.sites);
         assert_eq!(out.edges.len(), 1);
+    }
+
+    /// CJ.1c: in a Rust or Python file a read needle starting inside a
+    /// string literal or comment is no read; one in code (a Python f-string's
+    /// replacement field included) keeps its key and its site.
+    #[test]
+    fn literal_env_reads_mint_nothing_in_rust_and_python() {
+        let repo = RepoId(1);
+        let sorted_keys = |out: &ConfigNodes| {
+            let mut k = config_keys(out);
+            k.sort();
+            k
+        };
+        let rs = "pub fn mode() -> String {\n    std::env::var(\"APP_MODE\").unwrap_or_default()\n}\n\
+                  /// `os.getenv(\"DOC_KEY\")`\n\
+                  fn t() { let s = \"os.getenv('JWT_SECRET')\"; }\n";
+        let out = extract_config_reads(rs, "src/x.rs", module_id(repo), repo);
+        assert_eq!(sorted_keys(&out), vec!["config:env:APP_MODE".to_string()]);
+        let at = rs.find("std::env::var(").unwrap();
+        assert_eq!(out.sites.iter().map(|(_, o)| *o).min(), Some(at));
+        assert!(out.sites.iter().all(|(k, _)| *k == env_id(repo, "APP_MODE")));
+        // The same text read as TypeScript keeps every HEAD read.
+        let ts = extract_config_reads(rs, "src/x.ts", module_id(repo), repo);
+        assert_eq!(
+            sorted_keys(&ts),
+            ["config:env:APP_MODE", "config:env:DOC_KEY", "config:env:JWT_SECRET"]
+        );
+        // Python: a plain read and one inside an f-string, sites at the needle.
+        let py = "import os\nDB_URL = os.getenv(\"DB_URL\")\n\
+                  URL = f\"redis://{os.getenv('REDIS_HOST')}:6379/0\"\n\
+                  # os.getenv('COMMENTED')\nS = \"os.environ['IN_STRING']\"\n";
+        let out = extract_config_reads(py, "app/settings.py", module_id(repo), repo);
+        assert_eq!(sorted_keys(&out), ["config:env:DB_URL", "config:env:REDIS_HOST"]);
+        for (key, needle) in [("DB_URL", "os.getenv(\"DB_URL"), ("REDIS_HOST", "os.getenv('REDIS")] {
+            let at = py.find(needle).unwrap();
+            let offs: Vec<usize> = out
+                .sites
+                .iter()
+                .filter(|(k, _)| *k == env_id(repo, key))
+                .map(|(_, o)| *o)
+                .collect();
+            assert_eq!(offs.iter().min(), Some(&at), "{key}: {offs:?}");
+        }
     }
 
     #[test]

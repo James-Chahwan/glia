@@ -336,7 +336,7 @@ pub(crate) fn apply_cross_cutting_extractors(
     run_marked!(grpc::extract_grpc_client_nodes(source, path, module_id, repo));
     run_with_edges!(
         "data_sources",
-        data_sources::extract_data_source_nodes(source, module_id, repo)
+        data_sources::extract_data_source_nodes(source, path, module_id, repo)
     );
     // LE.4a: the extractor's statement sites (0-indexed lines here) and the
     // entities a declaration named, kept for the re-home below.
@@ -363,7 +363,9 @@ pub(crate) fn apply_cross_cutting_extractors(
     }
     // LE.4b: the env reads' sites (0-indexed lines here), kept for the
     // re-home below; `run_with_edges!` moves the rest.
-    let mut config_reads = config::extract_config_reads(source, module_id, repo);
+    // CJ.1c: `path` picks the literal / comment guard for data sources, env
+    // reads, secrets and flags (and cron's node-cron / Celery / @Scheduled).
+    let mut config_reads = config::extract_config_reads(source, path, module_id, repo);
     let config_sites = sites_at(
         source,
         std::mem::take(&mut config_reads.sites)
@@ -378,8 +380,8 @@ pub(crate) fn apply_cross_cutting_extractors(
     // (0-indexed lines here) are kept for the re-home below; secrets have
     // none and stay on the module.
     let flag_sites = {
-        let secrets = secrets_flags::extract_secret_refs(source, module_id, repo);
-        let mut flags = secrets_flags::extract_feature_flags(source, module_id, repo);
+        let secrets = secrets_flags::extract_secret_refs(source, path, module_id, repo);
+        let mut flags = secrets_flags::extract_feature_flags(source, path, module_id, repo);
         if let Some(marker) = secrets_flags::marker(&[&secrets, &flags], lang) {
             eprintln!("{marker} path={path}");
         }

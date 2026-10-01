@@ -48,6 +48,8 @@ use glia_code_domain::{
 };
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
+use crate::code_guard::LazyGuard;
+
 pub struct CronNodes {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
@@ -191,9 +193,14 @@ pub fn extract_cron_nodes(
         }
         jobs.extend(scan.jobs);
     }
-    jobs.extend(extract_node_cron(source));
-    jobs.extend(extract_celery_beat(source));
-    jobs.extend(extract_scheduled_annotation(source));
+    // CJ.1c: in a Rust or Python file a node-cron / `@Scheduled(` needle in
+    // a string literal or comment is no job, and a Celery beat key counts
+    // only when it opens its own literal (code_guard.rs).
+    let mut guard = LazyGuard::new(path, source);
+    jobs.extend(extract_node_cron(source, &mut guard));
+    jobs.extend(extract_celery_beat(source, &mut guard));
+    jobs.extend(extract_scheduled_annotation(source, &mut guard));
+    guard.report("cron");
     // LA.19a framework schedulers. Each is gated on the file's language AND
     // its library's import / namespace, so every other file costs one
     // extension test.
@@ -469,13 +476,17 @@ fn basename(path: &str) -> String {
 // form `new CronJob({ cronTime: '...', onTick: handler })`.
 // ----------------------------------------------------------------------------
 
-fn extract_node_cron(source: &str) -> Vec<CronJob> {
+fn extract_node_cron(source: &str, guard: &mut LazyGuard<'_>) -> Vec<CronJob> {
     let mut out = Vec::new();
     // Method form: `cron.schedule('...', handler)`. Handler may be an
     // identifier, an arrow function, or a method reference.
     let mut search_from = 0;
     while let Some(rel) = source[search_from..].find("cron.schedule(") {
         let pos = search_from + rel;
+        search_from = pos + "cron.schedule(".len();
+        if !guard.admits(pos) {
+            continue;
+        }
         let after = &source[pos + "cron.schedule(".len()..];
         if let Some(schedule) = first_quoted(after) {
             if looks_like_cron_expr(&schedule) {
@@ -488,12 +499,15 @@ fn extract_node_cron(source: &str) -> Vec<CronJob> {
                 });
             }
         }
-        search_from = pos + "cron.schedule(".len();
     }
     // Class form: `new CronJob({ cronTime: '...', onTick: handler })`
     let mut search_from = 0;
     while let Some(rel) = source[search_from..].find("cronTime:") {
         let pos = search_from + rel;
+        search_from = pos + "cronTime:".len();
+        if !guard.admits(pos) {
+            continue;
+        }
         let after = &source[pos + "cronTime:".len()..];
         if let Some(schedule) = first_quoted(after) {
             if looks_like_cron_expr(&schedule) {
@@ -515,7 +529,6 @@ fn extract_node_cron(source: &str) -> Vec<CronJob> {
                 });
             }
         }
-        search_from = pos + "cronTime:".len();
     }
     out
 }
@@ -525,48 +538,41 @@ fn extract_node_cron(source: &str) -> Vec<CronJob> {
 // `'schedule': 30.0` / `'schedule': timedelta(...)`. We capture the schedule
 // expression verbatim from the source (post-colon, pre-comma) and try to
 // pull a sibling `'task':` for the target.
+//
+// CJ.1c: the needle is itself a quoted dict key, so in a Rust or Python file
+// it counts only when the literal holding it opens AT it
+// ([`LazyGuard::admits_key`]): a key inside a larger string or a comment (a
+// scanner's own test literal, a doc line) is no entry.
 // ----------------------------------------------------------------------------
 
-fn extract_celery_beat(source: &str) -> Vec<CronJob> {
+fn extract_celery_beat(source: &str, guard: &mut LazyGuard<'_>) -> Vec<CronJob> {
     let mut out = Vec::new();
-    let mut search_from = 0;
-    while let Some(rel) = source[search_from..].find("'schedule':") {
-        let pos = search_from + rel;
-        let after = &source[pos + "'schedule':".len()..];
-        let schedule = celery_schedule_expr(after);
-        if !schedule.is_empty() && schedule.len() < 256 {
-            // Walk back ~256 bytes to find the sibling `'task':` value; the
-            // start snaps UP so a multibyte char on the cut can't panic.
-            let look_back_start = source.ceil_char_boundary(pos.saturating_sub(256));
-            let context = &source[look_back_start..pos];
-            let target = celery_task_in(context).unwrap_or_else(|| "anon".to_string());
-            out.push(CronJob {
-                schedule,
-                target,
-                source: "celery_beat",
-                handler: None,
-            });
+    // Single-quoted keys first, then the double-quoted variant.
+    for needle in ["'schedule':", "\"schedule\":"] {
+        let mut search_from = 0;
+        while let Some(rel) = source[search_from..].find(needle) {
+            let pos = search_from + rel;
+            search_from = pos + needle.len();
+            if !guard.admits_key(pos) {
+                continue;
+            }
+            let after = &source[pos + needle.len()..];
+            let schedule = celery_schedule_expr(after);
+            if !schedule.is_empty() && schedule.len() < 256 {
+                // Walk back ~256 bytes to find the sibling `'task':` value;
+                // the start snaps UP so a multibyte char on the cut can't
+                // panic.
+                let look_back_start = source.ceil_char_boundary(pos.saturating_sub(256));
+                let context = &source[look_back_start..pos];
+                let target = celery_task_in(context).unwrap_or_else(|| "anon".to_string());
+                out.push(CronJob {
+                    schedule,
+                    target,
+                    source: "celery_beat",
+                    handler: None,
+                });
+            }
         }
-        search_from = pos + "'schedule':".len();
-    }
-    // Double-quoted variant.
-    let mut search_from = 0;
-    while let Some(rel) = source[search_from..].find("\"schedule\":") {
-        let pos = search_from + rel;
-        let after = &source[pos + "\"schedule\":".len()..];
-        let schedule = celery_schedule_expr(after);
-        if !schedule.is_empty() && schedule.len() < 256 {
-            let look_back_start = source.ceil_char_boundary(pos.saturating_sub(256));
-            let context = &source[look_back_start..pos];
-            let target = celery_task_in(context).unwrap_or_else(|| "anon".to_string());
-            out.push(CronJob {
-                schedule,
-                target,
-                source: "celery_beat",
-                handler: None,
-            });
-        }
-        search_from = pos + "\"schedule\":".len();
     }
     out
 }
@@ -614,12 +620,18 @@ fn celery_task_in(context: &str) -> Option<String> {
 // Java/Spring: `@Scheduled(cron = "0 4 * * * *")`
 // ----------------------------------------------------------------------------
 
-fn extract_scheduled_annotation(source: &str) -> Vec<CronJob> {
+fn extract_scheduled_annotation(source: &str, guard: &mut LazyGuard<'_>) -> Vec<CronJob> {
     let mut out = Vec::new();
     let mut search_from = 0;
     while let Some(rel) = source[search_from..].find("@Scheduled(") {
         let pos = search_from + rel;
         let after_paren = pos + "@Scheduled(".len();
+        // CJ.1c: an annotation in a Rust / Python literal or comment is no
+        // job; the scan resumes inside it, so a real one after is still read.
+        if !guard.admits(pos) {
+            search_from = after_paren;
+            continue;
+        }
         // Find the closing paren bounds for this annotation.
         let mut j = after_paren;
         let mut depth = 1i32;
@@ -3230,6 +3242,49 @@ cron.schedule('*/5 * * * *', cleanupSessions);
             );
         }
     }
+    // ---- CJ.1c: literal / comment guard -----------------------------------
+
+    #[test]
+    fn literal_schedules_mint_nothing_in_rust() {
+        let src = "fn t() {\n    let s = \"cron.schedule('*/5 * * * *', tick);\";\n    let c = \"new CronJob({ cronTime: '0 12 * * *', onTick: report })\";\n}\n// @Scheduled(cron = \"0 4 * * * *\")\nfn job() {}\n";
+        assert!(run(src, "src/x.rs").nodes.is_empty(), "{:?}", sorted_qnames(&run(src, "src/x.rs")));
+        // The same text in a JS / Java file reads as at HEAD.
+        let js = sorted_qnames(&run(src, "src/x.js"));
+        assert!(js.contains(&"cron:*/5 * * * *:tick".to_string()), "{js:?}");
+        assert!(js.contains(&"cron:0 12 * * *:report".to_string()), "{js:?}");
+        let java = sorted_qnames(&run(src, "src/X.java"));
+        assert!(java.contains(&"cron:0 4 * * * *:job".to_string()), "{java:?}");
+        // A real call in Rust code after a refused one is still read.
+        let mixed = "// cron.schedule('0 0 * * 0', old);\ncron.schedule('*/5 * * * *', tick);\n";
+        assert_eq!(sorted_qnames(&run(mixed, "src/x.rs")), ["cron:*/5 * * * *:tick"]);
+    }
+
+    #[test]
+    fn celery_beat_key_must_open_its_literal() {
+        // A real Python dict: the key opens its own literal.
+        let single = "BEAT = {\n    'c': {'task': 'tasks.cleanup', 'schedule': crontab(minute=0)},\n}\n";
+        assert_eq!(
+            sorted_qnames(&run(single, "app/x.py")),
+            ["cron:crontab(minute=0):tasks.cleanup"]
+        );
+        let double = "BEAT = {\n    \"t\": {\"task\": \"tasks.tick\", \"schedule\": EVERY_MINUTE},\n}\n";
+        assert_eq!(sorted_qnames(&run(double, "app/x.py")), ["cron:EVERY_MINUTE:tasks.tick"]);
+        // A key inside a larger Python string or a `#` comment is no entry.
+        for src in [
+            "S = \"{'task': 'tasks.cleanup', 'schedule': crontab()}\"\n",
+            "# 'task': 'tasks.cleanup', 'schedule': crontab()\n",
+            "S = '{\"task\": \"tasks.cleanup\", \"schedule\": crontab()}'\n",
+        ] {
+            assert!(run(src, "app/x.py").nodes.is_empty(), "{src:?}");
+        }
+        // Rust: a key inside a string is held by it; the same text in a TS
+        // file reads as at HEAD.
+        let rs = "let s = \"{'task': 'tasks.cleanup', 'schedule': crontab()}\";\nlet r = r#\"{\"schedule\": \"* * * * *\"}\"#;\n";
+        assert!(run(rs, "src/x.rs").nodes.is_empty(), "{:?}", sorted_qnames(&run(rs, "src/x.rs")));
+        let ts = sorted_qnames(&run(rs, "src/x.ts"));
+        assert!(ts.contains(&"cron:crontab():tasks.cleanup".to_string()), "{ts:?}");
+    }
+
     // ---- LA.19a: framework schedulers ------------------------------------
 
     #[test]

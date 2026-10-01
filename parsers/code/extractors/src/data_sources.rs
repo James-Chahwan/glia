@@ -10,9 +10,18 @@
 //! across 20 languages without per-language syntactic analysis. False-positive
 //! risk is bounded by the medium confidence tier and by keeping patterns
 //! distinctive (`pg.` not `pg`, `sqlx::` not `sqlx`, etc.).
+//!
+//! CJ.1c: in a Rust or Python file a pattern counts only at an occurrence
+//! whose first byte is code ([`LazyGuard`]): a scanner's own needle table, a
+//! doc comment or a test's embedded sample source names a client, it does not
+//! use one. Inside code the match stays a substring
+//! (`QueueFramework::RedisList` still reads as redis); every other language
+//! is unchanged. fired_on: `[code-guard] data_sources lang=.. dropped=..`.
 
 use glia_code_domain::{CodeNav, GRAPH_TYPE, edge_category, node_kind};
 use glia_core::{Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
+
+use crate::code_guard::LazyGuard;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DataSourceKind {
@@ -41,10 +50,12 @@ pub struct DataSourceNodes {
     pub nav: CodeNav,
 }
 
-/// Scan `source` for data-source client usage and emit nodes + edges anchored
-/// to `module_id`. Dedups by provider within a single file.
+/// Scan `source` (read from `path`, which picks the CJ.1c guard; `""` = no
+/// guard) for data-source client usage and emit nodes + edges anchored to
+/// `module_id`. Dedups by provider within a single file.
 pub fn extract_data_source_nodes(
     source: &str,
+    path: &str,
     module_id: NodeId,
     repo: RepoId,
 ) -> DataSourceNodes {
@@ -52,14 +63,22 @@ pub fn extract_data_source_nodes(
     let mut edges = Vec::new();
     let mut nav = CodeNav::default();
     let mut seen = std::collections::HashSet::new();
+    let mut guard = LazyGuard::new(path, source);
 
     for (pattern, kind, provider) in PATTERNS {
-        if !source.contains(pattern) {
+        // A provider already emitted takes nothing more from this file, so
+        // its later patterns are never scanned (or counted as refusals).
+        if seen.contains(provider) {
             continue;
         }
-        if !seen.insert(*provider) {
+        // The first occurrence the guard admits counts; the scan stops there.
+        if !source
+            .match_indices(pattern)
+            .any(|(at, _)| guard.admits(at))
+        {
             continue;
         }
+        seen.insert(*provider);
         let qname = format!("data_source:{provider}");
         let id = NodeId::from_parts(GRAPH_TYPE, repo, kind.node_kind_id(), &qname);
         nodes.push(Node {
@@ -77,6 +96,7 @@ pub fn extract_data_source_nodes(
             cells: Vec::new(),
         });
     }
+    guard.report("data_sources");
 
     DataSourceNodes { nodes, edges, nav }
 }
@@ -140,7 +160,7 @@ mod tests {
         let repo = RepoId(1);
         let mid = module_id(repo);
         let out =
-            extract_data_source_nodes("const db = new MongoClient(url);", mid, repo);
+            extract_data_source_nodes("const db = new MongoClient(url);", "", mid, repo);
         assert_eq!(out.nodes.len(), 1);
         assert_eq!(out.edges.len(), 1);
         assert_eq!(out.edges[0].from, mid);
@@ -156,7 +176,7 @@ mod tests {
         let repo = RepoId(1);
         let mid = module_id(repo);
         let source = "import Redis from 'redis';\nconst es = new Elasticsearch();";
-        let out = extract_data_source_nodes(source, mid, repo);
+        let out = extract_data_source_nodes(source, "", mid, repo);
         let kinds: Vec<_> = out
             .nodes
             .iter()
@@ -172,6 +192,7 @@ mod tests {
         let mid = module_id(repo);
         let out = extract_data_source_nodes(
             "redis.set(k, v);\nRedis.Client.new();",
+            "",
             mid,
             repo,
         );
@@ -182,8 +203,38 @@ mod tests {
     fn node_qname_is_global() {
         let repo = RepoId(1);
         let mid = module_id(repo);
-        let out = extract_data_source_nodes("use diesel::prelude::*;", mid, repo);
+        let out = extract_data_source_nodes("use diesel::prelude::*;", "", mid, repo);
         let qname = out.nav.qname_by_id.get(&out.nodes[0].id).unwrap();
         assert_eq!(qname, "data_source:diesel");
+    }
+
+    fn providers(src: &str, path: &str) -> Vec<String> {
+        let repo = RepoId(1);
+        let out = extract_data_source_nodes(src, path, module_id(repo), repo);
+        let mut q: Vec<String> = out.nav.qname_by_id.values().cloned().collect();
+        q.sort();
+        q
+    }
+
+    #[test]
+    fn literal_patterns_mint_nothing_in_rust_and_python() {
+        let rs = "let db = \"new MongoClient(url)\";\n// SendGrid, Elasticsearch\n";
+        assert!(providers(rs, "src/x.rs").is_empty());
+        // The same Rust text read as TypeScript keeps the HEAD substring match.
+        assert_eq!(
+            providers(rs, "src/x.ts"),
+            ["data_source:elasticsearch", "data_source:mongodb", "data_source:sendgrid"]
+        );
+        // Python code keeps its client; a docstring / comment mention does not.
+        assert_eq!(
+            providers("import redis\nr = redis.Redis()\n", "app/x.py"),
+            ["data_source:redis"]
+        );
+        assert!(providers("\"\"\"Uses MongoClient.\"\"\"\n# smtplib\n", "app/x.py").is_empty());
+        // A refused occurrence does not hide a later one in code.
+        assert_eq!(
+            providers("// Redis\nlet c = Redis::open(url);\n", "src/x.rs"),
+            ["data_source:redis"]
+        );
     }
 }

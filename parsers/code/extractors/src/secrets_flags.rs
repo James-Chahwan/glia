@@ -29,6 +29,11 @@
 //! f-string or variable is skipped), and the flavor validator in config.rs
 //! rejects interpolated secret refs and short flag keys.
 //!
+//! CJ.1c: in a Rust or Python file an occurrence whose needle starts inside
+//! a string literal or comment (a scanner's own test source, a doc line) is
+//! no reference ([`LazyGuard`]); every other language is unchanged. fired_on:
+//! `[code-guard] <secrets|flags> lang=.. dropped=..`.
+//!
 //! The yaml side — k8s `secretKeyRef:` reads, `kind: Secret` and Flipt
 //! `flags:` definitions — lives in config.rs's `extract_yaml_env_defs`, which
 //! already walks every yaml file once.
@@ -36,6 +41,7 @@
 use glia_code_domain::{GRAPH_TYPE, node_kind};
 use glia_core::{NodeId, RepoId};
 
+use crate::code_guard::LazyGuard;
 use crate::config::{ConfigDef, ConfigNodes, Flavor, Side, build_nodes};
 
 /// How the key is read off a matched call.
@@ -194,12 +200,15 @@ const FLAG_ROWS: &[Row] = &[
 
 /// Secrets-manager references read in a code file:
 /// `config:secret:<provider>/<ref>`, `READS_CONFIG` from `module_id`. No
-/// [`ConfigNodes::sites`]: a secret reference stays on the module.
-pub fn extract_secret_refs(source: &str, module_id: NodeId, repo: RepoId) -> ConfigNodes {
-    let defs = scan(source, SECRET_ROWS)
+/// [`ConfigNodes::sites`]: a secret reference stays on the module. `path`
+/// picks the CJ.1c guard (`""` = no guard).
+pub fn extract_secret_refs(source: &str, path: &str, module_id: NodeId, repo: RepoId) -> ConfigNodes {
+    let mut guard = LazyGuard::new(path, source);
+    let defs = scan(source, SECRET_ROWS, &mut guard)
         .into_iter()
         .map(|(name, provider, _)| ConfigDef::secret(name, provider))
         .collect();
+    guard.report("secrets");
     build_nodes(defs, Side::Read, module_id, repo)
 }
 
@@ -209,11 +218,15 @@ pub fn extract_secret_refs(source: &str, module_id: NodeId, repo: RepoId) -> Con
 /// CC.7a: plus one [`ConfigNodes::sites`] entry per accepted check, as
 /// `(CONFIG_KEY id, byte offset of the matched needle)` in scan order, so the
 /// engine can re-home the module edge to the function holding the check (the
-/// LE.4b shape of `config::extract_config_reads`).
-pub fn extract_feature_flags(source: &str, module_id: NodeId, repo: RepoId) -> ConfigNodes {
+/// LE.4b shape of `config::extract_config_reads`). `path` picks the CJ.1c
+/// guard (`""` = no guard).
+pub fn extract_feature_flags(source: &str, path: &str, module_id: NodeId, repo: RepoId) -> ConfigNodes {
     let mut sites = Vec::new();
     let mut defs = Vec::new();
-    for (name, provider, offset) in scan(source, FLAG_ROWS) {
+    let mut guard = LazyGuard::new(path, source);
+    let checks = scan(source, FLAG_ROWS, &mut guard);
+    guard.report("flags");
+    for (name, provider, offset) in checks {
         let def = ConfigDef::flag(name, provider);
         // The same validator and qname `build_nodes` applies, so a site
         // always names a node this call emits.
@@ -277,7 +290,9 @@ pub fn marker(outs: &[&ConfigNodes], src: &str) -> Option<String> {
 /// order per row. `offset` is the byte offset where the matched needle starts
 /// (CC.7a's call site): the needles are ASCII, so `find` lands it on a char
 /// boundary. A row whose provider tokens are absent from the file never runs.
-fn scan(source: &str, rows: &[Row]) -> Vec<(String, &'static str, usize)> {
+/// CJ.1c: an occurrence the guard refuses (a Rust / Python literal or comment)
+/// is skipped.
+fn scan(source: &str, rows: &[Row], guard: &mut LazyGuard<'_>) -> Vec<(String, &'static str, usize)> {
     let mut lower: Option<String> = None;
     let mut out = Vec::new();
     for row in rows {
@@ -292,6 +307,10 @@ fn scan(source: &str, rows: &[Row]) -> Vec<(String, &'static str, usize)> {
         while let Some(rel) = source[from..].find(row.needle) {
             let at = from + rel;
             let after = at + row.needle.len();
+            if !guard.admits(at) {
+                from = after;
+                continue;
+            }
             // A needle ending in `(` ends ON the opener; any other needle
             // (`GetSecretValueInput`) is followed by one.
             let call = if row.needle.ends_with('(') {
@@ -562,12 +581,12 @@ mod tests {
 
     fn secrets(src: &str) -> ConfigNodes {
         let repo = RepoId(1);
-        extract_secret_refs(src, module_id(repo), repo)
+        extract_secret_refs(src, "", module_id(repo), repo)
     }
 
     fn flags(src: &str) -> ConfigNodes {
         let repo = RepoId(1);
-        extract_feature_flags(src, module_id(repo), repo)
+        extract_feature_flags(src, "", module_id(repo), repo)
     }
 
     fn cell_of(out: &ConfigNodes, qname: &str) -> Option<String> {
@@ -774,10 +793,10 @@ mod tests {
             "config:flag:new-checkout",
         );
         assert_eq!(
-            extract_feature_flags(SRC, m, repo).sites,
+            extract_feature_flags(SRC, "", m, repo).sites,
             vec![(key, SRC.find(".variation(").unwrap())]
         );
-        assert!(extract_secret_refs(SRC, m, repo).sites.is_empty());
+        assert!(extract_secret_refs(SRC, "", m, repo).sites.is_empty());
         // A rejected key (one char) gives no site, and every site names a node
         // the call emitted; a key checked twice has two sites.
         let twice = concat!(
@@ -786,7 +805,7 @@ mod tests {
             "b = client.variation(\"beta-ui\", u, False)\n",
             "def g(u):\n    return client.variation(\"beta-ui\", u, False)\n",
         );
-        let out = extract_feature_flags(twice, m, repo);
+        let out = extract_feature_flags(twice, "", m, repo);
         let ids: Vec<NodeId> = out.nodes.iter().map(|n| n.id).collect();
         assert_eq!(out.sites.len(), 2, "{:?}", out.sites);
         assert!(out.sites.iter().all(|(t, _)| ids.contains(t)));
@@ -807,5 +826,42 @@ mod tests {
             Some("[secrets] refs=2 providers=2 flags=0 flag_defs=0 src=python")
         );
         assert_eq!(marker(&[&flags("x = 1\n")], "python"), None);
+    }
+
+    /// CJ.1c: a flag check or secret read starting inside a Rust literal or
+    /// comment is no reference; the same text read as TypeScript is.
+    #[test]
+    fn literal_flag_checks_mint_nothing_in_rust() {
+        let repo = RepoId(1);
+        let m = module_id(repo);
+        let src = concat!(
+            "//! LaunchDarkly's `ldClient.variation(\"doc-flag\", ctx, false)`\n",
+            "fn t() {\n",
+            "    let flag = \"import * as ld from 'launchdarkly-node-server-sdk';\\n",
+            "const on = ldClient.variation('beta-search', ctx, false);\";\n",
+            "    let vault = \"import hvac\\nc.read('secret/data/api')\";\n",
+            "}\n",
+        );
+        let rs_flags = extract_feature_flags(src, "src/x.rs", m, repo);
+        assert!(qnames(&rs_flags).is_empty(), "{:?}", qnames(&rs_flags));
+        assert!(rs_flags.sites.is_empty());
+        assert!(qnames(&extract_secret_refs(src, "src/x.rs", m, repo)).is_empty());
+        let ts_flags = extract_feature_flags(src, "src/x.ts", m, repo);
+        assert_eq!(
+            qnames(&ts_flags),
+            ["config:flag:beta-search", "config:flag:doc-flag"]
+        );
+        assert_eq!(
+            qnames(&extract_secret_refs(src, "src/x.ts", m, repo)),
+            ["config:secret:vault/secret/data/api"]
+        );
+        // A real check in Python code stays, its site at the needle.
+        let py = "import ldclient\n# client.variation('old-flag', u, False)\non = client.variation('beta-search', u, False)\n";
+        let out = extract_feature_flags(py, "app/x.py", m, repo);
+        assert_eq!(qnames(&out), ["config:flag:beta-search"]);
+        assert_eq!(
+            out.sites.iter().map(|(_, o)| *o).collect::<Vec<_>>(),
+            [py.rfind(".variation(").unwrap()]
+        );
     }
 }
