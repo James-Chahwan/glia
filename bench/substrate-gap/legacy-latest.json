@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 323,
+  "fixtures": 329,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -337,7 +337,9 @@
     "csharp-mongo-collection": {
       "framework": "csharp-mongo-collection",
       "language": "csharp",
-      "per_category": {}
+      "per_category": {
+        "ACCESSES_DATA": 1.0
+      }
     },
     "csharp-namespace-qnames": {
       "framework": "csharp-namespace-qnames",
@@ -375,6 +377,13 @@
     },
     "dart-body-owners": {
       "framework": "dart-body-owners",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
+    "dart-dio-generic-calls": {
+      "framework": "dart-dio-generic-calls",
       "language": "dart",
       "per_category": {
         "CALLS": 1.0
@@ -458,6 +467,13 @@
       "framework": "docs-md-section-lines",
       "language": "markdown",
       "per_category": {}
+    },
+    "docs-sdd-project-scope": {
+      "framework": "docs-sdd-project-scope",
+      "language": "go",
+      "per_category": {
+        "DOCUMENTS": 1.0
+      }
     },
     "elixir-docs": {
       "framework": "elixir-docs",
@@ -677,6 +693,14 @@
       "language": "go",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "go-package-var-closures": {
+      "framework": "go-package-var-closures",
+      "language": "go",
+      "per_category": {
+        "CALLS": 1.0,
+        "HANDLED_BY": 1.0
       }
     },
     "go-receiver-method-handlers": {
@@ -1599,6 +1623,11 @@
         "READS_CONFIG": 1.0
       }
     },
+    "self-scan-literal-needles": {
+      "framework": "self-scan-literal-needles",
+      "language": "rust",
+      "per_category": {}
+    },
     "solidity-calls": {
       "framework": "solidity-calls",
       "language": "solidity",
@@ -1709,6 +1738,11 @@
       "language": "typescript",
       "per_category": {}
     },
+    "test-paths-declared": {
+      "framework": "test-paths-declared",
+      "language": "typescript",
+      "per_category": {}
+    },
     "test-reports-coverage": {
       "framework": "test-reports-coverage",
       "language": "python",
@@ -1724,6 +1758,16 @@
       "language": "typescript",
       "per_category": {
         "RPC_CALLS": 1.0
+      }
+    },
+    "ts-abstract-class": {
+      "framework": "ts-abstract-class",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "DEFINES": 1.0,
+        "INHERITS_FROM": 1.0,
+        "INJECTS": 1.0
       }
     },
     "ts-angular-di": {
@@ -2244,7 +2288,9 @@
     "xcut-websocket-precision": {
       "framework": "xcut-websocket-precision",
       "language": "typescript+go",
-      "per_category": {}
+      "per_category": {
+        "WS_CONNECTS": 1.0
+      }
     },
     "xcut-websocket-ws_connects": {
       "framework": "xcut-websocket",

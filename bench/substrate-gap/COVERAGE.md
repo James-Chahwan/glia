@@ -76,9 +76,9 @@ LEGEND ● full  ◐ partial  · none (fixture exists, nothing emitted)  ? unkno
            http_cl http_sr   kafka    amqp sqs/sns  pubsub azure_s    nats   redis    mqtt   taskq    grpc graphql      ws eventbu      db    migr  config secrets   flags    cron cli_def cli_inv   calls imports injects    impl   tests service subproj
 python           ●       ●       ●       ◐       ●       ◐       ●       ●       ●       ●       ·       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 go               ●       ●       ◐       ·       ·       ·       ·       ●       ·       ●       ·       ●       ·       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ◐       ●       ●
-typescript       ●       ●       ●       ◐       ●       ◐       ●       ●       ●       ●       ◐       ●       ●       ◐       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●
+typescript       ●       ●       ●       ◐       ●       ◐       ●       ●       ●       ●       ◐       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●
 java             ●       ●       ●       ●       ◐       ·       ·       ●       ·       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ◐       ●       ●
-csharp           ●       ●       ●       ◐       ●       ·       ●       ◐       ●       ·       ·       ●       ·       ●       ●       ◐       ●       ◐       ·       ●       ●       ●       ●       ●       ●       ●       ●       ◐       ●       ●
+csharp           ●       ●       ●       ◐       ●       ·       ●       ◐       ●       ·       ·       ●       ·       ●       ●       ●       ●       ◐       ·       ●       ●       ●       ●       ●       ●       ●       ●       ◐       ●       ●
 ruby             ●       ●       ·       ·       ·       ·       ?       ●       ●       ●       ●       ●       ·       ●       ·       ●       ●       ●       ·       ◐       ●       ●       ◐       ●       ●       ◐       ◐       ◐       ●       ●
 php              ●       ●       ◐       ◐       ·       ·       ?       ·       ·       ·       ·       ●       ●       ·       ·       ●       ●       ◐       ·       ◐       ●       ●       ·       ●       ●       ●       ◐       ◐       ●       ●
 swift            ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?
@@ -106,9 +106,9 @@ PER-MECHANISM  across 17 languages:
   taskq        ● 1   ◐ 2   · 8   ? 4   - 2   ! 0
   grpc         ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
   graphql      ● 4   ◐ 1   · 6   ? 5   - 1   ! 0
-  ws           ● 6   ◐ 1   · 4   ? 5   - 1   ! 0
+  ws           ● 7   ◐ 0   · 4   ? 5   - 1   ! 0
   eventbus     ● 4   ◐ 0   · 8   ? 5   - 0   ! 0
-  db           ● 7   ◐ 1   · 3   ? 5   - 1   ! 0
+  db           ● 8   ◐ 0   · 3   ? 5   - 1   ! 0
   migrations   ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
   config       ● 6   ◐ 5   · 0   ? 5   - 1   ! 0
   secrets      ● 5   ◐ 2   · 4   ? 5   - 1   ! 0
@@ -127,9 +127,9 @@ PER-MECHANISM  across 17 languages:
 PER-LANGUAGE  across 30 mechanisms:
   python       ● 26  ◐ 2   · 2   ? 0   - 0   ! 0
   go           ● 20  ◐ 2   · 8   ? 0   - 0   ! 0
-  typescript   ● 25  ◐ 4   · 1   ? 0   - 0   ! 0
+  typescript   ● 26  ◐ 3   · 1   ? 0   - 0   ! 0
   java         ● 23  ◐ 2   · 5   ? 0   - 0   ! 0
-  csharp       ● 20  ◐ 5   · 5   ? 0   - 0   ! 0
+  csharp       ● 21  ◐ 4   · 5   ? 0   - 0   ! 0
   ruby         ● 17  ◐ 5   · 7   ? 1   - 0   ! 0
   php          ● 13  ◐ 6   · 10  ? 1   - 0   ! 0
   swift        ● 2   ◐ 1   · 0   ? 27  - 0   ! 0
@@ -144,9 +144,9 @@ PER-LANGUAGE  across 30 mechanisms:
   kotlin       ● 6   ◐ 0   · 0   ? 24  - 0   ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 206 full, 49 partial, 91 none, 136 unknown, 0 error, 28 n/a.
+COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 208 full, 47 partial, 91 none, 136 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 176
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 181
 
 ## Cells routed via an alternative mechanism
 

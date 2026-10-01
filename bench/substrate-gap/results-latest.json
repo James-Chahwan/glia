@@ -358,17 +358,15 @@
         2,
         2
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [
-        "no routing expected"
-      ],
+      "reasons": [],
       "route": [
-        0,
-        0
+        2,
+        2
       ],
       "via": "db"
     },
@@ -2414,19 +2412,20 @@
     },
     "go/calls": {
       "extract": [
-        7,
-        7
+        8,
+        8
       ],
       "fixtures": [
         "fixtures/go-calls",
         "fixtures/go-closure-calls",
         "fixtures/go-field-dispatch",
         "fixtures/go-package-multifile-calls",
+        "fixtures/go-package-var-closures",
         "fixtures/go-return-type-receivers"
       ],
       "forbid": [
-        4,
-        4
+        8,
+        8
       ],
       "level": "full",
       "literal": [
@@ -2437,8 +2436,8 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        17,
-        17
+        28,
+        28
       ],
       "via": "call"
     },
@@ -8591,8 +8590,8 @@
     },
     "typescript/ws": {
       "extract": [
-        4,
-        4
+        5,
+        5
       ],
       "fixtures": [
         "fixtures/xcut-websocket-precision",
@@ -8602,17 +8601,15 @@
         1,
         1
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
-        4,
-        4
+        5,
+        5
       ],
-      "reasons": [
-        "no routing expected"
-      ],
+      "reasons": [],
       "route": [
-        1,
-        1
+        2,
+        2
       ],
       "via": "websocket"
     }
@@ -8654,12 +8651,14 @@
     "fixtures/csharp-namespace-qnames",
     "fixtures/cypher-label-precision",
     "fixtures/dart-bare-calls",
+    "fixtures/dart-dio-generic-calls",
     "fixtures/dart-extensions-imports",
     "fixtures/dart-members",
     "fixtures/data-entity-literal-shape",
     "fixtures/docs-adr-decision",
     "fixtures/docs-link-past-cap",
     "fixtures/docs-md-section-lines",
+    "fixtures/docs-sdd-project-scope",
     "fixtures/elixir-docs",
     "fixtures/elixir-xmodule-calls",
     "fixtures/enum-owned-methods",
@@ -8739,6 +8738,7 @@
     "fixtures/scip-python-dict-dispatch",
     "fixtures/sdd-quokka-feature",
     "fixtures/sdd-speckit-features",
+    "fixtures/self-scan-literal-needles",
     "fixtures/solidity-natspec",
     "fixtures/solidity-state_var",
     "fixtures/sql-migration-ddl",
@@ -8749,9 +8749,11 @@
     "fixtures/terraform-depends_on",
     "fixtures/terraform-infra_references",
     "fixtures/test-fixture-paths",
+    "fixtures/test-paths-declared",
     "fixtures/test-reports-coverage",
     "fixtures/test-reports-fail",
     "fixtures/trpc-create-caller",
+    "fixtures/ts-abstract-class",
     "fixtures/ts-decorator-anchor",
     "fixtures/ts-enum-members",
     "fixtures/ts-route-per-method",
@@ -8914,11 +8916,11 @@
   "totals": {
     "covered": 346,
     "error": 0,
-    "full": 206,
+    "full": 208,
     "grid": 510,
     "n/a": 28,
     "none": 91,
-    "partial": 49,
+    "partial": 47,
     "unknown": 136
   },
   "vocabulary": {
