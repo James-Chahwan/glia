@@ -1,0 +1,104 @@
+{
+  "framework": "ts-abstract-class",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "CH-1: `abstract class` (abstract_class_declaration) is a CLASS like any class: its concrete and abstract members are METHODs (an abstract member has no body), `this.m()` inside it binds in-file, a subclass's `extends` binds INHERITS_FROM, and an Angular decorator on it folds its role onto the CLASS. Baseline (HEAD f8a46c0, leap wheel): none of BaseRepo / FilterDataService exists, UserRepo has no INHERITS_FROM.",
+  "expect_nodes": [
+    {
+      "kind": "CLASS",
+      "name": "base-repo/BaseRepo",
+      "note": "export abstract class"
+    },
+    {
+      "kind": "METHOD",
+      "name": "BaseRepo/load",
+      "note": "concrete member of an abstract class"
+    },
+    {
+      "kind": "METHOD",
+      "name": "BaseRepo/fetchOne",
+      "note": "abstract member: abstract_method_signature, no body"
+    },
+    {
+      "kind": "METHOD",
+      "name": "BaseRepo/label",
+      "note": "protected abstract member"
+    },
+    {
+      "kind": "METHOD",
+      "name": "BaseRepo/describe",
+      "note": "concrete member"
+    },
+    {
+      "kind": "CLASS",
+      "name": "FilterDataService",
+      "note": "@Injectable() export abstract class"
+    },
+    {
+      "kind": "METHOD",
+      "name": "FilterDataService/fetchMain",
+      "note": "protected abstract member"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "BaseRepo/load",
+      "to": "BaseRepo/fetchOne",
+      "category": "CALLS",
+      "note": "template method: concrete member calls the abstract one, in-file"
+    },
+    {
+      "from": "BaseRepo/describe",
+      "to": "BaseRepo/label",
+      "category": "CALLS",
+      "note": "in-file self-call to an abstract member"
+    },
+    {
+      "from": "FilterDataService/load",
+      "to": "FilterDataService/fetchMain",
+      "category": "CALLS",
+      "note": "the webplatformfrontend FilterPageDataService shape"
+    },
+    {
+      "from": "base-repo/BaseRepo",
+      "to": "BaseRepo/fetchOne",
+      "category": "DEFINES",
+      "note": "the CLASS DEFINES its abstract METHOD"
+    },
+    {
+      "from": "user-repo/UserRepo",
+      "to": "base-repo/BaseRepo",
+      "category": "INHERITS_FROM",
+      "note": "extends BaseRepo<string> binds once the base exists"
+    },
+    {
+      "from": "FilterDataService",
+      "to": "ProductService",
+      "category": "INJECTS",
+      "note": "constructor DI of a decorated abstract class (TsCtor)"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "FUNCTION",
+      "name": "base-repo/fetchOne",
+      "note": "an abstract member is never a module FUNCTION"
+    },
+    {
+      "kind": "METHOD",
+      "name": "src/base-repo/BaseRepo/constructor",
+      "note": "no constructor is declared, none is minted"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "CLASS",
+      "node": "FilterDataService",
+      "cell": "ROLE",
+      "contains": "SERVICE",
+      "note": "the Angular extractor's `abstract` skip (this packet) gives `@Injectable() export abstract class` its SERVICE overlay, which folds onto the new CLASS; at HEAD extract_class_name stops at `abstract` and no overlay exists"
+    }
+  ]
+}

@@ -38,17 +38,18 @@ pub fn parse_file(
     module_qname: &str,
     repo: RepoId,
 ) -> Result<FileParse, ParseError> {
-    parse_file_stats(source, file_rel_path, module_qname, repo).map(|(parse, _)| parse)
+    parse_file_stats(source, file_rel_path, module_qname, repo).map(|(parse, _, _)| parse)
 }
 
 /// [`parse_file`], plus the file's CG.1 function-field counters (the
-/// `[ts-fields]` marker's numbers), which the tests read back.
+/// `[ts-fields]` marker's numbers) and its CH.1 abstract-class counters (the
+/// `[ts-abstract]` marker's numbers), which the tests read back.
 fn parse_file_stats(
     source: &str,
     file_rel_path: &str,
     module_qname: &str,
     repo: RepoId,
-) -> Result<(FileParse, FnFieldStats), ParseError> {
+) -> Result<(FileParse, FnFieldStats, AbstractStats), ParseError> {
     let mut parser = Parser::new();
     let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
     parser
@@ -105,8 +106,16 @@ fn parse_file_stats(
             ff.shadowed
         );
     }
+    // CH.1: `abstract class` declarations and their bodiless members, per file.
+    let ab = acc.abstract_stats;
+    if ab.classes + ab.methods > 0 {
+        eprintln!(
+            "[ts-abstract] classes={} abstract_methods={} file={file_rel_path}",
+            ab.classes, ab.methods
+        );
+    }
 
-    resolve_intra_file(acc).map(|parse| (parse, ff))
+    resolve_intra_file(acc).map(|parse| (parse, ff, ab))
 }
 
 // ============================================================================
@@ -152,6 +161,18 @@ struct Acc {
     typeorm: TypeOrmFile,
     /// CG.1: the `[ts-fields]` counters.
     fn_fields: FnFieldStats,
+    /// CH.1: the `[ts-abstract]` counters.
+    abstract_stats: AbstractStats,
+}
+
+/// CH.1: what one file's `abstract class` declarations gave the graph (the
+/// `[ts-abstract]` marker).
+#[derive(Default, Clone, Copy)]
+struct AbstractStats {
+    /// `abstract class` declarations minted as CLASSes.
+    classes: usize,
+    /// `abstract m(…): T;` members minted as METHODs.
+    methods: usize,
 }
 
 /// CG.1: what one file's function-valued class fields gave the graph (the
@@ -308,7 +329,12 @@ fn visit_top(
                 visit_top(decl, src, file_rel, module_qname, module_id, repo, acc);
             }
         }
-        "class_declaration" => {
+        // CH.1: `abstract class X` is its own node kind with the same fields
+        // (name / body / decorator / type_parameters + a class_heritage
+        // child), so it takes the class visitor whole. `declare abstract class`
+        // is an `ambient_declaration` and falls through to `_`, as `declare
+        // class` does.
+        "class_declaration" | "abstract_class_declaration" => {
             visit_class(n, src, file_rel, module_qname, module_id, repo, acc);
         }
         "interface_declaration" => {
@@ -368,6 +394,9 @@ fn visit_class(
     });
     acc.nav
         .record(class_id, name, &class_qname, node_kind::CLASS, Some(module_id));
+    if n.kind() == "abstract_class_declaration" {
+        acc.abstract_stats.classes += 1;
+    }
 
     // Class heritage: `class X extends Y implements I, J`.
     // `extends_clause` → INHERITS_FROM, each type in `implements_clause` →
@@ -381,11 +410,12 @@ fn visit_class(
         return;
     };
     // CG.1: every method name of the body, declared before or after a field,
-    // so a function-valued field named like a method mints no second node.
+    // so a function-valued field named like a method mints no second node. An
+    // abstract member (CH.1) is a method by name too.
     let method_names: HashSet<&str> = {
         let mut mc = body.walk();
         body.named_children(&mut mc)
-            .filter(|m| m.kind() == "method_definition")
+            .filter(|m| matches!(m.kind(), "method_definition" | "abstract_method_signature"))
             .filter_map(|m| child_text(m, "name", src))
             .collect()
     };
@@ -394,6 +424,12 @@ fn visit_class(
         match member.kind() {
             "method_definition" => {
                 visit_method(member, src, file_rel, &class_qname, class_id, repo, acc);
+            }
+            // CH.1: `abstract m(…): T;` — a METHOD with no body. An overload
+            // `method_signature` stays ignored: the implementation after it
+            // carries the node.
+            "abstract_method_signature" => {
+                visit_abstract_method(member, src, file_rel, &class_qname, class_id, repo, acc);
             }
             // `visit_field` reads a field's type and DI shape; a function-valued
             // field is also a METHOD (CG.1).
@@ -1125,6 +1161,69 @@ fn visit_method(
     }
 }
 
+/// CH.1: an abstract class member, `abstract fetchOne(id: string): T;` or
+/// `protected abstract label(): string;`, is a METHOD `<class>::<name>`: it is
+/// called as `this.m()`, overridden and implemented, exactly CB.9's rule for a
+/// Dart bodiless member. It gets [`visit_method`]'s treatment minus the body:
+/// DEFINES from the class, the `class_methods` entry `this.m()` binds through
+/// (so a concrete member declared above it binds too), and the nav record. Its
+/// CODE / POSITION are the signature, opening at its first decorator (CB.4: a
+/// member's decorators are `class_body` siblings). There is no body, so no
+/// call walk; parameters are not walked either (`visit_method` walks only
+/// `collect_inject_repository` over them, which a signature never carries).
+///
+/// A computed, string or number name mints nothing (as CG.1). A name the class
+/// already holds (a repeated signature, which TS rejects) keeps one NodeId.
+#[allow(clippy::too_many_arguments)]
+fn visit_abstract_method(
+    n: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    class_qname: &str,
+    class_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let Some(name_node) = n.child_by_field_name("name") else {
+        return;
+    };
+    if !matches!(
+        name_node.kind(),
+        "property_identifier" | "private_property_identifier"
+    ) {
+        return;
+    }
+    let name = text(name_node, src);
+    if acc.class_methods.contains_key(&(class_id, name.to_string())) {
+        return;
+    }
+    let method_qname = format!("{class_qname}::{name}");
+    let method_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &method_qname);
+    acc.nodes.push(Node {
+        id: method_id,
+        repo,
+        confidence: Confidence::Strong,
+        cells: build_cells_from(&n, first_decorator(n), src, file_rel),
+    });
+    acc.edges.push(Edge {
+        from: class_id,
+        to: method_id,
+        category: edge_category::DEFINES,
+        confidence: Confidence::Strong,
+        cells: Vec::new(),
+    });
+    acc.class_methods
+        .insert((class_id, name.to_string()), method_id);
+    acc.nav.record(
+        method_id,
+        name,
+        &method_qname,
+        node_kind::METHOD,
+        Some(class_id),
+    );
+    acc.abstract_stats.methods += 1;
+}
+
 #[allow(clippy::too_many_arguments)]
 fn visit_function_decl(
     n: TsNode,
@@ -1492,6 +1591,7 @@ fn collect_calls_in(
             "function_declaration"
                 | "method_definition"
                 | "class_declaration"
+                | "abstract_class_declaration"
                 | "class_expression"
         ) {
             continue;
@@ -4345,7 +4445,7 @@ export class Listener {
 
     /// The `[ts-fields]` counters of one parse, as `(fields, shadowed)`.
     fn fn_field_counts(src: &str, path: &str, module: &str) -> (usize, usize) {
-        let (_, stats) = parse_file_stats(src, path, module, repo()).unwrap();
+        let (_, stats, _) = parse_file_stats(src, path, module, repo()).unwrap();
         (stats.fields(), stats.shadowed)
     }
 
@@ -4427,7 +4527,7 @@ class C {
             assert!(has_node(&parse, m), "{field} is a METHOD");
             assert!(has_edge(&parse, m, persist, edge_category::CALLS), "{field} -> persist");
         }
-        let (_, stats) = parse_file_stats(src, "src/c.ts", "src::c", repo()).unwrap();
+        let (_, stats, _) = parse_file_stats(src, "src/c.ts", "src::c", repo()).unwrap();
         assert_eq!((stats.arrow, stats.function, stats.calls), (0, 2, 2));
     }
 
@@ -4516,5 +4616,160 @@ export class UsersService {
             .map(|e| e.from)
             .collect();
         assert_eq!(froms, vec![load], "the field METHOD makes the HTTP call");
+    }
+
+    // ---- CH.1: abstract classes ---------------------------------------------
+
+    /// The `[ts-abstract]` counters of one parse, as `(classes, methods)`.
+    fn abstract_counts(src: &str, path: &str, module: &str) -> (usize, usize) {
+        let (_, _, stats) = parse_file_stats(src, path, module, repo()).unwrap();
+        (stats.classes, stats.methods)
+    }
+
+    /// The `(bare name, category)` of every heritage / DI ref emitted from `from`.
+    fn bare_refs(parse: &FileParse, from: NodeId) -> Vec<(String, EdgeCategoryId)> {
+        parse
+            .refs
+            .iter()
+            .filter(|r| r.from == from)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => Some((n.clone(), r.category)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const BASE_REPO: &str = "\
+export abstract class BaseRepo<T> {
+  protected load(id: string): T {
+    return this.fetchOne(id);
+  }
+  abstract fetchOne(id: string): T;
+  protected abstract label(): string;
+  describe(): string {
+    return this.label();
+  }
+}
+";
+
+    #[test]
+    fn abstract_class_is_a_class_with_methods() {
+        use glia_code_domain::evidence::{Basis, Evidence};
+        let parse = parse_file(BASE_REPO, "src/base-repo.ts", "src::base-repo", repo()).unwrap();
+        let class = id(node_kind::CLASS, "src::base-repo::BaseRepo");
+        assert!(has_node(&parse, class), "`export abstract class` is a CLASS");
+        let m = |name: &str| id(node_kind::METHOD, &format!("src::base-repo::BaseRepo::{name}"));
+        for name in ["load", "fetchOne", "label", "describe"] {
+            assert!(has_node(&parse, m(name)), "{name} is a METHOD");
+            assert!(has_edge(&parse, class, m(name), edge_category::DEFINES), "DEFINES {name}");
+        }
+        for (from, to, row) in [("load", "fetchOne", 2), ("describe", "label", 7)] {
+            let edge = parse
+                .edges
+                .iter()
+                .find(|e| e.from == m(from) && e.to == m(to) && e.category == edge_category::CALLS)
+                .unwrap_or_else(|| panic!("{from} -> {to} resolves in-file, edges {:?}", parse.edges));
+            let ev = Evidence::of(edge).expect("intra-file CALLS carries evidence");
+            assert_eq!((ev.line, ev.basis), (Some(row), Basis::Site), "{from} -> {to}");
+            assert_eq!(ev.rule.as_deref(), Some("intra_file"));
+        }
+        let (code, pos, _) = method_cells(&parse, "src::base-repo::BaseRepo::fetchOne");
+        assert_eq!(code, "abstract fetchOne(id: string): T", "the signature is the CODE");
+        assert!(pos.contains("\"start_line\":4,"), "fetchOne sits on row 4: {pos}");
+        let (code, _, _) = method_cells(&parse, "src::base-repo::BaseRepo::label");
+        assert_eq!(code, "protected abstract label(): string");
+        for name in ["fetchOne", "label"] {
+            assert!(call_site_names(&parse, m(name)).is_empty(), "{name} has no body to call from");
+            assert!(
+                !parse.edges.iter().any(|e| e.from == m(name) && e.category == edge_category::CALLS),
+                "{name} makes no call"
+            );
+        }
+        assert!(
+            call_site_names(&parse, m("load")).is_empty() && call_site_names(&parse, m("describe")).is_empty(),
+            "both self-calls bind in-file: {:?}",
+            parse.calls
+        );
+        assert!(!has_node(&parse, id(node_kind::FUNCTION, "src::base-repo::fetchOne")));
+        assert_eq!(abstract_counts(BASE_REPO, "src/base-repo.ts", "src::base-repo"), (1, 2));
+    }
+
+    #[test]
+    fn unexported_and_default_abstract() {
+        let src = "abstract class A { abstract run(): void; }\nexport default abstract class B { go() {} }\n";
+        let parse = parse_file(src, "src/ab.ts", "src::ab", repo()).unwrap();
+        for qname in ["src::ab::A", "src::ab::B"] {
+            assert!(has_node(&parse, id(node_kind::CLASS, qname)), "CLASS {qname}");
+        }
+        assert!(has_node(&parse, id(node_kind::METHOD, "src::ab::A::run")));
+        assert!(has_node(&parse, id(node_kind::METHOD, "src::ab::B::go")));
+        assert_eq!(abstract_counts(src, "src/ab.ts", "src::ab"), (2, 1));
+
+        // A repeated signature keeps one node; a computed name mints none; a
+        // function field named like an abstract member is shadowed by it.
+        let odd = "abstract class C {\n  abstract m(): void;\n  abstract m(): void;\n  \
+                   abstract ['k'](): void;\n  m2 = () => 1;\n  abstract m2(): number;\n}\n";
+        let parse = parse_file(odd, "src/c.ts", "src::c", repo()).unwrap();
+        for name in ["m", "m2"] {
+            let mid = id(node_kind::METHOD, &format!("src::c::C::{name}"));
+            assert_eq!(parse.nodes.iter().filter(|n| n.id == mid).count(), 1, "{name} once");
+        }
+        let c = id(node_kind::CLASS, "src::c::C");
+        let defined = parse
+            .edges
+            .iter()
+            .filter(|e| e.from == c && e.category == edge_category::DEFINES)
+            .count();
+        assert_eq!(defined, 2, "m and m2 only: `['k']` mints nothing");
+        assert_eq!(abstract_counts(odd, "src/c.ts", "src::c"), (1, 2));
+        assert_eq!(fn_field_counts(odd, "src/c.ts", "src::c"), (0, 1));
+
+        // A plain class counts nothing.
+        assert_eq!(abstract_counts("class P { go() {} }\n", "src/p.ts", "src::p"), (0, 0));
+    }
+
+    #[test]
+    fn abstract_heritage_refs() {
+        let src = "export abstract class Repo extends Base implements IRepo {}\n";
+        let parse = parse_file(src, "src/repo.ts", "src::repo", repo()).unwrap();
+        let class = id(node_kind::CLASS, "src::repo::Repo");
+        assert!(has_node(&parse, class));
+        let refs = bare_refs(&parse, class);
+        assert!(refs.contains(&("Base".to_string(), edge_category::INHERITS_FROM)), "{refs:?}");
+        assert!(refs.contains(&("IRepo".to_string(), edge_category::IMPLEMENTS)), "{refs:?}");
+    }
+
+    #[test]
+    fn decorated_abstract_service_injects() {
+        let src = "import { Injectable } from '@angular/core';\n@Injectable()\n\
+                   export abstract class S {\n  constructor(private p: ProductService) {}\n}\n";
+        let parse = parse_file(src, "src/s.service.ts", "src::s", repo()).unwrap();
+        let class = id(node_kind::CLASS, "src::s::S");
+        assert!(has_node(&parse, class));
+        assert_eq!(
+            bare_refs(&parse, class),
+            vec![("ProductService".to_string(), edge_category::INJECTS)]
+        );
+        // The decorator sits on the parent export_statement; the shape is TsCtor.
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let export = tree.root_node().named_child(1).unwrap();
+        let decl = export.child_by_field_name("declaration").unwrap();
+        assert_eq!(decl.kind(), "abstract_class_declaration");
+        assert_eq!(class_di_shape(decl, src.as_bytes()), Some(DiShape::TsCtor));
+    }
+
+    #[test]
+    fn nested_abstract_class_calls_stay_its_own() {
+        // A class declared inside a function body is skipped by the body's call
+        // walk whichever keyword it has (it is not a top-level declaration, so
+        // it mints no node either): its field initialiser's call never becomes
+        // the function's.
+        let src = "export function f() {\n  abstract class Inner { x = g(); }\n  h();\n}\n";
+        let parse = parse_file(src, "src/f.ts", "src::f", repo()).unwrap();
+        let f = id(node_kind::FUNCTION, "src::f::f");
+        assert_eq!(call_site_names(&parse, f), vec!["h".to_string()]);
     }
 }

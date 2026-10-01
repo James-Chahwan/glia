@@ -156,10 +156,14 @@ fn find_next_class_name(s: &str) -> Option<String> {
     None
 }
 
+/// The `<Name>` of a line opening `class <Name>`, past any `export`,
+/// `default` and `abstract` modifiers (CH.1: `export abstract class X` behind
+/// a decorator is a decorated class like any other).
 fn extract_class_name(line: &str) -> Option<String> {
     let trimmed = line
         .trim_start_matches("export ")
-        .trim_start_matches("default ");
+        .trim_start_matches("default ")
+        .trim_start_matches("abstract ");
     let rest = trimmed.strip_prefix("class ")?;
     let name_end = rest
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
@@ -357,6 +361,23 @@ RouterModule.forRoot(routes);
                 ("page:/", "HomeComponent"),
                 ("page:/users", "UsersComponent"),
                 ("page:/users/:id", "UserDetailComponent"),
+            ]
+        );
+    }
+
+    /// CH.1: `abstract` between the decorator and `class` no longer hides the
+    /// class name, so a decorated abstract class gets its overlay.
+    #[test]
+    fn abstract_class_after_decorator_is_named() {
+        let src = "@Injectable()\nexport abstract class FilterDataService {}\n\n\
+                   @Directive()\nabstract class AnalyticsDirective {}\n\n\
+                   export default abstract class AuthGuard {}\n";
+        assert_eq!(
+            scan_decorated_classes(src),
+            vec![
+                ("AnalyticsDirective".to_string(), node_kind::DIRECTIVE),
+                ("AuthGuard".to_string(), node_kind::GUARD),
+                ("FilterDataService".to_string(), node_kind::SERVICE),
             ]
         );
     }
