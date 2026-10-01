@@ -329,6 +329,13 @@ fn run(args: &Args) -> i32 {
             ds.edges_removed,
             diff_out.display(),
         );
+        // How the diff paired nodes past their keys (CK.2): by route path, by
+        // (file, kind, name), by identity hint, and the hint pairs refused as
+        // two routes of different verbs or unalike paths.
+        eprintln!(
+            "[engram-export] v6 since pairing: route={} name={} hint={} hint_refused={}",
+            ds.by_route, ds.by_name, ds.by_hint, ds.hint_refused,
+        );
     }
     // The v6 span marker (LG.10): how many positioned nodes got 1-based lines
     // and how many doc Propositions got a source anchor. A healthy export has

@@ -1,7 +1,8 @@
 //! Inspect an emitted `.engram-gmap`: version, field coverage, edge-kind +
 //! provenance histograms. Verification tool for the v3 contract. A path
 //! ending in `.diff` is a `--since` run's `GmapDiff` (LG.8a): its version,
-//! both digests, the list lengths and the first keys of each node list.
+//! both digests, the list lengths, the first keys of each node list and one
+//! `moved <prior key> -> <key>` line per key-changing pair.
 //!
 //!   cargo run -p glia-engram-export --example inspect -- <path.engram-gmap>
 //!   cargo run -p glia-engram-export --example inspect -- <path.engram-gmap.diff>
@@ -106,7 +107,8 @@ fn main() {
     }
 }
 
-/// The diff mode: counts, digests and the first 5 keys of each node list.
+/// The diff mode: counts, digests, the first 5 keys of each node list and
+/// every key-changing pair as `moved <prior key> -> <key>`.
 fn inspect_diff(d: &GmapDiff) {
     println!("format_version : {}", d.format_version);
     println!("base_digest    : {:016x}", d.base_digest);
@@ -129,6 +131,12 @@ fn inspect_diff(d: &GmapDiff) {
     print_keys("added", &added);
     print_keys("removed", &removed);
     print_keys("modified", &modified);
+    // Every key-changing pair, in diff order: what the matching paired.
+    for c in &d.modified {
+        if c.prior_key != c.node.key {
+            println!("moved {} -> {}", c.prior_key, c.node.key);
+        }
+    }
     // Where the changes sit: modified nodes per file of their new span.
     let mut by_file: BTreeMap<&str, usize> = BTreeMap::new();
     for c in &d.modified {

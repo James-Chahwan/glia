@@ -12,12 +12,36 @@
 //!
 //! ## Matching nodes
 //!
-//! 1. **Keys first.** A target node whose key exists in the base is that base
-//!    node. Keys go first because a same-file reorder shifts `identity_hint`
-//!    ordinals: matching hints first would cross-pair swapped siblings.
-//! 2. **Identity hints second.** Among the nodes still unmatched on both
-//!    sides, an `identity_hint` that is `Some` and unique on each side pairs a
-//!    base node with a target node: a move or a rename.
+//! Four passes, each over the nodes every earlier pass left unmatched on both
+//! sides. A node's slot is the `(file token, kind)` of its `identity_hint`
+//! (`<file token>:<kind>:<ordinal>`); the file token is carried across a file
+//! move along a `--since` chain, so a slot survives the move.
+//!
+//! 1. **Keys.** A target node whose key exists in the base is that base node.
+//!    Keys go first because they are exact: a same-file reorder shifts
+//!    `identity_hint` ordinals, and matching hints first would cross-pair
+//!    swapped siblings.
+//! 2. **Routes, by path.** A ROUTE Symbol pairs within its file token and
+//!    verb (the METHOD of `<METHOD> <path>`, or the `page:` / `route:`
+//!    prefix, read through `endpoint::split_owner` and `nav::nav_route_path`;
+//!    the owner is not compared) with the route whose path is equal, else
+//!    alike up to a leading-segment prefix (`/trades/:id` ~
+//!    `/api/trades/:id`: a mount prefix gained or lost). A pair needs the two
+//!    to be each other's only fit among the free routes of the group, equal
+//!    paths before alike ones. Routes go before hints because one route
+//!    inserted ahead in a file shifts every later route's ordinal: CB.23 gave
+//!    a mounted Go route its own `/api` ROUTE, and the ordinal hint then
+//!    paired each route of the file with its neighbour's new one.
+//! 3. **Symbols, by name.** Any other Symbol pairs by `(file token, kind,
+//!    name)` when that triple is unique on both sides (LB.6's move-stable
+//!    shape): a function inserted ahead in a moved file shifts its siblings'
+//!    ordinals, not their names.
+//! 4. **Identity hints.** An `identity_hint` that is `Some` and unique on
+//!    each side pairs a base node with a target node: a move or a rename.
+//!    Never two ROUTEs of different verbs or of paths not alike (counted
+//!    [`DiffStats::hint_refused`]): such a route is a new contract, so the
+//!    base is removed and the target added, and Engram mints it a fresh
+//!    FactId instead of handing it a neighbour's.
 //!
 //! A pair whose bincode bytes are equal is unchanged and not written.
 //! Otherwise it is a [`NodeChange`] carrying the base key as `prior_key`, and
@@ -29,7 +53,7 @@
 //!
 //! Keys are unique within one glia export (`build_gmap` drops a repeated
 //! qname). On a hand-built gmap that repeats a key, the first node carrying it
-//! is the one matched by key, later ones fall through to the hint pass, and a
+//! is the one matched by key, later ones fall through to passes 2-4, and a
 //! key still held by a matched base node is never listed as removed.
 //!
 //! ## Edges
@@ -56,6 +80,8 @@ use engram_core::{
     Content, EdgeKind, GMAP_FORMAT_VERSION, Gmap, GmapDiff, GmapEdge, GmapNode, NodeChange,
     SpanRef, content_digest,
 };
+use glia_code_domain::{endpoint, node_kind};
+use glia_graph::nav;
 
 use crate::write_atomic;
 
@@ -76,6 +102,17 @@ pub struct DiffStats {
     pub edges_added: usize,
     /// `GmapDiff.edges_removed`.
     pub edges_removed: usize,
+    /// Pairs made by the route pass (2). Key pairs (pass 1) are not counted:
+    /// on a glia export, whose keys are unique, every pass 2-4 pair changes
+    /// the key, so `by_route + by_name + by_hint == moved`.
+    pub by_route: usize,
+    /// Pairs made by the name pass (3).
+    pub by_name: usize,
+    /// Pairs made by the identity-hint pass (4).
+    pub by_hint: usize,
+    /// Unique hint pairs the hint pass refused: two ROUTEs of different verbs
+    /// or of paths not alike. Each leaves one removed and one added node.
+    pub hint_refused: usize,
 }
 
 /// An edge's identity: `(from, kind, to, weight bits)`.
@@ -94,7 +131,7 @@ pub fn diff_gmaps(
     let mut pair: Vec<Option<usize>> = vec![None; target.nodes.len()];
     let mut taken = vec![false; base.nodes.len()];
 
-    // Pass A — keys.
+    // Pass 1 — keys.
     let mut base_by_key: BTreeMap<&str, usize> = BTreeMap::new();
     for (b, n) in base.nodes.iter().enumerate() {
         base_by_key.entry(n.key.as_str()).or_insert(b);
@@ -108,7 +145,18 @@ pub fn diff_gmaps(
         }
     }
 
-    // Pass B — identity hints unique on both sides among the unmatched.
+    // Pass 2 — routes by path within (file token, verb).
+    let by_route = pair_routes(base, target, &mut pair, &mut taken);
+    // Pass 3 — other Symbols by (file token, kind, name).
+    let by_name = pair_names(base, target, &mut pair, &mut taken);
+    let mut stats = DiffStats {
+        by_route,
+        by_name,
+        ..DiffStats::default()
+    };
+
+    // Pass 4 — identity hints unique on both sides among the unmatched, never
+    // two routes of different verbs or unalike paths.
     let mut base_hints: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (b, n) in base.nodes.iter().enumerate() {
         if let (false, Some(h)) = (taken[b], n.identity_hint.as_deref()) {
@@ -123,12 +171,16 @@ pub fn diff_gmaps(
     }
     for (hint, ts) in &target_hints {
         if let ([t], Some([b])) = (ts.as_slice(), base_hints.get(hint).map(Vec::as_slice)) {
+            if !route_pair_ok(&base.nodes[*b], &target.nodes[*t]) {
+                stats.hint_refused += 1;
+                continue;
+            }
             taken[*b] = true;
             pair[*t] = Some(*b);
+            stats.by_hint += 1;
         }
     }
 
-    let mut stats = DiffStats::default();
     let mut added = Vec::new();
     let mut modified = Vec::new();
     let mut rename: BTreeMap<&str, &str> = BTreeMap::new();
@@ -216,6 +268,183 @@ pub fn diff_gmaps(
         files: target.files.clone(),
     };
     (diff, stats)
+}
+
+/// `(file token, kind)` of a `<file token>:<kind>:<ordinal>` identity hint,
+/// split from the right as [`crate::prior_tokens`] does (a token holding `:`
+/// survives). `None` for an unhinted node and for a hint whose ordinal is not
+/// all digits or whose kind or token is empty.
+fn hint_slot(n: &GmapNode) -> Option<(&str, &str)> {
+    let mut parts = n.identity_hint.as_deref()?.rsplitn(3, ':');
+    let (Some(ordinal), Some(kind), Some(token)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let ordinal_ok = !ordinal.is_empty() && ordinal.bytes().all(|b| b.is_ascii_digit());
+    (ordinal_ok && !kind.is_empty() && !token.is_empty()).then_some((token, kind))
+}
+
+/// The hint kind of a ROUTE: the decimal `node_kind::ROUTE` id
+/// `build_identity_hints` writes.
+fn is_route_kind(kind: &str) -> bool {
+    kind.parse::<u32>() == Ok(node_kind::ROUTE.0)
+}
+
+/// A ROUTE: a Symbol whose hint slot names the ROUTE kind. Propositions (doc
+/// sections, NatSpec facts) never are.
+fn is_route(n: &GmapNode) -> bool {
+    matches!(n.content, Content::Symbol { .. })
+        && hint_slot(n).is_some_and(|(_, kind)| is_route_kind(kind))
+}
+
+/// `(verb, path)` of a ROUTE key, in every shape the tree emits: the owner
+/// (` @<project>`) is split off with `endpoint::split_owner`, then
+/// `nav::nav_route_path` reads `page:<p>` (client-router pages), `route:<p>`
+/// (go / ts_routes) or `<METHOD> <p>`; the verb is what precedes the path —
+/// `page:`, `route:` or the METHOD. `None` for any other key.
+fn route_of(key: &str) -> Option<(&str, &str)> {
+    let (q, _owner) = endpoint::split_owner(key);
+    let path = nav::nav_route_path(q)?;
+    let verb = q.strip_suffix(path)?.trim_end();
+    Some((verb, path))
+}
+
+/// Two route paths are alike when equal, or when the shorter is `/`-rooted,
+/// is not `/`, and ends the longer: a leading-segment prefix gained or lost
+/// (`/trades/:id` ~ `/api/trades/:id`). The shorter starting with `/` puts
+/// the match on a segment boundary (`/xtrades/:id` !~ `/trades/:id`). `/` is
+/// alike only to itself: as a suffix it would fit every route of a file.
+fn alike_paths(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    short.starts_with('/') && short != "/" && long.ends_with(short)
+}
+
+/// Whether the hint pass may pair `b` with `t`: always, unless both are
+/// ROUTEs whose keys parse ([`route_of`]); then only with the same verb and
+/// [`alike_paths`]. A ROUTE key in no known shape keeps the plain hint pair.
+fn route_pair_ok(b: &GmapNode, t: &GmapNode) -> bool {
+    if !(is_route(b) && is_route(t)) {
+        return true;
+    }
+    match (route_of(&b.key), route_of(&t.key)) {
+        (Some((bv, bp)), Some((tv, tp))) => bv == tv && alike_paths(bp, tp),
+        _ => true,
+    }
+}
+
+/// `(file token, verb, path)` of a ROUTE whose key parses.
+fn route_slot(n: &GmapNode) -> Option<(&str, &str, &str)> {
+    if !is_route(n) {
+        return None;
+    }
+    let (token, _) = hint_slot(n)?;
+    let (verb, path) = route_of(&n.key)?;
+    Some((token, verb, path))
+}
+
+/// Pass 2: the unmatched ROUTEs of each `(file token, verb)` group pair by
+/// path, equal paths first, then [`alike_paths`]. Within a tier a base and a
+/// target pair only when each is the other's ONLY fit among the group's free
+/// routes (snapshotted per tier), so the pairs do not depend on iteration
+/// order; an ambiguous tail (`/offers` fits `/api/offers` and
+/// `/api/user/offers`) stays unmatched for the guarded hint pass. Returns
+/// the pairs made.
+fn pair_routes(
+    base: &Gmap,
+    target: &Gmap,
+    pair: &mut [Option<usize>],
+    taken: &mut [bool],
+) -> usize {
+    type Side<'a> = Vec<(usize, &'a str)>;
+    let mut groups: BTreeMap<(&str, &str), (Side, Side)> = BTreeMap::new();
+    for (b, n) in base.nodes.iter().enumerate() {
+        if !taken[b]
+            && let Some((token, verb, path)) = route_slot(n)
+        {
+            groups.entry((token, verb)).or_default().0.push((b, path));
+        }
+    }
+    for (t, n) in target.nodes.iter().enumerate() {
+        if pair[t].is_none()
+            && let Some((token, verb, path)) = route_slot(n)
+        {
+            groups.entry((token, verb)).or_default().1.push((t, path));
+        }
+    }
+    let equal: fn(&str, &str) -> bool = |a, b| a == b;
+    let mut made = 0;
+    for (bs, ts) in groups.values() {
+        if bs.is_empty() || ts.is_empty() {
+            continue;
+        }
+        for fits in [equal, alike_paths] {
+            let free_b: Side = bs.iter().filter(|(b, _)| !taken[*b]).copied().collect();
+            let free_t: Side = ts
+                .iter()
+                .filter(|(t, _)| pair[*t].is_none())
+                .copied()
+                .collect();
+            let mut pairs = Vec::new();
+            for &(b, bp) in &free_b {
+                let mut fit = free_t.iter().filter(|(_, tp)| fits(bp, tp));
+                let (Some(&(t, tp)), None) = (fit.next(), fit.next()) else {
+                    continue;
+                };
+                if free_b.iter().filter(|(_, p)| fits(p, tp)).count() == 1 {
+                    pairs.push((b, t));
+                }
+            }
+            for (b, t) in pairs {
+                taken[b] = true;
+                pair[t] = Some(b);
+                made += 1;
+            }
+        }
+    }
+    made
+}
+
+/// `(file token, kind, name)` of a Symbol that is not a ROUTE.
+fn name_slot(n: &GmapNode) -> Option<(&str, &str, &str)> {
+    let Content::Symbol { name, .. } = &n.content else {
+        return None;
+    };
+    let (token, kind) = hint_slot(n)?;
+    (!is_route_kind(kind) && !name.is_empty()).then_some((token, kind, name.as_str()))
+}
+
+/// Pass 3: an unmatched non-ROUTE Symbol pairs with the one of its file
+/// token, kind and name when that triple names exactly one node on each side
+/// (two `get` methods of one file pair by neither). Returns the pairs made.
+fn pair_names(base: &Gmap, target: &Gmap, pair: &mut [Option<usize>], taken: &mut [bool]) -> usize {
+    type Slot<'a> = (&'a str, &'a str, &'a str);
+    let mut groups: BTreeMap<Slot, (Vec<usize>, Vec<usize>)> = BTreeMap::new();
+    for (b, n) in base.nodes.iter().enumerate() {
+        if !taken[b]
+            && let Some(slot) = name_slot(n)
+        {
+            groups.entry(slot).or_default().0.push(b);
+        }
+    }
+    for (t, n) in target.nodes.iter().enumerate() {
+        if pair[t].is_none()
+            && let Some(slot) = name_slot(n)
+        {
+            groups.entry(slot).or_default().1.push(t);
+        }
+    }
+    let mut made = 0;
+    for (bs, ts) in groups.values() {
+        if let ([b], [t]) = (bs.as_slice(), ts.as_slice()) {
+            taken[*b] = true;
+            pair[*t] = Some(*b);
+            made += 1;
+        }
+    }
+    made
 }
 
 /// Load a full engram gmap and the [`content_digest`] of the bytes read —
@@ -368,6 +597,33 @@ mod tests {
 
     fn keys(nodes: &[GmapNode]) -> Vec<&str> {
         nodes.iter().map(|n| n.key.as_str()).collect()
+    }
+
+    /// A ROUTE Symbol keyed `key` at `ordinal` among the ROUTEs of `file`
+    /// (its hint token): the hint `build_identity_hints` writes, and the key
+    /// minus its owner as the name.
+    fn route(key: &str, file: &str, ordinal: u32) -> GmapNode {
+        GmapNode {
+            key: key.to_string(),
+            content: Content::Symbol {
+                name: endpoint::split_owner(key).0.to_string(),
+                span: span(1, 10 + 5 * ordinal, 12 + 5 * ordinal),
+                qname: Some(key.to_string()),
+                doc: None,
+                imports: None,
+            },
+            provenance: None,
+            concept_hint: None,
+            identity_hint: Some(format!("{file}:{}:{ordinal}", node_kind::ROUTE.0)),
+        }
+    }
+
+    /// `(prior_key, key)` of every modified entry, in diff order.
+    fn moves(diff: &GmapDiff) -> Vec<(&str, &str)> {
+        diff.modified
+            .iter()
+            .map(|c| (c.prior_key.as_str(), c.node.key.as_str()))
+            .collect()
     }
 
     fn edge_ids(edges: &[GmapEdge]) -> Vec<(&str, EdgeKind, &str, Option<f32>)> {
@@ -531,6 +787,10 @@ mod tests {
                 location_only: 1,
                 edges_added: 1,
                 edges_removed: 2,
+                by_route: 0,
+                by_name: 0,
+                by_hint: 0,
+                hint_refused: 0,
             }
         );
     }
@@ -569,6 +829,8 @@ mod tests {
             (stats.modified, stats.moved, stats.location_only),
             (1, 1, 1)
         );
+        // A moved symbol whose name holds pairs by name, before its hint.
+        assert_eq!((stats.by_name, stats.by_hint), (1, 0));
     }
 
     #[test]
@@ -810,6 +1072,201 @@ mod tests {
         assert_eq!(std::fs::read(&out).unwrap(), a);
         assert_eq!(digest, content_digest(&a));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn mounted_routes_pair_by_path_not_ordinal() {
+        // CB.23's case: the file's routes gain a mount prefix and a route that
+        // used to share its qname with a test file's twin becomes its own
+        // ROUTE at ordinal 1, shifting every later ordinal by one. The ordinal
+        // hint alone pairs fund -> `POST /api/trades`, confirm -> fund and
+        // proposals -> confirm.
+        let f = "h/trades.go";
+        let base = gmap(
+            vec![
+                route("GET /trades/history @api", f, 0),
+                route("POST /trades/:id/fund @api", f, 1),
+                route("POST /trades/:id/confirm @api", f, 2),
+                route("GET /trades/:id/dispute/proposals @api", f, 3),
+            ],
+            vec![],
+        );
+        let target = gmap(
+            vec![
+                route("GET /api/trades/history @api", f, 0),
+                route("POST /api/trades @api", f, 1),
+                route("POST /api/trades/:id/fund @api", f, 2),
+                route("POST /api/trades/:id/confirm @api", f, 3),
+                route("GET /api/trades/:id/dispute/proposals @api", f, 4),
+            ],
+            vec![],
+        );
+
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert_eq!(
+            moves(&diff),
+            [
+                ("GET /trades/history @api", "GET /api/trades/history @api"),
+                (
+                    "POST /trades/:id/fund @api",
+                    "POST /api/trades/:id/fund @api"
+                ),
+                (
+                    "POST /trades/:id/confirm @api",
+                    "POST /api/trades/:id/confirm @api"
+                ),
+                (
+                    "GET /trades/:id/dispute/proposals @api",
+                    "GET /api/trades/:id/dispute/proposals @api"
+                ),
+            ]
+        );
+        assert_eq!(keys(&diff.added), ["POST /api/trades @api"]);
+        assert!(diff.removed.is_empty(), "{:?}", diff.removed);
+        assert_eq!(
+            (
+                stats.by_route,
+                stats.by_name,
+                stats.by_hint,
+                stats.hint_refused,
+                stats.moved
+            ),
+            (4, 0, 0, 0, 4)
+        );
+    }
+
+    #[test]
+    fn hint_pass_refuses_unalike_routes() {
+        // Each base route's hint is unique on both sides and names a route of
+        // another path or verb: a new contract, never a move.
+        let f = "f.go";
+        let base = gmap(
+            vec![
+                route("GET /reports @a", f, 0),
+                route("POST /orders @a", f, 1),
+                route("GET / @a", f, 2),
+                route("page:/kyc @a", f, 3),
+            ],
+            vec![],
+        );
+        let target = gmap(
+            vec![
+                route("GET /exports @a", f, 0),
+                route("PUT /orders @a", f, 1),
+                route("GET /api @a", f, 2),
+                route("page:/admin @a", f, 3),
+            ],
+            vec![],
+        );
+
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert!(diff.modified.is_empty(), "{:?}", moves(&diff));
+        assert_eq!(
+            diff.removed,
+            [
+                "GET / @a",
+                "GET /reports @a",
+                "POST /orders @a",
+                "page:/kyc @a"
+            ]
+        );
+        assert_eq!(
+            keys(&diff.added),
+            [
+                "GET /exports @a",
+                "PUT /orders @a",
+                "GET /api @a",
+                "page:/admin @a"
+            ]
+        );
+        assert_eq!(
+            (stats.hint_refused, stats.by_route, stats.by_hint),
+            (4, 0, 0)
+        );
+
+        assert_eq!(route_of("GET /a/b @svc"), Some(("GET", "/a/b")));
+        assert_eq!(route_of("page:/kyc @web"), Some(("page:", "/kyc")));
+        assert_eq!(route_of("route:/x"), Some(("route:", "/x")));
+        assert_eq!(route_of("orders::list"), None);
+        assert!(alike_paths("/trades/:id/fund", "/api/trades/:id/fund"));
+        assert!(!alike_paths("/xtrades/:id", "/trades/:id"));
+        assert!(!alike_paths("/", "/api"));
+        assert!(!alike_paths(
+            "/trades/:id/dispute",
+            "/trades/:id/dispute/propose"
+        ));
+    }
+
+    #[test]
+    fn ambiguous_route_tails_fall_back_to_the_guarded_hint() {
+        // `/offers` ends both target paths, so the route pass pairs neither;
+        // the hint pass pairs both by ordinal, and both pairs are alike.
+        let f = "h/offers.go";
+        let base = gmap(
+            vec![
+                route("GET /offers @a", f, 0),
+                route("GET /user/offers @a", f, 1),
+            ],
+            vec![],
+        );
+        let target = gmap(
+            vec![
+                route("GET /api/offers @a", f, 0),
+                route("GET /api/user/offers @a", f, 1),
+            ],
+            vec![],
+        );
+
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert_eq!(
+            moves(&diff),
+            [
+                ("GET /offers @a", "GET /api/offers @a"),
+                ("GET /user/offers @a", "GET /api/user/offers @a"),
+            ]
+        );
+        assert!(diff.added.is_empty() && diff.removed.is_empty());
+        assert_eq!(
+            (stats.by_route, stats.by_hint, stats.hint_refused),
+            (0, 2, 0)
+        );
+    }
+
+    #[test]
+    fn moved_file_with_an_insert_pairs_by_name() {
+        // svc/users.py moved to svc/store.py (its token carried along the
+        // --since chain) and gained `create` ahead of `load`: every key
+        // changes and every ordinal shifts by one. The ordinal hint alone
+        // pairs load -> create and save -> load.
+        let hint = |ordinal: u32| format!("svc/users.py:{}:{ordinal}", node_kind::FUNCTION.0);
+        let base = gmap(
+            vec![
+                sym("svc::users::load", 1, 3, "", &hint(0)),
+                sym("svc::users::save", 1, 8, "", &hint(1)),
+            ],
+            vec![],
+        );
+        let mut target = gmap(
+            vec![
+                sym("svc::store::create", 2, 3, "", &hint(0)),
+                sym("svc::store::load", 2, 8, "", &hint(1)),
+                sym("svc::store::save", 2, 13, "", &hint(2)),
+            ],
+            vec![],
+        );
+        target.files.insert(2, "svc/store.py".to_string());
+
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert_eq!(
+            moves(&diff),
+            [
+                ("svc::users::load", "svc::store::load"),
+                ("svc::users::save", "svc::store::save"),
+            ]
+        );
+        assert_eq!(keys(&diff.added), ["svc::store::create"]);
+        assert!(diff.removed.is_empty(), "{:?}", diff.removed);
+        assert_eq!((stats.by_name, stats.by_hint), (2, 0));
     }
 
     #[test]

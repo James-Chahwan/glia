@@ -167,6 +167,20 @@ fn since_line(stderr: &str) -> &str {
     lines[0]
 }
 
+/// The one `[engram-export] v6 since pairing:` line (CK.2).
+fn pairing_line(stderr: &str) -> &str {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("[engram-export] v6 since pairing:"))
+        .collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "want one v6 since pairing line in:\n{stderr}"
+    );
+    lines[0]
+}
+
 fn hex(digest: u64) -> String {
     format!("{digest:016x}")
 }
@@ -214,6 +228,12 @@ fn since_writes_the_diff_and_seeds_file_ids() {
             hex(a_digest),
             hex(b_digest)
         )
+    );
+    // The four Vault nodes of the moved Vault.sol keep their file token, kind
+    // and name: they pair by name, before their hints.
+    assert_eq!(
+        pairing_line(&b_err),
+        "[engram-export] v6 since pairing: route=0 name=4 hint=0 hint_refused=0"
     );
 
     let added: Vec<&str> = diff.added.iter().map(|n| n.key.as_str()).collect();
@@ -270,6 +290,10 @@ fn since_writes_the_diff_and_seeds_file_ids() {
              (moved=0 location_only=0) edges +0/-0; parse cache reused=2 reparsed=0 evicted=0",
             hex(b_digest)
         )
+    );
+    assert_eq!(
+        pairing_line(&c_err),
+        "[engram-export] v6 since pairing: route=0 name=0 hint=0 hint_refused=0"
     );
     assert_eq!(s.bytes("c"), s.bytes("b"));
     let c = s.diff("c");
