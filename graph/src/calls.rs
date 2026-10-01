@@ -1,6 +1,6 @@
 //! Call / ref resolution and the nav-walking helpers it needs.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use glia_code_domain::evidence::{self, Evidence};
 use glia_code_domain::{
@@ -164,6 +164,7 @@ pub(crate) fn resolve_calls<H>(
     let mut pkg_base_bound = 0usize;
     let mut enum_hits = EnumHits::default();
     let mut gate = BareFieldGate::default();
+    let mut constructed = ConstructedReceivers::default();
     // A6.6: CALLS bound into an INTERFACE's own METHOD, by the path that bound
     // them (a field-typed receiver, or a statically-qualified `IFoo.m()`).
     let (mut iface_recv, mut iface_static) = (0usize, 0usize);
@@ -222,16 +223,16 @@ pub(crate) fn resolve_calls<H>(
         };
 
         // A6.2a: `_repo.Find()` / `this.repo.find()` where the receiver is a
-        // declared field of the enclosing type. Strictly AFTER every lookup
-        // above, so an import binding or module symbol that shares the
-        // field's name keeps today's target.
+        // declared field of the enclosing type, and CL.5a: `new Calc().add()`
+        // on the type it constructs. Strictly AFTER every lookup above, so an
+        // import binding or module symbol that shares the field's name keeps
+        // today's target.
         let resolved = resolved.or_else(|| {
-            let hit = resolve_via_receiver_type(g, site, from_module, &mut gate);
-            if let Some(to) = hit {
-                recv_stats::record();
-                if is_interface_method(&g.nav, to) {
-                    iface_recv += 1;
-                }
+            let hit = resolve_via_receiver_type(g, site, from_module, &mut gate, &mut constructed);
+            if let Some(to) = hit
+                && is_interface_method(&g.nav, to)
+            {
+                iface_recv += 1;
             }
             hit.map(|to| (to, Branch::ReceiverType))
         });
@@ -268,6 +269,9 @@ pub(crate) fn resolve_calls<H>(
         );
     }
     if let Some(line) = gate.marker() {
+        eprintln!("{line}");
+    }
+    if let Some(line) = constructed.marker() {
         eprintln!("{line}");
     }
 }
@@ -872,12 +876,23 @@ fn resolve_type_name(g: &RepoGraph, from_module: NodeId, name: &str) -> Option<N
 /// LA.35a: the receiver's type comes from [`receiver_type`], which reads the
 /// caller's own locals (a parameter, a `let`) before the fields. A type found
 /// through a local is not gated: the gate exists because a bare name may be a
-/// local rather than the field, and a recorded local answers that.
+/// local rather than the field, and a recorded local answers that. Such a
+/// bind counts toward A6.2a's per-language `[recv] receiver-typed` line
+/// ([`recv_stats::record`]).
+///
+/// CL.5a: a receiver that IS a constructor call (`new Calc().add()`, PHP
+/// `(new Calc())->add()`, [`constructed_type`]) binds on the type it
+/// constructs, through [`constructed_type_id`], before any variable lookup:
+/// the text names no variable, so a type it fails to resolve binds nothing
+/// rather than fall back to [`receiver_type`], and the gate is not consulted
+/// (a constructor expression is never a field read). `constructed` tallies
+/// it for the `[recv] constructed receivers` line, not `recv_stats`.
 fn resolve_via_receiver_type(
     g: &RepoGraph,
     site: &CallSite,
     from_module: NodeId,
     gate: &mut BareFieldGate,
+    constructed: &mut ConstructedReceivers,
 ) -> Option<NodeId> {
     let method = match &site.qualifier {
         CallQualifier::Attribute { name, .. } | CallQualifier::ComplexReceiver { name, .. } => {
@@ -888,14 +903,14 @@ fn resolve_via_receiver_type(
     if method.is_empty() {
         return None;
     }
+    if let Some(ty) = constructed_type(site) {
+        let hit = constructed_type_id(g, from_module, ty).and_then(|t| type_method(g, t, method));
+        constructed.tally(gate.ext(g, site.from), hit.is_some());
+        return hit;
+    }
     let type_name = receiver_type(g, site)?;
     let type_id = resolve_type_name(g, from_module, type_name)?;
-    let hit = g
-        .symbols
-        .class_methods
-        .get(&type_id)
-        .and_then(|m| m.get(method).copied())
-        .or_else(|| g.symbols.interface_methods.get(&type_id).and_then(|m| m.get(method).copied()))?;
+    let hit = type_method(g, type_id, method)?;
     // A6.2a's gate: an Attribute base the caller does not bind as a local
     // was read as a field of the enclosing type.
     if let CallQualifier::Attribute { base, .. } = &site.qualifier
@@ -904,7 +919,153 @@ fn resolve_via_receiver_type(
     {
         return None;
     }
+    recv_stats::record();
     Some(hit)
+}
+
+/// The method `method` of the type `type_id`: its own (`class_methods`, a
+/// CLASS / STRUCT / ENUM), else an INTERFACE's (`interface_methods`, A6.6).
+fn type_method(g: &RepoGraph, type_id: NodeId, method: &str) -> Option<NodeId> {
+    g.symbols
+        .class_methods
+        .get(&type_id)
+        .and_then(|m| m.get(method).copied())
+        .or_else(|| g.symbols.interface_methods.get(&type_id).and_then(|m| m.get(method).copied()))
+}
+
+/// CL.5a: the simple name of the type a constructor-call receiver builds —
+/// a `ComplexReceiver` receiver (Java / C# / TypeScript `new Calc().add()`)
+/// or an `Attribute` base (PHP `(new Calc())->add()`).
+///
+/// The text, trimmed, may sit in ONE pair of outer parens; then the `new`
+/// keyword and whitespace; an identifier chain (`[A-Za-z0-9_$]` segments
+/// joined by `.`, `::` or `\`, one leading `\` / `::` allowed: a PHP
+/// fully-qualified or C++ global name); optional generic args (`<..>`); the
+/// constructor's argument list, whose closing `)` must END the text. Inside
+/// parens a no-argument constructor may drop its `()` (PHP / JS
+/// `(new Calc)->add()`). The answer is the chain's last segment.
+///
+/// Anything after the constructor's `)` — a chain (`new Calc().with(1)`,
+/// whose type is `with`'s return type), an anonymous body
+/// (`new Calc() { .. }`), a `!` — and every other shape (`newCalc()`,
+/// `renew()`, `new (getType())()`, `new()`, a variable) -> `None`.
+fn constructed_type(site: &CallSite) -> Option<&str> {
+    let text = match &site.qualifier {
+        CallQualifier::ComplexReceiver { receiver, .. } => receiver.as_str(),
+        CallQualifier::Attribute { base, .. } => base.as_str(),
+        _ => return None,
+    };
+    let text = text.trim();
+    let (text, parenthesised) = match text.strip_prefix('(').and_then(|t| t.strip_suffix(')')) {
+        Some(inner) => (inner.trim(), true),
+        None => (text, false),
+    };
+    let after_new = text.strip_prefix("new")?;
+    let body = after_new.trim_start();
+    if body.len() == after_new.len() {
+        return None; // `newCalc()`: no whitespace after the keyword
+    }
+    // Every step below advances over ASCII bytes only, so each index is a
+    // char boundary of `body`.
+    let b = body.as_bytes();
+    let mut i = if b.starts_with(b"\\") {
+        1
+    } else if b.starts_with(b"::") {
+        2
+    } else {
+        0
+    };
+    let segment = loop {
+        let start = i;
+        while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$') {
+            i += 1;
+        }
+        if i == start {
+            return None;
+        }
+        let segment = (start, i);
+        if b[i..].starts_with(b"::") {
+            i += 2;
+        } else if matches!(b.get(i), Some(b'.' | b'\\')) {
+            i += 1;
+        } else {
+            break segment;
+        }
+    };
+    let skip_ws = |mut i: usize| {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        i
+    };
+    i = skip_ws(i);
+    if i == b.len() {
+        return parenthesised.then(|| &body[segment.0..segment.1]);
+    }
+    if b[i] == b'<' {
+        i = skip_ws(balanced_end(b, i, b'<', b'>')?);
+    }
+    if b.get(i) != Some(&b'(') {
+        return None;
+    }
+    (balanced_end(b, i, b'(', b')')? == b.len()).then(|| &body[segment.0..segment.1])
+}
+
+/// The index just past the `close` that balances the `open` at `b[at]`,
+/// skipping quoted text (`"`, `'`, `` ` ``, backslash escapes) so a paren
+/// inside a string argument (`new Calc(")")`) is not counted. `None` when
+/// the text ends first.
+fn balanced_end(b: &[u8], at: usize, open: u8, close: u8) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = at;
+    while i < b.len() {
+        match b[i] {
+            q @ (b'"' | b'\'' | b'`') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            c if c == open => depth += 1,
+            c if c == close => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// CL.5a: the type node a constructor call names, by its simple name: the
+/// first scope that has the name decides — the caller module's import
+/// bindings (looking through a bound MODULE to its same-named def, as a TS
+/// default import binds the file), then the module's own top-level symbols,
+/// then the repo-unique type ([`unique_global_type`]; two distinct same-named
+/// types -> `None`). Only a STRUCT / CLASS / INTERFACE / ENUM answers, so a
+/// same-named FUNCTION never does.
+fn constructed_type_id(g: &RepoGraph, from_module: NodeId, name: &str) -> Option<NodeId> {
+    let is_type = |id: &NodeId| {
+        matches!(
+            g.nav.kind_by_id.get(id).copied(),
+            Some(k) if k == node_kind::STRUCT
+                || k == node_kind::CLASS
+                || k == node_kind::INTERFACE
+                || k == node_kind::ENUM
+        )
+    };
+    let bound = g.symbols.module_import_bindings.get(&from_module).and_then(|b| b.get(name));
+    if let Some(&bound) = bound {
+        return heritage_through_module(g, bound, name).filter(is_type);
+    }
+    let own = g.symbols.module_symbols.get(&from_module).and_then(|s| s.get(name));
+    if let Some(&own) = own {
+        return Some(own).filter(is_type);
+    }
+    unique_global_type(g, name)
 }
 
 /// The simple type name of a call's receiver, innermost scope first (LA.35a),
@@ -969,7 +1130,8 @@ fn field_type<'g>(g: &'g RepoGraph, from: NodeId, field: &str) -> Option<&'g str
 /// so the builder cannot say which language a call site is in.
 #[derive(Default)]
 struct BareFieldGate {
-    /// NodeId -> index into `g.nodes`, built on the first bare-field hit only.
+    /// NodeId -> index into `g.nodes`, built on the first [`Self::ext`]
+    /// lookup only (a bare-field hit, or a CL.5a constructed receiver).
     /// `resolve_calls` pushes edges, never nodes, so the indices stay valid.
     index: Option<HashMap<NodeId, usize>>,
     /// Bare-field binds skipped outside a constructor, by file extension.
@@ -977,19 +1139,25 @@ struct BareFieldGate {
 }
 
 impl BareFieldGate {
-    /// True when a bare `x.m()` in `caller` may bind through `x`'s field type.
-    fn admits(&mut self, g: &RepoGraph, caller: NodeId) -> bool {
+    /// The lowercased extension of `caller`'s source file, read off its
+    /// POSITION cell; `None` when it carries none (or its file has no
+    /// extension).
+    fn ext(&mut self, g: &RepoGraph, caller: NodeId) -> Option<String> {
         let index = self
             .index
             .get_or_insert_with(|| g.nodes.iter().enumerate().map(|(i, n)| (n.id, i)).collect());
-        let Some(ext) = index
+        index
             .get(&caller)
             .and_then(|&i| position_file(&g.nodes[i]))
             .and_then(|file| {
                 let base = file.rsplit('/').next().unwrap_or(&file);
                 base.rsplit_once('.').map(|(_, ext)| ext.to_ascii_lowercase())
             })
-        else {
+    }
+
+    /// True when a bare `x.m()` in `caller` may bind through `x`'s field type.
+    fn admits(&mut self, g: &RepoGraph, caller: NodeId) -> bool {
+        let Some(ext) = self.ext(g, caller) else {
             // No POSITION: keep A6.2a's behaviour rather than guess a language.
             return true;
         };
@@ -1017,6 +1185,45 @@ impl BareFieldGate {
         let exts: Vec<String> = by_ext.iter().map(|(e, n)| format!("{e}:{n}")).collect();
         Some(format!(
             "[recv] bare field receivers skipped outside constructor: {total} (ext={})",
+            exts.join(",")
+        ))
+    }
+}
+
+/// CL.5a's per-build tally of constructor-call receivers
+/// ([`constructed_type`]) `resolve_via_receiver_type` met: bound to a method
+/// of the constructed type, or not (the type or the method is not in the
+/// repo, or the name is ambiguous). `by_ext` counts every one met by the
+/// caller's file extension (`?` without a POSITION); a BTreeMap, so the
+/// marker is stable across runs.
+#[derive(Default)]
+struct ConstructedReceivers {
+    bound: usize,
+    unbound: usize,
+    by_ext: BTreeMap<String, usize>,
+}
+
+impl ConstructedReceivers {
+    fn tally(&mut self, ext: Option<String>, bound: bool) {
+        if bound {
+            self.bound += 1;
+        } else {
+            self.unbound += 1;
+        }
+        *self.by_ext.entry(ext.unwrap_or_else(|| "?".to_string())).or_default() += 1;
+    }
+
+    /// The fired_on line, `None` when the build met no constructed receiver:
+    /// `[recv] constructed receivers: bound=B unbound=U (ext=java:1,ts:2)`.
+    fn marker(&self) -> Option<String> {
+        if self.bound + self.unbound == 0 {
+            return None;
+        }
+        let exts: Vec<String> = self.by_ext.iter().map(|(e, n)| format!("{e}:{n}")).collect();
+        Some(format!(
+            "[recv] constructed receivers: bound={} unbound={} (ext={})",
+            self.bound,
+            self.unbound,
             exts.join(",")
         ))
     }
@@ -1753,6 +1960,161 @@ mod tests {
         assert_eq!(
             gate.marker().as_deref(),
             Some("[recv] bare field receivers skipped outside constructor: 3 (ext=py:1,ts:2)")
+        );
+    }
+
+    // ---- CL.5a: a call on a constructor expression binds the constructed type
+
+    /// `m2`: `class Calc { add() }` — the type `new Calc()` constructs.
+    fn calc_module(module: &str) -> (FileParse, NodeId) {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, module, None);
+        let calc = s.add(node_kind::CLASS, &format!("{module}::Calc"), Some(m));
+        let add = s.add(node_kind::METHOD, &format!("{module}::Calc::add"), Some(calc));
+        (s.file(vec![], vec![], vec![]), add)
+    }
+
+    /// `m1`: `fn t() { <qualifier>... }`, one call site per qualifier.
+    fn constructing_caller(
+        qualifiers: Vec<CallQualifier>,
+        imports: Vec<ImportStmt>,
+    ) -> (FileParse, NodeId) {
+        let mut s = Shape::new();
+        let m1 = s.add(node_kind::MODULE, "m1", None);
+        let t = s.add(node_kind::FUNCTION, "m1::t", Some(m1));
+        let calls = qualifiers
+            .into_iter()
+            .map(|qualifier| CallSite { from: t, qualifier, line: 0 })
+            .collect();
+        (s.file(imports, calls, vec![]), t)
+    }
+
+    #[test]
+    fn constructed_type_forms() {
+        let from = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m1::t");
+        let of = |qualifier: CallQualifier| {
+            constructed_type(&CallSite { from, qualifier, line: 0 }).map(str::to_string)
+        };
+        let calc = Some("Calc".to_string());
+        for receiver in [
+            "new Calc()",
+            "new com.example.Calc(1, 2)",
+            "new Calc<String>()",
+            "new Map<String, List<Integer>>(src)",
+            "(new Calc())",
+            "new \\App\\Calc()",
+            "new global::Shop.Calc()",
+            "new Calc(\")\", f(x))",
+            "new Calc(\n  1,\n  2)",
+        ] {
+            let want = if receiver.contains("Map") {
+                Some("Map".to_string())
+            } else {
+                calc.clone()
+            };
+            assert_eq!(of(recv(receiver, "add")), want, "{receiver:?}");
+        }
+        // PHP's form: the parenthesised constructor is an Attribute base, and
+        // inside parens a no-argument constructor may drop its `()`.
+        assert_eq!(of(attr("(new Calc())", "add")), calc);
+        assert_eq!(of(attr("(new Calc)", "add")), calc);
+        for receiver in [
+            "new Calc().with()",
+            "new Calc(\")\").with(\"(\")",
+            "new Calc() { }",
+            "new Calc()!",
+            "new Calc",
+            "newCalc()",
+            "renew()",
+            "new (getType())()",
+            "new()",
+            "new Calc[3]",
+            "new $cls",
+            "calc",
+            "this.calc",
+            "",
+        ] {
+            assert_eq!(of(recv(receiver, "add")), None, "{receiver:?}");
+        }
+        assert_eq!(of(CallQualifier::SelfMethod("add".to_string())), None);
+    }
+
+    /// Java / C# / TS `new Calc().add(2, 3)` binds `Calc::add`, rule
+    /// `receiver_type`; a chained `new Calc().with(1).add()` binds nothing (its
+    /// receiver's type is `with`'s return type), nor does a method `Calc` lacks.
+    #[test]
+    fn new_receiver_binds_the_constructed_types_method() {
+        let (calc_file, add) = calc_module("m2");
+        let (caller, t) = constructing_caller(
+            vec![
+                recv("new Calc()", "add"),
+                recv("new Calc().with(1)", "add"),
+                recv("new Calc()", "sub"),
+            ],
+            vec![],
+        );
+        let g = build_dotted(repo(), vec![calc_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(t, add)]);
+        assert_eq!(evidence_rule(&g, t, add, edge_category::CALLS), calls_rule("receiver_type"));
+        assert_eq!(g.unresolved_calls.len(), 2);
+    }
+
+    /// PHP `use App\Calc; (new Calc())->add()` with a second `Calc` elsewhere:
+    /// the import binding names the type, so the call binds through it.
+    #[test]
+    fn php_parenthesised_new_binds_through_the_import() {
+        let (calc_file, add) = calc_module("m2");
+        let (twin_file, twin_add) = calc_module("m3");
+        let (caller, t) = constructing_caller(
+            vec![attr("(new Calc())", "add")],
+            vec![import_symbol("m1", "m2", "Calc")],
+        );
+        let g = build_dotted(repo(), vec![calc_file, twin_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(t, add)]);
+        assert!(!edges_of(&g, edge_category::CALLS).contains(&(t, twin_add)));
+    }
+
+    /// Two classes `Calc` and no import naming either: the constructed type is
+    /// ambiguous, so the call binds nothing rather than guess.
+    #[test]
+    fn ambiguous_constructed_type_binds_nothing() {
+        let (calc_file, _) = calc_module("m2");
+        let (twin_file, _) = calc_module("m3");
+        let (caller, _) = constructing_caller(vec![recv("new Calc()", "add")], vec![]);
+        let g = build_dotted(repo(), vec![calc_file, twin_file, caller]).unwrap();
+        assert!(edges_of(&g, edge_category::CALLS).is_empty());
+        assert_eq!(g.unresolved_calls.len(), 1);
+    }
+
+    /// A6.2a's gate holds a bare `x.m()` outside a TypeScript constructor; a
+    /// constructor expression is never a field read, so it binds in any
+    /// method, in either qualifier shape.
+    #[test]
+    fn constructed_receiver_skips_the_field_gate() {
+        let (repo_file, _, find) = repo_module();
+        let (caller, shadow) =
+            placed_caller(attr("(new UserRepo())", "find"), "shadow", "src/a.service.ts");
+        let g = build_typescript(repo(), vec![repo_file, caller], |_, _| None).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(shadow, find)]);
+
+        let (repo_file, _, find) = repo_module();
+        let (caller, shadow) =
+            placed_caller(recv("new UserRepo()", "find"), "shadow", "src/a.service.ts");
+        let g = build_typescript(repo(), vec![repo_file, caller], |_, _| None).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(shadow, find)]);
+    }
+
+    #[test]
+    fn constructed_receivers_marker_counts_by_extension() {
+        let mut seen = ConstructedReceivers::default();
+        assert_eq!(seen.marker(), None);
+        seen.tally(Some("ts".to_string()), true);
+        seen.tally(Some("java".to_string()), true);
+        seen.tally(Some("ts".to_string()), false);
+        seen.tally(None, false);
+        assert_eq!(
+            seen.marker().as_deref(),
+            Some("[recv] constructed receivers: bound=2 unbound=2 (ext=?:1,java:1,ts:2)")
         );
     }
 
