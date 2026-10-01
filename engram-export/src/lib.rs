@@ -37,7 +37,10 @@
 //!      1-based lines, clamped to the file's real line count.
 //!   3. The `id → path` table is written as a sidecar `*.files.json` next to
 //!      the bincode and inlined as `Gmap.files`, so the span round-trips back
-//!      to a path. engram never computes on the span; it hands it back.
+//!      to a path. engram never computes on the span; it hands it back. A
+//!      third file, `*.meta.json` ([`meta_path`], CK.3), names the glia build
+//!      that wrote the gmap and the gmap's content digest: engram-core v6's
+//!      `Gmap` has no metadata slot, and engram never reads the sidecar.
 //!
 //! Doc sections export as `Content::Proposition`, anchored by the same
 //! `SpanRef` built the same way: `span: Some(..)` whenever the section has a
@@ -1182,8 +1185,9 @@ pub fn build_gmap(
 }
 
 /// Build and write the engram seed: `out_path` gets the `bincode`-serialized
-/// [`Gmap`], and `<out_path>.files.json` gets the file-id → path sidecar. Both
-/// are written tmp-then-rename, matching glia's `.gmap.tmp` convention.
+/// [`Gmap`], `<out_path>.files.json` the file-id → path sidecar and
+/// `<out_path>.meta.json` the build-identity sidecar ([`meta_path`]). Each is
+/// written tmp-then-rename, matching glia's `.gmap.tmp` convention.
 pub fn export_engram_gmap(
     merged: &MergedGraph,
     repo_root: &Path,
@@ -1198,8 +1202,12 @@ pub fn export_engram_gmap(
 /// The write half of [`export_engram_gmap`], for a caller that keeps the
 /// [`Gmap`] it built (the bin diffs it against the `--since` prior, LG.8a):
 /// the bincode bytes to `out_path`, then `gmap.files` as the
-/// `<out_path>.files.json` sidecar, each tmp-then-rename. Returns the
-/// [`content_digest`] of the bytes written (a `GmapDiff`'s target digest).
+/// `<out_path>.files.json` sidecar, then the `<out_path>.meta.json` build
+/// sidecar ([`meta_path`]), each tmp-then-rename. Returns the
+/// [`content_digest`] of the bytes written (a `GmapDiff`'s target digest, and
+/// the meta's `gmap_digest`). A crash between the gmap and the meta renames
+/// leaves the previous meta beside the new gmap; its `gmap_digest` no longer
+/// matches the gmap's digest, which is how a reader tells it is stale.
 pub fn write_engram_gmap(gmap: &Gmap, out_path: &Path) -> io::Result<u64> {
     let bytes = bincode::serialize(gmap)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -1210,7 +1218,30 @@ pub fn write_engram_gmap(gmap: &Gmap, out_path: &Path) -> io::Result<u64> {
     let sidecar_json = serde_json::to_vec_pretty(&sidecar)?;
     write_atomic(&sidecar_path(out_path), &sidecar_json)?;
 
-    Ok(content_digest(&bytes))
+    let digest = content_digest(&bytes);
+    write_atomic(&meta_path(out_path), &meta_json(digest)?)?;
+    Ok(digest)
+}
+
+/// The `<out_path>.meta.json` body for a gmap whose [`content_digest`] is
+/// `digest`: the glia build that wrote it, the exporter and the contract
+/// version. A `BTreeMap`, like the files sidecar, so the keys serialise sorted
+/// whatever serde_json's `preserve_order` feature is; the content is a pure
+/// function of the build and the gmap bytes, so two identical exports write
+/// identical meta files. No repo path, source text or value data.
+fn meta_json(digest: u64) -> serde_json::Result<Vec<u8>> {
+    let meta: BTreeMap<&str, serde_json::Value> = BTreeMap::from([
+        ("build_stamp", glia_engine::BUILD_STAMP.into()),
+        ("exporter", "glia-export-engram".into()),
+        ("exporter_version", env!("CARGO_PKG_VERSION").into()),
+        ("format_version", engram_core::GMAP_FORMAT_VERSION.into()),
+        ("glia_version", glia_engine::RELEASE.into()),
+        ("gmap_digest", format!("{digest:016x}").into()),
+        ("meta_version", META_VERSION.into()),
+        ("parser_stamp", glia_engine::PARSER_STAMP.into()),
+        ("version_line", glia_engine::VERSION_LINE.into()),
+    ]);
+    serde_json::to_vec_pretty(&meta)
 }
 
 /// `<out_path>.files.json` — the span sidecar lives beside the bincode.
@@ -1218,6 +1249,22 @@ pub fn sidecar_path(out_path: &Path) -> std::path::PathBuf {
     let mut s = out_path.as_os_str().to_os_string();
     s.push(".files.json");
     std::path::PathBuf::from(s)
+}
+
+/// The schema version of the `<out_path>.meta.json` sidecar ([`meta_path`]):
+/// bumped when a key is renamed or removed or changes meaning, never for a
+/// new key.
+pub const META_VERSION: u32 = 1;
+
+/// `<out_path>.meta.json` — the build-identity sidecar beside the bincode
+/// (CK.3): which glia wrote the gmap (release, `BUILD_STAMP`, `PARSER_STAMP`),
+/// the exporter's own version, the contract version, and the gmap's
+/// [`content_digest`], which binds the sidecar to the bytes it describes.
+/// engram-core v6 has no metadata slot in [`Gmap`], so this is where it lives.
+pub fn meta_path(out_path: &Path) -> PathBuf {
+    let mut s = out_path.as_os_str().to_os_string();
+    s.push(".meta.json");
+    PathBuf::from(s)
 }
 
 /// `<out_path>.glia` — the directory beside a gmap where the bin records the

@@ -14,7 +14,7 @@ use engram_core::{
     Content, EdgeKind, GMAP_FORMAT_VERSION, GmapDiff, GmapEdge, GmapNode, NodeChange, SpanRef,
     content_digest, content_key, encodable_text,
 };
-use glia_engram_export::{ExportOptions, build_gmap, export_engram_gmap};
+use glia_engram_export::{ExportOptions, build_gmap, export_engram_gmap, meta_path};
 
 /// The probe fixture: a 12-line Python service, a 7-line README whose second
 /// section names two symbols (so the doc-linker emits DOCUMENTS edges), and an
@@ -256,4 +256,9 @@ fn export_bytes_are_deterministic() {
     assert_eq!(written, runs[0]);
     assert_eq!(stats.digest, content_digest(&runs[0]));
     assert_eq!(&written[..4], &GMAP_FORMAT_VERSION.to_le_bytes()[..]);
+    // The `<out>.meta.json` sidecar (CK.3) names the gmap it describes.
+    let meta = std::fs::read_to_string(meta_path(&out)).unwrap();
+    let meta: serde_json::Value = serde_json::from_str(&meta).unwrap();
+    assert_eq!(meta["gmap_digest"], format!("{:016x}", stats.digest));
+    assert_eq!(meta["build_stamp"], glia_engine::BUILD_STAMP);
 }

@@ -5,13 +5,18 @@
 //!
 //! Every test runs the built bin on a scratch dir (no git: LB.6 pairs moves by
 //! content and name), with every `--out` outside the exported repo.
+//!
+//! CK.3: the bin names the glia that built it - `-V`, the `glia build=`
+//! marker, the `<out>.meta.json` sidecar and the history manifest's
+//! `build_stamp`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Command;
 
-use engram_core::{EdgeKind, GmapDiff, content_digest};
+use engram_core::{EdgeKind, GMAP_FORMAT_VERSION, GmapDiff, content_digest};
 use glia_engram_export::diff::diff_path;
+use glia_engram_export::{META_VERSION, history_dir, meta_path};
 
 /// The LG.7 probe fixture (12, 7 and 12 lines). `Vault.sol` is
 /// NatSpec-neutral: no contract comment and one untagged line on `deposit`, so
@@ -348,4 +353,125 @@ fn a_file_sorting_first_renumbers_nothing() {
     let added: BTreeSet<&str> = diff.added.iter().map(|n| n.key.as_str()).collect();
     assert!(added.iter().all(|k| k.starts_with("a::first")), "{added:?}");
     assert!(added.contains("a::first::first"), "{added:?}");
+}
+
+/// The one `[engram-export] glia build=` marker line (CK.3).
+fn build_line(stderr: &str) -> &str {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("[engram-export] glia build="))
+        .collect();
+    assert_eq!(lines.len(), 1, "want one glia build marker in:\n{stderr}");
+    lines[0]
+}
+
+/// The `<out>.meta.json` sidecar beside `out`: its raw text and its JSON.
+fn read_meta(out: &std::path::Path) -> (String, serde_json::Value) {
+    let path = meta_path(out);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("no meta sidecar at {}: {e}", path.display()));
+    let value = serde_json::from_str(&text).unwrap();
+    (text, value)
+}
+
+#[test]
+fn version_and_history_name_the_glia_build() {
+    let bin = env!("CARGO_BIN_EXE_glia-export-engram");
+    // (a) -V and --version print glia's version line, build stamp included.
+    for flag in ["-V", "--version"] {
+        let out = Command::new(bin).arg(flag).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{flag}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("glia-export-engram {}\n", glia_engine::VERSION_LINE),
+            "{flag}"
+        );
+    }
+
+    // (b) every run prints the build marker once, naming the meta sidecar.
+    let s = Scratch::new("stamp");
+    let a_err = s.export("a", None, &["--no-persist"], false);
+    let meta_a = meta_path(&s.out("a"));
+    assert_eq!(
+        build_line(&a_err),
+        format!(
+            "[engram-export] glia build={} exporter={} format_version={} meta={}",
+            glia_engine::BUILD_STAMP,
+            env!("CARGO_PKG_VERSION"),
+            GMAP_FORMAT_VERSION,
+            meta_a.display()
+        )
+    );
+
+    // (c) the history layout's manifest records the same build.
+    let manifest = std::fs::read_to_string(history_dir(&s.out("a")).join("manifest.json")).unwrap();
+    let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    assert_eq!(manifest["build_stamp"], glia_engine::BUILD_STAMP);
+
+    // (d) the meta sidecar: exactly these keys, sorted, bound to the gmap.
+    let (text, meta) = read_meta(&s.out("a"));
+    let keys: Vec<&str> = meta.as_object().unwrap().keys().map(String::as_str).collect();
+    let mut sorted = keys.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        [
+            "build_stamp",
+            "exporter",
+            "exporter_version",
+            "format_version",
+            "glia_version",
+            "gmap_digest",
+            "meta_version",
+            "parser_stamp",
+            "version_line",
+        ]
+    );
+    assert!(text.starts_with("{\n  \"build_stamp\""), "keys not sorted:\n{text}");
+    let a_digest = hex(content_digest(&s.bytes("a")));
+    assert_eq!(meta["build_stamp"], glia_engine::BUILD_STAMP);
+    assert_eq!(meta["exporter"], "glia-export-engram");
+    assert_eq!(meta["exporter_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(meta["format_version"], GMAP_FORMAT_VERSION);
+    assert_eq!(meta["glia_version"], glia_engine::RELEASE);
+    assert_eq!(meta["gmap_digest"], a_digest.as_str());
+    assert_eq!(meta["meta_version"], META_VERSION);
+    assert_eq!(META_VERSION, 1);
+    assert_eq!(meta["parser_stamp"], glia_engine::PARSER_STAMP);
+    assert_eq!(meta["version_line"], glia_engine::VERSION_LINE);
+    assert!(
+        a_err.contains(&format!(" digest={a_digest}\n")),
+        "the wrote line's digest is the meta's:\n{a_err}"
+    );
+
+    // (e) an identical export writes a byte-identical meta; a --since export
+    // writes its own, bound to its own gmap (the since line's target).
+    s.export("a", None, &["--no-persist"], false);
+    assert_eq!(read_meta(&s.out("a")).0, text, "identical exports, different meta");
+    s.edit_a_to_b();
+    let b_err = s.export("b", Some("a"), &["--no-persist"], false);
+    let b_digest = hex(content_digest(&s.bytes("b")));
+    assert_ne!(b_digest, a_digest);
+    assert!(
+        since_line(&b_err).contains(&format!(" target={b_digest} ")),
+        "{b_err}"
+    );
+    assert_eq!(read_meta(&s.out("b")).1["gmap_digest"], b_digest.as_str());
+    assert!(
+        build_line(&b_err).ends_with(&format!(" meta={}", meta_path(&s.out("b")).display())),
+        "{b_err}"
+    );
+
+    // A refused run (an unreadable --since prior) writes no meta.
+    let out = Command::new(bin)
+        .arg(s.repo())
+        .arg("--out")
+        .arg(s.out("c"))
+        .arg("--since")
+        .arg(s.out("never-written"))
+        .arg("--no-persist")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(6));
+    assert!(!meta_path(&s.out("c")).exists(), "a refused run wrote a meta");
 }

@@ -1,7 +1,20 @@
 //! `glia-export-engram` — write a resolved glia graph as an `engram_core::Gmap`
-//! bincode file (engram's Path-A seed) plus a `<out>.files.json` span sidecar,
-//! and record the glia graph it exported in a `<out>.glia/` directory beside
-//! them (the LC.9 layout, the one `glia build` and the MCP read).
+//! bincode file (engram's Path-A seed) plus a `<out>.files.json` span sidecar
+//! and a `<out>.meta.json` build sidecar, and record the glia graph it
+//! exported in a `<out>.glia/` directory beside them (the LC.9 layout, the one
+//! `glia build` and the MCP read).
+//!
+//! Which glia built a gmap (CK.3): `glia-export-engram -V` / `--version`
+//! prints glia's version line, `<release> (build <release>+p<PARSER_STAMP>)`
+//! (the crate's own version is not glia's: it is outside the workspace
+//! version); every run prints `[engram-export] glia build=<BUILD_STAMP>
+//! exporter=<crate version> format_version=<v> meta=<out>.meta.json`; that
+//! sidecar records the release, `BUILD_STAMP`, `PARSER_STAMP`, the exporter
+//! and contract versions and the gmap's content digest (`gmap_digest`: a meta
+//! whose digest is not the gmap's is stale); and `<out>.glia/manifest.json`
+//! carries `build_stamp` too (`glia inspect <out>.glia` prints it). The gmap
+//! itself has no field for it: engram-core v6's `Gmap` is `{format_version,
+//! nodes, edges, files}`.
 //!
 //! Lives here, not in the main `glia` CLI, on purpose: this is the ONLY code
 //! path that touches `engram-core` in the sibling `Engram` repo (a `../../`
@@ -49,10 +62,11 @@
 //! `GmapDiff` from the prior (base) to this export (target), named by both
 //! gmaps' content digests; with no change it is still written, with every list
 //! empty. Write order: `<out>.diff` beside `--out` is deleted first on every
-//! run, then the full gmap (+ sidecar) is written (the next run's base), then
-//! the diff, then `<out>.glia/`. A run that stops between the gmap and the
-//! diff leaves a full gmap and no diff (Engram re-seeds from it); a diff that
-//! cannot be written is exit 7.
+//! run, then the full gmap, `<out>.files.json` and `<out>.meta.json` are
+//! written (the next run's base), then the diff, then `<out>.glia/`. A run
+//! refused (exit 6) or failing before the gmap write writes no meta. A run
+//! that stops between the gmap and the diff leaves a full gmap and no diff
+//! (Engram re-seeds from it); a diff that cannot be written is exit 7.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -63,7 +77,7 @@ use glia_engine::persist::{load_layout, persist_graph};
 use glia_engine::{GenerateResult, ParseCache, generate_one, generate_one_with_cache};
 use glia_engram_export::diff::{diff_gmaps, diff_path, read_gmap, write_diff};
 use glia_engram_export::{
-    ExportOptions, build_gmap, history_dir, position_paths, prior_tokens, sidecar_path,
+    ExportOptions, build_gmap, history_dir, meta_path, position_paths, prior_tokens, sidecar_path,
     write_engram_gmap,
 };
 use glia_graph::identity::{MoveMap, carry_file_tokens, detect_moves};
@@ -71,7 +85,7 @@ use glia_graph::identity::{MoveMap, carry_file_tokens, detect_moves};
 #[derive(Parser, Debug)]
 #[command(
     name = "glia-export-engram",
-    version,
+    version = glia_engine::VERSION_LINE,
     about = "Export a resolved glia graph as an engram_core::Gmap bincode seed (+ span sidecar)."
 )]
 struct Args {
@@ -304,6 +318,16 @@ fn run(args: &Args) -> i32 {
         stats.digest,
         sidecar_path(&out_path).display(),
         history.display(),
+    );
+    // The build marker (CK.3): which glia wrote this gmap, the exporter's own
+    // version, the contract version, and the meta sidecar that records them
+    // beside the gmap. A separate line, so the `wrote` line keeps its shape.
+    eprintln!(
+        "[engram-export] glia build={} exporter={} format_version={} meta={}",
+        glia_engine::BUILD_STAMP,
+        env!("CARGO_PKG_VERSION"),
+        GMAP_FORMAT_VERSION,
+        meta_path(&out_path).display(),
     );
     // The v6 since marker (LG.8a): the diff just written, by digest and
     // counts, and what the parse cache reused for this build (since the cache
