@@ -1,15 +1,48 @@
 {
   "framework": "csharp-mongo-collection",
   "language": "csharp",
-  "dirs": ["."],
-  "cells": ["csharp/db"],
-  "note": "LG.3b. At HEAD scan_collection_calls only knows `.collection(` (lower-case), so the MongoDB.Driver GetCollection<T>(\"x\") / GetCollection<T>(nameof(T)) forms mint nothing; a non-literal name (auditName) must stay unminted.",
+  "dirs": [
+    "."
+  ],
+  "cells": [
+    "csharp/db"
+  ],
+  "note": "LG.3b. At HEAD scan_collection_calls only knows `.collection(` (lower-case), so the MongoDB.Driver GetCollection<T>(\"x\") / GetCollection<T>(nameof(T)) forms mint nothing; a non-literal name (auditName) must stay unminted. PROBE FIX (CL.11, HEAD f8a46c0): the key had no expect_edges, which matrix.py caps at partial ('no routing expected'); the constructor's ACCESSES_DATA edges (present at HEAD) are now expected.",
   "expect_nodes": [
-    {"kind": "DATA_ENTITY", "name": "data_entity:nosql:audit_log", "note": "GetCollection<BsonDocument>(\"audit_log\")"},
-    {"kind": "DATA_ENTITY", "name": "data_entity:nosql:OrderReadModel", "note": "GetCollection<T>(nameof(OrderReadModel))"}
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:nosql:audit_log",
+      "note": "GetCollection<BsonDocument>(\"audit_log\")"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "data_entity:nosql:OrderReadModel",
+      "note": "GetCollection<T>(nameof(OrderReadModel))"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "OrdersRepository::OrdersRepository",
+      "to": "data_entity:nosql:audit_log",
+      "category": "ACCESSES_DATA",
+      "note": "the constructor that calls GetCollection reads the collection (LE.4a rehoming)"
+    },
+    {
+      "from": "OrdersRepository::OrdersRepository",
+      "to": "data_entity:nosql:OrderReadModel",
+      "category": "ACCESSES_DATA"
+    }
   ],
   "forbid": [
-    {"kind": "DATA_ENTITY", "name": "auditName", "note": "a variable argument names no collection"},
-    {"kind": "DATA_ENTITY", "name": "BsonDocument", "note": "the type argument is not the collection"}
+    {
+      "kind": "DATA_ENTITY",
+      "name": "auditName",
+      "note": "a variable argument names no collection"
+    },
+    {
+      "kind": "DATA_ENTITY",
+      "name": "BsonDocument",
+      "note": "the type argument is not the collection"
+    }
   ]
 }

@@ -15,6 +15,19 @@
       "kind": "WS_HANDLER",
       "name": "ws:ws",
       "note": "gorilla Upgrader; name falls back to the literal 'ws'"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:/chat",
+      "note": "PROBE FIX (CL.11): a client on the path the server really upgrades (/chat)"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "ws_client:/chat",
+      "to": "ws:ws",
+      "category": "WS_CONNECTS",
+      "note": "the one pairing the /chat route proves; with the forbid below it shows the pairing is route-driven, not the wildcard fan-out"
     }
   ],
   "forbid": [
@@ -29,5 +42,5 @@
   "cells": [
     "typescript/ws"
   ],
-  "note": "Precision twin of xcut-websocket-ws_connects: a client on a real path and a handler whose name fell back to the generic 'ws' must NOT pair."
+  "note": "Precision twin of xcut-websocket-ws_connects: a client on a real path and a handler whose name fell back to the generic 'ws' must NOT pair, while a client on the upgraded /chat path must. PROBE FIX (CL.11, HEAD f8a46c0): the twin claimed typescript/ws with no routing expectation, which matrix.py caps at partial ('no routing expected'); client/chat.ts adds the positive pair."
 }
