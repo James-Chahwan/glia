@@ -53,7 +53,7 @@ export function label(order) {
 PLACE = "svc::orders::placeOrder"
 KEYS = ["seeds", "effects", "counts", "writes", "unresolved", "absence"]
 ROW_KEYS = ["class", "qname", "name", "kind", "file", "line", "mode", "depth", "seed", "via_config",
-            "services_crossed", "downstream", "path", "tier"]
+            "services_crossed", "downstream", "path", "tier", "external_hosts"]
 HOP_KEYS = ["from_qname", "to_qname", "category", "site_file", "site_line"]
 SHAPE = [("db", "data_entity:sql:orders", "write", 2),
          ("queue_produce", "queue_producer:orders", None, 2),

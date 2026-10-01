@@ -1,8 +1,11 @@
 //! `glia serves` (LD.8b) — who serves a channel: the human surface over the
 //! engine's `serves::serves`. `--json` is the LD.8a envelope
 //! `{results, absence}`; an empty table prints the absence block (the FACT,
-//! the caveat rows, the near misses) under `_(nothing serves it)_`. An absence
-//! is an answer, so it exits 0; exit 2 is a build failure.
+//! the caveat rows, the near misses) under `_(nothing serves it)_`. A client
+//! ENDPOINT whose server is outside the build (CJ.3) is an `external (<confidence>)`
+//! row after the routes, its hosts in the handlers column as
+//! `external: `<host>``. An absence is an answer, so it exits 0; exit 2 is a
+//! build failure.
 
 use glia_engine::serves::serves;
 
@@ -69,7 +72,10 @@ pub(crate) fn run(args: Args) -> i32 {
     println!("| match | live | kind | server | location | handlers |");
     println!("|---|:-:|---|---|---|---|");
     for s in &answer.results {
-        let handlers = if s.handlers.is_empty() {
+        let handlers = if !s.external_hosts.is_empty() {
+            let hosts: Vec<String> = s.external_hosts.iter().map(|h| format!("`{h}`")).collect();
+            format!("external: {}", hosts.join(", "))
+        } else if s.handlers.is_empty() {
             "—".to_string()
         } else {
             s.handlers

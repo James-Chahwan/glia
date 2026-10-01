@@ -13,6 +13,19 @@
 //! tier that matched it (`exact` | `endpoint_prefix` | `any` | `route_prefix`)
 //! — "served, but only through the `ANY` fallback" is visible.
 //!
+//! External servers (CJ.3): an HTTP channel is also served OUTSIDE the build
+//! when a client ENDPOINT for that verb and path is one CG.4b stamped ORIGIN
+//! `{"provenance":"external"}` (every call site names a public host no
+//! service, project or URL constant of the build names, and nothing pairs
+//! it). Such an ENDPOINT is listed after the routes, kind `ENDPOINT`, match
+//! `external`, no handlers, with the hosts its sites name in
+//! `external_hosts`; a channel asked as a full URL keeps only the external
+//! rows whose hosts include the URL's. A channel with only external rows is
+//! served, so it carries no absence. [`external_hosts`] is the one reader of
+//! that verdict, shared with `effects`: an endpoint the build pairs (an alias
+//! host, an overlay `[constants]` pin) is in-repo here, as in `glia gaps` and
+//! engram-export. HTTP only: WS / gRPC / GraphQL clients are not marked.
+//!
 //! What it does not see, stated rather than guessed:
 //! - The client-only tiers 5-6 (base-URL fold, suffix) — the matcher does not
 //!   offer them to a caller holding a declared path.
@@ -28,18 +41,18 @@
 //!
 //! fired_on marker, once per call:
 //! `[serves] mechanism=<http|queue> channel='<c>' servers=<n> match=<tiers|->`
-//! — grep token `[serves] mechanism=`.
+//! — grep token `[serves] mechanism=`. An external row's tier is `external`.
 //!
 //! Module slot declared by L0.2; its API is reached as
 //! `glia_engine::serves::<item>`, never flattened into the crate root.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use glia_code_domain::endpoint::split_owner;
-use glia_code_domain::{edge_category, node_kind};
+use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_code_extractors::queues::is_framework_tag;
-use glia_core::{Confidence, NodeId};
-use glia_graph::{HttpRouteMatcher, MergedGraph};
+use glia_core::{Cell, CellPayload, Confidence, NodeId};
+use glia_graph::{HttpRouteMatcher, MergedGraph, normalise_http_path};
 
 use crate::absence::{self, Answer, mechanisms_for_kind};
 use crate::answers::{Located, Locator, entrypoint_reachable, live_marker};
@@ -64,13 +77,20 @@ const SUGGESTIONS: usize = 5;
 const CONSUMER: &str = "queue_consumer:";
 const PRODUCER: &str = "queue_producer:";
 
+/// An ENDPOINT qname's prefix (`endpoint:<METHOD>:<path>`).
+const ENDPOINT: &str = "endpoint:";
+
+/// The match tier of a server outside the build (CJ.3).
+const EXTERNAL: &str = "external";
+
 /// One node that serves the channel, located, with the code it hands off to.
 #[derive(serde::Serialize, Debug, Clone)]
 #[non_exhaustive]
 pub struct Server {
     pub id: u64,
     pub qname: String,
-    /// `ROUTE` or `QUEUE_CONSUMER`.
+    /// `ROUTE` or `QUEUE_CONSUMER`; `ENDPOINT` for an `external` row (the
+    /// build's client of a server outside it).
     pub kind: &'static str,
     pub file: Option<String>,
     /// 1-based (LD.1's `Locator`).
@@ -79,15 +99,21 @@ pub struct Server {
     pub live: bool,
     /// HTTP: the matcher tier that reached the route — `exact`,
     /// `endpoint_prefix`, `any` (the method-agnostic fallback) or
-    /// `route_prefix`. Queue: always `exact` (literal topics only).
+    /// `route_prefix` — or `external` for a client ENDPOINT whose server is
+    /// outside the build (CJ.3). Queue: always `exact` (literal topics only).
     pub r#match: &'static str,
     /// `strong` | `medium` | `weak`. HTTP: the route's own confidence capped
-    /// at its tier's ceiling; queue: the consumer node's.
+    /// at its tier's ceiling (an `external` row: the endpoint node's); queue:
+    /// the consumer node's.
     pub confidence: &'static str,
     /// The HANDLED_BY targets of the server, in edge order, located. Empty
     /// when the build bound no handler (a module-level queue consumer, a
-    /// handler-less framework route).
+    /// handler-less framework route), and for every `external` row (the
+    /// handler is outside the build).
     pub handlers: Vec<Located>,
+    /// The hosts outside the build this row's client calls (match
+    /// `external`), sorted; empty for every in-repo server.
+    pub external_hosts: Vec<String>,
 }
 
 /// Who serves `channel`. `mechanism` is `auto`, `http` or `queue` (any case);
@@ -97,7 +123,10 @@ pub struct Server {
 /// HTTP: `METHOD /path` is looked up under that verb; a bare `/path` under
 /// GET, POST, PUT, PATCH and DELETE in that order, deduped by route (the
 /// matcher's `ANY` tier still finds method-agnostic routes under each). A
-/// full URL is read for its path. Queue: every `queue_consumer:<topic>` node
+/// full URL is read for its path. After the routes come the `external` rows:
+/// the ENDPOINTs CG.4b stamped external for those verbs and that path, in
+/// verb order then build order (a full URL keeps those naming its host).
+/// Queue: every `queue_consumer:<topic>` node
 /// (owner segment ignored), graphs in build order; a framework tag
 /// (`unresolved:<framework>`) is refused, not matched.
 ///
@@ -216,6 +245,7 @@ fn http(merged: &MergedGraph, live: &HashSet<NodeId>, channel: &str) -> Answer<S
         None => (VERBS.to_vec(), channel),
     };
     let path = request_path(raw_path);
+    let host = request_host(raw_path);
     let matcher = HttpRouteMatcher::new(&merged.graphs);
 
     let mut seen: HashSet<NodeId> = HashSet::new();
@@ -227,7 +257,8 @@ fn http(merged: &MergedGraph, live: &HashSet<NodeId>, channel: &str) -> Answer<S
             }
         }
     }
-    let results = servers(merged, live, &hits);
+    let external = external_servers(merged, &verbs, &path, host.as_deref());
+    let results = servers(merged, live, &hits, &external);
     Answer::from_results(results, || {
         let mechanisms = mechanisms_for_kind(node_kind::ROUTE);
         let asked = if verbs.len() == 1 {
@@ -261,6 +292,126 @@ fn request_path(raw: &str) -> String {
     } else {
         format!("/{p}")
     }
+}
+
+/// The host a full URL names: its authority with any `user@` and a numeric
+/// `:port` stripped, lower-cased, a trailing root `.` dropped; `None` for a
+/// bare path or an empty authority.
+fn request_host(raw: &str) -> Option<String> {
+    let (_, after_scheme) = raw.trim().split_once("://")?;
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    let host = host_name(authority);
+    (!host.is_empty()).then_some(host)
+}
+
+/// `[user@]host[:port]` -> `host`, lower-cased, a trailing root `.` dropped:
+/// the shape the endpoint fold judges a host in, so a recorded `host` and an
+/// asked one compare equal whatever their case or port.
+fn host_name(authority: &str) -> String {
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host.rsplit_once(':') {
+        Some((name, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => name,
+        _ => host,
+    };
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// CG.4b's verdict on one ENDPOINT id, read from every cell of every entry of
+/// it (an ENDPOINT id can sit in several graphs of a repo, LB.5, and CG.4b
+/// stamps every entry): `Some(hosts)` when some ORIGIN cell parses to
+/// `provenance == "external"`, `hosts` being the distinct `host` strings of
+/// the ENDPOINT_HIT payloads marked `"external": true` (CG.4a), sorted.
+/// `None` for an in-repo endpoint, including an external call the build pairs
+/// because its host names a project alias, or an overlay pin configured its
+/// site: CG.4b never stamps those. The one reader `effects` and `serves`
+/// share, so the two answers agree with `glia gaps` and engram-export.
+pub(crate) fn external_hosts<'c>(cells: impl IntoIterator<Item = &'c Cell>) -> Option<Vec<String>> {
+    let mut external = false;
+    let mut hosts: BTreeSet<String> = BTreeSet::new();
+    for c in cells {
+        let (CellPayload::Json(j) | CellPayload::Text(j)) = &c.payload else {
+            continue;
+        };
+        if c.kind == cell_type::ORIGIN {
+            external |= serde_json::from_str::<serde_json::Value>(j)
+                .is_ok_and(|v| v.get("provenance").and_then(|p| p.as_str()) == Some(EXTERNAL));
+        } else if c.kind == cell_type::ENDPOINT_HIT
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(j)
+            && v.get("external").and_then(|e| e.as_bool()) == Some(true)
+            && let Some(h) = v.get("host").and_then(|h| h.as_str())
+        {
+            hosts.insert(h.to_string());
+        }
+    }
+    external.then(|| hosts.into_iter().collect())
+}
+
+/// `(id, confidence, hosts)` of every ENDPOINT CG.4b stamped external whose
+/// owner-free qname is `endpoint:<verb>:<path>` for one of `verbs` (paths
+/// compared through the matcher's [`normalise_http_path`]), keeping only
+/// those whose hosts include `host` (in [`host_name`] form) when the channel
+/// named one. In verb order, then graph and node build order; the first entry
+/// of an id fixes its place and its confidence. One pass over the nodes.
+fn external_servers(
+    merged: &MergedGraph,
+    verbs: &[&str],
+    path: &str,
+    host: Option<&str>,
+) -> Vec<(NodeId, Confidence, Vec<String>)> {
+    let want = normalise_http_path(path);
+    // Per id: (verb index, confidence of the first entry, every entry's cells).
+    let mut order: Vec<NodeId> = Vec::new();
+    let mut found: HashMap<NodeId, (usize, Confidence, Vec<&Cell>)> = HashMap::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ENDPOINT) {
+                continue;
+            }
+            if let Some(entry) = found.get_mut(&n.id) {
+                entry.2.extend(n.cells.iter());
+                continue;
+            }
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
+            let Some((verb, p)) = split_owner(qname)
+                .0
+                .strip_prefix(ENDPOINT)
+                .and_then(|rest| rest.split_once(':'))
+            else {
+                continue;
+            };
+            let Some(vi) = verbs.iter().position(|v| v.eq_ignore_ascii_case(verb)) else {
+                continue;
+            };
+            if normalise_http_path(p) != want {
+                continue;
+            }
+            order.push(n.id);
+            found.insert(n.id, (vi, n.confidence, n.cells.iter().collect()));
+        }
+    }
+    let mut rows: Vec<(usize, NodeId, Confidence, Vec<String>)> = Vec::new();
+    for id in order {
+        let Some((vi, confidence, cells)) = found.remove(&id) else {
+            continue;
+        };
+        let Some(hosts) = external_hosts(cells) else {
+            continue;
+        };
+        if host.is_some_and(|h| !hosts.iter().any(|x| host_name(x) == h)) {
+            continue;
+        }
+        rows.push((vi, id, confidence, hosts));
+    }
+    // Stable: build order within a verb.
+    rows.sort_by_key(|r| r.0);
+    rows.into_iter()
+        .map(|(_, id, confidence, hosts)| (id, confidence, hosts))
+        .collect()
 }
 
 /// `path` with its last segment stripped; `None` for a one-segment path (its
@@ -320,7 +471,7 @@ fn queue(merged: &MergedGraph, live: &HashSet<NodeId>, topic: &str) -> Answer<Se
             .filter(|(_, t, _)| *t == topic)
             .map(|(id, _, confidence)| (id, "exact", confidence))
             .collect();
-    let results = servers(merged, live, &hits);
+    let results = servers(merged, live, &hits, &[]);
     Answer::from_results(results, || {
         let producers: Vec<(NodeId, &str, Confidence)> =
             queue_nodes(merged, node_kind::QUEUE_PRODUCER, PRODUCER)
@@ -398,14 +549,16 @@ fn fold_topic(topic: &str) -> String {
 
 // ---- shared ----------------------------------------------------------------
 
-/// Located servers for `hits` (in order), each with its HANDLED_BY targets.
-/// One pass over the edges and one [`Locator`] per answer.
+/// Located servers for `hits` (in order), each with its HANDLED_BY targets,
+/// then the `external` rows for `external` (in order, no handlers). One pass
+/// over the edges and one [`Locator`] per answer.
 fn servers(
     merged: &MergedGraph,
     live: &HashSet<NodeId>,
     hits: &[(NodeId, &'static str, Confidence)],
+    external: &[(NodeId, Confidence, Vec<String>)],
 ) -> Vec<Server> {
-    if hits.is_empty() {
+    if hits.is_empty() && external.is_empty() {
         return Vec::new();
     }
     let wanted: HashSet<NodeId> = hits.iter().map(|(id, _, _)| *id).collect();
@@ -419,7 +572,7 @@ fn servers(
         }
     }
     let loc = Locator::new(merged);
-    let rows: Vec<Server> = hits
+    let mut rows: Vec<Server> = hits
         .iter()
         .map(|&(id, tier, confidence)| {
             let at = loc.locate(id);
@@ -436,9 +589,25 @@ fn servers(
                     .get(&id)
                     .map(|hs| hs.iter().map(|h| loc.locate(*h)).collect())
                     .unwrap_or_default(),
+                external_hosts: Vec::new(),
             }
         })
         .collect();
+    rows.extend(external.iter().map(|(id, confidence, hosts)| {
+        let at = loc.locate(*id);
+        Server {
+            id: at.id,
+            qname: at.qname,
+            kind: at.kind,
+            file: at.file,
+            line: at.line,
+            live: live.contains(id),
+            r#match: EXTERNAL,
+            confidence: confidence_name(*confidence),
+            handlers: Vec::new(),
+            external_hosts: hosts.clone(),
+        }
+    }));
     live_marker("serves", rows.len(), rows.iter().filter(|r| r.live).count());
     rows
 }
@@ -486,6 +655,66 @@ mod tests {
         );
         assert_eq!(request_path("https://api.example.com"), "/");
         assert_eq!(request_path("orders/{id}"), "/orders/{id}");
+    }
+
+    #[test]
+    fn request_host_reads_the_authority() {
+        assert_eq!(
+            request_host("https://u@Api.Example.org:8443/x?q").as_deref(),
+            Some("api.example.org")
+        );
+        assert_eq!(
+            request_host("http://api.example.org.").as_deref(),
+            Some("api.example.org")
+        );
+        assert_eq!(request_host("/x"), None);
+        assert_eq!(request_host("orders/{id}"), None);
+        assert_eq!(request_host("https:///x"), None);
+        // A non-numeric suffix is no port.
+        assert_eq!(host_name("svc:http"), "svc:http");
+    }
+
+    fn cell(kind: glia_core::CellTypeId, json: &str) -> Cell {
+        Cell {
+            kind,
+            payload: CellPayload::Json(json.to_string()),
+        }
+    }
+
+    #[test]
+    fn external_hosts_reads_the_origin_verdict() {
+        let origin = cell(cell_type::ORIGIN, r#"{"provenance":"external"}"#);
+        let site = |host: &str, external: bool| {
+            let mark = if external { r#","external":true"# } else { "" };
+            cell(
+                cell_type::ENDPOINT_HIT,
+                &format!(r#"{{"method":"GET","path":"/search","host":"{host}"{mark}}}"#),
+            )
+        };
+        // Two entries of one id: hosts deduped and sorted, unmarked sites skipped.
+        let cells = [
+            site("z.example.org", true),
+            origin.clone(),
+            site("a.example.org", true),
+            site("z.example.org", true),
+            site("in.example.org", false),
+        ];
+        assert_eq!(
+            external_hosts(&cells),
+            Some(vec![
+                "a.example.org".to_string(),
+                "z.example.org".to_string()
+            ])
+        );
+        // Marked sites without the ORIGIN stamp: paired, so in-repo.
+        assert_eq!(external_hosts(&[site("a.example.org", true)]), None);
+        // Another provenance is not external.
+        let fixture = cell(cell_type::ORIGIN, r#"{"provenance":"test_fixture"}"#);
+        assert_eq!(
+            external_hosts(&[fixture, site("a.example.org", true)]),
+            None
+        );
+        assert_eq!(external_hosts(&[origin]), Some(Vec::new()));
     }
 
     #[test]

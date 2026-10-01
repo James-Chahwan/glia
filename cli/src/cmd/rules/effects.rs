@@ -6,14 +6,17 @@
 //! One table row per sink: `| class | mode | sink | location | depth | via |
 //! downstream |` (`via` is the witness chain from the seed, `downstream` the
 //! receivers one flow hop past the sink), plus `| crossed |` with
-//! `--cross-service`. An empty answer prints its LD.8a absence block. `--json`
-//! is the engine's whole `Effects`.
+//! `--cross-service`. A sink whose server is outside the build (CG.4b's ORIGIN
+//! `external`, CJ.3) reads `external: `<host>`` in `downstream`. An empty
+//! answer prints its LD.8a absence block. `--json` is the engine's whole
+//! `Effects` (each row's `external_hosts` included).
 //!
 //! A report, not a gate: exit 0 on any answer (an empty one included), 2 on a
 //! build failure, more than 64 names, or an unknown `--class`.
 //!
 //! Fired-on marker: the engine's
-//! `[effects] seeds=<S> reached=<R> effects=<E> (db=.. queue_produce=.. http_call=.. event_emit=.. other=..) writes=<W> config_seeds=<C>`.
+//! `[effects] seeds=<S> reached=<R> effects=<E> (db=.. queue_produce=.. http_call=.. event_emit=.. other=..) writes=<W> config_seeds=<C>`,
+//! and `[effects-external] sinks=<n> hosts=<k>` when a row is external.
 
 use glia_engine::effects::{DEFAULT_MAX_DEPTH, EffectRow, Effects, EffectsArgs, effects};
 
@@ -78,15 +81,24 @@ fn chain(r: &EffectRow) -> String {
     out
 }
 
+/// `external: `h1`, `h2`` for a sink outside the build (CJ.3), then the
+/// receivers `qname (CATEGORY)`; `—` when there is neither.
 fn downstream(r: &EffectRow) -> String {
-    if r.downstream.is_empty() {
-        return "—".to_string();
+    let mut parts: Vec<String> = Vec::new();
+    if !r.external_hosts.is_empty() {
+        let hosts: Vec<String> = r.external_hosts.iter().map(|h| format!("`{h}`")).collect();
+        parts.push(format!("external: {}", hosts.join(", ")));
     }
-    r.downstream
-        .iter()
-        .map(|t| format!("`{}` ({})", t.qname, t.category))
-        .collect::<Vec<_>>()
-        .join(", ")
+    parts.extend(
+        r.downstream
+            .iter()
+            .map(|t| format!("`{}` ({})", t.qname, t.category)),
+    );
+    if parts.is_empty() {
+        "—".to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 fn print_table(a: &Effects, cross_service: bool) {

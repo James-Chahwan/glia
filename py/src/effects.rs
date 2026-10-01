@@ -41,12 +41,15 @@ impl PyGraph {
     /// Returns a dict `{seeds, effects, counts, writes, unresolved,
     /// absence}`. `effects` is one row per sink `{class, qname, name, kind,
     /// file, line, mode, depth, seed, via_config, services_crossed,
-    /// downstream, path, tier}`: `class` from the domain's sink table (`db`,
+    /// downstream, path, tier, external_hosts}`: `class` from the domain's sink table (`db`,
     /// `email`, `queue_produce`, `http_call`, `event_emit`, `rpc_call`,
     /// `ws_send`, `graphql_op`), `mode` the folded SQL verb (`read` / `write`
     /// / `read_write`) or None, `path` the witness hops `{from_qname,
     /// to_qname, category, site_file, site_line}` from `seed`, `downstream`
-    /// the receivers one flow hop past the sink. Lines are 1-based. `depth`
+    /// the receivers one flow hop past the sink, `external_hosts` the sorted
+    /// hosts outside the build an `http_call` sink calls when the build
+    /// stamped it ORIGIN external (its `downstream` is then empty; `[]` for
+    /// an in-repo sink). Lines are 1-based. `depth`
     /// bounds the walk; `classes` keeps those classes; `writes_only` drops db
     /// reads; `cross_service` walks on past each send into the receiving
     /// handler (and counts `services_crossed`); `scope` keeps sinks under a

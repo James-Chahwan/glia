@@ -18,7 +18,8 @@ API = ("from flask import Flask\nfrom kafka import KafkaProducer\n\napp = Flask(
 WORKER = ("from kafka import KafkaConsumer\n\nconsumer = KafkaConsumer('orders')\n\n\n"
           "def handle():\n    for msg in consumer:\n        print(msg)\n")
 
-SERVER_KEYS = ["id", "qname", "kind", "file", "line", "live", "match", "confidence", "handlers"]
+SERVER_KEYS = ["id", "qname", "kind", "file", "line", "live", "match", "confidence", "handlers",
+               "external_hosts"]
 LOCATED_KEYS = ["id", "name", "qname", "kind", "file", "line"]
 
 

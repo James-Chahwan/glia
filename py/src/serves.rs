@@ -42,12 +42,17 @@ impl PyGraph {
     /// ValueError.
     ///
     /// Returns a dict `{results, absence}`: `results` is the servers
-    /// `{id, qname, kind, file, line, live, match, confidence, handlers}` —
-    /// `match` is the HTTP matcher tier that reached the route (`exact`,
-    /// `endpoint_prefix`, `any` = only the method-agnostic fallback,
-    /// `route_prefix`; `exact` for a queue consumer), `handlers` the
-    /// HANDLED_BY targets `{id, name, qname, kind, file, line}` in edge order,
-    /// lines 1-based. `absence` is `None` when something serves the channel,
+    /// `{id, qname, kind, file, line, live, match, confidence, handlers,
+    /// external_hosts}` — `match` is the HTTP matcher tier that reached the
+    /// route (`exact`, `endpoint_prefix`, `any` = only the method-agnostic
+    /// fallback, `route_prefix`; `exact` for a queue consumer), or `external`
+    /// for a client ENDPOINT (kind `ENDPOINT`, after the routes) the build
+    /// stamped ORIGIN external: its server is outside the build, so it has no
+    /// handlers and `external_hosts` lists the sorted hosts its call sites
+    /// name (a full-URL channel keeps the rows naming its host; `[]` on every
+    /// in-repo server). `handlers` is the HANDLED_BY targets `{id, name,
+    /// qname, kind, file, line}` in edge order, lines 1-based. `absence` is
+    /// `None` when something serves the channel, inside the build or out,
     /// else the FACT-tier `unserved_channel` dict (a refused framework tag is
     /// `no_match`) with the mechanism's caveat rows, up to five near misses
     /// in `suggestions` (the route under another verb or the parent path's;

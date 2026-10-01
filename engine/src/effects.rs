@@ -66,6 +66,12 @@
 //! sorted by (class in table order, depth, qname); ties keep BFS discovery
 //! order.
 //!
+//! `external_hosts` (CJ.3): an ENDPOINT sink CG.4b stamped ORIGIN
+//! `{"provenance":"external"}` (every call site names a public host outside
+//! the build, and nothing pairs it) carries the hosts its sites name, sorted,
+//! read by `serves::external_hosts` (the reader `serves` shares); its
+//! `downstream` stays empty. Every other row's list is empty.
+//!
 //! Filters apply to the rows, never the walk (a filtered-out sink still stops
 //! it): `classes` keeps the named classes, `writes_only` keeps db rows whose
 //! mode is `write` / `read_write` plus every other class (a send is a write),
@@ -91,14 +97,16 @@
 //!
 //! fired_on marker, one line per answered call:
 //! `[effects] seeds=<S> reached=<R> effects=<E> (db=<a> queue_produce=<b> http_call=<c> event_emit=<d> other=<o>) writes=<W> config_seeds=<C>`
-//! — grep `^\[effects\] seeds=`.
+//! — grep `^\[effects\] seeds=`. When a kept row is external, one more line
+//! after it: `[effects-external] sinks=<n> hosts=<k>` (`k` distinct hosts)
+//! — grep `^\[effects-external\]`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{cell_type, edge_category, node_kind};
-use glia_core::{CellPayload, Edge, EdgeCategoryId, NodeId, NodeKindId};
+use glia_core::{Cell, CellPayload, Edge, EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
 
 use crate::absence::{self, Absence};
@@ -107,6 +115,7 @@ use crate::arch::{default_keying, service_of};
 use crate::coverage::ext_to_language;
 use crate::find::{self, FindOptions, FoundNode};
 use crate::profile::CODE_PROFILE;
+use crate::serves::external_hosts;
 
 /// [`EffectsArgs::default`]'s `max_depth`.
 pub const DEFAULT_MAX_DEPTH: usize = 8;
@@ -229,6 +238,10 @@ pub struct EffectRow {
     pub path: Vec<EffectHop>,
     /// Always `derived`.
     pub tier: &'static str,
+    /// For an `http_call` sink CG.4b stamped ORIGIN external, its hosts
+    /// outside the build, sorted (its `downstream` is empty: nothing pairs
+    /// it); empty for an in-repo sink.
+    pub external_hosts: Vec<String>,
 }
 
 /// [`effects`]'s answer.
@@ -425,6 +438,14 @@ pub fn effects(
         }
     }
 
+    // CJ.3: CG.4b's verdict on each ENDPOINT sink, from every entry's cells.
+    let external = external_sinks(
+        merged,
+        hits.iter()
+            .map(|h| h.real)
+            .filter(|id| index.kind(*id) == Some(node_kind::ENDPOINT)),
+    );
+
     let keying = default_keying(merged);
     let service = |id: NodeId| -> Option<String> {
         let file = loc.file_of(id)?;
@@ -496,6 +517,7 @@ pub fn effects(
             downstream,
             path,
             tier: DERIVED,
+            external_hosts: external.get(&h.real).cloned().unwrap_or_default(),
         };
         rows.push((h.sink.0, row));
     }
@@ -538,6 +560,21 @@ pub fn effects(
         count("event_emit"),
         config_keys.len()
     );
+    let external_rows: Vec<&EffectRow> = rows
+        .iter()
+        .filter(|r| !r.external_hosts.is_empty())
+        .collect();
+    if !external_rows.is_empty() {
+        let hosts: BTreeSet<&str> = external_rows
+            .iter()
+            .flat_map(|r| r.external_hosts.iter().map(String::as_str))
+            .collect();
+        eprintln!(
+            "[effects-external] sinks={} hosts={}",
+            external_rows.len(),
+            hosts.len()
+        );
+    }
 
     let query = names.join(", ");
     let absence = if !rows.is_empty() {
@@ -631,6 +668,31 @@ pub fn effects(
         unresolved,
         absence,
     })
+}
+
+/// The external hosts (CG.4b's verdict, [`external_hosts`]) of each of `ids`
+/// that is external, read from every cell of every entry of it in one pass
+/// over the nodes; no pass at all when `ids` is empty.
+fn external_sinks(
+    merged: &MergedGraph,
+    ids: impl IntoIterator<Item = NodeId>,
+) -> HashMap<NodeId, Vec<String>> {
+    let mut cells: HashMap<NodeId, Vec<&Cell>> =
+        ids.into_iter().map(|id| (id, Vec::new())).collect();
+    if cells.is_empty() {
+        return HashMap::new();
+    }
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            if let Some(list) = cells.get_mut(&n.id) {
+                list.extend(n.cells.iter());
+            }
+        }
+    }
+    cells
+        .into_iter()
+        .filter_map(|(id, cs)| external_hosts(cs).map(|hosts| (id, hosts)))
+        .collect()
 }
 
 /// The class names of the sink table, in table order.

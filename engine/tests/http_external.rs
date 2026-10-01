@@ -14,12 +14,19 @@
 //! `glia gaps` lists it neither as an unpaired endpoint nor as a suspected
 //! edge, and the overlay `[constants]` pin (the escape hatch) makes it the
 //! build's own call again: unmarked, unstamped, paired.
+//!
+//! CJ.3: the two answers that list sinks and servers read that verdict.
+//! `effects` labels the `/search` sink with its host (`external_hosts`), and
+//! `serves "GET /search"` lists the external ENDPOINT after the in-repo route,
+//! match `external`.
 
 use std::path::Path;
 
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{CellPayload, NodeId};
+use glia_engine::effects::{EffectRow, Effects, EffectsArgs, effects};
 use glia_engine::gaps::{GapsOptions, GapsReport, SUSPECTED_EDGE, UNPAIRED_ENDPOINT, gaps_report};
+use glia_engine::serves::serves;
 use glia_engine::{GenerateResult, generate_one};
 
 const APP_JS: &str = "const express = require('express');
@@ -124,7 +131,12 @@ fn http_targets(r: &GenerateResult, from: NodeId) -> Vec<String> {
         .merged
         .all_edges()
         .filter(|e| e.category == edge_category::HTTP_CALLS && e.from == from)
-        .filter_map(|e| r.merged.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&e.to).cloned()))
+        .filter_map(|e| {
+            r.merged
+                .graphs
+                .iter()
+                .find_map(|g| g.nav.qname_by_id.get(&e.to).cloned())
+        })
         .collect();
     out.sort();
     out
@@ -168,7 +180,10 @@ fn external_endpoint_is_unpaired_labelled_and_no_gap() {
         !hits.is_empty() && hits.iter().all(|h| h.contains("\"external\":true")),
         "CG.4a marks every site: {hits:?}"
     );
-    assert!(http_targets(&r, search).is_empty(), "nominatim's /search is not GET /search");
+    assert!(
+        http_targets(&r, search).is_empty(),
+        "nominatim's /search is not GET /search"
+    );
     assert_eq!(
         payloads(&r, search, cell_type::ORIGIN),
         vec![r#"{"provenance":"external"}"#.to_string()],
@@ -206,7 +221,10 @@ fn external_endpoint_is_unpaired_labelled_and_no_gap() {
     assert!(!unpaired.contains(&SEARCH), "{rep:#?}");
     let suspected = report(&r, Some(SUSPECTED_EDGE));
     assert!(
-        suspected.rows.iter().all(|row| !row.qname.starts_with("endpoint:GET:/search")),
+        suspected
+            .rows
+            .iter()
+            .all(|row| !row.qname.starts_with("endpoint:GET:/search")),
         "{suspected:#?}"
     );
 }
@@ -222,5 +240,132 @@ fn overlay_pin_brings_the_endpoint_back() {
     let hits = payloads(&r, search, cell_type::ENDPOINT_HIT);
     assert!(hits.iter().all(|h| !h.contains("\"external\"")), "{hits:?}");
     assert!(payloads(&r, search, cell_type::ORIGIN).is_empty());
-    assert_eq!(http_targets(&r, search), vec!["GET /search @server".to_string()]);
+    assert_eq!(
+        http_targets(&r, search),
+        vec!["GET /search @server".to_string()]
+    );
+}
+
+const NOMINATIM: &str = "nominatim.openstreetmap.org";
+
+fn effects_of(r: &GenerateResult, seed: &str) -> Effects {
+    effects(&r.merged, &r.repo_labels, &[seed], &EffectsArgs::default()).expect("effects")
+}
+
+/// The one row of `a` whose sink is `qname`.
+fn sink<'a>(a: &'a Effects, qname: &str) -> &'a EffectRow {
+    let rows: Vec<&EffectRow> = a.effects.iter().filter(|r| r.qname == qname).collect();
+    assert_eq!(rows.len(), 1, "one {qname}: {a:#?}");
+    rows[0]
+}
+
+/// One server row: `(qname, kind, match, external_hosts)`.
+type Row = (String, &'static str, &'static str, Vec<String>);
+
+/// The servers of `channel`. An external row binds no handler (it sits
+/// outside the build), and an answer with rows carries no absence.
+fn served(r: &GenerateResult, channel: &str) -> Vec<Row> {
+    let a = serves(&r.merged, channel, "auto").expect("serves");
+    if a.results.is_empty() {
+        assert!(
+            a.absence.is_some(),
+            "{channel}: an empty answer carries its absence"
+        );
+    } else {
+        assert!(
+            a.absence.is_none(),
+            "{channel}: served, so no absence: {a:#?}"
+        );
+    }
+    for s in a.results.iter().filter(|s| s.r#match == "external") {
+        assert!(s.handlers.is_empty(), "{channel}: {s:#?}");
+        assert!(
+            s.line.is_some_and(|l| l >= 1),
+            "{channel}: located, 1-based: {s:#?}"
+        );
+    }
+    a.results
+        .iter()
+        .map(|s| (s.qname.clone(), s.kind, s.r#match, s.external_hosts.clone()))
+        .collect()
+}
+
+/// CJ.3: effects reads CG.4b's ORIGIN verdict. The external `/search` sink
+/// names its host and has no receiver; the paired `/orders` sink names no
+/// host and its route; with the `[constants]` pin `/search` is in-repo again.
+#[test]
+fn effects_labels_the_external_sink() {
+    let d = fixture(false);
+    let r = build(d.path());
+
+    let geo = effects_of(&r, "web::src::geo::forwardGeocode");
+    let search = sink(&geo, SEARCH);
+    assert_eq!(search.class, "http_call");
+    assert_eq!(search.external_hosts, vec![NOMINATIM.to_string()]);
+    assert!(
+        search.downstream.is_empty(),
+        "nothing pairs it: {search:#?}"
+    );
+
+    let orders = effects_of(&r, "web::src::geo::listOrders");
+    let row = sink(&orders, "endpoint:GET:/orders @web");
+    assert!(row.external_hosts.is_empty(), "{row:#?}");
+    let receivers: Vec<&str> = row.downstream.iter().map(|t| t.qname.as_str()).collect();
+    assert_eq!(receivers, ["GET /orders @server"]);
+
+    let pinned = fixture(true);
+    let r = build(pinned.path());
+    let geo = effects_of(&r, "web::src::geo::forwardGeocode");
+    let search = sink(&geo, SEARCH);
+    assert!(
+        search.external_hosts.is_empty(),
+        "the pin configures the site: {search:#?}"
+    );
+    let receivers: Vec<&str> = search.downstream.iter().map(|t| t.qname.as_str()).collect();
+    assert_eq!(receivers, ["GET /search @server"]);
+}
+
+/// CJ.3: serves lists the external ENDPOINT after the in-repo route, match
+/// `external`, with its host and no handler; a URL naming another host, a
+/// path no external call names, and the pinned build list the route alone.
+#[test]
+fn serves_lists_the_external_host_after_the_route() {
+    let d = fixture(false);
+    let r = build(d.path());
+
+    let route = |q: &str| -> Row { (q.to_string(), "ROUTE", "exact", Vec::new()) };
+    let external: Row = (
+        SEARCH.to_string(),
+        "ENDPOINT",
+        "external",
+        vec![NOMINATIM.to_string()],
+    );
+    let both = vec![route("GET /search @server"), external];
+    assert_eq!(served(&r, "GET /search"), both);
+    assert_eq!(
+        served(&r, "GET https://nominatim.openstreetmap.org/search"),
+        both
+    );
+    // The asked host is read as the fold reads one: case, port and query folded.
+    assert_eq!(
+        served(&r, "GET https://Nominatim.OpenStreetMap.org:443/search?q=x"),
+        both
+    );
+    assert_eq!(
+        served(&r, "GET https://other.example.org/search"),
+        vec![route("GET /search @server")]
+    );
+    assert_eq!(
+        served(&r, "GET /orders"),
+        vec![route("GET /orders @server")]
+    );
+    // A bare path asks every verb: the same two rows.
+    assert_eq!(served(&r, "/search"), both);
+
+    let pinned = fixture(true);
+    let r = build(pinned.path());
+    assert_eq!(
+        served(&r, "GET /search"),
+        vec![route("GET /search @server")]
+    );
 }
