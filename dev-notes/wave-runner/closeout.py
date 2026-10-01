@@ -350,6 +350,13 @@ def main():
                  "dev-notes/packet-corrections.json dev-notes/leap-corrections.json dev-notes/leap-051-corrections.json dev-notes/wave-runner && "
                  "git -c user.name='james chahwan' commit -q -F /tmp/claude-1000/-home-ivy-Code-glia/closeout.msg && git log --oneline -1")
     say(f"== committed: {out.strip()}" if rc == 0 else f"!! commit failed: {out}")
+    # Build caches grow by tens of GB a wave (0.5.1: target/ reached 219G and engram-export/target 59G,
+    # and W1's gate died on "No space left on device"). rustc's incremental cache is the bulk and is
+    # safe to drop: the next build is slower, never different. Every third landed wave, drop it.
+    if rc == 0 and wave % 3 == 0:
+        sh("rm -rf target/debug/incremental engram-export/target/debug/incremental")
+        say(f"== dropped the incremental build caches (every 3rd wave); repo disk free "
+            f"{shutil.disk_usage(str(ROOT)).free / 2**30:.0f}G")
 
 
 if __name__ == "__main__":
