@@ -6,7 +6,7 @@
 //!
 //! | section | kind | consumer | `--no-overlay` |
 //! |---|---|---|---|
-//! | `[walk]`, `[[project]]`, `[entrypoints]` | user config | LF.3a / LF.3b | still applied |
+//! | `[walk]`, `[[project]]`, `[entrypoints]` | user config | LF.3a / LF.3b (+CJ.4: `[walk] tests`) | still applied |
 //! | `[[constraint]]`, `[[decision]]`, `[[note]]`, `[[component]]`, `[[layer]]` | declared knowledge | LF.4a (+CC.5a) | still applied |
 //! | `[constants]`, `[[route_prefix]]`, `[[wrapper]]`, `[[edge]]` | overlay (inference) | LF.2d / LF.2e (+LG.3d) / LF.2b | skipped |
 //!
@@ -126,12 +126,68 @@ pub struct GliaConfig {
 }
 
 /// `[walk]`: gitignore-syntax patterns anchored at the repo root. They only
-/// extend the built-in skips; nothing here can un-skip a hard skip.
+/// extend the built-in rules; nothing here can un-skip a hard skip or un-tag
+/// a path the built-in test rule tags.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WalkConfig {
+    /// Extra walk skips (LF.3a): a matching path is never parsed.
     #[serde(default)]
     pub skip: Vec<String>,
+    /// Test / fixture code the built-in test paths miss (CJ.4): a matching
+    /// file's nodes carry ORIGIN provenance `test_fixture`, beside the engine's
+    /// fixed directory / suffix list. They only add: nothing here un-tags a
+    /// path.
+    #[serde(default)]
+    pub tests: Vec<String>,
+}
+
+impl WalkConfig {
+    /// The `[walk] tests` matcher, `None` when no pattern is declared (or,
+    /// past the loader's per-line check, the set fails to build).
+    pub fn tests_matcher(&self) -> Option<TestPaths> {
+        if self.tests.is_empty() {
+            return None;
+        }
+        // The root `check_skip_pattern` validates against: a pattern is
+        // matched against a repo-relative path, so the root is never stripped.
+        let mut builder = ignore::gitignore::GitignoreBuilder::new("/");
+        for pattern in &self.tests {
+            // Already validated by the loader; a failure here drops the line.
+            let _ = builder.add_line(None, pattern);
+        }
+        let matcher = builder.build().ok()?;
+        (!matcher.is_empty()).then_some(TestPaths { matcher })
+    }
+}
+
+/// A repo's compiled `[walk] tests` patterns (CJ.4), from
+/// [`WalkConfig::tests_matcher`]. Gitignore syntax, anchored at the repo root:
+/// `playwright/` matches that directory at any depth, `/qa/` only at the root,
+/// `qa/**/*.py` the Python files below it, and a `!pattern` re-includes a path
+/// against the earlier `tests` patterns only.
+#[derive(Debug, Clone)]
+pub struct TestPaths {
+    matcher: ignore::gitignore::Gitignore,
+}
+
+impl TestPaths {
+    /// True when `rel_file` (a repo-relative file path, as a POSITION cell
+    /// records it; `\` separators accepted) or one of its parent directories
+    /// matches. An empty path never matches.
+    pub fn matches(&self, rel_file: &str) -> bool {
+        let rel = rel_file.replace('\\', "/");
+        let rel = rel.trim_start_matches("./").trim_start_matches('/');
+        if rel.is_empty() {
+            return false;
+        }
+        self.matcher.matched_path_or_any_parents(Path::new(rel), false).is_ignore()
+    }
+
+    /// How many patterns the matcher holds (ignores plus `!` whitelists).
+    pub fn patterns(&self) -> usize {
+        self.matcher.num_ignores() as usize + self.matcher.num_whitelists() as usize
+    }
 }
 
 /// `[[project]]`: an extra sub-project root the manifest scan cannot see.
@@ -428,12 +484,12 @@ impl LoadedConfig {
     }
 
     /// Per-section entry counts in [`SECTIONS`] order: `walk` counts skip
-    /// patterns, `entrypoints` qname patterns, `constants` keys, every other
-    /// section its stanzas. Feeds the `[overlay] loaded` marker.
+    /// plus tests patterns, `entrypoints` qname patterns, `constants` keys,
+    /// every other section its stanzas. Feeds the `[overlay] loaded` marker.
     pub fn section_counts(&self) -> [(&'static str, usize); 12] {
         let c = &self.config;
         let n = [
-            c.walk.skip.len(),
+            c.walk.skip.len() + c.walk.tests.len(),
             c.project.len(),
             c.entrypoints.qnames.len(),
             c.constants.len(),
@@ -502,6 +558,13 @@ impl LoadedConfig {
             Ok(()) => true,
             Err(e) => {
                 errors.push(self.at(None, &format!("[walk] skip {p:?}: {e} (pattern dropped)")));
+                false
+            }
+        });
+        cfg.walk.tests.retain(|p| match check_skip_pattern(p) {
+            Ok(()) => true,
+            Err(e) => {
+                errors.push(self.at(None, &format!("[walk] tests {p:?}: {e} (pattern dropped)")));
                 false
             }
         });
@@ -1006,7 +1069,8 @@ components = ["api"]
         let l = parse_str(body);
         assert!(l.errors.is_empty(), "{:?}", l.errors);
         let counts: Vec<usize> = l.section_counts().iter().map(|(_, n)| *n).collect();
-        assert_eq!(counts, [2, 1, 2, 2, 1, 4, 1, 2, 1, 1, 2, 1]);
+        assert_eq!(counts, [4, 1, 2, 2, 1, 4, 1, 2, 1, 1, 2, 1]);
+        assert_eq!(l.config.walk.tests, ["playwright/", "qa/**/*.py"], "CJ.4: the example declares tests");
     }
 
     #[test]
@@ -1355,5 +1419,45 @@ prefix = "orders"
         let bad = parse_str("version = 1\n[[edge]]\nfrom = \"a\"\nto = \"b\"\ncategory = \"CALLS\"\norigin = \"robot\"\n");
         assert_eq!(bad.errors.len(), 1);
         assert!(bad.config.edge.is_empty());
+    }
+
+    /// CJ.4: `[walk] tests` parses (HEAD: an unknown field that ignored the
+    /// whole file), drops a bad pattern on its own, counts in `walk`, and
+    /// matches gitignore-style against a repo-relative file path.
+    #[test]
+    fn walk_tests_parse_validate_and_match() {
+        let l = parse_str("version = 1\n[walk]\ntests = [\"playwright/\", \"qa/**/*.py\", \"\"]\n");
+        assert_eq!(l.config.walk.tests, ["playwright/", "qa/**/*.py"]);
+        assert_eq!(l.errors.len(), 1, "{:?}", l.errors);
+        assert!(l.errors[0].contains("[walk] tests \"\""), "{:?}", l.errors);
+        assert!(l.config.walk.skip.is_empty());
+        assert!(l.is_overlay_empty(), "user config, not overlay content");
+        let walk = l.section_counts().iter().find(|(s, _)| *s == "walk").map(|(_, n)| *n);
+        assert_eq!(walk, Some(2));
+
+        let m = l.config.walk.tests_matcher().expect("two patterns compile");
+        assert_eq!(m.patterns(), 2);
+        for hit in ["playwright/checkout.ts", "e2e/playwright/a.ts", "qa/smoke/seed.py", "./playwright/x.ts", "playwright\\win.ts"] {
+            assert!(m.matches(hit), "{hit} is declared test code");
+        }
+        for miss in ["qa/smoke/seed.ts", "src/cart.ts", "playwright.config.ts", "src/qa/seed.py", ""] {
+            assert!(!m.matches(miss), "{miss:?} is not declared test code");
+        }
+
+        // Root anchoring and a re-include against the earlier tests patterns.
+        let l = parse_str("version = 1\n[walk]\nskip = [\"gen/\"]\ntests = [\"/acceptance/\", \"!/acceptance/support/\"]\n");
+        assert!(l.errors.is_empty(), "{:?}", l.errors);
+        let walk = l.section_counts().iter().find(|(s, _)| *s == "walk").map(|(_, n)| *n);
+        assert_eq!(walk, Some(3), "skip plus tests");
+        let m = l.config.walk.tests_matcher().expect("compiles");
+        assert_eq!(m.patterns(), 2, "one ignore, one whitelist");
+        assert!(m.matches("acceptance/cart.feature.ts"));
+        assert!(!m.matches("web/acceptance/cart.ts"), "a leading / anchors at the root");
+        assert!(!m.matches("acceptance/support/world.ts"), "re-included");
+
+        // A config with only skip has no tests matcher.
+        let l = parse_str("version = 1\n[walk]\nskip = [\"legacy\"]\n");
+        assert!(l.errors.is_empty() && l.config.walk.tests.is_empty(), "{:?}", l.errors);
+        assert!(l.config.walk.tests_matcher().is_none());
     }
 }

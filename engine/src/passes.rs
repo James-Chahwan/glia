@@ -8,9 +8,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use glia_code_domain::evidence::{self, Basis, Evidence, Location};
+use glia_code_domain::glia_config::TestPaths;
 use glia_code_domain::{bare_module_qname, edge_category, node_kind, same_stem_order};
-use glia_core::{Confidence, Edge, NodeId, NodeKindId};
+use glia_core::{Confidence, Edge, NodeId, NodeKindId, RepoId};
 use glia_graph::MergedGraph;
+
+use crate::profile::CodeBuildCtx;
 
 /// LC.2 fired_on marker, one line per build, un-gated:
 ///   `[edge-cells] intra=<intra edges> cross=<cross edges> with_cells=<k>`
@@ -792,11 +795,32 @@ fn is_identifier(s: &str) -> bool {
 /// which repos were built together, so a stamp of it that no longer holds
 /// (a layout merge, LC.10b, that brings the host's project) is removed
 /// before the stamping, on every entry of the id.
-pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph) {
+///
+/// CJ.4: a repo whose `.glia/overlay.toml` declares `[walk] tests = [..]`
+/// (user config: read with or without `--no-overlay`) has every node whose
+/// POSITION file matches stamped `test_fixture` too, in the same arm as the
+/// built-in path / qname rule, so precedence is unchanged. A pattern applies
+/// to its own repo's nodes only (RepoId match), and only adds. A layout merge
+/// runs with an empty `ctx`: the stamps its members were built with are kept
+/// by the skip-if-ORIGIN rule. Per declaring repo, after the stamping:
+/// `[provenance] declared tests repo=<label> patterns=<n> tagged=<d>`, where
+/// `tagged` counts node entries only the declared rule tagged.
+pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuildCtx) {
     use std::collections::HashSet;
 
     use glia_code_domain::{cell_type, node_kind};
     use glia_core::{Cell, CellPayload};
+
+    // (repo, label, matcher, tagged): in `ctx.inputs` order, so the marker
+    // lines are too.
+    let mut declared: Vec<(RepoId, &str, TestPaths, usize)> = ctx
+        .inputs
+        .iter()
+        .filter_map(|input| {
+            let matcher = input.config.as_ref()?.config.walk.tests_matcher()?;
+            Some((input.repo, input.label.as_str(), matcher, 0))
+        })
+        .collect();
 
     let third_party = glia_graph::HttpStackResolver::third_party_endpoints(&merged.graphs);
     // Only probed; not built at all when no endpoint is third-party.
@@ -856,6 +880,11 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph) {
                     stats.test_fixture_qname += 1;
                 }
                 "test_fixture"
+            } else if let Some(tagged) = declared_hit(&mut declared, n.repo, &file) {
+                // CJ.4: the repo's own `[walk] tests` patterns.
+                *tagged += 1;
+                stats.test_fixture_declared += 1;
+                "test_fixture"
             } else if kind == Some(node_kind::ENDPOINT) && external(&n.id) {
                 // A third-party HTTP endpoint (CG.4b, see the doc above).
                 EXTERNAL
@@ -872,6 +901,30 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph) {
     if let Some(line) = stats.marker() {
         eprintln!("{line}");
     }
+    for (_, label, matcher, tagged) in &declared {
+        eprintln!(
+            "[provenance] declared tests repo={label} patterns={} tagged={tagged}",
+            matcher.patterns()
+        );
+    }
+}
+
+/// The tagged-count slot of `repo`'s declared `[walk] tests` (CJ.4) when its
+/// matcher matches `file`; `None` for an empty file (a node with no POSITION)
+/// or a repo that declares none. Linear: a build holds a handful of repos.
+fn declared_hit<'d>(
+    declared: &'d mut [(RepoId, &str, TestPaths, usize)],
+    repo: RepoId,
+    file: &str,
+) -> Option<&'d mut usize> {
+    if file.is_empty() {
+        return None;
+    }
+    declared
+        .iter_mut()
+        .find(|(r, ..)| *r == repo)
+        .filter(|(_, _, matcher, _)| matcher.matches(file))
+        .map(|(.., tagged)| tagged)
 }
 
 /// The provenance of a third-party HTTP endpoint (CG.4b).
@@ -887,11 +940,15 @@ fn is_external_origin(c: &glia_core::Cell) -> bool {
 }
 
 /// ORIGIN cells one `tag_synthetic_provenance` run stamped, by provenance;
-/// `test_fixture` split by whether the path rule fired or only the qname rule.
+/// `test_fixture` split by whether the path rule fired, only the qname rule,
+/// or only a repo's declared `[walk] tests` (CJ.4). The marker's
+/// `test_fixture=` total counts all three; the declared ones are reported
+/// per repo on their own `[provenance] declared tests` line.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ProvenanceStats {
     test_fixture_path: usize,
     test_fixture_qname: usize,
+    test_fixture_declared: usize,
     generated_proto: usize,
     generated: usize,
     dependency: usize,
@@ -917,7 +974,8 @@ impl ProvenanceStats {
 
     /// The fired_on line, `None` when the run stamped nothing.
     fn marker(&self) -> Option<String> {
-        let test_fixture = self.test_fixture_path + self.test_fixture_qname;
+        let test_fixture =
+            self.test_fixture_path + self.test_fixture_qname + self.test_fixture_declared;
         let total = test_fixture
             + self.generated_proto
             + self.generated
@@ -2231,7 +2289,7 @@ mod passes_tests {
             m.cross_edges.push(Edge::new(from, route, edge_category::HTTP_CALLS, Confidence::Weak));
         }
 
-        tag_synthetic_provenance(&mut m);
+        tag_synthetic_provenance(&mut m, &CodeBuildCtx::empty());
         let external = vec![r#"{"provenance":"external"}"#.to_string()];
         assert_eq!(origins(&m, all), [external.clone(), external.clone()].concat(), "both entries");
         assert!(origins(&m, mixed).is_empty(), "one unmarked site, on the other entry");
@@ -2245,12 +2303,100 @@ mod passes_tests {
             .iter()
             .map(|id| origins(&m, *id))
             .collect();
-        tag_synthetic_provenance(&mut m);
+        tag_synthetic_provenance(&mut m, &CodeBuildCtx::empty());
         let after: Vec<Vec<String>> = [all, mixed, wired, in_test, merged_in, kept]
             .iter()
             .map(|id| origins(&m, *id))
             .collect();
         assert_eq!(before, after);
+    }
+
+    /// CJ.4: repo A's `[walk] tests = ["playwright/"]` stamps `test_fixture`
+    /// on A's nodes whose POSITION file sits under a `playwright/` directory
+    /// at any depth. Untouched: A's app code, a `playwright.config.ts` FILE,
+    /// a node with no POSITION, a node that already carries its own ORIGIN,
+    /// and repo B's node at the same path (B declares nothing). A built-in
+    /// test path keeps its own counter. User config: `--no-overlay` (the
+    /// context's `overlay = false`) changes nothing.
+    #[test]
+    fn declared_test_paths_tag_test_fixture() {
+        use std::path::PathBuf;
+
+        use crate::external::RepoInputs;
+        use glia_code_domain::glia_config;
+
+        const OWN: &str = r#"{"provenance":"contract","source":"openapi"}"#;
+        let at = |file: &str| Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":0,"end_line":2}}"#)),
+        };
+        let fx = node_kind::FUNCTION;
+        let build = || {
+            let mut a = Hand::new("test://cj4-a");
+            let ids = [
+                a.add(fx, "buyFlow", "playwright::checkout::buyFlow", vec![at("playwright/checkout.ts")]),
+                a.add(fx, "login", "web::playwright::login::login", vec![at("web/playwright/login.ts")]),
+                a.add(fx, "addItem", "src::cart::addItem", vec![at("src/cart.ts")]),
+                a.add(fx, "config", "playwright.config::config", vec![at("playwright.config.ts")]),
+                a.add(fx, "seed", "playwright::seed", vec![]),
+                a.add(fx, "x", "playwright::x::x", vec![
+                    at("playwright/x.ts"),
+                    Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(OWN.into()) },
+                ]),
+                a.add(fx, "spec", "src::cart::spec", vec![at("src/cart.test.ts")]),
+            ];
+            let mut b = Hand::new("test://cj4-b");
+            let other = b.add(fx, "buyFlow", "playwright::checkout::buyFlow", vec![at("playwright/checkout.ts")]);
+            (MergedGraph::new(vec![a.graph(), b.graph()]), ids, other)
+        };
+        let ctx = |overlay: bool| CodeBuildCtx {
+            inputs: vec![
+                RepoInputs {
+                    repo: RepoId::from_canonical("test://cj4-a"),
+                    root: PathBuf::from("cj4-a"),
+                    label: "a".into(),
+                    config: Some(glia_config::parse_str("version = 1\n[walk]\ntests = [\"playwright/\"]\n")),
+                },
+                RepoInputs {
+                    repo: RepoId::from_canonical("test://cj4-b"),
+                    root: PathBuf::from("cj4-b"),
+                    label: "b".into(),
+                    config: None,
+                },
+            ],
+            overlay,
+        };
+        let fixture = vec![r#"{"provenance":"test_fixture"}"#.to_string()];
+
+        let mut runs = Vec::new();
+        for overlay in [true, false] {
+            let (mut m, [flow, nested, app, config, no_pos, own, builtin], other) = build();
+            tag_synthetic_provenance(&mut m, &ctx(overlay));
+            assert_eq!(origins(&m, flow), fixture, "declared playwright/ at the root");
+            assert_eq!(origins(&m, nested), fixture, "declared playwright/ at any depth");
+            assert!(origins(&m, app).is_empty(), "app code stays untagged");
+            assert!(origins(&m, config).is_empty(), "a playwright.config.ts file is not the directory");
+            assert!(origins(&m, no_pos).is_empty(), "no POSITION, no declared tag");
+            assert_eq!(origins(&m, own), vec![OWN.to_string()], "an ORIGIN of its own is kept");
+            assert_eq!(origins(&m, builtin), fixture, "the built-in path rule still fires");
+            assert!(origins(&m, other).is_empty(), "repo B declares nothing");
+            runs.push(
+                [flow, nested, app, config, no_pos, own, builtin, other]
+                    .iter()
+                    .map(|id| origins(&m, *id))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(runs[0], runs[1], "--no-overlay leaves user config applied");
+
+        // No inputs (a layout merge): nothing is declared-tagged.
+        let (mut m, [flow, ..], _) = build();
+        tag_synthetic_provenance(&mut m, &CodeBuildCtx::empty());
+        assert!(origins(&m, flow).is_empty());
+
+        // The marker's total counts the declared stamps too.
+        let s = ProvenanceStats { test_fixture_path: 1, test_fixture_declared: 2, ..Default::default() };
+        assert!(s.marker().is_some_and(|m| m.starts_with("[provenance] test_fixture=3 (path=1 qname=0)")));
     }
 
     #[test]

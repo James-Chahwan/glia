@@ -31,6 +31,7 @@ version = 1                               # required; any other value ignores th
 
 [walk]
 skip = ["legacy/", "*.generated.ts"]      # gitignore syntax, anchored at the repo root; only adds skips
+tests = ["playwright/", "qa/**/*.py"]     # test / fixture code the built-in test paths miss (ORIGIN test_fixture); only adds
 
 [[project]]
 path = "tools/migrator"                   # a sub-project root that has no manifest
@@ -121,6 +122,31 @@ Stanza ids are 1-128 characters with no control characters, unique within their 
 Component and layer names are 1-118 characters (their entry ids are `component:<name>` /
 `layer:<name>`, so a `[[constraint]]` id may not start with either prefix).
 Every `*_arg` is a 0-based positional index, at most 8.
+
+## `[walk]`: skips and declared test paths
+
+Both lists are gitignore syntax, anchored at the repo root: `legacy/` matches that directory at
+any depth, `/legacy/` only at the root, `qa/**/*.py` the Python files below `qa/`, and a
+`!pattern` re-includes a path against the earlier patterns of the same list. Both only add to
+the built-in rules, and both are user config: applied with or without `--no-overlay`.
+
+- `skip`: a matching path is never parsed. A skipped directory becomes a REGION node with
+  ORIGIN provenance `excluded`.
+- `tests`: test / fixture code the built-in test paths miss (they name directories such as
+  `test`, `tests`, `__tests__`, `e2e`, `cypress`, `fixtures` and suffixes such as `_test.go`,
+  `.spec.ts`; `playwright/`, `qa/`, `acceptance/`, `smoke/`, `k6/` and `perf/` are not on that
+  list). The code is still parsed, and every node whose POSITION file matches carries ORIGIN
+  provenance `test_fixture`, like a built-in test path: `tests-for` lists it as a test case,
+  `gaps` leaves it out of `dead_symbol`, `patterns` excludes it, test-report ingest treats it
+  as a fixture, and engram-export / Engram drop it by default. A pattern applies to its own
+  repo's nodes only, never un-tags a path, and leaves a node that already carries an ORIGIN
+  (a contract operation, a region anchor) as it is. A node with no POSITION (a package
+  dependency, a queue tag) is never matched.
+
+A build whose overlay declares `tests` prints, per repo,
+`[provenance] declared tests repo=<label> patterns=<n> tagged=<d>`, where `tagged` counts the
+node entries only a declared pattern tagged (modules included); the
+`[provenance] test_fixture=<n> (path=<p> qname=<q>) ...` total counts them too.
 
 ## `[[wrapper]]`: call sites of a project's own helpers
 
@@ -217,7 +243,7 @@ never fail a build. Each one is printed once as `[overlay] error: .glia/overlay.
     in another layer
   - a duplicate id, or a duplicate component or layer name
   - a constant name outside `[A-Za-z_][A-Za-z0-9_.]*`
-  - an invalid skip pattern
+  - an invalid (or empty) `[walk] skip` or `tests` pattern, which drops that pattern only
   - a project path that is the repo root or leaves it
 
 ## Reflexion model
@@ -340,7 +366,7 @@ Each step prints one stderr line: `[overlay] propose repo=<label> rows=<n> ...`,
 
 On every build that finds the file, stderr carries
 `[overlay] loaded .glia/overlay.toml repo=<label> version=1 (walk=N project=N entrypoints=N constants=N route_prefix=N wrapper=N edge=N constraint=N decision=N note=N component=N layer=N) errors=E`.
-The counts are skip patterns for `walk`, qname patterns for `entrypoints`, keys for
+The counts are skip plus tests patterns for `walk`, qname patterns for `entrypoints`, keys for
 `constants`, and stanzas for every other section.
 
 ## History snapshot

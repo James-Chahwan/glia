@@ -1,0 +1,10 @@
+{
+  "framework": "test-paths-declared",
+  "language": "typescript",
+  "dirs": ["."],
+  "expect_cells": [
+    {"kind": "FUNCTION", "node": "playwright::checkout::buyFlow", "cell": "ORIGIN", "contains": "test_fixture", "note": "declared `playwright/`"},
+    {"kind": "FUNCTION", "node": "qa::smoke::seed::seed_users",   "cell": "ORIGIN", "contains": "test_fixture", "note": "declared `qa/**/*.py`"}
+  ],
+  "note": "CJ-4: overlay `[walk] tests` globs (gitignore syntax, repo-root anchored) feed the test_fixture ORIGIN beside CG.2a's built-in path list. src/cart.ts addItem is the app-code control, pinned untagged by the engine unit test. Baseline (HEAD cbaf4ca, installed wheel): the overlay is rejected (`unknown field tests`), ORIGIN 0/2."
+}

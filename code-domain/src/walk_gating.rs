@@ -1065,7 +1065,10 @@ mod tests {
     }
 
     fn walk_cfg(skip: &[&str]) -> crate::glia_config::WalkConfig {
-        crate::glia_config::WalkConfig { skip: skip.iter().map(|s| s.to_string()).collect() }
+        crate::glia_config::WalkConfig {
+            skip: skip.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
     }
 
     /// LF.3a: `[walk] skip` is gitignore syntax rooted at the repo root.
