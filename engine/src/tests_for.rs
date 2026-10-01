@@ -44,7 +44,11 @@
 //!   seed through it;
 //! - the module-level TESTS edges (a test MODULE -> the MODULE its name pairs
 //!   with, `passes::emit_tests_edges`): name-convention pairing is the
-//!   heuristic tier below and is never walked into a fact or derived row.
+//!   heuristic tier below and is never walked into a fact or derived row;
+//!   so are the function-level TESTS edges `emit_tests_edges` derives from
+//!   that pairing and a case's CALLS (CL.5b, EVIDENCE `pass:tests` /
+//!   `calls_into_tested_module`): the case reaches its callee over the CALLS
+//!   edge itself, so its row stays `derived`, never a `fact` source.
 //!
 //! # Test cases
 //!
@@ -56,7 +60,8 @@
 //!   JUnit `@Test shouldX()` qualifies by provenance and the root rule, not by
 //!   its name;
 //! - any FUNCTION / METHOD that is the source of a TESTS edge (pytest
-//!   `test_*`, which the Python parser pairs with what it calls);
+//!   `test_*`, which the Python parser pairs with what it calls), the
+//!   derived function-level edges above excepted;
 //! - a `test_fixture` MODULE the walk reaches: a Jest / Mocha file's
 //!   `describe` / `it` callbacks are anonymous, so the TypeScript parser
 //!   attributes their calls to the file's MODULE, and that module is the unit
@@ -154,6 +159,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_activation::algo::reach;
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk};
+use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{CellPayload, Edge, EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
@@ -162,6 +168,7 @@ use crate::absence::{self, Absence};
 use crate::answers::{Locator, in_scope, resolve_scope};
 use crate::external::signals::{self, FailRole};
 use crate::find::{self, FindOptions, FoundNode};
+use crate::passes::{FN_TESTS_EMITTER, FN_TESTS_RULE};
 
 /// [`TestsForArgs::default`]'s `max_depth`.
 pub const DEFAULT_MAX_DEPTH: usize = 6;
@@ -407,7 +414,8 @@ pub fn tests_for_delta(
 /// The rev mode's seeds, as after-graph ids: the added and moved nodes, the
 /// modified nodes whose OWN text changed, and the surviving endpoints of every
 /// added or removed edge of a walked category ([`TEST_REACH`], minus the
-/// module-level TESTS pairings).
+/// module-level TESTS pairings and the function-level TESTS edges derived
+/// from them, [`is_derived_fn_tests`]).
 ///
 /// A container's CODE cell is its whole span, so LE.1a marks a module or a
 /// class modified whenever a line inside one of its functions changes. Such a
@@ -428,10 +436,14 @@ fn rev_seeds(rev: &crate::delta::RevDelta) -> Vec<NodeId> {
         .collect();
     let moved_to: HashMap<NodeId, NodeId> = d.moved_nodes.iter().map(|&(b, a)| (b, a)).collect();
     let was: HashMap<NodeId, NodeId> = d.moved_nodes.iter().map(|&(b, a)| (a, b)).collect();
-    let walked = |c: &CodeText<'_>, k: &glia_activation::algo::delta::EdgeKey| {
+    let (old_fn_tests, new_fn_tests) = (derived_fn_tests(before), derived_fn_tests(after));
+    let walked = |c: &CodeText<'_>,
+                  fn_tests: &HashSet<(NodeId, NodeId)>,
+                  k: &glia_activation::algo::delta::EdgeKey| {
         TEST_REACH.contains(&k.category)
             && !(k.category == edge_category::TESTS
-                && c.kind.get(&k.from) == Some(&node_kind::MODULE))
+                && (c.kind.get(&k.from) == Some(&node_kind::MODULE)
+                    || fn_tests.contains(&(k.from, k.to))))
     };
     let mut ids: Vec<NodeId> = Vec::new();
     ids.extend(d.added_nodes.iter().copied());
@@ -442,16 +454,36 @@ fn rev_seeds(rev: &crate::delta::RevDelta) -> Vec<NodeId> {
             ids.push(id);
         }
     }
-    for k in d.added_edges.iter().filter(|k| walked(&new, k)) {
+    for k in d.added_edges.iter().filter(|k| walked(&new, &new_fn_tests, k)) {
         ids.extend([k.from, k.to]);
     }
-    for k in d.removed_edges.iter().filter(|k| walked(&old, k)) {
+    for k in d.removed_edges.iter().filter(|k| walked(&old, &old_fn_tests, k)) {
         for end in [k.from, k.to] {
             ids.push(moved_to.get(&end).copied().unwrap_or(end));
         }
     }
     ids.retain(|id| present.contains(id));
     ids
+}
+
+/// The `(from, to)` of every derived function-level TESTS edge of `m`
+/// ([`is_derived_fn_tests`]).
+fn derived_fn_tests(m: &MergedGraph) -> HashSet<(NodeId, NodeId)> {
+    m.all_edges()
+        .filter(|e| is_derived_fn_tests(e))
+        .map(|e| (e.from, e.to))
+        .collect()
+}
+
+/// A function-level TESTS edge `passes::emit_tests_edges` derived from a
+/// module pairing and a CALLS edge (CL.5b): its EVIDENCE names
+/// [`FN_TESTS_EMITTER`] and [`FN_TESTS_RULE`]. Like a module pairing, it is
+/// no fact source and no hop of the walk (module docs).
+fn is_derived_fn_tests(e: &Edge) -> bool {
+    e.category == edge_category::TESTS
+        && Evidence::of(e).is_some_and(|ev| {
+            ev.emitter == FN_TESTS_EMITTER && ev.rule.as_deref() == Some(FN_TESTS_RULE)
+        })
 }
 
 /// One graph's node CODE texts, kinds and nav children (the first graph that
@@ -1046,7 +1078,8 @@ struct TestIndex {
     fixture: HashSet<NodeId>,
     /// FUNCTION / METHOD nodes another `test_fixture` node CALLS.
     called_by_test: HashSet<NodeId>,
-    /// FUNCTION / METHOD sources of a TESTS edge.
+    /// FUNCTION / METHOD sources of a TESTS edge (the derived function-level
+    /// edges excepted, [`is_derived_fn_tests`]).
     tests_sources: HashSet<NodeId>,
     /// Target -> the FUNCTION / METHOD sources of its TESTS edges, in edge
     /// order, deduplicated.
@@ -1092,7 +1125,7 @@ impl TestIndex {
             if e.category == edge_category::CALLS && fixture.contains(&e.from) && callable(&e.to) {
                 called_by_test.insert(e.to);
             }
-            if e.category != edge_category::TESTS {
+            if e.category != edge_category::TESTS || is_derived_fn_tests(e) {
                 continue;
             }
             if callable(&e.from) {
@@ -1134,6 +1167,12 @@ impl TestIndex {
     /// A module-level TESTS edge: a MODULE source (the heuristic tier's).
     fn is_module_tests(&self, e: &Edge) -> bool {
         e.category == edge_category::TESTS && self.kind.get(&e.from) == Some(&node_kind::MODULE)
+    }
+
+    /// A TESTS edge the walk leaves out (module docs): a module pairing, or a
+    /// function-level edge derived from one ([`is_derived_fn_tests`]).
+    fn is_pairing(&self, e: &Edge) -> bool {
+        self.is_module_tests(e) || is_derived_fn_tests(e)
     }
 
     /// The MODULEs on `seed`'s nav parent chain, nearest first (the seed
@@ -1178,8 +1217,8 @@ fn is_test_fixture(cells: &[glia_core::Cell]) -> bool {
 }
 
 /// The walk's graph (module docs): every edge of the merge minus the edges
-/// into a test case and the module-level TESTS edges. The category filter is
-/// the `Adjacency`'s.
+/// into a test case, the module-level TESTS edges and the function-level
+/// TESTS edges derived from them. The category filter is the `Adjacency`'s.
 struct ReachSource<'a> {
     merged: &'a MergedGraph,
     idx: &'a TestIndex,
@@ -1194,7 +1233,7 @@ impl GraphSource for ReachSource<'_> {
         Box::new(
             self.merged
                 .all_edges()
-                .filter(|e| !self.idx.is_case(e.to) && !self.idx.is_module_tests(e)),
+                .filter(|e| !self.idx.is_case(e.to) && !self.idx.is_pairing(e)),
         )
     }
 }

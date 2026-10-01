@@ -5,13 +5,13 @@
 //! `Post` / `Finalize` specs of the code domain's pass registry
 //! ([`crate::profile::CODE_PASSES`], LD.13), which owns their order.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_code_domain::evidence::{self, Basis, Evidence, Location};
 use glia_code_domain::glia_config::TestPaths;
 use glia_code_domain::{bare_module_qname, edge_category, node_kind, same_stem_order};
 use glia_core::{Confidence, Edge, NodeId, NodeKindId, RepoId};
-use glia_graph::MergedGraph;
+use glia_graph::{MergedGraph, RepoGraph};
 
 use crate::profile::CodeBuildCtx;
 
@@ -1127,6 +1127,9 @@ struct TestsEdgeStats {
     camel: usize,
 }
 
+/// The TESTS edges of the build: the module pairing (A6.7,
+/// [`tests_module_edges`]), then the function-level edges derived from it and
+/// the CALLS edges (CL.5b, [`tests_fn_edges`]).
 pub(crate) fn emit_tests_edges(merged: &mut MergedGraph) {
     let (edges, stats) = tests_module_edges(merged);
     // A6.7 fired_on marker: `... 2>&1 | grep '^\[tests\] module TESTS edges:'`
@@ -1138,7 +1141,249 @@ pub(crate) fn emit_tests_edges(merged: &mut MergedGraph) {
             stats.camel
         );
     }
+    let pairs: Vec<(NodeId, NodeId)> = edges.iter().map(|e| (e.from, e.to)).collect();
+    let (fn_edges, fn_stats) = tests_fn_edges(merged, &pairs);
+    // CL.5b fired_on marker: `... 2>&1 | grep '^\[tests\] fn TESTS edges:'`
+    if let Some(line) = fn_stats.marker() {
+        eprintln!("{line}");
+    }
     merged.cross_edges.extend(edges);
+    merged.cross_edges.extend(fn_edges);
+}
+
+/// CL.5b: the EVIDENCE emitter and rule of a function-level TESTS edge
+/// [`tests_fn_edges`] derives. The one spelling: `tests_for.rs` reads the
+/// same pair to leave these edges out of its walk and its `fact` tier.
+pub(crate) const FN_TESTS_EMITTER: &str = "pass:tests";
+/// See [`FN_TESTS_EMITTER`].
+pub(crate) const FN_TESTS_RULE: &str = "calls_into_tested_module";
+
+/// What [`tests_fn_edges`] did, for its marker.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FnTestsStats {
+    /// Function-level TESTS edges minted.
+    edges: usize,
+    /// Distinct sources of those edges.
+    test_fns: usize,
+    /// Distinct non-root functions of a test module (helpers: a function of
+    /// the same test module calls them) whose CALLS into a tested module
+    /// minted nothing.
+    helpers: usize,
+    /// Distinct (test module, tested module) pairs read.
+    module_pairs: usize,
+    /// Distinct (root, callee) pairs a TESTS edge already joined (the Python
+    /// parser's, an overlay's): left single.
+    already: usize,
+}
+
+impl FnTestsStats {
+    /// `[tests] fn TESTS edges: <n> (test fns=<f>, helpers skipped=<h>,
+    /// module pairs=<p>, already joined=<k>)`, when `n + k > 0`.
+    fn marker(&self) -> Option<String> {
+        (self.edges + self.already > 0).then(|| {
+            format!(
+                "[tests] fn TESTS edges: {} (test fns={}, helpers skipped={}, module pairs={}, already joined={})",
+                self.edges, self.test_fns, self.helpers, self.module_pairs, self.already
+            )
+        })
+    }
+}
+
+/// A call site, as the CALLS edge's EVIDENCE recorded it: `(file, 0-based
+/// line)`, the file absent when the emitter named none.
+type CallSiteAt = (Option<String>, u32);
+
+/// CL.5b: function-level TESTS edges for every language, from the module
+/// pairing (`module_pairs`: test MODULE -> the MODULE it tests) and the CALLS
+/// edges of the merge.
+///
+/// A FUNCTION / METHOD whose module ([`module_of`]) is a test module T is a
+/// ROOT when no FUNCTION / METHOD of T calls it: a runner calls the cases and
+/// the cases call the helpers, so this is the language-free case test (an
+/// xUnit `Add_ReturnsSum` carries no `test` word, and no annotation is read).
+/// Every CALLS edge from a root of T to a FUNCTION / METHOD of a module T
+/// tests mints `TESTS root -> callee` (Medium; EVIDENCE [`FN_TESTS_EMITTER`]
+/// / [`FN_TESTS_RULE`] at the call's own site, the lowest when several CALLS
+/// edges join the pair; the Finalize fill names the caller's file when the
+/// call recorded none). A pair a TESTS edge already joins is left single.
+/// A unit reached only through a helper keeps its module pairing.
+///
+/// Emitted in raw-id order from a BTreeMap, so the output depends on neither
+/// the edge order nor the HashMap seed.
+fn tests_fn_edges(
+    merged: &MergedGraph,
+    module_pairs: &[(NodeId, NodeId)],
+) -> (Vec<Edge>, FnTestsStats) {
+    let mut stats = FnTestsStats::default();
+    let distinct: BTreeSet<(u64, u64)> = module_pairs.iter().map(|(f, t)| (f.0, t.0)).collect();
+    stats.module_pairs = distinct.len();
+    if distinct.is_empty() {
+        return (Vec::new(), stats);
+    }
+    // Test module -> the modules it tests (lookups only).
+    let mut targets: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for &(from, to) in &distinct {
+        targets.entry(NodeId(from)).or_default().push(NodeId(to));
+    }
+    let calls: Vec<&Edge> = merged
+        .all_edges()
+        .filter(|e| e.category == edge_category::CALLS && e.from != e.to)
+        .collect();
+    let ends: HashSet<NodeId> = calls.iter().flat_map(|e| [e.from, e.to]).collect();
+
+    // Every callable CALLS endpoint -> its module, the first graph that
+    // holds it deciding (graph order; lookups only).
+    let mut home: HashMap<NodeId, NodeId> = HashMap::new();
+    for g in &merged.graphs {
+        let mut files = FileModules::default();
+        for n in &g.nodes {
+            if !ends.contains(&n.id) || home.contains_key(&n.id) {
+                continue;
+            }
+            if !matches!(
+                g.nav.kind_by_id.get(&n.id),
+                Some(&node_kind::FUNCTION | &node_kind::METHOD)
+            ) {
+                continue;
+            }
+            if let Some(m) = module_of(g, n, &mut files) {
+                home.insert(n.id, m);
+            }
+        }
+    }
+
+    // The callables a function of their own test module calls: helpers.
+    let mut called_in_own: HashSet<NodeId> = HashSet::new();
+    for c in &calls {
+        if let (Some(mf), Some(mt)) = (home.get(&c.from), home.get(&c.to))
+            && mf == mt
+            && targets.contains_key(mt)
+        {
+            called_in_own.insert(c.to);
+        }
+    }
+    let joined: HashSet<(NodeId, NodeId)> = merged
+        .all_edges()
+        .filter(|e| e.category == edge_category::TESTS)
+        .map(|e| (e.from, e.to))
+        .collect();
+
+    let mut minted: BTreeMap<(u64, u64), Option<CallSiteAt>> = BTreeMap::new();
+    let mut helpers: BTreeSet<u64> = BTreeSet::new();
+    let mut already: BTreeSet<(u64, u64)> = BTreeSet::new();
+    for c in &calls {
+        let Some(tested) = home.get(&c.from).and_then(|m| targets.get(m)) else {
+            continue;
+        };
+        if !home.get(&c.to).is_some_and(|m| tested.contains(m)) {
+            continue;
+        }
+        if called_in_own.contains(&c.from) {
+            helpers.insert(c.from.0);
+            continue;
+        }
+        let key = (c.from.0, c.to.0);
+        if joined.contains(&(c.from, c.to)) {
+            already.insert(key);
+            continue;
+        }
+        let site = Evidence::of(c).and_then(|ev| ev.line.map(|l| (ev.file, l)));
+        let slot = minted.entry(key).or_insert(None);
+        // The lowest recorded site wins, whatever the edge order.
+        if site.is_some() && (slot.is_none() || site < *slot) {
+            *slot = site;
+        }
+    }
+
+    stats.edges = minted.len();
+    stats.test_fns = minted
+        .keys()
+        .map(|(f, _)| *f)
+        .collect::<BTreeSet<u64>>()
+        .len();
+    stats.helpers = helpers.len();
+    stats.already = already.len();
+    let edges = minted
+        .into_iter()
+        .map(|((from, to), site)| {
+            let ev = Evidence::emitter(FN_TESTS_EMITTER).rule(FN_TESTS_RULE);
+            let ev = match site {
+                Some((Some(file), line)) => ev.at(file, line),
+                Some((None, line)) => ev.line(line),
+                None => ev,
+            };
+            Edge::new(
+                NodeId(from),
+                NodeId(to),
+                edge_category::TESTS,
+                Confidence::Medium,
+            )
+            .with_cell(ev.to_cell())
+        })
+        .collect();
+    (edges, stats)
+}
+
+/// One graph's file -> MODULE index for [`module_of`], built on first use:
+/// `None` for a file two MODULEs share.
+#[derive(Default)]
+struct FileModules(Option<HashMap<String, Option<NodeId>>>);
+
+impl FileModules {
+    fn module(&mut self, g: &RepoGraph, file: &str) -> Option<NodeId> {
+        let index = self.0.get_or_insert_with(|| {
+            let mut index: HashMap<String, Option<NodeId>> = HashMap::new();
+            for n in &g.nodes {
+                if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::MODULE) {
+                    continue;
+                }
+                if let Some(f) = position_file(&n.cells) {
+                    index
+                        .entry(f)
+                        .and_modify(|m| {
+                            if *m != Some(n.id) {
+                                *m = None;
+                            }
+                        })
+                        .or_insert(Some(n.id));
+                }
+            }
+            index
+        });
+        index.get(file).copied().flatten()
+    }
+}
+
+/// The MODULE node `n` belongs to in `g`: the file that declares it, since
+/// the pairing it is read against joins test FILES with files.
+///
+/// 1. its CB.15 `home_module` entry (a member of a namespace several files
+///    open: the PACKAGE node hangs under its first file only);
+/// 2. else the one MODULE of `n`'s own POSITION file. A Go method declared
+///    in another file than its receiver struct has the struct as nav parent
+///    (`volume_ledger.go`'s `EDDService::SetVolumeLedger` under
+///    `edd_service.go`'s struct): it belongs to `volume_ledger`, the module
+///    `volume_ledger_test` tests. `home_module` is build-time only, so this
+///    rule is also what keeps a layout merge (LC.10b re-runs this pass over
+///    loaded graphs) equal to the joint build;
+/// 3. else (no POSITION, or a file two MODULEs share) the nearest MODULE on
+///    its nav parent chain, 32 hops at most; a node with no parent (a
+///    synthetic one) has none.
+fn module_of(g: &RepoGraph, n: &glia_core::Node, files: &mut FileModules) -> Option<NodeId> {
+    if let Some(m) = g.symbols.home_module.get(&n.id) {
+        return Some(*m);
+    }
+    if let Some(own) = position_file(&n.cells).and_then(|f| files.module(g, &f)) {
+        return Some(own);
+    }
+    let mut at = n.id;
+    for _ in 0..32 {
+        if g.nav.kind_by_id.get(&at) == Some(&node_kind::MODULE) {
+            return Some(at);
+        }
+        at = *g.nav.parent_of.get(&at)?;
+    }
+    None
 }
 
 /// One MODULE as the TESTS pairing sees it.
@@ -2699,5 +2944,408 @@ mod passes_tests {
         let before = m.graphs[0].nodes.clone();
         assert_eq!(fill_test_cells(&mut m), stats);
         assert_eq!(m.graphs[0].nodes, before, "a re-run changes nothing");
+    }
+
+    // ------------------------------------------------------------------
+    // CL.5b - function-level TESTS from the module pairing + CALLS
+    // ------------------------------------------------------------------
+
+    /// A callable (or any node) under `parent` in `h`'s nav.
+    fn child(
+        h: &mut Hand,
+        kind: NodeKindId,
+        qname: &str,
+        parent: NodeId,
+        cells: Vec<Cell>,
+    ) -> NodeId {
+        let name = qname.rsplit("::").next().unwrap_or(qname).to_string();
+        let id = h.add(kind, &name, qname, cells);
+        h.nav.parent_of.insert(id, parent);
+        h.nav.children_of.entry(parent).or_default().push(id);
+        id
+    }
+
+    fn module(h: &mut Hand, qname: &str, file: &str) -> NodeId {
+        let name = qname.rsplit("::").next().unwrap_or(qname).to_string();
+        h.add(node_kind::MODULE, &name, qname, vec![position(file)])
+    }
+
+    fn position(file: &str) -> Cell {
+        Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":0,"end_line":9}}"#
+            )),
+        }
+    }
+
+    /// A CALLS edge whose EVIDENCE records the call at 0-based `line`.
+    fn call(from: NodeId, to: NodeId, line: u32) -> Edge {
+        Edge::new(from, to, edge_category::CALLS, Confidence::Strong).with_cell(
+            Evidence::emitter("graph:calls")
+                .rule("bare")
+                .line(line)
+                .to_cell(),
+        )
+    }
+
+    fn fn_pairs(edges: &[Edge]) -> Vec<(NodeId, NodeId)> {
+        edges
+            .iter()
+            .filter(|e| e.category == edge_category::TESTS)
+            .filter(|e| Evidence::of(e).and_then(|ev| ev.rule).as_deref() == Some(FN_TESTS_RULE))
+            .map(|e| (e.from, e.to))
+            .collect()
+    }
+
+    /// The Go shape of matrix/go/tests: `calc_test::TestAdd` CALLS
+    /// `calc::Add`, and the name pairing joins `calc_test -> calc`.
+    struct GoCalc {
+        h: Hand,
+        calc: NodeId,
+        calc_test: NodeId,
+        add: NodeId,
+        test_add: NodeId,
+    }
+
+    fn go_calc() -> GoCalc {
+        let mut h = Hand::new("test://cl5b/go");
+        let calc = module(&mut h, "calc", "calc.go");
+        let calc_test = module(&mut h, "calc_test", "calc_test.go");
+        let add = child(
+            &mut h,
+            node_kind::FUNCTION,
+            "calc::Add",
+            calc,
+            vec![position("calc.go")],
+        );
+        let test_add = child(
+            &mut h,
+            node_kind::FUNCTION,
+            "calc_test::TestAdd",
+            calc_test,
+            vec![position("calc_test.go")],
+        );
+        GoCalc {
+            h,
+            calc,
+            calc_test,
+            add,
+            test_add,
+        }
+    }
+
+    impl GoCalc {
+        /// The graph, its edges `TestAdd -CALLS-> Add` (line 5) + `edges`.
+        fn graph(self, edges: Vec<Edge>) -> RepoGraph {
+            let mut g = self.h.graph();
+            g.edges = vec![call(self.test_add, self.add, 5)];
+            g.edges.extend(edges);
+            g
+        }
+    }
+
+    #[test]
+    fn fn_tests_from_calls_into_the_tested_module() {
+        let go = go_calc();
+        let (calc, calc_test, add, test_add) = (go.calc, go.calc_test, go.add, go.test_add);
+        let mut merged = MergedGraph::new(vec![go.graph(vec![])]);
+        let (edges, stats) = tests_fn_edges(&merged, &[(calc_test, calc)]);
+        assert_eq!(fn_pairs(&edges), [(test_add, add)]);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].confidence, Confidence::Medium);
+        let ev = Evidence::of(&edges[0]).expect("evidence");
+        assert_eq!(ev.emitter, FN_TESTS_EMITTER);
+        assert_eq!(ev.rule.as_deref(), Some(FN_TESTS_RULE));
+        assert_eq!(
+            (ev.line, ev.basis),
+            (Some(5), Basis::Site),
+            "the call's own line"
+        );
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some(
+                "[tests] fn TESTS edges: 1 (test fns=1, helpers skipped=0, module pairs=1, already joined=0)"
+            )
+        );
+
+        // The whole pass: the module pairing it names, then the fn edge.
+        emit_tests_edges(&mut merged);
+        let pairs: Vec<(NodeId, NodeId)> = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::TESTS)
+            .map(|e| (e.from, e.to))
+            .collect();
+        assert_eq!(pairs, [(calc_test, calc), (test_add, add)]);
+    }
+
+    /// `TestAdd` calls the helper `newCalc`, which calls `calc::New`: the
+    /// helper is called inside its own test module, so it is no root and its
+    /// call mints nothing; the case's own call does.
+    #[test]
+    fn fn_tests_skip_helpers() {
+        let mut go = go_calc();
+        let new = child(&mut go.h, node_kind::FUNCTION, "calc::New", go.calc, vec![]);
+        let helper = child(
+            &mut go.h,
+            node_kind::FUNCTION,
+            "calc_test::newCalc",
+            go.calc_test,
+            vec![],
+        );
+        let (calc, calc_test, add, test_add) = (go.calc, go.calc_test, go.add, go.test_add);
+        let g = go.graph(vec![call(test_add, helper, 6), call(helper, new, 12)]);
+        let merged = MergedGraph::new(vec![g]);
+        let (edges, stats) = tests_fn_edges(&merged, &[(calc_test, calc)]);
+        assert_eq!(fn_pairs(&edges), [(test_add, add)]);
+        assert_eq!(
+            stats,
+            FnTestsStats {
+                edges: 1,
+                test_fns: 1,
+                helpers: 1,
+                module_pairs: 1,
+                already: 0
+            }
+        );
+    }
+
+    /// A root's call into a module its test module does not test (a third
+    /// module) mints nothing.
+    #[test]
+    fn fn_tests_ignore_callees_outside_the_tested_module() {
+        let mut go = go_calc();
+        let util = module(&mut go.h, "util", "util.go");
+        let format = child(&mut go.h, node_kind::FUNCTION, "util::Format", util, vec![]);
+        let (calc, calc_test, test_add) = (go.calc, go.calc_test, go.test_add);
+        let mut g = go.graph(vec![]);
+        g.edges = vec![call(test_add, format, 7)];
+        let merged = MergedGraph::new(vec![g]);
+        let (edges, stats) = tests_fn_edges(&merged, &[(calc_test, calc)]);
+        assert!(edges.is_empty(), "{edges:?}");
+        assert_eq!(stats.marker(), None);
+    }
+
+    /// The Python parser's own `TESTS test_add -> add` already joins the
+    /// pair: it stays single, counted as already joined.
+    #[test]
+    fn fn_tests_dedupe_parser_edges() {
+        let mut h = Hand::new("test://cl5b/py");
+        let calc = module(&mut h, "calc", "calc.py");
+        let test_calc = module(&mut h, "test_calc", "test_calc.py");
+        let add = child(&mut h, node_kind::FUNCTION, "calc::add", calc, vec![]);
+        let test_add = child(
+            &mut h,
+            node_kind::FUNCTION,
+            "test_calc::test_add",
+            test_calc,
+            vec![],
+        );
+        let mut g = h.graph();
+        g.edges = vec![
+            call(test_add, add, 5),
+            Edge::new(test_add, add, edge_category::TESTS, Confidence::Strong)
+                .with_cell(Evidence::emitter("graph:refs").to_cell()),
+        ];
+        let mut merged = MergedGraph::new(vec![g]);
+        let (edges, stats) = tests_fn_edges(&merged, &[(test_calc, calc)]);
+        assert!(edges.is_empty(), "{edges:?}");
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some(
+                "[tests] fn TESTS edges: 0 (test fns=0, helpers skipped=0, module pairs=1, already joined=1)"
+            )
+        );
+        emit_tests_edges(&mut merged);
+        let joined = merged
+            .all_edges()
+            .filter(|e| e.category == edge_category::TESTS && (e.from, e.to) == (test_add, add))
+            .count();
+        assert_eq!(joined, 1);
+    }
+
+    /// Two roots, three calls (two to one callee on different lines), in
+    /// either edge order: one output, the lowest call line per pair.
+    #[test]
+    fn fn_tests_order_is_stable() {
+        let build = |reverse: bool| {
+            let mut go = go_calc();
+            let sub = child(&mut go.h, node_kind::FUNCTION, "calc::Sub", go.calc, vec![]);
+            let test_sub = child(
+                &mut go.h,
+                node_kind::FUNCTION,
+                "calc_test::TestSub",
+                go.calc_test,
+                vec![],
+            );
+            let (calc, calc_test, add, test_add) = (go.calc, go.calc_test, go.add, go.test_add);
+            let mut g = go.graph(vec![]);
+            g.edges = vec![
+                call(test_add, add, 9),
+                call(test_sub, sub, 14),
+                call(test_add, add, 5),
+                call(test_sub, add, 15),
+            ];
+            if reverse {
+                g.edges.reverse();
+            }
+            let merged = MergedGraph::new(vec![g]);
+            tests_fn_edges(&merged, &[(calc_test, calc), (calc_test, calc)])
+        };
+        let (a, sa) = build(false);
+        let (b, sb) = build(true);
+        assert_eq!(a, b);
+        assert_eq!(sa, sb);
+        assert_eq!(
+            sa,
+            FnTestsStats {
+                edges: 3,
+                test_fns: 2,
+                helpers: 0,
+                module_pairs: 1,
+                already: 0
+            }
+        );
+        let raw: Vec<(u64, u64)> = a.iter().map(|e| (e.from.0, e.to.0)).collect();
+        let mut sorted = raw.clone();
+        sorted.sort_unstable();
+        assert_eq!(raw, sorted, "raw-id order");
+        let go = go_calc();
+        let add_line = a
+            .iter()
+            .find(|e| (e.from, e.to) == (go.test_add, go.add))
+            .and_then(Evidence::of)
+            .and_then(|ev| ev.line);
+        assert_eq!(add_line, Some(5), "the lowest of the pair's call lines");
+    }
+
+    /// CB.15 on a graph loaded from a layout (no `home_module`): two test
+    /// files open one `Shop::Tests` PACKAGE whose nav parent is the first
+    /// file. The second file's case still belongs to its own file (its
+    /// POSITION), so it pairs with its own unit; with `home_module` filled
+    /// (a fresh build) the answer is the same.
+    #[test]
+    fn fn_tests_shared_package_keeps_each_file() {
+        let build = |homes: bool| {
+            let mut h = Hand::new("test://cl5b/cs");
+            let calc = module(&mut h, "Calc", "Calc.cs");
+            let order = module(&mut h, "Order", "Order.cs");
+            let calc_tests = module(&mut h, "CalcTests", "CalcTests.cs");
+            let order_tests = module(&mut h, "OrderTests", "OrderTests.cs");
+            let ns = child(
+                &mut h,
+                node_kind::PACKAGE,
+                "Shop::Tests",
+                calc_tests,
+                vec![],
+            );
+            let ct = child(
+                &mut h,
+                node_kind::CLASS,
+                "Shop::Tests::CalcTests",
+                ns,
+                vec![position("CalcTests.cs")],
+            );
+            let ot = child(
+                &mut h,
+                node_kind::CLASS,
+                "Shop::Tests::OrderTests",
+                ns,
+                vec![position("OrderTests.cs")],
+            );
+            let add_case = child(
+                &mut h,
+                node_kind::METHOD,
+                "Shop::Tests::CalcTests::Add_ReturnsSum",
+                ct,
+                vec![position("CalcTests.cs")],
+            );
+            let place_case = child(
+                &mut h,
+                node_kind::METHOD,
+                "Shop::Tests::OrderTests::Place_Works",
+                ot,
+                vec![position("OrderTests.cs")],
+            );
+            let add = child(
+                &mut h,
+                node_kind::METHOD,
+                "Shop::Calc::Add",
+                calc,
+                vec![position("Calc.cs")],
+            );
+            let place = child(
+                &mut h,
+                node_kind::METHOD,
+                "Shop::Order::Place",
+                order,
+                vec![position("Order.cs")],
+            );
+            let mut g = h.graph();
+            g.edges = vec![call(add_case, add, 9), call(place_case, place, 9)];
+            if homes {
+                for (id, m) in [(ot, order_tests), (place_case, order_tests)] {
+                    g.symbols.home_module.insert(id, m);
+                }
+            }
+            let merged = MergedGraph::new(vec![g]);
+            let pairs = [(calc_tests, calc), (order_tests, order)];
+            let (edges, _) = tests_fn_edges(&merged, &pairs);
+            let mut got = fn_pairs(&edges);
+            got.sort_by_key(|(f, t)| (f.0, t.0));
+            let mut want = vec![(add_case, add), (place_case, place)];
+            want.sort_by_key(|(f, t)| (f.0, t.0));
+            (got, want)
+        };
+        let (loaded, want) = build(false);
+        assert_eq!(loaded, want);
+        let (fresh, want) = build(true);
+        assert_eq!(fresh, want);
+    }
+
+    /// A Go method declared in `ops.go` on a struct of `calc.go` has the
+    /// struct as nav parent: it still belongs to its own file, so
+    /// `ops_test`'s case pairs with it and `calc_test`'s does not.
+    #[test]
+    fn fn_tests_method_belongs_to_its_own_file() {
+        let mut h = Hand::new("test://cl5b/go-method");
+        let calc = module(&mut h, "calc", "calc.go");
+        let ops = module(&mut h, "ops", "ops.go");
+        let calc_test = module(&mut h, "calc_test", "calc_test.go");
+        let ops_test = module(&mut h, "ops_test", "ops_test.go");
+        let st = child(
+            &mut h,
+            node_kind::STRUCT,
+            "calc::Calc",
+            calc,
+            vec![position("calc.go")],
+        );
+        let add = child(
+            &mut h,
+            node_kind::METHOD,
+            "ops::Calc::Add",
+            st,
+            vec![position("ops.go")],
+        );
+        let t_ops = child(
+            &mut h,
+            node_kind::FUNCTION,
+            "ops_test::TestAdd",
+            ops_test,
+            vec![position("ops_test.go")],
+        );
+        let t_calc = child(
+            &mut h,
+            node_kind::FUNCTION,
+            "calc_test::TestCalc",
+            calc_test,
+            vec![position("calc_test.go")],
+        );
+        let mut g = h.graph();
+        g.edges = vec![call(t_ops, add, 4), call(t_calc, add, 4)];
+        let merged = MergedGraph::new(vec![g]);
+        let (edges, _) = tests_fn_edges(&merged, &[(calc_test, calc), (ops_test, ops)]);
+        assert_eq!(fn_pairs(&edges), [(t_ops, add)]);
     }
 }
