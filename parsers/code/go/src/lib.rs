@@ -120,7 +120,7 @@ pub fn parse_file_with_modules(
     // CB.11: the router groups this file assigns to struct fields, read before
     // any route walk so a registration on `s.v1` finds the group whatever
     // function assigned it.
-    acc.field_prefixes = scan_field_prefixes(root, src);
+    acc.field_prefixes = scan_field_prefixes(root, src, package_qname);
 
     // Second pass: everything else.
     let mut cursor = root.walk();
@@ -221,6 +221,15 @@ pub fn parse_file_with_modules(
             acc.route_paths.len()
         );
     }
+    // CI.5: field mounts whose owner came through an import, and in-file
+    // field groups rooted at a group-typed parameter's mount.
+    let param_rooted = acc.field_prefixes.param_rooted();
+    if mounts.foreign + param_rooted > 0 {
+        eprintln!(
+            "[go-routes] mount owners foreign={} param_rooted={param_rooted} in {file_rel_path}",
+            mounts.foreign
+        );
+    }
     let gorm = &acc.gorm;
     if !gorm.models.is_empty() || !gorm.tables.is_empty() {
         eprintln!(
@@ -284,6 +293,15 @@ struct Acc {
     /// uniquely named repo `Println`. Filled with `di_containers`, so it is
     /// complete before any route is visited. Only looked up, never iterated.
     external_pkgs: std::collections::HashSet<String>,
+    /// CI.5: local name -> repo-local package directory qname of every
+    /// import under one of the repo's go.mod modules (`api` -> `api`; the
+    /// repo-root package -> `""`), so a struct of another package
+    /// (`s := &api.Server{}`) names the owner its own package's files name
+    /// ([`RouteScope::owner`]). An alias binds alone; an un-aliased import
+    /// binds every [`import_local_names`] candidate (LA.18d's rule for
+    /// `external_pkgs`). Filled before any function is visited (Go requires
+    /// imports first); only looked up, never iterated.
+    import_dirs: BTreeMap<String, String>,
     /// LA.18d: start byte of every func-literal route handler seen in this
     /// file. `len()` is the marker's handler count.
     func_literal_handlers: std::collections::HashSet<usize>,
@@ -406,6 +424,10 @@ struct MountCounts {
     /// `NavFact::FieldMount` facts recorded (a router mount assigned to a
     /// struct field).
     assigns: usize,
+    /// CI.5: the `assigns` whose owner is a struct of another package of the
+    /// repo, named through this file's import ([`RouteScope::owner`]) — the
+    /// `[go-routes] mount owners` marker's `foreign=`.
+    foreign: usize,
 }
 
 // ============================================================================
@@ -1384,6 +1406,23 @@ fn record_import(
             None => {
                 for local in import_local_names(&path_str) {
                     acc.external_pkgs.insert(local.to_string());
+                }
+            }
+        }
+    }
+
+    // CI.5: the package directory an in-repo import's local name stands for,
+    // the repo-root package (`Some("")`) included, so recorded before that
+    // arm returns below.
+    if let Some(dir) = &local {
+        match alias.as_deref() {
+            Some("_") | Some(".") => {}
+            Some(name) => {
+                acc.import_dirs.insert(name.to_string(), dir.clone());
+            }
+            None => {
+                for name in import_local_names(&path_str) {
+                    acc.import_dirs.insert(name.to_string(), dir.clone());
                 }
             }
         }
@@ -3073,11 +3112,16 @@ fn method_list_literal(node: TsNode, src: &[u8]) -> Option<Vec<&'static str>> {
 /// CB.11: one router group as a file spells it: the struct field its chain
 /// starts from (`None` = the engine itself, a local group, or a receiver the
 /// file cannot type, all rooted at `""` as the route walk roots them) and the
-/// `Group` literals joined onto it, in order.
+/// `Group` literals joined onto it, in order. CI.5: `param` is the
+/// `Mount::Param` of the group-typed parameter the chain starts from
+/// (`rg.Group("/admin")` in `NewPanel(rg *gin.RouterGroup)`), so the field
+/// holds the mount its callers hand `rg`, not the root; `field` is then
+/// `None`.
 #[derive(Debug, Clone, Default)]
 struct GroupPath {
     field: Option<(String, String)>,
     segs: Vec<String>,
+    param: Option<Mount>,
 }
 
 impl GroupPath {
@@ -3093,11 +3137,14 @@ impl GroupPath {
 /// [`scan_field_prefixes`]; only looked up, never iterated into output.
 #[derive(Debug, Default)]
 struct FieldPrefixes {
-    /// `(struct simple name, field)` -> the group prefix every assignment in
-    /// the file agrees on (`("Server", "v1")` -> `"/v1"`). A field two
-    /// assignments disagree on, or whose chain loops, is absent: unknown beats
-    /// wrong.
-    known: BTreeMap<(String, String), String>,
+    /// `(struct type, field)` -> the mount every assignment in the file agrees
+    /// on (`("Server", "v1")` -> `Const("/v1")`; CI.5: a group built from a
+    /// group-typed parameter -> that parameter's `Param` with the `.Group`
+    /// literals as its suffix). A field two assignments disagree on, or whose
+    /// chain loops, is absent: unknown beats wrong. The struct type is its
+    /// simple name for this package's structs, `pkg.T` for another's
+    /// ([`struct_type_name`]).
+    known: BTreeMap<(String, String), Mount>,
     /// A callable body's start byte -> its variable -> struct type map
     /// ([`scope_types`]). Empty for a file whose text never says `Group`;
     /// the route walk then types a body only when it meets a field receiver
@@ -3113,12 +3160,20 @@ struct FieldPrefixes {
 }
 
 impl FieldPrefixes {
-    /// The group prefix of field `field` of struct `ty`, when the file
-    /// assigns it one consistent group.
-    fn get(&self, ty: &str, field: &str) -> Option<&str> {
+    /// The mount field `field` of struct `ty` holds, when the file assigns it
+    /// one consistent group.
+    fn get(&self, ty: &str, field: &str) -> Option<&Mount> {
+        self.known.get(&(ty.to_string(), field.to_string()))
+    }
+
+    /// CI.5: how many fields hold a group rooted at a group-typed parameter
+    /// (a `Param` mount) — the `[go-routes] mount owners` marker's
+    /// `param_rooted=`.
+    fn param_rooted(&self) -> usize {
         self.known
-            .get(&(ty.to_string(), field.to_string()))
-            .map(String::as_str)
+            .values()
+            .filter(|m| matches!(m, Mount::Param { .. }))
+            .count()
     }
 
     /// CB.23: whether this file shows field `field` of struct `ty` holds a
@@ -3147,10 +3202,11 @@ impl FieldPrefixes {
 /// "<lit>")` (or `x.f = g`, `g` a local group) records `(type of x, f)`, and
 /// a keyed composite literal `&T{f: <recv>.Group("<lit>")}` records `(T, f)`.
 /// `<recv>` is a local group var, another struct field (resolved after the
-/// scan, so the functions may come in any order) or anything else (the engine
-/// itself, `""`). A file that never says `Group` holds no field group, and
-/// is skipped.
-fn scan_field_prefixes(root: TsNode, src: &[u8]) -> FieldPrefixes {
+/// scan, so the functions may come in any order), a group-typed parameter
+/// (CI.5: its `Mount::Param`, by the route walk's own rule,
+/// [`seed_param_mounts`]) or anything else (the engine itself, `""`). A file
+/// that never says `Group` holds no field group, and is skipped.
+fn scan_field_prefixes(root: TsNode, src: &[u8], package_qname: &str) -> FieldPrefixes {
     let mut out = FieldPrefixes {
         declared: declared_router_fields(root, src),
         ..FieldPrefixes::default()
@@ -3168,7 +3224,22 @@ fn scan_field_prefixes(root: TsNode, src: &[u8]) -> FieldPrefixes {
             continue;
         };
         let types = scope_types(decl, body, src);
-        let mut groups = HashMap::new();
+        // CI.5: a GROUP-typed parameter starts its chains at the mount its
+        // callers hand it; a ROOT-typed one is the root, as any unknown
+        // receiver already is.
+        let mut groups: HashMap<String, GroupPath> = callable_qname(decl, src, package_qname)
+            .map(|qname| seed_param_mounts(decl, &qname, src))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(_, mount)| matches!(mount, Mount::Param { .. }))
+            .map(|(name, mount)| {
+                let path = GroupPath {
+                    param: Some(mount),
+                    ..GroupPath::default()
+                };
+                (name, path)
+            })
+            .collect();
         scan_field_groups(body, src, &types, &mut groups, &mut facts);
         out.scopes.insert(body.start_byte(), types);
     }
@@ -3181,6 +3252,22 @@ fn scan_field_prefixes(root: TsNode, src: &[u8]) -> FieldPrefixes {
     }
     out.assigned = facts.into_keys().collect();
     out
+}
+
+/// CI.5: the nav qname [`visit_function`] / [`visit_method`] give a
+/// top-level callable (`<package>::<name>`, `<package>::<receiver type>::<name>`),
+/// the `fn_qname` its `Mount::Param`s name. `None` where they emit no
+/// callable (no name, or a method with no receiver type).
+fn callable_qname(decl: TsNode, src: &[u8], package_qname: &str) -> Option<String> {
+    let name = text_of(decl.child_by_field_name("name")?, src);
+    match decl.kind() {
+        "function_declaration" => Some(format!("{package_qname}::{name}")),
+        "method_declaration" => {
+            let (_, receiver_type) = parse_receiver(decl.child_by_field_name("receiver")?, src);
+            Some(format!("{package_qname}::{}::{name}", receiver_type?))
+        }
+        _ => None,
+    }
 }
 
 /// CB.23: the struct fields this file's top-level struct types declare with a
@@ -3299,8 +3386,9 @@ fn scan_field_groups(
 }
 
 /// CB.11: the group a field is assigned: a `.Group("<lit>")` call, or a local
-/// group var; CB.23: or a router constructor (`gin.New()`, the root, `""`).
-/// Anything else (the engine var, a parameter) records nothing.
+/// group var; CB.23: or a router constructor (`gin.New()`, the root, `""`);
+/// CI.5: or a group-typed parameter (its `Mount::Param`). Anything else (the
+/// engine var, a root-typed parameter) records nothing.
 fn group_value(
     value: TsNode,
     src: &[u8],
@@ -3315,8 +3403,8 @@ fn group_value(
 }
 
 /// CB.11: `<recv>.Group("<lit>")` as a [`GroupPath`]: `<recv>` a local group
-/// var continues that group, `x.f` with a typed `x` starts from field
-/// `(type of x, f)`, anything else from the root.
+/// var (CI.5: or a group-typed parameter) continues that group, `x.f` with a
+/// typed `x` starts from field `(type of x, f)`, anything else from the root.
 fn group_call_path(
     call: TsNode,
     src: &[u8],
@@ -3339,7 +3427,7 @@ fn group_call_path(
         "identifier" => groups.get(text_of(recv, src)).cloned().unwrap_or_default(),
         _ => GroupPath {
             field: field_key(recv, src, types),
-            segs: Vec::new(),
+            ..GroupPath::default()
         },
     };
     Some(base.then(lit))
@@ -3362,37 +3450,41 @@ fn field_key(
     Some((ty.clone(), text_of(f, src).to_string()))
 }
 
-/// CB.11: the prefix of field `key`: its every assignment's group, resolved
+/// CB.11: the mount of field `key`: its every assignment's group, resolved
 /// through the fields they start from, when all agree. A field the file
-/// assigns no group is the engine itself (`""`); a disagreement, or a chain
-/// that loops back through `visiting`, is `None`.
+/// assigns no group is the engine itself (`Const("")`); CI.5: a group rooted
+/// at a group-typed parameter is that parameter's `Param`, the `.Group`
+/// literals folded into its suffix ([`mount_then`], as the route walk folds
+/// them). A disagreement, or a chain that loops back through `visiting`, is
+/// `None`.
 fn resolve_field_prefix(
     key: &(String, String),
     facts: &BTreeMap<(String, String), Vec<GroupPath>>,
-    memo: &mut BTreeMap<(String, String), Option<String>>,
+    memo: &mut BTreeMap<(String, String), Option<Mount>>,
     visiting: &mut BTreeSet<(String, String)>,
-) -> Option<String> {
+) -> Option<Mount> {
     if let Some(done) = memo.get(key) {
         return done.clone();
     }
     let Some(paths) = facts.get(key) else {
-        return Some(String::new());
+        return Some(Mount::Const(String::new()));
     };
     if !visiting.insert(key.clone()) {
         return None;
     }
-    let mut agreed: Option<String> = None;
+    let mut agreed: Option<Mount> = None;
     let mut consistent = true;
     for path in paths {
-        let base = match &path.field {
-            None => Some(String::new()),
-            Some(field) => resolve_field_prefix(field, facts, memo, visiting),
+        let base = match (&path.param, &path.field) {
+            (Some(param), _) => Some(param.clone()),
+            (None, None) => Some(Mount::Const(String::new())),
+            (None, Some(field)) => resolve_field_prefix(field, facts, memo, visiting),
         };
         let Some(base) = base else {
             consistent = false;
             break;
         };
-        let prefix = path.segs.iter().fold(base, |acc, seg| join_path(&acc, seg));
+        let prefix = path.segs.iter().fold(base, |acc, seg| mount_then(acc, seg));
         match &agreed {
             None => agreed = Some(prefix),
             Some(seen) if *seen == prefix => {}
@@ -3410,8 +3502,9 @@ fn resolve_field_prefix(
 
 /// CB.11: the struct type each variable of one callable names: the method
 /// receiver, parameters typed `T` / `*T` / `pkg.T`, and locals bound by
-/// `x := &T{..}`, `x := T{..}`, `x := new(T)`, `var x T` (the simple name,
-/// pointer stripped). A name bound twice to different types, or once to
+/// `x := &T{..}`, `x := T{..}`, `x := new(T)`, `var x T` (pointer stripped;
+/// [`struct_type_name`]: `T`, or `pkg.T` for another package's struct, CI.5).
+/// A name bound twice to different types, or once to
 /// something else (`s := NewServer()`, a range variable), is left out:
 /// unknown beats wrong. Route-only, read at parse time: not
 /// `CodeNav.local_types`, which records call-chain text for the graph's
@@ -3520,7 +3613,7 @@ fn bind_scope_locals(n: TsNode, src: &[u8], scope: &mut ScopeTypes) {
 }
 
 /// CB.11: the struct an initialiser builds: `T{..}`, `&T{..}`, `new(T)`
-/// (and `pkg.T` forms, by `T`); anything else names none.
+/// (and `pkg.T` forms, CI.5: as `pkg.T`); anything else names none.
 fn value_struct_type(value: TsNode, src: &[u8]) -> Option<String> {
     match value.kind() {
         "composite_literal" => struct_type_name(value.child_by_field_name("type")?, src),
@@ -3542,7 +3635,11 @@ fn value_struct_type(value: TsNode, src: &[u8]) -> Option<String> {
             match arg.kind() {
                 "identifier" => Some(text_of(arg, src).to_string()),
                 "selector_expression" => {
-                    Some(text_of(arg.child_by_field_name("field")?, src).to_string())
+                    let pkg = arg
+                        .child_by_field_name("operand")
+                        .filter(|p| p.kind() == "identifier")?;
+                    let name = arg.child_by_field_name("field")?;
+                    qualified_name(text_of(pkg, src), text_of(name, src))
                 }
                 _ => struct_type_name(arg, src),
             }
@@ -3552,17 +3649,30 @@ fn value_struct_type(value: TsNode, src: &[u8]) -> Option<String> {
     }
 }
 
-/// CB.11: a named type's simple name: `T`, `*T`, `pkg.T`, `T[U]` -> `T`.
-/// Slices, maps, funcs and anonymous structs name no struct.
+/// CB.11: a named type's name: `T`, `*T`, `T[U]` -> `T`; CI.5: another
+/// package's `pkg.T` / `*pkg.T` keeps its qualifier, `pkg.T`, so it never
+/// collides with this package's own `T` and [`RouteScope::owner`] can place
+/// it through the file's import. Slices, maps, funcs and anonymous structs
+/// name no struct.
 fn struct_type_name(ty: TsNode, src: &[u8]) -> Option<String> {
     let name = match ty.kind() {
         "type_identifier" => text_of(ty, src),
-        "qualified_type" => text_of(ty.child_by_field_name("name")?, src),
+        "qualified_type" => {
+            let pkg = text_of(ty.child_by_field_name("package")?, src);
+            let name = text_of(ty.child_by_field_name("name")?, src);
+            return qualified_name(pkg, name);
+        }
         "pointer_type" => return struct_type_name(ty.named_child(0)?, src),
         "generic_type" => return struct_type_name(ty.child_by_field_name("type")?, src),
         _ => return None,
     };
     (!name.is_empty()).then(|| name.to_string())
+}
+
+/// CI.5: `pkg.T` as [`struct_type_name`] spells it; `None` when either side
+/// is empty (an error-recovered node).
+fn qualified_name(pkg: &str, name: &str) -> Option<String> {
+    (!pkg.is_empty() && !name.is_empty()).then(|| format!("{pkg}.{name}"))
 }
 
 /// CB.23: the callable a route walk runs in: its declaration and body, its
@@ -3699,6 +3809,9 @@ struct RouteScope<'a> {
     own_types: std::cell::OnceCell<BTreeMap<String, String>>,
     /// CB.11: the file's struct-field router groups.
     fields: &'a FieldPrefixes,
+    /// CI.5: the file's in-repo imports, local name -> package directory
+    /// qname ([`Acc::import_dirs`]), which place another package's struct.
+    imports: &'a BTreeMap<String, String>,
     /// CB.23: the callable walked.
     callable: &'a RouteFn<'a>,
 }
@@ -3717,11 +3830,23 @@ impl RouteScope<'_> {
     /// CB.23: the owner a Field mount names for struct `ty`: `<package dir
     /// qname>::<ty>`. A Go package is its directory (LA.13b), so the file
     /// that assigns a field and the file that registers on it name one owner.
-    fn owner(&self, ty: &str) -> String {
-        match self.callable.package_qname.rsplit_once("::") {
+    /// CI.5: another package's `pkg.T` names the directory the file's import
+    /// of `pkg` maps to (the repo-root package: `T`), so `cmd/main.go`'s
+    /// `&api.Server{}` and `api/server.go`'s `Server` meet; a package outside
+    /// the repo, or one no import binds, places no owner: `None`.
+    fn owner(&self, ty: &str) -> Option<String> {
+        if let Some((pkg, name)) = ty.split_once('.') {
+            let dir = self.imports.get(pkg)?;
+            return Some(if dir.is_empty() {
+                name.to_string()
+            } else {
+                format!("{dir}::{name}")
+            });
+        }
+        Some(match self.callable.package_qname.rsplit_once("::") {
             Some((dir, _)) => format!("{dir}::{ty}"),
             None => ty.to_string(),
-        }
+        })
     }
 
     /// `x.f` with an identifier `x`: `(type of x, f)`, the type `None` when
@@ -3739,21 +3864,27 @@ impl RouteScope<'_> {
     }
 
     /// CB.11 / CB.23: the mount field `f` of struct `ty` holds: the file's
-    /// group for it (CB.11) or, for a field the file declares with a router
+    /// group for it (CB.11; CI.5: a `Param` when the group is rooted at a
+    /// group-typed parameter) or, for a field the file declares with a router
     /// root type, the root; otherwise a Field mount the build resolves from
     /// the package's `FieldMount` facts (CB.20), or re-keys to the local path
-    /// when none reaches it.
+    /// when none reaches it. CI.5: a struct of a package outside the repo
+    /// (`srv.Handler` of `&http.Server{}`) has no owner a `FieldMount` could
+    /// name, so it is the unprefixed root it would re-key to anyway.
     fn typed_field_mount(&self, ty: &str, f: &str) -> Mount {
-        if let Some(prefix) = self.fields.get(ty, f) {
-            return Mount::Const(prefix.to_string());
+        if let Some(mount) = self.fields.get(ty, f) {
+            return mount.clone();
         }
         if self.fields.is_root(ty, f) {
             return Mount::Const(String::new());
         }
-        Mount::Field {
-            owner: self.owner(ty),
-            field: f.to_string(),
-            suffix: String::new(),
+        match self.owner(ty) {
+            Some(owner) => Mount::Field {
+                owner,
+                field: f.to_string(),
+                suffix: String::new(),
+            },
+            None => Mount::Const(String::new()),
         }
     }
 
@@ -3836,15 +3967,17 @@ impl RouteScope<'_> {
     }
 }
 
-/// CB.23: the router-typed parameters of `callable` ([`router_type`]; the
-/// receiver is no parameter): a ROOT-typed one holds the root, `""`; a
-/// GROUP-typed one the mount its callers hand it, `Param { fn qname, index }`.
+/// CB.23: the router-typed parameters of the callable `decl` ([`router_type`];
+/// the receiver is no parameter): a ROOT-typed one holds the root, `""`; a
+/// GROUP-typed one the mount its callers hand it, `Param { fn_qname, index }`.
 /// `index` counts parameter names, so `public, protected *gin.RouterGroup`
-/// are 0 and 1, and an unnamed parameter counts one.
-fn seed_param_mounts(callable: &RouteFn, src: &[u8]) -> BTreeMap<String, Mount> {
+/// are 0 and 1, and an unnamed parameter counts one. CI.5: one rule for the
+/// route walk ([`collect_routes_in`]) and the field-group scan
+/// ([`scan_field_prefixes`]).
+fn seed_param_mounts(decl: TsNode, fn_qname: &str, src: &[u8]) -> BTreeMap<String, Mount> {
     let mut out = BTreeMap::new();
     let mut index: u32 = 0;
-    for param in named_kids(callable.decl.child_by_field_name("parameters")) {
+    for param in named_kids(decl.child_by_field_name("parameters")) {
         let router = match param.kind() {
             "parameter_declaration" => param
                 .child_by_field_name("type")
@@ -3863,7 +3996,7 @@ fn seed_param_mounts(callable: &RouteFn, src: &[u8]) -> BTreeMap<String, Mount> 
             let mount = match router {
                 Some(RouterType::Root) => Some(Mount::Const(String::new())),
                 Some(RouterType::Group) => Some(Mount::Param {
-                    fn_qname: callable.qname.to_string(),
+                    fn_qname: fn_qname.to_string(),
                     index,
                     suffix: String::new(),
                 }),
@@ -3888,18 +4021,21 @@ fn collect_routes_in(
     repo: RepoId,
     acc: &mut Acc,
 ) {
-    // CB.11: the field groups are lent out of `acc` for the walk, which
-    // mutates `acc` as it emits.
+    // CB.11: the field groups (CI.5: and the import map) are lent out of
+    // `acc` for the walk, which mutates `acc` as it emits.
     let fields = std::mem::take(&mut acc.field_prefixes);
+    let imports = std::mem::take(&mut acc.import_dirs);
     let mut scope = RouteScope {
-        groups: seed_param_mounts(callable, src),
+        groups: seed_param_mounts(callable.decl, callable.qname, src),
         scanned: fields.scopes.get(&callable.body.start_byte()),
         own_types: std::cell::OnceCell::new(),
         fields: &fields,
+        imports: &imports,
         callable,
     };
     walk_routes(callable.body, src, file_rel, module_id, repo, &mut scope, acc);
     acc.field_prefixes = fields;
+    acc.import_dirs = imports;
 }
 
 fn walk_routes(
@@ -3956,8 +4092,8 @@ fn record_group_assignment(decl: TsNode, src: &[u8], scope: &mut RouteScope) {
 
 /// CB.23: record `fact` (a `MountArg` or a `FieldMount`) on `scope` and count
 /// it for the marker, once per distinct fact ([`CodeNav::record_fact`]
-/// dedups per scope).
-fn record_mount_fact(acc: &mut Acc, scope: NodeId, fact: NavFact) {
+/// dedups per scope). CI.5: whether the fact is new to the scope.
+fn record_mount_fact(acc: &mut Acc, scope: NodeId, fact: NavFact) -> bool {
     let seen = acc
         .nav
         .nav_facts
@@ -3971,13 +4107,19 @@ fn record_mount_fact(acc: &mut Acc, scope: NodeId, fact: NavFact) {
         }
     }
     acc.nav.record_fact(scope, fact);
+    !seen
 }
 
 /// CB.23: every router mount this body assigns to a struct field — `x.f =
-/// <mount>` with a typed `x`, or a keyed `T{f: <mount>}` of a struct of this
-/// package — as a `NavFact::FieldMount { owner: <package dir qname>::<T> }`
-/// on the callable, for the build's mount pass (CB.20).
+/// <mount>` with a typed `x`, or a keyed `T{f: <mount>}` — as a
+/// `NavFact::FieldMount { owner: <package dir qname>::<T> }` on the callable,
+/// for the build's mount pass (CB.20). CI.5: a struct of another package of
+/// the repo (`s := &api.Server{}`, `&api.Server{Public: ..}`) names the
+/// directory the file's import maps `api` to ([`RouteScope::owner`]), the
+/// owner that package's own registrations name; a struct of a package outside
+/// the repo (`&http.Server{}`) records nothing.
 fn record_field_mounts(n: TsNode, src: &[u8], scope: &RouteScope, acc: &mut Acc) {
+    // (struct type as the scope spells it, field, mount)
     let mut found: Vec<(String, String, Mount)> = Vec::new();
     match n.kind() {
         "assignment_statement" => {
@@ -3997,21 +4139,17 @@ fn record_field_mounts(n: TsNode, src: &[u8], scope: &RouteScope, acc: &mut Acc)
                     continue;
                 };
                 if let Some((Some(ty), field)) = scope.field_key(*target, src) {
-                    found.push((scope.owner(&ty), field, mount));
+                    found.push((ty, field, mount));
                 }
             }
         }
         "composite_literal" => {
-            // A struct of another package (`api.Server{..}`) names an owner
-            // this file cannot place: skipped.
             let Some(ty) = n
                 .child_by_field_name("type")
-                .map(|t| generic_base(t).unwrap_or(t))
-                .filter(|t| t.kind() == "type_identifier")
+                .and_then(|t| struct_type_name(t, src))
             else {
                 return;
             };
-            let owner = scope.owner(text_of(ty, src));
             for el in named_kids(n.child_by_field_name("body")) {
                 if el.kind() != "keyed_element" {
                     continue;
@@ -4027,19 +4165,24 @@ fn record_field_mounts(n: TsNode, src: &[u8], scope: &RouteScope, acc: &mut Acc)
                     continue;
                 };
                 if let Some(mount) = scope.value_mount(value, src, false) {
-                    found.push((owner.clone(), text_of(key, src).to_string(), mount));
+                    found.push((ty.clone(), text_of(key, src).to_string(), mount));
                 }
             }
         }
         _ => {}
     }
-    for (owner, field, mount) in found {
+    for (ty, field, mount) in found {
+        let Some(owner) = scope.owner(&ty) else {
+            continue;
+        };
         let fact = NavFact::FieldMount {
             owner,
             field,
             mount,
         };
-        record_mount_fact(acc, scope.callable.id, fact);
+        if record_mount_fact(acc, scope.callable.id, fact) && ty.contains('.') {
+            acc.mounts.foreign += 1;
+        }
     }
 }
 
@@ -8425,5 +8568,319 @@ var onSave = func(repo *store.Repo) {}
         assert_eq!(locals_of(&parse, svc), None);
         // The MODULE scope and the literal's var scope, nothing else.
         assert_eq!(parse.nav.local_types.len(), 2);
+    }
+
+    // ---- CI.5: mount owners through imports, parameter-rooted field groups ----
+
+    /// The bench fixture's sources (`go-route-mount-owners`), so the unit
+    /// tests and the graded fixture describe one program.
+    const OWNERS_MAIN: &str =
+        include_str!("../../../../bench/substrate-gap/fixtures/go-route-mount-owners/cmd/main.go");
+    const OWNERS_PANEL: &str = include_str!(
+        "../../../../bench/substrate-gap/fixtures/go-route-mount-owners/admin/panel.go"
+    );
+
+    /// `source` parsed as `file` of module `module` under the fixture's
+    /// `example.com/owners`.
+    fn parse_owners(source: &str, file: &str, module: &str) -> FileParse {
+        parse_file(source, file, module, "example.com/owners", repo()).unwrap()
+    }
+
+    #[test]
+    fn foreign_struct_field_mount_names_the_imported_package() {
+        // `s := &api.Server{}; s.Public = r.Group("/public")` in cmd/: the
+        // owner is the imported package's directory, the owner api/server.go's
+        // `s.Public.GET(..)` names (HEAD: `cmd::Server`, never met).
+        let parse = parse_owners(OWNERS_MAIN, "cmd/main.go", "cmd::main");
+        assert_eq!(
+            field_mounts(&parse, func_id("cmd::main::main")),
+            vec![(
+                "api::Server".to_string(),
+                "Public".to_string(),
+                Mount::Const("/public".into())
+            )]
+        );
+        let server = parse_owners(
+            include_str!(
+                "../../../../bench/substrate-gap/fixtures/go-route-mount-owners/api/server.go"
+            ),
+            "api/server.go",
+            "api::server",
+        );
+        assert_eq!(
+            route_qnames(&server),
+            vec!["GET <mount:field:api::Server.Public>/items".to_string()]
+        );
+    }
+
+    #[test]
+    fn foreign_composite_literal_mount() {
+        // A keyed literal of another package's struct, under its own name, an
+        // alias, and the repo-root package (whose directory is the root).
+        let source = r#"package main
+
+import (
+    "example.com/owners"
+    "example.com/owners/api"
+    web "example.com/owners/web/v2"
+    "github.com/gin-gonic/gin"
+)
+
+func main() {
+    r := gin.Default()
+    s := &api.Server{Public: r.Group("/p")}
+    w := web.Server{Admin: r.Group("/w")}
+    a := owners.App{Root: r}
+    run(s, w, a)
+}
+"#;
+        let parse = parse_owners(source, "cmd/main.go", "cmd::main");
+        assert_eq!(
+            field_mounts(&parse, func_id("cmd::main::main")),
+            vec![
+                (
+                    "api::Server".to_string(),
+                    "Public".to_string(),
+                    Mount::Const("/p".into())
+                ),
+                (
+                    "web::v2::Server".to_string(),
+                    "Admin".to_string(),
+                    Mount::Const("/w".into())
+                ),
+                ("App".to_string(), "Root".to_string(), Mount::Const(String::new())),
+            ]
+        );
+    }
+
+    #[test]
+    fn foreign_struct_never_collides_with_a_local_one() {
+        // This package's `Server.v1` and api's `Server.v1` are two fields:
+        // HEAD keyed both `("Server", "v1")`, saw two prefixes and read none.
+        let source = r#"package app
+
+import (
+    "example.com/owners/api"
+    "github.com/gin-gonic/gin"
+)
+
+type Server struct {
+    v1 *gin.RouterGroup
+}
+
+func NewServer(r *gin.Engine) *Server {
+    s := &Server{}
+    s.v1 = r.Group("/v1")
+    o := new(api.Server)
+    o.v1 = r.Group("/other")
+    s.v1.GET("/a", h)
+    o.v1.GET("/b", h)
+    return s
+}
+"#;
+        let parse = parse_owners(source, "app/server.go", "app::server");
+        assert_eq!(
+            route_qnames(&parse),
+            vec!["GET /other/b".to_string(), "GET /v1/a".to_string()]
+        );
+        assert_eq!(
+            field_mounts(&parse, func_id("app::server::NewServer")),
+            vec![
+                (
+                    "app::Server".to_string(),
+                    "v1".to_string(),
+                    Mount::Const("/v1".into())
+                ),
+                (
+                    "api::Server".to_string(),
+                    "v1".to_string(),
+                    Mount::Const("/other".into())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn outside_package_struct_records_no_mount() {
+        // A struct of a package outside the module places no owner: no
+        // FieldMount, and a registration on its field is the unprefixed root
+        // route itself, not a provisional no FieldMount could reach.
+        let source = r#"package main
+
+import (
+    "net/http"
+
+    "github.com/gin-gonic/gin"
+)
+
+func main() {
+    r := gin.Default()
+    srv := &http.Server{}
+    srv.Handler = r
+    srv.ListenAndServe()
+}
+
+func serve(srv *http.Server) {
+    srv.Handler.GET("/health", health)
+}
+"#;
+        let parse = parse_owners(source, "cmd/main.go", "cmd::main");
+        assert_eq!(mount_fact_count(&parse), 0);
+        assert_eq!(route_qnames(&parse), vec!["GET /health".to_string()]);
+        let health = route_id(repo(), "GET", "/health");
+        assert_eq!(handled_by(&parse, health), vec![bare("health")]);
+    }
+
+    #[test]
+    fn param_rooted_field_holds_the_param_mount() {
+        // The fixture: `p.admin = rg.Group("/admin")` in NewPanel(rg
+        // *gin.RouterGroup) holds rg's mount then `/admin` (HEAD: the root,
+        // `GET /admin/stats` as a Const route).
+        let parse = parse_owners(OWNERS_PANEL, "admin/panel.go", "admin::panel");
+        assert_eq!(
+            route_qnames(&parse),
+            vec!["GET <mount:param:admin::panel::NewPanel#0>/admin/stats".to_string()]
+        );
+        let new_panel = func_id("admin::panel::NewPanel");
+        assert_eq!(
+            field_mounts(&parse, new_panel),
+            vec![(
+                "admin::Panel".to_string(),
+                "admin".to_string(),
+                param_mount("admin::panel::NewPanel", 0, "/admin")
+            )]
+        );
+        let stats = param_route_id("admin::panel::NewPanel", 0, "GET", "/admin/stats");
+        assert_eq!(handled_by(&parse, stats), vec![attr("p", "stats")]);
+
+        // Registered in another callable of the file, through a local group
+        // and a second parameter; a field passed on carries the Param too.
+        let source = r#"package admin
+
+import "github.com/gin-gonic/gin"
+
+type Panel struct {
+    admin *gin.RouterGroup
+    raw   *gin.RouterGroup
+}
+
+func NewPanel(ctx context.Context, rg *gin.RouterGroup) *Panel {
+    p := &Panel{}
+    g := rg.Group("/admin")
+    p.admin = g.Group("/v1")
+    p.raw = rg
+    return p
+}
+
+func (p *Panel) routes() {
+    p.admin.GET("/stats", p.stats)
+    p.raw.GET("/ping", p.ping)
+    register(p.admin)
+}
+"#;
+        let parse = parse_owners(source, "admin/panel.go", "admin::panel");
+        assert_eq!(
+            route_qnames(&parse),
+            vec![
+                "GET <mount:param:admin::panel::NewPanel#1>/admin/v1/stats".to_string(),
+                "GET <mount:param:admin::panel::NewPanel#1>/ping".to_string(),
+            ]
+        );
+        assert_eq!(
+            mount_args(&parse, method_id("admin::panel::Panel::routes")),
+            vec![(
+                row_of(source, "register(p.admin)"),
+                "register".to_string(),
+                0,
+                param_mount("admin::panel::NewPanel", 1, "/admin/v1")
+            )]
+        );
+    }
+
+    #[test]
+    fn unmounted_param_field_keeps_its_suffix() {
+        // panel.go alone: no caller mounts NewPanel, so CB.20 re-keys the
+        // provisional to its suffix + local path, HEAD's `GET /admin/stats`
+        // byte for byte.
+        let parse = parse_owners(OWNERS_PANEL, "admin/panel.go", "admin::panel");
+        let routes = route_qnames(&parse);
+        let [route] = routes.as_slice() else {
+            panic!("one route: {routes:?}");
+        };
+        let (method, mount, path) =
+            glia_code_domain::endpoint::parse_mount_route_qname(route).expect("provisional");
+        assert_eq!(mount, param_mount("admin::panel::NewPanel", 0, ""));
+        assert_eq!(format!("{method} {path}"), "GET /admin/stats");
+    }
+
+    #[test]
+    fn root_param_field_stays_known() {
+        // A ROOT-typed parameter is the root, as before CI.5: the field holds
+        // the literal group, and the route is that Const route (CB.11).
+        let source = r#"package api
+
+import "github.com/gin-gonic/gin"
+
+type Server struct {
+    admin *gin.RouterGroup
+}
+
+func NewServer(r *gin.Engine) *Server {
+    s := &Server{}
+    s.admin = r.Group("/admin")
+    s.admin.GET("/stats", s.stats)
+    return s
+}
+"#;
+        let parse = parse_owners(source, "api/server.go", "api::server");
+        assert_eq!(route_qnames(&parse), vec!["GET /admin/stats".to_string()]);
+    }
+
+    #[test]
+    fn param_and_root_assignments_disagree() {
+        // A field one callable roots at a group-typed parameter while another
+        // assigns it from a router root holds two mounts: unknown in the file,
+        // so the route is CB.23's Field mount, which CB.20 resolves from both
+        // FieldMount facts (HEAD read both as the root: `GET /m/x`).
+        let source = r#"package api
+
+import "github.com/gin-gonic/gin"
+
+type Server struct {
+    mixed *gin.RouterGroup
+}
+
+func NewServer(r *gin.Engine) *Server {
+    s := &Server{}
+    s.mixed = r.Group("/m")
+    s.mixed.GET("/x", s.x)
+    return s
+}
+
+func (s *Server) Mount(rg *gin.RouterGroup) {
+    s.mixed = rg.Group("/m")
+}
+"#;
+        let parse = parse_owners(source, "api/server.go", "api::server");
+        assert_eq!(
+            route_qnames(&parse),
+            vec!["GET <mount:field:api::Server.mixed>/x".to_string()]
+        );
+        assert_eq!(
+            field_mounts(&parse, func_id("api::server::NewServer")),
+            vec![(
+                "api::Server".to_string(),
+                "mixed".to_string(),
+                Mount::Const("/m".into())
+            )]
+        );
+        assert_eq!(
+            field_mounts(&parse, method_id("api::server::Server::Mount")),
+            vec![(
+                "api::Server".to_string(),
+                "mixed".to_string(),
+                param_mount("api::server::Server::Mount", 0, "/m")
+            )]
+        );
     }
 }

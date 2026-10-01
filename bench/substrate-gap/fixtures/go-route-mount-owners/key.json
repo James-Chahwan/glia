@@ -1,0 +1,44 @@
+{
+  "framework": "go-route-mount-owners",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "http_server",
+  "cells": [
+    "go/http_server"
+  ],
+  "note": "CI-5 (CB.23 follow-ups): (a) cmd/ assigns a group to a field of ANOTHER package's struct (`s := &api.Server{}; s.Public = r.Group(\"/public\")`); the field mount names its owner through the import (`api::Server`), so the routes api registers on s.Public get /public. (b) admin.NewPanel stores `rg.Group(\"/admin\")` on a field of a parameter-handed group and registers on it in the same file: the field holds rg's mount, not the root. Baseline HEAD f8a46c0: GET /items (owner keyed cmd::Server, never mounted) and GET /admin/stats (CB.11's in-file `known` roots rg).",
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /public/items"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /api/admin/stats"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "GET /public/items",
+      "to": "api::server::Server::items",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "GET /api/admin/stats",
+      "to": "admin::panel::Panel::stats",
+      "category": "HANDLED_BY"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /items"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /admin/stats"
+    }
+  ]
+}

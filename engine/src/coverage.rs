@@ -183,7 +183,7 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     CoverageCaveat {
         language: "go",
         edge_category: "HANDLED_BY",
-        note: "a Go route takes its group's prefix when the group is built from a string literal (`g := r.Group(\"/api\")`), held in a struct field the package assigns it to, or passed through a parameter or a struct field by a call the build has resolved (one ROUTE per mount); a prefix held in a constant or a variable or built at run time (fmt.Sprintf, os.Getenv), a group returned by a function, and a group passed through a call that is not resolved (a function value, a loop over registrars) are not read, so the route keeps its local path and pairs with a client only through the HTTP resolver's prefix folds",
+        note: "a Go route takes its group's prefix when the group is built from a string literal (`g := r.Group(\"/api\")`), held in a struct field (of its own package or an imported one) assigned it, or passed through a parameter or a struct field by a call the build has resolved (one ROUTE per mount); a prefix held in a constant or a variable or built at run time (fmt.Sprintf, os.Getenv), a group returned by a function, and a group passed through a call that is not resolved (a function value, a loop over registrars) are not read, so the route keeps its local path and pairs with a client only through the HTTP resolver's prefix folds",
         verify: "grep .Group( / .Route( / .Mount( and follow the group to its registrations",
     },
     CoverageCaveat {
@@ -868,9 +868,17 @@ mod tests {
     fn go_route_mount_caveat_names_the_unread_prefixes() {
         // CB.11 / CB.20 / CB.23: a literal group reaches routes through
         // parameters and fields when the passing call binds; the row says so.
+        // CI.5: the field may be another package's struct, through an import.
         assert!(lang_rows("main.go", "go").contains(&("go", "HANDLED_BY")));
         let note = row_note("main.go", "go", "HANDLED_BY");
-        for part in ["struct field", "string literal", "resolved", "constant", "function value"] {
+        for part in [
+            "struct field",
+            "string literal",
+            "resolved",
+            "constant",
+            "function value",
+            "imported",
+        ] {
             assert!(note.contains(part), "{part}: {note}");
         }
         assert!(lang_rows("src/lib.rs", "go").is_empty());
