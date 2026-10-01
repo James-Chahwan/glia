@@ -74,11 +74,23 @@ fn a_known_symbol_with_no_doc_edge_is_no_edges_with_its_caveat() {
         "no DOCUMENTS edge reaches `app::helper` in this graph"
     );
     assert!(a.suggestions.is_empty());
-    // The universal contract-JSON row, and no row of another mechanism.
+    // The universal contract-JSON row and the CJ.2 ingestion-scope row, and
+    // no row of another mechanism.
     assert!(
         a.caveats
             .iter()
             .any(|c| c.language == "*" && c.edge_category == "DOCUMENTS" && c.edges_found == 0),
+        "{:?}",
+        a.caveats
+    );
+    assert_eq!(
+        a.caveats.iter().filter(|c| c.edge_category == "DOCUMENTS").count(),
+        2,
+        "{:?}",
+        a.caveats
+    );
+    assert!(
+        a.caveats.iter().any(|c| c.note.contains("single-backtick")),
         "{:?}",
         a.caveats
     );

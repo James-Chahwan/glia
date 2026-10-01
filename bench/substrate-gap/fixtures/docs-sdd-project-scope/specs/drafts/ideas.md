@@ -1,0 +1,3 @@
+# Ideas
+
+`PlaceOrder` could batch.

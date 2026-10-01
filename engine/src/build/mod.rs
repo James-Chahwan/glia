@@ -288,7 +288,7 @@ fn generate_one_inner(
     }
     let mut doc_records = FileDocSource(md).collect();
     doc_records.extend(SnapshotDocSource::for_repo(&root).collect());
-    if let Some(docs) = build_docs_graph(&doc_records, repo) {
+    if let Some(docs) = build_docs_graph(&doc_records, repo, &roots) {
         graphs.push(docs);
     }
     eprintln!("{}", times.repo_marker(repo_path));
@@ -544,7 +544,7 @@ pub(crate) fn assemble_many_with(
         }
         let mut doc_records = FileDocSource(md).collect();
         doc_records.extend(SnapshotDocSource::for_repo(&root).collect());
-        if let Some(docs) = build_docs_graph(&doc_records, repo) {
+        if let Some(docs) = build_docs_graph(&doc_records, repo, &roots) {
             all_graphs.push(docs);
         }
         all_errors.extend(parse_errors);

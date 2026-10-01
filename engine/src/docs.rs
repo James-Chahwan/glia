@@ -6,38 +6,136 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use glia_code_domain::evidence::Evidence;
+use glia_code_domain::project_roots::ProjectRoot;
 use glia_code_domain::{
     CodeNav, DocProvenance, DocRecord, GRAPH_TYPE, edge_category, node_kind,
 };
 use glia_core::{Confidence, Edge, Node, NodeId, RepoId};
 
-/// Repo-root markdown files worth ingesting as documentation.
-fn is_wellknown_doc(rel: &str) -> bool {
-    matches!(
-        rel,
-        "README.md"
-            | "ARCHITECTURE.md"
-            | "CHANGELOG.md"
-            | "CONTRIBUTING.md"
-            | "CODE_OF_CONDUCT.md"
-            | "CLAUDE.md"
-            | "AGENTS.md"
-            | "CODE_RULES.md"
-    )
+/// A well-known documentation FILE NAME, ASCII case-folded (CJ.2): any
+/// `readme*.md` (`README.md`, `readme.md`, `README.dev.md`, `README.zh-CN.md`)
+/// or one of the seven other names. Before CJ.2 the match was the eight exact
+/// names, case-sensitive, at the repo root only.
+fn is_wellknown_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    (lower.starts_with("readme") && lower.ends_with(".md"))
+        || matches!(
+            lower.as_str(),
+            "architecture.md"
+                | "changelog.md"
+                | "contributing.md"
+                | "code_of_conduct.md"
+                | "claude.md"
+                | "agents.md"
+                | "code_rules.md"
+        )
 }
 
-/// Should this markdown path be ingested? Root well-known files, anything under
-/// a top-level `docs/`, or under `.ai/` (≤2 levels), and (LF.4b) an ADR
-/// directory ([`is_adr_path`]). License boilerplate skipped.
-fn include_doc(rel: &str) -> bool {
+/// Which ingestion rule admitted a repo markdown file ([`include_doc`]). The
+/// discriminant indexes the per-rule counts the `[docs] scope:` marker prints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DocRule {
+    /// A well-known name ([`is_wellknown_name`]) at the repo root.
+    RootWellKnown,
+    /// A well-known name directly in a PROJECT root's directory (CJ.2).
+    ProjectWellKnown,
+    /// Anything under the repo-root `docs/`.
+    DocsTree,
+    /// Anything under the repo-root `.ai/`.
+    AiTree,
+    /// An ADR directory ([`is_adr_path`], LF.4b).
+    Adr,
+    /// Anything under a PROJECT root's own `docs/` (CJ.2).
+    ProjectDocsTree,
+    /// An SDD feature doc: `features/<feature>/<file>.md` (CJ.2).
+    Feature,
+    /// A spec-kit feature dir: `specs/<NNN-slug>/**/*.md` (CJ.2).
+    SpecKit,
+}
+
+/// The number of [`DocRule`] variants: the length of the per-rule counts.
+const DOC_RULES: usize = 8;
+
+/// Should this markdown path be ingested, and by which rule? `rel` is
+/// repo-relative; `project_dirs` are the non-empty `rel_path`s of the walk's
+/// PROJECT roots (manifest-rooted or `[[project]]`-declared), only
+/// membership-tested. First match wins:
+///
+/// 1. licence boilerplate (`license` anywhere in the path) -> never;
+/// 2. a well-known name at the repo root -> [`DocRule::RootWellKnown`];
+/// 3. a well-known name directly in a PROJECT root -> [`DocRule::ProjectWellKnown`];
+/// 4. the repo-root `docs/` and `.ai/` trees, an ADR directory (unchanged);
+/// 5. a PROJECT root's own `docs/` tree, any depth below it ->
+///    [`DocRule::ProjectDocsTree`] (`.ai/` and the ADR rule stay repo-root only);
+/// 6. an SDD doc ([`sdd_rule`]) at the repo root or at a PROJECT root.
+///
+/// Nothing else: a README inside a source directory, `features/` or `specs/`
+/// nested in source, or a `docs/` under a directory that is not a PROJECT
+/// root stays out.
+fn include_doc(rel: &str, project_dirs: &[&str]) -> Option<DocRule> {
+    let rel = rel.replace('\\', "/");
     let lower = rel.to_ascii_lowercase();
     if lower.ends_with("license.md") || lower.contains("license") {
-        return false;
+        return None;
     }
-    if is_wellknown_doc(rel) {
-        return true;
+    match rel.rsplit_once('/') {
+        None if is_wellknown_name(&rel) => return Some(DocRule::RootWellKnown),
+        Some((dir, name)) if project_dirs.contains(&dir) && is_wellknown_name(name) => {
+            return Some(DocRule::ProjectWellKnown);
+        }
+        _ => {}
     }
-    rel.starts_with("docs/") || rel.starts_with(".ai/") || is_adr_path(rel)
+    if rel.starts_with("docs/") {
+        return Some(DocRule::DocsTree);
+    }
+    if rel.starts_with(".ai/") {
+        return Some(DocRule::AiTree);
+    }
+    if is_adr_path(&rel) {
+        return Some(DocRule::Adr);
+    }
+    // `rel` below each PROJECT root that prefixes it at a `/` boundary; nested
+    // roots (`app` and `app/android`) both test, and either match admits.
+    let below_roots = || {
+        project_dirs
+            .iter()
+            .filter_map(|d| rel.strip_prefix(d).and_then(|r| r.strip_prefix('/')))
+    };
+    if below_roots().any(|rest| rest.starts_with("docs/")) {
+        return Some(DocRule::ProjectDocsTree);
+    }
+    std::iter::once(rel.as_str()).chain(below_roots()).find_map(sdd_rule)
+}
+
+/// CJ.2: an SDD feature doc, `rest` relative to the repo root or a PROJECT
+/// root. [`DocRule::Feature`]: exactly `features/<feature>/<file>.md`.
+/// [`DocRule::SpecKit`]: `specs/<NNN-slug>/...` with at least one more
+/// segment ending `.md` (`spec.md`, `plan.md`, `contracts/api.md`,
+/// `checklists/requirements.md`), where the feature dir is >= 3 ASCII digits,
+/// a `-`, and at least one more byte (`001-refunds`, `0042-x`).
+fn sdd_rule(rest: &str) -> Option<DocRule> {
+    if !rest.to_ascii_lowercase().ends_with(".md") {
+        return None;
+    }
+    let segments: Vec<&str> = rest.split('/').collect();
+    match segments.as_slice() {
+        ["features", feature, file] if !feature.is_empty() && file.len() > ".md".len() => {
+            Some(DocRule::Feature)
+        }
+        ["specs", dir, more @ ..]
+            if is_spec_kit_dir(dir) && !more.is_empty() && more.iter().all(|s| !s.is_empty()) =>
+        {
+            Some(DocRule::SpecKit)
+        }
+        _ => None,
+    }
+}
+
+/// A spec-kit feature directory name: >= 3 ASCII digits, `-`, then at least
+/// one more byte (`001-refunds`); `01-x` and `drafts` are not.
+fn is_spec_kit_dir(dir: &str) -> bool {
+    let digits = dir.bytes().take_while(u8::is_ascii_digit).count();
+    digits >= 3 && dir.as_bytes().get(digits) == Some(&b'-') && dir.len() > digits + 1
 }
 
 /// LF.4b: a markdown file inside an architecture-decision-record directory: a
@@ -332,7 +430,16 @@ impl DocSource for SnapshotDocSource {
 /// carries the prose in a CODE cell, a POSITION cell (md path + line range), and
 /// an ORIGIN cell `provenance=documentation`. The exporter maps the kind to
 /// `Content::Proposition`. (glia-v5 G18)
-pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<glia_graph::RepoGraph> {
+///
+/// `roots` are the walk's PROJECT roots: a repo file is admitted by
+/// [`include_doc`] against their directories (CJ.2). fired_on, on stderr, when
+/// a PROJECT-root or SDD rule admitted at least one doc:
+/// `[docs] scope: project_root=<p> project_docs=<q> feature=<f> spec_kit=<s> (root=<r> docs=<d> ai=<a> adr=<x>)`
+pub(crate) fn build_docs_graph(
+    records: &[DocRecord],
+    repo: RepoId,
+    roots: &[ProjectRoot],
+) -> Option<glia_graph::RepoGraph> {
     use glia_code_domain::{DocSourceKind, cell_type};
     use glia_core::{Cell, CellPayload};
 
@@ -362,13 +469,24 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<gl
     // CG.3 `[docs] section text:` marker: sections stored longer than the
     // pre-CG.3 500-byte cap, the longest stored text, and those cut at 64 KiB.
     let (mut long_sections, mut longest, mut truncated_sections) = (0usize, 0usize, 0usize);
+    // CJ.2: the PROJECT root directories (the repo root itself is the
+    // root rules), and the repo files each ingestion rule admitted.
+    let dirs: Vec<&str> = roots
+        .iter()
+        .map(|r| r.rel_path.as_str())
+        .filter(|d| !d.is_empty())
+        .collect();
+    let mut admitted = [0usize; DOC_RULES];
 
     for rec in records {
         let (path, text) = (&rec.rel_path, &rec.text);
         let is_file = rec.provenance.kind == DocSourceKind::File;
         // `include_doc` gates repo files; external docs are pre-curated by sync.
-        if is_file && !include_doc(path) {
-            continue;
+        if is_file {
+            match include_doc(path, &dirs) {
+                None => continue,
+                Some(rule) => admitted[rule as usize] += 1,
+            }
         }
 
         // A DOC_SPACE for an external container (Confluence space / Notion db /
@@ -484,6 +602,25 @@ pub(crate) fn build_docs_graph(records: &[DocRecord], repo: RepoId) -> Option<gl
             "[docs] sections={sections} from {section_docs} doc(s) (rows 0-indexed, end inclusive) dir_scoped={dir_scoped}"
         );
     }
+    // CJ.2 fired_on marker: `... 2>&1 | grep '^\[docs\] scope:'`
+    let n = |rule: DocRule| admitted[rule as usize];
+    let widened = n(DocRule::ProjectWellKnown)
+        + n(DocRule::ProjectDocsTree)
+        + n(DocRule::Feature)
+        + n(DocRule::SpecKit);
+    if widened > 0 {
+        eprintln!(
+            "[docs] scope: project_root={} project_docs={} feature={} spec_kit={} (root={} docs={} ai={} adr={})",
+            n(DocRule::ProjectWellKnown),
+            n(DocRule::ProjectDocsTree),
+            n(DocRule::Feature),
+            n(DocRule::SpecKit),
+            n(DocRule::RootWellKnown),
+            n(DocRule::DocsTree),
+            n(DocRule::AiTree),
+            n(DocRule::Adr),
+        );
+    }
     // CG.3 fired_on marker: `... 2>&1 | grep '^\[docs\] section text:'`
     if long_sections > 0 {
         eprintln!(
@@ -547,10 +684,10 @@ mod docs_tests {
                   Refunds go through support.\n";
         assert_eq!(rows(&chunk_markdown(md)), vec![(0, 2), (4, 6), (9, 11)]);
         // Include rules.
-        assert!(include_doc("README.md"));
-        assert!(include_doc("docs/architecture.md"));
-        assert!(!include_doc("LICENSE.md"));
-        assert!(!include_doc("src/notes.md")); // not root-wellknown / docs/ / .ai/
+        assert!(include_doc("README.md", &[]).is_some());
+        assert!(include_doc("docs/architecture.md", &[]).is_some());
+        assert!(include_doc("LICENSE.md", &[]).is_none());
+        assert!(include_doc("src/notes.md", &[]).is_none()); // not root-wellknown / docs/ / .ai/
     }
 
     /// The pre-CG.3 section rule, verbatim: 500 bytes, cut back to the last
@@ -607,7 +744,7 @@ mod docs_tests {
             text: md.to_string(),
             provenance: DocProvenance::file(),
         };
-        let Some(g) = build_docs_graph(&[rec], RepoId(11)) else {
+        let Some(g) = build_docs_graph(&[rec], RepoId(11), &[]) else {
             panic!("a doc with sections builds a graph");
         };
         let id = NodeId::from_parts(GRAPH_TYPE, RepoId(11), node_kind::DOC_SECTION, "docs::docs::orders::refunds");
@@ -675,7 +812,7 @@ mod docs_tests {
             "doc\\adr\\0008-windows.md",
         ] {
             assert!(is_adr_path(rel), "{rel} is an ADR path");
-            assert!(include_doc(rel), "{rel} is ingested");
+            assert!(include_doc(rel, &[]).is_some(), "{rel} is ingested");
         }
         for rel in [
             "doc/notes.md",
@@ -688,8 +825,112 @@ mod docs_tests {
         ] {
             assert!(!is_adr_path(rel), "{rel} is not an ADR path");
         }
-        assert!(!include_doc("doc/notes.md"), "the widening is ADR-only");
-        assert!(!include_doc("doc/adr/LICENSE.md"), "licence boilerplate stays out");
+        assert!(include_doc("doc/notes.md", &[]).is_none(), "the widening is ADR-only");
+        assert!(include_doc("doc/adr/LICENSE.md", &[]).is_none(), "licence boilerplate stays out");
+    }
+
+    /// CJ.2: the well-known docs and the `docs/` tree at every PROJECT root,
+    /// and SDD feature docs at the repo root or a PROJECT root, are admitted;
+    /// markdown inside a source tree is not.
+    #[test]
+    fn project_root_and_sdd_docs_are_included() {
+        use DocRule::*;
+        let dirs = ["services/orders", "web", "svc"];
+        for (rel, want) in [
+            ("services/orders/README.md", ProjectWellKnown),
+            ("services/orders/readme.md", ProjectWellKnown),
+            ("services/orders/README.dev.md", ProjectWellKnown),
+            ("services/orders/CHANGELOG.md", ProjectWellKnown),
+            ("web/CLAUDE.md", ProjectWellKnown),
+            ("features/checkout/backend.md", Feature),
+            ("web/features/checkout/ui.md", Feature),
+            ("specs/001-refunds/spec.md", SpecKit),
+            ("specs/001-refunds/contracts/api.md", SpecKit),
+            ("specs/0042-x/checklists/requirements.md", SpecKit),
+            ("svc/specs/002-x/plan.md", SpecKit),
+            ("services/orders/docs/runbook.md", ProjectDocsTree),
+            ("services/orders/docs/ops/deploy.md", ProjectDocsTree),
+            ("web/docs/adr/0001-x.md", ProjectDocsTree),
+            ("web/docs/features/a/b.md", ProjectDocsTree),
+            ("services\\orders\\README.md", ProjectWellKnown),
+        ] {
+            assert_eq!(include_doc(rel, &dirs), Some(want), "{rel}");
+        }
+        for rel in [
+            "services/docs/overview.md",
+            "web/src/docs/notes.md",
+            "services/orders/doc/notes.md",
+            "services/orders/docs/LICENSE.md",
+            "services/orders/internal/README.md",
+            "services/README.md",
+            "web/src/app/features/cart/README.md",
+            "features/README.md",
+            "features/a/b/c.md",
+            "specs/drafts/ideas.md",
+            "specs/01-x/spec.md",
+            "specs/001-/spec.md",
+            "specs/001-refunds",
+            "specs/001-refunds/spec.txt",
+            "services/orders/LICENSE.md",
+            "src/notes.md",
+            "services/ordersx/README.md",
+            "services/orders-api/docs/x.md",
+        ] {
+            assert_eq!(include_doc(rel, &dirs), None, "{rel}");
+        }
+        // The pre-CJ.2 rules are unchanged.
+        for (rel, want) in [
+            ("README.md", RootWellKnown),
+            ("docs/architecture.md", DocsTree),
+            (".ai/notes.md", AiTree),
+            ("doc/adr/0001-x.md", Adr),
+        ] {
+            assert_eq!(include_doc(rel, &dirs), Some(want), "{rel}");
+        }
+        assert_eq!(include_doc("doc/notes.md", &dirs), None);
+        assert_eq!(include_doc("LICENSE.md", &dirs), None);
+        // The root match is case-insensitive and admits README*.md variants.
+        for rel in ["readme.md", "README.zh-CN.md", "Changelog.md", "agents.md"] {
+            assert_eq!(include_doc(rel, &[]), Some(RootWellKnown), "{rel}");
+        }
+        assert_eq!(include_doc("NOTES.md", &[]), None);
+        // Without the PROJECT root, its README and docs/ tree stay out.
+        assert_eq!(include_doc("services/orders/README.md", &[]), None);
+        assert_eq!(include_doc("services/orders/docs/runbook.md", &[]), None);
+        // Nested roots: either one admits.
+        let nested = ["app", "app/android"];
+        assert_eq!(include_doc("app/android/README.md", &nested), Some(ProjectWellKnown));
+        assert_eq!(include_doc("app/android/docs/x.md", &nested), Some(ProjectDocsTree));
+        assert_eq!(include_doc("app/features/f/x.md", &nested), Some(Feature));
+    }
+
+    /// CJ.2: `build_docs_graph` reads the PROJECT roots it is handed; the
+    /// repo-root rules need none.
+    #[test]
+    fn build_docs_graph_admits_project_root_docs() {
+        let file = |rel: &str| DocRecord {
+            rel_path: rel.to_string(),
+            text: "# Notes\nsee `PlaceOrder`\n".to_string(),
+            provenance: DocProvenance::file(),
+        };
+        let records = [
+            file("README.md"),
+            file("services/orders/README.md"),
+            file("services/orders/internal/README.md"),
+            file("features/checkout/backend.md"),
+        ];
+        let roots = [
+            ProjectRoot::new(String::new(), "go", "go.mod", None),
+            ProjectRoot::new("services/orders".to_string(), "go", "go.mod", None),
+        ];
+        let qnames = |roots: &[ProjectRoot]| {
+            build_docs_graph(&records, RepoId(4), roots).map(|g| sections(&g).0).unwrap_or_default()
+        };
+        assert_eq!(
+            qnames(&roots),
+            ["docs::README::notes", "docs::features::checkout::backend::notes", "docs::services::orders::README::notes"]
+        );
+        assert_eq!(qnames(&[]), ["docs::README::notes", "docs::features::checkout::backend::notes"]);
     }
 
     /// LB.12: a repo doc's sections are scoped by its directories + stem, so
@@ -716,7 +957,7 @@ mod docs_tests {
         };
         let records = [file("docs/a/guide.md"), file("docs/b/guide.md"), file("README.md"), page];
         let repo = RepoId(7);
-        let Some(g) = build_docs_graph(&records, repo) else {
+        let Some(g) = build_docs_graph(&records, repo, &[]) else {
             panic!("four docs, no graph");
         };
         let mut setup: Vec<&str> = g
@@ -816,7 +1057,7 @@ mod docs_tests {
             text: md.to_string(),
             provenance: DocProvenance::file(),
         };
-        let Some(g) = build_docs_graph(&[rec], RepoId(3)) else {
+        let Some(g) = build_docs_graph(&[rec], RepoId(3), &[]) else {
             panic!("a doc with sections builds a graph");
         };
         let (q, dup) = sections(&g);
@@ -848,7 +1089,7 @@ mod docs_tests {
             ext(DocSourceKind::Wiki, "wiki", "db1", "orders"),
             ext(DocSourceKind::Confluence, "confluence", "ENG", "orders"),
         ];
-        let Some(g) = build_docs_graph(&records, RepoId(5)) else {
+        let Some(g) = build_docs_graph(&records, RepoId(5), &[]) else {
             panic!("three pages, no graph");
         };
         let (q, dup) = sections(&g);
@@ -890,7 +1131,7 @@ mod docs_tests {
             ("# Billing\n\n## Billing\n\nsee `BillingService`", vec!["docs::OPS::billing::billing", "docs::OPS::billing::billing-1"]),
             ("## Billing\n\nsee `BillingService`", vec!["docs::OPS::billing::billing"]),
         ] {
-            let Some(g) = build_docs_graph(&[page(text)], RepoId(9)) else {
+            let Some(g) = build_docs_graph(&[page(text)], RepoId(9), &[]) else {
                 panic!("one page, no graph");
             };
             let (q, dup) = sections(&g);

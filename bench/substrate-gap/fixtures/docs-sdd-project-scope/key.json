@@ -1,0 +1,56 @@
+{
+  "framework": "docs-sdd-project-scope",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "note": "CJ-2: doc ingestion widened to well-known docs and the docs/ tree at a PROJECT root (services/orders has go.mod) and SDD feature docs at the repo root (features/<f>/*.md, spec-kit specs/<NNN-slug>/); markdown in source trees stays out. Mentions are read from single backticks only. Baseline (HEAD f8a46c0, glia analyze and grade.py): no DOC_SECTION ingested, DOCUMENTS 0/4, FORBID VIOLATIONS 0 (the forbid rows are the precision gate: they hold at HEAD and must keep holding).",
+  "expect_edges": [
+    {
+      "from": "docs::services::orders::README",
+      "to": "PlaceOrder",
+      "category": "DOCUMENTS",
+      "note": "README at a manifest-rooted PROJECT root"
+    },
+    {
+      "from": "docs::services::orders::docs::runbook",
+      "to": "PlaceOrder",
+      "category": "DOCUMENTS",
+      "note": "a PROJECT root's own docs/ tree (services/orders has go.mod)"
+    },
+    {
+      "from": "docs::features::checkout::backend",
+      "to": "PlaceOrder",
+      "category": "DOCUMENTS",
+      "note": "SDD feature doc features/<f>/*.md"
+    },
+    {
+      "from": "docs::specs::001-refunds::spec",
+      "to": "refundOrder",
+      "category": "DOCUMENTS",
+      "note": "spec-kit specs/<NNN-slug>/spec.md"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "DOC_SECTION",
+      "name": "docs::services::orders::internal::README::internal",
+      "note": "a README inside a source directory"
+    },
+    {
+      "kind": "DOC_SECTION",
+      "name": "docs::web::src::app::features::cart::README::cart",
+      "note": "an Angular features/ folder under src/, not at a project root"
+    },
+    {
+      "kind": "DOC_SECTION",
+      "name": "docs::specs::drafts::ideas::ideas",
+      "note": "specs/ without an NNN-slug feature dir"
+    },
+    {
+      "kind": "DOC_SECTION",
+      "name": "docs::services::docs::overview::overview",
+      "note": "a docs/ tree whose parent (services/) is not a PROJECT root"
+    }
+  ]
+}

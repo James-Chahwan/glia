@@ -170,7 +170,7 @@ fn empty_answers_carry_their_absence() {
     assert_eq!(
         absence_markers(&out),
         [
-            "[absence] primitive=governing_docs reason=unknown_symbol mechanisms=DOCUMENTS caveats=1 suggestions=0"
+            "[absence] primitive=governing_docs reason=unknown_symbol mechanisms=DOCUMENTS caveats=2 suggestions=0"
         ]
     );
 
@@ -187,7 +187,7 @@ fn empty_answers_carry_their_absence() {
     assert_eq!(
         absence_markers(&out),
         [
-            "[absence] primitive=governing_docs reason=no_edges mechanisms=DOCUMENTS caveats=1 suggestions=0"
+            "[absence] primitive=governing_docs reason=no_edges mechanisms=DOCUMENTS caveats=2 suggestions=0"
         ]
     );
 

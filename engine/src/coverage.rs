@@ -71,6 +71,14 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "contract JSON (OpenAPI/Swagger, AsyncAPI, Pact) over 512 KB is not read, and one whose format key is outside its first and last 8 KB is not recognised",
         verify: "look for large swagger.json / openapi.json / pact files and read their paths by hand",
     },
+    // CJ.2: the repo markdown `docs::include_doc` admits, and the doc linker's
+    // backtick-only mention rule, so a `docs-for` absence says what was read.
+    CoverageCaveat {
+        language: "*",
+        edge_category: "DOCUMENTS",
+        note: "repo markdown is ingested only from: the well-known files (README*.md, ARCHITECTURE.md, CHANGELOG.md, CONTRIBUTING.md, CODE_OF_CONDUCT.md, CLAUDE.md, AGENTS.md, CODE_RULES.md, any case) at the repo root and at each PROJECT root, a docs/ tree at the repo root or at a PROJECT root, a top-level .ai/ tree, ADR directories (adr / adrs / decisions under doc / docs / architecture), SDD feature docs (features/<feature>/*.md and spec-kit specs/<NNN-slug>/ at the repo root or a PROJECT root) and synced external docs (`glia docs sync`); other markdown - a README inside a source directory, notes beside code - is not read. A doc section DOCUMENTS a symbol only when it names it in a single-backtick span (`ChatOps.EnsureUserReadyForChat`, `create_order()`); a plain-prose mention, a fenced code block or a link is not read, and one section links at most 25 symbols",
+        verify: "grep the symbol name across the repo's *.md files, and read the doc that names it in plain prose",
+    },
     // LA.27 (James's call): SDL inside code is read only from GraphQL-marked
     // literals, so unmarked SDL is a declared recall gap, not a silent one.
     // CB.1 names `.graphqls`; CB.24 adds the client base-URL narrowing rule.
@@ -446,6 +454,37 @@ mod tests {
         assert_eq!(
             edge_category::name(edge_category::QUEUE_FLOWS),
             "QUEUE_FLOWS",
+            "edges_found is keyed by this spelling"
+        );
+    }
+
+    #[test]
+    fn documents_scope_caveat_is_universal() {
+        // CJ.2: every repo is told which markdown is ingested and that a
+        // mention is read only from a single-backtick span; the row sits
+        // right after the contract-JSON one.
+        let report = coverage_report(&MergedGraph::new(Vec::new()));
+        let docs: Vec<_> = report
+            .iter()
+            .filter(|n| n.language == "*" && n.edge_category == "DOCUMENTS")
+            .collect();
+        assert_eq!(docs.len(), 2, "{:?}", docs.iter().map(|n| n.note).collect::<Vec<_>>());
+        assert!(docs[0].note.starts_with("contract JSON"), "{}", docs[0].note);
+        let note = docs[1].note;
+        for needle in [
+            "features/<feature>/*.md",
+            "specs/<NNN-slug>/",
+            "docs/ tree at the repo root or at a PROJECT root",
+            "single-backtick",
+            "README*.md",
+            "at most 25 symbols",
+        ] {
+            assert!(note.contains(needle), "{needle}: {note}");
+        }
+        assert_eq!(docs[1].edges_found, 0);
+        assert_eq!(
+            edge_category::name(edge_category::DOCUMENTS),
+            "DOCUMENTS",
             "edges_found is keyed by this spelling"
         );
     }
