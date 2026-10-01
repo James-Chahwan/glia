@@ -19,7 +19,7 @@
 //! | `wrapped_sink` | an `unresolved_endpoint` whose every owner is named like a declared http `[[wrapper]]` (the owner's last qname segment equals the stanza's `call` after its last `.` / `::`, in the owner's repo): the sink is real, its identity now lives at the wrapper's call sites (LF.2e mints them); informational | fact | `none` |
 //! | `unpaired_route` | a ROUTE that is not a client-router page (ORIGIN `nav_route`, `graph::nav::is_nav_route`) with no incoming HTTP_CALLS | heuristic (a public API is legitimately uncalled in-stack) | `route_prefix\|edge` |
 //! | `tag_only_queue` | a QUEUE_PRODUCER / QUEUE_CONSUMER whose topic is a framework tag (`queues::is_framework_tag`) | fact | `constants\|wrapper` |
-//! | `dead_symbol` | a FUNCTION / METHOD / CLASS outside `entrypoint_reachable`, with no incoming carry edge, not ORIGIN `test_fixture` | heuristic | `entrypoints` |
+//! | `dead_symbol` | a FUNCTION / METHOD / CLASS outside `entrypoint_reachable`, with no incoming carry edge, not a METHOD that IMPLEMENTS a METHOD with an incoming CALLS / USES from a third node, neither of the two (dispatch reaches it, CH.1c), not ORIGIN `test_fixture` | heuristic | `entrypoints` |
 //! | `cochange_no_edge` | a file pair git history says changes together (a CO_CHANGES edge, LF.5b) that no static link joins ([`cochange_gaps`]); the row is the first file's MODULE, `detail` names the other file, the counts and the languages | heuristic (co-change is history, not proof of coupling) | `edge` |
 //! | `suspected_edge` | CD.3b: an orphan of a learned (kind, category, kind) triple (a cross-service pairing the build already made at least twice) and a target its channel tokens match: `detail` names the category, the target qname in backticks and its location, then `score= channel= aa= ra= cochange= target_unpaired= triple=<KIND>-<CATEGORY>-><KIND> seen <n>x`; the row is the orphan, one per kept target (at most three); `draft` holds the paste-ready `[[edge]]` stanza (engine `suspected`) | heuristic (a suggestion: the overlay loop is its verifier) | `edge` |
 //! | `orphaned_rule` | a qname-bearing overlay stanza (`[[edge]]` from / to, `[[constraint]]` / `[[decision]]` / `[[note]]` anchor, `[entrypoints]` qname) that binds no node | fact | `remove` |
@@ -92,6 +92,9 @@
 //!   `cochange_no_edge` (`gaps`);
 //! - `[suspected] triples=T orphans=O candidates=C kept=K by=<CATEGORY:n,...>`
 //!   once per report that computes `suspected_edge` (and per [`graph_counts`]);
+//! - `[dead-dispatch] dead_symbol rows withheld: <n> (implementations of a called method)`
+//!   once per report that computes `dead_symbol` (and per [`graph_counts`])
+//!   when the CH.1c dispatch rule keeps `n > 0` rows out;
 //! - `[overlay] <rules> rules, +<M> edges, orphans <K>→<J>, gaps <G0>→<G1>, verdict=<keep|review|drop>`
 //!   once per [`overlay_delta`], the review's accept-loop line; `G` is the
 //!   sum of [`GraphCounts::gaps_by_category`].
@@ -613,6 +616,10 @@ struct View<'a> {
     http_in: HashSet<NodeId>,
     /// Nodes with an incoming edge reachability follows.
     carry_in: HashSet<NodeId>,
+    /// METHODs dispatch reaches (CH.1c): the `from` of a METHOD -> METHOD
+    /// IMPLEMENTS whose `to` has a CALLS / USES predecessor other than
+    /// itself and other than that `from`. Only looked up, never iterated.
+    dispatch_in: HashSet<NodeId>,
     /// CALLS / USES predecessors, in edge order.
     callers: HashMap<NodeId, Vec<NodeId>>,
     /// HANDLED_BY targets, in edge order.
@@ -630,10 +637,12 @@ impl<'a> View<'a> {
             http_out: HashMap::new(),
             http_in: HashSet::new(),
             carry_in: HashSet::new(),
+            dispatch_in: HashSet::new(),
             callers: HashMap::new(),
             handlers: HashMap::new(),
             project_roots: BTreeMap::new(),
         };
+        let mut methods: HashSet<NodeId> = HashSet::new();
         for g in &merged.graphs {
             for n in &g.nodes {
                 if v.repo_of.contains_key(&n.id) {
@@ -646,6 +655,9 @@ impl<'a> View<'a> {
                 };
                 v.repo_of.insert(n.id, g.repo.0);
                 v.qname_of.insert(n.id, qname.as_str());
+                if *kind == node_kind::METHOD {
+                    methods.insert(n.id);
+                }
                 if *kind == node_kind::PROJECT
                     && let Some(dir) = qname.strip_prefix("project:")
                     && dir != "."
@@ -678,6 +690,26 @@ impl<'a> View<'a> {
             }
             if CODE_PROFILE.tables.carries(c) && e.from != e.to {
                 v.carry_in.insert(e.to);
+            }
+        }
+        // Dispatch (CH.1c, the dead-row half of A7.8's implementer step): a
+        // call into a declared METHOD reaches each METHOD that IMPLEMENTS it.
+        // One hop: A6.6, CA.3b and CH.1b pair an implementation with the
+        // member it implements directly. The implementation's own call into
+        // the member vouches for it no more than a self-call does.
+        for e in merged.all_edges() {
+            if e.category != edge_category::IMPLEMENTS
+                || !methods.contains(&e.from)
+                || !methods.contains(&e.to)
+            {
+                continue;
+            }
+            let called = v
+                .callers
+                .get(&e.to)
+                .is_some_and(|cs| cs.iter().any(|c| *c != e.to && *c != e.from));
+            if called {
+                v.dispatch_in.insert(e.from);
             }
         }
         v
@@ -845,6 +877,8 @@ fn collect_rows(
 
     let live = want(DEAD_SYMBOL).then(|| entrypoint_reachable(merged));
     let mut ids = Ids::default();
+    // dead_symbol candidates only dispatch keeps out (CH.1c).
+    let mut withheld = 0usize;
 
     for n in &view.nodes {
         let mut node_row =
@@ -1028,6 +1062,10 @@ fn collect_rows(
                     && !view.carry_in.contains(&n.id)
                     && !provenance_is(n.cells, "test_fixture")
                 {
+                    if view.dispatch_in.contains(&n.id) {
+                        withheld += 1;
+                        continue;
+                    }
                     rows.push(node_row(
                         DEAD_SYMBOL,
                         "no entrypoint reaches it; no incoming call or use".to_string(),
@@ -1038,6 +1076,11 @@ fn collect_rows(
             }
             _ => {}
         }
+    }
+    if want(DEAD_SYMBOL) && withheld > 0 {
+        eprintln!(
+            "[dead-dispatch] dead_symbol rows withheld: {withheld} (implementations of a called method)"
+        );
     }
 
     if want(COCHANGE_NO_EDGE) {
