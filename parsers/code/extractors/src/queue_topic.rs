@@ -83,6 +83,13 @@ pub enum TopicRule {
     /// First quoted literal inside positional argument N (AMQP
     /// `basic_publish(exchange, routing_key)` and friends).
     ArgIndex(usize),
+    /// CL.1: positional argument N, falling back to argument M only when
+    /// argument N is present and is an EMPTY literal (`''`, `""`, ``` `` ```).
+    /// amqplib `publish(exchange, routingKey, content)`: the routing key names
+    /// the queue on the default and direct exchanges, and a fanout publish
+    /// (`publish('logs', '', buf)`) passes an empty key, so the exchange is
+    /// the only identity left.
+    ArgIndexOr(usize, usize),
     /// `topic: 'x'` / `Topic: "x"` / `topics = "x"` / `'topic' => 'x'` /
     /// `queue: :x`. Keys are tried in table order, first match wins.
     Keyed(&'static [&'static str]),
@@ -341,6 +348,10 @@ fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option
     match rule {
         TopicRule::ArgLiteral => arg_literal(region?, 0),
         TopicRule::ArgIndex(n) => arg_literal(region?, n),
+        TopicRule::ArgIndexOr(n, m) => {
+            let region = region?;
+            arg_literal(region, if empty_literal_arg(region, n) { m } else { n })
+        }
         // A2.5: Ruby and Elixir call the same APIs WITHOUT parentheses
         // (`sidekiq_options queue: 'critical'`), so a keyed rule that found no
         // bracketed region reads the rest of the LINE instead. Only the keyed
@@ -367,6 +378,10 @@ fn expr_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option<
     match rule {
         TopicRule::ArgLiteral => arg_expr(region?, 0),
         TopicRule::ArgIndex(n) => arg_expr(region?, n),
+        TopicRule::ArgIndexOr(n, m) => {
+            let region = region?;
+            arg_expr(region, if empty_literal_arg(region, n) { m } else { n })
+        }
         TopicRule::Keyed(keys) => {
             keyed_expr(region.unwrap_or_else(|| line_region(source, after)), keys)
         }
@@ -478,6 +493,14 @@ pub(crate) fn split_args(region: &str) -> Vec<&str> {
         out.push(arg);
     }
     out
+}
+
+/// CL.1: is positional argument `n` present and exactly an empty literal
+/// (`''`, `""` or ``` `` ```)? [`TopicRule::ArgIndexOr`]'s fallback test.
+fn empty_literal_arg(region: &str, n: usize) -> bool {
+    split_args(region)
+        .get(n)
+        .is_some_and(|a| matches!(a.trim(), "''" | "\"\"" | "``"))
 }
 
 /// First quoted literal inside positional argument `n`.
@@ -1057,6 +1080,55 @@ mod tests {
         assert_eq!(
             one(src, "channel.basic_publish", TopicRule::ArgIndex(1)),
             Some("orders".to_string())
+        );
+    }
+
+    #[test]
+    fn arg_index_or_falls_back_only_on_an_empty_literal() {
+        let rule = TopicRule::ArgIndexOr(1, 0);
+        let read = |src: &str| one(src, "channel.publish", rule);
+        // The routing key names the queue.
+        assert_eq!(
+            read("channel.publish('shop', 'orders', buf)"),
+            Some("orders".into())
+        );
+        // An empty key (fanout, every quote style) falls back to the exchange.
+        assert_eq!(
+            read("channel.publish('logs', '', buf)"),
+            Some("logs".into())
+        );
+        assert_eq!(
+            read("channel.publish(\"logs\", \"\", buf)"),
+            Some("logs".into())
+        );
+        assert_eq!(
+            read("channel.publish(`logs`, ``, buf)"),
+            Some("logs".into())
+        );
+        // A key that is not a literal never falls back to the exchange: the
+        // exchange is not the queue, so no topic is read and the key's
+        // expression is what the const fold sees.
+        assert_eq!(read("channel.publish('shop', key, buf)"), None);
+        let hits = scan("channel.publish('shop', key, buf)", "channel.publish", rule);
+        assert_eq!(hits[0].expr.as_deref(), Some("key"));
+        // A missing argument N is not an empty literal either.
+        assert_eq!(read("channel.publish('shop')"), None);
+        // The expression mirrors the fallback: the exchange's, under an empty key.
+        let hits = scan(
+            "channel.publish(EXCHANGE, '', buf)",
+            "channel.publish",
+            rule,
+        );
+        assert_eq!(hits[0].topic, None);
+        assert_eq!(hits[0].expr.as_deref(), Some("EXCHANGE"));
+        // `ArgIndex(1)` itself is unchanged: an empty literal is no topic.
+        assert_eq!(
+            one(
+                "channel.publish('logs', '', buf)",
+                "channel.publish",
+                TopicRule::ArgIndex(1)
+            ),
+            None
         );
     }
 

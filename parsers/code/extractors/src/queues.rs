@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::OnceLock;
 
 use glia_code_domain::{
@@ -206,11 +206,15 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     ("Subscriptions.topics(", QueueFramework::Kafka, &["akka.kafka"], TopicRule::ArgLiteral),
     // Rust — rdkafka: `consumer.subscribe(&["orders"])`.
     (".subscribe(&[", QueueFramework::Kafka, &["rdkafka"], TopicRule::ArgLiteral),
-    // Python — pika / amqp: `ch.queue_declare(queue="orders")`, receiver-free.
-    ("queue_declare(", QueueFramework::RabbitMQ, &["pika", "amqp"], TopicRule::KeyedOrArg(&["queue"])),
+    // Python — pika / amqp: `ch.basic_consume(queue="orders", ...)`,
+    // receiver-free. CL.1: `queue_declare(` is a DECLARE_PATTERNS row now.
     ("basic_consume(", QueueFramework::RabbitMQ, &["pika", "amqp"], TopicRule::KeyedOrArg(&["queue"])),
-    // C# — RabbitMQ.Client: `channel.QueueDeclare(queue: "orders", ...)`.
-    (".QueueDeclare(", QueueFramework::RabbitMQ, &["rabbitmq.client"], TopicRule::KeyedOrArg(&["queue"])),
+    // C# — RabbitMQ.Client v6 `channel.BasicConsume(queue: "orders",
+    // autoAck: true, consumer: c)` (named or positional) and v7
+    // `BasicConsumeAsync`. CL.1: before this row the C# consumer was found
+    // only because the tutorial shape also DECLARES the queue.
+    (".BasicConsume(", QueueFramework::RabbitMQ, &["rabbitmq.client"], TopicRule::KeyedOrArg(&["queue"])),
+    (".BasicConsumeAsync(", QueueFramework::RabbitMQ, &["rabbitmq.client"], TopicRule::KeyedOrArg(&["queue"])),
     // ---- A2.6: cloud brokers ---------------------------------------------
     // The identity arrives as a queue URL, an ARN or a GCP resource path, and
     // `queue_topic::fold_topic` reduces each to the bare name — so both sides
@@ -302,15 +306,24 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // and many JS animation libs; require Celery presence.
     // A2.5: `send_email.delay("welcome@example.com")` — the receiver is the
     // task, the argument is the payload.
+    // CL.1: an IMPORT_GATED_ROWS row — a Python file that fails the gate
+    // still fires on a task it imports by name (`from tasks import x`).
     (".delay(", QueueFramework::Celery, &["celery", "@shared_task"], TopicRule::Receiver),
     (".apply_async(", QueueFramework::Celery, &[], TopicRule::Receiver),
     // `.send(` is wildly overloaded (`res.send`, `socket.send`, ...). Require
     // Dramatiq import — `import dramatiq` or `@dramatiq.actor`.
     (".send(", QueueFramework::Dramatiq, &["dramatiq"], TopicRule::Receiver),
-    // `queue.add(` — generic var name; require BullMQ context.
-    ("queue.add(", QueueFramework::BullMQ, &["bullmq", "@nestjs/bullmq"], TopicRule::ArgLiteral),
+    // `queue.add(` — generic var name; require BullMQ context. CL.1:
+    // NoIdentity — arg #0 is the JOB name, dispatch metadata the worker reads
+    // as `job.name`, never a queue; the queue is `new Queue('x')` /
+    // `@InjectQueue('x')`. Liveness only, so it mints no tag either.
+    ("queue.add(", QueueFramework::BullMQ, &["bullmq", "@nestjs/bullmq"], TopicRule::NoIdentity),
     // `new Queue(` — also generic; require BullMQ.
     ("new Queue(", QueueFramework::BullMQ, &["bullmq", "@nestjs/bullmq"], TopicRule::ArgLiteral),
+    // TS — NestJS producers inject the queue by name
+    // (`@InjectQueue('audio') private q: Queue`) and call `this.q.add(..)`.
+    // The gate also admits `@nestjs/bullmq`.
+    ("@InjectQueue(", QueueFramework::BullMQ, &["@nestjs/bull"], TopicRule::ArgLiteral),
     // A2.5: `HardWorker.perform_async(order.id)` — receiver, not the id.
     ("perform_async", QueueFramework::Sidekiq, &[], TopicRule::Receiver),
     ("perform_in", QueueFramework::Sidekiq, &[], TopicRule::Receiver),
@@ -321,7 +334,16 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // Go's nats.go exports Capitalized `nc.Publish`; the lowercase JS needle
     // never matches Go source, so Go NATS producers went blind.
     ("nc.Publish", QueueFramework::Nats, &["nats"], TopicRule::ArgLiteral),
-    ("channel.publish", QueueFramework::RabbitMQ, &["amqp", "amqplib", "rabbitmq"], TopicRule::ArgLiteral),
+    // amqplib `channel.publish(exchange, routingKey, content)`. CL.1: the
+    // routing key (arg #1) names the queue on the default and direct
+    // exchanges; an EMPTY key (fanout) falls back to the exchange (arg #0),
+    // the identity this row read before.
+    ("channel.publish", QueueFramework::RabbitMQ, &["amqp", "amqplib", "rabbitmq"], TopicRule::ArgIndexOr(1, 0)),
+    // amqplib's default-exchange shortcut `channel.sendToQueue('jobs', buf)`.
+    (".sendToQueue(", QueueFramework::RabbitMQ, &["amqplib"], TopicRule::ArgLiteral),
+    // pika's positional arg #0 is the exchange; the `basic_publish(` Keyed row
+    // below reads the routing key of the SAME call, which explains this row's
+    // empty read (CL.1's overlap rule), so the pair mints one node.
     ("channel.basic_publish", QueueFramework::RabbitMQ, &[], TopicRule::ArgLiteral),
     ("producer.send", QueueFramework::Kafka, &["kafka", "confluent"], TopicRule::KeyedOrArg(&["topic"])),
     ("producer.produce", QueueFramework::Kafka, &["kafka", "confluent"], TopicRule::ArgLiteral),
@@ -378,6 +400,9 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     ("Template.convertAndSend(", QueueFramework::RabbitMQ, &["springframework.amqp"], TopicRule::ArgLiteral),
     // C# — RabbitMQ.Client: `BasicPublish(exchange, routingKey, props, body)`.
     (".BasicPublish(", QueueFramework::RabbitMQ, &["rabbitmq.client"], TopicRule::ArgIndex(1)),
+    // v7: `BasicPublishAsync(exchange: "", routingKey: "orders", body: b)` —
+    // the routing key is arg #1, named or positional.
+    (".BasicPublishAsync(", QueueFramework::RabbitMQ, &["rabbitmq.client"], TopicRule::ArgIndex(1)),
     // Elixir — AMQP: `publish(chan, exchange, routing_key, payload)` — arg #2 is
     // the routing key; arg #1 is the exchange, which is usually "".
     ("AMQP.Basic.publish(", QueueFramework::RabbitMQ, &["amqp"], TopicRule::ArgIndex(2)),
@@ -433,6 +458,42 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     ("Template.convertAndSend(", QueueFramework::Jms, &["springframework.jms"], TopicRule::ArgLiteral),
 ];
 
+// ---- CL.1: DECLARING A QUEUE IS NOT CONSUMING IT -----------------------------
+// `queue_declare(` / `.QueueDeclare(` used to be CONSUMER rows, so the RabbitMQ
+// tutorial's producer (`send.py` / `Send.cs`), which declares the queue it
+// publishes to, minted a `queue_consumer:<q>` beside its own producer and
+// QueueStackResolver paired the two: a false self-flow. A declaration names a
+// queue the file USES, which is exactly what an unnamed consume needs: Go's
+// `q, _ := ch.QueueDeclare("orders", ..)` + `ch.Consume(q.Name, ..)`, pika's
+// `queue_declare(queue="jobs")` + `basic_consume(queue=qname, ..)`.
+// ---------------------------------------------------------------------------
+/// Queue DECLARATIONS, scanned on the consumer side only and never a consumer
+/// site by themselves. When a file declares EXACTLY ONE queue of a framework,
+/// each consumer-row hit of that framework that named no topic (an "unnamed
+/// consume") becomes a consumer site of the declared queue, at the CONSUME
+/// call's offset; zero or two-plus declared queues bind nothing (ambiguous),
+/// and the unnamed consume keeps HEAD's framework tag. Same tuple shape and
+/// gate rules as [`CONSUMER_PATTERNS`].
+const DECLARE_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
+    // Python — pika / amqp: `ch.queue_declare(queue="orders")`, receiver-free.
+    ("queue_declare(", QueueFramework::RabbitMQ, &["pika", "amqp"], TopicRule::KeyedOrArg(&["queue"])),
+    // C# — RabbitMQ.Client v6 `channel.QueueDeclare(queue: "orders", ...)`, v7 async.
+    (".QueueDeclare(", QueueFramework::RabbitMQ, &["rabbitmq.client"], TopicRule::KeyedOrArg(&["queue"])),
+    (".QueueDeclareAsync(", QueueFramework::RabbitMQ, &["rabbitmq.client"], TopicRule::KeyedOrArg(&["queue"])),
+];
+
+/// CL.1: rows whose library gate a Python file may miss while still calling
+/// the task. The canonical Celery caller (`from tasks import process_order` +
+/// `process_order.delay(order_id)`) never mentions `celery`. When such a row's
+/// gate fails in a `.py` / `.pyw` file, a hit is kept iff its
+/// [`TopicRule::Receiver`] chain is a BARE name (no `.`) that a
+/// `from <mod> import ...` line of the same file binds
+/// ([`python_imported_names`]). `pygame.time.delay(100)` (a dotted chain) and
+/// jQuery's `.delay(` (not Python) stay out. KNOWN IMPRECISION: `from x
+/// import time` + `time.delay(..)` mints a Celery producer `time`.
+/// `.apply_async(` needs no entry: it is ungated.
+const IMPORT_GATED_ROWS: &[&str] = &[".delay("];
+
 /// True when `signals` is empty (always pass) or any signal substring appears in
 /// `lower_source`. Lets distinct framework names gate their broad-needle patterns.
 ///
@@ -478,7 +539,11 @@ fn broker_signals() -> &'static [&'static str] {
     static SIGNALS: OnceLock<Vec<&'static str>> = OnceLock::new();
     SIGNALS.get_or_init(|| {
         let mut out: Vec<&'static str> = Vec::new();
-        for (_, framework, signals, _) in CONSUMER_PATTERNS.iter().chain(PRODUCER_PATTERNS) {
+        for (_, framework, signals, _) in CONSUMER_PATTERNS
+            .iter()
+            .chain(PRODUCER_PATTERNS)
+            .chain(DECLARE_PATTERNS)
+        {
             if !is_broker(framework) {
                 continue;
             }
@@ -574,6 +639,11 @@ struct Pending {
     /// LE.4c: the 0-indexed line of EVERY site recorded for this node, in
     /// scan order, not capped or deduped (`anchor::attach` sorts and dedups).
     anchor_lines: Vec<u32>,
+    /// CL.1: where the node sits in the file's output — `(pending index, 1,
+    /// 0)` for a named node, `(slot, 0, row)` for a framework tag, whose
+    /// `slot` is the pending length when its row ran. Sorting on it puts a
+    /// deferred tag exactly where the per-row fallback used to create it.
+    rank: (usize, u8, usize),
 }
 
 /// Queue-consumer nodes for one file — one node per DISTINCT (topic, framework).
@@ -592,6 +662,7 @@ pub fn extract_queue_consumer_nodes(
         module_id,
         repo,
         CONSUMER_PATTERNS,
+        DECLARE_PATTERNS,
         node_kind::QUEUE_CONSUMER,
         "queue_consumer:",
         None,
@@ -612,6 +683,7 @@ pub fn extract_queue_producer_nodes(
         module_id,
         repo,
         PRODUCER_PATTERNS,
+        &[],
         node_kind::QUEUE_PRODUCER,
         "queue_producer:",
         None,
@@ -668,6 +740,7 @@ pub fn extract_queue_nodes_with_consts(
         module_id,
         repo,
         CONSUMER_PATTERNS,
+        DECLARE_PATTERNS,
         node_kind::QUEUE_CONSUMER,
         "queue_consumer:",
         Some(resolve),
@@ -679,6 +752,7 @@ pub fn extract_queue_nodes_with_consts(
         module_id,
         repo,
         PRODUCER_PATTERNS,
+        &[],
         node_kind::QUEUE_PRODUCER,
         "queue_producer:",
         Some(resolve),
@@ -741,23 +815,281 @@ pub fn replace_queue_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fo
     });
 }
 
+/// CL.1: one needle occurrence that survived its row's filters — what the
+/// declare binding and the deferred-tag pass read after the row loop.
+struct HitSpan<'p> {
+    /// Byte span of the needle occurrence. Both ends come from
+    /// `match_indices` plus the needle's length, so overlap tests compare
+    /// byte offsets and never slice.
+    start: usize,
+    end: usize,
+    needle: &'p str,
+    rule: &'p TopicRule,
+    framework: &'p QueueFramework,
+    /// LA.33: the row's handler rule (consumer side only).
+    handler: Option<HandlerRule>,
+    /// Pending index of the node this hit's site joined, when it named one.
+    named: Option<usize>,
+    /// The row is `NoIdentity`: a liveness call, never a site and never a tag.
+    no_identity: bool,
+    /// The hit recorded an identifier expression in its topic slot.
+    has_expr: bool,
+    /// Pending index of the declared queue the declare pass bound it to.
+    declared: Option<usize>,
+    /// The row's index in its table: callbacks are ordered by it.
+    row: usize,
+}
+
+/// CL.1: a row whose every hit read no topic. The per-row fallback minted its
+/// framework tag on the spot; it is now recorded after the declare pass, and
+/// only when one of its hits stays unexplained ([`explain_hit`]).
+struct DeferredTag<'p> {
+    row: usize,
+    needle: &'p str,
+    rule: &'p TopicRule,
+    framework: &'p QueueFramework,
+    handler: Option<HandlerRule>,
+    /// `pending.len()` when the row ran: where the tag used to be created.
+    slot: usize,
+    /// Indices into the span list, in hit order (never empty).
+    hits: Vec<usize>,
+}
+
+/// CL.1: why a deferred tag's hit needs no tag, and which node (if any)
+/// inherits its callbacks.
+#[derive(Clone, Copy)]
+enum Explained {
+    /// The same call is read by another row of the same framework that named
+    /// a topic (`Some`) or is a `NoIdentity` liveness row (`None`).
+    Overlap(Option<usize>),
+    /// A call with no identifier expression in a file that names a queue of
+    /// the same framework: the single such node, or `None` when several.
+    Named(Option<usize>),
+    /// The declare pass bound it to the file's one declared queue (its
+    /// callbacks went to that node at binding time).
+    Declare,
+}
+
+impl Explained {
+    fn by(self) -> &'static str {
+        match self {
+            Explained::Overlap(_) => "overlap",
+            Explained::Named(_) => "named",
+            Explained::Declare => "declare",
+        }
+    }
+}
+
+/// CL.1 rule (i): the pending index of a hit of the SAME framework that named
+/// a topic and whose needle span overlaps `spans[i]`'s (two rows reading one
+/// call: pika `channel.basic_publish` + `basic_publish(`), `Some(None)` when
+/// only a `NoIdentity` row's hit overlaps (segmentio `reader.ReadMessage` +
+/// `.ReadMessage(`), else `None`. A named overlap wins over a liveness one.
+fn overlap_of(spans: &[HitSpan<'_>], i: usize) -> Option<Option<usize>> {
+    let s = spans.get(i)?;
+    let mut liveness = false;
+    for (j, o) in spans.iter().enumerate() {
+        if j == i || o.framework != s.framework || !(o.start < s.end && s.start < o.end) {
+            continue;
+        }
+        if let Some(n) = o.named.or(o.declared) {
+            return Some(Some(n));
+        }
+        liveness |= o.no_identity;
+    }
+    liveness.then_some(None)
+}
+
+/// CL.1: is the deferred tag's hit `spans[i]` explained? Rules, in order:
+/// (iii) the declare pass bound it, (i) [`overlap_of`], (ii) it carries no
+/// identifier expression and `named` (the file's named nodes of its
+/// framework, taken before any tag was recorded) is non-empty.
+fn explain_hit(spans: &[HitSpan<'_>], i: usize, named: &[usize]) -> Option<Explained> {
+    let s = spans.get(i)?;
+    if s.declared.is_some() {
+        return Some(Explained::Declare);
+    }
+    if let Some(o) = overlap_of(spans, i) {
+        return Some(Explained::Overlap(o));
+    }
+    if !s.has_expr && !named.is_empty() {
+        let single = if let [only] = named {
+            Some(*only)
+        } else {
+            None
+        };
+        return Some(Explained::Named(single));
+    }
+    None
+}
+
+/// LA.4 (A11.7): the topic one hit names — its literal, else its identifier
+/// expression folded through `folds` (a fold that names nothing counts as
+/// unresolved).
+fn read_hit(
+    h: &queue_topic::TopicHit,
+    folds: Option<TopicResolver<'_>>,
+    counts: &mut ConstFoldCounts,
+    framework: &QueueFramework,
+    path: &str,
+) -> Option<(String, TopicForm)> {
+    match (&h.topic, folds, h.expr.as_deref()) {
+        (Some(t), _, _) => Some((t.clone(), h.form)),
+        (None, Some(resolve), Some(expr)) => {
+            let folded = resolve(expr).and_then(|v| queue_topic::fold_topic(&v));
+            match &folded {
+                Some((t, _)) => {
+                    counts.folded += 1;
+                    if debug_enabled() {
+                        eprintln!(
+                            "[queues] const-fold expr={expr} topic={t} framework={framework:?} file={path}"
+                        );
+                    }
+                }
+                None => counts.unresolved += 1,
+            }
+            folded
+        }
+        _ => None,
+    }
+}
+
+/// LA.33 + CL.1: [`push_callbacks`], remembering the row each new callback
+/// came from so the file's callbacks can be put back in row order.
+fn push_row_callbacks(
+    callbacks: &mut Vec<ConsumerCallback>,
+    rows: &mut Vec<usize>,
+    seen: &mut HashSet<(NodeId, HandlerExpr)>,
+    consumer: NodeId,
+    found: Vec<(u32, HandlerExpr, bool)>,
+    row: usize,
+) {
+    push_callbacks(callbacks, seen, consumer, found);
+    rows.resize(callbacks.len(), row);
+}
+
+/// CL.1: a Python source file, where an [`IMPORT_GATED_ROWS`] row may fire
+/// without its library gate.
+fn is_python_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".py") || lower.ends_with(".pyw")
+}
+
+/// CL.1: the receiver chain right before `offset` when it is a BARE name (no
+/// `.`): `process_order` of `process_order.delay(`, never `pygame.time`.
+fn bare_receiver(source: &str, offset: usize) -> Option<&str> {
+    let head = source.get(..offset)?;
+    let b = head.as_bytes();
+    let mut i = b.len();
+    // Only ASCII bytes are stepped over, so `i` stays on a char boundary.
+    while i > 0 && is_chain_byte(b[i - 1]) {
+        i -= 1;
+    }
+    let chain = head.get(i..)?;
+    (!chain.is_empty() && !chain.contains('.')).then_some(chain)
+}
+
+/// CL.1: a Python identifier (`[A-Za-z_][A-Za-z0-9_]*`, Unicode letters too).
+fn is_python_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// CL.1: every name a `from <mod> import ...` line of this Python file binds:
+/// comma lists, `a as b` binds `b`, a parenthesised list may span lines, a
+/// trailing `\\` continues one; `import *` binds nothing and a plain
+/// `import x` is not read (its calls are dotted, `x.task.delay(`).
+fn python_imported_names(source: &str) -> BTreeSet<String> {
+    let strip = |l: &str| l.split('#').next().unwrap_or("").to_string();
+    let mut out = BTreeSet::new();
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.trim_start().strip_prefix("from ") else {
+            continue;
+        };
+        let rest = strip(rest);
+        let Some(at) = rest.find(" import") else {
+            continue;
+        };
+        let mut list = rest.get(at + " import".len()..).unwrap_or("").to_string();
+        if !list.starts_with([' ', '(']) {
+            continue;
+        }
+        if list.trim_start().starts_with('(') {
+            while !list.contains(')') {
+                let Some(next) = lines.next() else { break };
+                list.push(' ');
+                list.push_str(&strip(next));
+            }
+            list = list.replace(['(', ')'], " ");
+        } else {
+            while list.trim_end().ends_with('\\') {
+                let cut = list.trim_end().len() - 1;
+                list.truncate(cut);
+                let Some(next) = lines.next() else { break };
+                list.push(' ');
+                list.push_str(&strip(next));
+            }
+        }
+        for item in list.split(',') {
+            let words: Vec<&str> = item.split_whitespace().collect();
+            let name = match words.as_slice() {
+                [n] => *n,
+                [_, "as", alias] => *alias,
+                _ => continue,
+            };
+            if is_python_ident(name) {
+                out.insert(name.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// Shared emit loop for both sides.
 ///
 /// Was: one topic per needle, read from the FIRST occurrence of that needle in
 /// the file. Now: every occurrence is scanned and each distinct topic gets its
 /// own node, so a file that publishes to `orders` and `payments` stops hiding
-/// one of them. The framework-tag fallback is emitted only when NO occurrence
-/// of that needle named a topic.
+/// one of them.
 ///
-/// LA.4 (A11.7): `resolve` is `None` on the per-file (cached) path, which is
-/// then byte-identical to before. The engine's post-cache const fold passes a
-/// resolver: an occurrence that read no literal but recorded an identifier
-/// expression ([`queue_topic::TopicHit::expr`]) becomes a site when the
-/// resolver names a value AND [`queue_topic::fold_topic`] accepts it — so a
-/// constant holding an SQS URL folds exactly as the literal would. Never on a
-/// generic-verb row (those keep their `literal_leads` guard) and never for
-/// `NoIdentity` or an A2.5 identity rule. `counts` tallies folded and
-/// unresolved expressions.
+/// CL.1 — THE FRAMEWORK TAG IS MINTED ONLY FOR AN UNEXPLAINED TOPIC-LESS CALL.
+/// The fallback used to be decided PER ROW: a row none of whose hits named a
+/// topic minted `unresolved:<framework>` on the spot, so a second row reading
+/// the SAME call (pika `channel.basic_publish` beside `basic_publish(`), or a
+/// liveness row in a file another row had already named, stood a sentinel
+/// beside the real node. Such a row is now DEFERRED, and after the last row
+/// (and, consumer side, the [`DECLARE_PATTERNS`] pass) each of its hits is
+/// explained by [`explain_hit`]. A deferred tag whose hits are ALL explained
+/// is not recorded, and its callbacks move to the node that explained each
+/// hit; one unexplained hit records it exactly as before (Weak, the row's
+/// first hit's site, every hit's callback). The rule only ever REMOVES a tag
+/// the per-row fallback minted, and a surviving tag lands at the row it used
+/// to be created at (`Pending::rank`), so a file whose tags all survive emits
+/// what it did before. A per-file "a named node silences every tag of its
+/// framework" rule was weighed and rejected: it would hide a genuinely
+/// unresolved second topic (`producer.produce(topicVar, ..)` beside a named
+/// `producer.send`).
+///
+/// CL.1 — DECLARE BINDING (consumer side, `declares` non-empty): see
+/// [`DECLARE_PATTERNS`]. An unnamed consume is a consumer-row hit that named
+/// no topic, is not a `NoIdentity` row's and overlaps no hit that named one.
+///
+/// LA.4 (A11.7): `resolve` is `None` on the per-file (cached) path. The
+/// engine's post-cache const fold passes a resolver: an occurrence that read
+/// no literal but recorded an identifier expression
+/// ([`queue_topic::TopicHit::expr`]) becomes a site when the resolver names a
+/// value AND [`queue_topic::fold_topic`] accepts it — so a constant holding an
+/// SQS URL folds exactly as the literal would. Never on a generic-verb row
+/// (those keep their `literal_leads` guard) and never for `NoIdentity` or an
+/// A2.5 identity rule. `counts` tallies folded and unresolved expressions.
+///
+/// fired_on (CL.1, `GLIA_QUEUE_DEBUG=1`):
+///   `[queues] tag-suppressed needle='<n>' framework=<F> side=<consumer|producer> by=<overlap|named|declare> file=<path>`
+///   `[queues] declare-bound queue=<q> framework=<F> consume='<needle>' consumes=<k> file=<path>`
+///   `[queues] declare-unbound declared=<d> framework=<F> file=<path>`
+///   `[queues] import-gated needle='.delay(' receiver=<sym> file=<path>`
 #[allow(clippy::too_many_arguments)]
 fn emit_queue_nodes(
     source: &str,
@@ -765,6 +1097,7 @@ fn emit_queue_nodes(
     module_id: NodeId,
     repo: RepoId,
     patterns: &[(&str, QueueFramework, &[&str], TopicRule)],
+    declares: &[(&str, QueueFramework, &[&str], TopicRule)],
     kind: glia_core::NodeKindId,
     prefix: &str,
     resolve: Option<TopicResolver<'_>>,
@@ -778,23 +1111,62 @@ fn emit_queue_nodes(
     // tree-sitter parse that already ran, and it is what makes the gate
     // case-insensitive for every row at once.
     let lower = source.to_ascii_lowercase();
-    // LA.33: consumer callbacks, per (consumer, handler), in site order.
+    // LA.33: consumer callbacks, per (consumer, handler), in site order;
+    // CL.1: `callback_rows[i]` is the row `callbacks[i]` came from.
     let mut callbacks: Vec<ConsumerCallback> = Vec::new();
+    let mut callback_rows: Vec<usize> = Vec::new();
     let mut callback_seen: HashSet<(NodeId, HandlerExpr)> = HashSet::new();
     // CJ.1a: in a Rust / Python file an occurrence starting in a string
     // literal or comment is no site, so a refused needle mints neither a
     // topic node nor its `unresolved:*` tag. Lexed on the first candidate.
     let mut guard = LazyGuard::new(path, source);
+    // CL.1: every surviving hit, and the rows whose tag is deferred.
+    let mut spans: Vec<HitSpan<'_>> = Vec::new();
+    let mut deferred: Vec<DeferredTag<'_>> = Vec::new();
+    let mut imported: Option<BTreeSet<String>> = None;
+    let side = if kind == node_kind::QUEUE_CONSUMER {
+        "consumer"
+    } else {
+        "producer"
+    };
 
-    for (pattern, framework, signals, rule) in patterns {
-        if !source.contains(pattern) || !signals_present(&lower, signals) {
+    for (row, (pattern, framework, signals, rule)) in patterns.iter().enumerate() {
+        if !source.contains(pattern) {
             continue;
         }
+        // CL.1: a Python file that fails an import-gated row's library gate
+        // still fires on a task it imports by name.
+        let import_gated = if signals_present(&lower, signals) {
+            false
+        } else if IMPORT_GATED_ROWS.contains(pattern) && is_python_path(path) {
+            true
+        } else {
+            continue;
+        };
         let handler = handler_rule(pattern).filter(|_| kind == node_kind::QUEUE_CONSUMER);
         let mut hits = queue_topic::scan_guarded(source, pattern, *rule, &mut guard);
+        if import_gated {
+            let names = imported.get_or_insert_with(|| python_imported_names(source));
+            hits.retain(|h| {
+                let Some(recv) = bare_receiver(source, h.offset) else {
+                    return false;
+                };
+                let keep = names.contains(recv) && h.topic.as_deref() == Some(recv);
+                if keep && debug_enabled() {
+                    eprintln!(
+                        "[queues] import-gated needle='{pattern}' receiver={recv} file={path}"
+                    );
+                }
+                keep
+            });
+        }
         if yields_to_earlier_rows(framework) {
             let len = pattern.len();
-            hits.retain(|h| !claimed.iter().any(|&(s, e)| h.offset < e && s < h.offset + len));
+            hits.retain(|h| {
+                !claimed
+                    .iter()
+                    .any(|&(s, e)| h.offset < e && s < h.offset + len)
+            });
         }
         if is_generic_verb_row(framework) {
             for h in &mut hits {
@@ -821,36 +1193,15 @@ fn emit_queue_nodes(
                 && !is_identity_rule(rule)
                 && !matches!(rule, TopicRule::NoIdentity)
         });
-        let sites: Vec<(String, usize, usize, TopicForm)> = hits
+        let reads: Vec<Option<(String, TopicForm)>> = hits
             .iter()
-            .filter_map(|h| {
-                let read = match (&h.topic, folds, h.expr.as_deref()) {
-                    (Some(t), _, _) => Some((t.clone(), h.form)),
-                    (None, Some(resolve), Some(expr)) => {
-                        let folded = resolve(expr).and_then(|v| queue_topic::fold_topic(&v));
-                        match &folded {
-                            Some((t, _)) => {
-                                counts.folded += 1;
-                                if debug_enabled() {
-                                    eprintln!(
-                                        "[queues] const-fold expr={expr} topic={t} framework={framework:?} file={path}"
-                                    );
-                                }
-                            }
-                            None => counts.unresolved += 1,
-                        }
-                        folded
-                    }
-                    _ => None,
-                };
-                read.map(|(t, form)| (t, queue_topic::line_of(source, h.offset), h.offset, form))
-            })
+            .map(|h| read_hit(h, folds, counts, framework, path))
             .collect();
-        if debug_enabled() && !sites.is_empty() {
-            let topics: Vec<&str> = sites.iter().map(|(t, _, _, _)| t.as_str()).collect();
+        let topics: Vec<&str> = reads.iter().flatten().map(|(t, _)| t.as_str()).collect();
+        if debug_enabled() && !topics.is_empty() {
             eprintln!(
                 "[queues] scan needle='{pattern}' rule={rule:?} hits={} path={path} topics={}",
-                sites.len(),
+                topics.len(),
                 topics.join(",")
             );
         }
@@ -858,71 +1209,225 @@ fn emit_queue_nodes(
         // so it gets its own grep-able line:
         //   GLIA_QUEUE_DEBUG=1 ... 2>&1 | grep '\[queues\] taskq rule='
         if debug_enabled() && is_identity_rule(rule) {
-            for (sym, _, _, _) in &sites {
+            for sym in &topics {
                 eprintln!(
                     "[queues] taskq rule={rule:?} symbol={sym} framework={framework:?} file={path}"
                 );
             }
         }
-        for (topic, line, offset, form) in &sites {
-            if record_site(
-                &mut pending,
-                &mut seen,
-                topic,
+        let no_identity = matches!(rule, TopicRule::NoIdentity);
+        let first_span = spans.len();
+        for (h, read) in hits.iter().zip(&reads) {
+            let named = match read {
+                Some((topic, form)) => {
+                    let line = queue_topic::line_of(source, h.offset);
+                    if record_site(
+                        &mut pending,
+                        &mut seen,
+                        topic,
+                        framework,
+                        repo,
+                        kind,
+                        prefix,
+                        Confidence::Medium,
+                        (line, h.offset),
+                    ) {
+                        fired_on(pattern, rule, framework, topic, path);
+                        cloud_fired_on(framework, topic, *form, path);
+                    }
+                    let idx = seen.get(&format!("{topic}:{framework:?}")).copied();
+                    // LA.33: this site's handler belongs to the node it just joined.
+                    if let (Some(hr), Some(id)) =
+                        (handler, idx.and_then(|i| pending.get(i)).map(|p| p.id))
+                    {
+                        let found = handlers_at(source, h.offset, pattern, hr);
+                        push_row_callbacks(
+                            &mut callbacks,
+                            &mut callback_rows,
+                            &mut callback_seen,
+                            id,
+                            found,
+                            row,
+                        );
+                    }
+                    idx
+                }
+                None => None,
+            };
+            spans.push(HitSpan {
+                start: h.offset,
+                end: h.offset + pattern.len(),
+                needle: pattern,
+                rule,
                 framework,
-                repo,
-                kind,
-                prefix,
-                Confidence::Medium,
-                (*line, *offset),
-            ) {
-                fired_on(pattern, rule, framework, topic, path);
-                cloud_fired_on(framework, topic, *form, path);
-            }
-            // LA.33: this site's handler belongs to the node it just joined.
-            if let (Some(h), Some(id)) = (handler, pending_id(&pending, &seen, topic, framework)) {
-                let found = handlers_at(source, *offset, pattern, h);
-                push_callbacks(&mut callbacks, &mut callback_seen, id, found);
-            }
+                handler,
+                named,
+                no_identity,
+                has_expr: h.expr.is_some(),
+                declared: None,
+                row,
+            });
         }
         // A needle whose rule is `NoIdentity` NEVER names a topic (it is a
         // liveness signal — Go's `r.ReadMessage(ctx)`), so falling back to a
         // topic-less framework tag here would manufacture exactly the all-to-all
-        // tag pairing A2.1 removed. Every other rule keeps the fallback.
-        if sites.is_empty() && !matches!(rule, TopicRule::NoIdentity) {
-            // A2.3: `Weak`, not `Medium`. The tag proves the framework is live in
-            // this file and nothing else; ranking it level with a node that names
-            // a real topic overstated what was actually read off the source. The
-            // `seen` key is `{topic}:{framework:?}`, so one tag per (framework,
-            // direction) per file however many needles of that framework fired.
-            let tag = framework_tag(framework);
-            // The tag's site is the needle occurrence itself — the one thing
-            // that WAS actually read off this file.
-            let site = hits.first().map_or((0, 0), |h| {
-                (queue_topic::line_of(source, h.offset), h.offset)
+        // tag pairing A2.1 removed. Every other rule keeps the fallback, which
+        // CL.1 defers until every row has run.
+        if topics.is_empty() && !no_identity {
+            deferred.push(DeferredTag {
+                row,
+                needle: pattern,
+                rule,
+                framework,
+                handler,
+                slot: pending.len(),
+                hits: (first_span..spans.len()).collect(),
             });
+        }
+    }
+
+    bind_declared_queues(
+        DeclareCtx {
+            source,
+            path,
+            repo,
+            kind,
+            prefix,
+            resolve,
+            lower: &lower,
+        },
+        declares,
+        &mut DeclareState {
+            pending: &mut pending,
+            seen: &mut seen,
+            spans: &mut spans,
+            callbacks: &mut callbacks,
+            callback_rows: &mut callback_rows,
+            callback_seen: &mut callback_seen,
+            guard: &mut guard,
+            counts,
+        },
+    );
+
+    // CL.1: the deferred tags, in row order. `named` is taken BEFORE any tag
+    // is recorded, so a tag never explains another.
+    let named_len = pending.len();
+    for tag in &deferred {
+        let named: Vec<usize> = pending
+            .iter()
+            .take(named_len)
+            .enumerate()
+            .filter(|(_, p)| p.framework == *tag.framework)
+            .map(|(i, _)| i)
+            .collect();
+        let why: Vec<Option<Explained>> = tag
+            .hits
+            .iter()
+            .map(|&i| explain_hit(&spans, i, &named))
+            .collect();
+        if why.iter().any(Option::is_none) {
+            // A2.3: `Weak`, not `Medium` — the tag proves the framework is
+            // live in this file and nothing else. The `seen` key is
+            // `{topic}:{framework:?}`, so one tag per (framework, direction)
+            // per file however many rows of that framework deferred one. Its
+            // site is the row's first occurrence, the one thing that WAS read.
+            let label = framework_tag(tag.framework);
+            let Some(first) = tag.hits.first().and_then(|&i| spans.get(i)) else {
+                continue;
+            };
+            let site = (queue_topic::line_of(source, first.start), first.start);
             if record_site(
                 &mut pending,
                 &mut seen,
-                &tag,
-                framework,
+                &label,
+                tag.framework,
                 repo,
                 kind,
                 prefix,
                 Confidence::Weak,
                 site,
             ) {
-                fired_on(pattern, rule, framework, &tag, path);
+                if let Some(p) = pending.last_mut() {
+                    p.rank = (tag.slot, 0, tag.row);
+                }
+                fired_on(tag.needle, tag.rule, tag.framework, &label, path);
             }
             // LA.33: every topic-less occurrence is the sentinel's; its
             // handler is a queue handler whatever the topic.
-            if let (Some(h), Some(id)) = (handler, pending_id(&pending, &seen, &tag, framework)) {
-                for hit in &hits {
-                    let found = handlers_at(source, hit.offset, pattern, h);
-                    push_callbacks(&mut callbacks, &mut callback_seen, id, found);
+            if let (Some(h), Some(id)) = (
+                tag.handler,
+                pending_id(&pending, &seen, &label, tag.framework),
+            ) {
+                for &i in &tag.hits {
+                    let Some(s) = spans.get(i) else { continue };
+                    let found = handlers_at(source, s.start, tag.needle, h);
+                    push_row_callbacks(
+                        &mut callbacks,
+                        &mut callback_rows,
+                        &mut callback_seen,
+                        id,
+                        found,
+                        tag.row,
+                    );
                 }
             }
+            continue;
         }
+        // Every hit is explained: no tag. Each hit's callbacks move to the
+        // node that explained it (a declare-bound hit's already did), or are
+        // dropped and counted when no single node did.
+        let mut dropped = 0usize;
+        let mut reasons: Vec<&str> = Vec::new();
+        for (&i, why) in tag.hits.iter().zip(why.iter().flatten()) {
+            if !reasons.contains(&why.by()) {
+                reasons.push(why.by());
+            }
+            let (Some(h), Some(s)) = (tag.handler, spans.get(i)) else {
+                continue;
+            };
+            let target = match *why {
+                Explained::Declare => continue,
+                Explained::Overlap(t) | Explained::Named(t) => t,
+            };
+            let found = handlers_at(source, s.start, tag.needle, h);
+            match target.and_then(|t| pending.get(t)).map(|p| p.id) {
+                Some(id) => push_row_callbacks(
+                    &mut callbacks,
+                    &mut callback_rows,
+                    &mut callback_seen,
+                    id,
+                    found,
+                    tag.row,
+                ),
+                None => dropped += found.len(),
+            }
+        }
+        if debug_enabled() {
+            let extra = if dropped > 0 {
+                format!(" callbacks_dropped={dropped}")
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "[queues] tag-suppressed needle='{}' framework={:?} side={side} by={} file={path}{extra}",
+                tag.needle,
+                tag.framework,
+                reasons.join(",")
+            );
+        }
+    }
+
+    // CL.1: back into the order the per-row fallback produced — a deferred
+    // tag before the nodes created after its row, callbacks by row. Both
+    // sorts are stable and keyed on table positions, never on a HashMap.
+    if pending.windows(2).any(|w| w[0].rank > w[1].rank) {
+        pending.sort_by_key(|p| p.rank);
+    }
+    if callback_rows.windows(2).any(|w| w[0] > w[1]) {
+        let mut rowed: Vec<(usize, ConsumerCallback)> =
+            callback_rows.into_iter().zip(callbacks).collect();
+        rowed.sort_by_key(|(r, _)| *r);
+        callbacks = rowed.into_iter().map(|(_, c)| c).collect();
     }
 
     // The post-cache const fold re-reads the file through this function with
@@ -938,6 +1443,145 @@ fn emit_queue_nodes(
     let mut out = finish(pending, source, path, module_id, repo, kind);
     out.callbacks = callbacks;
     out
+}
+
+/// CL.1: what [`bind_declared_queues`] reads.
+struct DeclareCtx<'a> {
+    source: &'a str,
+    path: &'a str,
+    repo: RepoId,
+    kind: glia_core::NodeKindId,
+    prefix: &'a str,
+    resolve: Option<TopicResolver<'a>>,
+    lower: &'a str,
+}
+
+/// CL.1: what [`bind_declared_queues`] writes — the emit loop's accumulators.
+struct DeclareState<'s, 'p, 'g> {
+    pending: &'s mut Vec<Pending>,
+    seen: &'s mut std::collections::HashMap<String, usize>,
+    spans: &'s mut Vec<HitSpan<'p>>,
+    callbacks: &'s mut Vec<ConsumerCallback>,
+    callback_rows: &'s mut Vec<usize>,
+    callback_seen: &'s mut HashSet<(NodeId, HandlerExpr)>,
+    guard: &'s mut LazyGuard<'g>,
+    counts: &'s mut ConstFoldCounts,
+}
+
+/// CL.1: the [`DECLARE_PATTERNS`] pass. Per framework with a declare row:
+/// when the file declares EXACTLY ONE queue (a declaration whose queue reads
+/// no name counts too, so `queue_declare(queue='')` beside
+/// `queue_declare(queue='orders')` is ambiguous), every unnamed consume of
+/// that framework becomes a consumer site of it at the consume call's offset
+/// (LE.4c anchors it to the consuming function), its callbacks follow, and
+/// its span records the binding, which explains it to the deferred-tag pass.
+/// Zero or two-plus declared queues bind nothing.
+fn bind_declared_queues(
+    ctx: DeclareCtx<'_>,
+    declares: &[(&str, QueueFramework, &[&str], TopicRule)],
+    st: &mut DeclareState<'_, '_, '_>,
+) {
+    // (framework, named queues in first-seen order, unnamed declarations).
+    let mut declared: Vec<(&QueueFramework, Vec<String>, usize)> = Vec::new();
+    for (pattern, framework, signals, rule) in declares {
+        let slot = match declared.iter().position(|(f, _, _)| *f == framework) {
+            Some(i) => i,
+            None => {
+                declared.push((framework, Vec::new(), 0));
+                declared.len() - 1
+            }
+        };
+        if !ctx.source.contains(pattern) || !signals_present(ctx.lower, signals) {
+            continue;
+        }
+        let folds = ctx
+            .resolve
+            .filter(|_| !is_identity_rule(rule) && !matches!(rule, TopicRule::NoIdentity));
+        for h in queue_topic::scan_guarded(ctx.source, pattern, *rule, st.guard) {
+            let read = read_hit(&h, folds, st.counts, framework, ctx.path);
+            let Some((_, queues, unnamed)) = declared.get_mut(slot) else {
+                continue;
+            };
+            match read {
+                Some((q, _)) if !queues.contains(&q) => queues.push(q),
+                Some(_) => {}
+                None => *unnamed += 1,
+            }
+        }
+    }
+    for (framework, queues, unnamed) in &declared {
+        let consumes: Vec<usize> = (0..st.spans.len())
+            .filter(|&i| {
+                st.spans.get(i).is_some_and(|s| {
+                    s.framework == *framework && s.named.is_none() && !s.no_identity
+                }) && !matches!(overlap_of(st.spans, i), Some(Some(_)))
+            })
+            .collect();
+        if consumes.is_empty() {
+            continue;
+        }
+        let count = queues.len() + unnamed;
+        let queue = match queues.as_slice() {
+            [q] if count == 1 => q,
+            _ => {
+                if debug_enabled() {
+                    eprintln!(
+                        "[queues] declare-unbound declared={count} framework={framework:?} file={}",
+                        ctx.path
+                    );
+                }
+                continue;
+            }
+        };
+        let mut per_needle: Vec<(&str, usize)> = Vec::new();
+        for i in consumes {
+            let Some(s) = st.spans.get(i) else { continue };
+            let (start, needle, rule, handler, row) = (s.start, s.needle, s.rule, s.handler, s.row);
+            let line = queue_topic::line_of(ctx.source, start);
+            if record_site(
+                st.pending,
+                st.seen,
+                queue,
+                framework,
+                ctx.repo,
+                ctx.kind,
+                ctx.prefix,
+                Confidence::Medium,
+                (line, start),
+            ) {
+                fired_on(needle, rule, framework, queue, ctx.path);
+            }
+            let idx = st.seen.get(&format!("{queue}:{framework:?}")).copied();
+            if let Some(s) = st.spans.get_mut(i) {
+                s.declared = idx;
+            }
+            if let (Some(h), Some(id)) =
+                (handler, idx.and_then(|x| st.pending.get(x)).map(|p| p.id))
+            {
+                let found = handlers_at(ctx.source, start, needle, h);
+                push_row_callbacks(
+                    st.callbacks,
+                    st.callback_rows,
+                    st.callback_seen,
+                    id,
+                    found,
+                    row,
+                );
+            }
+            match per_needle.iter_mut().find(|(n, _)| *n == needle) {
+                Some((_, k)) => *k += 1,
+                None => per_needle.push((needle, 1)),
+            }
+        }
+        if debug_enabled() {
+            for (needle, k) in per_needle {
+                eprintln!(
+                    "[queues] declare-bound queue={queue} framework={framework:?} consume='{needle}' consumes={k} file={}",
+                    ctx.path
+                );
+            }
+        }
+    }
 }
 
 /// The id [`record_site`] gave (topic, framework) in this file.
@@ -993,6 +1637,7 @@ fn record_site(
         lines: vec![line],
         offsets: vec![offset],
         anchor_lines: vec![anchor_line],
+        rank: (pending.len(), 1, 0),
     });
     true
 }
@@ -2387,7 +3032,9 @@ func Publish(w *kafka.Writer, v []byte) error {
 
     #[test]
     fn backtick_literal() {
-        let source = "import { Queue } from 'bullmq';\nqueue.add(`emails`, job);";
+        // CL.1: was over `queue.add(`, whose arg #0 is a BullMQ job name and
+        // no longer a topic; the subject here is the backtick reader.
+        let source = "import { Queue } from 'bullmq';\nconst q = new Queue(`emails`, opts);";
         let pr = extract_queue_producer_nodes(source, PATH, module_id(), repo());
         assert_eq!(qnames(&pr), vec!["queue_producer:emails".to_string()]);
     }
@@ -2462,7 +3109,11 @@ nc.Publish(subjectC, c)
         // The gate compares against a `to_ascii_lowercase`d copy of the source,
         // so ONE upper-case letter in a signal literal is a permanently dead
         // gate — the row can never fire again. Asserted, not commented.
-        for (needle, _, signals, _) in CONSUMER_PATTERNS.iter().chain(PRODUCER_PATTERNS) {
+        for (needle, _, signals, _) in CONSUMER_PATTERNS
+            .iter()
+            .chain(PRODUCER_PATTERNS)
+            .chain(DECLARE_PATTERNS)
+        {
             for s in *signals {
                 assert_eq!(
                     s.to_string(),
@@ -4396,5 +5047,316 @@ await myconsumer.run({ eachMessage: notMine });\n";
         assert_eq!(handled(&fp, orders), vec![start]);
         assert_eq!(refs_from(&fp, orders), vec![on_order]);
         assert_eq!(fp.refs.len(), 1);
+    }
+
+    // ---- CL.1: queue row semantics -----------------------------------------
+
+    /// The file's queue qnames in EMITTED order (not sorted).
+    fn ordered(r: &QueueNodes) -> Vec<String> {
+        r.nodes
+            .iter()
+            .filter_map(|n| r.nav.qname_by_id.get(&n.id).cloned())
+            .collect()
+    }
+
+    fn at(src: &str, path: &str) -> (Vec<String>, Vec<String>) {
+        (
+            qnames(&extract_queue_consumer_nodes(
+                src,
+                path,
+                module_id(),
+                repo(),
+            )),
+            qnames(&extract_queue_producer_nodes(
+                src,
+                path,
+                module_id(),
+                repo(),
+            )),
+        )
+    }
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn declaring_a_queue_is_not_consuming_it() {
+        // matrix/python/amqp's producer: it declares the queue it publishes to.
+        let pika = "import pika\n\nchannel = connection.channel()\nchannel.queue_declare(queue=\"orders\")\n\n\ndef publish_order(body):\n    channel.basic_publish(exchange=\"\", routing_key=\"orders\", body=body)\n";
+        assert_eq!(
+            at(pika, "server/producer.py"),
+            (vec![], strs(&["queue_producer:orders"]))
+        );
+        // matrix/csharp/amqp's producer, RabbitMQ.Client v6.
+        let send = "using RabbitMQ.Client;\nclass P {\n  void Publish(string p) {\n    _channel.QueueDeclare(queue: \"orders\", durable: true, exclusive: false, autoDelete: false, arguments: null);\n    _channel.BasicPublish(exchange: \"\", routingKey: \"orders\", basicProperties: null, body: b);\n  }\n}\n";
+        assert_eq!(
+            at(send, "server/Producer.cs"),
+            (vec![], strs(&["queue_producer:orders"]))
+        );
+        // The consumer is found by `.BasicConsume(` now, not by the declare.
+        let recv = "using RabbitMQ.Client;\nclass C {\n  void Run() {\n    _channel.QueueDeclare(queue: \"orders\", durable: true, exclusive: false, autoDelete: false, arguments: null);\n    var consumer = new EventingBasicConsumer(_channel);\n    _channel.BasicConsume(queue: \"orders\", autoAck: true, consumer: consumer);\n  }\n}\n";
+        let c = extract_queue_consumer_nodes(recv, "client/Consumer.cs", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        let lines: Vec<u32> = c.anchors.iter().map(|a| a.line).collect();
+        assert_eq!(
+            lines,
+            vec![5],
+            "the consume call is the one site, never the declare"
+        );
+        // A consumer of a queue declared elsewhere, positional, and v7 async.
+        let elsewhere =
+            "using RabbitMQ.Client;\n_channel.BasicConsume(\"orders\", true, consumer);\n";
+        assert_eq!(at(elsewhere, "W.cs").0, strs(&["queue_consumer:orders"]));
+        let v7 = "using RabbitMQ.Client;\nawait channel.QueueDeclareAsync(queue: \"hello\", durable: false);\nawait channel.BasicConsumeAsync(\"hello\", autoAck: true, consumer: consumer);\nawait channel.BasicPublishAsync(exchange: string.Empty, routingKey: \"hello\", body: body);\n";
+        assert_eq!(
+            at(v7, "V7.cs"),
+            (
+                strs(&["queue_consumer:hello"]),
+                strs(&["queue_producer:hello"])
+            )
+        );
+    }
+
+    #[test]
+    fn declared_queue_names_an_unnamed_consume() {
+        let src = "import pika\nchannel.queue_declare(queue=\"jobs\")\n\ndef run(qname):\n    channel.basic_consume(queue=qname, on_message_callback=cb)\n";
+        let c = extract_queue_consumer_nodes(src, "w.py", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:jobs"]));
+        // The site is the CONSUME call (line 4), so LE.4c anchors it to `run`.
+        let lines: Vec<u32> = c.anchors.iter().map(|a| a.line).collect();
+        assert_eq!(lines, vec![4]);
+        assert_eq!(
+            callbacks_of(&c),
+            vec![cb("queue_consumer:jobs", 4, name("cb"), false)]
+        );
+        // Two declared queues: ambiguous, nothing is bound and the tag stays.
+        let two = "import pika\nchannel.queue_declare(queue=\"a\")\nchannel.queue_declare(queue=\"b\")\nchannel.basic_consume(queue=qname, on_message_callback=cb)\n";
+        let c = extract_queue_consumer_nodes(two, "w.py", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:unresolved:rabbitmq"]));
+        assert_eq!(
+            callbacks_of(&c),
+            vec![cb(
+                "queue_consumer:unresolved:rabbitmq",
+                3,
+                name("cb"),
+                false
+            )]
+        );
+        // A server-named declaration (`queue=''`) is a declared queue too.
+        let anon = "import pika\nresult = channel.queue_declare(queue='', exclusive=True)\nchannel.queue_declare(queue='orders')\nchannel.basic_consume(queue=result.method.queue, on_message_callback=cb)\n";
+        assert_eq!(
+            at(anon, "w.py").0,
+            strs(&["queue_consumer:unresolved:rabbitmq"])
+        );
+        // A consume that names its queue is not rebound to the declared one.
+        let named = "import pika\nchannel.queue_declare(queue='jobs')\nchannel.basic_consume(queue='audit', on_message_callback=cb)\n";
+        assert_eq!(at(named, "w.py").0, strs(&["queue_consumer:audit"]));
+    }
+
+    #[test]
+    fn same_call_read_by_two_rows_mints_no_tag() {
+        // `channel.basic_publish` (ArgLiteral over arg #0, pika's exchange)
+        // and `basic_publish(` (Keyed routing_key) read ONE call.
+        let src = "import pika\n\nchannel.queue_declare(queue=\"orders\")\n\n\ndef publish_order(body):\n    channel.basic_publish(exchange=\"\", routing_key=\"orders\", body=body)\n";
+        let p = extract_queue_producer_nodes(src, "server/producer.py", module_id(), repo());
+        assert_eq!(ordered(&p), strs(&["queue_producer:orders"]));
+        // One node, one site: the anchor list holds the call's line once.
+        let lines: Vec<u32> = p.anchors.iter().map(|a| a.line).collect();
+        assert_eq!(lines, vec![6]);
+    }
+
+    #[test]
+    fn liveness_call_beside_a_named_node_mints_no_tag() {
+        // `new KafkaConsumer()` carries no identifier expression; the file
+        // names its Kafka topic on `consumer.subscribe`.
+        let src = "import { Kafka } from 'kafkajs';\nconst c = new KafkaConsumer();\nawait consumer.subscribe({ topic: 'orders' });\n";
+        let c = extract_queue_consumer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(ordered(&c), strs(&["queue_consumer:orders"]));
+        // Without the named node the liveness call is unexplained: tag kept.
+        let alone = "import { Kafka } from 'kafkajs';\nconst c = new KafkaConsumer();\n";
+        assert_eq!(consumers(alone), strs(&["queue_consumer:unresolved:kafka"]));
+        // A named node of ANOTHER framework explains nothing.
+        let other = "import { Kafka } from 'kafkajs';\nimport { connect } from 'nats';\nconst c = new KafkaConsumer();\nnc.subscribe('orders', onOrder);\n";
+        assert_eq!(
+            consumers(other),
+            strs(&["queue_consumer:orders", "queue_consumer:unresolved:kafka"])
+        );
+    }
+
+    #[test]
+    fn unexplained_hit_keeps_its_tag() {
+        // GUARD (passes before and after CL.1): `producer.produce(topicVar, ..)`
+        // names its topic by an expression nothing resolved, so the tag stays
+        // beside the named `orders` — and every node keeps its old position:
+        // the NATS tag's row runs before the Kafka rows.
+        let src = "import { connect } from 'nats';\nimport { Kafka } from 'kafkajs';\nnc.publish(subject, data);\nawait producer.send({ topic: 'orders', messages });\nawait producer.produce(topicVar, msg);\n";
+        let p = extract_queue_producer_nodes(src, PATH, module_id(), repo());
+        assert_eq!(
+            ordered(&p),
+            strs(&[
+                "queue_producer:unresolved:nats",
+                "queue_producer:orders",
+                "queue_producer:unresolved:kafka",
+            ])
+        );
+        let tag = p
+            .nodes
+            .iter()
+            .find(|n| {
+                p.nav
+                    .qname_by_id
+                    .get(&n.id)
+                    .is_some_and(|q| q.ends_with(":unresolved:kafka"))
+            })
+            .expect("kafka tag");
+        assert_eq!(tag.confidence, Confidence::Weak);
+    }
+
+    #[test]
+    fn amqplib_publish_reads_the_routing_key() {
+        let p = |body: &str| producers(&format!("import amqp from 'amqplib';\n{body}\n"));
+        assert_eq!(
+            p("channel.publish('shop', 'orders', b);"),
+            strs(&["queue_producer:orders"])
+        );
+        // Fanout: an empty routing key keeps the exchange identity.
+        assert_eq!(
+            p("channel.publish('logs', '', b);"),
+            strs(&["queue_producer:logs"])
+        );
+        // The default-exchange shortcut.
+        assert_eq!(
+            p("channel.sendToQueue('jobs', b);"),
+            strs(&["queue_producer:jobs"])
+        );
+        // matrix/typescript/amqp's producer: never `queue_producer:shop`.
+        let src = "import amqp from 'amqplib';\n\nexport async function publishOrder(payload: string): Promise<void> {\n  const channel = await conn.createChannel();\n  await channel.assertExchange('shop', 'direct');\n  channel.publish('shop', 'orders', Buffer.from(payload));\n}\n";
+        assert_eq!(
+            at(src, "server/producer.ts"),
+            (vec![], strs(&["queue_producer:orders"]))
+        );
+    }
+
+    #[test]
+    fn bullmq_job_name_is_not_a_topic() {
+        // matrix/typescript/taskq's producer.
+        let src = "import { Queue } from 'bullmq';\n\nconst queue = new Queue('orders', { connection: { host: 'localhost', port: 6379 } });\n\nexport async function checkout(orderId: string): Promise<void> {\n  await queue.add('process-order', { orderId });\n}\n";
+        assert_eq!(producers(src), strs(&["queue_producer:orders"]));
+        // `queue.add(` alone is liveness: no job-name node and no tag.
+        let only =
+            "import { Queue } from 'bullmq';\nawait queue.add('process-order', { orderId });\n";
+        assert_eq!(producers(only), Vec::<String>::new());
+    }
+
+    #[test]
+    fn inject_queue_names_the_producer() {
+        for import in ["@nestjs/bull", "@nestjs/bullmq"] {
+            let src = format!(
+                "import {{ InjectQueue }} from '{import}';\n@Injectable()\nexport class AudioService {{\n  constructor(@InjectQueue('audio') private audioQueue: Queue) {{}}\n  async transcode() {{ await this.audioQueue.add('transcode', {{ file: 'a.mp3' }}); }}\n}}\n"
+            );
+            assert_eq!(producers(&src), strs(&["queue_producer:audio"]), "{import}");
+        }
+        // Without a bull import the decorator is someone else's.
+        assert_eq!(
+            producers("@InjectQueue('audio') q: Queue;\n"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn celery_delay_on_an_imported_task() {
+        let py = |src: &str| {
+            qnames(&extract_queue_producer_nodes(
+                src,
+                "server/producer.py",
+                module_id(),
+                repo(),
+            ))
+        };
+        // matrix/python/taskq's caller never mentions celery.
+        let caller = "from tasks import process_order\n\n\ndef checkout(order_id):\n    process_order.delay(order_id)\n    return {\"queued\": True}\n";
+        assert_eq!(py(caller), strs(&["queue_producer:process_order"]));
+        // A dotted receiver is someone else's `delay`.
+        assert_eq!(
+            py("import pygame\npygame.time.delay(1)\n"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            py("import tasks\ntasks.process_order.delay(1)\n"),
+            Vec::<String>::new()
+        );
+        // A bare name no from-import binds, and a star import, bind nothing.
+        assert_eq!(py("def f(x):\n    x.delay(1)\n"), Vec::<String>::new());
+        assert_eq!(
+            py("from tasks import *\nprocess_order.delay(1)\n"),
+            Vec::<String>::new()
+        );
+        // Parenthesised multi-line lists, aliases and continuations.
+        let multi = "from app.tasks import (\n    send_email,  # mail\n    process_order as po,\n)\nfrom app.more import a, \\\n    rebuild\npo.delay(1)\nsend_email.delay(2)\nrebuild.delay(3)\n";
+        assert_eq!(
+            py(multi),
+            strs(&[
+                "queue_producer:po",
+                "queue_producer:rebuild",
+                "queue_producer:send_email"
+            ])
+        );
+        // Only Python files: the same text in a JS file is jQuery-shaped.
+        assert_eq!(
+            qnames(&extract_queue_producer_nodes(
+                caller,
+                "server/producer.js",
+                module_id(),
+                repo()
+            )),
+            Vec::<String>::new()
+        );
+        // A gated file reads exactly as before.
+        assert_eq!(
+            py("from celery import Celery\nsend_email.delay('x')\n"),
+            strs(&["queue_producer:send_email"])
+        );
+        assert_eq!(
+            python_imported_names(
+                "from a import b as c, d\nfrom .x import (e,\n f)\nimport g\nfrom h import *\n"
+            ),
+            ["c", "d", "e", "f"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
+    #[test]
+    fn suppressed_tag_callbacks_follow_the_explaining_node() {
+        // `basic_consume(on_message_callback=cb)` names no queue and carries no
+        // identifier expression; amqplib's `channel.consume` names `audit` in
+        // the same file, so the tag is explained (rule ii) and `cb` follows
+        // the single named RabbitMQ consumer.
+        let src = "import amqp\nchannel.consume('audit', onAudit)\nch.basic_consume(on_message_callback=cb)\n";
+        let c = extract_queue_consumer_nodes(src, "w.py", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:audit"]));
+        assert_eq!(
+            callbacks_of(&c),
+            vec![
+                cb("queue_consumer:audit", 1, name("onAudit"), false),
+                cb("queue_consumer:audit", 2, name("cb"), false),
+            ]
+        );
+        // Two named consumers: no single owner, so `cb` is dropped, not guessed.
+        let src = "import amqp\nchannel.consume('audit', onAudit)\nchannel.consume('orders', onOrder)\nch.basic_consume(on_message_callback=cb)\n";
+        let c = extract_queue_consumer_nodes(src, "w.py", module_id(), repo());
+        assert_eq!(
+            qnames(&c),
+            strs(&["queue_consumer:audit", "queue_consumer:orders"])
+        );
+        assert_eq!(
+            callbacks_of(&c),
+            vec![
+                cb("queue_consumer:audit", 1, name("onAudit"), false),
+                cb("queue_consumer:orders", 2, name("onOrder"), false),
+            ]
+        );
     }
 }
