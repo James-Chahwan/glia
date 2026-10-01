@@ -1,0 +1,17 @@
+{
+  "framework": "self-scan-literal-needles",
+  "language": "rust",
+  "dirs": ["."],
+  "note": "CJ-1 (CJ.1a). In .rs / .py files a queue or event needle that starts inside a string literal or comment is no call site; Sidekiq's bare `perform_async` / `perform_in` must be a whole word. Controls: rdkafka subscribe (Rust), pika basic_publish (Python), HardWorker.perform_async (Ruby). Baseline (HEAD f8a46c0, glia analyze): expect 3/3, FORBID VIOLATIONS 4 (orders, refunds, sidekiq_, user.created). `queue_producer:unresolved:rabbitmq` is not forbidden: the real pika call mints that tag beside `invoices` at HEAD (a code-position twin, listed as a gap).",
+  "expect_nodes": [
+    {"kind": "QUEUE_CONSUMER", "name": "payments", "note": "rdkafka consumer.subscribe(&[..]) in Rust code"},
+    {"kind": "QUEUE_PRODUCER", "name": "invoices", "note": "pika basic_publish in Python code"},
+    {"kind": "QUEUE_PRODUCER", "name": "HardWorker", "note": "Sidekiq receiver, `.` before the bare needle"}
+  ],
+  "forbid": [
+    {"kind": "QUEUE_PRODUCER", "name": "orders", "note": "nc.publish inside a Rust test literal"},
+    {"kind": "QUEUE_PRODUCER", "name": "refunds", "note": "basic_publish inside a Python string"},
+    {"kind": "QUEUE_PRODUCER", "name": "sidekiq_", "note": "perform_async inside the Rust fn name sidekiq_perform_async_uses_class"},
+    {"kind": "EVENT_EMITTER", "name": "user.created", "note": "emitter.emit inside a Rust test literal and a //! comment"}
+  ]
+}

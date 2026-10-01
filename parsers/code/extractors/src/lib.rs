@@ -1,6 +1,7 @@
 pub mod anchor;
 pub mod angular;
 pub mod cli;
+mod code_guard;
 pub mod config;
 pub mod constants;
 pub mod contracts;

@@ -417,13 +417,15 @@ fn char_literal_end(b: &[u8], at: usize) -> Option<usize> {
 /// verbatim strings (`@"..."`, `""` escapes), char literals, `//` comments and
 /// nesting `/* */` comments. A needle in a doc comment or a string (a test
 /// fixture, a scanner's own needle table) is not a declaration.
-struct CodeMap {
+/// [`crate::code_guard`] is the second user: it guards the queue and event
+/// needle scanners in Rust and Python files by the same rule (CJ.1a).
+pub(crate) struct CodeMap {
     /// `[start, end)` of each literal / comment, in source order.
     skips: Vec<(usize, usize)>,
 }
 
 impl CodeMap {
-    fn new(source: &str) -> Self {
+    pub(crate) fn new(source: &str) -> Self {
         let b = source.as_bytes();
         let mut skips = Vec::new();
         let mut i = 0;
@@ -459,9 +461,17 @@ impl CodeMap {
     }
 
     /// True when byte `pos` is code, not inside a literal or comment.
-    fn is_code(&self, pos: usize) -> bool {
+    pub(crate) fn is_code(&self, pos: usize) -> bool {
         let i = self.skips.partition_point(|&(start, _)| start <= pos);
         i == 0 || self.skips[i - 1].1 <= pos
+    }
+
+    /// CJ.1a: the first byte of the literal or comment holding `pos` (its
+    /// opening quote, its `//` / `#`), or `None` when `pos` is code.
+    pub(crate) fn literal_start(&self, pos: usize) -> Option<usize> {
+        let i = self.skips.partition_point(|&(start, _)| start <= pos);
+        let (start, end) = *self.skips.get(i.checked_sub(1)?)?;
+        (pos < end).then_some(start)
     }
 }
 
@@ -1213,7 +1223,7 @@ const MAX_LITERAL: usize = 4096;
 
 /// The literal and comment syntax [`CodeMap::script`] lexes.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Script {
+pub(crate) enum Script {
     Python,
     Ruby,
     Php,
@@ -1227,7 +1237,7 @@ impl CodeMap {
     /// the C family `'` opens a char literal), and heredoc bodies (Ruby `<<~ID`
     /// / `<<-ID`, PHP `<<<ID`) through their terminator line. Ruby `%w()`
     /// literals are read as code.
-    fn script(source: &str, script: Script) -> Self {
+    pub(crate) fn script(source: &str, script: Script) -> Self {
         let b = source.as_bytes();
         let mut skips = Vec::new();
         let mut heredoc: Option<&[u8]> = None;

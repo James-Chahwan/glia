@@ -7,6 +7,7 @@ use glia_code_domain::{
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
 
 use crate::anchor::{self, Anchor};
+use crate::code_guard::LazyGuard;
 use crate::marker_swap;
 use crate::queue_topic::{self, TopicForm, TopicRule};
 
@@ -780,13 +781,17 @@ fn emit_queue_nodes(
     // LA.33: consumer callbacks, per (consumer, handler), in site order.
     let mut callbacks: Vec<ConsumerCallback> = Vec::new();
     let mut callback_seen: HashSet<(NodeId, HandlerExpr)> = HashSet::new();
+    // CJ.1a: in a Rust / Python file an occurrence starting in a string
+    // literal or comment is no site, so a refused needle mints neither a
+    // topic node nor its `unresolved:*` tag. Lexed on the first candidate.
+    let mut guard = LazyGuard::new(path, source);
 
     for (pattern, framework, signals, rule) in patterns {
         if !source.contains(pattern) || !signals_present(&lower, signals) {
             continue;
         }
         let handler = handler_rule(pattern).filter(|_| kind == node_kind::QUEUE_CONSUMER);
-        let mut hits = queue_topic::scan(source, pattern, *rule);
+        let mut hits = queue_topic::scan_guarded(source, pattern, *rule, &mut guard);
         if yields_to_earlier_rows(framework) {
             let len = pattern.len();
             hits.retain(|h| !claimed.iter().any(|&(s, e)| h.offset < e && s < h.offset + len));
@@ -920,6 +925,16 @@ fn emit_queue_nodes(
         }
     }
 
+    // The post-cache const fold re-reads the file through this function with
+    // the same path, so it refuses exactly what the per-file pass refused; it
+    // stays quiet so each file reports once per parse.
+    if resolve.is_none() {
+        guard.report(if kind == node_kind::QUEUE_CONSUMER {
+            "queue_consumer"
+        } else {
+            "queue_producer"
+        });
+    }
     let mut out = finish(pending, source, path, module_id, repo, kind);
     out.callbacks = callbacks;
     out
@@ -2653,6 +2668,70 @@ $topic->produce(RD_KAFKA_PARTITION_UA, 0, $payload);
         let source = "class OrdersController\n  def create\n    HardWorker.perform_async(order.id)\n  end\nend\n";
         let pr = extract_queue_producer_nodes(source, PATH, module_id(), repo());
         assert_eq!(qnames(&pr), vec!["queue_producer:HardWorker".to_string()]);
+    }
+
+    /// CJ.1a: the self-scan-literal-needles fixture's scanner/src/table.rs: a
+    /// needle table, doc comments and a test's embedded sample source.
+    const NEEDLE_TABLE_RS: &str = r#"//! A scanner's own needle table: NATS `nc.publish("orders", data)` and the
+//! node `emitter.emit('user.created', u)` bus, read by the queue scanner.
+
+/// Needles the scanner looks for.
+pub const NEEDLES: &[&str] = &["nc.publish(", "channel.basic_publish(", "emitter.emit("];
+
+/// The library signals that gate them.
+pub const SIGNALS: &[&str] = &["nats", "amqp", "events"];
+
+/// Sidekiq rows read the receiver before the call.
+pub fn sidekiq_perform_async_uses_class() -> bool {
+    NEEDLES.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reads_a_nats_publish() {
+        let src = "import { connect } from 'nats';\nnc.publish(\"orders\", data);\n";
+        assert!(src.contains("nc.publish("));
+        let bus = "const emitter = new EventEmitter();\nemitter.emit('user.created', u);\n";
+        assert!(bus.contains("emit("));
+    }
+}
+"#;
+
+    #[test]
+    fn literal_and_comment_needles_mint_nothing_in_rust_and_python() {
+        let both = |src: &str, path: &str| {
+            let mut v = qnames(&extract_queue_producer_nodes(src, path, module_id(), repo()));
+            v.extend(qnames(&extract_queue_consumer_nodes(src, path, module_id(), repo())));
+            v
+        };
+        assert_eq!(both(NEEDLE_TABLE_RS, "scanner/src/table.rs"), Vec::<String>::new());
+        // Other languages have no guard: the same text read as TypeScript
+        // mints exactly what an unguarded read mints, phantoms included.
+        let ts = both(NEEDLE_TABLE_RS, "scanner/src/table.ts");
+        assert_eq!(ts, both(NEEDLE_TABLE_RS, ""));
+        assert!(ts.contains(&"queue_producer:orders".to_string()), "{ts:?}");
+
+        let worker = "use rdkafka::consumer::{Consumer, StreamConsumer};\n\npub fn start(consumer: &StreamConsumer) {\n    consumer.subscribe(&[\"payments\"]).expect(\"subscribe\");\n}\n";
+        let cr = extract_queue_consumer_nodes(worker, "worker/src/main.rs", module_id(), repo());
+        assert_eq!(qnames(&cr), vec!["queue_consumer:payments".to_string()]);
+
+        let probe = "import pika\n\nSAMPLE = \"channel.basic_publish(exchange='', routing_key='refunds', body=b)\"\n\n\ndef send_invoice(channel, body):\n    channel.basic_publish(exchange='', routing_key='invoices', body=body)\n";
+        let py = qnames(&extract_queue_producer_nodes(probe, "tools/probe.py", module_id(), repo()));
+        assert!(py.contains(&"queue_producer:invoices".to_string()), "{py:?}");
+        assert!(!py.contains(&"queue_producer:refunds".to_string()), "{py:?}");
+        let unguarded = qnames(&extract_queue_producer_nodes(probe, "tools/probe.txt", module_id(), repo()));
+        assert!(unguarded.contains(&"queue_producer:refunds".to_string()), "{unguarded:?}");
+    }
+
+    #[test]
+    fn bare_word_receiver_needs_a_word_start() {
+        let pr = |src: &str| qnames(&extract_queue_producer_nodes(src, "app/x.rb", module_id(), repo()));
+        assert_eq!(pr("fn sidekiq_perform_async_uses_class() {}\n"), Vec::<String>::new());
+        assert_eq!(pr("HardWorker.perform_async(1)\n"), vec!["queue_producer:HardWorker".to_string()]);
+        assert_eq!(pr("HardWorker.perform_in(5.minutes, 1)\n"), vec!["queue_producer:HardWorker".to_string()]);
+        assert_eq!(pr("MyJob.perform_inline(1)\n"), Vec::<String>::new());
+        assert_eq!(pr("MyJob.perform_async_bulk(1)\n"), Vec::<String>::new());
     }
 
     #[test]

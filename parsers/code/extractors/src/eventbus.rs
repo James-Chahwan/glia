@@ -5,6 +5,7 @@ use glia_code_domain::{CodeNav, FileParse, GRAPH_TYPE, cell_type, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, NodeKindId, RepoId};
 
 use crate::anchor::{Anchor, line_of};
+use crate::code_guard::LazyGuard;
 use crate::marker_swap;
 use crate::queues::ConstFoldCounts;
 
@@ -345,6 +346,8 @@ fn push_event_node(
 struct EventSide {
     /// `emitter` / `handler`: the A2.9 suppression and CB.3b fold markers.
     label: &'static str,
+    /// CJ.1a: the scanner the `[code-guard]` marker names.
+    guard_label: &'static str,
     kind: NodeKindId,
     prefix: &'static str,
     /// The type-keyed pass ([`scan_type_needles`] over the side's needles).
@@ -354,6 +357,7 @@ struct EventSide {
 
 const EMITTER_SIDE: EventSide = EventSide {
     label: "emitter",
+    guard_label: "event_emitter",
     kind: node_kind::EVENT_EMITTER,
     prefix: "event_emit:",
     typed: typed_emitters,
@@ -362,6 +366,7 @@ const EMITTER_SIDE: EventSide = EventSide {
 
 const HANDLER_SIDE: EventSide = EventSide {
     label: "handler",
+    guard_label: "event_handler",
     kind: node_kind::EVENT_HANDLER,
     prefix: "event_handle:",
     typed: typed_handlers,
@@ -381,9 +386,17 @@ fn typed_handlers(source: &str) -> Vec<(String, usize)> {
 /// the repo's; the per-file extractors pass none.
 type ConstResolver<'a> = &'a dyn Fn(&str) -> Option<String>;
 
-pub fn extract_event_emitter_nodes(source: &str, module_id: NodeId, repo: RepoId) -> EventNodes {
+/// `path` is the file the source came from: in a Rust / Python file it
+/// selects the CJ.1a literal / comment guard (`""` = no guard).
+pub fn extract_event_emitter_nodes(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> EventNodes {
     emit_event_nodes(
         source,
+        path,
         module_id,
         repo,
         &EMITTER_SIDE,
@@ -392,9 +405,16 @@ pub fn extract_event_emitter_nodes(source: &str, module_id: NodeId, repo: RepoId
     )
 }
 
-pub fn extract_event_handler_nodes(source: &str, module_id: NodeId, repo: RepoId) -> EventNodes {
+/// `path` as for [`extract_event_emitter_nodes`].
+pub fn extract_event_handler_nodes(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> EventNodes {
     emit_event_nodes(
         source,
+        path,
         module_id,
         repo,
         &HANDLER_SIDE,
@@ -435,8 +455,10 @@ pub fn extract_event_nodes_with_consts(
     resolve: &dyn Fn(&str) -> Option<String>,
 ) -> EventFold {
     let mut counts = ConstFoldCounts::default();
-    let emitters = emit_event_nodes(source, module_id, repo, &EMITTER_SIDE, Some(resolve), &mut counts);
-    let handlers = emit_event_nodes(source, module_id, repo, &HANDLER_SIDE, Some(resolve), &mut counts);
+    let emitters =
+        emit_event_nodes(source, path, module_id, repo, &EMITTER_SIDE, Some(resolve), &mut counts);
+    let handlers =
+        emit_event_nodes(source, path, module_id, repo, &HANDLER_SIDE, Some(resolve), &mut counts);
     EventFold {
         emitters,
         handlers,
@@ -504,8 +526,13 @@ pub fn replace_event_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fo
 /// CB.3b: `resolve` is `None` on the per-file (cached) path, which is then
 /// byte-identical to CB.3a; the engine's post-cache fold passes one, and
 /// `counts` tallies the constant-keyed sites it folded or left on their path.
+///
+/// CJ.1a: in a Rust / Python `path` an occurrence of either pass whose first
+/// byte sits in a string literal or comment is no site ([`LazyGuard`]); the
+/// post-cache fold reads the same path, so it refuses the same occurrences.
 fn emit_event_nodes(
     source: &str,
+    path: &str,
     module_id: NodeId,
     repo: RepoId,
     side: &EventSide,
@@ -516,8 +543,12 @@ fn emit_event_nodes(
     let mut nav = CodeNav::default();
     let mut anchors = Vec::new();
     let mut seen = HashSet::new();
+    let mut guard = LazyGuard::new(path, source);
 
     for (name, at) in (side.typed)(source) {
+        if !guard.admits(at) {
+            continue;
+        }
         let (id, _) = push_event_node(
             &mut nodes,
             &mut nav,
@@ -534,7 +565,7 @@ fn emit_event_nodes(
 
     let mut ctx = VerbCtx::default();
     for &(pattern, rule, ambiguous, gate) in side.patterns {
-        let Some((idx, key)) = find_gated(source, pattern, rule, gate, &mut ctx) else {
+        let Some((idx, key)) = find_gated(source, pattern, rule, gate, &mut ctx, &mut guard) else {
             continue;
         };
         if ambiguous && ctx.broker_present(source) {
@@ -562,6 +593,10 @@ fn emit_event_nodes(
         }
     }
 
+    // The fold stays quiet: each file reports once per parse.
+    if resolve.is_none() {
+        guard.report(side.guard_label);
+    }
     EventNodes { nodes, nav, anchors }
 }
 
@@ -1036,13 +1071,17 @@ struct GateTally {
 /// A file whose first `publish(` is a declaration and a later one a bus call
 /// anchors at the bus call (LA.29); a file whose first `.addEventListener(` is
 /// on a DOM element and a later one on a bus anchors at the bus call (LA.39).
-/// Broker suppression (A2.9) is the caller's, after this walk.
+/// Broker suppression (A2.9) is the caller's, after this walk. CJ.1a: an
+/// occurrence `guard` refuses (it starts in a Rust / Python literal or
+/// comment) is skipped before every check, so it is never tallied as a gate
+/// rejection.
 fn find_gated(
     source: &str,
     pattern: &str,
     rule: NameRule,
     gate: VerbGate,
     ctx: &mut VerbCtx,
+    guard: &mut LazyGuard<'_>,
 ) -> Option<(usize, SiteKey)> {
     let gated = gate != VerbGate::Open;
     let mut tally = GateTally::default();
@@ -1057,6 +1096,9 @@ fn find_gated(
     while let Some(rel) = source[from..].find(pattern) {
         let at = from + rel;
         from = at + pattern.len();
+        if !guard.admits(at) {
+            continue;
+        }
         if pattern == "publish(" && queue_owned_publish(source, at) {
             continue;
         }
@@ -1821,7 +1863,7 @@ mod tests {
     #[test]
     fn detects_emit() {
         let source = "emitter.emit('user.created', data);";
-        let result = extract_event_emitter_nodes(source, module_id(), repo());
+        let result = extract_event_emitter_nodes(source, "", module_id(), repo());
         assert!(!result.nodes.is_empty());
         assert!(
             result
@@ -1835,7 +1877,7 @@ mod tests {
     #[test]
     fn detects_handler() {
         let source = "emitter.on('user.created', handler);";
-        let result = extract_event_handler_nodes(source, module_id(), repo());
+        let result = extract_event_handler_nodes(source, "", module_id(), repo());
         assert!(!result.nodes.is_empty());
         assert!(
             result
@@ -1849,7 +1891,7 @@ mod tests {
     #[test]
     fn detects_nest_event_pattern() {
         let source = "@EventPattern('order.placed')\nasync handleOrder(data) {}";
-        let result = extract_event_handler_nodes(source, module_id(), repo());
+        let result = extract_event_handler_nodes(source, "", module_id(), repo());
         assert!(
             result
                 .nav
@@ -1862,7 +1904,7 @@ mod tests {
     #[test]
     fn detects_spring_publish_event_type() {
         let source = "publisher.publishEvent(new OrderPlacedEvent(id));";
-        let result = extract_event_emitter_nodes(source, module_id(), repo());
+        let result = extract_event_emitter_nodes(source, "", module_id(), repo());
         assert!(
             result
                 .nav
@@ -1883,7 +1925,7 @@ mod tests {
     #[test]
     fn detects_spring_event_listener_param_type() {
         let source = "@EventListener\npublic void onOrderPlaced(OrderPlacedEvent event) {}";
-        let result = extract_event_handler_nodes(source, module_id(), repo());
+        let result = extract_event_handler_nodes(source, "", module_id(), repo());
         assert!(
             result
                 .nav
@@ -1898,7 +1940,7 @@ mod tests {
     #[test]
     fn detects_mediatr_notification_handler() {
         let source = "public class Emailer : INotificationHandler<OrderPlaced>\n{\n}";
-        let result = extract_event_handler_nodes(source, module_id(), repo());
+        let result = extract_event_handler_nodes(source, "", module_id(), repo());
         assert!(
             result
                 .nav
@@ -1913,7 +1955,7 @@ mod tests {
     #[test]
     fn detects_nest_events_handler_decorator() {
         let source = "@EventsHandler(OrderPlacedEvent)\nexport class H {}";
-        let result = extract_event_handler_nodes(source, module_id(), repo());
+        let result = extract_event_handler_nodes(source, "", module_id(), repo());
         assert!(
             result
                 .nav
@@ -1930,7 +1972,7 @@ mod tests {
         // The string-keyed path calls `find` once per needle; this one walks
         // the whole file, and `Shop.Events.X` reduces to `X`.
         let source = "_mediator.Publish(new Shop.Events.OrderPlaced());\n                      _mediator.Publish(new Shop.Events.OrderShipped());";
-        let result = extract_event_emitter_nodes(source, module_id(), repo());
+        let result = extract_event_emitter_nodes(source, "", module_id(), repo());
         let mut names: Vec<_> = result.nav.qname_by_id.values().cloned().collect();
         names.sort();
         assert_eq!(
@@ -1943,7 +1985,7 @@ mod tests {
     fn type_needle_rejects_lowercase_and_keyword_captures() {
         // `condition` is an annotation argument, not an event type.
         let source = "@EventListener(condition = \"#e.ok\")\npublic void on(int n) {}";
-        let result = extract_event_handler_nodes(source, module_id(), repo());
+        let result = extract_event_handler_nodes(source, "", module_id(), repo());
         assert!(
             !result
                 .nav
@@ -1960,7 +2002,7 @@ mod tests {
         // `nc.publish("orders", p)` is a NATS QUEUE_PRODUCER; the generic
         // `publish(` needle must not mint a phantom EVENT_EMITTER beside it.
         let source = "func pub(nc conn, p []byte) { nc.publish(\"orders\", p) }";
-        let result = extract_event_emitter_nodes(source, module_id(), repo());
+        let result = extract_event_emitter_nodes(source, "", module_id(), repo());
         assert!(
             result.nodes.is_empty(),
             "expected no event node, got {:?}",
@@ -1969,7 +2011,7 @@ mod tests {
 
         // An in-process bus that happens to use the same verb still fires.
         let bus = "bus.publish(\"user.created\", u);";
-        let result = extract_event_emitter_nodes(bus, module_id(), repo());
+        let result = extract_event_emitter_nodes(bus, "", module_id(), repo());
         assert!(
             result
                 .nav
@@ -1982,7 +2024,7 @@ mod tests {
     // ---- A2.9: broker pub/sub leaves the event bus -------------------------
 
     fn emitted(source: &str) -> Vec<String> {
-        let mut v: Vec<String> = extract_event_emitter_nodes(source, module_id(), repo())
+        let mut v: Vec<String> = extract_event_emitter_nodes(source, "", module_id(), repo())
             .nav
             .qname_by_id
             .into_values()
@@ -1992,13 +2034,44 @@ mod tests {
     }
 
     fn handled(source: &str) -> Vec<String> {
-        let mut v: Vec<String> = extract_event_handler_nodes(source, module_id(), repo())
+        let mut v: Vec<String> = extract_event_handler_nodes(source, "", module_id(), repo())
             .nav
             .qname_by_id
             .into_values()
             .collect();
         v.sort();
         v
+    }
+
+    /// CJ.1a: in a Rust file a site whose needle starts in a string literal
+    /// or a doc comment mints nothing, on both passes and in the post-cache
+    /// fold; the same text read as TypeScript (no guard) still mints.
+    #[test]
+    fn literal_and_comment_sites_mint_nothing_in_rust() {
+        let src = "/// Spring's `@EventListener(OrderPlaced)` handler.\nfn f() {\n    let bus = \"emitter.emit('user.created', u);\";\n}\n";
+        let qn = |out: EventNodes| {
+            let mut v: Vec<String> = out.nav.qname_by_id.into_values().collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            qn(extract_event_emitter_nodes(src, "x.ts", module_id(), repo())),
+            vec![s("event_emit:user.created")]
+        );
+        assert_eq!(
+            qn(extract_event_handler_nodes(src, "x.ts", module_id(), repo())),
+            vec![s("event_handle:OrderPlaced")]
+        );
+        assert_eq!(qn(extract_event_emitter_nodes(src, "x.rs", module_id(), repo())), Vec::<String>::new());
+        assert_eq!(qn(extract_event_handler_nodes(src, "x.rs", module_id(), repo())), Vec::<String>::new());
+        let fold = extract_event_nodes_with_consts(src, "x.rs", module_id(), repo(), &|_| None);
+        assert!(fold.emitters.nodes.is_empty() && fold.handlers.nodes.is_empty());
+        // A real call after the literal still mints, anchored at the call.
+        let real = "let bus = \"emitter.emit('user.created', u);\";\nemitter.emit(\"order.placed\", o);\n";
+        assert_eq!(
+            qn(extract_event_emitter_nodes(real, "x.rs", module_id(), repo())),
+            vec![s("event_emit:order.placed")]
+        );
     }
 
     #[test]
@@ -2089,7 +2162,7 @@ mod tests {
     fn anchors_type_sites_all_and_string_sites_once() {
         // Two type-keyed publishes of one event: one node, two anchors.
         let src = "class A {\n  void a() { publisher.publishEvent(new OrderPlaced(1)); }\n  void b() {\n    publisher.publishEvent(new OrderPlaced(2));\n  }\n}";
-        let out = extract_event_emitter_nodes(src, module_id(), repo());
+        let out = extract_event_emitter_nodes(src, "", module_id(), repo());
         assert_eq!(out.nodes.len(), 1);
         let id = out.nodes[0].id;
         assert_eq!(
@@ -2099,12 +2172,12 @@ mod tests {
 
         // String-keyed: the minting site only, at its own line.
         let src = "import x;\nexport function f() {\n  bus.on('user.created', h);\n}";
-        let out = extract_event_handler_nodes(src, module_id(), repo());
+        let out = extract_event_handler_nodes(src, "", module_id(), repo());
         assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 2 }]);
 
         // A suppressed broker call mints nothing, so it anchors nothing.
         let src = "import { connect } from 'mqtt';\nclient.subscribe('t');";
-        let out = extract_event_handler_nodes(src, module_id(), repo());
+        let out = extract_event_handler_nodes(src, "", module_id(), repo());
         assert!(out.nodes.is_empty() && out.anchors.is_empty());
     }
 
@@ -2129,7 +2202,7 @@ mod tests {
         // HEAD took the first `publish(` (the def) and minted event_emit:publish.
         let src = "def publish(self, m): pass\nbus.publish('user.created', u)";
         assert_eq!(emitted(src), vec!["event_emit:user.created"]);
-        let out = extract_event_emitter_nodes(src, module_id(), repo());
+        let out = extract_event_emitter_nodes(src, "", module_id(), repo());
         assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 1 }]);
     }
 
@@ -2251,7 +2324,7 @@ mod tests {
             "Event('order.shipped')\nonShipped() {}"
         );
         assert_eq!(handled(src), vec!["event_handle:order.shipped"]);
-        let out = extract_event_handler_nodes(src, module_id(), repo());
+        let out = extract_event_handler_nodes(src, "", module_id(), repo());
         assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 1 }]);
     }
 
@@ -2486,7 +2559,7 @@ mod tests {
         // HEAD took the first `.addEventListener(` and minted event_handle:click.
         let src = "el.addEventListener('click', h);\nbus.addEventListener('user.created', h2);";
         assert_eq!(handled(src), vec!["event_handle:user.created"]);
-        let out = extract_event_handler_nodes(src, module_id(), repo());
+        let out = extract_event_handler_nodes(src, "", module_id(), repo());
         assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 1 }]);
     }
 
@@ -2535,6 +2608,7 @@ mod tests {
     fn transport_needles_mark_their_nodes() {
         let out = extract_event_handler_nodes(
             "@EventPattern('order_shipped')\nasync onShipped(data) {}",
+            "",
             module_id(),
             repo(),
         );
@@ -2544,7 +2618,7 @@ mod tests {
         );
 
         let client = "import { ClientProxy } from '@nestjs/microservices';\nthis.client.emit('order_shipped', o);";
-        let out = extract_event_emitter_nodes(client, module_id(), repo());
+        let out = extract_event_emitter_nodes(client, "", module_id(), repo());
         assert_eq!(
             origins(&out),
             vec![(s("event_emit:order_shipped"), transport("nestjs-microservices"))]
@@ -2553,19 +2627,19 @@ mod tests {
         // CB.3a: a putEvents names its entry's DetailType; with none it names
         // nothing (HEAD: event_emit:eventBridge.putEvents).
         let bridge = "await eventBridge.putEvents({ Entries: [] }).promise();";
-        let out = extract_event_emitter_nodes(bridge, module_id(), repo());
+        let out = extract_event_emitter_nodes(bridge, "", module_id(), repo());
         assert_eq!(origins(&out), vec![]);
         let bridge = "await eventBridge.putEvents({ Entries: [{ DetailType: \"OrderPlaced\" }] }).promise();";
-        let out = extract_event_emitter_nodes(bridge, module_id(), repo());
+        let out = extract_event_emitter_nodes(bridge, "", module_id(), repo());
         assert_eq!(
             origins(&out),
             vec![(s("event_emit:OrderPlaced"), transport("aws-eventbridge"))]
         );
 
         let local = "import { EventEmitter } from 'events';\nconst bus = new EventEmitter();\nbus.emit('x', 1);";
-        let out = extract_event_emitter_nodes(local, module_id(), repo());
+        let out = extract_event_emitter_nodes(local, "", module_id(), repo());
         assert_eq!(origins(&out), vec![(s("event_emit:x"), vec![])], "in-process: no ORIGIN");
-        let out = extract_event_handler_nodes("bus.on('x', h);\n@OnEvent('y')\nh2() {}", module_id(), repo());
+        let out = extract_event_handler_nodes("bus.on('x', h);\n@OnEvent('y')\nh2() {}", "", module_id(), repo());
         assert_eq!(
             origins(&out),
             vec![(s("event_handle:x"), vec![]), (s("event_handle:y"), vec![])],
@@ -2578,7 +2652,7 @@ mod tests {
     #[test]
     fn a_transport_needle_marks_a_node_an_in_process_needle_minted() {
         let src = "bus.on('x', h);\n@EventPattern('x')\nonX(data) {}";
-        let out = extract_event_handler_nodes(src, module_id(), repo());
+        let out = extract_event_handler_nodes(src, "", module_id(), repo());
         assert_eq!(origins(&out), vec![(s("event_handle:x"), transport("nestjs-microservices"))]);
         assert_eq!(out.nodes.len(), 1);
     }
@@ -2746,7 +2820,7 @@ mod tests {
         // HEAD: event_emit:emit from the first occurrence.
         let src = concat!("bus.em", "it(x);\nbus.em", "it(\"user.created\", u);");
         assert_eq!(emitted(src), vec!["event_emit:user.created"]);
-        let out = extract_event_emitter_nodes(src, module_id(), repo());
+        let out = extract_event_emitter_nodes(src, "", module_id(), repo());
         assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 1 }]);
         // A constant reference is a name like a literal.
         let src = concat!("bus.em", "it(x);\nbus.em", "it(OrderEvents.Created, u);");
@@ -2849,8 +2923,8 @@ mod tests {
             (concat!("publisher.publishEv", "ent(new OrderPlacedEvent(id));"), 0),
         ] {
             let fold = extract_event_nodes_with_consts(src, PATH, module_id(), repo(), &|_| None);
-            let emitters = extract_event_emitter_nodes(src, module_id(), repo());
-            let handlers = extract_event_handler_nodes(src, module_id(), repo());
+            let emitters = extract_event_emitter_nodes(src, "", module_id(), repo());
+            let handlers = extract_event_handler_nodes(src, "", module_id(), repo());
             assert_eq!(fold.emitters.nodes, emitters.nodes, "{src}");
             assert_eq!(fold.emitters.anchors, emitters.anchors, "{src}");
             assert_eq!(fold.emitters.nav.qname_by_id, emitters.nav.qname_by_id, "{src}");
@@ -2978,8 +3052,8 @@ mod tests {
             .record(func, "create", "test::create", node_kind::FUNCTION, Some(module));
         let mut anchors = Vec::new();
         for out in [
-            extract_event_emitter_nodes(src, module, repo()),
-            extract_event_handler_nodes(src, module, repo()),
+            extract_event_emitter_nodes(src, "", module, repo()),
+            extract_event_handler_nodes(src, "", module, repo()),
         ] {
             fp.nodes.extend(out.nodes);
             anchors.extend(out.anchors);

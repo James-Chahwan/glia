@@ -24,6 +24,8 @@
 //! panic here happens inside the engine's `catch_unwind` and silently drops a
 //! whole file's parse.
 
+use crate::code_guard::LazyGuard;
+
 /// One occurrence of a needle in a source file.
 pub struct TopicHit {
     /// The topic this occurrence names, if the rule could read one.
@@ -162,12 +164,32 @@ pub fn clip(s: &str, n: usize) -> &str {
 
 /// Every occurrence of `needle` in `source`, each with the topic its argument
 /// region names under `rule` (or `None` when the rule cannot read one).
+/// No literal / comment guard: [`scan_guarded`] with a file that has none.
 pub fn scan(source: &str, needle: &str, rule: TopicRule) -> Vec<TopicHit> {
+    scan_guarded(source, needle, rule, &mut LazyGuard::new("", source))
+}
+
+/// CJ.1a: [`scan`] over the occurrences that may be call sites. An
+/// occurrence is dropped, IN THIS ORDER, when it is a bare-word needle inside
+/// a longer identifier ([`bare_word_ok`]) or when `guard` refuses it (its
+/// first byte sits in a Rust / Python string literal or comment), and only
+/// then is [`MAX_HITS_PER_NEEDLE`] applied, so a needle table's literal
+/// occurrences can no longer crowd a real call out of the cap.
+pub(crate) fn scan_guarded(
+    source: &str,
+    needle: &str,
+    rule: TopicRule,
+    guard: &mut LazyGuard<'_>,
+) -> Vec<TopicHit> {
     let mut hits = Vec::new();
     if needle.is_empty() {
         return hits;
     }
-    for (offset, _) in source.match_indices(needle).take(MAX_HITS_PER_NEEDLE) {
+    let sites = source
+        .match_indices(needle)
+        .filter(|&(offset, _)| bare_word_ok(source, offset, needle, rule) && guard.admits(offset))
+        .take(MAX_HITS_PER_NEEDLE);
+    for (offset, _) in sites {
         let after = offset.saturating_add(needle.len());
         let read = match rule {
             TopicRule::NoIdentity => None,
@@ -731,6 +753,26 @@ fn ident_at(s: &str) -> Option<String> {
     last_segment(t.get(..i)?)
 }
 
+/// CJ.1a: false when `needle` is a bare word (its first byte is an
+/// identifier byte, Sidekiq's `perform_async` / `perform_in`) read by
+/// [`TopicRule::Receiver`] and the occurrence at `offset` is part of a longer
+/// identifier: an identifier byte right before it or right after the needle
+/// (`sidekiq_perform_async_uses_class`, `MyJob.perform_inline(`).
+/// `HardWorker.perform_async(` and `perform_async(1)` are sites; every other
+/// row (`producer.send(`, `.delay(`) is unaffected.
+fn bare_word_ok(source: &str, offset: usize, needle: &str, rule: TopicRule) -> bool {
+    let bare = matches!(rule, TopicRule::Receiver)
+        && needle
+            .as_bytes()
+            .first()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_');
+    if !bare {
+        return true;
+    }
+    let b = source.as_bytes();
+    word_edge(b, offset.checked_sub(1)) && word_edge(b, Some(offset + needle.len()))
+}
+
 /// [`TopicRule::Receiver`] — the chain immediately before the needle.
 fn receiver_before(source: &str, offset: usize) -> Option<String> {
     ident_before(source.get(..offset)?)
@@ -908,6 +950,50 @@ mod tests {
             scan(&src, "nc.Publish", TopicRule::ArgLiteral).len(),
             MAX_HITS_PER_NEEDLE
         );
+    }
+
+    #[test]
+    fn scan_guarded_drops_before_the_cap() {
+        let table = ".send(\"x\")\n".repeat(MAX_HITS_PER_NEEDLE + 1);
+        let src = format!(
+            "const TABLE: &str = r#\"\n{table}\"#;\nfn f() {{ producer.send(\"orders\", m); }}\n"
+        );
+        let real = src.rfind(".send(").expect("the code site");
+        let mut guard = LazyGuard::new("src/table.rs", &src);
+        let hits = scan_guarded(&src, ".send(", TopicRule::ArgLiteral, &mut guard);
+        let read: Vec<_> = hits.iter().map(|h| (h.offset, h.topic.clone())).collect();
+        assert_eq!(read, vec![(real, Some("orders".to_string()))]);
+        // Unguarded, the 33 literal occurrences fill the cap and lose it.
+        let plain = scan(&src, ".send(", TopicRule::ArgLiteral);
+        assert_eq!(plain.len(), MAX_HITS_PER_NEEDLE);
+        assert!(plain.iter().all(|h| h.offset != real));
+    }
+
+    #[test]
+    fn bare_word_needles_are_whole_words() {
+        let at = |src: &str, needle: &str, rule| {
+            bare_word_ok(src, src.find(needle).unwrap(), needle, rule)
+        };
+        assert!(at(
+            "HardWorker.perform_async(1)",
+            "perform_async",
+            TopicRule::Receiver
+        ));
+        assert!(at("perform_async(1)", "perform_async", TopicRule::Receiver));
+        assert!(!at(
+            "fn sidekiq_perform_async_x()",
+            "perform_async",
+            TopicRule::Receiver
+        ));
+        assert!(!at(
+            "MyJob.perform_inline(1)",
+            "perform_in",
+            TopicRule::Receiver
+        ));
+        // Rows whose needle opens on punctuation, and every other rule, keep
+        // matching inside a longer receiver name.
+        assert!(at("my_producer.send(x)", ".send(", TopicRule::Receiver));
+        assert!(at("xperform_async", "perform_async", TopicRule::NoIdentity));
     }
 
     #[test]
