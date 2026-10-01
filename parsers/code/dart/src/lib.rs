@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
+use glia_code_domain::NavFact;
 pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
@@ -47,6 +48,13 @@ pub fn parse_file(
 
     visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
     scan_dart_routes(source, repo, &mut acc);
+
+    // CH.5a: the client base URL inputs of the endpoint fold (CH.5c), as
+    // build-time facts on this file's MODULE, and their fired_on marker.
+    let base_stats = collect_dio_base_facts(source, root, module_id, &mut acc);
+    if let Some(line) = base_stats.marker(file_rel_path) {
+        eprintln!("{line}");
+    }
 
     // LA.34 fired_on marker: this file had an unqualified call that Dart's
     // lexical scope decided (a class member or a local binding).
@@ -2156,9 +2164,11 @@ const HTTP_VERBS: &[&str] = &["get", "post", "put", "patch", "delete", "head", "
 /// Pattern A: detect a client HTTP call `<recv>.<verb>('<path>', ...)` and emit a
 /// shared ENDPOINT node. tree-sitter-dart shapes `dio.get('/x')` as a node whose
 /// first named children are `identifier(receiver)`, `selector(.verb)`,
-/// `selector((args))`. `<recv>` must name an HTTP client (dio / http / *client /
-/// api) — server routes (`router.get`, shelf cascades) are handled by
-/// `scan_dart_routes`, which skips these client receivers so no phantom ROUTE.
+/// `selector((args))`; [`dart_client_call`] also reads the two shapes a generic
+/// call `dio.get<T>('/x')` takes (CH.5a). `<recv>` must name an HTTP client
+/// (dio / http / *client / api) — server routes (`router.get`, shelf cascades)
+/// are handled by `scan_dart_routes`, which skips these client receivers so no
+/// phantom ROUTE.
 fn try_detect_dart_endpoint(
     n: TsNode,
     src: &[u8],
@@ -2167,29 +2177,20 @@ fn try_detect_dart_endpoint(
     file_rel: &str,
     acc: &mut Acc,
 ) {
-    let mut c = n.walk();
-    let kids: Vec<TsNode> = n.named_children(&mut c).collect();
-    if kids.len() < 3 || kids[0].kind() != "identifier" {
+    let Some((recv, verb_sel, sl)) = dart_client_call(n, src) else {
         return;
-    }
-    if !is_http_client_receiver(text_of(kids[0], src)) {
-        return;
-    }
-    if kids[1].kind() != "selector" || kids[2].kind() != "selector" {
+    };
+    if !is_http_client_receiver(text_of(recv, src)) {
         return;
     }
     // Verb is the first identifier under the `.verb` selector.
-    let Some(method) = first_identifier_text(kids[1], src) else {
+    let Some(method) = first_identifier_text(verb_sel, src) else {
         return;
     };
     let method_l = method.to_ascii_lowercase();
     if !HTTP_VERBS.contains(&method_l.as_str()) {
         return;
     }
-    // Path is the first string literal in the argument selector.
-    let Some(sl) = first_descendant_of_kind(kids[2], "string_literal") else {
-        return;
-    };
     // A3.3: normalise BEFORE the guard, so `dio.post('https://api/users')`
     // becomes `/users` instead of being dropped as "not a path".
     let raw = dart_string_path(sl, src);
@@ -2225,6 +2226,114 @@ fn try_detect_dart_endpoint(
         &mut acc.nav,
         &mut acc.endpoint_seen,
     );
+}
+
+/// The receiver `identifier`, the `.verb` selector and the first argument's
+/// `string_literal` of a call `<recv>.<verb>(<args>)` held by `n`, in the three
+/// shapes tree-sitter-dart 0.1.0 gives it:
+///
+/// - plain, `dio.get('/x', ..)`: `n`'s named children are `identifier`,
+///   `selector(.get)`, `selector((args))`; the path is the first string
+///   literal in the argument selector.
+/// - generic selector chain, `dio.post<void>('/x', data: d)` (CH.5a): one or
+///   more `selector(<T>)` sit between the verb and the argument selector and
+///   are skipped. The parser picks this shape whenever the call has two or
+///   more arguments, or the type argument is not also an expression
+///   (`<String?>`, `<List<T>>` outside an `await`).
+/// - generic relational misparse, `await dio.get<dynamic>('/x')` (CH.5a): with
+///   one argument and an expression-like type argument the GLR parse prefers
+///   `((await dio.get) < dynamic) > ('/x')`, a `relational_expression` whose
+///   left side is another one holding the receiver and `.verb` before its `<`
+///   operator, and whose right side is a `parenthesized_expression` holding the
+///   argument, or a one-field `record_literal` when the argument has a
+///   trailing comma (`('/x',)`). Real Dart never compares a comparison's
+///   result with `>`, so the shape names a generic call; its first argument
+///   must be the literal itself.
+///
+/// None for anything else: the caller then mints nothing, as before.
+fn dart_client_call<'t>(n: TsNode<'t>, src: &[u8]) -> Option<(TsNode<'t>, TsNode<'t>, TsNode<'t>)> {
+    let mut c = n.walk();
+    let kids: Vec<TsNode> = n.named_children(&mut c).collect();
+    if n.kind() == "relational_expression" {
+        return dart_generic_misparse(&kids, src);
+    }
+    if kids.len() < 3 || kids[0].kind() != "identifier" || kids[1].kind() != "selector" {
+        return None;
+    }
+    let args_sel = kids[2..].iter().copied().find(|k| {
+        !(k.kind() == "selector" && matches!(selector_part(*k, src), SelectorPart::TypeArgs))
+    })?;
+    if args_sel.kind() != "selector" || !matches!(selector_part(args_sel, src), SelectorPart::Call)
+    {
+        return None;
+    }
+    let sl = first_descendant_of_kind(args_sel, "string_literal")?;
+    Some((kids[0], kids[1], sl))
+}
+
+/// [`dart_client_call`]'s relational-misparse shape, over the outer
+/// `relational_expression`'s named children `kids`: `[inner, ">", (literal),
+/// ..]` or `[inner, ">", (literal, ..), ..]`, `inner` = `[<head>, "<",
+/// <type>..]`, `<head>` = `identifier`, `selector(.verb)`, possibly wrapped in
+/// `unary_expression` / `await_expression`.
+fn dart_generic_misparse<'t>(
+    kids: &[TsNode<'t>],
+    src: &[u8],
+) -> Option<(TsNode<'t>, TsNode<'t>, TsNode<'t>)> {
+    let kids: Vec<TsNode> = kids
+        .iter()
+        .copied()
+        .filter(|k| k.kind() != "comment")
+        .collect();
+    let [inner, close, paren, ..] = kids.as_slice() else {
+        return None;
+    };
+    if inner.kind() != "relational_expression"
+        || close.kind() != "relational_operator"
+        || text_of(*close, src) != ">"
+        || !matches!(paren.kind(), "parenthesized_expression" | "record_literal")
+    {
+        return None;
+    }
+    let mut c = paren.walk();
+    let sl = paren
+        .named_children(&mut c)
+        .find(|k| k.kind() != "comment")?;
+    if sl.kind() != "string_literal" {
+        return None;
+    }
+    let mut c = inner.walk();
+    let inner_kids: Vec<TsNode> = inner
+        .named_children(&mut c)
+        .filter(|k| k.kind() != "comment")
+        .collect();
+    let open_at = inner_kids
+        .iter()
+        .position(|k| k.kind() == "relational_operator")?;
+    if text_of(inner_kids[open_at], src) != "<" || open_at + 1 >= inner_kids.len() {
+        return None;
+    }
+    let mut head: Vec<TsNode> = inner_kids[..open_at].to_vec();
+    while let [only] = head.as_slice()
+        && matches!(only.kind(), "unary_expression" | "await_expression")
+    {
+        let only = *only;
+        let mut c = only.walk();
+        head = only
+            .named_children(&mut c)
+            .filter(|k| k.kind() != "comment")
+            .collect();
+    }
+    let [recv, verb_sel] = head.as_slice() else {
+        return None;
+    };
+    if recv.kind() != "identifier"
+        || verb_sel.kind() != "selector"
+        || !matches!(selector_part(*verb_sel, src), SelectorPart::Member(_))
+    {
+        return None;
+    }
+    Some((*recv, *verb_sel, sl))
 }
 
 /// A normalised client path worth an ENDPOINT: absolute (`/users`), or an
@@ -2290,6 +2399,355 @@ fn dart_string_path(string_literal: TsNode, src: &[u8]) -> String {
             .to_string();
     }
     out
+}
+
+// ============================================================================
+// CH.5a: Dio client base URLs and URL-shaped value literals
+// ============================================================================
+//
+// quokka_android builds its client as `Dio(BaseOptions(baseUrl: Env.apiBaseUrl))`
+// and calls root-relative paths (`dio.get('/protected/friends')`) against
+// `/api/protected/..` server routes. The engine cannot see the AST, so the
+// parse records the two inputs the endpoint fold (CH.5c) needs as build-time
+// facts on the file's MODULE, never stored:
+//
+//   NavFact::ClientBase   every `BaseOptions(baseUrl: X)` (a call, `const` or
+//                         `new`) and every `<recv>.options.baseUrl = X`: the
+//                         expression text X and its 0-based row
+//   NavFact::ValueLiteral every getter returning a single string literal and
+//                         every top-level / static `const` / `final` initialised
+//                         to one, when the literal is URL-shaped (contains
+//                         `://` or starts with `/`): `Env.apiBaseUrl` ->
+//                         `${…}://${…}/api`
+
+/// What [`collect_dio_base_facts`] recorded in one file, for the
+/// `[dart-dio-base]` fired_on marker.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DioBaseStats {
+    /// `NavFact::ClientBase` facts found (equal ones are stored once).
+    bases: usize,
+    /// Of `bases`, those whose expression ends with `.baseUrl`: a base copied
+    /// from an existing request or client (`retry.baseUrl`).
+    copies: usize,
+    /// `NavFact::ValueLiteral` facts found.
+    literals: usize,
+}
+
+impl DioBaseStats {
+    /// The `[dart-dio-base]` stderr line for `file_rel`, None when the file
+    /// recorded nothing.
+    fn marker(&self, file_rel: &str) -> Option<String> {
+        (self.bases + self.literals > 0).then(|| {
+            format!(
+                "[dart-dio-base] bases={} (copy={}) literals={} file={file_rel}",
+                self.bases, self.copies, self.literals
+            )
+        })
+    }
+}
+
+/// Record this file's [`NavFact::ClientBase`] and [`NavFact::ValueLiteral`]
+/// facts on `module_id`. A file that never spells `baseUrl` holds no client
+/// base, so its full-tree walk is skipped.
+fn collect_dio_base_facts(
+    source: &str,
+    root: TsNode,
+    module_id: NodeId,
+    acc: &mut Acc,
+) -> DioBaseStats {
+    let (bases, copies) = if source.contains("baseUrl") {
+        collect_client_bases(root, source.as_bytes(), module_id, acc)
+    } else {
+        (0, 0)
+    };
+    let literals = collect_value_literals(root, source.as_bytes(), module_id, acc);
+    DioBaseStats {
+        bases,
+        copies,
+        literals,
+    }
+}
+
+/// Every client base URL in the file, depth-first in source order over the
+/// whole tree (not the body walks: quokka's Dio is built inside a top-level
+/// provider closure, which they do not enter). Returns (bases, copies).
+///
+/// Shape A: `BaseOptions(.., baseUrl: X, ..)`, an `identifier` followed by its
+/// call selector, or a `const` / `new` construction of it. Shape B: an
+/// assignment `<recv>.options.baseUrl = X` (or `??=`).
+fn collect_client_bases(
+    root: TsNode,
+    src: &[u8],
+    module_id: NodeId,
+    acc: &mut Acc,
+) -> (usize, usize) {
+    let mut bases = 0;
+    let mut copies = 0;
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if let Some((expr, row)) = client_base_at(n, src) {
+            bases += 1;
+            if expr.ends_with(".baseUrl") {
+                copies += 1;
+            }
+            acc.nav.record_fact(
+                module_id,
+                NavFact::ClientBase {
+                    via: "dio".into(),
+                    expr,
+                    line: u32::try_from(row).unwrap_or(u32::MAX),
+                },
+            );
+        }
+        let mut cursor = n.walk();
+        let kids: Vec<TsNode> = n.named_children(&mut cursor).collect();
+        stack.extend(kids.into_iter().rev());
+    }
+    (bases, copies)
+}
+
+/// The base-URL expression text and 0-based row when `n` is a
+/// [`collect_client_bases`] shape.
+fn client_base_at(n: TsNode, src: &[u8]) -> Option<(String, usize)> {
+    match n.kind() {
+        "identifier" if text_of(n, src) == "BaseOptions" => {
+            let call = n.next_named_sibling()?;
+            if call.kind() != "selector" || !matches!(selector_part(call, src), SelectorPart::Call)
+            {
+                return None;
+            }
+            let args = first_descendant_of_kind(call, "arguments")?;
+            Some((base_url_argument(args, src)?, n.start_position().row))
+        }
+        "const_object_expression" | "new_expression" => {
+            let ty = n.child_by_field_name("type")?;
+            if text_of(ty, src) != "BaseOptions" {
+                return None;
+            }
+            let args = n.child_by_field_name("arguments")?;
+            Some((base_url_argument(args, src)?, n.start_position().row))
+        }
+        "assignment_expression" => {
+            let left = n.child_by_field_name("left")?;
+            let right = n.child_by_field_name("right")?;
+            let target: String = text_of(left, src).split_whitespace().collect();
+            if !target.ends_with(".options.baseUrl") {
+                return None;
+            }
+            // The operator is the anonymous token right after the left side.
+            let op = left.next_sibling()?;
+            if !matches!(op.kind(), "=" | "??=") {
+                return None;
+            }
+            let expr = text_of(right, src).trim();
+            (!expr.is_empty()).then(|| (expr.to_string(), n.start_position().row))
+        }
+        _ => None,
+    }
+}
+
+/// The expression text of the `baseUrl:` named argument among `args` (an
+/// `arguments` node), trimmed: the source from the first node after the
+/// label to the end of the argument.
+fn base_url_argument(args: TsNode, src: &[u8]) -> Option<String> {
+    let mut cursor = args.walk();
+    for arg in args.named_children(&mut cursor) {
+        let Some(named) = (arg.kind() == "argument")
+            .then(|| arg.named_child(0))
+            .flatten()
+            .filter(|k| k.kind() == "named_argument")
+        else {
+            continue;
+        };
+        let mut c = named.walk();
+        let parts: Vec<TsNode> = named.named_children(&mut c).collect();
+        let [label, value, ..] = parts.as_slice() else {
+            continue;
+        };
+        if label.kind() != "label" || find_identifier(*label, src).as_deref() != Some("baseUrl") {
+            continue;
+        }
+        let expr = src
+            .get(value.start_byte()..named.end_byte())
+            .and_then(|b| std::str::from_utf8(b).ok())?
+            .trim();
+        return (!expr.is_empty()).then(|| expr.to_string());
+    }
+    None
+}
+
+/// Every URL-shaped value literal the file declares (see the section head),
+/// at library level and in each named class, mixin, enum, extension and
+/// extension type. Returns how many were found.
+fn collect_value_literals(root: TsNode, src: &[u8], module_id: NodeId, acc: &mut Acc) -> usize {
+    let mut found: Vec<(String, String)> = Vec::new();
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        match child.kind() {
+            "getter_signature" => {
+                if let Some(v) = getter_literal(child, sibling_body(child), src) {
+                    found.push(v);
+                }
+            }
+            "static_final_declaration_list" => found.extend(const_literals(child, src)),
+            "class_declaration"
+            | "mixin_declaration"
+            | "enum_declaration"
+            | "extension_declaration"
+            | "extension_type_declaration" => {
+                let (Some(owner), Some(body)) = (
+                    container_name(child, src),
+                    child.child_by_field_name("body"),
+                ) else {
+                    continue;
+                };
+                let mut members = body.walk();
+                for member in body.named_children(&mut members) {
+                    if member.kind() != "class_member" {
+                        continue;
+                    }
+                    for (name, value) in member_literals(member, src) {
+                        found.push((format!("{owner}.{name}"), value));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let count = found.len();
+    for (name, value) in found {
+        acc.nav
+            .record_fact(module_id, NavFact::ValueLiteral { name, value });
+    }
+    count
+}
+
+/// A container's own name (its `name` field), None for an unnamed extension,
+/// whose static members nothing outside it can name.
+fn container_name(decl: TsNode, src: &[u8]) -> Option<String> {
+    let name = decl.child_by_field_name("name")?;
+    if name.kind() == "extension_type_name" {
+        return find_identifier(name, src);
+    }
+    Some(text_of(name, src).to_string())
+}
+
+/// The URL-shaped literals one `class_member` declares, by member name: a
+/// getter (`method_signature` holding a `getter_signature`, its sibling
+/// `function_body`) or a `static const` / `static final` list.
+fn member_literals(member: TsNode, src: &[u8]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut cursor = member.walk();
+    for part in member.named_children(&mut cursor) {
+        match part.kind() {
+            "method_signature" => {
+                let mut c = part.walk();
+                let getter = part
+                    .named_children(&mut c)
+                    .find(|k| k.kind() == "getter_signature");
+                if let Some(getter) = getter
+                    && let Some(v) = getter_literal(getter, sibling_body(part), src)
+                {
+                    out.push(v);
+                }
+            }
+            "declaration" => {
+                let mut c = part.walk();
+                for list in part.named_children(&mut c) {
+                    if list.kind() == "static_final_declaration_list" {
+                        out.extend(const_literals(list, src));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A getter whose body yields one string literal: `=> '<lit>'`, or a block
+/// with exactly one `return` (returns inside nested closures and local
+/// functions not counted) of a string literal. (name, value) when the value is
+/// URL-shaped.
+fn getter_literal(sig: TsNode, body: Option<TsNode>, src: &[u8]) -> Option<(String, String)> {
+    let name = text_of(sig.child_by_field_name("name")?, src).to_string();
+    let body = body?;
+    let mut cursor = body.walk();
+    let inner = body
+        .named_children(&mut cursor)
+        .find(|k| k.kind() != "comment")?;
+    let literal = if inner.kind() == "block" {
+        let mut returns = Vec::new();
+        collect_returns(inner, &mut returns);
+        let [ret] = returns.as_slice() else {
+            return None;
+        };
+        let mut c = ret.walk();
+        let values: Vec<TsNode> = ret
+            .named_children(&mut c)
+            .filter(|k| k.kind() != "comment")
+            .collect();
+        let [value] = values.as_slice() else {
+            return None;
+        };
+        *value
+    } else {
+        inner
+    };
+    (literal.kind() == "string_literal")
+        .then(|| url_shaped(dart_string_path(literal, src)))
+        .flatten()
+        .map(|value| (name, value))
+}
+
+/// Every `return_statement` under `n`, not entering a nested closure, local
+/// function or class.
+fn collect_returns<'t>(n: TsNode<'t>, out: &mut Vec<TsNode<'t>>) {
+    let mut cursor = n.walk();
+    for child in n.named_children(&mut cursor) {
+        match child.kind() {
+            "return_statement" => out.push(child),
+            "function_expression"
+            | "function_body"
+            | "local_function_declaration"
+            | "lambda_expression"
+            | "class_definition"
+            | "class_declaration" => {}
+            _ => collect_returns(child, out),
+        }
+    }
+}
+
+/// The URL-shaped string-literal initialisers of a `static_final_declaration_list`
+/// (library-level `const` / `final`, or a member's `static const` / `static
+/// final`), by declared name.
+fn const_literals(list: TsNode, src: &[u8]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut cursor = list.walk();
+    for decl in list.named_children(&mut cursor) {
+        if decl.kind() != "static_final_declaration" {
+            continue;
+        }
+        let (Some(name), Some(value)) = (
+            decl.child_by_field_name("name"),
+            decl.child_by_field_name("value"),
+        ) else {
+            continue;
+        };
+        if value.kind() != "string_literal" {
+            continue;
+        }
+        if let Some(v) = url_shaped(dart_string_path(value, src)) {
+            out.push((text_of(name, src).to_string(), v));
+        }
+    }
+    out
+}
+
+/// `value` when it is URL-shaped (contains `://` or starts with `/`), which
+/// keeps env / l10n strings out of the cache sidecar.
+fn url_shaped(value: String) -> Option<String> {
+    (value.contains("://") || value.starts_with('/')).then_some(value)
 }
 
 // ============================================================================
@@ -4585,5 +5043,287 @@ class Wallet {
         );
         let fp = parse_file("\n\nimport 'models.dart';\n", "lib/m.dart", "lib::m", repo()).unwrap();
         assert_eq!(fp.imports[0].line, 2);
+    }
+
+    /// CH.5a: the ENDPOINT node id of `<method> <path>`.
+    fn endpoint_id(method: &str, path: &str) -> NodeId {
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::ENDPOINT,
+            &format!("endpoint:{method}:{path}"),
+        )
+    }
+
+    /// CH.5a: the facts recorded on MODULE `module_qname`, in record order.
+    fn module_facts(fp: &FileParse, module_qname: &str) -> Vec<NavFact> {
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module_qname);
+        fp.nav.nav_facts.get(&module).cloned().unwrap_or_default()
+    }
+
+    /// CH.5a: a generic client call `dio.get<T>('/x')` is an ENDPOINT with its
+    /// CALLS edge in both shapes tree-sitter-dart gives it (the relational
+    /// misparse of a one-argument call, the selector chain of a call with a
+    /// named argument), and the plain call's payload is HEAD's.
+    #[test]
+    fn generic_dio_call_is_an_endpoint() {
+        let source = include_str!(
+            "../../../../bench/substrate-gap/fixtures/dart-dio-generic-calls/lib/friend_service.dart"
+        );
+        let fp = parse_file(
+            source,
+            "lib/friend_service.dart",
+            "lib::friend_service",
+            repo(),
+        )
+        .unwrap();
+        for (method, path, caller) in [
+            ("GET", "/protected/friends", "listAll"),
+            ("GET", "/protected/user/profile", "profile"),
+            ("POST", "/protected/swipe", "swipe"),
+            ("POST", "/protected/friends/accept/${…}", "accept"),
+        ] {
+            let ep = endpoint_id(method, path);
+            assert!(
+                fp.nodes.iter().any(|n| n.id == ep),
+                "expected ENDPOINT {method} {path}"
+            );
+            let from = NodeId::from_parts(
+                GRAPH_TYPE,
+                repo(),
+                node_kind::METHOD,
+                &format!("lib::friend_service::FriendService::{caller}"),
+            );
+            assert!(
+                fp.edges
+                    .iter()
+                    .any(|e| e.from == from && e.to == ep && e.category == edge_category::CALLS),
+                "expected CALLS {caller} -> {method} {path}"
+            );
+        }
+        let endpoints = fp
+            .nodes
+            .iter()
+            .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::ENDPOINT))
+            .count();
+        assert_eq!(endpoints, 4, "one ENDPOINT per call");
+        assert!(
+            !fp.nodes
+                .iter()
+                .any(|n| n.id == route_id("GET", "/protected/friends")),
+            "a client call is never a server ROUTE"
+        );
+        // The plain call's ENDPOINT_HIT is byte-for-byte HEAD's.
+        assert_eq!(
+            endpoint_hit(&fp, endpoint_id("POST", "/protected/friends/accept/${…}")).as_deref(),
+            Some(PLAIN_ACCEPT_HIT)
+        );
+        // Every generic shape in quokka_android: a one-argument call with a
+        // trailing comma (a one-field record literal after the misparse), a
+        // nested `>>>` type argument, `<void>` misparsed after `await`, an
+        // un-awaited call held as an argument, a nullable type argument with a
+        // named argument, and a `return`.
+        let more = r#"class S {
+  Future<void> a() async {
+    final r0 = await dio.get<Map<String, dynamic>>(
+      '/l0/${Uri.encodeComponent(id)}',
+    );
+    final r1 = await dio.get<List<Map<String, dynamic>>>('/l1');
+    final r2 = await dio.get<void>('/l2');
+    unawaited(dio.delete<dynamic>('/l3'));
+    final r4 = await dio.get<String?>('/l4', queryParameters: {'q': q});
+    return dio.put<dynamic>('/l5');
+  }
+  bool b(int x, int y, int z) => x.y < z > ('/not-a-call');
+}
+"#;
+        let fp = parse_file(more, "lib/s.dart", "lib::s", repo()).unwrap();
+        for (method, path) in [
+            ("GET", "/l0/${…}"),
+            ("GET", "/l1"),
+            ("GET", "/l2"),
+            ("DELETE", "/l3"),
+            ("GET", "/l4"),
+            ("PUT", "/l5"),
+        ] {
+            assert!(
+                fp.nodes.iter().any(|n| n.id == endpoint_id(method, path)),
+                "expected ENDPOINT {method} {path}"
+            );
+        }
+        assert_eq!(
+            fp.nodes
+                .iter()
+                .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::ENDPOINT))
+                .count(),
+            6,
+            "a relational expression on a non-client receiver mints nothing"
+        );
+    }
+
+    /// CH.5a: HEAD's (cbaf4ca) ENDPOINT_HIT for the fixture's plain
+    /// `await dio.post('/protected/friends/accept/$id')` (line 20, col 5).
+    const PLAIN_ACCEPT_HIT: &str = r#"{"method":"POST","path":"/protected/friends/accept/${…}","file":"lib/friend_service.dart","line":20,"col":5,"confidence":"strong"}"#;
+
+    /// CH.5a: skipping the type-argument selector touches no server router: a
+    /// plain `router.get('/x', h)` is still a ROUTE, and a generic
+    /// `router.get<Response>(..)`, which the route text scan never read, mints
+    /// neither a ROUTE nor (its receiver is no HTTP client) an ENDPOINT.
+    #[test]
+    fn generic_server_router_still_a_route() {
+        let source = r#"
+final router = Router();
+void routes() {
+  router.get('/plain', handler);
+  router.get<Response>('/generic', handler);
+  router.post<Response>('/one');
+}
+"#;
+        let fp = parse_file(source, "bin/server.dart", "bin::server", repo()).unwrap();
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/plain")));
+        assert!(!fp.nodes.iter().any(|n| n.id == route_id("GET", "/generic")));
+        assert!(!fp.nodes.iter().any(|n| n.id == route_id("POST", "/one")));
+        assert!(
+            !fp.nav
+                .kind_by_id
+                .values()
+                .any(|k| *k == node_kind::ENDPOINT),
+            "a server router is no HTTP client"
+        );
+    }
+
+    /// CH.5a: every `BaseOptions(baseUrl: X)` - inside a top-level provider
+    /// closure, which the body walks never enter - and every
+    /// `<recv>.options.baseUrl = X` records a ClientBase on the MODULE.
+    #[test]
+    fn base_options_records_client_base() {
+        let source = r#"final p = FutureProvider((ref) async {
+  final dio = Dio(BaseOptions(baseUrl: Env.apiBaseUrl, connectTimeout: const Duration(seconds: 15)));
+  final retryDio = Dio(BaseOptions(baseUrl: retry.baseUrl));
+  dio.options.baseUrl = 'https://x/api';
+  const fixed = BaseOptions(baseUrl: '/v1');
+  x.baseUrl = 'not-a-client';
+  return dio;
+});
+"#;
+        let fp = parse_file(source, "lib/client.dart", "lib::client", repo()).unwrap();
+        let base = |expr: &str, line: u32| NavFact::ClientBase {
+            via: "dio".into(),
+            expr: expr.into(),
+            line,
+        };
+        assert_eq!(
+            module_facts(&fp, "lib::client"),
+            [
+                base("Env.apiBaseUrl", 1),
+                base("retry.baseUrl", 2),
+                base("'https://x/api'", 3),
+                base("'/v1'", 4),
+            ]
+        );
+        let tree = dart_tree(source);
+        let mut acc = Acc::default();
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::client");
+        assert_eq!(
+            collect_client_bases(tree.root_node(), source.as_bytes(), module, &mut acc),
+            (4, 1)
+        );
+    }
+
+    /// CH.5a: a getter returning one string literal, and a static / library
+    /// const initialised to one, record a ValueLiteral when the literal is
+    /// URL-shaped; a host, a name, or a getter with two returns record nothing.
+    #[test]
+    fn getter_and_const_value_literals() {
+        let source = r#"class Env {
+  static const String prodApiHost = 'api.example.net';
+  static String get apiBaseUrl {
+    final s = 'https';
+    return '$s://$prodApiHost/api';
+  }
+  static String get name => 'x';
+}
+"#;
+        let fp = parse_file(source, "lib/env.dart", "lib::env", repo()).unwrap();
+        let lit = |name: &str, value: &str| NavFact::ValueLiteral {
+            name: name.into(),
+            value: value.into(),
+        };
+        assert_eq!(
+            module_facts(&fp, "lib::env"),
+            [lit("Env.apiBaseUrl", "${…}://${…}/api")]
+        );
+
+        let source = r#"const apiRoot = 'https://top/api';
+String get health => '/health';
+class Two {
+  static String get base {
+    if (local) {
+      return '/a';
+    }
+    return '/b';
+  }
+  static String get closure {
+    final f = () {
+      return '/inner';
+    };
+    return '/outer';
+  }
+  static final legacy = '/v0';
+  final String instance = '/instance';
+}
+mixin Paths {
+  static String get root => 'https://m/api';
+}
+"#;
+        let fp = parse_file(source, "lib/two.dart", "lib::two", repo()).unwrap();
+        assert_eq!(
+            module_facts(&fp, "lib::two"),
+            [
+                lit("apiRoot", "https://top/api"),
+                lit("health", "/health"),
+                lit("Two.closure", "/outer"),
+                lit("Two.legacy", "/v0"),
+                lit("Paths.root", "https://m/api"),
+            ]
+        );
+    }
+
+    /// CH.5a: the `[dart-dio-base]` marker's counts, and no line for a file
+    /// that recorded nothing.
+    #[test]
+    fn dio_base_marker_counts_bases_copies_and_literals() {
+        let source = r#"class Env {
+  static String get apiBaseUrl => 'https://api.example.net/api';
+}
+final p = FutureProvider((ref) async {
+  final dio = Dio(BaseOptions(baseUrl: Env.apiBaseUrl));
+  final retryDio = Dio(BaseOptions(baseUrl: retry.baseUrl));
+});
+"#;
+        let tree = dart_tree(source);
+        let mut acc = Acc::default();
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::x");
+        let stats = collect_dio_base_facts(source, tree.root_node(), module, &mut acc);
+        assert_eq!(
+            stats,
+            DioBaseStats {
+                bases: 2,
+                copies: 1,
+                literals: 1
+            }
+        );
+        assert_eq!(
+            stats.marker("lib/x.dart").as_deref(),
+            Some("[dart-dio-base] bases=2 (copy=1) literals=1 file=lib/x.dart")
+        );
+        assert_eq!(DioBaseStats::default().marker("lib/x.dart"), None);
+    }
+
+    fn dart_tree(source: &str) -> tree_sitter::Tree {
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_dart::LANGUAGE.into();
+        parser.set_language(&lang).expect("dart grammar");
+        parser.parse(source, None).expect("tree")
     }
 }

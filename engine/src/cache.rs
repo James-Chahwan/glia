@@ -947,6 +947,15 @@ mod tests {
                 host: "api.example.com".into(),
                 line: 4,
             },
+            NavFact::ClientBase {
+                via: "dio".into(),
+                expr: "Env.apiBaseUrl".into(),
+                line: 20,
+            },
+            NavFact::ValueLiteral {
+                name: "Env.apiBaseUrl".into(),
+                value: "${…}://${…}/api".into(),
+            },
         ]
     }
 
@@ -969,8 +978,11 @@ mod tests {
         let fwd: Vec<u64> = (0..16).collect();
         let rev: Vec<u64> = (0..16).rev().collect();
         let parse = fill(&fwd);
+        // Scope `500 + i` holds the first `i % len + 1` facts, so scope
+        // `500 + len - 1` holds them all (`fill` covers 16 scopes).
+        assert!(facts.len() <= 16, "every_nav_fact outgrew fill's 16 scopes");
         assert_eq!(
-            parse.nav.nav_facts[&NodeId(507)],
+            parse.nav.nav_facts[&NodeId(500 + facts.len() as u64 - 1)],
             facts,
             "one scope holds every variant"
         );

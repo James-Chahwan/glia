@@ -1443,6 +1443,16 @@ pub enum NavFact {
     /// row `line`; the post-cache graft spreads it to its project's
     /// GRAPHQL_OPERATION / RPC_CALL sides.
     ClientHost { via: String, host: String, line: u32 },
+    /// Dart (CH.5a): this MODULE builds an HTTP client whose base URL is the
+    /// expression `expr` (`via` = `"dio"`: a `BaseOptions(baseUrl: ..)`
+    /// argument, or the right side of `<recv>.options.baseUrl = ..`) on
+    /// 0-based row `line`; the endpoint fold (CH.5c) resolves it to the
+    /// project's client base path.
+    ClientBase { via: String, expr: String, line: u32 },
+    /// Dart (CH.5a): getter or constant `name` (`Env.apiBaseUrl` in a type,
+    /// `apiBase` at library level) evaluates to the URL-shaped literal `value`,
+    /// `${…}` for each interpolation.
+    ValueLiteral { name: String, value: String },
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,

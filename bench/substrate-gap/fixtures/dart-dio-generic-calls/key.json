@@ -1,0 +1,19 @@
+{
+  "framework": "dart-dio-generic-calls",
+  "language": "dart",
+  "dirs": ["."],
+  "note": "CH-5 (Dart, extraction): a generic client call `dio.get<dynamic>('/x')` parses as identifier, selector(.get), selector(<T>), selector(args): the type-argument selector sits where try_detect_dart_endpoint expects the argument part, so the call mints nothing. quokka_android a77d4cb: 25 of its 43 dio calls are generic. Baseline (HEAD f8a46c0, leap wheel): only POST /protected/friends/accept/${…}.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET /protected/friends", "exact": true, "note": "dio.get<dynamic>"},
+    {"kind": "ENDPOINT", "name": "GET /protected/user/profile", "exact": true, "note": "nested generic type argument"},
+    {"kind": "ENDPOINT", "name": "POST /protected/swipe", "exact": true, "note": "dio.post<void> with a named data argument"},
+    {"kind": "ENDPOINT", "name": "POST /protected/friends/accept/${…}", "exact": true, "note": "plain call (regression guard)"}
+  ],
+  "expect_edges": [
+    {"from": "FriendService/listAll", "to": "GET /protected/friends", "category": "CALLS"},
+    {"from": "FriendService/swipe", "to": "POST /protected/swipe", "category": "CALLS"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "GET /protected/friends", "note": "a client call is never a server ROUTE"}
+  ]
+}
