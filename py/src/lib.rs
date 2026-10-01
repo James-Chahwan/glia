@@ -60,6 +60,7 @@ mod hubs;
 mod implementors;
 mod layout;
 mod merge;
+mod overlay_loop;
 mod pack;
 mod pages;
 mod patterns;

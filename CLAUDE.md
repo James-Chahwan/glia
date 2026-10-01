@@ -186,7 +186,7 @@ py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by na
   0.5.1 private slots (C0.4): pack CC.4c   review CC.6b   flags CC.7c
               contract_breaks CC.8b (+CC.8c)   hotspots CC.10b   cochange CC.11c
               communities CD.1e   splits CD.2d   hubs CD.4c   duplicate_flows CD.4f
-              timeline CD.5d
+              timeline CD.5d   overlay_loop CK.1 (C0.9)
 
 cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
               common.rs     shared helpers (generate_for, print_json, node lookup,
