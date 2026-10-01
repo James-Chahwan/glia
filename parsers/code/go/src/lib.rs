@@ -1269,8 +1269,8 @@ impl GoModules {
     /// importing file's OWN module, the nearest go.mod enclosing it, else by
     /// the first root dir: never by discovery order.
     ///
-    /// `Some("")` is the repo-root module's own path, which names no package
-    /// directory.
+    /// `Some("")` is the repo-root module's own path: it names the
+    /// repository-root package (dir `""`), recorded like any package (CI.3).
     fn map_import(&self, package_qname: &str, import_path: &str) -> Option<String> {
         let rest_of = |m: &GoModule| -> Option<String> {
             let rest = if import_path == m.module_path {
@@ -1428,16 +1428,22 @@ fn record_import(
         }
     }
 
-    let qname = match local {
-        // The repo-root module's own path (`import "github.com/foo/bar"` with
-        // module == "github.com/foo/bar" at the root): no package dir to
-        // name; ignore, as before LA.13. A nested module's path names its
-        // root dir, which is a package.
-        Some(q) if q.is_empty() => return,
-        Some(q) => q,
+    let (qname, alias) = match local {
+        // CI.3: the repo-root module's own path (`import
+        // "google.golang.org/grpc"` with that module at the repo root) names
+        // the repository-root package, dir `""`, recorded like any package.
+        // The graph names every other dir import by the dir's last segment,
+        // which the root dir does not have, so the binding name is written
+        // down here: the explicit alias (`_` / `.` kept as is), else the
+        // import path's last element.
+        Some(q) if q.is_empty() => {
+            let name = alias.unwrap_or_else(|| go_import_local_name(&path_str).to_string());
+            (q, Some(name))
+        }
+        Some(q) => (q, alias),
         // External import (stdlib or third-party). Keep the raw path for now;
         // cross-repo resolution is a v0.4.4 concern.
-        None => path_str.replace('/', "::"),
+        None => (path_str.replace('/', "::"), alias),
     };
 
     acc.imports.push(ImportStmt {
@@ -1448,6 +1454,16 @@ fn record_import(
         },
         line: line_at(spec),
     });
+}
+
+/// CI.3: the one name an un-aliased import of the repository-root package
+/// binds: the first of [`import_local_names`], the path's last element with a
+/// `/vN` major-version element skipped (`google.golang.org/grpc` -> `grpc`,
+/// `example.com/x/y/v3` -> `y`). A root package whose `package` clause
+/// differs from it (module `github.com/nats-io/nats.go`, `package nats`)
+/// binds under the path's name, which its callers do not spell.
+fn go_import_local_name(path: &str) -> &str {
+    import_local_names(path).first().copied().unwrap_or(path)
 }
 
 /// LA.18d: the name(s) an un-aliased Go import can bind. Go binds the imported
@@ -7458,6 +7474,62 @@ func Routes(r *gin.Engine) {
         assert_eq!(root.map_import("x::y", "example.com/app"), Some(String::new()));
         assert_eq!(root.map_import("x::y", "example.com/apple/x"), None);
         assert!(GoModules::root_only("").is_empty());
+    }
+
+    /// The imports `src` records under module path `prefix` at the repo
+    /// root, with the external-package names they bound.
+    fn imports_under(prefix: &str, src: &str) -> (Vec<ImportStmt>, Vec<String>) {
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
+        parser.set_language(&lang).expect("go grammar");
+        let tree = parser.parse(src, None).expect("tree");
+        let go = GoModules::root_only(prefix);
+        let mut acc = Acc::default();
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        for child in root.named_children(&mut cursor) {
+            if child.kind() == "import_declaration" {
+                collect_imports(child, src.as_bytes(), "cmd::main", &go, &mut acc);
+            }
+        }
+        let mut external: Vec<String> = acc.external_pkgs.into_iter().collect();
+        external.sort();
+        (acc.imports, external)
+    }
+
+    /// CI.3: an import of the repository-root module's own path is recorded
+    /// as path `""` (the root package dir), bound under the import path's
+    /// last element (a `/vN` skipped) or the explicit alias, `_` included; it
+    /// is in-repo, so no external package name.
+    #[test]
+    fn root_package_import_is_recorded() {
+        let module = |alias: Option<&str>| ImportTarget::Module {
+            path: String::new(),
+            alias: alias.map(str::to_string),
+        };
+        let src = "package main\n\nimport (\n\t\"example.com/app\"\n\trp \"example.com/app\"\n\
+                   \t_ \"example.com/app\"\n\t\"example.com/app/store\"\n\t\"fmt\"\n)\n";
+        let (imports, external) = imports_under("example.com/app", src);
+        let targets: Vec<&ImportTarget> = imports.iter().map(|i| &i.target).collect();
+        assert_eq!(
+            targets,
+            [
+                &module(Some("app")),
+                &module(Some("rp")),
+                &module(Some("_")),
+                &ImportTarget::Module { path: "store".to_string(), alias: None },
+                &ImportTarget::Module { path: "fmt".to_string(), alias: None },
+            ]
+        );
+        assert!(imports.iter().all(|i| i.from_module == "cmd::main"));
+        assert_eq!(external, ["fmt"], "the root import is in-repo");
+
+        let (imports, external) =
+            imports_under("example.com/app/v3", "package main\n\nimport \"example.com/app/v3\"\n");
+        assert_eq!(imports.iter().map(|i| &i.target).collect::<Vec<_>>(), [&module(Some("app"))]);
+        assert!(external.is_empty());
+        assert_eq!(go_import_local_name("google.golang.org/grpc"), "grpc");
+        assert_eq!(go_import_local_name("example.com/x/y/v3"), "y");
     }
 
     #[test]

@@ -1,0 +1,64 @@
+{
+  "framework": "go-root-package-imports",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "imports",
+  "cells": [
+    "go/imports",
+    "go/calls",
+    "go/impl"
+  ],
+  "note": "CI-3: an import of the repository-root package (`import \"example.com/rootpkg\"` where go.mod at the root declares that module, grpc-go's `google.golang.org/grpc`) is recorded like any package import: the importer IMPORTS the root package (bound to its first non-test file by qname, `client`), binds its local name (the import path's last element, or the alias), and calls through it resolve. CA.3b's reachability gate then reads the root package's real import graph: a one-method root interface pairs with cmd's conn (cmd imports the root) and no longer with isolated's file (no import path). Baseline HEAD f8a46c0: no IMPORTS, no CALLS through the root import, isolated::iso::file IMPLEMENTS options::Closer kept by the root_assumed rule.",
+  "expect_edges": [
+    {
+      "from": "cmd::main",
+      "to": "client",
+      "category": "IMPORTS",
+      "exact": true
+    },
+    {
+      "from": "internal::wrap::wrap",
+      "to": "client",
+      "category": "IMPORTS",
+      "exact": true,
+      "note": "aliased `rp`"
+    },
+    {
+      "from": "cmd::main::main",
+      "to": "client::NewClient",
+      "category": "CALLS"
+    },
+    {
+      "from": "cmd::main::main",
+      "to": "options::WithTimeout",
+      "category": "CALLS"
+    },
+    {
+      "from": "cmd::main::main",
+      "to": "client::Client::Invoke",
+      "category": "CALLS",
+      "note": "a local typed by a root-package call's result (CA.2b)"
+    },
+    {
+      "from": "internal::wrap::wrap::Dial",
+      "to": "client::NewClient",
+      "category": "CALLS"
+    },
+    {
+      "from": "cmd::main::conn",
+      "to": "options::Closer",
+      "category": "IMPLEMENTS",
+      "note": "one-method: cmd imports the root package"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "isolated::iso::file",
+      "to": "options::Closer",
+      "category": "IMPLEMENTS",
+      "note": "one-method, no import path: no longer assumed reached"
+    }
+  ]
+}

@@ -175,7 +175,7 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     CoverageCaveat {
         language: "go",
         edge_category: "IMPLEMENTS",
-        note: "implicit interface satisfaction is inferred (Medium, DERIVED) from method names and, where the parser read both, signatures (parameter and result types; package qualifiers, parameter names and a type alias are not resolved); a one-method interface, or a pair with a side in a _test.go file, pairs only across an import path (same package, a transitive import either way, or a package importing both); an import of the repository-root package is not recorded, so a root-package side is assumed reachable; a method on a generic type and an interface with type parameters are matched by name only; pointer and value receivers are merged; methods promoted through an embedded struct field are not seen; an interface embedding one that does not bind is skipped as open; constraint type terms are ignored",
+        note: "implicit interface satisfaction is inferred (Medium, DERIVED) from method names and, where the parser read both, signatures (parameter and result types; package qualifiers, parameter names and a type alias are not resolved); a one-method interface pairs only across an import path (same package, a transitive import either way, or a package importing both), and a pair with a side in a _test.go file only when that test file imports the other side's package directly (or both share a package); a method on a generic type and an interface with type parameters are matched by name only; pointer and value receivers are merged; methods promoted through an embedded struct field are not seen; an interface embedding one that does not bind is skipped as open; constraint type terms are ignored",
         verify: "check the method signatures and receivers against the interface",
     },
     // CB.11 / CB.20 / CB.23: struct-held routers and group mounts, measured
@@ -693,6 +693,13 @@ mod tests {
         assert!(
             go_row.is_some_and(|n| n.contains("signatures (parameter and result types")
                 && n.contains("a type alias are not resolved")),
+            "{go_row:?}"
+        );
+        // CI.3: root-package imports are recorded, so nothing is assumed
+        // reachable; a test-file side pairs only through a direct import.
+        assert!(go_row.is_some_and(|n| !n.contains("assumed reachable")), "{go_row:?}");
+        assert!(
+            go_row.is_some_and(|n| n.contains("imports the other side's package directly")),
             "{go_row:?}"
         );
     }

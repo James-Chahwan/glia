@@ -220,3 +220,32 @@ fn package_resolution_is_deterministic() {
         assert_eq!(edges(build_go(repo(), fixture_parses()).unwrap()), first);
     }
 }
+
+/// CI.3: an import of the repository-root package (the root go.mod's own
+/// module path) is an IMPORTS edge to the root dir's first non-test file by
+/// qname (no file is named after the root dir), and calls through it bind:
+/// package calls into either root file, and a method on a local typed by a
+/// root-package call's result (CA.2b).
+#[test]
+fn root_package_import_binds_calls() {
+    let parses = vec![
+        parse(
+            "client.go",
+            "package app\n\ntype Client struct{}\n\nfunc NewClient() *Client { return &Client{} }\n\n\
+             func (c *Client) Invoke() {}\n",
+        ),
+        parse("options.go", "package app\n\nfunc WithTimeout(n int) int { return n }\n"),
+        parse(
+            "cmd/main.go",
+            "package main\n\nimport \"example.com/app\"\n\nfunc main() {\n\tc := app.NewClient()\n\
+             \t_ = app.WithTimeout(3)\n\tc.Invoke()\n}\n",
+        ),
+    ];
+    let g = build_go(repo(), parses).unwrap();
+    assert_eq!(targets(&g, module("cmd::main"), edge_category::IMPORTS), vec![module("client")]);
+    let main = func("cmd::main::main");
+    assert!(has_edge(&g, main, func("client::NewClient"), edge_category::CALLS), "app.NewClient()");
+    assert!(has_edge(&g, main, func("options::WithTimeout"), edge_category::CALLS), "app.WithTimeout(3)");
+    let invoke = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "client::Client::Invoke");
+    assert!(has_edge(&g, main, invoke, edge_category::CALLS), "c.Invoke() on c := app.NewClient()");
+}

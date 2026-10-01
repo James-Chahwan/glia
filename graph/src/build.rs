@@ -18,7 +18,7 @@ use crate::calls::{
 use crate::cpp_scope::{CppScope, implicit_this};
 use crate::go_mounts::MountStats;
 use crate::imports::{
-    SameStem, resolve_imports_go, resolve_imports_python, resolve_imports_slash,
+    GoImportStats, SameStem, resolve_imports_go, resolve_imports_python, resolve_imports_slash,
     resolve_imports_ts, same_stem_table,
 };
 use crate::rust_paths::{MOD_ITEM, RustCrate, RustIndex, resolve_imports_rust, rust_ev};
@@ -95,6 +95,9 @@ pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Graph
     if let Some(line) = packages.marker() {
         eprintln!("{line}");
     }
+    if let Some(line) = packages.root_marker() {
+        eprintln!("{line}");
+    }
     eprintln!("{}", receivers.marker());
     eprintln!("{}", go_types_marker(&g.nav));
     if let Some(line) = go_sigs_marker(&g.nav) {
@@ -164,11 +167,11 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
     let split = bind_split_go_receivers(&mut g);
     build_symbol_table(&mut g);
     let packages = GoPackages::build(&g, &all_imports);
-    let dir_bound_imports = resolve_imports_go(&mut g, &all_imports, &packages);
+    let import_stats = resolve_imports_go(&mut g, &all_imports, &packages);
     let mut tally = EvidenceTally::default();
     let hook = |g: &RepoGraph, site: &CallSite| packages.resolve(g, site);
     resolve_go_calls(&mut g, &all_calls, &split, hook, &mut tally);
-    let package_stats = packages.stats(dir_bound_imports);
+    let package_stats = packages.stats(import_stats);
     let receivers = packages.tally.clone();
     // CB.20: reads the CALLS edges just bound; moves the provisional ROUTEs'
     // HANDLED_BY refs (and copies them to each extra mount) before they resolve.
@@ -1008,6 +1011,10 @@ struct GoPackageStats {
     dir_bound_imports: usize,
     /// Calls bound in another file of a package by [`GoPackages::resolve`].
     sibling_calls: usize,
+    /// CI.3: imports of the repository-root package (dir `""`).
+    root_imports: usize,
+    /// Of `root_imports`: bound to a root-dir file.
+    root_bound: usize,
 }
 
 impl GoPackageStats {
@@ -1018,6 +1025,18 @@ impl GoPackageStats {
             format!(
                 "[go-package] dirs={} multi_file={} dir_bound_imports={} sibling_calls={}",
                 self.dirs, self.multi_file, self.dir_bound_imports, self.sibling_calls
+            )
+        })
+    }
+
+    /// CI.3 fired_on, after [`GoPackageStats::marker`]: `[go-package]
+    /// root-package imports=R bound=B`, when any file imports the
+    /// repository-root package.
+    fn root_marker(&self) -> Option<String> {
+        (self.root_imports > 0).then(|| {
+            format!(
+                "[go-package] root-package imports={} bound={}",
+                self.root_imports, self.root_bound
             )
         })
     }
@@ -1063,9 +1082,13 @@ impl GoPackages {
             let ImportTarget::Module { path, alias } = &stmt.target else {
                 continue;
             };
+            // An empty path (the repository-root package, CI.3) arrives
+            // with its binding name as the alias; without one it names
+            // nothing.
             let local = match alias.as_deref() {
                 Some("_") | Some(".") => continue,
                 Some(a) => a,
+                None if path.is_empty() => continue,
                 None => path.rsplit("::").next().unwrap_or(path),
             };
             if let Some(&from) = g.symbols.module_by_qname.get(&stmt.from_module) {
@@ -1214,12 +1237,14 @@ impl GoPackages {
         hit
     }
 
-    fn stats(&self, dir_bound_imports: usize) -> GoPackageStats {
+    fn stats(&self, imports: GoImportStats) -> GoPackageStats {
         GoPackageStats {
             dirs: self.by_dir.len(),
             multi_file: self.by_dir.values().filter(|m| m.len() > 1).count(),
-            dir_bound_imports,
+            dir_bound_imports: imports.dir_bound,
             sibling_calls: self.sibling_calls.get(),
+            root_imports: imports.root_imports,
+            root_bound: imports.root_bound,
         }
     }
 
@@ -1227,9 +1252,12 @@ impl GoPackages {
     /// file's in-repo imports read through [`GoPackages::imported_dir`] (the
     /// tail-fallback binding included), each dir's union over its files
     /// (test files included: an in-package test can pass the package's own
-    /// types on), and each dir's importers. An external `x_test` file's
-    /// import of its own dir `x` is kept: that file reaches `x`'s imports
-    /// only through it.
+    /// types on), and each dir's importers. The repository-root package (dir
+    /// `""`) is a dir like any other once its imports are recorded (CI.3). An
+    /// external `x_test` file's import of its own dir `x` is kept: that file
+    /// reaches `x` through its direct import, not `x`'s imports
+    /// ([`DirImportGraph::scope`] answers a test side from its own file's
+    /// direct imports).
     pub(crate) fn dir_import_graph(&self, g: &RepoGraph) -> DirImportGraph<'_> {
         let mut of_file: HashMap<NodeId, BTreeSet<&str>> = HashMap::new();
         let mut of_dir: HashMap<&str, BTreeSet<&str>> = HashMap::new();
@@ -1287,17 +1315,15 @@ struct GoSide<'p> {
     test: bool,
 }
 
-/// [`DirImportGraph::scope`]'s verdict on a pair.
+/// [`DirImportGraph::scope`]'s verdict on a pair. The repository-root
+/// package (dir `""`) is reached through its recorded importers like any
+/// package (CI.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GoReach {
-    /// Same package, a transitive import either way, or a shared importer.
+    /// Same package; with a side in a `_test.go` file, that file's direct
+    /// import of the other side's package; else a transitive import either
+    /// way or a shared importer.
     Reached,
-    /// Only reached by assuming the repository-root package (dir `""`) is:
-    /// the Go parser records no import OF it (`record_import` returns on an
-    /// empty repo-local path), so every root-package pair would be lost.
-    /// Turns off by itself once root imports are recorded (the root dir then
-    /// has importers and closures that reach it).
-    RootAssumed,
     Unreached,
 }
 
@@ -1322,38 +1348,53 @@ impl<'p> DirImportGraph<'p> {
         start.iter().any(|&s| self.closure_of(s).contains(target))
     }
 
-    /// Where a side's code can pass a value on: the imports of its own file
-    /// when that is a `_test.go` file (never importable, so its package's
-    /// other imports are not its own), else of its whole package.
+    /// Where a non-test side's code can pass a value on: the imports of its
+    /// whole package. (A `_test.go` side is answered from its own file's
+    /// direct imports, [`DirImportGraph::imports_directly`].)
     fn start(&self, side: GoSide<'p>) -> Vec<&'p str> {
-        let set = if side.test { self.of_file.get(&side.file) } else { self.of_dir.get(side.dir) };
-        set.into_iter().flatten().copied().collect()
+        self.of_dir.get(side.dir).into_iter().flatten().copied().collect()
+    }
+
+    /// True when file MODULE `file` imports package dir `dir` itself.
+    fn imports_directly(&self, file: NodeId, dir: &str) -> bool {
+        self.of_file.get(&file).is_some_and(|s| s.contains(dir))
     }
 
     /// Whether a value of type `t` can reach code typed by interface `i`:
-    /// the same package; else `i`'s package reached from `t`'s side (`i` not
-    /// in a test file, which nothing imports); else `t`'s package reached
-    /// from `i`'s side (`t` not in a test file); else, neither in a test
-    /// file, a package importing both. Transitive, because Go lets a file
-    /// pass a `T` to a parameter typed `I` without importing `I`'s package.
+    ///
+    /// * the same package: always;
+    /// * a side declared in a `_test.go` file (never importable): only when
+    ///   that test file imports the other side's package DIRECTLY. A test
+    ///   file passes a value only to what it names, and a closure through
+    ///   its imports' imports would cross every hub it touches (grpc-go's
+    ///   root package, imported by 250 files, itself imports 61 dirs). Two
+    ///   test sides in different dirs never meet;
+    /// * neither in a test file: `i`'s package reached from `t`'s package,
+    ///   `t`'s reached from `i`'s, or a package importing both. Transitive,
+    ///   because Go lets a file pass a `T` to a parameter typed `I` without
+    ///   importing `I`'s package.
+    ///
+    /// The repository-root package (dir `""`) is reached through its
+    /// recorded importers like any package (CI.3).
     fn scope(&mut self, t: GoSide<'p>, i: GoSide<'p>) -> GoReach {
         if t.dir == i.dir {
             return GoReach::Reached;
         }
-        let (from_t, from_i) = (self.start(t), self.start(i));
-        let shared = !t.test
-            && !i.test
-            && match (self.importers.get(t.dir), self.importers.get(i.dir)) {
-                (Some(a), Some(b)) => !a.is_disjoint(b),
+        if t.test || i.test {
+            let hit = match (t.test, i.test) {
+                (true, false) => self.imports_directly(t.file, i.dir),
+                (false, true) => self.imports_directly(i.file, t.dir),
                 _ => false,
             };
-        if shared
-            || (!i.test && self.reaches(&from_t, i.dir))
-            || (!t.test && self.reaches(&from_i, t.dir))
-        {
+            return if hit { GoReach::Reached } else { GoReach::Unreached };
+        }
+        let shared = match (self.importers.get(t.dir), self.importers.get(i.dir)) {
+            (Some(a), Some(b)) => !a.is_disjoint(b),
+            _ => false,
+        };
+        let (from_t, from_i) = (self.start(t), self.start(i));
+        if shared || self.reaches(&from_t, i.dir) || self.reaches(&from_i, t.dir) {
             GoReach::Reached
-        } else if (!i.test && i.dir.is_empty()) || (!t.test && t.dir.is_empty()) {
-            GoReach::RootAssumed
         } else {
             GoReach::Unreached
         }
@@ -1918,6 +1959,7 @@ fn resolve_go_embeds(g: &mut RepoGraph, embeds: &[UnresolvedRef], imports: &[Imp
             let local = match alias.as_deref() {
                 Some("_") | Some(".") => continue,
                 Some(a) => a,
+                None if path.is_empty() => continue,
                 None => path.rsplit("::").next().unwrap_or(path),
             };
             import_paths.insert((stmt.from_module.as_str(), local), path.as_str());
@@ -2006,9 +2048,6 @@ struct GoImplicitStats {
     /// Edges pushed whose every method signature was compared (EVIDENCE rule
     /// `method_signature`; the rest keep `method_set`).
     signature_checked: usize,
-    /// Edges pushed only by assuming the repository-root package reachable
-    /// ([`GoReach::RootAssumed`]).
-    root_assumed: usize,
 }
 
 impl GoImplicitStats {
@@ -2023,17 +2062,16 @@ impl GoImplicitStats {
 
     /// CA.3b fired_on, after [`GoImplicitStats::marker`]: `[iface] go implicit
     /// filtered: signature=S scope=P (one_method=O test_side=X)
-    /// signature_checked=K root_assumed=R`.
+    /// signature_checked=K`.
     fn filtered_marker(&self) -> String {
         format!(
             "[iface] go implicit filtered: signature={} scope={} (one_method={} test_side={}) \
-             signature_checked={} root_assumed={}",
+             signature_checked={}",
             self.signature,
             self.one_method + self.test_side,
             self.one_method,
             self.test_side,
             self.signature_checked,
-            self.root_assumed
         )
     }
 }
@@ -2052,9 +2090,12 @@ impl GoImplicitStats {
 ///   a generic interface) keeps today's name match, rule `method_set`.
 /// * Reachability (a one-method interface, or a side declared in a
 ///   `_test.go` file, where a name match alone is noise): the two packages
-///   must be linked by an import path ([`DirImportGraph::scope`]); the
-///   repository-root package, whose imports the parser does not record, is
-///   assumed reached ([`GoReach::RootAssumed`]).
+///   must be linked by an import path ([`DirImportGraph::scope`]): a
+///   one-method pair through the same package, a transitive import either
+///   way or a package importing both; a side declared in a `_test.go` file
+///   pairs only with a type or interface of its own package or of a package
+///   its own file imports directly. The repository-root package is reached
+///   through its recorded importers like any package (CI.3).
 ///
 /// The rest of the rules:
 ///
@@ -2098,8 +2139,8 @@ fn emit_go_implicit_implements(
         return None;
     }
     let mut stats = GoImplicitStats::default();
-    // (type, interface, every signature compared, root package assumed).
-    let mut pairs: Vec<(NodeId, NodeId, bool, bool)> = Vec::new();
+    // (type, interface, every signature compared).
+    let mut pairs: Vec<(NodeId, NodeId, bool)> = Vec::new();
     {
         let nav = &g.nav;
         let mut dirs = packages.dir_import_graph(g);
@@ -2238,45 +2279,38 @@ fn emit_go_implicit_implements(
                     continue;
                 }
                 // R2: an import path, for a one-method set or a test side.
-                let mut root = false;
                 if let (Some(t), Some(i)) = (packages.side(g, ty), iface_side)
                     && (one_method || t.test || i.test)
+                    && dirs.scope(t, i) == GoReach::Unreached
                 {
-                    match dirs.scope(t, i) {
-                        GoReach::Reached => {}
-                        GoReach::RootAssumed => root = true,
-                        GoReach::Unreached => {
-                            if t.test || i.test {
-                                stats.test_side += 1;
-                            } else {
-                                stats.one_method += 1;
-                            }
-                            continue;
-                        }
+                    if t.test || i.test {
+                        stats.test_side += 1;
+                    } else {
+                        stats.one_method += 1;
                     }
+                    continue;
                 }
-                pairs.push((ty, iface, checked, root));
+                pairs.push((ty, iface, checked));
             }
         }
     }
-    pairs.sort_unstable_by_key(|(a, b, _, _)| (a.0, b.0));
-    pairs.dedup_by_key(|(a, b, _, _)| (*a, *b));
+    pairs.sort_unstable_by_key(|(a, b, _)| (a.0, b.0));
+    pairs.dedup_by_key(|(a, b, _)| (*a, *b));
     let existing: HashSet<(NodeId, NodeId)> = g
         .edges
         .iter()
         .filter(|e| e.category == edge_category::IMPLEMENTS)
         .map(|e| (e.from, e.to))
         .collect();
-    pairs.retain(|(a, b, _, _)| !existing.contains(&(*a, *b)));
+    pairs.retain(|(a, b, _)| !existing.contains(&(*a, *b)));
     stats.types = pairs.iter().map(|&(ty, ..)| ty).collect::<HashSet<_>>().len();
     stats.edges = pairs.len();
     stats.signature_checked = pairs.iter().filter(|p| p.2).count();
-    stats.root_assumed = pairs.iter().filter(|p| p.3).count();
     // LC.3d: `graph:iface` rule `method_signature` when every signature was
     // compared (CA.3b), else `method_set` (a match on names).
     let signature_ev = graph_evidence("graph:iface", "method_signature").to_cell();
     let names_ev = graph_evidence("graph:iface", "method_set").to_cell();
-    for (from, to, checked, _) in pairs {
+    for (from, to, checked) in pairs {
         let edge = Edge::new(from, to, edge_category::IMPLEMENTS, Confidence::Medium);
         let ev = if checked { &signature_ev } else { &names_ev };
         g.edges.push(edge.with_cell(ev.clone()));
@@ -4014,7 +4048,7 @@ mod tests {
             filtered(&stats).as_deref(),
             Some(
                 "[iface] go implicit filtered: signature=2 scope=0 (one_method=0 test_side=0) \
-                 signature_checked=2 root_assumed=0"
+                 signature_checked=2"
             )
         );
     }
@@ -4031,7 +4065,7 @@ mod tests {
             filtered(&stats).as_deref(),
             Some(
                 "[iface] go implicit filtered: signature=0 scope=0 (one_method=0 test_side=0) \
-                 signature_checked=0 root_assumed=0"
+                 signature_checked=0"
             )
         );
 
@@ -4057,7 +4091,7 @@ mod tests {
             filtered(&stats).as_deref(),
             Some(
                 "[iface] go implicit filtered: signature=0 scope=1 (one_method=1 test_side=0) \
-                 signature_checked=0 root_assumed=0"
+                 signature_checked=0"
             )
         );
 
@@ -4071,7 +4105,7 @@ mod tests {
             filtered(&stats).as_deref(),
             Some(
                 "[iface] go implicit filtered: signature=0 scope=0 (one_method=0 test_side=0) \
-                 signature_checked=1 root_assumed=0"
+                 signature_checked=1"
             )
         );
 
@@ -4110,7 +4144,7 @@ mod tests {
 
     /// An interface declared in a `_test.go` file pairs with a type of its
     /// own directory (test or not) and with a type of a package the test
-    /// file's own imports reach, never with an unreached one; a test file's
+    /// file imports directly, never with an unreached one; a test file's
     /// package imports are not its own.
     #[test]
     fn go_implicit_scope_test_interface() {
@@ -4151,26 +4185,121 @@ mod tests {
         assert!(implements_edge(&g, file, closable).is_some(), "the test file imports b");
     }
 
-    /// The Go parser records no import of the repository-root package, so a
-    /// root-package side counts as reached (`root_assumed`).
+    /// CI.3: an import of the repository-root package is recorded (path
+    /// `""`, bound under the import path's last element), so a root-package
+    /// one-method interface pairs with a type whose package imports the root.
     #[test]
-    fn go_implicit_root_package_is_assumed_reached() {
+    fn go_implicit_root_package_reached_through_its_import() {
         let root = "package scope\n\ntype Closer interface {\n\tClose()\n}\n";
         let b = "package b\n\nimport \"example.com/scope\"\n\ntype File struct{}\n\n\
                  func (f *File) Close() {}\n\nvar _ scope.Closer = (*File)(nil)\n";
         let parses = go_sources(&[("closer.go", root), ("b/file.go", b)]);
-        assert!(parses[1].imports.is_empty(), "the root import is not recorded");
-        let (g, stats) = go_implicit(parses);
+        assert_eq!(
+            parses[1].imports.iter().map(|i| &i.target).collect::<Vec<_>>(),
+            [&ImportTarget::Module { path: String::new(), alias: Some("scope".to_string()) }],
+            "the root import is recorded"
+        );
+        let (g, _, stats, packages, _, _) = build_go_passes(repo(), parses);
         let (closer, file) =
             (gid(node_kind::INTERFACE, "closer::Closer"), gid(node_kind::STRUCT, "b::file::File"));
         assert_eq!(implements_edge(&g, file, closer), Some(Confidence::Medium));
+        assert!(
+            has_edge(&g, gid(node_kind::MODULE, "b::file"), gid(node_kind::MODULE, "closer"), edge_category::IMPORTS),
+            "b::file IMPORTS the root package"
+        );
+        assert_eq!(
+            packages.root_marker().as_deref(),
+            Some("[go-package] root-package imports=1 bound=1")
+        );
         assert_eq!(
             filtered(&stats).as_deref(),
             Some(
                 "[iface] go implicit filtered: signature=0 scope=0 (one_method=0 test_side=0) \
-                 signature_checked=1 root_assumed=1"
+                 signature_checked=1"
             )
         );
+    }
+
+    /// CI.3: the root package is no longer assumed reached: a type with no
+    /// import path to it does not pair with its one-method interface.
+    #[test]
+    fn go_implicit_unreached_root_package_pair_is_rejected() {
+        let root = "package scope\n\ntype Closer interface {\n\tClose()\n}\n";
+        let b = "package b\n\nimport \"example.com/scope\"\n\ntype File struct{}\n\n\
+                 func (f *File) Close() {}\n\nvar _ scope.Closer = (*File)(nil)\n";
+        let iso = "package iso\n\ntype File struct{}\n\nfunc (f *File) Close() {}\n";
+        let (g, stats) =
+            go_implicit(go_sources(&[("closer.go", root), ("b/file.go", b), ("iso/file.go", iso)]));
+        let closer = gid(node_kind::INTERFACE, "closer::Closer");
+        assert_eq!(implements_edge(&g, gid(node_kind::STRUCT, "b::file::File"), closer), Some(Confidence::Medium));
+        let iso_file = gid(node_kind::STRUCT, "iso::file::File");
+        assert!(
+            !g.edges.iter().any(|e| e.from == iso_file && e.category == edge_category::IMPLEMENTS),
+            "no import path links iso to the root package"
+        );
+        assert_eq!(
+            filtered(&stats).as_deref(),
+            Some(
+                "[iface] go implicit filtered: signature=0 scope=1 (one_method=1 test_side=0) \
+                 signature_checked=1"
+            )
+        );
+    }
+
+    /// CI.3: a side declared in a `_test.go` file pairs only with a package
+    /// its own file imports DIRECTLY: an import that reaches the other side's
+    /// package only through another package's imports does not count.
+    #[test]
+    fn go_implicit_scope_test_side_needs_a_direct_import() {
+        // The interface in the test file.
+        let x_test = "package tests\n\nimport \"example.com/scope/c\"\n\n\
+                      type Closable interface {\n\tClose()\n}\n\nvar _ = c.Take\n";
+        let c_imports_b = "package c\n\nimport \"example.com/scope/b\"\n\nfunc Take(f *b.File) {}\n";
+        let closable = gid(node_kind::INTERFACE, "tests::x_test::Closable");
+        let file = gid(node_kind::STRUCT, "b::file::File");
+        let (g, stats) = go_implicit(go_sources(&[
+            ("tests/x_test.go", x_test),
+            ("c/c.go", c_imports_b),
+            ("b/file.go", FILE_GO),
+        ]));
+        assert_eq!(implements_edge(&g, file, closable), None, "x_test reaches b only through c");
+        assert_eq!(stats.map(|s| (s.one_method, s.test_side)), Some((0, 1)));
+
+        let x_test_imports_b = x_test.replace(
+            "import \"example.com/scope/c\"",
+            "import (\n\t\"example.com/scope/b\"\n\t\"example.com/scope/c\"\n)\n\nvar _ = b.File{}",
+        );
+        let (g, _) = go_implicit(go_sources(&[
+            ("tests/x_test.go", x_test_imports_b.as_str()),
+            ("c/c.go", c_imports_b),
+            ("b/file.go", FILE_GO),
+        ]));
+        assert_eq!(implements_edge(&g, file, closable), Some(Confidence::Medium), "x_test imports b");
+
+        // The type in the test file.
+        let y_test = "package tests\n\nimport \"example.com/scope/c\"\n\n\
+                      type fake struct{}\n\nfunc (f fake) Close() {}\n\nvar _ = c.Use\n";
+        let c_imports_a = "package c\n\nimport \"example.com/scope/a\"\n\nfunc Use(x a.Closer) {}\n";
+        let (fake, closer) =
+            (gid(node_kind::STRUCT, "tests::y_test::fake"), gid(node_kind::INTERFACE, "a::closer::Closer"));
+        let (g, stats) = go_implicit(go_sources(&[
+            ("tests/y_test.go", y_test),
+            ("c/c.go", c_imports_a),
+            ("a/closer.go", CLOSER_GO),
+        ]));
+        assert_eq!(implements_edge(&g, fake, closer), None, "y_test reaches a only through c");
+        assert_eq!(stats.map(|s| (s.one_method, s.test_side)), Some((0, 1)));
+
+        let y_test_imports_a = y_test.replace(
+            "import \"example.com/scope/c\"",
+            "import (\n\t\"example.com/scope/a\"\n\t\"example.com/scope/c\"\n)\n\nvar _ a.Closer = fake{}",
+        );
+        let (g, _) = go_implicit(go_sources(&[
+            ("tests/y_test.go", y_test_imports_a.as_str()),
+            ("c/c.go", c_imports_a),
+            ("a/closer.go", CLOSER_GO),
+        ]));
+        assert_eq!(implements_edge(&g, fake, closer), Some(Confidence::Medium), "y_test imports a");
     }
 
     /// A6.6's method pairs of a Go implicit (Medium) type-level edge are
@@ -4231,7 +4360,14 @@ mod tests {
         let (g, _, _, stats, receivers, _) = build_go_passes(repo(), multifile_package_shape());
         assert_eq!(
             stats,
-            GoPackageStats { dirs: 2, multi_file: 1, dir_bound_imports: 1, sibling_calls: 2 }
+            GoPackageStats {
+                dirs: 2,
+                multi_file: 1,
+                dir_bound_imports: 1,
+                sibling_calls: 2,
+                root_imports: 0,
+                root_bound: 0,
+            }
         );
         assert_eq!(
             stats.marker().as_deref(),
@@ -4248,6 +4384,8 @@ mod tests {
             "[go-receivers] bound=0 (return=0 local=0 package_var=0 field_chain=0) typed_unbound=0",
             "package calls are not typed-receiver binds"
         );
+
+        assert_eq!(stats.root_marker(), None, "no root-package import, no CI.3 line");
 
         let (_, _, _, empty, _, _) = build_go_passes(repo(), vec![]);
         assert_eq!(empty.marker(), None, "no MODULE, no marker");

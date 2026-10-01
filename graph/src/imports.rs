@@ -381,14 +381,22 @@ pub(crate) fn resolve_imports_python(
 /// its files ([`GoPackages::import_target`]; the call-level hook reaches the
 /// package's other files), then the tail fallback. A directory whose only
 /// file is the importer binds nothing and skips the tail fallback, which
-/// could only guess a same-named package elsewhere. Returns the number of
-/// imports the directory step bound (LA.13b, the `[go-package]` marker).
+/// could only guess a same-named package elsewhere.
+///
+/// CI.3: an empty path is the repository-root package (dir `""`), whose
+/// binding name the parser wrote down as the alias (the import path's last
+/// element, or the explicit alias). It binds the root dir's first non-test
+/// file by qname (no file is named after the root dir), rule `package_dir`;
+/// with no root `.go` file it binds nothing (the tail fallback has no name to
+/// look up).
+///
+/// Returns what the `[go-package]` markers print (LA.13b, CI.3).
 pub(crate) fn resolve_imports_go(
     g: &mut RepoGraph,
     imports: &[ImportStmt],
     packages: &GoPackages,
-) -> usize {
-    let mut dir_bound = 0usize;
+) -> GoImportStats {
+    let mut stats = GoImportStats::default();
     for stmt in imports {
         let Some(from_mod_id) = g
             .symbols
@@ -401,14 +409,21 @@ pub(crate) fn resolve_imports_go(
         let ImportTarget::Module { path, alias } = &stmt.target else {
             continue;
         };
-        let target = match g.symbols.module_by_qname.get(path).copied() {
+        let root = path.is_empty();
+        if root {
+            stats.root_imports += 1;
+        }
+        let exact = if root { None } else { g.symbols.module_by_qname.get(path).copied() };
+        let target = match exact {
             Some(exact) => Some((exact, "module")),
             None => match packages.import_target(path, from_mod_id) {
                 DirImport::Bound(id) => {
-                    dir_bound += 1;
+                    stats.dir_bound += 1;
+                    stats.root_bound += usize::from(root);
                     Some((id, "package_dir"))
                 }
                 DirImport::OnlyImporter => None,
+                DirImport::NoDir if root => None,
                 // Tail fallback (Pattern B): the go.mod-stripped path doesn't
                 // match a module qname or a package directory — bind the
                 // imported package by its unique short name (last `::`
@@ -426,13 +441,30 @@ pub(crate) fn resolve_imports_go(
         let bound = alias
             .clone()
             .unwrap_or_else(|| path.rsplit("::").next().unwrap_or(path).to_string());
+        // A root import without a name (only a hand-built ImportStmt; the
+        // parser always names one) binds nothing.
+        if bound.is_empty() {
+            continue;
+        }
         g.symbols
             .module_import_bindings
             .entry(from_mod_id)
             .or_default()
             .insert(bound, target_id);
     }
-    dir_bound
+    stats
+}
+
+/// What [`resolve_imports_go`] bound, for the `[go-package]` markers.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GoImportStats {
+    /// Imports bound by the package-directory step (LA.13b).
+    pub(crate) dir_bound: usize,
+    /// Imports of the repository-root package (an empty path, CI.3).
+    pub(crate) root_imports: usize,
+    /// Of `root_imports`: bound to a root-dir file (counted in `dir_bound`
+    /// too).
+    pub(crate) root_bound: usize,
 }
 
 /// Ruby imports: `require 'foo/bar'` gives a slash-delimited path. Convert
