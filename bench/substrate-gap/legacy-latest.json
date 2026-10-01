@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 332,
+  "fixtures": 335,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -715,6 +715,15 @@
       "language": "go",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "go-root-package-imports": {
+      "framework": "go-root-package-imports",
+      "language": "go",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPLEMENTS": 1.0,
+        "IMPORTS": 1.0
       }
     },
     "go-route-mount-owners": {
@@ -1635,6 +1644,11 @@
       "language": "rust",
       "per_category": {}
     },
+    "self-scan-literal-config": {
+      "framework": "self-scan-literal-config",
+      "language": "rust",
+      "per_category": {}
+    },
     "self-scan-literal-needles": {
       "framework": "self-scan-literal-needles",
       "language": "rust",
@@ -1895,6 +1909,14 @@
       "per_category": {
         "HANDLED_BY": 1.0,
         "HTTP_CALLS": 1.0
+      }
+    },
+    "ts-signal-state-fields": {
+      "framework": "ts-signal-state-fields",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "DEFINES": 1.0
       }
     },
     "ts-tests": {

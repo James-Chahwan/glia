@@ -418,7 +418,7 @@
     },
     "csharp/graphql": {
       "extract": [
-        0,
+        1,
         2
       ],
       "fixtures": [
@@ -430,15 +430,17 @@
       ],
       "level": "none",
       "literal": [
-        0,
+        1,
         2
       ],
-      "reasons": [],
+      "reasons": [
+        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
+      ],
       "route": [
         0,
         1
       ],
-      "via": null
+      "via": "graphql"
     },
     "csharp/grpc": {
       "extract": [
@@ -2360,7 +2362,7 @@
     },
     "go/amqp": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -2370,21 +2372,21 @@
         2,
         2
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "go/azure_sb": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -2394,22 +2396,22 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "go/calls": {
       "extract": [
-        8,
-        8
+        9,
+        9
       ],
       "fixtures": [
         "fixtures/go-calls",
@@ -2417,7 +2419,8 @@
         "fixtures/go-field-dispatch",
         "fixtures/go-package-multifile-calls",
         "fixtures/go-package-var-closures",
-        "fixtures/go-return-type-receivers"
+        "fixtures/go-return-type-receivers",
+        "fixtures/go-root-package-imports"
       ],
       "forbid": [
         8,
@@ -2432,8 +2435,8 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        28,
-        28
+        32,
+        32
       ],
       "via": "call"
     },
@@ -2609,7 +2612,7 @@
     },
     "go/graphql": {
       "extract": [
-        1,
+        2,
         2
       ],
       "fixtures": [
@@ -2619,16 +2622,14 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "graphql"
@@ -2720,17 +2721,18 @@
     },
     "go/impl": {
       "extract": [
-        4,
-        4
+        5,
+        5
       ],
       "fixtures": [
         "fixtures/go-iface-embed",
         "fixtures/go-iface-scope",
-        "fixtures/go-implicit-iface"
+        "fixtures/go-implicit-iface",
+        "fixtures/go-root-package-imports"
       ],
       "forbid": [
-        6,
-        6
+        7,
+        7
       ],
       "level": "full",
       "literal": [
@@ -2741,19 +2743,20 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        9,
-        9
+        10,
+        10
       ],
       "via": "type"
     },
     "go/imports": {
       "extract": [
-        3,
-        3
+        4,
+        4
       ],
       "fixtures": [
         "fixtures/go-imports",
-        "fixtures/go-nested-modules"
+        "fixtures/go-nested-modules",
+        "fixtures/go-root-package-imports"
       ],
       "forbid": [
         1,
@@ -2764,10 +2767,12 @@
         3,
         3
       ],
-      "reasons": [],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
       "route": [
-        3,
-        3
+        5,
+        5
       ],
       "via": "import"
     },
@@ -2805,21 +2810,17 @@
         "matrix/go/kafka"
       ],
       "forbid": [
-        3,
+        4,
         4
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
-        3,
+        4,
         4
       ],
-      "reasons": [
-        "forbid violated",
-        "literal lost",
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        2,
         2
       ],
       "via": "queue"
@@ -2900,7 +2901,7 @@
     },
     "go/pubsub": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -2910,21 +2911,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "go/redis": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -2934,17 +2935,17 @@
         2,
         2
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "go/secrets": {
       "extract": [
@@ -2998,7 +2999,7 @@
     },
     "go/sqs_sns": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -3008,17 +3009,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "go/subproject": {
       "extract": [
@@ -8718,6 +8719,7 @@
     "fixtures/sdd-quokka-feature",
     "fixtures/sdd-speckit-features",
     "fixtures/self-scan-literal-channels",
+    "fixtures/self-scan-literal-config",
     "fixtures/self-scan-literal-needles",
     "fixtures/solidity-natspec",
     "fixtures/solidity-state_var",
@@ -8738,6 +8740,7 @@
     "fixtures/ts-enum-members",
     "fixtures/ts-inherited-calls",
     "fixtures/ts-route-per-method",
+    "fixtures/ts-signal-state-fields",
     "fixtures/walk-dotnet-obj",
     "fixtures/walk-gitignore-semantics",
     "fixtures/walk-glia-control-dir",
@@ -8897,11 +8900,11 @@
   "totals": {
     "covered": 346,
     "error": 0,
-    "full": 220,
+    "full": 227,
     "grid": 510,
     "n/a": 28,
-    "none": 88,
-    "partial": 38,
+    "none": 82,
+    "partial": 37,
     "unknown": 136
   },
   "vocabulary": {

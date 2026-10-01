@@ -75,7 +75,7 @@ Columns, left to right (the review's own abbreviations):
 LEGEND ● full  ◐ partial  · none (fixture exists, nothing emitted)  ? unknown (no fixture)  - n/a (see Not applicable)  ! error
            http_cl http_sr   kafka    amqp sqs/sns  pubsub azure_s    nats   redis    mqtt   taskq    grpc graphql      ws eventbu      db    migr  config secrets   flags    cron cli_def cli_inv   calls imports injects    impl   tests service subproj
 python           ●       ●       ●       ●       ●       ◐       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-go               ●       ●       ◐       ·       ·       ·       ·       ●       ·       ●       ·       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
+go               ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 typescript       ●       ●       ●       ●       ●       ◐       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●
 java             ●       ●       ●       ●       ◐       ·       ·       ●       ·       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 csharp           ●       ●       ●       ●       ●       ·       ●       ◐       ●       ·       ·       ●       ·       ●       ●       ●       ●       ◐       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
@@ -95,17 +95,17 @@ kotlin           ●       ●       ?       ?       ?       ?       ?       ?  
 PER-MECHANISM  across 17 languages:
   http_client  ● 14  ◐ 0   · 1   ? 1   - 1   ! 0
   http_server  ● 10  ◐ 4   · 0   ? 2   - 1   ! 0
-  kafka        ● 5   ◐ 3   · 3   ? 5   - 1   ! 0
-  amqp         ● 4   ◐ 1   · 6   ? 5   - 1   ! 0
-  sqs_sns      ● 3   ◐ 1   · 7   ? 5   - 1   ! 0
-  pubsub       ● 0   ◐ 2   · 9   ? 5   - 1   ! 0
-  azure_sb     ● 3   ◐ 0   · 4   ? 9   - 1   ! 0
+  kafka        ● 6   ◐ 2   · 3   ? 5   - 1   ! 0
+  amqp         ● 5   ◐ 1   · 5   ? 5   - 1   ! 0
+  sqs_sns      ● 4   ◐ 1   · 6   ? 5   - 1   ! 0
+  pubsub       ● 1   ◐ 2   · 8   ? 5   - 1   ! 0
+  azure_sb     ● 4   ◐ 0   · 3   ? 9   - 1   ! 0
   nats         ● 6   ◐ 1   · 4   ? 5   - 1   ! 0
-  redis        ● 5   ◐ 1   · 5   ? 4   - 2   ! 0
+  redis        ● 6   ◐ 1   · 4   ? 4   - 2   ! 0
   mqtt         ● 7   ◐ 0   · 4   ? 5   - 1   ! 0
   taskq        ● 3   ◐ 1   · 7   ? 4   - 2   ! 0
   grpc         ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
-  graphql      ● 4   ◐ 1   · 6   ? 5   - 1   ! 0
+  graphql      ● 5   ◐ 1   · 5   ? 5   - 1   ! 0
   ws           ● 7   ◐ 0   · 4   ? 5   - 1   ! 0
   eventbus     ● 5   ◐ 0   · 7   ? 5   - 0   ! 0
   db           ● 8   ◐ 0   · 3   ? 5   - 1   ! 0
@@ -126,7 +126,7 @@ PER-MECHANISM  across 17 languages:
 
 PER-LANGUAGE  across 30 mechanisms:
   python       ● 28  ◐ 1   · 1   ? 0   - 0   ! 0
-  go           ● 22  ◐ 1   · 7   ? 0   - 0   ! 0
+  go           ● 29  ◐ 0   · 1   ? 0   - 0   ! 0
   typescript   ● 28  ◐ 1   · 1   ? 0   - 0   ! 0
   java         ● 25  ◐ 1   · 4   ? 0   - 0   ! 0
   csharp       ● 23  ◐ 2   · 5   ? 0   - 0   ! 0
@@ -144,9 +144,9 @@ PER-LANGUAGE  across 30 mechanisms:
   kotlin       ● 6   ◐ 0   · 0   ? 24  - 0   ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 220 full, 38 partial, 88 none, 136 unknown, 0 error, 28 n/a.
+COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 227 full, 37 partial, 82 none, 136 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 183
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 185
 
 ## Cells routed via an alternative mechanism
 
@@ -159,7 +159,11 @@ A `●` here does not mean the intended path fired — it means SOME path did. T
 | `csharp/sqs_sns` | ● full | `queue` | `eventbus` |
 | `dart/mqtt` | · none | `queue` | `eventbus` |
 | `dart/redis` | · none | `queue` | `eventbus` |
+| `go/azure_sb` | ● full | `queue` | `eventbus` |
 | `go/mqtt` | ● full | `queue` | `eventbus` |
+| `go/pubsub` | ● full | `queue` | `eventbus` |
+| `go/redis` | ● full | `queue` | `eventbus` |
+| `go/sqs_sns` | ● full | `queue` | `eventbus` |
 | `java/mqtt` | ● full | `queue` | `eventbus` |
 | `java/sqs_sns` | ◐ partial | `queue` | `eventbus` |
 | `python/azure_sb` | ● full | `queue` | `eventbus` |
