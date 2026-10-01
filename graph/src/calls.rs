@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use glia_code_domain::evidence::{self, Evidence};
 use glia_code_domain::{
-    CallQualifier, CallSite, CodeNav, UnresolvedRef, cell_type, edge_category, node_kind,
+    CallQualifier, CallSite, CodeNav, NavFact, UnresolvedRef, cell_type, edge_category, node_kind,
     recv_stats,
 };
 use glia_core::{Confidence, Edge, EdgeCategoryId, NodeId};
@@ -1282,6 +1282,246 @@ pub(crate) fn emit_method_level_implements(g: &mut RepoGraph) {
             g.symbols.interface_methods.len()
         );
     }
+}
+
+// ============================================================================
+// Inherited calls and abstract overrides (CH.1b, TypeScript family)
+// ============================================================================
+
+/// Deepest superclass chain [`resolve_inherited_calls`] and
+/// [`emit_abstract_implements`] climb; a longer one (or a cycle a bad merge
+/// left, `A extends B`, `B extends A`) is cut here and by the visited set.
+const MAX_INHERIT_LEVELS: usize = 16;
+
+/// What one TS-family graph build bound along INHERITS_FROM (CH.1b): the
+/// `this.m()` / `super.m()` sites [`resolve_inherited_calls`] bound, the
+/// sites left unresolved because two superclasses at one level both define
+/// the name, and the method-level IMPLEMENTS [`emit_abstract_implements`]
+/// drew.
+#[derive(Default)]
+pub(crate) struct InheritStats {
+    self_bound: usize,
+    super_bound: usize,
+    ambiguous: usize,
+    implements: usize,
+}
+
+impl InheritStats {
+    /// CH.1b fired_on marker, `None` when nothing bound and nothing was
+    /// ambiguous: `[ts-inherit] calls bound through superclasses: <n>
+    /// (self=<s> super=<p> ambiguous=<a>) abstract implements=<m>`.
+    fn marker(&self) -> Option<String> {
+        let bound = self.self_bound + self.super_bound;
+        (bound + self.ambiguous + self.implements > 0).then(|| {
+            format!(
+                "[ts-inherit] calls bound through superclasses: {bound} (self={} super={} \
+                 ambiguous={}) abstract implements={}",
+                self.self_bound, self.super_bound, self.ambiguous, self.implements
+            )
+        })
+    }
+
+    /// Print the marker, once per graph build, after both passes ran.
+    pub(crate) fn report(&self) {
+        if let Some(line) = self.marker() {
+            eprintln!("{line}");
+        }
+    }
+}
+
+/// CLASS -> its direct superclasses: every INHERITS_FROM edge whose two ends
+/// are CLASS nodes, keyed by the subclass id, each list sorted by id and
+/// deduped, so no HashMap order reaches an edge. An `interface extends`
+/// (INTERFACE ends) and an external base (an unresolved ref, no edge) are
+/// not in it.
+fn superclasses(g: &RepoGraph) -> BTreeMap<u64, Vec<NodeId>> {
+    let is_class = |id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::CLASS);
+    let mut map: BTreeMap<u64, Vec<NodeId>> = BTreeMap::new();
+    for e in &g.edges {
+        if e.category == edge_category::INHERITS_FROM && is_class(&e.from) && is_class(&e.to) {
+            map.entry(e.from.0).or_default().push(e.to);
+        }
+    }
+    for bases in map.values_mut() {
+        bases.sort_unstable_by_key(|b| b.0);
+        bases.dedup();
+    }
+    map
+}
+
+/// The nearest superclass member a lookup of `name` above `owner` finds.
+#[derive(Debug, PartialEq, Eq)]
+enum Definer {
+    /// Exactly one METHOD at the first level that defines the name.
+    One(NodeId),
+    /// Two or more distinct METHODs at that level (a class whose heritage
+    /// bound two bases, e.g. a mixin): no guess.
+    Ambiguous,
+    /// No superclass defines it, or the chain left the graph.
+    Nothing,
+}
+
+/// The runtime's own lookup of `name` above `owner`, level by level along
+/// INHERITS_FROM, starting at `owner`'s direct superclasses: the first level
+/// at which any base's `class_methods` has `name` decides. `owner` is never a
+/// candidate (the own class already failed for a `this.m()`, and `super.m()`
+/// skips it by definition). `class_methods` holds METHOD children only
+/// (`build_symbol_table`), so a field is never a target.
+fn nearest_definer(
+    g: &RepoGraph,
+    supers: &BTreeMap<u64, Vec<NodeId>>,
+    owner: NodeId,
+    name: &str,
+) -> Definer {
+    let mut visited: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    visited.insert(owner.0);
+    let mut level: Vec<NodeId> = supers.get(&owner.0).cloned().unwrap_or_default();
+    for _ in 0..MAX_INHERIT_LEVELS {
+        level.retain(|b| visited.insert(b.0));
+        if level.is_empty() {
+            return Definer::Nothing;
+        }
+        let mut hits: Vec<NodeId> = level
+            .iter()
+            .filter_map(|b| g.symbols.class_methods.get(b).and_then(|m| m.get(name)).copied())
+            .collect();
+        hits.sort_unstable_by_key(|h| h.0);
+        hits.dedup();
+        match hits.as_slice() {
+            [one] => return Definer::One(*one),
+            [] => {}
+            _ => return Definer::Ambiguous,
+        }
+        let mut next: Vec<NodeId> = level
+            .iter()
+            .filter_map(|b| supers.get(&b.0))
+            .flatten()
+            .copied()
+            .filter(|n| !visited.contains(&n.0))
+            .collect();
+        next.sort_unstable_by_key(|n| n.0);
+        next.dedup();
+        level = next;
+    }
+    Definer::Nothing
+}
+
+/// CH.1b: re-try the build's unresolved `this.m()` (SelfMethod) and
+/// `super.m()` (SuperMethod) sites along INHERITS_FROM. In TypeScript every
+/// method is virtual and `this.m()` names the receiver's own class chain, so
+/// a site whose enclosing CLASS defines no `m` binds to the nearest
+/// superclass that does ([`nearest_definer`]); `super.m()` is the same lookup
+/// starting one level up. A bound site is a CALLS edge, EVIDENCE
+/// `graph:calls` / `inherited_method` at the call's own line (LC.3b); two
+/// definers at one level leave the site unresolved and count `ambiguous`.
+/// A `this.m()` whose own class DOES define `m` (left unresolved for another
+/// reason) is not an inherited call and stays as it is.
+///
+/// Runs after `resolve_refs` (the heritage edges must exist) and only in
+/// [`crate::build::build_typescript_family`]. Unbound sites go back to
+/// `unresolved_calls` in their original order, so the build stays
+/// byte-identical at any thread count.
+pub(crate) fn resolve_inherited_calls(g: &mut RepoGraph, stats: &mut InheritStats) {
+    let pending = std::mem::take(&mut g.unresolved_calls);
+    let supers = superclasses(g);
+    let mut kept: Vec<CallSite> = Vec::with_capacity(pending.len());
+    for site in pending {
+        let (name, is_super) = match &site.qualifier {
+            CallQualifier::SelfMethod(name) => (name.as_str(), false),
+            CallQualifier::SuperMethod(name) => (name.as_str(), true),
+            _ => {
+                kept.push(site);
+                continue;
+            }
+        };
+        let Some(owner) = enclosing_class_or_struct(&g.nav, site.from)
+            .filter(|o| g.nav.kind_by_id.get(o) == Some(&node_kind::CLASS))
+        else {
+            kept.push(site);
+            continue;
+        };
+        let own_defines =
+            g.symbols.class_methods.get(&owner).is_some_and(|m| m.contains_key(name));
+        if !is_super && own_defines {
+            kept.push(site);
+            continue;
+        }
+        match nearest_definer(g, &supers, owner, name) {
+            Definer::One(to) => {
+                let ev = graph_evidence("graph:calls", "inherited_method").line(site.line);
+                push_edge(g, site.from, to, edge_category::CALLS, ev);
+                if is_super {
+                    stats.super_bound += 1;
+                } else {
+                    stats.self_bound += 1;
+                }
+            }
+            Definer::Ambiguous => {
+                stats.ambiguous += 1;
+                kept.push(site);
+            }
+            Definer::Nothing => kept.push(site),
+        }
+    }
+    g.unresolved_calls = kept;
+}
+
+/// True when the TS parser recorded `id` as an `abstract` member declared
+/// without a body ([`NavFact::AbstractMethod`]).
+fn is_abstract_method(g: &RepoGraph, id: NodeId) -> bool {
+    g.nav
+        .nav_facts
+        .get(&id)
+        .is_some_and(|facts| facts.contains(&NavFact::AbstractMethod))
+}
+
+/// CH.1b: a subclass method named like an ABSTRACT member of a superclass
+/// implements it, so a method-level IMPLEMENTS joins them (A6.6's direction,
+/// implementation -> declaration), EVIDENCE `graph:iface` /
+/// `abstract_override`, Strong (an explicit `extends` plus the same name).
+/// The member is the one the subclass method overrides: the first level of
+/// its ancestors that defines the name ([`nearest_definer`]), so a
+/// grandchild implements a grandparent's abstract member when no class
+/// between defines the name, a concrete definer between them stops the walk
+/// (it is what the method overrides, and a concrete override is not an
+/// implementation of a declaration), and two definers at one level pair
+/// nothing. An abstract re-declaration in an abstract subclass pairs too, so
+/// the chain reaches the concrete methods below it.
+///
+/// Pairs are sorted by id and deduped, and one already present as an
+/// IMPLEMENTS edge is not pushed again.
+pub(crate) fn emit_abstract_implements(g: &mut RepoGraph, stats: &mut InheritStats) {
+    let supers = superclasses(g);
+    let mut pairs: Vec<(NodeId, NodeId)> = Vec::new();
+    for &sub in supers.keys() {
+        let Some(methods) = g.symbols.class_methods.get(&NodeId(sub)) else {
+            continue;
+        };
+        let mut own: Vec<(&str, NodeId)> =
+            methods.iter().map(|(name, &mid)| (name.as_str(), mid)).collect();
+        own.sort_unstable_by(|a, b| a.0.cmp(b.0).then(a.1.0.cmp(&b.1.0)));
+        for (name, sub_mid) in own {
+            if let Definer::One(declared) = nearest_definer(g, &supers, NodeId(sub), name)
+                && is_abstract_method(g, declared)
+            {
+                pairs.push((sub_mid, declared));
+            }
+        }
+    }
+    let existing: std::collections::HashSet<(NodeId, NodeId)> = g
+        .edges
+        .iter()
+        .filter(|e| e.category == edge_category::IMPLEMENTS)
+        .map(|e| (e.from, e.to))
+        .collect();
+    pairs.sort_unstable_by_key(|(a, b)| (a.0, b.0));
+    pairs.dedup();
+    pairs.retain(|pair| !existing.contains(pair));
+    for &(from, to) in &pairs {
+        let ev = graph_evidence("graph:iface", "abstract_override");
+        push_edge_with(g, from, to, edge_category::IMPLEMENTS, ev, Confidence::Strong);
+    }
+    stats.implements += pairs.len();
 }
 
 /// Push one resolved edge, carrying `ev` as its EVIDENCE cell: the graph
@@ -2617,5 +2857,330 @@ mod tests {
         g.edges.insert(0, Edge::new(cls, iface, edge_category::IMPLEMENTS, Confidence::Medium));
         emit_method_level_implements(&mut g);
         assert_eq!(conf(&g, cls_get, iface_get), Some(Confidence::Strong), "strongest class edge");
+    }
+
+    // ---- CH.1b: inherited calls and abstract overrides (TS family) ----------
+
+    fn self_call(from: NodeId, name: &str, line: u32) -> CallSite {
+        CallSite { from, qualifier: CallQualifier::SelfMethod(name.to_string()), line }
+    }
+
+    fn super_call(from: NodeId, name: &str, line: u32) -> CallSite {
+        CallSite { from, qualifier: CallQualifier::SuperMethod(name.to_string()), line }
+    }
+
+    /// The hand-built files' relative resolver: `./<stem>` -> `src::<stem>`.
+    fn rel(_: &str, spec: &str) -> Option<String> {
+        spec.strip_prefix("./").map(|stem| format!("src::{stem}"))
+    }
+
+    /// Every edge of `category` with its evidence `(emitter, rule, line)` and
+    /// confidence, in edge order.
+    #[allow(clippy::type_complexity)]
+    fn with_evidence(
+        g: &RepoGraph,
+        category: EdgeCategoryId,
+    ) -> Vec<(NodeId, NodeId, String, Option<String>, Option<u32>, Confidence)> {
+        g.edges
+            .iter()
+            .filter(|e| e.category == category)
+            .filter_map(|e| {
+                let ev = Evidence::of(e)?;
+                Some((e.from, e.to, ev.emitter, ev.rule, ev.line, e.confidence))
+            })
+            .collect()
+    }
+
+    /// The CALLS edges `resolve_inherited_calls` drew: `(from, to, line)`.
+    fn inherited_calls(g: &RepoGraph) -> Vec<(NodeId, NodeId, Option<u32>)> {
+        with_evidence(g, edge_category::CALLS)
+            .into_iter()
+            .filter(|(_, _, em, rule, _, _)| {
+                em == "graph:calls" && rule.as_deref() == Some("inherited_method")
+            })
+            .map(|(from, to, _, _, line, _)| (from, to, line))
+            .collect()
+    }
+
+    /// The IMPLEMENTS edges `emit_abstract_implements` drew, sorted:
+    /// `(from, to, confidence)`.
+    fn abstract_implements(g: &RepoGraph) -> Vec<(NodeId, NodeId, Confidence)> {
+        let mut v: Vec<_> = with_evidence(g, edge_category::IMPLEMENTS)
+            .into_iter()
+            .filter(|(_, _, em, rule, _, _)| {
+                em == "graph:iface" && rule.as_deref() == Some("abstract_override")
+            })
+            .map(|(from, to, _, _, _, c)| (from, to, c))
+            .collect();
+        v.sort_by_key(|(a, b, _)| (a.0, b.0));
+        v
+    }
+
+    /// `A { load, describe }` <- `B { find: this.load(), describe }` <-
+    /// `C { go: this.load(); this.find(); this.describe() }`, one file each,
+    /// every `extends` an imported name: a `this.m()` the own class cannot
+    /// bind climbs INHERITS_FROM to the nearest definer, any depth, across
+    /// files, and the nearest definer wins over a farther one.
+    #[test]
+    fn self_call_binds_through_superclasses() {
+        let mut a = Shape::new();
+        let ma = a.add(node_kind::MODULE, "src::a", None);
+        let ca = a.add(node_kind::CLASS, "src::a::A", Some(ma));
+        let a_load = a.add(node_kind::METHOD, "src::a::A::load", Some(ca));
+        let a_describe = a.add(node_kind::METHOD, "src::a::A::describe", Some(ca));
+        let mut b = Shape::new();
+        let mb = b.add(node_kind::MODULE, "src::b", None);
+        let cb = b.add(node_kind::CLASS, "src::b::B", Some(mb));
+        let b_find = b.add(node_kind::METHOD, "src::b::B::find", Some(cb));
+        let b_describe = b.add(node_kind::METHOD, "src::b::B::describe", Some(cb));
+        let mut c = Shape::new();
+        let mc = c.add(node_kind::MODULE, "src::c", None);
+        let cc = c.add(node_kind::CLASS, "src::c::C", Some(mc));
+        let c_go = c.add(node_kind::METHOD, "src::c::C::go", Some(cc));
+        let files = vec![
+            a.file(vec![], vec![], vec![]),
+            b.file(
+                vec![import_symbol("src::b", "./a", "A")],
+                vec![self_call(b_find, "load", 3)],
+                vec![heritage_ref(cb, mb, "A", edge_category::INHERITS_FROM)],
+            ),
+            c.file(
+                vec![import_symbol("src::c", "./b", "B")],
+                vec![
+                    self_call(c_go, "load", 5),
+                    self_call(c_go, "find", 6),
+                    self_call(c_go, "describe", 7),
+                ],
+                vec![heritage_ref(cc, mc, "B", edge_category::INHERITS_FROM)],
+            ),
+        ];
+        let g = crate::build::build_typescript_family(repo(), files, rel).unwrap();
+        assert_eq!(
+            inherited_calls(&g),
+            vec![
+                (b_find, a_load, Some(3)),
+                (c_go, a_load, Some(5)),
+                (c_go, b_find, Some(6)),
+                (c_go, b_describe, Some(7)),
+            ]
+        );
+        assert!(
+            !edges_of(&g, edge_category::CALLS).contains(&(c_go, a_describe)),
+            "the nearest definer (B::describe) wins"
+        );
+        assert!(g.unresolved_calls.is_empty(), "{:?}", g.unresolved_calls);
+    }
+
+    /// `A { d }` <- `B { d: super.d() }`: `super.d()` binds the superclass's
+    /// `d`, never the override it is written in.
+    #[test]
+    fn super_call_skips_own_override() {
+        let mut a = Shape::new();
+        let ma = a.add(node_kind::MODULE, "src::a", None);
+        let ca = a.add(node_kind::CLASS, "src::a::A", Some(ma));
+        let a_d = a.add(node_kind::METHOD, "src::a::A::d", Some(ca));
+        let mut b = Shape::new();
+        let mb = b.add(node_kind::MODULE, "src::b", None);
+        let cb = b.add(node_kind::CLASS, "src::b::B", Some(mb));
+        let b_d = b.add(node_kind::METHOD, "src::b::B::d", Some(cb));
+        let files = vec![
+            a.file(vec![], vec![], vec![]),
+            b.file(
+                vec![import_symbol("src::b", "./a", "A")],
+                vec![super_call(b_d, "d", 10)],
+                vec![heritage_ref(cb, mb, "A", edge_category::INHERITS_FROM)],
+            ),
+        ];
+        let g = crate::build::build_typescript_family(repo(), files, rel).unwrap();
+        assert_eq!(inherited_calls(&g), vec![(b_d, a_d, Some(10))]);
+        assert!(!edges_of(&g, edge_category::CALLS).contains(&(b_d, b_d)));
+        assert!(g.unresolved_calls.is_empty());
+    }
+
+    /// `A { abstract f, d, abstract g }` <- `B { f, d }` <- `C { f }`;
+    /// `D extends A { f }`; `E extends B { g }`. An override of an abstract
+    /// member IMPLEMENTS it (a grandchild too, when no class between defines
+    /// the name); a concrete override does not, and a method whose nearest
+    /// definer is concrete (C::f, under B::f) pairs nothing.
+    #[test]
+    fn abstract_override_implements() {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "src::h", None);
+        let ca = s.add(node_kind::CLASS, "src::h::A", Some(m));
+        let a_f = s.add(node_kind::METHOD, "src::h::A::f", Some(ca));
+        let a_d = s.add(node_kind::METHOD, "src::h::A::d", Some(ca));
+        let a_g = s.add(node_kind::METHOD, "src::h::A::g", Some(ca));
+        s.nav.record_fact(a_f, NavFact::AbstractMethod);
+        s.nav.record_fact(a_g, NavFact::AbstractMethod);
+        let cb = s.add(node_kind::CLASS, "src::h::B", Some(m));
+        let b_f = s.add(node_kind::METHOD, "src::h::B::f", Some(cb));
+        let b_d = s.add(node_kind::METHOD, "src::h::B::d", Some(cb));
+        let cc = s.add(node_kind::CLASS, "src::h::C", Some(m));
+        let c_f = s.add(node_kind::METHOD, "src::h::C::f", Some(cc));
+        let cd = s.add(node_kind::CLASS, "src::h::D", Some(m));
+        let d_f = s.add(node_kind::METHOD, "src::h::D::f", Some(cd));
+        let ce = s.add(node_kind::CLASS, "src::h::E", Some(m));
+        let e_g = s.add(node_kind::METHOD, "src::h::E::g", Some(ce));
+        let refs = vec![
+            heritage_ref(cb, m, "A", edge_category::INHERITS_FROM),
+            heritage_ref(cc, m, "B", edge_category::INHERITS_FROM),
+            heritage_ref(cd, m, "A", edge_category::INHERITS_FROM),
+            heritage_ref(ce, m, "B", edge_category::INHERITS_FROM),
+        ];
+        let g = crate::build::build_typescript_family(
+            repo(),
+            vec![s.file(vec![], vec![], refs)],
+            rel,
+        )
+        .unwrap();
+        let mut want = vec![
+            (b_f, a_f, Confidence::Strong),
+            (d_f, a_f, Confidence::Strong),
+            (e_g, a_g, Confidence::Strong),
+        ];
+        want.sort_by_key(|(a, b, _)| (a.0, b.0));
+        assert_eq!(abstract_implements(&g), want);
+        let implements = edges_of(&g, edge_category::IMPLEMENTS);
+        assert!(!implements.contains(&(b_d, a_d)), "a concrete override is not IMPLEMENTS");
+        assert!(!implements.iter().any(|(from, _)| *from == c_f), "C::f overrides B::f");
+    }
+
+    /// A small hierarchy with an unbindable self call and a class whose base
+    /// is external: `A { load, abstract f }` <- `B { find: this.load();
+    /// this.nope(), f }`; `W extends External { run: this.base() }`.
+    fn inherit_files() -> (Vec<FileParse>, [NodeId; 6]) {
+        let mut a = Shape::new();
+        let ma = a.add(node_kind::MODULE, "src::a", None);
+        let ca = a.add(node_kind::CLASS, "src::a::A", Some(ma));
+        let a_load = a.add(node_kind::METHOD, "src::a::A::load", Some(ca));
+        let a_f = a.add(node_kind::METHOD, "src::a::A::f", Some(ca));
+        a.nav.record_fact(a_f, NavFact::AbstractMethod);
+        let mut b = Shape::new();
+        let mb = b.add(node_kind::MODULE, "src::b", None);
+        let cb = b.add(node_kind::CLASS, "src::b::B", Some(mb));
+        let b_find = b.add(node_kind::METHOD, "src::b::B::find", Some(cb));
+        let b_f = b.add(node_kind::METHOD, "src::b::B::f", Some(cb));
+        let mut w = Shape::new();
+        let mw = w.add(node_kind::MODULE, "src::w", None);
+        let cw = w.add(node_kind::CLASS, "src::w::W", Some(mw));
+        let w_run = w.add(node_kind::METHOD, "src::w::W::run", Some(cw));
+        let files = vec![
+            a.file(vec![], vec![], vec![]),
+            b.file(
+                vec![import_symbol("src::b", "./a", "A")],
+                vec![self_call(b_find, "load", 2), self_call(b_find, "nope", 3)],
+                vec![heritage_ref(cb, mb, "A", edge_category::INHERITS_FROM)],
+            ),
+            w.file(
+                vec![],
+                vec![self_call(w_run, "base", 4)],
+                vec![heritage_ref(cw, mw, "External", edge_category::INHERITS_FROM)],
+            ),
+        ];
+        (files, [a_load, a_f, b_find, b_f, w_run, cw])
+    }
+
+    /// Every edge, sorted, with its evidence: what must not depend on the
+    /// order the parses arrive in.
+    #[allow(clippy::type_complexity)]
+    fn sorted_edges(
+        g: &RepoGraph,
+    ) -> Vec<(u64, u64, u32, Option<String>, Option<u32>)> {
+        let mut v: Vec<_> = g
+            .edges
+            .iter()
+            .map(|e| {
+                let ev = Evidence::of(e);
+                (
+                    e.from.0,
+                    e.to.0,
+                    e.category.0,
+                    ev.as_ref().and_then(|ev| ev.rule.clone()),
+                    ev.and_then(|ev| ev.line),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// The walk is a pure function of the graph (reversed parses give the
+    /// same edges), unbound sites stay unresolved in their original order,
+    /// and only the TS family runs it: `build_typescript` (the `_`-arm
+    /// languages' builder) binds no inherited site and pairs nothing. The
+    /// two passes over that graph then give the family's edges and marker.
+    #[test]
+    fn inherit_walk_is_deterministic_and_ts_family_only() {
+        let (files, [a_load, a_f, b_find, b_f, w_run, _]) = inherit_files();
+        let g = crate::build::build_typescript_family(repo(), files, rel).unwrap();
+        assert_eq!(inherited_calls(&g), vec![(b_find, a_load, Some(2))]);
+        assert_eq!(abstract_implements(&g), vec![(b_f, a_f, Confidence::Strong)]);
+        assert_eq!(
+            g.unresolved_calls,
+            vec![self_call(b_find, "nope", 3), self_call(w_run, "base", 4)],
+            "unbound sites keep their order"
+        );
+
+        let (mut files, _) = inherit_files();
+        files.reverse();
+        let reversed = crate::build::build_typescript_family(repo(), files, rel).unwrap();
+        assert_eq!(sorted_edges(&reversed), sorted_edges(&g));
+
+        let (files, _) = inherit_files();
+        let mut plain = build_typescript(repo(), files, rel).unwrap();
+        assert!(inherited_calls(&plain).is_empty());
+        assert!(abstract_implements(&plain).is_empty());
+        assert_eq!(plain.unresolved_calls.len(), 3, "every self call stays unresolved");
+
+        let mut stats = InheritStats::default();
+        resolve_inherited_calls(&mut plain, &mut stats);
+        emit_abstract_implements(&mut plain, &mut stats);
+        assert_eq!(sorted_edges(&plain), sorted_edges(&g));
+        assert_eq!(plain.unresolved_calls, g.unresolved_calls);
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some(
+                "[ts-inherit] calls bound through superclasses: 1 (self=1 super=0 ambiguous=0) \
+                 abstract implements=1"
+            )
+        );
+        let before = plain.edges.len();
+        emit_abstract_implements(&mut plain, &mut InheritStats::default());
+        assert_eq!(plain.edges.len(), before, "an IMPLEMENTS already present is not pushed again");
+        assert_eq!(InheritStats::default().marker(), None);
+    }
+
+    /// Two bases at one level both defining `m` (a heritage clause that bound
+    /// twice): no guess, the site stays unresolved and counts `ambiguous`.
+    #[test]
+    fn two_definers_at_one_level_stay_unresolved() {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "src::x", None);
+        let p = s.add(node_kind::CLASS, "src::x::P", Some(m));
+        s.add(node_kind::METHOD, "src::x::P::m", Some(p));
+        let q = s.add(node_kind::CLASS, "src::x::Q", Some(m));
+        s.add(node_kind::METHOD, "src::x::Q::m", Some(q));
+        let k = s.add(node_kind::CLASS, "src::x::K", Some(m));
+        let k_go = s.add(node_kind::METHOD, "src::x::K::go", Some(k));
+        let file = s.file(
+            vec![],
+            vec![self_call(k_go, "m", 1)],
+            vec![
+                heritage_ref(k, m, "P", edge_category::INHERITS_FROM),
+                heritage_ref(k, m, "Q", edge_category::INHERITS_FROM),
+            ],
+        );
+        let mut plain = build_typescript(repo(), vec![file], rel).unwrap();
+        let mut stats = InheritStats::default();
+        resolve_inherited_calls(&mut plain, &mut stats);
+        assert!(inherited_calls(&plain).is_empty());
+        assert_eq!(plain.unresolved_calls, vec![self_call(k_go, "m", 1)]);
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some(
+                "[ts-inherit] calls bound through superclasses: 0 (self=0 super=0 ambiguous=1) \
+                 abstract implements=0"
+            )
+        );
     }
 }

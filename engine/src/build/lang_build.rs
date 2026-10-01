@@ -1,7 +1,8 @@
 //! The per-language graph build of `build_graphs_for_repo`: a deterministic
-//! language order, the `build_*` dispatch, one shared TS-family graph, and the
-//! import resolvers the `build_typescript` arm takes (relative, plus the A6.8
-//! tsconfig `paths` aliases for the TS family) and the includer-relative
+//! language order, the `build_*` dispatch, one shared TS-family graph (built
+//! by `build_typescript_family`, CH.1b; the `_` arm's languages keep
+//! `build_typescript`), and the import resolvers those arms take (relative,
+//! plus the A6.8 tsconfig `paths` aliases for the TS family) and the includer-relative
 //! step of the `#include` resolver `build_c_cpp` takes (its search roots are
 //! [`super::c_includes`], CB.22).
 
@@ -160,7 +161,7 @@ pub(super) fn build_language_graphs(
         crate::parallel::quiet(|| {
             if lang == TS_GROUP {
                 build_one(lang, parses, |parses| {
-                    glia_graph::build_typescript(repo, parses, |from, spec| {
+                    glia_graph::build_typescript_family(repo, parses, |from, spec| {
                         resolve_ts_source_aliased(from, spec, ts_aliases)
                     })
                 })

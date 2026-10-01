@@ -956,6 +956,7 @@ mod tests {
                 name: "Env.apiBaseUrl".into(),
                 value: "${…}://${…}/api".into(),
             },
+            NavFact::AbstractMethod,
         ]
     }
 

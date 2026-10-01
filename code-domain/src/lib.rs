@@ -1453,6 +1453,11 @@ pub enum NavFact {
     /// `apiBase` at library level) evaluates to the URL-shaped literal `value`,
     /// `${…}` for each interpolation.
     ValueLiteral { name: String, value: String },
+    /// TypeScript (CH.1b): this METHOD is an `abstract` member declared without
+    /// a body (recorded by the TS parser's `visit_abstract_method`); the graph
+    /// crate's `emit_abstract_implements` pairs a subclass method of the same
+    /// name with it as a method-level IMPLEMENTS.
+    AbstractMethod,
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,

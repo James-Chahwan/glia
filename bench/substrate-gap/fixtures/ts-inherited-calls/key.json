@@ -1,0 +1,72 @@
+{
+  "framework": "ts-inherited-calls",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "CH-1 (CH.1b): in the TypeScript family a `this.m()` whose own class defines no `m` binds to the nearest superclass along INHERITS_FROM that does (any depth, CALLS rule inherited_method), `super.m()` binds to the nearest strict superclass's `m`, and a subclass method named like an ABSTRACT member of a superclass IMPLEMENTS it (method level, A6.6's direction, rule abstract_override); a concrete override is not IMPLEMENTS. The @OnEvent listener is the entry, so liveness carries find -> load -> fetchOne (abstract) -> the implementer UserRepo::fetchOne. Baseline (HEAD f8a46c0): BaseRepo is no node (abstract_class_declaration unvisited, CH.1), so every row below is missing.",
+  "expect_nodes": [
+    {
+      "kind": "CLASS",
+      "name": "base-repo/BaseRepo"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "UserRepo/find",
+      "to": "BaseRepo/load",
+      "category": "CALLS",
+      "note": "this.load() inherited one level up"
+    },
+    {
+      "from": "AdminRepo/findAdmin",
+      "to": "BaseRepo/load",
+      "category": "CALLS",
+      "note": "this.load() inherited two levels up"
+    },
+    {
+      "from": "AdminRepo/findAdmin",
+      "to": "UserRepo/find",
+      "category": "CALLS",
+      "note": "this.find() inherited one level up, across files"
+    },
+    {
+      "from": "AdminRepo/findAdmin",
+      "to": "UserRepo/describe",
+      "category": "CALLS",
+      "note": "this.describe() binds the NEAREST definer (UserRepo's override), not BaseRepo's"
+    },
+    {
+      "from": "UserRepo/describe",
+      "to": "BaseRepo/describe",
+      "category": "CALLS",
+      "note": "super.describe() skips the own override"
+    },
+    {
+      "from": "UserRepo/fetchOne",
+      "to": "BaseRepo/fetchOne",
+      "category": "IMPLEMENTS",
+      "note": "implements the abstract member (method level)"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src/user-repo/UserRepo/describe",
+      "to": "src/base-repo/BaseRepo/describe",
+      "category": "IMPLEMENTS",
+      "note": "a concrete override is not IMPLEMENTS"
+    },
+    {
+      "from": "src/user-repo/UserRepo/describe",
+      "to": "src/user-repo/UserRepo/describe",
+      "category": "CALLS",
+      "note": "super.describe() never binds to the override itself"
+    },
+    {
+      "from": "src/admin-repo/AdminRepo/findAdmin",
+      "to": "src/base-repo/BaseRepo/describe",
+      "category": "CALLS",
+      "note": "the nearest definer wins: UserRepo overrides describe"
+    }
+  ]
+}

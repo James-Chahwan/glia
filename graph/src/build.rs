@@ -11,8 +11,9 @@ use glia_code_domain::{
 use glia_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 
 use crate::calls::{
-    EvidenceTally, emit_method_level_implements, enclosing_class_or_struct, enclosing_module,
-    graph_evidence, push_edge, resolve_calls, resolve_refs, unique_global_type,
+    EvidenceTally, InheritStats, emit_abstract_implements, emit_method_level_implements,
+    enclosing_class_or_struct, enclosing_module, graph_evidence, push_edge, resolve_calls,
+    resolve_inherited_calls, resolve_refs, unique_global_type,
 };
 use crate::cpp_scope::{CppScope, implicit_this};
 use crate::go_mounts::MountStats;
@@ -191,10 +192,53 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
 /// extension names, else the one the importer's language loads first
 /// (`imports::SameStem`); builders print the `[imports] same-stem
 /// picks` marker when any such import was tried.
+///
+/// This builder also serves the languages without one of their own (Dart,
+/// Solidity, Terraform: `lang_build`'s `_` arm), so it runs no TypeScript
+/// class semantics; the TS family (TS / JS / React / Angular / Vue) builds
+/// through [`build_typescript_family`].
 pub fn build_typescript<R>(
     repo: RepoId,
     parses: Vec<FileParse>,
     resolve_source: R,
+) -> Result<RepoGraph, GraphError>
+where
+    R: Fn(&str, &str) -> Option<String>,
+{
+    build_ts_like(repo, parses, resolve_source, false)
+}
+
+/// Build the TypeScript family's graph (CH.1b): [`build_typescript`]'s
+/// passes, then, once `resolve_refs` has bound the heritage edges, the two
+/// passes that follow INHERITS_FROM: an unbound `this.m()` / `super.m()`
+/// binds to the nearest superclass defining `m`
+/// (`calls::resolve_inherited_calls`), and a subclass method named like an
+/// `abstract` member of a superclass IMPLEMENTS it
+/// (`calls::emit_abstract_implements`). Prints the `[ts-inherit]`
+/// marker when either did anything.
+///
+/// Two entry points because [`build_typescript`] also builds Dart, Solidity
+/// and Terraform, and Solidity writes a bare internal call as a self call:
+/// those graphs keep their output until a packet of their own measures the
+/// walk (it is language-free; adopting it is one flag here).
+pub fn build_typescript_family<R>(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+    resolve_source: R,
+) -> Result<RepoGraph, GraphError>
+where
+    R: Fn(&str, &str) -> Option<String>,
+{
+    build_ts_like(repo, parses, resolve_source, true)
+}
+
+/// The passes [`build_typescript`] and [`build_typescript_family`] share;
+/// `inherit` adds the family's INHERITS_FROM passes after `resolve_refs`.
+fn build_ts_like<R>(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+    resolve_source: R,
+    inherit: bool,
 ) -> Result<RepoGraph, GraphError>
 where
     R: Fn(&str, &str) -> Option<String>,
@@ -207,6 +251,12 @@ where
     let mut tally = EvidenceTally::default();
     resolve_calls(&mut g, &all_calls, |_, _| None, &mut tally);
     resolve_refs(&mut g, &all_refs, &mut tally);
+    if inherit {
+        let mut inh = InheritStats::default();
+        resolve_inherited_calls(&mut g, &mut inh);
+        emit_abstract_implements(&mut g, &mut inh);
+        inh.report();
+    }
     emit_method_level_implements(&mut g);
     tally.report();
     Ok(g)
@@ -3202,6 +3252,13 @@ mod tests {
         let (file, [_, iface_get, _, cls_get, _]) = iface_and_impl();
         let g = build_typescript(repo(), vec![file], |_, _| None).unwrap();
         assert!(implements(&g).contains(&(cls_get, iface_get)));
+        // CH.1b: the TS family's builder runs it too, after its own passes.
+        let (file, [_, iface_get, _, cls_get, _]) = iface_and_impl();
+        let mut g = build_typescript_family(repo(), vec![file], |_, _| None).unwrap();
+        assert!(implements(&g).contains(&(cls_get, iface_get)));
+        let before = g.edges.len();
+        crate::calls::emit_method_level_implements(&mut g);
+        assert_eq!(g.edges.len(), before, "re-running the pass must not duplicate");
     }
 
     /// Two implementors of one interface, several methods: the emitted edge

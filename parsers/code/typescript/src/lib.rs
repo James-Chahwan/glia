@@ -16,6 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use glia_code_domain::NavFact;
 use glia_code_domain::data_entity;
 use glia_code_domain::di_stats::{self, DiShape};
 use glia_code_domain::endpoint;
@@ -1221,6 +1222,10 @@ fn visit_abstract_method(
         node_kind::METHOD,
         Some(class_id),
     );
+    // CH.1b: the graph crate pairs a subclass method of this name with it
+    // (`emit_abstract_implements`). A repeated signature returned above, so
+    // one fact per METHOD.
+    acc.nav.record_fact(method_id, NavFact::AbstractMethod);
     acc.abstract_stats.methods += 1;
 }
 
@@ -1970,6 +1975,11 @@ fn extract_call_qualifier(call: TsNode, src: &[u8]) -> Option<CallQualifier> {
             let prop = func.child_by_field_name("property")?;
             let name = text(prop, src).to_string();
             match object.kind() {
+                // CH.1b: `super.m()` is the superclass chain's `m`, skipping
+                // the caller's own class; the graph crate's
+                // `resolve_inherited_calls` binds it along INHERITS_FROM.
+                // `super(...)` has callee kind `super`, not a member: None.
+                "super" => Some(CallQualifier::SuperMethod(name)),
                 "this" => Some(CallQualifier::SelfMethod(name)),
                 "identifier" => Some(CallQualifier::Attribute {
                     base: text(object, src).to_string(),
@@ -4771,5 +4781,59 @@ export abstract class BaseRepo<T> {
         let parse = parse_file(src, "src/f.ts", "src::f", repo()).unwrap();
         let f = id(node_kind::FUNCTION, "src::f::f");
         assert_eq!(call_site_names(&parse, f), vec!["h".to_string()]);
+    }
+
+    // ---- CH.1b: abstract-member facts and `super.m()` -------------------------
+
+    /// Every abstract member carries `NavFact::AbstractMethod` (the graph
+    /// crate pairs its overrides with it); a concrete member carries none,
+    /// and a repeated signature records the fact once.
+    #[test]
+    fn abstract_member_carries_the_fact() {
+        let parse = parse_file(BASE_REPO, "src/base-repo.ts", "src::base-repo", repo()).unwrap();
+        let m = |name: &str| id(node_kind::METHOD, &format!("src::base-repo::BaseRepo::{name}"));
+        for name in ["fetchOne", "label"] {
+            assert_eq!(
+                parse.nav.nav_facts.get(&m(name)),
+                Some(&vec![NavFact::AbstractMethod]),
+                "{name} is abstract"
+            );
+        }
+        for name in ["load", "describe"] {
+            assert!(!parse.nav.nav_facts.contains_key(&m(name)), "{name} is concrete");
+        }
+        let odd = "abstract class C {\n  abstract m(): void;\n  abstract m(): void;\n  n() {}\n}\n";
+        let parse = parse_file(odd, "src/c.ts", "src::c", repo()).unwrap();
+        assert_eq!(
+            parse.nav.nav_facts.get(&id(node_kind::METHOD, "src::c::C::m")),
+            Some(&vec![NavFact::AbstractMethod])
+        );
+        assert!(!parse.nav.nav_facts.contains_key(&id(node_kind::METHOD, "src::c::C::n")));
+    }
+
+    /// `super.m()` is a SuperMethod CallSite at the call's row, never a
+    /// ComplexReceiver on `super`; `this.n()` still binds in-file; a
+    /// `super(...)` constructor call is no call site at all.
+    #[test]
+    fn super_call_is_super_method() {
+        let src = "class B { m() {} }\nclass C extends B {\n  m() { super.m(); this.n(); }\n  \
+                   n() {}\n  constructor() { super(); }\n}\n";
+        let parse = parse_file(src, "src/c.ts", "src::c", repo()).unwrap();
+        let c_m = id(node_kind::METHOD, "src::c::C::m");
+        let c_n = id(node_kind::METHOD, "src::c::C::n");
+        let from_c_m: Vec<(&CallQualifier, u32)> =
+            parse.calls.iter().filter(|c| c.from == c_m).map(|c| (&c.qualifier, c.line)).collect();
+        assert_eq!(from_c_m, vec![(&CallQualifier::SuperMethod("m".to_string()), 2)]);
+        assert!(
+            !parse.calls.iter().any(|c| matches!(
+                &c.qualifier,
+                CallQualifier::ComplexReceiver { receiver, .. } if receiver == "super"
+            )),
+            "{:?}",
+            parse.calls
+        );
+        assert!(has_edge(&parse, c_m, c_n, edge_category::CALLS), "this.n() binds in-file");
+        let ctor = id(node_kind::METHOD, "src::c::C::constructor");
+        assert!(!parse.calls.iter().any(|c| c.from == ctor), "{:?}", parse.calls);
     }
 }
