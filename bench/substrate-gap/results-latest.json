@@ -181,17 +181,15 @@
         "matrix/csharp/amqp"
       ],
       "forbid": [
-        2,
+        3,
         3
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [
-        "forbid violated"
-      ],
+      "reasons": [],
       "route": [
         1,
         1
@@ -879,16 +877,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         3,
         3
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        2,
+        3,
         3
       ],
       "via": "test"
@@ -2565,7 +2561,7 @@
     },
     "go/eventbus": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -2575,17 +2571,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "eventbus"
     },
     "go/flags": {
       "extract": [
@@ -2688,14 +2684,15 @@
     },
     "go/http_server": {
       "extract": [
-        11,
-        11
+        13,
+        13
       ],
       "fixtures": [
         "fixtures/angular-http-calls",
         "fixtures/dart-http-dio",
         "fixtures/go-handled-by",
         "fixtures/go-receiver-method-handlers",
+        "fixtures/go-route-mount-owners",
         "fixtures/http-base-prefix",
         "fixtures/react-http_calls",
         "fixtures/swift-http",
@@ -2704,20 +2701,20 @@
         "fixtures/xstack-ts-go-http"
       ],
       "forbid": [
-        3,
-        3
+        5,
+        5
       ],
       "level": "full",
       "literal": [
-        10,
-        10
+        12,
+        12
       ],
       "reasons": [
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        16,
-        16
+        18,
+        18
       ],
       "via": "http"
     },
@@ -2808,7 +2805,7 @@
         "matrix/go/kafka"
       ],
       "forbid": [
-        2,
+        3,
         4
       ],
       "level": "partial",
@@ -3085,16 +3082,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        2,
         2
       ],
       "via": "test"
@@ -3222,7 +3217,7 @@
     },
     "java/cli_inv": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -3232,17 +3227,17 @@
         1,
         1
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "cli"
     },
     "java/config": {
       "extract": [
@@ -3824,16 +3819,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         3,
         3
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        2,
+        3,
         3
       ],
       "via": "test"
@@ -4690,16 +4683,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        2,
         2
       ],
       "via": "test"
@@ -4739,17 +4730,15 @@
         "matrix/python/amqp"
       ],
       "forbid": [
-        1,
+        3,
         3
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [
-        "forbid violated"
-      ],
+      "reasons": [],
       "route": [
         1,
         1
@@ -5400,7 +5389,7 @@
     },
     "python/taskq": {
       "extract": [
-        3,
+        4,
         4
       ],
       "fixtures": [
@@ -5411,16 +5400,14 @@
         5,
         5
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        3,
+        4,
         4
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        2,
         2
       ],
       "via": "queue"
@@ -6895,16 +6882,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        2,
         2
       ],
       "via": "test"
@@ -7862,21 +7847,17 @@
         "matrix/typescript/amqp"
       ],
       "forbid": [
-        3,
+        4,
         4
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "forbid violated",
-        "literal lost",
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "queue"
@@ -8547,17 +8528,15 @@
         "matrix/typescript/taskq"
       ],
       "forbid": [
-        2,
+        3,
         3
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [
-        "forbid violated"
-      ],
+      "reasons": [],
       "route": [
         1,
         1
@@ -8738,6 +8717,7 @@
     "fixtures/scip-python-dict-dispatch",
     "fixtures/sdd-quokka-feature",
     "fixtures/sdd-speckit-features",
+    "fixtures/self-scan-literal-channels",
     "fixtures/self-scan-literal-needles",
     "fixtures/solidity-natspec",
     "fixtures/solidity-state_var",
@@ -8756,6 +8736,7 @@
     "fixtures/ts-abstract-class",
     "fixtures/ts-decorator-anchor",
     "fixtures/ts-enum-members",
+    "fixtures/ts-inherited-calls",
     "fixtures/ts-route-per-method",
     "fixtures/walk-dotnet-obj",
     "fixtures/walk-gitignore-semantics",
@@ -8916,11 +8897,11 @@
   "totals": {
     "covered": 346,
     "error": 0,
-    "full": 208,
+    "full": 220,
     "grid": 510,
     "n/a": 28,
-    "none": 91,
-    "partial": 47,
+    "none": 88,
+    "partial": 38,
     "unknown": 136
   },
   "vocabulary": {

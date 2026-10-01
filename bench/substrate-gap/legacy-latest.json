@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 329,
+  "fixtures": 332,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -715,6 +715,13 @@
       "language": "go",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "go-route-mount-owners": {
+      "framework": "go-route-mount-owners",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0
       }
     },
     "go-route-mounts": {
@@ -1623,6 +1630,11 @@
         "READS_CONFIG": 1.0
       }
     },
+    "self-scan-literal-channels": {
+      "framework": "self-scan-literal-channels",
+      "language": "rust",
+      "per_category": {}
+    },
     "self-scan-literal-needles": {
       "framework": "self-scan-literal-needles",
       "language": "rust",
@@ -1860,6 +1872,14 @@
       "language": "typescript",
       "per_category": {
         "IMPORTS": 1.0
+      }
+    },
+    "ts-inherited-calls": {
+      "framework": "ts-inherited-calls",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPLEMENTS": 1.0
       }
     },
     "ts-nest-di": {
