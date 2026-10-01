@@ -189,6 +189,12 @@ pub fn parse_file_with_modules(
             acc.closure_bodies, acc.closure_calls, acc.route_literals_skipped
         );
     }
+    if acc.var_init_calls + acc.var_literal_bodies > 0 {
+        eprintln!(
+            "[go-calls] package-var initialisers calls={} literal bodies={} literal calls={} vars={} in {file_rel_path}",
+            acc.var_init_calls, acc.var_literal_bodies, acc.var_literal_calls, acc.var_call_owners
+        );
+    }
     if acc.receiver_handlers > 0 {
         eprintln!(
             "[go-routes] receiver-method handlers={} in {file_rel_path}",
@@ -295,6 +301,15 @@ struct Acc {
     closure_bodies: usize,
     closure_calls: usize,
     route_literals_skipped: usize,
+    /// CI.1: what the package-var initialisers of this file gave their
+    /// STATE_VARs — CallSites made directly in an initialiser, the func
+    /// literals it holds that were walked, the CallSites inside those
+    /// literals, and the vars that own at least one call or literal — the
+    /// `[go-calls] package-var initialisers` marker's counters.
+    var_init_calls: usize,
+    var_literal_bodies: usize,
+    var_literal_calls: usize,
+    var_call_owners: usize,
     /// CA.2a: the type parameters of the callable being visited (its own
     /// `[T any]`, or a generic receiver's `Collection[T]`), so a receiver
     /// fact never types a local or result by one. Set and cleared by
@@ -833,10 +848,31 @@ fn emit_state_var_spec(
             confidence: Confidence::Strong,
             cells: Vec::new(),
         });
-        // A7.6: `var ProviderSet = wire.NewSet(NewA, NewB)` registers its
-        // providers from the var, which a `wire.Build(ProviderSet)` then names.
-        if let Some(value) = values.get(i) {
-            collect_provider_sets_in(*value, src, id, acc);
+        // CI.1: the calls made while evaluating this name's initialiser are
+        // the STATE_VAR's — the direct ones (`var svc = New()`), then those
+        // inside any func literal it holds (`var f = func() { g() }`, nested
+        // in a composite too). The walk starts at the VALUE, never the spec:
+        // `record_body_locals`' `var_spec` arm would record the var as a
+        // local of itself (CA.2a records it on the MODULE scope above). The
+        // same walk runs A7.6's detector, so `var ProviderSet =
+        // wire.NewSet(NewA, NewB)` registers its providers from the var, which
+        // a `wire.Build(ProviderSet)` then names. A constant initialiser may
+        // call only builtins, so a `const_spec` is not walked.
+        if spec.kind() == "var_spec"
+            && let Some(value) = values.get(i)
+        {
+            let before = acc.calls.len();
+            let mut literals = Vec::new();
+            collect_calls_at(*value, src, id, None, repo, file_rel, acc, &mut literals);
+            let direct = acc.calls.len() - before;
+            let (bodies, calls) =
+                collect_closure_calls(literals, src, id, None, repo, file_rel, acc);
+            acc.var_init_calls += direct;
+            acc.var_literal_bodies += bodies;
+            acc.var_literal_calls += calls;
+            if direct + bodies > 0 {
+                acc.var_call_owners += 1;
+            }
         }
     }
 }
@@ -933,7 +969,9 @@ fn visit_function(
             package_qname,
         };
         collect_routes_in(&callable, src, file_rel, module_id, repo, acc);
-        collect_closure_calls(closures, src, id, None, repo, file_rel, acc);
+        let (bodies, calls) = collect_closure_calls(closures, src, id, None, repo, file_rel, acc);
+        acc.closure_bodies += bodies;
+        acc.closure_calls += calls;
     }
     acc.type_params.clear();
 }
@@ -1037,7 +1075,10 @@ fn visit_method(
         };
         collect_routes_in(&callable, src, file_rel, module_id, repo, acc);
         acc.route_receiver = None;
-        collect_closure_calls(closures, src, id, receiver_var, repo, file_rel, acc);
+        let (bodies, calls) =
+            collect_closure_calls(closures, src, id, receiver_var, repo, file_rel, acc);
+        acc.closure_bodies += bodies;
+        acc.closure_calls += calls;
     }
     acc.type_params.clear();
 }
@@ -1427,44 +1468,56 @@ fn collect_calls_in<'t>(
 ) {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        // CA.2a: the locals this statement binds, on the enclosing fn.
-        record_body_locals(child, src, from, receiver_var, acc);
-        if child.kind() == "call_expression" {
-            if let Some(q) = classify_call(child, src, receiver_var) {
-                acc.calls.push(CallSite {
-                    from,
-                    qualifier: q,
-                    line: line_at(child),
-                });
-            }
-            // Pattern A: outbound client HTTP call (`http.Get('http://…/x')`) →
-            // ENDPOINT node so HttpStackResolver can pair it with a server ROUTE.
-            try_detect_go_endpoint(child, src, from, repo, file_rel, acc);
-            // Raw SQL (`db.Query("SELECT … FROM users")`) is not read here:
-            // the cross-cutting data-entities extractor reads every SQL
-            // literal with LG.3b's rejects and the engine re-homes its edge
-            // to this function (LE.4a, `anchor::rehome_to_owner`).
-            // GORM: `db.Model(&User{})` → the model-keyed entity,
-            // `db.Table("x")` → the table-keyed one, from the same `from` (A13.12).
-            try_detect_gorm_access(child, src, from, repo, acc);
-            // DI container registration: `wire.Build(NewA, NewB)` → INJECTS
-            // from the injector (`from`) to each provider (A7.6).
-            try_detect_go_provider_set(child, src, from, acc);
-        }
-        if child.kind() == "func_literal" {
-            closures.push(child);
-        } else {
-            collect_calls_in(
-                child,
-                src,
+        collect_calls_at(child, src, from, receiver_var, repo, file_rel, acc, closures);
+    }
+}
+
+/// [`collect_calls_in`] for one node: `node` itself is visited as a statement
+/// child of a body is — its locals, its CallSite and detectors when it is a
+/// call, then its children, unless it is a `func_literal`, which is queued on
+/// `closures` instead. A package var's initialiser enters here (CI.1), so its
+/// direct calls and the literals it holds go through the same code as a
+/// function body's.
+#[allow(clippy::too_many_arguments)]
+fn collect_calls_at<'t>(
+    node: TsNode<'t>,
+    src: &[u8],
+    from: NodeId,
+    receiver_var: Option<&str>,
+    repo: RepoId,
+    file_rel: &str,
+    acc: &mut Acc,
+    closures: &mut Vec<TsNode<'t>>,
+) {
+    // CA.2a: the locals this statement binds, on the enclosing fn.
+    record_body_locals(node, src, from, receiver_var, acc);
+    if node.kind() == "call_expression" {
+        if let Some(q) = classify_call(node, src, receiver_var) {
+            acc.calls.push(CallSite {
                 from,
-                receiver_var,
-                repo,
-                file_rel,
-                acc,
-                closures,
-            );
+                qualifier: q,
+                line: line_at(node),
+            });
         }
+        // Pattern A: outbound client HTTP call (`http.Get('http://…/x')`) →
+        // ENDPOINT node so HttpStackResolver can pair it with a server ROUTE.
+        try_detect_go_endpoint(node, src, from, repo, file_rel, acc);
+        // Raw SQL (`db.Query("SELECT … FROM users")`) is not read here:
+        // the cross-cutting data-entities extractor reads every SQL
+        // literal with LG.3b's rejects and the engine re-homes its edge
+        // to this function (LE.4a, `anchor::rehome_to_owner`).
+        // GORM: `db.Model(&User{})` → the model-keyed entity,
+        // `db.Table("x")` → the table-keyed one, from the same `from` (A13.12).
+        try_detect_gorm_access(node, src, from, repo, acc);
+        // DI container registration: `wire.Build(NewA, NewB)` → INJECTS
+        // from the injector (`from`) to each provider (A7.6); from a
+        // package var, `var Set = wire.NewSet(..)` (CI.1).
+        try_detect_go_provider_set(node, src, from, acc);
+    }
+    if node.kind() == "func_literal" {
+        closures.push(node);
+    } else {
+        collect_calls_in(node, src, from, receiver_var, repo, file_rel, acc, closures);
     }
 }
 
@@ -1478,6 +1531,11 @@ fn collect_calls_in<'t>(
 /// calls. Drained FIFO (breadth-first, each level in source order), after
 /// every CallSite of the body proper, so a function without a closure parses
 /// to the same FileParse as before.
+///
+/// Returns `(bodies, calls)`: the literals walked and the CallSites pushed
+/// from them. A function's caller adds them to CA.1's `[go-calls]
+/// func-literal` counters, a package var's (CI.1) to the `package-var
+/// initialisers` ones.
 #[allow(clippy::too_many_arguments)]
 fn collect_closure_calls(
     closures: Vec<TsNode>,
@@ -1487,15 +1545,16 @@ fn collect_closure_calls(
     repo: RepoId,
     file_rel: &str,
     acc: &mut Acc,
-) {
+) -> (usize, usize) {
     let calls_before = acc.calls.len();
+    let mut bodies = 0usize;
     let mut queue: std::collections::VecDeque<TsNode> = closures.into();
     while let Some(lit) = queue.pop_front() {
         if acc.func_literal_handlers.contains(&lit.start_byte()) {
             acc.route_literals_skipped += 1;
             continue;
         }
-        acc.closure_bodies += 1;
+        bodies += 1;
         // CA.2a: a drained literal's parameters are locals of `from`, as its
         // calls are `from`'s CallSites.
         record_params(lit.child_by_field_name("parameters"), src, from, acc);
@@ -1515,7 +1574,7 @@ fn collect_closure_calls(
         );
         queue.extend(nested);
     }
-    acc.closure_calls += acc.calls.len() - calls_before;
+    (bodies, acc.calls.len() - calls_before)
 }
 
 fn classify_call(call: TsNode, src: &[u8], receiver_var: Option<&str>) -> Option<CallQualifier> {
@@ -2432,25 +2491,6 @@ fn provider_qualifier(
             provider_qualifier(first, src, containers)
         }
         _ => None,
-    }
-}
-
-/// Walk a package-level initialiser for registrations, e.g.
-/// `var Set = wire.NewSet(...)` or `var Module = fx.Module("m", fx.Provide(...))`.
-/// Function bodies do not come through here; `collect_calls_in` covers them.
-fn collect_provider_sets_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
-    if acc.di_containers.is_empty() {
-        return;
-    }
-    if node.kind() == "call_expression" {
-        try_detect_go_provider_set(node, src, from, acc);
-    }
-    if node.kind() == "func_literal" {
-        return;
-    }
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        collect_provider_sets_in(child, src, from, acc);
     }
 }
 
@@ -8192,5 +8232,198 @@ func serve(mux *http.ServeMux, rg *gin.RouterGroup, router *Router) {
                 param_mount("pkg::serve", 1, "")
             )]
         );
+    }
+
+    // ---- CI.1: package-var initialiser calls belong to the var's STATE_VAR ----
+
+    /// The bench fixture's source (`go-package-var-closures`), so the unit
+    /// tests and the graded fixture describe one program.
+    const PKG_VAR_HOOKS: &str = include_str!(
+        "../../../../bench/substrate-gap/fixtures/go-package-var-closures/hooks/hooks.go"
+    );
+
+    fn hooks_parse() -> FileParse {
+        parse_file(PKG_VAR_HOOKS, "hooks/hooks.go", "hooks::hooks", "example.com/hooks", repo())
+            .unwrap()
+    }
+
+    fn state_var_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, qname)
+    }
+
+    #[test]
+    fn package_var_literal_calls_belong_to_the_var() {
+        let parse = hooks_parse();
+        let var = |name: &str| state_var_id(&format!("hooks::hooks::{name}"));
+        let row = |needle: &str| row_of(PKG_VAR_HOOKS, needle);
+        assert_eq!(
+            calls_from(&parse, var("newStore")),
+            vec![(attr("store", "Open"), row("return store.Open()"))]
+        );
+        assert_eq!(
+            calls_from(&parse, var("timeNow")),
+            vec![(bare("clock"), row("return clock()"))]
+        );
+        assert_eq!(
+            calls_from(&parse, var("onEvict")),
+            vec![
+                (attr("store", "Evict"), row("store.Evict(key)")),
+                (bare("audit"), row("audit(key)")),
+            ]
+        );
+        assert_eq!(
+            calls_from(&parse, var("handlers")),
+            vec![(bare("flush"), row("{ flush() }"))]
+        );
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "hooks::hooks");
+        assert_eq!(calls_from(&parse, module), vec![]);
+        // A literal is no declaration: no FUNCTION is minted for it.
+        let minted: Vec<&String> = parse
+            .nav
+            .qname_by_id
+            .iter()
+            .filter(|(id, q)| {
+                parse.nav.kind_by_id.get(*id) == Some(&node_kind::FUNCTION)
+                    && (q.ends_with("newStore") || q.ends_with("onEvict"))
+            })
+            .map(|(_, q)| q)
+            .collect();
+        assert!(minted.is_empty(), "{minted:?}");
+        for name in ["newStore", "onEvict"] {
+            let fn_id = func_id(&format!("hooks::hooks::{name}"));
+            assert!(!parse.nodes.iter().any(|n| n.id == fn_id), "FUNCTION {name}");
+        }
+    }
+
+    #[test]
+    fn nested_package_var_literals_are_drained() {
+        let source = r#"package xds
+
+import "sync"
+
+var once sync.Once
+
+var z string
+
+var getZone = func() string {
+    once.Do(func() {
+        fetch()
+    })
+    return z
+}
+
+func fetch() {}
+"#;
+        let parse = parse_file(source, "xds/utils.go", "xds", "", repo()).unwrap();
+        // The body first, then the nested literal it queued.
+        assert_eq!(
+            calls_from(&parse, state_var_id("xds::getZone")),
+            vec![
+                (attr("once", "Do"), row_of(source, "once.Do(func()")),
+                (bare("fetch"), row_of(source, "        fetch()")),
+            ]
+        );
+    }
+
+    #[test]
+    fn package_var_literal_params_are_locals_of_the_var() {
+        let source = r#"package app
+
+import "example.com/app/store"
+
+var onSave = func(repo *store.Repo) {
+    repo.Save()
+}
+"#;
+        let parse = parse_file(source, "app/hooks.go", "app", "example.com/app", repo()).unwrap();
+        let on_save = state_var_id("app::onSave");
+        assert_eq!(
+            locals_of(&parse, on_save),
+            Some(pairs(&[("repo", "store.Repo")]))
+        );
+        assert_eq!(
+            calls_from(&parse, on_save),
+            vec![(attr("repo", "Save"), row_of(source, "repo.Save()"))]
+        );
+    }
+
+    #[test]
+    fn package_var_initialiser_calls_belong_to_the_var() {
+        let parse = hooks_parse();
+        let var = |name: &str| state_var_id(&format!("hooks::hooks::{name}"));
+        let row = |needle: &str| row_of(PKG_VAR_HOOKS, needle);
+        assert_eq!(
+            calls_from(&parse, var("defaultStore")),
+            vec![(attr("store", "Open"), 20)]
+        );
+        assert_eq!(row("var defaultStore = store.Open()"), 20);
+        let paired = row("limit, ttl = clamp(10), clamp(20)");
+        assert_eq!(calls_from(&parse, var("limit")), vec![(bare("clamp"), paired)]);
+        assert_eq!(calls_from(&parse, var("ttl")), vec![(bare("clamp"), paired)]);
+        // One multi-value initialiser pairs with the first name only.
+        assert_eq!(
+            calls_from(&parse, var("lo")),
+            vec![(bare("bounds"), row("lo, hi     = bounds()"))]
+        );
+        assert_eq!(calls_from(&parse, var("hi")), vec![]);
+
+        let source = r#"package app
+
+import "github.com/google/wire"
+
+var svc = New()
+var n = 3
+var ProviderSet = wire.NewSet(NewA)
+const c = len("ab")
+"#;
+        let parse = parse_file(source, "app/set.go", "app", "", repo()).unwrap();
+        let (svc, set) = (state_var_id("app::svc"), state_var_id("app::ProviderSet"));
+        assert_eq!(
+            calls_from(&parse, svc),
+            vec![(bare("New"), row_of(source, "var svc = New()"))]
+        );
+        assert_eq!(
+            calls_from(&parse, set),
+            vec![(attr("wire", "NewSet"), row_of(source, "var ProviderSet"))]
+        );
+        // `n` is noise-gated, the const is not walked: nothing else calls.
+        let others: Vec<&CallSite> = parse
+            .calls
+            .iter()
+            .filter(|c| c.from != svc && c.from != set)
+            .collect();
+        assert!(others.is_empty(), "{others:?}");
+        assert!(
+            parse.nodes.iter().any(|n| n.id == state_var_id("app::c")),
+            "the const keeps its STATE_VAR"
+        );
+        // The provider walk is the call walk: each ref once, not doubled.
+        assert_eq!(injects_refs(&parse), vec![(set, bare("NewA"))]);
+    }
+
+    #[test]
+    fn initialiser_walk_records_no_locals() {
+        let source = r#"package app
+
+import "example.com/app/store"
+
+var svc = New()
+var onSave = func(repo *store.Repo) {}
+"#;
+        let parse = parse_file(source, "app/vars.go", "app", "example.com/app", repo()).unwrap();
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "app");
+        let (svc, on_save) = (state_var_id("app::svc"), state_var_id("app::onSave"));
+        let module_locals = locals_of(&parse, module).unwrap_or_default();
+        assert!(
+            module_locals.contains(&("svc".to_string(), "New()".to_string())),
+            "{module_locals:?}"
+        );
+        assert_eq!(
+            locals_of(&parse, on_save),
+            Some(pairs(&[("repo", "store.Repo")]))
+        );
+        assert_eq!(locals_of(&parse, svc), None);
+        // The MODULE scope and the literal's var scope, nothing else.
+        assert_eq!(parse.nav.local_types.len(), 2);
     }
 }

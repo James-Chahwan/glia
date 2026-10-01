@@ -1,0 +1,103 @@
+{
+  "framework": "go-package-var-closures",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "calls",
+  "cells": [
+    "go/calls"
+  ],
+  "note": "CI-1: calls inside a func literal held by a package-level var (`var newStore = func() ..`, a grouped `var ( .. )` block, a literal nested in a composite initialiser) are CALLS of the var's STATE_VAR node: the literal is no function body, so no FUNCTION is minted for it. A call made directly in a package-var initialiser (`var defaultStore = store.Open()`, a multi-name spec paired by position) is a CALLS of that var's STATE_VAR too. Callers already CALL the STATE_VAR (`newStore()` in Run, the control), so a caller reaches the literal's callees through it. A route handler held in a package var (`r.GET(\"/health\", health)`) is HANDLED_BY the STATE_VAR (the control) and its body's calls hang off it.",
+  "expect_edges": [
+    {
+      "from": "hooks::hooks::Run",
+      "to": "hooks::hooks::newStore",
+      "category": "CALLS",
+      "note": "CONTROL: a call of a func-valued package var binds the STATE_VAR at HEAD"
+    },
+    {
+      "from": "hooks::hooks::newStore",
+      "to": "store::store::Open",
+      "category": "CALLS"
+    },
+    {
+      "from": "hooks::hooks::timeNow",
+      "to": "hooks::hooks::clock",
+      "category": "CALLS",
+      "note": "grouped var block"
+    },
+    {
+      "from": "hooks::hooks::onEvict",
+      "to": "store::store::Evict",
+      "category": "CALLS"
+    },
+    {
+      "from": "hooks::hooks::onEvict",
+      "to": "hooks::hooks::audit",
+      "category": "CALLS"
+    },
+    {
+      "from": "hooks::hooks::handlers",
+      "to": "hooks::hooks::flush",
+      "category": "CALLS",
+      "note": "literal nested in a composite initialiser"
+    },
+    {
+      "from": "hooks::hooks::defaultStore",
+      "to": "store::store::Open",
+      "category": "CALLS",
+      "note": "a call made directly in a package-var initialiser"
+    },
+    {
+      "from": "hooks::hooks::limit",
+      "to": "hooks::hooks::clamp",
+      "category": "CALLS",
+      "note": "multi-name spec: each name owns its paired initialiser"
+    },
+    {
+      "from": "hooks::hooks::ttl",
+      "to": "hooks::hooks::clamp",
+      "category": "CALLS"
+    },
+    {
+      "from": "hooks::hooks::lo",
+      "to": "hooks::hooks::bounds",
+      "category": "CALLS",
+      "note": "one multi-value initialiser pairs with the first name"
+    },
+    {
+      "from": "GET /health",
+      "to": "server::server::health",
+      "category": "HANDLED_BY",
+      "note": "CONTROL: handler held in a package var"
+    },
+    {
+      "from": "server::server::health",
+      "to": "server::server::writeHealth",
+      "category": "CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "FUNCTION",
+      "name": "newStore"
+    },
+    {
+      "kind": "FUNCTION",
+      "name": "onEvict"
+    },
+    {
+      "from": "hooks::hooks",
+      "to": "store::store::Open",
+      "category": "CALLS",
+      "note": "the MODULE is not the owner when a STATE_VAR exists"
+    },
+    {
+      "from": "hooks::hooks::hi",
+      "to": "hooks::hooks::bounds",
+      "category": "CALLS",
+      "note": "a multi-value initialiser is not repeated for every name"
+    }
+  ]
+}

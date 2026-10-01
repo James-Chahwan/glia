@@ -567,3 +567,44 @@ fn go_closure_call_carries_its_site_line() {
         "{file}:{line} is not the closure's call row"
     );
 }
+
+/// CI.1: a call made while evaluating a Go package var's initialiser — inside
+/// a func literal the var holds (`var run = func() { local() }`) or directly
+/// (`var n = local()`) — is a CALLS edge of the var's STATE_VAR whose site
+/// evidence names the call's own row.
+#[test]
+fn go_package_var_calls_carry_their_site_lines() {
+    let (_tmp, repo, m) = build(&[
+        ("go.mod", "module example.com/app\n\ngo 1.21\n"),
+        (
+            "main.go",
+            "package main\n\n\
+             func local() int {\n\treturn 2\n}\n\n\
+             var run = func() {\n\tlocal()\n}\n\n\
+             var n = local()\n",
+        ),
+    ]);
+    let nodes = node_index(&m);
+    let name = |id: &NodeId| nodes.get(id).map(|n| n.1.clone()).unwrap_or_default();
+    for (var, site) in [("run", "local()"), ("n", "var n = local()")] {
+        let calls: Vec<&Edge> = m
+            .all_edges()
+            .filter(|e| e.category == edge_category::CALLS && name(&e.from) == var)
+            .collect();
+        let shown: Vec<(String, String)> =
+            calls.iter().map(|e| (name(&e.from), name(&e.to))).collect();
+        assert_eq!(
+            shown,
+            vec![(var.to_string(), "local".to_string())],
+            "CALLS out of {var}"
+        );
+        assert_eq!(
+            nodes.get(&calls[0].from).map(|n| n.0),
+            Some(node_kind::STATE_VAR),
+            "{var} is the package var's STATE_VAR"
+        );
+        let (file, line) = site_of(calls[0]).unwrap();
+        let text = source_line(&repo, &file, line).unwrap();
+        assert_eq!(text.trim(), site, "{file}:{line} is not {var}'s call row");
+    }
+}
