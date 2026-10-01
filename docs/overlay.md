@@ -369,6 +369,16 @@ On every build that finds the file, stderr carries
 The counts are skip plus tests patterns for `walk`, qname patterns for `entrypoints`, keys for
 `constants`, and stanzas for every other section.
 
+From Python (`glia_py`, CK.1): `overlay_propose(repo_paths, categories=None, top_k=20,
+snippet_lines=3)`, `overlay_try(repo_paths, candidate, leave_one_out=True)` and
+`overlay_accept(repo_path, candidate=None, only=None, remove=None, dry_run=False)` run the same
+three steps and return the `--json` objects as dicts. The first of `repo_paths` is the primary
+repo, whose `.glia/overlay.toml` the loop reads; the rest merge in, as `--with` does. `candidate`
+is the candidate's TOML text, not a path. A refusal raises `ValueError` with the engine's message.
+The markers end `surface=py`, and the candidate marker says `file=-`. They write what the
+commands write: `overlay_propose` nothing, `overlay_try` only the primary repo's parse cache (one
+repo), `overlay_accept` only `.glia/overlay.toml`.
+
 ## History snapshot
 
 Git history is a build input too, but not an overlay section. `glia history sync <repo>`

@@ -1,0 +1,4 @@
+# pyo3 surface of py/src/overlay_loop.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+fn overlay_accept(repo_path: &str, candidate: Option<&str> = None, only: Option<Vec<String>> = None, remove: Option<Vec<String>> = None, dry_run: bool = false) -> PyResult<Py<PyAny>>
+fn overlay_propose(repo_paths: Vec<String>, categories: Option<Vec<String>> = None, top_k: usize = 20, snippet_lines: usize = 3) -> PyResult<Py<PyAny>>
+fn overlay_try(repo_paths: Vec<String>, candidate: &str, leave_one_out: bool = true) -> PyResult<Py<PyAny>>
