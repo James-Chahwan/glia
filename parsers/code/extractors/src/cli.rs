@@ -2496,6 +2496,25 @@ const INVOCATION_PATTERNS: &[&str] = &[
     "std::process::Command::new(",
     "Command::new(",
     "system(",
+    // CL.10 — the JVM's two launch APIs. `ProcessBuilder(` serves Java's
+    // `new ProcessBuilder` and Kotlin's bare `ProcessBuilder` alike, each with
+    // a quoted argv. A list or array argument has its own needle ending at the
+    // inner bracket, so its quoted elements read as the argv; the outer
+    // needle's hit at the earlier offset sees an identifier (`List.of`) first
+    // and yields nothing. `Runtime.getRuntime().exec` with one string is a
+    // shell string, split by `scan_argv`. Not read: `new ProcessBuilder()`
+    // with a later `command(..)`, argv lists built elsewhere, and needles split
+    // by whitespace (`ProcessBuilder( List.of`).
+    // (No quoted literal follows a needle in this comment: the extractor runs
+    // over its own source too.)
+    "ProcessBuilder(",
+    "ProcessBuilder(List.of(",
+    "ProcessBuilder(Arrays.asList(",
+    "ProcessBuilder(listOf(",
+    "Runtime.getRuntime().exec(",
+    "Runtime.getRuntime().exec(new String[]{",
+    "Runtime.getRuntime().exec(new String[] {",
+    "Runtime.getRuntime().exec(arrayOf(",
 ];
 
 /// Most argv tokens [`scan_argv`] reads from one call site (the binary included).
@@ -2516,7 +2535,9 @@ pub fn extract_cli_invocation_nodes(
     // Keyed by the byte offset the arguments start at: `os.system(` and
     // `system(` (or `Command::new(` inside `std::process::Command::new(`) end at
     // the same `(`, so overlapping needles collapse to one call site, and the
-    // iteration is in source order.
+    // iteration is in source order. A nested needle (`ProcessBuilder(List.of(`)
+    // ends at a later offset than its outer one, whose hit reads no quoted token
+    // and so is never a site.
     let mut sites: std::collections::BTreeMap<usize, Vec<String>> = std::collections::BTreeMap::new();
     for &pattern in INVOCATION_PATTERNS {
         let mut search_from = 0;
@@ -3468,6 +3489,76 @@ def build():
         assert!(invocation("exec.Command(\"{tool}\")").0.is_empty());
         assert!(invocation("exec.Command(tool, \"x\")").0.is_empty());
         assert!(invocation("subprocess.run([\" \", \"x\"])").0.is_empty());
+    }
+
+    // ---- CL.10: JVM process launches ----------------------------------------
+
+    /// The matrix/java/cli_inv probe's launcher, read from the fixture.
+    const JAVA_CLI_INV_EXPORTER: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/java/cli_inv/client/Exporter.java"
+    ));
+
+    #[test]
+    fn java_process_builder_names_the_binary() {
+        // `new ProcessBuilder("invctl", "export")`: argv[0] is the binary, the
+        // subcommand rides the argv cell and never becomes a node of its own.
+        for source in [
+            JAVA_CLI_INV_EXPORTER,
+            // Kotlin constructs without `new`.
+            "val p = ProcessBuilder(\"invctl\", \"export\").inheritIO().start()",
+        ] {
+            let (qnames, argv) = invocation(source);
+            assert_eq!(qnames, vec!["cli_invoke:invctl"], "{source}");
+            assert_eq!(argv, vec![vec!["export"]], "{source}");
+            assert!(!qnames.iter().any(|q| q == "cli_invoke:export"), "{source}");
+        }
+        // No literal argv, or the argv set later through `command(..)`: not read.
+        assert!(invocation("Process p = new ProcessBuilder(cmd).start();").0.is_empty());
+        assert!(invocation("new ProcessBuilder().command(\"invctl\").start();").0.is_empty());
+    }
+
+    #[test]
+    fn java_process_builder_list_forms() {
+        let (qnames, argv) =
+            invocation("new ProcessBuilder(List.of(\"invctl\", \"export\", \"--all\")).start();");
+        assert_eq!(qnames, vec!["cli_invoke:invctl"]);
+        assert_eq!(argv, vec![vec!["export", "--all"]]);
+
+        let (qnames, argv) = invocation("new ProcessBuilder(Arrays.asList(\"invctl\", \"import\"));");
+        assert_eq!(qnames, vec!["cli_invoke:invctl"]);
+        assert_eq!(argv, vec![vec!["import"]]);
+
+        // Kotlin's list literal.
+        let (qnames, argv) = invocation("ProcessBuilder(listOf(\"invctl\", \"sync\")).start()");
+        assert_eq!(qnames, vec!["cli_invoke:invctl"]);
+        assert_eq!(argv, vec![vec!["sync"]]);
+
+        // A list built elsewhere is not read.
+        assert!(invocation("new ProcessBuilder(List.of(tool, \"x\"));").0.is_empty());
+        assert!(invocation("new ProcessBuilder(Arrays.asList(args));").0.is_empty());
+    }
+
+    #[test]
+    fn java_runtime_exec_shell_string() {
+        // The shell-string form is split on whitespace.
+        let (qnames, argv) = invocation("Process p = Runtime.getRuntime().exec(\"invctl export --all\");");
+        assert_eq!(qnames, vec!["cli_invoke:invctl"]);
+        assert_eq!(argv, vec![vec!["export", "--all"]]);
+
+        // The String[] overload (the only non-deprecated one since Java 18), in
+        // both brace spellings, and Kotlin's `arrayOf`.
+        for source in [
+            "Runtime.getRuntime().exec(new String[]{\"invctl\", \"export\"});",
+            "Runtime.getRuntime().exec(new String[] {\"invctl\", \"export\"});",
+            "Runtime.getRuntime().exec(arrayOf(\"invctl\", \"export\"))",
+        ] {
+            let (qnames, argv) = invocation(source);
+            assert_eq!(qnames, vec!["cli_invoke:invctl"], "{source}");
+            assert_eq!(argv, vec![vec!["export"]], "{source}");
+        }
+
+        assert!(invocation("Runtime.getRuntime().exec(command);").0.is_empty());
     }
 
     #[test]
