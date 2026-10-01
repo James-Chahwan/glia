@@ -534,14 +534,16 @@ const METHOD_MODIFIERS: &[&str] = &[
 ];
 
 /// Client-side GRAPHQL_OPERATION nodes: the operation needles
-/// ([`scan_operation_needles`]) and the named operations of `` gql` ``
-/// templates ([`extract_gql_template_operations`]).
+/// ([`scan_operation_needles`]), the named operations of `` gql` ``
+/// templates ([`extract_gql_template_operations`]) and the literal documents
+/// of Go machinebox / C# GraphQL.Client requests ([`client_request_operations`],
+/// CL.6a).
 ///
 /// `path` selects CJ.1b's literal / comment guard: in a Rust or Python file an
-/// operation needle or `` gql` `` tag that starts in a string literal or
-/// comment mints nothing (`""` = no guard). Resolver / SDL extraction is never
-/// guarded: an SDL schema legitimately lives in a string literal. fired_on,
-/// once per call that refused one:
+/// operation needle, `` gql` `` tag or client request that starts in a string
+/// literal or comment mints nothing (`""` = no guard). Resolver / SDL
+/// extraction is never guarded: an SDL schema legitimately lives in a string
+/// literal. fired_on, once per call that refused one:
 /// `[code-guard] graphql_op lang=<rust|python> dropped=<n> path=<path>`.
 pub fn extract_graphql_operation_nodes(
     source: &str,
@@ -577,15 +579,23 @@ pub fn extract_graphql_operation_nodes(
     }
 
     let templates = extract_gql_template_operations(source, &mut guard);
+    let (requests, request_tally) = client_request_operations(source, &mut guard);
     guard.report("graphql_op");
-    for (name, at) in templates {
+    if graphql_debug()
+        && let Some(marker) = request_tally.marker()
+    {
+        eprintln!("{marker}");
+    }
+    let templates = templates.into_iter().map(|(name, at)| (name, at, Confidence::Strong));
+    let requests = requests.into_iter().map(|(name, at)| (name, at, Confidence::Medium));
+    for (name, at, confidence) in templates.chain(requests) {
         if seen.insert(name.clone()) {
             let qname = format!("graphql_op:{name}");
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRAPHQL_OPERATION, &qname);
             nodes.push(Node {
                 id,
                 repo,
-                confidence: Confidence::Strong,
+                confidence,
                 cells: vec![],
             });
             nav.record(id, &name, &qname, node_kind::GRAPHQL_OPERATION, Some(module_id));
@@ -1791,6 +1801,481 @@ fn extract_operation_from_body(body: &str) -> Option<String> {
 }
 
 // ============================================================================
+// CL.6a — Go machinebox / C# GraphQL.Client request documents
+// ============================================================================
+
+/// machinebox/graphql, as a whole quoted Go import path. The import line's
+/// alias (else `graphql`) is the receiver of its `NewRequest(` needle.
+const MACHINEBOX_IMPORT: &str = "\"github.com/machinebox/graphql\"";
+
+/// The namespace a C# file names (`using GraphQL.Client.Http;`) when it
+/// builds requests for GraphQL.Client.
+const GRAPHQL_CLIENT_NAMESPACE: &str = "GraphQL.Client";
+
+/// GraphQL.Client's request types, read after `new` (optionally qualified).
+const GRAPHQL_CLIENT_REQUESTS: &[&str] = &["GraphQLRequest", "GraphQLHttpRequest"];
+
+/// What one file's client request needles came to, for the
+/// `[graphql-ops] client-request` marker. Every counted needle lands in
+/// exactly one of `named` / `root_field` / `unread`.
+#[derive(Default, Debug)]
+struct ClientRequestTally {
+    machinebox: usize,
+    graphql_client: usize,
+    /// Minted under the document's operation name.
+    named: usize,
+    /// An anonymous document, minted under its first root field.
+    root_field: usize,
+    /// A non-literal document, or one with no readable root field.
+    unread: usize,
+}
+
+impl ClientRequestTally {
+    /// The marker line, or `None` for a file with no client request needle.
+    fn marker(&self) -> Option<String> {
+        (self.machinebox + self.graphql_client > 0).then(|| {
+            format!(
+                "[graphql-ops] client-request machinebox={} graphql-client={} named={} root_field={} unread={}",
+                self.machinebox, self.graphql_client, self.named, self.root_field, self.unread
+            )
+        })
+    }
+}
+
+/// CL.6a: the operations of the GraphQL client requests in `source`, as
+/// (name, needle byte offset) in source order, plus the marker tally:
+/// - Go: `<recv>.NewRequest(<literal>)` in a file importing
+///   machinebox/graphql ([`machinebox_receivers`]);
+/// - C#: `new GraphQLRequest` / `new GraphQLHttpRequest` with a
+///   `{ Query = <literal> }` initializer or a literal first constructor
+///   argument, in a file naming `GraphQL.Client`.
+///
+/// No language tag reaches this extractor, so the import gates are the
+/// language gate. A needle on a `//` / `/*` comment line, or one `guard`
+/// refuses (a Rust / Python literal or comment, CJ.1b), is no site. A document is named by its operation name
+/// ([`extract_operation_from_body`]), else by its first root field
+/// ([`first_root_field`]), the field a resolver is keyed by. A non-literal
+/// document (a constant, a concatenation, an interpolated string) mints
+/// nothing.
+fn client_request_operations(
+    source: &str,
+    guard: &mut LazyGuard<'_>,
+) -> (Vec<(String, usize)>, ClientRequestTally) {
+    let b = source.as_bytes();
+    let mut tally = ClientRequestTally::default();
+    let mut sites: Vec<(usize, Option<String>)> = Vec::new();
+    for recv in machinebox_receivers(source) {
+        let needle = if recv.is_empty() {
+            "NewRequest(".to_string()
+        } else {
+            format!("{recv}.NewRequest(")
+        };
+        for (at, _) in source.match_indices(&needle) {
+            let before = at.checked_sub(1).and_then(|p| b.get(p));
+            if before.is_some_and(|&c| is_ident_byte(c) || c == b'.')
+                || in_line_comment(b, at)
+                || !guard.admits(at)
+            {
+                continue;
+            }
+            tally.machinebox += 1;
+            let arg = skip_ascii_ws(b, at + needle.len());
+            sites.push((at, go_literal(b, arg).and_then(|(doc, end)| ends_arg(b, end, b")").then_some(doc))));
+        }
+    }
+    let names_client = source.match_indices(GRAPHQL_CLIENT_NAMESPACE).any(|(at, ns)| {
+        !ident_byte_before(b, at) && !b.get(at + ns.len()).is_some_and(|&c| is_ident_byte(c))
+    });
+    if names_client {
+        for &ty in GRAPHQL_CLIENT_REQUESTS {
+            for (at, _) in source.match_indices(ty) {
+                let after = at + ty.len();
+                if ident_byte_before(b, at)
+                    || b.get(after).is_some_and(|&c| is_ident_byte(c))
+                    || !preceded_by_new(b, qualifier_start(b, at))
+                    || in_line_comment(b, at)
+                    || !guard.admits(at)
+                {
+                    continue;
+                }
+                tally.graphql_client += 1;
+                sites.push((at, cs_request_document(b, after)));
+            }
+        }
+    }
+    sites.sort_by_key(|&(at, _)| at);
+    let mut ops = Vec::new();
+    for (at, doc) in sites {
+        let doc = doc.as_deref();
+        if let Some(name) = doc.and_then(extract_operation_from_body) {
+            tally.named += 1;
+            ops.push((name, at));
+        } else if let Some(field) = doc.and_then(first_root_field) {
+            tally.root_field += 1;
+            ops.push((field, at));
+        } else {
+            tally.unread += 1;
+        }
+    }
+    (ops, tally)
+}
+
+/// The receivers machinebox/graphql is imported under: the import spec's
+/// alias, else `graphql`; `""` for a dot import. A blank (`_`) import, or a
+/// quoted path that is not an import spec, gives none.
+fn machinebox_receivers(source: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (at, _) in source.match_indices(MACHINEBOX_IMPORT) {
+        let head = source.get(..at).unwrap_or_default();
+        let head = head.get(head.rfind('\n').map_or(0, |p| p + 1)..).unwrap_or_default().trim();
+        let head = head
+            .strip_prefix("import")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+            .map_or(head, str::trim);
+        let recv = match head {
+            "" => "graphql",
+            "." => "",
+            alias if alias != "_" && is_ident(alias) => alias,
+            _ => continue,
+        };
+        if !out.iter().any(|r| r == recv) {
+            out.push(recv.to_string());
+        }
+    }
+    out
+}
+
+/// Where the (possibly `GraphQL.`-qualified) type name at `at` starts.
+fn qualifier_start(b: &[u8], at: usize) -> usize {
+    let mut start = at;
+    while start >= 2 && b.get(start - 1) == Some(&b'.') && b.get(start - 2).is_some_and(|&c| is_ident_byte(c)) {
+        start -= 1;
+        while start >= 1 && b.get(start - 1).is_some_and(|&c| is_ident_byte(c)) {
+            start -= 1;
+        }
+    }
+    start
+}
+
+/// True when the token after a literal ending at `end` closes the argument
+/// or member: `,` or one of `closers`. Anything else (`+`, a call) makes the
+/// value a non-literal expression.
+fn ends_arg(b: &[u8], end: usize, closers: &[u8]) -> bool {
+    b.get(skip_ascii_ws(b, end)).is_some_and(|c| *c == b',' || closers.contains(c))
+}
+
+/// The text of a one-line backslash-escaped string whose body starts at
+/// `from`, and the index just past its closing `"`. `\n` / `\t` / `\r`
+/// decode to blanks, `\"` / `\\` / `\'` to the character; any other escape
+/// is kept as written.
+fn escaped_string(b: &[u8], from: usize) -> Option<(String, usize)> {
+    let mut text = Vec::new();
+    let mut i = from;
+    loop {
+        match *b.get(i)? {
+            b'"' => return Some((String::from_utf8(text).ok()?, i + 1)),
+            b'\n' => return None,
+            b'\\' => {
+                let esc = *b.get(i + 1)?;
+                match esc {
+                    b'n' => text.push(b'\n'),
+                    b't' => text.push(b'\t'),
+                    b'r' => text.push(b'\r'),
+                    b'"' | b'\\' | b'\'' => text.push(esc),
+                    _ => text.extend_from_slice(&[b'\\', esc]),
+                }
+                i += 2;
+            }
+            c => {
+                text.push(c);
+                i += 1;
+            }
+        }
+    }
+}
+
+/// A Go string literal opening at `at` (a raw `` `..` `` string or an
+/// interpreted `".."` one), and the index just past it.
+fn go_literal(b: &[u8], at: usize) -> Option<(String, usize)> {
+    match *b.get(at)? {
+        b'`' => {
+            let close = at + 1 + b.get(at + 1..)?.iter().position(|&c| c == b'`')?;
+            let body = b.get(at + 1..close)?;
+            Some((String::from_utf8(body.to_vec()).ok()?, close + 1))
+        }
+        b'"' => escaped_string(b, at + 1),
+        _ => None,
+    }
+}
+
+/// A C# string literal opening at `at` and the index just past it. The text
+/// is `None` for an interpolated (`$`) string, whose holes are not literal.
+/// Forms: `".."` (backslash escapes), `@".."` (`""` escape, multi-line) and a
+/// `"""..."""` raw string (three or more quotes, closed by as many).
+fn cs_literal(b: &[u8], at: usize) -> Option<(Option<String>, usize)> {
+    let mut i = at;
+    let (mut interpolated, mut verbatim) = (false, false);
+    while let Some(&c) = b.get(i) {
+        match c {
+            b'$' => interpolated = true,
+            b'@' => verbatim = true,
+            _ => break,
+        }
+        i += 1;
+    }
+    if b.get(i) != Some(&b'"') {
+        return None;
+    }
+    let quotes = b.get(i..)?.iter().take_while(|&&c| c == b'"').count();
+    let (text, end) = if quotes >= 3 && !verbatim {
+        let delim = vec![b'"'; quotes];
+        let open = i + quotes;
+        let close = open + b.get(open..)?.windows(quotes).position(|w| w == delim.as_slice())?;
+        (String::from_utf8(b.get(open..close)?.to_vec()).ok()?, close + quotes)
+    } else if verbatim {
+        let mut text = Vec::new();
+        let mut j = i + 1;
+        loop {
+            match (*b.get(j)?, b.get(j + 1)) {
+                (b'"', Some(b'"')) => {
+                    text.push(b'"');
+                    j += 2;
+                }
+                (b'"', _) => break,
+                (c, _) => {
+                    text.push(c);
+                    j += 1;
+                }
+            }
+        }
+        (String::from_utf8(text).ok()?, j + 1)
+    } else {
+        escaped_string(b, i + 1)?
+    };
+    Some(((!interpolated).then_some(text), end))
+}
+
+/// The index just past the C# string / char literal or comment that starts
+/// at `i`, or `None` when none starts there. An unterminated one runs to the
+/// end of the source.
+fn cs_skip_opaque(b: &[u8], i: usize) -> Option<usize> {
+    match (*b.get(i)?, b.get(i + 1)) {
+        (b'/', Some(b'/')) => Some(b.get(i..)?.iter().position(|&x| x == b'\n').map_or(b.len(), |p| i + p)),
+        (b'/', Some(b'*')) => Some(find_close(b, i + 2, b"*/", false).map_or(b.len(), |p| p + 2)),
+        (b'\'', _) => Some(find_close(b, i + 1, b"'", true).map_or(b.len(), |p| p + 1)),
+        (c @ (b'"' | b'@' | b'$'), _) => match cs_literal(b, i) {
+            Some((_, end)) => Some(end),
+            None => (c == b'"').then_some(b.len()),
+        },
+        _ => None,
+    }
+}
+
+/// The index of the bracket closing the one opened at `open`, over any mix
+/// of `()[]{}`, skipping C# string / char literals and comments.
+fn cs_matching_close(b: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while let Some(&c) = b.get(i) {
+        if let Some(end) = cs_skip_opaque(b, i) {
+            i = end;
+            continue;
+        }
+        match c {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The document of a GraphQL.Client request whose type name ends at
+/// `after`: the `Query = <literal>` member of a `{ .. }` object initializer
+/// (assigned after the constructor ran, so it wins), else a literal first
+/// constructor argument (`query:` may name it).
+fn cs_request_document(b: &[u8], after: usize) -> Option<String> {
+    let mut i = skip_ascii_ws(b, after);
+    let mut ctor = None;
+    if b.get(i) == Some(&b'(') {
+        let mut arg = skip_ascii_ws(b, i + 1);
+        if b.get(arg..).is_some_and(|r| r.starts_with(b"query"))
+            && b.get(skip_ascii_ws(b, arg + 5)) == Some(&b':')
+        {
+            arg = skip_ascii_ws(b, skip_ascii_ws(b, arg + 5) + 1);
+        }
+        ctor = cs_literal(b, arg).and_then(|(doc, end)| doc.filter(|_| ends_arg(b, end, b")")));
+        i = skip_ascii_ws(b, cs_matching_close(b, i)? + 1);
+    }
+    if b.get(i) == Some(&b'{')
+        && let Some(member) = cs_initializer_query(b, i)
+    {
+        return member;
+    }
+    ctor
+}
+
+/// The `Query` member of the object initializer opened at `open`:
+/// `Some(Some(doc))` for a literal value, `Some(None)` for any other
+/// expression, `None` when the initializer sets no `Query`.
+fn cs_initializer_query(b: &[u8], open: usize) -> Option<Option<String>> {
+    let close = cs_matching_close(b, open)?;
+    let mut depth = 0usize;
+    let mut expect_member = true;
+    let mut i = open + 1;
+    while i < close {
+        if let Some(end) = cs_skip_opaque(b, i) {
+            // A literal is a value; a comment is trivia.
+            expect_member &= b.get(i) == Some(&b'/');
+            i = end;
+            continue;
+        }
+        let c = *b.get(i)?;
+        match c {
+            _ if c.is_ascii_whitespace() => {}
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                expect_member = false;
+            }
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => expect_member = true,
+            _ if is_ident_byte(c) && depth == 0 && expect_member => {
+                let end = i + b.get(i..close)?.iter().take_while(|&&x| is_ident_byte(x)).count();
+                let eq = skip_ascii_ws(b, end);
+                if b.get(i..end) == Some(b"Query") && b.get(eq) == Some(&b'=') && b.get(eq + 1) != Some(&b'=') {
+                    let value = skip_ascii_ws(b, eq + 1);
+                    return Some(
+                        cs_literal(b, value).and_then(|(doc, end)| doc.filter(|_| ends_arg(b, end, b"}"))),
+                    );
+                }
+                i = end;
+                expect_member = false;
+                continue;
+            }
+            _ => expect_member = false,
+        }
+        i += 1;
+    }
+    None
+}
+
+/// GraphQL ignored tokens from `i`: blanks, commas and `#` comments.
+fn gql_skip(b: &[u8], mut i: usize) -> usize {
+    while let Some(&c) = b.get(i) {
+        if c == b'#' {
+            i += b.get(i..).and_then(|r| r.iter().position(|&x| x == b'\n')).unwrap_or(b.len() - i);
+        } else if c.is_ascii_whitespace() || c == b',' {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+/// The index of the bracket closing the one opened at `open`, over any mix
+/// of `()[]{}`, skipping GraphQL strings and `#` comments.
+fn gql_close(b: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while let Some(&c) = b.get(i) {
+        match c {
+            b'"' => {
+                i = find_close(b, i + 1, b"\"", false)? + 1;
+                continue;
+            }
+            b'#' => {
+                i = gql_skip(b, i);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The GraphQL name (`[_A-Za-z][_0-9A-Za-z]*`) at `i`, and its end.
+fn gql_name(s: &str, i: usize) -> Option<(&str, usize)> {
+    let b = s.as_bytes();
+    if !b.get(i).is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_') {
+        return None;
+    }
+    let end = i + b.get(i..)?.iter().take_while(|&&c| c.is_ascii_alphanumeric() || c == b'_').count();
+    Some((s.get(i..end)?, end))
+}
+
+/// Past an optional `( .. )` argument / variable list and any `@directive`s
+/// (each with optional arguments) from `i`, and the ignored tokens after.
+/// `None` when a bracket never closes.
+fn gql_skip_args_and_directives(s: &str, i: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut i = i;
+    loop {
+        if b.get(i) == Some(&b'(') {
+            i = gql_skip(b, gql_close(b, i)? + 1);
+        }
+        if b.get(i) != Some(&b'@') {
+            return Some(i);
+        }
+        i = gql_skip(b, gql_name(s, i + 1)?.1);
+    }
+}
+
+/// The first root field `body` selects: past blanks, commas and `#`
+/// comments, an optional `query` / `mutation` / `subscription` keyword with
+/// an optional name, variable list and directives, then the `{`. An alias
+/// (`recent: orders`) names the field after it; an introspection field
+/// (`__typename`) is passed over. `None` for a fragment, a spread or any
+/// other shape.
+fn first_root_field(body: &str) -> Option<String> {
+    let b = body.as_bytes();
+    let mut i = gql_skip(b, 0);
+    if let Some((word, end)) = gql_name(body, i)
+        && matches!(word, "query" | "mutation" | "subscription")
+    {
+        i = gql_skip(b, end);
+        if let Some((_, end)) = gql_name(body, i) {
+            i = gql_skip(b, end);
+        }
+        i = gql_skip_args_and_directives(body, i)?;
+    }
+    if b.get(i) != Some(&b'{') {
+        return None;
+    }
+    i = gql_skip(b, i + 1);
+    loop {
+        let (mut field, end) = gql_name(body, i)?;
+        i = gql_skip(b, end);
+        if b.get(i) == Some(&b':') {
+            let (name, end) = gql_name(body, gql_skip(b, i + 1))?;
+            field = name;
+            i = gql_skip(b, end);
+        }
+        if !field.starts_with("__") {
+            return Some(field.to_string());
+        }
+        i = gql_skip_args_and_directives(body, i)?;
+        if b.get(i) == Some(&b'{') {
+            i = gql_skip(b, gql_close(b, i)? + 1);
+        }
+    }
+}
+
+// ============================================================================
 // CB.24 — the base URL a GraphQL client is built with
 // ============================================================================
 
@@ -2900,5 +3385,161 @@ mod tests {
         }
         assert_eq!(schema_name("current_user", Some("me".into()), true), "me");
         assert_eq!(schema_name("current_user", None, false), "current_user");
+    }
+
+    // ---- CL.6a: Go machinebox / C# GraphQL.Client requests ----
+
+    /// The client tally of one file, read as `path`.
+    fn request_tally(source: &str, path: &str) -> ClientRequestTally {
+        client_request_operations(source, &mut LazyGuard::new(path, source)).1
+    }
+
+    /// The operation qnames of `source` read from `path`.
+    fn op_qnames_at(source: &str, path: &str) -> Vec<String> {
+        let out = extract_graphql_operation_nodes(source, path, module_id(), repo());
+        let mut qnames: Vec<String> = out.nav.qname_by_id.values().cloned().collect();
+        qnames.sort();
+        qnames
+    }
+
+    /// matrix/go/graphql's client: an anonymous document is named by its
+    /// first root field, anchored on the `NewRequest(` line.
+    #[test]
+    fn machinebox_request_names_its_root_field() {
+        let src = "package main\n\nimport (\n\t\"context\"\n\n\t\"github.com/machinebox/graphql\"\n)\n\nfunc ListOrders(ctx context.Context) error {\n\tclient := graphql.NewClient(\"http://api/query\")\n\treq := graphql.NewRequest(`query { orders { id } }`)\n\tvar resp map[string]any\n\treturn client.Run(ctx, req, &resp)\n}\n";
+        let out = extract_graphql_operation_nodes(src, "client/client.go", module_id(), repo());
+        let qnames: Vec<&String> = out.nav.qname_by_id.values().collect();
+        assert_eq!(qnames, vec!["graphql_op:orders"]);
+        assert_eq!(out.nodes.first().map(|n| n.confidence), Some(Confidence::Medium));
+        assert_eq!(anchor_line(&out, "graphql_op:orders"), Some(10));
+        assert_eq!(
+            request_tally(src, "client/client.go").marker().as_deref(),
+            Some("[graphql-ops] client-request machinebox=1 graphql-client=0 named=0 root_field=1 unread=0")
+        );
+    }
+
+    /// A named document keeps its operation name; an import alias is the
+    /// needle receiver, and an interpreted string's `\n` escapes are blanks.
+    #[test]
+    fn machinebox_named_operation_keeps_its_name() {
+        let named = "import \"github.com/machinebox/graphql\"\n\nvar req = graphql.NewRequest(`\n    query GetOrders($id: ID!) {\n        order(id: $id) { id }\n    }\n`)\n";
+        assert_eq!(op_qnames_at(named, "c.go"), vec!["graphql_op:GetOrders"]);
+        let alias = "import (\n\tgql \"github.com/machinebox/graphql\"\n)\n\nfunc f() {\n\ta := gql.NewRequest(\"query ListOrders {\\n  orders { id }\\n}\")\n\tb := gql.NewRequest(\n\t\t\"mutation {\\n\\tcancelOrder(id: 1) { id }\\n}\",\n\t)\n\t_ = graphql.NewRequest(`{ ignored }`)\n}\n";
+        assert_eq!(
+            op_qnames_at(alias, "c.go"),
+            vec!["graphql_op:ListOrders", "graphql_op:cancelOrder"]
+        );
+        let tally = request_tally(alias, "c.go");
+        assert_eq!((tally.machinebox, tally.named, tally.root_field, tally.unread), (2, 1, 1, 0));
+        // A dot import has no receiver.
+        let dot = "import . \"github.com/machinebox/graphql\"\nvar r = NewRequest(`{ shipments { id } }`)\nvar h, _ = http.NewRequest(\"GET\", u, nil)\n";
+        assert_eq!(op_qnames_at(dot, "c.go"), vec!["graphql_op:shipments"]);
+    }
+
+    /// GraphQL.Client's request: a `Query =` initializer member (regular,
+    /// verbatim and raw strings) or the first constructor argument.
+    #[test]
+    fn graphql_client_request_initializer_and_ctor() {
+        let fixture = "using GraphQL;\nusing GraphQL.Client.Http;\n\npublic class BookClient\n{\n    public async Task Load(GraphQLHttpClient client)\n    {\n        var request = new GraphQLRequest { Query = \"query { books { title } }\" };\n        await client.SendQueryAsync<object>(request);\n    }\n}\n";
+        let out = extract_graphql_operation_nodes(fixture, "client/BookClient.cs", module_id(), repo());
+        let qnames: Vec<&String> = out.nav.qname_by_id.values().collect();
+        assert_eq!(qnames, vec!["graphql_op:books"]);
+        assert_eq!(anchor_line(&out, "graphql_op:books"), Some(7));
+        assert_eq!(
+            request_tally(fixture, "client/BookClient.cs").marker().as_deref(),
+            Some("[graphql-ops] client-request machinebox=0 graphql-client=1 named=0 root_field=1 unread=0")
+        );
+
+        let forms = [
+            // Verbatim, multi-line, after another member and a comment.
+            "var r = new GraphQLRequest\n{\n    // Query = \"{ decoy }\"\n    OperationName = null,\n    Query = @\"\n        query {\n          books { title }\n        }\",\n    Variables = new { id = 1 },\n};\n",
+            // A raw string constructor argument.
+            "var r = new GraphQLHttpRequest(\"\"\"\n    { books { \"quoted\" title } }\n    \"\"\");\n",
+            // `()` then an initializer, fully qualified.
+            "var r = new GraphQL.GraphQLRequest() { Query = \"{ books { title } }\" };\n",
+            // A named constructor argument.
+            "var r = new GraphQLRequest(query: \"{\\n  books { title }\\n}\");\n",
+            // The initializer's Query wins over the constructor argument.
+            "var r = new GraphQLRequest(\"{ authors { name } }\") { Query = \"{ books { id } }\" };\n",
+        ];
+        for form in forms {
+            let src = format!("using GraphQL.Client.Abstractions;\n{form}");
+            assert_eq!(op_qnames_at(&src, "x.cs"), vec!["graphql_op:books"], "{form}");
+        }
+        let named = "using GraphQL.Client.Http;\nvar r = new GraphQLRequest { Query = @\"query BookShelf { books { title } }\" };\n";
+        assert_eq!(op_qnames_at(named, "x.cs"), vec!["graphql_op:BookShelf"]);
+    }
+
+    #[test]
+    fn first_root_field_skips_variables_aliases_and_directives() {
+        for (doc, want) in [
+            ("query { orders { id } }", Some("orders")),
+            ("{ books { title } }", Some("books")),
+            ("query ($id: ID!) { order(id: $id) { id } }", Some("order")),
+            (
+                "query Recent($n: [Int!] = [1, 2], $s: String = \"a)b\") @live @cached(ttl: 60) {\n  recent: orders(first: $n) { id }\n}",
+                Some("orders"),
+            ),
+            ("# a comment\n\n  mutation { createOrder(input: {sku: \"x\"}) { id } }", Some("createOrder")),
+            ("subscription @auth(role: \"x\") { orderShipped { id } }", Some("orderShipped")),
+            ("{ __typename __schema { types { name } } shipments { id } }", Some("shipments")),
+            ("{ __typename }", None),
+            ("fragment F on Order { id }", None),
+            ("{ ...F }", None),
+            ("query {", None),
+            ("{ 1abc }", None),
+            ("queryX { orders }", None),
+            ("", None),
+        ] {
+            assert_eq!(first_root_field(doc).as_deref(), want, "{doc:?}");
+        }
+    }
+
+    /// The import gates are the language gate: no machinebox import, no
+    /// `GraphQL.Client`, a blank import, a comment line or a Rust literal
+    /// (CJ.1b's guard) mints nothing.
+    #[test]
+    fn a_request_without_the_import_mints_nothing() {
+        let go_doc = "\treq := graphql.NewRequest(`query { orders { id } }`)\n";
+        let cs_doc = "var r = new GraphQLRequest { Query = \"query { books { title } }\" };\n";
+        let go_cases = [
+            format!("import \"github.com/shurcooL/graphql\"\nfunc f() {{\n{go_doc}}}\n"),
+            format!("import _ \"github.com/machinebox/graphql\"\nfunc f() {{\n{go_doc}}}\n"),
+            format!("import \"github.com/machinebox/graphql\"\nfunc f() {{\n\t// {}\n}}\n", go_doc.trim()),
+            "import \"github.com/machinebox/graphql\"\nfunc f() { r, _ := http.NewRequest(\"GET\", \"{ orders }\", nil) }\n".to_string(),
+        ];
+        let cs_cases = [
+            format!("public class GraphQLRequest {{ public string Query; }}\n{cs_doc}"),
+            format!("using GraphQL.ClientExtras;\n{cs_doc}"),
+            "using GraphQL.Client.Http;\nvar r = new MyGraphQLRequest { Query = \"{ books }\" };\nvar t = typeof(GraphQLRequest);\n".to_string(),
+        ];
+        for src in go_cases.iter().chain(cs_cases.iter()) {
+            assert!(op_qnames_at(src, "x.go").is_empty(), "{src}");
+            let tally = request_tally(src, "x.go");
+            assert_eq!(tally.machinebox + tally.graphql_client, 0, "{src}");
+        }
+        // The fixture's own text, held in a Rust literal and a comment.
+        let rust = format!(
+            "// import \"github.com/machinebox/graphql\" -> {}\nconst GO: &str = r#\"\nimport \"github.com/machinebox/graphql\"\n{go_doc}\"#;\nconst CS: &str = r#\"using GraphQL.Client.Http;\n{cs_doc}\"#;\n",
+            go_doc.trim()
+        );
+        assert!(op_qnames_at(&rust, "scanner/src/samples.rs").is_empty());
+        assert_eq!(op_qnames_at(&rust, "x.go"), vec!["graphql_op:books", "graphql_op:orders"]);
+    }
+
+    #[test]
+    fn a_non_literal_document_mints_nothing() {
+        let go = "import \"github.com/machinebox/graphql\"\nfunc f() {\n\ta := graphql.NewRequest(ordersQuery)\n\tb := graphql.NewRequest(\"query { \" + field + \" }\")\n\tc := graphql.NewRequest(fmt.Sprintf(`{ %s }`, f))\n\td := graphql.NewRequest(`query {`)\n}\n";
+        assert!(op_qnames_at(go, "c.go").is_empty());
+        let tally = request_tally(go, "c.go");
+        assert_eq!((tally.machinebox, tally.unread), (4, 4));
+
+        let cs = "using GraphQL.Client.Http;\nvar a = new GraphQLRequest { Query = BooksQuery };\nvar b = new GraphQLRequest(query);\nvar c = new GraphQLRequest { Query = $\"query {{ {field} }}\" };\nvar d = new GraphQLRequest { Query = \"{ books { title } }\" + suffix };\nvar e = new GraphQLRequest(\"{ books }\") { Query = Other };\nvar g = new GraphQLHttpRequest { OperationName = \"x\" };\n";
+        assert!(op_qnames_at(cs, "x.cs").is_empty());
+        let tally = request_tally(cs, "x.cs");
+        assert_eq!(
+            tally.marker().as_deref(),
+            Some("[graphql-ops] client-request machinebox=0 graphql-client=6 named=0 root_field=0 unread=6")
+        );
     }
 }
