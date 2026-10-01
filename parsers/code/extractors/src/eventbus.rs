@@ -36,9 +36,21 @@ pub struct EventNodes {
 /// file with no broker signal behaves exactly as before.
 ///
 /// `gate` says how [`find_gated`] judges each occurrence ([`VerbGate`]):
-/// `publish(` / `.subscribe(` need a bus or a pub/sub import (LA.29), the
-/// DOM / jQuery / store / Node event verbs need an in-process bus as their
-/// receiver (LA.39), and the rest count wherever they occur.
+/// `publish(` / `.subscribe(` and their capitalised Go / C# spellings need a
+/// bus or a pub/sub import (LA.29), the DOM / jQuery / store / Node event
+/// verbs need an in-process bus as their receiver (LA.39), and the rest count
+/// wherever they occur.
+///
+/// CL.8: the capitalised rows are Go's in-process buses — asaskevich/EventBus
+/// `bus.Publish("topic", ..)` / `bus.Subscribe("topic", fn)` and its
+/// `SubscribeAsync` / `SubscribeOnce` / `SubscribeOnceAsync` handlers, a
+/// Watermill gochannel `publisher.Publish("topic", msg)`. They are dotted (a
+/// Go method DECLARATION `func (b *Bus) Publish(` is never one), broker-
+/// ambiguous (a NATS / paho / amqp / confluent file skips them: `nc.Publish`
+/// stays QUEUE_*) and [`VerbGate::Bus`]-gated, so Rx's `source.Subscribe(..)`
+/// and MediatR's typed `_mediator.Publish(new X())` ([`judge_verb`]'s `new `
+/// check) mint nothing here. Last in each table, so a file the lower-case
+/// rows already named keeps its nodes and their order.
 const EMITTER_PATTERNS: &[(&str, NameRule, bool, VerbGate)] = &[
     (".emit(", NameRule::Literal, false, VerbGate::Receiver),
     (".dispatch(", NameRule::Literal, false, VerbGate::Receiver),
@@ -48,6 +60,7 @@ const EMITTER_PATTERNS: &[(&str, NameRule, bool, VerbGate)] = &[
     ("publish(", NameRule::Literal, true, VerbGate::Bus),
     (".trigger(", NameRule::Literal, false, VerbGate::Receiver),
     ("dispatchEvent(", NameRule::Literal, false, VerbGate::Receiver),
+    (".Publish(", NameRule::Literal, true, VerbGate::Bus),
 ];
 
 const HANDLER_PATTERNS: &[(&str, NameRule, bool, VerbGate)] = &[
@@ -61,6 +74,10 @@ const HANDLER_PATTERNS: &[(&str, NameRule, bool, VerbGate)] = &[
     // Ruby hook — is no needle.
     ("def handle_event(", NameRule::Literal, false, VerbGate::Open),
     (".addListener(", NameRule::Literal, false, VerbGate::Receiver),
+    (".Subscribe(", NameRule::Literal, true, VerbGate::Bus),
+    (".SubscribeAsync(", NameRule::Literal, true, VerbGate::Bus),
+    (".SubscribeOnce(", NameRule::Literal, true, VerbGate::Bus),
+    (".SubscribeOnceAsync(", NameRule::Literal, true, VerbGate::Bus),
 ];
 
 /// Where an occurrence of a string-keyed needle reads its event name (CB.3a).
@@ -83,8 +100,9 @@ enum VerbGate {
     /// Every occurrence is a site: the decorator needles, `Subject.next`,
     /// `def handle_event(`, `EventBridge.putEvents`.
     Open,
-    /// LA.29: `publish(` and `.subscribe(`, the two broker-ambiguous verbs that
-    /// name a pub/sub channel. A function named `publish`, an RxJS
+    /// LA.29: `publish(` and `.subscribe(` (and, CL.8, Go's `.Publish(` /
+    /// `.Subscribe*(`), the broker-ambiguous verbs that name a pub/sub
+    /// channel. A function named `publish`, an RxJS
     /// `obs.subscribe(...)` and a tokio `tx.subscribe()` all share them with a
     /// real bus; [`judge_verb`] keeps a call on a bus-shaped receiver or in a
     /// file importing an in-process pub/sub library — never a declaration,
@@ -107,7 +125,7 @@ enum Via {
     /// The receiver's name is bus-shaped ([`BUS_RECEIVER_SUFFIXES`]).
     Receiver,
     /// LA.29: the file imports an in-process pub/sub library
-    /// ([`PUBSUB_IMPORTS`]); `publish(` / `.subscribe(` only.
+    /// ([`PUBSUB_IMPORTS`]); the [`VerbGate::Bus`] verbs only.
     Import,
     /// LA.39: the receiver is bound in this file to an emitter constructed
     /// from an emitter library, or to a `new EventTarget()`
@@ -246,12 +264,16 @@ const COLLECTION_SUFFIXES: &[&str] = &["events", "notifications"];
 
 /// In-process pub/sub libraries (matched in the lowercased file). A file that
 /// names one admits any receiver (`const ps = new PubSub(); ps.publish(..)`)
-/// and a bare call (Wisper's `publish('order_placed', self)`).
+/// and a bare call (Wisper's `publish('order_placed', self)`). CL.8: Go's
+/// `github.com/asaskevich/EventBus` (lower-case here: the check reads the
+/// lowered source) admits `eb := EventBus.New(); eb.Subscribe("x", h)`, whose
+/// receiver is not bus-shaped.
 const PUBSUB_IMPORTS: &[&str] = &[
     "graphql-subscriptions",
     "pubsub-js",
     "@nestjs/cqrs",
     "wisper",
+    "asaskevich/eventbus",
 ];
 
 /// The word before a bare `publish(` that makes it a function declaration:
@@ -2269,6 +2291,106 @@ mod tests {
             handled("pubsub.subscribe('POST_ADDED', h);"),
             vec!["event_handle:POST_ADDED"]
         );
+    }
+
+    // ---- CL.8: Go's capitalised in-process bus ----------------------------
+
+    /// bench/substrate-gap/matrix/go/eventbus/bus.go, verbatim.
+    const GO_ASASKEVICH_BUS: &str = "package main\n\nimport evbus \"github.com/asaskevich/EventBus\"\n\nfunc SendReceipt(orderID string) {}\n\nfunc Wire() {\n\tbus := evbus.New()\n\tbus.Subscribe(\"order:placed\", SendReceipt)\n\tbus.Publish(\"order:placed\", \"o-1\")\n}\n";
+
+    /// The verdict [`judge_verb`] gives the first occurrence of `needle`.
+    fn verdict(src: &str, needle: &str) -> Verdict {
+        let at = src.find(needle).expect("needle in source");
+        judge_verb(src, needle, at, &mut VerbCtx::default())
+    }
+
+    #[test]
+    fn go_asaskevich_bus_pairs() {
+        let src = GO_ASASKEVICH_BUS;
+        assert_eq!(emitted(src), vec!["event_emit:order:placed"]);
+        assert_eq!(handled(src), vec!["event_handle:order:placed"]);
+        // `bus` is bus-shaped: kept on the receiver, before the import.
+        assert_eq!(verdict(src, ".Publish("), Verdict::Keep(Via::Receiver));
+        assert_eq!(verdict(src, ".Subscribe("), Verdict::Keep(Via::Receiver));
+        // Weak string-keyed sites, each anchored at its own call (0-based).
+        let out = extract_event_emitter_nodes(src, "bus.go", module_id(), repo());
+        assert_eq!(out.nodes.len(), 1);
+        assert_eq!(out.nodes[0].confidence, Confidence::Weak);
+        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 9 }]);
+        let out = extract_event_handler_nodes(src, "bus.go", module_id(), repo());
+        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 8 }]);
+        // CJ.1a: the same calls in a Rust string literal (this file's own
+        // tests) or comment mint nothing in glia's build.
+        let rust = "/// `bus.Subscribe(\"order:placed\", f)`\nfn f() {\n    let s = \"bus.Publish(\\\"order:placed\\\", 1)\";\n}\n";
+        let none = |out: EventNodes| out.nodes.is_empty();
+        assert!(none(extract_event_emitter_nodes(rust, "x.rs", module_id(), repo())));
+        assert!(none(extract_event_handler_nodes(rust, "x.rs", module_id(), repo())));
+        // A Go method DECLARATION is never a site: the needles are dotted.
+        let decl = "func (b *Bus) Publish(topic string, args ...interface{}) {}\nfunc (b *Bus) Subscribe(topic string, fn interface{}) error { return nil }\n";
+        assert_eq!(emitted(decl), Vec::<String>::new());
+        assert_eq!(handled(decl), Vec::<String>::new());
+    }
+
+    #[test]
+    fn go_bus_alias_through_the_import() {
+        let src = "package main\n\nimport \"github.com/asaskevich/EventBus\"\n\nfunc main() {\n\teb := EventBus.New()\n\teb.Subscribe(\"x\", h)\n\teb.SubscribeAsync(\"y\", h, false)\n\teb.SubscribeOnce(\"z\", h)\n\teb.SubscribeOnceAsync(\"w\", h)\n\teb.Publish(\"x\", 1)\n}\n";
+        assert_eq!(
+            handled(src),
+            vec!["event_handle:w", "event_handle:x", "event_handle:y", "event_handle:z"]
+        );
+        assert_eq!(emitted(src), vec!["event_emit:x"]);
+        // `eb` is not bus-shaped: the asaskevich import admits it.
+        assert_eq!(verdict(src, ".Subscribe("), Verdict::Keep(Via::Import));
+        assert_eq!(verdict(src, ".Publish("), Verdict::Keep(Via::Import));
+        // Without the import the receiver alone is no bus.
+        let bare = src.replace("import \"github.com/asaskevich/EventBus\"\n", "");
+        assert_eq!(handled(&bare), Vec::<String>::new());
+        assert_eq!(emitted(&bare), Vec::<String>::new());
+        assert_eq!(verdict(&bare, ".Publish("), Verdict::NoBus);
+    }
+
+    #[test]
+    fn go_nats_publish_stays_broker_traffic() {
+        let nats = "package main\n\nimport \"github.com/nats-io/nats.go\"\n\nfunc main() {\n\tnc, _ := nats.Connect(nats.DefaultURL)\n\tnc.Publish(\"orders.created\", b)\n\tnc.Subscribe(\"orders.created\", func(m *nats.Msg) {})\n}\n";
+        assert_eq!(emitted(nats), Vec::<String>::new());
+        assert_eq!(handled(nats), Vec::<String>::new());
+        // A2.9: even a bus-shaped receiver is broker traffic in a NATS file.
+        let bus_in_broker = nats.replace("nc.", "bus.");
+        assert_eq!(emitted(&bus_in_broker), Vec::<String>::new());
+        assert_eq!(handled(&bus_in_broker), Vec::<String>::new());
+        // No import: `nc` is still no bus.
+        assert_eq!(emitted("nc.Publish(\"orders.created\", b)"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn csharp_rx_subscribe_is_not_a_bus() {
+        for src in [
+            "source.Subscribe(x => Console.WriteLine(x));",
+            "observable.Subscribe(OnNext, OnError);",
+            "_prices.Subscribe(p => Render(p));",
+            // A bus-shaped receiver with a lambda names no event (CB.3a).
+            "_events.Subscribe(e => Handle(e));",
+        ] {
+            assert_eq!(handled(src), Vec::<String>::new(), "{src}");
+        }
+        assert_eq!(verdict("source.Subscribe(x => f(x));", ".Subscribe("), Verdict::NoBus);
+        // The contrast: a bus subscribed by a topic literal is a handler.
+        assert_eq!(
+            handled("_eventBus.Subscribe(\"order.placed\", OnPlaced);"),
+            vec!["event_handle:order.placed"]
+        );
+    }
+
+    #[test]
+    fn mediatr_publish_new_is_a_type_site_not_a_string() {
+        let src = "await _mediator.Publish(new OrderPlaced(id));";
+        let out = extract_event_emitter_nodes(src, "", module_id(), repo());
+        assert_eq!(qnames(&out), vec!["event_emit:OrderPlaced"]);
+        assert_eq!(out.nodes.len(), 1);
+        assert_eq!(out.nodes[0].confidence, Confidence::Medium);
+        assert_eq!(verdict(src, ".Publish("), Verdict::TypeSite);
+        // `.Publish(evt)` names nothing (CB.3a).
+        assert_eq!(emitted("await _mediator.Publish(evt, ct);"), Vec::<String>::new());
     }
 
     #[test]
