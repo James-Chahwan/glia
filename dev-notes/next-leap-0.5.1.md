@@ -270,3 +270,37 @@ The Engram session ran a 480-query recall battery on glia 0.5.0 exports of quokk
 - New gaps with no owner:
   - TS `abstract class` declarations mint no CLASS / METHOD nodes;
   - TS URL-builder wrappers collapse to `<unresolved>` endpoints.
+
+### 7.4 Finishing batch (2026-10-01)
+
+James, after the 12 waves landed (verbatim): *"Why the fuck do we need to bump a version while we are still building"*.
+The bump is the last step, done once just before the tag. Then *"Yeah do every recommend action"* to the issues list:
+- **0.5.1 finishing batch** (specced into groups CH..CL, scheduled after W11; every packet depends on CZ.2 so the landed
+  waves cannot reorder):
+  - TS `abstract class` nodes;
+  - Angular signal / call-initialised fields as STATE_VAR carrying CALLS;
+  - TS URL-builder `<unresolved>` endpoints;
+  - method-by-value USES (same class);
+  - quokka_web `apiPrefix` in the endpoint fold;
+  - the Go gaps: package-level func literals, embedded-struct promotion, repo-root package imports, split receiver typed in another file;
+  - the glia self-scan phantom QUEUE_* / EVENT_* nodes;
+  - doc ingestion widened to project-root well-known docs + SDD feature docs (`features/<f>/*.md`, spec-kit `specs/<NNN>/`), keeping the backtick rule and a coverage caveat;
+  - external sinks labelled in `effects` / `serves`;
+  - an overlay `[walk] tests = [...]` list;
+  - pyo3 `overlay_propose / try / accept`;
+  - engram-export: fix the hint-pass cross-pairing (17 route facts) and print the build stamp;
+  - the 0.5.1-worthy slice of the matrix none / partial cells (scope pass);
+  - a closing docs packet.
+- **Accepted as is:** a client that hard-codes its own backend's public URL is marked external (escape hatch: an overlay
+  `[constants]` pin or `[[edge]]`).
+- **0.5.2:**
+  - PHP short-name symbol imports and `use \App\{X}`;
+  - CB.26's measured residuals (Swift locals / params, Dart plain-import calls, C++ lambdas / `auto` locals / CMake generator expressions, Go group prefixes held in a constant);
+  - the rest of the matrix none / partial cells;
+  - WS / gRPC / GraphQL external-endpoint marking.
+- **At the bump:** every glia crate moves to the workspace version (core, code-domain, graph, activation,
+  projection-text are still 0.4.x, so only glia-engine can be pinned exactly today).
+- **Process, done (448fbbb):**
+  - graph-content packets also run the cli + py tests;
+  - closeout drops the incremental caches every 3rd wave;
+  - one dependency commit per release stays the rule.
