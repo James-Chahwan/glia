@@ -556,12 +556,30 @@ fn keyed_literal(region: &str, keys: &[&str]) -> Option<Folded> {
                 continue;
             };
             j = skip_ws(b, j + sep);
+            // CL.2: `QueueUrl: aws.String("..")` reads the literal inside.
+            let j = step_into_helper(region, j).unwrap_or(j);
             if let Some(topic) = read_literal(region, j) {
                 return Some(topic);
             }
         }
     }
     None
+}
+
+/// CL.2: calls whose only job is to wrap a keyed value in a pointer, aws-sdk-go's
+/// `aws.String("x")` for every `*string` field (`QueueUrl`, `TopicArn`). A
+/// keyed value written through one is read INSIDE it, by [`keyed_literal`] and
+/// [`keyed_expr`] alike. A FIXED list on purpose: a general `f("x")` unwrap
+/// would read `QueueUrl: os.Getenv("QUEUE_URL")` as a queue named `QUEUE_URL`.
+const POINTER_HELPERS: &[&str] = &["aws.String("];
+
+/// CL.2: when the value at `j` opens a [`POINTER_HELPERS`] call, the byte just
+/// inside it, whitespace skipped. Matched AT the value, so `myaws.String(` is
+/// never the helper. The helper is ASCII, so the index stays on a char boundary.
+fn step_into_helper(region: &str, j: usize) -> Option<usize> {
+    let rest = region.get(j..)?;
+    let helper = POINTER_HELPERS.iter().find(|h| rest.starts_with(**h))?;
+    Some(skip_ws(region.as_bytes(), j + helper.len()))
 }
 
 // ---------------------------------------------------------------------------
@@ -655,13 +673,22 @@ fn keyed_expr(region: &str, keys: &[&str]) -> Option<String> {
                 continue;
             };
             let value_at = skip_ws(b, j + sep);
+            // CL.2: `QueueUrl: aws.String(queueURL)` hands `queueURL` to the
+            // LA.4 fold; the helper's whole argument must be the chain.
+            let helper = step_into_helper(region, value_at);
+            let value_at = helper.unwrap_or(value_at);
             let Some(rest) = region.get(value_at..) else {
                 continue;
             };
             let Some((expr, len)) = ident_chain(rest) else {
                 continue;
             };
-            if ends_value(b.get(skip_ws(b, value_at + len))) {
+            let next = b.get(skip_ws(b, value_at + len));
+            let ends = match helper {
+                Some(_) => next == Some(&b')'),
+                None => ends_value(next),
+            };
+            if ends {
                 return Some(expr.to_string());
             }
         }
@@ -1631,6 +1658,89 @@ mod tests {
         );
         assert_eq!(
             expr("send({ topic: ü })", "send", TopicRule::Keyed(&["topic"])),
+            None
+        );
+    }
+
+    // ---- CL.2: a keyed value written through a pointer helper -------------
+
+    #[test]
+    fn keyed_literal_steps_into_aws_string() {
+        // aws-sdk-go's `*string` fields: the literal sits inside `aws.String(`.
+        let region = "ctx, &sqs.SendMessageInput{\n\t\tQueueUrl:    aws.String(\"https://sqs.us-east-1.amazonaws.com/123456789012/orders\"),\n\t\tMessageBody: aws.String(body),\n\t}";
+        assert_eq!(
+            keyed_literal(region, &["queueurl"]),
+            Some(("orders".to_string(), TopicForm::Url))
+        );
+        // Whitespace inside the helper, and an SNS ARN.
+        assert_eq!(
+            keyed_literal(
+                "&sns.PublishInput{TopicArn: aws.String( \"arn:aws:sns:us-east-1:1:orders\" )}",
+                &["topicarn"]
+            ),
+            Some(("orders".to_string(), TopicForm::Arn))
+        );
+        // End to end through the Keyed rule.
+        let src = "client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(\"https://sqs/1/orders\")})";
+        let hit = scan(src, ".SendMessage(", TopicRule::Keyed(&["queueurl"])).remove(0);
+        assert_eq!(hit.topic.as_deref(), Some("orders"));
+        assert_eq!(hit.form, TopicForm::Url);
+        assert_eq!(hit.expr, None);
+    }
+
+    #[test]
+    fn keyed_expr_steps_into_aws_string() {
+        let src = "client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: aws.String(queueURL), MessageBody: aws.String(body)})";
+        let hit = scan(src, ".SendMessage(", TopicRule::Keyed(&["queueurl"])).remove(0);
+        assert_eq!(hit.topic, None);
+        assert_eq!(hit.expr.as_deref(), Some("queueURL"));
+        assert_eq!(
+            keyed_expr(
+                "{QueueUrl: aws.String( cfg.OrdersQueueURL )}",
+                &["queueurl"]
+            )
+            .as_deref(),
+            Some("cfg.OrdersQueueURL")
+        );
+        // The helper's whole argument must be the chain.
+        for value in [
+            "aws.String(base + name)",
+            "aws.String(urls[0])",
+            "aws.String(a, b)",
+        ] {
+            assert_eq!(
+                keyed_expr(&format!("{{QueueUrl: {value}}}"), &["queueurl"]),
+                None,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_helper_call_value_is_not_read() {
+        // GUARD: `os.Getenv("Q")` names an environment variable, never a
+        // queue, so neither a topic `Q` nor an expression comes back.
+        let src = "client.SendMessage(ctx, &sqs.SendMessageInput{QueueUrl: os.Getenv(\"Q\")})";
+        let hit = scan(src, ".SendMessage(", TopicRule::Keyed(&["queueurl"])).remove(0);
+        assert_eq!(hit.topic, None);
+        assert_eq!(hit.expr, None);
+        assert_eq!(
+            keyed_literal(
+                "{TopicArn: strings.TrimSpace(\"arn:aws:sns:us-east-1:1:orders\")}",
+                &["topicarn"]
+            ),
+            None
+        );
+        // The helper is matched at the value, never inside a longer name.
+        assert_eq!(
+            keyed_literal(
+                "{QueueUrl: myaws.String(\"https://sqs/1/orders\")}",
+                &["queueurl"]
+            ),
+            None
+        );
+        assert_eq!(
+            keyed_expr("{QueueUrl: myaws.String(u)}", &["queueurl"]),
             None
         );
     }

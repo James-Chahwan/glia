@@ -281,6 +281,42 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // arg #0 is the TOPIC and arg #1 the subscription, so arg #0 joins the
     // sender either way — the `CreateProcessor(` precedent above.
     ("[ServiceBusTrigger(", QueueFramework::AzureServiceBus, &["webjobs", "azure.functions.worker", "azure.messaging.servicebus"], TopicRule::ArgLiteral),
+    // ---- CL.2: Go broker clients -------------------------------------------
+    // Go exports Capitalised APIs and several take `ctx` first, so no row above
+    // reads a Go call. `.Consume(`, `.Subscription(`, `.Topic(` and `.Publish(`
+    // are common Go method names: every gate is the library's IMPORT PATH.
+    // streadway/amqp + rabbitmq/amqp091-go: `ch.Consume(queue, consumer, ..)`.
+    // The tutorial's `ch.Consume(q.Name, ..)` names no queue; CL.1's declare
+    // pass binds it to the file's one `ch.QueueDeclare("orders", ..)`.
+    (".Consume(", QueueFramework::RabbitMQ, &["streadway/amqp", "amqp091-go"], TopicRule::ArgLiteral),
+    (".ConsumeWithContext(", QueueFramework::RabbitMQ, &["amqp091-go"], TopicRule::ArgIndex(1)),
+    // azservicebus: `client.NewReceiverForQueue("orders", nil)`. A subscription
+    // receiver reads its TOPIC (arg #0), so it joins the sender — the
+    // `CreateProcessor(` precedent.
+    (".NewReceiverForQueue(", QueueFramework::AzureServiceBus, &["azservicebus"], TopicRule::ArgLiteral),
+    (".NewReceiverForSubscription(", QueueFramework::AzureServiceBus, &["azservicebus"], TopicRule::ArgLiteral),
+    // cloud.google.com/go/pubsub (v1 and v2 paths): v1 `client.Subscription("s")`,
+    // v2 `client.Subscriber("s")`. The JS row's COVERAGE_CAVEATS gap holds: a
+    // subscription pairs only when it is spelled like its topic.
+    (".Subscription(", QueueFramework::PubSub, &["cloud.google.com/go/pubsub"], TopicRule::ArgLiteral),
+    (".Subscriber(", QueueFramework::PubSub, &["cloud.google.com/go/pubsub"], TopicRule::ArgLiteral),
+    // go-redis (github.com/redis/go-redis, github.com/go-redis/redis): ctx is
+    // arg #0, so `LPop(ctx, key)` reads arg #1 and `BLPop(ctx, timeout,
+    // keys..)` arg #2, the first key.
+    (".BLPop(", QueueFramework::RedisList, &["go-redis"], TopicRule::ArgIndex(2)),
+    (".BRPop(", QueueFramework::RedisList, &["go-redis"], TopicRule::ArgIndex(2)),
+    (".LPop(", QueueFramework::RedisList, &["go-redis"], TopicRule::ArgIndex(1)),
+    (".RPop(", QueueFramework::RedisList, &["go-redis"], TopicRule::ArgIndex(1)),
+    // aws-sdk-go v1 / v2: `client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+    // QueueUrl: aws.String("https://sqs.../orders")})`. The keyed scan steps
+    // into `aws.String(` (`queue_topic::POINTER_HELPERS`) and the URL folds.
+    // Gated on the SQS SERVICE package, like the SNS rows, so another AWS
+    // service's call of the same name is not a queue.
+    (".ReceiveMessage(", QueueFramework::Sqs, &["aws-sdk-go/service/sqs", "aws-sdk-go-v2/service/sqs"], TopicRule::Keyed(&["queueurl"])),
+    // confluent-kafka-go: `c.SubscribeTopics([]string{"orders"}, nil)` (the
+    // list's first topic) and `c.SubscribeTopic("orders", nil)`.
+    (".SubscribeTopics(", QueueFramework::Kafka, &["confluent-kafka-go"], TopicRule::ArgLiteral),
+    (".SubscribeTopic(", QueueFramework::Kafka, &["confluent-kafka-go"], TopicRule::ArgLiteral),
     // ---- A2.9: broker pub/sub that used to live in eventbus.rs ----------
     // These verbs are the broadest needles in the table, so every row below is
     // a GENERIC-VERB row ([`is_generic_verb_row`]): it yields to any earlier
@@ -353,7 +389,10 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // read it, manufacturing a `queue_producer:unresolved:kafka` tag beside the
     // real node.
     ("producer.Produce(", QueueFramework::Kafka, &["kafka", "confluent"], TopicRule::KeyedOrArg(&["topic"])),
-    ("writer.WriteMessages", QueueFramework::Kafka, &["kafka", "segmentio"], TopicRule::KeyedOrArg(&["topic"])),
+    // CL.2: Keyed, like `.WriteMessages(`. kafka-go's arg #0 is always `ctx`,
+    // so the old KeyedOrArg fallback only ever recorded the expression `ctx`,
+    // which kept the tag alive beside a topic the Writer literal named.
+    ("writer.WriteMessages", QueueFramework::Kafka, &["kafka", "segmentio"], TopicRule::Keyed(&["topic"])),
     // Redis-as-queue producer side. .lpush / .rpush both push items onto a
     // list; consumers BLPOP/BRPOP off the other end.
     (".lpush(", QueueFramework::RedisList, &["redis"], TopicRule::ArgLiteral),
@@ -443,6 +482,43 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     (".createSender(", QueueFramework::AzureServiceBus, &["@azure/service-bus"], TopicRule::ArgLiteral),
     ("get_queue_sender(", QueueFramework::AzureServiceBus, &["azure.servicebus"], TopicRule::KeyedOrArg(&["queue_name"])),
     ("get_topic_sender(", QueueFramework::AzureServiceBus, &["azure.servicebus"], TopicRule::KeyedOrArg(&["topic_name"])),
+    // ---- CL.2: Go broker clients (see the CONSUMER_PATTERNS block) ---------
+    // Every row here sits BEFORE the A2.9 block: the MQTT `.Publish(` row there
+    // is a generic verb that yields to a call an earlier row already read.
+    // streadway/amqp + amqp091-go: `ch.Publish(exchange, key, mandatory,
+    // immediate, msg)` reads the routing key; the context-first spellings read
+    // it one slot later. An EMPTY key (fanout) falls back to the exchange,
+    // amqplib's CL.1 rule.
+    (".Publish(", QueueFramework::RabbitMQ, &["streadway/amqp", "amqp091-go"], TopicRule::ArgIndexOr(1, 0)),
+    (".PublishWithContext(", QueueFramework::RabbitMQ, &["streadway/amqp", "amqp091-go"], TopicRule::ArgIndexOr(2, 1)),
+    (".PublishWithDeferredConfirm(", QueueFramework::RabbitMQ, &["amqp091-go"], TopicRule::ArgIndexOr(1, 0)),
+    (".PublishWithDeferredConfirmWithContext(", QueueFramework::RabbitMQ, &["amqp091-go"], TopicRule::ArgIndexOr(2, 1)),
+    // aws-sdk-go v1 / v2 SNS: `client.Publish(ctx, &sns.PublishInput{TopicArn:
+    // aws.String("arn:aws:sns:..:orders")})`, gated on the SNS service package.
+    (".Publish(", QueueFramework::Sns, &["aws-sdk-go/service/sns", "aws-sdk-go-v2/service/sns"], TopicRule::Keyed(&["topicarn"])),
+    // aws-sdk-go v1 / v2 SQS: `client.SendMessage(ctx, &sqs.SendMessageInput{
+    // QueueUrl: aws.String("https://sqs.../orders")})`.
+    (".SendMessage(", QueueFramework::Sqs, &["aws-sdk-go/service/sqs", "aws-sdk-go-v2/service/sqs"], TopicRule::Keyed(&["queueurl"])),
+    // cloud.google.com/go/pubsub: v1 `client.Topic("orders")`, v2
+    // `client.Publisher("orders")`. KNOWN IMPRECISION, the JS `.topic(` row's:
+    // `.Topic(` is a reference, not a publish, so a subscriber that names its
+    // topic (`pubsub.SubscriptionConfig{Topic: client.Topic("orders")}`) mints
+    // the producer node too.
+    (".Topic(", QueueFramework::PubSub, &["cloud.google.com/go/pubsub"], TopicRule::ArgLiteral),
+    (".Publisher(", QueueFramework::PubSub, &["cloud.google.com/go/pubsub"], TopicRule::ArgLiteral),
+    // azservicebus: `client.NewSender("orders", nil)`, a queue or a topic.
+    (".NewSender(", QueueFramework::AzureServiceBus, &["azservicebus"], TopicRule::ArgLiteral),
+    // go-redis: `rdb.LPush(ctx, key, values..)`, the key behind ctx.
+    (".LPush(", QueueFramework::RedisList, &["go-redis"], TopicRule::ArgIndex(1)),
+    (".RPush(", QueueFramework::RedisList, &["go-redis"], TopicRule::ArgIndex(1)),
+    // segmentio/kafka-go: the topic is a field of the WRITER, `&kafka.Writer{
+    // Addr: .., Topic: "orders"}` or `kafka.NewWriter(kafka.WriterConfig{..})`
+    // (kafka-go rejects a Topic set on both the Writer and the Message). The
+    // needle ends in `{`, so the keyed scan reads the literal's body. A
+    // `WriteMessages(ctx, kafka.Message{Value: v})` through that Writer names
+    // no topic and carries no expression, so CL.1's rule (ii) drops its tag.
+    ("kafka.Writer{", QueueFramework::Kafka, &["kafka-go", "segmentio"], TopicRule::Keyed(&["topic"])),
+    ("kafka.WriterConfig{", QueueFramework::Kafka, &["kafka-go", "segmentio"], TopicRule::Keyed(&["topic"])),
     // ---- A2.9: broker pub/sub (see the CONSUMER_PATTERNS block) -----------
     // Redis pub/sub — `r.publish('notifications', payload)`. Placed AFTER the
     // NATS / RabbitMQ / SNS rows: a file importing both is attributed to the
@@ -477,8 +553,10 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
 const DECLARE_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // Python — pika / amqp: `ch.queue_declare(queue="orders")`, receiver-free.
     ("queue_declare(", QueueFramework::RabbitMQ, &["pika", "amqp"], TopicRule::KeyedOrArg(&["queue"])),
-    // C# — RabbitMQ.Client v6 `channel.QueueDeclare(queue: "orders", ...)`, v7 async.
-    (".QueueDeclare(", QueueFramework::RabbitMQ, &["rabbitmq.client"], TopicRule::KeyedOrArg(&["queue"])),
+    // C# — RabbitMQ.Client v6 `channel.QueueDeclare(queue: "orders", ...)`, v7
+    // async. CL.2: Go's streadway/amqp and amqp091-go spell it the same,
+    // positionally: `q, err := ch.QueueDeclare("orders", durable, ..)`.
+    (".QueueDeclare(", QueueFramework::RabbitMQ, &["rabbitmq.client", "streadway/amqp", "amqp091-go"], TopicRule::KeyedOrArg(&["queue"])),
     (".QueueDeclareAsync(", QueueFramework::RabbitMQ, &["rabbitmq.client"], TopicRule::KeyedOrArg(&["queue"])),
 ];
 
@@ -2464,8 +2542,8 @@ const GENERIC_WRAPPERS: &[&str] = &[
 /// Heuristic — extend as fixtures accumulate.
 const GO_PKG_DENY: &[&str] = &[
     "nats", "jetstream", "kafka", "sarama", "amqp", "amqp091", "mqtt", "sqs", "sns", "pubsub",
-    "aws", "types", "redis", "bytes", "http", "sync", "time", "strings", "errors", "sql", "json",
-    "url", "os", "io", "fmt", "context", "tls", "log", "slog",
+    "azservicebus", "aws", "types", "redis", "bytes", "http", "sync", "time", "strings", "errors",
+    "sql", "json", "url", "os", "io", "fmt", "context", "tls", "log", "slog",
 ];
 
 /// Envelope / client type names that are never the payload, whatever package.
@@ -5357,6 +5435,352 @@ await myconsumer.run({ eachMessage: notMine });\n";
                 cb("queue_consumer:audit", 1, name("onAudit"), false),
                 cb("queue_consumer:orders", 2, name("onOrder"), false),
             ]
+        );
+    }
+
+    // ---- CL.2: Go broker rows ----------------------------------------------
+
+    const GO_PATH: &str = "svc/main.go";
+
+    fn go_p(src: &str) -> Vec<String> {
+        qnames(&extract_queue_producer_nodes(src, GO_PATH, module_id(), repo()))
+    }
+
+    fn go_c(src: &str) -> Vec<String> {
+        qnames(&extract_queue_consumer_nodes(src, GO_PATH, module_id(), repo()))
+    }
+
+    /// `package main`, one import, and `body` inside `func f()`.
+    fn go_file(import: &str, body: &str) -> String {
+        format!("package main\n\nimport \"{import}\"\n\nfunc f() {{\n\t{body}\n}}\n")
+    }
+
+    /// matrix/go/amqp's producer and consumer.
+    const GO_AMQP_PRODUCER: &str = "package main\n\nimport \"github.com/streadway/amqp\"\n\nfunc PublishOrder(ch *amqp.Channel, body []byte) error {\n\treturn ch.Publish(\"\", \"orders\", false, false, amqp.Publishing{\n\t\tContentType: \"application/json\",\n\t\tBody:        body,\n\t})\n}\n";
+    const GO_AMQP_CONSUMER: &str = "package main\n\nimport \"github.com/streadway/amqp\"\n\nfunc ConsumeOrders(ch *amqp.Channel) error {\n\tq, err := ch.QueueDeclare(\"orders\", true, false, false, false, nil)\n\tif err != nil {\n\t\treturn err\n\t}\n\tmsgs, err := ch.Consume(q.Name, \"\", true, false, false, false, nil)\n\tif err != nil {\n\t\treturn err\n\t}\n\tfor d := range msgs {\n\t\thandle(d.Body)\n\t}\n\treturn nil\n}\n\nfunc handle(b []byte) {}\n";
+
+    #[test]
+    fn go_streadway_publish_reads_the_routing_key() {
+        assert_eq!(
+            at(GO_AMQP_PRODUCER, "server/producer.go"),
+            (vec![], strs(&["queue_producer:orders"]))
+        );
+        // amqp091-go, the maintained fork, and its context-first spellings:
+        // the routing key is arg #2 behind ctx and the exchange.
+        let amqp091 = "github.com/rabbitmq/amqp091-go";
+        for call in [
+            "ch.Publish(\"shop\", \"orders\", false, false, msg)",
+            "ch.PublishWithContext(ctx, \"\", \"orders\", false, false, msg)",
+            "ch.PublishWithDeferredConfirm(\"shop\", \"orders\", false, false, msg)",
+            "ch.PublishWithDeferredConfirmWithContext(ctx, \"shop\", \"orders\", false, false, msg)",
+        ] {
+            assert_eq!(
+                go_p(&go_file(amqp091, call)),
+                strs(&["queue_producer:orders"]),
+                "{call}"
+            );
+        }
+        // Fanout: an empty routing key keeps the exchange identity, the
+        // amqplib rule (CL.1).
+        assert_eq!(
+            go_p(&go_file(amqp091, "ch.Publish(\"logs\", \"\", false, false, msg)")),
+            strs(&["queue_producer:logs"])
+        );
+        // A file that also imports paho reads `.Publish(` ONCE, as RabbitMQ:
+        // the generic-verb MQTT row yields to the earlier amqp row.
+        let both = "package main\n\nimport (\n\t\"github.com/streadway/amqp\"\n\tmqtt \"github.com/eclipse/paho.mqtt.golang\"\n)\n\nfunc f() {\n\tch.Publish(\"\", \"orders\", false, false, msg)\n}\n";
+        let r = extract_queue_producer_nodes(both, GO_PATH, module_id(), repo());
+        assert_eq!(qnames(&r), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&r).contains(r#""framework":"RabbitMQ""#));
+        // Without the library, `.Publish(` is somebody else's.
+        assert_eq!(
+            go_p(&go_file("example.com/bus", "b.Publish(\"\", \"orders\")")),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn go_amqp_declared_queue_names_q_name_consume() {
+        let c = extract_queue_consumer_nodes(
+            GO_AMQP_CONSUMER,
+            "client/consumer.go",
+            module_id(),
+            repo(),
+        );
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        // The site is the CONSUME call (line 9), never the declare.
+        let lines: Vec<u32> = c.anchors.iter().map(|a| a.line).collect();
+        assert_eq!(lines, vec![9]);
+        // The tutorial producer declares its queue: that consumes nothing.
+        let amqp091 = "github.com/rabbitmq/amqp091-go";
+        assert_eq!(
+            go_c(&go_file(
+                amqp091,
+                "q, _ := ch.QueueDeclare(\"orders\", false, false, false, false, nil)"
+            )),
+            Vec::<String>::new()
+        );
+        // A literal consume, and amqp091's context-first spelling.
+        assert_eq!(
+            go_c(&go_file(
+                amqp091,
+                "ch.Consume(\"audit\", \"\", true, false, false, false, nil)\n\tch.ConsumeWithContext(ctx, \"orders\", \"\", true, false, false, false, nil)"
+            )),
+            strs(&["queue_consumer:audit", "queue_consumer:orders"])
+        );
+    }
+
+    #[test]
+    fn go_azservicebus_sender_and_receivers() {
+        let sdk = "github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus";
+        assert_eq!(
+            go_p(&go_file(sdk, "sender, err := client.NewSender(\"orders\", nil)")),
+            strs(&["queue_producer:orders"])
+        );
+        assert_eq!(
+            go_c(&go_file(
+                sdk,
+                "receiver, err := client.NewReceiverForQueue(\"orders\", nil)"
+            )),
+            strs(&["queue_consumer:orders"])
+        );
+        // A subscription receiver reads its TOPIC (arg #0), so it joins the
+        // sender — the C# `CreateProcessor(` precedent.
+        assert_eq!(
+            go_c(&go_file(
+                sdk,
+                "r, err := client.NewReceiverForSubscription(\"orders\", \"billing\", nil)"
+            )),
+            strs(&["queue_consumer:orders"])
+        );
+        assert_eq!(
+            go_p(&go_file("example.com/mq", "client.NewSender(\"orders\", nil)")),
+            Vec::<String>::new()
+        );
+        // matrix/go/azure_sb's sender: `sender.SendMessage(` is no SQS call,
+        // and the `azservicebus.Message` envelope is no MESSAGE_TYPE.
+        let sender = "package main\n\nimport (\n\t\"context\"\n\n\t\"github.com/Azure/azure-sdk-for-go/sdk/messaging/azservicebus\"\n)\n\nfunc Send(ctx context.Context, client *azservicebus.Client, body []byte) error {\n\tsender, err := client.NewSender(\"orders\", nil)\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn sender.SendMessage(ctx, &azservicebus.Message{Body: body}, nil)\n}\n";
+        let r = extract_queue_producer_nodes(sender, "server/sender.go", module_id(), repo());
+        assert_eq!(qnames(&r), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&r).contains(r#""framework":"AzureServiceBus""#));
+        assert_eq!(msg_type(&r.nodes[0]), None);
+        let opts = go_file(
+            sdk,
+            "r, err := client.NewReceiverForQueue(\"orders\", &azservicebus.ReceiverOptions{ReceiveMode: azservicebus.ReceiveModePeekLock})",
+        );
+        let c = extract_queue_consumer_nodes(&opts, GO_PATH, module_id(), repo());
+        assert_eq!(msg_type(&c.nodes[0]), None, "client options are no payload");
+    }
+
+    #[test]
+    fn go_gcp_pubsub_topic_and_subscription() {
+        for import in ["cloud.google.com/go/pubsub", "cloud.google.com/go/pubsub/v2"] {
+            let p = |body: &str| go_p(&go_file(import, body));
+            let c = |body: &str| go_c(&go_file(import, body));
+            assert_eq!(
+                p("topic := client.Topic(\"orders\")"),
+                strs(&["queue_producer:orders"]),
+                "{import}"
+            );
+            assert_eq!(
+                c("sub := client.Subscription(\"orders\")"),
+                strs(&["queue_consumer:orders"]),
+                "{import}"
+            );
+            // v2 spells them Publisher / Subscriber.
+            assert_eq!(
+                p("pub := client.Publisher(\"orders\")"),
+                strs(&["queue_producer:orders"]),
+                "{import}"
+            );
+            assert_eq!(
+                c("sub := client.Subscriber(\"orders\")"),
+                strs(&["queue_consumer:orders"]),
+                "{import}"
+            );
+        }
+        // `.Topic(` outside a pubsub file is somebody else's.
+        assert_eq!(
+            go_p(&go_file("example.com/mq", "t := c.Topic(\"orders\")")),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn go_redis_lists_read_the_key_after_ctx() {
+        for import in ["github.com/redis/go-redis/v9", "github.com/go-redis/redis/v8"] {
+            for push in [
+                "rdb.LPush(ctx, \"orders\", payload)",
+                "rdb.RPush(ctx, \"orders\", a, b)",
+            ] {
+                assert_eq!(
+                    go_p(&go_file(import, push)),
+                    strs(&["queue_producer:orders"]),
+                    "{import} {push}"
+                );
+            }
+            for pop in [
+                "rdb.LPop(ctx, \"orders\")",
+                "rdb.RPop(ctx, \"orders\")",
+                "rdb.BLPop(ctx, 0, \"orders\")",
+                "rdb.BRPop(ctx, 5*time.Second, \"orders\")",
+            ] {
+                assert_eq!(
+                    go_c(&go_file(import, pop)),
+                    strs(&["queue_consumer:orders"]),
+                    "{import} {pop}"
+                );
+            }
+        }
+        let v9 = "github.com/redis/go-redis/v9";
+        // The pushed VALUE is never the key: a key held in a variable is the
+        // unresolved signal, not `queue_producer:hello`.
+        assert_eq!(
+            go_p(&go_file(v9, "rdb.LPush(ctx, key, \"hello\")")),
+            strs(&["queue_producer:unresolved:redislist"])
+        );
+        // `.LPush(` in a file without go-redis mints nothing, and redigo's
+        // `redis` import is not go-redis.
+        for import in ["example.com/list", "github.com/gomodule/redigo/redis"] {
+            assert_eq!(
+                go_p(&go_file(import, "l.LPush(ctx, \"orders\", p)")),
+                Vec::<String>::new(),
+                "{import}"
+            );
+        }
+    }
+
+    /// matrix/go/sqs_sns's producer.
+    const GO_SQS_PRODUCER: &str = "package main\n\nimport (\n\t\"context\"\n\n\t\"github.com/aws/aws-sdk-go-v2/aws\"\n\t\"github.com/aws/aws-sdk-go-v2/service/sqs\"\n)\n\nfunc PublishOrder(ctx context.Context, client *sqs.Client, body string) error {\n\t_, err := client.SendMessage(ctx, &sqs.SendMessageInput{\n\t\tQueueUrl:    aws.String(\"https://sqs.us-east-1.amazonaws.com/123456789012/orders\"),\n\t\tMessageBody: aws.String(body),\n\t})\n\treturn err\n}\n";
+
+    #[test]
+    fn go_aws_sdk_sqs_url_through_aws_string() {
+        let pr = extract_queue_producer_nodes(
+            GO_SQS_PRODUCER,
+            "server/producer.go",
+            module_id(),
+            repo(),
+        );
+        assert_eq!(qnames(&pr), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&pr).contains(r#""framework":"Sqs","family":"sqs""#));
+        let consumer = "package main\n\nimport (\n\t\"context\"\n\t\"github.com/aws/aws-sdk-go-v2/aws\"\n\t\"github.com/aws/aws-sdk-go-v2/service/sqs\"\n)\n\nfunc PollOrders(ctx context.Context, client *sqs.Client) error {\n\t_, err := client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{\n\t\tQueueUrl: aws.String(\"https://sqs.us-east-1.amazonaws.com/123456789012/orders\"),\n\t})\n\treturn err\n}\n";
+        assert_eq!(go_c(consumer), strs(&["queue_consumer:orders"]));
+        // SDK v1: no ctx argument, same helper.
+        let v1 = "package main\n\nimport (\n\t\"github.com/aws/aws-sdk-go/aws\"\n\t\"github.com/aws/aws-sdk-go/service/sqs\"\n)\n\nfunc f() {\n\tsvc.SendMessage(&sqs.SendMessageInput{QueueUrl: aws.String(\"https://sqs.eu-west-1.amazonaws.com/1/orders\"), MessageBody: aws.String(b)})\n}\n";
+        assert_eq!(go_p(v1), strs(&["queue_producer:orders"]));
+        // A URL held in a variable hands its NAME to the LA.4 const fold.
+        let held = GO_SQS_PRODUCER.replace(
+            "aws.String(\"https://sqs.us-east-1.amazonaws.com/123456789012/orders\")",
+            "aws.String(ordersURL)",
+        );
+        assert_eq!(go_p(&held), strs(&["queue_producer:unresolved:sqs"]));
+        let fold = extract_queue_nodes_with_consts(
+            &held,
+            "server/producer.go",
+            module_id(),
+            repo(),
+            &|e: &str| (e == "ordersURL").then(|| "https://sqs.us-east-1.amazonaws.com/1/orders".to_string()),
+        );
+        assert_eq!(qnames(&fold.producers), strs(&["queue_producer:orders"]));
+        assert_eq!(fold.counts.folded, 1);
+        // Another AWS service's `SendMessage(` (Amazon Connect participant)
+        // in a file without the SQS service package.
+        assert_eq!(
+            go_p(&go_file(
+                "github.com/aws/aws-sdk-go-v2/service/connectparticipant",
+                "c.SendMessage(ctx, &connectparticipant.SendMessageInput{ConnectionToken: aws.String(tok)})"
+            )),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn go_sns_topic_arn_through_aws_string() {
+        for import in [
+            "github.com/aws/aws-sdk-go/service/sns",
+            "github.com/aws/aws-sdk-go-v2/service/sns",
+        ] {
+            let src = go_file(
+                import,
+                "client.Publish(ctx, &sns.PublishInput{\n\t\tTopicArn: aws.String(\"arn:aws:sns:us-east-1:123456789012:orders\"),\n\t\tMessage:  aws.String(body),\n\t})",
+            );
+            let r = extract_queue_producer_nodes(&src, GO_PATH, module_id(), repo());
+            assert_eq!(qnames(&r), strs(&["queue_producer:orders"]), "{import}");
+            assert!(
+                framework_of(&r).contains(r#""framework":"Sns","family":"sns""#),
+                "{import}"
+            );
+        }
+        // An SQS-only file's `.Publish(` is not SNS.
+        assert_eq!(
+            go_p(&go_file(
+                "github.com/aws/aws-sdk-go-v2/service/sqs",
+                "bus.Publish(ctx, &Event{TopicArn: aws.String(\"arn:aws:sns:us-east-1:1:orders\")})"
+            )),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn kafka_go_writer_struct_names_the_topic_and_drops_both_tags() {
+        // matrix/go/kafka: kafka-go rejects a Topic on both the Writer and the
+        // Message, so the topic lives on the Writer literal alone.
+        let producer = "package main\n\nimport (\n\t\"context\"\n\n\t\"github.com/segmentio/kafka-go\"\n)\n\nvar writer = &kafka.Writer{\n\tAddr:  kafka.TCP(\"localhost:9092\"),\n\tTopic: \"orders\",\n}\n\nfunc PublishOrder(ctx context.Context, payload []byte) error {\n\treturn writer.WriteMessages(ctx, kafka.Message{Value: payload})\n}\n";
+        let consumer = "package main\n\nimport (\n\t\"context\"\n\n\t\"github.com/segmentio/kafka-go\"\n)\n\nfunc ConsumeOrders(ctx context.Context) error {\n\treader := kafka.NewReader(kafka.ReaderConfig{Brokers: []string{\"localhost:9092\"}, Topic: \"orders\", GroupID: \"workers\"})\n\tfor {\n\t\tm, err := reader.ReadMessage(ctx)\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n\t\thandle(m.Value)\n\t}\n}\n\nfunc handle(v []byte) {}\n";
+        assert_eq!(
+            at(producer, "server/producer.go"),
+            (vec![], strs(&["queue_producer:orders"]))
+        );
+        assert_eq!(
+            at(consumer, "client/consumer.go"),
+            (strs(&["queue_consumer:orders"]), vec![])
+        );
+        // `kafka.NewWriter(kafka.WriterConfig{..})`, the pre-0.4 spelling.
+        let kgo = "github.com/segmentio/kafka-go";
+        assert_eq!(
+            go_p(&go_file(
+                kgo,
+                "w := kafka.NewWriter(kafka.WriterConfig{Brokers: brokers, Topic: \"orders\"})\n\tw.WriteMessages(ctx, kafka.Message{Value: v})"
+            )),
+            strs(&["queue_producer:orders"])
+        );
+        // A Writer naming no topic beside a message that does: one node.
+        assert_eq!(
+            go_p(&go_file(
+                kgo,
+                "w := &kafka.Writer{Addr: kafka.TCP(\"localhost:9092\")}\n\tw.WriteMessages(ctx, kafka.Message{Topic: \"orders\", Value: v})"
+            )),
+            strs(&["queue_producer:orders"])
+        );
+        // Nothing in the file names the topic: the tag still says kafka is
+        // live here, once.
+        assert_eq!(
+            go_p(&go_file(
+                kgo,
+                "writer.WriteMessages(ctx, kafka.Message{Value: v})"
+            )),
+            strs(&["queue_producer:unresolved:kafka"])
+        );
+    }
+
+    #[test]
+    fn confluent_go_subscribe_topics() {
+        let lib = "github.com/confluentinc/confluent-kafka-go/v2/kafka";
+        for sub in [
+            "c.SubscribeTopics([]string{\"orders\"}, nil)",
+            "c.SubscribeTopic(\"orders\", nil)",
+        ] {
+            let body = format!("{sub}\n\tfor {{\n\t\tmsg, err := consumer.ReadMessage(time.Second)\n\t\t_, _ = msg, err\n\t}}");
+            assert_eq!(
+                go_c(&go_file(lib, &body)),
+                strs(&["queue_consumer:orders"]),
+                "{sub}"
+            );
+        }
+        // Without the Go module, `.SubscribeTopics(` mints nothing.
+        assert_eq!(
+            go_c(&go_file("example.com/k", "c.SubscribeTopics([]string{\"orders\"}, nil)")),
+            Vec::<String>::new()
         );
     }
 }
