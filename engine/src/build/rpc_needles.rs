@@ -214,13 +214,15 @@ fn needle_one(
     let fp = parses_by_lang.get(lang)?.get(slot)?;
     let client = (grpc_side && client_side).then(|| {
         crate::parallel::quiet(|| {
-            grpc::extract_known_grpc_client_nodes(source, module_id, repo, services)
+            grpc::extract_known_grpc_client_nodes(source, path, module_id, repo, services)
         })
         .map_err(|_| format!("{path}: PANIC (grpc client needles)"))
     });
     let server = grpc_side.then(|| {
         crate::parallel::quiet(|| {
-            grpc::extract_grpc_server_nodes(source, module_id, repo, services, &fp.nodes, &fp.nav)
+            grpc::extract_grpc_server_nodes(
+                source, path, module_id, repo, services, &fp.nodes, &fp.nav,
+            )
         })
         .map_err(|_| format!("{path}: PANIC (grpc server needles)"))
     });

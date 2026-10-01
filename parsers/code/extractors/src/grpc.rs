@@ -5,6 +5,7 @@ use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
 use crate::anchor::{self, Anchor, line_of};
+use crate::code_guard::LazyGuard;
 
 /// One `rpc` declaration inside a proto `service` block.
 pub struct ProtoRpc {
@@ -417,9 +418,10 @@ fn ident_start(bytes: &[u8], pos: usize) -> usize {
 }
 
 /// The canonical service names the suffix-convention patterns recover from
-/// `source`, deduplicated, in emission order.
-fn suffix_pattern_names(source: &str) -> Vec<String> {
-    suffix_pattern_hits(source)
+/// `source`, deduplicated, in emission order. Only needles `guard` admits
+/// count (CJ.1b).
+fn suffix_pattern_names(source: &str, guard: &mut LazyGuard<'_>) -> Vec<String> {
+    suffix_pattern_hits(source, guard)
         .into_iter()
         .map(|(name, _)| name)
         .collect()
@@ -427,7 +429,9 @@ fn suffix_pattern_names(source: &str) -> Vec<String> {
 
 /// [`suffix_pattern_names`] with every construction site: each name once, in
 /// emission order, with the byte offsets of all the needles that recovered it.
-fn suffix_pattern_hits(source: &str) -> Vec<(String, Vec<usize>)> {
+/// CJ.1b: a needle `guard` refuses (it starts in a Rust / Python literal or
+/// comment) is no site.
+fn suffix_pattern_hits(source: &str, guard: &mut LazyGuard<'_>) -> Vec<(String, Vec<usize>)> {
     let mut names: Vec<(String, Vec<usize>)> = Vec::new();
     let mut slot: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let bytes = source.as_bytes();
@@ -437,6 +441,9 @@ fn suffix_pattern_hits(source: &str) -> Vec<(String, Vec<usize>)> {
         while let Some(rel) = source[search_from..].find(needle) {
             let pos = search_from + rel;
             search_from = pos + needle.len();
+            if !guard.admits(pos) {
+                continue;
+            }
             // The identifier ending right at the start of the needle is the
             // proto service name's prefix (e.g. `Cart` from `pb.NewCart` +
             // `ServiceClient(`).
@@ -969,13 +976,25 @@ impl RpcPackageCell {
 /// Each client carries its file's package evidence ([`client_evidence_cell`]),
 /// which the resolver uses to pick one service when a bare name is declared in
 /// more than one proto package (A5.4).
-pub fn extract_grpc_client_nodes(source: &str, module_id: NodeId, repo: RepoId) -> GrpcNodes {
+///
+/// `path` selects CJ.1b's literal / comment guard: in a Rust or Python file a
+/// stub needle that starts in a string literal or comment is no client site
+/// (`""` = no guard). fired_on, once per call that refused one:
+/// `[code-guard] grpc_client lang=<rust|python> dropped=<n> path=<path>`.
+pub fn extract_grpc_client_nodes(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> GrpcNodes {
     let mut out = GrpcNodes {
         nodes: Vec::new(),
         nav: CodeNav::default(),
         anchors: Vec::new(),
     };
-    let hits = suffix_pattern_hits(source);
+    let mut guard = LazyGuard::new(path, source);
+    let hits = suffix_pattern_hits(source, &mut guard);
+    guard.report("grpc_client");
     if hits.is_empty() {
         return out;
     }
@@ -1125,8 +1144,15 @@ const CLIENT_SUFFIXES: &[&str] = &[
 /// `new Greeter.GreeterClient(` and `greeter_client::GreeterClient::connect(`
 /// all match, while `NewLegacyPaymentsClient(` does not mint `Payments`. Files
 /// without gRPC context ([`file_has_grpc_context`]) yield nothing.
+///
+/// `path` selects CJ.1b's literal / comment guard, as for
+/// [`extract_grpc_client_nodes`]: a refused needle is no site, and the
+/// fallback names that suppress a service here are the GUARDED ones, so a
+/// suffix name read only from a literal never hides a real stub of the same
+/// service.
 pub fn extract_known_grpc_client_nodes(
     source: &str,
+    path: &str,
     module_id: NodeId,
     repo: RepoId,
     known: &[ProtoServiceRef],
@@ -1140,8 +1166,13 @@ pub fn extract_known_grpc_client_nodes(
         return out;
     }
     // The fallback's names count as already emitted: one node per client.
+    // Its own guard: the suffix pass reports those refusals for this file, so
+    // this pass's marker counts only its own needles.
     let mut seen: std::collections::HashSet<String> =
-        suffix_pattern_names(source).into_iter().collect();
+        suffix_pattern_names(source, &mut LazyGuard::new(path, source))
+            .into_iter()
+            .collect();
+    let mut guard = LazyGuard::new(path, source);
     // Longest name first, then by name: a fixed order however `known` arrived.
     // Same-named services from different packages share one needle set.
     let mut names: Vec<&str> = known
@@ -1169,7 +1200,7 @@ pub fn extract_known_grpc_client_nodes(
                 let pos = search_from + rel;
                 search_from = pos + needle.len();
                 let prefix = &source[ident_start(bytes, pos)..pos];
-                if prefix.is_empty() || prefix == "New" {
+                if (prefix.is_empty() || prefix == "New") && guard.admits(pos) {
                     sites.push(pos);
                 }
             }
@@ -1183,6 +1214,7 @@ pub fn extract_known_grpc_client_nodes(
             hosted += push_client_node(&mut out, source, &sites, name, module_id, repo, cell.as_ref());
         }
     }
+    guard.report("grpc_client");
     report_dial_hosts("known", hosted, sites_seen);
     out
 }
@@ -1473,8 +1505,14 @@ fn node_add_service_hits(source: &str, known: &BTreeMap<&str, BTreeSet<String>>)
     out
 }
 
-/// Every server needle hit in `source`, in offset order.
-fn server_hits(source: &str, known: &BTreeMap<&str, BTreeSet<String>>) -> Vec<ServerHit> {
+/// Every server needle hit in `source`, in offset order. CJ.1b: a hit
+/// `guard` refuses (it starts in a Rust / Python literal or comment) is
+/// dropped with the comment-line and declaration hits.
+fn server_hits(
+    source: &str,
+    known: &BTreeMap<&str, BTreeSet<String>>,
+    guard: &mut LazyGuard<'_>,
+) -> Vec<ServerHit> {
     let ctx = file_has_grpc_context(source);
     let mut hits: Vec<ServerHit> = Vec::new();
     for needle in SERVER_NEEDLES {
@@ -1494,7 +1532,9 @@ fn server_hits(source: &str, known: &BTreeMap<&str, BTreeSet<String>>) -> Vec<Se
         hits.extend(rust_trait_impl_hits(source, known));
         hits.extend(node_add_service_hits(source, known));
     }
-    hits.retain(|h| !in_comment_line(source, h.at) && !follows_decl_keyword(source, h.at));
+    hits.retain(|h| {
+        guard.admits(h.at) && !in_comment_line(source, h.at) && !follows_decl_keyword(source, h.at)
+    });
     hits.sort_by(|a, b| (a.at, &a.name).cmp(&(b.at, &b.name)));
     hits.dedup_by(|a, b| a.at == b.at && a.name == b.name);
     hits
@@ -1527,8 +1567,14 @@ fn fold_rpc_name(name: &str) -> String {
 ///
 /// Generated gRPC code ([`is_generated_source`]) never yields a server: it
 /// declares every base type the needles key on.
+///
+/// `path` selects CJ.1b's literal / comment guard: in a Rust or Python file a
+/// server needle that starts in a string literal or comment is no hit
+/// (`""` = no guard). fired_on, once per call that refused one:
+/// `[code-guard] grpc_server lang=<rust|python> dropped=<n> path=<path>`.
 pub fn extract_grpc_server_nodes(
     source: &str,
+    path: &str,
     module_id: NodeId,
     repo: RepoId,
     known: &[ProtoServiceRef],
@@ -1555,7 +1601,9 @@ pub fn extract_grpc_server_nodes(
             .or_default()
             .extend(svc.rpcs.iter().map(|r| fold_rpc_name(r)));
     }
-    let hits = server_hits(source, &by_name);
+    let mut guard = LazyGuard::new(path, source);
+    let hits = server_hits(source, &by_name, &mut guard);
+    guard.report("grpc_server");
     if hits.is_empty() {
         return out;
     }
@@ -2385,7 +2433,7 @@ service Users {
     #[test]
     fn client_nodes_from_code() {
         let source = "conn := grpc.Dial(addr)\nclient := pb.NewOrderServiceClient(conn)";
-        let result = extract_grpc_client_nodes(source, module_id(), repo());
+        let result = extract_grpc_client_nodes(source, "", module_id(), repo());
         assert_eq!(result.nodes.len(), 1);
         assert_eq!(result.nav.kind_by_id[&result.nodes[0].id], node_kind::GRPC_CLIENT);
         let qname = result.nav.qname_by_id.values().next().unwrap();
@@ -2409,7 +2457,7 @@ var blocking = CartServiceGrpc.newBlockingStub(channel)
 // C# / Node
 var client2 = new pb.CartServiceClient(channel)
 "#;
-        let result = extract_grpc_client_nodes(source, module_id(), repo());
+        let result = extract_grpc_client_nodes(source, "", module_id(), repo());
         let names: Vec<String> = result
             .nav
             .qname_by_id
@@ -2423,7 +2471,7 @@ var client2 = new pb.CartServiceClient(channel)
     #[test]
     fn client_extraction_handles_svc_suffix() {
         let source = "client := pb.NewOrderSvcClient(conn)";
-        let result = extract_grpc_client_nodes(source, module_id(), repo());
+        let result = extract_grpc_client_nodes(source, "", module_id(), repo());
         let names: Vec<String> = result.nav.qname_by_id.values().cloned().collect();
         assert_eq!(names, vec!["grpc_client:OrderSvc".to_string()]);
     }
@@ -2437,7 +2485,7 @@ let http = new HttpClient(config);
 let redis = createRedisClient(opts);
 let db = makeDbClient(uri);
 "#;
-        let result = extract_grpc_client_nodes(source, module_id(), repo());
+        let result = extract_grpc_client_nodes(source, "", module_id(), repo());
         assert!(
             result.nodes.is_empty(),
             "non-Service-prefixed Client(...) calls must not match"
@@ -2465,21 +2513,21 @@ let db = makeDbClient(uri);
     #[test]
     fn data_driven_needle_matches_suffixless_service() {
         let source = "using Grpc.Net.Client;\nvar c = new Greeter.GreeterClient(channel);";
-        let out = extract_known_grpc_client_nodes(source, module_id(), repo(), &[svc("Greeter")]);
+        let out = extract_known_grpc_client_nodes(source, "", module_id(), repo(), &[svc("Greeter")]);
         assert_eq!(client_qnames(&out), vec!["grpc_client:Greeter".to_string()]);
         let id = out.nodes[0].id;
         assert_eq!(out.nav.kind_by_id[&id], node_kind::GRPC_CLIENT);
         assert_eq!(out.nav.name_by_id[&id], "Greeter");
         assert_eq!(out.nav.parent_of[&id], module_id());
         // The suffix fallback alone is blind to it — that is the gap.
-        assert!(extract_grpc_client_nodes(source, module_id(), repo()).nodes.is_empty());
+        assert!(extract_grpc_client_nodes(source, "", module_id(), repo()).nodes.is_empty());
     }
 
     #[test]
     fn both_client_passes_anchor_every_construction_site() {
         // Suffix pass: two stubs of one service in two functions.
         let go = "import \"google.golang.org/grpc\"\n\nfunc A() {\n\tc := pb.NewUserServiceClient(conn)\n}\n\nfunc B() {\n\tc := pb.NewUserServiceClient(conn)\n}\n";
-        let out = extract_grpc_client_nodes(go, module_id(), repo());
+        let out = extract_grpc_client_nodes(go, "", module_id(), repo());
         assert_eq!(client_qnames(&out), vec!["grpc_client:UserService".to_string()]);
         let id = out.nodes[0].id;
         assert_eq!(
@@ -2489,29 +2537,29 @@ let db = makeDbClient(uri);
 
         // Data-driven pass: the C# fixture shape, one site.
         let cs = "using Grpc.Net.Client;\nclass H {\n  void F() {\n    var c = new Greeter.GreeterClient(ch);\n  }\n}";
-        let out = extract_known_grpc_client_nodes(cs, module_id(), repo(), &[svc("Greeter")]);
+        let out = extract_known_grpc_client_nodes(cs, "", module_id(), repo(), &[svc("Greeter")]);
         assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 3 }]);
 
         // No client, no anchor.
-        let none = extract_grpc_client_nodes("package main\n", module_id(), repo());
+        let none = extract_grpc_client_nodes("package main\n", "", module_id(), repo());
         assert!(none.nodes.is_empty() && none.anchors.is_empty());
     }
 
     #[test]
     fn data_driven_needle_requires_grpc_context() {
         let source = "var c = new Greeter.GreeterClient(channel);";
-        let out = extract_known_grpc_client_nodes(source, module_id(), repo(), &[svc("Greeter")]);
+        let out = extract_known_grpc_client_nodes(source, "", module_id(), repo(), &[svc("Greeter")]);
         assert!(out.nodes.is_empty(), "no gRPC context in the file → no client");
         // A service literally named `Http` must not turn HttpClient into gRPC.
         let http = "let http = new HttpClient(config);";
-        let out = extract_known_grpc_client_nodes(http, module_id(), repo(), &[svc("Http")]);
+        let out = extract_known_grpc_client_nodes(http, "", module_id(), repo(), &[svc("Http")]);
         assert!(out.nodes.is_empty());
     }
 
     #[test]
     fn data_driven_needle_does_not_match_longer_identifier() {
         let source = "import \"google.golang.org/grpc\"\nc := pb.NewLegacyPaymentsClient(conn)";
-        let out = extract_known_grpc_client_nodes(source, module_id(), repo(), &[svc("Payments")]);
+        let out = extract_known_grpc_client_nodes(source, "", module_id(), repo(), &[svc("Payments")]);
         assert!(out.nodes.is_empty(), "LegacyPayments is not Payments");
     }
 
@@ -2528,7 +2576,7 @@ let db = makeDbClient(uri);
         ];
         for source in cases {
             let out =
-                extract_known_grpc_client_nodes(source, module_id(), repo(), &[svc("Greeter")]);
+                extract_known_grpc_client_nodes(source, "", module_id(), repo(), &[svc("Greeter")]);
             assert_eq!(
                 client_qnames(&out),
                 vec!["grpc_client:Greeter".to_string()],
@@ -2543,10 +2591,10 @@ let db = makeDbClient(uri);
         // match: the fallback owns it, the data-driven pass must not repeat it.
         let source = "conn := grpc.Dial(addr)\nclient := pb.NewOrderServiceClient(conn)";
         let known = [svc("OrderService"), svc("Greeter")];
-        let out = extract_known_grpc_client_nodes(source, module_id(), repo(), &known);
+        let out = extract_known_grpc_client_nodes(source, "", module_id(), repo(), &known);
         assert!(out.nodes.is_empty(), "got {:?}", client_qnames(&out));
         assert_eq!(
-            client_qnames(&extract_grpc_client_nodes(source, module_id(), repo())),
+            client_qnames(&extract_grpc_client_nodes(source, "", module_id(), repo())),
             vec!["grpc_client:OrderService".to_string()]
         );
     }
@@ -2558,8 +2606,8 @@ let db = makeDbClient(uri);
         other_pkg.package = Some("v2".to_string());
         let forward = [svc("Auth"), svc("Users"), other_pkg.clone()];
         let backward = [other_pkg, svc("Users"), svc("Auth")];
-        let a = extract_known_grpc_client_nodes(source, module_id(), repo(), &forward);
-        let b = extract_known_grpc_client_nodes(source, module_id(), repo(), &backward);
+        let a = extract_known_grpc_client_nodes(source, "", module_id(), repo(), &forward);
+        let b = extract_known_grpc_client_nodes(source, "", module_id(), repo(), &backward);
         let expected = vec!["grpc_client:Users".to_string(), "grpc_client:Auth".to_string()];
         assert_eq!(client_qnames(&a), expected, "one node per name, longest first");
         assert_eq!(client_qnames(&b), expected);
@@ -2570,12 +2618,12 @@ let db = makeDbClient(uri);
         // Program.cs of the ASP.NET Core client factory: no `using Grpc.*` at
         // all, only the registration. `AddGrpcClient<` is the gRPC context.
         let program = "using Demo;\n\nvar builder = WebApplication.CreateBuilder(args);\nbuilder.Services.AddGrpcClient<Greeter.GreeterClient>(o =>\n{\n    o.Address = new Uri(\"https://localhost:5001\");\n});\n";
-        let out = extract_known_grpc_client_nodes(program, module_id(), repo(), &[svc("Greeter")]);
+        let out = extract_known_grpc_client_nodes(program, "", module_id(), repo(), &[svc("Greeter")]);
         assert_eq!(client_qnames(&out), vec!["grpc_client:Greeter".to_string()]);
         assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 3 }]);
         // A generic that is not the generated client is no hit.
         let other = "builder.Services.AddGrpcClient<Greeter.GreeterClient>(o => {});\nvar x = Get<LegacyGreeterClient>(y);\n";
-        let out = extract_known_grpc_client_nodes(other, module_id(), repo(), &[svc("Greeter")]);
+        let out = extract_known_grpc_client_nodes(other, "", module_id(), repo(), &[svc("Greeter")]);
         assert_eq!(out.anchors.len(), 1, "LegacyGreeterClient is not Greeter");
     }
 
@@ -2590,7 +2638,7 @@ let db = makeDbClient(uri);
 
     /// The server pass over `source` with no parse (no types, no methods).
     fn servers(source: &str) -> GrpcNodes {
-        extract_grpc_server_nodes(source, module_id(), repo(), &[greeter()], &[], &CodeNav::default())
+        extract_grpc_server_nodes(source, "", module_id(), repo(), &[greeter()], &[], &CodeNav::default())
     }
 
     fn server_lines(out: &GrpcNodes) -> Vec<u32> {
@@ -2758,7 +2806,7 @@ let db = makeDbClient(uri);
         let wrapper = parse_node(&mut nav, node_kind::CLASS, "Wrapper", "svc::Wrapper", (12, 15), m);
         let decoy = parse_node(&mut nav, node_kind::METHOD, "SayHello", "svc::Wrapper::SayHello", (14, 14), wrapper.id);
         let nodes = vec![impl_class, say, helper, wrapper, decoy];
-        let out = extract_grpc_server_nodes(source, m, repo(), &[greeter()], &nodes, &nav);
+        let out = extract_grpc_server_nodes(source, "", m, repo(), &[greeter()], &nodes, &nav);
         assert_eq!(out.nodes.len(), 1);
         // The base line (POSITION) and SayHello's first line; not Helper, and
         // not the same-named method of a class that does not extend the base.
@@ -2770,7 +2818,7 @@ let db = makeDbClient(uri);
         let node_src = "import { Server } from \"@grpc/grpc-js\";\n\nfunction sayHello(call, cb) {\n  cb(null, null);\n}\n\nconst server = new Server();\nserver.addService(GreeterService, { sayHello });\n";
         let mut nav = CodeNav::default();
         let f = parse_node(&mut nav, node_kind::FUNCTION, "sayHello", "server::sayHello", (2, 4), m);
-        let out = extract_grpc_server_nodes(node_src, m, repo(), &[greeter()], &[f], &nav);
+        let out = extract_grpc_server_nodes(node_src, "", m, repo(), &[greeter()], &[f], &nav);
         assert_eq!(server_lines(&out), vec![2]);
 
         // Rust: the impl block is outside the struct's span; the type is found
@@ -2779,7 +2827,7 @@ let db = makeDbClient(uri);
         let mut nav = CodeNav::default();
         let st = parse_node(&mut nav, node_kind::STRUCT, "MyGreeter", "main::MyGreeter", (3, 3), m);
         let method = parse_node(&mut nav, node_kind::METHOD, "say_hello", "main::MyGreeter::say_hello", (6, 6), st.id);
-        let out = extract_grpc_server_nodes(rs, m, repo(), &[greeter()], &[st, method], &nav);
+        let out = extract_grpc_server_nodes(rs, "", m, repo(), &[greeter()], &[st, method], &nav);
         assert_eq!(server_lines(&out), vec![5, 6]);
     }
 
@@ -2881,7 +2929,7 @@ let db = makeDbClient(uri);
     #[test]
     fn fallback_client_carries_its_files_package_evidence() {
         let source = "package main\n\nimport (\n\t\"google.golang.org/grpc\"\n\tpb \"example.com/gen/billing\"\n)\n\nfunc Charge() {\n\tc := pb.NewPaymentsServiceClient(conn)\n}\n";
-        let out = extract_grpc_client_nodes(source, module_id(), repo());
+        let out = extract_grpc_client_nodes(source, "", module_id(), repo());
         assert_eq!(client_qnames(&out), vec!["grpc_client:PaymentsService".to_string()], "qname stays bare");
         let evidence = evidence_of(&out);
         assert_eq!(evidence.len(), 1);
@@ -2892,13 +2940,13 @@ let db = makeDbClient(uri);
     #[test]
     fn data_driven_client_carries_evidence_and_no_evidence_means_no_cell() {
         let source = "using Grpc.Net.Client;\nusing GreeterApi;\nvar c = new Greeter.GreeterClient(channel);";
-        let out = extract_known_grpc_client_nodes(source, module_id(), repo(), &[svc("Greeter")]);
+        let out = extract_known_grpc_client_nodes(source, "", module_id(), repo(), &[svc("Greeter")]);
         let evidence = evidence_of(&out);
         assert_eq!(evidence.len(), 1);
         assert_eq!(evidence[0].imports, vec!["Grpc.Net.Client", "GreeterApi"]);
 
         // A stub with no import line at all carries no RPC_PACKAGE cell.
-        let bare = extract_grpc_client_nodes("c := pb.NewOrderServiceClient(conn)", module_id(), repo());
+        let bare = extract_grpc_client_nodes("c := pb.NewOrderServiceClient(conn)", "", module_id(), repo());
         assert_eq!(bare.nodes.len(), 1);
         assert!(evidence_of(&bare).is_empty(), "null-free: no evidence, no cell");
         // CB.21: the site's hostless ENDPOINT_HIT is its only cell.
@@ -2942,7 +2990,7 @@ let db = makeDbClient(uri);
                   func Other(conn *grpc.ClientConn) {\n\
                   \tc := pb.NewUserServiceClient(conn)\n\
                   \t_ = c\n}\n";
-        let out = extract_grpc_client_nodes(go, module_id(), repo());
+        let out = extract_grpc_client_nodes(go, "", module_id(), repo());
         assert_eq!(client_qnames(&out), vec!["grpc_client:UserService".to_string()]);
         assert_eq!(dial_hits(&out), vec![vec![host("users-svc:50051"), r#"{"via":"grpc"}"#.to_string()]]);
         // DialContext's target is its first string literal; dns:/// is stripped;
@@ -2951,10 +2999,10 @@ let db = makeDbClient(uri);
                    \told, _ := grpc.Dial(\"legacy:1\")\n\
                    \tconn, _ := grpc.DialContext(ctx, \"dns:///orders-svc:9000\", opts...)\n\
                    \tc := pb.NewOrderServiceClient(conn)\n}\n";
-        assert_eq!(dial_hits(&extract_grpc_client_nodes(ctx, module_id(), repo())), vec![vec![host("orders-svc:9000")]]);
+        assert_eq!(dial_hits(&extract_grpc_client_nodes(ctx, "", module_id(), repo())), vec![vec![host("orders-svc:9000")]]);
         // A dynamic target names nothing.
         let dynamic = "func f(addr string) {\n\tconn, _ := grpc.NewClient(addr)\n\tc := pb.NewOrderServiceClient(conn)\n}\n";
-        assert_eq!(dial_hits(&extract_grpc_client_nodes(dynamic, module_id(), repo())), vec![vec![r#"{"via":"grpc"}"#.to_string()]]);
+        assert_eq!(dial_hits(&extract_grpc_client_nodes(dynamic, "", module_id(), repo())), vec![vec![r#"{"via":"grpc"}"#.to_string()]]);
     }
 
     #[test]
@@ -2967,11 +3015,11 @@ let db = makeDbClient(uri);
                   \x20       stub.GetUser(None)\n\n\
                   async def run_aio():\n\
                   \x20   stub = users_pb2_grpc.UserServiceStub(grpc.aio.insecure_channel(target=\"http://admin-svc:8443/x\"))\n";
-        let out = extract_grpc_client_nodes(py, module_id(), repo());
+        let out = extract_grpc_client_nodes(py, "", module_id(), repo());
         assert_eq!(dial_hits(&out), vec![vec![host("users-svc:50051"), host("admin-svc:8443")]]);
         // A formatted target is not a literal authority.
         let fmt = "def run(h):\n    channel = grpc.insecure_channel('%s:50051' % h)\n    stub = pb.UserServiceStub(channel)\n";
-        assert_eq!(dial_hits(&extract_grpc_client_nodes(fmt, module_id(), repo())), vec![vec![r#"{"via":"grpc"}"#.to_string()]]);
+        assert_eq!(dial_hits(&extract_grpc_client_nodes(fmt, "", module_id(), repo())), vec![vec![r#"{"via":"grpc"}"#.to_string()]]);
     }
 
     #[test]
@@ -2988,10 +3036,10 @@ let db = makeDbClient(uri);
                     \x20 public void other(ManagedChannel ch) {\n\
                     \x20   var t = UserServiceGrpc.newBlockingStub(ch);\n\
                     \x20 }\n}\n";
-        let out = extract_grpc_client_nodes(java, module_id(), repo());
+        let out = extract_grpc_client_nodes(java, "", module_id(), repo());
         assert_eq!(dial_hits(&out), vec![vec![host("users-svc:50051"), r#"{"via":"grpc"}"#.to_string()]]);
         let target = "void f() {\n  var ch = ManagedChannelBuilder.forTarget(\"dns:///users-svc:443\").build();\n  var s = UserServiceGrpc.newStub(ch);\n}\n";
-        assert_eq!(dial_hits(&extract_grpc_client_nodes(target, module_id(), repo())), vec![vec![host("users-svc:443")]]);
+        assert_eq!(dial_hits(&extract_grpc_client_nodes(target, "", module_id(), repo())), vec![vec![host("users-svc:443")]]);
     }
 
     #[test]
@@ -2999,11 +3047,11 @@ let db = makeDbClient(uri);
         let js = "const grpc = require('@grpc/grpc-js');\n\
                   const client = new proto.UserServiceClient('users-svc:50051', grpc.credentials.createInsecure());\n\
                   const other = new proto.UserServiceClient(address, grpc.credentials.createInsecure());\n";
-        let out = extract_grpc_client_nodes(js, module_id(), repo());
+        let out = extract_grpc_client_nodes(js, "", module_id(), repo());
         assert_eq!(dial_hits(&out), vec![vec![host("users-svc:50051"), r#"{"via":"grpc"}"#.to_string()]]);
         // The data-driven pass reads the same way; a unix socket names no host.
         let cs = "using Grpc.Net.Client;\nvar a = new Greeter.GreeterClient(GrpcChannel.ForAddress(\"https://greeter-svc:5001\"));\nvar b = new Greeter.GreeterClient(\"unix:///tmp/g.sock\");\n";
-        let known = extract_known_grpc_client_nodes(cs, module_id(), repo(), &[svc("Greeter")]);
+        let known = extract_known_grpc_client_nodes(cs, "", module_id(), repo(), &[svc("Greeter")]);
         assert_eq!(dial_hits(&known), vec![vec![host("greeter-svc:5001"), r#"{"via":"grpc"}"#.to_string()]]);
     }
 
@@ -3555,5 +3603,61 @@ let db = makeDbClient(uri);
                 .nodes
                 .is_empty()
         );
+    }
+
+    /// CJ.1b: in a `.rs` file a stub / server needle inside a string literal
+    /// or comment mints nothing, through every pass; the same text read as Go
+    /// (no guard) mints as before, and tonic code needles stay.
+    #[test]
+    fn literal_stub_needles_mint_nothing_in_rust() {
+        let go_sample = "conn := grpc.Dial(addr)\nclient := pb.NewOrderServiceClient(conn)";
+        let rust = format!(
+            "/// The Go `pb.NewOrderServiceClient(conn)` stub, as the scanner reads it.\n\
+             fn sample() {{\n\
+             \x20   let src = {go_sample:?};\n\
+             \x20   let _ = src;\n\
+             }}\n"
+        );
+        // Suffix pass.
+        assert!(client_qnames(&extract_grpc_client_nodes(&rust, "src/x.rs", module_id(), repo())).is_empty());
+        assert_eq!(
+            client_qnames(&extract_grpc_client_nodes(&rust, "src/x.go", module_id(), repo())),
+            vec!["grpc_client:OrderService".to_string()]
+        );
+
+        // Known-client pass: the literal names a known service's stub.
+        let known_rs = "fn sample() {\n    let src = \"conn := grpc.Dial(addr)\\nc := pb.NewGreeterClient(conn)\";\n}\n";
+        let known = [svc("Greeter")];
+        assert!(extract_known_grpc_client_nodes(known_rs, "src/x.rs", module_id(), repo(), &known).nodes.is_empty());
+        assert_eq!(
+            client_qnames(&extract_known_grpc_client_nodes(known_rs, "src/x.go", module_id(), repo(), &known)),
+            vec!["grpc_client:Greeter".to_string()]
+        );
+
+        // Server pass over a Rust test literal holding the Go embed.
+        let server_rs = "#[test]\nfn reads() {\n    let src = \"import \\\"google.golang.org/grpc\\\"\\ntype server struct {\\n\\tpb.UnimplementedGreeterServer\\n}\";\n}\n";
+        let server = |path: &str| {
+            extract_grpc_server_nodes(server_rs, path, module_id(), repo(), &[greeter()], &[], &CodeNav::default())
+        };
+        assert!(server("src/x.rs").nodes.is_empty());
+        assert_eq!(client_qnames(&server("src/x.go")), vec!["grpc_server:Greeter".to_string()]);
+
+        // tonic registration in Rust code stays.
+        let tonic = "use tonic::transport::Server;\n\nasync fn serve(svc: MyGreeter) {\n    Server::builder().add_service(GreeterServer::new(svc));\n}\n";
+        let out = extract_grpc_server_nodes(tonic, "src/main.rs", module_id(), repo(), &[greeter()], &[], &CodeNav::default());
+        assert_eq!(client_qnames(&out), vec!["grpc_server:Greeter".to_string()]);
+        assert_eq!(server_lines(&out), vec![3]);
+
+        // The known pass's `seen` set is the GUARDED suffix names: a suffix
+        // name read only from a literal does not hide the real tonic stub.
+        let mixed = "use tonic::transport::Channel;\n\
+                     const SAMPLE: &str = \"c := pb.NewOrderServiceClient(conn)\";\n\
+                     async fn orders() {\n\
+                     \x20   let c = OrderServiceClient::connect(\"http://orders:50051\").await;\n\
+                     }\n";
+        assert!(extract_grpc_client_nodes(mixed, "src/orders.rs", module_id(), repo()).nodes.is_empty());
+        let out = extract_known_grpc_client_nodes(mixed, "src/orders.rs", module_id(), repo(), &[svc("OrderService")]);
+        assert_eq!(client_qnames(&out), vec!["grpc_client:OrderService".to_string()]);
+        assert_eq!(out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![3]);
     }
 }

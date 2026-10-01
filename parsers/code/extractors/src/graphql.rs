@@ -4,6 +4,7 @@ use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use glia_core::{Confidence, Node, NodeId, RepoId};
 
 use crate::anchor::{Anchor, line_of};
+use crate::code_guard::LazyGuard;
 
 pub struct GraphqlNodes {
     pub nodes: Vec<Node>,
@@ -294,7 +295,12 @@ fn accept(family: Family, arg: ArgShape, ctx: GqlContext, ident_before: bool) ->
 
 /// The needle lines that carry GraphQL evidence, as (operation name, 0-indexed
 /// line) in source order, and the tally for the `[graphql-ops]` marker.
-fn scan_operation_needles(source: &str) -> (Vec<(String, u32)>, NeedleTally) {
+/// CJ.1b: a needle occurrence `guard` refuses (it starts in a Rust / Python
+/// string literal or comment) carries no evidence.
+fn scan_operation_needles(
+    source: &str,
+    guard: &mut LazyGuard<'_>,
+) -> (Vec<(String, u32)>, NeedleTally) {
     let mut hits = Vec::new();
     let mut tally = NeedleTally::default();
     let b = source.as_bytes();
@@ -324,6 +330,9 @@ fn scan_operation_needles(source: &str) -> (Vec<(String, u32)>, NeedleTally) {
             }
             let kept = line.match_indices(pattern).any(|(at, _)| {
                 let hit = line_start + at;
+                if !guard.admits(hit) {
+                    return false;
+                }
                 let arg = first_arg_shape(source, hit + pattern.len());
                 accept(family, arg, ctx, ident_byte_before(b, hit))
             });
@@ -524,8 +533,19 @@ const METHOD_MODIFIERS: &[&str] = &[
     "function",
 ];
 
+/// Client-side GRAPHQL_OPERATION nodes: the operation needles
+/// ([`scan_operation_needles`]) and the named operations of `` gql` ``
+/// templates ([`extract_gql_template_operations`]).
+///
+/// `path` selects CJ.1b's literal / comment guard: in a Rust or Python file an
+/// operation needle or `` gql` `` tag that starts in a string literal or
+/// comment mints nothing (`""` = no guard). Resolver / SDL extraction is never
+/// guarded: an SDL schema legitimately lives in a string literal. fired_on,
+/// once per call that refused one:
+/// `[code-guard] graphql_op lang=<rust|python> dropped=<n> path=<path>`.
 pub fn extract_graphql_operation_nodes(
     source: &str,
+    path: &str,
     module_id: NodeId,
     repo: RepoId,
 ) -> GraphqlNodes {
@@ -533,8 +553,9 @@ pub fn extract_graphql_operation_nodes(
     let mut nav = CodeNav::default();
     let mut anchors = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut guard = LazyGuard::new(path, source);
 
-    let (hits, tally) = scan_operation_needles(source);
+    let (hits, tally) = scan_operation_needles(source, &mut guard);
     if graphql_debug()
         && let Some(marker) = tally.marker()
     {
@@ -555,7 +576,9 @@ pub fn extract_graphql_operation_nodes(
         }
     }
 
-    for (name, at) in extract_gql_template_operations(source) {
+    let templates = extract_gql_template_operations(source, &mut guard);
+    guard.report("graphql_op");
+    for (name, at) in templates {
         if seen.insert(name.clone()) {
             let qname = format!("graphql_op:{name}");
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRAPHQL_OPERATION, &qname);
@@ -1729,17 +1752,24 @@ fn extract_gql_operation_name(source: &str, _line: &str) -> Option<String> {
 }
 
 /// Every named operation in a `` gql` `` template, with the byte offset of
-/// its `` gql` `` tag.
-fn extract_gql_template_operations(source: &str) -> Vec<(String, usize)> {
+/// its `` gql` `` tag. CJ.1b: a tag `guard` refuses (it starts in a Rust /
+/// Python literal or comment) is no template.
+fn extract_gql_template_operations(
+    source: &str,
+    guard: &mut LazyGuard<'_>,
+) -> Vec<(String, usize)> {
     let mut ops = Vec::new();
     let mut search_from = 0;
     while let Some(idx) = source[search_from..].find("gql`") {
         let tag = search_from + idx;
         let abs = tag + 4;
+        search_from = abs;
+        if !guard.admits(tag) {
+            continue;
+        }
         if let Some(name) = extract_operation_from_body(&source[abs..]) {
             ops.push((name, tag));
         }
-        search_from = abs;
     }
     ops
 }
@@ -2123,7 +2153,7 @@ mod tests {
     #[test]
     fn detects_use_query() {
         let source = "const { data } = useQuery(GET_USERS);";
-        let result = extract_graphql_operation_nodes(source, module_id(), repo());
+        let result = extract_graphql_operation_nodes(source, "", module_id(), repo());
         assert!(!result.nodes.is_empty());
     }
 
@@ -2133,7 +2163,7 @@ mod tests {
             "const { data } = trpc.user.list.useQuery();",
             "const m = api.post.create.useMutation();",
         ] {
-            let result = extract_graphql_operation_nodes(source, module_id(), repo());
+            let result = extract_graphql_operation_nodes(source, "", module_id(), repo());
             assert!(
                 result.nodes.is_empty(),
                 "{source} -> {:?}",
@@ -2142,17 +2172,62 @@ mod tests {
         }
         // The Apollo shapes beside them still count.
         let mixed = "const a = trpc.user.list.useQuery();\nconst { data } = useQuery(GET_USERS);";
-        let result = extract_graphql_operation_nodes(mixed, module_id(), repo());
+        let result = extract_graphql_operation_nodes(mixed, "", module_id(), repo());
         assert!(result.nav.qname_by_id.values().any(|q| q == "graphql_op:useQuery"));
         let apollo = "const res = await client.query({ query: GET_USERS });";
-        let result = extract_graphql_operation_nodes(apollo, module_id(), repo());
+        let result = extract_graphql_operation_nodes(apollo, "", module_id(), repo());
         assert!(result.nav.qname_by_id.values().any(|q| q == "graphql_op:client.query"));
+    }
+
+    /// CJ.1b: in a `.rs` / `.py` file an operation needle or `` gql` `` tag
+    /// inside a string literal or comment mints nothing; the same text read
+    /// as TypeScript (no guard) mints as before. A Python needle in code
+    /// stays, anchored on its own line, not on a literal one above it.
+    #[test]
+    fn literal_operations_mint_nothing_in_rust_and_python() {
+        let hook = "const { data } = useQuery(GET_USERS);";
+        let template = r#"const GET_USERS = gql`query GetUsers { u }`;"#;
+        let rust = format!(
+            "/// `useQuery(GET_USERS)` and `gql` documents, as the scanner reads them.\n\
+             fn samples() {{\n\
+             \x20   let hook = {hook:?};\n\
+             \x20   let doc = r#\"{template}\"#;\n\
+             \x20   let _ = (hook, doc);\n\
+             }}\n"
+        );
+        let qnames = |out: &GraphqlNodes| {
+            let mut q: Vec<String> = out.nav.qname_by_id.values().cloned().collect();
+            q.sort();
+            q
+        };
+        let rs = extract_graphql_operation_nodes(&rust, "scanner/src/channels.rs", module_id(), repo());
+        assert!(rs.nodes.is_empty() && rs.anchors.is_empty(), "{:?}", qnames(&rs));
+
+        // Unguarded (TypeScript): each shape mints as it did before CJ.1b.
+        let ts_hook = extract_graphql_operation_nodes(hook, "x.ts", module_id(), repo());
+        assert_eq!(qnames(&ts_hook), vec!["graphql_op:useQuery"]);
+        let ts_doc = extract_graphql_operation_nodes(template, "x.ts", module_id(), repo());
+        assert_eq!(qnames(&ts_doc), vec!["graphql_op:GetUsers"]);
+        // The Rust file's text read as TypeScript still mints from its literals.
+        assert!(!extract_graphql_operation_nodes(&rust, "x.ts", module_id(), repo()).nodes.is_empty());
+
+        let py = "from gql import gql\n\
+                  QUERY = gql(\"query GetUsers { u }\")\n\
+                  # client.query(QUERY)\n\
+                  SAMPLE = \"client.query(QUERY)\"\n\
+                  def run(client):\n\
+                  \x20   return client.query(QUERY)\n";
+        let out = extract_graphql_operation_nodes(py, "client/ops.py", module_id(), repo());
+        assert_eq!(qnames(&out), vec!["graphql_op:GetUsers"]);
+        assert_eq!(out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![5]);
+        let unguarded = extract_graphql_operation_nodes(py, "client/ops.ts", module_id(), repo());
+        assert_eq!(unguarded.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![2]);
     }
 
     #[test]
     fn extracts_gql_template_name() {
         let source = r#"const GET_USERS = gql`query GetUsers { users { id name } }`;"#;
-        let result = extract_graphql_operation_nodes(source, module_id(), repo());
+        let result = extract_graphql_operation_nodes(source, "", module_id(), repo());
         assert!(result.nav.qname_by_id.values().any(|q| q == "graphql_op:GetUsers"));
     }
 
@@ -2268,7 +2343,7 @@ mod tests {
     #[test]
     fn anchors_operations_at_their_minting_line() {
         let src = "const GET_USER = gql`\n  query getUser { u }\n`;\n\nexport function P() {\n  const { data } = useQuery(GET_USER);\n}\nconst OTHER = gql`query listUsers { u }`;";
-        let out = extract_graphql_operation_nodes(src, module_id(), repo());
+        let out = extract_graphql_operation_nodes(src, "", module_id(), repo());
         // The useQuery( line mints getUser (the file's first gql tag).
         assert_eq!(anchor_line(&out, "graphql_op:getUser"), Some(5));
         // A template-only operation anchors at its gql` tag.
@@ -2294,7 +2369,7 @@ mod tests {
     }
 
     fn op_qnames(source: &str) -> Vec<String> {
-        let out = extract_graphql_operation_nodes(source, module_id(), repo());
+        let out = extract_graphql_operation_nodes(source, "", module_id(), repo());
         let mut qnames: Vec<String> = out.nav.qname_by_id.values().cloned().collect();
         qnames.sort();
         qnames
@@ -2334,7 +2409,7 @@ mod tests {
         // on the same line still mints.
         let mixed = "import { useQuery } from '@tanstack/react-query';\nimport { request } from 'graphql-request';\nuseQuery(['users'], () => request(API, USERS));";
         assert_eq!(op_qnames(mixed), vec!["graphql_op:request".to_string()]);
-        let (hits, tally) = scan_operation_needles(mixed);
+        let (hits, tally) = scan_operation_needles(mixed, &mut LazyGuard::new("", mixed));
         assert_eq!(hits, vec![("request".to_string(), 2)]);
         assert_eq!((tally.kept, tally.hook), (1, 1));
     }
@@ -2396,7 +2471,7 @@ mod tests {
     #[test]
     fn marker_counts_rejections_per_family() {
         let rows = "import { useQuery } from '@tanstack/react-query';\nclient.query('SELECT 1');\nclient.subscribe('t');\nuseQuery({ queryKey: ['k'] });";
-        let (hits, tally) = scan_operation_needles(rows);
+        let (hits, tally) = scan_operation_needles(rows, &mut LazyGuard::new("", rows));
         assert!(hits.is_empty());
         assert_eq!(
             tally.marker().as_deref(),
@@ -2404,7 +2479,7 @@ mod tests {
         );
 
         let users = "import { request, gql } from 'graphql-request';\nconst Q = gql(DOC);\nawait request(url, Q);";
-        let (hits, tally) = scan_operation_needles(users);
+        let (hits, tally) = scan_operation_needles(users, &mut LazyGuard::new("", users));
         assert_eq!(hits, vec![("request".to_string(), 2)]);
         assert_eq!(
             tally.marker().as_deref(),
@@ -2412,7 +2487,7 @@ mod tests {
         );
 
         // No needle hit, no marker line.
-        assert_eq!(scan_operation_needles("const x = 1;").1.marker(), None);
+        assert_eq!(scan_operation_needles("const x = 1;", &mut LazyGuard::new("", "const x = 1;")).1.marker(), None);
     }
 
     // LA.27. Every source below is a one-line Rust string (`\n` escapes), so

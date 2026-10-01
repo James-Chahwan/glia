@@ -56,6 +56,14 @@
 //! and one per file whose client sites named a host (CB.21):
 //!   `[ws] client hosts sites=1 in web/chat.ts`
 //!
+//! Self-scan precision (CJ.1b): in a Rust or Python file a needle whose first
+//! byte sits in a string literal or comment is no site ([`LazyGuard`], CJ.1a's
+//! guard), so a doc line or a test's sample source mints nothing. Only the
+//! NEEDLE offset is tested, never the anchor line: a FastAPI handler's
+//! `@app.websocket(` needle is code and anchors on the `def` below it. One
+//! line per scan that refused an occurrence:
+//!   `[code-guard] ws_client lang=rust dropped=2 path=src/x.rs`
+//!
 //! The call-argument reader here ([`call_region`], [`split_top`]) is a local
 //! copy of the shape `queue_topic.rs` keeps private (that file belongs to
 //! another packet's file set, the rule A2.8 followed for `escape_json`).
@@ -68,6 +76,7 @@ use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use glia_core::{Confidence, Node, NodeId, NodeKindId, RepoId};
 
 use crate::anchor::{Anchor, line_of};
+use crate::code_guard::LazyGuard;
 use crate::queue_topic::{LOOKAHEAD_LINES, MAX_HITS_PER_NEEDLE, MAX_REGION, clip};
 
 pub struct WsNodes {
@@ -421,12 +430,15 @@ fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -
     let mut per_framework: Vec<(&'static str, Vec<NodeId>)> = Vec::new();
     // CB.21: client sites whose ENDPOINT_HIT names a host.
     let mut hosted = 0usize;
+    // CJ.1b: a needle that starts in a Rust / Python literal or comment is no
+    // site (a scanner's own needle table, a doc line, a test's sample source).
+    let mut guard = LazyGuard::new(path, source);
 
     for r in side.rows {
         if !gate_holds(source, r.gate) {
             continue;
         }
-        for offset in sites(source, r.needle) {
+        for offset in sites(source, r.needle, &mut guard) {
             let Some(name) =
                 read_name(source, offset, r).or_else(|| fallback(r).map(str::to_string))
             else {
@@ -490,6 +502,11 @@ fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -
     if hosted > 0 {
         eprintln!("[ws] client hosts sites={hosted} in {path}");
     }
+    guard.report(if side.kind == node_kind::WS_HANDLER {
+        "ws_handler"
+    } else {
+        "ws_client"
+    });
 
     WsNodes {
         nodes,
@@ -507,8 +524,11 @@ fn is_ident_byte(b: u8) -> bool {
 }
 
 /// Byte offsets of `needle` in `source`, word-bounded when the needle starts
-/// with an identifier byte, at most [`MAX_HITS_PER_NEEDLE`].
-fn sites(source: &str, needle: &str) -> Vec<usize> {
+/// with an identifier byte, at most [`MAX_HITS_PER_NEEDLE`]. CJ.1b: an
+/// occurrence `guard` refuses (its first byte sits in a Rust / Python literal
+/// or comment) is dropped BEFORE the cap, so literal occurrences never crowd
+/// a real site out.
+fn sites(source: &str, needle: &str, guard: &mut LazyGuard<'_>) -> Vec<usize> {
     if needle.is_empty() {
         return Vec::new();
     }
@@ -518,6 +538,7 @@ fn sites(source: &str, needle: &str) -> Vec<usize> {
         .match_indices(needle)
         .map(|(i, _)| i)
         .filter(|&i| !bounded || i == 0 || bytes.get(i - 1).is_none_or(|b| !is_ident_byte(*b)))
+        .filter(|&i| guard.admits(i))
         .take(MAX_HITS_PER_NEEDLE)
         .collect()
 }
@@ -1654,6 +1675,51 @@ mod tests {
         );
         // A handler never carries one.
         assert!(handlers(FASTAPI).nodes.iter().all(|n| n.cells.is_empty()));
+    }
+
+    /// CJ.1b: a needle inside a Rust string literal or `///` comment mints
+    /// nothing in a `.rs` file; the same text read as TypeScript (no guard)
+    /// mints as before, and a Python needle in code stays.
+    #[test]
+    fn literal_and_comment_sites_mint_nothing_in_rust() {
+        let rust = "/// The NestJS `@WebSocketGateway` handler, as the scanner reads it.\n\
+                    fn sample() {\n\
+                    \x20   let out = clients(\"const ws = new WebSocket('ws://localhost:8080/chat');\");\n\
+                    \x20   let _ = out;\n\
+                    }\n";
+        let rs_handlers = extract_ws_handler_nodes(rust, "src/x.rs", module_id(), repo());
+        let rs_clients = extract_ws_client_nodes(rust, "src/x.rs", module_id(), repo());
+        assert!(qnames(&rs_handlers).is_empty(), "{:?}", qnames(&rs_handlers));
+        assert!(qnames(&rs_clients).is_empty(), "{:?}", qnames(&rs_clients));
+        assert!(rs_clients.anchors.is_empty() && rs_handlers.anchors.is_empty());
+
+        let ts_handlers = extract_ws_handler_nodes(rust, "src/x.ts", module_id(), repo());
+        let ts_clients = extract_ws_client_nodes(rust, "src/x.ts", module_id(), repo());
+        assert_eq!(qnames(&ts_handlers), vec!["ws:default"]);
+        assert_eq!(qnames(&ts_clients), vec!["ws_client:/chat"]);
+
+        let py = "import websockets\n\
+                  \n\
+                  # websockets.connect(\"ws://h:8765/commented\")\n\
+                  DOC = \"websockets.connect('ws://h:8765/quoted')\"\n\
+                  async def follow():\n\
+                  \x20   async with websockets.connect(\"ws://h:8765/live\") as ws:\n\
+                  \x20       return await ws.recv()\n";
+        let out = extract_ws_client_nodes(py, "client/a.py", module_id(), repo());
+        assert_eq!(qnames(&out), vec!["ws_client:/live"]);
+        assert_eq!(anchored(&out), vec![("ws_client:/live".to_string(), 5)]);
+    }
+
+    /// CJ.1b: refused literal occurrences are dropped before the per-needle
+    /// cap, so a file whose literals repeat a needle keeps its real site.
+    #[test]
+    fn literal_sites_do_not_fill_the_cap() {
+        let mut src = "const SAMPLE: &str = \"new WebSocket('/fake')\";\n"
+            .repeat(MAX_HITS_PER_NEEDLE + 5);
+        src.push_str("fn connect(url: &str) { let _ = new WebSocket(url); }\n");
+        let out = extract_ws_client_nodes(&src, "src/table.rs", module_id(), repo());
+        assert_eq!(qnames(&out), vec!["ws_client:ws"]);
+        assert_eq!(out.anchors.len(), 1);
     }
 
     #[test]

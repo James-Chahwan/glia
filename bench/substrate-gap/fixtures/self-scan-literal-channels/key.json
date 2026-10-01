@@ -1,0 +1,17 @@
+{
+  "framework": "self-scan-literal-channels",
+  "language": "rust",
+  "dirs": ["."],
+  "note": "CJ-1 (CJ.1b). In .rs / .py files a WebSocket, gRPC or GraphQL-operation needle that starts inside a string literal or comment mints no node. Controls: python-websockets connect and a grpc python stub, both in code. Baseline (HEAD f8a46c0, glia analyze): expect 2/2, FORBID VIOLATIONS 5 (ws_client:/chat, ws_client:ws, ws:default, graphql_op:useQuery, grpc_client:OrderService, all from scanner/src/channels.rs's //! lines and test literals).",
+  "expect_nodes": [
+    {"kind": "WS_CLIENT", "name": "/live", "note": "python-websockets connect in code"},
+    {"kind": "GRPC_CLIENT", "name": "PaymentService", "note": "grpc python stub in code"}
+  ],
+  "forbid": [
+    {"kind": "WS_CLIENT", "name": "/chat", "note": "new WebSocket inside a Rust test literal"},
+    {"kind": "WS_CLIENT", "name": "ws", "note": "new WebSocket(url) in a //! doc line (the unread-URL fallback name)"},
+    {"kind": "WS_HANDLER", "name": "default", "note": "@WebSocketGateway in a //! doc line"},
+    {"kind": "GRAPHQL_OPERATION", "name": "useQuery", "note": "useQuery inside a Rust test literal"},
+    {"kind": "GRPC_CLIENT", "name": "OrderService", "note": "pb.NewOrderServiceClient inside a Rust test literal"}
+  ]
+}
