@@ -13,6 +13,8 @@ glia builds its graph from source, so it misses links the source does not spell 
 
 The schema of every section is in docs/overlay.md (https://github.com/James-Chahwan/glia/blob/main/docs/overlay.md). For queries (where is X, what does X affect), use the `glia` skill.
 
+**From Python.** The wheel runs the same three steps in-process, with the same reports as the `--json` output: `glia_py.overlay_propose(repo_paths, categories=None, top_k=20, snippet_lines=3)`, `glia_py.overlay_try(repo_paths, candidate, leave_one_out=True)` and `glia_py.overlay_accept(repo_path, candidate=None, only=None, remove=None, dry_run=False)`. `repo_paths` is a list: the first is the primary repo, whose `.glia/overlay.toml` the loop reads, and the rest are what `--with` adds. `candidate` is the candidate's TOML text, not a path. `only` and `remove` are lists of stanza handles and gap ids. A refused candidate, or an accept that would not validate, raises `ValueError` with the loader's reasons, and nothing is written. `overlay_accept` is still the only writer of `.glia/overlay.toml`.
+
 ## When to use it, and when not
 
 Use it when `glia gaps <repo> --json` lists rows whose `suggest` is `constants`, `route_prefix`, `wrapper`, `edge`, `entrypoints` or `remove`. `glia coverage <repo> --json` names the edge kinds glia misses by language.
@@ -22,6 +24,14 @@ Many rows need no stanza. Read the code, then leave the row alone when:
 - the extractor misread the code, such as a `Set.delete(id)` counted as an HTTP DELETE. No stanza fixes that. Report it to the person as a glia bug, with the `file:line`.
 - the code really has no counterpart. For example, a client sends `PUT /settings/account` and the server serves only `DELETE /settings/account`. That is a bug in the code, not a blind spot. Report it.
 - it is generated code (a `.pb.dart`, `*.generated.ts`) flagged dead. Ask the person whether to skip it with `[walk] skip`. That setting is theirs, and it is not a candidate section.
+- it is test code flagged dead or counted as product code because it lives where glia's built-in test paths do not look (`playwright/`, `qa/`, `acceptance/`, `smoke/`, `k6/`, `perf/`). Ask the person whether to declare it in `.glia/overlay.toml`:
+
+  ```toml
+  [walk]
+  tests = ["playwright/", "qa/**/*.py"]
+  ```
+
+  The patterns use gitignore syntax and are anchored at the repo root. They only add: nothing un-tags a path. Every node in a matching file gets ORIGIN provenance `test_fixture`, so `tests-for` lists it as a test case, `gaps` leaves it out of `dead_symbol`, `patterns` leaves it out, and Engram drops it by default. A build prints `[provenance] declared tests repo=<label> patterns=<n> tagged=<d>`. Like `[walk] skip`, it is the person's setting. It is never a candidate section, so `overlay try` cannot measure it, and `--overlay-delta` does not see it either: `[walk]` applies under `--no-overlay` too. It does not yet add TESTS edges.
 - it is a `wrapped_sink` (informational) or an `orphaned_cell` (repaired by `glia cell ls --check --rekey`, not by the overlay).
 
 ## The loop

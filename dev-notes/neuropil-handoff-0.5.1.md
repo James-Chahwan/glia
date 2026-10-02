@@ -3,18 +3,20 @@
 The second glia -> neuropil handoff, after `neuropil-handoff-0.5.0.md`. neuropil is glia's in-process
 Rust consumer: it path-depends on six glia crates and calls `generate_one` at startup
 (`crates/neuropil-app/src/state.rs:443`). Read this in the neuropil session and act on neuropil only.
-0.5.1 is the "catch-up leap": 155 packets in `dev-notes/leap-051-packets.json`, landed on glia's local
-`main` in waves W0-W11 since v0.5.0 (`2170ff8`). Breaks were allowed when a packet declared them, and
+0.5.1 is the "catch-up leap": 198 packets in `dev-notes/leap-051-packets.json`, landed on glia's local
+`main` since v0.5.0 (`2170ff8`): 155 in waves W0-W11, then the 43-packet finishing batch (groups CH-CL,
+the leap doc's section 7.4) in W12-W19. Breaks were allowed when a packet declared them, and
 **consumers pin the release exactly**.
 
 Sources, in order of authority:
-- a run of glia's compile check, `scripts/check-neuropil.sh`, against glia HEAD `491c2ad` (after wave
-  W10; BUILD_STAMP `0.5.0+p056f1c5bba957392`), on a copy of neuropil with the 0.5.0 handoff's section 2
-  edits applied. Section 1 has the output verbatim. Every compile claim comes from that run. HEAD has
-  since moved to `2794ec5` (README and a CLI test only, CZ.1), which touches no crate neuropil links;
-- each packet's own `breaking` report from the 0.5.1 workflow journals (W0-W10, plus the CB.23 re-run
-  whose result landed). Where an agent's report differs from the spec, the report wins, and where a
-  report is wrong about neuropil this doc says so (section 5);
+- a run of glia's compile check, `scripts/check-neuropil.sh`, against glia HEAD `dbd8d2a` (the W18
+  close-out, the last code wave; BUILD_STAMP `0.5.0+pa0fc26c918dfcc7c`), on a copy of neuropil with the
+  0.5.0 handoff's section 2 edits applied, run 2026-10-02 by the docs packet CZ.3. Section 1 has the
+  output verbatim. Every compile claim comes from that run (the first revision of this doc ran it at
+  `491c2ad`, after W10, with the same result). W19 (CZ.3) touches docs only;
+- each packet's own `breaking` report and commit body (W0-W18, plus the CB.23 re-run whose result
+  landed). Where an agent's report differs from the spec, the report wins, and where a report is wrong
+  about neuropil this doc says so (section 5);
 - the specs' `breaking` blocks in `dev-notes/leap-051-packets.json`.
 
 Every neuropil `file:line` below was read read-only in neuropil's working tree: HEAD `b140d1e` with the
@@ -31,13 +33,18 @@ after each id is the glia commit that landed it.
    handoff's sections 2 and 3 first; 0.5.1 stacks on top.
 2. **0.5.1 adds no compile break.** With the 0.5.0 section 2 edits applied (the rename script plus
    `driver` -> `research`), the check reports **new=0 errors** under `--all-targets` against the 0.5.1
-   code at glia HEAD `491c2ad` (section 1; the version field still read 0.5.0 there). No 0.5.1 API change reaches a type neuropil builds: it constructs no `CodeNav`,
-   `SymbolTable`, `DomainTables`, `RepoMeta`, `BuildOptions` or `PassReport` literal (grep).
+   code at glia HEAD `dbd8d2a` (section 1; the version field still reads 0.5.0 there). No 0.5.1 API
+   change reaches a type neuropil builds: it constructs no `CodeNav`, `SymbolTable`, `DomainTables`,
+   `RepoMeta`, `BuildOptions`, `PassReport`, `WalkConfig`, `EffectRow` or `serves::Server` literal
+   (grep).
 3. **Pin exactly:** `glia-engine = { path = "../glia/engine", version = "=0.5.1" }`. Only glia-engine
    carries the release version; the other five crates keep their own crate versions (section 2).
 4. **Persisted state re-keys once for the nodes whose qname moved in 0.5.1**, chiefly mounted Go routes
-   (quokka's `POST /activity @turps` -> `POST /api/protected/activity @turps`), C++ out-of-line
-   members, verb-named events and a few DOC_SECTIONs (section 3). NodeIds follow the qname, so
+   (quokka's `POST /activity @turps` -> `POST /api/protected/activity @turps`), quokka's client
+   endpoints (`endpoint:GET:/protected/friends @quokka_web` -> `endpoint:GET:/api/protected/friends
+   @quokka_web`, and the same for `@quokka_android`), `endpoint:<M>:<unresolved>` sites that now read
+   their real path, C++ out-of-line members, verb-named events, framework-tag queue nodes and a few
+   DOC_SECTIONs (section 3). NodeIds follow the qname, so
    annotations anchored to those nodes lose their anchor. Every other NodeId is unchanged: the RepoId
    scheme did not move in 0.5.1.
 5. **The `.gmap` format 3 and CODE-as-span changes do not reach neuropil**: it builds in memory with
@@ -71,11 +78,20 @@ NEUROPIL_DIR="$C/np" GLIA_CONSUMER_CACHE="$C/cc" bash scripts/check-neuropil.sh
 ```
 [rename-0.5.0] rewrote 165 token(s) in 50 file(s) under <scratch>/npcheck/np (0 unknown token(s) left)
 [neuropil-check] note - neuropil differs from the baseline's (b140d1ede58ff6e77e8e7326a6a4cf21e822959e dirty=50 src=b690b6b4f6db -> unknown src=73b04787b8a9): NEW/FIXED may be neuropil's own edits, not the leap's
-[neuropil-check] ok - new=0 fixed=0 preexisting=0 in 60.2s against glia 0.5.0+p056f1c5bba957392 (neuropil unknown, lock drift +39 -26)
+[neuropil-check] ok - new=0 fixed=0 preexisting=0 in 61.6s against glia 0.5.0+pa0fc26c918dfcc7c (neuropil unknown, lock drift +39 -26)
 ```
 
 - The rename count (165 tokens in 50 files) and the source hash `73b04787b8a9` are the same as in the
-  0.5.0 handoff's run, so the copy is the same neuropil the 0.5.0 check saw.
+  0.5.0 handoff's run, so the copy is the same neuropil the 0.5.0 check saw (neuropil HEAD `b140d1e`,
+  50 dirty paths, unchanged on 2026-10-02).
+- **The finishing batch's public API moves reach no neuropil code.** CJ.3 adds `external_hosts` to
+  `glia_engine::effects::EffectRow` and `glia_engine::serves::Server` (both `#[non_exhaustive]`, so no
+  struct literal outside glia exists to break); CJ.4 adds the pub field `tests` to
+  `glia_code_domain::glia_config::WalkConfig` (plus `TestPaths`); CH.1b adds the pub fn
+  `glia_graph::build_typescript_family`; CH.1b, CH.3b, CH.5a and CI.6 append build-time `NavFact`
+  variants (`AbstractMethod`, `UrlPrefixKey`, `ClientBase` / `ValueLiteral`, `TypeAlias`). neuropil
+  names none of them (grep of `crates/`: 0 hits for `EffectRow`, `serves::Server`, `WalkConfig`,
+  `NavFact`), and the run above compiles it.
 - The `note` line is expected: the copy is not a git checkout.
 - The check's parsed error list (`errors.txt`) is empty: 0 errors across every neuropil target and the
   glia crates they pull in.
@@ -125,10 +141,23 @@ annotation falls back to its stored `world_pos` (`annotations.rs:279-282`).
 | events | CB.3a verb-named events removed (`444848b`), CB.3b constant-keyed events fold to their literal (`5a968a7`) | `event_emit:Subject.next` / `emit` / `publish` ... and `event_handle:on` / `subscribe` / `@OnEvent` ... vanish; a constant-keyed site is `event_emit:<literal>` when resolvable, else `event_emit:<Const.Path>` | quokka's `event_emit:Subject.next` goes; no constant-keyed site in quokka, lapse, Kina or neuropil |
 | doc sections | CE.4a fence-aware chunking and slug dedupe (`111bd1b`) | a `#` line inside a code fence is no longer a DOC_SECTION (it folds into its enclosing section); the 2nd+ section with a repeated slug gets `<...>::<slug>-N` | Kina README: 14 sections go; quokka `.ai/WORKFLOW.md`: 4; glia README 10, `docs/onboarding.md` 13 |
 | contract ops | CB.2 contract YAML sniffing (`2ff7f49`) | a yaml whose `openapi:` / `swagger:` / `asyncapi:` key has no version value loses its `contract::...` ops; an alphabetical swaggo `swagger.yaml` gains them | the twins share one NodeId (see the note below) |
+| client endpoints under an API prefix | CH.5b TS builder paths folded under the configured prefix (`17c7bef`), CH.5c Dart paths under agreeing Dio base URLs (`4eb3909`) | `endpoint:<M>:<path> @quokka_web` -> `endpoint:<M>:/api<path> @quokka_web` (a call read through `buildApiUrl`, whose builder reads `apiPrefix`), and `endpoint:<M>:/protected/x @quokka_android` -> `endpoint:<M>:/api/protected/x @quokka_android` | quokka-stack: 50 quokka_web endpoint qnames (53 call sites) and 42 quokka_android entries; Kina none |
+| `<unresolved>` client endpoints | CH.3a URLs read through a URL builder, a URL method, a `const` local or a `readonly` field (`4c05d47`), CH.3c no endpoint for a typed non-HTTP receiver (`58fb26c`) | a site that read `endpoint:<M>:<unresolved>[ @owner]` now reads `endpoint:<M>:<path>[ @owner]` (CH.3a), or mints nothing when its receiver is a `Map` / `Set` / store field (CH.3c); an `<unresolved>` ENDPOINT no site keeps goes | quokka-stack: 25 sites move, `endpoint:POST:<unresolved>`, `PATCH`, `GET` and `DELETE <unresolved>` go; Kina: `NotificationsApi::list` -> `endpoint:GET:/api/notifications @frontend`, `endpoint:DELETE:<unresolved>` / `PATCH` go |
+| a Dart ROUTE that was a Dio call | CH.5c a call on a Dio is never a server ROUTE (`4eb3909`) | `POST /auth/refresh @quokka_android` (ROUTE) goes; the call is the ENDPOINT `endpoint:POST:/api/auth/refresh @quokka_android` | quokka-stack: routes 65 -> 64 |
+| Go routes, two more mount shapes | CI.5 mounts through another package's struct field and a parameter-rooted field group (`ecb0c81`) | `<METHOD> <local>` -> `<METHOD> <prefix><local>` for those two shapes | no ROUTE moves on quokka-stack, Kina or lapse |
+| queue nodes | CL.1 a framework tag only for an unexplained call (`6da6473`), CL.2 Go broker rows (`b896904`), CL.3 JVM / .NET broker rows (`7456d6e`) | a `queue_consumer:<q>` minted by a RabbitMQ declaration alone goes; an explained `queue_*:unresolved:<family>` tag goes (kafka-go `Writer`, NATS.Net `*Async`, SQS request builders included); amqplib `channel.publish(ex, key)` is `queue_producer:<key>` (was `<ex>`); BullMQ `queue.add(name, ..)` mints nothing | measured on the matrix probes only (no real repo in the packets' runs) |
+| phantoms in Rust / Python source | CJ.1a-CJ.1c the literal and comment guard (`96f9280`, `aae59c6`, `472de38`) | a queue, event, WS, gRPC, GraphQL-operation, cron, data-source, env, secret or flag node minted from a needle inside a Rust or Python string literal or comment goes, with its edges | glia's own graph: 175 queue / event phantoms -> 0, 36 WS / gRPC / GraphQL -> 1. neuropil's own repo is Rust, so a neuropil session pointed at itself loses those too |
 
 **Shared NodeIds across per-language graphs (by design, no action).** swaggo writes `docs/swagger.json` and `docs/swagger.yaml` side by side; CB.2 now reads the yaml too, and by the LB.12 identity rule both name their ops `contract::<dirs>::swagger::<op>`, so the twins are ONE node. `MergedGraph` keeps one instance per per-language graph that holds it ("one id can sit in several per-language graphs", `graph/src/merged.rs`), which is how shared synthetic nodes (`config:env:*`, `data_entity:*`, `data_source:*`) have always been stored, 0.5.0 included. Answers dedupe by id (`glia find` on quokka returns one `contract::turps::docs::swagger::GET:/healthz` row, checked 2026-10-01), and `GliaGraph::load` already collapses them (`state.rs:522`, `:533-534`). Only code that walks `merged.graphs[].nodes` directly sees an instance per graph; key by id there.
 
-Additive only (new qnames, no existing one moves): Dart constructors, factories, operators and enum
+Additive only (new qnames, no existing one moves): from the finishing batch, `config:setting:<Section:Key>`
+CONFIG_KEYs from .NET `appsettings*.json` and from every env define `Section__Key`, which also defines
+`config:setting:Section:Key` (CL.7b, `2e0ef8a`, EVIDENCE rule `dotnet_env_override`); TS `abstract class`
+CLASSes and their METHODs (CH.1, `d12e804`); TS call-initialised STATE_VARs `<Class>::<field>` (CH.2,
+`faa563b`: Kina +1,455, quokka-stack +29); Dart generic Dio ENDPOINTs (CH.5a, `c44a41e`); DOC_SECTIONs
+from project-root and SDD feature docs (CJ.2, `6681070`: quokka-stack 133 -> 401 sections); queue, job,
+GraphQL, cron, event and CLI-launch nodes from CL.2-CL.4 and CL.6a-CL.10. From W0-W11: Dart
+constructors, factories, operators and enum
 constants (CB.9, `ec5c6ea`), Dart extension containers `<module>::extension<T>` (CB.17, `205861c`;
 qnames with `<` `>`, which `service_hex.rs`'s `::` split handles), Swift `init` / `deinit` / `subscript`
 / computed properties (CB.10, `90d1076`), TS arrow-function class fields as METHODs (CG.1, `8bff4f9`),
@@ -168,7 +197,17 @@ To make qname state move-proof, the 0.5.0 handoff's section 4.2 still applies: s
   payloads raw; neuropil parses no ENDPOINT_HIT field.
 - **ORIGIN provenance** gains `inferred:wrapper` (CA.4), `external` on third-party ENDPOINTs (CG.4b,
   `0a23e66`) and `test_fixture` on more paths (CG.2a, `5004a5a`: e2e / cypress / fixtures / testdata /
-  `__mocks__` / `test_*.py` ...). neuropil reads no ORIGIN.
+  `__mocks__` / `test_*.py` ...), and on any path a repo declares in `.glia/overlay.toml` `[walk] tests
+  = [..]` (CJ.4, `ac554f2`). neuropil reads no ORIGIN.
+- **STATE_VARs that call** (CH.2, `faa563b`; CI.1, `26d2bd9`): a TS call-initialised field and a Go
+  package-level var are STATE_VAR nodes with outgoing CALLS (an Angular `computed(() => ..)` calls the
+  signals it reads; `var svc = New()` calls `New`). Views that treat only FUNCTION / METHOD as callers
+  (`flow.rs`, the tier stack's call lanes) now see a STATE_VAR at the head of a call edge.
+- **TEST cells on functions** (CL.5b, `eb302a2`): LE.3a's TEST cell now sits on the FUNCTION / METHOD a
+  test function calls, not only on modules (Kina: nodes with a TEST cell 57 -> 147); `hud.rs` prints
+  more of them.
+- **`ENDPOINT_HIT`** on a TS / Dart client site may carry `wrapper`, `wrapper_of`, `folded_from`,
+  `prefix` and `prefix_from` (CH.3a, CH.3b, CH.5b, CH.5c); still printed raw.
 
 ### 4.2 Edges
 
@@ -187,7 +226,25 @@ To make qname state move-proof, the 0.5.0 handoff's section 4.2 still applies: s
   function, not the module (`hud.rs` `reads_config` rows).
 - Dart constructor bodies (CB.9): CALLS start at the constructor METHOD, not the CLASS; markers inside
   constructors hang on the METHOD (USES / HANDLED_BY), not the MODULE (CONTAINS).
-- The doc linker (CG.3): more DOCUMENTS edges (quokka 28 -> 179).
+- The doc linker (CG.3): more DOCUMENTS edges (quokka 28 -> 179); CJ.2 (`6681070`) adds the sections of
+  project-root and SDD feature docs and their links (quokka-stack DOCUMENTS 319 -> 1,102 at CJ.2).
+- **The finishing batch adds edges and moves no qname of an existing node through them** (CH.1b,
+  CH.1c, CI.1, CI.6 included):
+  - TS: CALLS for an unbound `this.m()` / `super.m()` to the nearest superclass defining `m` (EVIDENCE
+    rule `inherited_method`) and a method-level IMPLEMENTS from an override to the abstract member it
+    implements (rule `abstract_override`, Strong) (CH.1b, `d8e5c4c`); USES from a member to a
+    same-class METHOD it passes by value (CH.4, `3e6e9f3`).
+  - Go: STRUCT INHERITS_FROM for each in-repo struct embed and CALLS through promoted methods and
+    fields (CI.2a, `643de54`: Kina 7 embeds, quokka-stack 3); IMPLEMENTS through promoted methods (CI.2b,
+    `5fc42bb`: quokka-stack 7 -> 8) and in-repo type aliases (CI.6, `4942139`: quokka-stack 8 -> 9,
+    `Server` -> `QuokkaChatServiceServer`); fewer IMPLEMENTS with a `_test.go` side (CI.3, `99e2d10`:
+    grpc-go 9 type-level + 10 method-level dropped, none on Kina, lapse or
+    quokka-stack); HANDLED_BY for handlers typed in another file
+    (CI.4, `961c832`).
+  - Every language: function-level TESTS (CL.5b: Kina TESTS 57 -> 196); CALLS through a freshly
+    constructed receiver, `new Calc().add(..)` (CL.5a, `052d0c5`).
+  - `glia gaps` dead_symbol no longer lists an implementation of a called method (CH.1c, `f130663`,
+    `[dead-dispatch]`): a rows-only change; neuropil reads no gaps.
 
 ### 4.3 The build
 
@@ -198,7 +255,11 @@ To make qname state move-proof, the 0.5.0 handoff's section 4.2 still applies: s
   `[timing] build ...` line to stderr. neuropil could show them in `perf_overlay.rs`.
 - More new stderr lines at boot: `[provenance] ...`, `[go-mounts] ...`, `[http] mount-segment folds: ...`,
   `[ts-fields] ...`, `[event-const] ...` (only when something folds), `[client-hosts] ...`,
-  `[http-external] ...`. neuropil parses none.
+  `[http-external] ...`; from the finishing batch `[code-guard] ...` (once per scanner and Rust / Python
+  file where the guard refused a needle), `[ts-abstract]`, `[ts-inherit]`, `[ts-state]`, `[ts-endpoint-args]`,
+  `[ts-method-refs]`, `[endpoint-prefix]`, `[dart-dio-base]`, `[go-embeds]`, `[go-alias]`,
+  `[go-package] root-package imports`, `[docs] scope:`, `[tests] fn TESTS edges`. neuropil parses
+  none.
 - **Cargo.lock moved, so PARSER_STAMP moved.** neuropil keeps no parse cache (`generate_one` is
   uncached), so nothing rebuilds on its side.
 
@@ -249,24 +310,27 @@ python3 tools/visual_regression.py compare
 ```
 
 - Expect `visual_regression compare` to drift on scenes that draw quokka / Kina backends (mounted Go
-  routes, more Go CALLS, fewer IMPLEMENTS) and decorated TS methods. Review the diffs, then re-record.
+  routes, more Go CALLS, fewer IMPLEMENTS) and decorated TS methods, and on Kina's frontend, which gains
+  1,455 STATE_VAR nodes (CH.2). Review the diffs, then re-record.
 - Hidden nodes, bookmarks and anchored annotations on the section 3 families need re-setting once.
 - From glia, `bash scripts/check-neuropil.sh` should then report `new=0` plus the `note` that neuropil
   moved from the baseline's sha.
 
 ## 8. Done vs pending
 
-- **Done on the glia side:** W0-W10 (153 packets, all green) and W11's CZ.1 (`2794ec5`, README). The
-  section 1 run shows neuropil compiling against them once the 0.5.0 section 2 edits are in.
-- **Still running:** CZ.2 (release docs 2/2: CLAUDE.md and the glia skill); docs only, and it names no
-  neuropil item.
+- **Done on the glia side:** W0-W18 (197 packets, all green; the W18 close-out `dbd8d2a` measured
+  4,460 workspace tests passing) and the docs packet CZ.3 in W19, which re-ran section 1. The section 1
+  run shows neuropil compiling against all of them once the 0.5.0 section 2 edits are in.
 - **Pending, neuropil session:** the 0.5.0 handoff sections 2, 3 and 6, then this doc's section 2 pin and
   section 7.
 - **Pending, James:** the 0.5.1 bump and tag, then `cargo install --path cli --locked` from the tag so
   the `glia` on PATH matches.
 - **Pending, glia (not owned by a packet):**
   `check-neuropil.sh` still copies neuropil verbatim (the 0.5.0 handoff's open item).
-- **Checked, no neuropil change:** C0.1-C0.7 (slots, the dependency commit), CA.2a / CA.3a / CB.6
+- **Checked, no neuropil change:** the finishing batch's API additions (section 1: `EffectRow` /
+  `Server.external_hosts`, `WalkConfig.tests`, `build_typescript_family`, five build-time `NavFact`
+  variants), CK.1 (pyo3 only), CK.2 / CK.3 (engram-export only), CL.11 (fixture data),
+  C0.1-C0.7 and C0.9 (slots, the dependency commit), CA.2a / CA.3a / CB.6
   (`CodeNav` gained `return_types`, `method_sigs`, `nav_facts`; neuropil has no `CodeNav` literal),
   CB.15's `SymbolTable.home_module` (no literal), CD.1c's `DomainTables.community_weights` (neuropil
   builds none), CA.9's `PassReport` fields, CD.5b's `RepoMeta.rev`, CE.3b's `BuildOptions.overlay_text`

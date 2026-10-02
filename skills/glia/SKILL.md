@@ -66,6 +66,9 @@ Flags most commands share:
 - **Tier.** `tier` is `fact` (declared in the source), `derived` (inferred by a resolver, e.g. a client URL paired to a route) or `heuristic` (paired by name). Case varies by command. Weigh the answer by it.
 - **Empty answers.** An empty answer is not "nothing exists". It carries `absence: {tier, reason, note, caveats, suggestions}`. Each caveat names an edge kind glia is known to miss (`edge_category`, `language`), how many it did find (`edges_found`) and what to grep instead (`verify`).
 - **Blind spots.** `glia coverage <repo> --json` lists the same caveats for the whole repo. Run it once before trusting "not found".
+- **External sinks.** A call whose every site dials a public host outside the build (`fetch("https://nominatim.openstreetmap.org/search?…")`) is an ENDPOINT marked external, never paired with a route. `effects` rows name the host in `external_hosts`; the table's downstream cell reads `external: <host>`. `serves "GET /search" --json` lists it after any route, `"kind":"ENDPOINT","match":"external"`, so the channel is answered, not absent. `external_hosts` is `[]` on every other row. Such a call is real traffic, not a gap.
+- **Docs.** `docs-for` and the `DOCUMENTS` edges read only the markdown the build ingests. That is the well-known files (`README*.md`, `CLAUDE.md`, ...) and the `docs/` tree at the repo root and at every project root, a top-level `.ai/` tree, ADR directories, SDD feature docs (`features/<feature>/*.md`, spec-kit `specs/<NNN-slug>/`) and synced docs (`glia docs sync`). A section documents a symbol only when it names it in single backticks. A README inside a source directory is not read. `glia coverage` states this as a `DOCUMENTS` row.
+- **Dead symbols.** A `gaps` `dead_symbol` row is a function, method or class with no entry point reaching it and no incoming call or use. A method that IMPLEMENTS a called method (an interface method, an abstract member) is never one: dispatch reaches it.
 - **Exit codes.** 0 for any answer, empty included, except: `pack`, `hotspots`, `hubs`, `cochange` and `splits` exit 1 when the answer is empty. `why` exits 1 when no edge joins the two nodes (it still prints a witness path). `check` exits 1 on a violation, `review` when the change adds one, and `contract-breaks` when a change is breaking or leaves a client with no provider. `blast-radius` exits 3 when no seed resolved. 2 means a usage, git or build error, or a rule `check` could not evaluate.
 
 ## Cost, and what gets written
@@ -241,7 +244,8 @@ glia hubs . --json
 glia coverage . --json
 [{"language":"*","edge_category":"CALLS",…,"edges_found":1},
  {"language":"*","edge_category":"HTTP_CALLS","note":"URLs built dynamically (string concat / variables / base-url config) may not pair to a route","verify":"grep the path literal or base URL","edges_found":1},…,
- {"language":"go","edge_category":"IMPLEMENTS","note":"implicit interface satisfaction is inferred (Medium, DERIVED) from method names and, where the parser read both, signatures (parameter and result types; …); a one-method interface, or a pair with a side in a _test.go file, pairs only across an import path …","verify":"check the method signatures and receivers against the interface","edges_found":0},…]
+ {"language":"*","edge_category":"DOCUMENTS","note":"repo markdown is ingested only from: the well-known files (README*.md, …) at the repo root and at each PROJECT root, a docs/ tree at the repo root or at a PROJECT root, a top-level .ai/ tree, ADR directories (…), SDD feature docs (…) and synced external docs (`glia docs sync`); … A doc section DOCUMENTS a symbol only when it names it in a single-backtick span …",…,"edges_found":0},…,
+ {"language":"go","edge_category":"IMPLEMENTS","note":"implicit interface satisfaction is inferred (Medium, DERIVED) from method names and, where the parser read both, signatures (parameter and result types, with a type alias declared in the repo resolved through the method's package and imports; …); a one-method interface pairs only across an import path (…), and a pair with a side in a _test.go file only when that test file imports the other side's package directly (or both share a package); …; methods promoted through embedded fields count (…); …","verify":"check the method signatures and receivers against the interface","edges_found":0},…]
 
 # xstack-go-http; "suggest" names the .glia/overlay.toml section that could repair the row
 glia gaps . --json
@@ -253,7 +257,7 @@ glia docs-for . list_orders --json
 {"results":[{"qname":"docs::doc::adr::0001-use-flask-for-orders::decision","kind":"DOC_SECTION","file":"doc/adr/0001-use-flask-for-orders.md","line":11,…}],"absence":null}
 ```
 
-Declaring rules, edges glia misses and extra entry points in `.glia/overlay.toml`: https://github.com/James-Chahwan/glia/blob/main/docs/overlay.md
+Declaring rules, edges glia misses and extra entry points in `.glia/overlay.toml`: https://github.com/James-Chahwan/glia/blob/main/docs/overlay.md. Test code in a directory glia does not know as a test path (`playwright/`, `qa/`) is declared there with `[walk] tests`; the `glia-overlay` skill covers it and the rest of the overlay loop.
 
 ## Install
 

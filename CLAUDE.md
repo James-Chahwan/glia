@@ -52,13 +52,19 @@ parsers/code/
              the JVM family joins in engine/src/build/lang_build.rs
   react/   angular/  vue/    — framework parsers stacked on typescript
   extractors/ — cross-cutting: data_sources, cli, grpc, queues, websocket,
-                eventbus, graphql, ts_routes, angular/react/vue route extractors
+                eventbus, graphql, ts_routes, angular/react/vue route extractors;
+                code_guard (private): the one .rs / .py string-literal and comment
+                guard (LazyGuard) every needle scanner reads through, so glia's own
+                needle tables and test literals mint nothing (CJ.1a-c, `[code-guard]`)
 stamp/              Build identity: RELEASE + PARSER_STAMP (content hash of every
                     graph-shaping source). Keys the parse cache, so a parser fix
                     invalidates caches without a version bump.
 py/                 pyo3 bindings — the only Rust crate published to PyPI (as glia-py, module glia_py)
 toy-domain/         test-only second domain (publish = false) proving the domain seam; never a dependency of a shipped crate
-engram-export/      (excluded) glia -> engram_core::Gmap exporter; needs ../Engram; build/test only via scripts/check-engram-export.sh
+engram-export/      (excluded) glia -> engram_core::Gmap exporter; needs ../Engram; build/test only via scripts/check-engram-export.sh.
+                    Writes <out> plus <out>.files.json and <out>.meta.json (glia version, BUILD_STAMP,
+                    gmap_digest; CK.3), and <out>.glia/, the history layout `--since` reads;
+                    `-V` prints glia's version line
 ```
 
 Parsers live at `parsers/<domain>/<language>/`. When a non-code domain lands (0.5.0 ships the seam, not a domain), its parsers nest alongside `parsers/code/`.
@@ -114,7 +120,11 @@ engine/src/   lib.rs        facade (rules above)
                             c_includes.rs  IncludeRoots / IncludeResolver — C/C++ include search
                                            roots (compile_commands.json, CMake, include/; CB.22)
                             timing.rs      the per-phase `[timing]` stderr timers (CA.9)
-              docs.rs       markdown ingest          passes.rs    doc-linker, TESTS edge, the post-pass fns
+              docs.rs       markdown ingest; include_doc / DocRule: the well-known files and docs/
+                            at the repo root and every PROJECT root, .ai/, ADR dirs, SDD feature
+                            docs (features/<f>/*.md, spec-kit specs/<NNN-slug>/; CJ.2, `[docs] scope:`)
+              passes.rs     doc-linker, TESTS edges (module pairs, then fn-level from a test
+                            module's root functions, CL.5b), the post-pass fns
               profile.rs    CODE_PASSES — every build pass in run order (15 resolvers, 9 post-passes,
                             evidence fill + determinism sort); run_code_passes is the whole build tail
               coverage.rs   coverage_report          answers.rs   the P3 primitives
@@ -269,7 +279,25 @@ per layout write.
 
 Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems` with unresolved references (`UnresolvedRef`). The graph builder walks the tree to turn those into concrete edges uniformly across languages.
 
-- `SelfMethod` walks to the enclosing `CLASS` / `STRUCT` / equivalent.
+- `SelfMethod` walks to the enclosing `CLASS` / `STRUCT` / equivalent. In the TS family
+  (`build_typescript_family`, which lang_build's TS group calls) an unbound `this.m()` /
+  `super.m()` then follows INHERITS_FROM to the nearest ancestor defining m: the TS parser
+  emits `CallQualifier::SuperMethod` for `super.m()`, which starts one level up, and
+  `resolve_inherited_calls` binds both (CALLS rule `inherited_method`).
+  `emit_abstract_implements` pairs an override with the abstract member it implements
+  (`NavFact::AbstractMethod`, method-level IMPLEMENTS rule `abstract_override`) (CH.1b,
+  `[ts-inherit]`).
+- Go resolves more than calls through its package model (graph/src/build.rs). Struct
+  embeds bind as STRUCT INHERITS_FROM edges (`bind_go_embeds`), and `GoPromoted` /
+  `GoPackages::method_on` promote embedded methods and fields to calls and to implicit
+  IMPLEMENTS (CI.2a, CI.2b). `resolve_imports_go` (graph/src/imports.rs) binds imports of
+  the repository-root package (CI.3), and CA.3b's reach rule pairs a `_test.go` side only
+  through its own file's direct import (`DirImportGraph::imports_directly`).
+  `GoPackages::bind_type_handlers` binds receiver-method route handlers whose type sits in
+  another file of the package (CI.4). `build_go` also resolves in-repo
+  type aliases (`NavFact::TypeAlias`, `resolve_go_alias_sigs` over `alias_scope`) in method
+  signatures before the implicit-IMPLEMENTS compare (CI.6, `[go-alias]`). A call in a
+  package-var initialiser is a CALLS of the var's STATE_VAR (CI.1, parser-side).
 - An `extra_hook` seam on `resolve_calls` lets a language contribute resolution the generic
   walker misses; it is consulted only after every generic lookup failed. Four builders use it:
   `build_rust` hands it the path resolver in `graph/src/rust_paths.rs` (`crate::` / `self::` /
@@ -414,7 +442,9 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   `--layout`, LC.10c), `build`, `install-hooks` (`--pair`, LG.2).
 - query: `pages` (LA.6e), `find` (LD.3b), `flows` (LD.4b; `--features` / `--out`, LG.3c),
   `implementors` (LD.7c), `serves <repo> <channel> [--mechanism auto|http|queue]`
-  (LD.8b), `why <repo> <from> <to>` (LE.5; exits 1 when not found). 0.5.1:
+  (LD.8b; an HTTP channel also lists each ENDPOINT stamped ORIGIN `external` for that
+  verb + path, match `external`, `Server.external_hosts`, CJ.3), `why <repo> <from> <to>`
+  (LE.5; exits 1 when not found). 0.5.1:
   `pack <repo> <query> [--budget <tokens>] [--preset repair|review|onboard|centrality]`
   (CC.4c; the context for a query packed to a token budget, each node at the most detail
   the budget buys; stdout is the pack text alone), `hotspots [--level module|symbol|both]`
@@ -438,7 +468,9 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   directional confidence and whether a static link joins them; exits 1 with no rows),
   `timeline build|history|as-of` (CD.5d; the last `--revs` commits as edge validity
   spans in the `timeline.gmap` sidecar). A git or build error exits 2.
-- rules: `effects` (LE.4d), `cycles` (LE.6b), `check` (LE.8; exits 0 clean, 1 on
+- rules: `effects` (LE.4d; an external ENDPOINT sink names its host, downstream
+  `external: <host>`, `EffectRow.external_hosts`, CJ.3, `[effects-external]`), `cycles`
+  (LE.6b), `check` (LE.8; exits 0 clean, 1 on
   violations, 2 on an error; renders the reflexion model — `[[component]]`, `[[layer]]`,
   `kind = "allow"` — as a `## reflexion model` section, CC.5b / CC.5c), `spec-status`
   (LE.9b). 0.5.1: `flags [--status dead|undefined|single_site|quiet]` (CC.7c; the
@@ -450,19 +482,26 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   glia-engine nor glia-py has `ureq` in its normal dependency tree.
 - inputs: `gaps [--overlay-delta]` (LF.2c; `cochange_no_edge` rows carry no repo, so a
   merge with one relative path in two repos gives two alike rows; `suspected_edge` rows
-  carry a paste-ready `[[edge]]` draft, CD.3b), `history sync` (LF.5d), `tests ingest`
+  carry a paste-ready `[[edge]]` draft, CD.3b; `dead_symbol` withholds a METHOD that
+  IMPLEMENTS a METHOD with an incoming CALLS / USES from a third node, CH.1c,
+  `[dead-dispatch]`), `history sync` (LF.5d), `tests ingest`
   (LF.6d; a rolling window of runs, `--window`, `--reset`, CC.9b). 0.5.1: `overlay
   propose|try|accept` (CE.3e; the overlay loop, `skills/glia-overlay/SKILL.md`), `scip
   import <repo> <index.scip>` (CE.1c; writes `.glia/scip-snapshot/`, which the CE.1d
   build stage reads as FACT-tier CALLS / USES / IMPLEMENTS / INHERITS_FROM). A snapshot
-  step never runs inside a build.
+  step never runs inside a build. `.glia/overlay.toml` `[walk] tests = [..]` (CJ.4,
+  `WalkConfig::tests_matcher`: gitignore syntax, repo-root anchored, additive) gives
+  matching nodes ORIGIN `test_fixture` (`[provenance] declared tests`). It is user config
+  like `[walk] skip`: applied under `--no-overlay` and never a candidate section, so neither
+  `overlay try` nor `--overlay-delta` measures it. The TESTS pass does not read it yet.
 - hidden: `hook pre-commit|commit-msg`, the runners `install-hooks --pair` writes.
 
 pyo3 (`PyGraph`): `blast_radius`, `cross_stack_trace`, `entry_flows`,
 `feature_flows` / `write_feature_flows`, `resolve`, `find`, `coverage`,
 `governing_docs`, `page_flow`, `service_map`, `contracts`, `contract_fields`,
 `implementors`, `serves`, `why`, `diff_impact`, `tests_for` / `tests_for_diff`
-(`limit=`, `signals=`), `effects`, `cycles`, `check`, `spec_status`, `gaps`, `patterns`
+(`limit=`, `signals=`), `effects` (and `serves`: each row carries `external_hosts`, CJ.3),
+`cycles`, `check`, `spec_status`, `gaps`, `patterns`
 (CC.12b; the 0.5.0 `patterns_experimental` stays until 0.5.2 as a DeprecationWarning
 alias), and 0.5.1's `pack` / `pack_ids`, `flags`, `hotspots`, `cochange`,
 `communities`, `splits`, `hubs`, `duplicate_flows`; traversal —
@@ -476,10 +515,12 @@ every category, DEFINES included; LD.3c) — `set_cell` / `remove_cell` (+ `acti
 `overlay_delta`, `history_sync`, `tests_ingest`, `write_cell` / `remove_cell`,
 `kind_names` / `category_names` / `cell_type_names` / `entry_kinds`, and 0.5.1's
 `review_vs_rev` (`format="dict"|"markdown"`), `contract_breaks_vs_rev` (`with_repos=`),
-`cochange_vs_rev`, `timeline_build` / `timeline_history` / `timeline_as_of`. The cache
-transport, the overlay loop and `scip import` are CLI-only. An answer is a native dict /
-list; only `*_json` returns JSON text (LD.2). The committed surface is
-`py/api_surface/<module>.txt`.
+`cochange_vs_rev`, `timeline_build` / `timeline_history` / `timeline_as_of`, and
+`overlay_propose` / `overlay_try` / `overlay_accept` (CK.1, `py/src/overlay_loop.rs`:
+transport over `overlay_loop::{propose, try_candidate, accept}`; `candidate` is TOML
+text, a refusal is a `ValueError`, markers end `surface=py`). The cache transport and
+`scip import` are CLI-only. An answer is a native dict / list; only `*_json` returns JSON
+text (LD.2). The committed surface is `py/api_surface/<module>.txt`.
 
 Engine entry points — flat: `blast_radius`, `resolve_signal_located`,
 `coverage_report`, `governing_docs`, `entrypoint_reachable`, `locate_node`,
@@ -526,8 +567,9 @@ questions over one graph computes `entrypoint_reachable` once.
 - **0.5.1 — the catch-up leap, on local `main`, not yet tagged.** Scope in
   `dev-notes/next-leap-0.5.1.md` (§7.2 is James's rulings), packets in
   `dev-notes/leap-051-packets.json`, overrides in `dev-notes/leap-051-corrections.json`,
-  schedule and LANDED waves in `dev-notes/wave-runner/schedule_051.py`: 155 packets in
-  waves W0–W11. The name stays 0.5.1 and consumers pin it exactly, so it may break
+  schedule and LANDED waves in `dev-notes/wave-runner/schedule_051.py`: 198 packets, 155 in
+  waves W0–W11 and the 43-packet finishing batch (leap doc §7.4) in W12–W19. The name
+  stays 0.5.1 and consumers pin it exactly, so it may break
   contracts, each break declared by its packet. Groups: C0 wave-0 slots and the one
   dependency commit; CA dogfood fixes (Go closure calls, typed receivers, signature-checked
   implicit IMPLEMENTS, patterns on real repos, Kotlin receivers, the pooled TS build,
@@ -540,15 +582,31 @@ questions over one graph computes `entrypoint_reachable` once.
   (SCIP import, the shared parse cache, the overlay loop, Notion / MediaWiki / wiki-dir
   doc sources); CF the coverage-matrix probes (a Kotlin row, 28 not-applicable cells);
   CG the Engram session's findings (TS field methods, test-fixture provenance,
-  `--exclude-path`, full doc CODE text, external endpoints); CZ the release docs. No
+  `--exclude-path`, full doc CODE text, external endpoints); CZ the release docs. The
+  finishing batch: C0.9 the pyo3 `overlay_loop` slot; CH TypeScript / Angular / Dart
+  (abstract classes, inherited `this` / `super` calls and abstract-override IMPLEMENTS,
+  dead_symbol dispatch, call-initialised STATE_VARs, URL-builder endpoints, the non-HTTP
+  receiver gate, method-by-value USES, the `/api` prefix fold for TS builders and Dio
+  bases); CI Go (package-var initialiser calls, embedded-struct promotion for calls and
+  IMPLEMENTS, root-package imports, split-file handlers, foreign and parameter-rooted
+  mounts, type aliases); CJ the `.rs` / `.py` literal guard, project-root and SDD doc
+  ingestion, external sinks in `effects` / `serves`, `[walk] tests`; CK the pyo3 overlay
+  loop and the engram-export route pairing and build sidecar; CL the matrix slice (queue
+  row semantics, Go / JVM / .NET brokers, JobRunr / Hangfire / asynq, constructed
+  receivers, fn-level TESTS, GraphQL clients and HotChocolate, .NET env and appsettings,
+  Go EventBus, NestJS cron, JVM process launches); CZ.3 these docs and the handoffs. No
   registry id is allocated (the next free ids stay node 50 / edge 37 / cell 26); the
   WASM reader was dropped (CD.6b / CD.6c). What remains is release mechanics, James's:
-  the version bump (the Cargo workspace and `py/pyproject.toml` still read 0.5.0), the
-  handoff docs (repo-graph, neuropil, Engram: each with the exact pin and every declared
-  break), then push → tag `v0.5.1` → PyPI.
+  the version bump (the Cargo workspace and `py/pyproject.toml` still read 0.5.0; every
+  glia crate moves to the workspace version at the bump, leap doc §7.4), then push → tag
+  `v0.5.1` → PyPI. The handoff docs (`dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.1.md`,
+  each with the exact pin and every declared break) cover W0–W18.
 - **After 0.5.1** (the leap doc's §1 train): **0.5.2** the four bets — `glia watch`, a
   Datalog rule layer (with a GQL front-end), cross-repo identity, Engram PPR memory;
-  research in `dev-notes/research-0.5.2/`, packets after 0.5.1 lands. **0.5.3** scale —
+  research in `dev-notes/research-0.5.2/`, packets after 0.5.1 lands; plus the finishing
+  batch's deferrals (README `## Roadmap`: PHP short-name imports, CB.26's residuals, the
+  rest of the matrix cells, WS / gRPC / GraphQL external marking, `[walk] tests` feeding
+  the TESTS pass). **0.5.3** scale —
   Stack Graphs-style incremental resolution, build-target graphs (the likely first real
   non-code domain). **0.5.4** proof — precision rate on real repos, agent before/after,
   big-repo per-phase timings, calibrated confidence, `decide/` and `glia judge` on our own

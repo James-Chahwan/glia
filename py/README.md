@@ -30,6 +30,55 @@ is the release; `build_stamp()` is `<release>+p<16 hex>`, the hex half a
 content hash of every graph-shaping source file, so two builds of one release
 that parse differently report different stamps.
 
+## What's new in 0.5.1
+
+**Pin exactly: `glia-py==0.5.1`.** 0.5.1 keeps 0.5.0's API conventions, but it changes
+graph contents and the store format, and each glia release is pinned exactly.
+
+- **New `PyGraph` answers.** `pack` / `pack_ids` (the context for a query, packed to
+  a token budget), `hotspots`, `cochange`, `flags` (stale feature flags),
+  `communities`, `splits`, `hubs`, `duplicate_flows`, and `patterns`, out of
+  experimental (`patterns_experimental` warns and goes in 0.5.2). `tests_for` /
+  `tests_for_diff` gain `limit=` and `signals=` (rank by recent failures and
+  co-change).
+- **New module functions.** `review_vs_rev` is the PR report for a change against
+  a git rev (`format="markdown"` for a PR comment). Also `contract_breaks_vs_rev`
+  and `cochange_vs_rev`. `timeline_build` / `timeline_history` / `timeline_as_of`
+  say when each edge appeared and went over recent commits. `overlay_propose` /
+  `overlay_try` / `overlay_accept` run the overlay loop in-process. `patterns_vs_rev`
+  is new, and `patterns_vs_rev_experimental` stays as a deprecated alias until
+  0.5.2. `tests_ingest` gains `window=` / `reset=`: a re-ingest keeps a rolling
+  window of runs.
+- **Answer shapes.** `effects` and `serves` rows gain `external_hosts`, the
+  third-party hosts a sink calls (`[]` for in-repo rows). `serves` lists such an
+  endpoint for an HTTP channel. `gaps` rows gain a stable `id` and the
+  `suspected_edge` category, and `gaps` no longer lists an implementation of a
+  called method as a dead symbol.
+- **Store.** `.gmap` format 3 is smaller: interned evidence, code cells stored as
+  spans into the source, and an lz4 parse cache. `load_from_gmap` rebuilds a 0.5.0
+  layout once.
+- **Graph content a caller sees.** Rebuild any stored graph; a node whose qname
+  moved gets a new id.
+  - Client endpoints whose URL comes from a URL builder, a URL method, a `const`
+    local or a `readonly` field get real paths instead of
+    `endpoint:<METHOD>:<unresolved>`, and a configured API prefix (`/api`) folds
+    into their qname.
+  - Go routes mounted on a group passed through a parameter or a struct field gain
+    their prefix.
+  - .NET `appsettings*.json` keys are a new `config:setting:<Section:Key>` track,
+    read by C# `IConfiguration` and defined by `Section__Key` env vars too.
+  - Every language gets function-level TESTS edges, and TEST cells on functions.
+  - TypeScript: `this.m()` / `super.m()` calls bind through superclasses, and
+    overrides IMPLEMENTS abstract members. Signal and call-initialised fields are
+    STATE_VARs, and a method passed by value is USES.
+  - Go: struct embeds are INHERITS_FROM, with promoted calls and IMPLEMENTS.
+    Type aliases count in interface satisfaction, so streaming gRPC servers
+    implement their service. Package-var initialisers call, and imports of the
+    repository-root package resolve.
+  - `.glia/overlay.toml` `[walk] tests` adds `test_fixture` provenance.
+  - More broker, job, GraphQL and cron coverage, and fewer phantom nodes from
+    string literals in Rust and Python.
+
 ## What's new in 0.5.0
 
 The first release under the `glia-py` name, and one breaking release that moves
