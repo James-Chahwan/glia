@@ -504,7 +504,10 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
                 // method. The Go parser writes a receiver method value
                 // (`h.List` inside `func (h *TokensHandler) RegisterRoutes`)
                 // with the receiver's TYPE as its base, so a second type with
-                // a `List` cannot make it ambiguous.
+                // a `List` cannot make it ambiguous. A type declared in
+                // another file of its Go package, or a promoted method, was
+                // already bound through the package by the Go pre-pass (CI.4,
+                // `GoPackages::bind_type_handlers`) and never reaches here.
                 let hit = hit.or_else(|| {
                     if r.category == edge_category::HANDLED_BY {
                         module_type_method(g, r.from_module, base, name)
@@ -518,9 +521,10 @@ pub(crate) fn resolve_refs(g: &mut RepoGraph, refs: &[UnresolvedRef], tally: &mu
                 // struct-receiver variable (`h *Handlers`), not an import
                 // binding. So binding lookup fails. Scan all class_methods
                 // across the graph for a method matching `name`; emit
-                // only when exactly one match exists. A receiver type
-                // declared in another file of its package misses the arm
-                // above and lands here.
+                // only when exactly one match exists. A Go receiver type of
+                // the registering package binds through the Go pre-pass
+                // (CI.4) first; only a ref whose method that type lacks
+                // (own or promoted) still lands here.
                 hit.or_else(|| {
                     if r.category == edge_category::HANDLED_BY {
                         unique_global_method(g, name).map(|to| (to, Branch::GlobalUniqueMethod))
@@ -647,7 +651,11 @@ fn enum_member(g: &RepoGraph, enum_id: NodeId, name: &str) -> Option<NodeId> {
 /// CA.5a: the method `name` of the STRUCT / CLASS named `ty` among
 /// `module`'s own top-level defs. Only a method OF that type is ever returned,
 /// so a same-named method of another type cannot bind; a promoted method (an
-/// embedded struct's) is not in `class_methods` and misses.
+/// embedded struct's) is not in `class_methods` and misses. Go's split-file
+/// and promoted cases bind before `resolve_refs` runs, through the package
+/// (CI.4, `GoPackages::bind_type_handlers`, rule `package_type_method`): this
+/// lookup answers a Go ref only when the registering file declares both the
+/// type and the method.
 fn module_type_method(g: &RepoGraph, module: NodeId, ty: &str, name: &str) -> Option<NodeId> {
     let type_id = *g.symbols.module_symbols.get(&module)?.get(ty)?;
     match g.nav.kind_by_id.get(&type_id).copied() {
@@ -2776,10 +2784,12 @@ mod tests {
     }
 
     /// A type the registering module does not declare (a split receiver: the
-    /// struct lives in another file) takes the repo-unique method fallback
-    /// exactly as before, and a base naming a FUNCTION there is no type.
+    /// struct lives in another file of its package) binds its own method
+    /// through the package before this resolver runs (CI.4, Go's
+    /// `GoPackages::bind_type_handlers`, rule `package_type_method`), and a
+    /// base naming a FUNCTION there is no type: that ref stays unresolved.
     #[test]
-    fn type_qualified_handler_falls_back_when_the_type_is_elsewhere() {
+    fn type_qualified_handler_in_another_file_binds_through_the_package() {
         let mut s = Shape::new();
         let sm = s.add(node_kind::MODULE, "handlers::users", None);
         let users = s.add(node_kind::STRUCT, "handlers::users::UsersHandler", Some(sm));
@@ -2804,7 +2814,7 @@ mod tests {
         let g = crate::build::build_go(repo(), vec![types_file, routes_file]).unwrap();
         assert_eq!(
             evidence_rule(&g, get_user, show, edge_category::HANDLED_BY),
-            refs_rule("global_unique_method")
+            Some(("graph:go_packages".to_string(), Some("package_type_method".to_string())))
         );
         assert_eq!(g.unresolved_refs.len(), 1);
         assert_eq!(g.unresolved_refs[0].from, get_other);

@@ -1,0 +1,57 @@
+{
+  "framework": "go-split-receiver-handlers",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "http_server",
+  "cells": [
+    "go/http_server"
+  ],
+  "note": "CI-4: a receiver-method route handler (`r.GET(\"/tokens\", h.List)` in `func (h *TokensHandler) RegisterRoutes`) whose receiver type is declared in ANOTHER file of the package is HANDLED_BY that type's method, found through the package (GoPackages), not the repo-unique method name: TokensHandler and OffersHandler share List / Create. A handler promoted from an embedded struct (`h.Health`, BaseHandler) binds the promoted method (CI-2). Baseline HEAD f8a46c0: CA.5a binds same-file types only, and the global fallback finds List, Create and Health (Monitor) ambiguous.",
+  "expect_edges": [
+    {
+      "from": "GET /tokens",
+      "to": "handlers::tokens::TokensHandler::List",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "POST /tokens",
+      "to": "handlers::tokens::TokensHandler::Create",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "GET /offers",
+      "to": "handlers::offers::OffersHandler::List",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "POST /offers",
+      "to": "handlers::offers::OffersHandler::Create",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "GET /tokens/health",
+      "to": "handlers::base::BaseHandler::Health",
+      "category": "HANDLED_BY",
+      "note": "promoted from the embedded BaseHandler (CI-2); Monitor::Health makes the repo-unique name ambiguous"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "GET /tokens",
+      "to": "handlers::offers::OffersHandler::List",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "GET /offers",
+      "to": "handlers::tokens::TokensHandler::List",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "GET /tokens/health",
+      "to": "handlers::monitor::Monitor::Health",
+      "category": "HANDLED_BY"
+    }
+  ]
+}

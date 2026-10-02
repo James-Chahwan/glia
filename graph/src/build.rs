@@ -11,7 +11,7 @@ use glia_code_domain::{
 use glia_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 
 use crate::calls::{
-    EvidenceTally, InheritStats, emit_abstract_implements, emit_method_level_implements,
+    EvidenceTally, InheritStats, SiteFiles, emit_abstract_implements, emit_method_level_implements,
     emit_method_level_implements_with, enclosing_class_or_struct, enclosing_module, graph_evidence,
     push_edge, resolve_calls, resolve_inherited_calls, resolve_refs, unique_global_type,
 };
@@ -86,13 +86,23 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// hook follows them: a method or field the struct does not declare binds
 /// through Go's promotion rule ([`GoPromoted`]); `[go-embeds]` prints what
 /// bound.
+///
+/// CI.4: a receiver method value handler (`r.GET("/tokens", h.List)` in
+/// `func (h *TokensHandler) RegisterRoutes`) whose type is declared in another
+/// file of the package, or whose method is promoted from an embedded struct,
+/// is HANDLED_BY that type's method, found through the package
+/// ([`GoPackages::bind_type_handlers`]) before the refs resolve;
+/// `[go-handlers]` prints what bound.
 pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
-    let GoPasses { g, split, implicit, packages, receivers, mounts, embeds } =
+    let GoPasses { g, split, implicit, packages, receivers, mounts, embeds, handlers } =
         build_go_passes(repo, parses);
     if let Some(line) = split.marker() {
         eprintln!("{line}");
     }
     if let Some(line) = mounts.marker() {
+        eprintln!("{line}");
+    }
+    if let Some(line) = handlers.marker() {
         eprintln!("{line}");
     }
     if let Some(stats) = implicit {
@@ -178,6 +188,8 @@ struct GoPasses {
     mounts: MountStats,
     /// CI.2a: the struct embeds and what their promotion bound.
     embeds: GoEmbedStats,
+    /// CI.4: the HANDLED_BY refs bound to a package type's method.
+    handlers: TypeHandlerStats,
 }
 
 /// [`build_go`]'s passes, returning the stats its markers print.
@@ -206,6 +218,10 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
     // CB.20: reads the CALLS edges just bound; moves the provisional ROUTEs'
     // HANDLED_BY refs (and copies them to each extra mount) before they resolve.
     let mounts = crate::go_mounts::bind(&mut g, &mut refs);
+    // CI.4: a receiver method value whose type sits in another file of the
+    // package, or whose method is promoted, binds through the package before
+    // the generic resolver's repo-unique method name can.
+    let handlers = packages.bind_type_handlers(&mut g, &mut refs);
     resolve_refs(&mut g, &refs, &mut tally);
     let embeds = embed_binds.push(&mut g, &packages.promoted);
     let mut implicit = emit_go_implicit_implements(&mut g, &packages);
@@ -224,7 +240,7 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
         stats.promoted_method_pairs = method_pairs;
     }
     tally.report();
-    GoPasses { g, split, implicit, packages: package_stats, receivers, mounts, embeds }
+    GoPasses { g, split, implicit, packages: package_stats, receivers, mounts, embeds, handlers }
 }
 
 /// Build a per-repo TypeScript graph. TS import sources are raw strings
@@ -2003,6 +2019,154 @@ impl GoPackages {
 }
 
 // ============================================================================
+// Go package-type route handlers (CI.4)
+// ============================================================================
+
+/// What [`GoPackages::bind_type_handlers`] did to one Go graph, for the
+/// `[go-handlers]` marker.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TypeHandlerStats {
+    /// HANDLED_BY refs bound to their package type's method.
+    bound: usize,
+    /// Of `bound`: the type is declared in another file of the package.
+    other_file: usize,
+    /// Of `bound`: the method is promoted from an embedded struct.
+    promoted: usize,
+    /// Refs whose base named a package STRUCT but whose method did not
+    /// resolve on it (left to `resolve_refs`, as before).
+    unbound: usize,
+}
+
+impl TypeHandlerStats {
+    /// CI.4 fired_on, once per Go graph with a candidate ref: `[go-handlers]
+    /// package-type handlers bound=<b> (other_file=<o> promoted=<p>)
+    /// unbound=<u>`.
+    fn marker(&self) -> Option<String> {
+        (self.bound + self.unbound > 0).then(|| {
+            format!(
+                "[go-handlers] package-type handlers bound={} (other_file={} promoted={}) \
+                 unbound={}",
+                self.bound, self.other_file, self.promoted, self.unbound
+            )
+        })
+    }
+}
+
+/// [`GoPackages::type_handler`]'s answer for one HANDLED_BY ref.
+#[derive(Debug, PartialEq, Eq)]
+enum TypeHandler {
+    /// Not this pass's: a package-qualified or local-var base, or a
+    /// same-file type that declares the method (CA.5a's `type_method`).
+    Generic,
+    /// The base names a package STRUCT without the method, own or promoted.
+    Unbound,
+    /// The STRUCT's METHOD, whether it is promoted, and whether the STRUCT is
+    /// declared in another file of the package than the registration.
+    Bound { method: NodeId, promoted: bool, other_file: bool },
+}
+
+impl GoPackages {
+    /// CI.4: bind each HANDLED_BY ref a receiver method value wrote (the Go
+    /// parser's `Attribute { base: <receiver TYPE>, name }`, CA.5a) to the
+    /// method of that type found through its package
+    /// ([`GoPackages::type_handler`]): a receiver type declared in another
+    /// file of the package (`types.go` + `routes.go`), or a method promoted
+    /// from an embedded struct. `resolve_refs` reads only the registering
+    /// file's own types and the repo-unique method name, so it misses the
+    /// first when two types share the method name and binds the second by
+    /// name only.
+    ///
+    /// Runs after `go_mounts::bind` and before `resolve_refs`: a bound ref
+    /// leaves `refs` (the survivors keep their order), so the generic
+    /// resolver never sees it. The edge is Strong with evidence
+    /// `graph:go_packages` rule `package_type_method`, placed as
+    /// `resolve_refs` places every HANDLED_BY ref ([`SiteFiles::place`]):
+    /// the registering file at the registration's 0-based row.
+    fn bind_type_handlers(
+        &self,
+        g: &mut RepoGraph,
+        refs: &mut Vec<UnresolvedRef>,
+    ) -> TypeHandlerStats {
+        let mut stats = TypeHandlerStats::default();
+        let mut files: Option<SiteFiles> = None;
+        for r in std::mem::take(refs) {
+            match self.type_handler(g, &r) {
+                TypeHandler::Bound { method, promoted, other_file } => {
+                    let files = files.get_or_insert_with(|| SiteFiles::of(g));
+                    let ev = files.place(go_ev("package_type_method"), &r);
+                    push_edge(g, r.from, method, edge_category::HANDLED_BY, ev);
+                    stats.bound += 1;
+                    stats.other_file += usize::from(other_file);
+                    stats.promoted += usize::from(promoted);
+                }
+                TypeHandler::Unbound => {
+                    stats.unbound += 1;
+                    refs.push(r);
+                }
+                TypeHandler::Generic => refs.push(r),
+            }
+        }
+        stats
+    }
+
+    /// The METHOD a HANDLED_BY `Attribute { base, name }` ref binds through
+    /// its package (CI.4), Go's rules:
+    ///
+    /// 1. `base` an import of the registering file is a package-qualified
+    ///    handler (`handlers.List`): generic.
+    /// 2. The type: the registering file's own STRUCT `base`, else the one
+    ///    STRUCT `base` of its package directory
+    ///    ([`GoPackages::unique_type_in`]; test files only for a `_test.go`
+    ///    registration), declared in another file. Anything else (a local
+    ///    var `h` from `h := NewH()`) names no type: generic.
+    /// 3. The method: a same-file type declaring `name` is CA.5a's
+    ///    (`resolve_refs` rule `type_method`): generic. Otherwise the type's
+    ///    own method, else the one an embed promotes
+    ///    ([`GoPackages::method_on`]); a STRUCT's METHOD only, so a method
+    ///    promoted from an embedded INTERFACE never answers a handler.
+    fn type_handler(&self, g: &RepoGraph, r: &UnresolvedRef) -> TypeHandler {
+        if r.category != edge_category::HANDLED_BY {
+            return TypeHandler::Generic;
+        }
+        let CallQualifier::Attribute { base, name } = &r.qualifier else {
+            return TypeHandler::Generic;
+        };
+        let module = r.from_module;
+        let imported = self.import_path.get(&module).is_some_and(|m| m.contains_key(base))
+            || g.symbols.module_import_bindings.get(&module).is_some_and(|m| m.contains_key(base));
+        if imported {
+            return TypeHandler::Generic;
+        }
+        let is_struct = |id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::STRUCT);
+        let own = g.symbols.module_symbols.get(&module).and_then(|s| s.get(base));
+        let (ty, other_file) = match own.copied().filter(is_struct) {
+            Some(ty) => (ty, false),
+            None => {
+                let Some(dir) = self.dir_of.get(&module) else {
+                    return TypeHandler::Generic;
+                };
+                let with_tests = self.tests.contains(&module);
+                match self.unique_type_in(g, dir, base, with_tests).filter(is_struct) {
+                    Some(ty) => (ty, true),
+                    None => return TypeHandler::Generic,
+                }
+            }
+        };
+        let declares = g.symbols.class_methods.get(&ty).is_some_and(|m| m.contains_key(name));
+        if !other_file && declares {
+            return TypeHandler::Generic;
+        }
+        let on_struct = |m: &NodeId| g.nav.parent_of.get(m).is_some_and(is_struct);
+        match self.method_on(g, ty, name) {
+            Some((method, promoted)) if on_struct(&method) => {
+                TypeHandler::Bound { method, promoted, other_file }
+            }
+            _ => TypeHandler::Unbound,
+        }
+    }
+}
+
+// ============================================================================
 // Go implicit interface satisfaction (LD.7b)
 // ============================================================================
 
@@ -2414,8 +2578,10 @@ fn interface_method_set<'g>(
 /// / `package_import` (the LA.13b call hook), `receiver_return` /
 /// `receiver_local` / `receiver_package_var` / `receiver_field_chain` (the
 /// CA.2b typed-receiver half of that hook), `promoted_self` (CI.2a, a self
-/// call of a promoted method) or `embed_package` / `embed_import` (LD.7b
-/// interface embeds; CI.2a struct embeds reuse them).
+/// call of a promoted method), `embed_package` / `embed_import` (LD.7b
+/// interface embeds; CI.2a struct embeds reuse them) or
+/// `package_type_method` (CI.4, a route handler bound to its package type's
+/// method, [`GoPackages::bind_type_handlers`]).
 fn go_ev(rule: &str) -> Evidence {
     graph_evidence("graph:go_packages", rule)
 }
@@ -5198,6 +5364,186 @@ mod tests {
         );
         let GoPasses { embeds, .. } = build_go_passes(repo(), multifile_package_shape());
         assert_eq!(embeds.marker(), None);
+    }
+
+    // ---- CI.4: receiver-method handlers bind through the package ------------
+
+    /// The bench fixture go-split-receiver-handlers, parsed as the engine does.
+    fn split_handlers_fixture() -> Vec<FileParse> {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.join("bench/substrate-gap/fixtures/go-split-receiver-handlers"))
+            .expect("workspace root");
+        ["base.go", "monitor.go", "offers.go", "routes.go", "tokens.go"]
+            .iter()
+            .map(|file| {
+                let rel = format!("handlers/{file}");
+                let src = std::fs::read_to_string(root.join(&rel)).expect("fixture file");
+                let qname = rel.trim_end_matches(".go").replace('/', "::");
+                glia_parser_go::parse_file(&src, &rel, &qname, "example.com/split", repo())
+                    .expect("parse")
+            })
+            .collect()
+    }
+
+    /// The ROUTE whose qname is `qname` (after the CB.20 re-key).
+    fn route_id(g: &RepoGraph, qname: &str) -> NodeId {
+        let hits: Vec<NodeId> = g
+            .nav
+            .qname_by_id
+            .iter()
+            .filter(|(id, q)| {
+                q.as_str() == qname && g.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(hits.len(), 1, "one ROUTE {qname}: {hits:?}");
+        hits[0]
+    }
+
+    /// The HANDLED_BY targets of `route`.
+    fn handled_by(g: &RepoGraph, route: NodeId) -> Vec<NodeId> {
+        g.edges
+            .iter()
+            .filter(|e| e.from == route && e.category == edge_category::HANDLED_BY)
+            .map(|e| e.to)
+            .collect()
+    }
+
+    /// The EVIDENCE (emitter, rule, file, line) of the one HANDLED_BY edge
+    /// `route -> to`.
+    fn handler_ev(
+        g: &RepoGraph,
+        route: NodeId,
+        to: NodeId,
+    ) -> (String, Option<String>, Option<String>, Option<u32>) {
+        let ev = Evidence::of(only_edge(g, route, to, edge_category::HANDLED_BY))
+            .expect("EVIDENCE cell");
+        (ev.emitter, ev.rule, ev.file, ev.line)
+    }
+
+    fn pkg_type_ev(row: u32) -> (String, Option<String>, Option<String>, Option<u32>) {
+        (
+            "graph:go_packages".to_string(),
+            Some("package_type_method".to_string()),
+            Some("handlers/routes.go".to_string()),
+            Some(row),
+        )
+    }
+
+    /// The fixture's split receivers: `routes.go` registers `h.List` /
+    /// `h.Create` inside `(h *TokensHandler) RegisterRoutes` and `(h
+    /// *OffersHandler) RegisterRoutes`, the types declared in `tokens.go` /
+    /// `offers.go`, both with List and Create. Each route binds its own
+    /// type's method through the package, located at its registration row of
+    /// `routes.go`; none crosses to the other type.
+    #[test]
+    fn go_split_receiver_handler_binds_through_the_package() {
+        let GoPasses { g, handlers, .. } = build_go_passes(repo(), split_handlers_fixture());
+        let m = |q: &str| gid(node_kind::METHOD, q);
+        let cases = [
+            ("GET /tokens", "handlers::tokens::TokensHandler::List", 6),
+            ("POST /tokens", "handlers::tokens::TokensHandler::Create", 7),
+            ("GET /offers", "handlers::offers::OffersHandler::List", 12),
+            ("POST /offers", "handlers::offers::OffersHandler::Create", 13),
+        ];
+        for (route, method, row) in cases {
+            let r = route_id(&g, route);
+            assert_eq!(handled_by(&g, r), vec![m(method)], "{route}");
+            assert_eq!(handler_ev(&g, r, m(method)), pkg_type_ev(row), "{route}");
+        }
+        assert_eq!(
+            handlers,
+            TypeHandlerStats { bound: 5, other_file: 5, promoted: 1, unbound: 0 }
+        );
+        assert_eq!(
+            handlers.marker().as_deref(),
+            Some("[go-handlers] package-type handlers bound=5 (other_file=5 promoted=1) unbound=0")
+        );
+        assert!(
+            !g.unresolved_refs.iter().any(|r| r.category == edge_category::HANDLED_BY),
+            "{:?}",
+            g.unresolved_refs
+        );
+    }
+
+    /// `h.Health` on a TokensHandler that embeds BaseHandler binds the
+    /// promoted `BaseHandler::Health`, never `Monitor::Health` (the
+    /// repo-unique name is ambiguous, so no name fallback could pick).
+    #[test]
+    fn go_promoted_receiver_handler_binds_the_promoted_method() {
+        let g = build_go(repo(), split_handlers_fixture()).unwrap();
+        let health = route_id(&g, "GET /tokens/health");
+        let base = gid(node_kind::METHOD, "handlers::base::BaseHandler::Health");
+        assert_eq!(handled_by(&g, health), vec![base]);
+        assert_eq!(handler_ev(&g, health, base), pkg_type_ev(8));
+    }
+
+    /// Type, methods and `RegisterRoutes` in one file: CA.5a's `type_method`
+    /// binds it in `resolve_refs` as before, and the pre-pass counts nothing.
+    #[test]
+    fn go_same_file_receiver_handler_keeps_ca5a_evidence() {
+        let src = "package handlers\n\nimport \"github.com/gin-gonic/gin\"\n\n\
+                   type TokensHandler struct{}\n\n\
+                   func (h *TokensHandler) List(c *gin.Context) {}\n\n\
+                   func (h *TokensHandler) RegisterRoutes(r *gin.Engine) {\n\
+                   \tr.GET(\"/tokens\", h.List)\n}\n";
+        let other = "package handlers\n\nimport \"github.com/gin-gonic/gin\"\n\n\
+                     type OffersHandler struct{}\n\n\
+                     func (h *OffersHandler) List(c *gin.Context) {}\n";
+        let parses =
+            go_sources(&[("handlers/tokens.go", src), ("handlers/offers.go", other)]);
+        let GoPasses { g, handlers, .. } = build_go_passes(repo(), parses);
+        let list = gid(node_kind::METHOD, "handlers::tokens::TokensHandler::List");
+        let r = route_id(&g, "GET /tokens");
+        assert_eq!(handled_by(&g, r), vec![list]);
+        assert_eq!(
+            handler_ev(&g, r, list),
+            (
+                "graph:refs".to_string(),
+                Some("type_method".to_string()),
+                Some("handlers/tokens.go".to_string()),
+                Some(9)
+            )
+        );
+        assert_eq!(handlers, TypeHandlerStats::default());
+        assert_eq!(handlers.marker(), None);
+    }
+
+    /// A local-var base (`h := &TokensHandler{}; r.GET("/x", h.List)` in a
+    /// FUNCTION) names no type: the pre-pass leaves the ref alone (base `h`),
+    /// and `resolve_refs` binds it as at HEAD, through the repo-unique name.
+    #[test]
+    fn go_local_var_handler_is_untouched() {
+        let types = "package handlers\n\nimport \"github.com/gin-gonic/gin\"\n\n\
+                     type TokensHandler struct{}\n\n\
+                     func (h *TokensHandler) List(c *gin.Context) {}\n";
+        let routes = "package handlers\n\nimport \"github.com/gin-gonic/gin\"\n\n\
+                      func Register(r *gin.Engine) {\n\
+                      \th := &TokensHandler{}\n\
+                      \tr.GET(\"/x\", h.List)\n}\n";
+        let parses =
+            go_sources(&[("handlers/tokens.go", types), ("handlers/routes.go", routes)]);
+        let handler_refs: Vec<CallQualifier> = parses
+            .iter()
+            .flat_map(|p| &p.refs)
+            .filter(|r| r.category == edge_category::HANDLED_BY)
+            .map(|r| r.qualifier.clone())
+            .collect();
+        assert_eq!(
+            handler_refs,
+            vec![CallQualifier::Attribute { base: "h".to_string(), name: "List".to_string() }]
+        );
+        let GoPasses { g, handlers, .. } = build_go_passes(repo(), parses);
+        let list = gid(node_kind::METHOD, "handlers::tokens::TokensHandler::List");
+        let r = route_id(&g, "GET /x");
+        assert_eq!(handled_by(&g, r), vec![list]);
+        let (emitter, rule, ..) = handler_ev(&g, r, list);
+        assert_eq!(
+            (emitter.as_str(), rule.as_deref()),
+            ("graph:refs", Some("global_unique_method"))
+        );
+        assert_eq!(handlers, TypeHandlerStats::default());
     }
 
     // ---- CI.2b: implicit IMPLEMENTS through promotion -----------------------
