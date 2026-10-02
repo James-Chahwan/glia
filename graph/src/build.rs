@@ -93,8 +93,14 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// is HANDLED_BY that type's method, found through the package
 /// ([`GoPackages::bind_type_handlers`]) before the refs resolve;
 /// `[go-handlers]` prints what bound.
+///
+/// CI.6: a Go type alias declared in the repo (`type Chat_StreamServer =
+/// grpc.BidiStreamingServer[Msg, Reply]`, a parser `NavFact::TypeAlias`) is
+/// replaced by its target in every method signature before the
+/// implicit-IMPLEMENTS compare ([`resolve_go_alias_sigs`]); `[go-alias]`
+/// prints what it rewrote.
 pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
-    let GoPasses { g, split, implicit, packages, receivers, mounts, embeds, handlers } =
+    let GoPasses { g, split, implicit, packages, receivers, mounts, embeds, handlers, aliases } =
         build_go_passes(repo, parses);
     if let Some(line) = split.marker() {
         eprintln!("{line}");
@@ -123,6 +129,9 @@ pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Graph
     eprintln!("{}", go_types_marker(&g.nav));
     if let Some(line) = go_sigs_marker(&g.nav) {
         eprintln!("{line}");
+    }
+    if let Some(stats) = aliases {
+        eprintln!("{}", stats.marker());
     }
     Ok(g)
 }
@@ -190,6 +199,9 @@ struct GoPasses {
     embeds: GoEmbedStats,
     /// CI.4: the HANDLED_BY refs bound to a package type's method.
     handlers: TypeHandlerStats,
+    /// CI.6: the type aliases resolved in method signatures, `None` when no
+    /// file declared one.
+    aliases: Option<AliasStats>,
 }
 
 /// [`build_go`]'s passes, returning the stats its markers print.
@@ -224,6 +236,9 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
     let handlers = packages.bind_type_handlers(&mut g, &mut refs);
     resolve_refs(&mut g, &refs, &mut tally);
     let embeds = embed_binds.push(&mut g, &packages.promoted);
+    // CI.6: the signatures name an in-repo type alias by its target before
+    // CA.3b compares them (and CI.2b's promoted method sets read them).
+    let aliases = resolve_go_alias_sigs(&mut g, &packages);
     let mut implicit = emit_go_implicit_implements(&mut g, &packages);
     // CI.2b: a type-level edge's interface method the type does not declare
     // pairs with the METHOD its embed promotes, when a STRUCT declares it (a
@@ -240,7 +255,17 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
         stats.promoted_method_pairs = method_pairs;
     }
     tally.report();
-    GoPasses { g, split, implicit, packages: package_stats, receivers, mounts, embeds, handlers }
+    GoPasses {
+        g,
+        split,
+        implicit,
+        packages: package_stats,
+        receivers,
+        mounts,
+        embeds,
+        handlers,
+        aliases,
+    }
 }
 
 /// Build a per-repo TypeScript graph. TS import sources are raw strings
@@ -2608,8 +2633,9 @@ struct GoImplicitStats {
     /// set is not fully known.
     open: usize,
     /// CA.3b: name-covering pairs rejected because a method's signature, known
-    /// on both sides, differs from the interface's (a type alias is not
-    /// resolved, so `ID` vs `string` counts here too).
+    /// on both sides, differs from the interface's. An in-repo type alias is
+    /// resolved first (CI.6); a defined type (`type ID string`) is not its
+    /// underlying type, so `ID` vs `string` counts here.
     signature: usize,
     /// Pairs rejected by the reachability gate, neither side in a test file
     /// (a one-method interface).
@@ -2668,6 +2694,462 @@ impl GoImplicitStats {
     }
 }
 
+// ---- CI.6: Go type aliases in method signatures -----------------------------
+
+/// The longest alias-of-an-alias chain [`resolve_go_alias_sigs`] follows from
+/// a method signature. A longer chain, or a cycle (`type A = B; type B = A`,
+/// which Go rejects but a broken file can parse), leaves the alias name in
+/// the text.
+const GO_ALIAS_MAX_DEPTH: usize = 8;
+
+/// What [`resolve_go_alias_sigs`] did to one Go graph, for the `[go-alias]`
+/// marker.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AliasStats {
+    /// The qname-least package dir declaring an alias (`""` = the repository
+    /// root), so two repos' lines in one multi-repo build tell apart.
+    first: String,
+    /// `NavFact::TypeAlias` facts recorded by the graph's files.
+    aliases: usize,
+    /// Their distinct package dirs.
+    packages: usize,
+    /// METHOD signatures whose text changed.
+    sigs_rewritten: usize,
+    /// Of `sigs_rewritten`: the elements of an INTERFACE.
+    interface: usize,
+    /// Alias-name tokens left in place because their candidate aliases (the
+    /// package's own, those of the packages its file imports) expand to
+    /// different texts.
+    ambiguous: usize,
+    /// Alias-name tokens left in place because the text's own package
+    /// declares a STRUCT or INTERFACE of that name while every candidate
+    /// alias sits in another package: the qualifier the signature dropped
+    /// named that other package's type, or none did; the bare name is the
+    /// package's own type.
+    shadowed: usize,
+}
+
+impl AliasStats {
+    /// CI.6 fired_on: `[go-alias] <first>: aliases=A packages=P
+    /// sigs_rewritten=R (interface=I) ambiguous=X shadowed=S`, `<first>`
+    /// written `<root>` for the repository-root dir.
+    fn marker(&self) -> String {
+        let first = if self.first.is_empty() { "<root>" } else { self.first.as_str() };
+        format!(
+            "[go-alias] {first}: aliases={} packages={} sigs_rewritten={} (interface={}) \
+             ambiguous={} shadowed={}",
+            self.aliases,
+            self.packages,
+            self.sigs_rewritten,
+            self.interface,
+            self.ambiguous,
+            self.shadowed
+        )
+    }
+}
+
+/// CI.6: where a Go file names types ([`GoPackages::alias_scope`]): its own
+/// package dir, the in-repo package dirs it imports, and whether it is a
+/// `_test.go` file (an alias declared in a test file is visible only to the
+/// test files of its own package).
+pub(crate) struct AliasScope<'p> {
+    dir: &'p str,
+    imported: BTreeSet<&'p str>,
+    test: bool,
+}
+
+impl GoPackages {
+    /// CI.6: the [`AliasScope`] of file MODULE `file`: its package dir, every
+    /// dir an import of it binds ([`GoPackages::imported_dir`], the
+    /// repository-root package included, CI.3) and whether it is a test file.
+    /// `None` for a node that is not a Go file of this graph.
+    pub(crate) fn alias_scope(&self, g: &RepoGraph, file: NodeId) -> Option<AliasScope<'_>> {
+        let dir = self.dir_of.get(&file)?.as_str();
+        let imported = self
+            .import_path
+            .get(&file)
+            .into_iter()
+            .flat_map(|locals| locals.keys())
+            .filter_map(|local| self.imported_dir(g, file, local))
+            .collect();
+        Some(AliasScope { dir, imported, test: self.tests.contains(&file) })
+    }
+}
+
+/// One `type <name> = <shape>` of [`AliasTable`].
+struct AliasDef<'a> {
+    /// The file MODULE declaring it.
+    module: NodeId,
+    name: &'a str,
+    shape: &'a str,
+    /// Declared in a `_test.go` file.
+    test: bool,
+}
+
+/// CI.6: every Go type alias of a graph, by (package dir, name), plus what
+/// [`AliasResolver`] needs to scope a bare name.
+struct AliasTable<'a> {
+    /// (package dir, alias name) -> its declarations, sorted by module id (a
+    /// build-tag pair can declare one alias twice).
+    defs: BTreeMap<(&'a str, &'a str), Vec<AliasDef<'a>>>,
+    /// Every alias name: the cheap per-token pre-check.
+    names: BTreeSet<&'a str>,
+    /// (package dir, name) of every STRUCT / INTERFACE, for the shadowing
+    /// rule.
+    own_types: BTreeSet<(&'a str, &'a str)>,
+}
+
+impl<'a> AliasTable<'a> {
+    /// The table of `g`'s `NavFact::TypeAlias` facts; `None` when no file
+    /// recorded one.
+    fn build(g: &'a RepoGraph, packages: &'a GoPackages) -> Option<Self> {
+        let mut defs: BTreeMap<(&str, &str), Vec<AliasDef>> = BTreeMap::new();
+        for (module, facts) in &g.nav.nav_facts {
+            if g.nav.kind_by_id.get(module) != Some(&node_kind::MODULE) {
+                continue;
+            }
+            let Some(dir) = packages.dir_of.get(module) else {
+                continue;
+            };
+            for fact in facts {
+                if let NavFact::TypeAlias { name, shape } = fact {
+                    defs.entry((dir.as_str(), name.as_str())).or_default().push(AliasDef {
+                        module: *module,
+                        name: name.as_str(),
+                        shape: shape.as_str(),
+                        test: packages.tests.contains(module),
+                    });
+                }
+            }
+        }
+        if defs.is_empty() {
+            return None;
+        }
+        for list in defs.values_mut() {
+            list.sort_by_key(|d| d.module.0);
+        }
+        let names = defs.keys().map(|(_, name)| *name).collect();
+        let mut own_types = BTreeSet::new();
+        for (id, kind) in &g.nav.kind_by_id {
+            if *kind != node_kind::STRUCT && *kind != node_kind::INTERFACE {
+                continue;
+            }
+            let dir = packages.file_of(g, *id).and_then(|f| packages.dir_of.get(&f));
+            if let (Some(dir), Some(name)) = (dir, g.nav.name_by_id.get(id)) {
+                own_types.insert((dir.as_str(), name.as_str()));
+            }
+        }
+        Some(AliasTable { defs, names, own_types })
+    }
+
+    /// The `(aliases, packages, first)` of the marker.
+    fn counts(&self) -> (usize, usize, String) {
+        let dirs: BTreeSet<&str> = self.defs.keys().map(|(dir, _)| *dir).collect();
+        let first = dirs.first().map(|d| d.to_string()).unwrap_or_default();
+        (self.defs.values().map(Vec::len).sum(), dirs.len(), first)
+    }
+}
+
+/// A memoised alias expansion ([`AliasResolver::alias_text`]).
+enum AliasMemo {
+    /// The alias's target text, every in-repo alias it names expanded, and
+    /// the length of its longest alias chain (1 for a target naming none).
+    Done { text: String, height: usize },
+    /// The expansion reaches an alias cycle: it never resolves.
+    Cycle,
+}
+
+/// Why an alias did not expand.
+enum AliasFail {
+    /// Its expansion reaches an alias cycle.
+    Cycle,
+    /// Its chain is longer than the depth left ([`GO_ALIAS_MAX_DEPTH`]).
+    Deep,
+}
+
+/// CI.6: rewrites the in-repo Go type alias names of a signature text by
+/// their targets ([`resolve_go_alias_sigs`]).
+///
+/// Deterministic whatever order the texts come in: an alias's expansion is
+/// memoised only when it is the same from any start (a success, with its
+/// chain height, used only where that height fits the depth left; or a
+/// cycle, which no start resolves), never when it ran out of depth.
+struct AliasResolver<'a> {
+    g: &'a RepoGraph,
+    packages: &'a GoPackages,
+    table: AliasTable<'a>,
+    /// (declaring module, alias name) -> its expansion. Lookups only.
+    memo: HashMap<(NodeId, &'a str), AliasMemo>,
+    /// The aliases being expanded, innermost last.
+    visiting: Vec<(NodeId, &'a str)>,
+    ambiguous: usize,
+    shadowed: usize,
+}
+
+/// A Go identifier character, as the resolver cuts tokens (UTF-8 safe: a
+/// token ends on a char boundary).
+fn is_go_ident_char(c: char) -> bool {
+    c == '_' || c.is_alphanumeric()
+}
+
+/// The byte length of `text`'s leading `{ .. }`, through its matching `}`
+/// (the whole text when it never closes).
+fn brace_span(text: &str) -> usize {
+    let mut depth = 0usize;
+    for (i, c) in text.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return i + c.len_utf8();
+                }
+            }
+            _ => {}
+        }
+    }
+    text.len()
+}
+
+impl<'a> AliasResolver<'a> {
+    fn new(g: &'a RepoGraph, packages: &'a GoPackages, table: AliasTable<'a>) -> Self {
+        AliasResolver {
+            g,
+            packages,
+            table,
+            memo: HashMap::new(),
+            visiting: Vec::new(),
+            ambiguous: 0,
+            shadowed: 0,
+        }
+    }
+
+    /// Whether some token of `text` is an alias name.
+    fn names_any(&self, text: &str) -> bool {
+        text.split(|c: char| !is_go_ident_char(c)).any(|t| self.table.names.contains(t))
+    }
+
+    /// `text` with each alias name resolved in `scope` replaced by its
+    /// expanded target, in one left-to-right pass; the inserted text was
+    /// expanded in the alias's own scope and is not rescanned. A token
+    /// starting with a digit (an array length), `func` / `map` / `chan`, and
+    /// an inline `struct{..}` / `interface{..}` body (field and method names,
+    /// not types) are copied. With `strict` (an alias's own target) an
+    /// alias that cannot expand fails the whole text; without it (a method
+    /// signature) its name is copied. Also returns the longest alias chain
+    /// expanded (0 for none).
+    fn expand(
+        &mut self,
+        text: &str,
+        scope: &AliasScope<'a>,
+        budget: usize,
+        strict: bool,
+    ) -> Result<(String, usize), AliasFail> {
+        let mut out = String::with_capacity(text.len());
+        let mut height = 0usize;
+        let mut rest = text;
+        while let Some(c) = rest.chars().next() {
+            if !is_go_ident_char(c) {
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+                continue;
+            }
+            let end = rest
+                .char_indices()
+                .find(|&(_, c)| !is_go_ident_char(c))
+                .map_or(rest.len(), |(i, _)| i);
+            let (token, after) = rest.split_at(end);
+            rest = after;
+            if matches!(token, "struct" | "interface") && rest.starts_with('{') {
+                let body = brace_span(rest);
+                out.push_str(token);
+                out.push_str(&rest[..body]);
+                rest = &rest[body..];
+                continue;
+            }
+            if token.starts_with(|c: char| c.is_numeric())
+                || matches!(token, "func" | "map" | "chan")
+                || !self.table.names.contains(token)
+            {
+                out.push_str(token);
+                continue;
+            }
+            match self.resolve_token(token, scope, budget) {
+                Ok(Some((expanded, h))) => {
+                    out.push_str(&expanded);
+                    height = height.max(h);
+                }
+                Ok(None) => out.push_str(token),
+                Err(fail) if strict => return Err(fail),
+                Err(_) => out.push_str(token),
+            }
+        }
+        Ok((out, height))
+    }
+
+    /// The expansion of the alias name `token` read in `scope`, `None` when
+    /// it stays as written. Candidates: the aliases `token` of the scope's
+    /// package and of each package its file imports, a test file's alias
+    /// only for a test file of its own package. None -> stays. Every
+    /// candidate in another package while the scope's package declares a
+    /// type `token` -> stays (`shadowed`). Candidates expanding to different
+    /// texts -> stays (`ambiguous`); to one text (two packages generating one
+    /// alias) -> that text.
+    fn resolve_token(
+        &mut self,
+        token: &str,
+        scope: &AliasScope<'a>,
+        budget: usize,
+    ) -> Result<Option<(String, usize)>, AliasFail> {
+        let table = &self.table;
+        let mut cands: Vec<(NodeId, &'a str, &'a str)> = Vec::new();
+        let mut foreign_only = true;
+        let dirs = std::iter::once(scope.dir)
+            .chain(scope.imported.iter().copied().filter(|d| *d != scope.dir));
+        for dir in dirs {
+            let Some(defs) = table.defs.get(&(dir, token)) else {
+                continue;
+            };
+            for def in defs {
+                if def.test && !(scope.test && dir == scope.dir) {
+                    continue;
+                }
+                foreign_only &= dir != scope.dir;
+                cands.push((def.module, def.name, def.shape));
+            }
+        }
+        if cands.is_empty() {
+            return Ok(None);
+        }
+        if foreign_only && table.own_types.contains(&(scope.dir, token)) {
+            self.shadowed += 1;
+            return Ok(None);
+        }
+        let mut answer: Option<(String, usize)> = None;
+        let mut differ = false;
+        for cand in cands {
+            let (text, h) = self.alias_text(cand, budget)?;
+            match answer.as_mut() {
+                None => answer = Some((text, h)),
+                Some((seen, height)) if *seen == text => *height = (*height).max(h),
+                Some(_) => differ = true,
+            }
+        }
+        if differ {
+            self.ambiguous += 1;
+            return Ok(None);
+        }
+        Ok(answer)
+    }
+
+    /// One alias's expanded target and chain height, its target expanded in
+    /// the scope of the file declaring it with one level less of `budget`.
+    fn alias_text(
+        &mut self,
+        (module, name, shape): (NodeId, &'a str, &'a str),
+        budget: usize,
+    ) -> Result<(String, usize), AliasFail> {
+        let key = (module, name);
+        match self.memo.get(&key) {
+            Some(AliasMemo::Cycle) => return Err(AliasFail::Cycle),
+            Some(AliasMemo::Done { text, height }) if *height <= budget => {
+                return Ok((text.clone(), *height));
+            }
+            Some(AliasMemo::Done { .. }) => return Err(AliasFail::Deep),
+            None => {}
+        }
+        if self.visiting.contains(&key) {
+            return Err(AliasFail::Cycle);
+        }
+        if budget == 0 {
+            return Err(AliasFail::Deep);
+        }
+        let (g, packages) = (self.g, self.packages);
+        let Some(scope) = packages.alias_scope(g, module) else {
+            return Ok((shape.to_string(), 1));
+        };
+        self.visiting.push(key);
+        let res = self.expand(shape, &scope, budget - 1, true);
+        self.visiting.pop();
+        match res {
+            Ok((text, h)) => {
+                let height = h + 1;
+                self.memo.insert(key, AliasMemo::Done { text: text.clone(), height });
+                Ok((text, height))
+            }
+            Err(AliasFail::Cycle) => {
+                self.memo.insert(key, AliasMemo::Cycle);
+                Err(AliasFail::Cycle)
+            }
+            Err(AliasFail::Deep) => Err(AliasFail::Deep),
+        }
+    }
+}
+
+/// CI.6: replaces, in every METHOD signature of `g.nav.method_sigs` (CA.3a),
+/// each in-repo Go type alias the text names by the alias's target, so the
+/// implicit-IMPLEMENTS compare ([`emit_go_implicit_implements`], CA.3b) and
+/// CI.2b's promoted method sets read `(BidiStreamingServer[Msg,Reply])(error)`
+/// where the implementation wrote protoc-gen-go-grpc's back-compat alias
+/// `pb.Chat_StreamServer`.
+///
+/// Signatures dropped their package qualifiers, so a bare name is resolved
+/// through the scope of the file declaring the method ([`AliasScope`]: its
+/// package, its in-repo imports) by [`AliasResolver`]: the aliases of those
+/// packages named so, a package's own STRUCT / INTERFACE of that name
+/// shadowing an imported alias, two candidates kept only when they expand to
+/// one text, an alias of an alias expanded in the scope of its own file (to
+/// [`GO_ALIAS_MAX_DEPTH`]). An alias declared outside the repo or a generic
+/// one (never recorded) stays as written.
+///
+/// Methods are rewritten in NodeId order and each rewrite depends only on its
+/// own text and scope, so the result does not depend on the order. Entries are
+/// replaced, never added: `[go-sigs]` counts are unchanged. `method_sigs` is
+/// build-time only; nothing persisted changes but the edges the comparison
+/// admits. `None` when no file recorded an alias.
+fn resolve_go_alias_sigs(g: &mut RepoGraph, packages: &GoPackages) -> Option<AliasStats> {
+    let (rewrites, stats) = {
+        let table = AliasTable::build(g, packages)?;
+        let (aliases, dirs, first) = table.counts();
+        let mut stats = AliasStats { first, aliases, packages: dirs, ..AliasStats::default() };
+        let mut methods: Vec<NodeId> = g.nav.method_sigs.keys().copied().collect();
+        methods.sort_unstable_by_key(|id| id.0);
+        let mut resolver = AliasResolver::new(g, packages, table);
+        let mut rewrites: Vec<(NodeId, String)> = Vec::new();
+        for m in methods {
+            let Some(old) = g.nav.method_sigs.get(&m) else {
+                continue;
+            };
+            if !resolver.names_any(old) {
+                continue;
+            }
+            let Some(scope) = packages.file_of(g, m).and_then(|f| packages.alias_scope(g, f))
+            else {
+                continue;
+            };
+            let Ok((new, _)) = resolver.expand(old, &scope, GO_ALIAS_MAX_DEPTH, false) else {
+                continue;
+            };
+            if new == *old {
+                continue;
+            }
+            stats.sigs_rewritten += 1;
+            let parent = g.nav.parent_of.get(&m).and_then(|p| g.nav.kind_by_id.get(p));
+            if parent == Some(&node_kind::INTERFACE) {
+                stats.interface += 1;
+            }
+            rewrites.push((m, new));
+        }
+        stats.ambiguous = resolver.ambiguous;
+        stats.shadowed = resolver.shadowed;
+        (rewrites, stats)
+    };
+    for (m, new) in rewrites {
+        g.nav.method_sigs.insert(m, new);
+    }
+    Some(stats)
+}
+
 /// Where a method of a Go type's method set comes from
 /// ([`emit_go_implicit_implements`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2714,7 +3196,9 @@ struct ImplicitPair {
 ///
 /// * Signatures (every pair): each interface method's normalised signature
 ///   (`nav.method_sigs`, CA.3a; the predeclared `error`'s `Error` is
-///   `()(string)`) against the type's same-named method's. Both known and
+///   `()(string)`) against the type's same-named method's, both read after
+///   [`resolve_go_alias_sigs`] replaced each in-repo type alias by its
+///   target (CI.6). Both known and
 ///   different rejects the pair. All known and equal gives the edge EVIDENCE
 ///   rule `method_signature`; any unknown (a generic receiver, an element of
 ///   a generic interface) keeps today's name match, rule `method_set`.
@@ -5673,6 +6157,233 @@ mod tests {
             plain.as_ref().map(GoImplicitStats::promoted_marker).as_deref(),
             Some("[iface] go implicit promoted: pairs=0 (from_interface=0) method_pairs=0")
         );
+    }
+
+    // ---- CI.6: Go type aliases in method signatures -------------------------
+
+    const ALIAS_FIXTURE_FILES: [&str; 4] =
+        ["pb/chat_grpc.pb.go", "server/server.go", "server/compat.go", "store/store.go"];
+
+    /// Files of the bench fixture go-alias-signatures, parsed as the engine
+    /// does (go.mod `example.com/aliases`), in the order given.
+    fn alias_fixture(files: &[&str]) -> Vec<FileParse> {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.join("bench/substrate-gap/fixtures/go-alias-signatures"))
+            .expect("workspace root");
+        files
+            .iter()
+            .map(|rel| {
+                let src = std::fs::read_to_string(root.join(rel)).expect("fixture file");
+                let qname = rel.trim_end_matches(".go").replace('/', "::");
+                glia_parser_go::parse_file(&src, rel, &qname, "example.com/aliases", repo())
+                    .expect("parse")
+            })
+            .collect()
+    }
+
+    /// `build_go` with the alias pass's stats.
+    fn go_aliases(parses: Vec<FileParse>) -> (RepoGraph, Option<AliasStats>) {
+        let GoPasses { g, aliases, .. } = build_go_passes(repo(), parses);
+        (g, aliases)
+    }
+
+    fn sig<'g>(g: &'g RepoGraph, method: &str) -> Option<&'g str> {
+        g.nav.method_sigs.get(&gid(node_kind::METHOD, method)).map(String::as_str)
+    }
+
+    /// A method typed by protoc-gen-go-grpc's stream alias (`pb.Chat_StreamServer
+    /// = grpc.BidiStreamingServer[Msg, Reply]`, an alias of a generic declared
+    /// outside the repo) implements the interface written with the generic,
+    /// and so does one typed by an alias of that alias in another package;
+    /// a method typed by another stream alias (another instantiation) does
+    /// not.
+    #[test]
+    fn go_alias_stream_signature_implements() {
+        let parses = alias_fixture(&ALIAS_FIXTURE_FILES[..3]);
+        let g = build_go(repo(), parses).unwrap();
+        let chat = gid(node_kind::INTERFACE, "pb::chat_grpc.pb::ChatServer");
+        for ty in ["server::server::ChatService", "server::compat::ChatLegacy"] {
+            let ty = gid(node_kind::STRUCT, ty);
+            assert_eq!(implements_edge(&g, ty, chat), Some(Confidence::Medium));
+            assert_eq!(implements_rule(&g, ty, chat).as_deref(), Some("method_signature"));
+        }
+        let (stream, iface_stream) = (
+            gid(node_kind::METHOD, "server::server::ChatService::Stream"),
+            gid(node_kind::METHOD, "pb::chat_grpc.pb::ChatServer::Stream"),
+        );
+        assert_eq!(implements_edge(&g, stream, iface_stream), Some(Confidence::Medium));
+        assert_eq!(implements_rule(&g, stream, iface_stream).as_deref(), Some("same_name"));
+        let wrong = gid(node_kind::STRUCT, "server::server::WrongChat");
+        assert_eq!(implements_edge(&g, wrong, chat), None);
+        let wrong_stream = gid(node_kind::METHOD, "server::server::WrongChat::Stream");
+        assert_eq!(implements_edge(&g, wrong_stream, iface_stream), None);
+        let bidi = "(BidiStreamingServer[Msg,Reply])(error)";
+        assert_eq!(sig(&g, "server::server::ChatService::Stream"), Some(bidi));
+        assert_eq!(sig(&g, "server::compat::ChatLegacy::Stream"), Some(bidi));
+        assert_eq!(
+            sig(&g, "server::server::WrongChat::Stream"),
+            Some("(ServerStreamingServer[Reply])(error)")
+        );
+        assert_eq!(sig(&g, "pb::chat_grpc.pb::ChatServer::Stream"), Some(bidi), "unchanged");
+    }
+
+    /// Aliases of one package on either side of the compare: the
+    /// implementation writes `Key` for the interface's `string`, the
+    /// interface writes `RecordList` for the implementation's `[]*Record`.
+    /// An `int` parameter stays an `int`.
+    #[test]
+    fn go_alias_same_package_both_sides() {
+        let g = build_go(repo(), alias_fixture(&["store/store.go"])).unwrap();
+        let repo_i = gid(node_kind::INTERFACE, "store::store::Repo");
+        let mem = gid(node_kind::STRUCT, "store::store::memRepo");
+        assert_eq!(implements_edge(&g, mem, repo_i), Some(Confidence::Medium));
+        assert_eq!(implements_rule(&g, mem, repo_i).as_deref(), Some("method_signature"));
+        assert_eq!(implements_edge(&g, gid(node_kind::STRUCT, "store::store::badRepo"), repo_i), None);
+        assert_eq!(sig(&g, "store::store::Repo::List"), Some("()([]*Record)"));
+        assert_eq!(sig(&g, "store::store::memRepo::Get"), Some("(string)(*Record,error)"));
+        assert_eq!(sig(&g, "store::store::badRepo::Get"), Some("(int)(*Record,error)"));
+        assert_eq!(sig(&g, "store::store::badRepo::List"), Some("()([]*Record)"));
+    }
+
+    /// The quokka chat shape: a server embedding the generated Unimplemented
+    /// type (its `mustEmbed...` promoted, CI.2b) and overriding the stream
+    /// method with the alias-typed parameter implements the interface, and
+    /// its override pairs at method level.
+    #[test]
+    fn go_alias_promoted_override() {
+        let parses = alias_fixture(&ALIAS_FIXTURE_FILES[..2]);
+        let g = build_go(repo(), parses).unwrap();
+        let feed = gid(node_kind::INTERFACE, "pb::chat_grpc.pb::FeedServer");
+        let service = gid(node_kind::STRUCT, "server::server::FeedService");
+        assert_eq!(implements_edge(&g, service, feed), Some(Confidence::Medium));
+        assert_eq!(implements_rule(&g, service, feed).as_deref(), Some("method_signature"));
+        let (watch, iface_watch) = (
+            gid(node_kind::METHOD, "server::server::FeedService::Watch"),
+            gid(node_kind::METHOD, "pb::chat_grpc.pb::FeedServer::Watch"),
+        );
+        assert_eq!(implements_rule(&g, watch, iface_watch).as_deref(), Some("same_name"));
+        let unimplemented = gid(node_kind::STRUCT, "pb::chat_grpc.pb::UnimplementedFeedServer");
+        assert_eq!(implements_edge(&g, unimplemented, feed), Some(Confidence::Medium));
+    }
+
+    /// A bare name resolves through the method's package and its file's
+    /// in-repo imports: two imported aliases of one name with different
+    /// targets keep the name (`ambiguous`), with one target rewrite it; a
+    /// file importing neither keeps it; a package declaring a type of that
+    /// name keeps it (`shadowed`); an alias declared in a `_test.go` file is
+    /// seen by its package's test files only.
+    #[test]
+    fn go_alias_scope_ambiguity_and_shadowing() {
+        let parses = go_sources(&[
+            (
+                "a/a.go",
+                "package a\n\ntype S = int\n\ntype T = []byte\n\ntype A struct{}\n\n\
+                 func (A) Get(z Z) {}\n",
+            ),
+            ("a/x_test.go", "package a\n\ntype Z = float64\n"),
+            ("a/y_test.go", "package a\n\ntype Y struct{}\n\nfunc (Y) Get(z Z) {}\n"),
+            ("b/b.go", "package b\n\ntype S = string\n\ntype T = []byte\n"),
+            (
+                "u/u.go",
+                "package u\n\nimport (\n\t\"example.com/scope/a\"\n\t\"example.com/scope/b\"\n)\n\n\
+                 type U struct{}\n\nfunc (U) Get(x a.S) {}\n\nfunc (U) Put(x b.T) {}\n",
+            ),
+            ("n/n.go", "package n\n\ntype S int\n\ntype N struct{}\n\nfunc (N) Get(x S) {}\n"),
+            (
+                "c/c.go",
+                "package c\n\nimport \"example.com/scope/a\"\n\nvar _ a.A\n\n\
+                 type S struct{}\n\ntype C struct{}\n\nfunc (C) Get(x S) {}\n",
+            ),
+        ]);
+        let (g, stats) = go_aliases(parses);
+        assert_eq!(sig(&g, "u::u::U::Get"), Some("(S)()"), "a.S = int, b.S = string");
+        assert_eq!(sig(&g, "u::u::U::Put"), Some("([]byte)()"), "one target");
+        assert_eq!(sig(&g, "n::n::N::Get"), Some("(S)()"), "no import");
+        assert_eq!(sig(&g, "c::c::C::Get"), Some("(S)()"), "c's own S");
+        assert_eq!(sig(&g, "a::a::A::Get"), Some("(Z)()"), "a test file's alias");
+        assert_eq!(sig(&g, "a::y_test::Y::Get"), Some("(float64)()"));
+        assert_eq!(
+            stats.as_ref().map(AliasStats::marker).as_deref(),
+            Some(
+                "[go-alias] a: aliases=5 packages=2 sigs_rewritten=2 (interface=0) \
+                 ambiguous=1 shadowed=1"
+            )
+        );
+    }
+
+    /// An alias of an alias expands all the way (`C = []D`, `D = *E`); a
+    /// cycle (`A = B`, `B = A`) leaves the text as written; a chain longer
+    /// than GO_ALIAS_MAX_DEPTH stays too, while its shorter tail resolves,
+    /// whatever order the methods are visited in.
+    #[test]
+    fn go_alias_chain_and_cycle() {
+        let mut src = String::from(
+            "package k\n\ntype C = []D\n\ntype D = *E\n\ntype E struct{}\n\n\
+             type A = B\n\ntype B = A\n\ntype K struct{}\n\n\
+             func (K) Get(c C) {}\n\nfunc (K) Put(a A) {}\n\nfunc (K) Run(b B) {}\n",
+        );
+        for i in 0..9 {
+            src.push_str(&format!("\ntype L{i} = L{}\n", i + 1));
+        }
+        src.push_str("\ntype L9 = int\n");
+        for i in 0..10 {
+            src.push_str(&format!("\nfunc (K) M{i}(x L{i}) {{}}\n"));
+        }
+        let (g, stats) = go_aliases(go_sources(&[("k/k.go", &src)]));
+        assert_eq!(sig(&g, "k::k::K::Get"), Some("([]*E)()"));
+        assert_eq!(sig(&g, "k::k::K::Put"), Some("(A)()"));
+        assert_eq!(sig(&g, "k::k::K::Run"), Some("(B)()"));
+        // L<i> is a chain of 10 - i aliases: L2 (8) resolves, L1 (9) does not.
+        assert_eq!(sig(&g, "k::k::K::M0"), Some("(L0)()"));
+        assert_eq!(sig(&g, "k::k::K::M1"), Some("(L1)()"));
+        for i in 2..10 {
+            assert_eq!(sig(&g, &format!("k::k::K::M{i}")), Some("(int)()"), "L{i}");
+        }
+        assert_eq!(stats.map(|s| s.sigs_rewritten), Some(9));
+    }
+
+    /// The `[go-alias]` marker: the fixture's counts, `<root>` for the
+    /// repository-root package, and no line for a graph with no alias.
+    #[test]
+    fn go_alias_marker_shape() {
+        let (_, stats) = go_aliases(alias_fixture(&ALIAS_FIXTURE_FILES));
+        assert_eq!(
+            stats.as_ref().map(AliasStats::marker).as_deref(),
+            Some(
+                "[go-alias] pb: aliases=5 packages=3 sigs_rewritten=7 (interface=1) \
+                 ambiguous=0 shadowed=0"
+            )
+        );
+        let (_, root) = go_aliases(go_sources(&[("main.go", "package main\n\ntype ID = string\n")]));
+        assert_eq!(
+            root.as_ref().map(AliasStats::marker).as_deref(),
+            Some(
+                "[go-alias] <root>: aliases=1 packages=1 sigs_rewritten=0 (interface=0) \
+                 ambiguous=0 shadowed=0"
+            )
+        );
+        let (_, none) = go_aliases(implements_fixture());
+        assert_eq!(none, None);
+    }
+
+    /// The fixture built twice in one order gives one edge Vec, and built in
+    /// reversed file order the same edge set and the same signatures.
+    #[test]
+    fn go_alias_is_deterministic() {
+        let first = build_go(repo(), alias_fixture(&ALIAS_FIXTURE_FILES)).unwrap();
+        let second = build_go(repo(), alias_fixture(&ALIAS_FIXTURE_FILES)).unwrap();
+        assert_eq!(first.edges, second.edges);
+        let mut reversed_files = ALIAS_FIXTURE_FILES;
+        reversed_files.reverse();
+        let reversed = build_go(repo(), alias_fixture(&reversed_files)).unwrap();
+        let sorted = |g: &RepoGraph| {
+            let mut edges = g.edges.clone();
+            edges.sort_by_key(|e| (e.from.0, e.to.0, e.category.0));
+            edges
+        };
+        assert_eq!(sorted(&first), sorted(&reversed));
+        assert_eq!(first.nav.method_sigs, reversed.nav.method_sigs);
     }
 
     /// An import of a directory binds its dir-named file, else its first

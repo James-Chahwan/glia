@@ -1403,7 +1403,9 @@ pub struct CodeNav {
     /// the same text. A method on a generic receiver, or an element of an
     /// interface with type parameters, records nothing (unknown). Filled
     /// through [`CodeNav::record_method_sig`] (Go, CA.3a); read by the Go
-    /// implicit-IMPLEMENTS pass (CA.3b).
+    /// implicit-IMPLEMENTS pass (CA.3b), after the Go build has replaced each
+    /// in-repo type alias a text names by its target ([`NavFact::TypeAlias`],
+    /// CI.6).
     ///
     /// Build-time only, like `field_types`: never mirrored into the store.
     pub method_sigs: HashMap<NodeId, String>,
@@ -1463,6 +1465,14 @@ pub enum NavFact {
     /// `key` (`apiPrefix`); the endpoint fold (CH.5b) prefixes a URL built
     /// through it with that key's configured value.
     UrlPrefixKey { key: String },
+    /// Go (CI.6): this MODULE declares the type alias `type <name> =
+    /// <target>`; `shape` is the target's CA.3a type shape (package
+    /// qualifiers dropped, the text [`CodeNav::method_sigs`] entries are
+    /// written in). Not recorded for a generic alias, a target with a parse
+    /// error, or an identity re-export whose shape is its own name. Read by
+    /// the Go build to resolve aliases in method signatures before the
+    /// implicit-IMPLEMENTS signature compare.
+    TypeAlias { name: String, shape: String },
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,

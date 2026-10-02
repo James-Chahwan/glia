@@ -447,8 +447,13 @@ fn collect_types(
 ) {
     let mut cursor = type_decl.walk();
     for spec in type_decl.named_children(&mut cursor) {
-        if spec.kind() != "type_spec" {
-            continue;
+        match spec.kind() {
+            "type_spec" => {}
+            "type_alias" => {
+                record_type_alias(spec, src, module_id, acc);
+                continue;
+            }
+            _ => continue,
         }
         let Some(name_node) = spec.child_by_field_name("name") else {
             continue;
@@ -463,8 +468,9 @@ fn collect_types(
         let kind = match type_node.kind() {
             "struct_type" => node_kind::STRUCT,
             "interface_type" => node_kind::INTERFACE,
-            // Type aliases (`type Foo = Bar`) and non-struct/non-interface
-            // types skipped for v0.4.3b.
+            // Non-struct / non-interface defined types (`type ID string`)
+            // mint no node. A type alias (`type Foo = Bar`) is a sibling
+            // `type_alias` node, recorded above as a nav fact (CI.6).
             _ => continue,
         };
 
@@ -488,6 +494,42 @@ fn collect_types(
         }
         type_ids.insert(name, id);
     }
+}
+
+/// CI.6: a top-level `type <name> = <target>` (tree-sitter-go's `type_alias`,
+/// a sibling of `type_spec` in a `type_declaration`, grouped or not) becomes
+/// a [`NavFact::TypeAlias`] on the file MODULE, `shape` the target's CA.3a
+/// [`type_shape`], so the graph can rewrite the alias name in method
+/// signatures once every file of the repo is merged (an alias is often
+/// declared in another package than the method naming it). It mints no node
+/// and no edge.
+///
+/// Recorded nothing for: an empty name; a generic alias (`type Set[T
+/// comparable] = map[T]bool`, Go 1.24), whose parameters would leak into the
+/// text; a target missing or holding a parse error; an identity re-export
+/// (`type Status = status.Status`), whose shape is its own name, so a
+/// rewrite would change nothing.
+fn record_type_alias(spec: TsNode, src: &[u8], module_id: NodeId, acc: &mut Acc) {
+    let Some(name) = spec.child_by_field_name("name").map(|n| text_of(n, src)) else {
+        return;
+    };
+    if name.is_empty() || spec.child_by_field_name("type_parameters").is_some() {
+        return;
+    }
+    let Some(target) = spec.child_by_field_name("type").filter(|t| !t.has_error()) else {
+        return;
+    };
+    let shape = type_shape(target, src);
+    if shape.is_empty() || shape == name {
+        return;
+    }
+    acc.nav.record_fact(
+        module_id,
+        NavFact::TypeAlias {
+            name: name.to_string(),
+            shape,
+        },
+    );
 }
 
 /// LD.7b: the body of one `interface_type`. tree-sitter-go 0.25 names its
@@ -7886,6 +7928,65 @@ func (p *Plain) Close() error { return nil }
             sigs_of(&parse),
             pairs(&[("app::Closer::Close", "()(error)"), ("app::Plain::Close", "()(error)")])
         );
+    }
+
+    /// CI.6: each top-level type alias, grouped or not, is a `TypeAlias` nav
+    /// fact on the file MODULE, in source order, its shape the target's CA.3a
+    /// type shape (qualifiers dropped). An identity re-export (the shape is
+    /// the alias's own name) and a generic alias record nothing; no alias is
+    /// a node.
+    #[test]
+    fn go_type_aliases_are_recorded() {
+        let source = r#"package app
+
+import (
+    "google.golang.org/grpc"
+
+    pb "example.com/app/pb"
+)
+
+type Chat_StreamServer = grpc.BidiStreamingServer[Msg, Reply]
+
+type Key = string
+
+type Legacy = pb.Chat_StreamServer
+
+type Status = pb.Status
+
+type Set[T comparable] = map[T]bool
+
+type (
+    Grouped = []*Msg
+    Real    struct{}
+)
+
+type Msg struct{}
+"#;
+        let parse = parse_file(source, "app/app.go", "app", "example.com/app", repo()).unwrap();
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "app");
+        let alias = |name: &str, shape: &str| NavFact::TypeAlias {
+            name: name.into(),
+            shape: shape.into(),
+        };
+        assert_eq!(
+            parse.nav.nav_facts[&module],
+            vec![
+                alias("Chat_StreamServer", "BidiStreamingServer[Msg,Reply]"),
+                alias("Key", "string"),
+                alias("Legacy", "Chat_StreamServer"),
+                alias("Grouped", "[]*Msg"),
+            ]
+        );
+        for q in ["app::Real", "app::Msg"] {
+            let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, q);
+            assert!(parse.nodes.iter().any(|n| n.id == id), "{q} is a STRUCT");
+        }
+        for name in ["Chat_StreamServer", "Key", "Set", "Legacy", "Status", "Grouped"] {
+            assert!(
+                !parse.nav.name_by_id.values().any(|n| n == name),
+                "the alias {name} is not a node"
+            );
+        }
     }
 
     // ---- CB.11: routers held on a struct field ----

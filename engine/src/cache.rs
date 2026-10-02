@@ -960,6 +960,10 @@ mod tests {
             NavFact::UrlPrefixKey {
                 key: "apiPrefix".into(),
             },
+            NavFact::TypeAlias {
+                name: "Chat_StreamServer".into(),
+                shape: "BidiStreamingServer[Msg,Reply]".into(),
+            },
         ]
     }
 

@@ -1,0 +1,75 @@
+{
+  "framework": "go-alias-signatures",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "impl",
+  "cells": [
+    "go/impl"
+  ],
+  "note": "CI-6: Go type aliases resolved in method signatures before the implicit-IMPLEMENTS signature compare (CA.3b). A method typed by protoc-gen-go-grpc's stream alias (`pb.Chat_StreamServer = grpc.BidiStreamingServer[Msg, Reply]`, an alias to an out-of-module generic) implements the interface written with the generic; an alias of an alias in another package (server::compat LegacyStream) and same-package aliases on either side (store Key = string, RecordList = []*Record) resolve too. FeedService is the quokka chat shape: an embedded pb.UnimplementedFeedServer (CI.2b promotion) plus an alias-typed override. Baseline HEAD f8a46c0: only the generated UnimplementedFeedServer -> FeedServer pair; `[iface] go implicit filtered: signature=5`.",
+  "expect_edges": [
+    {
+      "from": "server::server::ChatService",
+      "to": "pb::chat_grpc.pb::ChatServer",
+      "category": "IMPLEMENTS",
+      "note": "Stream takes pb.Chat_StreamServer, the interface grpc.BidiStreamingServer[Msg, Reply]"
+    },
+    {
+      "from": "server::server::ChatService::Stream",
+      "to": "pb::chat_grpc.pb::ChatServer::Stream",
+      "category": "IMPLEMENTS",
+      "note": "method-level pair"
+    },
+    {
+      "from": "server::compat::ChatLegacy",
+      "to": "pb::chat_grpc.pb::ChatServer",
+      "category": "IMPLEMENTS",
+      "note": "alias of an alias, across packages"
+    },
+    {
+      "from": "server::server::FeedService",
+      "to": "pb::chat_grpc.pb::FeedServer",
+      "category": "IMPLEMENTS",
+      "note": "promoted mustEmbed (CI.2b) + alias-typed Watch"
+    },
+    {
+      "from": "server::server::FeedService::Watch",
+      "to": "pb::chat_grpc.pb::FeedServer::Watch",
+      "category": "IMPLEMENTS",
+      "note": "method-level pair"
+    },
+    {
+      "from": "store::store::memRepo",
+      "to": "store::store::Repo",
+      "category": "IMPLEMENTS",
+      "note": "same-package aliases on both sides"
+    },
+    {
+      "from": "pb::chat_grpc.pb::UnimplementedFeedServer",
+      "to": "pb::chat_grpc.pb::FeedServer",
+      "category": "IMPLEMENTS",
+      "note": "CONTROL: generated, no alias, HEAD"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "server::server::WrongChat",
+      "to": "pb::chat_grpc.pb::ChatServer",
+      "category": "IMPLEMENTS",
+      "note": "Stream takes pb.Feed_WatchServer = grpc.ServerStreamingServer[Reply], another type"
+    },
+    {
+      "from": "server::server::WrongChat::Stream",
+      "to": "pb::chat_grpc.pb::ChatServer::Stream",
+      "category": "IMPLEMENTS"
+    },
+    {
+      "from": "store::store::badRepo",
+      "to": "store::store::Repo",
+      "category": "IMPLEMENTS",
+      "note": "Get(int): no alias makes it Get(string)"
+    }
+  ]
+}
