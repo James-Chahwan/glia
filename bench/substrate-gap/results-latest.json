@@ -2716,10 +2716,11 @@
     },
     "go/impl": {
       "extract": [
-        6,
-        6
+        7,
+        7
       ],
       "fixtures": [
+        "fixtures/go-alias-signatures",
         "fixtures/go-embedded-implements",
         "fixtures/go-iface-embed",
         "fixtures/go-iface-scope",
@@ -2727,8 +2728,8 @@
         "fixtures/go-root-package-imports"
       ],
       "forbid": [
-        9,
-        9
+        12,
+        12
       ],
       "level": "full",
       "literal": [
@@ -2739,8 +2740,8 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        18,
-        18
+        25,
+        25
       ],
       "via": "type"
     },
@@ -8625,6 +8626,8 @@
     "fixtures/csharp-namespace-qnames",
     "fixtures/cypher-label-precision",
     "fixtures/dart-bare-calls",
+    "fixtures/dart-dio-base-path",
+    "fixtures/dart-dio-cascade-client",
     "fixtures/dart-dio-generic-calls",
     "fixtures/dart-extensions-imports",
     "fixtures/dart-members",
@@ -8735,6 +8738,7 @@
     "fixtures/ts-endpoint-receiver-gate",
     "fixtures/ts-enum-members",
     "fixtures/ts-inherited-calls",
+    "fixtures/ts-method-by-value",
     "fixtures/ts-route-per-method",
     "fixtures/ts-signal-state-fields",
     "fixtures/ts-url-builder-args",

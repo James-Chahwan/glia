@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 342,
+  "fixtures": 346,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -391,6 +391,21 @@
         "CALLS": 1.0
       }
     },
+    "dart-dio-base-path": {
+      "framework": "dart-dio-base-path",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
+    "dart-dio-cascade-client": {
+      "framework": "dart-dio-cascade-client",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
     "dart-dio-generic-calls": {
       "framework": "dart-dio-generic-calls",
       "language": "dart",
@@ -587,6 +602,13 @@
       "language": "go",
       "per_category": {
         "ACCESSES_DATA": 1.0
+      }
+    },
+    "go-alias-signatures": {
+      "framework": "go-alias-signatures",
+      "language": "go",
+      "per_category": {
+        "IMPLEMENTS": 1.0
       }
     },
     "go-calls": {
@@ -1939,6 +1961,14 @@
       "per_category": {
         "CALLS": 1.0,
         "IMPLEMENTS": 1.0
+      }
+    },
+    "ts-method-by-value": {
+      "framework": "ts-method-by-value",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "USES": 1.0
       }
     },
     "ts-nest-di": {

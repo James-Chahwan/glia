@@ -146,7 +146,7 @@ PER-LANGUAGE  across 30 mechanisms:
 
 COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 243 full, 34 partial, 69 none, 136 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 189
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 192
 
 ## Cells routed via an alternative mechanism
 
