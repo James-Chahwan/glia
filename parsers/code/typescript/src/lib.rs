@@ -226,6 +226,16 @@ struct Acc {
     abstract_stats: AbstractStats,
     /// CH.2: the `[ts-state]` counters.
     state_fields: StateFieldStats,
+    /// CH.3b: reads of an API-prefix-named member ([`API_PREFIX_NAMES`]:
+    /// `this.apiPrefix`, `cfg.basePath`, `const { apiPrefix } = cfg`), as
+    /// `(from, name as written, start byte)`. The call walk pops siblings
+    /// right to left; `url_prefix_facts` puts each scope's reads back in
+    /// source order.
+    prefix_reads: Vec<(NodeId, String, usize)>,
+    /// CH.3b: each fn / METHOD this file defines (a method, a function field,
+    /// a function declaration or a function-valued `const`) -> its parameter
+    /// count. The callables `url_prefix_facts` closes over.
+    callable_params: HashMap<NodeId, usize>,
 }
 
 /// CH.2: what one file's call-initialised class fields gave the graph (the
@@ -372,6 +382,14 @@ struct EndpointCandidate {
     /// read through (`buildApiUrl` for `this.urls.buildApiUrl('x/y')`).
     /// Serialised as `"wrapper"` on ENDPOINT_HIT, after `template`.
     wrapper: Option<String>,
+    /// CH.3b: the field `f` the builder was reached through when its callee
+    /// is `this.<f>.<m>` (`urls` for `this.urls.buildApiUrl('x/y')`), set
+    /// only beside `wrapper`. `resolve_intra_file` looks `f` up in `class`'s
+    /// field types and writes the type as `"wrapper_of"` on ENDPOINT_HIT.
+    wrapper_recv: Option<String>,
+    /// CH.3b: the class whose method / field walk found the call (the
+    /// `enclosing_class` of `collect_calls_in`); None outside a class.
+    class: Option<NodeId>,
     /// CH.3a: which arm of `classify_at` read the argument (the
     /// `[ts-endpoint-args]` counters).
     read: ArgRead,
@@ -407,6 +425,8 @@ struct PathArg {
     confidence: Confidence,
     /// CH.3a: see `EndpointCandidate::wrapper`.
     wrapper: Option<String>,
+    /// CH.3b: see `EndpointCandidate::wrapper_recv`.
+    wrapper_recv: Option<String>,
     /// CH.3a: see `EndpointCandidate::read`.
     read: ArgRead,
 }
@@ -420,6 +440,7 @@ impl PathArg {
             template: None,
             confidence,
             wrapper: None,
+            wrapper_recv: None,
             read: ArgRead::Direct,
         }
     }
@@ -988,6 +1009,8 @@ fn visit_function_field(
         Some(class_id),
     );
 
+    record_callable(method_id, value, acc);
+
     let before = acc.unresolved.len() + acc.endpoints.len();
     if let Some(body) = value.child_by_field_name("body") {
         collect_calls_in(body, src, method_id, Some(class_id), acc);
@@ -1484,6 +1507,8 @@ fn visit_method(
         Some(class_id),
     );
 
+    record_callable(method_id, n, acc);
+
     // A13.15: `constructor(@InjectRepository(User) private repo: …)`.
     if let Some(params) = n.child_by_field_name("parameters") {
         let mut pc = params.walk();
@@ -1763,6 +1788,7 @@ fn emit_function(
         node_kind::FUNCTION,
         Some(module_id),
     );
+    record_callable(func_id, n, acc);
 
     if let Some(body) = n.child_by_field_name("body") {
         collect_calls_in(body, src, func_id, None, acc);
@@ -1803,6 +1829,7 @@ fn emit_function_value(
         node_kind::FUNCTION,
         Some(module_id),
     );
+    record_callable(func_id, value, acc);
 
     if let Some(body) = value.child_by_field_name("body") {
         collect_calls_in(body, src, func_id, None, acc);
@@ -1945,11 +1972,17 @@ fn collect_calls_in(
                     line: line_at(node),
                 });
             }
-            try_detect_endpoint(node, src, from, acc);
+            try_detect_endpoint(node, src, from, enclosing_class, acc);
             try_detect_typeorm_access(node, src, from, acc);
         }
         if kind == "member_expression" {
             record_member_ref(node, src, from, acc);
+        }
+        if matches!(
+            kind,
+            "member_expression" | "shorthand_property_identifier_pattern" | "pair_pattern"
+        ) {
+            record_prefix_read(node, src, from, acc);
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
@@ -1985,6 +2018,187 @@ fn record_member_ref(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     }
 }
 
+/// CH.3b: member names that name a URL's API prefix, compared against
+/// [`prefix_name_key`]'s form (`apiPrefix`, `API_PREFIX`, `api_base_path`,
+/// `#basePath` all match). A bare `prefix` does not: it names log, cache and
+/// i18n prefixes as often as URLs.
+const API_PREFIX_NAMES: &[&str] = &[
+    "apiprefix",
+    "apibasepath",
+    "apipath",
+    "apiroot",
+    "basepath",
+    "pathprefix",
+    "urlprefix",
+    "routeprefix",
+];
+
+/// CH.3b: a member name ASCII-lowercased with `_` / `-` and a leading `#`
+/// removed, the form [`API_PREFIX_NAMES`] holds and two spellings of one key
+/// compare equal in.
+fn prefix_name_key(name: &str) -> String {
+    name.strip_prefix('#')
+        .unwrap_or(name)
+        .chars()
+        .filter(|c| !matches!(c, '_' | '-'))
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// CH.3b: record a read of an API-prefix-named member by `from`: a
+/// `member_expression`'s property, whatever its object (`this.apiPrefix`,
+/// `cfg.apiPrefix`, `environment.apiPrefix`, `this.#basePath`), or a
+/// destructured one (`const { apiPrefix } = cfg`, `const { apiPrefix: p } =
+/// cfg`). An assignment's target is a write, not a read. Which callable keys
+/// on one is decided by `url_prefix_facts` once the file's intra-file calls
+/// are resolved.
+fn record_prefix_read(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    let name = match node.kind() {
+        "member_expression" => {
+            if let Some(parent) = node.parent()
+                && matches!(
+                    parent.kind(),
+                    "assignment_expression" | "augmented_assignment_expression"
+                )
+                && parent.child_by_field_name("left") == Some(node)
+            {
+                return;
+            }
+            match node.child_by_field_name("property") {
+                Some(p)
+                    if matches!(
+                        p.kind(),
+                        "property_identifier" | "private_property_identifier"
+                    ) =>
+                {
+                    text(p, src)
+                }
+                _ => return,
+            }
+        }
+        "shorthand_property_identifier_pattern" => text(node, src),
+        "pair_pattern" => match node.child_by_field_name("key") {
+            Some(k) if k.kind() == "property_identifier" => text(k, src),
+            _ => return,
+        },
+        _ => return,
+    };
+    if !API_PREFIX_NAMES.contains(&prefix_name_key(name).as_str()) {
+        return;
+    }
+    acc.prefix_reads
+        .push((from, name.to_string(), node.start_byte()));
+}
+
+/// CH.3b: a callable's parameter count: the named, non-comment children of
+/// its `parameters`, or 1 for an arrow's bare `parameter` (`x => …`).
+fn param_count(func: TsNode) -> usize {
+    if let Some(params) = func.child_by_field_name("parameters") {
+        let mut cursor = params.walk();
+        params
+            .named_children(&mut cursor)
+            .filter(|c| c.kind() != "comment")
+            .count()
+    } else {
+        usize::from(func.child_by_field_name("parameter").is_some())
+    }
+}
+
+/// CH.3b: record `id`'s parameter count. A name declared twice (a getter and
+/// its setter share one METHOD id) keeps the larger count.
+fn record_callable(id: NodeId, func: TsNode, acc: &mut Acc) {
+    let n = param_count(func);
+    let slot = acc.callable_params.entry(id).or_insert(0);
+    *slot = (*slot).max(n);
+}
+
+/// CH.3b: what `url_prefix_facts` found in one file.
+#[derive(Default, Debug, PartialEq, Eq)]
+struct UrlPrefixScan {
+    /// `(callable, key as first spelled)`, by callable NodeId.
+    facts: Vec<(NodeId, String)>,
+    /// Callables (>= 1 parameter) whose closure reads two or more keys.
+    ambiguous: usize,
+}
+
+/// CH.3b: the callables of one file that build a URL under an API prefix.
+/// For each callable `X` with at least one parameter, in NodeId order: the
+/// prefix-named members `X` reads (in source order), then those its
+/// same-file callees read, then their callees' (two deep, over the
+/// intra-file CALLS `edges` between `params`' callables, in edge order, each
+/// callable once). Exactly one distinct key (by
+/// [`prefix_name_key`]) is a fact, under the first spelling met; two or more
+/// are ambiguous and record nothing (fails closed). quokka's
+/// `buildApiUrl(path) { return buildApiUrlFrom(this.config, path); }` keys on
+/// `apiPrefix` through `buildApiUrlFrom`'s `rawConfig.apiPrefix`, while
+/// `buildApiRootUrl`, whose callees read no prefix, keys on nothing.
+fn url_prefix_facts(
+    params: &HashMap<NodeId, usize>,
+    reads: &[(NodeId, String, usize)],
+    edges: &[Edge],
+) -> UrlPrefixScan {
+    let mut callees: std::collections::BTreeMap<u64, Vec<NodeId>> = Default::default();
+    for e in edges {
+        if e.category == edge_category::CALLS
+            && params.contains_key(&e.from)
+            && params.contains_key(&e.to)
+        {
+            let list = callees.entry(e.from.0).or_default();
+            if !list.contains(&e.to) {
+                list.push(e.to);
+            }
+        }
+    }
+    let mut read_by: std::collections::BTreeMap<u64, Vec<(usize, &str)>> = Default::default();
+    for (from, name, at) in reads {
+        read_by.entry(from.0).or_default().push((*at, name));
+    }
+    for scope_reads in read_by.values_mut() {
+        scope_reads.sort_unstable();
+    }
+    let mut ids: Vec<(NodeId, usize)> = params.iter().map(|(&id, &n)| (id, n)).collect();
+    ids.sort_by_key(|(id, _)| id.0);
+
+    let mut scan = UrlPrefixScan::default();
+    for (x, n) in ids {
+        if n == 0 {
+            continue;
+        }
+        // (normalised key, first spelling), in closure order.
+        let mut keys: Vec<(String, &str)> = Vec::new();
+        let mut visited: HashSet<NodeId> = HashSet::from([x]);
+        let mut level = vec![x];
+        for depth in 0..=2 {
+            for scope in &level {
+                for &(_, name) in read_by.get(&scope.0).into_iter().flatten() {
+                    let norm = prefix_name_key(name);
+                    if !keys.iter().any(|(k, _)| *k == norm) {
+                        keys.push((norm, name));
+                    }
+                }
+            }
+            if depth == 2 {
+                break;
+            }
+            let mut next = Vec::new();
+            for scope in &level {
+                for &c in callees.get(&scope.0).into_iter().flatten() {
+                    if visited.insert(c) {
+                        next.push(c);
+                    }
+                }
+            }
+            level = next;
+        }
+        match keys.as_slice() {
+            [] => {}
+            [(_, key)] => scan.facts.push((x, (*key).to_string())),
+            _ => scan.ambiguous += 1,
+        }
+    }
+    scan
+}
+
 // ============================================================================
 // Endpoint extraction (v0.4.4)
 // ============================================================================
@@ -2016,7 +2230,16 @@ fn record_member_ref(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
 
 const HTTP_METHOD_PROPS: &[&str] = &["get", "post", "put", "delete", "patch", "head", "options"];
 
-fn try_detect_endpoint(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+/// `enclosing_class` is the class whose method or field the call sits in
+/// (`collect_calls_in`'s), stored on the candidate so a builder read names
+/// its receiver's declared type (CH.3b `wrapper_of`).
+fn try_detect_endpoint(
+    call: TsNode,
+    src: &[u8],
+    from: NodeId,
+    enclosing_class: Option<NodeId>,
+    acc: &mut Acc,
+) {
     let func = match call.child_by_field_name("function") {
         Some(f) => f,
         None => return,
@@ -2041,7 +2264,7 @@ fn try_detect_endpoint(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
             }
             "GET".to_string()
         });
-        push_endpoint(call, from, method, arg, None, acc);
+        push_endpoint(call, from, enclosing_class, method, arg, None, acc);
         return;
     }
 
@@ -2094,6 +2317,7 @@ fn try_detect_endpoint(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     push_endpoint(
         call,
         from,
+        enclosing_class,
         method_lower.to_uppercase(),
         arg,
         requires_alias,
@@ -2104,6 +2328,7 @@ fn try_detect_endpoint(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
 fn push_endpoint(
     call: TsNode,
     from: NodeId,
+    class: Option<NodeId>,
     method: String,
     arg: PathArg,
     requires_import_alias: Option<String>,
@@ -2115,6 +2340,7 @@ fn push_endpoint(
         template,
         confidence,
         wrapper,
+        wrapper_recv,
         read,
     } = arg;
     // A3.3: the single funnel for every client-call shape, so host + query
@@ -2139,6 +2365,8 @@ fn push_endpoint(
         raw_path,
         template,
         wrapper,
+        wrapper_recv,
+        class,
         read,
     });
 }
@@ -2250,8 +2478,35 @@ fn builder_literal(call: TsNode, src: &[u8]) -> Option<PathArg> {
     };
     read.confidence = Confidence::Weak;
     read.wrapper = Some(wrapper.to_string());
+    read.wrapper_recv = this_field_receiver(call, src).map(str::to_string);
     read.read = ArgRead::Wrapper;
     Some(read)
+}
+
+/// CH.3b: `f` for a call whose callee is `this.<f>.<m>` (`urls` for
+/// `this.urls.buildApiUrl('x')`, `#urls` for `this.#urls.build('x')`), when
+/// that `this` is the enclosing class's instance ([`this_class`]: a
+/// `function` callback rebinds it). The class's field types then name the
+/// builder's declared type.
+fn this_field_receiver<'a>(call: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    let callee = call.child_by_field_name("function")?;
+    if callee.kind() != "member_expression" {
+        return None;
+    }
+    let inner = callee.child_by_field_name("object")?;
+    if inner.kind() != "member_expression" || inner.child_by_field_name("object")?.kind() != "this"
+    {
+        return None;
+    }
+    let field = inner.child_by_field_name("property")?;
+    if !matches!(
+        field.kind(),
+        "property_identifier" | "private_property_identifier"
+    ) {
+        return None;
+    }
+    this_class(inner)?;
+    Some(text(field, src))
 }
 
 /// The one argument of `call` when it is a string or template literal and
@@ -2679,6 +2934,7 @@ fn classify_template(template: TsNode, src: &[u8]) -> PathArg {
             Confidence::Strong
         },
         wrapper: None,
+        wrapper_recv: None,
         read: ArgRead::Direct,
     }
 }
@@ -2754,7 +3010,12 @@ fn downgrade(c: Confidence) -> Confidence {
 ///
 /// `wrapper` (CH.3a) follows `template`, skipped the same way: only a path
 /// read through a single-argument URL builder names it.
-fn endpoint_hit_cell(cand: &EndpointCandidate) -> Cell {
+///
+/// `wrapper_of` (CH.3b) follows `wrapper`, skipped the same way: the declared
+/// type of the field a builder was reached through (`this.<f>.<m>(…)`), when
+/// the enclosing class records one (a constructor parameter property, an
+/// annotated field or an `inject(T)` field).
+fn endpoint_hit_cell(cand: &EndpointCandidate, wrapper_of: Option<&str>) -> Cell {
     #[derive(serde::Serialize)]
     struct Payload<'a> {
         method: &'a str,
@@ -2769,6 +3030,8 @@ fn endpoint_hit_cell(cand: &EndpointCandidate) -> Cell {
         template: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         wrapper: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wrapper_of: Option<&'a str>,
     }
     let conf_str = match cand.confidence {
         Confidence::Strong => "strong",
@@ -2785,6 +3048,7 @@ fn endpoint_hit_cell(cand: &EndpointCandidate) -> Cell {
         raw: cand.raw_path.as_deref(),
         template: cand.template.as_deref(),
         wrapper: cand.wrapper.as_deref(),
+        wrapper_of,
     })
     .unwrap_or_else(|_| String::from("{}"));
     Cell {
@@ -3211,6 +3475,26 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
         }
     }
 
+    // CH.3b: `out.edges` now holds every intra-file CALLS, so each callable's
+    // same-file call closure is known: the URL builders keyed on exactly one
+    // API-prefix member get a build-time UrlPrefixKey fact.
+    let prefix = url_prefix_facts(&acc.callable_params, &acc.prefix_reads, &out.edges);
+    for (callable, key) in &prefix.facts {
+        out.nav
+            .record_fact(*callable, NavFact::UrlPrefixKey { key: key.clone() });
+    }
+    if !prefix.facts.is_empty() {
+        let keys: std::collections::BTreeSet<&str> =
+            prefix.facts.iter().map(|(_, k)| k.as_str()).collect();
+        eprintln!(
+            "[ts-url-prefix] builders={} ambiguous={} keys={} file={}",
+            prefix.facts.len(),
+            prefix.ambiguous,
+            keys.into_iter().collect::<Vec<_>>().join(","),
+            acc.file_rel
+        );
+    }
+
     // Endpoint emission. Build the import-alias set from `out.imports` so
     // shape-2 candidates (`axios.get(url)`) can be filtered to only those
     // whose base is a real module-level binding.
@@ -3303,7 +3587,13 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
         // builder keeps ONE definition of the qname shape.
         let qname = endpoint::endpoint_qname(&cand.method, &cand.path);
         let endpoint_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ENDPOINT, &qname);
-        let cell = endpoint_hit_cell(&cand);
+        // CH.3b: the builder's receiver type, from the class's field types
+        // (the A7.1 loop above has recorded its `inject(T)` fields).
+        let wrapper_of = cand
+            .class
+            .zip(cand.wrapper_recv.as_deref())
+            .and_then(|(c, f)| out.nav.field_types.get(&c)?.get(f).cloned());
+        let cell = endpoint_hit_cell(&cand, wrapper_of.as_deref());
         out.nodes.push(Node {
             id: endpoint_id,
             repo,
@@ -4726,6 +5016,323 @@ export class GeoService {
         let gated = "export function f(axios: any) { const u = '/a/b'; axios.get(u); }\n";
         let (.., stats) = parse_file_stats(gated, "src/g.ts", "src::g", repo()).unwrap();
         assert_eq!(stats, EndpointArgStats::default());
+    }
+
+    /// CH.3b: the build-time facts `parse` records for the node `kind` /
+    /// `qname` (empty when none).
+    fn facts_of(parse: &FileParse, kind: glia_core::NodeKindId, qname: &str) -> Vec<NavFact> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
+        parse.nav.nav_facts.get(&id).cloned().unwrap_or_default()
+    }
+
+    fn prefix_key(key: &str) -> Vec<NavFact> {
+        vec![NavFact::UrlPrefixKey { key: key.into() }]
+    }
+
+    /// CH.3b (a): quokka's api-url-builder.service.ts reduced. `buildApiUrl`
+    /// reads no prefix itself but calls the same-file `buildApiUrlFrom`,
+    /// which reads `config.apiPrefix`: both key on `apiPrefix`.
+    /// `buildApiRootUrl`'s callees read none, and `this.config.apiBaseUrl` is
+    /// no prefix name: no fact, so the fold leaves `healthz` alone.
+    #[test]
+    fn builder_through_same_file_function_gets_the_key() {
+        let src = "\
+import { Injectable } from '@angular/core';
+
+export interface Cfg { apiBaseUrl: string; apiPrefix: string; }
+
+@Injectable({ providedIn: 'root' })
+export class ApiUrlBuilderService {
+    private readonly config: Cfg = { apiBaseUrl: 'http://localhost:8080', apiPrefix: '/api' };
+
+    buildApiUrl(path: string): string {
+        return buildApiUrlFrom(this.config, path);
+    }
+
+    buildApiRootUrl(path: string): string {
+        const rootPath = `/${stripLeadingSlash(path)}`;
+        return new URL(rootPath, ensureTrailingSlash(this.config.apiBaseUrl)).toString();
+    }
+}
+
+export function buildApiUrlFrom(config: Partial<Cfg>, path: string): string {
+    const prefix = normalizeApiPrefix(config.apiPrefix || '/api');
+    return `${prefix}/${stripLeadingSlash(path)}`;
+}
+
+function normalizeApiPrefix(raw: string): string {
+    return raw.trim();
+}
+
+function stripLeadingSlash(value: string): string {
+    return value.replace(/^\\/+/, '');
+}
+
+function ensureTrailingSlash(value: string): string {
+    return value.endsWith('/') ? value : `${value}/`;
+}
+";
+        let parse = parse_file(src, "src/api-url-builder.service.ts", "src::urls", repo()).unwrap();
+        let m = |name: &str| facts_of(&parse, node_kind::METHOD, &format!("src::urls::ApiUrlBuilderService::{name}"));
+        let f = |name: &str| facts_of(&parse, node_kind::FUNCTION, &format!("src::urls::{name}"));
+        assert_eq!(m("buildApiUrl"), prefix_key("apiPrefix"), "through buildApiUrlFrom");
+        assert_eq!(f("buildApiUrlFrom"), prefix_key("apiPrefix"), "its own read");
+        assert_eq!(m("buildApiRootUrl"), [], "reads apiBaseUrl only");
+        for helper in ["normalizeApiPrefix", "stripLeadingSlash", "ensureTrailingSlash"] {
+            assert_eq!(f(helper), [], "{helper} reads no prefix member");
+        }
+        // The facts are build-time only: no node, edge or cell changes.
+        assert!(
+            parse.nodes.iter().all(|n| n.cells.iter().all(|c| match &c.payload {
+                CellPayload::Json(s) | CellPayload::Text(s) => !s.contains("UrlPrefixKey"),
+                _ => true,
+            }))
+        );
+    }
+
+    /// CH.3b (b): a direct read keys the callable, whatever the object or
+    /// spelling (`this.apiPrefix`, `env.API_PREFIX`, a destructured
+    /// `{ apiPrefix }` or `{ basePath: base }`, `this.#basePath`, an arrow
+    /// field's bare parameter counts as one); a zero-parameter callable
+    /// builds no URL from a path and gets none; a read three calls deep is
+    /// past the closure.
+    #[test]
+    fn direct_member_read() {
+        let src = "\
+declare const env: { API_PREFIX: string };
+
+export class Urls {
+    readonly apiPrefix = '/api';
+    #basePath = '/v2';
+
+    buildWsUrl(p: string): string {
+        return `${this.apiPrefix}/${p}`;
+    }
+
+    logUrls(): void {
+        console.info(this.apiPrefix);
+    }
+
+    fromEnv(p: string): string {
+        return env.API_PREFIX + p;
+    }
+
+    fromCfg(cfg: { apiPrefix: string }, p: string): string {
+        const { apiPrefix } = cfg;
+        return apiPrefix + p;
+    }
+
+    fromPair(cfg: { basePath: string }, p: string): string {
+        const { basePath: base } = cfg;
+        return base + p;
+    }
+
+    onPath = p => this.#basePath + p;
+}
+
+export function deep(p: string): string { return d1(p); }
+function d1(p: string): string { return d2(p); }
+function d2(p: string): string { return d3(p); }
+function d3(p: string): string { return cfg.apiPrefix + p; }
+declare const cfg: { apiPrefix: string };
+";
+        let parse = parse_file(src, "src/urls.ts", "src::urls", repo()).unwrap();
+        let m = |name: &str| facts_of(&parse, node_kind::METHOD, &format!("src::urls::Urls::{name}"));
+        let f = |name: &str| facts_of(&parse, node_kind::FUNCTION, &format!("src::urls::{name}"));
+        assert_eq!(m("buildWsUrl"), prefix_key("apiPrefix"));
+        assert_eq!(m("logUrls"), [], "no parameter: not a URL builder");
+        assert_eq!(m("fromEnv"), prefix_key("API_PREFIX"), "spelling as written");
+        assert_eq!(m("fromCfg"), prefix_key("apiPrefix"), "a destructured read");
+        assert_eq!(m("fromPair"), prefix_key("basePath"), "a renamed destructured read");
+        assert_eq!(m("onPath"), prefix_key("#basePath"), "an arrow field, one bare parameter");
+        assert_eq!(f("d3"), prefix_key("apiPrefix"));
+        assert_eq!(f("d2"), prefix_key("apiPrefix"), "one call deep");
+        assert_eq!(f("d1"), prefix_key("apiPrefix"), "two calls deep");
+        assert_eq!(f("deep"), [], "three calls deep is past the closure");
+    }
+
+    /// CH.3b (c): two distinct keys in one closure fail closed; two
+    /// spellings of one key are one key, under the first spelling met.
+    #[test]
+    fn two_keys_is_ambiguous() {
+        let src = "\
+export class Urls {
+    readonly apiPrefix = '/api';
+    readonly basePath = '/base';
+    readonly API_PREFIX = '/api';
+
+    build(p: string): string {
+        return `${this.apiPrefix}${this.basePath}/${p}`;
+    }
+
+    viaHelper(p: string): string {
+        return this.apiPrefix + helper(p);
+    }
+
+    sameKeyTwice(p: string): string {
+        return this.apiPrefix + this.API_PREFIX + p;
+    }
+}
+
+function helper(p: string): string {
+    return cfg.basePath + p;
+}
+declare const cfg: { basePath: string };
+";
+        let parse = parse_file(src, "src/urls.ts", "src::urls", repo()).unwrap();
+        let m = |name: &str| facts_of(&parse, node_kind::METHOD, &format!("src::urls::Urls::{name}"));
+        assert_eq!(m("build"), [], "apiPrefix + basePath: ambiguous");
+        assert_eq!(m("viaHelper"), [], "a callee's second key is ambiguous too");
+        assert_eq!(m("sameKeyTwice"), prefix_key("apiPrefix"), "one key, first spelling");
+        assert_eq!(
+            facts_of(&parse, node_kind::FUNCTION, "src::urls::helper"),
+            prefix_key("basePath")
+        );
+        let scan = url_prefix_facts(&HashMap::new(), &[], &[]);
+        assert_eq!(scan, UrlPrefixScan::default());
+    }
+
+    /// CH.3b (d): a builder-read ENDPOINT_HIT names the builder's receiver
+    /// type after `wrapper`: a constructor parameter property, an `inject(T)`
+    /// field, or through a zero-argument URL method's `return`. An untyped
+    /// receiver (`any`) or a `function` callback's `this` names none.
+    #[test]
+    fn wrapper_of_names_the_receiver_type() {
+        let payload = |parse: &FileParse, http: &str, path: &str| -> String {
+            parse
+                .nodes
+                .iter()
+                .filter(|n| n.id == endpoint_id(repo(), http, path))
+                .flat_map(|n| n.cells.iter())
+                .find_map(|c| match (&c.payload, c.kind == cell_type::ENDPOINT_HIT) {
+                    (CellPayload::Json(s), true) => Some(s.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no ENDPOINT_HIT on {http} {path}"))
+        };
+        let ctor = "\
+import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { ApiUrlBuilderService } from './api-url-builder.service';
+
+@Injectable({ providedIn: 'root' })
+export class FriendService {
+    constructor(private readonly http: HttpClient, private readonly apiUrlBuilder: ApiUrlBuilderService) {}
+
+    list() {
+        return this.http.get(this.apiUrlBuilder.buildApiUrl('protected/friends'));
+    }
+
+    checkSession() {
+        return this.http.get(this.sessionUrl());
+    }
+
+    later() {
+        setTimeout(function () {
+            this.http.get(this.apiUrlBuilder.buildApiUrl('protected/later/x'));
+        });
+    }
+
+    private sessionUrl(): string {
+        return this.apiUrlBuilder.buildApiUrl('protected/user/profile');
+    }
+}
+";
+        let parse = parse_file(ctor, "src/friend.service.ts", "src::friend", repo()).unwrap();
+        let hit = payload(&parse, "GET", "/protected/friends");
+        assert!(
+            hit.ends_with(
+                r#""raw":"protected/friends","wrapper":"buildApiUrl","wrapper_of":"ApiUrlBuilderService"}"#
+            ),
+            "wrapper_of follows wrapper: {hit}"
+        );
+        let p = endpoint_payloads(&parse, endpoint_id(repo(), "GET", "/protected/user/profile"));
+        assert_eq!(p[0]["wrapper"], "buildApiUrl");
+        assert_eq!(p[0]["wrapper_of"], "ApiUrlBuilderService", "through the URL method");
+        let p = endpoint_payloads(&parse, endpoint_id(repo(), "GET", "/protected/later/x"));
+        assert_eq!(p[0]["wrapper"], "buildApiUrl");
+        assert!(p[0].get("wrapper_of").is_none(), "a `function` rebinds `this`: {}", p[0]);
+
+        let injected = "\
+import { Injectable, inject } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+import { ApiUrlBuilderService } from './api-url-builder.service';
+
+@Injectable({ providedIn: 'root' })
+export class FriendService {
+    private readonly http = inject(HttpClient);
+    private readonly apiUrlBuilder = inject(ApiUrlBuilderService);
+
+    list() {
+        return this.http.get(this.apiUrlBuilder.buildApiUrl('protected/friends'));
+    }
+}
+";
+        let parse = parse_file(injected, "src/friend.service.ts", "src::friend", repo()).unwrap();
+        let p = endpoint_payloads(&parse, endpoint_id(repo(), "GET", "/protected/friends"));
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0]["wrapper"], "buildApiUrl");
+        assert_eq!(p[0]["wrapper_of"], "ApiUrlBuilderService", "an inject(T) field");
+
+        let untyped = "\
+export class FriendService {
+    constructor(private readonly http: any, private readonly api: any) {}
+    list() {
+        return this.http.get(this.api.buildApiUrl('protected/friends'));
+    }
+}
+";
+        let parse = parse_file(untyped, "src/friend.service.ts", "src::friend", repo()).unwrap();
+        let hit = payload(&parse, "GET", "/protected/friends");
+        assert!(hit.ends_with(r#""wrapper":"buildApiUrl"}"#), "no wrapper_of: {hit}");
+    }
+
+    /// CH.3b (e): prefix-like names that are not API prefixes (`cachePrefix`,
+    /// a bare `prefix`, `apiBaseUrl`), and a write to `apiPrefix`, key
+    /// nothing.
+    #[test]
+    fn unrelated_prefix_names_ignored() {
+        let src = "\
+export class Store {
+    readonly cachePrefix = 'c:';
+    readonly prefix = 'p:';
+    apiPrefix = '/api';
+    readonly apiBaseUrl = 'http://localhost';
+
+    key(id: string): string {
+        return this.cachePrefix + this.prefix + id;
+    }
+
+    origin(p: string): string {
+        return this.apiBaseUrl + p;
+    }
+
+    setPrefix(p: string): void {
+        this.apiPrefix = p;
+    }
+}
+";
+        let parse = parse_file(src, "src/store.ts", "src::store", repo()).unwrap();
+        assert!(
+            parse
+                .nav
+                .nav_facts
+                .values()
+                .flatten()
+                .all(|f| !matches!(f, NavFact::UrlPrefixKey { .. })),
+            "{:?}",
+            parse.nav.nav_facts
+        );
+        assert!(
+            ["cachePrefix", "prefix", "apiBaseUrl", "logPrefix", "i18nPrefix"]
+                .iter()
+                .all(|n| !API_PREFIX_NAMES.contains(&prefix_name_key(n).as_str()))
+        );
+        assert!(
+            ["apiPrefix", "API_PREFIX", "api_base_path", "#basePath", "api-root"]
+                .iter()
+                .all(|n| API_PREFIX_NAMES.contains(&prefix_name_key(n).as_str()))
+        );
     }
 
     /// LB.5 — a relative and a slashed call to one path are ONE ENDPOINT id

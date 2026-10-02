@@ -957,6 +957,9 @@ mod tests {
                 value: "${…}://${…}/api".into(),
             },
             NavFact::AbstractMethod,
+            NavFact::UrlPrefixKey {
+                key: "apiPrefix".into(),
+            },
         ]
     }
 

@@ -1458,6 +1458,11 @@ pub enum NavFact {
     /// crate's `emit_abstract_implements` pairs a subclass method of the same
     /// name with it as a method-level IMPLEMENTS.
     AbstractMethod,
+    /// TypeScript (CH.3b): this callable (>= 1 parameter) reads, itself or
+    /// through same-file callees two deep, exactly one API-prefix-named member
+    /// `key` (`apiPrefix`); the endpoint fold (CH.5b) prefixes a URL built
+    /// through it with that key's configured value.
+    UrlPrefixKey { key: String },
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,
