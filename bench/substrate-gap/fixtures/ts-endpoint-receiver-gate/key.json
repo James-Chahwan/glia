@@ -1,0 +1,21 @@
+{
+  "framework": "ts-endpoint-receiver-gate",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "CH-3 (precision): `this.<field>.<verb>(<non-literal>)` mints no ENDPOINT when the field's type is known and is not an HTTP client: a `new Map()` / `new Set()` / annotated field, an `inject(T)` field or a constructor parameter property of an in-repo service. An HttpClient field, an unknown type and every literal argument keep today's behaviour. Kina a448fb3: 13 of its 15 `<unresolved>` CALLS are Map / Set / store / service receivers (drafts.patch, trades.get, timers.get / delete ...); quokka a77d4cb: 6 (typingTimers, typingUsers, onlineUsers, membersByPublicId, desiredRooms). Baseline (HEAD 5fc42bb, leap wheel): GET / PATCH / DELETE <unresolved> ENDPOINTs with CALLS from open / save / dismiss.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET <unresolved>", "note": "TradesApi.fetchRaw's HttpClient call with a parameter URL is still a client call"},
+    {"kind": "ENDPOINT", "name": "GET /api/trades/${…}", "exact": true, "note": "the service's own literal call (regression guard)"}
+  ],
+  "expect_edges": [
+    {"from": "TradesApi/fetchRaw", "to": "GET <unresolved>", "category": "CALLS", "note": "HttpClient receiver keeps its ENDPOINT"},
+    {"from": "TradePage/open", "to": "TradesApi/get", "category": "CALLS", "note": "the receiver-typed call still binds (A6.2a)"},
+    {"from": "TradePage/save", "to": "TradesApi/patch", "category": "CALLS", "note": "inject() field type binds the receiver (A7.1)"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "PATCH <unresolved>", "note": "this.drafts.patch(id, ...) on an inject(TradesApi) field"},
+    {"kind": "ENDPOINT", "name": "DELETE <unresolved>", "note": "this.timers.delete / this.selected.delete on a Map / Set"},
+    {"from": "src/trade.page/TradePage/open", "to": "endpoint:GET:<unresolved>", "category": "CALLS", "note": "this.trades.get(id) on a constructor-typed service"},
+    {"from": "src/trade.page/TradePage/dismiss", "to": "endpoint:GET:<unresolved>", "category": "CALLS", "note": "this.timers.get(id) on a new Map()"}
+  ]
+}

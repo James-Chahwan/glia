@@ -45,9 +45,10 @@ pub fn parse_file(
 /// [`parse_file`], plus the file's CG.1 function-field counters (the
 /// `[ts-fields]` marker's numbers), its CH.1 abstract-class counters (the
 /// `[ts-abstract]` marker's numbers), its CH.2 call-initialised field
-/// counters (the `[ts-state]` marker's numbers) and its CH.3a URL-argument
-/// counters (the `[ts-endpoint-args]` marker's numbers), which the tests read
-/// back.
+/// counters (the `[ts-state]` marker's numbers), its CH.3c receiver-gate
+/// counters (the `[ts-endpoint-gate]` marker's numbers) and its CH.3a
+/// URL-argument counters (the `[ts-endpoint-args]` marker's numbers), which
+/// the tests read back.
 fn parse_file_stats(
     source: &str,
     file_rel_path: &str,
@@ -59,6 +60,7 @@ fn parse_file_stats(
         FnFieldStats,
         AbstractStats,
         StateFieldStats,
+        ReceiverGateStats,
         EndpointArgStats,
     ),
     ParseError,
@@ -138,6 +140,10 @@ fn parse_file_stats(
             ab.classes, ab.methods
         );
     }
+    // CH.3c: `this.<field>.<verb>(<unreadable>)` on a known non-HTTP field
+    // type mints nothing; before the `[ts-endpoint-args]` count, which counts
+    // only what becomes an ENDPOINT.
+    let gate = gate_non_http_receivers(&mut acc);
     // CH.3a: HTTP call-site arguments read through a builder, a URL method, a
     // `const` local or a readonly field / getter, per file.
     let ea = endpoint_arg_stats(&acc);
@@ -149,7 +155,7 @@ fn parse_file_stats(
         );
     }
 
-    resolve_intra_file(acc).map(|parse| (parse, ff, ab, sf, ea))
+    resolve_intra_file(acc).map(|parse| (parse, ff, ab, sf, gate, ea))
 }
 
 /// CH.3a: count the file's HTTP call sites by the arm that read their URL
@@ -236,6 +242,12 @@ struct Acc {
     /// a function declaration or a function-valued `const`) -> its parameter
     /// count. The callables `url_prefix_facts` closes over.
     callable_params: HashMap<NodeId, usize>,
+    /// CH.3c: `(class, field) -> constructor leaf name` of each unannotated
+    /// field initialised by `new X(…)` (`timers = new Map<string, number>()`
+    /// -> `Map`, `bus = new rx.Subject()` -> `Subject`). Parser-local: read
+    /// only by the receiver gate, so A6.2a's receiver binding through
+    /// `CodeNav::field_types` is unchanged.
+    field_new_types: HashMap<(NodeId, String), String>,
 }
 
 /// CH.2: what one file's call-initialised class fields gave the graph (the
@@ -366,6 +378,10 @@ struct EndpointCandidate {
     /// import alias (shape 2: `axios.get(url)`). None = always emit (shape 1
     /// `this.x.method()` and shape 3 `fetch()`).
     requires_import_alias: Option<String>,
+    /// CH.3c: the field `x` of a shape-1 call `this.x.method(…)`; None for
+    /// shapes 2 and 3. [`gate_non_http_receivers`] looks it up in `class`'s
+    /// field types.
+    receiver_field: Option<String>,
     /// A3.3: the call-site literal `path` was normalised from, set only when
     /// `normalise_client_path` or LB.5's leading-`/` canonicalisation actually
     /// changed it. Serialised as `"raw"` on ENDPOINT_HIT.
@@ -876,6 +892,20 @@ fn visit_field(field: TsNode, src: &[u8], module_id: NodeId, class_id: NodeId, a
     let Some(value) = field.child_by_field_name("value") else {
         return;
     };
+    // CH.3c: an unannotated `x = new Map<…>()` / `x = new rx.Subject()` field
+    // holds a value of the constructed type: the receiver gate's input.
+    if value.kind() == "new_expression" {
+        if annotated.is_none()
+            && let Some(name) = field_name
+            && let Some(ctor) = value.child_by_field_name("constructor")
+            && matches!(ctor.kind(), "identifier" | "member_expression")
+            && let Some(type_name) = heritage_type_name(ctor, src)
+        {
+            acc.field_new_types
+                .insert((class_id, name.to_string()), type_name.to_string());
+        }
+        return;
+    }
     if value.kind() != "call_expression" {
         return;
     }
@@ -2230,6 +2260,123 @@ fn url_prefix_facts(
 
 const HTTP_METHOD_PROPS: &[&str] = &["get", "post", "put", "delete", "patch", "head", "options"];
 
+/// CH.3c: what a client call's callee is reached through.
+enum CallBase {
+    /// Shape 3, `fetch(…)`: no receiver.
+    Fetch,
+    /// Shape 1, `this.<field>.<verb>(…)`: the field.
+    ThisField(String),
+    /// Shape 2, `<alias>.<verb>(…)`: emits only if `alias` is a module-level
+    /// import alias.
+    Alias(String),
+}
+
+/// CH.3c: the declared / constructed / injected types a `this.<field>`
+/// receiver of a client HTTP call may hold: Angular's `HttpClient` /
+/// `HttpHandler` (and the pre-4.3 `Http`), NestJS's `HttpService`, axios,
+/// got and ky instances. A type ending in `HttpClient` or `HttpService` counts
+/// too ([`is_http_client_type`]). An interface-typed client (`HttpLike`) gains
+/// a row here, never a per-repo rule.
+const HTTP_CLIENT_TYPES: &[&str] = &[
+    "HttpClient",
+    "HttpService",
+    "HttpHandler",
+    "Http",
+    "AxiosInstance",
+    "AxiosStatic",
+    "Axios",
+    "Got",
+    "KyInstance",
+    "Ky",
+];
+
+/// CH.3c: `t` (a simple type name) is an HTTP client type.
+fn is_http_client_type(t: &str) -> bool {
+    HTTP_CLIENT_TYPES.contains(&t) || t.ends_with("HttpClient") || t.ends_with("HttpService")
+}
+
+/// CH.3c: what the receiver gate dropped in one file (the
+/// `[ts-endpoint-gate]` marker).
+#[derive(Default, Clone, PartialEq, Eq, Debug)]
+struct ReceiverGateStats {
+    /// `<unresolved>` shape-1 candidates dropped.
+    dropped: usize,
+    /// Dropped candidates by receiver type; a BTreeMap so the marker is stable.
+    by_type: std::collections::BTreeMap<String, usize>,
+}
+
+/// CH.3c: drop each shape-1 candidate `this.<field>.<verb>(<arg>)` whose
+/// path stayed `<unresolved>` and whose `<field>` has a known type of the
+/// enclosing class that is not an HTTP client: a Map / Set / store / in-repo
+/// service verb call (`this.timers.get(id)`, `this.drafts.patch(id, {…})`) is
+/// no client HTTP call, and the A6.2a receiver pass binds the real callee
+/// through the same field type. The type is the one `CodeNav::field_types`
+/// holds once A7.1 has run — an `inject(T)` field's `T` whose callee passes
+/// the `inject` import gate (recorded later, in `resolve_intra_file`, so
+/// re-derived here from the same candidates), else an annotated field or a
+/// constructor parameter (A6.2b) — else a `new X(…)` initializer's
+/// ([`Acc::field_new_types`]). An unknown type keeps the candidate (fails
+/// open), as does every read path (a literal on any receiver is a real call
+/// through an in-repo wrapper) and every shape-2 / shape-3 call. Runs before
+/// [`endpoint_arg_stats`], so `[ts-endpoint-args]` counts only what becomes
+/// an ENDPOINT.
+fn gate_non_http_receivers(acc: &mut Acc) -> ReceiverGateStats {
+    let inject_bound = inject_import_bindings(&acc.imports);
+    let injected: HashMap<(NodeId, &str), &str> = acc
+        .inject_fn_candidates
+        .iter()
+        .filter(|c| inject_bound.contains(c.callee.as_str()))
+        .filter_map(|c| {
+            let (field, ty) = c.field_type.as_ref()?;
+            Some(((c.class_id, field.as_str()), ty.as_str()))
+        })
+        .collect();
+    let mut stats = ReceiverGateStats::default();
+    let mut kept = Vec::with_capacity(acc.endpoints.len());
+    for cand in std::mem::take(&mut acc.endpoints) {
+        let receiver_type = match (cand.class, cand.receiver_field.as_deref()) {
+            (Some(class), Some(field)) if cand.path == UNRESOLVED_PATH => injected
+                .get(&(class, field))
+                .copied()
+                .or_else(|| {
+                    acc.nav
+                        .field_types
+                        .get(&class)
+                        .and_then(|m| m.get(field))
+                        .map(String::as_str)
+                })
+                .or_else(|| {
+                    acc.field_new_types
+                        .get(&(class, field.to_string()))
+                        .map(String::as_str)
+                }),
+            _ => None,
+        };
+        match receiver_type {
+            Some(ty) if !is_http_client_type(ty) => {
+                stats.dropped += 1;
+                *stats.by_type.entry(ty.to_string()).or_default() += 1;
+            }
+            _ => kept.push(cand),
+        }
+    }
+    acc.endpoints = kept;
+    if stats.dropped > 0 {
+        let types: Vec<String> = stats
+            .by_type
+            .iter()
+            .map(|(t, k)| format!("{t}:{k}"))
+            .collect();
+        eprintln!(
+            "[ts-endpoint-gate] dropped non-HTTP receivers={} (types={}) file={}",
+            stats.dropped,
+            types.join(","),
+            acc.file_rel
+        );
+    }
+    stats
+}
+
 /// `enclosing_class` is the class whose method or field the call sits in
 /// (`collect_calls_in`'s), stored on the candidate so a builder read names
 /// its receiver's declared type (CH.3b `wrapper_of`).
@@ -2264,7 +2411,15 @@ fn try_detect_endpoint(
             }
             "GET".to_string()
         });
-        push_endpoint(call, from, enclosing_class, method, arg, None, acc);
+        push_endpoint(
+            call,
+            from,
+            enclosing_class,
+            method,
+            arg,
+            CallBase::Fetch,
+            acc,
+        );
         return;
     }
 
@@ -2286,8 +2441,9 @@ fn try_detect_endpoint(
     };
 
     // Shape 1: this.<x>.<method>(...) — object is itself a member_expression
-    // whose object is `this`.
-    let requires_alias = match object.kind() {
+    // whose object is `this`. CH.3c: `<x>` rides on the candidate for the
+    // receiver gate.
+    let base = match object.kind() {
         "member_expression" => {
             let inner_obj = match object.child_by_field_name("object") {
                 Some(o) => o,
@@ -2296,12 +2452,15 @@ fn try_detect_endpoint(
             if inner_obj.kind() != "this" {
                 return;
             }
-            None
+            let Some(field) = object.child_by_field_name("property") else {
+                return;
+            };
+            CallBase::ThisField(text(field, src).to_string())
         }
         // Shape 2: <alias>.<method>(...) — object is a plain identifier that
         // must be a module-level import alias. Validation happens in
         // resolve_intra_file once all imports are known.
-        "identifier" => Some(text(object, src).to_string()),
+        "identifier" => CallBase::Alias(text(object, src).to_string()),
         _ => return,
     };
 
@@ -2320,7 +2479,7 @@ fn try_detect_endpoint(
         enclosing_class,
         method_lower.to_uppercase(),
         arg,
-        requires_alias,
+        base,
         acc,
     );
 }
@@ -2331,10 +2490,15 @@ fn push_endpoint(
     class: Option<NodeId>,
     method: String,
     arg: PathArg,
-    requires_import_alias: Option<String>,
+    base: CallBase,
     acc: &mut Acc,
 ) {
     let start = call.start_position();
+    let (requires_import_alias, receiver_field) = match base {
+        CallBase::Fetch => (None, None),
+        CallBase::ThisField(field) => (None, Some(field)),
+        CallBase::Alias(alias) => (Some(alias), None),
+    };
     let PathArg {
         path,
         template,
@@ -2362,6 +2526,7 @@ fn push_endpoint(
         line: start.row + 1,
         col: start.column + 1,
         requires_import_alias,
+        receiver_field,
         raw_path,
         template,
         wrapper,
@@ -5335,6 +5500,171 @@ export class Store {
         );
     }
 
+    // ========================================================================
+    // CH.3c: the receiver gate
+    // ========================================================================
+
+    /// CH.3c: every ENDPOINT node of `parse`, as its nav qname.
+    fn endpoint_qnames(parse: &FileParse) -> Vec<String> {
+        let mut out: Vec<String> = parse
+            .nodes
+            .iter()
+            .filter(|n| parse.nav.kind_by_id.get(&n.id) == Some(&node_kind::ENDPOINT))
+            .filter_map(|n| parse.nav.qname_by_id.get(&n.id))
+            .cloned()
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// CH.3c (a): verb calls on a `new Map()` field and an annotated `Set`
+    /// field (Kina's `ToastService::dismiss`, quokka's `typingTimers` /
+    /// `desiredRooms`) mint no ENDPOINT.
+    #[test]
+    fn map_and_set_receivers_mint_nothing() {
+        let src = "\
+export class ToastService {
+    private readonly timers = new Map<string, number>();
+    private selected: Set<string> = new Set<string>();
+    #pending = new globalThis.Map<string, number>();
+
+    dismiss(id: string) {
+        const t = this.timers.get(id);
+        this.timers.delete(id);
+        this.selected.delete(id);
+        this.#pending.delete(id);
+        return t;
+    }
+}
+";
+        let (parse, .., gate, args) =
+            parse_file_stats(src, "src/toast.service.ts", "src::toast", repo()).unwrap();
+        assert_eq!(endpoint_qnames(&parse), Vec::<String>::new());
+        assert_eq!(gate.dropped, 4);
+        assert_eq!(
+            gate.by_type.into_iter().collect::<Vec<_>>(),
+            vec![("Map".to_string(), 3), ("Set".to_string(), 1)]
+        );
+        assert_eq!(args.unresolved, 0, "a gated site is no ENDPOINT to count");
+    }
+
+    /// CH.3c (b): an `inject(T)` field and a constructor parameter property
+    /// of an in-repo service (Kina's `drafts = inject(TradeDraftStore)`,
+    /// `tradeService.get(this.id())`) mint no ENDPOINT; the call sites the
+    /// A6.2a receiver pass binds remain.
+    #[test]
+    fn injected_and_ctor_typed_services_mint_nothing() {
+        let src = "\
+import { Component, inject } from '@angular/core';
+import { TradesApi } from './trades.api';
+
+@Component({ selector: 'app-trade', template: '' })
+export class TradePage {
+    private readonly drafts = inject(TradesApi);
+    constructor(private readonly trades: TradesApi) {}
+    open(id: string) { return this.trades.get(id); }
+    save(id: string) { return this.drafts.patch(id, {}); }
+}
+";
+        let (parse, .., gate, _) =
+            parse_file_stats(src, "src/trade.page.ts", "src::trade_page", repo()).unwrap();
+        assert_eq!(endpoint_qnames(&parse), Vec::<String>::new());
+        assert_eq!(
+            gate.by_type.into_iter().collect::<Vec<_>>(),
+            vec![("TradesApi".to_string(), 2)]
+        );
+        let open = id(node_kind::METHOD, "src::trade_page::TradePage::open");
+        let save = id(node_kind::METHOD, "src::trade_page::TradePage::save");
+        let receiver = |from: NodeId, recv: &str, name: &str| {
+            parse.calls.iter().any(|c| {
+                c.from == from
+                    && matches!(&c.qualifier, CallQualifier::ComplexReceiver { receiver, name: n }
+                        if receiver == recv && n == name)
+            })
+        };
+        assert!(receiver(open, "this.trades", "get"), "{:?}", parse.calls);
+        assert!(receiver(save, "this.drafts", "patch"), "{:?}", parse.calls);
+        assert_eq!(
+            field_types(&parse, "src::trade_page::TradePage"),
+            pairs(&[("drafts", "TradesApi"), ("trades", "TradesApi")])
+        );
+    }
+
+    /// CH.3c (c): an HttpClient field, an `any` field, an untyped field, an
+    /// `inject(HttpClient)` field, a `new HttpClient(…)` field and a field
+    /// typed `…HttpService` keep their `<unresolved>` ENDPOINT.
+    #[test]
+    fn http_client_and_unknown_receivers_keep() {
+        let src = "\
+import { inject } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+
+export class S {
+    private svc;
+    private readonly injected = inject(HttpClient);
+    private readonly built = new HttpClient(null);
+    private readonly nest: NestHttpService;
+    constructor(private http: HttpClient, private client: any) {}
+    a(url: string) { return this.http.get(url); }
+    b(url: string) { return this.client.get(url); }
+    c(url: string) { return this.svc.get(url); }
+    d(url: string) { return this.injected.post(url, {}); }
+    e(url: string) { return this.built.put(url, {}); }
+    f(url: string) { return this.nest.delete(url); }
+}
+";
+        let (parse, .., gate, _) = parse_file_stats(src, "src/s.ts", "src::s", repo()).unwrap();
+        assert_eq!(gate, ReceiverGateStats::default());
+        for (m, verb) in [
+            ("a", "GET"),
+            ("b", "GET"),
+            ("c", "GET"),
+            ("d", "POST"),
+            ("e", "PUT"),
+            ("f", "DELETE"),
+        ] {
+            assert!(
+                method_calls(&parse, "src::s", &format!("S::{m}"), verb, "<unresolved>"),
+                "S::{m} keeps {verb} <unresolved>"
+            );
+        }
+        assert!(is_http_client_type("HttpClient") && is_http_client_type("AxiosInstance"));
+        assert!(is_http_client_type("AuthHttpClient") && is_http_client_type("NestHttpService"));
+        assert!(!is_http_client_type("Map") && !is_http_client_type("HttpHeaders"));
+    }
+
+    /// CH.3c (d): a literal (or any read) path keeps its ENDPOINT on a typed
+    /// non-HTTP receiver: `this.api.get('/users')` through an in-repo wrapper
+    /// is a real client call.
+    #[test]
+    fn literal_on_typed_service_keeps() {
+        let src = "\
+export class UsersPage {
+    constructor(private api: ApiService) {}
+    load() { return this.api.get('/users'); }
+    one(id: string) { return this.api.get(`/users/${id}`); }
+}
+";
+        let (parse, .., gate, _) =
+            parse_file_stats(src, "src/users.page.ts", "src::users", repo()).unwrap();
+        assert_eq!(gate, ReceiverGateStats::default());
+        assert!(method_calls(
+            &parse,
+            "src::users",
+            "UsersPage::load",
+            "GET",
+            "/users"
+        ));
+        assert!(method_calls(
+            &parse,
+            "src::users",
+            "UsersPage::one",
+            "GET",
+            "/users/${…}"
+        ));
+    }
+
     /// LB.5 — a relative and a slashed call to one path are ONE ENDPOINT id
     /// (one nav entry, one ENDPOINT_HIT per call site), and the relative call's
     /// hit records the literal it was rewritten from.
@@ -6653,7 +6983,7 @@ export class UsersService {
 
     /// The `[ts-state]` counters of one parse, as `(fields, signal, calls)`.
     fn state_field_counts(src: &str, path: &str, module: &str) -> (usize, usize, usize) {
-        let (_, _, _, stats, _) = parse_file_stats(src, path, module, repo()).unwrap();
+        let (_, _, _, stats, ..) = parse_file_stats(src, path, module, repo()).unwrap();
         (stats.fields, stats.signal, stats.calls)
     }
 
