@@ -1,6 +1,6 @@
 [package]
 name = "glia-parser-angular"
-version = "0.4.9"
+version.workspace = true
 edition = "2024"
 publish = false
 

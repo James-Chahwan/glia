@@ -8588,7 +8588,7 @@
       "via": "websocket"
     }
   },
-  "engine": "0.5.0",
+  "engine": "0.5.1",
   "legacy_only": [
     "fixtures/angular-base-url",
     "fixtures/arch-monorepo-flows",

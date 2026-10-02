@@ -1,6 +1,6 @@
 [package]
 name = "glia-engram-export"
-version = "0.4.13"
+version = "0.5.1"
 edition = "2024"
 publish = false
 description = "Export a resolved glia MergedGraph as an engram_core::Gmap bincode file — engram's Path-A seed. Additional artifact; glia's native sharded .gmap is untouched."

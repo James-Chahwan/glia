@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "glia-py"
-version = "0.5.0"
+version = "0.5.1"
 description = "glia, the Rust cross-language code-graph engine (pyo3): parses, builds, and stores code graphs. The engine behind mcp-repo-graph."
 readme = "README.md"
 license = { file = "LICENSE" }

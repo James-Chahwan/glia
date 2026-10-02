@@ -69,4 +69,4 @@ members = [
 # The release is now only HALF the cache key: `stamp` folds in a content hash of
 # every graph-shaping source, so a parser fix invalidates caches WITHOUT a bump.
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"

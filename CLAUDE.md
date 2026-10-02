@@ -564,7 +564,7 @@ questions over one graph computes `entrypoint_reachable` once.
   library crate — packages `glia-*`, Rust paths `glia_*` (LD.11a) — and the Python
   package: PyPI dist `glia-py`, module `glia_py`, wheel
   `glia_py-<ver>-cp311-abi3-*.whl` (LD.11b, `--python`).
-- **0.5.1 — the catch-up leap, on local `main`, not yet tagged.** Scope in
+- **0.5.1 — the catch-up leap: complete on local `main`, version bumped, awaiting the tag.** Scope in
   `dev-notes/next-leap-0.5.1.md` (§7.2 is James's rulings), packets in
   `dev-notes/leap-051-packets.json`, overrides in `dev-notes/leap-051-corrections.json`,
   schedule and LANDED waves in `dev-notes/wave-runner/schedule_051.py`: 198 packets, 155 in
@@ -597,10 +597,12 @@ questions over one graph computes `entrypoint_reachable` once.
   Go EventBus, NestJS cron, JVM process launches); CZ.3 these docs and the handoffs. No
   registry id is allocated (the next free ids stay node 50 / edge 37 / cell 26); the
   WASM reader was dropped (CD.6b / CD.6c). What remains is release mechanics, James's:
-  the version bump (the Cargo workspace and `py/pyproject.toml` still read 0.5.0; every
-  glia crate moves to the workspace version at the bump, leap doc §7.4), then push → tag
-  `v0.5.1` → PyPI. The handoff docs (`dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.1.md`,
-  each with the exact pin and every declared break) cover W0–W18.
+  push → tag `v0.5.1` → PyPI (James's gate). The bump is done: the Cargo workspace and
+  `py/pyproject.toml` read 0.5.1, every glia crate takes the workspace version
+  (`version.workspace = true`; leap doc §7.4) and the excluded engram-export is 0.5.1, so
+  every crate can be pinned `=0.5.1`. The handoff docs
+  (`dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.1.md`, each with the exact pin and
+  every declared break) cover W0–W19.
 - **After 0.5.1** (the leap doc's §1 train): **0.5.2** the four bets — `glia watch`, a
   Datalog rule layer (with a GQL front-end), cross-repo identity, Engram PPR memory;
   research in `dev-notes/research-0.5.2/`, packets after 0.5.1 lands; plus the finishing
