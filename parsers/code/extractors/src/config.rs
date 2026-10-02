@@ -35,6 +35,8 @@
 //!     - Ruby:   `ENV['X']`, `ENV.fetch('X')`
 //!     - Java:   `System.getenv("X")`
 //!     - PHP:    `getenv('X')`, `$_ENV['X']`
+//!     - C#:     `Environment.GetEnvironmentVariable("X")` (CL.7a; the
+//!       `(..., EnvironmentVariableTarget.X)` form reads its first literal)
 //!
 //!   **Defines (separate file types via pipeline bypass):**
 //!     - Dockerfile `ENV KEY=value` / `ENV KEY value`
@@ -192,6 +194,7 @@ pub fn extract_config_reads(
     reads.extend(scan_ruby_env(source));
     reads.extend(scan_java_system_getenv(source));
     reads.extend(scan_php_env(source));
+    reads.extend(scan_dotnet_env(source));
     // Each offset is the read needle's start (capture_first_string_arg / the
     // process.env scan), so the guard tests the read expression itself.
     let mut guard = LazyGuard::new(path, source);
@@ -618,6 +621,13 @@ fn scan_ruby_env(source: &str) -> Vec<(String, usize)> {
 
 fn scan_java_system_getenv(source: &str) -> Vec<(String, usize)> {
     capture_first_string_arg(source, "System.getenv(")
+}
+
+/// CL.7a: .NET `Environment.GetEnvironmentVariable("X")`. The two-argument
+/// form `("X", EnvironmentVariableTarget.Process)` reads its first literal; a
+/// non-literal argument (`GetEnvironmentVariable(name)`) reads nothing.
+fn scan_dotnet_env(source: &str) -> Vec<(String, usize)> {
+    capture_first_string_arg(source, "Environment.GetEnvironmentVariable(")
 }
 
 fn scan_php_env(source: &str) -> Vec<(String, usize)> {
@@ -1146,6 +1156,37 @@ String key = System.getenv("API_KEY");
         let keys = config_keys(&out);
         assert!(keys.contains(&"config:env:DATABASE_URL".to_string()));
         assert!(keys.contains(&"config:env:API_KEY".to_string()));
+    }
+
+    #[test]
+    fn dotnet_environment_read() {
+        let repo = RepoId(1);
+        let src = r#"
+public class Db
+{
+    public NpgsqlConnection Open() => new NpgsqlConnection(Environment.GetEnvironmentVariable("DATABASE_URL"));
+    public string Region() => Environment.GetEnvironmentVariable("AWS_REGION", EnvironmentVariableTarget.Process);
+    public string Dynamic(string name) => Environment.GetEnvironmentVariable(name);
+}
+"#;
+        let out = extract_config_reads(src, "Db.cs", module_id(repo), repo);
+        let mut keys = config_keys(&out);
+        keys.sort();
+        assert_eq!(keys, vec!["config:env:AWS_REGION", "config:env:DATABASE_URL"]);
+        let reads: Vec<_> = out
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::READS_CONFIG)
+            .collect();
+        assert_eq!(reads.len(), 2);
+        assert!(reads.iter().all(|e| e.from == module_id(repo)));
+        // One site per literal read, each at its needle; the non-literal
+        // `GetEnvironmentVariable(name)` contributes neither node nor site.
+        assert_eq!(out.sites.len(), 2);
+        let db =
+            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CONFIG_KEY, "config:env:DATABASE_URL");
+        let (_, off) = out.sites.iter().find(|(id, _)| *id == db).expect("DATABASE_URL site");
+        assert!(src[*off..].starts_with("Environment.GetEnvironmentVariable(\"DATABASE_URL\")"));
     }
 
     #[test]
