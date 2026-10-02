@@ -564,7 +564,7 @@ questions over one graph computes `entrypoint_reachable` once.
   library crate — packages `glia-*`, Rust paths `glia_*` (LD.11a) — and the Python
   package: PyPI dist `glia-py`, module `glia_py`, wheel
   `glia_py-<ver>-cp311-abi3-*.whl` (LD.11b, `--python`).
-- **0.5.1 — the catch-up leap: complete on local `main`, version bumped, awaiting the tag.** Scope in
+- **0.5.1 — the catch-up leap: released 2026-10-02 (tag `v0.5.1`, `glia-py` 0.5.1 on PyPI).** Scope in
   `dev-notes/next-leap-0.5.1.md` (§7.2 is James's rulings), packets in
   `dev-notes/leap-051-packets.json`, overrides in `dev-notes/leap-051-corrections.json`,
   schedule and LANDED waves in `dev-notes/wave-runner/schedule_051.py`: 198 packets, 155 in
@@ -596,8 +596,8 @@ questions over one graph computes `entrypoint_reachable` once.
   receivers, fn-level TESTS, GraphQL clients and HotChocolate, .NET env and appsettings,
   Go EventBus, NestJS cron, JVM process launches); CZ.3 these docs and the handoffs. No
   registry id is allocated (the next free ids stay node 50 / edge 37 / cell 26); the
-  WASM reader was dropped (CD.6b / CD.6c). What remains is release mechanics, James's:
-  push → tag `v0.5.1` → PyPI (James's gate). The bump is done: the Cargo workspace and
+  WASM reader was dropped (CD.6b / CD.6c). It is
+  released: `main` and the `v0.5.1` tag pushed, `glia-py` 0.5.1 published by `wheels-py.yml`. The bump: the Cargo workspace and
   `py/pyproject.toml` read 0.5.1, every glia crate takes the workspace version
   (`version.workspace = true`; leap doc §7.4) and the excluded engram-export is 0.5.1, so
   every crate can be pinned `=0.5.1`. The handoff docs
