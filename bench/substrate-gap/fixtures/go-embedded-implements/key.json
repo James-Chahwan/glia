@@ -1,0 +1,76 @@
+{
+  "framework": "go-embedded-implements",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "impl",
+  "cells": [
+    "go/impl"
+  ],
+  "note": "CI-2 (2/2): Go interface satisfaction counts the methods promoted through embedded fields (a struct, an interface), at their shallowest depth; a name two embeds share at one depth is promoted by neither. An unexported method is keyed by the package that DECLARES it, so the gRPC server embedding pb.UnimplementedGreeterServer implements GreeterServer (its promoted mustEmbedUnimplementedGreeterServer is pb's) while a type declaring its own copy in another package does not. Baseline HEAD f8a46c0: no IMPLEMENTS from any embedder.",
+  "expect_edges": [
+    {
+      "from": "store::store::Users",
+      "to": "store::store::Repo",
+      "category": "IMPLEMENTS",
+      "note": "own Save + promoted Close"
+    },
+    {
+      "from": "store::store::Users",
+      "to": "store::store::Closer",
+      "category": "IMPLEMENTS",
+      "note": "one-method, same package"
+    },
+    {
+      "from": "store::store::LoggingRepo",
+      "to": "store::store::Repo",
+      "category": "IMPLEMENTS",
+      "note": "Close promoted from the embedded interface"
+    },
+    {
+      "from": "server::server::server",
+      "to": "pb::greeter_grpc.pb::GreeterServer",
+      "category": "IMPLEMENTS",
+      "note": "gRPC: mustEmbed promoted from pb.UnimplementedGreeterServer"
+    },
+    {
+      "from": "server::server::server::SayHello",
+      "to": "pb::greeter_grpc.pb::GreeterServer::SayHello",
+      "category": "IMPLEMENTS",
+      "note": "method-level pair of the new type-level edge"
+    },
+    {
+      "from": "store::store::Users::Save",
+      "to": "store::store::Repo::Save",
+      "category": "IMPLEMENTS",
+      "note": "method-level pair, own method"
+    },
+    {
+      "from": "store::store::Base::Close",
+      "to": "store::store::Repo::Close",
+      "category": "IMPLEMENTS",
+      "note": "method-level pair, promoted method (Base alone does not implement Repo)"
+    },
+    {
+      "from": "pb::greeter_grpc.pb::UnimplementedGreeterServer",
+      "to": "pb::greeter_grpc.pb::GreeterServer",
+      "category": "IMPLEMENTS",
+      "note": "CONTROL: own methods, HEAD"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "fake::fake::fakeServer",
+      "to": "pb::greeter_grpc.pb::GreeterServer",
+      "category": "IMPLEMENTS",
+      "note": "unexported method of another package"
+    },
+    {
+      "from": "store::store::Pair",
+      "to": "store::store::Closer",
+      "category": "IMPLEMENTS",
+      "note": "Close is ambiguous at depth 1: promoted by neither"
+    }
+  ]
+}

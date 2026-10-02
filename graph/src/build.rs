@@ -12,8 +12,8 @@ use glia_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, Repo
 
 use crate::calls::{
     EvidenceTally, InheritStats, emit_abstract_implements, emit_method_level_implements,
-    enclosing_class_or_struct, enclosing_module, graph_evidence, push_edge, resolve_calls,
-    resolve_inherited_calls, resolve_refs, unique_global_type,
+    emit_method_level_implements_with, enclosing_class_or_struct, enclosing_module, graph_evidence,
+    push_edge, resolve_calls, resolve_inherited_calls, resolve_refs, unique_global_type,
 };
 use crate::cpp_scope::{CppScope, implicit_this};
 use crate::go_mounts::MountStats;
@@ -98,6 +98,7 @@ pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Graph
     if let Some(stats) = implicit {
         eprintln!("{}", stats.marker());
         eprintln!("{}", stats.filtered_marker());
+        eprintln!("{}", stats.promoted_marker());
     }
     if let Some(line) = packages.marker() {
         eprintln!("{line}");
@@ -207,8 +208,21 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
     let mounts = crate::go_mounts::bind(&mut g, &mut refs);
     resolve_refs(&mut g, &refs, &mut tally);
     let embeds = embed_binds.push(&mut g, &packages.promoted);
-    let implicit = emit_go_implicit_implements(&mut g, &packages);
-    emit_method_level_implements(&mut g);
+    let mut implicit = emit_go_implicit_implements(&mut g, &packages);
+    // CI.2b: a type-level edge's interface method the type does not declare
+    // pairs with the METHOD its embed promotes, when a STRUCT declares it (a
+    // method promoted from an embedded interface is an interface METHOD, and
+    // an interface method implements nothing).
+    let promoted_method = |g: &RepoGraph, ty: NodeId, name: &str| {
+        packages.promoted.method(ty, name).filter(|m| {
+            let parent = g.nav.parent_of.get(m);
+            parent.and_then(|p| g.nav.kind_by_id.get(p)) == Some(&node_kind::STRUCT)
+        })
+    };
+    let method_pairs = emit_method_level_implements_with(&mut g, promoted_method);
+    if let Some(stats) = implicit.as_mut() {
+        stats.promoted_method_pairs = method_pairs;
+    }
     tally.report();
     GoPasses { g, split, implicit, packages: package_stats, receivers, mounts, embeds }
 }
@@ -2340,6 +2354,13 @@ impl GoPromoted {
         self.methods.get(&ty)?.get(name).copied()
     }
 
+    /// CI.2b: every embedding STRUCT with its whole promoted method set
+    /// (name -> METHOD), for the implicit-IMPLEMENTS method sets. The STRUCTs
+    /// come in HashMap order: a caller sorts what it derives.
+    fn method_sets(&self) -> impl Iterator<Item = (NodeId, &BTreeMap<String, NodeId>)> {
+        self.methods.iter().map(|(&ty, set)| (ty, set))
+    }
+
     /// The STRUCT declaring the field `field` an embed of STRUCT `ty`
     /// promotes.
     fn field_owner(&self, ty: NodeId, field: &str) -> Option<NodeId> {
@@ -2433,6 +2454,17 @@ struct GoImplicitStats {
     /// Edges pushed whose every method signature was compared (EVIDENCE rule
     /// `method_signature`; the rest keep `method_set`).
     signature_checked: usize,
+    /// CI.2b: edges pushed whose type covers the interface only with a
+    /// method promoted through an embedded field or the predeclared
+    /// `error`'s `Error`.
+    promoted_pairs: usize,
+    /// Of `promoted_pairs`: those using a method promoted from an embedded
+    /// INTERFACE.
+    from_interface: usize,
+    /// Method-level IMPLEMENTS pairs whose implementing METHOD a STRUCT
+    /// embed promotes (EVIDENCE rule `promoted_method`), set by
+    /// `build_go_passes` after the method-level pass.
+    promoted_method_pairs: usize,
 }
 
 impl GoImplicitStats {
@@ -2459,6 +2491,53 @@ impl GoImplicitStats {
             self.signature_checked,
         )
     }
+
+    /// CI.2b fired_on, after [`GoImplicitStats::filtered_marker`]: `[iface]
+    /// go implicit promoted: pairs=P (from_interface=I) method_pairs=M`.
+    fn promoted_marker(&self) -> String {
+        format!(
+            "[iface] go implicit promoted: pairs={} (from_interface={}) method_pairs={}",
+            self.promoted_pairs, self.from_interface, self.promoted_method_pairs
+        )
+    }
+}
+
+/// Where a method of a Go type's method set comes from
+/// ([`emit_go_implicit_implements`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HaveSrc {
+    /// Declared on the type (a pointer or a value receiver).
+    Own,
+    /// Promoted from an embedded STRUCT ([`GoPromoted`]).
+    Struct,
+    /// Promoted from an embedded INTERFACE ([`GoPromoted`]).
+    Interface,
+    /// The predeclared `error`'s `Error`, from an `error` embed.
+    Predeclared,
+}
+
+/// One method of a Go type's method set.
+#[derive(Clone, Copy)]
+struct Have<'g> {
+    /// The package (directory) declaring the method: the type's for an own
+    /// method, the embedded type's for a promoted one, `None` for the
+    /// predeclared `Error` (exported, so never package-matched).
+    dir: Option<&'g str>,
+    /// CA.3a's normalised signature, `None` when the parse recorded none.
+    sig: Option<&'g str>,
+    src: HaveSrc,
+}
+
+/// One name-covering pair [`emit_go_implicit_implements`] keeps.
+struct ImplicitPair {
+    ty: NodeId,
+    iface: NodeId,
+    /// Every method signature was compared (CA.3b).
+    checked: bool,
+    /// A method of the interface's set is promoted or predeclared (CI.2b).
+    promoted: bool,
+    /// One is promoted from an embedded INTERFACE.
+    from_interface: bool,
 }
 
 /// Go satisfies interfaces implicitly: a named type implements an interface
@@ -2498,14 +2577,28 @@ impl GoImplicitStats {
 /// * An empty set (`interface{}`, a constraint of type terms only) is
 ///   implemented by nothing here.
 /// * An unexported method name is package-scoped in Go: it matches only a
-///   type in the package (directory, [`go_package_dir`]) of the interface
-///   that declares it.
-/// * Types are the STRUCT / CLASS owners in `class_methods`. Pointer and
-///   value receivers both count toward a type's set, and methods promoted
-///   from an embedded struct field are not seen.
+///   method DECLARED in the package (directory, [`go_package_dir`]) of the
+///   interface that declares the name. For a type's own method that is the
+///   type's package; for a promoted one, the embedded type's (CI.2b: the
+///   gRPC server embedding `pb.UnimplementedXServer` has pb's
+///   `mustEmbedUnimplementedXServer`, a type of another package declaring
+///   its own copy does not).
+/// * Types are the STRUCT / CLASS owners in `class_methods`, plus every
+///   STRUCT with a promoted method or an `error` embed. Pointer and value
+///   receivers both count toward a type's set. CI.2b: so do the methods
+///   its embedded fields promote ([`GoPromoted`]: an embedded struct,
+///   pointer or interface, at its shallowest depth, a name two embeds share
+///   at one depth promoted by neither), and an `error` embed (an
+///   INHERITS_FROM ref still in `unresolved_refs`) contributes the
+///   predeclared `Error` ([`GO_PREDECLARED_IFACES`]), unless an embed also
+///   promotes an `Error`: Go then picks by depth, which the promoted index
+///   does not keep, so neither counts (a pair can only be missed). A
+///   promoted method keeps its own signature, so R1 and R2 apply unchanged;
+///   R2 reads the embedder's side (the value has the embedder's type).
 ///
 /// Runs after the embeds are pushed ([`GoEmbedBinds::push`]) and before
-/// `emit_method_level_implements`, which then pairs each new edge's methods.
+/// `emit_method_level_implements_with`, which then pairs each new edge's
+/// methods, a promoted one included.
 /// Pairs are sorted by id and deduped before any edge is pushed (the method
 /// tables are HashMaps with per-process seeds, and edge order feeds the
 /// store's shard hashes), and an IMPLEMENTS edge already present is not
@@ -2524,8 +2617,7 @@ fn emit_go_implicit_implements(
         return None;
     }
     let mut stats = GoImplicitStats::default();
-    // (type, interface, every signature compared).
-    let mut pairs: Vec<(NodeId, NodeId, bool)> = Vec::new();
+    let mut pairs: Vec<ImplicitPair> = Vec::new();
     {
         let nav = &g.nav;
         let mut dirs = packages.dir_import_graph(g);
@@ -2571,16 +2663,69 @@ fn emit_go_implicit_implements(
             }
         }
 
-        // Method name -> the types declaring it, to narrow each interface's
-        // candidates to the holders of its rarest method name.
-        let mut by_method: HashMap<&str, Vec<NodeId>> = HashMap::new();
+        // CI.2b: every candidate type's method set, built once: its own
+        // methods, then the ones its embeds promote, then an `error` embed's
+        // `Error`.
+        let mut have_sets: HashMap<NodeId, BTreeMap<&str, Have>> = HashMap::new();
         for (owner, methods) in &g.symbols.class_methods {
             let kind = nav.kind_by_id.get(owner);
             if kind != Some(&node_kind::STRUCT) && kind != Some(&node_kind::CLASS) {
                 continue;
             }
-            for name in methods.keys() {
-                by_method.entry(name.as_str()).or_default().push(*owner);
+            let dir = pkg_of(owner);
+            let set = have_sets.entry(*owner).or_default();
+            for (name, mid) in methods {
+                let sig = nav.method_sigs.get(mid).map(String::as_str);
+                set.insert(name.as_str(), Have { dir, sig, src: HaveSrc::Own });
+            }
+        }
+        for (ty, promoted) in packages.promoted.method_sets() {
+            let set = have_sets.entry(ty).or_default();
+            for (name, mid) in promoted {
+                let parent = nav.parent_of.get(mid);
+                let src = match parent.and_then(|p| nav.kind_by_id.get(p)) {
+                    Some(&node_kind::INTERFACE) => HaveSrc::Interface,
+                    _ => HaveSrc::Struct,
+                };
+                let sig = nav.method_sigs.get(mid).map(String::as_str);
+                let dir = parent.and_then(pkg_of);
+                set.entry(name.as_str()).or_insert(Have { dir, sig, src });
+            }
+        }
+        for r in &g.unresolved_refs {
+            if r.category != edge_category::INHERITS_FROM
+                || nav.kind_by_id.get(&r.from) != Some(&node_kind::STRUCT)
+            {
+                continue;
+            }
+            let CallQualifier::Bare(embedded) = &r.qualifier else {
+                continue;
+            };
+            let Some((_, methods)) = GO_PREDECLARED_IFACES.iter().find(|(n, _)| n == embedded)
+            else {
+                continue;
+            };
+            let set = have_sets.entry(r.from).or_default();
+            for &(name, sig) in *methods {
+                let error_m = Have { dir: None, sig: Some(sig), src: HaveSrc::Predeclared };
+                match set.get(name).map(|h| h.src) {
+                    None => {
+                        set.insert(name, error_m);
+                    }
+                    Some(HaveSrc::Struct | HaveSrc::Interface) => {
+                        set.remove(name);
+                    }
+                    Some(HaveSrc::Own | HaveSrc::Predeclared) => {}
+                }
+            }
+        }
+
+        // Method name -> the types whose set holds it, to narrow each
+        // interface's candidates to the holders of its rarest method name.
+        let mut by_method: HashMap<&str, Vec<NodeId>> = HashMap::new();
+        for (ty, set) in &have_sets {
+            for &name in set.keys() {
+                by_method.entry(name).or_default().push(*ty);
             }
         }
 
@@ -2636,11 +2781,13 @@ fn emit_go_implicit_implements(
             let iface_side = packages.side(g, iface);
             let one_method = set.len() == 1;
             for &ty in candidates {
-                let Some(methods) = g.symbols.class_methods.get(&ty) else {
+                let Some(methods) = have_sets.get(&ty) else {
                     continue;
                 };
+                // An unexported name matches a method declared in the
+                // interface's package, wherever it is promoted from.
                 let covers = set.keys().all(|&(name, pkg)| {
-                    methods.contains_key(name) && pkg.is_none_or(|p| pkg_of(&ty) == Some(p))
+                    methods.get(name).is_some_and(|h| pkg.is_none_or(|p| h.dir == Some(p)))
                 });
                 if !covers {
                     continue;
@@ -2649,9 +2796,9 @@ fn emit_go_implicit_implements(
                 let mut checked = true;
                 let mut differs = false;
                 for (&(name, _), &sig_i) in &set {
-                    let sig_t = methods.get(name).and_then(|m| nav.method_sigs.get(m));
+                    let sig_t = methods.get(name).and_then(|h| h.sig);
                     match (sig_i, sig_t) {
-                        (Some(a), Some(b)) if a != b.as_str() => {
+                        (Some(a), Some(b)) if a != b => {
                             differs = true;
                             break;
                         }
@@ -2675,29 +2822,38 @@ fn emit_go_implicit_implements(
                     }
                     continue;
                 }
-                pairs.push((ty, iface, checked));
+                let used = || set.keys().filter_map(|(name, _)| methods.get(name)).map(|h| h.src);
+                pairs.push(ImplicitPair {
+                    ty,
+                    iface,
+                    checked,
+                    promoted: used().any(|s| s != HaveSrc::Own),
+                    from_interface: used().any(|s| s == HaveSrc::Interface),
+                });
             }
         }
     }
-    pairs.sort_unstable_by_key(|(a, b, _)| (a.0, b.0));
-    pairs.dedup_by_key(|(a, b, _)| (*a, *b));
+    pairs.sort_unstable_by_key(|p| (p.ty.0, p.iface.0));
+    pairs.dedup_by_key(|p| (p.ty, p.iface));
     let existing: HashSet<(NodeId, NodeId)> = g
         .edges
         .iter()
         .filter(|e| e.category == edge_category::IMPLEMENTS)
         .map(|e| (e.from, e.to))
         .collect();
-    pairs.retain(|(a, b, _)| !existing.contains(&(*a, *b)));
-    stats.types = pairs.iter().map(|&(ty, ..)| ty).collect::<HashSet<_>>().len();
+    pairs.retain(|p| !existing.contains(&(p.ty, p.iface)));
+    stats.types = pairs.iter().map(|p| p.ty).collect::<HashSet<_>>().len();
     stats.edges = pairs.len();
-    stats.signature_checked = pairs.iter().filter(|p| p.2).count();
+    stats.signature_checked = pairs.iter().filter(|p| p.checked).count();
+    stats.promoted_pairs = pairs.iter().filter(|p| p.promoted).count();
+    stats.from_interface = pairs.iter().filter(|p| p.from_interface).count();
     // LC.3d: `graph:iface` rule `method_signature` when every signature was
     // compared (CA.3b), else `method_set` (a match on names).
     let signature_ev = graph_evidence("graph:iface", "method_signature").to_cell();
     let names_ev = graph_evidence("graph:iface", "method_set").to_cell();
-    for (from, to, checked) in pairs {
-        let edge = Edge::new(from, to, edge_category::IMPLEMENTS, Confidence::Medium);
-        let ev = if checked { &signature_ev } else { &names_ev };
+    for p in pairs {
+        let edge = Edge::new(p.ty, p.iface, edge_category::IMPLEMENTS, Confidence::Medium);
+        let ev = if p.checked { &signature_ev } else { &names_ev };
         g.edges.push(edge.with_cell(ev.clone()));
     }
     Some(stats)
@@ -5042,6 +5198,135 @@ mod tests {
         );
         let GoPasses { embeds, .. } = build_go_passes(repo(), multifile_package_shape());
         assert_eq!(embeds.marker(), None);
+    }
+
+    // ---- CI.2b: implicit IMPLEMENTS through promotion -----------------------
+
+    /// The bench fixture go-embedded-implements, parsed as the engine does.
+    fn implements_fixture() -> Vec<FileParse> {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.join("bench/substrate-gap/fixtures/go-embedded-implements"))
+            .expect("workspace root");
+        ["fake/fake.go", "pb/greeter_grpc.pb.go", "server/server.go", "store/store.go"]
+            .iter()
+            .map(|rel| {
+                let src = std::fs::read_to_string(root.join(rel)).expect("fixture file");
+                let qname = rel.trim_end_matches(".go").replace('/', "::");
+                glia_parser_go::parse_file(&src, rel, &qname, "example.com/impl", repo())
+                    .expect("parse")
+            })
+            .collect()
+    }
+
+    /// A type's method set counts what its embeds promote (a pointer to a
+    /// struct, an interface) and an unexported method matches in the package
+    /// that declares it: the gRPC server embedding pb's Unimplemented type
+    /// implements GreeterServer, a foreign copy of `mustEmbed...` does not,
+    /// and a name two embeds share at one depth counts for neither. The
+    /// method-level pass pairs a promoted STRUCT method (`promoted_method`)
+    /// and lets an own pair win the same (method, interface method).
+    #[test]
+    fn go_implicit_counts_promoted_methods() {
+        let g = build_go(repo(), implements_fixture()).unwrap();
+        let st = |q: &str| gid(node_kind::STRUCT, q);
+        let it = |q: &str| gid(node_kind::INTERFACE, q);
+        let m = |q: &str| gid(node_kind::METHOD, q);
+        let (repo_i, closer) = (it("store::store::Repo"), it("store::store::Closer"));
+        let greeter = it("pb::greeter_grpc.pb::GreeterServer");
+        let (users, logging) = (st("store::store::Users"), st("store::store::LoggingRepo"));
+        let server = st("server::server::server");
+        for (from, to) in [(users, repo_i), (users, closer), (logging, repo_i), (server, greeter)] {
+            assert_eq!(implements_edge(&g, from, to), Some(Confidence::Medium));
+            assert_eq!(implements_rule(&g, from, to).as_deref(), Some("method_signature"));
+        }
+        assert_eq!(implements_edge(&g, st("fake::fake::fakeServer"), greeter), None);
+        assert_eq!(implements_edge(&g, st("store::store::Pair"), closer), None);
+        let pair = |from: &str, to: &str| {
+            let (from, to) = (m(from), m(to));
+            (implements_edge(&g, from, to), implements_rule(&g, from, to))
+        };
+        let medium = |rule: &str| (Some(Confidence::Medium), Some(rule.to_string()));
+        assert_eq!(
+            pair("store::store::Base::Close", "store::store::Repo::Close"),
+            medium("promoted_method"),
+            "Base alone does not implement Repo"
+        );
+        assert_eq!(
+            pair("store::store::Base::Close", "store::store::Closer::Close"),
+            medium("same_name"),
+            "Base's own edge to Closer gives the same pair; the own rule wins"
+        );
+        assert_eq!(
+            pair("store::store::Users::Save", "store::store::Repo::Save"),
+            medium("same_name")
+        );
+        let say_hello = "pb::greeter_grpc.pb::GreeterServer::SayHello";
+        assert_eq!(pair("server::server::server::SayHello", say_hello), medium("same_name"));
+        let must_embed = "mustEmbedUnimplementedGreeterServer";
+        assert_eq!(
+            pair(
+                &format!("pb::greeter_grpc.pb::UnimplementedGreeterServer::{must_embed}"),
+                &format!("pb::greeter_grpc.pb::GreeterServer::{must_embed}")
+            ),
+            medium("same_name"),
+            "server's promoted mustEmbed pair is the Unimplemented type's own"
+        );
+        // LoggingRepo's Close is promoted from the Repo interface, an
+        // interface METHOD: it implements nothing (no Repo::Close ->
+        // Repo::Close or -> Closer::Close pair).
+        let repo_close = m("store::store::Repo::Close");
+        let implements_out = |from: NodeId| {
+            g.edges.iter().any(|e| e.from == from && e.category == edge_category::IMPLEMENTS)
+        };
+        assert!(!implements_out(repo_close));
+    }
+
+    /// A struct embedding `error` has the predeclared `Error`, so with its
+    /// own `Code` it implements `coded`; one whose other embed also promotes
+    /// an `Error` gets neither (Go picks by depth, the index does not keep
+    /// it), so it implements nothing.
+    #[test]
+    fn go_implicit_error_embed_contributes_error() {
+        let src = "package e\n\n\
+                   type coded interface {\n\terror\n\tCode() int\n}\n\n\
+                   type codeErr struct {\n\terror\n\tc int\n}\n\n\
+                   func (e codeErr) Code() int { return e.c }\n\n\
+                   type loud struct{}\n\nfunc (loud) Error() string { return \"\" }\n\n\
+                   type clash struct {\n\terror\n\tloud\n}\n\n\
+                   func (c clash) Code() int { return 0 }\n";
+        let (g, stats) = go_implicit(go_sources(&[("e/e.go", src)]));
+        let coded = gid(node_kind::INTERFACE, "e::e::coded");
+        let code_err = gid(node_kind::STRUCT, "e::e::codeErr");
+        assert_eq!(implements_edge(&g, code_err, coded), Some(Confidence::Medium));
+        assert_eq!(implements_rule(&g, code_err, coded).as_deref(), Some("method_signature"));
+        assert_eq!(implements_edge(&g, gid(node_kind::STRUCT, "e::e::clash"), coded), None);
+        assert_eq!(
+            stats.map(|s| (s.edges, s.promoted_pairs, s.from_interface)),
+            Some((1, 1, 0))
+        );
+    }
+
+    /// The `[iface] go implicit promoted:` marker over the bench fixture:
+    /// Users -> Repo / Closer, LoggingRepo -> Repo / Closer (Close promoted
+    /// from the Repo interface) and server -> GreeterServer; one promoted
+    /// method pair survives (Base::Close -> Repo::Close).
+    #[test]
+    fn go_implicit_promoted_marker_shape() {
+        let (_, stats) = go_implicit(implements_fixture());
+        assert_eq!(
+            stats.as_ref().map(GoImplicitStats::promoted_marker).as_deref(),
+            Some("[iface] go implicit promoted: pairs=5 (from_interface=2) method_pairs=1")
+        );
+        assert_eq!(
+            stats.as_ref().map(GoImplicitStats::marker).as_deref(),
+            Some("[iface] go implicit implements: 9 (interfaces=3 types=7 embedded=0 open=0)")
+        );
+        let (_, plain) = go_implicit(implicit_iface_shape());
+        assert_eq!(
+            plain.as_ref().map(GoImplicitStats::promoted_marker).as_deref(),
+            Some("[iface] go implicit promoted: pairs=0 (from_interface=0) method_pairs=0")
+        );
     }
 
     /// An import of a directory binds its dir-named file, else its first

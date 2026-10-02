@@ -1246,9 +1246,31 @@ impl ConstructedReceivers {
 /// the strongest when several produce one pair: an explicit heritage clause
 /// (Strong) keeps its methods Strong, a Go implicit satisfaction (Medium,
 /// inferred from the method set) makes its method pairs Medium too.
+///
+/// Every builder but Go's calls this; it is
+/// [`emit_method_level_implements_with`] with no extra lookup.
 pub(crate) fn emit_method_level_implements(g: &mut RepoGraph) {
+    emit_method_level_implements_with(g, |_, _, _| None);
+}
+
+/// [`emit_method_level_implements`] with `extra`, asked for an interface
+/// method the implementing type does not declare itself: `extra(g, type,
+/// name)` names the METHOD that implements it instead (CI.2b, Go: the
+/// METHOD an embedded STRUCT promotes), and that pair carries EVIDENCE rule
+/// `promoted_method` at the class edge's confidence; own pairs keep
+/// `same_name`. When an own and an extra pair name one (method, interface
+/// method) — a base method promoted into an embedder whose class edge rides
+/// beside the base's own — the own one survives: the sort key holds the
+/// extra tag after the confidence rank, so the surviving rule never depends
+/// on the HashMap order of `interface_methods`. Returns the extra pairs
+/// pushed, after the dedup and the existing-edge filter.
+pub(crate) fn emit_method_level_implements_with(
+    g: &mut RepoGraph,
+    extra: impl Fn(&RepoGraph, NodeId, &str) -> Option<NodeId>,
+) -> usize {
     let mut existing: std::collections::HashSet<(NodeId, NodeId)> = std::collections::HashSet::new();
-    let mut pairs: Vec<(NodeId, NodeId, Confidence)> = Vec::new();
+    // (implementing METHOD, interface METHOD, confidence, found by `extra`).
+    let mut pairs: Vec<(NodeId, NodeId, Confidence, bool)> = Vec::new();
     for e in &g.edges {
         if e.category != edge_category::IMPLEMENTS {
             continue;
@@ -1257,22 +1279,24 @@ pub(crate) fn emit_method_level_implements(g: &mut RepoGraph) {
         if g.nav.kind_by_id.get(&e.to) != Some(&node_kind::INTERFACE) {
             continue;
         }
-        let (Some(impl_ms), Some(iface_ms)) =
-            (g.symbols.class_methods.get(&e.from), g.symbols.interface_methods.get(&e.to))
-        else {
+        let Some(iface_ms) = g.symbols.interface_methods.get(&e.to) else {
             continue;
         };
+        let impl_ms = g.symbols.class_methods.get(&e.from);
         for (name, &iface_mid) in iface_ms {
-            if let Some(&impl_mid) = impl_ms.get(name) {
-                pairs.push((impl_mid, iface_mid, e.confidence));
+            if let Some(&impl_mid) = impl_ms.and_then(|ms| ms.get(name)) {
+                pairs.push((impl_mid, iface_mid, e.confidence, false));
+            } else if let Some(impl_mid) = extra(g, e.from, name) {
+                pairs.push((impl_mid, iface_mid, e.confidence, true));
             }
         }
     }
-    pairs.sort_unstable_by_key(|(a, b, c)| (a.0, b.0, confidence_rank(*c)));
-    pairs.dedup_by_key(|(a, b, _)| (*a, *b));
-    pairs.retain(|(a, b, _)| !existing.contains(&(*a, *b)));
-    for &(from, to, confidence) in &pairs {
-        let ev = graph_evidence("graph:iface", "same_name");
+    pairs.sort_unstable_by_key(|&(a, b, c, x)| (a.0, b.0, confidence_rank(c), x));
+    pairs.dedup_by_key(|(a, b, ..)| (*a, *b));
+    pairs.retain(|(a, b, ..)| !existing.contains(&(*a, *b)));
+    for &(from, to, confidence, promoted) in &pairs {
+        let rule = if promoted { "promoted_method" } else { "same_name" };
+        let ev = graph_evidence("graph:iface", rule);
         push_edge_with(g, from, to, edge_category::IMPLEMENTS, ev, confidence);
     }
     if !pairs.is_empty() {
@@ -1282,6 +1306,7 @@ pub(crate) fn emit_method_level_implements(g: &mut RepoGraph) {
             g.symbols.interface_methods.len()
         );
     }
+    pairs.iter().filter(|p| p.3).count()
 }
 
 // ============================================================================

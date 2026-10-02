@@ -234,6 +234,53 @@ fn go_implicit_satisfaction_is_derived() {
     assert!(read_only.results.is_empty());
 }
 
+/// CI.2b: the protoc-gen-go-grpc shape. GreeterServer's unexported
+/// `mustEmbedUnimplementedGreeterServer` exists on `server` only promoted
+/// from its embedded UnimplementedGreeterServer.
+const GO_GRPC: [(&str, &str); 3] = [
+    ("go.mod", "module example.com/shop\n\ngo 1.22\n"),
+    (
+        "greeter.go",
+        "package shop\n\ntype GreeterServer interface {\n\tSayHello(name string) string\n\tmustEmbedUnimplementedGreeterServer()\n}\n\ntype UnimplementedGreeterServer struct{}\n\nfunc (UnimplementedGreeterServer) SayHello(name string) string { return \"\" }\nfunc (UnimplementedGreeterServer) mustEmbedUnimplementedGreeterServer() {}\n",
+    ),
+    (
+        "server.go",
+        "package shop\n\ntype server struct {\n\tUnimplementedGreeterServer\n}\n\nfunc (s *server) SayHello(name string) string { return name }\n",
+    ),
+];
+
+#[test]
+fn go_promoted_methods_satisfy_an_interface() {
+    let (_tmp, m) = build(&GO_GRPC);
+
+    let greeter = implementors(&m, "greeter::GreeterServer", Down, true);
+    // Two rows at one depth come in node-id order, and ids hash the temp
+    // dir's path: compare them sorted.
+    let mut found = rows(&greeter.results);
+    found.sort_unstable();
+    assert_eq!(
+        found,
+        [
+            (
+                "greeter::UnimplementedGreeterServer",
+                1,
+                "IMPLEMENTS",
+                "DERIVED",
+                None
+            ),
+            ("server::server", 1, "IMPLEMENTS", "DERIVED", None),
+        ],
+        "server implements GreeterServer with its own SayHello and the promoted mustEmbed"
+    );
+
+    // CI.2a's embed edge: the server below the Unimplemented type it embeds.
+    let unimplemented = implementors(&m, "greeter::UnimplementedGreeterServer", Down, true);
+    assert_eq!(
+        rows(&unimplemented.results),
+        [("server::server", 1, "INHERITS_FROM", "FACT", None)]
+    );
+}
+
 #[test]
 fn php_heritage_is_blind_and_the_absence_says_so() {
     let (_tmp, m) = build(&[("Repo.php", PHP)]);

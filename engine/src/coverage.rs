@@ -171,11 +171,11 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     },
     // LD.7b: Go satisfaction is inferred, so its edges are Medium (DERIVED).
     // CA.3b: gated on signatures and, for a one-method set or a test side,
-    // package reachability.
+    // package reachability. CI.2b: method sets count promoted methods.
     CoverageCaveat {
         language: "go",
         edge_category: "IMPLEMENTS",
-        note: "implicit interface satisfaction is inferred (Medium, DERIVED) from method names and, where the parser read both, signatures (parameter and result types; package qualifiers, parameter names and a type alias are not resolved); a one-method interface pairs only across an import path (same package, a transitive import either way, or a package importing both), and a pair with a side in a _test.go file only when that test file imports the other side's package directly (or both share a package); a method on a generic type and an interface with type parameters are matched by name only; pointer and value receivers are merged; methods promoted through an embedded struct field are not seen; an interface embedding one that does not bind is skipped as open; constraint type terms are ignored",
+        note: "implicit interface satisfaction is inferred (Medium, DERIVED) from method names and, where the parser read both, signatures (parameter and result types; package qualifiers, parameter names and a type alias are not resolved); a one-method interface pairs only across an import path (same package, a transitive import either way, or a package importing both), and a pair with a side in a _test.go file only when that test file imports the other side's package directly (or both share a package); a method on a generic type and an interface with type parameters are matched by name only; pointer and value receivers are merged; methods promoted through embedded fields count (an embedded struct, pointer or interface, at its shallowest depth; a name two embeds share at one depth is promoted by neither; an embedded type outside the repo, such as sync.Mutex, contributes nothing; the predeclared error contributes Error, unless another embed also promotes an Error; an unexported method is matched in the package that declares it); a named struct field whose type the parser does not record (a func, slice, map or channel, or a type from outside the repo) does not shadow a promoted method of the same name; an interface embedding one that does not bind is skipped as open; constraint type terms are ignored",
         verify: "check the method signatures and receivers against the interface",
     },
     // CB.11 / CB.20 / CB.23: struct-held routers and group mounts, measured
@@ -700,6 +700,12 @@ mod tests {
         assert!(go_row.is_some_and(|n| !n.contains("assumed reachable")), "{go_row:?}");
         assert!(
             go_row.is_some_and(|n| n.contains("imports the other side's package directly")),
+            "{go_row:?}"
+        );
+        // CI.2b: promoted methods count toward a Go type's method set.
+        assert!(
+            go_row.is_some_and(|n| n.contains("promoted through embedded fields count")
+                && !n.contains("are not seen")),
             "{go_row:?}"
         );
     }
