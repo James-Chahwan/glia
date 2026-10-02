@@ -168,11 +168,13 @@ check rules < 200 ms on glia; RSS < 150 MB at glia ×10).
 
 ### DG / DH — the rest of the coverage matrix
 
-Every none (·) and partial (◐) cell at HEAD (`python3 bench/substrate-gap/matrix.py`): 94 none + 58 partial. Each is
+Every none (·) and partial (◐) cell at HEAD (`~/.venvs/glia-leap/bin/python bench/substrate-gap/matrix.py`): 69 none +
+34 partial = 103 cells. (The spec run's seed lists came from bare `python3`, which imports the user-site 0.4.18 wheel, and
+named 152 cells; the verifiers re-graded and found 49 of them already full.) Each is
 either fixed (extractor / resolver packet + fixture) or evidenced not-applicable (CF.13a's rule, added to the n/a
 list). Unknown (?) cells are out of scope except where a fix's fixture grades one.
-- **DG**: python, go, typescript, java, csharp, kotlin, scala, rust (80 cells).
-- **DH**: ruby, php, dart, elixir, swift, c_cpp, clojure, solidity, terraform (72 cells).
+- **DG**: python, go, typescript, java, csharp, kotlin, scala, rust.
+- **DH**: ruby, php, dart, elixir, swift, c_cpp, clojure, solidity, terraform.
 
 ### Cross-cutting (every group reads these)
 
@@ -199,3 +201,85 @@ ones (DA, DB, DC, DD, DE, DF, DG, DH); one integrator writes D0.* (ids, slots, t
 DZ.* (release docs + handoffs), wires cross-group deps and simulates the waves. Outputs merge into
 `dev-notes/leap-052-packets.json`, validated by `dev-notes/wave-runner/validate_packets.py`; the runner gains
 `--release 052` (schedule_052.py, shared_brief_052.md).
+
+### 4.1 Result (workflows wf_0eab9cd7-9d5 + wf_0703c054-94e, 2026-10-02: 21 agents, 0 errors, ~9.9M subagent tokens)
+
+**153 packets, 41,525 LOC, 15 waves** (W0 = 8 serial D0 packets, then 26 / 26 / 22 / 11 / 10 / 7 / 11 / 7 / 5 / 5 / 5 /
+5 / 3 / 2 at the runner's cap of 26). `dev-notes/leap-052-packets.json` holds the packets and the integration report;
+`python3 dev-notes/wave-runner/schedule_052.py` reproduces the schedule. Critical path 14 packets after W0, which is the
+lower bound (file contention adds no wave): DA.2 → DA.5b → DA.6 → DA.11 → DA.14a → DA.14b → DA.15 (the rules crate) →
+DB.2b → DB.2c → DB.3a → DB.3b → DB.8a → DB.8b (check, then the reflexion prelude) → DZ.2.
+
+| group | packets | LOC |
+|---|---|---|
+| D0 wave 0: SAME_AS = edge 37, the glia-rules crate (the one Cargo.lock change), every slot | 8 | 295 |
+| DA the rules crate | 22 | 7,400 |
+| DB rules in the engine, `glia query`, GQL, prelude + reflexion parity, rules through the overlay loop (DB.9a–c, Q9) | 19 | 7,130 |
+| DC `glia watch` | 13 | 3,705 |
+| DD cross-repo identity | 16 | 4,695 |
+| DE Engram anchors and hygiene | 11 | 2,500 |
+| DF deferrals and follow-ups, + TS typed-receiver inherited calls / concrete-override dispatch (DF.22a–c) | 25 | 6,000 |
+| DG / DH the matrix rest | 15 / 22 | 4,000 / 4,870 |
+| DZ release docs, three 0.5.2 handoffs | 2 | 930 |
+
+- **Registry:** one id, SAME_AS = edge_category 37; next free node 50 / edge 38 / cell 26. FORMAT_VERSION stays 3.
+- **Breaks:** 61 declared (node_id 26, cli_output 24, api_signature 16, edge_removal 15, cell_value 10, qname_shape 7,
+  out_of_repo 5), each in its packet's `breaking` block; DZ.2 gates that every one reaches a handoff.
+- **No dependency commit.** DE measured the RSS creep (repeat `generate()`, git-archive copies, VmRSS MB first → last):
+
+  | glia, 40 rebuilds | glia, 15 | grpc-go, 15 |
+  |---|---|---|
+  | glibc 413 → 1,335 (still climbing) | glibc 406 → 852; MALLOC_ARENA_MAX=2 338 → 551; mimalloc 404 → 1,051; jemalloc 384 → 537; jemalloc decay 0 + background_thread 201 → 219 | glibc 211 → 487; mimalloc 215 → 467; jemalloc tuned 111 → 121 |
+  | malloc_trim(0) after the swap 208 → 271 | trim 207 → 257; arena 2 + trim 204 → 211 | trim 107 → 158 |
+
+  Trim costs +5..10 % per rebuild; a one-shot CLI build does not creep. DE.10 calls glibc `malloc_trim` when a PyGraph
+  drops (no crate, no lock change); DC's WatchSession trims after a swap.
+- **Engram determinism, cause found** (DE.1 / DE.2): Engram's second Kina clone had the first clone as its `origin`, so
+  LB.1 gave two RepoIds; what remained after sorting was DOCUMENTS edges (an ambiguous bare doc mention picked by a
+  RepoId-ordered tie-break) and identity-hint row ties. Both become content tie-breaks.
+- **Matrix:** every one of the 103 none / partial cells has an owner packet; none was evidenced not-applicable.
+- **Runner:** `gen_wave.py` / `closeout.py --release 052`, `schedule_052.py`, `shared_brief_052.md`,
+  `leap-052-corrections.json`.
+
+### 4.2 Decisions for James (the packets took the default shown; override before the wave that implements it)
+
+Worth a look:
+1. **Allocator** — none; `malloc_trim` (DE.10). Fallback if overridden: tikv-jemallocator 0.6 in py / cli,
+   `cfg(not(target_env = "msvc"))`, decay 0 + background_thread, joining D0.2's lock change.
+2. **Concrete overrides as method-level IMPLEMENTS** (DF.22c, W11) — reverses CH.1b's design note "a concrete override
+   is not IMPLEMENTS" (a packet author's note, not a ruling). Alternative: method-level INHERITS_FROM plus a new hop in
+   liveness, gaps and tests_for.
+3. **Q2 applied to the existing kinds** (DB.3a / DB.3d) — a heuristic-only forbid_edge / no_cycle / divergence
+   violation stops exiting 1 (cli_output break).
+4. **Overlay-loop demotion** (DB.9b) — a graph stanza that adds or hides a declared rule's violation reads review, not
+   keep. `overlay propose` drafts no rule (rules come from declared intent, judged by try's check delta).
+5. **Generated-code provenance scope** (DE.8) — gRPC client sites only; generated HTTP clients keep their sites.
+6. **Engram to confirm** — DE.4 refuses word-less renames (precision over recall, CK.2's rule); DE.5's PPR side-file
+   format (droppable).
+7. **qname breaks** — DG.10 Akka routes compose their path; DG.12 sbt-member kinds gain ` @<dir>`.
+
+Defaults taken without a question: DEFAULT_MAX_ROWS 5,000,000 (stops both measured glia×10 closures); DA.17 gates the
+evaluator's own RSS peak; `glia query` exits 1 on an empty answer; `glia watch` in the change area, persist every 60 s,
+poll 500 ms, debounce 200 ms, SIGINT through a declared `signal(2)` extern (no crate); graft memos in memory only; an
+overlay edit rebuilds every group; package-name classes collapse without walking, SAME_AS weighs 0 in PPR; a contract op
+anchors to its HTTP-paired route (DERIVED); `--no-collapse` returns the raw rows; the persisted star centre is the least
+(qname, kind, graph index) member; an ambiguous doc mention keeps one weak edge to the least qname; DF.14's Pub/Sub
+binding is a JSON CODE cell (no id); DF.17 TS only; DF.19 `annotated_base`; DF.20 folds a config `.replace` (constant
+folding, not data-flow); DF.2's short-name refusal PHP only; DF.15 mints no PACKAGE node; DG.11 names a Scala test by its
+description; DG.2 skips only ProducerRecord envelopes; DH.13 / DH.17b / DH.18 follow each library's own key / model rule.
+
+### 4.3 Found during the spec run, no owner (0.5.3 candidates unless James pulls one in)
+
+- Go generic instantiation calls `F[T](...)` mint no CALLS.
+- Angular lifecycle hooks and constructors of reached components are dead_symbol rows (wpf: 312 ngOnInit, 942
+  constructors in 3,877 rows); TS interface members are not METHOD nodes, so interface-typed receivers bind nothing.
+- TS: call-initialised locals have no type (`return_types` is Go-only); module-level instance consts read in a
+  function; statics inherited through a subclass name; superclass STATE_VARs through a typed receiver; default-imported
+  class types.
+- A `[[constraint]]` with no anchor and no PROJECT scope is orphaned silently; `[walk] tests` is invisible to a layout
+  merge, like every overlay section.
+- The engine's tier vocabularies stay three (+ glia_rules::value::Tier); a witness path among equal alternatives can
+  differ between checkouts; RepoId-ordered tie-breaks remain in pick_primary, cochange, overlay bind, declared, cells.
+- Per-group remainders (integration_report.gaps_no_owner): DD maven / gradle / pubspec / mix / csproj PACKAGE_DEPs; DF
+  tRPC external marking, Swift protocol receivers, Dart export barrels; DG Rust trait members, Juniper / Sangria; DH
+  Elixir one-line defs, Absinthe import_fields, Ruby mixins.

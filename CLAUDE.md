@@ -604,8 +604,10 @@ questions over one graph computes `entrypoint_reachable` once.
   (`dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.1.md`, each with the exact pin and
   every declared break) cover W0–W19.
 - **After 0.5.1** (the leap doc's §1 train): **0.5.2** the four bets — `glia watch`, a
-  Datalog rule layer (with a GQL front-end), cross-repo identity, Engram PPR memory;
-  research in `dev-notes/research-0.5.2/`, packets after 0.5.1 lands; plus the finishing
+  Datalog rule layer (with a GQL front-end), cross-repo identity, and Engram anchors (the Engram
+  session's 2026-10-02 reframing of "Engram PPR memory"); scope `dev-notes/next-leap-0.5.2.md` (§0.1 the binding
+  decisions, §4.2 the defaults awaiting James), research `dev-notes/research-0.5.2/`, 153 packets in
+  `dev-notes/leap-052-packets.json` (15 waves, `schedule_052.py`, runner `--release 052`), not started; plus the finishing
   batch's deferrals (README `## Roadmap`: PHP short-name imports, CB.26's residuals, the
   rest of the matrix cells, WS / gRPC / GraphQL external marking, `[walk] tests` feeding
   the TESTS pass). **0.5.3** scale —
