@@ -274,3 +274,34 @@ Engram's 480-query recall battery on quokka-stack and Kina, dev split, paired, g
   closures (0.5.1 CA.1), Go receivers typed from a call's return (CA.2a/b), TS arrow-function class fields (new).
 - False Go IMPLEMENTS (name-only matching) pollute any PPR over the graph; Engram skips Go implements for now (CA.3b).
 - The glia-store hybrid seed that failed twice was a Voyage connect timeout in Engram's own adapter — not glia.
+
+## Engram's answer, 2026-10-02 (engram-6c session, Engram HEAD 84fe613): this replaces the bet's direction
+
+This note's read model is out of date. At b59f858 the read was entry-cell routing plus 2-hop spreading. Since 2aef25b it is global:
+- 8 direct slots are global dense-cosine hits;
+- the association slots are filled by a learned release gate over a pool (spreading reach, cosine ranks 9–50, a learned cue adapter's nominees).
+
+The deciding eval is now a prequential replay of Kina's history: 2,319 session units, and a hit is a returned item pointing at a file the agent then touched. Latest dev: 30.5% against round-2's 27.2% (+45 / −6, p ≈ 2e-8), strict 22.2% against 19.7%. Only 3 of 1,160 dev recalls had the touched file unstored, so glia's coverage is not the bottleneck; ranking is.
+
+**What Engram needs from glia, ranked:**
+1. **Byte-identical exports across clones of one commit.** Two Kina clones at a448fb3 gave gmaps that differed in edge order plus ~15 bytes, while each clone reproduced itself (Engram e63f394), and that blocked its determinism check. Suspects: a remote-less copy takes its RepoId from the directory name; edge order may follow directory-walk order. Verify first: export one commit from two clones with different directory names and diff the bytes.
+2. **Identity across re-keys, endpoints included.** A removed + added re-key drops every link Engram learned to that fact (its whole learning gain over its frozen control comes through experience → code links). Ask: an old → new pairing for every re-key the exporter knows, through the existing identity_hint, so there is no contract bump. Today "renamed" questions pass 4 of 9.
+3. **Keep commit → changed-symbol accuracy in `--since`**, already fixed in 0.5.1.
+4. **Keep leading_doc and the 500-byte cap_prose.** Doc text was load-bearing (b740a58), and nothing argues for changing the cap.
+5. "Who calls X" is now mostly Engram-side work (incoming_of exists; it has no MCP tool yet).
+
+**Answers to the five questions:**
+1. C2 is consistent with the boundary but low priority.
+2. Decision rule (override): a new candidate source, PPR included, enters Engram's association pool as a weight-0 feature. It stays only if Engram beats its ablation (wins > losses) on the dev hit and strict hit, with authored session answers ≥ frozen − 3 and rationale ≥ 57 / 60. PPR must never order the direct slots.
+3. Global seeding is already the baseline; it is not an arm.
+4. Side files: yes, as data, never as a code dependency.
+5. Hybrid-local first (fastembed + trigrams); lexical as a second arm; Voyage optional.
+
+**Contract:** no v7. The meta.json sidecar is enough for the build stamp. Keep cap_prose at 500. No SAME_AS need (the eval is single-repo). No cells beyond the 6.
+
+**Drop PPR as a default read path.** The learned gate moved spreading's weight from 1 to −0.13, and propagation along explicit edges does not predict what the agent works on next. If PPR stays, it is one optional, low-priority candidate source evaluated on the replay. Engram's own next step is content-derived links ("fold, don't forget", decision 15). glia's edges matter most as stable anchors whose identity survives change.
+
+**Consequence for 0.5.2:** the "Engram PPR memory" bet becomes **"Engram anchors"**:
+- (1) cross-clone export determinism, verified and fixed;
+- (2) re-key pairing through identity_hint for every re-key the exporter knows, endpoints included;
+- (3) at most an optional PPR candidate-source side file, lowest priority.
