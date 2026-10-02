@@ -85,8 +85,11 @@ pub(super) fn apply_post_cache(
     }
     // A11.2: re-key client ENDPOINTs whose base the table resolves and record
     // their authority. Post-cache, so cached parses are folded too and the
-    // cache keeps the pre-fold parse.
-    endpoint_fold::fold_repo(parses_by_lang.values_mut().flatten(), const_table, repo)
+    // cache keeps the pre-fold parse. CH.5b: a call site read through a URL
+    // builder that reads a configured API prefix moves under it; `roots` key
+    // the builders by owner. Before nav is dropped (the builder facts live
+    // only there) and above the owner pass (it re-keys ENDPOINTs).
+    endpoint_fold::fold_repo(parses_by_lang.values_mut().flatten(), const_table, repo, roots)
         .report(repo_label);
     // LA.6d: Next.js file-system pages. Before the owner pass, so a grafted
     // page is owner-qualified like every other nav ROUTE.

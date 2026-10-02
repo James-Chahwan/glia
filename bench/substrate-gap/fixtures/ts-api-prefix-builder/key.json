@@ -1,0 +1,77 @@
+{
+ "framework": "ts-api-prefix-builder",
+ "language": "typescript",
+ "dirs": [
+  "web",
+  "server"
+ ],
+ "note": "CH-5 (TypeScript half): quokka_web's shape. Every request URL goes through ApiUrlBuilderService.buildApiUrl, whose body (through the same-file buildApiUrlFrom) reads `apiPrefix`, bound to '/api' by the environment config; buildApiRootUrl reads no prefix. The endpoint fold prefixes a buildApiUrl call site's path with '/api' (ENDPOINT_HIT `prefix` / `prefix_from`), so it pairs EXACT with the gin route under /api; the root builder's /healthz is untouched. quokka a77d4cb: [http] exact=2 rprefix=46. Baseline (HEAD f8a46c0, leap wheel): endpoints GET /protected/friends (Weak) and POST <unresolved>; the friends pairing is route_prefix.",
+ "expect_nodes": [
+  {
+   "kind": "ENDPOINT",
+   "name": "GET /api/protected/friends",
+   "exact": true,
+   "note": "builder literal + the builder's config prefix"
+  },
+  {
+   "kind": "ENDPOINT",
+   "name": "POST /api/protected/friends/accept/${…}",
+   "exact": true,
+   "note": "builder template (CH.3a) + prefix"
+  },
+  {
+   "kind": "ENDPOINT",
+   "name": "GET /healthz",
+   "exact": true,
+   "note": "buildApiRootUrl reads no prefix: path unchanged"
+  }
+ ],
+ "expect_edges": [
+  {
+   "from": "GET /api/protected/friends",
+   "to": "/api/protected/friends",
+   "category": "HTTP_CALLS",
+   "note": "exact tier"
+  },
+  {
+   "from": "POST /api/protected/friends/accept",
+   "to": "/api/protected/friends/accept",
+   "category": "HTTP_CALLS",
+   "note": "exact tier through the placeholder fold"
+  },
+  {
+   "from": "GET /healthz",
+   "to": "/healthz",
+   "category": "HTTP_CALLS",
+   "note": "unchanged exact pairing (regression guard)"
+  }
+ ],
+ "expect_cells": [
+  {
+   "kind": "ENDPOINT",
+   "node": "GET /api/protected/friends",
+   "cell": "ENDPOINT_HIT",
+   "contains": "\"prefix\":\"/api\"",
+   "note": "the prefix the fold applied"
+  },
+  {
+   "kind": "ENDPOINT",
+   "node": "GET /api/protected/friends",
+   "cell": "ENDPOINT_HIT",
+   "contains": "\"prefix_from\":\"apiPrefix\"",
+   "note": "the config key the builder reads"
+  }
+ ],
+ "forbid": [
+  {
+   "kind": "ENDPOINT",
+   "name": "GET /protected/friends",
+   "note": "the unprefixed builder path must not survive"
+  },
+  {
+   "kind": "ENDPOINT",
+   "name": "GET /api/healthz",
+   "note": "the root builder is never prefixed"
+  }
+ ]
+}

@@ -66,13 +66,30 @@
 //! The sites are collected into a set over EVERY parse before any entry is
 //! marked, so the order the build hands the parses in never matters. Only
 //! the payload of a marked entry changes; every other entry is byte-identical.
+//!
+//! BUILDER PREFIXES (CH.5b). A TypeScript call site whose URL was read
+//! through a URL builder (`this.urls.buildApiUrl('protected/friends')`, CH.3a:
+//! ENDPOINT_HIT `"wrapper"`, CH.3b: `"wrapper_of"` = the receiver's type)
+//! is keyed by the path the builder was handed, not the one it returns. When
+//! that builder's own code reads exactly one API-prefix member (CH.3b's
+//! build-time `NavFact::UrlPrefixKey`) and the repo's configuration binds that
+//! member to ONE path (`environment.apiPrefix = '/api'`), the fold puts the
+//! prefix in front: `endpoint:GET:/protected/friends` becomes
+//! `endpoint:GET:/api/protected/friends`, its ENDPOINT_HIT gains `"prefix"`
+//! and `"prefix_from"` (the member), and the node becomes Medium (the
+//! builder's transform is known: one inference step, never Strong).
+//! [`PrefixContext`] gathers the builders over EVERY parse of the repo before
+//! any entry is folded. A call site with no `wrapper_of`, a builder with no
+//! fact (quokka's `buildApiRootUrl`), a member bound to two paths, or a path
+//! already under the prefix is left exactly as it was.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 use glia_code_domain::endpoint::{endpoint_qname, url_split};
 use glia_code_domain::glia_config::Origin;
-use glia_code_domain::{CodeNav, FileParse, GRAPH_TYPE, cell_type, node_kind};
+use glia_code_domain::project_roots::ProjectRoot;
+use glia_code_domain::{CodeNav, FileParse, GRAPH_TYPE, NavFact, cell_type, node_kind};
 use glia_code_extractors::constants::{ConstTable, fold_interpolations};
 use glia_core::{CellPayload, Confidence, Node, NodeId, RepoId};
 use serde::de::{Deserializer, MapAccess, Visitor};
@@ -80,11 +97,12 @@ use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::http_owner;
 use crate::rekey::rewrite_node_id;
 
-/// What the pass did to one repo, for the `[endpoint-fold]` and
-/// `[endpoint-host]` markers.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// What the pass did to one repo, for the `[endpoint-fold]`,
+/// `[endpoint-host]`, `[endpoint-external]` and `[endpoint-prefix]` markers.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct FoldStats {
     /// ENDPOINT node entries (TypeScript: call sites) whose path, and so
     /// whose identity, changed.
@@ -99,6 +117,15 @@ pub(crate) struct FoldStats {
     pub external: usize,
     /// CG.4a: distinct sites the repo's configuration names.
     pub configured: usize,
+    /// CH.5b: ENDPOINT node entries (TypeScript call sites) the builder
+    /// prefix step moved under their URL builder's configured API prefix.
+    /// Each is also counted in `folded`.
+    pub prefixed_wrapper: usize,
+    /// CH.5c's Dart project-base step: the `base=` of `[endpoint-prefix]`.
+    /// Nothing in CH.5b moves it.
+    pub prefixed_base: usize,
+    /// CH.5b: the distinct prefixes the prefix steps applied.
+    pub prefixes: BTreeSet<String>,
 }
 
 impl FoldStats {
@@ -108,6 +135,9 @@ impl FoldStats {
         self.preset += other.preset;
         self.external += other.external;
         self.configured += other.configured;
+        self.prefixed_wrapper += other.prefixed_wrapper;
+        self.prefixed_base += other.prefixed_base;
+        self.prefixes.extend(other.prefixes);
     }
 
     /// The fired_on markers, once per repo, each only when non-zero:
@@ -136,23 +166,242 @@ impl FoldStats {
                 self.external, self.configured
             );
         }
+        // CH.5b fired_on marker, once per repo where a prefix step moved an
+        // entry:
+        //   `[endpoint-prefix] prefixed <n> endpoint paths (wrapper=<w> base=<b>) prefixes=<p,...> repo=<label>`
+        let prefixed = self.prefixed_wrapper + self.prefixed_base;
+        if prefixed > 0 {
+            let prefixes: Vec<&str> = self.prefixes.iter().map(String::as_str).collect();
+            eprintln!(
+                "[endpoint-prefix] prefixed {prefixed} endpoint paths (wrapper={} base={}) \
+                 prefixes={} repo={repo_label}",
+                self.prefixed_wrapper,
+                self.prefixed_base,
+                prefixes.join(",")
+            );
+        }
     }
 }
 
 /// Fold every FileParse of one repo, then mark its external call sites
-/// (CG.4a) over the same parses.
+/// (CG.4a) over the same parses. `roots` are the walk's project roots: the
+/// owners [`PrefixContext`] keys URL builders by (CH.5b).
 pub(crate) fn fold_repo<'a>(
     parses: impl IntoIterator<Item = &'a mut FileParse>,
     consts: &ConstTable,
     repo: RepoId,
+    roots: &[ProjectRoot],
 ) -> FoldStats {
     let mut parses: Vec<&mut FileParse> = parses.into_iter().collect();
+    let ctx = PrefixContext::build(&parses, consts, roots);
     let mut stats = FoldStats::default();
     for fp in parses.iter_mut() {
-        stats.add(fold_endpoint_paths(fp, consts, repo));
+        stats.add(fold_endpoint_paths_with(fp, consts, repo, &ctx));
     }
     stats.add(mark_external(&mut parses, consts));
     stats
+}
+
+// ============================================================================
+// CH.5b: URL builders that read a configured API prefix
+// ============================================================================
+
+/// The prefix a URL builder puts in front of the path it is handed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuilderPrefix {
+    /// The configured path, `/`-led, no trailing `/` (`/api`).
+    path: String,
+    /// The API-prefix member the builder reads (`apiPrefix`): the
+    /// ENDPOINT_HIT `prefix_from`.
+    key: String,
+    /// LF.2d: the overlay-pinned constant keys the value came through, so the
+    /// entry records them as `overlay` and is Weak like any pinned fold.
+    pins: Vec<String>,
+}
+
+/// CH.5b: the repo's URL builders that carry a `NavFact::UrlPrefixKey`. Built
+/// over EVERY parse of the repo before any entry is folded, into BTreeMaps
+/// whose merges are order-free, so the HashMap order the build hands the
+/// parses in never shows.
+#[derive(Debug, Default)]
+struct PrefixContext {
+    /// `(owner, type simple name, method name)` -> the builder's prefix, or
+    /// `None` when it is ambiguous (its member binds two paths, or two facts
+    /// for one builder disagree).
+    builders: BTreeMap<(Option<String>, String, String), Option<BuilderPrefix>>,
+    /// Every owner that declares a METHOD of one of those `(type, method)`
+    /// names, fact or not: a call site's builder is found under another
+    /// owner only when exactly one owner declares it.
+    declared: BTreeMap<(String, String), BTreeSet<Option<String>>>,
+    owners: http_owner::OwnerIndex,
+}
+
+impl PrefixContext {
+    fn build(parses: &[&mut FileParse], consts: &ConstTable, roots: &[ProjectRoot]) -> Self {
+        let mut ctx = PrefixContext {
+            owners: http_owner::OwnerIndex::from_roots(roots),
+            ..PrefixContext::default()
+        };
+        let owner_of = |fp: &FileParse| {
+            http_owner::module_file(fp).and_then(|f| ctx.owners.owner_of(&f).map(String::from))
+        };
+        // One resolution per member, shared by every builder that reads it.
+        let mut values: BTreeMap<String, Option<BuilderPrefix>> = BTreeMap::new();
+        let mut builders: BTreeMap<(Option<String>, String, String), Option<BuilderPrefix>> =
+            BTreeMap::new();
+        for fp in parses {
+            let mut facts: Vec<(NodeId, &str)> = fp
+                .nav
+                .nav_facts
+                .iter()
+                .flat_map(|(scope, facts)| {
+                    facts.iter().filter_map(move |f| match f {
+                        NavFact::UrlPrefixKey { key } => Some((*scope, key.as_str())),
+                        _ => None,
+                    })
+                })
+                .collect();
+            if facts.is_empty() {
+                continue;
+            }
+            facts.sort_by(|a, b| a.0.0.cmp(&b.0.0).then_with(|| a.1.cmp(b.1)));
+            let owner = owner_of(fp);
+            for (scope, key) in facts {
+                let Some((class, method)) = builder_name(&fp.nav, scope) else {
+                    continue;
+                };
+                let prefix = values
+                    .entry(key.to_string())
+                    .or_insert_with(|| configured_prefix(key, consts))
+                    .clone();
+                builders
+                    .entry((owner.clone(), class, method))
+                    .and_modify(|seen| {
+                        if *seen != prefix {
+                            *seen = None;
+                        }
+                    })
+                    .or_insert(prefix);
+            }
+        }
+        if builders.is_empty() {
+            return ctx;
+        }
+        let names: BTreeSet<(&str, &str)> = builders
+            .keys()
+            .map(|(_, c, m)| (c.as_str(), m.as_str()))
+            .collect();
+        let mut declared: BTreeMap<(String, String), BTreeSet<Option<String>>> = BTreeMap::new();
+        for fp in parses {
+            let mut owner: Option<Option<String>> = None;
+            for (id, kind) in &fp.nav.kind_by_id {
+                if *kind != node_kind::METHOD {
+                    continue;
+                }
+                let Some(name) = builder_name(&fp.nav, *id) else {
+                    continue;
+                };
+                if names.contains(&(name.0.as_str(), name.1.as_str())) {
+                    let owner = owner.get_or_insert_with(|| owner_of(fp)).clone();
+                    declared.entry(name).or_default().insert(owner);
+                }
+            }
+        }
+        ctx.builders = builders;
+        ctx.declared = declared;
+        ctx
+    }
+
+    /// The prefix of the builder an entry's URL was read through: its
+    /// `wrapper` method on its `wrapper_of` type, under the call site's own
+    /// owner, else under the ONE owner that declares that builder. An entry
+    /// with no `wrapper_of` (an untyped or inherited receiver, a `function`
+    /// callback, a builder not reached through `this.<f>`) names no builder.
+    fn lookup(&self, fields: &Fields) -> Option<&BuilderPrefix> {
+        if self.builders.is_empty() {
+            return None;
+        }
+        let name = (
+            fields.str("wrapper_of")?.to_string(),
+            fields.str("wrapper")?.to_string(),
+        );
+        let owner = fields
+            .str("file")
+            .and_then(|f| self.owners.owner_of(f))
+            .map(String::from);
+        let hit = |owner: &Option<String>| {
+            self.builders
+                .get(&(owner.clone(), name.0.clone(), name.1.clone()))
+        };
+        if let Some(found) = hit(&owner) {
+            return found.as_ref();
+        }
+        let mut owners = self.declared.get(&name)?.iter();
+        match (owners.next(), owners.next()) {
+            (Some(only), None) => hit(only)?.as_ref(),
+            _ => None,
+        }
+    }
+}
+
+/// A builder scope's `(type simple name, method name)`: a METHOD whose parent
+/// is a type (not a MODULE). A module-level function names no type, and a
+/// call site that names no `wrapper_of` is never prefixed, so it keys
+/// nothing.
+fn builder_name(nav: &CodeNav, scope: NodeId) -> Option<(String, String)> {
+    if nav.kind_by_id.get(&scope) != Some(&node_kind::METHOD) {
+        return None;
+    }
+    let method = nav.name_by_id.get(&scope)?;
+    let parent = nav.parent_of.get(&scope)?;
+    if nav.kind_by_id.get(parent) == Some(&node_kind::MODULE) {
+        return None;
+    }
+    let class = nav.name_by_id.get(parent)?;
+    Some((class.clone(), method.clone()))
+}
+
+/// The ONE path the repo's configuration binds API-prefix member `key` to:
+/// every value of the bare key and of every dotted key ending `.<key>`
+/// (`environment.apiPrefix`, `DEFAULT_CONFIG.apiPrefix`), each binding of
+/// each, as a `/`-led path with the query cut and trailing `/` trimmed.
+/// `None` when there is no value, when any value is not such a path (empty,
+/// `/`, relative, interpolated, a bare authority), or when two differ.
+fn configured_prefix(key: &str, consts: &ConstTable) -> Option<BuilderPrefix> {
+    let dotted = format!(".{key}");
+    let mut paths: BTreeSet<String> = BTreeSet::new();
+    let mut pins: BTreeSet<String> = BTreeSet::new();
+    let bare = consts.candidates(key).into_iter().map(|v| (key, v));
+    let nested = consts.entries().filter(|(k, _)| k.ends_with(&dotted));
+    for (k, value) in bare.chain(nested) {
+        let path = url_split(value).1?;
+        let path = path.trim_end_matches('/');
+        if path.is_empty() || path.contains("${") {
+            return None;
+        }
+        paths.insert(path.to_string());
+        if consts.is_pinned(k) {
+            pins.insert(k.to_string());
+        }
+    }
+    let mut it = paths.into_iter();
+    let (Some(path), None) = (it.next(), it.next()) else {
+        return None;
+    };
+    Some(BuilderPrefix {
+        path,
+        key: key.to_string(),
+        pins: pins.into_iter().collect(),
+    })
+}
+
+/// `path` already sits under `prefix` (a builder that strips a duplicate
+/// prefix, or a call site that wrote it out).
+fn under_prefix(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// What one ENDPOINT node entry becomes.
@@ -164,8 +413,11 @@ struct Plan {
     payload: String,
     moved: bool,
     host: bool,
-    /// LF.2d: the node's new confidence, when an overlay constant folded it.
+    /// The node's new confidence: LF.2d's Weak when an overlay constant
+    /// folded it, CH.5b's Medium when a builder prefix moved it.
     confidence: Option<Confidence>,
+    /// CH.5b: the builder prefix the entry was moved under.
+    prefix: Option<String>,
 }
 
 /// LF.2d: the confidence of an entry an overlay constant folded. `[constants]`
@@ -175,11 +427,13 @@ fn pin_confidence() -> Confidence {
     Origin::default().confidence()
 }
 
-/// Fold the ENDPOINT nodes of one file in place.
-pub(crate) fn fold_endpoint_paths(
+/// Fold the ENDPOINT nodes of one file in place, prefixing builder-read call
+/// sites through `ctx` (CH.5b).
+fn fold_endpoint_paths_with(
     fp: &mut FileParse,
     consts: &ConstTable,
     repo: RepoId,
+    ctx: &PrefixContext,
 ) -> FoldStats {
     // Node entries grouped by their current id, in first-seen order. The
     // TypeScript parser pushes one entry per call site, so an id can repeat.
@@ -191,7 +445,7 @@ pub(crate) fn fold_endpoint_paths(
             continue;
         }
         stats.preset += usize::from(arrived_with_host(node));
-        let plan = plan_entry(node, &fp.nav, consts, repo);
+        let plan = plan_entry(node, &fp.nav, consts, repo, ctx);
         groups
             .entry(node.id)
             .or_insert_with(|| {
@@ -234,6 +488,10 @@ pub(crate) fn fold_endpoint_paths(
             }
             stats.folded += usize::from(plan.moved);
             stats.hosts += usize::from(plan.host);
+            if let Some(p) = plan.prefix {
+                stats.prefixed_wrapper += 1;
+                stats.prefixes.insert(p);
+            }
         }
     }
     stats
@@ -244,7 +502,18 @@ pub(crate) fn fold_endpoint_paths(
 /// An entry is only planned when it carries exactly one JSON ENDPOINT_HIT
 /// cell, which is what every client emitter writes. Anything else is left
 /// alone rather than guessed at.
-fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> Option<Plan> {
+///
+/// CH.5b: a host-less entry read through a URL builder `ctx` knows is moved
+/// under the builder's prefix. A builder's argument is usually relative
+/// (`raw` `protected/friends`), so such an entry's path is its own qname path
+/// when neither the fold nor `raw` yields one.
+fn plan_entry(
+    node: &Node,
+    nav: &CodeNav,
+    consts: &ConstTable,
+    repo: RepoId,
+    ctx: &PrefixContext,
+) -> Option<Plan> {
     let qname = nav.qname_by_id.get(&node.id)?;
     let (method, qpath) = qname.strip_prefix("endpoint:")?.split_once(':')?;
     let (_, mut fields) = single_hit(node)?;
@@ -253,7 +522,7 @@ fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> 
         .str("template")
         .and_then(|t| fold_interpolations(t, consts));
     // LF.2d: the overlay constants that fold read, if it folded at all.
-    let pins: Vec<String> = match (&folded, fields.str("template")) {
+    let mut pins: Vec<String> = match (&folded, fields.str("template")) {
         (Some(_), Some(t)) => consts.pinned_keys_in(t).into_iter().map(String::from).collect(),
         _ => Vec::new(),
     };
@@ -262,7 +531,21 @@ fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> 
         .or_else(|| fields.str("raw"))
         .unwrap_or(qpath);
     let (host, path) = url_split(input);
-    let path = path?;
+    // CH.5b: only a call site that names no authority at all (none in its
+    // URL, none written by its parser) can sit under a builder's prefix.
+    let builder = match (&host, fields.str("host")) {
+        (None, None) => ctx.lookup(&fields),
+        _ => None,
+    };
+    let mut path = match (path, builder) {
+        (Some(p), _) => p,
+        (None, Some(_)) if qpath.starts_with('/') => qpath.to_string(),
+        (None, _) => return None,
+    };
+    let builder = builder.filter(|b| !under_prefix(&path, &b.path));
+    if let Some(b) = builder {
+        path = format!("{}{path}", b.path);
+    }
     // An interpolated authority (`https://${…}/x`) names no service, and a
     // host the parser already wrote (A11.5) is not re-recorded.
     let host = host.filter(|h| !h.contains("${") && fields.str("host").is_none());
@@ -286,6 +569,15 @@ fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> 
     if !hosts.is_empty() {
         fields.set("hosts", Value::from(hosts));
     }
+    if let Some(b) = builder {
+        fields.set("prefix", Value::from(b.path.as_str()));
+        fields.set("prefix_from", Value::from(b.key.as_str()));
+        for k in &b.pins {
+            if !pins.contains(k) {
+                pins.push(k.clone());
+            }
+        }
+    }
     if !pins.is_empty() {
         fields.set("overlay", Value::from(format!("const:{}", pins.join(","))));
     }
@@ -305,7 +597,14 @@ fn plan_entry(node: &Node, nav: &CodeNav, consts: &ConstTable, repo: RepoId) -> 
         payload,
         moved,
         host: host.is_some(),
-        confidence: (!pins.is_empty()).then(pin_confidence),
+        // A pin wins (Weak); a builder prefix is one known transform: Medium,
+        // never Strong.
+        confidence: if !pins.is_empty() {
+            Some(pin_confidence())
+        } else {
+            builder.map(|_| Confidence::Medium)
+        },
+        prefix: builder.map(|b| b.path.clone()),
     })
 }
 
@@ -719,6 +1018,12 @@ mod tests {
         RepoId(7)
     }
 
+    /// One file folded on its own, with no builder facts (the pre-CH.5b
+    /// pass): every A11.x / LF.2d test keeps this call.
+    fn fold_endpoint_paths(fp: &mut FileParse, consts: &ConstTable, repo: RepoId) -> FoldStats {
+        fold_endpoint_paths_with(fp, consts, repo, &PrefixContext::default())
+    }
+
     fn ep_id(method: &str, path: &str) -> NodeId {
         NodeId::from_parts(
             GRAPH_TYPE,
@@ -744,7 +1049,12 @@ mod tests {
     /// entry is recorded once per id, under `func()`, so the parent/children
     /// bookkeeping is exercised too.
     fn push_call(fp: &mut FileParse, path: &str, payload: &str) -> NodeId {
-        let id = ep_id("GET", path);
+        push_call_as(fp, "GET", path, payload)
+    }
+
+    /// [`push_call`] for another HTTP method.
+    fn push_call_as(fp: &mut FileParse, method: &str, path: &str, payload: &str) -> NodeId {
+        let id = ep_id(method, path);
         fp.nodes.push(Node {
             id,
             repo: repo(),
@@ -764,8 +1074,8 @@ mod tests {
         if !fp.nav.kind_by_id.contains_key(&id) {
             fp.nav.record(
                 id,
-                &format!("GET {path}"),
-                &format!("endpoint:GET:{path}"),
+                &format!("{method} {path}"),
+                &format!("endpoint:{method}:{path}"),
                 node_kind::ENDPOINT,
                 Some(func()),
             );
@@ -1272,11 +1582,354 @@ mod tests {
         t
     }
 
+    // ---- CH.5b: URL builders that read a configured API prefix ------------
+
+    /// quokka's builder file reduced to its nav: a MODULE (whose POSITION
+    /// names `file`, the owner pass's fallback), a CLASS `class`, and one
+    /// METHOD per `(name, prefix key)` (`None` = no UrlPrefixKey fact).
+    fn builder_parse(file: &str, class: &str, methods: &[(&str, Option<&str>)]) -> FileParse {
+        let mut fp = FileParse::default();
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, file);
+        fp.nodes.push(Node {
+            id: module,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: vec![Cell {
+                kind: cell_type::POSITION,
+                payload: CellPayload::Json(format!(r#"{{"file":"{file}","line":0}}"#)),
+            }],
+        });
+        fp.nav.record(module, file, file, node_kind::MODULE, None);
+        let cq = format!("{file}::{class}");
+        let cid = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, &cq);
+        fp.nav.record(cid, class, &cq, node_kind::CLASS, Some(module));
+        for (name, key) in methods {
+            let mq = format!("{cq}::{name}");
+            let mid = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, &mq);
+            fp.nav.record(mid, name, &mq, node_kind::METHOD, Some(cid));
+            if let Some(key) = key {
+                fp.nav.record_fact(mid, NavFact::UrlPrefixKey { key: key.to_string() });
+            }
+        }
+        fp
+    }
+
+    /// The quokka builder: `buildApiUrl` reads `apiPrefix`, `buildApiRootUrl`
+    /// reads none.
+    fn quokka_builder() -> FileParse {
+        builder_parse(
+            "src/app/api-url-builder.service.ts",
+            "ApiUrlBuilderService",
+            &[("buildApiUrl", Some("apiPrefix")), ("buildApiRootUrl", None)],
+        )
+    }
+
+    fn env_prefix(value: &str) -> ConstTable {
+        ts_table(&format!("export const environment = {{\n  apiPrefix: '{value}',\n}};\n"))
+    }
+
+    /// A builder-read call site's ENDPOINT_HIT, the way CH.3a / CH.3b write it.
+    fn builder_hit(path: &str, raw: &str, wrapper: &str, wrapper_of: Option<&str>) -> String {
+        let of = wrapper_of.map_or(String::new(), |t| format!(r#","wrapper_of":"{t}""#));
+        format!(
+            r#"{{"method":"GET","path":"{path}","file":"src/app/friend.service.ts","line":11,"col":21,"confidence":"weak","raw":"{raw}","wrapper":"{wrapper}"{of}}}"#
+        )
+    }
+
+    /// Fold `caller` beside `builder` over one repo with no nested roots.
+    fn fold_pair(builder: &mut FileParse, caller: &mut FileParse, consts: &ConstTable) -> FoldStats {
+        fold_repo(vec![builder, caller], consts, repo(), &[])
+    }
+
+    /// CH.5b (a): quokka's `buildApiUrl('protected/friends')`, the builder's
+    /// `apiPrefix` bound to `/api` by the environment: the call site moves to
+    /// `/api/protected/friends`, records the prefix and its member, becomes
+    /// Medium, and its CALLS edge and nav entry follow it.
+    #[test]
+    fn builder_fact_prefixes_the_call_site() {
+        let mut builder = quokka_builder();
+        let mut caller = file();
+        let old = push_call(
+            &mut caller,
+            "/protected/friends",
+            &builder_hit("/protected/friends", "protected/friends", "buildApiUrl", Some("ApiUrlBuilderService")),
+        );
+        caller.nodes[1].confidence = Confidence::Weak;
+        let stats = fold_pair(&mut builder, &mut caller, &env_prefix("/api"));
+        assert_eq!(
+            stats,
+            FoldStats {
+                folded: 1,
+                prefixed_wrapper: 1,
+                prefixes: BTreeSet::from(["/api".to_string()]),
+                ..FoldStats::default()
+            }
+        );
+        let new = ep_id("GET", "/api/protected/friends");
+        assert_eq!(caller.nodes[1].id, new);
+        assert_eq!(caller.nodes[1].confidence, Confidence::Medium, "Weak -> Medium, never Strong");
+        assert_eq!(
+            payload(&caller, 1),
+            r#"{"method":"GET","path":"/api/protected/friends","file":"src/app/friend.service.ts","line":11,"col":21,"confidence":"weak","raw":"protected/friends","wrapper":"buildApiUrl","wrapper_of":"ApiUrlBuilderService","folded_from":"/protected/friends","prefix":"/api","prefix_from":"apiPrefix"}"#
+        );
+        assert_eq!(caller.edges[0].to, new, "the CALLS edge follows the node");
+        assert_eq!(
+            caller.nav.qname_by_id.get(&new).map(String::as_str),
+            Some("endpoint:GET:/api/protected/friends")
+        );
+        assert_eq!(caller.nav.parent_of.get(&new), Some(&func()));
+        assert!(!caller.nav.qname_by_id.contains_key(&old));
+
+        // A trailing `/` on the configured value and a second, agreeing
+        // binding (`environment.prod.ts`) give the same prefix.
+        let mut consts = env_prefix("/api/");
+        consts.merge_from(&ts_table("export const DEFAULT_CONFIG = { apiPrefix: '/api' };\n"));
+        let mut builder = quokka_builder();
+        let mut caller = file();
+        push_call(
+            &mut caller,
+            "/protected/friends",
+            &builder_hit("/protected/friends", "protected/friends", "buildApiUrl", Some("ApiUrlBuilderService")),
+        );
+        assert_eq!(fold_pair(&mut builder, &mut caller, &consts).prefixed_wrapper, 1);
+        assert_eq!(caller.nodes[1].id, new);
+
+        // LF.2d: a prefix read off an overlay pin is Weak and says so.
+        let mut pinned = ConstTable::default();
+        assert!(pinned.pin("apiPrefix", "/gw"));
+        let mut builder = quokka_builder();
+        let mut caller = file();
+        push_call(
+            &mut caller,
+            "/protected/friends",
+            &builder_hit("/protected/friends", "protected/friends", "buildApiUrl", Some("ApiUrlBuilderService")),
+        );
+        fold_pair(&mut builder, &mut caller, &pinned);
+        assert_eq!(caller.nodes[1].id, ep_id("GET", "/gw/protected/friends"));
+        assert_eq!(caller.nodes[1].confidence, Confidence::Weak);
+        assert!(payload(&caller, 1).ends_with(
+            r#""prefix":"/gw","prefix_from":"apiPrefix","overlay":"const:apiPrefix"}"#
+        ));
+    }
+
+    /// CH.5b (b): the root builder reads no prefix (quokka's
+    /// `buildApiRootUrl('healthz')`), and a builder call whose receiver type
+    /// is unknown (no `wrapper_of`) names no builder: both byte-identical.
+    #[test]
+    fn root_builder_without_fact_is_untouched() {
+        let mut builder = quokka_builder();
+        let mut caller = file();
+        push_call(
+            &mut caller,
+            "/healthz",
+            &builder_hit("/healthz", "healthz", "buildApiRootUrl", Some("ApiUrlBuilderService")),
+        );
+        push_call(
+            &mut caller,
+            "/protected/later",
+            &builder_hit("/protected/later", "protected/later", "buildApiUrl", None),
+        );
+        let before = caller.clone();
+        let stats = fold_pair(&mut builder, &mut caller, &env_prefix("/api"));
+        assert_eq!(stats, FoldStats::default());
+        assert!(same(&caller, &before));
+    }
+
+    /// CH.5b (c): a member bound to two paths, or to a value that is no
+    /// `/`-led path, prefixes nothing.
+    #[test]
+    fn disagreeing_prefix_values_fold_nothing() {
+        let mut two = env_prefix("/api");
+        two.merge_from(&env_prefix("/v2"));
+        let mut nested = ts_table("const apiPrefix = '/api';\n");
+        nested.merge_from(&ts_table("export const DEFAULT_CONFIG = { apiPrefix: '/v2' };\n"));
+        for consts in [two, nested, env_prefix("api"), env_prefix("/"), ConstTable::default()] {
+            let mut builder = quokka_builder();
+            let mut caller = file();
+            push_call(
+                &mut caller,
+                "/protected/friends",
+                &builder_hit("/protected/friends", "protected/friends", "buildApiUrl", Some("ApiUrlBuilderService")),
+            );
+            let before = caller.clone();
+            assert_eq!(fold_pair(&mut builder, &mut caller, &consts), FoldStats::default());
+            assert!(same(&caller, &before));
+        }
+        assert!(configured_prefix("apiPrefix", &env_prefix("${base}/api")).is_none());
+        assert_eq!(
+            configured_prefix("apiPrefix", &env_prefix("http://gw:8080/api?x=1")).map(|p| p.path),
+            Some("/api".to_string())
+        );
+    }
+
+    /// CH.5b (d): a path already under the prefix (written out at the call
+    /// site, or a builder that strips a duplicate) is left alone; a path that
+    /// only starts with the same letters is not under it.
+    #[test]
+    fn already_prefixed_path_is_untouched() {
+        let mut builder = quokka_builder();
+        let mut caller = file();
+        push_call(
+            &mut caller,
+            "/api/protected/x",
+            &builder_hit("/api/protected/x", "api/protected/x", "buildApiUrl", Some("ApiUrlBuilderService")),
+        );
+        push_call(
+            &mut caller,
+            "/api",
+            &builder_hit("/api", "/api", "buildApiUrl", Some("ApiUrlBuilderService")),
+        );
+        let before = caller.clone();
+        assert_eq!(fold_pair(&mut builder, &mut caller, &env_prefix("/api")), FoldStats::default());
+        assert!(same(&caller, &before));
+        assert!(under_prefix("/api/x", "/api") && under_prefix("/api", "/api"));
+        assert!(!under_prefix("/apiary/x", "/api"));
+    }
+
+    /// CH.5b (e): the same method name on another type is another builder,
+    /// and a module-level function keys nothing. Under nested roots, a call
+    /// site finds its own owner's builder first, another owner's only when
+    /// that owner is the one declaring it.
+    #[test]
+    fn other_class_same_method_name_does_not_match() {
+        let mut builder = quokka_builder();
+        let mut caller = file();
+        push_call(
+            &mut caller,
+            "/protected/friends",
+            &builder_hit("/protected/friends", "protected/friends", "buildApiUrl", Some("OtherBuilder")),
+        );
+        let before = caller.clone();
+        assert_eq!(fold_pair(&mut builder, &mut caller, &env_prefix("/api")), FoldStats::default());
+        assert!(same(&caller, &before));
+
+        let mut module_fn = FileParse::default();
+        let f = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "urls::buildApiUrlFrom");
+        let m = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "urls");
+        module_fn.nav.record(m, "urls", "urls", node_kind::MODULE, None);
+        module_fn.nav.record(f, "buildApiUrlFrom", "urls::buildApiUrlFrom", node_kind::FUNCTION, Some(m));
+        module_fn.nav.record_fact(f, NavFact::UrlPrefixKey { key: "apiPrefix".into() });
+        let ctx = PrefixContext::build(&[&mut module_fn], &env_prefix("/api"), &[]);
+        assert!(ctx.builders.is_empty(), "{ctx:?}");
+
+        // Owners `web` and `shared`: the builder lives in `shared` alone, so
+        // a `web` call site finds it there.
+        let roots = [
+            ProjectRoot::new("web".into(), "npm", "package.json", None),
+            ProjectRoot::new("shared".into(), "npm", "package.json", None),
+        ];
+        let hit = |file: &str| {
+            builder_hit("/protected/friends", "protected/friends", "buildApiUrl", Some("ApiUrlBuilderService"))
+                .replace("src/app/friend.service.ts", file)
+        };
+        let mut shared = builder_parse(
+            "shared/src/api-url-builder.service.ts",
+            "ApiUrlBuilderService",
+            &[("buildApiUrl", Some("apiPrefix"))],
+        );
+        let mut caller = file();
+        push_call(&mut caller, "/protected/friends", &hit("web/src/friend.service.ts"));
+        let stats = fold_repo(vec![&mut shared, &mut caller], &env_prefix("/api"), repo(), &roots);
+        assert_eq!(stats.prefixed_wrapper, 1);
+        assert_eq!(caller.nodes[1].id, ep_id("GET", "/api/protected/friends"));
+
+        // `web` declares its own ApiUrlBuilderService.buildApiUrl, which
+        // reads no prefix: `web`'s call site is not prefixed through `shared`.
+        let mut own = builder_parse("web/src/api-url-builder.service.ts", "ApiUrlBuilderService", &[("buildApiUrl", None)]);
+        let mut shared = builder_parse(
+            "shared/src/api-url-builder.service.ts",
+            "ApiUrlBuilderService",
+            &[("buildApiUrl", Some("apiPrefix"))],
+        );
+        let mut caller = file();
+        push_call(&mut caller, "/protected/friends", &hit("web/src/friend.service.ts"));
+        let before = caller.clone();
+        let stats = fold_repo(vec![&mut own, &mut shared, &mut caller], &env_prefix("/api"), repo(), &roots);
+        assert_eq!(stats.prefixed_wrapper, 0);
+        assert!(same(&caller, &before));
+    }
+
+    /// CH.5b (f): a builder template (CH.3a) keeps its placeholder and its
+    /// `template` source; only the path moves.
+    #[test]
+    fn template_entry_keeps_its_placeholders() {
+        let mut builder = quokka_builder();
+        let mut caller = file();
+        push_call_as(
+            &mut caller,
+            "POST",
+            "/protected/friends/accept/${…}",
+            r#"{"method":"POST","path":"/protected/friends/accept/${…}","file":"src/app/friend.service.ts","line":15,"col":21,"confidence":"weak","raw":"protected/friends/accept/${…}","template":"protected/friends/accept/${publicId}","wrapper":"buildApiUrl","wrapper_of":"ApiUrlBuilderService"}"#,
+        );
+        let stats = fold_pair(&mut builder, &mut caller, &env_prefix("/api"));
+        assert_eq!((stats.folded, stats.prefixed_wrapper), (1, 1));
+        let new = ep_id("POST", "/api/protected/friends/accept/${…}");
+        assert_eq!(caller.nodes[1].id, new);
+        assert_eq!(caller.edges[0].to, new);
+        assert_eq!(
+            payload(&caller, 1),
+            r#"{"method":"POST","path":"/api/protected/friends/accept/${…}","file":"src/app/friend.service.ts","line":15,"col":21,"confidence":"weak","raw":"protected/friends/accept/${…}","template":"protected/friends/accept/${publicId}","wrapper":"buildApiUrl","wrapper_of":"ApiUrlBuilderService","folded_from":"/protected/friends/accept/${…}","prefix":"/api","prefix_from":"apiPrefix"}"#
+        );
+    }
+
+    /// CH.5b end to end on the `ts-api-prefix-builder` fixture, through
+    /// `generate_many`: the buildApiUrl call sites pair EXACT with the gin
+    /// routes under `/api`, and the root builder's `/healthz` keeps its key.
+    #[test]
+    fn ts_api_prefix_builder_fixture_pairs_exact() {
+        let root = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bench/substrate-gap/fixtures/ts-api-prefix-builder"
+        );
+        let r = crate::generate_many(&[format!("{root}/web"), format!("{root}/server")])
+            .expect("fixture builds");
+        let m = &r.merged;
+        for gone in ["endpoint:GET:/protected/friends", "endpoint:GET:/api/healthz"] {
+            assert!(m.node_id_by_qname(gone).is_none(), "{gone} must not exist");
+        }
+        let hit_of = |ep: NodeId| -> String {
+            m.graphs
+                .iter()
+                .flat_map(|g| &g.nodes)
+                .filter(|n| n.id == ep)
+                .flat_map(|n| &n.cells)
+                .find_map(|c| match (&c.payload, c.kind == cell_type::ENDPOINT_HIT) {
+                    (CellPayload::Json(s), true) => Some(s.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        for (ep, route, prefixed) in [
+            ("endpoint:GET:/api/protected/friends", "GET /api/protected/friends", true),
+            ("endpoint:POST:/api/protected/friends/accept/${…}", "POST /api/protected/friends/accept/:publicId", true),
+            ("endpoint:GET:/healthz", "GET /healthz", false),
+        ] {
+            let e = m.node_id_by_qname(ep).unwrap_or_else(|| panic!("{ep} missing"));
+            let to = m.node_id_by_qname(route).unwrap_or_else(|| panic!("{route} missing"));
+            let call = m
+                .cross_edges
+                .iter()
+                .find(|x| x.from == e && x.category == glia_code_domain::edge_category::HTTP_CALLS)
+                .unwrap_or_else(|| panic!("{ep} unpaired"));
+            assert_eq!(call.to, to, "{ep}");
+            let evidence = call
+                .cells
+                .iter()
+                .find_map(|c| match (&c.payload, c.kind == cell_type::EVIDENCE) {
+                    (CellPayload::Json(s), true) => Some(s.as_str()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            assert!(evidence.contains(r#""rule":"exact""#), "{ep}: {evidence}");
+            assert_eq!(hit_of(e).contains(r#""prefix":"/api","prefix_from":"apiPrefix""#), prefixed, "{ep}");
+        }
+    }
+
     // ---- CG.4a: external call sites ----------------------------------------
 
     /// Fold one file the way the build does, marking included.
     fn fold_one(fp: &mut FileParse, consts: &ConstTable) -> FoldStats {
-        fold_repo(std::iter::once(fp), consts, repo())
+        fold_repo(std::iter::once(fp), consts, repo(), &[])
     }
 
     fn ts_table(src: &str) -> ConstTable {
@@ -1473,7 +2126,7 @@ mod tests {
             let mut b = file();
             push_call(&mut b, "${…}/users", sourced);
             let parses: Vec<&mut FileParse> = if flip { vec![&mut b, &mut a] } else { vec![&mut a, &mut b] };
-            let stats = fold_repo(parses, &consts, repo());
+            let stats = fold_repo(parses, &consts, repo(), &[]);
             assert_eq!((stats.external, stats.configured), (0, 1), "flip={flip}");
             assert!(!payload(&a, 1).contains("external"));
         }
