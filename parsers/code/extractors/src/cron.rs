@@ -18,8 +18,10 @@
 //!      entries, and `Sidekiq::Cron::Job.create(..)` in Ruby (LA.19b)
 //!  12. Laravel — `$schedule->job(new X)->everyFiveMinutes()` (LA.19b)
 //!  13. Oban — `{Oban.Plugins.Cron, crontab: [{"@daily", MyApp.Worker}]}` (LA.19b)
+//!  14. NestJS — `@Cron('0 3 * * *')` / `@Cron(CronExpression.X)` /
+//!      `@Interval(ms)` from `@nestjs/schedule` on a provider method (CL.9)
 //!
-//! Sources 5–13 are CODE sources: a job whose handler is nameable also
+//! Sources 5–14 are CODE sources: a job whose handler is nameable also
 //! carries a `CRON_JOB --HANDLED_BY--> handler` [`UnresolvedRef`] (bound by the
 //! graph builder's `resolve_refs`), so trace / blast-radius walk from a job
 //! into the code it runs. YAML jobs (sidekiq's included) carry none: they live
@@ -64,7 +66,7 @@ struct CronJob {
     target: String,
     /// workflow / k8s / node-cron / celery / scheduled-annot / quartz /
     /// hangfire / robfig / gocron / apscheduler / whenever / sidekiq_cron /
-    /// laravel / oban
+    /// laravel / oban / nestjs
     source: &'static str,
     /// The code the job runs, `Bare(fn)` or `Attribute { base, name }`, with
     /// the 0-based row of the construct that registers it (the scheduling
@@ -96,6 +98,7 @@ struct CodeCounts {
     go: usize,
     apscheduler: usize,
     spring: usize,
+    nestjs: usize,
     whenever: usize,
     sidekiq: usize,
     laravel: usize,
@@ -110,6 +113,7 @@ impl CodeCounts {
             "robfig" | "gocron" => self.go += 1,
             "apscheduler" => self.apscheduler += 1,
             "scheduled_annot" => self.spring += 1,
+            "nestjs" => self.nestjs += 1,
             "whenever" => self.whenever += 1,
             "sidekiq_cron" => self.sidekiq += 1,
             "laravel" => self.laravel += 1,
@@ -119,7 +123,7 @@ impl CodeCounts {
     }
 
     fn total(&self) -> usize {
-        self.quartz + self.hangfire + self.go + self.apscheduler + self.spring
+        self.quartz + self.hangfire + self.go + self.apscheduler + self.spring + self.nestjs
     }
 
     fn script_total(&self) -> usize {
@@ -133,18 +137,20 @@ fn is_script_source(source: &str) -> bool {
 }
 
 /// LA.19a fired_on: `[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0
-/// spring=0 handler_refs=1 path=Jobs.java`, or `None` when the file declared no
-/// code-sourced job. The prefix and field order are stable.
+/// spring=0 nestjs=0 handler_refs=1 path=Jobs.java`, or `None` when the file
+/// declared no code-sourced job. The prefix and field order are stable;
+/// `nestjs=` (CL.9) follows `spring=`.
 fn code_marker(c: &CodeCounts, handler_refs: usize, path: &str) -> Option<String> {
     (c.total() > 0).then(|| {
         format!(
-            "[cron] code jobs={} quartz={} hangfire={} go={} apscheduler={} spring={} handler_refs={handler_refs} path={path}",
+            "[cron] code jobs={} quartz={} hangfire={} go={} apscheduler={} spring={} nestjs={} handler_refs={handler_refs} path={path}",
             c.total(),
             c.quartz,
             c.hangfire,
             c.go,
             c.apscheduler,
             c.spring,
+            c.nestjs,
         )
     })
 }
@@ -220,6 +226,9 @@ pub fn extract_cron_nodes(
     }
     if matches!(ext, "py" | "pyw") && source.contains("apscheduler") {
         jobs.extend(extract_apscheduler(source));
+    }
+    if matches!(ext, "ts" | "tsx" | "js" | "mts" | "cts") && source.contains("@nestjs/schedule") {
+        jobs.extend(extract_nest_schedule(source));
     }
     // LA.19b script-language schedulers, gated the same way: extension first,
     // then the library's own spelling.
@@ -664,7 +673,9 @@ fn extract_scheduled_annotation(source: &str, guard: &mut LazyGuard<'_>) -> Vec<
                 let after_eq = &tail[eq + 1..];
                 if let Some(schedule) = first_quoted(after_eq) {
                     if looks_like_cron_expr(&schedule) {
-                        let method = method_name_after_annotation(&source[j..]);
+                        // `j` sits on the annotation's `)`.
+                        let method =
+                            method_name_after_annotation(source.get(j + 1..).unwrap_or_default());
                         // LA.19a: the annotated method, scoped by the class
                         // the annotation sits in, is the job's handler.
                         let handler = method.as_ref().and_then(|m| {
@@ -689,11 +700,32 @@ fn extract_scheduled_annotation(source: &str, guard: &mut LazyGuard<'_>) -> Vec<
     out
 }
 
-/// After the closing `)` of an `@Scheduled(...)` annotation, find the next
-/// Java method declaration's name — best-effort identifier scan.
+/// After the closing `)` of a scheduling annotation / decorator (Spring
+/// `@Scheduled(..)`, NestJS `@Cron(..)` / `@Interval(..)`), find the next
+/// method declaration's name — best-effort identifier scan. Annotations /
+/// decorators stacked between the two (`@SchedulerLock(name = "x")`,
+/// `@UseGuards(G)`, `@Timed`) are skipped whole, their arguments included, so
+/// their name never stands in for the method's (CL.9).
 fn method_name_after_annotation(after_close: &str) -> Option<String> {
-    // Skip whitespace/newlines, then tokens until we see `(`. Take the
-    // identifier immediately preceding it.
+    let mut rest = after_close.trim_start();
+    while let Some(tail) = rest.strip_prefix('@') {
+        let name_len = tail
+            .bytes()
+            .take_while(|b| is_ident_byte(*b) || *b == b'.')
+            .count();
+        if name_len == 0 {
+            return None;
+        }
+        rest = if tail.as_bytes().get(name_len) == Some(&b'(') {
+            let (_, end) = call_args(tail, name_len + 1)?;
+            tail.get(end..)?.trim_start()
+        } else {
+            tail.get(name_len..)?.trim_start()
+        };
+    }
+    // Then tokens until we see `(`. Take the identifier immediately preceding
+    // it.
+    let after_close = rest;
     let bytes = after_close.as_bytes();
     let mut last_ident_start: Option<usize> = None;
     let mut i = 0;
@@ -730,12 +762,16 @@ fn method_name_after_annotation(after_close: &str) -> Option<String> {
     None
 }
 
-/// Nearest Java / Kotlin / C# `class <Name>` declaration in `before` (the
-/// source up to an annotation). A `class ` hit counts only when everything
-/// between its line start and the keyword is modifiers or annotations, so
-/// prose (`// this class handles ..`) and `subclass ` never match.
+/// Nearest Java / Kotlin / C# / TypeScript `class <Name>` declaration in
+/// `before` (the source up to an annotation or decorator). A `class ` hit
+/// counts only when everything between its line start and the keyword is
+/// modifiers or annotations, so prose (`// this class handles ..`) and
+/// `subclass ` never match. `export` / `default` are the TS / JS spellings
+/// (CL.9), which Java never writes before `class`.
 fn enclosing_class_name(before: &str) -> Option<String> {
     const MODIFIERS: &[&str] = &[
+        "export",
+        "default",
         "public",
         "private",
         "protected",
@@ -921,6 +957,97 @@ fn func_arg_handler(arg: &str) -> (String, Option<CallQualifier>) {
         Some((target, q)) => (target, Some(q)),
         None => ("anon".to_string(), None),
     }
+}
+
+// --- NestJS ------------------------------------------------------------------
+
+/// NestJS `@nestjs/schedule` (gate: that import, in a TS / JS file; CL.9).
+/// `@Cron(<expr>)` on a provider method: a quoted expression (5 fields, or
+/// NestJS's 6 with seconds first) goes through [`normalise_schedule`]; a
+/// `CronExpression.<MEMBER>` keeps the member path verbatim as the schedule
+/// identity (the enum's values are not tabled, so it pairs with no equal
+/// literal elsewhere); any other first argument (a variable, a `Date`) is no
+/// job. `@Interval(ms)` / `@Interval('name', ms)` with an integer literal is
+/// the rate `@every <ms>ms`; `@Timeout` is a one-shot, not a schedule. The
+/// decorated method, scoped by its class, is the handler — the Spring shape.
+/// A decorator counts only when it leads its line ([`decorator_leads_line`]),
+/// so a commented-out `// @Cron(..)` or a JSDoc `* @Cron(..)` schedules
+/// nothing.
+fn extract_nest_schedule(source: &str) -> Vec<CronJob> {
+    let mut sites: Vec<(usize, &str)> = source
+        .match_indices("@Cron(")
+        .chain(source.match_indices("@Interval("))
+        .collect();
+    sites.sort_unstable();
+    let mut out = Vec::new();
+    for (pos, needle) in sites {
+        if !decorator_leads_line(source, pos) {
+            continue;
+        }
+        let Some((args, end)) = call_args(source, pos + needle.len()) else {
+            continue;
+        };
+        let schedule = if needle == "@Cron(" {
+            args.first().and_then(|a| nest_cron_schedule(a))
+        } else {
+            nest_interval(&args)
+        };
+        let Some(schedule) = schedule else {
+            continue;
+        };
+        let method = method_name_after_annotation(source.get(end..).unwrap_or_default());
+        let handler = method.as_ref().and_then(|m| {
+            Some(CallQualifier::Attribute {
+                base: enclosing_class_name(source.get(..pos)?)?,
+                name: m.clone(),
+            })
+        });
+        out.push(CronJob {
+            schedule,
+            target: method.unwrap_or_else(|| "anon".to_string()),
+            source: "nestjs",
+            handler: at_row(handler, source, pos),
+        });
+    }
+    out
+}
+
+/// True when only whitespace, or other decorators, precede the `@` at `pos`
+/// on its line: a `//` / `/*` / `*` comment line, or prose, does not.
+fn decorator_leads_line(source: &str, pos: usize) -> bool {
+    let Some(head) = source.get(..pos) else {
+        return false;
+    };
+    let line_start = head.rfind('\n').map_or(0, |n| n + 1);
+    let prefix = head.get(line_start..).unwrap_or_default().trim();
+    prefix.is_empty()
+        || (prefix.starts_with('@') && !prefix.contains("//") && !prefix.contains("/*"))
+}
+
+/// A NestJS `@Cron` first argument: a cron literal, or `CronExpression.X`
+/// verbatim.
+fn nest_cron_schedule(arg: &str) -> Option<String> {
+    if let Some(lit) = string_literal(arg) {
+        return normalise_schedule(&lit);
+    }
+    match ident_path(arg)?.as_slice() {
+        ["CronExpression", member] => Some(format!("CronExpression.{member}")),
+        _ => None,
+    }
+}
+
+/// `@Interval(ms)` / `@Interval('name', ms)`: an integer literal (`_`
+/// separators allowed) is `@every <ms>ms`; an expression is not read.
+fn nest_interval(args: &[&str]) -> Option<String> {
+    let ms = match args {
+        [ms] => *ms,
+        [name, ms] if string_literal(name).is_some() => *ms,
+        _ => return None,
+    };
+    let digits: String = ms.chars().filter(|c| *c != '_').collect();
+    let literal = ms.as_bytes().first().is_some_and(u8::is_ascii_digit)
+        && digits.bytes().all(|b| b.is_ascii_digit());
+    literal.then(|| format!("@every {digits}ms"))
 }
 
 // --- Quartz ------------------------------------------------------------------
@@ -3673,7 +3800,7 @@ sched.add_job(lambda: None, "cron", second=30, minute="*/2")
         assert_eq!(
             code_marker(&c, 1, "Jobs.java").as_deref(),
             Some(
-                "[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0 spring=0 handler_refs=1 path=Jobs.java"
+                "[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 handler_refs=1 path=Jobs.java"
             )
         );
         c.bump("robfig");
@@ -3682,7 +3809,7 @@ sched.add_job(lambda: None, "cron", second=30, minute="*/2")
         assert_eq!(
             code_marker(&c, 3, "w.go").as_deref(),
             Some(
-                "[cron] code jobs=4 quartz=1 hangfire=0 go=2 apscheduler=0 spring=1 handler_refs=3 path=w.go"
+                "[cron] code jobs=4 quartz=1 hangfire=0 go=2 apscheduler=0 spring=1 nestjs=0 handler_refs=3 path=w.go"
             )
         );
     }
@@ -3693,6 +3820,130 @@ sched.add_job(lambda: None, "cron", second=30, minute="*/2")
             "@Component\npublic class Cleanup {\n    // this class handles the subclass case\n    ";
         assert_eq!(enclosing_class_name(before).as_deref(), Some("Cleanup"));
         assert_eq!(enclosing_class_name("// no class here\n"), None);
+    }
+
+    /// The matrix/typescript/cron probe file (CL.9).
+    const NEST_TASKS: &str = "import { Injectable } from \"@nestjs/common\";\nimport { Cron } from \"@nestjs/schedule\";\n\n@Injectable()\nexport class TasksService {\n  @Cron(\"0 3 * * *\")\n  purge() {\n    return 0;\n  }\n}\n";
+
+    #[test]
+    fn nest_cron_literal_names_its_handler() {
+        let out = run(NEST_TASKS, "src/tasks.service.ts");
+        assert_eq!(sorted_qnames(&out), vec!["cron:0 3 * * *:purge"]);
+        assert_eq!(
+            handlers(&out),
+            vec![(
+                "cron:0 3 * * *:purge".to_string(),
+                attr("TasksService", "purge")
+            )]
+        );
+        // The ref sits at the decorator's row (0-based), the LC.3b site.
+        assert_eq!(out.refs[0].line, 5);
+        assert_eq!(out.edges.len(), 1, "one SCHEDULES edge module -> job");
+        assert_eq!(out.edges[0].category, edge_category::SCHEDULES);
+        let mut c = CodeCounts::default();
+        c.bump("nestjs");
+        assert_eq!(
+            code_marker(&c, 1, "src/tasks.service.ts").as_deref(),
+            Some(
+                "[cron] code jobs=1 quartz=0 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=1 handler_refs=1 path=src/tasks.service.ts"
+            )
+        );
+        // A 6-field NestJS expression (seconds first), options, stacked
+        // decorators and an `async` method with a return type.
+        let src = "import { Cron } from '@nestjs/schedule';\nexport default class Reports {\n  @Cron('45 */5 * * * *', {\n    name: 'digest',\n    timeZone: 'Europe/Paris',\n  })\n  @UseGuards(LockGuard)\n  @Timed()\n  async sendDigest(): Promise<void> {}\n}\n";
+        let out = run(src, "reports.ts");
+        assert_eq!(
+            handlers(&out),
+            vec![(
+                "cron:45 */5 * * * *:sendDigest".to_string(),
+                attr("Reports", "sendDigest")
+            )]
+        );
+    }
+
+    #[test]
+    fn nest_cron_expression_member_verbatim() {
+        let src = "import { Cron, CronExpression } from '@nestjs/schedule';\n@Injectable()\nexport class Cleanup {\n  @Cron(CronExpression.EVERY_DAY_AT_3AM)\n  sweep() {}\n\n  @Cron(SCHEDULE)\n  computed() {}\n\n  @Cron(new Date(Date.now() + 1000))\n  once() {}\n\n  @Cron('not a schedule')\n  prose() {}\n}\n";
+        let out = run(src, "cleanup.service.ts");
+        assert_eq!(
+            handlers(&out),
+            vec![(
+                "cron:CronExpression.EVERY_DAY_AT_3AM:sweep".to_string(),
+                attr("Cleanup", "sweep")
+            )],
+            "only the enum member is a schedule identity; a variable, a Date and prose are not"
+        );
+    }
+
+    #[test]
+    fn nest_interval_is_a_rate() {
+        let src = "import { Interval, Timeout } from '@nestjs/schedule';\nexport class Poller {\n  @Interval(5000)\n  poll() {}\n\n  @Interval('heartbeat', 10_000)\n  beat() {}\n\n  @Interval(60 * 1000)\n  computed() {}\n\n  @Timeout(3000)\n  warmUp() {}\n}\n";
+        let out = run(src, "poller.js");
+        assert_eq!(
+            handlers(&out),
+            vec![
+                (
+                    "cron:@every 10000ms:beat".to_string(),
+                    attr("Poller", "beat")
+                ),
+                (
+                    "cron:@every 5000ms:poll".to_string(),
+                    attr("Poller", "poll")
+                ),
+            ],
+            "a literal interval is a rate; an expression and a one-shot @Timeout are not"
+        );
+    }
+
+    #[test]
+    fn nest_cron_needs_the_schedule_import() {
+        let body = "export class TasksService {\n  @Cron(\"0 3 * * *\")\n  purge() {}\n}\n";
+        assert!(
+            run(body, "src/tasks.service.ts").nodes.is_empty(),
+            "no @nestjs/schedule import"
+        );
+        let gated = format!("import {{ Cron }} from '@nestjs/schedule';\n{body}");
+        assert!(
+            run(&gated, "tasks.py").nodes.is_empty(),
+            "not a TS / JS file"
+        );
+        assert_eq!(run(&gated, "src/tasks.service.mts").nodes.len(), 1);
+        // A commented-out decorator schedules nothing.
+        let commented = "import { Cron } from '@nestjs/schedule';\nexport class TasksService {\n  // @Cron('0 3 * * *')\n  /** @Cron('0 4 * * *') */\n  /*\n   * @Cron('0 5 * * *')\n   */\n  purge() {}\n}\n";
+        assert!(run(commented, "src/tasks.service.ts").nodes.is_empty());
+    }
+
+    #[test]
+    fn export_class_is_an_enclosing_class() {
+        assert_eq!(
+            enclosing_class_name("export default class Reports {\n  ").as_deref(),
+            Some("Reports")
+        );
+        assert_eq!(
+            enclosing_class_name("@Injectable()\nexport class TasksService {\n  ").as_deref(),
+            Some("TasksService")
+        );
+        assert_eq!(
+            enclosing_class_name("@Injectable() export abstract class Base {\n  ").as_deref(),
+            Some("Base")
+        );
+        assert_eq!(enclosing_class_name("// export the class below\n"), None);
+    }
+
+    #[test]
+    fn stacked_annotations_are_skipped_before_the_method() {
+        // Spring with ShedLock: the method, not the second annotation, runs.
+        let src = "@Component\npublic class Jobs {\n    @Scheduled(cron = \"0 0 4 * * *\")\n    @SchedulerLock(name = \"purge\",\n        lockAtMostFor = \"10m\")\n    public void purge() {}\n}\n";
+        let out = run(src, "Jobs.java");
+        assert_eq!(
+            handlers(&out),
+            vec![("cron:0 0 4 * * *:purge".to_string(), attr("Jobs", "purge"))]
+        );
+        assert_eq!(
+            method_name_after_annotation("\n  @A() @B.c(1, (2))\n  @D\n  run(): void {}")
+                .as_deref(),
+            Some("run")
+        );
     }
 
     #[test]
@@ -4266,7 +4517,7 @@ config :my_app, Oban,
         assert_eq!(
             code_marker(&c, 0, "x").as_deref(),
             Some(
-                "[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0 spring=0 handler_refs=0 path=x"
+                "[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 handler_refs=0 path=x"
             ),
             "the LA.19a marker is unchanged by script jobs"
         );
