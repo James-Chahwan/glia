@@ -1,0 +1,6 @@
+{
+ "generated": "2026-10-02",
+ "applies_to": "dev-notes/leap-052-packets.json (glia 0.5.2, the four bets)",
+ "rule": "A correction OVERRIDES its packet's spec wherever they disagree. closeout.py --release 052 folds each landed packet's followups that name a later D*.* packet in here.",
+ "corrections": {}
+}
