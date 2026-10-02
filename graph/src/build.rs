@@ -60,7 +60,7 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// ([`resolve_go_calls`]).
 ///
 /// LD.7b: an interface's embedded interfaces bind package-scoped and to an
-/// INTERFACE only ([`resolve_go_embeds`]); then, Go interfaces being
+/// INTERFACE only ([`bind_go_embeds`]); then, Go interfaces being
 /// satisfied implicitly, [`emit_go_implicit_implements`] derives each type ->
 /// interface IMPLEMENTS edge from method names, signatures (CA.3b) and, for a
 /// one-method interface or a `_test.go` side, package reachability, before
@@ -80,8 +80,15 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// group receives through the resolved calls, one ROUTE per mount, before
 /// the refs resolve ([`crate::go_mounts::bind`]); `[go-mounts]` prints what
 /// it did.
+///
+/// CI.2a: a struct's embedded fields bind like an interface's embeds, to the
+/// in-repo STRUCT or INTERFACE they name ([`bind_go_embeds`]), and the call
+/// hook follows them: a method or field the struct does not declare binds
+/// through Go's promotion rule ([`GoPromoted`]); `[go-embeds]` prints what
+/// bound.
 pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
-    let (g, split, implicit, packages, receivers, mounts) = build_go_passes(repo, parses);
+    let GoPasses { g, split, implicit, packages, receivers, mounts, embeds } =
+        build_go_passes(repo, parses);
     if let Some(line) = split.marker() {
         eprintln!("{line}");
     }
@@ -99,6 +106,9 @@ pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Graph
         eprintln!("{line}");
     }
     eprintln!("{}", receivers.marker());
+    if let Some(line) = embeds.marker() {
+        eprintln!("{line}");
+    }
     eprintln!("{}", go_types_marker(&g.nav));
     if let Some(line) = go_sigs_marker(&g.nav) {
         eprintln!("{line}");
@@ -152,21 +162,40 @@ pub(crate) fn build_go_with_mounts(
     repo: RepoId,
     parses: Vec<FileParse>,
 ) -> (RepoGraph, MountStats) {
-    let (g, _, _, _, _, mounts) = build_go_passes(repo, parses);
+    let GoPasses { g, mounts, .. } = build_go_passes(repo, parses);
     (g, mounts)
 }
 
 /// What [`build_go_passes`] returns: the graph and the stats its markers
 /// print.
-type GoPasses =
-    (RepoGraph, SplitStats, Option<GoImplicitStats>, GoPackageStats, ReceiverTally, MountStats);
+struct GoPasses {
+    g: RepoGraph,
+    split: SplitStats,
+    implicit: Option<GoImplicitStats>,
+    packages: GoPackageStats,
+    receivers: ReceiverTally,
+    mounts: MountStats,
+    /// CI.2a: the struct embeds and what their promotion bound.
+    embeds: GoEmbedStats,
+}
 
 /// [`build_go`]'s passes, returning the stats its markers print.
+///
+/// CI.2a: the embed refs (interface and struct) bind right after the symbol
+/// table, before any import or call pass, so the call hook reads the
+/// promoted-member index ([`GoPromoted`]) they give; they read only nav and
+/// the ImportStmts, so no binding moves. Their edges and unbound refs are
+/// pushed where LD.7b pushed them, after `resolve_refs`, so a graph without a
+/// struct embed keeps its edge and `unresolved_refs` order.
 fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
-    let (mut g, all_imports, all_calls, mut all_refs) = merge_parses(repo, parses);
+    let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     let split = bind_split_go_receivers(&mut g);
     build_symbol_table(&mut g);
-    let packages = GoPackages::build(&g, &all_imports);
+    let (embed_refs, mut refs): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
+        all_refs.into_iter().partition(|r| is_go_embed(&g.nav, r));
+    let embed_binds = bind_go_embeds(&g, &embed_refs, &all_imports);
+    let mut packages = GoPackages::build(&g, &all_imports);
+    packages.promoted = GoPromoted::build(&g, &embed_binds.bound);
     let import_stats = resolve_imports_go(&mut g, &all_imports, &packages);
     let mut tally = EvidenceTally::default();
     let hook = |g: &RepoGraph, site: &CallSite| packages.resolve(g, site);
@@ -175,15 +204,13 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
     let receivers = packages.tally.clone();
     // CB.20: reads the CALLS edges just bound; moves the provisional ROUTEs'
     // HANDLED_BY refs (and copies them to each extra mount) before they resolve.
-    let mounts = crate::go_mounts::bind(&mut g, &mut all_refs);
-    let (embeds, refs): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
-        all_refs.into_iter().partition(|r| is_go_embed(&g.nav, r));
+    let mounts = crate::go_mounts::bind(&mut g, &mut refs);
     resolve_refs(&mut g, &refs, &mut tally);
-    resolve_go_embeds(&mut g, &embeds, &all_imports);
+    let embeds = embed_binds.push(&mut g, &packages.promoted);
     let implicit = emit_go_implicit_implements(&mut g, &packages);
     emit_method_level_implements(&mut g);
     tally.report();
-    (g, split, implicit, package_stats, receivers, mounts)
+    GoPasses { g, split, implicit, packages: package_stats, receivers, mounts, embeds }
 }
 
 /// Build a per-repo TypeScript graph. TS import sources are raw strings
@@ -985,6 +1012,9 @@ pub(crate) struct GoPackages {
     global_types: std::cell::RefCell<HashMap<String, Option<NodeId>>>,
     /// What [`GoPackages::typed_receiver`] bound and missed (CA.2b).
     tally: ReceiverTally,
+    /// CI.2a: the methods and fields each embedding STRUCT promotes, set by
+    /// `build_go_passes` once the embeds are bound (empty until then).
+    promoted: GoPromoted,
 }
 
 /// Where an import of a package directory binds ([`GoPackages::import_target`]).
@@ -1115,6 +1145,7 @@ impl GoPackages {
             method_file,
             global_types: std::cell::RefCell::new(HashMap::new()),
             tally: ReceiverTally::default(),
+            promoted: GoPromoted::default(),
         }
     }
 
@@ -1137,10 +1168,30 @@ impl GoPackages {
 
     /// `resolve_calls`' `extra_hook`, consulted only after every generic
     /// lookup missed: a package call ([`GoPackages::package_call`]), else a
-    /// method on a typed receiver ([`GoPackages::typed_receiver`], CA.2b). A
-    /// base that is not an import no longer ends the hook.
+    /// method on a typed receiver ([`GoPackages::typed_receiver`], CA.2b),
+    /// else a self call of a promoted method ([`GoPackages::promoted_self`],
+    /// CI.2a). A base that is not an import no longer ends the hook.
     fn resolve(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
-        self.package_call(g, site).or_else(|| self.typed_receiver(g, site))
+        self.package_call(g, site)
+            .or_else(|| self.typed_receiver(g, site))
+            .or_else(|| self.promoted_self(g, site))
+    }
+
+    /// CI.2a: a self call `u.exec(..)` the receiver's STRUCT does not declare
+    /// (the generic SelfMethod arm missed it) binds to the method one of its
+    /// embeds promotes ([`GoPromoted::method`]), evidence
+    /// `graph:go_packages` rule `promoted_self`.
+    fn promoted_self(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
+        let CallQualifier::SelfMethod(name) = &site.qualifier else {
+            return None;
+        };
+        let owner = enclosing_class_or_struct(&g.nav, site.from)?;
+        if g.nav.kind_by_id.get(&owner) != Some(&node_kind::STRUCT) {
+            return None;
+        }
+        let hit = self.promoted.method(owner, name)?;
+        self.promoted.bump_call();
+        Some((hit, go_ev("promoted_self")))
     }
 
     /// A call into a package:
@@ -1475,15 +1526,15 @@ fn is_exported(name: &str) -> bool {
     name.chars().next().is_some_and(char::is_uppercase)
 }
 
-/// The METHOD `name` a value of type `ty` has: its declared method, else (an
-/// INTERFACE) the interface's own METHOD, which A6.6's method-level
-/// IMPLEMENTS carries on to the implementations.
-fn method_on(g: &RepoGraph, ty: NodeId, name: &str) -> Option<NodeId> {
-    g.symbols
-        .class_methods
-        .get(&ty)
-        .and_then(|m| m.get(name).copied())
-        .or_else(|| g.symbols.interface_methods.get(&ty).and_then(|m| m.get(name).copied()))
+/// What a receiver walk consulted, threaded through every hop.
+#[derive(Default)]
+struct Typed {
+    /// A recorded type text (a local, package var, result or field type)
+    /// was read: a miss counts as `typed_unbound`.
+    any: bool,
+    /// CI.2a: a hop read a field the struct does not declare from the embed
+    /// that promotes it: a bind counts as a promoted `field_hops`.
+    promoted_field: bool,
 }
 
 /// Where a receiver chain stands after a hop: a type, or an imported package
@@ -1528,7 +1579,8 @@ struct ReceiverTally {
     /// Sites whose receiver had a recorded type text (a local, package var,
     /// result or field type) but whose type or method did not resolve: a
     /// type of another module (`gin.Context`), an ambiguous name, a method
-    /// promoted from an embedded field.
+    /// promoted from an embed of another module (`sync.Mutex`'s `Lock`) or
+    /// supplied by two embeds at one depth (CI.2a binds the rest).
     typed_unbound: std::cell::Cell<usize>,
 }
 
@@ -1563,10 +1615,11 @@ impl GoPackages {
     /// package call missed). The receiver is an `Attribute` base or a
     /// `ComplexReceiver` chain ([`receiver_segments`]); [`GoPackages::chain_type`]
     /// types it through the facts CA.2a recorded, and the method binds on
-    /// that type ([`method_on`]). Every lookup is exact-name, kind-filtered
-    /// and unique-or-nothing. Evidence `graph:go_packages` with rule
-    /// `receiver_return` / `receiver_local` / `receiver_package_var` /
-    /// `receiver_field_chain`: the fact that typed the chain's last hop.
+    /// that type ([`GoPackages::method_on`]; CI.2a: also a promoted one).
+    /// Every lookup is exact-name, kind-filtered and unique-or-nothing.
+    /// Evidence `graph:go_packages` with rule `receiver_return` /
+    /// `receiver_local` / `receiver_package_var` / `receiver_field_chain`: the
+    /// fact that typed the chain's last hop.
     fn typed_receiver(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
         let (segs, name) = match &site.qualifier {
             CallQualifier::Attribute { base, name } => (receiver_segments(base)?, name),
@@ -1586,21 +1639,45 @@ impl GoPackages {
             caller_dir: self.dir_of.get(&module)?,
             from_test: self.tests.contains(&module),
         };
-        let mut typed = false;
+        let mut typed = Typed::default();
         let hit = self
             .chain_type(g, scope, &segs, 0, &mut typed)
-            .and_then(|(ty, source)| Some((method_on(g, ty, name)?, source)));
+            .and_then(|(ty, source)| Some((self.method_on(g, ty, name)?, source)));
         match hit {
-            Some((method, source)) => {
+            Some(((method, promoted), source)) => {
                 self.tally.bound(source);
+                if promoted {
+                    self.promoted.bump_call();
+                }
+                if typed.promoted_field {
+                    self.promoted.bump_field_hop();
+                }
                 Some((method, go_ev(source.rule())))
             }
             None => {
-                if typed {
+                if typed.any {
                     self.tally.typed_unbound.set(self.tally.typed_unbound.get() + 1);
                 }
                 None
             }
+        }
+    }
+
+    /// The METHOD `name` a value of type `ty` has, and whether it is
+    /// promoted: its declared method, else (an INTERFACE) the interface's own
+    /// METHOD, which A6.6's method-level IMPLEMENTS carries on to the
+    /// implementations, else (CI.2a) the method an embed of the STRUCT `ty`
+    /// promotes ([`GoPromoted::method`]).
+    fn method_on(&self, g: &RepoGraph, ty: NodeId, name: &str) -> Option<(NodeId, bool)> {
+        let own = g
+            .symbols
+            .class_methods
+            .get(&ty)
+            .and_then(|m| m.get(name).copied())
+            .or_else(|| g.symbols.interface_methods.get(&ty).and_then(|m| m.get(name).copied()));
+        match own {
+            Some(method) => Some((method, false)),
+            None => self.promoted.method(ty, name).map(|method| (method, true)),
         }
     }
 
@@ -1611,7 +1688,7 @@ impl GoPackages {
     }
 
     /// The type a receiver chain `segs` read in `scope` evaluates to, with
-    /// the fact that typed its last hop. `typed` turns true once any
+    /// the fact that typed its last hop. `typed.any` turns true once any
     /// recorded type text was consulted.
     fn chain_type<'a>(
         &'a self,
@@ -1619,7 +1696,7 @@ impl GoPackages {
         scope: RecvScope<'a>,
         segs: &[Seg<'_>],
         depth: u8,
-        typed: &mut bool,
+        typed: &mut Typed,
     ) -> Option<(NodeId, RecvSource)> {
         if depth > RECV_MAX_DEPTH || segs.len() > RECV_MAX_SEGS {
             return None;
@@ -1651,7 +1728,7 @@ impl GoPackages {
         scope: RecvScope<'a>,
         seg: Seg<'_>,
         depth: u8,
-        typed: &mut bool,
+        typed: &mut Typed,
     ) -> Option<(Hop<'a>, RecvSource)> {
         let local = |name: &str| {
             let f = scope.func?;
@@ -1663,7 +1740,7 @@ impl GoPackages {
                     if text.is_empty() {
                         return None;
                     }
-                    *typed = true;
+                    typed.any = true;
                     let ty = self.type_of_text(g, scope, text, depth + 1, typed)?;
                     return Some((Hop::Type(ty), RecvSource::Local));
                 }
@@ -1702,9 +1779,11 @@ impl GoPackages {
     /// * package + `V`: the exported package var `V` of that package.
     /// * type `T` + `f`: `T`'s field `f` -> its declared type, a bare name
     ///   (LA.23c) looked up in `T`'s package, else repo-wide
-    ///   ([`GoPackages::global_type`]).
-    /// * type `T` + `m()`: `T`'s method `m` -> its result type, read in the
-    ///   method's own file.
+    ///   ([`GoPackages::global_type`]); a field `T` does not declare, the one
+    ///   an embed promotes, typed in its declaring struct's package (CI.2a).
+    /// * type `T` + `m()`: `T`'s method `m` (promoted too,
+    ///   [`GoPackages::method_on`]) -> its result type, read in the method's
+    ///   own file.
     fn next_hop<'a>(
         &'a self,
         g: &RepoGraph,
@@ -1712,7 +1791,7 @@ impl GoPackages {
         hop: Hop<'a>,
         seg: Seg<'_>,
         depth: u8,
-        typed: &mut bool,
+        typed: &mut Typed,
     ) -> Option<(Hop<'a>, RecvSource)> {
         match (hop, seg) {
             (Hop::Package(dir), Seg::Call(f)) => {
@@ -1731,23 +1810,30 @@ impl GoPackages {
                 Some((Hop::Type(ty), RecvSource::PackageVar))
             }
             (Hop::Type(owner), Seg::Ident(field)) => {
-                let name = g
-                    .nav
-                    .field_types
-                    .get(&owner)?
-                    .get(field)
-                    .filter(|t| !t.is_empty())?;
-                *typed = true;
-                let owner_dir = self.dir_of.get(&enclosing_module(&g.nav, owner)?)?;
+                // CI.2a: a field `owner` does not declare is read from the
+                // STRUCT an embed promotes it from, in that struct's package.
+                let (decl, name) = match g.nav.field_types.get(&owner).and_then(|f| f.get(field)) {
+                    Some(name) => (owner, name),
+                    None => {
+                        let decl = self.promoted.field_owner(owner, field)?;
+                        typed.promoted_field = true;
+                        (decl, g.nav.field_types.get(&decl)?.get(field)?)
+                    }
+                };
+                if name.is_empty() {
+                    return None;
+                }
+                typed.any = true;
+                let owner_dir = self.dir_of.get(&enclosing_module(&g.nav, decl)?)?;
                 let ty = self
                     .unique_type_in(g, owner_dir, name, scope.with_tests(owner_dir))
                     .or_else(|| self.global_type(g, name, scope.from_test))?;
                 Some((Hop::Type(ty), RecvSource::FieldChain))
             }
             (Hop::Type(owner), Seg::Call(m)) => {
-                let method = method_on(g, owner, m)?;
+                let (method, _) = self.method_on(g, owner, m)?;
                 let ret = g.nav.return_types.get(&method)?;
-                *typed = true;
+                typed.any = true;
                 let at = RecvScope { func: None, module: self.file_of(g, method)?, ..scope };
                 let ty = self.type_of_text(g, at, ret, depth + 1, typed)?;
                 Some((Hop::Type(ty), RecvSource::Return))
@@ -1764,7 +1850,7 @@ impl GoPackages {
         scope: RecvScope<'_>,
         callee: NodeId,
         depth: u8,
-        typed: &mut bool,
+        typed: &mut Typed,
     ) -> Option<NodeId> {
         let kind = *g.nav.kind_by_id.get(&callee)?;
         if kind == node_kind::STRUCT || kind == node_kind::INTERFACE {
@@ -1774,7 +1860,7 @@ impl GoPackages {
             return None;
         }
         let ret = g.nav.return_types.get(&callee)?;
-        *typed = true;
+        typed.any = true;
         let at = RecvScope { func: None, module: self.file_of(g, callee)?, ..scope };
         self.type_of_text(g, at, ret, depth + 1, typed)
     }
@@ -1791,7 +1877,7 @@ impl GoPackages {
         dir: &str,
         name: &str,
         depth: u8,
-        typed: &mut bool,
+        typed: &mut Typed,
     ) -> Option<NodeId> {
         let with_tests = scope.with_tests(dir);
         let mut text: Option<&str> = None;
@@ -1810,7 +1896,7 @@ impl GoPackages {
             if t.is_empty() {
                 return None;
             }
-            *typed = true;
+            typed.any = true;
             let at = RecvScope { func: None, module: m, ..scope };
             let ty = self.type_of_text(g, at, t, depth + 1, typed)?;
             match answer {
@@ -1832,7 +1918,7 @@ impl GoPackages {
         scope: RecvScope<'_>,
         text: &str,
         depth: u8,
-        typed: &mut bool,
+        typed: &mut Typed,
     ) -> Option<NodeId> {
         if depth > RECV_MAX_DEPTH {
             return None;
@@ -1907,109 +1993,408 @@ impl GoPackages {
 // ============================================================================
 
 /// An embed ref of the Go parser: INHERITS_FROM out of an INTERFACE (one
-/// `type_elem` naming a single type).
+/// `type_elem` naming a single type, LD.7b) or out of a STRUCT (an embedded
+/// field, CI.2a).
 fn is_go_embed(nav: &CodeNav, r: &UnresolvedRef) -> bool {
     r.category == edge_category::INHERITS_FROM
-        && nav.kind_by_id.get(&r.from) == Some(&node_kind::INTERFACE)
+        && matches!(
+            nav.kind_by_id.get(&r.from),
+            Some(&node_kind::INTERFACE) | Some(&node_kind::STRUCT)
+        )
 }
 
-/// Bind each Go embed ref to the INTERFACE it names, Go's way: `R` is the
-/// interface `R` of the embedding interface's own package (directory), and
-/// `pkg.R` the interface `R` of the package the file imports as `pkg` (its
-/// import path, or a directory ending in it when the path has two or more
-/// segments, for a go.mod below the repo root). Exactly one INTERFACE must
-/// match, else the ref stays in `unresolved_refs`: another module's
-/// interface (`io.Reader`), a predeclared one (`error`, `comparable`), a
-/// constraint's exact type term (`interface{ MyStruct }`), or an ambiguous
-/// name.
+/// One embed [`bind_go_embeds`] bound: (embedder, embedded type, EVIDENCE
+/// rule, the ref's 0-based row).
+type GoEmbed = (NodeId, NodeId, &'static str, u32);
+
+/// What [`bind_go_embeds`] decided, pushed into the graph by
+/// [`GoEmbedBinds::push`] once the other refs have resolved.
+struct GoEmbedBinds {
+    /// In ref (parse) order.
+    bound: Vec<GoEmbed>,
+    unbound: Vec<UnresolvedRef>,
+    /// The struct half of the `[go-embeds]` counters.
+    stats: GoEmbedStats,
+}
+
+impl GoEmbedBinds {
+    /// Push the bound embeds as INHERITS_FROM edges (EVIDENCE
+    /// `graph:go_packages`, rule `embed_package` / `embed_import`, the ref's
+    /// line) and the rest onto `unresolved_refs`, then complete the
+    /// `[go-embeds]` counters from `promoted` (read after the calls bound).
+    fn push(self, g: &mut RepoGraph, promoted: &GoPromoted) -> GoEmbedStats {
+        for (from, to, rule, line) in self.bound {
+            push_edge(g, from, to, edge_category::INHERITS_FROM, go_ev(rule).line(line));
+        }
+        g.unresolved_refs.extend(self.unbound);
+        GoEmbedStats {
+            methods: promoted.methods.values().map(BTreeMap::len).sum(),
+            fields: promoted.fields.values().map(BTreeMap::len).sum(),
+            ambiguous: promoted.ambiguous,
+            calls: promoted.calls.get(),
+            field_hops: promoted.field_hops.get(),
+            ..self.stats
+        }
+    }
+}
+
+/// What CI.2a's struct embeds did to one Go graph, for the `[go-embeds]`
+/// marker.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct GoEmbedStats {
+    /// INHERITS_FROM refs out of a STRUCT (embedded fields).
+    struct_refs: usize,
+    /// Of `struct_refs`: bound to a STRUCT.
+    bound_struct: usize,
+    /// Of `struct_refs`: bound to an INTERFACE.
+    bound_interface: usize,
+    /// Promoted method entries over every embedding STRUCT.
+    methods: usize,
+    /// Promoted field entries over every embedding STRUCT.
+    fields: usize,
+    /// Names two embeds supply at one shallowest depth (promoted by neither).
+    ambiguous: usize,
+    /// CALLS bound to a promoted method (a self call or a typed receiver).
+    calls: usize,
+    /// CALLS bound through a promoted field of a receiver chain.
+    field_hops: usize,
+}
+
+impl GoEmbedStats {
+    /// CI.2a fired_on, once per Go graph with a struct embed ref:
+    /// `[go-embeds] struct embeds=<n> bound=<b> (struct=<s> interface=<i>)
+    /// promoted methods=<m> fields=<f> ambiguous=<a> calls=<c>
+    /// field_hops=<h>`.
+    fn marker(&self) -> Option<String> {
+        (self.struct_refs > 0).then(|| {
+            format!(
+                "[go-embeds] struct embeds={} bound={} (struct={} interface={}) promoted \
+                 methods={} fields={} ambiguous={} calls={} field_hops={}",
+                self.struct_refs,
+                self.bound_struct + self.bound_interface,
+                self.bound_struct,
+                self.bound_interface,
+                self.methods,
+                self.fields,
+                self.ambiguous,
+                self.calls,
+                self.field_hops
+            )
+        })
+    }
+}
+
+/// Bind each Go embed ref, Go's way: `R` is the type `R` of the embedder's
+/// own package (directory), and `pkg.R` the type `R` of the package the file
+/// imports as `pkg` (its import path, or a directory ending in it when the
+/// path has two or more segments, for a go.mod below the repo root). An
+/// INTERFACE embeds an INTERFACE only (LD.7b); a STRUCT a STRUCT or an
+/// INTERFACE (CI.2a). Exactly one acceptable node must match, else the ref
+/// stays unbound: another module's type (`io.Reader`), a predeclared one
+/// (`error`, `comparable`), a constraint's exact type term (`interface{
+/// MyStruct }`), or an ambiguous name (a same-named type of an external
+/// `x_test` package in the same directory).
 ///
 /// Not `resolve_refs`: its repo-wide by-name fallback binds any same-named
 /// node, and on grpc-go bound `ServerStream` (a same-package interface) to a
-/// DATA_ENTITY of that name. Edges are pushed in ref (parse) order.
-fn resolve_go_embeds(g: &mut RepoGraph, embeds: &[UnresolvedRef], imports: &[ImportStmt]) {
+/// DATA_ENTITY of that name. Reads only nav and the ImportStmts, so it runs
+/// before the import and call passes; [`GoEmbedBinds::push`] adds the edges
+/// in ref (parse) order.
+fn bind_go_embeds(
+    g: &RepoGraph,
+    embeds: &[UnresolvedRef],
+    imports: &[ImportStmt],
+) -> GoEmbedBinds {
+    let mut out =
+        GoEmbedBinds { bound: Vec::new(), unbound: Vec::new(), stats: GoEmbedStats::default() };
     if embeds.is_empty() {
-        return;
+        return out;
     }
-    let mut bound: Vec<(NodeId, NodeId, &str, u32)> = Vec::new();
-    let mut unbound: Vec<UnresolvedRef> = Vec::new();
-    {
-        let nav = &g.nav;
-        let mut by_dir_name: HashMap<(&str, &str), Vec<NodeId>> = HashMap::new();
-        let mut by_name: HashMap<&str, Vec<(&str, NodeId)>> = HashMap::new();
-        for n in &g.nodes {
-            if nav.kind_by_id.get(&n.id) != Some(&node_kind::INTERFACE) {
-                continue;
+    let nav = &g.nav;
+    let mut by_dir_name: HashMap<(&str, &str), Vec<(NodeId, NodeKindId)>> = HashMap::new();
+    let mut by_name: HashMap<&str, Vec<(&str, NodeId, NodeKindId)>> = HashMap::new();
+    for n in &g.nodes {
+        let Some(&kind) = nav.kind_by_id.get(&n.id) else {
+            continue;
+        };
+        if kind != node_kind::INTERFACE && kind != node_kind::STRUCT {
+            continue;
+        }
+        let (Some(name), Some(parent)) = (nav.name_by_id.get(&n.id), nav.parent_of.get(&n.id))
+        else {
+            continue;
+        };
+        let Some(module_qname) = nav.qname_by_id.get(parent) else {
+            continue;
+        };
+        let dir = go_package_dir(module_qname);
+        by_dir_name.entry((dir, name.as_str())).or_default().push((n.id, kind));
+        by_name.entry(name.as_str()).or_default().push((dir, n.id, kind));
+    }
+    // (importing file's MODULE qname, local package name) -> import path.
+    let mut import_paths: HashMap<(&str, &str), &str> = HashMap::new();
+    for stmt in imports {
+        let ImportTarget::Module { path, alias } = &stmt.target else {
+            continue;
+        };
+        let local = match alias.as_deref() {
+            Some("_") | Some(".") => continue,
+            Some(a) => a,
+            None if path.is_empty() => continue,
+            None => path.rsplit("::").next().unwrap_or(path),
+        };
+        import_paths.insert((stmt.from_module.as_str(), local), path.as_str());
+    }
+    // The one candidate an embedder of `from_kind` accepts, else `None`.
+    let only = |from_kind: NodeKindId, ids: &mut dyn Iterator<Item = (NodeId, NodeKindId)>| {
+        let mut ids = ids.filter(|&(_, k)| {
+            k == node_kind::INTERFACE || (from_kind == node_kind::STRUCT && k == node_kind::STRUCT)
+        });
+        match (ids.next(), ids.next()) {
+            (Some(one), None) => Some(one),
+            _ => None,
+        }
+    };
+    for r in embeds {
+        let Some(&from_kind) = nav.kind_by_id.get(&r.from) else {
+            out.unbound.push(r.clone());
+            continue;
+        };
+        let module_qname = nav.qname_by_id.get(&r.from_module).map_or("", String::as_str);
+        let hit = match &r.qualifier {
+            CallQualifier::Bare(name) => by_dir_name
+                .get(&(go_package_dir(module_qname), name.as_str()))
+                .and_then(|ids| only(from_kind, &mut ids.iter().copied()))
+                .map(|hit| (hit, "embed_package")),
+            CallQualifier::Attribute { base, name } => {
+                import_paths.get(&(module_qname, base.as_str())).and_then(|&path| {
+                    let suffix = format!("::{path}");
+                    let mut ids = by_name
+                        .get(name.as_str())
+                        .into_iter()
+                        .flatten()
+                        .filter(|(dir, ..)| {
+                            *dir == path || (path.contains("::") && dir.ends_with(&suffix))
+                        })
+                        .map(|&(_, id, kind)| (id, kind));
+                    only(from_kind, &mut ids).map(|hit| (hit, "embed_import"))
+                })
             }
-            let (Some(name), Some(parent)) = (nav.name_by_id.get(&n.id), nav.parent_of.get(&n.id)) else {
-                continue;
-            };
-            let Some(module_qname) = nav.qname_by_id.get(parent) else {
-                continue;
-            };
-            let dir = go_package_dir(module_qname);
-            by_dir_name.entry((dir, name.as_str())).or_default().push(n.id);
-            by_name.entry(name.as_str()).or_default().push((dir, n.id));
-        }
-        // (importing file's MODULE qname, local package name) -> import path.
-        let mut import_paths: HashMap<(&str, &str), &str> = HashMap::new();
-        for stmt in imports {
-            let ImportTarget::Module { path, alias } = &stmt.target else {
-                continue;
-            };
-            let local = match alias.as_deref() {
-                Some("_") | Some(".") => continue,
-                Some(a) => a,
-                None if path.is_empty() => continue,
-                None => path.rsplit("::").next().unwrap_or(path),
-            };
-            import_paths.insert((stmt.from_module.as_str(), local), path.as_str());
-        }
-        let only = |ids: &[NodeId]| match ids {
-            [one] => Some(*one),
             _ => None,
         };
-        for r in embeds {
-            let module_qname = nav.qname_by_id.get(&r.from_module).map_or("", String::as_str);
-            let hit = match &r.qualifier {
-                CallQualifier::Bare(name) => by_dir_name
-                    .get(&(go_package_dir(module_qname), name.as_str()))
-                    .and_then(|ids| only(ids))
-                    .map(|id| (id, "embed_package")),
-                CallQualifier::Attribute { base, name } => {
-                    import_paths.get(&(module_qname, base.as_str())).and_then(|&path| {
-                        let suffix = format!("::{path}");
-                        let ids: Vec<NodeId> = by_name
-                            .get(name.as_str())
-                            .into_iter()
-                            .flatten()
-                            .filter(|(dir, _)| {
-                                *dir == path || (path.contains("::") && dir.ends_with(&suffix))
-                            })
-                            .map(|&(_, id)| id)
-                            .collect();
-                        only(&ids).map(|id| (id, "embed_import"))
-                    })
+        if from_kind == node_kind::STRUCT {
+            out.stats.struct_refs += 1;
+        }
+        match hit {
+            Some(((to, kind), rule)) if to != r.from => {
+                if from_kind == node_kind::STRUCT {
+                    if kind == node_kind::STRUCT {
+                        out.stats.bound_struct += 1;
+                    } else {
+                        out.stats.bound_interface += 1;
+                    }
                 }
-                _ => None,
-            };
-            match hit {
-                Some((to, rule)) if to != r.from => bound.push((r.from, to, rule, r.line)),
-                _ => unbound.push(r.clone()),
+                out.bound.push((r.from, to, rule, r.line));
             }
+            _ => out.unbound.push(r.clone()),
         }
     }
-    for (from, to, rule, line) in bound {
-        push_edge(g, from, to, edge_category::INHERITS_FROM, go_ev(rule).line(line));
+    out
+}
+
+/// How deep [`GoPromoted::build`] follows embeds into embeds.
+const GO_EMBED_MAX_DEPTH: usize = 8;
+
+/// Where a promoted name comes from: a METHOD (a struct's or an interface's),
+/// or a field of the STRUCT that declares it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PromotedSrc {
+    Method(NodeId),
+    Field(NodeId),
+}
+
+/// CI.2a: the members each embedding Go STRUCT promotes, Go's selector rule.
+/// A name the struct declares itself (a method or a field, an embedded field
+/// included) is never promoted; otherwise the shallowest depth supplying it
+/// wins, and a name two embeds supply at that one depth is promoted by
+/// neither (`ambiguous`). A STRUCT at a depth supplies its declared methods
+/// and fields and passes its own embeds on to the next depth; an INTERFACE
+/// supplies its whole method set (its own METHODs, then its embedded
+/// interfaces', depth-first, first name wins).
+///
+/// Built once per Go graph from the bound embeds ([`bind_go_embeds`]); one
+/// bounded walk ([`GO_EMBED_MAX_DEPTH`]) per embedding STRUCT with a visited
+/// set, so an embedding cycle (which Go rejects) cannot loop. Every map is
+/// name-keyed and BTree-ordered and every embed list is sorted by id, so no
+/// answer depends on a HashMap's seed. The counters are Cells: the call hook
+/// takes `&self`.
+#[derive(Default)]
+pub(crate) struct GoPromoted {
+    /// STRUCT -> promoted method name -> METHOD.
+    methods: HashMap<NodeId, BTreeMap<String, NodeId>>,
+    /// STRUCT -> promoted field name -> the STRUCT declaring the field.
+    fields: HashMap<NodeId, BTreeMap<String, NodeId>>,
+    /// Names promoted by neither of two embeds at one depth.
+    ambiguous: usize,
+    /// CALLS bound to a promoted method.
+    calls: std::cell::Cell<usize>,
+    /// CALLS bound through a promoted field.
+    field_hops: std::cell::Cell<usize>,
+}
+
+impl GoPromoted {
+    fn build(g: &RepoGraph, bound: &[GoEmbed]) -> Self {
+        let mut out = GoPromoted::default();
+        if bound.is_empty() {
+            return out;
+        }
+        let kind = |id: NodeId| g.nav.kind_by_id.get(&id).copied();
+        let mut embeds: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        for &(from, to, ..) in bound {
+            embeds.entry(from).or_default().push(to);
+        }
+        for list in embeds.values_mut() {
+            list.sort_unstable_by_key(|id| id.0);
+            list.dedup();
+        }
+        let mut structs: Vec<NodeId> =
+            embeds.keys().copied().filter(|&id| kind(id) == Some(node_kind::STRUCT)).collect();
+        structs.sort_unstable_by_key(|id| id.0);
+        let field_names = |s: NodeId| -> Vec<&str> {
+            let fields = g.nav.field_types.get(&s).into_iter();
+            fields.flat_map(|m| m.keys().map(String::as_str)).collect()
+        };
+        for s in structs {
+            // The names `s` declares itself, methods and fields (an embedded
+            // field included): never promoted.
+            let mut blocked: BTreeSet<&str> = g
+                .symbols
+                .class_methods
+                .get(&s)
+                .into_iter()
+                .flat_map(|m| m.keys().map(String::as_str))
+                .collect();
+            blocked.extend(field_names(s));
+            let mut visited: HashSet<NodeId> = HashSet::from([s]);
+            let mut level: Vec<NodeId> = embeds.get(&s).cloned().unwrap_or_default();
+            let (mut methods, mut fields) = (BTreeMap::new(), BTreeMap::new());
+            for _ in 0..GO_EMBED_MAX_DEPTH {
+                if level.is_empty() {
+                    break;
+                }
+                let mut found: BTreeMap<&str, Vec<PromotedSrc>> = BTreeMap::new();
+                let mut next: Vec<NodeId> = Vec::new();
+                for &t in &level {
+                    if !visited.insert(t) {
+                        continue;
+                    }
+                    match kind(t) {
+                        Some(node_kind::STRUCT) => {
+                            let own = g.symbols.class_methods.get(&t).into_iter().flatten();
+                            for (name, &m) in own {
+                                push_src(&mut found, name, PromotedSrc::Method(m));
+                            }
+                            for name in field_names(t) {
+                                push_src(&mut found, name, PromotedSrc::Field(t));
+                            }
+                            next.extend(embeds.get(&t).into_iter().flatten().copied());
+                        }
+                        Some(node_kind::INTERFACE) => {
+                            for (name, m) in interface_method_set(g, &embeds, t) {
+                                push_src(&mut found, name, PromotedSrc::Method(m));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                for (name, srcs) in found {
+                    if !blocked.insert(name) {
+                        continue;
+                    }
+                    match srcs.as_slice() {
+                        [PromotedSrc::Method(m)] => {
+                            methods.insert(name.to_string(), *m);
+                        }
+                        [PromotedSrc::Field(decl)] => {
+                            fields.insert(name.to_string(), *decl);
+                        }
+                        _ => out.ambiguous += 1,
+                    }
+                }
+                next.sort_unstable_by_key(|id| id.0);
+                next.dedup();
+                level = next;
+            }
+            if !methods.is_empty() {
+                out.methods.insert(s, methods);
+            }
+            if !fields.is_empty() {
+                out.fields.insert(s, fields);
+            }
+        }
+        out
     }
-    g.unresolved_refs.extend(unbound);
+
+    /// The METHOD `name` an embed of STRUCT `ty` promotes.
+    fn method(&self, ty: NodeId, name: &str) -> Option<NodeId> {
+        self.methods.get(&ty)?.get(name).copied()
+    }
+
+    /// The STRUCT declaring the field `field` an embed of STRUCT `ty`
+    /// promotes.
+    fn field_owner(&self, ty: NodeId, field: &str) -> Option<NodeId> {
+        self.fields.get(&ty)?.get(field).copied()
+    }
+
+    fn bump_call(&self) {
+        self.calls.set(self.calls.get() + 1);
+    }
+
+    fn bump_field_hop(&self) {
+        self.field_hops.set(self.field_hops.get() + 1);
+    }
+}
+
+/// Record `src` for `name` at one depth of [`GoPromoted::build`]'s walk, once.
+fn push_src<'a>(found: &mut BTreeMap<&'a str, Vec<PromotedSrc>>, name: &'a str, src: PromotedSrc) {
+    let srcs = found.entry(name).or_default();
+    if !srcs.contains(&src) {
+        srcs.push(src);
+    }
+}
+
+/// An INTERFACE's whole method set as (name, METHOD): its own METHODs, then
+/// its embedded interfaces' (`embeds`, sorted by id), depth-first with a
+/// visited set; the first METHOD of a name wins. Embeds that did not bind
+/// contribute nothing.
+fn interface_method_set<'g>(
+    g: &'g RepoGraph,
+    embeds: &HashMap<NodeId, Vec<NodeId>>,
+    iface: NodeId,
+) -> BTreeMap<&'g str, NodeId> {
+    let mut set: BTreeMap<&'g str, NodeId> = BTreeMap::new();
+    let mut visited: HashSet<NodeId> = HashSet::new();
+    let mut stack = vec![iface];
+    while let Some(i) = stack.pop() {
+        if !visited.insert(i) || g.nav.kind_by_id.get(&i) != Some(&node_kind::INTERFACE) {
+            continue;
+        }
+        for (name, &m) in g.symbols.interface_methods.get(&i).into_iter().flatten() {
+            set.entry(name.as_str()).or_insert(m);
+        }
+        // Reversed, so the lowest id is popped (walked) first.
+        stack.extend(embeds.get(&i).into_iter().flatten().rev().copied());
+    }
+    set
 }
 
 /// The evidence of an edge a Go package-as-directory pass drew (LC.3d):
 /// `graph:go_packages` with rule `split_receiver` (LA.23d), `package_sibling`
 /// / `package_import` (the LA.13b call hook), `receiver_return` /
 /// `receiver_local` / `receiver_package_var` / `receiver_field_chain` (the
-/// CA.2b typed-receiver half of that hook) or `embed_package` /
-/// `embed_import` (LD.7b interface embeds).
+/// CA.2b typed-receiver half of that hook), `promoted_self` (CI.2a, a self
+/// call of a promoted method) or `embed_package` / `embed_import` (LD.7b
+/// interface embeds; CI.2a struct embeds reuse them).
 fn go_ev(rule: &str) -> Evidence {
     graph_evidence("graph:go_packages", rule)
 }
@@ -2119,7 +2504,7 @@ impl GoImplicitStats {
 ///   value receivers both count toward a type's set, and methods promoted
 ///   from an embedded struct field are not seen.
 ///
-/// Runs after [`resolve_go_embeds`] (the embed refs are bound) and before
+/// Runs after the embeds are pushed ([`GoEmbedBinds::push`]) and before
 /// `emit_method_level_implements`, which then pairs each new edge's methods.
 /// Pairs are sorted by id and deduped before any edge is pushed (the method
 /// tables are HashMaps with per-process seeds, and edge order feeds the
@@ -3638,8 +4023,8 @@ mod tests {
 
     /// `build_go` with the implicit pass's stats.
     fn go_implicit(parses: Vec<FileParse>) -> (RepoGraph, Option<GoImplicitStats>) {
-        let (g, _, stats, _, _, _) = build_go_passes(repo(), parses);
-        (g, stats)
+        let GoPasses { g, implicit, .. } = build_go_passes(repo(), parses);
+        (g, implicit)
     }
 
     fn implements_edge(g: &RepoGraph, from: NodeId, to: NodeId) -> Option<Confidence> {
@@ -4199,7 +4584,7 @@ mod tests {
             [&ImportTarget::Module { path: String::new(), alias: Some("scope".to_string()) }],
             "the root import is recorded"
         );
-        let (g, _, stats, packages, _, _) = build_go_passes(repo(), parses);
+        let GoPasses { g, implicit: stats, packages, .. } = build_go_passes(repo(), parses);
         let (closer, file) =
             (gid(node_kind::INTERFACE, "closer::Closer"), gid(node_kind::STRUCT, "b::file::File"));
         assert_eq!(implements_edge(&g, file, closer), Some(Confidence::Medium));
@@ -4357,7 +4742,8 @@ mod tests {
     /// bound in a sibling file; the fixture prints the packet's marker.
     #[test]
     fn go_package_stats_and_marker() {
-        let (g, _, _, stats, receivers, _) = build_go_passes(repo(), multifile_package_shape());
+        let GoPasses { g, packages: stats, receivers, .. } =
+            build_go_passes(repo(), multifile_package_shape());
         assert_eq!(
             stats,
             GoPackageStats {
@@ -4387,7 +4773,7 @@ mod tests {
 
         assert_eq!(stats.root_marker(), None, "no root-package import, no CI.3 line");
 
-        let (_, _, _, empty, _, _) = build_go_passes(repo(), vec![]);
+        let GoPasses { packages: empty, .. } = build_go_passes(repo(), vec![]);
         assert_eq!(empty.marker(), None, "no MODULE, no marker");
     }
 
@@ -4457,11 +4843,205 @@ mod tests {
             glia_parser_go::parse_file(&src, rel, &qname, "example.com/shop", repo()).expect("parse")
         })
         .collect();
-        let (_, _, _, _, receivers, _) = build_go_passes(repo(), parses);
+        let GoPasses { receivers, .. } = build_go_passes(repo(), parses);
         assert_eq!(
             receivers.marker(),
             "[go-receivers] bound=4 (return=1 local=2 package_var=1 field_chain=0) typed_unbound=0"
         );
+    }
+
+    // ---- CI.2a: Go struct embeds and promotion ------------------------------
+
+    /// The EVIDENCE (rule, line) of the `category` edge `from -> to`.
+    fn edge_rule_line(
+        g: &RepoGraph,
+        from: NodeId,
+        to: NodeId,
+        category: glia_core::EdgeCategoryId,
+    ) -> Option<(Option<String>, Option<u32>)> {
+        g.edges
+            .iter()
+            .find(|e| e.from == from && e.to == to && e.category == category)
+            .and_then(Evidence::of)
+            .map(|ev| (ev.rule, ev.line))
+    }
+
+    fn rule(rule: &str, line: u32) -> Option<(Option<String>, Option<u32>)> {
+        Some((Some(rule.to_string()), Some(line)))
+    }
+
+    /// The bench fixture go-embedded-promotion, parsed as the engine does.
+    fn promotion_fixture() -> Vec<FileParse> {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(|p| p.join("bench/substrate-gap/fixtures/go-embedded-promotion"))
+            .expect("workspace root");
+        ["app/app.go", "store/base.go", "store/users.go"]
+            .iter()
+            .map(|rel| {
+                let src = std::fs::read_to_string(root.join(rel)).expect("fixture file");
+                let qname = rel.trim_end_matches(".go").replace('/', "::");
+                glia_parser_go::parse_file(&src, rel, &qname, "example.com/promo", repo())
+                    .expect("parse")
+            })
+            .collect()
+    }
+
+    /// [`build_go_passes`] up to the promoted-member index.
+    fn promoted_index(parses: Vec<FileParse>) -> (RepoGraph, GoPromoted) {
+        let (mut g, imports, _, refs) = merge_parses(repo(), parses);
+        bind_split_go_receivers(&mut g);
+        build_symbol_table(&mut g);
+        let embeds: Vec<UnresolvedRef> =
+            refs.into_iter().filter(|r| is_go_embed(&g.nav, r)).collect();
+        let binds = bind_go_embeds(&g, &embeds, &imports);
+        let promoted = GoPromoted::build(&g, &binds.bound);
+        (g, promoted)
+    }
+
+    /// A struct embeds a STRUCT or an INTERFACE: bare through its own package
+    /// (`embed_package`), qualified through its file's import
+    /// (`embed_import`), each edge at its field's row. An INTERFACE embeds an
+    /// INTERFACE only (LD.7b: `interface{ Base }` stays unbound), and the
+    /// predeclared `error` stays in `unresolved_refs`.
+    #[test]
+    fn go_struct_embeds_bind_structs_and_interfaces() {
+        let iface = "package store\n\ntype Repo interface {\n\tSave() error\n}\n\n\
+                     type LoggingRepo struct {\n\tRepo\n}\n\ntype Port interface {\n\tBase\n}\n";
+        let app = "package app\n\nimport \"example.com/scope/store\"\n\n\
+                   type Svc struct {\n\t*store.Users\n\terror\n}\n";
+        let parses = go_sources(&[
+            ("store/base.go", "package store\n\ntype Base struct{}\n"),
+            ("store/users.go", "package store\n\ntype Users struct {\n\t*Base\n}\n"),
+            ("store/iface.go", iface),
+            ("app/app.go", app),
+        ]);
+        let GoPasses { g, embeds, .. } = build_go_passes(repo(), parses);
+        let (base, users, svc) = (
+            gid(node_kind::STRUCT, "store::base::Base"),
+            gid(node_kind::STRUCT, "store::users::Users"),
+            gid(node_kind::STRUCT, "app::app::Svc"),
+        );
+        let (repo_i, logging, port) = (
+            gid(node_kind::INTERFACE, "store::iface::Repo"),
+            gid(node_kind::STRUCT, "store::iface::LoggingRepo"),
+            gid(node_kind::INTERFACE, "store::iface::Port"),
+        );
+        let inh = edge_category::INHERITS_FROM;
+        assert_eq!(edge_rule_line(&g, users, base, inh), rule("embed_package", 3));
+        assert_eq!(edge_rule_line(&g, logging, repo_i, inh), rule("embed_package", 7));
+        assert_eq!(edge_rule_line(&g, svc, users, inh), rule("embed_import", 5));
+        assert!(!g.edges.iter().any(|e| e.from == port && e.category == inh));
+        let unbound: Vec<(NodeId, &CallQualifier)> = g
+            .unresolved_refs
+            .iter()
+            .filter(|r| r.category == inh)
+            .map(|r| (r.from, &r.qualifier))
+            .collect();
+        assert_eq!(
+            unbound,
+            vec![
+                (port, &CallQualifier::Bare("Base".to_string())),
+                (svc, &CallQualifier::Bare("error".to_string())),
+            ]
+        );
+        assert_eq!((embeds.struct_refs, embeds.bound_struct, embeds.bound_interface), (4, 2, 1));
+        // LoggingRepo promotes the interface's method.
+        let (_, promoted) = promoted_index(go_sources(&[("store/iface.go", iface)]));
+        assert_eq!(
+            promoted.method(logging, "Save"),
+            Some(gid(node_kind::METHOD, "store::iface::Repo::Save"))
+        );
+    }
+
+    /// Go's selector rule: an own method or field blocks a name, the
+    /// shallowest depth supplies it, and two embeds supplying it at one
+    /// depth promote it from neither.
+    #[test]
+    fn go_promoted_index_follows_depth_and_ambiguity() {
+        let src = "package p\n\n\
+                   type DB struct{}\n\n\
+                   type Base struct {\n\tdb *DB\n}\n\n\
+                   func (b *Base) Close() error { return nil }\n\n\
+                   func (b *Base) Name() string { return \"\" }\n\n\
+                   func (b *Base) exec() {}\n\n\
+                   type Users struct {\n\t*Base\n}\n\n\
+                   func (u *Users) Name() string { return \"\" }\n\n\
+                   type Deep struct {\n\tUsers\n}\n\n\
+                   type A struct{}\n\nfunc (a A) Close() {}\n\n\
+                   type B struct{}\n\nfunc (b B) Close() {}\n\n\
+                   type Pair struct {\n\tA\n\tB\n}\n";
+        let (_, promoted) = promoted_index(go_sources(&[("p/p.go", src)]));
+        let st = |n: &str| gid(node_kind::STRUCT, &format!("p::p::{n}"));
+        let m = |q: &str| gid(node_kind::METHOD, &format!("p::p::{q}"));
+        let names = |map: &HashMap<NodeId, BTreeMap<String, NodeId>>, ty: &str| -> Vec<String> {
+            map.get(&st(ty)).map(|m| m.keys().cloned().collect()).unwrap_or_default()
+        };
+        assert_eq!(names(&promoted.methods, "Users"), ["Close", "exec"]);
+        assert_eq!(names(&promoted.fields, "Users"), ["db"]);
+        assert_eq!(promoted.field_owner(st("Users"), "db"), Some(st("Base")));
+        assert_eq!(promoted.method(st("Users"), "Name"), None, "its own Name blocks Base's");
+        assert_eq!(promoted.method(st("Deep"), "Name"), Some(m("Users::Name")), "depth 1 over 2");
+        assert_eq!(promoted.method(st("Deep"), "Close"), Some(m("Base::Close")));
+        assert_eq!(promoted.field_owner(st("Deep"), "Base"), Some(st("Users")));
+        assert_eq!(promoted.field_owner(st("Deep"), "db"), Some(st("Base")));
+        assert_eq!(promoted.method(st("Pair"), "Close"), None, "A and B both supply Close");
+        assert_eq!(promoted.ambiguous, 1);
+    }
+
+    /// The bench fixture's four promoted calls bind with the rule of the
+    /// fact that typed them; the shadowing control keeps the struct's own
+    /// method.
+    #[test]
+    fn go_promoted_calls_bind() {
+        let g = build_go(repo(), promotion_fixture()).unwrap();
+        let m = |q: &str| gid(node_kind::METHOD, q);
+        let calls = edge_category::CALLS;
+        let close = m("store::base::Base::Close");
+        assert_eq!(
+            edge_rule_line(&g, m("store::users::Users::Save"), m("store::base::Base::exec"), calls),
+            rule("promoted_self", 11)
+        );
+        assert_eq!(
+            edge_rule_line(&g, m("store::users::Users::Flush"), m("store::base::DB::Run"), calls),
+            rule("receiver_field_chain", 13)
+        );
+        assert_eq!(
+            edge_rule_line(&g, m("app::app::Service::Shutdown"), close, calls),
+            rule("receiver_field_chain", 8)
+        );
+        assert_eq!(
+            edge_rule_line(&g, gid(node_kind::FUNCTION, "app::app::Run"), close, calls),
+            rule("receiver_local", 12)
+        );
+        let label = m("app::app::Service::Label");
+        assert!(has_edge(&g, label, m("store::users::Users::Name"), calls));
+        assert!(!has_edge(&g, label, m("store::base::Base::Name"), calls));
+        assert_eq!(
+            edge_rule_line(
+                &g,
+                gid(node_kind::STRUCT, "store::users::Users"),
+                gid(node_kind::STRUCT, "store::base::Base"),
+                edge_category::INHERITS_FROM
+            ),
+            rule("embed_package", 5)
+        );
+    }
+
+    /// The `[go-embeds]` marker over the bench fixture, and none for a graph
+    /// without a struct embed.
+    #[test]
+    fn go_embeds_marker_shape() {
+        let GoPasses { embeds, .. } = build_go_passes(repo(), promotion_fixture());
+        assert_eq!(
+            embeds.marker().as_deref(),
+            Some(
+                "[go-embeds] struct embeds=1 bound=1 (struct=1 interface=0) promoted methods=2 \
+                 fields=1 ambiguous=0 calls=3 field_hops=1"
+            )
+        );
+        let GoPasses { embeds, .. } = build_go_passes(repo(), multifile_package_shape());
+        assert_eq!(embeds.marker(), None);
     }
 
     /// An import of a directory binds its dir-named file, else its first
@@ -4590,7 +5170,7 @@ mod tests {
     fn go_packages_read_a_file_named_module_once_by_its_bare_form() {
         // `infra/main.go` + `infra/main.tf`, `infra/main_test.go` + `.py`:
         // one member each, the test file still a test, the alias not a member.
-        let (g, _, _, stats, _, _) = build_go_passes(
+        let GoPasses { g, packages: stats, .. } = build_go_passes(
             repo(),
             vec![
                 named_module("infra::main.go", "main", &[]),

@@ -1,0 +1,58 @@
+{
+  "framework": "go-embedded-promotion",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "calls",
+  "cells": [
+    "go/calls"
+  ],
+  "note": "CI-2 (1/2): a Go struct's embedded field is a STRUCT INHERITS_FROM edge, and a method or field promoted through it binds: a self call (u.exec), a promoted field chain (u.db.Run), a field-typed receiver (s.users.Close) and a parameter-typed receiver (u.Close). A method the struct declares itself shadows the promoted one (Users::Name over Base::Name). Baseline HEAD f8a46c0: no struct INHERITS_FROM and none of the four promoted CALLS; the shadowing control binds Users::Name.",
+  "expect_edges": [
+    {
+      "from": "store::users::Users",
+      "to": "store::base::Base",
+      "category": "INHERITS_FROM",
+      "note": "the embed"
+    },
+    {
+      "from": "store::users::Users::Save",
+      "to": "store::base::Base::exec",
+      "category": "CALLS",
+      "note": "promoted self call"
+    },
+    {
+      "from": "store::users::Users::Flush",
+      "to": "store::base::DB::Run",
+      "category": "CALLS",
+      "note": "promoted field db"
+    },
+    {
+      "from": "app::app::Service::Shutdown",
+      "to": "store::base::Base::Close",
+      "category": "CALLS",
+      "note": "field-typed receiver, promoted method"
+    },
+    {
+      "from": "app::app::Run",
+      "to": "store::base::Base::Close",
+      "category": "CALLS",
+      "note": "parameter-typed receiver, promoted method"
+    },
+    {
+      "from": "app::app::Service::Label",
+      "to": "store::users::Users::Name",
+      "category": "CALLS",
+      "note": "CONTROL: the struct's own method, HEAD"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "app::app::Service::Label",
+      "to": "store::base::Base::Name",
+      "category": "CALLS",
+      "note": "an own method shadows the promoted one"
+    }
+  ]
+}

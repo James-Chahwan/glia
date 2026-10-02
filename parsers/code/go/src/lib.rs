@@ -669,6 +669,9 @@ fn collect_field_types(
         else {
             continue;
         };
+        // CI.2a: the struct's own type parameters (`type Box[T any] struct {
+        // T }`) embed nothing a parse can name.
+        let type_params = type_param_names(spec.child_by_field_name("type_parameters"), src);
         let mut lc = list.walk();
         for decl in list.named_children(&mut lc) {
             if decl.kind() != "field_declaration" {
@@ -677,7 +680,76 @@ fn collect_field_types(
             for (field, ty) in field_decl_types(decl, src, type_ids, &acc.external_pkgs) {
                 acc.nav.record_field_type(struct_id, &field, &ty);
             }
+            push_struct_embed(decl, src, struct_id, &type_params, acc);
         }
+    }
+}
+
+/// CI.2a: an embedded field (a `field_declaration` with no `name`) is an
+/// INHERITS_FROM ref out of the struct ([`embedded_struct_qualifier`]), which
+/// the graph binds to the in-repo STRUCT or INTERFACE it names, package-scoped
+/// (`resolve_go_embeds`), and reads for Go's promoted methods and fields.
+///
+/// Independent of [`field_decl_types`]' guards: an embedded `*store.Logger`
+/// inside `type Logger` records no field type (the bare-name self-bind
+/// guard) but still embeds, bound through its import and never by bare name.
+/// The predeclared `error` is kept: its ref stays unresolved in the graph.
+fn push_struct_embed(
+    decl: TsNode,
+    src: &[u8],
+    struct_id: NodeId,
+    type_params: &[String],
+    acc: &mut Acc,
+) {
+    if decl.child_by_field_name("name").is_some() {
+        return;
+    }
+    let Some(type_node) = decl.child_by_field_name("type") else {
+        return;
+    };
+    let Some(module_id) = acc.module_id else {
+        return;
+    };
+    let Some(qualifier) = embedded_struct_qualifier(type_node, src, type_params, &acc.external_pkgs)
+    else {
+        return;
+    };
+    acc.refs.push(UnresolvedRef {
+        from: struct_id,
+        from_module: module_id,
+        qualifier,
+        category: edge_category::INHERITS_FROM,
+        line: line_at(decl),
+    });
+}
+
+/// How an embedded struct field names its type: `T` / `*T` / `T[..]` ->
+/// `Bare("T")`, `pkg.T` / `*pkg.T` / `pkg.T[..]` -> `Attribute { base: "pkg",
+/// name: "T" }`. `None` for `any`, one of the struct's own type parameters
+/// (`type Box[T any] struct { T }`), a package outside the repo's go.mod
+/// modules (`*zap.SugaredLogger`, `sync.Mutex`: LA.18d's `external_pkgs`;
+/// with no go.mod every import is external) and every other shape.
+fn embedded_struct_qualifier(
+    type_node: TsNode,
+    src: &[u8],
+    type_params: &[String],
+    external_pkgs: &std::collections::HashSet<String>,
+) -> Option<CallQualifier> {
+    let inner = generic_base(unwrap_pointer(type_node))?;
+    match inner.kind() {
+        "type_identifier" => {
+            let name = text_of(inner, src);
+            let skip = name.is_empty() || name == "any" || type_params.iter().any(|p| p == name);
+            (!skip).then(|| CallQualifier::Bare(name.to_string()))
+        }
+        "qualified_type" => {
+            let base = text_of(inner.child_by_field_name("package")?, src);
+            let name = text_of(inner.child_by_field_name("name")?, src);
+            (!base.is_empty() && !name.is_empty() && !external_pkgs.contains(base)).then(|| {
+                CallQualifier::Attribute { base: base.to_string(), name: name.to_string() }
+            })
+        }
+        _ => None,
     }
 }
 
@@ -7121,6 +7193,60 @@ type UserService struct {
         ]);
         assert_eq!(struct_fields(&parse, "shop::UserService"), expect);
         assert!(struct_fields(&parse, "shop::Logger").is_empty());
+    }
+
+    /// The INHERITS_FROM refs out of the struct `qname`, in parse order.
+    fn embed_refs(parse: &FileParse, qname: &str) -> Vec<CallQualifier> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, qname);
+        parse
+            .refs
+            .iter()
+            .filter(|r| r.from == id && r.category == edge_category::INHERITS_FROM)
+            .map(|r| r.qualifier.clone())
+            .collect()
+    }
+
+    /// CI.2a: every embedded field of a struct is an INHERITS_FROM ref, in
+    /// field order: bare (pointer and generic forms included) and qualified
+    /// through an in-module import; a package outside the module
+    /// (`*zap.SugaredLogger`) embeds nothing a parse can bind. The embedded
+    /// `*store.Logger` inside `type Logger` records no field type but still
+    /// embeds. With no go.mod every import is external: only bare embeds.
+    #[test]
+    fn struct_embeds_emit_inherits_from_refs() {
+        let bare = |n: &str| CallQualifier::Bare(n.to_string());
+        let attr = |b: &str, n: &str| CallQualifier::Attribute {
+            base: b.to_string(),
+            name: n.to_string(),
+        };
+        let parse = parse_file(FIELD_DECLS, "svc.go", "shop", "example.com/shop", repo()).unwrap();
+        assert_eq!(
+            embed_refs(&parse, "shop::UserService"),
+            vec![bare("UserRepo"), bare("Audit"), attr("store", "Tx"), bare("Base")]
+        );
+        assert_eq!(embed_refs(&parse, "shop::Logger"), vec![attr("store", "Logger")]);
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "shop");
+        let lines: Vec<(u32, NodeId)> = parse
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::INHERITS_FROM)
+            .map(|r| (r.line, r.from_module))
+            .collect();
+        let rows = [14, 25, 26, 27, 37];
+        assert_eq!(lines, rows.map(|row| (row, module)).to_vec());
+
+        let no_mod = parse_file(FIELD_DECLS, "svc.go", "shop", "", repo()).unwrap();
+        assert_eq!(
+            embed_refs(&no_mod, "shop::UserService"),
+            vec![bare("UserRepo"), bare("Audit"), bare("Base")]
+        );
+        assert!(embed_refs(&no_mod, "shop::Logger").is_empty());
+
+        // A struct's own type parameter and `any` embed nothing; the
+        // predeclared `error` is kept (the graph leaves it unresolved).
+        let src = "package p\n\ntype Box[T any] struct {\n\tT\n\terror\n\tany\n\tn int\n}\n";
+        let parse = parse_file(src, "p.go", "p", "example.com/p", repo()).unwrap();
+        assert_eq!(embed_refs(&parse, "p::Box"), vec![bare("error")]);
     }
 
     #[test]
