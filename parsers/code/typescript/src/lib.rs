@@ -248,6 +248,20 @@ struct Acc {
     /// only by the receiver gate, so A6.2a's receiver binding through
     /// `CodeNav::field_types` is unchanged.
     field_new_types: HashMap<(NodeId, String), String>,
+    /// CH.4: `this.<name>` used as a value inside a class member (a method
+    /// passed by value: `addEventListener('x', this.onX)`, `subscribe(this.h)`,
+    /// `this.render.bind(this)`), as `(from, enclosing class, name, row)`, one
+    /// per `(from, name)` in walk order. Resolved into USES edges to the same
+    /// class's METHOD in `resolve_intra_file`, once every member is known.
+    this_refs: Vec<(NodeId, NodeId, String, u32)>,
+    /// CH.4: `(from, name)` -> its index in `this_refs`. The call walk pops
+    /// siblings right to left, so a repeat keeps the smaller (first source)
+    /// row as the evidence line (LC.3b).
+    this_ref_seen: HashMap<(NodeId, String), usize>,
+    /// CH.4: the METHODs declared as a `get` / `set` accessor. Reading
+    /// `this.isDesktop` runs a getter: a state read, not a method passed by
+    /// value, so a by-value candidate naming one mints no USES.
+    accessors: HashSet<NodeId>,
 }
 
 /// CH.2: what one file's call-initialised class fields gave the graph (the
@@ -1497,6 +1511,15 @@ fn visit_enum(
     }
 }
 
+/// CH.4: a `get` / `set` accessor (`get isDesktop(): boolean {…}`, `abstract
+/// get label(): string;`): the keyword is an anonymous child of the member, so
+/// a method NAMED `get` (`get() {}`, a named `property_identifier`) is none.
+fn is_accessor(n: TsNode) -> bool {
+    let mut c = n.walk();
+    n.children(&mut c)
+        .any(|ch| !ch.is_named() && matches!(ch.kind(), "get" | "set"))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn visit_method(
     n: TsNode,
@@ -1529,6 +1552,9 @@ fn visit_method(
     });
     acc.class_methods
         .insert((class_id, name.to_string()), method_id);
+    if is_accessor(n) {
+        acc.accessors.insert(method_id);
+    }
     acc.nav.record(
         method_id,
         name,
@@ -1605,6 +1631,9 @@ fn visit_abstract_method(
     });
     acc.class_methods
         .insert((class_id, name.to_string()), method_id);
+    if is_accessor(n) {
+        acc.accessors.insert(method_id);
+    }
     acc.nav.record(
         method_id,
         name,
@@ -2007,6 +2036,7 @@ fn collect_calls_in(
         }
         if kind == "member_expression" {
             record_member_ref(node, src, from, acc);
+            record_this_ref(node, src, from, enclosing_class, acc);
         }
         if matches!(
             kind,
@@ -2045,6 +2075,70 @@ fn record_member_ref(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
     let (base, name) = (text(object, src).to_string(), text(property, src).to_string());
     if acc.member_ref_seen.insert((from, base.clone(), name.clone())) {
         acc.member_refs.push((from, base, name, line_at(node)));
+    }
+}
+
+/// CH.4: record `this.<name>` — object `this`, property a `property_identifier`
+/// or `#private` name — read as a VALUE inside a member of `enclosing_class`:
+/// a method passed by value (`addEventListener('resize', this.onResize)`,
+/// `subscribe(this.handleTick)`, `{ next: this.onNext }`) or bound
+/// (`this.render.bind(this)`, `.call` / `.apply`). Skipped: the callee of its
+/// call (`this.render()` is a CallSite, so CALLS), the target of an assignment
+/// (`this.handler = null` is a write), and the object of a further member read
+/// other than `bind` / `call` / `apply` (`this.items.push(x)` reads data). No
+/// enclosing class (a module-level walk) records nothing. Whether the name is
+/// the class's METHOD (not a data field or a CH.2 STATE_VAR) is decided in
+/// `resolve_intra_file`, once every member of the class is known.
+fn record_this_ref(
+    node: TsNode,
+    src: &[u8],
+    from: NodeId,
+    enclosing_class: Option<NodeId>,
+    acc: &mut Acc,
+) {
+    let Some(class) = enclosing_class else {
+        return;
+    };
+    let (Some(object), Some(property)) = (
+        node.child_by_field_name("object"),
+        node.child_by_field_name("property"),
+    ) else {
+        return;
+    };
+    if object.kind() != "this"
+        || !matches!(
+            property.kind(),
+            "property_identifier" | "private_property_identifier"
+        )
+    {
+        return;
+    }
+    if let Some(parent) = node.parent() {
+        let is = |field: &str| parent.child_by_field_name(field) == Some(node);
+        match parent.kind() {
+            "call_expression" if is("function") => return,
+            "assignment_expression" | "augmented_assignment_expression" if is("left") => return,
+            "member_expression" if is("object") => {
+                let via = parent.child_by_field_name("property").map(|p| text(p, src));
+                if !matches!(via, Some("bind" | "call" | "apply")) {
+                    return;
+                }
+            }
+            _ => {}
+        }
+    }
+    let name = text(property, src).to_string();
+    let row = line_at(node);
+    match acc.this_ref_seen.get(&(from, name.clone())) {
+        Some(&i) => {
+            if let Some(entry) = acc.this_refs.get_mut(i) {
+                entry.3 = entry.3.min(row);
+            }
+        }
+        None => {
+            acc.this_ref_seen.insert((from, name.clone()), acc.this_refs.len());
+            acc.this_refs.push((from, class, name, row));
+        }
     }
 }
 
@@ -3638,6 +3732,43 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
                 line: uc.line,
             }),
         }
+    }
+
+    // CH.4: a method passed by value is USED by the member that passes it, so
+    // a handler registered only as a callback has a carry in-edge. Same class
+    // by construction (`class_methods` is keyed by the enclosing class, so an
+    // inherited method records nothing); METHOD targets only, since CH.2 maps
+    // a STATE_VAR there too and a state read is never a USES, and no `get` /
+    // `set` accessor (`this.isDesktop` reads state through a getter); never a
+    // self-reference (`removeEventListener(.., this.onX)` inside `onX`).
+    let mut method_uses = 0usize;
+    let mut method_targets: HashSet<NodeId> = HashSet::new();
+    for (from, class, name, row) in std::mem::take(&mut acc.this_refs) {
+        let Some(&to) = acc.class_methods.get(&(class, name)) else {
+            continue;
+        };
+        if to == from
+            || out.nav.kind_by_id.get(&to) != Some(&node_kind::METHOD)
+            || acc.accessors.contains(&to)
+        {
+            continue;
+        }
+        let ev = evidence::Evidence::emitter(format!("parser:{}", lang_tag(&acc.file_rel)))
+            .rule("method_ref")
+            .line(row);
+        out.edges.push(
+            Edge::new(from, to, edge_category::USES, Confidence::Strong).with_cell(ev.to_cell()),
+        );
+        method_uses += 1;
+        method_targets.insert(to);
+    }
+    if method_uses > 0 {
+        eprintln!(
+            "[ts-method-refs] uses={} targets={} file={}",
+            method_uses,
+            method_targets.len(),
+            acc.file_rel
+        );
     }
 
     // CH.3b: `out.edges` now holds every intra-file CALLS, so each callable's
@@ -7435,5 +7566,198 @@ export abstract class BaseRepo<T> {
         assert!(has_edge(&parse, c_m, c_n, edge_category::CALLS), "this.n() binds in-file");
         let ctor = id(node_kind::METHOD, "src::c::C::constructor");
         assert!(!parse.calls.iter().any(|c| c.from == ctor), "{:?}", parse.calls);
+    }
+
+    /// CH.4: the USES edges `parse` holds from `from`, as `(to, evidence)`.
+    fn method_uses_from(
+        parse: &FileParse,
+        from: NodeId,
+    ) -> Vec<(NodeId, glia_code_domain::evidence::Evidence)> {
+        use glia_code_domain::evidence::Evidence;
+        parse
+            .edges
+            .iter()
+            .filter(|e| e.from == from && e.category == edge_category::USES)
+            .map(|e| (e.to, Evidence::of(e).expect("a method_ref USES carries evidence")))
+            .collect()
+    }
+
+    /// CH.4: an arrow-field METHOD (CG.1) passed to `addEventListener` is USED
+    /// by the member passing it: emitter the file's tag, rule `method_ref`, the
+    /// site's 0-based row. The field's own `this.render()` stays a CALLS, and
+    /// its self-reference (`removeEventListener(.., this.onResize)` inside
+    /// `onResize`) mints no self-edge.
+    #[test]
+    fn arrow_field_passed_by_value_is_used() {
+        use glia_code_domain::evidence::Basis;
+        let src = "\
+export class HeroComponent {
+  ngAfterViewInit(): void { window.addEventListener('resize', this.onResize); }
+  private onResize = (): void => {
+    this.render();
+    window.removeEventListener('resize', this.onResize);
+  };
+  render(): void {}
+}
+";
+        let parse = parse_file(src, "src/hero.component.ts", "src::hero", repo()).unwrap();
+        let m = |f: &str| id(node_kind::METHOD, &format!("src::hero::HeroComponent::{f}"));
+        let uses = method_uses_from(&parse, m("ngAfterViewInit"));
+        assert_eq!(uses.len(), 1, "{uses:?}");
+        let (to, ev) = &uses[0];
+        assert_eq!(*to, m("onResize"));
+        assert_eq!(ev.emitter, "parser:angular");
+        assert_eq!(ev.rule.as_deref(), Some("method_ref"));
+        assert_eq!((ev.line, ev.basis), (Some(1), Basis::Site));
+        assert_intra_call(&parse, m("onResize"), m("render"), 3, "onResize -> render");
+        assert!(
+            method_uses_from(&parse, m("onResize")).is_empty(),
+            "a call is no USES and a self-reference no self-edge: {:?}",
+            parse.edges
+        );
+    }
+
+    /// CH.4: `subscribe(this.h)`, `this.render.bind(this)`, `.call` and a
+    /// `#private` method passed by value are each a USES; the data field the
+    /// subscription goes through (`this.ticks`) is none.
+    #[test]
+    fn subscribe_and_bind() {
+        let src = "\
+export class Hero {
+  private readonly ticks = new Subject<number>();
+  ngAfterViewInit(): void {
+    this.ticks.subscribe(this.handleTick);
+    requestAnimationFrame(this.render.bind(this));
+    setTimeout(() => this.flush.call(this), 0);
+    queueMicrotask(this.#tick);
+  }
+  handleTick(n: number): void {}
+  render(): void {}
+  flush(): void {}
+  #tick(): void {}
+}
+";
+        let parse = parse_file(src, "src/hero.ts", "src::hero", repo()).unwrap();
+        let m = |f: &str| id(node_kind::METHOD, &format!("src::hero::Hero::{f}"));
+        let mut got: Vec<(NodeId, Option<u32>, Option<String>, String)> =
+            method_uses_from(&parse, m("ngAfterViewInit"))
+                .into_iter()
+                .map(|(to, ev)| (to, ev.line, ev.rule, ev.emitter))
+                .collect();
+        got.sort_by_key(|(_, line, ..)| *line);
+        let rule = Some("method_ref".to_string());
+        let tag = "parser:typescript".to_string();
+        assert_eq!(
+            got,
+            vec![
+                (m("handleTick"), Some(3), rule.clone(), tag.clone()),
+                (m("render"), Some(4), rule.clone(), tag.clone()),
+                (m("flush"), Some(5), rule.clone(), tag.clone()),
+                (m("#tick"), Some(6), rule, tag),
+            ],
+            "edges {:?}",
+            parse.edges
+        );
+    }
+
+    /// CH.4: a call is CALLS, never also a USES.
+    #[test]
+    fn call_is_not_uses() {
+        let src = "class C {\n  render() { this.handleTick(0); }\n  handleTick(n: number) {}\n}\n";
+        let parse = parse_file(src, "src/c.ts", "src::c", repo()).unwrap();
+        let m = |f: &str| id(node_kind::METHOD, &format!("src::c::C::{f}"));
+        assert_intra_call(&parse, m("render"), m("handleTick"), 1, "render -> handleTick");
+        assert!(
+            !parse.edges.iter().any(|e| e.category == edge_category::USES),
+            "{:?}",
+            parse.edges
+        );
+    }
+
+    /// CH.4: another class's member (`this.ticker.stop`), a data field
+    /// (`this.rafId`), a CH.2 STATE_VAR (`this.label`, a signal), an inherited
+    /// method (`this.handle`, defined on the superclass) passed by value and a
+    /// getter read (`this.isDesktop`, a METHOD read as state) mint no USES:
+    /// same class, METHOD targets only, no accessor.
+    #[test]
+    fn other_class_state_and_data_mint_nothing() {
+        let src = "\
+import { signal } from '@angular/core';
+export class Ticker { start(cb: () => void) { cb(); } stop() {} }
+export class Hero {
+  private readonly ticker = new Ticker();
+  private rafId = 0;
+  readonly label = signal('x');
+  ngAfterViewInit(): void {
+    this.ticker.start(this.ticker.stop);
+    console.info(this.rafId, this.label);
+  }
+}
+export class Base { handle(e: Event): void {} }
+export class Sub extends Base {
+  run(): void { window.addEventListener('x', this.handle); }
+  get isDesktop(): boolean { return true; }
+  layout(): void { if (this.isDesktop) { console.info(this.isDesktop); } }
+}
+";
+        let parse = parse_file(src, "src/hero.component.ts", "src::hero", repo()).unwrap();
+        assert!(
+            has_node(&parse, id(node_kind::STATE_VAR, "src::hero::Hero::label")),
+            "label is a CH.2 STATE_VAR (so class_methods maps it)"
+        );
+        assert!(
+            has_node(&parse, id(node_kind::METHOD, "src::hero::Sub::isDesktop")),
+            "the getter is a METHOD (so the accessor filter is what drops it)"
+        );
+        assert!(
+            !parse.edges.iter().any(|e| e.category == edge_category::USES),
+            "no USES: {:?}",
+            parse.edges
+        );
+    }
+
+    /// CH.4: two by-value sites of one method in one member are one USES
+    /// whose evidence row is the first site's, though the call walk pops
+    /// siblings right to left.
+    #[test]
+    fn dedupe_keeps_first_row() {
+        let src = "\
+export class Hero {
+  toggle(on: boolean): void {
+    if (on) {
+      window.addEventListener('resize', this.onResize);
+    } else {
+      window.removeEventListener('resize', this.onResize);
+    }
+  }
+  onResize(): void {}
+}
+";
+        let parse = parse_file(src, "src/hero.ts", "src::hero", repo()).unwrap();
+        let m = |f: &str| id(node_kind::METHOD, &format!("src::hero::Hero::{f}"));
+        let uses = method_uses_from(&parse, m("toggle"));
+        assert_eq!(uses.len(), 1, "{uses:?}");
+        assert_eq!(uses[0].0, m("onResize"));
+        assert_eq!(uses[0].1.line, Some(3), "the first site's row");
+    }
+
+    /// CH.4: assigning to a method's name is a write, never a USES.
+    #[test]
+    fn assignment_is_not_uses() {
+        let src = "\
+export class Hero {
+  reset(): void {
+    this.handler = null;
+    this.handler += '';
+  }
+  handler(): void {}
+}
+";
+        let parse = parse_file(src, "src/hero.ts", "src::hero", repo()).unwrap();
+        assert!(
+            !parse.edges.iter().any(|e| e.category == edge_category::USES),
+            "{:?}",
+            parse.edges
+        );
     }
 }

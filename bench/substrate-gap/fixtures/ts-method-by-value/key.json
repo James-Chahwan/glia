@@ -1,0 +1,66 @@
+{
+  "framework": "ts-method-by-value",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "CH-4: a method passed by value (`addEventListener('resize', this.onResize)`, `subscribe(this.handleTick)`, `this.render.bind(this)`) is used by the enclosing member: USES enclosing -> the SAME class's METHOD (CG.1 arrow-field METHODs included), so a method used only as a callback is not a dead_symbol. Never for a state / data field read (`this.rafId`), never across classes (`this.ticker.stop`), never for a call (`this.render()` is CALLS). quokka a77d4cb: 10 by-value sites to 5 arrow handlers; 4 of them (handleMotionPreferenceChange, handlePointerMove, handleVisibilityChange, handleReducedMotionChange) are dead_symbol rows today. Baseline (HEAD f8a46c0, leap wheel): no USES edge.",
+  "expect_edges": [
+    {
+      "from": "HeroComponent/ngAfterViewInit",
+      "to": "HeroComponent/onResize",
+      "category": "USES",
+      "note": "arrow-field METHOD passed to addEventListener"
+    },
+    {
+      "from": "HeroComponent/ngOnDestroy",
+      "to": "HeroComponent/onResize",
+      "category": "USES",
+      "note": "removeEventListener(this.onResize)"
+    },
+    {
+      "from": "HeroComponent/ngAfterViewInit",
+      "to": "HeroComponent/handleTick",
+      "category": "USES",
+      "note": "method passed to subscribe"
+    },
+    {
+      "from": "HeroComponent/ngAfterViewInit",
+      "to": "HeroComponent/render",
+      "category": "USES",
+      "note": "this.render.bind(this)"
+    },
+    {
+      "from": "HeroComponent/render",
+      "to": "HeroComponent/handleTick",
+      "category": "CALLS",
+      "note": "a call stays CALLS (regression guard)"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src/hero.component/HeroComponent/ngAfterViewInit",
+      "to": "src/ticker/Ticker/stop",
+      "category": "USES",
+      "note": "this.ticker.stop is another class's member"
+    },
+    {
+      "from": "src/hero.component/HeroComponent/render",
+      "to": "src/hero.component/HeroComponent/handleTick",
+      "category": "USES",
+      "note": "a call is not also a USES"
+    },
+    {
+      "from": "src/hero.component/HeroComponent/onResize",
+      "to": "src/hero.component/HeroComponent/render",
+      "category": "USES",
+      "note": "this.render() inside the arrow field is a call"
+    },
+    {
+      "from": "src/hero.component/HeroComponent/ngAfterViewInit",
+      "to": "src/hero.component/HeroComponent/label",
+      "category": "USES",
+      "note": "a state field (CH-2 STATE_VAR) passed by value is a state read, never USES"
+    }
+  ]
+}
