@@ -1,0 +1,25 @@
+{
+  "framework": "dart-dio-cascade-client",
+  "language": "dart",
+  "dirs": ["app"],
+  "note": "CH-5 (Dart, extraction precision): quokka_android/lib/core/http/api_client.dart builds a one-off client `final fresh = Dio(BaseOptions(..))..interceptors.add(..)` and calls `fresh.post('/auth/refresh', ..)`. `fresh` does not match the client-receiver name heuristic, so the text scan minted a server ROUTE `POST /auth/refresh` and no ENDPOINT; quokka_web's endpoint then paired with that phantom route. A receiver the file binds to a Dio (a `Dio(..)` construction, cascade or not, in a `final` / `var` / typed local, a field or getter declared `Dio`) is a Dio client: its verb calls are ENDPOINTs and never ROUTEs. The base here is a host-only literal (root path), so the endpoint fold adds no prefix. A shelf `Router()` in the same file still registers a ROUTE. Baseline (HEAD b269af5, leap wheel): ROUTEs POST /auth/refresh, GET /auth/me, PUT /auth/password, DELETE /auth/session and no ENDPOINT for them (nodes 1/5, CALLS 0/4, FORBID VIOLATIONS 4).",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "POST /auth/refresh", "exact": true, "note": "cascade `Dio(..)..x` local"},
+    {"kind": "ENDPOINT", "name": "GET /auth/me", "exact": true, "note": "typed local `Dio transport = Dio()`"},
+    {"kind": "ENDPOINT", "name": "PUT /auth/password", "exact": true, "note": "field `final Dio conn`"},
+    {"kind": "ENDPOINT", "name": "DELETE /auth/session", "exact": true, "note": "getter `Dio get session`"},
+    {"kind": "ROUTE", "name": "GET /health", "exact": true, "note": "a shelf Router() stays a server ROUTE"}
+  ],
+  "expect_edges": [
+    {"from": "AuthApi/refresh", "to": "POST /auth/refresh", "category": "CALLS"},
+    {"from": "AuthApi/me", "to": "GET /auth/me", "category": "CALLS"},
+    {"from": "AuthApi/changePassword", "to": "PUT /auth/password", "category": "CALLS"},
+    {"from": "AuthApi/logout", "to": "DELETE /auth/session", "category": "CALLS"}
+  ],
+  "forbid": [
+    {"kind": "ROUTE", "name": "POST /auth/refresh", "note": "a Dio client call is never a server ROUTE"},
+    {"kind": "ROUTE", "name": "GET /auth/me", "note": "a Dio client call is never a server ROUTE"},
+    {"kind": "ROUTE", "name": "PUT /auth/password", "note": "a Dio client call is never a server ROUTE"},
+    {"kind": "ROUTE", "name": "DELETE /auth/session", "note": "a Dio client call is never a server ROUTE"}
+  ]
+}

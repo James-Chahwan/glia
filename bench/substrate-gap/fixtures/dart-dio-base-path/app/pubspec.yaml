@@ -1,0 +1,3 @@
+name: app
+dependencies:
+  dio: ^5.4.0

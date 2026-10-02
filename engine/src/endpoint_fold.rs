@@ -82,6 +82,27 @@
 //! any entry is folded. A call site with no `wrapper_of`, a builder with no
 //! fact (quokka's `buildApiRootUrl`), a member bound to two paths, or a path
 //! already under the prefix is left exactly as it was.
+//!
+//! DART PROJECT BASES (CH.5c). A Dio call site does not name its client
+//! (quokka_android's clients come out of a Riverpod provider), so a Dart
+//! client's base path is a fact about its PROJECT: the owner
+//! ([`http_owner::OwnerIndex`]) of the file. Every `BaseOptions(baseUrl: X)` /
+//! `<recv>.options.baseUrl = X` a project's Dart files hold (CH.5a's
+//! `NavFact::ClientBase`) is resolved by [`resolve_client_base`]: a string
+//! literal, else a URL-shaped getter / constant of that name (CH.5a's
+//! `NavFact::ValueLiteral`: `Env.apiBaseUrl` -> `${…}://${…}/api`), else the
+//! const table's EXACT key (`resolve_expr_strict`, never the lenient
+//! last-segment lookup: quokka_web's environment.ts binds a bare `apiBaseUrl`
+//! to the Angular app's root URL). A base copied from an existing request
+//! (`retry.baseUrl`) or a root URL adds nothing. When every other base of the
+//! project agrees on ONE non-root path, each root-relative, host-less Dart
+//! ENDPOINT of that project moves under it like a builder-read call site:
+//! `endpoint:GET:/protected/friends` -> `endpoint:GET:/api/protected/friends`,
+//! `"prefix"` / `"prefix_from"` (the base expression), Medium (a project-level
+//! inference: the call site does not name its client). A project with an
+//! unresolvable base or two disagreeing paths is not prefixed and named once
+//! on an `[endpoint-base]` line, so an overlay `[constants]` pin of the
+//! expression's exact key can unblock it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -121,11 +142,15 @@ pub(crate) struct FoldStats {
     /// prefix step moved under their URL builder's configured API prefix.
     /// Each is also counted in `folded`.
     pub prefixed_wrapper: usize,
-    /// CH.5c's Dart project-base step: the `base=` of `[endpoint-prefix]`.
-    /// Nothing in CH.5b moves it.
+    /// CH.5c: ENDPOINT node entries (Dart call sites) the project-base step
+    /// moved under their project's Dio base path: the `base=` of
+    /// `[endpoint-prefix]`. Each is also counted in `folded`.
     pub prefixed_base: usize,
     /// CH.5b: the distinct prefixes the prefix steps applied.
     pub prefixes: BTreeSet<String>,
+    /// CH.5c: Dart projects whose Dio bases block the project-base step, by
+    /// owner (`.` = the repo root), with the reason, for `[endpoint-base]`.
+    pub blocked_bases: BTreeMap<String, String>,
 }
 
 impl FoldStats {
@@ -138,6 +163,7 @@ impl FoldStats {
         self.prefixed_wrapper += other.prefixed_wrapper;
         self.prefixed_base += other.prefixed_base;
         self.prefixes.extend(other.prefixes);
+        self.blocked_bases.extend(other.blocked_bases);
     }
 
     /// The fired_on markers, once per repo, each only when non-zero:
@@ -180,6 +206,12 @@ impl FoldStats {
                 prefixes.join(",")
             );
         }
+        // CH.5c diagnostic, once per Dart project whose bases block the
+        // project-base step:
+        //   `[endpoint-base] project <owner> not prefixed: <reason> repo=<label>`
+        for (project, reason) in &self.blocked_bases {
+            eprintln!("[endpoint-base] project {project} not prefixed: {reason} repo={repo_label}");
+        }
     }
 }
 
@@ -194,7 +226,10 @@ pub(crate) fn fold_repo<'a>(
 ) -> FoldStats {
     let mut parses: Vec<&mut FileParse> = parses.into_iter().collect();
     let ctx = PrefixContext::build(&parses, consts, roots);
-    let mut stats = FoldStats::default();
+    let mut stats = FoldStats {
+        blocked_bases: ctx.blocked_bases.clone(),
+        ..FoldStats::default()
+    };
     for fp in parses.iter_mut() {
         stats.add(fold_endpoint_paths_with(fp, consts, repo, &ctx));
     }
@@ -206,13 +241,14 @@ pub(crate) fn fold_repo<'a>(
 // CH.5b: URL builders that read a configured API prefix
 // ============================================================================
 
-/// The prefix a URL builder puts in front of the path it is handed.
+/// The prefix a URL builder puts in front of the path it is handed (CH.5b),
+/// or a Dart project's Dio base path (CH.5c).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BuilderPrefix {
     /// The configured path, `/`-led, no trailing `/` (`/api`).
     path: String,
-    /// The API-prefix member the builder reads (`apiPrefix`): the
-    /// ENDPOINT_HIT `prefix_from`.
+    /// The ENDPOINT_HIT `prefix_from`: the API-prefix member the builder
+    /// reads (`apiPrefix`), or the Dio base expression (`Env.apiBaseUrl`).
     key: String,
     /// LF.2d: the overlay-pinned constant keys the value came through, so the
     /// entry records them as `overlay` and is Weak like any pinned fold.
@@ -234,6 +270,10 @@ struct PrefixContext {
     /// owner only when exactly one owner declares it.
     declared: BTreeMap<(String, String), BTreeSet<Option<String>>>,
     owners: http_owner::OwnerIndex,
+    /// CH.5c: owner -> the ONE base path its Dart Dio clients agree on.
+    dart: BTreeMap<Option<String>, BuilderPrefix>,
+    /// CH.5c: owner label -> why its Dart bases block the project-base step.
+    blocked_bases: BTreeMap<String, String>,
 }
 
 impl PrefixContext {
@@ -242,6 +282,7 @@ impl PrefixContext {
             owners: http_owner::OwnerIndex::from_roots(roots),
             ..PrefixContext::default()
         };
+        (ctx.dart, ctx.blocked_bases) = dart_bases(parses, consts, &ctx.owners);
         let owner_of = |fp: &FileParse| {
             http_owner::module_file(fp).and_then(|f| ctx.owners.owner_of(&f).map(String::from))
         };
@@ -342,6 +383,267 @@ impl PrefixContext {
             _ => None,
         }
     }
+
+    /// CH.5c: the Dio base path of a Dart call site's project: a Dart entry
+    /// (its `file` ends `.dart`) whose qname path is root-relative (not a
+    /// `${…}` base-relative one), under an owner whose bases agree.
+    fn dart_base(&self, fields: &Fields, qpath: &str) -> Option<&BuilderPrefix> {
+        if self.dart.is_empty() || !qpath.starts_with('/') {
+            return None;
+        }
+        let file = fields.str("file").filter(|f| f.ends_with(".dart"))?;
+        self.dart.get(&self.owners.owner_of(file).map(String::from))
+    }
+}
+
+// ============================================================================
+// CH.5c: a Dart project's Dio base path
+// ============================================================================
+
+/// What one Dio base expression resolves to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Base {
+    /// A `/`-led path, no trailing `/` (`/api`), with the overlay-pinned
+    /// constant keys it was read through (LF.2d).
+    Path(String, Vec<String>),
+    /// The root (`https://api.x`, `/`, `${…}://${…}`): nothing to prefix.
+    Root,
+    /// A base copied from an existing request or client (`retry.baseUrl`):
+    /// whatever it holds came from another base of the project.
+    Copy,
+    /// Nothing the build can read resolves it.
+    Unresolved,
+}
+
+/// CH.5a's URL-shaped Dart getters / constants (`NavFact::ValueLiteral`), by
+/// name: per owner, and over the whole repo for a project that reads one
+/// declared in another (a shared package). A name bound to two values in one
+/// map is `None` there. Order-free: a binding, once `None`, stays `None`.
+#[derive(Debug, Default)]
+struct DartValues {
+    by_owner: BTreeMap<Option<String>, BTreeMap<String, Option<String>>>,
+    all: BTreeMap<String, Option<String>>,
+}
+
+impl DartValues {
+    fn insert(&mut self, owner: &Option<String>, name: &str, value: &str) {
+        let bind = |map: &mut BTreeMap<String, Option<String>>| {
+            map.entry(name.to_string())
+                .and_modify(|seen| {
+                    if seen.as_deref() != Some(value) {
+                        *seen = None;
+                    }
+                })
+                .or_insert_with(|| Some(value.to_string()));
+        };
+        bind(self.by_owner.entry(owner.clone()).or_default());
+        bind(&mut self.all);
+    }
+
+    /// The value `expr` names: its exact name, else its last two dotted
+    /// segments (`core.Env.apiBaseUrl` -> `Env.apiBaseUrl`), in the owner's
+    /// own map first, then the repo's. `Some(None)` = bound, but ambiguously.
+    fn lookup(&self, owner: &Option<String>, expr: &str) -> Option<Option<&str>> {
+        let segs: Vec<&str> = expr.split('.').collect();
+        let tail = (segs.len() > 2).then(|| segs[segs.len() - 2..].join("."));
+        let keys: Vec<&str> = std::iter::once(expr).chain(tail.as_deref()).collect();
+        let maps = [self.by_owner.get(owner), Some(&self.all)];
+        maps.into_iter()
+            .flatten()
+            .find_map(|map| keys.iter().find_map(|k| map.get(*k).map(Option::as_deref)))
+    }
+}
+
+/// CH.5c: resolve one `NavFact::ClientBase` expression of a Dart file under
+/// `owner`, in order: (a) a string literal, (b) a ValueLiteral of that name,
+/// (c) the const table's exact key, (d) a copied `.baseUrl`, (e) nothing.
+/// (c) is [`ConstTable::resolve_expr_strict`], never `resolve_expr`: the
+/// table is repo-wide and language-blind, and its last-segment fallback
+/// would answer `Env.apiBaseUrl` with another app's bare `apiBaseUrl`.
+fn resolve_client_base(
+    expr: &str,
+    owner: &Option<String>,
+    values: &DartValues,
+    consts: &ConstTable,
+) -> Base {
+    let expr = expr.trim();
+    if expr.starts_with(['\'', '"', 'r']) && expr.ends_with(['\'', '"']) {
+        return dart_literal(expr).map_or(Base::Unresolved, |v| base_of_value(&v, Vec::new()));
+    }
+    if let Some(value) = values.lookup(owner, expr) {
+        return value.map_or(Base::Unresolved, |v| base_of_value(v, Vec::new()));
+    }
+    if let Some(value) = consts.resolve_expr_strict(expr) {
+        let pins = consts
+            .pinned_keys_in(&format!("${{{expr}}}"))
+            .into_iter()
+            .map(String::from)
+            .collect();
+        return base_of_value(value, pins);
+    }
+    if expr.ends_with(".baseUrl") {
+        return Base::Copy;
+    }
+    Base::Unresolved
+}
+
+/// A Dart string literal (`'..'`, `".."`, raw `r'..'`) as one value, every
+/// `$name` / `${expr}` interpolation `${…}`. None when `expr` is not ONE
+/// plain literal: adjacent or concatenated strings, a triple-quoted one, or
+/// an escaped quote inside (all read as unresolved, never guessed).
+fn dart_literal(expr: &str) -> Option<String> {
+    let (raw, body) = match expr.strip_prefix('r') {
+        Some(rest) => (true, rest),
+        None => (false, expr),
+    };
+    let quote = body.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
+    let inner = body.strip_prefix(quote)?.strip_suffix(quote)?;
+    if inner.contains(quote) {
+        return None;
+    }
+    if raw {
+        return Some(inner.to_string());
+    }
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.extend(chars.next()),
+            '$' if chars.peek() == Some(&'{') => {
+                let mut depth = 0usize;
+                for n in chars.by_ref() {
+                    match n {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                out.push_str("${…}");
+            }
+            '$' if chars
+                .peek()
+                .is_some_and(|n| n.is_ascii_alphabetic() || *n == '_') =>
+            {
+                while chars
+                    .peek()
+                    .is_some_and(|n| n.is_ascii_alphanumeric() || *n == '_')
+                {
+                    chars.next();
+                }
+                out.push_str("${…}");
+            }
+            _ => out.push(c),
+        }
+    }
+    Some(out)
+}
+
+/// The base a resolved value names: the path of a URL (`${…}://${…}/api` ->
+/// `/api`) or of a `/`-led value, query cut and trailing `/` trimmed; Root
+/// when that leaves nothing; Unresolved for a value with no path (a bare word,
+/// a whole-URL `${…}`) or an interpolated one (`/v${…}`).
+fn base_of_value(value: &str, pins: Vec<String>) -> Base {
+    let path = if value.contains("://") || value.starts_with('/') {
+        url_split(value).1
+    } else {
+        None
+    };
+    let Some(path) = path else {
+        return Base::Unresolved;
+    };
+    let path = path.trim_end_matches('/');
+    if path.is_empty() {
+        Base::Root
+    } else if path.contains("${") {
+        Base::Unresolved
+    } else {
+        Base::Path(path.to_string(), pins)
+    }
+}
+
+/// CH.5c: every Dart project's Dio base path, and the projects whose bases
+/// block it (by owner label, `.` = the repo root, with the reason). Facts are
+/// gathered per owner, read in (file, line, expression) order, so neither the
+/// parse order nor the HashMap order of `nav_facts` shows. A project is
+/// blocked by any unresolved base (an unknown client might use another base;
+/// the first such expression is named) or by two distinct paths; Root and
+/// Copy bases are ignored, so a project with no path is simply not prefixed.
+fn dart_bases(
+    parses: &[&mut FileParse],
+    consts: &ConstTable,
+    owners: &http_owner::OwnerIndex,
+) -> (
+    BTreeMap<Option<String>, BuilderPrefix>,
+    BTreeMap<String, String>,
+) {
+    let mut facts: BTreeMap<Option<String>, Vec<(String, u32, String)>> = BTreeMap::new();
+    let mut values = DartValues::default();
+    for fp in parses {
+        let mut found = fp
+            .nav
+            .nav_facts
+            .values()
+            .flatten()
+            .filter(|f| matches!(f, NavFact::ClientBase { .. } | NavFact::ValueLiteral { .. }));
+        if found.next().is_none() {
+            continue;
+        }
+        let Some(file) = http_owner::module_file(fp).filter(|f| f.ends_with(".dart")) else {
+            continue;
+        };
+        let owner = owners.owner_of(&file).map(String::from);
+        for fact in fp.nav.nav_facts.values().flatten() {
+            match fact {
+                NavFact::ClientBase { via, expr, line } if via == "dio" => {
+                    facts.entry(owner.clone()).or_default().push((
+                        file.clone(),
+                        *line,
+                        expr.clone(),
+                    ));
+                }
+                NavFact::ValueLiteral { name, value } => values.insert(&owner, name, value),
+                _ => {}
+            }
+        }
+    }
+    let mut bases: BTreeMap<Option<String>, BuilderPrefix> = BTreeMap::new();
+    let mut blocked: BTreeMap<String, String> = BTreeMap::new();
+    for (owner, mut list) in facts {
+        list.sort();
+        list.dedup();
+        let label = owner.clone().unwrap_or_else(|| ".".to_string());
+        let mut paths: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
+        let mut unresolved: Option<&str> = None;
+        for (_, _, expr) in &list {
+            match resolve_client_base(expr, &owner, &values, consts) {
+                Base::Path(path, pins) => {
+                    paths.entry(path).or_insert_with(|| (expr.clone(), pins));
+                }
+                Base::Root | Base::Copy => {}
+                Base::Unresolved => {
+                    unresolved.get_or_insert(expr.as_str());
+                }
+            }
+        }
+        if let Some(expr) = unresolved {
+            blocked.insert(label, format!("unresolved base {expr}"));
+            continue;
+        }
+        if paths.len() > 1 {
+            let all: Vec<&str> = paths.keys().map(String::as_str).collect();
+            blocked.insert(label, format!("bases disagree on {}", all.join(",")));
+            continue;
+        }
+        if let Some((path, (key, pins))) = paths.into_iter().next() {
+            bases.insert(owner, BuilderPrefix { path, key, pins });
+        }
+    }
+    (bases, blocked)
 }
 
 /// A builder scope's `(type simple name, method name)`: a METHOD whose parent
@@ -414,10 +716,12 @@ struct Plan {
     moved: bool,
     host: bool,
     /// The node's new confidence: LF.2d's Weak when an overlay constant
-    /// folded it, CH.5b's Medium when a builder prefix moved it.
+    /// folded it, CH.5b's / CH.5c's Medium when a prefix step moved it.
     confidence: Option<Confidence>,
     /// CH.5b: the builder prefix the entry was moved under.
     prefix: Option<String>,
+    /// CH.5c: that prefix is the project's Dio base path, not a builder's.
+    base: bool,
 }
 
 /// LF.2d: the confidence of an entry an overlay constant folded. `[constants]`
@@ -489,7 +793,11 @@ fn fold_endpoint_paths_with(
             stats.folded += usize::from(plan.moved);
             stats.hosts += usize::from(plan.host);
             if let Some(p) = plan.prefix {
-                stats.prefixed_wrapper += 1;
+                if plan.base {
+                    stats.prefixed_base += 1;
+                } else {
+                    stats.prefixed_wrapper += 1;
+                }
                 stats.prefixes.insert(p);
             }
         }
@@ -507,6 +815,9 @@ fn fold_endpoint_paths_with(
 /// under the builder's prefix. A builder's argument is usually relative
 /// (`raw` `protected/friends`), so such an entry's path is its own qname path
 /// when neither the fold nor `raw` yields one.
+///
+/// CH.5c: failing that, a host-less, root-relative Dart entry is moved under
+/// its project's Dio base path ([`PrefixContext::dart_base`]).
 fn plan_entry(
     node: &Node,
     nav: &CodeNav,
@@ -531,11 +842,15 @@ fn plan_entry(
         .or_else(|| fields.str("raw"))
         .unwrap_or(qpath);
     let (host, path) = url_split(input);
-    // CH.5b: only a call site that names no authority at all (none in its
-    // URL, none written by its parser) can sit under a builder's prefix.
-    let builder = match (&host, fields.str("host")) {
-        (None, None) => ctx.lookup(&fields),
-        _ => None,
+    // CH.5b / CH.5c: only a call site that names no authority at all (none
+    // in its URL, none written by its parser) can sit under a prefix: its URL
+    // builder's, else (Dart) its project's Dio base path.
+    let (builder, base) = match (&host, fields.str("host")) {
+        (None, None) => match ctx.lookup(&fields) {
+            Some(b) => (Some(b), false),
+            None => (ctx.dart_base(&fields, qpath), true),
+        },
+        _ => (None, false),
     };
     let mut path = match (path, builder) {
         (Some(p), _) => p,
@@ -597,14 +912,15 @@ fn plan_entry(
         payload,
         moved,
         host: host.is_some(),
-        // A pin wins (Weak); a builder prefix is one known transform: Medium,
-        // never Strong.
+        // A pin wins (Weak); a builder prefix is one known transform, and a
+        // project base path one project-level inference: Medium, never Strong.
         confidence: if !pins.is_empty() {
             Some(pin_confidence())
         } else {
             builder.map(|_| Confidence::Medium)
         },
         prefix: builder.map(|b| b.path.clone()),
+        base: base && builder.is_some(),
     })
 }
 
@@ -1934,6 +2250,292 @@ mod tests {
 
     fn ts_table(src: &str) -> ConstTable {
         ConstTable::scan_file(src, "typescript")
+    }
+
+    // ---- CH.5c: a Dart project's Dio base path ------------------------------
+
+    /// A Dart file's MODULE (its POSITION names `file`) carrying `facts`, the
+    /// way CH.5a records ClientBase / ValueLiteral.
+    fn dart_module(file: &str, facts: Vec<NavFact>) -> FileParse {
+        let mut fp = FileParse::default();
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, file);
+        fp.nodes.push(Node {
+            id: module,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells: vec![Cell {
+                kind: cell_type::POSITION,
+                payload: CellPayload::Json(format!(r#"{{"file":"{file}","line":0}}"#)),
+            }],
+        });
+        fp.nav.record(module, file, file, node_kind::MODULE, None);
+        for fact in facts {
+            fp.nav.record_fact(module, fact);
+        }
+        fp
+    }
+
+    fn client_base(expr: &str, line: u32) -> NavFact {
+        NavFact::ClientBase {
+            via: "dio".into(),
+            expr: expr.into(),
+            line,
+        }
+    }
+
+    fn value_literal(name: &str, value: &str) -> NavFact {
+        NavFact::ValueLiteral {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+
+    /// quokka_android's two clients (`Env.apiBaseUrl`) and the getter that
+    /// holds `'$scheme://$host/api'`.
+    fn quokka_android() -> (FileParse, FileParse) {
+        (
+            dart_module(
+                "app/lib/core/api_client.dart",
+                vec![client_base("Env.apiBaseUrl", 20), client_base("Env.apiBaseUrl", 34)],
+            ),
+            dart_module(
+                "app/lib/core/env.dart",
+                vec![value_literal("Env.apiBaseUrl", "${…}://${…}/api")],
+            ),
+        )
+    }
+
+    /// A Dio call site's ENDPOINT_HIT, the way the Dart parser writes it.
+    fn dart_hit(method: &str, path: &str, file: &str) -> String {
+        format!(
+            r#"{{"method":"{method}","path":"{path}","file":"{file}","line":9,"col":11,"confidence":"strong"}}"#
+        )
+    }
+
+    /// Two nested Flutter projects, `app` and `other`.
+    fn dart_roots() -> Vec<ProjectRoot> {
+        ["app", "other"]
+            .into_iter()
+            .map(|r| ProjectRoot::new(r.into(), "pub", "pubspec.yaml", None))
+            .collect()
+    }
+
+    /// One Dart caller file under `app` with a `POST <path>` call site.
+    fn dart_caller(path: &str) -> FileParse {
+        let mut caller = file();
+        push_call_as(&mut caller, "POST", path, &dart_hit("POST", path, "app/lib/f.dart"));
+        caller.nodes[1].confidence = Confidence::Strong;
+        caller
+    }
+
+    fn fold_dart(parses: Vec<&mut FileParse>, consts: &ConstTable) -> FoldStats {
+        fold_repo(parses, consts, repo(), &dart_roots())
+    }
+
+    /// CH.5c (a): quokka_android. Its Dio bases read `Env.apiBaseUrl`, a
+    /// getter returning `${…}://${…}/api`, so the project's root-relative
+    /// call `POST /protected/friends` moves to `/api/protected/friends`,
+    /// records the path and the expression, and becomes Medium; its CALLS
+    /// edge and nav entry follow.
+    #[test]
+    fn dart_project_base_path_prefixes_its_calls() {
+        let (mut client, mut env) = quokka_android();
+        let mut caller = dart_caller("/protected/friends");
+        let old = caller.nodes[1].id;
+        let stats = fold_dart(vec![&mut client, &mut env, &mut caller], &ConstTable::default());
+        assert_eq!(
+            stats,
+            FoldStats {
+                folded: 1,
+                prefixed_base: 1,
+                prefixes: BTreeSet::from(["/api".to_string()]),
+                ..FoldStats::default()
+            }
+        );
+        let new = ep_id("POST", "/api/protected/friends");
+        assert_eq!(caller.nodes[1].id, new);
+        assert_eq!(caller.nodes[1].confidence, Confidence::Medium, "Strong -> Medium");
+        assert_eq!(
+            payload(&caller, 1),
+            r#"{"method":"POST","path":"/api/protected/friends","file":"app/lib/f.dart","line":9,"col":11,"confidence":"strong","folded_from":"/protected/friends","prefix":"/api","prefix_from":"Env.apiBaseUrl"}"#
+        );
+        assert_eq!(caller.edges[0].to, new, "the CALLS edge follows the node");
+        assert_eq!(
+            caller.nav.qname_by_id.get(&new).map(String::as_str),
+            Some("endpoint:POST:/api/protected/friends")
+        );
+        assert!(!caller.nav.qname_by_id.contains_key(&old));
+
+        // The parse order never shows.
+        let (mut client, mut env) = quokka_android();
+        let mut again = dart_caller("/protected/friends");
+        fold_dart(vec![&mut again, &mut env, &mut client], &ConstTable::default());
+        assert!(same(&caller, &again));
+    }
+
+    /// CH.5c (b): a base copied from an existing request (`retry.baseUrl`)
+    /// and a host-only literal base (a root path) add nothing; the project
+    /// keeps its one path.
+    #[test]
+    fn copied_base_is_ignored() {
+        let (mut client, mut env) = quokka_android();
+        let mut retry = dart_module(
+            "app/lib/core/auth_interceptor.dart",
+            vec![
+                client_base("retry.baseUrl", 56),
+                client_base("'https://api.example.net'", 60),
+            ],
+        );
+        let mut caller = dart_caller("/protected/friends");
+        let stats = fold_dart(
+            vec![&mut client, &mut env, &mut retry, &mut caller],
+            &ConstTable::default(),
+        );
+        assert_eq!(stats.prefixed_base, 1);
+        assert!(stats.blocked_bases.is_empty());
+        assert_eq!(caller.nodes[1].id, ep_id("POST", "/api/protected/friends"));
+    }
+
+    /// CH.5c (c): a base nothing resolves blocks its whole project (an
+    /// unknown client might use another base), and so do two bases that
+    /// disagree. Every entry stays byte-identical and the project is named
+    /// once for `[endpoint-base]`.
+    #[test]
+    fn unresolved_base_blocks_the_project() {
+        let (mut client, mut env) = quokka_android();
+        let mut cfg = dart_module("app/lib/cfg.dart", vec![client_base("cfg.url", 3)]);
+        let mut caller = dart_caller("/protected/friends");
+        let before = caller.clone();
+        let stats = fold_dart(
+            vec![&mut client, &mut env, &mut cfg, &mut caller],
+            &ConstTable::default(),
+        );
+        assert_eq!(
+            stats,
+            FoldStats {
+                blocked_bases: BTreeMap::from([(
+                    "app".to_string(),
+                    "unresolved base cfg.url".to_string()
+                )]),
+                ..FoldStats::default()
+            }
+        );
+        assert!(same(&caller, &before));
+
+        let (mut client, mut env) = quokka_android();
+        let mut v2 = dart_module("app/lib/v2.dart", vec![client_base("'/v2/'", 1)]);
+        let mut caller = dart_caller("/protected/friends");
+        let stats = fold_dart(
+            vec![&mut client, &mut env, &mut v2, &mut caller],
+            &ConstTable::default(),
+        );
+        assert_eq!(
+            stats.blocked_bases.get("app").map(String::as_str),
+            Some("bases disagree on /api,/v2")
+        );
+        assert_eq!(stats.prefixed_base, 0);
+        assert!(same(&caller, &before));
+    }
+
+    /// CH.5c (d): the const table is repo-wide and language-blind. An
+    /// Angular `environment.ts` binds a bare `apiBaseUrl` to its own root
+    /// URL; the lenient lookup would answer the Dart expression with it (a
+    /// root, so the project would silently lose its block). The strict
+    /// lookup does not, so with no ValueLiteral the project is blocked.
+    #[test]
+    fn lenient_const_never_answers_a_dart_base() {
+        let consts = ts_table(
+            "export const environment = {\n  apiBaseUrl: 'http://localhost:8080',\n};\n",
+        );
+        assert_eq!(
+            consts.resolve_expr("AppConfig.apiBaseUrl"),
+            Some("http://localhost:8080"),
+            "the lenient lookup would answer"
+        );
+        let mut client = dart_module(
+            "app/lib/core/api_client.dart",
+            vec![client_base("AppConfig.apiBaseUrl", 20)],
+        );
+        let mut caller = dart_caller("/protected/friends");
+        let before = caller.clone();
+        let stats = fold_dart(vec![&mut client, &mut caller], &consts);
+        assert_eq!(stats.prefixed_base, 0);
+        assert_eq!(
+            stats.blocked_bases.get("app").map(String::as_str),
+            Some("unresolved base AppConfig.apiBaseUrl")
+        );
+        assert!(same(&caller, &before));
+
+        // An exact key resolves (an overlay pin is how a blocked project is
+        // unblocked), and the entry says the pin produced it: Weak.
+        let mut pinned = consts.clone();
+        assert!(pinned.pin("AppConfig.apiBaseUrl", "https://api.example.net/v1"));
+        let mut client = dart_module(
+            "app/lib/core/api_client.dart",
+            vec![client_base("AppConfig.apiBaseUrl", 20)],
+        );
+        let mut caller = dart_caller("/protected/friends");
+        let stats = fold_dart(vec![&mut client, &mut caller], &pinned);
+        assert_eq!(stats.prefixed_base, 1);
+        assert_eq!(caller.nodes[1].id, ep_id("POST", "/v1/protected/friends"));
+        assert_eq!(caller.nodes[1].confidence, Confidence::Weak);
+        assert!(payload(&caller, 1).ends_with(
+            r#""prefix":"/v1","prefix_from":"AppConfig.apiBaseUrl","overlay":"const:AppConfig.apiBaseUrl"}"#
+        ));
+    }
+
+    /// CH.5c (e): only the project's own root-relative, host-less Dart
+    /// entries move. A Dart entry of another project, one whose parser wrote
+    /// a host, a `${…}`-based one, one already under the path, and a
+    /// TypeScript entry of the same project keep their bytes.
+    #[test]
+    fn other_project_and_host_entries_untouched() {
+        let (mut client, mut env) = quokka_android();
+        let mut caller = file();
+        push_call_as(&mut caller, "GET", "/x", &dart_hit("GET", "/x", "other/lib/x.dart"));
+        push_call_as(
+            &mut caller,
+            "GET",
+            "/hosted",
+            r#"{"method":"GET","path":"/hosted","file":"app/lib/f.dart","line":2,"col":3,"confidence":"strong","raw":"https://api.example.net/hosted","host":"api.example.net"}"#,
+        );
+        push_call_as(&mut caller, "GET", "${…}/based", &dart_hit("GET", "${…}/based", "app/lib/f.dart"));
+        push_call_as(&mut caller, "GET", "/api/already", &dart_hit("GET", "/api/already", "app/lib/f.dart"));
+        push_call_as(&mut caller, "GET", "/ts", &dart_hit("GET", "/ts", "app/src/a.ts"));
+        let before = caller.clone();
+        let stats = fold_dart(vec![&mut client, &mut env, &mut caller], &ConstTable::default());
+        assert_eq!(stats.prefixed_base, 0);
+        assert_eq!(stats.folded, 0);
+        assert_eq!(stats.preset, 1, "the parser's host is counted, never re-recorded");
+        assert!(same(&caller, &before));
+    }
+
+    /// CH.5c: what one base expression resolves to, in resolution order.
+    #[test]
+    fn client_base_resolution_order() {
+        let mut values = DartValues::default();
+        let app = Some("app".to_string());
+        values.insert(&app, "Env.apiBaseUrl", "${…}://${…}/api");
+        values.insert(&None, "Shared.base", "https://h/shared/");
+        values.insert(&None, "Twice.base", "/a");
+        values.insert(&Some("other".to_string()), "Twice.base", "/b");
+        let consts = ConstTable::default();
+        let path = |p: &str| Base::Path(p.to_string(), Vec::new());
+        let at = |e: &str| resolve_client_base(e, &app, &values, &consts);
+        assert_eq!(at("'https://x/api/'"), path("/api"));
+        assert_eq!(at("\"/v1?x=1\""), path("/v1"));
+        assert_eq!(at("r'/raw$x'"), path("/raw$x"));
+        assert_eq!(at("'$scheme://${cfg.host}/gw'"), path("/gw"));
+        assert_eq!(at("'https://x'"), Base::Root);
+        assert_eq!(at("'$base'"), Base::Unresolved, "a whole-URL variable");
+        assert_eq!(at("'/v${n}'"), Base::Unresolved, "an interpolated path");
+        assert_eq!(at("'a' + b"), Base::Unresolved);
+        assert_eq!(at("Env.apiBaseUrl"), path("/api"));
+        assert_eq!(at("core.Env.apiBaseUrl"), path("/api"), "an import prefix");
+        assert_eq!(at("Shared.base"), path("/shared"), "another project's value");
+        assert_eq!(at("Twice.base"), Base::Unresolved, "bound to two values");
+        assert_eq!(at("retry.baseUrl"), Base::Copy);
+        assert_eq!(at("cfg.url"), Base::Unresolved);
     }
 
     /// quokka's nominatim call: the template's authority is literal, so the

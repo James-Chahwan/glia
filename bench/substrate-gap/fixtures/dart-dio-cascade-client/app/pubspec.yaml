@@ -1,0 +1,4 @@
+name: app
+dependencies:
+  dio: ^5.4.0
+  shelf_router: ^1.1.4

@@ -46,8 +46,14 @@ pub fn parse_file(
     acc.nav
         .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
 
+    // CH.5c: the receivers bound to a Dio, read before the body walks (the
+    // client-call detector) and the route scan consult them.
+    acc.dio_receivers = collect_dio_receivers(source, root, src);
     visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
     scan_dart_routes(source, repo, &mut acc);
+    if let Some(line) = acc.dio_bound.marker(acc.dio_receivers.len(), file_rel_path) {
+        eprintln!("{line}");
+    }
 
     // CH.5a: the client base URL inputs of the endpoint fold (CH.5c), as
     // build-time facts on this file's MODULE, and their fired_on marker.
@@ -155,6 +161,12 @@ struct Acc {
     /// was recorded as a typed name of the caller's scope, for the
     /// `[dart-type-receivers]` marker.
     type_receivers: usize,
+    /// CH.5c: the names this file binds to a Dio client
+    /// ([`collect_dio_receivers`]). Lookup-only.
+    dio_receivers: HashSet<String>,
+    /// CH.5c: client calls / route-scan hits on a [`Acc::dio_receivers`]
+    /// name the name heuristic misses, for the `[dart-dio-receivers]` marker.
+    dio_bound: DioBoundStats,
 }
 
 #[derive(Default)]
@@ -2180,7 +2192,10 @@ fn try_detect_dart_endpoint(
     let Some((recv, verb_sel, sl)) = dart_client_call(n, src) else {
         return;
     };
-    if !is_http_client_receiver(text_of(recv, src)) {
+    // CH.5c: a receiver the file binds to a Dio is a client whatever its name.
+    let recv_name = text_of(recv, src);
+    let by_binding = !is_http_client_receiver(recv_name);
+    if by_binding && !acc.dio_receivers.contains(recv_name) {
         return;
     }
     // Verb is the first identifier under the `.verb` selector.
@@ -2226,6 +2241,7 @@ fn try_detect_dart_endpoint(
         &mut acc.nav,
         &mut acc.endpoint_seen,
     );
+    acc.dio_bound.endpoints += usize::from(by_binding);
 }
 
 /// The receiver `identifier`, the `.verb` selector and the first argument's
@@ -2751,6 +2767,160 @@ fn url_shaped(value: String) -> Option<String> {
 }
 
 // ============================================================================
+// CH.5c: receivers bound to a Dio client
+// ============================================================================
+//
+// The client-call detector and the route scan both decide "client or server
+// router" by the receiver's NAME (`is_http_client_receiver`: dio / http /
+// *client / *api). quokka_android's token refresh builds a one-off client
+// `final fresh = Dio(BaseOptions(..))..interceptors.add(..)` and calls
+// `fresh.post('/auth/refresh')`: no client name, so the scan minted a phantom
+// server ROUTE `POST /auth/refresh` and no ENDPOINT. The file's own
+// declarations say what `fresh` is, so they are read first.
+
+/// What the binding set reclassified in one file, for the
+/// `[dart-dio-receivers]` fired_on marker.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DioBoundStats {
+    /// Client ENDPOINT call sites minted through the binding set only.
+    endpoints: usize,
+    /// Route-scan hits skipped through the binding set only (each would
+    /// have been a phantom server ROUTE).
+    route_skips: usize,
+}
+
+impl DioBoundStats {
+    /// `[dart-dio-receivers] bound=<n> endpoints=<e> route_skips=<r> file=<f>`,
+    /// None when the binding set changed nothing in the file.
+    fn marker(&self, bound: usize, file_rel: &str) -> Option<String> {
+        (self.endpoints + self.route_skips > 0).then(|| {
+            format!(
+                "[dart-dio-receivers] bound={bound} endpoints={} route_skips={} file={file_rel}",
+                self.endpoints, self.route_skips
+            )
+        })
+    }
+}
+
+/// How one declaration binds its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Binding {
+    /// Declared `Dio` / `Dio?`, or initialised with a `Dio(..)` construction
+    /// (`new` / `const` too, and a cascade `Dio(..)..x` after it).
+    Dio,
+    /// Declared another type, or initialised with another class's
+    /// construction (`Router()`).
+    Other,
+}
+
+/// Every name the file binds to a Dio client: a local (`final` / `var` /
+/// typed), a field or top-level variable, a getter declared `Dio`, or a
+/// parameter declared `Dio`. One name space per file, not per scope, so a
+/// name the file ALSO binds to something else (a `Router()`, a `String`) is
+/// left out and the name heuristic alone decides it, as before. A file that
+/// never spells `Dio` binds nothing, so its walk is skipped.
+fn collect_dio_receivers(source: &str, root: TsNode, src: &[u8]) -> HashSet<String> {
+    if !source.contains("Dio") {
+        return HashSet::new();
+    }
+    let mut seen: HashMap<String, (bool, bool)> = HashMap::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if let Some((name, binding)) = dio_binding_at(n, src) {
+            let slot = seen.entry(name).or_default();
+            match binding {
+                Binding::Dio => slot.0 = true,
+                Binding::Other => slot.1 = true,
+            }
+        }
+        let mut cursor = n.walk();
+        stack.extend(n.named_children(&mut cursor));
+    }
+    seen.into_iter()
+        .filter(|(_, (dio, other))| *dio && !*other)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The name `n` declares and how, when `n` is a binding shape that says:
+///
+/// - `initialized_variable_definition` (a local): `[type] name value..`
+/// - `initialized_identifier` / `static_final_declaration` (a field or a
+///   top-level variable): `name value..`, its type the `type_identifier`
+///   just before its list (inside a `declaration`, or beside the list at
+///   library level)
+/// - `getter_signature` / `formal_parameter`: `[type] name`
+fn dio_binding_at(n: TsNode, src: &[u8]) -> Option<(String, Binding)> {
+    if !matches!(
+        n.kind(),
+        "initialized_variable_definition"
+            | "initialized_identifier"
+            | "static_final_declaration"
+            | "getter_signature"
+            | "formal_parameter"
+    ) {
+        return None;
+    }
+    let mut cursor = n.walk();
+    let kids: Vec<TsNode> = n
+        .named_children(&mut cursor)
+        .filter(|k| k.kind() != "comment")
+        .collect();
+    let at = kids.iter().position(|k| k.kind() == "identifier")?;
+    let name = text_of(kids[at], src).to_string();
+    let own_type = kids[..at]
+        .iter()
+        .rev()
+        .find(|k| k.kind() == "type_identifier")
+        .copied();
+    let declared = match n.kind() {
+        "initialized_variable_definition" | "getter_signature" | "formal_parameter" => own_type,
+        _ => n
+            .parent()
+            .and_then(|list| list.prev_named_sibling())
+            .filter(|t| t.kind() == "type_identifier"),
+    };
+    if let Some(t) = declared {
+        let binding = if text_of(t, src) == "Dio" {
+            Binding::Dio
+        } else {
+            Binding::Other
+        };
+        return Some((name, binding));
+    }
+    if matches!(n.kind(), "getter_signature" | "formal_parameter") {
+        return None;
+    }
+    construction_binding(kids.get(at + 1..)?, src).map(|b| (name, b))
+}
+
+/// The class an initialiser constructs: `X(..)` (an `identifier` and its
+/// call selector, a cascade possibly after), `new X(..)` or `const X(..)`.
+/// Dio when X is `Dio`, Other for another capitalised class, None for
+/// anything else (a call result, a literal, a provider read).
+fn construction_binding(value: &[TsNode], src: &[u8]) -> Option<Binding> {
+    let class = match value {
+        [ident, sel, ..] if ident.kind() == "identifier" && sel.kind() == "selector" => {
+            if !matches!(selector_part(*sel, src), SelectorPart::Call) {
+                return None;
+            }
+            text_of(*ident, src)
+        }
+        [expr, ..] if matches!(expr.kind(), "new_expression" | "const_object_expression") => {
+            text_of(expr.child_by_field_name("type")?, src)
+        }
+        _ => return None,
+    };
+    if class == "Dio" {
+        Some(Binding::Dio)
+    } else if class.starts_with(|c: char| c.is_ascii_uppercase()) {
+        Some(Binding::Other)
+    } else {
+        None
+    }
+}
+
+// ============================================================================
 // Dart route extraction (v0.4.11a R-dart)
 // ============================================================================
 //
@@ -2785,7 +2955,8 @@ fn scan_dart_routes(source: &str, repo: RepoId, acc: &mut Acc) {
     // shelf-style `.get('/...' / .post('/...' / etc. — SERVER routes only.
     // A client HTTP call (`dio.get('/x')`) has the same textual shape but is an
     // outbound ENDPOINT, handled by `try_detect_dart_endpoint`; skip it here (by
-    // receiver name) so it is not mis-emitted as a phantom server ROUTE.
+    // receiver name, or CH.5c: a receiver the file binds to a Dio) so it is
+    // not mis-emitted as a phantom server ROUTE.
     for method in ["get", "post", "put", "patch", "delete", "head", "options"] {
         let needle = format!(".{method}(");
         let mut idx = 0;
@@ -2794,10 +2965,16 @@ fn scan_dart_routes(source: &str, repo: RepoId, acc: &mut Acc) {
             let after = &source[dot_at + needle.len()..];
             if let Some(path) = first_string_literal_dart(after)
                 && path.starts_with('/')
-                && !is_http_client_receiver(ident_before(source, dot_at))
             {
-                let verb = method.to_ascii_uppercase();
-                emit_dart_route(&verb, &path, repo, acc, &mut seen, false);
+                let recv = ident_before(source, dot_at);
+                if !is_http_client_receiver(recv) {
+                    if acc.dio_receivers.contains(recv) {
+                        acc.dio_bound.route_skips += 1;
+                    } else {
+                        let verb = method.to_ascii_uppercase();
+                        emit_dart_route(&verb, &path, repo, acc, &mut seen, false);
+                    }
+                }
             }
             idx = dot_at + needle.len();
         }
@@ -5325,5 +5502,110 @@ final p = FutureProvider((ref) async {
         let lang: tree_sitter::Language = tree_sitter_dart::LANGUAGE.into();
         parser.set_language(&lang).expect("dart grammar");
         parser.parse(source, None).expect("tree")
+    }
+
+    /// CH.5c: quokka_android's token refresh. A receiver the file binds to a
+    /// Dio - a cascade `Dio(..)..x` local, a typed local, a field and a getter
+    /// declared `Dio` - is a client whatever its name: its verb calls are
+    /// ENDPOINTs with their CALLS edge, never server ROUTEs.
+    #[test]
+    fn dio_bound_receiver_is_a_client_not_a_route() {
+        let source = r#"import 'package:dio/dio.dart';
+class AuthApi {
+  AuthApi(this.conn);
+  final Dio conn;
+  Dio get session => conn;
+  Future<void> refresh() async {
+    final fresh = Dio(BaseOptions(baseUrl: Env.apiBaseUrl))
+      ..interceptors.add(CookieManager(jar));
+    final res = await fresh.post(
+      '/auth/refresh',
+      options: Options(extra: {'skipAuth': true}),
+    );
+  }
+  Future<void> me() async {
+    Dio transport = Dio();
+    var made = new Dio();
+    await transport.get('/auth/me');
+    await made.head('/auth/ping');
+    await conn.put('/auth/password', data: {});
+    await session.delete('/auth/session');
+  }
+}
+"#;
+        let fp = parse_file(source, "lib/api_client.dart", "lib::api_client", repo()).unwrap();
+        for (method, path) in [
+            ("POST", "/auth/refresh"),
+            ("GET", "/auth/me"),
+            ("HEAD", "/auth/ping"),
+            ("PUT", "/auth/password"),
+            ("DELETE", "/auth/session"),
+        ] {
+            let ep = endpoint_id(method, path);
+            assert!(
+                fp.nodes.iter().any(|n| n.id == ep),
+                "expected ENDPOINT {method} {path}"
+            );
+            assert!(
+                fp.edges
+                    .iter()
+                    .any(|e| e.to == ep && e.category == edge_category::CALLS),
+                "expected a CALLS edge into {method} {path}"
+            );
+            assert!(
+                !fp.nodes.iter().any(|n| n.id == route_id(method, path)),
+                "a Dio client call is never a ROUTE: {method} {path}"
+            );
+        }
+        let tree = dart_tree(source);
+        let bound = collect_dio_receivers(source, tree.root_node(), source.as_bytes());
+        let mut names: Vec<&str> = bound.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["conn", "fresh", "made", "session", "transport"]);
+    }
+
+    /// CH.5c: the binding set never turns a server router into a client. A
+    /// name the file binds to a `Router()` (or any other type) is left to the
+    /// name heuristic even when it is ALSO bound to a Dio, and a file that
+    /// never spells `Dio` binds nothing.
+    #[test]
+    fn dio_binding_never_claims_a_router() {
+        let source = r#"
+final router = Router();
+void routes() {
+  router.get('/things', handler);
+}
+class Other {
+  final Dio svc;
+  void m(String svc) {
+    svc.get('/both');
+  }
+}
+"#;
+        let fp = parse_file(source, "bin/server.dart", "bin::server", repo()).unwrap();
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/things")));
+        assert!(!fp.nodes.iter().any(|n| n.id == endpoint_id("GET", "/things")));
+        // `svc` is a Dio field and a String parameter: not in the set, so
+        // today's name heuristic decides (no client name: a route).
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/both")));
+        let tree = dart_tree(source);
+        assert!(collect_dio_receivers(source, tree.root_node(), source.as_bytes()).is_empty());
+        let plain = "final router = Router();\nvoid f() { router.get('/x', h); }\n";
+        let tree = dart_tree(plain);
+        assert!(collect_dio_receivers(plain, tree.root_node(), plain.as_bytes()).is_empty());
+    }
+
+    /// CH.5c fired_on marker: only a file the binding set changed prints.
+    #[test]
+    fn dio_bound_marker_reports_reclassified_calls() {
+        let stats = DioBoundStats {
+            endpoints: 2,
+            route_skips: 2,
+        };
+        assert_eq!(
+            stats.marker(3, "lib/a.dart").as_deref(),
+            Some("[dart-dio-receivers] bound=3 endpoints=2 route_skips=2 file=lib/a.dart")
+        );
+        assert_eq!(DioBoundStats::default().marker(3, "lib/a.dart"), None);
     }
 }

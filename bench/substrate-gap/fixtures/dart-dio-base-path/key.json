@@ -1,0 +1,23 @@
+{
+  "framework": "dart-dio-base-path",
+  "language": "dart",
+  "dirs": ["app", "server"],
+  "note": "CH-5 (Dart half): quokka_android's shape. The project's Dio clients are built with `BaseOptions(baseUrl: Env.apiBaseUrl)`, a getter returning '$scheme://$prodApiHost/api', so every root-relative dio call of that project is served under '/api'. The endpoint fold prefixes them (ENDPOINT_HIT `prefix` / `prefix_from`), so they pair EXACT with the gin routes; `BaseOptions(baseUrl: retry.baseUrl)` copies an existing base and is ignored. A generic call `dio.get<dynamic>('/x')` (selector(.get) selector(<T>) selector(args)) is an ENDPOINT at all. quokka_android: 18 plain + 25 generic dio calls. Baseline (HEAD b269af5, leap wheel, CH.5a + CH.5b landed): GET /protected/friends and POST /protected/friends/accept/${…} unprefixed, paired route_prefix (nodes 0/2, CALLS 0/1, HTTP_CALLS 0/2, cells 0/2, FORBID VIOLATIONS 2).",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "GET /api/protected/friends", "exact": true, "note": "generic dio.get<dynamic> + the project base path"},
+    {"kind": "ENDPOINT", "name": "POST /api/protected/friends/accept/${…}", "exact": true, "note": "plain dio.post + the project base path"}
+  ],
+  "expect_edges": [
+    {"from": "FriendService/listAll", "to": "GET /api/protected/friends", "category": "CALLS"},
+    {"from": "GET /api/protected/friends", "to": "/api/protected/friends", "category": "HTTP_CALLS", "note": "exact tier"},
+    {"from": "POST /api/protected/friends/accept", "to": "/api/protected/friends/accept", "category": "HTTP_CALLS", "note": "exact tier"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "POST /api/protected/friends/accept", "cell": "ENDPOINT_HIT", "contains": "\"prefix\":\"/api\"", "note": "the base path the fold applied"},
+    {"kind": "ENDPOINT", "node": "POST /api/protected/friends/accept", "cell": "ENDPOINT_HIT", "contains": "\"prefix_from\":\"Env.apiBaseUrl\"", "note": "the base-URL expression it came from"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "POST /protected/friends/accept/${…}", "note": "the unprefixed path must not survive"},
+    {"kind": "ENDPOINT", "name": "GET /protected/friends", "note": "the unprefixed generic call must not appear"}
+  ]
+}
