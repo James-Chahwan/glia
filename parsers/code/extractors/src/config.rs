@@ -22,6 +22,11 @@
 //!     an SDK check (LaunchDarkly, Unleash, ...) and a Flipt `flags:` file
 //!     declaring the same key must pair across repos (`ConfigResolver` pairs on
 //!     the full qname). The provider rides the ENV cell's `source` instead.
+//!   - `config:setting:<Section:Key>` — a hierarchical application setting
+//!     (CL.7b), the key exactly as the code reads it: .NET's `:`-joined
+//!     configuration path. `appsettings*.json` defines it, `IConfiguration`
+//!     reads it, and an env define `Section__Key` (.NET's environment
+//!     override, `__` standing for `:`) defines it too.
 //!
 //! A `config:file:database.yml` track stays reserved.
 //!
@@ -37,12 +42,22 @@
 //!     - PHP:    `getenv('X')`, `$_ENV['X']`
 //!     - C#:     `Environment.GetEnvironmentVariable("X")` (CL.7a; the
 //!       `(..., EnvironmentVariableTarget.X)` form reads its first literal)
+//!     - .NET settings (CL.7b, `config:setting:`, `.cs` files only):
+//!       `configuration["A:B"]`,
+//!       `.GetValue<T>("A:B")`, `.GetSection("A")` / `.GetRequiredSection`,
+//!       `.GetConnectionString("Db")` (= `ConnectionStrings:Db`); a
+//!       `GetSection("A")` chain prefixes the key it is read through. See
+//!       [`scan_dotnet_config_reads`].
 //!
 //!   **Defines (separate file types via pipeline bypass):**
 //!     - Dockerfile `ENV KEY=value` / `ENV KEY value`
 //!     - `.env` files (KEY=value lines, # comments)
 //!     - k8s YAML `env: - name: KEY`
 //!     - docker-compose `environment: - KEY=value`
+//!     - every one of the four above, for a name `A__B[__C..]`, ALSO defines
+//!       `config:setting:A:B[:C..]` (CL.7b, [`dotnet_env_override`])
+//!     - .NET `appsettings.json` / `appsettings.<Env>.json` leaves
+//!       (CL.7b, [`extract_settings_json_defs`])
 //!
 //!   **Secrets and flags in YAML (A13.8, same `extract_yaml_env_defs` walk):**
 //!     - READ  `config:secret:k8s/<name>` — a pod's `secretKeyRef: {name:}`
@@ -54,11 +69,11 @@
 //!
 //! Out of scope:
 //!   - Spring `application.yml` / `application.properties`
-//!   - Rails `config/database.yml`, .NET `appsettings.json` (and so the .NET
-//!     `IConfiguration["Section:Key"]` read side)
+//!   - Rails `config/database.yml`
 //!   - CI variable definitions (GHA `env:`, GitLab CI variables) — reads
 //!     covered via shell `$VAR` if needed in v0.5+.
 
+use glia_code_domain::evidence::{self, Evidence};
 use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
@@ -96,6 +111,8 @@ pub(crate) enum Flavor {
     Secret,
     /// `config:flag:<key>` — see [`is_valid_flag_key`].
     Flag,
+    /// `config:setting:<Section:Key>` (CL.7b) — see [`is_valid_setting_key`].
+    Setting,
 }
 
 impl Flavor {
@@ -104,6 +121,7 @@ impl Flavor {
             Flavor::Env => is_valid_env_name(&def.name),
             Flavor::Secret => !def.source.is_empty() && is_valid_secret_ref(&def.name),
             Flavor::Flag => is_valid_flag_key(&def.name),
+            Flavor::Setting => is_valid_setting_key(&def.name),
         }
     }
 
@@ -116,6 +134,7 @@ impl Flavor {
             Flavor::Env => "env",
             Flavor::Secret => "secret",
             Flavor::Flag => "flag",
+            Flavor::Setting => "setting",
         }
     }
 
@@ -126,7 +145,7 @@ impl Flavor {
     fn display_name(self, def: &ConfigDef) -> String {
         match self {
             Flavor::Secret => format!("{}/{}", def.source, def.name),
-            Flavor::Env | Flavor::Flag => def.name.clone(),
+            Flavor::Env | Flavor::Flag | Flavor::Setting => def.name.clone(),
         }
     }
 }
@@ -139,7 +158,9 @@ pub(crate) struct ConfigDef {
     pub(crate) name: String,
     value: Option<String>,
     /// Which syntax produced this — `dockerfile` | `dotenv` | `k8s` |
-    /// `compose`, empty on the env read side. For a secret or flag it is the
+    /// `compose` (an env define, and the setting it overrides, CL.7b),
+    /// `appsettings` (a settings-file leaf), empty on the env / setting read
+    /// side. For a secret or flag it is the
     /// PROVIDER (`vault`, `aws_sm`, `launchdarkly`, `flipt`, ...). It
     /// discriminates the ENV-cell payload so one cell type can carry several
     /// provenances without ambiguity.
@@ -162,6 +183,11 @@ impl ConfigDef {
     /// A feature-flag key `config:flag:<name>`, `provider` on the cell.
     pub(crate) fn flag(name: impl Into<String>, provider: &'static str) -> Self {
         ConfigDef { name: name.into(), value: None, source: provider, flavor: Flavor::Flag }
+    }
+
+    /// A .NET setting `config:setting:<Section:Key>` (CL.7b).
+    fn setting(name: impl Into<String>, value: Option<String>, source: &'static str) -> Self {
+        ConfigDef { name: name.into(), value, source, flavor: Flavor::Setting }
     }
 }
 
@@ -186,28 +212,40 @@ pub fn extract_config_reads(
     module_id: NodeId,
     repo: RepoId,
 ) -> ConfigNodes {
-    let mut reads = Vec::new();
-    reads.extend(scan_python_env(source));
-    reads.extend(scan_js_process_env(source));
-    reads.extend(scan_rust_env(source));
-    reads.extend(scan_go_env(source));
-    reads.extend(scan_ruby_env(source));
-    reads.extend(scan_java_system_getenv(source));
-    reads.extend(scan_php_env(source));
-    reads.extend(scan_dotnet_env(source));
+    let env = |hits: Vec<(String, usize)>| hits.into_iter().map(|(n, o)| (n, o, Flavor::Env));
+    let mut reads: Vec<(String, usize, Flavor)> = Vec::new();
+    reads.extend(env(scan_python_env(source)));
+    reads.extend(env(scan_js_process_env(source)));
+    reads.extend(env(scan_rust_env(source)));
+    reads.extend(env(scan_go_env(source)));
+    reads.extend(env(scan_ruby_env(source)));
+    reads.extend(env(scan_java_system_getenv(source)));
+    reads.extend(env(scan_php_env(source)));
+    reads.extend(env(scan_dotnet_env(source)));
+    // CL.7b: .NET IConfiguration reads, on the `config:setting:` track — C#
+    // files only, so a TypeScript `interface IConfiguration` beside a
+    // `this.config["apiUrl"]` mints nothing.
+    if is_csharp_path(path) {
+        reads.extend(
+            scan_dotnet_config_reads(source).into_iter().map(|(n, o)| (n, o, Flavor::Setting)),
+        );
+    }
     // Each offset is the read needle's start (capture_first_string_arg / the
     // process.env scan), so the guard tests the read expression itself.
     let mut guard = LazyGuard::new(path, source);
-    reads.retain(|(_, offset)| guard.admits(*offset));
+    reads.retain(|(_, offset, _)| guard.admits(*offset));
     guard.report("config");
     let mut sites = Vec::new();
     let mut defs = Vec::with_capacity(reads.len());
-    for (name, offset) in reads {
-        let def = ConfigDef::bare(name, "");
+    for (name, offset, flavor) in reads {
+        let def = match flavor {
+            Flavor::Setting => ConfigDef::setting(name, None, ""),
+            _ => ConfigDef::bare(name, ""),
+        };
         // The same validator and qname `build_sided` applies, so a site
         // always names a node this call emits.
-        if Flavor::Env.accepts(&def) {
-            let qname = Flavor::Env.qname(&def);
+        if def.flavor.accepts(&def) {
+            let qname = def.flavor.qname(&def);
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CONFIG_KEY, &qname);
             sites.push((id, offset));
         }
@@ -261,6 +299,177 @@ pub fn extract_yaml_env_defs(
     out
 }
 
+/// Most keys one settings file defines (CL.7b); the rest are counted as
+/// `capped=` in the `[config] settings` line and dropped.
+const SETTINGS_KEY_CAP: usize = 2_000;
+
+/// True for a .NET settings file (CL.7b): a basename matching
+/// `appsettings*.json`, case-insensitive — `appsettings.json`, the
+/// environment files `appsettings.Development.json`, and the names a host
+/// loads by hand (`AddJsonFile("configs/appsettings-prod.json")`,
+/// `appsettingsAdmin.json`). The part between is `[A-Za-z0-9._-]*`. The walk
+/// admits it beside the contract / JSON Schema sniffs and the engine routes
+/// it to [`extract_settings_json_defs`] before either.
+pub fn is_dotnet_settings_path(path: &str) -> bool {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path).to_ascii_lowercase();
+    base.strip_prefix("appsettings")
+        .and_then(|r| r.strip_suffix(".json"))
+        .is_some_and(|mid| {
+            mid.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        })
+}
+
+/// CL.7b: the `config:setting:<Section:Key>` keys a .NET settings file
+/// defines — every scalar leaf, its object path joined with `:` and an array
+/// element indexed `:0`, `:1` (the .NET binder's spelling), in the parsed
+/// map's iteration order (deterministic per file). A leaf's value rides an
+/// ENV cell through the A13.7 redaction ([`env_cell`], with the setting rules
+/// of [`is_secret_setting`]); a `null` or empty-string leaf is valueless. The
+/// value never reaches a name or qname.
+///
+/// The text is read the way .NET's JSON configuration provider reads it: a
+/// leading BOM, `//` / `/* */` comments and trailing commas are allowed
+/// ([`strip_jsonc`]). Anything else serde_json rejects, or a root that is not
+/// an object, mints nothing (`parse_error=1`). At most [`SETTINGS_KEY_CAP`]
+/// keys per file.
+///
+/// fired_on, once per settings file:
+/// `[config] settings file=<path> keys=<k> valued=<v> redacted=<r> capped=<c> parse_error=<0|1>`.
+pub fn extract_settings_json_defs(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> ConfigNodes {
+    let text = strip_jsonc(source.strip_prefix('\u{feff}').unwrap_or(source));
+    let mut leaves: Vec<(String, Option<String>)> = Vec::new();
+    let parse_error = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(root @ serde_json::Value::Object(_)) => {
+            flatten_settings(&root, "", &mut leaves);
+            false
+        }
+        _ => true,
+    };
+    let capped = leaves.len().saturating_sub(SETTINGS_KEY_CAP);
+    leaves.truncate(SETTINGS_KEY_CAP);
+    let defs = leaves
+        .into_iter()
+        .map(|(name, value)| ConfigDef::setting(name, value, "appsettings"))
+        .collect();
+    let out = build_nodes(defs, Side::Define, module_id, repo);
+    let (mut valued, mut redacted) = (0usize, 0usize);
+    for n in &out.nodes {
+        if let Some(c) = n.cells.iter().find(|c| c.kind == cell_type::ENV) {
+            valued += 1;
+            if matches!(&c.payload, CellPayload::Json(s) if s.contains("\"redacted\":true")) {
+                redacted += 1;
+            }
+        }
+    }
+    eprintln!(
+        "[config] settings file={path} keys={} valued={valued} redacted={redacted} capped={capped} parse_error={}",
+        out.nodes.len(),
+        u8::from(parse_error)
+    );
+    out
+}
+
+/// Depth-first walk of a parsed settings document, pushing every scalar leaf
+/// as `(Section:Key path, value)`. serde_json caps nesting at 128 levels, so
+/// the recursion is bounded.
+fn flatten_settings(v: &serde_json::Value, prefix: &str, out: &mut Vec<(String, Option<String>)>) {
+    use serde_json::Value;
+    let join = |seg: &str| {
+        if prefix.is_empty() { seg.to_string() } else { format!("{prefix}:{seg}") }
+    };
+    match v {
+        Value::Object(map) => {
+            for (k, child) in map {
+                flatten_settings(child, &join(k), out);
+            }
+        }
+        Value::Array(items) => {
+            for (i, child) in items.iter().enumerate() {
+                flatten_settings(child, &join(&i.to_string()), out);
+            }
+        }
+        Value::Null => out.push((prefix.to_string(), None)),
+        Value::String(s) => out.push((prefix.to_string(), (!s.is_empty()).then(|| s.clone()))),
+        Value::Bool(b) => out.push((prefix.to_string(), Some(b.to_string()))),
+        Value::Number(n) => out.push((prefix.to_string(), Some(n.to_string()))),
+    }
+}
+
+/// `source` with what .NET's JSON configuration reader skips removed:
+/// `//` line and `/* */` block comments outside strings, and a comma whose
+/// next non-blank character closes an object or array. String contents are
+/// copied untouched (escapes included).
+fn strip_jsonc(source: &str) -> String {
+    let mut no_comments = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let (mut in_str, mut escaped) = (false, false);
+    while let Some(c) = chars.next() {
+        if in_str {
+            no_comments.push(c);
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('/', Some('/')) => {
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        no_comments.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut prev = '\0';
+                for n in chars.by_ref() {
+                    if prev == '*' && n == '/' {
+                        break;
+                    }
+                    prev = n;
+                }
+                no_comments.push(' ');
+            }
+            _ => {
+                in_str = c == '"';
+                no_comments.push(c);
+            }
+        }
+    }
+    // Trailing commas, over the comment-free text.
+    let mut out = String::with_capacity(no_comments.len());
+    let (mut in_str, mut escaped) = (false, false);
+    for (i, c) in no_comments.char_indices() {
+        if in_str {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_str = false,
+                _ => {}
+            }
+        } else if c == '"' {
+            in_str = true;
+        } else if c == ','
+            && no_comments[i + 1..]
+                .trim_start()
+                .starts_with(['}', ']'])
+        {
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Every def on one `side` — the shape every single-sided caller wants.
 pub(crate) fn build_nodes(
     defs: Vec<ConfigDef>,
@@ -274,6 +483,14 @@ pub(crate) fn build_nodes(
 /// The one CONFIG_KEY emit path: node + READS_CONFIG / DEFINES_CONFIG edge +
 /// dedupe by qname + ENV cell. A key seen on both sides in one file is one
 /// node with one edge per side.
+///
+/// CL.7b: every env define whose name is a .NET environment override
+/// (`Stripe__SecretKey`, [`dotnet_env_override`]) is followed, in place, by
+/// the `config:setting:Stripe:SecretKey` define it implies, so item order and
+/// so NodeId / edge order stay deterministic. The override edge carries its
+/// own EVIDENCE (the route key's emitter, rule `dotnet_env_override`), which
+/// the engine's `stamp_missing` then leaves alone. fired_on, once per call
+/// that emitted one: `[config] env overrides -> settings=<n> source=<s>`.
 fn build_sided(items: Vec<(ConfigDef, Side)>, module_id: NodeId, repo: RepoId) -> ConfigNodes {
     let mut nodes: Vec<Node> = Vec::new();
     let mut edges = Vec::new();
@@ -284,19 +501,31 @@ fn build_sided(items: Vec<(ConfigDef, Side)>, module_id: NodeId, repo: RepoId) -
         std::collections::HashMap::new();
     let mut edged: std::collections::HashSet<(usize, Side)> = std::collections::HashSet::new();
     // The `[config]` marker counts the env track only; secrets and flags
-    // report through `[secrets]`.
+    // report through `[secrets]`, settings files through `[config] settings`
+    // and env overrides through `[config] env overrides`.
     let (mut env_defined, mut valued, mut redacted) = (0usize, 0usize, 0usize);
+    let mut overrides = 0usize;
+    let mut override_emitter: Option<&'static str> = None;
 
+    let mut expanded: Vec<(ConfigDef, Side, bool)> = Vec::with_capacity(items.len());
     for (def, side) in items {
+        let ov = if side == Side::Define { dotnet_env_override(&def) } else { None };
+        expanded.push((def, side, false));
+        if let Some(ov) = ov {
+            expanded.push((ov, Side::Define, true));
+        }
+    }
+
+    for (def, side, is_override) in expanded {
         if !def.flavor.accepts(&def) {
             continue;
         }
         let counts_env = def.flavor == Flavor::Env && side == Side::Define;
-        // The env read side states no value, so it never attaches a cell; a
-        // secret or flag records its provider and never a value.
+        // The env / setting read side states no value, so it never attaches a
+        // cell; a secret or flag records its provider and never a value.
         let cell = match (def.flavor, side) {
-            (Flavor::Env, Side::Read) => None,
-            (Flavor::Env, Side::Define) => env_cell(&def),
+            (Flavor::Env | Flavor::Setting, Side::Read) => None,
+            (Flavor::Env | Flavor::Setting, Side::Define) => env_cell(&def),
             (Flavor::Secret | Flavor::Flag, _) => Some((provider_cell(def.source), true)),
         };
         let qname = def.flavor.qname(&def);
@@ -342,7 +571,7 @@ fn build_sided(items: Vec<(ConfigDef, Side)>, module_id: NodeId, repo: RepoId) -
             nodes.len() - 1
         };
         if edged.insert((idx, side)) {
-            edges.push(Edge {
+            let mut edge = Edge {
                 from: module_id,
                 to: nodes[idx].id,
                 category: match side {
@@ -351,15 +580,57 @@ fn build_sided(items: Vec<(ConfigDef, Side)>, module_id: NodeId, repo: RepoId) -
                 },
                 confidence: Confidence::Medium,
                 cells: Vec::new(),
-            });
+            };
+            if is_override {
+                let emitter = define_emitter(def.source);
+                evidence::attach(&mut edge, Evidence::emitter(emitter).rule("dotnet_env_override"));
+                overrides += 1;
+                override_emitter.get_or_insert(emitter);
+            }
+            edges.push(edge);
         }
     }
 
     if env_defined > 0 {
         eprintln!("[config] defined={env_defined} valued={valued} redacted={redacted}");
     }
+    if let Some(emitter) = override_emitter {
+        let source = emitter.strip_prefix("extractor:").unwrap_or(emitter);
+        eprintln!("[config] env overrides -> settings={overrides} source={source}");
+    }
 
     ConfigNodes { nodes, edges, nav, sites: Vec::new() }
+}
+
+/// CL.7b: .NET's environment configuration provider reads an env var
+/// `Stripe__SecretKey` as the setting `Stripe:SecretKey` (`__` is the
+/// hierarchy separator, since `:` is not legal in every shell's env names).
+/// So a valid env define whose name splits on `__` into two or more non-empty
+/// segments also defines that setting, from the same module, with the same
+/// value (its ENV cell built by [`env_cell`] over the JOINED name). `PORT`,
+/// `__X`, `X__` and `A____B` override nothing; a read states no override, so
+/// only the define side calls this.
+fn dotnet_env_override(def: &ConfigDef) -> Option<ConfigDef> {
+    if def.flavor != Flavor::Env || !Flavor::Env.accepts(def) {
+        return None;
+    }
+    let segs: Vec<&str> = def.name.split("__").collect();
+    if segs.len() < 2 || segs.iter().any(|s| s.is_empty()) {
+        return None;
+    }
+    Some(ConfigDef::setting(segs.join(":"), def.value.clone(), def.source))
+}
+
+/// The EVIDENCE emitter of an env-override setting edge: exactly the one the
+/// engine's `stamp_missing` gives its sibling env edge, `extractor:<route
+/// key>` — `dockerfile`, `dotenv`, and `yaml` for the two YAML scanners
+/// (`k8s`, `compose`).
+fn define_emitter(source: &str) -> &'static str {
+    match source {
+        "dockerfile" => "extractor:dockerfile",
+        "dotenv" => "extractor:dotenv",
+        _ => "extractor:yaml",
+    }
 }
 
 /// The ENV cell of a secret or flag key: its provider, and that a value
@@ -391,6 +662,29 @@ fn is_secret_name(name: &str) -> bool {
     SECRET_NEEDLES.iter().any(|needle| upper.contains(needle))
 }
 
+/// Value fragments that mark an embedded credential (an ADO.NET / Npgsql /
+/// Azure connection string) whatever the key is called.
+const SECRET_VALUE_NEEDLES: [&str; 5] =
+    ["PASSWORD=", "PWD=", "ACCOUNTKEY=", "SHAREDACCESSKEY=", "SECRET="];
+
+/// CL.7b: A13.7's rule for a `config:setting:` key, which is stricter than the
+/// env rule because .NET names its secrets differently. Redacted when the
+/// whole `Section:Key` name hits [`is_secret_name`] (a superset of testing its
+/// last segment, so an override never shows a value its env sibling redacts),
+/// when it sits under `ConnectionStrings`, when its last segment ends in
+/// `Key` (`Jwt:Key`, `Stripe:PublishableKey`) or names a connection string,
+/// or when the value itself carries a credential fragment.
+fn is_secret_setting(name: &str, value: &str) -> bool {
+    let first = name.split(':').next().unwrap_or(name);
+    let last = name.rsplit(':').next().unwrap_or(name).to_ascii_lowercase();
+    let upper_value = value.to_ascii_uppercase();
+    is_secret_name(name)
+        || first.eq_ignore_ascii_case("ConnectionStrings")
+        || last.ends_with("key")
+        || last.contains("connectionstring")
+        || SECRET_VALUE_NEEDLES.iter().any(|n| upper_value.contains(n))
+}
+
 /// `scheme://user:pass@host/path` -> `scheme://***@host/path`. The HOST is
 /// deliberately KEPT: area A11 pairs a config value to a service by hostname,
 /// and a fully scrubbed URL would be unpairable. Only userinfo that actually
@@ -416,7 +710,11 @@ fn mask_userinfo(value: &str) -> Option<String> {
 /// only that a value exists — never the value itself.
 fn env_cell(def: &ConfigDef) -> Option<(Cell, bool)> {
     let raw = def.value.as_deref()?;
-    let (stored, redacted) = if is_secret_name(&def.name) {
+    let secret = match def.flavor {
+        Flavor::Setting => is_secret_setting(&def.name, raw),
+        _ => is_secret_name(&def.name),
+    };
+    let (stored, redacted) = if secret {
         (None, true)
     } else {
         let mut redacted = false;
@@ -520,6 +818,19 @@ pub(crate) fn is_valid_secret_ref(s: &str) -> bool {
             c.is_whitespace()
                 || c.is_control()
                 || matches!(c, '$' | '{' | '}' | '%' | '"' | '\'' | '`' | '\\')
+        })
+}
+
+/// A .NET setting key (CL.7b): 1..=128 bytes of `:`-separated segments, each
+/// non-empty and made of `[A-Za-z0-9_.-]` (`Logging:LogLevel:Microsoft.AspNetCore`,
+/// `Endpoints:0:Url`). A JSON key with a space, `$` or quote is no setting a
+/// code literal names, and a `"Stripe:" + x` fragment fails the empty-segment
+/// rule.
+pub(crate) fn is_valid_setting_key(s: &str) -> bool {
+    (1..=128).contains(&s.len())
+        && s.split(':').all(|seg| {
+            !seg.is_empty()
+                && seg.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
         })
 }
 
@@ -628,6 +939,233 @@ fn scan_java_system_getenv(source: &str) -> Vec<(String, usize)> {
 /// non-literal argument (`GetEnvironmentVariable(name)`) reads nothing.
 fn scan_dotnet_env(source: &str) -> Vec<(String, usize)> {
     capture_first_string_arg(source, "Environment.GetEnvironmentVariable(")
+}
+
+/// A `.cs` file, the one .NET language the engine routes (CL.7b).
+fn is_csharp_path(path: &str) -> bool {
+    path.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("cs"))
+}
+
+/// CL.7b: .NET `IConfiguration` reads, as `(Section:Key, offset)`, scanned
+/// in a C# file ([`is_csharp_path`]). Only a source that names the API (`IConfiguration*`, the
+/// `Microsoft.Extensions.Configuration` namespace) or reads through a
+/// `.Configuration` property (`builder.Configuration["X"]`: implicit usings
+/// let a minimal-API `Program.cs` do that with neither) is scanned.
+///
+/// - an indexer `<recv>["A:B"]` whose receiver's last segment, lower-cased
+///   and stripped of `_` / `@`, ends with `configuration` or `config`
+///   (`configuration[`, `_config[`, `builder.Configuration[`) — a user
+///   dictionary `cache["k"]` is not a read;
+/// - `.GetValue<T>("A:B")`, `.GetSection("A")`, `.GetRequiredSection("A")`
+///   (a section read is a key read of the section path);
+/// - `.GetConnectionString("Db")` -> `ConnectionStrings:Db`, where .NET
+///   keeps it.
+///
+/// A receiver that is itself a literal `GetSection("A")` / `GetRequiredSection`
+/// call prefixes the key (`config.GetSection("Stripe")["SecretKey"]` reads
+/// `Stripe:SecretKey`); any other call chain, or a method receiver named like
+/// a section (`stripeSection.GetValue<..>("Key")`, a relative key), reads
+/// nothing. A non-literal or interpolated key reads nothing. The offset is
+/// the receiver's last segment for an indexer and the method name for a call.
+fn scan_dotnet_config_reads(source: &str) -> Vec<(String, usize)> {
+    let named = [
+        "IConfiguration",
+        "Microsoft.Extensions.Configuration",
+        ".Configuration[",
+        ".Configuration.Get",
+    ];
+    if !named.iter().any(|n| source.contains(n)) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = source[from..].find("[") {
+        let at = from + rel;
+        from = at + 1;
+        let Some(key) = csharp_literal_arg(&source[at + 1..], b"]") else { continue };
+        if let Some((prefix, start)) = dotnet_receiver(source, at, true, 0) {
+            out.push((join_setting(prefix, &key), start));
+        }
+    }
+    for (method, generic) in [
+        ("GetValue", true),
+        ("GetSection", false),
+        ("GetRequiredSection", false),
+        ("GetConnectionString", false),
+    ] {
+        let needle = format!(".{method}");
+        let mut from = 0;
+        while let Some(rel) = source[from..].find(&needle) {
+            let dot = from + rel;
+            from = dot + needle.len();
+            let Some(args) = dotnet_call_args(&source[from..], generic) else { continue };
+            let Some(key) = csharp_literal_arg(&source[from + args..], b"),") else { continue };
+            let key = match method {
+                "GetConnectionString" => format!("ConnectionStrings:{key}"),
+                _ => key,
+            };
+            if let Some((prefix, _)) = dotnet_receiver(source, dot, false, 0) {
+                out.push((join_setting(prefix, &key), dot + 1));
+            }
+        }
+    }
+    out
+}
+
+/// `key` under a `GetSection` chain's path, if any.
+fn join_setting(prefix: Option<String>, key: &str) -> String {
+    match prefix {
+        Some(p) => format!("{p}:{key}"),
+        None => key.to_string(),
+    }
+}
+
+/// Past a method name: an optional generic argument list (required when
+/// `generic`, matched by `<` / `>` depth on one line), blanks, then `(`.
+/// Returns the byte length up to and including the `(`; `None` when the name
+/// continues (`.GetValues(`) or no call follows.
+fn dotnet_call_args(after: &str, generic: bool) -> Option<usize> {
+    let b = after.as_bytes();
+    let mut i = 0;
+    if generic {
+        if b.first() != Some(&b'<') {
+            return None;
+        }
+        let mut depth = 0usize;
+        while i < b.len() {
+            match b[i] {
+                b'<' => depth += 1,
+                b'>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        i += 1;
+                        break;
+                    }
+                }
+                b'\n' | b';' | b'{' | b'"' => return None,
+                _ => {}
+            }
+            i += 1;
+        }
+        if depth != 0 {
+            return None;
+        }
+    }
+    while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
+        i += 1;
+    }
+    (b.get(i) == Some(&b'(')).then_some(i + 1)
+}
+
+/// A C# string literal (`"A:B"` or verbatim `@"A:B"`) at the start of `after`
+/// (blanks allowed before it), whose next non-blank byte is one of `closers`
+/// — so `config["Stripe:" + x]` and an interpolated `$"..."` read nothing.
+fn csharp_literal_arg(after: &str, closers: &[u8]) -> Option<String> {
+    let b = after.as_bytes();
+    let mut i = 0;
+    while i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if b.get(i) == Some(&b'@') {
+        i += 1;
+    }
+    if b.get(i) != Some(&b'"') {
+        return None;
+    }
+    let start = i + 1;
+    let end = start + after[start..].find('"')?;
+    let mut j = end + 1;
+    while j < b.len() && b[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    b.get(j).is_some_and(|c| closers.contains(c)).then(|| after[start..end].to_string())
+}
+
+/// What a .NET config read at byte `pos` (its `[`, or the `.` before its
+/// method) is read through: `Some((None, start))` for the configuration root,
+/// `Some((Some(path), start))` under a literal `GetSection(..)` chain, `None`
+/// when unknown. `start` is the receiver's first byte (the read's site).
+/// `depth` bounds the chain walk.
+fn dotnet_receiver(
+    source: &str,
+    pos: usize,
+    indexer: bool,
+    depth: usize,
+) -> Option<(Option<String>, usize)> {
+    let b = source.as_bytes();
+    let mut end = pos;
+    if !indexer {
+        // A fluent chain may break the line before `.GetValue<..>(..)`.
+        while end > 0 && b[end - 1].is_ascii_whitespace() {
+            end -= 1;
+        }
+    }
+    // `config?["X"]`, `config!.GetValue<..>(..)`.
+    if end > 0 && matches!(b[end - 1], b'?' | b'!') {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    if b[end - 1] == b')' {
+        if depth >= 8 {
+            return None;
+        }
+        let (section, dot) = section_call_ending_at(source, end - 1)?;
+        let (outer, start) = dotnet_receiver(source, dot, false, depth + 1)?;
+        return Some((Some(join_setting(outer, &section)), start));
+    }
+    let mut start = end;
+    let ident_byte = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'@');
+    while start > 0 && ident_byte(b[start - 1]) {
+        start -= 1;
+    }
+    if start == end {
+        return None;
+    }
+    let ident: String = source[start..end]
+        .chars()
+        .filter(|c| !matches!(c, '_' | '@'))
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let configish = ident.ends_with("configuration") || ident.ends_with("config");
+    let root = if indexer { configish } else { configish || !ident.contains("section") };
+    root.then_some((None, start))
+}
+
+/// The literal section of a `.GetSection("A")` / `.GetRequiredSection("A")`
+/// call whose `)` is at byte `close`, and the byte of that call's `.`.
+fn section_call_ending_at(source: &str, close: usize) -> Option<(String, usize)> {
+    let b = source.as_bytes();
+    let mut j = close;
+    while j > 0 && b[j - 1].is_ascii_whitespace() {
+        j -= 1;
+    }
+    if j == 0 || b[j - 1] != b'"' {
+        return None;
+    }
+    let lit_end = j - 1;
+    let lit_start = source[..lit_end].rfind('"')?;
+    let mut k = lit_start;
+    if k > 0 && b[k - 1] == b'@' {
+        k -= 1;
+    }
+    while k > 0 && b[k - 1].is_ascii_whitespace() {
+        k -= 1;
+    }
+    if k == 0 || b[k - 1] != b'(' {
+        return None;
+    }
+    k -= 1;
+    let head = source[..k].trim_end();
+    for name in ["GetRequiredSection", "GetSection"] {
+        if let Some(rest) = head.strip_suffix(name)
+            && rest.ends_with('.')
+        {
+            return Some((source[lit_start + 1..lit_end].to_string(), rest.len() - 1));
+        }
+    }
+    None
 }
 
 fn scan_php_env(source: &str) -> Vec<(String, usize)> {
@@ -1782,5 +2320,385 @@ services:
         let repo = RepoId(1);
         assert!(extract_dotenv_defs("A=1\n", module_id(repo), repo).sites.is_empty());
         assert!(extract_dockerfile_defs("ENV B=2\n", module_id(repo), repo).sites.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // CL.7b — .NET settings: `config:setting:<Section:Key>`.
+    // ------------------------------------------------------------------
+
+    fn setting_id(repo: RepoId, key: &str) -> NodeId {
+        NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::CONFIG_KEY,
+            &format!("config:setting:{key}"),
+        )
+    }
+
+    /// The ENV-cell payload of the node with full `qname`.
+    fn payload_of(out: &ConfigNodes, qname: &str) -> Option<String> {
+        let (id, _) = out.nav.qname_by_id.iter().find(|(_, q)| *q == qname)?;
+        let node = out.nodes.iter().find(|n| n.id == *id)?;
+        node.cells.iter().find(|c| c.kind == cell_type::ENV).map(|c| match &c.payload {
+            CellPayload::Text(s) | CellPayload::Json(s) => s.clone(),
+            CellPayload::Bytes(_) => String::new(),
+        })
+    }
+
+    /// Every ENV / EVIDENCE payload in `out`, for leak checks.
+    fn all_payloads(out: &ConfigNodes) -> String {
+        out.nodes
+            .iter()
+            .flat_map(|n| n.cells.iter())
+            .chain(out.edges.iter().flat_map(|e| e.cells.iter()))
+            .map(|c| match &c.payload {
+                CellPayload::Text(s) | CellPayload::Json(s) => s.clone(),
+                CellPayload::Bytes(_) => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn setting_key_validator() {
+        for ok in ["Stripe:SecretKey", "Logging:LogLevel:Microsoft.AspNetCore", "Endpoints:0:Url", "Db", "a-b_c.d"]
+        {
+            assert!(is_valid_setting_key(ok), "{ok}");
+        }
+        let long = "a".repeat(129);
+        for bad in ["", "Stripe:", ":Key", "A::B", "has space", "$schema", "a\"b", "x{0}", long.as_str()] {
+            assert!(!is_valid_setting_key(bad), "{bad}");
+        }
+        assert!(is_valid_setting_key(&"a".repeat(128)));
+    }
+
+    #[test]
+    fn dotnet_indexer_and_getvalue_reads() {
+        let repo = RepoId(1);
+        let src = r#"using Microsoft.Extensions.Configuration;
+
+public class Payments
+{
+    private readonly IConfiguration _config;
+    private readonly Dictionary<string, string> cache = new();
+
+    public Payments(IConfiguration configuration)
+    {
+        var key = configuration["Stripe:SecretKey"];
+        var retries = _config.GetValue<int>("Retry:Max");
+        var limits = configuration
+            .GetValue<Dictionary<string, int>>("Limits:PerMinute", null);
+        var section = configuration.GetSection("Logging");
+        var req = _config.GetRequiredSection("Features");
+        var db = configuration.GetConnectionString("Db");
+        var nested = configuration.GetSection("Smtp")["Host"];
+        var deep = configuration.GetSection("A").GetSection("B").GetValue<string>("C");
+        var verbatim = configuration[@"Cdn:BaseUrl"];
+        var c = cache["k:v"];
+        var rel = stripeSection.GetValue<string>("Relative");
+        var dynamicKey = configuration[name];
+        var concat = configuration["Prefix:" + name];
+        var interp = configuration[$"Tenant:{id}"];
+        var values = configuration.GetValues("NotAMethod");
+    }
+}
+"#;
+        let out = extract_config_reads(src, "Payments.cs", module_id(repo), repo);
+        let mut keys = config_keys(&out);
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "config:setting:A",
+                "config:setting:A:B",
+                "config:setting:A:B:C",
+                "config:setting:Cdn:BaseUrl",
+                "config:setting:ConnectionStrings:Db",
+                "config:setting:Features",
+                "config:setting:Limits:PerMinute",
+                "config:setting:Logging",
+                "config:setting:Retry:Max",
+                "config:setting:Smtp",
+                "config:setting:Smtp:Host",
+                "config:setting:Stripe:SecretKey",
+            ]
+        );
+        // Read side: READS_CONFIG from the module, no value cell, one site
+        // per read at its receiver / method name.
+        assert!(out.edges.iter().all(|e| e.category == edge_category::READS_CONFIG
+            && e.from == module_id(repo)));
+        assert!(out.nodes.iter().all(|n| n.cells.is_empty()));
+        assert_eq!(out.sites.len(), keys.len());
+        let site = |key: &str| {
+            out.sites.iter().find(|(id, _)| *id == setting_id(repo, key)).map(|(_, o)| *o).unwrap()
+        };
+        assert!(src[site("Stripe:SecretKey")..].starts_with("configuration[\"Stripe:SecretKey\"]"));
+        assert!(src[site("Retry:Max")..].starts_with("GetValue<int>(\"Retry:Max\")"));
+        assert!(src[site("Limits:PerMinute")..].starts_with("GetValue<Dictionary"));
+        assert!(src[site("Smtp:Host")..].starts_with("configuration.GetSection(\"Smtp\")"));
+        // Nothing reads without an IConfiguration mention.
+        let plain = "var x = config[\"A:B\"];\nvar y = settings.GetValue<int>(\"C:D\");\n";
+        assert!(extract_config_reads(plain, "X.cs", module_id(repo), repo).nodes.is_empty());
+        // A minimal-API Program.cs reads through `builder.Configuration`.
+        let program = "var builder = WebApplication.CreateBuilder(args);\n\
+                       var cs = builder.Configuration[\"Redis:Host\"];\n";
+        let out = extract_config_reads(program, "Program.cs", module_id(repo), repo);
+        assert_eq!(config_keys(&out), ["config:setting:Redis:Host"]);
+    }
+
+    /// The setting scan runs on C# files only: the same text read as
+    /// TypeScript (an `interface IConfiguration` and a `config[..]` lookup) or
+    /// as Rust (the scanner's own test text) mints nothing.
+    #[test]
+    fn dotnet_config_reads_only_in_csharp_files() {
+        let repo = RepoId(1);
+        let src = "interface IConfiguration { apiUrl: string }\nconst u = this.config[\"apiUrl\"];\n";
+        for path in ["src/app/config.ts", "src/x.rs", "Program.csx", "cs", ""] {
+            let out = extract_config_reads(src, path, module_id(repo), repo);
+            assert!(out.nodes.is_empty(), "{path}: {:?}", config_keys(&out));
+        }
+        let cs = extract_config_reads(src, "src/Config.CS", module_id(repo), repo);
+        assert_eq!(config_keys(&cs), ["config:setting:apiUrl"]);
+    }
+
+    #[test]
+    fn appsettings_flattens_objects_and_arrays() {
+        let repo = RepoId(1);
+        let src = "\u{feff}{\n  // Kestrel\n  \"Logging\": { \"LogLevel\": { \"Default\": \"Information\", \"Microsoft.AspNetCore\": \"Warning\" } },\n  \
+                   \"AllowedHosts\": \"*\",\n  \"Retry\": { \"Max\": 3, \"Enabled\": true, \"Backoff\": null, \"Empty\": \"\" },\n  \
+                   /* endpoints */ \"Endpoints\": [ { \"Url\": \"http://+:80\" }, { \"Url\": \"https://+:443\", } ],\n  \
+                   \"Tags\": [\"a\", \"b\"],\n  \"Nothing\": {},\n  \"$schema\": \"https://example.test/schema\",\n  \
+                   \"Note\": \"// not a comment, /* nor this */\",\n}\n";
+        let out = extract_settings_json_defs(src, "appsettings.json", module_id(repo), repo);
+        let mut keys = config_keys(&out);
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "config:setting:AllowedHosts",
+                "config:setting:Endpoints:0:Url",
+                "config:setting:Endpoints:1:Url",
+                "config:setting:Logging:LogLevel:Default",
+                "config:setting:Logging:LogLevel:Microsoft.AspNetCore",
+                "config:setting:Note",
+                "config:setting:Retry:Backoff",
+                "config:setting:Retry:Empty",
+                "config:setting:Retry:Enabled",
+                "config:setting:Retry:Max",
+                "config:setting:Tags:0",
+                "config:setting:Tags:1",
+            ]
+        );
+        assert_eq!(
+            payload_of(&out, "config:setting:Retry:Max").as_deref(),
+            Some(r#"{"value":"3","source":"appsettings","redacted":false}"#)
+        );
+        assert!(payload_of(&out, "config:setting:Retry:Enabled").unwrap().contains(r#""value":"true""#));
+        assert!(payload_of(&out, "config:setting:Endpoints:1:Url").unwrap().contains(r#""value":"https://+:443""#));
+        assert!(payload_of(&out, "config:setting:Note").unwrap().contains("// not a comment, /* nor this */"));
+        // null and "" declare the key with no value.
+        assert_eq!(payload_of(&out, "config:setting:Retry:Backoff"), None);
+        assert_eq!(payload_of(&out, "config:setting:Retry:Empty"), None);
+        // Every key is a DEFINES_CONFIG target of the file's module, named by
+        // its full path.
+        assert_eq!(out.edges.len(), keys.len());
+        assert!(out.edges.iter().all(|e| e.category == edge_category::DEFINES_CONFIG
+            && e.from == module_id(repo)));
+        let id = setting_id(repo, "Retry:Max");
+        assert_eq!(out.nav.name_by_id[&id], "Retry:Max");
+        assert!(out.sites.is_empty());
+    }
+
+    #[test]
+    fn appsettings_secret_values_are_redacted() {
+        let repo = RepoId(1);
+        let src = r#"{
+  "Stripe": { "SecretKey": "sk_test_FIXTUREPLACEHOLDER", "PublishableKey": "pk_test_abc" },
+  "Jwt": { "Key": "jwt-signing-material", "Issuer": "payments" },
+  "Smtp": { "Password": "hunter2" },
+  "ConnectionStrings": { "Db": "Host=db;Database=app" },
+  "Redis": { "ConnectionString": "cache:6379,ssl=false" },
+  "Storage": { "Main": "DefaultEndpointsProtocol=https;AccountName=x;AccountKey=c2VjcmV0" },
+  "Upstream": { "Url": "https://svc:p4ss@users.internal/api" }
+}"#;
+        let out = extract_settings_json_defs(src, "appsettings.Production.json", module_id(repo), repo);
+        for key in [
+            "Stripe:SecretKey",
+            "Stripe:PublishableKey",
+            "Jwt:Key",
+            "Smtp:Password",
+            "ConnectionStrings:Db",
+            "Redis:ConnectionString",
+            "Storage:Main",
+        ] {
+            assert_eq!(
+                payload_of(&out, &format!("config:setting:{key}")).as_deref(),
+                Some(r#"{"source":"appsettings","redacted":true}"#),
+                "{key}"
+            );
+        }
+        assert!(payload_of(&out, "config:setting:Jwt:Issuer").unwrap().contains(r#""value":"payments""#));
+        // A URL keeps its host and loses its userinfo (A13.7).
+        let up = payload_of(&out, "config:setting:Upstream:Url").unwrap();
+        assert!(up.contains(r#""value":"https://***@users.internal/api""#), "{up}");
+        let all = all_payloads(&out);
+        for leak in ["sk_test_", "pk_test_", "jwt-signing", "hunter2", "Host=db", "cache:6379", "c2VjcmV0", "p4ss"] {
+            assert!(!all.contains(leak), "{leak} leaked: {all}");
+        }
+        // The value never becomes an identity either.
+        assert!(out.nav.name_by_id.values().all(|n| !n.contains("sk_test_")));
+    }
+
+    #[test]
+    fn appsettings_parse_error_mints_nothing() {
+        let repo = RepoId(1);
+        for bad in ["{ \"Stripe\": { \"SecretKey\": ", "[ { \"A\": 1 } ]", "\"just a string\"", ""] {
+            let out = extract_settings_json_defs(bad, "appsettings.json", module_id(repo), repo);
+            assert!(out.nodes.is_empty() && out.edges.is_empty(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn appsettings_key_cap() {
+        let repo = RepoId(1);
+        let body: Vec<String> = (0..SETTINGS_KEY_CAP + 5).map(|i| format!("\"K{i}\": {i}")).collect();
+        let src = format!("{{ {} }}", body.join(", "));
+        let out = extract_settings_json_defs(&src, "appsettings.json", module_id(repo), repo);
+        assert_eq!(out.nodes.len(), SETTINGS_KEY_CAP);
+    }
+
+    #[test]
+    fn dotnet_settings_paths() {
+        for ok in [
+            "appsettings.json",
+            "src/Api/appsettings.json",
+            "src/Api/appsettings.Development.json",
+            "AppSettings.Production.JSON",
+            "svc\\appsettings.Local.json",
+            "src/Apps/cms-api/configs/appsettings-prod.json",
+            "configs/appsettingsAdminOne-prod.json",
+        ] {
+            assert!(is_dotnet_settings_path(ok), "{ok}");
+        }
+        for bad in
+            ["myappsettings.json", "appsettings.json.bak", "launchSettings.json", "appsettings.yaml", "appsettings x.json"]
+        {
+            assert!(!is_dotnet_settings_path(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn dotnet_env_override_defines_the_setting() {
+        let repo = RepoId(1);
+        let src = "ENV Stripe__SecretKey=sk_live_x\nENV Retry__Max=3\nENV PORT=8080\n";
+        let out = extract_dockerfile_defs(src, module_id(repo), repo);
+        let mut keys = config_keys(&out);
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "config:env:PORT",
+                "config:env:Retry__Max",
+                "config:env:Stripe__SecretKey",
+                "config:setting:Retry:Max",
+                "config:setting:Stripe:SecretKey",
+            ]
+        );
+        for key in ["Stripe:SecretKey", "Retry:Max"] {
+            let edges: Vec<&Edge> =
+                out.edges.iter().filter(|e| e.to == setting_id(repo, key)).collect();
+            assert_eq!(edges.len(), 1, "{key}");
+            assert_eq!(edges[0].category, edge_category::DEFINES_CONFIG);
+            assert_eq!(edges[0].from, module_id(repo));
+            let ev = Evidence::of(edges[0]).expect("override edge carries EVIDENCE");
+            assert_eq!(ev.emitter, "extractor:dockerfile");
+            assert_eq!(ev.rule.as_deref(), Some("dotnet_env_override"));
+        }
+        // The env edges are untouched: no evidence yet (route.rs stamps them).
+        let env_edge = out.edges.iter().find(|e| e.to == env_id(repo, "Stripe__SecretKey")).unwrap();
+        assert!(Evidence::of(env_edge).is_none());
+        assert_eq!(
+            payload_of(&out, "config:setting:Stripe:SecretKey").as_deref(),
+            Some(r#"{"source":"dockerfile","redacted":true}"#)
+        );
+        assert_eq!(
+            payload_of(&out, "config:setting:Retry:Max").as_deref(),
+            Some(r#"{"value":"3","source":"dockerfile","redacted":false}"#)
+        );
+        assert!(!all_payloads(&out).contains("sk_live_x"));
+        // Item order: each override follows its env define.
+        let order: Vec<&String> = out.nodes.iter().map(|n| &out.nav.qname_by_id[&n.id]).collect();
+        assert_eq!(
+            order,
+            [
+                "config:env:Stripe__SecretKey",
+                "config:setting:Stripe:SecretKey",
+                "config:env:Retry__Max",
+                "config:setting:Retry:Max",
+                "config:env:PORT",
+            ]
+        );
+
+        // .env: a three-segment override, emitter extractor:dotenv.
+        let out = extract_dotenv_defs("Logging__LogLevel__Default=Warning\n", module_id(repo), repo);
+        let edge = out
+            .edges
+            .iter()
+            .find(|e| e.to == setting_id(repo, "Logging:LogLevel:Default"))
+            .expect("dotenv override");
+        assert_eq!(Evidence::of(edge).unwrap().emitter, "extractor:dotenv");
+        assert!(
+            payload_of(&out, "config:setting:Logging:LogLevel:Default")
+                .unwrap()
+                .contains(r#""value":"Warning""#)
+        );
+
+        // k8s env list: emitter extractor:yaml, and the setting's cell is the
+        // one an appsettings leaf of that key gets (ConnectionStrings:* is
+        // redacted), while the env node keeps its env-track cell.
+        let k8s = concat!(
+            "spec:\n",
+            "  containers:\n",
+            "    - name: api\n",
+            "      env:\n",
+            "        - name: ConnectionStrings__Db\n",
+            "          value: Host=db\n",
+        );
+        let out = extract_yaml_env_defs(k8s, module_id(repo), repo);
+        let edge = out
+            .edges
+            .iter()
+            .find(|e| e.to == setting_id(repo, "ConnectionStrings:Db"))
+            .expect("k8s override");
+        assert_eq!(Evidence::of(edge).unwrap().emitter, "extractor:yaml");
+        let setting = payload_of(&out, "config:setting:ConnectionStrings:Db").unwrap();
+        assert_eq!(setting, r#"{"source":"k8s","redacted":true}"#);
+        assert!(!setting.contains("Host=db"));
+        assert_eq!(
+            env_payload(&out, "ConnectionStrings__Db").as_deref(),
+            Some(r#"{"value":"Host=db","source":"k8s","redacted":false}"#)
+        );
+
+        // compose environment map: emitter extractor:yaml too.
+        let compose = "services:\n  api:\n    environment:\n      Retry__Max: 5\n";
+        let out = extract_yaml_env_defs(compose, module_id(repo), repo);
+        let edge = out.edges.iter().find(|e| e.to == setting_id(repo, "Retry:Max")).unwrap();
+        assert_eq!(Evidence::of(edge).unwrap().emitter, "extractor:yaml");
+    }
+
+    #[test]
+    fn dotnet_env_override_needs_two_nonempty_segments() {
+        let env = |name: &str| ConfigDef::bare(name, "dockerfile");
+        for none in ["__X", "X__", "A____B", "PORT", "A_B"] {
+            assert!(dotnet_env_override(&env(none)).is_none(), "{none}");
+        }
+        let ov = dotnet_env_override(&env("A__B__C")).expect("A__B__C overrides");
+        assert_eq!((ov.name.as_str(), ov.flavor, ov.source), ("A:B:C", Flavor::Setting, "dockerfile"));
+        // Only an env define overrides: a secret or flag never does.
+        assert!(dotnet_env_override(&ConfigDef::flag("A__B", "flipt")).is_none());
+        // A read states no override.
+        let repo = RepoId(1);
+        let out = extract_config_reads("os.getenv('Stripe__SecretKey')\n", "", module_id(repo), repo);
+        assert_eq!(config_keys(&out), ["config:env:Stripe__SecretKey"]);
     }
 }

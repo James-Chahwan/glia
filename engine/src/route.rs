@@ -814,7 +814,8 @@ fn route_branches(
     }
 
     // A10.8: the walker queues a `.json` only when it sniffed as an API
-    // contract or (LA.16) a JSON Schema. After the manifest branch, so
+    // contract, (LA.16) a JSON Schema or (CL.7b) is a .NET settings file by
+    // path. After the manifest branch, so
     // package.json / composer.json never land here; before detect_language,
     // which has no json arm.
     let json_ext = std::path::Path::new(path)
@@ -824,6 +825,28 @@ fn route_branches(
     if json_ext {
         *branch = "json";
         let module_id = synthetic_module_id(repo, path);
+        // CL.7b: a .NET `appsettings*.json` (admitted by path) defines
+        // `config:setting:<Section:Key>` keys, one per leaf, and is never a
+        // contract or a schema, so it goes first. Its MODULE is named by the
+        // file name like every synthetic module (LB.9b); its edges are
+        // stamped `extractor:json` with the rest of the key.
+        if glia_code_extractors::config::is_dotnet_settings_path(path) {
+            let cfg_out = glia_code_extractors::config::extract_settings_json_defs(
+                source, path, module_id, repo,
+            );
+            let fp = (!cfg_out.nodes.is_empty()).then(|| {
+                synthetic_parse(
+                    path,
+                    module_id,
+                    repo,
+                    vec![cfg_out.nodes],
+                    vec![cfg_out.edges],
+                    vec![cfg_out.nav],
+                    vec![],
+                )
+            });
+            return Routed::NonCode { key: "json", fp, tally: t };
+        }
         // LA.16 (A10.12): a JSON Schema that is not an API contract
         // declares MESSAGE_TYPEs, the shape a `.proto` message or an
         // `.avsc` record gets, so MessageSchemaResolver can pair them
@@ -1712,6 +1735,71 @@ mod tests {
             route("testdata/settings.json", r#"{"config":{"type":"object","properties":{}}}"#).is_empty(),
             "a nested look-alike stashes nothing, not even a MODULE"
         );
+    }
+
+    /// CL.7b: an `appsettings.json` is a synthetic MODULE under the `json` key,
+    /// named by its file name, defining one `config:setting:` key per leaf
+    /// with an `extractor:json` DEFINES_CONFIG edge and a redacted secret.
+    #[test]
+    fn appsettings_routes_as_a_settings_module() {
+        let src = "{\n  \"Stripe\": { \"SecretKey\": \"sk_test_FIXTUREPLACEHOLDER\" },\n  \"Retry\": { \"Max\": 3 }\n}\n";
+        let files = vec![("server/appsettings.json".to_string(), src.to_string())];
+        let routed = route_one(
+            &files[0].0,
+            &files[0].1,
+            &RouteCtx {
+                repo: RepoId(1),
+                go: &GoModules::default(),
+                modules: &ModuleQnames::plan(&files),
+                prisma_provider: None,
+            },
+            None,
+        );
+        assert!(matches!(routed, Routed::NonCode { key: "json", fp: Some(_), .. }));
+
+        let parses = route("server/appsettings.json", src);
+        assert_eq!(parses.keys().copied().collect::<Vec<_>>(), ["json"]);
+        let fp = &parses["json"][0];
+        let module_id =
+            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MODULE, "server::appsettings.json");
+        assert_eq!(fp.nodes[0].id, module_id, "the settings file is a MODULE");
+        assert_eq!(fp.nav.name_by_id[&module_id], "appsettings.json");
+        let key = NodeId::from_parts(
+            GRAPH_TYPE,
+            RepoId(1),
+            node_kind::CONFIG_KEY,
+            "config:setting:Stripe:SecretKey",
+        );
+        assert_eq!(fp.nav.kind_by_id.get(&key), Some(&node_kind::CONFIG_KEY));
+        assert_eq!(fp.nav.name_by_id[&key], "Stripe:SecretKey");
+        let edge = fp
+            .edges
+            .iter()
+            .find(|e| e.to == key)
+            .expect("a DEFINES_CONFIG edge into the setting");
+        assert_eq!((edge.from, edge.category), (module_id, edge_category::DEFINES_CONFIG));
+        assert_eq!(evidence::Evidence::of(edge).unwrap().emitter, "extractor:json");
+        let node = fp.nodes.iter().find(|n| n.id == key).unwrap();
+        assert!(matches!(&node.cells[0].payload, CellPayload::Json(s)
+            if s == r#"{"source":"appsettings","redacted":true}"#));
+        assert!(fp.nav.name_by_id.values().all(|n| !n.contains("sk_test_")));
+        assert_eq!(fp.nodes.len(), 3, "MODULE + Stripe:SecretKey + Retry:Max");
+    }
+
+    /// CL.7b: the settings branch is by path only; an OpenAPI `.json` keeps
+    /// the A10.8 contract route and mints no setting.
+    #[test]
+    fn an_openapi_json_still_routes_as_a_contract() {
+        let openapi = r#"{"openapi":"3.0.3","paths":{"/users":{"get":{}}}}"#;
+        let fp = &route("openapi.json", openapi)["json"][0];
+        let kinds: Vec<_> = fp.nav.kind_by_id.values().copied().collect();
+        assert!(kinds.contains(&node_kind::DOC_SECTION), "a contract op");
+        assert!(!kinds.contains(&node_kind::CONFIG_KEY), "no setting from a contract");
+        // A settings file whose content looks like a contract is still settings.
+        let fp = &route("appsettings.json", openapi)["json"][0];
+        let kinds: Vec<_> = fp.nav.kind_by_id.values().copied().collect();
+        assert!(kinds.contains(&node_kind::CONFIG_KEY));
+        assert!(!kinds.contains(&node_kind::DOC_SECTION));
     }
 
     /// LA.6c: a `.component.html` template becomes a bare parse under the

@@ -8,6 +8,7 @@ use glia_code_domain::glia_config::{self, ProjectDecl, Spanned};
 use glia_code_domain::project_roots::{self, ProjectRoot};
 use glia_code_domain::walk_gating::{self, Collapse, Gate, GateCounts, IgnoreStack};
 use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+use glia_code_extractors::config::is_dotnet_settings_path;
 use glia_code_extractors::contracts::sniff_json_contract;
 use glia_code_extractors::schemas::sniff_json_schema;
 use glia_core::{Confidence, Node, NodeId, RepoId};
@@ -71,9 +72,10 @@ const MIGRATION_SQL_CAP: u64 = 4 * 1024 * 1024;
 const MARKDOWN_CAP: u64 = 500_000;
 
 /// A10.8 `[contract] json` marker counters. `sniffed` is every non-manifest
-/// `.json` the walk reached, `admitted` is the ones queued as contracts or
-/// (LA.16) as JSON Schemas, and `over_cap` is the ones never read because
-/// they exceed [`JSON_CONTRACT_CAP`].
+/// `.json` the walk reached, `admitted` is the ones queued as contracts,
+/// (LA.16) as JSON Schemas or (CL.7b) as .NET `appsettings*.json` settings
+/// files, and `over_cap` is the ones never read because they exceed
+/// [`JSON_CONTRACT_CAP`].
 #[derive(Default)]
 struct JsonAdmission {
     sniffed: usize,
@@ -104,7 +106,8 @@ enum PendingClass {
     /// reaches the `.json` sniff or the migration cap (neither suffix
     /// matches), so the source rule is the whole fall-through.
     Markdown { source_fallback: bool },
-    /// A non-manifest `.json`, read only to be sniffed (A10.8, LA.16).
+    /// A non-manifest `.json`, read only to be sniffed (A10.8, LA.16), or
+    /// admitted by its path as a .NET settings file (CL.7b).
     JsonSniff,
     /// A language file or a bypass path (manifest, yaml, Dockerfile, ...).
     Source,
@@ -114,7 +117,7 @@ enum PendingClass {
 enum Read {
     Md(String),
     /// A sniffed `.json`: `over_cap` when it was never read, `admitted` its
-    /// text when it is an API contract or a JSON Schema.
+    /// text when it is an API contract, a JSON Schema or a .NET settings file.
     Json { over_cap: bool, admitted: Option<String> },
     Src(String),
     /// Nothing to keep: a read failed, or a doc fell through to no rule.
@@ -142,11 +145,15 @@ fn read_one(p: &Pending) -> Read {
                 over_cap: true,
                 admitted: None,
             },
+            // CL.7b: an `appsettings*.json` is admitted by its path; its
+            // contents are never a contract (route.rs routes it first).
             Ok(_) => Read::Json {
                 over_cap: false,
-                admitted: std::fs::read_to_string(&p.abs)
-                    .ok()
-                    .filter(|t| sniff_json_contract(t).is_some() || sniff_json_schema(t)),
+                admitted: std::fs::read_to_string(&p.abs).ok().filter(|t| {
+                    is_dotnet_settings_path(&p.rel)
+                        || sniff_json_contract(t).is_some()
+                        || sniff_json_schema(t)
+                }),
             },
             Err(_) => Read::Json {
                 over_cap: false,
@@ -476,8 +483,9 @@ fn walk_dir(
                 continue;
             }
             // A10.8: a `.json` is read only to be sniffed, and queued only when
-            // it is an API contract (OpenAPI/Swagger, AsyncAPI, Pact) or, since
-            // LA.16 (A10.12), a JSON Schema. Lock files, tsconfig and test data
+            // it is an API contract (OpenAPI/Swagger, AsyncAPI, Pact), since
+            // LA.16 (A10.12) a JSON Schema, or since CL.7b a .NET
+            // `appsettings*.json` (by path). Lock files, tsconfig and test data
             // are read once, dropped by `read_pending`, and never kept.
             // `package.json` / `composer.json` are manifests (`is_bypass_path`)
             // and keep their own route below. Anything under a collapsed region
@@ -985,6 +993,27 @@ mod walk_tests {
             })
             .collect();
         assert_eq!(docs, ["contract::openapi::GET:/users"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// CL.7b: an `appsettings*.json` is admitted by its path (it never sniffs
+    /// as a contract or schema); its look-alikes are still sniffed and dropped.
+    #[test]
+    fn walk_admits_dotnet_settings_json() {
+        let root = walk_tmp("appsettings");
+        std::fs::create_dir_all(root.join("src/Api/Properties")).unwrap();
+        let files_in = [
+            ("src/Api/appsettings.json", r#"{"Stripe":{"SecretKey":"sk_test_x"}}"#),
+            ("src/Api/appsettings.Development.json", r#"{"Logging":{"LogLevel":{"Default":"Debug"}}}"#),
+            ("src/Api/Properties/launchSettings.json", r#"{"profiles":{"Api":{"commandName":"Project"}}}"#),
+            ("src/Api/mysettings.json", r#"{"Stripe":{"SecretKey":"sk_test_y"}}"#),
+        ];
+        for (rel, body) in files_in {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+        let (files, ..) = walk_source_files(&root);
+        let json: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(json, ["src/Api/appsettings.Development.json", "src/Api/appsettings.json"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

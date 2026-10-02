@@ -1,0 +1,29 @@
+{
+  "framework": "csharp-env-override-setting",
+  "language": "csharp",
+  "dirs": ["client", "server"],
+  "expect_nodes": [
+    {"kind": "CONFIG_KEY", "name": "Stripe:SecretKey",
+     "note": "the IConfiguration key, on the config:setting: track (CL.7b)"}
+  ],
+  "expect_edges": [
+    {"from": "StripeGateway", "to": "Stripe:SecretKey", "category": "READS_CONFIG",
+     "note": "configuration[\"Stripe:SecretKey\"] in the constructor (CL.7b read, LE.4b re-homed)"},
+    {"from": "Dockerfile", "to": "Stripe:SecretKey", "category": "DEFINES_CONFIG",
+     "note": "ENV Stripe__SecretKey is .NET's environment override of the Stripe:SecretKey setting (CL.7b cross-define, rule dotnet_env_override)"},
+    {"from": "Dockerfile", "to": "Retry:Max", "category": "DEFINES_CONFIG",
+     "note": "ENV Retry__Max overrides Retry:Max"},
+    {"from": "Stripe:SecretKey", "to": "Stripe:SecretKey", "category": "SHARES_CONFIG",
+     "note": "ConfigResolver pairs the client's read with the server's override define on the full qname"}
+  ],
+  "expect_cells": [
+    {"kind": "CONFIG_KEY", "node": "Retry:Max", "cell": "ENV", "contains": "\"value\":\"3\""}
+  ],
+  "forbid": [
+    {"kind": "CONFIG_KEY", "name": "sk_test_FIXTUREPLACEHOLDER", "max_nodes": 0,
+     "note": "the secret VALUE must never become a node identity"},
+    {"kind": "CONFIG_KEY", "name": "config:setting:PORT", "max_nodes": 0,
+     "note": "an env name without `__` is not a settings override"}
+  ],
+  "note": "CL.7b cross-define: a .NET environment variable `Section__Key` overrides the `Section:Key` setting, so an env define of `Stripe__SecretKey` (Dockerfile ENV, .env, k8s env, compose environment) also DEFINES_CONFIG config:setting:Stripe:SecretKey, which the IConfiguration read pairs with across repos. Baseline (HEAD f8a46c0): no config:setting: node, every row below missing."
+}
