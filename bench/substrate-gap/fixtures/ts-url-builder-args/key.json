@@ -1,0 +1,33 @@
+{
+  "framework": "ts-url-builder-args",
+  "language": "typescript",
+  "dirs": ["."],
+  "note": "CH-3 (URL builders and indirect arguments): the first argument of a client HTTP call is read through a single-argument URL-builder call (`this.urls.buildApiUrl(`protected/friends/accept/${id}`)`: a template's static parts, `${…}` for each substitution; recorded as `\"wrapper\"` on ENDPOINT_HIT), a zero-argument method of the same class whose body is one `return` of such a builder call (quokka's `this.sessionUrl()`), a `const` local declared before the use (quokka's reverseGeocode `const url`) and a `readonly` field initializer (Kina's `this.base`). A parameter, a `let` local and a non-readonly field stay `<unresolved>`. quokka a77d4cb: 31 CALLS go into `<unresolved>` today (20 builder templates, 3 zero-argument URL methods, 2 `const url` locals, 6 Map / Set receivers left to CH.3c). Baseline (HEAD f8a46c0, leap wheel): accept, checkSession, reverse and notifications go to `<unresolved>`.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "POST /protected/friends/accept/${…}", "exact": true, "note": "template inside a single-argument URL builder (was <unresolved>)"},
+    {"kind": "ENDPOINT", "name": "GET /protected/friends", "exact": true, "note": "string inside the builder: unchanged since LB.5 (control)"},
+    {"kind": "ENDPOINT", "name": "GET /protected/user/profile", "exact": true, "note": "this.sessionUrl() -> the method's one `return` -> the builder's literal"},
+    {"kind": "ENDPOINT", "name": "GET /reverse", "exact": true, "note": "`const url = `https://nominatim.openstreetmap.org/reverse?...`` local read at `fetch(url)` (was <unresolved>)"},
+    {"kind": "ENDPOINT", "name": "GET /api/notifications", "exact": true, "note": "`this.notificationsUrl`: a readonly field's initializer (was <unresolved>)"}
+  ],
+  "expect_edges": [
+    {"from": "FriendService/accept", "to": "POST /protected/friends/accept/${…}", "category": "CALLS"},
+    {"from": "FriendService/checkSession", "to": "GET /protected/user/profile", "category": "CALLS"},
+    {"from": "FriendService/download", "to": "GET <unresolved>", "category": "CALLS", "note": "a parameter-held URL stays <unresolved> (regression guard)"},
+    {"from": "GeoService/reverse", "to": "GET /reverse", "category": "CALLS"},
+    {"from": "GeoService/notifications", "to": "GET /api/notifications", "category": "CALLS"},
+    {"from": "GeoService/drafts", "to": "GET <unresolved>", "category": "CALLS", "note": "a non-readonly field is reassignable: stays <unresolved>"},
+    {"from": "GeoService/mutable", "to": "GET <unresolved>", "category": "CALLS", "note": "a `let` local is reassignable: stays <unresolved>"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "POST /protected/friends/accept", "cell": "ENDPOINT_HIT", "contains": "\"wrapper\":\"buildApiUrl\"", "note": "the builder the path was read through"},
+    {"kind": "ENDPOINT", "node": "GET /protected/user/profile", "cell": "ENDPOINT_HIT", "contains": "\"wrapper\":\"buildApiUrl\"", "note": "the builder the URL method returns"},
+    {"kind": "ENDPOINT", "node": "GET /reverse", "cell": "ENDPOINT_HIT", "contains": "\"external\":true", "note": "the const's literal host is a public site outside the repo's config (CG.4a)"}
+  ],
+  "forbid": [
+    {"kind": "ENDPOINT", "name": "POST <unresolved>", "note": "no POST site is unreadable here"},
+    {"from": "src/friend.service/FriendService/checkSession", "to": "endpoint:GET:<unresolved>", "category": "CALLS", "note": "the zero-argument URL method is read"},
+    {"from": "src/geo.service/GeoService/reverse", "to": "endpoint:GET:<unresolved>", "category": "CALLS", "note": "the const local is read"},
+    {"from": "src/geo.service/GeoService/notifications", "to": "endpoint:GET:<unresolved>", "category": "CALLS", "note": "the readonly field initializer is read"}
+  ]
+}

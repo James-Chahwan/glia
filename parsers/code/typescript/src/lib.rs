@@ -44,14 +44,25 @@ pub fn parse_file(
 
 /// [`parse_file`], plus the file's CG.1 function-field counters (the
 /// `[ts-fields]` marker's numbers), its CH.1 abstract-class counters (the
-/// `[ts-abstract]` marker's numbers) and its CH.2 call-initialised field
-/// counters (the `[ts-state]` marker's numbers), which the tests read back.
+/// `[ts-abstract]` marker's numbers), its CH.2 call-initialised field
+/// counters (the `[ts-state]` marker's numbers) and its CH.3a URL-argument
+/// counters (the `[ts-endpoint-args]` marker's numbers), which the tests read
+/// back.
 fn parse_file_stats(
     source: &str,
     file_rel_path: &str,
     module_qname: &str,
     repo: RepoId,
-) -> Result<(FileParse, FnFieldStats, AbstractStats, StateFieldStats), ParseError> {
+) -> Result<
+    (
+        FileParse,
+        FnFieldStats,
+        AbstractStats,
+        StateFieldStats,
+        EndpointArgStats,
+    ),
+    ParseError,
+> {
     let mut parser = Parser::new();
     let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
     parser
@@ -127,8 +138,45 @@ fn parse_file_stats(
             ab.classes, ab.methods
         );
     }
+    // CH.3a: HTTP call-site arguments read through a builder, a URL method, a
+    // `const` local or a readonly field / getter, per file.
+    let ea = endpoint_arg_stats(&acc);
+    if ea.read() > 0 {
+        eprintln!(
+            "[ts-endpoint-args] wrapper={} local={} field={} method={} unresolved={} \
+             file={file_rel_path}",
+            ea.wrapper, ea.local, ea.field, ea.method, ea.unresolved
+        );
+    }
 
-    resolve_intra_file(acc).map(|parse| (parse, ff, ab, sf))
+    resolve_intra_file(acc).map(|parse| (parse, ff, ab, sf, ea))
+}
+
+/// CH.3a: count the file's HTTP call sites by the arm that read their URL
+/// argument. Only candidates `resolve_intra_file` turns into ENDPOINTs count:
+/// a shape-2 call (`x.get(url)`) whose `x` is not an import alias does not.
+fn endpoint_arg_stats(acc: &Acc) -> EndpointArgStats {
+    let aliases = build_alias_set(&acc.imports);
+    let mut stats = EndpointArgStats::default();
+    let emitted = acc.endpoints.iter().filter(|c| {
+        c.requires_import_alias
+            .as_deref()
+            .is_none_or(|a| aliases.contains(a))
+    });
+    for cand in emitted {
+        if cand.path == UNRESOLVED_PATH {
+            stats.unresolved += 1;
+            continue;
+        }
+        match cand.read {
+            ArgRead::Direct => {}
+            ArgRead::Wrapper => stats.wrapper += 1,
+            ArgRead::Method => stats.method += 1,
+            ArgRead::Local => stats.local += 1,
+            ArgRead::Field => stats.field += 1,
+        }
+    }
+    stats
 }
 
 // ============================================================================
@@ -320,6 +368,34 @@ struct EndpointCandidate {
     /// host/query stripping changed it; this one is the source the engine's
     /// endpoint-fold pass resolves through the repo ConstTable.
     template: Option<String>,
+    /// CH.3a: the leaf name of the single-argument URL builder the path was
+    /// read through (`buildApiUrl` for `this.urls.buildApiUrl('x/y')`).
+    /// Serialised as `"wrapper"` on ENDPOINT_HIT, after `template`.
+    wrapper: Option<String>,
+    /// CH.3a: which arm of `classify_at` read the argument (the
+    /// `[ts-endpoint-args]` counters).
+    read: ArgRead,
+}
+
+/// The path text of an HTTP call whose URL argument could not be read.
+const UNRESOLVED_PATH: &str = "<unresolved>";
+
+/// CH.3a: the outermost arm of `classify_at` that read an HTTP call's URL
+/// argument. Each call site counts once in `[ts-endpoint-args]`, under this
+/// arm, or under `unresolved=` when its path stayed `<unresolved>`.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+enum ArgRead {
+    /// The argument itself (a literal, a template, today's fallbacks).
+    #[default]
+    Direct,
+    /// The one literal argument of a URL-builder call (arm a).
+    Wrapper,
+    /// The one `return` of a zero-argument same-class method (arm b).
+    Method,
+    /// The value of a `const` declared in an enclosing scope (arm d).
+    Local,
+    /// A `readonly` field initializer or a one-`return` getter (arm e).
+    Field,
 }
 
 /// What `classify_path_arg` read off an HTTP call's first argument.
@@ -329,6 +405,59 @@ struct PathArg {
     /// Substitution-preserving template source; see `EndpointCandidate::template`.
     template: Option<String>,
     confidence: Confidence,
+    /// CH.3a: see `EndpointCandidate::wrapper`.
+    wrapper: Option<String>,
+    /// CH.3a: see `EndpointCandidate::read`.
+    read: ArgRead,
+}
+
+impl PathArg {
+    /// A path read straight off a literal (or today's fallbacks): no template,
+    /// no wrapper.
+    fn plain(path: String, confidence: Confidence) -> Self {
+        PathArg {
+            path,
+            template: None,
+            confidence,
+            wrapper: None,
+            read: ArgRead::Direct,
+        }
+    }
+
+    /// The argument could not be read.
+    fn unresolved() -> Self {
+        Self::plain(UNRESOLVED_PATH.to_string(), Confidence::Weak)
+    }
+
+    /// The path minus every `${…}` substitution holds a `/`: what an
+    /// indirect read must show before it is taken as a URL (CH.3a rule f).
+    fn static_text_has_slash(&self) -> bool {
+        self.path.replace("${…}", "").contains('/')
+    }
+}
+
+/// CH.3a: what one file's HTTP call-site arguments gave the graph (the
+/// `[ts-endpoint-args]` marker). Only call sites that become ENDPOINTs count
+/// (a shape-2 call whose base is not an import alias does not).
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+struct EndpointArgStats {
+    /// Read through a single-argument URL builder's literal (arm a).
+    wrapper: usize,
+    /// Read through a `const` local (arm d).
+    local: usize,
+    /// Read through a `readonly` field or a getter (arm e).
+    field: usize,
+    /// Read through a zero-argument same-class URL method (arm b).
+    method: usize,
+    /// Still `<unresolved>`.
+    unresolved: usize,
+}
+
+impl EndpointArgStats {
+    /// Call sites one of CH.3a's arms read.
+    fn read(self) -> usize {
+        self.wrapper + self.local + self.field + self.method
+    }
 }
 
 // ============================================================================
@@ -1873,9 +2002,13 @@ fn record_member_ref(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
 //   - Template with only static parts                       → Strong
 //   - Template with interpolations                          → Medium (path
 //     keeps literal prefix + `${…}` placeholders)
-//   - Call expression (URL-builder wrapper) — pluck inner   → Weak
-//     literal as hint
-//   - Anything else (identifier, conditional, …)            → Weak,
+//   - Call expression whose one argument is a literal       → Weak,
+//     (URL-builder wrapper, CH.3a) — that literal, the       `wrapper` on
+//     callee's leaf name recorded                            ENDPOINT_HIT
+//   - `this.m()`, a `const` local, `this.<readonly field>`  → the value's
+//     (CH.3a) — the one declaration's value, depth one       own tier
+//   - Other call expression — pluck inner literal as hint   → Weak
+//   - Anything else (parameter, `let`, conditional, …)      → Weak,
 //     path = `<unresolved>`
 //
 // Method/path normalisation (e.g. `:id` ↔ `{id}`) is HttpStackResolver's job;
@@ -1981,6 +2114,8 @@ fn push_endpoint(
         path,
         template,
         confidence,
+        wrapper,
+        read,
     } = arg;
     // A3.3: the single funnel for every client-call shape, so host + query
     // stripping happens once. A normaliser, never a filter: interpolated bases
@@ -2003,33 +2138,511 @@ fn push_endpoint(
         requires_import_alias,
         raw_path,
         template,
+        wrapper,
+        read,
     });
 }
 
 fn classify_path_arg(arg: TsNode, src: &[u8]) -> PathArg {
-    let plain = |path: String, confidence| PathArg {
-        path,
-        template: None,
-        confidence,
-    };
+    classify_at(arg, src, true)
+}
+
+/// CH.3a: read an HTTP call's URL argument from what the source states at the
+/// call site and in the caller's own scope chain or class. Arms, in order:
+///
+/// - a string / template literal: itself (Strong / Medium);
+/// - (a) a call whose one argument is a literal (`this.urls.buildApiUrl(…)`):
+///   that literal, Weak, `wrapper` = the callee's leaf name; a template whose
+///   static text holds no `/` (`this.i18n.t(`errors.${code}`)`) is no URL;
+/// - (b) `this.<m>()` with no arguments: the one `return` of the same-class
+///   method `m` ([`same_class_method_return`]);
+/// - (c) any other call: its first string literal, Weak (the v0.4.4 hint);
+/// - (d) an identifier: the value of a `const` an enclosing scope declares
+///   before the use ([`local_const_value`]);
+/// - (e) `this.<p>`: a `readonly` field initializer or a one-`return` getter
+///   of the caller's own class ([`class_member_value`]);
+/// - anything else: `<unresolved>`.
+///
+/// `indirect_ok` gates (b), (d) and (e): an indirect read classifies the
+/// declaration it found with `indirect_ok = false`, so depth is one and no
+/// read follows a second declaration. No parameter, assignment, `let` / `var`
+/// or arbitrary call's return value is followed: no value data-flow.
+fn classify_at(arg: TsNode, src: &[u8], indirect_ok: bool) -> PathArg {
     match arg.kind() {
         "string" => {
             let raw = text(arg, src);
-            plain(strip_string_quotes(raw), Confidence::Strong)
+            PathArg::plain(strip_string_quotes(raw), Confidence::Strong)
         }
         "template_string" => classify_template(arg, src),
         "call_expression" => {
-            // URL-builder wrapper like `this.api.buildUrl('auth/login')` —
+            if let Some(read) = builder_literal(arg, src) {
+                return read;
+            }
+            if indirect_ok
+                && let Some(method) = this_zero_arg_call(arg, src)
+                && let Some(expr) = same_class_method_return(arg, method, src)
+            {
+                return indirect(classify_at(expr, src, false), ArgRead::Method);
+            }
+            // URL-builder wrapper like `this.api.buildUrl('auth/login', x)` —
             // pluck the innermost string literal as a hint, weak confidence.
-            plain(
-                find_first_string_literal(arg, src)
-                    .map(|s| strip_string_quotes(&s))
-                    .unwrap_or_else(|| "<unresolved>".to_string()),
-                Confidence::Weak,
-            )
+            find_first_string_literal(arg, src)
+                .map(|s| PathArg::plain(strip_string_quotes(&s), Confidence::Weak))
+                .unwrap_or_else(PathArg::unresolved)
         }
-        _ => plain("<unresolved>".to_string(), Confidence::Weak),
+        "identifier" if indirect_ok => match local_const_value(arg, src) {
+            Some(value) => indirect(classify_at(value, src, false), ArgRead::Local),
+            None => PathArg::unresolved(),
+        },
+        "member_expression"
+            if indirect_ok
+                && arg
+                    .child_by_field_name("object")
+                    .is_some_and(|o| o.kind() == "this") =>
+        {
+            match class_member_value(arg, src) {
+                Some(value) => indirect(classify_at(value, src, false), ArgRead::Field),
+                None => PathArg::unresolved(),
+            }
+        }
+        _ => PathArg::unresolved(),
     }
+}
+
+/// CH.3a rule f: what an indirect read (arms b, d, e) of `inner` gives. A
+/// method's builder-call return keeps arm a's reading (the class wrote that
+/// method to return a URL: `this.healthUrl()` returning
+/// `this.urls.buildApiRootUrl('healthz')` reads `/healthz`); every other read
+/// is a URL only when its static text holds a `/`, so a local such as
+/// `const id = this.route.snapshot.paramMap.get('id')`, a bare
+/// `const key = 'draft'` or a whole-substitution `` `${x}` `` stays
+/// `<unresolved>`. Confidence is the value's own.
+fn indirect(inner: PathArg, read: ArgRead) -> PathArg {
+    let builder_method = read == ArgRead::Method && inner.wrapper.is_some();
+    let taken = inner.path != UNRESOLVED_PATH && (builder_method || inner.static_text_has_slash());
+    if taken {
+        PathArg { read, ..inner }
+    } else {
+        PathArg {
+            read,
+            ..PathArg::unresolved()
+        }
+    }
+}
+
+/// CH.3a arm a: a call whose `arguments` are exactly one string or template
+/// literal, read as that literal through a URL builder. Weak (the builder
+/// may transform it), `wrapper` = the callee's leaf name. A template whose
+/// static text holds no `/` is no URL: `<unresolved>`, no wrapper. None when
+/// the call has another argument shape or a callee with no name, which leaves
+/// it to the v0.4.4 first-literal hint.
+fn builder_literal(call: TsNode, src: &[u8]) -> Option<PathArg> {
+    let literal = single_literal_arg(call)?;
+    let wrapper = callee_leaf_name(call, src)?;
+    let mut read = if literal.kind() == "string" {
+        PathArg::plain(strip_string_quotes(text(literal, src)), Confidence::Weak)
+    } else {
+        let read = classify_template(literal, src);
+        if !read.static_text_has_slash() {
+            return Some(PathArg::unresolved());
+        }
+        read
+    };
+    read.confidence = Confidence::Weak;
+    read.wrapper = Some(wrapper.to_string());
+    read.read = ArgRead::Wrapper;
+    Some(read)
+}
+
+/// The one argument of `call` when it is a string or template literal and
+/// nothing else (comments aside). A tagged template's `arguments` is the
+/// template itself, not an `arguments` list: None.
+fn single_literal_arg(call: TsNode) -> Option<TsNode> {
+    let args = call
+        .child_by_field_name("arguments")
+        .filter(|a| a.kind() == "arguments")?;
+    let mut cursor = args.walk();
+    let mut named = args
+        .named_children(&mut cursor)
+        .filter(|c| c.kind() != "comment");
+    let only = named.next()?;
+    if named.next().is_some() {
+        return None;
+    }
+    matches!(only.kind(), "string" | "template_string").then_some(only)
+}
+
+/// A call's callee leaf: an identifier's text or a member's `property`.
+fn callee_leaf_name<'a>(call: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    let callee = call.child_by_field_name("function")?;
+    match callee.kind() {
+        "identifier" => Some(text(callee, src)),
+        "member_expression" => callee.child_by_field_name("property").map(|p| text(p, src)),
+        _ => None,
+    }
+}
+
+/// `m` for a `this.m()` call with no arguments.
+fn this_zero_arg_call<'a>(call: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    let callee = call.child_by_field_name("function")?;
+    if callee.kind() != "member_expression"
+        || callee.child_by_field_name("object")?.kind() != "this"
+    {
+        return None;
+    }
+    let args = call
+        .child_by_field_name("arguments")
+        .filter(|a| a.kind() == "arguments")?;
+    if has_named_non_comment(args) {
+        return None;
+    }
+    callee.child_by_field_name("property").map(|p| text(p, src))
+}
+
+/// True when `n` has a named child that is not a comment.
+fn has_named_non_comment(n: TsNode) -> bool {
+    let mut cursor = n.walk();
+    n.named_children(&mut cursor).any(|c| c.kind() != "comment")
+}
+
+/// True when `n` has an anonymous child token of `kind` (`readonly`,
+/// `static`, `get`, `set`): a member NAMED `get` is a named node, not this.
+fn has_token(n: TsNode, kind: &str) -> bool {
+    let mut cursor = n.walk();
+    n.children(&mut cursor)
+        .any(|c| !c.is_named() && c.kind() == kind)
+}
+
+/// The expression of a method's body when the body is exactly one `return`
+/// of an expression (comments aside).
+fn sole_return(method: TsNode) -> Option<TsNode> {
+    let body = method.child_by_field_name("body")?;
+    let mut cursor = body.walk();
+    let mut stmts = body
+        .named_children(&mut cursor)
+        .filter(|s| s.kind() != "comment");
+    let only = stmts.next()?;
+    if stmts.next().is_some() || only.kind() != "return_statement" {
+        return None;
+    }
+    let mut inner = only.walk();
+    only.named_children(&mut inner)
+        .find(|e| e.kind() != "comment")
+}
+
+/// The class `this` names at `n`, as its `class_body` and whether `this` is
+/// the class itself (a `static` member or a static block). An arrow keeps
+/// `this`; a `function` (expression, declaration or generator) rebinds it and
+/// an object-literal method is not the class's: None.
+fn this_class(n: TsNode) -> Option<(TsNode, bool)> {
+    let mut cur = n;
+    while let Some(parent) = cur.parent() {
+        match parent.kind() {
+            "function_expression"
+            | "function_declaration"
+            | "generator_function"
+            | "generator_function_declaration"
+            | "class_body"
+            | "program" => return None,
+            "method_definition" | "public_field_definition" | "class_static_block" => {
+                let body = parent.parent().filter(|b| b.kind() == "class_body")?;
+                let is_static =
+                    parent.kind() == "class_static_block" || has_token(parent, "static");
+                return Some((body, is_static));
+            }
+            _ => {}
+        }
+        cur = parent;
+    }
+    None
+}
+
+/// CH.3a arm b: for `this.<m>()` with no arguments, the expression the
+/// caller's own class's method `m` returns, when `m` is a plain method (no
+/// `get` / `set`) of the same static-ness, takes no parameters and its body
+/// is exactly one `return` (`private sessionUrl() { return
+/// this.urls.buildApiUrl('protected/user/profile'); }`). Anything else: None.
+fn same_class_method_return<'t>(call: TsNode<'t>, m: &str, src: &[u8]) -> Option<TsNode<'t>> {
+    let (body, is_static) = this_class(call)?;
+    let mut cursor = body.walk();
+    let method = body.named_children(&mut cursor).find(|d| {
+        d.kind() == "method_definition"
+            && d.child_by_field_name("name")
+                .is_some_and(|n| text(n, src) == m)
+            && !has_token(*d, "get")
+            && !has_token(*d, "set")
+            && has_token(*d, "static") == is_static
+    })?;
+    if method
+        .child_by_field_name("parameters")
+        .is_some_and(has_named_non_comment)
+    {
+        return None;
+    }
+    sole_return(method)
+}
+
+/// CH.3a arm e: for `this.<p>`, the initializer of the caller's own class's
+/// `readonly` field `p`, else the expression its getter `p` returns when the
+/// getter's body is one `return`; static-ness must match the caller's `this`.
+/// A non-readonly field (reassignable anywhere in the class), a constructor
+/// parameter property, an inherited member, or a read inside a `function`
+/// callback (another `this`): None.
+fn class_member_value<'t>(member: TsNode<'t>, src: &[u8]) -> Option<TsNode<'t>> {
+    let p = text(member.child_by_field_name("property")?, src);
+    let (body, is_static) = this_class(member)?;
+    let named = |d: &TsNode| {
+        d.child_by_field_name("name")
+            .is_some_and(|n| text(n, src) == p)
+            && has_token(*d, "static") == is_static
+    };
+    let mut cursor = body.walk();
+    let members: Vec<TsNode<'t>> = body.named_children(&mut cursor).collect();
+    if let Some(field) = members
+        .iter()
+        .find(|d| d.kind() == "public_field_definition" && named(d))
+    {
+        return if has_token(*field, "readonly") {
+            field.child_by_field_name("value")
+        } else {
+            None
+        };
+    }
+    let getter = members
+        .iter()
+        .find(|d| d.kind() == "method_definition" && has_token(**d, "get") && named(d))?;
+    sole_return(*getter)
+}
+
+/// How a scope binds a name before a use: not at all, as a `const` with a
+/// readable value, or some other way (`let`, `var`, a destructuring, a
+/// function or class, or only after the use).
+enum ScopeBinding<'t> {
+    Unbound,
+    Const(TsNode<'t>),
+    Shadowed,
+}
+
+/// CH.3a arm d: the value of the `const` that `ident` names, declared in an
+/// enclosing scope (a block, a switch body or the module) and ending before
+/// the use. The walk stops at the first scope that binds the name: a `let`,
+/// `var`, destructuring, function or class binding, or one declared only
+/// after the use (the TDZ), gives None, as does a parameter (defaulted ones
+/// included), a `for` / `for … of` loop variable, a catch parameter, a
+/// function expression's own name, or a `var` a crossed function hoists.
+fn local_const_value<'t>(ident: TsNode<'t>, src: &[u8]) -> Option<TsNode<'t>> {
+    let name = text(ident, src);
+    let at = ident.start_byte();
+    let mut cur = ident;
+    while let Some(parent) = cur.parent() {
+        if matches!(parent.kind(), "statement_block" | "program" | "switch_body") {
+            match scope_binding(parent, name, at, src) {
+                ScopeBinding::Unbound => {}
+                ScopeBinding::Const(value) => return Some(value),
+                ScopeBinding::Shadowed => return None,
+            }
+        } else if binds_outside_block(parent, name, src) {
+            return None;
+        }
+        cur = parent;
+    }
+    None
+}
+
+/// True when `node`, an ancestor of a use, binds `name` outside its blocks: a
+/// function-like's parameters, a function expression's own name, a `var` the
+/// function hoists, a `for` / `for … of` loop variable or a catch parameter.
+fn binds_outside_block(node: TsNode, name: &str, src: &[u8]) -> bool {
+    let field_binds = |field: &str| {
+        node.child_by_field_name(field)
+            .is_some_and(|f| binds_name(f, name, src))
+    };
+    match node.kind() {
+        "arrow_function"
+        | "function_declaration"
+        | "generator_function_declaration"
+        | "method_definition" => params_bind(node, name, src) || hoists_var(node, name, src),
+        "function_expression" | "generator_function" => {
+            field_binds("name") || params_bind(node, name, src) || hoists_var(node, name, src)
+        }
+        "for_in_statement" => field_binds("left"),
+        "for_statement" => node
+            .child_by_field_name("initializer")
+            .is_some_and(|i| declaration_binds(i, name, src)),
+        "catch_clause" => field_binds("parameter"),
+        _ => false,
+    }
+}
+
+/// The statements a scope declares names with: a block's or the module's
+/// children (an `export` unwrapped to its declaration), or every case body of
+/// a `switch` (one scope in JS).
+fn scope_statements(scope: TsNode) -> Vec<TsNode> {
+    let mut cursor = scope.walk();
+    let children: Vec<TsNode> = scope.named_children(&mut cursor).collect();
+    if scope.kind() != "switch_body" {
+        return children;
+    }
+    let mut out = Vec::new();
+    for case in children {
+        let value = case.child_by_field_name("value");
+        let mut inner = case.walk();
+        out.extend(
+            case.named_children(&mut inner)
+                .filter(|s| Some(*s) != value),
+        );
+    }
+    out
+}
+
+/// How `scope` binds `name` for a use starting at byte `at`: the LAST binding
+/// whose statement ends before the use decides; a binding that exists only
+/// at or after the use still shadows every outer one (the TDZ).
+fn scope_binding<'t>(scope: TsNode<'t>, name: &str, at: usize, src: &[u8]) -> ScopeBinding<'t> {
+    let mut seen = false;
+    let mut before: Option<ScopeBinding<'t>> = None;
+    for stmt in scope_statements(scope) {
+        let decl = if stmt.kind() == "export_statement" {
+            match stmt.child_by_field_name("declaration") {
+                Some(d) => d,
+                None => continue,
+            }
+        } else {
+            stmt
+        };
+        let Some(binding) = statement_binding(decl, name, src) else {
+            continue;
+        };
+        seen = true;
+        if stmt.end_byte() <= at {
+            before = Some(binding);
+        }
+    }
+    match before {
+        Some(b) => b,
+        None if seen => ScopeBinding::Shadowed,
+        None => ScopeBinding::Unbound,
+    }
+}
+
+/// How one statement binds `name`, if it does: `const name = value` is
+/// `Const(value)`; any other declarator binding it, or a function / class
+/// declaration of that name, is `Shadowed`.
+fn statement_binding<'t>(decl: TsNode<'t>, name: &str, src: &[u8]) -> Option<ScopeBinding<'t>> {
+    match decl.kind() {
+        "lexical_declaration" | "variable_declaration" => {
+            let is_const = decl.kind() == "lexical_declaration"
+                && decl
+                    .child_by_field_name("kind")
+                    .is_some_and(|k| k.kind() == "const");
+            let mut cursor = decl.walk();
+            let declarator = decl.named_children(&mut cursor).find(|d| {
+                d.kind() == "variable_declarator"
+                    && d.child_by_field_name("name")
+                        .is_some_and(|n| binds_name(n, name, src))
+            })?;
+            let target = declarator.child_by_field_name("name")?;
+            match declarator.child_by_field_name("value") {
+                Some(value) if is_const && target.kind() == "identifier" => {
+                    Some(ScopeBinding::Const(value))
+                }
+                _ => Some(ScopeBinding::Shadowed),
+            }
+        }
+        "function_declaration"
+        | "generator_function_declaration"
+        | "class_declaration"
+        | "abstract_class_declaration" => decl
+            .child_by_field_name("name")
+            .is_some_and(|n| text(n, src) == name)
+            .then_some(ScopeBinding::Shadowed),
+        _ => None,
+    }
+}
+
+/// True when a `for` initializer declares `name` (or, for an expression
+/// initializer, mentions it: conservative).
+fn declaration_binds(init: TsNode, name: &str, src: &[u8]) -> bool {
+    match init.kind() {
+        "lexical_declaration" | "variable_declaration" => {
+            let mut cursor = init.walk();
+            init.named_children(&mut cursor).any(|d| {
+                d.kind() == "variable_declarator"
+                    && d.child_by_field_name("name")
+                        .is_some_and(|n| binds_name(n, name, src))
+            })
+        }
+        _ => binds_name(init, name, src),
+    }
+}
+
+/// True when a function-like's parameters bind `name`: an arrow's single
+/// `parameter`, or any formal parameter's pattern (a defaulted
+/// `path = '/def'` binds `path`).
+fn params_bind(func: TsNode, name: &str, src: &[u8]) -> bool {
+    if let Some(p) = func.child_by_field_name("parameter") {
+        return binds_name(p, name, src);
+    }
+    let Some(params) = func.child_by_field_name("parameters") else {
+        return false;
+    };
+    let mut cursor = params.walk();
+    params.named_children(&mut cursor).any(|p| {
+        let pattern = p
+            .child_by_field_name("pattern")
+            .or_else(|| p.child_by_field_name("name"))
+            .unwrap_or(p);
+        binds_name(pattern, name, src)
+    })
+}
+
+/// True when a function's body declares `var name` in a nested block (a
+/// `var` is function-scoped, so it shadows an outer `const` everywhere in the
+/// function); nested functions and classes are their own scopes, not walked.
+fn hoists_var(func: TsNode, name: &str, src: &[u8]) -> bool {
+    let Some(body) = func.child_by_field_name("body") else {
+        return false;
+    };
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "variable_declaration" && declaration_binds(n, name, src) {
+            return true;
+        }
+        let mut cursor = n.walk();
+        stack.extend(n.named_children(&mut cursor).filter(|c| {
+            !matches!(
+                c.kind(),
+                "arrow_function"
+                    | "function_expression"
+                    | "function_declaration"
+                    | "generator_function"
+                    | "generator_function_declaration"
+                    | "class_declaration"
+                    | "abstract_class_declaration"
+                    | "class"
+            )
+        }));
+    }
+    false
+}
+
+/// True when the binding pattern binds `name`: it is that identifier, or an
+/// `identifier` / shorthand property pattern inside it is. Identifiers in a
+/// default value count too, which only ever makes a read more conservative.
+fn binds_name(pattern: TsNode, name: &str, src: &[u8]) -> bool {
+    let mut stack = vec![pattern];
+    while let Some(n) = stack.pop() {
+        if matches!(
+            n.kind(),
+            "identifier" | "shorthand_property_identifier_pattern"
+        ) && text(n, src) == name
+        {
+            return true;
+        }
+        let mut cursor = n.walk();
+        stack.extend(n.named_children(&mut cursor));
+    }
+    false
 }
 
 /// A template literal as two parallel strings built from the same children:
@@ -2065,6 +2678,8 @@ fn classify_template(template: TsNode, src: &[u8]) -> PathArg {
         } else {
             Confidence::Strong
         },
+        wrapper: None,
+        read: ArgRead::Direct,
     }
 }
 
@@ -2136,6 +2751,9 @@ fn downgrade(c: Confidence) -> Confidence {
 /// `template` (A11.2) follows `raw` and is skipped the same way, so only an
 /// endpoint whose argument was a template with a substitution gains a field.
 /// The two are different values — see `EndpointCandidate`.
+///
+/// `wrapper` (CH.3a) follows `template`, skipped the same way: only a path
+/// read through a single-argument URL builder names it.
 fn endpoint_hit_cell(cand: &EndpointCandidate) -> Cell {
     #[derive(serde::Serialize)]
     struct Payload<'a> {
@@ -2149,6 +2767,8 @@ fn endpoint_hit_cell(cand: &EndpointCandidate) -> Cell {
         raw: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         template: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        wrapper: Option<&'a str>,
     }
     let conf_str = match cand.confidence {
         Confidence::Strong => "strong",
@@ -2164,6 +2784,7 @@ fn endpoint_hit_cell(cand: &EndpointCandidate) -> Cell {
         confidence: conf_str,
         raw: cand.raw_path.as_deref(),
         template: cand.template.as_deref(),
+        wrapper: cand.wrapper.as_deref(),
     })
     .unwrap_or_else(|_| String::from("{}"));
     Cell {
@@ -3528,6 +4149,585 @@ export class AuthService {
         }
     }
 
+    // ========================================================================
+    // CH.3a: URL builders and indirect URL arguments
+    // ========================================================================
+
+    /// CH.3a: the METHOD `<module>::<Class>::<name>` CALLS `endpoint:<M>:<path>`.
+    fn method_calls(parse: &FileParse, module: &str, owner: &str, http: &str, path: &str) -> bool {
+        let from = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::METHOD,
+            &format!("{module}::{owner}"),
+        );
+        has_edge(
+            parse,
+            from,
+            endpoint_id(repo(), http, path),
+            edge_category::CALLS,
+        )
+    }
+
+    /// CH.3a (a): a template inside a single-argument URL builder is read with
+    /// today's template rules (static parts, `${…}` per substitution), Weak,
+    /// and the builder rides on ENDPOINT_HIT as `wrapper`.
+    #[test]
+    fn wrapper_template_reads_static_parts() {
+        let src = "\
+export class FriendService {
+    constructor(private readonly http: any, private readonly urls: any) {}
+    accept(id: string) {
+        return this.http.post(this.urls.buildApiUrl(`protected/friends/accept/${encodeURIComponent(id)}`), {});
+    }
+}
+";
+        let parse = parse_file(src, "src/friend.ts", "src::friend", repo()).unwrap();
+        let ep = endpoint_id(repo(), "POST", "/protected/friends/accept/${…}");
+        let node = parse
+            .nodes
+            .iter()
+            .find(|n| n.id == ep)
+            .expect("builder template endpoint");
+        assert_eq!(node.confidence, Confidence::Weak);
+        assert!(method_calls(
+            &parse,
+            "src::friend",
+            "FriendService::accept",
+            "POST",
+            "/protected/friends/accept/${…}"
+        ));
+        let p = endpoint_payloads(&parse, ep);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0]["wrapper"], "buildApiUrl");
+        assert_eq!(
+            p[0]["template"],
+            "protected/friends/accept/${encodeURIComponent(id)}"
+        );
+        assert_eq!(p[0]["raw"], "protected/friends/accept/${…}");
+        assert_eq!(p[0]["confidence"], "weak");
+        assert!(
+            !parse
+                .nodes
+                .iter()
+                .any(|n| n.id == endpoint_id(repo(), "POST", "<unresolved>")),
+            "the builder template must not fall into <unresolved>"
+        );
+    }
+
+    /// CH.3a (b): a builder's plain string literal keeps today's reading and
+    /// gains only the `wrapper` field, after `template` (absent here).
+    #[test]
+    fn wrapper_literal_gains_the_wrapper_field() {
+        let src = "\
+export class AuthService {
+    constructor(private readonly http: any, private readonly api: any) {}
+    login(payload: any): void {
+        this.http.post(this.api.buildApiUrl('auth/login'), payload);
+    }
+}
+";
+        let parse = parse_file(src, "src/auth.ts", "src::auth", repo()).unwrap();
+        let ep = endpoint_id(repo(), "POST", "/auth/login");
+        let node = parse
+            .nodes
+            .iter()
+            .find(|n| n.id == ep)
+            .expect("builder literal endpoint");
+        assert_eq!(node.confidence, Confidence::Weak);
+        let p = endpoint_payloads(&parse, ep);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0]["wrapper"], "buildApiUrl");
+        assert!(p[0].get("template").is_none());
+        let raw = match &node
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::ENDPOINT_HIT)
+            .unwrap()
+            .payload
+        {
+            CellPayload::Json(s) => s.clone(),
+            _ => String::new(),
+        };
+        assert!(
+            raw.ends_with(r#""raw":"auth/login","wrapper":"buildApiUrl"}"#),
+            "wrapper must follow raw / template: {raw}"
+        );
+        // A direct literal carries no wrapper: byte-identical to before CH.3a.
+        let direct = "\
+export class S {
+    constructor(private readonly http: any) {}
+    load(): void { this.http.get('/api/users'); }
+}
+";
+        let parse = parse_file(direct, "src/s.ts", "src::s", repo()).unwrap();
+        let ep = endpoint_id(repo(), "GET", "/api/users");
+        let cell = parse
+            .nodes
+            .iter()
+            .find(|n| n.id == ep)
+            .and_then(|n| n.cells.iter().find(|c| c.kind == cell_type::ENDPOINT_HIT))
+            .unwrap();
+        assert_eq!(
+            cell.payload,
+            CellPayload::Json(
+                r#"{"method":"GET","path":"/api/users","file":"src/s.ts","line":3,"col":20,"confidence":"strong"}"#
+                    .into()
+            )
+        );
+    }
+
+    /// CH.3a (c): `this.sessionUrl()` with no arguments reads the one
+    /// `return` of the same-class method; two statements, a parameter or a
+    /// getter keep it `<unresolved>`.
+    #[test]
+    fn zero_arg_url_method_is_read() {
+        let src = "\
+export class AuthService {
+    constructor(private readonly http: any, private readonly urls: any) {}
+    checkSession() {
+        return this.http.get(this.sessionUrl());
+    }
+    health() {
+        return this.http.get(this.healthUrl());
+    }
+    private sessionUrl(): string {
+        return this.urls.buildApiUrl('protected/user/profile');
+    }
+    private healthUrl(): string {
+        return this.urls.buildApiRootUrl('healthz');
+    }
+}
+";
+        let parse = parse_file(src, "src/auth.ts", "src::auth", repo()).unwrap();
+        assert!(method_calls(
+            &parse,
+            "src::auth",
+            "AuthService::checkSession",
+            "GET",
+            "/protected/user/profile"
+        ));
+        let p = endpoint_payloads(
+            &parse,
+            endpoint_id(repo(), "GET", "/protected/user/profile"),
+        );
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0]["wrapper"], "buildApiUrl");
+        // A method's builder-call return keeps arm a's reading (no `/` rule).
+        assert!(method_calls(
+            &parse,
+            "src::auth",
+            "AuthService::health",
+            "GET",
+            "/healthz"
+        ));
+
+        for (label, method) in [
+            (
+                "two statements",
+                "private sessionUrl(): string {\n        const p = 'x';\n        return this.urls.buildApiUrl('protected/user/profile');\n    }",
+            ),
+            (
+                "a parameter",
+                "private sessionUrl(p?: string): string {\n        return this.urls.buildApiUrl('protected/user/profile');\n    }",
+            ),
+            (
+                "a getter",
+                "private get sessionUrl(): any {\n        return this.urls.buildApiUrl('protected/user/profile');\n    }",
+            ),
+        ] {
+            let src = format!(
+                "export class AuthService {{\n    constructor(private readonly http: any, private readonly urls: any) {{}}\n    checkSession() {{\n        return this.http.get(this.sessionUrl());\n    }}\n    {method}\n}}\n"
+            );
+            let parse = parse_file(&src, "src/auth.ts", "src::auth", repo()).unwrap();
+            assert!(
+                method_calls(
+                    &parse,
+                    "src::auth",
+                    "AuthService::checkSession",
+                    "GET",
+                    "<unresolved>"
+                ),
+                "{label}: must stay <unresolved>"
+            );
+            assert!(
+                !parse
+                    .nodes
+                    .iter()
+                    .any(|n| n.id == endpoint_id(repo(), "GET", "/protected/user/profile")),
+                "{label}: must not be read"
+            );
+        }
+    }
+
+    /// CH.3a (d): a `const` declared before the use in an enclosing scope is
+    /// read; a parameter, a `let`, a later `const`, a shadowing parameter or
+    /// loop variable, and a value with no `/` are not.
+    #[test]
+    fn local_const_and_shadowing() {
+        let src = "\
+export const API_URL = '/api/x';
+export class GeoService {
+    constructor(private readonly http: any) {}
+    async reverse(lat: number) {
+        const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}`;
+        return fetch(url);
+    }
+    moduleConst() {
+        return this.http.get(API_URL);
+    }
+}
+";
+        let parse = parse_file(src, "src/geo.ts", "src::geo", repo()).unwrap();
+        assert!(method_calls(
+            &parse,
+            "src::geo",
+            "GeoService::reverse",
+            "GET",
+            "/reverse"
+        ));
+        let p = endpoint_payloads(&parse, endpoint_id(repo(), "GET", "/reverse"));
+        assert_eq!(p.len(), 1);
+        assert_eq!(
+            p[0]["raw"],
+            "https://nominatim.openstreetmap.org/reverse?lat=${…}"
+        );
+        assert_eq!(
+            p[0]["template"],
+            "https://nominatim.openstreetmap.org/reverse?lat=${lat}"
+        );
+        assert_eq!(p[0]["confidence"], "medium");
+        assert!(
+            p[0].get("wrapper").is_none(),
+            "a local read names no builder"
+        );
+        // The hit is the call's, not the declaration's.
+        assert_eq!(p[0]["line"], 6);
+        assert!(method_calls(
+            &parse,
+            "src::geo",
+            "GeoService::moduleConst",
+            "GET",
+            "/api/x"
+        ));
+        // A module const read inside a module function, and a const in a
+        // `switch` case before the use (the switch body is one scope).
+        let src = "\
+export const API_URL = '/api/x';
+export function loadX() {
+    return fetch(API_URL);
+}
+export function pick(x: number) {
+    switch (x) {
+        case 1:
+            const url = '/api/one';
+            return fetch(url);
+        default:
+            return null;
+    }
+}
+";
+        let parse = parse_file(src, "src/fns.ts", "src::fns", repo()).unwrap();
+        let fn_calls = |name: &str, path: &str| {
+            let from = NodeId::from_parts(
+                GRAPH_TYPE,
+                repo(),
+                node_kind::FUNCTION,
+                &format!("src::fns::{name}"),
+            );
+            has_edge(
+                &parse,
+                from,
+                endpoint_id(repo(), "GET", path),
+                edge_category::CALLS,
+            )
+        };
+        assert!(fn_calls("loadX", "/api/x"));
+        assert!(fn_calls("pick", "/api/one"));
+
+        for (label, owner, body) in [
+            (
+                "a parameter",
+                "S::download",
+                "download(url: string) { return this.http.get(url); }",
+            ),
+            (
+                "a defaulted parameter",
+                "S::download",
+                "download(url = '/api/def') { return this.http.get(url); }",
+            ),
+            (
+                "a let",
+                "S::load",
+                "load() { let u = '/a'; return this.http.get(u); }",
+            ),
+            (
+                "a const after the use",
+                "S::load",
+                "load() { this.http.get(url); const url = '/a'; }",
+            ),
+            (
+                "an arrow parameter",
+                "S::load",
+                "load(urls: string[]) { const url = '/a'; urls.forEach((url) => this.http.get(url)); }",
+            ),
+            (
+                "a for-of variable",
+                "S::load",
+                "load(urls: string[]) { const url = '/a'; for (const url of urls) { this.http.get(url); } }",
+            ),
+            (
+                "a catch parameter",
+                "S::load",
+                "load() { const url = '/a'; try { } catch (url) { this.http.get(url); } }",
+            ),
+            (
+                "a hoisted var",
+                "S::load",
+                "load(x: boolean) { const url = '/a'; return (() => { if (x) { var url = '/b'; } return this.http.get(url); })(); }",
+            ),
+            (
+                "a value with no slash",
+                "S::load",
+                "load() { const id = this.route.snapshot.paramMap.get('id'); return this.http.get(id); }",
+            ),
+            (
+                "a bare value",
+                "S::load",
+                "load() { const key = 'draft'; return this.http.get(key); }",
+            ),
+            (
+                "a whole-substitution template",
+                "S::load",
+                "load(x: string) { const u = `${x}`; return this.http.get(u); }",
+            ),
+            (
+                "a destructured const",
+                "S::load",
+                "load(o: any) { const { url } = o; return this.http.get(url); }",
+            ),
+            (
+                "a switch-case const after the use",
+                "S::load",
+                "load(x: number) { switch (x) { case 1: this.http.get(url); break; default: const url = '/a'; } }",
+            ),
+        ] {
+            let src = format!(
+                "const url = '/api/outer';\nexport class S {{\n    constructor(private readonly http: any, private readonly route: any) {{}}\n    {body}\n}}\n"
+            );
+            let parse = parse_file(&src, "src/s.ts", "src::s", repo()).unwrap();
+            assert!(
+                method_calls(&parse, "src::s", owner, "GET", "<unresolved>"),
+                "{label}: must stay <unresolved>"
+            );
+            assert!(
+                !parse
+                    .nodes
+                    .iter()
+                    .any(|n| n.id == endpoint_id(repo(), "GET", "/api/outer")),
+                "{label}: the outer const must not be read"
+            );
+        }
+    }
+
+    /// CH.3a (e): a `readonly` field initializer and a one-`return` getter of
+    /// the caller's own class are read; a non-readonly field and a read inside
+    /// a `function () {}` callback (another `this`) are not.
+    #[test]
+    fn readonly_field_and_getter() {
+        let src = "\
+export class NotificationsApi {
+    private readonly notificationsUrl = '/api/notifications';
+    private readonly base = `${environment.apiUrl}/notices`;
+    private draftUrl = '/api/drafts';
+    constructor(private readonly http: any) {}
+    get usersUrl() { return '/api/users'; }
+    notifications() { return this.http.get(this.notificationsUrl); }
+    users() { return this.http.get(this.usersUrl); }
+    notices() { return this.http.get(this.base, { params: {} }); }
+    drafts() { return this.http.get(this.draftUrl); }
+    callback(xs: any[]) { xs.forEach(function () { this.http.get(this.notificationsUrl); }); }
+    arrow(xs: any[]) { xs.forEach(() => this.http.get(this.usersUrl)); }
+}
+";
+        let parse = parse_file(src, "src/n.ts", "src::n", repo()).unwrap();
+        let m = "src::n";
+        assert!(method_calls(
+            &parse,
+            m,
+            "NotificationsApi::notifications",
+            "GET",
+            "/api/notifications"
+        ));
+        let n = parse
+            .nodes
+            .iter()
+            .find(|n| n.id == endpoint_id(repo(), "GET", "/api/notifications"))
+            .unwrap();
+        assert_eq!(
+            n.confidence,
+            Confidence::Strong,
+            "a readonly string is as good as the literal"
+        );
+        assert!(method_calls(
+            &parse,
+            m,
+            "NotificationsApi::users",
+            "GET",
+            "/api/users"
+        ));
+        assert!(
+            method_calls(&parse, m, "NotificationsApi::arrow", "GET", "/api/users"),
+            "an arrow keeps this"
+        );
+        // The field's template rides along for the engine's endpoint fold.
+        assert!(method_calls(
+            &parse,
+            m,
+            "NotificationsApi::notices",
+            "GET",
+            "${…}/notices"
+        ));
+        let p = endpoint_payloads(&parse, endpoint_id(repo(), "GET", "${…}/notices"));
+        assert_eq!(p[0]["template"], "${environment.apiUrl}/notices");
+        assert!(p[0].get("wrapper").is_none());
+        assert!(method_calls(
+            &parse,
+            m,
+            "NotificationsApi::drafts",
+            "GET",
+            "<unresolved>"
+        ));
+        assert!(method_calls(
+            &parse,
+            m,
+            "NotificationsApi::callback",
+            "GET",
+            "<unresolved>"
+        ));
+        assert!(!method_calls(
+            &parse,
+            m,
+            "NotificationsApi::callback",
+            "GET",
+            "/api/notifications"
+        ));
+        // A static member is not the instance's field.
+        let st = "\
+export class S {
+    private static http: any;
+    private readonly url = '/api/a';
+    private static readonly staticUrl = '/api/b';
+    static load() { return this.http.get(this.url); }
+    static loadStatic() { return this.http.get(this.staticUrl); }
+}
+";
+        let parse = parse_file(st, "src/st.ts", "src::st", repo()).unwrap();
+        assert!(method_calls(
+            &parse,
+            "src::st",
+            "S::load",
+            "GET",
+            "<unresolved>"
+        ));
+        assert!(
+            !parse
+                .nodes
+                .iter()
+                .any(|n| n.id == endpoint_id(repo(), "GET", "/api/a"))
+        );
+        assert!(method_calls(
+            &parse,
+            "src::st",
+            "S::loadStatic",
+            "GET",
+            "/api/b"
+        ));
+    }
+
+    /// CH.3a (f): a single-argument non-URL call around a template (no `/`
+    /// in its static text) is no URL: `<unresolved>`, no wrapper.
+    #[test]
+    fn non_url_wrapper_template_stays_unresolved() {
+        let src = "\
+export class S {
+    constructor(private readonly http: any, private readonly i18n: any) {}
+    load(code: string) { return this.http.get(this.i18n.t(`errors.${code}`)); }
+}
+";
+        let parse = parse_file(src, "src/s.ts", "src::s", repo()).unwrap();
+        assert!(method_calls(
+            &parse,
+            "src::s",
+            "S::load",
+            "GET",
+            "<unresolved>"
+        ));
+        let p = endpoint_payloads(&parse, endpoint_id(repo(), "GET", "<unresolved>"));
+        assert_eq!(p.len(), 1);
+        assert!(p[0].get("wrapper").is_none(), "{}", p[0]);
+    }
+
+    /// CH.3a: `[ts-endpoint-args]` counts each emitted call site once, under
+    /// the outermost arm that read it, or `unresolved=`.
+    #[test]
+    fn endpoint_arg_stats_count_each_site_once() {
+        let friend = "\
+export class FriendService {
+    constructor(private readonly http: any, private readonly urls: any) {}
+    accept(publicId: string) {
+        return this.http.post(this.urls.buildApiUrl(`protected/friends/accept/${encodeURIComponent(publicId)}`), {});
+    }
+    list() { return this.http.get(this.urls.buildApiUrl('protected/friends')); }
+    checkSession() { return this.http.get(this.sessionUrl()); }
+    download(url: string) { return this.http.get(url); }
+    private sessionUrl(): string { return this.urls.buildApiUrl('protected/user/profile'); }
+}
+";
+        let (.., stats) =
+            parse_file_stats(friend, "src/friend.service.ts", "src::friend", repo()).unwrap();
+        assert_eq!(
+            stats,
+            EndpointArgStats {
+                wrapper: 2,
+                local: 0,
+                field: 0,
+                method: 1,
+                unresolved: 1
+            }
+        );
+        let geo = "\
+export class GeoService {
+    private readonly notificationsUrl = '/api/notifications';
+    private draftUrl = '/api/drafts';
+    constructor(private readonly http: any) {}
+    async reverse(lat: number, lon: number) {
+        const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}`;
+        return fetch(url);
+    }
+    notifications() { return this.http.get(this.notificationsUrl); }
+    drafts() { return this.http.get(this.draftUrl); }
+    mutable() { let u = '/api/a'; u = '/api/b'; return this.http.get(u); }
+    plain() { return this.http.get('/api/plain'); }
+}
+";
+        let (.., stats) = parse_file_stats(geo, "src/geo.service.ts", "src::geo", repo()).unwrap();
+        assert_eq!(
+            stats,
+            EndpointArgStats {
+                wrapper: 0,
+                local: 1,
+                field: 1,
+                method: 0,
+                unresolved: 2
+            }
+        );
+        // A shape-2 call whose base is no import alias emits nothing: not counted.
+        let gated = "export function f(axios: any) { const u = '/a/b'; axios.get(u); }\n";
+        let (.., stats) = parse_file_stats(gated, "src/g.ts", "src::g", repo()).unwrap();
+        assert_eq!(stats, EndpointArgStats::default());
+    }
+
     /// LB.5 — a relative and a slashed call to one path are ONE ENDPOINT id
     /// (one nav entry, one ENDPOINT_HIT per call site), and the relative call's
     /// hit records the literal it was rewritten from.
@@ -4846,7 +6046,7 @@ export class UsersService {
 
     /// The `[ts-state]` counters of one parse, as `(fields, signal, calls)`.
     fn state_field_counts(src: &str, path: &str, module: &str) -> (usize, usize, usize) {
-        let (_, _, _, stats) = parse_file_stats(src, path, module, repo()).unwrap();
+        let (_, _, _, stats, _) = parse_file_stats(src, path, module, repo()).unwrap();
         (stats.fields, stats.signal, stats.calls)
     }
 
@@ -5095,7 +6295,7 @@ class W {
 
     /// The `[ts-abstract]` counters of one parse, as `(classes, methods)`.
     fn abstract_counts(src: &str, path: &str, module: &str) -> (usize, usize) {
-        let (_, _, stats, _) = parse_file_stats(src, path, module, repo()).unwrap();
+        let (_, _, stats, ..) = parse_file_stats(src, path, module, repo()).unwrap();
         (stats.classes, stats.methods)
     }
 
