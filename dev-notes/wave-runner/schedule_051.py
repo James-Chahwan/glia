@@ -51,6 +51,7 @@ LANDED = {
     12: "C0.9 CH.1 CH.5a CI.1 CJ.1a CJ.2 CJ.3 CJ.4 CK.2 CL.5a CL.11",
     13: "CH.1b CI.5 CJ.1b CK.1 CK.3 CL.1 CL.5b CL.8 CL.10",
     14: "CH.1c CH.2 CI.3 CJ.1c CL.2 CL.6a",
+    15: "CH.3a CI.2a CL.3 CL.6b CL.7a CL.9",
 }
 GROUP_ORDER = {"0": 0, "A": 1, "B": 2, "C": 3, "D": 4, "E": 5, "F": 6, "Z": 9}
 

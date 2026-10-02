@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 335,
+  "fixtures": 337,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -607,6 +607,14 @@
       "language": "go",
       "per_category": {
         "ACCESSES_DATA": 1.0
+      }
+    },
+    "go-embedded-promotion": {
+      "framework": "go-embedded-promotion",
+      "language": "go",
+      "per_category": {
+        "CALLS": 1.0,
+        "INHERITS_FROM": 1.0
       }
     },
     "go-field-dispatch": {
@@ -1939,6 +1947,13 @@
       "per_category": {
         "ACCESSES_DATA": 1.0,
         "DEFINES": 1.0
+      }
+    },
+    "ts-url-builder-args": {
+      "framework": "ts-url-builder-args",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "vue-http-calls": {
