@@ -78,7 +78,7 @@ python           ●       ●       ●       ●       ●       ◐       ●
 go               ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 typescript       ●       ●       ●       ●       ●       ◐       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 java             ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-csharp           ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
+csharp           ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 ruby             ●       ●       ·       ·       ·       ·       ?       ●       ●       ●       ●       ●       ·       ●       ·       ●       ●       ●       ·       ◐       ●       ●       ◐       ●       ●       ◐       ◐       ◐       ●       ●
 php              ●       ●       ◐       ◐       ·       ·       ?       ·       ·       ·       ·       ●       ●       ·       ·       ●       ●       ◐       ·       ◐       ●       ●       ·       ●       ●       ●       ◐       ●       ●       ●
 swift            ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?
@@ -111,7 +111,7 @@ PER-MECHANISM  across 17 languages:
   db           ● 8   ◐ 0   · 3   ? 5   - 1   ! 0
   migrations   ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
   config       ● 7   ◐ 4   · 0   ? 5   - 1   ! 0
-  secrets      ● 5   ◐ 2   · 4   ? 5   - 1   ! 0
+  secrets      ● 6   ◐ 2   · 3   ? 5   - 1   ! 0
   flags        ● 7   ◐ 4   · 0   ? 5   - 1   ! 0
   cron         ● 9   ◐ 0   · 2   ? 5   - 1   ! 0
   cli_def      ● 8   ◐ 0   · 3   ? 4   - 2   ! 0
@@ -129,7 +129,7 @@ PER-LANGUAGE  across 30 mechanisms:
   go           ● 29  ◐ 0   · 1   ? 0   - 0   ! 0
   typescript   ● 29  ◐ 1   · 0   ? 0   - 0   ! 0
   java         ● 29  ◐ 0   · 1   ? 0   - 0   ! 0
-  csharp       ● 28  ◐ 0   · 2   ? 0   - 0   ! 0
+  csharp       ● 29  ◐ 0   · 1   ? 0   - 0   ! 0
   ruby         ● 17  ◐ 5   · 7   ? 1   - 0   ! 0
   php          ● 14  ◐ 5   · 10  ? 1   - 0   ! 0
   swift        ● 2   ◐ 1   · 0   ? 27  - 0   ! 0
@@ -144,9 +144,9 @@ PER-LANGUAGE  across 30 mechanisms:
   kotlin       ● 6   ◐ 0   · 0   ? 24  - 0   ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 238 full, 34 partial, 74 none, 136 unknown, 0 error, 28 n/a.
+COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 239 full, 34 partial, 73 none, 136 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 186
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 187
 
 ## Cells routed via an alternative mechanism
 

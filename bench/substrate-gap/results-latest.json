@@ -737,7 +737,7 @@
     },
     "csharp/secrets": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -747,17 +747,17 @@
         1,
         1
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        2,
         2
       ],
-      "via": null
+      "via": "config"
     },
     "csharp/service": {
       "extract": [
@@ -2715,18 +2715,19 @@
     },
     "go/impl": {
       "extract": [
-        5,
-        5
+        6,
+        6
       ],
       "fixtures": [
+        "fixtures/go-embedded-implements",
         "fixtures/go-iface-embed",
         "fixtures/go-iface-scope",
         "fixtures/go-implicit-iface",
         "fixtures/go-root-package-imports"
       ],
       "forbid": [
-        7,
-        7
+        9,
+        9
       ],
       "level": "full",
       "literal": [
@@ -2737,8 +2738,8 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        10,
-        10
+        18,
+        18
       ],
       "via": "type"
     },
@@ -8616,6 +8617,7 @@
     "fixtures/csharp-aspnet-composed",
     "fixtures/csharp-block-using",
     "fixtures/csharp-efcore",
+    "fixtures/csharp-env-override-setting",
     "fixtures/csharp-file-local-types",
     "fixtures/csharp-kafka-msgtype",
     "fixtures/csharp-minimal-api",
@@ -8892,10 +8894,10 @@
   "totals": {
     "covered": 346,
     "error": 0,
-    "full": 238,
+    "full": 239,
     "grid": 510,
     "n/a": 28,
-    "none": 74,
+    "none": 73,
     "partial": 34,
     "unknown": 136
   },

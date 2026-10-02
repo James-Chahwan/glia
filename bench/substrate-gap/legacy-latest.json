@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 337,
+  "fixtures": 339,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -283,6 +283,15 @@
       "language": "csharp",
       "per_category": {
         "ACCESSES_DATA": 1.0
+      }
+    },
+    "csharp-env-override-setting": {
+      "framework": "csharp-env-override-setting",
+      "language": "csharp",
+      "per_category": {
+        "DEFINES_CONFIG": 1.0,
+        "READS_CONFIG": 1.0,
+        "SHARES_CONFIG": 1.0
       }
     },
     "csharp-field-dispatch": {
@@ -607,6 +616,13 @@
       "language": "go",
       "per_category": {
         "ACCESSES_DATA": 1.0
+      }
+    },
+    "go-embedded-implements": {
+      "framework": "go-embedded-implements",
+      "language": "go",
+      "per_category": {
+        "IMPLEMENTS": 1.0
       }
     },
     "go-embedded-promotion": {
