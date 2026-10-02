@@ -95,6 +95,15 @@ pub enum TopicRule {
     Keyed(&'static [&'static str]),
     /// Keyed form first, falling back to argument #0 (APIs that accept both).
     KeyedOrArg(&'static [&'static str]),
+    /// CL.3: builder-method keys read in the fluent chain that FOLLOWS the
+    /// needle, up to the end of its statement ([`chain_region`]): Azure's
+    /// `new ServiceBusClientBuilder().sender().queueName("orders")`, the AWS
+    /// SDK v2 `ReceiveMessageRequest.builder().queueUrl("..")` built on its
+    /// own statement, MQTTnet's `new MqttApplicationMessageBuilder()
+    /// .WithTopic("x")`. Keys are tried in table order, first match wins, and
+    /// each is read as a builder method (`.key("x")`), the A2.6 form of
+    /// [`TopicRule::Keyed`].
+    Chain(&'static [&'static str]),
     /// The needle proves the framework but never names a topic.
     NoIdentity,
     // --- A2.5: TASK-QUEUE IDENTITY. These read a SYMBOL, not a literal, ------
@@ -344,6 +353,10 @@ pub fn escape_json(s: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option<Folded> {
+    // CL.3: a chain row reads no argument region, so it never walks one.
+    if let TopicRule::Chain(keys) = rule {
+        return keyed_literal(chain_region(source, after), keys);
+    }
     let region = arg_region(source, after, needle);
     match rule {
         TopicRule::ArgLiteral => arg_literal(region?, 0),
@@ -374,6 +387,10 @@ fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option
 /// from — the same region, the same argument, the same key, tried in the same
 /// order. `NoIdentity` and the A2.5 identity rules never carry one.
 fn expr_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option<String> {
+    // CL.3: `.queueName(QUEUE)` hands `QUEUE` to the LA.4 const fold.
+    if let TopicRule::Chain(keys) = rule {
+        return keyed_expr(chain_region(source, after), keys);
+    }
     let region = arg_region(source, after, needle);
     match rule {
         TopicRule::ArgLiteral => arg_expr(region?, 0),
@@ -405,16 +422,167 @@ fn line_region(source: &str, after: usize) -> &str {
 /// Some needles already swallow their opening bracket (`.lpush(`, `new Worker(`);
 /// the rest are bare names (`nc.Publish`, `producer.send`) followed by optional
 /// whitespace and then `(`, `{` or `[`.
+///
+/// CL.3: a bare MEMBER-CALL needle (one holding a `.`) may be followed by a
+/// generic method call's type arguments first, NATS.Net's
+/// `nc.SubscribeAsync<string>("orders")` or Hangfire's
+/// `BackgroundJob.Enqueue<Jobs>(x => ..)`: one balanced `<...>` is stepped
+/// over ([`skip_type_args`]). A dotless TYPE needle is not: after `KafkaConsumer`
+/// the type arguments open a declaration or a constructor
+/// (`new KafkaConsumer<>(props)`), whose argument is client config, and
+/// reading it would hand `props` to the LA.4 fold as a topic expression,
+/// which keeps CL.1 rule (ii) from dropping the file's kafka tag.
 pub(crate) fn arg_region<'a>(source: &'a str, after: usize, needle: &str) -> Option<&'a str> {
     let rest = source.get(after..)?;
     if needle.ends_with(['(', '{', '[']) {
         return region_body(rest);
     }
-    let trimmed = rest.trim_start();
+    let mut trimmed = rest.trim_start();
+    if trimmed.starts_with('<') && needle.contains('.') {
+        trimmed = skip_type_args(trimmed)?.trim_start();
+    }
     if !matches!(trimmed.as_bytes().first(), Some(b'(' | b'{' | b'[')) {
         return None;
     }
     region_body(trimmed.get(1..)?)
+}
+
+/// CL.3: `s` (which opens with `<`) past its balanced type-argument list:
+/// nested `<>` counted, so `>>` closes two levels, and quoted text stepped
+/// over (`region_body`'s rules). `None` — no call to read — when the list
+/// does not close within [`MAX_REGION`] bytes, or when a byte no type list
+/// holds comes first (`;`, `(`, `)`, `{`, `}`, `=`, a newline): that `<` was a
+/// comparison. Every byte that ends the walk is ASCII, so the slice lands on a
+/// char boundary.
+fn skip_type_args(s: &str) -> Option<&str> {
+    let b = s.as_bytes();
+    let limit = b.len().min(MAX_REGION);
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < limit {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+        } else {
+            match c {
+                b'\'' | b'"' | b'`' => quote = Some(c),
+                b'<' => depth += 1,
+                b'>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return s.get(i + 1..);
+                    }
+                }
+                b';' | b'(' | b')' | b'{' | b'}' | b'=' | b'\n' | b'\r' => return None,
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// CL.3: the fluent chain that FOLLOWS a needle, for [`TopicRule::Chain`]:
+/// `.connectionString(c)\n    .sender().queueName("orders").buildClient()`.
+/// Walks from `after` with [`region_body`]'s bracket and quote rules (a `//`
+/// comment is skipped to its line end) and stops, exclusive, at the first of:
+///
+/// * a depth-0 `;` (Java / C# statement end) or `,` (the next argument or
+///   initializer member);
+/// * a closing bracket that takes the depth below 0: the chain was an
+///   argument (`sqs.sendMessage(SendMessageRequest.builder()...build())`) or
+///   an initializer;
+/// * a depth-0 newline whose next non-blank byte is not `.` and whose
+///   previous non-blank byte is not `.`: Scala / Kotlin / Go statements end at
+///   a newline, and a Java / C# continuation line starts with `.`;
+/// * [`MAX_REGION`] bytes, or EOF.
+///
+/// Never runs into the next statement, and every byte it stops at is ASCII, so
+/// the slice lands on a char boundary.
+fn chain_region(source: &str, after: usize) -> &str {
+    let Some(rest) = source.get(after..) else {
+        return "";
+    };
+    let b = rest.as_bytes();
+    let limit = b.len().min(MAX_REGION);
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < limit {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        let stop = match c {
+            b'\'' | b'"' | b'`' => {
+                quote = Some(c);
+                false
+            }
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                // A line comment ends at its newline, which is judged next.
+                while i < limit && b[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b'(' | b'{' | b'[' => {
+                depth += 1;
+                false
+            }
+            b')' | b'}' | b']' => {
+                depth -= 1;
+                depth < 0
+            }
+            b';' | b',' => depth == 0,
+            b'\n' => depth == 0 && !chain_continues(b, i, limit),
+            _ => false,
+        };
+        if stop {
+            return rest.get(..i).unwrap_or("");
+        }
+        i += 1;
+    }
+    clip(rest, limit)
+}
+
+/// CL.3: does the chain carry on across the newline at `nl`? Yes when the next
+/// code byte before `limit` (blank lines and `//` comment lines skipped) is
+/// `.`, or the previous non-blank byte is.
+fn chain_continues(b: &[u8], nl: usize, limit: usize) -> bool {
+    let prev = b
+        .get(..nl)
+        .and_then(|head| head.iter().rev().find(|c| !c.is_ascii_whitespace()));
+    if prev == Some(&b'.') {
+        return true;
+    }
+    let mut i = nl + 1;
+    while i < limit {
+        match b.get(i) {
+            Some(c) if c.is_ascii_whitespace() => i += 1,
+            Some(b'/') if b.get(i + 1) == Some(&b'/') => {
+                while i < limit && b.get(i) != Some(&b'\n') {
+                    i += 1;
+                }
+            }
+            next => return next == Some(&b'.'),
+        }
+    }
+    false
 }
 
 /// Walk from just after an opening bracket (depth already 1) to its match,
@@ -1742,6 +1910,164 @@ mod tests {
         assert_eq!(
             keyed_expr("{QueueUrl: myaws.String(u)}", &["queueurl"]),
             None
+        );
+    }
+
+    // ---- CL.3: builder chains and generic type arguments --------------------
+
+    const SB_KEYS: TopicRule = TopicRule::Chain(&["queuename", "topicname"]);
+
+    #[test]
+    fn chain_reads_a_builder_key_to_the_statement_end() {
+        // Java: the chain breaks across lines, each continuation opening with
+        // `.`, and the statement ends at `;`.
+        let java = "ServiceBusSenderClient s = new ServiceBusClientBuilder().connectionString(c)\n    .sender()\n    .queueName(\"orders\")\n    .buildClient();\ns.sendMessage(m);\n";
+        assert_eq!(one(java, ".sender()", SB_KEYS), Some("orders".into()));
+        // Scala: no `;`, the statement ends at the newline.
+        let scala = "  def b = new ServiceBusClientBuilder().connectionString(c).receiver().queueName(\"orders\").buildClient()\n}\n";
+        assert_eq!(one(scala, ".receiver()", SB_KEYS), Some("orders".into()));
+        // C#: the builder is an argument, ended by the call's `)`.
+        let cs = "await client.SubscribeAsync(new MqttTopicFilterBuilder().WithTopic(\"sensors/temp\").Build());";
+        assert_eq!(
+            one(
+                cs,
+                "MqttTopicFilterBuilder()",
+                TopicRule::Chain(&["withtopic"])
+            ),
+            Some("sensors/temp".into())
+        );
+        // An AWS request built on its own statement; the URL folds (A2.6).
+        let aws = "ReceiveMessageRequest request = ReceiveMessageRequest.builder()\n        .queueUrl(\"https://sqs.us-east-1.amazonaws.com/1/orders\")\n        .maxNumberOfMessages(10)\n        .build();\nsqs.receiveMessage(request);\n";
+        let hit = scan(
+            aws,
+            "ReceiveMessageRequest.builder()",
+            TopicRule::Chain(&["queueurl"]),
+        )
+        .remove(0);
+        assert_eq!(hit.topic.as_deref(), Some("orders"));
+        assert_eq!(hit.form, TopicForm::Url);
+        // Keys are tried in table order: a topic receiver reads its TOPIC.
+        let topic =
+            "b.receiver().topicName(\"orders\").subscriptionName(\"billing\").buildClient();";
+        assert_eq!(one(topic, ".receiver()", SB_KEYS), Some("orders".into()));
+        // A lambda's `;` and a comment line inside the chain stay inside it.
+        let processor = "b.processor()\n    // the queue\n    .queueName(\"orders\")\n    .processMessage(ctx -> { log(ctx); })\n    .buildProcessorClient();";
+        assert_eq!(
+            one(processor, ".processor()", SB_KEYS),
+            Some("orders".into())
+        );
+        // A key held in a constant hands its NAME to the LA.4 fold.
+        let held = "b.sender().queueName(ORDERS_QUEUE).buildClient();";
+        assert_eq!(
+            expr(held, ".sender()", SB_KEYS),
+            Some("ORDERS_QUEUE".into())
+        );
+        assert_eq!(one(held, ".sender()", SB_KEYS), None);
+    }
+
+    #[test]
+    fn chain_stops_at_the_next_statement() {
+        // A newline neither side of which is `.` ends a Scala / Kotlin chain.
+        assert_eq!(
+            one("a.receiver()\nfoo.queueName(\"x\")", ".receiver()", SB_KEYS),
+            None
+        );
+        // `;` ends a Java one, `,` the argument, `)` the enclosing call.
+        assert_eq!(
+            one("a.receiver(); b.queueName(\"x\");", ".receiver()", SB_KEYS),
+            None
+        );
+        assert_eq!(
+            one(
+                "f(a.receiver(), b.queueName(\"x\"))",
+                ".receiver()",
+                SB_KEYS
+            ),
+            None
+        );
+        assert_eq!(
+            one(
+                "f(a.receiver()) + b.queueName(\"x\")",
+                ".receiver()",
+                SB_KEYS
+            ),
+            None
+        );
+        // A quoted `;` is text, not a statement end.
+        assert_eq!(
+            one(
+                "a.receiver().tag(\"a;b\").queueName(\"x\");",
+                ".receiver()",
+                SB_KEYS
+            ),
+            Some("x".into())
+        );
+        // A bare call is not a builder key: the `.` before the key is required.
+        assert_eq!(
+            one("a.receiver().f(queueName(\"x\"));", ".receiver()", SB_KEYS),
+            None
+        );
+        // Bounded, and panic-free on EOF / multi-byte text.
+        let long = format!("a.receiver(){}.queueName(\"x\");", " ".repeat(MAX_REGION));
+        assert_eq!(one(&long, ".receiver()", SB_KEYS), None);
+        for src in [
+            "a.receiver()",
+            "a.receiver().queueName(\"é",
+            "a.receiver().quéueName(\"x\")",
+        ] {
+            let _ = scan(src, ".receiver()", SB_KEYS);
+        }
+        assert_eq!(chain_region("x", 5), "");
+    }
+
+    #[test]
+    fn arg_region_skips_generic_arguments() {
+        let at = |src: &str, needle: &str| {
+            let after = src.find(needle).map(|i| i + needle.len()).unwrap_or(0);
+            arg_region(src, after, needle).map(str::to_string)
+        };
+        assert_eq!(
+            at("nc.SubscribeAsync<string>(\"orders\")", ".SubscribeAsync"),
+            Some("\"orders\"".into())
+        );
+        // Nested arguments, `>>>` closing three levels.
+        assert_eq!(
+            at(
+                "bus.PublishAsync<Dictionary<string, List<int>>>(\"orders\", d)",
+                ".PublishAsync"
+            ),
+            Some("\"orders\", d".into())
+        );
+        // Hangfire (CL.4): the type argument, then a lambda.
+        assert_eq!(
+            at("BackgroundJob.Enqueue<T>(x => x.Run())", ".Enqueue"),
+            Some("x => x.Run()".into())
+        );
+        // Unclosed, or a comparison, reads nothing.
+        assert_eq!(
+            at("nc.SubscribeAsync<string(\"orders\")", ".SubscribeAsync"),
+            None
+        );
+        assert_eq!(at("if (nc.Count < 3) { go(); }", "nc.Count"), None);
+        assert_eq!(at("nc.SubscribeAsync<string", ".SubscribeAsync"), None);
+        // A dotless TYPE needle is not stepped over: its constructor argument
+        // is client config, never a topic expression.
+        assert_eq!(at("new KafkaConsumer<>(props)", "KafkaConsumer"), None);
+        assert_eq!(
+            expr(
+                "new KafkaConsumer<>(props)",
+                "KafkaConsumer",
+                TopicRule::ArgLiteral
+            ),
+            None
+        );
+        assert_eq!(
+            one(
+                "nc.SubscribeAsync<Order>(\"orders\")",
+                ".SubscribeAsync",
+                TopicRule::ArgLiteral
+            ),
+            Some("orders".into())
         );
     }
 }

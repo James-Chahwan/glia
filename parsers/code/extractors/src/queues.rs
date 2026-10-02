@@ -317,6 +317,55 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // list's first topic) and `c.SubscribeTopic("orders", nil)`.
     (".SubscribeTopics(", QueueFramework::Kafka, &["confluent-kafka-go"], TopicRule::ArgLiteral),
     (".SubscribeTopic(", QueueFramework::Kafka, &["confluent-kafka-go"], TopicRule::ArgLiteral),
+    // ---- CL.3: JVM / .NET broker clients ------------------------------------
+    // Every row sits BEFORE the A2.9 block, so a generic `.subscribe(` verb row
+    // yields to a call one of these already read. `.receiver()` and the
+    // `Template.` / `.leftPop(` spellings are common words: every gate is the
+    // library's PACKAGE.
+    // Java / Scala / Kotlin — azure-messaging-servicebus names the queue on a
+    // builder METHOD after the client kind: `new ServiceBusClientBuilder()
+    // .connectionString(c).receiver().queueName("orders").buildClient()`,
+    // read along the chain to the statement's end (`TopicRule::Chain`). A
+    // topic receiver (`.topicName("t").subscriptionName("s")`) reads its
+    // TOPIC, so it joins the sender: the `CreateProcessor(` precedent. The C#
+    // namespace lowercases to the same gate, but the C# API has no
+    // `.receiver()`.
+    (".receiver()", QueueFramework::AzureServiceBus, &["azure.messaging.servicebus"], TopicRule::Chain(&["queuename", "topicname"])),
+    (".processor()", QueueFramework::AzureServiceBus, &["azure.messaging.servicebus"], TopicRule::Chain(&["queuename", "topicname"])),
+    (".sessionReceiver()", QueueFramework::AzureServiceBus, &["azure.messaging.servicebus"], TopicRule::Chain(&["queuename", "topicname"])),
+    (".sessionProcessor()", QueueFramework::AzureServiceBus, &["azure.messaging.servicebus"], TopicRule::Chain(&["queuename", "topicname"])),
+    // Spring Cloud GCP (`com.google.cloud.spring.pubsub`, before 2.x
+    // `org.springframework.cloud.gcp.pubsub`): `pubSubTemplate.subscribe(
+    // "orders", handler)`. Arg #0 is a SUBSCRIPTION: the JS `.subscription(`
+    // row's COVERAGE_CAVEATS gap holds.
+    ("Template.subscribe(", QueueFramework::PubSub, &["cloud.spring.pubsub", "cloud.gcp.pubsub"], TopicRule::ArgLiteral),
+    // Spring Data Redis lists: `redisTemplate.opsForList().rightPop("orders",
+    // timeout)`, the key first.
+    (".leftPop(", QueueFramework::RedisList, &["springframework.data.redis"], TopicRule::ArgLiteral),
+    (".rightPop(", QueueFramework::RedisList, &["springframework.data.redis"], TopicRule::ArgLiteral),
+    // AWS SDK for Java v2, the developer-guide shape: the request is built on
+    // its OWN statement (`ReceiveMessageRequest.builder().queueUrl("..")
+    // ..build()`) and `sqs.receiveMessage(request)` names no queue, so CL.1's
+    // rule (ii) drops that call's tag once this row named one.
+    ("ReceiveMessageRequest.builder()", QueueFramework::Sqs, &["awssdk.services.sqs"], TopicRule::Chain(&["queueurl"])),
+    // C# — NATS.Net v2 (`NATS.Client.Core`, `NATS.Net`): `nc.SubscribeAsync<
+    // Order>("orders")`. No trailing `(`: the type arguments sit between the
+    // name and the call, and `queue_topic::arg_region` steps over them. The
+    // HEAD `nc.Subscribe` row prefix-matches the same call and reads nothing;
+    // CL.1's rule (i) drops its tag beside this row's node.
+    (".SubscribeAsync", QueueFramework::Nats, &["nats.client", "nats.net"], TopicRule::ArgLiteral),
+    // C# — MQTTnet: `client.SubscribeAsync("sensors/temp")`, an options
+    // builder's `.WithTopicFilter("x")` / `.WithTopicFilter(f =>
+    // f.WithTopic("x"))` (its arg #0's first literal), and `new
+    // MqttTopicFilterBuilder().WithTopic("x")`. None is a shared verb
+    // ([`is_generic_verb_row`]), so each reads its topic normally.
+    ("MqttTopicFilterBuilder()", QueueFramework::Mqtt, &["mqttnet"], TopicRule::Chain(&["withtopic"])),
+    (".SubscribeAsync(", QueueFramework::Mqtt, &["mqttnet"], TopicRule::ArgLiteral),
+    (".WithTopicFilter(", QueueFramework::Mqtt, &["mqttnet"], TopicRule::ArgLiteral),
+    // C# — Google.Cloud.PubSub.V1: `SubscriptionName.FromProjectSubscription(
+    // "shop", "orders")`, arg #0 the project. A subscription pairs only when
+    // spelled like its topic (the `.subscription_path(` caveat).
+    ("SubscriptionName.FromProjectSubscription(", QueueFramework::PubSub, &["google.cloud.pubsub"], TopicRule::ArgIndex(1)),
     // ---- A2.9: broker pub/sub that used to live in eventbus.rs ----------
     // These verbs are the broadest needles in the table, so every row below is
     // a GENERIC-VERB row ([`is_generic_verb_row`]): it yields to any earlier
@@ -410,8 +459,12 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // the field (kafkaTemplate / KafkaTemplate / ordersTemplate).
     ("Template.send(", QueueFramework::Kafka, &["springframework.kafka"], TopicRule::ArgLiteral),
     // Java/Scala — plain client, diamond form: `new ProducerRecord<>("orders", v)`.
-    // KNOWN MISS: the explicit-generics form `new ProducerRecord<String,String>(`
-    // is unreachable because the argument-region walker cannot step over `<...>`.
+    // KNOWN MISS: the explicit-generics form `new ProducerRecord<String,String>(`.
+    // CL.3 taught `queue_topic::arg_region` to step over a `<...>` list, but
+    // only after a MEMBER-CALL needle (one holding a `.`, `.SubscribeAsync<T>(`):
+    // after a dotless TYPE needle the list opens a constructor whose argument
+    // is config (`new KafkaConsumer<>(props)`). A `ProducerRecord` row needs
+    // that guard lifted for its own needle (0.5.2).
     ("ProducerRecord<>(", QueueFramework::Kafka, &["kafka"], TopicRule::ArgLiteral),
     // Go — segmentio/kafka-go: `w.WriteMessages(ctx, kafka.Message{Topic: "x"})`.
     (".WriteMessages(", QueueFramework::Kafka, &["kafka-go", "segmentio"], TopicRule::Keyed(&["topic"])),
@@ -519,6 +572,35 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // no topic and carries no expression, so CL.1's rule (ii) drops its tag.
     ("kafka.Writer{", QueueFramework::Kafka, &["kafka-go", "segmentio"], TopicRule::Keyed(&["topic"])),
     ("kafka.WriterConfig{", QueueFramework::Kafka, &["kafka-go", "segmentio"], TopicRule::Keyed(&["topic"])),
+    // ---- CL.3: JVM / .NET broker clients (see the CONSUMER_PATTERNS block) -
+    // Before the A2.9 block, so the generic `.publish(` verb rows yield to a
+    // call these read.
+    // azure-messaging-servicebus: `new ServiceBusClientBuilder()
+    // .connectionString(c).sender().queueName("orders").buildClient()`.
+    (".sender()", QueueFramework::AzureServiceBus, &["azure.messaging.servicebus"], TopicRule::Chain(&["queuename", "topicname"])),
+    // Spring Cloud GCP: `pubSubTemplate.publish("orders", payload)`.
+    ("Template.publish(", QueueFramework::PubSub, &["cloud.spring.pubsub", "cloud.gcp.pubsub"], TopicRule::ArgLiteral),
+    // Spring Data Redis lists: `redisTemplate.opsForList().leftPush("orders", p)`.
+    (".leftPush(", QueueFramework::RedisList, &["springframework.data.redis"], TopicRule::ArgLiteral),
+    (".rightPush(", QueueFramework::RedisList, &["springframework.data.redis"], TopicRule::ArgLiteral),
+    // AWS SDK for Java v2 request builders. Built inside the call
+    // (`sqs.sendMessage(SendMessageRequest.builder()..build())`) the A2.6
+    // `.sendMessage(` row reads the same queue and the two sites join one
+    // node; built on its own statement, only this row reads it and CL.1's
+    // rule (ii) drops the call's tag.
+    ("SendMessageRequest.builder()", QueueFramework::Sqs, &["awssdk.services.sqs"], TopicRule::Chain(&["queueurl"])),
+    ("PublishRequest.builder()", QueueFramework::Sns, &["awssdk.services.sns"], TopicRule::Chain(&["topicarn"])),
+    // C# — NATS.Net v2: `nc.PublishAsync("orders", body)` and the typed
+    // `nc.PublishAsync<Order>("orders", o)`, hence no trailing `(`. The HEAD
+    // `nc.Publish` row prefix-matches and reads nothing; CL.1's rule (i)
+    // drops its tag beside this row's node.
+    (".PublishAsync", QueueFramework::Nats, &["nats.client", "nats.net"], TopicRule::ArgLiteral),
+    // C# — MQTTnet: `new MqttApplicationMessageBuilder().WithTopic("x")
+    // .WithPayload(p).Build()`, then `client.PublishAsync(msg)`.
+    ("MqttApplicationMessageBuilder()", QueueFramework::Mqtt, &["mqttnet"], TopicRule::Chain(&["withtopic"])),
+    // C# — Google.Cloud.PubSub.V1: `TopicName.FromProjectTopic("shop",
+    // "orders")`, arg #0 the project.
+    ("TopicName.FromProjectTopic(", QueueFramework::PubSub, &["google.cloud.pubsub"], TopicRule::ArgIndex(1)),
     // ---- A2.9: broker pub/sub (see the CONSUMER_PATTERNS block) -----------
     // Redis pub/sub — `r.publish('notifications', payload)`. Placed AFTER the
     // NATS / RabbitMQ / SNS rows: a file importing both is attributed to the
@@ -643,16 +725,32 @@ pub(crate) fn broker_signal_present(lower_source: &str) -> bool {
     broker_signals().iter().any(|s| lower_source.contains(s))
 }
 
+/// A2.9: the bare pub/sub verbs shared with Rx, in-process buses and every
+/// other broker.
+const GENERIC_VERB_NEEDLES: &[&str] = &[
+    ".publish(",
+    ".subscribe(",
+    ".psubscribe(",
+    ".Publish(",
+    ".Subscribe(",
+];
+
 /// A2.9: rows whose needle is a bare pub/sub verb (`.publish(` /
-/// `.subscribe(`) shared with Rx, in-process buses and every other broker.
-fn is_generic_verb_row(f: &QueueFramework) -> bool {
+/// `.subscribe(`) on a Redis pub/sub or MQTT row. CL.3: keyed by the NEEDLE
+/// as well as the framework, so an MQTTnet builder row
+/// (`MqttApplicationMessageBuilder()`, `.SubscribeAsync(`) is no shared verb:
+/// it reads its topic normally instead of losing it to the literal-must-lead
+/// guard, and it never yields. Every RedisPubSub / Mqtt row before CL.3 was a
+/// verb row, so their behaviour is unchanged.
+fn is_generic_verb_row(needle: &str, f: &QueueFramework) -> bool {
     matches!(f, QueueFramework::RedisPubSub | QueueFramework::Mqtt)
+        && GENERIC_VERB_NEEDLES.contains(&needle)
 }
 
 /// A2.9: rows that give way when an EARLIER row already read the same call
 /// site, so one call never mints two nodes of different frameworks.
-fn yields_to_earlier_rows(f: &QueueFramework) -> bool {
-    is_generic_verb_row(f) || matches!(f, QueueFramework::Jms)
+fn yields_to_earlier_rows(needle: &str, f: &QueueFramework) -> bool {
+    is_generic_verb_row(needle, f) || matches!(f, QueueFramework::Jms)
 }
 
 /// True when the argument region after `after` opens with a quoted literal,
@@ -1238,7 +1336,7 @@ fn emit_queue_nodes(
                 keep
             });
         }
-        if yields_to_earlier_rows(framework) {
+        if yields_to_earlier_rows(pattern, framework) {
             let len = pattern.len();
             hits.retain(|h| {
                 !claimed
@@ -1246,7 +1344,7 @@ fn emit_queue_nodes(
                     .any(|&(s, e)| h.offset < e && s < h.offset + len)
             });
         }
-        if is_generic_verb_row(framework) {
+        if is_generic_verb_row(pattern, framework) {
             for h in &mut hits {
                 if !literal_leads(source, h.offset + pattern.len()) {
                     h.topic = None;
@@ -1267,7 +1365,7 @@ fn emit_queue_nodes(
         // LA.4: the resolver only ever sees a row that may name a topic by an
         // identifier; everything else reads exactly as it always has.
         let folds = resolve.filter(|_| {
-            !is_generic_verb_row(framework)
+            !is_generic_verb_row(pattern, framework)
                 && !is_identity_rule(rule)
                 && !matches!(rule, TopicRule::NoIdentity)
         });
@@ -5781,6 +5879,266 @@ await myconsumer.run({ eachMessage: notMine });\n";
         assert_eq!(
             go_c(&go_file("example.com/k", "c.SubscribeTopics([]string{\"orders\"}, nil)")),
             Vec::<String>::new()
+        );
+    }
+
+    // ---- CL.3: JVM / .NET broker rows ---------------------------------------
+
+    fn jvm_p(src: &str) -> Vec<String> {
+        qnames(&extract_queue_producer_nodes(src, "server/Producer.java", module_id(), repo()))
+    }
+
+    fn jvm_c(src: &str) -> Vec<String> {
+        qnames(&extract_queue_consumer_nodes(src, "client/Consumer.java", module_id(), repo()))
+    }
+
+    /// matrix/java/azure_sb's sender and receiver.
+    const JAVA_SB_SENDER: &str = "package com.example;\n\nimport com.azure.messaging.servicebus.ServiceBusClientBuilder;\nimport com.azure.messaging.servicebus.ServiceBusMessage;\nimport com.azure.messaging.servicebus.ServiceBusSenderClient;\n\npublic class OrderSender {\n    public void send(String conn, String body) {\n        ServiceBusSenderClient sender = new ServiceBusClientBuilder().connectionString(conn)\n            .sender().queueName(\"orders\").buildClient();\n        sender.sendMessage(new ServiceBusMessage(body));\n    }\n}\n";
+    const JAVA_SB_RECEIVER: &str = "package com.example;\n\nimport com.azure.messaging.servicebus.ServiceBusClientBuilder;\nimport com.azure.messaging.servicebus.ServiceBusReceiverClient;\n\npublic class OrderReceiver {\n    public ServiceBusReceiverClient build(String conn) {\n        return new ServiceBusClientBuilder().connectionString(conn)\n            .receiver().queueName(\"orders\").buildClient();\n    }\n}\n";
+
+    #[test]
+    fn java_azure_sb_builders() {
+        let p = extract_queue_producer_nodes(JAVA_SB_SENDER, "server/OrderSender.java", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"AzureServiceBus""#));
+        // The site is the `.sender()` call's line (0-indexed 9).
+        assert_eq!(p.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![9]);
+        assert_eq!(jvm_c(JAVA_SB_RECEIVER), strs(&["queue_consumer:orders"]));
+        let sb = "import com.azure.messaging.servicebus.*;\nclass C {\n  void f() {\n";
+        // The processor client, a lambda's `;` inside its chain.
+        let processor = format!("{sb}    ServiceBusProcessorClient p = new ServiceBusClientBuilder()\n        .connectionString(c)\n        .processor()\n        .queueName(\"orders\")\n        .processMessage(ctx -> {{ handle(ctx); }})\n        .processError(e -> {{ log(e); }})\n        .buildProcessorClient();\n  }}\n}}\n");
+        assert_eq!(jvm_c(&processor), strs(&["queue_consumer:orders"]));
+        // A topic receiver reads its TOPIC, so it joins the topic's sender.
+        let topic = format!("{sb}    b.receiver().topicName(\"orders\").subscriptionName(\"billing\").buildClient();\n  }}\n}}\n");
+        assert_eq!(jvm_c(&topic), strs(&["queue_consumer:orders"]));
+        let topic_sender = format!("{sb}    b.sender().topicName(\"orders\").buildClient();\n  }}\n}}\n");
+        assert_eq!(jvm_p(&topic_sender), strs(&["queue_producer:orders"]));
+        // Session-enabled queues.
+        let session = format!("{sb}    b.sessionReceiver().queueName(\"orders\").buildClient();\n    b.sessionProcessor().queueName(\"audit\").processMessage(h).buildProcessorClient();\n  }}\n}}\n");
+        assert_eq!(jvm_c(&session), strs(&["queue_consumer:audit", "queue_consumer:orders"]));
+        // Scala calls the same Java builder; its statement ends at the newline.
+        let scala = "package shop\n\nimport com.azure.messaging.servicebus.{ServiceBusClientBuilder, ServiceBusMessage}\n\nobject OrderSender {\n  def send(conn: String, body: String): Unit =\n    new ServiceBusClientBuilder().connectionString(conn).sender().queueName(\"orders\").buildClient().sendMessage(new ServiceBusMessage(body))\n}\n";
+        assert_eq!(
+            qnames(&extract_queue_producer_nodes(scala, "server/OrderSender.scala", module_id(), repo())),
+            strs(&["queue_producer:orders"])
+        );
+        // A queue held in a variable is the unresolved signal; a constant folds.
+        let held = format!("{sb}    b.sender().queueName(queueName).buildClient();\n  }}\n}}\n");
+        assert_eq!(jvm_p(&held), strs(&["queue_producer:unresolved:azureservicebus"]));
+        let fold = extract_queue_nodes_with_consts(&held, "server/P.java", module_id(), repo(), &|e: &str| {
+            (e == "queueName").then(|| "orders".to_string())
+        });
+        assert_eq!(qnames(&fold.producers), strs(&["queue_producer:orders"]));
+        assert_eq!(fold.counts.folded, 1);
+        // `.sender()` / `.receiver()` without the Azure package are anybody's.
+        let other = "import com.example.mail.Envelope;\nclass C { void f() { e.sender().queueName(\"orders\"); e.receiver().queueName(\"orders\"); } }\n";
+        assert_eq!(jvm_p(other), Vec::<String>::new());
+        assert_eq!(jvm_c(other), Vec::<String>::new());
+    }
+
+    #[test]
+    fn java_spring_gcp_pubsub_template() {
+        let publisher = "package com.example;\n\nimport com.google.cloud.spring.pubsub.core.PubSubTemplate;\n\npublic class OrderPublisher {\n    private final PubSubTemplate pubSubTemplate;\n\n    public OrderPublisher(PubSubTemplate pubSubTemplate) {\n        this.pubSubTemplate = pubSubTemplate;\n    }\n\n    public void publish(String body) {\n        pubSubTemplate.publish(\"orders\", body);\n    }\n}\n";
+        let listener = "package com.example;\n\nimport com.google.cloud.spring.pubsub.core.PubSubTemplate;\n\npublic class OrderListener {\n    public OrderListener(PubSubTemplate pubSubTemplate) {\n        pubSubTemplate.subscribe(\"orders\", message -> message.ack());\n    }\n}\n";
+        let p = extract_queue_producer_nodes(publisher, "server/OrderPublisher.java", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"PubSub""#));
+        assert_eq!(jvm_c(listener), strs(&["queue_consumer:orders"]));
+        // The pre-2.x namespace.
+        let old = publisher.replace("com.google.cloud.spring.pubsub", "org.springframework.cloud.gcp.pubsub");
+        assert_eq!(jvm_p(&old), strs(&["queue_producer:orders"]));
+        // A Redis import beside it: the generic `.publish(` verb row yields to
+        // the template row, so the call mints ONE PubSub node.
+        let both = publisher.replace(
+            "import com.google",
+            "import org.springframework.data.redis.core.StringRedisTemplate;\nimport com.google",
+        );
+        let r = extract_queue_producer_nodes(&both, "server/OrderPublisher.java", module_id(), repo());
+        assert_eq!(qnames(&r), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&r).contains(r#""framework":"PubSub""#));
+        // Without Spring Cloud GCP, `template.publish(` is somebody else's.
+        assert_eq!(
+            jvm_p("import com.example.Bus;\nclass C { void f() { eventTemplate.publish(\"orders\", b); } }\n"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn java_spring_data_redis_lists() {
+        let producer = "package com.shop.messaging;\n\nimport org.springframework.data.redis.core.StringRedisTemplate;\nimport org.springframework.stereotype.Service;\n\n@Service\npublic class OrderProducer {\n    private final StringRedisTemplate redisTemplate;\n\n    public OrderProducer(StringRedisTemplate redisTemplate) {\n        this.redisTemplate = redisTemplate;\n    }\n\n    public void publish(String payload) {\n        redisTemplate.opsForList().leftPush(\"orders\", payload);\n    }\n}\n";
+        let consumer = "package com.shop.workers;\n\nimport java.time.Duration;\nimport org.springframework.data.redis.core.StringRedisTemplate;\nimport org.springframework.stereotype.Component;\n\n@Component\npublic class OrderConsumer {\n    private final StringRedisTemplate redisTemplate;\n\n    public OrderConsumer(StringRedisTemplate redisTemplate) {\n        this.redisTemplate = redisTemplate;\n    }\n\n    public void poll() {\n        String payload = redisTemplate.opsForList().rightPop(\"orders\", Duration.ofSeconds(5));\n        System.out.println(payload);\n    }\n}\n";
+        let p = extract_queue_producer_nodes(producer, "server/OrderProducer.java", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"RedisList""#));
+        let c = extract_queue_consumer_nodes(consumer, "client/OrderConsumer.java", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"RedisList""#));
+        let ops = "import org.springframework.data.redis.core.ListOperations;\nclass C {\n  void f() {\n    ops.rightPush(\"audit\", p);\n    ops.leftPop(\"jobs\");\n  }\n}\n";
+        assert_eq!(jvm_p(ops), strs(&["queue_producer:audit"]));
+        assert_eq!(jvm_c(ops), strs(&["queue_consumer:jobs"]));
+        // A `java.util` deque-like call without Spring Data Redis mints nothing.
+        let plain = "import java.util.Deque;\nclass C { void f() { d.leftPush(\"x\"); d.rightPop(\"x\"); } }\n";
+        assert_eq!(jvm_p(plain), Vec::<String>::new());
+        assert_eq!(jvm_c(plain), Vec::<String>::new());
+    }
+
+    /// matrix/java/sqs_sns's consumer: the AWS developer-guide receive shape.
+    const JAVA_SQS_CONSUMER: &str = "package com.shop.workers;\n\nimport software.amazon.awssdk.services.sqs.SqsClient;\nimport software.amazon.awssdk.services.sqs.model.Message;\nimport software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;\n\npublic class OrderConsumer {\n    private final SqsClient sqs = SqsClient.create();\n\n    public void poll() {\n        ReceiveMessageRequest request = ReceiveMessageRequest.builder()\n                .queueUrl(\"https://sqs.us-east-1.amazonaws.com/123456789012/orders\")\n                .maxNumberOfMessages(10)\n                .build();\n        for (Message m : sqs.receiveMessage(request).messages()) {\n            System.out.println(m.body());\n        }\n    }\n}\n";
+
+    #[test]
+    fn java_sqs_request_built_on_its_own_statement() {
+        let c = extract_queue_consumer_nodes(JAVA_SQS_CONSUMER, "client/OrderConsumer.java", module_id(), repo());
+        // Exactly the named node: `sqs.receiveMessage(request)` carries no
+        // expression in a `queueUrl` slot, so CL.1's rule (ii) drops its tag.
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"Sqs","family":"sqs""#));
+        // The producer builds its request INSIDE the call: the `.sendMessage(`
+        // row and the builder row read one queue, one node.
+        let producer = "package com.shop.messaging;\n\nimport software.amazon.awssdk.services.sqs.SqsClient;\nimport software.amazon.awssdk.services.sqs.model.SendMessageRequest;\n\npublic class OrderProducer {\n    private final SqsClient sqs = SqsClient.create();\n\n    public void publish(String payload) {\n        sqs.sendMessage(SendMessageRequest.builder()\n                .queueUrl(\"https://sqs.us-east-1.amazonaws.com/123456789012/orders\")\n                .messageBody(payload)\n                .build());\n    }\n}\n";
+        assert_eq!(jvm_p(producer), strs(&["queue_producer:orders"]));
+        // Built on its own statement, the producer reads the same way.
+        let own = "import software.amazon.awssdk.services.sqs.model.SendMessageRequest;\nclass P {\n  void f() {\n    SendMessageRequest r = SendMessageRequest.builder()\n        .queueUrl(\"https://sqs.eu-west-1.amazonaws.com/1/orders\")\n        .messageBody(b)\n        .build();\n    sqs.sendMessage(r);\n  }\n}\n";
+        assert_eq!(jvm_p(own), strs(&["queue_producer:orders"]));
+        // The request's queue held in a variable: the tag stays, one per side.
+        let held = JAVA_SQS_CONSUMER.replace(
+            "\"https://sqs.us-east-1.amazonaws.com/123456789012/orders\"",
+            "queueUrl",
+        );
+        assert_eq!(jvm_c(&held), strs(&["queue_consumer:unresolved:sqs"]));
+    }
+
+    #[test]
+    fn java_sns_publish_request_builder() {
+        let src = "import software.amazon.awssdk.services.sns.SnsClient;\nimport software.amazon.awssdk.services.sns.model.PublishRequest;\n\nclass Notifier {\n  void notify(SnsClient sns, String m) {\n    PublishRequest request = PublishRequest.builder()\n        .message(m)\n        .topicArn(\"arn:aws:sns:us-east-1:123456789012:orders\")\n        .build();\n    sns.publish(request);\n  }\n}\n";
+        let p = extract_queue_producer_nodes(src, "server/Notifier.java", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"Sns","family":"sns""#));
+        // Without the SNS service package the builder is not a publish.
+        let other = src.replace("services.sns", "services.ses");
+        assert_eq!(jvm_p(&other), Vec::<String>::new());
+    }
+
+    const CS_NATS_PUBLISHER: &str = "using NATS.Client.Core;\n\npublic class Publisher\n{\n    public async Task Send(NatsConnection nc, string body)\n    {\n        await nc.PublishAsync(\"orders\", body);\n    }\n}\n";
+    const CS_NATS_SUBSCRIBER: &str = "using NATS.Client.Core;\n\npublic class Subscriber\n{\n    public async Task Run(NatsConnection nc)\n    {\n        await foreach (var msg in nc.SubscribeAsync<string>(\"orders\"))\n        {\n            Console.WriteLine(msg.Data);\n        }\n    }\n}\n";
+
+    #[test]
+    fn csharp_nats_async_rows_name_both_sides_and_drop_the_prefix_tags() {
+        // Exactly one node per side: the HEAD `nc.Publish` / `nc.Subscribe`
+        // rows prefix-match the same calls, read nothing, and CL.1's rule (i)
+        // drops their `unresolved:nats` tags beside the named node.
+        let p = extract_queue_producer_nodes(CS_NATS_PUBLISHER, "server/Publisher.cs", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"Nats""#));
+        let c = extract_queue_consumer_nodes(CS_NATS_SUBSCRIBER, "client/Subscriber.cs", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        // The typed publish, any receiver, and the NATS.Net meta-package.
+        let typed = CS_NATS_PUBLISHER
+            .replace("nc.PublishAsync(\"orders\"", "js.PublishAsync<Order>(\"orders\"")
+            .replace("NATS.Client.Core", "NATS.Net");
+        assert_eq!(
+            qnames(&extract_queue_producer_nodes(&typed, "server/Publisher.cs", module_id(), repo())),
+            strs(&["queue_producer:orders"])
+        );
+        // A subject in a variable keeps ONE tag per side, as before.
+        let held = CS_NATS_PUBLISHER.replace("\"orders\"", "subject");
+        assert_eq!(
+            qnames(&extract_queue_producer_nodes(&held, "server/Publisher.cs", module_id(), repo())),
+            strs(&["queue_producer:unresolved:nats"])
+        );
+        // `PublishAsync` in a file without NATS is anybody's (the
+        // xcut-queue-csharp-kafka method name, a Confluent file).
+        let kafka = "using Confluent.Kafka;\npublic class P { public async Task PublishAsync(string s) { await _bus.PublishAsync(\"orders\", s); } }\n";
+        assert_eq!(
+            qnames(&extract_queue_producer_nodes(kafka, "server/P.cs", module_id(), repo())),
+            Vec::<String>::new()
+        );
+    }
+
+    const CS_MQTT_PUBLISHER: &str = "using MQTTnet;\nusing MQTTnet.Client;\n\npublic class SensorPublisher\n{\n    public async Task Send(IMqttClient client)\n    {\n        var msg = new MqttApplicationMessageBuilder().WithTopic(\"sensors/temp\").WithPayload(\"21\").Build();\n        await client.PublishAsync(msg);\n    }\n}\n";
+    const CS_MQTT_SUBSCRIBER: &str = "using MQTTnet;\nusing MQTTnet.Client;\n\npublic class SensorSubscriber\n{\n    public async Task Listen(IMqttClient client)\n    {\n        await client.SubscribeAsync(\"sensors/temp\");\n    }\n}\n";
+
+    #[test]
+    fn csharp_mqttnet_builders_and_subscribe() {
+        let p = extract_queue_producer_nodes(CS_MQTT_PUBLISHER, "server/SensorPublisher.cs", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:sensors/temp"]));
+        assert!(framework_of(&p).contains(r#""framework":"Mqtt""#));
+        let c = extract_queue_consumer_nodes(CS_MQTT_SUBSCRIBER, "client/SensorSubscriber.cs", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:sensors/temp"]));
+        let cs = |body: &str| {
+            let src = format!("using MQTTnet;\n\nclass S\n{{\n    async Task F()\n    {{\n        {body}\n    }}\n}}\n");
+            qnames(&extract_queue_consumer_nodes(&src, "client/S.cs", module_id(), repo()))
+        };
+        // The options builder, a filter lambda and the filter builder.
+        assert_eq!(
+            cs("var o = factory.CreateSubscribeOptionsBuilder().WithTopicFilter(\"a/b\").Build();"),
+            strs(&["queue_consumer:a/b"])
+        );
+        assert_eq!(
+            cs("var o = factory.CreateSubscribeOptionsBuilder().WithTopicFilter(f => { f.WithTopic(\"a/c\"); }).Build();"),
+            strs(&["queue_consumer:a/c"])
+        );
+        assert_eq!(
+            cs("await client.SubscribeAsync(new MqttTopicFilterBuilder().WithTopic(\"a/d\").Build());"),
+            strs(&["queue_consumer:a/d"])
+        );
+        // Without MQTTnet the builder is somebody else's.
+        let other = CS_MQTT_PUBLISHER.replace("MQTTnet", "Acme.Messaging");
+        assert_eq!(
+            qnames(&extract_queue_producer_nodes(&other, "server/S.cs", module_id(), repo())),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn csharp_gcp_pubsub_resource_names() {
+        let publisher = "using Google.Cloud.PubSub.V1;\n\npublic class Publisher\n{\n    public async Task Send(string body)\n    {\n        var pub = await PublisherClient.CreateAsync(TopicName.FromProjectTopic(\"shop\", \"orders\"));\n        await pub.PublishAsync(body);\n    }\n}\n";
+        let subscriber = "using Google.Cloud.PubSub.V1;\n\npublic class Subscriber\n{\n    public async Task Run()\n    {\n        var sub = await SubscriberClient.CreateAsync(SubscriptionName.FromProjectSubscription(\"shop\", \"orders\"));\n        await sub.StartAsync((msg, ct) => Task.FromResult(SubscriberClient.Reply.Ack));\n    }\n}\n";
+        let p = extract_queue_producer_nodes(publisher, "server/Publisher.cs", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"PubSub""#));
+        assert_eq!(
+            qnames(&extract_queue_consumer_nodes(subscriber, "client/Subscriber.cs", module_id(), repo())),
+            strs(&["queue_consumer:orders"])
+        );
+        // The project (arg #0) is never the name.
+        let project_only = publisher.replace("\"shop\", \"orders\"", "\"shop\", topicId");
+        assert_eq!(
+            qnames(&extract_queue_producer_nodes(&project_only, "server/Publisher.cs", module_id(), repo())),
+            strs(&["queue_producer:unresolved:pubsub"])
+        );
+    }
+
+    #[test]
+    fn mqtt_generic_guard_spares_builder_rows() {
+        // Every RedisPubSub / Mqtt row of the bare verbs is still generic, as
+        // at HEAD; the MQTTnet rows are not.
+        for (needle, framework, _, _) in CONSUMER_PATTERNS.iter().chain(PRODUCER_PATTERNS) {
+            let verb = GENERIC_VERB_NEEDLES.contains(needle);
+            let pubsub = matches!(framework, QueueFramework::RedisPubSub | QueueFramework::Mqtt);
+            assert_eq!(
+                is_generic_verb_row(needle, framework),
+                verb && pubsub,
+                "{needle} {framework:?}"
+            );
+            if pubsub && !needle.contains("Mqtt") && !needle.ends_with("Async(") && *needle != ".WithTopicFilter(" {
+                assert!(verb, "{needle} {framework:?} is a pre-CL.3 verb row");
+            }
+        }
+        assert!(is_generic_verb_row(".publish(", &QueueFramework::Mqtt));
+        assert!(is_generic_verb_row(".Subscribe(", &QueueFramework::Mqtt));
+        assert!(!is_generic_verb_row("MqttApplicationMessageBuilder()", &QueueFramework::Mqtt));
+        assert!(!is_generic_verb_row(".SubscribeAsync(", &QueueFramework::Mqtt));
+        assert!(!yields_to_earlier_rows(".SubscribeAsync(", &QueueFramework::Mqtt));
+        assert!(yields_to_earlier_rows("Template.convertAndSend(", &QueueFramework::Jms));
+        // HEAD behaviour of a verb row: a payload-first Rx-style call in an
+        // mqtt file mints no topic; the literal-led call still does.
+        let js = "import mqtt from 'mqtt';\nclient.publish('sensors/temp', payload);\nstream.subscribe(x => log('hi'));\n";
+        assert_eq!(producers(js), strs(&["queue_producer:sensors/temp"]));
+        // The builder row reads a topic the literal-must-lead guard would have
+        // erased (`.WithTopic(` is no literal).
+        assert_eq!(
+            qnames(&extract_queue_producer_nodes(CS_MQTT_PUBLISHER, "server/S.cs", module_id(), repo())),
+            strs(&["queue_producer:sensors/temp"])
         );
     }
 }
