@@ -275,6 +275,11 @@ now has two skills to point at (`skills/glia/SKILL.md`, `skills/glia-overlay/SKI
   exists. The fixture `http_stack_smoke` (byte-identical to glia's copy) gains 4 CALLS: 1 under CA.2a
   and 3 under CA.2b (`api.GET` binds the `Router` interface's `GET`). glia's `cli/tests/merge_cli.rs`
   moved 26 -> 30 intra edges for it (`6d5a6f8`, `c6726b5`). No wrapper assertion reads that number.
+  **Correction (repo-graph session, 2026-10-02):** one wrapper test did move.
+  `tests/test_mcp_tools.py::test_impact_live_only` picks a node whose blast radius, after CA.2b's new
+  CALLS, is 3 nodes that are all dead, so `impact(live_only=True)` now returns the blast_radius absence
+  "none reachable from an entry point (live_only)". The engine is right; repo-graph widened the test's
+  string check.
 - **Trace mechanism icons** (`server.py:467-468`) and tier sets (`server.py:815-823`): no new kind or
   category.
 - **Evidence strings:** the wrapper parses no emitter or rule (`method_set`, `receiver_type`,
