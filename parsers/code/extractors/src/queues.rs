@@ -66,6 +66,18 @@ pub enum QueueFramework {
     RedisPubSub,
     /// JMS / ActiveMQ / Artemis (`jmsTemplate.convertAndSend`, `@JmsListener`).
     Jms,
+    // --- CL.4: task queues whose job is a METHOD or a TYPE STRING ------------
+    /// JobRunr (Java / Kotlin / Scala): `BackgroundJob.enqueue(() ->
+    /// svc.sendWelcome(id))` enqueues the METHOD the lambda calls; the worker
+    /// side is that method, marked `@Job`.
+    JobRunr,
+    /// Hangfire (C#): `BackgroundJob.Enqueue<T>(x => x.SendWelcome(id))` +
+    /// `[Queue("emails")] public void SendWelcome(..)`. Its recurring jobs are
+    /// cron (`cron.rs`, LA.19a).
+    Hangfire,
+    /// hibiken/asynq (Go): the task TYPE string, `asynq.NewTask("email:welcome",
+    /// p)` + `mux.HandleFunc("email:welcome", h)`.
+    Asynq,
 }
 
 impl QueueFramework {
@@ -89,6 +101,9 @@ impl QueueFramework {
             QueueFramework::AzureServiceBus => "azureservicebus",
             QueueFramework::Mqtt => "mqtt",
             QueueFramework::Jms => "jms",
+            QueueFramework::JobRunr => "jobrunr",
+            QueueFramework::Hangfire => "hangfire",
+            QueueFramework::Asynq => "asynq",
         }
     }
 }
@@ -366,6 +381,27 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // "shop", "orders")`, arg #0 the project. A subscription pairs only when
     // spelled like its topic (the `.subscription_path(` caveat).
     ("SubscriptionName.FromProjectSubscription(", QueueFramework::PubSub, &["google.cloud.pubsub"], TopicRule::ArgIndex(1)),
+    // ---- CL.4: method-identity task queues ----------------------------------
+    // The job is a METHOD (JobRunr, Hangfire) or a task TYPE string (asynq),
+    // the A2.5 precedent: the qname is the job, never a broker queue. The
+    // worker method is the def under its attribute (`void` / `def` / `fun`);
+    // a bare method name pairs with any same-named job method of another
+    // class, Celery's bare task name precedent. A job method that carries no
+    // attribute has no consumer node (JobRunr's `@Job` is optional), so its
+    // producer stays unpaired.
+    // JobRunr: `@Job(name = "..")` is a display label, never the identity.
+    ("@Job(", QueueFramework::JobRunr, &["org.jobrunr"], TopicRule::DeclaredSymbol),
+    // Hangfire job filters on the method; the queue `[Queue("emails")]` names
+    // is broker routing. A class-level filter names a type, never a job.
+    ("[Queue(", QueueFramework::Hangfire, &["hangfire"], TopicRule::DeclaredSymbol),
+    ("[AutomaticRetry(", QueueFramework::Hangfire, &["hangfire"], TopicRule::DeclaredSymbol),
+    ("[JobDisplayName(", QueueFramework::Hangfire, &["hangfire"], TopicRule::DeclaredSymbol),
+    // asynq: `mux.HandleFunc("email:welcome", HandleWelcomeEmail)` and
+    // `mux.Handle(tasks.TypeEmail, processor)` (a constant type folds through
+    // LA.4). A net/http mux in the same file registers `/` paths, which
+    // `emit_queue_nodes` drops for this framework.
+    (".HandleFunc(", QueueFramework::Asynq, &["hibiken/asynq"], TopicRule::ArgLiteral),
+    (".Handle(", QueueFramework::Asynq, &["hibiken/asynq"], TopicRule::ArgLiteral),
     // ---- A2.9: broker pub/sub that used to live in eventbus.rs ----------
     // These verbs are the broadest needles in the table, so every row below is
     // a GENERIC-VERB row ([`is_generic_verb_row`]): it yields to any earlier
@@ -601,6 +637,32 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // C# — Google.Cloud.PubSub.V1: `TopicName.FromProjectTopic("shop",
     // "orders")`, arg #0 the project.
     ("TopicName.FromProjectTopic(", QueueFramework::PubSub, &["google.cloud.pubsub"], TopicRule::ArgIndex(1)),
+    // ---- CL.4: method-identity task queues (see the CONSUMER_PATTERNS block)
+    // LambdaCallee reads the method the job lambda calls, anywhere in the
+    // argument region, so a delay or a parent job id may come first. A hit
+    // with no lambda (`queue.Enqueue(item)`, `enqueue(svc::run)`, a JobRunr
+    // `JobRequest`) is no site and mints no tag.
+    // JobRunr: static `BackgroundJob`, an injected `JobScheduler`, and the
+    // IoC form `BackgroundJob.<EmailService>enqueue(x -> x.send())`. No
+    // trailing `(` on the first three: a Kotlin trailing lambda
+    // (`BackgroundJob.enqueue { svc.run() }`) opens with `{`. A recurring
+    // `scheduleRecurrently(` prefix-matches `BackgroundJob.schedule` and
+    // reads nothing (no bracket follows the needle).
+    ("BackgroundJob.enqueue", QueueFramework::JobRunr, &["org.jobrunr"], TopicRule::LambdaCallee),
+    ("BackgroundJob.schedule", QueueFramework::JobRunr, &["org.jobrunr"], TopicRule::LambdaCallee),
+    ("Scheduler.enqueue", QueueFramework::JobRunr, &["org.jobrunr"], TopicRule::LambdaCallee),
+    (">enqueue(", QueueFramework::JobRunr, &["org.jobrunr"], TopicRule::LambdaCallee),
+    (">schedule(", QueueFramework::JobRunr, &["org.jobrunr"], TopicRule::LambdaCallee),
+    // Hangfire: `BackgroundJob.Enqueue(() => ..)`, `BackgroundJob.Enqueue<T>(x
+    // => ..)` and an injected `IBackgroundJobClient`'s `_jobs.Enqueue<T>(..)`
+    // all read through one dotted needle (CL.3's `<T>` skip), as do
+    // `.Schedule` and the continuation `.ContinueJobWith(parentId, () => ..)`.
+    (".Enqueue", QueueFramework::Hangfire, &["hangfire"], TopicRule::LambdaCallee),
+    (".Schedule", QueueFramework::Hangfire, &["hangfire"], TopicRule::LambdaCallee),
+    (".ContinueJobWith", QueueFramework::Hangfire, &["hangfire"], TopicRule::LambdaCallee),
+    // asynq: `asynq.NewTask("email:welcome", payload)`; `client.Enqueue(task)`
+    // carries no type. A constant type folds through LA.4.
+    ("asynq.NewTask(", QueueFramework::Asynq, &["hibiken/asynq"], TopicRule::ArgLiteral),
     // ---- A2.9: broker pub/sub (see the CONSUMER_PATTERNS block) -----------
     // Redis pub/sub — `r.publish('notifications', payload)`. Placed AFTER the
     // NATS / RabbitMQ / SNS rows: a file importing both is attributed to the
@@ -689,8 +751,18 @@ fn is_broker(f: &QueueFramework) -> bool {
         | QueueFramework::Dramatiq
         | QueueFramework::BullMQ
         | QueueFramework::Sidekiq
-        | QueueFramework::Oban => false,
+        | QueueFramework::Oban
+        | QueueFramework::JobRunr
+        | QueueFramework::Hangfire
+        | QueueFramework::Asynq => false,
     }
+}
+
+/// CL.4: task queues whose job is a METHOD, named by the method a job lambda
+/// calls ([`TopicRule::LambdaCallee`]) and by the method an attribute marks
+/// ([`TopicRule::DeclaredSymbol`]). An attribute over a TYPE names no job.
+fn is_method_job(f: &QueueFramework) -> bool {
+    matches!(f, QueueFramework::JobRunr | QueueFramework::Hangfire)
 }
 
 /// Every library signal that gates a broker row in either table, deduped, in
@@ -1336,6 +1408,21 @@ fn emit_queue_nodes(
                 keep
             });
         }
+        // CL.4: a job lambda that calls nothing is no site at all, so it mints
+        // neither a node nor the `unresolved:` tag: `.Enqueue` is also
+        // `Queue<T>.Enqueue(item)`, which is no evidence of a job.
+        if matches!(rule, TopicRule::LambdaCallee) {
+            hits.retain(|h| h.topic.is_some());
+        }
+        // CL.4: where the job is a METHOD, an attribute over a TYPE (a
+        // class-level Hangfire `[AutomaticRetry]`) names no job.
+        if matches!(rule, TopicRule::DeclaredSymbol) && is_method_job(framework) {
+            for h in &mut hits {
+                if queue_topic::declares_type(source, h.offset + pattern.len()) {
+                    h.topic = None;
+                }
+            }
+        }
         if yields_to_earlier_rows(pattern, framework) {
             let len = pattern.len();
             hits.retain(|h| {
@@ -1354,7 +1441,6 @@ fn emit_queue_nodes(
         if hits.is_empty() {
             continue;
         }
-        claimed.extend(hits.iter().map(|h| (h.offset, h.offset + pattern.len())));
         // A2.8: keep each hit's OFFSET next to its topic. A topic read at byte
         // 402 is a call SITE at line 11, and that is the only provenance a
         // queue node has ever been able to carry. `line_of` is 0-indexed, the
@@ -1369,10 +1455,27 @@ fn emit_queue_nodes(
                 && !is_identity_rule(rule)
                 && !matches!(rule, TopicRule::NoIdentity)
         });
-        let reads: Vec<Option<(String, TopicForm)>> = hits
+        let mut reads: Vec<Option<(String, TopicForm)>> = hits
             .iter()
             .map(|h| read_hit(h, folds, counts, framework, path))
             .collect();
+        // CL.4: an asynq mux row that reads a `/` path (a literal, or a
+        // constant the LA.4 fold resolved) is a net/http route in the same
+        // file, never a task type: no site, no tag.
+        if *framework == QueueFramework::Asynq {
+            let keep: Vec<bool> = reads
+                .iter()
+                .map(|r| !r.as_ref().is_some_and(|(t, _)| t.starts_with('/')))
+                .collect();
+            let mut k = keep.iter();
+            hits.retain(|_| k.next().copied().unwrap_or(true));
+            let mut k = keep.iter();
+            reads.retain(|_| k.next().copied().unwrap_or(true));
+            if hits.is_empty() {
+                continue;
+            }
+        }
+        claimed.extend(hits.iter().map(|h| (h.offset, h.offset + pattern.len())));
         let topics: Vec<&str> = reads.iter().flatten().map(|(t, _)| t.as_str()).collect();
         if debug_enabled() && !topics.is_empty() {
             eprintln!(
@@ -1922,6 +2025,7 @@ fn is_identity_rule(rule: &TopicRule) -> bool {
             | TopicRule::ArgReceiver
             | TopicRule::DeclaredSymbol
             | TopicRule::EnclosingSymbol
+            | TopicRule::LambdaCallee
     )
 }
 
@@ -2003,6 +2107,9 @@ const HANDLER_RULES: &[(&str, HandlerRule)] = &[
     ("nc.QueueSubscribe", HandlerRule::ArgIndex(2)),
     // pika 1.x: `basic_consume(queue, on_message_callback, ...)`, keyword or positional.
     ("basic_consume(", HandlerRule::KeyedOrArg(&["on_message_callback"], 1)),
+    // CL.4 asynq: `mux.HandleFunc(type, handler)`, `mux.Handle(type, handler)`.
+    (".HandleFunc(", HandlerRule::ArgIndex(1)),
+    (".Handle(", HandlerRule::ArgIndex(1)),
 ];
 
 fn handler_rule(needle: &str) -> Option<HandlerRule> {
@@ -4290,12 +4397,13 @@ public class AuditFunction
         use QueueFramework::*;
         let all = [
             Celery, Dramatiq, BullMQ, Sidekiq, Oban, Nats, RabbitMQ, Kafka, RedisList, Sqs, Sns,
-            PubSub, AzureServiceBus, Mqtt, RedisPubSub, Jms,
+            PubSub, AzureServiceBus, Mqtt, RedisPubSub, Jms, JobRunr, Hangfire, Asynq,
         ];
         for f in &all {
             match f {
                 Celery | Dramatiq | BullMQ | Sidekiq | Oban | Nats | RabbitMQ | Kafka
-                | RedisList | Sqs | Sns | PubSub | AzureServiceBus | Mqtt | RedisPubSub | Jms => {}
+                | RedisList | Sqs | Sns | PubSub | AzureServiceBus | Mqtt | RedisPubSub | Jms
+                | JobRunr | Hangfire | Asynq => {}
             }
             assert!(is_framework_tag(&framework_tag(f)), "{f:?}");
         }
@@ -6140,5 +6248,196 @@ await myconsumer.run({ eachMessage: notMine });\n";
             qnames(&extract_queue_producer_nodes(CS_MQTT_PUBLISHER, "server/S.cs", module_id(), repo())),
             strs(&["queue_producer:sensors/temp"])
         );
+    }
+
+    // ---- CL.4: method-identity task queues (JobRunr, Hangfire, asynq) ------
+
+    /// matrix/java/taskq, both files.
+    const JOBRUNR_PRODUCER: &str = "package com.example;\n\nimport org.jobrunr.scheduling.BackgroundJob;\n\npublic class SignupService {\n    private final EmailJobs emailJobs = new EmailJobs();\n\n    public void signup(String userId) {\n        BackgroundJob.enqueue(() -> emailJobs.sendWelcome(userId));\n    }\n}\n";
+    const JOBRUNR_CONSUMER: &str = "package com.example;\n\nimport org.jobrunr.jobs.annotations.Job;\n\npublic class EmailJobs {\n    @Job(name = \"send-welcome-email\")\n    public void sendWelcome(String userId) {\n    }\n}\n";
+    /// matrix/csharp/taskq, both files.
+    const HANGFIRE_PRODUCER: &str = "using Hangfire;\n\npublic class Signup\n{\n    public void Register(string userId)\n    {\n        BackgroundJob.Enqueue<EmailJobs>(x => x.SendWelcome(userId));\n    }\n}\n";
+    const HANGFIRE_CONSUMER: &str = "using Hangfire;\n\npublic class EmailJobs\n{\n    [Queue(\"emails\")]\n    public void SendWelcome(string userId) { }\n}\n";
+    /// matrix/go/taskq, both files.
+    const ASYNQ_PRODUCER: &str = "package main\n\nimport \"github.com/hibiken/asynq\"\n\nfunc Enqueue(client *asynq.Client, payload []byte) error {\n\ttask := asynq.NewTask(\"email:welcome\", payload)\n\t_, err := client.Enqueue(task)\n\treturn err\n}\n";
+    const ASYNQ_CONSUMER: &str = "package main\n\nimport (\n\t\"context\"\n\n\t\"github.com/hibiken/asynq\"\n)\n\nfunc HandleWelcomeEmail(ctx context.Context, t *asynq.Task) error {\n\treturn nil\n}\n\nfunc Serve(srv *asynq.Server) error {\n\tmux := asynq.NewServeMux()\n\tmux.HandleFunc(\"email:welcome\", HandleWelcomeEmail)\n\treturn srv.Run(mux)\n}\n";
+
+    #[test]
+    fn new_frameworks_are_task_queues() {
+        // Task queues, not brokers: eventbus.rs's broker gate is unchanged,
+        // and none of their library signals joins it.
+        for (f, family) in [
+            (QueueFramework::JobRunr, "jobrunr"),
+            (QueueFramework::Hangfire, "hangfire"),
+            (QueueFramework::Asynq, "asynq"),
+        ] {
+            assert!(!is_broker(&f), "{f:?}");
+            assert_eq!(f.family(), family);
+            assert_eq!(framework_tag(&f), format!("{UNRESOLVED_PREFIX}{family}"));
+        }
+        for s in ["org.jobrunr", "hangfire", "hibiken/asynq"] {
+            assert!(!broker_signals().contains(&s), "{s}");
+        }
+        assert!(is_method_job(&QueueFramework::JobRunr) && is_method_job(&QueueFramework::Hangfire));
+        assert!(!is_method_job(&QueueFramework::Asynq) && !is_method_job(&QueueFramework::Celery));
+        // Every LambdaCallee row is a method-job row, and an identity rule.
+        for (needle, f, _, rule) in PRODUCER_PATTERNS {
+            if matches!(rule, TopicRule::LambdaCallee) {
+                assert!(is_method_job(f), "{needle} {f:?}");
+                assert!(is_identity_rule(rule));
+            }
+        }
+    }
+
+    #[test]
+    fn jobrunr_enqueue_pairs_the_job_annotation() {
+        let pr = extract_queue_producer_nodes(JOBRUNR_PRODUCER, "server/SignupService.java", module_id(), repo());
+        let cr = extract_queue_consumer_nodes(JOBRUNR_CONSUMER, "client/EmailJobs.java", module_id(), repo());
+        assert_eq!(qnames(&pr), strs(&["queue_producer:sendWelcome"]));
+        assert_eq!(qnames(&cr), strs(&["queue_consumer:sendWelcome"]));
+        assert!(framework_of(&pr).contains(r#""framework":"JobRunr","family":"jobrunr""#));
+        assert!(framework_of(&cr).contains(r#""framework":"JobRunr","family":"jobrunr""#));
+        // The display name is a label, never the identity; the producer's
+        // receiver field is a variable, never the job.
+        assert!(!qnames(&cr).iter().any(|q| q.contains("send-welcome-email")));
+        assert!(!qnames(&pr).iter().any(|q| q.contains("emailJobs")));
+        // The ungated file mints nothing.
+        let plain = JOBRUNR_PRODUCER.replace("import org.jobrunr.scheduling.BackgroundJob;", "");
+        assert_eq!(at(&plain, "server/S.java"), (vec![], vec![]));
+    }
+
+    #[test]
+    fn jobrunr_scala_arrow() {
+        // matrix/scala/taskq.
+        let producer = "package shop\n\nimport org.jobrunr.scheduling.BackgroundJob\n\nclass Signup(emailJobs: EmailJobs) {\n  def register(userId: String): Unit =\n    BackgroundJob.enqueue(() => emailJobs.sendWelcome(userId))\n}\n";
+        let consumer = "package shop\n\nimport org.jobrunr.jobs.annotations.Job\n\nclass EmailJobs {\n  @Job(name = \"send-welcome-email\")\n  def sendWelcome(userId: String): Unit = ()\n}\n";
+        assert_eq!(at(producer, "server/Signup.scala"), (vec![], strs(&["queue_producer:sendWelcome"])));
+        assert_eq!(at(consumer, "client/EmailJobs.scala"), (strs(&["queue_consumer:sendWelcome"]), vec![]));
+    }
+
+    #[test]
+    fn jobrunr_kotlin_ioc_and_scheduler_forms() {
+        // Kotlin: a trailing lambda (no arrow, after no argument or after the
+        // schedule's instant) and `fun` under `@Job`.
+        let kt = "import org.jobrunr.scheduling.BackgroundJob\nimport org.jobrunr.jobs.annotations.Job\n\nclass Jobs(private val mailer: Mailer) {\n    fun signup(id: String) {\n        BackgroundJob.enqueue { mailer.sendWelcome(id) }\n        BackgroundJob.schedule(Instant.now().plusSeconds(60)) { mailer.sendReminder(id) }\n    }\n\n    @Job(name = \"digest\")\n    fun sendDigest(id: String) { }\n}\n";
+        assert_eq!(
+            at(kt, "app/Jobs.kt"),
+            (
+                strs(&["queue_consumer:sendDigest"]),
+                strs(&["queue_producer:sendReminder", "queue_producer:sendWelcome"])
+            )
+        );
+        // Java: the IoC form, an injected JobScheduler, a block lambda with a
+        // delay first; a JobRequest (no lambda) and a recurring job are not read.
+        let java = "import org.jobrunr.scheduling.BackgroundJob;\nimport org.jobrunr.scheduling.JobScheduler;\n\nclass S {\n    void go(JobScheduler jobScheduler, JobRequestScheduler jobRequestScheduler) {\n        BackgroundJob.<EmailService>enqueue(x -> x.sendNewsletter(id));\n        jobScheduler.enqueue(() -> reports.build(id));\n        BackgroundJob.schedule(Instant.now().plusHours(1), () -> { return cleaner.purge(); });\n        jobRequestScheduler.enqueue(new SendEmailRequest(id));\n        BackgroundJob.scheduleRecurrently(\"nightly\", Cron.daily(), () -> cleaner.vacuum());\n    }\n}\n";
+        assert_eq!(
+            at(java, "app/S.java"),
+            (vec![], strs(&["queue_producer:build", "queue_producer:purge", "queue_producer:sendNewsletter"]))
+        );
+    }
+
+    #[test]
+    fn hangfire_generic_enqueue_pairs_the_queue_attribute() {
+        let pr = extract_queue_producer_nodes(HANGFIRE_PRODUCER, "server/Signup.cs", module_id(), repo());
+        let cr = extract_queue_consumer_nodes(HANGFIRE_CONSUMER, "client/EmailJobs.cs", module_id(), repo());
+        assert_eq!(qnames(&pr), strs(&["queue_producer:SendWelcome"]));
+        assert_eq!(qnames(&cr), strs(&["queue_consumer:SendWelcome"]));
+        assert!(framework_of(&pr).contains(r#""framework":"Hangfire","family":"hangfire""#));
+        assert!(framework_of(&cr).contains(r#""framework":"Hangfire","family":"hangfire""#));
+        // The queue the attribute names is broker routing, not the job.
+        assert!(!qnames(&cr).iter().any(|q| q.ends_with(":emails")));
+        // An injected client, a static call, a schedule and a continuation;
+        // stacked attributes name one job once.
+        let more = "using Hangfire;\n\nclass Jobs\n{\n    void Go(IBackgroundJobClient _jobs)\n    {\n        _jobs.Enqueue<IMailer>(m => m.SendDigest(id));\n        BackgroundJob.Enqueue(() => Console.WriteLine(\"hi\"));\n        BackgroundJob.Schedule(() => Cleaner.Purge(), TimeSpan.FromDays(1));\n        BackgroundJob.ContinueJobWith(parent, () => Reports.Build(id));\n    }\n\n    [Queue(\"critical\")]\n    [AutomaticRetry(Attempts = 3)]\n    public void Purge() { }\n\n    [JobDisplayName(\"Build {0}\")]\n    public async Task Build(int id) { }\n}\n";
+        assert_eq!(
+            at(more, "app/Jobs.cs"),
+            (
+                strs(&["queue_consumer:Build", "queue_consumer:Purge"]),
+                strs(&[
+                    "queue_producer:Build",
+                    "queue_producer:Purge",
+                    "queue_producer:SendDigest",
+                    "queue_producer:WriteLine",
+                ])
+            )
+        );
+    }
+
+    #[test]
+    fn lambda_without_a_callee_mints_nothing() {
+        // `.Enqueue` is also System.Collections' Queue<T>: no lambda, no job,
+        // and no `unresolved:hangfire` tag either.
+        let src = "using Hangfire;\nusing System.Collections.Generic;\n\nclass Buffer\n{\n    private readonly Queue<int> _q = new Queue<int>();\n    void Add(int item) { _q.Enqueue(item); }\n    void Later() { BackgroundJob.Enqueue(() => 42); }\n}\n";
+        assert_eq!(at(src, "app/Buffer.cs"), (vec![], vec![]));
+        let java = "import org.jobrunr.scheduling.BackgroundJob;\nclass X { void f() { BackgroundJob.enqueue(svc::run); } }\n";
+        assert_eq!(at(java, "app/X.java"), (vec![], vec![]));
+    }
+
+    #[test]
+    fn hangfire_class_attribute_is_not_a_job() {
+        // A class-level `[AutomaticRetry]` names a TYPE, which no lambda ever
+        // calls: no `queue_consumer:EmailJobs`. A method-level attribute in the
+        // same file names the file's job, which explains the class's hit.
+        let src = "using Hangfire;\n\n[AutomaticRetry(Attempts = 0)]\npublic class EmailJobs\n{\n    [Queue(\"emails\")]\n    public void SendWelcome(string id) { }\n}\n";
+        assert_eq!(at(src, "app/EmailJobs.cs"), (strs(&["queue_consumer:SendWelcome"]), vec![]));
+        let only = "using Hangfire;\n\n[AutomaticRetry(Attempts = 0)]\npublic sealed class EmailJobs\n{\n    public void SendWelcome(string id) { }\n}\n";
+        let (consumers, _) = at(only, "app/EmailJobs.cs");
+        assert!(!consumers.iter().any(|q| q.ends_with(":EmailJobs")), "{consumers:?}");
+        let record = "using Hangfire;\n\n[Queue(\"emails\")]\npublic record EmailJob(string Id);\n";
+        let (consumers, _) = at(record, "app/EmailJob.cs");
+        assert!(!consumers.iter().any(|q| q.ends_with(":EmailJob")), "{consumers:?}");
+    }
+
+    #[test]
+    fn asynq_task_type_pairs_and_binds_its_handler() {
+        let pr = extract_queue_producer_nodes(ASYNQ_PRODUCER, "server/enqueue.go", module_id(), repo());
+        let cr = extract_queue_consumer_nodes(ASYNQ_CONSUMER, "client/worker.go", module_id(), repo());
+        assert_eq!(qnames(&pr), strs(&["queue_producer:email:welcome"]));
+        assert_eq!(qnames(&cr), strs(&["queue_consumer:email:welcome"]));
+        assert!(framework_of(&pr).contains(r#""framework":"Asynq","family":"asynq""#));
+        assert!(framework_of(&cr).contains(r#""framework":"Asynq","family":"asynq""#));
+        // LA.33: the handler argument is the consumer's callback.
+        assert_eq!(
+            callbacks_of(&cr),
+            vec![cb("queue_consumer:email:welcome", 14, name("HandleWelcomeEmail"), false)]
+        );
+        // `client.Enqueue(task)` is no producer row of its own.
+        assert_eq!(pr.nodes.len(), 1);
+        // A task type held in a constant is an identifier the LA.4 fold reads.
+        let consts = "package main\n\nimport \"github.com/hibiken/asynq\"\n\nfunc Serve(mux *asynq.ServeMux) {\n\tmux.Handle(tasks.TypeEmailDelivery, tasks.NewEmailProcessor())\n}\n";
+        let fold = extract_queue_nodes_with_consts(
+            consts,
+            "worker/main.go",
+            module_id(),
+            repo(),
+            &resolver(&[("tasks.TypeEmailDelivery", "email:deliver")]),
+        );
+        assert_eq!(qnames(&fold.consumers), strs(&["queue_consumer:email:deliver"]));
+        assert_eq!(fold.counts.folded, 1);
+    }
+
+    #[test]
+    fn asynq_http_path_is_not_a_task_type() {
+        // A net/http mux in an asynq file: a `/` path is a route, never a
+        // task type, and it mints neither a node nor a tag.
+        let src = "package main\n\nimport (\n\t\"net/http\"\n\n\t\"github.com/hibiken/asynq\"\n)\n\nfunc Health(mux *http.ServeMux, h http.HandlerFunc) {\n\tmux.HandleFunc(\"/health\", h)\n\tmux.Handle(\"/metrics\", promhttp.Handler())\n}\n";
+        assert_eq!(at(src, "app/health.go"), (vec![], vec![]));
+        // ... and a constant that folds to a path is dropped the same way.
+        let consts = "package main\n\nimport \"github.com/hibiken/asynq\"\n\nfunc Serve(mux *http.ServeMux) {\n\tmux.HandleFunc(healthPath, h)\n}\n";
+        let fold = extract_queue_nodes_with_consts(
+            consts,
+            "app/health.go",
+            module_id(),
+            repo(),
+            &resolver(&[("healthPath", "/health")]),
+        );
+        assert!(
+            !qnames(&fold.consumers).iter().any(|q| q.contains("/health")),
+            "{:?}",
+            qnames(&fold.consumers)
+        );
+        // Without the asynq import the rows never fire.
+        let plain = ASYNQ_CONSUMER.replace("\"github.com/hibiken/asynq\"", "\"example.com/q\"");
+        assert_eq!(at(&plain, "client/worker.go"), (vec![], vec![]));
     }
 }

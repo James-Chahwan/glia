@@ -124,6 +124,13 @@ pub enum TopicRule {
     /// within [`ENCLOSING_LOOKBACK_LINES`] — `include Sidekiq::Worker` inside
     /// `class HardWorker` -> `HardWorker`.
     EnclosingSymbol,
+    /// CL.4: the method a job LAMBDA calls, for task queues whose job is a
+    /// method (JobRunr, Hangfire): `BackgroundJob.enqueue(() ->
+    /// emailJobs.sendWelcome(id))` -> `sendWelcome`, `Enqueue<T>(x =>
+    /// x.SendWelcome(id))` -> `SendWelcome`. See [`lambda_callee`]. A call
+    /// with no lambda (`queue.Enqueue(item)`, a method reference) reads
+    /// nothing, and the extractor treats that hit as no site at all.
+    LambdaCallee,
 }
 
 /// Bound on occurrences examined per needle per file — generated files can
@@ -144,7 +151,9 @@ pub const LOOKAHEAD_LINES: usize = 5;
 pub const ENCLOSING_LOOKBACK_LINES: usize = 200;
 
 /// Def-like keywords, tried IN THIS ORDER, so `public class Foo` reads as a
-/// class and not as a `public` whose next word is `class`.
+/// class and not as a `public` whose next word is `class`. CL.4: Kotlin's
+/// `fun` (a JobRunr `@Job` method) comes last, so it only ever reads a line
+/// no other keyword claims.
 const DEF_KEYWORDS: &[&str] = &[
     "def ",
     "fn ",
@@ -153,6 +162,20 @@ const DEF_KEYWORDS: &[&str] = &[
     "class ",
     "void ",
     "public ",
+    "fun ",
+];
+
+/// CL.4: keywords that declare a TYPE, read before a declared line's `(`
+/// ([`declares_type`]). `object` is Scala's; a C# `object` parameter sits
+/// after the `(`, so it never counts.
+const TYPE_KEYWORDS: &[&str] = &[
+    "class ",
+    "struct ",
+    "interface ",
+    "record ",
+    "enum ",
+    "object ",
+    "trait ",
 ];
 
 /// Scope-introducing keywords for [`TopicRule::EnclosingSymbol`], longest-first
@@ -216,6 +239,7 @@ pub(crate) fn scan_guarded(
             TopicRule::ArgReceiver => verbatim(arg_receiver(source, after, needle)),
             TopicRule::DeclaredSymbol => verbatim(declared_symbol(source, after)),
             TopicRule::EnclosingSymbol => verbatim(enclosing_symbol(source, offset)),
+            TopicRule::LambdaCallee => verbatim(lambda_callee(source, after, needle)),
             _ => topic_at(source, after, needle, rule),
         };
         let (topic, form, expr) = match read {
@@ -433,18 +457,30 @@ fn line_region(source: &str, after: usize) -> &str {
 /// reading it would hand `props` to the LA.4 fold as a topic expression,
 /// which keeps CL.1 rule (ii) from dropping the file's kafka tag.
 pub(crate) fn arg_region<'a>(source: &'a str, after: usize, needle: &str) -> Option<&'a str> {
+    opened_region(source, after, needle).map(|(_, region)| region)
+}
+
+/// CL.4: [`arg_region`] plus the bracket that opened it — `{` is a Kotlin
+/// trailing lambda (`BackgroundJob.enqueue { svc.run() }`), which
+/// [`lambda_callee`] reads as a lambda body.
+fn opened_region<'a>(source: &'a str, after: usize, needle: &str) -> Option<(u8, &'a str)> {
     let rest = source.get(after..)?;
-    if needle.ends_with(['(', '{', '[']) {
-        return region_body(rest);
+    if let Some(&open) = needle
+        .as_bytes()
+        .last()
+        .filter(|c| matches!(c, b'(' | b'{' | b'['))
+    {
+        return region_body(rest).map(|region| (open, region));
     }
     let mut trimmed = rest.trim_start();
     if trimmed.starts_with('<') && needle.contains('.') {
         trimmed = skip_type_args(trimmed)?.trim_start();
     }
-    if !matches!(trimmed.as_bytes().first(), Some(b'(' | b'{' | b'[')) {
-        return None;
-    }
-    region_body(trimmed.get(1..)?)
+    let open = *trimmed
+        .as_bytes()
+        .first()
+        .filter(|c| matches!(c, b'(' | b'{' | b'['))?;
+    region_body(trimmed.get(1..)?).map(|region| (open, region))
 }
 
 /// CL.3: `s` (which opens with `<`) past its balanced type-argument list:
@@ -1034,6 +1070,11 @@ fn declared_name(line: &str, kw_end: usize) -> Option<String> {
 /// lines are SKIPPED, not failed, so a stack of decorators
 /// (`@shared_task` / `@retry(...)` / `def send_email`) still finds the def.
 fn declared_symbol(source: &str, after: usize) -> Option<String> {
+    declared_line(source, after).map(|(_, name)| name)
+}
+
+/// The definition line [`declared_symbol`] reads, with the name it declares.
+fn declared_line(source: &str, after: usize) -> Option<(&str, String)> {
     let rest = source.get(after..)?;
     let body = rest.get(rest.find('\n')? + 1..)?;
     for line in body
@@ -1045,10 +1086,23 @@ fn declared_symbol(source: &str, after: usize) -> Option<String> {
             continue;
         };
         if let Some(name) = declared_name(line, kw_end) {
-            return Some(name);
+            return Some((line, name));
         }
     }
     None
+}
+
+/// CL.4: does the definition [`TopicRule::DeclaredSymbol`] reads under the
+/// needle ending at `after` declare a TYPE rather than a method? True when a
+/// [`TYPE_KEYWORDS`] word sits before the line's `(`: a class-level Hangfire
+/// `[AutomaticRetry]` over `public class EmailJobs`, `[Queue] public record
+/// Job(string Id)`. For a framework whose job is a METHOD the extractor reads
+/// such a hit as naming no job.
+pub(crate) fn declares_type(source: &str, after: usize) -> bool {
+    declared_line(source, after).is_some_and(|(line, _)| {
+        let head = line.split('(').next().unwrap_or(line);
+        TYPE_KEYWORDS.iter().any(|k| find_kw(head, k).is_some())
+    })
 }
 
 /// [`TopicRule::EnclosingSymbol`] — the nearest scope above the needle. The
@@ -1065,6 +1119,98 @@ fn enclosing_symbol(source: &str, offset: usize) -> Option<String> {
         }
     }
     None
+}
+
+/// CL.4 [`TopicRule::LambdaCallee`] — the method a job lambda calls. In the
+/// needle's argument region ([`opened_region`], so CL.3's `<T>` skip applies)
+/// the body is what follows the first depth-0 `->` / `=>`; a Kotlin trailing
+/// lambda is a body as it stands, written alone (`enqueue { svc.run() }`) or
+/// after the arguments on the same line (`schedule(at) { svc.run() }`).
+/// [`lambda_body_callee`] reads the body's callee. A method reference
+/// (`enqueue(svc::run)`) or a plain argument (`queue.Enqueue(item)`) has no
+/// lambda and reads nothing.
+fn lambda_callee(source: &str, after: usize, needle: &str) -> Option<String> {
+    let (open, region) = opened_region(source, after, needle)?;
+    if let Some(at) = depth0_arrow(region) {
+        return lambda_body_callee(region.get(at + 2..)?);
+    }
+    if open == b'{' {
+        return lambda_body_callee(region);
+    }
+    // The byte after the region is its `)` when the call closed; `region` is
+    // a subslice of `source`, so its offset is the pointer difference.
+    let end = (region.as_ptr() as usize)
+        .checked_sub(source.as_ptr() as usize)?
+        .checked_add(region.len())?;
+    let trailing = source
+        .get(end..)?
+        .strip_prefix(')')?
+        .trim_start_matches([' ', '\t'])
+        .strip_prefix('{')?;
+    let body = region_body(trailing)?;
+    match depth0_arrow(body) {
+        Some(at) => lambda_body_callee(body.get(at + 2..)?),
+        None => lambda_body_callee(body),
+    }
+}
+
+/// CL.4: byte index of the first `->` / `=>` at bracket depth 0 of `region`,
+/// quoted text stepped over ([`region_body`]'s rules). Both arrows are ASCII.
+fn depth0_arrow(region: &str) -> Option<usize> {
+    let b = region.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+        } else {
+            match c {
+                b'\'' | b'"' | b'`' => quote = Some(c),
+                b'(' | b'{' | b'[' => depth += 1,
+                b')' | b'}' | b']' => depth -= 1,
+                b'-' | b'=' if depth == 0 && b.get(i + 1) == Some(&b'>') => return Some(i),
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// CL.4: the callee a lambda body opens with — past an optional block `{`,
+/// `return` and `await`, an identifier chain followed by `(`, reduced to its
+/// last segment ([`last_segment`]). `() -> 42`, `() -> new Foo()` and
+/// `x => x.Run<int>()` read nothing.
+fn lambda_body_callee(body: &str) -> Option<String> {
+    let mut t = body.trim_start();
+    if let Some(rest) = t.strip_prefix('{') {
+        t = rest.trim_start();
+    }
+    for kw in ["return", "await"] {
+        if let Some(rest) = t
+            .strip_prefix(kw)
+            .filter(|r| r.starts_with(|c: char| c.is_ascii_whitespace()))
+        {
+            t = rest.trim_start();
+        }
+    }
+    let len = t
+        .bytes()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$' | b'.'))
+        .count();
+    let chain = t.get(..len)?;
+    if !t.get(len..)?.trim_start().starts_with('(') {
+        return None;
+    }
+    last_segment(chain)
 }
 
 /// True when the byte at `at` is absent or is not part of an identifier — so
@@ -2069,5 +2215,210 @@ mod tests {
             ),
             Some("orders".into())
         );
+    }
+
+    #[test]
+    fn lambda_callee_forms() {
+        let lc = |src: &str, needle: &str| one(src, needle, TopicRule::LambdaCallee);
+        let s = |v: &str| Some(v.to_string());
+        // Java / Scala / C# arrows; the receiver is never the job.
+        assert_eq!(
+            lc(
+                "BackgroundJob.enqueue(() -> emailJobs.sendWelcome(id));",
+                "BackgroundJob.enqueue"
+            ),
+            s("sendWelcome")
+        );
+        assert_eq!(
+            lc(
+                "BackgroundJob.enqueue(() => emailJobs.sendWelcome(id))",
+                "BackgroundJob.enqueue"
+            ),
+            s("sendWelcome")
+        );
+        assert_eq!(
+            lc(
+                "BackgroundJob.Enqueue(() => Console.WriteLine(\"hi\"));",
+                ".Enqueue"
+            ),
+            s("WriteLine")
+        );
+        // A generic argument before `(` (CL.3's skip), a lambda parameter.
+        assert_eq!(
+            lc(
+                "BackgroundJob.Enqueue<EmailJobs>(x => x.SendWelcome(id));",
+                ".Enqueue"
+            ),
+            s("SendWelcome")
+        );
+        assert_eq!(
+            lc(
+                "BackgroundJob.<EmailService>enqueue(x -> x.send(id));",
+                ">enqueue("
+            ),
+            s("send")
+        );
+        // A block lambda, `return` / `await` skipped; a delay or a parent id first.
+        assert_eq!(
+            lc(
+                "BackgroundJob.enqueue(() -> { svc.run(); });",
+                "BackgroundJob.enqueue"
+            ),
+            s("run")
+        );
+        assert_eq!(
+            lc(
+                "BackgroundJob.Enqueue(() => { return svc.Run(); });",
+                ".Enqueue"
+            ),
+            s("Run")
+        );
+        assert_eq!(
+            lc("x.Enqueue(async () => await svc.RunAsync())", ".Enqueue"),
+            s("RunAsync")
+        );
+        assert_eq!(
+            lc(
+                "BackgroundJob.schedule(Instant.now().plusHours(1), () -> cleaner.purge());",
+                "BackgroundJob.schedule"
+            ),
+            s("purge")
+        );
+        assert_eq!(
+            lc(
+                "BackgroundJob.ContinueJobWith(id, () => Reports.Build(\"a->b\"));",
+                ".ContinueJobWith"
+            ),
+            s("Build")
+        );
+        // An arrow inside a quoted argument or a nested call is not the lambda.
+        assert_eq!(
+            lc(
+                "BackgroundJob.Enqueue(Make(\"a => b\"), () => J.Go())",
+                ".Enqueue"
+            ),
+            s("Go")
+        );
+        // Kotlin trailing lambdas: alone, after the arguments, with a parameter.
+        assert_eq!(
+            lc(
+                "BackgroundJob.enqueue { mailer.sendWelcome(id) }",
+                "BackgroundJob.enqueue"
+            ),
+            s("sendWelcome")
+        );
+        assert_eq!(
+            lc(
+                "BackgroundJob.schedule(at) { mailer.remind(id) }",
+                "BackgroundJob.schedule"
+            ),
+            s("remind")
+        );
+        assert_eq!(
+            lc(
+                "BackgroundJob.enqueue<Mailer> { it.digest() }",
+                "BackgroundJob.enqueue"
+            ),
+            s("digest")
+        );
+        assert_eq!(
+            lc(
+                "jobScheduler.enqueue { m -> m.digest() }",
+                "Scheduler.enqueue"
+            ),
+            s("digest")
+        );
+        // No lambda, no call, or a body that is not a plain call: nothing.
+        assert_eq!(lc("_q.Enqueue(item);", ".Enqueue"), None);
+        assert_eq!(
+            lc("BackgroundJob.enqueue(svc::run);", "BackgroundJob.enqueue"),
+            None
+        );
+        assert_eq!(
+            lc("BackgroundJob.enqueue(() -> 42);", "BackgroundJob.enqueue"),
+            None
+        );
+        assert_eq!(
+            lc(
+                "BackgroundJob.enqueue(() -> new Job());",
+                "BackgroundJob.enqueue"
+            ),
+            None
+        );
+        assert_eq!(
+            lc(
+                "BackgroundJob.enqueue(() -> svc.field);",
+                "BackgroundJob.enqueue"
+            ),
+            None
+        );
+        assert_eq!(
+            lc(
+                "BackgroundJob.schedule(at)\n{ svc.run() }",
+                "BackgroundJob.schedule"
+            ),
+            None
+        );
+        assert_eq!(
+            lc(
+                "BackgroundJob.scheduleRecurrently(\"n\", () -> svc.run())",
+                "BackgroundJob.schedule"
+            ),
+            None
+        );
+        // An identity rule: no LA.4 expression is ever recorded.
+        let hit = scan("_q.Enqueue(item);", ".Enqueue", TopicRule::LambdaCallee);
+        assert!(hit.iter().all(|h| h.topic.is_none() && h.expr.is_none()));
+    }
+
+    #[test]
+    fn declared_symbol_reads_a_kotlin_fun_and_types_are_told_apart() {
+        let src = "@Job(name = \"digest\")\nfun sendDigest(id: String) { }\n";
+        assert_eq!(
+            one(src, "@Job(", TopicRule::DeclaredSymbol),
+            Some("sendDigest".into())
+        );
+        // `def` still wins over a later `fun` on the same line.
+        let py = "@shared_task\ndef fun (x):\n";
+        assert_eq!(
+            one(py, "@shared_task", TopicRule::DeclaredSymbol),
+            Some("fun".into())
+        );
+        let after =
+            |src: &str, needle: &str| src.find(needle).map(|i| i + needle.len()).unwrap_or(0);
+        for (src, is_type) in [
+            (
+                "[AutomaticRetry(Attempts = 0)]\npublic class EmailJobs\n{",
+                true,
+            ),
+            (
+                "[AutomaticRetry(Attempts = 0)]\npublic sealed class EmailJobs\n{",
+                true,
+            ),
+            ("[Queue(\"q\")]\npublic record EmailJob(string Id);", true),
+            ("@Job(name = \"x\")\nclass Jobs(val m: Mailer) {", true),
+            (
+                "[Queue(\"q\")]\npublic void SendWelcome(object state) { }",
+                false,
+            ),
+            (
+                "@Job(name = \"x\")\npublic void sendWelcome(String id) {",
+                false,
+            ),
+            (
+                "@Job(name = \"x\")\ndef sendWelcome(id: String): Unit = ()",
+                false,
+            ),
+            ("[Queue(\"q\")]\n", false),
+        ] {
+            let needle = if src.starts_with('@') {
+                "@Job("
+            } else if src.starts_with("[Queue") {
+                "[Queue("
+            } else {
+                "[AutomaticRetry("
+            };
+            assert_eq!(declares_type(src, after(src, needle)), is_type, "{src}");
+        }
     }
 }

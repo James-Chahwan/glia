@@ -117,10 +117,12 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     },
     // LA.33: a consumer is HANDLED_BY its callback only for these client
     // shapes; every other consumer keeps LE.4c's subscribing-function edge.
+    // CL.4: asynq's mux handler is the callback; a JobRunr / Hangfire job is
+    // HANDLED_BY its own method through the LE.4c anchor.
     CoverageCaveat {
         language: "*",
         edge_category: "HANDLED_BY",
-        note: "a queue consumer is HANDLED_BY its callback only for kafkajs eachMessage/eachBatch, amqplib consume, BullMQ Worker, nats subscribe (JS callback, Go Subscribe/QueueSubscribe) and pika basic_consume, and only when the callback is a name, a member, this/self.method or a one-call inline function; other consumers are HANDLED_BY the function that subscribes",
+        note: "a queue consumer is HANDLED_BY its callback only for kafkajs eachMessage/eachBatch, amqplib consume, BullMQ Worker, nats subscribe (JS callback, Go Subscribe/QueueSubscribe), pika basic_consume and asynq HandleFunc / Handle, and only when the callback is a name, a member, this/self.method or a one-call inline function; other consumers are HANDLED_BY the function that subscribes",
         verify: "grep the consumer call and read its callback argument",
     },
     CoverageCaveat {
@@ -561,7 +563,7 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), 1);
         let note = rows[0].note;
-        for client in ["kafkajs", "amqplib", "BullMQ", "nats", "pika"] {
+        for client in ["kafkajs", "amqplib", "BullMQ", "nats", "pika", "asynq"] {
             assert!(note.contains(client), "{client}: {note}");
         }
         assert!(note.contains("the function that subscribes"), "{note}");
