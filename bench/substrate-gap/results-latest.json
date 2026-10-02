@@ -837,7 +837,7 @@
     },
     "csharp/taskq": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -847,17 +847,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "csharp/tests": {
       "extract": [
@@ -2679,8 +2679,8 @@
     },
     "go/http_server": {
       "extract": [
-        13,
-        13
+        14,
+        14
       ],
       "fixtures": [
         "fixtures/angular-http-calls",
@@ -2688,6 +2688,7 @@
         "fixtures/go-handled-by",
         "fixtures/go-receiver-method-handlers",
         "fixtures/go-route-mount-owners",
+        "fixtures/go-split-receiver-handlers",
         "fixtures/http-base-prefix",
         "fixtures/react-http_calls",
         "fixtures/swift-http",
@@ -2696,8 +2697,8 @@
         "fixtures/xstack-ts-go-http"
       ],
       "forbid": [
-        5,
-        5
+        8,
+        8
       ],
       "level": "full",
       "literal": [
@@ -2708,8 +2709,8 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        18,
-        18
+        23,
+        23
       ],
       "via": "http"
     },
@@ -3044,7 +3045,7 @@
     },
     "go/taskq": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -3054,17 +3055,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "go/tests": {
       "extract": [
@@ -3777,7 +3778,7 @@
     },
     "java/taskq": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -3787,17 +3788,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "java/tests": {
       "extract": [
@@ -7581,7 +7582,7 @@
     },
     "scala/taskq": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -7591,17 +7592,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "scala/tests": {
       "extract": [
@@ -8729,7 +8730,9 @@
     "fixtures/test-reports-fail",
     "fixtures/trpc-create-caller",
     "fixtures/ts-abstract-class",
+    "fixtures/ts-api-prefix-builder",
     "fixtures/ts-decorator-anchor",
+    "fixtures/ts-endpoint-receiver-gate",
     "fixtures/ts-enum-members",
     "fixtures/ts-inherited-calls",
     "fixtures/ts-route-per-method",
@@ -8894,10 +8897,10 @@
   "totals": {
     "covered": 346,
     "error": 0,
-    "full": 239,
+    "full": 243,
     "grid": 510,
     "n/a": 28,
-    "none": 73,
+    "none": 69,
     "partial": 34,
     "unknown": 136
   },

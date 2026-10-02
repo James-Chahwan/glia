@@ -1,6 +1,6 @@
 {
   "engine": "0.5.0",
-  "fixtures": 339,
+  "fixtures": 342,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -792,6 +792,13 @@
       "per_category": {
         "CALLS": 1.0,
         "DEFINES": 1.0
+      }
+    },
+    "go-split-receiver-handlers": {
+      "framework": "go-split-receiver-handlers",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0
       }
     },
     "go-sql-call-args": {
@@ -1834,6 +1841,13 @@
         "INJECTS": 1.0
       }
     },
+    "ts-api-prefix-builder": {
+      "framework": "ts-api-prefix-builder",
+      "language": "typescript",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
     "ts-arrow-class-fields": {
       "framework": "ts-arrow-class-fields",
       "language": "typescript",
@@ -1855,6 +1869,13 @@
       "per_category": {
         "CONTAINS": 1.0,
         "HANDLED_BY": 1.0
+      }
+    },
+    "ts-endpoint-receiver-gate": {
+      "framework": "ts-endpoint-receiver-gate",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "ts-enum-members": {

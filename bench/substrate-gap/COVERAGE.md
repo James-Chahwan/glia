@@ -75,15 +75,15 @@ Columns, left to right (the review's own abbreviations):
 LEGEND ● full  ◐ partial  · none (fixture exists, nothing emitted)  ? unknown (no fixture)  - n/a (see Not applicable)  ! error
            http_cl http_sr   kafka    amqp sqs/sns  pubsub azure_s    nats   redis    mqtt   taskq    grpc graphql      ws eventbu      db    migr  config secrets   flags    cron cli_def cli_inv   calls imports injects    impl   tests service subproj
 python           ●       ●       ●       ●       ●       ◐       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-go               ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
+go               ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 typescript       ●       ●       ●       ●       ●       ◐       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-java             ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-csharp           ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
+java             ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
+csharp           ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 ruby             ●       ●       ·       ·       ·       ·       ?       ●       ●       ●       ●       ●       ·       ●       ·       ●       ●       ●       ·       ◐       ●       ●       ◐       ●       ●       ◐       ◐       ◐       ●       ●
 php              ●       ●       ◐       ◐       ·       ·       ?       ·       ·       ·       ·       ●       ●       ·       ·       ●       ●       ◐       ·       ◐       ●       ●       ·       ●       ●       ●       ◐       ●       ●       ●
 swift            ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?
 c_cpp            ·       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
-scala            ●       ◐       ·       ·       ·       ·       ●       ●       ◐       ●       ·       ●       ·       ·       ·       ·       ●       ◐       ●       ●       ·       ·       ·       ●       ●       ●       ●       ◐       ●       ◐
+scala            ●       ◐       ·       ·       ·       ·       ●       ●       ◐       ●       ●       ●       ·       ·       ·       ·       ●       ◐       ●       ●       ·       ·       ·       ●       ●       ●       ●       ◐       ●       ◐
 clojure          ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
 dart             ●       ◐       ◐       ·       ·       ·       ?       ·       ·       ·       ·       ●       ◐       ·       ·       ·       ●       ◐       ◐       ●       ●       ·       ·       ●       ●       ◐       ●       ◐       ●       ●
 elixir           ●       ●       ·       ·       ·       ·       ?       ·       ·       ·       ◐       ·       ·       ●       ·       ·       ·       ◐       ◐       ◐       ●       ·       ·       ●       ●       ·       ·       ◐       ●       ●
@@ -103,7 +103,7 @@ PER-MECHANISM  across 17 languages:
   nats         ● 7   ◐ 0   · 4   ? 5   - 1   ! 0
   redis        ● 7   ◐ 1   · 3   ? 4   - 2   ! 0
   mqtt         ● 8   ◐ 0   · 3   ? 5   - 1   ! 0
-  taskq        ● 3   ◐ 1   · 7   ? 4   - 2   ! 0
+  taskq        ● 7   ◐ 1   · 3   ? 4   - 2   ! 0
   grpc         ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
   graphql      ● 6   ◐ 1   · 4   ? 5   - 1   ! 0
   ws           ● 7   ◐ 0   · 4   ? 5   - 1   ! 0
@@ -126,15 +126,15 @@ PER-MECHANISM  across 17 languages:
 
 PER-LANGUAGE  across 30 mechanisms:
   python       ● 28  ◐ 1   · 1   ? 0   - 0   ! 0
-  go           ● 29  ◐ 0   · 1   ? 0   - 0   ! 0
+  go           ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   typescript   ● 29  ◐ 1   · 0   ? 0   - 0   ! 0
-  java         ● 29  ◐ 0   · 1   ? 0   - 0   ! 0
-  csharp       ● 29  ◐ 0   · 1   ? 0   - 0   ! 0
+  java         ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
+  csharp       ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   ruby         ● 17  ◐ 5   · 7   ? 1   - 0   ! 0
   php          ● 14  ◐ 5   · 10  ? 1   - 0   ! 0
   swift        ● 2   ◐ 1   · 0   ? 27  - 0   ! 0
   c_cpp        ● 2   ◐ 0   · 1   ? 27  - 0   ! 0
-  scala        ● 13  ◐ 5   · 12  ? 0   - 0   ! 0
+  scala        ● 14  ◐ 5   · 11  ? 0   - 0   ! 0
   clojure      ● 3   ◐ 1   · 0   ? 26  - 0   ! 0
   dart         ● 10  ◐ 7   · 12  ? 1   - 0   ! 0
   elixir       ● 8   ◐ 5   · 16  ? 1   - 0   ! 0
@@ -144,9 +144,9 @@ PER-LANGUAGE  across 30 mechanisms:
   kotlin       ● 6   ◐ 0   · 0   ? 24  - 0   ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 239 full, 34 partial, 73 none, 136 unknown, 0 error, 28 n/a.
+COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 243 full, 34 partial, 69 none, 136 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 187
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 189
 
 ## Cells routed via an alternative mechanism
 
