@@ -395,16 +395,17 @@ const PY_SERVER_PACKAGES: &[(&str, GqlLib)] = &[
 ];
 
 /// LA.38: the languages whose GraphQL server libraries spell resolvers with
-/// the decorators and classes read here. Java / Kotlin / C# / PHP / Rust / Go
-/// / Dart servers use other spellings (`@QueryMapping`, `@DgsQuery`,
-/// HotChocolate attributes), and a Java `@Query(` is Spring Data / Micronaut
-/// Data / Room.
+/// the decorators and classes read here. Java / Kotlin / PHP / Rust / Go /
+/// Dart servers use other spellings (`@QueryMapping`, `@DgsQuery`), and a
+/// Java `@Query(` is Spring Data / Micronaut Data / Room.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DecoratorFamily {
     /// NestJS / TypeGraphQL decorators.
     Ts,
     /// strawberry / graphene root classes and their fields (CB.14).
     Py,
+    /// HotChocolate root classes and their public members (CL.6b).
+    CSharp,
 }
 
 /// LA.38: the GraphQL server package a file imports.
@@ -414,6 +415,7 @@ enum GqlLib {
     TypeGraphql,
     Strawberry,
     Graphene,
+    HotChocolate,
 }
 
 impl GqlLib {
@@ -423,6 +425,7 @@ impl GqlLib {
             GqlLib::TypeGraphql => "type-graphql",
             GqlLib::Strawberry => "strawberry",
             GqlLib::Graphene => "graphene",
+            GqlLib::HotChocolate => "hotchocolate",
         }
     }
 }
@@ -431,16 +434,19 @@ impl GqlLib {
 /// `[graphql-decorators]` marker. Each needle occurrence lands in at most one
 /// rejection count: a file of another language (`rej_lang`), a file with no
 /// GraphQL server import (`rej_import`), or an occurrence off decorator /
-/// class position (`rej_position`: a comment, a string, mid-line).
+/// class position (`rej_position`: a comment, a string, mid-line). A C# file
+/// counts its root markers ([`CS_ROOT_NEEDLES`]) instead, `rej_position`
+/// being those in a comment, string or preprocessor line (CL.6b).
 #[derive(Default, Debug)]
 struct DecoratorCensus {
-    /// Occurrences of [`DECORATOR_NEEDLES`].
+    /// Occurrences of [`DECORATOR_NEEDLES`], or of [`CS_ROOT_NEEDLES`] in a
+    /// C# file.
     hits: usize,
     lib: Option<GqlLib>,
     /// Root nouns kept, in line order.
     roots: Vec<&'static str>,
     /// Field resolvers read: TypeScript methods under a field decorator,
-    /// Python root-class fields (CB.14).
+    /// Python root-class fields (CB.14), C# root-class members (CL.6b).
     fields: usize,
     rej_lang: usize,
     rej_import: usize,
@@ -648,16 +654,28 @@ pub fn extract_graphql_resolver_nodes(
 /// - Python: `@strawberry.type` on `class Query:`, or graphene
 ///   `class Query(graphene.ObjectType):`, names that root type, and the
 ///   root class's field resolvers ([`py_field_resolvers`], CB.14) are fields
-///   under their schema names.
+///   under their schema names;
+/// - C# (HotChocolate, CL.6b): a root class ([`cs_root_classes`]) names its
+///   root type, and its public members ([`cs_root_fields`]) are fields under
+///   HotChocolate's names.
 ///
 /// Every noun is a root type: `@Resolver(`, `@ResolveField(`,
-/// `@strawberry.type`, `@strawberry.mutation` and `ObjectType` name nothing.
+/// `@strawberry.type`, `@strawberry.mutation`, `ObjectType` and an object
+/// type extension name nothing.
 fn decorator_scan(source: &str, lang: &str) -> (Vec<(String, u32)>, DecoratorCensus) {
+    let family = decorator_family(lang);
+    let cs_sites = match family {
+        Some(DecoratorFamily::CSharp) => cs_root_needle_sites(source),
+        _ => Vec::new(),
+    };
     let mut census = DecoratorCensus {
-        hits: DECORATOR_NEEDLES.iter().map(|n| source.matches(n).count()).sum(),
+        hits: match family {
+            Some(DecoratorFamily::CSharp) => cs_sites.len(),
+            _ => DECORATOR_NEEDLES.iter().map(|n| source.matches(n).count()).sum(),
+        },
         ..DecoratorCensus::default()
     };
-    let Some(family) = decorator_family(lang) else {
+    let Some(family) = family else {
         census.rej_lang = census.hits;
         return (Vec::new(), census);
     };
@@ -667,20 +685,26 @@ fn decorator_scan(source: &str, lang: &str) -> (Vec<(String, u32)>, DecoratorCen
     };
     census.lib = Some(lib);
     let lines: Vec<&str> = source.lines().collect();
-    census.rej_position = misplaced_needles(&lines);
-    let roots = match family {
-        DecoratorFamily::Ts => ts_root_decorators(&lines),
-        DecoratorFamily::Py => py_root_classes(&lines, lib),
+    let (roots, fields) = match family {
+        DecoratorFamily::Ts => {
+            census.rej_position = misplaced_needles(&lines);
+            (ts_root_decorators(&lines), decorator_method_names(source))
+        }
+        DecoratorFamily::Py => {
+            census.rej_position = misplaced_needles(&lines);
+            (py_root_classes(&lines, lib), py_field_resolvers(&lines, lib))
+        }
+        DecoratorFamily::CSharp => {
+            let mask = cs_code_mask(source);
+            census.rej_position = cs_sites.iter().filter(|&&at| mask.get(at) == Some(&b' ')).count();
+            hc_roots_and_fields(source, &mask)
+        }
     };
     census.roots = roots.iter().map(|&(root, _)| root).collect();
     let mut names: Vec<(String, u32)> = roots
         .into_iter()
         .map(|(root, line)| (root.to_string(), line))
         .collect();
-    let fields = match family {
-        DecoratorFamily::Ts => decorator_method_names(source),
-        DecoratorFamily::Py => py_field_resolvers(&lines, lib),
-    };
     census.fields = fields.len();
     names.extend(fields);
     names.sort_by_key(|&(_, line)| line);
@@ -693,6 +717,7 @@ fn decorator_family(lang: &str) -> Option<DecoratorFamily> {
     match lang {
         "typescript" | "react" | "angular" | "vue" => Some(DecoratorFamily::Ts),
         "python" => Some(DecoratorFamily::Py),
+        "csharp" => Some(DecoratorFamily::CSharp),
         _ => None,
     }
 }
@@ -702,6 +727,7 @@ fn decorator_family(lang: &str) -> Option<DecoratorFamily> {
 /// counts and a REST controller importing `Query` from `@nestjs/common` does
 /// not. Python: a line starting with `import` / `from` and the package name
 /// as a whole token (`import strawberry as sb`, `from graphene import ...`).
+/// C#: a `using` of the `HotChocolate` namespace ([`cs_imports_hotchocolate`]).
 fn graphql_server_lib(source: &str, family: DecoratorFamily) -> Option<GqlLib> {
     match family {
         DecoratorFamily::Ts => {
@@ -730,6 +756,7 @@ fn graphql_server_lib(source: &str, family: DecoratorFamily) -> Option<GqlLib> {
                 })
                 .map(|&(_, lib)| lib)
         }),
+        DecoratorFamily::CSharp => cs_imports_hotchocolate(source).then_some(GqlLib::HotChocolate),
     }
 }
 
@@ -855,7 +882,7 @@ fn py_root_class_sites(lines: &[&str], lib: GqlLib) -> Vec<(&'static str, usize)
                     sites.push((root, i));
                 }
             }
-            GqlLib::NestGraphql | GqlLib::TypeGraphql => {}
+            GqlLib::NestGraphql | GqlLib::TypeGraphql | GqlLib::HotChocolate => {}
         }
     }
     sites
@@ -968,7 +995,7 @@ fn py_field_resolvers(lines: &[&str], lib: GqlLib) -> Vec<(String, u32)> {
         match lib {
             GqlLib::Strawberry => strawberry_fields(lines, &members, camel, &mut fields),
             GqlLib::Graphene => graphene_fields(lines, &members, camel, &mut fields),
-            GqlLib::NestGraphql | GqlLib::TypeGraphql => {}
+            GqlLib::NestGraphql | GqlLib::TypeGraphql | GqlLib::HotChocolate => {}
         }
     }
     fields.sort_by_key(|&(_, line)| line);
@@ -1339,6 +1366,572 @@ fn quoted_literal(s: &str) -> Option<&str> {
     (close > 0 && b.get(close) == Some(&quote))
         .then(|| s.get(1..close))
         .flatten()
+}
+
+// ---- CL.6b: HotChocolate code-first root types ----
+
+/// CL.6b: HotChocolate attributes that make the class they sit on a root
+/// type (the source generator's `[QueryType]` static classes).
+const HC_ROOT_ATTRIBUTES: &[(&str, &str)] = &[
+    ("QueryType", "Query"),
+    ("MutationType", "Mutation"),
+    ("SubscriptionType", "Subscription"),
+];
+
+/// CL.6b: the C# root markers the `[graphql-decorators]` census counts, each
+/// a whole word at both ends.
+const CS_ROOT_NEEDLES: &[&str] = &[
+    "[QueryType",
+    "[MutationType",
+    "[SubscriptionType",
+    "ExtendObjectType",
+    "class Query",
+    "class Mutation",
+    "class Subscription",
+];
+
+/// CL.6b: the modifiers a C# class declaration may open with.
+const CS_CLASS_MODIFIERS: &[&str] = &[
+    "public", "internal", "private", "protected", "static", "partial", "sealed", "abstract", "file", "new",
+    "unsafe",
+];
+
+/// CL.6b: words before a member's name that make it no GraphQL field: a
+/// nested type, an event, an operator, a constant.
+const CS_NOT_A_FIELD: &[&str] = &[
+    "class", "struct", "interface", "enum", "record", "delegate", "event", "operator", "implicit", "explicit",
+    "const",
+];
+
+/// CL.6b: words a `(` can follow in a member header that do not name a
+/// method (a tuple return type follows a modifier; `this(` / `base(` chain a
+/// constructor).
+const CS_KEYWORDS: &[&str] = &[
+    "public", "internal", "private", "protected", "static", "async", "override", "virtual", "sealed", "abstract",
+    "new", "extern", "unsafe", "readonly", "partial", "required", "this", "base", "typeof", "nameof", "default",
+    "where", "ref", "out", "in", "params",
+];
+
+/// CL.6b: `System.Object` methods, which HotChocolate never exposes.
+const CS_OBJECT_METHODS: &[&str] = &["ToString", "GetHashCode", "Equals", "GetType"];
+
+/// CL.6b: return types with no value, which make no field.
+const CS_NO_VALUE_TYPES: &[&str] = &["void", "Task", "ValueTask"];
+
+/// CL.6b: a `using` directive of the `HotChocolate` namespace or one under
+/// it, in its `global`, `static` and aliased (`using HC = HotChocolate.Types;`)
+/// forms; `HotChocolateX` is another namespace.
+fn cs_imports_hotchocolate(source: &str) -> bool {
+    let word = |t: &str, w: &str| -> Option<String> {
+        t.strip_prefix(w)
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+            .map(|rest| rest.trim_start().to_string())
+    };
+    source.lines().any(|line| {
+        let t = line.trim_start();
+        let t = word(t, "global").unwrap_or_else(|| t.to_string());
+        let Some(rest) = word(&t, "using") else {
+            return false;
+        };
+        let rest = word(&rest, "static").unwrap_or(rest);
+        let rest = match rest.split_once('=') {
+            Some((alias, value)) if is_ident(alias.trim()) => value.trim_start().to_string(),
+            _ => rest,
+        };
+        rest.strip_prefix("HotChocolate")
+            .is_some_and(|after| !after.bytes().next().is_some_and(is_ident_byte))
+    })
+}
+
+/// CL.6b: the byte offsets of every [`CS_ROOT_NEEDLES`] occurrence.
+fn cs_root_needle_sites(source: &str) -> Vec<usize> {
+    let b = source.as_bytes();
+    let mut sites: Vec<usize> = CS_ROOT_NEEDLES
+        .iter()
+        .flat_map(|needle| {
+            source
+                .match_indices(needle)
+                .map(|(at, n)| (at, at + n.len()))
+                .collect::<Vec<_>>()
+        })
+        .filter(|&(at, end)| !ident_byte_before(b, at) && !b.get(end).is_some_and(|&c| is_ident_byte(c)))
+        .map(|(at, _)| at)
+        .collect();
+    sites.sort_unstable();
+    sites
+}
+
+/// CL.6b: `source` with every C# comment, string / char literal
+/// ([`cs_skip_opaque`]) and preprocessor line overwritten with blanks,
+/// newlines kept, so an offset means the same in both and every brace,
+/// bracket and keyword left in the mask is code.
+fn cs_code_mask(source: &str) -> Vec<u8> {
+    let b = source.as_bytes();
+    let mut mask = b.to_vec();
+    let mut line_start = true;
+    let mut i = 0;
+    while let Some(&c) = b.get(i) {
+        let opaque = if line_start && c == b'#' {
+            Some(b.get(i..).and_then(|r| r.iter().position(|&x| x == b'\n')).map_or(b.len(), |p| i + p))
+        } else {
+            cs_skip_opaque(b, i)
+        };
+        if let Some(end) = opaque {
+            for x in mask.iter_mut().take(end).skip(i) {
+                if *x != b'\n' {
+                    *x = b' ';
+                }
+            }
+            line_start = false;
+            i = end.max(i + 1);
+            continue;
+        }
+        if c == b'\n' {
+            line_start = true;
+        } else if !c.is_ascii_whitespace() {
+            line_start = false;
+        }
+        i += 1;
+    }
+    mask
+}
+
+/// CL.6b: how a C# declaration ends: a `{ .. }` body (the offsets of both
+/// braces), a `;`, or an `=>` expression body.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CsEnd {
+    Body(usize, usize),
+    Semi,
+    Arrow,
+}
+
+/// CL.6b: one C# declaration: its header (attributes, modifiers, type, name,
+/// parameters) as a byte range of the mask, and how it ends.
+struct CsDecl {
+    head: (usize, usize),
+    end: CsEnd,
+}
+
+/// CL.6b: the declarations between `from` and `to` of the mask, one brace
+/// level: a header runs to the first `;`, `=>` or `{` outside its brackets;
+/// a body is skipped to its `}`, an expression body to its `;`.
+fn cs_decls(m: &[u8], from: usize, to: usize) -> Vec<CsDecl> {
+    let mut decls = Vec::new();
+    let (mut start, mut i, mut depth) = (from, from, 0usize);
+    while i < to {
+        let Some(&c) = m.get(i) else {
+            break;
+        };
+        match c {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b'{' if depth == 0 => {
+                let close = cs_matching_close(m, i).map_or(to, |c| c.min(to));
+                decls.push(CsDecl { head: (start, i), end: CsEnd::Body(i, close) });
+                i = close + 1;
+                start = i;
+                continue;
+            }
+            b'}' if depth == 0 => start = i + 1,
+            b';' if depth == 0 => {
+                decls.push(CsDecl { head: (start, i), end: CsEnd::Semi });
+                start = i + 1;
+            }
+            b'=' if depth == 0 && m.get(i + 1) == Some(&b'>') => {
+                decls.push(CsDecl { head: (start, i), end: CsEnd::Arrow });
+                i = cs_statement_end(m, i + 2, to) + 1;
+                start = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    decls
+}
+
+/// CL.6b: the `;` ending the expression that starts at `from`, outside its
+/// brackets (a switch expression or object initializer holds braces), or
+/// `to` when there is none.
+fn cs_statement_end(m: &[u8], from: usize, to: usize) -> usize {
+    let mut depth = 0usize;
+    for (i, &c) in m.iter().enumerate().take(to).skip(from) {
+        match c {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => match depth.checked_sub(1) {
+                Some(d) => depth = d,
+                None => return i,
+            },
+            b';' if depth == 0 => return i,
+            _ => {}
+        }
+    }
+    to
+}
+
+/// CL.6b: one C# attribute: its name past any namespace and without the
+/// `Attribute` suffix, and its argument text (`(..)` / `<..>`) read from the
+/// source, string literals intact.
+struct CsAttr<'a> {
+    name: &'a str,
+    args: &'a str,
+}
+
+/// CL.6b: the attribute lists a declaration header opens with, and the
+/// offset past them.
+fn cs_head_attrs<'a>(src: &'a str, m: &[u8], start: usize, end: usize) -> (Vec<CsAttr<'a>>, usize) {
+    let mut attrs = Vec::new();
+    let mut i = skip_ascii_ws(m, start);
+    while i < end && m.get(i) == Some(&b'[') {
+        let Some(close) = cs_matching_close(m, i).filter(|&c| c < end) else {
+            break;
+        };
+        let (mut item, mut depth) = (i + 1, 0usize);
+        for j in i + 1..=close {
+            match m.get(j) {
+                Some(b'(' | b'[' | b'{' | b'<') => depth += 1,
+                Some(b')' | b']' | b'}' | b'>') if j < close => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            if j == close || (depth == 0 && m.get(j) == Some(&b',')) {
+                attrs.extend(cs_attr(src, m, item, j));
+                item = j + 1;
+            }
+        }
+        i = skip_ascii_ws(m, close + 1);
+    }
+    (attrs, i)
+}
+
+/// CL.6b: the attribute between `from` and `to` (one item of a list), past
+/// an attribute target (`return:`).
+fn cs_attr<'a>(src: &'a str, m: &[u8], from: usize, to: usize) -> Option<CsAttr<'a>> {
+    let ident_end = |at: usize| cs_ident_end(m, at, to);
+    let mut i = skip_ascii_ws(m, from);
+    let target = skip_ascii_ws(m, ident_end(i));
+    if ident_end(i) > i && m.get(target) == Some(&b':') && m.get(target + 1) != Some(&b':') {
+        i = skip_ascii_ws(m, target + 1);
+    }
+    let dotted = i + m
+        .get(i..to)?
+        .iter()
+        .take_while(|&&c| is_ident_byte(c) || c == b'.' || c == b':')
+        .count();
+    let last = src.get(i..dotted)?.rsplit(['.', ':']).next()?;
+    let name = last.strip_suffix("Attribute").filter(|n| !n.is_empty()).unwrap_or(last);
+    let args = src.get(dotted..to)?.trim();
+    (!name.is_empty()).then_some(CsAttr { name, args })
+}
+
+/// CL.6b: the end of the identifier starting at `at`, no further than `to`.
+fn cs_ident_end(m: &[u8], at: usize, to: usize) -> usize {
+    at + m.get(at..to).map_or(0, |r| r.iter().take_while(|&&c| is_ident_byte(c)).count())
+}
+
+/// CL.6b: the arguments of `inner` (an argument list without its brackets)
+/// split at its top-level commas.
+fn cs_args(inner: &str) -> Vec<&str> {
+    let mut args = Vec::new();
+    let (mut depth, mut start, mut quoted) = (0i32, 0usize, false);
+    for (i, c) in inner.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '(' | '[' | '{' | '<' if !quoted => depth += 1,
+            ')' | ']' | '}' | '>' if !quoted => depth -= 1,
+            ',' if !quoted && depth == 0 => {
+                args.extend(inner.get(start..i).map(str::trim));
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    args.extend(inner.get(start..).map(str::trim));
+    args
+}
+
+/// CL.6b: the root type a class's attributes make it: `[QueryType]` /
+/// `[MutationType]` / `[SubscriptionType]`, or an `[ExtendObjectType]` of a
+/// root type, its name spelled `"Query"`, `OperationTypeNames.Query`,
+/// `typeof(Query)`, `nameof(Query)`, `Name = "Query"` or `<Query>`.
+fn hc_attr_root(attrs: &[CsAttr<'_>]) -> Option<&'static str> {
+    attrs.iter().find_map(|a| {
+        if let Some(&(_, root)) = HC_ROOT_ATTRIBUTES.iter().find(|(name, _)| *name == a.name) {
+            return Some(root);
+        }
+        if a.name != "ExtendObjectType" {
+            return None;
+        }
+        let inner = match a.args.strip_prefix('<') {
+            Some(generic) => generic.get(..generic.find('>')?)?,
+            None => a.args.strip_prefix('(')?.strip_suffix(')')?,
+        };
+        let args = cs_args(inner);
+        let named = args.iter().find_map(|arg| {
+            let value = arg.strip_prefix("Name")?.trim_start().strip_prefix('=')?;
+            (!value.starts_with('=')).then(|| value.trim())
+        });
+        let value = named.or_else(|| args.first().copied().filter(|arg| !arg.contains('=')))?;
+        let value = ["typeof(", "nameof("]
+            .iter()
+            .find_map(|call| value.strip_prefix(call)?.strip_suffix(')'))
+            .map_or(value, str::trim);
+        let name = quoted_literal(value).unwrap_or_else(|| value.rsplit(['.', ':']).next().unwrap_or(value));
+        ROOT_TYPES.iter().copied().find(|root| *root == name)
+    })
+}
+
+/// CL.6b: a `[GraphQLName("..")]` among `attrs`, when its value is a
+/// GraphQL name.
+fn hc_graphql_name(attrs: &[CsAttr<'_>]) -> Option<String> {
+    attrs.iter().filter(|a| a.name == "GraphQLName").find_map(|a| {
+        let value = quoted_literal(a.args.strip_prefix('(')?.strip_suffix(')')?.trim())?;
+        py_ident(value)
+            .is_some_and(|(_, rest)| rest.is_empty())
+            .then(|| value.to_string())
+    })
+}
+
+/// CL.6b: a class declaration header from `from` (past its attributes):
+/// modifiers ([`CS_CLASS_MODIFIERS`]), then `class <Name>`. The name, the
+/// offset of the `class` keyword, and whether the class is `static`.
+fn cs_class_head<'a>(src: &'a str, m: &[u8], from: usize, to: usize) -> Option<(&'a str, usize, bool)> {
+    let ident_end = |at: usize| cs_ident_end(m, at, to);
+    let mut i = skip_ascii_ws(m, from);
+    let mut is_static = false;
+    loop {
+        let end = ident_end(i);
+        let word = src.get(i..end)?;
+        if word == "class" {
+            let at = skip_ascii_ws(m, end);
+            let name = src.get(at..ident_end(at)).filter(|n| is_ident(n))?;
+            return Some((name, i, is_static));
+        }
+        if !CS_CLASS_MODIFIERS.contains(&word) {
+            return None;
+        }
+        is_static |= word == "static";
+        i = skip_ascii_ws(m, end);
+    }
+}
+
+/// CL.6b: one HotChocolate root class.
+struct CsRoot<'a> {
+    root: &'static str,
+    name: &'a str,
+    /// The offset of its `class` keyword, where the root noun anchors.
+    class_at: usize,
+    is_static: bool,
+    /// Its `{` and `}`.
+    body: (usize, usize),
+}
+
+/// CL.6b: the root classes of a C# file, in source order, through namespace
+/// blocks and enclosing classes: a class whose attributes make it a root
+/// ([`hc_attr_root`]), else one named exactly `Query` / `Mutation` /
+/// `Subscription`. A per-file scan: `AddQueryType<RootQuery>()` in another
+/// file does not make `RootQuery` a root.
+fn cs_root_classes<'a>(src: &'a str, m: &[u8]) -> Vec<CsRoot<'a>> {
+    fn walk<'a>(src: &'a str, m: &[u8], span: (usize, usize), nesting: usize, out: &mut Vec<CsRoot<'a>>) {
+        if nesting > 64 {
+            return;
+        }
+        for decl in cs_decls(m, span.0, span.1) {
+            let CsEnd::Body(open, close) = decl.end else {
+                continue;
+            };
+            let (attrs, at) = cs_head_attrs(src, m, decl.head.0, decl.head.1);
+            if let Some((name, class_at, is_static)) = cs_class_head(src, m, at, decl.head.1) {
+                let root = hc_attr_root(&attrs).or_else(|| ROOT_TYPES.iter().copied().find(|r| *r == name));
+                if let Some(root) = root {
+                    out.push(CsRoot { root, name, class_at, is_static, body: (open, close) });
+                }
+            } else if !src.get(at..decl.head.1).is_some_and(|h| {
+                h.strip_prefix("namespace").is_some_and(|rest| rest.starts_with(char::is_whitespace))
+            }) {
+                continue;
+            }
+            walk(src, m, (open + 1, close), nesting + 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(src, m, (0, m.len()), 0, &mut out);
+    out
+}
+
+/// CL.6b: a header's top-level tokens: an identifier, a bracketed group
+/// (`(..)` / `[..]` / `<..>`, by its opening byte), or a punctuation byte.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CsTok {
+    Word(usize, usize),
+    Group(u8),
+    Punct(u8),
+}
+
+fn cs_head_tokens(m: &[u8], from: usize, to: usize) -> Vec<CsTok> {
+    let mut toks = Vec::new();
+    let mut i = from;
+    while i < to {
+        let Some(&c) = m.get(i) else {
+            break;
+        };
+        if is_ident_byte(c) {
+            let end = cs_ident_end(m, i, to);
+            toks.push(CsTok::Word(i, end));
+            i = end;
+            continue;
+        }
+        if matches!(c, b'(' | b'[' | b'<') {
+            let mut depth = 0usize;
+            let mut j = i;
+            while j < to {
+                match m.get(j) {
+                    Some(b'(' | b'[' | b'<') => depth += 1,
+                    Some(b')' | b']' | b'>') => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                j += 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            toks.push(CsTok::Group(c));
+            i = j;
+            continue;
+        }
+        if !c.is_ascii_whitespace() {
+            toks.push(CsTok::Punct(c));
+        }
+        i += 1;
+    }
+    toks
+}
+
+/// CL.6b: the member a root-class declaration header (past its attributes)
+/// declares, when HotChocolate makes it a field: its name, the name's offset
+/// and whether it is a method. A `public` method (`Name(` or `Name<T>(` after
+/// the return type) or property (`Name {` / `Name =>`); never a constructor or
+/// destructor, a `static` member of a non-static class, a field, an indexer,
+/// an initializer, a nested type, an event, an operator, a constant, a
+/// `System.Object` method or a method returning `void` / `Task` / `ValueTask`.
+fn cs_member<'a>(
+    src: &'a str,
+    m: &[u8],
+    span: (usize, usize),
+    end: CsEnd,
+    class: &CsRoot<'_>,
+) -> Option<(&'a str, usize, bool)> {
+    let toks = cs_head_tokens(m, span.0, span.1);
+    let word = |t: &CsTok| match *t {
+        CsTok::Word(s, e) => src.get(s..e),
+        _ => None,
+    };
+    if toks.contains(&CsTok::Punct(b'=')) {
+        return None;
+    }
+    // A method: the first `(` group whose name (past a `<..>` group) is no
+    // keyword. Else a property: a header ending in its name before `{` / `=>`.
+    let method = toks.iter().enumerate().find_map(|(k, t)| {
+        if *t != CsTok::Group(b'(') {
+            return None;
+        }
+        let at = match toks.get(k.checked_sub(1)?)? {
+            CsTok::Group(b'<') => k.checked_sub(2)?,
+            _ => k - 1,
+        };
+        word(toks.get(at)?).filter(|w| !CS_KEYWORDS.contains(w)).map(|_| at)
+    });
+    let (at, is_method) = match method {
+        Some(at) => (at, true),
+        None if end != CsEnd::Semi => (toks.len().checked_sub(1)?, false),
+        None => return None,
+    };
+    let CsTok::Word(name_start, name_end) = *toks.get(at)? else {
+        return None;
+    };
+    let name = src.get(name_start..name_end).filter(|n| is_ident(n) && !CS_KEYWORDS.contains(n))?;
+    let prefix: Vec<&str> = toks.get(..at)?.iter().filter_map(word).collect();
+    let return_type = toks.get(..at)?.last().and_then(word);
+    let field = prefix.contains(&"public")
+        && !prefix.iter().any(|w| CS_NOT_A_FIELD.contains(w))
+        && (class.is_static || !prefix.contains(&"static"))
+        && name != class.name
+        && !(is_method
+            && (CS_OBJECT_METHODS.contains(&name) || return_type.is_some_and(|t| CS_NO_VALUE_TYPES.contains(&t))));
+    field.then_some((name, name_start, is_method))
+}
+
+/// CL.6b: HotChocolate's name for a member: a method drops a `Get` prefix
+/// (when an upper-case letter follows) and an `Async` suffix; then the
+/// leading upper-case run goes lower case, keeping the run's last letter
+/// when a letter follows it (`FormatFieldName`: `GetBooks` -> `books`,
+/// `GetUserByIdAsync` -> `userById`, `URLPath` -> `urlPath`, `ID` -> `id`).
+fn hc_field_name(member: &str, method: bool) -> Option<String> {
+    let mut name = member;
+    if method {
+        if let Some(rest) = name.strip_prefix("Get").filter(|r| r.starts_with(|c: char| c.is_ascii_uppercase())) {
+            name = rest;
+        }
+        if let Some(rest) = name.strip_suffix("Async").filter(|r| !r.is_empty()) {
+            name = rest;
+        }
+    }
+    if !is_ident(name) {
+        return None;
+    }
+    let run = name.chars().take_while(|c| c.is_uppercase()).count();
+    let lower = match name.chars().nth(run) {
+        Some(next) if run > 1 && next.is_alphabetic() => run - 1,
+        _ => run,
+    };
+    let mut out = String::with_capacity(name.len());
+    for (i, c) in name.chars().enumerate() {
+        if i < lower {
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
+}
+
+/// CL.6b: the fields of one root class, as (name, 0-indexed line of the
+/// member's name) in source order: its first-level members HotChocolate
+/// exposes ([`cs_member`]) under `[GraphQLName("..")]` when given, else
+/// [`hc_field_name`]; a `[GraphQLIgnore]` member is none.
+fn cs_root_fields(src: &str, m: &[u8], class: &CsRoot<'_>) -> Vec<(String, u32)> {
+    let (open, close) = class.body;
+    let mut fields = Vec::new();
+    for decl in cs_decls(m, open + 1, close) {
+        let (attrs, at) = cs_head_attrs(src, m, decl.head.0, decl.head.1);
+        if attrs.iter().any(|a| a.name == "GraphQLIgnore") {
+            continue;
+        }
+        let Some((member, name_at, method)) = cs_member(src, m, (at, decl.head.1), decl.end, class) else {
+            continue;
+        };
+        if let Some(name) = hc_graphql_name(&attrs).or_else(|| hc_field_name(member, method)) {
+            fields.push((name, line_of(src, name_at)));
+        }
+    }
+    fields
+}
+
+/// Root nouns as (root type, 0-indexed anchor line), one per root type.
+type RootNouns = Vec<(&'static str, u32)>;
+
+/// CL.6b: a C# file's root nouns (each anchored at the `class` line of its
+/// first root class) and their fields, given its [`cs_code_mask`].
+fn hc_roots_and_fields(src: &str, m: &[u8]) -> (RootNouns, Vec<(String, u32)>) {
+    let mut roots = RootNouns::new();
+    let mut fields = Vec::new();
+    for class in cs_root_classes(src, m) {
+        if !roots.iter().any(|&(r, _)| r == class.root) {
+            roots.push((class.root, line_of(src, class.class_at)));
+        }
+        fields.extend(cs_root_fields(src, m, &class));
+    }
+    fields.sort_by_key(|&(_, line)| line);
+    (roots, fields)
 }
 
 /// WHOLE-FILE mode for a routed `.graphql` / `.gql` schema
@@ -3541,5 +4134,123 @@ mod tests {
             tally.marker().as_deref(),
             Some("[graphql-ops] client-request machinebox=0 graphql-client=6 named=0 root_field=0 unread=6")
         );
+    }
+
+    // ---- CL.6b: HotChocolate code-first root types ----
+
+    /// bench/substrate-gap/matrix/csharp/graphql/server/Query.cs.
+    const HC_QUERY: &str = "using HotChocolate;\n\npublic class Query\n{\n    public IEnumerable<Book> GetBooks() => new List<Book>();\n}\n\npublic record Book(string Title);\n";
+
+    #[test]
+    fn hotchocolate_query_class_fields() {
+        assert_resolvers(HC_QUERY, "csharp", &["Query", "books"]);
+        let out = extract_graphql_resolver_nodes(HC_QUERY, "csharp", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(2), "the class line");
+        assert_eq!(anchor_line(&out, "graphql_resolver:books"), Some(4), "the method line");
+        assert_eq!(
+            decorator_scan(HC_QUERY, "csharp").1.marker("csharp").as_deref(),
+            Some("[graphql-decorators] lang=csharp import=hotchocolate roots=Query fields=1 rejected lang=0 import=0 position=0")
+        );
+        // The source-generator shape: a `[QueryType]` static class whose
+        // static methods and properties are the fields, a namespace block,
+        // a multi-line signature, a block body holding braces in strings.
+        let generated = "using HotChocolate.Types;\n\nnamespace Shop\n{\n    [QueryType]\n    public static partial class BookQueries\n    {\n        public static Book GetBookById(\n            int id,\n            [Service] IRepo repo) => repo.Find(id);\n\n        public static async Task<Author> GetAuthorAsync(int id)\n        {\n            var s = \"}\";\n            return new Author { Name = $\"{s}\" };\n        }\n\n        public static string Version { get; } = \"1\";\n\n        public static string Hello => \"world\";\n    }\n}\n";
+        assert_resolvers(generated, "csharp", &["Query", "author", "bookById", "hello", "version"]);
+        let out = extract_graphql_resolver_nodes(generated, "csharp", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(5));
+        assert_eq!(anchor_line(&out, "graphql_resolver:bookById"), Some(7));
+        assert_eq!(anchor_line(&out, "graphql_resolver:author"), Some(11));
+        // Mutation / Subscription by name, an attribute on the class line, a
+        // file-scoped namespace and `global using`.
+        let roots = "global using HotChocolate;\nnamespace Shop;\npublic sealed class Mutation\n{\n    public Book AddBook(string title) => new(title);\n}\n[SubscriptionType] public class Events\n{\n    public Book OnBookAdded([EventMessage] Book book) => book;\n}\n";
+        assert_resolvers(roots, "csharp", &["Mutation", "Subscription", "addBook", "onBookAdded"]);
+    }
+
+    #[test]
+    fn extend_object_type_fields() {
+        let source = "using HotChocolate;\nusing HotChocolate.Types;\n\n[ExtendObjectType(OperationTypeNames.Mutation)]\npublic class OrderMutations\n{\n    public Task<Order> CreateOrderAsync(OrderInput input) => _svc.Create(input);\n}\n";
+        assert_resolvers(source, "csharp", &["Mutation", "createOrder"]);
+        let out = extract_graphql_resolver_nodes(source, "csharp", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:Mutation"), Some(4), "the class line, past the attribute");
+        // Every spelling of the extended root, stacked attributes, and two
+        // classes extending one root in a file: one noun, both fields.
+        let spellings = "using HotChocolate.Types;\n[ExtendObjectType(\"Query\")]\npublic class A { public int GetA() => 1; }\n[Authorize]\n[ExtendObjectType(typeof(Query))]\npublic class B { public int GetB() => 2; }\n[ExtendObjectType<Subscription>]\npublic class C { public int GetC() => 3; }\n[ExtendObjectType(Name = \"Query\")]\npublic class D { public int GetD() => 4; }\n[HotChocolate.Types.ExtendObjectTypeAttribute(OperationTypeNames.Query)]\npublic class E { public int GetE() => 5; }\n";
+        assert_resolvers(spellings, "csharp", &["Query", "Subscription", "a", "b", "c", "d", "e"]);
+        // An object-type extension is no root, and neither is a class an
+        // attribute block three lines up no longer reaches.
+        let object_ext = "using HotChocolate.Types;\n[ExtendObjectType(typeof(Book))]\npublic class BookExtensions\n{\n    public Author GetAuthor([Parent] Book book) => null;\n}\n[QueryType]\npublic class Real { }\npublic class Next { public int GetNext() => 1; }\n";
+        assert_resolvers(object_ext, "csharp", &["Query"]);
+    }
+
+    #[test]
+    fn graphql_name_and_ignore() {
+        let source = "using HotChocolate;\npublic class Query\n{\n    [GraphQLName(\"me\")]\n    public User GetCurrentUser() => null;\n    [Authorize]\n    [GraphQLNameAttribute(\"viewer\")]\n    [UsePaging]\n    public User GetWhoAmI() => null;\n    [GraphQLIgnore]\n    public string GetSecret() => \"\";\n    [GraphQLDescription(\"the [catalog]\")] public IQueryable<Book> GetBooks() => null;\n    [HotChocolate.GraphQLIgnore] public string Hidden { get; set; }\n}\n";
+        assert_resolvers(source, "csharp", &["Query", "books", "me", "viewer"]);
+        let out = extract_graphql_resolver_nodes(source, "csharp", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:me"), Some(4), "the member line, not the attribute's");
+        assert_eq!(anchor_line(&out, "graphql_resolver:viewer"), Some(8));
+    }
+
+    #[test]
+    fn a_query_class_without_hotchocolate_mints_nothing() {
+        let unimported = HC_QUERY.trim_start_matches("using HotChocolate;\n");
+        assert_resolvers(unimported, "csharp", &[]);
+        assert_eq!(
+            decorator_scan(unimported, "csharp").1.marker("csharp").as_deref(),
+            Some("[graphql-decorators] lang=csharp import=none roots= fields=0 rejected lang=0 import=1 position=0")
+        );
+        // A package that only starts with the name, an import in a comment.
+        for using in ["using HotChocolateX;\n", "// using HotChocolate;\n", "using static Other.HotChocolate;\n"] {
+            assert_resolvers(&format!("{using}{unimported}"), "csharp", &[]);
+        }
+        // A static import and an alias of the namespace are imports.
+        for using in ["using static HotChocolate.Types.OperationTypeNames;\n", "using HC = HotChocolate.Types;\n"] {
+            assert_resolvers(&format!("{using}{unimported}"), "csharp", &["Query", "books"]);
+        }
+        // The same C# held by a file of another language.
+        assert_resolvers(HC_QUERY, "java", &[]);
+        assert_resolvers(HC_QUERY, "typescript", &[]);
+        // A root class in a comment or a string, and a longer class name.
+        let decoys = "using HotChocolate;\n// public class Query { public int GetX() => 1; }\n/* [QueryType]\npublic class Mutation { public int GetY() => 1; } */\nvar s = @\"\npublic class Subscription { public int GetZ() => 1; }\";\npublic class QueryBuilder { public int GetW() => 1; }\n";
+        assert_resolvers(decoys, "csharp", &[]);
+        assert_eq!(
+            decorator_scan(decoys, "csharp").1.marker("csharp").as_deref(),
+            Some("[graphql-decorators] lang=csharp import=hotchocolate roots= fields=0 rejected lang=0 import=0 position=4")
+        );
+    }
+
+    #[test]
+    fn hc_field_name_rules() {
+        for (member, method, field) in [
+            ("GetBooks", true, "books"),
+            ("GetUserByIdAsync", true, "userById"),
+            ("Hello", true, "hello"),
+            ("CreateOrderAsync", true, "createOrder"),
+            ("OnBookAdded", true, "onBookAdded"),
+            // `Get` before a lower-case letter is part of the word, and a
+            // bare `Get` / `Async` keeps its text.
+            ("Getaway", true, "getaway"),
+            ("Get", true, "get"),
+            ("Async", true, "async"),
+            // FormatFieldName: the upper-case run keeps its last letter when
+            // a letter follows it.
+            ("GetURLPath", true, "urlPath"),
+            ("ID", false, "id"),
+            ("HTTP2Server", false, "http2Server"),
+            ("IDs", false, "iDs"),
+            ("already", true, "already"),
+            // A property keeps its `Get` and `Async`.
+            ("GetCount", false, "getCount"),
+            ("LoadAsync", false, "loadAsync"),
+        ] {
+            assert_eq!(hc_field_name(member, method).as_deref(), Some(field), "{member}");
+        }
+        assert_eq!(hc_field_name("", true), None);
+    }
+
+    #[test]
+    fn constructors_and_private_members_are_not_fields() {
+        let source = "using HotChocolate;\n\npublic class Query\n{\n    #region Don't expose these {\n    private readonly IRepo _repo;\n    public const int Limit = 10;\n    #endregion\n    public Query(IRepo repo) { _repo = repo; }\n    public Query() : this(null) { }\n    ~Query() { }\n    private Book GetHidden() => null;\n    internal Book GetInternal() => null;\n    protected Book GetProtected() => null;\n    public static Book GetStatic() => null;\n    public void Log(string m) { }\n    public Task FlushAsync() => Task.CompletedTask;\n    public override string ToString() => \"Query\";\n    public string Name;\n    public Book this[int i] => null;\n    public event EventHandler Changed;\n    public class Nested { public int GetInner() => 1; }\n    public int Count { get; private set; }\n    public Book GetBook(int id)\n    {\n        // }\n        var verbatim = @\"}\"\"{\";\n        char c = '}';\n        if (id > 0) { return _repo.Find(id); }\n        return null;\n    }\n}\n\npublic class Other\n{\n    public int GetOther() => 1;\n}\n";
+        assert_resolvers(source, "csharp", &["Query", "book", "count"]);
     }
 }
