@@ -444,6 +444,41 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // `WorkerBuilder` is no site (`TopicRule::WorkerJobType`).
     (".build_fn(", QueueFramework::Apalis, &["apalis"], TopicRule::WorkerJobType),
     (".build(", QueueFramework::Apalis, &["apalis"], TopicRule::WorkerJobType),
+    // ---- DH.1: Ruby broker clients ------------------------------------------
+    // Every row sits BEFORE the A2.9 block, so the Redis / MQTT generic
+    // `.subscribe(` rows yield to a call one of these read. `.subscribe(`,
+    // `.subscription(`, `.receive_message(` and `topic ` are common Ruby
+    // words: every gate is the gem's require path, its construction or its
+    // namespace, lowercased, never a bare word a local variable could hold.
+    // Bunny (RabbitMQ): `q = ch.queue("orders", durable: true)` +
+    // `q.subscribe(block: true) { |_, _, body| .. }`. The subscribe names no
+    // queue (`TopicRule::Declared`): CL.1's declare pass binds it to the
+    // file's one `.queue(` declaration ([`DECLARE_PATTERNS`]); two declared
+    // queues bind nothing and keep the framework tag. The guides also write
+    // it paren-less with a block (`q.subscribe do |_, _, body|`), and a
+    // custom consumer subscribes through `q.subscribe_with(consumer)`.
+    (".subscribe(", QueueFramework::RabbitMQ, BUNNY_GATE, TopicRule::Declared),
+    (".subscribe ", QueueFramework::RabbitMQ, BUNNY_GATE, TopicRule::Declared),
+    (".subscribe_with(", QueueFramework::RabbitMQ, BUNNY_GATE, TopicRule::Declared),
+    // Karafka's routing DSL: `routes.draw do topic :orders do consumer
+    // OrdersConsumer end end`, a paren-less call naming a symbol or a string
+    // (`TopicRule::BareArg`: at a word edge, a literal, or no site at all).
+    // A constant (`topic Topics::ORDERS`) reads nothing.
+    ("topic ", QueueFramework::Kafka, &["karafka"], TopicRule::BareArg),
+    // google-cloud-pubsub: v2 `pubsub.subscription("orders")`, v3
+    // `pubsub.subscriber("orders")`, and the paren-less spelling the gem's
+    // reference docs use (`pubsub.subscription "orders"`). A subscription
+    // pairs only when spelled like its topic (the JS `.subscription(` row's
+    // COVERAGE_CAVEATS gap).
+    (".subscription(", QueueFramework::PubSub, GCP_PUBSUB_RUBY_GATE, TopicRule::ArgLiteral),
+    (".subscriber(", QueueFramework::PubSub, GCP_PUBSUB_RUBY_GATE, TopicRule::ArgLiteral),
+    (".subscription ", QueueFramework::PubSub, GCP_PUBSUB_RUBY_GATE, TopicRule::BareArg),
+    (".subscriber ", QueueFramework::PubSub, GCP_PUBSUB_RUBY_GATE, TopicRule::BareArg),
+    // aws-sdk-sqs: `sqs.receive_message(queue_url: "https://sqs.../orders")`,
+    // the snake_case keyword the boto3 row's `queueurl` never spells, and the
+    // gem's long-poller `Aws::SQS::QueuePoller.new(url)`. The URL folds.
+    (".receive_message(", QueueFramework::Sqs, AWS_SQS_RUBY_GATE, TopicRule::Keyed(&["queue_url"])),
+    ("QueuePoller.new(", QueueFramework::Sqs, AWS_SQS_RUBY_GATE, TopicRule::ArgLiteral),
     // ---- A2.9: broker pub/sub that used to live in eventbus.rs ----------
     // These verbs are the broadest needles in the table, so every row below is
     // a GENERIC-VERB row ([`is_generic_verb_row`]): it yields to any earlier
@@ -734,6 +769,32 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // receiver must be declared in the file as a storage
     // (`TopicRule::StorageJobType`), else the call is no site.
     (".push(", QueueFramework::Apalis, &["apalis"], TopicRule::StorageJobType),
+    // ---- DH.1: Ruby broker clients (see the CONSUMER_PATTERNS block) --------
+    // Before the A2.9 block, so the generic `.publish(` verb rows yield to a
+    // call these read.
+    // Bunny: `ch.default_exchange.publish("order-1", routing_key: "orders")`,
+    // the routing key naming the queue on the default exchange; a direct or
+    // topic exchange's key is read the same way. The payload is positional
+    // and never read, so a publish with no `routing_key:` names nothing.
+    (".publish(", QueueFramework::RabbitMQ, BUNNY_GATE, TopicRule::Keyed(&["routing_key"])),
+    // google-cloud-pubsub: v2 `pubsub.topic("orders")`, v3
+    // `pubsub.publisher("orders")`, and the paren-less spelling
+    // (`pubsub.topic "orders"`). KNOWN IMPRECISION, the JS `.topic(` row's:
+    // `.topic(` is a reference, not a publish.
+    (".topic(", QueueFramework::PubSub, GCP_PUBSUB_RUBY_GATE, TopicRule::ArgLiteral),
+    (".publisher(", QueueFramework::PubSub, GCP_PUBSUB_RUBY_GATE, TopicRule::ArgLiteral),
+    (".topic ", QueueFramework::PubSub, GCP_PUBSUB_RUBY_GATE, TopicRule::BareArg),
+    (".publisher ", QueueFramework::PubSub, GCP_PUBSUB_RUBY_GATE, TopicRule::BareArg),
+    // aws-sdk-sqs: `sqs.send_message(queue_url: url, message_body: b)` and
+    // `send_message_batch(queue_url: url, entries: [..])`. The URL folds.
+    (".send_message(", QueueFramework::Sqs, AWS_SQS_RUBY_GATE, TopicRule::Keyed(&["queue_url"])),
+    (".send_message_batch(", QueueFramework::Sqs, AWS_SQS_RUBY_GATE, TopicRule::Keyed(&["queue_url"])),
+    // aws-sdk-sns: `sns.publish(topic_arn: "arn:aws:sns:..:orders", message:
+    // m)`; the ARN folds. The A2.6 `.publish(` row above (its `aws-sdk` gate
+    // passes on `require "aws-sdk-sns"`) reads only `topicarn` and finds
+    // nothing on the same call: CL.1's rule (i) drops its tag beside this
+    // row's node.
+    (".publish(", QueueFramework::Sns, AWS_SNS_RUBY_GATE, TopicRule::Keyed(&["topic_arn"])),
     // ---- A2.9: broker pub/sub (see the CONSUMER_PATTERNS block) -----------
     // Redis pub/sub — `r.publish('notifications', payload)`. Placed AFTER the
     // NATS / RabbitMQ / SNS rows: a file importing both is attributed to the
@@ -774,7 +835,24 @@ const DECLARE_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // positionally: `q, err := ch.QueueDeclare("orders", durable, ..)`.
     (".QueueDeclare(", QueueFramework::RabbitMQ, &["rabbitmq.client", "streadway/amqp", "amqp091-go"], TopicRule::KeyedOrArg(&["queue"])),
     (".QueueDeclareAsync(", QueueFramework::RabbitMQ, &["rabbitmq.client"], TopicRule::KeyedOrArg(&["queue"])),
+    // DH.1: Ruby — Bunny `q = ch.queue("orders", durable: true)`, the queue
+    // an unnamed `q.subscribe(..)` consumes. A server-named queue
+    // (`ch.queue("", exclusive: true)`) reads no name and so counts as an
+    // unnamed declaration: ambiguous, nothing binds.
+    (".queue(", QueueFramework::RabbitMQ, BUNNY_GATE, TopicRule::ArgLiteral),
 ];
+
+// ---- DH.1: Ruby gem gates, shared by the three tables ------------------------
+/// Bunny: its require or its construction, never the bare word, so a Ruby file
+/// with a `bunny` local is no RabbitMQ client.
+const BUNNY_GATE: &[&str] = &["bunny.new", "require \"bunny\"", "require 'bunny'"];
+/// google-cloud-pubsub: the require path, and `Google::Cloud::Pubsub` (v2) /
+/// `Google::Cloud::PubSub` (v3), lowercased.
+const GCP_PUBSUB_RUBY_GATE: &[&str] = &["google/cloud/pubsub", "google::cloud::pubsub"];
+/// aws-sdk-sqs: the gem name and the `Aws::SQS` namespace, lowercased.
+const AWS_SQS_RUBY_GATE: &[&str] = &["aws-sdk-sqs", "aws::sqs"];
+/// aws-sdk-sns: the gem name and the `Aws::SNS` namespace, lowercased.
+const AWS_SNS_RUBY_GATE: &[&str] = &["aws-sdk-sns", "aws::sns"];
 
 /// CL.1: rows whose library gate a Python file may miss while still calling
 /// the task. The canonical Celery caller (`from tasks import process_order` +
@@ -1523,10 +1601,14 @@ fn emit_queue_nodes(
         // A12.1: the byte offset rides along too — it anchors the MESSAGE_TYPE scan.
         // LA.4: the resolver only ever sees a row that may name a topic by an
         // identifier; everything else reads exactly as it always has.
+        // DH.1: a Declared or BareArg hit never carries an expression to fold.
         let folds = resolve.filter(|_| {
             !is_generic_verb_row(pattern, framework)
                 && !is_identity_rule(rule)
-                && !matches!(rule, TopicRule::NoIdentity)
+                && !matches!(
+                    rule,
+                    TopicRule::NoIdentity | TopicRule::Declared | TopicRule::BareArg
+                )
         });
         let mut reads: Vec<Option<(String, TopicForm)>> = hits
             .iter()
@@ -6686,6 +6768,216 @@ await myconsumer.run({ eachMessage: notMine });\n";
             if matches!(rule, TopicRule::StorageJobType | TopicRule::WorkerJobType) {
                 assert_eq!(*f, QueueFramework::Apalis, "{needle}");
                 assert!(is_identity_rule(rule));
+            }
+        }
+    }
+
+    // ---- DH.1: Ruby broker clients -----------------------------------------
+
+    const RB_PATH: &str = "app/worker.rb";
+
+    fn rb(src: &str) -> (Vec<String>, Vec<String>) {
+        at(src, RB_PATH)
+    }
+
+    /// matrix/ruby/amqp, both files.
+    const BUNNY_WORKER: &str = "require \"bunny\"\n\nconn = Bunny.new\nconn.start\nch = conn.create_channel\nq = ch.queue(\"orders\", durable: true)\nq.subscribe(block: true) do |_delivery, _props, body|\n  puts body\nend\n";
+    const BUNNY_PUBLISHER: &str = "require \"bunny\"\n\nconn = Bunny.new\nconn.start\nch = conn.create_channel\nch.default_exchange.publish(\"order-1\", routing_key: \"orders\")\n";
+
+    #[test]
+    fn ruby_bunny_declared_queue_binds_subscribe() {
+        let c = extract_queue_consumer_nodes(BUNNY_WORKER, "client/worker.rb", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"RabbitMQ""#));
+        // The site is the SUBSCRIBE call (line 6), never the declaration.
+        let lines: Vec<u32> = c.anchors.iter().map(|a| a.line).collect();
+        assert_eq!(lines, vec![6]);
+        // The worker publishes nothing.
+        assert_eq!(rb(BUNNY_WORKER).1, Vec::<String>::new());
+        // A single-quoted require, `Bunny.new(url)`, other local names.
+        let single = "require 'bunny'\nconnection = Bunny.new(ENV[\"AMQP_URL\"])\nchannel = connection.create_channel\nqueue = channel.queue(\"emails\")\nqueue.subscribe(manual_ack: true) { |info, _, body| work(body) }\n";
+        assert_eq!(rb(single), (strs(&["queue_consumer:emails"]), vec![]));
+        // The guides' paren-less block form, and a custom consumer.
+        for call in [
+            "q.subscribe do |delivery_info, properties, payload|\n  puts payload\nend",
+            "q.subscribe_with(OrdersConsumer.new(ch, q), block: true)",
+        ] {
+            let src = format!("require \"bunny\"\nch = Bunny.new.tap(&:start).create_channel\nq = ch.queue(\"orders\")\n{call}\n");
+            assert_eq!(rb(&src), (strs(&["queue_consumer:orders"]), vec![]), "{call}");
+        }
+        // The publisher declares its queue and subscribes to nothing.
+        let declare_only = "require \"bunny\"\nch = Bunny.new.tap(&:start).create_channel\nq = ch.queue(\"orders\")\nch.default_exchange.publish(\"x\", routing_key: q.name)\n";
+        assert_eq!(rb(declare_only).0, Vec::<String>::new());
+    }
+
+    #[test]
+    fn ruby_bunny_two_declared_queues_bind_nothing() {
+        let tag = format!("queue_consumer:{UNRESOLVED_PREFIX}rabbitmq");
+        // Two declared queues: ambiguous, so the unnamed subscribe keeps the
+        // deferred framework tag and names neither queue.
+        let two = "require \"bunny\"\nch = Bunny.new.tap(&:start).create_channel\nq = ch.queue(\"orders\")\naudit = ch.queue(\"audit\")\nq.subscribe(manual_ack: true) { |_, _, b| p b }\n";
+        assert_eq!(rb(two).0, strs(&[&tag]));
+        // A server-named queue reads no name: ambiguous too.
+        let server_named = "require \"bunny\"\nch = Bunny.new.tap(&:start).create_channel\nq = ch.queue(\"\", exclusive: true)\nq.subscribe(block: true) { |_, _, b| p b }\n";
+        assert_eq!(rb(server_named).0, strs(&[&tag]));
+        // No declaration at all: nothing to bind.
+        let none = "require \"bunny\"\ndef listen(q)\n  q.subscribe(block: true) { |_, _, b| p b }\nend\n";
+        assert_eq!(rb(none).0, strs(&[&tag]));
+    }
+
+    #[test]
+    fn ruby_bunny_default_exchange_routing_key() {
+        let p = extract_queue_producer_nodes(BUNNY_PUBLISHER, "server/publisher.rb", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"RabbitMQ""#));
+        // The payload is positional: never the queue.
+        assert_eq!(rb(BUNNY_PUBLISHER), (vec![], strs(&["queue_producer:orders"])));
+        // A topic exchange's routing key is read the same way.
+        let topic_x = "require \"bunny\"\nch = Bunny.new.tap(&:start).create_channel\nx = ch.topic(\"events\")\nx.publish(payload, routing_key: \"orders.created\", persistent: true)\n";
+        assert_eq!(rb(topic_x).1, strs(&["queue_producer:orders.created"]));
+        // A publish with no routing key names nothing: the framework tag.
+        let fanout = "require \"bunny\"\nch = Bunny.new.tap(&:start).create_channel\nx = ch.fanout(\"logs\")\nx.publish(\"hello\")\n";
+        assert_eq!(rb(fanout).1, strs(&[&format!("queue_producer:{UNRESOLVED_PREFIX}rabbitmq")]));
+        // Guard: eventbus.rs mints no verb-fallback EVENT_EMITTER beside the
+        // queue node (a Bunny file is a broker file, `broker_signal_present`).
+        let ev = crate::eventbus::extract_event_emitter_nodes(BUNNY_PUBLISHER, RB_PATH, module_id(), repo());
+        assert!(ev.nodes.is_empty(), "{:?}", ev.nav.qname_by_id.values().collect::<Vec<_>>());
+    }
+
+    /// matrix/ruby/kafka, the routing file and the WaterDrop producer.
+    const KARAFKA_ROUTES: &str = "class KarafkaApp < Karafka::App\n  routes.draw do\n    topic :orders do\n      consumer OrdersConsumer\n    end\n  end\nend\n";
+    const KARAFKA_PRODUCER: &str = "class OrderPublisher\n  def publish(order)\n    Karafka.producer.produce_async(topic: \"orders\", payload: order.to_json)\n  end\nend\n";
+
+    #[test]
+    fn karafka_topic_symbol_and_string() {
+        let c = extract_queue_consumer_nodes(KARAFKA_ROUTES, "client/karafka.rb", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"Kafka""#));
+        assert_eq!(c.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![2]);
+        let string = KARAFKA_ROUTES.replace("topic :orders do", "topic \"orders\" do");
+        assert_eq!(rb(&string).0, strs(&["queue_consumer:orders"]));
+        // Consumer groups, several topics, dotted names.
+        let groups = "class KarafkaApp < Karafka::App\n  routes.draw do\n    consumer_group :billing do\n      topic :orders do\n        consumer OrdersConsumer\n        dead_letter_queue(topic: 'dlq', max_retries: 2)\n      end\n      topic 'payments.v1' do\n        consumer PaymentsConsumer\n      end\n    end\n  end\nend\n";
+        assert_eq!(
+            rb(groups).0,
+            strs(&["queue_consumer:orders", "queue_consumer:payments.v1"])
+        );
+        // The producer file routes nothing; its `topic:` keyword is no route.
+        assert_eq!(rb(KARAFKA_PRODUCER), (vec![], strs(&["queue_producer:orders"])));
+    }
+
+    #[test]
+    fn karafka_prose_topic_word_mints_nothing() {
+        for body in [
+            "  # topic name here\n",
+            "  topic = message.topic\n",
+            "  topic Topics::ORDERS do\n    consumer OrdersConsumer\n  end\n",
+            "  subtopic :orders\n",
+            "  my_topic \"orders\"\n",
+        ] {
+            let src = format!("class KarafkaApp < Karafka::App\n{body}end\n");
+            assert_eq!(rb(&src), (vec![], vec![]), "{body:?}");
+        }
+        // Without the gem, the DSL word is somebody else's.
+        let plain = "class Forum\n  topic :orders do\n  end\nend\n";
+        assert_eq!(rb(plain), (vec![], vec![]));
+    }
+
+    #[test]
+    fn ruby_gcp_pubsub_v2_and_v3() {
+        // matrix/ruby/pubsub, both files (v2: `Pubsub`, `topic` / `subscription`).
+        let listener = "require \"google/cloud/pubsub\"\n\npubsub = Google::Cloud::Pubsub.new\nsub = pubsub.subscription(\"orders\")\nlistener = sub.listen { |msg| msg.acknowledge! }\nlistener.start\n";
+        let publisher = "require \"google/cloud/pubsub\"\n\npubsub = Google::Cloud::Pubsub.new\ntopic = pubsub.topic(\"orders\")\ntopic.publish(\"order-1\")\n";
+        assert_eq!(rb(listener), (strs(&["queue_consumer:orders"]), vec![]));
+        assert_eq!(rb(publisher), (vec![], strs(&["queue_producer:orders"])));
+        let p = extract_queue_producer_nodes(publisher, RB_PATH, module_id(), repo());
+        assert!(framework_of(&p).contains(r#""framework":"PubSub","family":"pubsub""#));
+        // v3: `PubSub`, `publisher` / `subscriber`.
+        let v3_pub = "require \"google/cloud/pubsub\"\npubsub = Google::Cloud::PubSub.new\npublisher = pubsub.publisher(\"orders\")\npublisher.publish(\"order-1\")\n";
+        let v3_sub = "require \"google/cloud/pubsub\"\npubsub = Google::Cloud::PubSub.new\nsubscriber = pubsub.subscriber(\"orders\")\nsubscriber.listen { |m| m.acknowledge! }.start\n";
+        assert_eq!(rb(v3_pub), (vec![], strs(&["queue_producer:orders"])));
+        assert_eq!(rb(v3_sub), (strs(&["queue_consumer:orders"]), vec![]));
+        // The reference docs' paren-less spelling, both versions.
+        for (src, side) in [
+            ("topic = pubsub.topic \"orders\"\n", 1),
+            ("publisher = pubsub.publisher \"orders\"\n", 1),
+            ("sub = pubsub.subscription \"orders\"\n", 0),
+            ("subscriber = pubsub.subscriber \"orders\"\n", 0),
+        ] {
+            let file = format!("require \"google/cloud/pubsub\"\npubsub = Google::Cloud::PubSub.new\n{src}");
+            let (c, p) = rb(&file);
+            let (named, other) = if side == 0 { (c, p) } else { (p, c) };
+            let want = if side == 0 { "queue_consumer:orders" } else { "queue_producer:orders" };
+            assert_eq!((named, other), (strs(&[want]), vec![]), "{src:?}");
+        }
+        // Without the gem, `.topic(` / `.subscription(` are somebody else's.
+        let forum = "class Forum\n  def show\n    @topic = board.topic(\"orders\")\n    @sub = user.subscription(\"orders\")\n  end\nend\n";
+        assert_eq!(rb(forum), (vec![], vec![]));
+        for s in ["google/cloud/pubsub", "google::cloud::pubsub"] {
+            assert!(broker_signals().contains(&s), "{s}");
+        }
+    }
+
+    #[test]
+    fn ruby_aws_sqs_queue_url_folds() {
+        let url = "https://sqs.us-east-1.amazonaws.com/123/orders";
+        // matrix/ruby/sqs_sns, both files.
+        let poller = format!("require \"aws-sdk-sqs\"\n\nsqs = Aws::SQS::Client.new\nsqs.receive_message(queue_url: \"{url}\", max_number_of_messages: 10)\n");
+        let enqueue = format!("require \"aws-sdk-sqs\"\n\nsqs = Aws::SQS::Client.new\nsqs.send_message(queue_url: \"{url}\", message_body: \"order-1\")\n");
+        assert_eq!(rb(&poller), (strs(&["queue_consumer:orders"]), vec![]));
+        assert_eq!(rb(&enqueue), (vec![], strs(&["queue_producer:orders"])));
+        let p = extract_queue_producer_nodes(&enqueue, RB_PATH, module_id(), repo());
+        assert!(framework_of(&p).contains(r#""framework":"Sqs""#));
+        // The hash-argument form, the batch call and the gem's long-poller.
+        let hash = format!("sqs = Aws::SQS::Client.new\nsqs.send_message({{ queue_url: \"{url}\", message_body: b }})\n");
+        assert_eq!(rb(&hash).1, strs(&["queue_producer:orders"]));
+        let batch = format!("sqs = Aws::SQS::Client.new\nsqs.send_message_batch(queue_url: \"{url}\", entries: [{{ id: \"1\", message_body: b }}])\n");
+        assert_eq!(rb(&batch).1, strs(&["queue_producer:orders"]));
+        let qp = format!("require \"aws-sdk-sqs\"\npoller = Aws::SQS::QueuePoller.new(\"{url}\")\npoller.poll {{ |msg| work(msg.body) }}\n");
+        assert_eq!(rb(&qp).0, strs(&["queue_consumer:orders"]));
+        // A URL held in a variable names no queue: the framework tag, Weak.
+        let var = "require \"aws-sdk-sqs\"\nsqs = Aws::SQS::Client.new\nsqs.send_message(queue_url: url, message_body: b)\n";
+        assert_eq!(rb(var).1, strs(&[&format!("queue_producer:{UNRESOLVED_PREFIX}sqs")]));
+        // The same calls without the gem are somebody else's.
+        let mailer = "class Mailer\n  def deliver\n    smtp.send_message(queue_url: \"x\", body: b)\n  end\nend\n";
+        assert_eq!(rb(mailer), (vec![], vec![]));
+    }
+
+    #[test]
+    fn ruby_aws_sns_topic_arn_folds() {
+        let sns = "require \"aws-sdk-sns\"\n\nsns = Aws::SNS::Client.new\nsns.publish(topic_arn: \"arn:aws:sns:us-east-1:123456789012:orders\", message: \"order-1\")\n";
+        let p = extract_queue_producer_nodes(sns, RB_PATH, module_id(), repo());
+        // One node: the A2.6 `.publish(` row's empty `topicarn` read on the
+        // same call is explained by this row's node (CL.1 rule (i)), no tag.
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"Sns""#));
+        assert_eq!(rb(sns).0, Vec::<String>::new());
+        // The namespace alone gates it (the gem required elsewhere).
+        let ns = "sns = Aws::SNS::Client.new(region: \"us-east-1\")\nsns.publish({ topic_arn: \"arn:aws:sns:us-east-1:123456789012:orders\", message: m })\n";
+        assert_eq!(rb(ns).1, strs(&["queue_producer:orders"]));
+        for s in ["aws-sdk-sqs", "aws::sqs", "aws-sdk-sns", "aws::sns"] {
+            assert!(broker_signals().contains(&s), "{s}");
+        }
+    }
+
+    #[test]
+    fn bunny_gate_keeps_other_subscribe_out() {
+        // `.subscribe(` / `.queue(` / `.publish(` in a Ruby file that never
+        // requires or builds Bunny, a `bunny` local included, are no broker.
+        for src in [
+            "obs = Observable.new\nq = jobs.queue(\"orders\")\nobs.subscribe(listener)\n",
+            "bunny = Pet.new\nq = shelter.queue(\"orders\")\nbunny.subscribe(feed)\nbunny.publish(\"hop\", routing_key: \"orders\")\n",
+        ] {
+            assert_eq!(rb(src), (vec![], vec![]), "{src:?}");
+        }
+        for s in BUNNY_GATE {
+            assert!(broker_signals().contains(s), "{s}");
+        }
+        // Every DH.1 rule row is a non-identity, non-generic-verb row.
+        for (needle, f, _, rule) in CONSUMER_PATTERNS.iter().chain(PRODUCER_PATTERNS) {
+            if matches!(rule, TopicRule::Declared | TopicRule::BareArg) {
+                assert!(!is_identity_rule(rule), "{needle}");
+                assert!(!is_generic_verb_row(needle, f), "{needle}");
             }
         }
     }

@@ -144,6 +144,22 @@ pub enum TopicRule {
     /// else the backend storage's type argument. `.build(` is every builder's
     /// method, so an occurrence the rule cannot prove is no site at all.
     WorkerJobType,
+    // --- DH.1: CALLS THAT NAME A QUEUE ELSEWHERE, OR WITHOUT PARENTHESES ----
+    /// DH.1: the call names no queue; the file's one DECLARED queue is its
+    /// identity. Bunny's `q = ch.queue("orders")` + `q.subscribe(block: true)
+    /// { .. }`: every occurrence reads no topic and no expression, so the hit
+    /// exists only for CL.1's declare pass (`queues::bind_declared_queues`) to
+    /// bind, and an unbound one keeps the deferred framework tag.
+    Declared,
+    /// DH.1: the first argument of a call written with or without parentheses,
+    /// a quoted literal or a Ruby / Elixir `:symbol` ([`bare_arg`]): Karafka's
+    /// routing DSL `topic :orders do .. end`, google-cloud-pubsub's
+    /// `pubsub.topic "orders"`. A bare-word needle (`topic `) reads only at a
+    /// word edge ([`bare_word_ok`]), and an occurrence that reads no literal is
+    /// no site at all ([`scan_guarded`] drops it), so `topic = x`, a prose
+    /// `topic name` and `topic Topics::ORDERS` mint nothing. Never an
+    /// expression: the LA.4 fold has no slot to read here.
+    BareArg,
 }
 
 /// Bound on occurrences examined per needle per file — generated files can
@@ -233,6 +249,12 @@ pub fn scan(source: &str, needle: &str, rule: TopicRule) -> Vec<TopicHit> {
 /// cap: the rule's proof (a storage receiver, a `WorkerBuilder` statement) IS
 /// the site, so an unproven `.push(` / `.build(` is no call of the framework,
 /// becomes no hit, and so records no `unresolved:` tag downstream.
+///
+/// DH.1: a [`TopicRule::BareArg`] occurrence that reads no literal is dropped
+/// at the same point, for the same reason: the literal IS the site, and a
+/// `topic` word that names nothing (`topic = x`, `topic Topics::ORDERS`) is
+/// no call of the framework. A [`TopicRule::Declared`] occurrence is always a hit, with
+/// no topic and no expression.
 pub(crate) fn scan_guarded(
     source: &str,
     needle: &str,
@@ -252,7 +274,14 @@ pub(crate) fn scan_guarded(
         }
         let after = offset.saturating_add(needle.len());
         let read = match rule {
-            TopicRule::NoIdentity => None,
+            // DH.1: a Declared call names its queue elsewhere (the file's
+            // declaration), so it reads nothing here.
+            TopicRule::NoIdentity | TopicRule::Declared => None,
+            // DH.1: the literal, or no site at all (see the doc above).
+            TopicRule::BareArg => match bare_arg(source, after) {
+                Some(read) => Some(read),
+                None => continue,
+            },
             // A2.5: identity rules read the code AROUND the call, not its
             // arguments, so they need the needle's own offset. A symbol is
             // never a URL/ARN, so its form is always `Literal`.
@@ -431,16 +460,21 @@ fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option
             let region = region?;
             keyed_literal(region, keys).or_else(|| arg_literal(region, 0))
         }
-        // `NoIdentity` and the A2.5 identity rules never read an argument
-        // region; `scan` dispatches them before it gets here.
+        // `NoIdentity`, the A2.5 identity rules and DH.1's `Declared` /
+        // `BareArg` never read an argument region; `scan` dispatches them
+        // before it gets here.
         _ => None,
     }
 }
 
 /// LA.4: the identifier expression in the slot [`topic_at`] read no literal
 /// from — the same region, the same argument, the same key, tried in the same
-/// order. `NoIdentity` and the A2.5 identity rules never carry one.
+/// order. `NoIdentity` and the A2.5 identity rules never carry one, nor do
+/// DH.1's `Declared` (no slot) and `BareArg` (a literal or no site).
 fn expr_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option<String> {
+    if matches!(rule, TopicRule::Declared | TopicRule::BareArg) {
+        return None;
+    }
     // CL.3: `.queueName(QUEUE)` hands `QUEUE` to the LA.4 const fold.
     if let TopicRule::Chain(keys) = rule {
         return keyed_expr(chain_region(source, after), keys);
@@ -1044,8 +1078,12 @@ fn ident_at(s: &str) -> Option<String> {
 /// (`sidekiq_perform_async_uses_class`, `MyJob.perform_inline(`).
 /// `HardWorker.perform_async(` and `perform_async(1)` are sites; every other
 /// row (`producer.send(`, `.delay(`) is unaffected.
+///
+/// DH.1: [`TopicRule::BareArg`] joins it. Karafka's `topic ` needle also
+/// occurs inside `subtopic :x` and `my_topic "y"`, which are no route; the
+/// after-edge test passes the quote or `:` a real `topic :orders` puts there.
 fn bare_word_ok(source: &str, offset: usize, needle: &str, rule: TopicRule) -> bool {
-    let bare = matches!(rule, TopicRule::Receiver)
+    let bare = matches!(rule, TopicRule::Receiver | TopicRule::BareArg)
         && needle
             .as_bytes()
             .first()
@@ -1055,6 +1093,28 @@ fn bare_word_ok(source: &str, offset: usize, needle: &str, rule: TopicRule) -> b
     }
     let b = source.as_bytes();
     word_edge(b, offset.checked_sub(1)) && word_edge(b, Some(offset + needle.len()))
+}
+
+/// DH.1 [`TopicRule::BareArg`] — the first argument after `after`, spaces and
+/// tabs skipped (never a newline: a paren-less call ends with its line). When
+/// a `(` opens there it is argument #0 of that region, else the bytes right
+/// there; either way the argument must START with a quoted literal or a
+/// `:symbol` ([`read_literal`]): `topic :orders do`, `topic "orders" do`,
+/// `topic (:orders)`. `topic = x`, `topic Topics::ORDERS`, `topic ::Orders`
+/// and `topic (Foo.new("x"))` read nothing. Byte walks only: every index it
+/// slices at follows an ASCII byte.
+fn bare_arg(source: &str, after: usize) -> Option<Folded> {
+    let b = source.as_bytes();
+    let mut j = after;
+    while matches!(b.get(j), Some(b' ' | b'\t')) {
+        j += 1;
+    }
+    if b.get(j) == Some(&b'(') {
+        let region = region_body(source.get(j + 1..)?)?;
+        let arg = (*split_args(region).first()?).trim_start();
+        return read_literal(arg, 0);
+    }
+    read_literal(source, j)
 }
 
 /// [`TopicRule::Receiver`] — the chain immediately before the needle.
@@ -3060,6 +3120,102 @@ mod tests {
         assert!(
             hit.iter()
                 .all(|h| h.expr.is_none() && h.form == TopicForm::Literal)
+        );
+    }
+
+    // ---- DH.1: Declared and BareArg ----------------------------------------
+
+    fn bare(src: &str, needle: &str) -> Vec<Option<String>> {
+        scan(src, needle, TopicRule::BareArg)
+            .into_iter()
+            .map(|h| {
+                assert!(h.expr.is_none(), "BareArg never records an expression");
+                h.topic
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bare_arg_reads_symbol_string_and_paren_forms() {
+        let orders = vec![Some("orders".to_string())];
+        // Karafka's routing DSL, paren-less: a symbol or a string.
+        for src in [
+            "routes.draw do\n  topic :orders do\n    consumer OrdersConsumer\n  end\nend\n",
+            "  topic \"orders\" do\n    consumer OrdersConsumer\n  end\n",
+            "  topic 'orders' do\n  end\n",
+            "  topic \t :orders do\n  end\n",
+            // Parenthesised: argument #0 must start with the literal.
+            "  topic (:orders) do\n  end\n",
+            "  topic (\"orders\", x) do\n  end\n",
+        ] {
+            assert_eq!(bare(src, "topic "), orders, "{src:?}");
+        }
+        // A member needle, google-cloud-pubsub's documented paren-less call.
+        assert_eq!(bare("topic = pubsub.topic \"orders\"\n", ".topic "), orders);
+        // Every occurrence, each its own topic.
+        assert_eq!(
+            bare("topic :orders do\nend\ntopic :payments do\nend\n", "topic "),
+            vec![Some("orders".to_string()), Some("payments".to_string())]
+        );
+    }
+
+    #[test]
+    fn bare_arg_identifier_reads_nothing() {
+        // No literal right after the word is no site at all: no hit, so no
+        // `unresolved:` tag downstream either.
+        for src in [
+            "topic = message.topic\n",
+            "  topic Topics::ORDERS do\n  end\n",
+            "# topic name here\n",
+            "  topic (Foo.new(\"orders\")) do\n  end\n",
+            // A paren-less call ends with its line.
+            "  topic \n    \"orders\"\n",
+            "  topic ::Orders do\n  end\n",
+        ] {
+            assert!(
+                scan(src, "topic ", TopicRule::BareArg).is_empty(),
+                "{src:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_arg_needs_a_word_edge() {
+        assert!(scan("  my_topic :orders\n", "topic ", TopicRule::BareArg).is_empty());
+        assert!(scan("  subtopic \"orders\"\n", "topic ", TopicRule::BareArg).is_empty());
+        assert_eq!(
+            bare("  my_topic :x\n  topic :orders do\n", "topic "),
+            vec![Some("orders".to_string())]
+        );
+        let at = |src: &str| {
+            bare_word_ok(
+                src,
+                src.find("topic ").unwrap(),
+                "topic ",
+                TopicRule::BareArg,
+            )
+        };
+        assert!(at("topic :orders"));
+        assert!(!at("subtopic :orders"));
+        assert!(!at("topic orders"));
+    }
+
+    #[test]
+    fn declared_reads_no_topic_and_no_expr() {
+        // Bunny: `q.subscribe(..)` names no queue; even a literal argument
+        // is no topic under this rule (the declaration is the identity).
+        let src = "q = ch.queue(\"orders\", durable: true)\nq.subscribe(block: true) do |_, _, body|\nend\nq.subscribe(\"x\", queue)\n";
+        let hits = scan(src, ".subscribe(", TopicRule::Declared);
+        assert_eq!(hits.len(), 2);
+        assert!(
+            hits.iter()
+                .all(|h| h.topic.is_none() && h.expr.is_none() && h.form == TopicForm::Literal)
+        );
+        assert_eq!(
+            hits.iter().map(|h| h.offset).collect::<Vec<_>>(),
+            src.match_indices(".subscribe(")
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>()
         );
     }
 }
