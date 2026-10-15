@@ -1,8 +1,15 @@
 //! Repo walk + gating: which directories collapse to a single region anchor,
 //! which files are queued for parsing, and the one-node-per-region graph.
+//!
+//! DC.1 splits the walk in two: [`plan_walk`] is the sequential descent
+//! (gating, regions, project roots, every entered directory with its mtime,
+//! every `.gitignore`), [`read_walk`] the pooled reads with an injectable
+//! per-file reuse and optional stat stamps. [`walk_source_files`] is their
+//! composition, so a clean build prints and returns what it always did.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use glia_code_domain::glia_config::{self, ProjectDecl, Spanned};
 use glia_code_domain::project_roots::{self, ProjectRoot};
@@ -18,6 +25,7 @@ use crate::extract::detect_language;
 /// A build-output / vendored / gitignored directory collapsed to a single
 /// anchor node instead of being parsed file-by-file. Preserves the repo's
 /// spatial map without the per-file flood. (glia-v2 G1/G2/G10)
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RegionAnchor {
     /// Repo-relative path of the collapsed directory (`www`, `packages/x/dist`).
     rel_path: String,
@@ -85,19 +93,22 @@ struct JsonAdmission {
 
 /// A file the walk queued for a read (LG.1b). The descent only gates and
 /// classifies; every read runs afterwards on the engine pool
-/// ([`crate::parallel::par_map_ordered`]) and one sequential fold puts the
-/// texts into `files` / `md` in walk order, so both lists are the ones the
-/// inline reads built.
-struct Pending {
+/// ([`crate::parallel::par_map_ordered`], in [`read_walk`]) and one sequential
+/// fold puts the texts into `files` / `md` in walk order, so both lists are
+/// the ones the inline reads built.
+#[derive(Clone, Debug)]
+pub(crate) struct Pending {
     /// Repo-relative path, as `files` / `md` key it.
-    rel: String,
-    abs: PathBuf,
-    class: PendingClass,
+    pub(crate) rel: String,
+    pub(crate) abs: PathBuf,
+    pub(crate) class: PendingClass,
 }
 
-/// Which read rule a [`Pending`] file takes, decided during the descent.
-#[derive(Clone, Copy)]
-enum PendingClass {
+/// Which read rule a [`Pending`] file takes, decided during the descent. A
+/// re-gated path can change class (a `.md` whose path starts passing the
+/// source rule), so a reuse of a prior [`Read`] must match the class too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingClass {
     /// A `.md` doc (G18), read when it is at most [`MARKDOWN_CAP`] bytes.
     /// `source_fallback`: the path also passes the source rule (a
     /// `Dockerfile.md`, a `.env.md`), so a doc that is over the cap or not
@@ -113,8 +124,11 @@ enum PendingClass {
     Source,
 }
 
-/// The outcome of one [`Pending`] read.
-enum Read {
+/// The outcome of one [`Pending`] read. `Clone` and `PartialEq` so a watch
+/// session can keep it in its file table, hand it back to [`read_walk`] as a
+/// reuse, and tell an unchanged re-read from a changed one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Read {
     Md(String),
     /// A sniffed `.json`: `over_cap` when it was never read, `admitted` its
     /// text when it is an API contract, a JSON Schema or a .NET settings file.
@@ -125,8 +139,8 @@ enum Read {
 }
 
 /// Read one queued file by its class's rule. Runs on a pool worker: touches
-/// nothing but the file.
-fn read_one(p: &Pending) -> Read {
+/// nothing but the file. A watch session re-reads a named file through it.
+pub(crate) fn read_one(p: &Pending) -> Read {
     let file_len = || std::fs::metadata(&p.abs).map(|m| m.len());
     match p.class {
         PendingClass::Markdown { source_fallback } => {
@@ -175,59 +189,126 @@ struct ReadCounts {
     source: usize,
 }
 
-/// Read every queued file on the pool, then fold the texts into `files` /
-/// `md` and the `[contract] json` counters in walk order (LG.1b).
-///
-/// fired_on marker, once per walk:
-///   `[parallel] walk <root>: read <n> files on <t> threads (md <m>, json <j>, source <s>)`
-/// `n` = `m + j + s`, the files the walk queued for a read by class (a `.md`
-/// that falls through to the source rule counts as md).
-fn read_pending(
-    root: &Path,
-    pending: Vec<Pending>,
-    files: &mut Vec<(String, String)>,
-    md: &mut Vec<(String, String)>,
-    json: &mut JsonAdmission,
-) {
-    let (reads, threads) = crate::parallel::par_map_ordered(&pending, read_one);
-    let mut counts = ReadCounts::default();
-    for (p, read) in pending.into_iter().zip(reads) {
-        match p.class {
-            PendingClass::Markdown { .. } => counts.md += 1,
-            PendingClass::JsonSniff => counts.json += 1,
-            PendingClass::Source => counts.source += 1,
+/// A directory the descent recorded (DC.1), with its mtime at plan time.
+/// `rel` is repo-relative, `""` for the root. A watcher stats it instead of
+/// re-listing it: a moved mtime means an entry was added, removed or renamed
+/// directly under it (Q11).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WalkedDir {
+    pub(crate) rel: String,
+    pub(crate) mtime: Option<SystemTime>,
+}
+
+/// One file's stat (DC.1): what a watcher compares to see a file change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileStamp {
+    pub(crate) len: u64,
+    pub(crate) mtime: Option<SystemTime>,
+}
+
+impl FileStamp {
+    /// The stamp of `path` now, `None` when it cannot be stat'ed (gone, or no
+    /// permission). Follows symlinks, like the read.
+    pub(crate) fn of(path: &Path) -> Option<Self> {
+        let m = std::fs::metadata(path).ok()?;
+        Some(Self { len: m.len(), mtime: m.modified().ok() })
+    }
+}
+
+/// The modification time of `path`, `None` when the stat or the platform
+/// cannot give one.
+fn mtime_of(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// One queued file's read as [`read_walk`] took it (DC.1): its class, the
+/// [`Read`] (fresh or reused), and the stamp taken before it when stamps were
+/// asked for. A watch session's file table holds these.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReadRecord {
+    pub(crate) rel: String,
+    pub(crate) class: PendingClass,
+    pub(crate) read: Read,
+    pub(crate) stamp: Option<FileStamp>,
+}
+
+/// The walk's descent (DC.1, [`plan_walk`]): every queued read, the collapsed
+/// regions, the detected project roots, the tallies [`read_walk`] prints, and
+/// what a watcher stats to see the tree change without re-walking it.
+pub(crate) struct WalkPlan {
+    /// The files to read, in walk (name) order.
+    pub(crate) pending: Vec<Pending>,
+    regions: Vec<RegionAnchor>,
+    /// Manifest-detected roots in discovery order, before the `[[project]]`
+    /// merge and the sort, which [`read_walk`] does.
+    roots: Vec<ProjectRoot>,
+    declared: DeclaredDirs,
+    /// The user config's `[[project]]` stanzas (LF.3a).
+    projects: Vec<Spanned<ProjectDecl>>,
+    counts: GateCounts,
+    /// The `.gitignore` and `[walk] skip` tallies, rendered once the descent
+    /// is done and printed last by [`read_walk`], as the one-function walk did.
+    ignore_lines: Vec<String>,
+    /// Every directory the descent entered (listed), the root first, in walk
+    /// order. A region or a hard-skipped directory is not entered, so not
+    /// listed.
+    pub(crate) dirs: Vec<WalkedDir>,
+    /// Every collapsed region root, in walk order. `walk_gating::gate_dir`
+    /// decides a region from that directory's own entries (a nested `.git`, a
+    /// bundle's chunk names), so its mtime is watched although the walk never
+    /// enters it.
+    pub(crate) region_dirs: Vec<WalkedDir>,
+    /// The repo-relative path of every `.gitignore` in an entered directory,
+    /// whether or not it pushed a layer (a comments-only file pushes none).
+    pub(crate) gitignores: Vec<String>,
+}
+
+/// [`read_walk`]'s sequential fold: the texts into `files` / `md` and the
+/// `[contract] json` / `[parallel] walk` counters, in walk order (LG.1b).
+#[derive(Default)]
+struct ReadFold {
+    files: Vec<(String, String)>,
+    md: Vec<(String, String)>,
+    json: JsonAdmission,
+    counts: ReadCounts,
+}
+
+impl ReadFold {
+    fn add(&mut self, rel: &str, class: PendingClass, read: Read) {
+        match class {
+            PendingClass::Markdown { .. } => self.counts.md += 1,
+            PendingClass::JsonSniff => self.counts.json += 1,
+            PendingClass::Source => self.counts.source += 1,
         }
         match read {
-            Read::Md(text) => md.push((p.rel, text)),
+            Read::Md(text) => self.md.push((rel.to_string(), text)),
             Read::Json { over_cap, admitted } => {
-                json.sniffed += 1;
-                json.over_cap += usize::from(over_cap);
+                self.json.sniffed += 1;
+                self.json.over_cap += usize::from(over_cap);
                 if let Some(text) = admitted {
-                    json.admitted += 1;
-                    files.push((p.rel, text));
+                    self.json.admitted += 1;
+                    self.files.push((rel.to_string(), text));
                 }
             }
-            Read::Src(text) => files.push((p.rel, text)),
+            Read::Src(text) => self.files.push((rel.to_string(), text)),
             Read::Unreadable => {}
         }
     }
-    eprintln!(
-        "[parallel] walk {}: read {} files on {threads} threads (md {}, json {}, source {})",
-        root.display(),
-        counts.md + counts.json + counts.source,
-        counts.md,
-        counts.json,
-        counts.source
-    );
 }
 
+/// Walk the repo: [`plan_walk`], then [`read_walk`] with no reuse and no
+/// stamps (DC.1). A clean build takes no extra stat per file and prints
+/// exactly the lines the one-function walk printed, in its order.
 pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
-    let mut files = Vec::new();
-    let mut regions = Vec::new();
-    let mut md = Vec::new();
-    let mut roots = Vec::new();
-    let mut counts = GateCounts::default();
-    let mut json = JsonAdmission::default();
+    read_walk(root, &plan_walk(root), None, false).0
+}
+
+/// The walk's sequential descent (DC.1): config load, the `.gitignore`
+/// stack, gating, region collapse, project-root detection and the queue of
+/// reads. It prints only what the descent prints inline (`[walk] skipped
+/// engine output`, `[migrations] skipped`, a `.gitignore` warning); every
+/// tally line is [`read_walk`]'s.
+pub(crate) fn plan_walk(root: &Path) -> WalkPlan {
     // LF.3a: the user config's `[walk]` and `[[project]]` sections. Loaded once
     // and silently: the build's external-input stage reports loader errors, and
     // the store loads the same file through `IgnoreStack::for_repo`, so a user
@@ -237,26 +318,127 @@ pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
     // Per-directory `.gitignore` layers: pushed on the way down, popped on the
     // way back up, so each verdict sees exactly the files git would. (A8.2)
     let mut ignores = IgnoreStack::with_config(root, &config.walk);
-    let mut declared = DeclaredDirs::new(&config.project);
-    let mut pending = Vec::new();
+    let mut plan = WalkPlan {
+        pending: Vec::new(),
+        regions: Vec::new(),
+        roots: Vec::new(),
+        declared: DeclaredDirs::new(&config.project),
+        projects: config.project,
+        counts: GateCounts::default(),
+        ignore_lines: Vec::new(),
+        dirs: Vec::new(),
+        region_dirs: Vec::new(),
+        gitignores: Vec::new(),
+    };
     let pushed = ignores.push_dir(root);
-    walk_dir(
-        root,
-        root,
-        &mut ignores,
-        &mut pending,
-        &mut regions,
-        &mut roots,
-        &mut counts,
-        &mut declared,
-    );
+    walk_dir(root, root, &mut ignores, &mut plan);
     if pushed {
         ignores.pop();
     }
-    // LG.1b: the descent (gating, gitignore, project roots, regions) stays
-    // sequential; the reads it queued run on the pool.
-    read_pending(root, pending, &mut files, &mut md, &mut json);
-    merge_declared_roots(&config.project, &declared, &regions, &mut roots);
+    if ignores.files > 0 {
+        plan.ignore_lines.push(ignores.marker());
+    }
+    // LF.3a fired_on: `grep '^\[walk\] config skip'`, attributes file skips
+    // (directory skips are the `config=` count of the gate tally).
+    if ignores.config_patterns > 0 {
+        plan.ignore_lines.push(ignores.config_marker());
+    }
+    plan
+}
+
+/// [`read_walk`]'s per-file reuse: a queued file's prior [`Read`], or `None`
+/// to read it. Called on pool workers, so `Sync`; `'a` lets it borrow the
+/// caller's file table.
+pub(crate) type Reuse<'a> = dyn Fn(&Pending) -> Option<Read> + Sync + 'a;
+
+/// The walk's reads (DC.1, LG.1b): every file `plan` queued, on the engine
+/// pool, then one sequential fold into `files` / `md` and the `[contract]
+/// json` counters in walk order, the `[[project]]` merge, the explicit roots
+/// sort and every tally line. The descent stays sequential ([`plan_walk`]:
+/// gitignore layers are a stack); only the reads are pooled.
+///
+/// `reuse` answers a queued file's prior [`Read`] in place of a read. The
+/// caller answers `Some` only from a prior [`ReadRecord`] with the same `rel`
+/// AND the same [`PendingClass`] (a re-gated path can change class), and only
+/// for a file it knows unchanged: a reused file is stamped fresh, so reusing a
+/// file whose recorded stamp no longer matches would hide its change. Re-running
+/// the fold over reused reads is exact by construction: a content edit can move
+/// a file between `files` and `md` or in and out of `files`, and the fold is
+/// what counts the `.json` admissions.
+///
+/// `stamps` takes each file's [`FileStamp`] BEFORE its read, so a write
+/// racing the read leaves a stamp older than the content and the next stat
+/// sees the change. The [`ReadRecord`]s, one per queued file in plan order,
+/// come back only when `stamps` or `reuse` is asked for (a watch session's
+/// file table); a clean read returns none, since keeping them copies every
+/// text once.
+///
+/// fired_on markers, once per call, in this order:
+///   `[parallel] walk <root>: read <n> files on <t> threads (md <m>, json <j>, source <s>)`
+/// (`n` = `m + j + s`, the queued files by class; a `.md` that falls through to
+/// the source rule counts as md), then with `reuse` only
+///   `[walk] reuse root=<root> reused=<r> read=<k> of <n>` (`r + k = n`),
+/// then the `[roots] declared` lines, `[contract] json sniffed=`, `[contract]
+/// json over_cap=`, `[roots] <n> project roots`, the `[walk]` gate tally and
+/// the `[walk] gitignore` / `[walk] config skip` lines, each gated on non-zero
+/// as before.
+pub(crate) fn read_walk(
+    root: &Path,
+    plan: &WalkPlan,
+    reuse: Option<&Reuse<'_>>,
+    stamps: bool,
+) -> (WalkResult, Vec<ReadRecord>) {
+    let (taken, threads) = crate::parallel::par_map_ordered(&plan.pending, |p| {
+        let stamp = if stamps { FileStamp::of(&p.abs) } else { None };
+        match reuse.and_then(|f| f(p)) {
+            Some(read) => (read, stamp, true),
+            None => (read_one(p), stamp, false),
+        }
+    });
+    let reused = taken.iter().filter(|(_, _, hit)| *hit).count();
+    let mut fold = ReadFold::default();
+    let records = if stamps || reuse.is_some() {
+        let records: Vec<ReadRecord> = plan
+            .pending
+            .iter()
+            .zip(taken)
+            .map(|(p, (read, stamp, _))| ReadRecord {
+                rel: p.rel.clone(),
+                class: p.class,
+                read,
+                stamp,
+            })
+            .collect();
+        for r in &records {
+            fold.add(&r.rel, r.class, r.read.clone());
+        }
+        records
+    } else {
+        for (p, (read, ..)) in plan.pending.iter().zip(taken) {
+            fold.add(&p.rel, p.class, read);
+        }
+        Vec::new()
+    };
+    let ReadFold { files, md, json, counts } = fold;
+    eprintln!(
+        "[parallel] walk {}: read {} files on {threads} threads (md {}, json {}, source {})",
+        root.display(),
+        counts.md + counts.json + counts.source,
+        counts.md,
+        counts.json,
+        counts.source
+    );
+    // DC.1 fired_on: `grep '^\[walk\] reuse root='`.
+    if reuse.is_some() {
+        eprintln!(
+            "[walk] reuse root={} reused={reused} read={} of {}",
+            root.display(),
+            plan.pending.len() - reused,
+            plan.pending.len()
+        );
+    }
+    let mut roots = plan.roots.clone();
+    merge_declared_roots(&plan.projects, &plan.declared, &plan.regions, &mut roots);
     // A10.8 fired_on marker: `... 2>&1 | grep '^\[contract\] json sniffed='`.
     // Gated on non-zero like the other walk lines.
     if json.sniffed > 0 {
@@ -274,18 +456,13 @@ pub(crate) fn walk_source_files(root: &Path) -> WalkResult {
     }
     // Attributable collapse tally. Gated on non-zero so a region-free repo stays
     // quiet on the hot path, matching the `[incremental]` / `[gmap]` precedent.
-    if counts.total() > 0 {
-        eprintln!("[walk] {}", counts.marker());
+    if plan.counts.total() > 0 {
+        eprintln!("[walk] {}", plan.counts.marker());
     }
-    if ignores.files > 0 {
-        eprintln!("[walk] {}", ignores.marker());
+    for line in &plan.ignore_lines {
+        eprintln!("[walk] {line}");
     }
-    // LF.3a fired_on: `grep '^\[walk\] config skip'`, attributes file skips
-    // (directory skips are the `config=` count above).
-    if ignores.config_patterns > 0 {
-        eprintln!("[walk] {}", ignores.config_marker());
-    }
-    (files, regions, md, roots)
+    ((files, plan.regions.clone(), md, roots), records)
 }
 
 /// The directories named by `[[project]]` stanzas and whether the walk
@@ -381,23 +558,17 @@ fn missing_reason(rel: &str, regions: &[RegionAnchor]) -> String {
 }
 
 /// Descend `dir`: gate each directory, detect project roots, collapse
-/// regions, and queue every file a rule reads into `pending` (LG.1b: the
-/// reads themselves run afterwards, in [`read_pending`]).
-#[allow(clippy::too_many_arguments)]
-fn walk_dir(
-    root: &Path,
-    dir: &Path,
-    ignores: &mut IgnoreStack,
-    pending: &mut Vec<Pending>,
-    regions: &mut Vec<RegionAnchor>,
-    roots: &mut Vec<ProjectRoot>,
-    counts: &mut GateCounts,
-    declared: &mut DeclaredDirs,
-) {
+/// regions, record every entered directory, region root and `.gitignore`
+/// (DC.1), and queue every file a rule reads into `plan.pending` (LG.1b: the
+/// reads themselves run afterwards, in [`read_walk`]).
+fn walk_dir(root: &Path, dir: &Path, ignores: &mut IgnoreStack, plan: &mut WalkPlan) {
+    // Stat before the listing, as a file's stamp precedes its read: an entry
+    // added after the stat moves the mtime past the recorded one, whether or
+    // not the listing caught it.
+    let mtime = mtime_of(dir);
     let Ok(entries) = std::fs::read_dir(dir) else { return };
-    if !declared.wanted.is_empty() {
-        declared.enter(&dir.strip_prefix(root).unwrap_or(dir).to_string_lossy());
-    }
+    let dir_rel = dir.strip_prefix(root).unwrap_or(dir).to_string_lossy().to_string();
+    plan.declared.enter(&dir_rel);
     // Sort by name: read_dir yields filesystem/inode order, which leaked into
     // node/edge Vec order (and so shard bytes) — stable-ish on one machine,
     // not reproducible across machines or after file churn (audit 2026-06-10).
@@ -411,12 +582,18 @@ fn walk_dir(
         .filter(|e| e.file_type().is_ok_and(|t| !t.is_dir()))
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
+    if names.iter().any(|n| n == ".gitignore") {
+        plan.gitignores.push(match dir_rel.as_str() {
+            "" => ".gitignore".to_string(),
+            rel => format!("{rel}/.gitignore"),
+        });
+    }
     if let Some((ecosystem, manifest, label)) = project_roots::detect_root(&names, |base| {
         std::fs::read_to_string(dir.join(base)).unwrap_or_default()
     }) {
-        let rel = dir.strip_prefix(root).unwrap_or(dir).to_string_lossy().to_string();
-        roots.push(ProjectRoot::new(rel, ecosystem, &manifest, label));
+        plan.roots.push(ProjectRoot::new(dir_rel.clone(), ecosystem, &manifest, label));
     }
+    plan.dirs.push(WalkedDir { rel: dir_rel, mtime });
     for entry in entries {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
@@ -441,11 +618,15 @@ fn walk_dir(
                 ignores.is_ignored(&path, true),
                 ignores.is_excluded(&path, true),
             );
-            counts.record(gate);
+            plan.counts.record(gate);
             if let Some(provenance) = gate.collapse() {
-                let rel = path.strip_prefix(root).unwrap_or(&path);
-                regions.push(RegionAnchor {
-                    rel_path: rel.to_string_lossy().to_string(),
+                let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().to_string();
+                plan.region_dirs.push(WalkedDir {
+                    rel: rel.clone(),
+                    mtime: mtime_of(&path),
+                });
+                plan.regions.push(RegionAnchor {
+                    rel_path: rel,
                     provenance,
                     region: name,
                 });
@@ -455,7 +636,7 @@ fn walk_dir(
                 continue;
             }
             let pushed = ignores.push_dir(&path);
-            walk_dir(root, &path, ignores, pending, regions, roots, counts, declared);
+            walk_dir(root, &path, ignores, plan);
             if pushed {
                 ignores.pop();
             }
@@ -479,19 +660,19 @@ fn walk_dir(
                 let class = PendingClass::Markdown {
                     source_fallback: source_rule(),
                 };
-                pending.push(Pending { rel: rel_str, abs: path, class });
+                plan.pending.push(Pending { rel: rel_str, abs: path, class });
                 continue;
             }
             // A10.8: a `.json` is read only to be sniffed, and queued only when
             // it is an API contract (OpenAPI/Swagger, AsyncAPI, Pact), since
             // LA.16 (A10.12) a JSON Schema, or since CL.7b a .NET
             // `appsettings*.json` (by path). Lock files, tsconfig and test data
-            // are read once, dropped by `read_pending`, and never kept.
+            // are read once, dropped by `read_walk`'s fold, and never kept.
             // `package.json` / `composer.json` are manifests (`is_bypass_path`)
             // and keep their own route below. Anything under a collapsed region
             // (node_modules, dist, ...) is never reached.
             if lower.ends_with(".json") && !is_bypass_path(&rel_str) {
-                pending.push(Pending {
+                plan.pending.push(Pending {
                     rel: rel_str,
                     abs: path,
                     class: PendingClass::JsonSniff,
@@ -507,7 +688,7 @@ fn walk_dir(
                 continue;
             }
             if source_rule() {
-                pending.push(Pending {
+                plan.pending.push(Pending {
                     rel: rel_str,
                     abs: path,
                     class: PendingClass::Source,
@@ -1441,6 +1622,182 @@ mod walk_tests {
         assert_eq!(seq.2, par.2);
         let big = seq.0.iter().find(|(p, _)| p == "ops/big/Dockerfile.md").unwrap();
         assert_eq!(big.1, big_dockerfile, "the oversize doc is read whole, as source");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The DC.1 fixture tree: one file per read rule, a gitignored file and
+    /// directory, a vendored region, a `[walk] skip` and a manifest root.
+    fn dc1_tree(tag: &str) -> std::path::PathBuf {
+        let root = walk_tmp(tag);
+        for d in ["docs", "api", "svc", "node_modules/left-pad", ".glia", "legacy", "build"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for (rel, body) in [
+            (".gitignore", "/build\n*.gen.py\n"),
+            ("README.md", "# Fixture\n"),
+            ("docs/guide.md", "# Guide\n\nRun `svc/app.py`.\n"),
+            ("api/openapi.json", r#"{"openapi":"3.0.3","paths":{"/users":{"get":{}}}}"#),
+            ("tsconfig.json", r#"{"compilerOptions":{"strict":true}}"#),
+            ("svc/app.py", "def run():\n    return 1\n"),
+            ("svc/out.gen.py", "generated = 1\n"),
+            ("svc/main.go", "package main\n\nfunc main() {}\n"),
+            ("node_modules/left-pad/index.js", "module.exports = 1;\n"),
+            ("package.json", r#"{"name":"@shop/fixture"}"#),
+            (".glia/overlay.toml", "version = 1\n[walk]\nskip = [\"legacy\"]\n"),
+            ("legacy/old.py", "old = 2\n"),
+            ("build/b.py", "built = 3\n"),
+        ] {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+        root
+    }
+
+    /// DC.1: `walk_source_files` is `read_walk(plan_walk)`, and stamping the
+    /// reads changes nothing but the records it hands back.
+    #[test]
+    fn plan_then_read_is_walk_source_files() {
+        let root = dc1_tree("planread");
+        let walked = walk_source_files(&root);
+        let plan = plan_walk(&root);
+        let (read, records) = read_walk(&root, &plan, None, false);
+        assert_eq!(read, walked, "files, regions, md and roots match the composed walk");
+        assert!(records.is_empty(), "a clean read keeps no file table");
+
+        // The fixture exercises every rule it names.
+        let keys = |v: &[(String, String)]| v.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>();
+        assert_eq!(keys(&walked.0), ["api/openapi.json", "package.json", "svc/app.py", "svc/main.go"]);
+        assert_eq!(keys(&walked.2), ["README.md", "docs/guide.md"]);
+        let regions: Vec<(&str, Collapse)> =
+            walked.1.iter().map(|r| (r.rel_path.as_str(), r.provenance)).collect();
+        assert_eq!(
+            regions,
+            [
+                ("build", Collapse::BuildOutput),
+                ("legacy", Collapse::Excluded),
+                ("node_modules", Collapse::Vendored),
+            ]
+        );
+        let roots: Vec<&str> = walked.3.iter().map(|r| r.rel_path.as_str()).collect();
+        assert_eq!(roots, [""]);
+
+        // With stamps: the same result, one record per queued file in plan order.
+        let (stamped, records) = read_walk(&root, &plan, None, true);
+        assert_eq!(stamped, walked);
+        let pending: Vec<&str> = plan.pending.iter().map(|p| p.rel.as_str()).collect();
+        let recorded: Vec<&str> = records.iter().map(|r| r.rel.as_str()).collect();
+        assert_eq!(recorded, pending);
+        assert!(pending.contains(&"tsconfig.json"), "sniffed, not admitted: {pending:?}");
+        assert!(records.iter().all(|r| r.stamp.is_some()), "every queued file is stamped");
+        let ts = records.iter().find(|r| r.rel == "tsconfig.json").unwrap();
+        assert_eq!(ts.class, PendingClass::JsonSniff);
+        assert_eq!(ts.read, Read::Json { over_cap: false, admitted: None });
+        let len = |rel: &str| std::fs::metadata(root.join(rel)).unwrap().len();
+        assert!(records.iter().all(|r| r.stamp.unwrap().len == len(&r.rel)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// DC.1: a re-read with a reuse closure reads only what the closure does
+    /// not answer, and its result is a fresh walk's.
+    #[test]
+    fn reuse_rereads_only_changed() {
+        use std::collections::BTreeMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = dc1_tree("reuse");
+        let plan = plan_walk(&root);
+        let (first, before) = read_walk(&root, &plan, None, true);
+        assert_eq!(first, walk_source_files(&root));
+        assert_eq!(before.len(), plan.pending.len());
+
+        // A different length, so the stamp moves even inside one mtime tick.
+        let edited = "svc/app.py";
+        std::fs::write(root.join(edited), "def run():\n    return 2 + 40\n").unwrap();
+
+        let prior: BTreeMap<&str, &ReadRecord> = before.iter().map(|r| (r.rel.as_str(), r)).collect();
+        let hits = AtomicUsize::new(0);
+        let reuse = |p: &Pending| -> Option<Read> {
+            if p.rel == edited {
+                return None;
+            }
+            let r = prior.get(p.rel.as_str()).filter(|r| r.class == p.class)?;
+            hits.fetch_add(1, Ordering::Relaxed);
+            Some(r.read.clone())
+        };
+        let plan = plan_walk(&root);
+        let (second, after) = read_walk(&root, &plan, Some(&reuse), true);
+
+        assert_eq!(hits.load(Ordering::Relaxed), plan.pending.len() - 1, "every other file reused");
+        assert_eq!(second, walk_source_files(&root), "the reused read is a fresh walk");
+        let app = second.0.iter().find(|(p, _)| p == edited).unwrap();
+        assert!(app.1.contains("2 + 40"), "the edited file was re-read: {:?}", app.1);
+        let rels = |v: &[ReadRecord]| v.iter().map(|r| r.rel.clone()).collect::<Vec<_>>();
+        assert_eq!(rels(&before), rels(&after));
+        let moved: Vec<&str> = before
+            .iter()
+            .zip(&after)
+            .filter(|(b, a)| b.stamp != a.stamp)
+            .map(|(b, _)| b.rel.as_str())
+            .collect();
+        assert_eq!(moved, [edited], "only the edited file's stamp differs");
+        let changed: Vec<&str> = before
+            .iter()
+            .zip(&after)
+            .filter(|(b, a)| b.read != a.read)
+            .map(|(b, _)| b.rel.as_str())
+            .collect();
+        assert_eq!(changed, [edited]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// DC.1: the plan lists every directory the descent entered, every region
+    /// root it collapsed and every `.gitignore` it saw, each directory with its
+    /// mtime, which moves when an entry is added.
+    #[test]
+    fn plan_records_dirs_and_gitignores() {
+        use std::time::{Duration, SystemTime};
+
+        let root = walk_tmp("plandirs");
+        for d in ["sub/deep", "other", "node_modules/left-pad", "gen"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for (rel, body) in [
+            (".gitignore", "/gen\n"),
+            ("sub/.gitignore", "*.tmp\n"),
+            ("sub/deep/a.py", "a = 1\n"),
+            ("other/b.go", "package other\n"),
+            ("node_modules/left-pad/.gitignore", "*.log\n"),
+            ("node_modules/left-pad/index.js", "module.exports = 1;\n"),
+            ("gen/g.py", "g = 1\n"),
+        ] {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+
+        let plan = plan_walk(&root);
+        let dirs: Vec<&str> = plan.dirs.iter().map(|d| d.rel.as_str()).collect();
+        assert_eq!(dirs, ["", "other", "sub", "sub/deep"], "entered dirs, no region");
+        let region_dirs: Vec<&str> = plan.region_dirs.iter().map(|d| d.rel.as_str()).collect();
+        assert_eq!(region_dirs, ["gen", "node_modules"]);
+        assert_eq!(plan.gitignores, [".gitignore", "sub/.gitignore"], "none inside a region");
+        assert!(plan.dirs.iter().chain(&plan.region_dirs).all(|d| d.mtime.is_some()));
+
+        // An mtime pinned in the past, so the move below never hides in one tick.
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        for d in ["other", "node_modules"] {
+            std::fs::File::open(root.join(d)).unwrap().set_modified(old).unwrap();
+        }
+        let mtime = |plan: &WalkPlan, rel: &str| {
+            plan.dirs.iter().chain(&plan.region_dirs).find(|d| d.rel == rel).unwrap().mtime
+        };
+        let plan = plan_walk(&root);
+        assert_eq!(mtime(&plan, "other"), Some(old));
+        assert_eq!(mtime(&plan, "node_modules"), Some(old));
+
+        std::fs::write(root.join("other/c.go"), "package other\n\nfunc C() {}\n").unwrap();
+        std::fs::create_dir_all(root.join("node_modules/right-pad")).unwrap();
+        let plan = plan_walk(&root);
+        assert_ne!(mtime(&plan, "other"), Some(old), "a new file moves its directory's mtime");
+        assert_ne!(mtime(&plan, "node_modules"), Some(old), "a region root's own entries move it");
+        assert!(plan.pending.iter().any(|p| p.rel == "other/c.go"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
