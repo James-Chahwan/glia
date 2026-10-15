@@ -16,6 +16,25 @@ pub fn parse_file(
     module_qname: &str,
     repo: RepoId,
 ) -> Result<FileParse, ParseError> {
+    let acc = parse_acc(source, file_rel_path, module_qname, repo)?;
+    Ok(FileParse {
+        nodes: acc.nodes,
+        edges: acc.edges,
+        imports: acc.imports,
+        calls: acc.calls,
+        refs: acc.refs,
+        nav: acc.nav,
+        properties: Default::default(),
+    })
+}
+
+/// [`parse_file`]'s walk, its per-file counters kept (the tests read them).
+fn parse_acc(
+    source: &str,
+    file_rel_path: &str,
+    module_qname: &str,
+    repo: RepoId,
+) -> Result<Acc, ParseError> {
     let mut parser = Parser::new();
     let lang: tree_sitter::Language = tree_sitter_scala::LANGUAGE.into();
     parser
@@ -69,16 +88,10 @@ pub fn parse_file(
             acc.endpoint_hits, file_rel_path
         );
     }
-
-    Ok(FileParse {
-        nodes: acc.nodes,
-        edges: acc.edges,
-        imports: acc.imports,
-        calls: acc.calls,
-        refs: acc.refs,
-        nav: acc.nav,
-        properties: Default::default(),
-    })
+    if acc.tests.suites > 0 {
+        eprintln!("{}", acc.tests.marker(file_rel_path));
+    }
+    Ok(acc)
 }
 
 /// LB.7a: a Scala top-level type belongs to its package (its directory, the
@@ -130,6 +143,8 @@ struct Acc {
     endpoint_hits: usize,
     /// Dedups INJECTS refs per `(consumer, injected type)` within a file.
     inject_seen: std::collections::HashSet<(NodeId, String)>,
+    /// Test suites / cases / containers read in this file (DG.11 marker).
+    tests: TestTally,
 }
 
 /// Walk the file's top-level declarations. `parent_qname` is the file MODULE's
@@ -227,6 +242,11 @@ fn visit_type_def(
 
     if let Some(body) = node.child_by_field_name("body") {
         visit_body_members(body, src, file_rel, &qname, id, module_id, repo, acc);
+        if is_test_suite(node, src) {
+            acc.tests.suites += 1;
+            let mut suite = Suite::new(src, file_rel, &qname, id, repo);
+            visit_test_registrations(body, "", &mut suite, acc);
+        }
     }
     true
 }
@@ -980,6 +1000,401 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         });
     }
     cells
+}
+
+// ============================================================================
+// Test-case registrations (DG.11): ScalaTest / MUnit cases -> FUNCTION nodes
+// ============================================================================
+//
+// A ScalaTest or MUnit case is a registration in the suite's class body, not
+// a def, so the body walk above attributes its calls to nothing:
+//
+//   FlatSpec     "X" should "y" in { .. }     it should "z" in { .. }
+//                behavior of "X"              "X" should "y" taggedAs(T) in { .. }
+//   FunSuite     test("y") { .. }             (MUnit's FunSuite the same)
+//   WordSpec     "X" when { "y" should { "z" in { .. } } }
+//   FreeSpec     "X" - { "y" in { .. } }
+//   FunSpec      describe("X") { it("y") { .. } }
+//   PropSpec     property("y") { .. }
+//   FeatureSpec  Feature("X") { Scenario("y") { .. } }
+//
+// Each case becomes a FUNCTION `<suite qname>::<description>` under the
+// suite, holding the calls of its body, so CL.5b's function-level TESTS pass
+// (engine/src/passes.rs `tests_fn_edges`) has a root to start from. Only a
+// suite's body is read (its extends clause names a [`SCALA_TEST_BASES`] type
+// by its last segment), so a `"a" in b` in production code is never a case.
+// Known limit: a suite extending an in-house base (`class S extends BaseSpec`)
+// is not recognised unless the base is in the list.
+//
+// fired_on, once per file with a suite:
+//   `[scala-tests] suites=<s> cases=<c> containers=<k> path=<file>`
+//   `glia analyze <repo> 2>&1 | grep '\[scala-tests\]'`
+
+/// The suite types whose body holds case registrations, matched by the last
+/// segment of an extends / with type (`org.scalatest.flatspec.AnyFlatSpec`,
+/// `munit.FunSuite`).
+const SCALA_TEST_BASES: &[&str] = &[
+    // ScalaTest 3.1+ styles, their async twins and the `*Like` traits a
+    // TestKit suite mixes in.
+    "AnyFlatSpec",
+    "AnyFunSuite",
+    "AnyWordSpec",
+    "AnyFreeSpec",
+    "AnyFunSpec",
+    "AnyPropSpec",
+    "AnyFeatureSpec",
+    "AsyncFlatSpec",
+    "AsyncFunSuite",
+    "AsyncWordSpec",
+    "AsyncFreeSpec",
+    "AsyncFunSpec",
+    "AsyncPropSpec",
+    "AsyncFeatureSpec",
+    "AnyFlatSpecLike",
+    "AnyFunSuiteLike",
+    "AnyWordSpecLike",
+    "AnyFreeSpecLike",
+    "AnyFunSpecLike",
+    "AnyPropSpecLike",
+    "AnyFeatureSpecLike",
+    // Pre-3.1 ScalaTest; `FunSuite` is also MUnit's.
+    "FlatSpec",
+    "FunSuite",
+    "WordSpec",
+    "FreeSpec",
+    "FunSpec",
+    "PropSpec",
+    "FeatureSpec",
+    // MUnit.
+    "ScalaCheckSuite",
+    "CatsEffectSuite",
+];
+
+/// The verbs a description chain joins (`"X" should "y"`) and a WordSpec
+/// container opens (`"X" when { .. }`).
+const CASE_VERBS: &[&str] = &["should", "must", "can", "when", "which", "that"];
+
+/// Calls that register one case: `test("y") { .. }`, `it("y") { .. }`.
+const CASE_CALLS: &[&str] = &[
+    "test", "it", "they", "ignore", "property", "scenario", "Scenario",
+];
+
+/// Calls whose block holds cases: `describe("X") { .. }`, `Feature("X") { .. }`.
+const CONTAINER_CALLS: &[&str] = &["describe", "Feature", "feature"];
+
+/// The longest case description kept, in chars.
+const CASE_NAME_MAX: usize = 120;
+
+/// Per-file counts behind the `[scala-tests]` marker.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TestTally {
+    /// Classes / objects / traits whose extends clause names a suite base.
+    suites: usize,
+    /// FUNCTION nodes minted, one per case registration.
+    cases: usize,
+    /// WordSpec / FreeSpec / FunSpec / FeatureSpec blocks that prefix cases.
+    containers: usize,
+}
+
+impl TestTally {
+    fn marker(&self, file_rel: &str) -> String {
+        format!(
+            "[scala-tests] suites={} cases={} containers={} path={file_rel}",
+            self.suites, self.cases, self.containers
+        )
+    }
+}
+
+/// Does the type's extends clause name a [`SCALA_TEST_BASES`] type?
+fn is_test_suite(type_node: TsNode, src: &[u8]) -> bool {
+    let Some(ext) = type_node.child_by_field_name("extend") else {
+        return false;
+    };
+    let mut cursor = ext.walk();
+    ext.children_by_field_name("type", &mut cursor).any(|ty| {
+        let raw = text_of(ty, src);
+        let base = raw.split('[').next().unwrap_or(raw).trim();
+        let simple = base.rsplit('.').next().unwrap_or(base).trim();
+        SCALA_TEST_BASES.contains(&simple)
+    })
+}
+
+/// The suite whose body is being read, and the case names it already holds.
+struct Suite<'a> {
+    src: &'a [u8],
+    file_rel: &'a str,
+    qname: &'a str,
+    id: NodeId,
+    repo: RepoId,
+    names: std::collections::HashSet<String>,
+}
+
+impl<'a> Suite<'a> {
+    fn new(src: &'a [u8], file_rel: &'a str, qname: &'a str, id: NodeId, repo: RepoId) -> Self {
+        Suite {
+            src,
+            file_rel,
+            qname,
+            id,
+            repo,
+            names: std::collections::HashSet::new(),
+        }
+    }
+
+    /// A free name for `base` in this suite: `base`, then `base #2`, `#3`, ..
+    /// (ScalaTest rejects a duplicate name, but a nested prefix can collide).
+    fn claim(&mut self, base: String) -> String {
+        let mut name = base.clone();
+        let mut k = 1usize;
+        while !self.names.insert(name.clone()) {
+            k += 1;
+            name = format!("{base} #{k}");
+        }
+        name
+    }
+}
+
+/// Read every statement of `parent` (a suite body or a container's block) as
+/// a possible registration, in tree order. `prefix` is the enclosing
+/// containers' text. The FlatSpec subject (`behavior of "X"`, or the string a
+/// `"X" should "y" in` chain starts with) names a later `it` / `they`.
+fn visit_test_registrations(parent: TsNode, prefix: &str, suite: &mut Suite, acc: &mut Acc) {
+    let mut subject: Option<String> = None;
+    let mut cursor = parent.walk();
+    for stmt in parent.named_children(&mut cursor) {
+        visit_test_registration(stmt, prefix, &mut subject, suite, acc);
+    }
+}
+
+fn visit_test_registration(
+    stmt: TsNode,
+    prefix: &str,
+    subject: &mut Option<String>,
+    suite: &mut Suite,
+    acc: &mut Acc,
+) {
+    let src = suite.src;
+    match stmt.kind() {
+        "infix_expression" => {
+            let (Some(left), Some(op), Some(right)) = (
+                stmt.child_by_field_name("left"),
+                stmt.child_by_field_name("operator"),
+                stmt.child_by_field_name("right"),
+            ) else {
+                return;
+            };
+            let op = text_of(op, src);
+            if matches!(op, "in" | "ignore") && right.kind() == "block" {
+                // A case: `<description chain> in { .. }`.
+                if let Some(text) = case_chain_text(left, src, subject.as_deref()) {
+                    if let Some(head) = chain_subject(left, src) {
+                        *subject = Some(head);
+                    }
+                    emit_test_case(stmt, right, &joined(prefix, &text), suite, acc);
+                }
+            } else if op == "of" && left.kind() == "identifier" && text_of(left, src) == "behavior"
+            {
+                // FlatSpec `behavior of "X"`: the subject of later `it`s.
+                if let Some(s) = string_content(right, src) {
+                    *subject = Some(s);
+                }
+            } else if (op == "-" || CASE_VERBS.contains(&op)) && right.kind() == "block" {
+                // A container: `"X" should { .. }`, FreeSpec `"X" - { .. }`.
+                let Some(text) = string_content(left, src) else {
+                    return;
+                };
+                let text = if op == "-" {
+                    text
+                } else {
+                    format!("{text} {op}")
+                };
+                acc.tests.containers += 1;
+                visit_test_registrations(right, &joined(prefix, &text), suite, acc);
+            }
+        }
+        "call_expression" => {
+            // `name("desc", ..) { body }`: an outer call whose function is the
+            // inner call naming the registration.
+            let (Some(inner), Some(body)) = (
+                stmt.child_by_field_name("function"),
+                stmt.child_by_field_name("arguments"),
+            ) else {
+                return;
+            };
+            if inner.kind() != "call_expression" {
+                return;
+            }
+            let (Some(callee), Some(args)) = (
+                inner.child_by_field_name("function"),
+                inner.child_by_field_name("arguments"),
+            ) else {
+                return;
+            };
+            if callee.kind() != "identifier" {
+                return;
+            }
+            let callee = text_of(callee, src);
+            let mut ac = args.walk();
+            let Some(text) = args
+                .named_children(&mut ac)
+                .next()
+                .and_then(|a| case_arg_name(a, src))
+            else {
+                return;
+            };
+            if CASE_CALLS.contains(&callee) && matches!(body.kind(), "block" | "arguments") {
+                emit_test_case(stmt, body, &joined(prefix, &text), suite, acc);
+            } else if CONTAINER_CALLS.contains(&callee) && body.kind() == "block" {
+                acc.tests.containers += 1;
+                visit_test_registrations(body, &joined(prefix, &text), suite, acc);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The text of a case's description chain: string contents and verbs joined
+/// by spaces (`"X" should "y"` -> `X should y`); `it` / `they` reads as the
+/// FlatSpec subject when there is one; a `taggedAs(..)` tail is dropped. Any
+/// other shape is not a description: None.
+fn case_chain_text(n: TsNode, src: &[u8], subject: Option<&str>) -> Option<String> {
+    match n.kind() {
+        "string" | "interpolated_string_expression" => string_content(n, src),
+        "identifier" => {
+            let word = text_of(n, src);
+            matches!(word, "it" | "they").then(|| subject.unwrap_or(word).to_string())
+        }
+        "infix_expression" => {
+            let op = text_of(n.child_by_field_name("operator")?, src);
+            let left = case_chain_text(n.child_by_field_name("left")?, src, subject)?;
+            if op == "taggedAs" {
+                return Some(left);
+            }
+            if !CASE_VERBS.contains(&op) {
+                return None;
+            }
+            let right = string_content(n.child_by_field_name("right")?, src)?;
+            Some(format!("{left} {op} {right}"))
+        }
+        _ => None,
+    }
+}
+
+/// The string a verb chain starts with (`"X" should "y"` -> `X`): the
+/// FlatSpec subject a later `it should ..` takes. A bare `"y"` (WordSpec's
+/// leaf) and an `it` chain set none.
+fn chain_subject(n: TsNode, src: &[u8]) -> Option<String> {
+    let mut head = n;
+    let mut verb = false;
+    while head.kind() == "infix_expression" {
+        verb |= head
+            .child_by_field_name("operator")
+            .is_some_and(|op| CASE_VERBS.contains(&text_of(op, src)));
+        head = head.child_by_field_name("left")?;
+    }
+    verb.then(|| string_content(head, src)).flatten()
+}
+
+/// The description a registration call's first argument names: a string, or
+/// MUnit's `"y".ignore` / `"y".tag(Slow)` around one.
+fn case_arg_name(n: TsNode, src: &[u8]) -> Option<String> {
+    let mut cur = n;
+    for _ in 0..8 {
+        cur = match cur.kind() {
+            "string" | "interpolated_string_expression" => return string_content(cur, src),
+            "field_expression" => cur.child_by_field_name("value")?,
+            "call_expression" => cur.child_by_field_name("function")?,
+            _ => return None,
+        };
+    }
+    None
+}
+
+/// The text inside a string literal (`"y"`, `"""y"""`, `s"y $x"`).
+fn string_content(n: TsNode, src: &[u8]) -> Option<String> {
+    let lit = match n.kind() {
+        "string" => n,
+        "interpolated_string_expression" => {
+            let mut cursor = n.walk();
+            n.named_children(&mut cursor)
+                .find(|c| c.kind() == "interpolated_string")?
+        }
+        _ => return None,
+    };
+    let text = text_of(lit, src);
+    let inner = text
+        .strip_prefix("\"\"\"")
+        .and_then(|t| t.strip_suffix("\"\"\""))
+        .or_else(|| text.strip_prefix('"').and_then(|t| t.strip_suffix('"')))?;
+    Some(inner.to_string())
+}
+
+/// `prefix text`, or `text` alone under no container.
+fn joined(prefix: &str, text: &str) -> String {
+    if prefix.is_empty() {
+        text.to_string()
+    } else {
+        format!("{prefix} {text}")
+    }
+}
+
+/// A description as a qname segment: whitespace collapsed, `::` read as `:`,
+/// at most [`CASE_NAME_MAX`] chars. Empty is no name.
+fn case_name(raw: &str) -> Option<String> {
+    let mut name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    while name.contains("::") {
+        name = name.replace("::", ":");
+    }
+    let name: String = name.chars().take(CASE_NAME_MAX).collect();
+    let name = name.trim_end();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Mint the FUNCTION `<suite>::<description>` for one registration and
+/// collect the calls of its body. A fixture case `{ fx => .. }` holds its
+/// calls in the lambda, which [`collect_calls_in`] does not enter.
+fn emit_test_case(stmt: TsNode, body: TsNode, description: &str, suite: &mut Suite, acc: &mut Acc) {
+    let Some(base) = case_name(description) else {
+        return;
+    };
+    let name = suite.claim(base);
+    let qname = format!("{}::{name}", suite.qname);
+    let id = NodeId::from_parts(GRAPH_TYPE, suite.repo, node_kind::FUNCTION, &qname);
+    acc.nodes.push(Node {
+        id,
+        repo: suite.repo,
+        confidence: Confidence::Strong,
+        cells: entity_cells(&stmt, suite.src, suite.file_rel),
+    });
+    acc.edges.push(Edge {
+        from: suite.id,
+        to: id,
+        category: edge_category::DEFINES,
+        confidence: Confidence::Strong,
+        cells: Vec::new(),
+    });
+    acc.nav
+        .record(id, &name, &qname, node_kind::FUNCTION, Some(suite.id));
+    acc.tests.cases += 1;
+
+    let mut cursor = body.walk();
+    let stmts: Vec<TsNode> = body
+        .named_children(&mut cursor)
+        .filter(|c| !matches!(c.kind(), "comment" | "block_comment"))
+        .collect();
+    match stmts.as_slice() {
+        [lambda] if lambda.kind() == "lambda_expression" => {
+            let params = lambda.child_by_field_name("parameters");
+            let mut lc = lambda.walk();
+            for part in lambda.named_children(&mut lc) {
+                if Some(part) != params {
+                    // In a suite body: a bare `helper()` is the suite's own.
+                    collect_calls_in(part, suite.src, id, true, acc);
+                }
+            }
+        }
+        _ => collect_calls_in(body, suite.src, id, true, acc),
+    }
 }
 
 // ============================================================================
@@ -2486,5 +2901,485 @@ object Users {
             tally.marker("UserRoutes.scala"),
             "[scala-routes] routes=2 handled=2 akka_composed=0 path=UserRoutes.scala"
         );
+    }
+
+    // ---- DG.11: ScalaTest / MUnit case registrations -------------------------
+
+    /// The FUNCTION nodes' names, in the order they were minted (tree order).
+    fn case_names(acc: &Acc) -> Vec<&str> {
+        acc.nodes
+            .iter()
+            .filter(|n| acc.nav.kind_by_id.get(&n.id) == Some(&node_kind::FUNCTION))
+            .filter_map(|n| acc.nav.name_by_id.get(&n.id).map(String::as_str))
+            .collect()
+    }
+
+    /// The call qualifiers collected from the node whose qname is `qname`.
+    fn calls_of(acc: &Acc, qname: &str) -> Vec<CallQualifier> {
+        let ids: Vec<NodeId> = acc
+            .nav
+            .qname_by_id
+            .iter()
+            .filter(|(_, q)| q.as_str() == qname)
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(ids.len(), 1, "one node {qname}: {:?}", acc.nav.qname_by_id);
+        acc.calls
+            .iter()
+            .filter(|c| c.from == ids[0])
+            .map(|c| c.qualifier.clone())
+            .collect()
+    }
+
+    fn self_call(name: &str) -> CallQualifier {
+        CallQualifier::SelfMethod(name.to_string())
+    }
+
+    fn receiver_call(receiver: &str, name: &str) -> CallQualifier {
+        CallQualifier::ComplexReceiver {
+            receiver: receiver.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn flat_spec_cases_are_functions() {
+        // The matrix scala/tests spec: `"OrderService" should "sum" in { .. }`.
+        let source = include_str!(
+            "../../../../bench/substrate-gap/matrix/scala/tests/src/test/scala/shop/OrderServiceSpec.scala"
+        );
+        let file = "src/test/scala/shop/OrderServiceSpec.scala";
+        let acc = parse_acc(
+            source,
+            file,
+            "src::test::scala::shop::OrderServiceSpec",
+            repo(),
+        )
+        .unwrap();
+        let case = "src::test::scala::shop::OrderServiceSpec::OrderService should sum";
+        let fp = parse_file(
+            source,
+            file,
+            "src::test::scala::shop::OrderServiceSpec",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(qnames_of(&fp, node_kind::FUNCTION), vec![case]);
+        assert_eq!(
+            acc.tests,
+            TestTally {
+                suites: 1,
+                cases: 1,
+                containers: 0
+            }
+        );
+        assert_eq!(
+            acc.tests.marker(file),
+            "[scala-tests] suites=1 cases=1 containers=0 path=src/test/scala/shop/OrderServiceSpec.scala"
+        );
+
+        let class_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::CLASS,
+            "src::test::scala::shop::OrderServiceSpec",
+        );
+        let case_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, case);
+        assert_eq!(acc.nav.parent_of.get(&case_id), Some(&class_id));
+        assert_eq!(
+            acc.nav.name_by_id.get(&case_id).map(String::as_str),
+            Some("OrderService should sum")
+        );
+        assert!(
+            acc.edges.iter().any(|e| e.from == class_id
+                && e.to == case_id
+                && e.category == edge_category::DEFINES),
+            "the suite DEFINES its case"
+        );
+        let node = acc
+            .nodes
+            .iter()
+            .find(|n| n.id == case_id)
+            .expect("case node");
+        assert_eq!(node.confidence, Confidence::Strong);
+        let code = node
+            .cells
+            .iter()
+            .find(|c| c.kind == cell_type::CODE)
+            .expect("CODE cell");
+        assert!(
+            matches!(&code.payload, CellPayload::Text(t) if t.starts_with("\"OrderService\" should \"sum\" in {")),
+            "CODE is the registration: {:?}",
+            code.payload
+        );
+        assert!(node.cells.iter().any(|c| c.kind == cell_type::POSITION));
+        let calls = calls_of(&acc, case);
+        assert!(
+            calls.contains(&receiver_call("new OrderService()", "total")),
+            "the case holds the call into the service: {calls:?}"
+        );
+        assert!(calls.contains(&self_call("assert")), "{calls:?}");
+        let line = acc
+            .calls
+            .iter()
+            .find(|c| {
+                c.from == case_id && c.qualifier == receiver_call("new OrderService()", "total")
+            })
+            .map(|c| c.line);
+        assert_eq!(line, Some(6), "the call's own 0-based row");
+
+        // FlatSpec subjects: `behavior of`, then the string a verb chain starts
+        // with, name a later `it` / `they`; tags drop; `ignore` is a case; a
+        // `pending` body (no block) is not.
+        let source = r#"
+class StackSpec extends org.scalatest.flatspec.AnyFlatSpec with Matchers {
+  it should "stand alone" in { a() }
+  behavior of "A Stack"
+  it should "pop" in { s.pop() }
+  "A Queue" should "enqueue" taggedAs(Slow) in { q.add() }
+  it must "dequeue" in { q.poll() }
+  they can "skip" ignore { q.skip() }
+  it should "wait" in pending
+  def helper(): Int = 1
+}
+"#;
+        let acc = parse_acc(
+            source,
+            "src/test/StackSpec.scala",
+            "src::test::StackSpec",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(
+            case_names(&acc),
+            vec![
+                "it should stand alone",
+                "A Stack should pop",
+                "A Queue should enqueue",
+                "A Queue must dequeue",
+                "A Queue can skip",
+            ]
+        );
+        assert_eq!(
+            calls_of(&acc, "src::test::StackSpec::A Stack should pop"),
+            vec![receiver_call_attr("s", "pop")]
+        );
+        assert_eq!(
+            acc.tests,
+            TestTally {
+                suites: 1,
+                cases: 5,
+                containers: 0
+            }
+        );
+    }
+
+    fn receiver_call_attr(base: &str, name: &str) -> CallQualifier {
+        CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn fun_suite_and_munit_tests() {
+        let source = r#"
+import org.scalatest.funsuite.AnyFunSuite
+
+class CalcSuite extends AnyFunSuite {
+  test("adds") { add(1, 2) }
+  test("""adds
+      twice""", Slow) {
+    add(2, 2)
+  }
+  test("by value")(check(3))
+  ignore("later") { calc.later() }
+  def add(a: Int, b: Int) = a + b
+}
+
+class CalcMunit extends munit.FunSuite {
+  test("m".ignore) { Calc.run() }
+  test("tagged".tag(Slow)) { Calc.go() }
+  test("fx") { fx =>
+    fx.check()
+  }
+  test(s"interp $n") { Calc.n() }
+}
+
+object AsyncSuite extends AsyncFunSuite {
+  test("async") { Future(Calc.run()) }
+}
+"#;
+        let acc = parse_acc(source, "src/test/Calc.scala", "src::test::Calc", repo()).unwrap();
+        assert_eq!(
+            case_names(&acc),
+            vec![
+                "adds",
+                "adds twice",
+                "by value",
+                "later",
+                "m",
+                "tagged",
+                "fx",
+                "interp $n",
+                "async"
+            ]
+        );
+        assert_eq!(
+            acc.tests,
+            TestTally {
+                suites: 3,
+                cases: 9,
+                containers: 0
+            }
+        );
+        // A bare call in a case is the suite's own method, as in a def.
+        assert_eq!(
+            calls_of(&acc, "src::test::CalcSuite::adds"),
+            vec![self_call("add")]
+        );
+        assert_eq!(
+            calls_of(&acc, "src::test::CalcSuite::adds twice"),
+            vec![self_call("add")]
+        );
+        assert_eq!(
+            calls_of(&acc, "src::test::CalcSuite::by value"),
+            vec![self_call("check")]
+        );
+        assert_eq!(
+            calls_of(&acc, "src::test::CalcMunit::m"),
+            vec![receiver_call_attr("Calc", "run")]
+        );
+        // The fixture lambda's body holds the case's calls.
+        assert_eq!(
+            calls_of(&acc, "src::test::CalcMunit::fx"),
+            vec![receiver_call_attr("fx", "check")]
+        );
+        let mut async_calls = calls_of(&acc, "src::test::AsyncSuite::async");
+        async_calls.sort_by_key(|q| format!("{q:?}"));
+        assert_eq!(
+            async_calls,
+            vec![receiver_call_attr("Calc", "run"), self_call("Future")]
+        );
+        // The helper def is still a METHOD of the suite, not a case.
+        assert!(
+            qnames_of_acc(&acc, node_kind::METHOD)
+                .contains(&"src::test::CalcSuite::add".to_string())
+        );
+    }
+
+    fn qnames_of_acc(acc: &Acc, kind: glia_core::NodeKindId) -> Vec<String> {
+        let mut v: Vec<String> = acc
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == kind)
+            .filter_map(|(id, _)| acc.nav.qname_by_id.get(id).cloned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn word_and_free_spec_containers_prefix() {
+        let source = r#"
+class StackSpec extends AnyWordSpec {
+  "A Stack" when {
+    "empty" should {
+      "pop" in { s.pop() }
+      "peek" ignore { s.peek() }
+    }
+    "full" which {
+      "push" in { s.push(1) }
+    }
+  }
+}
+
+class TreeSpec extends AnyFreeSpec {
+  "A Tree" - {
+    "grows" in { t.grow() }
+    "when cut" - {
+      "falls" in { t.fall() }
+    }
+  }
+}
+"#;
+        let acc = parse_acc(source, "src/test/Spec.scala", "src::test::Spec", repo()).unwrap();
+        assert_eq!(
+            case_names(&acc),
+            vec![
+                "A Stack when empty should pop",
+                "A Stack when empty should peek",
+                "A Stack when full which push",
+                "A Tree grows",
+                "A Tree when cut falls",
+            ]
+        );
+        assert_eq!(
+            acc.tests,
+            TestTally {
+                suites: 2,
+                cases: 5,
+                containers: 5
+            }
+        );
+        assert_eq!(
+            calls_of(&acc, "src::test::TreeSpec::A Tree when cut falls"),
+            vec![receiver_call_attr("t", "fall")]
+        );
+        // Every case hangs off its suite, whatever its container depth.
+        let suite =
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "src::test::StackSpec");
+        let pop = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo(),
+            node_kind::FUNCTION,
+            "src::test::StackSpec::A Stack when empty should pop",
+        );
+        assert_eq!(acc.nav.parent_of.get(&pop), Some(&suite));
+    }
+
+    #[test]
+    fn fun_spec_describe_it() {
+        let source = r#"
+class CalcSpec extends AnyFunSpec {
+  describe("Calc") {
+    it("adds") { calc.add(1) }
+    describe("when negative") {
+      they("subtract") { calc.sub(1) }
+    }
+  }
+}
+
+class ShopFeature extends AnyFeatureSpec with GivenWhenThen {
+  Feature("Checkout") {
+    Scenario("pays") { shop.pay() }
+  }
+}
+
+class PropSuite extends PropSpec {
+  property("commutes") { calc.add(2) }
+}
+"#;
+        let acc = parse_acc(source, "src/test/Calc.scala", "src::test::Calc", repo()).unwrap();
+        assert_eq!(
+            case_names(&acc),
+            vec![
+                "Calc adds",
+                "Calc when negative subtract",
+                "Checkout pays",
+                "commutes"
+            ]
+        );
+        assert_eq!(
+            acc.tests,
+            TestTally {
+                suites: 3,
+                cases: 4,
+                containers: 3
+            }
+        );
+        assert_eq!(
+            calls_of(&acc, "src::test::CalcSpec::Calc when negative subtract"),
+            vec![receiver_call_attr("calc", "sub")]
+        );
+        assert_eq!(
+            calls_of(&acc, "src::test::ShopFeature::Checkout pays"),
+            vec![receiver_call_attr("shop", "pay")]
+        );
+    }
+
+    #[test]
+    fn non_suite_class_infix_in_is_not_a_case() {
+        // Registration shapes outside a suite body are production code: a
+        // router's `"a" in { .. }`, a `test(..) { .. }` helper. An in-house
+        // base (`BaseSpec`) is not recognised (the known limit).
+        let source = r#"
+class Router {
+  "a" should "b" in { route() }
+  test("x") { run() }
+  describe("y") { it("z") { go() } }
+  def handle(): Unit = { "c" in { d() } }
+}
+
+object Plain extends Base with Serializable {
+  "a" in { b() }
+}
+
+class MySpec extends BaseSpec {
+  "A" should "b" in { c() }
+}
+"#;
+        let acc = parse_acc(source, "src/main/Router.scala", "src::main::Router", repo()).unwrap();
+        assert!(case_names(&acc).is_empty(), "{:?}", case_names(&acc));
+        assert_eq!(acc.tests, TestTally::default());
+        assert!(!is_test_suite_src("class S extends Spec"));
+        assert!(is_test_suite_src(
+            "class S extends org.scalatest.wordspec.AnyWordSpec"
+        ));
+        assert!(is_test_suite_src(
+            "class S extends TestKit(ActorSystem(\"x\")) with AnyWordSpecLike with Matchers"
+        ));
+        assert!(is_test_suite_src("class S extends CatsEffectSuite"));
+        assert!(is_test_suite_src("trait S extends AnyFlatSpec"));
+    }
+
+    /// Parse `source`, a single type declaration, and gate it.
+    fn is_test_suite_src(source: &str) -> bool {
+        let mut p = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_scala::LANGUAGE.into();
+        p.set_language(&lang).unwrap();
+        let tree = p.parse(source, None).unwrap();
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        let ty = root
+            .named_children(&mut cursor)
+            .next()
+            .expect("one declaration");
+        is_test_suite(ty, source.as_bytes())
+    }
+
+    #[test]
+    fn duplicate_descriptions_are_numbered() {
+        let long = "x".repeat(150);
+        let source = format!(
+            r#"
+class DupSpec extends AnyFreeSpec {{
+  "A" - {{ "b" in {{ x() }} }}
+  "A" - {{ "b" in {{ y() }} }}
+  "A b" in {{ z() }}
+  "Long::name   with" + "x" in {{ q() }}
+  "Long::name   with  space" in {{ w() }}
+  "{long}" in {{ v() }}
+  "" in {{ e() }}
+}}
+"#
+        );
+        let acc = parse_acc(
+            &source,
+            "src/test/DupSpec.scala",
+            "src::test::DupSpec",
+            repo(),
+        )
+        .unwrap();
+        let truncated = "x".repeat(CASE_NAME_MAX);
+        assert_eq!(
+            case_names(&acc),
+            vec![
+                "A b",
+                "A b #2",
+                "A b #3",
+                "Long:name with space",
+                truncated.as_str()
+            ]
+        );
+        assert_eq!(
+            calls_of(&acc, "src::test::DupSpec::A b #2"),
+            vec![self_call("y")],
+            "the second registration keeps its own calls"
+        );
+        // A name holds no `::`, so the case's qname has one more segment.
+        assert_eq!(case_name("a :: b ::: c"), Some("a : b : c".to_string()));
+        assert_eq!(case_name("  \n "), None);
     }
 }

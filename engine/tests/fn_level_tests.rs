@@ -18,6 +18,7 @@ use std::path::Path;
 use glia_code_domain::evidence::{Basis, Evidence};
 use glia_code_domain::{cell_type, edge_category};
 use glia_core::{CellPayload, Confidence, Edge};
+use glia_engine::gaps::{DEAD_SYMBOL, GapsOptions, gaps_report};
 use glia_engine::merge::{MergeMember, merge_layouts, read_workspace};
 use glia_engine::persist::persist_result;
 use glia_engine::tests_for::{DERIVED, TestsForArgs, tests_for};
@@ -315,5 +316,78 @@ fn tests_for_does_not_promote_derived_fn_tests() {
         a.tests.iter().all(|t| t.reason != "tests_edge"),
         "{:?}",
         a.tests
+    );
+}
+
+const ORDER_SERVICE_SCALA: &str = include_str!(
+    "../../bench/substrate-gap/matrix/scala/tests/src/main/scala/shop/OrderService.scala"
+);
+/// ScalaTest AnyFlatSpec: the case is `"OrderService" should "sum" in { .. }`
+/// in the class body, not a def. DG.11 mints it as a FUNCTION holding the
+/// block's calls, a root of the test module (nothing calls it).
+const ORDER_SERVICE_SPEC_SCALA: &str = include_str!(
+    "../../bench/substrate-gap/matrix/scala/tests/src/test/scala/shop/OrderServiceSpec.scala"
+);
+
+/// DG.11: a ScalaTest case block is a FUNCTION whose CALLS edge into the
+/// tested module becomes `TESTS case -> callee`, and the case is no dead
+/// symbol (its test file gives it ORIGIN `test_fixture`). Before DG.11 the
+/// case was no node and only `TESTS OrderServiceSpec -> OrderService` (the
+/// module pairing) existed.
+#[test]
+fn scalatest_case_blocks_test_their_callees() {
+    let (_d, g) = build(&[
+        (
+            "src/main/scala/shop/OrderService.scala",
+            ORDER_SERVICE_SCALA,
+        ),
+        (
+            "src/test/scala/shop/OrderServiceSpec.scala",
+            ORDER_SERVICE_SPEC_SCALA,
+        ),
+    ]);
+    let m = &g.merged;
+    let case = "src::test::scala::shop::OrderServiceSpec::OrderService should sum";
+    let total = "src::main::scala::shop::OrderService::total";
+    assert_eq!(fn_tests(m), [pair(case, total)]);
+
+    let e = tests_edge(m, case, total);
+    assert_eq!(e.confidence, Confidence::Medium);
+    let ev = Evidence::of(e).expect("the edge carries EVIDENCE");
+    assert_eq!(ev.emitter, "pass:tests");
+    assert_eq!(ev.rule.as_deref(), Some("calls_into_tested_module"));
+    assert_eq!(
+        ev.file.as_deref(),
+        Some("src/test/scala/shop/OrderServiceSpec.scala")
+    );
+    assert_eq!(ev.line, Some(6), "the call's own 0-based line");
+
+    // The CALLS edge the TESTS edge is derived from, and the module pairing.
+    let calls: Vec<&Edge> = m
+        .all_edges()
+        .filter(|e| {
+            e.category == edge_category::CALLS
+                && qname_of(m, e.from) == case
+                && qname_of(m, e.to) == total
+        })
+        .collect();
+    assert_eq!(calls.len(), 1, "CALLS {case} -> {total}");
+    tests_edge(
+        m,
+        "src::test::scala::shop::OrderServiceSpec",
+        "src::main::scala::shop::OrderService",
+    );
+    assert_eq!(test_cell(m, total), [pair(case, "FUNCTION")]);
+
+    let rep = gaps_report(m, &[], &GapsOptions::default()).expect("report");
+    let dead: Vec<&str> = rep
+        .rows
+        .iter()
+        .filter(|r| r.category == DEAD_SYMBOL)
+        .map(|r| r.qname.as_str())
+        .collect();
+    assert!(
+        !dead.contains(&case),
+        "the case is no dead symbol: {dead:?}"
     );
 }
