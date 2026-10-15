@@ -92,6 +92,11 @@ could answer each (each needs James's ruling before it becomes a packet):
 
 Close-out followups that name no 0.5.2 packet are appended here as each wave lands.
 
+- W0 (D0.6): `engine/tests/git_fixture/mod.rs` `root` and `git_mv` are unused in the `contract_breaks` test binary
+  (present since 0.5.1). A shared test module compiled per binary; unfinished wiring, not a `dead_code` allow.
+- W0 (D0.1): `cargo fmt --check` is not clean in code-domain (`code_span.rs`, `profile.rs`) at 0.5.1; no gate runs
+  rustfmt. Candidate: one formatting commit plus a fmt gate in the close-out.
+
 ## 3. Open questions for James
 
 1. Section C: which candidates become packets (review queue, SQL projection, identity-scoped queries)?
