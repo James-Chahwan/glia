@@ -20,6 +20,7 @@ use glia_code_extractors::{anchor, eventbus, queue_topic, queues};
 use glia_core::{Cell, CellPayload, NodeId, NodeKindId, RepoId};
 use glia_graph::rust_paths::RustCrate;
 
+use super::assemble::FileConstTables;
 use super::lang_build::TsAliasSet;
 use super::rpc_needles::{RpcContext, RpcNeedleCounts, apply_rpc_needles};
 use crate::arch::node_file;
@@ -38,9 +39,12 @@ use crate::route::ModuleQnames;
 /// census and the LE.4a `[data-access]` census, the LB.4a / LB.8 owner
 /// segment, the CB.24 client-host stamp, the DF.8 external client-site mark,
 /// then the A16.4 IMPORTS-cell filter. `const_table` is the repo's A11.1
-/// table; `roots` are the walk's project roots (A8.4); `rust_crates` their
-/// Cargo packages, whose names the IMPORTS filter treats as intra-repo
-/// (LA.1b), as it does every specifier a `ts_aliases` key matches (A6.8).
+/// table and `file_tables` the per-file scans it was merged from (DC.3: the
+/// queue / event const folds read a file's own bindings there instead of
+/// re-scanning it); `roots` are the walk's project roots (A8.4);
+/// `rust_crates` their Cargo packages, whose names the IMPORTS filter treats
+/// as intra-repo (LA.1b), as it does every specifier a `ts_aliases` key
+/// matches (A6.8).
 /// `wrappers` is the repo's
 /// `.glia/overlay.toml` when the build applies the overlay (`None` under
 /// `--no-overlay`): its `[[wrapper]]` stanzas feed the LF.2e stage
@@ -63,6 +67,7 @@ pub(super) fn apply_post_cache(
     repo: RepoId,
     rpc: &RpcContext,
     const_table: &ConstTable,
+    file_tables: &FileConstTables,
     roots: &[ProjectRoot],
     rust_crates: &[RustCrate],
     ts_aliases: &TsAliasSet,
@@ -98,14 +103,16 @@ pub(super) fn apply_post_cache(
     // LA.4 (A11.7): queue topics named by a constant. Same seam and the same
     // cache rule as the endpoint fold; runs before the A16.4 filter, which then
     // rewrites the folded nodes' IMPORTS cell like every other node's.
-    apply_queue_const_topics(parses_by_lang, files, repo, &modules, const_table, parse_errors)
-        .report(repo_label);
+    let folds = FoldInputs { files, repo, modules: &modules, consts: const_table, file_tables };
+    let (queue_stats, queue_pool) = apply_queue_const_topics(parses_by_lang, &folds, parse_errors);
+    queue_stats.report(repo_label);
     // CB.3b: event sites keyed by a constant fold to its literal through the
     // same tables and the same cache rule. Above the owner pass, which
     // qualifies EVENT_EMITTER / EVENT_HANDLER like every owned kind, and
     // before the A16.4 filter, which rewrites the folded nodes' IMPORTS cell.
-    apply_event_const_names(parses_by_lang, files, repo, &modules, const_table, parse_errors)
-        .report(repo_label);
+    let (event_stats, event_pool) = apply_event_const_names(parses_by_lang, &folds, parse_errors);
+    event_stats.report(repo_label);
+    report_const_fold_pool(queue_pool, event_pool, repo_label);
     // LF.2e: the wrappers' queue half, AFTER the const fold (which rebuilds a
     // folded file's queue nodes from the queue scan and would drop a wrapper
     // node) and above the owner pass, like every graft that mints an owned kind.
@@ -478,7 +485,7 @@ fn graft_next_pages(
 }
 
 /// LA.4 (A11.7): per-repo tallies of the queue-topic const fold.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct QueueConstStats {
     /// Files whose queue nodes were swapped (at least one site folded).
     files: usize,
@@ -518,95 +525,207 @@ impl QueueConstStats {
 /// (`ConstTable::resolve_identity`); an ambiguous key never. A wrong topic
 /// manufactures a false cross-service QUEUE_FLOWS edge; no topic does not.
 ///
+/// DC.3: the same-file bindings are the file's own A11.1 scan
+/// ([`FileConstTables`]), never a second scan; the targets are chosen in
+/// file order ([`fold_targets`]), each fold is computed on the engine pool
+/// ([`crate::parallel::par_map_ordered`], read-only on the parses), then the
+/// stats, the evidence stamp, the swap and any error line are applied in
+/// target order, which is file order: the inline loop's results, byte for
+/// byte. Returns the stats and the pool the folds ran on.
+///
 /// A file's queue nodes are swapped (`queues::replace_queue_nodes`) only when
-/// at least one site folded, so every other file is untouched. `files` is
-/// walk-sorted and the parse index is keyed by (language, module), so the
-/// result does not depend on HashMap order.
+/// at least one site folded, so every other file is untouched.
 fn apply_queue_const_topics(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
-    files: &[(String, String)],
-    repo: RepoId,
-    modules: &ModuleQnames,
-    consts: &ConstTable,
+    inputs: &FoldInputs<'_>,
     parse_errors: &mut Vec<String>,
-) -> QueueConstStats {
+) -> (QueueConstStats, FoldPool) {
     let mut stats = QueueConstStats::default();
-    let is_queue = |k: &glia_core::NodeKindId| {
-        *k == node_kind::QUEUE_PRODUCER || *k == node_kind::QUEUE_CONSUMER
-    };
-    // (language, module) -> the parses holding a queue node under that module,
-    // in walk order. The module is the queue nodes' parent: the id the router
-    // handed the extractors, whatever the language parser emitted first.
+    let targets = fold_targets(parses_by_lang, inputs, is_queue_node, queue_position);
+    if targets.is_empty() {
+        return (stats, FoldPool::default());
+    }
+    let (outs, threads) = crate::parallel::par_map_ordered(&targets, |t| {
+        fold_one(inputs, t, |source, path, resolve| {
+            let (module, repo) = (t.module_id, inputs.repo);
+            queues::extract_queue_nodes_with_consts(source, path, module, repo, resolve)
+        })
+    });
+    for (t, out) in targets.iter().zip(outs) {
+        let Some(mut fold) = out else {
+            parse_errors.push(format!("{}: PANIC (queue const fold)", inputs.path(t)));
+            continue;
+        };
+        stats.folded += fold.counts.folded;
+        stats.unresolved += fold.counts.unresolved;
+        if fold.counts.folded == 0 {
+            continue;
+        }
+        stats.files += 1;
+        // LC.3a: the re-emitted `module -> queue node` CONTAINS edges replace
+        // ones the queue extractor stamped in the parse closure; these land
+        // post-cache, unstamped.
+        let ev = Evidence::emitter("extractor:queues").rule("const_fold");
+        evidence::stamp_missing_with(&mut fold.consumers.edges, &ev);
+        evidence::stamp_missing_with(&mut fold.producers.edges, &ev);
+        if let Some(fp) = parses_by_lang.get_mut(t.lang).and_then(|p| p.get_mut(t.slot)) {
+            queues::replace_queue_nodes(fp, t.module_id, t.lang, fold);
+        }
+    }
+    (stats, FoldPool { files: targets.len(), threads })
+}
+
+/// DC.3: what both const folds read besides the parses they swap.
+struct FoldInputs<'a> {
+    /// The walked files, walk-sorted.
+    files: &'a [(String, String)],
+    repo: RepoId,
+    /// The router's LB.9b MODULE plan.
+    modules: &'a ModuleQnames,
+    /// The repo's A11.1 table, LF.2d pins included.
+    consts: &'a ConstTable,
+    /// The per-file scans `consts` was merged from, aligned with `files`.
+    file_tables: &'a FileConstTables,
+}
+
+impl FoldInputs<'_> {
+    /// The path of `t`'s file, for its error line.
+    fn path(&self, t: &FoldTarget) -> &str {
+        self.files.get(t.file).map_or("", |(path, _)| path.as_str())
+    }
+}
+
+/// DC.3: one file a const fold runs on: `files[file]`, its parse language,
+/// its MODULE id (the folded nodes' parent) and `slot`, the index in
+/// `parses_by_lang[lang]` of the parse the fold swaps.
+struct FoldTarget {
+    file: usize,
+    lang: &'static str,
+    module_id: NodeId,
+    slot: usize,
+}
+
+/// DC.3: the pool one const fold ran on: the files it folded (its targets)
+/// and the pool's thread count.
+#[derive(Clone, Copy, Default)]
+struct FoldPool {
+    files: usize,
+    threads: usize,
+}
+
+/// DC.3 fired_on marker, once per repo where either const fold had a target:
+///   `[const-fold] pooled queue_files=<q> event_files=<e> threads=<t> repo=<label>`
+/// `q` / `e` count the files the LA.4 queue / CB.3b event fold ran on, each
+/// fold over the file's own A11.1 scan, `t` the engine pool's thread count.
+/// After the `[queue-const]` / `[event-const]` lines, which are unchanged.
+fn report_const_fold_pool(queue: FoldPool, event: FoldPool, repo_label: &str) {
+    if queue.files + event.files > 0 {
+        eprintln!(
+            "[const-fold] pooled queue_files={} event_files={} threads={} repo={repo_label}",
+            queue.files,
+            event.files,
+            queue.threads.max(event.threads)
+        );
+    }
+}
+
+/// DC.3: the files a const fold runs on, in file (walk) order — the selection
+/// the LA.4 / CB.3b inline loops made, read-only.
+///
+/// A parse holds a fold's markers when one of its `is_marker` nodes has a
+/// parent: the MODULE id the router handed the extractors, whatever the
+/// language parser emitted first. Holders are indexed by (language, module),
+/// in parse order. A walked file is a target when its (`detect_language`,
+/// LB.9b module id) has holders and one of them carries a marker node whose
+/// POSITION cell opens with `position(path)`: `a.ts` and `a.js` share a module
+/// id, and a node's POSITION names the file it was read from, so a fold never
+/// lands on a sibling. A parse holds one file's markers and a swap re-reads
+/// that same file, so choosing every target before any swap is the inline
+/// loop's choice. The index is only looked up, never iterated into the
+/// output: no HashMap order reaches a target.
+fn fold_targets(
+    parses_by_lang: &HashMap<&'static str, Vec<FileParse>>,
+    inputs: &FoldInputs<'_>,
+    is_marker: fn(&CodeNav, NodeId) -> bool,
+    position: fn(&str) -> Option<String>,
+) -> Vec<FoldTarget> {
     let mut holders: HashMap<(&'static str, NodeId), Vec<usize>> = HashMap::new();
-    for (lang, parses) in parses_by_lang.iter() {
+    for (lang, parses) in parses_by_lang {
         for (i, fp) in parses.iter().enumerate() {
             let module = fp
                 .nav
                 .kind_by_id
-                .iter()
-                .find(|(_, k)| is_queue(k))
-                .and_then(|(id, _)| fp.nav.parent_of.get(id));
+                .keys()
+                .find(|id| is_marker(&fp.nav, **id))
+                .and_then(|id| fp.nav.parent_of.get(id));
             if let Some(module) = module {
                 holders.entry((*lang, *module)).or_default().push(i);
             }
         }
     }
     if holders.is_empty() {
-        return stats;
+        return Vec::new();
     }
-    for (path, source) in files {
+    let mut targets = Vec::new();
+    for (file, (path, _)) in inputs.files.iter().enumerate() {
         let Some(lang) = detect_language(path) else {
             continue;
         };
-        let module_id = modules.module_id(path, repo);
+        let module_id = inputs.modules.module_id(path, inputs.repo);
         let Some(candidates) = holders.get(&(lang, module_id)) else {
             continue;
         };
-        let Some(parses) = parses_by_lang.get_mut(lang) else {
+        let (Some(parses), Some(position)) = (parses_by_lang.get(lang), position(path)) else {
             continue;
         };
-        // `a.ts` and `a.js` share a module id; the queue nodes' POSITION names
-        // the file they were read from, so a fold never lands on a sibling.
-        let position = format!(r#"{{"file":"{}","#, queue_topic::escape_json(path));
-        let Some(&at) = candidates.iter().find(|&&i| {
+        let Some(&slot) = candidates.iter().find(|&&i| {
             parses
                 .get(i)
-                .is_some_and(|fp| nodes_read_from(fp, &position, is_queue_node))
+                .is_some_and(|fp| nodes_read_from(fp, &position, is_marker))
         }) else {
             continue;
         };
-        let Some(fp) = parses.get_mut(at) else {
-            continue;
-        };
-        let fold = catch_unwind(AssertUnwindSafe(|| {
-            let local = ConstTable::scan_file(source, lang);
-            let resolve = |expr: &str| {
-                local
-                    .resolve_expr_strict(expr)
-                    .or_else(|| consts.resolve_identity(expr))
-                    .map(str::to_string)
-            };
-            queues::extract_queue_nodes_with_consts(source, path, module_id, repo, &resolve)
-        }));
-        match fold {
-            Ok(mut fold) => {
-                stats.folded += fold.counts.folded;
-                stats.unresolved += fold.counts.unresolved;
-                if fold.counts.folded > 0 {
-                    stats.files += 1;
-                    // LC.3a: the re-emitted `module -> queue node` CONTAINS
-                    // edges replace ones the queue extractor stamped in the
-                    // parse closure; these land post-cache, unstamped.
-                    let ev = Evidence::emitter("extractor:queues").rule("const_fold");
-                    evidence::stamp_missing_with(&mut fold.consumers.edges, &ev);
-                    evidence::stamp_missing_with(&mut fold.producers.edges, &ev);
-                    queues::replace_queue_nodes(fp, module_id, lang, fold);
-                }
-            }
-            Err(_) => parse_errors.push(format!("{path}: PANIC (queue const fold)")),
-        }
+        targets.push(FoldTarget { file, lang, module_id, slot });
     }
-    stats
+    targets
+}
+
+/// DC.3: one const fold's pure half, run on a pool worker: `extract` re-reads
+/// `files[t.file]` through the LA.4 resolver — the file's own scan
+/// ([`FileConstTables`]) at any shape, then the repo table's
+/// `ConstTable::resolve_identity`. `None` is the fold's panic: the file's
+/// const scan panicked (its table is `None`, so the re-scan the fold used to
+/// run would have panicked too) or `extract` did.
+fn fold_one<R>(
+    inputs: &FoldInputs<'_>,
+    t: &FoldTarget,
+    extract: impl FnOnce(&str, &str, &dyn Fn(&str) -> Option<String>) -> R,
+) -> Option<R> {
+    let (path, source) = inputs.files.get(t.file)?;
+    let local = inputs.file_tables.get(t.file)?;
+    let consts = inputs.consts;
+    crate::parallel::quiet(|| {
+        let resolve = |expr: &str| {
+            local
+                .resolve_expr_strict(expr)
+                .or_else(|| consts.resolve_identity(expr))
+                .map(str::to_string)
+        };
+        extract(source, path, &resolve)
+    })
+    .ok()
+}
+
+/// LA.4: the POSITION prefix of a queue node read from `path`.
+fn queue_position(path: &str) -> Option<String> {
+    Some(format!(r#"{{"file":"{}","#, queue_topic::escape_json(path)))
+}
+
+/// CB.3b: the POSITION prefix of an event node read from `path`
+/// (`anchor::position_cell` JSON-encodes the file).
+fn event_position(path: &str) -> Option<String> {
+    let file = serde_json::to_string(path).ok()?;
+    Some(format!(r#"{{"file":{file},"#))
 }
 
 /// Does one of `fp`'s marker nodes (those `is_marker` selects) carry a
@@ -642,7 +761,7 @@ fn is_event_site_node(nav: &CodeNav, id: NodeId) -> bool {
 }
 
 /// CB.3b: per-repo tallies of the event-name const fold.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct EventConstStats {
     /// Files whose event nodes were swapped (at least one site folded).
     files: usize,
@@ -685,94 +804,49 @@ impl EventConstStats {
 /// the LA.41 name rule rejects keeps the path. A wrong name manufactures a
 /// false EVENT_FLOWS edge; the path does not.
 ///
+/// DC.3: the same split as LA.4's fold — targets in file order
+/// ([`fold_targets`]), each fold on the engine pool over the file's own
+/// A11.1 scan ([`FileConstTables`]), then stats, swap and error lines in
+/// target (= file) order. Returns the stats and the pool the folds ran on.
+///
 /// A file's event nodes are swapped (`eventbus::replace_event_nodes`) only
-/// when at least one site folded. `files` is walk-sorted and the parse index
-/// is keyed by (language, module), so the result does not depend on HashMap
-/// order.
+/// when at least one site folded.
 fn apply_event_const_names(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
-    files: &[(String, String)],
-    repo: RepoId,
-    modules: &ModuleQnames,
-    consts: &ConstTable,
+    inputs: &FoldInputs<'_>,
     parse_errors: &mut Vec<String>,
-) -> EventConstStats {
+) -> (EventConstStats, FoldPool) {
     let mut stats = EventConstStats::default();
-    // (language, module) -> the parses holding an event site under that
-    // module, in walk order. The module is the event nodes' parent: the id the
-    // router handed the extractors.
-    let mut holders: HashMap<(&'static str, NodeId), Vec<usize>> = HashMap::new();
-    for (lang, parses) in parses_by_lang.iter() {
-        for (i, fp) in parses.iter().enumerate() {
-            let module = fp
-                .nav
-                .kind_by_id
-                .keys()
-                .find(|id| is_event_site_node(&fp.nav, **id))
-                .and_then(|id| fp.nav.parent_of.get(id));
-            if let Some(module) = module {
-                holders.entry((*lang, *module)).or_default().push(i);
-            }
+    let targets = fold_targets(parses_by_lang, inputs, is_event_site_node, event_position);
+    if targets.is_empty() {
+        return (stats, FoldPool::default());
+    }
+    let (outs, threads) = crate::parallel::par_map_ordered(&targets, |t| {
+        fold_one(inputs, t, |source, path, resolve| {
+            let (module, repo) = (t.module_id, inputs.repo);
+            eventbus::extract_event_nodes_with_consts(source, path, module, repo, resolve)
+        })
+    });
+    for (t, out) in targets.iter().zip(outs) {
+        let Some(fold) = out else {
+            parse_errors.push(format!("{}: PANIC (event const fold)", inputs.path(t)));
+            continue;
+        };
+        stats.folded += fold.counts.folded;
+        stats.unresolved += fold.counts.unresolved;
+        if fold.counts.folded == 0 {
+            continue;
+        }
+        stats.files += 1;
+        // Event nodes carry no edges of their own (their module and owner
+        // edges are the anchor pass's), so there is no extractor edge to
+        // stamp: the swap stamps what it re-anchors `extractor:anchor` rule
+        // `const_fold`.
+        if let Some(fp) = parses_by_lang.get_mut(t.lang).and_then(|p| p.get_mut(t.slot)) {
+            eventbus::replace_event_nodes(fp, t.module_id, t.lang, fold);
         }
     }
-    if holders.is_empty() {
-        return stats;
-    }
-    for (path, source) in files {
-        let Some(lang) = detect_language(path) else {
-            continue;
-        };
-        let module_id = modules.module_id(path, repo);
-        let Some(candidates) = holders.get(&(lang, module_id)) else {
-            continue;
-        };
-        let Some(parses) = parses_by_lang.get_mut(lang) else {
-            continue;
-        };
-        // `a.ts` and `a.js` share a module id; an event node's POSITION
-        // (`anchor::position_cell`, a JSON-encoded file) names the file it
-        // was read from, so a fold never lands on a sibling.
-        let Ok(file) = serde_json::to_string(path) else {
-            continue;
-        };
-        let position = format!(r#"{{"file":{file},"#);
-        let Some(&at) = candidates.iter().find(|&&i| {
-            parses
-                .get(i)
-                .is_some_and(|fp| nodes_read_from(fp, &position, is_event_site_node))
-        }) else {
-            continue;
-        };
-        let Some(fp) = parses.get_mut(at) else {
-            continue;
-        };
-        let fold = catch_unwind(AssertUnwindSafe(|| {
-            let local = ConstTable::scan_file(source, lang);
-            let resolve = |expr: &str| {
-                local
-                    .resolve_expr_strict(expr)
-                    .or_else(|| consts.resolve_identity(expr))
-                    .map(str::to_string)
-            };
-            eventbus::extract_event_nodes_with_consts(source, path, module_id, repo, &resolve)
-        }));
-        match fold {
-            Ok(fold) => {
-                stats.folded += fold.counts.folded;
-                stats.unresolved += fold.counts.unresolved;
-                if fold.counts.folded > 0 {
-                    stats.files += 1;
-                    // Event nodes carry no edges of their own (their module
-                    // and owner edges are the anchor pass's), so there is no
-                    // extractor edge to stamp: the swap stamps what it
-                    // re-anchors `extractor:anchor` rule `const_fold`.
-                    eventbus::replace_event_nodes(fp, module_id, lang, fold);
-                }
-            }
-            Err(_) => parse_errors.push(format!("{path}: PANIC (event const fold)")),
-        }
-    }
-    stats
+    (stats, FoldPool { files: targets.len(), threads })
 }
 
 /// A16.4 (audit 2026-06-10 #12): rewrite each file's IMPORTS cell without the
@@ -1179,5 +1253,279 @@ mod client_host_tests {
             pairs(&built.merged, edge_category::RPC_CALLS),
             vec![("rpc_call:item.list @apps/web".to_string(), "rpc:item.list @services/catalog".to_string())]
         );
+    }
+}
+
+#[cfg(test)]
+mod const_fold_tests {
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    use super::super::assemble::{RepoBuildCtx, build_const_table, parse_and_graft};
+    use super::super::c_includes::IncludeRoots;
+    use super::super::{BuildOptions, go_modules_for};
+    use super::*;
+    use crate::cache::CacheEntry;
+    use crate::external::repo_inputs;
+    use crate::route::parse_repo_files;
+    use crate::walk::walk_source_files;
+    use glia_code_domain::walk_gating::repo_identity;
+
+    /// TS and Go files whose queue topics and event names are constants
+    /// declared in ANOTHER file (SCREAMING / dotted, so the repo table's
+    /// `resolve_identity` trusts them), plus one Go subscriber whose subject
+    /// is a lower-case constant of its OWN file, which only the file's own
+    /// scan (`FileConstTables`) resolves.
+    fn write_repo(dir: &Path) {
+        let write = |rel: &str, body: &str| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write("go.mod", "module example.com/fx\n");
+        write("subjects.go", "package fx\n\nconst SUBJECT_ORDERS = \"orders.created\"\n");
+        write(
+            "publish.go",
+            concat!(
+                "package fx\n\n",
+                "import \"github.com/nats-io/nats.go\"\n\n",
+                "func Publish(nc *nats.Conn, data []byte) {\n",
+                "\tnc.Publish(SUBJECT_ORDERS, data)\n",
+                "}\n",
+            ),
+        );
+        write(
+            "consume.go",
+            concat!(
+                "package fx\n\n",
+                "import \"github.com/nats-io/nats.go\"\n\n",
+                "const billingSubject = \"billing.paid\"\n\n",
+                "func Consume(nc *nats.Conn) {\n",
+                "\tnc.Subscribe(billingSubject, func(m *nats.Msg) {})\n",
+                "}\n",
+            ),
+        );
+        write("web/topics.ts", "export const ORDERS_TOPIC = 'orders';\n");
+        write(
+            "web/publish.ts",
+            concat!(
+                "import { Kafka } from 'kafkajs';\n",
+                "import { ORDERS_TOPIC } from './topics';\n\n",
+                "const kafka = new Kafka({ clientId: 'web', brokers: ['b:9092'] });\n",
+                "const producer = kafka.producer();\n\n",
+                "export async function publishOrder(): Promise<void> {\n",
+                "  await producer.send({ topic: ORDERS_TOPIC, messages: [] });\n",
+                "}\n",
+            ),
+        );
+        write(
+            "web/orders.events.ts",
+            concat!(
+                "export const OrderEvents = ",
+                "{ Created: \"order.created\", Paid: \"order.paid\" } as const;\n",
+            ),
+        );
+        write(
+            "web/orders.service.ts",
+            concat!(
+                "import { Injectable } from \"@nestjs/common\";\n",
+                "import { EventEmitter2 } from \"@nestjs/event-emitter\";\n",
+                "import { OrderEvents } from \"./orders.events\";\n\n",
+                "@Injectable()\n",
+                "export class OrdersService {\n",
+                "  constructor(private eventEmitter: EventEmitter2) {}\n\n",
+                "  create(id: string) {\n",
+                "    this.eventEmitter.emit(OrderEvents.Created, { id });\n",
+                "  }\n",
+                "}\n",
+            ),
+        );
+        write(
+            "web/billing.listener.ts",
+            concat!(
+                "import { Injectable } from \"@nestjs/common\";\n",
+                "import { OnEvent } from \"@nestjs/event-emitter\";\n",
+                "import { OrderEvents } from \"./orders.events\";\n\n",
+                "@Injectable()\n",
+                "export class BillingListener {\n",
+                "  @OnEvent(OrderEvents.Paid)\n",
+                "  onPaid(payload: { id: string }) {}\n",
+                "}\n",
+            ),
+        );
+    }
+
+    /// The canonical cache payload (`CacheEntry::payload`) of every parse,
+    /// languages sorted, parses in their router order.
+    fn payloads(by_lang: &HashMap<&'static str, Vec<FileParse>>) -> Vec<(String, Vec<u8>)> {
+        let mut langs: Vec<&&'static str> = by_lang.keys().collect();
+        langs.sort();
+        langs
+            .into_iter()
+            .flat_map(|lang| {
+                by_lang[*lang].iter().map(move |fp| {
+                    let bytes = CacheEntry::new(0, lang, fp.clone()).payload().expect("payload");
+                    (lang.to_string(), bytes)
+                })
+            })
+            .collect()
+    }
+
+    /// Every queue / event site qname across the parses.
+    fn site_qnames(by_lang: &HashMap<&'static str, Vec<FileParse>>) -> BTreeSet<String> {
+        by_lang
+            .values()
+            .flatten()
+            .flat_map(|fp| {
+                fp.nav.qname_by_id.iter().filter_map(|(id, q)| {
+                    (is_queue_node(&fp.nav, *id) || is_event_site_node(&fp.nav, *id))
+                        .then(|| q.clone())
+                })
+            })
+            .collect()
+    }
+
+    fn in_pool<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("pool")
+            .install(f)
+    }
+
+    /// The walk of a repo and the parses of its files, pre-graft.
+    struct Parsed {
+        files: Vec<(String, String)>,
+        repo: RepoId,
+        by_lang: HashMap<&'static str, Vec<FileParse>>,
+        errors: Vec<String>,
+    }
+
+    fn parsed(root: &Path) -> Parsed {
+        let label = root.to_str().unwrap();
+        let repo = RepoId::from_canonical(&repo_identity(root).key);
+        let (files, _regions, _md, roots) = walk_source_files(root);
+        let go = go_modules_for(root, &roots, label);
+        let (by_lang, errors) = parse_repo_files(&files, repo, &go, None, label);
+        Parsed { files, repo, by_lang, errors }
+    }
+
+    /// What both folds left: their stats and pools, the parses, the errors.
+    struct Folded {
+        queue: QueueConstStats,
+        event: EventConstStats,
+        pools: [(usize, usize); 2],
+        by_lang: HashMap<&'static str, Vec<FileParse>>,
+        errors: Vec<String>,
+    }
+
+    /// Both folds, run directly over a copy of `p`'s parses with `tables` as
+    /// the per-file scans.
+    fn fold_both(p: &Parsed, consts: &ConstTable, tables: &FileConstTables) -> Folded {
+        let mut by_lang = p.by_lang.clone();
+        let mut errors = Vec::new();
+        let modules = ModuleQnames::plan(&p.files);
+        let inputs = FoldInputs {
+            files: &p.files,
+            repo: p.repo,
+            modules: &modules,
+            consts,
+            file_tables: tables,
+        };
+        let (queue, qp) = apply_queue_const_topics(&mut by_lang, &inputs, &mut errors);
+        let (event, ep) = apply_event_const_names(&mut by_lang, &inputs, &mut errors);
+        let pools = [(qp.files, qp.threads), (ep.files, ep.threads)];
+        Folded { queue, event, pools, by_lang, errors }
+    }
+
+    /// DC.3: the const folds on a pool of 8 equal the folds on a pool of 1
+    /// (sequential): the same parses byte for byte (canonical payloads), the
+    /// same stats and error lines, through `parse_and_graft` and through the
+    /// folds alone; each fold reads `FileConstTables`, and a target whose
+    /// scan is `None` reports the fold's PANIC line.
+    #[test]
+    fn const_folds_pooled_equal_sequential() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        write_repo(&root);
+        let label = root.to_str().unwrap().to_string();
+
+        // Through the whole graft stage.
+        let graft = |threads: usize| {
+            in_pool(threads, || {
+                let repo = RepoId::from_canonical(&repo_identity(&root).key);
+                let (files, _regions, _md, roots) = walk_source_files(&root);
+                let opts = BuildOptions::default();
+                let inputs = vec![repo_inputs(repo, root.clone(), label.clone(), None)];
+                let go = go_modules_for(&root, &roots, &label);
+                let ts_aliases = TsAliasSet::read(&root, &roots, &label);
+                let c_includes = IncludeRoots::read(&root, &files, &roots, &label);
+                let mut rpc = RpcContext::default();
+                rpc.add_files(&files);
+                let ctx = RepoBuildCtx {
+                    repo,
+                    repo_label: &label,
+                    go: &go,
+                    ts_aliases: &ts_aliases,
+                    c_includes: &c_includes,
+                    rpc: &rpc,
+                    roots: &roots,
+                    config: inputs.first().and_then(|i| i.config.as_ref()),
+                    opts: &opts,
+                };
+                let g = parse_and_graft(&files, None, &ctx);
+                (payloads(&g.parses_by_lang), g.parse_errors, site_qnames(&g.parses_by_lang))
+            })
+        };
+        let (seq, seq_errors, seq_sites) = graft(1);
+        let (pooled, pooled_errors, pooled_sites) = graft(8);
+        assert_eq!(seq_errors, pooled_errors, "parse_and_graft error lines");
+        assert_eq!(seq_sites, pooled_sites);
+        assert!(seq == pooled, "parse_and_graft parses differ between 1 and 8 threads");
+        // Every cross-file constant folded, and the same-file lower-case one.
+        let want = [
+            "event_emit:order.created",
+            "event_handle:order.paid",
+            "queue_consumer:billing.paid",
+            "queue_producer:orders",
+            "queue_producer:orders.created",
+        ];
+        assert_eq!(seq_sites, want.map(String::from).into_iter().collect::<BTreeSet<_>>());
+
+        // The two folds alone, over a fresh parse and the stage's own scan.
+        let p = parsed(&root);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        let mut scan_errors = Vec::new();
+        let (consts, tables, _, _) = build_const_table(&p.files, &mut scan_errors);
+        assert!(scan_errors.is_empty(), "{scan_errors:?}");
+        let one = in_pool(1, || fold_both(&p, &consts, &tables));
+        let eight = in_pool(8, || fold_both(&p, &consts, &tables));
+        let q = &one.queue;
+        assert_eq!((q.files, q.folded, q.unresolved), (3, 3, 0), "{q:?}");
+        let e = &one.event;
+        assert_eq!((e.files, e.folded, e.unresolved), (2, 2, 0), "{e:?}");
+        assert_eq!((&one.queue, &one.event), (&eight.queue, &eight.event), "stats by threads");
+        assert!(one.errors.is_empty(), "{:?}", one.errors);
+        assert_eq!(one.errors, eight.errors);
+        assert!(payloads(&one.by_lang) == payloads(&eight.by_lang), "folded parses by threads");
+        // (files, threads) per fold: the targets ran on the installed pool.
+        assert_eq!(one.pools, [(3, 1), (2, 1)]);
+        assert_eq!(eight.pools, [(3, 8), (2, 8)]);
+
+        // The fold reads FileConstTables: with consume.go's scan gone (as
+        // when it panicked) its lower-case subject cannot resolve, and the
+        // fold reports its own PANIC line instead of re-scanning the file.
+        let consume = p.files.iter().position(|(path, _)| path.ends_with("consume.go")).unwrap();
+        let mut gone: Vec<Option<ConstTable>> =
+            (0..p.files.len()).map(|i| tables.get(i).cloned()).collect();
+        gone[consume] = None;
+        let gone = in_pool(8, || fold_both(&p, &consts, &FileConstTables(gone)));
+        let consume_path = &p.files[consume].0;
+        assert_eq!(gone.errors, vec![format!("{consume_path}: PANIC (queue const fold)")]);
+        assert_eq!((gone.queue.files, gone.queue.folded), (2, 2), "{:?}", gone.queue);
+        assert_eq!(gone.event, one.event, "the event fold does not read consume.go");
+        let sites = site_qnames(&gone.by_lang);
+        assert!(!sites.contains("queue_consumer:billing.paid"), "{sites:?}");
+        assert!(sites.contains("queue_producer:orders.created"), "{sites:?}");
     }
 }

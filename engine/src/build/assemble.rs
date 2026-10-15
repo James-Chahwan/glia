@@ -43,12 +43,12 @@ use crate::route::parse_repo_files;
 /// ([`crate::parallel::par_map_ordered`]), then merged into the table and its
 /// panics reported in file order, so the first-wins bindings, the conflict
 /// count and the `parse_errors` order are the sequential scan's. Returns the
-/// table, the files scanned and the pool's thread count, for the
-/// `[parallel]` line.
-fn build_const_table(
+/// table, the per-file scans ([`FileConstTables`], DC.3), the files scanned
+/// and the pool's thread count, for the `[parallel]` line.
+pub(super) fn build_const_table(
     files: &[(String, String)],
     parse_errors: &mut Vec<String>,
-) -> (ConstTable, usize, usize) {
+) -> (ConstTable, FileConstTables, usize, usize) {
     let (scans, threads) = crate::parallel::par_map_ordered(files, |(path, source)| {
         let lang = detect_language(path)?;
         Some(crate::parallel::quiet(|| {
@@ -56,16 +56,44 @@ fn build_const_table(
         }))
     });
     let mut table = ConstTable::default();
+    let mut per_file = Vec::with_capacity(files.len());
     let mut scanned = 0usize;
     for ((path, _), scan) in files.iter().zip(scans) {
-        let Some(scan) = scan else { continue };
+        let Some(scan) = scan else {
+            per_file.push(None);
+            continue;
+        };
         scanned += 1;
         match scan {
-            Ok(file_table) => table.merge_from(&file_table),
-            Err(_) => parse_errors.push(format!("{path}: PANIC (const table scan)")),
+            Ok(file_table) => {
+                table.merge_from(&file_table);
+                per_file.push(Some(file_table));
+            }
+            Err(_) => {
+                parse_errors.push(format!("{path}: PANIC (const table scan)"));
+                per_file.push(None);
+            }
         }
     }
-    (table, scanned, threads)
+    (table, FileConstTables(per_file), scanned, threads)
+}
+
+/// DC.3: the per-file A11.1 scans [`build_const_table`] ran, index-aligned
+/// with the walked `files`: `Some` is the file's own table
+/// (`ConstTable::scan_file`, before any merge or LF.2d pin), `None` a file
+/// with no source language or whose scan panicked. The LA.4 queue-topic and
+/// CB.3b event-name const folds (`grafts::apply_post_cache`) resolve a holder
+/// file's SAME-FILE bindings here instead of re-scanning it; a fold target
+/// whose entry is `None` had a panicking scan, and the fold reports its own
+/// `PANIC (.. const fold)` line, as its re-scan used to.
+pub(super) struct FileConstTables(pub(super) Vec<Option<ConstTable>>);
+
+impl FileConstTables {
+    /// The scan of `files[file]`; `None` when it has no language, its scan
+    /// panicked, or `file` is out of range.
+    pub(super) fn get(&self, file: usize) -> Option<&ConstTable> {
+        self.0.get(file).and_then(Option::as_ref)
+    }
 }
 
 /// LF.2d: pin the repo's `.glia/overlay.toml` `[constants]` into `table`,
@@ -212,9 +240,12 @@ pub(crate) fn parse_and_graft(
 
     // A11.1 fired_on marker, once per repo. Post-cache passes that read the
     // table (A11.2 endpoint fold, queue-topic const fold) take `&const_table`
-    // and live in `grafts::apply_post_cache`, beside `apply_rpc_needles`.
+    // and live in `grafts::apply_post_cache`, beside `apply_rpc_needles`; the
+    // queue / event const folds also read `file_tables`, the per-file scans
+    // the table was merged from (DC.3).
     let started = Instant::now();
-    let (mut const_table, const_files, threads) = build_const_table(files, &mut parse_errors);
+    let (mut const_table, file_tables, const_files, threads) =
+        build_const_table(files, &mut parse_errors);
     if !const_table.is_empty() {
         eprintln!(
             "[const] repo table: {} bindings from {} files ({} conflicts) repo={repo_label}",
@@ -240,6 +271,7 @@ pub(crate) fn parse_and_graft(
         repo,
         rpc,
         &const_table,
+        &file_tables,
         roots,
         &rust_crates,
         ts_aliases,
