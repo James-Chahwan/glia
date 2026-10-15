@@ -349,8 +349,9 @@ fn visit_impl(
     let impl_type = rust_type_name(type_node, src, None);
 
     // G12.5 — Rust has no `extends`; a trait impl `impl Trait for Type` carries
-    // the `trait` field. Emit IMPLEMENTS (Type → trait) only when the trait is
-    // in-file; skip external traits rather than fabricate a target.
+    // the `trait` field. A trait of the same container is an IMPLEMENTS edge
+    // (Type → trait) here; any other trait is a ref the graph crate binds by
+    // Rust path rules (DG.13a, `trait_impl_ref`).
     if let Some(trait_node) = node.child_by_field_name("trait") {
         let trait_name = text_of(trait_node, src);
         let trait_base = trait_name.split('<').next().unwrap_or(trait_name);
@@ -362,6 +363,8 @@ fn visit_impl(
                 confidence: Confidence::Strong,
                 cells: Vec::new(),
             });
+        } else if type_ids.contains_key(base_name) && !is_negative_impl(node) {
+            trait_impl_ref(trait_node, src, parent_id, acc);
         }
     }
 
@@ -402,6 +405,55 @@ fn visit_impl(
             }
         }
     }
+}
+
+/// DG.13a: the IMPLEMENTS ref of `impl Trait for Type` whose trait is not
+/// declared in the impl's container, from `from` (the in-container self
+/// type). `Repo` / `Repo<T>` is `Bare("Repo")`; `crate::repo::Repo` /
+/// `fmt::Display<T>` is `Attribute { base: "crate::repo", name: "Repo" }`,
+/// generic arguments stripped. The graph crate binds it by Rust path rules
+/// (`RustIndex::resolve_type_refs`), never by a repo-wide name. The ref's line
+/// is the trait's 0-based row, its edge's EVIDENCE site.
+fn trait_impl_ref(trait_node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    let Some(from_module) = acc.file_module else {
+        return;
+    };
+    let path = match trait_node.kind() {
+        "generic_type" => trait_node.child_by_field_name("type"),
+        _ => Some(trait_node),
+    };
+    let qualifier = match path {
+        Some(p) if p.kind() == "type_identifier" => {
+            CallQualifier::Bare(text_of(p, src).to_string())
+        }
+        Some(p) if p.kind() == "scoped_type_identifier" => {
+            let (Some(base), Some(name)) =
+                (p.child_by_field_name("path"), p.child_by_field_name("name"))
+            else {
+                return;
+            };
+            CallQualifier::Attribute {
+                base: text_of(base, src).to_string(),
+                name: text_of(name, src).to_string(),
+            }
+        }
+        _ => return,
+    };
+    acc.refs.push(UnresolvedRef {
+        from,
+        from_module,
+        qualifier,
+        category: edge_category::IMPLEMENTS,
+        line: line_at(trait_node),
+    });
+}
+
+/// `impl !Trait for Type`: a negative impl says the type does NOT implement
+/// the trait, so it draws no IMPLEMENTS ref.
+fn is_negative_impl(node: TsNode) -> bool {
+    let mut cursor = node.walk();
+    let negative = node.children(&mut cursor).any(|c| !c.is_named() && c.kind() == "!");
+    negative
 }
 
 /// G19 — module-level `const`/`static` surfaced as STATE_VAR.
@@ -2349,6 +2401,66 @@ impl Display for Foo {
         assert!(fp.edges.iter().any(|e| e.category == edge_category::IMPLEMENTS
             && e.from == foo_id
             && e.to == display_id));
+    }
+
+    /// DG.13a: a trait the impl's container does not declare is an
+    /// IMPLEMENTS ref from the in-container self type, Bare or a path with
+    /// its generic arguments stripped; an in-container trait keeps its direct
+    /// edge and pushes no ref; a foreign self type, a reference, a blanket
+    /// impl and a negative impl push nothing.
+    #[test]
+    fn trait_impl_of_an_imported_trait_emits_a_ref() {
+        let source = r#"
+use crate::repo::Repo;
+
+pub trait Local {}
+pub struct SqlRepo;
+pub struct Wrap<T>(T);
+
+impl Repo for SqlRepo {}
+impl crate::repo::Store<u32> for SqlRepo {}
+impl<T> fmt::Display for Wrap<T> {}
+impl Local for SqlRepo {}
+impl Repo for other::Foo {}
+impl Repo for &SqlRepo {}
+impl<T: Local> Repo for T {}
+impl !Send for SqlRepo {}
+"#;
+        let fp = parse_file(source, "src/sql.rs", "src::sql", repo()).unwrap();
+        let sql = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, "src::sql::SqlRepo");
+        let wrap = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, "src::sql::Wrap");
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "src::sql");
+        let refs: Vec<(NodeId, &CallQualifier, u32)> = fp
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::IMPLEMENTS)
+            .map(|r| {
+                assert_eq!(r.from_module, module);
+                (r.from, &r.qualifier, r.line)
+            })
+            .collect();
+        let bare = CallQualifier::Bare("Repo".to_string());
+        let store = CallQualifier::Attribute {
+            base: "crate::repo".to_string(),
+            name: "Store".to_string(),
+        };
+        let display = CallQualifier::Attribute {
+            base: "fmt".to_string(),
+            name: "Display".to_string(),
+        };
+        assert_eq!(
+            refs,
+            vec![(sql, &bare, 7), (sql, &store, 8), (wrap, &display, 9)],
+            "one ref per impl of a trait from elsewhere, from the in-file self type"
+        );
+        let local = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "src::sql::Local");
+        let direct: Vec<(NodeId, NodeId)> = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPLEMENTS)
+            .map(|e| (e.from, e.to))
+            .collect();
+        assert_eq!(direct, vec![(sql, local)], "the in-file trait keeps HEAD's direct edge");
     }
 
     #[test]

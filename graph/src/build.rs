@@ -21,7 +21,9 @@ use crate::imports::{
     GoImportStats, SameStem, resolve_imports_go, resolve_imports_python, resolve_imports_slash,
     resolve_imports_ts, same_stem_table,
 };
-use crate::rust_paths::{MOD_ITEM, RustCrate, RustIndex, resolve_imports_rust, rust_ev};
+use crate::rust_paths::{
+    MOD_ITEM, RustCrate, RustIndex, TYPE_REF_CATEGORIES, resolve_imports_rust, rust_ev,
+};
 use crate::swift_scope::{SwiftModuleTypes, implicit_self};
 use crate::types::{GraphError, RepoGraph, SymbolTable};
 
@@ -421,6 +423,11 @@ pub fn build_dotted(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// re-exports, aliases, globs and fn-body uses bind. A fn's own `use`s and
 /// every glob stay in the returned bindings, which the pre-pass (a fn's
 /// `use`s shadow the file's) and the hook (the file's globs, last) read.
+///
+/// DG.13a: every ref of a [`TYPE_REF_CATEGORIES`] category (the IMPLEMENTS
+/// of `impl Trait for Type` whose trait lives in another file or module) is
+/// bound by Rust path rules ([`RustIndex::resolve_type_refs`]) before, and
+/// instead of, `resolve_refs`; every other ref keeps the generic path.
 pub fn build_rust(
     repo: RepoId,
     parses: Vec<FileParse>,
@@ -430,6 +437,10 @@ pub fn build_rust(
     build_symbol_table(&mut g);
     let idx = RustIndex::build(&g, crates);
     let bindings = resolve_imports_rust(&mut g, &all_imports, &idx);
+    let (type_refs, all_refs): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) = all_refs
+        .into_iter()
+        .partition(|r| TYPE_REF_CATEGORIES.iter().any(|(c, _, _)| *c == r.category));
+    idx.resolve_type_refs(&mut g, &type_refs, &bindings);
     // Scoped pre-pass: a hit is a CALLS edge now; a miss (and every other
     // site) keeps its original position for the generic pass.
     let mut rest: Vec<CallSite> = Vec::with_capacity(all_calls.len());

@@ -34,6 +34,14 @@
 //! such an `impl`, and a receiver type only Rust scoping names (a fn-body
 //! `use`, a glob, an inline mod, the one crate-local type of that name).
 //!
+//! DG.13a binds the Rust type refs the parser cannot ([`TYPE_REF_CATEGORIES`],
+//! [`RustIndex::resolve_type_refs`]): `impl Trait for Type` whose trait is
+//! declared in another file or module becomes IMPLEMENTS by Rust path rules
+//! (the scope's `use`, its own item, its globs, a `crate::` / `super::` /
+//! workspace-crate path), never by a repo-wide name, so `use
+//! std::fmt::Display; impl Display for X` never binds a crate's own `trait
+//! Display`.
+//!
 //! Every lookup is by key, and every candidate list is sorted by qname before
 //! a tie-break, so no winner is ever picked by iterating a `HashMap`.
 
@@ -42,10 +50,10 @@ use std::collections::{HashMap, HashSet};
 
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{
-    CallQualifier, CallSite, CodeNav, ImportStmt, ImportTarget, cell_type, edge_category,
-    node_kind, recv_stats,
+    CallQualifier, CallSite, CodeNav, ImportStmt, ImportTarget, UnresolvedRef, cell_type,
+    edge_category, node_kind, recv_stats,
 };
-use glia_core::{CellPayload, NodeId, NodeKindId};
+use glia_core::{CellPayload, EdgeCategoryId, NodeId, NodeKindId};
 
 use crate::calls::{
     graph_evidence, position_file, push_edge, receiver_type, unique_global_function,
@@ -114,6 +122,74 @@ pub(crate) fn rust_ev(rule: &str) -> Evidence {
 /// LA.3 bind the `[rust-items]` marker's `mod_scoped_calls` counts.
 pub(crate) const MOD_ITEM: &str = "mod_item";
 
+/// The Rust type refs [`RustIndex::resolve_type_refs`] owns (DG.13a), one row
+/// each: the ref's category, the node kinds its target may be, and the
+/// EVIDENCE rule of the edge it draws. `build_rust` routes every ref of a
+/// listed category here instead of the generic `resolve_refs`, whose
+/// repo-wide name fallback would bind `use std::fmt::Display; impl Display
+/// for X` to a crate's own `trait Display`. A new Rust type ref is one row.
+pub(crate) const TYPE_REF_CATEGORIES: &[(EdgeCategoryId, &[NodeKindId], &str)] =
+    &[(edge_category::IMPLEMENTS, &[node_kind::INTERFACE], "trait_impl")];
+
+const TYPE_ROWS: usize = TYPE_REF_CATEGORIES.len();
+
+/// Every type and trait name the std prelude (Rust 2021, plus 2024's
+/// `Future` / `IntoFuture`) puts in scope. A bare type name no item, `use`
+/// or glob of its scope binds names one of these: external, never a
+/// same-named crate type.
+const PRELUDE_TYPES: &[&str] = &[
+    "AsMut",
+    "AsRef",
+    "Box",
+    "Clone",
+    "Copy",
+    "Default",
+    "DoubleEndedIterator",
+    "Drop",
+    "Eq",
+    "ExactSizeIterator",
+    "Extend",
+    "Fn",
+    "FnMut",
+    "FnOnce",
+    "From",
+    "FromIterator",
+    "Future",
+    "Into",
+    "IntoFuture",
+    "IntoIterator",
+    "Iterator",
+    "Option",
+    "Ord",
+    "PartialEq",
+    "PartialOrd",
+    "Result",
+    "Send",
+    "Sized",
+    "String",
+    "Sync",
+    "ToOwned",
+    "ToString",
+    "TryFrom",
+    "TryInto",
+    "Unpin",
+    "Vec",
+];
+
+/// What one type ref came to ([`RustIndex::resolve_type_refs`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TypeHit {
+    /// The node the name or path names in its scope.
+    Bound(NodeId),
+    /// Something outside the graph: a `use` the walk could not follow
+    /// (`use std::fmt::Display;`), an extern crate's path, a prelude name.
+    /// Dropped, never a fallback.
+    External,
+    /// Nothing in scope names it, it names a node of another kind, or two
+    /// globs name it: kept in `g.unresolved_refs`.
+    Unbound,
+}
+
 /// Where a path stands after some of its segments.
 enum Pos {
     /// A file MODULE, or an inline-mod PACKAGE (LA.3).
@@ -167,6 +243,12 @@ struct Stats {
     unique_in_crate: Cell<usize>,
     receiver_skipped: Cell<usize>,
     recv: [Cell<usize>; 4],
+    /// DG.13a `[rust-types]`: per [`TYPE_REF_CATEGORIES`] row, refs seen and
+    /// refs bound; then every row's refs dropped as external, and kept unbound.
+    type_refs: [Cell<usize>; TYPE_ROWS],
+    type_bound: [Cell<usize>; TYPE_ROWS],
+    type_external: Cell<usize>,
+    type_unbound: Cell<usize>,
 }
 
 impl Stats {
@@ -397,10 +479,12 @@ impl RustIndex {
     }
 
     /// The fired_on markers of one `build_rust`: LA.1a's path line, then
-    /// LA.35b's [`Self::report_recv`] line.
+    /// LA.35b's [`Self::report_recv`] line, then DG.13a's
+    /// [`Self::report_types`] line.
     pub(crate) fn report(&self) {
         self.report_paths();
         self.report_recv();
+        self.report_types();
     }
 
     /// LA.1a fired_on marker, once per `build_rust` that examined a path call:
@@ -1173,6 +1257,19 @@ impl RustIndex {
         }
     }
 
+    /// Whether the file of `scope` sits in a known crate: a Cargo package
+    /// covers it and has a crate root above it. Loose `.rs` files, whose
+    /// module tree is a guess, are not; only they keep the repo-unique tail
+    /// fallbacks (a `use`'s, LA.1b; a type ref's, DG.13a).
+    fn known_crate(&self, g: &RepoGraph, scope: NodeId) -> bool {
+        enclosing(&g.nav, scope, false)
+            .and_then(|m| g.nav.qname_by_id.get(&m))
+            .is_some_and(|q| {
+                self.covering(q).is_some()
+                    && matches!(self.crate_root(g, q), Some(Root::Module(_)))
+            })
+    }
+
     /// The package whose dir is the longest prefix of `q`.
     fn covering(&self, q: &str) -> Option<usize> {
         let mut best: Option<(usize, usize)> = None;
@@ -1329,6 +1426,19 @@ pub(crate) struct RustBindings {
     /// Scope (file MODULE, inline PACKAGE, fn) -> the scopes its `use ..::*`
     /// globs name, sorted by qname.
     globs: HashMap<NodeId, Vec<NodeId>>,
+    /// Scope -> every name a `use` leaf of it binds that resolved to nothing
+    /// (`use std::fmt::Display;` declares `Display`), plus `*` for a glob the
+    /// walk could not follow (DG.13a). A type ref naming one is external,
+    /// never a same-named crate type. A name two leaves bind to two targets
+    /// (cfg-gated twins) is ambiguous, not external, so it is not listed.
+    declared: HashMap<NodeId, HashSet<String>>,
+}
+
+impl RustBindings {
+    /// Whether a `use` of `scope` names `name` and bound nothing.
+    fn declares(&self, scope: NodeId, name: &str) -> bool {
+        self.declared.get(&scope).is_some_and(|d| d.contains(name))
+    }
 }
 
 /// Where a lookup reads `use` bindings: the finished tables at call time
@@ -1631,12 +1741,7 @@ pub(crate) fn resolve_imports_rust(
         let (false, true, Some(name)) = (bound, leaf.tail_fallback, leaf.member) else {
             continue;
         };
-        let known_crate = enclosing(&g.nav, leaf.scope, false)
-            .and_then(|m| g.nav.qname_by_id.get(&m))
-            .is_some_and(|q| {
-                idx.covering(q).is_some() && matches!(idx.crate_root(g, q), Some(Root::Module(_)))
-            });
-        if known_crate {
+        if idx.known_crate(g, leaf.scope) {
             continue;
         }
         let Some(t) = unique_global_function(g, name).or_else(|| unique_global_module(g, name))
@@ -1676,9 +1781,24 @@ pub(crate) fn resolve_imports_rust(
     }
     stats.scopes = scopes.len();
 
+    // DG.13a: what each scope's `use`s name but bind nothing (an external
+    // crate's item, or a glob the walk could not follow), after the tail
+    // fallback had its say.
+    let mut declared: HashMap<NodeId, HashSet<String>> = HashMap::new();
+    for (leaf, hit) in leaves.iter().zip(&results) {
+        if hit.is_some_and(|h| h.target.is_some()) {
+            continue;
+        }
+        let name = if leaf.glob { Some("*") } else { leaf.bound };
+        if let Some(name) = name {
+            declared.entry(leaf.scope).or_default().insert(name.to_string());
+        }
+    }
+
     let mut rb = RustBindings {
         fn_scoped: HashMap::new(),
         globs: tables.globs,
+        declared,
     };
     for (scope, names) in tables.bound {
         if names.is_empty() {
@@ -1823,6 +1943,240 @@ impl RustIndex {
             },
             Pos::Type(_) | Pos::TypeName(_) => None,
         }
+    }
+}
+
+// ---- DG.13a: type refs -------------------------------------------------------
+
+impl RustIndex {
+    /// Bind the Rust type refs `build_rust` routed here (every ref of a
+    /// [`TYPE_REF_CATEGORIES`] category), in input order: a hit is an edge of
+    /// the ref's category carrying EVIDENCE `graph:rust_paths` / the row's
+    /// rule at the ref's line; an external name is dropped; anything else
+    /// goes to `g.unresolved_refs` unchanged. The generic `resolve_refs`
+    /// never sees these refs, so its repo-wide name fallback cannot bind them.
+    pub(crate) fn resolve_type_refs(
+        &self,
+        g: &mut RepoGraph,
+        refs: &[UnresolvedRef],
+        rb: &RustBindings,
+    ) {
+        for r in refs {
+            let Some(row) = TYPE_REF_CATEGORIES
+                .iter()
+                .position(|(c, _, _)| *c == r.category)
+            else {
+                g.unresolved_refs.push(r.clone());
+                continue;
+            };
+            let (category, want, rule) = TYPE_REF_CATEGORIES[row];
+            Stats::bump(&self.stats.type_refs[row]);
+            match self.resolve_type(g, rb, r.from, &r.qualifier, want) {
+                TypeHit::Bound(to) => {
+                    Stats::bump(&self.stats.type_bound[row]);
+                    push_edge(g, r.from, to, category, rust_ev(rule).line(r.line));
+                }
+                TypeHit::External => Stats::bump(&self.stats.type_external),
+                TypeHit::Unbound => {
+                    Stats::bump(&self.stats.type_unbound);
+                    g.unresolved_refs.push(r.clone());
+                }
+            }
+        }
+    }
+
+    /// The node of a kind in `want` that a type name or path written for
+    /// `from` names, from `from`'s scope S (its inline mod, else its file
+    /// MODULE). Rust scoping, never the enclosing modules: an inline mod sees
+    /// its parent's names only through a `use super::..`.
+    fn resolve_type(
+        &self,
+        g: &RepoGraph,
+        rb: &RustBindings,
+        from: NodeId,
+        qualifier: &CallQualifier,
+        want: &[NodeKindId],
+    ) -> TypeHit {
+        let Some(scope) = enclosing(&g.nav, from, true) else {
+            return TypeHit::Unbound;
+        };
+        let hit = match qualifier {
+            CallQualifier::Bare(name) => self.bare_type(g, rb, scope, name, want),
+            CallQualifier::Attribute { base, name } => self.path_type(g, rb, scope, base, name),
+            _ => TypeHit::Unbound,
+        };
+        match hit {
+            TypeHit::Bound(id) if !g.nav.kind_by_id.get(&id).is_some_and(|k| want.contains(k)) => {
+                TypeHit::Unbound
+            }
+            other => other,
+        }
+    }
+
+    /// A bare type name in scope S, Rust's order: (a) S's `use` binding; (b)
+    /// a `use` of S that bound nothing names it (external); (c) a type S
+    /// declares; (d) S's globs ([`Self::glob_type`]); then the prelude
+    /// ([`PRELUDE_TYPES`], external); (e) only in loose files (no known
+    /// crate, no glob the walk could not follow), the one type of a `want`
+    /// kind named so across the repo, LA.1b's tail-fallback rule.
+    fn bare_type(
+        &self,
+        g: &RepoGraph,
+        rb: &RustBindings,
+        scope: NodeId,
+        name: &str,
+        want: &[NodeKindId],
+    ) -> TypeHit {
+        if let Some(id) = rb.bound(g, scope, name) {
+            return TypeHit::Bound(id);
+        }
+        if rb.declares(scope, name) {
+            return TypeHit::External;
+        }
+        if let Some(Pos::Type(id)) = type_pos(g, scope, name) {
+            return TypeHit::Bound(id);
+        }
+        if let Some(hit) = self.glob_type(g, rb, scope, name) {
+            return hit;
+        }
+        if PRELUDE_TYPES.contains(&name) {
+            return TypeHit::External;
+        }
+        if self.known_crate(g, scope) || rb.declares(scope, "*") {
+            return TypeHit::Unbound;
+        }
+        unique_type_of(g, name, want).map_or(TypeHit::Unbound, TypeHit::Bound)
+    }
+
+    /// A path type `base::name` written in scope S: `base` walked as a Rust
+    /// path the way [`Self::resolve_variant`] walks one (`crate::` /
+    /// `self::` / `super::` / a `use`-bound module / a child module / a
+    /// workspace crate), then the type `name` in the scope it reaches: its
+    /// own item, its `use` binding (a `pub use` re-export), its globs. A
+    /// first segment that a `use` of S names without binding, or that no
+    /// rule finds (an extern crate: `std::fmt::Display`), is external; so is
+    /// a `name` the reached scope's own `use` names without binding.
+    fn path_type(
+        &self,
+        g: &RepoGraph,
+        rb: &RustBindings,
+        scope: NodeId,
+        base: &str,
+        name: &str,
+    ) -> TypeHit {
+        let Some(segs) = split_path(base) else {
+            return TypeHit::Unbound;
+        };
+        let first = segs[0].as_str();
+        let keyword = matches!(first, "crate" | "self" | "super" | "Self");
+        if !keyword && rb.bound(g, scope, first).is_none() && rb.declares(scope, first) {
+            return TypeHit::External;
+        }
+        let Some(file_module) = enclosing(&g.nav, scope, false) else {
+            return TypeHit::Unbound;
+        };
+        let Some((start, _)) = self.start(g, rb, scope, scope, file_module, first) else {
+            return if keyword {
+                TypeHit::Unbound
+            } else {
+                TypeHit::External
+            };
+        };
+        let mut unused = false;
+        let Some(Pos::Scope(at)) = self.walk(g, rb, start, &segs[1..], &mut unused) else {
+            return TypeHit::Unbound;
+        };
+        let own = type_pos(g, at, name).and_then(|p| match p {
+            Pos::Type(id) => Some(id),
+            _ => None,
+        });
+        let hit = own
+            .or_else(|| {
+                rb.bound(g, at, name)
+                    .filter(|id| g.nav.kind_by_id.get(id).is_some_and(|k| is_type_kind(*k)))
+            })
+            .or_else(|| self.glob_member(g, rb, at, name, is_type_kind));
+        match hit {
+            Some(id) => TypeHit::Bound(id),
+            None if rb.declares(at, name) => TypeHit::External,
+            None => TypeHit::Unbound,
+        }
+    }
+
+    /// `name` through the globs of `scope`, breadth-first like
+    /// [`Self::glob_member`]: a reached scope contributes its own type, its
+    /// `use` binding or child module ([`Self::own_member`]), else, when one
+    /// of its `use`s names `name` without binding it, an external hit; only
+    /// a scope with neither opens its own globs. One node -> `Bound`; only
+    /// external hits -> `External`; two distinct hits, or a node and an
+    /// external -> `Unbound` (ambiguous, never first-wins); nothing -> `None`.
+    fn glob_type(
+        &self,
+        g: &RepoGraph,
+        rb: &RustBindings,
+        scope: NodeId,
+        name: &str,
+    ) -> Option<TypeHit> {
+        let mut frontier: Vec<NodeId> = rb.globs(scope).to_vec();
+        if frontier.is_empty() {
+            return None;
+        }
+        let mut seen: HashSet<NodeId> = HashSet::from([scope]);
+        let mut hit: Option<NodeId> = None;
+        let mut external = false;
+        for _ in 0..MAX_USE_HOPS {
+            let mut next = Vec::new();
+            for t in frontier {
+                if !seen.insert(t) {
+                    continue;
+                }
+                match self.own_member(g, rb, t, name, is_type_kind) {
+                    Some(id) if hit.is_some_and(|h| h != id) => return Some(TypeHit::Unbound),
+                    Some(id) => hit = Some(id),
+                    None if rb.declares(t, name) => external = true,
+                    None => next.extend_from_slice(rb.globs(t)),
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+        match (hit, external) {
+            (Some(id), false) => Some(TypeHit::Bound(id)),
+            (None, true) => Some(TypeHit::External),
+            (Some(_), true) => Some(TypeHit::Unbound),
+            (None, false) => None,
+        }
+    }
+
+    /// DG.13a fired_on marker, once per `build_rust` with any type ref:
+    /// `[rust-types] implements=<bound>/<refs> injects=<bound>/<refs>
+    /// external=<e> unbound=<u>`. A category with no [`TYPE_REF_CATEGORIES`]
+    /// row reads `0/0`; `external` and `unbound` sum over every row.
+    fn report_types(&self) {
+        let seen: usize = self.stats.type_refs.iter().map(Cell::get).sum();
+        if seen == 0 {
+            return;
+        }
+        let of = |category: EdgeCategoryId| {
+            TYPE_REF_CATEGORIES
+                .iter()
+                .position(|(c, _, _)| *c == category)
+                .map_or((0, 0), |row| {
+                    (
+                        self.stats.type_bound[row].get(),
+                        self.stats.type_refs[row].get(),
+                    )
+                })
+        };
+        let (ib, ir) = of(edge_category::IMPLEMENTS);
+        let (jb, jr) = of(edge_category::INJECTS);
+        eprintln!(
+            "[rust-types] implements={ib}/{ir} injects={jb}/{jr} external={} unbound={}",
+            self.stats.type_external.get(),
+            self.stats.type_unbound.get(),
+        );
     }
 }
 
@@ -2029,6 +2383,26 @@ fn is_callable(k: NodeKindId) -> bool {
     k == node_kind::FUNCTION || k == node_kind::STRUCT || k == node_kind::CLASS
 }
 
+/// The one type of a kind in `want` named `name` across the repo's scopes
+/// (a type under its MODULE and an inline PACKAGE is one type); two distinct
+/// -> `None`. DG.13a's loose-file fallback ([`RustIndex::bare_type`] (e)).
+fn unique_type_of(g: &RepoGraph, name: &str, want: &[NodeKindId]) -> Option<NodeId> {
+    let mut hit: Option<NodeId> = None;
+    for syms in g.symbols.module_symbols.values() {
+        let Some(&id) = syms
+            .get(name)
+            .filter(|id| g.nav.kind_by_id.get(id).is_some_and(|k| want.contains(k)))
+        else {
+            continue;
+        };
+        match hit {
+            Some(existing) if existing != id => return None,
+            _ => hit = Some(id),
+        }
+    }
+    hit
+}
+
 fn sorted_ids(mut defs: Vec<(String, NodeId)>) -> Vec<NodeId> {
     defs.sort_by(|a, b| a.0.cmp(&b.0));
     defs.dedup_by(|a, b| a.1 == b.1);
@@ -2118,6 +2492,7 @@ mod tests {
         nodes: Vec<Node>,
         imports: Vec<ImportStmt>,
         calls: Vec<CallSite>,
+        refs: Vec<UnresolvedRef>,
     }
 
     impl File {
@@ -2128,6 +2503,7 @@ mod tests {
                 nodes: vec![],
                 imports: vec![],
                 calls: vec![],
+                refs: vec![],
             };
             f.add(node_kind::MODULE, module_q, None);
             f
@@ -2148,6 +2524,13 @@ mod tests {
         /// `use <module>::<name>;` written in this file.
         fn use_item(&mut self, module: &str, name: &str) {
             let from_module = self.nav.qname_by_id[&self.module].clone();
+            self.use_in(&from_module, module, name);
+        }
+
+        /// `use <module>::<name>;` written in the scope of qname `scope` (the
+        /// file MODULE or an inline-mod PACKAGE); `name` `*` is a glob.
+        fn use_in(&mut self, scope: &str, module: &str, name: &str) {
+            let from_module = scope.to_string();
             self.imports.push(ImportStmt {
                 from_module,
                 target: ImportTarget::Symbol {
@@ -2172,13 +2555,25 @@ mod tests {
             });
         }
 
+        /// `impl <trait> for <from>` with a trait declared elsewhere, as
+        /// the parser's IMPLEMENTS ref (DG.13a).
+        fn implements(&mut self, from: NodeId, qualifier: CallQualifier) {
+            self.refs.push(UnresolvedRef {
+                from,
+                from_module: self.module,
+                qualifier,
+                category: edge_category::IMPLEMENTS,
+                line: 4,
+            });
+        }
+
         fn parse(self) -> FileParse {
             FileParse {
                 nodes: self.nodes,
                 edges: vec![],
                 imports: self.imports,
                 calls: self.calls,
-                refs: vec![],
+                refs: self.refs,
                 nav: self.nav,
                 properties: HashSet::new(),
             }
@@ -2403,6 +2798,232 @@ mod tests {
             calls_from(&g, drun).is_empty(),
             "{:?}",
             calls_from(&g, drun)
+        );
+    }
+
+    // ---- DG.13a: type refs ---------------------------------------------------
+
+    fn bare(name: &str) -> CallQualifier {
+        CallQualifier::Bare(name.to_string())
+    }
+
+    fn path(base: &str, name: &str) -> CallQualifier {
+        CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    /// Every IMPLEMENTS edge as `(from qname, to qname)`, sorted, each
+    /// asserted to carry EVIDENCE `graph:rust_paths` / `trait_impl` at the
+    /// ref's line.
+    fn implements(g: &RepoGraph) -> Vec<(String, String)> {
+        let q = |id: &NodeId| g.nav.qname_by_id.get(id).cloned().unwrap_or_default();
+        let mut out: Vec<(String, String)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPLEMENTS)
+            .map(|e| {
+                let ev = Evidence::of(e).expect("an IMPLEMENTS edge carries EVIDENCE");
+                assert_eq!(
+                    (ev.emitter.as_str(), ev.rule.as_deref(), ev.line),
+                    ("graph:rust_paths", Some("trait_impl"), Some(4)),
+                );
+                (q(&e.from), q(&e.to))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The `from` qnames of the IMPLEMENTS refs left unresolved, sorted.
+    fn unbound(g: &RepoGraph) -> Vec<String> {
+        let mut out: Vec<String> = g
+            .unresolved_refs
+            .iter()
+            .filter(|r| r.category == edge_category::IMPLEMENTS)
+            .filter_map(|r| g.nav.qname_by_id.get(&r.from).cloned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn pair(from: &str, to: &str) -> (String, String) {
+        (from.to_string(), to.to_string())
+    }
+
+    #[test]
+    fn resolve_type_refs_binds_through_use() {
+        // trait Repo in src::repo, re-exported by the crate root.
+        let mut repo_rs = File::new("src::repo");
+        let m = repo_rs.module;
+        repo_rs.add(node_kind::INTERFACE, "src::repo::Repo", Some(m));
+        let mut lib = File::new("src::lib");
+        lib.use_item("repo", "Repo");
+        // `use crate::repo::Repo; impl Repo for A`
+        let mut a = File::new("src::a");
+        let m = a.module;
+        a.use_item("crate::repo", "Repo");
+        let ty = a.add(node_kind::STRUCT, "src::a::A", Some(m));
+        a.implements(ty, bare("Repo"));
+        // `impl crate::repo::Repo for B`
+        let mut b = File::new("src::b");
+        let m = b.module;
+        let ty = b.add(node_kind::STRUCT, "src::b::B", Some(m));
+        b.implements(ty, path("crate::repo", "Repo"));
+        // `impl crate::Repo for C`: through the root's `pub use`.
+        let mut c = File::new("src::c");
+        let m = c.module;
+        let ty = c.add(node_kind::STRUCT, "src::c::C", Some(m));
+        c.implements(ty, path("crate", "Repo"));
+        // `use crate::repo::*; impl Repo for D`
+        let mut d = File::new("src::d");
+        let m = d.module;
+        d.use_item("crate::repo", "*");
+        let ty = d.add(node_kind::STRUCT, "src::d::D", Some(m));
+        d.implements(ty, bare("Repo"));
+        // Inline mods of src::e, which declares trait Shape.
+        let mut e = File::new("src::e");
+        let m = e.module;
+        e.add(node_kind::INTERFACE, "src::e::Shape", Some(m));
+        // `mod inner { use super::*; trait Local; impl Shape for F; impl Local for G }`
+        let inner = e.add(node_kind::PACKAGE, "src::e::inner", Some(m));
+        e.use_in("src::e::inner", "super", "*");
+        e.add(node_kind::INTERFACE, "src::e::inner::Local", Some(inner));
+        let ty = e.add(node_kind::STRUCT, "src::e::inner::F", Some(inner));
+        e.implements(ty, bare("Shape"));
+        let ty = e.add(node_kind::STRUCT, "src::e::inner::G", Some(inner));
+        e.implements(ty, bare("Local"));
+        // `mod plain { impl Shape for P }`: no `use`, so Shape is not in scope.
+        let plain = e.add(node_kind::PACKAGE, "src::e::plain", Some(m));
+        let ty = e.add(node_kind::STRUCT, "src::e::plain::P", Some(plain));
+        e.implements(ty, bare("Shape"));
+        let parses = vec![
+            repo_rs.parse(),
+            lib.parse(),
+            a.parse(),
+            b.parse(),
+            c.parse(),
+            d.parse(),
+            e.parse(),
+        ];
+        let g = build_rust(repo(), parses, &[krate("shop", "")]).expect("builds");
+        assert_eq!(
+            implements(&g),
+            vec![
+                pair("src::a::A", "src::repo::Repo"),
+                pair("src::b::B", "src::repo::Repo"),
+                pair("src::c::C", "src::repo::Repo"),
+                pair("src::d::D", "src::repo::Repo"),
+                pair("src::e::inner::F", "src::e::Shape"),
+                pair("src::e::inner::G", "src::e::inner::Local"),
+            ],
+        );
+        assert_eq!(
+            unbound(&g),
+            vec!["src::e::plain::P".to_string()],
+            "an inline mod sees its parent's trait only through a use"
+        );
+    }
+
+    #[test]
+    fn external_use_never_binds_a_same_named_repo_trait() {
+        // The crate declares its own Display, Default and Shape traits.
+        let mut display = File::new("src::display");
+        let m = display.module;
+        display.add(node_kind::INTERFACE, "src::display::Display", Some(m));
+        display.add(node_kind::INTERFACE, "src::display::Default", Some(m));
+        display.add(node_kind::INTERFACE, "src::display::Shape", Some(m));
+        display.add(node_kind::INTERFACE, "src::display::Debug", Some(m));
+        let mut sql = File::new("src::sql");
+        let m = sql.module;
+        sql.use_item("std::fmt", "Display");
+        sql.use_in("src::sql", "serde", "*");
+        sql.imports.push(ImportStmt {
+            from_module: "src::sql".to_string(),
+            target: ImportTarget::Module {
+                path: "std::fmt".to_string(),
+                alias: None,
+            },
+            line: 0,
+        });
+        let ty = sql.add(node_kind::STRUCT, "src::sql::SqlRepo", Some(m));
+        // `use std::fmt::Display; impl Display for SqlRepo`: external.
+        sql.implements(ty, bare("Display"));
+        // `impl Default for SqlRepo`: the prelude's, never the crate's.
+        sql.implements(ty, bare("Default"));
+        // `use std::fmt; impl fmt::Debug for SqlRepo`: external.
+        sql.implements(ty, path("fmt", "Debug"));
+        // `impl std::fmt::Display for SqlRepo`: an extern crate path.
+        sql.implements(ty, path("std::fmt", "Display"));
+        // `impl Shape for SqlRepo`, Shape never imported: unbound in a known
+        // crate, never the crate's one Shape.
+        sql.implements(ty, bare("Shape"));
+        let parses = vec![display.parse(), sql.parse()];
+        let g = build_rust(repo(), parses, &[krate("shop", "")]).expect("builds");
+        assert_eq!(implements(&g), Vec::<(String, String)>::new());
+        assert_eq!(
+            unbound(&g),
+            vec!["src::sql::SqlRepo".to_string()],
+            "external refs are dropped, only the unimported Shape stays unbound"
+        );
+    }
+
+    #[test]
+    fn loose_files_keep_the_tail_fallback() {
+        // matrix/rust/impl's shape: loose `.rs` files, no Cargo package.
+        let mut repo_rs = File::new("repo");
+        let m = repo_rs.module;
+        repo_rs.add(node_kind::INTERFACE, "repo::Repo", Some(m));
+        repo_rs.add(node_kind::INTERFACE, "repo::Display", Some(m));
+        repo_rs.add(node_kind::INTERFACE, "repo::Store", Some(m));
+        repo_rs.add(node_kind::STRUCT, "repo::Twin", Some(m));
+        let mut other = File::new("other");
+        let m = other.module;
+        other.add(node_kind::INTERFACE, "other::Store", Some(m));
+        other.add(node_kind::INTERFACE, "other::Twin", Some(m));
+        // `use crate::repo::Repo; impl Repo for SqlRepo`
+        let mut sql = File::new("sql_repo");
+        let m = sql.module;
+        sql.use_item("crate::repo", "Repo");
+        let ty = sql.add(node_kind::STRUCT, "sql_repo::SqlRepo", Some(m));
+        sql.implements(ty, bare("Repo"));
+        // `impl Twin for Cache`, never imported: the one INTERFACE Twin
+        // (a STRUCT of that name is not a trait).
+        let mut cache = File::new("cache");
+        let m = cache.module;
+        cache.use_item("std::fmt", "Display");
+        let ty = cache.add(node_kind::STRUCT, "cache::Cache", Some(m));
+        cache.implements(ty, bare("Twin"));
+        // `use std::fmt::Display; impl Display for Cache`: external, even here.
+        cache.implements(ty, bare("Display"));
+        // `impl Store for Cache`: two INTERFACE Store, ambiguous.
+        cache.implements(ty, bare("Store"));
+        // A glob the walk cannot follow may bring the name in: no fallback.
+        let mut globbed = File::new("globbed");
+        let m = globbed.module;
+        globbed.use_item("serde", "*");
+        let ty = globbed.add(node_kind::STRUCT, "globbed::Glob", Some(m));
+        globbed.implements(ty, bare("Repo"));
+        let parses = vec![
+            repo_rs.parse(),
+            other.parse(),
+            sql.parse(),
+            cache.parse(),
+            globbed.parse(),
+        ];
+        let g = build_rust(repo(), parses, &[]).expect("builds");
+        assert_eq!(
+            implements(&g),
+            vec![
+                pair("cache::Cache", "other::Twin"),
+                pair("sql_repo::SqlRepo", "repo::Repo"),
+            ],
+        );
+        assert_eq!(
+            unbound(&g),
+            vec!["cache::Cache".to_string(), "globbed::Glob".to_string()],
+            "Store is ambiguous; the opaque glob withholds the fallback"
         );
     }
 

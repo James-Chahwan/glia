@@ -1,0 +1,17 @@
+{
+  "framework": "rust-trait-impl-precision",
+  "language": "rust",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "INTERFACE", "name": "Repo"},
+    {"kind": "STRUCT", "name": "SqlRepo"}
+  ],
+  "expect_edges": [
+    {"from": "SqlRepo", "to": "Repo", "category": "IMPLEMENTS", "note": "imported crate-local trait, bound through the use"}
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {"from": "SqlRepo", "to": "Display", "category": "IMPLEMENTS", "note": "std::fmt::Display is imported: it must never bind to the repo's own Display trait"}
+  ],
+  "note": "DG.13a precision twin of matrix/rust/impl. A Cargo crate: `use crate::repo::Repo; impl Repo for SqlRepo` binds across files through the use (RustIndex::resolve_type_refs), while `use std::fmt::Display; impl Display for SqlRepo` names the std trait and must never bind to the crate's own `trait Display`. Legacy-only (no cells). Baseline 2026-10-16, HEAD e9bbe6fc, glia_py wheel in ~/.venvs/glia-leap: IMPLEMENTS 0/1 (no IMPLEMENTS edge at all), forbid 0 violations."
+}

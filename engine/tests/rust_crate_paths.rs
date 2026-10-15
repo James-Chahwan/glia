@@ -528,3 +528,44 @@ fn reexport_chains_cycles_and_glob_ambiguity() {
         "{calls:?}"
     );
 }
+
+fn trait_impl_fixture() -> String {
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../bench/substrate-gap/fixtures/rust-trait-impl-precision"
+    )
+    .to_string()
+}
+
+/// DG.13a: `use crate::repo::Repo; impl Repo for SqlRepo` in another file
+/// than the trait is an IMPLEMENTS edge bound through the `use`, with
+/// EVIDENCE `graph:rust_paths` / `trait_impl` at the impl's line, while
+/// `use std::fmt::Display; impl Display for SqlRepo` names std's trait and
+/// never binds the crate's own `trait Display`.
+#[test]
+fn trait_impl_across_files() {
+    let r = generate_one(&trait_impl_fixture()).expect("fixture builds");
+    let implements = edges_of(&r, edge_category::IMPLEMENTS);
+    assert_eq!(
+        implements,
+        vec![("src::sql::SqlRepo".to_string(), "src::repo::Repo".to_string())],
+        "IMPLEMENTS = {implements:?}"
+    );
+    let qname = qnames(&r);
+    let edge = r
+        .merged
+        .all_edges()
+        .find(|e| {
+            e.category == edge_category::IMPLEMENTS
+                && qname.get(&e.to).map(String::as_str) == Some("src::repo::Repo")
+        })
+        .expect("the IMPLEMENTS edge");
+    let ev = glia_code_domain::evidence::Evidence::of(edge).expect("EVIDENCE cell");
+    assert_eq!(ev.emitter, "graph:rust_paths");
+    assert_eq!(ev.rule.as_deref(), Some("trait_impl"));
+    assert_eq!(
+        (ev.file.as_deref(), ev.line),
+        (Some("src/sql.rs"), Some(5)),
+        "the site is the impl's trait, 0-based"
+    );
+}
