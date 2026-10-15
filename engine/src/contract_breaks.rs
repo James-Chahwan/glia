@@ -95,7 +95,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use glia_activation::algo::delta::GraphDelta;
-use glia_code_domain::edge_category;
+use glia_code_domain::{edge_category, same_as};
 use glia_core::{EdgeCategoryId, NodeId};
 use glia_graph::MergedGraph;
 
@@ -536,18 +536,17 @@ fn kind_of(h: &Holder) -> &'static str {
     }
 }
 
+/// A row's key: a message's fully-qualified name; an op's
+/// `same_as::contract_op_key` display (`METHOD path`, `[action ]channel`), the
+/// one key the identity resolver's contract_op class uses too; else the qname.
 fn key_of(h: &Holder) -> String {
     if h.message {
         return qualified_name(&h.qname).to_string();
     }
-    if let (Some(method), Some(path)) = (h.origin_str("method"), h.origin_str("path")) {
-        return format!("{} {path}", method.to_ascii_uppercase());
+    if let Some(k) = h.origin.as_ref().and_then(same_as::contract_op_key) {
+        return k.display;
     }
-    match (h.origin_str("action"), h.origin_str("channel")) {
-        (Some(action), Some(channel)) => format!("{action} {}", channel.trim_matches('/')),
-        (None, Some(channel)) => channel.trim_matches('/').to_string(),
-        _ => h.qname.clone(),
-    }
+    h.qname.clone()
 }
 
 /// `primary`'s format when it names one, else `fallback`'s.
