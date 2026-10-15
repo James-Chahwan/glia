@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -6,6 +6,10 @@ use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser, Tree};
 
 use glia_code_domain::NavFact;
+use glia_code_domain::endpoint::{
+    ClientEndpoint, HitExtras, client_url_split, push_client_endpoint_with,
+};
+use glia_code_domain::evidence::{self, Evidence};
 pub use glia_code_domain::{
     CallQualifier, CallSite, CodeNav, FileParse, GRAPH_TYPE, ImportStmt, ImportTarget, ParseError,
     UnresolvedRef, cell_type, edge_category, node_kind,
@@ -62,7 +66,7 @@ pub fn parse_file(
             parsed.cpp_error_bytes
         );
     }
-    let (fp, stats, lambdas) =
+    let (fp, stats, lambdas, http) =
         parse_tree_into(&parsed.tree, source, file_rel_path, module_qname, repo);
     if qname_debug() && let Some(line) = stats.marker(file_rel_path) {
         // LB.10b debug marker:
@@ -74,23 +78,29 @@ pub fn parse_file(
     if let Some(line) = lambdas.marker(file_rel_path) {
         eprintln!("{line}");
     }
+    // DH.21 fired_on, per file whose functions mint a client ENDPOINT:
+    //   `glia analyze <repo> 2>&1 | grep '^\[c-http-client\]'`
+    if let Some(line) = http.marker(file_rel_path) {
+        eprintln!("{line}");
+    }
     Ok(fp)
 }
 
 /// Walk a parsed tree into a [`FileParse`], with the counts of the LB.10b
-/// identity rules and of the lambdas walked (DF.5) for the markers.
+/// identity rules, of the lambdas walked (DF.5) and of the HTTP client
+/// ENDPOINTs minted (DH.21) for the markers.
 fn parse_tree_into(
     tree: &Tree,
     source: &str,
     file_rel_path: &str,
     module_qname: &str,
     repo: RepoId,
-) -> (FileParse, IdentityStats, LambdaStats) {
+) -> (FileParse, IdentityStats, LambdaStats, HttpClientStats) {
     let src = source.as_bytes();
     let root = tree.root_node();
 
     let module_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, module_qname);
-    let mut acc = Acc::new(module_id, module_qname, is_header_path(file_rel_path));
+    let mut acc = Acc::new(module_id, module_qname, file_rel_path, repo);
     acc.push_node(Node {
         id: module_id,
         repo,
@@ -123,7 +133,7 @@ fn parse_tree_into(
         nav: acc.nav,
         properties: Default::default(),
     };
-    (fp, acc.stats, acc.lambdas)
+    (fp, acc.stats, acc.lambdas, acc.http)
 }
 
 /// A MODULE's nav name is its file stem (LB.10a): every C/C++ MODULE is named
@@ -257,10 +267,19 @@ struct Acc {
     template_params: Vec<String>,
     /// DF.5: the lambdas walked as part of their enclosing function's body.
     lambdas: LambdaStats,
+    /// DH.21: the file's repo-relative path (the ENDPOINT_HIT `file`) and
+    /// repo, for the client ENDPOINTs a function body mints.
+    file_rel: String,
+    repo: RepoId,
+    /// DH.21: the ENDPOINT ids minted in this file, `push_client_endpoint`'s
+    /// per-file dedup. Lookup only, never iterated.
+    endpoint_seen: HashSet<NodeId>,
+    /// DH.21: the counts behind the `[c-http-client]` marker.
+    http: HttpClientStats,
 }
 
 impl Acc {
-    fn new(module_id: NodeId, module_qname: &str, is_header: bool) -> Self {
+    fn new(module_id: NodeId, module_qname: &str, file_rel: &str, repo: RepoId) -> Self {
         Acc {
             nodes: Vec::new(),
             edges: Vec::new(),
@@ -270,13 +289,17 @@ impl Acc {
             nav: CodeNav::default(),
             emitted: HashMap::new(),
             dir: module_qname.rsplit_once("::").map_or("", |(d, _)| d).to_string(),
-            is_header,
+            is_header: is_header_path(file_rel),
             local_types: HashMap::new(),
             stats: IdentityStats::default(),
             module_id,
             module_qname: module_qname.to_string(),
             template_params: Vec::new(),
             lambdas: LambdaStats::default(),
+            file_rel: file_rel.to_string(),
+            repo,
+            endpoint_seen: HashSet::new(),
+            http: HttpClientStats::default(),
         }
     }
 
@@ -416,6 +439,24 @@ impl LambdaStats {
     fn marker(&self, file_rel: &str) -> Option<String> {
         (self.bodies > 0).then(|| {
             format!("[c-lambda] bodies={} calls={} file={file_rel}", self.bodies, self.calls)
+        })
+    }
+}
+
+/// DH.21: the client ENDPOINT CALLS a file's function bodies minted, by
+/// library (libcurl's easy interface, the one so far).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct HttpClientStats {
+    libcurl: usize,
+}
+
+impl HttpClientStats {
+    /// `[c-http-client] endpoints=<n> (libcurl=<n>) path=<file>`, for a file
+    /// that minted any.
+    fn marker(&self, file_rel: &str) -> Option<String> {
+        let endpoints = self.libcurl;
+        (endpoints > 0).then(|| {
+            format!("[c-http-client] endpoints={endpoints} (libcurl={}) path={file_rel}", self.libcurl)
         })
     }
 }
@@ -1049,6 +1090,7 @@ fn visit_callable(node: TsNode, src: &[u8], fn_id: NodeId, ns_path: &str, acc: &
     if let Some(body) = node.child_by_field_name("body") {
         collect_calls_in(body, src, fn_id, acc);
         collect_body_facts(body, src, fn_id, ns_path, acc);
+        collect_curl_endpoints(body, src, fn_id, acc);
     }
 }
 
@@ -1257,6 +1299,305 @@ fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
                 _ => stack.push((child, in_lambda)),
             }
         }
+    }
+}
+
+// ============================================================================
+// DH.21 — HTTP clients through libcurl's easy interface
+// ============================================================================
+//
+// `curl_easy_setopt(h, CURLOPT_URL, "http://api/users")` names a request whose
+// verb is the state of the SAME handle `h` when the request runs
+// (curl.se/libcurl/c/curl_easy_setopt.html). A function body's libcurl calls
+// are read in source order, one state per handle (the handle argument's text,
+// whitespace dropped: `curl` and `self->curl` are two handles). Each URL is
+// emitted with the verb its handle holds at the `curl_easy_perform(h)` /
+// `curl_multi_add_handle(m, h)` that runs it, or, when the body runs it
+// nowhere (a helper performs it), at `curl_easy_cleanup(h)` /
+// `curl_easy_reset(h)` or the end of the body. The verb is libcurl's own
+// (`Curl_http_method`): a CURLOPT_CUSTOMREQUEST literal, upper-cased; else
+// HEAD while CURLOPT_NOBODY is on; else the LAST of CURLOPT_POST /
+// POSTFIELDS / COPYPOSTFIELDS / MIMEPOST / HTTPPOST (POST), CURLOPT_UPLOAD /
+// PUT (PUT) and CURLOPT_HTTPGET (GET); else GET.
+//
+// Limits, by design: the state is per function body, so a handle whose
+// options are set in another function reads as GET; a URL the source does not
+// spell as a literal (a variable, a `snprintf` buffer, a macro-joined string)
+// names nothing, never an `<unresolved>` node; branches are not evaluated, so
+// two URLs set in an `if` / `else` before one perform both count.
+
+/// libcurl's request method of a handle (its `set.method`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum CurlMethod {
+    #[default]
+    Get,
+    Post,
+    Put,
+    Head,
+}
+
+/// A CURLOPT_URL literal set on a handle, at its `curl_easy_setopt` call
+/// (0-based row and column).
+struct CurlUrl {
+    raw: String,
+    row: usize,
+    col: usize,
+}
+
+/// One handle's state while a body is read.
+#[derive(Default)]
+struct CurlHandle {
+    key: String,
+    /// The URLs set since the handle was last performed; after a perform
+    /// they stay (a second perform re-runs them) until a new one is set.
+    urls: Vec<CurlUrl>,
+    /// A perform ran `urls`.
+    performed: bool,
+    method: CurlMethod,
+    no_body: bool,
+    custom: Option<String>,
+}
+
+/// What a libcurl call does to its handle.
+enum CurlOp {
+    Set,
+    Perform,
+    Close,
+}
+
+impl CurlHandle {
+    /// The verb a request on this handle is sent with now.
+    fn verb(&self) -> String {
+        if let Some(custom) = &self.custom {
+            return custom.clone();
+        }
+        let verb = match (self.no_body, self.method) {
+            (true, _) | (false, CurlMethod::Head) => "HEAD",
+            (false, CurlMethod::Get) => "GET",
+            (false, CurlMethod::Post) => "POST",
+            (false, CurlMethod::Put) => "PUT",
+        };
+        verb.to_string()
+    }
+
+    /// One `curl_easy_setopt(h, <opt>, <value>)` at `call`, as libcurl's
+    /// setopt applies it.
+    fn set(&mut self, opt: &str, value: TsNode, call: TsNode, src: &[u8]) {
+        let on = curl_long_on(value, src);
+        match opt {
+            "CURLOPT_URL" => {
+                if self.performed {
+                    self.urls.clear();
+                    self.performed = false;
+                }
+                if let Some(raw) = c_string_literal(value, src).filter(|r| !r.trim().is_empty()) {
+                    let pos = call.start_position();
+                    self.urls.push(CurlUrl { raw, row: pos.row, col: pos.column });
+                }
+            }
+            "CURLOPT_POSTFIELDS" | "CURLOPT_COPYPOSTFIELDS" => self.method = CurlMethod::Post,
+            "CURLOPT_POST" | "CURLOPT_UPLOAD" | "CURLOPT_PUT" => {
+                self.method = match (on, opt) {
+                    (false, _) => CurlMethod::Get,
+                    (true, "CURLOPT_POST") => CurlMethod::Post,
+                    (true, _) => CurlMethod::Put,
+                };
+                self.no_body &= !on;
+            }
+            "CURLOPT_MIMEPOST" | "CURLOPT_HTTPPOST" if on => {
+                self.method = CurlMethod::Post;
+                self.no_body = false;
+            }
+            "CURLOPT_NOBODY" => {
+                self.no_body = on;
+                if on {
+                    self.method = CurlMethod::Head;
+                } else if self.method == CurlMethod::Head {
+                    self.method = CurlMethod::Get;
+                }
+            }
+            "CURLOPT_HTTPGET" if on => {
+                self.method = CurlMethod::Get;
+                self.no_body = false;
+            }
+            "CURLOPT_CUSTOMREQUEST" => {
+                let token = |v: &String| {
+                    !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphabetic() || b == b'-' || b == b'_')
+                };
+                self.custom =
+                    c_string_literal(value, src).map(|v| v.trim().to_ascii_uppercase()).filter(token);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether a `long` option value turns the option on. A literal zero (`0`,
+/// `0L`), `false` or a null pointer is off; anything else is on, a value the
+/// source does not spell included (an option is set for a reason).
+fn curl_long_on(value: TsNode, src: &[u8]) -> bool {
+    let t = text_of(value, src).trim();
+    let digits = t.trim_end_matches(['l', 'L', 'u', 'U']);
+    let zero = !digits.is_empty() && digits.bytes().all(|b| b == b'0');
+    !(zero || matches!(t, "false" | "FALSE" | "NULL" | "nullptr"))
+}
+
+/// The text of a string literal the source spells in full: `"…"` with any
+/// encoding prefix, a C++ raw string, or adjacent literals joined
+/// (`"http://api" "/users"`). None for anything else, a joined string with a
+/// macro operand (`BASE "/users"`) included.
+fn c_string_literal(node: TsNode, src: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    match node.kind() {
+        "string_literal" => Some(node.named_children(&mut cursor).map(|p| text_of(p, src)).collect()),
+        "raw_string_literal" => Some(
+            node.named_children(&mut cursor)
+                .find(|p| p.kind() == "raw_string_content")
+                .map_or_else(String::new, |p| text_of(p, src).to_string()),
+        ),
+        "concatenated_string" => {
+            let parts: Vec<TsNode> = node.named_children(&mut cursor).collect();
+            parts.into_iter().map(|p| c_string_literal(p, src)).collect()
+        }
+        "parenthesized_expression" => c_string_literal(node.named_child(0)?, src),
+        _ => None,
+    }
+}
+
+/// `(host, path)` of a CURLOPT_URL literal ([`client_url_split`]). libcurl
+/// reads a URL with no `scheme://` as `host[:port][/path]` (it guesses the
+/// scheme), so the first segment of such a literal is its host, never a path
+/// segment.
+fn curl_url_split(raw: &str) -> (Option<String>, Option<String>) {
+    let raw = raw.trim();
+    let has_scheme = raw.find("://").is_some_and(|i| !raw[..i].contains(['/', '?', '#']));
+    if has_scheme || raw.starts_with('/') {
+        client_url_split(raw)
+    } else {
+        client_url_split(&format!("http://{raw}"))
+    }
+}
+
+/// The arguments of a call, comments skipped.
+fn call_args(call: TsNode) -> Vec<TsNode> {
+    let Some(list) = call.child_by_field_name("arguments") else {
+        return Vec::new();
+    };
+    let mut cursor = list.walk();
+    list.named_children(&mut cursor).filter(|n| n.kind() != "comment").collect()
+}
+
+/// DH.21: the libcurl client requests of a function body (see the section
+/// note), each an ENDPOINT CALLS edge from `fn_id`. As [`collect_calls_in`],
+/// a lambda's calls are the body's and a nested `function_definition` is
+/// not walked.
+fn collect_curl_endpoints(body: TsNode, src: &[u8], fn_id: NodeId, acc: &mut Acc) {
+    if !text_of(body, src).contains("curl_") {
+        return;
+    }
+    let mut calls: Vec<TsNode> = Vec::new();
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call_expression" {
+            calls.push(n);
+        }
+        let mut cursor = n.walk();
+        stack.extend(n.named_children(&mut cursor).filter(|c| c.kind() != "function_definition"));
+    }
+    calls.sort_by_key(|n| n.start_byte());
+
+    let mut handles: Vec<CurlHandle> = Vec::new();
+    let mut emitted: HashSet<(usize, usize, String)> = HashSet::new();
+    for call in calls {
+        let Some(func) = call.child_by_field_name("function") else {
+            continue;
+        };
+        let (at, op) = match text_of(func, src).trim().trim_start_matches("::") {
+            "curl_easy_setopt" => (0, CurlOp::Set),
+            "curl_easy_perform" => (0, CurlOp::Perform),
+            "curl_multi_add_handle" => (1, CurlOp::Perform),
+            "curl_easy_cleanup" | "curl_easy_reset" => (0, CurlOp::Close),
+            _ => continue,
+        };
+        let args = call_args(call);
+        let Some(handle) = args.get(at) else {
+            continue;
+        };
+        let key: String = text_of(*handle, src).chars().filter(|c| !c.is_whitespace()).collect();
+        let i = match handles.iter().position(|h| h.key == key) {
+            Some(i) => i,
+            None => {
+                handles.push(CurlHandle { key, ..CurlHandle::default() });
+                handles.len() - 1
+            }
+        };
+        let h = &mut handles[i];
+        match op {
+            CurlOp::Set => {
+                if let (Some(opt), Some(value)) = (args.get(1), args.get(2)) {
+                    h.set(text_of(*opt, src).trim(), *value, call, src);
+                }
+            }
+            CurlOp::Perform => {
+                emit_curl_requests(h, fn_id, &mut emitted, acc);
+                h.performed = true;
+            }
+            CurlOp::Close => {
+                if !h.performed {
+                    emit_curl_requests(h, fn_id, &mut emitted, acc);
+                }
+                *h = CurlHandle { key: std::mem::take(&mut h.key), ..CurlHandle::default() };
+            }
+        }
+    }
+    for h in handles.iter().filter(|h| !h.performed) {
+        emit_curl_requests(h, fn_id, &mut emitted, acc);
+    }
+}
+
+/// Every URL `h` holds, as an ENDPOINT of its current verb called from
+/// `fn_id`: Medium (the verb is read off sibling options), the hit at the
+/// CURLOPT_URL call with the literal's host, the CALLS edge's evidence at
+/// that call. A (call, verb) is emitted once per body.
+fn emit_curl_requests(
+    h: &CurlHandle,
+    fn_id: NodeId,
+    emitted: &mut HashSet<(usize, usize, String)>,
+    acc: &mut Acc,
+) {
+    let verb = h.verb();
+    for url in &h.urls {
+        if !emitted.insert((url.row, url.col, verb.clone())) {
+            continue;
+        }
+        let (host, path) = curl_url_split(&url.raw);
+        let Some(path) = path else {
+            continue;
+        };
+        let ep = ClientEndpoint {
+            method: verb.clone(),
+            path,
+            file: acc.file_rel.clone(),
+            line: url.row + 1,
+            col: url.col + 1,
+            confidence: Confidence::Medium,
+        };
+        let extras = HitExtras { host: host.as_deref(), ..HitExtras::default() };
+        push_client_endpoint_with(
+            acc.repo,
+            &ep,
+            extras,
+            fn_id,
+            &mut acc.nodes,
+            &mut acc.edges,
+            &mut acc.nav,
+            &mut acc.endpoint_seen,
+        );
+        if let Some(edge) = acc.edges.last_mut() {
+            let row = u32::try_from(url.row).unwrap_or(u32::MAX);
+            evidence::attach(edge, Evidence::emitter("parser:c_cpp").rule("libcurl").line(row));
+        }
+        acc.http.libcurl += 1;
     }
 }
 
@@ -2093,7 +2434,7 @@ int& g() { static int y; return y; }
         // The marker's counts: Local, n::K file-local; a, ref, K::f bound;
         // run, total, init provisional.
         let tree = parse_tree(source, Dialect::Cpp).unwrap().tree;
-        let (_, stats, _) = parse_tree_into(&tree, source, "src/Widget.cpp", "src::Widget.cpp", repo());
+        let (_, stats, _, _) = parse_tree_into(&tree, source, "src/Widget.cpp", "src::Widget.cpp", repo());
         assert_eq!(stats, IdentityStats { file_local: 2, bound: 3, provisional: 3, ..IdentityStats::default() });
         assert_eq!(
             stats.marker("src/Widget.cpp").as_deref(),
@@ -2111,7 +2452,7 @@ int& g() { static int y; return y; }
     /// The `[qname] c_cpp:` marker a parse of `source` prints.
     fn marker_of(source: &str, file: &str, module: &str) -> String {
         let tree = parse_tree(source, Dialect::from_path(file)).unwrap().tree;
-        let (_, stats, _) = parse_tree_into(&tree, source, file, module, repo());
+        let (_, stats, _, _) = parse_tree_into(&tree, source, file, module, repo());
         stats.marker(file).unwrap_or_default()
     }
 
@@ -2537,7 +2878,7 @@ int main() {
 
     fn walk_with_lambdas(source: &str, file: &str, module: &str) -> (FileParse, LambdaStats) {
         let tree = parse_tree(source, Dialect::from_path(file)).unwrap().tree;
-        let (fp, _, lambdas) = parse_tree_into(&tree, source, file, module, repo());
+        let (fp, _, lambdas, _) = parse_tree_into(&tree, source, file, module, repo());
         (fp, lambdas)
     }
 
@@ -2785,6 +3126,303 @@ int twice(int);
             ("dir.h/a.cpp", false),
         ] {
             assert_eq!(is_header_path(path), header, "{path}");
+        }
+    }
+
+    // ---- DH.21: libcurl easy-interface clients ----
+
+    /// The DH.21 matrix probe's client (bench/substrate-gap/matrix/c_cpp/
+    /// http_client/client/api_client.c), verbatim.
+    const CURL_PROBE: &str = r#"#include <curl/curl.h>
+
+int list_users(void) {
+    CURL *curl = curl_easy_init();
+    curl_easy_setopt(curl, CURLOPT_URL, "http://api/users");
+    int rc = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+    return rc;
+}
+
+int create_user(const char *json) {
+    CURL *curl = curl_easy_init();
+    curl_easy_setopt(curl, CURLOPT_URL, "http://api/users");
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json);
+    int rc = curl_easy_perform(curl);
+    curl_easy_cleanup(curl);
+    return rc;
+}
+"#;
+
+    /// The ENDPOINT qnames of a parse, in emission order.
+    fn endpoints(fp: &FileParse) -> Vec<String> {
+        fp.nodes
+            .iter()
+            .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::ENDPOINT))
+            .filter_map(|n| fp.nav.qname_by_id.get(&n.id).cloned())
+            .collect()
+    }
+
+    /// `(caller name, ENDPOINT qname)` of every CALLS edge to an ENDPOINT.
+    fn endpoint_calls(fp: &FileParse) -> Vec<(String, String)> {
+        fp.edges
+            .iter()
+            .filter(|e| {
+                e.category == edge_category::CALLS
+                    && fp.nav.kind_by_id.get(&e.to) == Some(&node_kind::ENDPOINT)
+            })
+            .map(|e| {
+                let name = fp.nav.name_by_id.get(&e.from).cloned().unwrap_or_default();
+                (name, fp.nav.qname_by_id.get(&e.to).cloned().unwrap_or_default())
+            })
+            .collect()
+    }
+
+    /// The ENDPOINT_HIT payload of the ENDPOINT named `qname`.
+    fn endpoint_hit(fp: &FileParse, qname: &str) -> String {
+        let id = fp
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == qname)
+            .map(|(id, _)| *id)
+            .unwrap_or_else(|| panic!("no node {qname}"));
+        let node = fp.nodes.iter().find(|n| n.id == id).unwrap();
+        node.cells
+            .iter()
+            .find(|c| c.kind == cell_type::ENDPOINT_HIT)
+            .map(|c| match &c.payload {
+                CellPayload::Json(s) | CellPayload::Text(s) => s.clone(),
+                _ => String::new(),
+            })
+            .unwrap_or_default()
+    }
+
+    fn pair(from: &str, to: &str) -> (String, String) {
+        (from.to_string(), to.to_string())
+    }
+
+    /// DH.21: the `[c-http-client]` fired_on line counts the ENDPOINT
+    /// CALLS a file minted; a file with none prints nothing.
+    #[test]
+    fn libcurl_marker() {
+        let file = "client/api_client.c";
+        let tree = parse_tree(CURL_PROBE, Dialect::C).unwrap().tree;
+        let (_, _, _, http) = parse_tree_into(&tree, CURL_PROBE, file, "client::api_client.c", repo());
+        assert_eq!(
+            http.marker(file).as_deref(),
+            Some("[c-http-client] endpoints=2 (libcurl=2) path=client/api_client.c")
+        );
+        assert_eq!(HttpClientStats::default().marker(file), None);
+    }
+
+    /// DH.21: a CURLOPT_URL with no method option on its handle is
+    /// libcurl's default GET, called from the configuring function; the hit
+    /// names the file and the literal's host, and the CALLS edge is located
+    /// at the CURLOPT_URL call.
+    #[test]
+    fn libcurl_default_get() {
+        let fp = parse_file(CURL_PROBE, "api_client.c", "api_client.c", Dialect::C, repo()).unwrap();
+        assert!(endpoints(&fp).contains(&"endpoint:GET:/users".to_string()), "{:?}", endpoints(&fp));
+        assert!(endpoint_calls(&fp).contains(&pair("list_users", "endpoint:GET:/users")));
+        let hit = endpoint_hit(&fp, "endpoint:GET:/users");
+        assert!(hit.contains(r#""method":"GET""#), "{hit}");
+        assert!(hit.contains(r#""file":"api_client.c""#), "{hit}");
+        assert!(hit.contains(r#""line":5"#), "{hit}");
+        assert!(hit.contains(r#""host":"api""#), "{hit}");
+        let edge = fp
+            .edges
+            .iter()
+            .find(|e| fp.nav.qname_by_id.get(&e.to).map(String::as_str) == Some("endpoint:GET:/users"))
+            .unwrap();
+        let ev = glia_code_domain::evidence::Evidence::of(edge).unwrap();
+        assert_eq!(ev.emitter, "parser:c_cpp");
+        assert_eq!(ev.rule.as_deref(), Some("libcurl"));
+        assert_eq!(ev.line, Some(4), "0-based row of the CURLOPT_URL call");
+    }
+
+    /// DH.21: CURLOPT_POSTFIELDS on the SAME handle makes the request a POST,
+    /// and the function then reaches no GET: exactly the probe's two
+    /// ENDPOINTs (its forbid: create_user must not reach GET /users).
+    #[test]
+    fn libcurl_postfields_is_post() {
+        let fp = parse_file(CURL_PROBE, "api_client.c", "api_client.c", Dialect::C, repo()).unwrap();
+        assert_eq!(endpoints(&fp), ["endpoint:GET:/users", "endpoint:POST:/users"]);
+        assert_eq!(
+            endpoint_calls(&fp),
+            [pair("list_users", "endpoint:GET:/users"), pair("create_user", "endpoint:POST:/users")]
+        );
+        assert!(endpoint_hit(&fp, "endpoint:POST:/users").contains(r#""method":"POST""#));
+
+        // COPYPOSTFIELDS, POST and MIMEPOST are POSTs too.
+        for opt in ["CURLOPT_COPYPOSTFIELDS, \"a=1\"", "CURLOPT_POST, 1L", "CURLOPT_MIMEPOST, mime"] {
+            let src = format!(
+                "void f(curl_mime *mime) {{ CURL *h = curl_easy_init();\n curl_easy_setopt(h, CURLOPT_URL, \"https://x/items\");\n curl_easy_setopt(h, {opt});\n curl_easy_perform(h); }}\n"
+            );
+            let fp = parse_file(&src, "c.c", "c.c", Dialect::C, repo()).unwrap();
+            assert_eq!(endpoint_calls(&fp), [pair("f", "endpoint:POST:/items")], "{opt}");
+        }
+    }
+
+    /// DH.21: a CURLOPT_CUSTOMREQUEST literal names the verb (upper-cased)
+    /// whatever else the handle says; a non-literal one keeps the
+    /// option-derived verb.
+    #[test]
+    fn libcurl_customrequest_verb() {
+        let src = r#"
+void del(void) {
+    CURL *h = curl_easy_init();
+    curl_easy_setopt(h, CURLOPT_URL, "http://api/users/1");
+    curl_easy_setopt(h, CURLOPT_POSTFIELDS, "x");
+    curl_easy_setopt(h, CURLOPT_CUSTOMREQUEST, "delete");
+    curl_easy_perform(h);
+}
+void any(const char *verb) {
+    CURL *h = curl_easy_init();
+    curl_easy_setopt(h, CURLOPT_CUSTOMREQUEST, verb);
+    curl_easy_setopt(h, CURLOPT_URL, "http://api/orders");
+    curl_easy_setopt(h, CURLOPT_POSTFIELDS, "x");
+    curl_easy_perform(h);
+}
+"#;
+        let fp = parse_file(src, "c.c", "c.c", Dialect::C, repo()).unwrap();
+        assert_eq!(
+            endpoint_calls(&fp),
+            [pair("del", "endpoint:DELETE:/users/1"), pair("any", "endpoint:POST:/orders")]
+        );
+    }
+
+    /// DH.21: CURLOPT_UPLOAD is a PUT and CURLOPT_NOBODY a HEAD; NOBODY
+    /// outranks the method an option set, and `0L` turns an option off.
+    #[test]
+    fn libcurl_upload_put_and_nobody_head() {
+        let src = r#"
+void put(void) {
+    CURL *h = curl_easy_init();
+    curl_easy_setopt(h, CURLOPT_URL, "http://api/files/a");
+    curl_easy_setopt(h, CURLOPT_UPLOAD, 1L);
+    curl_easy_perform(h);
+}
+void head(void) {
+    CURL *h = curl_easy_init();
+    curl_easy_setopt(h, CURLOPT_URL, "http://api/health");
+    curl_easy_setopt(h, CURLOPT_NOBODY, 1L);
+    curl_easy_setopt(h, CURLOPT_POSTFIELDS, "x");
+    curl_easy_perform(h);
+}
+void off(void) {
+    CURL *h = curl_easy_init();
+    curl_easy_setopt(h, CURLOPT_URL, "http://api/plain");
+    curl_easy_setopt(h, CURLOPT_UPLOAD, 0L);
+    curl_easy_setopt(h, CURLOPT_POST, 0);
+    curl_easy_perform(h);
+}
+"#;
+        let fp = parse_file(src, "c.c", "c.c", Dialect::C, repo()).unwrap();
+        assert_eq!(
+            endpoint_calls(&fp),
+            [
+                pair("put", "endpoint:PUT:/files/a"),
+                pair("head", "endpoint:HEAD:/health"),
+                pair("off", "endpoint:GET:/plain"),
+            ]
+        );
+    }
+
+    /// DH.21: two handles in one function keep their own options, and a
+    /// reused handle is read per perform: CURLOPT_HTTPGET puts it back to
+    /// GET for the next URL.
+    #[test]
+    fn libcurl_two_handles_in_one_function() {
+        let src = r#"
+void sync(void) {
+    CURL *a = curl_easy_init();
+    CURL *b = curl_easy_init();
+    curl_easy_setopt(a, CURLOPT_URL, "http://api/a");
+    curl_easy_setopt(b, CURLOPT_URL, "http://api/b");
+    curl_easy_setopt(a, CURLOPT_POSTFIELDS, "x");
+    curl_easy_perform(a);
+    curl_easy_perform(b);
+}
+void reuse(void) {
+    CURL *h = curl_easy_init();
+    curl_easy_setopt(h, CURLOPT_URL, "http://api/login");
+    curl_easy_setopt(h, CURLOPT_POSTFIELDS, "x");
+    curl_easy_perform(h);
+    curl_easy_setopt(h, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(h, CURLOPT_URL, "http://api/me");
+    curl_easy_perform(h);
+    curl_easy_cleanup(h);
+}
+"#;
+        let fp = parse_file(src, "c.c", "c.c", Dialect::C, repo()).unwrap();
+        assert_eq!(
+            endpoint_calls(&fp),
+            [
+                pair("sync", "endpoint:POST:/a"),
+                pair("sync", "endpoint:GET:/b"),
+                pair("reuse", "endpoint:POST:/login"),
+                pair("reuse", "endpoint:GET:/me"),
+            ]
+        );
+    }
+
+    /// DH.21: a URL the source does not spell (a variable, a buffer, a
+    /// macro-built string) names nothing: no ENDPOINT, no `<unresolved>`;
+    /// a scheme-less literal is `host[/path]` as libcurl reads it, and a
+    /// handle with no perform in the function is read at its end.
+    #[test]
+    fn libcurl_variable_url_names_nothing() {
+        let src = r#"
+void dyn(const char *url, int id) {
+    char buf[256];
+    CURL *h = curl_easy_init();
+    curl_easy_setopt(h, CURLOPT_URL, url);
+    curl_easy_perform(h);
+    snprintf(buf, sizeof buf, "http://api/users/%d", id);
+    curl_easy_setopt(h, CURLOPT_URL, buf);
+    curl_easy_setopt(h, CURLOPT_URL, BASE "/users");
+    curl_easy_perform(h);
+}
+"#;
+        let fp = parse_file(src, "c.c", "c.c", Dialect::C, repo()).unwrap();
+        assert!(endpoints(&fp).is_empty(), "{:?}", endpoints(&fp));
+        assert!(endpoint_calls(&fp).is_empty());
+
+        let src = "CURL *mk(void) {\n CURL *h = curl_easy_init();\n curl_easy_setopt(h, CURLOPT_URL, \"localhost:8080/v1\" \"/health\");\n return h;\n}\n";
+        let fp = parse_file(src, "c.c", "c.c", Dialect::C, repo()).unwrap();
+        assert_eq!(endpoint_calls(&fp), [pair("mk", "endpoint:GET:/v1/health")]);
+        assert!(endpoint_hit(&fp, "endpoint:GET:/v1/health").contains(r#""host":"localhost:8080""#));
+    }
+
+    /// DH.21: the same calls inside C++ methods (inline and out-of-line)
+    /// are CALLS from the METHOD; a raw-string URL is a literal.
+    #[test]
+    fn cpp_member_function_client() {
+        let src = r#"
+#include <curl/curl.h>
+class Api {
+public:
+    int list() {
+        curl_easy_setopt(curl_, CURLOPT_URL, R"(http://api/users)");
+        return curl_easy_perform(curl_);
+    }
+    int create(const std::string &body);
+private:
+    CURL *curl_;
+};
+int Api::create(const std::string &body) {
+    curl_easy_setopt(this->curl_, CURLOPT_URL, "http://api/users");
+    curl_easy_setopt(this->curl_, CURLOPT_COPYPOSTFIELDS, body.c_str());
+    return curl_easy_perform(this->curl_);
+}
+"#;
+        let fp = parse_file(src, "src/api.cpp", "src::api.cpp", Dialect::Cpp, repo()).unwrap();
+        assert_eq!(
+            endpoint_calls(&fp),
+            [pair("list", "endpoint:GET:/users"), pair("create", "endpoint:POST:/users")]
+        );
+        for e in fp.edges.iter().filter(|e| fp.nav.kind_by_id.get(&e.to) == Some(&node_kind::ENDPOINT)) {
+            assert_eq!(fp.nav.kind_by_id.get(&e.from), Some(&node_kind::METHOD));
         }
     }
 }
