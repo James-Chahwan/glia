@@ -96,12 +96,37 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   (present since 0.5.1). A shared test module compiled per binary; unfinished wiring, not a `dead_code` allow.
 - W0 (D0.1): `cargo fmt --check` is not clean in code-domain (`code_span.rs`, `profile.rs`) at 0.5.1; no gate runs
   rustfmt. Candidate: one formatting commit plus a fmt gate in the close-out.
+- W1 (DA.3): `rules::value::Tier` is a fourth tier vocabulary, beside the string consts in engine `why.rs` and
+  `check.rs` and `implementors.rs`'s uppercase enum. Its words match `why.rs`, so DB maps them 1:1; one shared
+  vocabulary is in no 0.5.2 item.
+- W1 (DE.1): an ambiguous bare doc mention still binds one candidate at Weak, now stable rather than RepoId-dependent.
+  Measured weak binds: glia 240, quokka-stack 193, Kina 4. Alternatives: proximity ranking, or mint no edge (question 4).
+- W1 (DD.1): `RUSTDOCFLAGS=-D warnings cargo doc -p glia-activation` fails on links broken before 0.5.2 (`EffectSink`
+  in profile.rs; `plan` → the private `ppr_vector`); the `algo` module-doc links went to DD.3 as a correction.
+- W1 (DF.1): PHP `use` mid-line (`<?php use \A\{B};`, `namespace X; use \A\{B};`) is still swallowed by
+  tree-sitter-php 0.24; the mask reads only line-start statements.
+- W1 (DF.2): a PHP namespaced `use` under a root the repo does not own still takes the `tail_unique` guess
+  (`use Symfony\Bundle\SecurityBundle\Security` → PACKAGE `App::Security`); a file with several statement-form
+  `namespace A; … namespace B;` blocks lists its types under every namespace (needs a parser-side type owner).
+- W1 (DF.5): C++ heritage: a `base_class_clause` should become an unresolved INHERITS_FROM ref so `CppScope.bases`
+  fills (binds Flutter runners' `this->Show()`, 30 lambda sites, and implicit-this calls to base members); and
+  `make_box().get()` arrives as `Attribute { base: "make_box()" }`, bindable through `return_types`.
+- W1 (DF.14): a Pub/Sub consumer whose subscription S is bound to topic T ≠ S still pairs exactly with a producer
+  publishing to a topic named S; the declared binding contradicts that pair.
+- W1 (DF.17): TS locals from `inject()` (`const auth = inject(AuthService); auth.user()`) have no type, and Angular
+  template reads (`{{ auth.user()?.displayName }}`) bind nothing (Kina guards and templates).
+- W1 (DF.18): an OpenAPI YAML `servers:` sequence at indent 0 (`servers:\n- url: /v1`, what yaml.v2 emitters write)
+  reads as no servers; fixing it moves those documents' op qnames, so the packet declares a qname break. Flow-style
+  `servers: [{url: ..}]` / `variables: {..}` stay unread.
+- W1 (DF.20): `deployment_hosts` could apply a `.replace` span's transform to each alternative and write `hosts`; the
+  config-expression grammar could take a SCREAMING_CASE bare identifier (`ADMIN_BASE + '/users'`).
 
 ## 3. Open questions for James
 
 1. Section C: which candidates become packets (review queue, SQL projection, identity-scoped queries)?
 2. Section B: does `find`'s semantic tier also feed `pack` and blast-radius seeding, or stay in `find`?
 3. Does B ship with a glia-side writer for tests only (a fixture `.glia/vectors.jsonl`), or wait for Engram's writer?
+4. Section E (DE.1): an ambiguous bare doc mention — keep the one Weak bind, rank by proximity, or mint no edge?
 
 ## 4. Spec run
 
