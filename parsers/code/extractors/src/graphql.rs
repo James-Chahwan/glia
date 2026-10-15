@@ -4,7 +4,7 @@ use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use glia_core::{Confidence, Node, NodeId, RepoId};
 
 use crate::anchor::{Anchor, line_of};
-use crate::cli::CodeMap;
+use crate::cli::{CodeMap, Script};
 use crate::code_guard::LazyGuard;
 
 pub struct GraphqlNodes {
@@ -137,6 +137,20 @@ struct NeedleTally {
     client: usize,
     request: usize,
     context: Option<GqlContext>,
+    /// DH.8: set on the first kept hit of a Dart file that imports
+    /// package:graphql ([`dart_imports_graphql`]).
+    dart: Option<DartDocTally>,
+}
+
+/// DH.8: how the kept needles of a package:graphql Dart file were named, for
+/// the `[graphql-ops] dart-document` marker: from a same-file constant
+/// (`gql(listOrders)`), from an inline literal (`gql(r'''query X {..}''')`),
+/// or neither (the needle's fallback name).
+#[derive(Default, Clone, Copy)]
+struct DartDocTally {
+    constant: usize,
+    inline: usize,
+    unread: usize,
 }
 
 impl NeedleTally {
@@ -163,6 +177,16 @@ impl NeedleTally {
             self.client,
             self.request,
             ctx.label()
+        ))
+    }
+
+    /// DH.8: the `[graphql-ops] dart-document` line, or `None` when the file
+    /// is no package:graphql Dart file with a kept needle.
+    fn dart_marker(&self) -> Option<String> {
+        let d = self.dart?;
+        Some(format!(
+            "[graphql-ops] dart-document const={} inline={} unread={}",
+            d.constant, d.inline, d.unread
         ))
     }
 }
@@ -298,6 +322,12 @@ fn accept(family: Family, arg: ArgShape, ctx: GqlContext, ident_before: bool) ->
 /// line) in source order, and the tally for the `[graphql-ops]` marker.
 /// CJ.1b: a needle occurrence `guard` refuses (it starts in a Rust / Python
 /// string literal or comment) carries no evidence.
+///
+/// A kept line is named by [`extract_gql_operation_name`], else by its
+/// needle. DH.8: in a Dart file that imports package:graphql (or
+/// graphql_flutter) the kept call's own `gql(..)` document names it first
+/// ([`dart_document_name`]): `client.query(QueryOptions(document:
+/// gql(listOrders)))` is the operation its `listOrders` constant declares.
 fn scan_operation_needles(
     source: &str,
     guard: &mut LazyGuard<'_>,
@@ -305,6 +335,9 @@ fn scan_operation_needles(
     let mut hits = Vec::new();
     let mut tally = NeedleTally::default();
     let b = source.as_bytes();
+    // DH.8: whether the file's package:graphql import was read, on its first
+    // kept hit.
+    let mut dart_checked = false;
     let mut next_line_start = 0usize;
     for (line_no, line) in source.split_inclusive('\n').enumerate() {
         let line_start = next_line_start;
@@ -329,17 +362,32 @@ fn scan_operation_needles(
             if !trimmed.contains(pattern) {
                 continue;
             }
-            let kept = line.match_indices(pattern).any(|(at, _)| {
-                let hit = line_start + at;
+            let kept = line.match_indices(pattern).map(|(at, _)| line_start + at).find(|&hit| {
                 if !guard.admits(hit) {
                     return false;
                 }
                 let arg = first_arg_shape(source, hit + pattern.len());
                 accept(family, arg, ctx, ident_byte_before(b, hit))
             });
-            tally.record(family, kept);
-            if kept {
-                let op_name = extract_gql_operation_name(source, trimmed)
+            tally.record(family, kept.is_some());
+            if let Some(hit) = kept {
+                if !dart_checked {
+                    dart_checked = true;
+                    tally.dart = dart_imports_graphql(source).then(DartDocTally::default);
+                }
+                // The needle's `(` is its last byte.
+                let document = tally.dart.as_mut().map(|d| {
+                    let found = dart_document_name(source, hit + pattern.len() - 1);
+                    match found.as_ref().map(|(_, doc)| *doc) {
+                        Some(DartDoc::Constant) => d.constant += 1,
+                        Some(DartDoc::Inline) => d.inline += 1,
+                        None => d.unread += 1,
+                    }
+                    found.map(|(name, _)| name)
+                });
+                let op_name = document
+                    .flatten()
+                    .or_else(|| extract_gql_operation_name(source, trimmed))
                     .unwrap_or_else(|| pattern.trim_end_matches('(').to_string());
                 hits.push((op_name, u32::try_from(line_no).unwrap_or(u32::MAX)));
                 break;
@@ -412,6 +460,11 @@ enum DecoratorFamily {
     Rust,
     /// Caliban `RootResolver(..)` case classes and their parameters (DG.4).
     Scala,
+    /// graphql-ruby root classes and their `field` calls (DH.8).
+    Ruby,
+    /// Absinthe `query do` / `mutation do` / `subscription do` blocks and
+    /// their `field`s (DH.8).
+    Elixir,
 }
 
 /// LA.38: the GraphQL server package a file imports.
@@ -424,6 +477,8 @@ enum GqlLib {
     HotChocolate,
     AsyncGraphql,
     Caliban,
+    GraphqlRuby,
+    Absinthe,
 }
 
 impl GqlLib {
@@ -436,6 +491,8 @@ impl GqlLib {
             GqlLib::HotChocolate => "hotchocolate",
             GqlLib::AsyncGraphql => "async-graphql",
             GqlLib::Caliban => "caliban",
+            GqlLib::GraphqlRuby => "graphql-ruby",
+            GqlLib::Absinthe => "absinthe",
         }
     }
 }
@@ -449,18 +506,21 @@ impl GqlLib {
 /// being those in a comment, string or preprocessor line (CL.6b); a Rust
 /// file its root attributes ([`rs_root_attr_sites`]) and a Scala file its
 /// `RootResolver` calls ([`scala_root_resolver_sites`]), `rej_position`
-/// being those in a comment or string (DG.4).
+/// being those in a comment or string (DG.4); a Ruby file its root-named
+/// `class` declarations ([`ruby_root_class_sites`]) and an Elixir file its
+/// root block openers ([`absinthe_root_sites`]), the same way (DH.8).
 #[derive(Default, Debug)]
 struct DecoratorCensus {
     /// Occurrences of [`DECORATOR_NEEDLES`], or of the language's root
-    /// markers in a C# / Rust / Scala file.
+    /// markers in a C# / Rust / Scala / Ruby / Elixir file.
     hits: usize,
     lib: Option<GqlLib>,
     /// Root nouns kept, in line order.
     roots: Vec<&'static str>,
     /// Field resolvers read: TypeScript methods under a field decorator,
     /// Python root-class fields (CB.14), C# root-class members (CL.6b), Rust
-    /// root-impl methods and Scala root case-class parameters (DG.4).
+    /// root-impl methods and Scala root case-class parameters (DG.4),
+    /// graphql-ruby root-class and Absinthe root-block fields (DH.8).
     fields: usize,
     rej_lang: usize,
     rej_import: usize,
@@ -578,10 +638,10 @@ pub fn extract_graphql_operation_nodes(
     let mut guard = LazyGuard::new(path, source);
 
     let (hits, tally) = scan_operation_needles(source, &mut guard);
-    if graphql_debug()
-        && let Some(marker) = tally.marker()
-    {
-        eprintln!("{marker}");
+    if graphql_debug() {
+        for marker in [tally.marker(), tally.dart_marker()].into_iter().flatten() {
+            eprintln!("{marker}");
+        }
     }
     for (op_name, line) in hits {
         if seen.insert(op_name.clone()) {
@@ -632,7 +692,7 @@ pub fn extract_graphql_operation_nodes(
 /// SDL only inside a GraphQL-marked literal ([`gql_literal_regions`], LA.27).
 /// A comment or an unmarked string that holds `type Query {` mints nothing,
 /// and neither does a decorator needle outside a TypeScript / Python / C# /
-/// Rust / Scala file that imports a GraphQL server package. A `.graphql` / `.gql` body goes
+/// Rust / Scala / Ruby / Elixir file that imports a GraphQL server package. A `.graphql` / `.gql` body goes
 /// through [`extract_graphql_sdl_file_nodes`] instead.
 pub fn extract_graphql_resolver_nodes(
     source: &str,
@@ -678,7 +738,16 @@ pub fn extract_graphql_resolver_nodes(
 ///   literal / comment guard;
 /// - Scala (Caliban, DG.4): a `RootResolver(..)` argument names its root
 ///   type, and the parameters of its in-file case class are fields
-///   ([`caliban_roots_and_fields`]).
+///   ([`caliban_roots_and_fields`]);
+/// - Ruby (graphql-ruby, DH.8): a `QueryType` / `MutationType` /
+///   `SubscriptionType` class (or one named exactly `Query`, ..) inheriting
+///   a `*BaseObject` / `GraphQL::Schema::Object` names its root type, and
+///   its body's `field :name` calls are fields under graphql-ruby's camelised
+///   names ([`graphql_ruby_roots_and_fields`]);
+/// - Elixir (Absinthe, DH.8): a `query do` / `mutation do` /
+///   `subscription do` block names its root type, and the `field :name`
+///   statements at its first level are fields under Absinthe's external
+///   names ([`absinthe_roots_and_fields`]); both read through a code mask.
 ///
 /// Every noun is a root type: `@Resolver(`, `@ResolveField(`,
 /// `@strawberry.type`, `@strawberry.mutation`, `ObjectType` and an object
@@ -689,11 +758,19 @@ fn decorator_scan(source: &str, lang: &str) -> (Vec<(String, u32)>, DecoratorCen
         Some(DecoratorFamily::CSharp) => cs_root_needle_sites(source),
         Some(DecoratorFamily::Rust) => rs_root_attr_sites(source),
         Some(DecoratorFamily::Scala) => scala_root_resolver_sites(source),
+        Some(DecoratorFamily::Ruby) => ruby_root_class_sites(source),
+        Some(DecoratorFamily::Elixir) => absinthe_root_sites(source),
         _ => Vec::new(),
     };
     let mut census = DecoratorCensus {
         hits: match family {
-            Some(DecoratorFamily::CSharp | DecoratorFamily::Rust | DecoratorFamily::Scala) => root_sites.len(),
+            Some(
+                DecoratorFamily::CSharp
+                | DecoratorFamily::Rust
+                | DecoratorFamily::Scala
+                | DecoratorFamily::Ruby
+                | DecoratorFamily::Elixir,
+            ) => root_sites.len(),
             _ => DECORATOR_NEEDLES.iter().map(|n| source.matches(n).count()).sum(),
         },
         ..DecoratorCensus::default()
@@ -734,6 +811,16 @@ fn decorator_scan(source: &str, lang: &str) -> (Vec<(String, u32)>, DecoratorCen
             census.rej_position = root_sites.iter().filter(|&&at| mask.get(at) == Some(&b' ')).count();
             caliban_roots_and_fields(source, &mask, &root_sites)
         }
+        DecoratorFamily::Ruby => {
+            let mask = ruby_mask(source);
+            census.rej_position = root_sites.iter().filter(|&&at| mask.get(at) == Some(&b' ')).count();
+            graphql_ruby_roots_and_fields(source, &mask)
+        }
+        DecoratorFamily::Elixir => {
+            let mask = elixir_code_mask(source);
+            census.rej_position = root_sites.iter().filter(|&&at| mask.get(at) == Some(&b' ')).count();
+            absinthe_roots_and_fields(source, &mask, &root_sites)
+        }
     };
     census.roots = roots.iter().map(|&(root, _)| root).collect();
     let mut names: Vec<(String, u32)> = roots
@@ -755,6 +842,8 @@ fn decorator_family(lang: &str) -> Option<DecoratorFamily> {
         "csharp" => Some(DecoratorFamily::CSharp),
         "rust" => Some(DecoratorFamily::Rust),
         "scala" => Some(DecoratorFamily::Scala),
+        "ruby" => Some(DecoratorFamily::Ruby),
+        "elixir" => Some(DecoratorFamily::Elixir),
         _ => None,
     }
 }
@@ -767,7 +856,9 @@ fn decorator_family(lang: &str) -> Option<DecoratorFamily> {
 /// C#: a `using` of the `HotChocolate` namespace ([`cs_imports_hotchocolate`]).
 /// Rust: an `async_graphql` crate path or `use` at code position
 /// ([`rs_imports_async_graphql`]). Scala: an `import caliban` line
-/// ([`scala_imports_caliban`]).
+/// ([`scala_imports_caliban`]). Ruby: `GraphQL::Schema` at code position or
+/// a class inheriting a `*BaseObject` ([`ruby_imports_graphql`]). Elixir:
+/// `use Absinthe.Schema` at code position ([`absinthe_schema`]).
 fn graphql_server_lib(source: &str, family: DecoratorFamily) -> Option<GqlLib> {
     match family {
         DecoratorFamily::Ts => {
@@ -799,6 +890,12 @@ fn graphql_server_lib(source: &str, family: DecoratorFamily) -> Option<GqlLib> {
         DecoratorFamily::CSharp => cs_imports_hotchocolate(source).then_some(GqlLib::HotChocolate),
         DecoratorFamily::Rust => rs_imports_async_graphql(source).then_some(GqlLib::AsyncGraphql),
         DecoratorFamily::Scala => scala_imports_caliban(source).then_some(GqlLib::Caliban),
+        // A file that never spells the markers is never lexed.
+        DecoratorFamily::Ruby => ((source.contains("GraphQL::Schema") || source.contains("BaseObject"))
+            && ruby_imports_graphql(source, &ruby_mask(source)))
+        .then_some(GqlLib::GraphqlRuby),
+        DecoratorFamily::Elixir => (source.contains("Absinthe.Schema") && absinthe_schema(&elixir_code_mask(source)))
+            .then_some(GqlLib::Absinthe),
     }
 }
 
@@ -928,7 +1025,9 @@ fn py_root_class_sites(lines: &[&str], lib: GqlLib) -> Vec<(&'static str, usize)
             | GqlLib::TypeGraphql
             | GqlLib::HotChocolate
             | GqlLib::AsyncGraphql
-            | GqlLib::Caliban => {}
+            | GqlLib::Caliban
+            | GqlLib::GraphqlRuby
+            | GqlLib::Absinthe => {}
         }
     }
     sites
@@ -1045,7 +1144,9 @@ fn py_field_resolvers(lines: &[&str], lib: GqlLib) -> Vec<(String, u32)> {
             | GqlLib::TypeGraphql
             | GqlLib::HotChocolate
             | GqlLib::AsyncGraphql
-            | GqlLib::Caliban => {}
+            | GqlLib::Caliban
+            | GqlLib::GraphqlRuby
+            | GqlLib::Absinthe => {}
         }
     }
     fields.sort_by_key(|&(_, line)| line);
@@ -2909,6 +3010,627 @@ fn caliban_roots_and_fields(src: &str, m: &[u8], sites: &[usize]) -> (RootNouns,
     (roots, fields)
 }
 
+// ---- DH.8: graphql-ruby and Absinthe (Elixir) code-first root types ----
+
+/// DH.8: [`code_mask`] of a Ruby file, through [`CodeMap::script`]'s Ruby
+/// lexer (`#` comments, `=begin` blocks, `'` / `"` strings, heredoc bodies).
+fn ruby_mask(source: &str) -> Vec<u8> {
+    let map = CodeMap::script(source, Script::Ruby);
+    code_mask(source, |at| map.is_code(at))
+}
+
+/// DH.8: `(start, end)` of every line of `b` (a source or its mask), `end`
+/// at the line's `\n` or the end of input.
+fn line_spans(b: &[u8]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = 0;
+    for (at, &c) in b.iter().enumerate() {
+        if c == b'\n' {
+            spans.push((start, at));
+            start = at + 1;
+        }
+    }
+    if start < b.len() {
+        spans.push((start, b.len()));
+    }
+    spans
+}
+
+/// DH.8: the offset of the first byte of `start..end` that is no blank or
+/// tab (`end` when there is none).
+fn first_non_blank(b: &[u8], start: usize, end: usize) -> usize {
+    start + b.get(start..end).map_or(0, |r| r.iter().take_while(|&&c| c == b' ' || c == b'\t').count())
+}
+
+/// DH.8: the `::`-separated constant path starting at `from` of a Ruby mask
+/// (past blanks and a leading `::`), no further than `to`, and the offset
+/// past it: `Types::QueryType` -> `[Types, QueryType]`.
+fn ruby_path<'a>(src: &'a str, m: &[u8], from: usize, to: usize) -> (Vec<&'a str>, usize) {
+    let mut segs = Vec::new();
+    let mut at = first_non_blank(m, from, to);
+    if m.get(at..to).is_some_and(|r| r.starts_with(b"::")) {
+        at += 2;
+    }
+    loop {
+        let end = cs_ident_end(m, at, to);
+        let Some(seg) = src.get(at..end).filter(|s| !s.is_empty()) else {
+            break;
+        };
+        segs.push(seg);
+        at = end;
+        if !m.get(end..to).is_some_and(|r| r.starts_with(b"::")) {
+            break;
+        }
+        at = end + 2;
+    }
+    (segs, at)
+}
+
+/// DH.8: the root type a graphql-ruby class name declares: exactly `Query` /
+/// `Mutation` / `Subscription`, or a name ending in `QueryType` /
+/// `MutationType` / `SubscriptionType` (the install generator's
+/// `Types::QueryType`).
+fn ruby_root(name: &str) -> Option<&'static str> {
+    ROOT_TYPES.iter().copied().find(|&root| {
+        name == root || name.strip_suffix("Type").is_some_and(|stem| stem.ends_with(root))
+    })
+}
+
+/// DH.8: a graphql-ruby object superclass: one whose last segment ends in
+/// `BaseObject` (`Types::BaseObject`, the generator's base class) or
+/// `GraphQL::Schema::Object` itself.
+fn ruby_object_superclass(segs: &[&str]) -> bool {
+    segs.last().is_some_and(|s| s.ends_with("BaseObject")) || segs == ["GraphQL", "Schema", "Object"]
+}
+
+/// DH.8: one Ruby `class` declaration: the path it names, its superclass
+/// path (empty for none), the offset of `class` and its 0-indexed line.
+struct RubyClass<'a> {
+    name: Vec<&'a str>,
+    superclass: Vec<&'a str>,
+    class_at: usize,
+    line: usize,
+}
+
+/// DH.8: every `class <Path> [< <Superclass>]` declaration of a Ruby mask
+/// that opens its line; `class << self` is none.
+fn ruby_classes<'a>(src: &'a str, m: &[u8]) -> Vec<RubyClass<'a>> {
+    let mut classes = Vec::new();
+    for (line, (start, end)) in line_spans(m).into_iter().enumerate() {
+        let at = first_non_blank(m, start, end);
+        if m.get(at..at + 5) != Some(b"class") || m.get(at + 5).is_some_and(|&c| is_ident_byte(c)) {
+            continue;
+        }
+        let after = first_non_blank(m, at + 5, end);
+        if m.get(after..end).is_some_and(|r| r.starts_with(b"<<")) {
+            continue;
+        }
+        let (name, name_end) = ruby_path(src, m, after, end);
+        if name.is_empty() {
+            continue;
+        }
+        let lt = first_non_blank(m, name_end, end);
+        let superclass = if m.get(lt) == Some(&b'<') && m.get(lt + 1) != Some(&b'<') {
+            ruby_path(src, m, lt + 1, end).0
+        } else {
+            Vec::new()
+        };
+        classes.push(RubyClass { name, superclass, class_at: at, line });
+    }
+    classes
+}
+
+/// DH.8: the census sites of a Ruby file: every whole-word `class` whose
+/// declared name (read from the source, so a commented-out declaration
+/// counts) is root-shaped ([`ruby_root`]).
+fn ruby_root_class_sites(source: &str) -> Vec<usize> {
+    let b = source.as_bytes();
+    word_sites(b, b"class")
+        .into_iter()
+        .filter(|&at| {
+            let end = b.get(at..).and_then(|r| r.iter().position(|&c| c == b'\n')).map_or(b.len(), |p| at + p);
+            ruby_path(source, b, at + 5, end).0.last().is_some_and(|name| ruby_root(name).is_some())
+        })
+        .collect()
+}
+
+/// DH.8: a Ruby file that uses graphql-ruby: `GraphQL::Schema` (the schema
+/// class, or `GraphQL::Schema::Object`) at code position, or a class whose
+/// superclass ends in `BaseObject`.
+fn ruby_imports_graphql(src: &str, m: &[u8]) -> bool {
+    let needle = b"GraphQL::Schema";
+    let schema = m.windows(needle.len()).enumerate().any(|(at, w)| {
+        w == needle && !ident_byte_before(m, at) && !m.get(at + needle.len()).is_some_and(|&c| is_ident_byte(c))
+    });
+    schema || ruby_classes(src, m).iter().any(|c| c.superclass.last().is_some_and(|s| s.ends_with("BaseObject")))
+}
+
+/// DH.8: graphql-ruby's `Schema::Member::BuildType.camelize`, the default
+/// for every field (`camelize: true`): a name with no `_` (or `_` itself)
+/// stays as written; otherwise each `_`-separated part is capitalised
+/// (first char upper, the rest lower, Ruby's `String#capitalize`), the parts
+/// are joined, the first char is lowered, and the name's leading
+/// underscores are put back. `user_orders` -> `userOrders`, `user_ID` ->
+/// `userId`, `a__b` -> `aB`, `_private` -> `_private`.
+fn ruby_camelize(s: &str) -> String {
+    if s == "_" || !s.contains('_') {
+        return s.to_string();
+    }
+    let mut joined = String::new();
+    for part in s.split('_') {
+        let mut chars = part.chars();
+        if let Some(first) = chars.next() {
+            joined.extend(first.to_uppercase());
+            joined.extend(chars.flat_map(char::to_lowercase));
+        }
+    }
+    let mut chars = joined.chars();
+    let Some(first) = chars.next() else {
+        return s.to_string();
+    };
+    let lead = s.len() - s.trim_start_matches('_').len();
+    let mut out = "_".repeat(lead);
+    out.extend(first.to_lowercase());
+    out.push_str(chars.as_str());
+    out
+}
+
+/// DH.8: the offset past one Ruby statement starting at `at` on line `j` of
+/// a mask: its line, plus each following line while the text so far ends
+/// in `,` / `(` / `\` or leaves a bracket open (a multi-line `field` call),
+/// at most [`PY_CALL_WINDOW`] lines.
+fn ruby_statement_end(m: &[u8], lines: &[(usize, usize)], j: usize, at: usize) -> usize {
+    let mut depth = 0i32;
+    let mut end = at;
+    for &(start, line_end) in lines.iter().skip(j).take(PY_CALL_WINDOW) {
+        let from = start.max(at);
+        for &c in m.get(from..line_end).unwrap_or_default() {
+            match c {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                _ => {}
+            }
+        }
+        end = line_end;
+        let tail = m.get(from..line_end).unwrap_or_default().trim_ascii_end();
+        if depth <= 0 && !matches!(tail.last(), Some(b',' | b'(' | b'\\')) {
+            break;
+        }
+    }
+    end
+}
+
+/// DH.8: the offset of a `key:` (or `:key =>`) option's value in the
+/// statement `from..to` of a Ruby mask.
+fn ruby_option(m: &[u8], from: usize, to: usize, key: &[u8]) -> Option<usize> {
+    let stmt = m.get(from..to)?;
+    word_sites(stmt, key).into_iter().find_map(|at| {
+        let after = at + key.len();
+        let value = match (stmt.get(after), stmt.get(after + 1)) {
+            (Some(b':'), next) if next != Some(&b':') => after + 1,
+            _ => {
+                let arrow = first_non_blank(stmt, after, stmt.len());
+                stmt.get(arrow..arrow + 2).filter(|r| *r == b"=>").map(|_| arrow + 2)?
+            }
+        };
+        Some(from + first_non_blank(stmt, value, stmt.len()))
+    })
+}
+
+/// DH.8: one graphql-ruby `field` call whose `field` word starts at `at` on
+/// line `j` of the mask: its Ruby name (a `:symbol` or a quoted string),
+/// its schema name ([`ruby_camelize`]d unless the call holds `camelize:
+/// false`) and the type method that resolves it (a `resolver_method:
+/// :name` option, else the Ruby name), for the anchor.
+fn ruby_field(src: &str, m: &[u8], lines: &[(usize, usize)], j: usize, at: usize) -> Option<(String, String)> {
+    let line_end = lines.get(j)?.1;
+    // Blanks are skipped in the source: the mask blanks a quoted name too.
+    let sb = src.as_bytes();
+    let mut p = first_non_blank(sb, at + 5, line_end);
+    if m.get(p) == Some(&b'(') {
+        p = first_non_blank(sb, p + 1, line_end);
+    }
+    let name = match (m.get(p), sb.get(p)) {
+        (Some(b':'), _) => {
+            let end = cs_ident_end(m, p + 1, line_end);
+            if matches!(m.get(end), Some(b'?' | b'!' | b'=' | b':')) {
+                return None;
+            }
+            src.get(p + 1..end)?
+        }
+        (Some(b' '), Some(b'"' | b'\'')) => quoted_literal(src.get(p..line_end)?)?,
+        _ => return None,
+    };
+    if !is_ident(name) {
+        return None;
+    }
+    let end = ruby_statement_end(m, lines, j, at);
+    let camel = !ruby_option(m, at, end, b"camelize")
+        .is_some_and(|v| m.get(v..v + 5) == Some(b"false") && !m.get(v + 5).is_some_and(|&c| is_ident_byte(c)));
+    let method = ruby_option(m, at, end, b"resolver_method")
+        .filter(|&v| m.get(v) == Some(&b':'))
+        .and_then(|v| src.get(v + 1..cs_ident_end(m, v + 1, end)))
+        .filter(|s| !s.is_empty())
+        .unwrap_or(name);
+    let schema = if camel { ruby_camelize(name) } else { name.to_string() };
+    Some((schema, method.to_string()))
+}
+
+/// DH.8: the instance method a `def` line starting at `at` of a Ruby mask
+/// defines; a class method (`def self.x`) is none.
+fn ruby_def_name<'a>(src: &'a str, m: &[u8], at: usize, line_end: usize) -> Option<&'a str> {
+    let p = first_non_blank(m, at + 3, line_end);
+    let end = cs_ident_end(m, p, line_end);
+    if m.get(end) == Some(&b'.') {
+        return None;
+    }
+    src.get(p..end).filter(|s| !s.is_empty())
+}
+
+/// DH.8: the fields of the graphql-ruby root class declared on line
+/// `class_line`, as (schema name, 0-indexed anchor line) in line order. The
+/// body is the lines after the class line indented deeper than it (the
+/// `end` at the class line's indentation closes it). A `def` / nested
+/// `class` / `module` line hides its own body (the lines indented deeper,
+/// and its `end`), so a `field` call inside a method or a nested class is
+/// none. Each `field` line left is a field ([`ruby_field`]); it anchors at
+/// the class's `def` of its resolving method when the class has one (so
+/// HANDLED_BY lands on that method), else at the `field` line.
+fn ruby_class_fields(src: &str, m: &[u8], lines: &[(usize, usize)], class_line: usize) -> Vec<(String, u32)> {
+    let sb = src.as_bytes();
+    let indent = |(start, end): (usize, usize)| first_non_blank(sb, start, end) - start;
+    let Some(&class_span) = lines.get(class_line) else {
+        return Vec::new();
+    };
+    let class_indent = indent(class_span);
+    let mut hidden: Option<usize> = None;
+    let mut defs: Vec<(&str, usize)> = Vec::new();
+    let mut found: Vec<(String, String, usize)> = Vec::new();
+    for (j, &(start, end)) in lines.iter().enumerate().skip(class_line + 1) {
+        let at = first_non_blank(m, start, end);
+        if m.get(at..end).is_none_or(|r| r.trim_ascii().is_empty()) {
+            continue;
+        }
+        let ind = indent((start, end));
+        let word = |w: &[u8]| m.get(at..at + w.len()) == Some(w) && !m.get(at + w.len()).is_some_and(|&c| is_ident_byte(c));
+        if let Some(k) = hidden {
+            if ind > k {
+                continue;
+            }
+            hidden = None;
+            if ind == k && word(b"end") {
+                continue;
+            }
+        }
+        if ind <= class_indent {
+            break;
+        }
+        if word(b"def") {
+            if let Some(name) = ruby_def_name(src, m, at, end) {
+                defs.push((name, j));
+            }
+            hidden = Some(ind);
+        } else if word(b"class") || word(b"module") {
+            hidden = Some(ind);
+        } else if word(b"field")
+            && let Some((schema, method)) = ruby_field(src, m, lines, j, at)
+        {
+            found.push((schema, method, j));
+        }
+    }
+    found
+        .into_iter()
+        .map(|(schema, method, j)| {
+            let anchor = defs.iter().find(|&&(d, _)| d == method).map_or(j, |&(_, line)| line);
+            (schema, line_u32(anchor))
+        })
+        .collect()
+}
+
+/// DH.8: a Ruby file's graphql-ruby root nouns and their fields, given its
+/// [`ruby_mask`]: each class whose name is root-shaped ([`ruby_root`]) and
+/// whose superclass is a graphql-ruby object ([`ruby_object_superclass`])
+/// names its root, anchored at its class line, and its body's `field` calls
+/// are the root's fields ([`ruby_class_fields`]). An object type (`class
+/// OrderType < Types::BaseObject`) names nothing.
+fn graphql_ruby_roots_and_fields(src: &str, m: &[u8]) -> (RootNouns, Vec<(String, u32)>) {
+    let lines = line_spans(m);
+    let mut roots = RootNouns::new();
+    let mut fields = Vec::new();
+    for class in ruby_classes(src, m) {
+        let Some(root) = class.name.last().and_then(|n| ruby_root(n)) else {
+            continue;
+        };
+        if !ruby_object_superclass(&class.superclass) {
+            continue;
+        }
+        if !roots.iter().any(|&(r, _)| r == root) {
+            roots.push((root, line_of(src, class.class_at)));
+        }
+        fields.extend(ruby_class_fields(src, m, &lines, class.line));
+    }
+    fields.sort_by_key(|&(_, line)| line);
+    (roots, fields)
+}
+
+/// DH.8: the end of the Elixir string or charlist opening at `at` (`"`,
+/// `'`, or a `"""` / `'''` heredoc), `\` escapes honoured; the end of input
+/// when it never closes. Strings may span lines.
+fn elixir_string_end(b: &[u8], at: usize) -> usize {
+    let Some(&q) = b.get(at) else {
+        return at;
+    };
+    let triple = [q, q, q];
+    if b.get(at..at + 3) == Some(&triple[..]) {
+        return find_close(b, at + 3, &triple, false).map_or(b.len(), |p| p + 3);
+    }
+    find_close(b, at + 1, &[q], false).map_or(b.len(), |p| p + 1)
+}
+
+/// DH.8: the end of the Elixir sigil opening at `at` (`~s(..)`, `~r/../i`,
+/// `~S"""..."""`): its letters, its delimiter (a bracket closes with its
+/// pair, any other with itself), the body and the modifier letters after
+/// it. `None` when no sigil opens there.
+fn elixir_sigil_end(b: &[u8], at: usize) -> Option<usize> {
+    let letters = b.get(at + 1..)?.iter().take_while(|c| c.is_ascii_alphabetic()).count();
+    if letters == 0 {
+        return None;
+    }
+    let open = at + 1 + letters;
+    let d = *b.get(open)?;
+    let body_end = match d {
+        b'"' | b'\'' => elixir_string_end(b, open),
+        b'(' | b'[' | b'{' | b'<' | b'/' | b'|' => {
+            let close = match d {
+                b'(' => b')',
+                b'[' => b']',
+                b'{' => b'}',
+                b'<' => b'>',
+                other => other,
+            };
+            find_close(b, open + 1, &[close], false).map_or(b.len(), |p| p + 1)
+        }
+        _ => return None,
+    };
+    Some(body_end + b.get(body_end..).map_or(0, |r| r.iter().take_while(|c| c.is_ascii_alphabetic()).count()))
+}
+
+/// DH.8: [`code_mask`] of an Elixir file. One lexing pass blanks `#`
+/// comments, `"` strings and `'` charlists (`"""` / `'''` heredocs
+/// included), sigils ([`elixir_sigil_end`]) and `?c` char literals (`?#`,
+/// `?"`; a `?` after an identifier byte ends a name such as `valid?`).
+/// String interpolation is read as part of its string.
+fn elixir_code_mask(source: &str) -> Vec<u8> {
+    let b = source.as_bytes();
+    let mut code = vec![true; b.len()];
+    let mut i = 0;
+    while i < b.len() {
+        let end = match b[i] {
+            b'#' => Some(b.get(i..).and_then(|r| r.iter().position(|&c| c == b'\n')).map_or(b.len(), |p| i + p)),
+            b'"' | b'\'' => Some(elixir_string_end(b, i)),
+            b'~' => elixir_sigil_end(b, i),
+            b'?' if !ident_byte_before(b, i) => match b.get(i + 1) {
+                Some(b'\\') => Some(i + 3),
+                Some(_) => source.get(i + 1..).and_then(|r| r.chars().next()).map(|c| i + 1 + c.len_utf8()),
+                None => None,
+            },
+            _ => None,
+        };
+        match end.map(|e| e.min(b.len())) {
+            Some(end) if end > i => {
+                code.iter_mut().take(end).skip(i).for_each(|c| *c = false);
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+    code_mask(source, |at| code.get(at).copied().unwrap_or(false))
+}
+
+/// DH.8: an Elixir file that is an Absinthe schema: `use Absinthe.Schema`
+/// at code position (`use Absinthe.Schema.Notation`, a type module's
+/// import, is not).
+fn absinthe_schema(m: &[u8]) -> bool {
+    let module = b"Absinthe.Schema";
+    word_sites(m, b"use").into_iter().any(|at| {
+        let p = skip_ascii_ws(m, at + 3);
+        m.get(p..p + module.len()) == Some(&module[..])
+            && !m.get(p + module.len()).is_some_and(|&c| is_ident_byte(c) || c == b'.')
+    })
+}
+
+/// DH.8: the offset past the `do` that opens the root block whose
+/// `query` / `mutation` / `subscription` word ends at `after` on a line
+/// ending at `line_end`: the next word is `do`, or the macro takes options
+/// first (`query name: "RootQuery" do`, `query(name: "Q") do`) and the line
+/// ends its options with a `do`. A keyword `do:` one-liner opens no block.
+fn absinthe_block_do(b: &[u8], after: usize, line_end: usize) -> Option<usize> {
+    let p = first_non_blank(b, after, line_end);
+    let opener = |at: usize| {
+        b.get(at..at + 2) == Some(b"do")
+            && !ident_byte_before(b, at)
+            && !b.get(at + 2).is_some_and(|&c| is_ident_byte(c) || c == b':')
+    };
+    if opener(p) {
+        return Some(p + 2);
+    }
+    let options = b.get(p) == Some(&b'(') || {
+        let end = cs_ident_end(b, p, line_end);
+        end > p && b.get(end) == Some(&b':') && b.get(end + 1) != Some(&b':')
+    };
+    if !options {
+        return None;
+    }
+    (p..line_end).rev().find(|&at| opener(at)).map(|at| at + 2)
+}
+
+/// DH.8: the census sites of an Elixir file: every whole-word `query` /
+/// `mutation` / `subscription` (not an atom, a call on a module or an
+/// attribute) that opens a block on its line ([`absinthe_block_do`]), read
+/// from the source, so a commented-out block counts.
+fn absinthe_root_sites(source: &str) -> Vec<usize> {
+    let b = source.as_bytes();
+    let mut sites: Vec<usize> = ROOT_TYPES
+        .iter()
+        .flat_map(|root| {
+            let word = root.to_ascii_lowercase();
+            word_sites(b, word.as_bytes())
+                .into_iter()
+                .filter(|&at| !matches!(at.checked_sub(1).and_then(|p| b.get(p)), Some(b':' | b'.' | b'@')))
+                .filter(|&at| {
+                    let line_end = b.get(at..).and_then(|r| r.iter().position(|&c| c == b'\n')).map_or(b.len(), |p| at + p);
+                    absinthe_block_do(b, at + word.len(), line_end).is_some()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    sites.sort_unstable();
+    sites
+}
+
+/// DH.8: the fields of the Absinthe root block whose `do` ends at `from` of
+/// an Elixir mask, as (schema name, 0-indexed line of `field`). The block
+/// nests by token: `do` (not the keyword `do:`) and `fn` open, `end`
+/// closes, an atom (`:do`) or a call on a module (`X.end`) is neither. A
+/// `field :name` statement at the block's first level is a field, under
+/// Absinthe's default `LanguageConventions` external name
+/// ([`absinthe_external_name`]); a field's own `do .. end` (its `resolve`,
+/// its `arg`s) is a deeper level, so nothing inside it is a root field.
+/// `import_fields :order_queries` is not expanded: the imported object's
+/// fields are declared in an `object` block, which no root scan reads.
+fn absinthe_block_fields(src: &str, m: &[u8], from: usize) -> Vec<(String, u32)> {
+    let mut fields = Vec::new();
+    let mut depth = 1usize;
+    let mut i = from;
+    while i < m.len() {
+        if !m.get(i).is_some_and(|&c| is_ident_byte(c)) || ident_byte_before(m, i) {
+            i += 1;
+            continue;
+        }
+        let end = cs_ident_end(m, i, m.len());
+        let token = m.get(i..end).unwrap_or_default();
+        let prev = i.checked_sub(1).and_then(|p| m.get(p)).copied();
+        let next = m.get(end).copied();
+        let plain = !matches!(prev, Some(b':' | b'.'));
+        match token {
+            b"do" | b"fn" if plain && next != Some(b':') => depth += 1,
+            b"end" if plain && next != Some(b':') => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            b"field" if plain && depth == 1 => {
+                let line_start = m.get(..i).and_then(|r| r.iter().rposition(|&c| c == b'\n')).map_or(0, |p| p + 1);
+                let lead = m.get(line_start..i).unwrap_or_default().iter().rposition(|c| !c.is_ascii_whitespace());
+                let statement = lead.is_none_or(|p| m.get(line_start + p) == Some(&b';'));
+                let mut p = first_non_blank(m, end, m.len());
+                if m.get(p) == Some(&b'(') {
+                    p = first_non_blank(m, p + 1, m.len());
+                }
+                if statement && m.get(p) == Some(&b':') && m.get(p + 1) != Some(&b':') {
+                    let name_end = cs_ident_end(m, p + 1, m.len());
+                    if let Some(name) = src.get(p + 1..name_end).filter(|n| is_ident(n)) {
+                        fields.push((absinthe_external_name(name), line_of(src, i)));
+                    }
+                }
+            }
+            _ => {}
+        }
+        i = end;
+    }
+    fields
+}
+
+/// DH.8: an Elixir file's Absinthe root nouns and their fields, given its
+/// [`elixir_code_mask`] and its [`absinthe_root_sites`]: each site at code
+/// position that opens its line's statement names its root, anchored at its
+/// line, and the `field`s at its block's first level are the root's fields
+/// ([`absinthe_block_fields`]). An `object :order do` block names nothing.
+fn absinthe_roots_and_fields(src: &str, m: &[u8], sites: &[usize]) -> (RootNouns, Vec<(String, u32)>) {
+    let mut roots = RootNouns::new();
+    let mut fields = Vec::new();
+    for &at in sites.iter().filter(|&&at| m.get(at) != Some(&b' ')) {
+        let line_start = m.get(..at).and_then(|r| r.iter().rposition(|&c| c == b'\n')).map_or(0, |p| p + 1);
+        if first_non_blank(m, line_start, at) != at {
+            continue;
+        }
+        let line_end = m.get(at..).and_then(|r| r.iter().position(|&c| c == b'\n')).map_or(m.len(), |p| at + p);
+        let word = cs_ident_end(m, at, line_end);
+        let Some(root) = src.get(at..word).and_then(|w| ROOT_TYPES.iter().copied().find(|r| r.eq_ignore_ascii_case(w))) else {
+            continue;
+        };
+        let Some(open) = absinthe_block_do(m, word, line_end) else {
+            continue;
+        };
+        if !roots.iter().any(|&(r, _)| r == root) {
+            roots.push((root, line_of(src, at)));
+        }
+        fields.extend(absinthe_block_fields(src, m, open));
+    }
+    fields.sort_by_key(|&(_, line)| line);
+    (roots, fields)
+}
+
+/// DH.8: Absinthe's default adapter, `LanguageConventions.to_external_name`
+/// for a field: a `__` prefix is kept and the rest converted; a name that
+/// starts upper-case is `Absinthe.Utils.camelize` (Elixir's
+/// `Macro.camelize`, [`macro_camelize`]); any other is `camelize(lower:
+/// true)`: its leading underscores kept, the rest `Macro.camelize`d and its
+/// first char lowered. `user_orders` -> `userOrders`, `field_2` -> `field2`,
+/// `user_ID` -> `user_ID`, `_private` -> `_private`.
+fn absinthe_external_name(s: &str) -> String {
+    if let Some(rest) = s.strip_prefix("__") {
+        return format!("__{}", absinthe_external_name(rest));
+    }
+    if s.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return macro_camelize(s);
+    }
+    let lead = s.len() - s.trim_start_matches('_').len();
+    let camel = macro_camelize(s);
+    let mut chars = camel.chars();
+    let mut out = "_".repeat(lead);
+    if let Some(first) = chars.next() {
+        out.extend(first.to_lowercase());
+    }
+    out.push_str(chars.as_str());
+    out
+}
+
+/// DH.8: Elixir's `Macro.camelize` on an atom name: leading underscores
+/// dropped, the first char upper-cased, then each `_` run collapsed and
+/// read against the char after it: a lower-case letter is upper-cased, a
+/// digit kept, the end of the name drops it, anything else keeps one `_`.
+fn macro_camelize(s: &str) -> String {
+    let mut chars = s.trim_start_matches('_').chars().peekable();
+    let mut out = String::new();
+    if let Some(first) = chars.next() {
+        out.push(first.to_ascii_uppercase());
+    }
+    while let Some(c) = chars.next() {
+        if c != '_' {
+            out.push(c);
+            continue;
+        }
+        while chars.peek() == Some(&'_') {
+            chars.next();
+        }
+        match chars.peek().copied() {
+            Some(h) if h.is_ascii_lowercase() => {
+                chars.next();
+                out.push(h.to_ascii_uppercase());
+            }
+            Some(h) if h.is_ascii_digit() => {
+                chars.next();
+                out.push(h);
+            }
+            Some(_) => out.push('_'),
+            None => {}
+        }
+    }
+    out
+}
+
 /// WHOLE-FILE mode for a routed `.graphql` / `.gql` schema
 /// (`engine::route::parse_repo_files`, LA.27): the whole text is SDL, so every
 /// root type block and its fields count. No decorator patterns: those are
@@ -3366,6 +4088,158 @@ fn extract_operation_from_body(body: &str) -> Option<String> {
         }
     }
     None
+}
+
+// ---- DH.8: Dart package:graphql documents ----
+
+/// DH.8: package:graphql and graphql_flutter (which re-exports its client),
+/// as scope prefixes of a quoted import URI ([`quoted_module_at`]).
+const DART_GRAPHQL_PACKAGES: &[&str] = &["package:graphql/", "package:graphql_flutter/"];
+
+/// DH.8: the words that may precede a document constant's name on its
+/// declaration line; one of `const` / `final` / `var` must be among them.
+const DART_DECL_WORDS: &[&str] = &["static", "late", "const", "final", "var", "String"];
+
+/// DH.8: where a Dart operation's name was read.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DartDoc {
+    /// `gql(<ident>)`, the identifier a same-file string constant.
+    Constant,
+    /// `gql(<literal>)`.
+    Inline,
+}
+
+/// DH.8: a Dart file that imports package:graphql or graphql_flutter.
+fn dart_imports_graphql(source: &str) -> bool {
+    let b = source.as_bytes();
+    b.iter()
+        .enumerate()
+        .filter(|&(_, &c)| c == b'\'' || c == b'"')
+        .any(|(i, _)| DART_GRAPHQL_PACKAGES.iter().any(|p| quoted_module_at(b, i + 1, p)))
+}
+
+/// DH.8: the Dart string literal opening at `at` (an `r` raw prefix, then
+/// `'''` / `"""` spanning lines or `'` / `"` on one line), as (body start,
+/// body end, offset past the literal). `None` when no literal opens there or
+/// it never closes.
+fn dart_literal(b: &[u8], at: usize) -> Option<(usize, usize, usize)> {
+    let raw = b.get(at) == Some(&b'r') && !ident_byte_before(b, at);
+    let q_at = if raw { at + 1 } else { at };
+    let q = *b.get(q_at).filter(|&&q| q == b'\'' || q == b'"')?;
+    let triple = [q, q, q];
+    if b.get(q_at..q_at + 3) == Some(&triple[..]) {
+        let close = find_close(b, q_at + 3, &triple, false)?;
+        return Some((q_at + 3, close, close + 3));
+    }
+    let close = find_close(b, q_at + 1, &[q], true)?;
+    Some((q_at + 1, close, close + 1))
+}
+
+/// DH.8: the offset past the Dart literal or comment opening at `i`, or
+/// `None` when neither does.
+fn dart_skip(b: &[u8], i: usize) -> Option<usize> {
+    match (b.get(i)?, b.get(i + 1)) {
+        (b'/', Some(b'/')) => Some(b.get(i..)?.iter().position(|&c| c == b'\n').map_or(b.len(), |p| i + p)),
+        (b'/', Some(b'*')) => Some(find_close(b, i + 2, b"*/", false).map_or(b.len(), |p| p + 2)),
+        (b'\'' | b'"', _) | (b'r', Some(b'\'' | b'"')) => dart_literal(b, i).map(|(_, _, end)| end),
+        _ => None,
+    }
+}
+
+/// DH.8: the bracket closing the `(` at `open` of Dart source, over any mix
+/// of `()[]{}`, past literals and comments ([`dart_skip`]).
+fn dart_call_close(b: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while let Some(&c) = b.get(i) {
+        if let Some(end) = dart_skip(b, i) {
+            i = end;
+            continue;
+        }
+        match c {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// DH.8: the operation the call opening at `open` (a kept needle's `(`)
+/// sends, read from the first `gql(..)` among its arguments that names one
+/// ([`extract_operation_from_body`]): an inline literal, or an identifier
+/// bound to a string constant in the same file ([`dart_const_document`]).
+/// `None` when no `gql(..)` in the call names an operation (an anonymous
+/// `query { .. }`, a document built in another file).
+fn dart_document_name(source: &str, open: usize) -> Option<(String, DartDoc)> {
+    let b = source.as_bytes();
+    let close = dart_call_close(b, open)?;
+    let mut i = open + 1;
+    while i < close {
+        if let Some(end) = dart_skip(b, i) {
+            i = end;
+            continue;
+        }
+        let tag = b.get(i..i + 3) == Some(b"gql")
+            && !ident_byte_before(b, i)
+            && i.checked_sub(1).and_then(|p| b.get(p)) != Some(&b'.')
+            && !b.get(i + 3).is_some_and(|&c| is_ident_byte(c));
+        let paren = skip_ascii_ws(b, i + 3);
+        if tag && b.get(paren) == Some(&b'(') {
+            let arg = skip_ascii_ws(b, paren + 1);
+            let named = match dart_literal(b, arg) {
+                Some((start, end, _)) => source
+                    .get(start..end)
+                    .and_then(extract_operation_from_body)
+                    .map(|name| (name, DartDoc::Inline)),
+                None => {
+                    let end = cs_ident_end(b, arg, close);
+                    source
+                        .get(arg..end)
+                        .filter(|id| is_ident(id) && b.get(skip_ascii_ws(b, end)) == Some(&b')'))
+                        .and_then(|id| dart_const_document(source, id))
+                        .map(|name| (name, DartDoc::Constant))
+                }
+            };
+            if named.is_some() {
+                return named;
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// DH.8: the operation the same-file string constant `ident` declares:
+/// `const listOrders = r"""query Orders {..}""";` (also `final` / `var`,
+/// `static const String x = '...'`), read from the first declaration line
+/// whose words before the name are all [`DART_DECL_WORDS`] (so a commented
+/// line is none) and whose `=` binds a literal.
+fn dart_const_document(source: &str, ident: &str) -> Option<String> {
+    let b = source.as_bytes();
+    source.match_indices(ident).find_map(|(at, _)| {
+        let end = at + ident.len();
+        if ident_byte_before(b, at) || b.get(end).is_some_and(|&c| is_ident_byte(c)) {
+            return None;
+        }
+        let line_start = source.get(..at)?.rfind('\n').map_or(0, |p| p + 1);
+        let words: Vec<&str> = source.get(line_start..at)?.split_whitespace().collect();
+        let declared = !words.is_empty()
+            && words.iter().all(|w| DART_DECL_WORDS.contains(w))
+            && words.iter().any(|w| matches!(*w, "const" | "final" | "var"));
+        let eq = skip_ascii_ws(b, end);
+        if !declared || b.get(eq) != Some(&b'=') || matches!(b.get(eq + 1), Some(b'=' | b'>')) {
+            return None;
+        }
+        let (start, body_end, _) = dart_literal(b, skip_ascii_ws(b, eq + 1))?;
+        source.get(start..body_end).and_then(extract_operation_from_body)
+    })
 }
 
 // ============================================================================
@@ -5405,5 +6279,189 @@ mod tests {
             decorator_scan(decoys, "scala").1.marker("scala").as_deref(),
             Some("[graphql-decorators] lang=scala import=caliban roots= fields=0 rejected lang=0 import=0 position=3")
         );
+    }
+
+    // ---- DH.8: graphql-ruby, Absinthe, Dart package:graphql ----
+
+    /// bench/substrate-gap/matrix/ruby/graphql/server/app/graphql/types/query_type.rb.
+    const GRAPHQL_RUBY_QUERY_TYPE: &str = "module Types\n  class QueryType < Types::BaseObject\n    field :orders, [Types::OrderType], null: false\n\n    def orders\n      Order.all\n    end\n  end\nend\n";
+
+    /// bench/substrate-gap/matrix/elixir/graphql/server/lib/schema.ex.
+    const ABSINTHE_SCHEMA: &str = "defmodule ShopWeb.Schema do\n  use Absinthe.Schema\n\n  object :order do\n    field :id, :id\n  end\n\n  query do\n    field :orders, list_of(:order) do\n      resolve fn _, _, _ -> {:ok, []} end\n    end\n  end\nend\n";
+
+    /// bench/substrate-gap/matrix/dart/graphql/client/lib/orders.dart.
+    const DART_ORDERS: &str = "import 'package:graphql/client.dart';\n\nconst listOrders = r\"\"\"\n  query Orders {\n    orders {\n      id\n    }\n  }\n\"\"\";\n\nFuture<QueryResult> fetchOrders(GraphQLClient client) {\n  return client.query(QueryOptions(document: gql(listOrders)));\n}\n";
+
+    #[test]
+    fn graphql_ruby_query_type_fields() {
+        assert_resolvers(GRAPHQL_RUBY_QUERY_TYPE, "ruby", &["Query", "orders"]);
+        let out = extract_graphql_resolver_nodes(GRAPHQL_RUBY_QUERY_TYPE, "ruby", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(1), "the class line");
+        assert_eq!(anchor_line(&out, "graphql_resolver:orders"), Some(4), "the type's `def orders`");
+        assert_eq!(
+            decorator_scan(GRAPHQL_RUBY_QUERY_TYPE, "ruby").1.marker("ruby").as_deref(),
+            Some("[graphql-decorators] lang=ruby import=graphql-ruby roots=Query fields=1 rejected lang=0 import=0 position=0")
+        );
+        // The compact class path, an unqualified base class, the root class
+        // named exactly `Subscription`, and `GraphQL::Schema::Object` itself.
+        let compact = "class Types::MutationType < BaseObject\n  field :create_order, mutation: Mutations::CreateOrder\nend\nclass Subscription < GraphQL::Schema::Object\n  field(:order_placed, Types::OrderType)\nend\n";
+        assert_resolvers(compact, "ruby", &["Mutation", "Subscription", "createOrder", "orderPlaced"]);
+        // The same file of another language.
+        assert_resolvers(GRAPHQL_RUBY_QUERY_TYPE, "python", &[]);
+        assert_resolvers(GRAPHQL_RUBY_QUERY_TYPE, "elixir", &[]);
+    }
+
+    #[test]
+    fn graphql_ruby_camelizes_and_honours_camelize_false() {
+        let src = "class Types::QueryType < GraphQL::Schema::Object\n  field :user_orders, [Types::OrderType], null: false\n  field :raw_id, ID, null: false, camelize: false\n  field \"named_by_string\", String\n  field :order, Types::OrderType, null: true do\n    argument :order_id, ID, required: true\n  end\n  field :legacy, String,\n    camelize: false\n  field :by_method, String, resolver_method: :resolve_by_method\n\n  def resolve_by_method\n    field :not_a_field, String\n  end\n\n  def self.helper\n    field :nor_this, String\n  end\nend\n";
+        assert_resolvers(src, "ruby", &["Query", "byMethod", "legacy", "namedByString", "order", "raw_id", "userOrders"]);
+        let out = extract_graphql_resolver_nodes(src, "ruby", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:byMethod"), Some(11), "its resolver_method's def");
+        assert_eq!(anchor_line(&out, "graphql_resolver:userOrders"), Some(1), "no def: the field line");
+        for (ruby, schema) in [
+            ("orders", "orders"),
+            ("user_orders", "userOrders"),
+            ("user_ID", "userId"),
+            ("HTTP_status", "httpStatus"),
+            ("field_2", "field2"),
+            ("a__b", "aB"),
+            ("_private", "_private"),
+            ("_", "_"),
+        ] {
+            assert_eq!(ruby_camelize(ruby), schema, "{ruby}");
+        }
+    }
+
+    #[test]
+    fn graphql_ruby_non_root_object_type_is_no_resolver() {
+        let object = "module Types\n  class OrderType < Types::BaseObject\n    field :id, ID, null: false\n  end\nend\n";
+        assert_resolvers(object, "ruby", &[]);
+        assert_eq!(decorator_scan(object, "ruby").1.marker("ruby"), None, "no root-named class, no census line");
+        // A root-named class that is no GraphQL object, in a file with no
+        // graphql-ruby marker.
+        let model = "class QueryType < ApplicationRecord\n  field :orders\nend\n";
+        assert_resolvers(model, "ruby", &[]);
+        assert_eq!(
+            decorator_scan(model, "ruby").1.marker("ruby").as_deref(),
+            Some("[graphql-decorators] lang=ruby import=none roots= fields=0 rejected lang=0 import=1 position=0")
+        );
+        // Declarations in a comment, a heredoc and a `=begin` block are no
+        // roots; a nested class's body is hidden, and the fields after it
+        // are still the root's.
+        let decoys = "# class QueryType < Types::BaseObject\nDOC = <<~RUBY\n  class MutationType < Types::BaseObject\n    field :fake, String\n  end\nRUBY\n=begin\nclass SubscriptionType < Types::BaseObject\n=end\nclass QueryType < Types::BaseObject\n  class Inner < Types::BaseObject\n    field :inner, String\n  end\n  field :after_inner, String # field :in_comment\nend\n";
+        assert_resolvers(decoys, "ruby", &["Query", "afterInner"]);
+        assert_eq!(
+            decorator_scan(decoys, "ruby").1.marker("ruby").as_deref(),
+            Some("[graphql-decorators] lang=ruby import=graphql-ruby roots=Query fields=1 rejected lang=0 import=0 position=3")
+        );
+    }
+
+    #[test]
+    fn absinthe_query_block_fields() {
+        assert_resolvers(ABSINTHE_SCHEMA, "elixir", &["Query", "orders"]);
+        let out = extract_graphql_resolver_nodes(ABSINTHE_SCHEMA, "elixir", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(7), "the `query do` line");
+        assert_eq!(anchor_line(&out, "graphql_resolver:orders"), Some(8));
+        assert_eq!(
+            decorator_scan(ABSINTHE_SCHEMA, "elixir").1.marker("elixir").as_deref(),
+            Some("[graphql-decorators] lang=elixir import=absinthe roots=Query fields=1 rejected lang=0 import=0 position=0")
+        );
+        // A type module (`use Absinthe.Schema.Notation`) is no schema, and
+        // its `object` blocks are no roots.
+        let notation = "defmodule ShopWeb.Schema.OrderQueries do\n  use Absinthe.Schema.Notation\n\n  object :order_queries do\n    field :orders, list_of(:order)\n  end\nend\n";
+        assert_resolvers(notation, "elixir", &[]);
+        assert_resolvers(ABSINTHE_SCHEMA, "ruby", &[]);
+    }
+
+    #[test]
+    fn absinthe_mutation_and_nested_do_blocks() {
+        let src = "defmodule ShopWeb.Schema do\n  use Absinthe.Schema\n  import_types ShopWeb.Schema.Types\n\n  @desc \"\"\"\n  query do\n    field :in_doc, :string\n  end\n  \"\"\"\n  # query do field :commented, :string end\n\n  query name: \"RootQuery\" do\n    @desc \"Orders by user\"\n    field :user_orders, list_of(:order) do\n      arg :user_id, non_null(:id)\n      resolve fn _, %{user_id: id}, _ ->\n        case Shop.orders(id) do\n          {:ok, o} -> {:ok, o}\n          err -> err\n        end\n      end\n    end\n    field :ping, :string, resolve: fn _, _, _ -> {:ok, \"pong\"} end\n    field(:field_2, :string)\n    import_fields :order_queries\n  end\n\n  mutation do\n    field :place_order, :order do\n      arg :input, non_null(:order_input)\n      resolve &Resolvers.place_order/3\n    end\n  end\n\n  subscription do\n    field :order_placed, :order do\n      config fn _, _ -> {:ok, topic: \"*\"} end\n    end\n  end\n\n  object :order do\n    field :id, :id\n  end\nend\n";
+        assert_resolvers(
+            src,
+            "elixir",
+            &["Mutation", "Query", "Subscription", "field2", "orderPlaced", "ping", "placeOrder", "userOrders"],
+        );
+        assert_eq!(
+            decorator_scan(src, "elixir").1.marker("elixir").as_deref(),
+            Some("[graphql-decorators] lang=elixir import=absinthe roots=Query,Mutation,Subscription fields=5 rejected lang=0 import=0 position=2")
+        );
+        // An Elixir module that is no Absinthe schema.
+        let plain = "defmodule Report do\n  def run(query) do\n    query |> Repo.all()\n  end\nend\n";
+        assert_resolvers(plain, "elixir", &[]);
+        assert_eq!(decorator_scan(plain, "elixir").1.marker("elixir"), None);
+        for (elixir, schema) in [
+            ("orders", "orders"),
+            ("user_orders", "userOrders"),
+            ("user_ID", "user_ID"),
+            ("field_2", "field2"),
+            ("a__b", "aB"),
+            ("_private", "_private"),
+            ("__typename_x", "__typenameX"),
+            ("Orders_x", "OrdersX"),
+        ] {
+            assert_eq!(absinthe_external_name(elixir), schema, "{elixir}");
+        }
+    }
+
+    #[test]
+    fn elixir_mask_blanks_literals_comments_sigils_and_chars() {
+        let src = "a = \"query do\" # end\nb = ~s(end) <> ~S\"\"\"\nend\n\"\"\" <> 'do'\nc = ?# <> ?\" <> valid?(x)\n";
+        let m = elixir_code_mask(src);
+        assert_eq!(m.len(), src.len());
+        let code = String::from_utf8_lossy(&m).split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(code, "a = b = <> <> c = <> <> valid?(x)");
+    }
+
+    #[test]
+    fn dart_gql_const_document_names_the_op() {
+        assert_eq!(op_qnames(DART_ORDERS), ["graphql_op:Orders"]);
+        let (hits, tally) = scan_operation_needles(DART_ORDERS, &mut LazyGuard::new("", DART_ORDERS));
+        assert_eq!(hits, [("Orders".to_string(), 11)], "minted at the needle line");
+        assert_eq!(
+            tally.marker().as_deref(),
+            Some("[graphql-ops] kept=1 rejected=0 hook=0 client=0 request=0 context=gql-tag")
+        );
+        assert_eq!(tally.dart_marker().as_deref(), Some("[graphql-ops] dart-document const=1 inline=0 unread=0"));
+        // graphql_flutter, a multi-line call, a typed static constant
+        // declared after its use.
+        let flutter = "import \"package:graphql_flutter/graphql_flutter.dart\";\n\nclass OrdersApi {\n  Future<void> place(GraphQLClient client, String id) async {\n    final result = await client.mutate(\n      MutationOptions(\n        document: gql(placeOrderMutation),\n        variables: {'id': id},\n      ),\n    );\n  }\n\n  static const String placeOrderMutation = '''\n    mutation PlaceOrder($id: ID!) { placeOrder(id: $id) { id } }\n  ''';\n}\n";
+        assert_eq!(op_qnames(flutter), ["graphql_op:PlaceOrder"]);
+        // A constant declared only in a comment names nothing: the fallback.
+        let commented = "import 'package:graphql/client.dart';\n// const listOrders = r'query Orders { orders { id } }';\nFuture<QueryResult> f(GraphQLClient client) => client.query(QueryOptions(document: gql(listOrders)));\n";
+        assert_eq!(op_qnames(commented), ["graphql_op:client.query"]);
+        let (_, tally) = scan_operation_needles(commented, &mut LazyGuard::new("", commented));
+        assert_eq!(tally.dart_marker().as_deref(), Some("[graphql-ops] dart-document const=0 inline=0 unread=1"));
+        // Without the package:graphql import the call keeps its fallback name.
+        let unimported = DART_ORDERS.replace("import 'package:graphql/client.dart';\n", "");
+        assert_eq!(op_qnames(&unimported), ["graphql_op:client.query"]);
+        let (_, tally) = scan_operation_needles(&unimported, &mut LazyGuard::new("", &unimported));
+        assert_eq!(tally.dart_marker(), None);
+    }
+
+    #[test]
+    fn dart_inline_gql_literal() {
+        let inline = "import 'package:graphql/client.dart';\n\nFuture<QueryResult> fetch(GraphQLClient client) {\n  return client.query(QueryOptions(document: gql(r'''\n    query Inline { orders { id } }\n  ''')));\n}\n";
+        assert_eq!(op_qnames(inline), ["graphql_op:Inline"]);
+        let (_, tally) = scan_operation_needles(inline, &mut LazyGuard::new("", inline));
+        assert_eq!(tally.dart_marker().as_deref(), Some("[graphql-ops] dart-document const=0 inline=1 unread=0"));
+        // Two calls, each named by its own document.
+        let two = "import 'package:graphql/client.dart';\nconst a = \"query First { a }\";\nfinal f1 = client.query(QueryOptions(document: gql(a)));\nfinal f2 = client.query(QueryOptions(document: gql(\"query Second { b }\")));\n";
+        assert_eq!(op_qnames(two), ["graphql_op:First", "graphql_op:Second"]);
+        // An anonymous document names nothing.
+        let anonymous = "import 'package:graphql/client.dart';\nfinal f = client.query(QueryOptions(document: gql(r'query { orders { id } }')));\n";
+        assert_eq!(op_qnames(anonymous), ["graphql_op:client.query"]);
+    }
+
+    #[test]
+    fn ts_fallback_naming_unchanged() {
+        // The Dart shape in an Apollo TS file: the call's document is a
+        // constant passed to `gql(..)`, which a TS file is not read for.
+        let ts = "import { ApolloClient, gql } from '@apollo/client';\nconst listOrders = `query Orders { orders { id } }`;\nexport const load = () => client.query({ query: gql(listOrders) });\n";
+        assert_eq!(op_qnames(ts), ["graphql_op:client.query"]);
+        let (_, tally) = scan_operation_needles(ts, &mut LazyGuard::new("", ts));
+        assert_eq!(tally.dart_marker(), None);
+        // A template-tagged document still names the call.
+        let tagged = "import { gql } from '@apollo/client';\nconst ORDERS = gql`query Orders { orders { id } }`;\nclient.query({ query: ORDERS });\n";
+        assert_eq!(op_qnames(tagged), ["graphql_op:Orders"]);
     }
 }
