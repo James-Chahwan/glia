@@ -1,0 +1,64 @@
+{
+  "framework": "python-requirements-roots",
+  "language": "python",
+  "dirs": [
+    "."
+  ],
+  "note": "DE.9: a requirements.txt or Pipfile beside at least one .py file roots a python project (ecosystem python, label the directory basename, label_source dir), so the flask route under svc/email takes the LB.4a owner suffix on its qname. docs/requirements.txt sits beside only index.md and roots nothing. The ORIGIN manifest is the repo-relative manifest path. Baseline HEAD a08fc669 (leap wheel and debug CLI): no PROJECT node; the ROUTE qname is `GET /health` with no owner.",
+  "expect_nodes": [
+    {
+      "kind": "PROJECT",
+      "name": "email"
+    },
+    {
+      "kind": "PROJECT",
+      "name": "worker"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /health @svc/email"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "PROJECT",
+      "node": "project:svc/email",
+      "cell": "ORIGIN",
+      "contains": "\"manifest\":\"svc/email/requirements.txt\""
+    },
+    {
+      "kind": "PROJECT",
+      "node": "project:svc/email",
+      "cell": "ORIGIN",
+      "contains": "\"label_source\":\"dir\""
+    },
+    {
+      "kind": "PROJECT",
+      "node": "project:svc/worker",
+      "cell": "ORIGIN",
+      "contains": "\"ecosystem\":\"python\""
+    },
+    {
+      "kind": "PROJECT",
+      "node": "project:svc/worker",
+      "cell": "ORIGIN",
+      "contains": "\"manifest\":\"svc/worker/Pipfile\""
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "PROJECT",
+      "max_nodes": 2,
+      "note": "docs/requirements.txt has no .py sibling"
+    },
+    {
+      "kind": "PROJECT",
+      "name": "project:docs"
+    },
+    {
+      "kind": "ROUTE",
+      "max_nodes": 1,
+      "note": "one route, the owned one: no unowned twin beside `GET /health @svc/email`. LB.4a suffixes the qname only (the name stays `GET /health`), so an exact-name forbid cannot tell the two apart; the expect_nodes row is the ownership check"
+    }
+  ]
+}

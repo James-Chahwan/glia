@@ -116,6 +116,14 @@ pub const DECLARED_ECOSYSTEM: &str = "declared";
 /// Manifest basename → ecosystem, in precedence order. The first entry present
 /// (and confirmed, see [`confirms`]) decides the ecosystem; ties never happen
 /// because the table is scanned in order.
+///
+/// The last two rows (DE.9) are the weakest evidence of all: a
+/// `requirements.txt` or `Pipfile` roots a python project only when its
+/// directory also holds a `.py` file (the gate in `candidates`), and any other
+/// manifest in the same directory decides first, so a `requirements.txt` kept
+/// for tooling beside a `pom.xml` or `package.json` never re-labels that
+/// project. Neither names the project ([`manifest_label`] gives `None`), so the
+/// label is the directory basename.
 pub const MANIFESTS: &[(&str, &str)] = &[
     ("package.json", "npm"),
     ("go.mod", "go"),
@@ -135,7 +143,23 @@ pub const MANIFESTS: &[(&str, &str)] = &[
     ("build.sbt", "sbt"),
     ("deps.edn", "clojure"),
     ("project.clj", "clojure"),
+    ("requirements.txt", "python"),
+    ("Pipfile", "python"),
 ];
+
+/// [`MANIFESTS`] rows that root a project only beside a `.py` file (DE.9): a
+/// Sphinx `docs/requirements.txt` next to `.md` / `.rst` pages is a build pin,
+/// not a service. The check reads the entry names the walker already holds,
+/// never the manifest text, so [`detect`] and [`detect_root`] agree.
+const PY_SOURCE_GATED: &[&str] = &["requirements.txt", "Pipfile"];
+
+/// Whether `names` holds a Python source file: an entry whose extension is
+/// exactly `py` (`Path` gives a bare `.py` dotfile no extension).
+fn has_py_source(names: &[String]) -> bool {
+    names
+        .iter()
+        .any(|n| Path::new(n.as_str()).extension().is_some_and(|e| e == "py"))
+}
 
 /// Extension-keyed manifests (.NET), checked after [`MANIFESTS`]. A solution
 /// outranks a project file in the same directory.
@@ -146,10 +170,14 @@ pub const MANIFEST_EXTS: &[(&str, &str)] = &[
     ("vbproj", "dotnet"),
 ];
 
-/// Every manifest in one directory's entry names, in precedence order.
+/// Every manifest in one directory's entry names, in precedence order. A
+/// `requirements.txt` / `Pipfile` is a candidate only beside a `.py` file
+/// (DE.9); the gate is computed once per directory, from the names alone.
 fn candidates(names: &[String]) -> impl Iterator<Item = (&'static str, &str)> {
+    let py_source = has_py_source(names);
     let by_name = MANIFESTS
         .iter()
+        .filter(move |(base, _)| py_source || !PY_SOURCE_GATED.contains(base))
         .filter_map(|(base, eco)| names.iter().find(|n| n == base).map(|n| (*eco, n.as_str())));
     let by_ext = MANIFEST_EXTS.iter().filter_map(|(ext, eco)| {
         names
@@ -209,6 +237,12 @@ pub fn detect_root(
         // their text is never read.
         if !MANIFESTS.iter().any(|(b, _)| *b == base) {
             return Some((eco, base.to_string(), manifest_label(base, "")));
+        }
+        // A requirements.txt / Pipfile already passed the `.py` sibling gate
+        // in `candidates`, which is its whole confirmation, and names no
+        // project (DE.9): its text is never read either.
+        if PY_SOURCE_GATED.contains(&base) {
+            return Some((eco, base.to_string(), None));
         }
         let text = read(base);
         if confirms(base, &text) {
@@ -705,6 +739,89 @@ mod tests {
             Some(("dotnet", "Api.csproj".into(), Some("Api".into())))
         );
         assert_eq!(reads, 0);
+    }
+
+    /// DE.9: a requirements.txt or Pipfile roots a python project only beside
+    /// a `.py` file, at the lowest precedence, labelled by the directory, and
+    /// `detect` (names) and `detect_root` (the walker's path) agree.
+    #[test]
+    fn project_roots_requirements_and_pipfile_need_a_py_sibling() {
+        let mut reads = Vec::new();
+        let mut root = |ns: &[&str]| {
+            detect_root(&names(ns), |b| {
+                reads.push(b.to_string());
+                String::new()
+            })
+        };
+        assert_eq!(
+            root(&["app.py", "requirements.txt"]),
+            Some(("python", "requirements.txt".into(), None))
+        );
+        assert_eq!(
+            root(&["Pipfile", "main.py"]),
+            Some(("python", "Pipfile".into(), None))
+        );
+        // A Sphinx docs pin with no Python source is no project.
+        assert_eq!(root(&["index.md", "requirements.txt"]), None);
+        assert_eq!(root(&["Pipfile", "README.rst"]), None);
+        // A bare `.py` dotfile is not a source file; `x.pyc` / `x.pyi` are not either.
+        assert_eq!(root(&[".py", "requirements.txt"]), None);
+        assert_eq!(root(&["requirements.txt", "x.pyc", "y.pyi"]), None);
+        // The name check is the whole confirmation: no manifest text is read.
+        assert!(reads.is_empty(), "read {reads:?}");
+        // Lowest precedence: any other manifest in the directory decides.
+        let pkg = |_: &str| r#"{"name":"web"}"#.to_string();
+        assert_eq!(
+            detect_root(&names(&["package.json", "requirements.txt", "x.py"]), pkg),
+            Some(("npm", "package.json".into(), Some("web".into())))
+        );
+        assert_eq!(
+            detect_root(&names(&["Pipfile", "pyproject.toml", "x.py"]), |_| String::new()),
+            Some(("python", "pyproject.toml".into(), None))
+        );
+        // ... unless it is not confirmed: a tool-only setup.cfg falls through.
+        assert_eq!(
+            detect_root(&names(&["app.py", "requirements.txt", "setup.cfg"]), |_| {
+                "[flake8]\n".into()
+            }),
+            Some(("python", "requirements.txt".into(), None))
+        );
+        // requirements.txt outranks Pipfile, both outrank .NET's extension rows.
+        assert_eq!(
+            detect_root(&names(&["Pipfile", "requirements.txt", "x.py"]), |_| String::new()),
+            Some(("python", "requirements.txt".into(), None))
+        );
+        assert_eq!(
+            detect(&names(&["Api.csproj", "requirements.txt", "x.py"])),
+            Some(("python", "requirements.txt".into()))
+        );
+        // Name-level detect agrees with the walker's path.
+        assert_eq!(
+            detect(&names(&["app.py", "requirements.txt"])),
+            Some(("python", "requirements.txt".into()))
+        );
+        assert_eq!(
+            detect(&names(&["Pipfile", "main.py"])),
+            Some(("python", "Pipfile".into()))
+        );
+        assert_eq!(detect(&names(&["index.md", "requirements.txt"])), None);
+        assert_eq!(
+            detect(&names(&["package.json", "requirements.txt", "x.py"])),
+            Some(("npm", "package.json".into()))
+        );
+        assert_eq!(manifest_label("requirements.txt", "flask==3.0.0\n"), None);
+        assert_eq!(manifest_label("Pipfile", "[packages]\nrequests = \"*\"\n"), None);
+        // No label, so the directory basename names it (DD.4 label_source dir).
+        let (eco, base, label) =
+            detect_root(&names(&["requirements.txt", "server.py"]), |_| String::new()).unwrap();
+        let r = ProjectRoot::new("svc/email".into(), eco, &base, label);
+        assert_eq!(
+            (r.label.as_str(), r.label_source, r.ecosystem, r.manifest.as_str()),
+            ("email", LABEL_DIR, "python", "svc/email/requirements.txt")
+        );
+        // A repo-root requirements.txt is a `root`-labelled python project.
+        let r = ProjectRoot::new(String::new(), eco, &base, None);
+        assert_eq!((r.label.as_str(), r.label_source), ("root", LABEL_ROOT));
     }
 
     #[test]
