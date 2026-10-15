@@ -4,6 +4,7 @@ use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use glia_core::{Confidence, Node, NodeId, RepoId};
 
 use crate::anchor::{Anchor, line_of};
+use crate::cli::CodeMap;
 use crate::code_guard::LazyGuard;
 
 pub struct GraphqlNodes {
@@ -395,9 +396,9 @@ const PY_SERVER_PACKAGES: &[(&str, GqlLib)] = &[
 ];
 
 /// LA.38: the languages whose GraphQL server libraries spell resolvers with
-/// the decorators and classes read here. Java / Kotlin / PHP / Rust / Go /
-/// Dart servers use other spellings (`@QueryMapping`, `@DgsQuery`), and a
-/// Java `@Query(` is Spring Data / Micronaut Data / Room.
+/// the decorators and classes read here. Java / Kotlin / PHP / Go / Dart
+/// servers use other spellings (`@QueryMapping`, `@DgsQuery`), and a Java
+/// `@Query(` is Spring Data / Micronaut Data / Room.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DecoratorFamily {
     /// NestJS / TypeGraphQL decorators.
@@ -406,6 +407,11 @@ enum DecoratorFamily {
     Py,
     /// HotChocolate root classes and their public members (CL.6b).
     CSharp,
+    /// async-graphql `#[Object]` / `#[Subscription]` root impls and their
+    /// methods (DG.4).
+    Rust,
+    /// Caliban `RootResolver(..)` case classes and their parameters (DG.4).
+    Scala,
 }
 
 /// LA.38: the GraphQL server package a file imports.
@@ -416,6 +422,8 @@ enum GqlLib {
     Strawberry,
     Graphene,
     HotChocolate,
+    AsyncGraphql,
+    Caliban,
 }
 
 impl GqlLib {
@@ -426,6 +434,8 @@ impl GqlLib {
             GqlLib::Strawberry => "strawberry",
             GqlLib::Graphene => "graphene",
             GqlLib::HotChocolate => "hotchocolate",
+            GqlLib::AsyncGraphql => "async-graphql",
+            GqlLib::Caliban => "caliban",
         }
     }
 }
@@ -436,17 +446,21 @@ impl GqlLib {
 /// GraphQL server import (`rej_import`), or an occurrence off decorator /
 /// class position (`rej_position`: a comment, a string, mid-line). A C# file
 /// counts its root markers ([`CS_ROOT_NEEDLES`]) instead, `rej_position`
-/// being those in a comment, string or preprocessor line (CL.6b).
+/// being those in a comment, string or preprocessor line (CL.6b); a Rust
+/// file its root attributes ([`rs_root_attr_sites`]) and a Scala file its
+/// `RootResolver` calls ([`scala_root_resolver_sites`]), `rej_position`
+/// being those in a comment or string (DG.4).
 #[derive(Default, Debug)]
 struct DecoratorCensus {
-    /// Occurrences of [`DECORATOR_NEEDLES`], or of [`CS_ROOT_NEEDLES`] in a
-    /// C# file.
+    /// Occurrences of [`DECORATOR_NEEDLES`], or of the language's root
+    /// markers in a C# / Rust / Scala file.
     hits: usize,
     lib: Option<GqlLib>,
     /// Root nouns kept, in line order.
     roots: Vec<&'static str>,
     /// Field resolvers read: TypeScript methods under a field decorator,
-    /// Python root-class fields (CB.14), C# root-class members (CL.6b).
+    /// Python root-class fields (CB.14), C# root-class members (CL.6b), Rust
+    /// root-impl methods and Scala root case-class parameters (DG.4).
     fields: usize,
     rej_lang: usize,
     rej_import: usize,
@@ -617,8 +631,8 @@ pub fn extract_graphql_operation_nodes(
 /// `detect_language`): the decorator family ([`decorator_scan`], LA.38) and
 /// SDL only inside a GraphQL-marked literal ([`gql_literal_regions`], LA.27).
 /// A comment or an unmarked string that holds `type Query {` mints nothing,
-/// and neither does a decorator needle outside a TypeScript / Python file
-/// that imports a GraphQL server package. A `.graphql` / `.gql` body goes
+/// and neither does a decorator needle outside a TypeScript / Python / C# /
+/// Rust / Scala file that imports a GraphQL server package. A `.graphql` / `.gql` body goes
 /// through [`extract_graphql_sdl_file_nodes`] instead.
 pub fn extract_graphql_resolver_nodes(
     source: &str,
@@ -645,9 +659,9 @@ pub fn extract_graphql_resolver_nodes(
 
 /// LA.38: the GraphQL decorator family of one code file, as (name, 0-indexed
 /// line) pairs in line order, plus the census for the `[graphql-decorators]`
-/// marker. It runs only for a TypeScript-family or Python file
-/// ([`decorator_family`]) that imports a GraphQL server package
-/// ([`graphql_server_lib`]), and reads only at decorator / class position:
+/// marker. It runs only for a file of a [`decorator_family`] language that
+/// imports a GraphQL server package ([`graphql_server_lib`]), and reads only
+/// at decorator / class position:
 /// - TypeScript (NestJS / TypeGraphQL): a line starting with `@Query(` /
 ///   `@Mutation(` / `@Subscription(` names that root type, and the method
 ///   under a field decorator ([`decorator_method_names`]) is a field;
@@ -657,20 +671,29 @@ pub fn extract_graphql_resolver_nodes(
 ///   under their schema names;
 /// - C# (HotChocolate, CL.6b): a root class ([`cs_root_classes`]) names its
 ///   root type, and its public members ([`cs_root_fields`]) are fields under
-///   HotChocolate's names.
+///   HotChocolate's names;
+/// - Rust (async-graphql, DG.4): an `#[Object]` / `#[Subscription]` impl of
+///   a root type names it, and its methods are fields under async-graphql's
+///   names ([`async_graphql_roots_and_fields`]), all read through CJ.1's
+///   literal / comment guard;
+/// - Scala (Caliban, DG.4): a `RootResolver(..)` argument names its root
+///   type, and the parameters of its in-file case class are fields
+///   ([`caliban_roots_and_fields`]).
 ///
 /// Every noun is a root type: `@Resolver(`, `@ResolveField(`,
 /// `@strawberry.type`, `@strawberry.mutation`, `ObjectType` and an object
 /// type extension name nothing.
 fn decorator_scan(source: &str, lang: &str) -> (Vec<(String, u32)>, DecoratorCensus) {
     let family = decorator_family(lang);
-    let cs_sites = match family {
+    let root_sites = match family {
         Some(DecoratorFamily::CSharp) => cs_root_needle_sites(source),
+        Some(DecoratorFamily::Rust) => rs_root_attr_sites(source),
+        Some(DecoratorFamily::Scala) => scala_root_resolver_sites(source),
         _ => Vec::new(),
     };
     let mut census = DecoratorCensus {
         hits: match family {
-            Some(DecoratorFamily::CSharp) => cs_sites.len(),
+            Some(DecoratorFamily::CSharp | DecoratorFamily::Rust | DecoratorFamily::Scala) => root_sites.len(),
             _ => DECORATOR_NEEDLES.iter().map(|n| source.matches(n).count()).sum(),
         },
         ..DecoratorCensus::default()
@@ -696,8 +719,20 @@ fn decorator_scan(source: &str, lang: &str) -> (Vec<(String, u32)>, DecoratorCen
         }
         DecoratorFamily::CSharp => {
             let mask = cs_code_mask(source);
-            census.rej_position = cs_sites.iter().filter(|&&at| mask.get(at) == Some(&b' ')).count();
+            census.rej_position = root_sites.iter().filter(|&&at| mask.get(at) == Some(&b' ')).count();
             hc_roots_and_fields(source, &mask)
+        }
+        DecoratorFamily::Rust => {
+            let mut guard = LazyGuard::new(RS_GUARD_PATH, source);
+            let mask = code_mask(source, |at| guard.admits(at));
+            census.rej_position = root_sites.iter().filter(|&&at| mask.get(at) == Some(&b' ')).count();
+            async_graphql_roots_and_fields(source, &mask)
+        }
+        DecoratorFamily::Scala => {
+            let map = CodeMap::new(source);
+            let mask = code_mask(source, |at| map.is_code(at));
+            census.rej_position = root_sites.iter().filter(|&&at| mask.get(at) == Some(&b' ')).count();
+            caliban_roots_and_fields(source, &mask, &root_sites)
         }
     };
     census.roots = roots.iter().map(|&(root, _)| root).collect();
@@ -718,6 +753,8 @@ fn decorator_family(lang: &str) -> Option<DecoratorFamily> {
         "typescript" | "react" | "angular" | "vue" => Some(DecoratorFamily::Ts),
         "python" => Some(DecoratorFamily::Py),
         "csharp" => Some(DecoratorFamily::CSharp),
+        "rust" => Some(DecoratorFamily::Rust),
+        "scala" => Some(DecoratorFamily::Scala),
         _ => None,
     }
 }
@@ -728,6 +765,9 @@ fn decorator_family(lang: &str) -> Option<DecoratorFamily> {
 /// not. Python: a line starting with `import` / `from` and the package name
 /// as a whole token (`import strawberry as sb`, `from graphene import ...`).
 /// C#: a `using` of the `HotChocolate` namespace ([`cs_imports_hotchocolate`]).
+/// Rust: an `async_graphql` crate path or `use` at code position
+/// ([`rs_imports_async_graphql`]). Scala: an `import caliban` line
+/// ([`scala_imports_caliban`]).
 fn graphql_server_lib(source: &str, family: DecoratorFamily) -> Option<GqlLib> {
     match family {
         DecoratorFamily::Ts => {
@@ -757,6 +797,8 @@ fn graphql_server_lib(source: &str, family: DecoratorFamily) -> Option<GqlLib> {
                 .map(|&(_, lib)| lib)
         }),
         DecoratorFamily::CSharp => cs_imports_hotchocolate(source).then_some(GqlLib::HotChocolate),
+        DecoratorFamily::Rust => rs_imports_async_graphql(source).then_some(GqlLib::AsyncGraphql),
+        DecoratorFamily::Scala => scala_imports_caliban(source).then_some(GqlLib::Caliban),
     }
 }
 
@@ -882,7 +924,11 @@ fn py_root_class_sites(lines: &[&str], lib: GqlLib) -> Vec<(&'static str, usize)
                     sites.push((root, i));
                 }
             }
-            GqlLib::NestGraphql | GqlLib::TypeGraphql | GqlLib::HotChocolate => {}
+            GqlLib::NestGraphql
+            | GqlLib::TypeGraphql
+            | GqlLib::HotChocolate
+            | GqlLib::AsyncGraphql
+            | GqlLib::Caliban => {}
         }
     }
     sites
@@ -995,7 +1041,11 @@ fn py_field_resolvers(lines: &[&str], lib: GqlLib) -> Vec<(String, u32)> {
         match lib {
             GqlLib::Strawberry => strawberry_fields(lines, &members, camel, &mut fields),
             GqlLib::Graphene => graphene_fields(lines, &members, camel, &mut fields),
-            GqlLib::NestGraphql | GqlLib::TypeGraphql | GqlLib::HotChocolate => {}
+            GqlLib::NestGraphql
+            | GqlLib::TypeGraphql
+            | GqlLib::HotChocolate
+            | GqlLib::AsyncGraphql
+            | GqlLib::Caliban => {}
         }
     }
     fields.sort_by_key(|&(_, line)| line);
@@ -1929,6 +1979,931 @@ fn hc_roots_and_fields(src: &str, m: &[u8]) -> (RootNouns, Vec<(String, u32)>) {
             roots.push((class.root, line_of(src, class.class_at)));
         }
         fields.extend(cs_root_fields(src, m, &class));
+    }
+    fields.sort_by_key(|&(_, line)| line);
+    (roots, fields)
+}
+
+// ---- DG.4: async-graphql (Rust) and Caliban (Scala) root types ----
+
+/// DG.4: the stand-in path a Rust file's [`LazyGuard`] is built with.
+/// [`extract_graphql_resolver_nodes`] takes the `detect_language` tag, not a
+/// path, and `rust` is the tag of exactly the `.rs` extension, the one
+/// `code_guard` keys its Rust lexer on (a bare `.rs` would not do: the
+/// extension of a dot-file is none).
+const RS_GUARD_PATH: &str = "schema.rs";
+
+/// DG.4: async-graphql's root attributes as they open an attribute, bare or
+/// crate-qualified; [`rs_root_attr_sites`] requires a `]`, `(` or blank
+/// after one, so `#[ObjectType]` is none.
+const RS_ROOT_ATTR_NEEDLES: &[&str] = &[
+    "#[Object",
+    "#[async_graphql::Object",
+    "#[Subscription",
+    "#[async_graphql::Subscription",
+];
+
+/// DG.4: the derives that merge root parts into one root type
+/// (`#[derive(MergedObject)] struct Query(UserQuery, OrderQuery);`).
+const RS_MERGED_DERIVES: &[&str] = &["MergedObject", "MergedSubscription"];
+
+/// DG.4: the placeholder roots a schema takes for an absent mutation or
+/// subscription type.
+const RS_EMPTY_ROOTS: &[&str] = &["EmptyMutation", "EmptySubscription"];
+
+/// DG.4: `#[graphql(..)]` flags that make an `#[Object]` method no field of
+/// its type: `skip` hides it, an `entity` method is a federation `_entities`
+/// lookup and a `flatten` method merges its result's fields instead.
+const RS_NOT_A_FIELD: &[&str] = &["skip", "entity", "flatten"];
+
+/// DG.4: what may precede `fn` in a method header.
+const RS_FN_MODIFIERS: &[&str] = &["pub", "async", "const", "unsafe", "extern", "default"];
+
+/// DG.4: Caliban's `RootResolver(queryResolver, mutationResolver,
+/// subscriptionResolver)` parameter names, in root order.
+const CALIBAN_RESOLVER_PARAMS: &[&str] = &["queryResolver", "mutationResolver", "subscriptionResolver"];
+
+/// DG.4: Scala parameter modifiers a case-class field may carry before its
+/// name.
+const SCALA_PARAM_MODIFIERS: &[&str] = &["val", "var", "override", "private", "protected", "final", "implicit", "using"];
+
+/// DG.4: `source` with every byte `is_code` refuses (its literals and
+/// comments) and every `'` it admits (a Rust lifetime or loop label, a Scala
+/// symbol literal, which [`cs_matching_close`] would read as a char quote)
+/// overwritten with a blank, newlines kept, so an offset means the same in
+/// both and every bracket, keyword and identifier left is code. A literal or
+/// comment is blanked whole, so the mask stays valid UTF-8.
+fn code_mask(source: &str, mut is_code: impl FnMut(usize) -> bool) -> Vec<u8> {
+    source
+        .bytes()
+        .enumerate()
+        .map(|(at, c)| match c {
+            b'\n' => b'\n',
+            b'\'' => b' ',
+            _ if !is_code(at) => b' ',
+            _ => c,
+        })
+        .collect()
+}
+
+/// DG.4: the offsets of every whole-word occurrence of `word` in a mask
+/// (the gated files' structural scans; the per-file gates search the source
+/// with `match_indices`).
+fn word_sites(b: &[u8], word: &[u8]) -> Vec<usize> {
+    if word.is_empty() {
+        return Vec::new();
+    }
+    b.windows(word.len())
+        .enumerate()
+        .filter(|&(at, w)| {
+            w == word && !ident_byte_before(b, at) && !b.get(at + word.len()).is_some_and(|&c| is_ident_byte(c))
+        })
+        .map(|(at, _)| at)
+        .collect()
+}
+
+/// DG.4: the items of the bracket group opening at `open` and closing at
+/// `close` of a mask, split at its commas outside nested `()[]{}` (and
+/// `<>` when `angle`, where the `>` of `->` / `=>` is no bracket), as
+/// trimmed `(start, end)` spans; an empty item is none.
+fn mask_items(m: &[u8], open: usize, close: usize, angle: bool) -> Vec<(usize, usize)> {
+    let mut items = Vec::new();
+    let mut push = |from: usize, to: usize| {
+        let start = skip_ascii_ws(m, from).min(to);
+        let end = start + m.get(start..to).map_or(0, |r| r.iter().rposition(|c| !c.is_ascii_whitespace()).map_or(0, |p| p + 1));
+        if end > start {
+            items.push((start, end));
+        }
+    };
+    let (mut depth, mut start) = (0i32, open + 1);
+    for at in open + 1..close {
+        match m.get(at) {
+            Some(b'(' | b'[' | b'{') => depth += 1,
+            Some(b')' | b']' | b'}') => depth -= 1,
+            Some(b'<') if angle => depth += 1,
+            Some(b'>') if angle && !matches!(at.checked_sub(1).and_then(|p| m.get(p)), Some(b'-' | b'=')) => depth -= 1,
+            Some(b',') if depth == 0 => {
+                push(start, at);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    push(start, close);
+    items
+}
+
+/// DG.4: the `>` closing the `<` at `open` of a mask, past nested `<..>`
+/// and the `>` of `->` / `=>`; `None` at a `;`, `{` or `}` first (a
+/// comparison, not a type argument list).
+fn angle_close(m: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, &c) in m.iter().enumerate().skip(open) {
+        match c {
+            b'<' => depth += 1,
+            b'>' if !matches!(at.checked_sub(1).and_then(|p| m.get(p)), Some(b'-' | b'=')) => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            b';' | b'{' | b'}' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// DG.4: the identifiers of the path starting at `from` of a mask (past
+/// blanks and, in Rust, a leading `::`), joined by `sep` (`::` in Rust, `.`
+/// in Scala), no further than `to`: `crate::schema::QueryRoot::default` ->
+/// `[crate, schema, QueryRoot, default]`.
+fn path_segments<'a>(src: &'a str, m: &[u8], from: usize, to: usize, sep: &[u8]) -> Vec<&'a str> {
+    let mut segs = Vec::new();
+    let mut at = skip_ascii_ws(m, from);
+    if m.get(at..).is_some_and(|r| r.starts_with(sep)) && sep == b"::" {
+        at += sep.len();
+    }
+    while at < to {
+        let end = cs_ident_end(m, at, to);
+        let Some(seg) = src.get(at..end).filter(|s| !s.is_empty()) else {
+            break;
+        };
+        segs.push(seg);
+        if !m.get(end..to).is_some_and(|r| r.starts_with(sep)) {
+            break;
+        }
+        at = end + sep.len();
+    }
+    segs
+}
+
+/// DG.4: the type a path names: its last segment that starts upper-case
+/// (`QueryRoot` in `QueryRoot::default`, `Queries` in `api.Queries`).
+fn type_segment<'a>(segs: &[&'a str]) -> Option<&'a str> {
+    segs.iter().rev().copied().find(|s| s.starts_with(|c: char| c.is_ascii_uppercase()))
+}
+
+/// DG.4: the byte offsets of every async-graphql root attribute opener
+/// ([`RS_ROOT_ATTR_NEEDLES`]).
+fn rs_root_attr_sites(source: &str) -> Vec<usize> {
+    let b = source.as_bytes();
+    let mut sites: Vec<usize> = RS_ROOT_ATTR_NEEDLES
+        .iter()
+        .flat_map(|needle| {
+            source
+                .match_indices(needle)
+                .map(|(at, n)| (at, at + n.len()))
+                .collect::<Vec<_>>()
+        })
+        .filter(|&(_, end)| b.get(end).is_some_and(|&c| c == b']' || c == b'(' || c.is_ascii_whitespace()))
+        .map(|(at, _)| at)
+        .collect();
+    sites.sort_unstable();
+    sites
+}
+
+/// DG.4: a Rust file that uses async-graphql: the crate name
+/// `async_graphql` as a whole word at code position (CJ.1's [`LazyGuard`],
+/// so a sample in a string or a doc comment is none) that opens a path
+/// (`async_graphql::Object`, `::async_graphql::Schema`) or is what a `use`
+/// declaration (`use async_graphql;`, `pub use async_graphql as gql;`) or
+/// `extern crate` names. `async_graphql_axum` is another crate; a file that
+/// never spells the name is never lexed.
+fn rs_imports_async_graphql(source: &str) -> bool {
+    let b = source.as_bytes();
+    let mut guard = LazyGuard::new(RS_GUARD_PATH, source);
+    let name = "async_graphql";
+    source.match_indices(name).any(|(at, _)| {
+        if ident_byte_before(b, at) || b.get(at + name.len()).is_some_and(|&c| is_ident_byte(c)) {
+            return false;
+        }
+        let path = b.get(skip_ascii_ws(b, at + name.len())..).is_some_and(|r| r.starts_with(b"::"));
+        let line_start = source.get(..at).and_then(|s| s.rfind('\n')).map_or(0, |p| p + 1);
+        let words: Vec<&str> = source.get(line_start..at).unwrap_or_default().split_whitespace().collect();
+        let used = (words.last() == Some(&"use") && words.iter().all(|w| *w == "use" || w.starts_with("pub")))
+            || words == ["extern", "crate"];
+        (path || used) && guard.admits(at)
+    })
+}
+
+/// DG.4: a Scala file that imports Caliban: a line starting with `import
+/// caliban` past which no identifier byte follows (`import caliban.*`,
+/// `import caliban.{graphQL, RootResolver}`); `import calibanx` is another
+/// package.
+fn scala_imports_caliban(source: &str) -> bool {
+    source.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("import")
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+            .and_then(|rest| rest.trim_start().strip_prefix("caliban"))
+            .is_some_and(|after| !after.bytes().next().is_some_and(is_ident_byte))
+    })
+}
+
+/// DG.4: async-graphql's field rename rules, the `rename_fields` values of
+/// `#[Object(..)]` / `#[Subscription(..)]`; the default is `camelCase`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RenameRule {
+    Lower,
+    Upper,
+    Pascal,
+    Camel,
+    Snake,
+    ScreamingSnake,
+}
+
+impl RenameRule {
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "lowercase" => RenameRule::Lower,
+            "UPPERCASE" => RenameRule::Upper,
+            "PascalCase" => RenameRule::Pascal,
+            "camelCase" => RenameRule::Camel,
+            "snake_case" => RenameRule::Snake,
+            "SCREAMING_SNAKE_CASE" => RenameRule::ScreamingSnake,
+            _ => return None,
+        })
+    }
+
+    /// The GraphQL name async-graphql derives from a Rust method name
+    /// (async-graphql-derive's `RenameRule::rename`): `lowercase` and
+    /// `UPPERCASE` change case only, the others are heck's conversions over
+    /// [`heck_words`]. So `order_count` -> `orderCount`, `user_ID` ->
+    /// `userId`, `field_2` -> `field2`, and a leading `_` is dropped
+    /// (`_internal` -> `internal`).
+    fn apply(self, name: &str) -> String {
+        let words = heck_words(name);
+        let joined = |sep: &str, word: fn(&str) -> String| words.iter().map(|w| word(w)).collect::<Vec<_>>().join(sep);
+        match self {
+            RenameRule::Lower => name.to_lowercase(),
+            RenameRule::Upper => name.to_uppercase(),
+            RenameRule::Pascal => joined("", capitalize),
+            RenameRule::Camel => words
+                .iter()
+                .enumerate()
+                .map(|(i, w)| if i == 0 { w.to_lowercase() } else { capitalize(w) })
+                .collect(),
+            RenameRule::Snake => joined("_", str::to_lowercase),
+            RenameRule::ScreamingSnake => joined("_", str::to_uppercase),
+        }
+    }
+}
+
+/// DG.4: heck's word split (`transform`): every non-alphanumeric char is a
+/// separator (so leading and doubled `_` make no word), and within a run a
+/// word ends before an upper-case char that follows a lower-case one
+/// (`getUser`) and before the last capital of a capital run a lower-case
+/// char follows (`HTTPResponse` -> `HTTP`, `Response`); digits carry the
+/// case mode through.
+fn heck_words(s: &str) -> Vec<&str> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mode {
+        Boundary,
+        Lower,
+        Upper,
+    }
+    let mut words = Vec::new();
+    for run in s.split(|c: char| !c.is_alphanumeric()) {
+        let mut chars = run.char_indices().peekable();
+        let (mut init, mut mode) = (0, Mode::Boundary);
+        while let Some((i, c)) = chars.next() {
+            let Some(&(next_i, next)) = chars.peek() else {
+                words.extend(run.get(init..));
+                break;
+            };
+            let next_mode = if c.is_lowercase() {
+                Mode::Lower
+            } else if c.is_uppercase() {
+                Mode::Upper
+            } else {
+                mode
+            };
+            if next_mode == Mode::Lower && next.is_uppercase() {
+                words.extend(run.get(init..next_i));
+                (init, mode) = (next_i, Mode::Boundary);
+            } else if mode == Mode::Upper && c.is_uppercase() && next.is_lowercase() {
+                words.extend(run.get(init..i));
+                (init, mode) = (i, Mode::Boundary);
+            } else {
+                mode = next_mode;
+            }
+        }
+    }
+    words
+}
+
+/// DG.4: heck's `capitalize`: the first char upper-case, the rest lower.
+fn capitalize(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars.flat_map(char::to_lowercase)).collect(),
+        None => String::new(),
+    }
+}
+
+/// DG.4: one Rust outer attribute: its path past a leading `::`
+/// (`Object`, `async_graphql::Object`, `derive`, `graphql`) and its argument
+/// text from the source, string literals intact (`(name = "x")`, or empty).
+struct RsAttr<'a> {
+    path: &'a str,
+    args: &'a str,
+}
+
+impl<'a> RsAttr<'a> {
+    /// The items of the argument list, split at its top-level commas
+    /// ([`cs_args`]); none for a bare attribute.
+    fn items(&self) -> Vec<&'a str> {
+        let args: &'a str = self.args;
+        args.strip_prefix('(')
+            .and_then(|a| a.strip_suffix(')'))
+            .map(|inner| cs_args(inner).into_iter().filter(|item| !item.is_empty()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The quoted value of a `key = "value"` item.
+    fn value(&self, key: &str) -> Option<&'a str> {
+        self.items().into_iter().find_map(|item| {
+            let rest = item.strip_prefix(key)?.trim_start().strip_prefix('=')?;
+            quoted_literal(rest.trim())
+        })
+    }
+
+    /// True when the list holds the flag `name`, bare or `= true`.
+    fn flag(&self, name: &str) -> bool {
+        self.items().into_iter().any(|item| {
+            item == name
+                || item
+                    .strip_prefix(name)
+                    .and_then(|rest| rest.trim_start().strip_prefix('='))
+                    .is_some_and(|value| value.trim() == "true")
+        })
+    }
+}
+
+/// DG.4: the outer attributes a Rust item header opens with, and the
+/// offset past them; an inner attribute (`#![..]`) is skipped, not kept.
+fn rs_head_attrs<'a>(src: &'a str, m: &[u8], from: usize, to: usize) -> (Vec<RsAttr<'a>>, usize) {
+    let mut attrs = Vec::new();
+    let mut at = skip_ascii_ws(m, from);
+    while at < to && m.get(at) == Some(&b'#') {
+        let mut open = skip_ascii_ws(m, at + 1);
+        let inner = m.get(open) == Some(&b'!');
+        if inner {
+            open = skip_ascii_ws(m, open + 1);
+        }
+        if m.get(open) != Some(&b'[') {
+            break;
+        }
+        let Some(close) = cs_matching_close(m, open).filter(|&c| c < to) else {
+            break;
+        };
+        if !inner {
+            let start = skip_ascii_ws(m, open + 1);
+            let path_end = start + m.get(start..close).map_or(0, |r| r.iter().take_while(|&&c| is_ident_byte(c) || c == b':').count());
+            if let (Some(path), Some(args)) = (src.get(start..path_end), src.get(path_end..close)) {
+                let path = path.strip_prefix("::").unwrap_or(path);
+                attrs.push(RsAttr { path, args: args.trim() });
+            }
+        }
+        at = skip_ascii_ws(m, close + 1);
+    }
+    (attrs, at)
+}
+
+/// DG.4: one `#[Object]` / `#[Subscription]` impl block.
+struct RsObjectImpl<'a> {
+    /// The self type's name.
+    ty: &'a str,
+    subscription: bool,
+    rule: RenameRule,
+    /// The offset of the `impl` keyword, where a root noun anchors.
+    impl_at: usize,
+    /// Its `{` and `}`.
+    body: (usize, usize),
+}
+
+/// DG.4: whether `attrs` hold async-graphql's `#[Object]` (false) or
+/// `#[Subscription]` (true), and that attribute's field rename rule.
+fn rs_root_attr(attrs: &[RsAttr<'_>]) -> Option<(bool, RenameRule)> {
+    attrs.iter().find_map(|a| {
+        let subscription = match a.path {
+            "Object" | "async_graphql::Object" => false,
+            "Subscription" | "async_graphql::Subscription" => true,
+            _ => return None,
+        };
+        let rule = a.value("rename_fields").and_then(RenameRule::parse).unwrap_or(RenameRule::Camel);
+        Some((subscription, rule))
+    })
+}
+
+/// DG.4: the self type of an inherent impl header from `from` (past its
+/// attributes): `impl QueryRoot`, `impl<'a> QueryRoot<'a>`,
+/// `impl crate::api::QueryRoot`, with the offset of its `impl` keyword. A
+/// trait impl (`impl X for Y`) is none.
+fn rs_impl_self_type<'a>(src: &'a str, m: &[u8], from: usize, to: usize) -> Option<(&'a str, usize)> {
+    let toks = cs_head_tokens(m, from, to);
+    let word = |t: Option<&CsTok>| match t {
+        Some(&CsTok::Word(s, e)) => src.get(s..e),
+        _ => None,
+    };
+    let k = toks.iter().position(|t| word(Some(t)) == Some("impl"))?;
+    if toks.iter().take(k).any(|t| !matches!(word(Some(t)), Some("unsafe" | "default")))
+        || toks.iter().any(|t| word(Some(t)) == Some("for"))
+    {
+        return None;
+    }
+    let CsTok::Word(impl_at, _) = *toks.get(k)? else {
+        return None;
+    };
+    let mut i = k + 1;
+    if toks.get(i) == Some(&CsTok::Group(b'<')) {
+        i += 1;
+    }
+    let mut ty = word(toks.get(i))?;
+    while toks.get(i + 1) == Some(&CsTok::Punct(b':')) && toks.get(i + 2) == Some(&CsTok::Punct(b':')) {
+        let Some(next) = word(toks.get(i + 3)) else {
+            break;
+        };
+        ty = next;
+        i += 3;
+    }
+    is_ident(ty).then_some((ty, impl_at))
+}
+
+/// DG.4: a `#[derive(MergedObject)]` / `#[derive(MergedSubscription)]`
+/// tuple struct header from `from` (past its attributes): its name and the
+/// type of each member, in order (`struct Query(UserQuery, orders::OrderQuery)`
+/// -> `Query`, `[UserQuery, OrderQuery]`).
+fn rs_merged_struct<'a>(
+    src: &'a str,
+    m: &[u8],
+    attrs: &[RsAttr<'_>],
+    from: usize,
+    to: usize,
+) -> Option<(&'a str, Vec<&'a str>)> {
+    let merged = attrs.iter().any(|a| {
+        a.path == "derive"
+            && a.items().iter().any(|item| item.rsplit("::").next().is_some_and(|d| RS_MERGED_DERIVES.contains(&d.trim())))
+    });
+    if !merged {
+        return None;
+    }
+    let toks = cs_head_tokens(m, from, to);
+    let k = toks.iter().position(|t| matches!(*t, CsTok::Word(s, e) if src.get(s..e) == Some("struct")))?;
+    let CsTok::Word(name_start, name_end) = *toks.get(k + 1)? else {
+        return None;
+    };
+    let name = src.get(name_start..name_end).filter(|n| is_ident(n))?;
+    let mut open = skip_ascii_ws(m, name_end);
+    if m.get(open) == Some(&b'<') {
+        open = skip_ascii_ws(m, angle_close(m, open)? + 1);
+    }
+    if m.get(open) != Some(&b'(') {
+        return None;
+    }
+    let close = cs_matching_close(m, open).filter(|&c| c <= to)?;
+    let members = mask_items(m, open, close, true)
+        .into_iter()
+        .filter_map(|(s, e)| {
+            let mut at = s;
+            if src.get(s..cs_ident_end(m, s, e)) == Some("pub") {
+                at = skip_ascii_ws(m, s + 3);
+                if m.get(at) == Some(&b'(') {
+                    at = cs_matching_close(m, at)? + 1;
+                }
+            }
+            type_segment(&path_segments(src, m, at, e, b"::"))
+        })
+        .collect();
+    Some((name, members))
+}
+
+/// DG.4: merged root structs, as (name, member types).
+type MergedRoots<'a> = Vec<(&'a str, Vec<&'a str>)>;
+
+/// DG.4: the impl blocks and merged root structs of a Rust file's mask, in
+/// source order, through `mod` blocks and every other body (a test may
+/// declare its schema inside a function).
+fn rs_items<'a>(src: &'a str, m: &[u8]) -> (Vec<RsObjectImpl<'a>>, MergedRoots<'a>) {
+    struct Found<'a> {
+        impls: Vec<RsObjectImpl<'a>>,
+        merged: MergedRoots<'a>,
+    }
+    fn walk<'a>(src: &'a str, m: &[u8], span: (usize, usize), nesting: usize, found: &mut Found<'a>) {
+        if nesting > 64 {
+            return;
+        }
+        for decl in cs_decls(m, span.0, span.1) {
+            let (attrs, at) = rs_head_attrs(src, m, decl.head.0, decl.head.1);
+            if let Some(merged) = rs_merged_struct(src, m, &attrs, at, decl.head.1) {
+                found.merged.push(merged);
+            }
+            let CsEnd::Body(open, close) = decl.end else {
+                continue;
+            };
+            if let Some((subscription, rule)) = rs_root_attr(&attrs)
+                && let Some((ty, impl_at)) = rs_impl_self_type(src, m, at, decl.head.1)
+            {
+                found.impls.push(RsObjectImpl { ty, subscription, rule, impl_at, body: (open, close) });
+            }
+            walk(src, m, (open + 1, close), nesting + 1, found);
+        }
+    }
+    let mut found = Found { impls: Vec::new(), merged: Vec::new() };
+    walk(src, m, (0, m.len()), 0, &mut found);
+    (found.impls, found.merged)
+}
+
+/// DG.4: the root each type a Rust file's schema construction names takes,
+/// in source order: the three arguments of `Schema::new(Q, M, S)` /
+/// `Schema::build(Q, M, S)` (values: `QueryRoot`, `QueryRoot::default()`,
+/// `Query(A, B)`) or of the type `Schema<Q, M, S>` (a `type AppSchema =
+/// Schema<..>` alias, a parameter type), each argument's type its leading
+/// path's [`type_segment`]; [`RS_EMPTY_ROOTS`] name nothing. `None` when the
+/// file has no such site, so its roots go by name.
+fn rs_schema_roots<'a>(src: &'a str, m: &[u8]) -> Option<Vec<(&'a str, &'static str)>> {
+    let mut named = Vec::new();
+    let mut any = false;
+    for at in word_sites(m, b"Schema") {
+        let after = skip_ascii_ws(m, at + "Schema".len());
+        let (open, close, angle) = if m.get(after..).is_some_and(|r| r.starts_with(b"::")) {
+            let ctor = skip_ascii_ws(m, after + 2);
+            let ctor_end = cs_ident_end(m, ctor, m.len());
+            let open = skip_ascii_ws(m, ctor_end);
+            if !matches!(m.get(ctor..ctor_end), Some(b"new" | b"build")) || m.get(open) != Some(&b'(') {
+                continue;
+            }
+            let Some(close) = cs_matching_close(m, open) else {
+                continue;
+            };
+            (open, close, false)
+        } else if m.get(after) == Some(&b'<') {
+            let Some(close) = angle_close(m, after) else {
+                continue;
+            };
+            (after, close, true)
+        } else {
+            continue;
+        };
+        let items = mask_items(m, open, close, angle);
+        if items.len() != ROOT_TYPES.len() {
+            continue;
+        }
+        any = true;
+        for (&(s, e), &root) in items.iter().zip(ROOT_TYPES) {
+            if let Some(ty) = type_segment(&path_segments(src, m, s, e, b"::"))
+                && !RS_EMPTY_ROOTS.contains(&ty)
+            {
+                named.push((ty, root));
+            }
+        }
+    }
+    any.then_some(named)
+}
+
+/// DG.4: the root a type name makes, for a file that names no schema:
+/// `Query`, `QueryRoot` or any name ending in `Query` is the query root,
+/// likewise `Mutation` and `Subscription`.
+fn rs_root_by_name(name: &str) -> Option<&'static str> {
+    ROOT_TYPES
+        .iter()
+        .copied()
+        .find(|root| name.ends_with(root) || name.strip_prefix(root) == Some("Root"))
+}
+
+/// DG.4: the name and `fn` keyword offset of a method header from `from`
+/// (past its attributes): only [`RS_FN_MODIFIERS`] (and a `pub(..)` group)
+/// before `fn`; a raw identifier (`r#type`) reads as `type`.
+fn rs_fn_name<'a>(src: &'a str, m: &[u8], from: usize, to: usize) -> Option<(&'a str, usize)> {
+    let toks = cs_head_tokens(m, from, to);
+    let word = |t: Option<&CsTok>| match t {
+        Some(&CsTok::Word(s, e)) => src.get(s..e),
+        _ => None,
+    };
+    let k = toks.iter().position(|t| word(Some(t)) == Some("fn"))?;
+    let modifiers_only = toks.iter().take(k).all(|t| {
+        *t == CsTok::Group(b'(') || word(Some(t)).is_some_and(|w| RS_FN_MODIFIERS.contains(&w))
+    });
+    let CsTok::Word(fn_at, _) = *toks.get(k)? else {
+        return None;
+    };
+    let mut name = word(toks.get(k + 1))?;
+    if name == "r" && toks.get(k + 2) == Some(&CsTok::Punct(b'#')) {
+        name = word(toks.get(k + 3))?;
+    }
+    (modifiers_only && is_ident(name)).then_some((name, fn_at))
+}
+
+/// DG.4: the fields of one root impl, as (GraphQL name, 0-indexed line of
+/// its `fn`) in source order: every method of its body (async-graphql makes
+/// each one a field, whatever its visibility) but one whose `#[graphql(..)]`
+/// holds a [`RS_NOT_A_FIELD`] flag, named by `#[graphql(name = "..")]` when
+/// given, else by the impl's rename rule ([`RenameRule::apply`]).
+fn rs_object_fields(src: &str, m: &[u8], imp: &RsObjectImpl<'_>) -> Vec<(String, u32)> {
+    let (open, close) = imp.body;
+    let mut fields = Vec::new();
+    for decl in cs_decls(m, open + 1, close) {
+        let (attrs, at) = rs_head_attrs(src, m, decl.head.0, decl.head.1);
+        let graphql: Vec<&RsAttr<'_>> = attrs.iter().filter(|a| a.path == "graphql").collect();
+        if graphql.iter().any(|a| RS_NOT_A_FIELD.iter().any(|flag| a.flag(flag))) {
+            continue;
+        }
+        let Some((name, fn_at)) = rs_fn_name(src, m, at, decl.head.1) else {
+            continue;
+        };
+        let field = graphql
+            .iter()
+            .find_map(|a| a.value("name"))
+            .map_or_else(|| imp.rule.apply(name), str::to_string);
+        if !field.is_empty() {
+            fields.push((field, line_of(src, fn_at)));
+        }
+    }
+    fields
+}
+
+/// DG.4: a Rust file's async-graphql root nouns (each anchored at the
+/// `impl` line of its first root impl) and their fields ([`rs_object_fields`]),
+/// given its [`code_mask`]. A root impl is an `#[Object]` / `#[Subscription]`
+/// impl ([`rs_items`]) whose self type the file's schema construction names
+/// ([`rs_schema_roots`]) or, when the file names no schema, whose name makes
+/// a root ([`rs_root_by_name`]); a member of a merged root struct takes its
+/// root, and a `#[Subscription]` impl is always the subscription root. An
+/// object type (`#[Object] impl Order`, `#[derive(SimpleObject)]`) is none.
+fn async_graphql_roots_and_fields(src: &str, m: &[u8]) -> (RootNouns, Vec<(String, u32)>) {
+    let (impls, merged) = rs_items(src, m);
+    let mut root_of: Vec<(&str, &'static str)> = match rs_schema_roots(src, m) {
+        Some(named) => named,
+        None => impls
+            .iter()
+            .map(|imp| imp.ty)
+            .chain(merged.iter().map(|&(name, _)| name))
+            .filter_map(|name| rs_root_by_name(name).map(|root| (name, root)))
+            .collect(),
+    };
+    // Merged parts take their root, through nested merges.
+    for _ in 0..=merged.len() {
+        let mut grew = false;
+        for (name, members) in &merged {
+            let Some(root) = root_of.iter().find(|(n, _)| n == name).map(|&(_, r)| r) else {
+                continue;
+            };
+            for member in members {
+                if !root_of.iter().any(|(n, _)| n == member) {
+                    root_of.push((member, root));
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut roots = RootNouns::new();
+    let mut fields = Vec::new();
+    for imp in &impls {
+        let root = if imp.subscription {
+            Some("Subscription")
+        } else {
+            root_of.iter().find(|(n, _)| *n == imp.ty).map(|&(_, r)| r)
+        };
+        let Some(root) = root else {
+            continue;
+        };
+        if !roots.iter().any(|&(r, _)| r == root) {
+            roots.push((root, line_of(src, imp.impl_at)));
+        }
+        fields.extend(rs_object_fields(src, m, imp));
+    }
+    fields.sort_by_key(|&(_, line)| line);
+    (roots, fields)
+}
+
+/// DG.4: the byte offsets of every `RootResolver(` / `RootResolver[..](`
+/// call, the name a whole word; an import of the name is no site.
+fn scala_root_resolver_sites(source: &str) -> Vec<usize> {
+    let b = source.as_bytes();
+    let name = "RootResolver";
+    source
+        .match_indices(name)
+        .map(|(at, _)| at)
+        .filter(|&at| {
+            !ident_byte_before(b, at) && matches!(b.get(skip_ascii_ws(b, at + name.len())), Some(b'(' | b'['))
+        })
+        .collect()
+}
+
+/// DG.4: one Scala case class: its name, the offset of its `case` keyword
+/// and its first parameter list's brackets, when it has one.
+struct ScalaCaseClass<'a> {
+    name: &'a str,
+    case_at: usize,
+    params: Option<(usize, usize)>,
+}
+
+/// DG.4: every case class a Scala file's mask declares.
+fn scala_case_classes<'a>(src: &'a str, m: &[u8]) -> Vec<ScalaCaseClass<'a>> {
+    word_sites(m, b"case")
+        .into_iter()
+        .filter_map(|case_at| {
+            let class = skip_ascii_ws(m, case_at + "case".len());
+            let class_end = cs_ident_end(m, class, m.len());
+            if m.get(class..class_end) != Some(b"class") {
+                return None;
+            }
+            let at = skip_ascii_ws(m, class_end);
+            let name_end = cs_ident_end(m, at, m.len());
+            let name = src.get(at..name_end).filter(|n| is_ident(n))?;
+            let mut open = skip_ascii_ws(m, name_end);
+            if m.get(open) == Some(&b'[') {
+                open = skip_ascii_ws(m, cs_matching_close(m, open)? + 1);
+            }
+            let params = (m.get(open) == Some(&b'('))
+                .then(|| cs_matching_close(m, open).map(|close| (open, close)))
+                .flatten();
+            Some(ScalaCaseClass { name, case_at, params })
+        })
+        .collect()
+}
+
+/// DG.4: the type a Scala `val` / `var` named `v` holds: its annotated type
+/// (`val q: Queries`) or its initialiser's constructor (`val q = Queries(..)`,
+/// `val q = new Queries(..)`), each the path's [`type_segment`].
+fn scala_val_type<'a>(src: &'a str, m: &[u8], v: &str) -> Option<&'a str> {
+    let sites = word_sites(m, b"val").into_iter().chain(word_sites(m, b"var"));
+    sites.into_iter().find_map(|at| {
+        let name = skip_ascii_ws(m, at + 3);
+        let name_end = cs_ident_end(m, name, m.len());
+        if src.get(name..name_end) != Some(v) {
+            return None;
+        }
+        let p = skip_ascii_ws(m, name_end);
+        let mut rhs = match (m.get(p), m.get(p + 1)) {
+            (Some(b':'), _) => skip_ascii_ws(m, p + 1),
+            (Some(b'='), next) if !matches!(next, Some(b'=' | b'>')) => skip_ascii_ws(m, p + 1),
+            _ => return None,
+        };
+        if m.get(rhs..cs_ident_end(m, rhs, m.len())) == Some(b"new") {
+            rhs = skip_ascii_ws(m, rhs + 3);
+        }
+        type_segment(&path_segments(src, m, rhs, m.len(), b"."))
+    })
+}
+
+/// DG.4: one `RootResolver` argument (`s..e`, the `k`-th): the root slot it
+/// fills (its position, or the `queryResolver = ..` parameter it names) and
+/// its value span, past `Some(..)` / `Option(..)`; `None` for an absent
+/// root (`None`, `Unit`, `()`, `Option.empty[..]`).
+fn caliban_arg(src: &str, m: &[u8], k: usize, s: usize, e: usize) -> Option<(usize, (usize, usize))> {
+    let name_end = cs_ident_end(m, s, e);
+    let eq = skip_ascii_ws(m, name_end);
+    let (slot, mut start) = if name_end > s && m.get(eq) == Some(&b'=') && !matches!(m.get(eq + 1), Some(b'=' | b'>')) {
+        let param = src.get(s..name_end)?;
+        (CALIBAN_RESOLVER_PARAMS.iter().position(|p| *p == param)?, skip_ascii_ws(m, eq + 1))
+    } else {
+        (k, s)
+    };
+    let mut end = e;
+    loop {
+        let word_end = cs_ident_end(m, start, end);
+        let next = skip_ascii_ws(m, word_end);
+        match src.get(start..word_end)? {
+            "Some" | "Option" if m.get(next) == Some(&b'(') => {
+                let close = cs_matching_close(m, next).filter(|&c| c < end)?;
+                start = skip_ascii_ws(m, next + 1);
+                end = close;
+            }
+            "Option" if m.get(next) == Some(&b'.') => return None,
+            "None" | "Unit" => return None,
+            "" if m.get(start) == Some(&b'(') && m.get(skip_ascii_ws(m, start + 1)) == Some(&b')') => return None,
+            _ => break,
+        }
+    }
+    (start < end).then_some((slot, (start, end)))
+}
+
+/// DG.4: the case class a `RootResolver` argument value constructs: `T(..)`,
+/// `new T(..)`, `T`, or a lower-case identifier bound in the file by `val v
+/// = T(..)` / `val v: T` ([`scala_val_type`]); the path's last segment when it
+/// is that identifier, else its [`type_segment`].
+fn caliban_arg_type<'a>(src: &'a str, m: &[u8], (start, end): (usize, usize)) -> Option<&'a str> {
+    let mut at = start;
+    if m.get(at..cs_ident_end(m, at, end)) == Some(b"new") {
+        at = skip_ascii_ws(m, at + 3);
+    }
+    let segs = path_segments(src, m, at, end, b".");
+    let last = segs.last().copied()?;
+    if last.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+        && let Some(ty) = scala_val_type(src, m, last)
+    {
+        return Some(ty);
+    }
+    type_segment(&segs)
+}
+
+/// DG.4: one case-class parameter (`s..e` of the mask) as a Caliban field:
+/// its name (verbatim, or a `@GQLName("..")` annotation's value, read from
+/// the source) and the 0-indexed line of the name; a `@GQLExcluded`
+/// parameter is none.
+fn caliban_param(src: &str, m: &[u8], s: usize, e: usize) -> Option<(String, u32)> {
+    let mut at = skip_ascii_ws(m, s);
+    let mut renamed = None;
+    while at < e && m.get(at) == Some(&b'@') {
+        let name_end = at + 1 + m.get(at + 1..e).map_or(0, |r| r.iter().take_while(|&&c| is_ident_byte(c) || c == b'.').count());
+        let annotation = src.get(at + 1..name_end)?.rsplit('.').next()?;
+        let mut next = skip_ascii_ws(m, name_end);
+        let mut args = None;
+        if m.get(next) == Some(&b'(') {
+            let close = cs_matching_close(m, next).filter(|&c| c < e)?;
+            args = src.get(next + 1..close);
+            next = close + 1;
+        }
+        match annotation {
+            "GQLExcluded" => return None,
+            "GQLName" => renamed = args.and_then(|a| quoted_literal(a.trim())).map(str::to_string),
+            _ => {}
+        }
+        at = skip_ascii_ws(m, next);
+    }
+    loop {
+        let word_end = cs_ident_end(m, at, e);
+        match src.get(at..word_end) {
+            Some(w) if SCALA_PARAM_MODIFIERS.contains(&w) => at = skip_ascii_ws(m, word_end),
+            _ => break,
+        }
+    }
+    let (name, name_end) = if m.get(at) == Some(&b'`') {
+        let close = at + 1 + m.get(at + 1..e)?.iter().position(|&c| c == b'`')?;
+        (src.get(at + 1..close)?, close + 1)
+    } else {
+        let end = cs_ident_end(m, at, e);
+        (src.get(at..end).filter(|n| is_ident(n))?, end)
+    };
+    let colon = skip_ascii_ws(m, name_end);
+    (m.get(colon) == Some(&b':') && !name.is_empty())
+        .then(|| (renamed.unwrap_or_else(|| name.to_string()), line_of(src, at)))
+}
+
+/// DG.4: the fields of one root case class, in parameter order
+/// ([`caliban_param`]).
+fn caliban_case_class_fields(src: &str, m: &[u8], class: &ScalaCaseClass<'_>) -> Vec<(String, u32)> {
+    let Some((open, close)) = class.params else {
+        return Vec::new();
+    };
+    mask_items(m, open, close, false)
+        .into_iter()
+        .filter_map(|(s, e)| caliban_param(src, m, s, e))
+        .collect()
+}
+
+/// DG.4: a Scala file's Caliban root nouns and their fields, given its
+/// [`code_mask`] and its [`scala_root_resolver_sites`]: each argument of a
+/// `RootResolver(..)` call at code position names its root (position 0 / 1 /
+/// 2, or `queryResolver = ..` / `mutationResolver = ..` /
+/// `subscriptionResolver = ..`; [`caliban_arg`]), and when the case class it
+/// constructs ([`caliban_arg_type`]) is declared in the file, that class's
+/// parameters are the root's fields, under their Scala names. A root whose
+/// type is declared in another file names its root only: the noun anchors at
+/// the case class line when the class is in the file, else at the argument.
+fn caliban_roots_and_fields(src: &str, m: &[u8], sites: &[usize]) -> (RootNouns, Vec<(String, u32)>) {
+    let classes = scala_case_classes(src, m);
+    let mut roots = RootNouns::new();
+    let mut fields = Vec::new();
+    let mut read: Vec<&str> = Vec::new();
+    for &at in sites.iter().filter(|&&at| m.get(at) != Some(&b' ')) {
+        let mut open = skip_ascii_ws(m, at + "RootResolver".len());
+        if m.get(open) == Some(&b'[') {
+            let Some(close) = cs_matching_close(m, open) else {
+                continue;
+            };
+            open = skip_ascii_ws(m, close + 1);
+        }
+        if m.get(open) != Some(&b'(') {
+            continue;
+        }
+        let Some(close) = cs_matching_close(m, open) else {
+            continue;
+        };
+        for (k, (s, e)) in mask_items(m, open, close, false).into_iter().enumerate() {
+            let Some((slot, value)) = caliban_arg(src, m, k, s, e) else {
+                continue;
+            };
+            let Some(&root) = ROOT_TYPES.get(slot) else {
+                continue;
+            };
+            let class = caliban_arg_type(src, m, value).and_then(|ty| classes.iter().find(|c| c.name == ty));
+            if !roots.iter().any(|&(r, _)| r == root) {
+                let anchor = class.map_or(value.0, |c| c.case_at);
+                roots.push((root, line_of(src, anchor)));
+            }
+            if let Some(class) = class
+                && !read.contains(&class.name)
+            {
+                read.push(class.name);
+                fields.extend(caliban_case_class_fields(src, m, class));
+            }
+        }
     }
     fields.sort_by_key(|&(_, line)| line);
     (roots, fields)
@@ -3746,6 +4721,10 @@ mod tests {
         // strawberry.type).
         let table = "pub const NOUNS: &[&str] = &[\"@Resolver(\", \"@ResolveField(\", \"ObjectType):\", \"@strawberry.type\"];";
         assert_resolvers(table, "rust", &[]);
+        // DG.4: async-graphql's needles in a Rust table, the crate named only
+        // in strings.
+        let rs_table = "pub const NEEDLES: &[&str] = &[\"use async_graphql::Object;\", \"#[Object]\", \"#[Subscription(\", \"RootResolver(\"];\nimpl QueryRoot { fn orders(&self) {} }";
+        assert_resolvers(rs_table, "rust", &[]);
         // HEAD: Query.
         assert_resolvers("// @Query(() => X)\nfunc f() {}", "go", &[]);
         // The same decorator in a GraphQL server file of the TypeScript family.
@@ -4252,5 +5231,179 @@ mod tests {
     fn constructors_and_private_members_are_not_fields() {
         let source = "using HotChocolate;\n\npublic class Query\n{\n    #region Don't expose these {\n    private readonly IRepo _repo;\n    public const int Limit = 10;\n    #endregion\n    public Query(IRepo repo) { _repo = repo; }\n    public Query() : this(null) { }\n    ~Query() { }\n    private Book GetHidden() => null;\n    internal Book GetInternal() => null;\n    protected Book GetProtected() => null;\n    public static Book GetStatic() => null;\n    public void Log(string m) { }\n    public Task FlushAsync() => Task.CompletedTask;\n    public override string ToString() => \"Query\";\n    public string Name;\n    public Book this[int i] => null;\n    public event EventHandler Changed;\n    public class Nested { public int GetInner() => 1; }\n    public int Count { get; private set; }\n    public Book GetBook(int id)\n    {\n        // }\n        var verbatim = @\"}\"\"{\";\n        char c = '}';\n        if (id > 0) { return _repo.Find(id); }\n        return null;\n    }\n}\n\npublic class Other\n{\n    public int GetOther() => 1;\n}\n";
         assert_resolvers(source, "csharp", &["Query", "book", "count"]);
+    }
+
+    // ---- DG.4: async-graphql (Rust) and Caliban (Scala) roots ----
+
+    /// bench/substrate-gap/matrix/rust/graphql/server/src/schema.rs.
+    const AG_QUERY: &str = "use async_graphql::{Object, SimpleObject};\n\n#[derive(SimpleObject)]\npub struct Order {\n    id: String,\n}\n\npub struct QueryRoot;\n\n#[Object]\nimpl QueryRoot {\n    async fn orders(&self) -> Vec<Order> {\n        vec![]\n    }\n}\n";
+
+    /// bench/substrate-gap/matrix/scala/graphql/server/Api.scala.
+    const CALIBAN_API: &str = "package shop\n\nimport caliban.graphQL\nimport caliban.RootResolver\n\ncase class Order(id: String)\ncase class Queries(orders: List[Order])\n\nobject Api {\n  val api = graphQL(RootResolver(Queries(orders = Nil)))\n}\n";
+
+    #[test]
+    fn async_graphql_query_root_fields() {
+        assert_resolvers(AG_QUERY, "rust", &["Query", "orders"]);
+        let out = extract_graphql_resolver_nodes(AG_QUERY, "rust", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(10), "the impl line");
+        assert_eq!(anchor_line(&out, "graphql_resolver:orders"), Some(11), "the fn line");
+        assert_eq!(
+            decorator_scan(AG_QUERY, "rust").1.marker("rust").as_deref(),
+            Some("[graphql-decorators] lang=rust import=async-graphql roots=Query fields=1 rejected lang=0 import=0 position=0")
+        );
+        // Mutation / Subscription by name, a crate-qualified attribute, a
+        // `use async_graphql;` import and generic impls.
+        let roots = "use async_graphql;\n\n#[async_graphql::Object]\nimpl<'a> MutationRoot<'a> {\n    async fn add_order(&self, ctx: &async_graphql::Context<'_>) -> i32 { 1 }\n}\n#[Object(name = \"Q\")]\nimpl RootQuery {\n    pub async fn me(&self) -> i32 { 1 }\n}\n#[Object]\nimpl SubscriptionRoot {\n    async fn ticks(&self) -> i32 { 1 }\n}\n";
+        assert_resolvers(roots, "rust", &["Mutation", "Query", "Subscription", "addOrder", "me", "ticks"]);
+    }
+
+    #[test]
+    fn async_graphql_schema_names_the_roots() {
+        // A schema in the file names the roots: `Q` and `M` take theirs by
+        // position, and `LegacyQuery`, named by no schema, is no root.
+        let named = "use async_graphql::{EmptySubscription, Object, Schema};\n\npub struct Q;\npub struct M;\n\n#[Object]\nimpl Q {\n    async fn orders(&self) -> i32 { 1 }\n}\n\n#[Object]\nimpl M {\n    async fn place_order(&self, id: i32) -> i32 { id }\n}\n\n#[Object]\nimpl LegacyQuery {\n    async fn legacy(&self) -> i32 { 0 }\n}\n\npub fn schema() -> Schema<Q, M, EmptySubscription> {\n    Schema::new(Q, M, EmptySubscription)\n}\n";
+        assert_resolvers(named, "rust", &["Mutation", "Query", "orders", "placeOrder"]);
+        // `Schema::build` with a struct-literal value and a qualified path.
+        let built = "use async_graphql::{EmptyMutation, EmptySubscription, Object};\npub struct Root { db: Db }\n#[Object]\nimpl Root { async fn version(&self) -> &str { \"1\" } }\nfn main() {\n    let a = async_graphql::Schema::build(Root { db: Db::new() }, EmptyMutation, EmptySubscription).finish();\n    let b = Schema::build(crate::api::Root::default(), EmptyMutation, EmptySubscription);\n}\n";
+        assert_resolvers(built, "rust", &["Query", "version"]);
+        // A merged root: its parts take its root, whatever their names.
+        let merged = "use async_graphql::*;\n#[derive(MergedObject, Default)]\npub struct Query(Users, shop::Orders);\n#[derive(Default)] pub struct Users;\n#[Object] impl Users { async fn users(&self) -> i32 { 1 } }\n#[Object] impl Orders { async fn orders(&self) -> i32 { 2 } }\n#[Object] impl Stray { async fn stray(&self) -> i32 { 3 } }\npub type AppSchema = Schema<Query, EmptyMutation, EmptySubscription>;\n";
+        assert_resolvers(merged, "rust", &["Query", "orders", "users"]);
+        let out = extract_graphql_resolver_nodes(merged, "rust", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(4), "the first root impl");
+        // A call that is no async-graphql schema (another crate's
+        // one-argument `Schema::new`) leaves the roots to their names.
+        let arrow = "use async_graphql::Object;\nfn s() { let x = arrow::Schema::new(vec![]); }\n#[Object]\nimpl QueryRoot { async fn orders(&self) -> i32 { 1 } }\n";
+        assert_resolvers(arrow, "rust", &["Query", "orders"]);
+    }
+
+    #[test]
+    fn async_graphql_rename_skip_and_camel_case() {
+        let source = "use async_graphql::{Context, Object, Subscription, ID};\nuse futures_util::Stream;\n\npub struct QueryRoot;\n\n#[Object]\nimpl QueryRoot {\n    /// All orders; a `}` in a doc comment.\n    async fn order_count(&self, ctx: &Context<'_>) -> usize {\n        let s = \"}\";\n        let c = '}';\n        s.len()\n    }\n    #[graphql(name = \"allOrders\")]\n    async fn orders(&self) -> Vec<i32> { vec![] }\n    #[graphql(skip)]\n    fn helper(&self) -> i32 { 1 }\n    #[graphql(entity)]\n    async fn find_order_by_id(&self, id: ID) -> i32 { 0 }\n    #[graphql(flatten)]\n    async fn common(&self) -> Common { Common }\n    #[graphql(skip = true)]\n    fn other(&self) -> i32 { 1 }\n    async fn r#type(&self) -> i32 { 0 }\n    async fn _internal(&self) -> i32 { 0 }\n    pub(crate) fn user_ID(&self) -> i32 { 0 }\n}\n\n#[async_graphql::Object(rename_fields = \"snake_case\")]\nimpl MutationRoot {\n    async fn placeOrder(&self) -> i32 { 0 }\n}\n\npub struct Events;\n\n#[Subscription]\nimpl Events {\n    async fn order_created<'a>(&'a self) -> impl Stream<Item = i32> + 'a { futures_util::stream::empty() }\n}\n";
+        assert_resolvers(
+            source,
+            "rust",
+            &["Mutation", "Query", "Subscription", "allOrders", "internal", "orderCount", "orderCreated", "place_order", "type", "userId"],
+        );
+        let out = extract_graphql_resolver_nodes(source, "rust", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:orderCount"), Some(8), "the fn line, past its doc comment");
+        assert_eq!(anchor_line(&out, "graphql_resolver:allOrders"), Some(14), "the fn line, past its attribute");
+        assert_eq!(anchor_line(&out, "graphql_resolver:Subscription"), Some(36));
+    }
+
+    #[test]
+    fn async_graphql_rename_rules() {
+        for (name, field) in [
+            ("order_count", "orderCount"),
+            ("orders", "orders"),
+            ("_internal", "internal"),
+            ("user_ID", "userId"),
+            ("field_2", "field2"),
+            ("getHTTPResponse", "getHttpResponse"),
+            ("a__b", "aB"),
+            ("placeOrder", "placeOrder"),
+        ] {
+            assert_eq!(RenameRule::Camel.apply(name), field, "{name}");
+        }
+        assert_eq!(RenameRule::Pascal.apply("order_count"), "OrderCount");
+        assert_eq!(RenameRule::Snake.apply("placeOrder"), "place_order");
+        assert_eq!(RenameRule::ScreamingSnake.apply("placeOrder"), "PLACE_ORDER");
+        assert_eq!(RenameRule::Lower.apply("placeOrder"), "placeorder");
+        assert_eq!(RenameRule::Upper.apply("place_order"), "PLACE_ORDER");
+        assert_eq!(RenameRule::parse("SCREAMING_SNAKE_CASE"), Some(RenameRule::ScreamingSnake));
+        assert_eq!(RenameRule::parse("kebab-case"), None);
+    }
+
+    #[test]
+    fn async_graphql_non_root_object_has_no_resolvers() {
+        let source = "use async_graphql::{ComplexObject, Object, SimpleObject};\n#[derive(SimpleObject)]\n#[graphql(complex)]\npub struct Order { id: i32 }\n#[ComplexObject]\nimpl Order { async fn total(&self) -> i32 { 0 } }\n#[Object]\nimpl Customer { async fn orders(&self) -> Vec<Order> { vec![] } }\nimpl QueryRoot { async fn hidden(&self) -> i32 { 0 } }\n#[Object]\nimpl Resolver for QueryRoot { async fn x(&self) -> i32 { 0 } }\n";
+        assert_resolvers(source, "rust", &[]);
+        assert_eq!(
+            decorator_scan(source, "rust").1.marker("rust").as_deref(),
+            Some("[graphql-decorators] lang=rust import=async-graphql roots= fields=0 rejected lang=0 import=0 position=0")
+        );
+        // The same file of another language, and juniper's attribute.
+        assert_resolvers(AG_QUERY, "go", &[]);
+        let juniper = "use juniper::graphql_object;\npub struct Query;\n#[graphql_object]\nimpl Query { fn orders() -> i32 { 1 } }\n";
+        assert_resolvers(juniper, "rust", &[]);
+    }
+
+    #[test]
+    fn async_graphql_sample_in_a_rust_string_is_no_site() {
+        // The whole sample in a string, a raw string or a doc comment: no
+        // import at code position.
+        for sample in [
+            "const SAMPLE: &str = \"use async_graphql::Object;\\n#[Object]\\nimpl QueryRoot {\\n    async fn orders(&self) -> i32 { 1 }\\n}\\n\";\n",
+            "const SAMPLE: &str = r#\"use async_graphql::Object;\n#[Object]\nimpl QueryRoot {\n    async fn orders(&self) -> i32 { 1 }\n}\n\"#;\n",
+            "/// use async_graphql::Object;\n/// #[Object]\n/// impl QueryRoot { async fn orders(&self) -> i32 { 1 } }\npub fn f() {}\n",
+        ] {
+            assert_resolvers(sample, "rust", &[]);
+            assert_eq!(
+                decorator_scan(sample, "rust").1.marker("rust").as_deref(),
+                Some("[graphql-decorators] lang=rust import=none roots= fields=0 rejected lang=0 import=1 position=0"),
+                "{sample}"
+            );
+        }
+        // A real import, the root impls in comments and a raw string.
+        let decoys = "use async_graphql::Object;\n// #[Object]\n// impl QueryRoot { async fn orders(&self) -> i32 { 1 } }\n/// ```\n/// #[Object]\n/// impl MutationRoot { async fn add(&self) -> i32 { 1 } }\n/// ```\npub fn f() {}\npub const S: &str = r#\"#[async_graphql::Subscription]\nimpl Events { async fn ticks(&self) -> i32 { 1 } }\"#;\n";
+        assert_resolvers(decoys, "rust", &[]);
+        assert_eq!(
+            decorator_scan(decoys, "rust").1.marker("rust").as_deref(),
+            Some("[graphql-decorators] lang=rust import=async-graphql roots= fields=0 rejected lang=0 import=0 position=3")
+        );
+        // Another crate that only starts with the name; `extern crate` names it.
+        let axum = "use async_graphql_axum::GraphQL;\n#[Object]\nimpl QueryRoot { async fn orders(&self) -> i32 { 1 } }\n";
+        assert_resolvers(axum, "rust", &[]);
+        let extern_crate = "extern crate async_graphql;\n#[Object]\nimpl QueryRoot { async fn orders(&self) -> i32 { 1 } }\n";
+        assert_resolvers(extern_crate, "rust", &["Query", "orders"]);
+    }
+
+    #[test]
+    fn caliban_root_resolver_case_class() {
+        assert_resolvers(CALIBAN_API, "scala", &["Query", "orders"]);
+        let out = extract_graphql_resolver_nodes(CALIBAN_API, "scala", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(6), "the case class line");
+        assert_eq!(anchor_line(&out, "graphql_resolver:orders"), Some(6));
+        assert_eq!(
+            decorator_scan(CALIBAN_API, "scala").1.marker("scala").as_deref(),
+            Some("[graphql-decorators] lang=scala import=caliban roots=Query fields=1 rejected lang=0 import=0 position=0")
+        );
+        // Queries and Mutations case classes through `val`s, a multi-line
+        // parameter list, `@GQLName` / `@GQLExcluded`, a back-quoted name.
+        let both = "import caliban._\nimport caliban.schema.Annotations.{GQLExcluded, GQLName}\n\ncase class Queries(\n  orders: List[Order],\n  @GQLName(\"customer\") user: Long => Option[User],\n  @GQLExcluded secret: String\n)\ncase class Mutations(placeOrder: OrderInput => Order, `cancel`: Long => Boolean)\n\nobject Api {\n  val queries = Queries(Nil, _ => None, \"\")\n  val mutations: Mutations = Mutations(_ => ???, _ => true)\n  val api = graphQL(RootResolver(queries, mutations))\n}\n";
+        assert_resolvers(both, "scala", &["Mutation", "Query", "cancel", "customer", "orders", "placeOrder"]);
+        let out = extract_graphql_resolver_nodes(both, "scala", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:customer"), Some(5));
+        // Types declared in another file name their roots only; `None`
+        // names nothing; `Some(..)` / `Option(..)` hold the resolver.
+        let elsewhere = "import caliban.{graphQL, RootResolver}\nobject Api {\n  val api = graphQL(\n    RootResolver(Some(Queries(Nil)), None, Option(Subscriptions(stream)))\n  )\n}\n";
+        assert_resolvers(elsewhere, "scala", &["Query", "Subscription"]);
+        let out = extract_graphql_resolver_nodes(elsewhere, "scala", module_id(), repo());
+        assert_eq!(anchor_line(&out, "graphql_resolver:Query"), Some(3), "the argument line");
+        // Named arguments pick their root.
+        let named = "import caliban.RootResolver\ncase class M(add: Int => Int)\nval api = graphQL(RootResolver(mutationResolver = M(identity), queryResolver = Q()))\n";
+        assert_resolvers(named, "scala", &["Mutation", "Query", "add"]);
+    }
+
+    #[test]
+    fn caliban_needs_the_import() {
+        let unimported = CALIBAN_API.replace("import caliban.graphQL\nimport caliban.RootResolver\n", "");
+        assert_resolvers(&unimported, "scala", &[]);
+        assert_eq!(
+            decorator_scan(&unimported, "scala").1.marker("scala").as_deref(),
+            Some("[graphql-decorators] lang=scala import=none roots= fields=0 rejected lang=0 import=1 position=0")
+        );
+        assert_resolvers(&format!("import calibanx.RootResolver\n{unimported}"), "scala", &[]);
+        assert_resolvers(&format!("// import caliban.RootResolver\n{unimported}"), "scala", &[]);
+        // The same file of another language.
+        assert_resolvers(CALIBAN_API, "java", &[]);
+        assert_resolvers(CALIBAN_API, "kotlin", &[]);
+        // A RootResolver call in a comment or a string is no site.
+        let decoys = "import caliban._\ncase class Queries(orders: List[Order])\n// graphQL(RootResolver(Queries(Nil)))\n/* RootResolver(Mutations(Nil)) */\nval doc = \"\"\"RootResolver(Queries(Nil))\"\"\"\n";
+        assert_resolvers(decoys, "scala", &[]);
+        assert_eq!(
+            decorator_scan(decoys, "scala").1.marker("scala").as_deref(),
+            Some("[graphql-decorators] lang=scala import=caliban roots= fields=0 rejected lang=0 import=0 position=3")
+        );
     }
 }
