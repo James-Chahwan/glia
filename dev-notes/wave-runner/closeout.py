@@ -346,7 +346,7 @@ def main():
     msg = (f"bench+plan: {what} landed — {passed} tests, {fixtures} fixtures, matrix {covered}/{grid}"
            + (f", {na} n/a" if na else "") + "\n\n"
            + "\n".join(lines) + "\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"
-           + "Claude-Session: https://claude.ai/code/session_01U92Fg6cfqUfbvx14qoM6iw\n")
+           + "Claude-Session: https://claude.ai/code/session_011hMXDeYW7TWXZdUnNxWakK\n")
     Path("/tmp/claude-1000/-home-ivy-Code-glia/closeout.msg").write_text(msg)
     out, rc = sh("git add bench/substrate-gap/results-latest.json bench/substrate-gap/COVERAGE.md bench/substrate-gap/legacy-latest.json "
                  "dev-notes/packet-corrections.json dev-notes/leap-corrections.json dev-notes/leap-051-corrections.json "

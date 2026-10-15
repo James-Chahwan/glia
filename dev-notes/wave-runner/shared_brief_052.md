@@ -66,7 +66,7 @@ The message path MUST contain your packet id and nothing else may write to it. `
 `.git/index.lock` contention is EXPECTED — on "Unable to create '.git/index.lock'", sleep 2-5s and retry up to ~10 times. Never delete the lock.
 Subject `<type>(<scope>): <what>`; a body saying what changed, what the gate was, and every declared break (old -> new); then these exact last two lines:
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01U92Fg6cfqUfbvx14qoM6iw
+Claude-Session: https://claude.ai/code/session_011hMXDeYW7TWXZdUnNxWakK
 Do NOT push, tag, rebase, reset, amend, or touch any commit that is not yours.
 
 === WHEN YOUR SPEC OR CORRECTION IS WRONG ===
