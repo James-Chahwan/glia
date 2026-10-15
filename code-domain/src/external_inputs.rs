@@ -37,12 +37,20 @@
 //! CONSTRAINT ENTRIES (the rule schema `glia check`, LE.8, reads through
 //! [`parse_constraints`] and nowhere else). The overlay's `[[constraint]]`
 //! stanzas (LF.4a) are stored as
-//! `{"source":"overlay","id","kind","from"?,"to"?,"from_raw"?,"to_raw"?,"scope"?,"scope_raw"?,"categories"?,"text"?,"origin":"human|llm","decl":".glia/overlay.toml:<line>"}`:
-//! `from` / `to` / `scope` hold the scope RESOLVED to a repo-relative path
-//! (`.` = the repo root) and the `*_raw` keys what the stanza said (a project
-//! label, a qname or a path), so a reader never re-resolves a label. An entry
-//! written through the cell API (`source` `api`) carries the scope strings as
-//! its writer gave them.
+//! `{"source":"overlay","id","kind","from"?,"to"?,"from_raw"?,"to_raw"?,"scope"?,"scope_raw"?,"categories"?,"text"?,"transitive"?,"via"?,"via_raw"?,"rule"?,"min_tier"?,"origin":"human|llm","decl":".glia/overlay.toml:<line>"}`:
+//! `from` / `to` / `scope` / `via` hold the scope RESOLVED to a repo-relative
+//! path (`.` = the repo root) and the `*_raw` keys what the stanza said (a
+//! project label, a qname or a path), so a reader never re-resolves a label.
+//! An entry written through the cell API (`source` `api`) carries the scope
+//! strings as its writer gave them.
+//!
+//! The version-2 keys (DB.1, overlay `version = 2`) are written only when set,
+//! so a version-1 stanza's entry is what 0.5.1 stored: `transitive` (`true`)
+//! and `via` on a forbid_edge, `rule` (Datalog text) on an invariant,
+//! `min_tier` (`fact | derived`, `glia_config::MIN_TIERS`). A `rule` is
+//! declared only in `.glia/overlay.toml` (0.5.2 Q9): [`validate_entry`], the
+//! cell API's check, refuses the key whatever `source` says, and only the
+//! overlay stage checks its entries through [`validate_declared_entry`].
 //!
 //! THE REFLEXION MODEL (CC.5a) is stored the same way, so a loaded `.gmap` can
 //! be checked without the overlay file:
@@ -64,7 +72,10 @@ use serde_json::{Map, Value};
 
 use crate::cell_type;
 use crate::edge_category;
-use crate::glia_config::{CONSTRAINT_KINDS, MAX_ID_CHARS, MAX_NOTE_CHARS, MODEL_KINDS};
+use crate::glia_config::{
+    CONSTRAINT_KINDS, MAX_ID_CHARS, MAX_NOTE_CHARS, MIN_TIERS, MODEL_KINDS, RULE_ONLY_INVARIANT,
+    TRANSITIVE_ONLY_FORBID, VIA_ONLY_TRANSITIVE, check_min_tier, check_min_tier_on, check_rule_text,
+};
 
 /// Repo-relative path of the checked-in cell sidecar.
 pub const CELLS_FILE: &str = ".glia/cells.jsonl";
@@ -299,7 +310,13 @@ pub fn canonical(v: &Value) -> Value {
     }
 }
 
-/// Check one entry against its cell type's rules. Every entry is an object
+/// The Q9 refusal: the cell API cannot write a `rule` (0.5.2 Q9).
+pub const RULE_IS_OVERLAY_ONLY: &str = "`rule` (Datalog text) is declared only in .glia/overlay.toml [[constraint]] (0.5.2 Q9); the cell API cannot write one";
+
+/// Check one entry against its cell type's rules: the check of every cell-API
+/// path (`glia_store::cells::write_cell` for `glia cell set` and pyo3's
+/// `write_cell`, `glia_graph::cells::apply_cell_write` for the build's
+/// `.glia/cells.jsonl` stage and pyo3's `set_cell`). Every entry is an object
 /// with `source` in [`ENTRY_SOURCES`] and an `id` of 1..=128 chars with no
 /// control chars.
 /// - CONSTRAINT: `kind` in `forbid_edge | no_cycle | invariant | allow`
@@ -309,13 +326,35 @@ pub fn canonical(v: &Value) -> Value {
 ///   present, are edge category NAMES; invariant needs `text`; component needs
 ///   `name` and a non-empty `paths` array of non-empty strings; layer needs
 ///   `name`, a u32 `rank` and a non-empty `components` array of non-empty
-///   strings, and `strict`, when present, is a bool. (The `[[constraint]]` /
-///   `[[component]]` / `[[layer]]` rules of `glia_config`, sharing its
+///   strings, and `strict`, when present, is a bool. The version-2 keys
+///   (DB.1): `transitive`, when present, is a bool, and `true` only on a
+///   forbid_edge; `via` is a non-empty array of non-empty strings, only with
+///   `transitive` true; `min_tier` is one of `glia_config::MIN_TIERS`, on a
+///   forbid_edge or no_cycle (on an invariant only with a `rule`, which this
+///   check never admits). A `rule` key of ANY value is refused whatever
+///   `source` says ([`RULE_IS_OVERLAY_ONLY`], 0.5.2 Q9). (The `[[constraint]]`
+///   / `[[component]]` / `[[layer]]` rules of `glia_config`, sharing its
 ///   constants.)
 /// - DECISION: `title` or `text`; `status` optional (stored lowercased).
 /// - CONV: `text` of 1..=4096 chars; `by` and `at` optional strings (`at` is
 ///   the caller's opaque timestamp: glia never reads the clock).
 pub fn validate_entry(cell: CellTypeId, v: &Value) -> Result<(), String> {
+    check_entry(cell, v, false)
+}
+
+/// [`validate_entry`]'s checks, plus a CONSTRAINT `rule`: a non-blank string
+/// of at most `glia_config::MAX_RULE_CHARS` chars, on kind invariant, from
+/// source `overlay`. Called ONLY by the overlay stage, which builds its
+/// entries from `.glia/overlay.toml` (`engine::external::declared`): a second
+/// caller would reopen the Q9 bypass. The rule's text is not parsed here
+/// (DB.3a parses it at `glia check` time).
+pub fn validate_declared_entry(cell: CellTypeId, v: &Value) -> Result<(), String> {
+    check_entry(cell, v, true)
+}
+
+/// The shared body of [`validate_entry`] (`allow_rule` false) and
+/// [`validate_declared_entry`] (`allow_rule` true).
+fn check_entry(cell: CellTypeId, v: &Value, allow_rule: bool) -> Result<(), String> {
     let obj = v.as_object().ok_or("entry must be a JSON object")?;
     let text = |key: &str| string_field(obj, key);
     let present = |key: &str| -> Result<bool, String> {
@@ -331,52 +370,7 @@ pub fn validate_entry(cell: CellTypeId, v: &Value) -> Result<(), String> {
         return Err(format!("`id` {id:?} must be 1..={MAX_ID_CHARS} chars with no control chars"));
     }
     match cell {
-        c if c == cell_type::CONSTRAINT => {
-            let kind = text("kind")?.unwrap_or_default();
-            if !CONSTRAINT_KINDS.contains(&kind) && !MODEL_KINDS.contains(&kind) {
-                let all: Vec<&str> = CONSTRAINT_KINDS.iter().chain(MODEL_KINDS).copied().collect();
-                return Err(format!("`kind` {kind:?} is not one of {}", all.join(" | ")));
-            }
-            if matches!(kind, "forbid_edge" | "allow") && !(present("from")? && present("to")?) {
-                return Err(format!("kind {kind} needs `from` and `to`"));
-            }
-            if kind == "invariant" && !present("text")? {
-                return Err("kind invariant needs `text`".into());
-            }
-            if matches!(kind, "component" | "layer") && !present("name")? {
-                return Err(format!("kind {kind} needs `name`"));
-            }
-            if kind == "component" && string_list(obj, "paths").is_none() {
-                return Err("kind component needs `paths`: a non-empty array of non-empty strings".into());
-            }
-            if kind == "layer" {
-                if obj.get("rank").and_then(Value::as_u64).and_then(|r| u32::try_from(r).ok()).is_none() {
-                    return Err("kind layer needs `rank`: an integer 0..=4294967295".into());
-                }
-                if string_list(obj, "components").is_none() {
-                    return Err("kind layer needs `components`: a non-empty array of non-empty strings".into());
-                }
-                if !matches!(obj.get("strict"), None | Some(Value::Null | Value::Bool(_))) {
-                    return Err("`strict` must be a bool".into());
-                }
-            }
-            text("scope")?;
-            match obj.get("categories") {
-                None | Some(Value::Null) => {}
-                Some(Value::Array(names)) => {
-                    for name in names {
-                        let known = name
-                            .as_str()
-                            .is_some_and(|n| edge_category::ALL.iter().any(|(_, e)| *e == n));
-                        if !known {
-                            return Err(format!("category {name} is not an edge category name"));
-                        }
-                    }
-                }
-                Some(_) => return Err("`categories` must be an array of edge category names".into()),
-            }
-            Ok(())
-        }
+        c if c == cell_type::CONSTRAINT => constraint_checks(obj, allow_rule),
         c if c == cell_type::DECISION => {
             text("status")?;
             if !(present("title")? || present("text")?) {
@@ -397,6 +391,103 @@ pub fn validate_entry(cell: CellTypeId, v: &Value) -> Result<(), String> {
         c if c == cell_type::VECTOR => Err("VECTOR takes a vector payload, not an entry".into()),
         c => Err(format!("cell type {} takes no external entries", c.0)),
     }
+}
+
+/// A CONSTRAINT entry's rules (see [`validate_entry`]); `allow_rule` admits a
+/// `rule` on an overlay invariant ([`validate_declared_entry`]).
+fn constraint_checks(obj: &Map<String, Value>, allow_rule: bool) -> Result<(), String> {
+    let text = |key: &str| string_field(obj, key);
+    let present = |key: &str| -> Result<bool, String> {
+        Ok(string_field(obj, key)?.is_some_and(|s| !s.trim().is_empty()))
+    };
+    let kind = text("kind")?.unwrap_or_default();
+    if !CONSTRAINT_KINDS.contains(&kind) && !MODEL_KINDS.contains(&kind) {
+        let all: Vec<&str> = CONSTRAINT_KINDS.iter().chain(MODEL_KINDS).copied().collect();
+        return Err(format!("`kind` {kind:?} is not one of {}", all.join(" | ")));
+    }
+    if matches!(kind, "forbid_edge" | "allow") && !(present("from")? && present("to")?) {
+        return Err(format!("kind {kind} needs `from` and `to`"));
+    }
+    if kind == "invariant" && !present("text")? {
+        return Err("kind invariant needs `text`".into());
+    }
+    if matches!(kind, "component" | "layer") && !present("name")? {
+        return Err(format!("kind {kind} needs `name`"));
+    }
+    if kind == "component" && string_list(obj, "paths").is_none() {
+        return Err("kind component needs `paths`: a non-empty array of non-empty strings".into());
+    }
+    if kind == "layer" {
+        if obj.get("rank").and_then(Value::as_u64).and_then(|r| u32::try_from(r).ok()).is_none() {
+            return Err("kind layer needs `rank`: an integer 0..=4294967295".into());
+        }
+        if string_list(obj, "components").is_none() {
+            return Err("kind layer needs `components`: a non-empty array of non-empty strings".into());
+        }
+        if !matches!(obj.get("strict"), None | Some(Value::Null | Value::Bool(_))) {
+            return Err("`strict` must be a bool".into());
+        }
+    }
+    text("scope")?;
+    match obj.get("categories") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(names)) => {
+            for name in names {
+                let known = name
+                    .as_str()
+                    .is_some_and(|n| edge_category::ALL.iter().any(|(_, e)| *e == n));
+                if !known {
+                    return Err(format!("category {name} is not an edge category name"));
+                }
+            }
+        }
+        Some(_) => return Err("`categories` must be an array of edge category names".into()),
+    }
+    // The version-2 keys (DB.1).
+    let has_rule = match obj.get("rule") {
+        None => false,
+        Some(_) if !allow_rule => return Err(RULE_IS_OVERLAY_ONLY.into()),
+        Some(Value::String(rule)) => {
+            if kind != "invariant" {
+                return Err(RULE_ONLY_INVARIANT.into());
+            }
+            check_rule_text(rule)?;
+            match text("source")? {
+                Some("overlay") => {}
+                other => {
+                    let src = other.unwrap_or_default();
+                    return Err(format!("`rule` is written only with source `overlay`, not {src:?} (0.5.2 Q9)"));
+                }
+            }
+            true
+        }
+        Some(_) => return Err("`rule` must be a string of Datalog text".into()),
+    };
+    let transitive = match obj.get("transitive") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err("`transitive` must be a bool".into()),
+    };
+    if transitive && kind != "forbid_edge" {
+        return Err(TRANSITIVE_ONLY_FORBID.into());
+    }
+    match obj.get("via") {
+        None | Some(Value::Null) => {}
+        Some(_) if string_list(obj, "via").is_none() => {
+            return Err("`via` must be a non-empty array of non-empty strings".into());
+        }
+        Some(_) if !transitive => return Err(VIA_ONLY_TRANSITIVE.into()),
+        Some(_) => {}
+    }
+    match obj.get("min_tier") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(tier)) => {
+            check_min_tier(tier)?;
+            check_min_tier_on(kind, has_rule)?;
+        }
+        Some(_) => return Err(format!("`min_tier` must be a string: {}", MIN_TIERS.join(" | "))),
+    }
+    Ok(())
 }
 
 /// `obj[key]` as a non-empty array of non-empty (trimmed) strings; `None` for
@@ -479,12 +570,18 @@ fn entries_payload(mut entries: Vec<Value>) -> CellPayload {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ConstraintKind {
-    /// No edge from a node in scope `from` to a node in scope `to`.
-    ForbidEdge { from: String, to: String },
+    /// No edge from a node in scope `from` to a node in scope `to`. With
+    /// `transitive` (overlay version 2, DB.1), no path either: a path through
+    /// any third scope counts, except one that enters `to` through a `via`
+    /// facade scope (resolved paths, like `from` / `to`). Evaluated by DB.3b;
+    /// until then the checker lists a transitive rule as unchecked.
+    ForbidEdge { from: String, to: String, transitive: bool, via: Vec<String> },
     /// No cycle among the nodes in `scope` (`None` = the whole graph).
     NoCycle { scope: Option<String> },
-    /// A statement no graph query checks.
-    Invariant { text: String },
+    /// A statement. With `rule` (overlay version 2, DB.1) it is checked: the
+    /// Datalog text's `violation/N` rows are its violations (DB.3a); without
+    /// one no graph query checks it.
+    Invariant { text: String, rule: Option<String> },
     /// A reflexion-model component (CC.5a): the code under `paths` (resolved
     /// repo-relative paths, `.` = the root) belongs to `name`. A declaration,
     /// not a rule.
@@ -526,6 +623,10 @@ pub struct ConstraintRule {
     pub source: String,
     /// `.glia/overlay.toml:<line>` for a declared rule; `None` for an API write.
     pub decl: Option<String>,
+    /// The weakest violation tier that fails CI: one of
+    /// `glia_config::MIN_TIERS` (`fact | derived`); `None` = the checker's
+    /// default (DB.1, read by DB.3a).
+    pub min_tier: Option<String>,
 }
 
 /// Every well-formed rule in a CONSTRAINT payload, in stored order (sorted by
@@ -534,8 +635,11 @@ pub struct ConstraintRule {
 /// (forbid_edge / allow `from` + `to`, invariant `text`, component `name` +
 /// a non-empty `paths` array of non-empty strings, layer `name` + a u32
 /// `rank` + a non-empty `components` array of non-empty strings) or has a
-/// non-string where a string belongs (a non-bool `strict`) is skipped; a
-/// payload that is not a JSON array yields nothing. Never panics.
+/// non-string where a string belongs (a non-bool `strict` or forbid_edge
+/// `transitive`, a forbid_edge `via` that is not a non-empty array of
+/// non-empty strings, a blank or non-string invariant `rule`, a `min_tier`
+/// outside `glia_config::MIN_TIERS`) is skipped; a payload that is not a JSON
+/// array yields nothing. Never panics.
 pub fn parse_constraints(payload: &CellPayload) -> Vec<ConstraintRule> {
     entry_array(payload).unwrap_or_default().iter().filter_map(constraint_rule).collect()
 }
@@ -548,9 +652,28 @@ fn constraint_rule(v: &Value) -> Option<ConstraintRule> {
         field(key).flatten().map(str::trim).filter(|s| !s.is_empty()).map(String::from)
     };
     let kind = match field("kind")?? {
-        "forbid_edge" => ConstraintKind::ForbidEdge { from: required("from")?, to: required("to")? },
+        "forbid_edge" => ConstraintKind::ForbidEdge {
+            from: required("from")?,
+            to: required("to")?,
+            transitive: match obj.get("transitive") {
+                None | Some(Value::Null) => false,
+                Some(Value::Bool(b)) => *b,
+                Some(_) => return None,
+            },
+            via: match obj.get("via") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(_) => string_list(obj, "via")?,
+            },
+        },
         "no_cycle" => ConstraintKind::NoCycle { scope: field("scope")?.map(String::from) },
-        "invariant" => ConstraintKind::Invariant { text: required("text")? },
+        "invariant" => ConstraintKind::Invariant {
+            text: required("text")?,
+            rule: match field("rule")? {
+                None => None,
+                Some(r) if r.trim().is_empty() => return None,
+                Some(r) => Some(r.to_string()),
+            },
+        },
         "allow" => ConstraintKind::Allow { from: required("from")?, to: required("to")? },
         "component" => ConstraintKind::Component { name: required("name")?, paths: string_list(obj, "paths")? },
         "layer" => ConstraintKind::Layer {
@@ -572,12 +695,18 @@ fn constraint_rule(v: &Value) -> Option<ConstraintRule> {
         }
         Some(_) => return None,
     };
+    let min_tier = match field("min_tier")? {
+        None => None,
+        Some(t) if MIN_TIERS.contains(&t) => Some(t.to_string()),
+        Some(_) => return None,
+    };
     Some(ConstraintRule {
         id: required("id")?,
         kind,
         categories,
         source: required("source")?,
         decl: field("decl")?.map(String::from),
+        min_tier,
     })
 }
 
@@ -730,12 +859,15 @@ mod tests {
                 ("web-uses-api", "allow", None),
             ]
         );
-        assert_eq!(rules[0].kind, ConstraintKind::ForbidEdge { from: "web".into(), to: "services/api".into() });
+        assert_eq!(
+            rules[0].kind,
+            ConstraintKind::ForbidEdge { from: "web".into(), to: "services/api".into(), transitive: false, via: vec![] }
+        );
         assert_eq!(rules[0].categories, ["CALLS", "RENAMED_SINCE"], "an unregistered name is kept for the checker");
         assert_eq!(rules[0].source, "overlay");
         assert_eq!(rules[1].kind, ConstraintKind::NoCycle { scope: Some("services/api".into()) });
         assert_eq!(rules[2].kind, ConstraintKind::NoCycle { scope: None });
-        assert_eq!(rules[3].kind, ConstraintKind::Invariant { text: "charges are idempotent".into() });
+        assert_eq!(rules[3].kind, ConstraintKind::Invariant { text: "charges are idempotent".into(), rule: None });
         assert_eq!(
             rules[4].kind,
             ConstraintKind::Component { name: "web".into(), paths: vec!["web".into(), "shared/ui".into()] }
@@ -758,6 +890,127 @@ mod tests {
         assert!(parse_constraints(&CellPayload::Json("{}".into())).is_empty());
         assert!(parse_constraints(&CellPayload::Text("not json".into())).is_empty());
         assert!(parse_constraints(&CellPayload::Bytes(vec![1, 2])).is_empty());
+    }
+
+    /// DB.1 / Q9: the cell API (validate_entry) refuses a `rule` whatever its
+    /// `source` says - the HEAD probes stored both entries below - and only
+    /// the overlay stage's check (validate_declared_entry) admits one.
+    #[test]
+    fn validate_entry_rule_fields() {
+        let rule = "violation(f) :- node(f, \"FUNCTION\").";
+        let probe = |source: &str| json!({"source": source, "id": "r1", "kind": "invariant", "text": "t", "rule": rule});
+        for source in ["api", "overlay"] {
+            let e = validate_entry(cell_type::CONSTRAINT, &probe(source)).expect_err(source);
+            assert!(e.contains("declared only in .glia/overlay.toml"), "{source}: {e}");
+            assert_eq!(e, RULE_IS_OVERLAY_ONLY);
+        }
+        // Any value, even null, is refused: the key itself is overlay-only.
+        for v in [json!(null), json!(""), json!(7)] {
+            let entry = json!({"source": "api", "id": "r", "kind": "invariant", "text": "t", "rule": v});
+            assert_eq!(validate_entry(cell_type::CONSTRAINT, &entry), Err(RULE_IS_OVERLAY_ONLY.to_string()));
+        }
+        assert_eq!(validate_declared_entry(cell_type::CONSTRAINT, &probe("overlay")), Ok(()));
+        let api = validate_declared_entry(cell_type::CONSTRAINT, &probe("api")).expect_err("source api");
+        assert!(api.contains("only with source `overlay`") && api.contains("Q9"), "{api}");
+        let declared = |v: Value| validate_declared_entry(cell_type::CONSTRAINT, &v);
+        let blank = declared(json!({"source": "overlay", "id": "r", "kind": "invariant", "text": "t", "rule": "  "}));
+        assert!(blank.as_ref().is_err_and(|e| e.contains("not blank")), "{blank:?}");
+        let long = "x".repeat(crate::glia_config::MAX_RULE_CHARS + 1);
+        assert!(declared(json!({"source": "overlay", "id": "r", "kind": "invariant", "text": "t", "rule": long})).is_err());
+        let on_forbid = declared(json!({"source": "overlay", "id": "r", "kind": "forbid_edge", "from": "a", "to": "b", "rule": rule}));
+        assert_eq!(on_forbid, Err("`rule` is an invariant field".to_string()));
+        assert!(declared(json!({"source": "overlay", "id": "r", "kind": "invariant", "text": "t", "rule": 1})).is_err());
+        assert_eq!(
+            declared(json!({"source": "overlay", "id": "r", "kind": "invariant", "text": "t", "rule": rule, "min_tier": "fact"})),
+            Ok(())
+        );
+        // validate_declared_entry runs every validate_entry check besides.
+        assert!(validate_declared_entry(cell_type::CONV, &json!({"source": "overlay", "id": "n", "text": "  "})).is_err());
+        assert!(validate_declared_entry(cell_type::DECISION, &json!({"source": "overlay", "id": "d", "text": "t"})).is_ok());
+
+        // transitive / via / min_tier: the same shape rules on both paths.
+        let forbid = |extra: Value| {
+            let mut e = json!({"source": "api", "id": "f", "kind": "forbid_edge", "from": "web", "to": "api"});
+            for (k, v) in extra.as_object().unwrap() {
+                e[k] = v.clone();
+            }
+            e
+        };
+        for check in [validate_entry, validate_declared_entry] {
+            let ok = |v: Value| check(cell_type::CONSTRAINT, &v).is_ok();
+            assert!(ok(forbid(json!({"transitive": true, "via": ["api/public"], "min_tier": "derived"}))));
+            assert!(ok(forbid(json!({"transitive": false}))));
+            assert!(ok(json!({"source": "api", "id": "c", "kind": "no_cycle", "min_tier": "fact"})));
+            for (bad, needle) in [
+                (forbid(json!({"min_tier": "heuristic"})), "never fails CI"),
+                (forbid(json!({"min_tier": "x"})), "must be fact | derived"),
+                (forbid(json!({"min_tier": 1})), "must be a string"),
+                (forbid(json!({"transitive": "yes"})), "`transitive` must be a bool"),
+                (forbid(json!({"via": ["api/public"]})), "set `transitive = true`"),
+                (forbid(json!({"transitive": true, "via": []})), "non-empty array"),
+                (forbid(json!({"transitive": true, "via": [""]})), "non-empty array"),
+                (forbid(json!({"transitive": true, "via": "api/public"})), "non-empty array"),
+                (json!({"source": "api", "id": "c", "kind": "no_cycle", "transitive": true}), "forbid_edge field"),
+                (json!({"source": "api", "id": "c", "kind": "no_cycle", "via": ["x"]}), "set `transitive = true`"),
+                (json!({"source": "api", "id": "a", "kind": "allow", "from": "w", "to": "a", "min_tier": "fact"}), "kind allow"),
+                (json!({"source": "api", "id": "i", "kind": "invariant", "text": "t", "min_tier": "fact"}), "needs `rule`"),
+                (
+                    json!({"source": "api", "id": "component:w", "kind": "component", "name": "w", "paths": ["w"], "min_tier": "fact"}),
+                    "kind component",
+                ),
+            ] {
+                let e = check(cell_type::CONSTRAINT, &bad).expect_err(needle);
+                assert!(e.contains(needle), "{bad}: {e}");
+            }
+        }
+    }
+
+    /// DB.1: the version-2 keys read into the new variant fields; a malformed
+    /// one skips its entry (the reader's contract).
+    #[test]
+    fn parse_constraints_reads_version_two_fields() {
+        let rule = "violation(x) :- node(x, \"ROUTE\").";
+        let entries = [
+            json!({"source": "overlay", "id": "a", "kind": "forbid_edge", "from": "web", "to": "services/api",
+                   "transitive": true, "via": ["services/api/public"], "via_raw": ["./services/api/public/"],
+                   "min_tier": "fact", "decl": ".glia/overlay.toml:3"}),
+            json!({"source": "overlay", "id": "b", "kind": "invariant", "text": "no routes", "rule": rule,
+                   "min_tier": "derived", "decl": ".glia/overlay.toml:12"}),
+            json!({"source": "overlay", "id": "c", "kind": "no_cycle", "min_tier": "fact"}),
+            // Malformed: each is skipped.
+            json!({"source": "overlay", "id": "d", "kind": "forbid_edge", "from": "a", "to": "b", "transitive": "yes"}),
+            json!({"source": "overlay", "id": "e", "kind": "forbid_edge", "from": "a", "to": "b", "transitive": true, "via": []}),
+            json!({"source": "overlay", "id": "f", "kind": "forbid_edge", "from": "a", "to": "b", "transitive": true, "via": [3]}),
+            json!({"source": "overlay", "id": "g", "kind": "invariant", "text": "t", "rule": "  "}),
+            json!({"source": "overlay", "id": "h", "kind": "invariant", "text": "t", "rule": 1}),
+            json!({"source": "overlay", "id": "i", "kind": "no_cycle", "min_tier": "heuristic"}),
+        ];
+        let payload = CellPayload::Json(serde_json::to_string(&entries).unwrap());
+        let rules = parse_constraints(&payload);
+        let ids: Vec<&str> = rules.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+        assert_eq!(
+            rules[0].kind,
+            ConstraintKind::ForbidEdge {
+                from: "web".into(),
+                to: "services/api".into(),
+                transitive: true,
+                via: vec!["services/api/public".into()],
+            }
+        );
+        assert_eq!(rules[0].min_tier.as_deref(), Some("fact"));
+        assert_eq!(rules[1].kind, ConstraintKind::Invariant { text: "no routes".into(), rule: Some(rule.into()) });
+        assert_eq!(rules[1].min_tier.as_deref(), Some("derived"));
+        assert_eq!((rules[2].kind.name(), rules[2].min_tier.as_deref()), ("no_cycle", Some("fact")));
+        // A version-1 entry reads with every version-2 field unset.
+        let v1 = json!([{"source": "api", "id": "w", "kind": "forbid_edge", "from": "a", "to": "b"}]);
+        let v1 = parse_constraints(&CellPayload::Json(v1.to_string()));
+        assert_eq!(v1[0].kind, ConstraintKind::ForbidEdge { from: "a".into(), to: "b".into(), transitive: false, via: vec![] });
+        assert_eq!(v1[0].min_tier, None);
+        // Round trip through the writer's merge.
+        let stored = merge_entry(None, &entries[0]).unwrap();
+        let stored = merge_entry(Some(&stored), &entries[1]).unwrap();
+        assert_eq!(parse_constraints(&stored), rules[..2]);
     }
 
     #[test]

@@ -466,9 +466,11 @@ fn candidate_sections_are_limited() {
         link.contains("edge#1") && link.contains("\"orders\""),
         "{link}"
     );
-    // `version = 1` is optional; any other version is refused.
+    // `version` is optional; it follows the loader's SUPPORTED_VERSIONS
+    // (1 and 2, DB.1), and any other version is refused.
     assert!(parse_candidate("version = 1\n[constants]\nA = \"a\"\n").is_ok());
-    assert!(parse_candidate("version = 2\n[constants]\nA = \"a\"\n").is_err());
+    assert!(parse_candidate("version = 2\n[constants]\nA = \"a\"\n").is_ok());
+    assert!(parse_candidate("version = 3\n[constants]\nA = \"a\"\n").is_err());
     // Several gap links on one stanza, and one pattern's own link inside a
     // multi-line array.
     let many = parse_candidate(

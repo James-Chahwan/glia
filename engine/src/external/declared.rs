@@ -40,14 +40,20 @@
 //! label and its directory) are one path claimed twice: the later component
 //! is rejected, so no two stored components own an equal path.
 //!
-//! ENTRIES, upserted through `external_inputs::validate_entry` +
+//! ENTRIES, upserted through `external_inputs::validate_declared_entry` +
 //! `merge_entry` (source `overlay`), so they share one canonical array per
 //! cell with the API sidecar's (`api`) and the ADR pass's (`adr`) entries,
-//! keyed by `(source, id)`:
+//! keyed by `(source, id)`. This stage is the ONE caller of
+//! `validate_declared_entry`, the check that admits a constraint's `rule`
+//! (0.5.2 Q9: rule text is overlay-only; every cell-API path checks through
+//! `validate_entry`, which refuses it):
 //! - constraint -> CONSTRAINT
-//!   `{"source":"overlay","id","kind","from"?,"to"?,"from_raw"?,"to_raw"?,"scope"?,"scope_raw"?,"categories"?,"text"?,"origin":"human|llm","decl"}`,
-//!   every scope stored RESOLVED to a path beside its raw value, so `glia
-//!   check` (LE.8) never re-resolves a label;
+//!   `{"source":"overlay","id","kind","from"?,"to"?,"from_raw"?,"to_raw"?,"scope"?,"scope_raw"?,"categories"?,"text"?,"transitive"?,"via"?,"via_raw"?,"rule"?,"min_tier"?,"origin":"human|llm","decl"}`,
+//!   every scope (a transitive forbid_edge's `via` facades included) stored
+//!   RESOLVED to a path beside its raw value, so `glia check` (LE.8) never
+//!   re-resolves a label. The version-2 keys (DB.1) are written only when the
+//!   stanza sets them (`transitive` only as `true`), so a version-1 stanza's
+//!   entry is byte-identical to 0.5.1's;
 //! - decision -> DECISION `{"source":"overlay","id","title"?,"status"?,"text"?,"decl"}`;
 //! - note -> CONV `{"source":"overlay","id","text","by"?,"decl"}`, `id`
 //!   defaulting to `note#<n>` (the note's 1-based position in the file);
@@ -91,7 +97,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use glia_code_domain::external_inputs::{
-    ConstraintKind, ConstraintRule, merge_entry, parse_constraints, validate_entry,
+    ConstraintKind, ConstraintRule, merge_entry, parse_constraints, validate_declared_entry,
 };
 use glia_code_domain::glia_config::{
     COMPONENT_ID_PREFIX, LAYER_ID_PREFIX, LoadedConfig, MODEL_KINDS, NOTE_ID_PREFIX, Origin,
@@ -479,6 +485,13 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
         let (from, from_raw) = resolve(&d.from);
         let (to, to_raw) = resolve(&d.to);
         let (scope, scope_raw) = resolve(&d.scope);
+        // A transitive forbid_edge's facades resolve like its from / to.
+        let (via, via_raw) = if d.via.is_empty() {
+            (None, None)
+        } else {
+            let resolved: Vec<String> = d.via.iter().map(|raw| anchors.path_of(merged, raw)).collect();
+            (strings(&resolved), strings(&d.via))
+        };
         let entry = object(vec![
             ("source", s("overlay")),
             ("id", s(&d.id)),
@@ -491,6 +504,11 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
             ("scope_raw", scope_raw),
             ("categories", categories),
             ("text", text(&d.text)),
+            ("transitive", d.transitive.then_some(Value::Bool(true))),
+            ("via", via),
+            ("via_raw", via_raw),
+            ("rule", text(&d.rule)),
+            ("min_tier", text(&d.min_tier)),
             ("origin", s(origin_name(d.origin))),
             ("decl", s(&decl)),
         ]);
@@ -593,7 +611,7 @@ pub(super) fn apply_declared_cells(
             t.rejected(&st, format!("rejected {what}: {e}"));
             continue;
         }
-        if let Err(e) = validate_entry(st.cell, &st.entry) {
+        if let Err(e) = validate_declared_entry(st.cell, &st.entry) {
             t.rejected(&st, format!("rejected {what}: {e}"));
             continue;
         }
@@ -715,10 +733,10 @@ fn report(label: &str, t: &Tally) {
 ///
 /// A rule's scopes come back as paths: an overlay rule stored them resolved,
 /// and an API rule's are resolved here through the same `resolve_scope`,
-/// which leaves a path unchanged - a forbid_edge's `from` / `to`, a
-/// no_cycle's `scope` and a component's `paths` (CC.5a; an allow's `from` /
-/// `to` are component names and stay as stored). One id in several language
-/// graphs is read once.
+/// which leaves a path unchanged - a forbid_edge's `from` / `to` and `via`
+/// facades (DB.1), a no_cycle's `scope` and a component's `paths` (CC.5a; an
+/// allow's `from` / `to` are component names and stay as stored). One id in
+/// several language graphs is read once.
 pub(crate) fn declared_constraints(merged: &MergedGraph) -> Vec<(NodeId, ConstraintRule)> {
     let mut seen = HashSet::new();
     let mut out: Vec<(NodeId, ConstraintRule)> = Vec::new();
@@ -747,9 +765,12 @@ pub(crate) fn declared_constraints(merged: &MergedGraph) -> Vec<(NodeId, Constra
             continue;
         }
         match &mut rule.kind {
-            ConstraintKind::ForbidEdge { from, to } => {
+            ConstraintKind::ForbidEdge { from, to, via, .. } => {
                 path(from);
                 path(to);
+                for p in via {
+                    path(p);
+                }
             }
             ConstraintKind::NoCycle { scope: Some(scope) } => path(scope),
             ConstraintKind::Component { paths: component_paths, .. } => {
@@ -839,7 +860,10 @@ scope = \"./services/api/\"
         assert_eq!(got, want.iter().map(|(_, w)| *w).collect::<Vec<_>>());
         let by_id = |id: &str| rules.iter().find(|(_, x)| x.id == id).map(|(_, x)| x.kind.clone()).unwrap();
         // The API rule's `./web` and label `api` come back as paths.
-        assert_eq!(by_id("w"), ConstraintKind::ForbidEdge { from: "web".into(), to: "services/api".into() });
+        assert_eq!(
+            by_id("w"),
+            ConstraintKind::ForbidEdge { from: "web".into(), to: "services/api".into(), transitive: false, via: vec![] }
+        );
         assert_eq!(by_id("api-acyclic"), ConstraintKind::NoCycle { scope: Some("services/api".into()) });
         // The stored overlay entry keeps both the resolved and the raw scope.
         let stored = r.merged.graphs.iter().flat_map(|g| &g.nodes).find(|n| n.id == api).unwrap();
@@ -943,6 +967,69 @@ to = \"api\"
         let CellPayload::Json(s) = &payload.payload else { panic!("CONSTRAINT is JSON") };
         assert!(s.contains(r#""paths":["services/api"],"paths_raw":["api"]"#), "{s}");
         assert!(!s.contains("component:dup"), "a path already claimed rejects the later component: {s}");
+    }
+
+    /// DB.1: an API rule's `via` facades come back resolved like its from /
+    /// to (a decorated path normalised, a project label as its path); an
+    /// overlay rule's were stored resolved beside `via_raw`.
+    #[test]
+    fn via_resolves_like_from_and_to() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let overlay = "version = 2
+
+[[constraint]]
+id = \"no-api\"
+kind = \"forbid_edge\"
+from = \"web\"
+to = \"api\"
+transitive = true
+via = [\"./services/api/public/\"]
+";
+        for (path, body) in [
+            ("web/package.json", "{\"name\": \"web\"}\n"),
+            ("web/src/ui.ts", "export function render() { return 1; }\n"),
+            ("services/api/pyproject.toml", "[project]\nname = \"api\"\n"),
+            ("services/api/app.py", "def charge(order_id):\n    return order_id\n"),
+            (".glia/overlay.toml", overlay),
+            (
+                ".glia/cells.jsonl",
+                "{\"qname\":\"project:web\",\"cell\":\"CONSTRAINT\",\"entry\":{\"source\":\"api\",\"id\":\"w\",\"kind\":\"forbid_edge\",\"from\":\"./web\",\"to\":\"api\",\"transitive\":true,\"via\":[\"./services/api/public/\",\"api\"]}}\n",
+            ),
+        ] {
+            let p = root.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        let r = crate::generate_one(root.to_str().unwrap()).unwrap();
+        let rules = declared_constraints(&r.merged);
+        let by_id = |id: &str| rules.iter().find(|(_, x)| x.id == id).map(|(_, x)| x.kind.clone()).unwrap();
+        assert_eq!(
+            by_id("w"),
+            ConstraintKind::ForbidEdge {
+                from: "web".into(),
+                to: "services/api".into(),
+                transitive: true,
+                via: vec!["services/api/public".into(), "services/api".into()],
+            }
+        );
+        assert_eq!(
+            by_id("no-api"),
+            ConstraintKind::ForbidEdge {
+                from: "web".into(),
+                to: "services/api".into(),
+                transitive: true,
+                via: vec!["services/api/public".into()],
+            }
+        );
+        let web = rules.iter().find(|(_, x)| x.id == "no-api").map(|(id, _)| *id).unwrap();
+        let stored = r.merged.graphs.iter().flat_map(|g| &g.nodes).find(|n| n.id == web).unwrap();
+        let payload = stored.cells.iter().find(|c| c.kind == cell_type::CONSTRAINT).unwrap();
+        let CellPayload::Json(s) = &payload.payload else { panic!("CONSTRAINT is JSON") };
+        assert!(
+            s.contains(r#""transitive":true,"via":["services/api/public"],"via_raw":["./services/api/public/"]"#),
+            "{s}"
+        );
     }
 
     #[test]

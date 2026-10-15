@@ -1034,7 +1034,13 @@ impl RuleIndex {
                 continue;
             };
             match &rule.kind {
-                ConstraintKind::ForbidEdge { from, to } => {
+                // A transitive rule is unchecked (check.rs evaluate): no rows.
+                ConstraintKind::ForbidEdge {
+                    from,
+                    to,
+                    transitive: false,
+                    ..
+                } => {
                     let cats = if cats.is_empty() {
                         default_forbid_categories()
                     } else {

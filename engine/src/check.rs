@@ -9,9 +9,10 @@
 //! repo-relative paths (`.` = the root), so this module never re-resolves a
 //! label.
 //!
-//! - `forbid_edge {from, to}`: every DIRECT edge (the observed fact;
-//!   transitive reach is `effects` / `diff-impact` business) whose category is
-//!   in the rule's set, `from` end in scope `from` and `to` end in scope `to`.
+//! - `forbid_edge {from, to}` (`transitive` false): every DIRECT edge (the
+//!   observed fact; transitive reach is `effects` / `diff-impact` business)
+//!   whose category is in the rule's set, `from` end in scope `from` and `to`
+//!   end in scope `to`.
 //!   The set is the rule's `categories` (edge category NAMES), else
 //!   [`default_forbid_categories`]: IMPORTS plus the code profile's carry
 //!   edges, minus TESTS and DOCUMENTS (a test or a doc legitimately crosses
@@ -25,8 +26,12 @@
 //!   strongly-connected component, its evidence a shortest witness cycle and
 //!   its `count` the component's size. An unscoped rule checks the whole
 //!   graph.
-//! - `invariant {text}` (and any kind this crate cannot evaluate): listed in
-//!   [`CheckReport::unchecked`], never dropped.
+//! - `invariant {text, rule}` (a `rule` is overlay version 2's Datalog text,
+//!   DB.1, evaluated once DB.3a lands), a `forbid_edge` with `transitive`
+//!   (DB.1, evaluated once DB.3b lands) and any kind this crate cannot
+//!   evaluate: listed in [`CheckReport::unchecked`], never dropped, never
+//!   mis-evaluated as a direct-edge rule. A rule's `min_tier` (DB.1) is read
+//!   by DB.3a's gate; it does not change this module's verdicts yet.
 //!
 //! # Tiers (CC.3)
 //!
@@ -463,8 +468,14 @@ enum Outcome {
 fn evaluate(ctx: &mut Ctx<'_>, rule: &ConstraintRule) -> Outcome {
     // Only the kinds this module evaluates reach the category check: an
     // invariant's categories are never read.
+    // A transitive forbid_edge (DB.3b) and an invariant, with or without its
+    // Datalog `rule` (DB.3a), are listed unchecked until their evaluators land:
+    // the direct-edge walk below would under-report a transitive rule.
     match &rule.kind {
-        ConstraintKind::ForbidEdge { .. } | ConstraintKind::NoCycle { .. } => {}
+        ConstraintKind::ForbidEdge {
+            transitive: false, ..
+        }
+        | ConstraintKind::NoCycle { .. } => {}
         _ => return Outcome::Unchecked,
     }
     let categories = match categories_of(&rule.categories) {
@@ -472,7 +483,7 @@ fn evaluate(ctx: &mut Ctx<'_>, rule: &ConstraintRule) -> Outcome {
         Err(e) => return Outcome::Error(e),
     };
     let result = match &rule.kind {
-        ConstraintKind::ForbidEdge { from, to } => {
+        ConstraintKind::ForbidEdge { from, to, .. } => {
             let cats = if categories.is_empty() {
                 default_forbid_categories()
             } else {
@@ -1530,6 +1541,66 @@ mod tests {
         let mut t = vec![HEURISTIC, "other", FACT, DERIVED];
         t.sort_by_key(|x| tier_rank(x));
         assert_eq!(t, [FACT, DERIVED, HEURISTIC, "other"]);
+    }
+
+    /// DB.1's interim posture: a transitive forbid_edge and a rule invariant
+    /// (overlay version 2) are listed unchecked - never judged by the direct
+    /// walk - while the direct rule over the same scopes still is.
+    #[test]
+    fn transitive_forbid_and_rule_invariant_are_unchecked() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let overlay = "version = 2
+
+[[constraint]]
+id = \"direct\"
+kind = \"forbid_edge\"
+from = \"web\"
+to = \"services/api\"
+categories = [\"IMPORTS\"]
+
+[[constraint]]
+id = \"transitive\"
+kind = \"forbid_edge\"
+from = \"web\"
+to = \"services/api\"
+categories = [\"IMPORTS\"]
+transitive = true
+min_tier = \"fact\"
+
+[[constraint]]
+id = \"rule\"
+kind = \"invariant\"
+scope = \"services/api\"
+text = \"every route has a handler\"
+rule = \"violation(r) :- unhandled_route(r).\"
+";
+        for (rel, src) in [
+            ("web/pyproject.toml", "[project]\nname = \"web\"\n"),
+            (
+                "web/app.py",
+                "from services.api.internal import charge\n\n\ndef pay(o):\n    return charge(o)\n",
+            ),
+            ("services/api/pyproject.toml", "[project]\nname = \"api\"\n"),
+            ("services/api/internal.py", "def charge(o):\n    return o\n"),
+            (".glia/overlay.toml", overlay),
+        ] {
+            let p = tmp.path().join(rel);
+            std::fs::create_dir_all(p.parent().expect("a parent")).expect("mkdir");
+            std::fs::write(p, src).expect("write");
+        }
+        let r = crate::generate_one(tmp.path().to_str().expect("utf-8")).expect("generate_one");
+        let report = check(&r.merged);
+        assert_eq!((report.rules, report.checked), (3, 1), "{report:?}");
+        let mut unchecked = report.unchecked.clone();
+        unchecked.sort_unstable();
+        assert_eq!(unchecked, ["rule", "transitive"]);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let ids: Vec<&str> = report
+            .violations
+            .iter()
+            .map(|v| v.rule_id.as_str())
+            .collect();
+        assert_eq!(ids, ["direct"], "only the direct rule is evaluated");
     }
 
     #[test]

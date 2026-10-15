@@ -168,10 +168,98 @@ fn declared_constraints_round_trips() {
     assert_eq!(rules.len(), 1, "{rules:?}");
     let rule = &rules[0];
     assert_eq!(rule.id, "web-no-api-internals");
-    assert_eq!(rule.kind, ConstraintKind::ForbidEdge { from: "web".into(), to: "services/api".into() });
+    assert_eq!(
+        rule.kind,
+        ConstraintKind::ForbidEdge { from: "web".into(), to: "services/api".into(), transitive: false, via: vec![] }
+    );
     assert_eq!(rule.categories, ["CALLS"]);
     assert_eq!(rule.source, "overlay");
     assert_eq!(rule.decl.as_deref(), Some(".glia/overlay.toml:3"));
+    assert_eq!(rule.min_tier, None);
+}
+
+/// DB.1: a version-2 overlay's rule fields are stored on the entry - only the
+/// keys a stanza sets, the facades resolved beside their raw text - and read
+/// back into the new variant fields. The same file at version 1 drops both
+/// stanzas and writes no CONSTRAINT cell.
+#[test]
+fn v2_constraint_entries_round_trip() {
+    let overlay = r#"version = 2
+
+[[constraint]]
+id = "no-api"
+kind = "forbid_edge"
+from = "web"
+to = "services/api"
+transitive = true
+via = ["services/api/public"]
+
+[[constraint]]
+id = "no-routes"
+kind = "invariant"
+scope = "services/api"
+text = "the api declares no route"
+rule = "violation(x) :- node(x, \"ROUTE\")."
+min_tier = "fact"
+origin = "human"
+"#;
+    let loaded = glia_config::parse_str(overlay);
+    assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+    let tmp = tempfile::tempdir().unwrap();
+    let r = generate_one(&repo(tmp.path(), Some(overlay), None)).unwrap();
+    assert_eq!(
+        cell(&r, "project:web", cell_type::CONSTRAINT),
+        [r#"[{"decl":".glia/overlay.toml:3","from":"web","from_raw":"web","id":"no-api","kind":"forbid_edge","origin":"llm","source":"overlay","to":"services/api","to_raw":"services/api","transitive":true,"via":["services/api/public"],"via_raw":["services/api/public"]}]"#]
+    );
+    assert_eq!(
+        cell(&r, "project:services/api", cell_type::CONSTRAINT),
+        [r#"[{"decl":".glia/overlay.toml:11","id":"no-routes","kind":"invariant","min_tier":"fact","origin":"human","rule":"violation(x) :- node(x, \"ROUTE\").","scope":"services/api","scope_raw":"services/api","source":"overlay","text":"the api declares no route"}]"#]
+    );
+    let rules: Vec<ConstraintRule> = all_of(&r, cell_type::CONSTRAINT).iter().flat_map(parse_constraints).collect();
+    let by_id = |id: &str| rules.iter().find(|x| x.id == id).cloned().unwrap();
+    let forbid = by_id("no-api");
+    assert_eq!(
+        forbid.kind,
+        ConstraintKind::ForbidEdge {
+            from: "web".into(),
+            to: "services/api".into(),
+            transitive: true,
+            via: vec!["services/api/public".into()],
+        }
+    );
+    assert_eq!(forbid.min_tier, None);
+    let inv = by_id("no-routes");
+    assert_eq!(
+        inv.kind,
+        ConstraintKind::Invariant {
+            text: "the api declares no route".into(),
+            rule: Some("violation(x) :- node(x, \"ROUTE\").".into()),
+        }
+    );
+    assert_eq!(inv.min_tier.as_deref(), Some("fact"));
+
+    // The same stanzas in a version-1 file: each is dropped, nothing stored.
+    let v1 = overlay.replacen("version = 2", "version = 1", 1);
+    let loaded = glia_config::parse_str(&v1);
+    assert_eq!(loaded.errors.len(), 2, "{:?}", loaded.errors);
+    assert!(loaded.errors.iter().all(|e| e.contains("need `version = 2`")), "{:?}", loaded.errors);
+    let tmp = tempfile::tempdir().unwrap();
+    let r = generate_one(&repo(tmp.path(), Some(&v1), None)).unwrap();
+    assert!(all_of(&r, cell_type::CONSTRAINT).is_empty());
+}
+
+/// Q9: a `.glia/cells.jsonl` CONSTRAINT row carrying `rule` is rejected by
+/// the build's sidecar stage whatever its `source` says (HEAD stored it).
+#[test]
+fn sidecar_rule_is_rejected() {
+    for source in ["api", "overlay"] {
+        let row = format!(
+            r#"{{"qname":"project:web","cell":"CONSTRAINT","entry":{{"source":"{source}","id":"r","kind":"invariant","text":"t","rule":"x"}}}}"#
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let r = generate_one(&repo(tmp.path(), None, Some(&row))).unwrap();
+        assert!(all_of(&r, cell_type::CONSTRAINT).is_empty(), "source {source}: the rule row is not applied");
+    }
 }
 
 /// A sidecar DECISION row and an overlay decision on one node share one

@@ -27,7 +27,7 @@ overlay results, and `--no-overlay` builds without them.
 ## Example
 
 ```toml
-version = 1                               # required; any other value ignores the whole file
+version = 1                               # required: 1, or 2 to use rule / transitive / via / min_tier; any other value ignores the whole file
 
 [walk]
 skip = ["legacy/", "*.generated.ts"]      # gitignore syntax, anchored at the repo root; only adds skips
@@ -225,7 +225,9 @@ Every table rejects unknown keys, so a typo is an error, not a silently ignored 
 never fail a build. Each one is printed once as `[overlay] error: .glia/overlay.toml:<line>: <message>`.
 
 - A TOML syntax error, an unknown key, a wrong type, a missing required field, or a `version`
-  other than 1 ignores the **whole file**.
+  other than 1 or 2 ignores the **whole file**. Version 1 is the 0.5.1 schema and loads exactly as
+  it did; version 2 adds the `[[constraint]]` fields `rule`, `transitive`, `via` and `min_tier`
+  (next section). A 0.5.1 glia ignores a version-2 file whole (`version = 2 is not supported`).
 - A stanza that parses but breaks a rule is **dropped on its own**. The rest of the file
   still applies. The rules:
   - an `[[edge]]` category that is not an edge category name, or is `DEFINES`, `CONTAINS`
@@ -235,6 +237,13 @@ never fail a build. Each one is printed once as `[overlay] error: .glia/overlay.
     `name_arg`, or with a `flavor` other than `sql` / `nosql` / `graph`)
   - an unknown constraint kind, or one missing its required fields; `kind = "component"` or
     `"layer"` in a `[[constraint]]` (the model is declared only through its own sections)
+  - a `rule`, `transitive = true`, a non-empty `via` or a `min_tier` in a version-1 file
+    (`` `rule` need `version = 2` (this file says version = 1) ``)
+  - `transitive` on any kind but `forbid_edge`; `via` without `transitive = true`, or with an
+    empty path, a path that leaves the repo (`..`) or one path listed twice
+  - `rule` on any kind but `invariant`, or a blank one, or one over 16,384 characters
+  - a `min_tier` other than `fact` / `derived` (`heuristic` included: a heuristic violation
+    never fails CI), on an `allow`, or on an `invariant` without `rule`
   - an `allow` whose `from` / `to` is not a kept `[[component]]`, names one component twice,
     or sets `scope`
   - a component with no paths, an empty path, a path that leaves the repo (`..`), or a path
@@ -245,6 +254,76 @@ never fail a build. Each one is printed once as `[overlay] error: .glia/overlay.
   - a constant name outside `[A-Za-z_][A-Za-z0-9_.]*`
   - an invalid (or empty) `[walk] skip` or `tests` pattern, which drops that pattern only
   - a project path that is the repo root or leaves it
+
+## Rule invariants, transitive forbid and min_tier (version 2)
+
+`version = 2` adds four `[[constraint]]` fields. Everything else in the file reads as in version 1,
+and a version-1 file keeps loading unchanged; a version-1 file that sets one of the four loses that
+stanza only, with an error naming the fields.
+
+```toml
+version = 2
+
+[[constraint]]
+id = "web-not-into-api"
+kind = "forbid_edge"
+from = "web"
+to = "services/api"
+transitive = true                         # a path through any third scope counts, not only a direct edge
+via = ["services/api/public"]             # facades: a path may enter `to` here
+categories = ["CALLS", "HTTP_CALLS"]
+min_tier = "fact"                         # fact | derived (default derived)
+
+[[constraint]]
+id = "routes-are-handled"
+kind = "invariant"
+scope = "services/api"
+text = "every route has a handler"
+rule = 'violation(r) :- unhandled_route(r).'   # Datalog over the graph and the prelude
+min_tier = "derived"
+```
+
+- `rule` (on an `invariant`; `text` stays required as the statement a person reads): Datalog text
+  whose `violation/N` rows are the rule's violations. It is evaluated at `glia check` time over
+  the graph plus the predicate prelude (`docs/rules.md`), never at load: the loader checks only
+  that it is a non-blank string of at most 16,384 characters, so a CONSTRAINT cell never depends
+  on the rules parser. A name the rule uses that this glia does not have (an unknown kind,
+  category or predicate) or a syntax error is a rule error at check time: `glia check` lists it
+  in its errors and exits 2, and `glia gaps` reports a `rotted_rule` row. An invariant without
+  `rule` is a statement only: listed as unchecked.
+- `transitive` (on a `forbid_edge`): a path from `from` to `to` through any third scope counts.
+  The first node of `to` on a path is the hit. `via` names facade scopes (paths or project
+  labels, resolved like `from` / `to`) the walk never passes through, so a path that enters `to`
+  through a facade is allowed. `IMPORTS` chains over the module import graph, separately from the
+  symbol categories, unless the rule names both `IMPORTS` and `CALLS`. One violation per hit,
+  with its shortest best-tier path as the witness.
+- `min_tier` (on a `forbid_edge`, a `no_cycle`, or an `invariant` with `rule`): `fact` or
+  `derived`, default `derived`. A violation whose tier is weaker is reported and does not fail
+  CI. A `heuristic` violation never fails CI under any `min_tier` (0.5.2 Q2), so `heuristic` is
+  not a value.
+
+A worked example. `web/` is a TypeScript app and `services/api/` a Python service whose
+`services/api/public/` package is its published surface. Under the first stanza above, a path from
+`web` into `services/api/public/` is allowed, and the walk never continues past the facade. A path
+from `web` whose first node under `services/api/` is anywhere else - an `HTTP_CALLS` hop straight
+into a handler in `services/api/internal/`, or a chain of calls through a third scope such as
+`shared/` - is one violation per such node, the path its witness. The `HTTP_CALLS` hop is
+resolver-paired (DERIVED), so under `min_tier = "fact"` that violation is listed and leaves the exit
+code at 0; a path of `CALLS` edges the parsers bound (FACT) fails CI.
+
+Storage. The fields go on the rule's CONSTRAINT entry only when set: `"transitive":true`,
+`"via":[resolved]` beside `"via_raw":[as written]`, `"rule"` and `"min_tier"`. A version-1
+stanza's entry is byte-identical to what 0.5.1 stored.
+
+Rule text is declared only in this file (0.5.2 Q9). The cell API (`glia cell set`, `glia_py`'s
+`set_cell` / `write_cell`, a hand-edited `.glia/cells.jsonl` row) refuses a CONSTRAINT entry that
+carries a `rule` key, whatever its `source` says: `` `rule` (Datalog text) is declared only in
+.glia/overlay.toml [[constraint]] (0.5.2 Q9); the cell API cannot write one ``. A rule a model
+proposes goes through the overlay file like any other stanza.
+
+Until the evaluators land in this release, `glia check` lists a transitive `forbid_edge` and every
+`invariant` as unchecked (the `unchecked=` count of its `[check]` line) rather than judging them
+with the direct-edge walk.
 
 ## Reflexion model
 

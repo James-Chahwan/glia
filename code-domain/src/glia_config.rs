@@ -13,10 +13,19 @@
 //! Loading never panics and never bails a build (pipeline stages emit empty):
 //! - file absent -> `None`;
 //! - TOML syntax error, schema error (unknown key, wrong type, missing
-//!   required field) or `version != 1` -> the WHOLE config is defaulted and one
-//!   error is recorded;
+//!   required field) or a `version` outside [`SUPPORTED_VERSIONS`] -> the
+//!   WHOLE config is defaulted and one error is recorded;
 //! - a validation error drops ONLY the offending stanza (or list entry) and
 //!   records an error naming its line.
+//!
+//! VERSIONS (0.5.2 Q7). Version 1 is the 0.5.1 schema and keeps loading
+//! exactly as it did. Version 2 adds the `[[constraint]]` fields of
+//! [`V2_CONSTRAINT_FIELDS`] (DB.1): `rule` (an invariant's Datalog text),
+//! `transitive` + `via` (a transitive forbid_edge and its facades) and
+//! `min_tier`. A version-1 file that sets one of them loses that stanza, not
+//! the file. The loader checks their SHAPE only: a rule's text is parsed at
+//! `glia check` time (DB.3a), never here, so a CONSTRAINT cell never depends
+//! on the rules parser (R1 §3, Q8).
 //!
 //! Every struct is `deny_unknown_fields`: a typo fails loudly instead of being
 //! silently ignored. Only the repo-root `.glia/overlay.toml` is read; a nested
@@ -36,8 +45,18 @@ use crate::edge_category;
 
 /// Repo-relative path of the file. Only the repo root's copy is read.
 pub const OVERLAY_FILE: &str = ".glia/overlay.toml";
-/// The one schema version this glia reads.
-pub const SUPPORTED_VERSION: u32 = 1;
+/// The schema versions this glia reads (0.5.2 Q7): 1, and 2 for the
+/// `[[constraint]]` fields of [`V2_CONSTRAINT_FIELDS`].
+pub const SUPPORTED_VERSIONS: &[u32] = &[1, 2];
+/// The newest schema version: the one a file needs to set every field.
+pub const LATEST_VERSION: u32 = 2;
+/// The `[[constraint]]` fields only a version-2 file may set (DB.1).
+pub const V2_CONSTRAINT_FIELDS: &[&str] = &["rule", "transitive", "via", "min_tier"];
+/// `min_tier` values: the weakest violation tier that fails CI. HEURISTIC is
+/// never one: a heuristic violation is reported and never fails CI (0.5.2 Q2).
+pub const MIN_TIERS: &[&str] = &["fact", "derived"];
+/// `[[constraint]] rule`: at most this many chars of Datalog text.
+pub const MAX_RULE_CHARS: usize = 16_384;
 /// Upper bound for every `*_arg` positional index.
 pub const MAX_ARG_INDEX: usize = 8;
 /// Stanza ids: 1..=128 chars, no control chars (the external_inputs id rule).
@@ -84,7 +103,7 @@ pub const NOTE_ID_PREFIX: &str = "note#";
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GliaConfig {
-    /// Must be [`SUPPORTED_VERSION`]; anything else defaults the whole config.
+    /// One of [`SUPPORTED_VERSIONS`]; anything else defaults the whole config.
     #[serde(default)]
     pub version: u32,
     /// Extra walk skips (LF.3a).
@@ -328,7 +347,7 @@ impl EdgeDecl {
 }
 
 /// `[[constraint]]`: a declared rule (the CONSTRAINT entry shape of
-/// `external_inputs::validate_entry`).
+/// `external_inputs::validate_declared_entry`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConstraintDecl {
@@ -354,6 +373,24 @@ pub struct ConstraintDecl {
     pub text: Option<String>,
     #[serde(default)]
     pub origin: Origin,
+    /// invariant, version 2: Datalog text whose `violation/N` rows are the
+    /// rule's violations, evaluated at `glia check` time (DB.3a). Its shape is
+    /// checked here (non-blank, at most [`MAX_RULE_CHARS`] chars), never its
+    /// syntax.
+    #[serde(default)]
+    pub rule: Option<String>,
+    /// forbid_edge, version 2: a path through any third scope counts, not only
+    /// a direct edge (DB.3b).
+    #[serde(default)]
+    pub transitive: bool,
+    /// A transitive forbid_edge, version 2: facade scopes (paths or project
+    /// labels) a path may enter `to` through.
+    #[serde(default)]
+    pub via: Vec<String>,
+    /// Version 2: one of [`MIN_TIERS`], the weakest violation tier that fails
+    /// CI (absent = the checker's default, derived).
+    #[serde(default)]
+    pub min_tier: Option<String>,
 }
 
 /// `[[decision]]`: a recorded decision; needs `title` or `text`.
@@ -544,15 +581,23 @@ impl LoadedConfig {
         let mut cfg = std::mem::take(&mut self.config);
         let mut errors = Vec::new();
 
-        if cfg.version != SUPPORTED_VERSION {
+        if !SUPPORTED_VERSIONS.contains(&cfg.version) {
             let msg = if cfg.version == 0 {
-                "`version = 1` is missing; the whole file is ignored".to_string()
+                format!(
+                    "`version` is missing (1, or {LATEST_VERSION} to use {}); the whole file is ignored",
+                    V2_CONSTRAINT_FIELDS.join(" / ")
+                )
             } else {
-                format!("version = {} is not supported (this glia reads version 1); the whole file is ignored", cfg.version)
+                format!(
+                    "version = {} is not supported (this glia reads versions {}); the whole file is ignored",
+                    cfg.version,
+                    versions_list()
+                )
             };
             self.errors.push(self.at(version_line(text), &msg));
             return;
         }
+        let version = cfg.version;
 
         cfg.walk.skip.retain(|p| match check_skip_pattern(p) {
             Ok(()) => true,
@@ -720,6 +765,7 @@ impl LoadedConfig {
                 }
                 _ => {}
             }
+            check_v2_fields(c, version)?;
             if let Some(bad) = c.categories.iter().find(|n| category_id(n).is_none()) {
                 return Err(format!("category {bad:?} is not an edge category name"));
             }
@@ -803,6 +849,119 @@ fn failed(msg: String) -> LoadedConfig {
 
 fn category_id(name: &str) -> Option<EdgeCategoryId> {
     edge_category::ALL.iter().find(|(_, n)| *n == name).map(|(id, _)| *id)
+}
+
+/// [`SUPPORTED_VERSIONS`] as prose: `1 and 2`.
+fn versions_list() -> String {
+    let v: Vec<String> = SUPPORTED_VERSIONS.iter().map(u32::to_string).collect();
+    match v.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        Some((last, _)) => last.clone(),
+        None => String::new(),
+    }
+}
+
+/// Placement of `transitive`: only a forbid_edge takes it.
+pub(crate) const TRANSITIVE_ONLY_FORBID: &str = "`transitive` is a forbid_edge field";
+/// Placement of `via`: only a transitive forbid_edge takes it.
+pub(crate) const VIA_ONLY_TRANSITIVE: &str =
+    "`via` names facades of a transitive forbid_edge; set `transitive = true`";
+/// Placement of `rule`: only an invariant takes it.
+pub(crate) const RULE_ONLY_INVARIANT: &str = "`rule` is an invariant field";
+
+/// A `rule`'s shape (the loader's and `external_inputs::validate_declared_entry`'s
+/// shared check): non-blank, at most [`MAX_RULE_CHARS`] chars. Its syntax is
+/// the checker's (DB.3a), never the loader's.
+pub(crate) fn check_rule_text(rule: &str) -> Result<(), String> {
+    let n = rule.chars().count();
+    if rule.trim().is_empty() || n > MAX_RULE_CHARS {
+        return Err(format!("`rule` must be 1..={MAX_RULE_CHARS} chars of Datalog text, not blank (got {n})"));
+    }
+    Ok(())
+}
+
+/// A `min_tier` value is one of [`MIN_TIERS`].
+pub(crate) fn check_min_tier(tier: &str) -> Result<(), String> {
+    if MIN_TIERS.contains(&tier) {
+        return Ok(());
+    }
+    Err(format!(
+        "`min_tier` must be {} (a heuristic violation is reported and never fails CI, 0.5.2 Q2)",
+        MIN_TIERS.join(" | ")
+    ))
+}
+
+/// Which CONSTRAINT kinds take a `min_tier`: forbid_edge and no_cycle, and an
+/// invariant only with a `rule` (an unchecked statement has no violations).
+pub(crate) fn check_min_tier_on(kind: &str, has_rule: bool) -> Result<(), String> {
+    match kind {
+        "forbid_edge" | "no_cycle" => Ok(()),
+        "invariant" if has_rule => Ok(()),
+        "invariant" => Err("`min_tier` on an invariant needs `rule` (an unchecked statement has no violations)".into()),
+        "allow" => Err("`min_tier` is not taken by kind allow (a divergence's gate is the default)".into()),
+        k => Err(format!("`min_tier` is not taken by kind {k} (a model declaration has no violations of its own)")),
+    }
+}
+
+/// The version-2 `[[constraint]]` fields (DB.1): only a version-2 file sets
+/// one, and each sits on the kind that reads it.
+fn check_v2_fields(c: &ConstraintDecl, version: u32) -> Result<(), String> {
+    let set: Vec<String> = V2_CONSTRAINT_FIELDS
+        .iter()
+        .filter(|f| match **f {
+            "rule" => c.rule.is_some(),
+            "transitive" => c.transitive,
+            "via" => !c.via.is_empty(),
+            "min_tier" => c.min_tier.is_some(),
+            _ => false,
+        })
+        .map(|f| format!("`{f}`"))
+        .collect();
+    if set.is_empty() {
+        return Ok(());
+    }
+    if version < LATEST_VERSION {
+        return Err(format!(
+            "{} need `version = {LATEST_VERSION}` (this file says version = {version})",
+            set.join(", ")
+        ));
+    }
+    let forbid = c.kind == "forbid_edge";
+    if c.transitive && !forbid {
+        return Err(TRANSITIVE_ONLY_FORBID.into());
+    }
+    if !c.via.is_empty() {
+        if !(forbid && c.transitive) {
+            return Err(VIA_ONLY_TRANSITIVE.into());
+        }
+        let mut seen = BTreeSet::new();
+        for raw in &c.via {
+            if raw.trim().is_empty() {
+                return Err("a `via` path is empty (use \".\" for the repo root)".into());
+            }
+            let rel = match rel_path_of(raw) {
+                "" => ".",
+                r => r,
+            };
+            if rel.split('/').any(|seg| seg == "..") {
+                return Err(format!("`via` path {raw:?} leaves the repo"));
+            }
+            if !seen.insert(rel.to_string()) {
+                return Err(format!("`via` path {rel:?} is listed twice"));
+            }
+        }
+    }
+    if let Some(rule) = &c.rule {
+        if c.kind != "invariant" {
+            return Err(RULE_ONLY_INVARIANT.into());
+        }
+        check_rule_text(rule)?;
+    }
+    if let Some(tier) = &c.min_tier {
+        check_min_tier(tier)?;
+        check_min_tier_on(&c.kind, c.rule.is_some())?;
+    }
+    Ok(())
 }
 
 /// Line of a top-level `version = ...` key (before the first table header).
@@ -1073,6 +1232,23 @@ components = ["api"]
         assert_eq!(l.config.walk.tests, ["playwright/", "qa/**/*.py"], "CJ.4: the example declares tests");
     }
 
+    /// DB.1: the version-2 example of docs/overlay.md loads clean.
+    #[test]
+    fn docs_version_two_example_parses_cleanly() {
+        let doc = include_str!("../../docs/overlay.md");
+        let body = doc
+            .split("```toml\n")
+            .find(|b| b.starts_with("version = 2\n"))
+            .and_then(|s| s.split("```").next())
+            .expect("a version-2 toml block");
+        let l = parse_str(body);
+        assert!(l.errors.is_empty(), "{:?}", l.errors);
+        assert_eq!(l.config.constraint.len(), 2);
+        let f = l.config.constraint[0].get_ref();
+        assert!(f.transitive && f.via == ["services/api/public"] && f.min_tier.as_deref() == Some("fact"));
+        assert!(l.config.constraint[1].get_ref().rule.is_some());
+    }
+
     #[test]
     fn typo_in_stanza_is_an_error_not_silence() {
         let l = parse_str("version = 1\n[[edge]]\nform = \"a::f\"\nto = \"b::g\"\ncategory = \"CALLS\"\n");
@@ -1096,15 +1272,151 @@ components = ["api"]
 
     #[test]
     fn wrong_version_defaults_everything() {
-        for (text, line) in [
-            (FULL.replacen("version = 1", "version = 2", 1), ":1: "),
-            (FULL.replacen("version = 1", "", 1), "toml: "),
+        for (text, line, needle) in [
+            (FULL.replacen("version = 1", "version = 3", 1), ":1: ", "this glia reads versions 1 and 2"),
+            (FULL.replacen("version = 1", "", 1), "toml: ", "`version` is missing (1, or 2 to use rule / transitive / via / min_tier)"),
         ] {
             let l = parse_str(&text);
             assert_eq!(l.errors.len(), 1, "{:?}", l.errors);
-            assert!(l.errors[0].contains(line) && l.errors[0].contains("version"), "{}", l.errors[0]);
+            assert!(l.errors[0].contains(line) && l.errors[0].contains(needle), "{}", l.errors[0]);
             assert!(l.section_counts().iter().all(|(_, n)| *n == 0));
         }
+        // FULL (a version-1 file) also loads as version 2: version 2 only adds fields.
+        let v2 = parse_str(&FULL.replacen("version = 1", "version = 2", 1));
+        assert!(v2.errors.is_empty(), "{:?}", v2.errors);
+        assert!(v2.section_counts().iter().all(|(_, n)| *n == 1));
+    }
+
+    /// DB.1: the version-2 stanzas the tests below share - a transitive
+    /// forbid_edge with a facade and a min_tier, and a rule invariant.
+    const V2_RULES: &str = r#"[[constraint]]
+id = "no-api"
+kind = "forbid_edge"
+from = "web"
+to = "services/api"
+transitive = true
+via = ["services/api/public"]
+min_tier = "fact"
+
+[[constraint]]
+id = "no-routes"
+kind = "invariant"
+text = "no service declares a route"
+rule = "violation(x) :- node(x, \"ROUTE\")."
+"#;
+
+    #[test]
+    fn version_two_reads_rule_fields() {
+        let l = parse_str(&format!("version = 2\n\n{V2_RULES}"));
+        assert!(l.errors.is_empty(), "{:?}", l.errors);
+        assert_eq!(l.config.version, 2);
+        assert_eq!(l.config.constraint.len(), 2);
+        let f = l.config.constraint[0].get_ref();
+        assert_eq!((f.kind.as_str(), f.transitive), ("forbid_edge", true));
+        assert_eq!(f.via, ["services/api/public"]);
+        assert_eq!(f.min_tier.as_deref(), Some("fact"));
+        assert_eq!(f.rule, None);
+        let i = l.config.constraint[1].get_ref();
+        assert_eq!(i.kind, "invariant");
+        assert_eq!(i.rule.as_deref(), Some("violation(x) :- node(x, \"ROUTE\")."));
+        assert!(!i.transitive && i.via.is_empty() && i.min_tier.is_none());
+        // A version-1 stanza reads with every v2 field unset.
+        let l = parse_str("version = 1\n[[constraint]]\nid = \"c\"\nkind = \"no_cycle\"\n");
+        let c = l.config.constraint[0].get_ref();
+        assert!(l.errors.is_empty() && c.rule.is_none() && !c.transitive && c.via.is_empty() && c.min_tier.is_none());
+    }
+
+    /// Q7: a version-1 file that sets a version-2 field loses that stanza and
+    /// nothing else - the config is NOT defaulted.
+    #[test]
+    fn version_one_drops_only_the_rule_stanzas() {
+        let text = format!("version = 1\n[walk]\nskip = [\"gen/\"]\n\n{V2_RULES}\n[[constraint]]\nid = \"kept\"\nkind = \"no_cycle\"\n");
+        let l = parse_str(&text);
+        assert_eq!(l.errors.len(), 2, "{:#?}", l.errors);
+        assert_eq!(
+            l.errors[0],
+            ".glia/overlay.toml:5: [[constraint]] `transitive`, `via`, `min_tier` need `version = 2` (this file says version = 1) (stanza dropped)"
+        );
+        assert_eq!(
+            l.errors[1],
+            ".glia/overlay.toml:14: [[constraint]] `rule` need `version = 2` (this file says version = 1) (stanza dropped)"
+        );
+        assert_eq!(l.config.walk.skip, ["gen/"]);
+        let ids: Vec<&str> = l.config.constraint.iter().map(|c| c.get_ref().id.as_str()).collect();
+        assert_eq!(ids, ["kept"]);
+        // `transitive = false` and `via = []` set nothing: a version-1 file keeps them.
+        let l = parse_str("version = 1\n[[constraint]]\nid = \"c\"\nkind = \"forbid_edge\"\nfrom = \"a\"\nto = \"b\"\ntransitive = false\nvia = []\n");
+        assert!(l.errors.is_empty() && l.config.constraint.len() == 1, "{:?}", l.errors);
+    }
+
+    /// DB.1: each version-2 shape rule drops its stanza with its exact message.
+    #[test]
+    fn rule_field_gates() {
+        let long = "x".repeat(MAX_RULE_CHARS + 1);
+        let forbid = "kind = \"forbid_edge\"\nfrom = \"web\"\nto = \"api\"";
+        let bad = [
+            ("kind = \"no_cycle\"\ntransitive = true".to_string(), "`transitive` is a forbid_edge field".to_string()),
+            (
+                format!("{forbid}\nvia = [\"api/public\"]"),
+                "`via` names facades of a transitive forbid_edge; set `transitive = true`".to_string(),
+            ),
+            (
+                "kind = \"no_cycle\"\nvia = [\"api/public\"]".to_string(),
+                "`via` names facades of a transitive forbid_edge; set `transitive = true`".to_string(),
+            ),
+            (format!("{forbid}\ntransitive = true\nvia = [\"../x\"]"), "`via` path \"../x\" leaves the repo".to_string()),
+            (format!("{forbid}\ntransitive = true\nvia = [\" \"]"), "a `via` path is empty (use \".\" for the repo root)".to_string()),
+            (
+                format!("{forbid}\ntransitive = true\nvia = [\"api/public\", \"./api/public/\"]"),
+                "`via` path \"api/public\" is listed twice".to_string(),
+            ),
+            (format!("{forbid}\nrule = \"violation(x) :- node(x, \\\"ROUTE\\\").\""), "`rule` is an invariant field".to_string()),
+            (
+                "kind = \"invariant\"\ntext = \"t\"\nrule = \"  \"".to_string(),
+                format!("`rule` must be 1..={MAX_RULE_CHARS} chars of Datalog text, not blank (got 2)"),
+            ),
+            (
+                format!("kind = \"invariant\"\ntext = \"t\"\nrule = \"{long}\""),
+                format!("`rule` must be 1..={MAX_RULE_CHARS} chars of Datalog text, not blank (got {})", MAX_RULE_CHARS + 1),
+            ),
+            (
+                format!("{forbid}\nmin_tier = \"strong\""),
+                "`min_tier` must be fact | derived (a heuristic violation is reported and never fails CI, 0.5.2 Q2)".to_string(),
+            ),
+            (
+                format!("{forbid}\nmin_tier = \"heuristic\""),
+                "`min_tier` must be fact | derived (a heuristic violation is reported and never fails CI, 0.5.2 Q2)".to_string(),
+            ),
+            (
+                "kind = \"allow\"\nfrom = \"web\"\nto = \"api\"\nmin_tier = \"fact\"".to_string(),
+                "`min_tier` is not taken by kind allow (a divergence's gate is the default)".to_string(),
+            ),
+            (
+                "kind = \"invariant\"\ntext = \"t\"\nmin_tier = \"fact\"".to_string(),
+                "`min_tier` on an invariant needs `rule` (an unchecked statement has no violations)".to_string(),
+            ),
+        ];
+        let model = "[[component]]\nname = \"web\"\npaths = [\"web\"]\n[[component]]\nname = \"api\"\npaths = [\"api\"]\n";
+        for (body, msg) in &bad {
+            let l = parse_str(&format!("version = 2\n{model}[[constraint]]\nid = \"c\"\n{body}\n"));
+            assert_eq!(l.errors, [format!(".glia/overlay.toml:8: [[constraint]] {msg} (stanza dropped)")], "{body}");
+            assert!(l.config.constraint.is_empty(), "{body}");
+            assert_eq!(l.config.component.len(), 2, "{body}: only the stanza is dropped");
+        }
+        // Each field where it belongs loads clean.
+        let ok = [
+            format!("{forbid}\ntransitive = true"),
+            format!("{forbid}\ntransitive = true\nvia = [\"api/public\", \"api\"]\nmin_tier = \"derived\""),
+            "kind = \"no_cycle\"\nmin_tier = \"fact\"".to_string(),
+            format!("kind = \"invariant\"\ntext = \"t\"\nrule = \"{}\"\nmin_tier = \"fact\"", "x".repeat(MAX_RULE_CHARS)),
+        ];
+        for body in &ok {
+            let l = parse_str(&format!("version = 2\n{model}[[constraint]]\nid = \"c\"\n{body}\n"));
+            assert!(l.errors.is_empty() && l.config.constraint.len() == 1, "{body}: {:?}", l.errors);
+        }
+        // An unknown key still fails the whole file: deny_unknown_fields stays.
+        let l = parse_str("version = 2\n[[constraint]]\nid = \"c\"\nkind = \"no_cycle\"\nmin_teir = \"fact\"\n");
+        assert!(l.errors.len() == 1 && l.errors[0].contains("min_teir") && l.config.constraint.is_empty(), "{:?}", l.errors);
     }
 
     #[test]
