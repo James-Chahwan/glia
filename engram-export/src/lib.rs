@@ -372,6 +372,9 @@ pub const CATEGORY_MAP: &[(EdgeCategoryId, EdgeKind, Option<f32>)] = &[
     (ec::SHARES_INFRA_REF, EdgeKind::Cooccurs, Some(0.3)),
     (ec::SHARES_DEPENDENCY, EdgeKind::Cooccurs, Some(0.3)),
     (ec::SHARES_DATA_SOURCE, EdgeKind::Cooccurs, Some(0.3)),
+    // SAME_AS (0.5.2, DD.5): an identity class link, mapped like the SHARES_*
+    // rows it replaces (Q20: no contract change).
+    (ec::SAME_AS, EdgeKind::Cooccurs, Some(0.3)),
     (ec::CO_CHANGES, EdgeKind::Cooccurs, Some(0.3)),
     // Plain association glia puts no weight on.
     (ec::TESTS, EdgeKind::Cooccurs, None),
@@ -1365,6 +1368,9 @@ mod tests {
         assert_eq!(edge_kind(ec::SHARES_SCHEMA), EdgeKind::Cooccurs);
         assert_eq!(edge_kind(ec::SHARES_DATA_SOURCE), EdgeKind::Cooccurs);
         assert_eq!(edge_weight(ec::SHARES_DATA_SOURCE), Some(0.3));
+        // SAME_AS (0.5.2) maps like the SHARES_* rows it replaces (Q20).
+        assert_eq!(edge_kind(ec::SAME_AS), EdgeKind::Cooccurs);
+        assert_eq!(edge_weight(ec::SAME_AS), Some(0.3));
         assert_eq!(edge_kind(ec::CO_CHANGES), EdgeKind::Cooccurs);
         assert_eq!(edge_weight(ec::CO_CHANGES), Some(0.3));
         assert_eq!(edge_kind(ec::TESTS), EdgeKind::Cooccurs);

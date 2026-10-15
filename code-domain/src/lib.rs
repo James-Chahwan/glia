@@ -50,6 +50,11 @@ pub mod snapshots;
 /// CODE cells stored as spans into the source: the CodeSpan codec. (CD.7c)
 pub mod code_span;
 
+// 0.5.2 slot (D0.1): declared here so its owner edits only its own file.
+
+/// Identity rule names, keys and normalisers for SAME_AS classes. (DD.2)
+pub mod same_as;
+
 // ============================================================================
 // Node kinds
 // ============================================================================
@@ -405,6 +410,8 @@ pub mod edge_category {
     // proposed CO_CHANGES = 38; compacted so ALL stays 1..=len):
     //   35 NAVIGATES_TO       — LA.6a
     //   36 CO_CHANGES         — LF.5b
+    // 37 allocated centrally by D0.1, the 0.5.2 release's only allocation:
+    //   37 SAME_AS            — D0.1 for DD (0.5.2): identity stars, IdentityResolver (DD.5)
     // ------------------------------------------------------------------
 
     /// Cross-repo pairing: two nodes reach the same external data source
@@ -440,6 +447,19 @@ pub mod edge_category {
     /// symmetric in cross_links. Emitter LF.5b; read by LF.5c / LF.5d and the
     /// Engram edge table (LG.11); the overlay loader (LF.2a) rejects it by name.
     pub const CO_CHANGES: EdgeCategoryId = EdgeCategoryId(36);
+
+    /// RESERVED (D0.1, for DD in 0.5.2) — one identity class's member → the
+    /// class's star center (the member with the least `(qname, kind, graph
+    /// index)`, DD.5): one package, one proto / Avro / JSON Schema message, one
+    /// contract operation, one SCIP symbol, or a HEURISTIC vendored copy
+    /// (DD.6). The tier is the rule's (`code-domain/src/profile.rs`
+    /// `identity_rules`, DD.3); EVIDENCE emitter `resolver:identity`, rule
+    /// `<rule>[/diverged]`. NOT in `CODE_TABLES.carry_edges` and weight 0 in
+    /// activation: identity reaches a walk only through the quotient
+    /// (`activation::algo::classes`, DD.1). Symmetric in cross_links (DD.14).
+    /// Emitted only by `IdentityResolver` (DD.5). Replaces SHARES_DEPENDENCY
+    /// and the message half of SHARES_SCHEMA (Q16, DD.16).
+    pub const SAME_AS: EdgeCategoryId = EdgeCategoryId(37);
 
     /// Canonical id→name for every edge category. Single source of truth for
     /// decode tables (pyo3 `category_names`) and the CLI. Keep in lockstep with
@@ -483,6 +503,8 @@ pub mod edge_category {
         // L0.1 leap reservations — no emitter yet.
         (NAVIGATES_TO, "NAVIGATES_TO"), // LA.6a
         (CO_CHANGES, "CO_CHANGES"),     // LF.5b
+        // D0.1 0.5.2 reservation — no emitter until DD.5.
+        (SAME_AS, "SAME_AS"), // DD.5 (D0.1)
     ];
 
     /// Name for an edge-category id, or `"UNKNOWN"` if unregistered.
@@ -3527,7 +3549,7 @@ mod tests {
             "edge_category",
             edge_category::ALL.iter().map(|(id, _)| id.0).collect(),
             edge_category::ALL.iter().map(|(_, n)| *n).collect(),
-            36,
+            37,
         );
         check(
             "cell_type",
@@ -4414,9 +4436,12 @@ mod tests {
         assert_eq!(cell_type::name(cell_type::COVERAGE), "COVERAGE");
         assert_eq!(cell_type::name(cell_type::ENTRYPOINT), "ENTRYPOINT");
         assert_eq!(cell_type::name(cell_type::ACCESS_MODE), "ACCESS_MODE");
+        // D0.1 — the 0.5.2 allocation, locked at 37.
+        assert_eq!(edge_category::name(edge_category::SAME_AS), "SAME_AS");
+        assert_eq!(edge_category::SAME_AS.0, 37, "SAME_AS is locked at 37 (D0.1)");
         // Reserved, not emitted: the next free ids stay UNKNOWN.
         assert_eq!(node_kind::name(NodeKindId(50)), "UNKNOWN");
-        assert_eq!(edge_category::name(EdgeCategoryId(37)), "UNKNOWN");
+        assert_eq!(edge_category::name(EdgeCategoryId(38)), "UNKNOWN");
         assert_eq!(cell_type::name(CellTypeId(26)), "UNKNOWN");
     }
 

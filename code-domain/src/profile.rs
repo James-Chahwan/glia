@@ -259,6 +259,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
         (ec::RPC_CALLS, 3),
         (ec::NAVIGATES_TO, 2),
         // CO_CHANGES out: git history is a heuristic, never structure.
+        // SAME_AS out: identity reaches a walk only through the quotient (DD.1).
     ],
 };
 
@@ -357,6 +358,7 @@ mod tests {
                 "SHARES_DEPENDENCY",
                 "SHARES_DATA_SOURCE",
                 "CO_CHANGES",
+                "SAME_AS",
             ]
         );
         assert_eq!(CODE_TABLES.community_weights.len() + left_out.len(), ec::ALL.len());
