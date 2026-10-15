@@ -1,0 +1,63 @@
+{
+  "framework": "ts-receiver-inherited-calls",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "cells": [
+    "typescript/calls"
+  ],
+  "note": "DF.22b: a call on a typed receiver whose declared class defines no such method binds the nearest superclass method along INHERITS_FROM (CALLS, EVIDENCE graph:calls rule inherited_receiver): an injected field (`this.store.load()`), a parameter (`store.load()`), a `new` local (`fresh.save()`) and a constructed receiver (`new UserStore().load()`); the own method keeps binding as before (rule receiver_type). A bare name that is neither a local nor the constructor's parameter is not the field (A6.2a's gate): `repo.load()` in `stale` reads the module-level `repo`, so it binds nothing although the class has a field `repo: UserStore`. Baseline (HEAD 22c65ee, debug CLI): only UserStore::find -> BaseStore::load (CH.1b) binds.",
+  "expect_edges": [
+    {
+      "from": "UsersService/onRequested",
+      "to": "BaseStore/save",
+      "category": "CALLS",
+      "note": "this.store.save(): constructor-injected field typed UserStore, save on BaseStore"
+    },
+    {
+      "from": "UsersService/onRequested",
+      "to": "BaseStore/load",
+      "category": "CALLS",
+      "note": "this.store.load()"
+    },
+    {
+      "from": "UsersService/sync",
+      "to": "UserStore/find",
+      "category": "CALLS",
+      "note": "parameter typed UserStore, own method (DF.22a)"
+    },
+    {
+      "from": "UsersService/sync",
+      "to": "BaseStore/load",
+      "category": "CALLS",
+      "note": "parameter typed UserStore, inherited method"
+    },
+    {
+      "from": "UsersService/rebuild",
+      "to": "BaseStore/save",
+      "category": "CALLS",
+      "note": "local initialised by new UserStore()"
+    },
+    {
+      "from": "UsersService/rebuild",
+      "to": "BaseStore/load",
+      "category": "CALLS",
+      "note": "constructed receiver new UserStore().load()"
+    },
+    {
+      "from": "UserStore/find",
+      "to": "BaseStore/load",
+      "category": "CALLS",
+      "note": "this.load(): CH.1b control"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src/users.service/UsersService/stale",
+      "to": "src/base-store/BaseStore/load",
+      "category": "CALLS",
+      "note": "a bare `repo` outside the constructor is the module-level const, not the field"
+    }
+  ]
+}

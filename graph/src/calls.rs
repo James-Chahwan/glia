@@ -1457,28 +1457,42 @@ const MAX_INHERIT_LEVELS: usize = 16;
 
 /// What one TS-family graph build bound along INHERITS_FROM (CH.1b): the
 /// `this.m()` / `super.m()` sites [`resolve_inherited_calls`] bound, the
-/// sites left unresolved because two superclasses at one level both define
-/// the name, and the method-level IMPLEMENTS [`emit_abstract_implements`]
-/// drew.
+/// typed-receiver sites it bound (DF.22b: `this.store.m()`, `p.m()`,
+/// `new T().m()` whose declared class inherits `m`), the sites left
+/// unresolved because two superclasses at one level both define the name,
+/// and the method-level IMPLEMENTS [`emit_abstract_implements`] drew.
+///
+/// `receiver_bound` counts constructed receivers too. CL.5a's
+/// `[recv] constructed receivers: bound=B unbound=U` line still counts what
+/// `resolve_calls` bound, before this pass runs, so a constructed receiver
+/// bound here counts `unbound` there and `receiver=` here; only the
+/// non-constructed ones reach A6.2a's `[recv] receiver-typed calls bound`
+/// count ([`recv_stats::record`]), as in `resolve_via_receiver_type`.
 #[derive(Default)]
 pub(crate) struct InheritStats {
     self_bound: usize,
     super_bound: usize,
+    receiver_bound: usize,
     ambiguous: usize,
     implements: usize,
 }
 
 impl InheritStats {
-    /// CH.1b fired_on marker, `None` when nothing bound and nothing was
-    /// ambiguous: `[ts-inherit] calls bound through superclasses: <n>
-    /// (self=<s> super=<p> ambiguous=<a>) abstract implements=<m>`.
+    /// CH.1b / DF.22b fired_on marker, `None` when nothing bound and nothing
+    /// was ambiguous: `[ts-inherit] calls bound through superclasses: <n>
+    /// (self=<s> super=<p> receiver=<r> ambiguous=<a>) abstract
+    /// implements=<m>`, `<n>` = `<s> + <p> + <r>`.
     fn marker(&self) -> Option<String> {
-        let bound = self.self_bound + self.super_bound;
+        let bound = self.self_bound + self.super_bound + self.receiver_bound;
         (bound + self.ambiguous + self.implements > 0).then(|| {
             format!(
                 "[ts-inherit] calls bound through superclasses: {bound} (self={} super={} \
-                 ambiguous={}) abstract implements={}",
-                self.self_bound, self.super_bound, self.ambiguous, self.implements
+                 receiver={} ambiguous={}) abstract implements={}",
+                self.self_bound,
+                self.super_bound,
+                self.receiver_bound,
+                self.ambiguous,
+                self.implements
             )
         })
     }
@@ -1526,8 +1540,9 @@ enum Definer {
 /// The runtime's own lookup of `name` above `owner`, level by level along
 /// INHERITS_FROM, starting at `owner`'s direct superclasses: the first level
 /// at which any base's `class_methods` has `name` decides. `owner` is never a
-/// candidate (the own class already failed for a `this.m()`, and `super.m()`
-/// skips it by definition). `class_methods` holds METHOD children only
+/// candidate (the own class already failed for a `this.m()` and for a typed
+/// receiver, DF.22b, and `super.m()` skips it by definition). `class_methods`
+/// holds METHOD children only
 /// (`build_symbol_table`), so a field is never a target.
 fn nearest_definer(
     g: &RepoGraph,
@@ -1579,6 +1594,18 @@ fn nearest_definer(
 /// A `this.m()` whose own class DOES define `m` (left unresolved for another
 /// reason) is not an inherited call and stays as it is.
 ///
+/// DF.22b: a call on a typed receiver (`this.store.m()`, a parameter or
+/// local `p.m()`, `new T().m()`) whose declared class defines no `m` is the
+/// same lookup started at that class: a value typed `T` finds `m` on `T`'s
+/// prototype chain, so the nearest superclass of `T` defining `m` is the
+/// member the call names, EVIDENCE `graph:calls` / `inherited_receiver`.
+/// The receiver is typed exactly as `resolve_via_receiver_type` types it
+/// ([`receiver_class`]), behind the same A6.2a bare-field gate, and only a
+/// CLASS walks. A subclass of `T` overriding `m` is reached by dispatch
+/// (DF.22c), never by a second CALLS here. A receiver class with an own
+/// member `m` (a METHOD that did not bind for another reason, or a
+/// STATE_VAR, which shadows an inherited method) is no inherited call.
+///
 /// Runs after `resolve_refs` (the heritage edges must exist) and only in
 /// [`crate::build::build_typescript_family`]. Unbound sites go back to
 /// `unresolved_calls` in their original order, so the build stays
@@ -1586,36 +1613,37 @@ fn nearest_definer(
 pub(crate) fn resolve_inherited_calls(g: &mut RepoGraph, stats: &mut InheritStats) {
     let pending = std::mem::take(&mut g.unresolved_calls);
     let supers = superclasses(g);
+    // A6.2a's gate, fresh: its skipped tally is dropped, since
+    // `resolve_calls` already printed this build's `[recv] bare field
+    // receivers skipped` line.
+    let mut gate = BareFieldGate::default();
     let mut kept: Vec<CallSite> = Vec::with_capacity(pending.len());
     for site in pending {
-        let (name, is_super) = match &site.qualifier {
-            CallQualifier::SelfMethod(name) => (name.as_str(), false),
-            CallQualifier::SuperMethod(name) => (name.as_str(), true),
-            _ => {
-                kept.push(site);
-                continue;
+        let lookup = match &site.qualifier {
+            CallQualifier::SelfMethod(name) => self_lookup(g, &supers, &site, name, false),
+            CallQualifier::SuperMethod(name) => self_lookup(g, &supers, &site, name, true),
+            CallQualifier::Attribute { name, .. } | CallQualifier::ComplexReceiver { name, .. } => {
+                receiver_lookup(g, &supers, &site, name, &mut gate)
             }
+            _ => None,
         };
-        let Some(owner) = enclosing_class_or_struct(&g.nav, site.from)
-            .filter(|o| g.nav.kind_by_id.get(o) == Some(&node_kind::CLASS))
-        else {
+        let Some((walk, definer)) = lookup else {
             kept.push(site);
             continue;
         };
-        let own_defines =
-            g.symbols.class_methods.get(&owner).is_some_and(|m| m.contains_key(name));
-        if !is_super && own_defines {
-            kept.push(site);
-            continue;
-        }
-        match nearest_definer(g, &supers, owner, name) {
+        match definer {
             Definer::One(to) => {
-                let ev = graph_evidence("graph:calls", "inherited_method").line(site.line);
+                let ev = graph_evidence("graph:calls", walk.rule()).line(site.line);
                 push_edge(g, site.from, to, edge_category::CALLS, ev);
-                if is_super {
-                    stats.super_bound += 1;
-                } else {
-                    stats.self_bound += 1;
+                match walk {
+                    InheritWalk::SelfCall => stats.self_bound += 1,
+                    InheritWalk::SuperCall => stats.super_bound += 1,
+                    InheritWalk::Receiver { constructed } => {
+                        stats.receiver_bound += 1;
+                        if !constructed {
+                            recv_stats::record();
+                        }
+                    }
                 }
             }
             Definer::Ambiguous => {
@@ -1626,6 +1654,114 @@ pub(crate) fn resolve_inherited_calls(g: &mut RepoGraph, stats: &mut InheritStat
         }
     }
     g.unresolved_calls = kept;
+}
+
+/// Which of [`resolve_inherited_calls`]' lookups a site took.
+#[derive(Clone, Copy)]
+enum InheritWalk {
+    /// `this.m()`, from the caller's enclosing CLASS (CH.1b).
+    SelfCall,
+    /// `super.m()`, from the caller's enclosing CLASS (CH.1b).
+    SuperCall,
+    /// A typed receiver, from its declared CLASS (DF.22b); `constructed`
+    /// when the receiver is a constructor call (CL.5a).
+    Receiver { constructed: bool },
+}
+
+impl InheritWalk {
+    /// The EVIDENCE rule of the CALLS edge the lookup binds.
+    fn rule(self) -> &'static str {
+        match self {
+            InheritWalk::SelfCall | InheritWalk::SuperCall => "inherited_method",
+            InheritWalk::Receiver { .. } => "inherited_receiver",
+        }
+    }
+}
+
+/// CH.1b's lookup for a `this.m()` (`is_super` false) or `super.m()` site:
+/// the caller's enclosing CLASS, `None` (kept) when there is none or when a
+/// `this.m()`'s own class defines `m`.
+fn self_lookup(
+    g: &RepoGraph,
+    supers: &BTreeMap<u64, Vec<NodeId>>,
+    site: &CallSite,
+    name: &str,
+    is_super: bool,
+) -> Option<(InheritWalk, Definer)> {
+    let owner = enclosing_class_or_struct(&g.nav, site.from)
+        .filter(|o| g.nav.kind_by_id.get(o) == Some(&node_kind::CLASS))?;
+    let own_defines = g.symbols.class_methods.get(&owner).is_some_and(|m| m.contains_key(name));
+    if !is_super && own_defines {
+        return None;
+    }
+    let walk = if is_super { InheritWalk::SuperCall } else { InheritWalk::SelfCall };
+    Some((walk, nearest_definer(g, supers, owner, name)))
+}
+
+/// DF.22b's lookup for a typed-receiver site: the receiver's declared CLASS
+/// ([`receiver_class`]), `None` (kept) for an empty name, an untyped or
+/// gated receiver, or a class with an own member `name`
+/// ([`has_own_member`]).
+fn receiver_lookup(
+    g: &RepoGraph,
+    supers: &BTreeMap<u64, Vec<NodeId>>,
+    site: &CallSite,
+    name: &str,
+    gate: &mut BareFieldGate,
+) -> Option<(InheritWalk, Definer)> {
+    if name.is_empty() {
+        return None;
+    }
+    let (class, constructed) = receiver_class(g, site, gate)?;
+    if has_own_member(g, class, name) {
+        return None;
+    }
+    Some((InheritWalk::Receiver { constructed }, nearest_definer(g, supers, class, name)))
+}
+
+/// True when the CLASS `class` declares a member `name` itself: a METHOD
+/// (`class_methods`) or a STATE_VAR child (DF.17's [`state_member`] shape),
+/// either of which a lookup on an instance finds before the prototype chain.
+fn has_own_member(g: &RepoGraph, class: NodeId, name: &str) -> bool {
+    g.symbols.class_methods.get(&class).is_some_and(|m| m.contains_key(name))
+        || g.nav.children_of.get(&class).is_some_and(|children| {
+            children.iter().any(|c| {
+                g.nav.kind_by_id.get(c) == Some(&node_kind::STATE_VAR)
+                    && g.nav.name_by_id.get(c).map(String::as_str) == Some(name)
+            })
+        })
+}
+
+/// DF.22b: the declared CLASS of a call's receiver, typed as
+/// [`resolve_via_receiver_type`] types it, with its helpers, called not
+/// copied: a constructor-call receiver ([`constructed_type`], CL.5a) is the
+/// type it constructs ([`constructed_type_id`]) and never falls back to a
+/// variable; any other receiver is [`receiver_type`] (locals first, LA.35a /
+/// DF.22a, then the enclosing type's fields, A6.2a) resolved by
+/// [`resolve_type_name`]. An `Attribute` base that is no local of the caller
+/// goes through A6.2a's [`BareFieldGate`]: in TS / JS a bare name outside the
+/// constructor is a parameter, local or global, never the field. Only a
+/// CLASS answers (INHERITS_FROM between CLASS nodes is what
+/// [`superclasses`] walks). The bool is true for a constructed receiver.
+fn receiver_class(
+    g: &RepoGraph,
+    site: &CallSite,
+    gate: &mut BareFieldGate,
+) -> Option<(NodeId, bool)> {
+    let is_class = |id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::CLASS);
+    let from_module = enclosing_home_module(g, site.from)?;
+    if let Some(ty) = constructed_type(site) {
+        return constructed_type_id(g, from_module, ty).filter(is_class).map(|t| (t, true));
+    }
+    let type_name = receiver_type(g, site)?;
+    let type_id = resolve_type_name(g, from_module, type_name).filter(is_class)?;
+    if let CallQualifier::Attribute { base, .. } = &site.qualifier
+        && local_type(g, site.from, base).is_none()
+        && !gate.admits(g, site.from)
+    {
+        return None;
+    }
+    Some((type_id, false))
 }
 
 /// True when the TS parser recorded `id` as an `abstract` member declared
@@ -3481,8 +3617,8 @@ mod tests {
         assert_eq!(
             stats.marker().as_deref(),
             Some(
-                "[ts-inherit] calls bound through superclasses: 1 (self=1 super=0 ambiguous=0) \
-                 abstract implements=1"
+                "[ts-inherit] calls bound through superclasses: 1 (self=1 super=0 receiver=0 \
+                 ambiguous=0) abstract implements=1"
             )
         );
         let before = plain.edges.len();
@@ -3519,9 +3655,187 @@ mod tests {
         assert_eq!(
             stats.marker().as_deref(),
             Some(
-                "[ts-inherit] calls bound through superclasses: 0 (self=0 super=0 ambiguous=1) \
-                 abstract implements=0"
+                "[ts-inherit] calls bound through superclasses: 0 (self=0 super=0 receiver=0 \
+                 ambiguous=1) abstract implements=0"
             )
         );
+    }
+
+    // ---- DF.22b: typed-receiver inherited calls (TS family) -----------------
+
+    fn receiver_call(from: NodeId, receiver: &str, name: &str, line: u32) -> CallSite {
+        CallSite {
+            from,
+            qualifier: CallQualifier::ComplexReceiver {
+                receiver: receiver.to_string(),
+                name: name.to_string(),
+            },
+            line,
+        }
+    }
+
+    fn attr_call(from: NodeId, base: &str, name: &str, line: u32) -> CallSite {
+        CallSite { from, qualifier: attr(base, name), line }
+    }
+
+    /// The CALLS edges whose EVIDENCE is `graph:calls` / `rule`, in edge
+    /// order: `(from, to, line)`.
+    fn calls_with_rule(g: &RepoGraph, rule: &str) -> Vec<(NodeId, NodeId, Option<u32>)> {
+        with_evidence(g, edge_category::CALLS)
+            .into_iter()
+            .filter(|(_, _, em, r, _, _)| em == "graph:calls" && r.as_deref() == Some(rule))
+            .map(|(from, to, _, _, line, _)| (from, to, line))
+            .collect()
+    }
+
+    /// One module `src::h`: `A { load }` <- `B { find }`; `C { go }` with a
+    /// field `b: B`; a FUNCTION `f` with a local `p: B`. `go` calls
+    /// `this.b.load()` (4), `this.b.find()` (5), `this.b.nope()` (6); `f`
+    /// calls `p.load()` (8), `new B().load()` (9), `q.load()` (10).
+    /// Returns the parses and `[a_load, b_find, c_go, f]`.
+    fn receiver_files() -> (Vec<FileParse>, [NodeId; 4]) {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "src::h", None);
+        let ca = s.add(node_kind::CLASS, "src::h::A", Some(m));
+        let a_load = s.add(node_kind::METHOD, "src::h::A::load", Some(ca));
+        let cb = s.add(node_kind::CLASS, "src::h::B", Some(m));
+        let b_find = s.add(node_kind::METHOD, "src::h::B::find", Some(cb));
+        let cc = s.add(node_kind::CLASS, "src::h::C", Some(m));
+        let c_go = s.add(node_kind::METHOD, "src::h::C::go", Some(cc));
+        let f = s.add(node_kind::FUNCTION, "src::h::f", Some(m));
+        s.nav.record_field_type(cc, "b", "B");
+        s.nav.record_local_type(f, "p", "B");
+        let file = s.file(
+            vec![],
+            vec![
+                receiver_call(c_go, "this.b", "load", 4),
+                receiver_call(c_go, "this.b", "find", 5),
+                receiver_call(c_go, "this.b", "nope", 6),
+                attr_call(f, "p", "load", 8),
+                receiver_call(f, "new B()", "load", 9),
+                attr_call(f, "q", "load", 10),
+            ],
+            vec![heritage_ref(cb, m, "A", edge_category::INHERITS_FROM)],
+        );
+        (vec![file], [a_load, b_find, c_go, f])
+    }
+
+    /// DF.22b: a field (`this.b`), a local (`p`) and a constructed receiver
+    /// (`new B()`) typed `B` bind the `load` B inherits from A (rule
+    /// `inherited_receiver`, each at its own line); B's own `find` keeps
+    /// binding in `resolve_calls` (rule `receiver_type`); a method no class
+    /// in the chain defines and an untyped receiver stay unresolved, in
+    /// order. Two definers at one level above the receiver's class bind
+    /// nothing and count `ambiguous`.
+    #[test]
+    fn receiver_call_binds_through_superclasses() {
+        let (files, [a_load, b_find, c_go, f]) = receiver_files();
+        recv_stats::reset();
+        let g = crate::build::build_typescript_family(repo(), files, rel).unwrap();
+        assert_eq!(
+            calls_with_rule(&g, "inherited_receiver"),
+            vec![(c_go, a_load, Some(4)), (f, a_load, Some(8)), (f, a_load, Some(9))]
+        );
+        assert_eq!(calls_with_rule(&g, "receiver_type"), vec![(c_go, b_find, Some(5))]);
+        assert!(inherited_calls(&g).is_empty(), "no this.m() / super.m() site here");
+        assert_eq!(
+            g.unresolved_calls,
+            vec![receiver_call(c_go, "this.b", "nope", 6), attr_call(f, "q", "load", 10)],
+            "unbound sites keep their order"
+        );
+        assert_eq!(
+            recv_stats::take(),
+            3,
+            "this.b.find() and the two non-constructed inherited binds; new B().load() is CL.5a's"
+        );
+
+        let (files, _) = receiver_files();
+        let mut plain = build_typescript(repo(), files, rel).unwrap();
+        let mut stats = InheritStats::default();
+        resolve_inherited_calls(&mut plain, &mut stats);
+        emit_abstract_implements(&mut plain, &mut stats);
+        assert_eq!(sorted_edges(&plain), sorted_edges(&g));
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some(
+                "[ts-inherit] calls bound through superclasses: 3 (self=0 super=0 receiver=3 \
+                 ambiguous=0) abstract implements=0"
+            )
+        );
+
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "src::x", None);
+        let p = s.add(node_kind::CLASS, "src::x::P", Some(m));
+        s.add(node_kind::METHOD, "src::x::P::m", Some(p));
+        let q = s.add(node_kind::CLASS, "src::x::Q", Some(m));
+        s.add(node_kind::METHOD, "src::x::Q::m", Some(q));
+        let k = s.add(node_kind::CLASS, "src::x::K", Some(m));
+        let u = s.add(node_kind::CLASS, "src::x::U", Some(m));
+        let u_run = s.add(node_kind::METHOD, "src::x::U::run", Some(u));
+        s.nav.record_field_type(u, "k", "K");
+        let file = s.file(
+            vec![],
+            vec![receiver_call(u_run, "this.k", "m", 2)],
+            vec![
+                heritage_ref(k, m, "P", edge_category::INHERITS_FROM),
+                heritage_ref(k, m, "Q", edge_category::INHERITS_FROM),
+            ],
+        );
+        let mut plain = build_typescript(repo(), vec![file], rel).unwrap();
+        let mut stats = InheritStats::default();
+        resolve_inherited_calls(&mut plain, &mut stats);
+        assert!(calls_with_rule(&plain, "inherited_receiver").is_empty());
+        assert_eq!(plain.unresolved_calls, vec![receiver_call(u_run, "this.k", "m", 2)]);
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some(
+                "[ts-inherit] calls bound through superclasses: 0 (self=0 super=0 receiver=0 \
+                 ambiguous=1) abstract implements=0"
+            )
+        );
+    }
+
+    /// DF.22b is the TS family's only: `build_typescript` (Dart / Solidity /
+    /// Terraform through lang_build's `_` arm) leaves the three inherited
+    /// receiver sites unresolved, in order, and draws no
+    /// `inherited_receiver` edge; B's own `find` binds as before.
+    #[test]
+    fn receiver_walk_is_ts_family_only() {
+        let (files, [_, b_find, c_go, f]) = receiver_files();
+        let plain = build_typescript(repo(), files, rel).unwrap();
+        assert!(calls_with_rule(&plain, "inherited_receiver").is_empty());
+        assert_eq!(calls_with_rule(&plain, "receiver_type"), vec![(c_go, b_find, Some(5))]);
+        assert_eq!(
+            plain.unresolved_calls,
+            vec![
+                receiver_call(c_go, "this.b", "load", 4),
+                receiver_call(c_go, "this.b", "nope", 6),
+                attr_call(f, "p", "load", 8),
+                receiver_call(f, "new B()", "load", 9),
+                attr_call(f, "q", "load", 10),
+            ]
+        );
+    }
+
+    /// An own member stops the walk: a STATE_VAR `load` on the receiver's
+    /// class shadows the `load` its superclass defines, so a constructed
+    /// `new B().load()` (whose CL.5a arm reads methods only) binds nothing.
+    #[test]
+    fn own_state_var_shadows_inherited_method() {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "src::h", None);
+        let ca = s.add(node_kind::CLASS, "src::h::A", Some(m));
+        s.add(node_kind::METHOD, "src::h::A::load", Some(ca));
+        let cb = s.add(node_kind::CLASS, "src::h::B", Some(m));
+        s.add(node_kind::STATE_VAR, "src::h::B::load", Some(cb));
+        let f = s.add(node_kind::FUNCTION, "src::h::f", Some(m));
+        let file = s.file(
+            vec![],
+            vec![receiver_call(f, "new B()", "load", 3)],
+            vec![heritage_ref(cb, m, "A", edge_category::INHERITS_FROM)],
+        );
+        let g = crate::build::build_typescript_family(repo(), vec![file], rel).unwrap();
+        assert!(calls_with_rule(&g, "inherited_receiver").is_empty());
+        assert_eq!(g.unresolved_calls, vec![receiver_call(f, "new B()", "load", 3)]);
     }
 }

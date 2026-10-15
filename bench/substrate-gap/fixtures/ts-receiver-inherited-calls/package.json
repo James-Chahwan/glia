@@ -1,0 +1,1 @@
+{"name": "receiver-inherited-calls", "version": "1.0.0", "dependencies": {"@nestjs/common": "^10.0.0"}}
