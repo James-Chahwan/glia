@@ -6,12 +6,14 @@
 //! The fixture is one root holding an Angular client (`web/`) and an Express
 //! API (`api/`). `list()` and `count()` pair through the HTTP resolver, so
 //! (ENDPOINT, HTTP_CALLS, ROUTE) is seen twice; `markAllRead()` posts to
-//! `${environment.apiUrl}/notifications/read-all` through a class-field base,
-//! which the resolver cannot pair: the orphan `endpoint:POST:${…}/read-all @web`.
-//! The read-all routes sit behind a `/:tenant` path parameter: a parameter is
-//! never a mount, so the resolver's mount-segment fold (CB.23), which pairs
-//! `/{}/read-all` with the one route ending `/<literal mounts>/read-all`,
-//! leaves the orphan to this heuristic.
+//! `${environment.apiUrl}/notifications/read-all` through a class-field base.
+//! The endpoint fold resolves that base (DF.20: the readonly field's template
+//! is substituted for `${this.base}`), so the orphan is
+//! `endpoint:POST:/api/notifications/read-all @web`; it was
+//! `endpoint:POST:${…}/read-all @web` before. The read-all routes sit behind a
+//! `/:tenant` path parameter where the endpoint has the literal `/api`: the
+//! HTTP resolver leaves the pair alone, and a parameter is never a mount for
+//! its mount-segment fold (CB.23), so the orphan is left to this heuristic.
 
 use std::path::Path;
 
@@ -83,7 +85,7 @@ export default router;
 ";
 const API_PACKAGE: &str = "{\"name\":\"api\",\"dependencies\":{\"express\":\"4.18.0\"}}\n";
 
-const ORPHAN: &str = "endpoint:POST:${…}/read-all @web";
+const ORPHAN: &str = "endpoint:POST:/api/notifications/read-all @web";
 const TARGET: &str = "POST /:tenant/notifications/read-all @api";
 const WRONG_METHOD: &str = "GET /:tenant/notifications/read-all @api";
 
@@ -122,8 +124,8 @@ fn rows<'a>(rep: &'a GapsReport, category: &str) -> Vec<&'a GapRow> {
     rep.rows.iter().filter(|r| r.category == category).collect()
 }
 
-/// The shape this packet exists for is still minted at HEAD: the class-field
-/// `${…}` base leaves one unpaired endpoint, and both read-all routes unpaired.
+/// The shape this packet exists for is still minted: the class-field base
+/// leaves one unpaired endpoint, and both read-all routes unpaired.
 fn assert_the_orphan_is_there(rep: &GapsReport) {
     let unpaired: Vec<&str> = rows(rep, UNPAIRED_ENDPOINT)
         .iter()

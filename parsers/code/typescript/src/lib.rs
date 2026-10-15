@@ -154,6 +154,14 @@ fn parse_file_stats(
             ea.wrapper, ea.local, ea.field, ea.method, ea.unresolved
         );
     }
+    // DF.20: call-site templates whose base was a config-expression class
+    // member (`${this.api}` -> `${environment.apiUrl}`), per file.
+    if ea.aliases > 0 {
+        eprintln!(
+            "[ts-endpoints] member aliases={} file={file_rel_path}",
+            ea.aliases
+        );
+    }
 
     resolve_intra_file(acc).map(|parse| (parse, ff, ab, sf, gate, ea))
 }
@@ -170,6 +178,7 @@ fn endpoint_arg_stats(acc: &Acc) -> EndpointArgStats {
             .is_none_or(|a| aliases.contains(a))
     });
     for cand in emitted {
+        stats.aliases += usize::from(cand.alias.is_some());
         if cand.path == UNRESOLVED_PATH {
             stats.unresolved += 1;
             continue;
@@ -423,6 +432,10 @@ struct EndpointCandidate {
     /// CH.3a: which arm of `classify_at` read the argument (the
     /// `[ts-endpoint-args]` counters).
     read: ArgRead,
+    /// DF.20: the class members (`this.api`) whose config-expression value
+    /// [`classify_template`] substituted into `template`, comma-joined in
+    /// template order. Serialised as `"alias"` on ENDPOINT_HIT, last.
+    alias: Option<String>,
 }
 
 /// The path text of an HTTP call whose URL argument could not be read.
@@ -459,6 +472,8 @@ struct PathArg {
     wrapper_recv: Option<String>,
     /// CH.3a: see `EndpointCandidate::read`.
     read: ArgRead,
+    /// DF.20: see `EndpointCandidate::alias`.
+    alias: Option<String>,
 }
 
 impl PathArg {
@@ -472,6 +487,7 @@ impl PathArg {
             wrapper: None,
             wrapper_recv: None,
             read: ArgRead::Direct,
+            alias: None,
         }
     }
 
@@ -502,6 +518,10 @@ struct EndpointArgStats {
     method: usize,
     /// Still `<unresolved>`.
     unresolved: usize,
+    /// DF.20: call sites whose template read a config-expression class
+    /// member (the `[ts-endpoints] member aliases=` count); orthogonal to the
+    /// arms above.
+    aliases: usize,
 }
 
 impl EndpointArgStats {
@@ -2600,6 +2620,7 @@ fn push_endpoint(
         wrapper,
         wrapper_recv,
         read,
+        alias,
     } = arg;
     // A3.3: the single funnel for every client-call shape, so host + query
     // stripping happens once. A normaliser, never a filter: interpolated bases
@@ -2627,6 +2648,7 @@ fn push_endpoint(
         wrapper_recv,
         class,
         read,
+        alias,
     });
 }
 
@@ -2660,7 +2682,7 @@ fn classify_at(arg: TsNode, src: &[u8], indirect_ok: bool) -> PathArg {
             let raw = text(arg, src);
             PathArg::plain(strip_string_quotes(raw), Confidence::Strong)
         }
-        "template_string" => classify_template(arg, src),
+        "template_string" => classify_template(arg, src, indirect_ok),
         "call_expression" => {
             if let Some(read) = builder_literal(arg, src) {
                 return read;
@@ -2729,7 +2751,9 @@ fn builder_literal(call: TsNode, src: &[u8]) -> Option<PathArg> {
     let mut read = if literal.kind() == "string" {
         PathArg::plain(strip_string_quotes(text(literal, src)), Confidence::Weak)
     } else {
-        let read = classify_template(literal, src);
+        // DF.20: a builder's argument substitutes no member: the builder's
+        // own transform decides the URL (CH.5b's prefix fold).
+        let read = classify_template(literal, src, false);
         if !read.static_text_has_slash() {
             return Some(PathArg::unresolved());
         }
@@ -3165,17 +3189,36 @@ fn binds_name(pattern: TsNode, name: &str, src: &[u8]) -> bool {
 /// text (`${environment.apiUrl}`). Replacing every `${expr}` in `template`
 /// with `${…}` therefore gives back `path` exactly, which is what lets the
 /// engine's endpoint fold leave an unresolvable endpoint bit-identical.
-fn classify_template(template: TsNode, src: &[u8]) -> PathArg {
+///
+/// DF.20: when `aliases_ok` (a direct read: CH.3a's depth one), a
+/// substitution `${this.<m>}` whose member [`class_member_value`] reads as a
+/// config expression ([`config_expr_text`]) holding at least one path is
+/// written into `template` as that expression's normal form instead
+/// (`${this.api}/trades` -> `${environment.apiUrl}/trades`), and `alias`
+/// names the member. `path` keeps `${…}`, so the identity above holds for
+/// every template but such a one: the endpoint fold keys the node once the
+/// table resolves the expression, and an expression no span of which
+/// resolves folds to nothing, leaving the node as it was. A member that is no
+/// config expression (or a literal, which the table's own binding of the
+/// member folds, as on HEAD) keeps `${this.<m>}`.
+fn classify_template(template: TsNode, src: &[u8], aliases_ok: bool) -> PathArg {
     let mut out = String::new();
     let mut source = String::new();
     let mut has_subst = false;
+    let mut aliases: Vec<String> = Vec::new();
     let mut cursor = template.walk();
     for child in template.named_children(&mut cursor) {
         match child.kind() {
             "template_substitution" => {
                 has_subst = true;
                 out.push_str("${…}");
-                source.push_str(text(child, src));
+                match aliases_ok.then(|| member_alias(child, src)).flatten() {
+                    Some((alias, normal)) => {
+                        source.push_str(&normal);
+                        aliases.push(alias);
+                    }
+                    None => source.push_str(text(child, src)),
+                }
             }
             "string_fragment" => {
                 out.push_str(text(child, src));
@@ -3195,7 +3238,216 @@ fn classify_template(template: TsNode, src: &[u8]) -> PathArg {
         wrapper: None,
         wrapper_recv: None,
         read: ArgRead::Direct,
+        alias: (!aliases.is_empty()).then(|| aliases.join(",")),
     }
+}
+
+/// DF.20: for a `template_substitution` that is exactly `this.<m>`, the
+/// alias `this.<m>` and the normal form of the config expression its
+/// own-class `readonly` field or one-`return` getter holds
+/// ([`class_member_value`], CH.3a's rules: no inherited, reassignable or
+/// other-`this` member), when that form reads at least one path.
+fn member_alias(subst: TsNode, src: &[u8]) -> Option<(String, String)> {
+    let mut cursor = subst.walk();
+    let mut named = subst
+        .named_children(&mut cursor)
+        .filter(|c| c.kind() != "comment");
+    let member = named.next()?;
+    if named.next().is_some()
+        || member.kind() != "member_expression"
+        || member.child_by_field_name("object")?.kind() != "this"
+    {
+        return None;
+    }
+    let property = member.child_by_field_name("property")?;
+    if property.kind() != "property_identifier" {
+        return None;
+    }
+    let normal = config_expr_text(class_member_value(member, src)?, src)?;
+    normal
+        .contains("${")
+        .then(|| (format!("this.{}", text(property, src)), normal))
+}
+
+/// DF.20: the template normal form of a CONFIG EXPRESSION, the grammar
+/// `glia_code_extractors::constants` reads off one text line for a `const`:
+/// (a) a member path of identifiers not rooted at `this` / `super` and
+/// reading no `env` / `environ` owner (`environment.apiUrl`) -> `${path}`;
+/// (b) a string literal -> its text; (c) a template whose substitutions are
+/// all (a) or (e) -> its text, each substitution `${path}`; (d) `x + y` of
+/// (a)-(e) -> the concatenation; (e) `<path>.replace('<a>', '<b>')` with two
+/// plain string literals -> `${path.replace('a', 'b')}`; a parenthesised one
+/// is itself. Anything else (a call, `this.x`, `process.env.X || ..`, a
+/// ternary, an escape) is None: no evaluator, no value data-flow.
+fn config_expr_text(expr: TsNode, src: &[u8]) -> Option<String> {
+    match expr.kind() {
+        "member_expression" => config_path(expr, src).map(|p| format!("${{{p}}}")),
+        "string" => {
+            let mut cursor = expr.walk();
+            if expr
+                .named_children(&mut cursor)
+                .any(|c| c.kind() != "string_fragment")
+            {
+                return None;
+            }
+            let body = strip_string_quotes(text(expr, src));
+            literal_piece_ok(&body).then_some(body)
+        }
+        "template_string" => {
+            let mut out = String::new();
+            let mut cursor = expr.walk();
+            for child in expr.named_children(&mut cursor) {
+                match child.kind() {
+                    "string_fragment" => {
+                        let piece = text(child, src);
+                        if !literal_piece_ok(piece) {
+                            return None;
+                        }
+                        out.push_str(piece);
+                    }
+                    "template_substitution" => {
+                        let mut inner = child.walk();
+                        let mut named = child
+                            .named_children(&mut inner)
+                            .filter(|c| c.kind() != "comment");
+                        let only = named.next()?;
+                        if named.next().is_some() {
+                            return None;
+                        }
+                        out.push_str(&path_or_replace(only, src)?);
+                    }
+                    _ => return None,
+                }
+            }
+            Some(out)
+        }
+        "binary_expression" => {
+            let op = expr.child_by_field_name("operator")?;
+            if text(op, src) != "+" {
+                return None;
+            }
+            let left = config_expr_text(expr.child_by_field_name("left")?, src)?;
+            let right = config_expr_text(expr.child_by_field_name("right")?, src)?;
+            Some(left + &right)
+        }
+        "parenthesized_expression" => config_expr_text(sole_named(expr)?, src),
+        "call_expression" => replace_text(expr, src),
+        _ => None,
+    }
+}
+
+/// DF.20: a member path (a) as `${path}`, or a `.replace` call (e) as its
+/// span: what a config template's substitution may be.
+fn path_or_replace(expr: TsNode, src: &[u8]) -> Option<String> {
+    match expr.kind() {
+        "member_expression" => config_path(expr, src).map(|p| format!("${{{p}}}")),
+        "call_expression" => replace_text(expr, src),
+        _ => None,
+    }
+}
+
+/// DF.20 (e): `<path>.replace('<a>', '<b>')` (the path optionally
+/// parenthesised) with exactly two plain string literals, as
+/// `${path.replace('a', 'b')}`.
+fn replace_text(call: TsNode, src: &[u8]) -> Option<String> {
+    let callee = call.child_by_field_name("function")?;
+    if callee.kind() != "member_expression"
+        || callee
+            .child_by_field_name("property")
+            .is_none_or(|p| text(p, src) != "replace")
+    {
+        return None;
+    }
+    let mut object = callee.child_by_field_name("object")?;
+    while object.kind() == "parenthesized_expression" {
+        object = sole_named(object)?;
+    }
+    if object.kind() != "member_expression" {
+        return None;
+    }
+    let path = config_path(object, src)?;
+    let args = call
+        .child_by_field_name("arguments")
+        .filter(|a| a.kind() == "arguments")?;
+    let mut cursor = args.walk();
+    let lits: Vec<TsNode> = args
+        .named_children(&mut cursor)
+        .filter(|c| c.kind() != "comment")
+        .collect();
+    let [from, to] = lits.as_slice() else {
+        return None;
+    };
+    let from = replace_arg(*from, src)?;
+    let to = replace_arg(*to, src)?;
+    Some(format!("${{{path}.replace('{from}', '{to}')}}"))
+}
+
+/// DF.20: a `.replace` argument: a plain string literal (no escape) whose
+/// text the normal form carries in single quotes and the fold evaluates
+/// exactly: no quote, backslash, brace, `$` (a JS replacement pattern) or
+/// line break.
+fn replace_arg(lit: TsNode, src: &[u8]) -> Option<String> {
+    if lit.kind() != "string" {
+        return None;
+    }
+    let mut cursor = lit.walk();
+    if lit
+        .named_children(&mut cursor)
+        .any(|c| c.kind() != "string_fragment")
+    {
+        return None;
+    }
+    let body = strip_string_quotes(text(lit, src));
+    (!body.contains(['\'', '"', '`', '\\', '{', '}', '$', '\n', '\r'])).then_some(body)
+}
+
+/// DF.20: literal text a normal form may carry: nothing that opens a span or
+/// hides an escape.
+fn literal_piece_ok(piece: &str) -> bool {
+    !piece.contains(['$', '`', '\\', '\n', '\r'])
+}
+
+/// DF.20 (a): `environment.apiUrl` (or `env?.api.base`) as a `.`-joined
+/// path: identifiers and property identifiers only, rooted at an
+/// `identifier` (not `this` / `super`), no owner named `env` / `environ`.
+fn config_path(member: TsNode, src: &[u8]) -> Option<String> {
+    let mut segs: Vec<&str> = Vec::new();
+    let mut cur = member;
+    loop {
+        match cur.kind() {
+            "member_expression" => {
+                let prop = cur.child_by_field_name("property")?;
+                if prop.kind() != "property_identifier" {
+                    return None;
+                }
+                segs.push(text(prop, src));
+                cur = cur.child_by_field_name("object")?;
+            }
+            "identifier" => {
+                segs.push(text(cur, src));
+                break;
+            }
+            _ => return None,
+        }
+    }
+    segs.reverse();
+    let ident = |s: &str| {
+        s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    let (_, owners) = segs.split_last()?;
+    let env = owners
+        .iter()
+        .any(|o| o.eq_ignore_ascii_case("env") || o.eq_ignore_ascii_case("environ"));
+    (segs.len() >= 2 && !env && segs.iter().all(|s| ident(s))).then(|| segs.join("."))
+}
+
+/// The one named non-comment child of `n`.
+fn sole_named(n: TsNode) -> Option<TsNode> {
+    let mut cursor = n.walk();
+    let mut named = n.named_children(&mut cursor).filter(|c| c.kind() != "comment");
+    let only = named.next()?;
+    named.next().is_none().then_some(only)
 }
 
 fn find_first_string_literal(n: TsNode, src: &[u8]) -> Option<String> {
@@ -3274,6 +3526,9 @@ fn downgrade(c: Confidence) -> Confidence {
 /// type of the field a builder was reached through (`this.<f>.<m>(…)`), when
 /// the enclosing class records one (a constructor parameter property, an
 /// annotated field or an `inject(T)` field).
+///
+/// `alias` (DF.20) is written last, skipped the same way: only a template
+/// that read a config-expression class member (`this.api`) names it.
 fn endpoint_hit_cell(cand: &EndpointCandidate, wrapper_of: Option<&str>) -> Cell {
     #[derive(serde::Serialize)]
     struct Payload<'a> {
@@ -3291,6 +3546,8 @@ fn endpoint_hit_cell(cand: &EndpointCandidate, wrapper_of: Option<&str>) -> Cell
         wrapper: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         wrapper_of: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alias: Option<&'a str>,
     }
     let conf_str = match cand.confidence {
         Confidence::Strong => "strong",
@@ -3308,6 +3565,7 @@ fn endpoint_hit_cell(cand: &EndpointCandidate, wrapper_of: Option<&str>) -> Cell
         template: cand.template.as_deref(),
         wrapper: cand.wrapper.as_deref(),
         wrapper_of,
+        alias: cand.alias.as_deref(),
     })
     .unwrap_or_else(|_| String::from("{}"));
     Cell {
@@ -5231,6 +5489,154 @@ export class S {
         ));
     }
 
+    /// DF.20: the one ENDPOINT_HIT of the single ENDPOINT with `path`.
+    fn sole_hit(parse: &FileParse, method: &str, path: &str) -> serde_json::Value {
+        let p = endpoint_payloads(parse, endpoint_id(repo(), method, path));
+        assert_eq!(p.len(), 1, "{path}: {p:?}");
+        p[0].clone()
+    }
+
+    /// DF.20: `${this.api}` whose one-`return` getter returns a config path
+    /// is written into the template as that path; the ENDPOINT keeps its
+    /// `${…}` path until the engine's fold, and `alias` names the member,
+    /// last.
+    #[test]
+    fn this_member_getter_substitutes() {
+        let src = "\
+export class TradeService {
+    constructor(private http: any) {}
+    private get api() { return environment.apiUrl; }
+    list() { return this.http.get(`${this.api}/trades`); }
+    one(id: string) { return this.http.get(`${this.api}/trades/${id}`); }
+}
+";
+        let (parse, .., stats) =
+            parse_file_stats(src, "src/trade.service.ts", "src::trade", repo()).unwrap();
+        assert!(method_calls(&parse, "src::trade", "TradeService::list", "GET", "${…}/trades"));
+        let hit = sole_hit(&parse, "GET", "${…}/trades");
+        assert_eq!(hit["template"], "${environment.apiUrl}/trades");
+        assert_eq!(hit["alias"], "this.api");
+        assert_eq!(hit["confidence"], "medium");
+        let raw: Vec<&str> = parse
+            .nodes
+            .iter()
+            .filter(|n| n.id == endpoint_id(repo(), "GET", "${…}/trades"))
+            .flat_map(|n| n.cells.iter())
+            .filter_map(|c| match &c.payload {
+                CellPayload::Json(s) if c.kind == cell_type::ENDPOINT_HIT => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            raw.len() == 1 && raw[0].ends_with(r#","alias":"this.api"}"#),
+            "alias is last: {raw:?}"
+        );
+        // A later path parameter stays as written.
+        let hit = sole_hit(&parse, "GET", "${…}/trades/${…}");
+        assert_eq!(hit["template"], "${environment.apiUrl}/trades/${id}");
+        assert_eq!(stats.aliases, 2, "two call sites read a member alias");
+    }
+
+    /// DF.20: a `readonly` field holding a template of config paths
+    /// substitutes its text, nested `${…}` and all.
+    #[test]
+    fn readonly_template_field_substitutes() {
+        let src = "\
+export class NotificationsService {
+    private readonly base = `${environment.apiUrl}/notifications`;
+    constructor(private http: any) {}
+    unread() { return this.http.get(`${this.base}/unread`); }
+}
+";
+        let parse = parse_file(src, "src/n.ts", "src::n", repo()).unwrap();
+        let hit = sole_hit(&parse, "GET", "${…}/unread");
+        assert_eq!(hit["template"], "${environment.apiUrl}/notifications/unread");
+        assert_eq!(hit["alias"], "this.base");
+    }
+
+    /// DF.20: `environment.apiUrl.replace('/api', '') + '/admin'` (a field or
+    /// a getter) becomes `${environment.apiUrl.replace('/api', '')}/admin`,
+    /// whatever the source's quotes and parentheses.
+    #[test]
+    fn replace_expression_substitutes() {
+        let src = "\
+export class AdminService {
+    private readonly base = environment.apiUrl.replace('/api', '') + '/admin';
+    private get adminBase() { return (environment.apiUrl).replace(\"/api\", '') + `/admin`; }
+    constructor(private http: any) {}
+    stats() { return this.http.get(`${this.base}/stats`); }
+    users() { return this.http.get(`${this.adminBase}/users`); }
+}
+";
+        let parse = parse_file(src, "src/admin.ts", "src::admin", repo()).unwrap();
+        let hit = sole_hit(&parse, "GET", "${…}/stats");
+        assert_eq!(
+            hit["template"],
+            "${environment.apiUrl.replace('/api', '')}/admin/stats"
+        );
+        assert_eq!(hit["alias"], "this.base");
+        let hit = sole_hit(&parse, "GET", "${…}/users");
+        assert_eq!(
+            hit["template"],
+            "${environment.apiUrl.replace('/api', '')}/admin/users"
+        );
+        assert_eq!(hit["alias"], "this.adminBase");
+    }
+
+    /// DF.20: a member that is no config expression keeps `${this.<m>}` and
+    /// names no alias: a call, `this.x`, a non-readonly field, an env
+    /// fallback, a ternary, a literal, a `.replace` with a non-literal or a
+    /// `$` pattern, a read inside a `function` callback, and a URL builder's
+    /// argument.
+    #[test]
+    fn non_config_member_unchanged() {
+        let src = "\
+export class S {
+    private base = environment.apiUrl;
+    private readonly cfgBase = this.cfg.get('x');
+    private readonly selfBase = this.root + '/x';
+    private readonly envBase = process.env.API_URL || 'http://localhost';
+    private readonly tern = environment.production ? '/p' : '/d';
+    private readonly lit = '/api/lit';
+    private readonly rep = environment.apiUrl.replace(/api/, '');
+    private readonly dollar = environment.apiUrl.replace('/api', '$&');
+    private readonly env2 = process.env.API + '/x';
+    private readonly ok = environment.apiUrl;
+    constructor(private http: any, private cfg: any, private urls: any) {}
+    a() { return this.http.get(`${this.base}/a`); }
+    b() { return this.http.get(`${this.cfgBase}/b`); }
+    c() { return this.http.get(`${this.selfBase}/c`); }
+    d() { return this.http.get(`${this.envBase}/d`); }
+    e() { return this.http.get(`${this.tern}/e`); }
+    f() { return this.http.get(`${this.lit}/f`); }
+    g() { return this.http.get(`${this.rep}/g`); }
+    h() { return this.http.get(`${this.dollar}/h`); }
+    i() { return this.http.get(`${this.env2}/i`); }
+    j(xs: any[]) { xs.forEach(function () { this.http.get(`${this.ok}/j`); }); }
+    k() { return this.http.get(this.urls.buildApiUrl(`${this.ok}/k`)); }
+}
+";
+        let (parse, .., stats) = parse_file_stats(src, "src/s.ts", "src::s", repo()).unwrap();
+        for (m, member) in [
+            ("a", "base"),
+            ("b", "cfgBase"),
+            ("c", "selfBase"),
+            ("d", "envBase"),
+            ("e", "tern"),
+            ("f", "lit"),
+            ("g", "rep"),
+            ("h", "dollar"),
+            ("i", "env2"),
+            ("j", "ok"),
+            ("k", "ok"),
+        ] {
+            let hit = sole_hit(&parse, "GET", &format!("${{…}}/{m}"));
+            assert_eq!(hit["template"], format!("${{this.{member}}}/{m}"), "{m}");
+            assert!(hit.get("alias").is_none(), "{m}: {hit}");
+        }
+        assert_eq!(stats.aliases, 0);
+    }
+
     /// CH.3a (f): a single-argument non-URL call around a template (no `/`
     /// in its static text) is no URL: `<unresolved>`, no wrapper.
     #[test]
@@ -5279,7 +5685,8 @@ export class FriendService {
                 local: 0,
                 field: 0,
                 method: 1,
-                unresolved: 1
+                unresolved: 1,
+                aliases: 0
             }
         );
         let geo = "\
@@ -5305,7 +5712,8 @@ export class GeoService {
                 local: 1,
                 field: 1,
                 method: 0,
-                unresolved: 2
+                unresolved: 2,
+                aliases: 0
             }
         );
         // A shape-2 call whose base is no import alias emits nothing: not counted.

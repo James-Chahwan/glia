@@ -1,0 +1,56 @@
+{
+  "framework": "ts-config-alias-endpoints",
+  "language": "typescript",
+  "dirs": [
+    "web",
+    "server"
+  ],
+  "note": "DF (0.5.1 follow-up, Kina's `${this.api}`): an endpoint base held in a class member assigned from config - a one-return getter `get apiUrl() { return environment.apiUrl; }`, a readonly field `base = `${environment.apiUrl}/notifications``, or `environment.apiUrl.replace('/api', '') + '/admin'` - reaches the URL as `${this.apiUrl}`, which the TS parser keeps as an opaque `${…}` and the endpoint fold cannot look up (the const table has no `this.<member>` key). HEAD (84e2e71, leap wheel): ENDPOINTs `endpoint:GET:${…}/trades`, `${…}/unread`, `${…}/users`, `${…}/stats`, paired only through the HTTP resolver's base (suffix) tier, and `${…}/stats` pairs the PUBLIC `GET /stats`, not `GET /admin/stats` (a wrong-service pair). A module-level `export const ADMIN_BASE = environment.apiUrl.replace('/api', '') + '/admin'` is no const-table binding either (constants.rs binds literal values only). Kina a448fb3: 89 of 150 ENDPOINT_HIT sites keep a `${…}` base - this.adminBase 29, this.base 27, ADMIN_BASE 16, this.api 13, and 4 `process.env.X || lit` BACKEND sites in two demo scripts; [endpoint-fold] folded 57; [http] paired=93 (exact=48 base=45). The 42 `${this.apiUrl}` sites already fold, only because the const table's last-segment fallback reads `this.apiUrl` as environment.apiUrl's `apiUrl`.",
+  "expect_nodes": [
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:/api/trades"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:/api/notifications/unread"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:/admin/stats"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:/admin/users"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "endpoint:GET:/api/trades",
+      "to": "GET /api/trades",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:GET:/admin/users",
+      "to": "GET /admin/users",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:GET:/admin/stats",
+      "to": "GET /admin/stats",
+      "category": "HTTP_CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "endpoint:GET:/admin/stats",
+      "to": "GET /stats",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:${…}/trades",
+      "max_nodes": 0
+    }
+  ]
+}

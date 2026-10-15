@@ -257,9 +257,10 @@ fn overlay_delta_keeps_a_data_wrapper_that_pairs_no_orphan() {
 /// fresh temp root: an Angular client (`web/`) whose `list()` / `count()`
 /// pair through the HTTP resolver, so (ENDPOINT, HTTP_CALLS, ROUTE) is
 /// learned, and whose `markAllRead()` posts through a class-field
-/// `${environment.apiUrl}` base the resolver cannot pair; an Express API
-/// (`api/`) serving all three, the read-all routes behind a `/:tenant` path
-/// parameter the mount-segment fold (CB.23) never strips.
+/// `${environment.apiUrl}` base (folded since DF.20 to
+/// `endpoint:POST:/api/notifications/read-all`) the resolver cannot pair; an
+/// Express API (`api/`) serving all three, the read-all routes behind a
+/// `/:tenant` path parameter the mount-segment fold (CB.23) never strips.
 fn suspected(tag: &str) -> PathBuf {
     const SERVICE_TS: &str = "import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
@@ -384,7 +385,7 @@ fn suspected_edge_prints_stanza() {
     assert_eq!(block.lines().nth(1), Some("[[edge]]"), "{block}");
     for line in [
         "category = \"HTTP_CALLS\"",
-        "from = \"endpoint:POST:${…}/read-all @web\"",
+        "from = \"endpoint:POST:/api/notifications/read-all @web\"",
         "to = \"POST /:tenant/notifications/read-all @api\"",
     ] {
         assert!(block.lines().any(|l| l == line), "{line:?} in {block}");

@@ -34,6 +34,21 @@
 //! first-wins cannot override it and the strict lookups see one value. Pins
 //! are applied after every source merge.
 //!
+//! CONFIG EXPRESSIONS (DF.20). A TS `const|let|var NAME = <config
+//! expression>` on one line (`export const ADMIN_BASE =
+//! environment.apiUrl.replace('/api', '') + '/admin'`) binds NAME to the
+//! expression's TEMPLATE normal form (`${environment.apiUrl.replace('/api',
+//! '')}/admin`), held apart from the literal bindings: only
+//! [`fold_interpolations`] (and [`ConstTable::pinned_keys_in`], which walks
+//! the same fold) reads it, never `get` / `resolve_expr*` / `resolve_identity`
+//! / `candidates` / `entries`, so no consumer that mints identity from a value
+//! (a queue topic) ever sees a `${…}`. The grammar is the TS parser's
+//! `config_expr_text` over a text line: a dotted identifier path not rooted
+//! at `this` / `super` and reading no env owner, a string literal, a
+//! backtick template whose substitutions are such paths, `+` of those, and
+//! `<path>.replace('<a>', '<b>')` with two string literals. Anything else (a
+//! call, `this.x`, `process.env.X || ..`, a ternary) binds nothing.
+//!
 //! No panics: every slice goes through `get()` or lands on an ASCII byte.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -51,6 +66,12 @@ pub const UNRESOLVED_SPAN: &str = "${…}";
 /// Bracket depth past which the object-literal walk gives up on a file.
 const MAX_OBJECT_DEPTH: usize = 32;
 
+/// DF.20: how deep [`fold_interpolations`] follows a config-expression
+/// binding whose value holds `${…}` spans of its own (the call's template is
+/// depth 0). Deeper, or back to a key already being folded, the span stays
+/// unresolved.
+const MAX_FOLD_DEPTH: usize = 3;
+
 /// Name -> literal bindings for one file or one repo. `BTreeMap`, and first
 /// binding wins over the engine's sorted file list, so the table is identical
 /// across processes (the reason `walk_source_files` sorts).
@@ -63,11 +84,19 @@ pub struct ConstTable {
     files: usize,
     /// Keys bound by [`ConstTable::pin`] (an overlay constant), not by source.
     pinned: BTreeSet<String>,
+    /// DF.20: config-expression bindings in their template normal form
+    /// (`ADMIN_BASE` -> `${environment.apiUrl.replace('/api', '')}/admin`),
+    /// first binding wins. Read by the fold only (module doc).
+    exprs: BTreeMap<String, String>,
+    /// DF.20: extra distinct template values seen for an `exprs` key.
+    expr_alternatives: BTreeMap<String, Vec<String>>,
 }
 
 impl ConstTable {
-    /// Every literal binding `source` declares. Line-oriented; `lang` is the
-    /// engine's language tag and only selects which declaration shapes apply.
+    /// Every literal binding `source` declares, and (TS, DF.20) every one-line
+    /// `const|let|var` of a config expression (module doc). Line-oriented;
+    /// `lang` is the engine's language tag and only selects which
+    /// declaration shapes apply.
     pub fn scan_file(source: &str, lang: &str) -> Self {
         let ts = matches!(lang, "typescript" | "react" | "angular" | "vue");
         let mut t = ConstTable::default();
@@ -92,8 +121,13 @@ impl ConstTable {
                     continue;
                 }
             }
-            if let Some((name, value)) = binding(line, body, lang) {
+            // DF.20: a TS template with substitutions is no literal; the
+            // config-expression reader may still bind it.
+            let literal = binding(line, body, lang).filter(|(_, v)| !(ts && v.contains("${")));
+            if let Some((name, value)) = literal {
                 t.insert(name, value);
+            } else if ts && let Some((name, value)) = config_binding(body) {
+                t.insert_expr(name, &value);
             } else if ts && let Some((name, rest)) = object_opener(body) {
                 chain.push(Some(name.to_string()));
                 scan_object(rest, &mut chain, &mut t);
@@ -113,6 +147,14 @@ impl ConstTable {
         for (k, alts) in &other.alternatives {
             for v in alts {
                 self.bind(k, v);
+            }
+        }
+        for (k, v) in &other.exprs {
+            self.bind_expr(k, v);
+        }
+        for (k, alts) in &other.expr_alternatives {
+            for v in alts {
+                self.bind_expr(k, v);
             }
         }
     }
@@ -200,12 +242,20 @@ impl ConstTable {
         first.chain(rest)
     }
 
+    /// Distinct bound keys: literal bindings, plus the DF.20
+    /// config-expression keys no literal binds (the `[const] repo table: <n>
+    /// bindings` count).
     pub fn len(&self) -> usize {
         self.by_key.len()
+            + self
+                .exprs
+                .keys()
+                .filter(|k| !self.by_key.contains_key(*k))
+                .count()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.by_key.is_empty()
+        self.by_key.is_empty() && self.exprs.is_empty()
     }
 
     /// Files that contributed at least one binding.
@@ -218,6 +268,7 @@ impl ConstTable {
     pub fn conflicts(&self) -> usize {
         self.alternatives
             .iter()
+            .chain(&self.expr_alternatives)
             .filter(|(k, _)| !self.pinned.contains(*k))
             .map(|(_, alts)| alts.len())
             .sum()
@@ -243,6 +294,8 @@ impl ConstTable {
         };
         self.by_key.insert(key.to_string(), v);
         self.alternatives.remove(key);
+        self.exprs.remove(key);
+        self.expr_alternatives.remove(key);
         self.pinned.insert(key.to_string());
         true
     }
@@ -254,52 +307,174 @@ impl ConstTable {
         self.pinned.contains(key)
     }
 
-    /// The pinned keys [`fold_interpolations`] would read to fold `template`,
-    /// in span order, each once: the leading span's lenient lookup (full key,
-    /// then its last segment, as [`Self::resolve_expr`]) and every later
-    /// constant-shaped span's exact key. Empty when no pin is involved.
+    /// The pinned keys [`fold_interpolations`] reads to fold `template`, in
+    /// the order the fold reads them, each once: the leading span's lenient
+    /// lookup (full key, then its last segment, as [`Self::resolve_expr`]),
+    /// every later constant-shaped span's exact key, and (DF.20) every key a
+    /// config-expression binding the fold followed read in turn. A span that
+    /// did not resolve contributes nothing. Empty when no pin is involved.
     pub fn pinned_keys_in(&self, template: &str) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
         if self.pinned.is_empty() {
             return out;
         }
-        let mut rest = template;
-        let mut leading = true;
-        while let Some(start) = rest.find("${") {
-            let first = leading && start == 0;
-            leading = false;
-            let Some(inner) = rest.get(start + 2..) else { break };
-            let Some(end) = closing_brace(inner) else { break };
-            let Some(expr) = inner.get(..end) else { break };
-            let key = if first {
-                self.lenient_key(expr)
-            } else if constant_shaped(expr) {
-                normalise_expr(expr)
-                    .filter(|k| !self.alternatives.contains_key(k) && self.by_key.contains_key(k))
-            } else {
-                None
-            };
-            if let Some(k) = key
-                && let Some(pinned) = self.pinned.get(k.as_str())
+        let mut reads = Vec::new();
+        self.fold_at(template, 0, &mut Vec::new(), &mut reads);
+        for key in reads {
+            if let Some(pinned) = self.pinned.get(key.as_str())
                 && !out.contains(&pinned.as_str())
             {
                 out.push(pinned.as_str());
             }
-            let Some(after) = inner.get(end + 1..) else { break };
-            rest = after;
         }
         out
     }
 
-    /// The key [`Self::resolve_expr`] resolves `expr` through: the full
-    /// normalised key, else its last segment.
-    fn lenient_key(&self, expr: &str) -> Option<String> {
-        let key = normalise_expr(expr)?;
-        if self.by_key.contains_key(&key) {
-            return Some(key);
+    /// One fold of `raw` at `depth`: the text with every resolvable span
+    /// substituted and every other one [`UNRESOLVED_SPAN`], whether any span
+    /// resolved, and whether EVERY span did. `stack` holds the
+    /// config-expression keys being folded (a cycle guard); `reads` gains the
+    /// key of each span that resolved, in order.
+    fn fold_at(
+        &self,
+        raw: &str,
+        depth: usize,
+        stack: &mut Vec<String>,
+        reads: &mut Vec<String>,
+    ) -> Folded {
+        let mut out = String::with_capacity(raw.len());
+        let mut rest = raw;
+        let mut hit = false;
+        let mut complete = true;
+        while let Some(start) = rest.find("${") {
+            let leading = out.is_empty() && start == 0;
+            out.push_str(rest.get(..start).unwrap_or(""));
+            let inner = rest.get(start + 2..).unwrap_or("");
+            let Some(end) = closing_brace(inner) else {
+                out.push_str(rest.get(start..).unwrap_or(""));
+                complete = false;
+                rest = "";
+                break;
+            };
+            let expr = inner.get(..end).unwrap_or("");
+            let mut span_reads = Vec::new();
+            match self.span_value(expr, leading, depth, stack, &mut span_reads) {
+                Some(v) => {
+                    out.push_str(&v);
+                    reads.append(&mut span_reads);
+                    hit = true;
+                }
+                None => {
+                    out.push_str(UNRESOLVED_SPAN);
+                    complete = false;
+                }
+            }
+            rest = inner.get(end + 1..).unwrap_or("");
         }
-        let last = key.rsplit('.').next()?;
-        self.by_key.contains_key(last).then(|| last.to_string())
+        out.push_str(rest);
+        Folded {
+            text: out,
+            hit,
+            complete,
+        }
+    }
+
+    /// The value of one `${expr}` span: `<path>.replace('<a>', '<b>')` is
+    /// `<path>`'s value with the first `<a>` replaced by `<b>` (JS
+    /// `String.prototype.replace` with a string pattern); anything else is
+    /// the span's own value ([`Self::span_key`]). A config-expression value
+    /// is folded in turn and counts only when every span of it resolved.
+    ///
+    /// A plain span reads the key's first binding, as the lenient lookup
+    /// always has. A `.replace` span applies the transform to every
+    /// deployment value of the key (A11.4: first binding first, then its
+    /// alternatives) and takes the first result that is still a URL base
+    /// ([`url_base_ok`]): `'https://api.kinaswap.com/api'.replace('/api',
+    /// '')` is `https:/.kinaswap.com/api` in JS (the first `/api` is the
+    /// host's), which names no service, so the fold reads the next
+    /// deployment's (`http://localhost:3701/api` -> `http://localhost:3701`).
+    /// No deployment giving a URL base leaves the span unresolved.
+    fn span_value(
+        &self,
+        expr: &str,
+        leading: bool,
+        depth: usize,
+        stack: &mut Vec<String>,
+        reads: &mut Vec<String>,
+    ) -> Option<String> {
+        let (path, replace) = match split_replace(expr) {
+            Some((path, from, to)) => (path, Some((from, to))),
+            None => (expr, None),
+        };
+        let key = self.span_key(path, leading)?;
+        // A literal binding wins over a config expression of the same key.
+        let template = !self.by_key.contains_key(&key);
+        let (map, alternatives) = if template {
+            (&self.exprs, &self.expr_alternatives)
+        } else {
+            (&self.by_key, &self.alternatives)
+        };
+        let values = map
+            .get(&key)
+            .into_iter()
+            .chain(alternatives.get(&key).into_iter().flatten())
+            .take(if replace.is_some() { usize::MAX } else { 1 });
+        for value in values {
+            let mut nested = Vec::new();
+            let resolved = if template {
+                if depth >= MAX_FOLD_DEPTH || stack.contains(&key) {
+                    return None;
+                }
+                stack.push(key.clone());
+                let folded = self.fold_at(value, depth + 1, stack, &mut nested);
+                stack.pop();
+                if !folded.complete {
+                    continue;
+                }
+                folded.text
+            } else {
+                value.clone()
+            };
+            let resolved = match replace {
+                Some((from, to)) => {
+                    let replaced = resolved.replacen(from, to, 1);
+                    if !url_base_ok(&replaced) {
+                        continue;
+                    }
+                    replaced
+                }
+                None => resolved,
+            };
+            reads.push(key);
+            reads.append(&mut nested);
+            return Some(resolved);
+        }
+        None
+    }
+
+    /// The key a span's path resolves through. The leading span (a base URL)
+    /// is lenient, as [`Self::resolve_expr`]: the full normalised key, else
+    /// its last segment, a literal binding before a config expression at each
+    /// step. A later span must be constant-shaped and resolves exactly, to a
+    /// key holding ONE value across both kinds of binding.
+    fn span_key(&self, path: &str, leading: bool) -> Option<String> {
+        let key = normalise_expr(path)?;
+        let bound = |k: &str| self.by_key.contains_key(k) || self.exprs.contains_key(k);
+        if leading {
+            if bound(&key) {
+                return Some(key);
+            }
+            let last = key.rsplit('.').next()?;
+            return bound(last).then(|| last.to_string());
+        }
+        if !constant_shaped(path) {
+            return None;
+        }
+        let values = |map: &BTreeMap<String, String>, alts: &BTreeMap<String, Vec<String>>| {
+            usize::from(map.contains_key(&key)) + alts.get(&key).map_or(0, Vec::len)
+        };
+        let n = values(&self.by_key, &self.alternatives) + values(&self.exprs, &self.expr_alternatives);
+        (n == 1).then_some(key)
     }
 
     /// Validate, redact, then bind.
@@ -313,19 +488,53 @@ impl ConstTable {
     }
 
     fn bind(&mut self, key: &str, value: &str) {
-        match self.by_key.get(key) {
-            None => {
-                self.by_key.insert(key.to_string(), value.to_string());
-            }
-            Some(first) if first == value => {}
-            Some(_) => {
-                let alts = self.alternatives.entry(key.to_string()).or_default();
-                if !alts.iter().any(|a| a == value) {
-                    alts.push(value.to_string());
-                }
+        bind_first(&mut self.by_key, &mut self.alternatives, key, value);
+    }
+
+    /// DF.20: validate, redact, then bind a config expression's normal form.
+    fn insert_expr(&mut self, name: &str, value: &str) {
+        if is_secret_name(name) {
+            return;
+        }
+        if let Some(v) = accept_expr_value(value) {
+            self.bind_expr(name, &v);
+        }
+    }
+
+    fn bind_expr(&mut self, key: &str, value: &str) {
+        bind_first(&mut self.exprs, &mut self.expr_alternatives, key, value);
+    }
+}
+
+/// First binding wins; a later distinct value is kept, once, as an
+/// alternative.
+fn bind_first(
+    map: &mut BTreeMap<String, String>,
+    alternatives: &mut BTreeMap<String, Vec<String>>,
+    key: &str,
+    value: &str,
+) {
+    match map.get(key) {
+        None => {
+            map.insert(key.to_string(), value.to_string());
+        }
+        Some(first) if first == value => {}
+        Some(_) => {
+            let alts = alternatives.entry(key.to_string()).or_default();
+            if !alts.iter().any(|a| a == value) {
+                alts.push(value.to_string());
             }
         }
     }
+}
+
+/// What [`ConstTable::fold_at`] made of one template.
+struct Folded {
+    text: String,
+    /// At least one span resolved.
+    hit: bool,
+    /// Every span resolved (and every `${` closed).
+    complete: bool,
 }
 
 /// Substitute every `${expr}` in `raw` the table can resolve. `Some` only if at
@@ -336,38 +545,16 @@ impl ConstTable {
 /// path parameter, so it resolves strictly and only when it is constant-shaped
 /// (dotted or ALL_CAPS): `/users/${id}` must stay a parameter even when some
 /// file happens to bind `id`.
+///
+/// DF.20: a span `<path>.replace('<a>', '<b>')` resolves `<path>` by the same
+/// rule, then replaces the first `<a>` by `<b>`. A span bound to a config
+/// expression (`ADMIN_BASE` -> `${environment.apiUrl.replace('/api',
+/// '')}/admin`) is folded in turn, at most [`MAX_FOLD_DEPTH`] levels deep,
+/// each value's own first span leading; it resolves only when every span of
+/// it does, and a key already being folded (a cycle) never does.
 pub fn fold_interpolations(raw: &str, table: &ConstTable) -> Option<String> {
-    let mut out = String::with_capacity(raw.len());
-    let mut rest = raw;
-    let mut hit = false;
-    while let Some(start) = rest.find("${") {
-        let leading = out.is_empty() && start == 0;
-        out.push_str(rest.get(..start)?);
-        let inner = rest.get(start + 2..)?;
-        let Some(end) = closing_brace(inner) else {
-            out.push_str(rest.get(start..)?);
-            rest = "";
-            break;
-        };
-        let expr = inner.get(..end)?;
-        let value = if leading {
-            table.resolve_expr(expr)
-        } else if constant_shaped(expr) {
-            table.resolve_expr_strict(expr)
-        } else {
-            None
-        };
-        match value {
-            Some(v) => {
-                out.push_str(v);
-                hit = true;
-            }
-            None => out.push_str(UNRESOLVED_SPAN),
-        }
-        rest = inner.get(end + 1..)?;
-    }
-    out.push_str(rest);
-    hit.then_some(out)
+    let folded = table.fold_at(raw, 0, &mut Vec::new(), &mut Vec::new());
+    folded.hit.then_some(folded.text)
 }
 
 // ---------------------------------------------------------------------------
@@ -565,6 +752,221 @@ fn hash_define(body: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((name, literal_rhs(rhs)?))
+}
+
+// ---------------------------------------------------------------------------
+// DF.20 config expressions (text reader; the TS parser's `config_expr_text`
+// reads the same grammar off the AST)
+// ---------------------------------------------------------------------------
+
+/// TS `[export] const|let|var NAME[: T] = <config expression>` on one line:
+/// NAME and the expression's template normal form. A class field (`readonly
+/// base = …`, no `const` / `let` / `var`) is not one: the TS parser reads
+/// those per class.
+fn config_binding(body: &str) -> Option<(&str, String)> {
+    let (head, rhs) = split_assign(body)?;
+    let name = decl_name(head, "typescript")?;
+    let declares = before_annotation(head)
+        .split_whitespace()
+        .any(|t| matches!(t, "const" | "let" | "var"));
+    if !declares {
+        return None;
+    }
+    let (value, rest) = config_expr(rhs)?;
+    terminal(rest).then_some((name, value))
+}
+
+/// `term ('+' term)*`, concatenated.
+fn config_expr(s: &str) -> Option<(String, &str)> {
+    let (mut out, mut rest) = config_term(s.trim_start())?;
+    loop {
+        let r = rest.trim_start();
+        let Some(next) = r.strip_prefix('+') else {
+            return Some((out, r));
+        };
+        if next.starts_with(['+', '=']) {
+            return None;
+        }
+        let (term, after) = config_term(next.trim_start())?;
+        out.push_str(&term);
+        rest = after;
+    }
+}
+
+/// `( expr )` (then optionally `.replace(..)` when the parenthesised
+/// expression is one path), a string literal, a backtick template of path
+/// spans, or a path with an optional `.replace('<a>', '<b>')`.
+fn config_term(s: &str) -> Option<(String, &str)> {
+    match *s.as_bytes().first()? {
+        b'(' => {
+            let (inner, rest) = config_expr(s.get(1..)?)?;
+            let rest = rest.trim_start().strip_prefix(')')?;
+            match replace_call(rest) {
+                Some((from, to, after)) => Some((replace_span(sole_path(&inner)?, from, to), after)),
+                None => Some((inner, rest)),
+            }
+        }
+        b'\'' | b'"' => {
+            let (body, rest) = quoted(s)?;
+            literal_piece_ok(body).then(|| (body.to_string(), rest))
+        }
+        b'`' => config_template(s),
+        _ => {
+            let (path, rest) = config_path(s)?;
+            match replace_call(rest) {
+                Some((from, to, after)) => Some((replace_span(&path, from, to), after)),
+                None => Some((format!("${{{path}}}"), rest)),
+            }
+        }
+    }
+}
+
+/// A backtick template whose substitutions are each a path (or a path's
+/// `.replace(..)`), as its normal form: fragments verbatim, each
+/// substitution `${path}`.
+fn config_template(s: &str) -> Option<(String, &str)> {
+    let mut rest = s.strip_prefix('`')?;
+    let mut out = String::new();
+    loop {
+        let tick = rest.find('`')?;
+        match rest.find("${").filter(|&sp| sp < tick) {
+            Some(sp) => {
+                let fragment = rest.get(..sp)?;
+                literal_piece_ok(fragment).then_some(())?;
+                out.push_str(fragment);
+                let inner = rest.get(sp + 2..)?;
+                let end = inner.find('}')?;
+                out.push_str(&path_span(inner.get(..end)?.trim())?);
+                rest = inner.get(end + 1..)?;
+            }
+            None => {
+                let fragment = rest.get(..tick)?;
+                literal_piece_ok(fragment).then_some(())?;
+                out.push_str(fragment);
+                return Some((out, rest.get(tick + 1..)?));
+            }
+        }
+    }
+}
+
+/// One template substitution that is exactly a path or a path's
+/// `.replace(..)`, as its normal-form span.
+fn path_span(expr: &str) -> Option<String> {
+    let (path, rest) = config_path(expr)?;
+    match replace_call(rest) {
+        Some((from, to, after)) => after
+            .trim()
+            .is_empty()
+            .then(|| replace_span(&path, from, to)),
+        None => rest.trim().is_empty().then(|| format!("${{{path}}}")),
+    }
+}
+
+/// A dotted identifier path (`environment.apiUrl`, `env?.api.base`) at the
+/// start of `s`, joined by `.`, and what follows it. At least two segments,
+/// not rooted at `this` / `super`, and no `env` / `environ` owner (the
+/// table never reads the environment). Stops before a `.replace(`.
+fn config_path(s: &str) -> Option<(String, &str)> {
+    let mut segs: Vec<&str> = Vec::new();
+    let mut rest = s;
+    loop {
+        let end = ident_end(rest);
+        let seg = rest.get(..end)?;
+        if !valid_name(seg) {
+            return None;
+        }
+        segs.push(seg);
+        rest = rest.get(end..)?;
+        let Some(after) = rest.strip_prefix("?.").or_else(|| rest.strip_prefix('.')) else {
+            break;
+        };
+        if replace_call(rest).is_some() {
+            break;
+        }
+        rest = after;
+    }
+    let path = segs.join(".");
+    let rooted_ok = segs.len() >= 2 && !matches!(segs[0], "this" | "super");
+    (rooted_ok && normalise_expr(&path).as_deref() == Some(path.as_str())).then_some((path, rest))
+}
+
+/// `.replace('<a>', '<b>')` at the start of `s`: both arguments string
+/// literals [`replace_arg_ok`] accepts, and what follows the `)`.
+fn replace_call(s: &str) -> Option<(&str, &str, &str)> {
+    let rest = s
+        .strip_prefix(".replace")?
+        .trim_start()
+        .strip_prefix('(')?
+        .trim_start();
+    let (from, rest) = quoted(rest)?;
+    let rest = rest.trim_start().strip_prefix(',')?.trim_start();
+    let (to, rest) = quoted(rest)?;
+    let rest = rest.trim_start().strip_prefix(')')?;
+    (replace_arg_ok(from) && replace_arg_ok(to)).then_some((from, to, rest))
+}
+
+/// A `.replace` argument the normal form can carry in single quotes and the
+/// fold can evaluate exactly: no quote, backslash, brace, `$` (a JS
+/// replacement pattern) or line break.
+fn replace_arg_ok(arg: &str) -> bool {
+    !arg.contains(['\'', '"', '`', '\\', '{', '}', '$', '\n', '\r'])
+}
+
+/// Literal text inside a normal form: nothing that could open a span or
+/// hide an escape.
+fn literal_piece_ok(piece: &str) -> bool {
+    !piece.contains(['$', '`', '\\', '\n', '\r'])
+}
+
+/// The normal-form span of `path.replace('from', 'to')`.
+fn replace_span(path: &str, from: &str, to: &str) -> String {
+    format!("${{{path}.replace('{from}', '{to}')}}")
+}
+
+/// The path of a normal form that is exactly one `${path}` span.
+fn sole_path(normal: &str) -> Option<&str> {
+    let path = normal.strip_prefix("${")?.strip_suffix('}')?;
+    (!path.contains(['$', '{', '}', '('])).then_some(path)
+}
+
+/// DF.20: a `.replace` result that is still a URL base. A value opening
+/// with a web scheme (`http:`, `https:`, `ws:`, `wss:`, any case) must go on
+/// with `//` and a non-empty authority; anything else (a path, a bare
+/// segment, empty) is a base as it stands.
+fn url_base_ok(v: &str) -> bool {
+    let Some(colon) = v.find(':') else {
+        return true;
+    };
+    let scheme = v.get(..colon).unwrap_or("");
+    if !["http", "https", "ws", "wss"]
+        .iter()
+        .any(|s| scheme.eq_ignore_ascii_case(s))
+    {
+        return true;
+    }
+    v.get(colon + 1..)
+        .and_then(|rest| rest.strip_prefix("//"))
+        .is_some_and(|authority| !authority.is_empty() && !authority.starts_with(['/', '?', '#']))
+}
+
+/// A fold span `<path>.replace('<a>', '<b>')`: the path and both arguments.
+fn split_replace(expr: &str) -> Option<(&str, &str, &str)> {
+    let expr = expr.trim();
+    expr.match_indices(".replace").find_map(|(i, _)| {
+        let (from, to, rest) = replace_call(expr.get(i..)?)?;
+        rest.trim()
+            .is_empty()
+            .then_some((expr.get(..i)?.trim(), from, to))
+    })
+}
+
+/// A config expression's normal form worth binding: non-empty, not
+/// oversized, one line, userinfo masked as a literal's.
+fn accept_expr_value(v: &str) -> Option<String> {
+    if v.is_empty() || v.len() > MAX_VALUE_LEN || v.contains(['\n', '\r']) {
+        return None;
+    }
+    Some(mask_userinfo(v).unwrap_or_else(|| v.to_string()))
 }
 
 /// TS `[export] const OBJ[: T] = {` — the rest of the line after the `{`.
@@ -1283,6 +1685,299 @@ export const PAGE = 'p';
         assert!(repo.pinned_keys_in("${OTHER}/users").is_empty());
         assert!(repo.pinned_keys_in("/users").is_empty());
         assert!(repo.pinned_keys_in("${GATEWAY").is_empty(), "unclosed span");
+    }
+
+    /// DF.20: a one-line TS `const|let|var` of a config expression binds its
+    /// template normal form, apart from the literal bindings: the literal
+    /// lookups never see it. A class field, a call, `this.x`, an env read, a
+    /// fallback, a ternary or a bare identifier binds nothing.
+    #[test]
+    fn const_config_expression_binds() {
+        let t = scan(
+            "import { environment } from '../environments/environment';\n\
+             export const ADMIN_BASE = environment.apiUrl.replace('/api', '') + '/admin';\n\
+             const NOTICES: string = `${environment.apiUrl}/notifications`;\n\
+             let plainBase = environment.api.base;\n\
+             var paren = (environment.apiUrl).replace(\"/api\", '/v2') + '/x'; // c\n\
+             export const LIT = '/a' + '/b';\n\
+             class S {\n  private readonly base = environment.apiUrl.replace('/api', '') + '/admin';\n}\n\
+             export const CALL = environment.build('/x');\n\
+             export const SELF = this.cfg.apiUrl + '/x';\n\
+             export const ENV = process.env.API_URL || 'http://localhost';\n\
+             export const ENV2 = process.env.API_URL + '/x';\n\
+             export const TERN = environment.production ? '/p' : '/d';\n\
+             export const BARE = base + '/x';\n\
+             export const SPLICE = `${base}/x`;\n\
+             export const DOLLAR = environment.apiUrl.replace('/api', '$&');\n\
+             export const API_TOKEN_URL = environment.apiUrl + '/token';\n",
+            "typescript",
+        );
+        let expr = |k: &str| t.exprs.get(k).map(String::as_str);
+        assert_eq!(
+            expr("ADMIN_BASE"),
+            Some("${environment.apiUrl.replace('/api', '')}/admin")
+        );
+        assert_eq!(expr("NOTICES"), Some("${environment.apiUrl}/notifications"));
+        assert_eq!(expr("plainBase"), Some("${environment.api.base}"));
+        assert_eq!(expr("paren"), Some("${environment.apiUrl.replace('/api', '/v2')}/x"));
+        assert_eq!(expr("LIT"), Some("/a/b"));
+        for k in [
+            "base", "CALL", "SELF", "ENV", "ENV2", "TERN", "BARE", "SPLICE", "DOLLAR",
+            "API_TOKEN_URL",
+        ] {
+            assert_eq!(expr(k), None, "{k} is no config expression");
+        }
+        // Never a literal binding: no identity consumer reads a template.
+        for k in ["ADMIN_BASE", "NOTICES", "LIT"] {
+            assert_eq!(t.get(k), None, "{k}");
+            assert_eq!(t.resolve_expr(k), None, "{k}");
+            assert_eq!(t.resolve_identity(k), None, "{k}");
+            assert!(t.candidates(k).is_empty(), "{k}");
+        }
+        assert_eq!(t.entries().count(), 0);
+        assert_eq!(t.len(), 5, "the [const] line counts them");
+        assert_eq!(t.files(), 1);
+        // Merging is first-wins with alternatives, as for a literal.
+        let mut repo = ConstTable::default();
+        repo.merge_from(&t);
+        repo.merge_from(&scan(
+            "export const ADMIN_BASE = environment.adminUrl + '/admin';\n",
+            "typescript",
+        ));
+        assert_eq!(
+            repo.exprs.get("ADMIN_BASE").map(String::as_str),
+            Some("${environment.apiUrl.replace('/api', '')}/admin")
+        );
+        assert_eq!(repo.conflicts(), 1);
+        // A pin replaces a config expression like a literal.
+        assert!(repo.pin("ADMIN_BASE", "/pinned"));
+        assert_eq!(repo.conflicts(), 0);
+        assert_eq!(
+            fold_interpolations("${ADMIN_BASE}/users", &repo).as_deref(),
+            Some("/pinned/users")
+        );
+    }
+
+    /// DF.20: `<path>.replace('<a>', '<b>')` replaces the FIRST occurrence
+    /// (JS `String.prototype.replace` with a string pattern), in a call's own
+    /// template and through a config-expression binding.
+    #[test]
+    fn fold_replace_first_occurrence() {
+        let t = scan(
+            "export const environment = {\n  apiUrl: 'http://localhost:3701/api',\n  twice: '/api/x/api',\n};\n\
+             export const ADMIN_BASE = environment.apiUrl.replace('/api', '') + '/admin';\n",
+            "typescript",
+        );
+        assert_eq!(
+            fold_interpolations("${environment.apiUrl.replace('/api', '')}/admin/stats", &t).as_deref(),
+            Some("http://localhost:3701/admin/stats")
+        );
+        assert_eq!(
+            fold_interpolations("${environment.twice.replace('/api', '')}", &t).as_deref(),
+            Some("/x/api"),
+            "first occurrence only"
+        );
+        assert_eq!(
+            fold_interpolations("${ environment.apiUrl.replace( \"/api\" , '/v2' ) }/x", &t).as_deref(),
+            Some("http://localhost:3701/v2/x")
+        );
+        assert_eq!(
+            fold_interpolations("${ADMIN_BASE}/users", &t).as_deref(),
+            Some("http://localhost:3701/admin/users")
+        );
+        // `this.` and the last-segment fallback apply to the replaced path.
+        assert_eq!(
+            fold_interpolations("${this.apiUrl.replace('/api', '')}/x", &t).as_deref(),
+            Some("http://localhost:3701/x")
+        );
+        // A pattern that is absent leaves the value as it is.
+        assert_eq!(
+            fold_interpolations("${environment.apiUrl.replace('/nope', '')}/x", &t).as_deref(),
+            Some("http://localhost:3701/api/x")
+        );
+        // Anything but two plain string literals is no `.replace` span.
+        for raw in [
+            "${environment.apiUrl.replace(/api/, '')}/x",
+            "${environment.apiUrl.replace('/api', x)}/x",
+            "${environment.apiUrl.replace('/api', '$&')}/x",
+            "${environment.apiUrl.replace('/api')}/x",
+            "${environment.apiUrl.replace('/api', '').trim()}/x",
+        ] {
+            assert_eq!(fold_interpolations(raw, &t), None, "{raw}");
+        }
+        // A later span folds a `.replace` only on a constant-shaped path.
+        assert_eq!(
+            fold_interpolations("/p/${environment.apiUrl.replace('http://', '')}", &t).as_deref(),
+            Some("/p/localhost:3701/api")
+        );
+        assert_eq!(
+            fold_interpolations("/p/${id.replace('a', 'b')}", &t),
+            None,
+            "a lower-case later span is a parameter"
+        );
+    }
+
+    /// DF.20: a `.replace` span reads every deployment value of its key and
+    /// takes the first whose transform is still a URL base. Kina's
+    /// production `https://api.kinaswap.com/api` loses its host's `/api` to
+    /// `.replace('/api', '')` (JS replaces the FIRST occurrence), so the
+    /// development binding is the one that names a service.
+    #[test]
+    fn fold_replace_skips_a_deployment_it_breaks() {
+        let mut repo = ConstTable::default();
+        for src in [
+            "export const environment = {\n  apiUrl: 'https://api.kinaswap.com/api',\n};\n",
+            "export const environment = {\n  apiUrl: 'https://api.kinaswap.com/api',\n};\n",
+            "export const environment = {\n  apiUrl: 'http://localhost:3701/api',\n};\n",
+            "export const ADMIN_BASE = environment.apiUrl.replace('/api', '') + '/admin';\n",
+        ] {
+            repo.merge_from(&scan(src, "typescript"));
+        }
+        assert_eq!(
+            fold_interpolations("${environment.apiUrl.replace('/api', '')}/admin/stats", &repo).as_deref(),
+            Some("http://localhost:3701/admin/stats")
+        );
+        assert_eq!(
+            fold_interpolations("${ADMIN_BASE}/users", &repo).as_deref(),
+            Some("http://localhost:3701/admin/users")
+        );
+        // A plain span still reads the first binding.
+        assert_eq!(
+            fold_interpolations("${environment.apiUrl}/x", &repo).as_deref(),
+            Some("https://api.kinaswap.com/api/x")
+        );
+        // No deployment survives: unresolved.
+        let only = scan(
+            "export const environment = {\n  apiUrl: 'https://api.kinaswap.com/api',\n};\n",
+            "typescript",
+        );
+        assert_eq!(
+            fold_interpolations("${environment.apiUrl.replace('/api', '')}/admin", &only),
+            None
+        );
+        assert_eq!(
+            fold_interpolations("${environment.apiUrl.replace('api.kinaswap.com', '')}/x", &only),
+            None,
+            "an emptied authority is no base"
+        );
+        for (v, ok) in [
+            ("http://localhost:3701", true),
+            ("HTTPS://h/x", true),
+            ("/api", true),
+            ("", true),
+            ("api/v1", true),
+            ("localhost:3701/api", true),
+            ("https:/.kinaswap.com/api", false),
+            ("https://", false),
+            ("wss:///x", false),
+        ] {
+            assert_eq!(url_base_ok(v), ok, "{v}");
+        }
+    }
+
+    /// DF.20: a binding whose value holds spans of its own is folded in turn,
+    /// three levels deep at most, and resolves only when every span of it
+    /// does.
+    #[test]
+    fn fold_nested_template() {
+        let t = scan(
+            "export const environment = {\n  apiUrl: 'http://localhost:3701/api',\n};\n\
+             export const ROOT = environment.apiUrl.replace('/api', '');\n\
+             export const ADMIN = Consts.ROOT + '/admin';\n\
+             export const NOTICES = `${environment.apiUrl}/notices`;\n\
+             export const HALF = `${environment.apiUrl}/x/${environment.missing}`;\n\
+             export const L1 = Consts.L2 + '/1';\n\
+             export const L2 = Consts.L3 + '/2';\n\
+             export const L3 = environment.apiUrl + '/3';\n\
+             export const M1 = Consts.M2 + '/1';\n\
+             export const M2 = Consts.M3 + '/2';\n\
+             export const M3 = Consts.M4 + '/3';\n\
+             export const M4 = environment.apiUrl + '/4';\n",
+            "typescript",
+        );
+        assert_eq!(
+            fold_interpolations("${ADMIN}/users", &t).as_deref(),
+            Some("http://localhost:3701/admin/users"),
+            "ADMIN -> ROOT -> environment.apiUrl"
+        );
+        assert_eq!(
+            fold_interpolations("${NOTICES}/unread", &t).as_deref(),
+            Some("http://localhost:3701/api/notices/unread")
+        );
+        assert_eq!(
+            fold_interpolations("${HALF}/y", &t),
+            None,
+            "a binding that folds only in part is unresolved"
+        );
+        assert_eq!(
+            fold_interpolations("${L1}/a", &t).as_deref(),
+            Some("http://localhost:3701/api/3/2/1/a"),
+            "three levels fold"
+        );
+        assert_eq!(
+            fold_interpolations("${M1}/a", &t),
+            None,
+            "a fourth level is past MAX_FOLD_DEPTH"
+        );
+        // A later constant-shaped span folds a binding too, by its exact key.
+        assert_eq!(
+            fold_interpolations("/v/${NOTICES}", &t).as_deref(),
+            Some("/v/http://localhost:3701/api/notices")
+        );
+        assert_eq!(fold_interpolations("/v/${Consts.NOTICES}", &t), None);
+    }
+
+    /// DF.20: a binding that reaches itself never resolves, at any length of
+    /// cycle, and the rest of the template still folds.
+    #[test]
+    fn fold_cycle_stays_unresolved() {
+        let t = scan(
+            "export const environment = {\n  apiUrl: 'http://localhost:3701/api',\n};\n\
+             export const LOOP = Consts.LOOP + '/x';\n\
+             export const PING = Consts.PONG + '/a';\n\
+             export const PONG = Consts.PING + '/b';\n",
+            "typescript",
+        );
+        assert_eq!(fold_interpolations("${LOOP}/y", &t), None);
+        assert_eq!(fold_interpolations("${PING}/y", &t), None);
+        assert_eq!(
+            fold_interpolations("${environment.apiUrl}/${Consts.LOOP}", &t).as_deref(),
+            Some("http://localhost:3701/api/${…}")
+        );
+    }
+
+    /// DF.20: literal bindings and every literal lookup are unchanged by the
+    /// config-expression reader, and `pinned_keys_in` follows the fold into a
+    /// config expression's own spans.
+    #[test]
+    fn literal_bindings_unchanged() {
+        let src = "export const TOPIC = 'orders';\nexport const environment = {\n  apiUrl: 'http://api',\n};\n\
+                   export const ADMIN = environment.apiUrl + '/admin';\n";
+        let t = scan(src, "typescript");
+        assert_eq!(t.get("TOPIC"), Some("orders"));
+        assert_eq!(t.get("environment.apiUrl"), Some("http://api"));
+        assert_eq!(t.resolve_identity("TOPIC"), Some("orders"));
+        let literal: Vec<(&str, &str)> = t.entries().collect();
+        assert_eq!(
+            literal,
+            [
+                ("TOPIC", "orders"),
+                ("apiUrl", "http://api"),
+                ("environment.apiUrl", "http://api")
+            ]
+        );
+        assert_eq!(
+            fold_interpolations("${environment.apiUrl}/users/${id}", &t).as_deref(),
+            Some("http://api/users/${…}")
+        );
+        let mut pinned = t.clone();
+        assert!(pinned.pin("environment.apiUrl", "http://gw"));
+        assert_eq!(pinned.pinned_keys_in("${ADMIN}/users"), ["environment.apiUrl"]);
+        assert_eq!(
+            fold_interpolations("${ADMIN}/users", &pinned).as_deref(),
+            Some("http://gw/admin/users")
+        );
+        assert!(pinned.pinned_keys_in("${MISSING}/users").is_empty());
     }
 
     /// CG.4a: every binding, first values in key order, then each key's
