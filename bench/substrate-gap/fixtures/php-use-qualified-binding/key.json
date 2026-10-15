@@ -1,0 +1,52 @@
+{
+  "framework": "php-use-qualified-binding",
+  "language": "php",
+  "dirs": [
+    "."
+  ],
+  "note": "DF (0.5.1 deferral 'PHP short-name symbol imports', the dropped CB.8 draft): a PSR-4 class is directory-scoped (src::Billing::Invoicer, LB.7b) while its `use` names the namespace (App\\Billing\\Invoicer). graph/src/imports.rs resolve_imports_python's Symbol arm finds no MODULE App::Billing and falls back to unique_global_function(\"Invoicer\"), which two classes of that short name make ambiguous: BOTH imports and BOTH calls vanish. HEAD (84e2e71, leap wheel): 0 IMPORTS, 0 CALLS in the repo. After: the import binds the member of the declared namespace PACKAGE App::Billing; `use App\\Legal\\Invoicer` names a namespace no file declares under the repo-owned root App and binds nothing (never the tail guess).",
+  "expect_edges": [
+    {
+      "from": "src::Orders::OrderService",
+      "to": "src::Billing::Invoicer",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "src::Orders::ShipmentService",
+      "to": "src::Shipping::Invoicer",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "src::Orders::OrderService::place",
+      "to": "src::Billing::Invoicer::issue",
+      "category": "CALLS"
+    },
+    {
+      "from": "src::Orders::ShipmentService::ship",
+      "to": "src::Shipping::Invoicer::issue",
+      "category": "CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src::Orders::OrderService",
+      "to": "src::Shipping::Invoicer",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "src::Orders::ShipmentService::ship",
+      "to": "src::Billing::Invoicer::issue",
+      "category": "CALLS"
+    },
+    {
+      "from": "src::Orders::LegalService::check",
+      "to": "src::Billing::Invoicer::issue",
+      "category": "CALLS"
+    },
+    {
+      "from": "src::Orders::LegalService::check",
+      "to": "src::Shipping::Invoicer::issue",
+      "category": "CALLS"
+    }
+  ]
+}

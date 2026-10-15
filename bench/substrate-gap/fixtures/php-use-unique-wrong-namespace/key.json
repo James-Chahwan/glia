@@ -1,0 +1,27 @@
+{
+  "framework": "php-use-unique-wrong-namespace",
+  "language": "php",
+  "dirs": [
+    "."
+  ],
+  "note": "DF precision twin of php-use-qualified-binding (the CB.8 draft's probe php6): with ONE Invoicer in the repo, `use App\\Legal\\Invoicer` (a namespace no file declares, under the repo-owned root App) binds App\\Billing\\Invoicer through unique_global_function's tail guess. HEAD (84e2e71, leap wheel): IMPORTS LegalService -> Billing::Invoicer and CALLS check -> issue present (FORBID VIOLATIONS 2). The control OrderService binds on HEAD and after.",
+  "expect_edges": [
+    {
+      "from": "src::Orders::OrderService::place",
+      "to": "src::Billing::Invoicer::issue",
+      "category": "CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src::Orders::LegalService",
+      "to": "src::Billing::Invoicer",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "src::Orders::LegalService::check",
+      "to": "src::Billing::Invoicer::issue",
+      "category": "CALLS"
+    }
+  ]
+}

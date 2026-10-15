@@ -7,7 +7,7 @@ use glia_code_domain::{
     ImportStmt, ImportTarget, bare_module_qname, edge_category, evidence, node_kind,
     same_stem_order,
 };
-use glia_core::NodeId;
+use glia_core::{NodeId, NodeKindId};
 
 use crate::build::{DirImport, GoPackages};
 use crate::calls::{graph_evidence, push_edge, unique_global_function, unique_global_module};
@@ -201,6 +201,241 @@ impl SameStem {
             eprintln!("{line}");
         }
     }
+
+    /// The file extension of MODULE `importer` (`php`), from the same
+    /// lazily-read table [`Self::pick`] uses, so a graph reads every MODULE's
+    /// POSITION at most once whichever step asks first.
+    fn importer_ext(&mut self, g: &RepoGraph, importer: NodeId) -> Option<String> {
+        self.module_ext.get_or_insert_with(|| module_exts(g)).get(&importer).cloned()
+    }
+}
+
+// ============================================================================
+// Namespace members (DF.2)
+// ============================================================================
+
+/// The node kinds a namespace member can be: what a symbol import names
+/// (`use App\Billing\Invoicer`, `use function App\Util\fmt`, C#
+/// `using static Shop.Core.Helpers`).
+const MEMBER_KINDS: &[NodeKindId] = &[
+    node_kind::CLASS,
+    node_kind::INTERFACE,
+    node_kind::ENUM,
+    node_kind::STRUCT,
+    node_kind::FUNCTION,
+];
+
+/// DF.2: every namespace PACKAGE of one graph with its member types and
+/// functions, and the root namespaces the repo declares.
+///
+/// A PHP / C# namespace is a PACKAGE: each file opening `namespace
+/// App\Billing;` has a CONTAINS edge to PACKAGE `App::Billing` and keeps its
+/// top-level types itself (`module_symbols` of the file MODULE), while a
+/// braced or block namespace's members are the PACKAGE's own nav children
+/// (`module_symbols` of the PACKAGE). PSR-4 types are directory-scoped
+/// (`src::Billing::Invoicer`, LB.7b), so no MODULE qname is the namespace a
+/// `use` names and the import's module lookups miss; this index binds it by
+/// the namespace instead of the repo-unique short name.
+///
+/// A file opening several statement-form namespaces (`namespace A; ...
+/// namespace B; ...`, which PSR-4 forbids) lists its types under each: the
+/// parser records no finer owner.
+///
+/// Build-local: rebuilt by every [`resolve_imports_python`] call that needs
+/// it, never stored. A pure function of the graph: BTree containers, and a
+/// member set is deduped by id (one type registered under its MODULE and
+/// its PACKAGE is one member), so `g.edges` / HashMap order never shows.
+#[derive(Debug, Default)]
+pub(crate) struct NamespaceIndex {
+    /// PACKAGE qname -> member name -> the distinct member ids. Every
+    /// namespace PACKAGE of the graph has an entry, members or not, so a
+    /// declared namespace without the name is told from an undeclared one.
+    members: BTreeMap<String, BTreeMap<String, Vec<NodeId>>>,
+    /// The first `::` segment of every PACKAGE qname (`App`): the root
+    /// namespaces the repo owns.
+    roots: BTreeSet<String>,
+}
+
+/// What [`NamespaceIndex::member`] found for `ns` + `name`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NsHit {
+    /// The one member of the declared namespace named so.
+    Unique(NodeId),
+    /// Two distinct members of the namespace share the name (a class two
+    /// files declare): nothing binds.
+    Ambiguous,
+    /// The namespace is declared and has no member of that name, nor a
+    /// sub-namespace: the short-name guess could only pick another
+    /// namespace's type.
+    Missing,
+    /// `ns::name` is itself a declared namespace: a namespace import (C#
+    /// `using Shop.Core;`, PHP `use App\Billing;`), resolved as before.
+    Namespace,
+    /// No PACKAGE has the qname `ns`.
+    NotDeclared,
+}
+
+impl NamespaceIndex {
+    pub(crate) fn build(g: &RepoGraph) -> Self {
+        let mut idx = NamespaceIndex::default();
+        let is_package = |id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::PACKAGE);
+        // Every PACKAGE is a namespace with its own nav children as members.
+        let mut scopes: Vec<(NodeId, NodeId)> = g
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::PACKAGE)
+            .map(|(id, _)| (*id, *id))
+            .collect();
+        // A file opening the namespace contributes its own top-level members.
+        scopes.extend(
+            g.edges
+                .iter()
+                .filter(|e| {
+                    e.category == edge_category::CONTAINS
+                        && is_package(&e.to)
+                        && g.nav.kind_by_id.get(&e.from) == Some(&node_kind::MODULE)
+                })
+                .map(|e| (e.to, e.from)),
+        );
+        for (package, scope) in scopes {
+            let Some(qname) = g.nav.qname_by_id.get(&package) else { continue };
+            let root = qname.split("::").next().unwrap_or(qname);
+            idx.roots.insert(root.to_string());
+            let members = idx.members.entry(qname.clone()).or_default();
+            let Some(symbols) = g.symbols.module_symbols.get(&scope) else { continue };
+            for (name, id) in symbols {
+                let member_kind = g.nav.kind_by_id.get(id).is_some_and(|k| MEMBER_KINDS.contains(k));
+                if !member_kind {
+                    continue;
+                }
+                let ids = members.entry(name.clone()).or_default();
+                if !ids.contains(id) {
+                    ids.push(*id);
+                }
+            }
+        }
+        idx
+    }
+
+    /// The member `name` of namespace `ns` (a `::` qname).
+    pub(crate) fn member(&self, ns: &str, name: &str) -> NsHit {
+        let nested = if ns.is_empty() { name.to_string() } else { format!("{ns}::{name}") };
+        let Some(members) = self.members.get(ns) else {
+            return if self.members.contains_key(&nested) {
+                NsHit::Namespace
+            } else {
+                NsHit::NotDeclared
+            };
+        };
+        match members.get(name).map(Vec::as_slice) {
+            Some([id]) => NsHit::Unique(*id),
+            Some([_, _, ..]) => NsHit::Ambiguous,
+            _ if self.members.contains_key(&nested) => NsHit::Namespace,
+            _ => NsHit::Missing,
+        }
+    }
+
+    /// Whether `ns` lies under a root namespace some file of the repo
+    /// declares (`App::Legal` when `App::Billing` is declared).
+    pub(crate) fn owns_root(&self, ns: &str) -> bool {
+        let root = ns.split("::").next().unwrap_or(ns);
+        !root.is_empty() && self.roots.contains(root)
+    }
+}
+
+/// What the namespace step did in one [`resolve_imports_python`] call (the
+/// `[imports] namespace symbols:` marker).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct NamespaceStats {
+    /// Bound to the member of the declared namespace (rule `namespace`).
+    pub(crate) bound: usize,
+    /// The declared namespace has two members of the name: left unbound.
+    pub(crate) ambiguous: usize,
+    /// The declared namespace has no member of the name: left unbound.
+    pub(crate) missing: usize,
+    /// A `.php` import into an undeclared namespace under a root namespace
+    /// the repo declares: left unbound, never the short-name guess.
+    pub(crate) refused_owned_root: usize,
+    /// The importers' file extensions, for the marker's discriminator.
+    pub(crate) exts: BTreeSet<String>,
+}
+
+/// What the namespace step decided for one symbol import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NsStep {
+    /// Bind this member, rule `namespace`.
+    Bind(NodeId),
+    /// Bind nothing: no short-name guess either.
+    Refuse,
+    /// Not the namespace step's: the short-name fallback runs as before.
+    Fallthrough,
+}
+
+/// The namespace step of a symbol import, built lazily: a graph whose
+/// symbol imports all bind by module never builds the index.
+#[derive(Debug, Default)]
+struct Namespaces {
+    index: Option<NamespaceIndex>,
+    stats: NamespaceStats,
+}
+
+impl Namespaces {
+    /// `ns` is the import's resolved module qname, `importer` its file MODULE.
+    fn step(
+        &mut self,
+        g: &RepoGraph,
+        same: &mut SameStem,
+        ns: &str,
+        name: &str,
+        importer: NodeId,
+    ) -> NsStep {
+        let idx = self.index.get_or_insert_with(|| NamespaceIndex::build(g));
+        let hit = idx.member(ns, name);
+        let step = match hit {
+            NsHit::Unique(id) => {
+                self.stats.bound += 1;
+                NsStep::Bind(id)
+            }
+            NsHit::Ambiguous => {
+                self.stats.ambiguous += 1;
+                NsStep::Refuse
+            }
+            NsHit::Missing => {
+                self.stats.missing += 1;
+                NsStep::Refuse
+            }
+            NsHit::Namespace => NsStep::Fallthrough,
+            NsHit::NotDeclared => {
+                if idx.owns_root(ns) && same.importer_ext(g, importer).as_deref() == Some("php") {
+                    self.stats.refused_owned_root += 1;
+                    NsStep::Refuse
+                } else {
+                    NsStep::Fallthrough
+                }
+            }
+        };
+        if step != NsStep::Fallthrough {
+            let ext = same.importer_ext(g, importer).unwrap_or_else(|| "?".to_string());
+            self.stats.exts.insert(ext);
+        }
+        step
+    }
+
+    /// DF.2 fired_on, once per [`resolve_imports_python`] call in which the
+    /// namespace step bound or refused anything:
+    ///   `[imports] namespace symbols: bound={b} ambiguous={a} missing={m} refused_owned_root={r} (exts={x,y})`
+    /// `exts` (the importers' file extensions, sorted) tells PHP from C#.
+    fn marker(&self) -> Option<String> {
+        let NamespaceStats { bound, ambiguous, missing, refused_owned_root, exts } = &self.stats;
+        (bound + ambiguous + missing + refused_owned_root > 0).then(|| {
+            format!(
+                "[imports] namespace symbols: bound={bound} ambiguous={ambiguous} \
+                 missing={missing} refused_owned_root={refused_owned_root} (exts={})",
+                exts.iter().map(String::as_str).collect::<Vec<_>>().join(",")
+            )
+        })
+    }
 }
 
 /// Every MODULE's file extension, from its POSITION ([`evidence::locate`]).
@@ -230,11 +465,21 @@ fn module_exts(g: &RepoGraph) -> HashMap<NodeId, String> {
 /// fallback; a pair no rule picks from keeps the tail's class guess but not
 /// its module guess, which would bind a lone same-named module elsewhere once
 /// the pair's own qnames stop ending in the stem.
+///
+/// DF.2: a symbol import is tried, in order, as a submodule, a symbol of its
+/// module, a symbol of a same-stem sibling, a member of its namespace
+/// PACKAGE ([`NamespaceIndex`], rule `namespace`), and last the repo-unique
+/// short name (`tail_unique`). A declared namespace without a unique member
+/// of the name binds nothing, and so does a `.php` import into an undeclared
+/// namespace under a root namespace the repo declares (`use App\Legal\X`
+/// beside `namespace App\Billing`); a vendor root (`Illuminate\..`) and
+/// every language without namespace PACKAGEs keep the short-name fallback.
 pub(crate) fn resolve_imports_python(
     g: &mut RepoGraph,
     imports: &[ImportStmt],
     same: &mut SameStem,
 ) {
+    let mut ns = Namespaces::default();
     for stmt in imports {
         let Some(from_mod_id) = g
             .symbols
@@ -351,21 +596,41 @@ pub(crate) fn resolve_imports_python(
                             .or_default()
                             .insert(bound, symbol_id);
                     }
-                } else if let Some(symbol_id) = unique_global_function(g, name) {
-                    // Tail fallback (Pattern B): `from a.b import Name` where `a.b`
-                    // isn't a resolvable module (flat layout) — bind the imported
-                    // symbol by its unique global name. Miss-only + ambiguity-safe.
-                    import_edge(g, from_mod_id, symbol_id, "tail_unique", stmt.line);
-                    g.symbols
-                        .module_import_bindings
-                        .entry(from_mod_id)
-                        .or_default()
-                        .insert(bound, symbol_id);
-                } else if sym_refused {
-                    same.unresolved();
+                } else {
+                    // DF.2: the module is a declared namespace PACKAGE (PHP /
+                    // C#): bind its member, never another namespace's
+                    // same-named type. A same-stem pair no rule picked from
+                    // keeps the tail's class guess, as before.
+                    let step = if sym_refused {
+                        NsStep::Fallthrough
+                    } else {
+                        ns.step(g, same, &target_module_qname, name, from_mod_id)
+                    };
+                    let (target, rule) = match step {
+                        NsStep::Bind(id) => (Some(id), "namespace"),
+                        NsStep::Refuse => (None, "namespace"),
+                        // Tail fallback (Pattern B): `from a.b import Name`
+                        // where `a.b` isn't a resolvable module (flat layout)
+                        // — bind the imported symbol by its unique global
+                        // name. Miss-only + ambiguity-safe.
+                        NsStep::Fallthrough => (unique_global_function(g, name), "tail_unique"),
+                    };
+                    if let Some(symbol_id) = target {
+                        import_edge(g, from_mod_id, symbol_id, rule, stmt.line);
+                        g.symbols
+                            .module_import_bindings
+                            .entry(from_mod_id)
+                            .or_default()
+                            .insert(bound, symbol_id);
+                    } else if sym_refused {
+                        same.unresolved();
+                    }
                 }
             }
         }
+    }
+    if let Some(line) = ns.marker() {
+        eprintln!("{line}");
     }
 }
 
@@ -610,8 +875,9 @@ fn ts_target(
 /// `submodule` (`from pkg import mod`), `symbol` (the module holding an
 /// imported name), `package_dir` (a Go package directory, LA.13b),
 /// `same_stem` (the sibling of an ambiguous same-stem pair the importer's
-/// language loads, LB.13) or `tail_unique` (the repo-unique short name, a
-/// guess the full path could not confirm).
+/// language loads, LB.13), `namespace` (the member of the declared namespace
+/// PACKAGE a symbol import names, DF.2) or `tail_unique` (the repo-unique
+/// short name, a guess the full path could not confirm).
 /// `line` is the import statement's 0-based row (LC.3b, basis site).
 fn import_edge(g: &mut RepoGraph, from: NodeId, to: NodeId, rule: &str, line: u32) {
     let ev = graph_evidence("graph:imports", rule).line(line);
@@ -931,5 +1197,319 @@ mod tests {
         assert_eq!(file_ext("clj/app/main.cljs"), Some("cljs"));
         assert_eq!(file_ext("Makefile"), None);
         assert_eq!(file_ext("a/b."), None);
+    }
+
+    // ---- DF.2: symbol imports bind by namespace ------------------------------
+
+    fn class(qname: &str) -> NodeId {
+        gid(node_kind::CLASS, qname)
+    }
+
+    fn method(qname: &str) -> NodeId {
+        gid(node_kind::METHOD, qname)
+    }
+
+    /// The PACKAGE `ns` the file MODULE `m` of `fp` opens, as the php parser
+    /// records a namespace: node, nav child of the file, CONTAINS edge.
+    fn opens(fp: &mut FileParse, m: NodeId, ns: &str) -> NodeId {
+        let pkg = gid(node_kind::PACKAGE, ns);
+        fp.nodes.push(Node { id: pkg, repo: repo(), confidence: Confidence::Strong, cells: vec![] });
+        let simple = ns.rsplit("::").next().unwrap_or(ns);
+        fp.nav.record(pkg, simple, ns, node_kind::PACKAGE, Some(m));
+        fp.edges.push(glia_core::Edge {
+            from: m,
+            to: pkg,
+            category: edge_category::CONTAINS,
+            confidence: Confidence::Strong,
+            cells: vec![],
+        });
+        pkg
+    }
+
+    /// CLASS `qname` (nav name its last segment) under `parent`, with
+    /// METHOD children `methods`.
+    fn declares(fp: &mut FileParse, parent: NodeId, qname: &str, methods: &[&str]) {
+        let name = qname.rsplit("::").next().unwrap_or(qname);
+        let c = class(qname);
+        fp.nodes.push(Node { id: c, repo: repo(), confidence: Confidence::Strong, cells: vec![] });
+        fp.nav.record(c, name, qname, node_kind::CLASS, Some(parent));
+        for m in methods {
+            let q = format!("{qname}::{m}");
+            let id = method(&q);
+            fp.nodes.push(Node { id, repo: repo(), confidence: Confidence::Strong, cells: vec![] });
+            fp.nav.record(id, m, &q, node_kind::METHOD, Some(c));
+        }
+    }
+
+    /// A statement-form PHP file (`namespace <ns>;`) at `path`, MODULE
+    /// `qname`, declaring CLASS `qname` (PSR-4: the class is
+    /// directory-scoped, so its qname is the file's) with `methods`.
+    fn php_class(path: &str, qname: &str, ns: &str, methods: &[&str]) -> FileParse {
+        let name = qname.rsplit("::").next().unwrap_or(qname);
+        let mut fp = file(path, qname, name, &[]);
+        let m = module(qname);
+        opens(&mut fp, m, ns);
+        declares(&mut fp, m, qname, methods);
+        fp
+    }
+
+    /// `use <ns>\<name>;` in the file MODULE `qname` of `fp`, and its class
+    /// `<qname>`'s method `caller` calling `<name>::issue()`.
+    fn uses(mut fp: FileParse, qname: &str, ns: &str, name: &str, caller: &str) -> FileParse {
+        fp.imports.push(ImportStmt {
+            from_module: qname.to_string(),
+            target: ImportTarget::Symbol {
+                module: ns.to_string(),
+                name: name.to_string(),
+                alias: None,
+                level: 0,
+            },
+            line: 3,
+        });
+        fp.calls.push(CallSite {
+            from: method(&format!("{qname}::{caller}")),
+            qualifier: CallQualifier::Attribute { base: name.to_string(), name: "issue".to_string() },
+            line: 9,
+        });
+        fp
+    }
+
+    /// The service `src/Orders/<svc>.php` (namespace App::Orders) whose
+    /// method `run` calls `Invoicer::issue()` after `use <ns>\Invoicer;`.
+    fn service(svc: &str, ext: &str, ns: &str) -> FileParse {
+        let q = format!("src::Orders::{svc}");
+        let fp = php_class(&format!("src/Orders/{svc}.{ext}"), &q, "App::Orders", &["run"]);
+        uses(fp, &q, ns, "Invoicer", "run")
+    }
+
+    /// `(target, rule)` of every IMPORTS edge out of MODULE `from`.
+    fn imports_of(g: &RepoGraph, from: &str) -> Vec<(NodeId, String)> {
+        g.edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPORTS && e.from == module(from))
+            .map(|e| (e.to, Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default()))
+            .collect()
+    }
+
+    fn calls_of(g: &RepoGraph, svc: &str) -> Vec<NodeId> {
+        edges_of(g, edge_category::CALLS, method(&format!("src::Orders::{svc}::run")))
+    }
+
+    /// The namespace step's own count, replayed on the built graph.
+    /// Every symbol import of these tests misses its module, so each one
+    /// reaches the step.
+    fn replay(g: &RepoGraph, imports: &[ImportStmt]) -> (NamespaceStats, Option<String>) {
+        let mut same = same_stem_table(g);
+        let mut ns = Namespaces::default();
+        for stmt in imports {
+            if let ImportTarget::Symbol { module, name, .. } = &stmt.target {
+                let from = module_id(g, &stmt.from_module);
+                ns.step(g, &mut same, module, name, from);
+            }
+        }
+        (ns.stats.clone(), ns.marker())
+    }
+
+    fn module_id(g: &RepoGraph, qname: &str) -> NodeId {
+        g.symbols.module_by_qname[qname]
+    }
+
+    fn all_imports(parses: &[FileParse]) -> Vec<ImportStmt> {
+        parses.iter().flat_map(|p| p.imports.clone()).collect()
+    }
+
+    fn billing_and_shipping() -> Vec<FileParse> {
+        vec![
+            php_class("src/Billing/Invoicer.php", "src::Billing::Invoicer", "App::Billing", &["issue"]),
+            php_class("src/Shipping/Invoicer.php", "src::Shipping::Invoicer", "App::Shipping", &["issue"]),
+        ]
+    }
+
+    #[test]
+    fn same_short_name_binds_by_namespace() {
+        let mut parses = billing_and_shipping();
+        parses.push(service("OrderService", "php", "App::Billing"));
+        parses.push(service("ShipmentService", "php", "App::Shipping"));
+        let imports = all_imports(&parses);
+        let g = build_dotted(repo(), parses).expect("build");
+        let (billing, shipping) = (class("src::Billing::Invoicer"), class("src::Shipping::Invoicer"));
+        assert_eq!(imports_of(&g, "src::Orders::OrderService"), [(billing, "namespace".to_string())]);
+        assert_eq!(imports_of(&g, "src::Orders::ShipmentService"), [(shipping, "namespace".to_string())]);
+        assert_eq!(calls_of(&g, "OrderService"), [method("src::Billing::Invoicer::issue")]);
+        assert_eq!(calls_of(&g, "ShipmentService"), [method("src::Shipping::Invoicer::issue")]);
+        // HEAD's short-name guess sees two Invoicers and binds neither.
+        assert_eq!(unique_global_function(&g, "Invoicer"), None);
+        let (stats, marker) = replay(&g, &imports);
+        assert_eq!((stats.bound, stats.ambiguous, stats.missing, stats.refused_owned_root), (2, 0, 0, 0));
+        assert_eq!(
+            marker.as_deref(),
+            Some("[imports] namespace symbols: bound=2 ambiguous=0 missing=0 refused_owned_root=0 (exts=php)")
+        );
+    }
+
+    #[test]
+    fn unique_name_in_declared_namespace_is_namespace_rule() {
+        let mut parses = vec![php_class(
+            "src/Billing/Invoicer.php",
+            "src::Billing::Invoicer",
+            "App::Billing",
+            &["issue"],
+        )];
+        parses.push(service("OrderService", "php", "App::Billing"));
+        let g = build_dotted(repo(), parses).expect("build");
+        let billing = class("src::Billing::Invoicer");
+        // The target HEAD's tail guess picked, now confirmed by the namespace.
+        assert_eq!(unique_global_function(&g, "Invoicer"), Some(billing));
+        assert_eq!(imports_of(&g, "src::Orders::OrderService"), [(billing, "namespace".to_string())]);
+        assert_eq!(calls_of(&g, "OrderService"), [method("src::Billing::Invoicer::issue")]);
+    }
+
+    #[test]
+    fn undeclared_namespace_under_owned_root_refuses_php() {
+        let mut parses = vec![php_class(
+            "src/Billing/Invoicer.php",
+            "src::Billing::Invoicer",
+            "App::Billing",
+            &["issue"],
+        )];
+        parses.push(service("LegalService", "php", "App::Legal"));
+        parses.push(service("OrderService", "php", "App::Billing"));
+        let imports = all_imports(&parses);
+        let g = build_dotted(repo(), parses).expect("build");
+        assert!(imports_of(&g, "src::Orders::LegalService").is_empty());
+        assert!(calls_of(&g, "LegalService").is_empty());
+        // The control still binds.
+        assert_eq!(calls_of(&g, "OrderService"), [method("src::Billing::Invoicer::issue")]);
+        let (stats, marker) = replay(&g, &imports);
+        assert_eq!((stats.bound, stats.refused_owned_root), (1, 1));
+        assert_eq!(
+            marker.as_deref(),
+            Some("[imports] namespace symbols: bound=1 ambiguous=0 missing=0 refused_owned_root=1 (exts=php)")
+        );
+    }
+
+    #[test]
+    fn undeclared_namespace_non_php_keeps_tail() {
+        let mut parses = vec![php_class(
+            "src/Billing/Invoicer.php",
+            "src::Billing::Invoicer",
+            "App::Billing",
+            &["issue"],
+        )];
+        // The same import shape from a `.py` importer: not PHP, so the
+        // owned-root refusal never applies and the short name binds as HEAD.
+        parses.push(service("LegalService", "py", "App::Legal"));
+        let imports = all_imports(&parses);
+        let g = build_dotted(repo(), parses).expect("build");
+        let billing = class("src::Billing::Invoicer");
+        assert_eq!(imports_of(&g, "src::Orders::LegalService"), [(billing, "tail_unique".to_string())]);
+        assert_eq!(calls_of(&g, "LegalService"), [method("src::Billing::Invoicer::issue")]);
+        let (stats, marker) = replay(&g, &imports);
+        assert_eq!(stats, NamespaceStats::default());
+        assert_eq!(marker, None);
+    }
+
+    #[test]
+    fn vendor_namespace_keeps_tail() {
+        let mut parses = vec![php_class(
+            "src/Billing/Invoicer.php",
+            "src::Billing::Invoicer",
+            "App::Billing",
+            &["issue"],
+        )];
+        // `use Illuminate\Support\Invoicer;`: no file declares an
+        // `Illuminate` namespace, so the repo does not own that root.
+        parses.push(service("VendorService", "php", "Illuminate::Support"));
+        let g = build_dotted(repo(), parses).expect("build");
+        let billing = class("src::Billing::Invoicer");
+        assert_eq!(imports_of(&g, "src::Orders::VendorService"), [(billing, "tail_unique".to_string())]);
+        let idx = NamespaceIndex::build(&g);
+        assert_eq!(idx.member("Illuminate::Support", "Invoicer"), NsHit::NotDeclared);
+        assert!(!idx.owns_root("Illuminate::Support"));
+        assert!(idx.owns_root("App::Legal"));
+    }
+
+    #[test]
+    fn braced_namespace_members_bind() {
+        // `namespace App\Jobs { class Mailer { .. } }` in two files: the
+        // class's nav parent is the PACKAGE itself, its qname the namespace's.
+        let mut a = file("src/Jobs/Mailer.php", "src::Jobs::Mailer", "Mailer", &[]);
+        let pkg = opens(&mut a, module("src::Jobs::Mailer"), "App::Jobs");
+        declares(&mut a, pkg, "App::Jobs::Mailer", &["issue"]);
+        let mut b = file("lib/Jobs/Queue.php", "lib::Jobs::Queue", "Queue", &[]);
+        let pkg_b = opens(&mut b, module("lib::Jobs::Queue"), "App::Jobs");
+        declares(&mut b, pkg_b, "App::Jobs::Queue", &["issue"]);
+        // A same-named class of another namespace.
+        let other = php_class("src/Mail/Mailer.php", "src::Mail::Mailer", "App::Mail", &["issue"]);
+        let q = "src::Orders::OrderService";
+        let svc = php_class("src/Orders/OrderService.php", q, "App::Orders", &["run"]);
+        let svc = uses(svc, q, "App::Jobs", "Mailer", "run");
+        let g = build_dotted(repo(), vec![a, b, other, svc]).expect("build");
+        let mailer = class("App::Jobs::Mailer");
+        assert_eq!(imports_of(&g, q), [(mailer, "namespace".to_string())]);
+        assert_eq!(calls_of(&g, "OrderService"), [method("App::Jobs::Mailer::issue")]);
+        let idx = NamespaceIndex::build(&g);
+        assert_eq!(idx.member("App::Jobs", "Queue"), NsHit::Unique(class("App::Jobs::Queue")));
+    }
+
+    #[test]
+    fn declared_namespace_without_the_member_binds_nothing() {
+        // `use App\Billing\Invoicer;` while the only Invoicer is App\Legacy's.
+        let mut parses = vec![
+            php_class("src/Billing/Ledger.php", "src::Billing::Ledger", "App::Billing", &["post"]),
+            php_class("src/Legacy/Invoicer.php", "src::Legacy::Invoicer", "App::Legacy", &["issue"]),
+        ];
+        parses.push(service("OrderService", "php", "App::Billing"));
+        let imports = all_imports(&parses);
+        let g = build_dotted(repo(), parses).expect("build");
+        assert!(imports_of(&g, "src::Orders::OrderService").is_empty());
+        assert!(calls_of(&g, "OrderService").is_empty());
+        let (stats, _) = replay(&g, &imports);
+        assert_eq!(stats.missing, 1);
+    }
+
+    #[test]
+    fn a_class_two_files_declare_in_one_namespace_binds_nothing() {
+        let mut parses = vec![
+            php_class("src/Billing/Invoicer.php", "src::Billing::Invoicer", "App::Billing", &["issue"]),
+            php_class("lib/Billing/Invoicer.php", "lib::Billing::Invoicer", "App::Billing", &["issue"]),
+        ];
+        parses.push(service("OrderService", "php", "App::Billing"));
+        let imports = all_imports(&parses);
+        let g = build_dotted(repo(), parses).expect("build");
+        assert!(imports_of(&g, "src::Orders::OrderService").is_empty());
+        let (stats, _) = replay(&g, &imports);
+        assert_eq!(stats.ambiguous, 1);
+    }
+
+    #[test]
+    fn a_namespace_import_keeps_the_head_path() {
+        // `use App\Billing;` (PHP) / `using Shop.Core;` (C#) name a namespace,
+        // not a member: HEAD's short-name lookup binds the PACKAGE, whether or
+        // not the parent namespace `App` is itself declared.
+        let mut root = file("src/Kernel.php", "src::Kernel", "Kernel", &[]);
+        opens(&mut root, module("src::Kernel"), "App");
+        let invoicer =
+            php_class("src/Billing/Invoicer.php", "src::Billing::Invoicer", "App::Billing", &["issue"]);
+        let mut svc = service("OrderService", "php", "App");
+        if let Some(ImportStmt { target: ImportTarget::Symbol { name, .. }, .. }) = svc.imports.last_mut() {
+            *name = "Billing".to_string();
+        }
+        let imports = svc.imports.clone();
+        let g = build_dotted(repo(), vec![root, invoicer, svc]).expect("build");
+        let billing_ns = gid(node_kind::PACKAGE, "App::Billing");
+        assert_eq!(
+            imports_of(&g, "src::Orders::OrderService"),
+            [(billing_ns, "tail_unique".to_string())]
+        );
+        let idx = NamespaceIndex::build(&g);
+        assert_eq!(idx.member("App", "Billing"), NsHit::Namespace);
+        // `App` undeclared: still a namespace import, never the refusal.
+        let mut no_root = NamespaceIndex::build(&g);
+        no_root.members.remove("App");
+        assert_eq!(no_root.member("App", "Billing"), NsHit::Namespace);
+        let (stats, marker) = replay(&g, &imports);
+        assert_eq!(stats, NamespaceStats::default());
+        assert_eq!(marker, None);
     }
 }
