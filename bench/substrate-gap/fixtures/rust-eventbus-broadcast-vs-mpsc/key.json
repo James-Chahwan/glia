@@ -1,0 +1,44 @@
+{
+  "framework": "rust-tokio-broadcast-vs-mpsc",
+  "language": "rust",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "eventbus",
+  "cells": [
+    "rust/eventbus"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "Shipped"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "Shipped"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "Shipped",
+      "to": "Shipped",
+      "category": "EVENT_FLOWS"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "Run",
+      "max_nodes": 0,
+      "note": "an mpsc work queue is not a bus"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "Run",
+      "max_nodes": 0,
+      "note": "an mpsc receive is not a bus subscription"
+    }
+  ],
+  "note": "DG.3 precision twin of matrix/rust/eventbus: the event enum is read only from broadcast channel types."
+}

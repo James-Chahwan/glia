@@ -374,6 +374,11 @@ struct EventSide {
     prefix: &'static str,
     /// The type-keyed pass ([`scan_type_needles`] over the side's needles).
     typed: fn(&str) -> Vec<(String, usize)>,
+    /// DG.3: the typed in-process bus pass ([`bus_emitters`] /
+    /// [`bus_handlers`]): tokio broadcast variants, Akka / Pekko EventStream
+    /// classes. It reads the guard itself for the occurrences that only gate
+    /// a site (the enum's channel type, a receive, a pattern's `let`).
+    buses: fn(&str, &mut LazyGuard<'_>) -> Vec<BusSite>,
     patterns: &'static [(&'static str, NameRule, bool, VerbGate)],
     /// DF.12: the side of a literal blinker site ([`blinker_literal_sites`])
     /// this side mints.
@@ -386,6 +391,7 @@ const EMITTER_SIDE: EventSide = EventSide {
     kind: node_kind::EVENT_EMITTER,
     prefix: "event_emit:",
     typed: typed_emitters,
+    buses: bus_emitters,
     patterns: EMITTER_PATTERNS,
     signal_side: PySignalSide::Emit,
 };
@@ -396,6 +402,7 @@ const HANDLER_SIDE: EventSide = EventSide {
     kind: node_kind::EVENT_HANDLER,
     prefix: "event_handle:",
     typed: typed_handlers,
+    buses: bus_handlers,
     patterns: HANDLER_PATTERNS,
     signal_side: PySignalSide::Handle,
 };
@@ -558,6 +565,14 @@ pub fn replace_event_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fo
 /// byte sits in a string literal or comment is no site ([`LazyGuard`]); the
 /// post-cache fold reads the same path, so it refuses the same occurrences.
 ///
+/// DG.3: after the type-keyed pass, the typed in-process buses ([`BusSite`]:
+/// tokio broadcast variants, Akka / Pekko EventStream classes), each site
+/// through the same guard, Medium, every site anchored, into the same `seen`
+/// set. fired_on marker, per side of a file where that pass read a site, per
+/// framework (per-file pass only):
+///   `... 2>&1 | grep '\[eventbus\] typed-bus'`
+///   `[eventbus] typed-bus side=<emitter|handler> framework=<tokio-broadcast|akka-eventstream> n=<distinct names> path=<path>`
+///
 /// DF.12: last, in a `.py` file, the literal blinker sites of the side
 /// ([`blinker_literal_sites`]: `signal("x").send(..)`, `@signal("x").connect`),
 /// Medium, every site anchored, into the same `seen` set. fired_on marker, per
@@ -595,6 +610,34 @@ fn emit_event_nodes(
             repo,
         );
         anchors.push(Anchor { node: id, line: line_of(source, at) });
+    }
+
+    // DG.3: the typed in-process buses, Medium like the type-keyed pass (a
+    // real type or variant names each site), every site anchored. The
+    // distinct names per framework feed the marker below.
+    let mut bus_names: Vec<(&'static str, BTreeSet<String>)> = Vec::new();
+    for (name, at, framework) in (side.buses)(source, &mut guard) {
+        if !guard.admits(at) {
+            continue;
+        }
+        let (id, _) = push_event_node(
+            &mut nodes,
+            &mut nav,
+            &mut seen,
+            &name,
+            side.kind,
+            side.prefix,
+            Confidence::Medium,
+            module_id,
+            repo,
+        );
+        anchors.push(Anchor { node: id, line: line_of(source, at) });
+        match bus_names.iter_mut().find(|(f, _)| *f == framework) {
+            Some((_, names)) => {
+                names.insert(name);
+            }
+            None => bus_names.push((framework, BTreeSet::from([name]))),
+        }
     }
 
     let mut ctx = VerbCtx::default();
@@ -656,6 +699,13 @@ fn emit_event_nodes(
                 "[event-py-literal] blinker literal sites={} side={} file={path}",
                 literal.len(),
                 side.label
+            );
+        }
+        for (framework, names) in &bus_names {
+            eprintln!(
+                "[eventbus] typed-bus side={} framework={framework} n={} path={path}",
+                side.label,
+                names.len()
             );
         }
         guard.report(side.guard_label);
@@ -1910,6 +1960,450 @@ fn is_event_name(lit: &str) -> bool {
         prev = Some(c);
     }
     alnum
+}
+
+// ============================================================================
+// DG.3: typed in-process buses — tokio broadcast and the Akka / Pekko
+// EventStream
+// ============================================================================
+//
+// Two buses whose event is a TYPE, never a string, so neither the string
+// needles (a literal or a constant after the verb) nor the type-keyed needles
+// (`publishEvent(new `, MediatR) see them:
+//
+// - tokio `broadcast::channel::<Event>(16)`: Rust's in-process
+//   multi-consumer pub/sub (docs.rs tokio::sync::broadcast: `Sender::send`,
+//   `Sender::subscribe`, `Receiver::recv`). An enum of events is the idiom,
+//   so the event is the VARIANT: `tx.send(Event::OrderPlaced(..))` emits
+//   `OrderPlaced`, `while let Ok(Event::OrderPlaced(id)) = rx.recv().await`
+//   handles it. The enum comes only from broadcast channel types
+//   ([`tokio_broadcast_enums`]), so a work queue's `mpsc::Sender<Job>` mints
+//   nothing.
+// - Akka / Pekko EventStream: classic `system.eventStream.publish(T(..))` /
+//   `.subscribe(ref, classOf[T])`, typed `EventStream.Publish(e)` /
+//   `EventStream.Subscribe[T](ref)`. The event is the class
+//   ([`akka_event_stream_sites`]).
+//
+// A site names a real event or mints nothing (CB.3a): a value read from a
+// variable (`publish(evt)`) names no type. Both buses are in-process, so the
+// nodes carry no transport ORIGIN (LB.8b) and the EventBusResolver pairs them
+// inside one project. Every site goes through [`emit_event_nodes`]' CJ.1a
+// guard; the enum collection and the receive gate read only occurrences the
+// guard admits, so glia's own test literals mint nothing.
+
+/// DG.3: one typed-bus site — (event name, byte offset of the site,
+/// framework label for the `[eventbus] typed-bus` marker).
+type BusSite = (String, usize, &'static str);
+
+/// DG.3: which side of a typed bus a scan reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BusSide {
+    Emit,
+    Handle,
+}
+
+const TOKIO_BROADCAST: &str = "tokio-broadcast";
+const AKKA_EVENT_STREAM: &str = "akka-eventstream";
+
+/// The tokio broadcast types whose generic argument is the event enum:
+/// `broadcast::channel::<E>(..)`, `broadcast::Sender<E>`,
+/// `broadcast::Receiver<E>` (a `tokio::sync::` prefix included).
+/// async_broadcast is out of scope.
+const BROADCAST_TYPES: &[&str] = &[
+    "broadcast::channel::<",
+    "broadcast::Sender<",
+    "broadcast::Receiver<",
+];
+
+/// A file reads a broadcast handler only when it receives: `Receiver::recv`,
+/// `try_recv`, `blocking_recv`.
+const BROADCAST_RECEIVES: &[&str] = &[".recv()", ".try_recv()", ".blocking_recv()"];
+
+/// The broadcast emitter call, its argument the variant.
+const BROADCAST_SEND: &str = ".send(";
+
+/// How far back [`in_let_pattern`] looks for the `let` of a pattern.
+const LET_LOOKBACK: usize = 512;
+
+/// The imports that make `eventStream` / `EventStream` Akka's or Pekko's.
+const AKKA_IMPORTS: &[&str] = &[
+    "akka.actor",
+    "akka.event",
+    "org.apache.pekko.actor",
+    "org.apache.pekko.event",
+];
+
+/// The EventStream emitters, arg #0 the event: classic, then typed.
+const AKKA_PUBLISH: &[&str] = &["eventStream.publish(", "EventStream.Publish("];
+
+/// Classic subscribe: the event is the `classOf[T]` in the argument list.
+const AKKA_SUBSCRIBE: &str = "eventStream.subscribe(";
+const CLASS_OF: &str = "classOf[";
+
+/// Typed subscribe: the event is the type argument.
+const AKKA_SUBSCRIBE_TYPED: &str = "EventStream.Subscribe[";
+
+fn bus_emitters(source: &str, guard: &mut LazyGuard<'_>) -> Vec<BusSite> {
+    bus_sites(source, guard, BusSide::Emit)
+}
+
+fn bus_handlers(source: &str, guard: &mut LazyGuard<'_>) -> Vec<BusSite> {
+    bus_sites(source, guard, BusSide::Handle)
+}
+
+/// One side's typed-bus sites, tokio then Akka, each in source order.
+fn bus_sites(source: &str, guard: &mut LazyGuard<'_>, side: BusSide) -> Vec<BusSite> {
+    let mut out = tokio_broadcast_sites(source, side, guard);
+    out.extend(akka_event_stream_sites(source, side));
+    out
+}
+
+/// The event enums of a file's tokio broadcast channels: the last path
+/// segment of each [`BROADCAST_TYPES`] generic argument the guard admits,
+/// uppercase-initial, deduplicated, in source order.
+fn tokio_broadcast_enums<'s>(source: &'s str, guard: &mut LazyGuard<'_>) -> Vec<&'s str> {
+    let mut found: Vec<(usize, &str)> = Vec::new();
+    for needle in BROADCAST_TYPES {
+        for (at, _) in source.match_indices(needle) {
+            let Some((segments, _)) = path_at(source, skip_ws(source.as_bytes(), at + needle.len()))
+            else {
+                continue;
+            };
+            let Some(&name) = segments.last() else {
+                continue;
+            };
+            if is_type_name(name) && guard.admits(at) {
+                found.push((at, name));
+            }
+        }
+    }
+    found.sort_by_key(|&(at, _)| at);
+    let mut enums: Vec<&str> = Vec::new();
+    for (_, name) in found {
+        if !enums.contains(&name) {
+            enums.push(name);
+        }
+    }
+    enums
+}
+
+/// The `::`-separated ASCII identifier path starting at byte `i`
+/// (`Event::OrderPlaced`, `crate::events::Event`) as its segments, and the
+/// index past it; `None` when no identifier starts at `i`. A trailing `::`
+/// with no identifier after it is not consumed. Steps on ASCII bytes only, so
+/// every slice is on a char boundary.
+fn path_at(source: &str, i: usize) -> Option<(Vec<&str>, usize)> {
+    let b = source.as_bytes();
+    let mut segments = Vec::new();
+    let mut at = i;
+    loop {
+        let start = at;
+        while b.get(at).is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_') {
+            at += 1;
+        }
+        if at == start {
+            break;
+        }
+        segments.push(&source[start..at]);
+        let more = b.get(at) == Some(&b':')
+            && b.get(at + 1) == Some(&b':')
+            && b.get(at + 2).is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_');
+        if !more {
+            break;
+        }
+        at += 2;
+    }
+    (!segments.is_empty()).then_some((segments, at))
+}
+
+/// An uppercase-initial plain ASCII identifier: an enum, a variant, a class.
+fn is_type_name(name: &str) -> bool {
+    name.len() <= 128
+        && name.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+        && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+/// Every `E::V` of the file for an E in `enums` and an uppercase-initial V
+/// that ends its path (`Event::OrderPlaced`, also `events::Event::Placed`;
+/// `Event::Inner::X` is a module path, not a variant): (offset of E, V, the
+/// index past V), in source order.
+fn variant_paths<'s>(source: &'s str, enums: &[&str]) -> Vec<(usize, &'s str, usize)> {
+    let b = source.as_bytes();
+    let mut out = Vec::new();
+    for e in enums {
+        let needle = format!("{e}::");
+        for (at, _) in source.match_indices(needle.as_str()) {
+            if at > 0 && is_ident_byte(b[at - 1]) {
+                continue;
+            }
+            let Some((segments, end)) = path_at(source, at) else {
+                continue;
+            };
+            if let [first, variant] = segments.as_slice()
+                && first == e
+                && is_type_name(variant)
+            {
+                out.push((at, *variant, end));
+            }
+        }
+    }
+    out.sort_by_key(|&(at, _, _)| at);
+    out
+}
+
+/// DG.3: one side's tokio broadcast sites. EMITTER: `.send(E::V` (optional
+/// whitespace, E possibly path-qualified) -> (V, offset of E). HANDLER, only
+/// in a file that receives ([`BROADCAST_RECEIVES`]): an `E::V` that is a
+/// PATTERN — a match arm ([`arm_pattern`]) or inside a `let` / `if let` /
+/// `while let` pattern ([`in_let_pattern`]) — not inside a `.send(`
+/// argument, and not in a function that sends but never receives
+/// ([`producer_only`]).
+fn tokio_broadcast_sites(source: &str, side: BusSide, guard: &mut LazyGuard<'_>) -> Vec<BusSite> {
+    if !BROADCAST_TYPES.iter().any(|n| source.contains(n)) {
+        return Vec::new();
+    }
+    let enums = tokio_broadcast_enums(source, guard);
+    if enums.is_empty() {
+        return Vec::new();
+    }
+    let b = source.as_bytes();
+    // The `.send(` argument spans, and the variant each one emits.
+    let mut sends: Vec<(usize, usize)> = Vec::new();
+    let mut emitted: Vec<BusSite> = Vec::new();
+    for (at, _) in source.match_indices(BROADCAST_SEND) {
+        let open = at + BROADCAST_SEND.len();
+        let close = balanced_close(b, open).unwrap_or(source.len());
+        sends.push((open, close));
+        let arg = skip_ws(b, open);
+        let Some((segments, end)) = path_at(source, arg) else {
+            continue;
+        };
+        let [.., e, variant] = segments.as_slice() else {
+            continue;
+        };
+        if enums.contains(e) && is_type_name(variant) {
+            let e_at = end - variant.len() - 2 - e.len();
+            emitted.push((variant.to_string(), e_at, TOKIO_BROADCAST));
+        }
+    }
+    if side == BusSide::Emit {
+        return emitted;
+    }
+    let mut receives: Vec<usize> = BROADCAST_RECEIVES
+        .iter()
+        .flat_map(|n| source.match_indices(*n))
+        .map(|(at, _)| at)
+        .filter(|&at| guard.admits(at))
+        .collect();
+    if receives.is_empty() {
+        return Vec::new();
+    }
+    receives.sort_unstable();
+    let fns = rust_fn_keywords(source, guard);
+    let scope = FnScope { fns: &fns, sends: &sends, receives: &receives, len: source.len() };
+    variant_paths(source, &enums)
+        .into_iter()
+        .filter(|&(at, _, _)| !sends.iter().any(|&(open, close)| open <= at && at < close))
+        .filter(|&(at, _, _)| !producer_only(&scope, at))
+        .filter(|&(at, _, end)| arm_pattern(b, end) || in_let_pattern(source, at, guard))
+        .map(|(at, variant, _)| (variant.to_string(), at, TOKIO_BROADCAST))
+        .collect()
+}
+
+/// The offsets [`producer_only`] reads, all in ascending order: the file's
+/// `fn` keywords, its `.send(` argument spans and its admitted receives.
+struct FnScope<'a> {
+    fns: &'a [usize],
+    sends: &'a [(usize, usize)],
+    receives: &'a [usize],
+    len: usize,
+}
+
+/// True when the pattern at `at` sits in a function that sends and never
+/// receives: the producer inspecting its own event before it broadcasts
+/// (`if let Event::Error { .. } = ev { continue }` then `tx.send(ev)`), not a
+/// subscriber. The function is the text from the `fn` keyword before `at` to
+/// the next one (closures and nested items are inside it), so a dispatch
+/// helper that only matches (`fn handle(ev: Event) { match ev { .. } }`)
+/// still counts.
+fn producer_only(scope: &FnScope<'_>, at: usize) -> bool {
+    let next = scope.fns.partition_point(|&f| f <= at);
+    let start = next.checked_sub(1).map_or(0, |i| scope.fns[i]);
+    let end = scope.fns.get(next).copied().unwrap_or(scope.len);
+    let inside = |pos: usize| start <= pos && pos < end;
+    scope.sends.iter().any(|&(open, _)| inside(open)) && !scope.receives.iter().any(|&r| inside(r))
+}
+
+/// The offsets of a Rust source's `fn` keywords the guard admits, in source
+/// order: `fn` at a word start with whitespace after it (`fn(&str)` pointer
+/// types and `Fn` / `FnMut` bounds are not items).
+fn rust_fn_keywords(source: &str, guard: &mut LazyGuard<'_>) -> Vec<usize> {
+    let b = source.as_bytes();
+    source
+        .match_indices("fn")
+        .map(|(at, _)| at)
+        .filter(|&at| {
+            (at == 0 || !is_ident_byte(b[at - 1]))
+                && b.get(at + 2).is_some_and(u8::is_ascii_whitespace)
+        })
+        .filter(|&at| guard.admits(at))
+        .collect()
+}
+
+/// Index of the bracket closing the one at `open` (`(`, `[` or `{`), every
+/// bracket kind counted on one depth; `None` when it never closes.
+fn bracket_close(b: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, &c) in b.iter().enumerate().skip(open) {
+        match c {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// True when the variant path ending at `end` is a match-arm pattern: after
+/// its optional `(..)` / `{..}` payload and the closers of enclosing patterns
+/// (`Ok(Event::A(x))`), its line goes on with `=>`, an alternative `|` (never
+/// `||` or `|=`), or an `if` guard followed by `=>` on the same line.
+fn arm_pattern(b: &[u8], end: usize) -> bool {
+    let mut i = skip_blank(b, end);
+    if matches!(b.get(i), Some(b'(' | b'{')) {
+        let Some(close) = bracket_close(b, i) else {
+            return false;
+        };
+        i = close + 1;
+    }
+    loop {
+        i = skip_blank(b, i);
+        if matches!(b.get(i), Some(b')' | b']')) {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    match (b.get(i), b.get(i + 1)) {
+        (Some(b'='), Some(b'>')) => true,
+        (Some(b'|'), next) => !matches!(next, Some(b'|' | b'=')),
+        (Some(b'i'), Some(b'f')) if b.get(i + 2).is_some_and(u8::is_ascii_whitespace) => {
+            let line_end = b[i..]
+                .iter()
+                .position(|&c| c == b'\n')
+                .map_or(b.len(), |n| i + n);
+            b[i..line_end].windows(2).any(|w| w == b"=>")
+        }
+        _ => false,
+    }
+}
+
+/// True when the variant path at `at` lies in a `let` / `if let` / `while let`
+/// pattern: walking back from it, a `let` keyword the guard admits comes
+/// before any `=` (the statement's right-hand side, a comparison, an arm's
+/// `=>`), `;` or block-opening `{` outside the brackets passed over. An
+/// enclosing pattern's opening bracket (`Ok(`, `Some(`, a tuple) is stepped
+/// out of. Bounded to [`LET_LOOKBACK`] bytes; ASCII bytes only.
+fn in_let_pattern(source: &str, at: usize, guard: &mut LazyGuard<'_>) -> bool {
+    let b = source.as_bytes();
+    let floor = at.saturating_sub(LET_LOOKBACK);
+    let mut depth = 0usize;
+    let mut i = at;
+    while i > floor {
+        i -= 1;
+        match b[i] {
+            b')' | b']' | b'}' => depth += 1,
+            b'(' | b'[' => depth = depth.saturating_sub(1),
+            b'{' if depth > 0 => depth -= 1,
+            b'{' | b';' | b'=' if depth == 0 => return false,
+            b't' if depth == 0
+                && i >= 2
+                && &b[i - 2..=i] == b"let"
+                && (i == 2 || !is_ident_byte(b[i - 3]))
+                && !b.get(i + 1).is_some_and(|&c| is_ident_byte(c)) =>
+            {
+                if guard.admits(i - 2) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// DG.3: one side's Akka / Pekko EventStream sites, in a file naming an Akka
+/// or Pekko actor / event package ([`AKKA_IMPORTS`]). EMITTER:
+/// `eventStream.publish(` and the typed `EventStream.Publish(` -> the
+/// [`leading_type`] of arg #0. HANDLER: `eventStream.subscribe(` -> the
+/// `classOf[T]` in its argument list; the typed `EventStream.Subscribe[T](`
+/// -> T. Each at the needle's offset, in source order.
+fn akka_event_stream_sites(source: &str, side: BusSide) -> Vec<BusSite> {
+    if !AKKA_IMPORTS.iter().any(|i| source.contains(i)) {
+        return Vec::new();
+    }
+    let b = source.as_bytes();
+    let mut out: Vec<BusSite> = Vec::new();
+    let mut push = |name: Option<&str>, at: usize| {
+        if let Some(name) = name {
+            out.push((name.to_string(), at, AKKA_EVENT_STREAM));
+        }
+    };
+    match side {
+        BusSide::Emit => {
+            for needle in AKKA_PUBLISH {
+                for (at, _) in source.match_indices(needle) {
+                    push(leading_type(&source[at + needle.len()..]), at);
+                }
+            }
+        }
+        BusSide::Handle => {
+            for (at, _) in source.match_indices(AKKA_SUBSCRIBE) {
+                let open = at + AKKA_SUBSCRIBE.len();
+                let close = balanced_close(b, open).unwrap_or(source.len());
+                let args = &source[open..close];
+                let name = args
+                    .find(CLASS_OF)
+                    .and_then(|i| class_name(&args[i + CLASS_OF.len()..], b"]["));
+                push(name, at);
+            }
+            for (at, _) in source.match_indices(AKKA_SUBSCRIBE_TYPED) {
+                push(class_name(&source[at + AKKA_SUBSCRIBE_TYPED.len()..], b"]["), at);
+            }
+        }
+    }
+    out.sort_by_key(|&(_, at, _)| at);
+    out
+}
+
+/// The class an Akka publish argument constructs: `T(..)`, `new T(..)`, a
+/// bare `T` (a case object), `pkg.T`, `T { .. }` — the last `.` segment,
+/// uppercase-initial. A value (`evt`, `x.event`) or an expression names no
+/// class.
+fn leading_type(arg: &str) -> Option<&str> {
+    let arg = arg.trim_start();
+    let arg = arg.strip_prefix("new ").map_or(arg, str::trim_start);
+    class_name(arg, b"([{),")
+}
+
+/// The dotted ASCII name at the start of `text` (`OrderPlaced`,
+/// `events.OrderPlaced`), its last segment, when it is uppercase-initial and
+/// the first non-blank byte after it is one of `follow`.
+fn class_name<'s>(text: &'s str, follow: &[u8]) -> Option<&'s str> {
+    let end = text
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+        .unwrap_or(text.len());
+    let next = text[end..].trim_start_matches([' ', '\t']).as_bytes().first()?;
+    if !follow.contains(next) {
+        return None;
+    }
+    let name = text[..end].rsplit('.').next()?;
+    is_type_name(name).then_some(name)
 }
 
 // ============================================================================
@@ -4398,5 +4892,176 @@ mod tests {
                 .nodes
                 .is_empty()
         );
+    }
+
+    // ---- DG.3: typed in-process buses ----
+
+    fn bus_qnames(src: &str, path: &str) -> (Vec<String>, Vec<String>) {
+        (
+            qnames(&extract_event_emitter_nodes(src, path, module_id(), repo())),
+            qnames(&extract_event_handler_nodes(src, path, module_id(), repo())),
+        )
+    }
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// matrix/rust/eventbus/src/events.rs, verbatim.
+    const TOKIO_MATRIX: &str = "use tokio::sync::broadcast;\n\n#[derive(Clone, Debug)]\npub enum Event {\n    OrderPlaced(String),\n}\n\npub async fn wire() {\n    let (tx, mut rx) = broadcast::channel::<Event>(16);\n    tokio::spawn(async move {\n        while let Ok(Event::OrderPlaced(id)) = rx.recv().await {\n            println!(\"{id}\");\n        }\n    });\n    let _ = tx.send(Event::OrderPlaced(\"o-1\".into()));\n}\n";
+
+    #[test]
+    fn tokio_broadcast_variants_are_events() {
+        let (emit, handle) = bus_qnames(TOKIO_MATRIX, "src/events.rs");
+        assert_eq!(emit, strs(&["event_emit:OrderPlaced"]));
+        assert_eq!(handle, strs(&["event_handle:OrderPlaced"]));
+        // Anchors are 0-based lines: the send, then the `while let`.
+        let out = extract_event_emitter_nodes(TOKIO_MATRIX, "src/events.rs", module_id(), repo());
+        assert!(out.nodes.iter().all(|n| n.confidence == Confidence::Medium));
+        assert_eq!(out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![14]);
+        let out = extract_event_handler_nodes(TOKIO_MATRIX, "src/events.rs", module_id(), repo());
+        assert_eq!(out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![10]);
+
+        // A match over a receive: every arm's variant, alternatives included;
+        // the qualified send and a field type of the bus name the enum.
+        let arms = "pub struct Hub { tx: tokio::sync::broadcast::Sender<crate::bus::Event> }\n\
+            async fn run(hub: &Hub, mut rx: broadcast::Receiver<Event>) {\n\
+            \x20   let _ = hub.tx.send(bus::Event::D { id: 1 });\n\
+            \x20   match rx.recv().await {\n\
+            \x20       Ok(Event::A(x)) => println!(\"{x}\"),\n\
+            \x20       Ok(Event::B) | Ok(Event::C) => {}\n\
+            \x20       Ok(Event::E { id }) if id > 0 => {}\n\
+            \x20       _ => {}\n\
+            \x20   }\n\
+            \x20   let made = Event::F(1);\n\
+            \x20   if made == Event::G {}\n\
+            }\n";
+        let (emit, handle) = bus_qnames(arms, "src/hub.rs");
+        assert_eq!(emit, strs(&["event_emit:D"]));
+        assert_eq!(
+            handle,
+            strs(&["event_handle:A", "event_handle:B", "event_handle:C", "event_handle:E"])
+        );
+
+        // A pattern in a file that never receives is no handler.
+        let no_recv = "fn f(tx: broadcast::Sender<Event>, e: Event) {\n    match e { Event::A => {} }\n    let _ = tx.send(Event::A);\n}\n";
+        let (emit, handle) = bus_qnames(no_recv, "src/a.rs");
+        assert_eq!(emit, strs(&["event_emit:A"]));
+        assert!(handle.is_empty(), "{handle:?}");
+    }
+
+    #[test]
+    fn tokio_producer_inspecting_its_event_is_no_handler() {
+        // A sender that filters its own event before broadcasting is the
+        // producer, while a helper that only matches is the subscriber's
+        // dispatch; the receive is in a third function.
+        let src = "fn reader(tx: broadcast::Sender<Event>, ev: Event) {\n\
+            \x20   if let Event::Error { ref code, .. } = ev {\n\
+            \x20       return;\n\
+            \x20   }\n\
+            \x20   let _ = tx.send(ev);\n\
+            \x20   let _ = tx.send(Event::Error { code: 1 });\n\
+            }\n\
+            async fn run(mut rx: broadcast::Receiver<Event>) {\n\
+            \x20   while let Ok(ev) = rx.recv().await { handle(ev); }\n\
+            }\n\
+            fn handle(ev: Event) {\n\
+            \x20   match ev { Event::Ready => {} _ => {} }\n\
+            }\n";
+        let (emit, handle) = bus_qnames(src, "src/bridge.rs");
+        assert_eq!(emit, strs(&["event_emit:Error"]));
+        assert_eq!(handle, strs(&["event_handle:Ready"]));
+    }
+
+    #[test]
+    fn tokio_mpsc_enum_is_not_a_bus() {
+        // bench/substrate-gap/fixtures/rust-eventbus-broadcast-vs-mpsc/src/wire.rs
+        let src = "use tokio::sync::{broadcast, mpsc};\n\n#[derive(Clone, Debug)]\npub enum Event {\n    Shipped(u32),\n}\n\n#[derive(Debug)]\npub enum Job {\n    Run(u32),\n}\n\npub async fn wire(\n    events: broadcast::Sender<Event>,\n    jobs: mpsc::Sender<Job>,\n    mut inbox: mpsc::Receiver<Job>,\n) {\n    let mut rx = events.subscribe();\n    let _ = events.send(Event::Shipped(1));\n    let _ = jobs.send(Job::Run(1)).await;\n    while let Some(Job::Run(n)) = inbox.recv().await {\n        println!(\"{n}\");\n    }\n    if let Ok(Event::Shipped(id)) = rx.recv().await {\n        println!(\"{id}\");\n    }\n}\n";
+        let (emit, handle) = bus_qnames(src, "src/wire.rs");
+        assert_eq!(emit, strs(&["event_emit:Shipped"]));
+        assert_eq!(handle, strs(&["event_handle:Shipped"]));
+        // With no broadcast type at all, the same calls are a work queue.
+        let queue = src.replace("broadcast::Sender<Event>", "mpsc::Sender<Event>");
+        let (emit, handle) = bus_qnames(&queue, "src/wire.rs");
+        assert!(emit.is_empty() && handle.is_empty(), "{emit:?} {handle:?}");
+    }
+
+    #[test]
+    fn tokio_broadcast_needle_in_a_rust_string_is_no_site() {
+        let sample = concat!(
+            "const SAMPLE: &str = r#\"let (tx, mut rx) = broadcast::channel::<Event>(16);\n",
+            "let _ = tx.send(Event::A(1));\n",
+            "while let Ok(Event::A(x)) = rx.recv().await {}\"#;\n",
+            "// tx.send(Event::B(2)); let Ok(Event::B(y)) = rx.recv();\n",
+        );
+        let (emit, handle) = bus_qnames(sample, "src/sample.rs");
+        assert!(emit.is_empty() && handle.is_empty(), "{emit:?} {handle:?}");
+        // Control: the same lines as code are a bus.
+        let live = "let (tx, mut rx) = broadcast::channel::<Event>(16);\nlet _ = tx.send(Event::A(1));\nwhile let Ok(Event::A(x)) = rx.recv().await {}\n";
+        let (emit, handle) = bus_qnames(live, "src/sample.rs");
+        assert_eq!((emit, handle), (strs(&["event_emit:A"]), strs(&["event_handle:A"])));
+        // The enum is read only from a channel type in code: a real send of a
+        // variant whose enum only a string names mints nothing either.
+        let half = "const T: &str = \"broadcast::Sender<Event>\";\nfn f(tx: X) { let _ = tx.send(Event::A(1)); }\n";
+        let (emit, _) = bus_qnames(half, "src/half.rs");
+        assert!(emit.is_empty(), "{emit:?}");
+    }
+
+    /// matrix/scala/eventbus/Orders.scala, verbatim.
+    const AKKA_MATRIX: &str = "package shop\n\nimport akka.actor.{ActorRef, ActorSystem}\n\ncase class OrderPlaced(id: String)\n\nobject Orders {\n  def wire(system: ActorSystem, listener: ActorRef): Unit = {\n    system.eventStream.subscribe(listener, classOf[OrderPlaced])\n    system.eventStream.publish(OrderPlaced(\"o-1\"))\n  }\n}\n";
+
+    #[test]
+    fn akka_event_stream_publish_and_subscribe() {
+        let (emit, handle) = bus_qnames(AKKA_MATRIX, "Orders.scala");
+        assert_eq!(emit, strs(&["event_emit:OrderPlaced"]));
+        assert_eq!(handle, strs(&["event_handle:OrderPlaced"]));
+
+        // Classic `new T(..)` / a case object / a qualified class, typed
+        // Publish / Subscribe[T], Pekko's package; a value names nothing.
+        let more = "import org.apache.pekko.actor.typed.eventstream.EventStream\n\
+            object W {\n\
+            \x20 def f(sys: ActorSystem[_], ref: ActorRef[Shipped], evt: Any): Unit = {\n\
+            \x20   sys.eventStream ! EventStream.Publish(Shipped(\"s\"))\n\
+            \x20   sys.eventStream ! EventStream.Subscribe[Shipped](ref)\n\
+            \x20   classic.eventStream.publish(new Cancelled(\"c\"))\n\
+            \x20   classic.eventStream.publish(Events.Refunded)\n\
+            \x20   classic.eventStream.publish(evt)\n\
+            \x20   classic.eventStream.subscribe(self, classOf[Events.Refunded])\n\
+            \x20 }\n\
+            }\n";
+        let (emit, handle) = bus_qnames(more, "W.scala");
+        assert_eq!(
+            emit,
+            strs(&["event_emit:Cancelled", "event_emit:Refunded", "event_emit:Shipped"])
+        );
+        assert_eq!(handle, strs(&["event_handle:Refunded", "event_handle:Shipped"]));
+    }
+
+    #[test]
+    fn akka_gate_needs_the_import() {
+        let bare = AKKA_MATRIX.replace("import akka.actor.{ActorRef, ActorSystem}\n", "");
+        let (emit, handle) = bus_qnames(&bare, "Orders.scala");
+        assert!(emit.is_empty() && handle.is_empty(), "{emit:?} {handle:?}");
+        let (emit, handle) =
+            bus_qnames(&AKKA_MATRIX.replace("akka.actor", "org.apache.pekko.actor"), "Orders.scala");
+        assert_eq!(emit, strs(&["event_emit:OrderPlaced"]));
+        assert_eq!(handle, strs(&["event_handle:OrderPlaced"]));
+    }
+
+    #[test]
+    fn typed_bus_scans_never_panic_on_truncated_or_multibyte_sources() {
+        let cuts = [TOKIO_MATRIX, AKKA_MATRIX];
+        for src in cuts {
+            for end in 0..=src.len() {
+                if let Some(head) = src.get(..end) {
+                    for path in ["a.rs", "a.scala", ""] {
+                        let _ = bus_qnames(head, path);
+                    }
+                }
+            }
+        }
+        let wide = "use tokio::sync::broadcast;\nfn f(tx: broadcast::Sender<Évent>, rx: broadcast::Receiver<Event>) {\n  let é = tx.send(Event::Ä(1)); let Ok(Event::Ü) = rx.recv() else { return };\n  match rx.recv() { Ok(Event::Ö(x)) => {} }\n}\nimport akka.actor\nx.eventStream.publish(Ärger(1)); x.eventStream.subscribe(r, classOf[Über])\n";
+        let (emit, handle) = bus_qnames(wide, "a.rs");
+        assert!(emit.is_empty() && handle.is_empty(), "{emit:?} {handle:?}");
     }
 }
