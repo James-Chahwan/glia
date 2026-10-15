@@ -78,6 +78,12 @@ pub enum QueueFramework {
     /// hibiken/asynq (Go): the task TYPE string, `asynq.NewTask("email:welcome",
     /// p)` + `mux.HandleFunc("email:welcome", h)`.
     Asynq,
+    // --- DG.1: a task queue whose job is a TYPE ------------------------------
+    /// apalis (Rust): the job is the TYPE a storage holds and a worker's
+    /// handler takes, `storage.push(Email { .. })` +
+    /// `WorkerBuilder::new(..).backend(storage).build_fn(send_email)` with
+    /// `async fn send_email(job: Email)`.
+    Apalis,
 }
 
 impl QueueFramework {
@@ -104,6 +110,7 @@ impl QueueFramework {
             QueueFramework::JobRunr => "jobrunr",
             QueueFramework::Hangfire => "hangfire",
             QueueFramework::Asynq => "asynq",
+            QueueFramework::Apalis => "apalis",
         }
     }
 }
@@ -223,7 +230,10 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     (".subscribe(&[", QueueFramework::Kafka, &["rdkafka"], TopicRule::ArgLiteral),
     // Python — pika / amqp: `ch.basic_consume(queue="orders", ...)`,
     // receiver-free. CL.1: `queue_declare(` is a DECLARE_PATTERNS row now.
-    ("basic_consume(", QueueFramework::RabbitMQ, &["pika", "amqp"], TopicRule::KeyedOrArg(&["queue"])),
+    // DG.1: Rust — lapin `channel.basic_consume("orders", "worker", opts,
+    // args)`, the queue positional (arg #1 is the consumer TAG, a literal, so
+    // the pika handler rule below reads no handler from it).
+    ("basic_consume(", QueueFramework::RabbitMQ, &["pika", "amqp", "lapin"], TopicRule::KeyedOrArg(&["queue"])),
     // C# — RabbitMQ.Client v6 `channel.BasicConsume(queue: "orders",
     // autoAck: true, consumer: c)` (named or positional) and v7
     // `BasicConsumeAsync`. CL.1: before this row the C# consumer was found
@@ -402,6 +412,38 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // `emit_queue_nodes` drops for this framework.
     (".HandleFunc(", QueueFramework::Asynq, &["hibiken/asynq"], TopicRule::ArgLiteral),
     (".Handle(", QueueFramework::Asynq, &["hibiken/asynq"], TopicRule::ArgLiteral),
+    // ---- DG.1: Rust broker clients and apalis -------------------------------
+    // Every gate is the crate's Rust PATH (lowercase, the gate reads the
+    // lowercased file): a crate is named in `use` / a path, never only in
+    // Cargo.toml. Every row sits BEFORE the A2.9 block, so the Redis / MQTT
+    // generic `.subscribe(` rows yield to a call one of these read. lapin's
+    // consume is the pika `basic_consume(` row above, its gate widened.
+    // azservicebus (the Rust crate): `client.create_receiver_for_queue(
+    // "orders", opts)`. A subscription receiver reads its TOPIC (arg #0), so
+    // it joins the sender: the `CreateProcessor(` precedent.
+    (".create_receiver_for_queue(", QueueFramework::AzureServiceBus, &["azservicebus"], TopicRule::ArgLiteral),
+    (".create_receiver_for_subscription(", QueueFramework::AzureServiceBus, &["azservicebus"], TopicRule::ArgLiteral),
+    // async-nats: `client.subscribe("orders")`, `client.queue_subscribe(
+    // "orders", "workers".into())`. Receiver-agnostic inside a file naming
+    // the crate (the NATS.Net `.PublishAsync` trade): the NATS rows are no
+    // shared verb ([`is_generic_verb_row`]), so they read arg #0 normally.
+    (".subscribe(", QueueFramework::Nats, &["async_nats"], TopicRule::ArgLiteral),
+    (".queue_subscribe(", QueueFramework::Nats, &["async_nats"], TopicRule::ArgLiteral),
+    // google-cloud-pubsub (the yoshidan crate): `client.subscription("s")`. A
+    // subscription pairs only when spelled like its topic (the JS
+    // `.subscription(` row's COVERAGE_CAVEATS gap).
+    (".subscription(", QueueFramework::PubSub, &["google_cloud_pubsub"], TopicRule::ArgLiteral),
+    // aws-sdk-sqs fluent builder: `client.receive_message().queue_url(url)
+    // .send().await`, the URL a builder METHOD after an argument-less call
+    // (CL.3's Chain rule); `queue_topic::fold_topic` reduces it to the name.
+    (".receive_message()", QueueFramework::Sqs, &["aws_sdk_sqs"], TopicRule::Chain(&["queue_url"])),
+    // apalis: `WorkerBuilder::new("w").backend(storage).build_fn(send_email)`
+    // (0.6 / 0.7) or `.build(send_email)` (main), the job the handler's first
+    // parameter TYPE (`async fn send_email(job: Email)`) or the backend
+    // storage's. `.build(` is every builder's: a statement without
+    // `WorkerBuilder` is no site (`TopicRule::WorkerJobType`).
+    (".build_fn(", QueueFramework::Apalis, &["apalis"], TopicRule::WorkerJobType),
+    (".build(", QueueFramework::Apalis, &["apalis"], TopicRule::WorkerJobType),
     // ---- A2.9: broker pub/sub that used to live in eventbus.rs ----------
     // These verbs are the broadest needles in the table, so every row below is
     // a GENERIC-VERB row ([`is_generic_verb_row`]): it yields to any earlier
@@ -663,6 +705,35 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // asynq: `asynq.NewTask("email:welcome", payload)`; `client.Enqueue(task)`
     // carries no type. A constant type folds through LA.4.
     ("asynq.NewTask(", QueueFramework::Asynq, &["hibiken/asynq"], TopicRule::ArgLiteral),
+    // ---- DG.1: Rust broker clients and apalis (see the CONSUMER_PATTERNS
+    // block) -------------------------------------------------------------------
+    // lapin: `channel.basic_publish(exchange, routing_key, opts, payload,
+    // props)`. The routing key (arg #1) names the queue on the default and
+    // direct exchanges; an EMPTY key (fanout) falls back to the exchange,
+    // amqplib's CL.1 rule. A one-line `channel.basic_publish("", "orders",
+    // ..)` also hits the HEAD `channel.basic_publish` row, which reads the
+    // empty exchange; CL.1's rule (i) drops that row's tag beside this one's
+    // node.
+    (".basic_publish(", QueueFramework::RabbitMQ, &["lapin"], TopicRule::ArgIndexOr(1, 0)),
+    // azservicebus: `client.create_sender("orders", opts)`, a queue or a topic.
+    (".create_sender(", QueueFramework::AzureServiceBus, &["azservicebus"], TopicRule::ArgLiteral),
+    // async-nats: `client.publish("orders", payload)`.
+    (".publish(", QueueFramework::Nats, &["async_nats"], TopicRule::ArgLiteral),
+    // google-cloud-pubsub: `client.topic("orders")` then
+    // `topic.new_publisher(None)`. KNOWN IMPRECISION, the JS `.topic(` row's:
+    // `.topic(` is a reference, not a publish.
+    (".topic(", QueueFramework::PubSub, &["google_cloud_pubsub"], TopicRule::ArgLiteral),
+    // aws-sdk-sqs / aws-sdk-sns fluent builders: `client.send_message()
+    // .queue_url(url).message_body(b).send().await`, `send_message_batch()`,
+    // and SNS `client.publish().topic_arn(arn)`. The URL / ARN folds.
+    (".send_message()", QueueFramework::Sqs, &["aws_sdk_sqs"], TopicRule::Chain(&["queue_url"])),
+    (".send_message_batch()", QueueFramework::Sqs, &["aws_sdk_sqs"], TopicRule::Chain(&["queue_url"])),
+    (".publish()", QueueFramework::Sns, &["aws_sdk_sns"], TopicRule::Chain(&["topic_arn"])),
+    // apalis: `storage.push(Email { .. })`, the job the storage's TYPE
+    // argument or the pushed value's type. `.push(` is every Vec's: the
+    // receiver must be declared in the file as a storage
+    // (`TopicRule::StorageJobType`), else the call is no site.
+    (".push(", QueueFramework::Apalis, &["apalis"], TopicRule::StorageJobType),
     // ---- A2.9: broker pub/sub (see the CONSUMER_PATTERNS block) -----------
     // Redis pub/sub — `r.publish('notifications', payload)`. Placed AFTER the
     // NATS / RabbitMQ / SNS rows: a file importing both is attributed to the
@@ -696,7 +767,8 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
 /// gate rules as [`CONSUMER_PATTERNS`].
 const DECLARE_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // Python — pika / amqp: `ch.queue_declare(queue="orders")`, receiver-free.
-    ("queue_declare(", QueueFramework::RabbitMQ, &["pika", "amqp"], TopicRule::KeyedOrArg(&["queue"])),
+    // DG.1: Rust — lapin `channel.queue_declare("orders", opts, args)`.
+    ("queue_declare(", QueueFramework::RabbitMQ, &["pika", "amqp", "lapin"], TopicRule::KeyedOrArg(&["queue"])),
     // C# — RabbitMQ.Client v6 `channel.QueueDeclare(queue: "orders", ...)`, v7
     // async. CL.2: Go's streadway/amqp and amqp091-go spell it the same,
     // positionally: `q, err := ch.QueueDeclare("orders", durable, ..)`.
@@ -754,7 +826,8 @@ fn is_broker(f: &QueueFramework) -> bool {
         | QueueFramework::Oban
         | QueueFramework::JobRunr
         | QueueFramework::Hangfire
-        | QueueFramework::Asynq => false,
+        | QueueFramework::Asynq
+        | QueueFramework::Apalis => false,
     }
 }
 
@@ -2026,6 +2099,8 @@ fn is_identity_rule(rule: &TopicRule) -> bool {
             | TopicRule::DeclaredSymbol
             | TopicRule::EnclosingSymbol
             | TopicRule::LambdaCallee
+            | TopicRule::StorageJobType
+            | TopicRule::WorkerJobType
     )
 }
 
@@ -2110,6 +2185,10 @@ const HANDLER_RULES: &[(&str, HandlerRule)] = &[
     // CL.4 asynq: `mux.HandleFunc(type, handler)`, `mux.Handle(type, handler)`.
     (".HandleFunc(", HandlerRule::ArgIndex(1)),
     (".Handle(", HandlerRule::ArgIndex(1)),
+    // DG.1 apalis: `WorkerBuilder::new(..).backend(s).build_fn(send_email)`,
+    // the worker's handler fn.
+    (".build_fn(", HandlerRule::ArgIndex(0)),
+    (".build(", HandlerRule::ArgIndex(0)),
 ];
 
 fn handler_rule(needle: &str) -> Option<HandlerRule> {
@@ -4397,13 +4476,13 @@ public class AuditFunction
         use QueueFramework::*;
         let all = [
             Celery, Dramatiq, BullMQ, Sidekiq, Oban, Nats, RabbitMQ, Kafka, RedisList, Sqs, Sns,
-            PubSub, AzureServiceBus, Mqtt, RedisPubSub, Jms, JobRunr, Hangfire, Asynq,
+            PubSub, AzureServiceBus, Mqtt, RedisPubSub, Jms, JobRunr, Hangfire, Asynq, Apalis,
         ];
         for f in &all {
             match f {
                 Celery | Dramatiq | BullMQ | Sidekiq | Oban | Nats | RabbitMQ | Kafka
                 | RedisList | Sqs | Sns | PubSub | AzureServiceBus | Mqtt | RedisPubSub | Jms
-                | JobRunr | Hangfire | Asynq => {}
+                | JobRunr | Hangfire | Asynq | Apalis => {}
             }
             assert!(is_framework_tag(&framework_tag(f)), "{f:?}");
         }
@@ -6439,5 +6518,175 @@ await myconsumer.run({ eachMessage: notMine });\n";
         // Without the asynq import the rows never fire.
         let plain = ASYNQ_CONSUMER.replace("\"github.com/hibiken/asynq\"", "\"example.com/q\"");
         assert_eq!(at(&plain, "client/worker.go"), (vec![], vec![]));
+    }
+
+    // ---- DG.1: Rust broker clients and apalis typed jobs -------------------
+
+    const RS_PATH: &str = "src/lib.rs";
+
+    fn rs_p(src: &str) -> Vec<String> {
+        qnames(&extract_queue_producer_nodes(src, RS_PATH, module_id(), repo()))
+    }
+
+    fn rs_c(src: &str) -> Vec<String> {
+        qnames(&extract_queue_consumer_nodes(src, RS_PATH, module_id(), repo()))
+    }
+
+    /// matrix/rust/amqp, both files.
+    const LAPIN_CONSUMER: &str = "use lapin::{options::BasicConsumeOptions, types::FieldTable, Channel};\n\npub async fn consume(channel: &Channel) {\n    let _consumer = channel\n        .basic_consume(\"orders\", \"worker\", BasicConsumeOptions::default(), FieldTable::default())\n        .await;\n}\n";
+    const LAPIN_PRODUCER: &str = "use lapin::{options::BasicPublishOptions, BasicProperties, Channel};\n\npub async fn publish(channel: &Channel, body: &[u8]) {\n    let _ = channel\n        .basic_publish(\"\", \"orders\", BasicPublishOptions::default(), body, BasicProperties::default())\n        .await;\n}\n";
+    /// matrix/rust/taskq, both files.
+    const APALIS_PRODUCER: &str = "use apalis::prelude::*;\n\npub async fn enqueue(storage: &mut apalis_redis::RedisStorage<crate::WelcomeEmail>) {\n    let _ = storage.push(crate::WelcomeEmail { to: \"a@b.c\".into() }).await;\n}\n";
+    const APALIS_CONSUMER: &str = "use apalis::prelude::*;\n\n#[derive(Debug, serde::Serialize, serde::Deserialize)]\npub struct WelcomeEmail {\n    pub to: String,\n}\n\npub async fn send_welcome(job: WelcomeEmail) -> Result<(), Error> {\n    Ok(())\n}\n\npub fn worker(storage: apalis_redis::RedisStorage<WelcomeEmail>) -> Worker<()> {\n    WorkerBuilder::new(\"welcome-email\").backend(storage).build_fn(send_welcome)\n}\n";
+
+    #[test]
+    fn rust_lapin_rows() {
+        let cr = extract_queue_consumer_nodes(LAPIN_CONSUMER, "client/src/worker.rs", module_id(), repo());
+        let pr = extract_queue_producer_nodes(LAPIN_PRODUCER, "server/src/publisher.rs", module_id(), repo());
+        assert_eq!(qnames(&cr), strs(&["queue_consumer:orders"]));
+        assert_eq!(qnames(&pr), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&pr).contains(r#""framework":"RabbitMQ""#));
+        // Arg #1 of lapin's `basic_consume` is the consumer TAG, a literal:
+        // the pika handler rule reads no handler from it, so the consumer
+        // carries no HANDLED_BY ref (only its owner edge to `consume`).
+        assert!(cr.callbacks.is_empty());
+        let fp = class_parse(LAPIN_CONSUMER, (0, 0), &[]);
+        assert!(refs_from(&fp, qid(node_kind::QUEUE_CONSUMER, "queue_consumer:orders")).is_empty());
+        let lapin = |body: &str| format!("use lapin::Channel;\n\nasync fn f(channel: &Channel) {{\n    {body};\n}}\n");
+        // One line: the ungated HEAD `channel.basic_publish` row reads the
+        // empty exchange beside this row; CL.1's rule (i) drops its tag.
+        assert_eq!(
+            rs_p(&lapin("channel.basic_publish(\"\", \"orders\", opts, body, props).await")),
+            strs(&["queue_producer:orders"])
+        );
+        // Fanout: an empty routing key keeps the exchange identity.
+        assert_eq!(
+            rs_p(&lapin("channel.basic_publish(\"logs\", \"\", opts, body, props).await")),
+            strs(&["queue_producer:logs"])
+        );
+        // lapin declares its queue and consumes it by name: the declare pass
+        // binds the unnamed consume to the file's one declared queue.
+        let declared = lapin(
+            "let queue = channel.queue_declare(\"jobs\", QueueDeclareOptions::default(), FieldTable::default()).await?;\n    let c = channel.basic_consume(queue.name().as_str(), \"w\", BasicConsumeOptions::default(), FieldTable::default()).await",
+        );
+        assert_eq!(rs_c(&declared), strs(&["queue_consumer:jobs"]));
+        // Without the crate, `.basic_publish(` is somebody else's.
+        assert_eq!(
+            rs_p("async fn f(bus: &Bus) {\n    bus.basic_publish(\"\", \"orders\").await;\n}\n"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn rust_azservicebus_rows() {
+        let sb = |body: &str| format!("use azservicebus::prelude::*;\n\nasync fn f(client: &mut ServiceBusClient) {{\n    {body};\n}}\n");
+        assert_eq!(
+            rs_p(&sb("let mut sender = client.create_sender(\"orders\", ServiceBusSenderOptions::default()).await?")),
+            strs(&["queue_producer:orders"])
+        );
+        assert_eq!(
+            rs_c(&sb("let mut receiver = client.create_receiver_for_queue(\"orders\", ServiceBusReceiverOptions::default()).await?")),
+            strs(&["queue_consumer:orders"])
+        );
+        // A subscription receiver reads its TOPIC (arg #0), so it joins the
+        // sender (the `CreateProcessor(` precedent).
+        assert_eq!(
+            rs_c(&sb("let r = client.create_receiver_for_subscription(\"orders\", \"billing\", Default::default()).await?")),
+            strs(&["queue_consumer:orders"])
+        );
+        assert!(broker_signals().contains(&"azservicebus"));
+    }
+
+    #[test]
+    fn rust_async_nats_rows() {
+        let pub_src = "pub async fn publish(client: &async_nats::Client) {\n    let _ = client.publish(\"orders\", \"order-1\".into()).await;\n}\n";
+        let sub_src = "pub async fn listen(client: &async_nats::Client) {\n    let _subscriber = client.subscribe(\"orders\").await;\n    let _workers = client.queue_subscribe(\"audit\", \"workers\".into()).await;\n}\n";
+        assert_eq!(rs_p(pub_src), strs(&["queue_producer:orders"]));
+        assert_eq!(rs_c(sub_src), strs(&["queue_consumer:audit", "queue_consumer:orders"]));
+        let r = extract_queue_producer_nodes(pub_src, RS_PATH, module_id(), repo());
+        assert!(framework_of(&r).contains(r#""framework":"Nats""#));
+        // The same calls in a file naming no NATS crate mint nothing.
+        let local = |s: &str| s.replace("async_nats::Client", "bus::Client");
+        assert_eq!(rs_p(&local(pub_src)), Vec::<String>::new());
+        assert_eq!(rs_c(&local(sub_src)), Vec::<String>::new());
+        assert!(!is_generic_verb_row(".publish(", &QueueFramework::Nats));
+        assert!(broker_signals().contains(&"async_nats"));
+    }
+
+    #[test]
+    fn rust_gcp_pubsub_rows() {
+        let publisher = "use google_cloud_pubsub::client::Client;\n\npub async fn publish(client: &Client) {\n    let topic = client.topic(\"orders\");\n    let publisher = topic.new_publisher(None);\n    let _ = publisher.publish(Default::default()).await;\n}\n";
+        let subscriber = "use google_cloud_pubsub::client::Client;\n\npub async fn listen(client: &Client) {\n    let subscription = client.subscription(\"orders\");\n    let _ = subscription.pull(10, None).await;\n}\n";
+        assert_eq!(rs_p(publisher), strs(&["queue_producer:orders"]));
+        assert_eq!(rs_c(subscriber), strs(&["queue_consumer:orders"]));
+        let r = extract_queue_producer_nodes(publisher, RS_PATH, module_id(), repo());
+        assert!(framework_of(&r).contains(r#""framework":"PubSub","family":"pubsub""#));
+        // `publisher.publish(..)` is broker traffic now: eventbus.rs mints no
+        // verb-fallback EVENT_EMITTER beside the queue node (the CB-g phantom).
+        let ev = crate::eventbus::extract_event_emitter_nodes(publisher, RS_PATH, module_id(), repo());
+        assert!(ev.nodes.is_empty(), "{:?}", ev.nav.qname_by_id.values().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn rust_aws_sdk_builders() {
+        let url = "https://sqs.us-east-1.amazonaws.com/123/orders";
+        let send = format!("use aws_sdk_sqs::Client;\n\npub async fn enqueue(client: &Client, body: &str) {{\n    let _ = client\n        .send_message()\n        .queue_url(\"{url}\")\n        .message_body(body)\n        .send()\n        .await;\n}}\n");
+        assert_eq!(rs_p(&send), strs(&["queue_producer:orders"]));
+        let batch = format!("use aws_sdk_sqs::Client;\n\nasync fn f(client: &Client) {{\n    client.send_message_batch().queue_url(\"{url}\").set_entries(Some(e)).send().await;\n}}\n");
+        assert_eq!(rs_p(&batch), strs(&["queue_producer:orders"]));
+        let recv = format!("use aws_sdk_sqs::Client;\n\npub async fn poll(client: &Client) {{\n    let _ = client.receive_message().queue_url(\"{url}\").send().await;\n}}\n");
+        assert_eq!(rs_c(&recv), strs(&["queue_consumer:orders"]));
+        let sns = "use aws_sdk_sns::Client;\n\nasync fn f(client: &Client) {\n    client\n        .publish()\n        .topic_arn(\"arn:aws:sns:us-east-1:123456789012:orders\")\n        .message(\"m\")\n        .send()\n        .await;\n}\n";
+        let r = extract_queue_producer_nodes(sns, RS_PATH, module_id(), repo());
+        assert_eq!(qnames(&r), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&r).contains(r#""framework":"Sns""#));
+        // A URL held in a variable names no queue: the framework tag, Weak.
+        let var = "use aws_sdk_sqs::Client;\n\nasync fn f(client: &Client, url: &str) {\n    client.send_message().queue_url(url).send().await;\n}\n";
+        assert_eq!(rs_p(var), strs(&["queue_producer:unresolved:sqs"]));
+    }
+
+    #[test]
+    fn rust_apalis_typed_jobs() {
+        let pr = extract_queue_producer_nodes(APALIS_PRODUCER, "server/src/enqueue.rs", module_id(), repo());
+        let cr = extract_queue_consumer_nodes(APALIS_CONSUMER, "client/src/worker.rs", module_id(), repo());
+        assert_eq!(qnames(&pr), strs(&["queue_producer:WelcomeEmail"]));
+        assert_eq!(qnames(&cr), strs(&["queue_consumer:WelcomeEmail"]));
+        assert!(framework_of(&pr).contains(r#""framework":"Apalis","family":"apalis""#));
+        assert!(framework_of(&cr).contains(r#""framework":"Apalis","family":"apalis""#));
+        // LA.33: the worker's handler fn is the consumer's callback.
+        assert_eq!(
+            callbacks_of(&cr),
+            vec![cb("queue_consumer:WelcomeEmail", 12, name("send_welcome"), false)]
+        );
+        // The README shape: an untyped MemoryStorage, the pushed struct's type.
+        let memory = "use apalis::prelude::*;\n\nasync fn produce() {\n    let mut storage = MemoryStorage::new();\n    storage.push(Email { to: \"a@b.c\".into() }).await.unwrap();\n}\n";
+        assert_eq!(rs_p(memory), strs(&["queue_producer:Email"]));
+        // `.build(` (apalis main) after WorkerBuilder, handler declared here.
+        let build = "use apalis::prelude::*;\n\nasync fn send_email(task: Email, data: Data<usize>) {}\n\nfn main() {\n    let worker = WorkerBuilder::new(\"email-worker\")\n        .concurrency(2)\n        .backend(storage)\n        .build(send_email);\n}\n";
+        assert_eq!(rs_c(build), strs(&["queue_consumer:Email"]));
+        // A handler declared elsewhere: the backend storage's type argument.
+        let backend = "use apalis::prelude::*;\n\nfn worker(storage: RedisStorage<Email>) {\n    Monitor::new().register(WorkerBuilder::new(\"w\").backend(storage.clone()).build_fn(jobs::send));\n}\n";
+        assert_eq!(rs_c(backend), strs(&["queue_consumer:Email"]));
+        // Precision: a Vec push beside a real storage, and a `.build(x)` with
+        // no WorkerBuilder in its statement, are no site and mint no tag.
+        let vec_push = "use apalis::prelude::*;\n\npub struct Report { pub id: u32 }\n\npub async fn enqueue(storage: &mut MemoryStorage<Email>) {\n    let mut reports = Vec::new();\n    reports.push(Report { id: 1 });\n    let _ = storage.push(Email { to: \"a@b.c\".into() }).await;\n}\n";
+        assert_eq!(rs_p(vec_push), strs(&["queue_producer:Email"]));
+        let other_builder = "use apalis::prelude::*;\n\nfn client() {\n    let http = reqwest::Client::builder().timeout(t).build(x);\n}\n";
+        assert_eq!(rs_c(other_builder), Vec::<String>::new());
+        let untyped = "use apalis::prelude::*;\n\nfn f(jobs: &mut Vec<Email>, storage: &mut S) {\n    jobs.push(Email { to: t });\n    storage.push(job);\n}\n";
+        assert_eq!(rs_p(untyped), Vec::<String>::new());
+        // A task queue: its gate joins no broker signal.
+        assert!(!is_broker(&QueueFramework::Apalis));
+        assert_eq!(framework_tag(&QueueFramework::Apalis), format!("{UNRESOLVED_PREFIX}apalis"));
+        assert!(!broker_signals().contains(&"apalis"));
+        for s in ["lapin", "async_nats", "google_cloud_pubsub", "aws_sdk_sqs", "aws_sdk_sns"] {
+            assert!(broker_signals().contains(&s), "{s}");
+        }
+        for (needle, f, _, rule) in CONSUMER_PATTERNS.iter().chain(PRODUCER_PATTERNS) {
+            if matches!(rule, TopicRule::StorageJobType | TopicRule::WorkerJobType) {
+                assert_eq!(*f, QueueFramework::Apalis, "{needle}");
+                assert!(is_identity_rule(rule));
+            }
+        }
     }
 }

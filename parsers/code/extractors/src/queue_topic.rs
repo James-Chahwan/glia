@@ -131,6 +131,19 @@ pub enum TopicRule {
     /// with no lambda (`queue.Enqueue(item)`, a method reference) reads
     /// nothing, and the extractor treats that hit as no site at all.
     LambdaCallee,
+    // --- DG.1: TYPED-JOB IDENTITY. apalis (Rust) names a job by its TYPE. ----
+    /// DG.1: an apalis storage push, `storage.push(Email { .. })`. The
+    /// receiver must be declared in the file as a storage ([`storage_job_type`]);
+    /// the job is the storage's type argument, else the pushed value's type.
+    /// `.push(` is every `Vec`'s method, so an occurrence the rule cannot
+    /// prove is no site at all ([`scan_guarded`] drops it).
+    StorageJobType,
+    /// DG.1: an apalis worker, `WorkerBuilder::new(..).backend(s)
+    /// .build_fn(send_email)`. The statement must hold `WorkerBuilder`
+    /// ([`worker_job_type`]); the job is the handler's first parameter type,
+    /// else the backend storage's type argument. `.build(` is every builder's
+    /// method, so an occurrence the rule cannot prove is no site at all.
+    WorkerJobType,
 }
 
 /// Bound on occurrences examined per needle per file — generated files can
@@ -214,6 +227,12 @@ pub fn scan(source: &str, needle: &str, rule: TopicRule) -> Vec<TopicHit> {
 /// first byte sits in a Rust / Python string literal or comment), and only
 /// then is [`MAX_HITS_PER_NEEDLE`] applied, so a needle table's literal
 /// occurrences can no longer crowd a real call out of the cap.
+///
+/// DG.1: a [`TopicRule::StorageJobType`] / [`TopicRule::WorkerJobType`]
+/// occurrence that reads no job type is dropped at the same point, before the
+/// cap: the rule's proof (a storage receiver, a `WorkerBuilder` statement) IS
+/// the site, so an unproven `.push(` / `.build(` is no call of the framework,
+/// becomes no hit, and so records no `unresolved:` tag downstream.
 pub(crate) fn scan_guarded(
     source: &str,
     needle: &str,
@@ -224,11 +243,13 @@ pub(crate) fn scan_guarded(
     if needle.is_empty() {
         return hits;
     }
-    let sites = source
-        .match_indices(needle)
-        .filter(|&(offset, _)| bare_word_ok(source, offset, needle, rule) && guard.admits(offset))
-        .take(MAX_HITS_PER_NEEDLE);
-    for (offset, _) in sites {
+    for (offset, _) in source.match_indices(needle) {
+        if hits.len() >= MAX_HITS_PER_NEEDLE {
+            break;
+        }
+        if !bare_word_ok(source, offset, needle, rule) || !guard.admits(offset) {
+            continue;
+        }
         let after = offset.saturating_add(needle.len());
         let read = match rule {
             TopicRule::NoIdentity => None,
@@ -240,6 +261,15 @@ pub(crate) fn scan_guarded(
             TopicRule::DeclaredSymbol => verbatim(declared_symbol(source, after)),
             TopicRule::EnclosingSymbol => verbatim(enclosing_symbol(source, offset)),
             TopicRule::LambdaCallee => verbatim(lambda_callee(source, after, needle)),
+            // DG.1: the job TYPE, or no site at all (see the doc above).
+            TopicRule::StorageJobType => match storage_job_type(source, offset, after, needle) {
+                Some(job) => verbatim(Some(job)),
+                None => continue,
+            },
+            TopicRule::WorkerJobType => match worker_job_type(source, offset, after, needle) {
+                Some(job) => verbatim(Some(job)),
+                None => continue,
+            },
             _ => topic_at(source, after, needle, rule),
         };
         let (topic, form, expr) = match read {
@@ -1211,6 +1241,475 @@ fn lambda_body_callee(body: &str) -> Option<String> {
         return None;
     }
     last_segment(chain)
+}
+
+// ---------------------------------------------------------------------------
+// DG.1 — apalis typed jobs: the job is a Rust TYPE, read off declarations
+// ---------------------------------------------------------------------------
+
+/// DG.1: path segments that never name a job type — `Self` and the std
+/// wrappers a value or type may be spelled through.
+const NOT_A_JOB_TYPE: &[&str] = &[
+    "Self", "Some", "None", "Ok", "Err", "Box", "Arc", "Rc", "Vec", "String", "Option", "Result",
+];
+
+/// DG.1 [`TopicRule::StorageJobType`] — the job an apalis storage push names.
+///
+/// The receiver R (the identifier right before the needle, a line-broken
+/// chain allowed, [`word_before`]) must be DECLARED in this file
+/// ([`rust_binding_type`]): a parameter / field `R: <ty>` or a `let [mut]
+/// R[: <ty>] = <init>` whose type or initializer path names a segment ending
+/// in `Storage` (`&mut apalis_redis::RedisStorage<Job>`,
+/// `MemoryStorage::new()`, `PostgresStorage::new(pool)`, `impl Storage<Job =
+/// Email>`). The job is that storage's type argument ([`storage_generic`]),
+/// else the type the pushed value is built from ([`pushed_type`]).
+///
+/// `None` — no site — for a `Vec`'s push, a call-result receiver, a pushed
+/// variable into an untyped storage, and a storage declared in ANOTHER file:
+/// one passed in through a struct field declared elsewhere
+/// (`self.storage.push(job)`) is not read (a field declared in this file is
+/// an `R: <ty>` declaration and is).
+fn storage_job_type(source: &str, offset: usize, after: usize, needle: &str) -> Option<String> {
+    let (recv, _) = word_before(source, offset)?;
+    if recv == "self" || recv.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    let generic = storage_generic(rust_binding_type(source, recv, offset)?)?;
+    generic
+        .and_then(rust_type_name)
+        .or_else(|| pushed_type(source, after, needle))
+}
+
+/// DG.1 [`TopicRule::WorkerJobType`] — the job an apalis worker runs.
+///
+/// The needle's statement ([`statement_start`]) must hold `WorkerBuilder`
+/// before the needle, else `None` (`.build(` is every builder's method). The
+/// job is the first parameter type of the handler fn positional argument #0
+/// names, declared in this file (`async fn send_email(job: Email, ..)`,
+/// [`rust_fn_first_param_type`]); else the type argument of the statement's
+/// `.backend(S)` (apalis 0.6+) / `.with_storage(S)` (0.4 / 0.5) storage,
+/// written inline (`RedisStorage::<Email>::new(c)`) or declared in this file
+/// (`storage: RedisStorage<Email>`); else `None`.
+fn worker_job_type(source: &str, offset: usize, after: usize, needle: &str) -> Option<String> {
+    let stmt = source.get(statement_start(source, offset)..offset)?;
+    if !stmt.contains("WorkerBuilder") {
+        return None;
+    }
+    let handler = arg_region(source, after, needle)
+        .and_then(|region| split_args(region).first().map(|a| a.trim()))
+        .filter(|h| {
+            h.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                && h.bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b':'))
+        });
+    if let Some(job) = handler
+        .and_then(|h| h.rsplit("::").next())
+        .and_then(|f| rust_fn_first_param_type(source, f))
+    {
+        return Some(job);
+    }
+    let (at, len) = [".backend(", ".with_storage("]
+        .iter()
+        .filter_map(|k| stmt.rfind(k).map(|at| (at, k.len())))
+        .max()?;
+    let arg = split_args(region_body(stmt.get(at + len..)?)?)
+        .first()?
+        .trim();
+    if let Some(job) = storage_generic(arg).flatten().and_then(rust_type_name) {
+        return Some(job);
+    }
+    let (ident, _) = *rust_path(arg).first()?;
+    storage_generic(rust_binding_type(source, ident, offset)?)?.and_then(rust_type_name)
+}
+
+/// DG.1: the declaration text of the binding `ident`: the `<ty>` of a
+/// parameter / field / typed `let` (`ident: <ty>`), else the initializer of
+/// an untyped `let [mut] ident = <init>` ([`binding_decl`]). The nearest
+/// declaration before `before` wins (the innermost one a straight-line read
+/// sees), else the first after it (a struct field declared below its
+/// `impl`). An occurrence on a `//` comment line declares nothing, so `//
+/// storage: the redis handle` shadows no real declaration; the rest of the
+/// file is read raw, which is safe because it only qualifies an occurrence
+/// the CJ.1a guard already admitted as code.
+fn rust_binding_type<'a>(source: &'a str, ident: &str, before: usize) -> Option<&'a str> {
+    let b = source.as_bytes();
+    let mut nearest = None;
+    let mut later = None;
+    for (at, _) in source.match_indices(ident) {
+        let end = at + ident.len();
+        if !word_edge(b, at.checked_sub(1)) || !word_edge(b, Some(end)) {
+            continue;
+        }
+        // A member or path segment (`x.storage`, `m::storage`) declares nothing.
+        if at > 0 && matches!(b[at - 1], b'.' | b':') {
+            continue;
+        }
+        let line = source
+            .get(..at)
+            .and_then(|head| head.rsplit('\n').next())
+            .unwrap_or("");
+        if line.contains("//") {
+            continue;
+        }
+        let Some(decl) = binding_decl(source, at, end) else {
+            continue;
+        };
+        if at < before {
+            nearest = Some(decl);
+        } else if later.is_none() {
+            later = Some(decl);
+        }
+    }
+    nearest.or(later)
+}
+
+/// DG.1: what the occurrence of a binding at bytes `at..end` declares — the
+/// type after `ident:` (never `ident::`), or the initializer after `let [mut]
+/// ident =` (never `==` / `=>`) — or `None` when it declares nothing.
+fn binding_decl(source: &str, at: usize, end: usize) -> Option<&str> {
+    let b = source.as_bytes();
+    let j = skip_ws(b, end);
+    if b.get(j) == Some(&b':') && b.get(j + 1) != Some(&b':') {
+        return Some(decl_text(source, j + 1, false)).filter(|t| !t.is_empty());
+    }
+    let let_bound = match word_before(source, at) {
+        Some(("let", _)) => true,
+        Some(("mut", m)) => matches!(word_before(source, m), Some(("let", _))),
+        _ => false,
+    };
+    if !let_bound || b.get(j) != Some(&b'=') || matches!(b.get(j + 1), Some(b'=' | b'>')) {
+        return None;
+    }
+    Some(decl_text(source, j + 1, true)).filter(|t| !t.is_empty())
+}
+
+/// DG.1: the declared type (`init` false) or initializer (`init` true) that
+/// starts at `start`, trimmed: up to the first depth-0 `,` `)` `;` `=` `{`
+/// `|` (a type) or `;` (an initializer), or the close of a bracket it did not
+/// open. A type counts `<..>` as brackets (the `>` of `->` is none); an
+/// initializer does not, a `<` there may be a comparison. `"` strings are
+/// stepped over; at most [`MAX_REGION`] bytes are read, and every byte it
+/// stops at is ASCII, so the slice lands on a char boundary.
+fn decl_text(source: &str, start: usize, init: bool) -> &str {
+    let Some(rest) = source.get(start..) else {
+        return "";
+    };
+    let b = rest.as_bytes();
+    let limit = b.len().min(MAX_REGION);
+    let mut depth = 0i32;
+    let mut quote = false;
+    let mut i = 0usize;
+    while i < limit {
+        let c = b[i];
+        if quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            quote = c != b'"';
+            i += 1;
+            continue;
+        }
+        let stop = match c {
+            b'"' => {
+                quote = true;
+                false
+            }
+            b'(' | b'[' => {
+                depth += 1;
+                false
+            }
+            b'{' if init || depth > 0 => {
+                depth += 1;
+                false
+            }
+            b'{' => true,
+            b'<' if !init => {
+                depth += 1;
+                false
+            }
+            // The `>` of `->` closes nothing.
+            b'>' if !(init || (i > 0 && b[i - 1] == b'-')) => {
+                depth -= 1;
+                depth < 0
+            }
+            b')' | b']' | b'}' => {
+                depth -= 1;
+                depth < 0
+            }
+            b',' | b'=' | b'|' if !init => depth == 0,
+            b';' => depth == 0,
+            _ => false,
+        };
+        if stop {
+            return rest.get(..i).unwrap_or("").trim();
+        }
+        i += 1;
+    }
+    clip(rest, limit).trim()
+}
+
+/// DG.1: does the type or initializer path `decl` name a storage, a segment
+/// ending in `Storage`? `Some(type argument)` when it does
+/// (`RedisStorage<Job>`, the turbofish `RedisStorage::<Job>::new(c)`, `impl
+/// Storage<Job = Email>` -> `Email`; [`first_type_arg`]), `Some(None)` for
+/// one written without (`MemoryStorage::new()`), `None` when no segment is a
+/// storage.
+fn storage_generic(decl: &str) -> Option<Option<&str>> {
+    let (_, args) = rust_path(decl)
+        .into_iter()
+        .find(|(seg, _)| seg.ends_with("Storage"))?;
+    Some(args.and_then(first_type_arg))
+}
+
+/// DG.1: the first argument of a `<..>` list's inside (`Job, Codec<X>` ->
+/// `Job`), an associated binding read as its type (`Job = Email` -> `Email`).
+fn first_type_arg(args: &str) -> Option<&str> {
+    let b = args.as_bytes();
+    let mut depth = 0i32;
+    let mut end = b.len();
+    for (i, &c) in b.iter().enumerate() {
+        match c {
+            b'<' | b'(' | b'[' => depth += 1,
+            b'>' if !(i > 0 && b[i - 1] == b'-') => depth -= 1,
+            b')' | b']' => depth -= 1,
+            b',' if depth == 0 => {
+                end = i;
+                break;
+            }
+            _ => {}
+        }
+    }
+    let arg = args.get(..end)?.trim();
+    let arg = match arg.split_once('=') {
+        Some((name, ty))
+            if !name.trim().is_empty()
+                && name
+                    .trim()
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_') =>
+        {
+            ty.trim()
+        }
+        _ => arg,
+    };
+    (!arg.is_empty()).then_some(arg)
+}
+
+/// DG.1: the leading Rust path of `s`, `&` / `mut` / `dyn` / `impl` and
+/// lifetimes stepped over: each segment with the inside of the `<..>` that
+/// follows it (a type's arguments, or a turbofish `::<..>`), in order.
+/// `&mut apalis_redis::RedisStorage<crate::Job>` -> `[(apalis_redis, None),
+/// (RedisStorage, Some("crate::Job"))]`. Stops at the first byte no path
+/// holds (`(`, `{`, `.`, a space); an unclosed `<` ends it after its segment.
+fn rust_path(s: &str) -> Vec<(&str, Option<&str>)> {
+    let mut rest = s.trim_start();
+    loop {
+        let before = rest.len();
+        rest = rest.trim_start_matches('&').trim_start();
+        if let Some(r) = rest.strip_prefix('\'') {
+            let n = r
+                .bytes()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == b'_')
+                .count();
+            rest = r.get(n..).unwrap_or("").trim_start();
+        }
+        for kw in ["mut ", "dyn ", "impl "] {
+            if let Some(r) = rest.strip_prefix(kw) {
+                rest = r.trim_start();
+            }
+        }
+        if rest.len() == before {
+            break;
+        }
+    }
+    let mut out = Vec::new();
+    loop {
+        let n = rest
+            .bytes()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == b'_')
+            .count();
+        let Some(seg) = rest.get(..n).filter(|seg| !seg.is_empty()) else {
+            break;
+        };
+        rest = rest.get(n..).unwrap_or("");
+        let open = rest
+            .strip_prefix("::")
+            .filter(|r| r.starts_with('<'))
+            .unwrap_or(rest);
+        let mut args = None;
+        if open.starts_with('<') {
+            let Some((inside, tail)) = angle_body(open) else {
+                out.push((seg, None));
+                break;
+            };
+            args = Some(inside);
+            rest = tail;
+        }
+        out.push((seg, args));
+        match rest.strip_prefix("::") {
+            Some(r) => rest = r,
+            None => break,
+        }
+    }
+    out
+}
+
+/// DG.1: `s` (which opens with `<`) split at its balanced close: the inside
+/// and the text after the `>`. The `>` of `->` closes nothing; `None` when a
+/// `;` / `{` / `}` comes first or [`MAX_REGION`] bytes pass (that `<` was a
+/// comparison). Every byte it splits at is ASCII.
+fn angle_body(s: &str) -> Option<(&str, &str)> {
+    let b = s.as_bytes();
+    let mut depth = 0i32;
+    for (i, &c) in b.iter().enumerate().take(MAX_REGION) {
+        match c {
+            b'<' => depth += 1,
+            b'>' if !(i > 0 && b[i - 1] == b'-') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((s.get(1..i)?, s.get(i + 1..)?));
+                }
+            }
+            b';' | b'{' | b'}' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// DG.1: the job type a Rust type path names: its FIRST segment written with
+/// an upper-case initial, so a module prefix is stepped over
+/// (`crate::jobs::Email` -> `Email`) and an enum variant names its enum
+/// (`Job::Email { .. }` -> `Job`). `None` for a one-letter name (a generic
+/// parameter, `RedisStorage<T>`), a [`NOT_A_JOB_TYPE`] segment, and a path
+/// with no upper-case segment.
+fn rust_type_name(t: &str) -> Option<String> {
+    let (seg, _) = rust_path(t)
+        .into_iter()
+        .find(|(seg, _)| seg.starts_with(|c: char| c.is_ascii_uppercase()))?;
+    if seg.len() < 2 || NOT_A_JOB_TYPE.contains(&seg) {
+        return None;
+    }
+    normalise_topic(seg)
+}
+
+/// DG.1: the type the value pushed as positional argument #0 is built from —
+/// a struct / tuple-struct / unit literal or an associated constructor
+/// (`Email { .. }`, `Email(..)`, `jobs::Email::new(..)`, `Email::default()`),
+/// read by [`rust_type_name`]. A variable (`storage.push(job)`) and a
+/// SCREAMING_CASE constant (`storage.push(DEFAULT_JOB)`) name no type.
+fn pushed_type(source: &str, after: usize, needle: &str) -> Option<String> {
+    let region = arg_region(source, after, needle)?;
+    let arg = split_args(region).first()?.trim();
+    rust_type_name(arg).filter(|t| t.bytes().any(|c| c.is_ascii_lowercase()))
+}
+
+/// DG.1: the type of the first non-`self` parameter of `fn <fn_name>`
+/// declared in this file (`async fn send_email(job: Email, ctx: Data<..>)` ->
+/// `Email`, a destructuring pattern's type too), read by [`rust_type_name`].
+/// The first declaration whose parameter list reads wins.
+fn rust_fn_first_param_type(source: &str, fn_name: &str) -> Option<String> {
+    let b = source.as_bytes();
+    for (at, _) in source.match_indices(fn_name) {
+        let end = at + fn_name.len();
+        if !word_edge(b, at.checked_sub(1)) || !word_edge(b, Some(end)) {
+            continue;
+        }
+        if !matches!(word_before(source, at), Some(("fn", _))) {
+            continue;
+        }
+        let mut rest = source.get(end..).unwrap_or("").trim_start();
+        if rest.starts_with('<') {
+            let Some((_, tail)) = angle_body(rest) else {
+                continue;
+            };
+            rest = tail.trim_start();
+        }
+        let Some(params) = rest.strip_prefix('(').and_then(region_body) else {
+            continue;
+        };
+        let param = split_args(params)
+            .into_iter()
+            .map(str::trim)
+            .find(|p| !matches!(rust_path(p).first(), Some(("self", _))))?;
+        let colon = depth0_colon(param)?;
+        return rust_type_name(param.get(colon + 1..)?);
+    }
+    None
+}
+
+/// DG.1: byte index of the first `:` of `param` outside brackets that is not
+/// half of a `::` — the one between a parameter's pattern and its type.
+fn depth0_colon(param: &str) -> Option<usize> {
+    let b = param.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'(' | b'[' | b'{' | b'<' => depth += 1,
+            b')' | b']' | b'}' | b'>' => depth -= 1,
+            b':' if b.get(i + 1) == Some(&b':') => {
+                i += 2;
+                continue;
+            }
+            b':' if depth == 0 => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// DG.1: the identifier word ending just before `at`, whitespace (a line
+/// break included) skipped, with its start offset: `let` of `let mut x`,
+/// `storage` of `storage\n    .push(`. `None` when a non-identifier byte
+/// comes first (`get().push(`).
+fn word_before(source: &str, at: usize) -> Option<(&str, usize)> {
+    let head = source.get(..at)?.trim_end();
+    let b = head.as_bytes();
+    let mut i = b.len();
+    // Only ASCII bytes are stepped over, so `i` stays on a char boundary.
+    while i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') {
+        i -= 1;
+    }
+    head.get(i..).filter(|w| !w.is_empty()).map(|w| (w, i))
+}
+
+/// DG.1: the byte where the statement holding `offset` starts — just past
+/// the previous `;`, `{` or `}` outside every bracket the walk back from
+/// `offset` sits in, so `Monitor::new().register(WorkerBuilder::new("x")
+/// .backend(s).build_fn(h))` reads from `Monitor`. `"` strings are stepped
+/// over; at most [`MAX_REGION`] bytes are walked, and the start is moved
+/// forward to a char boundary.
+fn statement_start(source: &str, offset: usize) -> usize {
+    let b = source.as_bytes();
+    let end = offset.min(b.len());
+    let floor = end.saturating_sub(MAX_REGION);
+    let mut depth = 0i32;
+    let mut quote = false;
+    let mut i = end;
+    while i > floor {
+        let c = b[i - 1];
+        if quote {
+            quote = !(c == b'"' && !(i >= 2 && b[i - 2] == b'\\'));
+        } else {
+            match c {
+                b'"' => quote = true,
+                b')' | b']' => depth += 1,
+                b'(' | b'[' => depth -= 1,
+                b'}' | b'{' | b';' if depth <= 0 => return i,
+                b'}' => depth += 1,
+                b'{' => depth -= 1,
+                _ => {}
+            }
+        }
+        i -= 1;
+    }
+    while i < end && !source.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 /// True when the byte at `at` is absent or is not part of an identifier — so
@@ -2420,5 +2919,147 @@ mod tests {
             };
             assert_eq!(declares_type(src, after(src, needle)), is_type, "{src}");
         }
+    }
+
+    fn jobs(src: &str, needle: &str, rule: TopicRule) -> Vec<String> {
+        scan(src, needle, rule)
+            .into_iter()
+            .filter_map(|h| h.topic)
+            .collect()
+    }
+
+    #[test]
+    fn storage_job_type_reads_the_generic_then_the_pushed_type() {
+        let push = |src: &str| jobs(src, ".push(", TopicRule::StorageJobType);
+        // The storage's type argument; `&mut`, the crate path and the job's
+        // module prefix are stepped over.
+        assert_eq!(
+            push(
+                "async fn e(storage: &mut apalis_redis::RedisStorage<crate::WelcomeEmail>) {\n    storage.push(crate::WelcomeEmail { to: t }).await;\n}\n"
+            ),
+            ["WelcomeEmail"]
+        );
+        // The type argument wins over the pushed value; a typed `let`, a
+        // turbofish initializer and an `impl Storage<Job = ..>` read it too.
+        for src in [
+            "fn e(s: &mut RedisStorage<Email>, j: Email) { s.push(j); }",
+            "fn e() { let mut s: SqliteStorage<Email> = SqliteStorage::new(p); s.push(j); }",
+            "fn e() { let mut s = PostgresStorage::<Email>::new(pool); s.push(j); }",
+            "fn e(s: &mut impl Storage<Job = Email>) { s.push(j); }",
+            "fn e(s: &'a mut RedisStorage<Email, JsonCodec<Vec<u8>>>) { s.push(j); }",
+        ] {
+            assert_eq!(push(src), ["Email"], "{src}");
+        }
+        // An untyped storage: the type the pushed value is built from.
+        for (value, job) in [
+            ("Email { to: t }", "Email"),
+            ("Email(t)", "Email"),
+            ("jobs::Email::new(t)", "Email"),
+            ("Email::default()", "Email"),
+            ("Job::Welcome { to: t }", "Job"),
+        ] {
+            let src = format!(
+                "fn e() {{\n    let mut storage = MemoryStorage::new();\n    storage.push({value});\n}}\n"
+            );
+            assert_eq!(push(&src), [job], "{value}");
+        }
+        // A line-broken chain still names its receiver.
+        assert_eq!(
+            push(
+                "fn e() {\n    let mut storage = MemoryStorage::new();\n    storage\n        .push(Email { to: t })\n        .await;\n}\n"
+            ),
+            ["Email"]
+        );
+        // The nearest declaration wins: a `Vec` named like an earlier storage
+        // is no storage, and a commented declaration shadows nothing.
+        assert_eq!(
+            push(
+                "fn a(storage: &mut RedisStorage<Email>) {}\nfn b() {\n    let mut storage = Vec::new();\n    storage.push(Report { id: 1 });\n}\n"
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            push(
+                "fn e(storage: &mut RedisStorage<Email>) {\n    // storage: the shared handle\n    storage.push(x);\n}\n"
+            ),
+            ["Email"]
+        );
+        // No site: not a storage, undeclared, a generic job, a variable into
+        // an untyped storage, a constant, a call-result receiver.
+        for src in [
+            "fn e() { let mut reports = Vec::new(); reports.push(Report { id: 1 }); }",
+            "fn e() { storage.push(Email { to: t }); }",
+            "fn e<J>(s: &mut RedisStorage<J>, job: J) { s.push(job); }",
+            "fn e() { let mut s = MemoryStorage::new(); s.push(job); }",
+            "fn e() { let mut s = MemoryStorage::new(); s.push(DEFAULT_JOB); }",
+            "fn e() { storage().push(Email { to: t }); }",
+        ] {
+            assert!(
+                scan(src, ".push(", TopicRule::StorageJobType).is_empty(),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_job_type_reads_the_handler_then_the_backend() {
+        let build = |src: &str, needle: &str| jobs(src, needle, TopicRule::WorkerJobType);
+        // The handler's first parameter type (async or not, `self` skipped,
+        // generics stepped over, a destructuring pattern's type).
+        for handler in [
+            "async fn send_welcome(job: WelcomeEmail) -> Result<(), Error> { Ok(()) }",
+            "pub fn send_welcome<C>(job: jobs::WelcomeEmail, ctx: Data<C>) {}",
+            "fn send_welcome(WelcomeEmail { to }: WelcomeEmail) {}",
+        ] {
+            let src = format!(
+                "{handler}\n\nfn w(s: S) -> W {{\n    WorkerBuilder::new(\"w\").backend(s).build_fn(send_welcome)\n}}\n"
+            );
+            assert_eq!(build(&src, ".build_fn("), ["WelcomeEmail"], "{handler}");
+        }
+        // apalis main spells it `.build(`, the chain line-broken.
+        assert_eq!(
+            build(
+                "async fn send_email(task: Email, data: Data<usize>) {}\n\nfn main() {\n    let w = WorkerBuilder::new(\"email-worker\")\n        .concurrency(2)\n        .backend(storage)\n        .build(send_email);\n}\n",
+                ".build("
+            ),
+            ["Email"]
+        );
+        // A handler declared elsewhere: the backend storage, declared in the
+        // file, written inline, or (apalis 0.4 / 0.5) `.with_storage(`, and
+        // the worker registered inside an enclosing call.
+        for src in [
+            "fn w(storage: RedisStorage<Email>) {\n    Monitor::new().register(WorkerBuilder::new(\"w\").backend(storage.clone()).build_fn(jobs::send));\n}\n",
+            "fn w() {\n    WorkerBuilder::new(\"w\").backend(RedisStorage::<Email>::new(conn)).build_fn(send);\n}\n",
+            "fn w(storage: SqliteStorage<Email>) {\n    WorkerBuilder::new(\"w\").with_storage(storage).build_fn(send);\n}\n",
+        ] {
+            assert_eq!(build(src, ".build_fn("), ["Email"], "{src}");
+        }
+        // No site: no WorkerBuilder in the statement (an earlier statement's
+        // does not count), or no readable job type.
+        for src in [
+            "fn c() { let http = reqwest::Client::builder().timeout(t).build(x); }",
+            "fn c() { let w = WorkerBuilder::new(\"w\"); let h = Client::builder().build(x); }",
+            "fn w(s: S) { WorkerBuilder::new(\"w\").backend(s).build_fn(elsewhere::send); }",
+        ] {
+            let needle = if src.contains(".build_fn(") {
+                ".build_fn("
+            } else {
+                ".build("
+            };
+            assert!(
+                scan(src, needle, TopicRule::WorkerJobType).is_empty(),
+                "{src}"
+            );
+        }
+        // Neither rule reads an expression, and a symbol is never a URL.
+        let hit = scan(
+            "fn w() { WorkerBuilder::new(\"w\").backend(RedisStorage::<Email>::new(c)).build_fn(h); }",
+            ".build_fn(",
+            TopicRule::WorkerJobType,
+        );
+        assert!(
+            hit.iter()
+                .all(|h| h.expr.is_none() && h.form == TopicForm::Literal)
+        );
     }
 }

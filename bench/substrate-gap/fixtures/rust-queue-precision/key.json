@@ -1,0 +1,15 @@
+{
+  "framework": "rust-queue-precision",
+  "language": "rust",
+  "dirs": ["."],
+  "expect_nodes": [
+    {"kind": "QUEUE_PRODUCER", "name": "Email", "note": "apalis storage push, identity = the storage's job type (MemoryStorage<Email>)"}
+  ],
+  "expect_edges": [],
+  "expect_cells": [],
+  "forbid": [
+    {"kind": "QUEUE_PRODUCER", "name": "Report", "max_nodes": 0, "note": "Vec::push of a struct literal in an apalis file is not a job: the receiver `reports` is declared `Vec::new()`, never a ...Storage"},
+    {"kind": "QUEUE_PRODUCER", "name": "audit", "max_nodes": 0, "note": "a local publish method in a file naming no broker crate (the async-nats rows are gated on async_nats)"}
+  ],
+  "note": "DG.1 precision twin of matrix/rust/taskq and matrix/rust/nats. Legacy-only (no cells): it guards precision, it does not grade a cell. Baseline 2026-10-15 (glia_py 0.5.1 wheel in ~/.venvs/glia-leap, before DG.1): nodes 0/1, no queue node at all."
+}
