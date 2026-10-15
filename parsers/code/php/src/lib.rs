@@ -23,8 +23,21 @@ pub fn parse_file(
     parser
         .set_language(&lang)
         .map_err(|e| ParseError::LanguageInit(e.to_string()))?;
-    let tree = parser.parse(source, None).ok_or(ParseError::NoTree)?;
+    // DF.1: the TREE comes from a byte-for-byte copy in which the one leading
+    // `\` of each `use \A\B\{..};` is a space (tree-sitter-php 0.24 has no rule
+    // for it and its ERROR node swallows the rest of the file). Lengths and
+    // offsets are unchanged, so every node range is valid in `source`, and
+    // every text read below (`src`, CODE / POSITION cells, names) stays on the
+    // original bytes.
     let src = source.as_bytes();
+    let masked = mask_group_use_backslash(source);
+    if let Some(m) = &masked {
+        let n = m.bytes().zip(src).filter(|(a, b)| a != *b).count();
+        eprintln!("[php-use] group use behind a leading backslash masked={n} file={file_rel_path}");
+    }
+    let tree = parser
+        .parse(masked.as_deref().unwrap_or(source), None)
+        .ok_or(ParseError::NoTree)?;
     let root = tree.root_node();
 
     // Namespaces, `use` maps and Eloquent model classes are read up front, so a
@@ -111,6 +124,108 @@ pub fn parse_file(
         nav: acc.nav,
         properties: Default::default(),
     })
+}
+
+/// DF.1: `source` with the one leading `\` of every group `use` written behind
+/// a leading backslash (`use \App\Models\{User, Order};`) overwritten by a
+/// space, or `None` when the file holds no such statement (the common case: no
+/// copy is made). PHP reads `use \A\{B};` exactly as `use A\{B};` (a `use`
+/// path is always absolute), so the masked text means the same program; one
+/// ASCII byte replaces one ASCII byte, so its length, byte offsets, rows,
+/// columns and UTF-8 boundaries are those of `source`.
+///
+/// Every offset [`group_use_backslashes`] records holds a `\`, so the copy is
+/// valid UTF-8 and `from_utf8` never fails.
+fn mask_group_use_backslash(source: &str) -> Option<String> {
+    let offsets = group_use_backslashes(source.as_bytes());
+    if offsets.is_empty() {
+        return None;
+    }
+    let mut bytes = source.as_bytes().to_vec();
+    for at in offsets {
+        if let Some(b) = bytes.get_mut(at) {
+            *b = b' ';
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// DF.1: the byte offset of the ONE leading `\` of each group `use` behind a
+/// leading backslash, in source order. tree-sitter-php 0.24 has no rule for
+/// that form (`legacy_namespace_name` takes no fully qualified name there):
+/// the statement becomes an ERROR node whose recovery swallows the rest of the
+/// file, every class, method and call after it.
+///
+/// A statement is read at a line start (after ASCII spaces / tabs): the
+/// keyword `use` (ASCII case-insensitive, as PHP keywords are), whitespace, an
+/// optional `function` / `const` keyword and whitespace, then `\`, a name
+/// (`[A-Za-z_][A-Za-z0-9_\\]*`, bytes >= 0x80 being label bytes as in PHP)
+/// whose last byte is `\`, then `{` (spaces / tabs between allowed). A trait
+/// `use T { .. }` (its name does not end in `\`), a closure `use ($x)` (`(`
+/// first), a plain `use \A\B;` and an unanchored `use A\{B};` never match.
+/// Every anchor is an ASCII byte, so a multi-byte character is never split; a
+/// `use` line inside a heredoc only changes how the tree sees that line, since
+/// text is always read from the original.
+fn group_use_backslashes(src: &[u8]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut line_start = 0;
+    while line_start < src.len() {
+        if let Some(at) = group_use_backslash_at(src, line_start) {
+            out.push(at);
+        }
+        line_start = src[line_start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(src.len(), |p| line_start + p + 1);
+    }
+    out
+}
+
+/// The leading `\` of a group `use` starting on the line at `line_start`
+/// ([`group_use_backslashes`]), if there is one.
+fn group_use_backslash_at(src: &[u8], line_start: usize) -> Option<usize> {
+    let at = skip_while(src, line_start, |b| b == b' ' || b == b'\t');
+    let mut at = after_keyword(src, at, b"use")?;
+    if let Some(kw) =
+        after_keyword(src, at, b"function").or_else(|| after_keyword(src, at, b"const"))
+    {
+        at = kw;
+    }
+    if src.get(at) != Some(&b'\\') {
+        return None;
+    }
+    let backslash = at;
+    let first = *src.get(at + 1)?;
+    if !(first.is_ascii_alphabetic() || first == b'_' || first >= 0x80) {
+        return None;
+    }
+    let end = skip_while(src, at + 1, |b| {
+        b.is_ascii_alphanumeric() || b == b'_' || b == b'\\' || b >= 0x80
+    });
+    if src.get(end - 1) != Some(&b'\\') {
+        return None;
+    }
+    let brace = skip_while(src, end, |b| b == b' ' || b == b'\t');
+    (src.get(brace) == Some(&b'{')).then_some(backslash)
+}
+
+/// The first offset at or after `at` whose byte fails `keep` (or `src.len()`).
+fn skip_while(src: &[u8], at: usize, keep: impl Fn(u8) -> bool) -> usize {
+    src.get(at..)
+        .and_then(|rest| rest.iter().position(|&b| !keep(b)))
+        .map_or(src.len().max(at), |p| at + p)
+}
+
+/// The offset after `keyword` (ASCII case-insensitive) at `at` and the
+/// whitespace that must follow it, or `None` when `at` holds no such keyword:
+/// `user` is no `use`, and neither is `use\A` (PHP lexes that as one name).
+fn after_keyword(src: &[u8], at: usize, keyword: &[u8]) -> Option<usize> {
+    let end = at.checked_add(keyword.len())?;
+    if !src.get(at..end)?.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let after = skip_while(src, end, |b| b.is_ascii_whitespace());
+    (after > end).then_some(after)
 }
 
 /// LB.7b: a PHP top-level type outside a braced `namespace X { }` belongs to
@@ -1436,11 +1551,14 @@ struct UseClause {
 /// group: the sibling `namespace_name` prefixes each clause), `use function` /
 /// `use const` (the declaration's `type` applies to every clause unless a clause
 /// carries its own, as in a mixed group `use A\{function f, const C, D};`) and a
-/// leading `\`, which is stripped (a `use` path is always absolute).
+/// leading `\`, which is stripped (a `use` path is always absolute). A group
+/// behind a leading `\` (`use \A\{B};`) reaches here parsed: [`parse_file`]
+/// builds the tree from [`mask_group_use_backslash`]'s copy, where that `\` is
+/// a space, so the group's `namespace_name` starts one byte later and reads
+/// `A` from the original text.
 fn use_clauses(decl: TsNode, src: &[u8]) -> Vec<UseClause> {
-    // A declaration the grammar could not parse (tree-sitter-php 0.24 has no
-    // rule for a group behind a leading `\`: `use \A\{B};`) holds ERROR
-    // nodes, and its recovered clauses name a fragment (`\A`), not the import.
+    // A declaration the grammar could not parse holds ERROR nodes, and its
+    // recovered clauses name a fragment, not the import.
     if decl.has_error() {
         return Vec::new();
     }
@@ -2891,9 +3009,8 @@ use Illuminate\Http\Request;
     }
 
     /// CB.7: a leading `\` is stripped — a `use` path is always absolute.
-    /// tree-sitter-php 0.24 cannot parse a group behind a leading `\`
-    /// (`use \App\Billing\{Ledger};` is an ERROR node): that statement
-    /// records the right import or nothing, never the recovered `\App`.
+    /// DF.1: also on a group behind a leading `\` (`use \App\Billing\{Ledger};`),
+    /// which tree-sitter-php 0.24 cannot parse and [`parse_file`] masks.
     #[test]
     fn leading_backslash_is_stripped() {
         let source = "<?php\nuse \\App\\Models\\Customer;\nuse \\A\\B, \\C\\D as E;\n";
@@ -2906,10 +3023,124 @@ use Illuminate\Http\Request;
             ]
         );
         let group = use_targets("<?php\nuse \\App\\Billing\\{Ledger};\n");
-        assert!(
-            group.is_empty() || group == vec![sym("App::Billing", "Ledger", None)],
-            "{group:?}"
+        assert_eq!(group, vec![sym("App::Billing", "Ledger", None)]);
+    }
+
+    /// DF.1, over the `php-group-use-leading-backslash` fixture: on HEAD the
+    /// `use \App\Models\{User, Order};` ERROR node swallowed the class after
+    /// it. Masked, the class and its method parse, the group's two clauses
+    /// import, both static calls are recorded, and the CODE cell still holds
+    /// the original text, backslash and all.
+    #[test]
+    fn group_use_behind_backslash_keeps_the_file() {
+        let source = include_str!(
+            "../../../../bench/substrate-gap/fixtures/php-group-use-leading-backslash/src/Orders/Checkout.php"
         );
+        let module = "src::Orders::Checkout";
+        let fp = parse_file(source, "src/Orders/Checkout.php", module, repo()).unwrap();
+        assert_eq!(
+            qnames_of(&fp, node_kind::CLASS),
+            vec!["src::Orders::Checkout".to_string()]
+        );
+        assert_eq!(
+            qnames_of(&fp, node_kind::METHOD),
+            vec!["src::Orders::Checkout::run".to_string()]
+        );
+        assert!(
+            fp.imports.iter().all(|i| i.from_module == module),
+            "{:?}",
+            fp.imports
+        );
+        assert!(fp.imports.iter().all(|i| i.line == 3), "{:?}", fp.imports);
+        assert_eq!(
+            fp.imports
+                .iter()
+                .map(|i| i.target.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                sym("App::Models", "User", None),
+                sym("App::Models", "Order", None),
+            ]
+        );
+        let mut calls = attr_bases(&fp);
+        calls.sort();
+        assert_eq!(
+            calls,
+            vec![
+                ("Order".to_string(), "create".to_string()),
+                ("User".to_string(), "find".to_string()),
+            ]
+        );
+        let code: Vec<&str> = fp
+            .nodes
+            .iter()
+            .flat_map(|n| &n.cells)
+            .filter(|c| c.kind == cell_type::CODE)
+            .filter_map(|c| match &c.payload {
+                CellPayload::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            code.iter()
+                .any(|t| t.contains("use \\App\\Models\\{User, Order};")),
+            "{code:?}"
+        );
+    }
+
+    /// DF.1: the mask overwrites exactly the recorded leading `\` of a group
+    /// `use` (also after `use function` / `use const`) with one space, so
+    /// lengths and every other byte are the original's.
+    #[test]
+    fn mask_is_byte_preserving() {
+        for (source, want) in [
+            ("use \\A\\{B};", "use  A\\{B};"),
+            ("use function \\A\\{f};", "use function  A\\{f};"),
+            ("USE CONST \\A\\B\\ {C, D};", "USE CONST  A\\B\\ {C, D};"),
+            (
+                "<?php\n  use \\Ä\\Mödels\\{Usér};\n// é\n\tuse \\B\\{C};\n",
+                "<?php\n  use  Ä\\Mödels\\{Usér};\n// é\n\tuse  B\\{C};\n",
+            ),
+        ] {
+            let recorded = group_use_backslashes(source.as_bytes());
+            let masked = mask_group_use_backslash(source).unwrap();
+            assert_eq!(masked, want);
+            assert_eq!(masked.len(), source.len());
+            let differ: Vec<usize> = masked
+                .bytes()
+                .zip(source.bytes())
+                .enumerate()
+                .filter(|(_, (a, b))| a != b)
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(differ, recorded, "{source:?}");
+            assert!(recorded.iter().all(|&i| source.as_bytes()[i] == b'\\'));
+        }
+    }
+
+    /// DF.1: a trait `use T { .. }`, a closure `use ($x)`, a plain
+    /// `use \A\B;`, an unanchored group, a commented-out or mid-line `use`
+    /// and `use\A\{B}` (PHP lexes that as one name) are not masked.
+    #[test]
+    fn mask_leaves_trait_and_closure_use_alone() {
+        for source in [
+            "use T { a as b; }",
+            "    use \\T\\Named { a as b; }",
+            "function () use ($x) {}",
+            "$f = function ()\n    use ($x) {};",
+            "use \\A\\B;",
+            "use A\\{B};",
+            "// use \\A\\{B};",
+            "$a; use \\A\\{B};",
+            "use\\A\\{B};",
+            "user \\A\\{B};",
+            "use \\\\A\\{B};",
+            "use \\A\\",
+            "use",
+            "",
+        ] {
+            assert_eq!(mask_group_use_backslash(source), None, "{source:?}");
+        }
     }
 
     /// CB.7: `use A\B, C\D as E;` is two imports; a clause with no namespace

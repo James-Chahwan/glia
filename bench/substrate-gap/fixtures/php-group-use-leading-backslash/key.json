@@ -1,0 +1,41 @@
+{
+  "framework": "php-group-use-leading-backslash",
+  "language": "php",
+  "dirs": [
+    "."
+  ],
+  "note": "DF (0.5.1 deferral 'use \\App\\{X}'): tree-sitter-php 0.24 has no rule for a group `use` behind a leading backslash, so `use \\App\\Models\\{User, Order};` is an ERROR node that swallows the rest of the file: HEAD (84e2e71, leap wheel) emits MODULE src::Orders::Checkout and nothing else from it - no CLASS Checkout, no METHOD run, 0 IMPORTS, 0 CALLS. CB.7's use_clauses returned nothing for the statement by design. The same statement without the backslash parses and binds (control measured on HEAD).",
+  "expect_nodes": [
+    {
+      "kind": "CLASS",
+      "name": "src::Orders::Checkout",
+      "note": "the class after the statement survives the parse"
+    },
+    {
+      "kind": "METHOD",
+      "name": "src::Orders::Checkout::run"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "src::Orders::Checkout",
+      "to": "src::Models::User",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "src::Orders::Checkout",
+      "to": "src::Models::Order",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "src::Orders::Checkout::run",
+      "to": "src::Models::User::find",
+      "category": "CALLS"
+    },
+    {
+      "from": "src::Orders::Checkout::run",
+      "to": "src::Models::Order::create",
+      "category": "CALLS"
+    }
+  ]
+}
