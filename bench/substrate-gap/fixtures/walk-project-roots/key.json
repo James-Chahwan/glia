@@ -15,7 +15,8 @@
   "expect_cells": [
     {"kind": "PROJECT", "node": "project:.",            "cell": "ORIGIN", "contains": "\"manifest\":\"package.json\"", "note": "the repo root is `project:.`, never an empty tail"},
     {"kind": "PROJECT", "node": "project:libs/core",    "cell": "ORIGIN", "contains": "\"provenance\":\"project_root\"", "note": "reuses cell_type::ORIGIN; no new cell type"},
-    {"kind": "PROJECT", "node": "project:services/api", "cell": "ORIGIN", "contains": "\"ecosystem\":\"go\"", "note": "ecosystem rides the ORIGIN payload"}
+    {"kind": "PROJECT", "node": "project:services/api", "cell": "ORIGIN", "contains": "\"ecosystem\":\"go\"", "note": "ecosystem rides the ORIGIN payload"},
+    {"kind": "PROJECT", "node": "project:libs/core",    "cell": "ORIGIN", "contains": "\"label_source\":\"manifest\"", "note": "DD.4: the label came from Cargo.toml [package] name, not the dir basename fallback"}
   ],
   "forbid": [
     {"kind": "PROJECT", "max_nodes": 4, "note": "one PROJECT per manifest root: libs/core/src and apps/web are not double-counted"}

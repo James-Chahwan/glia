@@ -564,8 +564,12 @@ pub mod cell_type {
     /// ANOTHER repository (a `.git` dir, a submodule's or a linked worktree's
     /// `.git` file) — see `walk_gating::Collapse`. (A8.1)
     /// A `PROJECT` anchor (A8.5) carries
-    /// `{"provenance":"project_root","ecosystem":"npm","manifest":"apps/web/package.json","label":"@shop/web","path":"apps/web"}`.
-    /// Its `path` is repo-relative and is `""` for the repo root.
+    /// `{"provenance":"project_root","ecosystem":"npm","manifest":"apps/web/package.json","label":"@shop/web","label_source":"manifest","path":"apps/web"}`.
+    /// Its `path` is repo-relative and is `""` for the repo root. Its
+    /// `label_source` (DD.4) says where `label` came from: `manifest` (the
+    /// manifest's own name), `dir` (the directory basename fallback), `root`
+    /// (the repo root with no name) or `declared` (a `[[project]]` overlay
+    /// entry); see `project_roots::LABEL_*`.
     /// Lets consumers (engram, neuropil) filter by *coordinate* rather than by
     /// string-matching keys, and preserves the spatial map of a repo without
     /// emitting a node per file inside a collapsed region. (glia-v2 G10/G14)

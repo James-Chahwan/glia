@@ -750,7 +750,8 @@ pub(crate) fn project_qname(rel_path: &str) -> String {
 /// manifest label (`@shop/web`), which is what `--scope <label>` and service
 /// labelling look up. The qname is derived from the path, so it stays stable
 /// when a label changes. The single `ORIGIN` cell is
-/// `{provenance:"project_root", ecosystem, manifest, label, path}`. Because the
+/// `{provenance:"project_root", ecosystem, manifest, label, label_source, path}`,
+/// where `label_source` (DD.4) is [`ProjectRoot::label_source`]. Because the
 /// nodes have ZERO edges, blast radius, trace and liveness cannot fan out
 /// through them.
 pub(crate) fn build_project_graph(roots: &[ProjectRoot], repo: RepoId) -> glia_graph::RepoGraph {
@@ -769,6 +770,7 @@ pub(crate) fn build_project_graph(roots: &[ProjectRoot], repo: RepoId) -> glia_g
             "ecosystem": r.ecosystem,
             "manifest": r.manifest,
             "label": r.label,
+            "label_source": r.label_source,
             "path": r.rel_path,
         })
         .to_string();
@@ -1406,6 +1408,7 @@ mod walk_tests {
                 "ecosystem": "npm",
                 "manifest": "package.json",
                 "label": "shop-monorepo",
+                "label_source": "manifest",
                 "path": "",
             })
         );
@@ -1416,6 +1419,7 @@ mod walk_tests {
         assert!(origin_of("project:.").contains(r#""manifest":"package.json""#));
         assert!(origin_of("project:libs/core").contains(r#""provenance":"project_root""#));
         assert!(origin_of("project:services/api").contains(r#""ecosystem":"go""#));
+        assert!(origin_of("project:libs/core").contains(r#""label_source":"manifest""#));
 
         // No edge touches a PROJECT node, including the doc-linker's DOCUMENTS
         // edges from a README that names two of the labels.
@@ -1450,6 +1454,61 @@ mod walk_tests {
         assert_eq!(slot(m), slot(&many.merged));
         assert!(slot(m).is_some());
         assert_eq!(m.graphs.len(), many.merged.graphs.len());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// DD.4: a PROJECT's ORIGIN records where its label came from. A
+    /// `package.json` with no `name` is labelled by its directory (`dir`), so
+    /// `utils` is never mistaken for a name the manifest declared; a named one
+    /// is `manifest`.
+    #[test]
+    fn project_label_source_is_recorded() {
+        let root = walk_tmp("label_source");
+        for d in ["packages/utils", "packages/money"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("packages/utils/package.json"), r#"{"private":true}"#).unwrap();
+        std::fs::write(root.join("packages/money/package.json"), r#"{"name":"@shop/money"}"#).unwrap();
+
+        let (_files, _regions, _md, roots) = walk_source_files(&root);
+        let g = build_project_graph(&roots, RepoId::from_canonical("dd4-label-source"));
+        // (qname, nav name, ORIGIN text), by qname.
+        let mut got: Vec<(String, String, String)> = g
+            .nodes
+            .iter()
+            .map(|n| {
+                let origin = match &n.cells[..] {
+                    [glia_core::Cell { kind, payload: glia_core::CellPayload::Json(j) }]
+                        if *kind == glia_code_domain::cell_type::ORIGIN =>
+                    {
+                        j.clone()
+                    }
+                    other => panic!("exactly one JSON ORIGIN cell, got {other:?}"),
+                };
+                (g.nav.qname_by_id[&n.id].clone(), g.nav.name_by_id[&n.id].clone(), origin)
+            })
+            .collect();
+        got.sort_by(|a, b| a.0.cmp(&b.0));
+        let parsed: Vec<serde_json::Value> =
+            got.iter().map(|(.., o)| serde_json::from_str(o).unwrap()).collect();
+        let rows: Vec<(&str, &str, Option<&str>)> = got
+            .iter()
+            .zip(&parsed)
+            .map(|((q, name, _), o)| (q.as_str(), name.as_str(), o["label_source"].as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("project:packages/money", "@shop/money", Some("manifest")),
+                ("project:packages/utils", "utils", Some("dir")),
+            ]
+        );
+        assert_eq!(parsed[1]["label"], "utils");
+        assert_eq!(parsed[1]["manifest"], "packages/utils/package.json");
+        // `json!` sorts its keys, so the payload text a fixture's `contains`
+        // row reads is stable.
+        assert!(got[1].2.contains(r#""label":"utils","label_source":"dir","manifest":"#), "{}", got[1].2);
+        assert!(got[0].2.contains(r#""label_source":"manifest""#), "{}", got[0].2);
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -25,14 +25,42 @@ pub struct ProjectRoot {
     pub rel_path: String,
     /// Human label from the manifest, else the dir basename, else `"root"`.
     pub label: String,
+    /// Which link of the fallback chain produced [`ProjectRoot::label`] (DD.4):
+    /// [`LABEL_MANIFEST`], [`LABEL_DIR`], [`LABEL_ROOT`] or [`LABEL_DECLARED`].
+    /// Only a [`LABEL_MANIFEST`] label is a name the manifest itself declared,
+    /// so only it may be matched as the same thing as a registry package.
+    pub label_source: &'static str,
     pub ecosystem: &'static str,
     /// Repo-relative path of the manifest that named it.
     pub manifest: String,
 }
 
+/// [`ProjectRoot::label_source`]: the manifest's own name (`package.json`
+/// `name`, `go.mod` `module`, `Cargo.toml` `[package] name`, a .NET file stem).
+pub const LABEL_MANIFEST: &str = "manifest";
+/// [`ProjectRoot::label_source`]: no usable label, so the basename of the
+/// repo-relative directory.
+pub const LABEL_DIR: &str = "dir";
+/// [`ProjectRoot::label_source`]: no usable label at the repo root, so `"root"`.
+pub const LABEL_ROOT: &str = "root";
+/// [`ProjectRoot::label_source`]: the label a `[[project]]` entry in
+/// `.glia/overlay.toml` declared (LF.3a).
+pub const LABEL_DECLARED: &str = "declared";
+
+/// The tail of the label fallback chain [`ProjectRoot::new`] and
+/// [`ProjectRoot::declared`] share: the basename of the repo-relative
+/// `rel_path` ([`LABEL_DIR`]), else `"root"` ([`LABEL_ROOT`]).
+fn fallback_label(rel_path: &str) -> (String, &'static str) {
+    match rel_path.rsplit('/').next().and_then(clean_label) {
+        Some(base) => (base, LABEL_DIR),
+        None => ("root".to_string(), LABEL_ROOT),
+    }
+}
+
 impl ProjectRoot {
     /// Build a root, applying the label fallback chain: manifest label → the
-    /// basename of `rel_path` → `"root"`. The basename is taken from the
+    /// basename of `rel_path` → `"root"`, recording which link produced it in
+    /// [`ProjectRoot::label_source`]. The basename is taken from the
     /// REPO-RELATIVE path, never the checkout directory, so the repo root is
     /// always `"root"` wherever the repo happens to be cloned.
     pub fn new(
@@ -41,9 +69,10 @@ impl ProjectRoot {
         manifest_basename: &str,
         label: Option<String>,
     ) -> Self {
-        let label = label
-            .or_else(|| rel_path.rsplit('/').next().and_then(clean_label))
-            .unwrap_or_else(|| "root".to_string());
+        let (label, label_source) = match label {
+            Some(l) => (l, LABEL_MANIFEST),
+            None => fallback_label(&rel_path),
+        };
         let manifest = if rel_path.is_empty() {
             manifest_basename.to_string()
         } else {
@@ -52,6 +81,7 @@ impl ProjectRoot {
         Self {
             rel_path,
             label,
+            label_source,
             ecosystem,
             manifest,
         }
@@ -62,15 +92,17 @@ impl ProjectRoot {
     /// `rel_path` is the loader's normalised path (`ProjectDecl::rel_path`).
     /// The label falls back like [`ProjectRoot::new`]: the declared label when
     /// it passes the manifest-label rules (no `::`, `${` or control chars, at
-    /// most 200 chars), else the basename of `rel_path`, else `"root"`.
+    /// most 200 chars), else the basename of `rel_path`, else `"root"`; its
+    /// source is [`LABEL_DECLARED`], [`LABEL_DIR`] or [`LABEL_ROOT`].
     pub fn declared(rel_path: String, label: Option<&str>) -> Self {
-        let label = label
-            .and_then(clean_label)
-            .or_else(|| rel_path.rsplit('/').next().and_then(clean_label))
-            .unwrap_or_else(|| "root".to_string());
+        let (label, label_source) = match label.and_then(clean_label) {
+            Some(l) => (l, LABEL_DECLARED),
+            None => fallback_label(&rel_path),
+        };
         Self {
             rel_path,
             label,
+            label_source,
             ecosystem: DECLARED_ECOSYSTEM,
             manifest: crate::glia_config::OVERLAY_FILE.to_string(),
         }
@@ -602,6 +634,35 @@ mod tests {
         );
         let r = ProjectRoot::new(String::new(), "go", "go.mod", None);
         assert_eq!((r.label.as_str(), r.manifest.as_str()), ("root", "go.mod"));
+    }
+
+    /// DD.4: each root records which link of the label fallback chain named
+    /// it, so a basename fallback is never mistaken for a manifest's own name.
+    #[test]
+    fn label_source_follows_the_fallback() {
+        let r = ProjectRoot::new("apps/web".into(), "npm", "package.json", Some("@shop/web".into()));
+        assert_eq!((r.label.as_str(), r.label_source), ("@shop/web", LABEL_MANIFEST));
+        let r = ProjectRoot::new("packages/utils".into(), "npm", "package.json", None);
+        assert_eq!((r.label.as_str(), r.label_source), ("utils", LABEL_DIR));
+        let r = ProjectRoot::new(String::new(), "go", "go.mod", None);
+        assert_eq!((r.label.as_str(), r.label_source), ("root", LABEL_ROOT));
+        let r = ProjectRoot::declared("libs/x".into(), Some("X"));
+        assert_eq!((r.label.as_str(), r.label_source), ("X", LABEL_DECLARED));
+        let r = ProjectRoot::declared("libs/x".into(), None);
+        assert_eq!((r.label.as_str(), r.label_source), ("x", LABEL_DIR));
+        // A declared label that breaks the label rules falls back to the dir.
+        let r = ProjectRoot::declared("svc/api".into(), Some("a::b"));
+        assert_eq!((r.label.as_str(), r.label_source), ("api", LABEL_DIR));
+        let r = ProjectRoot::declared(String::new(), None);
+        assert_eq!((r.label.as_str(), r.label_source), ("root", LABEL_ROOT));
+        // The walker's own path: a manifest with no name falls back to the dir.
+        let (eco, base, label) =
+            detect_root(&names(&["package.json"]), |_| r#"{"private":true}"#.into()).unwrap();
+        let r = ProjectRoot::new("packages/utils".into(), eco, &base, label);
+        assert_eq!((r.label.as_str(), r.label_source), ("utils", LABEL_DIR));
+        let distinct: std::collections::BTreeSet<_> =
+            [LABEL_MANIFEST, LABEL_DIR, LABEL_ROOT, LABEL_DECLARED].into_iter().collect();
+        assert_eq!(distinct.len(), 4, "the four sources are distinct strings");
     }
 
     #[test]

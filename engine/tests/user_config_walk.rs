@@ -173,6 +173,7 @@ fn declared_root_emits_project() {
             "ecosystem": "declared",
             "manifest": ".glia/overlay.toml",
             "label": "migrator",
+            "label_source": "declared",
             "path": "tools/migrator",
         })
     );
