@@ -74,6 +74,13 @@ pub mod timeline;
 // 0.5.1 internals: crate-private slots, cross-module items `pub(crate)`.
 mod suspected;
 
+// 0.5.2 primitives: one public module each, reached by module path
+// (`glia_engine::watch::WatchSession`); each owner fills its file.
+pub mod identity;
+pub mod memory;
+pub mod rules;
+pub mod watch;
+
 pub use glia_graph::MergedGraph as ReExportedMergedGraph;
 
 pub use arch::{
