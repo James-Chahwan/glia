@@ -35,6 +35,22 @@
 //!   a module attribute, not a handler, and mints nothing. The resolver pairs
 //!   a trailing-`*` topic with its concrete topics.
 //!
+//! Paths read off the file's routing structure (DG.5), not the call's own
+//! arguments:
+//! - axum: `ws.on_upgrade(..)` sits in the handler fn F; its path is the
+//!   first in-file `.route("/p", get(F))` whose method router names F
+//!   ([`PathRead::AxumRoute`]). No in-file route names F: the name is `ws`,
+//!   and the graph crate's ws resolver lends it the paths of every ROUTE
+//!   HANDLED_BY F, as for a gorilla upgrade.
+//! - Akka / Pekko HTTP: `handleWebSocketMessages(..)` is routed by the
+//!   `path(..)` / `pathPrefix(..)` directives whose blocks enclose it,
+//!   composed outer to inner (`pathPrefix("api") { path("ws" / Segment) {..} }`
+//!   -> `/api/ws/:segment`, [`PathRead::AkkaDirective`]); a matcher outside
+//!   [`AKKA_MATCHERS`] makes the name `ws`.
+//!
+//! Both scan blocks over code bytes only ([`Blocks`], CodeMap's C-family
+//! lexing, which covers Rust and Scala).
+//!
 //! Anchors: the name is read per site, so EVERY site is anchored and
 //! `anchor::attach` gives each owning function its HANDLED_BY (server) or USES
 //! (client) edge. Python decorators anchor at the decorated `def` line
@@ -50,6 +66,8 @@
 //! fired_on marker, one line per file per framework that yielded a node, `n`
 //! = distinct nodes that framework's sites read, path repo-relative:
 //!   `[ws] handlers framework=fastapi n=2 in app.py`
+//!   `[ws] handlers framework=axum n=1 in src/main.rs`
+//!   `[ws] handlers framework=akka-http n=1 in ChatRoutes.scala`
 //!   `[ws] clients framework=browser n=2 in live.ts`
 //!   `[ws] handlers framework=phoenix n=1 in lib/app_web/channels/user_socket.ex`
 //!   `[ws] clients framework=actioncable n=1 in chat.js`
@@ -76,6 +94,7 @@ use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use glia_core::{Confidence, Node, NodeId, NodeKindId, RepoId};
 
 use crate::anchor::{Anchor, line_of};
+use crate::cli::CodeMap;
 use crate::code_guard::LazyGuard;
 use crate::queue_topic::{LOOKAHEAD_LINES, MAX_HITS_PER_NEEDLE, MAX_REGION, clip};
 
@@ -107,6 +126,14 @@ enum PathRead {
     /// The first double-quoted literal on the needle's line, from the needle
     /// on (Elixir's paren-less `socket "/socket", ...` / `channel "room:*", ...`).
     LineLiteral,
+    /// DG.5, axum: the path of the first in-file `.route("/p", ..)` whose
+    /// method router names the `fn` enclosing the needle
+    /// ([`enclosing_rust_fn`], [`axum_route_of`]).
+    AxumRoute,
+    /// DG.5, Akka / Pekko HTTP: the composed path of the `path(..)` /
+    /// `pathPrefix(..)` directives whose blocks enclose the needle
+    /// ([`akka_directive_path`]).
+    AkkaDirective,
 }
 
 /// Which names a row mints.
@@ -180,6 +207,10 @@ const NHOOYR: &[&str] = &["nhooyr.io/websocket", "github.com/coder/websocket"];
 const FASTAPI_STARLETTE: &[&str] = &["fastapi", "starlette"];
 /// phoenix.js, by its import string (not `phoenix_html` / `phoenix_live_view`).
 const PHOENIX_JS: &[&str] = &["\"phoenix\"", "'phoenix'"];
+/// axum, by its crate path (`use axum::..`, `axum::extract::ws`).
+const AXUM: &[&str] = &["axum"];
+/// Akka HTTP and its Apache fork Pekko HTTP, by package.
+const AKKA_HTTP: &[&str] = &["akka.http", "org.apache.pekko.http"];
 
 const HANDLER_ROWS: &[WsRow] = &[
     // node `ws` / socket servers. A bare `WebSocketServer` (an import line)
@@ -204,6 +235,9 @@ const HANDLER_ROWS: &[WsRow] = &[
     // import) are not handlers; the upgrade call inside the handler is.
     row(".Upgrade(", GORILLA, PathRead::Generic, "gorilla"),
     row("websocket.Accept(", NHOOYR, PathRead::Generic, "nhooyr"),
+    // Rust: axum's `WebSocketUpgrade::on_upgrade`, inside the handler fn the
+    // file's router mounts (DG.5).
+    row(".on_upgrade(", AXUM, PathRead::AxumRoute, "axum"),
     // Python.
     WsRow {
         needle: ".websocket(",
@@ -243,6 +277,19 @@ const HANDLER_ROWS: &[WsRow] = &[
         &["StompEndpointRegistry"],
         PathRead::Arg(0),
         "spring-stomp",
+    ),
+    // Scala: Akka / Pekko HTTP, under the path directives enclosing it (DG.5).
+    row(
+        "handleWebSocketMessages(",
+        AKKA_HTTP,
+        PathRead::AkkaDirective,
+        "akka-http",
+    ),
+    row(
+        "handleWebSocketMessagesForProtocol(",
+        AKKA_HTTP,
+        PathRead::AkkaDirective,
+        "akka-http",
     ),
     // C#: SignalR hubs and raw ASP.NET Core sockets.
     row("MapHub<", &["SignalR"], PathRead::AfterAngle, "signalr"),
@@ -433,14 +480,16 @@ fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -
     // CJ.1b: a needle that starts in a Rust / Python literal or comment is no
     // site (a scanner's own needle table, a doc line, a test's sample source).
     let mut guard = LazyGuard::new(path, source);
+    // DG.5: the file's code blocks, lexed on the first site that reads them.
+    let mut blocks: Option<Blocks> = None;
 
     for r in side.rows {
         if !gate_holds(source, r.gate) {
             continue;
         }
         for offset in sites(source, r.needle, &mut guard) {
-            let Some(name) =
-                read_name(source, offset, r).or_else(|| fallback(r).map(str::to_string))
+            let Some(name) = read_name(source, offset, r, &mut blocks)
+                .or_else(|| fallback(r).map(str::to_string))
             else {
                 continue;
             };
@@ -554,8 +603,14 @@ fn fallback(r: &WsRow) -> Option<&'static str> {
     })
 }
 
-/// The name one site reads, or `None` when the row reads none there.
-fn read_name(source: &str, offset: usize, r: &WsRow) -> Option<String> {
+/// The name one site reads, or `None` when the row reads none there. `blocks`
+/// is the scan's [`Blocks`], built here on the first site that needs it.
+fn read_name(
+    source: &str,
+    offset: usize,
+    r: &WsRow,
+    blocks: &mut Option<Blocks>,
+) -> Option<String> {
     let after = offset.checked_add(r.needle.len())?;
     let name = match r.read {
         PathRead::Generic | PathRead::Default => return None,
@@ -575,6 +630,15 @@ fn read_name(source: &str, offset: usize, r: &WsRow) -> Option<String> {
         PathRead::Client(n) => client_path(split_top(call_region(source, after)?, b',').get(n)?)?,
         PathRead::ClassBeforeLt => class_before(source, offset, after)?,
         PathRead::LineLiteral => line_literal(source, offset)?,
+        PathRead::AxumRoute => {
+            let blocks = blocks.get_or_insert_with(|| Blocks::new(source));
+            axum_route_of(source, enclosing_rust_fn(source, offset, blocks)?, blocks)?
+        }
+        PathRead::AkkaDirective => akka_directive_path(
+            source,
+            offset,
+            blocks.get_or_insert_with(|| Blocks::new(source)),
+        )?,
     };
     let shaped = r.accept != Accept::ChannelClass || is_channel_class(&name);
     (valid_name(&name) && shaped).then_some(name)
@@ -996,6 +1060,353 @@ fn normalise_ws_path(url: &str) -> String {
     url.to_string()
 }
 
+// ---- DG.5: paths read off the file's routing structure -------------------
+
+/// One file's code-byte `{ }` blocks: every `{` outside a literal or comment
+/// ([`CodeMap::new`], the C family's lexing, which covers Rust's raw strings
+/// and Scala's `"""` blocks and nesting comments) paired with its matching
+/// `}`, or the end of input when it never closes.
+struct Blocks {
+    map: CodeMap,
+    /// `(open, close)` of each block, sorted by `open`.
+    pairs: Vec<(usize, usize)>,
+}
+
+impl Blocks {
+    fn new(source: &str) -> Self {
+        let map = CodeMap::new(source);
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        let mut open: Vec<usize> = Vec::new();
+        for (i, c) in source.bytes().enumerate() {
+            if !matches!(c, b'{' | b'}') || !map.is_code(i) {
+                continue;
+            }
+            if c == b'{' {
+                open.push(pairs.len());
+                pairs.push((i, source.len()));
+            } else if let Some(pair) = open.pop().and_then(|k| pairs.get_mut(k)) {
+                pair.1 = i;
+            }
+        }
+        Blocks { map, pairs }
+    }
+
+    /// True when byte `pos` is code, not inside a literal or comment.
+    fn is_code(&self, pos: usize) -> bool {
+        self.map.is_code(pos)
+    }
+
+    /// True when the block whose `{` is byte `open` holds byte `at`.
+    fn encloses(&self, open: usize, at: usize) -> bool {
+        self.pairs
+            .binary_search_by_key(&open, |p| p.0)
+            .ok()
+            .and_then(|k| self.pairs.get(k))
+            .is_some_and(|&(o, close)| o < at && at < close)
+    }
+}
+
+/// The name of the `fn` whose body holds byte `offset`: the nearest
+/// `fn <ident>` before it (in code) whose body `{` — the first code `{` after
+/// its name at bracket depth 0, where a `;` first means no body (a trait
+/// method declaration) — opens a block that still spans `offset`. A fn nested
+/// in another wins while the site is in its body; after its body ends, the
+/// outer fn does.
+fn enclosing_rust_fn<'s>(source: &'s str, offset: usize, blocks: &Blocks) -> Option<&'s str> {
+    let b = source.as_bytes();
+    for (i, _) in source.get(..offset)?.rmatch_indices("fn") {
+        let keyword = (i == 0 || b.get(i - 1).is_some_and(|c| !is_ident_byte(*c)))
+            && b.get(i + 2).is_some_and(u8::is_ascii_whitespace)
+            && blocks.is_code(i);
+        if !keyword {
+            continue;
+        }
+        let Some(rest) = source.get(i + 2..) else {
+            continue;
+        };
+        let name_at = i + 2 + (rest.len() - rest.trim_start().len());
+        let name_len = b
+            .get(name_at..)
+            .map_or(0, |t| t.iter().take_while(|c| is_ident_byte(**c)).count());
+        let Some(name) = source.get(name_at..name_at + name_len) else {
+            continue;
+        };
+        if name.is_empty() || name.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+            continue;
+        }
+        if body_open(b, name_at + name_len, offset, blocks)
+            .is_some_and(|o| blocks.encloses(o, offset))
+        {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// The body `{` of the fn whose signature starts at `from`: the first code `{`
+/// at `(` / `[` depth 0 before `limit` (a struct pattern parameter's `{` is
+/// inside the parentheses, an array type's `;` inside its brackets); `None`
+/// when a depth-0 `;` comes first.
+fn body_open(b: &[u8], from: usize, limit: usize, blocks: &Blocks) -> Option<usize> {
+    let mut depth = 0i32;
+    for i in from..limit.min(b.len()) {
+        let c = *b.get(i)?;
+        if !matches!(c, b'(' | b')' | b'[' | b']' | b'{' | b';') || !blocks.is_code(i) {
+            continue;
+        }
+        match c {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth -= 1,
+            b'{' if depth == 0 => return Some(i),
+            b';' if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// axum's method routers: `get(h)` ... `any(h)` take the handler as their one
+/// argument, `on(filter, h)` as its second.
+const AXUM_METHOD_ROUTERS: &[&str] = &[
+    "get", "post", "put", "delete", "patch", "head", "options", "trace", "connect", "any", "on",
+];
+
+/// The path of the first `.route("/p", <method router>)` call in the file (in
+/// source order, in code) whose method router names `handler`
+/// ([`names_handler`]). A fn mounted on two routes keeps the first.
+fn axum_route_of(source: &str, handler: &str, blocks: &Blocks) -> Option<String> {
+    source
+        .match_indices(".route(")
+        .filter(|(i, _)| blocks.is_code(*i))
+        .find_map(|(i, needle)| {
+            let args = split_top(call_region(source, i + needle.len())?, b',');
+            let path = server_literal(args.first()?)?;
+            names_handler(args.get(1)?, handler).then_some(path)
+        })
+}
+
+/// True when the method-router expression `expr` routes to `handler`: a call
+/// chain `get(index).post(chat).layer(..)` whose calls are each `<path>(..)`,
+/// one of them an [`AXUM_METHOD_ROUTERS`] entry (bare, or through a path such
+/// as `routing::get` / `axum::routing::any`) whose handler argument is exactly
+/// `handler`.
+fn names_handler(expr: &str, handler: &str) -> bool {
+    let mut rest = expr.trim();
+    loop {
+        let path_len = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+            .unwrap_or(rest.len());
+        let (Some(path), Some(tail)) = (rest.get(..path_len), rest.get(path_len..)) else {
+            return false;
+        };
+        let Some(args_from) = tail.trim_start().strip_prefix('(') else {
+            return false;
+        };
+        let Some(region) = call_region(args_from, 0) else {
+            return false;
+        };
+        let method = path.rsplit("::").next().unwrap_or(path);
+        if AXUM_METHOD_ROUTERS.contains(&method) {
+            let args: Vec<&str> = split_top(region, b',')
+                .into_iter()
+                .map(str::trim)
+                .filter(|a| !a.is_empty())
+                .collect();
+            let named = match (method, args.as_slice()) {
+                ("on", [_, h]) => Some(*h),
+                ("on", _) => None,
+                (_, [h]) => Some(*h),
+                _ => None,
+            };
+            if named == Some(handler) {
+                return true;
+            }
+        }
+        // Past the call's `)`: the next link of the chain, if any.
+        let Some(after) = args_from.get(region.len() + 1..) else {
+            return false;
+        };
+        match after.trim_start().strip_prefix('.') {
+            Some(next) => rest = next.trim_start(),
+            None => return false,
+        }
+    }
+}
+
+/// Akka HTTP's path matchers that stand for a value, read as the handler
+/// parameter shapes the ws resolver knows (`:x` is one segment,
+/// `is_handler_param`); a bare `*` stays literal there and pairs nothing.
+/// The table DG.10 gives the Scala parser's Akka ROUTEs, so one Akka source
+/// reads one path on both sides.
+const AKKA_MATCHERS: &[(&str, &str)] = &[
+    ("Segment", ":segment"),
+    ("IntNumber", ":id"),
+    ("LongNumber", ":id"),
+    ("HexIntNumber", ":id"),
+    ("HexLongNumber", ":id"),
+    ("DoubleNumber", ":id"),
+    ("JavaUUID", ":id"),
+    ("Remaining", "*"),
+    ("RemainingPath", "*"),
+];
+
+/// The path Akka / Pekko HTTP's directives route the needle at `offset` to:
+/// every `path(..)` / `pathPrefix(..)` call before it (in code; an identifier
+/// byte before `path` disqualifies it, so `subpath(` is no directive) that
+/// encloses it ([`directive_encloses`]), composed outer to inner. `None` when
+/// no directive encloses the site, or one that does reads unreadable — its
+/// matcher ([`akka_matcher_path`]), or a `|` alternative.
+fn akka_directive_path(source: &str, offset: usize, blocks: &Blocks) -> Option<String> {
+    let head = source.get(..offset)?;
+    let b = source.as_bytes();
+    let mut sites: Vec<(usize, usize)> = ["path(", "pathPrefix("]
+        .iter()
+        .flat_map(|d| head.match_indices(d).map(|(i, n)| (i, i + n.len())))
+        .collect();
+    sites.sort_unstable();
+    let mut path = String::new();
+    for (at, args) in sites {
+        if (at > 0 && b.get(at - 1).is_some_and(|c| is_ident_byte(*c))) || !blocks.is_code(at) {
+            continue;
+        }
+        let Some(region) = call_region(source, args) else {
+            continue;
+        };
+        let close = args + region.len();
+        if b.get(close) != Some(&b')') {
+            continue;
+        }
+        match directive_encloses(source, at, close, offset, blocks) {
+            Encloses::No => {}
+            Encloses::Unreadable => return None,
+            Encloses::Yes => path.push_str(&akka_matcher_path(region)?),
+        }
+    }
+    (!path.is_empty()).then_some(path)
+}
+
+/// Whether one directive call routes a site.
+enum Encloses {
+    /// Its block does not hold the site.
+    No,
+    /// It routes the site, alone or `&`-joined with other directives.
+    Yes,
+    /// It routes the site as one `|` alternative: no single path.
+    Unreadable,
+}
+
+/// Whether the directive call `at..=close` (its `)` at `close`) routes byte
+/// `offset`: the block it is applied to — a `{ .. }` or `( .. )` right after
+/// its `)` — holds the site, or it sits in a parenthesised directive group
+/// (not a call's argument list) applied to such a block:
+/// `(path("ws") & get) { .. }` routes through it, `(path("a") | path("b"))
+/// { .. }` through no single path.
+fn directive_encloses(
+    source: &str,
+    at: usize,
+    close: usize,
+    offset: usize,
+    blocks: &Blocks,
+) -> Encloses {
+    if applied_block_holds(source, close, offset, blocks) {
+        return Encloses::Yes;
+    }
+    let Some(open) = group_open(source, at, blocks) else {
+        return Encloses::No;
+    };
+    // A call's argument list (`handleRejections(h)`, `concat(..)`) is no
+    // directive group.
+    let called = source
+        .get(..open)
+        .and_then(|before| before.trim_end().bytes().last())
+        .is_some_and(|c| is_ident_byte(c) || matches!(c, b']' | b')'));
+    if called {
+        return Encloses::No;
+    }
+    let Some(group) = call_region(source, open + 1) else {
+        return Encloses::No;
+    };
+    let group_close = open + 1 + group.len();
+    if source.as_bytes().get(group_close) != Some(&b')')
+        || !applied_block_holds(source, group_close, offset, blocks)
+    {
+        return Encloses::No;
+    }
+    if split_top(group, b'|').len() > 1 {
+        Encloses::Unreadable
+    } else {
+        Encloses::Yes
+    }
+}
+
+/// True when the `{ .. }` / `( .. )` block that starts right after the `)` at
+/// `close` (whitespace between) holds byte `offset`.
+fn applied_block_holds(source: &str, close: usize, offset: usize, blocks: &Blocks) -> bool {
+    let Some(tail) = source.get(close + 1..) else {
+        return false;
+    };
+    let open = close + 1 + (tail.len() - tail.trim_start().len());
+    match source.as_bytes().get(open) {
+        Some(b'{') => blocks.encloses(open, offset),
+        Some(b'(') => call_region(source, open + 1)
+            .is_some_and(|args| open < offset && offset < open + 1 + args.len()),
+        _ => false,
+    }
+}
+
+/// The `(` of the innermost parenthesised group holding byte `at`, scanned
+/// back over code bytes at most [`MAX_REGION`] bytes; `None` when a code `{`,
+/// `}` or `;` at depth 0 (the start of the enclosing statement or block)
+/// comes first.
+fn group_open(source: &str, at: usize, blocks: &Blocks) -> Option<usize> {
+    let b = source.as_bytes();
+    let mut depth = 0i32;
+    for i in (at.saturating_sub(MAX_REGION)..at).rev() {
+        let c = *b.get(i)?;
+        if !matches!(c, b'(' | b')' | b'{' | b'}' | b';') || !blocks.is_code(i) {
+            continue;
+        }
+        match c {
+            b')' => depth += 1,
+            b'(' if depth == 0 => return Some(i),
+            b'(' => depth -= 1,
+            _ if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// One Akka path directive's argument as a path: segments split at top-level
+/// `/`, a `"..."` literal verbatim (an inner `/` kept), a value matcher by
+/// [`AKKA_MATCHERS`]; `path("ws" / "chat")` -> `/ws/chat`, `path("rooms" /
+/// IntNumber)` -> `/rooms/:id`. `None` for any other token (a `val` matcher,
+/// `separateOnSlashes(..)`, `Slash`, an interpolated string), an empty
+/// segment or a second argument.
+fn akka_matcher_path(args: &str) -> Option<String> {
+    if split_top(args, b',').len() != 1 {
+        return None;
+    }
+    let mut path = String::new();
+    for seg in split_top(args, b'/') {
+        let seg = seg.trim();
+        let piece = match leading_literal(seg) {
+            Some((lit, rest))
+                if seg.starts_with('"') && rest.trim().is_empty() && !lit.is_empty() =>
+            {
+                lit
+            }
+            _ => AKKA_MATCHERS
+                .iter()
+                .find(|(token, _)| *token == seg)
+                .map(|(_, param)| *param)?,
+        };
+        path.push('/');
+        path.push_str(piece);
+    }
+    Some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1376,7 +1787,11 @@ mod tests {
     fn rows_that_read_arguments_are_call_shaped() {
         for r in HANDLER_ROWS.iter().chain(CLIENT_ROWS) {
             match r.read {
-                PathRead::Arg(_) | PathRead::KeyedOrArg(_) | PathRead::Client(_) => {
+                PathRead::Arg(_)
+                | PathRead::KeyedOrArg(_)
+                | PathRead::Client(_)
+                | PathRead::AxumRoute
+                | PathRead::AkkaDirective => {
                     assert!(r.needle.ends_with('('), "{}", r.needle)
                 }
                 PathRead::AfterAngle => assert!(r.needle.ends_with('<'), "{}", r.needle),
@@ -1720,6 +2135,292 @@ mod tests {
         let out = extract_ws_client_nodes(&src, "src/table.rs", module_id(), repo());
         assert_eq!(qnames(&out), vec!["ws_client:ws"]);
         assert_eq!(out.anchors.len(), 1);
+    }
+
+    // ---- DG.5: axum and Akka / Pekko HTTP ---------------------------------
+
+    /// bench/substrate-gap/matrix/rust/ws/server/src/main.rs.
+    const AXUM_MAIN_RS: &str = "use axum::{extract::ws::{WebSocket, WebSocketUpgrade}, response::Response, routing::get, Router};\n\
+        \n\
+        async fn chat(ws: WebSocketUpgrade) -> Response {\n\
+        \x20   ws.on_upgrade(handle)\n\
+        }\n\
+        \n\
+        async fn handle(_socket: WebSocket) {}\n\
+        \n\
+        pub fn app() -> Router {\n\
+        \x20   Router::new().route(\"/ws/chat\", get(chat))\n\
+        }\n";
+
+    /// An axum file whose handler `chat` is mounted by `router`.
+    fn axum_with(router: &str) -> String {
+        format!(
+            "use axum::extract::ws::WebSocketUpgrade;\n\
+             async fn chat(ws: WebSocketUpgrade) -> impl IntoResponse {{\n\
+             \x20   ws.on_upgrade(|socket| async move {{ handle(socket).await }})\n\
+             }}\n\
+             pub fn app() -> Router {{\n\
+             \x20   {router}\n\
+             }}\n"
+        )
+    }
+
+    #[test]
+    fn axum_on_upgrade_reads_its_route() {
+        let out = handlers(AXUM_MAIN_RS);
+        assert_eq!(qnames(&out), vec!["ws:/ws/chat"]);
+        assert_eq!(
+            anchored(&out),
+            vec![("ws:/ws/chat".to_string(), 3)],
+            "the on_upgrade line inside `chat`, so anchor::attach gives chat its HANDLED_BY"
+        );
+        for (router, want) in [
+            ("Router::new().route(\"/live\", any(chat))", "ws:/live"),
+            (
+                "Router::new().route(\"/live\", routing::get(chat))",
+                "ws:/live",
+            ),
+            (
+                "Router::new().route(\"/live\", axum::routing::any(chat))",
+                "ws:/live",
+            ),
+            (
+                "Router::new()\n        .route(\"/\", get(index))\n        .route(\"/live\", get(index).post(chat))",
+                "ws:/live",
+            ),
+            (
+                "Router::new().route(\"/live\", get(chat).layer(cors))",
+                "ws:/live",
+            ),
+            (
+                "Router::new().route(\"/live\", on(MethodFilter::GET, chat))",
+                "ws:/live",
+            ),
+            (
+                "Router::new().route(\"/ws/{room}\", get(chat)).route(\"/second\", get(chat))",
+                "ws:/ws/{room}",
+            ),
+            // A route naming another fn, a non-router call and a substring of
+            // the name never mount `chat`.
+            ("Router::new().route(\"/other\", get(other))", "ws:ws"),
+            ("Router::new().route(\"/svc\", get_service(chat))", "ws:ws"),
+            ("Router::new().route(\"/x\", get(chatty))", "ws:ws"),
+        ] {
+            assert_eq!(
+                qnames(&handlers(&axum_with(router))),
+                vec![want],
+                "{router}"
+            );
+        }
+    }
+
+    #[test]
+    fn axum_two_handlers_and_a_nested_fn() {
+        let src = "use axum::extract::ws::WebSocketUpgrade;\n\
+                   async fn chat(ws: WebSocketUpgrade) -> Response {\n\
+                   \x20   fn helper(p: [u8; 4], Point { x, y }: Point) -> u8 { x }\n\
+                   \x20   ws.on_upgrade(handle)\n\
+                   }\n\
+                   async fn feed(ws: WebSocketUpgrade) -> Response {\n\
+                   \x20   ws.on_upgrade(stream)\n\
+                   }\n\
+                   trait Hub { fn chat(&self); }\n\
+                   pub fn app() -> Router {\n\
+                   \x20   Router::new().route(\"/ws/chat\", get(chat)).route(\"/ws/feed\", get(feed))\n\
+                   }\n";
+        assert_eq!(
+            anchored(&handlers(src)),
+            vec![
+                ("ws:/ws/chat".to_string(), 3),
+                ("ws:/ws/feed".to_string(), 6)
+            ],
+            "the nested `helper` ended before the site, so `chat` owns it"
+        );
+    }
+
+    #[test]
+    fn axum_handler_routed_elsewhere_is_generic() {
+        let src = "use axum::extract::ws::WebSocketUpgrade;\n\
+                   pub async fn chat(ws: WebSocketUpgrade) -> Response {\n\
+                   \x20   ws.on_upgrade(handle)\n\
+                   }\n";
+        assert_eq!(
+            anchored(&handlers(src)),
+            vec![("ws:ws".to_string(), 2)],
+            "the router lives in another file: the resolver lends `ws` the ROUTEs HANDLED_BY chat"
+        );
+        // No enclosing fn at all reads nothing either.
+        assert_eq!(
+            qnames(&handlers("use axum;\nstatic X: u8 = ws.on_upgrade(h);\n")),
+            vec!["ws:ws"]
+        );
+    }
+
+    #[test]
+    fn axum_on_upgrade_without_axum_import_is_no_site() {
+        // warp's `Ws::on_upgrade` is not axum's.
+        let src = "use warp::Filter;\n\
+                   fn routes() -> impl Filter {\n\
+                   \x20   warp::path(\"echo\").and(warp::ws()).map(|ws: warp::ws::Ws| ws.on_upgrade(echo))\n\
+                   }\n";
+        let out = handlers(src);
+        assert!(out.nodes.is_empty(), "{:?}", qnames(&out));
+        assert!(out.anchors.is_empty());
+    }
+
+    #[test]
+    fn axum_needle_in_a_rust_string_is_no_site() {
+        let rs = |src: &str| extract_ws_handler_nodes(src, "src/main.rs", module_id(), repo());
+        let src = "use axum::Router;\n\
+                   /// Calls `ws.on_upgrade(handle)` in a doc line.\n\
+                   const SAMPLE: &str = \"async fn chat(ws: WebSocketUpgrade) { ws.on_upgrade(h) }\";\n";
+        let out = rs(src);
+        assert!(out.nodes.is_empty(), "{:?}", qnames(&out));
+        // In code, a `.route(` and a `fn` in a literal or comment mount nothing.
+        let src = "use axum::Router;\n\
+                   // Router::new().route(\"/commented\", get(chat))\n\
+                   const S: &str = \"Router::new().route(\\\"/quoted\\\", get(chat))\";\n\
+                   async fn chat(ws: WebSocketUpgrade) -> Response {\n\
+                   \x20   let _ = \"fn decoy() {\";\n\
+                   \x20   ws.on_upgrade(handle)\n\
+                   }\n\
+                   pub fn app() -> Router { Router::new().route(\"/real\", get(chat)) }\n";
+        assert_eq!(anchored(&rs(src)), vec![("ws:/real".to_string(), 5)]);
+    }
+
+    /// bench/substrate-gap/matrix/scala/ws/server/ChatRoutes.scala.
+    const AKKA_CHAT_ROUTES: &str = "package shop\n\
+        \n\
+        import akka.http.scaladsl.model.ws.Message\n\
+        import akka.http.scaladsl.server.Directives._\n\
+        import akka.stream.scaladsl.Flow\n\
+        \n\
+        object ChatRoutes {\n\
+        \x20 val echo = Flow[Message]\n\
+        \x20 val route = path(\"ws\" / \"chat\") {\n\
+        \x20   handleWebSocketMessages(echo)\n\
+        \x20 }\n\
+        }\n";
+
+    /// An Akka HTTP file whose route is `body`.
+    fn akka_with(body: &str) -> String {
+        format!(
+            "import akka.http.scaladsl.server.Directives._\n\
+             object Routes {{\n\
+             \x20 val route = {body}\n\
+             }}\n"
+        )
+    }
+
+    #[test]
+    fn akka_handle_websocket_reads_the_composed_path() {
+        let out = handlers(AKKA_CHAT_ROUTES);
+        assert_eq!(anchored(&out), vec![("ws:/ws/chat".to_string(), 9)]);
+        for (body, want) in [
+            (
+                "pathPrefix(\"api\") {\n    path(\"ws\" / Segment) { room =>\n      handleWebSocketMessages(chat(room))\n    }\n  }",
+                "ws:/api/ws/:segment",
+            ),
+            (
+                "pathPrefix(\"api\" / \"v1\") { pathPrefix(\"rooms\") { path(IntNumber) { id => handleWebSocketMessages(f(id)) } } }",
+                "ws:/api/v1/rooms/:id",
+            ),
+            (
+                "pathPrefix(\"files\") { path(Remaining) { r => handleWebSocketMessages(f) } }",
+                "ws:/files/*",
+            ),
+            (
+                "path(\"ws/chat\") { handleWebSocketMessages(f) }",
+                "ws:/ws/chat",
+            ),
+            (
+                "path(\"ws\") { handleWebSocketMessagesForProtocol(f, \"chat\") }",
+                "ws:/ws",
+            ),
+            // A sibling route's block does not hold the site.
+            (
+                "concat(\n    path(\"health\") { complete(\"ok\") },\n    path(\"ws\") { handleWebSocketMessages(f) }\n  )",
+                "ws:/ws",
+            ),
+            (
+                "(path(\"ws\") & get) { handleWebSocketMessages(f) }",
+                "ws:/ws",
+            ),
+            (
+                "pathPrefix(\"api\") { (get & path(\"live\")) { handleWebSocketMessages(f) } }",
+                "ws:/api/live",
+            ),
+            ("path(\"ws\")(handleWebSocketMessages(f))", "ws:/ws"),
+            // Unreadable: a val matcher, `separateOnSlashes`, an alternative,
+            // or a directive group the site is not in.
+            ("path(wsMatcher) { handleWebSocketMessages(f) }", "ws:ws"),
+            (
+                "pathPrefix(\"api\") { path(wsMatcher) { handleWebSocketMessages(f) } }",
+                "ws:ws",
+            ),
+            (
+                "path(separateOnSlashes(\"ws/chat\")) { handleWebSocketMessages(f) }",
+                "ws:ws",
+            ),
+            (
+                "(path(\"a\") | path(\"b\")) { handleWebSocketMessages(f) }",
+                "ws:ws",
+            ),
+            ("handleWebSocketMessages(f)", "ws:ws"),
+        ] {
+            assert_eq!(qnames(&handlers(&akka_with(body))), vec![want], "{body}");
+        }
+        // Pekko's package gates the same rows.
+        let pekko = AKKA_CHAT_ROUTES.replace("import akka.http", "import org.apache.pekko.http");
+        assert_eq!(qnames(&handlers(&pekko)), vec!["ws:/ws/chat"]);
+    }
+
+    /// The matcher table DG.10 gives the Scala parser's Akka ROUTEs, pinned on
+    /// the same inputs.
+    #[test]
+    fn akka_matcher_paths() {
+        for (args, want) in [
+            ("\"ws\" / \"chat\"", Some("/ws/chat")),
+            ("\"users\" / IntNumber", Some("/users/:id")),
+            (
+                "\"users\" / Segment / \"posts\" / LongNumber",
+                Some("/users/:segment/posts/:id"),
+            ),
+            ("JavaUUID", Some("/:id")),
+            ("Remaining", Some("/*")),
+            ("\"a/b\"", Some("/a/b")),
+            ("wsMatcher", None),
+            ("separateOnSlashes(\"a/b\")", None),
+            ("\"a\" / Slash", None),
+            ("\"\"", None),
+            ("s\"x$y\"", None),
+            ("\"a\", \"b\"", None),
+        ] {
+            assert_eq!(akka_matcher_path(args).as_deref(), want, "{args}");
+        }
+    }
+
+    #[test]
+    fn akka_needs_the_http_import() {
+        let src = AKKA_CHAT_ROUTES
+            .replace("import akka.http.scaladsl.model.ws.Message\n", "")
+            .replace("import akka.http.scaladsl.server.Directives._\n", "");
+        let out = handlers(&src);
+        assert!(out.nodes.is_empty(), "{:?}", qnames(&out));
+    }
+
+    #[test]
+    fn subpath_is_not_a_path_directive() {
+        for body in [
+            "subpath(\"x\") { handleWebSocketMessages(f) }",
+            "filepath(\"x\") { handleWebSocketMessages(f) }",
+            "{ val s = \"path(\\\"x\\\") {\"; handleWebSocketMessages(f) }",
+        ] {
+            assert_eq!(qnames(&handlers(&akka_with(body))), vec!["ws:ws"], "{body}");
+        }
+        // An enclosing `subpath(` does not hide the real directive inside it.
+        let body = "subpath(\"x\") { path(\"ws\") { handleWebSocketMessages(f) } }";
+        assert_eq!(qnames(&handlers(&akka_with(body))), vec!["ws:/ws"]);
     }
 
     #[test]
