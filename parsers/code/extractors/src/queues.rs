@@ -84,6 +84,13 @@ pub enum QueueFramework {
     /// `WorkerBuilder::new(..).backend(storage).build_fn(send_email)` with
     /// `async fn send_email(job: Email)`.
     Apalis,
+    // --- DH.2: a task queue whose job is a CLASS -----------------------------
+    /// Laravel queued jobs (PHP): the job is the CLASS, the A2.5 Sidekiq / Oban
+    /// precedent. The worker runs `class SendWelcomeEmail implements
+    /// ShouldQueue`'s `handle()`; the dispatch site names the class,
+    /// `SendWelcomeEmail::dispatch($user)` or `dispatch(new
+    /// SendWelcomeEmail($user))`. See [`laravel_job_at`].
+    Laravel,
 }
 
 impl QueueFramework {
@@ -111,6 +118,7 @@ impl QueueFramework {
             QueueFramework::Hangfire => "hangfire",
             QueueFramework::Asynq => "asynq",
             QueueFramework::Apalis => "apalis",
+            QueueFramework::Laravel => "laravel",
         }
     }
 }
@@ -479,6 +487,55 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // gem's long-poller `Aws::SQS::QueuePoller.new(url)`. The URL folds.
     (".receive_message(", QueueFramework::Sqs, AWS_SQS_RUBY_GATE, TopicRule::Keyed(&["queue_url"])),
     ("QueuePoller.new(", QueueFramework::Sqs, AWS_SQS_RUBY_GATE, TopicRule::ArgLiteral),
+    // ---- DH.2: PHP clients ----------------------------------------------------
+    // PHP calls a method with `->` (and a static one with `::`), so no
+    // leading-dot row above ever reads a PHP call. `->subscribe(`,
+    // `->subscription(` and `->receiveMessage(` are common PHP method names:
+    // every gate is the package's NAMESPACE, lowercased (`\\` in the Rust
+    // literal), never a word a local could hold (the DH.2 gate consts after
+    // DECLARE_PATTERNS). Every row sits BEFORE the A2.9 block, so the Redis /
+    // MQTT generic `->subscribe(` rows yield to a call one of these read.
+    // php-rdkafka: `$consumer->subscribe(['orders'])`, the first topic of the
+    // array.
+    ("->subscribe(", QueueFramework::Kafka, &["rdkafka"], TopicRule::ArgLiteral),
+    // php-rdkafka construction, liveness only. HEAD's dotless `KafkaConsumer`
+    // row reads `$conf` out of `new RdKafka\KafkaConsumer($conf)`, an
+    // expression, so CL.1's rule (ii) cannot drop its tag; these rows overlap
+    // that hit (rule (i), liveness) and do. `use RdKafka\KafkaConsumer;` +
+    // `new KafkaConsumer($conf)` is the first row's.
+    ("new KafkaConsumer(", QueueFramework::Kafka, &["rdkafka"], TopicRule::NoIdentity),
+    ("RdKafka\\KafkaConsumer(", QueueFramework::Kafka, &["rdkafka"], TopicRule::NoIdentity),
+    // basis-company/nats: `$client->subscribe('orders', $handler)` and the
+    // queue-group `$client->subscribeQueue('orders', 'workers', $handler)`.
+    // No shared verb ([`is_generic_verb_row`]): they read arg #0 normally.
+    ("->subscribe(", QueueFramework::Nats, BASIS_NATS_GATE, TopicRule::ArgLiteral),
+    ("->subscribeQueue(", QueueFramework::Nats, BASIS_NATS_GATE, TopicRule::ArgLiteral),
+    // google/cloud-pubsub: `$pubsub->subscription('orders')`. A subscription
+    // pairs only when spelled like its topic (the JS `.subscription(` row's
+    // COVERAGE_CAVEATS gap).
+    ("->subscription(", QueueFramework::PubSub, GCP_PUBSUB_PHP_GATE, TopicRule::ArgLiteral),
+    // aws-sdk-php: an associative array, `$sqs->receiveMessage(['QueueUrl' =>
+    // 'https://sqs.../orders'])`; the keyed scan reads `'QueueUrl' => '..'`
+    // (the key's closing quote, then `=>`) and the URL folds.
+    ("->receiveMessage(", QueueFramework::Sqs, AWS_SQS_PHP_GATE, TopicRule::Keyed(&["queueurl"])),
+    // Laravel's Redis facade: `Redis::subscribe(['orders'], fn ($m) => ..)`,
+    // `Redis::psubscribe(['orders.*'], ..)` (a glob, paired only literally).
+    // The needle itself spells `redis`, so the gate is the facade's namespace.
+    // A library row, not a generic verb: it reads arg #0 normally.
+    ("Redis::subscribe(", QueueFramework::RedisPubSub, LARAVEL_REDIS_GATE, TopicRule::ArgLiteral),
+    ("Redis::psubscribe(", QueueFramework::RedisPubSub, LARAVEL_REDIS_GATE, TopicRule::ArgLiteral),
+    // Laravel queued jobs: the worker is the class the `implements
+    // ShouldQueue` line declares (EnclosingSymbol reads the class on the
+    // needle's own line). Ungated: [`laravel_job_at`] keeps a hit only on a
+    // `class T .. implements .. ShouldQueue` line, so the `use
+    // Illuminate\Contracts\Queue\ShouldQueue;` import and a comment naming it
+    // are no site and mint no tag. KNOWN IMPRECISION: queued listeners,
+    // mailables and notifications implement ShouldQueue too, so `class
+    // SendReceipt implements ShouldQueue` reads as `queue_consumer:SendReceipt`;
+    // they do run on the queue worker, and no `::dispatch(` names them, so
+    // they stay unpaired. A class that inherits ShouldQueue from a base job
+    // (`class Charge extends BaseJob`) has no consumer node of its own.
+    ("ShouldQueue", QueueFramework::Laravel, &[], TopicRule::EnclosingSymbol),
     // ---- A2.9: broker pub/sub that used to live in eventbus.rs ----------
     // These verbs are the broadest needles in the table, so every row below is
     // a GENERIC-VERB row ([`is_generic_verb_row`]): it yields to any earlier
@@ -497,6 +554,17 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     (".subscribe(", QueueFramework::Mqtt, &["mqtt", "paho"], TopicRule::ArgLiteral),
     // Go — eclipse/paho.mqtt.golang exports Capitalised APIs.
     (".Subscribe(", QueueFramework::Mqtt, &["paho.mqtt"], TopicRule::ArgLiteral),
+    // DH.2: the `->` spellings. PHP — php-mqtt/client `$mqtt->subscribe(
+    // 'sensors/temp', $cb, 0)`; phpredis `$redis->subscribe(['orders'], $cb)`
+    // / `->psubscribe(['news.*'], $cb)`, Predis's `$loop->subscribe('orders')`
+    // and a Laravel connection's `Redis::connection()->subscribe([..])`.
+    // MQTT first: its gate is the package, `redis` is any file naming a Redis
+    // client, so a php-mqtt file that also caches in Redis stays MQTT. The
+    // verbs are receiver syntax, not PHP's alone: a C++ / Perl call
+    // (`redis->subscribe("ch")`) in a file passing the gate reads the same.
+    ("->subscribe(", QueueFramework::Mqtt, PHP_MQTT_GATE, TopicRule::ArgLiteral),
+    ("->subscribe(", QueueFramework::RedisPubSub, &["redis"], TopicRule::ArgLiteral),
+    ("->psubscribe(", QueueFramework::RedisPubSub, &["redis"], TopicRule::ArgLiteral),
 ];
 
 const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
@@ -795,6 +863,44 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // nothing on the same call: CL.1's rule (i) drops its tag beside this
     // row's node.
     (".publish(", QueueFramework::Sns, AWS_SNS_RUBY_GATE, TopicRule::Keyed(&["topic_arn"])),
+    // ---- DH.2: PHP clients (see the CONSUMER_PATTERNS block) ----------------
+    // Before the A2.9 block, so the generic `->publish(` verb rows yield to a
+    // call these read: a phpredis call in a file that also imports basis/nats
+    // or aws-sdk-php SNS is attributed to that row.
+    // php-amqplib: `$channel->basic_publish($msg, $exchange, $routing_key)`,
+    // positional. The routing key (arg #2) names the queue on the default and
+    // direct exchanges; an EMPTY key (fanout) falls back to the exchange (arg
+    // #1), amqplib's CL.1 rule. HEAD's pika `basic_publish(` row hits the same
+    // call (its gate passes on `PhpAmqpLib`) and reads no `routing_key=`;
+    // CL.1's rule (i) drops its tag beside this row's node.
+    ("->basic_publish(", QueueFramework::RabbitMQ, PHPAMQPLIB_GATE, TopicRule::ArgIndexOr(2, 1)),
+    // basis-company/nats: `$client->publish('orders', $payload)`.
+    ("->publish(", QueueFramework::Nats, BASIS_NATS_GATE, TopicRule::ArgLiteral),
+    // google/cloud-pubsub: `$pubsub->topic('orders')->publish([..])`. KNOWN
+    // IMPRECISION, the JS `.topic(` row's: `->topic(` is a reference, not a
+    // publish.
+    ("->topic(", QueueFramework::PubSub, GCP_PUBSUB_PHP_GATE, TopicRule::ArgLiteral),
+    // aws-sdk-php: `$sqs->sendMessage(['QueueUrl' => '..', 'MessageBody' =>
+    // b])`, `->sendMessageBatch(['QueueUrl' => '..', 'Entries' => [..]])`, and
+    // SNS `$sns->publish(['TopicArn' => 'arn:aws:sns:..:orders', ..])`. The
+    // URL / ARN folds.
+    ("->sendMessage(", QueueFramework::Sqs, AWS_SQS_PHP_GATE, TopicRule::Keyed(&["queueurl"])),
+    ("->sendMessageBatch(", QueueFramework::Sqs, AWS_SQS_PHP_GATE, TopicRule::Keyed(&["queueurl"])),
+    ("->publish(", QueueFramework::Sns, AWS_SNS_PHP_GATE, TopicRule::Keyed(&["topicarn"])),
+    // Laravel's Redis facade: `Redis::publish('orders', $payload)`.
+    ("Redis::publish(", QueueFramework::RedisPubSub, LARAVEL_REDIS_GATE, TopicRule::ArgLiteral),
+    // Laravel queued jobs: `SendWelcomeEmail::dispatch($user)` (Receiver reads
+    // the class), the `dispatch(new SendWelcomeEmail($user))` helper and the
+    // controller's `$this->dispatch(new SendWelcomeEmail)` (the class the
+    // argument constructs). The gate admits a file that names a `\Jobs\`
+    // namespace (`artisan make:job`'s home); [`laravel_job_at`] then keeps a
+    // hit only for a job class, so `OrderPlaced::dispatch()` with `use
+    // App\Events\OrderPlaced;` (a Laravel EVENT), Symfony Messenger's
+    // `$bus->dispatch(new SendEmail)` and Livewire's `$this->dispatch('x')`
+    // mint nothing, no tag either. KNOWN IMPRECISION: a Messenger message
+    // class living under a `Jobs` namespace reads as a Laravel job.
+    ("::dispatch(", QueueFramework::Laravel, LARAVEL_JOBS_GATE, TopicRule::Receiver),
+    (LARAVEL_DISPATCH_HELPER, QueueFramework::Laravel, LARAVEL_JOBS_GATE, TopicRule::ArgReceiver),
     // ---- A2.9: broker pub/sub (see the CONSUMER_PATTERNS block) -----------
     // Redis pub/sub — `r.publish('notifications', payload)`. Placed AFTER the
     // NATS / RabbitMQ / SNS rows: a file importing both is attributed to the
@@ -804,6 +910,11 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // paho's `client.Publish("sensors/temp", qos, retained, payload)`.
     (".publish(", QueueFramework::Mqtt, &["mqtt", "paho"], TopicRule::ArgLiteral),
     (".Publish(", QueueFramework::Mqtt, &["paho.mqtt"], TopicRule::ArgLiteral),
+    // DH.2: the `->` spellings (see the CONSUMER_PATTERNS block): php-mqtt
+    // `$mqtt->publish('sensors/temp', '21', 0)`, phpredis / Predis
+    // `$redis->publish('orders', $m)`. MQTT first, for the same reason.
+    ("->publish(", QueueFramework::Mqtt, PHP_MQTT_GATE, TopicRule::ArgLiteral),
+    ("->publish(", QueueFramework::RedisPubSub, &["redis"], TopicRule::ArgLiteral),
     // Java/Kotlin — Spring JMS: `jmsTemplate.convertAndSend("orders", msg)`,
     // the producer half of the A2.4 `@JmsListener(` row. Same needle as the
     // Spring AMQP row above; a file importing both is attributed to AMQP.
@@ -853,6 +964,31 @@ const GCP_PUBSUB_RUBY_GATE: &[&str] = &["google/cloud/pubsub", "google::cloud::p
 const AWS_SQS_RUBY_GATE: &[&str] = &["aws-sdk-sqs", "aws::sqs"];
 /// aws-sdk-sns: the gem name and the `Aws::SNS` namespace, lowercased.
 const AWS_SNS_RUBY_GATE: &[&str] = &["aws-sdk-sns", "aws::sns"];
+
+// ---- DH.2: PHP package gates, shared by both tables ---------------------------
+// Each is the package's NAMESPACE as a `use` line or a fully-qualified name
+// spells it, lowercased (the gate reads the lowercased file), so a PHP file is
+// gated by what it imports, never by a word a local variable could hold.
+/// php-amqplib: `PhpAmqpLib\..`.
+const PHPAMQPLIB_GATE: &[&str] = &["phpamqplib"];
+/// basis-company/nats: `Basis\Nats\Client`.
+const BASIS_NATS_GATE: &[&str] = &["basis\\nats"];
+/// google/cloud-pubsub: `Google\Cloud\PubSub\PubSubClient`.
+const GCP_PUBSUB_PHP_GATE: &[&str] = &["google\\cloud\\pubsub"];
+/// aws-sdk-php: `Aws\Sqs\SqsClient`, `Aws\Sns\SnsClient`.
+const AWS_SQS_PHP_GATE: &[&str] = &["aws\\sqs"];
+const AWS_SNS_PHP_GATE: &[&str] = &["aws\\sns"];
+/// php-mqtt/client: `PhpMqtt\Client\MqttClient`.
+const PHP_MQTT_GATE: &[&str] = &["phpmqtt\\client"];
+/// Laravel's Redis facade, `Illuminate\Support\Facades\Redis`.
+const LARAVEL_REDIS_GATE: &[&str] = &["illuminate\\support\\facades\\redis"];
+/// Laravel queued jobs: a file that names a `\Jobs\` namespace segment
+/// (`use App\Jobs\SendWelcomeEmail;`, `new \App\Jobs\X`). A task queue, so
+/// never a broker signal ([`is_broker`]).
+const LARAVEL_JOBS_GATE: &[&str] = &["\\jobs\\"];
+/// The `dispatch(` helper's needle, which [`laravel_job_at`] reads apart from
+/// the static `::dispatch(` row: its job is the class argument #0 constructs.
+const LARAVEL_DISPATCH_HELPER: &str = "dispatch(";
 
 /// CL.1: rows whose library gate a Python file may miss while still calling
 /// the task. The canonical Celery caller (`from tasks import process_order` +
@@ -905,7 +1041,8 @@ fn is_broker(f: &QueueFramework) -> bool {
         | QueueFramework::JobRunr
         | QueueFramework::Hangfire
         | QueueFramework::Asynq
-        | QueueFramework::Apalis => false,
+        | QueueFramework::Apalis
+        | QueueFramework::Laravel => false,
     }
 }
 
@@ -949,22 +1086,27 @@ pub(crate) fn broker_signal_present(lower_source: &str) -> bool {
 }
 
 /// A2.9: the bare pub/sub verbs shared with Rx, in-process buses and every
-/// other broker.
+/// other broker. DH.2: and their `->` spellings (PHP's method call, C++'s and
+/// Perl's too).
 const GENERIC_VERB_NEEDLES: &[&str] = &[
     ".publish(",
     ".subscribe(",
     ".psubscribe(",
     ".Publish(",
     ".Subscribe(",
+    "->publish(",
+    "->subscribe(",
+    "->psubscribe(",
 ];
 
 /// A2.9: rows whose needle is a bare pub/sub verb (`.publish(` /
-/// `.subscribe(`) on a Redis pub/sub or MQTT row. CL.3: keyed by the NEEDLE
-/// as well as the framework, so an MQTTnet builder row
-/// (`MqttApplicationMessageBuilder()`, `.SubscribeAsync(`) is no shared verb:
-/// it reads its topic normally instead of losing it to the literal-must-lead
-/// guard, and it never yields. Every RedisPubSub / Mqtt row before CL.3 was a
-/// verb row, so their behaviour is unchanged.
+/// `.subscribe(`, DH.2's `->publish(` / `->subscribe(`) on a Redis pub/sub or
+/// MQTT row. CL.3: keyed by the NEEDLE as well as the framework, so an MQTTnet
+/// builder row (`MqttApplicationMessageBuilder()`, `.SubscribeAsync(`) is no
+/// shared verb: it reads its topic normally instead of losing it to the
+/// literal-must-lead guard, and it never yields. DH.2's Laravel facade rows
+/// (`Redis::publish(`) are library rows the same way. Framework-keyed too, so
+/// php-rdkafka's and basis/nats's `->subscribe(` read arg #0 normally.
 fn is_generic_verb_row(needle: &str, f: &QueueFramework) -> bool {
     matches!(f, QueueFramework::RedisPubSub | QueueFramework::Mqtt)
         && GENERIC_VERB_NEEDLES.contains(&needle)
@@ -1489,6 +1631,10 @@ fn python_imported_names(source: &str) -> BTreeSet<String> {
 ///   `[queues] declare-bound queue=<q> framework=<F> consume='<needle>' consumes=<k> file=<path>`
 ///   `[queues] declare-unbound declared=<d> framework=<F> file=<path>`
 ///   `[queues] import-gated needle='.delay(' receiver=<sym> file=<path>`
+///
+/// fired_on (DH.2, `GLIA_QUEUE_DEBUG=1`): a Laravel row's hits that name no
+/// job class ([`laravel_job_at`]):
+///   `[queues] laravel-no-job needle='<n>' side=<consumer|producer> dropped=<k> file=<path>`
 #[allow(clippy::too_many_arguments)]
 fn emit_queue_nodes(
     source: &str,
@@ -1626,6 +1772,37 @@ fn emit_queue_nodes(
             hits.retain(|_| k.next().copied().unwrap_or(true));
             let mut k = keep.iter();
             reads.retain(|_| k.next().copied().unwrap_or(true));
+            if hits.is_empty() {
+                continue;
+            }
+        }
+        // DH.2: a Laravel row's identity is a job CLASS ([`laravel_job_at`]).
+        // A hit naming none (an event's `OrderPlaced::dispatch()`,
+        // `dispatch($job)`, the `use ..\ShouldQueue;` import) is no site and
+        // mints no tag; a kept one reads the class.
+        if *framework == QueueFramework::Laravel {
+            let consumer = kind == node_kind::QUEUE_CONSUMER;
+            let jobs: Vec<Option<String>> = hits
+                .iter()
+                .zip(&reads)
+                .map(|(h, r)| {
+                    let read = r.as_ref().map(|(t, _)| t.as_str());
+                    laravel_job_at(source, pattern, h.offset, read, consumer)
+                })
+                .collect();
+            let dropped = jobs.iter().filter(|j| j.is_none()).count();
+            if dropped > 0 && debug_enabled() {
+                eprintln!(
+                    "[queues] laravel-no-job needle='{pattern}' side={side} dropped={dropped} file={path}"
+                );
+            }
+            let mut k = jobs.iter();
+            hits.retain(|_| k.next().is_some_and(Option::is_some));
+            reads = jobs
+                .into_iter()
+                .flatten()
+                .map(|job| Some((job, TopicForm::Literal)))
+                .collect();
             if hits.is_empty() {
                 continue;
             }
@@ -2209,6 +2386,298 @@ fn framework_tag(f: &QueueFramework) -> String {
 /// could drift from the enum. A12.2 calls this rather than re-deriving it.
 pub fn is_framework_tag(topic: &str) -> bool {
     topic.starts_with(UNRESOLVED_PREFIX)
+}
+
+// ---- DH.2: LARAVEL QUEUED JOBS ------------------------------------------------
+// A Laravel job is a CLASS: `php artisan make:job SendWelcomeEmail` writes
+// `app/Jobs/SendWelcomeEmail.php`, `class SendWelcomeEmail implements
+// ShouldQueue` with a `handle()`, and a caller dispatches it by name,
+// `SendWelcomeEmail::dispatch($user)` or `dispatch(new SendWelcomeEmail($user))`.
+// The class name is the join key (the A2.5 Sidekiq / Oban precedent). Every
+// `::dispatch(` is not a job, though: a Laravel EVENT dispatches the same way
+// (`OrderPlaced::dispatch($id)`, DH.7's), and `dispatch(` is also Symfony
+// Messenger's and Livewire's. So a hit is kept only for a class that IS a job:
+// one bound to a `Jobs` namespace (the make:job home), or declared in the file
+// as a ShouldQueue class. Byte walks over ASCII only, so every slice lands on a
+// char boundary.
+// ---------------------------------------------------------------------------
+
+/// DH.2: the job class one Laravel hit names, or `None`: the hit is no site
+/// and mints no tag.
+///
+/// * Consumer (`ShouldQueue`): the class [`TopicRule::EnclosingSymbol`] read
+///   (`read`), when the needle sits on that class's own `class T .. implements
+///   ..` line ([`class_implements_head`]).
+/// * Producer `::dispatch(`: the qualified name right before the needle
+///   (`SendWelcomeEmail`, `\App\Jobs\SendWelcomeEmail`), its last segment the
+///   class. A `$var::dispatch(` is no class.
+/// * Producer `dispatch(` ([`LARAVEL_DISPATCH_HELPER`]), at a word edge: the
+///   class argument #0 constructs ([`laravel_constructed`]), `new X(..)`,
+///   `new X` or `new \App\Jobs\X(..)`. Its [`TopicRule::ArgReceiver`] read is
+///   not used: PHP spells the constructor `new X(`, with a space, and `new X`
+///   takes no parentheses at all.
+///
+/// A producer's class is a job when its qualifier holds a `Jobs` segment or
+/// [`laravel_job`] says so; a consumer's line already declared it one.
+fn laravel_job_at(
+    source: &str,
+    needle: &str,
+    offset: usize,
+    read: Option<&str>,
+    consumer: bool,
+) -> Option<String> {
+    if consumer {
+        let class = read?;
+        let line_start = source.get(..offset)?.rfind('\n').map_or(0, |i| i + 1);
+        let head = source.get(line_start..offset)?;
+        return class_implements_head(head, class).then(|| class.to_string());
+    }
+    let qualified = if needle == LARAVEL_DISPATCH_HELPER {
+        if !php_call_edge(source, offset) {
+            return None;
+        }
+        laravel_constructed(source, offset + needle.len(), needle)?
+    } else {
+        php_qualified_before(source, offset)?
+    };
+    let class = php_short_name(qualified)?;
+    (has_jobs_segment(qualified) || laravel_job(source, class)).then(|| class.to_string())
+}
+
+/// DH.2: is `name` a Laravel job in this file's eyes? True when the `use`
+/// import binding it ([`php_use_target`]) holds a `Jobs` namespace segment
+/// (`use App\Jobs\SendWelcomeEmail;`), or the file declares `class <name>` on
+/// a line that also holds `implements` and `ShouldQueue`.
+fn laravel_job(source: &str, name: &str) -> bool {
+    if php_use_target(source, name).is_some_and(|fqn| has_jobs_segment(&fqn)) {
+        return true;
+    }
+    source.lines().any(|line| {
+        line.match_indices("ShouldQueue").any(|(at, _)| {
+            line.get(..at)
+                .is_some_and(|head| class_implements_head(head, name))
+        })
+    })
+}
+
+/// DH.2: `head` (a line's text up to a `ShouldQueue` occurrence) declares
+/// `class <class>` at a word edge and then names `implements`: `final class
+/// Charge extends Job implements \Illuminate\Contracts\Queue\`. A line led by
+/// a comment (`//`, `#`, `*`, `/*`) declares nothing.
+fn class_implements_head(head: &str, class: &str) -> bool {
+    let t = head.trim_start();
+    if ["//", "#", "*", "/*"].iter().any(|c| t.starts_with(c)) {
+        return false;
+    }
+    let Some(after_kw) = php_keyword_end(head, "class") else {
+        return false;
+    };
+    let rest = head.get(after_kw..).unwrap_or("").trim_start();
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    let declared = rest.get(..end).unwrap_or("");
+    !declared.is_empty()
+        && declared.eq_ignore_ascii_case(class)
+        && rest
+            .get(end..)
+            .and_then(|tail| php_keyword_end(tail, "implements"))
+            .is_some()
+}
+
+/// DH.2: the byte just past the first word-edged, whitespace-followed `kw` in
+/// `s` (`class` of `final class X`, never of `subclass X` or `class_alias(`).
+fn php_keyword_end(s: &str, kw: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    s.match_indices(kw).find_map(|(at, _)| {
+        let end = at + kw.len();
+        let before = at == 0 || !b.get(at - 1).copied().is_some_and(ident);
+        let after = b.get(end).is_some_and(u8::is_ascii_whitespace);
+        (before && after).then_some(end)
+    })
+}
+
+/// DH.2: true when a function-call needle at `offset` starts a name: the byte
+/// before is no identifier byte and no `$` (`dispatch(`, `->dispatch(`,
+/// `\dispatch(`; never `redispatch(` or a `$dispatch(` closure call).
+fn php_call_edge(source: &str, offset: usize) -> bool {
+    let b = source.as_bytes();
+    offset == 0
+        || !b
+            .get(offset - 1)
+            .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$'))
+}
+
+/// DH.2: the PHP qualified name ending at `offset` (`SendWelcomeEmail`,
+/// `\App\Jobs\SendWelcomeEmail`), or `None` when there is none or it is a
+/// variable (`$job::dispatch(`).
+fn php_qualified_before(source: &str, offset: usize) -> Option<&str> {
+    let head = source.get(..offset)?;
+    let b = head.as_bytes();
+    let mut i = b.len();
+    while i > 0 && (b[i - 1].is_ascii_alphanumeric() || matches!(b[i - 1], b'_' | b'\\')) {
+        i -= 1;
+    }
+    if i > 0 && b[i - 1] == b'$' {
+        return None;
+    }
+    head.get(i..).filter(|q| !q.is_empty())
+}
+
+/// DH.2: the class argument #0 of the call whose needle ends at `after`
+/// constructs: `new X(..)`, `new X`, `new \App\Jobs\X(..)` -> its qualified
+/// name; anything else (`$job`, `'refresh'`, `X::make()`) -> `None`.
+fn laravel_constructed<'a>(source: &'a str, after: usize, needle: &str) -> Option<&'a str> {
+    let region = queue_topic::arg_region(source, after, needle)?;
+    let arg = *queue_topic::split_args(region).first()?;
+    let rest = arg.trim().strip_prefix("new")?;
+    if !rest.starts_with(|c: char| c.is_ascii_whitespace() || c == '\\') {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '\\'))
+        .unwrap_or(rest.len());
+    rest.get(..end).filter(|q| !q.is_empty())
+}
+
+/// DH.2: the last segment of a PHP qualified name, when it is an identifier.
+fn php_short_name(qualified: &str) -> Option<&str> {
+    let short = qualified.rsplit('\\').next()?;
+    let first = short.as_bytes().first()?;
+    (first.is_ascii_alphabetic() || *first == b'_').then_some(short)
+}
+
+/// DH.2: a namespace segment before the class's own is `Jobs` (ASCII case
+/// ignored, PHP's rule for names): `App\Jobs\X`, `\App\Jobs\Billing\X`.
+fn has_jobs_segment(qualified: &str) -> bool {
+    let segs: Vec<&str> = qualified.split('\\').filter(|s| !s.is_empty()).collect();
+    segs.split_last()
+        .is_some_and(|(_, ns)| ns.iter().any(|s| s.eq_ignore_ascii_case("jobs")))
+}
+
+/// Lines one `use` statement may span (a multi-line group import).
+const MAX_USE_LINES: usize = 64;
+
+/// DH.2: the fully-qualified name (leading `\` dropped) a PHP `use` import
+/// binds `short` to: `use A\B\C;` binds `C`, `use A\B\C as D;` binds `D`,
+/// `use A\{B, C\D as E};` binds `B` and `E`, `use A\B, C\D;` both. Names
+/// compare ASCII case-insensitively, PHP's rule for class names.
+///
+/// Read at LINE level: a statement starts on a line whose first word is
+/// `use` and runs to its `;`, over lines for a multi-line group. A line inside
+/// a `/* .. */` block opened at a line start, inside a heredoc / nowdoc, or
+/// behind a `//` / `#` comment is never read, and `use function` / `use
+/// const` bind no class. A trait `use` in a class body (`use Queueable;`)
+/// reads like an import of a global name, which carries no namespace and so
+/// is never a job. `pub(crate)`: DH.7's Laravel events read it too.
+pub(crate) fn php_use_target(source: &str, short: &str) -> Option<String> {
+    let mut lines = source.lines();
+    let mut block = false;
+    let mut heredoc: Option<&str> = None;
+    while let Some(line) = lines.next() {
+        let t = line.trim();
+        if let Some(label) = heredoc {
+            let closes = t.strip_prefix(label).is_some_and(|r| {
+                !r.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            });
+            if closes {
+                heredoc = None;
+            }
+            continue;
+        }
+        if block {
+            block = !t.contains("*/");
+            continue;
+        }
+        if let Some(open) = t.strip_prefix("/*") {
+            block = !open.contains("*/");
+            continue;
+        }
+        if let Some(label) = heredoc_label(line) {
+            heredoc = Some(label);
+            continue;
+        }
+        let Some(rest) = t.strip_prefix("use") else {
+            continue;
+        };
+        if !rest.starts_with(|c: char| c.is_ascii_whitespace()) {
+            continue;
+        }
+        let mut stmt = strip_line_comment(rest).to_string();
+        let mut more = 0usize;
+        while !stmt.contains(';') && more < MAX_USE_LINES {
+            let Some(next) = lines.next() else { break };
+            stmt.push(' ');
+            stmt.push_str(strip_line_comment(next));
+            more += 1;
+        }
+        let body = stmt.split(';').next().unwrap_or("");
+        if let Some(fqn) = use_binding(body, short) {
+            return Some(fqn);
+        }
+    }
+    None
+}
+
+/// DH.2: `s` up to its first `//` or `#` (a `use` line holds no string).
+fn strip_line_comment(s: &str) -> &str {
+    let cut = [s.find("//"), s.find('#')].into_iter().flatten().min();
+    cut.and_then(|i| s.get(..i)).unwrap_or(s)
+}
+
+/// DH.2: the label a heredoc / nowdoc opened on `line` closes on
+/// (`<<<PHP`, `<<<'EOT'`, `<<< "SQL"`), or `None`.
+fn heredoc_label(line: &str) -> Option<&str> {
+    let at = line.find("<<<")?;
+    let rest = line.get(at + 3..)?.trim_start();
+    let rest = rest.strip_prefix(['\'', '"']).unwrap_or(rest);
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    rest.get(..end).filter(|l| !l.is_empty())
+}
+
+/// DH.2: the qualified name one `use` statement's `body` (after `use`, before
+/// `;`) binds to `short`, with a group prefix joined on.
+fn use_binding(body: &str, short: &str) -> Option<String> {
+    let body = body.trim();
+    let first = body.split_whitespace().next()?;
+    if first.eq_ignore_ascii_case("function") || first.eq_ignore_ascii_case("const") {
+        return None;
+    }
+    if let Some(open) = body.find('{') {
+        // A group import's prefix ends with `\`; a trait-conflict block
+        // (`use A, B { B::f insteadof A; }`) is no import.
+        let prefix = body.get(..open)?.trim();
+        if !prefix.ends_with('\\') {
+            return None;
+        }
+        let close = body.rfind('}').unwrap_or(body.len());
+        let inner = body.get(open + 1..close)?;
+        let name = inner.split(',').find_map(|item| use_item(item, short))?;
+        return Some(format!("{}{name}", prefix.trim_start_matches('\\')));
+    }
+    let name = body.split(',').find_map(|item| use_item(item, short))?;
+    Some(name.trim_start_matches('\\').to_string())
+}
+
+/// DH.2: one comma item of a `use` list, `A\B` or `A\B as C`, when the name it
+/// binds is `short`. A group's `function x` / `const X` member binds no class.
+fn use_item<'a>(item: &'a str, short: &str) -> Option<&'a str> {
+    let words: Vec<&str> = item.split_whitespace().collect();
+    let (name, alias) = match words.as_slice() {
+        [name] => (*name, None),
+        [name, kw, alias] if kw.eq_ignore_ascii_case("as") => (*name, Some(*alias)),
+        _ => return None,
+    };
+    let valid = !name.is_empty()
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'\\'));
+    let binds = alias.unwrap_or_else(|| name.rsplit('\\').next().unwrap_or(name));
+    (valid && binds.eq_ignore_ascii_case(short)).then_some(name)
 }
 
 // ---- LA.33: consumer callbacks -> HANDLED_BY the handler ------------------
@@ -4559,12 +5028,13 @@ public class AuditFunction
         let all = [
             Celery, Dramatiq, BullMQ, Sidekiq, Oban, Nats, RabbitMQ, Kafka, RedisList, Sqs, Sns,
             PubSub, AzureServiceBus, Mqtt, RedisPubSub, Jms, JobRunr, Hangfire, Asynq, Apalis,
+            Laravel,
         ];
         for f in &all {
             match f {
                 Celery | Dramatiq | BullMQ | Sidekiq | Oban | Nats | RabbitMQ | Kafka
                 | RedisList | Sqs | Sns | PubSub | AzureServiceBus | Mqtt | RedisPubSub | Jms
-                | JobRunr | Hangfire | Asynq | Apalis => {}
+                | JobRunr | Hangfire | Asynq | Apalis | Laravel => {}
             }
             assert!(is_framework_tag(&framework_tag(f)), "{f:?}");
         }
@@ -6389,8 +6859,22 @@ await myconsumer.run({ eachMessage: notMine });\n";
                 verb && pubsub,
                 "{needle} {framework:?}"
             );
-            if pubsub && !needle.contains("Mqtt") && !needle.ends_with("Async(") && *needle != ".WithTopicFilter(" {
-                assert!(verb, "{needle} {framework:?} is a pre-CL.3 verb row");
+            // DH.2: restated structurally. A RedisPubSub / Mqtt needle whose
+            // text after a leading `.` or `->` is a BARE verb (`publish(` /
+            // `subscribe(` / `psubscribe(`, any ASCII case) is a generic-verb
+            // row; every other one is a library row and exempt (the MQTTnet
+            // builders, `.SubscribeAsync(`, `.WithTopicFilter(`, Laravel's
+            // `Redis::publish(`).
+            let bare = needle
+                .strip_prefix("->")
+                .or_else(|| needle.strip_prefix('.'))
+                .is_some_and(|v| {
+                    ["publish(", "subscribe(", "psubscribe("]
+                        .iter()
+                        .any(|b| v.eq_ignore_ascii_case(b))
+                });
+            if pubsub && bare {
+                assert!(verb, "{needle} {framework:?} is a bare verb row");
             }
         }
         assert!(is_generic_verb_row(".publish(", &QueueFramework::Mqtt));
@@ -6980,5 +7464,380 @@ await myconsumer.run({ eachMessage: notMine });\n";
                 assert!(!is_generic_verb_row(needle, f), "{needle}");
             }
         }
+    }
+
+    // ---- DH.2: PHP broker clients and Laravel queued jobs -------------------
+
+    const PHP_PATH: &str = "app/worker.php";
+
+    fn php(src: &str) -> (Vec<String>, Vec<String>) {
+        at(src, PHP_PATH)
+    }
+
+    fn php_tag(side: &str, framework: &str) -> Vec<String> {
+        vec![format!("queue_{side}:{UNRESOLVED_PREFIX}{framework}")]
+    }
+
+    /// matrix/php/amqp, both files.
+    const AMQPLIB_PUBLISHER: &str = "<?php\n\nuse PhpAmqpLib\\Connection\\AMQPStreamConnection;\nuse PhpAmqpLib\\Message\\AMQPMessage;\n\n$conn = new AMQPStreamConnection('localhost', 5672, 'guest', 'guest');\n$channel = $conn->channel();\n$channel->basic_publish(new AMQPMessage('order-1'), '', 'orders');\n";
+    const AMQPLIB_WORKER: &str = "<?php\n\nuse PhpAmqpLib\\Connection\\AMQPStreamConnection;\n\n$conn = new AMQPStreamConnection('localhost', 5672, 'guest', 'guest');\n$channel = $conn->channel();\n$channel->queue_declare('orders', false, true, false, false);\n$channel->basic_consume('orders', '', false, true, false, false, function ($msg) {\n    echo $msg->body;\n});\n";
+
+    #[test]
+    fn php_amqplib_positional_routing_key() {
+        let p = extract_queue_producer_nodes(AMQPLIB_PUBLISHER, "server/publisher.php", module_id(), repo());
+        // Was `queue_producer:unresolved:rabbitmq`: the pika `basic_publish(`
+        // row reads only `routing_key=` / `queue=`, and its empty read of the
+        // same call is explained by the `->basic_publish(` row's node (CL.1
+        // rule (i)), so the file mints exactly one node.
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"RabbitMQ""#));
+        // The worker is HEAD's `basic_consume(` row, unchanged.
+        assert_eq!(php(AMQPLIB_WORKER), (strs(&["queue_consumer:orders"]), vec![]));
+        assert_eq!(php(AMQPLIB_PUBLISHER).0, Vec::<String>::new());
+        // A routing key held in a variable names nothing: HEAD's tag.
+        let var = AMQPLIB_PUBLISHER.replace("'', 'orders'", "'', $queue");
+        assert_eq!(php(&var).1, php_tag("producer", "rabbitmq"));
+    }
+
+    #[test]
+    fn php_amqplib_fanout_reads_exchange() {
+        // An EMPTY routing key (fanout) falls back to the exchange, arg #1.
+        let fanout = "<?php\nuse PhpAmqpLib\\Message\\AMQPMessage;\n$channel->basic_publish($m, 'logs', '');\n";
+        assert_eq!(php(fanout), (vec![], strs(&["queue_producer:logs"])));
+        // A direct exchange with a key: the key.
+        let direct = "<?php\nuse PhpAmqpLib\\Message\\AMQPMessage;\n$channel->basic_publish($m, 'direct_logs', 'error');\n";
+        assert_eq!(php(direct), (vec![], strs(&["queue_producer:error"])));
+    }
+
+    /// matrix/php/kafka, both files.
+    const RDKAFKA_CONSUMER: &str = "<?php\n\n$conf = new RdKafka\\Conf();\n$consumer = new RdKafka\\KafkaConsumer($conf);\n$consumer->subscribe(['orders']);\n$message = $consumer->consume(120 * 1000);\n";
+    const RDKAFKA_PRODUCER: &str = "<?php\n\n$producer = new RdKafka\\Producer(new RdKafka\\Conf());\n$topic = $producer->newTopic(\"orders\");\n$topic->produce(RD_KAFKA_PARTITION_UA, 0, \"order-1\");\n";
+
+    #[test]
+    fn php_rdkafka_subscribe_array_drops_the_consumer_tag() {
+        let c = extract_queue_consumer_nodes(RDKAFKA_CONSUMER, "client/consumer.php", module_id(), repo());
+        // Was `queue_consumer:unresolved:kafka`: HEAD's dotless
+        // `KafkaConsumer` row reads the expression `$conf` from the
+        // constructor, so only the overlapping NoIdentity
+        // `RdKafka\KafkaConsumer(` liveness row explains its tag.
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"Kafka""#));
+        // The producer file is HEAD's `newTopic(` row, unchanged.
+        assert_eq!(php(RDKAFKA_PRODUCER), (vec![], strs(&["queue_producer:orders"])));
+        // An imported short name and two topics (the first is read).
+        let imported = "<?php\nuse RdKafka\\Conf;\nuse RdKafka\\KafkaConsumer;\n$consumer = new KafkaConsumer($conf);\n$consumer->subscribe([\"payments\", \"refunds\"]);\n";
+        assert_eq!(php(imported), (strs(&["queue_consumer:payments"]), vec![]));
+        // Topics held in a variable name nothing: the tag stays.
+        let var = RDKAFKA_CONSUMER.replace("['orders']", "$topics");
+        assert_eq!(php(&var).0, php_tag("consumer", "kafka"));
+    }
+
+    #[test]
+    fn php_mqtt_client_publish_subscribe() {
+        // matrix/php/mqtt, both files.
+        let listener = "<?php\n\nuse PhpMqtt\\Client\\MqttClient;\n\n$mqtt = new MqttClient('broker', 1883);\n$mqtt->connect();\n$mqtt->subscribe('sensors/temp', function ($topic, $message) {\n    echo $message;\n}, 0);\n$mqtt->loop(true);\n";
+        let sensor = "<?php\n\nuse PhpMqtt\\Client\\MqttClient;\n\n$mqtt = new MqttClient('broker', 1883);\n$mqtt->connect();\n$mqtt->publish('sensors/temp', '21', 0);\n";
+        assert_eq!(php(listener), (strs(&["queue_consumer:sensors/temp"]), vec![]));
+        assert_eq!(php(sensor), (vec![], strs(&["queue_producer:sensors/temp"])));
+        let p = extract_queue_producer_nodes(sensor, PHP_PATH, module_id(), repo());
+        assert!(framework_of(&p).contains(r#""framework":"Mqtt""#));
+        // Without a broker library, `->publish(` / `->subscribe(` are a
+        // blog's and a newsletter's.
+        let blog = "<?php\n$post->publish('draft');\n$feed->subscribe('news', $user);\n";
+        assert_eq!(php(blog), (vec![], vec![]));
+    }
+
+    #[test]
+    fn php_basis_nats_publish_subscribe() {
+        // matrix/php/nats, both files.
+        let sub = "<?php\n\nuse Basis\\Nats\\Client;\n\n$client = new Client();\n$client->subscribe('orders', function ($payload) {\n    echo $payload;\n});\n$client->process();\n";
+        let publ = "<?php\n\nuse Basis\\Nats\\Client;\n\n$client = new Client();\n$client->publish('orders', 'order-1');\n";
+        assert_eq!(php(sub), (strs(&["queue_consumer:orders"]), vec![]));
+        assert_eq!(php(publ), (vec![], strs(&["queue_producer:orders"])));
+        let p = extract_queue_producer_nodes(publ, PHP_PATH, module_id(), repo());
+        assert!(framework_of(&p).contains(r#""framework":"Nats""#));
+        // A queue-group subscriber.
+        let group = "<?php\nuse Basis\\Nats\\Client;\n$client->subscribeQueue('orders', 'workers', fn ($m) => work($m));\n";
+        assert_eq!(php(group), (strs(&["queue_consumer:orders"]), vec![]));
+        // A file that also holds a phpredis client: the NATS row claims the
+        // call first, so it is never a RedisPubSub twin (A2.9).
+        let both = "<?php\nuse Basis\\Nats\\Client;\n$redis = new Redis();\n$client->publish('orders', 'x');\n$client->subscribe('orders', fn ($m) => 1);\n";
+        let p = extract_queue_producer_nodes(both, PHP_PATH, module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"Nats""#));
+        let c = extract_queue_consumer_nodes(both, PHP_PATH, module_id(), repo());
+        assert_eq!(c.nodes.len(), 1, "{:?}", qnames(&c));
+        assert!(framework_of(&c).contains(r#""framework":"Nats""#));
+    }
+
+    #[test]
+    fn php_gcp_pubsub_topic_subscription() {
+        // matrix/php/pubsub, both files.
+        let listener = "<?php\n\nuse Google\\Cloud\\PubSub\\PubSubClient;\n\n$pubsub = new PubSubClient(['projectId' => 'shop']);\n$subscription = $pubsub->subscription('orders');\nforeach ($subscription->pull() as $message) {\n    $subscription->acknowledge($message);\n}\n";
+        let publisher = "<?php\n\nuse Google\\Cloud\\PubSub\\PubSubClient;\n\n$pubsub = new PubSubClient(['projectId' => 'shop']);\n$pubsub->topic('orders')->publish(['data' => 'order-1']);\n";
+        assert_eq!(php(listener), (strs(&["queue_consumer:orders"]), vec![]));
+        assert_eq!(php(publisher), (vec![], strs(&["queue_producer:orders"])));
+        let p = extract_queue_producer_nodes(publisher, PHP_PATH, module_id(), repo());
+        assert!(framework_of(&p).contains(r#""framework":"PubSub","family":"pubsub""#));
+        // Without the library, a forum's topic and a plan's subscription.
+        let forum = "<?php\n$topic = $board->topic('orders');\n$sub = $user->subscription('pro');\n";
+        assert_eq!(php(forum), (vec![], vec![]));
+    }
+
+    #[test]
+    fn php_laravel_redis_facade_and_phpredis() {
+        // matrix/php/redis, both files: the Laravel facade.
+        let listener = "<?php\n\nuse Illuminate\\Support\\Facades\\Redis;\n\nRedis::subscribe(['orders'], function (string $message) {\n    echo $message;\n});\n";
+        let notifier = "<?php\n\nuse Illuminate\\Support\\Facades\\Redis;\n\nRedis::publish('orders', json_encode(['id' => 1]));\n";
+        assert_eq!(php(listener), (strs(&["queue_consumer:orders"]), vec![]));
+        assert_eq!(php(notifier), (vec![], strs(&["queue_producer:orders"])));
+        let p = extract_queue_producer_nodes(notifier, PHP_PATH, module_id(), repo());
+        assert!(framework_of(&p).contains(r#""framework":"RedisPubSub""#));
+        let glob = "<?php\nuse Illuminate\\Support\\Facades\\Redis;\nRedis::psubscribe(['orders.*'], function ($message, $channel) {});\n";
+        assert_eq!(php(glob), (strs(&["queue_consumer:orders.*"]), vec![]));
+        // A named connection's subscribe is the phpredis verb.
+        let conn = "<?php\nuse Illuminate\\Support\\Facades\\Redis;\nRedis::connection('pubsub')->subscribe(['orders'], fn ($m) => 1);\n";
+        assert_eq!(php(conn), (strs(&["queue_consumer:orders"]), vec![]));
+        // phpredis and Predis.
+        let phpredis = "<?php\n$redis = new Redis();\n$redis->connect('127.0.0.1');\n$redis->publish('orders', $m);\n$redis->subscribe(['orders'], function ($r, $ch, $msg) {});\n$redis->psubscribe(['news.*'], 'on_news');\n";
+        assert_eq!(
+            php(phpredis),
+            (
+                strs(&["queue_consumer:news.*", "queue_consumer:orders"]),
+                strs(&["queue_producer:orders"])
+            )
+        );
+        let predis = "<?php\n$client = new Predis\\Client();\n$client->publish('orders', $m);\n";
+        assert_eq!(php(predis), (vec![], strs(&["queue_producer:orders"])));
+    }
+
+    #[test]
+    fn php_arrow_verb_needs_a_leading_literal() {
+        // A2.9's guard on the `->` spellings: a channel in a variable names no
+        // topic (the coverage tag, the `.publish(ch, m)` precedent) ...
+        let var = "<?php\n$redis = new Redis();\n$redis->publish($ch, $m);\n";
+        assert_eq!(php(var), (vec![], php_tag("producer", "redispubsub")));
+        // ... and a literal inside a callback is never read as the channel.
+        let rx = "<?php\n$redis = new Redis();\n$events->subscribe(fn ($e) => logger('hi'));\n";
+        assert_eq!(php(rx), (php_tag("consumer", "redispubsub"), vec![]));
+        let mqtt = "<?php\nuse PhpMqtt\\Client\\MqttClient;\n$mqtt->subscribe($topic, function ($t, $m) { logger('hi'); }, 0);\n";
+        assert_eq!(php(mqtt), (php_tag("consumer", "mqtt"), vec![]));
+    }
+
+    #[test]
+    fn php_aws_sqs_array_keys_fold() {
+        let url = "https://sqs.us-east-1.amazonaws.com/123/orders";
+        // matrix/php/sqs_sns, both files.
+        let poller = format!("<?php\n\nuse Aws\\Sqs\\SqsClient;\n\n$sqs = new SqsClient(['region' => 'us-east-1', 'version' => 'latest']);\n$sqs->receiveMessage(['QueueUrl' => '{url}']);\n");
+        let enqueue = format!("<?php\n\nuse Aws\\Sqs\\SqsClient;\n\n$sqs = new SqsClient(['region' => 'us-east-1', 'version' => 'latest']);\n$sqs->sendMessage(['QueueUrl' => '{url}', 'MessageBody' => 'order-1']);\n");
+        assert_eq!(php(&poller), (strs(&["queue_consumer:orders"]), vec![]));
+        assert_eq!(php(&enqueue), (vec![], strs(&["queue_producer:orders"])));
+        let p = extract_queue_producer_nodes(&enqueue, PHP_PATH, module_id(), repo());
+        assert!(framework_of(&p).contains(r#""framework":"Sqs""#));
+        // The URL folded (`[queues] cloud broker=Sqs topic=orders from=url`).
+        let hits = queue_topic::scan(&enqueue, "->sendMessage(", TopicRule::Keyed(&["queueurl"]));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].form, TopicForm::Url);
+        // The batch call; a URL held in a variable is the tag.
+        let batch = format!("<?php\nuse Aws\\Sqs\\SqsClient;\n$sqs->sendMessageBatch(['QueueUrl' => \"{url}\", 'Entries' => $entries]);\n");
+        assert_eq!(php(&batch), (vec![], strs(&["queue_producer:orders"])));
+        let var = "<?php\nuse Aws\\Sqs\\SqsClient;\n$sqs->sendMessage(['QueueUrl' => $queueUrl, 'MessageBody' => $b]);\n";
+        assert_eq!(php(var), (vec![], php_tag("producer", "sqs")));
+        // Without the SDK, a mailer's `sendMessage` is no queue.
+        let mailer = format!("<?php\n$mailer->sendMessage(['QueueUrl' => '{url}']);\n");
+        assert_eq!(php(&mailer), (vec![], vec![]));
+    }
+
+    #[test]
+    fn php_aws_sns_topic_arn() {
+        let src = "<?php\nuse Aws\\Sns\\SnsClient;\n$sns = new SnsClient(['region' => 'us-east-1', 'version' => 'latest']);\n$sns->publish(['TopicArn' => 'arn:aws:sns:us-east-1:123456789012:orders', 'Message' => 'order-1']);\n";
+        let p = extract_queue_producer_nodes(src, PHP_PATH, module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"Sns""#));
+        assert_eq!(php(src).0, Vec::<String>::new());
+        // A file that also holds a phpredis client: SNS claims the call.
+        let both = src.replace("$sns = new", "$cache = new Redis();\n$sns = new");
+        let p = extract_queue_producer_nodes(&both, PHP_PATH, module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"Sns""#));
+    }
+
+    /// matrix/php/taskq, both files.
+    const LARAVEL_JOB: &str = "<?php\n\nnamespace App\\Jobs;\n\nuse Illuminate\\Contracts\\Queue\\ShouldQueue;\nuse Illuminate\\Foundation\\Queue\\Queueable;\n\nclass SendWelcomeEmail implements ShouldQueue\n{\n    use Queueable;\n\n    public function handle(): void {}\n}\n";
+    const LARAVEL_CONTROLLER: &str = "<?php\n\nnamespace App\\Http\\Controllers;\n\nuse App\\Jobs\\SendWelcomeEmail;\n\nclass SignupController\n{\n    public function store()\n    {\n        SendWelcomeEmail::dispatch();\n    }\n}\n";
+
+    #[test]
+    fn laravel_job_dispatch_pairs_should_queue() {
+        let c = extract_queue_consumer_nodes(LARAVEL_JOB, "client/app/Jobs/SendWelcomeEmail.php", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:SendWelcomeEmail"]));
+        assert!(framework_of(&c).contains(r#""framework":"Laravel","family":"laravel""#));
+        // The site is the class line, never the `use ..ShouldQueue;` import.
+        assert_eq!(c.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![7]);
+        assert_eq!(php(LARAVEL_JOB).1, Vec::<String>::new());
+        let p = extract_queue_producer_nodes(
+            LARAVEL_CONTROLLER,
+            "server/app/Http/Controllers/SignupController.php",
+            module_id(),
+            repo(),
+        );
+        assert_eq!(qnames(&p), strs(&["queue_producer:SendWelcomeEmail"]));
+        assert!(framework_of(&p).contains(r#""framework":"Laravel","family":"laravel""#));
+        assert_eq!(c.nodes[0].confidence, Confidence::Medium);
+        assert_eq!(php(LARAVEL_CONTROLLER).0, Vec::<String>::new());
+        // Arguments and queue options; a fully-qualified class, no import.
+        for call in [
+            "SendWelcomeEmail::dispatch($user)->onQueue('emails');",
+            "\\App\\Jobs\\SendWelcomeEmail::dispatch($user);",
+        ] {
+            let src = format!("<?php\nnamespace App\\Http\\Controllers;\nclass SignupController\n{{\n    public function store($user)\n    {{\n        {call}\n    }}\n}}\n");
+            let src = if call.starts_with('\\') {
+                src
+            } else {
+                src.replace("class SignupController", "use App\\Jobs\\SendWelcomeEmail;\nclass SignupController")
+            };
+            assert_eq!(php(&src), (vec![], strs(&["queue_producer:SendWelcomeEmail"])), "{call}");
+        }
+    }
+
+    #[test]
+    fn laravel_helper_dispatch_new() {
+        for call in [
+            "dispatch(new SendWelcomeEmail($user));",
+            "dispatch(new SendWelcomeEmail);",
+            "$this->dispatch(new SendWelcomeEmail($user));",
+            "Bus::dispatch(new SendWelcomeEmail($user));",
+        ] {
+            let src = format!("<?php\nnamespace App\\Http\\Controllers;\nuse App\\Jobs\\SendWelcomeEmail;\nuse Illuminate\\Support\\Facades\\Bus;\nclass SignupController\n{{\n    public function store($user)\n    {{\n        {call}\n    }}\n}}\n");
+            assert_eq!(php(&src), (vec![], strs(&["queue_producer:SendWelcomeEmail"])), "{call}");
+        }
+        // A fully-qualified `new`, no import.
+        let fq = "<?php\nclass Billing\n{\n    public function charge($u) { dispatch(new \\App\\Jobs\\Billing\\ChargeCard($u)); }\n}\n";
+        assert_eq!(php(fq), (vec![], strs(&["queue_producer:ChargeCard"])));
+        // A dispatch that names no job class is no site: no node, no tag
+        // (`dispatch($job)`, Livewire's `$this->dispatch('refresh')`, a
+        // `redispatch(` of something else).
+        let anon = "<?php\nuse App\\Jobs\\SendWelcomeEmail;\nfunction f($job) { dispatch($job); $this->dispatch('refresh'); redispatch(new SendWelcomeEmail()); }\n";
+        assert_eq!(php(anon), (vec![], vec![]));
+    }
+
+    #[test]
+    fn laravel_event_dispatch_is_not_a_job() {
+        // matrix/php/eventbus's listener file: an EVENT (DH.7's), never a job.
+        let event = "<?php\nnamespace App\\Listeners;\nuse App\\Events\\OrderPlaced;\nfunction place(int $id): void\n{\n    OrderPlaced::dispatch($id);\n}\n";
+        assert_eq!(php(event), (vec![], vec![]));
+        let spec = "<?php\nuse App\\Events\\OrderPlaced;\nOrderPlaced::dispatch(1);\n";
+        assert_eq!(php(spec), (vec![], vec![]));
+        // Beside a job import the event still names no job, and mints no tag.
+        let only_event = "<?php\nuse App\\Events\\OrderPlaced;\nuse App\\Jobs\\SendWelcomeEmail;\nOrderPlaced::dispatch(1);\n";
+        assert_eq!(php(only_event), (vec![], vec![]));
+        let mixed = format!("{only_event}SendWelcomeEmail::dispatch();\n");
+        assert_eq!(php(&mixed), (vec![], strs(&["queue_producer:SendWelcomeEmail"])));
+        // Symfony Messenger and a Redux store are no Laravel job.
+        let messenger = "<?php\nuse App\\Message\\SendEmail;\n$bus->dispatch(new SendEmail($id));\n";
+        assert_eq!(php(messenger), (vec![], vec![]));
+        assert_eq!(
+            at("this.store.dispatch({ type: 'ROOM_JOINING', roomId });", "web/chat.service.ts"),
+            (vec![], vec![])
+        );
+    }
+
+    #[test]
+    fn laravel_shouldqueue_import_line_is_no_site() {
+        let import_only = "<?php\nnamespace App\\Jobs;\nuse Illuminate\\Contracts\\Queue\\ShouldQueue;\n";
+        assert_eq!(php(import_only), (vec![], vec![]));
+        // A class that never implements it, and a comment naming it.
+        let other = "<?php\nuse Illuminate\\Contracts\\Queue\\ShouldQueue;\nclass Report\n{\n    // should this be ShouldQueue?\n}\n";
+        assert_eq!(php(other), (vec![], vec![]));
+        let commented = "<?php\n// class Draft implements ShouldQueue\nclass Draft\n{\n}\n";
+        assert_eq!(php(commented), (vec![], vec![]));
+        // `final`, an `extends`, two interfaces, a fully-qualified name.
+        let fq = "<?php\nfinal class Charge extends Job implements \\Illuminate\\Contracts\\Queue\\ShouldQueue, ShouldBeUnique\n{\n}\n";
+        assert_eq!(php(fq), (strs(&["queue_consumer:Charge"]), vec![]));
+        // KNOWN IMPRECISION: a queued LISTENER implements it too and reads
+        // as an (unpaired) job consumer; it does run on the queue worker.
+        let listener = "<?php\nnamespace App\\Listeners;\nuse Illuminate\\Contracts\\Queue\\ShouldQueue;\nclass SendReceipt implements ShouldQueue\n{\n    public function handle(OrderPlaced $e): void {}\n}\n";
+        assert_eq!(php(listener), (strs(&["queue_consumer:SendReceipt"]), vec![]));
+    }
+
+    #[test]
+    fn php_use_target_forms() {
+        let src = "<?php\nnamespace App\\Http;\n\nuse App\\Jobs\\SendWelcomeEmail;\nuse App\\Jobs\\ChargeCard as Charge;\nuse App\\Jobs\\{Refund, Billing\\Invoice as Bill};\nuse App\\Models\\User, \\App\\Models\\Team;\nuse function App\\Support\\helper;\n// use App\\Jobs\\Commented;\n/*\nuse App\\Jobs\\Blocked;\n*/\n$s = <<<PHP\nuse App\\Jobs\\Heredoc;\nPHP;\nclass C\n{\n    use Queueable;\n}\n";
+        let t = |short: &str| php_use_target(src, short);
+        assert_eq!(t("SendWelcomeEmail").as_deref(), Some("App\\Jobs\\SendWelcomeEmail"));
+        // An alias binds the alias, never the class's own name.
+        assert_eq!(t("Charge").as_deref(), Some("App\\Jobs\\ChargeCard"));
+        assert_eq!(t("ChargeCard"), None);
+        // A group import joins its prefix; a member may be nested and aliased.
+        assert_eq!(t("Refund").as_deref(), Some("App\\Jobs\\Refund"));
+        assert_eq!(t("Bill").as_deref(), Some("App\\Jobs\\Billing\\Invoice"));
+        // A comma list; a leading `\` dropped; PHP's case rule.
+        assert_eq!(t("User").as_deref(), Some("App\\Models\\User"));
+        assert_eq!(t("Team").as_deref(), Some("App\\Models\\Team"));
+        assert_eq!(t("sendwelcomeemail").as_deref(), Some("App\\Jobs\\SendWelcomeEmail"));
+        // `use function` binds no class; comments and a heredoc are no import.
+        for none in ["helper", "Commented", "Blocked", "Heredoc", "Missing"] {
+            assert_eq!(t(none), None, "{none}");
+        }
+        // A trait use carries no namespace, so it is never a job.
+        assert_eq!(t("Queueable").as_deref(), Some("Queueable"));
+        assert!(!laravel_job(src, "Queueable"));
+        // A multi-line group import.
+        let multi = "<?php\nuse App\\Jobs\\{\n    SendWelcomeEmail,\n    ChargeCard, // billing\n};\n";
+        assert_eq!(php_use_target(multi, "ChargeCard").as_deref(), Some("App\\Jobs\\ChargeCard"));
+        assert!(laravel_job(multi, "ChargeCard"));
+        // A trait-conflict block is no group import.
+        let traits = "<?php\nclass C\n{\n    use A, B { B::hello insteadof A; }\n}\n";
+        assert_eq!(php_use_target(traits, "hello"), None);
+        // `laravel_job`'s second branch: declared in the file as ShouldQueue.
+        assert!(laravel_job(LARAVEL_JOB, "SendWelcomeEmail"));
+        assert!(!laravel_job(LARAVEL_JOB, "Queueable"));
+        assert!(laravel_job(LARAVEL_CONTROLLER, "SendWelcomeEmail"));
+        assert!(!laravel_job(LARAVEL_CONTROLLER, "SignupController"));
+    }
+
+    #[test]
+    fn php_rows_are_gated_on_namespaces() {
+        // The `->` verbs are generic only on Redis / MQTT rows; the facade
+        // rows and the other PHP clients read arg #0 normally.
+        assert!(is_generic_verb_row("->publish(", &QueueFramework::RedisPubSub));
+        assert!(is_generic_verb_row("->subscribe(", &QueueFramework::Mqtt));
+        assert!(is_generic_verb_row("->psubscribe(", &QueueFramework::RedisPubSub));
+        assert!(!is_generic_verb_row("Redis::publish(", &QueueFramework::RedisPubSub));
+        assert!(!is_generic_verb_row("->subscribe(", &QueueFramework::Kafka));
+        assert!(!is_generic_verb_row("->subscribe(", &QueueFramework::Nats));
+        // Every PHP namespace gate is a broker signal (eventbus.rs yields its
+        // verbs in those files); the Laravel job gate is a task queue's.
+        for g in [
+            PHPAMQPLIB_GATE,
+            BASIS_NATS_GATE,
+            GCP_PUBSUB_PHP_GATE,
+            AWS_SQS_PHP_GATE,
+            AWS_SNS_PHP_GATE,
+            PHP_MQTT_GATE,
+            LARAVEL_REDIS_GATE,
+        ] {
+            for s in g {
+                assert!(broker_signals().contains(s), "{s}");
+            }
+        }
+        assert!(!broker_signals().contains(&"\\jobs\\"));
+        assert!(!is_broker(&QueueFramework::Laravel));
+        assert_eq!(QueueFramework::Laravel.family(), "laravel");
+        assert_eq!(framework_tag(&QueueFramework::Laravel), format!("{UNRESOLVED_PREFIX}laravel"));
+        // The Laravel facade's needle spells `redis`, so its gate is the
+        // namespace, never a word the needle already holds.
+        for (needle, _, signals, _) in CONSUMER_PATTERNS.iter().chain(PRODUCER_PATTERNS) {
+            if !needle.starts_with("Redis::") {
+                continue;
+            }
+            assert_eq!(*signals, LARAVEL_REDIS_GATE, "{needle}");
+            let lower = needle.to_ascii_lowercase();
+            for s in *signals {
+                assert!(!lower.contains(s), "signal {s:?} is a substring of {needle:?}");
+            }
+        }
+        // A Laravel job file mints no event and no broker verb node.
+        let ev = crate::eventbus::extract_event_emitter_nodes(LARAVEL_CONTROLLER, PHP_PATH, module_id(), repo());
+        assert!(ev.nodes.is_empty(), "{:?}", ev.nav.qname_by_id.values().collect::<Vec<_>>());
     }
 }
