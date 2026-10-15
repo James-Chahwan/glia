@@ -24,9 +24,16 @@ pub enum CliFramework {
     /// DG.8: scopt (Scala), the builder's `programName` / `cmd` and scopt 3's
     /// `OptionParser[T]("x")`.
     Scopt,
+    /// DH.10: Dart's package:args, a `CommandRunner('x', ..)` (the
+    /// executable) and each `Command` subclass's `name`.
+    CommandRunner,
+    /// DH.10: an Elixir Mix task, `defmodule Mix.Tasks.Shop.Sync` with
+    /// `use Mix.Task`, run as `mix shop.sync`.
+    MixTask,
     /// LA.20c: a binary a packaging manifest declares (pyproject.toml
     /// `[project.scripts]`, setup.py `console_scripts`, package.json `bin`,
-    /// Cargo.toml `[[bin]]`), not a subcommand a CLI library registers.
+    /// Cargo.toml `[[bin]]`; DH.10: composer.json `bin`, a `*.gemspec`'s
+    /// `executables`), not a subcommand a CLI library registers.
     Manifest,
 }
 
@@ -47,6 +54,8 @@ impl CliFramework {
             CliFramework::Symfony => "symfony",
             CliFramework::Laravel => "laravel",
             CliFramework::Scopt => "scopt",
+            CliFramework::CommandRunner => "commandrunner",
+            CliFramework::MixTask => "mix",
             CliFramework::Manifest => "manifest",
         }
     }
@@ -108,7 +117,9 @@ type LineExtractor = fn(&str) -> Option<String>;
 /// Laravel artisan for `php`. LA.20c: a `python` file's setuptools
 /// `console_scripts` entry points (setup.py is Python source, so it is read
 /// here, not by [`extract_manifest_binaries`]) declare binaries. DG.8: scopt
-/// for `scala` (a file that mentions `scopt`).
+/// for `scala` (a file that mentions `scopt`). DH.10: package:args for `dart`
+/// (a file that names `package:args/`), Mix tasks for `elixir` (a file that
+/// names `Mix.Task`).
 pub fn extract_cli_command_nodes(
     source: &str,
     lang: &str,
@@ -167,6 +178,12 @@ pub fn extract_cli_command_nodes(
         }
         "scala" if source.contains("scopt") => {
             decls.extend(scan_scopt(source, &CodeMap::new(source)));
+        }
+        "dart" if source.contains("package:args/") => {
+            decls.extend(scan_dart_args(source, &CodeMap::script(source, Script::Dart)));
+        }
+        "elixir" if source.contains("Mix.Task") => {
+            decls.extend(scan_mix_tasks(source, &CodeMap::script(source, Script::Elixir)));
         }
         _ => {}
     }
@@ -229,8 +246,8 @@ pub fn extract_cli_command_nodes(
 /// listed; the prefix and `path=` are stable. LA.20c: a python file that
 /// declares only setuptools `console_scripts` binaries (a setup.py) prints the
 /// manifest line instead, `[cli-decl] manifest bins=1 (pyproject=0 setup=1
-/// npm=0 cargo=0) path=setup.py`, the one every manifest-declared binary
-/// shares.
+/// npm=0 cargo=0 composer=0 gemspec=0) path=setup.py`, the one every
+/// manifest-declared binary shares.
 pub fn decl_marker(lang: &str, out: &CliNodes, path: &str) -> Option<String> {
     if out.per_framework.is_empty() {
         return None;
@@ -1235,16 +1252,24 @@ pub(crate) enum Script {
     Python,
     Ruby,
     Php,
+    /// DH.10: `//` and nesting `/* */` comments, `'''` / `"""` blocks, raw
+    /// `r'..'` / `r".."` strings (no escapes); `#` is code (a symbol literal).
+    Dart,
+    /// DH.10: `#` comments, `"""` / `'''` heredocs and `?c` char literals
+    /// (`?"`, `?\n`); a `?` after an identifier byte ends a name (`valid?`).
+    Elixir,
 }
 
 impl CodeMap {
-    /// [`CodeMap::new`]'s contract for Python, Ruby and PHP, whose literals
-    /// and comments are not the C family's: `#` line comments (not PHP 8's
-    /// `#[` attribute opener), PHP's `//` and `/* */`, Ruby's `=begin` /
-    /// `=end`, Python's `'''` / `"""` blocks, `'...'` strings of any length (in
-    /// the C family `'` opens a char literal), and heredoc bodies (Ruby `<<~ID`
-    /// / `<<-ID`, PHP `<<<ID`) through their terminator line. Ruby `%w()`
-    /// literals are read as code.
+    /// [`CodeMap::new`]'s contract for Python, Ruby, PHP, Dart and Elixir,
+    /// whose literals and comments are not the C family's: `#` line comments
+    /// (not PHP 8's `#[` attribute opener, and not in Dart), PHP's and Dart's
+    /// `//` and `/* */` (Dart's nest), Ruby's `=begin` / `=end`, Python's,
+    /// Dart's and Elixir's `'''` / `"""` blocks, `'...'` strings of any length
+    /// (in the C family `'` opens a char literal), Dart raw strings, Elixir
+    /// `?c` char literals, and heredoc bodies (Ruby `<<~ID` / `<<-ID`, PHP
+    /// `<<<ID`) through their terminator line. Ruby `%w()` literals and
+    /// Elixir sigils are read as code.
     pub(crate) fn script(source: &str, script: Script) -> Self {
         let b = source.as_bytes();
         let mut skips = Vec::new();
@@ -1259,12 +1284,28 @@ impl CodeMap {
                 i = end;
                 continue;
             }
+            let c_comments = matches!(script, Script::Php | Script::Dart);
+            let triple = matches!(script, Script::Python | Script::Dart | Script::Elixir);
+            let after_ident = i > 0 && is_ident_byte(b[i - 1]);
             let end = match b[i] {
                 b'#' if script == Script::Php && b.get(i + 1) == Some(&b'[') => None,
+                b'#' if script == Script::Dart => None,
                 b'#' => Some(line_end(b, i)),
-                b'/' if script == Script::Php && b.get(i + 1) == Some(&b'/') => Some(line_end(b, i)),
+                b'/' if c_comments && b.get(i + 1) == Some(&b'/') => Some(line_end(b, i)),
                 b'/' if script == Script::Php && b.get(i + 1) == Some(&b'*') => Some(skip_comment(b, i)),
-                q @ (b'"' | b'\'') if script == Script::Python && b[i..].starts_with(&[q, q, q]) => {
+                b'/' if script == Script::Dart && b.get(i + 1) == Some(&b'*') => {
+                    Some(skip_nested_block_comment(b, i))
+                }
+                b'r' if script == Script::Dart && !after_ident && matches!(b.get(i + 1), Some(b'"' | b'\'')) => {
+                    let q = b[i + 1];
+                    Some(if b[i + 1..].starts_with(&[q, q, q]) {
+                        find_bytes(b, i + 4, &[q, q, q]).map_or(b.len(), |j| j + 3)
+                    } else {
+                        find_bytes(b, i + 2, &[q]).map_or(b.len(), |j| j + 1)
+                    })
+                }
+                b'?' if script == Script::Elixir && !after_ident && i + 1 < b.len() => Some(elixir_char_end(b, i)),
+                q @ (b'"' | b'\'') if triple && b[i..].starts_with(&[q, q, q]) => {
                     Some(find_bytes(b, i + 3, &[q, q, q]).map_or(b.len(), |j| j + 3))
                 }
                 q @ (b'"' | b'\'') => Some(skip_quoted(b, i, q)),
@@ -1303,6 +1344,22 @@ impl CodeMap {
             _ => pos,
         }
     }
+}
+
+/// Index just past the Elixir char literal whose `?` is at `at` (`?a`,
+/// `?\\n`, `?é`), on a char boundary.
+fn elixir_char_end(b: &[u8], at: usize) -> usize {
+    let width = |lead: u8| match lead {
+        c if c < 0x80 => 1,
+        c if c >= 0xF0 => 4,
+        c if c >= 0xE0 => 3,
+        _ => 2,
+    };
+    let end = match b[at + 1] {
+        b'\\' => at + 2 + b.get(at + 2).map_or(0, |&c| width(c)),
+        c => at + 1 + width(c),
+    };
+    end.min(b.len())
 }
 
 /// The index of the `\n` ending the line `at` is on, or the end of input.
@@ -2203,13 +2260,306 @@ fn scan_scopt(source: &str, code: &CodeMap) -> Vec<CliDecl> {
 }
 
 // ----------------------------------------------------------------------------
+// DH.10: Dart's package:args and Elixir's Mix tasks. Both files are lexed by
+// [`CodeMap::script`] ([`Script::Dart`] / [`Script::Elixir`]), so a needle in
+// a string, a doc heredoc or a comment declares nothing.
+// ----------------------------------------------------------------------------
+
+/// One `class Name ... { body }` of a Dart file.
+struct DartClass<'a> {
+    name: &'a str,
+    /// The superclass's last name segment, type arguments dropped
+    /// (`args.Command<void>` -> `Command`); empty without `extends`.
+    base: &'a str,
+    /// `[start, end)` of the body, inside its braces.
+    body: (usize, usize),
+}
+
+/// Every named class of a Dart file with a body (`abstract class`, `final
+/// class` and the rest included). A mixin application `class A = B with M;`
+/// has no body and is passed over: its `;` comes before any `{`.
+fn dart_classes<'a>(source: &'a str, code: &CodeMap) -> Vec<DartClass<'a>> {
+    let b = source.as_bytes();
+    let mut out = Vec::new();
+    for at in code_words(source, code, 0, source.len(), "class") {
+        let (name, after) = read_ident(source, skip_ws(b, at + "class".len()));
+        if name.is_empty() {
+            continue;
+        }
+        let limit = b.len().min(after + MAX_ATTR_SPAN);
+        let Some(open) = (after..limit).find(|&i| matches!(b[i], b'{' | b';') && code.is_code(i)) else { continue };
+        if b[open] != b'{' {
+            continue;
+        }
+        let base = code_words(source, code, after, open, "extends").first().map_or("", |&x| {
+            let mut i = skip_ws(b, x + "extends".len());
+            let mut last = "";
+            loop {
+                let (seg, end) = read_ident(source, i);
+                if seg.is_empty() {
+                    break;
+                }
+                last = seg;
+                if b.get(end) != Some(&b'.') {
+                    break;
+                }
+                i = end + 1;
+            }
+            last
+        });
+        let body = balanced_code(source, code, open, MAX_CLASS_BODY).unwrap_or((open + 1, b.len()));
+        out.push(DartClass { name, base, body });
+    }
+    out
+}
+
+/// Index just past the Dart type-argument list opening at `open` (`<void>`,
+/// `<Map<String, int>>`), or `None` when it does not close before a `;`, a
+/// brace or [`MAX_ATTR_SPAN`] bytes.
+fn dart_type_args_end(b: &[u8], open: usize) -> Option<usize> {
+    let limit = b.len().min(open.saturating_add(MAX_ATTR_SPAN));
+    let mut depth = 0usize;
+    for (i, &c) in b.iter().enumerate().take(limit).skip(open) {
+        match c {
+            b'<' => depth += 1,
+            b'>' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            b';' | b'{' | b'}' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The command name a `Command` subclass body declares at its top level (not
+/// inside a method, a parameter list or a collection), with its offset:
+/// `final name = 'x';`, `final String name = 'x';`, `String name = 'x';`,
+/// `var name = 'x';`, `String get name => 'x';` or `String get name {
+/// return 'x'; }`. The value must be exactly one plain string literal ending
+/// the statement: an interpolation (`'$prefix-sync'`), a concatenation or a
+/// variable names nothing.
+fn dart_command_name(source: &str, code: &CodeMap, (start, end): (usize, usize)) -> Option<(usize, String)> {
+    let b = source.as_bytes();
+    let mut depth = 0usize;
+    let mut i = start;
+    while i < end {
+        let next = code.next_code(i);
+        if next != i {
+            i = next;
+            continue;
+        }
+        match b[i] {
+            b'{' | b'(' | b'[' => depth += 1,
+            b'}' | b')' | b']' => depth = depth.saturating_sub(1),
+            b'n' if depth == 0
+                && b[i..].starts_with(b"name")
+                && !(i > 0 && (is_ident_byte(b[i - 1]) || matches!(b[i - 1], b'$' | b'.')))
+                && !b.get(i + 4).copied().is_some_and(is_ident_byte) =>
+            {
+                if let Some(name) = dart_name_value(source, i, end) {
+                    return Some((i, name));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The literal a `name` member at `at` is declared with (see
+/// [`dart_command_name`]), read up to `end`.
+fn dart_name_value(source: &str, at: usize, end: usize) -> Option<String> {
+    let b = source.as_bytes();
+    let after = skip_ws(b, at + "name".len());
+    let value = match php_prev_word(source, at) {
+        "get" if b[after..].starts_with(b"=>") => skip_ws(b, after + 2),
+        "get" if b.get(after) == Some(&b'{') => {
+            let (word, ret) = read_ident(source, skip_ws(b, after + 1));
+            if word != "return" {
+                return None;
+            }
+            skip_ws(b, ret)
+        }
+        "final" | "String" | "var"
+            if b.get(after) == Some(&b'=') && !matches!(b.get(after + 1), Some(b'=' | b'>')) =>
+        {
+            skip_ws(b, after + 1)
+        }
+        _ => return None,
+    };
+    let lit = source.get(value..end).and_then(quoted_literal)?;
+    let close = skip_ws(b, value + lit.len() + 2);
+    (b.get(close) == Some(&b';') && valid_cli_name(lit)).then(|| lit.to_string())
+}
+
+/// package:args (pub.dev/packages/args), in a Dart file that names
+/// `package:args/`: the executable a `CommandRunner` is constructed with
+/// (`CommandRunner('mytool', 'desc')`, `CommandRunner<void>(..)`, `new
+/// CommandRunner(..)`, or a subclass's `: super('mytool', ..)`: its
+/// documented `executableName`) -> `cli:mytool`, no handler; and each class
+/// extending `Command` (or a `*Command` base, `Command<T>` included) whose
+/// body declares its `name` ([`dart_command_name`]) -> `cli:<name>` handled
+/// by `Bare(<Class>)`, the Symfony precedent (a command is its class; its
+/// `run` shares a name with every other command's). In source order. An
+/// abstract base with no literal `name` declares nothing, and `aliases` are
+/// not read.
+fn scan_dart_args(source: &str, code: &CodeMap) -> Vec<CliDecl> {
+    let b = source.as_bytes();
+    let first_str = |at: usize| {
+        call_args(source, code, at)
+            .and_then(|span| first_positional_str(source, span))
+            .filter(|n| valid_cli_name(n))
+    };
+    let mut found: Vec<(usize, CliDecl)> = Vec::new();
+    for at in code_words(source, code, 0, source.len(), "CommandRunner") {
+        let mut i = skip_ws(b, at + "CommandRunner".len());
+        if b.get(i) == Some(&b'<') {
+            let Some(close) = dart_type_args_end(b, i) else { continue };
+            i = close;
+        }
+        if let Some(name) = first_str(i) {
+            found.push((at, CliDecl::new(CliFramework::CommandRunner, name, None)));
+        }
+    }
+    for class in dart_classes(source, code) {
+        let (start, end) = class.body;
+        if class.base == "CommandRunner" {
+            if let Some((at, name)) = code_words(source, code, start, end, "super")
+                .into_iter()
+                .find_map(|at| first_str(at + "super".len()).map(|name| (at, name)))
+            {
+                found.push((at, CliDecl::new(CliFramework::CommandRunner, name, None)));
+            }
+        } else if class.base.ends_with("Command")
+            && let Some((at, name)) = dart_command_name(source, code, class.body)
+        {
+            let handler = CallQualifier::Bare(class.name.to_string());
+            found.push((at, CliDecl::new(CliFramework::CommandRunner, name, at_row(Some(handler), source, at))));
+        }
+    }
+    found.sort_by_key(|(at, _)| *at);
+    found.into_iter().map(|(_, decl)| decl).collect()
+}
+
+/// The Elixir alias at `i` (`Mix.Tasks.Shop.Sync`: identifier bytes and
+/// dots, starting upper-case, a trailing `.` dropped) and the index after it.
+fn elixir_alias(source: &str, i: usize) -> (&str, usize) {
+    let b = source.as_bytes();
+    if !b.get(i).is_some_and(u8::is_ascii_uppercase) {
+        return ("", i);
+    }
+    let mut end = i;
+    while b.get(end).is_some_and(|&c| is_ident_byte(c) || c == b'.') {
+        end += 1;
+    }
+    while end > i && b[end - 1] == b'.' {
+        end -= 1;
+    }
+    (&source[i..end], end)
+}
+
+/// Elixir's `Macro.underscore` on one alias segment, the rule Mix's task
+/// names follow: `ShopSync` -> `shop_sync`, `HTTPServer` -> `http_server`,
+/// `Foo2Bar` -> `foo2_bar`. An upper-case letter followed by a lower-case
+/// one starts a word; so does one after a non-upper-case byte other than `_`.
+fn macro_underscore(seg: &str) -> String {
+    let b = seg.as_bytes();
+    let mut out = String::with_capacity(b.len() + 4);
+    let Some(&first) = b.first() else { return out };
+    out.push(char::from(first.to_ascii_lowercase()));
+    let (mut prev, mut i) = (first, 1);
+    while i < b.len() {
+        let h = b[i];
+        if h.is_ascii_uppercase() {
+            if let Some(&t) = b.get(i + 1)
+                && !t.is_ascii_uppercase()
+                && !t.is_ascii_digit()
+                && t != b'_'
+            {
+                out.push('_');
+                out.push(char::from(h.to_ascii_lowercase()));
+                out.push(char::from(t));
+                (prev, i) = (t, i + 2);
+                continue;
+            }
+            if !prev.is_ascii_uppercase() && prev != b'_' {
+                out.push('_');
+            }
+        }
+        out.push(char::from(h.to_ascii_lowercase()));
+        (prev, i) = (h, i + 1);
+    }
+    out
+}
+
+/// True when the `use` at `at` is `use Mix.Task` or `use Mix.Task.Compiler`
+/// (a compiler is a task too, `Mix.Tasks.Compile.X` run as `mix compile.x`).
+fn uses_mix_task(source: &str, at: usize) -> bool {
+    let b = source.as_bytes();
+    let i = at + "use".len();
+    if !matches!(b.get(i), Some(b' ' | b'\t')) {
+        return false;
+    }
+    matches!(elixir_alias(source, skip_ws(b, i)).0, "Mix.Task" | "Mix.Task.Compiler")
+}
+
+/// Mix tasks, in an Elixir file that names `Mix.Task`: each `defmodule
+/// Mix.Tasks.<Seg>(.<Seg>)*` whose module uses `Mix.Task` (a code `use
+/// Mix.Task` after the `defmodule` and before the file's next one) ->
+/// `cli:<task>`, the task name Mix derives (`Mix.Task.task_name/1`: the
+/// segments after `Mix.Tasks.`, each [`macro_underscore`]d, joined with
+/// `.`), so `Mix.Tasks.Shop.Sync` is `cli:shop.sync` (`mix shop.sync`) and
+/// `Mix.Tasks.Ecto.Gen.Repo` is `cli:ecto.gen.repo`. Handled by the task
+/// module, `Bare(<last segment>)` (the name the Elixir parser gives the
+/// module's PACKAGE): its `run/1` is the entry point, but every task has one,
+/// and the bare `run` would be ambiguous where the module is unique. A
+/// `Mix.Tasks.*` module without `use Mix.Task` (a helper) is not a task.
+fn scan_mix_tasks(source: &str, code: &CodeMap) -> Vec<CliDecl> {
+    let b = source.as_bytes();
+    let defs = code_words(source, code, 0, source.len(), "defmodule");
+    let uses: Vec<usize> = code_words(source, code, 0, source.len(), "use")
+        .into_iter()
+        .filter(|&at| uses_mix_task(source, at))
+        .collect();
+    let mut out = Vec::new();
+    for (k, &at) in defs.iter().enumerate() {
+        let next = defs.get(k + 1).copied().unwrap_or(b.len());
+        if !uses.iter().any(|&u| u > at && u < next) {
+            continue;
+        }
+        let (alias, after) = elixir_alias(source, skip_ws(b, at + "defmodule".len()));
+        let Some(rest) = alias.strip_prefix("Mix.Tasks.") else { continue };
+        if !matches!(b.get(after), Some(b' ' | b'\t' | b'\r' | b'\n' | b',')) {
+            continue;
+        }
+        let segs: Vec<&str> = rest.split('.').collect();
+        if !segs.iter().all(|s| s.starts_with(|c: char| c.is_ascii_uppercase())) {
+            continue;
+        }
+        let name = segs.iter().map(|s| macro_underscore(s)).collect::<Vec<_>>().join(".");
+        if !valid_cli_name(&name) {
+            continue;
+        }
+        let handler = segs.last().map(|s| CallQualifier::Bare((*s).to_string()));
+        out.push(CliDecl::new(CliFramework::MixTask, name, at_row(handler, source, at)));
+    }
+    out
+}
+
+// ----------------------------------------------------------------------------
 // LA.20c: binaries declared by packaging manifests. A CLI library declares the
 // SUBCOMMAND (`@click.command("sync")`); the BINARY a caller's argv[0] names
 // (`mytool`) is declared only by the package's manifest, so without these
 // scans `cli_invoke:mytool` has no `cli:mytool` to pair with. Line scanners
 // (the crate has no TOML dependency), deliberately narrow: the three Python
-// script tables, Cargo's `[[bin]]` name, npm's `bin`, and setuptools'
-// `console_scripts`. No HANDLED_BY: a manifest is a synthetic parse in the
+// script tables, Cargo's `[[bin]]` name, npm's `bin`, setuptools'
+// `console_scripts`, and (DH.10) composer.json's `bin` and a gemspec's
+// `executables`. No HANDLED_BY: a manifest is a synthetic parse in the
 // `manifest` language group, and refs never resolve across language graphs.
 // ----------------------------------------------------------------------------
 
@@ -2221,6 +2571,10 @@ enum ManifestForm {
     SetupPy,
     Npm,
     Cargo,
+    /// DH.10: composer.json `bin`.
+    Composer,
+    /// DH.10: a `*.gemspec`'s `executables`.
+    Gemspec,
 }
 
 impl ManifestForm {
@@ -2232,6 +2586,8 @@ impl ManifestForm {
             "pyproject.toml" => Some(ManifestForm::Pyproject),
             "package.json" => Some(ManifestForm::Npm),
             "Cargo.toml" => Some(ManifestForm::Cargo),
+            "composer.json" => Some(ManifestForm::Composer),
+            base if crate::packages::is_gemspec_name(base) => Some(ManifestForm::Gemspec),
             _ => None,
         }
     }
@@ -2245,10 +2601,12 @@ const MAX_SCRIPTS_SPAN: usize = 16 * 1024;
 /// manifest and `CliInvocationResolver` pairs `cli_invoke:<bin>` with it.
 /// Dispatch is by basename: pyproject.toml `[project.scripts]` /
 /// `[project.gui-scripts]` / `[tool.poetry.scripts]` keys, package.json `bin`
-/// (its keys, or the unscoped package `name` when `bin` is one path), and each
-/// Cargo.toml `[[bin]]` table's `name`. A Cargo package with no `[[bin]]` is
-/// not assumed to be a binary: a per-file extractor cannot see whether
-/// `src/main.rs` exists. Any other path yields nothing.
+/// (its keys, or the unscoped package `name` when `bin` is one path), each
+/// Cargo.toml `[[bin]]` table's `name`, and (DH.10) the basename of each
+/// composer.json `bin` path and every name a `*.gemspec` assigns to
+/// `executables`. A Cargo package with no `[[bin]]` is not assumed to be a
+/// binary: a per-file extractor cannot see whether `src/main.rs` exists. Any
+/// other path yields nothing.
 pub fn extract_manifest_binaries(
     source: &str,
     path: &str,
@@ -2259,6 +2617,8 @@ pub fn extract_manifest_binaries(
         Some(ManifestForm::Pyproject) => scan_pyproject_scripts(source),
         Some(ManifestForm::Npm) => scan_package_json_bin(source),
         Some(ManifestForm::Cargo) => scan_cargo_bins(source),
+        Some(ManifestForm::Composer) => scan_composer_bin(source),
+        Some(ManifestForm::Gemspec) => scan_gemspec_executables(source),
         Some(ManifestForm::SetupPy) | None => Vec::new(),
     };
     let mut out = CliNodes::default();
@@ -2275,7 +2635,8 @@ pub fn extract_manifest_binaries(
 }
 
 /// LA.20c fired_on, one per manifest that declared a binary:
-/// `[cli-decl] manifest bins=1 (pyproject=1 setup=0 npm=0 cargo=0) path=pyproject.toml`.
+/// `[cli-decl] manifest bins=1 (pyproject=1 setup=0 npm=0 cargo=0 composer=0
+/// gemspec=0) path=pyproject.toml` (DH.10 added the last two counters).
 /// `None` when `out` holds no manifest binary or `path` is not a manifest.
 pub fn manifest_marker(path: &str, out: &CliNodes) -> Option<String> {
     let form = ManifestForm::of_path(path)?;
@@ -2290,11 +2651,13 @@ pub fn manifest_marker(path: &str, out: &CliNodes) -> Option<String> {
 fn manifest_line(form: ManifestForm, n: usize, path: &str) -> String {
     let count = |f: ManifestForm| if f == form { n } else { 0 };
     format!(
-        "[cli-decl] manifest bins={n} (pyproject={} setup={} npm={} cargo={}) path={path}",
+        "[cli-decl] manifest bins={n} (pyproject={} setup={} npm={} cargo={} composer={} gemspec={}) path={path}",
         count(ManifestForm::Pyproject),
         count(ManifestForm::SetupPy),
         count(ManifestForm::Npm),
         count(ManifestForm::Cargo),
+        count(ManifestForm::Composer),
+        count(ManifestForm::Gemspec),
     )
 }
 
@@ -2445,6 +2808,126 @@ fn scan_package_json_bin(source: &str) -> Vec<String> {
     }
 }
 
+/// DH.10 composer.json: `bin` is a list of paths (or one path), each
+/// installed under `vendor/bin/` by its basename (`bin/mytool` -> `mytool`).
+fn scan_composer_bin(source: &str) -> Vec<String> {
+    use serde_json::Value;
+    let Ok(Value::Object(pkg)) = serde_json::from_str::<Value>(source) else {
+        return Vec::new();
+    };
+    let paths: Vec<&str> = match pkg.get("bin") {
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).collect(),
+        Some(Value::String(one)) => vec![one.as_str()],
+        _ => Vec::new(),
+    };
+    paths
+        .into_iter()
+        .filter_map(|p| p.rsplit(['/', '\\']).next())
+        .map(str::to_string)
+        .collect()
+}
+
+/// DH.10 `*.gemspec`: every name assigned to a spec's executables, read off
+/// a Ruby-lexed source ([`CodeMap::script`], so `#` comments and strings
+/// declare nothing): `<spec>.executables = ["a", 'b']` (a list may span
+/// lines; non-literal elements are passed over), `= %w[a b]` (any `%w` /
+/// `%W` delimiter), `= "a"`, `<< "a"`, and the singular `<spec>.executable =
+/// "a"`. A computed list (`spec.files.grep(%r{^exe/}) { .. }`, `Dir[..]`)
+/// names no literal binary and reads nothing. In source order.
+fn scan_gemspec_executables(source: &str) -> Vec<String> {
+    let b = source.as_bytes();
+    let code = CodeMap::script(source, Script::Ruby);
+    let mut found: Vec<(usize, String)> = Vec::new();
+    for word in ["executables", "executable"] {
+        for at in code_words(source, &code, 0, source.len(), word) {
+            if at < 2 || b[at - 1] != b'.' || ident_before(source, at - 1).is_empty() {
+                continue;
+            }
+            let op = skip_ws(b, at + word.len());
+            let rhs = if b.get(op) == Some(&b'=') && !matches!(b.get(op + 1), Some(b'=' | b'~' | b'>')) {
+                skip_ws(b, op + 1)
+            } else if word == "executables" && b[op..].starts_with(b"<<") {
+                skip_ws(b, op + 2)
+            } else {
+                continue;
+            };
+            found.extend(ruby_string_list(source, &code, rhs).into_iter().map(|name| (at, name)));
+        }
+    }
+    found.sort_by_key(|(at, _)| *at);
+    found.into_iter().map(|(_, name)| name).collect()
+}
+
+/// The strings a Ruby expression at `at` spells literally: a `[..]` list's
+/// plain string elements, a `%w` / `%W` word list, or one string literal
+/// ending its statement. Anything else (a method call, a variable) is empty.
+fn ruby_string_list(source: &str, code: &CodeMap, at: usize) -> Vec<String> {
+    let b = source.as_bytes();
+    match b.get(at) {
+        Some(b'[') => {
+            let Some((start, end)) = balanced_code(source, code, at, MAX_SCRIPTS_SPAN) else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            let mut i = start;
+            while i < end {
+                let next = code.next_code(i);
+                if next == i {
+                    i += 1;
+                    continue;
+                }
+                let after = skip_ws(b, next);
+                if matches!(b[i], b'"' | b'\'')
+                    && (after >= end || b[after] == b',')
+                    && let Some(lit) = source.get(i..end).and_then(quoted_literal)
+                {
+                    out.push(lit.to_string());
+                }
+                i = next;
+            }
+            out
+        }
+        Some(b'%') if matches!(b.get(at + 1), Some(b'w' | b'W')) => {
+            let Some(&open) = b.get(at + 2) else { return Vec::new() };
+            let close = match open {
+                b'[' => b']',
+                b'(' => b')',
+                b'{' => b'}',
+                b'<' => b'>',
+                c if c.is_ascii_punctuation() => c,
+                _ => return Vec::new(),
+            };
+            let limit = b.len().min(at + 3 + MAX_SCRIPTS_SPAN);
+            let (mut depth, mut j) = (1usize, at + 3);
+            while j < limit {
+                if b[j] == close {
+                    depth -= 1;
+                    if depth == 0 {
+                        return source[at + 3..j].split_ascii_whitespace().map(str::to_string).collect();
+                    }
+                } else if b[j] == open && open != close {
+                    depth += 1;
+                }
+                j += 1;
+            }
+            Vec::new()
+        }
+        Some(b'"' | b'\'') => {
+            let Some(lit) = source.get(at..).and_then(quoted_literal) else { return Vec::new() };
+            let mut j = at + lit.len() + 2;
+            while matches!(b.get(j), Some(b' ' | b'\t')) {
+                j += 1;
+            }
+            if matches!(b.get(j), None | Some(b'\n' | b'\r' | b';' | b'#')) {
+                vec![lit.to_string()]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// The binary an entry-point spec declares: `name = pkg.mod:func` (spaces
 /// optional) -> `name`. `None` when it is not `<bin-name> = <target>`.
 fn entry_point_name(spec: &str) -> Option<String> {
@@ -2566,6 +3049,24 @@ const INVOCATION_PATTERNS: &[&str] = &[
     "Runtime.getRuntime().exec(new String[]{",
     "Runtime.getRuntime().exec(new String[] {",
     "Runtime.getRuntime().exec(arrayOf(",
+    // DH.10 — PHP, Dart and Elixir launches. Symfony Process takes one argv
+    // array (the opening bracket `scan_argv` steps into), its
+    // `fromShellCommandline` and PHP's `shell_exec` / `passthru` a shell
+    // string; `proc_open` takes either. dart:io `Process.run` / `runSync` /
+    // `start` and Elixir's `System.cmd` take the binary then an argv list,
+    // `System.shell` a shell string. C# `new Process()` has no quoted argv
+    // and is no site; a bare `exec` needle is not added (`regex.exec(..)`
+    // would read a binary).
+    "new Process(",
+    "Process::fromShellCommandline(",
+    "shell_exec(",
+    "proc_open(",
+    "passthru(",
+    "Process.run(",
+    "Process.runSync(",
+    "Process.start(",
+    "System.cmd(",
+    "System.shell(",
 ];
 
 /// Most argv tokens [`scan_argv`] reads from one call site (the binary included).
@@ -3897,6 +4398,282 @@ def build():
         assert_eq!(invocation(multibyte).0, vec!["cli_invoke:ß", "cli_invoke:ä", "cli_invoke:ö"]);
     }
 
+    // ---- DH.10: PHP, Dart and Elixir launches --------------------------------
+
+    /// The matrix/php/cli_inv probe's Symfony Process launcher.
+    const PHP_CLI_INV_RUNNER: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/php/cli_inv/client/Runner.php"
+    ));
+    /// The matrix/dart/cli_inv probe's dart:io launcher.
+    const DART_CLI_INV_RUN: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/dart/cli_inv/client/bin/run.dart"
+    ));
+    /// The matrix/elixir/cli_inv probe's `System.cmd` launcher.
+    const ELIXIR_CLI_INV_RUNNER: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/elixir/cli_inv/client/lib/runner.ex"
+    ));
+
+    /// `(source, binary, argv)` cases each minting exactly that one node.
+    fn assert_invocations(cases: &[(&str, &str, &[&str])]) {
+        for (source, bin, args) in cases {
+            let (qnames, argv) = invocation(source);
+            assert_eq!(qnames, vec![format!("cli_invoke:{bin}")], "{source}");
+            assert_eq!(argv, vec![args.to_vec()], "{source}");
+        }
+    }
+
+    #[test]
+    fn symfony_process_argv_array() {
+        // `new Process([..])`: the argv array's first element is the binary;
+        // `sync` rides the argv cell and never becomes a node of its own.
+        let (qnames, argv) = invocation(PHP_CLI_INV_RUNNER);
+        assert_eq!(qnames, vec!["cli_invoke:mytool"]);
+        assert_eq!(argv, vec![vec!["sync"]]);
+        assert_invocations(&[
+            ("$p = new Process([\"mytool\", \"sync\", \"--force\"]);", "mytool", &["sync", "--force"]),
+            ("$p = Process::fromShellCommandline(\"mytool sync --all\");", "mytool", &["sync", "--all"]),
+        ]);
+        // C#'s `new Process()` and a Process built from a variable: no site.
+        assert!(invocation("var p = new Process();").0.is_empty());
+        assert!(invocation("$p = new Process($argv);").0.is_empty());
+    }
+
+    #[test]
+    fn php_shell_exec_split() {
+        assert_invocations(&[
+            ("$out = shell_exec(\"mytool sync\");", "mytool", &["sync"]),
+            ("passthru(\"mytool sync --verbose\");", "mytool", &["sync", "--verbose"]),
+            ("$h = proc_open(\"mytool sync\", $spec, $pipes);", "mytool", &["sync"]),
+            ("$h = proc_open([\"mytool\", \"sync\"], $spec, $pipes);", "mytool", &["sync"]),
+        ]);
+    }
+
+    #[test]
+    fn dart_process_run_argv() {
+        let (qnames, argv) = invocation(DART_CLI_INV_RUN);
+        assert_eq!(qnames, vec!["cli_invoke:mytool"]);
+        assert_eq!(argv, vec![vec!["sync"]]);
+        assert_invocations(&[
+            ("final r = Process.runSync(\"mytool\", [\"sync\"]);", "mytool", &["sync"]),
+            ("final p = await Process.start(\"mytool\", [\"sync\", \"--watch\"]);", "mytool", &["sync", "--watch"]),
+        ]);
+        // C#'s spelling is its own needle, still read.
+        assert_eq!(invocation("Process.Start(\"mytool\", \"sync\");").0, vec!["cli_invoke:mytool"]);
+    }
+
+    #[test]
+    fn elixir_system_cmd_argv() {
+        let (qnames, argv) = invocation(ELIXIR_CLI_INV_RUNNER);
+        assert_eq!(qnames, vec!["cli_invoke:mytool"]);
+        assert_eq!(argv, vec![vec!["sync"]]);
+        assert_invocations(&[
+            ("{out, 0} = System.cmd(\"mytool\", [\"sync\"], into: IO.stream())", "mytool", &["sync"]),
+            ("System.shell(\"mytool sync --all\")", "mytool", &["sync", "--all"]),
+        ]);
+        assert!(invocation("System.cmd(tool, [\"sync\"])").0.is_empty());
+    }
+
+    #[test]
+    fn regex_exec_is_not_an_invocation() {
+        // A bare `exec(` is no needle: a regex match reads no binary.
+        for source in ["const m = re.exec(\"abc\");", "if (/x+/.exec(\"xx\")) {}", "$r = $re->exec(\"abc\");"] {
+            assert!(invocation(source).0.is_empty(), "{source}");
+        }
+    }
+
+    // ---- DH.10: Dart package:args and Elixir Mix tasks ------------------------
+
+    /// The matrix/dart/cli_def probe's package:args runner, read from the fixture.
+    const DART_CLI_DEF_MYTOOL: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/dart/cli_def/server/bin/mytool.dart"
+    ));
+    /// The matrix/elixir/cli_def probe's Mix task.
+    const ELIXIR_CLI_DEF_TASK: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/elixir/cli_def/server/lib/mix/tasks/shop.sync.ex"
+    ));
+
+    #[test]
+    fn dart_command_runner_and_command_names() {
+        // The runner's first argument is the executable a caller types; the
+        // Command subclass's `name` is a subcommand handled by its class.
+        let out = decls(DART_CLI_DEF_MYTOOL, "dart");
+        assert_eq!(commands(&out), vec!["cli:sync", "cli:mytool"]);
+        assert_eq!(handlers(&out), vec![("cli:sync".to_string(), bare("SyncCommand"))]);
+        assert_eq!(out.per_framework, vec![(CliFramework::CommandRunner, 2)]);
+        assert_eq!(
+            decl_marker("dart", &out, "bin/mytool.dart").as_deref(),
+            Some("[cli-decl] dart=commandrunner:2 handler_refs=1 path=bin/mytool.dart")
+        );
+        // The scan is gated on `package:args/` and on the dart tag.
+        let ungated = DART_CLI_DEF_MYTOOL.replace("package:args/", "package:other/");
+        assert!(decls(&ungated, "dart").nodes.is_empty());
+        for lang in ["typescript", "java", "kotlin", "python", "ruby"] {
+            assert!(commands(&decls(DART_CLI_DEF_MYTOOL, lang)).is_empty(), "{lang}");
+        }
+    }
+
+    #[test]
+    fn dart_getter_name_form() {
+        let source = r#"import 'package:args/command_runner.dart' as args;
+
+class DeployCommand extends args.Command<int> {
+  @override
+  String get name => 'deploy';
+  @override
+  String get description => 'Deploy';
+}
+
+class GcCommand extends Command {
+  String get name {
+    return "gc";
+  }
+}
+
+class PlainCommand extends BaseCommand {
+  @override
+  final String name = 'plain';
+}
+
+class Runner extends CommandRunner<void> {
+  Runner() : super('shopctl', 'The shop tool');
+}
+
+final runner = new CommandRunner("legacy", "Old style");
+"#;
+        let out = decls(source, "dart");
+        assert_eq!(commands(&out), vec!["cli:deploy", "cli:gc", "cli:plain", "cli:shopctl", "cli:legacy"]);
+        assert_eq!(
+            handlers(&out),
+            vec![
+                ("cli:deploy".to_string(), bare("DeployCommand")),
+                ("cli:gc".to_string(), bare("GcCommand")),
+                ("cli:plain".to_string(), bare("PlainCommand")),
+            ]
+        );
+
+        let nothing = r#"import 'package:args/command_runner.dart';
+
+// final name = 'commented';
+/* CommandRunner('blocked', 'x') */
+final help = "CommandRunner('quoted', 'x')";
+final raw = r'CommandRunner("raw", "x")';
+
+abstract class BaseCommand extends Command<void> {
+  String get name;
+}
+
+class LocalCommand extends Command<void> {
+  @override
+  void run() {
+    final name = 'local';
+    print(name);
+  }
+  String get name => '$prefix-sync';
+}
+
+class NotACommand extends Widget {
+  final name = 'widget';
+}
+
+class Mixed = Object with Command;
+final runner = CommandRunner(executable, 'built');
+"#;
+        let out = decls(nothing, "dart");
+        assert!(out.nodes.is_empty(), "{:?}", commands(&out));
+        assert_eq!(decl_marker("dart", &out, "bin/x.dart"), None);
+
+        // Every truncation of a multi-byte source reads without a panic.
+        let multibyte = "import 'package:args/args.dart';\nclass XCommand extends Command { final name = 'é'; }\nCommandRunner<Ü>('ö', 'ß')..run(";
+        for (cut, _) in multibyte.char_indices() {
+            let _ = decls(&multibyte[..cut], "dart");
+        }
+        assert_eq!(commands(&decls(multibyte, "dart")), vec!["cli:é", "cli:ö"]);
+    }
+
+    #[test]
+    fn mix_task_names() {
+        let out = decls(ELIXIR_CLI_DEF_TASK, "elixir");
+        assert_eq!(commands(&out), vec!["cli:shop.sync"]);
+        assert_eq!(handlers(&out), vec![("cli:shop.sync".to_string(), bare("Sync"))]);
+        assert_eq!(out.per_framework, vec![(CliFramework::MixTask, 1)]);
+        assert_eq!(
+            decl_marker("elixir", &out, "lib/mix/tasks/shop.sync.ex").as_deref(),
+            Some("[cli-decl] elixir=mix:1 handler_refs=1 path=lib/mix/tasks/shop.sync.ex")
+        );
+
+        for (module, task, handler) in [
+            ("Ecto.Gen.Repo", "ecto.gen.repo", "Repo"),
+            ("HTTPServer", "http_server", "HTTPServer"),
+            ("ShopSync", "shop_sync", "ShopSync"),
+            ("Phx2.Gen", "phx2.gen", "Gen"),
+        ] {
+            let source = format!("defmodule Mix.Tasks.{module} do\n  use Mix.Task\n  def run(_), do: :ok\nend\n");
+            let out = decls(&source, "elixir");
+            assert_eq!(commands(&out), vec![format!("cli:{task}")], "{module}");
+            assert_eq!(handlers(&out), vec![(format!("cli:{task}"), bare(handler))], "{module}");
+        }
+        // A compiler is a task too.
+        let compiler = "defmodule Mix.Tasks.Compile.Assets do\n  use Mix.Task.Compiler\n  def run(_), do: {:ok, []}\nend\n";
+        assert_eq!(commands(&decls(compiler, "elixir")), vec!["cli:compile.assets"]);
+
+        // Elixir's Macro.underscore, segment by segment.
+        for (seg, want) in [
+            ("Sync", "sync"),
+            ("ShopSync", "shop_sync"),
+            ("HTTPServer", "http_server"),
+            ("Foo2Bar", "foo2_bar"),
+            ("FOOBar", "foo_bar"),
+            ("A", "a"),
+            ("V2", "v2"),
+        ] {
+            assert_eq!(macro_underscore(seg), want, "{seg}");
+        }
+    }
+
+    #[test]
+    fn mix_task_needs_use_mix_task() {
+        let source = r#"defmodule Mix.Tasks.Helper do
+  # use Mix.Task
+  def helper, do: "use Mix.Task"
+end
+
+defmodule Mix.Tasks.Docs.Example do
+  @moduledoc """
+  defmodule Mix.Tasks.Fake do
+    use Mix.Task
+  end
+  """
+  use Mix.TaskHelper
+end
+
+defmodule MyApp.Tasks.Sync do
+  use Mix.Task
+end
+
+defmodule Mix.Tasks.Real do
+  @quote ?"
+  use Mix.Task
+  def run(_), do: :ok
+end
+"#;
+        let out = decls(source, "elixir");
+        assert_eq!(commands(&out), vec!["cli:real"]);
+        assert_eq!(handlers(&out), vec![("cli:real".to_string(), bare("Real"))]);
+        // Other languages never run the Mix scan.
+        assert!(decls(ELIXIR_CLI_DEF_TASK, "ruby").nodes.is_empty());
+        // Every truncation reads without a panic.
+        let multibyte = "defmodule Mix.Tasks.Ünï do\n  use Mix.Task\n  @doc ?é\nend\ndefmodule Mix.Tasks.Ok do use Mix.Task end";
+        for (cut, _) in multibyte.char_indices() {
+            let _ = decls(&multibyte[..cut], "elixir");
+        }
+        assert_eq!(commands(&decls(multibyte, "elixir")), vec!["cli:ok"]);
+    }
+
     #[test]
     fn argv_cell_round_trips_and_ignores_other_cells() {
         let argv = vec![vec!["migrate".to_string(), "--yes".to_string()]];
@@ -3935,7 +4712,7 @@ def build():
         assert_eq!(manifest_commands(&out), ["cli:mytool"]);
         assert_eq!(
             manifest_marker("pyproject.toml", &out).as_deref(),
-            Some("[cli-decl] manifest bins=1 (pyproject=1 setup=0 npm=0 cargo=0) path=pyproject.toml")
+            Some("[cli-decl] manifest bins=1 (pyproject=1 setup=0 npm=0 cargo=0 composer=0 gemspec=0) path=pyproject.toml")
         );
 
         let pyproject = "[project]\nname = \"acme\"\ndependencies = [\"click\"]\n\n\
@@ -3970,7 +4747,9 @@ svc-long = {\n  reference = \"svc.long:run\",\n  type = \"console\"\n}\nsvc-afte
         assert_eq!(manifest_commands(&out), ["cli:ship-admin", "cli:shipit"]);
         assert_eq!(
             manifest_marker("server/package.json", &out).as_deref(),
-            Some("[cli-decl] manifest bins=2 (pyproject=0 setup=0 npm=2 cargo=0) path=server/package.json")
+            Some(
+                "[cli-decl] manifest bins=2 (pyproject=0 setup=0 npm=2 cargo=0 composer=0 gemspec=0) path=server/package.json"
+            )
         );
 
         let scoped = r#"{"name": "@acme/deployer", "bin": "./cli.js"}"#;
@@ -3995,7 +4774,7 @@ svc-long = {\n  reference = \"svc.long:run\",\n  type = \"console\"\n}\nsvc-afte
         assert_eq!(manifest_commands(&out), ["cli:migrate", "cli:seed"]);
         assert_eq!(
             manifest_marker("Cargo.toml", &out).as_deref(),
-            Some("[cli-decl] manifest bins=2 (pyproject=0 setup=0 npm=0 cargo=2) path=Cargo.toml")
+            Some("[cli-decl] manifest bins=2 (pyproject=0 setup=0 npm=0 cargo=2 composer=0 gemspec=0) path=Cargo.toml")
         );
         // A package with no [[bin]] is not assumed to be a binary: whether
         // src/main.rs exists is not visible to a per-file extractor.
@@ -4030,7 +4809,7 @@ setup(
         assert_eq!(manifest_commands(&out), ["cli:acme", "cli:acme-admin"]);
         assert_eq!(
             decl_marker("python", &out, "setup.py").as_deref(),
-            Some("[cli-decl] manifest bins=2 (pyproject=0 setup=2 npm=0 cargo=0) path=setup.py")
+            Some("[cli-decl] manifest bins=2 (pyproject=0 setup=2 npm=0 cargo=0 composer=0 gemspec=0) path=setup.py")
         );
 
         let kwarg = "from setuptools import setup\nsetup(entry_points=dict(console_scripts=['tool = pkg.mod:func']))\n";
@@ -4079,5 +4858,99 @@ setup(entry_points={"console_scripts": ["mytool = mytool.cli:cli"]})
             decl_marker("python", &out, "setup.py").as_deref(),
             Some("[cli-decl] python=click:1,manifest:1 handler_refs=0 path=setup.py")
         );
+    }
+
+    // ---- DH.10: composer.json `bin`, `*.gemspec` executables -------------------
+
+    /// The matrix/php/cli_inv probe's composer.json.
+    const PHP_CLI_INV_COMPOSER: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/php/cli_inv/server/composer.json"
+    ));
+    /// The matrix/ruby/cli_inv probe's gemspec.
+    const RUBY_CLI_INV_GEMSPEC: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/ruby/cli_inv/server/mytool.gemspec"
+    ));
+
+    #[test]
+    fn composer_bin_basenames() {
+        assert_eq!(manifest_commands(&manifest_bins(PHP_CLI_INV_COMPOSER, "composer.json")), ["cli:mytool"]);
+        let one = r#"{"name": "acme/tool", "bin": "bin/tool"}"#;
+        assert_eq!(manifest_commands(&manifest_bins(one, "server/composer.json")), ["cli:tool"]);
+        let many = r#"{"bin": ["bin/a", "scripts/b.php", "bin/a", 7]}"#;
+        assert_eq!(manifest_commands(&manifest_bins(many, "composer.json")), ["cli:a", "cli:b.php"]);
+        // No `bin`, a `bin` of another shape, or not JSON: nothing.
+        for source in [r#"{"name": "acme/lib", "require": {"php": "^8.2"}}"#, r#"{"bin": {"x": "y"}}"#, "{ nope"] {
+            assert!(manifest_bins(source, "composer.json").nodes.is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn gemspec_executables_forms() {
+        assert_eq!(manifest_commands(&manifest_bins(RUBY_CLI_INV_GEMSPEC, "mytool.gemspec")), ["cli:mytool"]);
+        let gemspec = r#"# frozen_string_literal: true
+Gem::Specification.new do |spec|
+  spec.name = "toolkit"
+  spec.executables = %w[alpha beta]
+  spec.executables << 'gamma'
+  spec.executables += ["not-read"] if false
+  spec.executable = "delta"
+  spec.executables.concat(%w(epsilon))
+end
+"#;
+        assert_eq!(
+            manifest_commands(&manifest_bins(gemspec, "toolkit.gemspec")),
+            ["cli:alpha", "cli:beta", "cli:gamma", "cli:delta"]
+        );
+        let multi = "Gem::Specification.new do |s|\n  s.executables = [\n    \"one\", # the first\n    'two',\n    name,\n  ]\n  s.executables = %w(three)\n  s.executables = \"four\"\nend\n";
+        assert_eq!(
+            manifest_commands(&manifest_bins(multi, "pkg/multi.gemspec")),
+            ["cli:one", "cli:two", "cli:three", "cli:four"]
+        );
+    }
+
+    #[test]
+    fn gemspec_glob_reads_nothing() {
+        let source = r#"Gem::Specification.new do |spec|
+  spec.bindir = "exe"
+  spec.executables = spec.files.grep(%r{^exe/}) { |f| File.basename(f) }
+  # spec.executables = ["commented"]
+  executables = ["local"]
+  puts "spec.executables = ['quoted']"
+  spec.executables == ["compared"]
+  spec.executables = ["built" + suffix]
+  spec.executables = Dir["exe/*"].map { |f| File.basename(f) }
+end
+"#;
+        let out = manifest_bins(source, "x.gemspec");
+        assert!(out.nodes.is_empty(), "{:?}", commands(&out));
+        assert_eq!(manifest_marker("x.gemspec", &out), None);
+        // Every truncation of a multi-byte gemspec reads without a panic.
+        let multibyte = "Gem::Specification.new do |s|\n  s.executables = %w[ä é]\n  s.executables << 'ö'\n  s.executables = [\"ü\", 'ß']\nend\n";
+        for (cut, _) in multibyte.char_indices() {
+            let _ = manifest_bins(&multibyte[..cut], "m.gemspec");
+        }
+        // Not a binary name: nothing is minted.
+        assert!(manifest_bins(multibyte, "m.gemspec").nodes.is_empty());
+    }
+
+    #[test]
+    fn manifest_marker_counts_composer_and_gemspec() {
+        let out = manifest_bins(PHP_CLI_INV_COMPOSER, "composer.json");
+        assert_eq!(
+            manifest_marker("composer.json", &out).as_deref(),
+            Some("[cli-decl] manifest bins=1 (pyproject=0 setup=0 npm=0 cargo=0 composer=1 gemspec=0) path=composer.json")
+        );
+        let out = manifest_bins(RUBY_CLI_INV_GEMSPEC, "server/mytool.gemspec");
+        assert_eq!(
+            manifest_marker("server/mytool.gemspec", &out).as_deref(),
+            Some(
+                "[cli-decl] manifest bins=1 (pyproject=0 setup=0 npm=0 cargo=0 composer=0 gemspec=1) path=server/mytool.gemspec"
+            )
+        );
+        // A gemspec that ships no executable prints nothing.
+        let lib = manifest_bins("Gem::Specification.new { |s| s.name = \"lib\" }\n", "lib.gemspec");
+        assert_eq!(manifest_marker("lib.gemspec", &lib), None);
     }
 }

@@ -25,9 +25,10 @@ const MAX_SUBCOMMAND_ARGVS: usize = 8;
 ///    Confidence `weakest(invocation, command)`.
 /// 2. **sub** — the subcommand word of each argv vector on the node's argv
 ///    cells (`mytool migrate --yes` -> `cli:migrate`, `php bin/console
-///    app:sync-orders` -> `cli:app:sync-orders`). A bare word like
-///    `migrate` is common, so this match is `Weak`, capped at
-///    [`MAX_SUBCOMMAND_ARGVS`] vectors, and never promoted.
+///    app:sync-orders` -> `cli:app:sync-orders`; DH.10: `mix shop.sync` ->
+///    `cli:shop.sync`). A bare word like `migrate` is common, so this match
+///    is `Weak`, capped at [`MAX_SUBCOMMAND_ARGVS`] vectors, and never
+///    promoted.
 ///
 /// Edges are deduped on `(from, to)` — a pair both lookups find keeps the bin
 /// confidence — and emitted sorted, so the output does not depend on graph order.
@@ -67,7 +68,7 @@ impl CrossGraphResolver for CliInvocationResolver {
                     .flat_map(parse_argv_cell)
                     .take(MAX_SUBCOMMAND_ARGVS)
                     .collect();
-                for word in argvs.iter().filter_map(|argv| subcommand_word(argv)) {
+                for word in argvs.iter().filter_map(|argv| subcommand_word(argv, tool)) {
                     for t in command_index.get(word).into_iter().flatten() {
                         if paired.insert((n.id, t.id)) {
                             edges.push(Edge {
@@ -101,13 +102,21 @@ impl CrossGraphResolver for CliInvocationResolver {
 /// `x.yaml` and `/path` are passed over. LA.20b: `:` belongs to the word, since
 /// Symfony and Laravel name their commands `app:sync-orders` / `emails:send`
 /// (`php bin/console app:sync-orders` passes over `bin/console` and pairs with
-/// `cli:app:sync-orders`).
-fn subcommand_word(argv: &[String]) -> Option<&str> {
+/// `cli:app:sync-orders`). DH.10: the invoked binary `tool` decides whether
+/// a `.` belongs to the word. For `mix` it does, since a Mix task is named by
+/// its dotted module path (`mix shop.sync`, `mix ecto.migrate` pair with
+/// `cli:shop.sync` / `cli:ecto.migrate`); for every other binary a dotted
+/// token is a file name (`x.yaml`) and is passed over.
+fn subcommand_word<'a>(argv: &'a [String], tool: &str) -> Option<&'a str> {
+    let dotted = tool == "mix";
     argv.iter().map(String::as_str).find(|t| {
         let mut chars = t.chars();
         chars.next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
             && chars.all(|c| {
-                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | ':')
+                c.is_ascii_lowercase()
+                    || c.is_ascii_digit()
+                    || matches!(c, '_' | '-' | ':')
+                    || (dotted && c == '.')
             })
     })
 }
@@ -122,11 +131,70 @@ mod tests {
 
     #[test]
     fn subcommand_word_skips_flags_and_paths() {
-        assert_eq!(subcommand_word(&argv(&["migrate", "--yes"])), Some("migrate"));
-        assert_eq!(subcommand_word(&argv(&["--config", "cfg.yaml", "db-sync"])), Some("db-sync"));
-        assert_eq!(subcommand_word(&argv(&["-f", "/tmp/x", "."])), None);
-        assert_eq!(subcommand_word(&argv(&["Build"])), None);
-        assert_eq!(subcommand_word(&[]), None);
+        assert_eq!(subcommand_word(&argv(&["migrate", "--yes"]), "tool"), Some("migrate"));
+        assert_eq!(subcommand_word(&argv(&["--config", "cfg.yaml", "db-sync"]), "tool"), Some("db-sync"));
+        assert_eq!(subcommand_word(&argv(&["-f", "/tmp/x", "."]), "tool"), None);
+        assert_eq!(subcommand_word(&argv(&["Build"]), "tool"), None);
+        assert_eq!(subcommand_word(&[], "tool"), None);
+    }
+
+    /// DH.10: a Mix task word keeps its dots for `mix` only; any other
+    /// binary passes a dotted token over as a file name.
+    #[test]
+    fn mix_subcommand_keeps_dots() {
+        assert_eq!(subcommand_word(&argv(&["shop.sync"]), "mix"), Some("shop.sync"));
+        assert_eq!(subcommand_word(&argv(&["ecto.gen.repo", "-r", "Repo"]), "mix"), Some("ecto.gen.repo"));
+        assert_eq!(subcommand_word(&argv(&["--no-deps-check", "phx.server"]), "mix"), Some("phx.server"));
+        assert_eq!(subcommand_word(&argv(&["test", "test/a_test.exs"]), "mix"), Some("test"));
+        assert_eq!(subcommand_word(&argv(&["shop.sync"]), "tool"), None);
+        assert_eq!(subcommand_word(&argv(&["x.yaml", "apply"]), "kubectl"), Some("apply"));
+        // `.` widens only the tail: a word still starts lower-case or a digit.
+        assert_eq!(subcommand_word(&argv(&[".hidden", "Shop.Sync"]), "mix"), None);
+    }
+
+    /// DH.10: `mix shop.sync` pairs, Weak, with the Mix task `cli:shop.sync`
+    /// by its dotted word; the same argv under another binary pairs nothing.
+    #[test]
+    fn mix_task_word_pairs_through_the_resolver() {
+        use glia_code_domain::{CodeNav, GRAPH_TYPE};
+        use glia_code_extractors::cli::argv_cell;
+        use glia_core::{Node, RepoId};
+
+        use crate::types::{RepoGraph, SymbolTable};
+
+        let pairs = |bin: &str| {
+            let repo = RepoId::from_canonical("test://cli/mix");
+            let mut nav = CodeNav::default();
+            let qname = format!("cli_invoke:{bin}");
+            let inv = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLI_INVOCATION, &qname);
+            nav.record(inv, bin, &qname, node_kind::CLI_INVOCATION, None);
+            let cmd = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLI_COMMAND, "cli:shop.sync");
+            nav.record(cmd, "shop.sync", "cli:shop.sync", node_kind::CLI_COMMAND, None);
+            let argvs = [argv(&["shop.sync"])];
+            let graph = RepoGraph {
+                repo,
+                nodes: vec![
+                    Node { id: inv, repo, confidence: Confidence::Medium, cells: vec![argv_cell(bin, &argvs)] },
+                    Node { id: cmd, repo, confidence: Confidence::Strong, cells: vec![] },
+                ],
+                edges: vec![],
+                nav,
+                symbols: SymbolTable::default(),
+                unresolved_calls: vec![],
+                unresolved_refs: vec![],
+                properties: HashSet::new(),
+            };
+            let mut merged = MergedGraph::new(vec![graph]);
+            CliInvocationResolver.resolve(&mut merged);
+            merged
+                .cross_edges
+                .iter()
+                .filter(|e| e.category == edge_category::CLI_INVOKES)
+                .map(|e| (e.from == inv, e.to == cmd, e.confidence))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pairs("mix"), vec![(true, true, Confidence::Weak)]);
+        assert!(pairs("make").is_empty());
     }
 
     /// LA.20b: `php bin/console app:sync-orders` passes over the script path
@@ -168,7 +236,7 @@ mod tests {
             .map(|e| (e.from, e.to, e.confidence))
             .collect();
         assert_eq!(edges, vec![(inv, cmd, Confidence::Weak)]);
-        assert_eq!(subcommand_word(&argv(&["bin/console", "app:sync-orders"])), Some("app:sync-orders"));
-        assert_eq!(subcommand_word(&argv(&["emails:send", "--queue"])), Some("emails:send"));
+        assert_eq!(subcommand_word(&argv(&["bin/console", "app:sync-orders"]), "php"), Some("app:sync-orders"));
+        assert_eq!(subcommand_word(&argv(&["emails:send", "--queue"]), "php"), Some("emails:send"));
     }
 }

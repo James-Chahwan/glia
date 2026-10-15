@@ -81,7 +81,11 @@ pub fn extract_for_path(
     build_nodes(names_with_eco, module_id, repo)
 }
 
-/// True when the path is a recognised manifest filename.
+/// True when the path is a recognised manifest filename. DH.10: a
+/// `*.gemspec` too, read for the executables it ships
+/// (`cli::extract_manifest_binaries`) and for no dependency
+/// ([`extract_for_path`] has no arm for it), so the walk reads it, the router
+/// sends it down the manifest branch and no language parser sees it.
 pub fn is_manifest_path(path: &str) -> bool {
     let base = path.rsplit('/').next().unwrap_or(path);
     matches!(
@@ -93,7 +97,13 @@ pub fn is_manifest_path(path: &str) -> bool {
             | "go.mod"
             | "Gemfile"
             | "composer.json"
-    )
+    ) || is_gemspec_name(base)
+}
+
+/// DH.10: a RubyGems spec file name, `<name>.gemspec` (a bare `.gemspec` is
+/// not one).
+pub(crate) fn is_gemspec_name(base: &str) -> bool {
+    base.len() > ".gemspec".len() && base.ends_with(".gemspec")
 }
 
 fn build_nodes(
@@ -783,5 +793,21 @@ end
             .filter(|q| q.as_str() == "package:npm:react")
             .count();
         assert_eq!(count, 1);
+    }
+
+    /// DH.10: a `*.gemspec` is a manifest path (walked, routed down the
+    /// manifest branch), but declares no PACKAGE_DEP of its own.
+    #[test]
+    fn gemspec_is_a_manifest_path() {
+        for path in ["mytool.gemspec", "server/mytool.gemspec", "a/b/my-tool.gemspec"] {
+            assert!(is_manifest_path(path), "{path}");
+        }
+        for path in [".gemspec", "mytool.gemspec.bak", "gemspec", "mytool.gemspecs", "lib/gemspec.rb"] {
+            assert!(!is_manifest_path(path), "{path}");
+        }
+        let repo = RepoId(1);
+        let src = "Gem::Specification.new do |s|\n  s.name = \"mytool\"\n  s.add_dependency \"thor\"\n  s.executables = [\"mytool\"]\nend\n";
+        let out = extract_for_path(src, "server/mytool.gemspec", module_id(repo), repo);
+        assert!(out.nodes.is_empty() && out.edges.is_empty());
     }
 }
