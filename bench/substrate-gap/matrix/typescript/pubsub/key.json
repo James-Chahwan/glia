@@ -1,0 +1,32 @@
+{
+  "framework": "typescript-pubsub-terraform-binding",
+  "language": "typescript",
+  "dirs": [
+    "publisher",
+    "subscriber",
+    "infra"
+  ],
+  "mechanism": "pubsub",
+  "cells": [
+    "typescript/pubsub"
+  ],
+  "note": "DF.14 (matrix cell typescript/pubsub): a Pub/Sub subscriber names a SUBSCRIPTION (`orders-worker`), never its topic; the binding lives in IaC. Here infra/pubsub.tf declares google_pubsub_subscription.orders_worker { name = \"orders-worker\", topic = google_pubsub_topic.orders.id }. HEAD (84e2e71, leap wheel): QUEUE_PRODUCER orders / QUEUE_CONSUMER orders-worker / both INFRA_RESOURCEs and their INFRA_REFERENCES edge, but no QUEUE_FLOWS (graph/src/resolvers/queue.rs paired on topic equality only). DF.14: the Terraform parser records each google_pubsub_topic / google_pubsub_subscription name and the subscription's topic as a JSON CODE cell, and the queue resolver pairs a producer of topic T with a Pub/Sub consumer of a subscription bound to T (EVIDENCE resolver:queue rule binding, Medium). The binding-free twin fixtures/xcut-queue-cloud-pubsub keeps its forbid (no binding, no pair) and stops claiming the cell.",
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:orders-worker"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "queue_producer:orders",
+      "to": "queue_consumer:orders-worker",
+      "category": "QUEUE_FLOWS",
+      "note": "through the Terraform subscription -> topic binding"
+    }
+  ]
+}

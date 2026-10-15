@@ -3,7 +3,8 @@
   "language": "python",
   "dirs": [
     "client",
-    "server"
+    "server",
+    "infra"
   ],
   "mechanism": "pubsub",
   "cells": [
@@ -42,5 +43,5 @@
       "note": "MEASURED VIOLATION: the same for subscriber.subscribe(subscription_path, ...)"
     }
   ],
-  "note": "A15.7 baseline 2026-09-17: NONE via=eventbus -- no queue node; the only nodes are two method-named event phantoms. The subscription is deliberately NOT named after the topic: in production it rarely is. Keyed on QUEUE_* + QUEUE_FLOWS for every messaging cell in A15.7, including the eventbus-first mechanisms, because that is the graph A2.6 (cloud brokers) and A2.9 (MQTT / Redis pub/sub / NATS leave eventbus.rs) are building: an EVENT_* key would read `none` the moment those fixes land. `via` still records the eventbus path when it is the one that fired."
+  "note": "A15.7 baseline 2026-09-17: NONE via=eventbus -- no queue node; the only nodes are two method-named event phantoms. The subscription is deliberately NOT named after the topic: in production it rarely is. Keyed on QUEUE_* + QUEUE_FLOWS for every messaging cell in A15.7, including the eventbus-first mechanisms, because that is the graph A2.6 (cloud brokers) and A2.9 (MQTT / Redis pub/sub / NATS leave eventbus.rs) are building: an EVENT_* key would read `none` the moment those fixes land. `via` still records the eventbus path when it is the one that fired. DF.14: infra/pubsub.tf now declares the binding (google_pubsub_subscription.orders_worker { name = \"orders-worker\", topic = google_pubsub_topic.orders.name }); the Terraform parser records it as a JSON CODE cell on the INFRA_RESOURCE and the queue resolver pairs the topic's producer with the subscription's consumer (EVIDENCE resolver:queue rule binding, Medium). Baseline at HEAD before DF.14 (leap wheel): QUEUE_FLOWS orders -> orders-worker 0/1."
 }

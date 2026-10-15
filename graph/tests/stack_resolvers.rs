@@ -741,6 +741,243 @@ fn queue_resolver_ignores_catchall() {
     assert_eq!(literal.len(), 1, "got {literal:?}");
 }
 
+// ---- DF.14: Pub/Sub subscription -> topic bindings from Terraform ---------
+
+fn infra_repo() -> RepoId {
+    RepoId::from_canonical("test://resolver/infra")
+}
+
+/// The terraform parser's JSON CODE cell (`pubsub_cell`), in its exact shape.
+fn pubsub_cell(json: String) -> glia_core::Cell {
+    glia_core::Cell {
+        kind: glia_code_domain::cell_type::CODE,
+        payload: glia_core::CellPayload::Json(json),
+    }
+}
+
+/// `google_pubsub_topic.<res> { name = "<name>" }`.
+fn tf_topic(res: &str, name: &str) -> (&'static str, String, glia_core::Cell) {
+    let json = format!(r#"{{"pubsub":"topic","name":"{name}"}}"#);
+    ("google_pubsub_topic", res.to_string(), pubsub_cell(json))
+}
+
+/// `google_pubsub_subscription.<res> { name = "<name>", topic = google_pubsub_topic.<topic_res>.name }`.
+fn tf_sub_ref(res: &str, name: &str, topic_res: &str) -> (&'static str, String, glia_core::Cell) {
+    let json = format!(
+        r#"{{"pubsub":"subscription","name":"{name}","topic_ref":"google_pubsub_topic.{topic_res}"}}"#
+    );
+    ("google_pubsub_subscription", res.to_string(), pubsub_cell(json))
+}
+
+/// `google_pubsub_subscription.<res> { name = "<name>", topic = "<topic>" }`.
+fn tf_sub_lit(res: &str, name: &str, topic: &str) -> (&'static str, String, glia_core::Cell) {
+    let json = format!(r#"{{"pubsub":"subscription","name":"{name}","topic":"{topic}"}}"#);
+    ("google_pubsub_subscription", res.to_string(), pubsub_cell(json))
+}
+
+/// One Terraform repo of INFRA_RESOURCE nodes, qname = the parser's
+/// `resource_qname` (`infra::qname(canonical_kind(type), name)`).
+fn infra_graph(resources: Vec<(&'static str, String, glia_core::Cell)>) -> RepoGraph {
+    use glia_code_domain::infra;
+    let mut nav = CodeNav::default();
+    let mut nodes = Vec::new();
+    for (ty, res, cell) in resources {
+        let qname = infra::qname(infra::canonical_kind(ty), &res);
+        let (mut node, id) = make_node(infra_repo(), node_kind::INFRA_RESOURCE, &qname, Confidence::Strong);
+        node.cells.push(cell);
+        record(&mut nav, id, &format!("{ty}.{res}"), &qname, node_kind::INFRA_RESOURCE);
+        nodes.push(node);
+    }
+    make_graph(infra_repo(), nodes, nav)
+}
+
+/// `queue_pairs` with an infra repo beside the two sides, each edge with its
+/// EVIDENCE emitter and rule.
+fn binding_pairs(
+    producers: &[QueueSide],
+    consumers: &[QueueSide],
+    infra: RepoGraph,
+) -> Vec<(String, String, Confidence, String)> {
+    let ga = queue_side(repo_a(), node_kind::QUEUE_CONSUMER, "queue_consumer:", consumers);
+    let gb = queue_side(repo_b(), node_kind::QUEUE_PRODUCER, "queue_producer:", producers);
+    let mut merged = MergedGraph::new(vec![ga, gb, infra]);
+    QueueStackResolver.resolve(&mut merged);
+    let qname = |id: NodeId| {
+        merged
+            .graphs
+            .iter()
+            .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+            .unwrap_or_default()
+    };
+    let mut out: Vec<_> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::QUEUE_FLOWS)
+        .map(|e| {
+            let ev = glia_code_domain::evidence::Evidence::of(e).expect("every QUEUE_FLOWS edge carries EVIDENCE");
+            let rule = format!("{}:{}", ev.emitter, ev.rule.unwrap_or_default());
+            (qname(e.from), qname(e.to), e.confidence, rule)
+        })
+        .collect();
+    out.sort_by(|a, b| (&a.0, &a.1, &a.3).cmp(&(&b.0, &b.1, &b.3)));
+    out
+}
+
+fn binding_edge(topic: &str, sub: &str) -> (String, String, Confidence, String) {
+    (
+        format!("queue_producer:{topic}"),
+        format!("queue_consumer:{sub}"),
+        Confidence::Medium,
+        "resolver:queue:binding".to_string(),
+    )
+}
+
+#[test]
+fn queue_resolver_pairs_through_pubsub_binding() {
+    // The matrix shape: the publisher names topic `orders`, the subscriber
+    // names subscription `orders-worker`, Terraform binds them.
+    let by_ref = binding_pairs(
+        &[("orders", &["pubsub"])],
+        &[("orders-worker", &["pubsub"])],
+        infra_graph(vec![tf_topic("orders", "orders"), tf_sub_ref("orders_worker", "orders-worker", "orders")]),
+    );
+    assert_eq!(by_ref, [binding_edge("orders", "orders-worker")], "a declared binding is Medium, never Strong");
+
+    // A literal `topic = "orders"` binds the same way, with no topic resource.
+    let by_literal = binding_pairs(
+        &[("orders", &["pubsub"])],
+        &[("orders-worker", &["pubsub"])],
+        infra_graph(vec![tf_sub_lit("orders_worker", "orders-worker", "orders")]),
+    );
+    assert_eq!(by_literal, [binding_edge("orders", "orders-worker")]);
+
+    // A consumer with no family cell pairs through the binding as it would exactly.
+    let no_family = binding_pairs(
+        &[("orders", &["pubsub"])],
+        &[("orders-worker", &[])],
+        infra_graph(vec![tf_sub_lit("orders_worker", "orders-worker", "orders")]),
+    );
+    assert_eq!(no_family, [binding_edge("orders", "orders-worker")]);
+}
+
+#[test]
+fn queue_resolver_no_binding_no_pair() {
+    // fixtures/xcut-queue-cloud-pubsub: a topic and a subscription with
+    // different names and no IaC binding are different names, not a pair.
+    let none = binding_pairs(&[("orders", &["pubsub"])], &[("orders-worker", &["pubsub"])], infra_graph(vec![]));
+    assert!(none.is_empty(), "got {none:?}");
+
+    // A declared topic alone binds nothing; neither does a subscription whose
+    // topic_ref names no topic resource with a name.
+    let dangling = binding_pairs(
+        &[("orders", &["pubsub"])],
+        &[("orders-worker", &["pubsub"])],
+        infra_graph(vec![tf_topic("orders", "orders"), tf_sub_ref("orders_worker", "orders-worker", "missing")]),
+    );
+    assert!(dangling.is_empty(), "got {dangling:?}");
+
+    // A binding for another subscription pairs nothing here.
+    let other = binding_pairs(
+        &[("orders", &["pubsub"])],
+        &[("orders-worker", &["pubsub"])],
+        infra_graph(vec![tf_sub_lit("audit", "orders-audit", "orders")]),
+    );
+    assert!(other.is_empty(), "got {other:?}");
+}
+
+#[test]
+fn queue_resolver_binding_respects_family() {
+    let infra = || infra_graph(vec![tf_topic("orders", "orders"), tf_sub_ref("orders_worker", "orders-worker", "orders")]);
+    // A Kafka consumer that happens to be named like the subscription is no
+    // Pub/Sub subscriber: the binding does not apply to it.
+    let kafka_consumer = binding_pairs(&[("orders", &["pubsub"])], &[("orders-worker", &["kafka"])], infra());
+    assert!(kafka_consumer.is_empty(), "got {kafka_consumer:?}");
+    let kafka_both = binding_pairs(&[("orders", &["kafka"])], &[("orders-worker", &["kafka"])], infra());
+    assert!(kafka_both.is_empty(), "got {kafka_both:?}");
+    // A Kafka producer of `orders` is not the Pub/Sub topic `orders`.
+    let kafka_producer = binding_pairs(&[("orders", &["kafka"])], &[("orders-worker", &["pubsub"])], infra());
+    assert!(kafka_producer.is_empty(), "got {kafka_producer:?}");
+}
+
+#[test]
+fn queue_resolver_conflicting_binding_dropped() {
+    // One subscription name bound to two topics is no identity: neither pairs.
+    let two_topics = binding_pairs(
+        &[("orders", &["pubsub"]), ("billing", &["pubsub"])],
+        &[("orders-worker", &["pubsub"])],
+        infra_graph(vec![
+            tf_topic("orders", "orders"),
+            tf_sub_ref("orders_worker", "orders-worker", "orders"),
+            tf_sub_lit("orders_worker_billing", "orders-worker", "billing"),
+        ]),
+    );
+    assert!(two_topics.is_empty(), "got {two_topics:?}");
+
+    // The same binding declared twice is still one binding, one edge.
+    let repeated = binding_pairs(
+        &[("orders", &["pubsub"])],
+        &[("orders-worker", &["pubsub"])],
+        infra_graph(vec![
+            tf_topic("orders", "orders"),
+            tf_sub_ref("orders_worker", "orders-worker", "orders"),
+            tf_sub_lit("orders_worker_again", "orders-worker", "orders"),
+        ]),
+    );
+    assert_eq!(repeated, [binding_edge("orders", "orders-worker")]);
+
+    // A topic resource carrying two names (two `google_pubsub_topic.orders`
+    // in one repo) resolves no topic_ref.
+    let two_names = binding_pairs(
+        &[("orders", &["pubsub"]), ("orders-v2", &["pubsub"])],
+        &[("orders-worker", &["pubsub"])],
+        infra_graph(vec![
+            tf_topic("orders", "orders"),
+            tf_topic("orders", "orders-v2"),
+            tf_sub_ref("orders_worker", "orders-worker", "orders"),
+        ]),
+    );
+    assert!(two_names.is_empty(), "got {two_names:?}");
+}
+
+#[test]
+fn queue_resolver_binding_keeps_exact_pairs() {
+    // The exact entry under the subscription's own name stays: a producer of
+    // `orders-worker` still pairs exactly (Strong), beside the binding edge.
+    let both = binding_pairs(
+        &[("orders", &["pubsub"]), ("orders-worker", &["pubsub"])],
+        &[("orders-worker", &["pubsub"])],
+        infra_graph(vec![tf_sub_lit("orders_worker", "orders-worker", "orders")]),
+    );
+    assert_eq!(
+        both,
+        [
+            binding_edge("orders", "orders-worker"),
+            (
+                "queue_producer:orders-worker".to_string(),
+                "queue_consumer:orders-worker".to_string(),
+                Confidence::Strong,
+                "resolver:queue:exact".to_string(),
+            ),
+        ]
+    );
+
+    // A subscription bound to its own name pairs once, exactly, not twice.
+    let same_name = binding_pairs(
+        &[("orders", &["pubsub"])],
+        &[("orders", &["pubsub"])],
+        infra_graph(vec![tf_topic("orders", "orders"), tf_sub_ref("orders_sub", "orders", "orders")]),
+    );
+    assert_eq!(
+        same_name,
+        [(
+            "queue_producer:orders".to_string(),
+            "queue_consumer:orders".to_string(),
+            Confidence::Strong,
+            "resolver:queue:exact".to_string(),
+        )]
+    );
+}
+
 // ============================================================================
 // GraphQLStackResolver
 // ============================================================================

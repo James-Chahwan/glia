@@ -3,8 +3,7 @@
   "language": "typescript",
   "dirs": ["publisher", "subscriber"],
   "mechanism": "pubsub",
-  "cells": ["typescript/pubsub"],
-  "note": "Node-only by design: a Pub/Sub subscription name is not the topic name, so producer->consumer pairing needs the IaC binding, which is declared as a QUEUE_FLOWS COVERAGE_CAVEATS row (engine/src/coverage.rs) instead of being faked. The matrix therefore caps this cell at partial (no routing expected), the honest level. Baseline 2026-09-17 (installed wheel = HEAD 2cc066d, before A2.6): nodes 0/2, zero queue nodes.",
+  "note": "Node-only by design: a Pub/Sub subscription name is not the topic name, so producer->consumer pairing needs the IaC binding, which is declared as a QUEUE_FLOWS COVERAGE_CAVEATS row (engine/src/coverage.rs) instead of being faked. The matrix therefore caps this cell at partial (no routing expected), the honest level. Baseline 2026-09-17 (installed wheel = HEAD 2cc066d, before A2.6): nodes 0/2, zero queue nodes. DF.14: the routing proof moved to matrix/typescript/pubsub, where infra/pubsub.tf declares the google_pubsub_subscription -> google_pubsub_topic binding the queue resolver pairs through (rule binding); this fixture has no binding, so it stays a precision fixture (no binding, no pair) and no longer claims the typescript/pubsub matrix cell.",
   "expect_nodes": [
     {"kind": "QUEUE_PRODUCER", "name": "queue_producer:orders", "note": "pubsub.topic('orders') names the TOPIC"},
     {"kind": "QUEUE_CONSUMER", "name": "queue_consumer:orders-worker", "note": "pubsub.subscription('orders-worker') names a SUBSCRIPTION, not the topic"}

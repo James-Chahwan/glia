@@ -1,11 +1,13 @@
 //! Queue stack resolver — producer → consumer by topic name, gated on broker
-//! family, with broker-dialect wildcard subscriptions (A2.7).
+//! family, with broker-dialect wildcard subscriptions (A2.7) and GCP Pub/Sub
+//! subscriptions bound to their topic in Terraform (DF.14).
 
-use std::collections::HashMap;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::str::Split;
 
 use glia_code_domain::endpoint::split_owner;
-use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_code_domain::{cell_type, edge_category, infra, node_kind};
 use glia_code_extractors::queues::{QueueFramework, UNRESOLVED_PREFIX};
 use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId};
 
@@ -42,15 +44,28 @@ impl CrossGraphResolver for QueueStackResolver {
     /// inference, not a literal identity. A subscription with no literal
     /// segment (`>`, `#`, `*.*`, `^.*`) pairs with nothing (`skipped_catchall`).
     ///
+    /// DF.14: a GCP Pub/Sub subscriber names its SUBSCRIPTION, never its
+    /// topic, so its consumer node can never equal a producer's topic. The
+    /// binding is declared in Terraform (`google_pubsub_subscription { name,
+    /// topic }`, recorded by the terraform parser as a JSON CODE cell on the
+    /// INFRA_RESOURCE; [`pubsub_bindings`]). A consumer of a bound
+    /// subscription S whose families admit Pub/Sub is also indexed under its
+    /// topic T, so a producer of T pairs with it: rule `binding`, at most
+    /// `Medium` (a declared binding is DERIVED, never a literal identity).
+    /// Its exact entry under S is untouched.
+    ///
     /// fired_on marker (one line per build, only when a counter is non-zero):
     ///   `... 2>&1 | grep '^\[queues\] resolver paired='`
     fn resolve(&self, merged: &mut MergedGraph) {
-        let index = build_queue_index(&merged.graphs);
+        let bindings = pubsub_bindings(&merged.graphs);
+        let index = build_queue_index(&merged.graphs, &bindings);
         let mut skipped_unresolved = index.skipped_unresolved;
         let (mut paired, mut family_mismatch, mut wildcard) = (0usize, 0usize, 0usize);
+        let mut binding = 0usize;
         // LC.3c: `exact` for a consumer keyed on the producer's topic,
-        // `pattern` for a compiled wildcard subscription that covers it.
-        let mut rules = RuleTally::new("queue", &["exact", "pattern"]);
+        // `pattern` for a compiled wildcard subscription that covers it,
+        // `binding` (DF.14) for a Pub/Sub subscription bound to it.
+        let mut rules = RuleTally::new("queue", &["exact", "pattern", "binding"]);
         for g in &merged.graphs {
             for n in &g.nodes {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::QUEUE_PRODUCER) {
@@ -72,10 +87,17 @@ impl CrossGraphResolver for QueueStackResolver {
                         family_mismatch += 1;
                         continue;
                     }
-                    let confidence = weakest(n.confidence, t.confidence);
+                    let mut confidence = weakest(n.confidence, t.confidence);
+                    let rule = if t.via_binding {
+                        confidence = weakest(confidence, Confidence::Medium);
+                        binding += 1;
+                        "binding"
+                    } else {
+                        "exact"
+                    };
                     merged.cross_edges.push(
                         Edge::new(n.id, t.id, edge_category::QUEUE_FLOWS, confidence)
-                            .with_cell(rules.cell("exact")),
+                            .with_cell(rules.cell(rule)),
                     );
                     paired += 1;
                 }
@@ -102,12 +124,13 @@ impl CrossGraphResolver for QueueStackResolver {
         let skipped_catchall = index.skipped_catchall;
         // One line per BUILD (not per file), and only when this resolver had
         // anything to say — the `[ws-resolve]` house style, so the fixtures with
-        // no queue nodes at all stay silent. `wildcard` is a subset of `paired`.
+        // no queue nodes at all stay silent. `wildcard` and `binding` are
+        // subsets of `paired`.
         if paired + skipped_unresolved + family_mismatch + skipped_catchall > 0 {
             eprintln!(
                 "[queues] resolver paired={paired} skipped_unresolved={skipped_unresolved} \
                  family_mismatch={family_mismatch} wildcard={wildcard} \
-                 skipped_catchall={skipped_catchall}"
+                 skipped_catchall={skipped_catchall} binding={binding}"
             );
         }
         rules.report();
@@ -124,6 +147,9 @@ struct Consumer<'a> {
     id: NodeId,
     confidence: Confidence,
     families: Vec<&'a str>,
+    /// DF.14: indexed under the topic its Pub/Sub subscription is bound to,
+    /// not under its own topic string (rule `binding`).
+    via_binding: bool,
 }
 
 struct WildcardConsumer<'a> {
@@ -143,7 +169,16 @@ struct QueueIndex<'a> {
 /// Topic → consumers (every resolvable consumer, so literal equality keeps
 /// today's behaviour), plus the wildcard subscribers in a separate Vec so the
 /// exact hot path stays one HashMap lookup.
-fn build_queue_index(graphs: &[RepoGraph]) -> QueueIndex<'_> {
+///
+/// DF.14: a consumer whose topic string is a subscription in `bindings` and
+/// whose families admit Pub/Sub is pushed a second time, under the bound
+/// topic, flagged `via_binding`. Reached only through that topic key, so no
+/// exact pair changes; a subscription bound to its own name adds nothing.
+fn build_queue_index<'a>(
+    graphs: &'a [RepoGraph],
+    bindings: &BTreeMap<&'a str, &'a str>,
+) -> QueueIndex<'a> {
+    let pubsub = [QueueFramework::PubSub.family()];
     let mut ix = QueueIndex {
         exact: HashMap::new(),
         wildcard: Vec::new(),
@@ -177,10 +212,22 @@ fn build_queue_index(graphs: &[RepoGraph]) -> QueueIndex<'_> {
             if !arms.is_empty() {
                 ix.wildcard.push(WildcardConsumer { id: n.id, topic, arms });
             }
+            if let Some(&bound) = bindings.get(topic)
+                && bound != topic
+                && families_compatible(&families, &pubsub)
+            {
+                ix.exact.entry(bound).or_default().push(Consumer {
+                    id: n.id,
+                    confidence: n.confidence,
+                    families: families.clone(),
+                    via_binding: true,
+                });
+            }
             ix.exact.entry(topic).or_default().push(Consumer {
                 id: n.id,
                 confidence: n.confidence,
                 families,
+                via_binding: false,
             });
         }
     }
@@ -207,9 +254,101 @@ fn node_families(cells: &[Cell]) -> Vec<&str> {
 /// extractors crate (`queues::finish`), not user JSON, so this keeps
 /// serde_json out of the graph crate (same call as `http::extract_method_field`).
 fn family_field(json: &str) -> Option<&str> {
-    let rest = &json[json.find("\"family\":\"")? + "\"family\":\"".len()..];
-    let tag = &rest[..rest.find('"')?];
-    (!tag.is_empty()).then_some(tag)
+    str_field(json, "family")
+}
+
+/// Tight scan for the non-empty string value of `"<key>":"<value>"` in a
+/// payload glia wrote itself, whose values hold no `"` and no escape.
+fn str_field<'j>(json: &'j str, key: &str) -> Option<&'j str> {
+    let needle = format!("\"{key}\":\"");
+    let rest = &json[json.find(&needle)? + needle.len()..];
+    let value = &rest[..rest.find('"')?];
+    (!value.is_empty()).then_some(value)
+}
+
+// ---- DF.14: Pub/Sub subscription -> topic bindings -------------------------
+
+/// The Terraform resource type whose INFRA_RESOURCE a `topic_ref` names.
+const PUBSUB_TOPIC_RESOURCE: &str = "google_pubsub_topic";
+
+/// What a subscription cell says its topic is.
+enum BoundTo<'a> {
+    /// A literal topic id.
+    Name(&'a str),
+    /// The topic INFRA_RESOURCE qname, in graph `usize`: a Terraform
+    /// reference is module-local, so it resolves in the subscription's repo.
+    Resource(usize, String),
+}
+
+/// DF.14: Pub/Sub subscription name → the topic name it is bound to, from the
+/// terraform parser's JSON CODE cells on INFRA_RESOURCE nodes
+/// (`{"pubsub":"topic","name":..}`, `{"pubsub":"subscription","name":..,
+/// "topic":..}` or `{..,"topic_ref":"google_pubsub_topic.<r>"}`). A
+/// `topic_ref` resolves through the topic INFRA_RESOURCE whose qname is
+/// `infra::qname(infra::canonical_kind("google_pubsub_topic"), r)` (the
+/// parser's own `resource_qname`) and that node's topic cell. A topic qname
+/// carrying two names in one repo resolves nothing, and a subscription name
+/// bound to two different topics is dropped: no guess either way.
+fn pubsub_bindings(graphs: &[RepoGraph]) -> BTreeMap<&str, &str> {
+    let mut topics: BTreeMap<(usize, &str), Option<&str>> = BTreeMap::new();
+    let mut subs: Vec<(&str, BoundTo<'_>)> = Vec::new();
+    for (gi, g) in graphs.iter().enumerate() {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::INFRA_RESOURCE) {
+                continue;
+            }
+            for c in &n.cells {
+                let (true, CellPayload::Json(json)) = (c.kind == cell_type::CODE, &c.payload) else {
+                    continue;
+                };
+                let Some(name) = str_field(json, "name") else { continue };
+                match str_field(json, "pubsub") {
+                    Some("topic") => {
+                        let Some(qname) = g.nav.qname_by_id.get(&n.id) else { continue };
+                        match topics.entry((gi, qname.as_str())) {
+                            Entry::Vacant(e) => {
+                                e.insert(Some(name));
+                            }
+                            Entry::Occupied(mut e) if *e.get() != Some(name) => {
+                                e.insert(None);
+                            }
+                            Entry::Occupied(_) => {}
+                        }
+                    }
+                    Some("subscription") => {
+                        if let Some(topic) = str_field(json, "topic") {
+                            subs.push((name, BoundTo::Name(topic)));
+                        } else if let Some((ty, r)) =
+                            str_field(json, "topic_ref").and_then(|a| a.split_once('.'))
+                            && ty == PUBSUB_TOPIC_RESOURCE
+                        {
+                            let qname = infra::qname(infra::canonical_kind(ty), r);
+                            subs.push((name, BoundTo::Resource(gi, qname)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut bound: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+    for (sub, to) in subs {
+        let topic = match to {
+            BoundTo::Name(t) => Some(t),
+            BoundTo::Resource(gi, qname) => topics.get(&(gi, qname.as_str())).copied().flatten(),
+        };
+        let Some(topic) = topic else { continue };
+        match bound.entry(sub) {
+            Entry::Vacant(e) => {
+                e.insert(Some(topic));
+            }
+            Entry::Occupied(mut e) if *e.get() != Some(topic) => {
+                e.insert(None);
+            }
+            Entry::Occupied(_) => {}
+        }
+    }
+    bound.into_iter().filter_map(|(sub, topic)| Some((sub, topic?))).collect()
 }
 
 /// Pair when either side is unknown or generic, or the sets intersect.
