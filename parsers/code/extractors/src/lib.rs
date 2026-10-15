@@ -18,6 +18,7 @@ pub mod openapi_annot;
 pub mod packages;
 pub mod prisma;
 pub mod eventbus;
+pub mod generated;
 pub mod graphql;
 pub mod grpc;
 pub mod queue_topic;
