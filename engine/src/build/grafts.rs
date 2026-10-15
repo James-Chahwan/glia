@@ -11,8 +11,8 @@ use glia_code_domain::evidence::{self, Evidence};
 use glia_code_domain::glia_config::LoadedConfig;
 use glia_code_domain::project_roots::ProjectRoot;
 use glia_code_domain::{
-    CodeNav, FileParse, LocalModuleIndex, NavFact, attach_imports_cell_filtered, cell_type,
-    node_kind,
+    CodeNav, FileParse, ImportTarget, LocalModuleIndex, NavFact, attach_imports_cell_filtered,
+    cell_type, node_kind,
 };
 use glia_code_extractors::constants::ConstTable;
 use glia_code_extractors::next_pages::{self, NextRoots, PageRouter};
@@ -33,7 +33,8 @@ use crate::route::ModuleQnames;
 /// Run every post-cache graft over one repo's parses, in order: the LF.2e
 /// overlay wrapper scan and its http half, the A11.2 endpoint fold, the LA.6d
 /// Next.js page graft, the LA.4 queue-topic const fold, the CB.3b event-name
-/// const fold, the LF.2e wrappers' queue half, the A5.2 / A5.3 / LA.17 RPC
+/// const fold, the DF.13 Python signal binding, the LF.2e wrappers' queue
+/// half, the A5.2 / A5.3 / LA.17 RPC
 /// needles with their `[grpc-client]` /
 /// `[grpc-server-impl]` / `[proto-rpc]` markers, the A5.8 `[marker-anchor]`
 /// census and the LE.4a `[data-access]` census, the LB.4a / LB.8 owner
@@ -113,6 +114,12 @@ pub(super) fn apply_post_cache(
     let (event_stats, event_pool) = apply_event_const_names(parses_by_lang, &folds, parse_errors);
     event_stats.report(repo_label);
     report_const_fold_pool(queue_pool, event_pool, repo_label);
+    // DF.13: blinker / Django signal sites, named through the repo's signal
+    // table. After the CB.3b fold, whose re-emit it extends (one helper,
+    // `event_fold_one`, so the two cannot drift), and in the same seam: above
+    // the owner pass and the A16.4 filter, so the swapped nodes are
+    // owner-qualified and IMPORTS-filtered like every event node.
+    apply_python_signals(parses_by_lang, &folds, roots, parse_errors).report(repo_label);
     // LF.2e: the wrappers' queue half, AFTER the const fold (which rebuilds a
     // folded file's queue nodes from the queue scan and would drop a wrapper
     // node) and above the owner pass, like every graft that mints an owned kind.
@@ -822,10 +829,7 @@ fn apply_event_const_names(
         return (stats, FoldPool::default());
     }
     let (outs, threads) = crate::parallel::par_map_ordered(&targets, |t| {
-        fold_one(inputs, t, |source, path, resolve| {
-            let (module, repo) = (t.module_id, inputs.repo);
-            eventbus::extract_event_nodes_with_consts(source, path, module, repo, resolve)
-        })
+        event_fold_one(inputs, t, |_, _, fold| fold)
     });
     for (t, out) in targets.iter().zip(outs) {
         let Some(fold) = out else {
@@ -847,6 +851,542 @@ fn apply_event_const_names(
         }
     }
     (stats, FoldPool { files: targets.len(), threads })
+}
+
+/// CB.3b / DF.13: one file's event nodes re-emitted through the CB.3b
+/// resolver ([`fold_one`]: the file's own A11.1 scan, then the repo table's
+/// `ConstTable::resolve_identity`), handed to `then` with the file's source
+/// and path. The one re-emit both event grafts run, so a file DF.13 swaps
+/// gets exactly the nodes CB.3b would give it. `None` is a panic.
+fn event_fold_one<R>(
+    inputs: &FoldInputs<'_>,
+    t: &FoldTarget,
+    then: impl FnOnce(&str, &str, eventbus::EventFold) -> R,
+) -> Option<R> {
+    fold_one(inputs, t, |source, path, resolve| {
+        let (module, repo) = (t.module_id, inputs.repo);
+        let fold = eventbus::extract_event_nodes_with_consts(source, path, module, repo, resolve);
+        then(source, path, fold)
+    })
+}
+
+// ============================================================================
+// DF.13: Python signals, the cross-file binding
+// ============================================================================
+
+/// DF.13: the emitter and rule the owner edges of a bound signal site carry,
+/// in place of the `const_fold` rule the shared swap stamps.
+const PY_SIGNAL_EMITTER: &str = "extractor:anchor";
+const PY_SIGNAL_RULE: &str = "python_signal";
+
+/// DF.13: per-repo tallies of the Python signal binding.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PySignalStats {
+    /// Bindable declarations: distinct (declaring module, variable) pairs
+    /// with one identity.
+    decls: usize,
+    /// Files whose event nodes were swapped (at least one bound site).
+    files: usize,
+    /// Bound sites that named an event and emit (`.send(` ...) ...
+    emit: usize,
+    /// ... and that handle (`.connect`, `@receiver(..)` ...).
+    handle: usize,
+    /// Names refused as ambiguous: a module declaring one variable with two
+    /// identities, or a file binding one name to two signals.
+    dropped: usize,
+}
+
+impl PySignalStats {
+    /// fired_on marker, once per repo that declares a Python signal (or
+    /// refused one):
+    ///   `[event-py-signals] decls=<d> files=<f> emit=<e> handle=<h> dropped=<x> repo=<label>`
+    /// Printed at `files=0` too, so declared signals no file binds are
+    /// visible rather than silent.
+    fn report(&self, repo_label: &str) {
+        if self.decls + self.dropped > 0 {
+            eprintln!(
+                "[event-py-signals] decls={} files={} emit={} handle={} dropped={} repo={repo_label}",
+                self.decls, self.files, self.emit, self.handle, self.dropped
+            );
+        }
+    }
+}
+
+/// DF.13: a Python file's IMPORT qname, the name `import` / `from` statements
+/// give it: [`crate::extract::path_to_qname`] (`shop/signals.py` ->
+/// `shop::signals`), a package's `__init__.py` named by its package
+/// (`shop/__init__.py` -> `shop`). The stem form, never LB.9b's file-name
+/// form: an import names the stem.
+fn py_import_qname(path: &str) -> String {
+    let q = crate::extract::path_to_qname(path);
+    if q == "__init__" {
+        return String::new();
+    }
+    match q.strip_suffix("::__init__") {
+        Some(pkg) => pkg.to_string(),
+        None => q,
+    }
+}
+
+/// DF.13: bind `name` to `identity` in `map`; a second, different identity
+/// makes the name ambiguous (`None`). Returns true when this call made it so.
+fn bind_once(map: &mut BTreeMap<String, Option<String>>, name: &str, identity: &str) -> bool {
+    match map.get_mut(name) {
+        None => {
+            map.insert(name.to_string(), Some(identity.to_string()));
+            false
+        }
+        Some(slot) => match slot {
+            Some(had) if had != identity => {
+                *slot = None;
+                true
+            }
+            _ => false,
+        },
+    }
+}
+
+/// DF.13: the repo's Python signal declarations and the module names its
+/// imports resolve against.
+struct PySignalTable {
+    /// Declaring module (import qname, [`py_import_qname`]) -> variable ->
+    /// event identity (`PySignalDecl::event_identity` of the module's dotted
+    /// path); `None` for a variable declared with two identities.
+    by_module: BTreeMap<String, BTreeMap<String, Option<String>>>,
+    /// Every Python file's import qname, so an import resolves to the module
+    /// that EXISTS first on its search path, declaring or not.
+    modules: BTreeSet<String>,
+    /// The repo-relative dirs of the walk's python project roots (A8.4),
+    /// the sys.path entries an absolute import is read against.
+    roots: Vec<String>,
+}
+
+impl PySignalTable {
+    /// Scan every walked `.py` file whose text can hold a declaration
+    /// (`eventbus::python_signal_decls`), in walk order. A file whose scan
+    /// panics declares nothing and gets a `PANIC (python signals)` line.
+    fn build(
+        files: &[(String, String)],
+        roots: &[ProjectRoot],
+        parse_errors: &mut Vec<String>,
+    ) -> Self {
+        let mut by_module: BTreeMap<String, BTreeMap<String, Option<String>>> = BTreeMap::new();
+        let mut modules = BTreeSet::new();
+        for (path, source) in files {
+            if detect_language(path) != Some("python") {
+                continue;
+            }
+            let key = py_import_qname(path);
+            modules.insert(key.clone());
+            if key.is_empty() || !(source.contains("signal(") || source.contains("Signal(")) {
+                continue;
+            }
+            let Ok(decls) = crate::parallel::quiet(|| eventbus::python_signal_decls(source, path))
+            else {
+                parse_errors.push(format!("{path}: PANIC (python signals)"));
+                continue;
+            };
+            let dotted = key.replace("::", ".");
+            for decl in decls {
+                let identity = decl.event_identity(&dotted);
+                bind_once(by_module.entry(key.clone()).or_default(), &decl.name, &identity);
+            }
+        }
+        let roots = roots
+            .iter()
+            .filter(|r| r.ecosystem == "python" && !r.rel_path.is_empty())
+            .map(|r| r.rel_path.clone())
+            .collect();
+        PySignalTable { by_module, modules, roots }
+    }
+
+    /// (bindable declarations, refused ones).
+    fn counts(&self) -> (usize, usize) {
+        let all = self.by_module.values().flat_map(BTreeMap::values);
+        all.fold((0, 0), |(ok, bad), v| match v {
+            Some(_) => (ok + 1, bad),
+            None => (ok, bad + 1),
+        })
+    }
+
+    /// Does a module or a package named `q` exist (a file `q`, or a file
+    /// under `q::`)?
+    fn exists(&self, q: &str) -> bool {
+        if self.modules.contains(q) {
+            return true;
+        }
+        let prefix = format!("{q}::");
+        self.modules
+            .range(prefix.clone()..)
+            .next()
+            .is_some_and(|m| m.starts_with(&prefix))
+    }
+
+    /// The import qname `module` names from the file at `path` (import qname
+    /// `importer`), by Python's rules. A relative import (`level` > 0) starts
+    /// at the importer's package, `level` 1 (`shop/orders.py` -> `shop`; a
+    /// package's own `__init__.py`, whose import qname is already the
+    /// package, starts at itself), climbs one package per further dot, then
+    /// appends `module`. An absolute one (`level` 0) is read against each
+    /// python project root enclosing `path`, innermost first, then the repo
+    /// root, and names the first base where the module exists. `None` when
+    /// a relative import climbs past the repo root or an absolute one exists
+    /// under no base.
+    fn resolve(&self, path: &str, importer: &str, module: &str, level: u32) -> Option<String> {
+        let dotted = module.replace('.', "::");
+        if level > 0 {
+            let mut parts: Vec<&str> = importer.split("::").filter(|p| !p.is_empty()).collect();
+            let is_init = path.rsplit(['/', '\\']).next() == Some("__init__.py");
+            let pop = level as usize - usize::from(is_init);
+            if pop > parts.len() {
+                return None;
+            }
+            parts.truncate(parts.len() - pop);
+            if !dotted.is_empty() {
+                parts.push(&dotted);
+            }
+            return Some(parts.join("::"));
+        }
+        let mut bases: Vec<&str> = self
+            .roots
+            .iter()
+            .filter(|r| path.starts_with(&format!("{r}/")))
+            .map(String::as_str)
+            .collect();
+        bases.sort_by_key(|r| std::cmp::Reverse(r.len()));
+        bases.push("");
+        bases.into_iter().find_map(|base| {
+            let q = if base.is_empty() {
+                dotted.clone()
+            } else {
+                format!("{}::{dotted}", base.replace('/', "::"))
+            };
+            self.exists(&q).then_some(q)
+        })
+    }
+
+    /// The signals module `q` declares, when it declares any.
+    fn declared(&self, q: &str) -> Option<&BTreeMap<String, Option<String>>> {
+        self.by_module.get(q)
+    }
+
+    /// The names one Python file binds to a signal, with each one's identity
+    /// (`None`: refused, two identities):
+    /// - the names its own module declares;
+    /// - `from <m> import <n> [as <a>]` where module `<m>` declares `<n>`
+    ///   (bound as `<a>` or `<n>`), else where `<m>::<n>` is a module that
+    ///   declares signals (`from shop import signals` binds
+    ///   `signals.<name>`; Python's order: the attribute first, then the
+    ///   submodule);
+    /// - `import <m> [as <a>]` where `<m>` declares signals: `<m>.<name>`
+    ///   (`<a>.<name>`).
+    ///
+    /// A name a module refused, or a module no search base holds, binds
+    /// nothing. `dropped` counts the names this file made ambiguous.
+    fn bound(
+        &self,
+        path: &str,
+        fp: &FileParse,
+        dropped: &mut usize,
+    ) -> BTreeMap<String, Option<String>> {
+        let importer = py_import_qname(path);
+        let mut out: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let mut bind = |out: &mut BTreeMap<String, Option<String>>, name: &str, identity: &str| {
+            *dropped += usize::from(bind_once(out, name, identity));
+        };
+        if let Some(own) = self.declared(&importer) {
+            for (name, identity) in own {
+                if let Some(identity) = identity {
+                    bind(&mut out, name, identity);
+                }
+            }
+        }
+        for stmt in &fp.imports {
+            match &stmt.target {
+                ImportTarget::Symbol { module, name, alias, level } => {
+                    let Some(target) = self.resolve(path, &importer, module, *level) else {
+                        continue;
+                    };
+                    let local = alias.as_deref().unwrap_or(name);
+                    if let Some(identity) = self.declared(&target).and_then(|d| d.get(name)) {
+                        if let Some(identity) = identity {
+                            bind(&mut out, local, identity);
+                        }
+                        continue;
+                    }
+                    let sub = if target.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{target}::{name}")
+                    };
+                    for (sig, identity) in self.declared(&sub).into_iter().flatten() {
+                        if let Some(identity) = identity {
+                            bind(&mut out, &format!("{local}.{sig}"), identity);
+                        }
+                    }
+                }
+                ImportTarget::Module { path: dotted, alias } => {
+                    let Some(target) = self.resolve(path, &importer, dotted, 0) else {
+                        continue;
+                    };
+                    let local = alias.as_deref().unwrap_or(dotted);
+                    for (sig, identity) in self.declared(&target).into_iter().flatten() {
+                        if let Some(identity) = identity {
+                            bind(&mut out, &format!("{local}.{sig}"), identity);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// DF.13: the fresh signal nodes of one file merged into its CB.3b re-emit:
+/// each EVENT_EMITTER into `fold.emitters`, each EVENT_HANDLER into
+/// `fold.handlers`, a node whose id the fold already holds (a literal
+/// blinker site naming the same event) kept once, and every site's anchor
+/// kept (`eventbus::replace_event_nodes` concatenates both sides' anchors,
+/// and `anchor::attach` sorts them).
+fn merge_signal_nodes(fold: &mut eventbus::EventFold, sig: eventbus::EventNodes) -> SignalMerge {
+    let held: HashSet<NodeId> = fold
+        .emitters
+        .nodes
+        .iter()
+        .chain(&fold.handlers.nodes)
+        .map(|n| n.id)
+        .collect();
+    let eventbus::EventNodes { nodes, nav, anchors } = sig;
+    let mut minted = HashSet::new();
+    for node in nodes {
+        let id = node.id;
+        if held.contains(&id) || !minted.insert(id) {
+            continue;
+        }
+        let Some(&kind) = nav.kind_by_id.get(&id) else {
+            continue;
+        };
+        let side = if kind == node_kind::EVENT_EMITTER {
+            &mut fold.emitters
+        } else {
+            &mut fold.handlers
+        };
+        side.nodes.push(node);
+        side.nav.kind_by_id.insert(id, kind);
+        if let Some(name) = nav.name_by_id.get(&id) {
+            side.nav.name_by_id.insert(id, name.clone());
+        }
+        if let Some(qname) = nav.qname_by_id.get(&id) {
+            side.nav.qname_by_id.insert(id, qname.clone());
+        }
+        if let Some(&parent) = nav.parent_of.get(&id) {
+            side.nav.parent_of.insert(id, parent);
+            side.nav.children_of.entry(parent).or_default().push(id);
+        }
+    }
+    let mut merge = SignalMerge { minted, emit: 0, handle: 0 };
+    for a in &anchors {
+        match nav.kind_by_id.get(&a.node) {
+            Some(&k) if k == node_kind::EVENT_EMITTER => merge.emit += 1,
+            Some(_) => merge.handle += 1,
+            None => {}
+        }
+    }
+    fold.handlers.anchors.extend(anchors);
+    merge
+}
+
+/// DF.13: what [`merge_signal_nodes`] added to one file's re-emit.
+struct SignalMerge {
+    /// The ids only the binding minted (a membership set: nothing iterates
+    /// it into the output).
+    minted: HashSet<NodeId>,
+    /// Bound sites that named an event, per side: `python_signal_nodes`
+    /// anchors each one, and mints nothing for an identity the LA.41 name
+    /// rule refuses.
+    emit: usize,
+    handle: usize,
+}
+
+/// DF.13 (blinker and Django signals pair across files). A signal's identity
+/// is declared in one file (`order_placed = signal("order-placed")`,
+/// `order_placed = Signal()`) and used in another (`from signals import
+/// order_placed`, then `order_placed.send(..)`, `@order_placed.connect`,
+/// `@receiver(order_placed)`). The per-file extractors are cached by the
+/// file's own hash and cannot read the declaring file, so, like CB.3b, this
+/// runs after the parse cache, text only:
+///
+/// 1. the repo's signal table ([`PySignalTable::build`]): DF.12's
+///    `python_signal_decls` per `.py` file, each identity from
+///    `PySignalDecl::event_identity` of the declaring module's dotted path
+///    (`order-placed`; Django `shop.signals.order_placed`);
+/// 2. per Python parse, in walk order, the names it binds
+///    ([`PySignalTable::bound`]) and their sites (`python_signal_sites`; the
+///    bound set is the only gate, so a `.send(` on anything else mints
+///    nothing);
+/// 3. a file with a bound site gets its CB.3b re-emit ([`event_fold_one`]:
+///    its literal, constant-keyed and DF.12 literal blinker nodes exactly as
+///    CB.3b would emit them) plus `python_signal_nodes` of its sites
+///    ([`merge_signal_nodes`]), swapped in through
+///    `eventbus::replace_event_nodes`.
+///
+/// The swap re-anchors every event node of the file and stamps the owner
+/// edges it adds `const_fold`. An owner edge the file held before keeps the
+/// evidence it had; a new one, a bound site's, is stamped
+/// `extractor:anchor` rule `python_signal`. A bound node gets the file's
+/// IMPORTS cell when the swap did not give it one (a file with no event
+/// node before has none to inherit), after its POSITION, so the A16.4
+/// filter rewrites it like every other node's. No ORIGIN: both libraries
+/// are in-process buses (DF.12).
+///
+/// Determinism: the table is BTree-keyed and built in walk order, files are
+/// visited in walk order and each swap is per parse; `parses_by_lang` is only
+/// looked up. A re-export (`from app import signals` where
+/// `app/__init__.py` re-exports another module's signal) binds only when the
+/// import names the declaring module.
+fn apply_python_signals(
+    parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
+    inputs: &FoldInputs<'_>,
+    roots: &[ProjectRoot],
+    parse_errors: &mut Vec<String>,
+) -> PySignalStats {
+    let mut stats = PySignalStats::default();
+    let table = PySignalTable::build(inputs.files, roots, parse_errors);
+    (stats.decls, stats.dropped) = table.counts();
+    if stats.decls == 0 {
+        return stats;
+    }
+    let slots: HashMap<NodeId, usize> = match parses_by_lang.get("python") {
+        Some(parses) => {
+            let mut slots = HashMap::new();
+            for (slot, fp) in parses.iter().enumerate() {
+                if let Some(first) = fp.nodes.first() {
+                    slots.entry(first.id).or_insert(slot);
+                }
+            }
+            slots
+        }
+        None => return stats,
+    };
+    for (file, (path, source)) in inputs.files.iter().enumerate() {
+        if detect_language(path) != Some("python") {
+            continue;
+        }
+        let module_id = inputs.modules.module_id(path, inputs.repo);
+        let Some(&slot) = slots.get(&module_id) else {
+            continue;
+        };
+        let Some(fp) = parses_by_lang.get("python").and_then(|p| p.get(slot)) else {
+            continue;
+        };
+        let bound = table.bound(path, fp, &mut stats.dropped);
+        let names: BTreeSet<String> = bound
+            .iter()
+            .filter_map(|(name, identity)| identity.as_ref().map(|_| name.clone()))
+            .collect();
+        if names.is_empty() {
+            continue;
+        }
+        let Ok(found) = crate::parallel::quiet(|| eventbus::python_signal_sites(source, path, &names))
+        else {
+            parse_errors.push(format!("{path}: PANIC (python signals)"));
+            continue;
+        };
+        let sites: Vec<(eventbus::PySignalSide, String, usize)> = found
+            .into_iter()
+            .filter_map(|s| {
+                let identity = bound.get(&s.bound)?.clone()?;
+                Some((s.side, identity, s.at))
+            })
+            .collect();
+        if sites.is_empty() {
+            continue;
+        }
+        let t = FoldTarget { file, lang: "python", module_id, slot };
+        let out = event_fold_one(inputs, &t, |source, path, mut fold| {
+            let sig = eventbus::python_signal_nodes(source, path, module_id, inputs.repo, &sites);
+            let merge = merge_signal_nodes(&mut fold, sig);
+            (fold, merge)
+        });
+        let Some((fold, merge)) = out else {
+            parse_errors.push(format!("{path}: PANIC (python signals)"));
+            continue;
+        };
+        if merge.emit + merge.handle == 0 {
+            continue;
+        }
+        let Some(fp) = parses_by_lang.get_mut("python").and_then(|p| p.get_mut(slot)) else {
+            continue;
+        };
+        stats.files += 1;
+        stats.emit += merge.emit;
+        stats.handle += merge.handle;
+        swap_signal_nodes(fp, module_id, fold, &merge.minted);
+    }
+    stats
+}
+
+/// DF.13: [`eventbus::replace_event_nodes`] for one file, then the two
+/// repairs a bound site needs (see [`apply_python_signals`]). The swap stamps
+/// every owner edge it adds `extractor:anchor` rule `const_fold`: an owner
+/// edge of an event site the file held before gets back the evidence it
+/// had, and a new one (a bound site's) is stamped `python_signal`. Each node
+/// in `minted` without an IMPORTS cell gets the file's raw cell, the one the
+/// router gave every node of the parse.
+fn swap_signal_nodes(
+    fp: &mut FileParse,
+    module_id: NodeId,
+    fold: eventbus::EventFold,
+    minted: &HashSet<NodeId>,
+) {
+    type EdgeKey = (NodeId, NodeId, glia_core::EdgeCategoryId);
+    let sites_of = |fp: &FileParse| -> HashSet<NodeId> {
+        fp.nav
+            .kind_by_id
+            .keys()
+            .filter(|id| is_event_site_node(&fp.nav, **id))
+            .copied()
+            .collect()
+    };
+    let old_sites = sites_of(fp);
+    let before: HashMap<EdgeKey, Evidence> = fp
+        .edges
+        .iter()
+        .filter(|e| old_sites.contains(&e.from) || old_sites.contains(&e.to))
+        .filter_map(|e| Some(((e.from, e.to, e.category), Evidence::of(e)?)))
+        .collect();
+    let imports = fp
+        .nodes
+        .iter()
+        .flat_map(|n| n.cells.iter())
+        .find(|c| c.kind == cell_type::IMPORTS)
+        .cloned();
+    eventbus::replace_event_nodes(fp, module_id, "python", fold);
+    let sites = sites_of(fp);
+    let bound = Evidence::emitter(PY_SIGNAL_EMITTER).rule(PY_SIGNAL_RULE);
+    for e in fp.edges.iter_mut() {
+        if !(sites.contains(&e.from) || sites.contains(&e.to)) {
+            continue;
+        }
+        let Some(ev) = Evidence::of(e) else {
+            continue;
+        };
+        if ev.emitter != PY_SIGNAL_EMITTER || ev.rule.as_deref() != Some("const_fold") {
+            continue;
+        }
+        match before.get(&(e.from, e.to, e.category)) {
+            Some(old) if *old != ev => evidence::attach(e, old.clone()),
+            Some(_) => {}
+            None => evidence::attach(e, bound.clone()),
+        }
+    }
+    if let Some(cell) = imports {
+        for n in fp.nodes.iter_mut().filter(|n| minted.contains(&n.id)) {
+            if !n.cells.iter().any(|c| c.kind == cell_type::IMPORTS) {
+                n.cells.push(cell.clone());
+            }
+        }
+    }
 }
 
 /// A16.4 (audit 2026-06-10 #12): rewrite each file's IMPORTS cell without the
