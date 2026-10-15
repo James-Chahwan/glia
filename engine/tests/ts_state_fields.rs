@@ -37,10 +37,36 @@ const FIXTURE: [(&str, &str); 3] = [
 
 const TRADE: &str = "src::trade.component::TradeComponent";
 
+/// DF.17: the `ts-signal-xfile-reads` corpus fixture, another class's signal
+/// / computed STATE_VARs read through an `inject()` field and a constructor
+/// parameter property.
+const XFILE: [(&str, &str); 3] = [
+    (
+        "package.json",
+        include_str!("../../bench/substrate-gap/fixtures/ts-signal-xfile-reads/package.json"),
+    ),
+    (
+        "src/app/draft.store.ts",
+        include_str!(
+            "../../bench/substrate-gap/fixtures/ts-signal-xfile-reads/src/app/draft.store.ts"
+        ),
+    ),
+    (
+        "src/app/editor.component.ts",
+        include_str!(
+            "../../bench/substrate-gap/fixtures/ts-signal-xfile-reads/src/app/editor.component.ts"
+        ),
+    ),
+];
+
 fn build() -> (tempfile::TempDir, std::path::PathBuf, MergedGraph) {
+    build_from(&FIXTURE)
+}
+
+fn build_from(files: &[(&str, &str)]) -> (tempfile::TempDir, std::path::PathBuf, MergedGraph) {
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
-    for (rel, src) in FIXTURE {
+    for &(rel, src) in files {
         let path = repo.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, src).unwrap();
@@ -171,5 +197,50 @@ fn the_class_takes_none_of_the_initializers_calls() {
         m.all_edges()
             .any(|e| e.from == class && e.to == total && e.category == edge_category::DEFINES),
         "the class DEFINES its STATE_VAR"
+    );
+}
+
+/// DF.17: `this.store.length()` (an `inject()` field) and `this.other.draft()`
+/// (a constructor parameter property) bind to DraftStore's STATE_VARs as
+/// `receiver_state` at the read's own line; `this.store.save()` stays the
+/// `receiver_type` control.
+#[test]
+fn cross_class_signal_reads_bind() {
+    let (_tmp, repo, m) = build_from(&XFILE);
+    let nodes = by_qname(&m);
+    let show = node(
+        &nodes,
+        "src::app::editor.component::EditorComponent::show",
+        node_kind::METHOD,
+    );
+    let store = "src::app::draft.store::DraftStore";
+    for (target, kind, rule, text) in [
+        ("save", node_kind::METHOD, "receiver_type", "this.store.save()"),
+        ("length", node_kind::STATE_VAR, "receiver_state", "this.store.length()"),
+        ("draft", node_kind::STATE_VAR, "receiver_state", "this.other.draft()"),
+    ] {
+        let to = node(&nodes, &format!("{store}::{target}"), kind);
+        let edge = m
+            .all_edges()
+            .find(|e| e.from == show && e.to == to && e.category == edge_category::CALLS)
+            .unwrap_or_else(|| panic!("show CALLS DraftStore::{target}"));
+        let ev = Evidence::of(edge).expect("the CALLS edge carries EVIDENCE");
+        assert_eq!(ev.emitter, "graph:calls", "{target}: {ev:?}");
+        assert_eq!(ev.rule.as_deref(), Some(rule), "{target}: {ev:?}");
+        assert_eq!(ev.basis, Basis::Site, "{target}: {ev:?}");
+        let (Some(file), Some(line)) = (ev.file.clone(), ev.line) else {
+            panic!("site evidence without a file and line: {ev:?}");
+        };
+        assert_eq!(file, "src/app/editor.component.ts");
+        let src = source_line(&repo, &file, line);
+        assert!(src.contains(text), "{target}: {file}:{line} is `{}`", src.trim());
+    }
+    // In-class reads stay CH.2's: `length`'s computed body reads `draft`.
+    let length = node(&nodes, &format!("{store}::length"), node_kind::STATE_VAR);
+    let draft = node(&nodes, &format!("{store}::draft"), node_kind::STATE_VAR);
+    assert!(
+        m.all_edges()
+            .any(|e| e.from == length && e.to == draft && e.category == edge_category::CALLS),
+        "DraftStore::length CALLS DraftStore::draft"
     );
 }

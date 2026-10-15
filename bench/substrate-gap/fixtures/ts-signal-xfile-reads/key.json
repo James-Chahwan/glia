@@ -1,0 +1,26 @@
+{
+  "framework": "ts-signal-xfile-reads",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "DF (0.5.1 follow-up 'cross-file signal reads binding STATE_VARs'): CH.2 mints `draft = signal(..)` / `length = computed(..)` as STATE_VARs and binds `this.draft()` inside DraftStore, but a read through another class's typed field (`this.store.length()`, `this.other.draft()`) goes through graph/src/calls.rs resolve_via_receiver_type -> type_method, which reads class_methods (METHODs only). HEAD (84e2e71, leap wheel): CALLS EditorComponent::show -> DraftStore::save present, -> DraftStore::length / DraftStore::draft 0/2. Kina (a448fb3): 991 CALLS into STATE_VARs, all from inside the STATE_VAR's own class; 0 cross-class (`this.auth.user()` alone is written 30 times).",
+  "expect_edges": [
+    {
+      "from": "EditorComponent::show",
+      "to": "DraftStore::save",
+      "category": "CALLS",
+      "note": "control"
+    },
+    {
+      "from": "EditorComponent::show",
+      "to": "DraftStore::length",
+      "category": "CALLS"
+    },
+    {
+      "from": "EditorComponent::show",
+      "to": "DraftStore::draft",
+      "category": "CALLS"
+    }
+  ]
+}

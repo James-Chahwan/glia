@@ -74,10 +74,13 @@ enum Branch {
     EnumMember,
     GlobalUniqueMethod,
     TypeMethod,
+    /// DF.17: a TS-family read of another class's STATE_VAR through a typed
+    /// receiver ([`state_member`]).
+    ReceiverState,
 }
 
 impl Branch {
-    const COUNT: usize = 10;
+    const COUNT: usize = 11;
 
     fn rule(self) -> &'static str {
         match self {
@@ -91,6 +94,7 @@ impl Branch {
             Branch::EnumMember => "enum_member",
             Branch::GlobalUniqueMethod => "global_unique_method",
             Branch::TypeMethod => "type_method",
+            Branch::ReceiverState => "receiver_state",
         }
     }
 }
@@ -165,6 +169,7 @@ pub(crate) fn resolve_calls<H>(
     let mut enum_hits = EnumHits::default();
     let mut gate = BareFieldGate::default();
     let mut constructed = ConstructedReceivers::default();
+    let mut state_reads = StateReads::default();
     // A6.6: CALLS bound into an INTERFACE's own METHOD, by the path that bound
     // them (a field-typed receiver, or a statically-qualified `IFoo.m()`).
     let (mut iface_recv, mut iface_static) = (0usize, 0usize);
@@ -224,17 +229,20 @@ pub(crate) fn resolve_calls<H>(
 
         // A6.2a: `_repo.Find()` / `this.repo.find()` where the receiver is a
         // declared field of the enclosing type, and CL.5a: `new Calc().add()`
-        // on the type it constructs. Strictly AFTER every lookup above, so an
-        // import binding or module symbol that shares the field's name keeps
-        // today's target.
+        // on the type it constructs; DF.17: a TS-family `this.store.draft()`
+        // on a STATE_VAR of the field's type. Strictly AFTER every lookup
+        // above, so an import binding or module symbol that shares the
+        // field's name keeps today's target.
         let resolved = resolved.or_else(|| {
-            let hit = resolve_via_receiver_type(g, site, from_module, &mut gate, &mut constructed);
-            if let Some(to) = hit
-                && is_interface_method(&g.nav, to)
-            {
+            let (to, branch) =
+                resolve_via_receiver_type(g, site, from_module, &mut gate, &mut constructed)?;
+            if is_interface_method(&g.nav, to) {
                 iface_recv += 1;
             }
-            hit.map(|to| (to, Branch::ReceiverType))
+            if let Branch::ReceiverState = branch {
+                state_reads.0 += 1;
+            }
+            Some((to, branch))
         });
 
         let resolved = match resolved {
@@ -272,6 +280,9 @@ pub(crate) fn resolve_calls<H>(
         eprintln!("{line}");
     }
     if let Some(line) = constructed.marker() {
+        eprintln!("{line}");
+    }
+    if let Some(line) = state_reads.marker() {
         eprintln!("{line}");
     }
 }
@@ -895,13 +906,21 @@ fn resolve_type_name(g: &RepoGraph, from_module: NodeId, name: &str) -> Option<N
 /// rather than fall back to [`receiver_type`], and the gate is not consulted
 /// (a constructor expression is never a field read). `constructed` tallies
 /// it for the `[recv] constructed receivers` line, not `recv_stats`.
+///
+/// DF.17: when the receiver's declared type has no method `method` and the
+/// caller's file is TS-family ([`is_ts_family`]), a STATE_VAR of that CLASS
+/// named `method` binds instead ([`state_member`]: an Angular `signal` /
+/// `computed` / call-initialised field read as `this.store.draft()`), as
+/// [`Branch::ReceiverState`]; every other hit is [`Branch::ReceiverType`].
+/// A6.2a's gate applies to both, and both count toward `recv_stats`. The
+/// constructed-type arm reads methods only.
 fn resolve_via_receiver_type(
     g: &RepoGraph,
     site: &CallSite,
     from_module: NodeId,
     gate: &mut BareFieldGate,
     constructed: &mut ConstructedReceivers,
-) -> Option<NodeId> {
+) -> Option<(NodeId, Branch)> {
     let method = match &site.qualifier {
         CallQualifier::Attribute { name, .. } | CallQualifier::ComplexReceiver { name, .. } => {
             name.as_str()
@@ -914,11 +933,20 @@ fn resolve_via_receiver_type(
     if let Some(ty) = constructed_type(site) {
         let hit = constructed_type_id(g, from_module, ty).and_then(|t| type_method(g, t, method));
         constructed.tally(gate.ext(g, site.from), hit.is_some());
-        return hit;
+        return hit.map(|to| (to, Branch::ReceiverType));
     }
     let type_name = receiver_type(g, site)?;
     let type_id = resolve_type_name(g, from_module, type_name)?;
-    let hit = type_method(g, type_id, method)?;
+    let hit = match type_method(g, type_id, method) {
+        Some(m) => (m, Branch::ReceiverType),
+        None => {
+            let state = state_member(g, type_id, method)?;
+            if !gate.ext(g, site.from).as_deref().is_some_and(is_ts_family) {
+                return None;
+            }
+            (state, Branch::ReceiverState)
+        }
+    };
     // A6.2a's gate: an Attribute base the caller does not bind as a local
     // was read as a field of the enclosing type.
     if let CallQualifier::Attribute { base, .. } = &site.qualifier
@@ -939,6 +967,31 @@ fn type_method(g: &RepoGraph, type_id: NodeId, method: &str) -> Option<NodeId> {
         .get(&type_id)
         .and_then(|m| m.get(method).copied())
         .or_else(|| g.symbols.interface_methods.get(&type_id).and_then(|m| m.get(method).copied()))
+}
+
+/// DF.17: the STATE_VAR child named `name` of the CLASS `type_id` (CH.2's
+/// `draft = signal(..)` / `length = computed(..)`), read off the nav's
+/// `children_of`, so `class_methods` stays METHOD-only for every other
+/// receiver-typed bind. Two such children (CH.2 mints at most one per name)
+/// bind neither; a non-CLASS type has none.
+fn state_member(g: &RepoGraph, type_id: NodeId, name: &str) -> Option<NodeId> {
+    if g.nav.kind_by_id.get(&type_id) != Some(&node_kind::CLASS) {
+        return None;
+    }
+    let mut hits = g.nav.children_of.get(&type_id)?.iter().copied().filter(|c| {
+        g.nav.kind_by_id.get(c) == Some(&node_kind::STATE_VAR)
+            && g.nav.name_by_id.get(c).map(String::as_str) == Some(name)
+    });
+    let hit = hits.next()?;
+    hits.all(|c| c == hit).then_some(hit)
+}
+
+/// The TypeScript / JavaScript source extensions (a Vue SFC's script
+/// included), lowercased as [`BareFieldGate::ext`] reads them: the callers
+/// whose bare field reads are constructor-gated and whose typed receivers
+/// may read a STATE_VAR (DF.17).
+fn is_ts_family(ext: &str) -> bool {
+    matches!(ext, "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" | "vue")
 }
 
 /// CL.5a: the simple name of the type a constructor-call receiver builds —
@@ -1170,7 +1223,7 @@ impl BareFieldGate {
             return true;
         };
         let ctor = match ext.as_str() {
-            "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" | "vue" => "constructor",
+            e if is_ts_family(e) => "constructor",
             "py" | "pyi" => "__init__",
             _ => return true,
         };
@@ -1234,6 +1287,19 @@ impl ConstructedReceivers {
             self.unbound,
             exts.join(",")
         ))
+    }
+}
+
+/// DF.17's per-build count of CALLS bound to another class's STATE_VAR
+/// through a typed receiver ([`Branch::ReceiverState`]).
+#[derive(Default)]
+struct StateReads(usize);
+
+impl StateReads {
+    /// The fired_on line, `None` when nothing bound:
+    /// `[recv] state reads bound across classes: N`.
+    fn marker(&self) -> Option<String> {
+        (self.0 > 0).then(|| format!("[recv] state reads bound across classes: {}", self.0))
     }
 }
 
@@ -2233,6 +2299,119 @@ mod tests {
         assert_eq!(
             gate.marker().as_deref(),
             Some("[recv] bare field receivers skipped outside constructor: 3 (ext=py:1,ts:2)")
+        );
+    }
+
+    // ---- DF.17: a typed receiver reads another class's STATE_VAR (TS family)
+
+    /// `m2`: `class DraftStore { draft = signal(''); save() {} }`, plus a
+    /// METHOD `twin` and a STATE_VAR `twin` when `twin` is set.
+    fn store_module(twin: bool) -> (FileParse, [NodeId; 4]) {
+        let mut s = Shape::new();
+        let m2 = s.add(node_kind::MODULE, "m2", None);
+        let store = s.add(node_kind::CLASS, "m2::DraftStore", Some(m2));
+        let draft = s.add(node_kind::STATE_VAR, "m2::DraftStore::draft", Some(store));
+        let save = s.add(node_kind::METHOD, "m2::DraftStore::save", Some(store));
+        let mut method_twin = draft;
+        if twin {
+            method_twin = s.add(node_kind::METHOD, "m2::DraftStore::twin", Some(store));
+            s.add(node_kind::STATE_VAR, "m2::DraftStore::twin", Some(store));
+        }
+        (s.file(vec![], vec![], vec![]), [store, draft, save, method_twin])
+    }
+
+    /// `m1`: `class Editor { store: DraftStore; show() { this.store.<m>() .. } }`,
+    /// `show` placed in `path` (`None`: no POSITION).
+    fn reader(methods: &[&str], path: Option<&str>) -> (FileParse, NodeId) {
+        let mut s = Shape::new();
+        let m1 = s.add(node_kind::MODULE, "m1", None);
+        let editor = s.add(node_kind::CLASS, "m1::Editor", Some(m1));
+        let show = s.add(node_kind::METHOD, "m1::Editor::show", Some(editor));
+        s.nav.record_field_type(editor, "store", "DraftStore");
+        let calls = methods
+            .iter()
+            .enumerate()
+            .map(|(i, m)| CallSite { from: show, qualifier: recv("this.store", m), line: i as u32 })
+            .collect();
+        let mut file = s.file(vec![], calls, vec![]);
+        if let Some(path) = path {
+            place(&mut file, show, path);
+        }
+        (file, show)
+    }
+
+    #[test]
+    fn field_typed_receiver_reads_a_state_var() {
+        let (store, [_, draft, save, _]) = store_module(false);
+        let (caller, show) = reader(&["draft", "save"], Some("src/app/editor.component.ts"));
+        let g = build_typescript(repo(), vec![store, caller], |_, _| None).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(show, draft), (show, save)]);
+        assert_eq!(
+            evidence_rule(&g, show, draft, edge_category::CALLS),
+            calls_rule("receiver_state")
+        );
+        assert_eq!(
+            evidence_rule(&g, show, save, edge_category::CALLS),
+            calls_rule("receiver_type")
+        );
+        assert!(g.unresolved_calls.is_empty());
+    }
+
+    /// A CLASS holding a METHOD and a STATE_VAR of one name binds the METHOD.
+    #[test]
+    fn method_wins_over_state_var() {
+        let (store, [_, _, _, method_twin]) = store_module(true);
+        let (caller, show) = reader(&["twin"], Some("src/app/editor.component.ts"));
+        let g = build_typescript(repo(), vec![store, caller], |_, _| None).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(show, method_twin)]);
+        assert_eq!(
+            evidence_rule(&g, show, method_twin, edge_category::CALLS),
+            calls_rule("receiver_type")
+        );
+    }
+
+    /// Solidity (a public state var is a getter), Python and a caller with no
+    /// POSITION never read a STATE_VAR through the receiver; the METHOD still
+    /// binds.
+    #[test]
+    fn non_ts_caller_does_not_read_state_vars() {
+        for path in [Some("contracts/Editor.sol"), Some("svc/editor.py"), None] {
+            let (store, [_, _, save, _]) = store_module(false);
+            let (caller, show) = reader(&["draft", "save"], path);
+            let g = build_dotted(repo(), vec![store, caller]).unwrap();
+            assert_eq!(edges_of(&g, edge_category::CALLS), vec![(show, save)], "{path:?}");
+            assert_eq!(g.unresolved_calls.len(), 1, "{path:?}");
+        }
+        let (store, [_, _, save, _]) = store_module(false);
+        let (caller, show) = reader(&["draft", "save"], Some("svc/editor.py"));
+        let g = build_python(repo(), vec![store, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(show, save)]);
+    }
+
+    /// Two STATE_VAR children of one name, or a non-CLASS owner: no member.
+    #[test]
+    fn state_member_needs_one_state_var_of_a_class() {
+        let (store, [class, draft, _, _]) = store_module(false);
+        let g = build_dotted(repo(), vec![store]).unwrap();
+        assert_eq!(state_member(&g, class, "draft"), Some(draft));
+        assert_eq!(state_member(&g, class, "save"), None, "a METHOD is not state");
+        assert_eq!(state_member(&g, draft, "draft"), None, "not a CLASS");
+
+        let (mut store, [class, draft, _, _]) = store_module(false);
+        let q = "m2::DraftStore::draft#2";
+        let shadow = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, q);
+        assert_ne!(shadow, draft);
+        store.nav.record(shadow, "draft", q, node_kind::STATE_VAR, Some(class));
+        let g = build_dotted(repo(), vec![store]).unwrap();
+        assert_eq!(state_member(&g, class, "draft"), None, "two same-named STATE_VARs");
+    }
+
+    #[test]
+    fn state_reads_marker() {
+        assert_eq!(StateReads::default().marker(), None);
+        assert_eq!(
+            StateReads(3).marker().as_deref(),
+            Some("[recv] state reads bound across classes: 3")
         );
     }
 
