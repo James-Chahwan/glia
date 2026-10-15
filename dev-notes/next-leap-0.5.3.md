@@ -155,6 +155,45 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   `.run` without parentheses, `Seq.apply(..)`. DB: Slick tables through a type alias, a generic base or a qualified
   `extends profile.api.Table[`. HTTP: Akka `pathEnd` / `pathSuffix` / `rawPathPrefix` / `|` prefixes, Scala 3
   brace-less blocks, handler names for inline directive blocks.
+- W3 (DH.11): the W2 code-guard cluster grows: the `data_entities.rs` SQL-literal scan and the older migration DSL
+  needles do not read through `LazyGuard`, so glia's own `data_entities.rs` / `migrations.rs` test literals mint 67
+  self-noise ACCESSES_DATA edges at HEAD (a declared graph-content change for `.rs` / `.py`).
+- W3 (DF.10): `glia serves` lists external HTTP ENDPOINTs (match `external`) but not the external WS / gRPC / GraphQL
+  clients DF.10 now marks; `serves::external_servers` is ENDPOINT-only.
+- W3 (DF.15): CI.5's parser-side `import_dirs` and the `external_pkgs` / `import_local_names` skip set still use path
+  spellings, so a Go package imported without an alias under a clause name unlike its directory keeps the
+  `api.Server` field-owner miss; needs a graph-side owner mapping.
+- W3 (DF.22b): TS inherited calls: a STATE_VAR declared on a superclass is not looked up (`nearest_definer` reads
+  `class_methods`, METHODs only); CL.5a's `[recv] constructed receivers` tally still counts a receiver this pass binds
+  as unbound.
+- W3 (DF.13): Python signals: re-exports through `__init__.py` and star imports bind nothing (the parser emits no
+  ImportStmt for `from x import *`). Decorator handlers (`@ee.on`, `@sig.connect`, `@receiver`) anchor to the module,
+  not HANDLED_BY the decorated def, because the decorator line sits outside the def's POSITION span (`anchor::attach`,
+  every Python decorator site). `marker_swap::swap` could take the evidence rule and the IMPORTS behaviour as
+  parameters, shrinking `grafts.rs` `swap_signal_nodes` to a `replace_event_nodes` call.
+- W3 (DG.11): ScalaTest: a suite extending an in-house base (`MySpec extends BaseSpec`, BaseSpec extends AnyFlatSpec)
+  is not recognised (needs a resolver-level base walk); Scala 3 brace-less `test("x"):`, cases registered in loops or
+  helper defs, and fixture-suite bases (`FixtureAnyFlatSpec`) mint no case.
+- W3 (DH.2): Laravel queues: `implements ShouldQueue` on the next line, `self::dispatch()` / `static::dispatch()`,
+  `dispatchSync` / `dispatchIf` / `Queue::push(new X)`, subclasses of a ShouldQueue base and the global `Redis` alias
+  have no rows; a job consumer is anchored at its class line, not HANDLED_BY `handle()` (the CL.4 binding; the
+  coverage caveat went to DF.21).
+- W3 (DH.5, DH.10): Dart `Platform.environment.containsKey('X')` / `String.fromEnvironment('X')` and Elixir
+  `Application.get_env` are unread; PHP `exec(` (collides with `regex.exec`), a fully qualified
+  `new \Symfony\...\Process(`, package:args `aliases`, pubspec `executables:` and gemspec `executables.concat(..)` /
+  `+=` are unread.
+- W3 (DH.8): GraphQL: Absinthe `import_fields` is not expanded across modules; graphql-ruby root classes are found by
+  name, not through `query Types::X`; a Dart document passed by value (`document: listOrders`) or QueryOptions built
+  outside the call is unread; anonymous `query { .. }` is unnamed. `graphql.rs`'s private `elixir_code_mask` could
+  become DH.10's `CodeMap::script(.., Script::Elixir)` once that lexer blanks sigils.
+- W3 (DH.9): Ratchet: a Slim / Laravel `->route(` in a Ratchet file reads as a socket route, and `"/ws/$x"` is read
+  verbatim; Dart `Uri(scheme: 'ws', ..)` and adjacent-literal concatenation read as the generic `ws_client:ws`; the ws
+  call-argument reader is a private copy of `queue_topic.rs`'s.
+- W3 (DH.11): sqflite renames, Ecto `rename table(:a), to: table(:b)` (only `a`), `create(table(:x))` and Dart raw
+  strings `r'users'` name no table.
+- W3 (DH.21): libcurl: handle state is per function (options set in a helper read as GET), the handle key is textual
+  (`curl` ≠ `self->curl`), and non-literal URLs (an `snprintf` buffer, `BASE "/x"`) name nothing; a const-table fold
+  of `#define BASE "http://.."` would cover the macro case.
 
 ## 3. Open questions for James
 
