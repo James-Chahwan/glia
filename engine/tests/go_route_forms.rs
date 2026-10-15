@@ -249,3 +249,86 @@ fn const_prefixes_end_to_end() {
         assert!(cells[0].contains(r#""file":"api/routes.go""#), "{q}: {cells:?}");
     }
 }
+
+/// DF.16: the substrate-gap fixture `go-local-method-handlers`, written into
+/// a tempdir with its directory layout.
+fn build_local_method_handlers() -> (tempfile::TempDir, MergedGraph) {
+    const FILES: [(&str, &str); 3] = [
+        (
+            "go.mod",
+            include_str!("../../bench/substrate-gap/fixtures/go-local-method-handlers/go.mod"),
+        ),
+        (
+            "api/handlers.go",
+            include_str!(
+                "../../bench/substrate-gap/fixtures/go-local-method-handlers/api/handlers.go"
+            ),
+        ),
+        (
+            "api/routes.go",
+            include_str!(
+                "../../bench/substrate-gap/fixtures/go-local-method-handlers/api/routes.go"
+            ),
+        ),
+    ];
+    let td = tempfile::tempdir().expect("tempdir");
+    for (rel, text) in FILES {
+        let path = td.path().join(rel);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).expect("mkdir");
+        }
+        std::fs::write(&path, text).expect("write fixture file");
+    }
+    let root = td.path().to_string_lossy().into_owned();
+    let merged = generate_one(&root).expect("generate_one").merged;
+    (td, merged)
+}
+
+/// The qname of every node `id` is HANDLED_BY, sorted.
+fn handler_qnames(m: &MergedGraph, id: NodeId) -> Vec<String> {
+    let mut out: Vec<String> = m
+        .graphs
+        .iter()
+        .flat_map(|g| g.edges.iter())
+        .chain(m.cross_edges.iter())
+        .filter(|e| e.from == id && e.category == edge_category::HANDLED_BY)
+        .filter_map(|e| m.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&e.to).cloned()))
+        .collect();
+    out.sort();
+    out
+}
+
+/// DF.16 acceptance: method-value handlers of a typed parameter (`h
+/// *TokensHandler`), a call-initialised local (`h := NewTokensHandler()`), a
+/// composite-literal local (`t := &TokensHandler{}`) and a declared var (`var
+/// d TokensHandler`) are HANDLED_BY TokensHandler's methods, though
+/// UsersHandler declares every same name. Before DF.16 the four bases stayed
+/// the variable names and the repo-unique name fallback bound none.
+#[test]
+fn local_method_handlers_bind() {
+    let (_td, m) = build_local_method_handlers();
+    for (q, handler) in [
+        ("GET /tokens", "api::handlers::TokensHandler::List"),
+        ("POST /tokens", "api::handlers::TokensHandler::Create"),
+        ("GET /tokens/:id", "api::handlers::TokensHandler::Show"),
+        ("DELETE /tokens/:id", "api::handlers::TokensHandler::Del"),
+    ] {
+        assert_eq!(handler_qnames(&m, route(&m, q)), vec![handler.to_string()], "{q}");
+    }
+    let into_users = m
+        .graphs
+        .iter()
+        .flat_map(|g| g.edges.iter())
+        .chain(m.cross_edges.iter())
+        .filter(|e| e.category == edge_category::HANDLED_BY)
+        .filter(|e| {
+            m.graphs.iter().any(|g| {
+                g.nav
+                    .qname_by_id
+                    .get(&e.to)
+                    .is_some_and(|q| q.starts_with("api::handlers::UsersHandler::"))
+            })
+        })
+        .count();
+    assert_eq!(into_users, 0, "a HANDLED_BY edge into UsersHandler");
+}

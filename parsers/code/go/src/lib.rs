@@ -206,10 +206,13 @@ pub fn parse_file_with_modules(
             acc.var_init_calls, acc.var_literal_bodies, acc.var_literal_calls, acc.var_call_owners
         );
     }
-    if acc.receiver_handlers > 0 {
+    // CA.5a / DF.16 fired_on: method-value handlers whose base names a type,
+    // through the registering method's receiver (`handlers=`) or a typed
+    // parameter / local of the registering callable (`local-method=`).
+    if acc.receiver_handlers + acc.local_handlers > 0 {
         eprintln!(
-            "[go-routes] receiver-method handlers={} in {file_rel_path}",
-            acc.receiver_handlers
+            "[go-routes] receiver-method handlers={} local-method={} in {file_rel_path}",
+            acc.receiver_handlers, acc.local_handlers
         );
     }
     let forms = &acc.route_forms;
@@ -358,6 +361,10 @@ struct Acc {
     /// CA.5a: HANDLED_BY refs whose base was rewritten from the receiver var
     /// to its type in this file — the `[go-routes] receiver-method` marker.
     receiver_handlers: usize,
+    /// DF.16: HANDLED_BY refs whose base was rewritten from a typed
+    /// parameter or local of the registering callable to its type text
+    /// ([`local_handler_base`]) — the marker's `local-method=`.
+    local_handlers: usize,
     /// LA.32a: route registrations emitted in this file, the POSITION cells
     /// pushed for them, and the method-bearing forms among them — the
     /// `[go-routes] registrations=` marker's counters.
@@ -5019,14 +5026,23 @@ fn emit_route_from_call(
                         let display = format!("{base}.{name}");
                         // CA.5a: `h.List` where `h` is the registering
                         // method's receiver names the receiver's TYPE, which
-                        // the graph binds to that type's own method; any
-                        // other base (a package, a local) stays a name.
+                        // the graph binds to that type's own method. DF.16:
+                        // a typed parameter or local of the registering
+                        // callable names its recorded type text
+                        // ([`local_handler_base`]); any other base (a
+                        // package, an untyped local) stays a name.
                         let base = match &acc.route_receiver {
                             Some((var, ty)) if *var == base => {
                                 acc.receiver_handlers += 1;
                                 ty.clone()
                             }
-                            _ => base,
+                            _ => match local_handler_base(&acc.nav, scope.callable.id, &base) {
+                                Some(ty) => {
+                                    acc.local_handlers += 1;
+                                    ty
+                                }
+                                None => base,
+                            },
                         };
                         (Some(display), Some(CallQualifier::Attribute { base, name }))
                     }
@@ -5237,6 +5253,46 @@ fn string_literal_text(n: TsNode, src: &[u8]) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// DF.16: the base a method-value handler `x.M` names when `x` is a typed
+/// parameter or local of the registering callable `scope` (CA.2a's
+/// `CodeNav::local_types[scope][x]`, filled before the route walk): its
+/// recorded type text, so the graph binds `M` on that type
+/// (`GoPackages::type_handler`) instead of by the repo-unique method name.
+///
+/// Only the texts the graph can type at package scope are taken:
+///
+/// * `T` (`h *T`, `t := &T{}`, `var d T`, `new(T)`; pointer stripped);
+/// * `pkg.T` (another package's type, its import name kept);
+/// * `F()` / `pkg.F()` (a local bound from a call; the callee's result type
+///   is read by the graph).
+///
+/// A local of unknown type (`""`, two types in one body), a `self.<field>`
+/// alias, a longer chain, and a chain rooted in another local (`svc.Repo()`,
+/// a func value `f()`) name nothing the graph could read outside the
+/// callable: `None`, and the base stays the variable name (the generic
+/// resolver's fallback, as before DF.16).
+fn local_handler_base(nav: &CodeNav, scope: NodeId, var: &str) -> Option<String> {
+    let locals = nav.local_types.get(&scope)?;
+    let text = locals.get(var)?;
+    let call = text.strip_suffix("()");
+    let path = call.unwrap_or(text);
+    let segs: Vec<&str> = path.split('.').collect();
+    let ident = |s: &str| {
+        s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+            && s.chars().all(|c| c.is_alphanumeric() || c == '_')
+    };
+    if segs.len() > 2 || !segs.iter().all(|s| ident(s)) {
+        return None;
+    }
+    // The root of a dotted or call text is a package or a function, never a
+    // local of the callable (nor its receiver, `self`).
+    let root = segs[0];
+    if (segs.len() == 2 || call.is_some()) && (root == "self" || locals.contains_key(root)) {
+        return None;
+    }
+    Some(text.clone())
 }
 
 fn route_method_cell(
@@ -7025,13 +7081,97 @@ func (h *TokensHandler) Create(c *gin.Context) {}
             .all(|r| r.from_module == module_id));
     }
 
+    // ---- DF.16: a typed parameter / local names its type text ----
+
+    /// The base of every HANDLED_BY `Attribute` ref of `route`, in push order.
+    fn handler_bases(parse: &FileParse, route: NodeId) -> Vec<String> {
+        handled_by(parse, route)
+            .into_iter()
+            .filter_map(|q| match q {
+                CallQualifier::Attribute { base, .. } => Some(base),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn local_var_handler_is_unchanged() {
-        // A local `h` in a FUNCTION, a local `h` in a method whose receiver is
-        // `s`, and a function after a receiver method (the receiver is cleared).
-        let source = r#"package server
+    fn param_method_value_names_the_param_type() {
+        let source = r#"package api
+
+import (
+    "github.com/gin-gonic/gin"
+    "example.com/shop/handlers"
+)
+
+func Register(r *gin.Engine, h *TokensHandler, u *handlers.UsersHandler, v TokensHandler) {
+    r.GET("/x", h.List)
+    r.GET("/y", u.List)
+    r.GET("/z", v.Show)
+}
+"#;
+        let parse =
+            parse_file(source, "api/routes.go", "api::routes", "example.com/shop", repo()).unwrap();
+        let x = route_id(repo(), "GET", "/x");
+        assert_eq!(handled_by(&parse, x), vec![attr("TokensHandler", "List")]);
+        // Another package's type keeps its import name; a value parameter
+        // names its type as a pointer one does.
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "GET", "/y")),
+            vec![attr("handlers.UsersHandler", "List")]
+        );
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "GET", "/z")),
+            vec![attr("TokensHandler", "Show")]
+        );
+        // The ROUTE_METHOD cell keeps the source text of the handler.
+        assert_eq!(route_handlers(&parse, x), vec![Some("h.List".to_string())]);
+    }
+
+    #[test]
+    fn local_from_composite_and_var() {
+        let source = r#"package api
 
 import "github.com/gin-gonic/gin"
+
+func Register(r *gin.Engine) {
+    t := &TokensHandler{}
+    r.GET("/t", t.Show)
+    var d TokensHandler
+    r.DELETE("/d", d.Del)
+    n := new(TokensHandler)
+    r.PUT("/n", n.Put)
+    v := TokensHandler{}
+    r.POST("/v", v.Create)
+}
+"#;
+        let parse =
+            parse_file(source, "api/routes.go", "api::routes", "example.com/shop", repo()).unwrap();
+        for (method, path, name) in [
+            ("GET", "/t", "Show"),
+            ("DELETE", "/d", "Del"),
+            ("PUT", "/n", "Put"),
+            ("POST", "/v", "Create"),
+        ] {
+            assert_eq!(
+                handled_by(&parse, route_id(repo(), method, path)),
+                vec![attr("TokensHandler", name)],
+                "{method} {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_from_call_keeps_the_chain() {
+        // A local `h` from a call in a FUNCTION, in a method whose receiver is
+        // `s` (only `s` is CA.5a's), and from an imported package's
+        // constructor: the base is the call's normalised chain, which the
+        // graph types through the callee's result.
+        let source = r#"package server
+
+import (
+    "github.com/gin-gonic/gin"
+    "example.com/app/handlers"
+)
 
 type Server struct{}
 
@@ -7041,24 +7181,129 @@ func (s *Server) Routes(r *gin.Engine) {
 }
 
 func setup(r *gin.Engine) {
-    h := NewItems()
+    h := NewItems(db, 3)
     r.GET("/items", h.List)
+    p := handlers.NewProducts()
+    r.GET("/products", p.List)
 }
 "#;
         let parse =
             parse_file(source, "server/server.go", "server", "example.com/app", repo()).unwrap();
         assert_eq!(
             handled_by(&parse, route_id(repo(), "GET", "/users")),
-            vec![attr("h", "List")]
+            vec![attr("NewUsers()", "List")]
         );
         assert_eq!(
             handled_by(&parse, route_id(repo(), "GET", "/items")),
-            vec![attr("h", "List")]
+            vec![attr("NewItems()", "List")]
+        );
+        assert_eq!(
+            handled_by(&parse, route_id(repo(), "GET", "/products")),
+            vec![attr("handlers.NewProducts()", "List")]
         );
         assert_eq!(
             route_handlers(&parse, route_id(repo(), "GET", "/items")),
             vec![Some("h.List".to_string())]
         );
+    }
+
+    #[test]
+    fn unknown_local_keeps_its_name() {
+        // Bound to two types; a range var; a chain rooted in another local;
+        // a func-value local; a `self.<field>` alias; a longer chain; an
+        // untyped value: none names a type the graph reads outside the
+        // callable, so each base stays the variable's name.
+        let source = r#"package server
+
+import "github.com/gin-gonic/gin"
+
+type Server struct{ users *UsersHandler }
+
+func setup(r *gin.Engine, svc *Services, hs []*TokensHandler) {
+    a := &TokensHandler{}
+    a = nil
+    var a2 UsersHandler
+    _ = a2
+    {
+        a := &UsersHandler{}
+        _ = a
+    }
+    r.GET("/a", a.List)
+    for _, k := range hs {
+        r.GET("/k", k.List)
+    }
+    c := svc.Handlers()
+    r.GET("/c", c.List)
+    mk := NewTokensHandler
+    f := mk()
+    r.GET("/f", f.List)
+    l := NewA().B()
+    r.GET("/l", l.List)
+    x := handlerFor("x")[0]
+    r.GET("/x", x.List)
+}
+
+func (s *Server) routes(r *gin.Engine) {
+    u := s.users
+    r.GET("/u", u.List)
+}
+"#;
+        let parse =
+            parse_file(source, "server/server.go", "server", "example.com/app", repo()).unwrap();
+        for (path, base) in [
+            ("/a", "a"),
+            ("/k", "k"),
+            ("/c", "c"),
+            ("/f", "f"),
+            ("/l", "l"),
+            ("/x", "x"),
+            ("/u", "u"),
+        ] {
+            assert_eq!(
+                handler_bases(&parse, route_id(repo(), "GET", path)),
+                vec![base.to_string()],
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn receiver_var_still_ca5a() {
+        // The receiver `h` is CA.5a's (its type); a parameter `u` of the same
+        // method is DF.16's (its type); a local named like the receiver in a
+        // later FUNCTION is that function's own.
+        let source = r#"package handlers
+
+import "github.com/gin-gonic/gin"
+
+type TokensHandler struct{}
+
+func (h *TokensHandler) Register(r *gin.Engine, u *UsersHandler) {
+    r.GET("/a", h.List)
+    r.GET("/b", u.List)
+}
+
+func other(r *gin.Engine) {
+    h := &UsersHandler{}
+    r.GET("/c", h.List)
+}
+"#;
+        let parse = parse_file(
+            source,
+            "handlers/tokens.go",
+            "handlers::tokens",
+            "example.com/kina",
+            repo(),
+        )
+        .unwrap();
+        let cases = [("/a", "TokensHandler"), ("/b", "UsersHandler"), ("/c", "UsersHandler")];
+        for (path, base) in cases {
+            assert_eq!(
+                handled_by(&parse, route_id(repo(), "GET", path)),
+                vec![attr(base, "List")],
+                "{path}"
+            );
+        }
     }
 
     #[test]
@@ -9370,7 +9615,8 @@ func serve(srv *http.Server) {
             )]
         );
         let stats = param_route_id("admin::panel::NewPanel", 0, "GET", "/admin/stats");
-        assert_eq!(handled_by(&parse, stats), vec![attr("p", "stats")]);
+        // DF.16: the local `p := &Panel{}` names its type.
+        assert_eq!(handled_by(&parse, stats), vec![attr("Panel", "stats")]);
 
         // Registered in another callable of the file, through a local group
         // and a second parameter; a field passed on carries the Param too.

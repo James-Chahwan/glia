@@ -2080,14 +2080,19 @@ impl TypeHandlerStats {
 /// [`GoPackages::type_handler`]'s answer for one HANDLED_BY ref.
 #[derive(Debug, PartialEq, Eq)]
 enum TypeHandler {
-    /// Not this pass's: a package-qualified or local-var base, or a
-    /// same-file type that declares the method (CA.5a's `type_method`).
+    /// Not this pass's: a package-qualified or untyped local-var base, a
+    /// type text that types nothing, or a same-file type that declares the
+    /// method (CA.5a's `type_method`).
     Generic,
     /// The base names a package STRUCT without the method, own or promoted.
     Unbound,
-    /// The STRUCT's METHOD, whether it is promoted, and whether the STRUCT is
-    /// declared in another file of the package than the registration.
-    Bound { method: NodeId, promoted: bool, other_file: bool },
+    /// The STRUCT's METHOD, whether it is promoted, whether the STRUCT is
+    /// declared in another file than the registration, and the EVIDENCE
+    /// rule: `package_type_method` for a type of the registering package
+    /// named as written (CI.4, and a parser-rewritten `T`, DF.16), or
+    /// `local_type_method` for another package's `pkg.T` or a call result
+    /// `F()` / `pkg.F()` (DF.16).
+    Bound { method: NodeId, promoted: bool, other_file: bool, rule: &'static str },
 }
 
 impl GoPackages {
@@ -2116,9 +2121,9 @@ impl GoPackages {
         let mut files: Option<SiteFiles> = None;
         for r in std::mem::take(refs) {
             match self.type_handler(g, &r) {
-                TypeHandler::Bound { method, promoted, other_file } => {
+                TypeHandler::Bound { method, promoted, other_file, rule } => {
                     let files = files.get_or_insert_with(|| SiteFiles::of(g));
-                    let ev = files.place(go_ev("package_type_method"), &r);
+                    let ev = files.place(go_ev(rule), &r);
                     push_edge(g, r.from, method, edge_category::HANDLED_BY, ev);
                     stats.bound += 1;
                     stats.other_file += usize::from(other_file);
@@ -2149,6 +2154,12 @@ impl GoPackages {
     ///    own method, else the one an embed promotes
     ///    ([`GoPackages::method_on`]); a STRUCT's METHOD only, so a method
     ///    promoted from an embedded INTERFACE never answers a handler.
+    ///
+    /// DF.16: the Go parser also writes a typed parameter's or local's type
+    /// text as the base (`h *TokensHandler` -> `TokensHandler`, which rule 2
+    /// reads like a written type). A base that is a TYPE TEXT rather than a
+    /// name — another package's `pkg.T`, or a call result `F()` / `pkg.F()`
+    /// — is typed by [`GoPackages::local_type_handler`] before rule 2.
     fn type_handler(&self, g: &RepoGraph, r: &UnresolvedRef) -> TypeHandler {
         if r.category != edge_category::HANDLED_BY {
             return TypeHandler::Generic;
@@ -2161,6 +2172,9 @@ impl GoPackages {
             || g.symbols.module_import_bindings.get(&module).is_some_and(|m| m.contains_key(base));
         if imported {
             return TypeHandler::Generic;
+        }
+        if base.contains('.') || base.ends_with("()") {
+            return self.local_type_handler(g, module, base, name);
         }
         let is_struct = |id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::STRUCT);
         let own = g.symbols.module_symbols.get(&module).and_then(|s| s.get(base));
@@ -2184,8 +2198,66 @@ impl GoPackages {
         let on_struct = |m: &NodeId| g.nav.parent_of.get(m).is_some_and(is_struct);
         match self.method_on(g, ty, name) {
             Some((method, promoted)) if on_struct(&method) => {
-                TypeHandler::Bound { method, promoted, other_file }
+                TypeHandler::Bound { method, promoted, other_file, rule: "package_type_method" }
             }
+            _ => TypeHandler::Unbound,
+        }
+    }
+
+    /// DF.16: the METHOD `name` of the type a handler base's TYPE TEXT names,
+    /// read at the registering file's package scope (CA.2b's
+    /// [`GoPackages::type_of_text`], `func: None`):
+    ///
+    /// * `pkg.T`, `pkg` an import of the file: the STRUCT / INTERFACE `T` of
+    ///   that package's directory;
+    /// * `F()`: the FUNCTION `F` of the file, else of its package, and the
+    ///   type its recorded result (CA.2a) names in the callee's own file; a
+    ///   type `T()` is a conversion to `T`;
+    /// * `pkg.F()`: the exported FUNCTION `F` of the imported package, the
+    ///   same way (a package var `V.F()` of the file's package: `V`'s type's
+    ///   method `F`'s result).
+    ///
+    /// The parser writes such a base only when its root is no local of the
+    /// registering callable, so the package scope reads it as Go does. Any
+    /// other shape, a text that types nothing, or a type that is no STRUCT
+    /// (an interface result) is generic, which leaves the ref to
+    /// `resolve_refs` exactly as its variable name did; a STRUCT without the
+    /// method (own or promoted) is unbound. The method binds even when its
+    /// type sits in the registering file: `resolve_refs` cannot read a type
+    /// text. Rule `local_type_method`.
+    fn local_type_handler(
+        &self,
+        g: &RepoGraph,
+        module: NodeId,
+        base: &str,
+        name: &str,
+    ) -> TypeHandler {
+        let shaped = matches!(
+            receiver_segments(base).as_deref(),
+            Some([Seg::Ident(_), Seg::Ident(_)] | [Seg::Call(_)] | [Seg::Ident(_), Seg::Call(_)])
+        );
+        let Some(caller_dir) = self.dir_of.get(&module).filter(|_| shaped) else {
+            return TypeHandler::Generic;
+        };
+        let scope = RecvScope {
+            func: None,
+            module,
+            caller_dir,
+            from_test: self.tests.contains(&module),
+        };
+        let mut typed = Typed::default();
+        let is_struct = |id: &NodeId| g.nav.kind_by_id.get(id) == Some(&node_kind::STRUCT);
+        let Some(ty) = self.type_of_text(g, scope, base, 0, &mut typed).filter(is_struct) else {
+            return TypeHandler::Generic;
+        };
+        let on_struct = |m: &NodeId| g.nav.parent_of.get(m).is_some_and(is_struct);
+        match self.method_on(g, ty, name) {
+            Some((method, promoted)) if on_struct(&method) => TypeHandler::Bound {
+                method,
+                promoted,
+                other_file: self.file_of(g, ty) != Some(module),
+                rule: "local_type_method",
+            },
             _ => TypeHandler::Unbound,
         }
     }
@@ -5994,11 +6066,14 @@ mod tests {
         assert_eq!(handlers.marker(), None);
     }
 
-    /// A local-var base (`h := &TokensHandler{}; r.GET("/x", h.List)` in a
-    /// FUNCTION) names no type: the pre-pass leaves the ref alone (base `h`),
-    /// and `resolve_refs` binds it as at HEAD, through the repo-unique name.
+    /// DF.16: a local-var base (`h := &TokensHandler{}; r.GET("/x", h.List)`
+    /// in a FUNCTION) is written by the parser as the local's type
+    /// (`TokensHandler`), which the pre-pass reads like a written type: the
+    /// type declared in another file of the package binds its own method,
+    /// rule `package_type_method` (before DF.16 the ref kept base `h` and
+    /// `resolve_refs` bound it through the repo-unique name).
     #[test]
-    fn go_local_var_handler_is_untouched() {
+    fn go_local_var_handler_binds_through_its_type() {
         let types = "package handlers\n\nimport \"github.com/gin-gonic/gin\"\n\n\
                      type TokensHandler struct{}\n\n\
                      func (h *TokensHandler) List(c *gin.Context) {}\n";
@@ -6016,18 +6091,189 @@ mod tests {
             .collect();
         assert_eq!(
             handler_refs,
-            vec![CallQualifier::Attribute { base: "h".to_string(), name: "List".to_string() }]
+            vec![CallQualifier::Attribute {
+                base: "TokensHandler".to_string(),
+                name: "List".to_string()
+            }]
         );
         let GoPasses { g, handlers, .. } = build_go_passes(repo(), parses);
         let list = gid(node_kind::METHOD, "handlers::tokens::TokensHandler::List");
         let r = route_id(&g, "GET /x");
         assert_eq!(handled_by(&g, r), vec![list]);
-        let (emitter, rule, ..) = handler_ev(&g, r, list);
+        assert_eq!(handler_ev(&g, r, list), pkg_type_ev(6));
         assert_eq!(
-            (emitter.as_str(), rule.as_deref()),
-            ("graph:refs", Some("global_unique_method"))
+            handlers,
+            TypeHandlerStats { bound: 1, other_file: 1, promoted: 0, unbound: 0 }
         );
+    }
+
+    // ---- DF.16: method-value handlers of typed parameters / locals ----------
+
+    /// Two handler types sharing every method name, in `handlers/types.go`.
+    const DF16_TYPES: &str = "package handlers\n\nimport \"github.com/gin-gonic/gin\"\n\n\
+        type TokensHandler struct{}\n\n\
+        func (h *TokensHandler) List(c *gin.Context) {}\n\
+        func (h *TokensHandler) Show(c *gin.Context) {}\n\n\
+        type UsersHandler struct{}\n\n\
+        func (u *UsersHandler) List(c *gin.Context) {}\n\
+        func (u *UsersHandler) Show(c *gin.Context) {}\n\n\
+        type Lister interface{ List(c *gin.Context) }\n\n\
+        func NewTokensHandler() *TokensHandler { return &TokensHandler{} }\n\
+        func NewUsersHandler() (*UsersHandler, error) { return &UsersHandler{}, nil }\n\
+        func NewLister() Lister { return &UsersHandler{} }\n";
+
+    /// The `local_type_method` EVIDENCE of a registration in `file` at
+    /// 0-based `row`.
+    fn local_type_ev(
+        file: &str,
+        row: u32,
+    ) -> (String, Option<String>, Option<String>, Option<u32>) {
+        (
+            "graph:go_packages".to_string(),
+            Some("local_type_method".to_string()),
+            Some(file.to_string()),
+            Some(row),
+        )
+    }
+
+    /// A local bound from a call (`h := NewTokensHandler()`, the parser's
+    /// base `NewTokensHandler()`) is typed through the callee's recorded
+    /// result type (the second result of `(*UsersHandler, error)` dropped),
+    /// in the registering file's package, and binds that type's method even
+    /// though every method name is shared. Same file or another: both bind.
+    #[test]
+    fn call_chain_base_binds_through_return_type() {
+        let routes = "package handlers\n\nimport \"github.com/gin-gonic/gin\"\n\n\
+                      func Register(r *gin.Engine) {\n\
+                      \th := NewTokensHandler()\n\
+                      \tr.GET(\"/tokens\", h.List)\n\
+                      \tu, _ := NewUsersHandler()\n\
+                      \tr.GET(\"/users\", u.Show)\n}\n";
+        let parses =
+            go_sources(&[("handlers/types.go", DF16_TYPES), ("handlers/routes.go", routes)]);
+        let bases: Vec<String> = parses
+            .iter()
+            .flat_map(|p| &p.refs)
+            .filter(|r| r.category == edge_category::HANDLED_BY)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Attribute { base, .. } => Some(base.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bases, vec!["NewTokensHandler()", "NewUsersHandler()"]);
+        let GoPasses { g, handlers, .. } = build_go_passes(repo(), parses);
+        let m = |q: &str| gid(node_kind::METHOD, q);
+        let file = "handlers/routes.go";
+        for (route, method, row) in [
+            ("GET /tokens", "handlers::types::TokensHandler::List", 6),
+            ("GET /users", "handlers::types::UsersHandler::Show", 8),
+        ] {
+            let r = route_id(&g, route);
+            assert_eq!(handled_by(&g, r), vec![m(method)], "{route}");
+            assert_eq!(handler_ev(&g, r, m(method)), local_type_ev(file, row), "{route}");
+        }
+        assert_eq!(
+            handlers,
+            TypeHandlerStats { bound: 2, other_file: 2, promoted: 0, unbound: 0 }
+        );
+
+        // The type and its constructor in the registering file itself:
+        // `resolve_refs` cannot read a call text, so the pre-pass binds it.
+        let one = format!(
+            "{DF16_TYPES}\nfunc Register(r *gin.Engine) {{\n\th := NewTokensHandler()\n\
+             \tr.GET(\"/tokens\", h.List)\n}}\n"
+        );
+        let GoPasses { g, handlers, .. } =
+            build_go_passes(repo(), go_sources(&[("handlers/types.go", &one)]));
+        let r = route_id(&g, "GET /tokens");
+        let list = m("handlers::types::TokensHandler::List");
+        assert_eq!(handled_by(&g, r), vec![list]);
+        assert_eq!(handler_ev(&g, r, list).1.as_deref(), Some("local_type_method"));
+        assert_eq!(
+            handlers,
+            TypeHandlerStats { bound: 1, other_file: 0, promoted: 0, unbound: 0 }
+        );
+    }
+
+    /// Another package's type (`t := &handlers.TokensHandler{}`, a parameter
+    /// `u *handlers.UsersHandler`) and its exported constructor
+    /// (`h := handlers.NewTokensHandler()`) bind through the registering
+    /// file's import of that package, rule `local_type_method`.
+    #[test]
+    fn imported_type_base_binds_in_its_package() {
+        let main = "package main\n\nimport (\n\t\"github.com/gin-gonic/gin\"\n\
+                    \t\"example.com/scope/handlers\"\n)\n\n\
+                    func routes(r *gin.Engine, u *handlers.UsersHandler) {\n\
+                    \tt := &handlers.TokensHandler{}\n\
+                    \tr.GET(\"/a\", t.List)\n\
+                    \th := handlers.NewTokensHandler()\n\
+                    \tr.GET(\"/b\", h.Show)\n\
+                    \tr.GET(\"/c\", u.List)\n}\n";
+        let parses =
+            go_sources(&[("handlers/types.go", DF16_TYPES), ("cmd/main.go", main)]);
+        let bases: Vec<String> = parses
+            .iter()
+            .flat_map(|p| &p.refs)
+            .filter(|r| r.category == edge_category::HANDLED_BY)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Attribute { base, .. } => Some(base.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            bases,
+            vec!["handlers.TokensHandler", "handlers.NewTokensHandler()", "handlers.UsersHandler"]
+        );
+        let GoPasses { g, handlers, .. } = build_go_passes(repo(), parses);
+        let m = |q: &str| gid(node_kind::METHOD, q);
+        for (route, method, row) in [
+            ("GET /a", "handlers::types::TokensHandler::List", 9),
+            ("GET /b", "handlers::types::TokensHandler::Show", 11),
+            ("GET /c", "handlers::types::UsersHandler::List", 12),
+        ] {
+            let r = route_id(&g, route);
+            assert_eq!(handled_by(&g, r), vec![m(method)], "{route}");
+            assert_eq!(handler_ev(&g, r, m(method)), local_type_ev("cmd/main.go", row), "{route}");
+        }
+        assert_eq!(
+            handlers,
+            TypeHandlerStats { bound: 3, other_file: 3, promoted: 0, unbound: 0 }
+        );
+    }
+
+    /// A type text that types no STRUCT is not this pass's: an interface
+    /// result (`NewLister()`), a callee the repo does not declare
+    /// (`Missing()`), a package outside the repo (`gin.New()`). Each ref is
+    /// left to `resolve_refs` as its variable name was (the shared `List`
+    /// binds nothing by name), and the pre-pass counts none.
+    #[test]
+    fn unknown_chain_is_generic() {
+        let routes = "package handlers\n\nimport \"github.com/gin-gonic/gin\"\n\n\
+                      func Register(r *gin.Engine) {\n\
+                      \tl := NewLister()\n\
+                      \tr.GET(\"/l\", l.List)\n\
+                      \tx := Missing()\n\
+                      \tr.GET(\"/x\", x.List)\n\
+                      \te := gin.New()\n\
+                      \tr.GET(\"/e\", e.List)\n}\n";
+        let parses =
+            go_sources(&[("handlers/types.go", DF16_TYPES), ("handlers/routes.go", routes)]);
+        let GoPasses { g, handlers, .. } = build_go_passes(repo(), parses);
+        for route in ["GET /l", "GET /x", "GET /e"] {
+            assert_eq!(handled_by(&g, route_id(&g, route)), vec![], "{route}");
+        }
         assert_eq!(handlers, TypeHandlerStats::default());
+        assert_eq!(handlers.marker(), None);
+        let unresolved: Vec<&str> = g
+            .unresolved_refs
+            .iter()
+            .filter(|r| r.category == edge_category::HANDLED_BY)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Attribute { base, .. } => Some(base.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unresolved, vec!["NewLister()", "Missing()", "gin.New()"]);
     }
 
     // ---- CI.2b: implicit IMPLEMENTS through promotion -----------------------

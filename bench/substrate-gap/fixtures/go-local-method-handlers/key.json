@@ -1,0 +1,42 @@
+{
+  "framework": "go-local-method-handlers",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "note": "DF (0.5.1 follow-up 'method-value handlers on typed params / locals'): CA.5a rewrites a handler `h.List` to the receiver's TYPE only when `h` is the registering method's receiver; a parameter `h *TokensHandler` or a local (`h := NewTokensHandler()`, `t := &TokensHandler{}`, `var d TokensHandler`) keeps base `h`, and graph/src/build.rs GoPackages::type_handler calls a local var 'names no type: generic'. With two handler types sharing every method name, the repo-unique name fallback binds nothing. HEAD (84e2e71, leap wheel): HANDLED_BY 0/4.",
+  "expect_edges": [
+    {
+      "from": "GET /tokens",
+      "to": "api::handlers::TokensHandler::List",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "POST /tokens",
+      "to": "api::handlers::TokensHandler::Create",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "GET /tokens/:id",
+      "to": "api::handlers::TokensHandler::Show",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "DELETE /tokens/:id",
+      "to": "api::handlers::TokensHandler::Del",
+      "category": "HANDLED_BY"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "GET /tokens",
+      "to": "api::handlers::UsersHandler::List",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "POST /tokens",
+      "to": "api::handlers::UsersHandler::Create",
+      "category": "HANDLED_BY"
+    }
+  ]
+}
