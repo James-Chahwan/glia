@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 356,
+  "fixtures": 361,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -197,6 +197,14 @@
       "language": "c_cpp",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "cpp-cmake-genex-includes": {
+      "framework": "cpp-cmake-genex-includes",
+      "language": "c_cpp",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
       }
     },
     "cpp-declarations": {
@@ -611,6 +619,11 @@
       "language": "python",
       "per_category": {}
     },
+    "generated-provenance": {
+      "framework": "generated-provenance",
+      "language": "go+dart+csharp",
+      "per_category": {}
+    },
     "go-accesses-data": {
       "framework": "go-accesses-data",
       "language": "go",
@@ -724,6 +737,13 @@
       "language": "go",
       "per_category": {
         "ACCESSES_DATA": 1.0
+      }
+    },
+    "go-local-method-handlers": {
+      "framework": "go-local-method-handlers",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0
       }
     },
     "go-nats-consumer-callbacks": {
@@ -1625,6 +1645,13 @@
         "CALLS": 1.0
       }
     },
+    "rust-eventbus-broadcast-vs-mpsc": {
+      "framework": "rust-tokio-broadcast-vs-mpsc",
+      "language": "rust",
+      "per_category": {
+        "EVENT_FLOWS": 1.0
+      }
+    },
     "rust-http": {
       "framework": "rust-http",
       "language": "rust",
@@ -2039,6 +2066,13 @@
       "language": "typescript",
       "per_category": {
         "INJECTS": 1.0
+      }
+    },
+    "ts-param-local-receivers": {
+      "framework": "ts-param-local-receivers",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "ts-route-per-method": {
