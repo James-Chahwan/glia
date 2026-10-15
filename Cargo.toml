@@ -29,6 +29,8 @@ members = [
     "store",
     "projection-text",
     "activation",
+    # 0.5.2 (DA): glia-rules, the domain-free Datalog evaluator; query-time, so not in stamp's HASHED_ROOTS
+    "rules",
     "parsers/code/rust",
     "parsers/code/java",
     "parsers/code/kotlin",

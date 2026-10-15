@@ -1,0 +1,12 @@
+[package]
+name = "glia-rules"
+version.workspace = true
+edition = "2024"
+publish = false
+description = "Domain-free Datalog rule evaluator: a string-named rule IR, one lexer shared by the Datalog surface and the GQL read subset, analysis, a planner, levelled semi-naive evaluation over sorted batches, reaches / scc builtins over activation::algo, provenance and explain, grouped aggregates and magic sets; its fact seam is FactSource: GraphSource. Query-time: no stored derived edges."
+
+[dependencies]
+# Node / edge ids and the domain-free graph primitives the fact seam reads.
+glia-core = { path = "../core" }
+# GraphSource (the fact seam's supertrait) and the algo walks (reach, cycles).
+glia-activation = { path = "../activation" }

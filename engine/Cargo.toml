@@ -14,6 +14,10 @@ glia-code-domain = { path = "../code-domain" }
 glia-graph = { path = "../graph" }
 # Direction enum for the P3 resolve/blast answer-shaping (activation config).
 glia-activation = { path = "../activation" }
+# 0.5.2 (D0.2): engine::rules (DB) evaluates rules over glia-rules. A path
+# dependency with no external crate; engine/Cargo.toml and Cargo.lock are
+# hashed, so PARSER_STAMP moves once, here.
+glia-rules = { path = "../rules" }
 glia-code-extractors = { path = "../parsers/code/extractors" }
 glia-parser-python = { path = "../parsers/code/python" }
 glia-parser-go = { path = "../parsers/code/go" }

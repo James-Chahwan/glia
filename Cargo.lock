@@ -500,6 +500,7 @@ dependencies = [
  "glia-parser-typescript",
  "glia-parser-vue",
  "glia-projection-text",
+ "glia-rules",
  "glia-stamp",
  "glia-store",
  "lz4_flex",
@@ -838,6 +839,14 @@ dependencies = [
  "quote",
  "serde_json",
  "syn",
+]
+
+[[package]]
+name = "glia-rules"
+version = "0.5.1"
+dependencies = [
+ "glia-activation",
+ "glia-core",
 ]
 
 [[package]]
