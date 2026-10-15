@@ -57,6 +57,7 @@ mod gaps;
 mod graph;
 mod hotspots;
 mod hubs;
+mod identity;
 mod implementors;
 mod layout;
 mod merge;
@@ -64,6 +65,7 @@ mod overlay_loop;
 mod pack;
 mod pages;
 mod patterns;
+mod query;
 mod records;
 mod registry;
 mod review;
@@ -76,6 +78,7 @@ mod text;
 mod timeline;
 mod trace;
 mod traversal;
+mod watch;
 mod why;
 
 #[pymodule]
