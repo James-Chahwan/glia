@@ -35,7 +35,9 @@ CAP = 26
 
 # Waves that have landed, by number; closeout.py --release 052 appends each one, and
 # --verify then guards that re-running the scheduler reproduces history.
-LANDED = {}
+LANDED = {
+    0: "D0.1 D0.2 D0.3 D0.4 D0.5 D0.6 D0.7 D0.8",
+}
 GROUP_ORDER = {"0": 0, "A": 1, "B": 2, "C": 3, "D": 4, "E": 5, "F": 6, "G": 7, "H": 8, "Z": 9}
 
 
