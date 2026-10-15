@@ -56,6 +56,9 @@ pub const TOY_TABLES: DomainTables = DomainTables {
         (SAME_OBJECT, 4),
         (CONTAINS_SHOT, 1),
     ],
+    // No identity rules (DD.3): the same object seen twice is a SAME_OBJECT
+    // edge the resolve pass writes, not a class.
+    identity_rules: &[],
 };
 
 /// The domain's build passes, over a built [`ToyGraph`], no build context.

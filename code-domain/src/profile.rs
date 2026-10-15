@@ -39,12 +39,50 @@
 //! at 1; every edge that would glue unrelated code through a shared hub (a
 //! PROJECT's CONTAINS, a package, a doc, a test, a shared schema / config /
 //! entity, git history) is left out, so weighs 0.
+//!
+//! DD.3: `identity_rules` is the code domain's eight ways two nodes are one
+//! thing, one [`IdentityRule`] per [`same_as::RULES`] name in that order:
+//! the kinds each pairs, the key they share, the tier (FACT, DERIVED or
+//! HEURISTIC) and whether a class is contracted in walks. Three consumers
+//! read the rows: the identity resolver (which kinds a rule pairs), the tier
+//! of a SAME_AS edge, and the answers' collapse (FACT and DERIVED classes
+//! collapse, HEURISTIC never). SAME_AS itself weighs 0 in PPR and is in no
+//! carry or community list: identity reaches a walk or a ranking only through
+//! the quotient (`glia_activation::algo::classes`, DD.1), never as an edge.
 
 use glia_activation::profile::{
-    ActivationPreset, DomainTables, EffectSink, EntryRule, NamedEntry, Registries,
+    ActivationPreset, DomainTables, EffectSink, EntryRule, IdentityRule, IdentityTier, NamedEntry,
+    Registries,
 };
+use glia_core::NodeKindId;
 
-use crate::{GRAPH_TYPE, cell_type, edge_category as ec, node_kind as nk};
+use crate::{GRAPH_TYPE, cell_type, edge_category as ec, node_kind as nk, same_as};
+
+/// The definitions the SCIP build stage binds a definition row to
+/// (`engine/src/external/scip.rs` `DEF_KINDS`, in its order): what a SCIP
+/// symbol can name on either side of a `scip_symbol` class.
+const SCIP_DEF_KINDS: &[NodeKindId] = &[
+    nk::FUNCTION,
+    nk::METHOD,
+    nk::CLASS,
+    nk::STRUCT,
+    nk::INTERFACE,
+    nk::ENUM,
+    nk::ATTRIBUTE,
+    nk::STATE_VAR,
+];
+
+/// The declarations a vendored copy is matched by (`body_hash`,
+/// `path_suffix`): a file's MODULE and the code declared in it.
+const VENDORED_KINDS: &[NodeKindId] = &[
+    nk::MODULE,
+    nk::FUNCTION,
+    nk::METHOD,
+    nk::CLASS,
+    nk::STRUCT,
+    nk::INTERFACE,
+    nk::ENUM,
+];
 
 /// The code domain's tables.
 pub const CODE_TABLES: DomainTables = DomainTables {
@@ -145,7 +183,9 @@ pub const CODE_TABLES: DomainTables = DomainTables {
     // medium, structural edges (`contains`, `defines`) lowest; any category
     // not listed weighs 1.0. CO_CHANGES (LF.5b) weighs 0: a git-history
     // heuristic, it must not reshape any ranking (a 0 edge is skipped
-    // outright, so scores are those of the graph without it).
+    // outright, so scores are those of the graph without it). SAME_AS (DD.3)
+    // weighs 0 too: identity reaches a ranking only through the quotient, and
+    // a SAME_AS star at 1.0 would conduct across every repo sharing a package.
     activation_weights: &[
         (ec::CALLS, 5.0),
         (ec::HTTP_CALLS, 5.0),
@@ -167,6 +207,7 @@ pub const CODE_TABLES: DomainTables = DomainTables {
         (ec::CONTAINS, 1.0),
         (ec::DOCUMENTS, 0.5),
         (ec::CO_CHANGES, 0.0),
+        (ec::SAME_AS, 0.0),
     ],
     // Task-tuned lenses over the base weights (WP-F / GR-5); any other name,
     // `"default"` included, is the base.
@@ -261,6 +302,82 @@ pub const CODE_TABLES: DomainTables = DomainTables {
         // CO_CHANGES out: git history is a heuristic, never structure.
         // SAME_AS out: identity reaches a walk only through the quotient (DD.1).
     ],
+    // DD.3: one row per `same_as::RULES` name, in that order (the guard test
+    // below pins it). `walk` is a ranking-visible dial: a class contracted in
+    // a walk joins its members' neighbourhoods into one blast radius.
+    identity_rules: &[
+        // A class of one external package spans every repo depending on it:
+        // it collapses in rows, but walking it would join every dependant of
+        // `react` in every repo into one blast radius.
+        IdentityRule {
+            name: same_as::RULE_PACKAGE_NAME,
+            from: &[nk::PACKAGE_DEP],
+            to: &[nk::PACKAGE_DEP],
+            key: "package:<eco>:<name>, ecosystem-normalised",
+            tier: IdentityTier::Fact,
+            walk: false,
+        },
+        // A PROJECT has no edges, so contracting it with the dependencies
+        // naming it fans out only to the library's real consumers.
+        IdentityRule {
+            name: same_as::RULE_MANIFEST_NAME,
+            from: &[nk::PACKAGE_DEP],
+            to: &[nk::PROJECT],
+            key: "dependency name == manifest label (per ecosystem)",
+            tier: IdentityTier::Fact,
+            walk: true,
+        },
+        IdentityRule {
+            name: same_as::RULE_MESSAGE_FQNAME,
+            from: &[nk::MESSAGE_TYPE],
+            to: &[nk::MESSAGE_TYPE],
+            key: "message:<flavor>:<fq name>",
+            tier: IdentityTier::Fact,
+            walk: true,
+        },
+        // A contract op is paired from its ORIGIN by `same_as::contract_op_key`.
+        IdentityRule {
+            name: same_as::RULE_CONTRACT_OP,
+            from: &[nk::DOC_SECTION],
+            to: &[nk::DOC_SECTION],
+            key: "METHOD + normalised path, or action + channel, under one project",
+            tier: IdentityTier::Derived,
+            walk: true,
+        },
+        IdentityRule {
+            name: same_as::RULE_CONTRACT_ROUTE,
+            from: &[nk::DOC_SECTION],
+            to: &[nk::DOC_SECTION],
+            key: "the one ROUTE the op's path matches",
+            tier: IdentityTier::Derived,
+            walk: true,
+        },
+        IdentityRule {
+            name: same_as::RULE_SCIP_SYMBOL,
+            from: SCIP_DEF_KINDS,
+            to: SCIP_DEF_KINDS,
+            key: "SCIP scheme manager package descriptor",
+            tier: IdentityTier::Fact,
+            walk: true,
+        },
+        // Vendored copies are guesses: they never collapse and never walk.
+        IdentityRule {
+            name: same_as::RULE_BODY_HASH,
+            from: VENDORED_KINDS,
+            to: VENDORED_KINDS,
+            key: "path-suffix files, name chain, byte-identical body",
+            tier: IdentityTier::Heuristic,
+            walk: false,
+        },
+        IdentityRule {
+            name: same_as::RULE_PATH_SUFFIX,
+            from: VENDORED_KINDS,
+            to: VENDORED_KINDS,
+            key: "path-suffix files under a confirmed vendoring offset, body differs",
+            tier: IdentityTier::Heuristic,
+            walk: false,
+        },
+    ],
 };
 
 #[cfg(test)]
@@ -316,6 +433,79 @@ mod tests {
             let w = CODE_TABLES.activation_config(preset).edge_weights.get(&ec::CO_CHANGES).copied();
             assert_eq!(w, Some(0.0), "preset {preset:?}");
         }
+    }
+
+    #[test]
+    fn same_as_never_conducts() {
+        // REGRESSION GUARD (DD.3). SAME_AS joins an identity class's members
+        // to its star center: one npm package in every repo, hundreds of
+        // vendored candidates. Identity reaches a walk or a ranking only
+        // through the quotient, so the edge carries no blast radius or
+        // liveness, is no effect, groups no community and weighs 0 in every
+        // activation preset (an unlisted category would weigh 1.0).
+        assert!(!CODE_TABLES.carries(ec::SAME_AS), "SAME_AS must stay OUT of carry_edges");
+        assert!(!CODE_TABLES.effect_sinks.iter().any(|s| s.via.contains(&ec::SAME_AS)));
+        assert_eq!(CODE_TABLES.community_weight(ec::SAME_AS), 0);
+        for preset in [None, Some("repair"), Some("review"), Some("onboard"), Some("centrality")] {
+            let w = CODE_TABLES.activation_config(preset).edge_weights.get(&ec::SAME_AS).copied();
+            assert_eq!(w, Some(0.0), "preset {preset:?}");
+        }
+    }
+
+    /// DD.3: one identity rule per `same_as` rule name, in its order, with
+    /// the tiers and walk dials 0.5.2 ruled (Q17 / Q18): packages and
+    /// vendored copies never walk, vendored copies are HEURISTIC.
+    #[test]
+    fn identity_rules_cover_every_rule() {
+        use IdentityTier::{Derived, Fact, Heuristic};
+        assert_eq!(CODE_TABLES.validate(), Ok(()));
+        let rules = CODE_TABLES.identity_rules;
+        let names: Vec<&str> = rules.iter().map(|r| r.name).collect();
+        assert_eq!(names, same_as::RULES);
+        let table: Vec<(&str, IdentityTier, bool)> =
+            rules.iter().map(|r| (r.name, r.tier, r.walk)).collect();
+        assert_eq!(
+            table,
+            [
+                ("package_name", Fact, false),
+                ("manifest_name", Fact, true),
+                ("message_fqname", Fact, true),
+                ("contract_op", Derived, true),
+                ("contract_route", Derived, true),
+                ("scip_symbol", Fact, true),
+                ("body_hash", Heuristic, false),
+                ("path_suffix", Heuristic, false),
+            ]
+        );
+
+        let rule = |name: &str| CODE_TABLES.identity_rule(name);
+        let pairs = |name: &str| rule(name).map(|r| (r.from, r.to));
+        const DEP: &[NodeKindId] = &[nk::PACKAGE_DEP];
+        const PROJECT: &[NodeKindId] = &[nk::PROJECT];
+        const MESSAGE: &[NodeKindId] = &[nk::MESSAGE_TYPE];
+        const DOC: &[NodeKindId] = &[nk::DOC_SECTION];
+        assert_eq!(pairs("package_name"), Some((DEP, DEP)));
+        assert_eq!(pairs("manifest_name"), Some((DEP, PROJECT)));
+        assert_eq!(pairs("message_fqname"), Some((MESSAGE, MESSAGE)));
+        for name in ["contract_op", "contract_route"] {
+            assert_eq!(pairs(name), Some((DOC, DOC)), "{name}");
+        }
+        assert_eq!(pairs("scip_symbol"), Some((SCIP_DEF_KINDS, SCIP_DEF_KINDS)));
+        assert_eq!(SCIP_DEF_KINDS.len(), 8);
+        for name in ["body_hash", "path_suffix"] {
+            assert_eq!(pairs(name), Some((VENDORED_KINDS, VENDORED_KINDS)), "{name}");
+            assert!(rule(name).is_some_and(|r| !r.tier.collapses()), "{name} never collapses");
+        }
+        assert_eq!(VENDORED_KINDS[0], nk::MODULE);
+        assert_eq!(&VENDORED_KINDS[1..], &SCIP_DEF_KINDS[..6], "a file plus its declared code");
+
+        // Every key is a line, the rule names are the bare EVIDENCE rules.
+        for r in rules {
+            assert!(!r.key.is_empty() && !r.key.contains('\n'), "{}", r.name);
+            let diverged = same_as::evidence_rule(r.name, true);
+            assert_eq!(same_as::split_evidence_rule(&diverged), (r.name, true), "{diverged}");
+        }
+        assert!(rule("package_name/diverged").is_none());
     }
 
     /// CD.1c: communities group by what code does to code. Structure

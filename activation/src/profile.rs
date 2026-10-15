@@ -5,10 +5,13 @@
 //! - [`DomainTables`] is the data half — no generics, const-constructible:
 //!   the id registries, which nodes are entrypoints ([`EntryRule`]), which
 //!   edges carry reachability / blast radius, the effect sinks
-//!   ([`EffectSink`]), the activation weights with their named presets, and
-//!   the integer community weights (CD.1c). Query consumers (blast radius,
-//!   liveness, PPR seeding, communities) need only this, so a crate that
-//!   cannot name the domain's graph type still reads it.
+//!   ([`EffectSink`](crate::profile::EffectSink)), the activation weights
+//!   with their named presets, the integer community weights (CD.1c) and the
+//!   identity rules ([`IdentityRule`](crate::profile::IdentityRule), each of
+//!   one [`IdentityTier`](crate::profile::IdentityTier), DD.3). Query
+//!   consumers (blast radius, liveness, PPR seeding, communities, identity
+//!   collapse) need only this, so a crate that cannot name the domain's graph
+//!   type still reads it.
 //! - [`DomainProfile<G, C>`] is the tables plus the domain's build passes
 //!   ([`PassRegistry<G, C>`], LD.13), over the domain's graph `G` and build
 //!   context `C`.
@@ -19,9 +22,9 @@
 //! `profile::CODE_PROFILE`).
 //!
 //! Every field is a `&'static` slice, `&str` or plain value — never a map — so
-//! a domain builds the tables with a struct literal in a `const`. Neither
-//! struct is `#[non_exhaustive]` on purpose: a new profile dimension must
-//! force every domain to fill it.
+//! a domain builds the tables with a struct literal in a `const`. No struct
+//! here is `#[non_exhaustive]` on purpose: a new profile dimension must force
+//! every domain to fill it.
 
 use std::fmt;
 
@@ -189,6 +192,66 @@ pub struct ActivationPreset {
 }
 
 // ============================================================================
+// Identity rules
+// ============================================================================
+
+/// How surely an [`IdentityRule`]'s members are one thing (DD.3). Ordered
+/// strongest first, `Fact < Derived < Heuristic`, so the tier of a class its
+/// members joined through several rules is the weakest, the `max` of theirs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IdentityTier {
+    /// Read at a site: a manifest, a qname or an index names the one thing.
+    Fact,
+    /// Paired by a rule over facts (a contract op and the route it matches).
+    Derived,
+    /// A guess (a vendored copy found by path suffix or body hash).
+    Heuristic,
+}
+
+impl IdentityTier {
+    /// `fact`, `derived` or `heuristic`: the tier as answers print it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fact => "fact",
+            Self::Derived => "derived",
+            Self::Heuristic => "heuristic",
+        }
+    }
+
+    /// Does a class of this tier collapse to one row in an answer? FACT and
+    /// DERIVED classes do; a HEURISTIC class never does.
+    pub fn collapses(self) -> bool {
+        self != Self::Heuristic
+    }
+}
+
+/// One way nodes are the same thing (DD.3): a node of one of `from` and a
+/// node of one of `to` whose `key` agrees are members of one identity class
+/// (the code domain's SAME_AS star).
+///
+/// `walk` says whether a class is contracted to one node in walks (blast
+/// radius, trace, liveness): a class whose members are only alike in rows,
+/// such as one external package every repo depends on, collapses in an answer
+/// but must not join its dependants into one walk. A HEURISTIC rule never
+/// walks ([`DomainTables::validate`] refuses one that does).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IdentityRule {
+    /// The rule's name, unique within the table; the EVIDENCE `rule` of the
+    /// edges it writes. It never contains `/`, which qualifies that EVIDENCE
+    /// rule (`<rule>/diverged`).
+    pub name: &'static str,
+    /// The member kinds on one side.
+    pub from: &'static [NodeKindId],
+    /// The member kinds on the other side (the same list for a same-kind rule).
+    pub to: &'static [NodeKindId],
+    /// What the members share, one line for answers and docs.
+    pub key: &'static str,
+    pub tier: IdentityTier,
+    /// Contracted in walks; `false` for every HEURISTIC rule.
+    pub walk: bool,
+}
+
+// ============================================================================
 // Tables
 // ============================================================================
 
@@ -219,6 +282,10 @@ pub struct DomainTables {
     /// `activation_weights` on purpose: those are PPR ranking dials, and a
     /// ranking retune must not move community structure.
     pub community_weights: &'static [(EdgeCategoryId, u32)],
+    /// The ways nodes are one thing (DD.3), one [`IdentityRule`] per rule
+    /// name, in the order the domain's identity pass reports them. Empty is
+    /// legal: a domain with no identity.
+    pub identity_rules: &'static [IdentityRule],
 }
 
 impl DomainTables {
@@ -251,6 +318,12 @@ impl DomainTables {
         self.community_weights.iter().find(|(k, _)| *k == c).map_or(0, |(_, w)| *w)
     }
 
+    /// The identity rule called `name`, if the domain declares one. `name` is
+    /// the bare rule: an EVIDENCE rule `<rule>/diverged` is split first.
+    pub fn identity_rule(&self, name: &str) -> Option<&'static IdentityRule> {
+        self.identity_rules.iter().find(|r| r.name == name)
+    }
+
     /// The effect sink (with its table index) that reaching a `kind` node over
     /// a `via` edge is, first match in table order; `None` when it is no
     /// effect.
@@ -273,6 +346,10 @@ impl DomainTables {
     /// no earlier row names, with a weight `>= 1` (a 0 row is refused as
     /// ambiguous: leaving a category out already weighs it 0). Each
     /// `community_weights` error names its row, `community_weights[i]`.
+    /// Every identity rule has a non-empty name without `/` that no earlier
+    /// rule has, a non-empty key, and non-empty `from` and `to` lists of
+    /// registered kinds, none twice; a HEURISTIC rule does not walk. Each
+    /// identity error names its rule, `identity_rules[i]`.
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
         if self.graph_type.is_empty() {
@@ -385,6 +462,38 @@ impl DomainTables {
                 errors.push(format!(
                     "{field} weighs edge category {} 0: a community weight is >= 1, and a category left out weighs 0",
                     c.0
+                ));
+            }
+        }
+
+        for (i, rule) in self.identity_rules.iter().enumerate() {
+            let field = format!("identity_rules[{i}]");
+            if rule.name.is_empty() {
+                errors.push(format!("{field} has an empty name"));
+            } else if rule.name.contains('/') {
+                errors.push(format!(
+                    "{field} name {:?} contains '/', which qualifies an evidence rule (<rule>/diverged)",
+                    rule.name
+                ));
+            }
+            if !rule.name.is_empty()
+                && self.identity_rules[..i].iter().any(|prior| prior.name == rule.name)
+            {
+                errors.push(format!("{field} name {:?} is declared more than once", rule.name));
+            }
+            if rule.key.is_empty() {
+                errors.push(format!("{field} has an empty key"));
+            }
+            for (side, list) in [("from", rule.from), ("to", rule.to)] {
+                if list.is_empty() {
+                    errors.push(format!("{field}.{side} is empty: the rule pairs no node"));
+                }
+                kinds(&format!("{field}.{side}"), list, &mut errors);
+            }
+            if rule.tier == IdentityTier::Heuristic && rule.walk {
+                errors.push(format!(
+                    "{field} ({:?}) is heuristic and walks: a heuristic class is never contracted in a walk",
+                    rule.name
                 ));
             }
         }
@@ -516,6 +625,17 @@ mod tests {
             ActivationPreset { name: "wide", overrides: &[(IMPORTS, 0.0)] },
         ],
         community_weights: &[(CALLS, 3), (IMPORTS, 1)],
+        identity_rules: &[],
+    };
+
+    /// A valid same-kind rule the identity tests vary one field of.
+    const RULE_X: IdentityRule = IdentityRule {
+        name: "x",
+        from: &[FUNCTION, METHOD],
+        to: &[FUNCTION, METHOD],
+        key: "one qname",
+        tier: IdentityTier::Derived,
+        walk: true,
     };
 
     #[test]
@@ -728,6 +848,117 @@ mod tests {
             Some(&2.0)
         );
         assert_eq!(TABLES.community_weight(CONTAINS), 0);
+    }
+
+    #[test]
+    fn validate_rejects_bad_identity_rules() {
+        // Each problem alone is one error, naming its rule.
+        let rows: [(&[IdentityRule], &str); 6] = [
+            (
+                &[IdentityRule { name: "a/b", ..RULE_X }],
+                "identity_rules[0] name \"a/b\" contains '/', which qualifies an evidence rule (<rule>/diverged)",
+            ),
+            (&[RULE_X, RULE_X], "identity_rules[1] name \"x\" is declared more than once"),
+            (
+                &[IdentityRule { from: &[], ..RULE_X }],
+                "identity_rules[0].from is empty: the rule pairs no node",
+            ),
+            (
+                &[IdentityRule { to: &[FUNCTION, NodeKindId(999)], ..RULE_X }],
+                "identity_rules[0].to holds node kind 999, which is not registered",
+            ),
+            (
+                &[IdentityRule { tier: IdentityTier::Heuristic, walk: true, ..RULE_X }],
+                "identity_rules[0] (\"x\") is heuristic and walks: a heuristic class is never contracted in a walk",
+            ),
+            (&[IdentityRule { name: "", ..RULE_X }], "identity_rules[0] has an empty name"),
+        ];
+        for (rules, error) in rows {
+            let bad = DomainTables { identity_rules: rules, ..TABLES };
+            assert_eq!(bad.validate().unwrap_err(), [error], "{rules:?}");
+        }
+
+        // Every problem of one rule, in check order, each naming the rule.
+        let bad = DomainTables {
+            identity_rules: &[
+                RULE_X,
+                IdentityRule {
+                    name: "y",
+                    from: &[CLASS, CLASS],
+                    to: &[],
+                    key: "",
+                    tier: IdentityTier::Heuristic,
+                    walk: true,
+                },
+            ],
+            ..TABLES
+        };
+        assert_eq!(
+            bad.validate().unwrap_err(),
+            [
+                "identity_rules[1] has an empty key",
+                "identity_rules[1].from lists node kind 4 more than once",
+                "identity_rules[1].to is empty: the rule pairs no node",
+                "identity_rules[1] (\"y\") is heuristic and walks: a heuristic class is never contracted in a walk",
+            ]
+        );
+
+        // A heuristic rule that does not walk, a fact rule across two kind
+        // lists, and no rules at all are legal.
+        let ok = DomainTables {
+            identity_rules: &[
+                IdentityRule { tier: IdentityTier::Heuristic, walk: false, ..RULE_X },
+                IdentityRule {
+                    name: "y",
+                    from: &[CLASS],
+                    to: &[COMPONENT],
+                    tier: IdentityTier::Fact,
+                    ..RULE_X
+                },
+            ],
+            ..TABLES
+        };
+        assert_eq!(ok.validate(), Ok(()));
+        assert_eq!(TABLES.validate(), Ok(()));
+    }
+
+    #[test]
+    fn identity_rule_lookup() {
+        const RULES: &[IdentityRule] = &[
+            RULE_X,
+            IdentityRule {
+                name: "y",
+                from: &[CLASS],
+                to: &[COMPONENT],
+                key: "one name",
+                tier: IdentityTier::Heuristic,
+                walk: false,
+            },
+        ];
+        let tables = DomainTables { identity_rules: RULES, ..TABLES };
+        assert_eq!(tables.validate(), Ok(()));
+        assert_eq!(tables.identity_rule("x"), Some(&RULE_X));
+        assert_eq!(
+            tables.identity_rule("y").map(|r| (r.tier, r.walk)),
+            Some((IdentityTier::Heuristic, false))
+        );
+        for unknown in ["z", "", "X", "x/diverged"] {
+            assert!(tables.identity_rule(unknown).is_none(), "{unknown:?}");
+        }
+        assert!(TABLES.identity_rule("x").is_none(), "an empty table has no identity");
+    }
+
+    #[test]
+    fn tier_order() {
+        use IdentityTier::{Derived, Fact, Heuristic};
+        assert!(Fact < Derived && Derived < Heuristic);
+        // A class joined through rules of several tiers is the weakest.
+        assert_eq!([Derived, Heuristic, Fact].into_iter().max(), Some(Heuristic));
+        assert_eq!([Fact, Derived, Fact].into_iter().max(), Some(Derived));
+        let names = [Fact, Derived, Heuristic].map(IdentityTier::as_str);
+        assert_eq!(names, ["fact", "derived", "heuristic"]);
+        assert!(Fact.collapses() && Derived.collapses());
+        assert!(!Heuristic.collapses());
     }
 
     /// A toy graph: the passes that touched it, in order.

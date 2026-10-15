@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(t.carry_edges, HEAD_CARRY);
 
         // The base weights `graph::activation` hardcoded before LD.14b.
-        const HEAD_WEIGHTS: [(EdgeCategoryId, f64); 20] = [
+        const HEAD_WEIGHTS: [(EdgeCategoryId, f64); 21] = [
             (ec::CALLS, 5.0),
             (ec::HTTP_CALLS, 5.0),
             (ec::GRPC_CALLS, 5.0),
@@ -415,6 +415,9 @@ mod tests {
             (ec::DOCUMENTS, 0.5),
             // LF.5b: the git-history heuristic weighs 0 (no ranking change).
             (ec::CO_CHANGES, 0.0),
+            // DD.3: identity weighs 0, reaching rankings only through the
+            // quotient (no SAME_AS edge existed before DD.5: no ranking change).
+            (ec::SAME_AS, 0.0),
         ];
         // The preset overrides `graph::activation` hardcoded before LD.14b;
         // any other name, `"default"` included, is the base.

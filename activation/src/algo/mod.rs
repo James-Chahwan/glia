@@ -16,16 +16,18 @@
 //!
 //! This crate depends on `core` only, so nothing here can name a domain's
 //! node kind or edge category: an algorithm takes the categories it follows
-//! as a [`CategorySet`], or a domain's [`DomainTables`] through
-//! [`Adjacency::carry`]. A graph type opts in by implementing
-//! [`GraphSource`]; the algorithms then run over an [`Adjacency`], a CSR
-//! index built once per query in O(V + E), instead of scanning the whole edge
-//! list for every node they visit.
+//! as a [`CategorySet`](crate::algo::CategorySet), or a domain's
+//! [`DomainTables`](crate::profile::DomainTables) through
+//! [`Adjacency::carry`](crate::algo::Adjacency::carry). A graph type opts in
+//! by implementing [`GraphSource`](crate::algo::GraphSource); the algorithms
+//! then run over an [`Adjacency`](crate::algo::Adjacency), a CSR index built
+//! once per query in O(V + E), instead of scanning the whole edge list for
+//! every node they visit.
 //!
 //! The index preserves the edge-scan walks it replaced exactly (the parity
-//! rules on [`Adjacency`]), so a first-reach category, a discovery order or a
-//! depth never changes when a caller moves onto it; `reach`'s tests hold the
-//! old scan loops as the oracle.
+//! rules on [`Adjacency`](crate::algo::Adjacency)), so a first-reach
+//! category, a discovery order or a depth never changes when a caller moves
+//! onto it; `reach`'s tests hold the old scan loops as the oracle.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -324,6 +326,7 @@ mod tests {
         activation_weights: &[],
         activation_presets: &[],
         community_weights: &[],
+        identity_rules: &[],
     };
 
     fn ids(adj: &Adjacency, xs: &[Inc]) -> Vec<(u64, u32)> {
