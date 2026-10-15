@@ -1,9 +1,13 @@
-//! The per-language graph build of `build_graphs_for_repo`: a deterministic
-//! language order, the `build_*` dispatch, one shared TS-family graph (built
-//! by `build_typescript_family`, CH.1b; the `_` arm's languages keep
-//! `build_typescript`), and the import resolvers those arms take (relative,
-//! plus the A6.8 tsconfig `paths` aliases for the TS family) and the includer-relative
-//! step of the `#include` resolver `build_c_cpp` takes (its search roots are
+//! The per-language graph build of `build_graphs_for_repo`, as three stages
+//! (DC.2): [`plan_groups`] (a deterministic group order: sorted languages,
+//! the JVM join, the TS family last), [`build_groups`] (each group built on
+//! the engine pool, or taken from a per-group reuse slot) and [`fold_groups`]
+//! (the graphs and the per-repo markers, in plan order). The `build_*`
+//! dispatch, one shared TS-family graph (built by `build_typescript_family`,
+//! CH.1b; the `_` arm's languages keep `build_typescript`), and the import
+//! resolvers those arms take (relative, plus the A6.8 tsconfig `paths`
+//! aliases for the TS family) and the includer-relative step of the
+//! `#include` resolver `build_c_cpp` takes (its search roots are
 //! [`super::c_includes`], CB.22).
 
 use std::cmp::Reverse;
@@ -51,48 +55,67 @@ const JVM_GUEST: &str = "kotlin";
 /// build carries (CA.7).
 const TS_GROUP: &str = "typescript";
 
-/// What [`build_language_graphs`] hands back to `build_graphs_for_repo`.
-pub(super) struct LanguageGraphs {
-    /// The per-language graphs, in sorted language order, the TS family last.
-    pub(super) graphs: Vec<RepoGraph>,
-    /// The A7.0 `[di]` marker input: INJECTS refs per matrix row.
-    pub(super) di_refs: Vec<(&'static str, usize)>,
-    /// LG.1c: the language builds mapped on the engine pool, for the
-    /// `[parallel]` line: every build group, the TS family's one graph
-    /// included (CA.7).
-    pub(super) pooled: usize,
+/// One build group of a repo ([`plan_groups`]): the parses one graph is built
+/// from, after every post-cache graft.
+pub(crate) struct GroupInput {
+    /// The plan key: the language tag (`java` for a JVM family that holds
+    /// Java, so its Kotlin parses ride along), or [`TS_GROUP`] for the TS
+    /// family. Unique within a plan; [`LangBuild::key`] of its build.
+    pub(crate) key: &'static str,
+    pub(crate) parses: Vec<FileParse>,
 }
 
-/// Build one repo's per-language graphs from its finished parses, in sorted
-/// language order with the TS family last ([`LanguageGraphs`]); graph build
-/// failures go to `parse_errors`. Prints the LC.3b `[evidence-lines]`, A6.2a
-/// `[recv]` and A6.3 `[heritage]` markers for `repo_label`.
-/// `rust_crates` ([`rust_crates`]) feeds `build_rust`'s path resolver (LA.1a);
-/// `ts_aliases` the TS family's import resolver ([`resolve_ts_source_aliased`],
-/// A6.8); `c_includes` the C/C++ include resolver over the repo's include
-/// search roots (CB.22, [`IncludeRoots::resolver`]).
-///
-/// LG.1c: every build group builds on the engine pool
-/// ([`crate::parallel::par_map_owned`]), one [`build_one`] per group; CA.7
-/// made the TS family's one graph the pool map's LAST item, so it is still
-/// folded last. The builds are folded in input order (graphs, errors, the
-/// `[recv]` and `[heritage]` counts), so the graphs and the per-repo
-/// `[recv]` / `[heritage]` lines are the sequential build's. The per-build
-/// lines (`[evidence-lines]`, and the graph crate's own) print on the thread
-/// that ran the build, right after it: under `GLIA_THREADS=1` in the
-/// sequential order, on a pool interleaved across languages. A panicking
-/// build is re-raised here, the first in fold order, as the inline build let
-/// it propagate.
-pub(super) fn build_language_graphs(
+/// One repo's build groups in clean-build order, and the per-language marker
+/// inputs counted off the parses before the JVM join ([`plan_groups`]).
+pub(crate) struct GroupPlan {
+    /// Sorted by language with the Kotlin parses joined into `java` in place
+    /// (A14.2) and the TS family pushed last (CA.7). This order is the graph
+    /// order, so the shard index: a caller that rebuilds some groups keeps it.
+    pub(crate) groups: Vec<GroupInput>,
+    /// The A7.0 `[di]` marker input: INJECTS refs per matrix row.
+    pub(crate) di_refs: Vec<(&'static str, usize)>,
+    /// The A6.2a `[recv]` marker input: declared field types per matrix row.
+    pub(crate) recv_fields: Vec<(&'static str, usize)>,
+}
+
+/// What a group build reads besides its parses: the repo-level inputs a build
+/// consults after the parse cache, so a cached parse needs no key for them.
+#[derive(Clone, Copy)]
+pub(crate) struct GroupCtx<'a> {
+    pub(crate) repo: RepoId,
+    /// Labels the build's markers (`[c-includes]`, `[groups]`); never reaches
+    /// the graph.
+    pub(crate) repo_label: &'a str,
+    /// The Cargo packages ([`rust_crates`]), `build_rust`'s path resolver
+    /// input (LA.1a).
+    pub(crate) rust_crates: &'a [RustCrate],
+    /// The TS family's import resolver aliases ([`resolve_ts_source_aliased`],
+    /// A6.8).
+    pub(crate) ts_aliases: &'a TsAliasSet,
+    /// The C/C++ include search roots (CB.22, [`IncludeRoots::resolver`]).
+    pub(crate) c_includes: &'a IncludeRoots,
+}
+
+/// What [`fold_groups`] hands back.
+pub(crate) struct LanguageGraphs {
+    /// The per-group graphs, in plan order (sorted languages, the TS family
+    /// last). A failed build leaves a `parse_errors` line and no graph.
+    pub(crate) graphs: Vec<RepoGraph>,
+    /// The plan key ([`GroupInput::key`]) of each graph in `graphs`, index
+    /// for index: how a caller maps a graph back to its group.
+    pub(crate) keys: Vec<&'static str>,
+    /// LG.1c: the groups mapped on the engine pool, for the `[parallel]`
+    /// line: every build group, the TS family's one graph included (CA.7).
+    pub(crate) pooled: usize,
+}
+
+/// Stage 1 of a repo's language build: its finished (post-graft) parses as
+/// build groups in clean-build order ([`GroupPlan`]). Prints the A14.2
+/// `[kotlin] entities:` line for `repo_label`.
+pub(crate) fn plan_groups(
     parses_by_lang: HashMap<&'static str, Vec<FileParse>>,
-    repo: RepoId,
     repo_label: &str,
-    rust_crates: &[RustCrate],
-    ts_aliases: &TsAliasSet,
-    c_includes: &IncludeRoots,
-    parse_errors: &mut Vec<String>,
-) -> LanguageGraphs {
-    let mut graphs = Vec::new();
+) -> GroupPlan {
     // Deterministic per-language build order: HashMap iteration is seeded per
     // process, and the resulting `graphs` order decides shard indices in
     // `write_sharded` (repo-<hash>-NN.gmap). Random order made every shard's
@@ -138,62 +161,126 @@ pub(super) fn build_language_graphs(
     // The per-language marker inputs above keep `kotlin` as its own row; the
     // build below sees the JVM family as one graph.
     join_jvm_family(&mut parses_by_lang);
-    let mut recv_bound: Vec<(&str, usize)> = Vec::new();
-    let mut heritage: Vec<HeritageTally> = Vec::new();
     let mut ts_family: Vec<FileParse> = Vec::new();
-    let mut pool_builds: Vec<(&'static str, Vec<FileParse>)> = Vec::new();
+    let mut groups: Vec<GroupInput> = Vec::new();
     for (lang, parses) in parses_by_lang {
         if build_group(lang) == TS_GROUP {
             ts_family.extend(parses);
         } else {
-            pool_builds.push((lang, parses));
+            groups.push(GroupInput { key: lang, parses });
         }
     }
-    // CA.7: the TS family is the LAST pool item; `par_map_owned` hands the
+    // CA.7: the TS family is the LAST group; `par_map_owned` hands the
     // results back in input order, so it still folds last. Its key is the
-    // build group, not a language tag of `pool_builds` (no tag of the family
+    // build group, not a language tag of `groups` (no tag of the family
     // reaches the loop's `else` arm), and it takes the aliased resolver.
     if !ts_family.is_empty() {
-        pool_builds.push((TS_GROUP, ts_family));
+        groups.push(GroupInput { key: TS_GROUP, parses: ts_family });
     }
-    let pooled = pool_builds.len();
-    let (built, _threads) = crate::parallel::par_map_owned(pool_builds, |(lang, parses)| {
-        crate::parallel::quiet(|| {
-            if lang == TS_GROUP {
-                build_one(lang, parses, |parses| {
-                    glia_graph::build_typescript_family(repo, parses, |from, spec| {
-                        resolve_ts_source_aliased(from, spec, ts_aliases)
-                    })
-                })
-            } else {
-                build_one(lang, parses, |parses| {
-                    build_solo(lang, parses, repo, repo_label, rust_crates, c_includes)
-                })
-            }
+    GroupPlan { groups, di_refs, recv_fields }
+}
+
+/// Stage 2: one [`LangBuild`] per group of a plan, in plan order. `reuse` is
+/// aligned with `groups`: a `Some` whose [`LangBuild::key`] is its group's
+/// key is taken as built; every other group (a `None`, a missing entry, a
+/// reuse of another key) is built by [`build_one_group`]. A clean build
+/// passes no reuse. A reused build is the caller's copy of a build made from
+/// equal inputs, so the result is the clean build's either way.
+///
+/// LG.1c: the groups are mapped on the engine pool
+/// ([`crate::parallel::par_map_owned`]), the TS family last (CA.7). The
+/// per-build lines (`[evidence-lines]`, `[c-includes]` and the graph crate's
+/// own) print on the thread that ran the build, right after it: under
+/// `GLIA_THREADS=1` in the sequential order, on a pool interleaved across
+/// languages. A panicking build is re-raised here, the first in plan order,
+/// as the inline build let it propagate.
+///
+/// fired_on marker, once per repo, after the builds:
+///   `[groups] repo=<label> built=<b> reused=<r> keys=<k1,k2,..>`
+/// `keys` are the built groups' keys in plan order (`-` when none); a clean
+/// build prints `reused=0`.
+pub(crate) fn build_groups(
+    groups: Vec<GroupInput>,
+    reuse: Vec<Option<LangBuild>>,
+    ctx: &GroupCtx<'_>,
+) -> Vec<LangBuild> {
+    let mut reuse = reuse.into_iter();
+    let items: Vec<(GroupInput, Option<LangBuild>)> = groups
+        .into_iter()
+        .map(|input| {
+            let taken = reuse.next().flatten().filter(|b| b.key() == input.key);
+            (input, taken)
         })
+        .collect();
+    let built: Vec<&'static str> =
+        items.iter().filter(|(_, taken)| taken.is_none()).map(|(input, _)| input.key).collect();
+    let reused = items.len() - built.len();
+    let (builds, _threads) = crate::parallel::par_map_owned(items, |(input, taken)| match taken {
+        Some(build) => Ok(build),
+        None => crate::parallel::quiet(|| build_one_group(input, ctx)),
     });
-    for build in built {
-        match build {
-            Ok(build) => build.fold(&mut graphs, &mut recv_bound, &mut heritage, parse_errors),
-            Err(payload) => std::panic::resume_unwind(payload),
-        }
+    let builds: Vec<LangBuild> = builds
+        .into_iter()
+        .map(|build| build.unwrap_or_else(|payload| std::panic::resume_unwind(payload)))
+        .collect();
+    let keys = if built.is_empty() { "-".to_string() } else { built.join(",") };
+    eprintln!(
+        "[groups] repo={} built={} reused={reused} keys={keys}",
+        ctx.repo_label,
+        built.len()
+    );
+    builds
+}
+
+/// Build one group's graph on THIS thread: [`build_one`] over the TS family's
+/// `build_typescript_family` (with the aliased import resolver) or the
+/// language's own `build_*` ([`build_solo`]).
+fn build_one_group(input: GroupInput, ctx: &GroupCtx<'_>) -> LangBuild {
+    let GroupInput { key, parses } = input;
+    if key == TS_GROUP {
+        build_one(key, parses, |parses| {
+            glia_graph::build_typescript_family(ctx.repo, parses, |from, spec| {
+                resolve_ts_source_aliased(from, spec, ctx.ts_aliases)
+            })
+        })
+    } else {
+        build_one(key, parses, |parses| {
+            build_solo(key, parses, ctx.repo, ctx.repo_label, ctx.rust_crates, ctx.c_includes)
+        })
+    }
+}
+
+/// Stage 3: fold the builds, in plan order, into the repo's graphs
+/// ([`LanguageGraphs`]); a failed build's line goes to `parse_errors` at its
+/// fold position (a reused failed build replays its own line), so the graphs
+/// and the error order are the clean build's. Prints the A6.2a `[recv]` and
+/// A6.3 `[heritage]` markers for `repo_label`; `recv_fields` is the plan's.
+pub(crate) fn fold_groups(
+    builds: Vec<LangBuild>,
+    recv_fields: &[(&'static str, usize)],
+    parse_errors: &mut Vec<String>,
+    repo_label: &str,
+) -> LanguageGraphs {
+    let pooled = builds.len();
+    let mut graphs = Vec::new();
+    let mut keys = Vec::new();
+    let mut recv_bound: Vec<(&str, usize)> = Vec::new();
+    let mut heritage: Vec<HeritageTally> = Vec::new();
+    for build in builds {
+        build.fold(&mut graphs, &mut keys, &mut recv_bound, &mut heritage, parse_errors);
     }
     // A6.2a fired_on marker, once per repo, every `recv_stats::LANGS` row
     // zero-filled (LA.35a adds `rust`: bound = the field- and local-typed
     // binds of `build_rust`, fields = the Rust parses' struct field types):
     //   `[recv] receiver-typed calls bound: csharp=N … rust=N (fields: csharp=F … rust=F) repo=<label>`
-    recv_stats::flush_marker(&recv_bound, &recv_fields, repo_label);
+    recv_stats::flush_marker(&recv_bound, recv_fields, repo_label);
     // A6.3 fired_on marker, once per repo (A6.4 / A6.5 read their rows here):
     //   `[heritage] refs bound: dart=N … typescript=N unresolved: dart=M … repo=<label>`
     if let Some(line) = heritage_marker(&mut heritage, repo_label) {
         eprintln!("{line}");
     }
 
-    LanguageGraphs {
-        graphs,
-        di_refs,
-        pooled,
-    }
+    LanguageGraphs { graphs, keys, pooled }
 }
 
 /// One non-TS build group's graph: the `build_*` its language takes. The
@@ -229,10 +316,13 @@ fn build_solo(
     }
 }
 
-/// One language build's result, made on the thread that ran the build and
-/// folded into the repo's lists by [`build_language_graphs`], in language
-/// order.
-struct LangBuild {
+/// One group build's result, made on the thread that ran the build and
+/// folded into the repo's lists by [`fold_groups`], in plan order. `Clone`
+/// so a caller can keep a pre-pass copy of a group for reuse
+/// ([`build_groups`]); the clean build never clones one (the fold moves it).
+#[derive(Clone)]
+pub(crate) struct LangBuild {
+    /// The plan key ([`GroupInput::key`]).
     lang: &'static str,
     /// The graph with its `graph:build` evidence stamped, and its
     /// `[heritage]` tally; or the `parse_errors` line of a failed build.
@@ -242,11 +332,17 @@ struct LangBuild {
 }
 
 impl LangBuild {
+    /// The plan key of the group this build was made from.
+    pub(crate) fn key(&self) -> &'static str {
+        self.lang
+    }
+
     /// Append this build to the repo's lists: the sequential loop's
-    /// per-language step.
+    /// per-group step.
     fn fold(
         self,
         graphs: &mut Vec<RepoGraph>,
+        keys: &mut Vec<&'static str>,
         recv_bound: &mut Vec<(&'static str, usize)>,
         heritage: &mut Vec<HeritageTally>,
         parse_errors: &mut Vec<String>,
@@ -256,6 +352,7 @@ impl LangBuild {
             Ok((g, h)) => {
                 heritage.push(h);
                 graphs.push(g);
+                keys.push(self.lang);
             }
             Err(e) => parse_errors.push(e),
         }
@@ -423,6 +520,7 @@ impl LineTally {
 /// `unresolved` counts the heritage refs `resolve_refs` left unbound (an
 /// external base: `extends Component`, `implements OnInit`). The graph build
 /// does not know its language, hence the tally per build here.
+#[derive(Clone)]
 struct HeritageTally {
     lang: &'static str,
     bound: usize,
@@ -474,7 +572,7 @@ fn heritage_marker(tallies: &mut [HeritageTally], repo_label: &str) -> Option<St
 /// `examples/*.rs`, `benches/*.rs`, at exactly that depth) as module qnames.
 /// A root with none of them (a `[workspace]`-only manifest) is skipped. Sorted
 /// by (dir, name); `files` is the walk's list, so only walked files count.
-pub(super) fn rust_crates(files: &[(String, String)], roots: &[ProjectRoot]) -> Vec<RustCrate> {
+pub(crate) fn rust_crates(files: &[(String, String)], roots: &[ProjectRoot]) -> Vec<RustCrate> {
     let mut crates = Vec::new();
     for root in roots.iter().filter(|r| r.ecosystem == "cargo") {
         let prefix = if root.rel_path.is_empty() {
@@ -646,7 +744,7 @@ impl TsAliases {
 /// through `web/tsconfig.json`. Only dirs that declare `paths` are kept,
 /// sorted by dir.
 #[derive(Debug, Clone, Default)]
-pub(super) struct TsAliasSet {
+pub(crate) struct TsAliasSet {
     scopes: Vec<TsAliases>,
 }
 
@@ -656,7 +754,7 @@ impl TsAliasSet {
     ///
     /// fired_on marker, once per tsconfig that declares `paths`:
     ///   `[tsconfig] <n> path aliases (baseUrl=<b>) file=<repo-relative path> repo=<label>`
-    pub(super) fn read(root: &Path, roots: &[ProjectRoot], repo_label: &str) -> Self {
+    pub(crate) fn read(root: &Path, roots: &[ProjectRoot], repo_label: &str) -> Self {
         let dirs: BTreeSet<&str> = std::iter::once("")
             .chain(roots.iter().map(|r| r.rel_path.as_str()))
             .collect();

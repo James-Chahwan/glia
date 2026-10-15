@@ -10,7 +10,7 @@ use glia_core::{Edge, Node, NodeId, RepoId};
 // Output graph
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RepoGraph {
     pub repo: RepoId,
     pub nodes: Vec<Node>,
@@ -33,7 +33,7 @@ pub struct RepoGraph {
 
 /// Symbol index built during resolution. Everything keyed by node id so
 /// consumers never re-parse qnames.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct SymbolTable {
     /// Module qname (`"myapp::users"`) → module node id.
     pub module_by_qname: HashMap<String, NodeId>,

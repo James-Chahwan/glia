@@ -21,7 +21,7 @@ use crate::types::{RepoGraph, SymbolTable};
 /// through the v0.4.5 rkyv store without the intra-repo edge list being
 /// polluted by cross-repo references that only make sense once multiple repos
 /// are in scope.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MergedGraph {
     pub graphs: Vec<RepoGraph>,
     pub cross_edges: Vec<Edge>,

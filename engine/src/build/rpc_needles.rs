@@ -18,7 +18,7 @@ use crate::route::ModuleQnames;
 /// client-needle pass keys on it, so a client repo with no `.proto` of its own
 /// still recognises stubs for the server repo's services.
 #[derive(Default)]
-pub(super) struct RpcContext {
+pub(crate) struct RpcContext {
     /// Sorted and deduplicated, so needle order (and therefore GRPC_CLIENT
     /// emission order) does not depend on walk or repo order.
     pub(super) services: Vec<ProtoServiceRef>,
@@ -26,7 +26,7 @@ pub(super) struct RpcContext {
 
 impl RpcContext {
     /// Fold in every service the `.proto` files among `files` declare.
-    pub(super) fn add_files(&mut self, files: &[(String, String)]) {
+    pub(crate) fn add_files(&mut self, files: &[(String, String)]) {
         for (path, source) in files {
             if detect_language(path) == Some("proto") {
                 self.services.extend(grpc::proto_service_refs(source));

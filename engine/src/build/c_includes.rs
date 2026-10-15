@@ -53,7 +53,7 @@ const CMAKE_ROOT_DIR_VARS: [&str; 2] = ["${PROJECT_SOURCE_DIR}", "${CMAKE_SOURCE
 
 /// One repo's C/C++ include search directories and where they came from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct IncludeRoots {
+pub(crate) struct IncludeRoots {
     /// Repo-relative, `/`-separated, `""` for the repo root; search order.
     dirs: Vec<String>,
     /// Distinct kept dirs each source named, before the cross-source dedup.
@@ -71,7 +71,7 @@ impl IncludeRoots {
     ///
     /// Prints one line per malformed compile database:
     ///   `[c-includes] warning: skipped malformed compile_commands.json file=<path> repo=<label>: <error>`
-    pub(super) fn read(
+    pub(crate) fn read(
         root: &Path,
         files: &[(String, String)],
         roots: &[ProjectRoot],

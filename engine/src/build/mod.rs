@@ -3,24 +3,36 @@
 //! of a build is split by seam:
 //!
 //! - [`assemble`] — `build_graphs_for_repo`: parse, const table, post-cache
-//!   grafts, per-language build, per-repo markers, under one panic-hook guard.
+//!   grafts ([`assemble::parse_and_graft`], under one panic-hook guard), the
+//!   per-group build, per-repo markers ([`assemble::repo_markers`]).
 //! - [`grafts`] — the post-cache graft sequence (endpoint fold, HTTP owner
 //!   segment, queue const fold, RPC needles and their markers, anchor census,
 //!   IMPORTS-cell filter).
 //! - [`rpc_needles`] — the build-wide proto service set and the gRPC
 //!   client / server needle passes.
-//! - [`lang_build`] — the deterministic per-language `build_*` dispatch.
+//! - [`lang_build`] — the per-group build as three stages (DC.2):
+//!   [`lang_build::plan_groups`] (the deterministic group order),
+//!   [`lang_build::build_groups`] (the `build_*` dispatch on the pool, with a
+//!   per-group reuse slot) and [`lang_build::fold_groups`].
 //! - [`timing`] — the per-phase timers' `[timing]` stderr lines (CA.9): one
 //!   per built repo, one per build, one per layout write. Stderr only.
 //!
-//! The build tail (cross-graph resolvers, the external edges, post-passes,
-//! evidence fill, the determinism sort) is the code domain's pass registry,
-//! [`crate::profile::CODE_PASSES`], run by one
-//! [`crate::profile::run_code_passes_with`] call (LD.13) given the build's
+//! After a repo's language graphs come its region, project and docs graphs
+//! ([`aux_graphs`]). The build tail ([`finish_build`]: cross-graph resolvers,
+//! the external edges, post-passes, evidence fill, the determinism sort) is
+//! the code domain's pass registry, [`crate::profile::CODE_PASSES`], run by
+//! one [`crate::profile::run_code_passes_with`] call (LD.13) given the build's
 //! [`CodeBuildCtx`]: each repo's `.glia` inputs, loaded once per repo right
 //! after its walk, and the [`BuildOptions`]. After it, the external node-cell
 //! stage ([`crate::external::apply_external_cells`], LF.1a) applies the same
 //! inputs.
+//!
+//! DC.2: those stages are crate-visible so a caller that holds its own file
+//! set and per-group builds (`crate::watch`, DC.7a) can run exactly the calls
+//! `generate_one_inner` makes. `assemble`, `c_includes`, `lang_build` and
+//! `rpc_needles` are `pub(crate)` modules: their `pub(crate)` items are
+//! reached by module path (`crate::build::lang_build::plan_groups`); their
+//! `pub(super)` items stay inside `build`.
 //!
 //! [`BuildOptions`] is how a caller switches a build (LF.2b): `overlay`,
 //! whether the `.glia/overlay.toml` overlay sections apply, and (CE.3b)
@@ -28,11 +40,11 @@
 //! file. It is a build option, not an env var, because pyo3 `generate()` may
 //! run on several Python threads at once.
 
-mod assemble;
-mod c_includes;
+pub(crate) mod assemble;
+pub(crate) mod c_includes;
 mod grafts;
-mod lang_build;
-mod rpc_needles;
+pub(crate) mod lang_build;
+pub(crate) mod rpc_needles;
 pub(crate) mod timing;
 
 use std::path::{Path, PathBuf};
@@ -41,14 +53,16 @@ use std::time::{Duration, Instant};
 use glia_code_domain::project_roots::ProjectRoot;
 use glia_code_domain::walk_gating::{RepoIdentity, repo_identity};
 use glia_core::RepoId;
-use glia_graph::MergedGraph;
+use glia_graph::{MergedGraph, RepoGraph};
 
 use crate::cache::ParseCache;
 use crate::docs::{DocSource, FileDocSource, SnapshotDocSource, build_docs_graph};
 use crate::extract::GoModules;
 use crate::external::{RepoInputs, apply_external_cells, repo_inputs};
 use crate::profile::{CodeBuildCtx, run_code_passes_with};
-use crate::walk::{WalkResult, build_project_graph, build_region_graph, walk_source_files};
+use crate::walk::{
+    RegionAnchor, WalkResult, build_project_graph, build_region_graph, walk_source_files,
+};
 
 use assemble::{RepoBuildCtx, build_graphs_for_repo};
 use c_includes::IncludeRoots;
@@ -71,6 +85,7 @@ use timing::BuildTimes;
 /// };
 /// ```
 #[non_exhaustive]
+#[derive(Clone)]
 pub struct GenerateResult {
     pub merged: MergedGraph,
     pub total_nodes: usize,
@@ -278,29 +293,12 @@ fn generate_one_inner(
     };
     let (mut graphs, mut parse_errors, mut times) = build_graphs_for_repo(&files, cache, &ctx);
     times.walk = walk;
-    // Slot order is regions, then projects, then docs. It fixes the shard index,
-    // so generate_many_inner must use the same order.
-    if !regions.is_empty() {
-        graphs.push(build_region_graph(&regions, repo));
-    }
-    if !roots.is_empty() {
-        graphs.push(build_project_graph(&roots, repo));
-    }
-    let mut doc_records = FileDocSource(md).collect();
-    doc_records.extend(SnapshotDocSource::for_repo(&root).collect());
-    if let Some(docs) = build_docs_graph(&doc_records, repo, &roots) {
-        graphs.push(docs);
-    }
+    graphs.extend(aux_graphs(&root, repo, &regions, &roots, md));
     eprintln!("{}", times.repo_marker(repo_path));
-    let mut merged = MergedGraph::new(graphs);
-    let ctx = CodeBuildCtx::new(inputs, opts);
-    let report = run_code_passes_with(&mut merged, &ctx);
-    let external = timed(|| apply_external_cells(&mut merged, &ctx.inputs));
-    let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
-    let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
-        + merged.cross_edges.len();
+    let Finished { merged, total_nodes, total_edges, times } =
+        finish_build(graphs, inputs, opts, 1, started);
     parse_errors.shrink_to_fit();
-    eprintln!("{}", BuildTimes::new(1, &report, Some(external), started.elapsed()).marker());
+    eprintln!("{}", times.marker());
     Ok(GenerateResult {
         merged,
         total_nodes,
@@ -374,15 +372,12 @@ fn generate_many_inner(
     opts: &BuildOptions,
 ) -> Result<GenerateResult, String> {
     let started = Instant::now();
-    let Assembled { mut merged, parse_errors, label_inputs, repo_roots, inputs } =
+    let Assembled { merged, parse_errors, label_inputs, repo_roots, inputs } =
         assemble_many_with(pairs, incremental, opts)?;
-    let ctx = CodeBuildCtx::new(inputs, opts);
-    let report = run_code_passes_with(&mut merged, &ctx);
-    let external = timed(|| apply_external_cells(&mut merged, &ctx.inputs));
-    let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
-    let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
-        + merged.cross_edges.len();
-    let times = BuildTimes::new(label_inputs.len(), &report, Some(external), started.elapsed());
+    // `merged` is the assembly's fresh merge (no cross edge, no pass undo
+    // record), so the tail re-merges its graphs unchanged.
+    let Finished { merged, total_nodes, total_edges, times } =
+        finish_build(merged.graphs, inputs, opts, label_inputs.len(), started);
     eprintln!("{}", times.marker());
     Ok(GenerateResult {
         merged,
@@ -535,18 +530,7 @@ pub(crate) fn assemble_many_with(
             eprintln!("[incremental] {identity_root}: warning: failed to save parse cache: {e}");
         }
         all_graphs.extend(graphs);
-        // Same slot order as generate_one_inner: regions, projects, docs.
-        if !regions.is_empty() {
-            all_graphs.push(build_region_graph(&regions, repo));
-        }
-        if !roots.is_empty() {
-            all_graphs.push(build_project_graph(&roots, repo));
-        }
-        let mut doc_records = FileDocSource(md).collect();
-        doc_records.extend(SnapshotDocSource::for_repo(&root).collect());
-        if let Some(docs) = build_docs_graph(&doc_records, repo, &roots) {
-            all_graphs.push(docs);
-        }
+        all_graphs.extend(aux_graphs(&root, repo, &regions, &roots, md));
         all_errors.extend(parse_errors);
         eprintln!("{}", times.repo_marker(path));
     }
@@ -564,6 +548,72 @@ pub(crate) fn assemble_many_with(
         repo_roots,
         inputs,
     })
+}
+
+/// One repo's non-language graphs, in slot order: its region graph (when the
+/// walk collapsed a build / vendor region), its project graph (when it found
+/// a project root, A8.5), then its docs graph (the walked markdown `md` and
+/// the `glia docs sync` snapshot under `root`, when either holds a doc). They
+/// follow the repo's language graphs, and the slot order fixes the shard
+/// index, so every build appends them through here (`generate_one_inner`,
+/// `assemble_many_with`, and the watch session of DC.7a).
+pub(crate) fn aux_graphs(
+    root: &Path,
+    repo: RepoId,
+    regions: &[RegionAnchor],
+    roots: &[ProjectRoot],
+    md: Vec<(String, String)>,
+) -> Vec<RepoGraph> {
+    let mut graphs = Vec::new();
+    if !regions.is_empty() {
+        graphs.push(build_region_graph(regions, repo));
+    }
+    if !roots.is_empty() {
+        graphs.push(build_project_graph(roots, repo));
+    }
+    let mut doc_records = FileDocSource(md).collect();
+    doc_records.extend(SnapshotDocSource::for_repo(root).collect());
+    if let Some(docs) = build_docs_graph(&doc_records, repo, roots) {
+        graphs.push(docs);
+    }
+    graphs
+}
+
+/// What [`finish_build`] hands back: the finished graph, its totals and the
+/// build's tail and total times.
+pub(crate) struct Finished {
+    pub(crate) merged: MergedGraph,
+    pub(crate) total_nodes: usize,
+    /// Every repo graph's edges plus the cross edges.
+    pub(crate) total_edges: usize,
+    /// The `[timing] build` line's times (CA.9): `resolve` / `post` /
+    /// `finalize` from the pass report, `external_cells`, `total` since the
+    /// build's start. The caller prints [`BuildTimes::marker`].
+    pub(crate) times: BuildTimes,
+}
+
+/// The build tail over every built repo's graphs, in slot order: merge them,
+/// run [`crate::profile::CODE_PASSES`] ([`run_code_passes_with`], LD.13) and
+/// then the external node-cell stage ([`apply_external_cells`], LF.1a) over
+/// `inputs` (each built repo's `.glia` inputs, in argument order), and total
+/// the nodes and edges. `repos` (the repos built) and `started` (the build's
+/// start) are the returned [`BuildTimes`]' `repos` and `total`.
+pub(crate) fn finish_build(
+    graphs: Vec<RepoGraph>,
+    inputs: Vec<RepoInputs>,
+    opts: &BuildOptions,
+    repos: usize,
+    started: Instant,
+) -> Finished {
+    let mut merged = MergedGraph::new(graphs);
+    let ctx = CodeBuildCtx::new(inputs, opts);
+    let report = run_code_passes_with(&mut merged, &ctx);
+    let external = timed(|| apply_external_cells(&mut merged, &ctx.inputs));
+    let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
+    let total_edges: usize = merged.graphs.iter().map(|g| g.edges.len()).sum::<usize>()
+        + merged.cross_edges.len();
+    let times = BuildTimes::new(repos, &report, Some(external), started.elapsed());
+    Finished { merged, total_nodes, total_edges, times }
 }
 
 /// Run `f` and return what it took (CA.9).
@@ -867,5 +917,195 @@ mod cache_tests {
         ParseCache::purge(repo).unwrap();
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod stage_tests {
+    use std::cell::RefCell;
+
+    use super::assemble::{parse_and_graft, repo_markers};
+    use super::lang_build::{
+        GroupCtx, LangBuild, LanguageGraphs, build_groups, fold_groups, plan_groups,
+    };
+    use super::*;
+
+    /// One single-repo build through the DC.2 stages, composed as
+    /// `generate_one_inner` composes them, with `reuse(key)` filling each
+    /// group's reuse slot.
+    struct Staged {
+        result: GenerateResult,
+        /// The group builds before the fold, cloned: what a later build of
+        /// the same repo can reuse.
+        builds: Vec<LangBuild>,
+        /// The plan's keys, in plan order.
+        plan_keys: Vec<&'static str>,
+        /// `LanguageGraphs::keys`: the key of each language graph.
+        graph_keys: Vec<&'static str>,
+    }
+
+    fn staged(repo_path: &str, reuse: impl Fn(&'static str) -> Option<LangBuild>) -> Staged {
+        let started = Instant::now();
+        let root = PathBuf::from(repo_path);
+        let ident = repo_identity(&root);
+        let repo = RepoId::from_canonical(&ident.key);
+        let (files, regions, md, roots) = walk_source_files(&root);
+        let opts = BuildOptions::default();
+        let inputs = vec![repo_inputs(repo, root.clone(), repo_path.to_string(), None)];
+        let go = go_modules_for(&root, &roots, repo_path);
+        let ts_aliases = TsAliasSet::read(&root, &roots, repo_path);
+        let c_includes = IncludeRoots::read(&root, &files, &roots, repo_path);
+        let mut rpc = RpcContext::default();
+        rpc.add_files(&files);
+        let ctx = RepoBuildCtx {
+            repo,
+            repo_label: repo_path,
+            go: &go,
+            ts_aliases: &ts_aliases,
+            c_includes: &c_includes,
+            rpc: &rpc,
+            roots: &roots,
+            config: inputs.first().and_then(|i| i.config.as_ref()),
+            opts: &opts,
+        };
+        let mut grafted = parse_and_graft(&files, None, &ctx);
+        let plan = plan_groups(std::mem::take(&mut grafted.parses_by_lang), repo_path);
+        let plan_keys: Vec<&'static str> = plan.groups.iter().map(|g| g.key).collect();
+        let slots: Vec<Option<LangBuild>> = plan_keys.iter().map(|k| reuse(k)).collect();
+        let group_ctx = GroupCtx {
+            repo,
+            repo_label: repo_path,
+            rust_crates: &grafted.rust_crates,
+            ts_aliases: &ts_aliases,
+            c_includes: &c_includes,
+        };
+        let builds = build_groups(plan.groups, slots, &group_ctx);
+        let kept = builds.clone();
+        let LanguageGraphs { mut graphs, keys, pooled } =
+            fold_groups(builds, &plan.recv_fields, &mut grafted.parse_errors, repo_path);
+        repo_markers(&graphs, &plan.di_refs, &grafted, pooled, repo_path);
+        graphs.extend(aux_graphs(&root, repo, &regions, &roots, md));
+        let Finished { merged, total_nodes, total_edges, .. } =
+            finish_build(graphs, inputs, &opts, 1, started);
+        let result = GenerateResult {
+            merged,
+            total_nodes,
+            total_edges,
+            parse_errors: grafted.parse_errors,
+            repo_labels: crate::arch::repo_label_map(&[(repo.0, repo_path.to_string())]),
+            repo_roots: std::collections::BTreeMap::from([(repo.0, repo_path.to_string())]),
+        };
+        Staged { result, builds: kept, plan_keys, graph_keys: keys }
+    }
+
+    /// A repo of every group shape the plan orders: python, go (with a
+    /// go.mod), rust (a Cargo package) and TS (the family, built last), plus
+    /// a README for the docs graph and the project graph its manifests make.
+    fn write_repo(dir: &Path) {
+        let write = |rel: &str, body: &str| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write("a.py", "def foo():\n    return bar()\n\ndef bar():\n    return 1\n");
+        write("go.mod", "module example.com/fx\n");
+        write("m.go", "package m\n\nfunc F() int { return G() }\n\nfunc G() int { return 1 }\n");
+        write("c.ts", "export function tsEntry(): number {\n  return helper();\n}\nfunction helper(): number { return 3; }\n");
+        write("Cargo.toml", "[package]\nname = \"fx-crate\"\nversion = \"0.1.0\"\n");
+        write("src/lib.rs", "pub fn run() -> u32 { step() }\nfn step() -> u32 { 1 }\n");
+        write("README.md", "# Fixture\n\nCall `foo` and `run`.\n");
+    }
+
+    /// The bytes of every file `write_merged_sharded` writes for `merged`.
+    fn shard_bytes(merged: &MergedGraph, dir: &Path) -> Vec<(String, Vec<u8>)> {
+        glia_store::write_merged_sharded(merged, dir).unwrap();
+        let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn stages_equal_generate_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        write_repo(&repo);
+        let repo_s = repo.to_str().unwrap();
+
+        let clean = generate_one(repo_s).unwrap();
+        let stages = staged(repo_s, |_| None);
+        assert_eq!(stages.plan_keys, ["go", "python", "rust", "typescript"], "TS family last");
+        assert_eq!(stages.graph_keys, stages.plan_keys, "one graph per group, no failure");
+        assert_eq!(stages.builds.iter().map(LangBuild::key).collect::<Vec<_>>(), stages.plan_keys);
+        assert_eq!(stages.result.parse_errors, clean.parse_errors);
+        assert_eq!(
+            (stages.result.total_nodes, stages.result.total_edges),
+            (clean.total_nodes, clean.total_edges)
+        );
+        assert_eq!(
+            shard_bytes(&stages.result.merged, &tmp.path().join("stages")),
+            shard_bytes(&clean.merged, &tmp.path().join("clean")),
+            "the stages write generate_one's bytes"
+        );
+    }
+
+    #[test]
+    fn group_reuse_reassembles_in_clean_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        write_repo(&repo);
+        let repo_s = repo.to_str().unwrap();
+
+        let a = staged(repo_s, |_| None);
+        let a_bytes = shard_bytes(&a.result.merged, &tmp.path().join("a"));
+        // A body edit of the python file only: every other group's inputs
+        // are unchanged, so its build from A is the build B would make.
+        std::fs::write(repo.join("a.py"), "def foo():\n    return bar() + 1\n\ndef bar():\n    return 2\n")
+            .unwrap();
+        let offered: RefCell<Vec<&'static str>> = RefCell::new(Vec::new());
+        let b = staged(repo_s, |key| {
+            let build = a.builds.iter().find(|b| b.key() == key && key != "python").cloned();
+            if build.is_some() {
+                offered.borrow_mut().push(key);
+            }
+            build
+        });
+        let clean = generate_one(repo_s).unwrap();
+
+        let reused = offered.into_inner();
+        let expected: Vec<&'static str> =
+            b.plan_keys.iter().copied().filter(|k| *k != "python").collect();
+        assert_eq!(reused, expected, "every group but python reused");
+        assert_eq!(b.graph_keys, b.plan_keys);
+        assert_eq!(b.result.parse_errors, clean.parse_errors);
+        let b_bytes = shard_bytes(&b.result.merged, &tmp.path().join("b"));
+        assert_ne!(b_bytes, a_bytes, "the python edit reached the graph");
+        assert_eq!(
+            b_bytes,
+            shard_bytes(&clean.merged, &tmp.path().join("clean")),
+            "reused groups reassemble into the clean build's bytes"
+        );
+    }
+
+    /// A reuse slot holding another group's build is not taken: the group is
+    /// built, so the result is still the clean build.
+    #[test]
+    fn a_reuse_of_another_key_is_built() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        write_repo(&repo);
+        let repo_s = repo.to_str().unwrap();
+
+        let a = staged(repo_s, |_| None);
+        let go = a.builds.iter().find(|b| b.key() == "go").cloned().unwrap();
+        let b = staged(repo_s, |key| (key == "python").then(|| go.clone()));
+        assert_eq!(b.builds.iter().map(LangBuild::key).collect::<Vec<_>>(), b.plan_keys);
+        assert_eq!(
+            shard_bytes(&b.result.merged, &tmp.path().join("b")),
+            shard_bytes(&generate_one(repo_s).unwrap().merged, &tmp.path().join("clean")),
+        );
     }
 }

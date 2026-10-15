@@ -1,20 +1,27 @@
 //! Per-repo graph assembly: `build_graphs_for_repo` and the facts and markers
 //! it owns (the A11.1 const table and its LF.2d overlay pins, the A12.1
-//! `[msgtype]` census, the quiet-panic scope that covers the whole assembly).
+//! `[msgtype]` census, the quiet-panic scope that covers parse and grafts).
+//! DC.2 split it into callable stages: [`parse_and_graft`] (parse, const
+//! table, Cargo packages, post-cache grafts), the per-group build of
+//! [`super::lang_build`] (plan, build, fold) and [`repo_markers`].
+
+use std::collections::HashMap;
 
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::glia_config::LoadedConfig;
 use glia_code_domain::project_roots::ProjectRoot;
-use glia_code_domain::{cell_type, di_stats, node_kind};
+use glia_code_domain::{FileParse, cell_type, di_stats, node_kind};
 use glia_code_extractors::constants::ConstTable;
 use glia_core::RepoId;
+use glia_graph::RepoGraph;
+use glia_graph::rust_paths::RustCrate;
 
 use std::time::Instant;
 
 use super::BuildOptions;
 use super::c_includes::IncludeRoots;
 use super::grafts;
-use super::lang_build::{self, TsAliasSet};
+use super::lang_build::{self, GroupCtx, GroupPlan, LangBuild, LanguageGraphs, TsAliasSet};
 use super::rpc_needles::RpcContext;
 use super::timing::PhaseTimes;
 use crate::cache::ParseCache;
@@ -110,51 +117,76 @@ fn pin_overlay_constants(
 /// the repo dir before the parse. A packet that adds a per-repo input extends
 /// this struct, never the parameter list.
 #[derive(Clone, Copy)]
-pub(super) struct RepoBuildCtx<'a> {
-    pub(super) repo: RepoId,
+pub(crate) struct RepoBuildCtx<'a> {
+    pub(crate) repo: RepoId,
     /// The repo path as the caller was given it. It only labels markers
     /// (`[incremental]`, `[const]`, ...), so a multi-repo build prints one
     /// attributable line per repo; it never reaches the graph.
-    pub(super) repo_label: &'a str,
+    pub(crate) repo_label: &'a str,
     /// The repo's go.mod set (LA.13), handed to every Go parse.
-    pub(super) go: &'a GoModules,
+    pub(crate) go: &'a GoModules,
     /// The repo's tsconfig `paths` aliases per project dir (A6.8): the TS
     /// family's import resolver and the IMPORTS-cell filter read them.
-    pub(super) ts_aliases: &'a TsAliasSet,
+    pub(crate) ts_aliases: &'a TsAliasSet,
     /// The repo's C/C++ include search roots (CB.22): `build_c_cpp`'s include
     /// resolver reads them after the parse cache, so the cache needs no key.
-    pub(super) c_includes: &'a IncludeRoots,
+    pub(crate) c_includes: &'a IncludeRoots,
     /// The build-wide proto service set (A5.2).
-    pub(super) rpc: &'a RpcContext,
+    pub(crate) rpc: &'a RpcContext,
     /// The walk's project roots (A8.4), the owner vocabulary of the LB.4a HTTP
     /// owner segment.
-    pub(super) roots: &'a [ProjectRoot],
+    pub(crate) roots: &'a [ProjectRoot],
     /// The repo's loaded `.glia/overlay.toml` (`RepoInputs::config`). With
     /// `opts` it decides the overlay stages that run before the graph is built
     /// (LF.2d's constant pins; LF.2e's `[[wrapper]]` call sites, minted inside
     /// `grafts::apply_post_cache`).
-    pub(super) config: Option<&'a LoadedConfig>,
-    pub(super) opts: &'a BuildOptions,
+    pub(crate) config: Option<&'a LoadedConfig>,
+    pub(crate) opts: &'a BuildOptions,
 }
 
-/// Parse, graft and build one repo's graphs from its walked `files`, reusing
-/// `cache` when given, under the per-repo context `ctx` ([`RepoBuildCtx`]).
+/// One repo's parses after every post-cache graft ([`parse_and_graft`]): the
+/// input of its per-group build, and what [`repo_markers`] reports.
+pub(crate) struct Grafted {
+    /// The finished parses per parse-language tag; [`lang_build::plan_groups`]
+    /// orders them.
+    pub(crate) parses_by_lang: HashMap<&'static str, Vec<FileParse>>,
+    /// The parse, const-table-scan and graft error lines, in that order.
+    pub(crate) parse_errors: Vec<String>,
+    /// `parse`, `const_scan` and `grafts` (CA.9); `walk` and
+    /// `language_build` are zero, for the caller that ran them to fill.
+    pub(crate) times: PhaseTimes,
+    /// The Cargo packages ([`lang_build::rust_crates`]), read by the A16.4
+    /// IMPORTS filter inside the grafts and by `build_rust`
+    /// ([`GroupCtx::rust_crates`]).
+    pub(crate) rust_crates: Vec<RustCrate>,
+    /// Files the A11.1 const-table scan read, for the `[parallel]` line.
+    pub(crate) const_files: usize,
+    /// The engine pool's thread count, for the `[parallel]` line.
+    pub(crate) threads: usize,
+    /// Files the RPC needle pass ran on, for the `[parallel]` line.
+    pub(crate) rpc_files: usize,
+}
+
+/// Stage 1 of a repo's assembly: parse `files` (reusing `cache` when given),
+/// build the const table and its LF.2d pins, read the Cargo packages and run
+/// the post-cache grafts, under the per-repo context `ctx`
+/// ([`RepoBuildCtx`]). `files` is the whole walked file set of the repo: a
+/// caller that holds its own file table (a watch session) injects it here.
 ///
-/// Also returns what its phases took (CA.9): `parse`, `const_scan` (the
-/// table, its `[const]` line and the LF.2d pins), `grafts` (the Cargo-package
-/// read and `grafts::apply_post_cache`) and `language_build`. `walk` is left
-/// zero for the caller, which ran the walk, to fill.
-pub(super) fn build_graphs_for_repo(
+/// Its times (CA.9): `parse`, `const_scan` (the table, its `[const]` line and
+/// the LF.2d pins) and `grafts` (the Cargo-package read and
+/// `grafts::apply_post_cache`).
+pub(crate) fn parse_and_graft(
     files: &[(String, String)],
     cache: Option<&mut ParseCache>,
     ctx: &RepoBuildCtx<'_>,
-) -> (Vec<glia_graph::RepoGraph>, Vec<String>, PhaseTimes) {
+) -> Grafted {
     let RepoBuildCtx {
         repo,
         repo_label,
         go,
         ts_aliases,
-        c_includes,
+        c_includes: _,
         rpc,
         roots,
         config,
@@ -166,7 +198,8 @@ pub(super) fn build_graphs_for_repo(
     // scope covers every `catch_unwind` the assembly runs on THIS thread
     // (grafts, the overlay wrapper stage, the needle passes), the pool
     // workers go through `parallel::quiet`, and a panic on any other thread
-    // of the process still reaches the original hook.
+    // of the process still reaches the original hook. The group builds run
+    // inside `parallel::quiet` on whichever thread maps them.
     let _quiet = crate::parallel::quiet_scope();
     // A7.0: shape counters describe only the detectors that run in THIS build.
     di_stats::reset();
@@ -216,39 +249,84 @@ pub(super) fn build_graphs_for_repo(
     );
     times.grafts = started.elapsed();
 
-    let started = Instant::now();
-    let lang_build::LanguageGraphs {
-        graphs,
-        di_refs,
-        pooled,
-    } = lang_build::build_language_graphs(
+    Grafted {
         parses_by_lang,
-        repo,
-        repo_label,
-        &rust_crates,
-        ts_aliases,
-        c_includes,
-        &mut parse_errors,
-    );
-    times.language_build = started.elapsed();
+        parse_errors,
+        times,
+        rust_crates,
+        const_files,
+        threads,
+        rpc_files: rpc_added.files,
+    }
+}
 
-    // A7.0 fired_on marker, once per repo: `[di] injects refs: … repo=<label>`.
-    di_stats::flush_marker(&di_refs, repo_label);
-    msgtype_marker(&graphs, repo_label);
-    // LG.1b / LG.1c fired_on marker, once per repo, after its graphs are built:
-    //   `[parallel] <repo>: const-scan <c> files, rpc-needles <r> files, <g> language graphs on <t> threads`
-    // `c` = files the A11.1 const-table scan read (every file with a source
-    // language), `r` = files the RPC needle pass ran on (text-gated, with a
-    // parse; 0 when the build knows no proto service; `apply_post_cache`
-    // returns it), `g` = the per-language graph builds mapped on the pool
-    // (every build group, the TS family's one graph the last of them, CA.7),
-    // `t` = the pool that ran all three.
+/// Parse, graft and build one repo's graphs from its walked `files`, reusing
+/// `cache` when given, under the per-repo context `ctx` ([`RepoBuildCtx`]):
+/// [`parse_and_graft`], then every group of [`lang_build::plan_groups`] built
+/// ([`lang_build::build_groups`], no reuse) and folded
+/// ([`lang_build::fold_groups`]), then [`repo_markers`].
+///
+/// Also returns what its phases took (CA.9): `parse`, `const_scan` and
+/// `grafts` ([`parse_and_graft`]) and `language_build` (plan, build and
+/// fold). `walk` is left zero for the caller, which ran the walk, to fill.
+pub(super) fn build_graphs_for_repo(
+    files: &[(String, String)],
+    cache: Option<&mut ParseCache>,
+    ctx: &RepoBuildCtx<'_>,
+) -> (Vec<RepoGraph>, Vec<String>, PhaseTimes) {
+    let mut grafted = parse_and_graft(files, cache, ctx);
+
+    let started = Instant::now();
+    let GroupPlan { groups, di_refs, recv_fields } =
+        lang_build::plan_groups(std::mem::take(&mut grafted.parses_by_lang), ctx.repo_label);
+    let group_ctx = GroupCtx {
+        repo: ctx.repo,
+        repo_label: ctx.repo_label,
+        rust_crates: &grafted.rust_crates,
+        ts_aliases: ctx.ts_aliases,
+        c_includes: ctx.c_includes,
+    };
+    // A clean build reuses nothing: every group is built.
+    let reuse: Vec<Option<LangBuild>> = Vec::new();
+    let builds = lang_build::build_groups(groups, reuse, &group_ctx);
+    let LanguageGraphs { graphs, keys, pooled } = lang_build::fold_groups(
+        builds,
+        &recv_fields,
+        &mut grafted.parse_errors,
+        ctx.repo_label,
+    );
+    grafted.times.language_build = started.elapsed();
+    // `keys` is index-aligned with `graphs` (a failed group adds neither): a
+    // caller that keeps a per-graph side table beside them (a watch session's
+    // group of each graph) maps a graph to its group through it.
+    debug_assert_eq!(keys.len(), graphs.len(), "one plan key per language graph");
+
+    repo_markers(&graphs, &di_refs, &grafted, pooled, ctx.repo_label);
+    (graphs, grafted.parse_errors, grafted.times)
+}
+
+/// The per-repo lines printed once its language graphs are built:
+/// - A7.0 `[di] injects refs: … repo=<label>` (`di_refs`: the plan's);
+/// - A12.1 `[msgtype]` (counted off `graphs`, see [`msgtype_marker`]);
+/// - LG.1b / LG.1c `[parallel] <repo>: const-scan <c> files, rpc-needles <r> files, <g> language graphs on <t> threads`:
+///   `c` = files the A11.1 const-table scan read (every file with a source
+///   language), `r` = files the RPC needle pass ran on (text-gated, with a
+///   parse; 0 when the build knows no proto service), `g` = `pooled`, the
+///   group builds mapped on the pool (every build group, the TS family's one
+///   graph the last of them, CA.7), `t` = the pool that ran all three.
+pub(crate) fn repo_markers(
+    graphs: &[RepoGraph],
+    di_refs: &[(&'static str, usize)],
+    grafted: &Grafted,
+    pooled: usize,
+    repo_label: &str,
+) {
+    di_stats::flush_marker(di_refs, repo_label);
+    msgtype_marker(graphs, repo_label);
     eprintln!(
-        "[parallel] {repo_label}: const-scan {const_files} files, rpc-needles {} files, {pooled} language graphs on {threads} threads",
-        rpc_added.files
+        "[parallel] {repo_label}: const-scan {} files, rpc-needles {} files, {pooled} language graphs on {} threads",
+        grafted.const_files, grafted.rpc_files, grafted.threads
     );
-
-    (graphs, parse_errors, times)
 }
 
 /// A12.1 fired_on marker, once per repo that holds a queue node:
@@ -256,7 +334,7 @@ pub(super) fn build_graphs_for_repo(
 /// `typed` counts nodes carrying a `cell_type::MESSAGE_TYPE` cell, `tag_topics`
 /// the identity-free framework tags that can never carry a contract. Counted
 /// off the built graphs, so cache-served files count too; silent otherwise.
-fn msgtype_marker(graphs: &[glia_graph::RepoGraph], repo_label: &str) {
+fn msgtype_marker(graphs: &[RepoGraph], repo_label: &str) {
     let (mut queue_nodes, mut typed, mut tags) = (0usize, 0usize, 0usize);
     for g in graphs {
         for n in &g.nodes {
