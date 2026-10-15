@@ -12,13 +12,8 @@
 //! (LD.2); a `min_share` above 100, a `group_by` other than `"service"` /
 //! `"package"` (CA.5b) or an engine `Err` raises `ValueError`.
 //!
-//! 0.5.0 named them `patterns_experimental` / `patterns_vs_rev_experimental`
-//! so no consumer adopted the answer before the engine met its promotion
-//! criterion (the engine module docs, "Promotion criterion"). Those names stay
-//! until 0.5.2 as aliases: the same parameters, the same helper, the same
-//! dict, after a `DeprecationWarning` naming the new name (an error under
-//! `warnings.simplefilter("error")`, so nothing is computed then). Removing
-//! them in 0.5.2 is deleting the two alias fns and their snapshot lines.
+//! 0.5.0 named them `patterns_experimental` / `patterns_vs_rev_experimental`;
+//! the aliases were removed in 0.5.2 (DE.11).
 //!
 //! Transport only: populations, signatures, verdicts and locations live in
 //! the engine. The helpers the pyo3 entry points delegate to are pyo3-free,
@@ -28,7 +23,7 @@
 
 use std::collections::BTreeMap;
 
-use pyo3::exceptions::{PyDeprecationWarning, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use glia_engine::delta::graph_delta_vs_rev;
@@ -66,7 +61,7 @@ fn options(
     Ok(p)
 }
 
-/// The body of [`PyGraph::patterns`] (and its alias), minus pyo3.
+/// The body of [`PyGraph::patterns`], minus pyo3.
 fn graph_report(
     merged: &MergedGraph,
     repo_labels: &BTreeMap<u64, String>,
@@ -81,7 +76,7 @@ fn graph_report(
     Ok(report)
 }
 
-/// The body of [`patterns_vs_rev`] (and its alias), minus pyo3. `Err` is a bad
+/// The body of [`patterns_vs_rev`], minus pyo3. `Err` is a bad
 /// `min_share` or `group_by`, or the engine's message (not a directory, git missing, not a
 /// git work tree, an unknown rev, a failed build).
 fn rev_report(
@@ -97,19 +92,6 @@ fn rev_report(
     let report = pattern_conformance_delta(&d.after.merged, &d.after.repo_labels, &d.delta, &p);
     eprintln!("[patterns] surface=pyo3 mode=delta");
     Ok(report)
-}
-
-/// A pre-promotion alias's `DeprecationWarning`, naming its replacement.
-const GRAPH_ALIAS_WARNING: &std::ffi::CStr =
-    c"patterns_experimental is deprecated: use patterns (removed in 0.5.2)";
-/// [`patterns_vs_rev_experimental`]'s warning.
-const REV_ALIAS_WARNING: &std::ffi::CStr =
-    c"patterns_vs_rev_experimental is deprecated: use patterns_vs_rev (removed in 0.5.2)";
-
-/// Emit a pre-promotion alias's `DeprecationWarning` at the caller's line;
-/// `Err` when the warning filter turns it into an exception.
-fn deprecated(py: Python<'_>, message: &std::ffi::CStr) -> PyResult<()> {
-    PyErr::warn(py, py.get_type::<PyDeprecationWarning>().as_any(), message, 1)
 }
 
 #[pymethods]
@@ -160,23 +142,6 @@ impl PyGraph {
                 .map_err(PyValueError::new_err)?;
         to_py(py, serde_json::to_string(&report))
     }
-
-    /// **patterns_experimental** (DEPRECATED, removed in 0.5.2): the 0.5.0
-    /// name of `patterns`. Same parameters and dict, after a
-    /// `DeprecationWarning` (raised as an exception, before any work, under
-    /// `warnings.simplefilter("error")`).
-    #[pyo3(signature = (min_support=5, min_share=75, scope=None, group_by="service"))]
-    fn patterns_experimental(
-        &self,
-        py: Python<'_>,
-        min_support: usize,
-        min_share: usize,
-        scope: Option<&str>,
-        group_by: &str,
-    ) -> PyResult<Py<PyAny>> {
-        deprecated(py, GRAPH_ALIAS_WARNING)?;
-        self.patterns(py, min_support, min_share, scope, group_by)
-    }
 }
 
 /// **patterns_vs_rev** (LE.7b; out of experimental since CC.12b): pattern
@@ -209,28 +174,8 @@ fn patterns_vs_rev(
     to_py(py, serde_json::to_string(&report))
 }
 
-/// **patterns_vs_rev_experimental** (DEPRECATED, removed in 0.5.2): the
-/// 0.5.0 name of `patterns_vs_rev`. Same parameters and dict, after a
-/// `DeprecationWarning` (raised as an exception, before any work, under
-/// `warnings.simplefilter("error")`).
-#[pyfunction]
-#[pyo3(signature = (repo_path, base="HEAD", min_support=5, min_share=75, scope=None, group_by="service"))]
-fn patterns_vs_rev_experimental(
-    py: Python<'_>,
-    repo_path: &str,
-    base: &str,
-    min_support: usize,
-    min_share: usize,
-    scope: Option<&str>,
-    group_by: &str,
-) -> PyResult<Py<PyAny>> {
-    deprecated(py, REV_ALIAS_WARNING)?;
-    patterns_vs_rev(py, repo_path, base, min_support, min_share, scope, group_by)
-}
-
 fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(patterns_vs_rev, m)?)?;
-    m.add_function(wrap_pyfunction!(patterns_vs_rev_experimental, m)?)?;
     Ok(())
 }
 
@@ -352,8 +297,7 @@ mod tests {
         assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
 
-    /// LE.7b: the helper behind `PyGraph.patterns` (and its deprecated
-    /// alias) returns the engine's report with the documented keys and no
+    /// LE.7b: the helper behind `PyGraph.patterns` returns the engine's report with the documented keys and no
     /// `experimental` key (CC.12b), the one located divergence, and the
     /// keywords reach the engine. The conformance itself is covered by
     /// `engine/tests/patterns.rs`.
@@ -419,8 +363,8 @@ mod tests {
         assert!(err.contains("\"service\" or \"package\"") && err.contains("\"dir\""), "{err}");
     }
 
-    /// LE.7b: the helper behind `patterns_vs_rev` (and its alias) judges the
-    /// working tree and lists only the divergence the change added; an
+    /// LE.7b: the helper behind `patterns_vs_rev` judges the working
+    /// tree and lists only the divergence the change added; an
     /// unknown rev is the engine's error.
     #[test]
     fn rev_helper_lists_the_touched_divergence() {

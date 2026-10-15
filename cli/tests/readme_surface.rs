@@ -460,7 +460,20 @@ fn a_broken_readme_copy_is_reported() {
 /// lines outside a fence or outside `## CLI`, and description prose are not.
 #[test]
 fn checker_reports_each_stale_mention_at_its_line() {
-    let s = surface();
+    // No real snapshot has a hidden flag since 0.5.2 removed `glia patterns
+    // --experimental` (DE.11), so a synthetic hidden `--legacy` on `patterns`
+    // keeps the checker's hidden-flag branch covered.
+    let mut s = surface();
+    s.flags.get_mut("patterns").expect("patterns snapshot").insert(
+        "--legacy".into(),
+        ArgSpec {
+            long: "--legacy".into(),
+            takes_value: false,
+            values: vec![],
+            hidden: true,
+            global: false,
+        },
+    );
     let md = "\
 ## Install
 ```
@@ -474,7 +487,7 @@ glia fnd <REPO>
 glia cache pusj <REPO> <STORE>
 glia impact <REPO> <QNAME> [--direction forward|sideways]
 glia hotspots <REPO> [--level module|symbol]
-glia patterns <REPO> [--experimental]
+glia patterns <REPO> [--legacy]
 glia hook pre-commit --pair <PAIR>
 glia timeline build|history|as-of <REPO> [--json] [--revs <REVS>]
 glia docs sync <REPO> --source wiki
@@ -534,7 +547,7 @@ glia fnd <REPO>
     );
     assert!(f[3].contains("`--level module|symbol`"), "{}", f[3]);
     assert!(
-        f[4].ends_with("`--experimental` is hidden in its snapshot"),
+        f[4].ends_with("`--legacy` is hidden in its snapshot"),
         "{}",
         f[4]
     );
@@ -587,7 +600,7 @@ glia fnd <REPO>
     assert!(unshown("timeline build", "--head") && !unshown("timeline build", "--revs"));
     assert!(unshown("timeline history", "--category") && !unshown("timeline as-of", "--json"));
     assert!(
-        !unshown("patterns", "--experimental"),
+        !unshown("patterns", "--legacy"),
         "hidden flags need no mention"
     );
 }

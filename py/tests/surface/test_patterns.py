@@ -10,12 +10,11 @@ group_by="package", CA.5b), the most frequent role chain of the sighted
 handlers as a population's convention, each sighted handler off it a located
 DIVERGENCE (lines 1-based), each blind one (`handler>(no effect)`) listed in
 the population's `blind`. No key and no marker says `experimental`. The
-pre-promotion names `PyGraph.patterns_experimental` / `patterns_vs_rev_experimental`
-stay until 0.5.2 as aliases: same parameters, the same dict, and a
-DeprecationWarning naming the new name (raised under
-`warnings.simplefilter("error")`). A min_share above 100, a group_by other
-than "service" / "package" or an engine error raises ValueError. The rev
-function needs a `git` binary. Shared helpers: test_build.py."""
+pre-promotion names `PyGraph.patterns_experimental` / `patterns_vs_rev_experimental`,
+kept as DeprecationWarning aliases until 0.5.2, are removed (DE.11): neither
+attribute exists. A min_share above 100, a group_by other than "service" /
+"package" or an engine error raises ValueError. The rev function needs a
+`git` binary. Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import os
@@ -23,7 +22,6 @@ import pathlib
 import subprocess
 import sys
 import tempfile
-import warnings
 
 from test_build import Checks, params, rg, stderr_of
 
@@ -93,31 +91,19 @@ def git(top: pathlib.Path, *args: str) -> None:
                    env=env, check=True, capture_output=True, text=True)
 
 
-def deprecated(fn):
-    """(fn(), the DeprecationWarnings it emitted) under the default filters."""
-    with warnings.catch_warnings(record=True) as seen:
-        warnings.simplefilter("always")
-        out = fn()
-    return out, [w for w in seen if issubclass(w.category, DeprecationWarning)]
-
-
 def main() -> int:
     c = Checks("patterns")
     method = getattr(rg.PyGraph, "patterns", None)
     fn = getattr(rg, "patterns_vs_rev", None)
-    old_method = getattr(rg.PyGraph, "patterns_experimental", None)
-    old_fn = getattr(rg, "patterns_vs_rev_experimental", None)
     c.check("PyGraph.patterns exists", method is not None)
     c.check("patterns_vs_rev exists", fn is not None)
-    c.check("PyGraph.patterns_experimental alias kept until 0.5.2", old_method is not None)
-    c.check("patterns_vs_rev_experimental alias kept until 0.5.2", old_fn is not None)
-    if None in (method, fn, old_method, old_fn):
+    c.check("patterns_experimental removed in 0.5.2", not hasattr(rg.PyGraph, "patterns_experimental"))
+    c.check("patterns_vs_rev_experimental removed in 0.5.2", not hasattr(rg, "patterns_vs_rev_experimental"))
+    if None in (method, fn):
         return c.done()
     rev_params = [("repo_path", None), ("base", "HEAD"), *KW]
     c.check("patterns params", params(method) == KW, params(method))
     c.check("patterns_vs_rev params", params(fn) == rev_params, params(fn))
-    c.check("alias params match", params(old_method) == KW and params(old_fn) == rev_params,
-            (params(old_method), params(old_fn)))
 
     with tempfile.TemporaryDirectory(prefix="glia-surface-patterns-") as tmp:
         gitconfig = pathlib.Path(tmp) / "gitconfig"
@@ -165,18 +151,6 @@ def main() -> int:
         c.check("engine marker ends in blind and group_by", " blind=0 group_by=service\n" in err, err[-400:])
         c.check("no marker says experimental", "[patterns] experimental" not in err, err[-400:])
 
-        (old, seen), old_err = stderr_of(lambda: deprecated(lambda: g.patterns_experimental()))
-        c.check("patterns_experimental returns the same dict", old == r, old)
-        c.check("patterns_experimental warns once",
-                len(seen) == 1 and "use patterns (removed in 0.5.2)" in str(seen[0].message),
-                [str(w.message) for w in seen])
-        c.check("patterns_experimental marker is the pyo3 one", GRAPH_MARKER in old_err, old_err[-400:])
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            c.raises("patterns_experimental raises DeprecationWarning under error filter", DeprecationWarning,
-                     lambda: g.patterns_experimental(), "patterns_experimental is deprecated")
-            c.check("patterns() does not warn under error filter", g.patterns() == r)
-
         by_pkg, err = stderr_of(lambda: g.patterns(group_by="package"))
         c.check("group_by=package keys every population by directory",
                 [(p.get("service"), p.get("package")) for p in by_pkg.get("populations", [])]
@@ -213,16 +187,6 @@ def main() -> int:
         c.raises("unknown rev raises", ValueError,
                  lambda: rg.patterns_vs_rev(str(rev_top), base="no-such-rev"), "no-such-rev")
 
-        old_rv, seen = deprecated(lambda: rg.patterns_vs_rev_experimental(str(rev_top)))
-        c.check("patterns_vs_rev_experimental returns the same dict", old_rv == rv, old_rv)
-        c.check("patterns_vs_rev_experimental warns once",
-                len(seen) == 1 and "use patterns_vs_rev (removed in 0.5.2)" in str(seen[0].message),
-                [str(w.message) for w in seen])
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            c.raises("patterns_vs_rev_experimental raises DeprecationWarning under error filter",
-                     DeprecationWarning, lambda: rg.patterns_vs_rev_experimental(str(rev_top)),
-                     "patterns_vs_rev_experimental is deprecated")
     return c.done()
 
 

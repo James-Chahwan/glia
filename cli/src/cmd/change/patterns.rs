@@ -7,10 +7,9 @@
 //!
 //! The command runs without a flag. 0.5.0 refused without `--experimental`
 //! until the engine met its promotion criterion (the engine module docs,
-//! "Promotion criterion"); CC.12b promoted it, so `--experimental` is hidden,
-//! still accepted until 0.5.2 and prints
-//! `[patterns] note: --experimental is no longer needed (accepted until 0.5.2)`
-//! on stderr before anything else, the answer unchanged.
+//! "Promotion criterion"); CC.12b promoted it and kept the flag hidden until
+//! 0.5.2, which removed it (DE.11): `--experimental` is now clap's
+//! unexpected-argument usage error (exit 2).
 //!
 //! Two modes. Whole graph (the default): a fresh build of the repo (`--with`
 //! merges more repos in) and every exception listed. Delta (`--base <rev>`):
@@ -62,10 +61,6 @@ use glia_engine::patterns::{
 
 use crate::common::{build_options, generate_for};
 
-/// What `--experimental` prints since the promotion (CC.12b), verbatim.
-const EXPERIMENTAL_NOTE: &str =
-    "[patterns] note: --experimental is no longer needed (accepted until 0.5.2)";
-
 /// `--group-by`: what keys a population (the engine's `GroupBy`).
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
 pub(crate) enum GroupByArg {
@@ -80,10 +75,6 @@ pub(crate) enum GroupByArg {
 pub(crate) struct Args {
     /// Path to the repo root (a git work tree with `--base`).
     repo: String,
-    /// Accepted until 0.5.2 and ignored but for a note on stderr: the
-    /// command left experimental in 0.5.1 (CC.12b).
-    #[arg(long, hide = true)]
-    experimental: bool,
     /// Delta mode: judge the working tree's graph, listing only the
     /// divergences the change against this git rev (a branch, tag, sha or
     /// `HEAD~N`) touched.
@@ -149,9 +140,6 @@ fn answer(args: &Args, p: &PatternArgs) -> Result<(PatternReport, &'static str),
 }
 
 pub(crate) fn run(args: Args) -> i32 {
-    if args.experimental {
-        eprintln!("{EXPERIMENTAL_NOTE}");
-    }
     let p = match pattern_args(&args) {
         Ok(p) => p,
         Err(e) => {

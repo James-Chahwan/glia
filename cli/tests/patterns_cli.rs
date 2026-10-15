@@ -6,9 +6,9 @@
 //! repository > db; `RawOrderHandler` goes straight to the repository.
 //! CA.5b adds a blind health check (`handler>(no effect)`), listed apart from
 //! the divergences, and `--group-by package`. CC.12b promoted the command out
-//! of experimental: it runs without a flag, `--experimental` is hidden,
-//! accepted until 0.5.2 and prints a note, and neither the report nor a
-//! marker says `experimental`.
+//! of experimental: it runs without a flag, and neither the report nor a
+//! marker says `experimental`. The hidden `--experimental` it kept until 0.5.2
+//! is gone (DE.11): passing it is clap's usage error.
 //!
 //! This surface's `[patterns] surface=cli mode=<graph|delta>` stderr line is
 //! the fired_on marker, beside the engine's `[patterns] populations=..`;
@@ -25,8 +25,6 @@ use std::process::{Command, Output};
 
 use serde_json::Value;
 
-/// What `--experimental` prints since the promotion (CC.12b), verbatim.
-const NOTE: &str = "[patterns] note: --experimental is no longer needed (accepted until 0.5.2)";
 const CONVENTION: &str = "handler>service>repository>db";
 const DIRECT_SIGNATURE: &str = "handler>repository>db";
 const DIRECT: &str = "handlers::handlers::RawOrderHandler";
@@ -193,11 +191,12 @@ fn no_experimental_word(err: &str) {
 }
 
 /// CC.12b: `glia patterns <dir>` runs without a flag (exit 0, the report,
-/// both markers, no note). `--experimental` is still accepted until 0.5.2:
-/// exit 0, the same report byte for byte, and the note on stderr. A path that
-/// does not exist is now the build's error (exit 2), not a refusal on a flag.
+/// both markers, no note). DE.11: the hidden `--experimental` CC.12b kept
+/// until 0.5.2 is removed, so passing it is clap's unexpected-argument usage
+/// error (exit 2, nothing on stdout, no build run). A path that does not
+/// exist is the build's error (exit 2), not a refusal on a flag.
 #[test]
-fn runs_without_flag_and_notes_the_old_one() {
+fn runs_without_flag_and_refuses_the_old_one() {
     let s = Scratch::shop("noflag", 6);
     let plain = s.patterns(&["--json"]);
     let err = stderr(&plain);
@@ -205,15 +204,15 @@ fn runs_without_flag_and_notes_the_old_one() {
     assert_eq!(json(&plain)["judged"].as_u64(), Some(1), "{}", stdout(&plain));
     assert!(err.lines().any(|l| l == GRAPH_MARKER), "{err}");
     assert!(err.lines().any(|l| l.starts_with("[patterns] populations=1 judged=1 handlers=6 divergences=1")), "{err}");
-    assert!(!err.contains(NOTE), "{err}");
+    assert!(!err.contains("[patterns] note:"), "{err}");
     no_experimental_word(&err);
 
     let flagged = s.patterns(&["--experimental", "--json"]);
     let err = stderr(&flagged);
-    assert_eq!(flagged.status.code(), Some(0), "{err}");
-    assert_eq!(err.lines().filter(|l| *l == NOTE).count(), 1, "{err}");
-    assert_eq!(stdout(&flagged), stdout(&plain));
-    no_experimental_word(&err);
+    assert_eq!(flagged.status.code(), Some(2), "{err}");
+    assert!(err.contains("unexpected argument '--experimental'"), "{err}");
+    assert!(!err.lines().any(|l| l.starts_with("[patterns] ")), "no build ran: {err}");
+    assert!(stdout(&flagged).is_empty(), "{}", stdout(&flagged));
 
     let table = s.patterns(&[]);
     assert_eq!(table.status.code(), Some(0), "{}", stderr(&table));
