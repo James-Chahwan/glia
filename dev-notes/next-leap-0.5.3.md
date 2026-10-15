@@ -120,6 +120,41 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   `servers: [{url: ..}]` / `variables: {..}` stay unread.
 - W1 (DF.20): `deployment_hosts` could apply a `.replace` span's transform to each alternative and write `hosts`; the
   config-expression grammar could take a SCREAMING_CASE bare identifier (`ADMIN_BASE + '/users'`).
+- W2 (DG.7a, DG.8, DH.1): the CJ.1 code guard misses three needle scanners, so glia's self-graph mints phantoms: the
+  k8s CronJob YAML scanner in `cron.rs` (`cron:0 6 * * 1:report`), the CLI invocation needles
+  (`INVOCATION_PATTERNS`, 10 phantom `cli_invoke` nodes from `cli.rs` comments and test literals), and Ruby source
+  (a `# topic "x"` comment in a Karafka file reads as a site; LazyGuard covers `.rs` / `.py` only). Each is a declared
+  graph-content change for glia's self-scan.
+- W2 (DD.4): `ProjectInfo`, `glia projects --json` and py `project_roots` do not surface the PROJECT ORIGIN's
+  `label_source`; showing it moves `py/api_surface` and the `test_arch.py` key pin.
+- W2 (DF.16): a Go handler base that is a `self.<field>` alias or a chain rooted in another local
+  (`h := svc.Handlers()`) keeps base `h`; binding it needs the registering callable on the ROUTE ref.
+- W2 (DH.20): Vapor: SelfMethod HANDLED_BY from a ROUTE (`boot(routes:)` with `use: self.index`, the common controller
+  shape) needs the registering method's owner; grouped builders (`app.grouped("users")`) do not join the prefix; a
+  client call with a trailing closure mints a phantom `POST /https://...` ROUTE; `app.get("/users")` reads
+  `GET //users`; `app.get(use: index)` mints no `GET /`.
+- W2 (DH.19): reitit route emission should read the route-data map with `map_entries` (emits `{:post {:handler b}}`
+  too; a declared new-ROUTE break); a Clojure FUNCTION behind an unbound `:as` alias has no HANDLED_BY fallback
+  (`unique_global_method` looks only at METHODs).
+- W2 (DH.15): Dart injectable `@factoryMethod` / `@module` / prefixed annotations (`@di.injectable`); a shelf
+  handler that is a method of the enclosing class (`router.get('/x', _list)`) and `@Route.get('/p')` need
+  class-scoped handler refs.
+- W2 (DH.13): Ruby: dry-auto_inject readers could bind `user_service.find(id)` through a recorded field type; a scoped
+  superclass reduces to its last segment (`ActiveRecord::Base` → an app `Base`); registrations in another file than
+  the include bind only by the camelised-name convention.
+- W2 (DH.14): PHP enum methods are not nodes (`visit_enum` does not walk `enum_declaration_list`), so
+  `enum E implements I` gets no method-level IMPLEMENTS.
+- W2 (DH.1): a Bunny fanout / topic consumer (`q.bind("logs")`) does not name the exchange a key-less fanout
+  `.publish(` goes to; the producer keeps `queue_producer:unresolved:rabbitmq`.
+- W2 (DG.3, DG.4, DG.5, DG.7a, DG.8, DG.9, DG.10): Rust / Scala matrix residuals. Event bus: Akka Java / Kotlin
+  `getEventStream()`, a bare-imported `Sender<Event>`, async_broadcast, an enum only inferred from
+  `broadcast::channel(16)`. GraphQL: Juniper / Sangria (also in D), `#[derive(SimpleObject)]` root struct fields. WS:
+  an axum fn mounted on two routes reads its first path; `get(Self::chat)` pairs only through route inheritance;
+  Akka's Java DSL and Scala 3 braceless directives. Cron: tokio-cron `JobBuilder` chains, multi-statement run closures,
+  a lifetime in call args unclosing the quote scan. CLI: scala.sys.process pipeline operators, an argv built elsewhere,
+  `.run` without parentheses, `Seq.apply(..)`. DB: Slick tables through a type alias, a generic base or a qualified
+  `extends profile.api.Table[`. HTTP: Akka `pathEnd` / `pathSuffix` / `rawPathPrefix` / `|` prefixes, Scala 3
+  brace-less blocks, handler names for inline directive blocks.
 
 ## 3. Open questions for James
 
