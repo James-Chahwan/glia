@@ -59,7 +59,10 @@ pub fn parse_file(
             "[qname] scala: {top_level_types} top-level types scoped to {scope} (file stem dropped) file={file_rel_path}"
         );
     }
-    scan_scala_routes(source, repo, &mut acc);
+    let routes = scan_scala_routes(source, root, module_id, repo, &mut acc);
+    if routes.routes > 0 {
+        eprintln!("{}", routes.marker(file_rel_path));
+    }
     if acc.endpoint_hits > 0 {
         eprintln!(
             "[scala-http-client] {} endpoints in {}",
@@ -980,54 +983,124 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
 }
 
 // ============================================================================
-// Scala route extraction (v0.4.11a R-scala)
+// Scala route extraction (v0.4.11a R-scala; DG.10)
 // ============================================================================
 //
-// Coverage (text scan — Scala DSLs are deeply nested and awkward to track via
-// tree-sitter alone):
+// Coverage (text scan for the sites, tree-sitter for the http4s handler):
 //
-//   Akka HTTP:   path("users") { ... }                 → ANY /users
-//   http4s:      case GET -> Root / "users"            → GET /users
-//                case POST -> Root / "u" / IntVar(id)  → POST /u/:id
+//   Akka / Pekko HTTP:  path("users") { ... }                   -> ANY /users
+//                       path("ws" / "chat") { ... }             -> ANY /ws/chat
+//                       pathPrefix("api") { path("u" / IntNumber) { .. } }
+//                                                               -> ANY /api/u/:id
+//   http4s:             case GET -> Root / "users" => list()    -> GET /users
+//                       case POST -> Root / "u" / IntVar(id)    -> POST /u/:id
+//
+// An http4s ROUTE also gets a HANDLED_BY ref naming what its case body calls
+// (`=> getUser(id)`); an Akka route's handler is an inline directive block, so
+// it gets none.
 //
 // Play Framework's primary routing is a `conf/routes` file (not Scala source)
 // parsed by sbt compiler — out of scope for this parser. Play annotation
 // forms are rare in practice.
+//
+// fired_on, once per file with a route:
+//   `[scala-routes] routes=<n> handled=<h> akka_composed=<c> path=<file>`
+//   `glia analyze <repo> 2>&1 | grep '\[scala-routes\]'`
 
-fn scan_scala_routes(source: &str, repo: RepoId, acc: &mut Acc) {
+/// Per-file route counts behind the `[scala-routes]` marker.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RouteTally {
+    /// Distinct ROUTE nodes the file minted.
+    routes: usize,
+    /// HANDLED_BY refs emitted from an http4s case body.
+    handled: usize,
+    /// Distinct Akka ROUTEs whose path took more than one matcher segment or
+    /// an enclosing `pathPrefix` block.
+    akka_composed: usize,
+}
+
+impl RouteTally {
+    fn marker(&self, file_rel: &str) -> String {
+        format!(
+            "[scala-routes] routes={} handled={} akka_composed={} path={file_rel}",
+            self.routes, self.handled, self.akka_composed
+        )
+    }
+}
+
+fn scan_scala_routes(
+    source: &str,
+    root: TsNode,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) -> RouteTally {
     let mut seen = std::collections::HashSet::new();
+    let mut tally = RouteTally::default();
 
-    // Akka HTTP `path("X") {` — emit ANY /X.
-    let needle = "path(";
-    let mut idx = 0;
-    while let Some(pos) = source[idx..].find(needle) {
-        let start = idx + pos + needle.len();
-        if let Some(path) = first_string_literal_scala(&source[start..])
-            && is_pathlike(&path)
-        {
-            emit_scala_route("ANY", &path, repo, acc, &mut seen);
+    // Akka / Pekko HTTP `path(<matcher>) {` under its enclosing `pathPrefix`
+    // blocks — emit ANY <prefixes>/<segments>. A matcher (or an enclosing
+    // prefix) this reader cannot spell mints nothing: no path beats a wrong one.
+    if source.contains("path(") {
+        let text = ScalaText::new(source);
+        let prefixes = text.prefix_blocks();
+        for site in text.directive_sites("path(") {
+            let Some(mut segments) = akka_prefixes(&prefixes, site) else {
+                continue;
+            };
+            let composed = !segments.is_empty();
+            let Some(own) = text
+                .call_args(site + "path".len())
+                .and_then(|(open, close)| akka_matcher_path(&source[open + 1..close]))
+            else {
+                continue;
+            };
+            let composed = composed || own.len() > 1;
+            segments.extend(own);
+            let before = seen.len();
+            emit_scala_route("ANY", &format!("/{}", segments.join("/")), repo, acc, &mut seen);
+            if composed && seen.len() > before {
+                tally.akka_composed += 1;
+            }
         }
-        idx = start;
     }
 
     // http4s pattern `case METHOD -> Root / "seg" ...` — split by method
-    // and accumulate segments.
+    // and accumulate segments; the case body names the handler.
+    let src = source.as_bytes();
     for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] {
         let needle = format!("{method} -> Root");
         let mut idx = 0;
         while let Some(pos) = source[idx..].find(&needle) {
-            let start = idx + pos + needle.len();
+            let site = idx + pos;
+            let start = site + needle.len();
             let after = &source[start..];
             let path = collect_http4s_path(after);
-            if !path.is_empty() {
-                emit_scala_route(method, &path, repo, acc, &mut seen);
-            } else {
-                // Bare `METHOD -> Root` with no segments = root path.
-                emit_scala_route(method, "/", repo, acc, &mut seen);
+            // Bare `METHOD -> Root` with no segments = root path.
+            let path = if path.is_empty() { "/".to_string() } else { path };
+            let route_id = emit_scala_route(method, &path, repo, acc, &mut seen);
+            if let Some((qualifier, line)) = http4s_handler(root, src, site, method.len()) {
+                let duplicate = acc.refs.iter().any(|r| {
+                    r.from == route_id
+                        && r.category == edge_category::HANDLED_BY
+                        && r.qualifier == qualifier
+                });
+                if !duplicate {
+                    acc.refs.push(UnresolvedRef {
+                        from: route_id,
+                        from_module: module_id,
+                        qualifier,
+                        category: edge_category::HANDLED_BY,
+                        line,
+                    });
+                    tally.handled += 1;
+                }
             }
             idx = start;
         }
     }
+    tally.routes = seen.len();
+    tally
 }
 
 fn collect_http4s_path(after: &str) -> String {
@@ -1082,25 +1155,415 @@ fn collect_http4s_path(after: &str) -> String {
     out
 }
 
-fn first_string_literal_scala(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => {
-                let rest = &s[i + 1..];
-                let end = rest.find('"')?;
-                let lit = &rest[..end];
-                if lit.is_empty() || lit.len() > 256 {
-                    return None;
-                }
-                return Some(lit.to_string());
-            }
-            b')' | b'{' | b';' | b'\n' if i > 0 => return None,
-            _ => i += 1,
+/// The handler an http4s `case METHOD -> Root / .. => body` names, for the
+/// route site whose METHOD token starts at byte `at` (`len` bytes): the
+/// qualifier of the HANDLED_BY ref and the case's 0-based row. The site must
+/// sit in the pattern of its `case_clause` (a commented-out site inside another
+/// case's body names nothing). The body's value — its last statement — must be
+/// a call:
+///   `getUser(id)`                     -> the enclosing type's own method, or Bare
+///   `svc.find(id).flatMap(Ok(_))`     -> Attribute { svc, find } (the chain's head)
+///   `typed[IO](x)`                    -> as `typed(x)`
+///   `Ok(..)`, `Created(..)`, a block, a `for`, a match -> None
+/// A bare `f` (or `this.f`) is `Attribute { base: T, name: f }` when T, the
+/// nearest enclosing object / class / trait, declares `def f` in this file, so
+/// resolve_refs binds T's own method (CA.5a, `module_type_method`) and a
+/// same-named function elsewhere cannot take it; otherwise it stays `Bare(f)`.
+fn http4s_handler(root: TsNode, src: &[u8], at: usize, len: usize) -> Option<(CallQualifier, u32)> {
+    let mut n = root.descendant_for_byte_range(at, at + len)?;
+    let case = loop {
+        if n.kind() == "case_clause" {
+            break n;
         }
+        n = n.parent()?;
+    };
+    let pattern = case.child_by_field_name("pattern")?;
+    if at < pattern.start_byte() || at >= pattern.end_byte() {
+        return None;
+    }
+    let mut cursor = case.walk();
+    let body = case.children_by_field_name("body", &mut cursor).last()?;
+    let qualifier = match handler_callee(body, src)? {
+        (Some(base), name) if base != "this" => CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        },
+        (_, name) => match enclosing_type_declaring(case, src, name) {
+            Some(ty) => CallQualifier::Attribute {
+                base: ty.to_string(),
+                name: name.to_string(),
+            },
+            None => CallQualifier::Bare(name.to_string()),
+        },
+    };
+    Some((qualifier, line_at(case)))
+}
+
+/// `(receiver, callee)` of the call a case body evaluates to: `f(..)` ->
+/// `(None, f)`, `a.f(..)` -> `(Some(a), f)`, and a receiver chain
+/// `a.f(..).g(..)` reads its head call `a.f`. A callee starting with an upper
+/// case letter (an http4s status constructor `Ok` / `Created` / `NotFound`, a
+/// companion `apply`) or any receiver that is not an identifier is None.
+fn handler_callee<'a>(expr: TsNode<'a>, src: &'a [u8]) -> Option<(Option<&'a str>, &'a str)> {
+    let mut cur = expr;
+    loop {
+        if cur.kind() != "call_expression" {
+            return None;
+        }
+        let mut func = cur.child_by_field_name("function")?;
+        if func.kind() == "generic_function" {
+            func = func.child_by_field_name("function")?;
+        }
+        let (base, name) = match func.kind() {
+            "identifier" => (None, text_of(func, src)),
+            "field_expression" => {
+                let value = func.child_by_field_name("value")?;
+                match value.kind() {
+                    "call_expression" => {
+                        cur = value;
+                        continue;
+                    }
+                    "identifier" => (
+                        Some(text_of(value, src)),
+                        text_of(func.child_by_field_name("field")?, src),
+                    ),
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let lower = name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_lowercase() || c == '_');
+        return lower.then_some((base, name));
+    }
+}
+
+/// The name of the nearest object / class / trait enclosing `node`, iff its
+/// own body declares `def <method>`.
+fn enclosing_type_declaring<'a>(node: TsNode<'a>, src: &'a [u8], method: &str) -> Option<&'a str> {
+    let mut cur = node.parent();
+    while let Some(n) = cur {
+        if matches!(n.kind(), "object_definition" | "class_definition" | "trait_definition") {
+            let body = n.child_by_field_name("body")?;
+            let mut cursor = body.walk();
+            let declares = body.named_children(&mut cursor).any(|m| {
+                m.kind() == "function_definition"
+                    && m.child_by_field_name("name").map(|id| text_of(id, src)) == Some(method)
+            });
+            return declares
+                .then(|| n.child_by_field_name("name").map(|id| text_of(id, src)))
+                .flatten();
+        }
+        cur = n.parent();
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Akka / Pekko HTTP path directives
+// ---------------------------------------------------------------------------
+
+/// Byte classes of a Scala source: what is code, what sits in a string /
+/// char literal, and what is a comment. The Akka scan finds directives, parens
+/// and braces in code bytes only, so a `{` in a string or a commented-out
+/// `path("old")` never counts.
+const CODE: u8 = 0;
+const LITERAL: u8 = 1;
+const COMMENT: u8 = 2;
+
+struct ScalaText<'a> {
+    src: &'a [u8],
+    class: Vec<u8>,
+}
+
+impl<'a> ScalaText<'a> {
+    fn new(source: &'a str) -> Self {
+        let src = source.as_bytes();
+        let mut class = vec![CODE; src.len()];
+        let mut i = 0;
+        while i < src.len() {
+            let rest = &src[i..];
+            let (end, kind) = if rest.starts_with(b"//") {
+                // Line comment: to the end of the line.
+                let len = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+                (i + len, COMMENT)
+            } else if rest.starts_with(b"/*") {
+                // Block comment: Scala's nest; an unclosed one runs to the end.
+                let mut depth = 0usize;
+                let mut j = i;
+                while j < src.len() {
+                    if src[j..].starts_with(b"/*") {
+                        depth += 1;
+                        j += 2;
+                    } else if src[j..].starts_with(b"*/") {
+                        depth -= 1;
+                        j += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else {
+                        j += 1;
+                    }
+                }
+                (j, COMMENT)
+            } else if rest.starts_with(b"\"\"\"") {
+                // Triple-quoted string: no escapes, ends at the next `"""`.
+                let end = rest[3..]
+                    .windows(3)
+                    .position(|w| w == b"\"\"\"")
+                    .map_or(src.len(), |p| i + 3 + p + 3);
+                (end, LITERAL)
+            } else if rest[0] == b'"' {
+                // Single-line string (plain or interpolated): an unescaped
+                // `"` or the end of the line closes it.
+                let mut j = i + 1;
+                while j < src.len() && src[j] != b'"' && src[j] != b'\n' {
+                    j += if src[j] == b'\\' { 2 } else { 1 };
+                }
+                (j + 1, LITERAL)
+            } else if let Some(len) = (rest[0] == b'\'').then(|| char_literal_len(rest)).flatten() {
+                // A char literal `'a'` / `'\n'`; a `'sym` or a lone quote is code.
+                (i + len, LITERAL)
+            } else {
+                i += 1;
+                continue;
+            };
+            let end = end.clamp(i + 1, src.len());
+            class[i..end].fill(kind);
+            i = end;
+        }
+        ScalaText { src, class }
+    }
+
+    fn is_code(&self, at: usize) -> bool {
+        self.class.get(at) == Some(&CODE)
+    }
+
+    /// Code offsets of `needle` (`path(`, `pathPrefix(`) that start at an
+    /// identifier boundary, so `subpath(` and a user's `filepath(` are not
+    /// directives.
+    fn directive_sites(&self, needle: &str) -> Vec<usize> {
+        let n = needle.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while let Some(p) = self.src.get(i..).and_then(|s| s.windows(n.len()).position(|w| w == n)) {
+            let at = i + p;
+            let boundary = at == 0 || !is_ident_byte(self.src[at - 1]);
+            if boundary && self.is_code(at) {
+                out.push(at);
+            }
+            i = at + 1;
+        }
+        out
+    }
+
+    /// The `(open, close)` paren offsets of the call whose `(` is at `open`.
+    fn call_args(&self, open: usize) -> Option<(usize, usize)> {
+        (self.src.get(open) == Some(&b'(')).then_some(())?;
+        self.matching(open, b'(', b')').map(|close| (open, close))
+    }
+
+    /// The offset of the code `close` byte balancing the code `open` byte at `at`.
+    fn matching(&self, at: usize, open: u8, close: u8) -> Option<usize> {
+        let mut depth = 0usize;
+        for j in at..self.src.len() {
+            if !self.is_code(j) {
+                continue;
+            }
+            if self.src[j] == open {
+                depth += 1;
+            } else if self.src[j] == close {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(j);
+                }
+            }
+        }
+        None
+    }
+
+    /// The first offset at or after `at` that is neither whitespace nor comment.
+    fn skip_blank(&self, mut at: usize) -> usize {
+        while at < self.src.len()
+            && (self.class[at] == COMMENT || self.src[at].is_ascii_whitespace())
+        {
+            at += 1;
+        }
+        at
+    }
+
+    /// Every `pathPrefix(<matcher>) { .. }` block of the file: the block's
+    /// brace offsets and the matcher's segments (None when unreadable). The
+    /// directive may be combined before its block, `(pathPrefix("api") & get) {`.
+    fn prefix_blocks(&self) -> Vec<PrefixBlock> {
+        let mut out = Vec::new();
+        for site in self.directive_sites("pathPrefix(") {
+            let Some((open, close)) = self.call_args(site + "pathPrefix".len()) else {
+                continue;
+            };
+            let Some(brace) = self.block_after(close + 1) else {
+                continue;
+            };
+            let Some(end) = self.matching(brace, b'{', b'}') else {
+                continue;
+            };
+            let args = std::str::from_utf8(&self.src[open + 1..close]).ok();
+            out.push(PrefixBlock {
+                open: brace,
+                close: end,
+                segments: args.and_then(akka_matcher_path),
+            });
+        }
+        out
+    }
+
+    /// The `{` opening the block a directive applies to, from just after its
+    /// argument list: directly, or past `& <directive>[(..)]` conjunctions and
+    /// the `)` closing the group they sit in. A `)` with no conjunction before
+    /// it closes some other call's argument list: no block.
+    fn block_after(&self, from: usize) -> Option<usize> {
+        let mut at = self.skip_blank(from);
+        let mut conjoined = false;
+        loop {
+            match self.src.get(at)? {
+                b'{' => return Some(at),
+                b')' if conjoined => at = self.skip_blank(at + 1),
+                b'&' if self.src.get(at + 1) != Some(&b'&') => {
+                    conjoined = true;
+                    at = self.skip_blank(at + 1);
+                    let start = at;
+                    while at < self.src.len() && (is_ident_byte(self.src[at]) || self.src[at] == b'.') {
+                        at += 1;
+                    }
+                    if at == start {
+                        return None;
+                    }
+                    if self.src.get(at) == Some(&b'(') {
+                        at = self.matching(at, b'(', b')')? + 1;
+                    }
+                    at = self.skip_blank(at);
+                }
+                _ => return None,
+            }
+        }
+    }
+}
+
+/// One `pathPrefix(..) { .. }` block: `open` / `close` are its braces.
+struct PrefixBlock {
+    open: usize,
+    close: usize,
+    segments: Option<Vec<String>>,
+}
+
+/// The prefix segments of the `pathPrefix` blocks enclosing `site`, outer
+/// first, or None when one of them has an unreadable matcher (the route's path
+/// is then unknown).
+fn akka_prefixes(blocks: &[PrefixBlock], site: usize) -> Option<Vec<String>> {
+    let mut enclosing: Vec<&PrefixBlock> = blocks
+        .iter()
+        .filter(|b| b.open < site && site < b.close)
+        .collect();
+    enclosing.sort_by_key(|b| b.open);
+    let mut out = Vec::new();
+    for block in enclosing {
+        out.extend(block.segments.clone()?);
+    }
+    Some(out)
+}
+
+/// The segments of one Akka path matcher — a `path(..)` / `pathPrefix(..)`
+/// argument list — split at its top-level `/`:
+///   a string literal                     -> its text (an inner `/` kept)
+///   `Segment`                            -> `:segment`
+///   `IntNumber` `LongNumber` `HexIntNumber` `HexLongNumber` `DoubleNumber`
+///   `JavaUUID`                           -> `:id` (http4s `IntVar`'s spelling)
+///   `Remaining` `RemainingPath`          -> `*` (kept literal by the HTTP resolver)
+/// Any other token (a `val` matcher, `separateOnSlashes(..)`, `Slash`, an
+/// interpolated string) makes the matcher unreadable: None. DG.5's Akka
+/// WebSocket reader in the extractors crate spells paths with this same table.
+fn akka_matcher_path(args: &str) -> Option<Vec<String>> {
+    let text = ScalaText::new(args);
+    let src = args.as_bytes();
+    let mut parts: Vec<(usize, usize)> = Vec::new();
+    let (mut depth, mut start) = (0i32, 0usize);
+    for (j, &b) in src.iter().enumerate() {
+        if !text.is_code(j) {
+            continue;
+        }
+        match b {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'/' if depth == 0 => {
+                parts.push((start, j));
+                start = j + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push((start, src.len()));
+    let mut out = Vec::new();
+    for (s, e) in parts {
+        // Comments read as blanks; what is left must be one token. A byte maps
+        // to one char, so a non-ASCII token reads garbled, and is rejected:
+        // is_pathlike and the matcher names are ASCII.
+        let token: String = (s..e)
+            .map(|j| if text.class[j] == COMMENT { ' ' } else { char::from(src[j]) })
+            .collect();
+        let token = token.trim();
+        let segment = if let Some(lit) = token
+            .strip_prefix('"')
+            .and_then(|t| t.strip_suffix('"'))
+            .filter(|_| !token.starts_with("\"\"\""))
+        {
+            if lit.is_empty() || lit.len() > 256 || lit.contains(['"', '\\']) || !is_pathlike(lit) {
+                return None;
+            }
+            // `path("/users/")` reads as `users`; a bare `"/"` adds nothing.
+            let lit = lit.trim_matches('/');
+            if lit.is_empty() {
+                continue;
+            }
+            lit.to_string()
+        } else {
+            match token {
+                "Segment" => ":segment".to_string(),
+                "IntNumber" | "LongNumber" | "HexIntNumber" | "HexLongNumber" | "DoubleNumber"
+                | "JavaUUID" => ":id".to_string(),
+                "Remaining" | "RemainingPath" => "*".to_string(),
+                _ => return None,
+            }
+        };
+        out.push(segment);
+    }
+    Some(out)
+}
+
+/// The byte length of the char literal `rest` starts with (`'a'`, `'\n'`,
+/// `'A'`, a multi-byte `'é'`), or None for a symbol / lone quote.
+fn char_literal_len(rest: &[u8]) -> Option<usize> {
+    if rest.get(1) == Some(&b'\\') {
+        return rest
+            .iter()
+            .take(10)
+            .skip(3)
+            .position(|&b| b == b'\'')
+            .map(|p| p + 4);
+    }
+    let lead = *rest.get(1)?;
+    let width = match lead {
+        0x00..=0x7f => 1,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        _ => 4,
+    };
+    (lead != b'\'' && lead != b'\n' && rest.get(1 + width) == Some(&b'\'')).then_some(width + 2)
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
 fn is_pathlike(s: &str) -> bool {
@@ -1109,24 +1572,25 @@ fn is_pathlike(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.' | ':' | '*'))
 }
 
+/// Mint the ROUTE `<method> <path>` once per file and return its id — also
+/// when `seen` already holds it, so a second site still attaches its handler.
 fn emit_scala_route(
     method: &str,
     path: &str,
     repo: RepoId,
     acc: &mut Acc,
     seen: &mut std::collections::HashSet<(String, String)>,
-) {
+) -> NodeId {
     let path = if path.starts_with('/') {
         path.to_string()
     } else {
         format!("/{path}")
     };
-    let key = (method.to_string(), path.clone());
-    if !seen.insert(key) {
-        return;
-    }
     let route_name = format!("{method} {path}");
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
+    if !seen.insert((method.to_string(), path)) {
+        return route_id;
+    }
     acc.nodes.push(Node {
         id: route_id,
         repo,
@@ -1138,6 +1602,7 @@ fn emit_scala_route(
     });
     acc.nav
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
+    route_id
 }
 
 #[cfg(test)]
@@ -1760,5 +2225,266 @@ object AppWiring {
             vec!["UserRepo", "UserService"]
         );
         assert_eq!(injects_count(&fp), 2);
+    }
+
+    // ---- DG.10: http4s handlers and composed Akka paths ---------------------
+
+    /// Sorted names of every ROUTE the file minted.
+    fn route_names(fp: &FileParse) -> Vec<String> {
+        let mut v: Vec<String> = fp
+            .nav
+            .kind_by_id
+            .iter()
+            .filter(|(_, k)| **k == node_kind::ROUTE)
+            .filter_map(|(id, _)| fp.nav.name_by_id.get(id).cloned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// The HANDLED_BY refs from the ROUTE `<method> <path>`, in emit order.
+    fn handled_by(fp: &FileParse, method: &str, path: &str) -> Vec<(CallQualifier, u32)> {
+        let id = route_id(method, path);
+        fp.refs
+            .iter()
+            .filter(|r| r.from == id && r.category == edge_category::HANDLED_BY)
+            .map(|r| (r.qualifier.clone(), r.line))
+            .collect()
+    }
+
+    fn attr(base: &str, name: &str) -> CallQualifier {
+        CallQualifier::Attribute { base: base.to_string(), name: name.to_string() }
+    }
+
+    #[test]
+    fn http4s_case_bodies_name_their_handlers() {
+        // The matrix scala/http_server file: a bare `getUser(id)` names the
+        // enclosing object's own method, as a type-qualified ref.
+        let source = include_str!(
+            "../../../../bench/substrate-gap/matrix/scala/http_server/server/UserRoutes.scala"
+        );
+        let fp = parse_file(source, "UserRoutes.scala", "UserRoutes", repo()).unwrap();
+        assert_eq!(handled_by(&fp, "GET", "/users/:id"), vec![(attr("UserRoutes", "getUser"), 10)]);
+        assert_eq!(handled_by(&fp, "POST", "/users"), vec![(attr("UserRoutes", "createUser"), 11)]);
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "UserRoutes");
+        assert!(
+            fp.refs
+                .iter()
+                .filter(|r| r.category == edge_category::HANDLED_BY)
+                .all(|r| r.from_module == module_id),
+            "HANDLED_BY refs carry the file MODULE: {:?}",
+            fp.refs
+        );
+
+        let source = r#"
+object Api {
+  val routes = HttpRoutes.of[IO] {
+    case GET -> Root / "ok" => Ok("x")
+    case GET -> Root / "find" / id => svc.find(id).flatMap(Ok(_))
+    case GET -> Root / "bare" => helper()
+    case GET -> Root / "gen" => typed[IO](1)
+    case GET -> Root / "self" => this.typed(2)
+    case req @ POST -> Root / "multi" =>
+      // case GET -> Root / "ghost" => ghost()
+      log(req)
+      Api.create(req)
+    case GET -> Root / "for" => for { x <- y } yield x
+    case GET -> Root / "status" => NotFound()
+  }
+  def typed[F[_]](x: Int) = ???
+}
+"#;
+        let fp = parse_file(source, "src/Api.scala", "src::Api", repo()).unwrap();
+        assert!(handled_by(&fp, "GET", "/ok").is_empty(), "`Ok(..)` is a status, not a handler");
+        assert_eq!(handled_by(&fp, "GET", "/find/:id"), vec![(attr("svc", "find"), 4)]);
+        // `Api` declares no `helper`: the ref stays Bare for the module lookup.
+        assert_eq!(
+            handled_by(&fp, "GET", "/bare"),
+            vec![(CallQualifier::Bare("helper".to_string()), 5)]
+        );
+        assert_eq!(handled_by(&fp, "GET", "/gen"), vec![(attr("Api", "typed"), 6)]);
+        assert_eq!(handled_by(&fp, "GET", "/self"), vec![(attr("Api", "typed"), 7)]);
+        // A multi-statement body evaluates to its last statement.
+        assert_eq!(handled_by(&fp, "POST", "/multi"), vec![(attr("Api", "create"), 8)]);
+        // The commented-out site still mints its ROUTE (the text scan, as at
+        // HEAD) but sits in another case's body, so it names no handler.
+        assert!(route_names(&fp).contains(&"GET /ghost".to_string()));
+        assert!(handled_by(&fp, "GET", "/ghost").is_empty());
+        assert!(handled_by(&fp, "GET", "/for").is_empty());
+        assert!(handled_by(&fp, "GET", "/status").is_empty());
+        assert_eq!(
+            fp.refs.iter().filter(|r| r.category == edge_category::HANDLED_BY).count(),
+            5,
+            "refs: {:?}",
+            fp.refs
+        );
+    }
+
+    #[test]
+    fn akka_path_matchers_compose() {
+        // The matrix scala/ws file: every segment, not the first literal.
+        let source = include_str!(
+            "../../../../bench/substrate-gap/matrix/scala/ws/server/ChatRoutes.scala"
+        );
+        let fp = parse_file(source, "ChatRoutes.scala", "ChatRoutes", repo()).unwrap();
+        assert_eq!(route_names(&fp), vec!["ANY /ws/chat".to_string()]);
+
+        let source = r#"
+object Routes {
+  val api = pathPrefix("api") {
+    path("users" / IntNumber) { id =>
+      get { complete(id.toString) }
+    } ~
+    pathPrefix("v1" / "admin") {
+      path(Segment / "items") { name => complete(name) }
+    }
+  }
+  val files = pathPrefix("files") {
+    path(Remaining) { rest => complete(rest) }
+  }
+  val grouped = (pathPrefix("v2") & get) {
+    path("ping") { complete("pong") }
+  }
+  val users = path(UsersPath) { complete("x") }
+  val split = path(separateOnSlashes("a/b")) { complete("x") }
+  val hidden = pathPrefix(ApiPrefix) {
+    path("orders") { complete("x") }
+  }
+  val tricky = path("orders" /* the list */ / LongNumber) {
+    val brace = "}"
+    complete(brace)
+  }
+  // path("commented") { complete("x") }
+  val text = "path(\"instring\")"
+}
+"#;
+        let fp = parse_file(source, "src/Routes.scala", "src::Routes", repo()).unwrap();
+        assert_eq!(
+            route_names(&fp),
+            vec![
+                "ANY /api/users/:id".to_string(),
+                "ANY /api/v1/admin/:segment/items".to_string(),
+                "ANY /files/*".to_string(),
+                "ANY /orders/:id".to_string(),
+                "ANY /v2/ping".to_string(),
+            ],
+            "a val matcher, separateOnSlashes and an unreadable prefix mint nothing"
+        );
+        assert!(
+            fp.refs.iter().all(|r| r.category != edge_category::HANDLED_BY),
+            "an Akka route names no handler: {:?}",
+            fp.refs
+        );
+
+        let tree = {
+            let mut p = Parser::new();
+            let lang: tree_sitter::Language = tree_sitter_scala::LANGUAGE.into();
+            p.set_language(&lang).unwrap();
+            p.parse(source, None).unwrap()
+        };
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "src::Routes");
+        let tally = scan_scala_routes(source, tree.root_node(), module_id, repo(), &mut Acc::default());
+        assert_eq!(tally, RouteTally { routes: 5, handled: 0, akka_composed: 5 });
+    }
+
+    #[test]
+    fn akka_matcher_table() {
+        let read = |s: &str| akka_matcher_path(s).map(|v| v.join("/"));
+        assert_eq!(read(r#""ws" / "chat""#).as_deref(), Some("ws/chat"));
+        assert_eq!(read(r#""api/v1" / Segment"#).as_deref(), Some("api/v1/:segment"));
+        for m in ["IntNumber", "LongNumber", "HexIntNumber", "HexLongNumber", "DoubleNumber", "JavaUUID"] {
+            assert_eq!(read(&format!(r#""u" / {m}"#)).as_deref(), Some("u/:id"), "{m}");
+        }
+        assert_eq!(read("Remaining").as_deref(), Some("*"));
+        assert_eq!(read(r#""f" / RemainingPath"#).as_deref(), Some("f/*"));
+        assert_eq!(read(r#""/users/""#).as_deref(), Some("users"));
+        for unreadable in [
+            "UsersPath",
+            "Slash",
+            r#"separateOnSlashes("a/b")"#,
+            r#"s"users/$id""#,
+            r#""a" + "b""#,
+            r#""""triple""""#,
+            r#""has space""#,
+            r#""""#,
+            "",
+            r#""u" / IntNumber.?"#,
+        ] {
+            assert_eq!(read(unreadable), None, "{unreadable}");
+        }
+    }
+
+    #[test]
+    fn subpath_is_not_a_directive() {
+        let source = r#"
+object Files {
+  def filepath(name: String) = name
+  val a = subpath("users") { complete("x") }
+  val b = filepath("admin")
+  val c = rawPathPrefix("raw") { path("x") { complete("y") } }
+  val d = pathPrefix("only") { complete("prefix alone is no route") }
+}
+"#;
+        let fp = parse_file(source, "src/Files.scala", "src::Files", repo()).unwrap();
+        // `rawPathPrefix(` is not a `pathPrefix(` block, so `path("x")` is bare.
+        assert_eq!(route_names(&fp), vec!["ANY /x".to_string()]);
+    }
+
+    #[test]
+    fn route_dedup_still_returns_the_id() {
+        let mut acc = Acc::default();
+        let mut seen = std::collections::HashSet::new();
+        let first = emit_scala_route("GET", "/users", repo(), &mut acc, &mut seen);
+        let again = emit_scala_route("GET", "users", repo(), &mut acc, &mut seen);
+        assert_eq!(first, route_id("GET", "/users"));
+        assert_eq!(again, first);
+        assert_eq!(acc.nodes.len(), 1);
+
+        // Two HttpRoutes serving one route: one ROUTE, a ref per handler, and
+        // a repeated (route, handler) pair once.
+        let source = r#"
+object Users {
+  def listA() = ???
+  def listB() = ???
+  val a = HttpRoutes.of[IO] { case GET -> Root / "users" => listA() }
+  val b = HttpRoutes.of[IO] { case GET -> Root / "users" => listB() }
+  val c = HttpRoutes.of[IO] { case GET -> Root / "users" => listB() }
+}
+"#;
+        let fp = parse_file(source, "src/Users.scala", "src::Users", repo()).unwrap();
+        assert_eq!(route_names(&fp), vec!["GET /users".to_string()]);
+        assert_eq!(
+            handled_by(&fp, "GET", "/users"),
+            vec![(attr("Users", "listA"), 4), (attr("Users", "listB"), 5)]
+        );
+    }
+
+    #[test]
+    fn truncated_route_sources_never_panic() {
+        // Every prefix of a DSL-heavy file is a malformed file: unclosed
+        // strings, comments, char literals, parens and blocks. None may panic.
+        let source = "object R {\n  val r = pathPrefix(\"api\" /* c /* n */ */) {\n    path(\"a\" / 'x' / '\\n' / \"\"\"t\"\"\" / IntNumber) { _ => complete(\"}\") } ~\n    (pathPrefix(\"g\") & get) { path(\"é\") { complete(s\"${x}\") } }\n  }\n  val h = HttpRoutes.of[IO] { case GET -> Root / \"u\" / id => getUser(id) }\n  def getUser(id: String) = ???\n}\n";
+        for end in (0..=source.len()).filter(|&e| source.is_char_boundary(e)) {
+            let cut = &source[..end];
+            let fp = parse_file(cut, "src/R.scala", "src::R", repo());
+            assert!(fp.is_ok(), "parse failed at {end}");
+        }
+    }
+
+    #[test]
+    fn scala_routes_marker_counts() {
+        let source = include_str!(
+            "../../../../bench/substrate-gap/matrix/scala/http_server/server/UserRoutes.scala"
+        );
+        let mut p = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_scala::LANGUAGE.into();
+        p.set_language(&lang).unwrap();
+        let tree = p.parse(source, None).unwrap();
+        let module_id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "UserRoutes");
+        let tally = scan_scala_routes(source, tree.root_node(), module_id, repo(), &mut Acc::default());
+        assert_eq!(
+            tally.marker("UserRoutes.scala"),
+            "[scala-routes] routes=2 handled=2 akka_composed=0 path=UserRoutes.scala"
+        );
     }
 }
