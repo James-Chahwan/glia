@@ -49,8 +49,17 @@ pub fn parse_file(
     // CH.5c: the receivers bound to a Dio, read before the body walks (the
     // client-call detector) and the route scan consult them.
     acc.dio_receivers = collect_dio_receivers(source, root, src);
+    // DH.15: read before the class walk, which emits INJECTS only in a file
+    // importing injectable.
+    acc.injectable_import = imports_injectable(root, src);
     visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
-    scan_dart_routes(source, repo, &mut acc);
+    if let Some(line) = acc.di.marker(file_rel_path) {
+        eprintln!("{line}");
+    }
+    let shelf = scan_dart_routes(source, repo, module_id, &mut acc);
+    if let Some(line) = shelf.marker(file_rel_path) {
+        eprintln!("{line}");
+    }
     if let Some(line) = acc.dio_bound.marker(acc.dio_receivers.len(), file_rel_path) {
         eprintln!("{line}");
     }
@@ -167,6 +176,12 @@ struct Acc {
     /// CH.5c: client calls / route-scan hits on a [`Acc::dio_receivers`]
     /// name the name heuristic misses, for the `[dart-dio-receivers]` marker.
     dio_bound: DioBoundStats,
+    /// DH.15: this file imports `package:injectable/` ([`imports_injectable`]),
+    /// so an injectable annotation on one of its classes is get_it's.
+    injectable_import: bool,
+    /// DH.15: injectable classes and their INJECTS refs, for the `[dart-di]`
+    /// marker.
+    di: DiStats,
 }
 
 #[derive(Default)]
@@ -372,6 +387,11 @@ fn visit_class(
             // LA.23e: declared / constructor-initialised field types, for
             // A6.2a's receiver-type pass.
             collect_dart_field_types(child, src, id, acc);
+            // DH.15: an injectable class's constructor parameters, a field
+            // formal typed through the field types just recorded.
+            if acc.injectable_import && is_injectable_class(node, src) {
+                emit_injects(child, src, id, parent_id, acc);
+            }
         }
     }
 }
@@ -2161,6 +2181,268 @@ fn collect_dart_field_types(class_body: TsNode, src: &[u8], class_id: NodeId, ac
     }
 }
 
+// ============================================================================
+// DH.15: injectable constructor injection -> INJECTS refs
+// ============================================================================
+//
+// injectable (pub.dev/packages/injectable, the get_it code generator)
+// registers a class annotated `@injectable` / `@lazySingleton` /
+// `@singleton` (or their `@Injectable(..)` / `@LazySingleton(..)` /
+// `@Singleton(..)` constructor forms) and builds it by resolving each
+// constructor parameter by TYPE, so the parameter type is a fact of the
+// source, the TS / Java / C# constructor-DI rule:
+//
+//   @injectable
+//   class HomeController {
+//     final ApiService api;
+//     HomeController(this.api);       INJECTS Bare(ApiService) from the CLASS
+//   }
+//
+// A field formal (`this.api`, `{required this.api}`) takes the field's type
+// from [`collect_dart_field_types`]; a typed parameter (`ApiService api`,
+// `required p.Api<T>? api`, `Api this.api`) its own head, the prefix,
+// generic arguments and `?` dropped. Core-library types are never
+// registered services; a `@factoryParam` / `@ignoreParam` parameter is the
+// caller's argument, never a container lookup. Every constructor
+// (generative, `const`, factory, redirecting factory) contributes; a type
+// two of them inject is one ref. Refs bind in the graph crate through
+// `resolve_refs`' INJECTS chain (import binding, the module's own symbols,
+// then the repo-unique name), so a package type (`Dio`) binds nothing. A
+// class without the annotation, or a file not importing injectable, emits
+// none: plain constructor parameters are not DI.
+
+/// The class annotations that make injectable register (and so build) the
+/// class. A form ending in `(` matches its constructor call with any
+/// arguments; any other form matches exactly.
+const INJECTABLE_ANNOTATIONS: &[&str] = &[
+    "@injectable",
+    "@Injectable(",
+    "@lazySingleton",
+    "@LazySingleton(",
+    "@singleton",
+    "@Singleton(",
+];
+
+/// Parameter annotations injectable reads as "not from the container".
+const INJECTABLE_SKIP_PARAMS: &[&str] = &["factoryParam", "ignoreParam"];
+
+/// Core-library types no injectable registration provides, beyond
+/// [`DART_BUILTIN_TYPES`].
+const INJECT_CORE_TYPES: &[&str] = &["Duration", "DateTime"];
+
+/// The constructor signature kinds whose parameters injectable resolves.
+const DART_CTOR_SIGNATURES: &[&str] = &[
+    "constructor_signature",
+    "constant_constructor_signature",
+    "factory_constructor_signature",
+    "redirecting_factory_constructor_signature",
+];
+
+#[derive(Default)]
+struct DiStats {
+    /// Classes carrying an [`INJECTABLE_ANNOTATIONS`] annotation in a file
+    /// importing injectable.
+    classes: usize,
+    /// INJECTS refs emitted from them.
+    injects: usize,
+}
+
+impl DiStats {
+    /// The DH.15 fired_on line, when this file declared an injectable class.
+    fn marker(&self, file_rel: &str) -> Option<String> {
+        (self.classes > 0).then(|| {
+            format!(
+                "[dart-di] injectable classes={} injects={} path={file_rel}",
+                self.classes, self.injects
+            )
+        })
+    }
+}
+
+/// Whether the file imports any `package:injectable/` library.
+fn imports_injectable(root: TsNode, src: &[u8]) -> bool {
+    let mut cursor = root.walk();
+    root.named_children(&mut cursor)
+        .filter(|c| c.kind() == "import_or_export")
+        .filter_map(|c| {
+            named_child_of_kind(c, "library_import")
+                .and_then(|lib| named_child_of_kind(lib, "import_specification"))
+                .and_then(|spec| spec.child_by_field_name("uri"))
+                .and_then(|u| import_uri(u, src))
+        })
+        .any(|uri| uri.starts_with("package:injectable/"))
+}
+
+/// Whether a `class_declaration` carries an [`INJECTABLE_ANNOTATIONS`]
+/// annotation (its `annotation` children, whitespace dropped).
+fn is_injectable_class(class: TsNode, src: &[u8]) -> bool {
+    let mut cursor = class.walk();
+    class
+        .named_children(&mut cursor)
+        .filter(|c| c.kind() == "annotation")
+        .any(|a| {
+            let text: String = text_of(a, src).split_whitespace().collect();
+            INJECTABLE_ANNOTATIONS.iter().any(|form| {
+                if form.ends_with('(') {
+                    text.starts_with(form)
+                } else {
+                    text == *form
+                }
+            })
+        })
+}
+
+/// One INJECTS ref per distinct injected type of the injectable class `id`
+/// whose body is `class_body`, from `id` in `module_id`, in source order.
+fn emit_injects(class_body: TsNode, src: &[u8], id: NodeId, module_id: NodeId, acc: &mut Acc) {
+    let fields = acc.nav.field_types.get(&id);
+    let mut found: Vec<(String, u32)> = Vec::new();
+    let mut members = class_body.walk();
+    for member in class_body.named_children(&mut members) {
+        if member.kind() != "class_member" {
+            continue;
+        }
+        let mut parts = member.walk();
+        for part in member.named_children(&mut parts) {
+            if !matches!(part.kind(), "method_signature" | "declaration") {
+                continue;
+            }
+            let mut sigs = part.walk();
+            for sig in part.named_children(&mut sigs) {
+                if !DART_CTOR_SIGNATURES.contains(&sig.kind()) {
+                    continue;
+                }
+                if let Some(params) = sig.child_by_field_name("parameters") {
+                    ctor_param_types(params, src, fields, &mut found);
+                }
+            }
+        }
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    acc.di.classes += 1;
+    for (ty, line) in found {
+        if DART_BUILTIN_TYPES.contains(&ty.as_str())
+            || INJECT_CORE_TYPES.contains(&ty.as_str())
+            || !seen.insert(ty.clone())
+        {
+            continue;
+        }
+        acc.di.injects += 1;
+        acc.refs.push(UnresolvedRef {
+            from: id,
+            from_module: module_id,
+            qualifier: CallQualifier::Bare(ty),
+            category: edge_category::INJECTS,
+            line,
+        });
+    }
+}
+
+/// The injected type head and row of each parameter of one
+/// `formal_parameter_list` (positional, `[..]` and `{..}`), pushed to `out`.
+/// `fields` is the class's [`collect_dart_field_types`] map, which types a
+/// field formal (`this.x`) that writes none of its own.
+///
+/// tree-sitter-dart 0.1.0 puts a parameter's annotation inside its
+/// `formal_parameter` when the parameter opens its list, but as the
+/// preceding SIBLING after a `,` (`{Clock? c, @factoryParam Session? s}`),
+/// so both places are read.
+fn ctor_param_types(
+    list: TsNode,
+    src: &[u8],
+    fields: Option<&HashMap<String, String>>,
+    out: &mut Vec<(String, u32)>,
+) {
+    let mut skip_next = false;
+    let mut cursor = list.walk();
+    for p in list.named_children(&mut cursor) {
+        match p.kind() {
+            "annotation" => skip_next |= is_skip_annotation(p, src),
+            "formal_parameter" => {
+                let skip = std::mem::take(&mut skip_next) || {
+                    let mut k = p.walk();
+                    p.named_children(&mut k)
+                        .any(|c| c.kind() == "annotation" && is_skip_annotation(c, src))
+                };
+                if skip {
+                    continue;
+                }
+                if let Some(ty) = formal_param_type(p, src, fields) {
+                    out.push((ty, line_at(p)));
+                }
+            }
+            "optional_formal_parameters" => ctor_param_types(p, src, fields, out),
+            _ => {}
+        }
+    }
+}
+
+/// A parameter annotation naming [`INJECTABLE_SKIP_PARAMS`] (`@factoryParam`).
+fn is_skip_annotation(annotation: TsNode, src: &[u8]) -> bool {
+    annotation
+        .child_by_field_name("name")
+        .is_some_and(|n| INJECTABLE_SKIP_PARAMS.contains(&text_of(n, src)))
+}
+
+/// The type head of one `formal_parameter`. A field formal
+/// (`constructor_param`: `this.x`, `Api this.x`) and a super formal
+/// (`super_formal_parameter`: `Api super.x`) write their type, if any,
+/// inside that child; an untyped field formal is typed by its field, an
+/// untyped super formal by nothing this class says.
+fn formal_param_type(
+    param: TsNode,
+    src: &[u8],
+    fields: Option<&HashMap<String, String>>,
+) -> Option<String> {
+    let mut cursor = param.walk();
+    let formal = param
+        .named_children(&mut cursor)
+        .find(|c| matches!(c.kind(), "constructor_param" | "super_formal_parameter"));
+    let Some(formal) = formal else {
+        return param_type_head(param, src);
+    };
+    if let Some(ty) = param_type_head(formal, src) {
+        return Some(ty);
+    }
+    if formal.kind() != "constructor_param" {
+        return None;
+    }
+    let mut k = formal.walk();
+    let field = formal
+        .named_children(&mut k)
+        .filter(|c| c.kind() == "identifier")
+        .last()?;
+    fields?.get(text_of(field, src)).cloned()
+}
+
+/// The type a parameter node writes among its direct children: tree-sitter-
+/// dart inlines it as siblings of the name, `type_identifier` (twice with a
+/// `.` for an import prefix `p.T`), then an optional `type_arguments` and
+/// `?`, so the last `type_identifier` is the simple name. The grammar wraps
+/// a named field formal's `required` keyword in a `type_identifier`, which
+/// is no type. None for an untyped parameter and for a function, record or
+/// `void` type, or the old function-typed form (`int f(int x)`), none of
+/// which a container provides.
+fn param_type_head(node: TsNode, src: &[u8]) -> Option<String> {
+    let mut head: Option<&str> = None;
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "type_identifier" => {
+                let t = text_of(child, src);
+                if t != "required" {
+                    head = Some(t);
+                }
+            }
+            "function_type" | "record_type" | "void_type" | "formal_parameter_list" => {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    head.map(str::to_string)
+}
+
 /// The 0-based row a node starts on: the `line` of the `CallSite` /
 /// `UnresolvedRef` / `ImportStmt` it asserts (LC.3b, POSITION convention).
 fn line_at(n: TsNode) -> u32 {
@@ -2933,11 +3215,21 @@ fn construction_binding(value: &[TsNode], src: &[u8]) -> Option<Binding> {
 //
 // Shape B ROUTE nodes (METHOD <path> qname + Text ROUTE_METHOD cell) for the
 // server routes; go_router pages take the `page:<path>` qname (LB.4c).
+//
+// DH.15: a server route's argument #1 is its handler (`..get('/users/<id>',
+// getUser)`): a HANDLED_BY ref from the ROUTE, `Bare(getUser)` or
+// `Attribute { base, name }` for `handlers.getUser`, bound by the graph
+// crate's `resolve_refs` (the module's own symbols first). A closure or a
+// call names no handler. go_router pages get none: their `builder:` is a
+// closure and nav links are LA.6's.
 
-fn scan_dart_routes(source: &str, repo: RepoId, acc: &mut Acc) {
+fn scan_dart_routes(source: &str, repo: RepoId, module_id: NodeId, acc: &mut Acc) -> ShelfRouteStats {
     // Track emitted routes to dedup — a file may hit the same path twice
     // between the tree walk and the text scan.
     let mut seen = std::collections::HashSet::new();
+    let mut stats = ShelfRouteStats::default();
+    // DH.15: one HANDLED_BY ref per (route, handler) a file registers.
+    let mut handlers: HashSet<(NodeId, String)> = HashSet::new();
 
     // go_router — look for `GoRoute(path:` token.
     let needle = "GoRoute(";
@@ -2947,7 +3239,7 @@ fn scan_dart_routes(source: &str, repo: RepoId, acc: &mut Acc) {
         if let Some(path) = extract_kwarg_string(&source[start..], "path") {
             // A3.4: go_router is BROWSER/app navigation, not a server
             // endpoint — mark it so the HTTP route index skips it.
-            emit_dart_route("ANY", &path, repo, acc, &mut seen, true);
+            let _ = emit_dart_route("ANY", &path, repo, acc, &mut seen, true);
         }
         idx = start;
     }
@@ -2963,7 +3255,7 @@ fn scan_dart_routes(source: &str, repo: RepoId, acc: &mut Acc) {
         while let Some(pos) = source[idx..].find(&needle) {
             let dot_at = idx + pos;
             let after = &source[dot_at + needle.len()..];
-            if let Some(path) = first_string_literal_dart(after)
+            if let Some((path, lit_end)) = first_string_literal_dart_end(after)
                 && path.starts_with('/')
             {
                 let recv = ident_before(source, dot_at);
@@ -2972,13 +3264,101 @@ fn scan_dart_routes(source: &str, repo: RepoId, acc: &mut Acc) {
                         acc.dio_bound.route_skips += 1;
                     } else {
                         let verb = method.to_ascii_uppercase();
-                        emit_dart_route(&verb, &path, repo, acc, &mut seen, false);
+                        let known = seen.len();
+                        let route_id = emit_dart_route(&verb, &path, repo, acc, &mut seen, false);
+                        if seen.len() > known {
+                            stats.routes += 1;
+                        }
+                        // DH.15: argument #1 of the same call is the handler.
+                        if let Some(handler) = after.get(lit_end..).and_then(dart_route_handler) {
+                            let key = match &handler {
+                                CallQualifier::Bare(n) => n.clone(),
+                                CallQualifier::Attribute { base, name } => format!("{base}.{name}"),
+                                _ => String::new(),
+                            };
+                            if handlers.insert((route_id, key)) {
+                                stats.handlers += 1;
+                                acc.refs.push(UnresolvedRef {
+                                    from: route_id,
+                                    from_module: module_id,
+                                    qualifier: handler,
+                                    category: edge_category::HANDLED_BY,
+                                    line: glia_code_domain::line_of(source, dot_at),
+                                });
+                            }
+                        }
                     }
                 }
             }
             idx = dot_at + needle.len();
         }
     }
+    stats
+}
+
+/// DH.15: the shelf server routes a file registered and the HANDLED_BY refs
+/// read from them, for the `[dart-routes]` marker.
+#[derive(Default)]
+struct ShelfRouteStats {
+    /// Distinct server ROUTE nodes the method scan emitted.
+    routes: usize,
+    /// HANDLED_BY refs from them.
+    handlers: usize,
+}
+
+impl ShelfRouteStats {
+    /// The DH.15 fired_on line, when this file registered a server route.
+    fn marker(&self, file_rel: &str) -> Option<String> {
+        (self.routes > 0).then(|| {
+            format!(
+                "[dart-routes] shelf routes={} handlers={} path={file_rel}",
+                self.routes, self.handlers
+            )
+        })
+    }
+}
+
+/// DH.15: the handler a shelf route call names as its argument #1, read
+/// from `rest`, the source right after the path literal. shelf_router's
+/// `router.get('/users/<id>', getUser)` passes a function: an identifier is
+/// `Bare(name)`, a `base.name` tear-off (`handlers.getUser`) an
+/// `Attribute`. The argument must end at the next `,` or `)`, so a closure
+/// (`(Request r) => ..`), a call (`makeHandler()`) or any other expression
+/// names nothing; so does a call with no second argument, or a literal.
+fn dart_route_handler(rest: &str) -> Option<CallQualifier> {
+    let rest = rest.trim_start().strip_prefix(',')?.trim_start();
+    let (first, rest) = split_dart_ident(rest)?;
+    let (second, rest) = match rest.strip_prefix('.') {
+        Some(after_dot) => {
+            let (name, rest) = split_dart_ident(after_dot)?;
+            (Some(name), rest)
+        }
+        None => (None, rest),
+    };
+    if !matches!(rest.trim_start().chars().next(), Some(',' | ')')) {
+        return None;
+    }
+    match second {
+        None if matches!(first, "null" | "true" | "false" | "this" | "super") => None,
+        None => Some(CallQualifier::Bare(first.to_string())),
+        Some(name) => Some(CallQualifier::Attribute {
+            base: first.to_string(),
+            name: name.to_string(),
+        }),
+    }
+}
+
+/// A Dart identifier (`[A-Za-z_$][A-Za-z0-9_$]*`) at the start of `s`, and
+/// the rest of `s` after it.
+fn split_dart_ident(s: &str) -> Option<(&str, &str)> {
+    let end = s
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+        .unwrap_or(s.len());
+    let ident = s.get(..end)?;
+    if ident.is_empty() || ident.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    Some((ident, s.get(end..)?))
 }
 
 fn extract_kwarg_string(s: &str, key: &str) -> Option<String> {
@@ -2998,7 +3378,15 @@ fn extract_kwarg_string(s: &str, key: &str) -> Option<String> {
 }
 
 fn first_string_literal_dart(s: &str) -> Option<String> {
+    first_string_literal_dart_end(s).map(|(lit, _)| lit)
+}
+
+/// [`first_string_literal_dart`], plus the byte offset in `s` just past the
+/// literal's closing quote (DH.15: where a route call's next argument
+/// starts).
+fn first_string_literal_dart_end(s: &str) -> Option<(String, usize)> {
     let trimmed = s.trim_start();
+    let lead = s.len() - trimmed.len();
     let bytes = trimmed.as_bytes();
     if bytes.is_empty() {
         return None;
@@ -3013,7 +3401,8 @@ fn first_string_literal_dart(s: &str) -> Option<String> {
     if lit.is_empty() || lit.len() > 256 {
         return None;
     }
-    Some(lit.to_string())
+    // lead + the opening quote + the literal + the closing quote.
+    Some((lit.to_string(), lead + 1 + end + 1))
 }
 
 /// Emit one ROUTE node. `nav` marks a *browser/app navigation* target
@@ -3031,6 +3420,9 @@ fn first_string_literal_dart(s: &str) -> Option<String> {
 /// line's `(page-qnamed P)` figure, which the engine counts off the parses'
 /// `page:` qnames. The graph-side `[http] nav-routes excluded from route index`
 /// marker covers them too.
+///
+/// Returns the route's id, emitted here or already seen in this file: DH.15's
+/// HANDLED_BY ref starts from it.
 fn emit_dart_route(
     method: &str,
     path: &str,
@@ -3038,18 +3430,18 @@ fn emit_dart_route(
     acc: &mut Acc,
     seen: &mut std::collections::HashSet<(String, String)>,
     nav: bool,
-) {
+) -> NodeId {
     let route_qname = if nav {
         format!("page:{path}")
     } else {
         format!("{method} {path}")
     };
     let display_name = if nav { path } else { route_qname.as_str() };
+    let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_qname);
     let key = (method.to_string(), route_qname.clone());
     if !seen.insert(key) {
-        return;
+        return route_id;
     }
-    let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_qname);
     let mut cells = vec![Cell {
         kind: cell_type::ROUTE_METHOD,
         payload: CellPayload::Text(method.to_string()),
@@ -3068,6 +3460,7 @@ fn emit_dart_route(
     });
     acc.nav
         .record(route_id, display_name, &route_qname, node_kind::ROUTE, None);
+    route_id
 }
 
 fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
@@ -5607,5 +6000,306 @@ class Other {
             Some("[dart-dio-receivers] bound=3 endpoints=2 route_skips=2 file=lib/a.dart")
         );
         assert_eq!(DioBoundStats::default().marker(3, "lib/a.dart"), None);
+    }
+
+    // ---- DH.15: injectable constructor DI -> INJECTS refs ------------------
+
+    /// The INJECTS refs of a parse: (from, injected type head, line).
+    fn injects_refs(fp: &FileParse) -> Vec<(NodeId, String, u32)> {
+        fp.refs
+            .iter()
+            .filter(|r| r.category == edge_category::INJECTS)
+            .map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => (r.from, n.clone(), r.line),
+                q => (r.from, format!("{q:?}"), r.line),
+            })
+            .collect()
+    }
+
+    fn module_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, qname)
+    }
+
+    /// matrix/dart/injects home_controller.dart, verbatim.
+    const HOME_CONTROLLER: &str = "import 'package:injectable/injectable.dart';
+
+import 'api_service.dart';
+
+@injectable
+class HomeController {
+  final ApiService api;
+
+  HomeController(this.api);
+}
+";
+
+    #[test]
+    fn injectable_this_field_param() {
+        // `HomeController(this.api)`: the field formal's type is the field's
+        // declared type, read through collect_dart_field_types.
+        let fp = parse_file(HOME_CONTROLLER, "home_controller.dart", "home_controller", repo()).unwrap();
+        let ctl = class_id("home_controller::HomeController");
+        assert_eq!(injects_refs(&fp), vec![(ctl, "ApiService".to_string(), 8)]);
+        let r = fp.refs.iter().find(|r| r.category == edge_category::INJECTS).unwrap();
+        assert_eq!(r.from_module, module_id("home_controller"));
+    }
+
+    #[test]
+    fn injectable_typed_and_named_params() {
+        let source = r#"import 'package:injectable/injectable.dart';
+import 'package:http/http.dart' as p;
+
+@LazySingleton(as: AuthRepo)
+class AuthRepoImpl implements AuthRepo {
+  final TokenStore store;
+  AuthRepoImpl(this.store, p.HttpClient<Json>? client,
+      {required this.cache, required Logger log, Clock? clock,
+      @factoryParam Session? session, Audit this.audit});
+  const AuthRepoImpl.named(TokenStore again);
+  factory AuthRepoImpl.make(Metrics m) => AuthRepoImpl.named(TokenStore());
+  final Cache cache;
+  final Object audit;
+}
+
+@singleton
+class Ticking {
+  Ticking(final Ticker t, [Zone? zone]);
+}
+
+@Injectable()
+class Plain {
+  Plain(Foo foo);
+}
+
+@lazySingleton
+class Lazy {
+  factory Lazy(Bar bar) = LazyImpl;
+}
+
+@Singleton(dispose: close)
+class Closing {
+  Closing(super.x, Sink sink);
+}
+"#;
+        let fp = parse_file(source, "lib/auth.dart", "lib::auth", repo()).unwrap();
+        let of = |class: &str| -> Vec<String> {
+            let id = class_id(&format!("lib::auth::{class}"));
+            injects_refs(&fp)
+                .into_iter()
+                .filter(|(from, _, _)| *from == id)
+                .map(|(_, t, _)| t)
+                .collect()
+        };
+        // Field formals (`this.store`, `required this.cache`) take the field's
+        // type; a typed field formal (`Audit this.audit`) its own; a typed
+        // parameter its head without the prefix, generics or `?`. A type
+        // two constructors inject is one ref; `@factoryParam` is the
+        // caller's argument, never a container lookup.
+        assert_eq!(
+            of("AuthRepoImpl"),
+            ["TokenStore", "HttpClient", "Cache", "Logger", "Clock", "Audit", "Metrics"]
+        );
+        assert_eq!(of("Ticking"), ["Ticker", "Zone"]);
+        assert_eq!(of("Plain"), ["Foo"]);
+        assert_eq!(of("Lazy"), ["Bar"]);
+        // `super.x` names no type here; `Sink` is typed.
+        assert_eq!(of("Closing"), ["Sink"]);
+        // Each ref sits on its parameter's row and starts from the class.
+        let line_of_clock = injects_refs(&fp)
+            .into_iter()
+            .find(|(_, t, _)| t == "Clock")
+            .map(|(_, _, l)| l);
+        assert_eq!(line_of_clock, Some(7));
+        assert!(
+            fp.refs
+                .iter()
+                .filter(|r| r.category == edge_category::INJECTS)
+                .all(|r| r.from_module == module_id("lib::auth"))
+        );
+    }
+
+    #[test]
+    fn unannotated_class_emits_no_inject() {
+        // Plain constructor parameters are not DI: only the annotation makes
+        // get_it build the class.
+        let source = r#"import 'package:injectable/injectable.dart';
+import 'package:meta/meta.dart';
+
+class HomeController {
+  final ApiService api;
+  HomeController(this.api);
+}
+
+@immutable
+class View {
+  View(ApiService api);
+}
+"#;
+        let fp = parse_file(source, "lib/home.dart", "lib::home", repo()).unwrap();
+        assert!(injects_refs(&fp).is_empty(), "{:?}", injects_refs(&fp));
+    }
+
+    #[test]
+    fn injectable_skips_core_types() {
+        let source = r#"import 'package:injectable/injectable.dart';
+
+@injectable
+class Settings {
+  final String name;
+  Settings(this.name, int n, double d, num x, bool b, dynamic y, Object o,
+      List<Repo> l, Map<String, Repo> m, Set<Repo> s, Future<Repo> f,
+      Stream<Repo> st, Duration dur, DateTime at, void Function() cb,
+      int pick(int i), (int, Repo) pair, Repo repo);
+}
+"#;
+        let fp = parse_file(source, "lib/settings.dart", "lib::settings", repo()).unwrap();
+        let types: Vec<String> = injects_refs(&fp).into_iter().map(|(_, t, _)| t).collect();
+        assert_eq!(types, ["Repo"]);
+    }
+
+    #[test]
+    fn injectable_needs_the_import() {
+        // A file that never imports `package:injectable/` has no injectable
+        // annotation, whatever its annotations are called.
+        let source = HOME_CONTROLLER.replace("import 'package:injectable/injectable.dart';\n", "");
+        let fp = parse_file(&source, "home_controller.dart", "home_controller", repo()).unwrap();
+        assert!(injects_refs(&fp).is_empty(), "{:?}", injects_refs(&fp));
+    }
+
+    // ---- DH.15: shelf_router route handlers -> HANDLED_BY refs ------------
+
+    /// The HANDLED_BY refs of a parse: (from, qualifier, line).
+    fn handler_refs(fp: &FileParse) -> Vec<(NodeId, CallQualifier, u32)> {
+        fp.refs
+            .iter()
+            .filter(|r| r.category == edge_category::HANDLED_BY)
+            .map(|r| (r.from, r.qualifier.clone(), r.line))
+            .collect()
+    }
+
+    #[test]
+    fn shelf_router_handler_refs() {
+        // matrix/dart/http_server server/server.dart, verbatim, plus a
+        // `base.name` handler.
+        let source = r#"import 'package:shelf/shelf.dart';
+import 'package:shelf_router/shelf_router.dart';
+
+Response getUser(Request request, String id) => Response.ok('user $id');
+
+Response createUser(Request request) => Response(201);
+
+final router = Router()
+  ..get('/users/<id>', getUser)
+  ..post('/users', createUser);
+
+final admin = Router()
+  ..put( '/users/<id>' ,  handlers.updateUser )
+  ..delete("/users/<id>", h.remove,);
+"#;
+        let fp = parse_file(source, "server.dart", "server", repo()).unwrap();
+        let bare = |n: &str| CallQualifier::Bare(n.to_string());
+        let attr = |b: &str, n: &str| CallQualifier::Attribute {
+            base: b.to_string(),
+            name: n.to_string(),
+        };
+        let mut refs = handler_refs(&fp);
+        refs.sort_by_key(|(_, _, line)| *line);
+        assert_eq!(
+            refs,
+            vec![
+                (route_id("GET", "/users/<id>"), bare("getUser"), 8),
+                (route_id("POST", "/users"), bare("createUser"), 9),
+                (route_id("PUT", "/users/<id>"), attr("handlers", "updateUser"), 12),
+                (route_id("DELETE", "/users/<id>"), attr("h", "remove"), 13),
+            ]
+        );
+        assert!(
+            fp.refs
+                .iter()
+                .filter(|r| r.category == edge_category::HANDLED_BY)
+                .all(|r| r.from_module == module_id("server"))
+        );
+    }
+
+    #[test]
+    fn shelf_inline_closure_has_no_handler() {
+        let source = r#"import 'package:shelf_router/shelf_router.dart';
+import 'package:go_router/go_router.dart';
+
+final app = Router()
+  ..get('/hi', (Request r) => Response.ok('hi'))
+  ..get('/made', makeHandler())
+  ..get('/opts', base, middleware: m)
+  ..get('/bare');
+final nav = GoRouter(routes: [GoRoute(path: '/page', builder: buildPage)]);
+"#;
+        let fp = parse_file(source, "bin/app.dart", "bin::app", repo()).unwrap();
+        for path in ["/hi", "/made", "/bare"] {
+            assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", path)), "route {path}");
+        }
+        // `base` is argument #1 of `/opts`: a handler, its named argument
+        // after it notwithstanding.
+        assert_eq!(
+            handler_refs(&fp),
+            vec![(route_id("GET", "/opts"), CallQualifier::Bare("base".to_string()), 6)]
+        );
+    }
+
+    #[test]
+    fn dio_client_calls_still_skipped() {
+        // CH.5c control: a Dio-bound receiver's call is a client ENDPOINT,
+        // never a ROUTE, so its second argument is never a handler.
+        let source = r#"import 'package:dio/dio.dart';
+
+final api = Dio();
+
+Future<void> load(Options options, Object data) async {
+  await api.get('/users', options);
+  await dio.post('/users', data);
+}
+"#;
+        let fp = parse_file(source, "lib/api.dart", "lib::api", repo()).unwrap();
+        assert!(!fp.nodes.iter().any(|n| n.id == route_id("GET", "/users")));
+        assert!(!fp.nodes.iter().any(|n| n.id == route_id("POST", "/users")));
+        assert!(handler_refs(&fp).is_empty(), "{:?}", handler_refs(&fp));
+    }
+
+    #[test]
+    fn injectable_factory_params_skip_in_both_placements() {
+        // The annotation sits inside the first parameter's node and before a
+        // later one's as a sibling; either way the parameter is the caller's.
+        let source = r#"import 'package:injectable/injectable.dart';
+
+@injectable
+class Detail {
+  Detail(@factoryParam Item first, Repo repo, @factoryParam Item second,
+      {@ignoreParam Clock? clock, Cache? cache, @factoryParam Item? third});
+}
+"#;
+        let fp = parse_file(source, "lib/detail.dart", "lib::detail", repo()).unwrap();
+        let types: Vec<String> = injects_refs(&fp).into_iter().map(|(_, t, _)| t).collect();
+        assert_eq!(types, ["Repo", "Cache"]);
+    }
+
+    #[test]
+    fn dh15_markers() {
+        let di = DiStats {
+            classes: 1,
+            injects: 1,
+        };
+        assert_eq!(
+            di.marker("home_controller.dart").as_deref(),
+            Some("[dart-di] injectable classes=1 injects=1 path=home_controller.dart")
+        );
+        assert_eq!(DiStats::default().marker("a.dart"), None);
+        let shelf = ShelfRouteStats {
+            routes: 2,
+            handlers: 2,
+        };
+        assert_eq!(
+            shelf.marker("server/server.dart").as_deref(),
+            Some("[dart-routes] shelf routes=2 handlers=2 path=server/server.dart")
+        );
+        assert_eq!(ShelfRouteStats::default().marker("a.dart"), None);
     }
 }
