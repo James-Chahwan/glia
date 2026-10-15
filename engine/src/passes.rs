@@ -202,15 +202,21 @@ pub(crate) fn fill_evidence_sites(merged: &mut MergedGraph) -> FillStats {
 ///
 /// A16.3: the mention is resolved against a two-tier index rather than a bare
 /// name→id map, so a qualified mention (`` `PaymentGateway.charge` ``) binds to
-/// that member instead of whichever same-named symbol happened to hold the
-/// lowest NodeId, and an ambiguous bare name is stamped `Weak` instead of
-/// claiming `Medium` for a coin flip.
+/// that member instead of any same-named symbol, and an ambiguous bare name is
+/// stamped `Weak` instead of claiming `Medium` for a coin flip.
+///
+/// DE.1: a mention with several candidates (a bare name, or a `Class::method`
+/// tail in several modules) binds the least (qname, kind, graph index)
+/// candidate, a pure function of content. It used to bind the lowest NodeId,
+/// which hashes the RepoId, so one README documented a different symbol under
+/// another remote or directory name. `[doclink] tie-break by qname:` counts
+/// those binds.
 pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
     use glia_code_domain::cell_type;
     use glia_core::CellPayload;
 
     let mut idx = DocSymbolIndex::default();
-    for g in &merged.graphs {
+    for (graph, g) in merged.graphs.iter().enumerate() {
         for n in &g.nodes {
             let Some(kind) = g.nav.kind_by_id.get(&n.id).copied() else {
                 continue;
@@ -221,7 +227,8 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
             let Some(name) = g.nav.name_by_id.get(&n.id) else {
                 continue;
             };
-            idx.add(name, g.nav.qname_by_id.get(&n.id).map(String::as_str), n.id);
+            let qname = g.nav.qname_by_id.get(&n.id).map(String::as_str);
+            idx.add(name, DocCand { id: n.id, qname, kind: kind.0, graph });
         }
     }
     if idx.by_name.is_empty() {
@@ -231,6 +238,8 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
     const MAX_LINKS_PER_DOC: usize = 25;
     let mut new_edges: Vec<Edge> = Vec::new();
     let (mut strong, mut medium, mut weak, mut doc_sections) = (0usize, 0usize, 0usize, 0usize);
+    // DE.1: binds whose mention had several candidates, per tier.
+    let (mut tie_qualified, mut tie_bare) = (0usize, 0usize);
     // CG.3: sections whose links stopped at MAX_LINKS_PER_DOC. A section's CODE
     // is its whole text now (not its first 500 bytes), so the cap can bind.
     let mut capped = 0usize;
@@ -267,6 +276,11 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
                     Confidence::Medium => medium += 1,
                     Confidence::Weak => weak += 1,
                 }
+                match (rule, confidence) {
+                    ("qualified", Confidence::Medium) => tie_qualified += 1,
+                    ("ambiguous", _) => tie_bare += 1,
+                    _ => {}
+                }
                 new_edges.push(
                     Edge::new(n.id, sym, edge_category::DOCUMENTS, confidence)
                         .with_cell(Evidence::emitter("pass:doclink").rule(rule).to_cell()),
@@ -284,6 +298,9 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
              weak={weak} ambiguous) over {doc_sections} doc sections",
             new_edges.len()
         );
+    }
+    if tie_qualified + tie_bare > 0 {
+        eprintln!("[doclink] tie-break by qname: qualified={tie_qualified} bare={tie_bare}");
     }
     if capped > 0 {
         eprintln!("[doclink] {capped} sections reached the {MAX_LINKS_PER_DOC}-link cap");
@@ -649,39 +666,90 @@ fn is_http_verb(method: &str) -> bool {
 /// Doc→code mention index. `by_tail2` keys the last two qname segments so a
 /// qualified mention (`Class.method`) binds to the right member; `by_name` keeps
 /// today's bare-name lookup but carries the collision count so an ambiguous hit
-/// can be graded instead of silently picking the lowest NodeId. Both maps are
-/// only ever LOOKED UP, never iterated (CODE_RULES §3).
+/// can be graded. Each key keeps the least (qname, kind, graph index) candidate
+/// (DE.1, [`DocCand::key`]), never the lowest NodeId, so the pick is the same
+/// under any RepoId. Both maps are only ever LOOKED UP, never iterated
+/// (CODE_RULES §3).
 #[derive(Default)]
 struct DocSymbolIndex {
-    /// `name`            → (lowest id, how many symbols share it)
-    by_name: HashMap<String, (NodeId, usize)>,
-    /// `"Class::method"` → (lowest id, how many symbols share it)
-    by_tail2: HashMap<String, (NodeId, usize)>,
+    /// `name`            → the least candidate, and how many share the name
+    by_name: HashMap<String, DocPick>,
+    /// `"Class::method"` → the least candidate, and how many share the tail
+    by_tail2: HashMap<String, DocPick>,
+}
+
+/// One doc-linkable symbol offered to [`DocSymbolIndex::add`]: its id, qname,
+/// kind id and the index of its graph in `merged.graphs` (argument order).
+#[derive(Debug, Clone, Copy)]
+struct DocCand<'a> {
+    id: NodeId,
+    qname: Option<&'a str>,
+    kind: u32,
+    graph: usize,
+}
+
+impl<'a> DocCand<'a> {
+    /// The order the index keeps a candidate by: the least qname (a symbol with
+    /// none sorts last), then the kind id (a CLASS / COMPONENT twin sharing a
+    /// qname), then the graph index (one qname in two repos of a multi-repo
+    /// build). Content only: the NodeId hashes the RepoId and never decides.
+    fn key(&self) -> (bool, &'a str, u32, usize) {
+        (self.qname.is_none(), self.qname.unwrap_or(""), self.kind, self.graph)
+    }
+}
+
+/// A [`DocSymbolIndex`] value: the kept candidate and how many candidates
+/// share its key (`count > 1` is an ambiguous mention).
+#[derive(Debug)]
+struct DocPick {
+    id: NodeId,
+    qname: Option<String>,
+    kind: u32,
+    graph: usize,
+    count: usize,
+}
+
+impl DocPick {
+    fn new(c: DocCand<'_>, count: usize) -> Self {
+        DocPick { id: c.id, qname: c.qname.map(str::to_string), kind: c.kind, graph: c.graph, count }
+    }
+
+    fn cand(&self) -> DocCand<'_> {
+        DocCand { id: self.id, qname: self.qname.as_deref(), kind: self.kind, graph: self.graph }
+    }
 }
 
 impl DocSymbolIndex {
-    fn record(map: &mut HashMap<String, (NodeId, usize)>, key: String, id: NodeId) {
-        map.entry(key)
-            .and_modify(|(cur, n)| {
-                if id.0 < cur.0 {
-                    *cur = id;
+    /// Count `cand` under `key`, keeping it when its [`DocCand::key`] is less
+    /// than the kept one's. The qname is cloned only when a candidate is kept.
+    fn record(map: &mut HashMap<String, DocPick>, key: String, cand: DocCand<'_>) {
+        match map.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                let cur = slot.get_mut();
+                let count = cur.count + 1;
+                if cand.key() < cur.cand().key() {
+                    *cur = DocPick::new(cand, count);
+                } else {
+                    cur.count = count;
                 }
-                *n += 1;
-            })
-            .or_insert((id, 1));
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(DocPick::new(cand, 1));
+            }
+        }
     }
 
-    fn add(&mut self, name: &str, qname: Option<&str>, id: NodeId) {
-        Self::record(&mut self.by_name, name.to_string(), id);
+    fn add(&mut self, name: &str, cand: DocCand<'_>) {
+        Self::record(&mut self.by_name, name.to_string(), cand);
         // Same identifier rules as the lookup side, so a key is never stored
         // that `resolve_doc_mention` could not ask for.
-        if let Some(q) = qname {
+        if let Some(q) = cand.qname {
             let mut segs = q.rsplit("::");
             if let (Some(last), Some(prev)) = (segs.next(), segs.next())
                 && is_identifier(prev)
                 && is_identifier(last)
             {
-                Self::record(&mut self.by_tail2, format!("{prev}::{last}"), id);
+                Self::record(&mut self.by_tail2, format!("{prev}::{last}"), cand);
             }
         }
     }
@@ -701,7 +769,7 @@ fn resolve_doc_mention(
         if let (Some(last), Some(prev)) = (segs.next(), segs.next())
             && is_identifier(prev)
             && is_identifier(last)
-            && let Some(&(id, n)) = idx.by_tail2.get(&format!("{prev}::{last}"))
+            && let Some(&DocPick { id, count: n, .. }) = idx.by_tail2.get(&format!("{prev}::{last}"))
         {
             let confidence = if n == 1 {
                 Confidence::Strong
@@ -713,7 +781,7 @@ fn resolve_doc_mention(
     }
     // Tiers 2/3 — bare tail name (the pre-A16.3 behaviour), graded by ambiguity.
     let ident = identifier_from_span(span)?;
-    let &(id, n) = idx.by_name.get(&ident)?;
+    let &DocPick { id, count: n, .. } = idx.by_name.get(&ident)?;
     Some(if n == 1 {
         (id, Confidence::Medium, "unique")
     } else {
@@ -1911,22 +1979,33 @@ fn strip_camel_test_affixes(name: &str) -> &str {
 mod passes_tests {
     use super::*;
 
+    /// A METHOD candidate in graph 0.
+    fn method(id: u64, qname: &str) -> DocCand<'_> {
+        DocCand { id: NodeId(id), qname: Some(qname), kind: node_kind::METHOD.0, graph: 0 }
+    }
+
+    /// `(kept id, count)` of one index entry.
+    fn pick(map: &HashMap<String, DocPick>, key: &str) -> (NodeId, usize) {
+        let p = &map[key];
+        (p.id, p.count)
+    }
+
     /// A16.3 — hand-built index, no MergedGraph needed. Mirrors the doc-link
     /// fixture: `PaymentGateway::charge` is a unique member, `charge` is a
     /// unique bare name, `save` is shared by two classes.
     fn fixture_index() -> DocSymbolIndex {
         let mut idx = DocSymbolIndex::default();
-        idx.add("charge", Some("ordering::PaymentGateway::charge"), NodeId(7));
-        idx.add("get_user", Some("users::get_user"), NodeId(3));
-        idx.add("save", Some("ordering::OrderService::save"), NodeId(11));
-        idx.add("save", Some("users::UserRepo::save"), NodeId(4));
+        idx.add("charge", method(7, "ordering::PaymentGateway::charge"));
+        idx.add("get_user", method(3, "users::get_user"));
+        idx.add("save", method(11, "ordering::OrderService::save"));
+        idx.add("save", method(4, "users::UserRepo::save"));
         idx
     }
 
     #[test]
     fn doc_mention_qualified_is_strong() {
         let idx = fixture_index();
-        assert_eq!(idx.by_tail2["PaymentGateway::charge"], (NodeId(7), 1));
+        assert_eq!(pick(&idx.by_tail2, "PaymentGateway::charge"), (NodeId(7), 1));
         assert_eq!(
             resolve_doc_mention("PaymentGateway.charge", &idx),
             Some((NodeId(7), Confidence::Strong, "qualified"))
@@ -1950,12 +2029,13 @@ mod passes_tests {
     #[test]
     fn doc_mention_bare_ambiguous_is_weak() {
         let idx = fixture_index();
-        // Two symbols named `save`: same lowest-id target as the pre-A16.3
-        // path picked, but no longer claiming Medium for a coin flip.
-        assert_eq!(idx.by_name["save"], (NodeId(4), 2));
+        // Two symbols named `save`: no longer claiming Medium for a coin flip,
+        // and (DE.1) the least qname, `ordering::OrderService::save`, not the
+        // lowest NodeId (4, `users::UserRepo::save`).
+        assert_eq!(pick(&idx.by_name, "save"), (NodeId(11), 2));
         assert_eq!(
             resolve_doc_mention("save", &idx),
-            Some((NodeId(4), Confidence::Weak, "ambiguous"))
+            Some((NodeId(11), Confidence::Weak, "ambiguous"))
         );
     }
 
@@ -1972,8 +2052,32 @@ mod passes_tests {
         // Ambiguous bare fallback still degrades to Weak.
         assert_eq!(
             resolve_doc_mention("Whatever.save", &idx),
-            Some((NodeId(4), Confidence::Weak, "ambiguous"))
+            Some((NodeId(11), Confidence::Weak, "ambiguous"))
         );
+    }
+
+    /// DE.1: a qname shared by two candidates (a CLASS / COMPONENT twin, or one
+    /// qname in two repos of a multi-repo build) falls to the kind id, then the
+    /// graph index; the insertion order and the NodeId never decide, and a
+    /// candidate with no qname sorts after every one with a qname.
+    #[test]
+    fn doclink_pick_breaks_qname_ties_by_kind_then_graph() {
+        let class = DocCand { id: NodeId(9), qname: Some("ui::Card"), kind: node_kind::CLASS.0, graph: 1 };
+        let component = DocCand { kind: node_kind::COMPONENT.0, id: NodeId(1), ..class };
+        let (lo, hi) = if class.kind < component.kind { (class, component) } else { (component, class) };
+        let other_repo = DocCand { id: NodeId(2), graph: 0, ..hi };
+        let unnamed = DocCand { id: NodeId(0), qname: None, kind: 0, graph: 0 };
+        for order in [[unnamed, hi, lo, other_repo], [other_repo, lo, unnamed, hi], [lo, other_repo, hi, unnamed]] {
+            let mut idx = DocSymbolIndex::default();
+            for c in order {
+                idx.add("Card", c);
+            }
+            assert_eq!(pick(&idx.by_name, "Card"), (lo.id, 4), "{order:?}");
+        }
+        let mut idx = DocSymbolIndex::default();
+        idx.add("Card", hi);
+        idx.add("Card", other_repo);
+        assert_eq!(pick(&idx.by_name, "Card"), (other_repo.id, 2), "same qname and kind: graph 0 wins");
     }
 
     #[test]
@@ -2006,6 +2110,12 @@ mod passes_tests {
 
         fn add(&mut self, kind: NodeKindId, name: &str, qname: &str, cells: Vec<Cell>) -> NodeId {
             let id = NodeId::from_parts(GRAPH_TYPE, self.repo, kind, qname);
+            self.add_at(id, kind, name, qname, cells)
+        }
+
+        /// [`Self::add`] with a chosen `id` (DE.1: a test can make the lowest
+        /// NodeId the larger qname, as a different RepoId may).
+        fn add_at(&mut self, id: NodeId, kind: NodeKindId, name: &str, qname: &str, cells: Vec<Cell>) -> NodeId {
             self.nav.record(id, name, qname, kind, None);
             self.nodes.push(Node { id, repo: self.repo, confidence: Confidence::Strong, cells });
             id
@@ -2090,6 +2200,59 @@ mod passes_tests {
             .and_then(Evidence::of)
             .and_then(|ev| ev.rule);
         assert_eq!(rule.as_deref(), Some("qualified"));
+    }
+
+    /// DE.1: the DOCUMENTS edges `link_doc_sections` mints from `doc`, with
+    /// their EVIDENCE rule.
+    fn doc_links(edges: &[Edge], doc: NodeId) -> Vec<(NodeId, Confidence, Option<String>)> {
+        edges
+            .iter()
+            .filter(|e| e.from == doc && e.category == edge_category::DOCUMENTS)
+            .map(|e| (e.to, e.confidence, Evidence::of(e).and_then(|ev| ev.rule)))
+            .collect()
+    }
+
+    /// One DOC_SECTION whose CODE is `text`, at a chosen id.
+    fn doc_at(h: &mut Hand, id: u64, text: &str) -> NodeId {
+        let code = Cell { kind: cell_type::CODE, payload: CellPayload::Text(text.into()) };
+        h.add_at(NodeId(id), node_kind::DOC_SECTION, "caching", "docs::README::caching", vec![code])
+    }
+
+    /// DE.1: an ambiguous bare mention binds the least (qname, kind)
+    /// candidate, never the lowest NodeId. Here the lowest id (10) is the
+    /// larger qname, as the NodeIds of one tree under another RepoId may be.
+    #[test]
+    fn doclink_ambiguous_pick_is_least_qname() {
+        let mut h = Hand::new("test://doclink/least-qname");
+        let feed = h.add_at(NodeId(20), node_kind::METHOD, "refresh", "a::feed::Feed::refresh", vec![]);
+        let wallet = h.add_at(NodeId(10), node_kind::METHOD, "refresh", "b::wallet::Wallet::refresh", vec![]);
+        let doc = doc_at(&mut h, 30, "Call `refresh` after a write.");
+        let mut merged = MergedGraph::new(vec![h.graph()]);
+
+        link_doc_sections(&mut merged);
+        assert_eq!(
+            doc_links(&merged.cross_edges, doc),
+            vec![(feed, Confidence::Weak, Some("ambiguous".to_string()))],
+            "the least qname wins, not the lowest NodeId ({wallet:?})"
+        );
+    }
+
+    /// DE.1: a qualified mention whose `Class::method` tail names several
+    /// symbols (one per module) binds the least qname too, at Medium.
+    #[test]
+    fn doclink_qualified_pick_is_least_qname() {
+        let mut h = Hand::new("test://doclink/least-qname-qualified");
+        let a = h.add_at(NodeId(20), node_kind::METHOD, "refresh", "a::feed::Feed::refresh", vec![]);
+        let b = h.add_at(NodeId(10), node_kind::METHOD, "refresh", "b::feed::Feed::refresh", vec![]);
+        let doc = doc_at(&mut h, 30, "`Feed.refresh` reloads the feed.");
+        let mut merged = MergedGraph::new(vec![h.graph()]);
+
+        link_doc_sections(&mut merged);
+        assert_eq!(
+            doc_links(&merged.cross_edges, doc),
+            vec![(a, Confidence::Medium, Some("qualified".to_string()))],
+            "the least qname wins, not the lowest NodeId ({b:?})"
+        );
     }
 
     #[test]

@@ -8,8 +8,8 @@
 //! `[history] snapshot incomplete` line (once per half) and a no-op.
 //!
 //! Files map to MODULE nodes by the `file` of their first POSITION cell
-//! (exact repo-relative match; several MODULEs on one file bind the smallest
-//! NodeId). Paths with no MODULE (yaml, lockfiles, docs, deleted files) are
+//! (exact repo-relative match; several MODULEs on one file bind the least
+//! qname, DE.1, never the NodeId, which hashes the RepoId). Paths with no MODULE (yaml, lockfiles, docs, deleted files) are
 //! counted `unmapped` and ignored, never guessed. Renames: commits are walked
 //! newest to oldest with an alias map (old path -> current path); a file entry
 //! with `from = old` sets `alias[old] = current(new)`, so every commit before
@@ -186,25 +186,32 @@ pub(super) fn position(n: &Node) -> Option<(String, Option<i64>, Option<i64>)> {
 }
 
 /// `repo`'s MODULE nodes by the file of their POSITION; several on one file
-/// bind the smallest NodeId. Shared with the SCIP stage (`super::scip`).
+/// bind the least qname (DE.1: a MODULE with no qname sorts last, and the
+/// NodeId decides only between equal qnames, which within one repo name one
+/// node). The NodeId hashes the RepoId, so binding the smallest one put a
+/// CO_CHANGES / ATTN / SCIP fact on a different MODULE under another remote or
+/// directory name. Shared with the SCIP stage (`super::scip`).
 pub(super) fn module_files(merged: &MergedGraph, repo: RepoId) -> BTreeMap<String, NodeId> {
-    let mut out: BTreeMap<String, NodeId> = BTreeMap::new();
+    // (no qname, qname, id): the least is kept.
+    let mut best: BTreeMap<String, (bool, &str, NodeId)> = BTreeMap::new();
     for g in merged.graphs.iter().filter(|g| g.repo == repo) {
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::MODULE) {
                 continue;
             }
             let Some((file, _, _)) = position(n) else { continue };
-            out.entry(file)
-                .and_modify(|id| {
-                    if n.id.0 < id.0 {
-                        *id = n.id;
+            let qname = g.nav.qname_by_id.get(&n.id).map(String::as_str);
+            let cand = (qname.is_none(), qname.unwrap_or(""), n.id);
+            best.entry(file)
+                .and_modify(|cur| {
+                    if (cand.0, cand.1, cand.2.0) < (cur.0, cur.1, cur.2.0) {
+                        *cur = cand;
                     }
                 })
-                .or_insert(n.id);
+                .or_insert(cand);
         }
     }
-    out
+    best.into_iter().map(|(file, (_, _, id))| (file, id)).collect()
 }
 
 /// Every file entry of every commit of `snapshot` under the path it has at
@@ -567,6 +574,47 @@ mod tests {
         let sets = commit_file_sets(&snapshot(commits, vec![]));
         let names: Vec<Vec<&str>> = sets.iter().map(|s| s.iter().map(String::as_str).collect()).collect();
         assert_eq!(names, [vec!["z.py"], vec!["docs/x.md", "z.py"], vec!["Cargo.lock", "z.py"]]);
+    }
+
+    /// DE.1: two MODULEs positioned at one file bind the least qname, not the
+    /// lowest NodeId (which a different RepoId may reorder). The ids run
+    /// opposite to the qnames; a third MODULE with no qname sorts last.
+    #[test]
+    fn module_files_binds_least_qname() {
+        let repo = RepoId::from_canonical("test://history-least-qname");
+        let mut g = glia_graph::RepoGraph {
+            repo,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            nav: Default::default(),
+            symbols: Default::default(),
+            unresolved_calls: Vec::new(),
+            unresolved_refs: Vec::new(),
+            properties: Default::default(),
+        };
+        let at = |file: &str| Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":0,"end_line":1}}"#)),
+        };
+        for (id, qname, file) in [
+            (5u64, None, "svc/a.py"),
+            (10, Some("svc::b"), "svc/a.py"),
+            (20, Some("svc::a"), "svc/a.py"),
+            (7, Some("svc::c"), "svc/c.py"),
+        ] {
+            let id = NodeId(id);
+            g.nodes.push(Node { id, repo, confidence: Confidence::Strong, cells: vec![at(file)] });
+            g.nav.kind_by_id.insert(id, node_kind::MODULE);
+            if let Some(q) = qname {
+                g.nav.qname_by_id.insert(id, q.to_string());
+            }
+        }
+        let merged = MergedGraph::new(vec![g]);
+        let files = module_files(&merged, repo);
+        assert_eq!(
+            files.into_iter().collect::<Vec<_>>(),
+            [("svc/a.py".to_string(), NodeId(20)), ("svc/c.py".to_string(), NodeId(7))]
+        );
     }
 
     #[test]
