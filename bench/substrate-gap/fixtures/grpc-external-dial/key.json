@@ -1,0 +1,29 @@
+{
+  "framework": "grpc-external-dial",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "note": "DF (WS / gRPC / GraphQL external marking, gRPC half): a stub whose connection is dialled at a public third-party host (geocoder.googleapis.com:443) pairs with the in-repo server of the same service name: graph/src/resolvers/grpc.rs narrows by host only on positive evidence (CB.21). HEAD (84e2e71, leap wheel): GRPC_CALLS grpc_client:Geocoder -> grpc:geo.v1.Geocoder (FORBID VIOLATIONS 1); the client's ENDPOINT_HIT is {\"via\":\"grpc\",\"host\":\"geocoder.googleapis.com:443\"}.",
+  "expect_cells": [
+    {
+      "kind": "GRPC_CLIENT",
+      "node": "grpc_client:Geocoder",
+      "cell": "ENDPOINT_HIT",
+      "contains": "\"external\":true"
+    },
+    {
+      "kind": "GRPC_CLIENT",
+      "node": "grpc_client:Geocoder",
+      "cell": "ORIGIN",
+      "contains": "external"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "grpc_client:Geocoder",
+      "to": "grpc:geo.v1.Geocoder",
+      "category": "GRPC_CALLS"
+    }
+  ]
+}

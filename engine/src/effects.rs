@@ -70,7 +70,10 @@
 //! `{"provenance":"external"}` (every call site names a public host outside
 //! the build, and nothing pairs it) carries the hosts its sites name, sorted,
 //! read by `serves::external_hosts` (the reader `serves` shares); its
-//! `downstream` stays empty. Every other row's list is empty.
+//! `downstream` stays empty. DF.10: a WS_CLIENT (`ws_send`), GRPC_CLIENT
+//! (`rpc_call`) or GRAPHQL_OPERATION (`graphql_op`) sink stamped the same way
+//! (DF.9 leaves it unpaired) carries its dialled hosts likewise, a GraphQL
+//! client's `hosts` list included. Every other row's list is empty.
 //!
 //! Filters apply to the rows, never the walk (a filtered-out sink still stops
 //! it): `classes` keeps the named classes, `writes_only` keeps db rows whose
@@ -114,6 +117,7 @@ use crate::answers::{Locator, in_scope, resolve_scope};
 use crate::arch::{default_keying, service_of};
 use crate::coverage::ext_to_language;
 use crate::find::{self, FindOptions, FoundNode};
+use crate::passes::EXTERNAL_SIDE_KINDS;
 use crate::profile::CODE_PROFILE;
 use crate::serves::external_hosts;
 
@@ -238,9 +242,10 @@ pub struct EffectRow {
     pub path: Vec<EffectHop>,
     /// Always `derived`.
     pub tier: &'static str,
-    /// For an `http_call` sink CG.4b stamped ORIGIN external, its hosts
-    /// outside the build, sorted (its `downstream` is empty: nothing pairs
-    /// it); empty for an in-repo sink.
+    /// For an `http_call`, `ws_send`, `rpc_call` or `graphql_op` sink stamped
+    /// ORIGIN external (CG.4b, DF.10), its hosts outside the build, sorted
+    /// (its `downstream` is empty: nothing pairs it); empty for an in-repo
+    /// sink.
     pub external_hosts: Vec<String>,
 }
 
@@ -438,12 +443,13 @@ pub fn effects(
         }
     }
 
-    // CJ.3: CG.4b's verdict on each ENDPOINT sink, from every entry's cells.
+    // CJ.3: CG.4b's verdict on each ENDPOINT sink (DF.10: and each WS /
+    // gRPC / GraphQL client sink), from every entry's cells.
     let external = external_sinks(
         merged,
         hits.iter()
             .map(|h| h.real)
-            .filter(|id| index.kind(*id) == Some(node_kind::ENDPOINT)),
+            .filter(|id| index.kind(*id).is_some_and(|k| EXTERNAL_SIDE_KINDS.contains(&k))),
     );
 
     let keying = default_keying(merged);

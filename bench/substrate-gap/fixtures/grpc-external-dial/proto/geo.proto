@@ -1,0 +1,7 @@
+syntax = "proto3";
+package geo.v1;
+service Geocoder {
+  rpc Lookup (Req) returns (Resp);
+}
+message Req { string q = 1; }
+message Resp { string r = 1; }

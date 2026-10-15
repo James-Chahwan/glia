@@ -1,0 +1,54 @@
+{
+  "framework": "external-channel-clients",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "DF (0.5.1 deferral 'WS / gRPC / GraphQL external-endpoint marking'; CG.4a / CG.4b / CJ.3 did HTTP only): a WebSocket client dialling wss://stream.binance.com/ws and an Apollo client on https://api.github.com/graphql pair with this repo's own `/ws` handler and `getUser` resolver because ws / graphql pairing is by path / field name and an unknown host narrows nothing (A11.4 acts on positive evidence only). HEAD (84e2e71, leap wheel): WS_CONNECTS ws_client:/ws @apps/web -> ws:/ws @services/users and GRAPHQL_CALLS graphql_op:GetUser @apps/web -> graphql_resolver:getUser @services/users (FORBID VIOLATIONS 2); their ENDPOINT_HIT cells carry `host` stream.binance.com / `hosts` [api.github.com] and no `external`. The `/feed` client on localhost is the in-build control and pairs on HEAD and after.",
+  "expect_edges": [
+    {
+      "from": "ws_client:/feed @apps/web",
+      "to": "ws:/feed @services/users",
+      "category": "WS_CONNECTS",
+      "note": "control: a local host is never external"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "WS_CLIENT",
+      "node": "ws_client:/ws @apps/web",
+      "cell": "ENDPOINT_HIT",
+      "contains": "\"external\":true"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "node": "ws_client:/ws @apps/web",
+      "cell": "ORIGIN",
+      "contains": "external"
+    },
+    {
+      "kind": "GRAPHQL_OPERATION",
+      "node": "graphql_op:GetUser @apps/web",
+      "cell": "ENDPOINT_HIT",
+      "contains": "\"external\":true"
+    },
+    {
+      "kind": "GRAPHQL_OPERATION",
+      "node": "graphql_op:GetUser @apps/web",
+      "cell": "ORIGIN",
+      "contains": "external"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "ws_client:/ws @apps/web",
+      "to": "ws:/ws @services/users",
+      "category": "WS_CONNECTS"
+    },
+    {
+      "from": "graphql_op:GetUser @apps/web",
+      "to": "graphql_resolver:getUser @services/users",
+      "category": "GRAPHQL_CALLS"
+    }
+  ]
+}

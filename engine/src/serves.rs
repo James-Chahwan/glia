@@ -319,15 +319,18 @@ fn host_name(authority: &str) -> String {
     host.trim_end_matches('.').to_ascii_lowercase()
 }
 
-/// CG.4b's verdict on one ENDPOINT id, read from every cell of every entry of
-/// it (an ENDPOINT id can sit in several graphs of a repo, LB.5, and CG.4b
-/// stamps every entry): `Some(hosts)` when some ORIGIN cell parses to
-/// `provenance == "external"`, `hosts` being the distinct `host` strings of
-/// the ENDPOINT_HIT payloads marked `"external": true` (CG.4a), sorted.
-/// `None` for an in-repo endpoint, including an external call the build pairs
+/// CG.4b's verdict on one ENDPOINT id (DF.10: or WS_CLIENT, GRPC_CLIENT or
+/// GRAPHQL_OPERATION id), read from every cell of every entry of it (an id
+/// can sit in several graphs of a repo, LB.5, and the stamp lands on every
+/// entry): `Some(hosts)` when some ORIGIN cell parses to
+/// `provenance == "external"`, `hosts` being the distinct `host` strings and
+/// `hosts` array entries (a GraphQL / tRPC client base, CB.24) of the
+/// ENDPOINT_HIT payloads marked `"external": true` (CG.4a, DF.8), sorted.
+/// `None` for an in-repo side, including an external call the build pairs
 /// because its host names a project alias, or an overlay pin configured its
-/// site: CG.4b never stamps those. The one reader `effects` and `serves`
-/// share, so the two answers agree with `glia gaps` and engram-export.
+/// site: the stamp never lands on those. The one reader `effects` and
+/// `serves` share, so the two answers agree with `glia gaps` and
+/// engram-export.
 pub(crate) fn external_hosts<'c>(cells: impl IntoIterator<Item = &'c Cell>) -> Option<Vec<String>> {
     let mut external = false;
     let mut hosts: BTreeSet<String> = BTreeSet::new();
@@ -341,9 +344,12 @@ pub(crate) fn external_hosts<'c>(cells: impl IntoIterator<Item = &'c Cell>) -> O
         } else if c.kind == cell_type::ENDPOINT_HIT
             && let Ok(v) = serde_json::from_str::<serde_json::Value>(j)
             && v.get("external").and_then(|e| e.as_bool()) == Some(true)
-            && let Some(h) = v.get("host").and_then(|h| h.as_str())
         {
-            hosts.insert(h.to_string());
+            if let Some(h) = v.get("host").and_then(|h| h.as_str()) {
+                hosts.insert(h.to_string());
+            }
+            let listed = v.get("hosts").and_then(|h| h.as_array());
+            hosts.extend(listed.into_iter().flatten().filter_map(|h| h.as_str()).map(str::to_string));
         }
     }
     external.then(|| hosts.into_iter().collect())
@@ -715,6 +721,27 @@ mod tests {
             None
         );
         assert_eq!(external_hosts(&[origin]), Some(Vec::new()));
+    }
+
+    /// DF.10: a GraphQL operation's marked hit names its hosts as a `hosts`
+    /// array (CB.24's client base); every entry is read beside any `host`,
+    /// deduped and sorted, and an unmarked hit's list is still skipped.
+    #[test]
+    fn external_hosts_reads_a_hosts_list() {
+        let origin = cell(cell_type::ORIGIN, r#"{"provenance":"external"}"#);
+        let gql = cell(
+            cell_type::ENDPOINT_HIT,
+            r#"{"via":"graphql","hosts":["z.example.org","api.github.com"],"external":true}"#,
+        );
+        let ws = cell(
+            cell_type::ENDPOINT_HIT,
+            r#"{"via":"ws","host":"api.github.com","external":true}"#,
+        );
+        let unmarked = cell(cell_type::ENDPOINT_HIT, r#"{"via":"graphql","hosts":["in.example.org"]}"#);
+        assert_eq!(
+            external_hosts(&[gql, origin, ws, unmarked]),
+            Some(vec!["api.github.com".to_string(), "z.example.org".to_string()])
+        );
     }
 
     #[test]

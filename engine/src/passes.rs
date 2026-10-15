@@ -866,6 +866,13 @@ fn is_identifier(s: &str) -> bool {
 /// (a layout merge, LC.10b, that brings the host's project) is removed
 /// before the stamping, on every entry of the id.
 ///
+/// DF.10: the same rule covers the channel clients DF.9 leaves out of
+/// pairing ([`EXTERNAL_SIDE_KINDS`]): a WS_CLIENT, GRPC_CLIENT or
+/// GRAPHQL_OPERATION in its resolver's `third_party_clients` that no
+/// [`PAIRING_CATEGORIES`] edge leaves (resolver or overlay) is stamped
+/// `external` in the same last arm, and a stale stamp on one is taken back
+/// the same way. The marker's `external=` counts all four kinds.
+///
 /// CJ.4: a repo whose `.glia/overlay.toml` declares `[walk] tests = [..]`
 /// (user config: read with or without `--no-overlay`) has every node whose
 /// POSITION file matches stamped `test_fixture` too, in the same arm as the
@@ -901,18 +908,23 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuild
         })
         .collect();
 
-    let third_party = glia_graph::HttpStackResolver::third_party_endpoints(&merged.graphs);
-    // Only probed; not built at all when no endpoint is third-party.
+    // CG.4b's endpoints and DF.10's channel clients: one set, only probed.
+    let mut third_party = glia_graph::HttpStackResolver::third_party_endpoints(&merged.graphs);
+    third_party.extend(glia_graph::WebSocketStackResolver::third_party_clients(&merged.graphs));
+    third_party.extend(glia_graph::GrpcStackResolver::third_party_clients(&merged.graphs));
+    third_party.extend(glia_graph::GraphQLStackResolver::third_party_clients(&merged.graphs));
+    // Only probed; not built at all when no side is third-party.
     let paired: HashSet<NodeId> = if third_party.is_empty() {
         HashSet::new()
     } else {
         merged
             .all_edges()
-            .filter(|e| e.category == edge_category::HTTP_CALLS)
+            .filter(|e| PAIRING_CATEGORIES.contains(&e.category))
             .map(|e| e.from)
             .collect()
     };
     let external = |id: &NodeId| third_party.contains(id) && !paired.contains(id);
+    let side = |kind: Option<NodeKindId>| kind.is_some_and(|k| EXTERNAL_SIDE_KINDS.contains(&k));
 
     let mut generated = generated_files(ctx);
     let mut stats = ProvenanceStats::default();
@@ -921,7 +933,7 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuild
         let nav = &g.nav;
         for n in nodes.iter_mut() {
             let kind = nav.kind_by_id.get(&n.id).copied();
-            if kind == Some(node_kind::ENDPOINT) && !external(&n.id) {
+            if side(kind) && !external(&n.id) {
                 n.cells.retain(|c| !is_external_origin(c));
             }
             // Don't double-tag (region anchors are tagged at creation).
@@ -973,8 +985,9 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuild
                     GeneratedBy::Banner => stats.generated_banner += 1,
                 }
                 "generated"
-            } else if kind == Some(node_kind::ENDPOINT) && external(&n.id) {
-                // A third-party HTTP endpoint (CG.4b, see the doc above).
+            } else if side(kind) && external(&n.id) {
+                // A third-party HTTP endpoint (CG.4b) or channel client
+                // (DF.10), see the doc above.
                 EXTERNAL
             } else {
                 continue;
@@ -1015,8 +1028,28 @@ fn declared_hit<'d>(
         .map(|(.., tagged)| tagged)
 }
 
-/// The provenance of a third-party HTTP endpoint (CG.4b).
+/// The provenance of a third-party HTTP endpoint (CG.4b) or channel client
+/// (DF.10).
 const EXTERNAL: &str = "external";
+
+/// The node kinds `tag_synthetic_provenance` stamps [`EXTERNAL`] on: the
+/// HTTP endpoint (CG.4b) and the three channel clients (DF.10). `effects`
+/// reads the verdict on the same four sink kinds (CJ.3).
+pub(crate) const EXTERNAL_SIDE_KINDS: [NodeKindId; 4] = [
+    node_kind::ENDPOINT,
+    node_kind::WS_CLIENT,
+    node_kind::GRPC_CLIENT,
+    node_kind::GRAPHQL_OPERATION,
+];
+
+/// The categories whose edge from a side pairs it, resolver or overlay
+/// `[[edge]]` alike: such a side is never [`EXTERNAL`].
+const PAIRING_CATEGORIES: [glia_core::EdgeCategoryId; 4] = [
+    edge_category::HTTP_CALLS,
+    edge_category::WS_CONNECTS,
+    edge_category::GRPC_CALLS,
+    edge_category::GRAPHQL_CALLS,
+];
 
 /// The ORIGIN cell `tag_synthetic_provenance` writes for [`EXTERNAL`], and
 /// only that cell: an ORIGIN another stage wrote is never taken for it.
@@ -1045,7 +1078,8 @@ struct ProvenanceStats {
     generated_qname: usize,
     dependency: usize,
     synthetic: usize,
-    /// CG.4b: node ENTRIES stamped `external` (an id in two graphs of a repo
+    /// CG.4b / DF.10: node ENTRIES stamped `external`, all four
+    /// [`EXTERNAL_SIDE_KINDS`] (an id in two graphs of a repo
     /// counts twice, like every other provenance here).
     external: usize,
 }
@@ -2826,6 +2860,70 @@ mod passes_tests {
             .map(|id| origins(&m, *id))
             .collect();
         assert_eq!(before, after);
+    }
+
+    /// DF.10: a WS / gRPC / GraphQL client DF.9 leaves out of pairing gets
+    /// ORIGIN `external` when nothing pairs it; the same marked client with a
+    /// WS_CONNECTS edge (resolver or overlay) gets none, an in-build client
+    /// none, a stale stamp on a now-paired client is taken back, and a client
+    /// in a test file stays `test_fixture` (the external arm is last).
+    #[test]
+    fn external_ws_client_gets_origin() {
+        const WS: &str = r#"{"via":"ws","host":"stream.binance.com","external":true}"#;
+        const GRPC: &str = r#"{"via":"grpc","host":"geocoder.googleapis.com:443","external":true}"#;
+        const GQL: &str = r#"{"via":"graphql","hosts":["api.github.com"],"external":true}"#;
+        const LOCAL: &str = r#"{"via":"ws","host":"localhost:8080"}"#;
+        let hit = |j: &str| Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Json(j.into()) };
+        let stamped = || Cell {
+            kind: cell_type::ORIGIN,
+            payload: CellPayload::Json(r#"{"provenance":"external"}"#.into()),
+        };
+        let spec_file = Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(r#"{"file":"src/ticker.spec.ts","start_line":3,"end_line":3}"#.into()),
+        };
+        let ws = node_kind::WS_CLIENT;
+
+        let build = |wired: bool| {
+            let mut web = Hand::new("test://df10-web");
+            let ids = [
+                web.add(ws, "/ws", "ws_client:/ws", vec![hit(WS)]),
+                web.add(ws, "/live", "ws_client:/live", vec![hit(WS)]),
+                web.add(ws, "/feed", "ws_client:/feed", vec![hit(LOCAL)]),
+                web.add(ws, "/stale", "ws_client:/stale", vec![hit(WS), stamped()]),
+                web.add(ws, "/spec", "ws_client:/spec", vec![hit(WS), spec_file.clone()]),
+                web.add(node_kind::GRPC_CLIENT, "Geocoder", "grpc_client:Geocoder", vec![hit(GRPC)]),
+                web.add(node_kind::GRAPHQL_OPERATION, "GetUser", "graphql_op:GetUser", vec![hit(GQL)]),
+            ];
+            let mut server = Hand::new("test://df10-server");
+            let handler = server.add(node_kind::WS_HANDLER, "/ws", "ws:/ws", vec![]);
+            let mut m = MergedGraph::new(vec![web.graph(), server.graph()]);
+            let [ws_ext, live, _, stale, ..] = ids;
+            // `/live` and `/stale` are paired (an overlay edge looks the same).
+            let mut paired = vec![live, stale];
+            if wired {
+                paired.push(ws_ext);
+            }
+            for from in paired {
+                m.cross_edges.push(Edge::new(from, handler, edge_category::WS_CONNECTS, Confidence::Weak));
+            }
+            (m, ids)
+        };
+        let external = vec![r#"{"provenance":"external"}"#.to_string()];
+
+        let (mut m, [ws_ext, live, feed, stale, spec, grpc, gql]) = build(false);
+        tag_synthetic_provenance(&mut m, &CodeBuildCtx::empty());
+        assert_eq!(origins(&m, ws_ext), external, "unpaired third-party ws client");
+        assert_eq!(origins(&m, grpc), external, "unpaired third-party grpc stub");
+        assert_eq!(origins(&m, gql), external, "unpaired third-party graphql op");
+        assert!(origins(&m, live).is_empty(), "a WS_CONNECTS edge pairs it");
+        assert!(origins(&m, feed).is_empty(), "a local host is in-build");
+        assert!(origins(&m, stale).is_empty(), "the stale stamp is taken back");
+        assert_eq!(origins(&m, spec), vec![r#"{"provenance":"test_fixture"}"#.to_string()]);
+
+        let (mut m, [ws_ext, ..]) = build(true);
+        tag_synthetic_provenance(&mut m, &CodeBuildCtx::empty());
+        assert!(origins(&m, ws_ext).is_empty(), "the same client with a WS_CONNECTS edge");
     }
 
     /// CJ.4: repo A's `[walk] tests = ["playwright/"]` stamps `test_fixture`
