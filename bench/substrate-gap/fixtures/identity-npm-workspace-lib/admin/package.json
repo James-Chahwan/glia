@@ -1,0 +1,7 @@
+{
+  "name": "admin",
+  "dependencies": {
+    "@shop/money": "^1.0.0",
+    "utils": "^1.0.0"
+  }
+}

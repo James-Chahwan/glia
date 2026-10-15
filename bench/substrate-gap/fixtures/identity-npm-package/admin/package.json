@@ -1,0 +1,10 @@
+{
+  "name": "admin",
+  "dependencies": {
+    "react": "^18.2.0",
+    "lodash": "^4.17.21"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

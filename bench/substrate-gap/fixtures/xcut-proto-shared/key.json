@@ -7,6 +7,7 @@
     {"kind": "MESSAGE_TYPE", "name": "OrderPlaced", "note": "declared in both services"}
   ],
   "expect_edges": [
-    {"from": "OrderPlaced", "to": "OrderPlaced", "category": "SHARES_SCHEMA", "note": "same message:proto:shop.OrderPlaced in two repos"}
+    {"from": "OrderPlaced", "to": "OrderPlaced", "category": "SHARES_SCHEMA", "note": "same message:proto:shop.OrderPlaced in two repos"},
+    {"from": "OrderPlaced", "to": "OrderPlaced", "category": "SAME_AS", "note": "DD.5: one identity class (message_fqname), one star edge"}
   ]
 }

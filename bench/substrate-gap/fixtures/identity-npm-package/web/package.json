@@ -1,0 +1,8 @@
+{
+  "name": "web",
+  "dependencies": {
+    "react": "^18.2.0",
+    "lodash": "^4.17.21",
+    "left-pad": "1.3.0"
+  }
+}

@@ -10,6 +10,7 @@
   ],
   "expect_edges": [
     {"from": "message:jsonschema:OrderCreated", "to": "message:jsonschema:OrderCreated", "category": "SHARES_SCHEMA", "note": "same qname in two repos, joined by MessageSchemaResolver"},
+    {"from": "message:jsonschema:OrderCreated", "to": "message:jsonschema:OrderCreated", "category": "SAME_AS", "note": "DD.5: one identity class (message_fqname), one star edge"},
     {"from": "message:jsonschema:OrderCreated", "to": "message:jsonschema:OrderCreated.Address", "category": "DEFINES", "note": "root DEFINES its $defs entry, as proto/avro nesting does"}
   ],
   "expect_cells": [

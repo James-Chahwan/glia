@@ -218,6 +218,48 @@ fn merge_equals_building_together() {
     assert_eq!(marker, &want);
 }
 
+/// DD.5: merge == joint build holds with SAME_AS present. The identity stars
+/// are `resolver:identity` cross edges, so a member's are dropped and the
+/// merge recomputes them over the union; their centers are chosen by qname
+/// and argument order, so the merged bytes equal the joint build's. Two repos
+/// sharing `react` (package_name) and one proto message whose web copy has an
+/// extra field (message_fqname/diverged).
+#[test]
+fn merge_equals_building_together_with_same_as() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (api, web) = (tmp.path().join("api"), tmp.path().join("web"));
+    let message = |extra: &str| {
+        format!(
+            "syntax = \"proto3\";\n\npackage shop;\n\nmessage OrderPlaced {{\n  string id = 1;\n{extra}}}\n"
+        )
+    };
+    write(&api, "package.json", r#"{"name":"api","dependencies":{"react":"^18.2.0"}}"#);
+    write(&api, "proto/shop.proto", &message(""));
+    write(&web, "package.json", r#"{"name":"web","dependencies":{"react":"^18.2.0"}}"#);
+    write(&web, "proto/shop.proto", &message("  int64 total_cents = 2;\n"));
+    let (a, b, t) = (tmp.path().join("out_a"), tmp.path().join("out_b"), tmp.path().join("out_t"));
+    layout(&[&api], &a);
+    layout(&[&web], &b);
+    let together = layout(&[&api, &web], &t);
+    let rules: Vec<String> = together
+        .merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::SAME_AS)
+        .filter_map(|e| Evidence::of(e).and_then(|ev| ev.rule))
+        .collect();
+    assert!(rules.len() >= 2, "control: the joint build holds the stars: {rules:?}");
+    assert!(rules.iter().any(|r| r == "package_name"), "react: {rules:?}");
+    assert!(rules.iter().any(|r| r == "message_fqname/diverged"), "OrderPlaced: {rules:?}");
+
+    let m = merge_layouts(&[gmap("api", &a), gmap("web", &b)]).unwrap();
+    let same_as = |e: &Edge| e.category == edge_category::SAME_AS;
+    assert_eq!(count(&m, same_as), rules.len(), "recomputed once, never doubled");
+    let out_m = tmp.path().join("out_m");
+    persist_merge(&m, &out_m, "test").unwrap();
+    assert_same_layout(&out_m, &t);
+}
+
 /// A5.2's inexact spot, reported: the client member was built without the
 /// server member's proto services, so its gRPC client needles never saw them.
 #[test]

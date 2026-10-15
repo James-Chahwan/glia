@@ -1,0 +1,17 @@
+{
+  "framework": "identity-npm-package",
+  "language": "typescript",
+  "dirs": ["web", "admin"],
+  "note": "DD.5: a package both repos declare is one identity class (rule package_name, FACT): one SAME_AS star edge per class, member -> the class's first-graph copy (equal qnames). Baseline HEAD 84e2e71: 2 SHARES_DEPENDENCY edges, no SAME_AS category.",
+  "expect_nodes": [
+    {"kind": "PACKAGE_DEP", "name": "package:npm:react"}
+  ],
+  "expect_edges": [
+    {"from": "package:npm:react", "to": "package:npm:react", "category": "SAME_AS"},
+    {"from": "package:npm:lodash", "to": "package:npm:lodash", "category": "SAME_AS"}
+  ],
+  "forbid": [
+    {"from": "package:npm:left-pad", "to": "package:npm:left-pad", "category": "SAME_AS", "note": "only web declares it"},
+    {"from": "package:npm:typescript", "to": "package:npm:typescript", "category": "SAME_AS", "note": "only admin declares it"}
+  ]
+}

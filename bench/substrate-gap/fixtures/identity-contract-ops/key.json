@@ -1,0 +1,17 @@
+{
+  "framework": "identity-contract-ops",
+  "language": "go",
+  "dirs": ["."],
+  "note": "DD.5: contract::main::GET:/orders (swaggo) and contract::docs::swagger::GET:/orders share CC.8's op key under project:. (contract_op, DERIVED); all three GET ops resolve to the one ROUTE GET /api/orders (contract_route, DERIVED): one class, star edges into its least-qname member (the swagger op). The cancel op has no route and stays alone. Neither file declares a basePath (the quokka swagger.json shape): with one, every op's path gains /api and contract_op alone joins them.",
+  "expect_nodes": [
+    {"kind": "DOC_SECTION", "name": "GET:/api/orders"}
+  ],
+  "expect_edges": [
+    {"from": "contract::features::orders::feature::GET:/api/orders", "to": "contract::docs::swagger::GET:/orders", "category": "SAME_AS", "exact": true, "note": "contract_route: the star center is the least qname, the swagger op"},
+    {"from": "contract::main::GET:/orders", "to": "contract::docs::swagger::GET:/orders", "category": "SAME_AS", "exact": true, "note": "contract_op and contract_route"}
+  ],
+  "forbid": [
+    {"from": "contract::features::orders::feature::POST:/api/orders/:id/cancel", "to": "contract::docs::swagger::GET:/orders", "category": "SAME_AS"},
+    {"from": "contract::docs::swagger::GET:/orders", "to": "contract::features::orders::feature::POST:/api/orders/:id/cancel", "category": "SAME_AS"}
+  ]
+}

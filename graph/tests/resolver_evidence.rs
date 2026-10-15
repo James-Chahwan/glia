@@ -416,3 +416,107 @@ fn message_schema_edge_carries_no_rule_of_its_own() {
     let e = edge(&m, ua, ub, edge_category::SHARES_SCHEMA);
     assert!(Evidence::of(e).is_none(), "{e:?}");
 }
+
+// ============================================================================
+// Identity (DD.5) — SAME_AS stars name one of five rules, `/diverged` optional
+// ============================================================================
+
+/// Every SAME_AS edge the identity resolver writes carries exactly one
+/// EVIDENCE cell: emitter `resolver:identity` (the engine stamp's spelling)
+/// and a rule that is one of the five it pairs by, optionally `/diverged`.
+#[test]
+fn identity_edges_name_their_rule() {
+    use glia_code_domain::same_as;
+
+    const RULES: [&str; 5] = [
+        same_as::RULE_PACKAGE_NAME,
+        same_as::RULE_MANIFEST_NAME,
+        same_as::RULE_MESSAGE_FQNAME,
+        same_as::RULE_CONTRACT_OP,
+        same_as::RULE_CONTRACT_ROUTE,
+    ];
+    let fields = |extra: &str| {
+        json_cell(
+            cell_type::SCHEMA_FIELDS,
+            &format!(r#"[{{"name":"id"}}{extra}]"#),
+        )
+    };
+    let origin = |method: &str, path: &str| {
+        json_cell(
+            cell_type::ORIGIN,
+            &format!(
+                r#"{{"provenance":"contract","source":"openapi","method":"{method}","path":"{path}"}}"#
+            ),
+        )
+    };
+    let pos = |file: &str| {
+        json_cell(
+            cell_type::POSITION,
+            &format!(r#"{{"file":"{file}","start_line":1}}"#),
+        )
+    };
+
+    let mut a = G::new("identity-a");
+    a.node(node_kind::PACKAGE_DEP, "package:npm:react");
+    a.node_with(
+        node_kind::MESSAGE_TYPE,
+        "message:proto:shop.Order",
+        vec![fields("")],
+    );
+    a.node_with(
+        node_kind::PROJECT,
+        "project:.",
+        vec![json_cell(
+            cell_type::ORIGIN,
+            r#"{"provenance":"project_root","ecosystem":"npm","manifest":"package.json","label":"money","label_source":"manifest","path":""}"#,
+        )],
+    );
+    a.node_with(
+        node_kind::DOC_SECTION,
+        "contract::docs::GET:/orders/{id}",
+        vec![origin("GET", "/orders/{id}"), pos("docs/openapi.yaml")],
+    );
+    a.node_with(
+        node_kind::DOC_SECTION,
+        "contract::main::GET:/orders/:id",
+        vec![origin("GET", "/orders/:id"), pos("main.go")],
+    );
+    route(&mut a, "GET", "/orders/:id");
+    let mut b = G::new("identity-b");
+    b.node(node_kind::PACKAGE_DEP, "package:npm:react");
+    b.node(node_kind::PACKAGE_DEP, "package:npm:money");
+    b.node_with(
+        node_kind::MESSAGE_TYPE,
+        "message:proto:shop.Order",
+        vec![fields(r#",{"name":"extra"}"#)],
+    );
+    let m = resolve(vec![a.build(), b.build()], &IdentityResolver);
+
+    let mut seen: Vec<String> = Vec::new();
+    for e in m
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::SAME_AS)
+    {
+        let (emitter, rule) = rule_of(e);
+        assert_eq!(emitter, "resolver:identity", "{e:?}");
+        let rule = rule.unwrap_or_else(|| panic!("no rule: {e:?}"));
+        let (base, _) = same_as::split_evidence_rule(&rule);
+        assert!(RULES.contains(&base), "{rule}");
+        assert!(rule == base || rule == format!("{base}/diverged"), "{rule}");
+        seen.push(rule);
+    }
+    seen.sort();
+    assert_eq!(
+        seen,
+        [
+            "contract_op",
+            "contract_route",
+            "manifest_name",
+            "message_fqname/diverged",
+            "package_name",
+        ],
+        "{:?}",
+        m.cross_edges
+    );
+}

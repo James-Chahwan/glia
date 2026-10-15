@@ -1,0 +1,6 @@
+{
+  "name": "@shop/web",
+  "dependencies": {
+    "@shop/money": "workspace:*"
+  }
+}

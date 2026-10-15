@@ -1,0 +1,12 @@
+{
+  "framework": "identity-proto-diverged",
+  "language": "proto",
+  "dirs": ["orders", "billing", "shipping"],
+  "note": "DD.5: message:proto:shop.v1.OrderCreated in three repos is one identity class: two SAME_AS star edges (not three clique edges); shipping's copy has an extra field, so its class is diverged (EVIDENCE rule message_fqname/diverged on the edges whose copy differs from the center's - the orders copy, first in argument order). grade.py cannot read edge cells: the Rust test pins the qualifier.",
+  "expect_nodes": [
+    {"kind": "MESSAGE_TYPE", "name": "message:proto:shop.v1.OrderCreated"}
+  ],
+  "expect_edges": [
+    {"from": "message:proto:shop.v1.OrderCreated", "to": "message:proto:shop.v1.OrderCreated", "category": "SAME_AS"}
+  ]
+}

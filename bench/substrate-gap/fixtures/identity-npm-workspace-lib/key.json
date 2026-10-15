@@ -1,0 +1,17 @@
+{
+  "framework": "identity-npm-workspace-lib",
+  "language": "typescript",
+  "dirs": ["monorepo", "admin"],
+  "note": "DD.5: PROJECT project:packages/money (label @shop/money, label_source manifest) is the same thing as the @shop/money dependency in packages/web and in admin (manifest_name); the two deps are also one package_name class. packages/utils has no name, so its label `utils` comes from the dir and never matches the registry package utils.",
+  "expect_nodes": [
+    {"kind": "PROJECT", "name": "project:packages/money"}
+  ],
+  "expect_edges": [
+    {"from": "@shop/money", "to": "@shop/money", "category": "SAME_AS", "note": "the admin dep -> the monorepo dep (package_name; equal qnames, first graph is the center)"},
+    {"from": "project:packages/money", "to": "package:npm:@shop/money", "category": "SAME_AS", "note": "manifest_name: the center is the least qname, package:... < project:..."}
+  ],
+  "forbid": [
+    {"from": "package:npm:utils", "to": "project:packages/utils", "category": "SAME_AS", "note": "a dir-derived label is not a declared package name"},
+    {"from": "project:packages/utils", "to": "package:npm:utils", "category": "SAME_AS", "note": "either star direction"}
+  ]
+}

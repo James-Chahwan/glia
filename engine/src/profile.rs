@@ -49,8 +49,8 @@ use glia_core::NodeKindId;
 use glia_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
     EventBusResolver, GraphQLStackResolver, GrpcStackResolver, HttpStackResolver, IacResolver,
-    MergedGraph, MessageSchemaResolver, PackageResolver, QueueStackResolver, RpcStackResolver,
-    SharedSchemaResolver, WebSocketStackResolver,
+    IdentityResolver, MergedGraph, MessageSchemaResolver, PackageResolver, QueueStackResolver,
+    RpcStackResolver, SharedSchemaResolver, WebSocketStackResolver,
 };
 
 use crate::build::BuildOptions;
@@ -135,6 +135,10 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
     resolver!("config", ConfigResolver),
     resolver!("iac", IacResolver),
     resolver!("package", PackageResolver),
+    // DD.5: SAME_AS identity stars, the last Resolve pass. It reads nodes
+    // only (never another resolver's edges), so its place is a convention:
+    // last, beside the SHARES_* pairings DD.16 retires.
+    resolver!("identity", IdentityResolver),
     // LF.2b: the external edges (`.glia/overlay.toml` `[[edge]]` stanzas),
     // first of the post-passes so every one of them sees them. They carry
     // their own EVIDENCE (emitter `overlay:edge`), which the Finalize fill
@@ -301,7 +305,7 @@ mod tests {
 
     use super::*;
 
-    const HEAD_ORDER: [&str; 26] = [
+    const HEAD_ORDER: [&str; 27] = [
         "http",
         "grpc",
         "rpc",
@@ -317,6 +321,7 @@ mod tests {
         "config",
         "iac",
         "package",
+        "identity",
         "external_edges",
         "downgrade_test_paths",
         "demote_unmatched_http_nodes",
@@ -334,7 +339,8 @@ mod tests {
     /// `run_all_resolvers` (15), `post_passes` (6), then fill-then-sort as
     /// the last two steps (LC.3a); LF.2b's external edges are the first
     /// post-pass, LE.3a's TEST cells follow the TESTS emitter, and LF.4b's
-    /// ADR decisions follow the doc linker.
+    /// ADR decisions follow the doc linker. DD.5's identity resolver is the
+    /// sixteenth and last Resolve pass.
     #[test]
     fn code_passes_order_is_head_order() {
         assert_eq!(CODE_PASSES.validate(), Ok(()));
@@ -344,7 +350,7 @@ mod tests {
         let count = |st: Stage| stages.iter().filter(|s| **s == st).count();
         assert_eq!(
             (count(Stage::Resolve), count(Stage::Post), count(Stage::Finalize)),
-            (15, 9, 2)
+            (16, 9, 2)
         );
     }
 

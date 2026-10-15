@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package shop.v1;
+
+message OrderCreated {
+  string order_id = 1;
+  int64 total_cents = 2;
+  string carrier = 3;
+}

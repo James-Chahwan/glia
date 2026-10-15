@@ -17,6 +17,12 @@
       "from": "message:proto:shop.v1.OrderCreated",
       "to": "message:proto:shop.v1.OrderCreated",
       "category": "SHARES_SCHEMA"
+    },
+    {
+      "from": "message:proto:shop.v1.OrderCreated",
+      "to": "message:proto:shop.v1.OrderCreated",
+      "category": "SAME_AS",
+      "note": "DD.5: one identity class (message_fqname/diverged: the consumer's copy drifted)"
     }
   ],
   "expect_cells": [

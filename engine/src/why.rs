@@ -28,6 +28,15 @@
 //! | `resolver`, `pass` | derived — paired by name / path / topic / convention |
 //! | `overlay`, `history` | heuristic — declared by a person or a model, or co-change in git |
 //!
+//! One emitter is tiered by its rule, not its stage: a SAME_AS edge of the
+//! identity resolver (`resolver:identity`, DD.5) takes the tier of its rule's
+//! row in `CODE_TABLES.identity_rules` (DD.3: `package_name`,
+//! `manifest_name`, `message_fqname` and `scip_symbol` fact, `contract_op`
+//! and `contract_route` derived, the vendored-copy rules heuristic), note
+//! `identity class (<rule>)`, or `identity class (<rule>, diverged)` for a
+//! `<rule>/diverged` edge whose two members' contents differ. A rule the table
+//! does not declare falls back to the stage's tier.
+//!
 //! Exceptions, each with a row `note` (the first three tried in this order,
 //! each only on a fact-stage edge): a `graph` edge
 //! bound by a name-only guess (LC.3d: `graph:refs` `global_unique` /
@@ -68,8 +77,9 @@
 use std::collections::{HashMap, HashSet};
 
 use glia_activation::algo::{Adjacency, CategorySet, Walk, reach};
+use glia_activation::profile::IdentityTier;
 use glia_code_domain::evidence::{Basis, Evidence};
-use glia_code_domain::{cell_type, edge_category};
+use glia_code_domain::{cell_type, edge_category, same_as};
 use glia_core::{CellPayload, Confidence, Edge, EdgeCategoryId, NodeId};
 use glia_graph::MergedGraph;
 
@@ -474,6 +484,32 @@ fn explain_edge(
     }
 }
 
+/// The identity resolver's EVIDENCE emitter (DD.5): the `resolver!` stamp of
+/// its `CODE_PASSES` row.
+const IDENTITY_EMITTER: &str = "resolver:identity";
+
+/// `(tier, note)` of an identity resolver edge, from its rule's
+/// `identity_rules` row (module doc); `None` for every other emitter and for
+/// a rule the table does not declare, which fall through to the stage tier.
+fn identity_tier(ev: &Evidence) -> Option<(&'static str, Option<String>)> {
+    if ev.emitter != IDENTITY_EMITTER {
+        return None;
+    }
+    let (base, diverged) = same_as::split_evidence_rule(ev.rule.as_deref()?);
+    let rule = CODE_PROFILE.tables.identity_rule(base)?;
+    let tier = match rule.tier {
+        IdentityTier::Fact => FACT,
+        IdentityTier::Derived => DERIVED,
+        IdentityTier::Heuristic => HEURISTIC,
+    };
+    let note = if diverged {
+        format!("identity class ({base}, diverged)")
+    } else {
+        format!("identity class ({base})")
+    };
+    Some((tier, Some(note)))
+}
+
 /// The plain tier of an emitter stage; `None` for a stage outside the
 /// documented vocabulary.
 fn stage_tier(stage: &str) -> Option<&'static str> {
@@ -494,6 +530,9 @@ pub(crate) fn tier_of(ev: Option<&Evidence>, e: &Edge) -> (&'static str, Option<
     let Some(ev) = ev else {
         return (DERIVED, Some("no evidence recorded".to_string()));
     };
+    if let Some(identity) = identity_tier(ev) {
+        return identity;
+    }
     let stage = ev.emitter.split(':').next().unwrap_or("");
     let Some(tier) = stage_tier(stage) else {
         return (DERIVED, Some(format!("unknown emitter stage `{stage}`")));
@@ -684,6 +723,34 @@ mod tests {
             tier(&unplaced, Confidence::Medium),
             (DERIVED, Some("no location recorded".to_string()))
         );
+    }
+
+    /// DD.5: an identity edge takes its rule's tier from `identity_rules`,
+    /// `/diverged` noted; a rule the table does not declare falls back to
+    /// the `resolver` stage (derived, no note). Location plays no part.
+    #[test]
+    fn identity_edges_tier_by_rule() {
+        let edge = Edge::new(NodeId(1), NodeId(2), edge_category::SAME_AS, Confidence::Strong);
+        let tier = |rule: &str| {
+            let ev = Evidence::emitter("resolver:identity").rule(rule);
+            tier_of(Some(&ev), &edge)
+        };
+        let noted = |t: &'static str, n: &str| (t, Some(n.to_string()));
+        assert_eq!(tier("package_name"), noted(FACT, "identity class (package_name)"));
+        assert_eq!(tier("manifest_name"), noted(FACT, "identity class (manifest_name)"));
+        assert_eq!(tier("contract_op"), noted(DERIVED, "identity class (contract_op)"));
+        assert_eq!(tier("contract_route"), noted(DERIVED, "identity class (contract_route)"));
+        assert_eq!(
+            tier("message_fqname/diverged"),
+            noted(FACT, "identity class (message_fqname, diverged)")
+        );
+        assert_eq!(tier("body_hash"), noted(HEURISTIC, "identity class (body_hash)"));
+        assert_eq!(tier("zzz"), (DERIVED, None), "an undeclared rule is the stage's tier");
+        let bare = Evidence::emitter("resolver:identity");
+        assert_eq!(tier_of(Some(&bare), &edge), (DERIVED, None));
+        // Only the identity emitter reads the table.
+        let other = Evidence::emitter("resolver:package").rule("package_name");
+        assert_eq!(tier_of(Some(&other), &edge), (DERIVED, None));
     }
 
     /// CE.1d: a SCIP edge is a located fact, noted with its indexer.
