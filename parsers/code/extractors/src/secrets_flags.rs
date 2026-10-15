@@ -20,14 +20,15 @@
 //! crosses languages, and a tree-sitter pass per language would cost more
 //! than it buys for a literal first argument.
 //!
-//! PRECISION. `.read(`, `.isEnabled(`, `.variation(` and `.getValue(` are
-//! generic method names, and a key-shape check alone does not stop
-//! `feature.isEnabled("x-y")` in unrelated code. So every needle row carries
-//! PROVIDER TOKENS, and a row fires only in a file that mentions one of them
-//! (case-insensitively) — in practice, the file that imports the SDK. The
-//! captured argument must then be exactly one string literal (a concatenation,
-//! f-string or variable is skipped), and the flavor validator in config.rs
-//! rejects interpolated secret refs and short flag keys.
+//! PRECISION. `.read(`, `.isEnabled(`, `.variation(`, `.getValue(` and
+//! Ruby's `.enabled?(` are generic method names, and a key-shape check alone
+//! does not stop `feature.isEnabled("x-y")` in unrelated code. So every
+//! needle row carries PROVIDER TOKENS, and a row fires only in a file that
+//! mentions one of them (case-insensitively) — in practice, the file that
+//! imports the SDK. The captured argument must then be exactly one string
+//! literal (or, for Flipper / FunWithFlags, one symbol / atom; a
+//! concatenation, f-string or variable is skipped), and the flavor validator
+//! in config.rs rejects interpolated secret refs and short flag keys.
 //!
 //! CJ.1c: in a Rust or Python file an occurrence whose needle starts inside
 //! a string literal or comment (a scanner's own test source, a doc line) is
@@ -67,6 +68,11 @@ enum Pick {
     /// mount is this call's first literal, the path is argument `n` of the
     /// chained `method` call. Yields `mount/path`.
     MountThen(&'static str, usize),
+    /// The n-th positional argument as a string literal or a Ruby symbol /
+    /// Elixir atom (DH.6): Flipper (`Flipper.enabled?(:search, actor)`) and
+    /// FunWithFlags (`FunWithFlags.enabled?(:"new-checkout", for: user)`) key
+    /// a flag by `:name` or `:"quoted-name"`. See [`atom_or_literal`].
+    Atom(usize),
 }
 
 struct Row {
@@ -114,10 +120,14 @@ const SECRET_ROWS: &[Row] = &[
     secret(".KVv2(", "vault", VAULT, Pick::MountThen(".Get(", 1), &[], plain),
     secret(".KVv1(", "vault", VAULT, Pick::MountThen(".Get(", 1), &[], plain),
     secret(".kv(", "vault", VAULT, Pick::MountThen(".read(", 0), &[], plain),
-    // AWS Secrets Manager — boto3 kwarg, JS v2 / v3 object literal, Go input
-    // struct (`aws.String` wrapper), C# initializer, Java v1 / v2 builders.
-    secret(".get_secret_value(", "aws_sm", AWS_SM, Pick::Named(&["SecretId"]), &[], aws_ref),
+    // AWS Secrets Manager — boto3 kwarg, aws-sdk-ruby keyword / hash rocket
+    // (`secret_id: "x"`, `:secret_id => "x"`, DH.6), JS v2 / v3 object
+    // literal, aws-sdk-php request array through `->` (`['SecretId' => 'x']`,
+    // DH.6), Go input struct (`aws.String` wrapper), C# initializer, Java
+    // v1 / v2 builders.
+    secret(".get_secret_value(", "aws_sm", AWS_SM, Pick::Named(&["SecretId", "secret_id"]), &[], aws_ref),
     secret(".getSecretValue(", "aws_sm", AWS_SM, Pick::Named(&["SecretId"]), &[], aws_ref),
+    secret("->getSecretValue(", "aws_sm", AWS_SM, Pick::Named(&["SecretId"]), &[], aws_ref),
     secret("GetSecretValueCommand(", "aws_sm", AWS_SM, Pick::Named(&["SecretId"]), &[], aws_ref),
     secret("GetSecretValueInput", "aws_sm", AWS_SM, Pick::Named(&["SecretId"]), &[], aws_ref),
     secret("GetSecretValueRequest", "aws_sm", AWS_SM, Pick::Named(&["SecretId"]), &[], aws_ref),
@@ -142,6 +152,11 @@ const OPENFEATURE: &[&str] = &["openfeature"];
 const UNLEASH: &[&str] = &["unleash"];
 const FLAGSMITH: &[&str] = &["flagsmith"];
 const SPLIT: &[&str] = &["splitio", "io.split"];
+/// Flipper's module name: `Flipper.enabled?` / `require "flipper"`. It gates
+/// the generic `.enabled?(` predicate, so ActiveSupport's and every other
+/// `enabled?` stay out of a file that never names Flipper.
+const FLIPPER: &[&str] = &["flipper"];
+const FUN_WITH_FLAGS: &[&str] = &["funwithflags"];
 
 const fn flag(needle: &'static str, provider: &'static str, gate: &'static [&'static str], pick: Pick) -> Row {
     Row { needle, provider, gate, pick, mount: &[], norm: plain }
@@ -157,6 +172,10 @@ const FLAG_ROWS: &[Row] = &[
     flag(".variation_detail(", "launchdarkly", LAUNCHDARKLY, Pick::FirstElseSecond),
     flag(".variationDetail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(0)),
     flag("VariationDetail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(0)),
+    // The PHP SDK (launchdarkly/server-sdk) calls through `->`:
+    // `$client->variation('k', $ctx, false)` (DH.6).
+    flag("->variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(0)),
+    flag("->variationDetail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(0)),
     // The LaunchDarkly Rust SDK's typed variations and their detail twins
     // (DG.6): `client.bool_variation(&ctx, "k", false)`, the key argument #1.
     flag(".bool_variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
@@ -217,6 +236,11 @@ const FLAG_ROWS: &[Row] = &[
     flag(".getTreatmentWithConfig(", "split", SPLIT, Pick::SecondElseFirst),
     flag(".get_treatment_with_config(", "split", SPLIT, Pick::SecondElseFirst),
     flag(".Treatment(", "split", SPLIT, Pick::SecondElseFirst),
+    // Flipper (Ruby) and FunWithFlags (Elixir) key a flag by a symbol / atom
+    // or a string, first (DH.6). The FunWithFlags needle names its module,
+    // so its gate is that module name.
+    flag(".enabled?(", "flipper", FLIPPER, Pick::Atom(0)),
+    flag("FunWithFlags.enabled?(", "fun_with_flags", FUN_WITH_FLAGS, Pick::Atom(0)),
 ];
 
 /// Secrets-manager references read in a code file:
@@ -375,6 +399,7 @@ fn capture(call: &str, row: &Row) -> Option<String> {
             let path = chained.get(n).and_then(|a| string_literal(a))?;
             join_mount(mount, path)
         }
+        Pick::Atom(n) => args.get(n).and_then(|a| atom_or_literal(a))?.to_string(),
     };
     let key = match named_literal_opt(row.mount, &call[1..close - 1]) {
         Some(mount) => join_mount(&mount, &raw),
@@ -478,10 +503,40 @@ fn string_literal(arg: &str) -> Option<&str> {
     (j == b.len() - 1).then(|| &t[1..j])
 }
 
+/// The key `arg` names iff it is exactly one string literal ([`string_literal`])
+/// or one Ruby symbol / Elixir atom (DH.6): `:"x"` / `:'x'` -> `x`, and a bare
+/// `:name` -> `name`, whose identifier bytes may end in one `?` / `!` as Ruby
+/// and Elixir allow. `:a.b`, `:"a" <> b`, `::Mod` and a variable name nothing;
+/// the flag validator in config.rs then judges the name like any other key.
+fn atom_or_literal(arg: &str) -> Option<&str> {
+    let t = arg.trim();
+    if let Some(lit) = string_literal(t) {
+        return Some(lit);
+    }
+    let rest = t.strip_prefix(':')?;
+    let b = rest.as_bytes();
+    match *b.first()? {
+        b'"' | b'\'' => string_literal(rest),
+        c if c.is_ascii_alphabetic() || c == b'_' => {
+            let mut end = 1;
+            while end < b.len() && (b[end].is_ascii_alphanumeric() || b[end] == b'_') {
+                end += 1;
+            }
+            if end < b.len() && matches!(b[end], b'?' | b'!') {
+                end += 1;
+            }
+            (end == b.len()).then_some(rest)
+        }
+        _ => None,
+    }
+}
+
 /// The literal bound to the first of `names` inside a call body: `name="x"`,
-/// `name = 'x'`, `name: "x"`, `"name": "x"` (a Python request dict) or
-/// `Name: aws.String("x")` (a Go wrapper call). The name must stand alone —
-/// `MySecretId=` does not match `SecretId`.
+/// `name = 'x'`, `name: "x"`, `"name": "x"` (a Python request dict),
+/// `'name' => 'x'` / `:name => "x"` (a PHP array key, a Ruby hash rocket;
+/// DH.6) or `Name: aws.String("x")` (a Go wrapper call). The name must stand
+/// alone — `MySecretId=` does not match `SecretId` — and `==` / `::` after it
+/// bind nothing.
 fn named_literal(window: &str, names: &[&str]) -> Option<String> {
     let b = window.as_bytes();
     let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
@@ -507,6 +562,9 @@ fn named_literal(window: &str, names: &[&str]) -> Option<String> {
                 i += 1;
             }
             match (b.get(i), b.get(i + 1)) {
+                // `=>` is one separator: stepping one byte would leave `>`
+                // in front of the value, which `leading_literal` refuses.
+                (Some(b'='), Some(b'>')) => i += 2,
                 (Some(b'='), Some(b'=')) | (Some(b':'), Some(b':')) => continue,
                 (Some(b'=' | b':'), _) => i += 1,
                 _ => continue,
@@ -938,6 +996,243 @@ mod tests {
             "c = ldclient.get().variation(flag_name, ctx, False)\n",
         );
         assert!(flags(src).nodes.is_empty(), "{:?}", qnames(&flags(src)));
+        // DH.6's rows run the same validator: a one- or two-char symbol, atom
+        // or PHP key is no flag.
+        let rb = "require \"flipper\"\nFlipper.enabled?(:a, user)\nFlipper.enabled?(:\"ab\")\nFlipper.enabled?(\"x\")\n";
+        assert!(flags(rb).nodes.is_empty(), "{:?}", qnames(&flags(rb)));
+        let ex = "FunWithFlags.enabled?(:a, for: user)\nFunWithFlags.enabled?(:ab)\n";
+        assert!(flags(ex).nodes.is_empty(), "{:?}", qnames(&flags(ex)));
+        let php = "<?php\nuse LaunchDarkly\\LDClient;\n$a = $client->variation('a', $ctx, false);\n$b = $client->variationDetail('ab', $ctx, false);\n";
+        assert!(flags(php).nodes.is_empty(), "{:?}", qnames(&flags(php)));
+    }
+
+    /// DH.6: Flipper keys a flag by a Ruby symbol (`:search`, `:"new-checkout"`)
+    /// or a string; the check reports its site at the `.enabled?(` needle.
+    #[test]
+    fn flipper_symbol_and_string_keys() {
+        let repo = RepoId(1);
+        let m = module_id(repo);
+        let rb = concat!(
+            "require \"flipper\"\n",
+            "\n",
+            "class Checkout\n",
+            "  def variant(user)\n",
+            "    Flipper.enabled?(:\"new-checkout\", user) ? \"new\" : \"legacy\"\n",
+            "  end\n",
+            "\n",
+            "  def search?\n",
+            "    Flipper.enabled?(:search)\n",
+            "  end\n",
+            "\n",
+            "  def beta?(flipper)\n",
+            "    flipper.enabled?(\"beta\") || flipper.enabled?('dark_mode', current_user)\n",
+            "  end\n",
+            "end\n",
+        );
+        let out = extract_feature_flags(rb, "client/checkout.rb", m, repo);
+        assert_eq!(
+            qnames(&out),
+            [
+                "config:flag:beta",
+                "config:flag:dark_mode",
+                "config:flag:new-checkout",
+                "config:flag:search",
+            ]
+        );
+        assert!(
+            out.edges
+                .iter()
+                .all(|e| e.category == edge_category::READS_CONFIG && e.from == m)
+        );
+        assert_eq!(
+            cell_of(&out, "config:flag:new-checkout").as_deref(),
+            Some(r#"{"source":"flipper","redacted":true}"#)
+        );
+        assert_eq!(out.sites.len(), 4, "{:?}", out.sites);
+        assert!(out.sites.iter().all(|(_, o)| rb[*o..].starts_with(".enabled?(")));
+        // The probe's per-file line: one flag read, nothing declared.
+        let one = "require \"flipper\"\nFlipper.enabled?(:\"new-checkout\", user)\n";
+        let secrets_out = extract_secret_refs(one, "client/checkout.rb", m, repo);
+        let flags_out = extract_feature_flags(one, "client/checkout.rb", m, repo);
+        assert_eq!(
+            marker(&[&secrets_out, &flags_out], "ruby").as_deref(),
+            Some("[secrets] refs=0 providers=0 flags=1 flag_defs=0 src=ruby")
+        );
+    }
+
+    /// DH.6: `.enabled?(` is a common Ruby predicate (ActiveSupport, every
+    /// toggle object), so it reads only in a file that names Flipper.
+    #[test]
+    fn flipper_needs_its_gate() {
+        let rb = "class Feature\n  def on?\n    x.enabled?(:new_checkout) && settings.enabled?(\"beta-ui\")\n  end\nend\n";
+        assert!(flags(rb).nodes.is_empty(), "{:?}", qnames(&flags(rb)));
+        // An actor argument (`Flipper[:search].enabled?(user)`) is no key.
+        let actor = "require 'flipper'\nFlipper[:search].enabled?(current_user)\n";
+        assert!(flags(actor).nodes.is_empty(), "{:?}", qnames(&flags(actor)));
+    }
+
+    /// DH.6: FunWithFlags keys a flag by an Elixir atom; the needle carries the
+    /// module, so the gate is the module name itself.
+    #[test]
+    fn fun_with_flags_atom_key() {
+        let repo = RepoId(1);
+        let m = module_id(repo);
+        let ex = concat!(
+            "defmodule Checkout do\n",
+            "  def variant(user) do\n",
+            "    if FunWithFlags.enabled?(:\"new-checkout\", for: user), do: \"new\", else: \"legacy\"\n",
+            "  end\n",
+            "\n",
+            "  def search?, do: FunWithFlags.enabled?(:fast_search)\n",
+            "end\n",
+        );
+        let out = extract_feature_flags(ex, "client/lib/checkout.ex", m, repo);
+        assert_eq!(qnames(&out), ["config:flag:fast_search", "config:flag:new-checkout"]);
+        assert_eq!(
+            cell_of(&out, "config:flag:new-checkout").as_deref(),
+            Some(r#"{"source":"fun_with_flags","redacted":true}"#)
+        );
+        assert_eq!(out.sites.len(), 2, "{:?}", out.sites);
+        assert!(out.sites.iter().all(|(_, o)| ex[*o..].starts_with("FunWithFlags.enabled?(")));
+        // An atom must be the whole argument: a call, a concatenation or a
+        // variable reads nothing.
+        let whole = concat!(
+            "FunWithFlags.enabled?(:checkout.name)\n",
+            "FunWithFlags.enabled?(:\"new\" <> suffix)\n",
+            "FunWithFlags.enabled?(flag_name, for: user)\n",
+            "FunWithFlags.enabled?(::Checkout)\n",
+        );
+        assert!(flags(whole).nodes.is_empty(), "{:?}", qnames(&flags(whole)));
+    }
+
+    /// DH.6: the LaunchDarkly PHP SDK calls through `->`:
+    /// `$client->variation('key', $ctx, false)` and `->variationDetail(`.
+    #[test]
+    fn php_launchdarkly_variation() {
+        let php = concat!(
+            "<?php\n",
+            "\n",
+            "use LaunchDarkly\\LDClient;\n",
+            "use LaunchDarkly\\LDContext;\n",
+            "\n",
+            "function variant(LDClient $client, string $userKey): string\n",
+            "{\n",
+            "    return $client->variation('new-checkout', LDContext::create($userKey), false) ? 'new' : 'legacy';\n",
+            "}\n",
+            "\n",
+            "function detail(LDClient $client, LDContext $ctx)\n",
+            "{\n",
+            "    return $client->variationDetail(\"beta-search\", $ctx, false);\n",
+            "}\n",
+        );
+        let out = flags(php);
+        assert_eq!(qnames(&out), ["config:flag:beta-search", "config:flag:new-checkout"]);
+        assert_eq!(
+            cell_of(&out, "config:flag:new-checkout").as_deref(),
+            Some(r#"{"source":"launchdarkly","redacted":true}"#)
+        );
+        assert_eq!(out.sites.len(), 2, "{:?}", out.sites);
+        assert!(out.sites.iter().all(|(_, o)| php[*o..].starts_with("->variation")));
+        // No LaunchDarkly token: some other `->variation(`.
+        assert!(flags("<?php\n$v = $product->variation('blue-large');\n").nodes.is_empty());
+        // A non-literal key reads nothing.
+        let var = "<?php\nuse LaunchDarkly\\LDClient;\n$on = $client->variation($key, $ctx, false);\n";
+        assert!(flags(var).nodes.is_empty(), "{:?}", qnames(&flags(var)));
+    }
+
+    /// DH.6: aws-sdk-ruby names the secret with the `secret_id:` keyword (or a
+    /// `:secret_id =>` hash rocket), not boto3's `SecretId`.
+    #[test]
+    fn ruby_aws_secret_id_kwarg() {
+        let repo = RepoId(1);
+        let m = module_id(repo);
+        let rb = concat!(
+            "require \"aws-sdk-secretsmanager\"\n",
+            "\n",
+            "def db_password\n",
+            "  client = Aws::SecretsManager::Client.new\n",
+            "  client.get_secret_value(secret_id: \"prod/db-password\").secret_string\n",
+            "end\n",
+            "\n",
+            "def api_key(client)\n",
+            "  client.get_secret_value(:secret_id => 'arn:aws:secretsmanager:eu-west-1:123:secret:prod/api-key', version_stage: \"AWSCURRENT\")\n",
+            "end\n",
+        );
+        let out = extract_secret_refs(rb, "secrets.rb", m, repo);
+        assert_eq!(
+            qnames(&out),
+            ["config:secret:aws_sm/prod/api-key", "config:secret:aws_sm/prod/db-password"]
+        );
+        assert!(
+            out.edges
+                .iter()
+                .all(|e| e.category == edge_category::READS_CONFIG && e.from == m)
+        );
+        assert!(out.sites.is_empty());
+        assert_eq!(
+            cell_of(&out, "config:secret:aws_sm/prod/db-password").as_deref(),
+            Some(r#"{"source":"aws_sm","redacted":true}"#)
+        );
+        let one = "require \"aws-sdk-secretsmanager\"\nclient.get_secret_value(secret_id: \"prod/db-password\")\n";
+        let secrets_out = extract_secret_refs(one, "secrets.rb", m, repo);
+        let flags_out = extract_feature_flags(one, "secrets.rb", m, repo);
+        assert_eq!(
+            marker(&[&secrets_out, &flags_out], "ruby").as_deref(),
+            Some("[secrets] refs=1 providers=1 flags=0 flag_defs=0 src=ruby")
+        );
+        // An interpolated or variable id reads nothing.
+        let dynamic = concat!(
+            "require \"aws-sdk-secretsmanager\"\n",
+            "client.get_secret_value(secret_id: \"#{env}/db\")\n",
+            "client.get_secret_value(secret_id: name)\n",
+        );
+        assert!(secrets(dynamic).nodes.is_empty(), "{:?}", qnames(&secrets(dynamic)));
+    }
+
+    /// DH.6: aws-sdk-php takes a request array, `['SecretId' => 'x']`, through
+    /// a `->` receiver.
+    #[test]
+    fn php_aws_secret_id_array_key() {
+        let php = concat!(
+            "<?php\n",
+            "\n",
+            "use Aws\\SecretsManager\\SecretsManagerClient;\n",
+            "\n",
+            "$client = new SecretsManagerClient(['region' => 'us-east-1', 'version' => 'latest']);\n",
+            "$result = $client->getSecretValue(['SecretId' => 'prod/db-password']);\n",
+            "$other = $client->getSecretValue([\n    \"VersionStage\" => \"AWSCURRENT\",\n    \"SecretId\" => \"prod/stripe\",\n]);\n",
+        );
+        let out = secrets(php);
+        assert_eq!(
+            qnames(&out),
+            ["config:secret:aws_sm/prod/db-password", "config:secret:aws_sm/prod/stripe"]
+        );
+        assert!(out.edges.iter().all(|e| e.category == edge_category::READS_CONFIG));
+        // A concatenated id is not a whole literal.
+        let cat = "<?php\nuse Aws\\SecretsManager\\SecretsManagerClient;\n$r = $client->getSecretValue(['SecretId' => 'prod/' . $name]);\n";
+        assert!(secrets(cat).nodes.is_empty(), "{:?}", qnames(&secrets(cat)));
+        // No Secrets Manager token: some other `->getSecretValue(`.
+        assert!(secrets("<?php\n$v = $vault->getSecretValue(['SecretId' => 'prod/x']);\n").nodes.is_empty());
+    }
+
+    /// DH.6: a `=>` separator (PHP array key, Ruby hash rocket) is stepped
+    /// over whole; `==` / `::` stay refused and the value must still be one
+    /// whole literal.
+    #[test]
+    fn named_literal_steps_over_hash_rocket() {
+        assert_eq!(named_literal("['SecretId' => 'x/y']", &["SecretId"]).as_deref(), Some("x/y"));
+        assert_eq!(named_literal(":secret_id => \"x/y\"", &["secret_id"]).as_deref(), Some("x/y"));
+        assert_eq!(named_literal("\"secret_id\"=>\"x/y\", a: 1", &["secret_id"]).as_deref(), Some("x/y"));
+        // The pre-DH.6 separators still read.
+        assert_eq!(named_literal("SecretId=\"x/y\"", &["SecretId"]).as_deref(), Some("x/y"));
+        assert_eq!(named_literal("{ SecretId: 'x/y' }", &["SecretId"]).as_deref(), Some("x/y"));
+        assert_eq!(named_literal("SecretId = \"x/y\"", &["SecretId"]).as_deref(), Some("x/y"));
+        // Refused: comparison, path, a non-literal or partial value after `=>`.
+        assert_eq!(named_literal("SecretId == 'x/y'", &["SecretId"]), None);
+        assert_eq!(named_literal("SecretId::Value", &["SecretId"]), None);
+        assert_eq!(named_literal("'SecretId' => $id", &["SecretId"]), None);
+        assert_eq!(named_literal("'SecretId' => 'x/' . $y", &["SecretId"]), None);
+        assert_eq!(named_literal("'MySecretId' => 'x/y'", &["SecretId"]), None);
     }
 
     #[test]
