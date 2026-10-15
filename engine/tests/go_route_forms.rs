@@ -155,3 +155,97 @@ fn every_go_route_is_positioned_at_its_registration() {
         );
     }
 }
+
+/// DF.7: the substrate-gap fixture `go-route-const-prefix`, written into a
+/// tempdir with its directory layout.
+fn build_const_prefix() -> (tempfile::TempDir, MergedGraph) {
+    const FILES: [(&str, &str); 4] = [
+        (
+            "go.mod",
+            include_str!("../../bench/substrate-gap/fixtures/go-route-const-prefix/go.mod"),
+        ),
+        (
+            "api/consts.go",
+            include_str!("../../bench/substrate-gap/fixtures/go-route-const-prefix/api/consts.go"),
+        ),
+        (
+            "api/routes.go",
+            include_str!("../../bench/substrate-gap/fixtures/go-route-const-prefix/api/routes.go"),
+        ),
+        (
+            "paths/paths.go",
+            include_str!("../../bench/substrate-gap/fixtures/go-route-const-prefix/paths/paths.go"),
+        ),
+    ];
+    let td = tempfile::tempdir().expect("tempdir");
+    for (rel, text) in FILES {
+        let path = td.path().join(rel);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).expect("mkdir");
+        }
+        std::fs::write(&path, text).expect("write fixture file");
+    }
+    let root = td.path().to_string_lossy().into_owned();
+    let merged = generate_one(&root).expect("generate_one").merged;
+    (td, merged)
+}
+
+/// Every ROUTE qname in the graph, sorted.
+fn route_qnames(m: &MergedGraph) -> Vec<String> {
+    let mut out: Vec<String> = m
+        .graphs
+        .iter()
+        .flat_map(|g| {
+            g.nodes.iter().filter_map(move |n| {
+                (g.nav.kind_by_id.get(&n.id) == Some(&glia_code_domain::node_kind::ROUTE))
+                    .then(|| g.nav.qname_by_id.get(&n.id).cloned())
+                    .flatten()
+            })
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// DF.7 acceptance: a group prefix held in a constant of the same file
+/// (`r.Group(apiPrefix)`, `r.Group(AdminPrefix + "/x")`), another file of the
+/// package (`r.Group(OtherFilePrefix)`), an imported package
+/// (`r.Group(paths.Shared)`) and a constant inside a parameter-mounted group
+/// (`Mount(r.Group("/m"))`, `g.Group(apiPrefix)`) is the route's prefix.
+/// Before DF.7 every one registered at the root (`GET /items`, `GET /thing`,
+/// `GET /ping`, `GET /stats`, `GET /deep`).
+#[test]
+fn const_prefixes_end_to_end() {
+    let (_td, m) = build_const_prefix();
+
+    assert_eq!(
+        route_qnames(&m),
+        vec![
+            "GET /admin/x/stats",
+            "GET /admin/x/users",
+            "GET /api/v1/items",
+            "GET /m/api/v1/deep",
+            "GET /other/thing",
+            "GET /shared/ping",
+        ]
+    );
+    for (route_q, handler) in [
+        ("GET /api/v1/items", "listItems"),
+        ("GET /admin/x/stats", "stats"),
+        ("GET /other/thing", "thing"),
+        ("GET /shared/ping", "ping"),
+        ("GET /m/api/v1/deep", "deep"),
+    ] {
+        assert_eq!(handlers(&m, route(&m, route_q)), vec![handler.to_string()], "{route_q}");
+    }
+    for q in ["GET /items", "GET /thing", "GET /ping", "GET /stats", "GET /deep"] {
+        assert!(m.node_id_by_qname(q).is_none(), "{q} exists");
+    }
+    // Each final ROUTE keeps the POSITION of its registration.
+    for q in ["GET /other/thing", "GET /shared/ping", "GET /m/api/v1/deep"] {
+        let cells = cells_of(&m, route(&m, q), cell_type::POSITION);
+        assert_eq!(cells.len(), 1, "{q}: {cells:?}");
+        assert!(cells[0].contains(r#""file":"api/routes.go""#), "{q}: {cells:?}");
+    }
+}

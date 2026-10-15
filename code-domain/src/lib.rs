@@ -1495,6 +1495,13 @@ pub enum NavFact {
     /// the Go build to resolve aliases in method signatures before the
     /// implicit-IMPLEMENTS signature compare.
     TypeAlias { name: String, shape: String },
+    /// Go (DF.7): this file MODULE declares the package-level string constant
+    /// `const <name> [string] = <value>`, its value a string literal or a `+`
+    /// of literals and constants declared earlier in the same file, folded.
+    /// Read by the Go mount pass (`graph/src/go_mounts.rs`) to substitute the
+    /// [`endpoint::const_placeholder`]s a router-group prefix names: a
+    /// constant of another file of the package, or of an imported package.
+    GoStringConst { name: String, value: String },
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,
@@ -1503,6 +1510,8 @@ pub enum NavFact {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Mount {
     /// A literal prefix known in the file (`/api/v2`; `""` = a router root).
+    /// DF.7: it may hold [`endpoint::const_placeholder`]s (a constant the file
+    /// names but does not declare), which the build's mount pass substitutes.
     Const(String),
     /// Parameter `index` of the enclosing fn `fn_qname` (receiver excluded),
     /// then `suffix`.
@@ -2016,19 +2025,28 @@ pub mod endpoint {
     /// returned, so the HTTP resolver never sees one. A token never holds a
     /// `>`: a Go qname is identifiers and directory names.
     ///
-    /// A Const mount is never provisional: it returns the plain ROUTE qname,
+    /// A Const mount is not provisional: it returns the plain ROUTE qname,
     /// `route_qname(method, join_path(prefix, local_path))`, byte for byte
-    /// what the Go parser builds for a group whose prefix it reads.
+    /// what the Go parser builds for a group whose prefix it reads. DF.7: a
+    /// Const prefix holding a [`const_placeholder`] (a constant of another
+    /// file or package) is provisional, token `const:<prefix>`, `<path>` the
+    /// canonical local path; the mount pass substitutes the constant. A
+    /// placeholder holds no `>`, so the token still ends at the first one.
     ///
     /// ```text
     /// Param { Register, 0, "" },    "/u"  -> "GET <mount:param:api::routes::Register#0>/u"
     /// Param { Register, 0, "/me" }, "p"   -> "GET <mount:param:api::routes::Register#0>/me/p"
     /// Field { api::Server, admin, "" }, "/x" -> "GET <mount:field:api::Server.admin>/x"
     /// Const("/api/v2"),             "users" -> "GET /api/v2/users"
+    /// Const("${const:api.P}/x"),    "/s"  -> "GET <mount:const:${const:api.P}/x>/s"
     /// ```
     pub fn mount_route_qname(method: &str, mount: &super::Mount, local_path: &str) -> String {
         use super::Mount;
         let (token, suffix) = match mount {
+            Mount::Const(prefix) if has_const_placeholder(prefix) => {
+                let path = canonical_http_path(local_path);
+                return format!("{method} {MOUNT_OPEN}const:{prefix}>{path}");
+            }
             Mount::Const(prefix) => return route_qname(method, &join_path(prefix, local_path)),
             Mount::Param {
                 fn_qname,
@@ -2049,9 +2067,12 @@ pub mod endpoint {
     /// `(method, mount, path)`. The mount's suffix was folded into the path
     /// when the qname was built, so the mount comes back with an empty suffix
     /// and `path` holds suffix and local path together (one route, however it
-    /// was reached). `None` for anything else, a canonical `<METHOD> <path>`
-    /// ROUTE qname included. The caller strips an LB.4a owner first with
-    /// [`split_owner`]: this reads the whole tail as the path.
+    /// was reached). DF.7: a `const:` token comes back as the `Const` prefix
+    /// it holds, placeholders included (a `const:` token without one is not
+    /// a provisional the builder mints: `None`). `None` for anything else, a
+    /// canonical `<METHOD> <path>` ROUTE qname included. The caller strips an
+    /// LB.4a owner first with [`split_owner`]: this reads the whole tail as
+    /// the path.
     pub fn parse_mount_route_qname(q: &str) -> Option<(String, super::Mount, String)> {
         use super::Mount;
         let (method, rest) = q.split_once(' ')?;
@@ -2059,7 +2080,13 @@ pub mod endpoint {
             return None;
         }
         let (token, path) = rest.strip_prefix(MOUNT_OPEN)?.split_once('>')?;
-        let mount = if let Some(p) = token.strip_prefix("param:") {
+        let mount = if let Some(prefix) = token.strip_prefix("const:") {
+            // DF.7: only a prefix the parser could not fold is provisional.
+            if !has_const_placeholder(prefix) {
+                return None;
+            }
+            Mount::Const(prefix.to_string())
+        } else if let Some(p) = token.strip_prefix("param:") {
             let (fn_qname, index) = p.rsplit_once('#')?;
             if fn_qname.is_empty() || index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit())
             {
@@ -2083,6 +2110,45 @@ pub mod endpoint {
             }
         };
         Some((method.to_string(), mount, path.to_string()))
+    }
+
+    /// Opens a [`const_placeholder`].
+    const CONST_OPEN: &str = "${const:";
+
+    /// DF.7: the text a Go router-group prefix holds for a string constant
+    /// the file names but does not declare: `${const:<dir>.<name>}`, `dir`
+    /// the repo-local package directory qname that declares it (`api`,
+    /// `internal::paths`; `""` for the repo-root package, LA.13b) and `name`
+    /// the constant. No `>` (a Go qname is identifiers and directory names),
+    /// so it may sit inside a `<mount:..>` token; the build's mount pass
+    /// substitutes it from the package's [`super::NavFact::GoStringConst`]s.
+    ///
+    /// ```text
+    /// const_placeholder("api", "OtherFilePrefix") == "${const:api.OtherFilePrefix}"
+    /// ```
+    pub fn const_placeholder(dir: &str, name: &str) -> String {
+        format!("{CONST_OPEN}{dir}.{name}}}")
+    }
+
+    /// DF.7: whether `s` holds a [`const_placeholder`].
+    pub fn has_const_placeholder(s: &str) -> bool {
+        next_const_placeholder(s).is_some()
+    }
+
+    /// DF.7: the first [`const_placeholder`] in `s`: `(start, end, dir,
+    /// name)`, `s[start..end]` the whole placeholder. The name is the text
+    /// after the LAST `.` (a Go identifier holds none; a directory may). An
+    /// opener with no closing `}`, or with an empty name, is no placeholder,
+    /// and neither is anything after it.
+    pub fn next_const_placeholder(s: &str) -> Option<(usize, usize, &str, &str)> {
+        let start = s.find(CONST_OPEN)?;
+        let body_at = start + CONST_OPEN.len();
+        let close = s[body_at..].find('}')?;
+        let (dir, name) = s[body_at..body_at + close].rsplit_once('.')?;
+        if name.is_empty() {
+            return None;
+        }
+        Some((start, body_at + close + 1, dir, name))
     }
 
     /// ENDPOINT qname `endpoint:<METHOD>:<path>`, with the path canonical —
@@ -4011,6 +4077,74 @@ mod tests {
         assert_eq!(
             parse_mount_route_qname(base),
             Some(("GET".into(), param, "/users".into()))
+        );
+    }
+
+    /// DF.7: a Const prefix holding a constant placeholder is a provisional
+    /// `const:` mount, the canonical local path after the token; it reads back
+    /// as that Const prefix and that path. A folded Const stays the plain
+    /// ROUTE qname.
+    #[test]
+    fn const_placeholder_mount_is_provisional() {
+        use endpoint::{
+            const_placeholder, has_const_placeholder, mount_route_qname,
+            next_const_placeholder, parse_mount_route_qname, split_owner, with_owner,
+        };
+        let other = const_placeholder("api", "OtherFilePrefix");
+        assert_eq!(other, "${const:api.OtherFilePrefix}");
+        assert!(has_const_placeholder(&other));
+        assert_eq!(
+            next_const_placeholder(&format!("/v{other}/x")),
+            Some((2, 2 + other.len(), "api", "OtherFilePrefix"))
+        );
+        assert_eq!(
+            next_const_placeholder("${const:v1.2::paths.Shared}"),
+            Some((0, 27, "v1.2::paths", "Shared"))
+        );
+        assert_eq!(
+            next_const_placeholder(&const_placeholder("", "Root")),
+            Some((0, 14, "", "Root"))
+        );
+        for s in ["/api/v1", "${base}/x", "${const:api.X", "${const:X}", "${const:api.}"] {
+            assert!(!has_const_placeholder(s), "{s}");
+        }
+
+        let mount = Mount::Const(other.clone());
+        let q = mount_route_qname("GET", &mount, "thing");
+        assert_eq!(q, "GET <mount:const:${const:api.OtherFilePrefix}>/thing");
+        assert_eq!(
+            parse_mount_route_qname(&q),
+            Some(("GET".into(), mount, "/thing".into()))
+        );
+
+        let joined = Mount::Const(format!("{}/x", const_placeholder("api", "AdminPrefix")));
+        let q = with_owner(&mount_route_qname("POST", &joined, "/stats"), "shop");
+        assert_eq!(q, "POST <mount:const:${const:api.AdminPrefix}/x>/stats @shop");
+        let (base, owner) = split_owner(&q);
+        assert_eq!(owner, Some("shop"));
+        assert_eq!(
+            parse_mount_route_qname(base),
+            Some(("POST".into(), joined, "/stats".into()))
+        );
+
+        // A group's index route: the local path stays `/` behind the token.
+        let q = mount_route_qname("GET", &Mount::Const(const_placeholder("paths", "Shared")), "/");
+        assert_eq!(q, "GET <mount:const:${const:paths.Shared}>/");
+
+        // A Param mount carries the placeholder in its suffix, folded into the
+        // path; the canonical form keeps a `${`-led path as it is.
+        let deep = Mount::Param {
+            fn_qname: "api::routes::Mount".into(),
+            index: 0,
+            suffix: const_placeholder("api", "P"),
+        };
+        assert_eq!(
+            mount_route_qname("GET", &deep, "/deep"),
+            "GET <mount:param:api::routes::Mount#0>${const:api.P}/deep"
+        );
+        assert_eq!(
+            mount_route_qname("GET", &Mount::Const("/api/v1".into()), "/items"),
+            "GET /api/v1/items"
         );
     }
 

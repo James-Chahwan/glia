@@ -27,7 +27,7 @@ pub use glia_code_domain::{
 use glia_code_domain::data_entity;
 use glia_code_domain::di_stats::{self, DiShape};
 use glia_code_domain::endpoint::{
-    ClientEndpoint, HitExtras, client_url_split, join_path, mount_route_qname,
+    ClientEndpoint, HitExtras, client_url_split, const_placeholder, join_path, mount_route_qname,
     push_client_endpoint_with,
 };
 use glia_code_domain::{Mount, NavFact};
@@ -117,19 +117,30 @@ pub fn parse_file_with_modules(
         }
     }
 
+    // DF.7: the imports, then the file's string constants, before the
+    // field-group scan, which reads a `.Group(paths.Shared)` prefix through
+    // both. Go requires imports before every other declaration, so taking
+    // them here, ahead of the second pass, changes no order the rest sees.
+    let mut cursor = root.walk();
+    for child in root.named_children(&mut cursor) {
+        if child.kind() == "import_declaration" {
+            collect_imports(child, src, package_qname, go, &mut acc);
+        }
+    }
+    acc.file_consts = FileConsts::scan(root, src, module_id, &mut acc.nav);
+
     // CB.11: the router groups this file assigns to struct fields, read before
     // any route walk so a registration on `s.v1` finds the group whatever
     // function assigned it.
-    acc.field_prefixes = scan_field_prefixes(root, src, package_qname);
+    acc.field_prefixes =
+        scan_field_prefixes(root, src, package_qname, &acc.file_consts, &acc.import_dirs);
 
     // Second pass: everything else.
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
         match child.kind() {
-            "package_clause" => { /* already known; nothing to emit */ }
-            "import_declaration" => {
-                collect_imports(child, src, package_qname, go, &mut acc);
-            }
+            // DF.7: the imports were collected above.
+            "package_clause" | "import_declaration" => {}
             "function_declaration" => {
                 visit_function(
                     child,
@@ -205,7 +216,7 @@ pub fn parse_file_with_modules(
     let mounts = &acc.mounts;
     if forms.registrations > 0 || mounts.args + mounts.assigns > 0 {
         eprintln!(
-            "[go-routes] registrations={} positioned={} forms(handle={} any={} match={} pattern={} field={}) mounts(param={} field={} args={} assigns={}) in {file_rel_path} nodes={} paths={}",
+            "[go-routes] registrations={} positioned={} forms(handle={} any={} match={} pattern={} field={}) mounts(param={} field={} args={} assigns={}) consts={} in {file_rel_path} nodes={} paths={}",
             forms.registrations,
             forms.positioned,
             forms.handle,
@@ -217,6 +228,7 @@ pub fn parse_file_with_modules(
             mounts.field,
             mounts.args,
             mounts.assigns,
+            acc.file_consts.values.len(),
             acc.route_qnames.len(),
             acc.route_paths.len()
         );
@@ -360,6 +372,10 @@ struct Acc {
     /// CB.23: the router-mount counters of the `[go-routes]` marker's
     /// `mounts(..)`.
     mounts: MountCounts,
+    /// DF.7: this file's package-level string constants and var names
+    /// ([`FileConsts::scan`]), read before any route walk; `collect_routes_in`
+    /// lends it to the walk. Its size is the `[go-routes]` marker's `consts=`.
+    file_consts: FileConsts,
     /// A13.12: this file's GORM evidence and the `[orm-gorm]` marker counters.
     gorm: GormFile,
 }
@@ -3335,8 +3351,16 @@ impl FieldPrefixes {
 /// scan, so the functions may come in any order), a group-typed parameter
 /// (CI.5: its `Mount::Param`, by the route walk's own rule,
 /// [`seed_param_mounts`]) or anything else (the engine itself, `""`). A file
-/// that never says `Group` holds no field group, and is skipped.
-fn scan_field_prefixes(root: TsNode, src: &[u8], package_qname: &str) -> FieldPrefixes {
+/// that never says `Group` holds no field group, and is skipped. DF.7: a
+/// `.Group(..)` argument is read through [`PrefixScope::prefix_text`], with
+/// the file's constants and in-repo imports, as the route walk reads it.
+fn scan_field_prefixes(
+    root: TsNode,
+    src: &[u8],
+    package_qname: &str,
+    consts: &FileConsts,
+    imports: &BTreeMap<String, String>,
+) -> FieldPrefixes {
     let mut out = FieldPrefixes {
         declared: declared_router_fields(root, src),
         ..FieldPrefixes::default()
@@ -3370,7 +3394,12 @@ fn scan_field_prefixes(root: TsNode, src: &[u8], package_qname: &str) -> FieldPr
                 (name, path)
             })
             .collect();
-        scan_field_groups(body, src, &types, &mut groups, &mut facts);
+        let prefix = PrefixScope::new(consts, imports, package_qname, decl, body);
+        let read = GroupRead {
+            types: &types,
+            prefix: &prefix,
+        };
+        scan_field_groups(body, src, &read, &mut groups, &mut facts);
         out.scopes.insert(body.start_byte(), types);
     }
     let mut memo = BTreeMap::new();
@@ -3443,6 +3472,13 @@ fn declared_router_fields(root: TsNode, src: &[u8]) -> BTreeMap<(String, String)
     out
 }
 
+/// DF.7: how the field-group scan reads one callable: its variable -> struct
+/// type map ([`scope_types`]) and its `.Group(..)` argument reader.
+struct GroupRead<'r, 'a> {
+    types: &'r BTreeMap<String, String>,
+    prefix: &'r PrefixScope<'a>,
+}
+
 /// CB.11: one body's field-group facts, in source order. Local groups
 /// (`g := r.Group("/x")`) follow `record_group_assignment`'s rule, so a
 /// field assigned `g` holds the prefix the route walk gives `g`. Func
@@ -3450,7 +3486,7 @@ fn declared_router_fields(root: TsNode, src: &[u8]) -> BTreeMap<(String, String)
 fn scan_field_groups(
     n: TsNode,
     src: &[u8],
-    types: &BTreeMap<String, String>,
+    read: &GroupRead,
     groups: &mut HashMap<String, GroupPath>,
     facts: &mut BTreeMap<(String, String), Vec<GroupPath>>,
 ) {
@@ -3461,7 +3497,7 @@ fn scan_field_groups(
             let values = named_kids(n.child_by_field_name("right"));
             if let ([name], [value]) = (names.as_slice(), values.as_slice())
                 && name.kind() == "identifier"
-                && let Some(group) = group_call_path(*value, src, types, groups)
+                && let Some(group) = group_call_path(*value, src, read, groups)
             {
                 groups.insert(text_of(*name, src).to_string(), group);
             }
@@ -3474,8 +3510,8 @@ fn scan_field_groups(
             let values = named_kids(n.child_by_field_name("right"));
             if targets.len() == values.len() {
                 for (target, value) in targets.iter().zip(&values) {
-                    if let Some(key) = field_key(*target, src, types)
-                        && let Some(group) = group_value(*value, src, types, groups)
+                    if let Some(key) = field_key(*target, src, read.types)
+                        && let Some(group) = group_value(*value, src, read, groups)
                     {
                         facts.entry(key).or_default().push(group);
                     }
@@ -3499,7 +3535,7 @@ fn scan_field_groups(
                         .child_by_field_name("value")
                         .and_then(|v| v.named_child(0));
                     if let (Some(key), Some(value)) = (key, value)
-                        && let Some(group) = group_value(value, src, types, groups)
+                        && let Some(group) = group_value(value, src, read, groups)
                     {
                         let key = (owner.clone(), text_of(key, src).to_string());
                         facts.entry(key).or_default().push(group);
@@ -3511,7 +3547,7 @@ fn scan_field_groups(
     }
     let mut cursor = n.walk();
     for child in n.named_children(&mut cursor) {
-        scan_field_groups(child, src, types, groups, facts);
+        scan_field_groups(child, src, read, groups, facts);
     }
 }
 
@@ -3522,23 +3558,25 @@ fn scan_field_groups(
 fn group_value(
     value: TsNode,
     src: &[u8],
-    types: &BTreeMap<String, String>,
+    read: &GroupRead,
     groups: &HashMap<String, GroupPath>,
 ) -> Option<GroupPath> {
     match value.kind() {
         "identifier" => groups.get(text_of(value, src)).cloned(),
         _ if is_router_ctor(value, src) => Some(GroupPath::default()),
-        _ => group_call_path(value, src, types, groups),
+        _ => group_call_path(value, src, read, groups),
     }
 }
 
 /// CB.11: `<recv>.Group("<lit>")` as a [`GroupPath`]: `<recv>` a local group
 /// var (CI.5: or a group-typed parameter) continues that group, `x.f` with a
 /// typed `x` starts from field `(type of x, f)`, anything else from the root.
+/// DF.7: `<lit>` may be a prefix held in a constant
+/// ([`PrefixScope::prefix_text`]).
 fn group_call_path(
     call: TsNode,
     src: &[u8],
-    types: &BTreeMap<String, String>,
+    read: &GroupRead,
     groups: &HashMap<String, GroupPath>,
 ) -> Option<GroupPath> {
     if call.kind() != "call_expression" {
@@ -3551,12 +3589,13 @@ fn group_call_path(
         return None;
     }
     let args = call.child_by_field_name("arguments")?;
-    let lit = string_literal_text(args.named_child(0)?, src)?;
+    // DF.7: a literal, or a prefix held in a constant.
+    let lit = read.prefix.prefix_text(args.named_child(0)?, src)?;
     let recv = func.child_by_field_name("operand")?;
     let base = match recv.kind() {
         "identifier" => groups.get(text_of(recv, src)).cloned().unwrap_or_default(),
         _ => GroupPath {
-            field: field_key(recv, src, types),
+            field: field_key(recv, src, read.types),
             ..GroupPath::default()
         },
     };
@@ -3920,6 +3959,272 @@ fn mount_then(mount: Mount, lit: &str) -> Mount {
     }
 }
 
+// ============================================================================
+// Route-group prefixes held in a constant (DF.7)
+// ============================================================================
+//
+// `r.Group(apiPrefix)`, `r.Group(AdminPrefix + "/x")`, `r.Group(paths.Shared)`:
+// a prefix held in a package-level string constant. One of this file folds
+// here; one the file names but does not declare (another file of the package,
+// or an imported in-repo package) becomes a `${const:<dir>.<Name>}`
+// placeholder (`endpoint::const_placeholder`), and the build's mount pass
+// (`graph/src/go_mounts.rs`) substitutes it from the package's
+// `NavFact::GoStringConst`s. A var is never read: it is mutable.
+
+/// DF.7: the package-level string constants one Go file declares and the
+/// names of its package-level vars. Built by [`FileConsts::scan`] before any
+/// route walk; only looked up, never iterated into output.
+#[derive(Debug, Default)]
+struct FileConsts {
+    /// Constant name -> its value, a string literal or a `+` of literals and
+    /// constants declared earlier in the file, folded.
+    values: BTreeMap<String, String>,
+    /// Package-level var names: a `.Group(..)` argument naming one is never a
+    /// constant of another file.
+    vars: BTreeSet<String>,
+}
+
+impl FileConsts {
+    /// Read the top-level `const` and `var` declarations of the file at
+    /// `root`, recording each folded constant as a `NavFact::GoStringConst`
+    /// on the file MODULE `module_id`, in source order. A constant whose
+    /// value does not fold (iota, a number, a call, a constant of another
+    /// file) is left out; so is a name declared twice (the first wins).
+    fn scan(root: TsNode, src: &[u8], module_id: NodeId, nav: &mut CodeNav) -> FileConsts {
+        let mut out = FileConsts::default();
+        for decl in named_kids(Some(root)) {
+            match decl.kind() {
+                "const_declaration" => out.scan_consts(decl, src, module_id, nav),
+                "var_declaration" => out.scan_vars(decl, src),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// One `const` declaration, grouped or not. A spec with no value repeats
+    /// the previous spec's expression list (Go's implicit repetition); names
+    /// pair with values by position.
+    fn scan_consts(&mut self, decl: TsNode, src: &[u8], module_id: NodeId, nav: &mut CodeNav) {
+        let mut previous: Vec<TsNode> = Vec::new();
+        for spec in named_kids(Some(decl)) {
+            if spec.kind() != "const_spec" {
+                continue;
+            }
+            if let Some(value) = spec.child_by_field_name("value") {
+                previous = named_kids(Some(value));
+            }
+            // The `name` field also covers the `,` between names.
+            let mut c = spec.walk();
+            let names: Vec<TsNode> = spec
+                .children_by_field_name("name", &mut c)
+                .filter(|n| n.kind() == "identifier")
+                .collect();
+            if names.len() != previous.len() {
+                continue;
+            }
+            for (name, value) in names.iter().zip(&previous) {
+                let name = text_of(*name, src);
+                if name == "_" || self.values.contains_key(name) {
+                    continue;
+                }
+                if let Some(value) = self.fold(*value, src) {
+                    nav.record_fact(
+                        module_id,
+                        NavFact::GoStringConst {
+                            name: name.to_string(),
+                            value: value.clone(),
+                        },
+                    );
+                    self.values.insert(name.to_string(), value);
+                }
+            }
+        }
+    }
+
+    /// One `var` declaration's names, grouped or not.
+    fn scan_vars(&mut self, decl: TsNode, src: &[u8]) {
+        for child in named_kids(Some(decl)) {
+            let specs = match child.kind() {
+                "var_spec" => vec![child],
+                "var_spec_list" => named_kids(Some(child)),
+                _ => continue,
+            };
+            for spec in specs.into_iter().filter(|s| s.kind() == "var_spec") {
+                let mut c = spec.walk();
+                for name in spec.children_by_field_name("name", &mut c) {
+                    if name.kind() == "identifier" {
+                        self.vars.insert(text_of(name, src).to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    /// A constant expression's string value: a string literal, a constant of
+    /// this file already folded, a parenthesised one, or a `+` of those.
+    fn fold(&self, n: TsNode, src: &[u8]) -> Option<String> {
+        match n.kind() {
+            "interpreted_string_literal" | "raw_string_literal" => string_literal_text(n, src),
+            "identifier" => self.values.get(text_of(n, src)).cloned(),
+            "parenthesized_expression" => self.fold(n.named_child(0)?, src),
+            "binary_expression" if is_concat(n) => {
+                let left = self.fold(n.child_by_field_name("left")?, src)?;
+                let right = self.fold(n.child_by_field_name("right")?, src)?;
+                Some(left + &right)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// DF.7: whether a `binary_expression` is a `+`.
+fn is_concat(n: TsNode) -> bool {
+    n.child_by_field_name("operator")
+        .is_some_and(|op| op.kind() == "+")
+}
+
+/// DF.7: what a `.Group(..)` argument is read against: the file's constants
+/// and imports, its package directory, and the callable the call sits in,
+/// whose bound names ([`bound_names`], computed on first need) shadow any
+/// package constant.
+struct PrefixScope<'a> {
+    consts: &'a FileConsts,
+    /// The file's in-repo imports, local name -> package directory qname
+    /// ([`Acc::import_dirs`]).
+    imports: &'a BTreeMap<String, String>,
+    /// The file's package directory qname (its MODULE qname minus the last
+    /// segment, LA.13b; `""` at the repo root).
+    dir: &'a str,
+    decl: TsNode<'a>,
+    body: TsNode<'a>,
+    bound: std::cell::OnceCell<BTreeSet<String>>,
+}
+
+impl<'a> PrefixScope<'a> {
+    fn new(
+        consts: &'a FileConsts,
+        imports: &'a BTreeMap<String, String>,
+        package_qname: &'a str,
+        decl: TsNode<'a>,
+        body: TsNode<'a>,
+    ) -> Self {
+        PrefixScope {
+            consts,
+            imports,
+            dir: package_qname.rsplit_once("::").map_or("", |(dir, _)| dir),
+            decl,
+            body,
+            bound: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// Whether the callable binds `name` (its receiver, a parameter, a named
+    /// result or a local).
+    fn binds(&self, name: &str, src: &[u8]) -> bool {
+        self.bound
+            .get_or_init(|| bound_names(self.decl, self.body, src))
+            .contains(name)
+    }
+
+    /// The prefix text of `.Group(arg)`: a string literal; an identifier
+    /// naming a constant of this file (its folded value) or, unless the
+    /// callable or the file binds it otherwise (a parameter, a local, a
+    /// package-level var), a constant of another file of the package (a
+    /// placeholder in this file's directory); `pkg.Name` with `pkg` an in-repo
+    /// import the callable does not shadow (a placeholder in that package's
+    /// directory); a parenthesised one, or a `+` of those, joined. Anything
+    /// else (a call, a field, a var): `None`, the group the walk cannot read.
+    fn prefix_text(&self, arg: TsNode, src: &[u8]) -> Option<String> {
+        match arg.kind() {
+            "interpreted_string_literal" | "raw_string_literal" => string_literal_text(arg, src),
+            "parenthesized_expression" => self.prefix_text(arg.named_child(0)?, src),
+            "identifier" => {
+                let name = text_of(arg, src);
+                if self.binds(name, src) || self.consts.vars.contains(name) {
+                    return None;
+                }
+                Some(match self.consts.values.get(name) {
+                    Some(value) => value.clone(),
+                    None => const_placeholder(self.dir, name),
+                })
+            }
+            "selector_expression" => {
+                let pkg = arg
+                    .child_by_field_name("operand")
+                    .filter(|o| o.kind() == "identifier")
+                    .map(|o| text_of(o, src))?;
+                let name = text_of(arg.child_by_field_name("field")?, src);
+                if name.is_empty() || self.binds(pkg, src) {
+                    return None;
+                }
+                let dir = self.imports.get(pkg)?;
+                Some(const_placeholder(dir, name))
+            }
+            "binary_expression" if is_concat(arg) => {
+                let left = self.prefix_text(arg.child_by_field_name("left")?, src)?;
+                let right = self.prefix_text(arg.child_by_field_name("right")?, src)?;
+                Some(left + &right)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// DF.7: every name callable `decl` binds: its receiver, its parameters and
+/// named results, and the locals of its body (`:=`, `var`, `const`, a
+/// declaring `range` / receive, a type switch's alias), in any nested block;
+/// func literals are skipped, as the route walk skips them. A name bound
+/// anywhere in the body counts, wherever the `.Group` call sits: a wrongly
+/// shadowed constant only keeps the walk's root (HEAD), never a wrong prefix.
+fn bound_names(decl: TsNode, body: TsNode, src: &[u8]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for list in ["receiver", "parameters", "result"] {
+        let Some(list) = decl
+            .child_by_field_name(list)
+            .filter(|l| l.kind() == "parameter_list")
+        else {
+            continue;
+        };
+        for param in named_kids(Some(list)) {
+            let mut c = param.walk();
+            for name in param.children_by_field_name("name", &mut c) {
+                if name.kind() == "identifier" {
+                    out.insert(text_of(name, src).to_string());
+                }
+            }
+        }
+    }
+    bind_body_names(body, src, &mut out);
+    out
+}
+
+/// DF.7: [`bound_names`]' body walk.
+fn bind_body_names(n: TsNode, src: &[u8], out: &mut BTreeSet<String>) {
+    let mut add = |names: Vec<TsNode>| {
+        for name in names.into_iter().filter(|x| x.kind() == "identifier") {
+            out.insert(text_of(name, src).to_string());
+        }
+    };
+    match n.kind() {
+        "func_literal" => return,
+        "short_var_declaration" => add(named_kids(n.child_by_field_name("left"))),
+        "var_spec" | "const_spec" => {
+            let mut c = n.walk();
+            add(n.children_by_field_name("name", &mut c).collect());
+        }
+        "range_clause" | "receive_statement" if declares(n) => {
+            add(named_kids(n.child_by_field_name("left")));
+        }
+        "type_switch_statement" => add(named_kids(n.child_by_field_name("alias"))),
+        _ => {}
+    }
+    let mut cursor = n.walk();
+    for child in n.named_children(&mut cursor) {
+        bind_body_names(child, src, out);
+    }
+}
+
 /// The route walk's view of one callable body: the router mount each of its
 /// locals holds and, for CB.11, the struct type each of its variables names
 /// plus the file's struct-field groups.
@@ -3944,6 +4249,8 @@ struct RouteScope<'a> {
     imports: &'a BTreeMap<String, String>,
     /// CB.23: the callable walked.
     callable: &'a RouteFn<'a>,
+    /// DF.7: how a `.Group(..)` argument is read in this callable.
+    prefix: PrefixScope<'a>,
 }
 
 impl RouteScope<'_> {
@@ -4049,7 +4356,9 @@ impl RouteScope<'_> {
     /// CB.23: the mount `<operand>.Group("<lit>")` yields: the operand's
     /// ([`Self::receiver_mount`]; any other operand, a call chain included,
     /// is the root, as the walk has always rooted it) then `<lit>`. `None`
-    /// unless `call` is such a call with a string literal.
+    /// unless `call` is such a call with a string literal or, DF.7, a prefix
+    /// [`PrefixScope::prefix_text`] reads (a constant's value, or a
+    /// placeholder the build's mount pass substitutes).
     fn group_mount(&self, call: TsNode, src: &[u8]) -> Option<Mount> {
         if call.kind() != "call_expression" {
             return None;
@@ -4061,7 +4370,8 @@ impl RouteScope<'_> {
             return None;
         }
         let first = call.child_by_field_name("arguments")?.named_child(0)?;
-        let lit = string_literal_text(first, src)?;
+        // DF.7: a literal, or a prefix held in a constant.
+        let lit = self.prefix.prefix_text(first, src)?;
         let base = func
             .child_by_field_name("operand")
             .and_then(|operand| self.receiver_mount(operand, src))
@@ -4153,8 +4463,10 @@ fn collect_routes_in(
 ) {
     // CB.11: the field groups (CI.5: and the import map) are lent out of
     // `acc` for the walk, which mutates `acc` as it emits.
+    // DF.7: and the file's constants.
     let fields = std::mem::take(&mut acc.field_prefixes);
     let imports = std::mem::take(&mut acc.import_dirs);
+    let consts = std::mem::take(&mut acc.file_consts);
     let mut scope = RouteScope {
         groups: seed_param_mounts(callable.decl, callable.qname, src),
         scanned: fields.scopes.get(&callable.body.start_byte()),
@@ -4162,10 +4474,18 @@ fn collect_routes_in(
         fields: &fields,
         imports: &imports,
         callable,
+        prefix: PrefixScope::new(
+            &consts,
+            &imports,
+            callable.package_qname,
+            callable.decl,
+            callable.body,
+        ),
     };
     walk_routes(callable.body, src, file_rel, module_id, repo, &mut scope, acc);
     acc.field_prefixes = fields;
     acc.import_dirs = imports;
+    acc.file_consts = consts;
 }
 
 fn walk_routes(
@@ -9180,6 +9500,353 @@ func (s *Server) Mount(rg *gin.RouterGroup) {
                 "mixed".to_string(),
                 param_mount("api::server::Server::Mount", 0, "/m")
             )]
+        );
+    }
+
+    // ------------------------------------------------------------------------
+    // DF.7: route-group prefixes held in a constant.
+    // ------------------------------------------------------------------------
+
+    const CONST_ROUTES: &str =
+        include_str!("../../../../bench/substrate-gap/fixtures/go-route-const-prefix/api/routes.go");
+
+    /// The file MODULE's `GoStringConst` facts as `(name, value)`, in record
+    /// order.
+    fn string_consts(parse: &FileParse, module: &str) -> Vec<(String, String)> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module);
+        let facts = parse.nav.nav_facts.get(&id).cloned().unwrap_or_default();
+        facts
+            .into_iter()
+            .filter_map(|f| match f {
+                NavFact::GoStringConst { name, value } => Some((name, value)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn plain_route(method: &str, path: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, &format!("{method} {path}"))
+    }
+
+    #[test]
+    fn same_file_const_prefix_folds() {
+        // The fixture's `v1 := r.Group(apiPrefix)`: the parser folds the
+        // constant, so the ROUTE is final, never provisional.
+        let parse = parse_as(CONST_ROUTES, "api/routes.go", "api::routes");
+        let qnames = route_qnames(&parse);
+        assert!(qnames.contains(&"GET /api/v1/items".to_string()), "{qnames:?}");
+        assert!(!qnames.contains(&"GET /items".to_string()), "{qnames:?}");
+        let items = plain_route("GET", "/api/v1/items");
+        assert_eq!(handled_by(&parse, items), vec![bare("listItems")]);
+        assert_eq!(route_positions(&parse, items).len(), 1);
+    }
+
+    #[test]
+    fn concatenated_const_prefix() {
+        let source = r#"package api
+
+import "github.com/gin-gonic/gin"
+
+const (
+    AdminPrefix = "/admin"
+    Full        = AdminPrefix + `/x` + "/y"
+    Again
+)
+
+func Register(r *gin.Engine) {
+    admin := r.Group(AdminPrefix + "/x")
+    admin.GET("/stats", h)
+    full := r.Group((Full))
+    full.GET("/f", h)
+    again := r.Group(Again + "/z")
+    again.GET("/a", h)
+}
+
+func h(c *gin.Context) {}
+"#;
+        let parse = parse_as(source, "api/routes.go", "api::routes");
+        assert_eq!(
+            route_qnames(&parse),
+            vec![
+                "GET /admin/x/stats".to_string(),
+                "GET /admin/x/y/f".to_string(),
+                "GET /admin/x/y/z/a".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn other_file_const_is_a_placeholder() {
+        // `OtherFilePrefix` is declared in api/consts.go: the file cannot fold
+        // it, so the ROUTE is a provisional `const:` mount the build resolves.
+        let parse = parse_as(CONST_ROUTES, "api/routes.go", "api::routes");
+        let qnames = route_qnames(&parse);
+        let thing = "GET <mount:const:${const:api.OtherFilePrefix}>/thing".to_string();
+        assert!(qnames.contains(&thing), "{qnames:?}");
+        assert!(!qnames.contains(&"GET /thing".to_string()), "{qnames:?}");
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, &thing);
+        assert_eq!(handled_by(&parse, id), vec![bare("thing")]);
+        // A repo-root package's file names the root directory, `""`.
+        let source = r#"package main
+
+import "github.com/gin-gonic/gin"
+
+func main() {
+    r := gin.Default()
+    g := r.Group(Base)
+    g.GET("/x", h)
+}
+"#;
+        let root = parse_as(source, "main.go", "main");
+        assert_eq!(
+            route_qnames(&root),
+            vec!["GET <mount:const:${const:.Base}>/x".to_string()]
+        );
+    }
+
+    #[test]
+    fn imported_const_is_a_placeholder() {
+        // `paths.Shared`, `paths` an in-repo import: a placeholder in that
+        // package's directory. A constant of a package outside the module
+        // (`gin.Version`) is unread: its group registers at the root.
+        let parse = parse_as(CONST_ROUTES, "api/routes.go", "api::routes");
+        let qnames = route_qnames(&parse);
+        assert!(
+            qnames.contains(&"GET <mount:const:${const:paths.Shared}>/ping".to_string()),
+            "{qnames:?}"
+        );
+        let source = r#"package api
+
+import (
+    "github.com/gin-gonic/gin"
+
+    p "example.com/shop/internal/paths"
+)
+
+func Register(r *gin.Engine) {
+    a := r.Group(p.Admin + "/v2")
+    a.GET("/a", h)
+    e := r.Group(gin.Version)
+    e.GET("/e", h)
+}
+"#;
+        let parse = parse_as(source, "api/routes.go", "api::routes");
+        assert_eq!(
+            route_qnames(&parse),
+            vec![
+                "GET /e".to_string(),
+                "GET <mount:const:${const:internal::paths.Admin}/v2>/a".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn param_mount_carries_the_placeholder() {
+        // The fixture's `Mount(g)`: `sub := g.Group(apiPrefix)` folds into the
+        // Param mount's suffix; a constant of another file rides in it as a
+        // placeholder, and in the mount a call hands a parameter.
+        let parse = parse_as(CONST_ROUTES, "api/routes.go", "api::routes");
+        let qnames = route_qnames(&parse);
+        assert!(
+            qnames.contains(&"GET <mount:param:api::routes::Mount#0>/api/v1/deep".to_string()),
+            "{qnames:?}"
+        );
+        let source = r#"package api
+
+import "github.com/gin-gonic/gin"
+
+func Mount(g *gin.RouterGroup) {
+    sub := g.Group(Other)
+    sub.GET("/x", h)
+}
+
+func Wire(r *gin.Engine) {
+    Mount(r.Group(Other + "/w"))
+}
+"#;
+        let parse = parse_as(source, "api/routes.go", "api::routes");
+        assert_eq!(
+            route_qnames(&parse),
+            vec!["GET <mount:param:api::routes::Mount#0>${const:api.Other}/x".to_string()]
+        );
+        assert_eq!(
+            mount_args(&parse, func_id("api::routes::Wire")),
+            vec![(
+                10,
+                "Mount".to_string(),
+                0,
+                Mount::Const("${const:api.Other}/w".into())
+            )]
+        );
+    }
+
+    #[test]
+    fn field_group_reads_a_const_prefix() {
+        // CB.11's field groups read a constant prefix the same way.
+        let source = r#"package api
+
+import (
+    "github.com/gin-gonic/gin"
+
+    "example.com/shop/paths"
+)
+
+const v1 = "/v1"
+
+type Server struct {
+    pub   *gin.RouterGroup
+    share *gin.RouterGroup
+}
+
+func NewServer(r *gin.Engine) *Server {
+    s := &Server{}
+    s.pub = r.Group(v1)
+    s.share = r.Group(paths.Shared)
+    return s
+}
+
+func (s *Server) Routes() {
+    s.pub.GET("/p", h)
+    s.share.GET("/s", h)
+}
+"#;
+        let parse = parse_as(source, "api/server.go", "api::server");
+        assert_eq!(
+            route_qnames(&parse),
+            vec![
+                "GET /v1/p".to_string(),
+                "GET <mount:const:${const:paths.Shared}>/s".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn var_is_not_read() {
+        // A package-level var is mutable: never a prefix, wherever it sits in
+        // the file, so its group keeps the walk's root.
+        let source = r#"package api
+
+import "github.com/gin-gonic/gin"
+
+func Register(r *gin.Engine) {
+    g := r.Group(p)
+    g.GET("/items", h)
+    l := r.Group(later)
+    l.GET("/later", h)
+}
+
+var p = "/x"
+
+var (
+    later = "/l"
+)
+"#;
+        let parse = parse_as(source, "api/routes.go", "api::routes");
+        assert_eq!(
+            route_qnames(&parse),
+            vec!["GET /items".to_string(), "GET /later".to_string()]
+        );
+        assert!(string_consts(&parse, "api::routes").is_empty());
+    }
+
+    #[test]
+    fn param_or_local_named_like_a_const_is_not_a_placeholder() {
+        // `prefix` is a parameter (and a same-file constant), `loc` and
+        // `paths` locals: none is a package constant, so each group keeps the
+        // walk's root, HEAD's qname.
+        let source = r#"package api
+
+import (
+    "github.com/gin-gonic/gin"
+
+    "example.com/shop/paths"
+)
+
+const prefix = "/c"
+
+func Mount(r *gin.Engine, prefix string) {
+    g := r.Group(prefix)
+    g.GET("/a", h)
+    loc := pick()
+    l := r.Group(loc)
+    l.GET("/b", h)
+    paths := pick()
+    q := r.Group(paths.Shared)
+    q.GET("/c", h)
+    for _, seg := range segs() {
+        s := r.Group(seg)
+        s.GET("/d", h)
+    }
+}
+"#;
+        let parse = parse_as(source, "api/routes.go", "api::routes");
+        assert_eq!(
+            route_qnames(&parse),
+            vec![
+                "GET /a".to_string(),
+                "GET /b".to_string(),
+                "GET /c".to_string(),
+                "GET /d".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn go_string_consts_recorded() {
+        // Every top-level string constant, folded, on the file MODULE, in
+        // source order; iota, numbers, calls, a constant of another file and
+        // a function-local constant are not.
+        let source = r#"package api
+
+const apiPrefix = "/api/v1"
+
+const (
+    AdminPrefix = "/admin"
+    Raw         = `/raw`
+    Joined      = AdminPrefix + "/j"
+    First, Second = "/1", "/2"
+    Typed string = "/t"
+    Elsewhere = OtherFilePrefix + "/e"
+)
+
+const (
+    A = iota
+    B
+)
+
+const N = 3
+
+func f() {
+    const local = "/local"
+}
+"#;
+        let parse = parse_as(source, "api/consts.go", "api::consts");
+        let pair = |n: &str, v: &str| (n.to_string(), v.to_string());
+        assert_eq!(
+            string_consts(&parse, "api::consts"),
+            vec![
+                pair("apiPrefix", "/api/v1"),
+                pair("AdminPrefix", "/admin"),
+                pair("Raw", "/raw"),
+                pair("Joined", "/admin/j"),
+                pair("First", "/1"),
+                pair("Second", "/2"),
+                pair("Typed", "/t"),
+            ]
+        );
+        // The fixture's two files.
+        let routes = parse_as(CONST_ROUTES, "api/routes.go", "api::routes");
+        assert_eq!(
+            string_consts(&routes, "api::routes"),
+            vec![pair("apiPrefix", "/api/v1"), pair("AdminPrefix", "/admin")]
+        );
+        let other = include_str!(
+            "../../../../bench/substrate-gap/fixtures/go-route-const-prefix/api/consts.go"
+        );
+        let other = parse_as(other, "api/consts.go", "api::consts");
+        assert_eq!(
+            string_consts(&other, "api::consts"),
+            vec![pair("OtherFilePrefix", "/other")]
         );
     }
 }

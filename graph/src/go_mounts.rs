@@ -26,11 +26,23 @@
 //! every copy's handler. A provisional nobody mounts keeps its local path,
 //! the qname the parser minted for it before CB.23. Structural identity only
 //! (the A11 const-fold family): no value flows to any sink.
+//!
+//! DF.7: a group prefix held in a string constant the file does not declare
+//! (`r.Group(OtherFilePrefix)`, `r.Group(paths.Shared)`) reaches here as a
+//! `${const:<dir>.<Name>}` placeholder
+//! ([`glia_code_domain::endpoint::const_placeholder`]): in a provisional
+//! `<METHOD> <mount:const:<prefix>><path>` qname, in a Param / Field mount's
+//! suffix, or in a prefix a `MountArg` / `FieldMount` carries. Every final
+//! path is substituted from the package constants the parser recorded
+//! ([`NavFact::GoStringConst`] on each file MODULE, keyed by the package
+//! directory); a placeholder with no constant substitutes `""`, the root the
+//! walk gave such a group before DF.7.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_code_domain::endpoint::{
-    canonical_http_path, join_path, parse_mount_route_qname, route_qname, split_owner, with_owner,
+    canonical_http_path, join_path, next_const_placeholder, parse_mount_route_qname, route_qname,
+    split_owner, with_owner,
 };
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{GRAPH_TYPE, Mount, NavFact, UnresolvedRef, edge_category, node_kind};
@@ -68,17 +80,25 @@ pub(crate) struct MountStats {
     /// Slots a cap stopped: refused a prefix at [`MAX_PREFIXES`], or still
     /// growing after [`MAX_ROUNDS`].
     pub(crate) capped: usize,
+    /// DF.7: constant placeholders substituted in final ROUTE paths, one per
+    /// placeholder per path built.
+    pub(crate) const_prefixes: usize,
+    /// DF.7: the `const_prefixes` no package constant answered: substituted
+    /// `""`.
+    pub(crate) const_unresolved: usize,
 }
 
 impl MountStats {
     /// `[go-mounts] provisional=<p> mounted=<m> extra_mounts=<c>
     /// unmounted=<u> mount_args=<a> unbound_args=<b> field_mounts=<f>
-    /// capped=<k>`, once per Go graph with a provisional ROUTE.
+    /// capped=<k> const_prefixes=<n> const_unresolved=<r>`, once per Go graph
+    /// with a provisional ROUTE.
     pub(crate) fn marker(&self) -> Option<String> {
         (self.provisional > 0).then(|| {
             format!(
                 "[go-mounts] provisional={} mounted={} extra_mounts={} unmounted={} \
-                 mount_args={} unbound_args={} field_mounts={} capped={}",
+                 mount_args={} unbound_args={} field_mounts={} capped={} const_prefixes={} \
+                 const_unresolved={}",
                 self.provisional,
                 self.mounted,
                 self.extra_mounts,
@@ -86,7 +106,9 @@ impl MountStats {
                 self.mount_args,
                 self.unbound_args,
                 self.field_mounts,
-                self.capped
+                self.capped,
+                self.const_prefixes,
+                self.const_unresolved
             )
         })
     }
@@ -153,21 +175,38 @@ pub(crate) fn bind(g: &mut RepoGraph, refs: &mut Vec<UnresolvedRef>) -> MountSta
     let fn_ids = param_fn_ids(g, &provisionals);
     let flows = collect_flows(g, &mut stats);
     let slots = fixpoint(&flows, &fn_ids, &mut stats);
+    let consts = package_consts(g);
 
-    // Finals per provisional, sorted; empty slot -> the local path.
+    // Finals per provisional, sorted; empty slot -> the local path. DF.7:
+    // each path's constant placeholders substituted; a `const:` provisional
+    // is its own prefix, mounted when a constant answers one of them.
     let mut plans: Vec<Vec<Final>> = Vec::with_capacity(provisionals.len());
     for p in &provisionals {
         let prefixes = slot_of(&p.base, &fn_ids).and_then(|s| slots.get(&s));
-        let paths: BTreeSet<String> = match prefixes {
-            Some(set) if !set.is_empty() => {
+        let paths: BTreeSet<String> = match (&p.base, prefixes) {
+            (Mount::Const(prefix), _) => {
+                let (path, resolved) =
+                    substitute(&join_path(prefix, &p.path), &consts, &mut stats);
+                if resolved > 0 {
+                    stats.mounted += 1;
+                } else {
+                    stats.unmounted += 1;
+                }
+                BTreeSet::from([canonical_http_path(&path).into_owned()])
+            }
+            (_, Some(set)) if !set.is_empty() => {
                 stats.mounted += 1;
                 set.iter()
-                    .map(|m| canonical_http_path(&join_path(m, &p.path)).into_owned())
+                    .map(|m| {
+                        let (path, _) = substitute(&join_path(m, &p.path), &consts, &mut stats);
+                        canonical_http_path(&path).into_owned()
+                    })
                     .collect()
             }
             _ => {
                 stats.unmounted += 1;
-                BTreeSet::from([canonical_http_path(&p.path).into_owned()])
+                let (path, _) = substitute(&p.path, &consts, &mut stats);
+                BTreeSet::from([canonical_http_path(&path).into_owned()])
             }
         };
         stats.extra_mounts += paths.len().saturating_sub(1);
@@ -212,6 +251,84 @@ pub(crate) fn bind(g: &mut RepoGraph, refs: &mut Vec<UnresolvedRef>) -> MountSta
         }
     }
     stats
+}
+
+/// DF.7: the package string constants of `g`, `(package dir, name)` ->
+/// value, from every file MODULE's [`NavFact::GoStringConst`] facts in
+/// `g.nodes` order. A package is its directory (LA.13b: the MODULE qname
+/// minus its last segment, `""` at the repo root, the rule
+/// `GoPackages` keys by). A `_test` file's constants are left out (a
+/// non-test file never sees them), and a name two files of one directory
+/// bind to different values (no compiling package does) is absent: unknown
+/// beats wrong. Empty when no MODULE recorded one.
+fn package_consts(g: &RepoGraph) -> BTreeMap<(String, String), String> {
+    let mut seen: BTreeMap<(String, String), Option<String>> = BTreeMap::new();
+    for n in &g.nodes {
+        if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::MODULE) {
+            continue;
+        }
+        let Some(facts) = g.nav.nav_facts.get(&n.id) else {
+            continue;
+        };
+        let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+            continue;
+        };
+        let (dir, file) = qname.rsplit_once("::").unwrap_or(("", qname.as_str()));
+        if file.ends_with("_test") {
+            continue;
+        }
+        for f in facts {
+            let NavFact::GoStringConst { name, value } = f else {
+                continue;
+            };
+            let slot = seen
+                .entry((dir.to_string(), name.clone()))
+                .or_insert_with(|| Some(value.clone()));
+            if slot.as_deref() != Some(value.as_str()) {
+                *slot = None;
+            }
+        }
+    }
+    seen.into_iter()
+        .filter_map(|(key, value)| value.map(|v| (key, v)))
+        .collect()
+}
+
+/// DF.7: `s` with each constant placeholder, left to right, replaced by its
+/// package constant (`""` when none answers), and how many a constant
+/// answered; both counts go to `stats`. A `/` at a placeholder's edge never
+/// doubles: the placeholder took a group join's place (`join_path("/m",
+/// "${const:..}")` is `/m/${const:..}`), and a `/` pair across it is one
+/// `join_path` never builds. A string with no placeholder comes back
+/// unchanged.
+fn substitute(
+    s: &str,
+    consts: &BTreeMap<(String, String), String>,
+    stats: &mut MountStats,
+) -> (String, usize) {
+    fn push(out: &mut String, piece: &str) {
+        match piece.strip_prefix('/') {
+            Some(rest) if out.ends_with('/') => out.push_str(rest),
+            _ => out.push_str(piece),
+        }
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    let mut resolved = 0;
+    while let Some((start, end, dir, name)) = next_const_placeholder(rest) {
+        push(&mut out, &rest[..start]);
+        stats.const_prefixes += 1;
+        match consts.get(&(dir.to_string(), name.to_string())) {
+            Some(value) => {
+                push(&mut out, value);
+                resolved += 1;
+            }
+            None => stats.const_unresolved += 1,
+        }
+        rest = &rest[end..];
+    }
+    push(&mut out, rest);
+    (out, resolved)
 }
 
 /// Every ROUTE whose qname (owner stripped) parses as a provisional mount
@@ -532,7 +649,7 @@ mod tests {
     //! a route or takes a router-typed parameter, so the parser itself records
     //! neither.
 
-    use glia_code_domain::endpoint::mount_route_qname;
+    use glia_code_domain::endpoint::{const_placeholder, mount_route_qname};
     use glia_code_domain::{CallQualifier, FileParse, cell_type};
     use glia_core::{CellPayload, Node, RepoId};
 
@@ -742,7 +859,7 @@ func Get2FA() {}
             stats.marker().as_deref(),
             Some(
                 "[go-mounts] provisional=1 mounted=1 extra_mounts=0 unmounted=0 mount_args=1 \
-                 unbound_args=0 field_mounts=0 capped=0"
+                 unbound_args=0 field_mounts=0 capped=0 const_prefixes=0 const_unresolved=0"
             )
         );
     }
@@ -990,6 +1107,153 @@ func Healthz() {}
             MountStats {
                 provisional: 1,
                 unmounted: 1,
+                ..MountStats::default()
+            }
+        );
+    }
+
+    /// DF.7: `r.Group(OtherFilePrefix)` and `r.Group(paths.Shared)`, prefixes
+    /// held in a constant of another file of the package and of an imported
+    /// package: each `const:` provisional takes the constant the parser
+    /// recorded on that package's file MODULE, keyed by its directory.
+    #[test]
+    fn const_placeholder_resolves_from_package_facts() {
+        let routes_src = "package api
+
+func Register(r any) {
+}
+
+func thing() {}
+func ping()  {}
+";
+        let consts = parse("api/consts.go", "package api\n\nconst OtherFilePrefix = \"/other\"\n");
+        let shared = parse("paths/paths.go", "package paths\n\nconst Shared = \"/shared\"\n");
+        let mut fp = parse("api/routes.go", routes_src);
+        let at = row(routes_src, "func Register");
+        let other = konst(&const_placeholder("api", "OtherFilePrefix"));
+        provisional(&mut fp, "GET", &other, "/thing", "", "thing", at);
+        let joined = konst(&format!("{}/x", const_placeholder("paths", "Shared")));
+        provisional(&mut fp, "GET", &joined, "/ping", "", "ping", at);
+        let (g, stats) = build_go_with_mounts(repo(), vec![consts, shared, fp]);
+
+        assert_eq!(routes(&g), vec!["GET /other/thing", "GET /shared/x/ping"]);
+        assert_eq!(
+            handlers(&g, route("GET /other/thing")),
+            vec![func("api::routes::thing")]
+        );
+        assert_eq!(
+            handlers(&g, route("GET /shared/x/ping")),
+            vec![func("api::routes::ping")]
+        );
+        assert_eq!(g.nav.name_by_id[&route("GET /other/thing")], "GET /other/thing");
+        assert_no_provisional(&g);
+        assert_eq!(
+            stats,
+            MountStats {
+                provisional: 2,
+                mounted: 2,
+                const_prefixes: 2,
+                ..MountStats::default()
+            }
+        );
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some(
+                "[go-mounts] provisional=2 mounted=2 extra_mounts=0 unmounted=0 mount_args=0 \
+                 unbound_args=0 field_mounts=0 capped=0 const_prefixes=2 const_unresolved=0"
+            )
+        );
+    }
+
+    /// DF.7: a placeholder no package constant answers substitutes `""`, so
+    /// the route keeps its local path (the walk's pre-DF.7 root): a name no
+    /// file declares, one two files of the directory bind to different
+    /// values, and one only a `_test.go` file declares.
+    #[test]
+    fn unresolved_placeholder_keeps_local_path() {
+        let src = "package api
+
+func Register(r any) {
+}
+
+func thing() {}
+";
+        let a = parse("api/a.go", "package api\n\nconst Twice = \"/a\"\n");
+        let b = parse("api/b.go", "package api\n\nconst Twice = \"/b\"\n");
+        let t = parse("api/a_test.go", "package api\n\nconst InTest = \"/t\"\n");
+        let mut fp = parse("api/routes.go", src);
+        let at = row(src, "func Register");
+        for (name, local) in [("Missing", "/one"), ("Twice", "/two"), ("InTest", "/three")] {
+            let mount = konst(&const_placeholder("api", name));
+            provisional(&mut fp, "GET", &mount, local, "", "thing", at);
+        }
+        let (g, stats) = build_go_with_mounts(repo(), vec![a, b, t, fp]);
+
+        assert_eq!(routes(&g), vec!["GET /one", "GET /two", "GET /three"]);
+        assert_eq!(handlers(&g, route("GET /two")), vec![func("api::routes::thing")]);
+        assert_no_provisional(&g);
+        assert_eq!(
+            stats,
+            MountStats {
+                provisional: 3,
+                unmounted: 3,
+                const_prefixes: 3,
+                const_unresolved: 3,
+                ..MountStats::default()
+            }
+        );
+    }
+
+    /// DF.7: a placeholder in a Param mount's suffix (`sub := g.Group(P)` in
+    /// `Mount(g)`, `P` a constant of another file) and in the prefix a call
+    /// hands it (`Mount(r.Group(Other))`) are both substituted in the final
+    /// paths; a `/` never doubles at a placeholder's edge.
+    #[test]
+    fn placeholder_through_param_mount() {
+        let src = "package api
+
+func Wire() {
+\tMount(nil)
+\tMount(nil)
+}
+
+func Mount(g any) {
+}
+
+func deep() {}
+";
+        let consts = parse(
+            "api/consts.go",
+            "package api\n\nconst P = \"/api/v1\"\n\nconst Other = \"/other/\"\n",
+        );
+        let mut fp = parse("api/routes.go", src);
+        mount_arg(&mut fp, "api::routes::Wire", row(src, "Mount(nil)"), "Mount", konst("/m"));
+        mount_arg(
+            &mut fp,
+            "api::routes::Wire",
+            row(src, "Mount(nil)") + 1,
+            "Mount",
+            konst(&format!("/v/{}", const_placeholder("api", "Other"))),
+        );
+        let reg = param("api::routes::Mount", &const_placeholder("api", "P"));
+        provisional(&mut fp, "GET", &reg, "/deep", "", "deep", row(src, "func Mount"));
+        let (g, stats) = build_go_with_mounts(repo(), vec![consts, fp]);
+
+        let mut got = routes(&g);
+        got.sort();
+        assert_eq!(got, vec!["GET /m/api/v1/deep", "GET /v/other/api/v1/deep"]);
+        for r in ["GET /m/api/v1/deep", "GET /v/other/api/v1/deep"] {
+            assert_eq!(handlers(&g, route(r)), vec![func("api::routes::deep")]);
+        }
+        assert_no_provisional(&g);
+        assert_eq!(
+            stats,
+            MountStats {
+                provisional: 1,
+                mounted: 1,
+                extra_mounts: 1,
+                mount_args: 2,
+                const_prefixes: 3,
                 ..MountStats::default()
             }
         );

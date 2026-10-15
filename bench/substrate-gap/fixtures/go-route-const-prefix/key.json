@@ -1,0 +1,64 @@
+{
+  "framework": "go-route-const-prefix",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "note": "DF (CB.26 residual 'Go route-group prefixes held in a constant'): every Group-prefix reader in parsers/code/go/src/lib.rs (RouteScope::group_mount, group_call_path, record_group_assignment) takes `string_literal_text` of the argument, so `r.Group(apiPrefix)` is not a group at all and its routes register at the root. HEAD (84e2e71, leap wheel): ROUTEs `GET /items`, `GET /stats`, `GET /thing`, `GET /ping`, `GET /deep` - every prefix lost. After: a const of the same file, another file of the package or an imported package, alone or `+`-joined with literals, is the prefix, also through a parameter mount (`GET /m/api/v1/deep`).",
+  "expect_nodes": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /api/v1/items"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /admin/x/stats"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /other/thing"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /shared/ping"
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /m/api/v1/deep"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "GET /api/v1/items",
+      "to": "api::routes::listItems",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "GET /other/thing",
+      "to": "api::routes::thing",
+      "category": "HANDLED_BY"
+    },
+    {
+      "from": "GET /m/api/v1/deep",
+      "to": "api::routes::deep",
+      "category": "HANDLED_BY"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ROUTE",
+      "name": "GET /items",
+      "max_nodes": 0
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /thing",
+      "max_nodes": 0
+    },
+    {
+      "kind": "ROUTE",
+      "name": "GET /ping",
+      "max_nodes": 0
+    }
+  ]
+}
