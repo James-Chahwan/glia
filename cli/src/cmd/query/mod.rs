@@ -1,7 +1,7 @@
 //! `query` area: graph lookups — pages (LA.6e), find (LD.3b), flows (LD.4b),
 //! implementors (LD.7c), serves (LD.8b), why (LE.5), pack (CC.4c), hotspots
 //! (CC.10b), communities (CD.1e), splits (CD.2d), hubs (CD.4c),
-//! duplicate-flows (CD.4f).
+//! duplicate-flows (CD.4f), identity (DD.15), query (DB.5).
 //!
 //! Each command is a variant of `QueryCmd` (flattened into `Cmd`, so it lists
 //! at top level in `glia --help`) plus one arm in `run`, with its `Args`
@@ -16,9 +16,11 @@ mod find;
 mod flows;
 mod hotspots;
 mod hubs;
+mod identity;
 mod implementors;
 mod pack;
 mod pages;
+mod query;
 mod serves;
 mod splits;
 mod why;
