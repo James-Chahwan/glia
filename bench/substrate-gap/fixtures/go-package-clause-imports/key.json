@@ -1,0 +1,20 @@
+{
+  "framework": "go-package-clause-imports",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "note": "DF (0.5.1 follow-up 'the Go package clause'): an un-aliased Go import binds the imported package's declared name (its `package` clause), which the import path only suggests. graph/src/imports.rs resolve_imports_go binds a dir import under the dir's last segment (`v2store`) and CI.3's root import under the path's last element (`nats.go`), so `store.Open()` / `nats.Connect(..)` name a binding nothing holds. HEAD (84e2e71, leap wheel): IMPORTS cmd::app::main -> nats and -> internal::v2store::store bind; CALLS main -> Connect / Open 0/2. quokka-stack turps has 9 of 22 dirs whose clause differs from the dir (Server -> server, models/User -> models), every one imported with an explicit alias today.",
+  "expect_edges": [
+    {
+      "from": "cmd::app::main::main",
+      "to": "nats::Connect",
+      "category": "CALLS"
+    },
+    {
+      "from": "cmd::app::main::main",
+      "to": "internal::v2store::store::Open",
+      "category": "CALLS"
+    }
+  ]
+}

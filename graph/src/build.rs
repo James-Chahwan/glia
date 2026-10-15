@@ -218,8 +218,11 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
     build_symbol_table(&mut g);
     let (embed_refs, mut refs): (Vec<UnresolvedRef>, Vec<UnresolvedRef>) =
         all_refs.into_iter().partition(|r| is_go_embed(&g.nav, r));
-    let embed_binds = bind_go_embeds(&g, &embed_refs, &all_imports);
-    let mut packages = GoPackages::build(&g, &all_imports);
+    // DF.15: the name each package dir's `package` clause declares, read
+    // once, before the two passes that name an un-aliased import by it.
+    let package_names = go_package_names(&g);
+    let embed_binds = bind_go_embeds(&g, &embed_refs, &all_imports, &package_names);
+    let mut packages = GoPackages::build(&g, &all_imports, package_names);
     packages.promoted = GoPromoted::build(&g, &embed_binds.bound);
     let import_stats = resolve_imports_go(&mut g, &all_imports, &packages);
     let mut tally = EvidenceTally::default();
@@ -1015,6 +1018,74 @@ fn go_package_dir(module_qname: &str) -> &str {
     module_qname.rsplit_once("::").map_or("", |(dir, _)| dir)
 }
 
+/// Every file MODULE of a Go graph (after [`build_symbol_table`]), sorted by
+/// the qname its package reads: a file named by its file name (LB.9b,
+/// `infra::main.go`) is its bare form (`infra::main`), so its stem still
+/// reads `_test` / dir-named, and its bare alias in `module_by_qname` is not
+/// a second member.
+fn go_file_modules(g: &RepoGraph) -> Vec<(String, NodeId)> {
+    let mut modules: Vec<(String, NodeId)> = g
+        .symbols
+        .module_by_qname
+        .iter()
+        .filter(|(q, id)| g.nav.qname_by_id.get(*id) == Some(*q))
+        .map(|(q, id)| {
+            let bare = g.nav.name_by_id.get(id).and_then(|n| bare_module_qname(q, n));
+            (bare.unwrap_or_else(|| q.clone()), *id)
+        })
+        .collect();
+    modules.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.0.cmp(&b.1.0)));
+    modules
+}
+
+/// DF.15: package dir -> the package name its files' `package` clauses
+/// declare ([`NavFact::GoPackageName`], the one reader of those facts). A
+/// `_test.go` file and a `_test` clause (an external test package) never name
+/// the package. A `main` clause beside another one (a `//go:build ignore`
+/// generator in a library dir) is dropped: an importable package is never
+/// `main`. A dir whose remaining files declare two names (build-tag
+/// variants, a broken tree) has no entry, so its imports keep the
+/// path-derived name ([`go_binding_name`]).
+fn go_package_names(g: &RepoGraph) -> BTreeMap<String, String> {
+    let mut clauses: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+    for (qname, id) in go_file_modules(g) {
+        if qname.rsplit("::").next().is_some_and(|stem| stem.ends_with("_test")) {
+            continue;
+        }
+        for fact in g.nav.nav_facts.get(&id).into_iter().flatten() {
+            if let NavFact::GoPackageName { name } = fact
+                && !name.ends_with("_test")
+            {
+                clauses.entry(go_package_dir(&qname).to_string()).or_default().insert(name);
+            }
+        }
+    }
+    clauses
+        .into_iter()
+        .filter_map(|(dir, names)| {
+            let mut importable = names.iter().filter(|n| **n != "main");
+            let name = match (importable.next(), importable.next()) {
+                (Some(one), None) => *one,
+                (None, _) => "main",
+                (Some(_), Some(_)) => return None,
+            };
+            Some((dir, name.to_string()))
+        })
+        .collect()
+}
+
+/// DF.15: the name an un-aliased import of package dir `path` binds, from
+/// `names` ([`go_package_names`]): the dir's clause, else, for a non-root
+/// path, its last `::` segment. The repository root (`""`) has no segment,
+/// so without a clause it binds nothing.
+fn go_binding_name<'a>(names: &'a BTreeMap<String, String>, path: &'a str) -> Option<&'a str> {
+    match names.get(path) {
+        Some(name) => Some(name.as_str()),
+        None if path.is_empty() => None,
+        None => Some(path.rsplit("::").next().unwrap_or(path)),
+    }
+}
+
 // ============================================================================
 // Go package = directory (LA.13b)
 // ============================================================================
@@ -1037,8 +1108,15 @@ fn go_package_dir(module_qname: &str) -> &str {
 ///
 /// A `_test.go` file (a MODULE whose last segment ends in `_test`) is built
 /// only by `go test`: an importer never sees it and a non-test file never
-/// calls into it. It may also be an external `package x_test`, which the
-/// directory cannot tell apart (the package clause is not in the parse).
+/// calls into it. It may also be an external `package x_test`; its file name
+/// marks it a test file either way, and its clause never names the package
+/// (DF.15, [`go_package_names`]).
+///
+/// DF.15: an un-aliased import binds the imported package's declared name
+/// (its `package` clause, [`GoPackages::binding_name`]), not its directory's
+/// last segment: `import ".../internal/v2store"` of `package store` binds
+/// `store`, and the repository-root package of module `.../nats.go` declaring
+/// `package nats` binds `nats`.
 ///
 /// Deterministic: member lists are sorted by qname and a lookup binds only
 /// when exactly one node answers, never the first of several.
@@ -1053,8 +1131,12 @@ pub(crate) struct GoPackages {
     /// The `_test.go` file MODULEs.
     tests: HashSet<NodeId>,
     /// Importing file MODULE -> local package name -> import path, for every
-    /// `ImportTarget::Module` except a blank (`_`) or dot (`.`) import.
+    /// `ImportTarget::Module` except a blank (`_`) or dot (`.`) import. An
+    /// un-aliased import is named by [`GoPackages::binding_name`] (DF.15).
     import_path: HashMap<NodeId, HashMap<String, String>>,
+    /// DF.15: package dir -> the name its non-test files' `package` clause
+    /// declares ([`go_package_names`]).
+    package_names: BTreeMap<String, String>,
     /// Calls [`GoPackages::package_call`] bound.
     sibling_calls: std::cell::Cell<usize>,
     /// METHOD -> the file MODULE that DEFINES it, for a method whose nav
@@ -1100,6 +1182,9 @@ struct GoPackageStats {
     root_imports: usize,
     /// Of `root_imports`: bound to a root-dir file.
     root_bound: usize,
+    /// DF.15: un-aliased imports bound under a `package` clause name the
+    /// import path does not spell (every bound root import counts).
+    clause_named: usize,
 }
 
 impl GoPackageStats {
@@ -1115,13 +1200,14 @@ impl GoPackageStats {
     }
 
     /// CI.3 fired_on, after [`GoPackageStats::marker`]: `[go-package]
-    /// root-package imports=R bound=B`, when any file imports the
-    /// repository-root package.
+    /// root-package imports=R bound=B clause_named=N`, when any file imports
+    /// the repository-root package or (DF.15) any un-aliased import binds a
+    /// `package` clause name its path does not spell.
     fn root_marker(&self) -> Option<String> {
-        (self.root_imports > 0).then(|| {
+        (self.root_imports > 0 || self.clause_named > 0).then(|| {
             format!(
-                "[go-package] root-package imports={} bound={}",
-                self.root_imports, self.root_bound
+                "[go-package] root-package imports={} bound={} clause_named={}",
+                self.root_imports, self.root_bound, self.clause_named
             )
         })
     }
@@ -1129,23 +1215,15 @@ impl GoPackageStats {
 
 impl GoPackages {
     /// Index the MODULEs of `g` (after [`build_symbol_table`]) by package
-    /// directory, and the imports by importing file and local name.
-    fn build(g: &RepoGraph, imports: &[ImportStmt]) -> Self {
-        // One entry per MODULE, under the qname its package reads: a file
-        // named by its file name (LB.9b, `infra::main.go`) is its bare form
-        // (`infra::main`), so its stem still reads `_test` / dir-named, and
-        // its bare alias in `module_by_qname` is not a second member.
-        let mut modules: Vec<(String, NodeId)> = g
-            .symbols
-            .module_by_qname
-            .iter()
-            .filter(|(q, id)| g.nav.qname_by_id.get(*id) == Some(*q))
-            .map(|(q, id)| {
-                let bare = g.nav.name_by_id.get(id).and_then(|n| bare_module_qname(q, n));
-                (bare.unwrap_or_else(|| q.clone()), *id)
-            })
-            .collect();
-        modules.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.0.cmp(&b.1.0)));
+    /// directory, and the imports by importing file and local name, an
+    /// un-aliased one under the name `package_names` ([`go_package_names`])
+    /// gives its dir.
+    fn build(
+        g: &RepoGraph,
+        imports: &[ImportStmt],
+        package_names: BTreeMap<String, String>,
+    ) -> Self {
+        let modules = go_file_modules(g);
         let mut by_dir: HashMap<String, Vec<NodeId>> = HashMap::new();
         let mut dir_named: HashMap<String, NodeId> = HashMap::new();
         let mut dir_of: HashMap<NodeId, String> = HashMap::new();
@@ -1167,14 +1245,16 @@ impl GoPackages {
             let ImportTarget::Module { path, alias } = &stmt.target else {
                 continue;
             };
-            // An empty path (the repository-root package, CI.3) arrives
-            // with its binding name as the alias; without one it names
-            // nothing.
+            // DF.15: an un-aliased import is named by its package clause
+            // (an empty path, the repository-root package of CI.3, by the
+            // clause only; without one it names nothing).
             let local = match alias.as_deref() {
                 Some("_") | Some(".") => continue,
                 Some(a) => a,
-                None if path.is_empty() => continue,
-                None => path.rsplit("::").next().unwrap_or(path),
+                None => match go_binding_name(&package_names, path) {
+                    Some(name) => name,
+                    None => continue,
+                },
             };
             if let Some(&from) = g.symbols.module_by_qname.get(&stmt.from_module) {
                 import_path.entry(from).or_default().insert(local.to_string(), path.clone());
@@ -1196,12 +1276,22 @@ impl GoPackages {
             dir_of,
             tests,
             import_path,
+            package_names,
             sibling_calls: std::cell::Cell::new(0),
             method_file,
             global_types: std::cell::RefCell::new(HashMap::new()),
             tally: ReceiverTally::default(),
             promoted: GoPromoted::default(),
         }
+    }
+
+    /// DF.15: the name an un-aliased import of `path` (a package dir qname,
+    /// LA.13b; `""` = the repository root) binds: the dir's `package` clause,
+    /// else, outside the root, the path's last `::` segment (HEAD's name; a
+    /// path that is no dir, or a dir whose files disagree). `None` for a root
+    /// package with no clause, which binds nothing.
+    pub(crate) fn binding_name<'a>(&'a self, path: &'a str) -> Option<&'a str> {
+        go_binding_name(&self.package_names, path)
     }
 
     /// The file an import of package directory `dir` by file `importer`
@@ -1351,6 +1441,7 @@ impl GoPackages {
             sibling_calls: self.sibling_calls.get(),
             root_imports: imports.root_imports,
             root_bound: imports.root_bound,
+            clause_named: imports.clause_named,
         }
     }
 
@@ -2379,6 +2470,7 @@ fn bind_go_embeds(
     g: &RepoGraph,
     embeds: &[UnresolvedRef],
     imports: &[ImportStmt],
+    package_names: &BTreeMap<String, String>,
 ) -> GoEmbedBinds {
     let mut out =
         GoEmbedBinds { bound: Vec::new(), unbound: Vec::new(), stats: GoEmbedStats::default() };
@@ -2406,7 +2498,9 @@ fn bind_go_embeds(
         by_dir_name.entry((dir, name.as_str())).or_default().push((n.id, kind));
         by_name.entry(name.as_str()).or_default().push((dir, n.id, kind));
     }
-    // (importing file's MODULE qname, local package name) -> import path.
+    // (importing file's MODULE qname, local package name) -> import path; an
+    // un-aliased import under its package clause name, as GoPackages names
+    // it (DF.15).
     let mut import_paths: HashMap<(&str, &str), &str> = HashMap::new();
     for stmt in imports {
         let ImportTarget::Module { path, alias } = &stmt.target else {
@@ -2415,8 +2509,10 @@ fn bind_go_embeds(
         let local = match alias.as_deref() {
             Some("_") | Some(".") => continue,
             Some(a) => a,
-            None if path.is_empty() => continue,
-            None => path.rsplit("::").next().unwrap_or(path),
+            None => match go_binding_name(package_names, path) {
+                Some(name) => name,
+                None => continue,
+            },
         };
         import_paths.insert((stmt.from_module.as_str(), local), path.as_str());
     }
@@ -5449,8 +5545,9 @@ mod tests {
     }
 
     /// CI.3: an import of the repository-root package is recorded (path
-    /// `""`, bound under the import path's last element), so a root-package
-    /// one-method interface pairs with a type whose package imports the root.
+    /// `""`; DF.15: no alias, bound under the root's `package` clause), so a
+    /// root-package one-method interface pairs with a type whose package
+    /// imports the root.
     #[test]
     fn go_implicit_root_package_reached_through_its_import() {
         let root = "package scope\n\ntype Closer interface {\n\tClose()\n}\n";
@@ -5459,7 +5556,7 @@ mod tests {
         let parses = go_sources(&[("closer.go", root), ("b/file.go", b)]);
         assert_eq!(
             parses[1].imports.iter().map(|i| &i.target).collect::<Vec<_>>(),
-            [&ImportTarget::Module { path: String::new(), alias: Some("scope".to_string()) }],
+            [&ImportTarget::Module { path: String::new(), alias: None }],
             "the root import is recorded"
         );
         let GoPasses { g, implicit: stats, packages, .. } = build_go_passes(repo(), parses);
@@ -5472,7 +5569,7 @@ mod tests {
         );
         assert_eq!(
             packages.root_marker().as_deref(),
-            Some("[go-package] root-package imports=1 bound=1")
+            Some("[go-package] root-package imports=1 bound=1 clause_named=1")
         );
         assert_eq!(
             filtered(&stats).as_deref(),
@@ -5631,6 +5728,7 @@ mod tests {
                 sibling_calls: 2,
                 root_imports: 0,
                 root_bound: 0,
+                clause_named: 0,
             }
         );
         assert_eq!(
@@ -5772,7 +5870,7 @@ mod tests {
         build_symbol_table(&mut g);
         let embeds: Vec<UnresolvedRef> =
             refs.into_iter().filter(|r| is_go_embed(&g.nav, r)).collect();
-        let binds = bind_go_embeds(&g, &embeds, &imports);
+        let binds = bind_go_embeds(&g, &embeds, &imports, &go_package_names(&g));
         let promoted = GoPromoted::build(&g, &binds.bound);
         (g, promoted)
     }
@@ -6652,7 +6750,7 @@ mod tests {
             let parses: Vec<FileParse> = order.iter().map(|&i| files[i].clone()).collect();
             let (mut g, imports, _, _) = merge_parses(repo(), parses);
             build_symbol_table(&mut g);
-            let pk = GoPackages::build(&g, &imports);
+            let pk = GoPackages::build(&g, &imports, go_package_names(&g));
             let importer = m("main");
             assert_eq!(pk.import_target("a::store", importer), DirImport::Bound(m("a::store::store")));
             assert_eq!(pk.import_target("b::util", importer), DirImport::Bound(m("b::util::y")));
@@ -6777,7 +6875,7 @@ mod tests {
             ],
         );
         build_symbol_table(&mut g2);
-        let pk = GoPackages::build(&g2, &imports);
+        let pk = GoPackages::build(&g2, &imports, go_package_names(&g2));
         assert_eq!(pk.by_dir["infra"].len(), 2);
         assert!(pk.tests.contains(&gid(node_kind::MODULE, "infra::main_test.go")));
         assert_eq!(

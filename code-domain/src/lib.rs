@@ -1506,6 +1506,13 @@ pub enum NavFact {
     /// [`endpoint::const_placeholder`]s a router-group prefix names: a
     /// constant of another file of the package, or of an imported package.
     GoStringConst { name: String, value: String },
+    /// Go (DF.15): this file MODULE's `package` clause names the package
+    /// `name` (`package store` in `internal/v2store/store.go`). Go binds an
+    /// un-aliased import under the imported package's declared name, which
+    /// its import path only suggests; the Go build (`GoPackages::build`)
+    /// reads the clauses of a directory's non-test files as the name an
+    /// import of that directory binds.
+    GoPackageName { name: String },
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,

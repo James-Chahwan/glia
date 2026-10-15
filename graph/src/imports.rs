@@ -648,12 +648,17 @@ pub(crate) fn resolve_imports_python(
 /// file is the importer binds nothing and skips the tail fallback, which
 /// could only guess a same-named package elsewhere.
 ///
-/// CI.3: an empty path is the repository-root package (dir `""`), whose
-/// binding name the parser wrote down as the alias (the import path's last
-/// element, or the explicit alias). It binds the root dir's first non-test
-/// file by qname (no file is named after the root dir), rule `package_dir`;
-/// with no root `.go` file it binds nothing (the tail fallback has no name to
-/// look up).
+/// CI.3: an empty path is the repository-root package (dir `""`). It binds
+/// the root dir's first non-test file by qname (no file is named after the
+/// root dir), rule `package_dir`; with no root `.go` file it binds nothing
+/// (the tail fallback has no name to look up).
+///
+/// DF.15: the importer binds an aliased import under its alias, an
+/// un-aliased one under the imported package's `package` clause
+/// ([`GoPackages::binding_name`]: `store` for `internal/v2store` declaring
+/// `package store`, `nats` for a root package of module `.../nats.go`),
+/// else the path's last segment; a root package with no clause binds no
+/// name.
 ///
 /// Returns what the `[go-package]` markers print (LA.13b, CI.3).
 pub(crate) fn resolve_imports_go(
@@ -703,11 +708,18 @@ pub(crate) fn resolve_imports_go(
             continue;
         };
         import_edge(g, from_mod_id, target_id, rule, stmt.line);
-        let bound = alias
-            .clone()
-            .unwrap_or_else(|| path.rsplit("::").next().unwrap_or(path).to_string());
-        // A root import without a name (only a hand-built ImportStmt; the
-        // parser always names one) binds nothing.
+        let bound = match alias {
+            Some(alias) => alias.clone(),
+            None => {
+                // A root package without a clause binds no name.
+                let Some(name) = packages.binding_name(path) else {
+                    continue;
+                };
+                let derived = if root { None } else { path.rsplit("::").next() };
+                stats.clause_named += usize::from(derived != Some(name));
+                name.to_string()
+            }
+        };
         if bound.is_empty() {
             continue;
         }
@@ -730,6 +742,9 @@ pub(crate) struct GoImportStats {
     /// Of `root_imports`: bound to a root-dir file (counted in `dir_bound`
     /// too).
     pub(crate) root_bound: usize,
+    /// DF.15: un-aliased imports bound under a `package` clause name the
+    /// path does not spell (a bound root import always: its path has none).
+    pub(crate) clause_named: usize,
 }
 
 /// Ruby imports: `require 'foo/bar'` gives a slash-delimited path. Convert

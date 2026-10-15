@@ -249,3 +249,157 @@ fn root_package_import_binds_calls() {
     let invoke = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "client::Client::Invoke");
     assert!(has_edge(&g, main, invoke, edge_category::CALLS), "c.Invoke() on c := app.NewClient()");
 }
+
+// ---- DF.15: an un-aliased import binds the package clause -----------------
+
+/// [`parse`] under go.mod module `prefix`.
+fn parse_under(prefix: &str, rel: &str, src: &str) -> FileParse {
+    let qname = rel.strip_suffix(".go").unwrap_or(rel).replace('/', "::");
+    parse_file(src, rel, &qname, prefix, repo()).unwrap()
+}
+
+fn method(qname: &str) -> NodeId {
+    NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, qname)
+}
+
+/// The `go-package-clause-imports` fixture: `internal/v2store` declares
+/// `package store` and the root package of module `github.com/acme/nats.go`
+/// declares `package nats`, so `store.Open()` and `nats.Connect(..)` bind
+/// through the clause names (HEAD bound `v2store` and `nats.go`, which no
+/// call spells: CALLS 0/2). The dir's external `package store_test` file
+/// does not make its clause ambiguous.
+#[test]
+fn clause_names_the_dir_binding() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("bench/substrate-gap/fixtures/go-package-clause-imports");
+    let parses = ["cmd/app/main.go", "internal/v2store/store.go", "internal/v2store/store_test.go", "nats.go"]
+        .iter()
+        .map(|rel| {
+            let src = std::fs::read_to_string(root.join(rel)).unwrap();
+            parse_under("github.com/acme/nats.go", rel, &src)
+        })
+        .collect();
+    let g = build_go(repo(), parses).unwrap();
+    let main = func("cmd::app::main::main");
+    assert_eq!(
+        targets(&g, module("cmd::app::main"), edge_category::IMPORTS),
+        vec![module("nats"), module("internal::v2store::store")]
+    );
+    assert!(has_edge(&g, main, func("nats::Connect"), edge_category::CALLS), "nats.Connect(..)");
+    assert!(
+        has_edge(&g, main, func("internal::v2store::store::Open"), edge_category::CALLS),
+        "store.Open()"
+    );
+    assert!(g.unresolved_calls.is_empty(), "leftover: {:?}", g.unresolved_calls);
+}
+
+/// An external test package's `package lib_test` clause never names its
+/// directory: `lib/v2` (clause `lib`) binds `lib` for an importer and for
+/// the dir's own external test, which imports it.
+#[test]
+fn test_package_clause_ignored() {
+    let parses = vec![
+        parse("lib/v2/a.go", "package lib\n\nfunc A() {}\n"),
+        parse(
+            "lib/v2/a_test.go",
+            "package lib_test\n\nimport \"example.com/app/lib/v2\"\n\nfunc TestA() {\n\tlib.A()\n}\n",
+        ),
+        parse("cmd/main.go", "package main\n\nimport \"example.com/app/lib/v2\"\n\nfunc main() {\n\tlib.A()\n}\n"),
+    ];
+    let g = build_go(repo(), parses).unwrap();
+    let a = func("lib::v2::a::A");
+    assert!(has_edge(&g, func("cmd::main::main"), a, edge_category::CALLS), "lib.A() from cmd");
+    assert!(has_edge(&g, func("lib::v2::a_test::TestA"), a, edge_category::CALLS), "lib.A() from the x_test");
+}
+
+/// Two clauses in one dir (build-tag variants) name no package: an import
+/// falls back to the dir's last segment (HEAD's name), and neither clause
+/// binds.
+#[test]
+fn conflicting_clauses_fall_back() {
+    let parses = vec![
+        parse("pkg/multi/a.go", "package alpha\n\nfunc A() {}\n"),
+        parse("pkg/multi/b.go", "package beta\n\nfunc B() {}\n"),
+        parse(
+            "cmd/main.go",
+            "package main\n\nimport \"example.com/app/pkg/multi\"\n\nfunc main() {\n\tmulti.A()\n\
+             \talpha.B()\n}\n",
+        ),
+    ];
+    let g = build_go(repo(), parses).unwrap();
+    let main = func("cmd::main::main");
+    assert!(has_edge(&g, main, func("pkg::multi::a::A"), edge_category::CALLS), "multi.A()");
+    assert!(
+        !has_edge(&g, main, func("pkg::multi::b::B"), edge_category::CALLS),
+        "alpha.B(): a clause of an ambiguous dir binds nothing"
+    );
+}
+
+/// A `package main` file beside a library's files (a `//go:build ignore`
+/// generator) does not make the dir ambiguous: an importable package is
+/// never `main`, so the library's clause names the dir.
+#[test]
+fn main_clause_beside_a_library_is_dropped() {
+    let parses = vec![
+        parse("tools/v1/make.go", "package gen\n\nfunc Make() {}\n"),
+        parse("tools/v1/generate.go", "//go:build ignore\n\npackage main\n\nfunc main() {}\n"),
+        parse("cmd/main.go", "package main\n\nimport \"example.com/app/tools/v1\"\n\nfunc main() {\n\tgen.Make()\n}\n"),
+    ];
+    let g = build_go(repo(), parses).unwrap();
+    assert!(has_edge(&g, func("cmd::main::main"), func("tools::v1::make::Make"), edge_category::CALLS));
+}
+
+/// An aliased import binds its alias only, its clause or dir name never
+/// (HEAD behaviour), the root package's alias included.
+#[test]
+fn aliased_import_unchanged() {
+    let parses = vec![
+        parse("client.go", "package app\n\nfunc Dial() {}\n"),
+        parse("internal/v2store/store.go", "package store\n\nfunc Open() {}\n\nfunc Close() {}\n"),
+        parse(
+            "cmd/main.go",
+            "package main\n\nimport (\n\trp \"example.com/app\"\n\tst \"example.com/app/internal/v2store\"\n)\n\n\
+             func main() {\n\trp.Dial()\n\tst.Open()\n\tstore.Close()\n\tapp.Dial()\n}\n",
+        ),
+    ];
+    let g = build_go(repo(), parses).unwrap();
+    let main = func("cmd::main::main");
+    assert!(has_edge(&g, main, func("client::Dial"), edge_category::CALLS), "rp.Dial()");
+    assert!(has_edge(&g, main, func("internal::v2store::store::Open"), edge_category::CALLS), "st.Open()");
+    assert!(
+        !has_edge(&g, main, func("internal::v2store::store::Close"), edge_category::CALLS),
+        "store.Close(): the import is aliased `st`"
+    );
+    let dials = targets(&g, main, edge_category::CALLS).iter().filter(|&&t| t == func("client::Dial")).count();
+    assert_eq!(dials, 1, "app.Dial(): the root import is aliased `rp`");
+}
+
+/// CI.2a's embed binding names an un-aliased import by the same clause name:
+/// the root package of module `example.com/kit.go` declares `package kit`, so
+/// `struct{ kit.Base }` embeds `Base` (INHERITS_FROM) and a self call of its
+/// method is promoted (HEAD named the import `kit.go`: neither bound).
+#[test]
+fn root_package_embed_binds_through_clause() {
+    let prefix = "example.com/kit.go";
+    let parses = vec![
+        parse_under(prefix, "base.go", "package kit\n\ntype Base struct{}\n\nfunc (b *Base) Hello() {}\n"),
+        parse_under(
+            prefix,
+            "cmd/x.go",
+            "package main\n\nimport \"example.com/kit.go\"\n\ntype T struct {\n\tkit.Base\n}\n\n\
+             func (t *T) Run() {\n\tt.Hello()\n}\n",
+        ),
+    ];
+    let g = build_go(repo(), parses).unwrap();
+    let (t, base) = (
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, "cmd::x::T"),
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STRUCT, "base::Base"),
+    );
+    assert!(has_edge(&g, t, base, edge_category::INHERITS_FROM), "T embeds kit.Base");
+    assert!(
+        has_edge(&g, method("cmd::x::T::Run"), method("base::Base::Hello"), edge_category::CALLS),
+        "t.Hello() promoted from kit.Base"
+    );
+}

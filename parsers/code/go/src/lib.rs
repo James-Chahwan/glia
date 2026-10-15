@@ -93,6 +93,11 @@ pub fn parse_file_with_modules(
         .unwrap_or(package_qname);
     acc.nav
         .record(module_id, module_simple, package_qname, node_kind::MODULE, None);
+    // DF.15: the `package` clause names the package an un-aliased import of
+    // this file's directory binds; the graph reads it (`GoPackages::build`).
+    if let Some(name) = package_clause_name(root, src) {
+        acc.nav.record_fact(module_id, NavFact::GoPackageName { name: name.to_string() });
+    }
 
     // Struct/interface name → NodeId map for this file. Populated in a first
     // pass so method declarations can attach to their receiver struct.
@@ -1568,15 +1573,11 @@ fn record_import(
     let (qname, alias) = match local {
         // CI.3: the repo-root module's own path (`import
         // "google.golang.org/grpc"` with that module at the repo root) names
-        // the repository-root package, dir `""`, recorded like any package.
-        // The graph names every other dir import by the dir's last segment,
-        // which the root dir does not have, so the binding name is written
-        // down here: the explicit alias (`_` / `.` kept as is), else the
-        // import path's last element.
-        Some(q) if q.is_empty() => {
-            let name = alias.unwrap_or_else(|| go_import_local_name(&path_str).to_string());
-            (q, Some(name))
-        }
+        // the repository-root package, dir `""`, recorded like any package,
+        // with its alias as written (`_` / `.` kept). DF.15: an un-aliased
+        // import binds the package's `package` clause, which the graph reads
+        // from the root dir's files (`GoPackages::binding_name`), so no name
+        // is derived from the path here.
         Some(q) => (q, alias),
         // External import (stdlib or third-party). Keep the raw path for now;
         // cross-repo resolution is a v0.4.4 concern.
@@ -1593,14 +1594,16 @@ fn record_import(
     });
 }
 
-/// CI.3: the one name an un-aliased import of the repository-root package
-/// binds: the first of [`import_local_names`], the path's last element with a
-/// `/vN` major-version element skipped (`google.golang.org/grpc` -> `grpc`,
-/// `example.com/x/y/v3` -> `y`). A root package whose `package` clause
-/// differs from it (module `github.com/nats-io/nats.go`, `package nats`)
-/// binds under the path's name, which its callers do not spell.
-fn go_import_local_name(path: &str) -> &str {
-    import_local_names(path).first().copied().unwrap_or(path)
+/// DF.15: the package name the file's `package` clause declares (`package
+/// store` -> `store`), `None` for a file without one (a parse error). Go binds
+/// an un-aliased import under this name, never the import path's last
+/// element (module `github.com/nats-io/nats.go` declares `package nats`).
+fn package_clause_name<'a>(root: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    let clause = named_kids(Some(root)).into_iter().find(|c| c.kind() == "package_clause")?;
+    let ident = named_kids(Some(clause))
+        .into_iter()
+        .find(|c| c.kind() == "package_identifier")?;
+    Some(text_of(ident, src)).filter(|name| !name.is_empty())
 }
 
 /// LA.18d: the name(s) an un-aliased Go import can bind. Go binds the imported
@@ -8231,9 +8234,11 @@ func Routes(r *gin.Engine) {
     }
 
     /// CI.3: an import of the repository-root module's own path is recorded
-    /// as path `""` (the root package dir), bound under the import path's
-    /// last element (a `/vN` skipped) or the explicit alias, `_` included; it
-    /// is in-repo, so no external package name.
+    /// as path `""` (the root package dir), with the explicit alias as
+    /// written, `_` included; it is in-repo, so no external package name.
+    /// DF.15: an un-aliased one carries no alias (the graph binds the root
+    /// dir's `package` clause), where CI.3 wrote the import path's last
+    /// element.
     #[test]
     fn root_package_import_is_recorded() {
         let module = |alias: Option<&str>| ImportTarget::Module {
@@ -8247,7 +8252,7 @@ func Routes(r *gin.Engine) {
         assert_eq!(
             targets,
             [
-                &module(Some("app")),
+                &module(None),
                 &module(Some("rp")),
                 &module(Some("_")),
                 &ImportTarget::Module { path: "store".to_string(), alias: None },
@@ -8259,10 +8264,44 @@ func Routes(r *gin.Engine) {
 
         let (imports, external) =
             imports_under("example.com/app/v3", "package main\n\nimport \"example.com/app/v3\"\n");
-        assert_eq!(imports.iter().map(|i| &i.target).collect::<Vec<_>>(), [&module(Some("app"))]);
+        assert_eq!(imports.iter().map(|i| &i.target).collect::<Vec<_>>(), [&module(None)]);
         assert!(external.is_empty());
-        assert_eq!(go_import_local_name("google.golang.org/grpc"), "grpc");
-        assert_eq!(go_import_local_name("example.com/x/y/v3"), "y");
+        assert_eq!(import_local_names("google.golang.org/grpc").first(), Some(&"grpc"));
+        assert_eq!(import_local_names("example.com/x/y/v3").first(), Some(&"y"));
+    }
+
+    /// DF.15: the file MODULE records its `package` clause as a
+    /// `GoPackageName` fact, the clause's name and never the dir's
+    /// (`package store` in `internal/v2store/store.go`); an external test
+    /// package records its own `_test` name.
+    #[test]
+    fn package_clause_is_recorded() {
+        let names = |source: &str, path: &str, qname: &str| {
+            let parse = parse_file(source, path, qname, "example.com/app", repo()).unwrap();
+            let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, qname);
+            parse
+                .nav
+                .nav_facts
+                .get(&module)
+                .into_iter()
+                .flatten()
+                .filter_map(|f| match f {
+                    NavFact::GoPackageName { name } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let store = "// Package store keeps things.\npackage store\n\nfunc Open() int { return 1 }\n";
+        assert_eq!(
+            names(store, "internal/v2store/store.go", "internal::v2store::store"),
+            ["store"]
+        );
+        assert_eq!(
+            names("package store_test\n\nfunc helper() {}\n", "internal/v2store/store_test.go",
+                "internal::v2store::store_test"),
+            ["store_test"]
+        );
+        assert!(names("func broken() {}\n", "x/x.go", "x::x").is_empty(), "no clause, no fact");
     }
 
     #[test]
@@ -8536,6 +8575,8 @@ type Msg struct{}
         assert_eq!(
             parse.nav.nav_facts[&module],
             vec![
+                // DF.15: the package clause, recorded with the MODULE.
+                NavFact::GoPackageName { name: "app".into() },
                 alias("Chat_StreamServer", "BidiStreamingServer[Msg,Reply]"),
                 alias("Key", "string"),
                 alias("Legacy", "Chat_StreamServer"),
