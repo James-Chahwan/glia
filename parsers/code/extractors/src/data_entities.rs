@@ -31,6 +31,9 @@
 //!   - Driver collection calls: `.collection('x')` (Node / Firestore),
 //!     `.Collection("x")` (Go mongo-driver / Firestore), `.getCollection("x")`
 //!     (Java), `.GetCollection<T>("x" | nameof(T))` (C# MongoDB.Driver)
+//!   - sqflite (DH.11): the table-named helpers `db.query('users')`,
+//!     `.queryCursor`, `.insert`, `.update`, `.delete` in a Dart file importing
+//!     `package:sqflite/` or `package:sqflite_common` ([`sqflite_table_calls`])
 //!   - Cypher: `MATCH (x:<Label>)` / `MERGE (x:<Label>)` (label-only; query
 //!     parsing punted), read only from Cypher-shaped string literals joined
 //!     like SQL (LA.28, [`scan_cypher_labels`]): a Rust `match`, SQL `MERGE
@@ -61,6 +64,7 @@
 //!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] literals='` (LG.3b)
 //!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] cypher '` (LA.28)
 //!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] decl '` (LA.42)
+//!   `GLIA_DATA_DEBUG=1 ... 2>&1 | grep '\[data-entity\] sqflite '` (DH.11)
 
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -334,6 +338,17 @@ pub fn extract_data_entity_access(
     for hit in collection_calls(source) {
         stats.note_collection(&hit.name);
         sink.emit_site(DataEntityFlavor::Nosql, &hit.name, hit.pos, hit.verb);
+    }
+    // DH.11: a sqflite helper names its table with no SQL text. sqflite has
+    // no model layer, so the table is the identity, and the helper's verb is
+    // the access mode.
+    if let Some(hits) = sqflite_table_calls(source) {
+        for (table, at, verb) in &hits {
+            sink.emit_site(DataEntityFlavor::Sql, table, *at, *verb);
+        }
+        if debug_enabled() {
+            eprintln!("{}", sqflite_marker(&hits));
+        }
     }
     for name in scan_beanie_documents(source, &mut decl) {
         decl.funnel(&name);
@@ -2734,6 +2749,153 @@ fn collection_arg(source: &str, i: usize) -> Option<(String, usize)> {
 }
 
 // ----------------------------------------------------------------------------
+// sqflite (DH.11, pub.dev/packages/sqflite): the Flutter SQLite plugin's
+// `Database` / `Transaction` / `Batch` helpers take the table as argument #0,
+// `db.query('users')`, `db.insert('users', {..})`, with no SQL text for the
+// statement scan to read. The receiver is any expression; the import is the
+// gate.
+// ----------------------------------------------------------------------------
+
+/// The imports that make a file a sqflite user: the plugin, and the shared
+/// core (`sqflite_common`, `sqflite_common_ffi`).
+const SQFLITE_IMPORTS: &[&str] = &["package:sqflite/", "package:sqflite_common"];
+
+/// The table-named helpers and the access each one is.
+const SQFLITE_HELPERS: &[(&str, AccessVerb)] = &[
+    (".query(", AccessVerb::Read),
+    (".queryCursor(", AccessVerb::Read),
+    (".insert(", AccessVerb::Write),
+    (".update(", AccessVerb::Write),
+    (".delete(", AccessVerb::Write),
+];
+
+/// `(table, offset of the table name, verb)` of every sqflite helper call in
+/// `source`, in source order, or `None` when the file imports no sqflite.
+/// Only a leading single-line literal names a table (LA.42): `db.query(table)`
+/// and `'$table'` name nothing. A call is refused when its receiver ends in
+/// something no expression ends in, when its `.` sits in a string literal or
+/// on a comment line (glia's own sources hold Dart samples in Rust literals),
+/// and, for `.update(`, when argument #1 is a closure: that is `Map.update`.
+fn sqflite_table_calls(source: &str) -> Option<Vec<(String, usize, AccessVerb)>> {
+    if !SQFLITE_IMPORTS.iter().any(|g| source.contains(g)) {
+        return None;
+    }
+    let b = source.as_bytes();
+    let mut literals: Option<Vec<Range<usize>>> = None;
+    let mut out = Vec::new();
+    for &(needle, verb) in SQFLITE_HELPERS {
+        let mut from = 0;
+        while let Some(rel) = source[from..].find(needle) {
+            let pos = from + rel;
+            from = pos + needle.len();
+            // `db.`, `_db!.`, `db?.`, `(await database).`, `rows[0].`, and a
+            // cascade's second `.`.
+            let receiver_ok = pos.checked_sub(1).is_some_and(|p| {
+                is_word_byte(b[p]) || matches!(b[p], b')' | b']' | b'!' | b'?' | b'.')
+            });
+            if !receiver_ok {
+                continue;
+            }
+            let Some((table, at)) = sqflite_table_arg(source, from, needle == ".update(") else {
+                continue;
+            };
+            let lits = literals.get_or_insert_with(|| literal_spans(source));
+            if in_spans(lits, pos) || line_opens_with(b, pos, &[b"//", b"/*", b"*"]) {
+                continue;
+            }
+            out.push((table, at, verb));
+        }
+    }
+    out.sort_by_key(|&(_, at, _)| at);
+    Some(out)
+}
+
+/// The table a sqflite helper's argument #0 (starting at `i`, just past the
+/// `(`) spells, cleaned by [`canonical_sql_name`] (`main.users` -> `users`),
+/// and the offset of that name in the source. The literal must end the
+/// argument. `needs_values`: argument #1 must follow and not be a closure
+/// (`counts.update('k', (n) => n + 1)` is `Map.update`).
+fn sqflite_table_arg(source: &str, i: usize, needs_values: bool) -> Option<(String, usize)> {
+    let b = source.as_bytes();
+    let mut k = i;
+    while b.get(k).is_some_and(u8::is_ascii_whitespace) {
+        k += 1;
+    }
+    let (LeadingLit::Lit(name), past) = literal_after(&source[k..], |_| false) else {
+        return None;
+    };
+    let mut j = k + past;
+    while b.get(j).is_some_and(u8::is_ascii_whitespace) {
+        j += 1;
+    }
+    match b.get(j) {
+        Some(b')') if !needs_values => {}
+        Some(b',') if !(needs_values && closure_at(b, j + 1)) => {}
+        _ => return None,
+    }
+    let table = canonical_sql_name(name)?;
+    let at = k + 1 + name.rfind(table.as_str())?;
+    Some((table, at))
+}
+
+/// True when the argument starting at `i` is a Dart closure: `(n) => ..` or
+/// `(n) { .. }`, its parameter list closing within 256 bytes.
+fn closure_at(b: &[u8], i: usize) -> bool {
+    let mut k = i;
+    while b.get(k).is_some_and(u8::is_ascii_whitespace) {
+        k += 1;
+    }
+    if b.get(k) != Some(&b'(') {
+        return false;
+    }
+    let Some(close) = b[k..].iter().take(256).position(|&c| c == b')') else {
+        return false;
+    };
+    let mut j = k + close + 1;
+    while b.get(j).is_some_and(u8::is_ascii_whitespace) {
+        j += 1;
+    }
+    b[j..].starts_with(b"=>") || b.get(j) == Some(&b'{')
+}
+
+/// DH.11: the outer span of every string literal in `source`, source order
+/// ([`string_literals`]), for the needle scanners that run with no path and
+/// so no CJ.1 guard: a needle whose first byte is in a span is no call.
+pub(crate) fn literal_spans(source: &str) -> Vec<Range<usize>> {
+    string_literals(source).into_iter().map(|l| l.outer).collect()
+}
+
+/// True when byte `pos` sits inside one of `spans` ([`literal_spans`]).
+pub(crate) fn in_spans(spans: &[Range<usize>], pos: usize) -> bool {
+    let i = spans.partition_point(|r| r.start <= pos);
+    i > 0 && pos < spans[i - 1].end
+}
+
+/// True when the line holding `pos` opens, before `pos`, with one of
+/// `prefixes`: a comment line (`//`, `/*`, a block comment's `*`, `#`).
+pub(crate) fn line_opens_with(b: &[u8], pos: usize, prefixes: &[&[u8]]) -> bool {
+    let start = b[..pos].iter().rposition(|&c| c == b'\n').map_or(0, |p| p + 1);
+    let line = b[start..pos].trim_ascii_start();
+    prefixes.iter().any(|p| line.starts_with(p))
+}
+
+/// `[data-entity] sqflite tables=<distinct tables> sites=<calls>`: one line
+/// per file that imports sqflite, under `GLIA_DATA_DEBUG`.
+fn sqflite_marker(hits: &[(String, usize, AccessVerb)]) -> String {
+    let mut tables: Vec<&str> = Vec::new();
+    for (table, _, _) in hits {
+        if !tables.contains(&table.as_str()) {
+            tables.push(table);
+        }
+    }
+    format!(
+        "[data-entity] sqflite tables={} sites={}",
+        tables.len(),
+        hits.len()
+    )
+}
+
+// ----------------------------------------------------------------------------
 // Beanie (Pydantic + Motor): `class Foo(Document): class Settings: name = "..."`.
 // The collection name lives on a `Settings` inner class. Scan for `class
 // Settings:` and read the `name = '<value>'` line of its block, within the
@@ -4557,5 +4719,109 @@ console.log("SELECT email FROM users WHERE email LIKE 'demo-%@x.com' ORDER BY em
                 rejected_shape: 1
             }
         );
+    }
+
+    /// DH.11: the matrix/dart/db probe's `lib/repo.dart`.
+    const SQFLITE_REPO: &str = r#"import 'package:sqflite/sqflite.dart';
+
+Future<List<Map<String, Object?>>> allUsers(Database db) {
+  return db.query('users');
+}
+
+Future<int> addUser(Database db, String email) {
+  return db.insert('users', {'email': email});
+}
+"#;
+
+    fn named_sites(src: &str) -> Vec<(String, AccessVerb)> {
+        sites_of(src).into_iter().map(|(n, _, v)| (n, v)).collect()
+    }
+
+    #[test]
+    fn sqflite_helpers_name_tables() {
+        use AccessVerb::{Read, Write};
+        let repo = RepoId(1);
+        let (out, access) = extract_data_entity_access(SQFLITE_REPO, module_id(repo), repo);
+        assert_eq!(entity_qnames(&out), ["data_entity:sql:users"]);
+        assert!(access.declared.is_empty(), "a helper call is a site");
+        let hits = sqflite_table_calls(SQFLITE_REPO).unwrap_or_default();
+        assert_eq!(sqflite_marker(&hits), "[data-entity] sqflite tables=1 sites=2");
+        assert_eq!(
+            sites_of(SQFLITE_REPO),
+            [
+                ("users".to_string(), "users".to_string(), Read),
+                ("users".to_string(), "users".to_string(), Write),
+            ]
+        );
+        // Every helper, on a Database / Transaction / Batch receiver of any
+        // shape (`txn`, `_db!`, `db?`, a cascade, a parenthesised await).
+        let src = "import 'package:sqflite_common_ffi/sqflite_ffi.dart';\n\
+                   final rows = await txn.queryCursor(\"orders\", where: 'id = ?');\n\
+                   await _db!.update('carts', values, where: 'id = ?');\n\
+                   await db?.delete('sessions', where: 'id = ?');\n\
+                   batch..insert('audit', row)..delete('main.tmp');\n\
+                   await (await database).query('items');\n";
+        let want: Vec<(String, AccessVerb)> = [
+            ("orders", Read),
+            ("carts", Write),
+            ("sessions", Write),
+            ("audit", Write),
+            ("tmp", Write),
+            ("items", Read),
+        ]
+        .into_iter()
+        .map(|(n, v)| (n.to_string(), v))
+        .collect();
+        assert_eq!(named_sites(src), want);
+        for (name, at, _) in sites_of(src) {
+            assert_eq!(name, at, "the site's offset is the table name");
+        }
+    }
+
+    #[test]
+    fn sqflite_needs_its_import() {
+        let src = SQFLITE_REPO.replace("package:sqflite/sqflite.dart", "package:app/db.dart");
+        let repo = RepoId(1);
+        let (out, access) = extract_data_entity_access(&src, module_id(repo), repo);
+        assert!(entity_qnames(&out).is_empty(), "{:?}", entity_qnames(&out));
+        assert!(access.sites.is_empty());
+        // A look-alike package is not sqflite either.
+        let src = SQFLITE_REPO.replace("package:sqflite/", "package:sqflite_wrapper/");
+        assert!(named_sites(&src).is_empty());
+        assert_eq!(sqflite_table_calls(&src), None, "no import, no marker");
+    }
+
+    #[test]
+    fn sqflite_variable_table_names_nothing() {
+        let src = r#"import 'package:sqflite/sqflite.dart';
+
+const table = 'users';
+Future<void> f(Database db, String tableName, Map<String, int> counts, List<String> l) async {
+  await db.query(table);
+  await db.insert(tableName, {'a': 1});
+  await db.query('$table');
+  await db.delete('${table}_old');
+  await db.query(r'users');
+  counts.update('users', (n) => n + 1);
+  counts.update('orders', (n) { return n + 1; });
+  rulesData.update('linter', (dynamic value) => {'rules': rules});
+  l.insert(0, 'users');
+  // await db.query('users');
+  /// Calls `db.delete('sessions')`.
+  final s = "db.insert('carts', row)";
+}
+"#;
+        assert!(named_sites(src).is_empty(), "{:?}", named_sites(src));
+        let repo = RepoId(1);
+        let (out, _) = extract_data_entity_access(src, module_id(repo), repo);
+        assert!(entity_qnames(&out).is_empty(), "{:?}", entity_qnames(&out));
+    }
+
+    #[test]
+    fn sqflite_needle_in_a_host_literal_names_nothing() {
+        // glia's own sources hold Dart samples in Rust literals: a test's
+        // embedded probe is no access.
+        let rust = format!("const PROBE: &str = r#\"{SQFLITE_REPO}\"#;\n");
+        assert!(named_sites(&rust).is_empty(), "{:?}", named_sites(&rust));
     }
 }

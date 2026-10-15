@@ -13,7 +13,7 @@
 //!   sends it to [`extract_sql_migration`]. The gate is deliberately narrow:
 //!   a repo full of query fixtures (`tests/data/q.sql`) is never read.
 //! * Migration DSLs in code files: Alembic, Django, Rails, knex / Sequelize /
-//!   TypeORM, Laravel, EF Core. [`scan_migration_dsl`] runs from
+//!   TypeORM, Laravel, EF Core, Ecto (DH.11). [`scan_migration_dsl`] runs from
 //!   `data_entities::extract_data_entity_nodes` on every code file, which is
 //!   right: `create_table :orders` declares a table wherever it appears.
 //!
@@ -24,8 +24,8 @@
 use glia_core::{NodeId, RepoId};
 
 use crate::data_entities::{
-    DataEntityFlavor, DataEntityNodes, EntitySink, blank_sql_noise, canonical_sql_name,
-    scan_sql_ddl, sql_file_tables,
+    DataEntityFlavor, DataEntityNodes, EntitySink, blank_sql_noise, canonical_sql_name, in_spans,
+    line_opens_with, literal_spans, scan_sql_ddl, sql_file_tables,
 };
 
 /// True when the walk should read `path` as a SQL migration. See
@@ -208,7 +208,7 @@ fn is_keyword_or_catalog(name: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DslTable {
     /// `alembic` | `django` | `rails` | `knex` | `sequelize` | `typeorm` |
-    /// `laravel` | `efcore`.
+    /// `laravel` | `efcore` | `ecto`.
     pub framework: &'static str,
     pub table: String,
 }
@@ -224,6 +224,10 @@ enum Arg {
     /// A keyword argument at the call's own depth: Django `name="Order"`
     /// (`=`), EF Core `table: "Users"` (`:`).
     Kw(&'static str, u8),
+    /// The first argument of the call the needle opens, an Elixir atom
+    /// (`:users`, `:"users"`) or a quoted string (`"users"`), ending at its
+    /// `,` / `)`: Ecto's `create table(:users)`, `create index(:users, [..])`.
+    Atom,
 }
 
 struct Dsl {
@@ -336,6 +340,36 @@ const DSLS: &[Dsl] = &[
             ("migrationBuilder.InsertData(", Arg::Kw("table", b':')),
         ],
     },
+    // Ecto (DH.11, hexdocs.pm/ecto_sql/Ecto.Migration.html): the DDL macro
+    // takes a `table(..)`, `index(..)` / `unique_index(..)` or
+    // `constraint(..)` struct, each naming its table first, written as
+    // `mix format` keeps it (`create table(:users) do`). The verb prefix and
+    // the `use Ecto.Migration` gate keep a schema's `schema "users"` and a
+    // bare `table(..)` helper out.
+    Dsl {
+        framework: "ecto",
+        gate: &["Ecto.Migration"],
+        needles: &[
+            ("create table(", Arg::Atom),
+            ("create_if_not_exists table(", Arg::Atom),
+            ("alter table(", Arg::Atom),
+            ("drop table(", Arg::Atom),
+            ("drop_if_exists table(", Arg::Atom),
+            ("rename table(", Arg::Atom),
+            ("create index(", Arg::Atom),
+            ("create unique_index(", Arg::Atom),
+            ("create_if_not_exists index(", Arg::Atom),
+            ("create_if_not_exists unique_index(", Arg::Atom),
+            ("drop index(", Arg::Atom),
+            ("drop unique_index(", Arg::Atom),
+            ("drop_if_exists index(", Arg::Atom),
+            ("drop_if_exists unique_index(", Arg::Atom),
+            ("rename index(", Arg::Atom),
+            ("create constraint(", Arg::Atom),
+            ("drop constraint(", Arg::Atom),
+            ("drop_if_exists constraint(", Arg::Atom),
+        ],
+    },
 ];
 
 /// How far a keyword-argument search reads into a call before giving up.
@@ -350,6 +384,8 @@ const KWARG_WINDOW: usize = 4096;
 /// Django models emit.
 pub fn scan_migration_dsl(source: &str) -> Vec<DslTable> {
     let mut out = Vec::new();
+    // DH.11: string-literal spans, built once on the first Ecto hit.
+    let mut literals = None;
     for dsl in DSLS {
         if !dsl.gate.iter().any(|g| source.contains(g)) {
             continue;
@@ -363,10 +399,20 @@ pub fn scan_migration_dsl(source: &str) -> Vec<DslTable> {
                 if !needle_boundary_ok(source.as_bytes(), pos, needle, arg) {
                     continue;
                 }
+                // An Ecto needle in a string (an `@doc """` sample, glia's
+                // own needle table and tests) or on a `#` comment line is no
+                // migration call.
+                if matches!(arg, Arg::Atom)
+                    && (in_spans(literals.get_or_insert_with(|| literal_spans(source)), pos)
+                        || line_opens_with(source.as_bytes(), pos, &[b"#"]))
+                {
+                    continue;
+                }
                 let raw = match arg {
                     Arg::First => first_literal(source, from),
                     Arg::Ruby => ruby_first_arg(source, from),
                     Arg::Kw(key, sep) => kwarg_literal(source, from, key, sep),
+                    Arg::Atom => elixir_first_arg(source, from),
                 };
                 let Some(table) = raw.as_deref().and_then(canonical_sql_name) else {
                     continue;
@@ -505,6 +551,40 @@ fn ruby_first_arg(source: &str, i: usize) -> Option<String> {
         return Some(source[s..e].to_string());
     }
     quoted_at(source, k)
+}
+
+/// An Elixir call's first argument, the call's `(` just before `i`: an atom
+/// `:users`, a quoted atom `:"users"` or a string `"users"`, which must end
+/// the argument (`,` or `)` next). A module attribute (`@table`), a variable
+/// or an expression names nothing; an interpolated string
+/// (`"#{prefix}_users"`) is dropped by `canonical_sql_name`.
+fn elixir_first_arg(source: &str, i: usize) -> Option<String> {
+    let b = source.as_bytes();
+    let mut k = i;
+    while b.get(k).is_some_and(u8::is_ascii_whitespace) {
+        k += 1;
+    }
+    let atom = b.get(k) == Some(&b':');
+    if atom {
+        k += 1;
+    }
+    let (name, mut end) = if b.get(k) == Some(&b'"') {
+        let name = quoted_at(source, k)?;
+        let end = k + name.len() + 2;
+        (name, end)
+    } else if atom && b.get(k).is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_') {
+        let mut e = k;
+        while e < b.len() && is_ident(b[e]) {
+            e += 1;
+        }
+        (source[k..e].to_string(), e)
+    } else {
+        return None;
+    };
+    while b.get(end).is_some_and(u8::is_ascii_whitespace) {
+        end += 1;
+    }
+    matches!(b.get(end), Some(b',' | b')')).then_some(name)
 }
 
 /// The literal value of keyword argument `key` (`key=` / `key:`) at the call's
@@ -895,6 +975,147 @@ x.createTable(name);
         assert_eq!(
             qnames(&out.entities),
             ["data_entity:sql:regimes", "data_entity:sql:trades"]
+        );
+    }
+
+    /// DH.11: the matrix/elixir/migrations probe's
+    /// `priv/repo/migrations/20240101000000_create_users.exs`.
+    const ECTO_CREATE_USERS: &str = "defmodule Shop.Repo.Migrations.CreateUsers do\n  \
+                                     use Ecto.Migration\n\n  def change do\n    \
+                                     create table(:users) do\n      add :email, :string\n    \
+                                     end\n  end\nend\n";
+
+    #[test]
+    fn ecto_create_table_atom() {
+        assert_eq!(tables(ECTO_CREATE_USERS), [("ecto", "users".to_string())]);
+        assert_eq!(
+            dsl_markers(&scan_migration_dsl(ECTO_CREATE_USERS)),
+            ["[migrations] dsl framework=ecto tables=1"]
+        );
+        // Through the data-entity funnel: a declaration, so the edge stays
+        // on the migration file's MODULE.
+        let repo = RepoId(1);
+        let (out, access) =
+            crate::data_entities::extract_data_entity_access(ECTO_CREATE_USERS, module_id(repo), repo);
+        assert_eq!(qnames(&out), ["data_entity:sql:users"]);
+        assert!(access.sites.is_empty());
+        assert_eq!(access.declared.len(), 1);
+        assert!(out.edges.iter().all(|e| e.from == module_id(repo)));
+    }
+
+    #[test]
+    fn ecto_alter_drop_rename_and_index_forms() {
+        let src = r#"defmodule Shop.Repo.Migrations.Reshape do
+  use Ecto.Migration
+
+  def up do
+    alter table(:accounts) do
+      add :plan, :string
+    end
+    create_if_not_exists table(:audit_log, primary_key: false) do
+      add :id, :binary_id, primary_key: true
+    end
+    rename table(:carts), :total, to: :amount
+    create index(:orders, [:user_id])
+    create unique_index(:accounts, [:email], name: :accounts_email_index)
+    create_if_not_exists index("sessions", [:token])
+    rename index(:people, [:name], name: "people_name_index"), to: "persons_name_index"
+    create constraint(:orders, :total_must_be_positive, check: "total > 0")
+    drop_if_exists table(:tmp_import)
+    drop index(:orders, [:legacy_id])
+    drop constraint(:orders, :legacy_check)
+    drop table(:legacy)
+    recreate table(:not_ecto)
+  end
+end
+"#;
+        let got: Vec<String> = tables(src)
+            .into_iter()
+            .map(|(fw, t)| {
+                assert_eq!(fw, "ecto");
+                t
+            })
+            .collect();
+        // Grouped by needle (table forms, index forms, constraint forms),
+        // then source order.
+        assert_eq!(
+            got,
+            [
+                "audit_log",
+                "accounts",
+                "legacy",
+                "tmp_import",
+                "carts",
+                "orders",
+                "accounts",
+                "sessions",
+                "orders",
+                "people",
+                "orders",
+                "orders",
+            ]
+        );
+        assert_eq!(
+            dsl_markers(&scan_migration_dsl(src)),
+            ["[migrations] dsl framework=ecto tables=8"]
+        );
+    }
+
+    #[test]
+    fn ecto_needle_in_a_literal_or_comment_names_nothing() {
+        let src = r#"defmodule Shop.Repo.Migrations.Doc do
+  use Ecto.Migration
+  @moduledoc """
+  Run `create table(:sessions)` by hand first.
+  """
+  def change do
+    # create table(:legacy)
+    execute("create table(:raw)")
+    create table(:users)
+  end
+end
+"#;
+        assert_eq!(tables(src), [("ecto", "users".to_string())]);
+        // glia's own sources hold Ecto samples in Rust literals.
+        let rust = format!("const PROBE: &str = {ECTO_CREATE_USERS:?};\n");
+        assert!(tables(&rust).is_empty(), "{:?}", tables(&rust));
+    }
+
+    #[test]
+    fn ecto_gate_required() {
+        // `create table(:users)` outside an `Ecto.Migration` module is some
+        // other macro.
+        let src = "defmodule Shop.Setup do\n  def change do\n    create table(:users) do\n    end\n  end\nend\n";
+        assert!(tables(src).is_empty(), "{:?}", tables(src));
+    }
+
+    #[test]
+    fn ecto_string_table_name() {
+        let src = r##"defmodule Shop.Repo.Migrations.Strings do
+  use Ecto.Migration
+  @table :ignored
+
+  def change do
+    create table("users", prefix: "admin") do
+      add :email, :string
+    end
+    alter table(:"user_events") do
+      add :seen, :boolean
+    end
+    create table(@table)
+    create table(table_name)
+    create table("#{prefix}_users")
+    create index( "users" , [:email])
+  end
+end
+"##;
+        assert_eq!(
+            tables(src),
+            [
+                ("ecto", "users".to_string()),
+                ("ecto", "user_events".to_string()),
+                ("ecto", "users".to_string()),
+            ]
         );
     }
 }
