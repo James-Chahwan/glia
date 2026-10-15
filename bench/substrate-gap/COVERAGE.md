@@ -74,79 +74,79 @@ Columns, left to right (the review's own abbreviations):
 ```
 LEGEND ● full  ◐ partial  · none (fixture exists, nothing emitted)  ? unknown (no fixture)  - n/a (see Not applicable)  ! error
            http_cl http_sr   kafka    amqp sqs/sns  pubsub azure_s    nats   redis    mqtt   taskq    grpc graphql      ws eventbu      db    migr  config secrets   flags    cron cli_def cli_inv   calls imports injects    impl   tests service subproj
-python           ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
+python           ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 go               ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 typescript       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 java             ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 csharp           ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-ruby             ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ·       ●       ·       ●       ●       ●       ·       ◐       ●       ●       ◐       ●       ●       ●       ●       ●       ●       ●
-php              ●       ●       ◐       ◐       ·       ·       ?       ·       ·       ·       ·       ●       ●       ·       ·       ●       ●       ◐       ·       ◐       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●
+ruby             ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
+php              ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 swift            ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ?       ?       ?       ?       ?       ?
-c_cpp            ·       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
-scala            ●       ●       ·       ·       ·       ·       ●       ●       ◐       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ◐       ●       ◐
+c_cpp            ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
+scala            ●       ●       ·       ·       ·       ·       ●       ●       ◐       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ◐
 clojure          ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
-dart             ●       ●       ◐       ·       ·       ·       ?       ·       ·       ·       ·       ●       ◐       ·       ·       ·       ●       ◐       ◐       ●       ●       ·       ·       ●       ●       ●       ●       ◐       ●       ●
-elixir           ●       ●       ·       ·       ·       ·       ?       ·       ·       ·       ◐       ·       ·       ●       ·       ·       ·       ◐       ◐       ◐       ●       ·       ·       ●       ●       ·       ·       ◐       ●       ●
+dart             ●       ●       ◐       ·       ·       ·       ?       ·       ·       ·       ·       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ◐       ●       ●
+elixir           ●       ●       ·       ·       ·       ·       ?       ·       ·       ·       ◐       ·       ●       ●       ·       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ·       ◐       ●       ●
 rust             ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ◐       ◐       ●       ●       ●
 solidity         -       -       -       -       -       -       -       -       -       -       -       -       -       -       ●       -       -       -       -       -       -       -       -       ●       ●       ?       ●       ?       ?       ?
 terraform        ?       ?       ?       ?       ?       ?       ?       ?       -       ?       -       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       -       ?       -       ?       -       -       ?       ?       ?
 kotlin           ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ?       ?       ?
 
 PER-MECHANISM  across 17 languages:
-  http_client  ● 14  ◐ 0   · 1   ? 1   - 1   ! 0
+  http_client  ● 15  ◐ 0   · 0   ? 1   - 1   ! 0
   http_server  ● 14  ◐ 0   · 0   ? 2   - 1   ! 0
-  kafka        ● 7   ◐ 2   · 2   ? 5   - 1   ! 0
-  amqp         ● 7   ◐ 1   · 3   ? 5   - 1   ! 0
-  sqs_sns      ● 7   ◐ 0   · 4   ? 5   - 1   ! 0
-  pubsub       ● 7   ◐ 0   · 4   ? 5   - 1   ! 0
+  kafka        ● 8   ◐ 1   · 2   ? 5   - 1   ! 0
+  amqp         ● 8   ◐ 0   · 3   ? 5   - 1   ! 0
+  sqs_sns      ● 8   ◐ 0   · 3   ? 5   - 1   ! 0
+  pubsub       ● 8   ◐ 0   · 3   ? 5   - 1   ! 0
   azure_sb     ● 7   ◐ 0   · 0   ? 9   - 1   ! 0
-  nats         ● 8   ◐ 0   · 3   ? 5   - 1   ! 0
-  redis        ● 7   ◐ 1   · 3   ? 4   - 2   ! 0
-  mqtt         ● 8   ◐ 0   · 3   ? 5   - 1   ! 0
-  taskq        ● 8   ◐ 1   · 2   ? 4   - 2   ! 0
+  nats         ● 9   ◐ 0   · 2   ? 5   - 1   ! 0
+  redis        ● 8   ◐ 1   · 2   ? 4   - 2   ! 0
+  mqtt         ● 9   ◐ 0   · 2   ? 5   - 1   ! 0
+  taskq        ● 9   ◐ 1   · 1   ? 4   - 2   ! 0
   grpc         ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
-  graphql      ● 8   ◐ 1   · 2   ? 5   - 1   ! 0
-  ws           ● 9   ◐ 0   · 2   ? 5   - 1   ! 0
-  eventbus     ● 7   ◐ 0   · 5   ? 5   - 0   ! 0
-  db           ● 9   ◐ 0   · 2   ? 5   - 1   ! 0
-  migrations   ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
-  config       ● 8   ◐ 3   · 0   ? 5   - 1   ! 0
-  secrets      ● 7   ◐ 2   · 2   ? 5   - 1   ! 0
-  flags        ● 8   ◐ 3   · 0   ? 5   - 1   ! 0
+  graphql      ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
+  ws           ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
+  eventbus     ● 8   ◐ 0   · 4   ? 5   - 0   ! 0
+  db           ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
+  migrations   ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
+  config       ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
+  secrets      ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
+  flags        ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
   cron         ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
-  cli_def      ● 9   ◐ 0   · 2   ? 4   - 2   ! 0
-  cli_inv      ● 7   ◐ 1   · 3   ? 5   - 1   ! 0
+  cli_def      ● 11  ◐ 0   · 0   ? 4   - 2   ! 0
+  cli_inv      ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
   calls        ● 16  ◐ 0   · 0   ? 0   - 1   ! 0
   imports      ● 15  ◐ 0   · 0   ? 2   - 0   ! 0
   injects      ● 10  ◐ 1   · 1   ? 4   - 1   ! 0
   impl         ● 11  ◐ 1   · 1   ? 3   - 1   ! 0
-  tests        ● 8   ◐ 3   · 0   ? 6   - 0   ! 0
+  tests        ● 9   ◐ 2   · 0   ? 6   - 0   ! 0
   service      ● 11  ◐ 0   · 0   ? 6   - 0   ! 0
   subproject   ● 10  ◐ 1   · 0   ? 6   - 0   ! 0
 
 PER-LANGUAGE  across 30 mechanisms:
-  python       ● 29  ◐ 0   · 1   ? 0   - 0   ! 0
+  python       ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   go           ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   typescript   ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   java         ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   csharp       ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
-  ruby         ● 24  ◐ 2   · 3   ? 1   - 0   ! 0
-  php          ● 15  ◐ 4   · 10  ? 1   - 0   ! 0
+  ruby         ● 28  ◐ 0   · 1   ? 1   - 0   ! 0
+  php          ● 28  ◐ 0   · 1   ? 1   - 0   ! 0
   swift        ● 3   ◐ 0   · 0   ? 27  - 0   ! 0
-  c_cpp        ● 2   ◐ 0   · 1   ? 27  - 0   ! 0
-  scala        ● 22  ◐ 3   · 5   ? 0   - 0   ! 0
+  c_cpp        ● 3   ◐ 0   · 0   ? 27  - 0   ! 0
+  scala        ● 23  ◐ 2   · 5   ? 0   - 0   ! 0
   clojure      ● 4   ◐ 0   · 0   ? 26  - 0   ! 0
-  dart         ● 12  ◐ 5   · 12  ? 1   - 0   ! 0
-  elixir       ● 8   ◐ 5   · 16  ? 1   - 0   ! 0
+  dart         ● 19  ◐ 2   · 8   ? 1   - 0   ! 0
+  elixir       ● 15  ◐ 2   · 12  ? 1   - 0   ! 0
   rust         ● 28  ◐ 2   · 0   ? 0   - 0   ! 0
   solidity     ● 4   ◐ 0   · 0   ? 4   - 22  ! 0
   terraform    ● 0   ◐ 0   · 0   ? 24  - 6   ! 0
   kotlin       ● 6   ◐ 0   · 0   ? 24  - 0   ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 277 full, 21 partial, 48 none, 136 unknown, 0 error, 28 n/a.
+COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 311 full, 8 partial, 27 none, 136 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 206
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 214
 
 ## Cells routed via an alternative mechanism
 
@@ -171,6 +171,10 @@ A `●` here does not mean the intended path fired — it means SOME path did. T
 | `java/pubsub` | ● full | `queue` | `eventbus` |
 | `java/redis` | ● full | `queue` | `eventbus` |
 | `java/sqs_sns` | ● full | `queue` | `eventbus` |
+| `php/mqtt` | ● full | `queue` | `eventbus` |
+| `php/pubsub` | ● full | `queue` | `eventbus` |
+| `php/redis` | ● full | `queue` | `eventbus` |
+| `php/sqs_sns` | ● full | `queue` | `eventbus` |
 | `python/azure_sb` | ● full | `queue` | `eventbus` |
 | `python/mqtt` | ● full | `queue` | `eventbus` |
 | `python/pubsub` | ● full | `queue` | `eventbus` |

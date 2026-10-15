@@ -26,7 +26,7 @@
     },
     "c_cpp/http_client": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -36,17 +36,17 @@
         1,
         1
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        2,
         2
       ],
-      "via": null
+      "via": "http"
     },
     "c_cpp/imports": {
       "extract": [
@@ -961,7 +961,7 @@
     },
     "dart/cli_def": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -971,21 +971,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "cli"
     },
     "dart/cli_inv": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -995,17 +995,17 @@
         1,
         1
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "cli"
     },
     "dart/config": {
       "extract": [
@@ -1019,16 +1019,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         1,
         1
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        3,
         3
       ],
       "via": "config"
@@ -1059,7 +1057,7 @@
     },
     "dart/db": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -1069,17 +1067,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "db"
     },
     "dart/eventbus": {
       "extract": [
@@ -1141,17 +1139,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "literal lost",
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "graphql"
@@ -1464,16 +1459,14 @@
         1,
         1
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         1,
         1
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        3,
         3
       ],
       "via": "config"
@@ -1606,7 +1599,7 @@
     },
     "dart/ws": {
       "extract": [
-        1,
+        2,
         2
       ],
       "fixtures": [
@@ -1616,16 +1609,14 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "websocket"
@@ -1682,7 +1673,7 @@
     },
     "elixir/cli_def": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -1692,21 +1683,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "cli"
     },
     "elixir/cli_inv": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -1716,17 +1707,17 @@
         1,
         1
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "cli"
     },
     "elixir/config": {
       "extract": [
@@ -1740,16 +1731,14 @@
         1,
         1
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         1,
         1
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        3,
         3
       ],
       "via": "config"
@@ -1838,23 +1827,21 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         1,
         1
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        3,
         3
       ],
       "via": "config"
     },
     "elixir/graphql": {
       "extract": [
-        1,
+        2,
         2
       ],
       "fixtures": [
@@ -1864,16 +1851,14 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "graphql"
@@ -2050,7 +2035,7 @@
     },
     "elixir/migrations": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -2060,17 +2045,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "db"
     },
     "elixir/mqtt": {
       "extract": [
@@ -2180,16 +2165,14 @@
         1,
         1
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         1,
         1
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        3,
         3
       ],
       "via": "config"
@@ -4004,17 +3987,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "literal lost",
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "queue"
@@ -4069,7 +4049,7 @@
     },
     "php/cli_inv": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -4079,17 +4059,17 @@
         1,
         1
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "cli"
     },
     "php/config": {
       "extract": [
@@ -4103,16 +4083,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         1,
         1
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        3,
         3
       ],
       "via": "config"
@@ -4201,16 +4179,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         1,
         1
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        3,
         3
       ],
       "via": "config"
@@ -4399,17 +4375,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "literal lost",
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "queue"
@@ -4440,7 +4413,7 @@
     },
     "php/mqtt": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -4450,21 +4423,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "php/nats": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -4474,21 +4447,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "php/pubsub": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -4498,21 +4471,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "php/redis": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -4522,21 +4495,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "php/secrets": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -4546,17 +4519,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "config"
     },
     "php/service": {
       "extract": [
@@ -4586,7 +4559,7 @@
     },
     "php/sqs_sns": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -4596,17 +4569,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "php/subproject": {
       "extract": [
@@ -4636,7 +4609,7 @@
     },
     "php/taskq": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -4646,17 +4619,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "php/tests": {
       "extract": [
@@ -4684,7 +4657,7 @@
     },
     "php/ws": {
       "extract": [
-        1,
+        2,
         2
       ],
       "fixtures": [
@@ -4694,16 +4667,14 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "websocket"
@@ -4906,7 +4877,7 @@
     },
     "python/eventbus": {
       "extract": [
-        2,
+        6,
         6
       ],
       "fixtures": [
@@ -4918,14 +4889,14 @@
         1,
         1
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        2,
+        6,
         6
       ],
       "reasons": [],
       "route": [
-        1,
+        3,
         3
       ],
       "via": "eventbus"
@@ -5532,16 +5503,14 @@
         1,
         1
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         1,
         1
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "cli"
@@ -5658,23 +5627,21 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         1,
         1
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        3,
         3
       ],
       "via": "config"
     },
     "ruby/graphql": {
       "extract": [
-        1,
+        2,
         2
       ],
       "fixtures": [
@@ -5684,16 +5651,14 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "graphql"
@@ -5989,7 +5954,7 @@
     },
     "ruby/secrets": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -5999,17 +5964,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "config"
     },
     "ruby/service": {
       "extract": [
@@ -7588,16 +7553,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         1,
         1
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        2,
         2
       ],
       "via": "test"
@@ -7848,18 +7811,19 @@
     },
     "typescript/calls": {
       "extract": [
-        15,
-        15
+        16,
+        16
       ],
       "fixtures": [
         "fixtures/ts-arrow-class-fields",
         "fixtures/ts-calls",
         "fixtures/ts-field-dispatch",
-        "fixtures/ts-param-local-receivers"
+        "fixtures/ts-param-local-receivers",
+        "fixtures/ts-receiver-inherited-calls"
       ],
       "forbid": [
-        9,
-        9
+        10,
+        10
       ],
       "level": "full",
       "literal": [
@@ -7870,8 +7834,8 @@
         "extract probed from mechanism kinds (fixture scopes no nodes)"
       ],
       "route": [
-        16,
-        16
+        23,
+        23
       ],
       "via": "call"
     },
@@ -8615,12 +8579,14 @@
     "fixtures/event-verb-fallback",
     "fixtures/event-verb-receivers",
     "fixtures/external-cells-sidecar",
+    "fixtures/external-channel-clients",
     "fixtures/generated-provenance",
     "fixtures/go-closure-handled_by",
     "fixtures/go-gorm",
     "fixtures/go-local-method-handlers",
     "fixtures/go-nats-consumer-callbacks",
     "fixtures/go-overlay-data-wrapper",
+    "fixtures/go-package-clause-imports",
     "fixtures/go-route-const-prefix",
     "fixtures/go-route-mounts",
     "fixtures/go-route-per-method",
@@ -8632,6 +8598,7 @@
     "fixtures/graphql-op-needle-precision",
     "fixtures/graphql-rpc-host-narrowing",
     "fixtures/graphql-sdl-literal-scope",
+    "fixtures/grpc-external-dial",
     "fixtures/grpc-host-narrowing",
     "fixtures/history-cochange",
     "fixtures/http-absolute-url-client",
@@ -8643,6 +8610,10 @@
     "fixtures/http-nav-vs-server-route",
     "fixtures/http-placeholder-fold",
     "fixtures/http-relative-paths",
+    "fixtures/identity-contract-ops",
+    "fixtures/identity-npm-package",
+    "fixtures/identity-npm-workspace-lib",
+    "fixtures/identity-proto-diverged",
     "fixtures/imports-local-filter",
     "fixtures/java-declarative-clients",
     "fixtures/java-enum-members",
@@ -8680,6 +8651,7 @@
     "fixtures/py-router-prefix",
     "fixtures/py-test-cells",
     "fixtures/py-typer-argparse-cli",
+    "fixtures/python-requirements-roots",
     "fixtures/react-hook",
     "fixtures/rpc-event-monorepo-owner",
     "fixtures/ruby-ar-tablename",
@@ -8881,11 +8853,11 @@
   "totals": {
     "covered": 346,
     "error": 0,
-    "full": 277,
+    "full": 311,
     "grid": 510,
     "n/a": 28,
-    "none": 48,
-    "partial": 21,
+    "none": 27,
+    "partial": 8,
     "unknown": 136
   },
   "vocabulary": {

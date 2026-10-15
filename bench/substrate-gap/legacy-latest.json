@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 361,
+  "fixtures": 370,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -619,6 +619,13 @@
       "language": "python",
       "per_category": {}
     },
+    "external-channel-clients": {
+      "framework": "external-channel-clients",
+      "language": "typescript",
+      "per_category": {
+        "WS_CONNECTS": 1.0
+      }
+    },
     "generated-provenance": {
       "framework": "generated-provenance",
       "language": "go+dart+csharp",
@@ -768,6 +775,13 @@
         "ACCESSES_DATA": 1.0
       }
     },
+    "go-package-clause-imports": {
+      "framework": "go-package-clause-imports",
+      "language": "go",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
     "go-package-multifile-calls": {
       "framework": "go-package-multifile-calls",
       "language": "go",
@@ -903,6 +917,11 @@
       "language": "typescript",
       "per_category": {}
     },
+    "grpc-external-dial": {
+      "framework": "grpc-external-dial",
+      "language": "go",
+      "per_category": {}
+    },
     "grpc-host-narrowing": {
       "framework": "grpc-host-narrowing",
       "language": "go",
@@ -998,6 +1017,34 @@
       "language": "rust+clojure+go+typescript",
       "per_category": {
         "HTTP_CALLS": 1.0
+      }
+    },
+    "identity-contract-ops": {
+      "framework": "identity-contract-ops",
+      "language": "go",
+      "per_category": {
+        "SAME_AS": 1.0
+      }
+    },
+    "identity-npm-package": {
+      "framework": "identity-npm-package",
+      "language": "typescript",
+      "per_category": {
+        "SAME_AS": 1.0
+      }
+    },
+    "identity-npm-workspace-lib": {
+      "framework": "identity-npm-workspace-lib",
+      "language": "typescript",
+      "per_category": {
+        "SAME_AS": 1.0
+      }
+    },
+    "identity-proto-diverged": {
+      "framework": "identity-proto-diverged",
+      "language": "proto",
+      "per_category": {
+        "SAME_AS": 1.0
       }
     },
     "imports-local-filter": {
@@ -1417,6 +1464,7 @@
       "framework": "proto-field-drift",
       "language": "proto",
       "per_category": {
+        "SAME_AS": 1.0,
         "SHARES_SCHEMA": 1.0
       }
     },
@@ -1521,6 +1569,11 @@
       "per_category": {
         "HANDLED_BY": 1.0
       }
+    },
+    "python-requirements-roots": {
+      "framework": "python-requirements-roots",
+      "language": "python",
+      "per_category": {}
     },
     "react-hook": {
       "framework": "react-hook",
@@ -2075,6 +2128,13 @@
         "CALLS": 1.0
       }
     },
+    "ts-receiver-inherited-calls": {
+      "framework": "ts-receiver-inherited-calls",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
     "ts-route-per-method": {
       "framework": "ts-route-per-method",
       "language": "typescript",
@@ -2311,6 +2371,7 @@
       "framework": "xcut-proto-shared",
       "language": "proto",
       "per_category": {
+        "SAME_AS": 1.0,
         "SHARES_SCHEMA": 1.0
       }
     },
@@ -2563,6 +2624,7 @@
       "language": "json",
       "per_category": {
         "DEFINES": 1.0,
+        "SAME_AS": 1.0,
         "SHARES_SCHEMA": 1.0
       }
     },
