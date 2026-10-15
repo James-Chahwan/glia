@@ -360,12 +360,13 @@ fn run(args: &Args) -> i32 {
             diff_out.display(),
         );
         // How the diff paired nodes past their keys (CK.2): ROUTEs and (DE.3)
-        // ENDPOINTs by path, by (file, kind, name), by identity hint, and the
-        // hint pairs refused as two routes or two endpoints of different
-        // verbs or unalike paths.
+        // ENDPOINTs by path, by (file, kind, name), (DE.4) same-parent
+        // renames by their names' words, by identity hint, and the hint pairs
+        // refused as two routes or two endpoints of different verbs or
+        // unalike paths, or two other facts whose names share no word.
         eprintln!(
-            "[engram-export] v6 since pairing: route={} endpoint={} name={} hint={} hint_refused={}",
-            ds.by_route, ds.by_endpoint, ds.by_name, ds.by_hint, ds.hint_refused,
+            "[engram-export] v6 since pairing: route={} endpoint={} name={} words={} hint={} hint_refused={}",
+            ds.by_route, ds.by_endpoint, ds.by_name, ds.by_words, ds.by_hint, ds.hint_refused,
         );
     }
     // The v6 span marker (LG.10): how many positioned nodes got 1-based lines

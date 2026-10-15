@@ -241,7 +241,7 @@ fn since_writes_the_diff_and_seeds_file_ids() {
     // and name: they pair by name, before their hints.
     assert_eq!(
         pairing_line(&b_err),
-        "[engram-export] v6 since pairing: route=0 endpoint=0 name=4 hint=0 hint_refused=0"
+        "[engram-export] v6 since pairing: route=0 endpoint=0 name=4 words=0 hint=0 hint_refused=0"
     );
 
     let added: Vec<&str> = diff.added.iter().map(|n| n.key.as_str()).collect();
@@ -301,7 +301,7 @@ fn since_writes_the_diff_and_seeds_file_ids() {
     );
     assert_eq!(
         pairing_line(&c_err),
-        "[engram-export] v6 since pairing: route=0 endpoint=0 name=0 hint=0 hint_refused=0"
+        "[engram-export] v6 since pairing: route=0 endpoint=0 name=0 words=0 hint=0 hint_refused=0"
     );
     assert_eq!(s.bytes("c"), s.bytes("b"));
     let c = s.diff("c");
@@ -521,7 +521,7 @@ fn a_rekeyed_endpoint_arrives_as_a_move() {
     let b_err = s.export("b", Some("a"), &["--no-persist"], false);
     assert_eq!(
         pairing_line(&b_err),
-        "[engram-export] v6 since pairing: route=0 endpoint=1 name=0 hint=0 hint_refused=0"
+        "[engram-export] v6 since pairing: route=0 endpoint=1 name=0 words=0 hint=0 hint_refused=0"
     );
 
     let diff = s.diff("b");

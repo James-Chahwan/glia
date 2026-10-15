@@ -12,7 +12,7 @@
 //!
 //! ## Matching nodes
 //!
-//! Four passes, each over the nodes every earlier pass left unmatched on both
+//! Five passes, each over the nodes every earlier pass left unmatched on both
 //! sides. A node's slot is the `(file token, kind)` of its `identity_hint`
 //! (`<file token>:<kind>:<ordinal>`); the file token is carried across a file
 //! move along a `--since` chain, so a slot survives the move.
@@ -40,16 +40,31 @@
 //!    page at its located handler component, `build_identity_hints`), so
 //!    their hints name the anchor file and they join this pass there.
 //! 3. **Symbols, by name.** Any other Symbol (never a ROUTE or an ENDPOINT,
-//!    which pair only in pass 2 or the guarded pass 4) pairs by `(file
+//!    which pair only in pass 2 or the guarded pass 5) pairs by `(file
 //!    token, kind, name)` when that triple is unique on both sides (LB.6's
 //!    move-stable shape): a function inserted ahead in a moved file shifts
 //!    its siblings' ordinals, not their names.
-//! 4. **Identity hints.** An `identity_hint` that is `Some` and unique on
+//! 4. **Renames, by their names' words (DE.4).** Any other hinted Symbol
+//!    or Proposition (a doc section, by its key's last segment) pairs within
+//!    its slot with the one of the SAME parent key (the key minus its last
+//!    `::` segment) whose name's words ([`name_words`]: camel, acronym and
+//!    `_` / `-` boundaries, lower-cased) fit best: Jaccard at least 1/3, or
+//!    one word set holding the other, each the other's unique best. An
+//!    in-place rename after inserts ahead of it (`AdminComponent::resolve`
+//!    -> `resolveDispute`, ordinal 1 -> 12 in Kina e6e7404) pairs here, where
+//!    the ordinal hint would hand `resolve` a neighbour's new member.
+//! 5. **Identity hints.** An `identity_hint` that is `Some` and unique on
 //!    each side pairs a base node with a target node: a move or a rename.
 //!    Never two ROUTEs or two ENDPOINTs of different verbs or of paths not
-//!    alike (counted [`DiffStats::hint_refused`]): such a route is a new
-//!    contract, so the base is removed and the target added, and Engram
-//!    mints it a fresh FactId instead of handing it a neighbour's.
+//!    alike, and (DE.4) never two other facts whose names share no word
+//!    ([`words_fit`]; the parent is not compared here, since a file move or
+//!    a class rename changes every member's parent key and this pass carries
+//!    those); each refusal is counted [`DiffStats::hint_refused`]. Such a
+//!    route is a new contract and such a symbol another symbol that took an
+//!    ordinal, so the base is removed and the target added, and Engram
+//!    mints it a fresh FactId instead of handing it a neighbour's. A true
+//!    rename sharing no word (`SuspiciousMatter` -> `RegulatorReport`) is
+//!    removed + added too: a fresh FactId, never a wrong one.
 //!
 //! A pair whose bincode bytes are equal is unchanged and not written.
 //! Otherwise it is a [`NodeChange`] carrying the base key as `prior_key`, and
@@ -61,7 +76,7 @@
 //!
 //! Keys are unique within one glia export (`build_gmap` drops a repeated
 //! qname). On a hand-built gmap that repeats a key, the first node carrying it
-//! is the one matched by key, later ones fall through to passes 2-4, and a
+//! is the one matched by key, later ones fall through to passes 2-5, and a
 //! key still held by a matched base node is never listed as removed.
 //!
 //! ## Edges
@@ -111,20 +126,24 @@ pub struct DiffStats {
     /// `GmapDiff.edges_removed`.
     pub edges_removed: usize,
     /// ROUTE pairs made by the route pass (2). Key pairs (pass 1) are not
-    /// counted: on a glia export, whose keys are unique, every pass 2-4 pair
-    /// changes the key, so `by_route + by_endpoint + by_name + by_hint ==
-    /// moved`.
+    /// counted: on a glia export, whose keys are unique, every pass 2-5 pair
+    /// changes the key, so `by_route + by_endpoint + by_name + by_words +
+    /// by_hint == moved`.
     pub by_route: usize,
     /// ENDPOINT pairs made by the route pass (2), counted apart from
     /// [`by_route`](Self::by_route). (DE.3)
     pub by_endpoint: usize,
     /// Pairs made by the name pass (3).
     pub by_name: usize,
-    /// Pairs made by the identity-hint pass (4).
+    /// Pairs made by the words pass (4): same-parent renames in one hint
+    /// slot whose names share words. (DE.4)
+    pub by_words: usize,
+    /// Pairs made by the identity-hint pass (5).
     pub by_hint: usize,
     /// Unique hint pairs the hint pass refused: two ROUTEs or two ENDPOINTs
-    /// of different verbs or of paths not alike. Each leaves one removed and
-    /// one added node.
+    /// of different verbs or of paths not alike, or (DE.4) two other facts
+    /// whose names share no word. Each leaves one removed and one added
+    /// node.
     pub hint_refused: usize,
 }
 
@@ -162,15 +181,19 @@ pub fn diff_gmaps(
     let (by_route, by_endpoint) = pair_routes(base, target, &mut pair, &mut taken);
     // Pass 3 — other Symbols by (file token, kind, name).
     let by_name = pair_names(base, target, &mut pair, &mut taken);
+    // Pass 4 — same-parent renames in one hint slot, by their names' words.
+    let by_words = pair_words(base, target, &mut pair, &mut taken);
     let mut stats = DiffStats {
         by_route,
         by_endpoint,
         by_name,
+        by_words,
         ..DiffStats::default()
     };
 
-    // Pass 4 — identity hints unique on both sides among the unmatched, never
-    // two routes (or two endpoints) of different verbs or unalike paths.
+    // Pass 5 — identity hints unique on both sides among the unmatched, never
+    // two routes (or two endpoints) of different verbs or unalike paths, and
+    // never two other facts whose names share no word.
     let mut base_hints: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (b, n) in base.nodes.iter().enumerate() {
         if let (false, Some(h)) = (taken[b], n.identity_hint.as_deref()) {
@@ -185,7 +208,9 @@ pub fn diff_gmaps(
     }
     for (hint, ts) in &target_hints {
         if let ([t], Some([b])) = (ts.as_slice(), base_hints.get(hint).map(Vec::as_slice)) {
-            if !route_pair_ok(&base.nodes[*b], &target.nodes[*t]) {
+            let (bn, tn) = (&base.nodes[*b], &target.nodes[*t]);
+            let routes = is_route_like(bn) && is_route_like(tn);
+            if !route_pair_ok(bn, tn) || !(routes || words_fit(bn, tn)) {
                 stats.hint_refused += 1;
                 continue;
             }
@@ -474,13 +499,222 @@ fn pair_routes(
 }
 
 /// `(file token, kind, name)` of a Symbol that is neither a ROUTE nor an
-/// ENDPOINT: those pair by path in pass 2, or in the guarded pass 4.
+/// ENDPOINT: those pair by path in pass 2, or in the guarded pass 5.
 fn name_slot(n: &GmapNode) -> Option<(&str, &str, &str)> {
     let Content::Symbol { name, .. } = &n.content else {
         return None;
     };
     let (token, kind) = hint_slot(n)?;
     (!is_route_like_kind(kind) && !name.is_empty()).then_some((token, kind, name.as_str()))
+}
+
+/// A name's lower-cased words (DE.4): split at every ASCII character that is
+/// not alphanumeric (`_`, `-`, `.`, ...), at an ASCII lower-case letter or
+/// digit followed by an upper-case one (`kycLoading`, `Server2Go`), and
+/// before the last upper-case letter of a run followed by a lower-case one
+/// (`SMRWith` -> smr, with). Only ASCII decides a boundary: any other
+/// character stays inside its word (chars, never byte offsets). Empty words
+/// are dropped: `PendingSMRWithUser` -> {pending, smr, user, with}, the doc
+/// slug `repo-graph-structural-map` -> {graph, map, repo, structural}.
+fn name_words(name: &str) -> BTreeSet<String> {
+    let chars: Vec<char> = name.chars().collect();
+    let mut words = BTreeSet::new();
+    let mut word = String::new();
+    let mut flush = |word: &mut String| {
+        if !word.is_empty() {
+            words.insert(word.to_lowercase());
+            word.clear();
+        }
+    };
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_ascii() && !c.is_ascii_alphanumeric() {
+            flush(&mut word);
+            continue;
+        }
+        if c.is_ascii_uppercase() && i > 0 {
+            let prev = chars[i - 1];
+            let next = chars.get(i + 1).copied();
+            let camel = prev.is_ascii_lowercase() || prev.is_ascii_digit();
+            let acronym_end =
+                prev.is_ascii_uppercase() && next.is_some_and(|n| n.is_ascii_lowercase());
+            if camel || acronym_end {
+                flush(&mut word);
+            }
+        }
+        word.push(c);
+    }
+    flush(&mut word);
+    words
+}
+
+/// The name the words of a fact come from: a Symbol's `name`, a
+/// Proposition's key's last `::` segment (a doc section's slug, a NatSpec
+/// fact's `<fn>#<tag>`). `None` for a Vector.
+fn fact_name(n: &GmapNode) -> Option<&str> {
+    match &n.content {
+        Content::Symbol { name, .. } => Some(name.as_str()),
+        Content::Proposition { .. } => {
+            Some(n.key.rsplit_once("::").map_or(n.key.as_str(), |(_, s)| s))
+        }
+        Content::Vector(_) => None,
+    }
+}
+
+/// A key minus its last `::` segment (`a::Users::get` -> `a::Users`); `""`
+/// for a key with no `::`.
+fn parent_key(key: &str) -> &str {
+    key.rsplit_once("::").map_or("", |(p, _)| p)
+}
+
+/// One side of a words fit: the fact's name and its [`name_words`].
+struct Words<'a> {
+    name: &'a str,
+    words: BTreeSet<String>,
+}
+
+impl<'a> Words<'a> {
+    fn of(n: &'a GmapNode) -> Option<Words<'a>> {
+        let name = fact_name(n)?;
+        Some(Words {
+            name,
+            words: name_words(name),
+        })
+    }
+
+    /// `(|A ∩ B|, |A ∪ B|)` when the two names fit: both have words and
+    /// their Jaccard is at least 1/3 (`3 * |A ∩ B| >= |A ∪ B|`) or one word
+    /// set contains the other. Two equal non-empty names fit even with no
+    /// words (`_`, `$`), as `(1, 1)`: the hint pass keeps an unrenamed
+    /// member whatever its name.
+    fn fit(&self, other: &Words) -> Option<(u64, u64)> {
+        let (a, b) = (&self.words, &other.words);
+        if !a.is_empty() && !b.is_empty() {
+            let inter = a.intersection(b).count();
+            let union = a.len() + b.len() - inter;
+            let contained = inter == a.len() || inter == b.len();
+            if 3 * inter >= union || contained {
+                return Some((inter as u64, union as u64));
+            }
+        }
+        (self.name == other.name && !self.name.is_empty()).then_some((1, 1))
+    }
+}
+
+/// Whether `b` and `t` are one fact under a new name, by their words alone
+/// ([`Words::fit`]): both Symbols or both Propositions, never a Vector. The
+/// hint pass's guard for a non-route-like pair; the words pass also needs
+/// the same [`parent_key`].
+fn words_fit(b: &GmapNode, t: &GmapNode) -> bool {
+    let same_content = matches!(
+        (&b.content, &t.content),
+        (Content::Symbol { .. }, Content::Symbol { .. })
+            | (Content::Proposition { .. }, Content::Proposition { .. })
+    );
+    same_content
+        && match (Words::of(b), Words::of(t)) {
+            (Some(bw), Some(tw)) => bw.fit(&tw).is_some(),
+            _ => false,
+        }
+}
+
+/// Pass 4 (DE.4): the unmatched non-route-like hinted facts of each hint
+/// slot `(file token, kind)` pair by their names' words, for an in-place
+/// rename an insert ahead of it hid from the ordinal (Kina e6e7404:
+/// `AdminComponent::resolve` -> `resolveDispute`, ordinal 1 -> 12). A base
+/// `b` and a target `t` pair when they have the same [`parent_key`] and the
+/// same content shape, their names fit ([`Words::fit`]), and each is the
+/// other's unique best Jaccard among such candidates (compared as cross
+/// products; a tie pairs neither). Every best is read off one snapshot of
+/// the group, and a pair is mutual, so iteration order cannot change the
+/// pairs. Returns the pairs made.
+fn pair_words(base: &Gmap, target: &Gmap, pair: &mut [Option<usize>], taken: &mut [bool]) -> usize {
+    struct Cand<'a> {
+        index: usize,
+        parent: &'a str,
+        is_symbol: bool,
+        words: Words<'a>,
+    }
+    fn cand(index: usize, n: &GmapNode) -> Option<((&str, &str), Cand<'_>)> {
+        let (token, kind) = hint_slot(n)?;
+        if is_route_like_kind(kind) {
+            return None;
+        }
+        let is_symbol = match &n.content {
+            Content::Symbol { .. } => true,
+            Content::Proposition { .. } => false,
+            Content::Vector(_) => return None,
+        };
+        let words = Words::of(n)?;
+        let parent = parent_key(&n.key);
+        Some((
+            (token, kind),
+            Cand {
+                index,
+                parent,
+                is_symbol,
+                words,
+            },
+        ))
+    }
+    /// The index into `others` of `x`'s unique best fit, or `None`.
+    fn best(x: &Cand, others: &[Cand]) -> Option<usize> {
+        let mut top: Option<(usize, (u64, u64))> = None;
+        let mut tied = false;
+        for (j, o) in others.iter().enumerate() {
+            if o.parent != x.parent || o.is_symbol != x.is_symbol {
+                continue;
+            }
+            let Some((inter, union)) = x.words.fit(&o.words) else {
+                continue;
+            };
+            match top {
+                None => top = Some((j, (inter, union))),
+                Some((_, (ti, tu))) => match (inter * tu).cmp(&(ti * union)) {
+                    std::cmp::Ordering::Greater => {
+                        top = Some((j, (inter, union)));
+                        tied = false;
+                    }
+                    std::cmp::Ordering::Equal => tied = true,
+                    std::cmp::Ordering::Less => {}
+                },
+            }
+        }
+        top.filter(|_| !tied).map(|(j, _)| j)
+    }
+
+    type Slot<'a> = (&'a str, &'a str);
+    let mut groups: BTreeMap<Slot, (Vec<Cand>, Vec<Cand>)> = BTreeMap::new();
+    for (b, n) in base.nodes.iter().enumerate() {
+        if !taken[b]
+            && let Some((slot, c)) = cand(b, n)
+        {
+            groups.entry(slot).or_default().0.push(c);
+        }
+    }
+    for (t, n) in target.nodes.iter().enumerate() {
+        if pair[t].is_none()
+            && let Some((slot, c)) = cand(t, n)
+        {
+            groups.entry(slot).or_default().1.push(c);
+        }
+    }
+    let mut made = 0;
+    for (bs, ts) in groups.values() {
+        if bs.is_empty() || ts.is_empty() {
+            continue;
+        }
+        let best_of_t: Vec<Option<usize>> = ts.iter().map(|t| best(t, bs)).collect();
+        for (bi, b) in bs.iter().enumerate() {
+            if let Some(ti) = best(b, ts)
+                && best_of_t[ti] == Some(bi)
+            {
+                taken[b.index] = true;
+                pair[ts[ti].index] = Some(b.index);
+                made += 1;
+            }
+        }
+    }
+    made
 }
 
 /// Pass 3: an unmatched non-route-like Symbol pairs with the one of its file
@@ -857,6 +1091,7 @@ mod tests {
                 by_route: 0,
                 by_endpoint: 0,
                 by_name: 0,
+                by_words: 0,
                 by_hint: 0,
                 hint_refused: 0,
             }
@@ -979,11 +1214,13 @@ mod tests {
     fn removed_node_edges_keep_base_keys() {
         let base = service();
         let mut target = service();
-        // save is deleted and load is renamed (same hint): the removed edge
-        // save -> load keeps save's base key and carries load's TARGET key.
+        // save is deleted and load is renamed load_by_id (one slot, one
+        // parent, a shared word: the words pass pairs it, DE.4): the removed
+        // edge save -> load keeps save's base key and carries load's TARGET
+        // key.
         target.nodes.retain(|n| n.key != "svc::users::Users::save");
         target.nodes[2] = sym(
-            "svc::users::Users::fetch",
+            "svc::users::Users::load_by_id",
             1,
             5,
             "Load one user.",
@@ -999,22 +1236,23 @@ mod tests {
             e(
                 "svc::users::Users",
                 EdgeKind::Contains,
-                "svc::users::Users::fetch",
+                "svc::users::Users::load_by_id",
                 Some(1.0),
             ),
             e(
                 "docs::README::users",
                 EdgeKind::Documents,
-                "svc::users::Users::fetch",
+                "svc::users::Users::load_by_id",
                 Some(0.3),
             ),
         ];
 
-        let (diff, _) = diff_gmaps(&base, 1, &target, 2);
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert_eq!((stats.by_words, stats.by_hint), (1, 0));
         assert_eq!(diff.removed, ["svc::users::Users::save"]);
         assert_eq!(diff.modified.len(), 1);
         assert_eq!(diff.modified[0].prior_key, "svc::users::Users::load");
-        assert_eq!(diff.modified[0].node.key, "svc::users::Users::fetch");
+        assert_eq!(diff.modified[0].node.key, "svc::users::Users::load_by_id");
         // The name changed with the key, so it is not location-only.
         assert!(!diff.modified[0].location_only);
         assert_eq!(
@@ -1029,7 +1267,7 @@ mod tests {
                 (
                     "svc::users::Users::save",
                     EdgeKind::Calls,
-                    "svc::users::Users::fetch",
+                    "svc::users::Users::load_by_id",
                     Some(0.8)
                 ),
             ]
@@ -1551,6 +1789,332 @@ mod tests {
         // The ROUTE rules are unchanged.
         assert!(alike_paths("/trades/:id", "/api/trades/:id"));
         assert!(!alike_paths("/", "/api"));
+    }
+
+    /// A Symbol keyed `key` whose hint is `<file>:<kind>:<ordinal>`, the
+    /// name its key's last segment, at line `10 + 5 * ordinal` of file 1.
+    fn member(key: &str, file: &str, kind: u32, ordinal: u32) -> GmapNode {
+        let mut n = sym(
+            key,
+            1,
+            10 + 5 * ordinal,
+            "",
+            &format!("{file}:{kind}:{ordinal}"),
+        );
+        n.concept_hint = None;
+        n
+    }
+
+    #[test]
+    fn words_pass_pairs_an_in_place_rename_after_inserts() {
+        // Kina e6e7404's AdminComponent: `resolve` became `resolveDispute`
+        // while eleven methods landed ahead of it (ordinal 1 -> 12). The
+        // ordinal hint alone paired loading -> actionError, resolve -> kyc
+        // and resolving -> kycError: three wrong moves and a missed rename.
+        let (f, m) = ("web/admin.component.ts", node_kind::METHOD.0);
+        let base = gmap(
+            vec![
+                member("web::AdminComponent::loading", f, m, 0),
+                member("web::AdminComponent::resolve", f, m, 1),
+                member("web::AdminComponent::resolving", f, m, 2),
+            ],
+            vec![],
+        );
+        let names = [
+            "actionError",
+            "kyc",
+            "kycError",
+            "disputes",
+            "stats",
+            "users",
+            "filter",
+            "page",
+            "total",
+            "selected",
+            "approve",
+            "reject",
+            "resolveDispute",
+        ];
+        let target = gmap(
+            names
+                .iter()
+                .zip(0..)
+                .map(|(name, o)| member(&format!("web::AdminComponent::{name}"), f, m, o))
+                .collect(),
+            vec![],
+        );
+
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert_eq!(
+            moves(&diff),
+            [(
+                "web::AdminComponent::resolve",
+                "web::AdminComponent::resolveDispute"
+            )]
+        );
+        assert_eq!(
+            diff.removed,
+            [
+                "web::AdminComponent::loading",
+                "web::AdminComponent::resolving"
+            ]
+        );
+        assert_eq!(diff.added.len(), 12);
+        assert!(
+            keys(&diff.added).contains(&"web::AdminComponent::actionError")
+                && keys(&diff.added).contains(&"web::AdminComponent::kyc"),
+            "{:?}",
+            keys(&diff.added)
+        );
+        // loading(0) -> actionError(0) and resolving(2) -> kycError(2) share
+        // a hint and no word.
+        assert_eq!(
+            (
+                stats.by_words,
+                stats.by_hint,
+                stats.hint_refused,
+                stats.moved
+            ),
+            (1, 0, 2, 1)
+        );
+
+        assert_eq!(
+            name_words("PendingSMRWithUser"),
+            BTreeSet::from(["pending", "smr", "with", "user"].map(String::from))
+        );
+        assert_eq!(
+            name_words("repo-graph-structural-map"),
+            BTreeSet::from(["repo", "graph", "structural", "map"].map(String::from))
+        );
+        assert_eq!(
+            name_words("HTTPServer2Go"),
+            BTreeSet::from(["http", "server2", "go"].map(String::from))
+        );
+        assert_eq!(
+            name_words("TestFreshRate_Reference"),
+            BTreeSet::from(["test", "fresh", "rate", "reference"].map(String::from))
+        );
+        assert_eq!(
+            name_words("ClearedEntryIDsForUser"),
+            BTreeSet::from(["cleared", "entry", "i", "ds", "for", "user"].map(String::from))
+        );
+        // Non-ASCII stays inside its word; no ASCII, no boundary.
+        assert_eq!(
+            name_words("größeWert"),
+            BTreeSet::from(["größe", "wert"].map(String::from))
+        );
+        assert_eq!(name_words("__"), BTreeSet::new());
+        assert_eq!(
+            name_words("isLanding"),
+            BTreeSet::from(["is", "landing"].map(String::from))
+        );
+    }
+
+    #[test]
+    fn hint_pass_refuses_a_rename_with_no_shared_word() {
+        // Kina 1aca01c's fx rewrite: one hint on both sides, two different
+        // symbols (`Source::Name` gone, `Pair::String` new).
+        let (f, m) = ("backend/fx/fx.go", node_kind::METHOD.0);
+        let base = gmap(vec![member("fx::Source::Name", f, m, 3)], vec![]);
+        let target = gmap(vec![member("fx::Pair::String", f, m, 3)], vec![]);
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert!(diff.modified.is_empty(), "{:?}", moves(&diff));
+        assert_eq!(diff.removed, ["fx::Source::Name"]);
+        assert_eq!(keys(&diff.added), ["fx::Pair::String"]);
+        assert_eq!(
+            (stats.by_words, stats.by_hint, stats.hint_refused),
+            (0, 0, 1)
+        );
+    }
+
+    #[test]
+    fn hint_pass_keeps_a_shared_word_rename() {
+        // Kina's ListPendingHits -> ListHits: one slot, a shared word.
+        let (f, m) = ("backend/store/hits.go", node_kind::METHOD.0);
+        let base = gmap(
+            vec![member("store::Repo::ListPendingHits", f, m, 2)],
+            vec![],
+        );
+        let target = gmap(vec![member("store::Repo::ListHits", f, m, 2)], vec![]);
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert_eq!(
+            moves(&diff),
+            [("store::Repo::ListPendingHits", "store::Repo::ListHits")]
+        );
+        assert!(diff.added.is_empty() && diff.removed.is_empty());
+        assert_eq!((stats.by_words, stats.hint_refused), (1, 0));
+
+        // The class renamed too: a new parent, so the words pass passes it
+        // over, and the hint pass pairs it on the shared word.
+        let target = gmap(vec![member("store::HitRepo::ListHits", f, m, 2)], vec![]);
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert_eq!(
+            moves(&diff),
+            [("store::Repo::ListPendingHits", "store::HitRepo::ListHits")]
+        );
+        assert_eq!(
+            (stats.by_words, stats.by_hint, stats.hint_refused),
+            (0, 1, 0)
+        );
+    }
+
+    #[test]
+    fn hint_pass_keeps_members_of_a_moved_file() {
+        // a.py moved to b.py, its token carried: every member's parent key
+        // changes, and the name pass refuses the ambiguous `get`. The hint
+        // pass pairs both on their equal names, whatever the parents.
+        let m = node_kind::METHOD.0;
+        let base = gmap(
+            vec![
+                member("a::Users::get", "a.py", m, 0),
+                member("a::Orders::get", "a.py", m, 1),
+            ],
+            vec![],
+        );
+        let target = gmap(
+            vec![
+                member("b::Users::get", "a.py", m, 0),
+                member("b::Orders::get", "a.py", m, 1),
+            ],
+            vec![],
+        );
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert_eq!(
+            moves(&diff),
+            [
+                ("a::Users::get", "b::Users::get"),
+                ("a::Orders::get", "b::Orders::get"),
+            ]
+        );
+        assert!(diff.added.is_empty() && diff.removed.is_empty());
+        assert_eq!(
+            (
+                stats.moved,
+                stats.by_name,
+                stats.by_words,
+                stats.by_hint,
+                stats.hint_refused
+            ),
+            (2, 0, 0, 2, 0)
+        );
+    }
+
+    #[test]
+    fn words_pass_needs_the_same_parent() {
+        // Kina 1aca01c: `Service::Rate` went, `Alerter::Notify` and
+        // `Alerter::RateStale` came, in one slot. The ordinal paired Rate ->
+        // Notify; a words pass blind to parents would pair Rate -> RateStale.
+        // Neither is a rename.
+        let (f, m) = ("backend/fx/fx.go", node_kind::METHOD.0);
+        let base = gmap(vec![member("fx::Service::Rate", f, m, 0)], vec![]);
+        let target = gmap(
+            vec![
+                member("fx::Alerter::Notify", f, m, 0),
+                member("fx::Alerter::RateStale", f, m, 1),
+            ],
+            vec![],
+        );
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert!(diff.modified.is_empty(), "{:?}", moves(&diff));
+        assert_eq!(diff.removed, ["fx::Service::Rate"]);
+        assert_eq!(
+            keys(&diff.added),
+            ["fx::Alerter::Notify", "fx::Alerter::RateStale"]
+        );
+        assert_eq!(
+            (stats.by_words, stats.by_hint, stats.hint_refused),
+            (0, 0, 1)
+        );
+
+        // Control: the same rename under its own parent pairs by words.
+        let target = gmap(
+            vec![
+                member("fx::Alerter::Notify", f, m, 0),
+                member("fx::Service::RateStale", f, m, 1),
+            ],
+            vec![],
+        );
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert_eq!(
+            moves(&diff),
+            [("fx::Service::Rate", "fx::Service::RateStale")]
+        );
+        assert_eq!(keys(&diff.added), ["fx::Alerter::Notify"]);
+        assert_eq!((stats.by_words, stats.by_hint), (1, 0));
+    }
+
+    #[test]
+    fn doc_sections_pair_by_their_slugs_words() {
+        // Kina ace21d5 / c643306: a section heading grew (`repo-graph` ->
+        // `repo-graph-structural-map`) after a section landed ahead of it,
+        // and `overview` gave way to an unrelated section at its ordinal.
+        let section = |slug: &str, ordinal: u32| {
+            let mut n = prose(&format!("docs::CLAUDE::{slug}"), slug, ordinal);
+            n.identity_hint = Some(format!("CLAUDE.md:{}:{ordinal}", node_kind::DOC_SECTION.0));
+            n
+        };
+        let base = gmap(
+            vec![section("overview", 0), section("repo-graph", 1)],
+            vec![],
+        );
+        let target = gmap(
+            vec![
+                section("planning-wiki-work-items", 0),
+                section("setup", 1),
+                section("repo-graph-structural-map", 2),
+            ],
+            vec![],
+        );
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert_eq!(
+            moves(&diff),
+            [(
+                "docs::CLAUDE::repo-graph",
+                "docs::CLAUDE::repo-graph-structural-map"
+            )]
+        );
+        assert_eq!(diff.removed, ["docs::CLAUDE::overview"]);
+        assert_eq!(
+            keys(&diff.added),
+            [
+                "docs::CLAUDE::planning-wiki-work-items",
+                "docs::CLAUDE::setup"
+            ]
+        );
+        assert_eq!(
+            (stats.by_words, stats.by_hint, stats.hint_refused),
+            (1, 0, 1)
+        );
+    }
+
+    #[test]
+    fn words_pass_leaves_a_tie_to_the_guarded_hint() {
+        // ListHits fits ListPendingHits and ListClearedHits alike (Jaccard
+        // 2/3 each): the words pass pairs neither, and the hint pass pairs
+        // the one at ListHits' ordinal, which shares its words.
+        let (f, m) = ("backend/store/hits.go", node_kind::METHOD.0);
+        let base = gmap(vec![member("store::Repo::ListHits", f, m, 0)], vec![]);
+        let target = gmap(
+            vec![
+                member("store::Repo::ListPendingHits", f, m, 0),
+                member("store::Repo::ListClearedHits", f, m, 1),
+            ],
+            vec![],
+        );
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert_eq!(
+            moves(&diff),
+            [("store::Repo::ListHits", "store::Repo::ListPendingHits")]
+        );
+        assert_eq!((stats.by_words, stats.by_hint), (0, 1));
+        // Reversed sides tie the same way: one base fact is the best of two
+        // targets, but its own best is not unique.
+        let (diff, stats) = diff_gmaps(&target, 1, &base, 2);
+        assert_eq!(
+            moves(&diff),
+            [("store::Repo::ListPendingHits", "store::Repo::ListHits")]
+        );
+        assert_eq!((stats.by_words, stats.by_hint), (0, 1));
     }
 
     #[test]
