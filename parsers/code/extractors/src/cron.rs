@@ -20,8 +20,10 @@
 //!  13. Oban — `{Oban.Plugins.Cron, crontab: [{"@daily", MyApp.Worker}]}` (LA.19b)
 //!  14. NestJS — `@Cron('0 3 * * *')` / `@Cron(CronExpression.X)` /
 //!      `@Interval(ms)` from `@nestjs/schedule` on a provider method (CL.9)
+//!  15. tokio-cron-scheduler — `Job::new_async("0 0 3 * * *", |_, _| ..)` and
+//!      the other scheduled `Job` constructors in a Rust file (DG.7a)
 //!
-//! Sources 5–14 are CODE sources: a job whose handler is nameable also
+//! Sources 5–15 are CODE sources: a job whose handler is nameable also
 //! carries a `CRON_JOB --HANDLED_BY--> handler` [`UnresolvedRef`] (bound by the
 //! graph builder's `resolve_refs`), so trace / blast-radius walk from a job
 //! into the code it runs. YAML jobs (sidekiq's included) carry none: they live
@@ -66,7 +68,7 @@ struct CronJob {
     target: String,
     /// workflow / k8s / node-cron / celery / scheduled-annot / quartz /
     /// hangfire / robfig / gocron / apscheduler / whenever / sidekiq_cron /
-    /// laravel / oban / nestjs
+    /// laravel / oban / nestjs / tokio_cron
     source: &'static str,
     /// The code the job runs, `Bare(fn)` or `Attribute { base, name }`, with
     /// the 0-based row of the construct that registers it (the scheduling
@@ -99,6 +101,7 @@ struct CodeCounts {
     apscheduler: usize,
     spring: usize,
     nestjs: usize,
+    tokio: usize,
     whenever: usize,
     sidekiq: usize,
     laravel: usize,
@@ -114,6 +117,7 @@ impl CodeCounts {
             "apscheduler" => self.apscheduler += 1,
             "scheduled_annot" => self.spring += 1,
             "nestjs" => self.nestjs += 1,
+            "tokio_cron" => self.tokio += 1,
             "whenever" => self.whenever += 1,
             "sidekiq_cron" => self.sidekiq += 1,
             "laravel" => self.laravel += 1,
@@ -123,7 +127,13 @@ impl CodeCounts {
     }
 
     fn total(&self) -> usize {
-        self.quartz + self.hangfire + self.go + self.apscheduler + self.spring + self.nestjs
+        self.quartz
+            + self.hangfire
+            + self.go
+            + self.apscheduler
+            + self.spring
+            + self.nestjs
+            + self.tokio
     }
 
     fn script_total(&self) -> usize {
@@ -137,13 +147,14 @@ fn is_script_source(source: &str) -> bool {
 }
 
 /// LA.19a fired_on: `[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0
-/// spring=0 nestjs=0 handler_refs=1 path=Jobs.java`, or `None` when the file
-/// declared no code-sourced job. The prefix and field order are stable;
-/// `nestjs=` (CL.9) follows `spring=`.
+/// spring=0 nestjs=0 tokio=0 handler_refs=1 path=Jobs.java`, or `None` when
+/// the file declared no code-sourced job. The prefix and field order are
+/// stable; `nestjs=` (CL.9) follows `spring=`, and `tokio=` (DG.7a,
+/// tokio-cron-scheduler) follows `nestjs=`.
 fn code_marker(c: &CodeCounts, handler_refs: usize, path: &str) -> Option<String> {
     (c.total() > 0).then(|| {
         format!(
-            "[cron] code jobs={} quartz={} hangfire={} go={} apscheduler={} spring={} nestjs={} handler_refs={handler_refs} path={path}",
+            "[cron] code jobs={} quartz={} hangfire={} go={} apscheduler={} spring={} nestjs={} tokio={} handler_refs={handler_refs} path={path}",
             c.total(),
             c.quartz,
             c.hangfire,
@@ -151,6 +162,7 @@ fn code_marker(c: &CodeCounts, handler_refs: usize, path: &str) -> Option<String
             c.apscheduler,
             c.spring,
             c.nestjs,
+            c.tokio,
         )
     })
 }
@@ -206,11 +218,17 @@ pub fn extract_cron_nodes(
     jobs.extend(extract_node_cron(source, &mut guard));
     jobs.extend(extract_celery_beat(source, &mut guard));
     jobs.extend(extract_scheduled_annotation(source, &mut guard));
-    guard.report("cron");
     // LA.19a framework schedulers. Each is gated on the file's language AND
     // its library's import / namespace, so every other file costs one
     // extension test.
     let ext = path.rsplit_once('.').map_or("", |(_, e)| e);
+    // DG.7a: tokio-cron-scheduler reads Rust, so it shares the guard (glia's
+    // own sources hold its needles in literals and comments) and runs before
+    // the guard reports, so a refused needle is counted in `[code-guard]`.
+    if ext == "rs" && source.contains("tokio_cron_scheduler") {
+        jobs.extend(extract_tokio_cron(source, &mut guard));
+    }
+    guard.report("cron");
     if matches!(ext, "java" | "kt" | "kts" | "groovy" | "scala") && source.contains("org.quartz") {
         jobs.extend(extract_quartz(source));
     }
@@ -1449,6 +1467,259 @@ fn chained_call_arg<'s>(source: &'s str, mut i: usize, method: &str) -> Option<&
         i = end;
     }
     None
+}
+
+// --- Rust: tokio-cron-scheduler -----------------------------------------------
+
+/// tokio-cron-scheduler's scheduled `Job` constructors, each with the index of
+/// its run argument: `(schedule, run)`, or `(schedule, timezone, run)` for the
+/// `_tz` forms. The Duration-driven `new_repeated*` / `new_one_shot*` take no
+/// schedule, so they are not read.
+const TOKIO_CRON_CTORS: [(&str, usize); 7] = [
+    ("new", 1),
+    ("new_async", 1),
+    ("new_tz", 2),
+    ("new_async_tz", 2),
+    ("new_cron_job", 1),
+    ("new_cron_job_async", 1),
+    ("new_cron_job_async_tz", 2),
+];
+
+/// tokio-cron-scheduler (gate: `tokio_cron_scheduler` in a `.rs` file; DG.7a).
+/// `Job::<ctor>(..)` for a [`TOKIO_CRON_CTORS`] constructor, in source order:
+/// the occurrence must be code ([`LazyGuard::admits`]), its path must not run
+/// into the identifier before it (`MyJob::new(` is no job;
+/// `tokio_cron_scheduler::Job::new(` is), the call must carry exactly the
+/// constructor's arguments, and the schedule (the first) must be a string
+/// literal that [`normalise_schedule`] keeps: the crate's 6-field,
+/// seconds-first `0 0 3 * * *` stays verbatim. The run argument names the
+/// handler: a Rust path (`purge`, `jobs::purge`) through [`rust_path_handler`],
+/// or a closure whose body is one call ([`closure_single_call`]); anything
+/// else is the job `anon` with no handler. Arguments are split by
+/// [`rust_call_args`] over [`call_args`], which reads a `'` as a quote: a
+/// lifetime inside the call can leave it unclosed, and then no job is read.
+fn extract_tokio_cron(source: &str, guard: &mut LazyGuard<'_>) -> Vec<CronJob> {
+    let mut out = Vec::new();
+    for (pos, needle) in source.match_indices("Job::") {
+        let after = pos + needle.len();
+        let Some(method) = source.get(after..).and_then(leading_ident) else {
+            continue;
+        };
+        let Some(&(_, run_at)) = TOKIO_CRON_CTORS.iter().find(|(m, _)| *m == method) else {
+            continue;
+        };
+        let open = after + method.len();
+        if source.as_bytes().get(open) != Some(&b'(')
+            || ident_before(source, pos).is_some()
+            || !guard.admits(pos)
+        {
+            continue;
+        }
+        let Some(args) = rust_call_args(source, open + 1) else {
+            continue;
+        };
+        if args.len() != run_at + 1 {
+            continue;
+        }
+        let Some(schedule) = args
+            .first()
+            .and_then(|a| string_literal(a))
+            .and_then(|raw| normalise_schedule(&raw))
+        else {
+            continue;
+        };
+        let Some(run) = args.get(run_at).copied() else {
+            continue;
+        };
+        let (target, handler) = match rust_path_handler(run).or_else(|| closure_single_call(run)) {
+            Some((target, q)) => (target, Some(q)),
+            None => ("anon".to_string(), None),
+        };
+        out.push(CronJob {
+            schedule,
+            target,
+            source: "tokio_cron",
+            handler: at_row(handler, source, pos),
+        });
+    }
+    out
+}
+
+/// [`call_args`] for a Rust call: the commas of a closure's `|a, b|`
+/// parameter list sit at the call's own depth, so the pieces `call_args` cut
+/// there are joined back into one argument. `None` when the call does not
+/// close or a parameter list never does.
+fn rust_call_args(source: &str, open: usize) -> Option<Vec<&str>> {
+    let (pieces, _) = call_args(source, open)?;
+    let mut args = Vec::with_capacity(pieces.len());
+    // The start of a closure argument whose `|..|` is still open.
+    let mut head: Option<usize> = None;
+    for piece in pieces {
+        let at = offset_in(source, piece, open);
+        match head {
+            Some(start) if piece.contains('|') => {
+                args.push(source.get(start..at + piece.len())?);
+                head = None;
+            }
+            Some(_) => {}
+            None => {
+                let rest = piece.strip_prefix("move").map_or(piece, str::trim_start);
+                if rest
+                    .strip_prefix('|')
+                    .is_some_and(|params| !params.contains('|'))
+                {
+                    head = Some(at);
+                } else {
+                    args.push(piece);
+                }
+            }
+        }
+    }
+    head.is_none().then_some(args)
+}
+
+/// Names that read as a call in front of `(` but are never a job's function.
+const RUST_NON_CALLEES: [&str; 15] = [
+    "if", "while", "match", "return", "in", "as", "loop", "let", "move", "async", "await",
+    "unsafe", "self", "super", "crate",
+];
+
+/// `(target, handler)` for a Rust path naming a function, in the Rust parser's
+/// own call shape: `purge` is `Bare(purge)`, `jobs::purge` / `crate::jobs::purge`
+/// is `Attribute { base: "jobs" / "crate::jobs", name: purge }`. A segment
+/// that is not a plain identifier (a turbofish, a macro `!`, a method chain),
+/// a keyword, or an UpperCamel last segment (a tuple struct or variant such as
+/// `Ok`, which constructs and runs nothing) is `None`.
+fn rust_path_handler(path: &str) -> Option<(String, CallQualifier)> {
+    let segs: Vec<&str> = path.trim().split("::").collect();
+    if !segs
+        .iter()
+        .all(|seg| leading_ident(seg).is_some_and(|id| id.len() == seg.len()))
+    {
+        return None;
+    }
+    let (name, base) = segs.split_last()?;
+    if name.starts_with(|c: char| c.is_ascii_uppercase()) || RUST_NON_CALLEES.contains(name) {
+        return None;
+    }
+    let q = if base.is_empty() {
+        CallQualifier::Bare(name.to_string())
+    } else {
+        CallQualifier::Attribute {
+            base: base.join("::"),
+            name: name.to_string(),
+        }
+    };
+    Some((name.to_string(), q))
+}
+
+/// The callee of a run closure whose body is exactly one call to a Rust path:
+/// `|_uuid, _l| Box::pin(async move { purge().await })` runs `purge`. Peels
+/// `move`, the `|..|` parameters (and a `-> T` return type), then, repeatedly,
+/// a trailing `;` or `.await`, `Box::pin(..)`, `async move { .. }` /
+/// `async { .. }` and an outer `{ .. }`. What is left must be `path(args)`
+/// with nothing after its `)`, whose arguments call no further path
+/// (`tokio::spawn(purge())` names no single handler; `purge(db.clone())`, a
+/// method call on a value, does). A second statement, a macro (`println!`), a
+/// `let` / `if` or a method chain is `None`.
+fn closure_single_call(arg: &str) -> Option<(String, CallQualifier)> {
+    let s = arg.trim();
+    let s = match s.strip_prefix("move") {
+        Some(rest) if rest.starts_with(|c: char| c.is_whitespace() || c == '|') => {
+            rest.trim_start()
+        }
+        _ => s,
+    };
+    let params = s.strip_prefix('|')?;
+    let close = params.find('|')?;
+    let mut body = params.get(close + 1..)?.trim_start();
+    if let Some(ret) = body.strip_prefix("->") {
+        // `|..| -> T { .. }`: a closure with a return type has a block body.
+        body = ret.get(ret.find('{')?..)?;
+    }
+    loop {
+        let before = body.len();
+        body = body.trim();
+        body = body.strip_suffix(';').map_or(body, str::trim_end);
+        body = body.strip_suffix(".await").map_or(body, str::trim_end);
+        if let Some(inner) = enclosed(body, "Box::pin(", b')')
+            .or_else(|| async_block(body))
+            .or_else(|| enclosed(body, "{", b'}'))
+        {
+            body = inner;
+        }
+        if body.len() == before {
+            break;
+        }
+    }
+    let open = body.find('(')?;
+    let (_, end) = call_args(body, open + 1)?;
+    if end != body.len() || calls_a_path(body.get(open + 1..end - 1)?) {
+        return None;
+    }
+    rust_path_handler(body.get(..open)?)
+}
+
+/// The text between `opener` (which `s` starts with) and the `close` that
+/// matches it, when that close is the last byte of `s`.
+fn enclosed<'s>(s: &'s str, opener: &str, close: u8) -> Option<&'s str> {
+    s.strip_prefix(opener)?;
+    let (_, end) = bracket_items(s, opener.len(), close)?;
+    (end == s.len()).then(|| s.get(opener.len()..end - 1))?
+}
+
+/// The body of `async { .. }` / `async move { .. }` spanning all of `s`.
+fn async_block(s: &str) -> Option<&str> {
+    let rest = s.strip_prefix("async")?.trim_start();
+    let rest = match rest.strip_prefix("move") {
+        Some(r) if r.starts_with(|c: char| c.is_whitespace() || c == '{') => r.trim_start(),
+        _ => rest,
+    };
+    enclosed(rest, "{", b'}')
+}
+
+/// True when `args` holds a call to a function path: a `(` right after a path
+/// whose last segment is a lowercase identifier (`Duration::from_secs(`),
+/// unless that identifier is a method name (`.clone(`). A macro (`vec!(`,
+/// whose `!` ends no identifier) and an UpperCamel constructor (`Some(`) are
+/// no call. Double-quoted strings are skipped.
+fn calls_a_path(args: &str) -> bool {
+    let bytes = args.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => match skip_string(bytes, i, bytes.len()) {
+                Some(next) => {
+                    i = next;
+                    continue;
+                }
+                None => return false,
+            },
+            b'(' => {
+                let path_len = bytes[..i]
+                    .iter()
+                    .rev()
+                    .take_while(|b| is_ident_byte(**b) || **b == b':')
+                    .count();
+                let last_len = bytes[..i]
+                    .iter()
+                    .rev()
+                    .take_while(|b| is_ident_byte(**b))
+                    .count();
+                let function = bytes
+                    .get(i - last_len)
+                    .is_some_and(|b| *b == b'_' || b.is_ascii_lowercase())
+                    && last_len > 0;
+                let method = i > path_len && bytes[i - path_len - 1] == b'.';
+                if function && !method {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 // --- APScheduler ---------------------------------------------------------------
@@ -3800,7 +4071,7 @@ sched.add_job(lambda: None, "cron", second=30, minute="*/2")
         assert_eq!(
             code_marker(&c, 1, "Jobs.java").as_deref(),
             Some(
-                "[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 handler_refs=1 path=Jobs.java"
+                "[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 tokio=0 handler_refs=1 path=Jobs.java"
             )
         );
         c.bump("robfig");
@@ -3809,7 +4080,7 @@ sched.add_job(lambda: None, "cron", second=30, minute="*/2")
         assert_eq!(
             code_marker(&c, 3, "w.go").as_deref(),
             Some(
-                "[cron] code jobs=4 quartz=1 hangfire=0 go=2 apscheduler=0 spring=1 nestjs=0 handler_refs=3 path=w.go"
+                "[cron] code jobs=4 quartz=1 hangfire=0 go=2 apscheduler=0 spring=1 nestjs=0 tokio=0 handler_refs=3 path=w.go"
             )
         );
     }
@@ -3845,7 +4116,7 @@ sched.add_job(lambda: None, "cron", second=30, minute="*/2")
         assert_eq!(
             code_marker(&c, 1, "src/tasks.service.ts").as_deref(),
             Some(
-                "[cron] code jobs=1 quartz=0 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=1 handler_refs=1 path=src/tasks.service.ts"
+                "[cron] code jobs=1 quartz=0 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=1 tokio=0 handler_refs=1 path=src/tasks.service.ts"
             )
         );
         // A 6-field NestJS expression (seconds first), options, stacked
@@ -3957,6 +4228,12 @@ sched.add_job(lambda: None, "cron", second=30, minute="*/2")
                     "import org.quartz.*; // {wide}\nx(cronSchedule(\"{wide}\")); newJob({wide}.class); cronSchedule(\"0 0 2 * * ?\"{wide}"
                 ),
                 "J.java",
+            ),
+            (
+                format!(
+                    "use tokio_cron_scheduler::Job; // {wide}\nJob::new(\"{wide}\", |_, _| {wide}()); Job::new_async(\"0 0 3 * * *\", |_, _| Box::pin(async move {{ {wide}(\"{wide}\").await }})); Job::new_tz(\"0 0 3 * * *\", {wide}, move |_, _| -> {wide} {{ p({wide}"
+                ),
+                "src/j.rs",
             ),
             (
                 format!(
@@ -4517,7 +4794,7 @@ config :my_app, Oban,
         assert_eq!(
             code_marker(&c, 0, "x").as_deref(),
             Some(
-                "[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 handler_refs=0 path=x"
+                "[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 tokio=0 handler_refs=0 path=x"
             ),
             "the LA.19a marker is unchanged by script jobs"
         );
@@ -4584,5 +4861,142 @@ config :my_app, Oban,
         ] {
             let _ = run(&src, path);
         }
+    }
+
+    /// The matrix/rust/cron probe file (DG.7a).
+    const TOKIO_JOBS: &str = r#"use tokio_cron_scheduler::{Job, JobScheduler};
+
+pub async fn start() {
+    let sched = JobScheduler::new().await.unwrap();
+    let job = Job::new_async("0 0 3 * * *", |_uuid, _l| Box::pin(async move { purge().await })).unwrap();
+    sched.add(job).await.unwrap();
+    sched.start().await.unwrap();
+}
+
+async fn purge() {}
+"#;
+
+    #[test]
+    fn tokio_cron_scheduler_jobs() {
+        let out = run(TOKIO_JOBS, "src/jobs.rs");
+        assert_eq!(sorted_qnames(&out), vec!["cron:0 0 3 * * *:purge"]);
+        assert_eq!(
+            handlers(&out),
+            vec![("cron:0 0 3 * * *:purge".to_string(), bare("purge"))]
+        );
+        // The ref sits at the `Job::new_async(` row (0-based), the LC.3b site.
+        assert_eq!(out.refs[0].line, 4);
+        assert_eq!(out.refs[0].category, edge_category::HANDLED_BY);
+        assert_eq!(out.edges.len(), 1, "one SCHEDULES edge module -> job");
+        assert_eq!(out.edges[0].category, edge_category::SCHEDULES);
+
+        // A function path as the run argument; `_tz` forms read arg #2; a
+        // fully qualified `Job` path is the same constructor.
+        let src = "use tokio_cron_scheduler::Job;\nfn jobs() {\n    Job::new(\"1/10 * * * * *\", tick).unwrap();\n    Job::new_tz(\"0 30 9 * * Mon-Fri\", chrono_tz::UTC, |_, _| { report(); }).unwrap();\n    tokio_cron_scheduler::Job::new_cron_job_async(\"0 15 * * * *\", move |_, _| { Box::pin(async move { reports::weekly(&pool).await; }) }).unwrap();\n    Job::new_async_tz(\"0 0 4 * * *\", Utc, crate::ops::vacuum).unwrap();\n    Job::new(\"0 0 6 * * *\", |_id: Uuid, _l: JobsSchedulerLocked| sweep()).unwrap();\n}\n";
+        let out = run(src, "src/jobs.rs");
+        assert_eq!(
+            handlers(&out),
+            vec![
+                (
+                    "cron:0 0 4 * * *:vacuum".to_string(),
+                    attr("crate::ops", "vacuum")
+                ),
+                ("cron:0 0 6 * * *:sweep".to_string(), bare("sweep")),
+                (
+                    "cron:0 15 * * * *:weekly".to_string(),
+                    attr("reports", "weekly")
+                ),
+                ("cron:0 30 9 * * Mon-Fri:report".to_string(), bare("report")),
+                ("cron:1/10 * * * * *:tick".to_string(), bare("tick")),
+            ]
+        );
+        assert_eq!(out.nodes.len(), 5);
+
+        // A closure that does more than call one function names no handler,
+        // and neither does a constructor or a wrapper around a second call.
+        let src = "use tokio_cron_scheduler::Job;\nfn jobs() {\n    Job::new(\"0 0 1 * * *\", |_, _| { println!(\"tick\"); }).unwrap();\n    Job::new_async(\"0 0 2 * * *\", |uuid, mut l| Box::pin(async move { let n = l.next_tick_for_job(uuid).await; log(n); })).unwrap();\n    Job::new_async(\"0 0 5 * * *\", |_, _| Box::pin(async move { tokio::spawn(purge()); })).unwrap();\n}\n";
+        let out = run(src, "src/jobs.rs");
+        assert_eq!(
+            sorted_qnames(&out),
+            vec![
+                "cron:0 0 1 * * *:anon",
+                "cron:0 0 2 * * *:anon",
+                "cron:0 0 5 * * *:anon"
+            ]
+        );
+        assert!(out.refs.is_empty(), "{:?}", handlers(&out));
+
+        // Duration-driven jobs take no schedule; a non-cron literal, a
+        // variable schedule, a look-alike type and the wrong arity are no job.
+        let src = "use tokio_cron_scheduler::Job;\nfn jobs(spec: &str) {\n    Job::new_repeated(Duration::from_secs(8), |_, _| tick()).unwrap();\n    Job::new_one_shot(Duration::from_secs(18), |_, _| tick()).unwrap();\n    Job::new(\"every minute\", tick).unwrap();\n    Job::new(spec, tick).unwrap();\n    MyJob::new(\"0 0 3 * * *\", purge);\n    Job::new(\"0 0 3 * * *\");\n}\n";
+        assert!(run(src, "src/jobs.rs").nodes.is_empty());
+
+        // A needle inside a Rust raw string or a comment is no job (CJ.1).
+        let src = "use tokio_cron_scheduler::Job;\nconst SAMPLE: &str = r#\"Job::new(\"0 0 3 * * *\", purge)\"#;\n// Job::new_async(\"0 0 4 * * *\", purge)\n/// `Job::new_tz(\"0 0 5 * * *\", Utc, purge)`\nfn f() {}\n";
+        assert!(run(src, "src/jobs.rs").nodes.is_empty());
+
+        // The gate: no `tokio_cron_scheduler` in the file, or not a `.rs`
+        // file, is nothing.
+        let ungated = TOKIO_JOBS.replace("tokio_cron_scheduler", "my_scheduler");
+        assert!(run(&ungated, "src/jobs.rs").nodes.is_empty());
+        assert!(run(TOKIO_JOBS, "src/jobs.ts").nodes.is_empty());
+    }
+
+    #[test]
+    fn tokio_cron_marker() {
+        let out = run(TOKIO_JOBS, "src/jobs.rs");
+        let mut c = CodeCounts::default();
+        for n in &out.nodes {
+            let CellPayload::Json(payload) = &n.cells[0].payload else {
+                panic!("CRON_JOB CODE cell is JSON");
+            };
+            assert!(payload.contains(r#""source":"tokio_cron""#), "{payload}");
+            c.bump("tokio_cron");
+        }
+        assert_eq!(
+            code_marker(&c, out.refs.len(), "src/jobs.rs").as_deref(),
+            Some(
+                "[cron] code jobs=1 quartz=0 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 tokio=1 handler_refs=1 path=src/jobs.rs"
+            )
+        );
+    }
+
+    #[test]
+    fn closure_single_call_peels_to_one_call() {
+        let callee = closure_single_call;
+        assert_eq!(
+            callee("|_uuid, _l| Box::pin(async move { purge().await })"),
+            Some(("purge".to_string(), bare("purge")))
+        );
+        assert_eq!(
+            callee("move |_, _| { Box::pin(async { jobs::purge(db.clone()).await; }) }"),
+            Some(("purge".to_string(), attr("jobs", "purge")))
+        );
+        assert_eq!(
+            callee(
+                "|_, _| -> Pin<Box<dyn Future<Output = ()> + Send>> { Box::pin(sweep(\"a(b)\")) }"
+            ),
+            Some(("sweep".to_string(), bare("sweep")))
+        );
+        assert_eq!(callee("|_, _| { Ok(()) }"), None);
+        assert_eq!(callee("|_, _| { a(); b() }"), None);
+        assert_eq!(callee("|_, _| { purge().await.unwrap() }"), None);
+        assert_eq!(callee("|_, _| { if ready() { go() } }"), None);
+        assert_eq!(callee("|_, _| { purge(Duration::from_secs(3)) }"), None);
+        assert_eq!(
+            callee("|_, _| { purge(Some(3), vec!(1)) }"),
+            Some(("purge".to_string(), bare("purge")))
+        );
+        assert_eq!(callee("tick"), None, "a path is rust_path_handler's");
+        assert_eq!(
+            rust_path_handler("tick"),
+            Some(("tick".to_string(), bare("tick")))
+        );
+        assert_eq!(
+            rust_path_handler("Self::tick").map(|(_, q)| q),
+            Some(attr("Self", "tick"))
+        );
+        assert_eq!(rust_path_handler("MyJob"), None);
+        assert_eq!(rust_path_handler("Vec::<u8>::new"), None);
     }
 }
