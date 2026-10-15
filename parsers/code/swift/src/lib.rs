@@ -458,6 +458,7 @@ fn visit_member(
     } else if let Some(existing) = acc.nodes.iter_mut().find(|n| n.id == id) {
         existing.cells.extend(cells);
     }
+    record_local_types(node, body, id, src, acc);
     if let Some(body) = body {
         collect_calls_in(body, src, id, acc);
         collect_client_endpoints_in(body, src, id, repo, file_rel, acc);
@@ -570,6 +571,305 @@ fn constructor_name<'a>(value: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
         .then_some(name)
 }
 
+/// DF.3: record on `scope` (the fn / METHOD `decl` mints) the receiver type
+/// of every local its body binds, on `acc.nav.local_types`, which
+/// `resolve_calls`' receiver pass reads before the enclosing type's stored
+/// properties (LA.35a) and the Swift hook (`graph::swift_scope`, rule
+/// `local_receiver`) reads to bind `x.m()` on the type in the caller's own
+/// module:
+///
+/// - a parameter of `decl` (`store: Store`, `_ store: Store`, `to store:
+///   Store`; the INTERNAL name is the local) or of a closure in the body: its
+///   declared type through [`simple_type_name`] (`Store?` peeled; `Store!`,
+///   `inout` and attributes are siblings of the type), else `""`;
+/// - a `let` / `var` binding ([`record_property_locals`]), an `if` / `guard`
+///   / `while` optional binding ([`record_condition_locals`]): its annotation,
+///   else its value's type ([`local_value_type`]);
+/// - a `for` item, a `catch let` error, a `case let` pattern: `""`.
+///
+/// Calls inside a closure are the enclosing callable's (`collect_calls_in`
+/// enters closures), so the walk enters them too; it never enters a nested
+/// `func` (its calls are not collected) or a nested type. The body is one
+/// scope: a name bound to two types becomes `""` through
+/// `record_local_type`, a lost edge, never a guessed one. `""` is a local of
+/// unknown type: it shadows a same-named stored property.
+fn record_local_types(
+    decl: TsNode,
+    body: Option<TsNode>,
+    scope: NodeId,
+    src: &[u8],
+    acc: &mut Acc,
+) {
+    let mut cursor = decl.walk();
+    for p in decl.named_children(&mut cursor) {
+        if p.kind() == "parameter" {
+            record_param(p, scope, src, acc);
+        }
+    }
+    let mut stack: Vec<TsNode> = body.into_iter().collect();
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "function_declaration" | "class_declaration" | "protocol_declaration" => continue,
+            "lambda_parameter" => record_param(node, scope, src, acc),
+            "property_declaration" => record_property_locals(node, scope, src, acc),
+            "if_statement" | "guard_statement" | "while_statement" => {
+                record_condition_locals(node, scope, src, acc);
+            }
+            "for_statement" => {
+                if let Some(item) = node.child_by_field_name("item") {
+                    record_unknown_pattern(item, true, scope, src, acc);
+                }
+            }
+            "catch_block" => {
+                if let Some(error) = node.child_by_field_name("error") {
+                    record_unknown_pattern(error, true, scope, src, acc);
+                }
+            }
+            "switch_pattern" => record_unknown_pattern(node, false, scope, src, acc),
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        let children: Vec<TsNode> = node.named_children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev());
+    }
+}
+
+/// DF.3: record a local of `scope`, skipping a name no call binds through
+/// (`_`, `self` in `guard let self = self`).
+fn record_local(scope: NodeId, name: &str, ty: &str, acc: &mut Acc) {
+    if name != "_" && name != "self" {
+        acc.nav.record_local_type(scope, name, ty);
+    }
+}
+
+/// DF.3: a `parameter` / `lambda_parameter`: the grammar puts the internal
+/// name and the type in two `name` fields (the external label is
+/// `external_name`), so the first `name` is the local and the second its type.
+fn record_param(p: TsNode, scope: NodeId, src: &[u8], acc: &mut Acc) {
+    let mut cursor = p.walk();
+    let mut names = p.children_by_field_name("name", &mut cursor);
+    let Some(local) = names.next().filter(|n| n.kind() == "simple_identifier") else {
+        return;
+    };
+    let ty = names.next().and_then(|t| simple_type_name(t, src)).unwrap_or("");
+    record_local(scope, text_of(local, src), ty, acc);
+}
+
+/// DF.3: the bindings of a local `let` / `var` (`let a: Store, b = Repo()`
+/// binds two), read in source order like [`record_stored_field_types`]: a
+/// `name` pattern opens a binding, its `type_annotation` or, failing that, its
+/// `value` gives the type. Each binding is recorded when the next opens, so a
+/// later one's value may name an earlier one. A tuple pattern (`let (a, b) =
+/// pair()`) binds names of unknown type.
+fn record_property_locals(node: TsNode, scope: NodeId, src: &[u8], acc: &mut Acc) {
+    let mut open: Option<(&str, Option<String>)> = None;
+    let mut cursor = node.walk();
+    let mut more = cursor.goto_first_child();
+    while more {
+        let child = cursor.node();
+        match (cursor.field_name(), child.kind()) {
+            (Some("name"), _) => {
+                flush_binding(open.take(), scope, acc);
+                match child.child_by_field_name("bound_identifier") {
+                    Some(id) => open = Some((text_of(id, src), None)),
+                    None => record_unknown_pattern(child, true, scope, src, acc),
+                }
+            }
+            (_, "type_annotation") => {
+                if let Some((_, ty)) = open.as_mut() {
+                    *ty = Some(annotated_type(child, src));
+                }
+            }
+            (Some("value"), _) => {
+                if let Some((_, ty @ None)) = open.as_mut() {
+                    *ty = Some(local_value_type(child, scope, src, &acc.nav));
+                }
+            }
+            _ => {}
+        }
+        more = cursor.goto_next_sibling();
+    }
+    flush_binding(open, scope, acc);
+}
+
+/// DF.3: the optional bindings of an `if` / `guard` / `while` condition list
+/// (`if let a = b, let c: Store = d`, the shorthand `if let repo`). The
+/// grammar flattens them onto the statement: a `bound_identifier` opens a
+/// binding, a `type_annotation` condition types it, and the named condition
+/// right after its `=` is its value. A shorthand binding (no `=`) unwraps the
+/// same-named outer value ([`alias_type`]). An `if case let` pattern binds
+/// names of unknown type ([`record_unknown_pattern`]).
+fn record_condition_locals(node: TsNode, scope: NodeId, src: &[u8], acc: &mut Acc) {
+    // The open binding: its name, its type once known, whether its `=` was read.
+    let mut open: Option<(&str, Option<String>, bool)> = None;
+    // A `let` / `var` of the current clause: `if case let .some(w) = opt`
+    // puts it beside the pattern, not in it.
+    let mut binds = false;
+    let mut cursor = node.walk();
+    let mut more = cursor.goto_first_child();
+    while more {
+        let child = cursor.node();
+        match (cursor.field_name(), child.kind()) {
+            (Some("bound_identifier"), _) => {
+                finish_condition_binding(open.take(), scope, acc);
+                open = Some((text_of(child, src), None, false));
+            }
+            (Some("condition"), "=") if !child.is_named() => {
+                binds = false;
+                if let Some((_, _, eq)) = open.as_mut() {
+                    *eq = true;
+                }
+            }
+            (_, ",") if !child.is_named() => binds = false,
+            (Some("condition"), "type_annotation") => {
+                if let Some((_, ty, _)) = open.as_mut() {
+                    *ty = Some(annotated_type(child, src));
+                }
+            }
+            (Some("condition"), "pattern") => {
+                record_unknown_pattern(child, binds, scope, src, acc);
+            }
+            (Some("condition"), "value_binding_pattern") => binds = true,
+            (Some("condition"), _) if child.is_named() && matches!(open, Some((_, _, true))) => {
+                if let Some((name, ty, _)) = open.take() {
+                    let ty = ty.unwrap_or_else(|| local_value_type(child, scope, src, &acc.nav));
+                    record_local(scope, name, &ty, acc);
+                }
+            }
+            _ => {}
+        }
+        more = cursor.goto_next_sibling();
+    }
+    finish_condition_binding(open, scope, acc);
+}
+
+/// DF.3: record an optional binding [`record_condition_locals`] closed with
+/// no value read: its annotation's type, else (the shorthand `if let repo`)
+/// the same-named outer value's ([`alias_type`]).
+fn finish_condition_binding(
+    open: Option<(&str, Option<String>, bool)>,
+    scope: NodeId,
+    acc: &mut Acc,
+) {
+    if let Some((name, ty, _)) = open {
+        let ty = ty.unwrap_or_else(|| alias_type(name, scope, &acc.nav));
+        record_local(scope, name, &ty, acc);
+    }
+}
+
+/// DF.3: a `type_annotation`'s simple type ([`simple_type_name`]), `""` for
+/// one that names no single type.
+fn annotated_type(annotation: TsNode, src: &[u8]) -> String {
+    annotation
+        .child_by_field_name("name")
+        .and_then(|t| simple_type_name(t, src))
+        .unwrap_or("")
+        .to_string()
+}
+
+/// DF.3: record a `let` / `var` binding [`record_property_locals`] closed;
+/// a binding with neither annotation nor value is of unknown type.
+fn flush_binding(open: Option<(&str, Option<String>)>, scope: NodeId, acc: &mut Acc) {
+    if let Some((name, ty)) = open {
+        record_local(scope, name, ty.as_deref().unwrap_or(""), acc);
+    }
+}
+
+/// DF.3: every name a pattern binds, recorded as a local of unknown type
+/// (`""`): a `bound_identifier` (`let x`), and, under a `let` / `var` (or
+/// where the context binds, `bound`: a `for` item, a tuple `let`), a nested
+/// pattern that is a lone identifier (`case let .pair(a, b)`). Without a
+/// `let` a lone identifier is an expression pattern, matched, not bound.
+fn record_unknown_pattern(
+    pattern: TsNode,
+    bound: bool,
+    scope: NodeId,
+    src: &[u8],
+    acc: &mut Acc,
+) {
+    let mut stack = vec![(pattern, bound)];
+    while let Some((node, bound)) = stack.pop() {
+        let mut cursor = node.walk();
+        let children: Vec<TsNode> = node.named_children(&mut cursor).collect();
+        let bound = bound || children.iter().any(|c| c.kind() == "value_binding_pattern");
+        if let Some(id) = node.child_by_field_name("bound_identifier") {
+            record_local(scope, text_of(id, src), "", acc);
+        } else if bound
+            && node.kind() == "pattern"
+            && let [only] = children.as_slice()
+            && only.kind() == "simple_identifier"
+        {
+            record_local(scope, text_of(*only, src), "", acc);
+        }
+        for child in children.into_iter().rev() {
+            if matches!(child.kind(), "pattern" | "switch_pattern") {
+                stack.push((child, bound));
+            }
+        }
+    }
+}
+
+/// DF.3: the type a local gets from its value, or `""`:
+/// - `Store(..)` ([`constructor_name`]) or `Store.init(..)`: `Store`;
+/// - `x as? Store` / `as!` / `as`: `Store`; `try` / `await` are peeled;
+/// - `self.repo` or a bare `repo`: [`alias_type`];
+/// - anything else (a call chain, a factory, a literal): `""`.
+fn local_value_type(value: TsNode, scope: NodeId, src: &[u8], nav: &CodeNav) -> String {
+    match value.kind() {
+        "try_expression" | "await_expression" => value
+            .child_by_field_name("expr")
+            .map(|e| local_value_type(e, scope, src, nav))
+            .unwrap_or_default(),
+        "as_expression" => value
+            .child_by_field_name("name")
+            .and_then(|t| simple_type_name(t, src))
+            .unwrap_or("")
+            .to_string(),
+        "call_expression" => constructor_name(value, src)
+            .or_else(|| init_call_type(value, src))
+            .unwrap_or("")
+            .to_string(),
+        "simple_identifier" => alias_type(text_of(value, src), scope, nav),
+        "navigation_expression" => {
+            let target = value.child_by_field_name("target");
+            let member = nav_member_name(value, src);
+            match target {
+                Some(t) if t.kind() == "self_expression" && !member.is_empty() => {
+                    format!("self.{member}")
+                }
+                _ => String::new(),
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+/// DF.3: `Store.init(..)` -> `Store` (a Capitalised plain-identifier target).
+fn init_call_type<'a>(value: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    let callee = value.named_child(0)?;
+    if callee.kind() != "navigation_expression" || nav_member_name(callee, src) != "init" {
+        return None;
+    }
+    let target = callee.child_by_field_name("target")?;
+    let name = text_of(target, src);
+    (target.kind() == "simple_identifier" && name.chars().next().is_some_and(char::is_uppercase))
+        .then_some(name)
+}
+
+/// DF.3: the type of the value a bare `name` reads in `scope`: a local
+/// recorded so far (parameters first, then the body in source order) gives
+/// its own type; any other name reads the enclosing type's stored property
+/// (Swift's implicit `self`), the alias `self.<name>` the receiver pass
+/// resolves through `field_types` (nothing, outside a type or with no such
+/// property). A local is not in scope in its own initializer, so `let repo =
+/// repo` reads the outer `repo`: the lookup runs before the binding records.
+fn alias_type(name: &str, scope: NodeId, nav: &CodeNav) -> String {
+    match nav.local_types.get(&scope).and_then(|l| l.get(name)) {
+        Some(ty) => ty.clone(),
+        None => format!("self.{name}"),
+    }
+}
+
 fn first_named_child_of_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).find(|c| c.kind() == kind)
@@ -607,7 +907,9 @@ fn visit_function(
     acc.nav
         .record(id, name, &qname, node_kind::FUNCTION, Some(parent_id));
 
-    if let Some(body) = node.child_by_field_name("body") {
+    let body = node.child_by_field_name("body");
+    record_local_types(node, body, id, src, acc);
+    if let Some(body) = body {
         collect_calls_in(body, src, id, acc);
         collect_client_endpoints_in(body, src, id, repo, file_rel, acc);
     }
@@ -645,7 +947,9 @@ fn visit_method(
     acc.nav
         .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
 
-    if let Some(body) = node.child_by_field_name("body") {
+    let body = node.child_by_field_name("body");
+    record_local_types(node, body, id, src, acc);
+    if let Some(body) = body {
         collect_calls_in(body, src, id, acc);
         collect_client_endpoints_in(body, src, id, repo, file_rel, acc);
     }
@@ -1736,6 +2040,171 @@ func listOrders(base: String) {
             ]
         );
         assert_eq!(fp.nav.field_types.len(), 1, "only the type records fields");
+    }
+
+    /// DF.3: the locals `scope` (a qname of `kind`) records, sorted.
+    fn locals_of(
+        fp: &FileParse,
+        kind: glia_core::NodeKindId,
+        scope: &str,
+    ) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = fp
+            .nav
+            .local_types
+            .get(&id(kind, scope))
+            .map(|l| l.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        out.sort();
+        out
+    }
+
+    fn pairs(rows: &[(&str, &str)]) -> Vec<(String, String)> {
+        rows.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    }
+
+    /// DF.3: the swift-local-receivers fixture's Service.swift: a method
+    /// parameter, a free function's `_ store` parameter (the internal name is
+    /// the local), `let s = Store()`, `let t: Store`, `var u = Store.init()`
+    /// and `let o: Store?` each record `Store`.
+    #[test]
+    fn param_and_local_types_are_recorded() {
+        let path = format!(
+            "{}/../../../bench/substrate-gap/fixtures/swift-local-receivers/Sources/App/Service.swift",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let fp = parse_file(&source, "Sources/App/Service.swift", "Sources::App::Service", repo())
+            .unwrap();
+        let method = node_kind::METHOD;
+        assert_eq!(
+            locals_of(&fp, method, "Sources::App::Service::run"),
+            pairs(&[("store", "Store")])
+        );
+        assert_eq!(
+            locals_of(&fp, method, "Sources::App::Service::local"),
+            pairs(&[("o", "Store"), ("s", "Store"), ("t", "Store"), ("u", "Store")])
+        );
+        assert_eq!(
+            locals_of(&fp, node_kind::FUNCTION, "Sources::App::Service::freeRun"),
+            pairs(&[("store", "Store")])
+        );
+    }
+
+    /// DF.3: parameter shapes - labels, `inout`, `!`, attributes, and types
+    /// that name no single type (`""`); an `init` and a `subscript` record
+    /// their parameters too, a computed property its body's locals.
+    #[test]
+    fn parameter_shapes_peel_to_the_simple_type() {
+        let source = "class W {\n\
+            init(to store: Store, _ r: Repo) {}\n\
+            subscript(i: Int, s: Store) -> Int { return 1 }\n\
+            var total: Int { let k = Store(); return k.load() }\n\
+            func m(a: inout Store, b: Store!, c: @escaping () -> Void,\n\
+            d: [Store], e: Box<Int>, f: Foundation.Date) {}\n\
+            }\n";
+        let fp = parse_file(source, "W.swift", "W", repo()).unwrap();
+        let method = node_kind::METHOD;
+        assert_eq!(locals_of(&fp, method, "W::init"), pairs(&[("r", "Repo"), ("store", "Store")]));
+        assert_eq!(locals_of(&fp, method, "W::subscript"), pairs(&[("i", "Int"), ("s", "Store")]));
+        assert_eq!(locals_of(&fp, method, "W::total"), pairs(&[("k", "Store")]));
+        assert_eq!(
+            locals_of(&fp, method, "W::m"),
+            pairs(&[
+                ("a", "Store"),
+                ("b", "Store"),
+                ("c", ""),
+                ("d", ""),
+                ("e", "Box"),
+                ("f", "Date"),
+            ])
+        );
+    }
+
+    /// DF.3: a closure's calls are the enclosing callable's, so its locals
+    /// and parameters join that scope (an untyped closure parameter is
+    /// `""`); a nested `func`'s locals (whose calls are not collected) and a
+    /// nested type's are never recorded.
+    #[test]
+    fn closure_locals_join_the_scope_and_nested_funcs_do_not() {
+        let source = "func m() {\n\
+            run { let inner = Store(); inner.save(1) }\n\
+            items.forEach { it in it.go() }\n\
+            items.map { (x: Repo) in x.load() }\n\
+            func nested(p: Store) { let nn = Store() }\n\
+            struct Local { func q() { let lq = Store() } }\n\
+            }\n";
+        let fp = parse_file(source, "W.swift", "W", repo()).unwrap();
+        assert_eq!(
+            locals_of(&fp, node_kind::FUNCTION, "W::m"),
+            pairs(&[("inner", "Store"), ("it", ""), ("x", "Repo")])
+        );
+    }
+
+    /// DF.3: a tuple pattern, a `for` item, a `catch let`, a `case let`
+    /// pattern bind names of unknown type; a `case .x` enum name and an
+    /// unbound expression pattern bind nothing; a name bound to two types is
+    /// unknown (`record_local_type`).
+    #[test]
+    fn tuple_pattern_is_unknown() {
+        let source = "func m() {\n\
+            let (a1, a2) = pair()\n\
+            for item in items {}\n\
+            for (i, v) in xs {}\n\
+            do { try x() } catch let err {}\n\
+            switch v {\n\
+            case .some(let sx): sx.go()\n\
+            case let .pair(pa, pb): pa.go()\n\
+            case known: break\n\
+            default: break\n\
+            }\n\
+            if case let .some(w) = opt {}\n\
+            let lc = make()\n\
+            let twice = Store()\n\
+            if true { let twice = Repo() }\n\
+            }\n";
+        let fp = parse_file(source, "W.swift", "W", repo()).unwrap();
+        let unknown = [
+            "a1", "a2", "err", "i", "item", "lc", "pa", "pb", "sx", "twice", "v", "w",
+        ];
+        let want: Vec<(&str, &str)> = unknown.iter().map(|n| (*n, "")).collect();
+        assert_eq!(locals_of(&fp, node_kind::FUNCTION, "W::m"), pairs(&want));
+    }
+
+    /// DF.3: optional bindings and aliases. `if let a = b` types `a` as the
+    /// value `b` reads: a local's own type, else the stored property's
+    /// (`self.b`); the shorthand `if let repo` and `guard let r = self.repo`
+    /// alias the property; an annotation, `as?` and `try` type the binding;
+    /// `guard let self = self` records nothing.
+    #[test]
+    fn optional_bindings_type_their_names() {
+        let source = "class W {\n\
+            func m(p: Store) {\n\
+            guard let self = self else { return }\n\
+            if let repo { repo.go() }\n\
+            guard let r = self.repo else { return }\n\
+            if let a = p, let c: Repo = d, var e = maybe, x > 3 {}\n\
+            while let n = it.next() {}\n\
+            let z = y as? Store\n\
+            let tr = try Store()\n\
+            let q = p\n\
+            }\n\
+            }\n";
+        let fp = parse_file(source, "W.swift", "W", repo()).unwrap();
+        assert_eq!(
+            locals_of(&fp, node_kind::METHOD, "W::m"),
+            pairs(&[
+                ("a", "Store"),
+                ("c", "Repo"),
+                ("e", "self.maybe"),
+                ("n", ""),
+                ("p", "Store"),
+                ("q", "Store"),
+                ("r", "self.repo"),
+                ("repo", "self.repo"),
+                ("tr", "Store"),
+                ("z", "Store"),
+            ])
+        );
     }
 
     #[test]

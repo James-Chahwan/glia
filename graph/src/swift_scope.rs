@@ -15,8 +15,13 @@
 //! across the group. A member METHOD's id is its qname, so the same member
 //! reached through either node is one id.
 //!
+//! A receiver the parser typed as a local of the caller (DF.3: a parameter,
+//! `let s = Store()`, `let t: Store`, `if let o = ..`) binds its member on
+//! that type in the caller's own module, so two targets that both declare
+//! `Store` never meet.
+//!
 //! fired_on marker, once per Swift graph:
-//! `[swift-scope] implicit_self=<n> same_module_static=<n> same_module_type=<n> extension_member=<n>`
+//! `[swift-scope] implicit_self=<n> same_module_static=<n> same_module_type=<n> extension_member=<n> local_receiver=<n>`
 //! — grep `^\[swift-scope\]`.
 
 use std::cell::Cell;
@@ -26,7 +31,7 @@ use glia_code_domain::evidence::Evidence;
 use glia_code_domain::{CallQualifier, CallSite, cell_type, node_kind};
 use glia_core::{CellPayload, Node, NodeId};
 
-use crate::calls::{enclosing_class_or_struct, enclosing_module, graph_evidence};
+use crate::calls::{enclosing_class_or_struct, enclosing_module, graph_evidence, receiver_type};
 use crate::types::RepoGraph;
 
 /// The EVIDENCE emitter of every edge the hook binds.
@@ -64,6 +69,7 @@ pub(crate) struct SwiftModuleTypes {
     same_module_static: Cell<usize>,
     same_module_type: Cell<usize>,
     extension_member: Cell<usize>,
+    local_receiver: Cell<usize>,
 }
 
 impl SwiftModuleTypes {
@@ -127,6 +133,7 @@ impl SwiftModuleTypes {
             same_module_static: Cell::new(0),
             same_module_type: Cell::new(0),
             extension_member: Cell::new(0),
+            local_receiver: Cell::new(0),
         }
     }
 
@@ -177,6 +184,14 @@ impl SwiftModuleTypes {
     /// - `Attribute { base: T, name: m }`, `T` a type of the caller's module
     ///   directory: its member `m` (a static member is a METHOD too) — rule
     ///   `same_module_static`.
+    /// - `Attribute { base: x, name: m }`, `x` no type of the caller's module
+    ///   directory but a local of the caller the parser typed `T` (DF.3,
+    ///   [`receiver_type`]: a parameter, an annotation, a construction, or a
+    ///   `self.<f>` alias read through the stored property's type): the member
+    ///   `m` of `T`'s group in the caller's OWN module directory, never a
+    ///   same-named type of another target — rule `local_receiver`. A local
+    ///   of unknown type, or a type only another module declares, binds
+    ///   nothing.
     /// - `Bare(T)`, `T` a type of the caller's module directory that the
     ///   module declares: the type (a construction) — rule `same_module_type`.
     pub(crate) fn resolve(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
@@ -187,12 +202,27 @@ impl SwiftModuleTypes {
                 &self.extension_member,
             ),
             CallQualifier::Attribute { base, name } => {
-                let group = self.group(self.caller_dir(g, site.from)?, base)?;
-                (
-                    Self::member(g, group, name)?,
-                    "same_module_static",
-                    &self.same_module_static,
-                )
+                let dir = self.caller_dir(g, site.from)?;
+                match self.group(dir, base) {
+                    Some(group) => (
+                        Self::member(g, group, name)?,
+                        "same_module_static",
+                        &self.same_module_static,
+                    ),
+                    None => {
+                        let is_local = g
+                            .nav
+                            .local_types
+                            .get(&site.from)
+                            .is_some_and(|l| l.contains_key(base));
+                        let ty = receiver_type(g, site).filter(|_| is_local)?;
+                        (
+                            Self::member(g, self.group(dir, ty)?, name)?,
+                            "local_receiver",
+                            &self.local_receiver,
+                        )
+                    }
+                }
             }
             CallQualifier::Bare(name) => {
                 let group = self.group(self.caller_dir(g, site.from)?, name)?;
@@ -214,10 +244,11 @@ impl SwiftModuleTypes {
     /// [`implicit_self`]'s count.
     pub(crate) fn marker(&self, implicit_self: usize) -> String {
         format!(
-            "[swift-scope] implicit_self={implicit_self} same_module_static={} same_module_type={} extension_member={}",
+            "[swift-scope] implicit_self={implicit_self} same_module_static={} same_module_type={} extension_member={} local_receiver={}",
             self.same_module_static.get(),
             self.same_module_type.get(),
-            self.extension_member.get()
+            self.extension_member.get(),
+            self.local_receiver.get()
         )
     }
 }
@@ -771,6 +802,125 @@ mod tests {
         assert!(calls_from(&g, node_kind::METHOD, "Sources::App::Cart::checkout").is_empty());
     }
 
+    /// DF.3: `<dir>::Store`, a STRUCT with the METHODs `save` and `load`,
+    /// declared in the file `<dir>::Store`.
+    fn store_in(dir: &str) -> FileParse {
+        let store = format!("{dir}::Store");
+        let (save, load) = (format!("{store}::save"), format!("{store}::load"));
+        swift_file(
+            &store,
+            &[
+                (node_kind::STRUCT, &store, None, "struct Store {"),
+                (node_kind::METHOD, &save, Some(&store), "func save(_ x: Int)"),
+                (node_kind::METHOD, &load, Some(&store), "func load() -> Int"),
+            ],
+            vec![],
+        )
+    }
+
+    /// DF.3: `<dir>::Service`, a CLASS whose METHOD `run` calls each of
+    /// `calls` (`(receiver, member)`) with each local of `locals` recorded,
+    /// and a stored property `repo: Store`.
+    fn service_in(dir: &str, locals: &[(&str, &str)], calls: &[(&str, &str)]) -> FileParse {
+        let service = format!("{dir}::Service");
+        let run = format!("{service}::run");
+        let sites = calls
+            .iter()
+            .map(|(base, name)| {
+                let q = CallQualifier::Attribute {
+                    base: (*base).into(),
+                    name: (*name).into(),
+                };
+                (run.as_str(), q)
+            })
+            .collect();
+        let mut file = swift_file(
+            &service,
+            &[
+                (node_kind::CLASS, &service, None, "final class Service {"),
+                (node_kind::METHOD, &run, Some(&service), "func run()"),
+            ],
+            sites,
+        );
+        let run_id = gid(node_kind::METHOD, &run);
+        for (name, ty) in locals {
+            file.nav.record_local_type(run_id, name, ty);
+        }
+        file.nav
+            .record_field_type(gid(node_kind::CLASS, &service), "repo", "Store");
+        file
+    }
+
+    /// DF.3: two targets declare `Store`, so no name-only lookup can pick
+    /// one; a parameter / local of the caller (and a `self.repo` alias)
+    /// binds the member on the CALLER's target's `Store`.
+    #[test]
+    fn local_receiver_binds_in_own_module() {
+        let locals = [("store", "Store"), ("r", "self.repo")];
+        let calls = [("store", "save"), ("r", "load")];
+        let g = build(vec![
+            store_in("Sources::App"),
+            store_in("Sources::Admin"),
+            service_in("Sources::App", &locals, &calls),
+            service_in("Sources::Admin", &locals, &calls),
+        ]);
+        for dir in ["Sources::App", "Sources::Admin"] {
+            let mut got = calls_from(&g, node_kind::METHOD, &format!("{dir}::Service::run"));
+            got.sort();
+            assert_eq!(
+                got,
+                vec![
+                    (format!("{dir}::Store::load"), "local_receiver".to_string()),
+                    (format!("{dir}::Store::save"), "local_receiver".to_string()),
+                ],
+                "{dir}: its own target's Store, never the other's"
+            );
+        }
+    }
+
+    /// DF.3: a local of unknown type (`""`) shadows the same-named stored
+    /// property and binds nothing; a name that is no local is not the
+    /// hook's (a bare stored-property receiver stays the generic pass's).
+    #[test]
+    fn local_of_unknown_type_binds_nothing() {
+        let g = build(vec![
+            store_in("Sources::App"),
+            store_in("Sources::Admin"),
+            service_in("Sources::App", &[("repo", "")], &[("repo", "save"), ("other", "save")]),
+        ]);
+        assert!(calls_from(&g, node_kind::METHOD, "Sources::App::Service::run").is_empty());
+    }
+
+    /// DF.3: a local typed by a type only another target declares binds
+    /// nothing (an `import`ed module's types stay unresolved, CB.26).
+    #[test]
+    fn other_module_only_type_binds_nothing() {
+        let g = build(vec![
+            store_in("Sources::Admin"),
+            store_in("Sources::Other"),
+            service_in("Sources::App", &[("store", "Store")], &[("store", "save")]),
+        ]);
+        assert!(calls_from(&g, node_kind::METHOD, "Sources::App::Service::run").is_empty());
+    }
+
+    /// DF.3: a repo-unique type is the generic receiver pass's (A6.2a
+    /// through the recorded local, rule `receiver_type`); the hook is only
+    /// consulted after it missed.
+    #[test]
+    fn unique_type_keeps_the_generic_receiver_binding() {
+        let g = build(vec![
+            store_in("Sources::App"),
+            service_in("Sources::App", &[("store", "Store")], &[("store", "save")]),
+        ]);
+        assert_eq!(
+            calls_from(&g, node_kind::METHOD, "Sources::App::Service::run"),
+            vec![(
+                "Sources::App::Store::save".to_string(),
+                "receiver_type".to_string()
+            )]
+        );
+    }
+
     #[test]
     fn marker_counts_each_path() {
         let formatter = swift_file(
@@ -796,12 +946,19 @@ mod tests {
             name: "money".into(),
         };
         let mut all_calls = vec![];
-        let mut files = vec![formatter, pricing(vec![])];
+        let checkout = gid(node_kind::METHOD, "Sources::App::Cart::checkout");
+        let mut cart = pricing(vec![]);
+        cart.nav.record_local_type(checkout, "s", "Store");
+        let mut files = vec![
+            formatter,
+            cart,
+            store_in("Sources::App"),
+            store_in("Sources::Admin"),
+        ];
         for f in &mut files {
             all_calls.append(&mut f.calls);
         }
         let g = build(files);
-        let checkout = gid(node_kind::METHOD, "Sources::App::Cart::checkout");
         all_calls.extend([
             CallSite {
                 from: checkout,
@@ -818,6 +975,14 @@ mod tests {
                 qualifier: bare("Formatter"),
                 line: 2,
             },
+            CallSite {
+                from: checkout,
+                qualifier: CallQualifier::Attribute {
+                    base: "s".into(),
+                    name: "save".into(),
+                },
+                line: 3,
+            },
         ]);
         let types = SwiftModuleTypes::new(&g);
         let n = implicit_self(&g, &types, &mut all_calls);
@@ -830,7 +995,7 @@ mod tests {
         }
         assert_eq!(
             types.marker(n),
-            "[swift-scope] implicit_self=1 same_module_static=1 same_module_type=1 extension_member=0"
+            "[swift-scope] implicit_self=1 same_module_static=1 same_module_type=1 extension_member=0 local_receiver=1"
         );
     }
 

@@ -1,0 +1,42 @@
+{
+  "framework": "swift-local-receivers",
+  "language": "swift",
+  "dirs": [
+    "."
+  ],
+  "note": "DF (CB.26 residual 'Swift locals / params as receivers'): the Swift parser records no parameter or local type (parsers/code/swift/src/lib.rs has no record_local_type), so `store.save(1)` on a parameter `store: Store`, a `let s = Store()` / `let t: Store` / `var u = Store.init()` / `Store?` local all stay unbound; Store is declared in two targets (App and Admin), so a name-only guess cannot pick it either. HEAD (84e2e71, leap wheel): CALLS from run / local / freeRun into Store's members 0/4 (only Service::local -> Store and -> Store::make, the construction / static paths CB.18 binds). After: each local / parameter's declared or constructed type is recorded and the Swift hook binds the member on the SAME target's type (Sources::App::Store, never Admin's).",
+  "expect_edges": [
+    {
+      "from": "Sources::App::Service::run",
+      "to": "Sources::App::Store::save",
+      "category": "CALLS"
+    },
+    {
+      "from": "Sources::App::Service::local",
+      "to": "Sources::App::Store::save",
+      "category": "CALLS"
+    },
+    {
+      "from": "Sources::App::Service::local",
+      "to": "Sources::App::Store::load",
+      "category": "CALLS"
+    },
+    {
+      "from": "Sources::App::Service::freeRun",
+      "to": "Sources::App::Store::save",
+      "category": "CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "Sources::App::Service::run",
+      "to": "Sources::Admin::Store::save",
+      "category": "CALLS"
+    },
+    {
+      "from": "Sources::App::Service::local",
+      "to": "Sources::Admin::Store::load",
+      "category": "CALLS"
+    }
+  ]
+}
