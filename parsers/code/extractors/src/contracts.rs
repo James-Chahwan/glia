@@ -44,7 +44,7 @@ use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 /// Everything one contract file contributes to the graph. `edges` is empty for
 /// OpenAPI: the module CONTAINS relation is carried by the nav parent, exactly
 /// as queues / graphql / grpc do.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ContractNodes {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,

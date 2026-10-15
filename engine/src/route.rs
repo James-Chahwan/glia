@@ -13,6 +13,7 @@ use glia_code_domain::{CodeNav, FileParse, GRAPH_TYPE, evidence, node_kind};
 use glia_code_extractors::contracts::ContractNodes;
 use glia_core::{Cell, Confidence, Edge, Node, NodeId, RepoId};
 
+use crate::build::memo::NonCodeOut;
 use crate::cache::{self, ParseCache};
 use crate::extract::{
     ExtractStats, GoModules, apply_cross_cutting_extractors, build_group, detect_language,
@@ -40,11 +41,39 @@ use crate::walk::{is_angular_template_path, is_dockerfile_path, is_dotenv_path};
 ///   `[parallel] <repo>: routed <n> files on <t> threads (synthetic <s>, reused <r>, reparsed <p>, failed <f>)`
 /// `n` = `s + r + p + f`: files a branch took (non-code, served from the
 /// cache, parsed, or failed); files no branch reads are not counted.
+///
+/// DC.4: the build calls [`parse_repo_files_hashed`] (with the hashes it
+/// computed once); this form is the router and graft tests' entry.
+#[cfg(test)]
 pub(crate) fn parse_repo_files(
     files: &[(String, String)],
     repo: RepoId,
     go: &GoModules,
     cache: Option<&mut ParseCache>,
+    repo_label: &str,
+) -> (HashMap<&'static str, Vec<FileParse>>, Vec<String>) {
+    parse_repo_files_hashed(files, None, repo, go, cache, repo_label)
+}
+
+/// [`parse_repo_files`] with the walked files' content hashes, index-aligned
+/// with `files` (DC.4: `build::assemble::parse_and_graft` computes them once
+/// per build, on the pool, when it holds a cache, and hands them to the const
+/// scan and the RPC needles too). Without them, or with a list of another
+/// length, a held cache hashes each file on its worker, as before.
+///
+/// DC.4: with a cache, a file a [`PURE_NONCODE`] branch routed under the same
+/// content hash is replayed from the cache's non-code memo
+/// (`build::memo::NonCodeMemo`) instead of re-running the branch; the fold
+/// consumes a hit exactly as a fresh outcome (its `lines` print in walk order,
+/// its counters sum), records each fresh pure outcome, and retains the memo
+/// to the walked path set where the parse entries are retained. The memo's
+/// `noncode_hit` / `noncode_miss` stats count the files a pure branch routed.
+pub(crate) fn parse_repo_files_hashed(
+    files: &[(String, String)],
+    hashes: Option<&[u64]>,
+    repo: RepoId,
+    go: &GoModules,
+    mut cache: Option<&mut ParseCache>,
     repo_label: &str,
 ) -> (HashMap<&'static str, Vec<FileParse>>, Vec<String>) {
     let mut parses_by_lang: HashMap<&str, Vec<FileParse>> = HashMap::new();
@@ -102,17 +131,28 @@ pub(crate) fn parse_repo_files(
     };
 
     // Read-only on the workers; the fresh parses are put after the fold.
+    // DC.4: with a cache every file has its content hash (the code branch's
+    // LA.12 diff input, the non-code memo's key): the caller's, else hashed on
+    // the worker.
+    let hashes = hashes.filter(|h| h.len() == files.len());
+    let slots: Vec<usize> = (0..files.len()).collect();
     let cache_ro = cache.as_deref();
-    let (routed, threads) = crate::parallel::par_map_ordered(files, |(path, source)| {
-        route_one(path, source, &ctx, cache_ro)
+    let (routed, threads) = crate::parallel::par_map_ordered(&slots, |&i| {
+        let (path, source) = &files[i];
+        let hash = cache_ro.map(|_| match hashes {
+            Some(h) => h[i],
+            None => cache::content_hash(source),
+        });
+        route_one(path, source, hash, &ctx, cache_ro)
     });
 
     // LG.1a: the one sequential fold, in walk order.
     let (mut n_synthetic, mut n_reused, mut n_reparsed, mut n_failed) = (0usize, 0, 0, 0);
+    let (mut noncode_hit, mut noncode_miss) = (0usize, 0usize);
     for ((path, _), r) in files.iter().zip(routed) {
         match r {
             Routed::Skip => {}
-            Routed::NonCode { key, fp, tally: t } => {
+            Routed::NonCode { key, fp, tally: t, memo } => {
                 n_synthetic += 1;
                 for line in &t.lines {
                     eprintln!("{line}");
@@ -121,6 +161,19 @@ pub(crate) fn parse_repo_files(
                     contracts.record(c);
                 }
                 tally.add(&t);
+                // DC.4: a fresh pure outcome is recorded under its hash (the
+                // clone the memo keeps); a hit was counted on the worker.
+                match memo {
+                    NonCodeMemo::Hit => noncode_hit += 1,
+                    NonCodeMemo::Fresh(Some(hash)) if PURE_NONCODE.contains(&key) => {
+                        noncode_miss += 1;
+                        if let Some(c) = cache.as_deref_mut() {
+                            let out = NonCodeOut { key, fp: fp.clone(), tally: t };
+                            c.memo_mut().noncode.insert(path.clone(), hash, out);
+                        }
+                    }
+                    NonCodeMemo::Fresh(_) => {}
+                }
                 if let Some(fp) = fp {
                     parses_by_lang.entry(key).or_default().push(fp);
                 }
@@ -226,6 +279,15 @@ pub(crate) fn parse_repo_files(
         }
         c.retain_paths(&live_paths);
         c.record_diff(diff);
+        // DC.4: the memos keep every WALKED path (a non-code file, or a code
+        // file whose parse failed, still has a const scan or a memo entry);
+        // the const scan and the needles look up after this, over the same
+        // walked set.
+        let walked: std::collections::HashSet<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        let memo = c.memo_mut();
+        memo.retain(&walked);
+        memo.stats.noncode_hit = noncode_hit;
+        memo.stats.noncode_miss = noncode_miss;
         // `stamp=` makes the always-on line grep-proof of WHICH code produced
         // these parses — a rebuilt wheel that quietly kept the old .so shows the
         // old stamp here (dev-notes memory: feedback_maturin_stale_wheel). The
@@ -445,6 +507,39 @@ struct RouteCtx<'a> {
     prisma_provider: Option<&'a str>,
 }
 
+/// The non-code branches whose outcome is a function of `(path, source,
+/// repo)` alone, so the DC.4 non-code memo may replay it for an unchanged
+/// file: yaml, Dockerfile, package manifest, dotenv, migration `.sql`, `.json`
+/// (settings, JSON Schema, contract), `.proto`, `.graphql`, `.avsc`. Not
+/// `prisma` (it reads the build-wide A13.16 `prisma_provider`, another file's
+/// datasource) nor `angular` (the template's links hang off the LB.9b plan's
+/// MODULE id of its `.component.ts`).
+///
+/// CONTRACT: a branch listed here may read only `(path, source, repo)`. A
+/// packet that makes one read anything else (the module plan, the go
+/// context, another file) removes it from this list in the same commit
+/// (`build::memo`, module doc).
+const PURE_NONCODE: &[&str] = &[
+    "yaml",
+    "dockerfile",
+    "manifest",
+    "dotenv",
+    "migration",
+    "json",
+    "proto",
+    "graphql",
+    "avro",
+];
+
+/// Where a [`Routed::NonCode`] outcome came from (DC.4).
+enum NonCodeMemo {
+    /// Replayed from the cache's non-code memo.
+    Hit,
+    /// The branch ran now; the file's content hash when the build holds a
+    /// cache (the fold records a [`PURE_NONCODE`] outcome under it).
+    Fresh(Option<u64>),
+}
+
 /// One walked file's routing outcome: [`route_one`] builds it on a pool
 /// worker, [`parse_repo_files`] folds it in walk order.
 enum Routed {
@@ -454,10 +549,12 @@ enum Routed {
     /// migration, prisma, the Angular template's links, json, proto, graphql,
     /// avro). `fp` is what it files under the lang `key`: `None` when the
     /// branch routed the file but had nothing to stash (still counted).
+    /// `memo`: replayed or fresh (DC.4).
     NonCode {
         key: &'static str,
         fp: Option<FileParse>,
         tally: SynthTally,
+        memo: NonCodeMemo,
     },
     /// A language parser's file: its content hash when the build has a cache
     /// (the LA.12 diff input), whether a cached parse was rejected for its
@@ -484,8 +581,10 @@ enum CodeOutcome {
 }
 
 /// One non-code file's marker counters, and the fold's per-build sum.
-#[derive(Default)]
-struct SynthTally {
+/// `Clone` and `pub(crate)` (DC.4): the non-code memo (`build::memo`) keeps
+/// one per file and a hit replays a clone.
+#[derive(Default, Clone)]
+pub(crate) struct SynthTally {
     // A5.1 `[proto]`.
     proto_files: usize,
     proto_services: usize,
@@ -591,9 +690,27 @@ impl SynthTally {
 /// `parallel::quiet`: a panic in any branch becomes a
 /// `<path>: PANIC (<branch>): <payload>` error instead of ending the build
 /// (before LG.1a only the language branch and the template links were).
-fn route_one(path: &str, source: &str, ctx: &RouteCtx, cache: Option<&ParseCache>) -> Routed {
+///
+/// `hash` is the file's content hash, `Some` exactly when `cache` is (DC.4).
+/// A file the cache's non-code memo holds under that hash is replayed from it
+/// (a clone of the memo's [`NonCodeOut`]) without running any branch: the memo
+/// only holds [`PURE_NONCODE`] outcomes, and which branch takes a file is a
+/// function of its path and content, so an equal hash means the same branch.
+fn route_one(
+    path: &str,
+    source: &str,
+    hash: Option<u64>,
+    ctx: &RouteCtx,
+    cache: Option<&ParseCache>,
+) -> Routed {
+    if let (Some(h), Some(c)) = (hash, cache)
+        && let Some(out) = c.memo().noncode.get(path, &h)
+    {
+        let NonCodeOut { key, fp, tally } = out.clone();
+        return Routed::NonCode { key, fp, tally, memo: NonCodeMemo::Hit };
+    }
     let mut branch: &'static str = "route";
-    match crate::parallel::quiet(|| route_branches(path, source, ctx, cache, &mut branch)) {
+    match crate::parallel::quiet(|| route_branches(path, source, hash, ctx, cache, &mut branch)) {
         Ok(r) => r,
         Err(payload) => Routed::Failed(format!(
             "{path}: PANIC ({branch}): {}",
@@ -603,14 +720,17 @@ fn route_one(path: &str, source: &str, ctx: &RouteCtx, cache: Option<&ParseCache
 }
 
 /// [`route_one`]'s body. Each branch names itself in `branch` first, so a
-/// caught panic says which extractor it came from.
+/// caught panic says which extractor it came from. `hash` is [`route_one`]'s.
 fn route_branches(
     path: &str,
     source: &str,
+    hash: Option<u64>,
     ctx: &RouteCtx,
     cache: Option<&ParseCache>,
     branch: &mut &'static str,
 ) -> Routed {
+    // Every non-code outcome below is fresh (DC.4).
+    let fresh = || NonCodeMemo::Fresh(hash);
     let repo = ctx.repo;
     let modules = ctx.modules;
     let mut t = SynthTally::default();
@@ -654,7 +774,7 @@ fn route_branches(
                 vec![],
             )
         });
-        return Routed::NonCode { key: "yaml", fp, tally: t };
+        return Routed::NonCode { key: "yaml", fp, tally: t, memo: fresh() };
     }
 
     if is_dockerfile_path(path) {
@@ -677,7 +797,7 @@ fn route_branches(
                 vec![],
             )
         });
-        return Routed::NonCode { key: "dockerfile", fp, tally: t };
+        return Routed::NonCode { key: "dockerfile", fp, tally: t, memo: fresh() };
     }
 
     if glia_code_extractors::packages::is_manifest_path(path) {
@@ -707,7 +827,7 @@ fn route_branches(
                 vec![],
             )
         });
-        return Routed::NonCode { key: "manifest", fp, tally: t };
+        return Routed::NonCode { key: "manifest", fp, tally: t, memo: fresh() };
     }
 
     if is_dotenv_path(path) {
@@ -727,7 +847,7 @@ fn route_branches(
                 vec![],
             )
         });
-        return Routed::NonCode { key: "dotenv", fp, tally: t };
+        return Routed::NonCode { key: "dotenv", fp, tally: t, memo: fresh() };
     }
 
     // A13.9: a migration `.sql` (the walk admits one only through
@@ -753,7 +873,7 @@ fn route_branches(
                 vec![],
             )
         });
-        return Routed::NonCode { key: "migration", fp, tally: t };
+        return Routed::NonCode { key: "migration", fp, tally: t, memo: fresh() };
     }
 
     // A13.16: a Prisma schema (the walk admits `.prisma` only through
@@ -782,7 +902,7 @@ fn route_branches(
                 vec![],
             )
         });
-        return Routed::NonCode { key: "prisma", fp, tally: t };
+        return Routed::NonCode { key: "prisma", fp, tally: t, memo: fresh() };
     }
 
     // LA.6c: an Angular `.component.html` template (admitted by the walk)
@@ -810,7 +930,7 @@ fn route_branches(
             refs: links.refs,
             ..Default::default()
         });
-        return Routed::NonCode { key: "angular", fp, tally: t };
+        return Routed::NonCode { key: "angular", fp, tally: t, memo: fresh() };
     }
 
     // A10.8: the walker queues a `.json` only when it sniffed as an API
@@ -845,7 +965,7 @@ fn route_branches(
                     vec![],
                 )
             });
-            return Routed::NonCode { key: "json", fp, tally: t };
+            return Routed::NonCode { key: "json", fp, tally: t, memo: fresh() };
         }
         // LA.16 (A10.12): a JSON Schema that is not an API contract
         // declares MESSAGE_TYPEs, the shape a `.proto` message or an
@@ -871,7 +991,7 @@ fn route_branches(
                     recs.module_cells,
                 )
             });
-            return Routed::NonCode { key: "json", fp, tally: t };
+            return Routed::NonCode { key: "json", fp, tally: t, memo: fresh() };
         }
         let out = glia_code_extractors::contracts::extract_json_contract(
             source, path, module_id, repo,
@@ -888,7 +1008,7 @@ fn route_branches(
                 vec![],
             )
         });
-        return Routed::NonCode { key: "json", fp, tally: t };
+        return Routed::NonCode { key: "json", fp, tally: t, memo: fresh() };
     }
 
     let Some(lang) = detect_language(path) else { return Routed::Skip };
@@ -932,7 +1052,7 @@ fn route_branches(
                 out.module_cells,
             )
         });
-        return Routed::NonCode { key: "proto", fp, tally: t };
+        return Routed::NonCode { key: "proto", fp, tally: t, memo: fresh() };
     }
 
     // A10.4: a `.graphql` / `.graphqls` / `.gql` schema reaches the SDL
@@ -960,7 +1080,7 @@ fn route_branches(
             glia_code_extractors::anchor::attach(&mut fp, path, module_id, &mut anchors);
             fp
         });
-        return Routed::NonCode { key: "graphql", fp, tally: t };
+        return Routed::NonCode { key: "graphql", fp, tally: t, memo: fresh() };
     }
 
     // A10.6: an Avro `.avsc` is the shared contract under a Kafka stack.
@@ -989,7 +1109,7 @@ fn route_branches(
                 recs.module_cells,
             )
         });
-        return Routed::NonCode { key: "avro", fp, tally: t };
+        return Routed::NonCode { key: "avro", fp, tally: t, memo: fresh() };
     }
 
     // Every branch above routed its own files, so `parser_route` is
@@ -1000,8 +1120,8 @@ fn route_branches(
     let module_qname = modules.module_qname(path);
 
     // WP-D incremental: reuse the cached parse if the source is unchanged;
-    // only changed / new files pay tree-sitter.
-    let hash = cache.is_some().then(|| cache::content_hash(source));
+    // only changed / new files pay tree-sitter. `hash` is `Some` exactly when
+    // a cache is held (DC.4: computed once per build by the caller).
     let cached_fp = match hash {
         Some(h) => cache.and_then(|c| c.get(path, h, lang)),
         None => None,
@@ -1747,6 +1867,7 @@ mod tests {
         let routed = route_one(
             &files[0].0,
             &files[0].1,
+            None,
             &RouteCtx {
                 repo: RepoId(1),
                 go: &GoModules::default(),

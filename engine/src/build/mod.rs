@@ -44,6 +44,7 @@ pub(crate) mod assemble;
 pub(crate) mod c_includes;
 mod grafts;
 pub(crate) mod lang_build;
+pub(crate) mod memo;
 pub(crate) mod rpc_needles;
 pub(crate) mod timing;
 
@@ -916,6 +917,205 @@ mod cache_tests {
         assert!(ParseCache::load(repo).is_empty());
         ParseCache::purge(repo).unwrap();
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ---- DC.4: the build memos ------------------------------------------
+
+    use super::memo::MemoStats;
+    use glia_code_domain::{GRAPH_TYPE, edge_category, node_kind};
+    use glia_core::NodeId;
+
+    const MEMO_PROTO: &str = "syntax = \"proto3\";\npackage shop;\noption go_package = \"example.com/shop/pb\";\n\nservice Greeter {\n  rpc SayHello (HelloRequest) returns (HelloReply);\n}\n";
+    const MEMO_PROTO_MORE: &str = "syntax = \"proto3\";\npackage shop;\noption go_package = \"example.com/shop/pb\";\n\nservice Greeter {\n  rpc SayHello (HelloRequest) returns (HelloReply);\n  rpc SayBye (HelloRequest) returns (HelloReply);\n}\n";
+    const MEMO_GO_CLIENT: &str = "package main\n\nimport (\n\t\"google.golang.org/grpc\"\n\tpb \"example.com/shop/pb\"\n)\n\nfunc main() {\n\tconn, _ := grpc.Dial(\"server:50051\")\n\tgreeter := pb.NewGreeterClient(conn)\n\t_ = greeter\n}\n";
+
+    /// A repo with one file per memo: a `.proto` service (const scan +
+    /// non-code), a Go gRPC client (const scan + the one needle file), a
+    /// Python file (const scan), a k8s yaml, an OpenAPI json, a Dockerfile and
+    /// a go.mod (non-code).
+    fn memo_repo(tag: &str) -> PathBuf {
+        let dir = unique_tmp(tag);
+        let write = |rel: &str, body: &str| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write("go.mod", "module example.com/shop\n\ngo 1.22\n");
+        write("api/greeter.proto", MEMO_PROTO);
+        write("cmd/main.go", MEMO_GO_CLIENT);
+        write("app.py", "import os\n\nPORT = \"8080\"\n\n\ndef handler():\n    return os.getenv(\"PORT\")\n");
+        write(
+            "deploy/web.yaml",
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\nspec:\n  template:\n    spec:\n      containers:\n        - name: web\n          image: web:1\n          env:\n            - name: PORT\n              value: \"8080\"\n",
+        );
+        write(
+            "openapi.json",
+            "{\"openapi\": \"3.0.0\", \"info\": {\"title\": \"t\", \"version\": \"1\"}, \"paths\": {\"/users\": {\"get\": {\"responses\": {\"200\": {\"description\": \"ok\"}}}}}}\n",
+        );
+        write("Dockerfile", "FROM python:3.12\nENV PORT=8080\nCMD [\"python\", \"app.py\"]\n");
+        dir
+    }
+
+    /// The bytes `write_merged_sharded` writes for `m`, per shard file.
+    fn store_bytes(m: &MergedGraph, dir: &Path) -> Vec<(String, Vec<u8>)> {
+        glia_store::write_merged_sharded(m, dir).unwrap();
+        let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| (e.file_name().to_string_lossy().to_string(), std::fs::read(e.path()).unwrap()))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// `r`'s store bytes equal a clean `generate_one` of `repo`'s.
+    fn assert_bytes_clean(r: &GenerateResult, repo: &str, scratch: &Path, what: &str) {
+        let clean = generate_one(repo).unwrap();
+        assert_eq!(r.parse_errors, clean.parse_errors, "{what}: parse errors");
+        assert!(
+            store_bytes(&r.merged, &scratch.join("warm")) == store_bytes(&clean.merged, &scratch.join("clean")),
+            "{what}: a memo-served build differs from a clean one"
+        );
+        std::fs::remove_dir_all(scratch).ok();
+    }
+
+    #[test]
+    fn memo_hits_on_an_unchanged_tree() {
+        let dir = memo_repo("memo_hits");
+        let repo = dir.to_str().unwrap();
+        let mut cache = ParseCache::new();
+        generate_one_with_cache(repo, &mut cache).unwrap();
+        // Cold: every eligible file computed. Const: the .proto, the Go and
+        // the Python file (a source language each); needles: the Go client;
+        // non-code: go.mod, the .proto, the yaml, the json, the Dockerfile.
+        let cold = MemoStats {
+            const_miss: 3,
+            needle_miss: 1,
+            noncode_miss: 5,
+            ..MemoStats::default()
+        };
+        assert_eq!(cache.memo().stats, cold);
+        let warm = generate_one_with_cache(repo, &mut cache).unwrap();
+        assert_eq!(
+            cache.memo().stats,
+            MemoStats {
+                const_hit: 3,
+                needle_hit: 1,
+                noncode_hit: 5,
+                ..MemoStats::default()
+            },
+            "an unchanged tree recomputes nothing"
+        );
+        assert_bytes_clean(&warm, repo, &unique_tmp("memo_hits_out"), "unchanged tree");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn memo_misses_when_the_service_set_changes() {
+        let dir = memo_repo("memo_svc");
+        let repo = dir.to_str().unwrap();
+        let mut cache = ParseCache::new();
+        generate_one_with_cache(repo, &mut cache).unwrap();
+        // One more rpc: the needle key's service fingerprint moves, so the
+        // one file whose text gate passes is recomputed although its bytes
+        // did not change; the .proto itself is the one const / non-code miss.
+        std::fs::write(dir.join("api/greeter.proto"), MEMO_PROTO_MORE).unwrap();
+        let warm = generate_one_with_cache(repo, &mut cache).unwrap();
+        assert_eq!(
+            cache.memo().stats,
+            MemoStats {
+                const_hit: 2,
+                const_miss: 1,
+                needle_hit: 0,
+                needle_miss: 1,
+                noncode_hit: 4,
+                noncode_miss: 1,
+            }
+        );
+        assert_bytes_clean(&warm, repo, &unique_tmp("memo_svc_out"), "service set changed");
+        // And back on the new set: all hits again.
+        generate_one_with_cache(repo, &mut cache).unwrap();
+        assert_eq!((cache.memo().stats.needle_hit, cache.memo().stats.needle_miss), (1, 0));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn memo_cleared_with_the_context() {
+        let dir = memo_repo("memo_ctx");
+        let repo = dir.to_str().unwrap();
+        let mut cache = ParseCache::new();
+        generate_one_with_cache(repo, &mut cache).unwrap();
+        let held = cache.memo().len();
+        assert!(held > 0, "a build fills the memo");
+        let context = |root: &Path| {
+            let (_, _, _, roots) = walk_source_files(root);
+            (repo_identity(root).key, go_modules_for(root, &roots, repo).context_key())
+        };
+        // The same context keeps it ...
+        let (key, go) = context(&dir);
+        cache.validate_context(&key, &go);
+        assert_eq!(cache.memo().len(), held, "an unchanged context keeps the memo");
+        // ... a go.mod module edit discards it with the parses.
+        std::fs::write(dir.join("go.mod"), "module example.com/store\n\ngo 1.22\n").unwrap();
+        let (key, go) = context(&dir);
+        cache.validate_context(&key, &go);
+        assert_eq!(cache.memo().len(), 0, "the memo is discarded with the context");
+        assert!(cache.is_empty());
+        let warm = generate_one_with_cache(repo, &mut cache).unwrap();
+        let s = cache.memo().stats;
+        assert_eq!((s.const_hit, s.needle_hit, s.noncode_hit), (0, 0, 0), "{s:?}");
+        assert_bytes_clean(&warm, repo, &unique_tmp("memo_ctx_out"), "after a context change");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sidecar_bytes_unchanged_by_the_memo() {
+        let dir = memo_repo("memo_sidecar");
+        let repo = dir.to_str().unwrap();
+        let mut filled = ParseCache::new();
+        generate_one_with_cache(repo, &mut filled).unwrap();
+        assert!(filled.memo().len() > 0);
+        let (a, b) = (unique_tmp("memo_sidecar_a"), unique_tmp("memo_sidecar_b"));
+        filled.save(a.to_str().unwrap()).unwrap();
+        // The same entries with an empty memo: the sidecar loaded back.
+        let empty = ParseCache::load(a.to_str().unwrap());
+        assert_eq!((empty.len(), empty.memo().len()), (filled.len(), 0));
+        empty.save(b.to_str().unwrap()).unwrap();
+        let read = |d: &Path| std::fs::read(glia_store::default_gmap_dir(d).join("parse_cache.bin")).unwrap();
+        assert!(read(&a) == read(&b), "the memo reached parse_cache.bin");
+        for d in [&dir, &a, &b] {
+            std::fs::remove_dir_all(d).ok();
+        }
+    }
+
+    #[test]
+    fn needle_memo_survives_a_slot_shift() {
+        let dir = memo_repo("memo_slot");
+        let repo = dir.to_str().unwrap();
+        let mut cache = ParseCache::new();
+        generate_one_with_cache(repo, &mut cache).unwrap();
+        // A Go file that sorts before cmd/main.go: the client file's parse
+        // moves one slot along in the go parses.
+        std::fs::write(dir.join("cmd/aaa.go"), "package main\n\nfunc helper() int {\n\treturn 1\n}\n").unwrap();
+        let warm = generate_one_with_cache(repo, &mut cache).unwrap();
+        let s = cache.memo().stats;
+        assert_eq!((s.needle_hit, s.needle_miss), (1, 0), "the client file's halves are replayed: {s:?}");
+        // The replayed marker is grafted onto main.go's own parse: its MODULE
+        // parents it and its `main` function USES it (A5.8), as clean.
+        let rid = glia_core::RepoId::from_canonical(&repo_identity(&dir).key);
+        let module = NodeId::from_parts(GRAPH_TYPE, rid, node_kind::MODULE, "cmd::main");
+        let main_fn = NodeId::from_parts(GRAPH_TYPE, rid, node_kind::FUNCTION, "cmd::main::main");
+        let client = NodeId::from_parts(GRAPH_TYPE, rid, node_kind::GRPC_CLIENT, "grpc_client:Greeter");
+        let parent = warm.merged.graphs.iter().find_map(|g| g.nav.parent_of.get(&client).copied());
+        assert_eq!(parent, Some(module), "the client hangs off cmd/main.go's MODULE");
+        assert!(
+            warm.merged
+                .all_edges()
+                .any(|e| e.from == main_fn && e.to == client && e.category == edge_category::USES),
+            "the client's owner is main.go's `main`"
+        );
+        assert_bytes_clean(&warm, repo, &unique_tmp("memo_slot_out"), "after a slot shift");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

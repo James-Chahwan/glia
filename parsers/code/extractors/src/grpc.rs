@@ -218,6 +218,9 @@ pub fn extract_grpc_from_proto(source: &str, from: NodeId) -> Vec<GrpcService> {
     parse_proto(source, from).services
 }
 
+/// `Clone` (DC.4): the engine's needle memo hands a cached batch back by
+/// clone, since the graft consumes it.
+#[derive(Clone)]
 pub struct GrpcNodes {
     pub nodes: Vec<Node>,
     pub nav: CodeNav,
@@ -1725,7 +1728,7 @@ impl ProtoRpcCounts {
 /// What [`extract_proto_rpc_nodes`] adds to one file's parse. The nodes arrive
 /// finished — POSITION cell and owner edge (HANDLED_BY / USES) or the module
 /// CONTAINS fallback — so the engine grafts them without an anchor pass.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct ProtoRpcNodes {
     pub nodes: Vec<Node>,

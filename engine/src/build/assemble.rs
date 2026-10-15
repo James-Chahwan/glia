@@ -22,11 +22,12 @@ use super::BuildOptions;
 use super::c_includes::IncludeRoots;
 use super::grafts;
 use super::lang_build::{self, GroupCtx, GroupPlan, LangBuild, LanguageGraphs, TsAliasSet};
+use super::memo::{BuildMemo, ConstKey, ConstMemo, MemoStats};
 use super::rpc_needles::RpcContext;
 use super::timing::PhaseTimes;
-use crate::cache::ParseCache;
+use crate::cache::{ParseCache, content_hash};
 use crate::extract::{GoModules, detect_language};
-use crate::route::parse_repo_files;
+use crate::route::parse_repo_files_hashed;
 
 /// The repo-scope name -> literal table (A11.1), built from every walked file
 /// with a source language. Like the go.mod set (`go_modules_for`) it is a
@@ -45,35 +46,99 @@ use crate::route::parse_repo_files;
 /// count and the `parse_errors` order are the sequential scan's. Returns the
 /// table, the per-file scans ([`FileConstTables`], DC.3), the files scanned
 /// and the pool's thread count, for the `[parallel]` line.
+///
+/// DC.4: the build runs [`build_const_table_with`] (the memo-aware scan);
+/// this memo-free form is the stage tests' entry (grafts.rs).
+#[cfg(test)]
 pub(super) fn build_const_table(
     files: &[(String, String)],
     parse_errors: &mut Vec<String>,
 ) -> (ConstTable, FileConstTables, usize, usize) {
-    let (scans, threads) = crate::parallel::par_map_ordered(files, |(path, source)| {
-        let lang = detect_language(path)?;
-        Some(crate::parallel::quiet(|| {
-            ConstTable::scan_file(source, lang)
-        }))
+    build_const_table_with(files, None, parse_errors)
+}
+
+/// One file's A11.1 scan as the pool returns it (DC.4). The inner `Option`
+/// is the scan's table, `None` when it panicked.
+enum ConstScan {
+    /// No source language: never scanned.
+    NoLang,
+    /// Replayed from the const memo.
+    Hit(Option<ConstTable>),
+    /// Scanned now, as `lang`.
+    Fresh(&'static str, Option<ConstTable>),
+}
+
+/// [`build_const_table`], and (DC.4) with `memo` = the walked files' content
+/// hashes (index-aligned with `files`) and the held cache's memos: a file
+/// whose scan the const memo holds under the same `(content hash, language)`
+/// is replayed from it instead of rescanned, a panicking scan as the same
+/// `PANIC (const table scan)` line and a `None` per-file entry; each fresh
+/// scan is recorded after the pool, in the sequential fold. Hits and fresh
+/// scans fold identically, so the table, its first-wins bindings, the
+/// conflict count, [`FileConstTables`] and the `parse_errors` order are the
+/// clean build's. Sets the memo's `const_hit` / `const_miss` (files with a
+/// source language). A hash list of another length disables the memo.
+fn build_const_table_with(
+    files: &[(String, String)],
+    memo: Option<(&[u64], &mut BuildMemo)>,
+    parse_errors: &mut Vec<String>,
+) -> (ConstTable, FileConstTables, usize, usize) {
+    let mut memo = memo.filter(|(hashes, _)| hashes.len() == files.len());
+    let lookup: Option<(&[u64], &ConstMemo)> = memo.as_ref().map(|(h, m)| (*h, &m.consts));
+    let slots: Vec<usize> = (0..files.len()).collect();
+    let (scans, threads) = crate::parallel::par_map_ordered(&slots, |&i| {
+        let (path, source) = &files[i];
+        let Some(lang) = detect_language(path) else {
+            return ConstScan::NoLang;
+        };
+        if let Some((hashes, consts)) = lookup
+            && let Some(scan) = consts.get(path, &ConstKey { content_hash: hashes[i], lang })
+        {
+            return ConstScan::Hit(scan.clone());
+        }
+        ConstScan::Fresh(
+            lang,
+            crate::parallel::quiet(|| ConstTable::scan_file(source, lang)).ok(),
+        )
     });
     let mut table = ConstTable::default();
     let mut per_file = Vec::with_capacity(files.len());
     let mut scanned = 0usize;
-    for ((path, _), scan) in files.iter().zip(scans) {
-        let Some(scan) = scan else {
-            per_file.push(None);
-            continue;
+    let (mut hit, mut miss) = (0usize, 0usize);
+    for (i, ((path, _), scan)) in files.iter().zip(scans).enumerate() {
+        let scan = match scan {
+            ConstScan::NoLang => {
+                per_file.push(None);
+                continue;
+            }
+            ConstScan::Hit(scan) => {
+                hit += 1;
+                scan
+            }
+            ConstScan::Fresh(lang, scan) => {
+                miss += 1;
+                if let Some((hashes, m)) = memo.as_mut() {
+                    let key = ConstKey { content_hash: hashes[i], lang };
+                    m.consts.insert(path.clone(), key, scan.clone());
+                }
+                scan
+            }
         };
         scanned += 1;
         match scan {
-            Ok(file_table) => {
+            Some(file_table) => {
                 table.merge_from(&file_table);
                 per_file.push(Some(file_table));
             }
-            Err(_) => {
+            None => {
                 parse_errors.push(format!("{path}: PANIC (const table scan)"));
                 per_file.push(None);
             }
         }
+    }
+    if let Some((_, m)) = memo {
+        m.stats.const_hit = hit;
+        m.stats.const_miss = miss;
     }
     (table, FileConstTables(per_file), scanned, threads)
 }
@@ -204,9 +269,17 @@ pub(crate) struct Grafted {
 /// Its times (CA.9): `parse`, `const_scan` (the table, its `[const]` line and
 /// the LF.2d pins) and `grafts` (the Cargo-package read and
 /// `grafts::apply_post_cache`).
+///
+/// DC.4: with a cache, the walked files' content hashes are computed once
+/// here, on the pool (inside `parse`), and handed to the router, the const
+/// scan and the RPC needles, which each replay an unchanged file's output
+/// from the cache's build memos (`build::memo`) instead of recomputing it.
+/// The memo's stats are reset first, and its fired_on line follows the
+/// grafts, once per repo build that holds a cache:
+///   `[graft-memo] const hit=<h>/<n> needles hit=<h>/<n> noncode hit=<h>/<n> repo=<label>`
 pub(crate) fn parse_and_graft(
     files: &[(String, String)],
-    cache: Option<&mut ParseCache>,
+    mut cache: Option<&mut ParseCache>,
     ctx: &RepoBuildCtx<'_>,
 ) -> Grafted {
     let RepoBuildCtx {
@@ -234,8 +307,19 @@ pub(crate) fn parse_and_graft(
 
     let mut times = PhaseTimes::default();
     let started = Instant::now();
-    let (mut parses_by_lang, mut parse_errors) =
-        parse_repo_files(files, repo, go, cache, repo_label);
+    // DC.4: one content hash per walked file, only when a cache is held.
+    let hashes: Option<Vec<u64>> = cache.as_deref_mut().map(|c| {
+        c.memo_mut().stats = MemoStats::default();
+        crate::parallel::par_map_ordered(files, |(_, source)| content_hash(source)).0
+    });
+    let (mut parses_by_lang, mut parse_errors) = parse_repo_files_hashed(
+        files,
+        hashes.as_deref(),
+        repo,
+        go,
+        cache.as_deref_mut(),
+        repo_label,
+    );
     times.parse = started.elapsed();
 
     // A11.1 fired_on marker, once per repo. Post-cache passes that read the
@@ -244,8 +328,9 @@ pub(crate) fn parse_and_graft(
     // queue / event const folds also read `file_tables`, the per-file scans
     // the table was merged from (DC.3).
     let started = Instant::now();
+    let memo = hashes.as_deref().zip(cache.as_deref_mut().map(ParseCache::memo_mut));
     let (mut const_table, file_tables, const_files, threads) =
-        build_const_table(files, &mut parse_errors);
+        build_const_table_with(files, memo, &mut parse_errors);
     if !const_table.is_empty() {
         eprintln!(
             "[const] repo table: {} bindings from {} files ({} conflicts) repo={repo_label}",
@@ -262,14 +347,24 @@ pub(crate) fn parse_and_graft(
     // (a sibling crate is not a dependency) and by `build_rust`.
     let started = Instant::now();
     let rust_crates = lang_build::rust_crates(files, roots);
+    // DC.4: the needle memo travels to `apply_rpc_needles` inside a per-repo
+    // copy of the build's proto service set (`RpcContext::with_memo`), and
+    // comes back with this build's fresh outputs below. Not when the build
+    // knows no service: the needles do not run.
+    let mut repo_rpc = match (cache.as_deref_mut(), hashes) {
+        (Some(c), Some(hashes)) if !rpc.services.is_empty() => {
+            Some(rpc.with_memo(std::mem::take(&mut c.memo_mut().needles), hashes))
+        }
+        _ => None,
+    };
     // LF.2e (http), A11.2, LA.6d, LA.4, LF.2e (queue), A5.2 / A5.3, A5.8,
     // LB.4a / LB.8, A16.4: the post-cache grafts, in that order. The overlay
     // `[[wrapper]]` stage runs only when the build applies the overlay.
-    let rpc_added = grafts::apply_post_cache(
+    let mut rpc_added = grafts::apply_post_cache(
         &mut parses_by_lang,
         files,
         repo,
-        rpc,
+        repo_rpc.as_ref().unwrap_or(rpc),
         &const_table,
         &file_tables,
         roots,
@@ -280,6 +375,14 @@ pub(crate) fn parse_and_graft(
         repo_label,
     );
     times.grafts = started.elapsed();
+    if let Some(c) = cache {
+        let memo = c.memo_mut();
+        if let Some(needles) = repo_rpc.as_mut().and_then(RpcContext::take_memo) {
+            memo.needles = needles;
+        }
+        rpc_added.record_memo(memo);
+        eprintln!("{}", memo.marker(repo_label));
+    }
 
     Grafted {
         parses_by_lang,

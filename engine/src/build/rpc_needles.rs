@@ -3,7 +3,7 @@
 //! anchored as they are grafted (A5.8), and the Connect / Twirp procedures and
 //! calls (LA.17). `grafts::apply_post_cache` runs them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glia_code_domain::evidence::{self, Evidence};
 use glia_code_domain::{FileParse, attach_imports_cell};
@@ -11,6 +11,7 @@ use glia_code_extractors::anchor;
 use glia_code_extractors::grpc::{self, ProtoServiceRef};
 use glia_core::{NodeId, RepoId};
 
+use super::memo::{self, BuildMemo, NeedleHalves, NeedleKey, NeedleMemo};
 use crate::extract::{detect_language, merge_nav};
 use crate::route::ModuleQnames;
 
@@ -22,9 +23,40 @@ pub(crate) struct RpcContext {
     /// Sorted and deduplicated, so needle order (and therefore GRPC_CLIENT
     /// emission order) does not depend on walk or repo order.
     pub(super) services: Vec<ProtoServiceRef>,
+    /// DC.4: one repo's needle memo and its walked files' content hashes, on
+    /// the per-repo copy [`RpcContext::with_memo`] makes; `None` on the
+    /// build-wide set. `grafts::apply_post_cache` hands the context to
+    /// [`apply_rpc_needles`] unchanged, so the memo reaches the needles
+    /// without a new parameter on every graft.
+    memo: Option<HeldNeedles>,
+}
+
+/// The needle memo a held cache lends one repo's [`apply_rpc_needles`]
+/// (DC.4), and the walked files' content hashes, index-aligned with `files`.
+struct HeldNeedles {
+    memo: NeedleMemo,
+    hashes: Vec<u64>,
 }
 
 impl RpcContext {
+    /// DC.4: a per-repo copy of this service set carrying the repo's needle
+    /// `memo` (moved out of its `ParseCache`) and the walked files' content
+    /// `hashes`. [`RpcContext::take_memo`] hands the memo back after the
+    /// grafts, and [`RpcNeedleCounts::record_memo`] adds the build's fresh
+    /// outputs to it.
+    pub(super) fn with_memo(&self, memo: NeedleMemo, hashes: Vec<u64>) -> RpcContext {
+        RpcContext {
+            services: self.services.clone(),
+            memo: Some(HeldNeedles { memo, hashes }),
+        }
+    }
+
+    /// DC.4: the needle memo [`RpcContext::with_memo`] lent, back to its
+    /// cache; `None` on a context that holds none.
+    pub(super) fn take_memo(&mut self) -> Option<NeedleMemo> {
+        self.memo.take().map(|h| h.memo)
+    }
+
     /// Fold in every service the `.proto` files among `files` declare.
     pub(crate) fn add_files(&mut self, files: &[(String, String)]) {
         for (path, source) in files {
@@ -77,6 +109,17 @@ impl RpcContext {
 /// through [`parse_index`], built once, instead of a scan of every parse.
 /// The counts' `files` is how many files the needles ran on (LG.1c: returned
 /// through `grafts::apply_post_cache` to the `[parallel]` line).
+///
+/// DC.4: when `rpc` holds a needle memo ([`RpcContext::with_memo`]), a file
+/// whose halves the memo holds under the same [`NeedleKey`] (content hash,
+/// language, MODULE id, service-set fingerprint, Twirp flag) is replayed from
+/// it on the worker instead of re-running its needles: the halves are cloned,
+/// panic strings included, and grafted onto the parse at THIS build's slot
+/// (the slot is never memoised: it shifts when a file is added or removed),
+/// exactly as fresh halves are. A file whose `(language, MODULE id)` two
+/// parses share is never memoised (its parse lookup reads another file's
+/// parse). The fresh halves return in the counts' `memo_new`, for the
+/// caller to record ([`RpcNeedleCounts::record_memo`]).
 pub(super) fn apply_rpc_needles(
     parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
     files: &[(String, String)],
@@ -90,10 +133,14 @@ pub(super) fn apply_rpc_needles(
         return added;
     }
     let twirp_repo = is_twirp_repo(files);
-    let index = parse_index(parses_by_lang);
+    let (index, shared) = parse_index(parses_by_lang);
     let services = rpc.services.as_slice();
     let parses: &HashMap<&'static str, Vec<FileParse>> = parses_by_lang;
-    let (outs, _threads) = crate::parallel::par_map_ordered(files, |(path, source)| {
+    let held = rpc.memo.as_ref().filter(|h| h.hashes.len() == files.len());
+    let services_fp = held.map(|_| memo::services_fp(services));
+    let slots: Vec<usize> = (0..files.len()).collect();
+    let (outs, _threads) = crate::parallel::par_map_ordered(&slots, |&i| {
+        let (path, source) = &files[i];
         let file = NeedleFile {
             path,
             source,
@@ -101,18 +148,41 @@ pub(super) fn apply_rpc_needles(
             services,
             twirp_repo,
         };
-        needle_one(&file, modules, &index, parses)
+        let lookup = held.zip(services_fp).map(|(h, services_fp)| MemoLookup {
+            memo: &h.memo,
+            content_hash: h.hashes[i],
+            services_fp,
+            shared: &shared,
+        });
+        needle_one(&file, modules, &index, parses, lookup)
     });
-    for ((path, _), out) in files.iter().zip(outs) {
+    for ((path, _), step) in files.iter().zip(outs) {
+        let out = match step {
+            NeedleStep::Skip => continue,
+            NeedleStep::Hit(out) => {
+                added.memo_hit += 1;
+                out
+            }
+            NeedleStep::Fresh { key, out } => {
+                added.memo_miss += 1;
+                if let Some(key) = key {
+                    let halves = out.as_ref().map(|o| o.halves.clone());
+                    added.memo_new.push((path.clone(), key, halves));
+                }
+                out
+            }
+        };
         let Some(out) = out else { continue };
         added.files += 1;
         let NeedleOut {
             lang,
             slot,
             module_id,
-            client,
-            server,
-            proto_rpc,
+            halves: NeedleHalves {
+                client,
+                server,
+                proto_rpc,
+            },
         } = out;
         let Some(fp) = parses_by_lang.get_mut(lang).and_then(|v| v.get_mut(slot)) else {
             continue;
@@ -143,18 +213,28 @@ pub(super) fn apply_rpc_needles(
 /// `parses_by_lang[language]`, keyed by each parse's first node (every code
 /// parser emits the file's MODULE first). The first parse of a language wins
 /// a repeated id, as the linear `find` it replaces did.
+///
+/// DC.4: also the repeated keys. A file under one of them may be paired with
+/// ANOTHER file's parse, a cross-file input the needle memo's key cannot
+/// see, so the memo skips it.
 fn parse_index(
     parses_by_lang: &HashMap<&'static str, Vec<FileParse>>,
-) -> HashMap<(&'static str, NodeId), usize> {
+) -> (HashMap<(&'static str, NodeId), usize>, HashSet<(&'static str, NodeId)>) {
     let mut index = HashMap::new();
+    let mut shared = HashSet::new();
     for (lang, parses) in parses_by_lang {
         for (slot, fp) in parses.iter().enumerate() {
             if let Some(first) = fp.nodes.first() {
-                index.entry((*lang, first.id)).or_insert(slot);
+                let key = (*lang, first.id);
+                if index.contains_key(&key) {
+                    shared.insert(key);
+                } else {
+                    index.insert(key, slot);
+                }
             }
         }
     }
-    index
+    (index, shared)
 }
 
 /// One walked file and the build-wide inputs of its needle halves.
@@ -169,27 +249,56 @@ struct NeedleFile<'a> {
 /// One file's needle output, computed on a pool worker and grafted by the
 /// sequential loop of [`apply_rpc_needles`]. Each half is `None` when its
 /// text gate kept it off the file, else its nodes or the `parse_errors` line
-/// of a caught panic.
+/// of a caught panic. `lang`, `slot` and `module_id` are this build's, on a
+/// memo hit too (DC.4); only the halves are memoised.
 struct NeedleOut {
     lang: &'static str,
     /// Index into `parses_by_lang[lang]`.
     slot: usize,
     module_id: NodeId,
-    client: Option<Result<grpc::GrpcNodes, String>>,
-    server: Option<Result<grpc::GrpcNodes, String>>,
-    proto_rpc: Option<Result<grpc::ProtoRpcNodes, String>>,
+    halves: NeedleHalves,
 }
 
-/// Compute one file's needle halves against its parse, read-only. `None` when
-/// the cheap text checks rule out every half, the file has no source language
-/// (or is a `.proto`), or it has no parse (it failed to parse: there is no
+/// What a worker reads of the held needle memo for one file (DC.4).
+#[derive(Clone, Copy)]
+struct MemoLookup<'a> {
+    memo: &'a NeedleMemo,
+    content_hash: u64,
+    services_fp: u64,
+    /// [`parse_index`]'s repeated keys: never memoised.
+    shared: &'a HashSet<(&'static str, NodeId)>,
+}
+
+/// One file's needle step (DC.4). A file is ELIGIBLE when a needle text gate
+/// passed and it has a source language other than `.proto`: the
+/// `[graft-memo]` line's needle `n`.
+enum NeedleStep {
+    /// Not eligible: no needle runs.
+    Skip,
+    /// Replayed from the memo: `None` when the memo recorded no parse, or
+    /// this build finds none.
+    Hit(Option<NeedleOut>),
+    /// Computed now (`None`: the file has no parse). `key` is the memo key to
+    /// record the halves under, `None` when no memo is held or the file's
+    /// parse key is shared.
+    Fresh {
+        key: Option<NeedleKey>,
+        out: Option<NeedleOut>,
+    },
+}
+
+/// Compute one file's needle halves against its parse, read-only, or (DC.4)
+/// replay them from `memo`. [`NeedleStep::Skip`] when the cheap text checks
+/// rule out every half or the file has no source language (or is a
+/// `.proto`); no output when it has no parse (it failed to parse: there is no
 /// module to hang a marker on).
 fn needle_one(
     file: &NeedleFile<'_>,
     modules: &ModuleQnames,
     index: &HashMap<(&'static str, NodeId), usize>,
     parses_by_lang: &HashMap<&'static str, Vec<FileParse>>,
-) -> Option<NeedleOut> {
+    memo: Option<MemoLookup<'_>>,
+) -> NeedleStep {
     let NeedleFile {
         path,
         source,
@@ -203,15 +312,45 @@ fn needle_one(
     let grpc_side = grpc::may_hold_grpc_server(source);
     let proto_rpc_side = grpc::may_hold_proto_rpc(source, twirp_repo);
     if !grpc_side && !proto_rpc_side {
-        return None;
+        return NeedleStep::Skip;
     }
-    let lang = detect_language(path)?;
+    let Some(lang) = detect_language(path) else {
+        return NeedleStep::Skip;
+    };
     if lang == "proto" {
-        return None;
+        return NeedleStep::Skip;
     }
     let module_id = modules.module_id(path, repo);
-    let slot = *index.get(&(lang, module_id))?;
-    let fp = parses_by_lang.get(lang)?.get(slot)?;
+    let parse = index
+        .get(&(lang, module_id))
+        .and_then(|&slot| Some((slot, parses_by_lang.get(lang)?.get(slot)?)));
+    let lookup = memo
+        .filter(|m| !m.shared.contains(&(lang, module_id)))
+        .map(|m| {
+            let key = NeedleKey {
+                content_hash: m.content_hash,
+                lang,
+                module_id,
+                services_fp: m.services_fp,
+                twirp: twirp_repo,
+            };
+            (m.memo, key)
+        });
+    if let Some((memo, key)) = &lookup
+        && let Some(held) = memo.get(path, key)
+    {
+        let out = held.as_ref().zip(parse).map(|(halves, (slot, _))| NeedleOut {
+            lang,
+            slot,
+            module_id,
+            halves: halves.clone(),
+        });
+        return NeedleStep::Hit(out);
+    }
+    let key = lookup.map(|(_, key)| key);
+    let Some((slot, fp)) = parse else {
+        return NeedleStep::Fresh { key, out: None };
+    };
     let client = (grpc_side && client_side).then(|| {
         crate::parallel::quiet(|| {
             grpc::extract_known_grpc_client_nodes(source, path, module_id, repo, services)
@@ -234,14 +373,17 @@ fn needle_one(
         })
         .map_err(|_| format!("{path}: PANIC (proto rpc needles)"))
     });
-    Some(NeedleOut {
+    let out = NeedleOut {
         lang,
         slot,
         module_id,
-        client,
-        server,
-        proto_rpc,
-    })
+        halves: NeedleHalves {
+            client,
+            server,
+            proto_rpc,
+        },
+    };
+    NeedleStep::Fresh { key, out: Some(out) }
 }
 
 /// LA.17: does this repo speak Twirp? Its go.mod requires the runtime, or it
@@ -265,6 +407,26 @@ pub(super) struct RpcNeedleCounts {
     pub(super) servers: usize,
     /// LA.17: the Connect / Twirp pass's tallies, summed over the repo.
     pub(super) proto_rpc: grpc::ProtoRpcCounts,
+    /// DC.4: eligible files ([`NeedleStep`]) replayed from the memo ...
+    memo_hit: usize,
+    /// ... and computed now.
+    memo_miss: usize,
+    /// DC.4: the fresh memoisable halves, in file order, for
+    /// [`RpcNeedleCounts::record_memo`].
+    memo_new: Vec<(String, NeedleKey, Option<NeedleHalves>)>,
+}
+
+impl RpcNeedleCounts {
+    /// DC.4: record this build's fresh needle halves in `memo` (the held
+    /// cache's, its needle memo already handed back by
+    /// [`RpcContext::take_memo`]) and set its needle stats.
+    pub(super) fn record_memo(&mut self, memo: &mut BuildMemo) {
+        for (path, key, halves) in self.memo_new.drain(..) {
+            memo.needles.insert(path, key, halves);
+        }
+        memo.stats.needle_hit = self.memo_hit;
+        memo.stats.needle_miss = self.memo_miss;
+    }
 }
 
 /// Graft one post-cache marker batch onto its file's parse: the nodes, their

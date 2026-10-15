@@ -43,6 +43,8 @@ use std::path::{Path, PathBuf};
 use glia_code_domain::{CodeNav, FileParse};
 use glia_core::NodeId;
 
+use crate::build::memo::BuildMemo;
+
 /// Build identity a cache must match to be reused: `<release>+p<parser stamp>`
 /// (see the `stamp` crate).
 ///
@@ -455,6 +457,13 @@ pub struct ParseCache {
     /// sidecar layout unchanged, and a loaded cache starts at `None`.
     #[serde(skip)]
     last_diff: Option<CacheDiff>,
+    /// DC.4: the in-memory build memos (const-table scans, RPC needle halves,
+    /// non-code routing outcomes; `build::memo`). Never persisted: `serde(skip)`
+    /// keeps the sidecar bytes and the CE.2 shared-cache payloads unchanged,
+    /// so a loaded cache starts with an empty memo. Cleared with `entries`
+    /// when the build context changes ([`ParseCache::validate_context`]).
+    #[serde(skip)]
+    memo: BuildMemo,
 }
 
 impl Default for ParseCache {
@@ -466,6 +475,7 @@ impl Default for ParseCache {
             entries: BTreeMap::new(),
             stats: CacheStats::default(),
             last_diff: None,
+            memo: BuildMemo::default(),
         }
     }
 }
@@ -483,6 +493,10 @@ impl ParseCache {
     /// mismatch means every entry is suspect. Called at the top of each build —
     /// covers the disk sidecar AND a long-lived in-memory cache (neuropil)
     /// being pointed at a different repo.
+    ///
+    /// DC.4: the build memos are discarded with the entries, for the same
+    /// reason: their NodeIds carry the RepoId, and the needle halves read
+    /// parses the go context shapes.
     pub fn validate_context(&mut self, repo_canonical: &str, go_context: &str) {
         if self.repo_canonical != repo_canonical || self.go_modules != go_context {
             if !self.entries.is_empty() {
@@ -492,6 +506,7 @@ impl ParseCache {
                 );
             }
             self.entries.clear();
+            self.memo.clear();
             repo_canonical.clone_into(&mut self.repo_canonical);
             go_context.clone_into(&mut self.go_modules);
         }
@@ -551,6 +566,17 @@ impl ParseCache {
     /// the checked-out file (CE.2b).
     pub(crate) fn put_entry(&mut self, path: String, entry: CacheEntry) {
         self.entries.insert(path, entry);
+    }
+
+    /// The DC.4 build memos, read-only: the build's pool workers look them up.
+    pub(crate) fn memo(&self) -> &BuildMemo {
+        &self.memo
+    }
+
+    /// The DC.4 build memos, for a stage's sequential fold to insert its
+    /// misses, and for the build to reset and retain them.
+    pub(crate) fn memo_mut(&mut self) -> &mut BuildMemo {
+        &mut self.memo
     }
 
     /// Drop entries for files no longer present this build (deletions / files
