@@ -1,0 +1,57 @@
+{
+  "framework": "ts-param-local-receivers",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "cells": [
+    "typescript/calls"
+  ],
+  "note": "DF.22a: TypeScript parameters and locals type their receivers (LA.35a's local_types, which the TS parser never filled): a function or method parameter `api: ApiService`, an annotated local `const typed: ApiService`, a local initialised by `new ApiService()`. `x.m()` on such a name binds `m` on the declared type through resolve_calls' receiver pass (rule receiver_type). Two types for one name in one body (the method parameter and an arrow parameter) make the name unknown: no edge rather than a guess. AdminService carries a decoy fetchUser / purge. Baseline (HEAD 22c65ee, debug CLI): no CALLS at all (`[evidence-lines] lang=typescript calls=0`).",
+  "expect_edges": [
+    {
+      "from": "report/loadReport",
+      "to": "ApiService/fetchUser",
+      "category": "CALLS",
+      "note": "function parameter"
+    },
+    {
+      "from": "ReportBuilder/build",
+      "to": "AdminService/purge",
+      "category": "CALLS",
+      "note": "method parameter"
+    },
+    {
+      "from": "ReportBuilder/build",
+      "to": "AdminService/fetchUser",
+      "category": "CALLS",
+      "note": "method parameter"
+    },
+    {
+      "from": "ReportBuilder/build",
+      "to": "ApiService/purge",
+      "category": "CALLS",
+      "note": "annotated local"
+    },
+    {
+      "from": "ReportBuilder/build",
+      "to": "ApiService/fetchUser",
+      "category": "CALLS",
+      "note": "local initialised by new ApiService()"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src/report/loadReport",
+      "to": "src/admin.service/AdminService/fetchUser",
+      "category": "CALLS",
+      "note": "decoy: the parameter's declared type decides"
+    },
+    {
+      "from": "src/report/ReportBuilder/shadow",
+      "to": "src/api.service/ApiService/purge",
+      "category": "CALLS",
+      "note": "the arrow parameter `api: AdminService` shadows the method parameter: the name is of unknown type in the body"
+    }
+  ]
+}

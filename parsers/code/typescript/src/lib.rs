@@ -42,10 +42,23 @@ pub fn parse_file(
     parse_file_stats(source, file_rel_path, module_qname, repo).map(|(parse, ..)| parse)
 }
 
+/// [`parse_file_stats`]'s answer: the parse, then each marker's counters in
+/// the order the doc there lists them.
+type FileStats = (
+    FileParse,
+    FnFieldStats,
+    AbstractStats,
+    StateFieldStats,
+    LocalStats,
+    ReceiverGateStats,
+    EndpointArgStats,
+);
+
 /// [`parse_file`], plus the file's CG.1 function-field counters (the
 /// `[ts-fields]` marker's numbers), its CH.1 abstract-class counters (the
 /// `[ts-abstract]` marker's numbers), its CH.2 call-initialised field
-/// counters (the `[ts-state]` marker's numbers), its CH.3c receiver-gate
+/// counters (the `[ts-state]` marker's numbers), its DF.22a local-receiver
+/// counters (the `[ts-locals]` marker's numbers), its CH.3c receiver-gate
 /// counters (the `[ts-endpoint-gate]` marker's numbers) and its CH.3a
 /// URL-argument counters (the `[ts-endpoint-args]` marker's numbers), which
 /// the tests read back.
@@ -54,17 +67,7 @@ fn parse_file_stats(
     file_rel_path: &str,
     module_qname: &str,
     repo: RepoId,
-) -> Result<
-    (
-        FileParse,
-        FnFieldStats,
-        AbstractStats,
-        StateFieldStats,
-        ReceiverGateStats,
-        EndpointArgStats,
-    ),
-    ParseError,
-> {
+) -> Result<FileStats, ParseError> {
     let mut parser = Parser::new();
     let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
     parser
@@ -99,6 +102,18 @@ fn parse_file_stats(
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
         visit_top(child, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    }
+
+    // DF.22a: every import is read now, so the `inject(T)`-shaped locals take
+    // A7.1's gate, then the file's local-typed receivers are counted.
+    record_inject_locals(&mut acc);
+    let ls = local_stats(&acc);
+    if ls.typed > 0 {
+        eprintln!(
+            "[ts-locals] typed receivers={} (param={} annotated={} new={} inject={} alias={}) \
+             unknown={} file={file_rel_path}",
+            ls.typed, ls.param, ls.annotated, ls.new, ls.inject, ls.alias, ls.unknown
+        );
     }
 
     let orm = &acc.typeorm;
@@ -163,7 +178,7 @@ fn parse_file_stats(
         );
     }
 
-    resolve_intra_file(acc).map(|parse| (parse, ff, ab, sf, gate, ea))
+    resolve_intra_file(acc).map(|parse| (parse, ff, ab, sf, ls, gate, ea))
 }
 
 /// CH.3a: count the file's HTTP call sites by the arm that read their URL
@@ -271,6 +286,62 @@ struct Acc {
     /// `this.isDesktop` runs a getter: a state read, not a method passed by
     /// value, so a by-value candidate naming one mints no USES.
     accessors: HashSet<NodeId>,
+    /// DF.22a: `const x = <callee>(T)` locals shaped like `inject(T)`, in
+    /// source order. Recorded on `nav.local_types` after the visit loop, once
+    /// every import of the file is read: typed when the callee is a named
+    /// `inject` import binding (A7.1's gate), else of unknown type.
+    local_inject: Vec<LocalInject>,
+    /// DF.22a: `(scope, local)` -> what gave the local its first typed record.
+    /// Read only by the `[ts-locals]` marker ([`local_stats`]).
+    local_src: HashMap<(NodeId, String), LocalSrc>,
+}
+
+/// DF.22a: what typed a local of a TS-family callable, for the `[ts-locals]`
+/// marker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LocalSrc {
+    /// A formal parameter's annotation (`api: ApiService`).
+    Param,
+    /// A declarator's annotation (`const t: Repo = …`) or an `x as T` value.
+    Annotated,
+    /// A `new T(…)` value.
+    New,
+    /// An `inject(T)` value whose callee passed the `inject` import gate.
+    Inject,
+    /// A `this.<field>` value: the local aliases the field (`self.<field>`).
+    Alias,
+}
+
+/// DF.22a: one `const x = <callee>(T)` local awaiting the `inject` import
+/// gate ([`Acc::local_inject`]).
+struct LocalInject {
+    /// The callable the local belongs to (the call walk's `from`).
+    scope: NodeId,
+    name: String,
+    /// The local name the call goes through (`inject`, or `i` after
+    /// `import { inject as i }`).
+    callee: String,
+    /// The type the call returns when it is `inject`: its `<T>` argument,
+    /// else its class argument's simple name.
+    ty: String,
+}
+
+/// DF.22a: one file's `x.m()` call sites whose receiver `x` is a recorded
+/// local of the caller (the `[ts-locals]` marker).
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+struct LocalStats {
+    /// Sites whose local has a type: the receiver pass looks `m` up on it
+    /// (an in-repo type binds; an external one binds nothing).
+    typed: usize,
+    /// Of `typed`, by what typed the local ([`LocalSrc`]).
+    param: usize,
+    annotated: usize,
+    new: usize,
+    inject: usize,
+    alias: usize,
+    /// Sites whose local is of unknown type (`""`, a conflict included): it
+    /// shadows a same-named field, so nothing binds.
+    unknown: usize,
 }
 
 /// CH.2: what one file's call-initialised class fields gave the graph (the
@@ -1001,7 +1072,8 @@ fn visit_field(field: TsNode, src: &[u8], module_id: NodeId, class_id: NodeId, a
 /// a method declared above the field binds too), the nav record, and a call
 /// walk of its body (an expression body or a block alike), whose calls, client
 /// HTTP calls and TypeORM sites are the field METHOD's. Parameters are not
-/// walked, as for a method.
+/// walked for calls, as for a method; their types are the METHOD's locals
+/// (DF.22a, [`record_param_types`]).
 ///
 /// Its CODE / POSITION / DOC are the field node's own: tree-sitter-typescript
 /// keeps a field's decorators INSIDE `public_field_definition`, so CB.4's
@@ -1074,6 +1146,8 @@ fn visit_function_field(
     );
 
     record_callable(method_id, value, acc);
+    // DF.22a: the function value's parameters are the field METHOD's locals.
+    record_param_types(value, src, method_id, acc);
 
     let before = acc.unresolved.len() + acc.endpoints.len();
     if let Some(body) = value.child_by_field_name("body") {
@@ -1593,6 +1667,10 @@ fn visit_method(
         }
     }
 
+    // DF.22a: a method's, a constructor's or an accessor's parameters type
+    // the receivers of its body (a parameter property records its field's
+    // type, so A6.2b's constructor binds keep their target).
+    record_param_types(n, src, method_id, acc);
     if let Some(body) = n.child_by_field_name("body") {
         collect_calls_in(body, src, method_id, Some(class_id), acc);
     }
@@ -1868,6 +1946,8 @@ fn emit_function(
         Some(module_id),
     );
     record_callable(func_id, n, acc);
+    // DF.22a: parameters type the receivers of the body.
+    record_param_types(n, src, func_id, acc);
 
     if let Some(body) = n.child_by_field_name("body") {
         collect_calls_in(body, src, func_id, None, acc);
@@ -1909,6 +1989,9 @@ fn emit_function_value(
         Some(module_id),
     );
     record_callable(func_id, value, acc);
+    // DF.22a: the arrow's / function expression's parameters type the
+    // receivers of its body.
+    record_param_types(value, src, func_id, acc);
 
     if let Some(body) = value.child_by_field_name("body") {
         collect_calls_in(body, src, func_id, None, acc);
@@ -2063,6 +2146,18 @@ fn collect_calls_in(
             "member_expression" | "shorthand_property_identifier_pattern" | "pair_pattern"
         ) {
             record_prefix_read(node, src, from, acc);
+        }
+        // DF.22a: the bindings of the walked body are locals of `from`, the
+        // node its calls are attributed to; a nested callback's parameters
+        // and locals included, since its calls are `from`'s too.
+        match kind {
+            "variable_declarator" => record_declarator_type(node, src, from, acc),
+            "arrow_function" | "function_expression" | "generator_function" => {
+                record_param_types(node, src, from, acc);
+            }
+            "for_in_statement" => record_pattern_unknown(node, "left", src, from, acc),
+            "catch_clause" => record_pattern_unknown(node, "parameter", src, from, acc),
+            _ => {}
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
@@ -2254,6 +2349,284 @@ fn record_callable(id: NodeId, func: TsNode, acc: &mut Acc) {
     let n = param_count(func);
     let slot = acc.callable_params.entry(id).or_insert(0);
     *slot = (*slot).max(n);
+}
+
+// ============================================================================
+// Local receiver types (DF.22a)
+// ============================================================================
+//
+// The parser records what the AST says about each binding's type on
+// `CodeNav::local_types` (LA.35a), the carrier the graph crate's generic
+// receiver pass reads innermost-first, before the enclosing class's fields:
+// `x.m()` on a typed local binds `m` on that type (rule `receiver_type`); a
+// local of unknown type (`""`) shadows a same-named field; `self.<f>` aliases
+// field `f`. A binding's scope is the node its calls are attributed to (the
+// call walk's `from`): a method, a function, a function field, a
+// call-initialised field or, for a top-level statement, the MODULE. A nested
+// arrow / function expression shares it, as its calls do.
+
+/// DF.22a: record `name` as a local of `scope` of simple type `ty` (`""` =
+/// unknown) and, for a typed record, what typed it (`kind`, first source
+/// kept; the `[ts-locals]` marker's only input). `record_local_type`'s rule
+/// decides a name bound twice in one scope: the same type keeps it, another
+/// type or an unknown makes the local unknown, whatever the order.
+fn record_local(acc: &mut Acc, scope: NodeId, name: &str, ty: &str, kind: LocalSrc) {
+    acc.nav.record_local_type(scope, name, ty);
+    if !ty.is_empty() && !name.is_empty() {
+        acc.local_src
+            .entry((scope, name.to_string()))
+            .or_insert(kind);
+    }
+}
+
+/// DF.22a: the names a binding pattern binds: an `identifier` or a shorthand
+/// property pattern, through object / array / rest / pair / defaulted
+/// patterns (`{ d }`, `[a, ...more]`, `{ k: v }`, `{ d = 1 }`). A default
+/// value, a pair's key and a member / subscript target (`for (this.x of xs)`)
+/// bind nothing.
+fn pattern_names<'a>(pattern: TsNode, src: &'a [u8]) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut stack = vec![pattern];
+    while let Some(n) = stack.pop() {
+        match n.kind() {
+            "identifier" | "shorthand_property_identifier_pattern" => out.push(text(n, src)),
+            "object_pattern" | "array_pattern" | "rest_pattern" => {
+                let mut cursor = n.walk();
+                stack.extend(n.named_children(&mut cursor));
+            }
+            "pair_pattern" => stack.extend(n.child_by_field_name("value")),
+            "assignment_pattern" | "object_assignment_pattern" => {
+                stack.extend(n.child_by_field_name("left"));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// DF.22a: record every name the `field` pattern of `node` binds as a local
+/// of unknown type: a `for … in` / `for … of` loop variable, a catch
+/// parameter.
+fn record_pattern_unknown(node: TsNode, field: &str, src: &[u8], scope: NodeId, acc: &mut Acc) {
+    if let Some(pattern) = node.child_by_field_name(field) {
+        for name in pattern_names(pattern, src) {
+            acc.nav.record_local_type(scope, name, "");
+        }
+    }
+}
+
+/// DF.22a: record every formal parameter of the callable `func` (a method,
+/// constructor or accessor, a function declaration, a function field's value,
+/// an arrow, a function expression) as a local of `scope`. An identifier
+/// parameter takes its annotation's class type ([`annotated_class_type`]:
+/// `ns.Foo` / `Foo<T>` / `Foo | null` -> `Foo`), else `""`; a destructuring,
+/// rest or defaulted pattern binds each of its names as `""`; a `this`
+/// parameter binds nothing. An arrow's bare `x => …` parameter is `""`.
+fn record_param_types(func: TsNode, src: &[u8], scope: NodeId, acc: &mut Acc) {
+    if let Some(p) = func.child_by_field_name("parameter") {
+        for name in pattern_names(p, src) {
+            acc.nav.record_local_type(scope, name, "");
+        }
+        return;
+    }
+    let Some(params) = func.child_by_field_name("parameters") else {
+        return;
+    };
+    let mut pc = params.walk();
+    for param in params.named_children(&mut pc) {
+        if !matches!(param.kind(), "required_parameter" | "optional_parameter") {
+            continue;
+        }
+        let Some(pattern) = param.child_by_field_name("pattern") else {
+            continue;
+        };
+        match pattern.kind() {
+            "this" => {}
+            "identifier" => {
+                let ty = param
+                    .child_by_field_name("type")
+                    .and_then(|t| annotated_class_type(t, src))
+                    .unwrap_or("");
+                record_local(acc, scope, text(pattern, src), ty, LocalSrc::Param);
+            }
+            _ => {
+                for name in pattern_names(pattern, src) {
+                    acc.nav.record_local_type(scope, name, "");
+                }
+            }
+        }
+    }
+}
+
+/// DF.22a: record a `variable_declarator`'s binding as a local of `scope`.
+/// An identifier name takes, in order: its annotation's class type (an
+/// annotation decides, `let s: Store;` with no value included; a
+/// non-class annotation is `""`); else its value's: a `new T(…)`'s
+/// constructor ([`new_type`]), an `x as T`'s `T`, a `this.<p>` read as the
+/// alias `self.<p>`, an `inject(T)`-shaped call queued for the import gate
+/// ([`Acc::local_inject`]); anything else (a call result, a literal, an
+/// `await`, a chain, no value) is `""`. A destructuring name binds each of
+/// its names as `""`.
+fn record_declarator_type(decl: TsNode, src: &[u8], scope: NodeId, acc: &mut Acc) {
+    let Some(name_node) = decl.child_by_field_name("name") else {
+        return;
+    };
+    if name_node.kind() != "identifier" {
+        for name in pattern_names(name_node, src) {
+            acc.nav.record_local_type(scope, name, "");
+        }
+        return;
+    }
+    let name = text(name_node, src);
+    if let Some(ann) = decl.child_by_field_name("type") {
+        let ty = annotated_class_type(ann, src).unwrap_or("");
+        record_local(acc, scope, name, ty, LocalSrc::Annotated);
+        return;
+    }
+    let Some(value) = decl.child_by_field_name("value") else {
+        acc.nav.record_local_type(scope, name, "");
+        return;
+    };
+    match value.kind() {
+        "new_expression" => {
+            let ty = new_type(value, src).unwrap_or("");
+            record_local(acc, scope, name, ty, LocalSrc::New);
+        }
+        "as_expression" => {
+            let mut cursor = value.walk();
+            let ty = value
+                .named_children(&mut cursor)
+                .filter(|c| c.kind() != "comment")
+                .nth(1)
+                .and_then(|t| class_type_name(t, src))
+                .unwrap_or("");
+            record_local(acc, scope, name, ty, LocalSrc::Annotated);
+        }
+        "member_expression" => {
+            let alias = value
+                .child_by_field_name("object")
+                .filter(|o| o.kind() == "this")
+                .and(value.child_by_field_name("property"))
+                .filter(|p| {
+                    matches!(
+                        p.kind(),
+                        "property_identifier" | "private_property_identifier"
+                    )
+                })
+                .map(|p| format!("self.{}", text(p, src)));
+            let ty = alias.as_deref().unwrap_or("");
+            record_local(acc, scope, name, ty, LocalSrc::Alias);
+        }
+        "call_expression" => match inject_shape(value, src) {
+            Some((callee, ty)) => acc.local_inject.push(LocalInject {
+                scope,
+                name: name.to_string(),
+                callee: callee.to_string(),
+                ty: ty.to_string(),
+            }),
+            None => acc.nav.record_local_type(scope, name, ""),
+        },
+        _ => acc.nav.record_local_type(scope, name, ""),
+    }
+}
+
+/// DF.22a: the class a `new T(…)` builds: its constructor's identifier, or a
+/// member chain's last property (`new ns.Widget<T>()` -> `Widget`), kept only
+/// when it starts with an ASCII uppercase letter (a class name by
+/// convention; `new factory()` names none).
+fn new_type<'a>(value: TsNode, src: &'a [u8]) -> Option<&'a str> {
+    let ctor = value.child_by_field_name("constructor")?;
+    let name = match ctor.kind() {
+        "identifier" => text(ctor, src),
+        "member_expression" => text(ctor.child_by_field_name("property")?, src),
+        _ => return None,
+    };
+    name.starts_with(|c: char| c.is_ascii_uppercase())
+        .then_some(name)
+}
+
+/// DF.22a: `(callee, type)` of an `inject(T)`-shaped call, as A7.1 reads an
+/// `inject(T)` field: an identifier callee and a first argument that is an
+/// identifier or a member chain; the type is a class-shaped `<T>` argument
+/// (`inject<HttpClient>(TOKEN)`), else the argument's simple name when it
+/// starts with an ASCII uppercase letter (`inject(AuthService)`,
+/// `inject(ns.Store)`). Whether the callee IS the `inject` import is
+/// [`record_inject_locals`]'s late gate.
+fn inject_shape<'a>(call: TsNode, src: &'a [u8]) -> Option<(&'a str, &'a str)> {
+    let callee = call.child_by_field_name("function")?;
+    if callee.kind() != "identifier" {
+        return None;
+    }
+    let args = call.child_by_field_name("arguments")?;
+    let mut ac = args.walk();
+    let arg = args.named_children(&mut ac).find(|a| a.kind() != "comment")?;
+    if !matches!(arg.kind(), "identifier" | "member_expression") {
+        return None;
+    }
+    let ty = match call.child_by_field_name("type_arguments") {
+        Some(ta) => {
+            let mut tc = ta.walk();
+            let first = ta.named_children(&mut tc).next()?;
+            class_type_name(first, src)?
+        }
+        None => heritage_type_name(arg, src)
+            .filter(|t| t.starts_with(|c: char| c.is_ascii_uppercase()))?,
+    };
+    Some((text(callee, src), ty))
+}
+
+/// DF.22a: record the queued `inject(T)`-shaped locals ([`Acc::local_inject`])
+/// in source order, once every import of the file is read: typed when the
+/// callee is a named `inject` import binding (`import { inject }`, or
+/// `{ inject as i }`: A7.1's gate on `inject(T)` fields), else of unknown
+/// type, so a project-local `inject` helper types nothing.
+fn record_inject_locals(acc: &mut Acc) {
+    let gate: HashSet<String> = inject_import_bindings(&acc.imports)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    for local in std::mem::take(&mut acc.local_inject) {
+        let ty = if gate.contains(&local.callee) {
+            local.ty.as_str()
+        } else {
+            ""
+        };
+        record_local(acc, local.scope, &local.name, ty, LocalSrc::Inject);
+    }
+}
+
+/// DF.22a: count the file's `x.m()` call sites (an `Attribute` qualifier)
+/// whose `x` is a recorded local of the caller, typed (by [`LocalSrc`]) or
+/// unknown: the `[ts-locals]` marker's numbers.
+fn local_stats(acc: &Acc) -> LocalStats {
+    let mut stats = LocalStats::default();
+    for uc in &acc.unresolved {
+        let CallQualifier::Attribute { base, .. } = &uc.qualifier else {
+            continue;
+        };
+        let Some(ty) = acc
+            .nav
+            .local_types
+            .get(&uc.from)
+            .and_then(|locals| locals.get(base.as_str()))
+        else {
+            continue;
+        };
+        if ty.is_empty() {
+            stats.unknown += 1;
+            continue;
+        }
+        stats.typed += 1;
+        match acc.local_src.get(&(uc.from, base.clone())) {
+            Some(LocalSrc::Param) => stats.param += 1,
+            Some(LocalSrc::Annotated) => stats.annotated += 1,
+            Some(LocalSrc::New) => stats.new += 1,
+            Some(LocalSrc::Inject) => stats.inject += 1,
+            Some(LocalSrc::Alias) => stats.alias += 1,
+            None => {}
+        }
+    }
+    stats
 }
 
 /// CH.3b: what `url_prefix_facts` found in one file.
@@ -8167,5 +8540,153 @@ export class Hero {
             "{:?}",
             parse.edges
         );
+    }
+
+    /// DF.22a: the locals `qname`'s scope records (`CodeNav::local_types`),
+    /// sorted; empty when the scope records none.
+    fn local_types(parse: &FileParse, qname: &str) -> std::collections::BTreeMap<String, String> {
+        let ids: Vec<NodeId> = parse
+            .nav
+            .qname_by_id
+            .iter()
+            .filter(|(_, q)| q.as_str() == qname)
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(!ids.is_empty(), "no node {qname}");
+        ids.iter()
+            .filter_map(|id| parse.nav.local_types.get(id))
+            .flat_map(|l| l.iter().map(|(k, v)| (k.clone(), v.clone())))
+            .collect()
+    }
+
+    fn locals(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// DF.22a's `params_and_locals_record_their_types` source: a method with
+    /// every parameter and declarator shape, a function and an arrow const.
+    const LOCALS_SRC: &str = "\
+import { Repo } from './repo';
+export class C {
+  m(api: ApiService, b?: ns.Bar | null, n: number, { d }: Opts, ...rest: X[]) {
+    const t: Repo = make();
+    const w = new ns.Widget<string>();
+    const r = this.repo;
+    const q = other as Queue;
+    let u;
+    for (const it of list) {}
+    try {} catch (e) {}
+    list.map((x: Item) => x.go());
+  }
+}
+export function f(svc: Svc) {}
+export const g = (h: Helper) => h.go();
+";
+
+    /// DF.22a: a parameter's annotation types it (`ns.Bar | null` -> `Bar`);
+    /// a primitive, destructured or rest parameter, a loop variable, a catch
+    /// parameter and an unannotated, uninitialised `let` are of unknown type;
+    /// a declarator takes its annotation over its value, a `new` value's
+    /// class, an `as` type or a `this.<f>` alias; a nested arrow's parameter
+    /// is the enclosing method's local. A function and an arrow const record
+    /// their own parameters.
+    #[test]
+    fn params_and_locals_record_their_types() {
+        let parse = parse_file(LOCALS_SRC, "src/c.ts", "src::c", repo()).unwrap();
+        assert_eq!(
+            local_types(&parse, "src::c::C::m"),
+            locals(&[
+                ("api", "ApiService"),
+                ("b", "Bar"),
+                ("n", ""),
+                ("d", ""),
+                ("rest", ""),
+                ("t", "Repo"),
+                ("w", "Widget"),
+                ("r", "self.repo"),
+                ("q", "Queue"),
+                ("u", ""),
+                ("it", ""),
+                ("e", ""),
+                ("x", "Item"),
+            ])
+        );
+        assert_eq!(local_types(&parse, "src::c::f"), locals(&[("svc", "Svc")]));
+        assert_eq!(local_types(&parse, "src::c::g"), locals(&[("h", "Helper")]));
+    }
+
+    /// DF.22a: a name two bindings of one body give different types (the
+    /// method's parameter and a nested arrow's) is of unknown type, and so is
+    /// a local holding a function value.
+    #[test]
+    fn a_name_bound_to_two_types_is_unknown() {
+        let src = "export class R { shadow(api: ApiService) { const run = (api: AdminService) => api.purge(); } }\n";
+        let parse = parse_file(src, "src/r.ts", "src::r", repo()).unwrap();
+        assert_eq!(
+            local_types(&parse, "src::r::R::shadow"),
+            locals(&[("api", ""), ("run", "")])
+        );
+    }
+
+    /// DF.22a: `const auth = inject(AuthService)` types `auth` only when the
+    /// callee is the `inject` import (A7.1's gate on `inject(T)` fields); a
+    /// project-local `inject` helper types nothing.
+    #[test]
+    fn inject_local_needs_the_inject_import() {
+        let body = "export const guard = () => { const auth = inject(AuthService); return auth.check(); };\n";
+        let imported = format!("import {{ inject }} from '@angular/core';\n{body}");
+        let parse = parse_file(&imported, "src/guard.ts", "src::guard", repo()).unwrap();
+        assert_eq!(
+            local_types(&parse, "src::guard::guard"),
+            locals(&[("auth", "AuthService")])
+        );
+        let aliased = format!("import {{ inject as di }} from '@angular/core';\n{}", body.replace("inject(", "di("));
+        let parse = parse_file(&aliased, "src/guard.ts", "src::guard", repo()).unwrap();
+        assert_eq!(
+            local_types(&parse, "src::guard::guard"),
+            locals(&[("auth", "AuthService")])
+        );
+        let local_fn = format!("function inject(t: unknown) {{ return t; }}\n{body}");
+        let parse = parse_file(&local_fn, "src/guard.ts", "src::guard", repo()).unwrap();
+        assert_eq!(local_types(&parse, "src::guard::guard"), locals(&[("auth", "")]));
+    }
+
+    /// DF.22a: `[ts-locals]` counts the `x.m()` sites on a recorded local by
+    /// what typed it, and the sites on a local of unknown type.
+    #[test]
+    fn ts_locals_marker_counts() {
+        let src = "\
+import { Repo } from './repo';
+export class C {
+  m(api: ApiService, b?: ns.Bar | null, n: number, { d }: Opts, ...rest: X[]) {
+    const t: Repo = make();
+    const w = new ns.Widget<string>();
+    const r = this.repo;
+    const q = other as Queue;
+    let u;
+    api.x(); t.y(); w.z(); r.q(); u.v();
+  }
+}
+";
+        let (_, _, _, _, stats, ..) = parse_file_stats(src, "src/c.ts", "src::c", repo()).unwrap();
+        assert_eq!(
+            stats,
+            LocalStats {
+                typed: 4,
+                param: 1,
+                annotated: 1,
+                new: 1,
+                inject: 0,
+                alias: 1,
+                unknown: 1,
+            }
+        );
+        let guard = "import { inject } from '@angular/core';\n\
+                     export const guard = () => { const auth = inject(AuthService); return auth.check(); };\n";
+        let (_, _, _, _, stats, ..) = parse_file_stats(guard, "src/g.ts", "src::g", repo()).unwrap();
+        assert_eq!((stats.typed, stats.inject, stats.unknown), (1, 1, 0));
     }
 }
