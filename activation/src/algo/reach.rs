@@ -6,6 +6,17 @@
 //! returned (the tests hold those loops as the oracle): the same nodes, in the
 //! same discovery order, each with the same depth, first-reach category and
 //! parent.
+//!
+//! [`bfs_levels`] is the levelled walk (DA.1): the caller gives every kept edge
+//! and every seed a small level, and pass `L` walks only the edges and starts
+//! only the seeds of level `<= L`, so each reached node reports the first level
+//! whose pass reached it, in O(levels x (V + E)) over one index instead of one
+//! index per level. A membership mask keeps a walk inside a node set, a rank
+//! orders each depth layer so a node's parent is the lowest-ranked node one
+//! hop up rather than the first discovered, and `plus` reports a seed that a
+//! walk of one or more hops reaches (the transitive closure `+`). Its first
+//! consumer is glia-rules' closure builtins (`reaches` / `scc`, DA.11), where a
+//! level is an evidence tier.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -55,7 +66,7 @@ pub fn bfs(adj: &Adjacency, seeds: &[NodeId], walk: Walk, max_depth: usize) -> B
         if depth >= max_depth {
             continue;
         }
-        let mut step = |inc: &Inc, out: &mut Bfs| {
+        each_incidence(adj, node, walk, |inc| {
             out.scanned += 1;
             let next = inc.other as usize;
             if !visited[next] {
@@ -68,32 +79,213 @@ pub fn bfs(adj: &Adjacency, seeds: &[NodeId], walk: Walk, max_depth: usize) -> B
                 });
                 queue.push_back((inc.other, depth + 1));
             }
-        };
-        match walk {
-            Walk::Forward => adj.outgoing(node).iter().for_each(|inc| step(inc, &mut out)),
-            Walk::Backward => adj.incoming(node).iter().for_each(|inc| step(inc, &mut out)),
-            Walk::Both => {
-                // One pass in edge order: the two lists merged by edge
-                // position; a self-loop sits on both and is taken once, out.
-                let (outs, ins) = (adj.outgoing(node), adj.incoming(node));
-                let (mut i, mut j) = (0, 0);
-                while i < outs.len() || j < ins.len() {
-                    let take_out = j == ins.len() || (i < outs.len() && outs[i].edge <= ins[j].edge);
-                    if take_out {
-                        if j < ins.len() && outs[i].edge == ins[j].edge {
-                            j += 1;
-                        }
-                        step(&outs[i], &mut out);
-                        i += 1;
-                    } else {
-                        step(&ins[j], &mut out);
+        });
+    }
+    out
+}
+
+/// Hand `step` every incidence of `node` that `walk` follows, in edge order:
+/// the out-list, the in-list, or ([`Walk::Both`]) the two merged by edge
+/// position with a self-loop (on both lists) taken once, as forward. The one
+/// step order [`bfs`] and [`bfs_levels`] share.
+fn each_incidence(adj: &Adjacency, node: u32, walk: Walk, mut step: impl FnMut(&Inc)) {
+    match walk {
+        Walk::Forward => adj.outgoing(node).iter().for_each(step),
+        Walk::Backward => adj.incoming(node).iter().for_each(step),
+        Walk::Both => {
+            let (outs, ins) = (adj.outgoing(node), adj.incoming(node));
+            let (mut i, mut j) = (0, 0);
+            while i < outs.len() || j < ins.len() {
+                let take_out = j == ins.len() || (i < outs.len() && outs[i].edge <= ins[j].edge);
+                if take_out {
+                    if j < ins.len() && outs[i].edge == ins[j].edge {
                         j += 1;
                     }
+                    step(&outs[i]);
+                    i += 1;
+                } else {
+                    step(&ins[j]);
+                    j += 1;
                 }
             }
         }
     }
+}
+
+/// One node a levelled walk reached, at the first level whose pass reached it,
+/// with that pass's depth, reaching category, parent and edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LevelReached {
+    pub id: NodeId,
+    /// The first pass that reached the node.
+    pub level: u8,
+    /// Hops from the nearest started seed, in that pass.
+    pub depth: usize,
+    pub via: EdgeCategoryId,
+    pub parent: NodeId,
+    /// Position of the reaching edge among the index's kept edges (the global
+    /// edge order filtered by the kept categories): the index `edge_level` is
+    /// read at.
+    pub kept_edge: u32,
+}
+
+/// A levelled walk's result.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LevelBfs {
+    /// Every reported node once, at its smallest level: level ascending, in
+    /// discovery order within a level.
+    pub reached: Vec<LevelReached>,
+    /// The seeds the walk started from (indexed, inside the mask, at a level
+    /// below `levels`), each once at its lowest given level, in the order of
+    /// its first occurrence in the input.
+    pub seeds: Vec<(NodeId, u8)>,
+    /// Incidences examined over every pass: at most four per kept edge per
+    /// level (two, unless `plus` expands a seed a second time).
+    pub scanned: usize,
+}
+
+/// How [`bfs_levels`] walks. Build one with [`LevelWalk::new`] and set the
+/// optional fields on it.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct LevelWalk<'a> {
+    pub walk: Walk,
+    /// Passes `0..levels`.
+    pub levels: u8,
+    /// As in [`bfs`]: a node at depth `>= max_depth` is reached but not
+    /// expanded.
+    pub max_depth: usize,
+    /// Dense-index mask (`len == adj.len()`): a node outside is never entered
+    /// or reported, and a seed outside never starts.
+    pub within: Option<&'a [bool]>,
+    /// Dense-index rank (`len == adj.len()`): each depth layer is expanded in
+    /// ascending (rank, dense index) order, so a node's parent is the
+    /// lowest-ranked node one layer up with a walkable edge to it.
+    pub parent_rank: Option<&'a [u32]>,
+    /// The transitive-closure `+`: seeds start the walk unvisited, so a seed
+    /// is reported when one or more hops reach it (itself, on a cycle).
+    pub plus: bool,
+}
+
+impl<'a> LevelWalk<'a> {
+    /// `levels` passes along `walk`: unbounded depth, no mask, no rank, seeds
+    /// start visited.
+    pub fn new(walk: Walk, levels: u8) -> Self {
+        Self { walk, levels, max_depth: usize::MAX, within: None, parent_rank: None, plus: false }
+    }
+}
+
+/// Levelled multi-source breadth-first walk. Pass `L` (for `L` in
+/// `0..how.levels`) is a plain BFS that starts every seed of level `<= L` at
+/// depth 0 and walks the kept edge at position `k` only when
+/// `edge_level[k] <= L` (`u8::MAX` therefore means never). A node first
+/// reached in pass `L` is reported at level `L` with that pass's depth, via,
+/// parent and kept edge; a node reported in an earlier pass is walked again
+/// but not reported again, so `reached` is level-ascending.
+///
+/// With `plus = false` a seed starts visited and is reported only when an
+/// earlier pass reached it first. With `plus = true` it is reported (once)
+/// when a walk of one or more hops reaches it, and a seed reached that way is
+/// expanded a second time, which finds nothing new. Without `parent_rank`,
+/// `levels = 1` with every edge at level 0 is exactly [`bfs`]'s walk. A node's
+/// parent, depth and kept edge are those of its FIRST pass, so following
+/// reported parents can mix passes: a shortest path at one level `L` is a
+/// one-level walk with `edge_level' = 0` for every level `<= L` and
+/// `u8::MAX` otherwise.
+///
+/// An `edge_level`, mask or rank of the wrong length returns an empty result
+/// and prints `[algo] bfs_levels: <what> has <n> entries for <m>`.
+pub fn bfs_levels(adj: &Adjacency, seeds: &[(NodeId, u8)], edge_level: &[u8], how: &LevelWalk<'_>) -> LevelBfs {
+    let n = adj.len();
+    if edge_level.len() != adj.kept_edges() {
+        return length_guard("edge_level", edge_level.len(), adj.kept_edges(), "kept edges");
+    }
+    if let Some(mask) = how.within
+        && mask.len() != n
+    {
+        return length_guard("within", mask.len(), n, "indexed nodes");
+    }
+    if let Some(rank) = how.parent_rank
+        && rank.len() != n
+    {
+        return length_guard("parent_rank", rank.len(), n, "indexed nodes");
+    }
+    let inside = |ix: u32| how.within.is_none_or(|mask| mask[ix as usize]);
+
+    // Each started seed once, at its lowest level, in first-occurrence order.
+    let mut slot = vec![usize::MAX; n];
+    let mut start: Vec<(u32, u8)> = Vec::new();
+    for &(id, level) in seeds {
+        let Some(ix) = adj.index_of(id) else { continue };
+        if !inside(ix) {
+            continue;
+        }
+        match slot[ix as usize] {
+            usize::MAX => {
+                slot[ix as usize] = start.len();
+                start.push((ix, level));
+            }
+            at => start[at].1 = start[at].1.min(level),
+        }
+    }
+    start.retain(|&(_, level)| level < how.levels);
+
+    let mut out = LevelBfs { seeds: start.iter().map(|&(ix, level)| (adj.id(ix), level)).collect(), ..LevelBfs::default() };
+    let mut reported = vec![false; n];
+    let mut visited = vec![false; n];
+    let mut frontier: Vec<u32> = Vec::new();
+    let mut next: Vec<u32> = Vec::new();
+    for level in 0..how.levels {
+        visited.fill(false);
+        frontier.clear();
+        for &(ix, seed_level) in &start {
+            if seed_level <= level {
+                visited[ix as usize] = !how.plus;
+                frontier.push(ix);
+            }
+        }
+        // Layer by layer: without a rank, the same order a FIFO queue gives.
+        let mut depth = 0usize;
+        while !frontier.is_empty() && depth < how.max_depth {
+            if let Some(rank) = how.parent_rank {
+                frontier.sort_unstable_by_key(|&ix| (rank[ix as usize], ix));
+            }
+            next.clear();
+            for &node in &frontier {
+                each_incidence(adj, node, how.walk, |inc| {
+                    out.scanned += 1;
+                    let to = inc.other as usize;
+                    if edge_level[inc.edge as usize] > level || visited[to] || !inside(inc.other) {
+                        return;
+                    }
+                    visited[to] = true;
+                    if !reported[to] {
+                        reported[to] = true;
+                        out.reached.push(LevelReached {
+                            id: adj.id(inc.other),
+                            level,
+                            depth: depth + 1,
+                            via: inc.category,
+                            parent: adj.id(node),
+                            kept_edge: inc.edge,
+                        });
+                    }
+                    next.push(inc.other);
+                });
+            }
+            std::mem::swap(&mut frontier, &mut next);
+            depth += 1;
+        }
+    }
     out
+}
+
+/// The wrong-length guard: report and return an empty walk.
+fn length_guard(what: &str, got: usize, want: usize, unit: &str) -> LevelBfs {
+    eprintln!("[algo] bfs_levels: {what} has {got} entries for {want} {unit}, returning an empty walk");
+    LevelBfs::default()
 }
 
 /// The seeds plus everything `walk` reaches from them, at any depth.
@@ -478,5 +670,367 @@ mod tests {
             assert_eq!(b.reached.len(), (N - 1) as usize, "{walk:?}");
             assert!(b.scanned <= 2 * adj.kept_edges(), "{walk:?} scanned {}", b.scanned);
         }
+    }
+
+    // ---- bfs_levels (DA.1) ----
+
+    const WALKS: [Walk; 3] = [Walk::Forward, Walk::Backward, Walk::Both];
+
+    /// `n` nodes `0..n` and `m` edges with LCG endpoints over categories
+    /// `1..=cats` (self-loops and parallel edges included).
+    fn lcg_graph(rng: &mut Lcg, n: u64, m: usize, cats: u32) -> ToyGraph {
+        ToyGraph {
+            nodes: (0..n).map(NodeId).collect(),
+            edges: (0..m)
+                .map(|_| toy_edge(rng.below(n), rng.below(n), 1 + rng.below(cats as u64) as u32))
+                .collect(),
+        }
+    }
+
+    fn level_rows(b: &LevelBfs) -> Vec<(NodeId, usize, EdgeCategoryId, NodeId)> {
+        b.reached.iter().map(|r| (r.id, r.depth, r.via, r.parent)).collect()
+    }
+
+    fn at(level: u8, ids: &[NodeId]) -> Vec<(NodeId, u8)> {
+        ids.iter().map(|&s| (s, level)).collect()
+    }
+
+    fn ids_of(b: &LevelBfs) -> Vec<u64> {
+        b.reached.iter().map(|r| r.id.0).collect()
+    }
+
+    #[test]
+    fn levels_one_pass_equals_bfs() {
+        let mut rng = Lcg(0xda_0001);
+        let g = lcg_graph(&mut rng, 300, 900, 3);
+        let adj = Adjacency::build(&g, &CategorySet::all());
+        let zero = vec![0u8; adj.kept_edges()];
+        let s = [NodeId(0), NodeId(7)];
+        for walk in WALKS {
+            let want = bfs(&adj, &s, walk, usize::MAX);
+            let got = bfs_levels(&adj, &at(0, &s), &zero, &LevelWalk::new(walk, 1));
+            assert!(want.reached.len() > 100, "{walk:?}: the graph must reach widely");
+            assert_eq!(level_rows(&got), as_rows(&want), "{walk:?}");
+            assert!(got.reached.iter().all(|r| r.level == 0));
+            assert_eq!(got.seeds, at(0, &s));
+            assert_eq!(got.scanned, want.scanned, "{walk:?}");
+        }
+
+        // The random corpus: dangling endpoints, absent and repeated seeds,
+        // self-loops, parallel edges, category subsets, every depth.
+        let mut rng = Lcg(0xda_0002);
+        let mut compared = 0usize;
+        for _ in 0..300 {
+            let c = case(&mut rng);
+            for cats in category_sets(&mut rng) {
+                let adj = Adjacency::build(&c.graph, &CategorySet::of(&cats));
+                let zero = vec![0u8; adj.kept_edges()];
+                let s = seeds(&mut rng, &c);
+                for &max_depth in &DEPTHS {
+                    for walk in WALKS {
+                        let want = bfs(&adj, &s, walk, max_depth);
+                        let mut how = LevelWalk::new(walk, 1);
+                        how.max_depth = max_depth;
+                        let got = bfs_levels(&adj, &at(0, &s), &zero, &how);
+                        assert_eq!(level_rows(&got), as_rows(&want), "{walk:?} depth {max_depth} seeds {s:?}");
+                        assert_eq!(got.scanned, want.scanned);
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 300 * 2 * DEPTHS.len() * 3);
+    }
+
+    #[test]
+    fn levels_match_filtered_bfs_oracle() {
+        let mut rng = Lcg(0xda_0003);
+        let g = lcg_graph(&mut rng, 300, 900, 3);
+        // Index categories 1 and 2 only, so a kept position is not a graph
+        // edge position.
+        let keep = [EdgeCategoryId(1), EdgeCategoryId(2)];
+        let adj = Adjacency::build(&g, &CategorySet::of(&keep));
+        let kept: Vec<&Edge> = g.edges.iter().filter(|e| keep.contains(&e.category)).collect();
+        assert_eq!(kept.len(), adj.kept_edges());
+        assert!(kept.len() < g.edges.len());
+        let edge_level: Vec<u8> = kept.iter().map(|_| rng.below(3) as u8).collect();
+        // The level-0 seed has a level-0 edge each way, so pass 0 reaches
+        // something whichever way it walks.
+        let lvl0: Vec<&Edge> =
+            kept.iter().zip(&edge_level).filter(|&(e, &l)| l == 0 && e.from != e.to).map(|(e, _)| *e).collect();
+        let x = lvl0
+            .iter()
+            .map(|e| e.from)
+            .find(|&f| ![7, 42, 150].contains(&f.0) && lvl0.iter().any(|e| e.to == f))
+            .expect("a node with a level-0 edge each way");
+        // 7 is given twice; its lowest level (1) counts.
+        let seeds = [(x, 0), (NodeId(7), 2), (NodeId(42), 1), (NodeId(7), 1), (NodeId(150), 2)];
+        for walk in WALKS {
+            let got = bfs_levels(&adj, &seeds, &edge_level, &LevelWalk::new(walk, 3));
+            assert_eq!(got.seeds, vec![(x, 0), (NodeId(7), 1), (NodeId(42), 1), (NodeId(150), 2)]);
+            assert!(got.reached.windows(2).all(|w| w[0].level <= w[1].level), "{walk:?}: level ascending");
+            let once: HashSet<NodeId> = got.reached.iter().map(|r| r.id).collect();
+            assert_eq!(once.len(), got.reached.len(), "{walk:?}: each node once");
+            for r in &got.reached {
+                // The kept edge joins parent and node with `via`, walkable at the node's level.
+                let e = kept[r.kept_edge as usize];
+                let (tail, head) = (e.from, e.to);
+                let joined = match walk {
+                    Walk::Forward => (tail, head) == (r.parent, r.id),
+                    Walk::Backward => (head, tail) == (r.parent, r.id),
+                    Walk::Both => (tail, head) == (r.parent, r.id) || (head, tail) == (r.parent, r.id),
+                };
+                assert!(joined && e.category == r.via, "{walk:?}: {r:?} via {e:?}");
+                assert!(edge_level[r.kept_edge as usize] <= r.level);
+            }
+            for l in 0..3u8 {
+                let sub = ToyGraph {
+                    nodes: g.nodes.clone(),
+                    edges: kept.iter().zip(&edge_level).filter(|&(_, &x)| x <= l).map(|(e, _)| (*e).clone()).collect(),
+                };
+                let sub_adj = Adjacency::build(&sub, &CategorySet::all());
+                let s_l: Vec<NodeId> = seeds.iter().filter(|&&(_, x)| x <= l).map(|&(s, _)| s).collect();
+                // The closure at level l: seeds of level <= l plus what edges of level <= l reach.
+                let got_set: HashSet<NodeId> =
+                    got.reached.iter().filter(|r| r.level <= l).map(|r| r.id).chain(s_l.iter().copied()).collect();
+                assert_eq!(got_set, reachable(&sub_adj, &s_l, walk), "{walk:?} level {l}");
+                // The rows new at l are the filtered graph's BFS minus what an
+                // earlier level reported: same order, depth, via and parent.
+                let earlier: HashSet<NodeId> = got.reached.iter().filter(|r| r.level < l).map(|r| r.id).collect();
+                let want: Vec<_> = as_rows(&bfs(&sub_adj, &s_l, walk, usize::MAX))
+                    .into_iter()
+                    .filter(|row| !earlier.contains(&row.0))
+                    .collect();
+                let new_at_l: Vec<_> = got
+                    .reached
+                    .iter()
+                    .filter(|r| r.level == l)
+                    .map(|r| (r.id, r.depth, r.via, r.parent))
+                    .collect();
+                assert!(!new_at_l.is_empty(), "{walk:?}: level {l} must add nodes");
+                assert_eq!(new_at_l, want, "{walk:?} level {l}");
+            }
+        }
+    }
+
+    #[test]
+    fn seed_levels_gate_their_pass() {
+        // 1 -> 2, 3 -> 4, 5 -> 6, 2 -> 8; every edge at level 0.
+        let g = ToyGraph {
+            nodes: (1..=8).map(NodeId).collect(),
+            edges: vec![toy_edge(1, 2, 1), toy_edge(3, 4, 1), toy_edge(5, 6, 1), toy_edge(2, 8, 1)],
+        };
+        let adj = Adjacency::build(&g, &CategorySet::all());
+        let zero = vec![0u8; adj.kept_edges()];
+        // 3 is given at 2 (and its repeat at 2 changes nothing), 5 at 3 (never
+        // starts in 3 passes), 99 is absent, 2 is a seed at 2 that pass 0 reaches.
+        let seeds = [(NodeId(1), 0), (NodeId(3), 2), (NodeId(5), 3), (NodeId(99), 0), (NodeId(2), 2), (NodeId(3), 2)];
+        let got = bfs_levels(&adj, &seeds, &zero, &LevelWalk::new(Walk::Forward, 3));
+        assert_eq!(got.seeds, vec![(NodeId(1), 0), (NodeId(3), 2), (NodeId(2), 2)]);
+        let rows: Vec<(u64, u8, usize, u64)> = got.reached.iter().map(|r| (r.id.0, r.level, r.depth, r.parent.0)).collect();
+        assert_eq!(rows, vec![(2, 0, 1, 1), (8, 0, 2, 2), (4, 2, 1, 3)]);
+        // Two passes never start 3: 4 is never reached.
+        let two = bfs_levels(&adj, &seeds, &zero, &LevelWalk::new(Walk::Forward, 2));
+        assert_eq!(ids_of(&two), vec![2, 8]);
+        assert_eq!(two.seeds, vec![(NodeId(1), 0)]);
+    }
+
+    #[test]
+    fn within_mask_confines_walk() {
+        let g = ToyGraph {
+            nodes: (0..4).map(NodeId).collect(),
+            edges: vec![toy_edge(0, 1, 1), toy_edge(1, 2, 1), toy_edge(2, 3, 1)],
+        };
+        let adj = Adjacency::build(&g, &CategorySet::all());
+        let zero = vec![0u8; adj.kept_edges()];
+        let mask: Vec<bool> = (0..adj.len() as u32).map(|ix| adj.id(ix) != NodeId(2)).collect();
+        let mut how = LevelWalk::new(Walk::Forward, 1);
+        how.within = Some(&mask);
+        assert_eq!(ids_of(&bfs_levels(&adj, &at(0, &[NodeId(0)]), &zero, &how)), vec![1]);
+        // From 3 both ways the walk cannot step onto 2.
+        how.walk = Walk::Both;
+        assert!(bfs_levels(&adj, &at(0, &[NodeId(3)]), &zero, &how).reached.is_empty());
+        // A seed outside the mask never starts.
+        let outside = bfs_levels(&adj, &at(0, &[NodeId(2)]), &zero, &how);
+        assert_eq!(outside, LevelBfs::default());
+        // Without the mask the chain is walked whole.
+        how.within = None;
+        how.walk = Walk::Forward;
+        assert_eq!(ids_of(&bfs_levels(&adj, &at(0, &[NodeId(0)]), &zero, &how)), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn parent_rank_picks_lowest_ranked_parent() {
+        // s=1 -> a=2, s -> b=3, a -> t=4, b -> t; a's edge to t first.
+        let g = ToyGraph {
+            nodes: (1..=4).map(NodeId).collect(),
+            edges: vec![toy_edge(1, 2, 1), toy_edge(1, 3, 2), toy_edge(2, 4, 3), toy_edge(3, 4, 4)],
+        };
+        let adj = Adjacency::build(&g, &CategorySet::all());
+        let zero = vec![0u8; adj.kept_edges()];
+        let ix = |id: u64| adj.index_of(NodeId(id)).unwrap() as usize;
+        let ranked = |a: u32, b: u32| {
+            let mut rank = vec![0u32; adj.len()];
+            (rank[ix(2)], rank[ix(3)]) = (a, b);
+            rank
+        };
+        let t_of = |rank: Option<&[u32]>| {
+            let mut how = LevelWalk::new(Walk::Forward, 1);
+            how.parent_rank = rank;
+            let got = bfs_levels(&adj, &at(0, &[NodeId(1)]), &zero, &how);
+            assert_eq!(ids_of(&got), vec![2, 3, 4], "depth-1 discovery stays in s's edge order");
+            let t = got.reached[2];
+            (t.parent.0, t.via.0, t.kept_edge)
+        };
+        assert_eq!(t_of(None), (2, 3, 2), "unranked: the first discovered parent");
+        assert_eq!(t_of(Some(&ranked(5, 1))), (3, 4, 3), "rank(b) < rank(a)");
+        assert_eq!(t_of(Some(&ranked(1, 5))), (2, 3, 2), "rank(a) < rank(b)");
+        assert_eq!(t_of(Some(&ranked(7, 7))), (2, 3, 2), "a rank tie falls to the dense index");
+    }
+
+    #[test]
+    fn unwalkable_level() {
+        let g = ToyGraph {
+            nodes: (1..=3).map(NodeId).collect(),
+            edges: vec![toy_edge(1, 2, 1), toy_edge(2, 3, 1)],
+        };
+        let adj = Adjacency::build(&g, &CategorySet::all());
+        let levels = [0, u8::MAX];
+        for passes in [1, 3, u8::MAX] {
+            for walk in WALKS {
+                let got = bfs_levels(&adj, &at(0, &[NodeId(1)]), &levels, &LevelWalk::new(walk, passes));
+                let want: Vec<u64> = if walk == Walk::Backward { vec![] } else { vec![2] };
+                assert_eq!(ids_of(&got), want, "{walk:?} over {passes} passes");
+            }
+        }
+        // u8::MAX passes run passes 0..=254; the last still skips a u8::MAX edge.
+        let got = bfs_levels(&adj, &at(0, &[NodeId(2)]), &levels, &LevelWalk::new(Walk::Forward, u8::MAX));
+        assert!(got.reached.is_empty());
+        assert_eq!(got.scanned, u8::MAX as usize, "2's one out-edge examined once per pass");
+    }
+
+    #[test]
+    fn length_mismatch_is_empty_not_a_panic() {
+        let g = ToyGraph {
+            nodes: (1..=3).map(NodeId).collect(),
+            edges: vec![toy_edge(1, 2, 1), toy_edge(2, 3, 1)],
+        };
+        let adj = Adjacency::build(&g, &CategorySet::all());
+        let seeds = at(0, &[NodeId(1)]);
+        let short = vec![0u8; adj.kept_edges() - 1];
+        assert_eq!(bfs_levels(&adj, &seeds, &short, &LevelWalk::new(Walk::Forward, 3)), LevelBfs::default());
+        let zero = vec![0u8; adj.kept_edges()];
+        let long = vec![0u8; adj.kept_edges() + 1];
+        assert_eq!(bfs_levels(&adj, &seeds, &long, &LevelWalk::new(Walk::Forward, 3)), LevelBfs::default());
+        let mask = vec![true; adj.len() - 1];
+        let mut how = LevelWalk::new(Walk::Forward, 3);
+        how.within = Some(&mask);
+        assert_eq!(bfs_levels(&adj, &seeds, &zero, &how), LevelBfs::default());
+        let rank = vec![0u32; adj.len() + 1];
+        let mut how = LevelWalk::new(Walk::Forward, 3);
+        how.parent_rank = Some(&rank);
+        assert_eq!(bfs_levels(&adj, &seeds, &zero, &how), LevelBfs::default());
+        // Zero passes start nothing.
+        assert_eq!(bfs_levels(&adj, &seeds, &zero, &LevelWalk::new(Walk::Forward, 0)), LevelBfs::default());
+        // The right lengths walk.
+        assert_eq!(ids_of(&bfs_levels(&adj, &seeds, &zero, &LevelWalk::new(Walk::Forward, 3))), vec![2, 3]);
+    }
+
+    #[test]
+    fn levelled_scanned_is_linear() {
+        let mut rng = Lcg(0xda_0008);
+        let g = lcg_graph(&mut rng, 300, 900, 3);
+        let adj = Adjacency::build(&g, &CategorySet::all());
+        let edge_level: Vec<u8> = (0..adj.kept_edges()).map(|_| rng.below(3) as u8).collect();
+        let seeds: Vec<(NodeId, u8)> = (0..12).map(|i| (NodeId(i * 23), (i % 3) as u8)).collect();
+        let rank: Vec<u32> = (0..adj.len()).map(|_| rng.below(50) as u32).collect();
+        for walk in WALKS {
+            for plus in [false, true] {
+                for levels in [1u8, 3] {
+                    for ranked in [false, true] {
+                        let mut how = LevelWalk::new(walk, levels);
+                        how.plus = plus;
+                        how.parent_rank = ranked.then_some(rank.as_slice());
+                        let got = bfs_levels(&adj, &seeds, &edge_level, &how);
+                        let bound = 4 * adj.kept_edges() * levels as usize;
+                        assert!(got.scanned <= bound, "{walk:?} plus {plus} levels {levels}: {} > {bound}", got.scanned);
+                        assert!(!got.reached.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn plus_mode_reports_seeds_on_cycles() {
+        // 0 -> 1 -> 2 -> 0, 2 -> 3.
+        let g = ToyGraph {
+            nodes: (0..4).map(NodeId).collect(),
+            edges: vec![toy_edge(0, 1, 1), toy_edge(1, 2, 1), toy_edge(2, 0, 1), toy_edge(2, 3, 1)],
+        };
+        let adj = Adjacency::build(&g, &CategorySet::all());
+        let zero = vec![0u8; adj.kept_edges()];
+        let mut how = LevelWalk::new(Walk::Forward, 1);
+        how.plus = true;
+        let got = bfs_levels(&adj, &at(0, &[NodeId(0)]), &zero, &how);
+        let rows: Vec<(u64, usize, u64)> = got.reached.iter().map(|r| (r.id.0, r.depth, r.parent.0)).collect();
+        assert_eq!(rows, vec![(1, 1, 0), (2, 2, 1), (0, 3, 2), (3, 3, 2)]);
+        // Without plus the seed is never reported.
+        assert_eq!(ids_of(&bfs_levels(&adj, &at(0, &[NodeId(0)]), &zero, &LevelWalk::new(Walk::Forward, 1))), vec![1, 2, 3]);
+
+        // Chain 0 -> 1, seeds [0, 1]: plus reports 1 (reached from 0), never 0.
+        let chain = ToyGraph { nodes: (0..2).map(NodeId).collect(), edges: vec![toy_edge(0, 1, 1)] };
+        let cadj = Adjacency::build(&chain, &CategorySet::all());
+        let both = at(0, &[NodeId(0), NodeId(1)]);
+        let plus = bfs_levels(&cadj, &both, &[0], &how);
+        assert_eq!(plus.reached.iter().map(|r| (r.id.0, r.depth, r.parent.0)).collect::<Vec<_>>(), vec![(1, 1, 0)]);
+        assert!(bfs_levels(&cadj, &both, &[0], &LevelWalk::new(Walk::Forward, 1)).reached.is_empty());
+        // A self-loop puts its node on a cycle of one hop.
+        let self_loop = ToyGraph { nodes: vec![NodeId(5)], edges: vec![toy_edge(5, 5, 1)] };
+        let sadj = Adjacency::build(&self_loop, &CategorySet::all());
+        assert_eq!(ids_of(&bfs_levels(&sadj, &at(0, &[NodeId(5)]), &[0], &how)), vec![5]);
+    }
+
+    /// Plus mode is the one-or-more-hop closure (the closure of the seeds'
+    /// one-hop neighbours), and its non-seed rows are the plain walk's.
+    #[test]
+    fn plus_mode_matches_one_or_more_hop_oracle() {
+        let mut rng = Lcg(0xda_0009);
+        let mut seeds_reported = 0usize;
+        for _ in 0..300 {
+            let c = case(&mut rng);
+            for cats in category_sets(&mut rng) {
+                let allow: HashSet<EdgeCategoryId> = cats.iter().copied().collect();
+                let adj = Adjacency::build(&c.graph, &CategorySet::of(&cats));
+                let zero = vec![0u8; adj.kept_edges()];
+                let s = seeds(&mut rng, &c);
+                let indexed: Vec<NodeId> = s.iter().copied().filter(|&x| adj.index_of(x).is_some()).collect();
+                for walk in WALKS {
+                    let mut how = LevelWalk::new(walk, 1);
+                    how.plus = true;
+                    let got = bfs_levels(&adj, &at(0, &s), &zero, &how);
+                    let one_hop: Vec<NodeId> = c
+                        .graph
+                        .edges
+                        .iter()
+                        .filter(|e| allow.contains(&e.category))
+                        .flat_map(|e| {
+                            let fwd = walk != Walk::Backward && indexed.contains(&e.from);
+                            let bwd = walk != Walk::Forward && indexed.contains(&e.to);
+                            [fwd.then_some(e.to), bwd.then_some(e.from)]
+                        })
+                        .flatten()
+                        .collect();
+                    let got_set: HashSet<NodeId> = got.reached.iter().map(|r| r.id).collect();
+                    assert_eq!(got_set.len(), got.reached.len());
+                    assert_eq!(got_set, reachable(&adj, &one_hop, walk), "{walk:?} seeds {s:?}");
+                    let plain = bfs_levels(&adj, &at(0, &s), &zero, &LevelWalk::new(walk, 1));
+                    let non_seed: Vec<_> = level_rows(&got).into_iter().filter(|row| !s.contains(&row.0)).collect();
+                    assert_eq!(non_seed, level_rows(&plain), "{walk:?} seeds {s:?}");
+                    seeds_reported += got.reached.iter().filter(|r| s.contains(&r.id)).count();
+                }
+            }
+        }
+        assert!(seeds_reported > 100, "the corpus must reach seeds, got {seeds_reported}");
     }
 }
