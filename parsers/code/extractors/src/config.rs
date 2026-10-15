@@ -43,7 +43,11 @@
 //!       `.contains` / `.apply`, `scala.util.Properties.envOrElse("X", ..)` /
 //!       `.envOrNone` / `.envOrSome` (DG.6; `sys.props` is JVM system
 //!       properties, not the environment)
-//!     - PHP:    `getenv('X')`, `$_ENV['X']`
+//!     - PHP:    `getenv('X')`, `$_ENV['X']`; Laravel's `env('X')` helper
+//!       in a `.php` file, at a word edge (DH.5, [`scan_laravel_env`])
+//!     - Dart:   `Platform.environment['X']` (DH.5)
+//!     - Elixir: `System.get_env("X")`, `System.fetch_env!("X")`,
+//!       `System.fetch_env("X")` (DH.5)
 //!     - C#:     `Environment.GetEnvironmentVariable("X")` (CL.7a; the
 //!       `(..., EnvironmentVariableTarget.X)` form reads its first literal)
 //!     - .NET settings (CL.7b, `config:setting:`, `.cs` files only):
@@ -216,8 +220,13 @@ pub fn extract_config_reads(
     module_id: NodeId,
     repo: RepoId,
 ) -> ConfigNodes {
-    let env = |hits: Vec<(String, usize)>| hits.into_iter().map(|(n, o)| (n, o, Flavor::Env));
-    let mut reads: Vec<(String, usize, Flavor)> = Vec::new();
+    // A read is `(name, offset, flavor, idiom)`; `idiom` is a DH.5 idiom's
+    // index into ENV_READ_IDIOMS, for the `[config] env-read` marker only.
+    let env = |hits: Vec<(String, usize)>| hits.into_iter().map(|(n, o)| (n, o, Flavor::Env, None));
+    let idiom = |at: usize, hits: Vec<(String, usize)>| {
+        hits.into_iter().map(move |(n, o)| (n, o, Flavor::Env, Some(at)))
+    };
+    let mut reads: Vec<(String, usize, Flavor, Option<usize>)> = Vec::new();
     reads.extend(env(scan_python_env(source)));
     reads.extend(env(scan_js_process_env(source)));
     reads.extend(env(scan_rust_env(source)));
@@ -226,23 +235,31 @@ pub fn extract_config_reads(
     reads.extend(env(scan_java_system_getenv(source)));
     reads.extend(env(scan_scala_env(source)));
     reads.extend(env(scan_php_env(source)));
+    // DH.5: dart:io `Platform.environment['X']`, Elixir `System.get_env` /
+    // `fetch_env!` / `fetch_env`, Laravel's `env('X')` (`.php` files only).
+    reads.extend(idiom(IDIOM_DART, scan_dart_env(source)));
+    reads.extend(idiom(IDIOM_ELIXIR, scan_elixir_env(source)));
+    reads.extend(idiom(IDIOM_LARAVEL, scan_laravel_env(source, path)));
     reads.extend(env(scan_dotnet_env(source)));
     // CL.7b: .NET IConfiguration reads, on the `config:setting:` track — C#
     // files only, so a TypeScript `interface IConfiguration` beside a
     // `this.config["apiUrl"]` mints nothing.
     if is_csharp_path(path) {
         reads.extend(
-            scan_dotnet_config_reads(source).into_iter().map(|(n, o)| (n, o, Flavor::Setting)),
+            scan_dotnet_config_reads(source)
+                .into_iter()
+                .map(|(n, o)| (n, o, Flavor::Setting, None)),
         );
     }
     // Each offset is the read needle's start (capture_first_string_arg / the
     // process.env scan), so the guard tests the read expression itself.
     let mut guard = LazyGuard::new(path, source);
-    reads.retain(|(_, offset, _)| guard.admits(*offset));
+    reads.retain(|(_, offset, _, _)| guard.admits(*offset));
     guard.report("config");
     let mut sites = Vec::new();
     let mut defs = Vec::with_capacity(reads.len());
-    for (name, offset, flavor) in reads {
+    let mut idiom_reads = [0usize; ENV_READ_IDIOMS.len()];
+    for (name, offset, flavor, idiom) in reads {
         let def = match flavor {
             Flavor::Setting => ConfigDef::setting(name, None, ""),
             _ => ConfigDef::bare(name, ""),
@@ -253,8 +270,15 @@ pub fn extract_config_reads(
             let qname = def.flavor.qname(&def);
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CONFIG_KEY, &qname);
             sites.push((id, offset));
+            if let Some(n) = idiom.and_then(|i| idiom_reads.get_mut(i)) {
+                *n += 1;
+            }
         }
         defs.push(def);
+    }
+    // DH.5 fired_on: one line per new idiom that read a key in this file.
+    for line in env_read_markers(&idiom_reads, path) {
+        eprintln!("{line}");
     }
     let mut out = build_nodes(defs, Side::Read, module_id, repo);
     out.sites = sites;
@@ -1207,6 +1231,70 @@ fn scan_php_env(source: &str) -> Vec<(String, usize)> {
     out
 }
 
+/// DH.5: the env-read idioms the `[config] env-read` marker counts, by the
+/// index [`extract_config_reads`] tags their reads with. The HEAD idioms
+/// above print nothing, so their output is unchanged.
+const ENV_READ_IDIOMS: [&str; 3] = ["dart_platform", "elixir_system", "laravel_env"];
+const IDIOM_DART: usize = 0;
+const IDIOM_ELIXIR: usize = 1;
+const IDIOM_LARAVEL: usize = 2;
+
+/// DH.5: `dart:io`'s `Platform.environment['X']`, the server-side Dart env
+/// map. The key is the index literal; a non-literal index reads nothing.
+fn scan_dart_env(source: &str) -> Vec<(String, usize)> {
+    capture_first_string_arg(source, "Platform.environment[")
+}
+
+/// DH.5: Elixir's `System.get_env("X")` (and its `("X", default)` form),
+/// `System.fetch_env!("X")` and `System.fetch_env("X")`, the reads Phoenix's
+/// generated `config/runtime.exs` makes for every secret. A no-argument
+/// `System.get_env()` (the whole environment) names no key and reads nothing.
+/// `System.fetch_env(` is no substring of `System.fetch_env!(`, so each call
+/// is one site.
+fn scan_elixir_env(source: &str) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    for needle in ["System.get_env(", "System.fetch_env!(", "System.fetch_env("] {
+        out.extend(capture_first_string_arg(source, needle));
+    }
+    out
+}
+
+/// DH.5: Laravel's global `env('X', default)` helper, the way `config/*.php`
+/// read the `.env`. Scanned in a `.php` path only, so a JS / TS `env('X')`
+/// helper mints nothing. `env(` must sit at a word edge: the byte before it
+/// is no identifier byte (ASCII alphanumeric, `_`, or the `0x80..` bytes PHP
+/// allows in names), `>`, `:`, `$` or `@`. That keeps `getenv(` (HEAD's one
+/// read), `$this->env(`, `App::env(`, a closure `$env(` and Blade's
+/// `@env('local')` directive (an environment NAME test, not a key read) out;
+/// a namespaced `\env(` or a concatenated `.env(` is the helper and reads.
+fn scan_laravel_env(source: &str, path: &str) -> Vec<(String, usize)> {
+    let is_php = path.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("php"));
+    if !is_php {
+        return Vec::new();
+    }
+    let bytes = source.as_bytes();
+    capture_first_string_arg(source, "env(")
+        .into_iter()
+        .filter(|(_, at)| {
+            at.checked_sub(1).and_then(|i| bytes.get(i)).is_none_or(|&b| {
+                let ident = b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+                !(ident || matches!(b, b'>' | b':' | b'$' | b'@'))
+            })
+        })
+        .collect()
+}
+
+/// DH.5: the `[config] env-read` marker lines for one file, one per idiom of
+/// [`ENV_READ_IDIOMS`] that read at least one key (`counts` by idiom index).
+fn env_read_markers(counts: &[usize; ENV_READ_IDIOMS.len()], path: &str) -> Vec<String> {
+    ENV_READ_IDIOMS
+        .iter()
+        .zip(counts)
+        .filter(|(_, n)| **n > 0)
+        .map(|(idiom, n)| format!("[config] env-read idiom={idiom} n={n} path={path}"))
+        .collect()
+}
+
 // ----------------------------------------------------------------------------
 // Source-side scanners — Dockerfile, .env, YAML.
 // ----------------------------------------------------------------------------
@@ -1824,6 +1912,154 @@ $key = $_ENV['API_KEY'];
         let keys = config_keys(&out);
         assert!(keys.contains(&"config:env:DATABASE_URL".to_string()));
         assert!(keys.contains(&"config:env:API_KEY".to_string()));
+    }
+
+    /// DH.5: the offsets of every site whose key is `config:env:<key>`.
+    fn site_offsets(out: &ConfigNodes, repo: RepoId, key: &str) -> Vec<usize> {
+        out.sites.iter().filter(|(k, _)| *k == env_id(repo, key)).map(|(_, o)| *o).collect()
+    }
+
+    fn sorted_config_keys(out: &ConfigNodes) -> Vec<String> {
+        let mut k = config_keys(out);
+        k.sort();
+        k
+    }
+
+    #[test]
+    fn dart_platform_environment_read() {
+        let repo = RepoId(1);
+        let src = "import 'dart:io';\n\n\
+                   String databaseUrl() => Platform.environment['DATABASE_URL'] ?? '';\n\
+                   final port = Platform.environment[\"PORT\"];\n\
+                   final any = Platform.environment[name];\n";
+        let out = extract_config_reads(src, "client/bin/db.dart", module_id(repo), repo);
+        assert_eq!(sorted_config_keys(&out), ["config:env:DATABASE_URL", "config:env:PORT"]);
+        let at = src.find("Platform.environment['DATABASE_URL']").unwrap();
+        assert_eq!(site_offsets(&out, repo, "DATABASE_URL"), vec![at]);
+        assert_eq!(out.sites.len(), 2, "{:?}", out.sites);
+        let reads = out
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::READS_CONFIG && e.from == module_id(repo))
+            .count();
+        assert_eq!(reads, 2);
+    }
+
+    #[test]
+    fn elixir_system_env_reads() {
+        let repo = RepoId(1);
+        let src = "import Config\n\
+                   config :shop, Shop.Repo, url: System.get_env(\"DATABASE_URL\")\n\
+                   secret = System.fetch_env!(\"SECRET_KEY_BASE\")\n\
+                   {:ok, host} = System.fetch_env(\"PHX_HOST\")\n\
+                   port = System.get_env(\"PORT\", \"4000\")\n\
+                   all = System.get_env()\n";
+        let out = extract_config_reads(src, "config/runtime.exs", module_id(repo), repo);
+        assert_eq!(
+            sorted_config_keys(&out),
+            [
+                "config:env:DATABASE_URL",
+                "config:env:PHX_HOST",
+                "config:env:PORT",
+                "config:env:SECRET_KEY_BASE"
+            ]
+        );
+        for (key, needle) in [
+            ("DATABASE_URL", "System.get_env(\"DATABASE_URL"),
+            ("SECRET_KEY_BASE", "System.fetch_env!("),
+            ("PHX_HOST", "System.fetch_env(\"PHX"),
+            ("PORT", "System.get_env(\"PORT"),
+        ] {
+            assert_eq!(site_offsets(&out, repo, key), vec![src.find(needle).unwrap()], "{key}");
+        }
+        // `System.get_env()` names no key: four reads, four sites.
+        assert_eq!(out.sites.len(), 4, "{:?}", out.sites);
+    }
+
+    #[test]
+    fn laravel_env_helper_reads() {
+        let repo = RepoId(1);
+        let src = "<?php\n\nreturn [\n    'url' => env('DB_URL'),\n    \
+                   'host' => env('DB_HOST', '127.0.0.1'),\n    \
+                   'name' => \\env(\"DB_DATABASE\"),\n];\n";
+        let out = extract_config_reads(src, "config/database.php", module_id(repo), repo);
+        assert_eq!(
+            sorted_config_keys(&out),
+            ["config:env:DB_DATABASE", "config:env:DB_HOST", "config:env:DB_URL"]
+        );
+        assert_eq!(site_offsets(&out, repo, "DB_URL"), vec![src.find("env('DB_URL')").unwrap()]);
+        assert_eq!(site_offsets(&out, repo, "DB_HOST"), vec![src.find("env('DB_HOST'").unwrap()]);
+        assert_eq!(out.sites.len(), 3, "{:?}", out.sites);
+        // The default is a value, never a key.
+        assert!(!config_keys(&out).iter().any(|k| k.contains("127")));
+    }
+
+    /// DH.5: `env(` is a substring of `getenv(`; the word edge keeps a PHP
+    /// `getenv('Y')` at HEAD's reading. HEAD's python `getenv(` and PHP
+    /// `getenv(` needles both match it, at the same offset: one read
+    /// location, one edge, and no site at the inner `env(`.
+    #[test]
+    fn php_getenv_is_read_once() {
+        let repo = RepoId(1);
+        let src = "<?php\n$y = getenv('Y');\n";
+        let out = extract_config_reads(src, "config/app.php", module_id(repo), repo);
+        assert_eq!(config_keys(&out), ["config:env:Y"]);
+        let at = src.find("getenv(").unwrap();
+        let mut offs = site_offsets(&out, repo, "Y");
+        offs.dedup();
+        assert_eq!(offs, vec![at], "{:?}", out.sites);
+        assert_eq!(out.sites, extract_config_reads(src, "", module_id(repo), repo).sites);
+        assert_eq!(out.edges.len(), 1);
+    }
+
+    #[test]
+    fn laravel_env_needs_a_word_edge() {
+        let repo = RepoId(1);
+        for src in [
+            "<?php\n$a = $this->env('Z');\n",
+            "<?php\n$a = App::env('Z');\n",
+            "<?php\n$a = $env('Z');\n",
+            "<?php\n$a = putenv('Z=1');\n",
+            "<?php\n$a = my_env('Z');\n",
+            "@env('local')\n<p>local</p>\n@endenv\n",
+            "<?php\nfunction env($key, $default = null) {}\n",
+        ] {
+            let path = "resources/views/x.blade.php";
+            let out = extract_config_reads(src, path, module_id(repo), repo);
+            assert!(out.nodes.is_empty() && out.sites.is_empty(), "{src}: {:?}", config_keys(&out));
+        }
+    }
+
+    #[test]
+    fn laravel_env_is_php_only() {
+        let repo = RepoId(1);
+        let src = "export const url = env('DB_URL');\n";
+        for path in ["config/database.ts", "config/database.js", "config/database.py", ""] {
+            let out = extract_config_reads(src, path, module_id(repo), repo);
+            let keys = config_keys(&out);
+            assert!(out.nodes.is_empty() && out.sites.is_empty(), "{path}: {keys:?}");
+        }
+        let php = extract_config_reads(src, "config/Database.PHP", module_id(repo), repo);
+        assert_eq!(config_keys(&php), ["config:env:DB_URL"]);
+    }
+
+    #[test]
+    fn env_read_marker_lines() {
+        let repo = RepoId(1);
+        let mut counts = [0usize; ENV_READ_IDIOMS.len()];
+        assert!(env_read_markers(&counts, "a.php").is_empty());
+        counts[IDIOM_LARAVEL] = 2;
+        counts[IDIOM_DART] = 1;
+        assert_eq!(
+            env_read_markers(&counts, "client/x"),
+            [
+                "[config] env-read idiom=dart_platform n=1 path=client/x",
+                "[config] env-read idiom=laravel_env n=2 path=client/x"
+            ]
+        );
+        // Only the reads that name a key count: an invalid name mints nothing.
+        let src = "<?php\n$a = env('9BAD');\n";
+        assert!(extract_config_reads(src, "c.php", module_id(repo), repo).sites.is_empty());
     }
 
     #[test]
