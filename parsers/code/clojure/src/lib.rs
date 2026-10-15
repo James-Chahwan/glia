@@ -4,6 +4,7 @@ use glia_code_domain::endpoint::{
     ClientEndpoint, HitExtras, canonical_http_path, client_url_split, push_client_endpoint_with,
     route_qname,
 };
+use glia_code_domain::line_of;
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use tree_sitter::{Node as TsNode, Parser};
 
@@ -41,7 +42,13 @@ pub fn parse_file(
         .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
 
     visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
-    scan_clojure_routes(source, repo, &mut acc);
+    scan_clojure_routes(source, repo, module_id, &mut acc);
+    if acc.clj_routes > 0 {
+        eprintln!(
+            "[clj-routes] routes={} handlers={} path={file_rel_path}",
+            acc.clj_routes, acc.clj_handlers
+        );
+    }
     let endpoints = acc.clj_http_hits + acc.hato_hits;
     if endpoints > 0 {
         eprintln!(
@@ -90,6 +97,11 @@ struct Acc {
     /// `[doc]` marker.
     docstrings_attached: usize,
     ns_docstrings: usize,
+    /// DH.19: ROUTE nodes this file emitted (after the per-file verb + path
+    /// dedup) and the HANDLED_BY refs naming their handlers, for the
+    /// `[clj-routes]` marker.
+    clj_routes: usize,
+    clj_handlers: usize,
 }
 
 fn visit_top(
@@ -860,21 +872,32 @@ fn format_template(fmt: &str) -> (String, bool) {
 // syntactic patterns directly. Clojure's macro system means any
 // `(SYMBOL "literal" ...)` looks the same at parse time; gating on
 // upper-case HTTP verbs keeps precision high.
+//
+// DH.19: each route also names its handler, as a HANDLED_BY `UnresolvedRef`
+// from the ROUTE (the graph crate resolves it against `module_id`'s symbols):
+// a Compojure route's body form after its argument binding — `(get-user id)`
+// or a bare `list-users` — and a reitit method's value — `:get list-users` or
+// `:get {:handler get-user}`. See [`compojure_handler`] / [`reitit_handler`].
 
-fn scan_clojure_routes(source: &str, repo: RepoId, acc: &mut Acc) {
+fn scan_clojure_routes(source: &str, repo: RepoId, module_id: NodeId, acc: &mut Acc) {
     let mut seen = std::collections::HashSet::new();
+    let bytes = source.as_bytes();
 
     // Compojure: `(GET "..."`, `(POST "..."`, etc.
     for method in ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "ANY"] {
         let needle = format!("({method} \"");
         let mut idx = 0;
         while let Some(pos) = source[idx..].find(&needle) {
-            let start = idx + pos + needle.len();
+            let form = idx + pos;
+            let start = form + needle.len();
             let after = &source[start..];
             if let Some(end) = after.find('"') {
                 let path = &after[..end];
                 if !path.is_empty() {
-                    emit_clojure_route(method, path, repo, acc, &mut seen);
+                    let route = emit_clojure_route(method, path, repo, acc, &mut seen);
+                    if let Some(q) = compojure_handler(bytes, start + end + 1) {
+                        push_handler_ref(acc, route, module_id, q, line_of(source, form));
+                    }
                 }
             }
             idx = start;
@@ -888,11 +911,10 @@ fn scan_clojure_routes(source: &str, repo: RepoId, acc: &mut Acc) {
     // `[r (client/get (str base "/users") {:headers ...})]` is not a route.
     // Every probe is a byte read, never a str slice at a computed offset, so
     // multibyte text anywhere in the file cannot panic the scan.
-    let bytes = source.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'"'
-            && prev_non_ws(bytes, i) == Some(b'[')
+            && let Some(bracket) = prev_non_ws_at(bytes, i).filter(|&j| bytes[j] == b'[')
             && let Some(end) = source[i + 1..].find('"')
         {
             let close = i + 1 + end;
@@ -902,15 +924,22 @@ fn scan_clojure_routes(source: &str, repo: RepoId, acc: &mut Acc) {
                 && let Some(len) = source[open + 1..].find('}')
             {
                 let block = &source[open + 1..open + 1 + len];
+                let entries = map_entries(bytes, open);
                 for method in ["get", "post", "put", "patch", "delete", "head", "options"] {
                     if has_keyword(block, method) {
-                        emit_clojure_route(
+                        let route = emit_clojure_route(
                             &method.to_ascii_uppercase(),
                             path,
                             repo,
                             acc,
                             &mut seen,
                         );
+                        if let Some(q) = entries
+                            .as_deref()
+                            .and_then(|e| reitit_handler(bytes, e, method))
+                        {
+                            push_handler_ref(acc, route, module_id, q, line_of(source, bracket));
+                        }
                     }
                 }
             }
@@ -926,9 +955,9 @@ fn is_clj_ws(b: u8) -> bool {
     b.is_ascii_whitespace() || b == b','
 }
 
-/// The nearest non-whitespace byte before `i` (crossing newlines).
-fn prev_non_ws(bytes: &[u8], i: usize) -> Option<u8> {
-    bytes[..i].iter().rev().copied().find(|&b| !is_clj_ws(b))
+/// Index of the nearest non-whitespace byte before `i` (crossing newlines).
+fn prev_non_ws_at(bytes: &[u8], i: usize) -> Option<usize> {
+    bytes[..i].iter().rposition(|&b| !is_clj_ws(b))
 }
 
 /// Index of the nearest non-whitespace byte at or after `i`.
@@ -957,22 +986,25 @@ fn has_keyword(block: &str, name: &str) -> bool {
     })
 }
 
+/// Emit the ROUTE `<method> <path>` once per file and return its id (the
+/// existing node's id on a repeat registration, so a second handler of one
+/// verb + path still gets its ref).
 fn emit_clojure_route(
     method: &str,
     path: &str,
     repo: RepoId,
     acc: &mut Acc,
     seen: &mut std::collections::HashSet<(String, String)>,
-) {
+) -> NodeId {
     // LB.5: keyed on the canonical path, so compojure's relative `"bolts"` and
     // a slashed `"/bolts"` for the same verb are one node, `GET /bolts`.
     let path = canonical_http_path(path);
-    let key = (method.to_string(), path.to_string());
-    if !seen.insert(key) {
-        return;
-    }
     let route_name = route_qname(method, &path);
     let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
+    let key = (method.to_string(), path.to_string());
+    if !seen.insert(key) {
+        return route_id;
+    }
     acc.nodes.push(Node {
         id: route_id,
         repo,
@@ -984,6 +1016,255 @@ fn emit_clojure_route(
     });
     acc.nav
         .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
+    acc.clj_routes += 1;
+    route_id
+}
+
+/// DH.19: the HANDLED_BY ref `route -> qualifier`, once per pair per file.
+/// The edge it resolves to takes `line` (the route form's 0-based row) as its
+/// EVIDENCE site; an unresolved ref emits no edge.
+fn push_handler_ref(
+    acc: &mut Acc,
+    route: NodeId,
+    module_id: NodeId,
+    qualifier: CallQualifier,
+    line: u32,
+) {
+    let dup = acc.refs.iter().any(|r| {
+        r.from == route && r.category == edge_category::HANDLED_BY && r.qualifier == qualifier
+    });
+    if dup {
+        return;
+    }
+    acc.refs.push(UnresolvedRef {
+        from: route,
+        from_module: module_id,
+        qualifier,
+        category: edge_category::HANDLED_BY,
+        line,
+    });
+    acc.clj_handlers += 1;
+}
+
+/// Heads of a Compojure body that are a special form or a threading / control
+/// macro, never the handler: the handler sits somewhere inside, and naming the
+/// wrong inner call is worse than naming none.
+const NON_HANDLER_HEADS: &str = "let let* letfn binding do if if-not if-let if-some when \
+     when-not when-let when-some cond condp case fn fn* -> ->> as-> cond-> cond->> some-> \
+     some->> doto loop try quote";
+
+fn is_non_handler_head(tok: &str) -> bool {
+    NON_HANDLER_HEADS.split_ascii_whitespace().any(|h| h == tok)
+}
+
+/// DH.19: the handler of a Compojure route `(GET "/p" <binding> <body> ..)`,
+/// read from `after_path` (the byte after the path's closing quote). The
+/// binding — a vector `[id]`, a destructuring map `{params :params}` or a
+/// symbol `request` — is skipped; the body names the handler when it is a call
+/// `(get-user id)` whose head is a plain symbol (not a [`NON_HANDLER_HEADS`]
+/// form, not Java interop `(.m x)` / `(Ctor. x)`), a symbol `list-users`, or a
+/// var `#'list-users`. A bare symbol the binding itself binds (`[id] id`) is a
+/// value, not a handler. `ns/f` is `Attribute { base: ns, name: f }`, the
+/// shape the file's CALLS sites take. The graph crate decides whether the
+/// name is a repo symbol: ring's `(response ..)` stays unresolved.
+fn compojure_handler(bytes: &[u8], after_path: usize) -> Option<CallQualifier> {
+    let binding = next_form_start(bytes, after_path)?;
+    if is_close(bytes[binding]) {
+        return None;
+    }
+    let binding_end = skip_form(bytes, binding)?;
+    let body = next_form_start(bytes, binding_end)?;
+    match bytes[body] {
+        b'(' => {
+            let head = next_non_ws(bytes, body + 1)?;
+            let tok = token_at(bytes, head)?;
+            if is_non_handler_head(tok) || tok.starts_with('.') || tok.ends_with('.') {
+                return None;
+            }
+            symbol_qualifier(tok)
+        }
+        _ => {
+            let tok = var_or_symbol(bytes, body)?;
+            let bound = tokens_in(bytes, binding, binding_end);
+            if bound.contains(&tok) {
+                return None;
+            }
+            symbol_qualifier(tok)
+        }
+    }
+}
+
+/// DH.19: the handler of the reitit `method` in a route-data map, from its
+/// top-level `entries`: `:get list-users` (a symbol or `#'var`), or
+/// `:get {.. :handler get-user ..}`. A `(fn ..)` value or a keyword is none.
+fn reitit_handler(bytes: &[u8], entries: &[(usize, usize)], method: &str) -> Option<CallQualifier> {
+    let value = entry_value(bytes, entries, method)?;
+    if bytes[value] == b'{' {
+        let inner = map_entries(bytes, value)?;
+        let handler = entry_value(bytes, &inner, "handler")?;
+        return var_or_symbol(bytes, handler).and_then(symbol_qualifier);
+    }
+    var_or_symbol(bytes, value).and_then(symbol_qualifier)
+}
+
+/// The value index of the entry whose key is the keyword `:<name>`.
+fn entry_value(bytes: &[u8], entries: &[(usize, usize)], name: &str) -> Option<usize> {
+    entries.iter().find_map(|&(key, value)| {
+        let tok = token_at(bytes, key)?;
+        (tok.strip_prefix(':') == Some(name)).then_some(value)
+    })
+}
+
+/// The top-level `(key, value)` start indices of the map opening at `open`
+/// (`bytes[open] == b'{'`), or `None` when it does not close.
+fn map_entries(bytes: &[u8], open: usize) -> Option<Vec<(usize, usize)>> {
+    let mut out = Vec::new();
+    let mut pos = open + 1;
+    loop {
+        let key = next_form_start(bytes, pos)?;
+        if bytes[key] == b'}' {
+            return Some(out);
+        }
+        if is_close(bytes[key]) {
+            return None;
+        }
+        let key_end = skip_form(bytes, key)?;
+        let value = next_form_start(bytes, key_end)?;
+        if is_close(bytes[value]) {
+            return (bytes[value] == b'}').then_some(out);
+        }
+        pos = skip_form(bytes, value)?;
+        out.push((key, value));
+    }
+}
+
+fn is_close(b: u8) -> bool {
+    matches!(b, b')' | b']' | b'}')
+}
+
+/// Index of the next form at or after `i`: whitespace, `,` and `;` line
+/// comments are skipped.
+fn next_form_start(bytes: &[u8], mut i: usize) -> Option<usize> {
+    loop {
+        i = next_non_ws(bytes, i)?;
+        if bytes[i] != b';' {
+            return Some(i);
+        }
+        i += bytes[i..].iter().position(|&b| b == b'\n')?;
+    }
+}
+
+/// Index just past the form starting at `i`: a balanced `(..)` / `[..]` /
+/// `{..}` (strings, `\x` characters and `;` comments inside are stepped
+/// over), a `#(..)` / `#{..}` / `#".."` dispatch, a string, or a token.
+fn skip_form(bytes: &[u8], i: usize) -> Option<usize> {
+    match *bytes.get(i)? {
+        b'(' | b'[' | b'{' => skip_balanced(bytes, i),
+        b'"' => skip_string(bytes, i),
+        b'#' if matches!(bytes.get(i + 1), Some(b'(' | b'{' | b'"')) => skip_form(bytes, i + 1),
+        b'\\' => {
+            // A character literal: `\(` is one char, `\newline` a token.
+            let rest = bytes.get(i + 2..)?;
+            Some(i + 2 + rest.iter().take_while(|&&b| is_token_byte(b)).count())
+        }
+        b if is_token_byte(b) => {
+            Some(i + bytes[i..].iter().take_while(|&&b| is_token_byte(b)).count())
+        }
+        _ => None,
+    }
+}
+
+/// Index just past the bracket form opening at `open`.
+fn skip_balanced(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            b'"' => {
+                i = skip_string(bytes, i)?;
+                continue;
+            }
+            b'\\' => i += 1,
+            b';' => i += bytes[i..].iter().position(|&b| b == b'\n')?,
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Index just past the string literal opening at `open`.
+fn skip_string(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut i = open + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'"' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// The symbol / keyword token starting at `i`. Its bounds sit next to ASCII
+/// delimiters, so the slice is on char boundaries; a malformed one is `None`.
+fn token_at(bytes: &[u8], i: usize) -> Option<&str> {
+    let len = bytes
+        .get(i..)?
+        .iter()
+        .take_while(|&&b| is_token_byte(b))
+        .count();
+    if len == 0 {
+        return None;
+    }
+    std::str::from_utf8(&bytes[i..i + len]).ok()
+}
+
+/// The token at `i`, with a `#'` var quote stripped.
+fn var_or_symbol(bytes: &[u8], i: usize) -> Option<&str> {
+    let tok = token_at(bytes, i)?;
+    Some(tok.strip_prefix("#'").unwrap_or(tok))
+}
+
+/// Every token inside `bytes[start..end]` (the binding form's names).
+fn tokens_in(bytes: &[u8], start: usize, end: usize) -> Vec<&str> {
+    bytes[start..end]
+        .split(|&b| !is_token_byte(b))
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| std::str::from_utf8(t).ok())
+        .collect()
+}
+
+/// The ref a handler symbol names: `ns/f` -> `Attribute { base: ns, name: f }`,
+/// `f` -> `Bare(f)`. A keyword, number, literal, `&` or quoted / dispatch
+/// token names no handler.
+fn symbol_qualifier(tok: &str) -> Option<CallQualifier> {
+    let first = *tok.as_bytes().first()?;
+    let numeric = first.is_ascii_digit()
+        || (matches!(first, b'-' | b'+') && tok.as_bytes().get(1).is_some_and(u8::is_ascii_digit));
+    if numeric
+        || matches!(first, b':' | b'\'' | b'#' | b'%' | b'&')
+        || matches!(tok, "nil" | "true" | "false")
+    {
+        return None;
+    }
+    match tok.split_once('/') {
+        Some((base, name)) if !base.is_empty() && !name.is_empty() => {
+            Some(CallQualifier::Attribute {
+                base: base.to_string(),
+                name: name.to_string(),
+            })
+        }
+        Some(_) => None,
+        None => Some(CallQualifier::Bare(tok.to_string())),
+    }
 }
 
 fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
@@ -1604,5 +1885,170 @@ mod tests {
         let fp = parse_file(&source, "src/api.clj", "src::api", repo()).unwrap();
         assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/users")));
         assert_eq!(kind_count(&fp, node_kind::ROUTE), 1);
+    }
+
+    // ---- DH.19: route handlers (HANDLED_BY refs) ----
+
+    /// Every HANDLED_BY ref as `(route qname, qualifier, from_module, line)`,
+    /// sorted by route qname then line.
+    fn handler_refs(fp: &FileParse) -> Vec<(String, CallQualifier, NodeId, u32)> {
+        let mut v: Vec<_> = fp
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::HANDLED_BY)
+            .map(|r| {
+                let route = fp.nav.qname_by_id.get(&r.from).cloned().unwrap_or_default();
+                (route, r.qualifier.clone(), r.from_module, r.line)
+            })
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0).then(a.3.cmp(&b.3)));
+        v
+    }
+
+    fn module_id(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, qname)
+    }
+
+    fn bare(name: &str) -> CallQualifier {
+        CallQualifier::Bare(name.to_string())
+    }
+
+    /// The matrix probe's server file (matrix/clojure/http_server/server/routes.clj).
+    const COMPOJURE_PROBE: &str = r#"(ns app.routes
+  (:require [compojure.core :refer [defroutes GET POST]]
+            [ring.util.response :refer [response status]]))
+
+(defn get-user [id]
+  (response {:id id}))
+
+(defn create-user [request]
+  (status (response {:ok true}) 201))
+
+(defroutes app-routes
+  (GET "/users/:id" [id] (get-user id))
+  (POST "/users" request (create-user request)))
+"#;
+
+    #[test]
+    fn compojure_body_call_is_the_handler() {
+        let fp = parse_file(COMPOJURE_PROBE, "routes.clj", "routes", repo()).unwrap();
+        let m = module_id("routes");
+        assert_eq!(
+            handler_refs(&fp),
+            vec![
+                ("GET /users/:id".to_string(), bare("get-user"), m, 11),
+                ("POST /users".to_string(), bare("create-user"), m, 12),
+            ]
+        );
+    }
+
+    #[test]
+    fn compojure_bare_handler_symbol() {
+        let source = r#"
+(defroutes app-routes
+  (GET "/x" [] list-users)
+  (GET "/v" req #'show-v)
+  (GET "/p" [id] id)
+  (GET "/s" [] "hello")
+  (GET "/k" [] :ok)
+  (GET "/n" [] nil)
+  (PUT "/m" {params :params} update-m)
+  (GET "/x" [] list-users))
+"#;
+        let fp = parse_file(source, "src/routes.clj", "src::routes", repo()).unwrap();
+        let m = module_id("src::routes");
+        assert_eq!(kind_count(&fp, node_kind::ROUTE), 7);
+        assert_eq!(
+            handler_refs(&fp),
+            vec![
+                ("GET /v".to_string(), bare("show-v"), m, 3),
+                ("GET /x".to_string(), bare("list-users"), m, 2),
+                ("PUT /m".to_string(), bare("update-m"), m, 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn compojure_threading_body_is_no_handler() {
+        let source = r#"
+(defroutes app-routes
+  (GET "/a" [] (-> (resp) (status 200)))
+  (GET "/b" [x] (let [y x] (show y)))
+  (GET "/c" [] (do (log/info "x") (h)))
+  (GET "/d" {params :params} (->> params (render)))
+  (GET "/e" [] (if ok (a) (b)))
+  (GET "/f" [] (fn [req] (h req)))
+  (GET "/g" [] (.getBytes "x"))
+  (GET "/h" [] (Response. 200)))
+"#;
+        let fp = parse_file(source, "src/routes.clj", "src::routes", repo()).unwrap();
+        assert_eq!(kind_count(&fp, node_kind::ROUTE), 8);
+        assert!(handler_refs(&fp).is_empty(), "{:?}", handler_refs(&fp));
+    }
+
+    #[test]
+    fn reitit_method_symbol_and_handler_map() {
+        let source = r#"(def routes
+  [["/users" {:get list-users :post create-user}]
+   ["/users/:id" {:get {:handler get-user :parameters {:path {:id int?}}}}]
+   ["/ping"
+    {:head {:summary "pong; } ]" :handler #'ping}}]
+   ["/f" {:get (fn [_] {:status 200})}]
+   ["/k" {:get :not-a-handler}]])
+"#;
+        let fp = parse_file(source, "src/api.clj", "src::api", repo()).unwrap();
+        let m = module_id("src::api");
+        assert_eq!(
+            handler_refs(&fp),
+            vec![
+                ("GET /users".to_string(), bare("list-users"), m, 1),
+                ("GET /users/:id".to_string(), bare("get-user"), m, 2),
+                ("HEAD /ping".to_string(), bare("ping"), m, 3),
+                ("POST /users".to_string(), bare("create-user"), m, 1),
+            ]
+        );
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/f")));
+        assert!(fp.nodes.iter().any(|n| n.id == route_id("GET", "/k")));
+    }
+
+    #[test]
+    fn namespaced_handler_is_attribute() {
+        let source = r#"(ns app.routes
+  (:require [app.users :as users]))
+(defroutes app-routes
+  (GET "/users/:id" [id] (users/show id)))
+(def api [["/u" {:get users/index}]])
+"#;
+        let fp = parse_file(source, "src/routes.clj", "src::routes", repo()).unwrap();
+        let m = module_id("src::routes");
+        let attr = |base: &str, name: &str| CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        };
+        assert_eq!(
+            handler_refs(&fp),
+            vec![
+                ("GET /u".to_string(), attr("users", "index"), m, 4),
+                ("GET /users/:id".to_string(), attr("users", "show"), m, 3),
+            ]
+        );
+    }
+
+    /// The handler scan reads bytes and slices only between ASCII delimiters:
+    /// multibyte text in bindings, bodies and route data cannot panic it.
+    #[test]
+    fn handler_scan_survives_multibyte_text() {
+        let source = "(defroutes r\n  (GET \"/é\" [é] (montrer-é é))\n  (GET \"/t\" [] (h \"…)]}\"))\n  (GET \"/u\" [] …))\n(def a [[\"/w\" {:get {:doc \"é}\" :handler wé}}]])\n";
+        let fp = parse_file(source, "src/r.clj", "src::r", repo()).unwrap();
+        let m = module_id("src::r");
+        assert_eq!(
+            handler_refs(&fp),
+            vec![
+                ("GET /t".to_string(), bare("h"), m, 2),
+                ("GET /u".to_string(), bare("…"), m, 3),
+                ("GET /w".to_string(), bare("wé"), m, 4),
+                ("GET /é".to_string(), bare("montrer-é"), m, 1),
+            ]
+        );
     }
 }
