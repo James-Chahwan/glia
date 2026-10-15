@@ -36,6 +36,15 @@
 //!   every match). A handler is scoped by its LB.8 ` @owner` segment. Such a
 //!   pair's evidence rule is `host`, whatever tier it matched at.
 //!
+//! - **Third-party clients (DF.9).** A client whose every site the engine
+//!   marked external (DF.8: a literal public host, not configured) and none
+//!   of whose hosts names a service / project alias of the build
+//!   (`host::third_party_hosts`, CG.4b's HTTP rule) dials someone else's
+//!   socket (`wss://stream.binance.com/ws`): it pairs with nothing, even when
+//!   the build serves the same path. A generic client is dropped first, as
+//!   before. [`WebSocketStackResolver::third_party_clients`] lists such
+//!   clients by the same predicate.
+//!
 //! fired_on marker, once per build that pairs or drops anything:
 //!   `[ws-resolve] 2 pairs (exact=1 suffix=0 param=0 inherited=0 wildcard=1 host=0) dropped-generic=0 narrowed-by-host=0`
 //! A pair with a generic handler counts `inherited` whatever tier its
@@ -43,6 +52,8 @@
 //! tier it matched at. `dropped-generic` counts (client, handler)
 //! combinations that a generic side was part of and that did not pair;
 //! `narrowed-by-host` counts clients whose handlers a host narrowed.
+//! Then, when a third-party client was left unpaired (DF.9):
+//!   `[channel-external] via=ws clients=<n> hosts=<k>`
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -51,8 +62,8 @@ use glia_code_domain::{edge_category, node_kind};
 use glia_core::{Cell, Confidence, Edge, NodeId, RepoId};
 
 use super::host::{
-    AliasIndex, HostScoped, Narrowed, Owners, build_service_alias_index, hit_hosts, narrow_by_host,
-    owner_from_qname_suffix,
+    AliasIndex, ExternalSides, HostScoped, Narrowed, Owners, build_service_alias_index, hit_hosts,
+    narrow_by_host, owner_from_qname_suffix, third_party_hosts_lazy, third_party_sides,
 };
 use super::http::route_path;
 use super::{CrossGraphResolver, RuleTally, rule_evidence, weakest};
@@ -64,6 +75,23 @@ use crate::types::RepoGraph;
 // ============================================================================
 
 pub struct WebSocketStackResolver;
+
+impl WebSocketStackResolver {
+    /// DF.9: the WS_CLIENT ids this resolver leaves out of pairing as
+    /// third-party clients (see the module doc), by the one predicate the
+    /// resolver applies, so a post-pass can label them without a second copy
+    /// of it (the engine's `tag_synthetic_provenance`). A generic client (an
+    /// unreadable URL), which the resolver drops first, is listed too when its
+    /// sites qualify: it is third-party all the same. Only probed: no order
+    /// is promised.
+    ///
+    /// The alias index is built with no handler owners: owners scope an
+    /// alias, they never add or remove one, and only the alias NAMES are read
+    /// here.
+    pub fn third_party_clients(graphs: &[RepoGraph]) -> HashSet<NodeId> {
+        third_party_sides(graphs, node_kind::WS_CLIENT)
+    }
+}
 
 impl CrossGraphResolver for WebSocketStackResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
@@ -85,11 +113,12 @@ impl CrossGraphResolver for WebSocketStackResolver {
                 stats.narrowed_by_host
             );
         }
+        stats.external.report("ws");
     }
 }
 
 /// What one resolve run paired, per tier, and what it dropped.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct WsStats {
     exact: usize,
     suffix: usize,
@@ -101,6 +130,8 @@ struct WsStats {
     dropped_generic: usize,
     /// CB.21: clients whose matched handlers a host narrowed.
     narrowed_by_host: usize,
+    /// DF.9: third-party clients left unpaired, and their hosts.
+    external: ExternalSides,
 }
 
 impl WsStats {
@@ -245,7 +276,9 @@ impl HostScoped for WsTarget {
 ///
 /// CB.21: a client that matches two or more handlers is narrowed by its
 /// hosts first ([`narrow_by_host`] over the handlers' LB.8 owners); the alias
-/// index is built once, on the first client that needs it.
+/// index is built once, on the first client that needs it. DF.9: a
+/// third-party client (the module doc) is counted in `external` and pairs
+/// with nothing; the alias index it reads is the same one.
 fn pair_all(graphs: &[RepoGraph]) -> (Vec<Edge>, WsStats) {
     let mut stats = WsStats::default();
     let (handlers, owners) = collect_handlers(graphs);
@@ -259,6 +292,16 @@ fn pair_all(graphs: &[RepoGraph]) -> (Vec<Edge>, WsStats) {
             // The client's URL was unreadable: it asserts no path, so it
             // pairs nothing — not even another fallback name.
             stats.dropped_generic += handlers.len();
+            continue;
+        }
+        // DF.9 (CG.4b's rule): a client that dials only public hosts outside
+        // the build pairs with nothing, even when a handler serves its path.
+        if let Some(hosts) = third_party_hosts_lazy(
+            &mut aliases,
+            || build_service_alias_index(graphs, &owners).0,
+            &client.cells,
+        ) {
+            stats.external.add(client.id, hosts);
             continue;
         }
         let c = ws_segments(client.key);
@@ -900,6 +943,36 @@ mod tests {
                 rule_of(&edges[0])
             );
         }
+    }
+
+    /// DF.9: a client whose only site dials a public host the engine marked
+    /// external pairs with neither `/ws` handler and is counted once, with its
+    /// one host, under `[channel-external] via=ws`. A host whose label names
+    /// a project of the build (`chat.example-corp.com` -> `chat`) is the
+    /// build's own and pairs as before (CB.21 narrows on the whole host only,
+    /// which names no alias, so both handlers stay).
+    #[test]
+    fn ws_external_client_is_counted_not_paired() {
+        let binance = r#"{"via":"ws","host":"stream.binance.com","external":true}"#;
+        let (g, client, ..) = ws_monorepo(vec![hit(binance), hit(binance)]);
+        let (edges, stats) = pair_all(&[g]);
+        assert!(edges.is_empty(), "{edges:?}");
+        assert_eq!(
+            stats.external.line("ws").as_deref(),
+            Some("[channel-external] via=ws clients=1 hosts=1")
+        );
+        assert_eq!(stats.pairs(), 0);
+        let (g, ..) = ws_monorepo(vec![hit(binance)]);
+        assert!(WebSocketStackResolver::third_party_clients(&[g]).contains(&client));
+
+        let own = r#"{"via":"ws","host":"chat.example-corp.com","external":true}"#;
+        let (g, client, chat, notify) = ws_monorepo(vec![hit(own)]);
+        let (edges, stats) = pair_all(&[g]);
+        assert!(
+            connects(&edges, client, chat) && connects(&edges, client, notify),
+            "{edges:?}"
+        );
+        assert_eq!(stats.external.line("ws"), None, "silent with none");
     }
 
     /// CB.21: no cell, a hostless site among hosted ones, an unknown host, or

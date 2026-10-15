@@ -26,8 +26,19 @@
 //! rule is `host`. Package evidence (Pick::Narrowed) is never re-narrowed,
 //! and a stub with any hostless site keeps today's behaviour exactly.
 //!
+//! DF.9 applies CG.4b's HTTP rule to the client half: a stub whose every
+//! construction site the engine marked external (DF.8: its channel dials a
+//! literal public host the repo does not configure,
+//! `grpc.Dial("geocoder.googleapis.com:443")`) and none of whose hosts names
+//! a service / project alias of the build (`host::third_party_hosts`) calls
+//! someone else's service of the same name: it pairs with nothing, before
+//! package or host narrowing is tried. [`GrpcStackResolver::third_party_clients`]
+//! lists such stubs by the same predicate.
+//!
 //! fired_on marker, once per resolve that sees a service or a client:
 //!   `[grpc-index] 2 services (2 qualified, 0 bare) -> 1 edges, 0 dropped ambiguous, 0 narrowed by package evidence, 1 narrowed by host`
+//! then, when a third-party stub was left unpaired (DF.9):
+//!   `[channel-external] via=grpc clients=<n> hosts=<k>`
 
 use std::collections::{HashMap, HashSet};
 
@@ -37,8 +48,8 @@ use glia_code_extractors::grpc::RpcPackageCell;
 use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
 
 use super::host::{
-    AliasIndex, HostScoped, Narrowed, Owners, ProjectFiles, build_service_alias_index, hit_hosts,
-    narrow_by_host, owner_spelling, str_field,
+    AliasIndex, ExternalSides, HostScoped, Narrowed, Owners, ProjectFiles, build_service_alias_index,
+    hit_hosts, narrow_by_host, owner_spelling, str_field, third_party_hosts_lazy, third_party_sides,
 };
 use super::{CrossGraphResolver, RuleTally, weakest};
 use crate::merged::MergedGraph;
@@ -50,6 +61,21 @@ use crate::types::RepoGraph;
 
 pub struct GrpcStackResolver;
 
+impl GrpcStackResolver {
+    /// DF.9: the GRPC_CLIENT ids this resolver leaves out of pairing as
+    /// third-party stubs (see the module doc), by the one predicate the
+    /// resolver applies, so a post-pass can label them without a second copy
+    /// of it (the engine's `tag_synthetic_provenance`). Only probed: no order
+    /// is promised.
+    ///
+    /// The alias index is built with no service owners: owners scope an
+    /// alias, they never add or remove one, and only the alias NAMES are read
+    /// here.
+    pub fn third_party_clients(graphs: &[RepoGraph]) -> HashSet<NodeId> {
+        third_party_sides(graphs, node_kind::GRPC_CLIENT)
+    }
+}
+
 impl CrossGraphResolver for GrpcStackResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
         let (index, owners) = build_grpc_service_index(&merged.graphs);
@@ -58,6 +84,7 @@ impl CrossGraphResolver for GrpcStackResolver {
         let mut edges = Vec::new();
         let hits = client_hits(&merged.graphs);
         let mut aliases: Option<AliasIndex> = None;
+        let mut external = ExternalSides::default();
         for g in &merged.graphs {
             for n in &g.nodes {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::GRPC_CLIENT) {
@@ -70,6 +97,20 @@ impl CrossGraphResolver for GrpcStackResolver {
                     continue;
                 };
                 stats.clients += 1;
+                // DF.9 (CG.4b's rule): a stub that dials only public hosts
+                // outside the build pairs with nothing, whatever service of
+                // that name the build declares. Its sites from every graph
+                // copy are read, as host narrowing reads them.
+                if let Some(cells) = hits.get(&n.id)
+                    && let Some(hosts) = third_party_hosts_lazy(
+                        &mut aliases,
+                        || build_service_alias_index(&merged.graphs, &owners).0,
+                        cells,
+                    )
+                {
+                    external.add(n.id, hosts);
+                    continue;
+                }
                 let Some((targets, name_pkg)) = grpc_candidate_keys(svc_name)
                     .into_iter()
                     .find_map(|c| index.get(&c.key).filter(|t| !t.is_empty()).map(|t| (t, c.package)))
@@ -138,6 +179,7 @@ impl CrossGraphResolver for GrpcStackResolver {
                 stats.host
             );
         }
+        external.report("grpc");
         merged.cross_edges.extend(edges);
         let served = pair_servers(merged, &index, &mut rules);
         merged.cross_edges.extend(served);

@@ -1781,3 +1781,196 @@ fn http_any_nav_route_is_still_excluded() {
         "the nav ROUTE node itself must survive"
     );
 }
+
+// ============================================================================
+// DF.9: external WebSocket / gRPC / GraphQL clients stay out of pairing
+// ============================================================================
+//
+// CG.4b's HTTP rule for the channel resolvers: a client whose every
+// ENDPOINT_HIT carries DF.8's `"external":true` mark and none of whose hosts
+// names a service / project alias of the build pairs with nothing, and
+// `third_party_clients` lists it by the same predicate. Fully qualified, as
+// the A5.4 block, so the shared `use` lines stay as they are.
+
+/// An ENDPOINT_HIT cell with exactly the given JSON payload.
+fn endpoint_hit(json: &str) -> glia_core::Cell {
+    glia_core::Cell {
+        kind: glia_code_domain::cell_type::ENDPOINT_HIT,
+        payload: glia_core::CellPayload::Json(json.to_string()),
+    }
+}
+
+const WS_BINANCE: &str = r#"{"via":"ws","host":"stream.binance.com","external":true}"#;
+const GRPC_GOOGLE: &str = r#"{"via":"grpc","host":"geocoder.googleapis.com:443","external":true}"#;
+const GQL_GITHUB: &str = r#"{"via":"graphql","hosts":["api.github.com"],"external":true}"#;
+
+/// A server repo holding `server` nodes `(kind, qname, name)` and a client
+/// repo holding one `client_kind` node `client_qname` carrying one
+/// ENDPOINT_HIT per entry of `hits`. Returns the merge and the client's id.
+fn channel_merge(
+    server: &[(glia_core::NodeKindId, &str, &str)],
+    client_kind: glia_core::NodeKindId,
+    client_qname: &str,
+    hits: &[&str],
+) -> (MergedGraph, NodeId) {
+    let mut nav_a = CodeNav::default();
+    let mut nodes_a = Vec::new();
+    for (kind, qname, name) in server {
+        let (node, id) = make_node(repo_a(), *kind, qname, Confidence::Strong);
+        record(&mut nav_a, id, name, qname, *kind);
+        nodes_a.push(node);
+    }
+    let ga = make_graph(repo_a(), nodes_a, nav_a);
+
+    let mut nav_b = CodeNav::default();
+    let (mut client, client_id) = make_node(repo_b(), client_kind, client_qname, Confidence::Medium);
+    client.cells.extend(hits.iter().map(|j| endpoint_hit(j)));
+    let name = client_qname.split_once(':').map_or(client_qname, |(_, n)| n);
+    record(&mut nav_b, client_id, name, client_qname, client_kind);
+    let gb = make_graph(repo_b(), vec![client], nav_b);
+    (MergedGraph::new(vec![ga, gb]), client_id)
+}
+
+/// `(from, to)` of every `category` cross edge.
+fn cross(merged: &MergedGraph, category: glia_core::EdgeCategoryId) -> Vec<(NodeId, NodeId)> {
+    merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == category)
+        .map(|e| (e.from, e.to))
+        .collect()
+}
+
+fn ws_server() -> Vec<(glia_core::NodeKindId, &'static str, &'static str)> {
+    vec![(node_kind::WS_HANDLER, "ws:/ws", "/ws")]
+}
+
+#[test]
+fn ws_external_client_is_not_paired() {
+    let (mut merged, client) = channel_merge(&ws_server(), node_kind::WS_CLIENT, "ws_client:/ws", &[WS_BINANCE]);
+    WebSocketStackResolver.resolve(&mut merged);
+    assert!(cross(&merged, edge_category::WS_CONNECTS).is_empty(), "a third-party /ws is not the app's /ws");
+    let third = WebSocketStackResolver::third_party_clients(&merged.graphs);
+    assert_eq!(third.len(), 1, "the one external client, counted once");
+    assert!(third.contains(&client));
+
+    // Control: the same site without the mark pairs, as before DF.9.
+    let plain = r#"{"via":"ws","host":"stream.binance.com"}"#;
+    let (mut merged, client) = channel_merge(&ws_server(), node_kind::WS_CLIENT, "ws_client:/ws", &[plain]);
+    WebSocketStackResolver.resolve(&mut merged);
+    assert_eq!(cross(&merged, edge_category::WS_CONNECTS).len(), 1);
+    assert!(!WebSocketStackResolver::third_party_clients(&merged.graphs).contains(&client));
+}
+
+#[test]
+fn ws_mixed_sites_still_pair() {
+    // DF.8 marks per site: one public site and one host-less site leave one
+    // unmarked hit, so not every site is external.
+    let (mut merged, client) =
+        channel_merge(&ws_server(), node_kind::WS_CLIENT, "ws_client:/ws", &[WS_BINANCE, r#"{"via":"ws"}"#]);
+    WebSocketStackResolver.resolve(&mut merged);
+    let edges = cross(&merged, edge_category::WS_CONNECTS);
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0].0, client);
+    assert!(WebSocketStackResolver::third_party_clients(&merged.graphs).is_empty());
+}
+
+#[test]
+fn ws_external_host_naming_a_project_pairs() {
+    // Positive evidence wins, as CG.4b: the marked host's label `users` names
+    // the build's own `users` project.
+    let mut server = ws_server();
+    server.push((node_kind::PROJECT, "project:services/users", "users"));
+    let hit = r#"{"via":"ws","host":"users.example-corp.com","external":true}"#;
+    let (mut merged, client) = channel_merge(&server, node_kind::WS_CLIENT, "ws_client:/ws", &[hit]);
+    WebSocketStackResolver.resolve(&mut merged);
+    let edges = cross(&merged, edge_category::WS_CONNECTS);
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0].0, client);
+    assert!(WebSocketStackResolver::third_party_clients(&merged.graphs).is_empty());
+}
+
+fn grpc_server_side() -> Vec<(glia_core::NodeKindId, &'static str, &'static str)> {
+    vec![(node_kind::GRPC_SERVICE, "grpc:geo.v1.Geocoder", "Geocoder")]
+}
+
+#[test]
+fn grpc_external_client_is_not_paired() {
+    let (mut merged, client) =
+        channel_merge(&grpc_server_side(), node_kind::GRPC_CLIENT, "grpc_client:Geocoder", &[GRPC_GOOGLE]);
+    GrpcStackResolver.resolve(&mut merged);
+    assert!(cross(&merged, edge_category::GRPC_CALLS).is_empty(), "a Google stub is not the in-repo Geocoder");
+    assert!(GrpcStackResolver::third_party_clients(&merged.graphs).contains(&client));
+
+    // Control: unmarked, and marked beside an unmarked site, it pairs.
+    for hits in [
+        &[r#"{"via":"grpc","host":"geocoder.googleapis.com:443"}"#][..],
+        &[GRPC_GOOGLE, r#"{"via":"grpc","host":"geo-svc:50051"}"#][..],
+    ] {
+        let (mut merged, client) =
+            channel_merge(&grpc_server_side(), node_kind::GRPC_CLIENT, "grpc_client:Geocoder", hits);
+        GrpcStackResolver.resolve(&mut merged);
+        assert_eq!(cross(&merged, edge_category::GRPC_CALLS).len(), 1, "{hits:?}");
+        assert!(!GrpcStackResolver::third_party_clients(&merged.graphs).contains(&client), "{hits:?}");
+    }
+}
+
+fn graphql_server_side() -> Vec<(glia_core::NodeKindId, &'static str, &'static str)> {
+    vec![(node_kind::GRAPHQL_RESOLVER, "graphql_resolver:getUser", "getUser")]
+}
+
+#[test]
+fn graphql_external_op_is_not_paired() {
+    let (mut merged, op) =
+        channel_merge(&graphql_server_side(), node_kind::GRAPHQL_OPERATION, "graphql_op:GetUser", &[GQL_GITHUB]);
+    GraphQLStackResolver.resolve(&mut merged);
+    assert!(cross(&merged, edge_category::GRAPHQL_CALLS).is_empty(), "GitHub's getUser is not the app's");
+    assert!(GraphQLStackResolver::third_party_clients(&merged.graphs).contains(&op));
+
+    // Control: the same operation unmarked pairs.
+    let plain = r#"{"via":"graphql","hosts":["api.github.com"]}"#;
+    let (mut merged, op) =
+        channel_merge(&graphql_server_side(), node_kind::GRAPHQL_OPERATION, "graphql_op:GetUser", &[plain]);
+    GraphQLStackResolver.resolve(&mut merged);
+    assert_eq!(cross(&merged, edge_category::GRAPHQL_CALLS), vec![(op, merged.cross_edges[0].to)]);
+    assert!(!GraphQLStackResolver::third_party_clients(&merged.graphs).contains(&op));
+}
+
+#[test]
+fn third_party_clients_lists_only_external() {
+    // One build holding, per channel, an external client and an in-build one:
+    // each resolver's set is exactly its own external client, never another
+    // kind's, never the in-build one.
+    let mut nav = CodeNav::default();
+    let mut nodes = Vec::new();
+    let mut add = |kind, qname: &str, hits: &[&str]| {
+        let (mut node, id) = make_node(repo_b(), kind, qname, Confidence::Medium);
+        node.cells.extend(hits.iter().map(|j| endpoint_hit(j)));
+        record(&mut nav, id, qname, qname, kind);
+        nodes.push(node);
+        id
+    };
+    let ws_ext = add(node_kind::WS_CLIENT, "ws_client:/ws", &[WS_BINANCE]);
+    add(node_kind::WS_CLIENT, "ws_client:/feed", &[r#"{"via":"ws","host":"localhost:8080"}"#]);
+    let grpc_ext = add(node_kind::GRPC_CLIENT, "grpc_client:Geocoder", &[GRPC_GOOGLE]);
+    add(node_kind::GRPC_CLIENT, "grpc_client:UserService", &[r#"{"via":"grpc"}"#]);
+    let gql_ext = add(node_kind::GRAPHQL_OPERATION, "graphql_op:GetUser", &[GQL_GITHUB]);
+    add(node_kind::GRAPHQL_OPERATION, "graphql_op:me", &[]);
+    // An HTTP ENDPOINT marked external is the HTTP resolver's, not theirs.
+    add(
+        node_kind::ENDPOINT,
+        "endpoint:GET:/search",
+        &[r#"{"method":"GET","path":"/search","host":"nominatim.openstreetmap.org","external":true}"#],
+    );
+    let graphs = vec![make_graph(repo_b(), nodes, nav)];
+
+    let set = |s: std::collections::HashSet<NodeId>| {
+        let mut v: Vec<NodeId> = s.into_iter().collect();
+        v.sort_by_key(|id| id.0);
+        v
+    };
+    assert_eq!(set(WebSocketStackResolver::third_party_clients(&graphs)), vec![ws_ext]);
+    assert_eq!(set(GrpcStackResolver::third_party_clients(&graphs)), vec![grpc_ext]);
+    assert_eq!(set(GraphQLStackResolver::third_party_clients(&graphs)), vec![gql_ext]);
+    assert_eq!(HttpStackResolver::third_party_endpoints(&graphs).len(), 1);
+}

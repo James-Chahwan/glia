@@ -18,9 +18,21 @@
 //! keeps every pair). Such a pair's evidence rule is `host`; every other pair
 //! keeps the engine's emitter-only stamp.
 //!
+//! THIRD-PARTY OPERATIONS (DF.9). An operation whose every site the engine
+//! marked external (DF.8: the client's base names a literal public host the
+//! repo does not configure, `uri: "https://api.github.com/graphql"`) and none
+//! of whose hosts names a service / project alias of the build
+//! (`host::third_party_hosts`, CG.4b's HTTP rule) queries someone else's
+//! schema: it pairs with nothing, even when a resolver of the build serves
+//! the same field. An unkeyable operation is dropped first, as before.
+//! [`GraphQLStackResolver::third_party_clients`] lists such operations by the
+//! same predicate.
+//!
 //! fired_on marker, once per build with GraphQL to resolve:
 //!   `[graphql-resolve] 2 pairs; dropped: type-level=2, unkeyable=0, no-match=0; narrowed-by-host=1`
 //! `narrowed-by-host` counts operations whose resolvers a host narrowed.
+//! Then, when a third-party operation was left unpaired (DF.9):
+//!   `[channel-external] via=graphql clients=<n> hosts=<k>`
 
 use std::collections::{HashMap, HashSet};
 
@@ -28,15 +40,33 @@ use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::{edge_category, node_kind};
 use glia_core::{Edge, NodeId};
 
-use super::host::SideNarrowing;
+use super::host::{ExternalSides, SideNarrowing, third_party_sides};
 use super::{CrossGraphResolver, RuleTally, build_kind_index, weakest};
 use crate::merged::MergedGraph;
+use crate::types::RepoGraph;
 
 // ============================================================================
 // GraphQLStackResolver — matches operation → resolver by field key
 // ============================================================================
 
 pub struct GraphQLStackResolver;
+
+impl GraphQLStackResolver {
+    /// DF.9: the GRAPHQL_OPERATION ids this resolver leaves out of pairing as
+    /// third-party operations (see the module doc), by the one predicate the
+    /// resolver applies, so a post-pass can label them without a second copy
+    /// of it (the engine's `tag_synthetic_provenance`). An unkeyable
+    /// operation, which the resolver drops first, is listed too when its sites
+    /// qualify: it is third-party all the same. Only probed: no order is
+    /// promised.
+    ///
+    /// The alias index is built with no resolver owners: owners scope an
+    /// alias, they never add or remove one, and only the alias NAMES are read
+    /// here.
+    pub fn third_party_clients(graphs: &[RepoGraph]) -> HashSet<NodeId> {
+        third_party_sides(graphs, node_kind::GRAPHQL_OPERATION)
+    }
+}
 
 impl CrossGraphResolver for GraphQLStackResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
@@ -70,6 +100,7 @@ impl CrossGraphResolver for GraphQLStackResolver {
         );
         let mut narrowed: HashSet<NodeId> = HashSet::new();
         let mut rules = RuleTally::new("graphql", &["host"]);
+        let mut external = ExternalSides::default();
         for g in &merged.graphs {
             for n in &g.nodes {
                 if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::GRAPHQL_OPERATION) {
@@ -85,6 +116,13 @@ impl CrossGraphResolver for GraphQLStackResolver {
                     unkeyable += 1;
                     continue;
                 };
+                // DF.9 (CG.4b's rule): an operation that queries only public
+                // hosts outside the build pairs with nothing, whatever
+                // resolver of the build serves its field.
+                if let Some(hosts) = narrowing.third_party_hosts(n.id) {
+                    external.add(n.id, hosts);
+                    continue;
+                }
                 let Some(targets) = by_key.get(&key) else {
                     no_match += 1;
                     continue;
@@ -121,6 +159,7 @@ impl CrossGraphResolver for GraphQLStackResolver {
                 narrowed.len()
             );
         }
+        external.report("graphql");
     }
 }
 
@@ -273,6 +312,38 @@ mod host_tests {
             .collect();
         assert_eq!(rules.iter().filter(|r| r.as_deref() == Some("host")).count(), 2, "{rules:?}");
         assert_eq!(rules.iter().filter(|r| r.is_none()).count(), 2, "unnarrowed pairs stay bare");
+    }
+
+    /// DF.9: the web app's Apollo client dials a public host the engine
+    /// marked external (`api.github.com`), so its operation pairs with no
+    /// resolver, nor does its second graph copy (judged on every copy's
+    /// cells, as narrowing reads them); the admin app still pairs both. A
+    /// marked host whose label names a project (`users.example-corp.com`)
+    /// is the build's own and pairs as before.
+    #[test]
+    fn external_operation_pairs_nothing() {
+        let github = r#"{"via":"graphql","hosts":["api.github.com"],"external":true}"#;
+        let g = two_servers("gql-external", &[github]);
+        let web = g.nodes[6].id;
+        let copy = channel_graph("gql-external", &[(node_kind::GRAPHQL_OPERATION, "graphql_op:getUser @apps/web")]);
+        let mut merged = MergedGraph::new(vec![g, copy]);
+        merged.run(&GraphQLStackResolver);
+        assert_eq!(
+            cross_pairs(&merged, edge_category::GRAPHQL_CALLS),
+            vec![pair("apps/admin", "services/catalog"), pair("apps/admin", "services/users")]
+        );
+        let third: Vec<NodeId> = GraphQLStackResolver::third_party_clients(&merged.graphs).into_iter().collect();
+        assert_eq!(third, vec![web]);
+
+        let own = r#"{"via":"graphql","hosts":["users.example-corp.com"],"external":true}"#;
+        let mut merged = MergedGraph::new(vec![two_servers("gql-own", &[own])]);
+        merged.run(&GraphQLStackResolver);
+        let web_pairs = cross_pairs(&merged, edge_category::GRAPHQL_CALLS)
+            .into_iter()
+            .filter(|(f, _)| f.ends_with("@apps/web"))
+            .count();
+        assert_eq!(web_pairs, 2, "`users` names the users project: not third-party");
+        assert!(GraphQLStackResolver::third_party_clients(&merged.graphs).is_empty());
     }
 
     /// CB.24: without positive evidence nothing narrows: no hit, a hostless

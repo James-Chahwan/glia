@@ -9,11 +9,18 @@
 //! implementing [`HostScoped`] for its target: the repo it lives in and its
 //! owner (the nested project, an index into the resolver's [`Owners`]).
 //!
+//! DF.9: CG.4b's third-party rule ([`all_sites_external`],
+//! [`host_names_an_alias`], [`third_party_hosts`]) moved here from `http.rs`
+//! unchanged, so the HTTP, WebSocket, gRPC and GraphQL resolvers leave a
+//! client that dials only public hosts outside the build unpaired by one
+//! predicate, and [`third_party_sides`] lists such clients for the engine's
+//! provenance pass.
+//!
 //! Resolver-private: every item is `pub(crate)` at most, so the graph crate's
 //! `pub use resolvers::*` never gains a name from here.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::{cell_type, edge_category, node_kind};
@@ -451,6 +458,149 @@ pub(crate) fn hit_hosts<'c>(cells: impl IntoIterator<Item = &'c Cell>) -> Option
 }
 
 // ============================================================================
+// CA-13 (CG.4b, DF.9) — third-party sides
+// ============================================================================
+//
+// The HTTP resolver's CG.4b rule moved here unchanged (DF.9) so the channel
+// resolvers apply the one predicate: a client side whose every call site the
+// engine marked external (CG.4a for an ENDPOINT, DF.8 for a WS_CLIENT /
+// GRPC_CLIENT / GRAPHQL_OPERATION) and none of whose hosts names a service /
+// project alias of the build is a third-party call, and pairs with nothing.
+
+/// CA-13 (CG.4b): every call site of a client ENDPOINT is a third-party
+/// call: at least one ENDPOINT_HIT, and every ENDPOINT_HIT payload carries the
+/// `"external":true` mark the engine's endpoint fold writes (CG.4a: a host
+/// written in the call's own literal, public, and named by no URL constant of
+/// the client's repo). One unmarked site, or a non-JSON hit, and it is not.
+pub(crate) fn all_sites_external<'c>(cells: impl IntoIterator<Item = &'c Cell>) -> bool {
+    let mut seen = false;
+    for c in cells {
+        if c.kind != cell_type::ENDPOINT_HIT {
+            continue;
+        }
+        match &c.payload {
+            CellPayload::Json(json) if json.contains(EXTERNAL_MARK) => seen = true,
+            _ => return false,
+        }
+    }
+    seen
+}
+
+/// CA-13: the hosts of a third-party ENDPOINT, or None when it is not one.
+/// It is one when [`all_sites_external`] holds for its call sites and none of
+/// their hosts names a service / project of the build
+/// ([`host_names_an_alias`]).
+pub(crate) fn third_party_hosts(aliases: &AliasIndex, cells: &[&Cell]) -> Option<Vec<String>> {
+    if !all_sites_external(cells.iter().copied()) {
+        return None;
+    }
+    let hosts = hit_hosts(cells.iter().copied()).unwrap_or_default();
+    (!hosts.iter().any(|h| host_names_an_alias(aliases, h))).then_some(hosts)
+}
+
+/// The key CG.4a appends to an external site's ENDPOINT_HIT payload.
+pub(crate) const EXTERNAL_MARK: &str = "\"external\":true";
+
+/// Host labels that name no service: a public host's `api.` / `www.` says
+/// nothing about WHOSE api it is, so they are never compared with the alias
+/// keys (quokka's `app` project would otherwise claim `app.example.io`).
+pub(crate) const GENERIC_HOST_LABELS: &[&str] = &[
+    "api", "www", "app", "web", "cdn", "static", "gateway", "backend", "server", "service",
+];
+
+/// CA-13: does a public `host` name a service or project of this build? The
+/// whole host is looked up as [`narrow_by_host`] does, then every label of it
+/// but the last (the TLD) that is not in [`GENERIC_HOST_LABELS`], each through
+/// [`normalise_alias`]: `api.kinaswap.com` names a project called `kinaswap`
+/// even with no URL constant; `nominatim.openstreetmap.org` names nothing in
+/// a build without an `openstreetmap` / `nominatim` project.
+pub(crate) fn host_names_an_alias(aliases: &AliasIndex, host: &str) -> bool {
+    let host = host_name(host).to_ascii_lowercase();
+    if aliases.contains_key(&normalise_alias(&host)) {
+        return true;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    let named = labels.len().saturating_sub(1);
+    labels[..named]
+        .iter()
+        .filter(|l| !l.is_empty() && !GENERIC_HOST_LABELS.contains(l))
+        .any(|l| aliases.contains_key(&normalise_alias(l)))
+}
+
+/// DF.9: [`third_party_hosts`] over an alias index built on first need, so a
+/// resolve that meets no all-external side builds nothing new. A channel
+/// resolver passes the index it already builds lazily for [`narrow_by_host`];
+/// alias names are the same whatever owners scope them, and only names are
+/// read here.
+pub(crate) fn third_party_hosts_lazy(
+    aliases: &mut Option<AliasIndex>,
+    build: impl FnOnce() -> AliasIndex,
+    cells: &[&Cell],
+) -> Option<Vec<String>> {
+    if !all_sites_external(cells.iter().copied()) {
+        return None;
+    }
+    third_party_hosts(aliases.get_or_insert_with(build), cells)
+}
+
+/// DF.9: every node of `kind` whose cells, gathered across every graph entry
+/// of its id, make it a third-party side ([`third_party_hosts`]). The alias
+/// index is built with no target owners: owners scope an alias, they never
+/// add or remove one, and only alias names are read. Only probed: no order
+/// is promised.
+pub(crate) fn third_party_sides(graphs: &[RepoGraph], kind: NodeKindId) -> HashSet<NodeId> {
+    let mut cells: HashMap<NodeId, Vec<&Cell>> = HashMap::new();
+    for g in graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) == Some(&kind) {
+                cells.entry(n.id).or_default().extend(&n.cells);
+            }
+        }
+    }
+    let mut aliases: Option<AliasIndex> = None;
+    cells
+        .into_iter()
+        .filter(|(_, c)| {
+            third_party_hosts_lazy(&mut aliases, || build_service_alias_index(graphs, &Owners::default()).0, c)
+                .is_some()
+        })
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// DF.9: the third-party sides one channel resolver left unpaired (distinct
+/// ids: a resolver walking graph entries meets a two-entry side twice) and
+/// their distinct hosts. fired_on, when one was, after the resolver's own
+/// marker: `[channel-external] via=<ws|grpc|graphql> clients=<n> hosts=<k>`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ExternalSides {
+    sides: HashSet<NodeId>,
+    hosts: BTreeSet<String>,
+}
+
+impl ExternalSides {
+    /// Count `side` as third-party, dialling `hosts`.
+    pub(crate) fn add(&mut self, side: NodeId, hosts: Vec<String>) {
+        self.sides.insert(side);
+        self.hosts.extend(hosts);
+    }
+
+    /// The marker line, or None when no side was third-party.
+    pub(crate) fn line(&self, via: &str) -> Option<String> {
+        (!self.sides.is_empty()).then(|| {
+            format!("[channel-external] via={via} clients={} hosts={}", self.sides.len(), self.hosts.len())
+        })
+    }
+
+    /// Print the marker (see [`ExternalSides::line`]); silent with none.
+    pub(crate) fn report(&self, via: &str) {
+        if let Some(line) = self.line(via) {
+            eprintln!("{line}");
+        }
+    }
+}
+
+// ============================================================================
 // Narrowing
 // ============================================================================
 
@@ -590,6 +740,16 @@ impl<'g> SideNarrowing<'g> {
             }
         }
         Self { graphs, owners, scopes, cells, aliases: None }
+    }
+
+    /// DF.9: the hosts of `side` when it is a third-party side
+    /// ([`third_party_hosts`] over its cells from every graph copy, as
+    /// [`SideNarrowing::narrow`] reads them), else None. The alias index is
+    /// the one narrowing builds, on the first all-external side.
+    pub(crate) fn third_party_hosts(&mut self, side: NodeId) -> Option<Vec<String>> {
+        let cells = self.cells.get(&side)?;
+        let (graphs, owners) = (self.graphs, &self.owners);
+        third_party_hosts_lazy(&mut self.aliases, || build_service_alias_index(graphs, owners).0, cells)
     }
 
     /// Keep only the `targets` of the side `from` that live in the project or

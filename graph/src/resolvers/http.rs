@@ -8,8 +8,8 @@ use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId, RepoId};
 
 use super::host::{
-    AliasIndex, HostScoped, Narrowed, Owners, build_service_alias_index, hit_hosts, host_name,
-    narrow_by_host, normalise_alias, raw_field,
+    HostScoped, Narrowed, Owners, build_service_alias_index, hit_hosts, narrow_by_host, raw_field,
+    third_party_hosts,
 };
 use super::{CrossGraphResolver, RuleTally, weakest};
 use crate::merged::MergedGraph;
@@ -244,66 +244,6 @@ impl HttpStackResolver {
         stats.report_owner_narrowed(project_aliases);
         stats.report_owners(&owners);
     }
-}
-
-/// CA-13 (CG.4b): every call site of a client ENDPOINT is a third-party
-/// call: at least one ENDPOINT_HIT, and every ENDPOINT_HIT payload carries the
-/// `"external":true` mark the engine's endpoint fold writes (CG.4a: a host
-/// written in the call's own literal, public, and named by no URL constant of
-/// the client's repo). One unmarked site, or a non-JSON hit, and it is not.
-fn all_sites_external<'c>(cells: impl IntoIterator<Item = &'c Cell>) -> bool {
-    let mut seen = false;
-    for c in cells {
-        if c.kind != cell_type::ENDPOINT_HIT {
-            continue;
-        }
-        match &c.payload {
-            CellPayload::Json(json) if json.contains(EXTERNAL_MARK) => seen = true,
-            _ => return false,
-        }
-    }
-    seen
-}
-
-/// CA-13: the hosts of a third-party ENDPOINT, or None when it is not one.
-/// It is one when [`all_sites_external`] holds for its call sites and none of
-/// their hosts names a service / project of the build
-/// ([`host_names_an_alias`]).
-fn third_party_hosts(aliases: &AliasIndex, cells: &[&Cell]) -> Option<Vec<String>> {
-    if !all_sites_external(cells.iter().copied()) {
-        return None;
-    }
-    let hosts = hit_hosts(cells.iter().copied()).unwrap_or_default();
-    (!hosts.iter().any(|h| host_names_an_alias(aliases, h))).then_some(hosts)
-}
-
-/// The key CG.4a appends to an external site's ENDPOINT_HIT payload.
-const EXTERNAL_MARK: &str = "\"external\":true";
-
-/// Host labels that name no service: a public host's `api.` / `www.` says
-/// nothing about WHOSE api it is, so they are never compared with the alias
-/// keys (quokka's `app` project would otherwise claim `app.example.io`).
-const GENERIC_HOST_LABELS: &[&str] = &[
-    "api", "www", "app", "web", "cdn", "static", "gateway", "backend", "server", "service",
-];
-
-/// CA-13: does a public `host` name a service or project of this build? The
-/// whole host is looked up as [`narrow_by_host`] does, then every label of it
-/// but the last (the TLD) that is not in [`GENERIC_HOST_LABELS`], each through
-/// [`normalise_alias`]: `api.kinaswap.com` names a project called `kinaswap`
-/// even with no URL constant; `nominatim.openstreetmap.org` names nothing in
-/// a build without an `openstreetmap` / `nominatim` project.
-fn host_names_an_alias(aliases: &AliasIndex, host: &str) -> bool {
-    let host = host_name(host).to_ascii_lowercase();
-    if aliases.contains_key(&normalise_alias(&host)) {
-        return true;
-    }
-    let labels: Vec<&str> = host.split('.').collect();
-    let named = labels.len().saturating_sub(1);
-    labels[..named]
-        .iter()
-        .filter(|l| !l.is_empty() && !GENERIC_HOST_LABELS.contains(l))
-        .any(|l| aliases.contains_key(&normalise_alias(l)))
 }
 
 /// One client ENDPOINT node, however many graph entries carry it.
@@ -1507,7 +1447,7 @@ fn retier(
 
 #[cfg(test)]
 mod tests {
-    use super::super::host::{AliasIndex, AliasScope};
+    use super::super::host::{AliasIndex, AliasScope, all_sites_external, host_names_an_alias};
     use super::*;
 
     #[test]
