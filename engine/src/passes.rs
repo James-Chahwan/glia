@@ -5,15 +5,19 @@
 //! `Post` / `Finalize` specs of the code domain's pass registry
 //! ([`crate::profile::CODE_PASSES`], LD.13), which owns their order.
 
+use std::borrow::Cow;
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::Hasher;
 use std::path::Path;
 
 use glia_code_domain::evidence::{self, Basis, Evidence, Location};
 use glia_code_domain::glia_config::TestPaths;
-use glia_code_domain::{bare_module_qname, edge_category, node_kind, same_stem_order};
+use glia_code_domain::{bare_module_qname, cell_type, edge_category, node_kind, same_stem_order};
 use glia_code_extractors::generated::{Generated, generated_by_banner, generated_by_name};
-use glia_core::{Confidence, Edge, NodeId, NodeKindId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, RepoId};
 use glia_graph::{MergedGraph, RepoGraph};
+use twox_hash::XxHash64;
 
 use crate::profile::CodeBuildCtx;
 
@@ -30,7 +34,7 @@ pub(crate) fn edge_cells_marker(merged: &MergedGraph) {
 }
 
 /// LC.3a: what [`fill_evidence_sites`] found, for the `[evidence]` marker.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct FillStats {
     /// Edges visited, intra and cross.
     pub(crate) edges: usize,
@@ -107,6 +111,322 @@ fn synthetic_module_file(
         .then(|| qname.replace("::", "/"))
 }
 
+/// One node's fill input: its location ([`evidence::locate`] of its cells), its
+/// nav kind, and the LB.9b file fallback of an unlocated non-code MODULE
+/// ([`synthetic_module_file`]).
+type At = (Option<Location>, Option<NodeKindId>, Option<String>);
+
+/// The [`At`] of `n`, a node of `g`: its POSITION parsed, its kind, name and
+/// qname read off `g`'s nav.
+fn at_of(g: &RepoGraph, n: &Node) -> At {
+    let loc = evidence::locate(&n.cells);
+    let kind = g.nav.kind_by_id.get(&n.id).copied();
+    let fallback = if loc.is_none() {
+        synthetic_module_file(
+            kind,
+            &n.cells,
+            g.nav.qname_by_id.get(&n.id),
+            g.nav.name_by_id.get(&n.id),
+        )
+    } else {
+        None
+    };
+    (loc, kind, fallback)
+}
+
+/// What the fill decides for one edge, made without touching it.
+struct Decided {
+    /// The edge's evidence after the fill.
+    ev: Evidence,
+    /// `ev` differs from the edge's own, so it is attached.
+    changed: bool,
+    /// Placed at a non-code MODULE's file (LB.9b, `[evidence-file]`).
+    module_file: bool,
+}
+
+/// The LC.3a fill of one edge from its endpoints' [`At`]: `None` for an edge
+/// carrying no EVIDENCE cell (counted `missing`, never given one). A function
+/// of the edge's category and EVIDENCE cells and of the two `At`s only, which
+/// is what lets [`fill_group_evidence`] decide it ahead of Finalize.
+fn decide(e: &Edge, from: Option<&At>, to: Option<&At>) -> Option<Decided> {
+    let mut ev = Evidence::of(e)?;
+    let (mut changed, mut module_file) = (false, false);
+    if ev.file.is_none() {
+        let before = ev.clone();
+        ev.fill(
+            e.category,
+            to.and_then(|t| t.1),
+            from.and_then(|f| f.0.as_ref()),
+            to.and_then(|t| t.0.as_ref()),
+        );
+        // LB.9b: neither endpoint located, but one is a non-code MODULE
+        // whose file the qname names: basis `file` there, not `none`.
+        if ev.basis == Basis::None
+            && ev.line.is_none()
+            && let Some(file) = from
+                .and_then(|f| f.2.as_ref())
+                .or_else(|| to.and_then(|t| t.2.as_ref()))
+        {
+            ev.file = Some(file.clone());
+            ev.basis = Basis::File;
+            module_file = true;
+        }
+        changed = ev != before;
+    }
+    Some(Decided { ev, changed, module_file })
+}
+
+impl FillStats {
+    /// Count one edge with evidence at `basis`.
+    fn tally(&mut self, basis: Basis, module_file: bool) {
+        match basis {
+            Basis::Site => self.site += 1,
+            Basis::FromNode => self.from_node += 1,
+            Basis::ToNode => self.to_node += 1,
+            Basis::File => self.file += 1,
+            Basis::None => self.none += 1,
+        }
+        if module_file {
+            self.module_file += 1;
+        }
+    }
+}
+
+/// [`evidence::attach`] with the EVIDENCE cell already made: the edge's first
+/// EVIDENCE cell is replaced where it stands and any further one dropped, else
+/// the cell is appended. A cached fill ([`GroupFill`]) swaps its cell in
+/// through here, so no JSON is parsed or written at Finalize.
+fn attach_cell(e: &mut Edge, cell: Cell) {
+    match e.cells.iter().position(|c| c.kind == cell_type::EVIDENCE) {
+        Some(i) => {
+            let mut seen = 0usize;
+            e.cells.retain(|c| {
+                if c.kind != cell_type::EVIDENCE {
+                    return true;
+                }
+                seen += 1;
+                seen == 1
+            });
+            if let Some(slot) = e.cells.get_mut(i) {
+                *slot = cell;
+            }
+        }
+        None => e.cells.push(cell),
+    }
+}
+
+/// xxh64 of everything [`decide`] reads off an edge: its endpoints, its
+/// category and its EVIDENCE cells, in order (each payload's variant and
+/// length delimit it). Equal hashes at group build and at Finalize mean the
+/// edge's own fill inputs are unchanged.
+fn edge_fill_hash(e: &Edge) -> u64 {
+    let mut h = XxHash64::with_seed(0);
+    h.write_u64(e.from.0);
+    h.write_u64(e.to.0);
+    h.write_u32(e.category.0);
+    for c in e.cells.iter().filter(|c| c.kind == cell_type::EVIDENCE) {
+        let (tag, bytes) = match &c.payload {
+            CellPayload::Text(s) => (0u8, s.as_bytes()),
+            CellPayload::Json(s) => (1, s.as_bytes()),
+            CellPayload::Bytes(b) => (2, b.as_slice()),
+        };
+        h.write_u8(tag);
+        h.write_u64(bytes.len() as u64);
+        h.write(bytes);
+    }
+    h.finish()
+}
+
+/// xxh64 of a graph's node ids, in node order, and their count: the guard
+/// that a [`GroupFill`] still describes the graph it is applied to.
+fn node_ids_hash(g: &RepoGraph) -> u64 {
+    let mut h = XxHash64::with_seed(0);
+    h.write_u64(g.nodes.len() as u64);
+    for n in &g.nodes {
+        h.write_u64(n.id.0);
+    }
+    h.finish()
+}
+
+/// One edge's local fill result ([`GroupFill::edges`]).
+#[derive(Debug, Clone, Copy)]
+enum Contrib {
+    /// No EVIDENCE cell: counted `missing`.
+    Missing,
+    /// The basis after the local fill, whether it was placed at a non-code
+    /// MODULE's file, and its emitter ([`GroupFill::emitters`] index).
+    Filled { basis: Basis, module_file: bool, emitter: usize },
+    /// An endpoint is not a node of this graph: the local fill cannot know
+    /// its location, so Finalize fills the edge against the whole build.
+    Absent,
+}
+
+/// One edge of a [`GroupFill`]: its [`edge_fill_hash`] at group build and its
+/// local result.
+#[derive(Debug, Clone, Copy)]
+struct EdgeFill {
+    hash: u64,
+    contrib: Contrib,
+}
+
+/// DC.5: one language graph's evidence fill, decided at group build on the
+/// pool worker that built it ([`fill_group_evidence`]) against the graph's own
+/// node locations, and cached with the group's build (`LangBuild`, so a watch
+/// session that reuses the group never re-fills it). The graph itself is not
+/// touched: [`fill_evidence_sites_split`] applies the result at Finalize, edge
+/// for edge, wherever it is still the whole build's answer.
+///
+/// The premise: an edge's fill is a pure function of its category, its
+/// EVIDENCE cells and the [`At`] of both endpoints, where a node's `At` is
+/// that of its FIRST instance in graph order (one id can sit in several
+/// language graphs: a client ENDPOINT minted by two languages). No pass that
+/// runs between the group build and Finalize changes a POSITION,
+/// ENDPOINT_HIT, ROUTE_METHOD or IMPORTS cell, a nav kind, name or qname, or
+/// adds a node to a language graph (the resolvers append cross edges; the
+/// post-passes write confidence and ORIGIN / TEST / DECISION cells), so a
+/// graph's own `At`s are fixed at group build. What can still make a cached
+/// result differ from the global fill, and how Finalize catches it:
+/// - the endpoint's first instance is in an EARLIER graph with another `At`:
+///   that edge is re-filled;
+/// - the endpoint is not a node of this graph ([`Contrib::Absent`]): re-filled;
+/// - a pass replaced the edge's evidence (the SCIP stage restamps intra
+///   edges) or re-keyed it: its [`edge_fill_hash`] moved, so it is re-filled;
+/// - a pass added or removed an intra edge or a node: the edge count or the
+///   [`node_ids_hash`] differs, and the whole graph takes the global fill.
+///
+/// A pass that one day changes a node's POSITION cell, nav kind or qname
+/// before Finalize breaks the premise and must be named here (the byte and
+/// evidence-corpus gates would catch it first).
+#[derive(Debug, Clone)]
+pub(crate) struct GroupFill {
+    /// Each node id's `At`, first instance wins, in node order.
+    at: Vec<(NodeId, At)>,
+    /// [`node_ids_hash`] of the graph at group build.
+    nodes: u64,
+    /// One record per edge, index for index with the graph's edges.
+    edges: Vec<EdgeFill>,
+    /// The edges whose local fill changes their evidence: edge index and the
+    /// new EVIDENCE cell, in index order.
+    filled: Vec<(usize, Cell)>,
+    /// The emitter names [`Contrib::Filled`] points into, first seen first.
+    emitters: Vec<String>,
+}
+
+impl GroupFill {
+    /// Whether `g` still holds the nodes and the edge count this fill was
+    /// computed over.
+    fn describes(&self, g: &RepoGraph) -> bool {
+        g.edges.len() == self.edges.len() && node_ids_hash(g) == self.nodes
+    }
+}
+
+/// DC.5: decide the LC.3a fill of every edge of `g` against `g`'s own nodes
+/// ([`GroupFill`]), without mutating `g`. Runs in the group build, after the
+/// `graph:build` stamp and the `[evidence-lines]` tally (which counts basis
+/// `site` BEFORE the fill), so neither moves.
+pub(crate) fn fill_group_evidence(g: &RepoGraph) -> GroupFill {
+    let mut index: HashMap<NodeId, usize> = HashMap::with_capacity(g.nodes.len());
+    let mut at: Vec<(NodeId, At)> = Vec::with_capacity(g.nodes.len());
+    for n in &g.nodes {
+        if let Entry::Vacant(slot) = index.entry(n.id) {
+            slot.insert(at.len());
+            at.push((n.id, at_of(g, n)));
+        }
+    }
+    let local = |id: &NodeId| index.get(id).and_then(|&i| at.get(i)).map(|(_, a)| a);
+    let mut emitter_ix: HashMap<String, usize> = HashMap::new();
+    let mut emitters: Vec<String> = Vec::new();
+    let mut edges = Vec::with_capacity(g.edges.len());
+    let mut filled = Vec::new();
+    for (j, e) in g.edges.iter().enumerate() {
+        let (from, to) = (local(&e.from), local(&e.to));
+        let contrib = match (from, to) {
+            (Some(_), Some(_)) => match decide(e, from, to) {
+                None => Contrib::Missing,
+                Some(d) => {
+                    if d.changed {
+                        filled.push((j, d.ev.to_cell()));
+                    }
+                    let emitter = match emitter_ix.get(&d.ev.emitter) {
+                        Some(&i) => i,
+                        None => {
+                            emitter_ix.insert(d.ev.emitter.clone(), emitters.len());
+                            emitters.push(d.ev.emitter);
+                            emitters.len() - 1
+                        }
+                    };
+                    Contrib::Filled { basis: d.ev.basis, module_file: d.module_file, emitter }
+                }
+            },
+            _ => Contrib::Absent,
+        };
+        edges.push(EdgeFill { hash: edge_fill_hash(e), contrib });
+    }
+    GroupFill { at, nodes: node_ids_hash(g), edges, filled, emitters }
+}
+
+/// The whole build's [`At`] map: each id's first instance in graph order,
+/// with the index of the graph that holds it. Borrowed from a [`GroupFill`]
+/// where one applies, parsed from the node otherwise.
+type AtMap<'a> = HashMap<NodeId, (usize, Cow<'a, At>)>;
+
+/// The global LC.3a fill of one edge: [`decide`] against `at`, the evidence
+/// attached when it changed, counted into `stats`.
+fn fill_edge(e: &mut Edge, at: &AtMap<'_>, stats: &mut FillStats) {
+    stats.edges += 1;
+    let from = at.get(&e.from).map(|(_, a)| a.as_ref());
+    let to = at.get(&e.to).map(|(_, a)| a.as_ref());
+    let Some(d) = decide(e, from, to) else {
+        stats.missing += 1;
+        return;
+    };
+    if d.changed {
+        evidence::attach(e, d.ev.clone());
+    }
+    stats.tally(d.ev.basis, d.module_file);
+    *stats.emitters.entry(d.ev.emitter).or_default() += 1;
+}
+
+/// DC.5: how [`fill_evidence_sites_split`] split the fill, for its marker.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct SplitStats {
+    /// Graphs of the build.
+    pub(crate) graphs: usize,
+    /// Intra edges whose cached group result was applied.
+    pub(crate) group_filled: usize,
+    /// Intra edges of a graph with a usable [`GroupFill`] filled again
+    /// against the whole build (an endpoint first located in another graph,
+    /// an endpoint foreign to the graph, or evidence a pass changed).
+    pub(crate) refilled: usize,
+    /// Graphs filled globally: no [`GroupFill`] (regions, projects, docs,
+    /// every graph of a layout merge) or one that no longer describes it.
+    pub(crate) fallback_graphs: usize,
+    /// Cross edges, always filled globally.
+    pub(crate) cross: usize,
+}
+
+/// What [`fill_evidence_sites_split`] did: the LC.3a stats, unchanged by the
+/// split, and the split itself.
+#[derive(Debug)]
+pub(crate) struct SplitFill {
+    pub(crate) stats: FillStats,
+    pub(crate) split: SplitStats,
+}
+
+impl SplitFill {
+    /// The LC.3a `[evidence]` / LB.9b `[evidence-file]` lines
+    /// ([`FillStats::report`]), then DC.5's fired_on marker, once per build:
+    ///   `[evidence-split] graphs=<g> group_filled=<n> refilled=<r> fallback_graphs=<f> cross=<c>`
+    pub(crate) fn report(&self) {
+        self.stats.report();
+        let s = &self.split;
+        eprintln!(
+            "[evidence-split] graphs={} group_filled={} refilled={} fallback_graphs={} cross={}",
+            s.graphs, s.group_filled, s.refilled, s.fallback_graphs, s.cross
+        );
+    }
+}
+
 /// LC.3a: complete every edge's EVIDENCE location from its endpoints
 /// ([`Evidence::fill`]), over intra AND cross edges. A node's location is
 /// [`evidence::locate`] of its FIRST instance in graph order (one id can sit
@@ -118,82 +438,118 @@ fn synthetic_module_file(
 /// passes over loaded graphs) changes nothing. Runs after every pass that
 /// adds an edge and before the cross-edge sort (cells are part of LC.2's
 /// canonical order).
+///
+/// The fill with no [`GroupFill`]: every edge filled here. The external cell
+/// stage's second fill (`external::apply_external_cells`) calls this one.
 pub(crate) fn fill_evidence_sites(merged: &mut MergedGraph) -> FillStats {
-    // id -> (location, kind, the LB.9b file fallback of an unlocated
-    // non-code MODULE).
-    type At = (Option<Location>, Option<NodeKindId>, Option<String>);
-    let mut at: HashMap<NodeId, At> = HashMap::new();
-    for g in &merged.graphs {
-        for n in &g.nodes {
-            at.entry(n.id).or_insert_with(|| {
-                let loc = evidence::locate(&n.cells);
-                let kind = g.nav.kind_by_id.get(&n.id).copied();
-                let fallback = if loc.is_none() {
-                    synthetic_module_file(
-                        kind,
-                        &n.cells,
-                        g.nav.qname_by_id.get(&n.id),
-                        g.nav.name_by_id.get(&n.id),
-                    )
-                } else {
-                    None
-                };
-                (loc, kind, fallback)
-            });
+    fill_evidence_sites_split(merged, &[]).stats
+}
+
+/// DC.5: [`fill_evidence_sites`] taking each language graph's cached group
+/// result ([`GroupFill`]; `fills` is aligned with `merged.graphs`, `None`
+/// or a missing entry for a graph with none). Graph `i` with a fill that
+/// still describes it takes its cached results, re-filling only the edges
+/// [`GroupFill`]'s rules name; every other graph, and every cross edge, is
+/// filled as before. The global `At` map reads each fill's own `At`s, so no
+/// POSITION is parsed for those graphs. The evidence cells and [`FillStats`]
+/// are exactly the all-global fill's (`split_fill_equals_global_fill`).
+pub(crate) fn fill_evidence_sites_split(
+    merged: &mut MergedGraph,
+    fills: &[Option<GroupFill>],
+) -> SplitFill {
+    let usable: Vec<Option<&GroupFill>> = merged
+        .graphs
+        .iter()
+        .enumerate()
+        .map(|(i, g)| fills.get(i).and_then(Option::as_ref).filter(|f| f.describes(g)))
+        .collect();
+    let mut at: AtMap<'_> = HashMap::new();
+    // Per graph: its ids whose first instance in the build sits in an earlier
+    // graph with another `At`. Only graphs with a usable fill record them.
+    let mut moved: Vec<HashSet<NodeId>> = vec![HashSet::new(); merged.graphs.len()];
+    for (i, g) in merged.graphs.iter().enumerate() {
+        match usable.get(i).copied().flatten() {
+            Some(f) => {
+                for (id, a) in &f.at {
+                    match at.entry(*id) {
+                        Entry::Vacant(slot) => {
+                            slot.insert((i, Cow::Borrowed(a)));
+                        }
+                        Entry::Occupied(first) => {
+                            if first.get().1.as_ref() != a
+                                && let Some(set) = moved.get_mut(i)
+                            {
+                                set.insert(*id);
+                            }
+                        }
+                    }
+                }
+            }
+            None => {
+                for n in &g.nodes {
+                    at.entry(n.id).or_insert_with(|| (i, Cow::Owned(at_of(g, n))));
+                }
+            }
         }
     }
+
     let mut stats = FillStats::default();
+    let mut split = SplitStats {
+        graphs: merged.graphs.len(),
+        cross: merged.cross_edges.len(),
+        ..SplitStats::default()
+    };
     let MergedGraph {
         graphs,
         cross_edges,
         ..
     } = merged;
-    let edges = graphs
-        .iter_mut()
-        .flat_map(|g| g.edges.iter_mut())
-        .chain(cross_edges.iter_mut());
-    for e in edges {
-        stats.edges += 1;
-        let Some(mut ev) = Evidence::of(e) else {
-            stats.missing += 1;
+    for (i, g) in graphs.iter_mut().enumerate() {
+        let Some(f) = usable.get(i).copied().flatten() else {
+            split.fallback_graphs += 1;
+            for e in &mut g.edges {
+                fill_edge(e, &at, &mut stats);
+            }
             continue;
         };
-        if ev.file.is_none() {
-            let before = ev.clone();
-            let from = at.get(&e.from);
-            let to = at.get(&e.to);
-            ev.fill(
-                e.category,
-                to.and_then(|t| t.1),
-                from.and_then(|f| f.0.as_ref()),
-                to.and_then(|t| t.0.as_ref()),
-            );
-            // LB.9b: neither endpoint located, but one is a non-code MODULE
-            // whose file the qname names: basis `file` there, not `none`.
-            if ev.basis == Basis::None
-                && ev.line.is_none()
-                && let Some(file) = from
-                    .and_then(|f| f.2.as_ref())
-                    .or_else(|| to.and_then(|t| t.2.as_ref()))
-            {
-                ev.file = Some(file.clone());
-                ev.basis = Basis::File;
-                stats.module_file += 1;
+        let moved = moved.get(i).filter(|m| !m.is_empty());
+        let mut per_emitter = vec![0usize; f.emitters.len()];
+        let mut cached = f.filled.iter().peekable();
+        for (j, (e, rec)) in g.edges.iter_mut().zip(&f.edges).enumerate() {
+            let cell = cached.next_if(|(k, _)| *k == j).map(|(_, c)| c);
+            let refill = matches!(rec.contrib, Contrib::Absent)
+                || moved.is_some_and(|m| m.contains(&e.from) || m.contains(&e.to))
+                || edge_fill_hash(e) != rec.hash;
+            if refill {
+                split.refilled += 1;
+                fill_edge(e, &at, &mut stats);
+                continue;
             }
-            if ev != before {
-                evidence::attach(e, ev.clone());
+            split.group_filled += 1;
+            stats.edges += 1;
+            if let Some(cell) = cell {
+                attach_cell(e, cell.clone());
+            }
+            match rec.contrib {
+                Contrib::Filled { basis, module_file, emitter } => {
+                    stats.tally(basis, module_file);
+                    if let Some(n) = per_emitter.get_mut(emitter) {
+                        *n += 1;
+                    }
+                }
+                Contrib::Missing | Contrib::Absent => stats.missing += 1,
             }
         }
-        match ev.basis {
-            Basis::Site => stats.site += 1,
-            Basis::FromNode => stats.from_node += 1,
-            Basis::ToNode => stats.to_node += 1,
-            Basis::File => stats.file += 1,
-            Basis::None => stats.none += 1,
+        for (name, n) in f.emitters.iter().zip(per_emitter) {
+            if n > 0 {
+                *stats.emitters.entry(name.clone()).or_default() += n;
+            }
         }
-        *stats.emitters.entry(ev.emitter).or_default() += 1;
     }
-    stats
+    for e in cross_edges.iter_mut() {
+        fill_edge(e, &at, &mut stats);
+    }
+    SplitFill { stats, split }
 }
 
 /// WP-H / #7: link `.md` DOC_SECTION nodes to the code symbols they document so
@@ -2980,6 +3336,7 @@ mod passes_tests {
                 },
             ],
             overlay,
+            group_fills: Vec::new(),
         };
         let fixture = vec![r#"{"provenance":"test_fixture"}"#.to_string()];
 
@@ -3098,6 +3455,7 @@ mod passes_tests {
                 config: None,
             }],
             overlay: true,
+            group_fills: Vec::new(),
         };
         let origin = |p: &str| vec![format!(r#"{{"provenance":"{p}"}}"#)];
         let none: Vec<String> = Vec::new();
@@ -3848,5 +4206,288 @@ mod passes_tests {
         let merged = MergedGraph::new(vec![g]);
         let (edges, _) = tests_fn_edges(&merged, &[(calc_test, calc), (ops_test, ops)]);
         assert_eq!(fn_pairs(&edges), [(t_ops, add)]);
+    }
+    // ------------------------------------------------------------------
+    // DC.5 — the evidence fill split into group fills + Finalize
+    // ------------------------------------------------------------------
+
+    /// HEAD's (v0.5.1's) `fill_evidence_sites`, verbatim: the reference the
+    /// split fill must equal, kept apart from the code it checks.
+    fn head_global_fill(merged: &mut MergedGraph) -> FillStats {
+        // id -> (location, kind, the LB.9b file fallback of an unlocated
+        // non-code MODULE).
+        type At = (Option<Location>, Option<NodeKindId>, Option<String>);
+        let mut at: HashMap<NodeId, At> = HashMap::new();
+        for g in &merged.graphs {
+            for n in &g.nodes {
+                at.entry(n.id).or_insert_with(|| {
+                    let loc = evidence::locate(&n.cells);
+                    let kind = g.nav.kind_by_id.get(&n.id).copied();
+                    let fallback = if loc.is_none() {
+                        synthetic_module_file(
+                            kind,
+                            &n.cells,
+                            g.nav.qname_by_id.get(&n.id),
+                            g.nav.name_by_id.get(&n.id),
+                        )
+                    } else {
+                        None
+                    };
+                    (loc, kind, fallback)
+                });
+            }
+        }
+        let mut stats = FillStats::default();
+        let MergedGraph {
+            graphs,
+            cross_edges,
+            ..
+        } = merged;
+        let edges = graphs
+            .iter_mut()
+            .flat_map(|g| g.edges.iter_mut())
+            .chain(cross_edges.iter_mut());
+        for e in edges {
+            stats.edges += 1;
+            let Some(mut ev) = Evidence::of(e) else {
+                stats.missing += 1;
+                continue;
+            };
+            if ev.file.is_none() {
+                let before = ev.clone();
+                let from = at.get(&e.from);
+                let to = at.get(&e.to);
+                ev.fill(
+                    e.category,
+                    to.and_then(|t| t.1),
+                    from.and_then(|f| f.0.as_ref()),
+                    to.and_then(|t| t.0.as_ref()),
+                );
+                // LB.9b: neither endpoint located, but one is a non-code MODULE
+                // whose file the qname names: basis `file` there, not `none`.
+                if ev.basis == Basis::None
+                    && ev.line.is_none()
+                    && let Some(file) = from
+                        .and_then(|f| f.2.as_ref())
+                        .or_else(|| to.and_then(|t| t.2.as_ref()))
+                {
+                    ev.file = Some(file.clone());
+                    ev.basis = Basis::File;
+                    stats.module_file += 1;
+                }
+                if ev != before {
+                    evidence::attach(e, ev.clone());
+                }
+            }
+            match ev.basis {
+                Basis::Site => stats.site += 1,
+                Basis::FromNode => stats.from_node += 1,
+                Basis::ToNode => stats.to_node += 1,
+                Basis::File => stats.file += 1,
+                Basis::None => stats.none += 1,
+            }
+            *stats.emitters.entry(ev.emitter).or_default() += 1;
+        }
+        stats
+    }
+
+    fn pos(file: &str, line: u32) -> Cell {
+        Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":{line},"end_line":{}}}"#,
+                line + 2
+            )),
+        }
+    }
+
+    /// An edge whose only cell is `ev`'s EVIDENCE.
+    fn ev_edge(from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId, ev: Evidence) -> Edge {
+        Edge::new(from, to, category, Confidence::Strong).with_cell(ev.to_cell())
+    }
+
+    /// The five graphs of `split_fill_equals_global_fill`, built afresh on
+    /// every call so each fill runs over an identical copy, plus the edge a
+    /// "pass" removes from graph 2.
+    fn split_fixture() -> (Vec<RepoGraph>, Edge) {
+        let repo = "test://dc5";
+        let mut g0 = Hand::new(repo);
+        let f0 = g0.add(node_kind::FUNCTION, "f0", "a::f0", vec![pos("a.py", 3)]);
+        let h0 = g0.add(node_kind::FUNCTION, "h0", "a::h0", vec![pos("a.py", 10)]);
+        // One ENDPOINT id in graphs 0 and 1, at different places: the
+        // build locates it at graph 0's (its first instance).
+        let ep = g0.add(node_kind::ENDPOINT, "GET /x", "endpoint:GET:/x", vec![pos("web/a.ts", 5)]);
+        let only0 = g0.add(node_kind::FUNCTION, "only0", "a::only0", vec![pos("a.py", 20)]);
+        // LB.9b: a non-code MODULE (no POSITION, no IMPORTS) and an
+        // unlocated package it depends on.
+        let manifest = g0.add(node_kind::MODULE, "package.json", "web::package.json", vec![]);
+        let pkg = g0.add(node_kind::PACKAGE, "left-pad", "npm::left-pad", vec![]);
+        let mut graph0 = g0.graph();
+        let two_ev = Edge::new(f0, only0, edge_category::CALLS, Confidence::Strong)
+            .with_cell(Evidence::emitter("graph:build").to_cell())
+            .with_cell(Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json("{}".into()) })
+            .with_cell(Evidence::emitter("graph:other").to_cell());
+        graph0.edges = vec![
+            ev_edge(f0, h0, edge_category::CALLS, Evidence::emitter("graph:calls").rule("bare").line(4)),
+            // (3) a "pass" replaces this one's evidence before Finalize.
+            ev_edge(h0, f0, edge_category::CALLS, Evidence::emitter("graph:build")),
+            ev_edge(manifest, pkg, edge_category::DEPENDS_ON, Evidence::emitter("extractor:manifest")),
+            Edge::new(f0, ep, edge_category::USES, Confidence::Strong),
+            two_ev,
+            ev_edge(f0, ep, edge_category::DEFINES, Evidence::emitter("graph:build")),
+        ];
+
+        let mut g1 = Hand::new(repo);
+        let h1 = g1.add(node_kind::FUNCTION, "h1", "b::h1", vec![pos("b.ts", 2)]);
+        let k1 = g1.add(node_kind::FUNCTION, "k1", "b::k1", vec![pos("b.ts", 8)]);
+        let ep1 = g1.add(node_kind::ENDPOINT, "GET /x", "endpoint:GET:/x", vec![pos("web/b.ts", 7)]);
+        assert_eq!(ep1, ep, "one id in two graphs");
+        let mut graph1 = g1.graph();
+        graph1.edges = vec![
+            // (1) unfilled, into the shared ENDPOINT: located at graph 0's.
+            ev_edge(h1, ep, edge_category::CALLS, Evidence::emitter("graph:build")),
+            // (2) to an id only graph 0 holds, located at that end (the
+            // child of a structural edge).
+            ev_edge(h1, only0, edge_category::CONTAINS, Evidence::emitter("graph:refs")),
+            ev_edge(h1, k1, edge_category::CALLS, Evidence::emitter("graph:calls").line(3)),
+        ];
+
+        let mut g2 = Hand::new(repo);
+        let m2 = g2.add(node_kind::FUNCTION, "m2", "c::m2", vec![pos("c.go", 1)]);
+        let n2 = g2.add(node_kind::FUNCTION, "n2", "c::n2", vec![pos("c.go", 9)]);
+        let mut graph2 = g2.graph();
+        let removed = ev_edge(n2, m2, edge_category::CALLS, Evidence::emitter("graph:build"));
+        graph2.edges = vec![
+            ev_edge(m2, n2, edge_category::CALLS, Evidence::emitter("graph:build")),
+            removed.clone(),
+        ];
+
+        // A docs-like graph: no group fill.
+        let mut g3 = Hand::new(repo);
+        let doc = g3.add(node_kind::DOC_SECTION, "Intro", "README::Intro", vec![pos("README.md", 0)]);
+        let mut graph3 = g3.graph();
+        graph3.edges = vec![ev_edge(doc, h1, edge_category::DOCUMENTS, Evidence::emitter("pass:doclink"))];
+
+        // f0 again, with graph 0's very cells: same `At`, so its edge keeps
+        // the cached result.
+        let mut g4 = Hand::new(repo);
+        g4.add(node_kind::FUNCTION, "f0", "a::f0", vec![pos("a.py", 3)]);
+        let q4 = g4.add(node_kind::CLASS, "Q", "a::Q", vec![pos("a.py", 30)]);
+        let mut graph4 = g4.graph();
+        graph4.edges = vec![ev_edge(q4, f0, edge_category::CONTAINS, Evidence::emitter("graph:build"))];
+
+        (vec![graph0, graph1, graph2, graph3, graph4], removed)
+    }
+
+    /// What runs between the group builds and Finalize: (3) the SCIP-style
+    /// evidence replacement on a graph-0 edge, (4) a retain on graph 2, and
+    /// two resolver cross edges.
+    fn split_passes(m: &mut MergedGraph, removed: &Edge) {
+        let restamped = m.graphs[0].edges.get_mut(1).expect("graph 0's second edge");
+        evidence::attach(restamped, Evidence::emitter("scip").rule("occurrence").at("a.py", 11));
+        restamped.confidence = Confidence::Strong;
+        m.graphs[2].edges.retain(|e| e != removed);
+        let (doc, ep) = (m.graphs[3].nodes[0].id, m.graphs[0].nodes[2].id);
+        let h1 = m.graphs[1].nodes[0].id;
+        m.cross_edges = vec![
+            ev_edge(doc, ep, edge_category::DOCUMENTS, Evidence::emitter("pass:doclink")),
+            ev_edge(h1, ep, edge_category::HTTP_CALLS, Evidence::emitter("resolver:http")),
+        ];
+    }
+
+    /// DC.5: the split fill (cached group results + Finalize) equals HEAD's
+    /// global fill, cell for cell and stat for stat, over every case where a
+    /// cached result could differ: (1) an endpoint whose first instance is in
+    /// an earlier graph with another location, (2) an endpoint foreign to the
+    /// graph, (3) evidence a pass replaced, (4) an edge a pass removed; plus a
+    /// graph with no fill, cross edges, an edge with no evidence, one with two
+    /// EVIDENCE cells, and an LB.9b synthetic-MODULE edge.
+    #[test]
+    fn split_fill_equals_global_fill() {
+        let (graphs, removed) = split_fixture();
+        let fills: Vec<Option<GroupFill>> =
+            graphs.iter().enumerate().map(|(i, g)| (i != 3).then(|| fill_group_evidence(g))).collect();
+        // The group fill decides without touching its graph.
+        let (pristine, _) = split_fixture();
+        for (g, p) in graphs.iter().zip(&pristine) {
+            assert_eq!(g.edges, p.edges);
+        }
+
+        let mut split_m = MergedGraph::new(graphs);
+        split_passes(&mut split_m, &removed);
+        let split = fill_evidence_sites_split(&mut split_m, &fills);
+
+        let mut head_m = MergedGraph::new(split_fixture().0);
+        split_passes(&mut head_m, &removed);
+        let head = head_global_fill(&mut head_m);
+
+        let mut global_m = MergedGraph::new(split_fixture().0);
+        split_passes(&mut global_m, &removed);
+        let global = fill_evidence_sites(&mut global_m);
+
+        assert_eq!(split.stats, head, "FillStats");
+        assert_eq!(global, head, "the no-fills path is HEAD's");
+        for (i, (a, b)) in split_m.graphs.iter().zip(&head_m.graphs).enumerate() {
+            assert_eq!(a.edges, b.edges, "graph {i}'s edges");
+            assert_eq!(a.nodes, b.nodes, "graph {i}'s nodes");
+        }
+        assert_eq!(split_m.cross_edges, head_m.cross_edges);
+        assert_eq!(
+            split.split,
+            SplitStats { graphs: 5, group_filled: 7, refilled: 3, fallback_graphs: 2, cross: 2 }
+        );
+
+        // The cases bite: a graph-local result would have differed.
+        let file = |e: &Edge| Evidence::of(e).and_then(|ev| ev.file);
+        let (g0, g1) = (&split_m.graphs[0], &split_m.graphs[1]);
+        assert_eq!(file(&g1.edges[0]).as_deref(), Some("web/a.ts"), "(1) graph 0's ENDPOINT");
+        assert_eq!(file(&g1.edges[1]).as_deref(), Some("a.py"), "(2) graph 0's node");
+        assert_eq!(
+            Evidence::of(&g0.edges[1]).and_then(|ev| ev.rule).as_deref(),
+            Some("occurrence"),
+            "(3) the replaced evidence is kept"
+        );
+        assert_eq!(split_m.graphs[2].edges.len(), 1, "(4)");
+        assert_eq!(file(&g0.edges[2]).as_deref(), Some("web/package.json"), "LB.9b");
+        assert_eq!((head.missing, head.module_file), (1, 1));
+        let evidence_cells = |e: &Edge| e.cells.iter().filter(|c| c.kind == cell_type::EVIDENCE).count();
+        assert_eq!(evidence_cells(&g0.edges[4]), 1, "a filled edge keeps one EVIDENCE cell");
+        assert_eq!(g0.edges[4].cells.len(), 2, "and its ORIGIN cell");
+
+        // A fill that no longer describes its graph (another graph's, here)
+        // falls back to the global fill and stays exact.
+        let mut swapped_m = MergedGraph::new(split_fixture().0);
+        split_passes(&mut swapped_m, &removed);
+        let swapped: Vec<Option<GroupFill>> = vec![fills[1].clone(), fills[0].clone()];
+        let s = fill_evidence_sites_split(&mut swapped_m, &swapped);
+        assert_eq!(s.stats, head);
+        assert_eq!(s.split.fallback_graphs, 5, "{:?}", s.split);
+        for (a, b) in swapped_m.graphs.iter().zip(&head_m.graphs) {
+            assert_eq!(a.edges, b.edges);
+        }
+    }
+
+    /// The cell swap a cached fill applies is [`evidence::attach`]'s.
+    #[test]
+    fn attach_cell_is_evidence_attach() {
+        let (a, b) = (NodeId(1), NodeId(2));
+        let ev = Evidence::emitter("graph:build").at("x.py", 3);
+        let shapes: Vec<Vec<Cell>> = vec![
+            vec![],
+            vec![Evidence::emitter("old").to_cell()],
+            vec![
+                Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json("{}".into()) },
+                Evidence::emitter("old").to_cell(),
+                Evidence::emitter("older").to_cell(),
+            ],
+        ];
+        for cells in shapes {
+            let mut via_attach = Edge::new(a, b, edge_category::CALLS, Confidence::Strong);
+            via_attach.cells = cells.clone();
+            let mut via_cell = via_attach.clone();
+            evidence::attach(&mut via_attach, ev.clone());
+            attach_cell(&mut via_cell, ev.to_cell());
+            assert_eq!(via_cell, via_attach, "{cells:?}");
+        }
     }
 }

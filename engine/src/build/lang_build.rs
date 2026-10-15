@@ -23,6 +23,7 @@ use glia_graph::{GraphError, RepoGraph};
 use glia_graph::rust_paths::RustCrate;
 
 use crate::extract::{TS_FAMILY, build_group, path_to_qname};
+use crate::passes::{GroupFill, fill_group_evidence};
 
 use super::c_includes::{IncludeRoots, angle_includes, c_cpp_module_qnames};
 
@@ -104,6 +105,10 @@ pub(crate) struct LanguageGraphs {
     /// The plan key ([`GroupInput::key`]) of each graph in `graphs`, index
     /// for index: how a caller maps a graph back to its group.
     pub(crate) keys: Vec<&'static str>,
+    /// DC.5: each graph's evidence fill, decided at its group build
+    /// ([`fill_group_evidence`]), index for index with `graphs`: the build
+    /// tail applies them in its Finalize fill (`CodeBuildCtx::group_fills`).
+    pub(crate) fills: Vec<GroupFill>,
     /// LG.1c: the groups mapped on the engine pool, for the `[parallel]`
     /// line: every build group, the TS family's one graph included (CA.7).
     pub(crate) pooled: usize,
@@ -264,10 +269,18 @@ pub(crate) fn fold_groups(
     let pooled = builds.len();
     let mut graphs = Vec::new();
     let mut keys = Vec::new();
+    let mut fills = Vec::new();
     let mut recv_bound: Vec<(&str, usize)> = Vec::new();
     let mut heritage: Vec<HeritageTally> = Vec::new();
     for build in builds {
-        build.fold(&mut graphs, &mut keys, &mut recv_bound, &mut heritage, parse_errors);
+        build.fold(
+            &mut graphs,
+            &mut keys,
+            &mut fills,
+            &mut recv_bound,
+            &mut heritage,
+            parse_errors,
+        );
     }
     // A6.2a fired_on marker, once per repo, every `recv_stats::LANGS` row
     // zero-filled (LA.35a adds `rust`: bound = the field- and local-typed
@@ -280,7 +293,7 @@ pub(crate) fn fold_groups(
         eprintln!("{line}");
     }
 
-    LanguageGraphs { graphs, keys, pooled }
+    LanguageGraphs { graphs, keys, fills, pooled }
 }
 
 /// One non-TS build group's graph: the `build_*` its language takes. The
@@ -324,9 +337,11 @@ fn build_solo(
 pub(crate) struct LangBuild {
     /// The plan key ([`GroupInput::key`]).
     lang: &'static str,
-    /// The graph with its `graph:build` evidence stamped, and its
-    /// `[heritage]` tally; or the `parse_errors` line of a failed build.
-    graph: Result<(RepoGraph, HeritageTally), String>,
+    /// The graph with its `graph:build` evidence stamped, its `[heritage]`
+    /// tally and its evidence fill decided against its own nodes (DC.5,
+    /// [`fill_group_evidence`]: cached here, so a reused group is never
+    /// re-filled); or the `parse_errors` line of a failed build.
+    graph: Result<(RepoGraph, HeritageTally, GroupFill), String>,
     /// The receiver-typed binds `recv_stats` counted during the build.
     recv_bound: usize,
 }
@@ -343,16 +358,18 @@ impl LangBuild {
         self,
         graphs: &mut Vec<RepoGraph>,
         keys: &mut Vec<&'static str>,
+        fills: &mut Vec<GroupFill>,
         recv_bound: &mut Vec<(&'static str, usize)>,
         heritage: &mut Vec<HeritageTally>,
         parse_errors: &mut Vec<String>,
     ) {
         recv_bound.push((self.lang, self.recv_bound));
         match self.graph {
-            Ok((g, h)) => {
+            Ok((g, h, fill)) => {
                 heritage.push(h);
                 graphs.push(g);
                 keys.push(self.lang);
+                fills.push(fill);
             }
             Err(e) => parse_errors.push(e),
         }
@@ -360,9 +377,11 @@ impl LangBuild {
 }
 
 /// Run one language's graph build on THIS thread, tally it and print its
-/// LC.3b `[evidence-lines]` line. `recv_stats` is per thread (LG.1c) and the
-/// graph crate spawns no threads, so the `reset` .. `take` bracket holds
-/// exactly this build's receiver-typed binds.
+/// LC.3b `[evidence-lines]` line, then decide its evidence fill (DC.5,
+/// [`fill_group_evidence`]; after the tally, which counts basis `site` before
+/// the fill). `recv_stats` is per thread (LG.1c) and the graph crate spawns no
+/// threads, so the `reset` .. `take` bracket holds exactly this build's
+/// receiver-typed binds.
 fn build_one(
     lang: &'static str,
     parses: Vec<FileParse>,
@@ -379,7 +398,8 @@ fn build_one(
             if let Some(line) = LineTally::of(&g).marker(lang) {
                 eprintln!("{line}");
             }
-            Ok((g, h))
+            let fill = fill_group_evidence(&g);
+            Ok((g, h, fill))
         }
         Err(e) => Err(format!("{lang} graph: {e}")),
     };

@@ -55,6 +55,7 @@ use glia_graph::{
 
 use crate::build::BuildOptions;
 use crate::external::{RepoInputs, apply_external_edges};
+use crate::passes::GroupFill;
 use crate::{adr, passes};
 
 /// What every code pass receives besides the graph (LF.2b): each built repo's
@@ -62,20 +63,33 @@ use crate::{adr, passes};
 /// ([`BuildOptions::overlay`]). Made by the build only: its fields are
 /// crate-private. A layout merge ([`crate::merge`]) runs with no inputs: the
 /// overlay edges its members were built with are carried as member edges.
+///
+/// DC.5: `group_fills` holds each language graph's evidence fill, decided
+/// at its group build, aligned with the merged graphs (`None` for a region,
+/// project or docs graph); the Finalize `fill_evidence_sites` pass applies
+/// them. A context with none (a layout merge, [`Self::empty`]) fills every
+/// edge at Finalize, as before.
 pub struct CodeBuildCtx {
     pub(crate) inputs: Vec<RepoInputs>,
     pub(crate) overlay: bool,
+    pub(crate) group_fills: Vec<Option<GroupFill>>,
 }
 
 impl CodeBuildCtx {
     /// A build's context: its repos' inputs and options.
     pub(crate) fn new(inputs: Vec<RepoInputs>, opts: &BuildOptions) -> Self {
-        Self { inputs, overlay: opts.overlay }
+        Self { inputs, overlay: opts.overlay, group_fills: Vec::new() }
     }
 
     /// No external inputs: every external stage is a no-op.
     pub(crate) fn empty() -> Self {
-        Self { inputs: Vec::new(), overlay: true }
+        Self { inputs: Vec::new(), overlay: true, group_fills: Vec::new() }
+    }
+
+    /// This context with the build's group evidence fills (DC.5), aligned
+    /// with the graphs the passes run over.
+    pub(crate) fn with_group_fills(self, group_fills: Vec<Option<GroupFill>>) -> Self {
+        Self { group_fills, ..self }
     }
 }
 
@@ -221,13 +235,15 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
         run: |m, ctx| passes::tag_synthetic_provenance(m, ctx),
     },
     // LC.3a: locate every edge's evidence, after every pass that adds an
-    // edge and before the sort, whose canonical order compares cells.
+    // edge and before the sort, whose canonical order compares cells. DC.5:
+    // a language graph's intra edges take the fill decided at its group build
+    // where it still holds; the rest are filled here.
     PassSpec {
         name: "fill_evidence_sites",
         stage: Stage::Finalize,
         after: &[],
         populates: &[],
-        run: |m, _| passes::fill_evidence_sites(m).report(),
+        run: |m, ctx| passes::fill_evidence_sites_split(m, &ctx.group_fills).report(),
     },
     // Deterministic cross-edge order: several resolvers emit pairs by
     // iterating HashMap indexes (per-process seed), so the edge SET was stable

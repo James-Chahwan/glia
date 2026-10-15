@@ -60,6 +60,7 @@ use crate::cache::ParseCache;
 use crate::docs::{DocSource, FileDocSource, SnapshotDocSource, build_docs_graph};
 use crate::extract::GoModules;
 use crate::external::{RepoInputs, apply_external_cells, repo_inputs};
+use crate::passes::GroupFill;
 use crate::profile::{CodeBuildCtx, run_code_passes_with};
 use crate::walk::{
     RegionAnchor, WalkResult, build_project_graph, build_region_graph, walk_source_files,
@@ -292,12 +293,15 @@ fn generate_one_inner(
         config: inputs.first().and_then(|i| i.config.as_ref()),
         opts,
     };
-    let (mut graphs, mut parse_errors, mut times) = build_graphs_for_repo(&files, cache, &ctx);
+    let (mut graphs, fills, mut parse_errors, mut times) =
+        build_graphs_for_repo(&files, cache, &ctx);
     times.walk = walk;
+    let mut fills = group_fills(fills);
     graphs.extend(aux_graphs(&root, repo, &regions, &roots, md));
+    fills.resize_with(graphs.len(), || None);
     eprintln!("{}", times.repo_marker(repo_path));
     let Finished { merged, total_nodes, total_edges, times } =
-        finish_build(graphs, inputs, opts, 1, started);
+        finish_build(graphs, fills, inputs, opts, 1, started);
     parse_errors.shrink_to_fit();
     eprintln!("{}", times.marker());
     Ok(GenerateResult {
@@ -373,12 +377,12 @@ fn generate_many_inner(
     opts: &BuildOptions,
 ) -> Result<GenerateResult, String> {
     let started = Instant::now();
-    let Assembled { merged, parse_errors, label_inputs, repo_roots, inputs } =
+    let Assembled { merged, fills, parse_errors, label_inputs, repo_roots, inputs } =
         assemble_many_with(pairs, incremental, opts)?;
     // `merged` is the assembly's fresh merge (no cross edge, no pass undo
     // record), so the tail re-merges its graphs unchanged.
     let Finished { merged, total_nodes, total_edges, times } =
-        finish_build(merged.graphs, inputs, opts, label_inputs.len(), started);
+        finish_build(merged.graphs, fills, inputs, opts, label_inputs.len(), started);
     eprintln!("{}", times.marker());
     Ok(GenerateResult {
         merged,
@@ -396,6 +400,10 @@ fn generate_many_inner(
 /// a time instead.
 pub(crate) struct Assembled {
     pub(crate) merged: MergedGraph,
+    /// DC.5: each graph's group evidence fill, index for index with
+    /// `merged.graphs`: `Some` for a language graph, `None` for a region,
+    /// project or docs graph.
+    pub(crate) fills: Vec<Option<GroupFill>>,
     pub(crate) parse_errors: Vec<String>,
     /// `(RepoId.0, identity root as given)` per built repo, in argument
     /// order: the input of [`crate::arch::repo_label_map`].
@@ -429,6 +437,7 @@ pub(crate) fn assemble_many_with(
     opts: &BuildOptions,
 ) -> Result<Assembled, String> {
     let mut all_graphs = Vec::new();
+    let mut all_fills: Vec<Option<GroupFill>> = Vec::new();
     let mut all_errors = Vec::new();
     let mut label_inputs: Vec<(u64, String)> = Vec::new();
     let mut repo_roots: std::collections::BTreeMap<u64, String> = std::collections::BTreeMap::new();
@@ -519,7 +528,8 @@ pub(crate) fn assemble_many_with(
             config: input.config.as_ref(),
             opts,
         };
-        let (graphs, parse_errors, mut times) = build_graphs_for_repo(&files, cache.as_mut(), &ctx);
+        let (graphs, fills, parse_errors, mut times) =
+            build_graphs_for_repo(&files, cache.as_mut(), &ctx);
         times.walk = walk;
         inputs.push(input);
         // A tree built under another's identity (a materialised rev) never
@@ -531,7 +541,9 @@ pub(crate) fn assemble_many_with(
             eprintln!("[incremental] {identity_root}: warning: failed to save parse cache: {e}");
         }
         all_graphs.extend(graphs);
+        all_fills.extend(group_fills(fills));
         all_graphs.extend(aux_graphs(&root, repo, &regions, &roots, md));
+        all_fills.resize_with(all_graphs.len(), || None);
         all_errors.extend(parse_errors);
         eprintln!("{}", times.repo_marker(path));
     }
@@ -544,6 +556,7 @@ pub(crate) fn assemble_many_with(
     }
     Ok(Assembled {
         merged: MergedGraph::new(all_graphs),
+        fills: all_fills,
         parse_errors: all_errors,
         label_inputs,
         repo_roots,
@@ -580,6 +593,14 @@ pub(crate) fn aux_graphs(
     graphs
 }
 
+/// DC.5: a repo's language-graph fills ([`build_graphs_for_repo`]) as the
+/// build tail's slots, one `Some` per language graph. The caller pads the
+/// region / project / docs graphs it appends after them with `None`, so the
+/// slots stay index-aligned with the graphs [`finish_build`] merges.
+fn group_fills(fills: Vec<GroupFill>) -> Vec<Option<GroupFill>> {
+    fills.into_iter().map(Some).collect()
+}
+
 /// What [`finish_build`] hands back: the finished graph, its totals and the
 /// build's tail and total times.
 pub(crate) struct Finished {
@@ -597,17 +618,21 @@ pub(crate) struct Finished {
 /// run [`crate::profile::CODE_PASSES`] ([`run_code_passes_with`], LD.13) and
 /// then the external node-cell stage ([`apply_external_cells`], LF.1a) over
 /// `inputs` (each built repo's `.glia` inputs, in argument order), and total
-/// the nodes and edges. `repos` (the repos built) and `started` (the build's
-/// start) are the returned [`BuildTimes`]' `repos` and `total`.
+/// the nodes and edges. `fills` is aligned with `graphs` (DC.5: each language
+/// graph's group evidence fill, `None` for the others; a shorter list leaves
+/// the rest `None`), and the Finalize evidence fill applies them. `repos`
+/// (the repos built) and `started` (the build's start) are the returned
+/// [`BuildTimes`]' `repos` and `total`.
 pub(crate) fn finish_build(
     graphs: Vec<RepoGraph>,
+    fills: Vec<Option<GroupFill>>,
     inputs: Vec<RepoInputs>,
     opts: &BuildOptions,
     repos: usize,
     started: Instant,
 ) -> Finished {
     let mut merged = MergedGraph::new(graphs);
-    let ctx = CodeBuildCtx::new(inputs, opts);
+    let ctx = CodeBuildCtx::new(inputs, opts).with_group_fills(fills);
     let report = run_code_passes_with(&mut merged, &ctx);
     let external = timed(|| apply_external_cells(&mut merged, &ctx.inputs));
     let total_nodes: usize = merged.graphs.iter().map(|g| g.nodes.len()).sum();
@@ -1181,12 +1206,12 @@ mod stage_tests {
         };
         let builds = build_groups(plan.groups, slots, &group_ctx);
         let kept = builds.clone();
-        let LanguageGraphs { mut graphs, keys, pooled } =
+        let LanguageGraphs { mut graphs, keys, fills, pooled } =
             fold_groups(builds, &plan.recv_fields, &mut grafted.parse_errors, repo_path);
         repo_markers(&graphs, &plan.di_refs, &grafted, pooled, repo_path);
         graphs.extend(aux_graphs(&root, repo, &regions, &roots, md));
         let Finished { merged, total_nodes, total_edges, .. } =
-            finish_build(graphs, inputs, &opts, 1, started);
+            finish_build(graphs, group_fills(fills), inputs, &opts, 1, started);
         let result = GenerateResult {
             merged,
             total_nodes,
@@ -1306,6 +1331,72 @@ mod stage_tests {
         assert_eq!(
             shard_bytes(&b.result.merged, &tmp.path().join("b")),
             shard_bytes(&generate_one(repo_s).unwrap().merged, &tmp.path().join("clean")),
+        );
+    }
+
+    /// DC.5: a real build's passes run twice over one assembly, once with the
+    /// group evidence fills its language builds decided and once with none
+    /// (every edge filled at Finalize, as before DC.5): the `[evidence]`
+    /// stats and every graph's nodes, edges and cross edges are equal, and
+    /// the split did take the cached results.
+    #[test]
+    fn split_fill_equals_global_fill_on_a_build() {
+        use crate::passes::{SplitFill, fill_evidence_sites_split};
+        use crate::profile::CODE_PASSES;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        write_repo(&repo);
+        let repo_s = repo.to_str().unwrap().to_string();
+        let Assembled { merged, fills, .. } = assemble_many(&[repo_s], false).unwrap();
+        let languages = fills.iter().filter(|f| f.is_some()).count();
+        assert_eq!(languages, 4, "go, python, rust and the TS family");
+        assert_eq!(fills.len(), merged.graphs.len(), "one slot per graph");
+
+        let run = |ctx: &CodeBuildCtx| -> (MergedGraph, SplitFill) {
+            let mut m = MergedGraph::new(merged.graphs.clone());
+            let mut fill = None;
+            for spec in CODE_PASSES.order() {
+                if spec.name == "fill_evidence_sites" {
+                    fill = Some(fill_evidence_sites_split(&mut m, &ctx.group_fills));
+                } else {
+                    (spec.run)(&mut m, ctx);
+                }
+            }
+            (m, fill.expect("the Finalize fill ran"))
+        };
+        let (split_m, split) = run(&CodeBuildCtx::empty().with_group_fills(fills));
+        let (global_m, global) = run(&CodeBuildCtx::empty());
+
+        assert_eq!(split.stats, global.stats, "the `[evidence]` line is unchanged");
+        assert!(split.stats.edges > 0 && split.stats.missing == 0, "{:?}", split.stats);
+        assert_eq!(split_m.graphs.len(), global_m.graphs.len());
+        for (a, b) in split_m.graphs.iter().zip(&global_m.graphs) {
+            assert_eq!(a.nodes, b.nodes);
+            assert_eq!(a.edges, b.edges);
+        }
+        assert_eq!(split_m.cross_edges, global_m.cross_edges);
+        assert_eq!(
+            shard_bytes(&split_m, &tmp.path().join("split")),
+            shard_bytes(&global_m, &tmp.path().join("global")),
+        );
+
+        let intra: usize = global_m.graphs.iter().map(|g| g.edges.len()).sum();
+        let aux: usize = global_m.graphs.len() - languages;
+        let s = &split.split;
+        assert_eq!(
+            (s.graphs, s.fallback_graphs, s.cross),
+            (global_m.graphs.len(), aux, global_m.cross_edges.len())
+        );
+        assert!(s.group_filled > 0, "the cached group results were applied: {s:?}");
+        // A single-repo build appends its region / project / docs graphs
+        // after its language graphs.
+        let aux_edges: usize = global_m.graphs[languages..].iter().map(|g| g.edges.len()).sum();
+        assert_eq!(s.group_filled + s.refilled + aux_edges, intra, "every intra edge is counted once: {s:?}");
+        assert_eq!(
+            (global.split.group_filled, global.split.refilled, global.split.fallback_graphs),
+            (0, 0, global_m.graphs.len()),
+            "no fills: every graph is filled at Finalize"
         );
     }
 }

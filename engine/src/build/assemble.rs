@@ -27,6 +27,7 @@ use super::rpc_needles::RpcContext;
 use super::timing::PhaseTimes;
 use crate::cache::{ParseCache, content_hash};
 use crate::extract::{GoModules, detect_language};
+use crate::passes::GroupFill;
 use crate::route::parse_repo_files_hashed;
 
 /// The repo-scope name -> literal table (A11.1), built from every walked file
@@ -401,14 +402,16 @@ pub(crate) fn parse_and_graft(
 /// ([`lang_build::build_groups`], no reuse) and folded
 /// ([`lang_build::fold_groups`]), then [`repo_markers`].
 ///
-/// Also returns what its phases took (CA.9): `parse`, `const_scan` and
-/// `grafts` ([`parse_and_graft`]) and `language_build` (plan, build and
-/// fold). `walk` is left zero for the caller, which ran the walk, to fill.
+/// Also returns each graph's evidence fill, index for index with the graphs
+/// (DC.5, [`LanguageGraphs::fills`]), and what its phases took (CA.9):
+/// `parse`, `const_scan` and `grafts` ([`parse_and_graft`]) and
+/// `language_build` (plan, build and fold). `walk` is left zero for the
+/// caller, which ran the walk, to fill.
 pub(super) fn build_graphs_for_repo(
     files: &[(String, String)],
     cache: Option<&mut ParseCache>,
     ctx: &RepoBuildCtx<'_>,
-) -> (Vec<RepoGraph>, Vec<String>, PhaseTimes) {
+) -> (Vec<RepoGraph>, Vec<GroupFill>, Vec<String>, PhaseTimes) {
     let mut grafted = parse_and_graft(files, cache, ctx);
 
     let started = Instant::now();
@@ -424,7 +427,7 @@ pub(super) fn build_graphs_for_repo(
     // A clean build reuses nothing: every group is built.
     let reuse: Vec<Option<LangBuild>> = Vec::new();
     let builds = lang_build::build_groups(groups, reuse, &group_ctx);
-    let LanguageGraphs { graphs, keys, pooled } = lang_build::fold_groups(
+    let LanguageGraphs { graphs, keys, fills, pooled } = lang_build::fold_groups(
         builds,
         &recv_fields,
         &mut grafted.parse_errors,
@@ -435,9 +438,10 @@ pub(super) fn build_graphs_for_repo(
     // caller that keeps a per-graph side table beside them (a watch session's
     // group of each graph) maps a graph to its group through it.
     debug_assert_eq!(keys.len(), graphs.len(), "one plan key per language graph");
+    debug_assert_eq!(fills.len(), graphs.len(), "one evidence fill per language graph");
 
     repo_markers(&graphs, &di_refs, &grafted, pooled, ctx.repo_label);
-    (graphs, grafted.parse_errors, grafted.times)
+    (graphs, fills, grafted.parse_errors, grafted.times)
 }
 
 /// The per-repo lines printed once its language graphs are built:
