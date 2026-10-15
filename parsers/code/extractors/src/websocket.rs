@@ -51,6 +51,14 @@
 //! Both scan blocks over code bytes only ([`Blocks`], CodeMap's C-family
 //! lexing, which covers Rust and Scala).
 //!
+//! DH.9: Ratchet's `$app->route('/chat', new MyChat, ..)` is a PHP server
+//! (gated on `Ratchet\App`, a path literal or nothing). Dart's
+//! web_socket_channel (`WebSocketChannel` / `IOWebSocketChannel` /
+//! `HtmlWebSocketChannel.connect(..)`) and dart:io's `WebSocket.connect(..)`
+//! are clients whose URL may sit in a `Uri.parse(..)` / `Uri.tryParse(..)`
+//! ([`PathRead::ClientUri`]); a Dart literal's `$name` / `${expr}` is a
+//! dynamic piece of it ([`Interp::Dart`]).
+//!
 //! Anchors: the name is read per site, so EVERY site is anchored and
 //! `anchor::attach` gives each owning function its HANDLED_BY (server) or USES
 //! (client) edge. Python decorators anchor at the decorated `def` line
@@ -71,6 +79,9 @@
 //!   `[ws] clients framework=browser n=2 in live.ts`
 //!   `[ws] handlers framework=phoenix n=1 in lib/app_web/channels/user_socket.ex`
 //!   `[ws] clients framework=actioncable n=1 in chat.js`
+//!   `[ws] handlers framework=ratchet n=1 in server/server.php`
+//!   `[ws] clients framework=web_socket_channel n=1 in lib/chat.dart`
+//!   `[ws] clients framework=dart_io n=1 in bin/feed.dart`
 //! and one per file whose client sites named a host (CB.21):
 //!   `[ws] client hosts sites=1 in web/chat.ts`
 //!
@@ -120,6 +131,11 @@ enum PathRead {
     AfterAngle,
     /// [`client_path`] on positional argument `n`.
     Client(usize),
+    /// DH.9, Dart: [`client_path`] on positional argument `n` once
+    /// [`client_uri_arg`] stepped into a `Uri.parse(..)` / `Uri.tryParse(..)`
+    /// wrapper, every quoted literal read with Dart interpolation
+    /// ([`Interp::Dart`]).
+    ClientUri(usize),
     /// The class declared on the needle's own line, before the needle:
     /// `class ChatChannel < ApplicationCable::Channel` -> `ChatChannel`.
     ClassBeforeLt,
@@ -211,6 +227,12 @@ const PHOENIX_JS: &[&str] = &["\"phoenix\"", "'phoenix'"];
 const AXUM: &[&str] = &["axum"];
 /// Akka HTTP and its Apache fork Pekko HTTP, by package.
 const AKKA_HTTP: &[&str] = &["akka.http", "org.apache.pekko.http"];
+/// Ratchet's routing facade, by its class (`use Ratchet\App;` or a qualified
+/// `new \Ratchet\App(..)`).
+const RATCHET: &[&str] = &["Ratchet\\App"];
+/// Dart's web_socket_channel package, by its import (`/web_socket_channel.dart`,
+/// `/io.dart`, `/html.dart`).
+const WEB_SOCKET_CHANNEL: &[&str] = &["package:web_socket_channel/"];
 
 const HANDLER_ROWS: &[WsRow] = &[
     // node `ws` / socket servers. A bare `WebSocketServer` (an import line)
@@ -290,6 +312,18 @@ const HANDLER_ROWS: &[WsRow] = &[
         AKKA_HTTP,
         PathRead::AkkaDirective,
         "akka-http",
+    ),
+    // PHP: Ratchet's `$app->route('/chat', new MyChat, array('*'))` (DH.9).
+    // ReadOnly: only a path literal mints. The handler object is an instance
+    // (`new MyChat`), not a symbol a ref could bind, so no HANDLED_BY to it is
+    // read. KNOWN IMPRECISION: a Slim / Laravel `->route('/p', ..)` sharing a
+    // file with Ratchet reads as a socket route.
+    keyed_row(
+        "->route(",
+        RATCHET,
+        PathRead::Arg(0),
+        Accept::ReadOnly,
+        "ratchet",
     ),
     // C#: SignalR hubs and raw ASP.NET Core sockets.
     row("MapHub<", &["SignalR"], PathRead::AfterAngle, "signalr"),
@@ -383,6 +417,34 @@ const CLIENT_ROWS: &[WsRow] = &[
         NONE,
         PathRead::Client(0),
         "python-websockets",
+    ),
+    // Dart (DH.9): web_socket_channel's three channel classes and dart:io's
+    // own socket. Needles are word-bounded ([`sites`]), so each channel class
+    // is its own row; `connect` takes a `Uri` (or, for `IOWebSocketChannel`,
+    // a `String`), dart:io's `WebSocket.connect` a `String`.
+    row(
+        "WebSocketChannel.connect(",
+        WEB_SOCKET_CHANNEL,
+        PathRead::ClientUri(0),
+        "web_socket_channel",
+    ),
+    row(
+        "IOWebSocketChannel.connect(",
+        WEB_SOCKET_CHANNEL,
+        PathRead::ClientUri(0),
+        "web_socket_channel",
+    ),
+    row(
+        "HtmlWebSocketChannel.connect(",
+        WEB_SOCKET_CHANNEL,
+        PathRead::ClientUri(0),
+        "web_socket_channel",
+    ),
+    row(
+        "WebSocket.connect(",
+        &["dart:io"],
+        PathRead::ClientUri(0),
+        "dart_io",
     ),
     // ActionCable consumer (LA.18c): the channel class it subscribes to.
     keyed_row(
@@ -627,7 +689,10 @@ fn read_name(
             let open = after_angle(source, after)?;
             server_literal(split_top(call_region(source, open)?, b',').first()?)?
         }
-        PathRead::Client(n) => client_path(split_top(call_region(source, after)?, b',').get(n)?)?,
+        PathRead::Client(_) | PathRead::ClientUri(_) => {
+            let (arg, interp) = client_url_arg(source, after, r.read)?;
+            client_path(arg, interp)?
+        }
         PathRead::ClassBeforeLt => class_before(source, offset, after)?,
         PathRead::LineLiteral => line_literal(source, offset)?,
         PathRead::AxumRoute => {
@@ -925,8 +990,8 @@ fn after_angle(source: &str, start: usize) -> Option<usize> {
 /// `"ws://" + location.host + "/ws/chat"` -> `/ws/chat`,
 /// `` `${base}/ws/admin` `` -> `/ws/admin`,
 /// `"wss://api.example.com/echo"` -> `/echo`, `url` -> `None`.
-fn client_path(arg: &str) -> Option<String> {
-    let text = client_text(arg)?;
+fn client_path(arg: &str, interp: Interp) -> Option<String> {
+    let text = client_text(arg, interp)?;
     let candidate = match (text.find(DYNAMIC), text.rfind(DYNAMIC)) {
         (Some(first), Some(last)) => {
             let tail = text.get(last + DYNAMIC.len_utf8()..).unwrap_or("");
@@ -946,12 +1011,64 @@ fn client_path(arg: &str) -> Option<String> {
     path.starts_with('/').then(|| path.to_string())
 }
 
+/// How a client URL's quoted literals interpolate ([`client_text`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Interp {
+    /// Every row but Dart's: only a backtick template's `${...}` spans are
+    /// dynamic; a `'...'` / `"..."` literal is static text.
+    Backtick,
+    /// Dart (DH.9): `$name` and `${expr}` inside any quoted literal are
+    /// dynamic ([`push_dart`]).
+    Dart,
+}
+
+/// The URL argument a client row reads at the call whose `(` ends just before
+/// `after`, and how its literals interpolate; `None` for a row that reads no
+/// URL ([`PathRead::Client`] / [`PathRead::ClientUri`] only). The one reader
+/// of that argument, so [`read_name`] and [`site_host`] see the same text.
+fn client_url_arg(source: &str, after: usize, read: PathRead) -> Option<(&str, Interp)> {
+    let (n, interp) = match read {
+        PathRead::Client(n) => (n, Interp::Backtick),
+        PathRead::ClientUri(n) => (n, Interp::Dart),
+        _ => return None,
+    };
+    let arg = *split_top(call_region(source, after)?, b',').get(n)?;
+    Some(match interp {
+        Interp::Dart => (client_uri_arg(arg), interp),
+        Interp::Backtick => (arg, interp),
+    })
+}
+
+/// DH.9: a Dart URL argument with its `Uri.parse(..)` / `Uri.tryParse(..)`
+/// wrapper stepped into: the wrapper's first argument when `arg` is exactly
+/// that call (a trailing null assertion `!` allowed), else `arg` itself
+/// (`IOWebSocketChannel.connect('ws://..')`, dart:io's `String` URL). A
+/// wrapper with more after it (`Uri.parse(u).replace(..)`) stays whole, so it
+/// reads as one dynamic piece.
+fn client_uri_arg(arg: &str) -> &str {
+    let arg = arg.trim();
+    ["Uri.parse(", "Uri.tryParse("]
+        .iter()
+        .find_map(|wrapper| {
+            let inner = arg.strip_prefix(wrapper)?;
+            let region = call_region(inner, 0)?;
+            let tail = inner.get(region.len()..)?.strip_prefix(')')?.trim();
+            if tail.is_empty() || tail == "!" {
+                split_top(region, b',').first().copied()
+            } else {
+                None
+            }
+        })
+        .unwrap_or(arg)
+}
+
 /// A client URL argument as text: split into top-level `+` pieces, a string
 /// literal is static text, a template literal is static text with each
-/// `${...}` span a [`DYNAMIC`], anything else is one [`DYNAMIC`]. `None` for an
-/// empty argument. Shared by [`client_path`] and [`client_host`], so the two
-/// read one argument identically.
-fn client_text(arg: &str) -> Option<String> {
+/// `${...}` span a [`DYNAMIC`], anything else is one [`DYNAMIC`]. Under
+/// [`Interp::Dart`] a quoted literal's `$name` / `${expr}` are [`DYNAMIC`] too.
+/// `None` for an empty argument. Shared by [`client_path`] and
+/// [`client_host`], so the two read one argument identically.
+fn client_text(arg: &str, interp: Interp) -> Option<String> {
     let arg = arg.trim();
     if arg.is_empty() {
         return None;
@@ -963,6 +1080,8 @@ fn client_text(arg: &str) -> Option<String> {
             Some((lit, rest)) if rest.trim().is_empty() => {
                 if piece.starts_with('`') {
                     push_template(&mut text, lit);
+                } else if interp == Interp::Dart {
+                    push_dart(&mut text, lit);
                 } else {
                     text.push_str(lit);
                 }
@@ -993,8 +1112,8 @@ const WS_SCHEMES: [&str; 4] = ["ws://", "wss://", "http://", "https://"];
 /// `"wss://api.example.com/ws?token=" + t` -> `api.example.com`,
 /// `"ws://" + location.host + "/ws"` -> `None`, `` `${base}/ws` `` -> `None`,
 /// `"ws://chat-svc:" + port + "/ws"` -> `None`.
-fn client_host(arg: &str) -> Option<String> {
-    let text = client_text(arg)?;
+fn client_host(arg: &str, interp: Interp) -> Option<String> {
+    let text = client_text(arg, interp)?;
     let (head, dynamic) = match text.find(DYNAMIC) {
         Some(i) => (text.get(..i)?, true),
         None => (text.as_str(), false),
@@ -1007,14 +1126,12 @@ fn client_host(arg: &str) -> Option<String> {
 }
 
 /// CB.21: the host one client site dials. Only a row that reads a client URL
-/// ([`PathRead::Client`]) can name one; every other client row (a channel
-/// class, a topic, an import line) records none.
+/// ([`PathRead::Client`], [`PathRead::ClientUri`]) can name one; every other
+/// client row (a channel class, a topic, an import line) records none.
 fn site_host(source: &str, offset: usize, r: &WsRow) -> Option<String> {
-    let PathRead::Client(n) = r.read else {
-        return None;
-    };
     let after = offset.checked_add(r.needle.len())?;
-    client_host(split_top(call_region(source, after)?, b',').get(n)?)
+    let (arg, interp) = client_url_arg(source, after, r.read)?;
+    client_host(arg, interp)
 }
 
 /// Template-literal content into `out`, each `${...}` span as [`DYNAMIC`].
@@ -1024,22 +1141,64 @@ fn push_template(out: &mut String, lit: &str) {
         out.push_str(rest.get(..open).unwrap_or(""));
         out.push(DYNAMIC);
         let body = rest.get(open + 2..).unwrap_or("");
-        let mut depth = 1i32;
-        let mut end = body.len();
-        for (i, c) in body.char_indices() {
-            match c {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = i + 1;
-                        break;
-                    }
+        rest = body.get(span_end(body)..).unwrap_or("");
+    }
+    out.push_str(rest);
+}
+
+/// For the text just inside a `${`: the offset just past its matching `}`, or
+/// the end of `body` when it never closes.
+fn span_end(body: &str) -> usize {
+    let mut depth = 1i32;
+    for (i, c) in body.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
                 }
-                _ => {}
             }
+            _ => {}
         }
-        rest = body.get(end..).unwrap_or("");
+    }
+    body.len()
+}
+
+/// DH.9: Dart literal content into `out`, each `$name` / `${expr}`
+/// interpolation as [`DYNAMIC`]. A `\`-escaped char (`\$`) is kept as written
+/// and never interpolates, as every other client literal keeps its escapes.
+fn push_dart(out: &mut String, lit: &str) {
+    let mut rest = lit;
+    while let Some(at) = rest.find(['$', '\\']) {
+        out.push_str(rest.get(..at).unwrap_or(""));
+        let tail = rest.get(at..).unwrap_or("");
+        let mut chars = tail.chars();
+        let skip = match (chars.next(), chars.next()) {
+            (Some('\\'), Some(c)) => {
+                out.push('\\');
+                out.push(c);
+                1 + c.len_utf8()
+            }
+            (Some('$'), Some('{')) => {
+                out.push(DYNAMIC);
+                2 + span_end(tail.get(2..).unwrap_or(""))
+            }
+            (Some('$'), Some(c)) if c.is_ascii_alphabetic() || c == '_' => {
+                out.push(DYNAMIC);
+                1 + tail
+                    .bytes()
+                    .skip(1)
+                    .take_while(|b| is_ident_byte(*b))
+                    .count()
+            }
+            (Some(c), _) => {
+                out.push(c);
+                c.len_utf8()
+            }
+            (None, _) => break,
+        };
+        rest = tail.get(skip..).unwrap_or("");
     }
     out.push_str(rest);
 }
@@ -1790,6 +1949,7 @@ mod tests {
                 PathRead::Arg(_)
                 | PathRead::KeyedOrArg(_)
                 | PathRead::Client(_)
+                | PathRead::ClientUri(_)
                 | PathRead::AxumRoute
                 | PathRead::AkkaDirective => {
                     assert!(r.needle.ends_with('('), "{}", r.needle)
@@ -1980,7 +2140,10 @@ mod tests {
         let _ = clients(&long);
         let _ = handlers("using SignalR;\napp.MapHub<");
         let _ = handlers("import fastapi\n@app.websocket(");
-        assert_eq!(client_path("\"ws://h/ß\""), Some("/ß".to_string()));
+        assert_eq!(
+            client_path("\"ws://h/ß\"", Interp::Backtick),
+            Some("/ß".to_string())
+        );
     }
 
     /// Every row, gate satisfied, with 4-byte chars before the needle, inside
@@ -2050,8 +2213,14 @@ mod tests {
                 ]
             )]
         );
-        assert_eq!(client_host("\"https://api.example.com/hubs/chat\""), Some("api.example.com".into()));
-        assert_eq!(client_host("`ws://notify:9000/live`"), Some("notify:9000".into()));
+        assert_eq!(
+            client_host("\"https://api.example.com/hubs/chat\"", Interp::Backtick),
+            Some("api.example.com".into())
+        );
+        assert_eq!(
+            client_host("`ws://notify:9000/live`", Interp::Backtick),
+            Some("notify:9000".into())
+        );
         let go = "import \"github.com/gorilla/websocket\"\n\
                   c, _, _ := websocket.DefaultDialer.DialContext(ctx, \"ws://chat-svc/ws\", nil)\n";
         assert_eq!(
@@ -2075,7 +2244,7 @@ mod tests {
             "\"ws://${…}/ws\"",
             "\"\"",
         ] {
-            assert_eq!(client_host(arg), None, "{arg}");
+            assert_eq!(client_host(arg, Interp::Backtick), None, "{arg}");
         }
         let src = "const a = new WebSocket(\"ws://\" + location.host + \"/ws\");\n\
                    const b = new WebSocket(url);\n\
@@ -2430,5 +2599,192 @@ mod tests {
         assert_eq!(normalise_ws_path("http://h/hubs/chat"), "/hubs/chat");
         assert_eq!(normalise_ws_path("https://h"), "");
         assert_eq!(normalise_ws_path("/rel"), "/rel");
+    }
+
+    // ---- DH.9: Ratchet servers, Dart clients -----------------------------
+
+    /// bench/substrate-gap/matrix/php/ws/server/server.php.
+    const RATCHET_SERVER: &str = "<?php\n\
+        \n\
+        use Ratchet\\Http\\HttpServer;\n\
+        use Ratchet\\Server\\IoServer;\n\
+        use Ratchet\\WebSocket\\WsServer;\n\
+        use Ratchet\\App;\n\
+        \n\
+        $app = new App('localhost', 8080);\n\
+        $app->route('/ws/chat', new Chat(), ['*']);\n\
+        $app->run();\n";
+
+    #[test]
+    fn ratchet_route_mints_handler() {
+        let out = handlers(RATCHET_SERVER);
+        assert_eq!(anchored(&out), vec![("ws:/ws/chat".to_string(), 8)]);
+        // A qualified `new \Ratchet\App(..)` gates the file as well, and every
+        // route is read.
+        let src = "<?php\n$app = new \\Ratchet\\App('localhost', 8080);\n\
+                   $app->route('/chat', new MyChat, array('*'));\n\
+                   $app->route(\"/echo\", new Echo, array('*'), 'localhost');\n";
+        assert_eq!(qnames(&handlers(src)), vec!["ws:/chat", "ws:/echo"]);
+    }
+
+    #[test]
+    fn ratchet_route_without_path_literal_mints_nothing() {
+        let src = "<?php\nuse Ratchet\\App;\n$app = new App('localhost', 8080);\n\
+                   $app->route($path, new Chat(), ['*']);\n\
+                   $app->route(self::PATH . '/chat', new Chat());\n";
+        let out = handlers(src);
+        assert!(out.nodes.is_empty(), "{:?}", qnames(&out));
+        assert!(out.anchors.is_empty());
+        // `->route(` outside a Ratchet file (Slim, Laravel) is an HTTP router.
+        let slim = "<?php\nuse Slim\\Factory\\AppFactory;\n\
+                    $app->route('/users', 'UserController');\n\
+                    $router->route('/ws/chat', $handler);\n";
+        assert!(
+            handlers(slim).nodes.is_empty(),
+            "{:?}",
+            qnames(&handlers(slim))
+        );
+        // A Ratchet route is never a client.
+        assert!(clients(RATCHET_SERVER).nodes.is_empty());
+    }
+
+    /// bench/substrate-gap/matrix/dart/ws/client/lib/chat.dart.
+    const DART_CHANNEL: &str = "import 'package:web_socket_channel/web_socket_channel.dart';\n\
+        \n\
+        WebSocketChannel connect() {\n\
+        \x20 final channel = WebSocketChannel.connect(Uri.parse('ws://api/ws/chat'));\n\
+        \x20 channel.stream.listen((m) => print(m));\n\
+        \x20 return channel;\n\
+        }\n";
+
+    #[test]
+    fn web_socket_channel_uri_parse_client() {
+        let out = clients(DART_CHANNEL);
+        assert_eq!(anchored(&out), vec![("ws_client:/ws/chat".to_string(), 3)]);
+        assert_eq!(
+            hits(&out),
+            vec![(
+                "ws_client:/ws/chat".to_string(),
+                vec![r#"{"via":"ws","host":"api"}"#.to_string()]
+            )]
+        );
+        // `Uri.tryParse(..)` steps in the same way; a variable inside the
+        // wrapper is the generic client, with no host.
+        let src = "import 'package:web_socket_channel/web_socket_channel.dart';\n\
+                   final a = WebSocketChannel.connect(Uri.tryParse(\"wss://feed.example.com/live\")!);\n\
+                   final b = WebSocketChannel.connect(Uri.parse(url));\n\
+                   final c = WebSocketChannel.connect(Uri.parse('ws://h/x').replace(port: 9));\n";
+        assert_eq!(
+            hits(&clients(src)),
+            vec![
+                (
+                    "ws_client:/live".to_string(),
+                    vec![r#"{"via":"ws","host":"feed.example.com"}"#.to_string()]
+                ),
+                (
+                    "ws_client:ws".to_string(),
+                    vec![r#"{"via":"ws"}"#.to_string(), r#"{"via":"ws"}"#.to_string()]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn io_web_socket_channel_string_url() {
+        let src = "import 'package:web_socket_channel/io.dart';\n\
+                   import 'package:web_socket_channel/html.dart';\n\
+                   final io = IOWebSocketChannel.connect('ws://chat-svc:8080/ws/io');\n\
+                   final web = HtmlWebSocketChannel.connect(Uri.parse('wss://chat-svc/ws/web'));\n";
+        let out = clients(src);
+        assert_eq!(
+            anchored(&out),
+            vec![
+                ("ws_client:/ws/io".to_string(), 2),
+                ("ws_client:/ws/web".to_string(), 3)
+            ]
+        );
+        assert_eq!(
+            hits(&out),
+            vec![
+                (
+                    "ws_client:/ws/io".to_string(),
+                    vec![r#"{"via":"ws","host":"chat-svc:8080"}"#.to_string()]
+                ),
+                (
+                    "ws_client:/ws/web".to_string(),
+                    vec![r#"{"via":"ws","host":"chat-svc"}"#.to_string()]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn dart_io_websocket_connect() {
+        let src = "import 'dart:io';\n\
+                   Future<void> main() async {\n\
+                   \x20 final socket = await WebSocket.connect('ws://localhost:4040/ws/raw');\n\
+                   \x20 socket.add('hi');\n\
+                   }\n";
+        let out = clients(src);
+        assert_eq!(anchored(&out), vec![("ws_client:/ws/raw".to_string(), 2)]);
+        assert_eq!(
+            hits(&out),
+            vec![(
+                "ws_client:/ws/raw".to_string(),
+                vec![r#"{"via":"ws","host":"localhost:4040"}"#.to_string()]
+            )]
+        );
+    }
+
+    /// Dart interpolates `$name` and `${expr}` in any quoted literal: each is
+    /// a dynamic piece, never path or host text.
+    #[test]
+    fn dart_interpolation_is_dynamic() {
+        let src = "import 'package:web_socket_channel/web_socket_channel.dart';\n\
+                   final a = WebSocketChannel.connect(Uri.parse('$wsBase/ws/chat'));\n\
+                   final b = WebSocketChannel.connect(Uri.parse('ws://${env.host}/ws/feed'));\n\
+                   final c = WebSocketChannel.connect(Uri.parse('ws://h/rooms/$room'));\n\
+                   final d = WebSocketChannel.connect(Uri.parse('ws://h/cost\\$/x'));\n";
+        assert_eq!(
+            hits(&clients(src)),
+            vec![
+                (
+                    "ws_client:/ws/chat".to_string(),
+                    vec![r#"{"via":"ws"}"#.to_string()]
+                ),
+                (
+                    "ws_client:/ws/feed".to_string(),
+                    vec![r#"{"via":"ws"}"#.to_string()]
+                ),
+                (
+                    "ws_client:/rooms/".to_string(),
+                    vec![r#"{"via":"ws","host":"h"}"#.to_string()]
+                ),
+                (
+                    "ws_client:/cost\\$/x".to_string(),
+                    vec![r#"{"via":"ws","host":"h"}"#.to_string()]
+                ),
+            ]
+        );
+        // The JS rows keep reading `$` as text: no Dart rule leaks into them.
+        let js = "const ws = new WebSocket('ws://h/$live');\n";
+        assert_eq!(qnames(&clients(js)), vec!["ws_client:/$live"]);
+    }
+
+    #[test]
+    fn ws_connect_without_the_package_is_nothing() {
+        // No web_socket_channel / dart:io import: someone else's `connect`.
+        let src = "import 'package:my_sockets/my_sockets.dart';\n\
+                   final a = WebSocketChannel.connect(Uri.parse('ws://api/ws/chat'));\n\
+                   final b = IOWebSocketChannel.connect('ws://api/ws/io');\n\
+                   final c = await WebSocket.connect('ws://api/ws/raw');\n";
+        let out = clients(src);
+        assert!(out.nodes.is_empty(), "{:?}", qnames(&out));
+        // A browser `new WebSocket(..)` beside a dart:io import is still only
+        // the browser row, and the Dart row never reads the JS call.
+        let js = "// dart:io\nconst ws = new WebSocket(\"ws://h/ws/js\");\n";
+        assert_eq!(qnames(&clients(js)), vec!["ws_client:/ws/js"]);
+        // Nor is a Dart client ever a handler.
+        assert!(handlers(DART_CHANNEL).nodes.is_empty());
     }
 }
