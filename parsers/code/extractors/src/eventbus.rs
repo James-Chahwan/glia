@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::OnceLock;
 
 use glia_code_domain::{CodeNav, FileParse, GRAPH_TYPE, cell_type, node_kind};
@@ -375,6 +375,9 @@ struct EventSide {
     /// The type-keyed pass ([`scan_type_needles`] over the side's needles).
     typed: fn(&str) -> Vec<(String, usize)>,
     patterns: &'static [(&'static str, NameRule, bool, VerbGate)],
+    /// DF.12: the side of a literal blinker site ([`blinker_literal_sites`])
+    /// this side mints.
+    signal_side: PySignalSide,
 }
 
 const EMITTER_SIDE: EventSide = EventSide {
@@ -384,6 +387,7 @@ const EMITTER_SIDE: EventSide = EventSide {
     prefix: "event_emit:",
     typed: typed_emitters,
     patterns: EMITTER_PATTERNS,
+    signal_side: PySignalSide::Emit,
 };
 
 const HANDLER_SIDE: EventSide = EventSide {
@@ -393,6 +397,7 @@ const HANDLER_SIDE: EventSide = EventSide {
     prefix: "event_handle:",
     typed: typed_handlers,
     patterns: HANDLER_PATTERNS,
+    signal_side: PySignalSide::Handle,
 };
 
 fn typed_emitters(source: &str) -> Vec<(String, usize)> {
@@ -552,6 +557,13 @@ pub fn replace_event_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fo
 /// CJ.1a: in a Rust / Python `path` an occurrence of either pass whose first
 /// byte sits in a string literal or comment is no site ([`LazyGuard`]); the
 /// post-cache fold reads the same path, so it refuses the same occurrences.
+///
+/// DF.12: last, in a `.py` file, the literal blinker sites of the side
+/// ([`blinker_literal_sites`]: `signal("x").send(..)`, `@signal("x").connect`),
+/// Medium, every site anchored, into the same `seen` set. fired_on marker, per
+/// side of a `.py` file where that pass minted a node (per-file pass only):
+///   `... 2>&1 | grep '\[event-py-literal\] blinker literal sites='`
+///   `[event-py-literal] blinker literal sites=<n> side=<emitter|handler> file=<path>`
 fn emit_event_nodes(
     source: &str,
     path: &str,
@@ -615,8 +627,37 @@ fn emit_event_nodes(
         }
     }
 
+    // DF.12: a literal blinker site names its signal at the site, so it needs
+    // no binding. Every site anchors (its name is read from that site), like
+    // the type-keyed pass; the post-cache fold re-reads the same sites, so a
+    // swapped file keeps them.
+    let literal = blinker_literal_sites(source, path, side.signal_side, &mut guard);
+    let mut minted_literal = 0usize;
+    for (name, at) in &literal {
+        let (id, minted) = push_event_node(
+            &mut nodes,
+            &mut nav,
+            &mut seen,
+            name,
+            side.kind,
+            side.prefix,
+            Confidence::Medium,
+            module_id,
+            repo,
+        );
+        minted_literal += usize::from(minted);
+        anchors.push(Anchor { node: id, line: line_of(source, *at) });
+    }
+
     // The fold stays quiet: each file reports once per parse.
     if resolve.is_none() {
+        if minted_literal > 0 {
+            eprintln!(
+                "[event-py-literal] blinker literal sites={} side={} file={path}",
+                literal.len(),
+                side.label
+            );
+        }
         guard.report(side.guard_label);
     }
     EventNodes { nodes, nav, anchors }
@@ -1869,6 +1910,618 @@ fn is_event_name(lit: &str) -> bool {
         prev = Some(c);
     }
     alnum
+}
+
+// ============================================================================
+// DF.12: Python signals — blinker named signals and Django signals
+// ============================================================================
+//
+// A signal's identity is not at its sites. blinker names it once, at its
+// declaration (`order_placed = signal("order-placed")` in signals.py), and a
+// Django `Signal()` has no name at all: the variable is the identity. The
+// sites (`order_placed.send(..)`, `@order_placed.connect`, `@receiver(..)`)
+// sit in another file that imports the variable. So this module gives the
+// engine two pure scanners — the declarations of a file
+// ([`python_signal_decls`]) and the sites of a set of names the caller has
+// bound ([`python_signal_sites`]) — plus [`python_signal_nodes`], which mints
+// the sites once the caller (DF.13's post-cache graft) has named them. The one
+// shape that needs no binding, a literal `signal("x").send(..)` in a file
+// importing blinker, is read per file by [`emit_event_nodes`]
+// ([`blinker_literal_sites`]).
+//
+// Both libraries are in-process buses, so their nodes carry no transport
+// ORIGIN ([`mark_transport`]): the EventBusResolver pairs them inside one
+// project, as it pairs pyee. All three scanners read `.py` files only, and
+// every occurrence goes through the CJ.1a guard ([`LazyGuard`]).
+
+/// DF.12: the import lines that make a file a blinker signal file
+/// ([`py_imports`]).
+const BLINKER_IMPORTS: &[&str] = &["from blinker", "import blinker"];
+
+/// DF.12: the import lines that make a file a Django signal file.
+const DJANGO_SIGNAL_IMPORTS: &[&str] = &[
+    "from django.dispatch",
+    "import django.dispatch",
+    "from django import dispatch",
+];
+
+/// DF.12: the library a Python signal declaration comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PySignalLib {
+    /// blinker: a named `signal("x")` / `blinker.signal("x")` /
+    /// `<namespace>.signal("x")` / `Namespace().signal("x")`, or an anonymous
+    /// `Signal()` / `blinker.Signal()`.
+    Blinker,
+    /// Django: `Signal()` / `dispatch.Signal()` / `django.dispatch.Signal()`.
+    Django,
+}
+
+impl PySignalLib {
+    /// `blinker` / `django`.
+    pub fn label(self) -> &'static str {
+        match self {
+            PySignalLib::Blinker => "blinker",
+            PySignalLib::Django => "django",
+        }
+    }
+}
+
+/// DF.12: one module-level Python signal declaration
+/// ([`python_signal_decls`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PySignalDecl {
+    /// The variable the signal is assigned to (`order_placed`): the name an
+    /// importer binds.
+    pub name: String,
+    /// A named blinker signal's literal (`order-placed`), the event identity
+    /// as it stands. For a variable-identity signal ([`Self::qualified`]: a
+    /// Django or an anonymous blinker `Signal()`) the variable name, which the
+    /// caller qualifies with the declaring module ([`Self::event_identity`]).
+    pub identity: String,
+    /// True when the identity is the variable: two apps' `order_placed =
+    /// Signal()` are two events, so the declaring module is part of it.
+    pub qualified: bool,
+    pub lib: PySignalLib,
+    /// 0-based line of the declaration.
+    pub line: u32,
+}
+
+impl PySignalDecl {
+    /// The event the signal's sites mint under, given the declaring module's
+    /// dotted path (`myapp.signals`): `order-placed` for a named blinker
+    /// signal, `myapp.signals.order_placed` for a variable-identity one.
+    pub fn event_identity(&self, module_dotted: &str) -> String {
+        if self.qualified {
+            format!("{module_dotted}.{}", self.identity)
+        } else {
+            self.identity.clone()
+        }
+    }
+}
+
+/// DF.12: which end of a signal a site is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PySignalSide {
+    /// `.send(` / `.send_robust(` / `.send_async(`: an EVENT_EMITTER.
+    Emit,
+    /// `.connect(fn)`, `@x.connect`, `@x.connect_via(..)`, `@receiver(x)`:
+    /// an EVENT_HANDLER.
+    Handle,
+}
+
+/// DF.12: one site of a bound signal name ([`python_signal_sites`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PySignalSite {
+    /// The bound name as the site spells it (`order_placed`,
+    /// `signals.order_placed`): one entry of the caller's set.
+    pub bound: String,
+    pub side: PySignalSide,
+    /// Byte offset of the name's first byte.
+    pub at: usize,
+    /// 0-based line of `at` ([`line_of`]).
+    pub line: u32,
+}
+
+/// DF.12: the Python signal scanners read `.py` files only (last extension,
+/// ASCII case-insensitive).
+fn is_py_path(path: &str) -> bool {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    name.rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("py"))
+}
+
+/// A Python identifier byte: [`is_ident_byte`] plus every non-ASCII byte, so
+/// a boundary test never splits `naïve_signal` and a scan stops only on
+/// ASCII bytes (char boundaries).
+fn is_py_ident_byte(c: u8) -> bool {
+    is_ident_byte(c) || c >= 0x80
+}
+
+fn is_py_ident_start(c: u8) -> bool {
+    c.is_ascii_alphabetic() || c == b'_'
+}
+
+/// Index past the spaces and tabs at `i`.
+fn skip_blank(b: &[u8], mut i: usize) -> usize {
+    while matches!(b.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+    i
+}
+
+/// Index past the ASCII whitespace (line breaks included) at `i`.
+fn skip_ws(b: &[u8], mut i: usize) -> usize {
+    while b.get(i).is_some_and(u8::is_ascii_whitespace) {
+        i += 1;
+    }
+    i
+}
+
+/// The dotted name starting at byte `i` (`a`, `a.b.c`; no whitespace inside)
+/// as its segments, and the index past it. No segments when no identifier
+/// starts at `i`. A `.` with no identifier after it is not consumed.
+fn dotted_at(source: &str, mut i: usize) -> (Vec<&str>, usize) {
+    let b = source.as_bytes();
+    let mut segs = Vec::new();
+    while b.get(i).copied().is_some_and(is_py_ident_start) {
+        let start = i;
+        while b.get(i).copied().is_some_and(is_py_ident_byte) {
+            i += 1;
+        }
+        segs.push(&source[start..i]);
+        if b.get(i) == Some(&b'.') && b.get(i + 1).copied().is_some_and(is_py_ident_start) {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    (segs, i)
+}
+
+/// Is `name` a dotted Python name (`order_placed`, `signals.order_placed`)?
+fn is_dotted_name(name: &str) -> bool {
+    let (segs, end) = dotted_at(name, 0);
+    !segs.is_empty() && end == name.len()
+}
+
+/// Is the byte before `at` a decorator's `@`, first on its line after
+/// indentation?
+fn is_decorator(b: &[u8], at: usize) -> bool {
+    if at == 0 || b[at - 1] != b'@' {
+        return false;
+    }
+    let mut i = at - 1;
+    while i > 0 && matches!(b[i - 1], b' ' | b'\t') {
+        i -= 1;
+    }
+    i == 0 || b[i - 1] == b'\n'
+}
+
+/// DF.12: does a code line of `source` start (indentation skipped) with one of
+/// `prefixes`, its last word ending there (`from blinker` / `from
+/// blinker.base`, never `from blinker_ext`)? A line inside a docstring or a
+/// comment is no import (`guard`).
+fn py_imports(source: &str, prefixes: &[&str], guard: &mut LazyGuard<'_>) -> bool {
+    let mut start = 0usize;
+    for line in source.split_inclusive('\n') {
+        let at = start;
+        start += line.len();
+        let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+        let text = &line[indent..];
+        let hit = prefixes.iter().any(|p| {
+            text.strip_prefix(p)
+                .is_some_and(|rest| !rest.bytes().next().is_some_and(is_py_ident_byte))
+        });
+        if hit && guard.admits(at + indent) {
+            return true;
+        }
+    }
+    false
+}
+
+/// DF.12: one file's blinker / Django import gates, each read at most once,
+/// through a guard of their own (an import line inside a literal is none).
+struct PyGates<'a> {
+    source: &'a str,
+    guard: LazyGuard<'a>,
+    blinker: Option<bool>,
+    django: Option<bool>,
+}
+
+impl<'a> PyGates<'a> {
+    fn new(path: &'a str, source: &'a str) -> Self {
+        PyGates {
+            source,
+            guard: LazyGuard::new(path, source),
+            blinker: None,
+            django: None,
+        }
+    }
+
+    fn blinker(&mut self) -> bool {
+        if let Some(v) = self.blinker {
+            return v;
+        }
+        let v = py_imports(self.source, BLINKER_IMPORTS, &mut self.guard);
+        self.blinker = Some(v);
+        v
+    }
+
+    fn django(&mut self) -> bool {
+        if let Some(v) = self.django {
+            return v;
+        }
+        let v = py_imports(self.source, DJANGO_SIGNAL_IMPORTS, &mut self.guard);
+        self.django = Some(v);
+        v
+    }
+}
+
+/// DF.12: the name-shaped literal ([`literal_after`], LA.41's rule) right
+/// after byte `at`, with the index just past its closing quote.
+fn named_literal_end(source: &str, at: usize) -> Option<(String, usize)> {
+    let LiteralAt::Name(name) = literal_after(source, at) else {
+        return None;
+    };
+    let open = source.len() - source.get(at..)?.trim_start().len();
+    let end = open + 1 + name.len() + 1;
+    Some((name, end))
+}
+
+/// DF.12: every module-level signal declaration of a Python file, in source
+/// order (a name declared twice is listed twice; the caller decides). A
+/// declaration is a column-0 assignment `NAME = <call>` (an annotation
+/// `NAME: T = <call>` allowed) whose call is
+/// - a named blinker signal in a file importing blinker: `signal("lit")`,
+///   `blinker.signal("lit")`, `<ns>.signal("lit")`, `Namespace().signal("lit")`
+///   / `blinker.Namespace().signal("lit")`, the literal first and name-shaped
+///   (LA.41), followed by `)` or `,` -> identity `lit`;
+/// - a Django signal in a file importing `django.dispatch`: `Signal(..)`,
+///   `dispatch.Signal(..)`, `django.dispatch.Signal(..)` -> identity `NAME`,
+///   qualified by the caller ([`PySignalDecl::event_identity`]);
+/// - an anonymous blinker `Signal(..)` / `blinker.Signal(..)` in a file
+///   importing blinker (and, for the bare `Signal(`, not `django.dispatch`)
+///   -> identity `NAME`, qualified alike.
+///
+/// A class attribute or a function-local signal (indented) is no declaration,
+/// nor is a line inside a docstring or comment. Nothing for a non-`.py` path.
+pub fn python_signal_decls(source: &str, path: &str) -> Vec<PySignalDecl> {
+    let mut out = Vec::new();
+    if !is_py_path(path) || !(source.contains("signal(") || source.contains("Signal(")) {
+        return out;
+    }
+    let mut gates = PyGates::new(path, source);
+    let mut start = 0usize;
+    for line in source.split_inclusive('\n') {
+        let at = start;
+        start += line.len();
+        if let Some(decl) = signal_decl_at(source, at, &mut gates) {
+            out.push(decl);
+        }
+    }
+    out
+}
+
+/// DF.12: the declaration on the line starting at byte `at`, if it is one
+/// ([`python_signal_decls`]).
+fn signal_decl_at(source: &str, at: usize, gates: &mut PyGates<'_>) -> Option<PySignalDecl> {
+    let b = source.as_bytes();
+    if !b.get(at).copied().is_some_and(is_py_ident_start) {
+        return None;
+    }
+    let mut i = at;
+    while b.get(i).copied().is_some_and(is_py_ident_byte) {
+        i += 1;
+    }
+    let name = &source[at..i];
+    i = skip_blank(b, i);
+    if b.get(i) == Some(&b':') {
+        i += 1;
+        while let Some(&c) = b.get(i) {
+            if matches!(c, b'=' | b'\n' | b'(' | b')' | b'"' | b'\'' | b'#') {
+                break;
+            }
+            i += 1;
+        }
+    }
+    if b.get(i) != Some(&b'=') || b.get(i + 1) == Some(&b'=') {
+        return None;
+    }
+    let (segs, mut open) = dotted_at(source, skip_blank(b, i + 1));
+    if b.get(open) != Some(&b'(') {
+        return None;
+    }
+    let named = match segs.as_slice() {
+        ["signal"] | [_, "signal"] => true,
+        ["Namespace"] | ["blinker", "Namespace"] if source[open..].starts_with("().signal(") => {
+            open += "().signal".len();
+            true
+        }
+        _ => false,
+    };
+    let (identity, qualified, lib) = if named {
+        let (lit, end) = named_literal_end(source, open + 1)?;
+        if !matches!(b.get(skip_ws(b, end)), Some(b')' | b',')) || !gates.blinker() {
+            return None;
+        }
+        (lit, false, PySignalLib::Blinker)
+    } else {
+        let lib = match segs.as_slice() {
+            ["django", "dispatch", "Signal"] | ["dispatch", "Signal"] if gates.django() => {
+                PySignalLib::Django
+            }
+            ["blinker", "Signal"] if gates.blinker() => PySignalLib::Blinker,
+            ["Signal"] if gates.django() => PySignalLib::Django,
+            ["Signal"] if gates.blinker() => PySignalLib::Blinker,
+            _ => return None,
+        };
+        (name.to_string(), true, lib)
+    };
+    if !gates.guard.admits(at) {
+        return None;
+    }
+    Some(PySignalDecl {
+        name: name.to_string(),
+        identity,
+        qualified,
+        lib,
+        line: line_of(source, at),
+    })
+}
+
+/// DF.12: the side of a signal method call whose receiver starts at byte
+/// `start` and ends just before byte `past`: `.send(` / `.send_robust(` /
+/// `.send_async(` emit; `.connect(` with an argument handles, and so do the
+/// decorators `@<receiver>.connect` and `@<receiver>.connect_via(..)`.
+/// `None` for anything else (`.disconnect(`, `.receivers`, a bare
+/// `.connect()`, an undecorated `.connect_via(`).
+fn method_site_side(source: &str, start: usize, past: usize) -> Option<PySignalSide> {
+    let b = source.as_bytes();
+    if b.get(past) != Some(&b'.') {
+        return None;
+    }
+    let verb_start = past + 1;
+    let mut verb_end = verb_start;
+    while b.get(verb_end).copied().is_some_and(is_py_ident_byte) {
+        verb_end += 1;
+    }
+    let verb = &source[verb_start..verb_end];
+    let open = b.get(verb_end) == Some(&b'(');
+    let argument = open && !matches!(b.get(skip_ws(b, verb_end + 1)), None | Some(b')'));
+    match verb {
+        "send" | "send_robust" | "send_async" if open => Some(PySignalSide::Emit),
+        "connect" if argument => Some(PySignalSide::Handle),
+        "connect" if is_decorator(b, start) => Some(PySignalSide::Handle),
+        "connect_via" if open && is_decorator(b, start) => Some(PySignalSide::Handle),
+        _ => None,
+    }
+}
+
+/// DF.12: every site of the signal names `bound` holds (each a name or a
+/// dotted `mod.name`), sorted by offset. For each name, at an identifier
+/// boundary (no identifier byte and no `.` before it, so
+/// `my_order_placed.send(` and `x.order_placed.send(` are not sites of
+/// `order_placed`):
+/// - `<n>.send(` / `<n>.send_robust(` / `<n>.send_async(` -> Emit;
+/// - `<n>.connect(` with an argument, `@<n>.connect`, `@<n>.connect_via(` ->
+///   Handle;
+/// - `@receiver(<n>, ..)` and `@receiver([.., <n>, ..])` (or a tuple; also
+///   `@dispatch.receiver(` / `@django.dispatch.receiver(`), an element equal to
+///   the name exactly -> Handle, at the element.
+///
+/// No import gate: the bound set is the gate (an importer of a signal names
+/// neither library). Nothing for a non-`.py` path; an occurrence starting in a
+/// string literal or comment is no site (CJ.1a). Pure text, no tree-sitter.
+pub fn python_signal_sites(
+    source: &str,
+    path: &str,
+    bound: &BTreeSet<String>,
+) -> Vec<PySignalSite> {
+    let mut out: Vec<PySignalSite> = Vec::new();
+    if !is_py_path(path) || bound.is_empty() {
+        return out;
+    }
+    let b = source.as_bytes();
+    let mut guard = LazyGuard::new(path, source);
+    for name in bound.iter().filter(|n| is_dotted_name(n)) {
+        for (at, _) in source.match_indices(name.as_str()) {
+            if at > 0 && (is_py_ident_byte(b[at - 1]) || b[at - 1] == b'.') {
+                continue;
+            }
+            let Some(side) = method_site_side(source, at, at + name.len()) else {
+                continue;
+            };
+            if guard.admits(at) {
+                out.push(PySignalSite {
+                    bound: name.clone(),
+                    side,
+                    at,
+                    line: line_of(source, at),
+                });
+            }
+        }
+    }
+    for (at, name) in receiver_sites(source) {
+        if let Some(hit) = bound.get(name)
+            && guard.admits(at)
+        {
+            out.push(PySignalSite {
+                bound: hit.clone(),
+                side: PySignalSide::Handle,
+                at,
+                line: line_of(source, at),
+            });
+        }
+    }
+    out.sort_by(|x, y| (x.at, x.side, &x.bound).cmp(&(y.at, y.side, &y.bound)));
+    out.dedup_by(|x, y| x.at == y.at && x.side == y.side && x.bound == y.bound);
+    out
+}
+
+/// DF.12: every signal a Django `@receiver(..)` decorator names, as (byte
+/// offset, dotted name): its first argument when that is a dotted name, or
+/// each dotted-name element of a list / tuple first argument. An element must
+/// be followed by `,` or the closer (`get_signal()` names nothing).
+fn receiver_sites(source: &str) -> Vec<(usize, &str)> {
+    const NEEDLE: &str = "receiver(";
+    let b = source.as_bytes();
+    let mut out = Vec::new();
+    for (at, _) in source.match_indices(NEEDLE) {
+        if at > 0 && is_py_ident_byte(b[at - 1]) {
+            continue;
+        }
+        // `@dispatch.receiver(` / `@django.dispatch.receiver(`.
+        let mut start = at;
+        while start > 1 && b[start - 1] == b'.' && is_ident_byte(b[start - 2]) {
+            start = ident_start(b, start - 1);
+        }
+        if !is_decorator(b, start) {
+            continue;
+        }
+        let mut i = skip_ws(b, at + NEEDLE.len());
+        let close = match b.get(i) {
+            Some(b'[') => b']',
+            Some(b'(') => b')',
+            _ => {
+                let (segs, end) = dotted_at(source, i);
+                if !segs.is_empty() && matches!(b.get(skip_ws(b, end)), Some(b',' | b')')) {
+                    out.push((i, &source[i..end]));
+                }
+                continue;
+            }
+        };
+        i += 1;
+        loop {
+            i = skip_ws(b, i);
+            let (segs, end) = dotted_at(source, i);
+            if segs.is_empty() {
+                break;
+            }
+            let next = skip_ws(b, end);
+            match b.get(next) {
+                Some(&c) if c == b',' || c == close => out.push((i, &source[i..end])),
+                _ => break,
+            }
+            if b.get(next) != Some(&b',') {
+                break;
+            }
+            i = next + 1;
+        }
+    }
+    out
+}
+
+/// DF.12: the EVENT_EMITTER `event_emit:<identity>` / EVENT_HANDLER
+/// `event_handle:<identity>` nodes of a Python file's named signal sites —
+/// each `(side, identity, at)` the caller resolved a [`PySignalSite`] to — in
+/// offset order, Medium, deduplicated per side on the identity, every site
+/// anchored ([`crate::anchor`]). An identity the LA.41 name rule
+/// ([`is_event_name`]) refuses mints nothing. No ORIGIN: blinker and Django
+/// signals are in-process buses. Nothing for a non-`.py` path.
+pub fn python_signal_nodes(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    sites: &[(PySignalSide, String, usize)],
+) -> EventNodes {
+    let mut nodes = Vec::new();
+    let mut nav = CodeNav::default();
+    let mut anchors = Vec::new();
+    if is_py_path(path) {
+        let mut order: Vec<&(PySignalSide, String, usize)> = sites.iter().collect();
+        order.sort_by(|x, y| (x.2, x.0, &x.1).cmp(&(y.2, y.0, &y.1)));
+        let mut seen_emit = HashSet::new();
+        let mut seen_handle = HashSet::new();
+        for (side, identity, at) in order {
+            if !is_event_name(identity) {
+                continue;
+            }
+            let (seen, kind, prefix) = match side {
+                PySignalSide::Emit => (&mut seen_emit, node_kind::EVENT_EMITTER, "event_emit:"),
+                PySignalSide::Handle => {
+                    (&mut seen_handle, node_kind::EVENT_HANDLER, "event_handle:")
+                }
+            };
+            let (id, _) = push_event_node(
+                &mut nodes,
+                &mut nav,
+                seen,
+                identity,
+                kind,
+                prefix,
+                Confidence::Medium,
+                module_id,
+                repo,
+            );
+            anchors.push(Anchor {
+                node: id,
+                line: line_of(source, *at),
+            });
+        }
+    }
+    EventNodes {
+        nodes,
+        nav,
+        anchors,
+    }
+}
+
+/// DF.12: the literal blinker sites of one side of a `.py` file, as (signal
+/// literal, offset of the call): `signal("x")` (bare, or `blinker.signal(`)
+/// with a name-shaped literal (LA.41) and nothing else in the call, then
+/// `.send(` / `.send_robust(` / `.send_async(` (Emit) or `.connect(fn)` /
+/// `@signal("x").connect` / `@signal("x").connect_via(..)` (Handle) — in a
+/// file importing blinker. Such a site names its signal itself, so it needs
+/// no binding. An occurrence of the full shape inside a literal or comment is
+/// refused by `guard` (and counted for its `[code-guard]` line).
+fn blinker_literal_sites(
+    source: &str,
+    path: &str,
+    want: PySignalSide,
+    guard: &mut LazyGuard<'_>,
+) -> Vec<(String, usize)> {
+    const NEEDLE: &str = "signal(";
+    let mut out = Vec::new();
+    if !is_py_path(path) || !source.contains(NEEDLE) {
+        return out;
+    }
+    let b = source.as_bytes();
+    let mut gates: Option<PyGates<'_>> = None;
+    for (s, _) in source.match_indices(NEEDLE) {
+        let start = if s > 0 && b[s - 1] == b'.' {
+            let q = ident_start(b, s - 1);
+            let qualified_twice = q > 0 && (is_py_ident_byte(b[q - 1]) || b[q - 1] == b'.');
+            if &source[q..s - 1] != "blinker" || qualified_twice {
+                continue;
+            }
+            q
+        } else if s > 0 && is_py_ident_byte(b[s - 1]) {
+            continue;
+        } else {
+            s
+        };
+        let Some((name, end)) = named_literal_end(source, s + NEEDLE.len()) else {
+            continue;
+        };
+        let close = skip_ws(b, end);
+        if b.get(close) != Some(&b')') {
+            continue;
+        }
+        if method_site_side(source, start, skip_blank(b, close + 1)) != Some(want) {
+            continue;
+        }
+        if !gates
+            .get_or_insert_with(|| PyGates::new(path, source))
+            .blinker()
+        {
+            return Vec::new();
+        }
+        if guard.admits(start) {
+            out.push((name, start));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -3292,5 +3945,458 @@ mod tests {
         assert_eq!(fp.nav.qname_by_id.get(&declared).map(String::as_str), Some("Token::Transfer"));
         assert_eq!(fp.nodes.first().map(|n| n.id), Some(module_id()));
         assert_eq!(fp.nodes.last().map(|n| n.id), Some(declared));
+    }
+
+    // ---- DF.12: Python signals (blinker, Django) ---------------------------
+
+    /// The matrix probes, read from the fixtures (DF.13 joins them end to end).
+    const BLINKER_SIGNALS: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/python/eventbus/signals.py"
+    ));
+    const BLINKER_ORDERS: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/python/eventbus/orders.py"
+    ));
+    const DJANGO_SIGNALS: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/python/eventbus_django/signals.py"
+    ));
+    const DJANGO_RECEIVERS: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/python/eventbus_django/receivers.py"
+    ));
+
+    type Decl = (String, String, bool, PySignalLib);
+
+    fn decls(src: &str) -> Vec<Decl> {
+        python_signal_decls(src, "app/signals.py")
+            .into_iter()
+            .map(|d| (d.name, d.identity, d.qualified, d.lib))
+            .collect()
+    }
+
+    fn decl(name: &str, identity: &str, qualified: bool, lib: PySignalLib) -> Decl {
+        (s(name), s(identity), qualified, lib)
+    }
+
+    fn bound(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    fn sites(src: &str, names: &[&str]) -> Vec<(String, PySignalSide, u32)> {
+        python_signal_sites(src, "app/orders.py", &bound(names))
+            .into_iter()
+            .map(|x| (x.bound, x.side, x.line))
+            .collect()
+    }
+
+    fn py_emitted_at(src: &str, path: &str) -> Vec<String> {
+        qnames(&extract_event_emitter_nodes(src, path, module_id(), repo()))
+    }
+
+    fn py_handled_at(src: &str, path: &str) -> Vec<String> {
+        qnames(&extract_event_handler_nodes(src, path, module_id(), repo()))
+    }
+
+    fn py_emitted(src: &str) -> Vec<String> {
+        py_emitted_at(src, "app.py")
+    }
+
+    fn py_handled(src: &str) -> Vec<String> {
+        py_handled_at(src, "app.py")
+    }
+
+    fn lines(out: &EventNodes) -> Vec<u32> {
+        out.anchors.iter().map(|a| a.line).collect()
+    }
+
+    use PySignalLib::{Blinker, Django};
+    use PySignalSide::{Emit, Handle};
+
+    #[test]
+    fn blinker_decls_read_the_literal() {
+        let found = python_signal_decls(BLINKER_SIGNALS, "signals.py");
+        assert_eq!(
+            found,
+            vec![PySignalDecl {
+                name: s("order_placed"),
+                identity: s("order-placed"),
+                qualified: false,
+                lib: Blinker,
+                line: 2,
+            }]
+        );
+        assert_eq!(found[0].event_identity("signals"), "order-placed");
+        assert_eq!(found[0].lib.label(), "blinker");
+        for src in [
+            "import blinker\norder_placed = blinker.signal('order-placed')\n",
+            "from blinker import Namespace\nns = Namespace()\norder_placed = ns.signal(\"order-placed\", doc=\"d\")\n",
+            "from blinker import Namespace\norder_placed = Namespace().signal('order-placed')\n",
+            "import blinker\norder_placed = blinker.Namespace().signal('order-placed')\n",
+            "from blinker import signal\norder_placed: NamedSignal = signal(\n    'order-placed'\n)\n",
+            "from blinker.base import signal\norder_placed=signal('order-placed')  # placed\n",
+        ] {
+            assert_eq!(
+                decls(src),
+                vec![decl("order_placed", "order-placed", false, Blinker)],
+                "{src}"
+            );
+        }
+        // LA.41: a literal that is no name; no literal; a concatenation.
+        for src in [
+            "from blinker import signal\nx = signal('a, b')\n",
+            "from blinker import signal\nx = signal(NAME)\n",
+            "from blinker import signal\nx = signal('a' + b)\n",
+        ] {
+            assert_eq!(decls(src), Vec::<Decl>::new(), "{src}");
+        }
+        // Two declarations, in source order.
+        assert_eq!(
+            decls("from blinker import signal\na = signal('a')\nb = signal('b')\n"),
+            vec![
+                decl("a", "a", false, Blinker),
+                decl("b", "b", false, Blinker)
+            ]
+        );
+    }
+
+    #[test]
+    fn django_decls_read_the_variable() {
+        let found = python_signal_decls(DJANGO_SIGNALS, "signals.py");
+        assert_eq!(
+            found,
+            vec![PySignalDecl {
+                name: s("order_placed"),
+                identity: s("order_placed"),
+                qualified: true,
+                lib: Django,
+                line: 2,
+            }]
+        );
+        // The caller qualifies the identity: two apps' signals stay two.
+        assert_eq!(found[0].event_identity("signals"), "signals.order_placed");
+        assert_eq!(
+            found[0].event_identity("shop.signals"),
+            "shop.signals.order_placed"
+        );
+        assert_eq!(found[0].lib.label(), "django");
+        for src in [
+            "from django.dispatch import Signal\norder_placed = Signal()\n",
+            "from django import dispatch\norder_placed = dispatch.Signal(use_caching=True)\n",
+            "import django.dispatch\norder_placed: django.dispatch.Signal = django.dispatch.Signal()\n",
+            // Both imported: the bare `Signal()` is Django's.
+            "from blinker import signal\nfrom django.dispatch import Signal\norder_placed = Signal()\n",
+        ] {
+            assert_eq!(
+                decls(src),
+                vec![decl("order_placed", "order_placed", true, Django)],
+                "{src}"
+            );
+        }
+        // An anonymous blinker signal: the variable is its identity too.
+        for src in [
+            "from blinker import Signal\norder_placed = Signal()\n",
+            "import blinker\norder_placed = blinker.Signal()\n",
+        ] {
+            assert_eq!(
+                decls(src),
+                vec![decl("order_placed", "order_placed", true, Blinker)],
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn decls_need_the_import() {
+        for src in [
+            "order_placed = signal('order-placed')\n",
+            "order_placed = Signal()\n",
+            "from blinker_ext import signal\norder_placed = signal('order-placed')\n",
+            "from django.db.models.signals import post_save\norder_placed = Signal()\n",
+            "import signal\nold = signal.signal(signal.SIGINT, h)\n",
+            // Not module level: a class attribute, a function local.
+            "from blinker import signal\nclass S:\n    order_placed = signal('order-placed')\n",
+            "from django.dispatch import Signal\ndef f():\n    s = Signal()\n",
+            // An import line in a docstring is no import.
+            "\"\"\"\nfrom blinker import signal\n\"\"\"\norder_placed = signal('order-placed')\n",
+            // Not an assignment.
+            "from blinker import signal\nif order_placed == signal('order-placed'):\n    pass\n",
+        ] {
+            assert_eq!(decls(src), Vec::<Decl>::new(), "{src}");
+        }
+        assert!(python_signal_decls(BLINKER_SIGNALS, "signals.rs").is_empty());
+        assert!(python_signal_decls(DJANGO_SIGNALS, "").is_empty());
+    }
+
+    #[test]
+    fn sites_need_the_binding() {
+        assert_eq!(
+            sites(BLINKER_ORDERS, &["order_placed"]),
+            vec![(s("order_placed"), Handle, 3), (s("order_placed"), Emit, 9)]
+        );
+        assert!(sites(BLINKER_ORDERS, &[]).is_empty());
+        assert!(sites(BLINKER_ORDERS, &["placed"]).is_empty());
+        // An identifier boundary on both ends; a receiver that is an attribute
+        // of something else is not the bound name.
+        assert!(
+            sites(
+                "my_order_placed.send(x)\nself.order_placed.send(x)\norder_placed_v2.send(x)\norder_placed.sender(x)\n",
+                &["order_placed"]
+            )
+            .is_empty()
+        );
+        let verbs = "order_placed.send_robust(sender=None)\nawait order_placed.send_async(app)\norder_placed.connect(on_order)\norder_placed.connect(\n    on_order, sender=App)\n@order_placed.connect_via(app)\ndef h(s): pass\n";
+        assert_eq!(
+            sites(verbs, &["order_placed"])
+                .into_iter()
+                .map(|(_, side, line)| (side, line))
+                .collect::<Vec<_>>(),
+            vec![(Emit, 0), (Emit, 1), (Handle, 2), (Handle, 3), (Handle, 5)]
+        );
+        // No receiver given, not a handler verb, an undecorated connect_via,
+        // an attribute read.
+        assert!(
+            sites(
+                "order_placed.connect()\norder_placed.disconnect(h)\norder_placed.connect_via(app)(h)\nn = order_placed.receivers\nx = order_placed.connect\n",
+                &["order_placed"]
+            )
+            .is_empty()
+        );
+        // A module-form binding: `import signals` + `signals.order_placed`.
+        assert_eq!(
+            sites(
+                "import signals\nsignals.order_placed.send(x)\n@signals.order_placed.connect\ndef h(s): pass\n",
+                &["signals.order_placed", "order_placed"]
+            ),
+            vec![
+                (s("signals.order_placed"), Emit, 1),
+                (s("signals.order_placed"), Handle, 2)
+            ]
+        );
+        assert!(
+            python_signal_sites(BLINKER_ORDERS, "orders.ts", &bound(&["order_placed"])).is_empty()
+        );
+        let found = python_signal_sites(BLINKER_ORDERS, "orders.py", &bound(&["order_placed"]));
+        assert!(
+            found
+                .iter()
+                .all(|x| BLINKER_ORDERS[x.at..].starts_with("order_placed."))
+        );
+    }
+
+    #[test]
+    fn receiver_list_form() {
+        assert_eq!(
+            sites(DJANGO_RECEIVERS, &["order_placed"]),
+            vec![
+                (s("order_placed"), Handle, 5),
+                (s("order_placed"), Emit, 11)
+            ]
+        );
+        let src = "@receiver([post_save, order_placed], sender=Order)\ndef a(s, **k): pass\n@receiver((order_placed,\n           order_shipped))\ndef b(s, **k): pass\n@dispatch.receiver(order_placed)\ndef c(s, **k): pass\n";
+        assert_eq!(
+            sites(src, &["order_placed", "order_shipped"]),
+            vec![
+                (s("order_placed"), Handle, 0),
+                (s("order_placed"), Handle, 2),
+                (s("order_shipped"), Handle, 3),
+                (s("order_placed"), Handle, 5),
+            ]
+        );
+        // Not a decorator, not the exact name, a call, another decorator.
+        assert!(
+            sites(
+                "receiver(order_placed)(h)\n@receiver(order_placed_v2)\n@receiver(get(order_placed))\n@myreceiver(order_placed)\n",
+                &["order_placed"]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn literal_blinker_site_mints_per_file() {
+        let src = "from blinker import signal\n\nsignal(\"order-placed\").send(\"x\")\n\n\n@signal(\"order-placed\").connect\ndef h(s):\n    pass\n";
+        assert_eq!(py_emitted(src), vec![s("event_emit:order-placed")]);
+        assert_eq!(py_handled(src), vec![s("event_handle:order-placed")]);
+        // Medium, anchored at the site, no ORIGIN: an in-process bus.
+        let emit = extract_event_emitter_nodes(src, "app.py", module_id(), repo());
+        let handle = extract_event_handler_nodes(src, "app.py", module_id(), repo());
+        for out in [&emit, &handle] {
+            assert!(
+                out.nodes
+                    .iter()
+                    .all(|n| n.confidence == Confidence::Medium && n.cells.is_empty())
+            );
+        }
+        assert_eq!(lines(&emit), vec![2]);
+        assert_eq!(lines(&handle), vec![5]);
+        // The post-cache fold re-reads the literal sites exactly.
+        let fold = extract_event_nodes_with_consts(src, "app.py", module_id(), repo(), &|_| None);
+        assert_eq!(fold.emitters.nodes, emit.nodes);
+        assert_eq!(fold.emitters.anchors, emit.anchors);
+        assert_eq!(fold.handlers.nodes, handle.nodes);
+        assert_eq!(fold.handlers.anchors, handle.anchors);
+        assert_eq!(fold.counts, ConstFoldCounts::default());
+        // Every site anchors its one node.
+        let twice = extract_event_emitter_nodes(
+            "from blinker import signal\nsignal('a').send(1)\nsignal('a').send(2)\n",
+            "app.py",
+            module_id(),
+            repo(),
+        );
+        assert_eq!((twice.nodes.len(), lines(&twice)), (1, vec![1, 2]));
+        for (src, emits, handles) in [
+            (
+                "import blinker\nblinker.signal('a').send_robust(x)\nblinker.signal('a').connect(h)\n",
+                vec![s("event_emit:a")],
+                vec![s("event_handle:a")],
+            ),
+            (
+                "from blinker import signal\n@signal('b').connect_via(app)\ndef h(s): pass\nawait signal('b').send_async(app)\n",
+                vec![s("event_emit:b")],
+                vec![s("event_handle:b")],
+            ),
+        ] {
+            assert_eq!(py_emitted(src), emits, "{src}");
+            assert_eq!(py_handled(src), handles, "{src}");
+        }
+        for src in [
+            // No blinker import.
+            "signal('a').send(x)\n@signal('a').connect\ndef h(s): pass\n",
+            // No receiver given; a declaration; no literal; another callee.
+            "from blinker import signal\nsignal('a').connect()\n",
+            "from blinker import signal\nsig = signal('a')\n",
+            "from blinker import signal\nsignal(NAME).send(x)\n",
+            "from blinker import signal\nos.signal('a').send(x)\nmysignal('a').send(x)\n",
+        ] {
+            assert_eq!(py_emitted(src), Vec::<String>::new(), "{src}");
+            assert_eq!(py_handled(src), Vec::<String>::new(), "{src}");
+        }
+        // Python only.
+        assert!(py_emitted_at(src, "app.ts").is_empty());
+        assert!(py_handled_at(src, "app.ts").is_empty());
+    }
+
+    #[test]
+    fn rust_and_python_literals_mint_nothing() {
+        let src = "from blinker import signal\nx = \"signal('a').send()\"\n# signal('b').send()\n'''\n@signal('c').connect\n'''\n";
+        for path in ["x.py", "x.rs"] {
+            assert!(py_emitted_at(src, path).is_empty(), "{path}");
+            assert!(py_handled_at(src, path).is_empty(), "{path}");
+        }
+        // A real site after the literals still mints.
+        let real = format!("{src}signal('d').send()\n");
+        assert_eq!(py_emitted(&real), vec![s("event_emit:d")]);
+        // A declaration in a docstring; sites in a string or a comment.
+        assert!(
+            python_signal_decls(
+                "from blinker import signal\n\"\"\"\norder_placed = signal('order-placed')\n\"\"\"\n",
+                "s.py"
+            )
+            .is_empty()
+        );
+        let quoted = "print(\"order_placed.send()\")\n# order_placed.send()\nx = '@receiver(order_placed)'\n";
+        assert!(sites(quoted, &["order_placed"]).is_empty());
+        // The Rust spelling of a Python probe (glia's own tests) is no site.
+        let rust = "const P: &str = \"from blinker import signal\\norder_placed = signal('order-placed')\\norder_placed.send()\\n\";\n";
+        assert!(python_signal_decls(rust, "src/x.rs").is_empty());
+        assert!(python_signal_sites(rust, "src/x.rs", &bound(&["order_placed"])).is_empty());
+        assert!(py_emitted_at(rust, "src/x.rs").is_empty());
+    }
+
+    #[test]
+    fn no_event_emit_send() {
+        // The per-file passes read no site off the matrix probes (their
+        // signals need DF.13's binding), and above all no verb as a name.
+        for (path, src) in [
+            ("signals.py", BLINKER_SIGNALS),
+            ("orders.py", BLINKER_ORDERS),
+            ("signals.py", DJANGO_SIGNALS),
+            ("receivers.py", DJANGO_RECEIVERS),
+        ] {
+            assert_eq!(py_emitted_at(src, path), Vec::<String>::new(), "{path}");
+            assert_eq!(py_handled_at(src, path), Vec::<String>::new(), "{path}");
+        }
+        // The bound sites mint the signal's identity, never the verb.
+        let found = python_signal_sites(BLINKER_ORDERS, "orders.py", &bound(&["order_placed"]));
+        let named: Vec<(PySignalSide, String, usize)> = found
+            .iter()
+            .map(|x| (x.side, s("order-placed"), x.at))
+            .collect();
+        let out = python_signal_nodes(BLINKER_ORDERS, "orders.py", module_id(), repo(), &named);
+        assert_eq!(
+            qnames(&out),
+            vec![s("event_emit:order-placed"), s("event_handle:order-placed")]
+        );
+        assert!(
+            !qnames(&out)
+                .iter()
+                .any(|q| q == "event_emit:send" || q == "event_handle:connect")
+        );
+    }
+
+    #[test]
+    fn signal_nodes_mint_in_offset_order_and_anchor_every_site() {
+        let found =
+            python_signal_sites(DJANGO_RECEIVERS, "receivers.py", &bound(&["order_placed"]));
+        let mut named: Vec<(PySignalSide, String, usize)> = found
+            .iter()
+            .map(|x| (x.side, s("signals.order_placed"), x.at))
+            .collect();
+        named.reverse();
+        let out = python_signal_nodes(
+            DJANGO_RECEIVERS,
+            "receivers.py",
+            module_id(),
+            repo(),
+            &named,
+        );
+        assert_eq!(
+            qnames(&out),
+            vec![
+                s("event_emit:signals.order_placed"),
+                s("event_handle:signals.order_placed")
+            ]
+        );
+        // The handler (line 5) sits first in the file, so it is minted first.
+        let kinds: Vec<NodeKindId> = out
+            .nodes
+            .iter()
+            .map(|n| out.nav.kind_by_id[&n.id])
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![node_kind::EVENT_HANDLER, node_kind::EVENT_EMITTER]
+        );
+        assert!(
+            out.nodes
+                .iter()
+                .all(|n| n.confidence == Confidence::Medium && n.cells.is_empty())
+        );
+        assert_eq!(lines(&out), vec![5, 11]);
+        assert!(out.nav.parent_of.values().all(|p| *p == module_id()));
+        // One node per side and identity, every site anchored; an identity
+        // the name rule refuses mints nothing.
+        let src = "x.send()\nx.connect(h)\nx.send()\n";
+        let out = python_signal_nodes(
+            src,
+            "a.py",
+            module_id(),
+            repo(),
+            &[
+                (Emit, s("x"), 0),
+                (Emit, s("x"), 22),
+                (Handle, s("x"), 9),
+                (Emit, s(""), 3),
+            ],
+        );
+        assert_eq!(qnames(&out), vec![s("event_emit:x"), s("event_handle:x")]);
+        assert_eq!(lines(&out), vec![0, 1, 2]);
+        assert!(
+            python_signal_nodes(src, "a.rs", module_id(), repo(), &[(Emit, s("x"), 0)])
+                .nodes
+                .is_empty()
+        );
     }
 }
