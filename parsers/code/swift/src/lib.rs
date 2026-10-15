@@ -65,7 +65,7 @@ pub fn parse_file(
         );
     }
 
-    scan_vapor_routes(source, repo, &mut acc);
+    scan_vapor_routes(root, src, file_rel_path, module_id, repo, &mut acc);
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -1296,99 +1296,201 @@ fn first_descendant_of_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'
     None
 }
 
-fn scan_vapor_routes(source: &str, repo: RepoId, acc: &mut Acc) {
-    let methods: &[(&str, &str)] = &[
-        (".get(", "GET"),
-        (".post(", "POST"),
-        (".put(", "PUT"),
-        (".patch(", "PATCH"),
-        (".delete(", "DELETE"),
-        (".head(", "HEAD"),
-        (".options(", "OPTIONS"),
-    ];
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (needle, method) in methods {
-        let mut search_from = 0;
-        while let Some(rel) = source[search_from..].find(needle) {
-            let start = search_from + rel + needle.len();
-            let end = find_call_end(&source[start..]).unwrap_or(0);
-            if end == 0 {
-                search_from = start;
-                continue;
-            }
-            let args = &source[start..start + end];
-            let path = vapor_path_from_args(args);
-            if !path.is_empty() {
-                let route_name = format!("{method} /{path}");
-                if seen.insert(route_name.clone()) {
-                    emit_vapor_route(method, &format!("/{path}"), repo, acc);
-                }
-            }
-            search_from = start + end + 1;
-        }
-    }
+/// Vapor's `RoutesBuilder` verb methods and the ROUTE method each registers.
+const VAPOR_VERBS: &[(&str, &str)] = &[
+    ("get", "GET"),
+    ("post", "POST"),
+    ("put", "PUT"),
+    ("patch", "PATCH"),
+    ("delete", "DELETE"),
+    ("head", "HEAD"),
+    ("options", "OPTIONS"),
+];
+
+/// DH.20: per-file counts for the `[vapor-routes]` marker. `routes` are the
+/// ROUTE nodes minted, `handlers` the HANDLED_BY refs pushed (a `use:`
+/// responder read as a name), `skipped` the verb calls with string components
+/// that are no registration (no `use:`, no trailing closure).
+#[derive(Default)]
+struct VaporCounts {
+    routes: usize,
+    handlers: usize,
+    skipped: usize,
 }
 
-fn find_call_end(s: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut depth = 1usize;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
+/// One `<x>.<verb>(..)` call of the tree, read as a Vapor registration
+/// candidate.
+struct VaporCall {
+    method: &'static str,
+    /// The `/`-joined string components, `""` when the call has none.
+    path: String,
+    /// The call carries a `use:` argument or a trailing closure.
+    registers: bool,
+    /// The `use:` responder, when it names a function or a method.
+    handler: Option<CallQualifier>,
+    /// 0-based row of the `.<verb>` member, the HANDLED_BY ref's site.
+    line: u32,
+}
+
+/// Vapor routes (DH.20). A ROUTE is registered by a `<x>.<verb>(..)` call
+/// whose arguments hold a `use:` responder or that ends in a trailing closure
+/// (`app.get("hello") { req in .. }`): Vapor's `RoutesBuilder` API always
+/// labels the responder, so a call with neither (`req.parameters.get("id")`,
+/// `req.query.get(..)`, a dictionary `.get`) is no registration whatever its
+/// receiver, and is skipped. The calls are read from the tree, not the text,
+/// so the `{` that opens an `if let x = req.parameters.get("id") {` body is
+/// never a trailing closure and a `.get(` in a comment or a string is no call.
+///
+/// The ROUTE is `<METHOD> /<components>`, each string component verbatim:
+/// `app.get("users", ":id", use: getUser)` is `GET /users/:id` (glia's colon
+/// parameter, as Express / Compojure / http4s read it), `"*"` and `"**"`
+/// stay. A grouped builder (`users.get(":id", use: show)`) reads only its own
+/// components, so the group prefix is not joined. A `use:` naming a function
+/// (`getUser`), `self.m` or `<ident>.m` is a HANDLED_BY ref from the ROUTE,
+/// resolved by `build_swift` through the file MODULE's symbols first.
+///
+/// fired_on, on stderr, once per file with a registration or a skipped call:
+///   `[vapor-routes] routes=<n> handlers=<n> skipped=<n> path=<file>`
+fn scan_vapor_routes(
+    root: TsNode,
+    src: &[u8],
+    file_rel: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    let mut counts = VaporCounts::default();
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call_expression"
+            && let Some(call) = vapor_call(n, src)
+            && !call.path.is_empty()
+        {
+            if call.registers {
+                let route_name = format!("{} /{}", call.method, call.path);
+                let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
+                if seen.insert(route_id) {
+                    emit_vapor_route(route_id, call.method, &route_name, repo, acc);
+                    counts.routes += 1;
                 }
-            }
-            b'"' => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'"' {
-                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
-                        i += 2;
-                    } else {
-                        i += 1;
+                if let Some(qualifier) = call.handler {
+                    let r = UnresolvedRef {
+                        from: route_id,
+                        from_module: module_id,
+                        qualifier,
+                        category: edge_category::HANDLED_BY,
+                        line: call.line,
+                    };
+                    if !acc.refs.contains(&r) {
+                        acc.refs.push(r);
+                        counts.handlers += 1;
                     }
                 }
+            } else {
+                counts.skipped += 1;
             }
-            _ => {}
         }
-        i += 1;
+        // Reverse, so the stack pops the children in source order.
+        let mut cursor = n.walk();
+        let children: Vec<TsNode> = n.named_children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev());
     }
-    None
+    if counts.routes + counts.skipped > 0 {
+        eprintln!(
+            "[vapor-routes] routes={} handlers={} skipped={} path={file_rel}",
+            counts.routes, counts.handlers, counts.skipped
+        );
+    }
 }
 
-fn vapor_path_from_args(args: &str) -> String {
-    let bytes = args.as_bytes();
+/// `call` as a Vapor verb call: its callee is a navigation whose member is a
+/// [`VAPOR_VERBS`] name. None for any other call.
+fn vapor_call(call: TsNode, src: &[u8]) -> Option<VaporCall> {
+    let callee = call.named_child(0).filter(|c| c.kind() == "navigation_expression")?;
+    let member = nav_member_name(callee, src);
+    let method = VAPOR_VERBS.iter().find(|(verb, _)| *verb == member).map(|(_, m)| *m)?;
+    let suffix = first_named_child_of_kind(call, "call_suffix")?;
+    let args = first_named_child_of_kind(suffix, "value_arguments");
+    let trailing_closure = first_named_child_of_kind(suffix, "lambda_literal").is_some();
+    let responder = args.and_then(|a| labelled_argument(a, "use", src));
+    let line = callee.child_by_field_name("suffix").map_or_else(|| line_at(call), line_at);
+    Some(VaporCall {
+        method,
+        path: args.map(|a| vapor_path_from_args(a, src)).unwrap_or_default(),
+        registers: responder.is_some() || trailing_closure,
+        handler: responder.and_then(|v| vapor_handler(v, src)),
+        line,
+    })
+}
+
+/// The value of the `value_arguments` entry labelled `label` (`use:`), or None.
+fn labelled_argument<'a>(args: TsNode<'a>, label: &str, src: &[u8]) -> Option<TsNode<'a>> {
+    let mut cursor = args.walk();
+    let found = args
+        .named_children(&mut cursor)
+        .filter(|a| a.kind() == "value_argument")
+        .find(|a| {
+            a.child_by_field_name("name")
+                .is_some_and(|l| text_of(l, src).trim() == label)
+        });
+    found.and_then(|a| a.child_by_field_name("value"))
+}
+
+/// The path components of a Vapor verb call: its unlabelled string-literal
+/// arguments, each the source text between its quotes, verbatim (`":id"`,
+/// `"*"`, `"**"`), `/`-joined. A labelled argument (`use:`) and a non-string
+/// argument are never a component.
+fn vapor_path_from_args(args: TsNode, src: &[u8]) -> String {
     let mut parts: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'"' {
-            let start = i + 1;
-            let mut j = start;
-            while j < bytes.len() && bytes[j] != b'"' {
-                if bytes[j] == b'\\' && j + 1 < bytes.len() {
-                    j += 2;
-                } else {
-                    j += 1;
-                }
-            }
-            if j < bytes.len() {
-                let s = &args[start..j];
-                parts.push(s.trim_start_matches(':').to_string());
-                i = j + 1;
-                continue;
-            }
+    let mut cursor = args.walk();
+    for arg in args.named_children(&mut cursor) {
+        if arg.kind() != "value_argument" || arg.child_by_field_name("name").is_some() {
+            continue;
         }
-        i += 1;
+        if let Some(value) = arg.child_by_field_name("value")
+            && value.kind() == "line_string_literal"
+        {
+            let quoted = text_of(value, src);
+            let inner = quoted.strip_prefix('"').and_then(|q| q.strip_suffix('"'));
+            parts.push(inner.unwrap_or(quoted).to_string());
+        }
     }
     parts.join("/")
 }
 
-fn emit_vapor_route(method: &str, path: &str, repo: RepoId, acc: &mut Acc) {
-    let route_name = format!("{method} {path}");
-    let route_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::ROUTE, &route_name);
+/// The `use:` responder as the qualifier its HANDLED_BY ref resolves by: a
+/// function name -> `Bare(name)`; `self.m` / `Self.m` -> `SelfMethod(m)`;
+/// `<ident>.m` (a controller) -> `Attribute { ident, m }`. A closure, or a
+/// method of any other receiver (`UserController().index`), names no handler.
+fn vapor_handler(value: TsNode, src: &[u8]) -> Option<CallQualifier> {
+    match value.kind() {
+        "simple_identifier" => Some(CallQualifier::Bare(text_of(value, src).to_string())),
+        "navigation_expression" => {
+            let name = nav_member_name(value, src);
+            let target = value.child_by_field_name("target")?;
+            if name.is_empty() {
+                return None;
+            }
+            match target.kind() {
+                "self_expression" => Some(CallQualifier::SelfMethod(name.to_string())),
+                "simple_identifier" if text_of(target, src) == "Self" => {
+                    Some(CallQualifier::SelfMethod(name.to_string()))
+                }
+                "simple_identifier" => Some(CallQualifier::Attribute {
+                    base: text_of(target, src).to_string(),
+                    name: name.to_string(),
+                }),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The ROUTE node `route_name` (`<METHOD> /<path>`, name and qname alike)
+/// with its ROUTE_METHOD cell.
+fn emit_vapor_route(route_id: NodeId, method: &str, route_name: &str, repo: RepoId, acc: &mut Acc) {
     acc.nodes.push(Node {
         id: route_id,
         repo,
@@ -1399,7 +1501,7 @@ fn emit_vapor_route(method: &str, path: &str, repo: RepoId, acc: &mut Acc) {
         }],
     });
     acc.nav
-        .record(route_id, &route_name, &route_name, node_kind::ROUTE, None);
+        .record(route_id, route_name, route_name, node_kind::ROUTE, None);
 }
 
 fn file_cells(root: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
@@ -1692,8 +1794,184 @@ func routes(_ app: Application) throws {
             .collect();
         assert!(route_names.contains(&"GET /users"));
         assert!(route_names.contains(&"POST /users"));
-        assert!(route_names.contains(&"GET /users/id"));
-        assert!(route_names.contains(&"DELETE /users/id"));
+        // DH.20: the parameter component keeps its colon.
+        assert!(route_names.contains(&"GET /users/:id"));
+        assert!(route_names.contains(&"DELETE /users/:id"));
+        assert_eq!(route_names.len(), 4, "{route_names:?}");
+    }
+
+    /// DH.20: the ROUTE names of `fp`, sorted.
+    fn vapor_routes(fp: &FileParse) -> Vec<String> {
+        let mut names: Vec<String> = fp
+            .nav
+            .name_by_id
+            .iter()
+            .filter(|(id, _)| fp.nav.kind_by_id.get(*id) == Some(&node_kind::ROUTE))
+            .map(|(_, n)| n.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// DH.20: `(route name, qualifier, line)` of every HANDLED_BY ref.
+    fn vapor_handlers(fp: &FileParse) -> Vec<(String, CallQualifier, u32)> {
+        fp.refs
+            .iter()
+            .filter(|r| r.category == edge_category::HANDLED_BY)
+            .map(|r| {
+                let route = fp.nav.name_by_id.get(&r.from).cloned().unwrap_or_default();
+                (route, r.qualifier.clone(), r.line)
+            })
+            .collect()
+    }
+
+    /// DH.20: bench/substrate-gap/matrix/swift/http_server's routes.swift.
+    const VAPOR_MATRIX_ROUTES: &str = r#"import Vapor
+
+func getUser(req: Request) async throws -> String {
+    let id = req.parameters.get("id") ?? ""
+    return "user \(id)"
+}
+
+func createUser(req: Request) async throws -> HTTPStatus {
+    return .created
+}
+
+func routes(_ app: Application) throws {
+    app.get("users", ":id", use: getUser)
+    app.post("users", use: createUser)
+}
+"#;
+
+    #[test]
+    fn vapor_use_label_route_with_param() {
+        let fp = parse_file(VAPOR_MATRIX_ROUTES, "routes.swift", "routes", repo()).unwrap();
+        assert_eq!(vapor_routes(&fp), vec!["GET /users/:id", "POST /users"]);
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "routes");
+        let get = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::ROUTE, "GET /users/:id");
+        let method = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == get)
+            .and_then(|n| n.cells.iter().find(|c| c.kind == cell_type::ROUTE_METHOD))
+            .map(|c| c.payload.clone());
+        assert_eq!(method, Some(CellPayload::Text("GET".to_string())));
+        assert_eq!(
+            vapor_handlers(&fp),
+            vec![
+                ("GET /users/:id".to_string(), CallQualifier::Bare("getUser".into()), 12),
+                ("POST /users".to_string(), CallQualifier::Bare("createUser".into()), 13),
+            ]
+        );
+        assert!(
+            fp.refs
+                .iter()
+                .filter(|r| r.category == edge_category::HANDLED_BY)
+                .all(|r| r.from_module == module),
+            "a HANDLED_BY ref resolves through the file MODULE's symbols"
+        );
+    }
+
+    #[test]
+    fn parameters_get_is_not_a_route() {
+        let source = r#"import Vapor
+
+func show(req: Request) async throws -> String {
+    if let id = req.parameters.get("id") {
+        return id
+    }
+    guard let n = req.parameters.get("n", as: Int.self) else { throw Abort(.badRequest) }
+    let q = req.query.get(String.self, at: "q")
+    let cached = store.get("key")
+    // app.get("commented", use: show)
+    let help = "app.get(\"quoted\") { req in }"
+    return "\(n) \(q) \(cached) \(help)"
+}
+"#;
+        let fp = parse_file(source, "show.swift", "show", repo()).unwrap();
+        assert_eq!(vapor_routes(&fp), Vec::<String>::new());
+        assert!(vapor_handlers(&fp).is_empty());
+    }
+
+    #[test]
+    fn trailing_closure_route() {
+        let source = r#"import Vapor
+
+func routes(_ app: Application) throws {
+    app.get("hello") { req in "hi" }
+    app.get("hello", ":name") { req -> String in
+        let name = req.parameters.get("name")!
+        return "Hello, \(name)!"
+    }
+}
+"#;
+        let fp = parse_file(source, "routes.swift", "routes", repo()).unwrap();
+        assert_eq!(vapor_routes(&fp), vec!["GET /hello", "GET /hello/:name"]);
+        assert!(vapor_handlers(&fp).is_empty(), "a closure responder names no handler");
+    }
+
+    #[test]
+    fn controller_method_handler() {
+        let source = r#"import Vapor
+
+struct TodoController: RouteCollection {
+    func boot(routes: RoutesBuilder) throws {
+        let controller = TodoController()
+        routes.get("todos", use: controller.index)
+        routes.post("todos", use: self.create)
+        routes.delete("todos", ":todoID", use: Self.delete)
+        routes.put("todos", ":todoID", use: TodoController().update)
+        routes.patch("todos", ":todoID", use: { req in "patched" })
+    }
+}
+"#;
+        let fp = parse_file(source, "TodoController.swift", "TodoController", repo()).unwrap();
+        assert_eq!(
+            vapor_routes(&fp),
+            vec![
+                "DELETE /todos/:todoID",
+                "GET /todos",
+                "PATCH /todos/:todoID",
+                "POST /todos",
+                "PUT /todos/:todoID",
+            ]
+        );
+        assert_eq!(
+            vapor_handlers(&fp),
+            vec![
+                (
+                    "GET /todos".to_string(),
+                    CallQualifier::Attribute { base: "controller".into(), name: "index".into() },
+                    5,
+                ),
+                ("POST /todos".to_string(), CallQualifier::SelfMethod("create".into()), 6),
+                (
+                    "DELETE /todos/:todoID".to_string(),
+                    CallQualifier::SelfMethod("delete".into()),
+                    7,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn catchall_components_kept() {
+        let source = r#"import Vapor
+
+func routes(_ app: Application) throws {
+    app.get("files", "**", use: serveFile)
+    app.get("any", "*", "tail", use: anything)
+}
+"#;
+        let fp = parse_file(source, "routes.swift", "routes", repo()).unwrap();
+        assert_eq!(vapor_routes(&fp), vec!["GET /any/*/tail", "GET /files/**"]);
+        assert_eq!(
+            vapor_handlers(&fp),
+            vec![
+                ("GET /files/**".to_string(), CallQualifier::Bare("serveFile".into()), 3),
+                ("GET /any/*/tail".to_string(), CallQualifier::Bare("anything".into()), 4),
+            ]
+        );
     }
 
     #[test]
