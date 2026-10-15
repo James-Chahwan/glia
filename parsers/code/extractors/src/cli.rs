@@ -21,6 +21,9 @@ pub enum CliFramework {
     Thor,
     Symfony,
     Laravel,
+    /// DG.8: scopt (Scala), the builder's `programName` / `cmd` and scopt 3's
+    /// `OptionParser[T]("x")`.
+    Scopt,
     /// LA.20c: a binary a packaging manifest declares (pyproject.toml
     /// `[project.scripts]`, setup.py `console_scripts`, package.json `bin`,
     /// Cargo.toml `[[bin]]`), not a subcommand a CLI library registers.
@@ -43,6 +46,7 @@ impl CliFramework {
             CliFramework::Thor => "thor",
             CliFramework::Symfony => "symfony",
             CliFramework::Laravel => "laravel",
+            CliFramework::Scopt => "scopt",
             CliFramework::Manifest => "manifest",
         }
     }
@@ -103,7 +107,8 @@ type LineExtractor = fn(&str) -> Option<String>;
 /// `db.command("ping")` mints nothing); Thor for `ruby`; Symfony Console and
 /// Laravel artisan for `php`. LA.20c: a `python` file's setuptools
 /// `console_scripts` entry points (setup.py is Python source, so it is read
-/// here, not by [`extract_manifest_binaries`]) declare binaries.
+/// here, not by [`extract_manifest_binaries`]) declare binaries. DG.8: scopt
+/// for `scala` (a file that mentions `scopt`).
 pub fn extract_cli_command_nodes(
     source: &str,
     lang: &str,
@@ -159,6 +164,9 @@ pub fn extract_cli_command_nodes(
         }
         "php" if source.contains("Command") => {
             decls.extend(scan_symfony_laravel(source, &CodeMap::script(source, Script::Php)));
+        }
+        "scala" if source.contains("scopt") => {
+            decls.extend(scan_scopt(source, &CodeMap::new(source)));
         }
         _ => {}
     }
@@ -2152,6 +2160,49 @@ fn scan_symfony_laravel(source: &str, code: &CodeMap) -> Vec<CliDecl> {
 }
 
 // ----------------------------------------------------------------------------
+// DG.8: scopt (scala). Scala's literals and comments are the C family's
+// (`"..."`, `"""..."""`, `'c'`, `//`, nesting `/* */`), so a scopt file is
+// lexed by [`CodeMap::new`].
+// ----------------------------------------------------------------------------
+
+/// scopt, in a Scala file that mentions `scopt`: the scopt 4 builder's
+/// `programName("x")` (the binary) and `cmd("y")` (a subcommand, at any
+/// `children(..)` depth), and scopt 3's `OptionParser[T]("x")` constructor
+/// (`new scopt.OptionParser[Config]("x") { cmd("y") .. }`, its type argument
+/// stepped over) -> `cli:x` / `cli:y`, in source order. Bare (under
+/// `import builder._`) or qualified (`builder.cmd("y")`). The argument must
+/// be exactly one plain string literal: an interpolation (`cmd(s"..")`) or an
+/// expression names nothing, and a needle in a string or comment is not a
+/// call. No handler: a scopt `.action((_, c) => ..)` is a lambda updating the
+/// config, not a symbol (LA.20a: a ref only when the declaration names the
+/// code). `opt[T]("x")`, `arg`, `head` and `note` declare options and help
+/// text, not commands, and are not read.
+fn scan_scopt(source: &str, code: &CodeMap) -> Vec<CliDecl> {
+    let b = source.as_bytes();
+    let mut found: Vec<(usize, String)> = Vec::new();
+    for word in ["programName", "cmd", "OptionParser"] {
+        for at in code_words(source, code, 0, source.len(), word) {
+            let mut i = skip_ws(b, at + word.len());
+            if word == "OptionParser" {
+                if b.get(i) != Some(&b'[') {
+                    continue;
+                }
+                let Some((_, close)) = balanced_code(source, code, i, MAX_ATTR_SPAN) else {
+                    continue;
+                };
+                i = close + 1;
+            }
+            let Some(span) = call_args(source, code, i) else { continue };
+            if let Some(name) = first_positional_str(source, span).filter(|n| valid_cli_name(n)) {
+                found.push((at, name));
+            }
+        }
+    }
+    found.sort_by_key(|(at, _)| *at);
+    found.into_iter().map(|(_, name)| CliDecl::new(CliFramework::Scopt, name, None)).collect()
+}
+
+// ----------------------------------------------------------------------------
 // LA.20c: binaries declared by packaging manifests. A CLI library declares the
 // SUBCOMMAND (`@click.command("sync")`); the BINARY a caller's argv[0] names
 // (`mytool`) is declared only by the package's manifest, so without these
@@ -2552,6 +2603,17 @@ pub fn extract_cli_invocation_nodes(
             search_from = args_at;
         }
     }
+    // DG.8: a `scala.sys.process` launch is recognised by what FOLLOWS its
+    // argv (`Seq("tool", "x").!`), so no needle above reads it.
+    if source.contains("sys.process") {
+        let scala = scala_process_sites(source);
+        if !scala.is_empty() {
+            eprintln!("[cli-inv] scala=sys.process sites={}", scala.len());
+        }
+        for (at, tokens) in scala {
+            sites.entry(at).or_insert(tokens);
+        }
+    }
 
     // BTreeMap: nodes come out sorted by binary, whatever order the needles hit.
     let mut by_bin: std::collections::BTreeMap<String, Vec<Vec<String>>> =
@@ -2623,6 +2685,175 @@ fn scan_argv(after: &str) -> Vec<String> {
         tokens = split;
     }
     tokens
+}
+
+/// DG.8: every `scala.sys.process` launch in a file that names `sys.process`
+/// in code (an import, or a qualified `scala.sys.process.Process(..)`), as
+/// `(offset its argument text starts at, argv)` in source order:
+///
+/// - a `Seq(..)` / `List(..)` / `Vector(..)` call (an explicit `[String]`
+///   type argument stepped over) that is RUN: its `)` followed by `.!`,
+///   `.!!`, `.!<`, `.lazyLines`, `.lineStream` (or their `_!` forms),
+///   `.run(`, or, on the same line, a postfix ` !` / ` !!` (never `!=`);
+/// - `Process(..)` / `Process.apply(..)` whose first argument is such a list
+///   call, a string (`Process("git status")`, split as a shell string), or a
+///   string then a list (`Process("git", Seq("status"))`): building the
+///   ProcessBuilder is the launch, so no run suffix is needed;
+/// - a plain string literal that is run (`"git status".!!`), split as a shell
+///   string. An interpolated one (`s"git $rev".!!`) is not a literal.
+///
+/// The argv is read by [`scan_argv`], so it is the quoted tokens only and an
+/// argument built elsewhere (`val argv = Seq(..); argv.!`) is no site. A list
+/// that is never run (`Seq("a", "b").map(f)`) is no site, and needles in
+/// strings and comments are not code ([`CodeMap::new`]: Scala's literal and
+/// comment syntax is the C family's).
+fn scala_process_sites(source: &str) -> Vec<(usize, Vec<String>)> {
+    let b = source.as_bytes();
+    let code = CodeMap::new(source);
+    let mut from = 0;
+    let mut names_sys_process = false;
+    while let Some(rel) = source.get(from..).and_then(|s| s.find("sys.process")) {
+        let at = from + rel;
+        if code.is_code(at) {
+            names_sys_process = true;
+            break;
+        }
+        from = at + 1;
+    }
+    if !names_sys_process {
+        return Vec::new();
+    }
+    let mut out: Vec<(usize, Vec<String>)> = Vec::new();
+    for word in ["Seq", "List", "Vector"] {
+        for at in code_words(source, &code, 0, source.len(), word) {
+            let Some((start, end)) = scala_list_call(source, &code, at, word) else { continue };
+            if scala_run_suffix(source, end + 1) {
+                let tokens = scan_argv(&source[start..end]);
+                if !tokens.is_empty() {
+                    out.push((start, tokens));
+                }
+            }
+        }
+    }
+    for at in code_words(source, &code, 0, source.len(), "Process") {
+        let mut i = skip_ws(b, at + "Process".len());
+        if b.get(i) == Some(&b'.') {
+            let (method, after) = read_ident(source, skip_ws(b, i + 1));
+            if method != "apply" {
+                continue;
+            }
+            i = after;
+        }
+        let Some((start, end)) = call_args(source, &code, i) else { continue };
+        let tokens = scala_process_argv(source, &code, start, end);
+        if !tokens.is_empty() {
+            out.push((start, tokens));
+        }
+    }
+    for &(start, end) in &code.skips {
+        let plain = b[start] == b'"'
+            && !b[start..].starts_with(b"\"\"\"")
+            && !(start > 0 && is_ident_byte(b[start - 1]));
+        if plain && scala_run_suffix(source, end) {
+            let tokens = scan_argv(&source[start..end]);
+            if !tokens.is_empty() {
+                out.push((start, tokens));
+            }
+        }
+    }
+    out.sort_by_key(|(at, _)| *at);
+    out
+}
+
+/// The argument span `(start, end)` of the `Seq` / `List` / `Vector` call
+/// whose name `word` starts at `at` (`Seq("a")`, `List[String]("a")`), or
+/// `None` when no call follows the name.
+fn scala_list_call(source: &str, code: &CodeMap, at: usize, word: &str) -> Option<(usize, usize)> {
+    let b = source.as_bytes();
+    let mut i = skip_ws(b, at + word.len());
+    if b.get(i) == Some(&b'[') {
+        let (_, close) = balanced_code(source, code, i, MAX_ATTR_SPAN)?;
+        i = close + 1;
+    }
+    call_args(source, code, i)
+}
+
+/// True when the text at `i` (just past a list call's `)` or a string's
+/// closing quote) runs a ProcessBuilder: `.!`, `.!!`, `.!<`, `.!!<`, `.run(`,
+/// `.lazyLines`, `.lineStream` (and `_!`), or a same-line postfix `!` / `!!`
+/// / `!<`. A `!=` comparison is not a run.
+fn scala_run_suffix(source: &str, i: usize) -> bool {
+    let b = source.as_bytes();
+    let bang_run = |j: usize| {
+        if b.get(j) != Some(&b'!') {
+            return false;
+        }
+        let mut k = j + 1;
+        if b.get(k) == Some(&b'!') {
+            k += 1;
+        }
+        if b.get(k) == Some(&b'<') {
+            k += 1;
+        }
+        b.get(k) != Some(&b'=')
+    };
+    let j = skip_ws(b, i);
+    if b.get(j) == Some(&b'.') {
+        let k = j + 1;
+        if bang_run(k) {
+            return true;
+        }
+        let (method, after) = read_ident(source, k);
+        return match method {
+            "lazyLines" | "lineStream" => true,
+            "lazyLines_" | "lineStream_" => b.get(after) == Some(&b'!'),
+            "run" => b.get(skip_ws(b, after)) == Some(&b'('),
+            _ => false,
+        };
+    }
+    let mut p = i;
+    while matches!(b.get(p), Some(b' ' | b'\t')) {
+        p += 1;
+    }
+    bang_run(p)
+}
+
+/// The argv of `Process(..)`'s argument text `source[start..end]`: a list
+/// call's quoted tokens (`Process(Seq("docker", "build"))`), a shell string
+/// (`Process("git status")`), or a binary string then an argument list
+/// (`Process("git", Seq("status"))`). Anything else (a variable, an
+/// interpolation) is no argv.
+fn scala_process_argv(source: &str, code: &CodeMap, start: usize, end: usize) -> Vec<String> {
+    let b = source.as_bytes();
+    let v = skip_ws(b, start);
+    if v >= end {
+        return Vec::new();
+    }
+    if b[v] == b'"' {
+        let Some(lit) = source.get(v..end).and_then(extract_quoted) else { return Vec::new() };
+        let after = v + lit.len() + 2;
+        let mut tokens = scan_argv(&source[v..after]);
+        let comma = skip_ws(b, after);
+        if !tokens.is_empty() && comma < end && b[comma] == b',' {
+            let list = skip_ws(b, comma + 1);
+            let (word, _) = read_ident(source, list);
+            if matches!(word, "Seq" | "List" | "Vector")
+                && let Some((s, e)) = scala_list_call(source, code, list, word)
+            {
+                tokens.extend(scan_argv(&source[s..e]));
+                tokens.truncate(MAX_ARGV_TOKENS);
+            }
+        }
+        return tokens;
+    }
+    let (word, _) = read_ident(source, v);
+    match word {
+        "Seq" | "List" | "Vector" => scala_list_call(source, code, v, word)
+            .filter(|&(_, e)| e < end)
+            .map(|(s, e)| scan_argv(&source[s..e]))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
 fn strip_open_bracket<'a>(s: &'a str, openers: &[&str]) -> Option<&'a str> {
@@ -3559,6 +3790,111 @@ def build():
         }
 
         assert!(invocation("Runtime.getRuntime().exec(command);").0.is_empty());
+    }
+
+    // ---- DG.8: Scala (scopt, scala.sys.process) ------------------------------
+
+    /// The matrix/scala/cli_def probe's scopt 4 builder, read from the fixture.
+    const SCALA_CLI_DEF_MAIN: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/scala/cli_def/server/Main.scala"
+    ));
+    /// The matrix/scala/cli_inv probe's `scala.sys.process` launcher.
+    const SCALA_CLI_INV_EXPORTER: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../bench/substrate-gap/matrix/scala/cli_inv/client/Exporter.scala"
+    ));
+
+    #[test]
+    fn scopt_builder_and_option_parser() {
+        // scopt 4: `programName` is the binary, `cmd` a subcommand; an
+        // `.action` lambda names no handler.
+        let out = decls(SCALA_CLI_DEF_MAIN, "scala");
+        assert_eq!(commands(&out), vec!["cli:invctl", "cli:export"]);
+        assert_eq!(out.per_framework, vec![(CliFramework::Scopt, 2)]);
+        assert!(out.refs.is_empty());
+        assert_eq!(
+            decl_marker("scala", &out, "Main.scala").as_deref(),
+            Some("[cli-decl] scala=scopt:2 handler_refs=0 path=Main.scala")
+        );
+
+        // scopt 3: the OptionParser's constructor names the program; nested
+        // `children(cmd(..))` are commands, `opt` / `head` are not.
+        let v3 = "import scopt.OptionParser\nobject Cli {\n  val parser = new scopt.OptionParser[Config](\"shopctl\") {\n    head(\"shopctl\", \"1.x\")\n    opt[Int]('n', \"num\").action((x, c) => c.copy(n = x))\n    cmd(\"sync\").action((_, c) => c).children(cmd(\"orders\"), opt[Unit](\"dry-run\"))\n    cmd(\"gc\")\n  }\n}\n";
+        assert_eq!(commands(&decls(v3, "scala")), vec!["cli:shopctl", "cli:sync", "cli:orders", "cli:gc"]);
+        let extends = "import scopt._\nobject P extends OptionParser[Conf](\"tool\") { cmd(\"run\") }\n";
+        assert_eq!(commands(&decls(extends, "scala")), vec!["cli:tool", "cli:run"]);
+        // A qualified builder, without `import builder._`.
+        let qualified = "import scopt.OParser\nval b = OParser.builder[C]\nval p = OParser.sequence(b.programName(\"x\"), b.cmd(\"y\"))\n";
+        assert_eq!(commands(&decls(qualified, "scala")), vec!["cli:x", "cli:y"]);
+
+        // `cmd(..)` in a Scala file that never mentions scopt is any method.
+        assert!(commands(&decls("object M { def cmd(s: String) = s; cmd(\"x\") }", "scala")).is_empty());
+        // Needles in strings and comments, interpolations and expressions.
+        let guarded = "import scopt.OParser\nval help = \"programName(\\\"fake\\\")\"\n// cmd(\"line\")\n/* cmd(\"block\") */\nval a = cmd(s\"x$y\")\nval b = cmd(name)\nval c = OptionParser(\"no-type-arg\")\nval p = OParser.sequence(programName(\"real\"))\n";
+        assert_eq!(commands(&decls(guarded, "scala")), vec!["cli:real"]);
+        // The scan is Scala's: the same text in another language reads nothing.
+        for lang in ["java", "kotlin", "python", "rust", "typescript"] {
+            assert!(commands(&decls(SCALA_CLI_DEF_MAIN, lang)).is_empty(), "{lang}");
+        }
+        // Every truncation of a multi-byte scopt source reads without a panic.
+        let multibyte = "import scopt.OParser\nval p = new OptionParser[Ü](\"ä\") { cmd(\"é\").children(cmd(\"ö\")) }\nOParser.sequence(programName(\"ü\"), cmd(";
+        for (cut, _) in multibyte.char_indices() {
+            let _ = decls(&multibyte[..cut], "scala");
+        }
+        assert_eq!(commands(&decls(multibyte, "scala")), vec!["cli:ä", "cli:é", "cli:ö", "cli:ü"]);
+    }
+
+    #[test]
+    fn scala_sys_process_invocations() {
+        // `Seq(..).!`: argv[0] is the binary, `export` rides the argv cell and
+        // never becomes a node of its own.
+        let (qnames, argv) = invocation(SCALA_CLI_INV_EXPORTER);
+        assert_eq!(qnames, vec!["cli_invoke:invctl"]);
+        assert_eq!(argv, vec![vec!["export"]]);
+
+        let cases: &[(&str, &str, &[&str])] = &[
+            ("import sys.process._\nval s = \"git status\".!!", "git", &["status"]),
+            ("import scala.sys.process._\nProcess(Seq(\"docker\", \"build\")).run()", "docker", &["build"]),
+            ("import scala.sys.process._\nList(\"kubectl\", \"apply\").lazyLines", "kubectl", &["apply"]),
+            ("import scala.sys.process._\nVector[String](\"terraform\", \"plan\").!!", "terraform", &["plan"]),
+            ("import scala.sys.process._\nval rc = Seq(\"make\", \"test\") !\n", "make", &["test"]),
+            ("import scala.sys.process._\nSeq(\"helm\", \"lint\")\n  .!<", "helm", &["lint"]),
+            ("import scala.sys.process._\n\"git log\".lazyLines_!", "git", &["log"]),
+            ("import scala.sys.process.Process\nProcess(\"git\", Seq(\"fetch\")).!", "git", &["fetch"]),
+            ("import scala.sys.process._\nProcess.apply(\"ls -la\").!!", "ls", &["-la"]),
+            ("val code = scala.sys.process.Process(List(\"sbt\", \"compile\")).!", "sbt", &["compile"]),
+        ];
+        for (source, bin, args) in cases {
+            let (qnames, argv) = invocation(source);
+            assert_eq!(qnames, vec![format!("cli_invoke:{bin}")], "{source}");
+            assert_eq!(argv, vec![args.to_vec()], "{source}");
+        }
+
+        for source in [
+            // A list that is never run, and a comparison.
+            "import scala.sys.process._\nval xs = Seq(\"a\", \"b\").map(f)",
+            "import scala.sys.process._\nif (Seq(\"a\", \"b\") != other) ()",
+            "import scala.sys.process._\nval same = \"a\" != \"b\"",
+            // An argv built elsewhere, an interpolated command, a commented one.
+            "import scala.sys.process._\nval argv = Seq(\"invctl\", \"export\")\nargv.!",
+            "import scala.sys.process._\nval log = s\"git log $rev\".!!",
+            "import scala.sys.process._\n// Seq(\"rm\", \"-rf\").!\n/* \"rm -rf\".!! */",
+            // No sys.process in code: the fixture's call without its import,
+            // and an import only named in a comment or a string.
+            "object Exporter {\n  def run(): Int = Seq(\"invctl\", \"export\").!\n}\n",
+            "// uses sys.process\nval rc = Seq(\"invctl\", \"export\").!",
+            "val doc = \"import scala.sys.process._\"\nval rc = Seq(\"invctl\", \"export\").!",
+        ] {
+            assert!(invocation(source).0.is_empty(), "{source}");
+        }
+
+        // Every truncation of a multi-byte launcher reads without a panic.
+        let multibyte = "import scala.sys.process._\nval a = Seq(\"ä\", \"é\").!\nval b = \"ö ü\".!!\nProcess(\"ß\", List[String](\"ñ\")).run()\nVector(\"x";
+        for (cut, _) in multibyte.char_indices() {
+            let _ = invocation(&multibyte[..cut]);
+        }
+        assert_eq!(invocation(multibyte).0, vec!["cli_invoke:ß", "cli_invoke:ä", "cli_invoke:ö"]);
     }
 
     #[test]
