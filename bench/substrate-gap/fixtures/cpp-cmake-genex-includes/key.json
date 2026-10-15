@@ -1,0 +1,30 @@
+{
+  "framework": "cpp-cmake-genex-includes",
+  "language": "c_cpp",
+  "dirs": [
+    "."
+  ],
+  "note": "DF.6 (CB.26 residual 'CMake generator expressions'): engine/src/build/c_includes.rs cmake_dir returned None for any argument containing `$<`, so `$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/inc>` (the canonical exported-target form) and a config-conditional `$<$<CONFIG:Debug>:..>` added no search root. HEAD (84e2e71, leap wheel): [c-includes] search roots=0 (cmake=0), 0 IMPORTS, CALLS main -> make_box / trace_on absent. After: a BUILD_INTERFACE or config-conditional dir is a root; `$<INSTALL_INTERFACE:include>` (an install-tree path) is not.",
+  "expect_edges": [
+    {
+      "from": "src::main.cpp",
+      "to": "inc::app::box.h",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "src::main.cpp",
+      "to": "debug::app::trace.h",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "src::main.cpp::main",
+      "to": "src::box.cpp::make_box",
+      "category": "CALLS"
+    },
+    {
+      "from": "src::main.cpp::main",
+      "to": "src::trace.cpp::trace_on",
+      "category": "CALLS"
+    }
+  ]
+}

@@ -15,6 +15,10 @@
 //! 2. `include_directories(..)` / `target_include_directories(..)` of the
 //!    `CMakeLists.txt` in every directory that holds a walked C/C++ file (the
 //!    walk admits no `CMakeLists.txt`, so it is read beside the walked files).
+//!    A generator expression is unwrapped first ([`unwrap_genex`], DF.6):
+//!    `$<BUILD_INTERFACE:dir>` and a conditional `$<cond:dir>` name `dir`,
+//!    an `$<INSTALL_INTERFACE:..>` install-tree path and every other
+//!    expression name nothing.
 //! 3. conventional: `include/` under the repo root and under each project
 //!    root.
 //!
@@ -60,6 +64,8 @@ pub(crate) struct IncludeRoots {
     compile_commands: usize,
     cmake: usize,
     conventional: usize,
+    /// Of `cmake`, the dirs read through a generator expression (DF.6).
+    genex: usize,
     /// The `warning:` lines `read` printed (a malformed compile database).
     warnings: Vec<String>,
 }
@@ -94,16 +100,20 @@ impl IncludeRoots {
         out.compile_commands = out.keep(from_db, &held, &mut seen);
 
         let mut from_cmake = Vec::new();
+        let mut from_genex: HashSet<String> = HashSet::new();
         for dir in &held.order {
             let Ok(text) = std::fs::read_to_string(root.join(dir).join(CMAKE_LISTS)) else {
                 continue;
             };
             for arg in cmake_include_args(&text) {
-                if let Some(d) = cmake_dir(&arg, dir, &forms) {
-                    from_cmake.push(d);
+                let (dirs, via_genex) = cmake_dirs(&arg, dir, &forms);
+                if via_genex {
+                    from_genex.extend(dirs.iter().filter(|d| held.contains(d)).cloned());
                 }
+                from_cmake.extend(dirs);
             }
         }
+        out.genex = from_genex.len();
         out.cmake = out.keep(from_cmake, &held, &mut seen);
 
         let conventional = std::iter::once("")
@@ -144,18 +154,20 @@ impl IncludeRoots {
     }
 
     /// CB.22 fired_on marker, once per repo with C/C++ files, after its build:
-    ///   `[c-includes] search roots=<n> (compile_commands=<a> cmake=<b> conventional=<c>) angle=<g> bound_via_roots=<r> repo=<label>`
+    ///   `[c-includes] search roots=<n> (compile_commands=<a> cmake=<b> conventional=<c>) angle=<g> bound_via_roots=<r> genex=<x> repo=<label>`
     /// `n` = distinct search dirs, `a` / `b` / `c` = the dirs each source
     /// named (one dir two sources name counts in both), `g` = angle includes
     /// in the parses, `r` = includes bound through a search dir rather than
-    /// the includer's own.
+    /// the includer's own, `x` = the CMake dirs (of `b`) read through a
+    /// generator expression (DF.6).
     pub(super) fn marker(&self, angle: usize, bound_via_roots: usize, repo_label: &str) -> String {
         format!(
-            "[c-includes] search roots={} (compile_commands={} cmake={} conventional={}) angle={angle} bound_via_roots={bound_via_roots} repo={repo_label}",
+            "[c-includes] search roots={} (compile_commands={} cmake={} conventional={}) angle={angle} bound_via_roots={bound_via_roots} genex={} repo={repo_label}",
             self.dirs.len(),
             self.compile_commands,
             self.cmake,
-            self.conventional
+            self.conventional,
+            self.genex
         )
     }
 }
@@ -564,7 +576,9 @@ enum CmakeTok {
 /// The directory arguments of every `include_directories(..)` and
 /// `target_include_directories(..)` in a CMake list, in order: the
 /// `AFTER` / `BEFORE` / `SYSTEM` / scope keywords and the target name
-/// dropped, variables and generator expressions still unexpanded.
+/// dropped, variables and generator expressions still unexpanded. A
+/// generator expression CMake split at whitespace is one argument again
+/// ([`join_genex_args`]).
 fn cmake_include_args(text: &str) -> Vec<String> {
     let toks = cmake_tokens(text);
     let mut out = Vec::new();
@@ -600,17 +614,34 @@ fn cmake_include_args(text: &str) -> Vec<String> {
             "target_include_directories" => args.get(1..).unwrap_or_default(),
             _ => &[],
         };
-        out.extend(
-            dirs.iter()
-                .filter(|a| {
-                    !matches!(
-                        **a,
-                        "AFTER" | "BEFORE" | "SYSTEM" | "PUBLIC" | "PRIVATE" | "INTERFACE"
-                    )
-                })
-                .map(|a| a.to_string()),
-        );
+        out.extend(join_genex_args(dirs.iter().copied().filter(|a| {
+            !matches!(
+                *a,
+                "AFTER" | "BEFORE" | "SYSTEM" | "PUBLIC" | "PRIVATE" | "INTERFACE"
+            )
+        })));
         i = j + 1;
+    }
+    out
+}
+
+/// One command's arguments with every generator expression whole: an
+/// argument left inside an open `$<` takes the arguments after it,
+/// `;`-joined (CMake joins a command's items into one `;`-list before it
+/// evaluates an expression), until its brackets balance. One still open at
+/// the end stays as it is, and [`unwrap_genex`] skips it.
+fn join_genex_args<'a>(args: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut open = false;
+    for arg in args {
+        match out.last_mut() {
+            Some(cur) if open => {
+                cur.push(';');
+                cur.push_str(arg);
+            }
+            _ => out.push(arg.to_string()),
+        }
+        open = out.last().is_some_and(|cur| genex_open(cur));
     }
     out
 }
@@ -718,11 +749,163 @@ fn bracket_body(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<
     Some(body)
 }
 
+/// What one CMake include argument names once a generator expression around
+/// it is unwrapped ([`unwrap_genex`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Genex {
+    /// No generator expression: the argument is the dir.
+    Plain,
+    /// The dirs inside one, in order, each still unexpanded.
+    Dirs(Vec<String>),
+    /// Names no dir of the build tree.
+    Skip,
+}
+
+/// Deeper generator-expression nesting is skipped (no real list nests this
+/// far), so a pathological list cannot exhaust the stack.
+const GENEX_MAX_NESTING: usize = 16;
+
+/// DF.6: the dirs a CMake include argument names through a generator
+/// expression `$<head:tail>` that spans the whole argument. `head`
+/// `BUILD_INTERFACE` / `BUILD_LOCAL_INTERFACE` (the build tree's half of an
+/// exported target), a nested condition (`$<CONFIG:Debug>`, `$<BOOL:..>`,
+/// `$<NOT:..>`, ...) or a literal `1` names `tail`: a root that only
+/// exists under some configuration is still a place the build looks, and a
+/// root only ever adds a candidate. `tail` is a `;`-list, each item
+/// unwrapped again. A literal `0`, `INSTALL_INTERFACE` (an install-tree
+/// path), any other head (`TARGET_PROPERTY`, `TARGET_FILE_DIR`, `JOIN`,
+/// `IF`, ...), a value with no `:` (`$<CONFIG>`), text after the closing
+/// `>` and an unbalanced expression name nothing.
+fn unwrap_genex(arg: &str) -> Genex {
+    unwrap_genex_at(arg, 0)
+}
+
+fn unwrap_genex_at(arg: &str, nesting: usize) -> Genex {
+    let arg = arg.trim();
+    if !arg.starts_with("$<") {
+        return Genex::Plain;
+    }
+    if nesting >= GENEX_MAX_NESTING || genex_close(arg) != Some(arg.len()) {
+        return Genex::Skip;
+    }
+    let inner = &arg[2..arg.len() - 1];
+    let Some(head) = split_top(inner, b':').first().copied() else {
+        return Genex::Skip;
+    };
+    // No top-level `:` (`$<CONFIG>`): a value, never a dir.
+    let Some(tail) = inner.get(head.len() + 1..) else {
+        return Genex::Skip;
+    };
+    let names_tail = match head {
+        "BUILD_INTERFACE" | "BUILD_LOCAL_INTERFACE" | "1" => true,
+        cond => genex_close(cond) == Some(cond.len()),
+    };
+    if !names_tail {
+        return Genex::Skip;
+    }
+    let mut dirs = Vec::new();
+    for item in split_top(tail, b';') {
+        match unwrap_genex_at(item, nesting + 1) {
+            Genex::Plain if !item.trim().is_empty() => dirs.push(item.trim().to_string()),
+            Genex::Plain | Genex::Skip => {}
+            Genex::Dirs(ds) => dirs.extend(ds),
+        }
+    }
+    if dirs.is_empty() {
+        Genex::Skip
+    } else {
+        Genex::Dirs(dirs)
+    }
+}
+
+/// The offset just past the `>` that closes the `$<` opening `s`; None when
+/// `s` opens none or it never closes. Counted on the ASCII bytes `$<` and
+/// `>`, which a multi-byte character never holds.
+fn genex_close(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if !b.starts_with(b"$<") {
+        return None;
+    }
+    let (mut depth, mut i) = (0usize, 0usize);
+    while i < b.len() {
+        if b[i..].starts_with(b"$<") {
+            depth += 1;
+            i += 2;
+            continue;
+        }
+        if b[i] == b'>' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i + 1);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether `s` holds a `$<` that never closes.
+fn genex_open(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i..].starts_with(b"$<") {
+            match genex_close(&s[i..]) {
+                Some(n) => i += n,
+                None => return true,
+            }
+            continue;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// `s` split at every `sep` outside a `$<..>` (an unclosed one runs to the
+/// end); always at least one piece.
+fn split_top(s: &str, sep: u8) -> Vec<&str> {
+    let b = s.as_bytes();
+    let (mut out, mut start, mut i) = (Vec::new(), 0, 0);
+    while i < b.len() {
+        if b[i..].starts_with(b"$<") {
+            match genex_close(&s[i..]) {
+                Some(n) => i += n,
+                None => break,
+            }
+            continue;
+        }
+        if b[i] == sep {
+            out.push(&s[start..i]);
+            start = i + 1;
+        }
+        i += 1;
+    }
+    out.push(&s[start..]);
+    out
+}
+
+/// The repo-relative dirs one CMake include argument names ([`cmake_dir`]
+/// for the argument, or for each dir a generator expression around it
+/// names), and whether a generator expression named them.
+fn cmake_dirs(arg: &str, list_dir: &str, forms: &RootForms) -> (Vec<String>, bool) {
+    match unwrap_genex(arg) {
+        Genex::Plain => (cmake_dir(arg, list_dir, forms).into_iter().collect(), false),
+        Genex::Dirs(ds) => (
+            ds.iter()
+                .filter_map(|d| cmake_dir(d, list_dir, forms))
+                .collect(),
+            true,
+        ),
+        Genex::Skip => (Vec::new(), false),
+    }
+}
+
 /// One CMake include argument of the list in repo dir `list_dir`, as a
 /// repo-relative dir: relative to `list_dir` (CMake's rule), after
 /// `${CMAKE_CURRENT_SOURCE_DIR}` / `${CMAKE_CURRENT_LIST_DIR}` (the list's
 /// dir) or `${PROJECT_SOURCE_DIR}` / `${CMAKE_SOURCE_DIR}` (the repo root)
-/// as its prefix. A generator expression (`$<..>`), any other variable, or a
+/// as its prefix. An argument still holding a generator expression (`$<..>`;
+/// [`cmake_dirs`] unwraps one around it first), any other variable, or a
 /// path outside the repo gives None.
 fn cmake_dir(arg: &str, list_dir: &str, forms: &RootForms) -> Option<String> {
     let arg = arg.trim();
@@ -843,7 +1026,8 @@ mod tests {
     /// `target_include_directories(<t> [SYSTEM] [BEFORE] PUBLIC|PRIVATE|INTERFACE ..)`
     /// and `include_directories(..)`: plain relative dirs are the list's,
     /// `${CMAKE_CURRENT_SOURCE_DIR}` is the list's dir, `${PROJECT_SOURCE_DIR}`
-    /// the repo root; a generator expression and another variable are skipped.
+    /// the repo root, a `$<BUILD_INTERFACE:..>` dir is read (DF.6); an
+    /// `$<INSTALL_INTERFACE:..>` path and another variable are skipped.
     #[test]
     fn cmake_target_include_directories() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -863,10 +1047,10 @@ mod tests {
             "lib/src/core.cpp",
         ]);
         let got = IncludeRoots::read(root, &files, &[], "repo");
-        assert_eq!(got.dirs, ["lib/include", "lib/api", "common"]);
+        assert_eq!(got.dirs, ["lib/include", "lib/api", "lib/gen", "common"]);
         assert_eq!(
-            (got.compile_commands, got.cmake, got.conventional),
-            (0, 3, 0)
+            (got.compile_commands, got.cmake, got.conventional, got.genex),
+            (0, 4, 0, 1)
         );
         assert_eq!(
             cmake_include_args(
@@ -878,6 +1062,124 @@ mod tests {
             cmake_dir("$<INSTALL_INTERFACE:include>", "", &RootForms(Vec::new())),
             None
         );
+    }
+
+    /// The roots `IncludeRoots::read` takes from one `lib/CMakeLists.txt`
+    /// holding `cmake`, with every dir in `held` holding a walked header.
+    fn lib_cmake_roots(cmake: &str, held: &[&str]) -> IncludeRoots {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        write(root, "lib/CMakeLists.txt", cmake);
+        let mut files: Vec<String> = held.iter().map(|d| format!("{d}/h.h")).collect();
+        files.push("lib/src/core.cpp".to_string());
+        let files: Vec<&str> = files.iter().map(String::as_str).collect();
+        IncludeRoots::read(root, &walked(&files), &[], "repo")
+    }
+
+    /// DF.6: `$<BUILD_INTERFACE:dir>`, the build-tree half of an exported
+    /// target's include dirs, is a root under the list's own rules.
+    #[test]
+    fn build_interface_dir_is_a_root() {
+        let got = lib_cmake_roots(
+            "target_include_directories(core PUBLIC\n  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/inc>\n  $<BUILD_LOCAL_INTERFACE:local>)\n",
+            &["lib/inc", "lib/local"],
+        );
+        assert_eq!(got.dirs, ["lib/inc", "lib/local"]);
+        assert_eq!((got.cmake, got.genex), (2, 2));
+        assert!(got.marker(0, 0, "r").contains(" genex=2 repo=r"));
+    }
+
+    /// DF.6 precision pin: an install-tree path is never a search root.
+    #[test]
+    fn install_interface_is_skipped() {
+        let got = lib_cmake_roots(
+            "target_include_directories(core PUBLIC $<INSTALL_INTERFACE:include> $<INSTALL_PREFIX>/include\n  \"$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR};include>\")\n",
+            &["lib/include"],
+        );
+        assert!(got.dirs.is_empty(), "{:?}", got.dirs);
+        assert_eq!((got.cmake, got.genex), (0, 0));
+        assert_eq!(unwrap_genex("$<INSTALL_INTERFACE:include>"), Genex::Skip);
+        assert_eq!(unwrap_genex("$<INSTALL_PREFIX>/include"), Genex::Skip);
+    }
+
+    /// DF.6: a dir behind a condition (`$<CONFIG:..>`, `$<BOOL:..>`, a
+    /// nested `$<NOT:..>`, a literal `1`) is a root in every configuration.
+    #[test]
+    fn config_conditional_dir_is_a_root() {
+        let got = lib_cmake_roots(
+            "target_include_directories(app PRIVATE \"$<$<CONFIG:Debug>:${CMAKE_CURRENT_SOURCE_DIR}/debug>\"\n  $<$<BOOL:${USE_X}>:x> $<$<NOT:$<PLATFORM_ID:Windows>>:posix> $<1:one>\n  $<$<COMPILE_LANGUAGE:CXX>:$<BUILD_INTERFACE:cxx>>)\n",
+            &["lib/debug", "lib/x", "lib/posix", "lib/one", "lib/cxx"],
+        );
+        assert_eq!(
+            got.dirs,
+            ["lib/debug", "lib/x", "lib/posix", "lib/one", "lib/cxx"]
+        );
+        assert_eq!(got.genex, 5);
+    }
+
+    /// DF.6 precision pin: a literal-`0` condition names no dir.
+    #[test]
+    fn false_condition_is_skipped() {
+        let got = lib_cmake_roots(
+            "target_include_directories(app PRIVATE $<0:x> $<$<CONFIG:Debug>:$<0:y>>)\n",
+            &["lib/x", "lib/y"],
+        );
+        assert!(got.dirs.is_empty(), "{:?}", got.dirs);
+        assert_eq!(unwrap_genex("$<0:x>"), Genex::Skip);
+    }
+
+    /// DF.6: a `;`-list inside a generator expression is one dir per item,
+    /// each unwrapped again; a generator expression CMake split at
+    /// whitespace is rejoined by bracket depth.
+    #[test]
+    fn list_inside_genex() {
+        let got = lib_cmake_roots(
+            "include_directories($<BUILD_INTERFACE:a;b>\n  \"$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/c;$<BUILD_INTERFACE:d>;$<INSTALL_INTERFACE:e>>\"\n  $<BUILD_INTERFACE:f\n  g>)\n",
+            &[
+                "lib/a", "lib/b", "lib/c", "lib/d", "lib/e", "lib/f", "lib/g",
+            ],
+        );
+        assert_eq!(
+            got.dirs,
+            ["lib/a", "lib/b", "lib/c", "lib/d", "lib/f", "lib/g"]
+        );
+        assert_eq!(got.genex, 6);
+        assert_eq!(
+            unwrap_genex("$<BUILD_INTERFACE:a;;$<1:b>>"),
+            Genex::Dirs(vec!["a".to_string(), "b".to_string()])
+        );
+        assert_eq!(unwrap_genex("inc"), Genex::Plain);
+        assert_eq!(
+            cmake_include_args("include_directories($<BUILD_INTERFACE:f\n g> h)"),
+            ["$<BUILD_INTERFACE:f;g>", "h"]
+        );
+    }
+
+    /// DF.6 precision pin: a generator expression that names no dir by
+    /// itself (a target property, a file dir, a join, a bare value, an
+    /// unbalanced one) is skipped, as is a dir that still holds `$<` after
+    /// unwrapping.
+    #[test]
+    fn unknown_genex_is_skipped() {
+        let got = lib_cmake_roots(
+            "target_include_directories(app PRIVATE $<TARGET_PROPERTY:t,INCLUDE_DIRECTORIES>\n  $<TARGET_FILE_DIR:t> $<JOIN:a,b> $<CONFIG> $<IF:1,a,b> $<BUILD_INTERFACE:a>/b\n  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/$<CONFIG>/b> $<BUILD_INTERFACE:a)\n",
+            &["lib/a", "lib/b"],
+        );
+        assert!(got.dirs.is_empty(), "{:?}", got.dirs);
+        assert_eq!(got.genex, 0);
+        // Nesting past GENEX_MAX_NESTING is skipped, not recursed into.
+        let deep = format!(
+            "{}a{}",
+            "$<1:".repeat(GENEX_MAX_NESTING + 1),
+            ">".repeat(GENEX_MAX_NESTING + 1)
+        );
+        assert_eq!(unwrap_genex(&deep), Genex::Skip);
+        let shallow = format!(
+            "{}a{}",
+            "$<1:".repeat(GENEX_MAX_NESTING),
+            ">".repeat(GENEX_MAX_NESTING)
+        );
+        assert_eq!(unwrap_genex(&shallow), Genex::Dirs(vec!["a".to_string()]));
     }
 
     /// `include/` under the repo root and under a project root, only when a
@@ -928,7 +1230,7 @@ mod tests {
         );
         assert_eq!(
             got.marker(4, 3, "r"),
-            "[c-includes] search roots=3 (compile_commands=2 cmake=3 conventional=1) angle=4 bound_via_roots=3 repo=r"
+            "[c-includes] search roots=3 (compile_commands=2 cmake=3 conventional=1) angle=4 bound_via_roots=3 genex=0 repo=r"
         );
     }
 
