@@ -62,24 +62,30 @@ pub fn parse_file(
             parsed.cpp_error_bytes
         );
     }
-    let (fp, stats) = parse_tree_into(&parsed.tree, source, file_rel_path, module_qname, repo);
+    let (fp, stats, lambdas) =
+        parse_tree_into(&parsed.tree, source, file_rel_path, module_qname, repo);
     if qname_debug() && let Some(line) = stats.marker(file_rel_path) {
         // LB.10b debug marker:
         //   `GLIA_QNAME_DEBUG=1 glia analyze <repo> 2>&1 | grep '\[qname\] c_cpp: .* header types scoped'`
+        eprintln!("{line}");
+    }
+    // DF.5 fired_on, per file that holds a lambda in a function body:
+    //   `glia analyze <repo> 2>&1 | grep '^\[c-lambda\]'`
+    if let Some(line) = lambdas.marker(file_rel_path) {
         eprintln!("{line}");
     }
     Ok(fp)
 }
 
 /// Walk a parsed tree into a [`FileParse`], with the counts of the LB.10b
-/// identity rules for the marker.
+/// identity rules and of the lambdas walked (DF.5) for the markers.
 fn parse_tree_into(
     tree: &Tree,
     source: &str,
     file_rel_path: &str,
     module_qname: &str,
     repo: RepoId,
-) -> (FileParse, IdentityStats) {
+) -> (FileParse, IdentityStats, LambdaStats) {
     let src = source.as_bytes();
     let root = tree.root_node();
 
@@ -117,7 +123,7 @@ fn parse_tree_into(
         nav: acc.nav,
         properties: Default::default(),
     };
-    (fp, acc.stats)
+    (fp, acc.stats, acc.lambdas)
 }
 
 /// A MODULE's nav name is its file stem (LB.10a): every C/C++ MODULE is named
@@ -249,6 +255,8 @@ struct Acc {
     /// declarations, outermost first. A type spelled by one of them is
     /// unknown ([`simple_type`] gives `""`).
     template_params: Vec<String>,
+    /// DF.5: the lambdas walked as part of their enclosing function's body.
+    lambdas: LambdaStats,
 }
 
 impl Acc {
@@ -268,6 +276,7 @@ impl Acc {
             module_id,
             module_qname: module_qname.to_string(),
             template_params: Vec::new(),
+            lambdas: LambdaStats::default(),
         }
     }
 
@@ -390,6 +399,25 @@ struct IdentityStats {
     prototypes: usize,
     /// CB.19: `using namespace` / `using a::b` facts recorded.
     usings: usize,
+}
+
+/// DF.5: the lambda expressions [`collect_calls_in`] walked as part of the
+/// function that holds them, and the call sites inside them it recorded as
+/// that function's.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LambdaStats {
+    bodies: usize,
+    calls: usize,
+}
+
+impl LambdaStats {
+    /// `[c-lambda] bodies=<b> calls=<c> file=<file>`, for a file with any
+    /// lambda walked.
+    fn marker(&self, file_rel: &str) -> Option<String> {
+        (self.bodies > 0).then(|| {
+            format!("[c-lambda] bodies={} calls={} file={file_rel}", self.bodies, self.calls)
+        })
+    }
 }
 
 impl IdentityStats {
@@ -1011,13 +1039,33 @@ fn visit_function(
 /// the call sites of its body, the simple types of its parameters and
 /// local declarations (`Acc::nav` local_types, for the receiver pass) and
 /// the `using` directives in its body (approximated as file-wide facts).
+/// DF.5: and its declared return type ([`record_return_type`]), and the
+/// call sites, parameters and locals of the lambdas in its body as its own.
 fn visit_callable(node: TsNode, src: &[u8], fn_id: NodeId, ns_path: &str, acc: &mut Acc) {
+    record_return_type(node, src, fn_id, acc);
     if let Some(declarator) = node.child_by_field_name("declarator") {
         record_params(declarator, src, fn_id, acc);
     }
     if let Some(body) = node.child_by_field_name("body") {
         collect_calls_in(body, src, fn_id, acc);
         collect_body_facts(body, src, fn_id, ns_path, acc);
+    }
+}
+
+/// DF.5: the simple type a definition's `type` names, as `fn_id`'s return
+/// type (`Box make_box()`, `Box* find_box(int)`, `const shop::Box& f()` ->
+/// `Box`: the declarator's `*` / `&` never change the simple type), for the
+/// graph's `auto b = make_box(); b.get()` receiver rule (`receiver_return`
+/// in graph/src/cpp_scope.rs). A primitive, `void`, `auto` (a trailing
+/// return type included), a template-dependent type, a constructor or a
+/// destructor records nothing. An overload set is one node: the first
+/// definition the file walks records its type.
+fn record_return_type(def: TsNode, src: &[u8], fn_id: NodeId, acc: &mut Acc) {
+    if acc.nav.return_types.contains_key(&fn_id) {
+        return;
+    }
+    if let Some(ty) = def.child_by_field_name("type").and_then(|t| simple_type(t, src, acc)) {
+        acc.nav.record_return_type(fn_id, &ty);
     }
 }
 
@@ -1182,19 +1230,31 @@ fn collect_include(node: TsNode, src: &[u8], acc: &mut Acc) {
     });
 }
 
+/// The call sites of a function body, each a [`CallSite`] of `from`. DF.5:
+/// a lambda belongs to the function that holds it (as a Go func literal,
+/// CA.1), so its body is walked as `from`'s and every call in it counted in
+/// [`LambdaStats`]; the lambda's own invocation (`f(3)`) stays a `Bare`
+/// call of the body, as before. A nested `function_definition` (a member of
+/// a local class) is not walked: it is no part of this function.
 fn collect_calls_in(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
-    let mut stack = vec![node];
-    while let Some(n) = stack.pop() {
+    let mut stack = vec![(node, false)];
+    while let Some((n, in_lambda)) = stack.pop() {
         if n.kind() == "call_expression"
             && let Some(func) = n.child_by_field_name("function")
         {
             let qualifier = classify_call(func, src);
             acc.calls.push(CallSite { from, qualifier, line: line_at(n) });
+            acc.lambdas.calls += usize::from(in_lambda);
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
-            if !matches!(child.kind(), "function_definition" | "lambda_expression") {
-                stack.push(child);
+            match child.kind() {
+                "function_definition" => {}
+                "lambda_expression" => {
+                    acc.lambdas.bodies += 1;
+                    stack.push((child, true));
+                }
+                _ => stack.push((child, in_lambda)),
             }
         }
     }
@@ -1361,8 +1421,10 @@ fn record_param(p: TsNode, src: &[u8], fn_id: NodeId, acc: &mut Acc) {
 /// CB.19: the local declarations (`Cart c;`, `shop::Cart c(1);`, `auto c =
 /// Cart();`, `Cart* p = new Cart();`), range-for variables and `catch`
 /// parameters of a body, as locals of `fn_id`, and its `using` directives
-/// as file facts. Nested function definitions and lambdas are skipped, as
-/// [`collect_calls_in`] skips them.
+/// as file facts. DF.5: a lambda's parameters ([`record_lambda_params`]) and
+/// the declarations of its body are locals of `fn_id` too, as
+/// [`collect_calls_in`] walks its calls as `fn_id`'s; a capture list records
+/// nothing. Nested function definitions are skipped, as there.
 fn collect_body_facts(body: TsNode, src: &[u8], fn_id: NodeId, ns_path: &str, acc: &mut Acc) {
     let mut stack = vec![body];
     while let Some(n) = stack.pop() {
@@ -1392,15 +1454,52 @@ fn collect_body_facts(body: TsNode, src: &[u8], fn_id: NodeId, ns_path: &str, ac
                 }
             }
             "using_declaration" => record_using(n, src, ns_path, acc),
+            "lambda_expression" => record_lambda_params(n, src, fn_id, acc),
             _ => {}
         }
         let mut cursor = n.walk();
         for child in n.named_children(&mut cursor) {
-            if !matches!(child.kind(), "function_definition" | "lambda_expression") {
+            if child.kind() != "function_definition" {
                 stack.push(child);
             }
         }
     }
+}
+
+/// DF.5: a lambda's parameters (`[](Box& b) { .. }` -> `b: Box`) as locals of
+/// the function that holds it, through [`record_param`]. One the outer body
+/// binds to another type is blanked (unknown) by `record_local_type`, which
+/// loses an edge rather than guess one; an `auto` parameter (a generic
+/// lambda) and one spelled by the lambda's own template parameter
+/// (`[]<class T>(T t)`) are recorded unknown for the same reason: either
+/// can shadow an outer local of a known type.
+fn record_lambda_params(lambda: TsNode, src: &[u8], fn_id: NodeId, acc: &mut Acc) {
+    let Some(params) = lambda
+        .child_by_field_name("declarator")
+        .and_then(|d| d.child_by_field_name("parameters"))
+    else {
+        return;
+    };
+    let depth = acc.template_params.len();
+    if let Some(tparams) = lambda.child_by_field_name("template_parameters") {
+        let mut cursor = tparams.walk();
+        for p in tparams.named_children(&mut cursor) {
+            if let Some(name) = template_param_name(p, src) {
+                acc.template_params.push(name.to_string());
+            }
+        }
+    }
+    let mut cursor = params.walk();
+    for p in params.named_children(&mut cursor) {
+        let generic = p
+            .child_by_field_name("type")
+            .is_some_and(|t| t.kind() == "placeholder_type_specifier");
+        match (generic, p.child_by_field_name("declarator").and_then(|d| declared_name(d, src))) {
+            (true, Some(name)) => acc.nav.record_local_type(fn_id, name, ""),
+            _ => record_param(p, src, fn_id, acc),
+        }
+    }
+    acc.template_params.truncate(depth);
 }
 
 /// The locals one body `declaration` binds. An explicit type is shared by
@@ -1994,7 +2093,7 @@ int& g() { static int y; return y; }
         // The marker's counts: Local, n::K file-local; a, ref, K::f bound;
         // run, total, init provisional.
         let tree = parse_tree(source, Dialect::Cpp).unwrap().tree;
-        let (_, stats) = parse_tree_into(&tree, source, "src/Widget.cpp", "src::Widget.cpp", repo());
+        let (_, stats, _) = parse_tree_into(&tree, source, "src/Widget.cpp", "src::Widget.cpp", repo());
         assert_eq!(stats, IdentityStats { file_local: 2, bound: 3, provisional: 3, ..IdentityStats::default() });
         assert_eq!(
             stats.marker("src/Widget.cpp").as_deref(),
@@ -2012,7 +2111,7 @@ int& g() { static int y; return y; }
     /// The `[qname] c_cpp:` marker a parse of `source` prints.
     fn marker_of(source: &str, file: &str, module: &str) -> String {
         let tree = parse_tree(source, Dialect::from_path(file)).unwrap().tree;
-        let (_, stats) = parse_tree_into(&tree, source, file, module, repo());
+        let (_, stats, _) = parse_tree_into(&tree, source, file, module, repo());
         stats.marker(file).unwrap_or_default()
     }
 
@@ -2413,6 +2512,196 @@ int run(Cart c) { Cart d; return c.add(d); }
         // The call sites the receiver pass reads them for.
         assert!(fp.calls.iter().any(|c| c.from == add
             && c.qualifier == CallQualifier::Attribute { base: "box".to_string(), name: "get".to_string() }));
+    }
+
+    /// The fixture `cpp-lambda-auto-receivers`' src/main.cpp (DF.5).
+    const LAMBDA_MAIN: &str = "\
+#include <app/box.h>
+
+static void helper(int x) {}
+
+int main() {
+    auto b = make_box();
+    b.get();
+    auto p = find_box(1);
+    p->put(2);
+    auto f = [&](int x) {
+        helper(x);
+        Box inner;
+        inner.clear();
+    };
+    f(3);
+    return 0;
+}
+";
+
+    fn walk_with_lambdas(source: &str, file: &str, module: &str) -> (FileParse, LambdaStats) {
+        let tree = parse_tree(source, Dialect::from_path(file)).unwrap().tree;
+        let (fp, _, lambdas) = parse_tree_into(&tree, source, file, module, repo());
+        (fp, lambdas)
+    }
+
+    fn bare(name: &str) -> CallQualifier {
+        CallQualifier::Bare(name.to_string())
+    }
+
+    fn attr(base: &str, name: &str) -> CallQualifier {
+        CallQualifier::Attribute { base: base.to_string(), name: name.to_string() }
+    }
+
+    /// DF.5: a lambda's call sites are its enclosing function's; the
+    /// lambda's own invocation stays a bare call of the body, and the body's
+    /// locals keep the types the receiver pass reads (`auto b = make_box();`
+    /// is the callee's text, which graph/src/cpp_scope.rs reads back as a
+    /// call). On HEAD neither `helper(x)` nor `inner.clear()` was a call
+    /// site of anyone.
+    #[test]
+    fn lambda_calls_belong_to_the_enclosing_fn() {
+        let (fp, lambdas) = walk_with_lambdas(LAMBDA_MAIN, "src/main.cpp", "src::main.cpp");
+        let main = node_at(&fp, node_kind::FUNCTION, "src::main.cpp::main").unwrap();
+        let mut from_main: Vec<String> = fp
+            .calls
+            .iter()
+            .filter(|c| c.from == main)
+            .map(|c| format!("{:?}", c.qualifier))
+            .collect();
+        from_main.sort();
+        let mut want: Vec<String> = [
+            bare("make_box"),
+            attr("b", "get"),
+            bare("find_box"),
+            attr("p", "put"),
+            bare("helper"),
+            attr("inner", "clear"),
+            bare("f"),
+        ]
+        .iter()
+        .map(|q| format!("{q:?}"))
+        .collect();
+        want.sort();
+        assert_eq!(from_main, want);
+        // Every call site of the file is main's: none is left to the lambda.
+        assert!(fp.calls.iter().all(|c| c.from == main), "{:?}", fp.calls);
+        assert_eq!(lambdas, LambdaStats { bodies: 1, calls: 2 });
+        assert_eq!(
+            lambdas.marker("src/main.cpp").as_deref(),
+            Some("[c-lambda] bodies=1 calls=2 file=src/main.cpp")
+        );
+        assert_eq!(
+            locals(&fp, main),
+            pairs(&[("b", "make_box"), ("p", "find_box"), ("f", ""), ("inner", "Box")])
+        );
+        // A file with no lambda prints no marker.
+        let (_, none) = walk_with_lambdas("int g() { return h(); }", "src/g.cpp", "src::g.cpp");
+        assert_eq!(none, LambdaStats::default());
+        assert_eq!(none.marker("src/g.cpp"), None);
+    }
+
+    /// DF.5: a lambda's parameters are locals of the function that holds it,
+    /// with their simple types; one that shadows an outer local of another
+    /// type, an `auto` (generic lambda) parameter and one spelled by the
+    /// lambda's own template parameter are unknown; a capture records
+    /// nothing; a lambda in a lambda is walked too.
+    #[test]
+    fn lambda_params_are_locals() {
+        let source = "\
+int main() {
+    Cart c;
+    Box kept;
+    auto one = [](Box& b) { b.get(); };
+    auto two = [](Box c) { c.get(); };
+    auto three = [](const auto& a) { a.get(); };
+    auto four = []<class T>(T t, Box* q) { t.get(); };
+    auto five = [kept, &c](int n) { auto six = [](Cart& inner) { inner.add(); }; };
+    return 0;
+}
+";
+        let (fp, lambdas) = walk_with_lambdas(source, "src/main.cpp", "src::main.cpp");
+        let main = node_at(&fp, node_kind::FUNCTION, "src::main.cpp::main").unwrap();
+        assert_eq!(
+            locals(&fp, main),
+            pairs(&[
+                ("c", ""),
+                ("kept", "Box"),
+                ("one", ""),
+                ("two", ""),
+                ("three", ""),
+                ("four", ""),
+                ("five", ""),
+                ("six", ""),
+                ("b", "Box"),
+                ("a", ""),
+                ("t", ""),
+                ("q", "Box"),
+                ("inner", "Cart"),
+            ])
+        );
+        assert_eq!(lambdas, LambdaStats { bodies: 6, calls: 5 });
+        assert!(fp.calls.iter().any(|c| c.from == main && c.qualifier == attr("inner", "add")));
+    }
+
+    /// DF.5: a definition's declared return type is its simple type, a
+    /// pointer / reference declarator peeled; a primitive, `void`, `auto`, a
+    /// template parameter, a constructor and a prototype record nothing; an
+    /// out-of-line member records under its METHOD.
+    #[test]
+    fn return_types_recorded() {
+        let source = "\
+#include <app/box.h>
+int Box::get() const { return 1; }
+void Box::put(int v) {}
+Box make_box() { return Box(); }
+Box* find_box(int id) { return nullptr; }
+const shop::Box& ref_box() { static Box b; return b; }
+auto later() -> Box { return Box(); }
+template <class T> T same(T t) { return t; }
+Box declared_only();
+class Repo {
+ public:
+  Repo() {}
+  Box* find(int id) { return nullptr; }
+};
+";
+        let fp = parse_file(source, "src/box.cpp", "src::box.cpp", Dialect::Cpp, repo()).unwrap();
+        let ret = |kind, q: &str| {
+            let id = node_at(&fp, kind, q).unwrap_or_else(|| panic!("{q}: {:?}", all_qnames(&fp)));
+            fp.nav.return_types.get(&id).cloned()
+        };
+        assert_eq!(ret(node_kind::FUNCTION, "src::box.cpp::make_box").as_deref(), Some("Box"));
+        assert_eq!(ret(node_kind::FUNCTION, "src::box.cpp::find_box").as_deref(), Some("Box"));
+        assert_eq!(ret(node_kind::FUNCTION, "src::box.cpp::ref_box").as_deref(), Some("Box"));
+        assert_eq!(ret(node_kind::METHOD, "src::Box::get"), None, "int");
+        assert_eq!(ret(node_kind::METHOD, "src::Box::put"), None, "void");
+        assert_eq!(ret(node_kind::FUNCTION, "src::box.cpp::later"), None, "auto");
+        assert_eq!(ret(node_kind::FUNCTION, "src::box.cpp::same"), None, "template parameter");
+        assert_eq!(ret(node_kind::METHOD, "src::box.cpp::Repo::Repo"), None, "constructor");
+        assert_eq!(ret(node_kind::METHOD, "src::box.cpp::Repo::find").as_deref(), Some("Box"));
+        assert_eq!(fp.nav.return_types.len(), 4, "{:?}", fp.nav.return_types);
+    }
+
+    /// DF.5: a member of a local class is no part of the function that holds
+    /// it: neither its calls nor its lambdas are walked as the function's.
+    #[test]
+    fn nested_function_definition_still_skipped() {
+        let source = "\
+int run() {
+    struct Local {
+        void m() { go(); auto f = [] { went(); }; }
+    };
+    auto g = [] { ran(); };
+    return 0;
+}
+";
+        let (fp, lambdas) = walk_with_lambdas(source, "src/run.cpp", "src::run.cpp");
+        let run = node_at(&fp, node_kind::FUNCTION, "src::run.cpp::run").unwrap();
+        let names: Vec<String> = fp
+            .calls
+            .iter()
+            .filter(|c| c.from == run)
+            .map(|c| format!("{:?}", c.qualifier))
+            .collect();
+        assert_eq!(names, vec![format!("{:?}", bare("ran"))]);
+        assert_eq!(lambdas, LambdaStats { bodies: 1, calls: 1 });
     }
 
     /// CB.19 (C6 / C7): file / namespace-scope prototypes are `DeclaresFn`

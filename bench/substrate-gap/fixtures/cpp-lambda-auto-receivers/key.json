@@ -1,0 +1,34 @@
+{
+  "framework": "cpp-lambda-auto-receivers",
+  "language": "c_cpp",
+  "dirs": [
+    "."
+  ],
+  "note": "DF (CB.26 residuals 'C++ lambdas, auto locals'): parsers/code/c_cpp/src/lib.rs collect_calls_in and collect_body_facts skip every lambda_expression, so `helper(x)` and `inner.clear()` inside `[&](int x) { .. }` are no call sites of anyone; init_type reads `auto b = make_box();` as a construction of a type named make_box, which names no type, so `b.get()` / `p->put(2)` stay unbound. HEAD (84e2e71, leap wheel): CALLS main -> make_box and main -> find_box bind (prototype rule); main -> Box::get, Box::put, Box::clear and helper 0/4. After: a lambda's calls belong to its enclosing function; an `auto` local initialised by a call is typed by the callee's declared return type.",
+  "expect_edges": [
+    {
+      "from": "src::main.cpp::main",
+      "to": "inc::app::Box::get",
+      "category": "CALLS",
+      "note": "auto b = make_box(); return type Box"
+    },
+    {
+      "from": "src::main.cpp::main",
+      "to": "inc::app::Box::put",
+      "category": "CALLS",
+      "note": "auto p = find_box(1); return type Box*"
+    },
+    {
+      "from": "src::main.cpp::main",
+      "to": "src::main.cpp::helper",
+      "category": "CALLS",
+      "note": "inside the lambda"
+    },
+    {
+      "from": "src::main.cpp::main",
+      "to": "inc::app::Box::clear",
+      "category": "CALLS",
+      "note": "a lambda local of a declared type"
+    }
+  ]
+}

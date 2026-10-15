@@ -22,6 +22,11 @@
 //! METHOD under one CLASS, `this->x()` resolves, the defining file's static
 //! helper stays callable), and a namespace-qualified definition is a
 //! FUNCTION of its file.
+//!
+//! DF.5 (`lambda_and_auto_receivers_bind`, on `cpp-lambda-auto-receivers`):
+//! a lambda's calls belong to the function that holds it, and an `auto`
+//! local initialised by a call is typed by the callee's declared return
+//! type (graph/src/cpp_scope.rs rule `receiver_return`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -34,6 +39,7 @@ use glia_graph::MergedGraph;
 
 const FIXTURE: &str = "../bench/substrate-gap/fixtures/cpp-header-impl-files";
 const NAMESPACE_FIXTURE: &str = "../bench/substrate-gap/fixtures/cpp-namespace-qnames";
+const LAMBDA_AUTO_FIXTURE: &str = "../bench/substrate-gap/fixtures/cpp-lambda-auto-receivers";
 
 /// Copy the fixture's sources (not its key.json, not a stray `.ai` cache)
 /// into `dst`.
@@ -377,4 +383,44 @@ fn out_of_line_members_meet_their_class() {
         .filter(|ev| ev.emitter == "graph:cpp_members")
         .count();
     assert_eq!(joined, 2, "Widget -> run, Cart -> total");
+}
+
+/// DF.5: in `main`, `auto b = make_box(); b.get();` and `auto p =
+/// find_box(1); p->put(2);` bind Box::get / Box::put through the callees'
+/// declared return types (`Box`, `Box*`), and the lambda `[&](int x) {
+/// helper(x); Box inner; inner.clear(); }` contributes main's CALLS to
+/// `helper` and Box::clear. HEAD bound none of the four. Each carries its
+/// EVIDENCE; the two receiver edges are `graph:cpp_scope` rule
+/// `receiver_return`.
+#[test]
+fn lambda_and_auto_receivers_bind() {
+    let tmp = copy_of(LAMBDA_AUTO_FIXTURE);
+    let merged = build(&tmp);
+    let nav = nav(&merged);
+    let q = |id: &NodeId| nav.get(id).map(|(q, _, _)| q.clone()).unwrap_or_default();
+    let want = [
+        ("inc::app::Box::get", Some("receiver_return")),
+        ("inc::app::Box::put", Some("receiver_return")),
+        ("src::main.cpp::helper", None),
+        ("inc::app::Box::clear", None),
+    ];
+    for (to, rule) in want {
+        let found: Vec<Evidence> = merged
+            .all_edges()
+            .filter(|e| e.category == edge_category::CALLS)
+            .filter(|e| q(&e.from) == "src::main.cpp::main" && q(&e.to) == to)
+            .map(|e| Evidence::of(e).unwrap_or_else(|| panic!("CALLS main -> {to} without EVIDENCE")))
+            .collect();
+        assert_eq!(found.len(), 1, "CALLS main -> {to}: {:?}", edges(&merged, edge_category::CALLS));
+        if let Some(rule) = rule {
+            assert_eq!(found[0].emitter, "graph:cpp_scope", "{to}");
+            assert_eq!(found[0].rule.as_deref(), Some(rule), "{to}");
+        }
+    }
+    // The lambda's own invocation `f(3)` binds nothing (f is a local).
+    let calls = edges(&merged, edge_category::CALLS);
+    assert!(calls.iter().all(|(_, to)| !to.ends_with("::f")), "{calls:?}");
+    for e in merged.all_edges() {
+        assert!(Evidence::of(e).is_some(), "edge without EVIDENCE: {e:?}");
+    }
 }

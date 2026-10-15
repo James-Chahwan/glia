@@ -29,8 +29,18 @@
 //! by the lookup above: under `using namespace shop;` that reads `shop::Cart`
 //! even where the source spelled `legacy::Cart`.
 //!
+//! An `auto` local initialised by a call (`auto b = make_box();`) is recorded
+//! with the callee's text as its type (the parser cannot tell a constructor
+//! `Box()` from a call `make_box()`). When that text names no visible type,
+//! it is read as the callee (DF.5): the function a bare call of that name
+//! from the caller binds (the class's own member first, then the caller's
+//! namespaces outward over the visible files and prototypes, then `using`),
+//! and that function's declared return type (`CodeNav::return_types`, looked
+//! up from the callee's own file and scope) types the receiver, rule
+//! `receiver_return`.
+//!
 //! fired_on marker, once per C/C++ graph:
-//! `[cpp-scope] implicit_this=<a> qualified=<b> receiver_using=<c> prototype=<d> using=<e> ambiguous=<f>`
+//! `[cpp-scope] implicit_this=<a> qualified=<b> receiver_using=<c> prototype=<d> using=<e> ambiguous=<f> receiver_return=<g>`
 //! — grep `^\[cpp-scope\]`.
 
 use std::cell::{Cell, RefCell};
@@ -61,6 +71,7 @@ const QUALIFIED: &str = "qualified";
 const RECEIVER_USING: &str = "receiver_using";
 const PROTOTYPE: &str = "prototype";
 const USING: &str = "using";
+const RECEIVER_RETURN: &str = "receiver_return";
 
 /// A namespace-scope FUNCTION: its file MODULE, its C++ namespace and
 /// whether it is a definition a prototype elsewhere can name (a source file's
@@ -159,6 +170,7 @@ pub(crate) struct CppScope {
     prototype: Cell<usize>,
     using: Cell<usize>,
     ambiguous: Cell<usize>,
+    receiver_return: Cell<usize>,
 }
 
 impl CppScope {
@@ -286,6 +298,7 @@ impl CppScope {
             prototype: Cell::new(0),
             using: Cell::new(0),
             ambiguous: Cell::new(0),
+            receiver_return: Cell::new(0),
         }
     }
 
@@ -295,7 +308,9 @@ impl CppScope {
     ///   rewrote): `m` of a base of the caller's class, rule `implicit_this`;
     /// - `Attribute` / `ComplexReceiver` with a typed receiver (CB.19's
     ///   locals and fields, [`receiver_type`]): the type through C++ lookup
-    ///   and `using`, then its method, rule `receiver_using`;
+    ///   and `using`, then its method, rule `receiver_using`; a type text
+    ///   naming no visible type read as a callee whose declared return type
+    ///   types the receiver (`auto b = make_box();`), rule `receiver_return`;
     /// - `Attribute { base: T, name }`, `T` no variable of the caller: a type
     ///   (`Cart::count()`) -> its method, else a namespace (`util::clamp()`)
     ///   -> its function (a visible definition, else the one external
@@ -324,12 +339,13 @@ impl CppScope {
     pub(crate) fn marker(&self, implicit_this: usize) -> String {
         format!(
             "[cpp-scope] implicit_this={implicit_this} qualified={} receiver_using={} \
-             prototype={} using={} ambiguous={}",
+             prototype={} using={} ambiguous={} receiver_return={}",
             self.qualified.get(),
             self.receiver_using.get(),
             self.prototype.get(),
             self.using.get(),
-            self.ambiguous.get()
+            self.ambiguous.get(),
+            self.receiver_return.get()
         )
     }
 
@@ -343,6 +359,7 @@ impl CppScope {
                     RECEIVER_USING => Some(&self.receiver_using),
                     PROTOTYPE => Some(&self.prototype),
                     USING => Some(&self.using),
+                    RECEIVER_RETURN => Some(&self.receiver_return),
                     // A base member: the pre-pass counted the rewrite.
                     _ => None,
                 };
@@ -440,23 +457,27 @@ impl CppScope {
         {
             return self.settle(self.external(&vis, ns, name), PROTOTYPE);
         }
-        // C7: a using-declaration of `name` before the using-directives.
-        let usings = self.usings_at(&vis, &scope);
+        self.settle(self.using_function(&vis, &scope, name), USING)
+    }
+
+    /// C7: function `name` through the `using`s in effect at `scope`: a
+    /// using-declaration of `name` before the using-directives.
+    fn using_function(&self, vis: &HashSet<NodeId>, scope: &str, name: &str) -> Found {
+        let usings = self.usings_at(vis, scope);
         let decls: Vec<Found> = usings
             .iter()
             .filter(|u| u.name.as_deref() == Some(name))
-            .map(|u| self.ns_function(&vis, &self.using_ns(u), name))
+            .map(|u| self.ns_function(vis, &self.using_ns(u), name))
             .collect();
-        let found = match Found::any(decls) {
+        match Found::any(decls) {
             Found::Nothing => Found::any(
                 usings
                     .iter()
                     .filter(|u| u.name.is_none())
-                    .map(|u| self.ns_function(&vis, &self.using_ns(u), name)),
+                    .map(|u| self.ns_function(vis, &self.using_ns(u), name)),
             ),
             found => found,
-        };
-        self.settle(found, USING)
+        }
     }
 
     /// An `Attribute` / `ComplexReceiver` call the generic pass missed (C5,
@@ -474,8 +495,10 @@ impl CppScope {
         let scope = def_scope(&g.nav, site.from);
         // An object receiver of a known type: never read as a type name.
         if let Some(ty) = receiver_type(g, site) {
-            let found = self.method_of(g, self.lookup_type(&vis, &scope, ty), name);
-            return self.settle(found, RECEIVER_USING);
+            return match self.lookup_type(&vis, &scope, ty) {
+                Found::Nothing => self.receiver_return(g, site.from, (&vis, &scope), ty, name),
+                found => self.settle(self.method_of(g, found, name), RECEIVER_USING),
+            };
         }
         let CallQualifier::Attribute { base, .. } = &site.qualifier else {
             return None;
@@ -493,6 +516,79 @@ impl CppScope {
         }
         let ns = self.resolve_ns(&scope, base)?;
         self.settle(self.ns_function(&vis, &ns, name), QUALIFIED)
+    }
+
+    /// DF.5: a receiver whose recorded type text `text` names no visible
+    /// type, read as the callee of its initialiser (`auto b = make_box();`
+    /// records `make_box`): the function [`Self::callee`] binds, then that
+    /// function's declared return type (`CodeNav::return_types`), looked up
+    /// from the callee's own file and scope as its definition spells it,
+    /// then method `name` of it. A callee with no recorded return type (a
+    /// primitive, `auto`, a template parameter) binds nothing; several
+    /// callees, or several types, are refused and counted ambiguous.
+    fn receiver_return(
+        &self,
+        g: &RepoGraph,
+        from: NodeId,
+        (vis, scope): (&HashSet<NodeId>, &str),
+        text: &str,
+        name: &str,
+    ) -> Option<(NodeId, Evidence)> {
+        let callee = match self.callee(g, from, (vis, scope), text) {
+            Found::One(callee) => callee,
+            other => return self.settle(other, RECEIVER_RETURN),
+        };
+        let ret = g.nav.return_types.get(&callee)?;
+        let at = self.visible(self.caller_file(g, callee)?);
+        let ty = self.lookup_type(&at, &def_scope(&g.nav, callee), ret);
+        self.settle(self.method_of(g, ty, name), RECEIVER_RETURN)
+    }
+
+    /// The function a bare call `text()` from `from` names, as C++ looks it
+    /// up: a member of the caller's class (its own, else the nearest base's,
+    /// as [`implicit_this`] rewrites a bare call), then the caller's
+    /// namespaces innermost first over the visible definitions and
+    /// prototypes ([`Self::ns_function`]), then the `using`s in effect. Only
+    /// a plain identifier is a callee: the parser keeps a callee's last
+    /// segment, so a qualified call (`shop::make()`) reads as `make`.
+    fn callee(
+        &self,
+        g: &RepoGraph,
+        from: NodeId,
+        (vis, scope): (&HashSet<NodeId>, &str),
+        text: &str,
+    ) -> Found {
+        if text.is_empty() || !text.bytes().all(|b| b == b'_' || b.is_ascii_alphanumeric()) {
+            return Found::Nothing;
+        }
+        if g.nav.kind_by_id.get(&from) == Some(&node_kind::METHOD)
+            && let Some(owner) = enclosing_class_or_struct(&g.nav, from)
+        {
+            if let Some(own) = g
+                .symbols
+                .class_methods
+                .get(&owner)
+                .and_then(|m| m.get(text))
+            {
+                return Found::One(*own);
+            }
+            match self.base_member(g, owner, text) {
+                Found::Nothing => {}
+                found => return found,
+            }
+        }
+        // `std::string s; s.size()`: no namespace-scope function of that
+        // name anywhere, so neither a namespace nor a `using` can name one.
+        if !self.fns.contains_key(text) {
+            return Found::Nothing;
+        }
+        for ns in cpp_ns_prefixes(scope) {
+            match self.ns_function(vis, ns, text) {
+                Found::Nothing => {}
+                found => return found,
+            }
+        }
+        self.using_function(vis, scope, text)
     }
 
     /// Method `name` of a type a lookup found.
@@ -873,6 +969,12 @@ mod tests {
         fn field(mut self, owner: &str, name: &str, ty: &str) -> Self {
             let id = self.ids[owner];
             self.parse.nav.record_field_type(id, name, ty);
+            self
+        }
+
+        fn ret(mut self, f: &str, ty: &str) -> Self {
+            let id = self.ids[f];
+            self.parse.nav.record_return_type(id, ty);
             self
         }
 
@@ -1333,7 +1435,7 @@ mod tests {
         }
         assert_eq!(
             scope.marker(rewritten),
-            "[cpp-scope] implicit_this=0 qualified=0 receiver_using=0 prototype=0 using=0 ambiguous=1"
+            "[cpp-scope] implicit_this=0 qualified=0 receiver_using=0 prototype=0 using=0 ambiguous=1 receiver_return=0"
         );
     }
 
@@ -1505,6 +1607,200 @@ mod tests {
         assert_eq!(
             calls_from(&g, node_kind::METHOD, "shop::Cart::clear"),
             [edge("shop::Box::get", EMITTER, RECEIVER_USING)]
+        );
+    }
+
+    /// The fixture `cpp-lambda-auto-receivers` (DF.5), as the parser emits
+    /// it with the header beside its includers: `src::box.h` declares CLASS Box (get / put) and the
+    /// prototypes `make_box` / `find_box`; `src::box.cpp` defines them
+    /// (return type `Box`); `src::main.cpp` includes the header, and its
+    /// `main` holds `auto b = make_box();` (local `b`: `make_box`) and
+    /// `auto p = find_box(1);` (local `p`: `find_box`). `extra` adds files.
+    fn auto_shape(main: impl FnOnce(File) -> File, extra: Vec<File>) -> Vec<File> {
+        let h = File::new("src::box.h")
+            .fact(declares("", "make_box"))
+            .fact(declares("", "find_box"))
+            .item(node_kind::CLASS, "src::Box", "Box", None)
+            .item(node_kind::METHOD, "src::Box::get", "get", Some("src::Box"))
+            .item(node_kind::METHOD, "src::Box::put", "put", Some("src::Box"));
+        let defs = File::new("src::box.cpp")
+            .include("box.h")
+            .item(
+                node_kind::FUNCTION,
+                "src::box.cpp::make_box",
+                "make_box",
+                None,
+            )
+            .item(
+                node_kind::FUNCTION,
+                "src::box.cpp::find_box",
+                "find_box",
+                None,
+            )
+            .ret("src::box.cpp::make_box", "Box")
+            .ret("src::box.cpp::find_box", "Box");
+        let cpp = File::new("src::main.cpp").include("box.h").item(
+            node_kind::FUNCTION,
+            "src::main.cpp::main",
+            "main",
+            None,
+        );
+        let mut files = vec![h, defs, main(cpp)];
+        files.extend(extra);
+        files
+    }
+
+    /// DF.5: an `auto` local initialised by a call is typed by the callee's
+    /// declared return type: `make_box` binds through its header prototype
+    /// (rule `prototype`) and returns `Box`, so `b.get()` binds Box::get
+    /// (rule `receiver_return`); a pointer return (`Box* find_box`) is the
+    /// same type. HEAD bound neither: `make_box` names no type.
+    #[test]
+    fn auto_local_typed_by_callee_return() {
+        let files = auto_shape(
+            |main| {
+                main.local("src::main.cpp::main", "b", "make_box")
+                    .local("src::main.cpp::main", "p", "find_box")
+                    .call("src::main.cpp::main", bare("make_box"))
+                    .call("src::main.cpp::main", attr("b", "get"))
+                    .call("src::main.cpp::main", attr("p", "put"))
+            },
+            vec![],
+        );
+        let calls: Vec<CallSite> = files[2].parse.calls.clone();
+        let g = build(files);
+        assert_eq!(
+            calls_from(&g, node_kind::FUNCTION, "src::main.cpp::main"),
+            [
+                edge("src::box.cpp::make_box", EMITTER, PROTOTYPE),
+                edge("src::Box::get", EMITTER, RECEIVER_RETURN),
+                edge("src::Box::put", EMITTER, RECEIVER_RETURN),
+            ]
+        );
+        let scope = CppScope::new(&g, &HashMap::new());
+        for site in &calls {
+            scope.resolve(&g, site);
+        }
+        assert_eq!(
+            scope.marker(0),
+            "[cpp-scope] implicit_this=0 qualified=0 receiver_using=0 prototype=1 using=0 ambiguous=0 receiver_return=2"
+        );
+    }
+
+    /// DF.5: the callee is looked up as a bare call from the caller: a
+    /// same-file function first in its namespace (no prototype needed), and
+    /// inside a member the class's own method before a free function of the
+    /// same name; the return type is read in the callee's scope (`Box` of a
+    /// function in `namespace shop` is `shop::Box`).
+    #[test]
+    fn callee_is_looked_up_as_a_bare_call() {
+        let shop_box = File::new("src::shop.hpp")
+            .item(node_kind::PACKAGE, "src::shop.hpp::shop", "shop", None)
+            .item(
+                node_kind::CLASS,
+                "shop::Box",
+                "Box",
+                Some("src::shop.hpp::shop"),
+            )
+            .item(
+                node_kind::METHOD,
+                "shop::Box::get",
+                "get",
+                Some("shop::Box"),
+            );
+        let local = File::new("src::local.cpp")
+            .include("shop.hpp")
+            .include("box.h")
+            .item(node_kind::PACKAGE, "src::local.cpp::shop", "shop", None)
+            .item(
+                node_kind::FUNCTION,
+                "src::local.cpp::shop::mk",
+                "mk",
+                Some("src::local.cpp::shop"),
+            )
+            .ret("src::local.cpp::shop::mk", "Box")
+            .item(
+                node_kind::FUNCTION,
+                "src::local.cpp::shop::run",
+                "run",
+                Some("src::local.cpp::shop"),
+            )
+            .local("src::local.cpp::shop::run", "b", "mk")
+            .call("src::local.cpp::shop::run", attr("b", "get"))
+            // A member's own `make_box` (returning shop::Box) wins over the
+            // free `make_box` (returning ::Box).
+            .item(
+                node_kind::CLASS,
+                "src::local.cpp::shop::Maker",
+                "Maker",
+                Some("src::local.cpp::shop"),
+            )
+            .item(
+                node_kind::METHOD,
+                "src::local.cpp::shop::Maker::make_box",
+                "make_box",
+                Some("src::local.cpp::shop::Maker"),
+            )
+            .ret("src::local.cpp::shop::Maker::make_box", "Box")
+            .item(
+                node_kind::METHOD,
+                "src::local.cpp::shop::Maker::use",
+                "use",
+                Some("src::local.cpp::shop::Maker"),
+            )
+            .local("src::local.cpp::shop::Maker::use", "m", "make_box")
+            .call("src::local.cpp::shop::Maker::use", attr("m", "get"));
+        let g = build(auto_shape(|main| main, vec![shop_box, local]));
+        assert_eq!(
+            calls_from(&g, node_kind::FUNCTION, "src::local.cpp::shop::run"),
+            [edge("shop::Box::get", EMITTER, RECEIVER_RETURN)]
+        );
+        assert_eq!(
+            calls_from(&g, node_kind::METHOD, "src::local.cpp::shop::Maker::use"),
+            [edge("shop::Box::get", EMITTER, RECEIVER_RETURN)]
+        );
+    }
+
+    /// DF.5: a type text that is no function, a callee with no recorded
+    /// return type (`int count()`), a return type naming no member of the
+    /// call, and two external definitions of one prototype bind nothing; the
+    /// last is counted ambiguous.
+    #[test]
+    fn unresolvable_callee_binds_nothing() {
+        let other = File::new("src::box_win.cpp")
+            .item(
+                node_kind::FUNCTION,
+                "src::box_win.cpp::make_box",
+                "make_box",
+                None,
+            )
+            .ret("src::box_win.cpp::make_box", "Box");
+        let main = |main: File| {
+            main.item(node_kind::FUNCTION, "src::main.cpp::count", "count", None)
+                .local("src::main.cpp::main", "n", "nowhere")
+                .local("src::main.cpp::main", "c", "count")
+                .local("src::main.cpp::main", "p", "find_box")
+                .local("src::main.cpp::main", "b", "make_box")
+                .call("src::main.cpp::main", attr("n", "get"))
+                .call("src::main.cpp::main", attr("c", "get"))
+                .call("src::main.cpp::main", attr("p", "missing"))
+                .call("src::main.cpp::main", attr("b", "get"))
+        };
+        let files = auto_shape(main, vec![other]);
+        let calls: Vec<CallSite> = files[2].parse.calls.clone();
+        let g = build(files);
+        assert!(
+            calls_from(&g, node_kind::FUNCTION, "src::main.cpp::main").is_empty(),
+            "{:?}",
+            calls_from(&g, node_kind::FUNCTION, "src::main.cpp::main")
+        );
+        let scope = CppScope::new(&g, &HashMap::new());
+        for site in &calls {
+            assert!(scope.resolve(&g, site).is_none(), "{site:?}");
+        }
+        assert_eq!(
+            scope.marker(0),
+            "[cpp-scope] implicit_this=0 qualified=0 receiver_using=0 prototype=0 using=0 ambiguous=1 receiver_return=0"
         );
     }
 
