@@ -74,9 +74,9 @@ Columns, left to right (the review's own abbreviations):
 ```
 LEGEND ● full  ◐ partial  · none (fixture exists, nothing emitted)  ? unknown (no fixture)  - n/a (see Not applicable)  ! error
            http_cl http_sr   kafka    amqp sqs/sns  pubsub azure_s    nats   redis    mqtt   taskq    grpc graphql      ws eventbu      db    migr  config secrets   flags    cron cli_def cli_inv   calls imports injects    impl   tests service subproj
-python           ●       ●       ●       ●       ●       ◐       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
+python           ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 go               ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
-typescript       ●       ●       ●       ●       ●       ◐       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
+typescript       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 java             ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 csharp           ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 ruby             ●       ●       ·       ·       ·       ·       ?       ●       ●       ●       ●       ●       ·       ●       ·       ●       ●       ●       ·       ◐       ●       ●       ◐       ●       ●       ◐       ◐       ◐       ●       ●
@@ -87,7 +87,7 @@ scala            ●       ◐       ·       ·       ·       ·       ●    
 clojure          ●       ◐       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
 dart             ●       ◐       ◐       ·       ·       ·       ?       ·       ·       ·       ·       ●       ◐       ·       ·       ·       ●       ◐       ◐       ●       ●       ·       ·       ●       ●       ◐       ●       ◐       ●       ●
 elixir           ●       ●       ·       ·       ·       ·       ?       ·       ·       ·       ◐       ·       ·       ●       ·       ·       ·       ◐       ◐       ◐       ●       ·       ·       ●       ●       ·       ·       ◐       ●       ●
-rust             ●       ●       ●       ·       ·       ·       ·       ·       ●       ●       ·       ●       ·       ·       ·       ●       ●       ●       ·       ◐       ·       ●       ●       ●       ●       ◐       ◐       ●       ●       ●
+rust             ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ·       ·       ●       ●       ●       ·       ◐       ·       ●       ●       ●       ●       ◐       ◐       ●       ●       ●
 solidity         -       -       -       -       -       -       -       -       -       -       -       -       -       -       ●       -       -       -       -       -       -       -       -       ●       ●       ?       ●       ?       ?       ?
 terraform        ?       ?       ?       ?       ?       ?       ?       ?       -       ?       -       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       -       ?       -       ?       -       -       ?       ?       ?
 kotlin           ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ●       ●       ?       ?       ?
@@ -96,14 +96,14 @@ PER-MECHANISM  across 17 languages:
   http_client  ● 14  ◐ 0   · 1   ? 1   - 1   ! 0
   http_server  ● 10  ◐ 4   · 0   ? 2   - 1   ! 0
   kafka        ● 6   ◐ 2   · 3   ? 5   - 1   ! 0
-  amqp         ● 5   ◐ 1   · 5   ? 5   - 1   ! 0
-  sqs_sns      ● 5   ◐ 0   · 6   ? 5   - 1   ! 0
-  pubsub       ● 3   ◐ 2   · 6   ? 5   - 1   ! 0
-  azure_sb     ● 6   ◐ 0   · 1   ? 9   - 1   ! 0
-  nats         ● 7   ◐ 0   · 4   ? 5   - 1   ! 0
+  amqp         ● 6   ◐ 1   · 4   ? 5   - 1   ! 0
+  sqs_sns      ● 6   ◐ 0   · 5   ? 5   - 1   ! 0
+  pubsub       ● 6   ◐ 0   · 5   ? 5   - 1   ! 0
+  azure_sb     ● 7   ◐ 0   · 0   ? 9   - 1   ! 0
+  nats         ● 8   ◐ 0   · 3   ? 5   - 1   ! 0
   redis        ● 7   ◐ 1   · 3   ? 4   - 2   ! 0
   mqtt         ● 8   ◐ 0   · 3   ? 5   - 1   ! 0
-  taskq        ● 7   ◐ 1   · 3   ? 4   - 2   ! 0
+  taskq        ● 8   ◐ 1   · 2   ? 4   - 2   ! 0
   grpc         ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
   graphql      ● 6   ◐ 1   · 4   ? 5   - 1   ! 0
   ws           ● 7   ◐ 0   · 4   ? 5   - 1   ! 0
@@ -125,9 +125,9 @@ PER-MECHANISM  across 17 languages:
   subproject   ● 10  ◐ 1   · 0   ? 6   - 0   ! 0
 
 PER-LANGUAGE  across 30 mechanisms:
-  python       ● 28  ◐ 1   · 1   ? 0   - 0   ! 0
+  python       ● 29  ◐ 0   · 1   ? 0   - 0   ! 0
   go           ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
-  typescript   ● 29  ◐ 1   · 0   ? 0   - 0   ! 0
+  typescript   ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   java         ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   csharp       ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   ruby         ● 17  ◐ 5   · 7   ? 1   - 0   ! 0
@@ -138,15 +138,15 @@ PER-LANGUAGE  across 30 mechanisms:
   clojure      ● 3   ◐ 1   · 0   ? 26  - 0   ! 0
   dart         ● 10  ◐ 7   · 12  ? 1   - 0   ! 0
   elixir       ● 8   ◐ 5   · 16  ? 1   - 0   ! 0
-  rust         ● 16  ◐ 3   · 11  ? 0   - 0   ! 0
+  rust         ● 22  ◐ 3   · 5   ? 0   - 0   ! 0
   solidity     ● 4   ◐ 0   · 0   ? 4   - 22  ! 0
   terraform    ● 0   ◐ 0   · 0   ? 24  - 6   ! 0
   kotlin       ● 6   ◐ 0   · 0   ? 24  - 0   ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 243 full, 34 partial, 69 none, 136 unknown, 0 error, 28 n/a.
+COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 251 full, 32 partial, 63 none, 136 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 192
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 203
 
 ## Cells routed via an alternative mechanism
 
@@ -173,19 +173,22 @@ A `●` here does not mean the intended path fired — it means SOME path did. T
 | `java/sqs_sns` | ● full | `queue` | `eventbus` |
 | `python/azure_sb` | ● full | `queue` | `eventbus` |
 | `python/mqtt` | ● full | `queue` | `eventbus` |
-| `python/pubsub` | ◐ partial | `queue` | `eventbus` |
+| `python/pubsub` | ● full | `queue` | `eventbus` |
 | `python/redis` | ● full | `queue` | `eventbus` |
 | `python/sqs_sns` | ● full | `queue` | `eventbus` |
 | `ruby/mqtt` | ● full | `queue` | `eventbus` |
 | `ruby/redis` | ● full | `queue` | `eventbus` |
+| `rust/azure_sb` | ● full | `queue` | `eventbus` |
 | `rust/mqtt` | ● full | `queue` | `eventbus` |
+| `rust/pubsub` | ● full | `queue` | `eventbus` |
 | `rust/redis` | ● full | `queue` | `eventbus` |
+| `rust/sqs_sns` | ● full | `queue` | `eventbus` |
 | `scala/azure_sb` | ● full | `queue` | `eventbus` |
 | `scala/mqtt` | ● full | `queue` | `eventbus` |
 | `scala/redis` | ◐ partial | `queue` | `eventbus` |
 | `typescript/azure_sb` | ● full | `queue` | `eventbus` |
 | `typescript/mqtt` | ● full | `queue` | `eventbus` |
-| `typescript/pubsub` | ◐ partial | `queue` | `eventbus` |
+| `typescript/pubsub` | ● full | `queue` | `eventbus` |
 | `typescript/redis` | ● full | `queue` | `eventbus` |
 | `typescript/sqs_sns` | ● full | `queue` | `eventbus` |
 

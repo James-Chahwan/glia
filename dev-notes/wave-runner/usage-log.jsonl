@@ -125,3 +125,7 @@
 {"wave": "R052-W0", "event": "start", "pct": 1, "resets_at": 1792068600, "ts": 1792052653}
 {"wave": "R052-W0", "event": "start", "pct": 2, "resets_at": 1792068600, "ts": 1792057650}
 {"wave": "R052-W0", "event": "end", "pct": 4, "resets_at": 1792068600, "ts": 1792059928}
+{"wave": "R052-W1", "event": "start", "pct": 4, "resets_at": 1792068600, "ts": 1792059946}
+{"wave": "R052-W1", "event": "end", "pct": 24, "resets_at": 1792068600, "ts": 1792064455}
+{"wave": "R052-W1", "event": "end", "pct": 24, "resets_at": 1792068600, "ts": 1792064665}
+{"wave": "R052-W1", "event": "end", "pct": 24, "resets_at": 1792068600, "ts": 1792064839}

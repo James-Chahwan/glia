@@ -5241,16 +5241,14 @@
         2,
         2
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "queue"
@@ -6179,7 +6177,7 @@
     },
     "rust/amqp": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -6189,21 +6187,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "rust/azure_sb": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -6213,17 +6211,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "rust/calls": {
       "extract": [
@@ -6671,7 +6669,7 @@
     },
     "rust/nats": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -6681,21 +6679,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "rust/pubsub": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -6705,17 +6703,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "rust/redis": {
       "extract": [
@@ -6793,7 +6791,7 @@
     },
     "rust/sqs_sns": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -6803,17 +6801,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "rust/subproject": {
       "extract": [
@@ -6843,7 +6841,7 @@
     },
     "rust/taskq": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -6853,17 +6851,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "rust/tests": {
       "extract": [
@@ -8370,23 +8368,21 @@
         2
       ],
       "fixtures": [
-        "fixtures/xcut-queue-cloud-pubsub"
+        "matrix/typescript/pubsub"
       ],
       "forbid": [
-        4,
-        4
+        0,
+        0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [
-        "no routing expected"
-      ],
+      "reasons": [],
       "route": [
-        0,
-        0
+        1,
+        1
       ],
       "via": "queue"
     },
@@ -8605,6 +8601,7 @@
     "fixtures/contract-annot-swashbuckle",
     "fixtures/contract-asyncapi-nats",
     "fixtures/contract-openapi-json",
+    "fixtures/contract-openapi-server-variables",
     "fixtures/contract-openapi-swaggo-yaml",
     "fixtures/contract-openapi-yaml",
     "fixtures/contract-pact",
@@ -8614,6 +8611,7 @@
     "fixtures/cpp-header-extensions",
     "fixtures/cpp-header-impl-files",
     "fixtures/cpp-include-paths",
+    "fixtures/cpp-lambda-auto-receivers",
     "fixtures/cpp-namespace-qnames",
     "fixtures/cpp-out-of-line-members",
     "fixtures/csharp-aspnet-composed",
@@ -8650,6 +8648,7 @@
     "fixtures/go-gorm",
     "fixtures/go-nats-consumer-callbacks",
     "fixtures/go-overlay-data-wrapper",
+    "fixtures/go-route-const-prefix",
     "fixtures/go-route-mounts",
     "fixtures/go-route-per-method",
     "fixtures/go-route-registration-forms",
@@ -8696,9 +8695,12 @@
     "fixtures/overlay-declared-cells",
     "fixtures/overlay-entrypoints",
     "fixtures/php-dir-qnames",
+    "fixtures/php-group-use-leading-backslash",
     "fixtures/php-laravel-prefix",
     "fixtures/php-shared-namespace-bindings",
     "fixtures/php-use-forms",
+    "fixtures/php-use-qualified-binding",
+    "fixtures/php-use-unique-wrong-namespace",
     "fixtures/prisma-schema",
     "fixtures/proto-field-drift",
     "fixtures/py-graphene-fields",
@@ -8710,6 +8712,7 @@
     "fixtures/ruby-ar-tablename",
     "fixtures/ruby-rails-scope",
     "fixtures/ruby-require-in-scope",
+    "fixtures/rust-queue-precision",
     "fixtures/rust-typed-receivers",
     "fixtures/scala-package-qnames",
     "fixtures/scip-python-dict-dispatch",
@@ -8723,6 +8726,7 @@
     "fixtures/sql-migration-ddl",
     "fixtures/swift-implicit-self",
     "fixtures/swift-imports",
+    "fixtures/swift-local-receivers",
     "fixtures/swift-members",
     "fixtures/swift-module-qnames",
     "fixtures/terraform-depends_on",
@@ -8734,6 +8738,7 @@
     "fixtures/trpc-create-caller",
     "fixtures/ts-abstract-class",
     "fixtures/ts-api-prefix-builder",
+    "fixtures/ts-config-alias-endpoints",
     "fixtures/ts-decorator-anchor",
     "fixtures/ts-endpoint-receiver-gate",
     "fixtures/ts-enum-members",
@@ -8741,6 +8746,7 @@
     "fixtures/ts-method-by-value",
     "fixtures/ts-route-per-method",
     "fixtures/ts-signal-state-fields",
+    "fixtures/ts-signal-xfile-reads",
     "fixtures/ts-url-builder-args",
     "fixtures/walk-dotnet-obj",
     "fixtures/walk-gitignore-semantics",
@@ -8761,6 +8767,7 @@
     "fixtures/xcut-proto-shared",
     "fixtures/xcut-queue-anchor",
     "fixtures/xcut-queue-annot-listener",
+    "fixtures/xcut-queue-cloud-pubsub",
     "fixtures/xcut-queue-const-topic",
     "fixtures/xcut-queue-const-topic-java",
     "fixtures/xcut-queue-consumer-callbacks",
@@ -8901,11 +8908,11 @@
   "totals": {
     "covered": 346,
     "error": 0,
-    "full": 243,
+    "full": 251,
     "grid": 510,
     "n/a": 28,
-    "none": 69,
-    "partial": 34,
+    "none": 63,
+    "partial": 32,
     "unknown": 136
   },
   "vocabulary": {

@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 346,
+  "fixtures": 356,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -157,6 +157,13 @@
         "DOCUMENTS": 1.0
       }
     },
+    "contract-openapi-server-variables": {
+      "framework": "contract-openapi-server-variables",
+      "language": "go",
+      "per_category": {
+        "DOCUMENTS": 0.5
+      }
+    },
     "contract-openapi-swaggo-yaml": {
       "framework": "contract-openapi-swaggo-yaml",
       "language": "go",
@@ -221,6 +228,13 @@
       "per_category": {
         "CALLS": 1.0,
         "IMPORTS": 1.0
+      }
+    },
+    "cpp-lambda-auto-receivers": {
+      "framework": "cpp-lambda-auto-receivers",
+      "language": "c_cpp",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "cpp-namespace-qnames": {
@@ -772,6 +786,13 @@
         "IMPORTS": 1.0
       }
     },
+    "go-route-const-prefix": {
+      "framework": "go-route-const-prefix",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
+    },
     "go-route-mount-owners": {
       "framework": "go-route-mount-owners",
       "language": "go",
@@ -1281,6 +1302,14 @@
         "DEFINES": 1.0
       }
     },
+    "php-group-use-leading-backslash": {
+      "framework": "php-group-use-leading-backslash",
+      "language": "php",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
     "php-http": {
       "framework": "php-http",
       "language": "php",
@@ -1340,6 +1369,21 @@
       "per_category": {
         "CALLS": 1.0,
         "IMPORTS": 1.0
+      }
+    },
+    "php-use-qualified-binding": {
+      "framework": "php-use-qualified-binding",
+      "language": "php",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
+    "php-use-unique-wrong-namespace": {
+      "framework": "php-use-unique-wrong-namespace",
+      "language": "php",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "prisma-schema": {
@@ -1606,6 +1650,11 @@
         "CALLS": 1.0
       }
     },
+    "rust-queue-precision": {
+      "framework": "rust-queue-precision",
+      "language": "rust",
+      "per_category": {}
+    },
     "rust-typed-receivers": {
       "framework": "rust-typed-receivers",
       "language": "rust",
@@ -1779,6 +1828,13 @@
       "language": "swift",
       "per_category": {}
     },
+    "swift-local-receivers": {
+      "framework": "swift-local-receivers",
+      "language": "swift",
+      "per_category": {
+        "CALLS": 1.0
+      }
+    },
     "swift-members": {
       "framework": "swift-members",
       "language": "swift",
@@ -1883,6 +1939,13 @@
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "ts-config-alias-endpoints": {
+      "framework": "ts-config-alias-endpoints",
+      "language": "typescript",
+      "per_category": {
+        "HTTP_CALLS": 1.0
       }
     },
     "ts-decorator-anchor": {
@@ -1992,6 +2055,13 @@
       "per_category": {
         "CALLS": 1.0,
         "DEFINES": 1.0
+      }
+    },
+    "ts-signal-xfile-reads": {
+      "framework": "ts-signal-xfile-reads",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "ts-tests": {
@@ -2492,7 +2562,9 @@
     "grader_errors": [],
     "missing_cells": [],
     "missing_nodes": [],
-    "partial_cells": []
+    "partial_cells": [
+      "contract-openapi-server-variables: DOCUMENTS 0.50"
+    ]
   },
   "view": "run.py: per-fixture edge recall over fixtures/* plus its summary sections; the language x mechanism grid is results-latest.json"
 }
