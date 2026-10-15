@@ -8,7 +8,11 @@
 //! CD.3a), hubs ([`hubs`](crate::algo::hubs): degree / HITS, CD.4a), MinHash
 //! signatures ([`minhash`](crate::algo::minhash): LSH banding, CD.4d) and
 //! validity intervals ([`timeline`](crate::algo::timeline): folded over
-//! snapshots, CD.5a).
+//! snapshots, CD.5a). 0.5.2 adds identity classes
+//! ([`classes`](crate::algo::classes): a union-find with min-id
+//! representatives and a Quotient GraphSource adapter, DD.1) and push
+//! personalised PageRank ([`ppr`](crate::algo::ppr): Andersen-Chung-Lang push
+//! over an Adjacency, DE.5).
 //!
 //! This crate depends on `core` only, so nothing here can name a domain's
 //! node kind or edge category: an algorithm takes the categories it follows
@@ -30,6 +34,7 @@ use glia_core::{Edge, EdgeCategoryId, NodeId};
 
 use crate::profile::DomainTables;
 
+pub mod classes;
 pub mod community;
 pub mod cut;
 pub mod cycles;
@@ -37,6 +42,7 @@ pub mod delta;
 pub mod hubs;
 pub mod linkpred;
 pub mod minhash;
+pub mod ppr;
 pub mod reach;
 pub mod timeline;
 
