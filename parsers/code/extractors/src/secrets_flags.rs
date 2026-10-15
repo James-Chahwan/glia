@@ -58,6 +58,11 @@ enum Pick {
     /// takes `(flagName)`: the second argument if it is a literal, else the
     /// first.
     SecondElseFirst,
+    /// LaunchDarkly's `variation` / `variation_detail` (DG.6): every server
+    /// SDK but Rust's takes `(key, context, default)`, the Rust SDK
+    /// `(&self, context, key, default)`. The first argument if it is a
+    /// literal, else the second.
+    FirstElseSecond,
     /// A mount-scoped Vault client: `KVv2("secret").Get(ctx, "db")` — the
     /// mount is this call's first literal, the path is argument `n` of the
     /// chained `method` call. Yields `mount/path`.
@@ -118,6 +123,9 @@ const SECRET_ROWS: &[Row] = &[
     secret("GetSecretValueRequest", "aws_sm", AWS_SM, Pick::Named(&["SecretId"]), &[], aws_ref),
     secret(".secretId(", "aws_sm", AWS_SM, Pick::Positional(0), &[], aws_ref),
     secret(".withSecretId(", "aws_sm", AWS_SM, Pick::Positional(0), &[], aws_ref),
+    // Rust aws-sdk-secretsmanager fluent builders (DG.6):
+    // `client.get_secret_value().secret_id("x").send()`.
+    secret(".secret_id(", "aws_sm", AWS_SM, Pick::Positional(0), &[], aws_ref),
     // GCP Secret Manager: a `projects/<p>/secrets/<s>[/versions/<v>]` name.
     secret(".access_secret_version(", "gcp_sm", GCP_SM, Pick::NamedOrFirst(&["name"]), &[], gcp_ref),
     secret(".accessSecretVersion(", "gcp_sm", GCP_SM, Pick::NamedOrFirst(&["name"]), &[], gcp_ref),
@@ -140,14 +148,27 @@ const fn flag(needle: &'static str, provider: &'static str, gate: &'static [&'st
 }
 
 const FLAG_ROWS: &[Row] = &[
-    // LaunchDarkly: `variation("k", ctx, default)` in every server SDK;
+    // LaunchDarkly: `variation("k", ctx, default)` in every server SDK but
+    // Rust's `variation(&ctx, "k", default)` (DG.6, FirstElseSecond);
     // `Variation(` covers Bool / String / Int / Float64 / JSON / bool / json
     // / jsonValue ... and `VariationDetail(` their detail twins.
-    flag(".variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(0)),
+    flag(".variation(", "launchdarkly", LAUNCHDARKLY, Pick::FirstElseSecond),
     flag("Variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(0)),
-    flag(".variation_detail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(0)),
+    flag(".variation_detail(", "launchdarkly", LAUNCHDARKLY, Pick::FirstElseSecond),
     flag(".variationDetail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(0)),
     flag("VariationDetail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(0)),
+    // The LaunchDarkly Rust SDK's typed variations and their detail twins
+    // (DG.6): `client.bool_variation(&ctx, "k", false)`, the key argument #1.
+    flag(".bool_variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
+    flag(".str_variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
+    flag(".float_variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
+    flag(".int_variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
+    flag(".json_variation(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
+    flag(".bool_variation_detail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
+    flag(".str_variation_detail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
+    flag(".float_variation_detail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
+    flag(".int_variation_detail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
+    flag(".json_variation_detail(", "launchdarkly", LAUNCHDARKLY, Pick::Positional(1)),
     // OpenFeature: key first everywhere but Go, where it follows the ctx.
     flag(".getBooleanValue(", "openfeature", OPENFEATURE, Pick::Positional(0)),
     flag(".getStringValue(", "openfeature", OPENFEATURE, Pick::Positional(0)),
@@ -340,6 +361,11 @@ fn capture(call: &str, row: &Row) -> Option<String> {
             .get(1)
             .and_then(|a| string_literal(a))
             .or_else(|| args.first().and_then(|a| string_literal(a)))?
+            .to_string(),
+        Pick::FirstElseSecond => args
+            .first()
+            .and_then(|a| string_literal(a))
+            .or_else(|| args.get(1).and_then(|a| string_literal(a)))?
             .to_string(),
         Pick::MountThen(method, n) => {
             let mount = args.first().and_then(|a| string_literal(a))?;
@@ -687,6 +713,149 @@ mod tests {
             "KeyVaultSecret s = await client.GetSecretAsync(\"db-password\");\n",
         );
         assert_eq!(qnames(&secrets(cs)), vec!["config:secret:azure_kv/db-password"]);
+    }
+
+    /// DG.6: aws-sdk-secretsmanager's fluent builders name the secret through
+    /// `.secret_id(..)` (`.get_secret_value()` itself takes no argument); an
+    /// ARN keeps only its name, and the reference stays on the module.
+    #[test]
+    fn rust_aws_secret_id_builder() {
+        let repo = RepoId(1);
+        let m = module_id(repo);
+        let rs = concat!(
+            "use aws_sdk_secretsmanager::Client;\n",
+            "\n",
+            "pub async fn db_password(client: &Client) -> Option<String> {\n",
+            "    let out = client.get_secret_value().secret_id(\"prod/db-password\").send().await.ok()?;\n",
+            "    let _ = client\n",
+            "        .describe_secret()\n",
+            "        .secret_id(\"arn:aws:secretsmanager:eu-west-1:123:secret:prod/api-key\")\n",
+            "        .send()\n",
+            "        .await;\n",
+            "    let _ = client.get_secret_value().secret_id(name).send().await;\n",
+            "    out.secret_string().map(str::to_string)\n",
+            "}\n",
+        );
+        let out = extract_secret_refs(rs, "src/secrets.rs", m, repo);
+        assert_eq!(
+            qnames(&out),
+            ["config:secret:aws_sm/prod/api-key", "config:secret:aws_sm/prod/db-password"]
+        );
+        assert!(
+            out.edges
+                .iter()
+                .all(|e| e.category == edge_category::READS_CONFIG && e.from == m)
+        );
+        assert!(out.sites.is_empty());
+        assert_eq!(
+            cell_of(&out, "config:secret:aws_sm/prod/db-password").as_deref(),
+            Some(r#"{"source":"aws_sm","redacted":true}"#)
+        );
+        let flags_out = extract_feature_flags(rs, "src/secrets.rs", m, repo);
+        assert_eq!(
+            marker(&[&out, &flags_out], "rust").as_deref(),
+            Some("[secrets] refs=2 providers=1 flags=0 flag_defs=0 src=rust")
+        );
+        // No Secrets Manager token: some other builder's `.secret_id(`.
+        assert!(secrets("let s = approle.secret_id(\"prod/x\");\n").nodes.is_empty());
+    }
+
+    /// DG.6: the LaunchDarkly Rust SDK's typed variations take
+    /// `(&self, context, flag_key, default)`: the key is argument #1.
+    #[test]
+    fn rust_launchdarkly_typed_variations() {
+        let repo = RepoId(1);
+        let m = module_id(repo);
+        let rs = concat!(
+            "use launchdarkly_server_sdk::{Client, Context};\n",
+            "\n",
+            "pub fn variants(client: &Client, ctx: &Context) {\n",
+            "    let _ = client.bool_variation(&ctx, \"rs-bool\", false);\n",
+            "    let _ = client.str_variation(&ctx, \"rs-str\", \"legacy\".to_string());\n",
+            "    let _ = client.float_variation(&ctx, \"rs-float\", 0.5);\n",
+            "    let _ = client.int_variation(&ctx, \"rs-int\", 1);\n",
+            "    let _ = client.json_variation(&ctx, \"rs-json\", json!({\"a\": 1}));\n",
+            "    let _ = client.bool_variation_detail(&ctx, \"rs-bool-detail\", false);\n",
+            "    let _ = client.str_variation_detail(&ctx, \"rs-str-detail\", String::new());\n",
+            "    let _ = client.float_variation_detail(&ctx, \"rs-float-detail\", 0.0);\n",
+            "    let _ = client.int_variation_detail(&ctx, \"rs-int-detail\", 0);\n",
+            "    let _ = client\n",
+            "        .json_variation_detail(&ctx, \"rs-json-detail\", Value::Null);\n",
+            "}\n",
+        );
+        let out = extract_feature_flags(rs, "src/checkout.rs", m, repo);
+        assert_eq!(
+            qnames(&out),
+            [
+                "config:flag:rs-bool",
+                "config:flag:rs-bool-detail",
+                "config:flag:rs-float",
+                "config:flag:rs-float-detail",
+                "config:flag:rs-int",
+                "config:flag:rs-int-detail",
+                "config:flag:rs-json",
+                "config:flag:rs-json-detail",
+                "config:flag:rs-str",
+                "config:flag:rs-str-detail",
+            ]
+        );
+        // One site per check, each at its `._variation` needle.
+        assert_eq!(out.sites.len(), 10, "{:?}", out.sites);
+        assert!(
+            out.sites
+                .iter()
+                .all(|(_, o)| rs[*o..].starts_with('.') && rs[*o..].contains("_variation"))
+        );
+        let secrets_out = extract_secret_refs(rs, "src/checkout.rs", m, repo);
+        assert_eq!(
+            marker(&[&secrets_out, &out], "rust").as_deref(),
+            Some("[secrets] refs=0 providers=0 flags=10 flag_defs=0 src=rust")
+        );
+        // A key passed first is not the Rust shape: argument #1 is `&ctx`.
+        let swapped = concat!(
+            "use launchdarkly_server_sdk::Client;\n",
+            "let on = client.bool_variation(\"new-checkout\", &ctx, false);\n",
+        );
+        assert!(flags(swapped).nodes.is_empty(), "{:?}", qnames(&flags(swapped)));
+        // No LaunchDarkly token: some other `bool_variation`.
+        assert!(flags("let on = cfg.bool_variation(&ctx, \"new-checkout\", false);\n").nodes.is_empty());
+    }
+
+    /// DG.6: `variation` / `variation_detail` take the key first in every
+    /// server SDK but Rust's, which passes the context first.
+    #[test]
+    fn variation_reads_arg1_when_arg0_is_a_context() {
+        let rs = concat!(
+            "use launchdarkly_server_sdk::{Client, FlagValue};\n",
+            "let v = client.variation(&ctx, \"rs-generic\", FlagValue::Bool(false));\n",
+            "let d = client.variation_detail(&ctx, \"rs-generic-detail\", false);\n",
+        );
+        assert_eq!(
+            qnames(&flags(rs)),
+            ["config:flag:rs-generic", "config:flag:rs-generic-detail"]
+        );
+        // Python / JS / Ruby: the key first, as on HEAD; a literal first
+        // argument is the key even when a literal follows it.
+        let py = concat!(
+            "import ldclient\n",
+            "a = ldclient.get().variation(\"py-flag\", ctx, False)\n",
+            "b = ldclient.get().variation_detail(\"py-detail\", ctx, False)\n",
+            "c = ldclient.get().variation(\"py-first\", \"not-the-key\", False)\n",
+        );
+        assert_eq!(
+            qnames(&flags(py)),
+            ["config:flag:py-detail", "config:flag:py-first", "config:flag:py-flag"]
+        );
+        let js = concat!(
+            "import { init } from 'launchdarkly-node-server-sdk';\n",
+            "const on = await ldClient.variation('js-flag', { key }, false);\n",
+        );
+        assert_eq!(qnames(&flags(js)), ["config:flag:js-flag"]);
+        let rb = "require 'ldclient-rb'\non = client.variation(\"rb-flag\", context, false)\n";
+        assert_eq!(qnames(&flags(rb)), ["config:flag:rb-flag"]);
+        // Neither argument a literal: nothing.
+        let none = "import ldclient\nc = ldclient.get().variation(flag_name, ctx, False)\n";
+        assert!(flags(none).nodes.is_empty(), "{:?}", qnames(&flags(none)));
     }
 
     #[test]

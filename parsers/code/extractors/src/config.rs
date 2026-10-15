@@ -39,6 +39,10 @@
 //!     - Go:     `os.Getenv("X")`, `os.LookupEnv("X")`
 //!     - Ruby:   `ENV['X']`, `ENV.fetch('X')`
 //!     - Java:   `System.getenv("X")`
+//!     - Scala:  `sys.env("X")`, `sys.env.get("X")` / `.getOrElse` /
+//!       `.contains` / `.apply`, `scala.util.Properties.envOrElse("X", ..)` /
+//!       `.envOrNone` / `.envOrSome` (DG.6; `sys.props` is JVM system
+//!       properties, not the environment)
 //!     - PHP:    `getenv('X')`, `$_ENV['X']`
 //!     - C#:     `Environment.GetEnvironmentVariable("X")` (CL.7a; the
 //!       `(..., EnvironmentVariableTarget.X)` form reads its first literal)
@@ -220,6 +224,7 @@ pub fn extract_config_reads(
     reads.extend(env(scan_go_env(source)));
     reads.extend(env(scan_ruby_env(source)));
     reads.extend(env(scan_java_system_getenv(source)));
+    reads.extend(env(scan_scala_env(source)));
     reads.extend(env(scan_php_env(source)));
     reads.extend(env(scan_dotnet_env(source)));
     // CL.7b: .NET IConfiguration reads, on the `config:setting:` track — C#
@@ -932,6 +937,29 @@ fn scan_ruby_env(source: &str) -> Vec<(String, usize)> {
 
 fn scan_java_system_getenv(source: &str) -> Vec<(String, usize)> {
     capture_first_string_arg(source, "System.getenv(")
+}
+
+/// DG.6: Scala environment reads. `scala.sys.env` is a `Map[String, String]`
+/// read through `apply` (`sys.env("X")`, `sys.env.apply("X")`), `get`,
+/// `getOrElse` and `contains`; `scala.util.Properties` adds `envOrElse`,
+/// `envOrNone` and `envOrSome`. Each needle is a Scala-only spelling, and the
+/// key is its first literal. `sys.props(` (JVM system properties) is not an
+/// environment read and is no needle.
+fn scan_scala_env(source: &str) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    for needle in [
+        "sys.env(",
+        "sys.env.apply(",
+        "sys.env.get(",
+        "sys.env.getOrElse(",
+        "sys.env.contains(",
+        "Properties.envOrElse(",
+        "Properties.envOrNone(",
+        "Properties.envOrSome(",
+    ] {
+        out.extend(capture_first_string_arg(source, needle));
+    }
+    out
 }
 
 /// CL.7a: .NET `Environment.GetEnvironmentVariable("X")`. The two-argument
@@ -1725,6 +1753,63 @@ public class Db
             NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CONFIG_KEY, "config:env:DATABASE_URL");
         let (_, off) = out.sites.iter().find(|(id, _)| *id == db).expect("DATABASE_URL site");
         assert!(src[*off..].starts_with("Environment.GetEnvironmentVariable(\"DATABASE_URL\")"));
+    }
+
+    /// DG.6: Scala's environment reads — `sys.env`, a `Map[String, String]`
+    /// (`apply` / `get` / `getOrElse` / `contains`), and
+    /// `scala.util.Properties.envOr*`. `sys.props` is the JVM system
+    /// properties, not the environment; a non-literal key reads nothing.
+    #[test]
+    fn scala_sys_env_reads() {
+        let repo = RepoId(1);
+        let src = r#"
+package shop
+
+import scala.util.Properties
+
+object Db {
+  val url: String = sys.env("DATABASE_URL")
+  val host = sys.env.get("DB_HOST")
+  val port = sys.env.getOrElse("DB_PORT", "5432")
+  val ssl = sys.env.contains("DB_SSL")
+  val user = sys.env.apply("DB_USER")
+  val pool = Properties.envOrElse("DB_POOL", "10")
+  val region = scala.util.Properties.envOrNone("AWS_REGION")
+  val zone = Properties.envOrSome("AWS_ZONE", Some("a"))
+  val mode = sys.props("APP_MODE")
+  val home = sys.props.get("APP_HOME")
+  val dynamic = sys.env(name)
+}
+"#;
+        let out = extract_config_reads(src, "client/Db.scala", module_id(repo), repo);
+        let mut keys = config_keys(&out);
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "config:env:AWS_REGION",
+                "config:env:AWS_ZONE",
+                "config:env:DATABASE_URL",
+                "config:env:DB_HOST",
+                "config:env:DB_POOL",
+                "config:env:DB_PORT",
+                "config:env:DB_SSL",
+                "config:env:DB_USER",
+            ]
+        );
+        let reads: Vec<_> = out
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::READS_CONFIG)
+            .collect();
+        assert_eq!(reads.len(), 8);
+        assert!(reads.iter().all(|e| e.from == module_id(repo)));
+        // One site per read, at its needle (LE.4b re-homes from there).
+        assert_eq!(out.sites.len(), 8, "{:?}", out.sites);
+        let db =
+            NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CONFIG_KEY, "config:env:DATABASE_URL");
+        let (_, off) = out.sites.iter().find(|(id, _)| *id == db).expect("DATABASE_URL site");
+        assert!(src[*off..].starts_with("sys.env(\"DATABASE_URL\")"));
     }
 
     #[test]
