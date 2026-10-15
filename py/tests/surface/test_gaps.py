@@ -59,7 +59,9 @@ SUSPECTED = {
         "export default router;\n"),
     "api/package.json": '{"name":"api","dependencies":{"express":"4.18.0"}}\n',
 }
-ORPHAN = "endpoint:POST:${…}/read-all @web"
+# DF.20 folds `${this.base}` (a readonly field of a config expression) to `/api/notifications`, so the
+# endpoint is no longer `${…}/read-all`; it still pairs no route (`/:tenant/...`), so it stays the orphan.
+ORPHAN = "endpoint:POST:/api/notifications/read-all @web"
 
 
 def main() -> int:
