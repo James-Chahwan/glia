@@ -1,0 +1,393 @@
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:glibc", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "glibc", "rebuilds": 15, "first_mb": 406, "last_mb": 852, "delta_mb": 446, "peak_hwm_mb": null, "mean_secs_2_n": 1.44, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept"}
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:trim", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "trim", "rebuilds": 15, "first_mb": 207, "last_mb": 257, "delta_mb": 50, "peak_hwm_mb": null, "mean_secs_2_n": 1.52, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": true, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept"}
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:arena2", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "arena2", "rebuilds": 15, "first_mb": 338, "last_mb": 551, "delta_mb": 213, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {"MALLOC_ARENA_MAX": "2"}, "preload": null, "harness_trim": false, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept"}
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:arena2-trim", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "arena2-trim", "rebuilds": 15, "first_mb": 204, "last_mb": 211, "delta_mb": 7, "peak_hwm_mb": null, "mean_secs_2_n": 2.09, "engine_trims": 0, "glia_py": "0.5.1", "env": {"MALLOC_ARENA_MAX": "2"}, "preload": null, "harness_trim": true, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept"}
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:mimalloc-2.2.3", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "mimalloc-2.2.3", "rebuilds": 15, "first_mb": 404, "last_mb": 1051, "delta_mb": 647, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": "libmimalloc.so (2.2.3)", "harness_trim": false, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept"}
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:mimalloc-purge0", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "mimalloc-purge0", "rebuilds": 15, "first_mb": 405, "last_mb": 999, "delta_mb": 594, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {"MIMALLOC_PURGE_DELAY": "0"}, "preload": "libmimalloc.so (2.2.3)", "harness_trim": false, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept"}
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:jemalloc-5.3.0", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "jemalloc-5.3.0", "rebuilds": 15, "first_mb": 384, "last_mb": 537, "delta_mb": 153, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": "libjemalloc.so (5.3.0)", "harness_trim": false, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept"}
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:jemalloc-tuned", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "jemalloc-tuned", "rebuilds": 15, "first_mb": 201, "last_mb": 219, "delta_mb": 18, "peak_hwm_mb": null, "mean_secs_2_n": 1.72, "engine_trims": 0, "glia_py": "0.5.1", "env": {"MALLOC_CONF": "dirty_decay_ms:0,muzzy_decay_ms:0,background_thread:true"}, "preload": "libjemalloc.so (5.3.0)", "harness_trim": false, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept"}
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:glibc", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "glibc", "rebuilds": 40, "first_mb": 413, "last_mb": 1335, "delta_mb": 922, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept; still climbing at 40"}
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:trim", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "trim", "rebuilds": 40, "first_mb": 208, "last_mb": 271, "delta_mb": 63, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": true, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept; level at 268-287 from rebuild 10"}
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:trim-before-swap", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "trim-before-swap", "rebuilds": 40, "first_mb": 207, "last_mb": 383, "delta_mb": 176, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept; trim at the end of generate, before the swap: creeps"}
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:threads1", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "threads1", "rebuilds": null, "first_mb": 300, "last_mb": 412, "delta_mb": 112, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {"GLIA_THREADS": "1"}, "preload": null, "harness_trim": false, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept; levels by rebuild 5; rebuild count not recorded"}
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:threads1-trim", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "threads1-trim", "rebuilds": null, "first_mb": 181, "last_mb": 168, "delta_mb": -13, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {"GLIA_THREADS": "1"}, "preload": null, "harness_trim": true, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept; rebuild count not recorded"}
+{"kind": "run", "run_id": "2026-10-02 grpc-go@6f50403:glibc", "date": "2026-10-02", "source": "spec-run-052", "repo": "grpc-go@6f50403", "config": "glibc", "rebuilds": 15, "first_mb": 211, "last_mb": 487, "delta_mb": 276, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept"}
+{"kind": "run", "run_id": "2026-10-02 grpc-go@6f50403:trim", "date": "2026-10-02", "source": "spec-run-052", "repo": "grpc-go@6f50403", "config": "trim", "rebuilds": 15, "first_mb": 107, "last_mb": 158, "delta_mb": 51, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": true, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept"}
+{"kind": "run", "run_id": "2026-10-02 grpc-go@6f50403:jemalloc-tuned", "date": "2026-10-02", "source": "spec-run-052", "repo": "grpc-go@6f50403", "config": "jemalloc-tuned", "rebuilds": 15, "first_mb": 111, "last_mb": 121, "delta_mb": 10, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {"MALLOC_CONF": "dirty_decay_ms:0,muzzy_decay_ms:0,background_thread:true"}, "preload": "libjemalloc.so (5.3.0)", "harness_trim": false, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept"}
+{"kind": "run", "run_id": "2026-10-02 grpc-go@6f50403:mimalloc", "date": "2026-10-02", "source": "spec-run-052", "repo": "grpc-go@6f50403", "config": "mimalloc", "rebuilds": 15, "first_mb": 215, "last_mb": 467, "delta_mb": 252, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": "libmimalloc.so (2.2.3)", "harness_trim": false, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept; next-leap-0.5.2.md section 4 table"}
+{"kind": "run", "run_id": "2026-10-02 grpc-go@6f50403:mimalloc-tuned", "date": "2026-10-02", "source": "spec-run-052", "repo": "grpc-go@6f50403", "config": "mimalloc-tuned", "rebuilds": 15, "first_mb": 218, "last_mb": 420, "delta_mb": 202, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {"MIMALLOC_PURGE_DELAY": "0"}, "preload": "libmimalloc.so (2.2.3)", "harness_trim": false, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept"}
+{"kind": "run", "run_id": "2026-10-02 grpc-go@6f50403:trim-before-swap", "date": "2026-10-02", "source": "spec-run-052", "repo": "grpc-go@6f50403", "config": "trim-before-swap", "rebuilds": 15, "first_mb": 109, "last_mb": 177, "delta_mb": 68, "peak_hwm_mb": null, "mean_secs_2_n": null, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16, "note": "0.5.2 spec probe (DE.10 rationale): 0.5.1 wheel, repo-graph _build_graph pattern; first/last VmRSS only, per-rebuild rows not kept; trim at the end of generate, before the swap"}
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:glibc", "date": "2026-10-02", "source": "spec-verifier-052", "repo": "glia@84e2e71", "config": "glibc", "rebuilds": 12, "first_mb": 396, "last_mb": 791, "delta_mb": 395, "peak_hwm_mb": null, "mean_secs_2_n": 1.47, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16, "note": "0.5.2 spec verifier re-run on a fresh git archive HEAD copy of glia, 12 rebuilds"}
+{"kind": "run", "run_id": "2026-10-02 glia@84e2e71:trim", "date": "2026-10-02", "source": "spec-verifier-052", "repo": "glia@84e2e71", "config": "trim", "rebuilds": 12, "first_mb": 208, "last_mb": 251, "delta_mb": 43, "peak_hwm_mb": null, "mean_secs_2_n": 1.62, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": true, "cores": 16, "note": "0.5.2 spec verifier re-run on a fresh git archive HEAD copy of glia, 12 rebuilds"}
+{"kind": "oneshot", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "glibc", "peak_rss_mb": 410, "wall_secs": 2.0, "note": "CLI one-shot `glia build --no-incremental` of glia, 3 runs: peak RSS / wall; a one-shot process has no creep"}
+{"kind": "oneshot", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "jemalloc", "peak_rss_mb": 410, "wall_secs": 1.9, "note": "CLI one-shot `glia build --no-incremental` of glia, 3 runs: peak RSS / wall; a one-shot process has no creep"}
+{"kind": "oneshot", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "mimalloc", "peak_rss_mb": 420, "wall_secs": 2.2, "note": "CLI one-shot `glia build --no-incremental` of glia, 3 runs: peak RSS / wall; a one-shot process has no creep"}
+{"kind": "oneshot", "date": "2026-10-02", "source": "spec-run-052", "repo": "glia@84e2e71", "config": "arena2", "peak_rss_mb": 330, "wall_secs": 3.5, "note": "CLI one-shot `glia build --no-incremental` of glia, 3 runs: peak RSS / wall; a one-shot process has no creep"}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 1, "rss_mb": 409.7, "hwm_mb": 470.0, "secs": 5.942}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 2, "rss_mb": 477.8, "hwm_mb": 557.7, "secs": 1.436}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 3, "rss_mb": 548.8, "hwm_mb": 636.2, "secs": 1.404}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 4, "rss_mb": 604.8, "hwm_mb": 695.4, "secs": 1.433}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 5, "rss_mb": 655.4, "hwm_mb": 745.9, "secs": 1.584}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 6, "rss_mb": 716.1, "hwm_mb": 809.8, "secs": 3.746}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 7, "rss_mb": 769.9, "hwm_mb": 863.5, "secs": 4.092}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 8, "rss_mb": 832.6, "hwm_mb": 878.8, "secs": 1.974}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 9, "rss_mb": 846.4, "hwm_mb": 951.1, "secs": 1.541}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 10, "rss_mb": 888.2, "hwm_mb": 978.3, "secs": 2.318}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 11, "rss_mb": 898.6, "hwm_mb": 992.5, "secs": 1.869}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 12, "rss_mb": 945.4, "hwm_mb": 992.5, "secs": 1.553}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 13, "rss_mb": 966.5, "hwm_mb": 1070.9, "secs": 1.566}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 14, "rss_mb": 978.0, "hwm_mb": 1070.9, "secs": 2.397}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "rebuild": 15, "rss_mb": 1016.6, "hwm_mb": 1109.3, "secs": 2.082}
+{"kind": "run", "run_id": "2026-10-15T21:45:08 glia@4439808:glibc", "date": "2026-10-15", "source": "DE.10 HEAD wheel (W0)", "repo": "glia@4439808", "config": "glibc", "rebuilds": 15, "first_mb": 409.7, "last_mb": 1016.6, "delta_mb": 606.9, "peak_hwm_mb": 1109.3, "mean_secs_2_n": 2.071, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16, "load_1m": [47.5, 33.4], "note": "first DE.10 batch, machine shared with sibling builds (load_1m from uptime between runs); drop_secs not yet recorded"}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 1, "rss_mb": 403.7, "hwm_mb": 464.1, "secs": 2.32}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 2, "rss_mb": 237.9, "hwm_mb": 549.8, "secs": 1.742}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 3, "rss_mb": 236.5, "hwm_mb": 553.1, "secs": 2.34}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 4, "rss_mb": 239.6, "hwm_mb": 553.1, "secs": 1.506}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 5, "rss_mb": 239.5, "hwm_mb": 553.1, "secs": 2.72}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 6, "rss_mb": 240.2, "hwm_mb": 553.1, "secs": 1.519}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 7, "rss_mb": 242.5, "hwm_mb": 553.1, "secs": 1.765}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 8, "rss_mb": 245.5, "hwm_mb": 556.1, "secs": 1.66}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 9, "rss_mb": 258.1, "hwm_mb": 573.5, "secs": 1.991}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 10, "rss_mb": 260.9, "hwm_mb": 573.5, "secs": 3.706}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 11, "rss_mb": 259.1, "hwm_mb": 573.5, "secs": 9.386}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 12, "rss_mb": 251.5, "hwm_mb": 573.5, "secs": 6.803}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 13, "rss_mb": 252.9, "hwm_mb": 573.5, "secs": 4.916}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 14, "rss_mb": 252.9, "hwm_mb": 573.5, "secs": 5.586}
+{"kind": "rebuild", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "rebuild": 15, "rss_mb": 264.5, "hwm_mb": 573.5, "secs": 2.345}
+{"kind": "run", "run_id": "2026-10-15T21:45:59 glia@4439808:glibc", "date": "2026-10-15", "source": "DE.10 wheel (HEAD+DE.10)", "repo": "glia@4439808", "config": "glibc", "rebuilds": 15, "first_mb": 403.7, "last_mb": 264.5, "delta_mb": -139.2, "peak_hwm_mb": 573.5, "mean_secs_2_n": 3.427, "engine_trims": 15, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16, "load_1m": [33.4, 43.4], "note": "first DE.10 batch, machine shared with sibling builds (load_1m from uptime between runs); drop_secs not yet recorded"}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 1, "rss_mb": 218.0, "hwm_mb": 487.7, "secs": 23.431}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 2, "rss_mb": 239.5, "hwm_mb": 531.6, "secs": 6.123}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 3, "rss_mb": 238.8, "hwm_mb": 548.6, "secs": 1.978}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 4, "rss_mb": 248.1, "hwm_mb": 552.9, "secs": 3.341}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 5, "rss_mb": 250.3, "hwm_mb": 556.7, "secs": 2.466}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 6, "rss_mb": 247.8, "hwm_mb": 561.7, "secs": 2.552}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 7, "rss_mb": 265.5, "hwm_mb": 564.8, "secs": 6.071}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 8, "rss_mb": 265.1, "hwm_mb": 585.6, "secs": 2.568}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 9, "rss_mb": 262.0, "hwm_mb": 585.6, "secs": 2.004}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 10, "rss_mb": 261.4, "hwm_mb": 585.6, "secs": 2.123}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 11, "rss_mb": 256.7, "hwm_mb": 585.6, "secs": 3.065}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 12, "rss_mb": 256.1, "hwm_mb": 585.6, "secs": 5.164}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 13, "rss_mb": 272.3, "hwm_mb": 585.6, "secs": 1.722}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 14, "rss_mb": 283.9, "hwm_mb": 595.1, "secs": 2.396}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "rebuild": 15, "rss_mb": 300.0, "hwm_mb": 595.1, "secs": 1.969}
+{"kind": "run", "run_id": "2026-10-15T21:47:08 glia@4439808:trim", "date": "2026-10-15", "source": "DE.10 HEAD wheel (W0)", "repo": "glia@4439808", "config": "trim", "rebuilds": 15, "first_mb": 218.0, "last_mb": 300.0, "delta_mb": 82.0, "peak_hwm_mb": 595.1, "mean_secs_2_n": 3.11, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": true, "cores": 16, "load_1m": [43.4, 44.8], "note": "first DE.10 batch, machine shared with sibling builds (load_1m from uptime between runs); drop_secs not yet recorded"}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 1, "rss_mb": 411.7, "hwm_mb": 471.5, "secs": 3.937}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 2, "rss_mb": 465.4, "hwm_mb": 545.1, "secs": 1.88}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 3, "rss_mb": 519.7, "hwm_mb": 609.0, "secs": 2.378}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 4, "rss_mb": 577.4, "hwm_mb": 670.0, "secs": 2.478}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 5, "rss_mb": 641.0, "hwm_mb": 734.8, "secs": 3.056}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 6, "rss_mb": 661.3, "hwm_mb": 754.5, "secs": 2.241}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 7, "rss_mb": 726.4, "hwm_mb": 806.1, "secs": 7.098}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 8, "rss_mb": 764.9, "hwm_mb": 854.0, "secs": 2.981}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 9, "rss_mb": 817.6, "hwm_mb": 906.8, "secs": 3.475}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 10, "rss_mb": 856.3, "hwm_mb": 906.8, "secs": 4.576}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 11, "rss_mb": 900.4, "hwm_mb": 999.9, "secs": 4.308}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 12, "rss_mb": 904.9, "hwm_mb": 999.9, "secs": 2.943}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 13, "rss_mb": 928.3, "hwm_mb": 1021.9, "secs": 4.756}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 14, "rss_mb": 994.9, "hwm_mb": 1074.8, "secs": 1.489}
+{"kind": "rebuild", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "rebuild": 15, "rss_mb": 1054.0, "hwm_mb": 1138.4, "secs": 2.691}
+{"kind": "run", "run_id": "2026-10-15T21:47:59 glia@4439808:notrim", "date": "2026-10-15", "source": "DE.10 wheel (HEAD+DE.10)", "repo": "glia@4439808", "config": "notrim", "rebuilds": 15, "first_mb": 411.7, "last_mb": 1054.0, "delta_mb": 642.3, "peak_hwm_mb": 1138.4, "mean_secs_2_n": 3.311, "engine_trims": 0, "glia_py": "0.5.1", "env": {"GLIA_MALLOC_TRIM": "0"}, "preload": null, "harness_trim": false, "cores": 16, "load_1m": [44.8, 58.4], "note": "first DE.10 batch, machine shared with sibling builds (load_1m from uptime between runs); drop_secs not yet recorded"}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 1, "rss_mb": 223.1, "hwm_mb": 234.1, "secs": 19.851}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 2, "rss_mb": 274.3, "hwm_mb": 283.1, "secs": 5.821}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 3, "rss_mb": 319.2, "hwm_mb": 323.3, "secs": 2.679}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 4, "rss_mb": 329.5, "hwm_mb": 333.7, "secs": 3.541}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 5, "rss_mb": 356.9, "hwm_mb": 360.9, "secs": 2.936}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 6, "rss_mb": 358.6, "hwm_mb": 362.7, "secs": 2.737}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 7, "rss_mb": 391.7, "hwm_mb": 395.8, "secs": 3.414}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 8, "rss_mb": 410.4, "hwm_mb": 414.7, "secs": 1.131}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 9, "rss_mb": 442.0, "hwm_mb": 446.3, "secs": 1.094}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 10, "rss_mb": 444.9, "hwm_mb": 449.3, "secs": 1.433}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 11, "rss_mb": 469.6, "hwm_mb": 473.5, "secs": 5.872}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 12, "rss_mb": 495.2, "hwm_mb": 499.5, "secs": 4.398}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 13, "rss_mb": 517.0, "hwm_mb": 521.1, "secs": 3.804}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 14, "rss_mb": 517.2, "hwm_mb": 521.4, "secs": 3.052}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "rebuild": 15, "rss_mb": 519.7, "hwm_mb": 523.6, "secs": 2.517}
+{"kind": "run", "run_id": "2026-10-15T21:49:04 grpc-go@6f50403:glibc", "date": "2026-10-15", "source": "DE.10 HEAD wheel (W0)", "repo": "grpc-go@6f50403", "config": "glibc", "rebuilds": 15, "first_mb": 223.1, "last_mb": 519.7, "delta_mb": 296.6, "peak_hwm_mb": 523.6, "mean_secs_2_n": 3.174, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16, "load_1m": [58.4, 83.6], "note": "first DE.10 batch, machine shared with sibling builds (load_1m from uptime between runs); drop_secs not yet recorded"}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 1, "rss_mb": 218.7, "hwm_mb": 229.3, "secs": 8.678}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 2, "rss_mb": 137.4, "hwm_mb": 275.3, "secs": 3.057}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 3, "rss_mb": 134.0, "hwm_mb": 291.2, "secs": 2.678}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 4, "rss_mb": 137.9, "hwm_mb": 291.2, "secs": 2.12}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 5, "rss_mb": 144.3, "hwm_mb": 291.3, "secs": 1.641}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 6, "rss_mb": 146.5, "hwm_mb": 298.5, "secs": 1.373}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 7, "rss_mb": 144.9, "hwm_mb": 300.2, "secs": 1.943}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 8, "rss_mb": 154.5, "hwm_mb": 300.2, "secs": 2.349}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 9, "rss_mb": 155.3, "hwm_mb": 306.8, "secs": 1.648}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 10, "rss_mb": 149.8, "hwm_mb": 306.8, "secs": 1.661}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 11, "rss_mb": 163.3, "hwm_mb": 306.8, "secs": 1.426}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 12, "rss_mb": 161.3, "hwm_mb": 318.3, "secs": 1.479}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 13, "rss_mb": 160.8, "hwm_mb": 318.3, "secs": 1.285}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 14, "rss_mb": 159.6, "hwm_mb": 318.3, "secs": 2.021}
+{"kind": "rebuild", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "rebuild": 15, "rss_mb": 169.7, "hwm_mb": 325.0, "secs": 1.468}
+{"kind": "run", "run_id": "2026-10-15T21:49:40 grpc-go@6f50403:glibc", "date": "2026-10-15", "source": "DE.10 wheel (HEAD+DE.10)", "repo": "grpc-go@6f50403", "config": "glibc", "rebuilds": 15, "first_mb": 218.7, "last_mb": 169.7, "delta_mb": -49.0, "peak_hwm_mb": 325.0, "mean_secs_2_n": 1.868, "engine_trims": 15, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16, "load_1m": [83.6, 65.6], "note": "first DE.10 batch, machine shared with sibling builds (load_1m from uptime between runs); drop_secs not yet recorded"}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 1, "rss_mb": 116.9, "hwm_mb": 231.8, "secs": 3.454}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 2, "rss_mb": 128.5, "hwm_mb": 271.1, "secs": 1.34}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 3, "rss_mb": 132.7, "hwm_mb": 278.4, "secs": 2.737}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 4, "rss_mb": 137.6, "hwm_mb": 282.5, "secs": 4.32}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 5, "rss_mb": 143.2, "hwm_mb": 289.7, "secs": 4.02}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 6, "rss_mb": 152.4, "hwm_mb": 298.4, "secs": 2.567}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 7, "rss_mb": 154.2, "hwm_mb": 303.4, "secs": 1.554}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 8, "rss_mb": 164.4, "hwm_mb": 303.4, "secs": 2.484}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 9, "rss_mb": 161.7, "hwm_mb": 311.1, "secs": 4.516}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 10, "rss_mb": 162.8, "hwm_mb": 312.6, "secs": 2.212}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 11, "rss_mb": 158.0, "hwm_mb": 317.8, "secs": 1.794}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 12, "rss_mb": 167.4, "hwm_mb": 317.8, "secs": 1.571}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 13, "rss_mb": 166.7, "hwm_mb": 319.2, "secs": 1.258}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 14, "rss_mb": 171.9, "hwm_mb": 319.2, "secs": 1.489}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "rebuild": 15, "rss_mb": 175.1, "hwm_mb": 319.2, "secs": 1.563}
+{"kind": "run", "run_id": "2026-10-15T21:50:17 grpc-go@6f50403:trim", "date": "2026-10-15", "source": "DE.10 HEAD wheel (W0)", "repo": "grpc-go@6f50403", "config": "trim", "rebuilds": 15, "first_mb": 116.9, "last_mb": 175.1, "delta_mb": 58.2, "peak_hwm_mb": 319.2, "mean_secs_2_n": 2.387, "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": true, "cores": 16, "load_1m": [65.6, 54.8], "note": "first DE.10 batch, machine shared with sibling builds (load_1m from uptime between runs); drop_secs not yet recorded"}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 1, "rss_mb": 221.5, "hwm_mb": 231.9, "secs": 3.371}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 2, "rss_mb": 276.4, "hwm_mb": 285.1, "secs": 1.763}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 3, "rss_mb": 296.1, "hwm_mb": 300.4, "secs": 2.086}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 4, "rss_mb": 329.1, "hwm_mb": 333.5, "secs": 2.647}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 5, "rss_mb": 346.5, "hwm_mb": 350.8, "secs": 2.518}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 6, "rss_mb": 370.5, "hwm_mb": 374.7, "secs": 2.503}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 7, "rss_mb": 389.8, "hwm_mb": 394.1, "secs": 1.312}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 8, "rss_mb": 419.2, "hwm_mb": 423.8, "secs": 1.566}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 9, "rss_mb": 456.1, "hwm_mb": 460.3, "secs": 2.692}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 10, "rss_mb": 459.4, "hwm_mb": 463.6, "secs": 2.772}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 11, "rss_mb": 484.3, "hwm_mb": 488.4, "secs": 2.657}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 12, "rss_mb": 485.0, "hwm_mb": 489.2, "secs": 2.328}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 13, "rss_mb": 490.9, "hwm_mb": 495.1, "secs": 3.553}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 14, "rss_mb": 496.2, "hwm_mb": 500.7, "secs": 4.938}
+{"kind": "rebuild", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "rebuild": 15, "rss_mb": 496.3, "hwm_mb": 500.7, "secs": 2.922}
+{"kind": "run", "run_id": "2026-10-15T21:50:57 grpc-go@6f50403:notrim", "date": "2026-10-15", "source": "DE.10 wheel (HEAD+DE.10)", "repo": "grpc-go@6f50403", "config": "notrim", "rebuilds": 15, "first_mb": 221.5, "last_mb": 496.3, "delta_mb": 274.8, "peak_hwm_mb": 500.7, "mean_secs_2_n": 2.59, "engine_trims": 0, "glia_py": "0.5.1", "env": {"GLIA_MALLOC_TRIM": "0"}, "preload": null, "harness_trim": false, "cores": 16, "load_1m": [54.8, null], "note": "first DE.10 batch, machine shared with sibling builds (load_1m from uptime between runs); drop_secs not yet recorded"}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 1, "rss_mb": 421.9, "hwm_mb": 482.5, "secs": 5.807, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 2, "rss_mb": 481.1, "hwm_mb": 561.2, "secs": 7.144, "drop_secs": 0.096}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 3, "rss_mb": 539.7, "hwm_mb": 629.7, "secs": 8.56, "drop_secs": 0.081}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 4, "rss_mb": 620.9, "hwm_mb": 711.8, "secs": 11.128, "drop_secs": 0.059}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 5, "rss_mb": 682.1, "hwm_mb": 773.3, "secs": 7.561, "drop_secs": 0.11}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 6, "rss_mb": 698.4, "hwm_mb": 792.1, "secs": 11.355, "drop_secs": 0.084}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 7, "rss_mb": 762.3, "hwm_mb": 856.1, "secs": 8.37, "drop_secs": 0.125}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 8, "rss_mb": 776.6, "hwm_mb": 870.5, "secs": 7.971, "drop_secs": 0.117}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 9, "rss_mb": 841.7, "hwm_mb": 921.7, "secs": 8.347, "drop_secs": 0.12}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 10, "rss_mb": 853.8, "hwm_mb": 938.7, "secs": 9.023, "drop_secs": 0.184}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 11, "rss_mb": 900.9, "hwm_mb": 992.2, "secs": 8.017, "drop_secs": 0.175}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 12, "rss_mb": 906.8, "hwm_mb": 998.3, "secs": 7.871, "drop_secs": 0.258}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 13, "rss_mb": 954.3, "hwm_mb": 1047.9, "secs": 4.813, "drop_secs": 0.318}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 14, "rss_mb": 1011.6, "hwm_mb": 1091.5, "secs": 8.659, "drop_secs": 0.118}
+{"kind": "rebuild", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "rebuild": 15, "rss_mb": 1056.7, "hwm_mb": 1136.9, "secs": 7.745, "drop_secs": 0.094}
+{"kind": "run", "run_id": "2026-10-15T21:54:20 glia@4439808:glibc", "date": "2026-10-15", "source": "DE.10 HEAD wheel (W0) r1", "repo": "glia@4439808", "config": "glibc", "rebuilds": 15, "first_mb": 421.9, "last_mb": 1056.7, "delta_mb": 634.8, "peak_hwm_mb": 1136.9, "mean_secs_2_n": 8.326, "mean_drop_secs_2_n": 0.1385, "load_1m": [56.8, 94.3], "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 1, "rss_mb": 407.1, "hwm_mb": 467.4, "secs": 28.06, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 2, "rss_mb": 235.3, "hwm_mb": 567.7, "secs": 9.752, "drop_secs": 0.219}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 3, "rss_mb": 234.4, "hwm_mb": 567.7, "secs": 5.106, "drop_secs": 0.164}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 4, "rss_mb": 244.3, "hwm_mb": 567.7, "secs": 2.336, "drop_secs": 0.105}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 5, "rss_mb": 255.3, "hwm_mb": 574.7, "secs": 2.261, "drop_secs": 0.161}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 6, "rss_mb": 248.2, "hwm_mb": 574.7, "secs": 2.059, "drop_secs": 0.109}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 7, "rss_mb": 251.9, "hwm_mb": 574.7, "secs": 1.907, "drop_secs": 0.119}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 8, "rss_mb": 252.9, "hwm_mb": 574.7, "secs": 1.862, "drop_secs": 0.136}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 9, "rss_mb": 257.4, "hwm_mb": 574.7, "secs": 4.352, "drop_secs": 0.138}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 10, "rss_mb": 265.7, "hwm_mb": 574.7, "secs": 2.456, "drop_secs": 0.129}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 11, "rss_mb": 275.3, "hwm_mb": 596.0, "secs": 2.473, "drop_secs": 0.156}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 12, "rss_mb": 280.5, "hwm_mb": 596.0, "secs": 2.848, "drop_secs": 0.127}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 13, "rss_mb": 275.6, "hwm_mb": 596.0, "secs": 3.425, "drop_secs": 0.248}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 14, "rss_mb": 279.4, "hwm_mb": 596.0, "secs": 2.765, "drop_secs": 0.133}
+{"kind": "rebuild", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "rebuild": 15, "rss_mb": 279.8, "hwm_mb": 596.0, "secs": 3.374, "drop_secs": 0.148}
+{"kind": "run", "run_id": "2026-10-15T21:55:36 glia@4439808:glibc", "date": "2026-10-15", "source": "DE.10 wheel (HEAD+DE.10) r1", "repo": "glia@4439808", "config": "glibc", "rebuilds": 15, "first_mb": 407.1, "last_mb": 279.8, "delta_mb": -127.3, "peak_hwm_mb": 596.0, "mean_secs_2_n": 3.355, "mean_drop_secs_2_n": 0.1494, "load_1m": [94.3, 68.4], "engine_trims": 15, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 1, "rss_mb": 407.9, "hwm_mb": 467.8, "secs": 9.953, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 2, "rss_mb": 488.2, "hwm_mb": 568.4, "secs": 3.026, "drop_secs": 0.066}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 3, "rss_mb": 540.5, "hwm_mb": 630.5, "secs": 2.458, "drop_secs": 0.075}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 4, "rss_mb": 564.1, "hwm_mb": 658.3, "secs": 2.021, "drop_secs": 0.056}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 5, "rss_mb": 604.3, "hwm_mb": 698.4, "secs": 1.803, "drop_secs": 0.052}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 6, "rss_mb": 616.4, "hwm_mb": 710.6, "secs": 2.428, "drop_secs": 0.064}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 7, "rss_mb": 652.5, "hwm_mb": 746.4, "secs": 2.012, "drop_secs": 0.055}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 8, "rss_mb": 656.1, "hwm_mb": 750.1, "secs": 1.913, "drop_secs": 0.08}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 9, "rss_mb": 703.3, "hwm_mb": 797.3, "secs": 2.005, "drop_secs": 0.098}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 10, "rss_mb": 750.2, "hwm_mb": 844.6, "secs": 2.294, "drop_secs": 0.071}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 11, "rss_mb": 803.2, "hwm_mb": 897.3, "secs": 3.018, "drop_secs": 0.082}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 12, "rss_mb": 832.3, "hwm_mb": 912.6, "secs": 2.082, "drop_secs": 0.073}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 13, "rss_mb": 890.1, "hwm_mb": 936.9, "secs": 3.39, "drop_secs": 0.089}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 14, "rss_mb": 908.6, "hwm_mb": 1008.9, "secs": 3.06, "drop_secs": 0.072}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "rebuild": 15, "rss_mb": 903.4, "hwm_mb": 1008.9, "secs": 3.314, "drop_secs": 0.11}
+{"kind": "run", "run_id": "2026-10-15T21:56:21 glia@4439808:notrim", "date": "2026-10-15", "source": "DE.10 wheel (HEAD+DE.10) r1", "repo": "glia@4439808", "config": "notrim", "rebuilds": 15, "first_mb": 407.9, "last_mb": 903.4, "delta_mb": 495.5, "peak_hwm_mb": 1008.9, "mean_secs_2_n": 2.487, "mean_drop_secs_2_n": 0.0745, "load_1m": [68.4, 50.2], "engine_trims": 0, "glia_py": "0.5.1", "env": {"GLIA_MALLOC_TRIM": "0"}, "preload": null, "harness_trim": false, "cores": 16}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 1, "rss_mb": 224.3, "hwm_mb": 235.5, "secs": 4.756, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 2, "rss_mb": 275.8, "hwm_mb": 284.6, "secs": 3.128, "drop_secs": 0.039}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 3, "rss_mb": 316.6, "hwm_mb": 320.7, "secs": 2.427, "drop_secs": 0.042}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 4, "rss_mb": 331.5, "hwm_mb": 335.8, "secs": 2.127, "drop_secs": 0.042}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 5, "rss_mb": 360.8, "hwm_mb": 365.2, "secs": 2.818, "drop_secs": 0.042}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 6, "rss_mb": 393.6, "hwm_mb": 397.8, "secs": 3.796, "drop_secs": 0.032}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 7, "rss_mb": 399.5, "hwm_mb": 403.9, "secs": 3.122, "drop_secs": 0.108}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 8, "rss_mb": 411.7, "hwm_mb": 415.9, "secs": 2.258, "drop_secs": 0.042}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 9, "rss_mb": 417.2, "hwm_mb": 421.6, "secs": 2.26, "drop_secs": 0.04}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 10, "rss_mb": 417.4, "hwm_mb": 421.8, "secs": 2.123, "drop_secs": 0.045}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 11, "rss_mb": 429.4, "hwm_mb": 433.7, "secs": 1.84, "drop_secs": 0.049}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 12, "rss_mb": 438.5, "hwm_mb": 443.0, "secs": 1.893, "drop_secs": 0.036}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 13, "rss_mb": 436.6, "hwm_mb": 445.7, "secs": 1.42, "drop_secs": 0.031}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 14, "rss_mb": 459.3, "hwm_mb": 463.3, "secs": 1.286, "drop_secs": 0.028}
+{"kind": "rebuild", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "rebuild": 15, "rss_mb": 482.0, "hwm_mb": 486.0, "secs": 1.671, "drop_secs": 0.025}
+{"kind": "run", "run_id": "2026-10-15T21:56:59 grpc-go@6f50403:glibc", "date": "2026-10-15", "source": "DE.10 HEAD wheel (W0) r1", "repo": "grpc-go@6f50403", "config": "glibc", "rebuilds": 15, "first_mb": 224.3, "last_mb": 482.0, "delta_mb": 257.7, "peak_hwm_mb": 486.0, "mean_secs_2_n": 2.298, "mean_drop_secs_2_n": 0.0429, "load_1m": [50.2, 62.8], "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 1, "rss_mb": 222.9, "hwm_mb": 234.4, "secs": 2.166, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 2, "rss_mb": 127.8, "hwm_mb": 286.8, "secs": 1.354, "drop_secs": 0.07}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 3, "rss_mb": 135.8, "hwm_mb": 286.8, "secs": 1.654, "drop_secs": 0.079}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 4, "rss_mb": 142.1, "hwm_mb": 310.6, "secs": 1.83, "drop_secs": 0.089}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 5, "rss_mb": 149.9, "hwm_mb": 310.6, "secs": 2.996, "drop_secs": 0.116}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 6, "rss_mb": 158.2, "hwm_mb": 310.6, "secs": 2.669, "drop_secs": 0.134}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 7, "rss_mb": 159.3, "hwm_mb": 310.6, "secs": 3.324, "drop_secs": 0.181}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 8, "rss_mb": 166.1, "hwm_mb": 310.6, "secs": 3.06, "drop_secs": 0.086}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 9, "rss_mb": 167.4, "hwm_mb": 315.6, "secs": 2.458, "drop_secs": 0.111}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 10, "rss_mb": 160.9, "hwm_mb": 315.6, "secs": 2.83, "drop_secs": 0.112}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 11, "rss_mb": 161.5, "hwm_mb": 315.6, "secs": 1.867, "drop_secs": 0.068}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 12, "rss_mb": 172.1, "hwm_mb": 316.9, "secs": 2.279, "drop_secs": 0.126}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 13, "rss_mb": 170.4, "hwm_mb": 323.5, "secs": 2.417, "drop_secs": 0.1}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 14, "rss_mb": 180.0, "hwm_mb": 329.0, "secs": 2.03, "drop_secs": 0.118}
+{"kind": "rebuild", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "rebuild": 15, "rss_mb": 170.6, "hwm_mb": 330.9, "secs": 2.749, "drop_secs": 0.116}
+{"kind": "run", "run_id": "2026-10-15T21:57:35 grpc-go@6f50403:glibc", "date": "2026-10-15", "source": "DE.10 wheel (HEAD+DE.10) r1", "repo": "grpc-go@6f50403", "config": "glibc", "rebuilds": 15, "first_mb": 222.9, "last_mb": 170.6, "delta_mb": -52.3, "peak_hwm_mb": 330.9, "mean_secs_2_n": 2.394, "mean_drop_secs_2_n": 0.1076, "load_1m": [62.8, 53.1], "engine_trims": 15, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 1, "rss_mb": 224.3, "hwm_mb": 235.5, "secs": 3.505, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 2, "rss_mb": 278.7, "hwm_mb": 288.4, "secs": 1.642, "drop_secs": 0.029}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 3, "rss_mb": 319.1, "hwm_mb": 323.8, "secs": 1.708, "drop_secs": 0.038}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 4, "rss_mb": 347.1, "hwm_mb": 352.1, "secs": 2.078, "drop_secs": 0.043}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 5, "rss_mb": 349.9, "hwm_mb": 386.5, "secs": 2.074, "drop_secs": 0.111}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 6, "rss_mb": 369.2, "hwm_mb": 386.5, "secs": 1.769, "drop_secs": 0.044}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 7, "rss_mb": 378.9, "hwm_mb": 386.5, "secs": 1.61, "drop_secs": 0.026}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 8, "rss_mb": 384.2, "hwm_mb": 389.0, "secs": 1.355, "drop_secs": 0.028}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 9, "rss_mb": 405.7, "hwm_mb": 412.5, "secs": 1.481, "drop_secs": 0.062}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 10, "rss_mb": 438.0, "hwm_mb": 442.7, "secs": 3.165, "drop_secs": 0.087}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 11, "rss_mb": 443.7, "hwm_mb": 448.4, "secs": 2.536, "drop_secs": 0.059}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 12, "rss_mb": 453.5, "hwm_mb": 458.3, "secs": 1.808, "drop_secs": 0.037}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 13, "rss_mb": 476.7, "hwm_mb": 481.5, "secs": 2.182, "drop_secs": 0.162}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 14, "rss_mb": 485.4, "hwm_mb": 490.2, "secs": 2.195, "drop_secs": 0.037}
+{"kind": "rebuild", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "rebuild": 15, "rss_mb": 487.4, "hwm_mb": 492.2, "secs": 1.865, "drop_secs": 0.034}
+{"kind": "run", "run_id": "2026-10-15T21:58:07 grpc-go@6f50403:notrim", "date": "2026-10-15", "source": "DE.10 wheel (HEAD+DE.10) r1", "repo": "grpc-go@6f50403", "config": "notrim", "rebuilds": 15, "first_mb": 224.3, "last_mb": 487.4, "delta_mb": 263.1, "peak_hwm_mb": 492.2, "mean_secs_2_n": 1.962, "mean_drop_secs_2_n": 0.0569, "load_1m": [53.1, 44.2], "engine_trims": 0, "glia_py": "0.5.1", "env": {"GLIA_MALLOC_TRIM": "0"}, "preload": null, "harness_trim": false, "cores": 16}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 1, "rss_mb": 419.3, "hwm_mb": 479.9, "secs": 7.01, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 2, "rss_mb": 473.4, "hwm_mb": 553.3, "secs": 6.246, "drop_secs": 0.152}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 3, "rss_mb": 542.6, "hwm_mb": 632.0, "secs": 4.867, "drop_secs": 0.1}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 4, "rss_mb": 606.7, "hwm_mb": 696.4, "secs": 1.689, "drop_secs": 0.089}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 5, "rss_mb": 656.5, "hwm_mb": 750.8, "secs": 3.168, "drop_secs": 0.066}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 6, "rss_mb": 725.7, "hwm_mb": 820.1, "secs": 4.402, "drop_secs": 0.096}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 7, "rss_mb": 741.2, "hwm_mb": 835.6, "secs": 4.474, "drop_secs": 0.316}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 8, "rss_mb": 839.5, "hwm_mb": 885.8, "secs": 3.144, "drop_secs": 0.146}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 9, "rss_mb": 814.4, "hwm_mb": 914.2, "secs": 5.091, "drop_secs": 0.213}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 10, "rss_mb": 858.1, "hwm_mb": 951.1, "secs": 2.254, "drop_secs": 0.035}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 11, "rss_mb": 872.2, "hwm_mb": 965.3, "secs": 1.674, "drop_secs": 0.035}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 12, "rss_mb": 900.1, "hwm_mb": 980.4, "secs": 6.913, "drop_secs": 0.087}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 13, "rss_mb": 902.9, "hwm_mb": 987.8, "secs": 4.783, "drop_secs": 0.079}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 14, "rss_mb": 955.6, "hwm_mb": 1035.5, "secs": 8.136, "drop_secs": 0.159}
+{"kind": "rebuild", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "rebuild": 15, "rss_mb": 1010.6, "hwm_mb": 1095.2, "secs": 3.983, "drop_secs": 0.043}
+{"kind": "run", "run_id": "2026-10-15T21:59:15 glia@4439808:glibc", "date": "2026-10-15", "source": "DE.10 HEAD wheel (W0) r2", "repo": "glia@4439808", "config": "glibc", "rebuilds": 15, "first_mb": 419.3, "last_mb": 1010.6, "delta_mb": 591.3, "peak_hwm_mb": 1095.2, "mean_secs_2_n": 4.345, "mean_drop_secs_2_n": 0.1154, "load_1m": [44.2, 71.6], "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 1, "rss_mb": 412.0, "hwm_mb": 472.0, "secs": 30.701, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 2, "rss_mb": 238.8, "hwm_mb": 551.1, "secs": 9.117, "drop_secs": 0.195}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 3, "rss_mb": 238.1, "hwm_mb": 551.1, "secs": 1.426, "drop_secs": 0.079}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 4, "rss_mb": 236.1, "hwm_mb": 551.1, "secs": 3.706, "drop_secs": 0.132}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 5, "rss_mb": 238.3, "hwm_mb": 551.1, "secs": 2.914, "drop_secs": 0.162}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 6, "rss_mb": 247.9, "hwm_mb": 551.1, "secs": 3.667, "drop_secs": 0.138}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 7, "rss_mb": 261.3, "hwm_mb": 569.9, "secs": 4.078, "drop_secs": 0.075}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 8, "rss_mb": 252.0, "hwm_mb": 569.9, "secs": 5.672, "drop_secs": 0.208}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 9, "rss_mb": 250.9, "hwm_mb": 569.9, "secs": 7.238, "drop_secs": 0.13}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 10, "rss_mb": 254.4, "hwm_mb": 569.9, "secs": 3.81, "drop_secs": 0.187}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 11, "rss_mb": 252.4, "hwm_mb": 569.9, "secs": 3.585, "drop_secs": 0.081}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 12, "rss_mb": 249.2, "hwm_mb": 569.9, "secs": 2.993, "drop_secs": 0.231}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 13, "rss_mb": 247.1, "hwm_mb": 569.9, "secs": 5.397, "drop_secs": 0.191}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 14, "rss_mb": 250.1, "hwm_mb": 569.9, "secs": 2.345, "drop_secs": 0.105}
+{"kind": "rebuild", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "rebuild": 15, "rss_mb": 251.6, "hwm_mb": 569.9, "secs": 1.599, "drop_secs": 0.108}
+{"kind": "run", "run_id": "2026-10-15T22:00:45 glia@4439808:glibc", "date": "2026-10-15", "source": "DE.10 wheel (HEAD+DE.10) r2", "repo": "glia@4439808", "config": "glibc", "rebuilds": 15, "first_mb": 412.0, "last_mb": 251.6, "delta_mb": -160.4, "peak_hwm_mb": 569.9, "mean_secs_2_n": 4.111, "mean_drop_secs_2_n": 0.1444, "load_1m": [71.6, 67.8], "engine_trims": 15, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 1, "rss_mb": 416.6, "hwm_mb": 476.0, "secs": 4.909, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 2, "rss_mb": 476.9, "hwm_mb": 556.6, "secs": 3.783, "drop_secs": 0.066}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 3, "rss_mb": 535.0, "hwm_mb": 623.8, "secs": 1.876, "drop_secs": 0.076}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 4, "rss_mb": 594.1, "hwm_mb": 688.0, "secs": 1.824, "drop_secs": 0.06}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 5, "rss_mb": 638.3, "hwm_mb": 732.2, "secs": 1.587, "drop_secs": 0.063}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 6, "rss_mb": 658.5, "hwm_mb": 752.3, "secs": 1.709, "drop_secs": 0.045}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 7, "rss_mb": 713.2, "hwm_mb": 807.0, "secs": 1.783, "drop_secs": 0.047}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 8, "rss_mb": 773.5, "hwm_mb": 867.6, "secs": 1.539, "drop_secs": 0.055}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 9, "rss_mb": 822.4, "hwm_mb": 916.4, "secs": 1.482, "drop_secs": 0.038}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 10, "rss_mb": 879.5, "hwm_mb": 973.5, "secs": 1.35, "drop_secs": 0.036}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 11, "rss_mb": 925.2, "hwm_mb": 973.5, "secs": 1.38, "drop_secs": 0.088}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 12, "rss_mb": 943.7, "hwm_mb": 1043.4, "secs": 2.284, "drop_secs": 0.062}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 13, "rss_mb": 955.4, "hwm_mb": 1045.2, "secs": 1.89, "drop_secs": 0.059}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 14, "rss_mb": 959.9, "hwm_mb": 1049.9, "secs": 2.548, "drop_secs": 0.09}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "rebuild": 15, "rss_mb": 1009.3, "hwm_mb": 1099.2, "secs": 2.157, "drop_secs": 0.076}
+{"kind": "run", "run_id": "2026-10-15T22:01:18 glia@4439808:notrim", "date": "2026-10-15", "source": "DE.10 wheel (HEAD+DE.10) r2", "repo": "glia@4439808", "config": "notrim", "rebuilds": 15, "first_mb": 416.6, "last_mb": 1009.3, "delta_mb": 592.7, "peak_hwm_mb": 1099.2, "mean_secs_2_n": 1.942, "mean_drop_secs_2_n": 0.0615, "load_1m": [67.8, 52.9], "engine_trims": 0, "glia_py": "0.5.1", "env": {"GLIA_MALLOC_TRIM": "0"}, "preload": null, "harness_trim": false, "cores": 16}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 1, "rss_mb": 217.4, "hwm_mb": 229.1, "secs": 2.749, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 2, "rss_mb": 275.0, "hwm_mb": 284.5, "secs": 1.657, "drop_secs": 0.05}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 3, "rss_mb": 312.1, "hwm_mb": 316.9, "secs": 1.771, "drop_secs": 0.034}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 4, "rss_mb": 354.1, "hwm_mb": 358.5, "secs": 1.68, "drop_secs": 0.035}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 5, "rss_mb": 376.3, "hwm_mb": 380.7, "secs": 1.684, "drop_secs": 0.072}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 6, "rss_mb": 397.1, "hwm_mb": 401.6, "secs": 2.033, "drop_secs": 0.098}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 7, "rss_mb": 429.3, "hwm_mb": 433.8, "secs": 1.984, "drop_secs": 0.03}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 8, "rss_mb": 464.1, "hwm_mb": 468.7, "secs": 1.362, "drop_secs": 0.022}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 9, "rss_mb": 472.7, "hwm_mb": 477.2, "secs": 1.624, "drop_secs": 0.051}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 10, "rss_mb": 485.5, "hwm_mb": 489.9, "secs": 2.05, "drop_secs": 0.032}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 11, "rss_mb": 500.4, "hwm_mb": 509.3, "secs": 1.413, "drop_secs": 0.034}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 12, "rss_mb": 510.4, "hwm_mb": 514.9, "secs": 1.425, "drop_secs": 0.036}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 13, "rss_mb": 547.2, "hwm_mb": 551.5, "secs": 1.444, "drop_secs": 0.036}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 14, "rss_mb": 553.8, "hwm_mb": 558.2, "secs": 1.731, "drop_secs": 0.028}
+{"kind": "rebuild", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "rebuild": 15, "rss_mb": 557.2, "hwm_mb": 587.3, "secs": 1.218, "drop_secs": 0.032}
+{"kind": "run", "run_id": "2026-10-15T22:01:44 grpc-go@6f50403:glibc", "date": "2026-10-15", "source": "DE.10 HEAD wheel (W0) r2", "repo": "grpc-go@6f50403", "config": "glibc", "rebuilds": 15, "first_mb": 217.4, "last_mb": 557.2, "delta_mb": 339.8, "peak_hwm_mb": 587.3, "mean_secs_2_n": 1.648, "mean_drop_secs_2_n": 0.0421, "load_1m": [52.9, 44.6], "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 1, "rss_mb": 218.1, "hwm_mb": 229.4, "secs": 4.518, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 2, "rss_mb": 127.4, "hwm_mb": 278.3, "secs": 2.779, "drop_secs": 0.079}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 3, "rss_mb": 128.6, "hwm_mb": 278.3, "secs": 3.579, "drop_secs": 0.085}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 4, "rss_mb": 138.8, "hwm_mb": 280.9, "secs": 1.9, "drop_secs": 0.068}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 5, "rss_mb": 137.6, "hwm_mb": 282.8, "secs": 1.982, "drop_secs": 0.066}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 6, "rss_mb": 145.2, "hwm_mb": 293.6, "secs": 1.744, "drop_secs": 0.082}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 7, "rss_mb": 148.4, "hwm_mb": 294.5, "secs": 1.675, "drop_secs": 0.069}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 8, "rss_mb": 150.9, "hwm_mb": 298.4, "secs": 1.843, "drop_secs": 0.136}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 9, "rss_mb": 158.3, "hwm_mb": 301.6, "secs": 3.555, "drop_secs": 0.174}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 10, "rss_mb": 154.1, "hwm_mb": 301.6, "secs": 2.936, "drop_secs": 0.129}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 11, "rss_mb": 159.4, "hwm_mb": 302.8, "secs": 5.385, "drop_secs": 0.118}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 12, "rss_mb": 154.0, "hwm_mb": 324.4, "secs": 3.298, "drop_secs": 0.092}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 13, "rss_mb": 161.2, "hwm_mb": 324.4, "secs": 1.522, "drop_secs": 0.081}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 14, "rss_mb": 163.4, "hwm_mb": 324.4, "secs": 4.339, "drop_secs": 0.118}
+{"kind": "rebuild", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "rebuild": 15, "rss_mb": 172.2, "hwm_mb": 324.4, "secs": 4.171, "drop_secs": 0.093}
+{"kind": "run", "run_id": "2026-10-15T22:02:30 grpc-go@6f50403:glibc", "date": "2026-10-15", "source": "DE.10 wheel (HEAD+DE.10) r2", "repo": "grpc-go@6f50403", "config": "glibc", "rebuilds": 15, "first_mb": 218.1, "last_mb": 172.2, "delta_mb": -45.9, "peak_hwm_mb": 324.4, "mean_secs_2_n": 2.908, "mean_drop_secs_2_n": 0.0993, "load_1m": [44.6, 65.3], "engine_trims": 15, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 1, "rss_mb": 215.3, "hwm_mb": 226.4, "secs": 7.591, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 2, "rss_mb": 267.3, "hwm_mb": 276.4, "secs": 3.597, "drop_secs": 0.035}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 3, "rss_mb": 311.5, "hwm_mb": 315.9, "secs": 2.931, "drop_secs": 0.117}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 4, "rss_mb": 320.6, "hwm_mb": 324.7, "secs": 2.139, "drop_secs": 0.084}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 5, "rss_mb": 351.9, "hwm_mb": 356.0, "secs": 2.326, "drop_secs": 0.041}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 6, "rss_mb": 376.9, "hwm_mb": 386.0, "secs": 3.074, "drop_secs": 0.052}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 7, "rss_mb": 380.1, "hwm_mb": 386.0, "secs": 2.337, "drop_secs": 0.087}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 8, "rss_mb": 393.7, "hwm_mb": 398.0, "secs": 3.707, "drop_secs": 0.049}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 9, "rss_mb": 393.8, "hwm_mb": 398.1, "secs": 1.991, "drop_secs": 0.059}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 10, "rss_mb": 406.2, "hwm_mb": 410.3, "secs": 2.82, "drop_secs": 0.051}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 11, "rss_mb": 409.8, "hwm_mb": 414.1, "secs": 2.099, "drop_secs": 0.043}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 12, "rss_mb": 415.3, "hwm_mb": 419.8, "secs": 2.448, "drop_secs": 0.067}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 13, "rss_mb": 422.7, "hwm_mb": 426.9, "secs": 2.635, "drop_secs": 0.044}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 14, "rss_mb": 424.2, "hwm_mb": 428.8, "secs": 2.074, "drop_secs": 0.065}
+{"kind": "rebuild", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "rebuild": 15, "rss_mb": 452.0, "hwm_mb": 456.5, "secs": 4.81, "drop_secs": 0.09}
+{"kind": "run", "run_id": "2026-10-15T22:03:17 grpc-go@6f50403:notrim", "date": "2026-10-15", "source": "DE.10 wheel (HEAD+DE.10) r2", "repo": "grpc-go@6f50403", "config": "notrim", "rebuilds": 15, "first_mb": 215.3, "last_mb": 452.0, "delta_mb": 236.7, "peak_hwm_mb": 456.5, "mean_secs_2_n": 2.785, "mean_drop_secs_2_n": 0.0631, "load_1m": [65.3, 78.2], "engine_trims": 0, "glia_py": "0.5.1", "env": {"GLIA_MALLOC_TRIM": "0"}, "preload": null, "harness_trim": false, "cores": 16}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 1, "rss_mb": 420.3, "hwm_mb": 480.2, "secs": 20.159, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 2, "rss_mb": 491.1, "hwm_mb": 570.8, "secs": 2.176, "drop_secs": 0.082}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 3, "rss_mb": 551.3, "hwm_mb": 638.5, "secs": 2.361, "drop_secs": 0.074}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 4, "rss_mb": 605.7, "hwm_mb": 695.5, "secs": 1.79, "drop_secs": 0.053}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 5, "rss_mb": 663.9, "hwm_mb": 754.2, "secs": 2.917, "drop_secs": 0.085}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 6, "rss_mb": 716.5, "hwm_mb": 806.8, "secs": 4.509, "drop_secs": 0.128}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 7, "rss_mb": 771.6, "hwm_mb": 861.7, "secs": 4.034, "drop_secs": 0.125}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 8, "rss_mb": 786.1, "hwm_mb": 880.3, "secs": 7.368, "drop_secs": 0.068}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 9, "rss_mb": 846.0, "hwm_mb": 925.9, "secs": 5.744, "drop_secs": 0.106}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 10, "rss_mb": 903.0, "hwm_mb": 992.5, "secs": 2.811, "drop_secs": 0.162}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 11, "rss_mb": 950.8, "hwm_mb": 1043.8, "secs": 5.493, "drop_secs": 0.073}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 12, "rss_mb": 971.4, "hwm_mb": 1051.6, "secs": 1.771, "drop_secs": 0.092}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 13, "rss_mb": 974.7, "hwm_mb": 1059.3, "secs": 2.759, "drop_secs": 0.101}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 14, "rss_mb": 978.4, "hwm_mb": 1072.6, "secs": 3.527, "drop_secs": 0.09}
+{"kind": "rebuild", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "rebuild": 15, "rss_mb": 1048.8, "hwm_mb": 1128.6, "secs": 4.606, "drop_secs": 0.098}
+{"kind": "run", "run_id": "2026-10-15T22:04:30 glia@4439808:glibc", "date": "2026-10-15", "source": "DE.10 HEAD wheel (W0) r3", "repo": "glia@4439808", "config": "glibc", "rebuilds": 15, "first_mb": 420.3, "last_mb": 1048.8, "delta_mb": 628.5, "peak_hwm_mb": 1128.6, "mean_secs_2_n": 3.705, "mean_drop_secs_2_n": 0.0955, "load_1m": [78.2, 62.2], "engine_trims": 0, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 1, "rss_mb": 420.2, "hwm_mb": 479.7, "secs": 11.274, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 2, "rss_mb": 236.4, "hwm_mb": 564.2, "secs": 4.293, "drop_secs": 0.26}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 3, "rss_mb": 239.4, "hwm_mb": 564.2, "secs": 3.333, "drop_secs": 0.167}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 4, "rss_mb": 241.4, "hwm_mb": 564.2, "secs": 3.494, "drop_secs": 0.125}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 5, "rss_mb": 239.6, "hwm_mb": 564.2, "secs": 4.665, "drop_secs": 0.25}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 6, "rss_mb": 241.4, "hwm_mb": 564.2, "secs": 3.518, "drop_secs": 0.104}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 7, "rss_mb": 245.7, "hwm_mb": 564.2, "secs": 3.864, "drop_secs": 0.203}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 8, "rss_mb": 254.5, "hwm_mb": 564.2, "secs": 7.261, "drop_secs": 0.195}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 9, "rss_mb": 255.5, "hwm_mb": 564.2, "secs": 6.181, "drop_secs": 0.152}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 10, "rss_mb": 256.2, "hwm_mb": 575.2, "secs": 9.402, "drop_secs": 0.197}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 11, "rss_mb": 265.1, "hwm_mb": 575.7, "secs": 3.812, "drop_secs": 0.213}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 12, "rss_mb": 267.1, "hwm_mb": 578.3, "secs": 6.561, "drop_secs": 0.134}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 13, "rss_mb": 266.6, "hwm_mb": 582.0, "secs": 8.185, "drop_secs": 0.217}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 14, "rss_mb": 265.5, "hwm_mb": 582.0, "secs": 2.299, "drop_secs": 0.172}
+{"kind": "rebuild", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "rebuild": 15, "rss_mb": 265.2, "hwm_mb": 582.0, "secs": 4.484, "drop_secs": 0.159}
+{"kind": "run", "run_id": "2026-10-15T22:05:54 glia@4439808:glibc", "date": "2026-10-15", "source": "DE.10 wheel (HEAD+DE.10) r3", "repo": "glia@4439808", "config": "glibc", "rebuilds": 15, "first_mb": 420.2, "last_mb": 265.2, "delta_mb": -155.0, "peak_hwm_mb": 582.0, "mean_secs_2_n": 5.097, "mean_drop_secs_2_n": 0.182, "load_1m": [62.2, 80.4], "engine_trims": 15, "glia_py": "0.5.1", "env": {}, "preload": null, "harness_trim": false, "cores": 16}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 1, "rss_mb": 416.8, "hwm_mb": 476.5, "secs": 20.445, "drop_secs": 0.0}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 2, "rss_mb": 494.6, "hwm_mb": 574.4, "secs": 13.002, "drop_secs": 0.156}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 3, "rss_mb": 549.1, "hwm_mb": 639.8, "secs": 2.079, "drop_secs": 0.051}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 4, "rss_mb": 609.3, "hwm_mb": 701.4, "secs": 1.859, "drop_secs": 0.142}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 5, "rss_mb": 663.6, "hwm_mb": 756.0, "secs": 8.263, "drop_secs": 0.05}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 6, "rss_mb": 722.2, "hwm_mb": 815.9, "secs": 2.334, "drop_secs": 0.086}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 7, "rss_mb": 810.6, "hwm_mb": 856.8, "secs": 5.922, "drop_secs": 0.038}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 8, "rss_mb": 831.8, "hwm_mb": 935.4, "secs": 3.147, "drop_secs": 0.102}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 9, "rss_mb": 880.4, "hwm_mb": 974.2, "secs": 6.431, "drop_secs": 0.09}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 10, "rss_mb": 937.6, "hwm_mb": 983.8, "secs": 6.494, "drop_secs": 0.118}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 11, "rss_mb": 956.8, "hwm_mb": 1060.2, "secs": 3.757, "drop_secs": 0.047}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 12, "rss_mb": 967.7, "hwm_mb": 1060.4, "secs": 1.546, "drop_secs": 0.056}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 13, "rss_mb": 990.8, "hwm_mb": 1084.6, "secs": 1.691, "drop_secs": 0.039}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 14, "rss_mb": 1046.5, "hwm_mb": 1140.4, "secs": 1.356, "drop_secs": 0.039}
+{"kind": "rebuild", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "rebuild": 15, "rss_mb": 1047.8, "hwm_mb": 1141.6, "secs": 1.606, "drop_secs": 0.058}
+{"kind": "run", "run_id": "2026-10-15T22:07:15 glia@4439808:notrim", "date": "2026-10-15", "source": "DE.10 wheel (HEAD+DE.10) r3", "repo": "glia@4439808", "config": "notrim", "rebuilds": 15, "first_mb": 416.8, "last_mb": 1047.8, "delta_mb": 631.0, "peak_hwm_mb": 1141.6, "mean_secs_2_n": 4.249, "mean_drop_secs_2_n": 0.0766, "load_1m": [80.4, 69.0], "engine_trims": 0, "glia_py": "0.5.1", "env": {"GLIA_MALLOC_TRIM": "0"}, "preload": null, "harness_trim": false, "cores": 16}

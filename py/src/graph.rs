@@ -9,7 +9,9 @@
 //! two methods are the only way Python writes a layout: `generate` /
 //! `generate_many` only build (LD.2). A graph built with `overlay=False`
 //! (LF.2b) is extraction-only: `save_to_default` refuses it, so the repo's
-//! default layout dir only ever holds the overlay-applied graph.
+//! default layout dir only ever holds the overlay-applied graph. Dropping a
+//! `PyGraph` hands its freed memory back to the OS on Linux glibc (DE.10,
+//! [`TrimOnDrop`]).
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -54,6 +56,27 @@ pub(crate) struct PyGraph {
     /// DECISION, CONV, VECTOR), none of which it reads; a method that changes
     /// what it does read must reset this cell.
     live: OnceLock<HashSet<NodeId>>,
+    /// Declared LAST: fields drop in declaration order, so this guard's drop
+    /// runs once the graph above is freed and hands that memory back (DE.10).
+    /// A field added to `PyGraph` goes above it.
+    _trim: TrimOnDrop,
+}
+
+/// Zero-sized drop guard that runs `glia_engine::memory::release_freed_memory`
+/// when its `PyGraph` is dropped, after the graph's own fields are freed (the
+/// guard is the struct's last field). The freed graph sits in the build
+/// workers' glibc arenas; without the trim a process that rebuilds, such as
+/// repo-graph's MCP server swapping its live graph, keeps every old graph
+/// resident (glia, 40 rebuilds: 413 -> 1,335 MB; with the trim 208 -> 271).
+/// Marker: `[memory] malloc_trim site=pygraph_drop rss_mb=<before>-><after>`
+/// on Linux glibc; `GLIA_MALLOC_TRIM=0` turns it off.
+pub(crate) struct TrimOnDrop;
+
+impl Drop for TrimOnDrop {
+    fn drop(&mut self) {
+        // The readings are already in the marker line.
+        let _ = glia_engine::memory::release_freed_memory("pygraph_drop");
+    }
 }
 
 /// Why `save_to_default` refuses a graph, or `None` when it may write it: an
@@ -78,6 +101,7 @@ impl PyGraph {
             repo_roots: r.repo_roots,
             overlay_applied: true,
             live: OnceLock::new(),
+            _trim: TrimOnDrop,
         }
     }
 
