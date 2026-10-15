@@ -27,6 +27,8 @@ mod config;
 mod iac;
 mod package;
 mod cli;
+// 0.5.2 (D0.5): SAME_AS identity stars (DD.5-DD.7); its pub use lands with DD.5.
+mod identity;
 // CB.12: host narrowing (the service alias index and `narrow_by_host`),
 // shared by the channel resolvers. Not a resolver; nothing in it is public.
 mod host;
