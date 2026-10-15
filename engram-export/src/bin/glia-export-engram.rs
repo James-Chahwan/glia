@@ -359,12 +359,13 @@ fn run(args: &Args) -> i32 {
             ds.edges_removed,
             diff_out.display(),
         );
-        // How the diff paired nodes past their keys (CK.2): by route path, by
-        // (file, kind, name), by identity hint, and the hint pairs refused as
-        // two routes of different verbs or unalike paths.
+        // How the diff paired nodes past their keys (CK.2): ROUTEs and (DE.3)
+        // ENDPOINTs by path, by (file, kind, name), by identity hint, and the
+        // hint pairs refused as two routes or two endpoints of different
+        // verbs or unalike paths.
         eprintln!(
-            "[engram-export] v6 since pairing: route={} name={} hint={} hint_refused={}",
-            ds.by_route, ds.by_name, ds.by_hint, ds.hint_refused,
+            "[engram-export] v6 since pairing: route={} endpoint={} name={} hint={} hint_refused={}",
+            ds.by_route, ds.by_endpoint, ds.by_name, ds.by_hint, ds.hint_refused,
         );
     }
     // The v6 span marker (LG.10): how many positioned nodes got 1-based lines
@@ -379,10 +380,19 @@ fn run(args: &Args) -> i32 {
         stats.unreadable_files,
     );
     // The v6 identity marker (LG.9): hint coverage, files whose hints carry a
-    // token from before a move, and keys several nodes shared.
+    // token from before a move, and keys several nodes shared; then (DE.3)
+    // the positionless ENDPOINTs and `page:` ROUTEs hinted through an anchor
+    // (a call site, a located handler), out of all of them. The anchored
+    // counts come last, so the text before them keeps its shape.
     eprintln!(
-        "[engram-export] v6 identity: {}/{} hints, {carried} file(s) under a prior identity ({moves} move(s) detected), {} duplicate key(s) resolved to the located node",
-        stats.identity_hints, stats.nodes, stats.duplicate_keys,
+        "[engram-export] v6 identity: {}/{} hints, {carried} file(s) under a prior identity ({moves} move(s) detected), {} duplicate key(s) resolved to the located node; anchored endpoint={}/{} page={}/{}",
+        stats.identity_hints,
+        stats.nodes,
+        stats.duplicate_keys,
+        stats.anchored_endpoints,
+        stats.positionless_endpoints,
+        stats.anchored_pages,
+        stats.positionless_pages,
     );
     // The v6 order marker (DE.2): the export orders and tie-breaks by content,
     // never by NodeId (which hashes the RepoId), so every clone of one commit

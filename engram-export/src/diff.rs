@@ -21,27 +21,35 @@
 //!    Keys go first because they are exact: a same-file reorder shifts
 //!    `identity_hint` ordinals, and matching hints first would cross-pair
 //!    swapped siblings.
-//! 2. **Routes, by path.** A ROUTE Symbol pairs within its file token and
-//!    verb (the METHOD of `<METHOD> <path>`, or the `page:` / `route:`
-//!    prefix, read through `endpoint::split_owner` and `nav::nav_route_path`;
-//!    the owner is not compared) with the route whose path is equal, else
-//!    alike up to a leading-segment prefix (`/trades/:id` ~
-//!    `/api/trades/:id`: a mount prefix gained or lost). A pair needs the two
-//!    to be each other's only fit among the free routes of the group, equal
-//!    paths before alike ones. Routes go before hints because one route
-//!    inserted ahead in a file shifts every later route's ordinal: CB.23 gave
-//!    a mounted Go route its own `/api` ROUTE, and the ordinal hint then
-//!    paired each route of the file with its neighbour's new one.
-//! 3. **Symbols, by name.** Any other Symbol pairs by `(file token, kind,
-//!    name)` when that triple is unique on both sides (LB.6's move-stable
-//!    shape): a function inserted ahead in a moved file shifts its siblings'
-//!    ordinals, not their names.
+//! 2. **Routes and endpoints, by path.** A route-like Symbol — a ROUTE, or
+//!    an ENDPOINT (DE.3) — pairs within its file token, hint kind and verb
+//!    (the METHOD of `<METHOD> <path>` or of `endpoint:<METHOD>:<path>`, or
+//!    the `page:` / `route:` prefix, read through `endpoint::split_owner` and
+//!    `nav::nav_route_path`; the owner is not compared) with the one whose
+//!    path is equal, else alike ([`alike_paths`]: a leading-segment prefix
+//!    gained or lost, `/trades/:id` ~ `/api/trades/:id`; a leading `${…}`
+//!    base segment ignored; `<unresolved>` alike to any path). A pair needs
+//!    the two to be each other's only fit among the free nodes of the group,
+//!    equal paths before alike ones. The hint kind is part of the group, so
+//!    a ROUTE never pairs with an ENDPOINT. Routes go before hints because
+//!    one route inserted ahead in a file shifts every later route's ordinal:
+//!    CB.23 gave a mounted Go route its own `/api` ROUTE, and the ordinal
+//!    hint then paired each route of the file with its neighbour's new one.
+//!    An ENDPOINT and a client-router `page:` ROUTE have no file of their
+//!    own; the exporter anchors them (an ENDPOINT at its first call site, a
+//!    page at its located handler component, `build_identity_hints`), so
+//!    their hints name the anchor file and they join this pass there.
+//! 3. **Symbols, by name.** Any other Symbol (never a ROUTE or an ENDPOINT,
+//!    which pair only in pass 2 or the guarded pass 4) pairs by `(file
+//!    token, kind, name)` when that triple is unique on both sides (LB.6's
+//!    move-stable shape): a function inserted ahead in a moved file shifts
+//!    its siblings' ordinals, not their names.
 //! 4. **Identity hints.** An `identity_hint` that is `Some` and unique on
 //!    each side pairs a base node with a target node: a move or a rename.
-//!    Never two ROUTEs of different verbs or of paths not alike (counted
-//!    [`DiffStats::hint_refused`]): such a route is a new contract, so the
-//!    base is removed and the target added, and Engram mints it a fresh
-//!    FactId instead of handing it a neighbour's.
+//!    Never two ROUTEs or two ENDPOINTs of different verbs or of paths not
+//!    alike (counted [`DiffStats::hint_refused`]): such a route is a new
+//!    contract, so the base is removed and the target added, and Engram
+//!    mints it a fresh FactId instead of handing it a neighbour's.
 //!
 //! A pair whose bincode bytes are equal is unchanged and not written.
 //! Otherwise it is a [`NodeChange`] carrying the base key as `prior_key`, and
@@ -102,16 +110,21 @@ pub struct DiffStats {
     pub edges_added: usize,
     /// `GmapDiff.edges_removed`.
     pub edges_removed: usize,
-    /// Pairs made by the route pass (2). Key pairs (pass 1) are not counted:
-    /// on a glia export, whose keys are unique, every pass 2-4 pair changes
-    /// the key, so `by_route + by_name + by_hint == moved`.
+    /// ROUTE pairs made by the route pass (2). Key pairs (pass 1) are not
+    /// counted: on a glia export, whose keys are unique, every pass 2-4 pair
+    /// changes the key, so `by_route + by_endpoint + by_name + by_hint ==
+    /// moved`.
     pub by_route: usize,
+    /// ENDPOINT pairs made by the route pass (2), counted apart from
+    /// [`by_route`](Self::by_route). (DE.3)
+    pub by_endpoint: usize,
     /// Pairs made by the name pass (3).
     pub by_name: usize,
     /// Pairs made by the identity-hint pass (4).
     pub by_hint: usize,
-    /// Unique hint pairs the hint pass refused: two ROUTEs of different verbs
-    /// or of paths not alike. Each leaves one removed and one added node.
+    /// Unique hint pairs the hint pass refused: two ROUTEs or two ENDPOINTs
+    /// of different verbs or of paths not alike. Each leaves one removed and
+    /// one added node.
     pub hint_refused: usize,
 }
 
@@ -145,18 +158,19 @@ pub fn diff_gmaps(
         }
     }
 
-    // Pass 2 — routes by path within (file token, verb).
-    let by_route = pair_routes(base, target, &mut pair, &mut taken);
+    // Pass 2 — routes and endpoints by path within (file token, kind, verb).
+    let (by_route, by_endpoint) = pair_routes(base, target, &mut pair, &mut taken);
     // Pass 3 — other Symbols by (file token, kind, name).
     let by_name = pair_names(base, target, &mut pair, &mut taken);
     let mut stats = DiffStats {
         by_route,
+        by_endpoint,
         by_name,
         ..DiffStats::default()
     };
 
     // Pass 4 — identity hints unique on both sides among the unmatched, never
-    // two routes of different verbs or unalike paths.
+    // two routes (or two endpoints) of different verbs or unalike paths.
     let mut base_hints: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (b, n) in base.nodes.iter().enumerate() {
         if let (false, Some(h)) = (taken[b], n.identity_hint.as_deref()) {
@@ -290,31 +304,78 @@ fn is_route_kind(kind: &str) -> bool {
     kind.parse::<u32>() == Ok(node_kind::ROUTE.0)
 }
 
-/// A ROUTE: a Symbol whose hint slot names the ROUTE kind. Propositions (doc
-/// sections, NatSpec facts) never are.
-fn is_route(n: &GmapNode) -> bool {
-    matches!(n.content, Content::Symbol { .. })
-        && hint_slot(n).is_some_and(|(_, kind)| is_route_kind(kind))
+/// The hint kind of an ENDPOINT (`node_kind::ENDPOINT`), which the exporter
+/// anchors at its first call site (DE.3).
+fn is_endpoint_kind(kind: &str) -> bool {
+    kind.parse::<u32>() == Ok(node_kind::ENDPOINT.0)
 }
 
-/// `(verb, path)` of a ROUTE key, in every shape the tree emits: the owner
-/// (` @<project>`) is split off with `endpoint::split_owner`, then
-/// `nav::nav_route_path` reads `page:<p>` (client-router pages), `route:<p>`
-/// (go / ts_routes) or `<METHOD> <p>`; the verb is what precedes the path —
-/// `page:`, `route:` or the METHOD. `None` for any other key.
-fn route_of(key: &str) -> Option<(&str, &str)> {
+/// A route-like hint kind: ROUTE or ENDPOINT. Both pair by verb and path
+/// (pass 2), never by name (pass 3).
+fn is_route_like_kind(kind: &str) -> bool {
+    is_route_kind(kind) || is_endpoint_kind(kind)
+}
+
+/// A ROUTE or an ENDPOINT: a Symbol whose hint slot names one of the two
+/// kinds. Propositions (doc sections, NatSpec facts) never are.
+fn is_route_like(n: &GmapNode) -> bool {
+    matches!(n.content, Content::Symbol { .. })
+        && hint_slot(n).is_some_and(|(_, kind)| is_route_like_kind(kind))
+}
+
+/// `(verb, path)` of a ROUTE or ENDPOINT key, in every shape the tree emits:
+/// the owner (` @<project>`) is split off with `endpoint::split_owner`
+/// first, then `endpoint:<METHOD>:<p>` (`endpoint::endpoint_qname`; the
+/// METHOD is the text before the first `:`, all ASCII letters) gives
+/// `(METHOD, p)`, and `nav::nav_route_path` reads the ROUTE shapes
+/// `page:<p>` (client-router pages), `route:<p>` (go / ts_routes) or
+/// `<METHOD> <p>`, the verb being what precedes the path — `page:`,
+/// `route:` or the METHOD. `None` for any other key. `pub(crate)`:
+/// `build_identity_hints` reads a `page:` key with it.
+pub(crate) fn route_of(key: &str) -> Option<(&str, &str)> {
     let (q, _owner) = endpoint::split_owner(key);
+    if let Some(rest) = q.strip_prefix("endpoint:") {
+        let (method, path) = rest.split_once(':')?;
+        let is_method = !method.is_empty() && method.bytes().all(|b| b.is_ascii_alphabetic());
+        return is_method.then_some((method, path));
+    }
     let path = nav::nav_route_path(q)?;
     let verb = q.strip_suffix(path)?.trim_end();
     Some((verb, path))
 }
+
+/// The placeholder glia writes for an interpolated path segment (`${…}`,
+/// U+2026 inside): an ENDPOINT whose base URL is a variable starts with it.
+const PLACEHOLDER: &str = "${\u{2026}}";
+
+/// `p` minus one leading [`PLACEHOLDER`] segment (`${…}/disputes` ->
+/// `/disputes`); any other path unchanged. One segment only.
+fn strip_placeholder_base(p: &str) -> &str {
+    match p.strip_prefix(PLACEHOLDER) {
+        Some(rest) if rest.starts_with('/') => rest,
+        _ => p,
+    }
+}
+
+/// The path glia writes for a client call whose path it could not read.
+const UNRESOLVED: &str = "<unresolved>";
 
 /// Two route paths are alike when equal, or when the shorter is `/`-rooted,
 /// is not `/`, and ends the longer: a leading-segment prefix gained or lost
 /// (`/trades/:id` ~ `/api/trades/:id`). The shorter starting with `/` puts
 /// the match on a segment boundary (`/xtrades/:id` !~ `/trades/:id`). `/` is
 /// alike only to itself: as a suffix it would fit every route of a file.
+///
+/// DE.3, for the endpoint shapes: `<unresolved>` is alike to any path (the
+/// call now resolves, or no longer does), and one leading `${…}` segment is
+/// stripped from both paths before the rule (`${…}/admin/disputes` ~
+/// `${…}/disputes`: the base moved into a template variable). The pass
+/// takes an alike pair only when it is unique both ways in its group.
 fn alike_paths(a: &str, b: &str) -> bool {
+    if a == b || a == UNRESOLVED || b == UNRESOLVED {
+        return true;
+    }
+    let (a, b) = (strip_placeholder_base(a), strip_placeholder_base(b));
     if a == b {
         return true;
     }
@@ -323,10 +384,12 @@ fn alike_paths(a: &str, b: &str) -> bool {
 }
 
 /// Whether the hint pass may pair `b` with `t`: always, unless both are
-/// ROUTEs whose keys parse ([`route_of`]); then only with the same verb and
-/// [`alike_paths`]. A ROUTE key in no known shape keeps the plain hint pair.
+/// route-like ([`is_route_like`]; one hint names one kind, so two ROUTEs or
+/// two ENDPOINTs) and their keys parse ([`route_of`]); then only with the
+/// same verb and [`alike_paths`]. A key in no known shape keeps the plain
+/// hint pair.
 fn route_pair_ok(b: &GmapNode, t: &GmapNode) -> bool {
-    if !(is_route(b) && is_route(t)) {
+    if !(is_route_like(b) && is_route_like(t)) {
         return true;
     }
     match (route_of(&b.key), route_of(&t.key)) {
@@ -335,51 +398,54 @@ fn route_pair_ok(b: &GmapNode, t: &GmapNode) -> bool {
     }
 }
 
-/// `(file token, verb, path)` of a ROUTE whose key parses.
-fn route_slot(n: &GmapNode) -> Option<(&str, &str, &str)> {
-    if !is_route(n) {
+/// `(file token, hint kind, verb, path)` of a ROUTE or ENDPOINT whose key
+/// parses. The kind keeps ROUTEs and ENDPOINTs in separate groups.
+fn route_slot(n: &GmapNode) -> Option<(&str, &str, &str, &str)> {
+    if !is_route_like(n) {
         return None;
     }
-    let (token, _) = hint_slot(n)?;
+    let (token, kind) = hint_slot(n)?;
     let (verb, path) = route_of(&n.key)?;
-    Some((token, verb, path))
+    Some((token, kind, verb, path))
 }
 
-/// Pass 2: the unmatched ROUTEs of each `(file token, verb)` group pair by
-/// path, equal paths first, then [`alike_paths`]. Within a tier a base and a
-/// target pair only when each is the other's ONLY fit among the group's free
-/// routes (snapshotted per tier), so the pairs do not depend on iteration
-/// order; an ambiguous tail (`/offers` fits `/api/offers` and
-/// `/api/user/offers`) stays unmatched for the guarded hint pass. Returns
-/// the pairs made.
+/// Pass 2: the unmatched ROUTEs and ENDPOINTs of each `(file token, kind,
+/// verb)` group pair by path, equal paths first, then [`alike_paths`].
+/// Within a tier a base and a target pair only when each is the other's ONLY
+/// fit among the group's free nodes (snapshotted per tier), so the pairs do
+/// not depend on iteration order; an ambiguous tail (`/offers` fits
+/// `/api/offers` and `/api/user/offers`) stays unmatched for the guarded
+/// hint pass. Returns the pairs made: `(ROUTE pairs, ENDPOINT pairs)`.
 fn pair_routes(
     base: &Gmap,
     target: &Gmap,
     pair: &mut [Option<usize>],
     taken: &mut [bool],
-) -> usize {
+) -> (usize, usize) {
     type Side<'a> = Vec<(usize, &'a str)>;
-    let mut groups: BTreeMap<(&str, &str), (Side, Side)> = BTreeMap::new();
+    type Group<'a> = (&'a str, &'a str, &'a str);
+    let mut groups: BTreeMap<Group, (Side, Side)> = BTreeMap::new();
     for (b, n) in base.nodes.iter().enumerate() {
         if !taken[b]
-            && let Some((token, verb, path)) = route_slot(n)
+            && let Some((token, kind, verb, path)) = route_slot(n)
         {
-            groups.entry((token, verb)).or_default().0.push((b, path));
+            groups.entry((token, kind, verb)).or_default().0.push((b, path));
         }
     }
     for (t, n) in target.nodes.iter().enumerate() {
         if pair[t].is_none()
-            && let Some((token, verb, path)) = route_slot(n)
+            && let Some((token, kind, verb, path)) = route_slot(n)
         {
-            groups.entry((token, verb)).or_default().1.push((t, path));
+            groups.entry((token, kind, verb)).or_default().1.push((t, path));
         }
     }
     let equal: fn(&str, &str) -> bool = |a, b| a == b;
-    let mut made = 0;
-    for (bs, ts) in groups.values() {
+    let (mut routes, mut endpoints) = (0, 0);
+    for ((_, kind, _), (bs, ts)) in &groups {
         if bs.is_empty() || ts.is_empty() {
             continue;
         }
+        let made = if is_endpoint_kind(kind) { &mut endpoints } else { &mut routes };
         for fits in [equal, alike_paths] {
             let free_b: Side = bs.iter().filter(|(b, _)| !taken[*b]).copied().collect();
             let free_t: Side = ts
@@ -400,23 +466,24 @@ fn pair_routes(
             for (b, t) in pairs {
                 taken[b] = true;
                 pair[t] = Some(b);
-                made += 1;
+                *made += 1;
             }
         }
     }
-    made
+    (routes, endpoints)
 }
 
-/// `(file token, kind, name)` of a Symbol that is not a ROUTE.
+/// `(file token, kind, name)` of a Symbol that is neither a ROUTE nor an
+/// ENDPOINT: those pair by path in pass 2, or in the guarded pass 4.
 fn name_slot(n: &GmapNode) -> Option<(&str, &str, &str)> {
     let Content::Symbol { name, .. } = &n.content else {
         return None;
     };
     let (token, kind) = hint_slot(n)?;
-    (!is_route_kind(kind) && !name.is_empty()).then_some((token, kind, name.as_str()))
+    (!is_route_like_kind(kind) && !name.is_empty()).then_some((token, kind, name.as_str()))
 }
 
-/// Pass 3: an unmatched non-ROUTE Symbol pairs with the one of its file
+/// Pass 3: an unmatched non-route-like Symbol pairs with the one of its file
 /// token, kind and name when that triple names exactly one node on each side
 /// (two `get` methods of one file pair by neither). Returns the pairs made.
 fn pair_names(base: &Gmap, target: &Gmap, pair: &mut [Option<usize>], taken: &mut [bool]) -> usize {
@@ -788,6 +855,7 @@ mod tests {
                 edges_added: 1,
                 edges_removed: 2,
                 by_route: 0,
+                by_endpoint: 0,
                 by_name: 0,
                 by_hint: 0,
                 hint_refused: 0,
@@ -1267,6 +1335,222 @@ mod tests {
         assert_eq!(keys(&diff.added), ["svc::store::create"]);
         assert!(diff.removed.is_empty(), "{:?}", diff.removed);
         assert_eq!((stats.by_name, stats.by_hint), (2, 0));
+    }
+
+    /// An ENDPOINT Symbol keyed `key` at `ordinal` among the ENDPOINTs
+    /// anchored in `file` (DE.3): the hint `build_identity_hints` writes for a
+    /// call site in that file, the key minus its owner as the name, and no
+    /// span (the anchor is identity, not location).
+    fn endpoint(key: &str, file: &str, ordinal: u32) -> GmapNode {
+        GmapNode {
+            key: key.to_string(),
+            content: Content::Symbol {
+                name: endpoint::split_owner(key).0.to_string(),
+                span: SpanRef::NONE,
+                qname: Some(key.to_string()),
+                doc: None,
+                imports: None,
+            },
+            provenance: None,
+            concept_hint: None,
+            identity_hint: Some(format!("{file}:{}:{ordinal}", node_kind::ENDPOINT.0)),
+        }
+    }
+
+    #[test]
+    fn rekeyed_endpoints_pair_by_verb_and_alike_path_in_their_anchor_file() {
+        // Kina d32b7df -> e6e7404's shape: the admin base moved into a
+        // template variable (`${…}/admin/disputes` -> `${…}/disputes`), and a
+        // kyc call landed ahead of both, shifting their ordinals. The ordinal
+        // hint alone pairs GET disputes -> GET kyc and POST resolve -> GET
+        // disputes.
+        let f = "frontend/src/app/pages/admin/admin.component.ts";
+        let base = gmap(
+            vec![
+                endpoint("endpoint:GET:${…}/admin/disputes @web", f, 0),
+                endpoint("endpoint:POST:${…}/admin/disputes/${…}/resolve @web", f, 1),
+            ],
+            vec![],
+        );
+        let target = gmap(
+            vec![
+                endpoint("endpoint:GET:${…}/kyc @web", f, 0),
+                endpoint("endpoint:GET:${…}/disputes @web", f, 1),
+                endpoint("endpoint:POST:${…}/disputes/${…}/resolve @web", f, 2),
+            ],
+            vec![],
+        );
+
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert_eq!(
+            moves(&diff),
+            [
+                (
+                    "endpoint:GET:${…}/admin/disputes @web",
+                    "endpoint:GET:${…}/disputes @web"
+                ),
+                (
+                    "endpoint:POST:${…}/admin/disputes/${…}/resolve @web",
+                    "endpoint:POST:${…}/disputes/${…}/resolve @web"
+                ),
+            ]
+        );
+        assert_eq!(keys(&diff.added), ["endpoint:GET:${…}/kyc @web"]);
+        assert!(diff.removed.is_empty(), "{:?}", diff.removed);
+        assert_eq!(
+            (
+                stats.by_route,
+                stats.by_endpoint,
+                stats.by_name,
+                stats.by_hint,
+                stats.hint_refused,
+                stats.moved
+            ),
+            (0, 2, 0, 0, 0, 2)
+        );
+    }
+
+    #[test]
+    fn an_unresolved_endpoint_pairs_with_the_one_path_of_its_verb() {
+        // `<unresolved>` resolved to a real path, the only DELETE of its
+        // anchor file on both sides; a GET in the file is no candidate.
+        let f = "web/items.service.ts";
+        let base = gmap(
+            vec![
+                endpoint("endpoint:GET:/api/items @web", f, 0),
+                endpoint("endpoint:DELETE:<unresolved> @web", f, 1),
+            ],
+            vec![],
+        );
+        let target = gmap(
+            vec![
+                endpoint("endpoint:GET:/api/items @web", f, 0),
+                endpoint("endpoint:DELETE:/api/items/:id @web", f, 1),
+            ],
+            vec![],
+        );
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert_eq!(
+            moves(&diff),
+            [(
+                "endpoint:DELETE:<unresolved> @web",
+                "endpoint:DELETE:/api/items/:id @web"
+            )]
+        );
+        assert!(diff.added.is_empty() && diff.removed.is_empty());
+        assert_eq!((stats.by_endpoint, stats.by_hint), (1, 0));
+
+        // Two DELETEs in the file: `<unresolved>` fits both, so the path
+        // pass pairs neither, and with no hint left on both sides (the base
+        // was the file's third endpoint) nothing pairs: two fresh facts,
+        // never a guessed one.
+        let target = gmap(
+            vec![
+                endpoint("endpoint:DELETE:/api/items/:id @web", f, 0),
+                endpoint("endpoint:DELETE:/api/carts/:id @web", f, 1),
+            ],
+            vec![],
+        );
+        let base = gmap(vec![endpoint("endpoint:DELETE:<unresolved> @web", f, 2)], vec![]);
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert!(diff.modified.is_empty(), "{:?}", moves(&diff));
+        assert_eq!(diff.removed, ["endpoint:DELETE:<unresolved> @web"]);
+        assert_eq!(diff.added.len(), 2);
+        assert_eq!(
+            (stats.by_endpoint, stats.by_hint, stats.hint_refused),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn endpoints_never_pair_across_verbs_or_with_routes() {
+        // One hint on both sides, another verb: a new contract. The hint pass
+        // refuses it, and the name pass never sees an endpoint.
+        let f = "web/a.service.ts";
+        let base = gmap(
+            vec![
+                endpoint("endpoint:GET:/a @web", f, 0),
+                route("GET /b @api", f, 0),
+            ],
+            vec![],
+        );
+        let target = gmap(
+            vec![
+                endpoint("endpoint:POST:/a @web", f, 0),
+                // The ROUTE's path is now the endpoint's, under one token: a
+                // ROUTE and an ENDPOINT never share a pass-2 group.
+                endpoint("endpoint:GET:/b @web", f, 1),
+            ],
+            vec![],
+        );
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert!(diff.modified.is_empty(), "{:?}", moves(&diff));
+        assert_eq!(diff.removed, ["GET /b @api", "endpoint:GET:/a @web"]);
+        assert_eq!(
+            keys(&diff.added),
+            ["endpoint:POST:/a @web", "endpoint:GET:/b @web"]
+        );
+        assert_eq!(
+            (
+                stats.by_route,
+                stats.by_endpoint,
+                stats.by_name,
+                stats.by_hint,
+                stats.hint_refused
+            ),
+            (0, 0, 0, 0, 1)
+        );
+
+        // One file token, kind and name, unalike paths: the name pass skips
+        // endpoints (they pair by path or not at all), and the hints differ.
+        let named = |key: &str, ordinal: u32| {
+            let mut n = endpoint(key, "x.ts", ordinal);
+            if let Content::Symbol { name, .. } = &mut n.content {
+                *name = "load".to_string();
+            }
+            n
+        };
+        let base = gmap(vec![named("endpoint:GET:/a @web", 0)], vec![]);
+        let target = gmap(vec![named("endpoint:GET:/zzz @web", 5)], vec![]);
+        let (diff, stats) = diff_gmaps(&base, 1, &target, 2);
+        assert!(diff.modified.is_empty(), "{:?}", moves(&diff));
+        assert_eq!((stats.by_name, stats.by_endpoint, stats.by_hint), (0, 0, 0));
+    }
+
+    #[test]
+    fn endpoint_keys_and_placeholder_paths() {
+        assert_eq!(
+            route_of("endpoint:GET:${…}/admin/disputes @frontend"),
+            Some(("GET", "${…}/admin/disputes"))
+        );
+        assert_eq!(
+            route_of("endpoint:DELETE:/items/:id"),
+            Some(("DELETE", "/items/:id"))
+        );
+        assert_eq!(
+            route_of("endpoint:PUT:<unresolved> @web"),
+            Some(("PUT", "<unresolved>"))
+        );
+        assert_eq!(route_of("endpoint::/x"), None);
+        assert_eq!(route_of("endpoint:G-T:/x"), None);
+        assert_eq!(route_of("endpoint:GET"), None);
+        // A leading `${…}` base is ignored, one segment of it.
+        assert!(alike_paths("${…}/admin/disputes", "${…}/disputes"));
+        assert!(alike_paths(
+            "${…}/admin/disputes/${…}/resolve",
+            "${…}/disputes/${…}/resolve"
+        ));
+        assert!(alike_paths("${…}/stats", "/api/stats"));
+        assert!(alike_paths("${…}/stats", "/stats"));
+        assert!(!alike_paths("${…}/disputes", "${…}/admin/disputes/x"));
+        assert!(!alike_paths("${…}", "/x"));
+        assert!(!alike_paths("${…}/kyc", "${…}/disputes"));
+        // `<unresolved>` is alike to any path, either side.
+        assert!(alike_paths("<unresolved>", "/api/items/:id"));
+        assert!(alike_paths("/a", "<unresolved>"));
+        // The ROUTE rules are unchanged.
+        assert!(alike_paths("/trades/:id", "/api/trades/:id"));
+        assert!(!alike_paths("/", "/api"));
     }
 
     #[test]

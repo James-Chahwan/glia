@@ -9,6 +9,9 @@
 //! CK.3: the bin names the glia that built it - `-V`, the `glia build=`
 //! marker, the `<out>.meta.json` sidecar and the history manifest's
 //! `build_stamp`.
+//!
+//! DE.3: an ENDPOINT (a client call, no file of its own) is anchored at its
+//! call site, so an endpoint re-keyed by a path edit arrives as a move.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -238,7 +241,7 @@ fn since_writes_the_diff_and_seeds_file_ids() {
     // and name: they pair by name, before their hints.
     assert_eq!(
         pairing_line(&b_err),
-        "[engram-export] v6 since pairing: route=0 name=4 hint=0 hint_refused=0"
+        "[engram-export] v6 since pairing: route=0 endpoint=0 name=4 hint=0 hint_refused=0"
     );
 
     let added: Vec<&str> = diff.added.iter().map(|n| n.key.as_str()).collect();
@@ -298,7 +301,7 @@ fn since_writes_the_diff_and_seeds_file_ids() {
     );
     assert_eq!(
         pairing_line(&c_err),
-        "[engram-export] v6 since pairing: route=0 name=0 hint=0 hint_refused=0"
+        "[engram-export] v6 since pairing: route=0 endpoint=0 name=0 hint=0 hint_refused=0"
     );
     assert_eq!(s.bytes("c"), s.bytes("b"));
     let c = s.diff("c");
@@ -474,4 +477,79 @@ fn version_and_history_name_the_glia_build() {
         .unwrap();
     assert_eq!(out.status.code(), Some(6));
     assert!(!meta_path(&s.out("c")).exists(), "a refused run wrote a meta");
+}
+
+/// An Angular service with one HttpClient call (DE.3).
+const STATS_SERVICE_TS: &str = "import { Injectable } from '@angular/core';
+import { HttpClient } from '@angular/common/http';
+
+@Injectable({ providedIn: 'root' })
+export class StatsService {
+  constructor(private http: HttpClient) {}
+
+  load() {
+    return this.http.get('/stats');
+  }
+}
+";
+
+/// The one `[engram-export] v6 identity: <n>/<m> hints, ...` marker line.
+fn identity_line(stderr: &str) -> &str {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("[engram-export] v6 identity: ") && l.contains(" hints, "))
+        .collect();
+    assert_eq!(lines.len(), 1, "want one v6 identity marker in:\n{stderr}");
+    lines[0]
+}
+
+/// DE.3: the call's path gains an `/api` prefix, re-keying its ENDPOINT
+/// `endpoint:GET:/stats` -> `endpoint:GET:/api/stats`. Both are anchored at
+/// the call site in the service file, so the route pass pairs them by verb
+/// and alike path: one move, not a removed + an added fact.
+#[test]
+fn a_rekeyed_endpoint_arrives_as_a_move() {
+    let s = Scratch::new("endpoint");
+    s.write("web/stats.service.ts", STATS_SERVICE_TS);
+    let a_err = s.export("a", None, &["--no-persist"], false);
+    assert!(
+        identity_line(&a_err).ends_with("; anchored endpoint=1/1 page=0/0"),
+        "{a_err}"
+    );
+    let edited = s.read("web/stats.service.ts").replace("'/stats'", "'/api/stats'");
+    s.write("web/stats.service.ts", &edited);
+    let b_err = s.export("b", Some("a"), &["--no-persist"], false);
+    assert_eq!(
+        pairing_line(&b_err),
+        "[engram-export] v6 since pairing: route=0 endpoint=1 name=0 hint=0 hint_refused=0"
+    );
+
+    let diff = s.diff("b");
+    let moved: Vec<(&str, &str)> = diff
+        .modified
+        .iter()
+        .filter(|c| c.prior_key != c.node.key)
+        .map(|c| (c.prior_key.as_str(), c.node.key.as_str()))
+        .collect();
+    assert_eq!(moved, [("endpoint:GET:/stats", "endpoint:GET:/api/stats")]);
+    let change = diff
+        .modified
+        .iter()
+        .find(|c| c.prior_key == "endpoint:GET:/stats")
+        .unwrap();
+    let kind = glia_code_domain::node_kind::ENDPOINT.0;
+    assert_eq!(
+        change.node.identity_hint.as_deref(),
+        Some(format!("web/stats.service.ts:{kind}:0").as_str())
+    );
+    assert!(
+        !diff.removed.iter().any(|k| k.starts_with("endpoint:")),
+        "{:?}",
+        diff.removed
+    );
+    assert!(
+        !diff.added.iter().any(|n| n.key.starts_with("endpoint:")),
+        "{:?}",
+        diff.added.iter().map(|n| &n.key).collect::<Vec<_>>()
+    );
 }

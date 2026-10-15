@@ -63,6 +63,20 @@
 //! ([`prior_tokens`]) and carries them (LB.6 `carry_file_tokens`) into
 //! [`ExportOptions::file_identity`]. Without `--since` every token is the path.
 //!
+//! Two kinds of fact have no file of their own (DE.3): an ENDPOINT (a client
+//! call's `endpoint:<METHOD>:<path>`, placed only by its ENDPOINT_HIT call
+//! sites) and a client-router `page:` ROUTE (no POSITION; its HANDLED_BY
+//! component has one). Each takes an **anchor** for its hint: an ENDPOINT
+//! its least `(file, line, col)` ENDPOINT_HIT site, a page the file and
+//! start row of its least-qname located HANDLED_BY target. The hint is then
+//! `<anchor file token>:<own kind>:<ordinal>`, ranked with the positioned
+//! nodes of that `(token, kind)` group, so a page joins the ROUTE group of
+//! its component's file. The anchor is identity, not location: the node's
+//! span stays `SpanRef::NONE`, and `prior_tokens` never reads a token from
+//! it. A page with no located handler stays unhinted. The `--since` diff
+//! pairs anchored endpoints and pages by verb and path inside their anchor
+//! file (`diff`, pass 2), so a re-keyed endpoint arrives as a move.
+//!
 //! Keys are unique in an export. When several nodes share a qname (a Python
 //! method and the ATTRIBUTE its `self.m` read mints; a Java / PHP / Scala / C#
 //! public type and its file MODULE) exactly one is emitted, chosen by
@@ -137,12 +151,28 @@ pub struct ExportStats {
     /// MODULEs), both with or both without a DOC cell, so the least kind id
     /// won. Before DE.2 the lower NodeId did, which moved with the RepoId.
     pub key_kind_ties: usize,
-    /// Emitted nodes carrying an `identity_hint` (every located one). (LG.9)
+    /// Emitted nodes carrying an `identity_hint`: every located one, and
+    /// every anchored ENDPOINT and page (DE.3). (LG.9)
     pub identity_hints: usize,
+    /// Emitted ENDPOINTs with no POSITION cell: the client calls, which have
+    /// no file of their own. (DE.3)
+    pub positionless_endpoints: usize,
+    /// Of [`positionless_endpoints`](Self::positionless_endpoints), those
+    /// anchored at an ENDPOINT_HIT call site, so they carry an
+    /// `identity_hint` (`build_identity_hints`). (DE.3)
+    pub anchored_endpoints: usize,
+    /// Emitted `page:` ROUTEs (client-router pages) with no POSITION cell.
+    /// (DE.3)
+    pub positionless_pages: usize,
+    /// Of [`positionless_pages`](Self::positionless_pages), those anchored at
+    /// a located HANDLED_BY target (their component), so they carry an
+    /// `identity_hint`. (DE.3)
+    pub anchored_pages: usize,
     /// Emitted nodes whose hint ordinal the qname decided: they share their
-    /// start and end row with another node of their kind in their file
-    /// (`var lo, hi` on one line, enum values on one row). Before DE.2 the
-    /// NodeId decided, which moved with the RepoId. (DE.2)
+    /// start and end row (and, for an anchored ENDPOINT, the call site's col)
+    /// with another node of their kind in their file (`var lo, hi` on one
+    /// line, enum values on one row, two pages of one component, DE.3).
+    /// Before DE.2 the NodeId decided, which moved with the RepoId. (DE.2)
     pub hint_row_ties: usize,
     /// Edges skipped: endpoint qname unknown, or a degenerate self-edge.
     pub skipped_edges: usize,
@@ -517,43 +547,136 @@ struct Hint {
     row_tie: bool,
 }
 
-/// One positioned node in a hint group: `(start row, end row, has no qname,
-/// qname, NodeId)`, the order its ordinal is taken in.
-type HintRank<'a> = (u32, u32, bool, Option<&'a str>, u64);
+/// One node in a hint group: `(start row, col, end row, has no qname,
+/// qname, NodeId)`, the order its ordinal is taken in. A positioned node's
+/// col is 0, so positioned nodes order exactly as before DE.3; an anchored
+/// ENDPOINT carries its call site's row and col, an anchored page its
+/// handler's start row and col 0, and an anchor's end row is its start row.
+type HintRank<'a> = (u32, u32, u32, bool, Option<&'a str>, u64);
+
+/// `(file, line, col)` of every ENDPOINT_HIT cell on a node that names a
+/// call site: a JSON payload with a non-empty string `file` and an integer
+/// `line` (1-based, `endpoint::endpoint_hit_json`); a missing `col` reads 0.
+/// A malformed payload, or a channel client's fileless hit, is skipped.
+fn endpoint_hit_sites(cells: &[Cell]) -> Vec<(String, u64, u64)> {
+    cells
+        .iter()
+        .filter(|c| c.kind == cell_type::ENDPOINT_HIT)
+        .filter_map(|c| {
+            let (CellPayload::Json(j) | CellPayload::Text(j)) = &c.payload else {
+                return None;
+            };
+            let v: serde_json::Value = serde_json::from_str(j).ok()?;
+            let file = v.get("file")?.as_str().filter(|f| !f.is_empty())?;
+            let line = v.get("line")?.as_u64()?;
+            let col = v.get("col").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            Some((file.to_string(), line, col))
+        })
+        .collect()
+}
+
+/// A ROUTE qname in the client-router page shape (`page:<p>[ @<owner>]`).
+fn is_page_qname(qname: &str) -> bool {
+    diff::route_of(qname).is_some_and(|(verb, _)| verb == "page:")
+}
+
+/// `u64` -> `u32`, saturating: a row or col past `u32::MAX` still orders last.
+fn to_u32(n: u64) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// HANDLED_BY targets per source node, in edge order (the pick over them,
+/// the least qname, does not depend on it). Lookup only: never iterated
+/// into the output.
+fn handled_by_targets(merged: &MergedGraph) -> HashMap<NodeId, Vec<NodeId>> {
+    let mut out: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    for e in merged.all_edges() {
+        if e.category == ec::HANDLED_BY {
+            out.entry(e.from).or_default().push(e.to);
+        }
+    }
+    out
+}
 
 /// Build `NodeId → identity_hint` (`<file token>:<kind>:<ordinal>`) for every
-/// node that has a POSITION cell. The file token is `file_identity[path]`, or
-/// the path itself when the map does not name it (always, without `--since`:
-/// the v5 hint). Ordinal = rank among nodes of the same kind in the same file,
-/// ordered by (start row, end row, qname). Name-free, so it survives surface
+/// node that has a POSITION cell, and for every positionless ENDPOINT and
+/// `page:` ROUTE that takes an anchor (DE.3, below). The file token is
+/// `file_identity[path]`, or the path itself when the map does not name it
+/// (always, without `--since`: the v5 hint). Ordinal = rank among nodes of
+/// the same kind in the same file, ordered by (start row, col, end row,
+/// qname); a positioned node's col is 0. Name-free, so it survives surface
 /// renames AND body edits (engram preserves the FactId + learned salience),
 /// and file moves along a `--since` chain (LG.9); it shifts only when
 /// same-kind siblings are reordered within a file. (glia-v3 G4)
 ///
-/// The qname only orders nodes that share both rows (`var lo, hi`, enum
-/// values on one row): a rename there can swap two ordinals, as a reorder
-/// would. Never the NodeId first (DE.2): it hashes the RepoId, so two clones
-/// would number one row's nodes differently. A node with no qname sorts after
-/// the named nodes of its rows, so it never moves their ordinals; the NodeId
-/// is left to break only a tie of one qname and one kind, which within one
-/// repo is one node.
+/// The anchors (DE.3), for the facts with no file of their own: an
+/// ENDPOINT takes its least `(file, line, col)` ENDPOINT_HIT site (row =
+/// line - 1); a ROUTE whose qname is a `page:` takes, among its HANDLED_BY
+/// targets that have a POSITION, the one of least qname, and its file and
+/// start row. The anchored node joins the `(token of the anchor file, its
+/// OWN kind)` group, so an ENDPOINT's hint is `<token>:9:<ordinal>` and a
+/// page's `<token>:5:<ordinal>`, in the ROUTE group of its component's
+/// file. Both picks are least-by-value, so no edge or graph order decides.
+/// Any other positionless node, and a page with no located handler, gets
+/// no hint.
+///
+/// The qname only orders nodes that share their rows and col (`var lo, hi`,
+/// enum values on one row, two pages of one component): a rename there can
+/// swap two ordinals, as a reorder would. Never the NodeId first (DE.2): it
+/// hashes the RepoId, so two clones would number one row's nodes
+/// differently. A node with no qname sorts after the named nodes of its
+/// rows, so it never moves their ordinals; the NodeId is left to break only
+/// a tie of one qname and one kind, which within one repo is one node.
 fn build_identity_hints<'a>(
     merged: &'a MergedGraph,
     file_identity: &BTreeMap<String, String>,
 ) -> HashMap<NodeId, Hint> {
-    let mut positioned: Vec<(String, u32, HintRank<'a>, NodeId)> = Vec::new();
+    let mut members: Vec<(String, u32, HintRank<'a>, NodeId)> = Vec::new();
+    // The located nodes, for the page anchors: NodeId -> (no qname, qname,
+    // file, start row), the first graph naming the id winning. Lookup only.
+    let mut located: HashMap<NodeId, (bool, Option<&'a str>, String, u32)> = HashMap::new();
+    let mut pages: Vec<(u32, HintRank<'a>, NodeId)> = Vec::new();
     for g in &merged.graphs {
         for n in &g.nodes {
+            let kind = g.nav.kind_by_id.get(&n.id).copied();
+            let k = kind.map_or(0, |k| k.0);
+            let qname = g.nav.qname_by_id.get(&n.id).map(String::as_str);
             if let Some((file, start_line, end_line)) = position_of(&n.cells) {
-                let kind = g.nav.kind_by_id.get(&n.id).map(|k| k.0).unwrap_or(0);
-                let qname = g.nav.qname_by_id.get(&n.id).map(String::as_str);
-                let rank = (start_line, end_line, qname.is_none(), qname, n.id.0);
-                positioned.push((file, kind, rank, n.id));
+                located
+                    .entry(n.id)
+                    .or_insert_with(|| (qname.is_none(), qname, file.clone(), start_line));
+                let rank = (start_line, 0, end_line, qname.is_none(), qname, n.id.0);
+                members.push((file, k, rank, n.id));
+            } else if kind == Some(node_kind::ENDPOINT) {
+                let site = endpoint_hit_sites(&n.cells).into_iter().min();
+                if let Some((file, line, col)) = site {
+                    let row = to_u32(line.saturating_sub(1));
+                    let rank = (row, to_u32(col), row, qname.is_none(), qname, n.id.0);
+                    members.push((file, k, rank, n.id));
+                }
+            } else if kind == Some(node_kind::ROUTE) && qname.is_some_and(is_page_qname) {
+                // The rows are filled from the handler below.
+                pages.push((k, (0, 0, 0, qname.is_none(), qname, n.id.0), n.id));
+            }
+        }
+    }
+    if !pages.is_empty() {
+        let handlers = handled_by_targets(merged);
+        for (k, mut rank, id) in pages {
+            let anchor = handlers
+                .get(&id)
+                .into_iter()
+                .flatten()
+                .filter_map(|t| located.get(t))
+                .min();
+            if let Some((_, _, file, row)) = anchor {
+                (rank.0, rank.2) = (*row, *row);
+                members.push((file.clone(), k, rank, id));
             }
         }
     }
     let mut groups: BTreeMap<(&str, u32), Vec<(HintRank<'a>, NodeId)>> = BTreeMap::new();
-    for (file, kind, rank, id) in &positioned {
+    for (file, kind, rank, id) in &members {
         let token = file_identity.get(file).map_or(file.as_str(), String::as_str);
         groups.entry((token, *kind)).or_default().push((*rank, *id));
     }
@@ -561,9 +684,9 @@ fn build_identity_hints<'a>(
     let mut out = HashMap::new();
     for ((token, kind), mut v) in groups {
         v.sort_by(|a, b| a.0.cmp(&b.0));
-        let rows = |i: usize| v.get(i).map(|(r, _)| (r.0, r.1));
+        let rows = |i: usize| v.get(i).map(|(r, _)| (r.0, r.1, r.2));
         for (ordinal, (rank, id)) in v.iter().enumerate() {
-            let here = Some((rank.0, rank.1));
+            let here = Some((rank.0, rank.1, rank.2));
             let row_tie = (ordinal > 0 && rows(ordinal - 1) == here) || rows(ordinal + 1) == here;
             out.insert(*id, Hint { text: format!("{token}:{kind}:{ordinal}"), row_tie });
         }
@@ -1147,6 +1270,17 @@ pub fn build_gmap(
             let hint = identity.get(&n.id);
             let identity_hint = hint.map(|h| h.text.clone());
             stats.identity_hints += usize::from(identity_hint.is_some());
+            // DE.3: a positionless ENDPOINT or page is hinted only through an
+            // anchor (`build_identity_hints`).
+            if pos.is_none() {
+                if kind == Some(node_kind::ENDPOINT) {
+                    stats.positionless_endpoints += 1;
+                    stats.anchored_endpoints += usize::from(identity_hint.is_some());
+                } else if kind == Some(node_kind::ROUTE) && is_page_qname(qname) {
+                    stats.positionless_pages += 1;
+                    stats.anchored_pages += usize::from(identity_hint.is_some());
+                }
+            }
             stats.hint_row_ties += usize::from(hint.is_some_and(|h| h.row_tie));
             let (fact_concept, fact_hint) = (concept_hint.clone(), identity_hint.clone());
             nodes.push(GmapNode {
@@ -2302,6 +2436,178 @@ mod tests {
         assert_eq!(hint_of(&gmap, "web::Card"), format!("card.ts:{}:0", node_kind::CLASS.0));
         assert_eq!(hint_of(&gmap, "web::Pane"), format!("pane.ts:{}:0", node_kind::COMPONENT.0));
         assert_eq!((stats.duplicate_keys, stats.key_kind_ties), (2, 1));
+    }
+
+    /// One graph of `(id, qname, kind, POSITION (file, start row), extra
+    /// cells)` rows and `(from, to, category)` edges.
+    type Row<'a> = (u64, &'a str, NodeKindId, Option<(&'a str, u32)>, Vec<Cell>);
+
+    fn graph_of(rows: Vec<Row>, edges: &[(u64, u64, EdgeCategoryId)]) -> MergedGraph {
+        let repo = RepoId(1);
+        let mut nav = CodeNav::default();
+        let mut nodes = Vec::new();
+        for (id, qname, kind, pos, mut cells) in rows {
+            nav.record(NodeId(id), qname, qname, kind, None);
+            if let Some((file, row)) = pos {
+                cells.insert(0, pos_cell(file, row, row + 1));
+            }
+            nodes.push(Node { id: NodeId(id), repo, confidence: Confidence::Strong, cells });
+        }
+        MergedGraph::new(vec![RepoGraph {
+            repo,
+            nodes,
+            edges: edges.iter().map(|(f, t, c)| edge(*f, *t, *c)).collect(),
+            nav,
+            symbols: Default::default(),
+            unresolved_calls: Vec::new(),
+            unresolved_refs: Vec::new(),
+            properties: Default::default(),
+        }])
+    }
+
+    fn hit_cell(json: &str) -> Cell {
+        Cell { kind: cell_type::ENDPOINT_HIT, payload: CellPayload::Json(json.to_string()) }
+    }
+
+    /// An HTTP ENDPOINT_HIT at `file:line:col` (`endpoint_hit_json`'s shape).
+    fn hit(file: &str, line: u32, col: u32) -> Cell {
+        hit_cell(&format!(
+            r#"{{"method":"GET","path":"/a","file":"{file}","line":{line},"col":{col},"confidence":"strong"}}"#
+        ))
+    }
+
+    fn node_of<'g>(gmap: &'g Gmap, key: &str) -> &'g GmapNode {
+        gmap.nodes.iter().find(|n| n.key == key).unwrap_or_else(|| panic!("{key}: not exported"))
+    }
+
+    fn span_of(gmap: &Gmap, key: &str) -> SpanRef {
+        match &node_of(gmap, key).content {
+            Content::Symbol { span, .. } => *span,
+            other => panic!("{key}: {other:?}"),
+        }
+    }
+
+    /// DE.3: a positionless ENDPOINT takes the hint of its least `(file,
+    /// line, col)` call site: that file's token, its own kind, the ordinal by
+    /// (line, col) among the ENDPOINTs anchored there. Its span stays NONE,
+    /// no token is read back from it, and a hit naming no file is no anchor.
+    #[test]
+    fn endpoints_anchor_at_their_least_call_site() {
+        let merged = graph_of(
+            vec![
+                (1, "web::a", node_kind::CLASS, Some(("a.ts", 0)), vec![]),
+                (
+                    11,
+                    "endpoint:GET:/a @web",
+                    node_kind::ENDPOINT,
+                    None,
+                    vec![hit("b.ts", 3, 5), hit("a.ts", 10, 2)],
+                ),
+                (12, "endpoint:GET:/b @web", node_kind::ENDPOINT, None, vec![hit("a.ts", 10, 1)]),
+                (
+                    13,
+                    "endpoint:POST:/c @web",
+                    node_kind::ENDPOINT,
+                    None,
+                    vec![hit_cell("{"), hit_cell(r#"{"via":"ws"}"#), hit("a.ts", 4, 9)],
+                ),
+                (
+                    14,
+                    "endpoint:GET:/d @web",
+                    node_kind::ENDPOINT,
+                    None,
+                    vec![hit_cell(r#"{"file":"","line":2,"col":1}"#)],
+                ),
+            ],
+            &[],
+        );
+        let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
+        let kind = node_kind::ENDPOINT.0;
+        assert_eq!(hint_of(&gmap, "endpoint:POST:/c @web"), format!("a.ts:{kind}:0"));
+        assert_eq!(hint_of(&gmap, "endpoint:GET:/b @web"), format!("a.ts:{kind}:1"));
+        assert_eq!(hint_of(&gmap, "endpoint:GET:/a @web"), format!("a.ts:{kind}:2"));
+        assert_eq!(node_of(&gmap, "endpoint:GET:/d @web").identity_hint, None);
+        assert_eq!(hint_of(&gmap, "web::a"), format!("a.ts:{}:0", node_kind::CLASS.0));
+        assert_eq!(span_of(&gmap, "endpoint:GET:/a @web"), SpanRef::NONE);
+        assert_eq!(
+            (stats.positionless_endpoints, stats.anchored_endpoints),
+            (4, 3)
+        );
+        // One row, two cols: ordered by col, no qname tie.
+        assert_eq!((stats.identity_hints, stats.positioned, stats.hint_row_ties), (4, 1, 0));
+        // The anchors hold no span file, so b.ts (a call site only) gets no
+        // token and a.ts's comes from the located class.
+        assert_eq!(
+            prior_tokens(&gmap),
+            BTreeMap::from([("a.ts".to_string(), "a.ts".to_string())])
+        );
+
+        // A --since token for the anchor file carries to its endpoints.
+        let opts = ExportOptions {
+            file_identity: [("a.ts".to_string(), "old/a.ts".to_string())].into(),
+            ..Default::default()
+        };
+        let (moved, _, _) = build_gmap(&merged, &std::env::temp_dir(), &opts);
+        assert_eq!(hint_of(&moved, "endpoint:POST:/c @web"), format!("old/a.ts:{kind}:0"));
+    }
+
+    /// DE.3: a positionless `page:` ROUTE takes the file and start row of its
+    /// least-qname located HANDLED_BY target (whatever the edge order) and
+    /// ranks in that file's ROUTE group, ahead of a located ROUTE further
+    /// down; two pages of one component tie on the row and go by qname. A
+    /// page with no located handler, or none at all, and a ROUTE that is no
+    /// page keep no hint.
+    #[test]
+    fn pages_anchor_at_their_least_qname_located_handler() {
+        let mut merged = graph_of(
+            vec![
+                (10, "web::kyc::KycComponent", node_kind::CLASS, Some(("kyc.component.ts", 5)), vec![]),
+                (
+                    11,
+                    "web::admin::AdminComponent",
+                    node_kind::CLASS,
+                    Some(("admin.component.ts", 2)),
+                    vec![],
+                ),
+                (12, "web::zz::Other", node_kind::CLASS, Some(("other.ts", 0)), vec![]),
+                (13, "web::lost::Gone", node_kind::CLASS, None, vec![]),
+                (20, "page:/kyc @web", node_kind::ROUTE, None, vec![]),
+                (21, "page:/admin @web", node_kind::ROUTE, None, vec![]),
+                (22, "page:/lost @web", node_kind::ROUTE, None, vec![]),
+                (23, "page:/none @web", node_kind::ROUTE, None, vec![]),
+                (26, "page:/kyc/:id @web", node_kind::ROUTE, None, vec![]),
+                (24, "GET /kyc/status @web", node_kind::ROUTE, Some(("kyc.component.ts", 9)), vec![]),
+                (25, "GET /x @api", node_kind::ROUTE, None, vec![]),
+            ],
+            &[
+                (20, 12, ec::HANDLED_BY),
+                (20, 10, ec::HANDLED_BY),
+                (22, 13, ec::HANDLED_BY),
+                (23, 10, ec::CALLS),
+                (25, 10, ec::HANDLED_BY),
+                (26, 10, ec::HANDLED_BY),
+            ],
+        );
+        // A cross edge anchors too.
+        merged.cross_edges.push(edge(21, 11, ec::HANDLED_BY));
+        let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
+        let route = node_kind::ROUTE.0;
+        assert_eq!(hint_of(&gmap, "page:/kyc @web"), format!("kyc.component.ts:{route}:0"));
+        assert_eq!(hint_of(&gmap, "page:/kyc/:id @web"), format!("kyc.component.ts:{route}:1"));
+        assert_eq!(hint_of(&gmap, "GET /kyc/status @web"), format!("kyc.component.ts:{route}:2"));
+        assert_eq!(hint_of(&gmap, "page:/admin @web"), format!("admin.component.ts:{route}:0"));
+        for key in ["page:/lost @web", "page:/none @web", "GET /x @api"] {
+            assert_eq!(node_of(&gmap, key).identity_hint, None, "{key}");
+        }
+        assert_eq!(
+            hint_of(&gmap, "web::kyc::KycComponent"),
+            format!("kyc.component.ts:{}:0", node_kind::CLASS.0)
+        );
+        assert_eq!(span_of(&gmap, "page:/kyc @web"), SpanRef::NONE);
+        assert_eq!((stats.positionless_pages, stats.anchored_pages), (5, 3));
+        assert_eq!((stats.positionless_endpoints, stats.anchored_endpoints), (0, 0));
+        // The two pages of KycComponent: the qname ordered them.
+        assert_eq!(stats.hint_row_ties, 2);
     }
 
     /// DE.2: with two heritage targets named like the `@inheritdoc` base, the
