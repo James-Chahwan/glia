@@ -22,6 +22,8 @@
 //! and no owner — they are contract files written as comments / RSpec DSL. A
 //! swaggo `@BasePath` in the same file is joined onto every path, with the
 //! un-prefixed router path kept as `raw_path` for the pairing pass's retry.
+//! DF.18: [`swaggo_general_base`] reads the general-info block's `@BasePath`
+//! on its own, for the generated `docs/swagger.*` that declares no base.
 //!
 //! Parsers EXTRACT: this reads one file's text plus its own `FileParse`.
 
@@ -802,30 +804,77 @@ fn swaggo_units(source: &str) -> Vec<Unit<'_>> {
         .find(|a| a.name.eq_ignore_ascii_case("BasePath"))
         .map(|a| fold_server_base(a.args))
         .unwrap_or_default();
+    swag_runs(source)
+        .into_iter()
+        .filter(|run| !run.annots.is_empty())
+        .map(|run| {
+            let declared = run
+                .annots
+                .iter()
+                .filter(|(_, a)| a.name.eq_ignore_ascii_case("Router"))
+                .filter_map(|(n, a)| router_key(a.args, &base, *n))
+                .collect();
+            Unit {
+                line: run.line,
+                annots: run.annots.into_iter().map(|(_, a)| a).collect(),
+                declared: Some(declared),
+            }
+        })
+        .collect()
+}
+
+/// One run of consecutive `//` lines: its first line (0-based) and the
+/// `// @<Name> <args>` annotations in it, each with its own line.
+struct SwagRun<'a> {
+    line: u32,
+    annots: Vec<(u32, Annot<'a>)>,
+}
+
+/// Every comment run of a Go file, in file order — the blocks swaggo reads,
+/// shared by [`swaggo_units`] (the `@Router` blocks) and
+/// [`swaggo_general_base`] (the general-info block).
+fn swag_runs(source: &str) -> Vec<SwagRun<'_>> {
     let mut out = Vec::new();
-    let mut cur: Option<Unit<'_>> = None;
+    let mut cur: Option<SwagRun<'_>> = None;
     for (n, raw) in source.lines().enumerate() {
         if !raw.trim_start().starts_with("//") {
-            out.extend(cur.take().filter(|u| !u.annots.is_empty()));
+            out.extend(cur.take());
             continue;
         }
-        let u = cur.get_or_insert_with(|| Unit {
+        let run = cur.get_or_insert_with(|| SwagRun {
             line: n as u32,
             annots: Vec::new(),
-            declared: Some(Vec::new()),
         });
-        let Some(a) = swag_line(raw) else {
-            continue;
-        };
-        if a.name.eq_ignore_ascii_case("Router")
-            && let Some(key) = router_key(a.args, &base, n as u32)
-        {
-            u.declared.get_or_insert_default().push(key);
+        if let Some(a) = swag_line(raw) {
+            run.annots.push((n as u32, a));
         }
-        u.annots.push(a);
     }
-    out.extend(cur.filter(|u| !u.annots.is_empty()));
+    out.extend(cur);
     out
+}
+
+/// DF.18: the `@BasePath` of swaggo's general-info block — the first comment
+/// run that holds `@BasePath` and no `@Router` (`// @title Turps API` ...
+/// `// @BasePath /api` above `main` / `SetupRouter`) — folded as a server
+/// url is ([`fold_server_base`]; `/` folds to ""), with the 0-based line of
+/// its `@BasePath`. `None` in a file without one. swaggo generates
+/// `docs/swagger.{json,yaml}` from these annotations, so the base also
+/// belongs to the generated document, which declares none itself; the
+/// same-file join of `swaggo_units` is unchanged.
+pub fn swaggo_general_base(source: &str) -> Option<(String, u32)> {
+    swag_runs(source)
+        .into_iter()
+        .filter(|run| {
+            !run.annots
+                .iter()
+                .any(|(_, a)| a.name.eq_ignore_ascii_case("Router"))
+        })
+        .find_map(|run| {
+            run.annots
+                .iter()
+                .find(|(_, a)| a.name.eq_ignore_ascii_case("BasePath"))
+                .map(|(n, a)| (fold_server_base(a.args), *n))
+        })
 }
 
 /// `// @Name args` as an annotation (`args` trimmed), or `None` for any other
@@ -1854,6 +1903,83 @@ func Health(c *gin.Context) {
                 ops: 1,
                 unkeyed: 0
             }]
+        );
+    }
+
+    /// quokka's turps/Server/server.go header shape: the general-info block
+    /// sits on `SetupRouter`, its `@BasePath` on 0-based line 15.
+    const GENERAL_INFO: &str = r#"package server
+
+import "github.com/gin-gonic/gin"
+
+var healthStream = 1
+
+// @title           Turps API
+// @version         1.0
+// @description     Turps REST endpoints covering auth, activities, groups, and chat diagnostics.
+// @termsOfService  https://example.com/terms
+// @contact.name    Turps Engineering
+// @contact.email   support@turps.com
+// @license.name    Proprietary
+// @license.url     https://example.com/license
+// @host            localhost:8080
+// @BasePath        /api
+// @schemes         http
+// @securityDefinitions.apikey BearerAuth
+// @in             header
+// @name           Authorization
+func SetupRouter() *gin.Engine {
+	return gin.Default()
+}
+"#;
+
+    #[test]
+    fn general_info_base_is_read() {
+        assert_eq!(
+            swaggo_general_base(GENERAL_INFO),
+            Some(("/api".to_string(), 15))
+        );
+        // Folded like a server url: a trailing `/` dropped, `/` alone empty.
+        let src = GENERAL_INFO.replace("/api\n", "/api/v1/\n");
+        assert_eq!(swaggo_general_base(&src), Some(("/api/v1".to_string(), 15)));
+        let src = GENERAL_INFO.replace("/api\n", "/\n");
+        assert_eq!(swaggo_general_base(&src), Some((String::new(), 15)));
+        // The general-info block declares no op of its own.
+        let (ops, stats) = run(
+            GENERAL_INFO,
+            "turps/Server/server.go",
+            "go",
+            &FileParse::default(),
+        );
+        assert!(ops.is_empty() && stats.is_empty(), "{ops:?} {stats:?}");
+        // A file without one.
+        assert_eq!(swaggo_general_base(SWAGGO), None);
+        assert_eq!(
+            swaggo_general_base("package main\n\nfunc main() {}\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn router_block_base_is_not_general_info() {
+        // A `@BasePath` inside a `@Router` block is that block's, not the
+        // general-info block's (the same-file join still reads it).
+        let src = SWAGGO.replace(
+            "// @Router       /users/{id} [get]\n",
+            "// @Router       /users/{id} [get]\n// @BasePath     /v9\n",
+        );
+        assert_eq!(swaggo_general_base(&src), None);
+        let (ops, _) = run(&src, "users.go", "go", &FileParse::default());
+        assert_eq!(ops[0].0, "contract::users::GET:/v9/users/{id}");
+        // A later general-info block is still found past a router block.
+        let both = format!("{src}\n// @title X\n// @BasePath /api\nfunc main() {{}}\n");
+        let line = both
+            .lines()
+            .position(|l| l == "// @BasePath /api")
+            .map(|n| n as u32);
+        assert_eq!(
+            swaggo_general_base(&both),
+            line.map(|n| ("/api".to_string(), n))
         );
     }
 

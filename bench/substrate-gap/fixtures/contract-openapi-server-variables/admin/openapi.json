@@ -1,0 +1,2 @@
+{"openapi":"3.0.0","info":{"title":"admin","version":"1"},"servers":[{"url":"http://localhost:8080"},{"url":"https://api.example.com/admin"}],
+ "paths":{"/stats":{"get":{"operationId":"stats","responses":{"200":{"description":"ok"}}}}}}

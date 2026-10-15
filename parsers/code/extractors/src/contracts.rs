@@ -36,7 +36,7 @@
 //! Parsers EXTRACT — nothing here resolves anything; pairing operations with
 //! routes is the graph crate's job.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, dir_stem_qname, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
@@ -225,13 +225,16 @@ fn unquote(s: &str) -> &str {
     t
 }
 
-/// Fold a `servers[0].url` / Swagger-2 `basePath` into the path prefix every
+/// Fold a `servers[].url` / Swagger-2 `basePath` into the path prefix every
 /// operation inherits. Public because A10.8 folds the SAME url from the JSON
-/// contract path and the two must agree.
+/// contract path and the two must agree, and swaggo's `@BasePath` folds here
+/// too (`openapi_annot`).
 ///
 /// An absolute url keeps only its path component; a TEMPLATED url (`{host}`)
 /// folds to "" rather than a garbage prefix, because a wrong prefix is worse
-/// than none — A10.2 pairs on `raw_path` as a fallback either way.
+/// than none — A10.2 pairs on `raw_path` as a fallback either way. DF.18
+/// substitutes a server's variable defaults first (`expand_server_url`), so
+/// only a variable with no default still reaches this rule.
 pub fn fold_server_base(raw: &str) -> String {
     let v = unquote(raw.trim());
     if v.is_empty() || v.contains('{') {
@@ -316,10 +319,15 @@ fn version_value(raw: &str) -> bool {
 
 /// Indentation scan of the `paths:` block. Returns operations in declaration
 /// order (never a map — the store's byte-identical gate depends on emission
-/// order).
+/// order). Each op's path is joined onto the document's first server base
+/// (`server_bases_yaml`: its variables expanded, DF.18).
 pub fn scan_openapi(source: &str) -> Vec<Op> {
     let lines: Vec<&str> = source.lines().collect();
-    let base = scan_base(&lines);
+    scan_paths(&lines, server_bases_yaml(&lines).base())
+}
+
+/// [`scan_openapi`] over split lines, every path joined onto `base`.
+fn scan_paths(lines: &[&str], base: &str) -> Vec<Op> {
     let mut ops: Vec<Op> = Vec::new();
 
     let Some(paths_idx) = lines
@@ -392,7 +400,7 @@ pub fn scan_openapi(source: &str) -> Vec<Op> {
         }
         ops.push(Op {
             method: lower.to_ascii_uppercase(),
-            path: join_path(&base, path),
+            path: join_path(base, path),
             raw_path: path.to_string(),
             operation_id: None,
             line: i as u32,
@@ -403,43 +411,241 @@ pub fn scan_openapi(source: &str) -> Vec<Op> {
     ops
 }
 
-/// `servers: - url: <v>` (OpenAPI 3) or `basePath: <v>` (Swagger 2), whichever
-/// appears first at indent 0.
-fn scan_base(lines: &[&str]) -> String {
+// ----------------------------------------------------------------------
+// DF.18 — server bases: templated urls expanded, every server recorded
+// ----------------------------------------------------------------------
+
+/// The server bases one OpenAPI document declares (DF.18), read by
+/// [`server_bases_yaml`] / [`server_bases_json`].
+#[derive(Debug, Default)]
+struct ServerBases {
+    /// The distinct folded bases in document order: each `servers[].url`
+    /// with its variables expanded ([`expand_server_url`]) and folded
+    /// ([`fold_server_base`]), else Swagger 2's `basePath`. The first is the
+    /// base every op's path is joined onto (the identity rule: the first
+    /// server); none is no base.
+    bases: Vec<String>,
+    /// Server urls holding a `{variable}`.
+    templated: usize,
+    /// Of those, the ones whose every variable had a `default`.
+    expanded: usize,
+}
+
+impl ServerBases {
+    /// The base an op's path is joined onto: the first server's.
+    fn base(&self) -> &str {
+        self.bases.first().map_or("", String::as_str)
+    }
+
+    /// Record one `servers[]` entry: its raw `url` value and its variables'
+    /// defaults. A url without a template folds exactly as before DF.18; a
+    /// templated one folds through its defaults, or to "" when a variable
+    /// has none ([`fold_server_base`]'s rule for a template).
+    fn push_server(&mut self, raw_url: &str, vars: &BTreeMap<String, String>) {
+        let url = unquote(raw_url.trim());
+        let base = if url.contains('{') {
+            self.templated += 1;
+            match expand_server_url(url, vars) {
+                Some(expanded) => {
+                    self.expanded += 1;
+                    collapse_slashes(&fold_server_base(&expanded))
+                }
+                None => fold_server_base(url),
+            }
+        } else {
+            fold_server_base(raw_url)
+        };
+        self.push_base(base);
+    }
+
+    fn push_base(&mut self, base: String) {
+        if !self.bases.contains(&base) {
+            self.bases.push(base);
+        }
+    }
+
+    /// `,"bases":[..]` for an op's ORIGIN when the document lists two or more
+    /// distinct bases; nothing otherwise, so a one-server document's ORIGIN
+    /// is what it was before DF.18.
+    fn origin_field(&self) -> String {
+        if self.bases.len() < 2 {
+            return String::new();
+        }
+        let items: Vec<String> = self
+            .bases
+            .iter()
+            .map(|b| format!(r#""{}""#, esc(b)))
+            .collect();
+        format!(r#","bases":[{}]"#, items.join(","))
+    }
+
+    /// The `[contracts] openapi servers:` marker, for a file with a templated
+    /// server or two or more distinct bases.
+    fn report(&self, file: &str) {
+        let multi = usize::from(self.bases.len() >= 2);
+        if self.templated > 0 || multi > 0 {
+            eprintln!(
+                "[contracts] openapi servers: templated={} expanded={} multi_base={multi} file={file}",
+                self.templated, self.expanded
+            );
+        }
+    }
+}
+
+/// Substitute every `{name}` of a server url with that variable's `default`
+/// (`{scheme}://api.example.com/{basePath}` + `scheme: https`, `basePath:
+/// api/v1` -> `https://api.example.com/api/v1`). `None` when a variable has
+/// no default, a brace is unbalanced, or a default is itself a template: the
+/// url is then left to fold to "", the rule before DF.18.
+fn expand_server_url(url: &str, vars: &BTreeMap<String, String>) -> Option<String> {
+    let mut out = String::with_capacity(url.len());
+    let mut rest = url;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let close = after.find('}')?;
+        let value = vars.get(&after[..close])?;
+        if value.contains(['{', '}']) {
+            return None;
+        }
+        out.push_str(value);
+        rest = &after[close + 1..];
+    }
+    if rest.contains('}') {
+        return None;
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// `//api/v1` -> `/api/v1`: a default written with its own leading slash
+/// after a template's `/` must not double it.
+fn collapse_slashes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if !(c == '/' && out.ends_with('/')) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `servers:` (OpenAPI 3: every `- url:` item, with its sibling
+/// `variables:` defaults) or `basePath:` (Swagger 2), whichever appears first
+/// at indent 0. The servers block ends at the next indent-0 key.
+fn server_bases_yaml(lines: &[&str]) -> ServerBases {
+    let mut out = ServerBases::default();
     for (i, line) in lines.iter().enumerate() {
         if is_skippable(line) || indent_of(line) != 0 {
             continue;
         }
         let t = line.trim();
         if t == "servers:" {
-            for next in &lines[i + 1..] {
-                if is_skippable(next) {
-                    continue;
-                }
-                if indent_of(next) == 0 {
-                    break;
-                }
-                let inner = next.trim();
-                if let Some(rest) = inner.strip_prefix("- ")
-                    && let Some((k, v)) = rest.split_once(':')
-                    && k.trim() == "url"
-                {
-                    return fold_server_base(v);
-                }
-                // `- ` on its own line, `url:` beneath it.
-                if let Some((k, v)) = inner.split_once(':')
-                    && k.trim() == "url"
-                {
-                    return fold_server_base(v);
+            let block = lines[i + 1..]
+                .iter()
+                .filter(|l| !is_skippable(l))
+                .take_while(|l| indent_of(l) != 0)
+                .copied();
+            for item in yaml_server_items(block) {
+                if let Some((url, vars)) = yaml_server(&item) {
+                    out.push_server(url, &vars);
                 }
             }
-            return String::new();
+            return out;
         }
         if let Some(rest) = t.strip_prefix("basePath:") {
-            return fold_server_base(rest);
+            out.push_base(fold_server_base(rest));
+            return out;
         }
     }
-    String::new()
+    out
+}
+
+/// The servers block split into its list items, each as `(indent, text)`
+/// lines (`text` trimmed). An item's `- ` is dropped, so its inline first key
+/// sits at its own column (`  - url: x` is `(4, "url: x")`); a lone `-` puts
+/// its keys on the lines beneath. Items are the `-` lines at the block's
+/// first indent, so a nested list (`enum:`) stays inside its item. A block
+/// that does not open with `-` is read as one item.
+fn yaml_server_items<'a>(block: impl Iterator<Item = &'a str>) -> Vec<Vec<(usize, &'a str)>> {
+    let mut items = Vec::new();
+    let mut item_indent: Option<usize> = None;
+    let mut cur: Option<Vec<(usize, &str)>> = None;
+    for line in block {
+        let ind = indent_of(line);
+        let t = line.trim();
+        let ii = *item_indent.get_or_insert(ind);
+        if ind == ii && (t == "-" || t.starts_with("- ")) {
+            items.extend(cur.take());
+            let rest = t[1..].trim_start();
+            let mut item = Vec::new();
+            if !rest.is_empty() {
+                item.push((ind + (t.len() - rest.len()), rest));
+            }
+            cur = Some(item);
+            continue;
+        }
+        cur.get_or_insert_default().push((ind, t));
+    }
+    items.extend(cur);
+    items
+}
+
+/// One server item: its raw `url` value and its variables' defaults, or
+/// `None` when it declares no url. Keys are read at the item's own column;
+/// the url key is matched as written (`url`), as before DF.18.
+fn yaml_server<'a>(item: &[(usize, &'a str)]) -> Option<(&'a str, BTreeMap<String, String>)> {
+    let col = item.first()?.0;
+    let mut url = None;
+    let mut vars = BTreeMap::new();
+    let mut i = 0;
+    while i < item.len() {
+        let (ind, t) = item[i];
+        i += 1;
+        if ind != col {
+            continue;
+        }
+        let Some((k, v)) = t.split_once(':') else {
+            continue;
+        };
+        if k.trim() == "url" {
+            url = url.or(Some(v));
+            continue;
+        }
+        if unquote(k.trim()) != "variables" {
+            continue;
+        }
+        let end = item[i..]
+            .iter()
+            .position(|(d, _)| *d <= col)
+            .map_or(item.len(), |p| i + p);
+        yaml_variables(&item[i..end], &mut vars);
+        i = end;
+    }
+    Some((url?, vars))
+}
+
+/// A server's `variables:` mapping: each `<name>:` at the mapping's first
+/// column, and the `default:` scalar among its direct children (quotes and a
+/// trailing comment stripped). The first default of a name wins.
+fn yaml_variables(children: &[(usize, &str)], vars: &mut BTreeMap<String, String>) {
+    let Some(&(name_col, _)) = children.first() else {
+        return;
+    };
+    let mut name: Option<&str> = None;
+    let mut child_col: Option<usize> = None;
+    for &(ind, t) in children {
+        if ind <= name_col {
+            name = (ind == name_col).then(|| key_of(t)).flatten();
+            child_col = None;
+            continue;
+        }
+        let Some(n) = name else { continue };
+        if ind == *child_col.get_or_insert(ind) && key_of(t) == Some("default") {
+            vars.entry(n.to_string())
+                .or_insert_with(|| value_of(t).to_string());
+        }
+    }
 }
 
 /// One declared AsyncAPI channel operation: `<action> <channel>`.
@@ -883,9 +1089,12 @@ pub fn extract_yaml_contracts(
     match kind {
         Sniffed::OpenApi => {
             out.source = Some(ContractSource::OpenApi);
-            let ops = scan_openapi(source);
+            let lines: Vec<&str> = source.lines().collect();
+            let servers = server_bases_yaml(&lines);
+            servers.report(path);
+            let ops = scan_paths(&lines, servers.base());
             let doc = tree(ops.is_empty());
-            emit_openapi(&mut out, ops, doc.as_ref(), path, module_id, repo);
+            emit_openapi(&mut out, ops, &servers, doc.as_ref(), path, module_id, repo);
         }
         Sniffed::AsyncApi => {
             out.source = Some(ContractSource::AsyncApi);
@@ -1110,10 +1319,14 @@ fn emit_feature_yaml(
 /// in the same directory would be, while another directory's `openapi.yaml`
 /// declares its own.
 /// `doc` is the parsed document (LE.10b): an op declaring a request or
-/// response body schema also gets a SCHEMA_FIELDS cell.
+/// response body schema also gets a SCHEMA_FIELDS cell. DF.18: a document
+/// listing two or more distinct server bases records them all in each op's
+/// ORIGIN `bases` (after `raw_path`), in document order.
+#[allow(clippy::too_many_arguments)]
 fn emit_openapi(
     out: &mut ContractNodes,
     ops: Vec<Op>,
+    servers: &ServerBases,
     doc: Option<&YNode>,
     path: &str,
     module_id: NodeId,
@@ -1121,11 +1334,12 @@ fn emit_openapi(
 ) {
     let mut cx = doc.map(FieldCx::new);
     let feature = feature_field(out.feature.as_deref());
+    let bases = servers.origin_field();
     for op in ops {
         let qname = contract_op_qname(path, &format!("{}:{}", op.method, op.path));
         let name = format!("{} {}", op.method, op.path);
         let origin = format!(
-            r#"{{"provenance":"contract","source":"openapi"{feature},"method":"{}","path":"{}","raw_path":"{}"{}}}"#,
+            r#"{{"provenance":"contract","source":"openapi"{feature},"method":"{}","path":"{}","raw_path":"{}"{bases}{}}}"#,
             esc(&op.method),
             esc(&op.path),
             esc(&op.raw_path),
@@ -1294,10 +1508,46 @@ fn located<'a, T>(
     v
 }
 
-/// `paths` → each path item → each allow-listed method, in document order.
-/// `servers[0].url` (OpenAPI 3) or `basePath` (Swagger 2) is folded exactly as
-/// the yaml path folds it.
-fn json_openapi_ops(source: &str, doc: &JsonMap, lines: &LineIndex) -> Vec<Op> {
+/// Every `servers[].url` (OpenAPI 3), each through its
+/// `variables.<name>.default`s, else `basePath` (Swagger 2): folded exactly
+/// as the yaml path folds them ([`server_bases_yaml`]). A server entry with
+/// no url string declares nothing.
+fn server_bases_json(doc: &JsonMap) -> ServerBases {
+    use serde_json::Value;
+    let mut out = ServerBases::default();
+    let servers = doc.get("servers").and_then(Value::as_array);
+    for server in servers.into_iter().flatten() {
+        let Some(url) = server.get("url").and_then(Value::as_str) else {
+            continue;
+        };
+        let vars: BTreeMap<String, String> = server
+            .get("variables")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter_map(|(name, var)| {
+                let default = match var.get("default")? {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    Value::Bool(b) => b.to_string(),
+                    _ => return None,
+                };
+                Some((name.clone(), default))
+            })
+            .collect();
+        out.push_server(url, &vars);
+    }
+    if out.bases.is_empty()
+        && let Some(base_path) = doc.get("basePath").and_then(Value::as_str)
+    {
+        out.push_base(fold_server_base(base_path));
+    }
+    out
+}
+
+/// `paths` → each path item → each allow-listed method, in document order,
+/// every path joined onto `base` (the first server's, [`server_bases_json`]).
+fn json_openapi_ops(source: &str, doc: &JsonMap, lines: &LineIndex, base: &str) -> Vec<Op> {
     use serde_json::Value;
     let mut ops = Vec::new();
     if !doc.contains_key("openapi") && !doc.contains_key("swagger") {
@@ -1306,15 +1556,6 @@ fn json_openapi_ops(source: &str, doc: &JsonMap, lines: &LineIndex) -> Vec<Op> {
     let Some(paths) = doc.get("paths").and_then(Value::as_object) else {
         return ops;
     };
-    let base = doc
-        .get("servers")
-        .and_then(Value::as_array)
-        .and_then(|s| s.first())
-        .and_then(|s| s.get("url"))
-        .and_then(Value::as_str)
-        .or_else(|| doc.get("basePath").and_then(Value::as_str))
-        .map(fold_server_base)
-        .unwrap_or_default();
     let start = json_key_at(source, 0, source.len(), "paths").unwrap_or(0);
     let items = located(source, start, paths, |k, v| {
         k.starts_with('/').then_some(())?;
@@ -1336,7 +1577,7 @@ fn json_openapi_ops(source: &str, doc: &JsonMap, lines: &LineIndex) -> Vec<Op> {
             let moff = moff.filter(|m| *m < end).or(off);
             ops.push(Op {
                 method: verb.to_ascii_uppercase(),
-                path: join_path(&base, key),
+                path: join_path(base, key),
                 raw_path: key.to_string(),
                 operation_id: body
                     .get("operationId")
@@ -1528,9 +1769,11 @@ pub fn extract_json_contract(
     };
     match kind {
         ContractSource::OpenApi => {
-            let ops = json_openapi_ops(source, &doc, &lines);
+            let servers = server_bases_json(&doc);
+            servers.report(path);
+            let ops = json_openapi_ops(source, &doc, &lines, servers.base());
             let t = tree(ops.is_empty());
-            emit_openapi(&mut out, ops, t.as_ref(), path, module_id, repo);
+            emit_openapi(&mut out, ops, &servers, t.as_ref(), path, module_id, repo);
         }
         ContractSource::AsyncApi => {
             let ops = json_asyncapi_ops(source, &doc, &lines);
@@ -2895,6 +3138,271 @@ paths:
         let ops = scan_openapi(source);
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].path, "/orders");
+    }
+
+    // ------------------------------------------------------------------
+    // DF.18 — server variables and every server's base
+    // ------------------------------------------------------------------
+
+    const VARS_YAML: &str = r#"openapi: 3.0.0
+info:
+  title: svc
+  version: "1"
+servers:
+  - url: "{scheme}://api.example.com/{basePath}"
+    variables:
+      scheme:
+        default: https
+      basePath:
+        default: api/v1
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      responses:
+        "200":
+          description: ok
+"#;
+
+    const VARS_JSON: &str = r#"{"openapi":"3.0.0","info":{"title":"svc","version":"1"},
+ "servers":[{"url":"{scheme}://api.example.com/{basePath}","variables":{"scheme":{"default":"https"},"basePath":{"default":"api/v1"}}}],
+ "paths":{"/users":{"get":{"operationId":"listUsers","responses":{"200":{"description":"ok"}}}}}}"#;
+
+    const ADMIN_JSON: &str = r#"{"openapi":"3.0.0","info":{"title":"admin","version":"1"},"servers":[{"url":"http://localhost:8080"},{"url":"https://api.example.com/admin"}],
+ "paths":{"/stats":{"get":{"operationId":"stats","responses":{"200":{"description":"ok"}}}}}}"#;
+
+    #[test]
+    fn server_variables_expand_defaults() {
+        let want = r#"{"provenance":"contract","source":"openapi","method":"GET","path":"/api/v1/users","raw_path":"/users","operation_id":"listUsers"}"#;
+        for (out, file) in [
+            (
+                extract_yaml_contracts(VARS_YAML, "docs/openapi.yaml", module_id(), repo()),
+                "yaml",
+            ),
+            (
+                extract_json_contract(VARS_JSON, "docs/openapi.json", module_id(), repo()),
+                "json",
+            ),
+        ] {
+            assert_eq!(out.nodes.len(), 1, "{file}");
+            let id = out.nodes[0].id;
+            assert_eq!(
+                out.nav.qname_by_id[&id], "contract::docs::openapi::GET:/api/v1/users",
+                "{file}"
+            );
+            assert_eq!(out.nav.name_by_id[&id], "GET /api/v1/users", "{file}");
+            assert_eq!(
+                origin_json(&out.nodes[0]),
+                want,
+                "{file}: one server, so no `bases`"
+            );
+        }
+        assert_eq!(scan_openapi(VARS_YAML)[0].path, "/api/v1/users");
+        let lines: Vec<&str> = VARS_YAML.lines().collect();
+        let servers = server_bases_yaml(&lines);
+        assert_eq!(
+            (
+                servers.bases.as_slice(),
+                servers.templated,
+                servers.expanded
+            ),
+            (&["/api/v1".to_string()][..], 1, 1)
+        );
+    }
+
+    #[test]
+    fn expand_server_url_substitutes_or_refuses() {
+        let vars: BTreeMap<String, String> =
+            [("host", "api.example.com"), ("v", "/v2"), ("t", "{x}")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        assert_eq!(
+            expand_server_url("https://{host}/base", &vars).as_deref(),
+            Some("https://api.example.com/base")
+        );
+        assert_eq!(
+            expand_server_url("https://{host}{v}", &vars).as_deref(),
+            Some("https://api.example.com/v2")
+        );
+        assert_eq!(
+            expand_server_url("https://{missing}/v1", &vars),
+            None,
+            "no default"
+        );
+        assert_eq!(
+            expand_server_url("https://{host/v1", &vars),
+            None,
+            "unbalanced"
+        );
+        assert_eq!(
+            expand_server_url("https://host}/v1", &vars),
+            None,
+            "unbalanced"
+        );
+        assert_eq!(
+            expand_server_url("https://{t}/v1", &vars),
+            None,
+            "a template default"
+        );
+        // A default's own leading slash after the template's `/` is one slash.
+        let mut sb = ServerBases::default();
+        sb.push_server("https://{host}/{v}", &vars);
+        assert_eq!(sb.bases, ["/v2"]);
+    }
+
+    #[test]
+    fn variable_without_default_folds_empty() {
+        // HEAD's rule kept: a variable with no default leaves the url a
+        // template, which folds to "" (a wrong prefix is worse than none).
+        let yaml = r#"openapi: 3.0.0
+servers:
+  - url: https://{host}/v1
+    variables:
+      host:
+        enum:
+          - a.example.com
+          - b.example.com
+paths:
+  /orders:
+    get:
+      responses:
+        '200':
+          description: ok
+"#;
+        let out = extract_yaml_contracts(yaml, "openapi.yaml", module_id(), repo());
+        assert_eq!(out.nav.name_by_id[&out.nodes[0].id], "GET /orders");
+        assert_eq!(
+            origin_json(&out.nodes[0]),
+            r#"{"provenance":"contract","source":"openapi","method":"GET","path":"/orders","raw_path":"/orders"}"#
+        );
+        let lines: Vec<&str> = yaml.lines().collect();
+        let servers = server_bases_yaml(&lines);
+        assert_eq!((servers.templated, servers.expanded), (1, 0));
+        let json = r#"{"openapi":"3.0.0","servers":[{"url":"https://{host}/v1","variables":{"host":{"enum":["a"]}}}],"paths":{"/orders":{"get":{}}}}"#;
+        let out = extract_json_contract(json, "openapi.json", module_id(), repo());
+        assert_eq!(out.nav.name_by_id[&out.nodes[0].id], "GET /orders");
+    }
+
+    #[test]
+    fn several_servers_record_bases() {
+        let want = r#"{"provenance":"contract","source":"openapi","method":"GET","path":"/stats","raw_path":"/stats","bases":["","/admin"],"operation_id":"stats"}"#;
+        let json = extract_json_contract(ADMIN_JSON, "admin/openapi.json", module_id(), repo());
+        assert_eq!(json.nodes.len(), 1);
+        assert_eq!(
+            json.nav.qname_by_id[&json.nodes[0].id], "contract::admin::openapi::GET:/stats",
+            "the op's identity is the first server's base"
+        );
+        assert_eq!(origin_json(&json.nodes[0]), want);
+        // The yaml twin, with a lone `-` item and a description before the url.
+        let yaml = r#"openapi: 3.0.0
+servers:
+  - url: http://localhost:8080
+    description: dev
+  -
+    description: prod
+    url: https://api.example.com/admin/
+paths:
+  /stats:
+    get:
+      operationId: stats
+"#;
+        let y = extract_yaml_contracts(yaml, "admin/openapi.yaml", module_id(), repo());
+        assert_eq!(origin_json(&y.nodes[0]), want);
+        assert_eq!(y.nodes[0].id, json.nodes[0].id);
+        // Two servers folding to one base are one base: no `bases`.
+        let same = r#"{"openapi":"3.0.0","servers":[{"url":"https://a.example.com/v1"},{"url":"https://b.example.com/v1/"}],"paths":{"/x":{"get":{}}}}"#;
+        let out = extract_json_contract(same, "openapi.json", module_id(), repo());
+        assert_eq!(
+            origin_json(&out.nodes[0]),
+            r#"{"provenance":"contract","source":"openapi","method":"GET","path":"/v1/x","raw_path":"/x"}"#
+        );
+    }
+
+    #[test]
+    fn templated_servers_read_in_order_with_variables_anywhere() {
+        // Variables before the url, a quoted default with a trailing comment,
+        // and a second templated server: every base expands, in order.
+        let yaml = r#"openapi: 3.1.0
+servers:
+  - variables:
+      env:
+        description: deploy
+        default: 'staging' # the default env
+    url: https://{env}.example.com/api
+  - url: "{root}"
+    variables:
+      root:
+        default: /internal
+paths:
+  /ping:
+    get: {}
+"#;
+        let lines: Vec<&str> = yaml.lines().collect();
+        let servers = server_bases_yaml(&lines);
+        assert_eq!(servers.bases, ["/api", "/internal"]);
+        assert_eq!((servers.templated, servers.expanded), (2, 2));
+        let out = extract_yaml_contracts(yaml, "openapi.yaml", module_id(), repo());
+        assert_eq!(out.nav.name_by_id[&out.nodes[0].id], "GET /api/ping");
+        assert!(
+            origin_json(&out.nodes[0])
+                .contains(r#""raw_path":"/ping","bases":["/api","/internal"]}"#)
+        );
+    }
+
+    #[test]
+    fn one_server_payload_unchanged() {
+        // Byte-for-byte the ORIGIN a single untemplated server gave before
+        // DF.18, in both formats.
+        let want = r#"{"provenance":"contract","source":"openapi","method":"GET","path":"/api/v1/users","raw_path":"/users","operation_id":"listUsers"}"#;
+        let yaml = r#"openapi: 3.0.3
+servers:
+  - url: /api/v1
+paths:
+  /users:
+    get:
+      operationId: listUsers
+"#;
+        let json = r#"{"openapi":"3.0.3","servers":[{"url":"/api/v1"}],"paths":{"/users":{"get":{"operationId":"listUsers"}}}}"#;
+        let y = extract_yaml_contracts(yaml, "spec.yaml", module_id(), repo());
+        let j = extract_json_contract(json, "spec.json", module_id(), repo());
+        assert_eq!(origin_json(&y.nodes[0]), want);
+        assert_eq!(origin_json(&j.nodes[0]), want);
+        assert_eq!(
+            y.nav.qname_by_id[&y.nodes[0].id],
+            "contract::spec::GET:/api/v1/users"
+        );
+        // A block that ends at the next indent-0 key, a sequence at indent 0
+        // (read as no servers, as before), and no servers at all.
+        let flush = "openapi: 3.0.0\nservers:\n- url: /v9\npaths:\n  /a:\n    get: {}\n";
+        assert_eq!(scan_openapi(flush)[0].path, "/a");
+        let bare = "openapi: 3.0.0\npaths:\n  /a:\n    get: {}\n";
+        assert_eq!(scan_openapi(bare)[0].path, "/a");
+    }
+
+    #[test]
+    fn swagger2_basepath_unchanged() {
+        let want = r#"{"provenance":"contract","source":"openapi","method":"GET","path":"/v2/pets/{id}","raw_path":"/pets/{id}","operation_id":"getPet"}"#;
+        let yaml = "swagger: \"2.0\"\nbasePath: /v2\npaths:\n  /pets/{id}:\n    get:\n      operationId: getPet\n";
+        let json = r#"{"swagger":"2.0","basePath":"/v2","paths":{"/pets/{id}":{"get":{"operationId":"getPet"}}}}"#;
+        assert_eq!(
+            origin_json(
+                &extract_yaml_contracts(yaml, "swagger.yaml", module_id(), repo()).nodes[0]
+            ),
+            want
+        );
+        assert_eq!(
+            origin_json(&extract_json_contract(json, "swagger.json", module_id(), repo()).nodes[0]),
+            want
+        );
+        // `servers` wins when both are declared, as before: first at indent 0
+        // in yaml, the servers array in JSON.
+        let both =
+            "openapi: 3.0.0\nservers:\n  - url: /s\nbasePath: /b\npaths:\n  /p:\n    get: {}\n";
+        assert_eq!(scan_openapi(both)[0].path, "/s/p");
+        let both = r#"{"openapi":"3.0.0","basePath":"/b","servers":[{"url":"/s"}],"paths":{"/p":{"get":{}}}}"#;
+        let out = extract_json_contract(both, "openapi.json", module_id(), repo());
+        assert_eq!(out.nav.name_by_id[&out.nodes[0].id], "GET /s/p");
     }
 
     #[test]

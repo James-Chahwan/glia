@@ -1,0 +1,34 @@
+{
+  "framework": "contract-openapi-server-variables",
+  "language": "go",
+  "dirs": [
+    "."
+  ],
+  "note": "DF (0.5.1 follow-up 'OpenAPI basePath / servers in spec-status'): parsers/code/extractors/src/contracts.rs fold_server_base folds a templated server url (`{scheme}://api.example.com/{basePath}`) to \"\" instead of substituting each variable's `default`, and reads servers[0] only, so a root dev server listed first hides the API base of the second. HEAD (84e2e71, leap wheel; `glia spec-status`): both ops `implemented (prefix, medium)` with paths `/users` and `/stats`; their ORIGIN cells carry `\"path\":\"/users\"` / `\"path\":\"/stats\"` and no `bases`. After: the variables fold (`/api/v1/users`, exact) and the JSON op records every server's base (`\"bases\":[\"\",\"/admin\"]`) so the contract link pairs it through the second (rule server_base).",
+  "expect_cells": [
+    {
+      "kind": "DOC_SECTION",
+      "node": "GET /api/v1/users",
+      "cell": "ORIGIN",
+      "contains": "\"path\":\"/api/v1/users\""
+    },
+    {
+      "kind": "DOC_SECTION",
+      "node": "GET /stats",
+      "cell": "ORIGIN",
+      "contains": "\"bases\":[\"\",\"/admin\"]"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "GET /api/v1/users",
+      "to": "GET /api/v1/users",
+      "category": "DOCUMENTS"
+    },
+    {
+      "from": "GET /stats",
+      "to": "GET /admin/stats",
+      "category": "DOCUMENTS"
+    }
+  ]
+}
