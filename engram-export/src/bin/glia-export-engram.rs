@@ -67,6 +67,12 @@
 //! refused (exit 6) or failing before the gmap write writes no meta. A run
 //! that stops between the gmap and the diff leaves a full gmap and no diff
 //! (Engram re-seeds from it); a diff that cannot be written is exit 7.
+//!
+//! Every clone of one commit writes the same gmap, `files.json`, `meta.json`
+//! and `--since` diff bytes (DE.2): glia's NodeIds hash the repo identity (its
+//! origin URL, or its directory name outside git), and the export orders by
+//! content alone. `[engram-export] v6 order: <e> edges sorted by key; hint row
+//! ties by qname=<t>; key ties by kind=<k>` reports the content tie-breaks.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -377,6 +383,14 @@ fn run(args: &Args) -> i32 {
     eprintln!(
         "[engram-export] v6 identity: {}/{} hints, {carried} file(s) under a prior identity ({moves} move(s) detected), {} duplicate key(s) resolved to the located node",
         stats.identity_hints, stats.nodes, stats.duplicate_keys,
+    );
+    // The v6 order marker (DE.2): the export orders and tie-breaks by content,
+    // never by NodeId (which hashes the RepoId), so every clone of one commit
+    // writes these bytes. The edge count, then how many hints the qname
+    // ordered inside one row and how many shared keys the kind decided.
+    eprintln!(
+        "[engram-export] v6 order: {} edges sorted by key; hint row ties by qname={}; key ties by kind={}",
+        stats.edges, stats.hint_row_ties, stats.key_kind_ties,
     );
     // The v6 NatSpec marker (LG.12): Solidity tags exported as Propositions
     // and the Documents edges joining them (plus @inheritdoc base -> override)

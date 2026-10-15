@@ -232,16 +232,21 @@ fn natspec_tags_become_facts_and_documents_edges() {
     assert_fact_shape(&gmap, WITHDRAW);
 
     // @inheritdoc IVault: the base function documents the override. Its only
-    // other Documents edge is its @author fact.
-    let into: Vec<&str> = documents_into(&gmap, WITHDRAW)
+    // other Documents edge is its @author fact. Read by key, not position:
+    // edges leave sorted by (from, kind, to, weight) since DE.2.
+    let mut into: Vec<&str> = documents_into(&gmap, WITHDRAW)
         .iter()
         .map(|e| e.from.as_str())
         .collect();
-    assert_eq!(
-        into,
-        [format!("{WITHDRAW}#natspec:author").as_str(), IWITHDRAW]
-    );
-    let inherit = documents_into(&gmap, WITHDRAW)[1];
+    into.sort_unstable();
+    let author = format!("{WITHDRAW}#natspec:author");
+    let mut want = [author.as_str(), IWITHDRAW];
+    want.sort_unstable();
+    assert_eq!(into, want);
+    let inherit = documents_into(&gmap, WITHDRAW)
+        .into_iter()
+        .find(|e| e.from == IWITHDRAW)
+        .expect("the @inheritdoc edge");
     assert_eq!(inherit.weight, Some(1.0));
 
     // The interface function: @notice only, so a doc and no facts.

@@ -67,8 +67,22 @@
 //! method and the ATTRIBUTE its `self.m` read mints; a Java / PHP / Scala / C#
 //! public type and its file MODULE) exactly one is emitted, chosen by
 //! `key_rank`: the located node, then a declaration over a MODULE, then the
-//! one with a DOC cell, then the lowest `NodeId`. The others are counted in
-//! [`ExportStats::duplicate_keys`]; their edges still land on the shared key.
+//! one with a DOC cell, then the least kind id (DE.2: a CLASS over its
+//! COMPONENT twin). The others are counted in [`ExportStats::duplicate_keys`];
+//! their edges still land on the shared key.
+//!
+//! ## The determinism story (DE.2)
+//!
+//! Every clone of one commit exports the same bytes. glia's `NodeId` hashes
+//! the RepoId (LB.1: the origin URL, the git dir's name, or the directory name
+//! outside git), so one tree under two identities has two id sets, and an
+//! export keyed by qname never orders or tie-breaks by it: the edges are
+//! sorted by `(from, kind, to, weight)` (glia's cross edges come NodeId-sorted),
+//! identity-hint ordinals inside one row go by qname (`build_identity_hints`),
+//! a key tie by kind (`key_rank`) and an `@inheritdoc` base by the least
+//! qname (`inheritdoc_base`). The last NodeId tie-break left is between two
+//! same-kind nodes of one qname on one row, which within one repo are one
+//! NodeId.
 //!
 //! ## The NatSpec story (v6, LG.12)
 //!
@@ -118,8 +132,18 @@ pub struct ExportStats {
     /// Nodes skipped because another node with the same qname won the key
     /// (the located one first; see the crate docs).
     pub duplicate_keys: usize,
+    /// Key winners whose rank differed from the best other candidate for the
+    /// key only in the kind: both located, both declarations (or both
+    /// MODULEs), both with or both without a DOC cell, so the least kind id
+    /// won. Before DE.2 the lower NodeId did, which moved with the RepoId.
+    pub key_kind_ties: usize,
     /// Emitted nodes carrying an `identity_hint` (every located one). (LG.9)
     pub identity_hints: usize,
+    /// Emitted nodes whose hint ordinal the qname decided: they share their
+    /// start and end row with another node of their kind in their file
+    /// (`var lo, hi` on one line, enum values on one row). Before DE.2 the
+    /// NodeId decided, which moved with the RepoId. (DE.2)
+    pub hint_row_ties: usize,
     /// Edges skipped: endpoint qname unknown, or a degenerate self-edge.
     pub skipped_edges: usize,
     /// Interned POSITION files that could not be read under `repo_root`, so
@@ -258,8 +282,9 @@ fn path_excluded(file: &str, opts: &ExportOptions) -> bool {
     opts.exclude_paths.iter().any(|p| glob_match(p, file))
 }
 
-/// `(has a POSITION, is not a MODULE, has a DOC cell, lowest NodeId)`.
-type KeyRank = (bool, bool, bool, Reverse<u64>);
+/// `(has a POSITION, is not a MODULE, has a DOC cell, least kind id)`; a
+/// node with no kind ranks after every kind.
+type KeyRank = (bool, bool, bool, Reverse<u32>);
 
 /// How a node ranks for a key it shares; the maximum is exported (LG.9). The
 /// located node first: it alone carries a span and an `identity_hint`, and
@@ -267,14 +292,24 @@ type KeyRank = (bool, bool, bool, Reverse<u64>);
 /// ATTRIBUTE twin its `self.m` read mints). Then a declaration over its file
 /// MODULE (a Java / PHP / Scala / C# public type shares the MODULE's qname
 /// since LB.2 / LB.7: the type is the fact worth keeping, the MODULE's edges
-/// land on the same key). Then the one with a DOC cell, then the lowest id.
+/// land on the same key). Then the one with a DOC cell, then the least kind
+/// id (a CLASS over its COMPONENT twin). Never the NodeId: it hashes the
+/// RepoId, so two clones would key different nodes (DE.2). Within one repo a
+/// qname and a kind name one node, so the rank is total there.
 fn key_rank(n: &Node, kind: Option<NodeKindId>) -> KeyRank {
     (
         position_of(&n.cells).is_some(),
         kind != Some(node_kind::MODULE),
         doc_cell(&n.cells).is_some(),
-        Reverse(n.id.0),
+        Reverse(kind.map_or(u32::MAX, |k| k.0)),
     )
+}
+
+/// Whether `winner` beat `runner_up` on the kind alone (DE.2,
+/// [`ExportStats::key_kind_ties`]).
+fn decided_by_kind(winner: &KeyRank, runner_up: &KeyRank) -> bool {
+    let first_three = |r: &KeyRank| (r.0, r.1, r.2);
+    first_three(winner) == first_three(runner_up) && winner.3 != runner_up.3
 }
 
 /// Minimal glob match supporting `*` (any run of chars, including none, `/`
@@ -473,38 +508,64 @@ fn normalize_feature(s: &str) -> String {
 
 // ---- identity_hint (G4) — name-free structural location ----
 
+/// One node's `identity_hint` ([`build_identity_hints`]).
+struct Hint {
+    /// `<file token>:<kind>:<ordinal>`.
+    text: String,
+    /// It shares its start and end row with another node of its group, so
+    /// the qname decided its ordinal ([`ExportStats::hint_row_ties`]).
+    row_tie: bool,
+}
+
+/// One positioned node in a hint group: `(start row, end row, has no qname,
+/// qname, NodeId)`, the order its ordinal is taken in.
+type HintRank<'a> = (u32, u32, bool, Option<&'a str>, u64);
+
 /// Build `NodeId → identity_hint` (`<file token>:<kind>:<ordinal>`) for every
 /// node that has a POSITION cell. The file token is `file_identity[path]`, or
 /// the path itself when the map does not name it (always, without `--since`:
 /// the v5 hint). Ordinal = rank among nodes of the same kind in the same file,
-/// ordered by (start row, `NodeId`). Name-free, so it survives surface renames
-/// AND body edits (engram preserves the FactId + learned salience), and file
-/// moves along a `--since` chain (LG.9); it shifts only when same-kind
-/// siblings are reordered within a file. (glia-v3 G4)
-fn build_identity_hints(
-    merged: &MergedGraph,
+/// ordered by (start row, end row, qname). Name-free, so it survives surface
+/// renames AND body edits (engram preserves the FactId + learned salience),
+/// and file moves along a `--since` chain (LG.9); it shifts only when
+/// same-kind siblings are reordered within a file. (glia-v3 G4)
+///
+/// The qname only orders nodes that share both rows (`var lo, hi`, enum
+/// values on one row): a rename there can swap two ordinals, as a reorder
+/// would. Never the NodeId first (DE.2): it hashes the RepoId, so two clones
+/// would number one row's nodes differently. A node with no qname sorts after
+/// the named nodes of its rows, so it never moves their ordinals; the NodeId
+/// is left to break only a tie of one qname and one kind, which within one
+/// repo is one node.
+fn build_identity_hints<'a>(
+    merged: &'a MergedGraph,
     file_identity: &BTreeMap<String, String>,
-) -> HashMap<NodeId, String> {
-    let mut groups: BTreeMap<(&str, u32), Vec<(u32, NodeId)>> = BTreeMap::new();
-    let mut positioned: Vec<(String, u32, u32, NodeId)> = Vec::new();
+) -> HashMap<NodeId, Hint> {
+    let mut positioned: Vec<(String, u32, HintRank<'a>, NodeId)> = Vec::new();
     for g in &merged.graphs {
         for n in &g.nodes {
-            if let Some((file, start_line, _)) = position_of(&n.cells) {
+            if let Some((file, start_line, end_line)) = position_of(&n.cells) {
                 let kind = g.nav.kind_by_id.get(&n.id).map(|k| k.0).unwrap_or(0);
-                positioned.push((file, kind, start_line, n.id));
+                let qname = g.nav.qname_by_id.get(&n.id).map(String::as_str);
+                let rank = (start_line, end_line, qname.is_none(), qname, n.id.0);
+                positioned.push((file, kind, rank, n.id));
             }
         }
     }
-    for (file, kind, start_line, id) in &positioned {
+    let mut groups: BTreeMap<(&str, u32), Vec<(HintRank<'a>, NodeId)>> = BTreeMap::new();
+    for (file, kind, rank, id) in &positioned {
         let token = file_identity.get(file).map_or(file.as_str(), String::as_str);
-        groups.entry((token, *kind)).or_default().push((*start_line, *id));
+        groups.entry((token, *kind)).or_default().push((*rank, *id));
     }
     // Lookup only: the output is read by NodeId, never iterated into bytes.
     let mut out = HashMap::new();
     for ((token, kind), mut v) in groups {
-        v.sort_by_key(|(line, id)| (*line, id.0));
-        for (ordinal, (_, id)) in v.into_iter().enumerate() {
-            out.insert(id, format!("{token}:{kind}:{ordinal}"));
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        let rows = |i: usize| v.get(i).map(|(r, _)| (r.0, r.1));
+        for (ordinal, (rank, id)) in v.iter().enumerate() {
+            let here = Some((rank.0, rank.1));
+            let row_tie = (ordinal > 0 && rows(ordinal - 1) == here) || rows(ordinal + 1) == here;
+            out.insert(*id, Hint { text: format!("{token}:{kind}:{ordinal}"), row_tie });
         }
     }
     out
@@ -770,7 +831,8 @@ struct NatspecSymbol {
 }
 
 /// Heritage (`INHERITS_FROM` / `IMPLEMENTS`) targets per source node, in
-/// edge order. Lookup only: never iterated into the output.
+/// edge order, which [`inheritdoc_base`] does not depend on. Lookup only:
+/// never iterated into the output.
 fn heritage_targets(merged: &MergedGraph) -> HashMap<NodeId, Vec<NodeId>> {
     let mut out: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     for e in merged.all_edges() {
@@ -783,7 +845,8 @@ fn heritage_targets(merged: &MergedGraph) -> HashMap<NodeId, Vec<NodeId>> {
 
 /// The key of the contract / interface an `@inheritdoc <base>` on `s` names:
 /// among the heritage edges out of `s`'s enclosing CLASS / INTERFACE, the
-/// first target whose qname's last segment is `base`; else the only exported
+/// least qname whose last segment is `base` (DE.2: not the first in edge
+/// order, which for cross edges is NodeId order); else the only exported
 /// CLASS / INTERFACE named `base` (`types`, short name -> keys). The fallback
 /// exists because a base declared in another file can leave the heritage
 /// edge's target outside the graph. `None` when neither finds one, or the
@@ -820,7 +883,8 @@ fn inheritdoc_base(
             targets
                 .iter()
                 .filter_map(|t| qname_of.get(t).copied())
-                .find(|q| q.rsplit("::").next() == Some(base))
+                .filter(|q| q.rsplit("::").next() == Some(base))
+                .min()
         })
         .map(str::to_string);
     via_heritage.or_else(|| {
@@ -857,6 +921,11 @@ fn intern_files(
         id_to_path.insert(next, p.clone());
     }
     id_to_path
+}
+
+/// An exported edge's sort key, `(from, kind, to, weight bits)` (DE.2).
+fn edge_order(e: &GmapEdge) -> (&str, EdgeKind, &str, Option<u32>) {
+    (e.from.as_str(), e.kind, e.to.as_str(), e.weight.map(f32::to_bits))
 }
 
 /// Build an [`engram_core::Gmap`] plus the file-id → path sidecar table from a
@@ -908,11 +977,13 @@ pub fn build_gmap(
     }
 
     // Key winners — one node per qname among those the filters keep, by
-    // [`key_rank`]; an exact tie (one NodeId listed twice) goes to the first
-    // listed. Filters first: a filtered twin must not win and then be dropped,
-    // losing the key.
+    // [`key_rank`]; an exact tie (one NodeId listed twice, or one qname and
+    // kind in two repos) goes to the first listed. Filters first: a filtered
+    // twin must not win and then be dropped, losing the key. `runners_up`
+    // keeps the best losing rank per key, for `key_kind_ties`.
     type Winner = (KeyRank, Reverse<(usize, usize)>);
     let mut winners: BTreeMap<&str, Winner> = BTreeMap::new();
+    let mut runners_up: BTreeMap<&str, KeyRank> = BTreeMap::new();
     for (gi, g) in merged.graphs.iter().enumerate() {
         for (ni, n) in g.nodes.iter().enumerate() {
             let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
@@ -931,12 +1002,21 @@ pub fn build_gmap(
                 continue;
             }
             let rank = (key_rank(n, g.nav.kind_by_id.get(&n.id).copied()), Reverse((gi, ni)));
-            let best = winners.entry(qname.as_str()).or_insert(rank);
-            if rank > *best {
-                *best = rank;
+            let Some(best) = winners.get_mut(qname.as_str()) else {
+                winners.insert(qname.as_str(), rank);
+                continue;
+            };
+            let loser = if rank > *best { std::mem::replace(best, rank) } else { rank };
+            let runner = runners_up.entry(qname.as_str()).or_insert(loser.0);
+            if loser.0 > *runner {
+                *runner = loser.0;
             }
         }
     }
+    stats.key_kind_ties = runners_up
+        .iter()
+        .filter(|(q, r)| winners.get(*q).is_some_and(|w| decided_by_kind(&w.0, r)))
+        .count();
 
     // Pass 2 — nodes. Key = full qname; name = short symbol (qname tail as a
     // fallback). One node per key, the winner, so each engram concept-cell
@@ -1064,8 +1144,10 @@ pub fn build_gmap(
                     concept_hint_for(qname),
                 )
             };
-            let identity_hint = identity.get(&n.id).cloned();
+            let hint = identity.get(&n.id);
+            let identity_hint = hint.map(|h| h.text.clone());
             stats.identity_hints += usize::from(identity_hint.is_some());
+            stats.hint_row_ties += usize::from(hint.is_some_and(|h| h.row_tie));
             let (fact_concept, fact_hint) = (concept_hint.clone(), identity_hint.clone());
             nodes.push(GmapNode {
                 key: qname.clone(),
@@ -1136,9 +1218,10 @@ pub fn build_gmap(
         });
     }
 
-    // LG.12 — NatSpec `Documents` edges, in node order: each symbol's tag
-    // facts (weight 1.0: a tag is the symbol's own documentation, definitional
-    // like Contains), then each `@inheritdoc` base function it resolves to.
+    // LG.12 — NatSpec `Documents` edges (sorted with the rest below): each
+    // symbol's tag facts (weight 1.0: a tag is the symbol's own
+    // documentation, definitional like Contains), then each `@inheritdoc`
+    // base function it resolves to.
     let heritage = if natspec_symbols.iter().any(|s| !s.inheritdoc.is_empty()) {
         heritage_targets(merged)
     } else {
@@ -1172,6 +1255,12 @@ pub fn build_gmap(
             stats.natspec_edges += 1;
         }
     }
+    // DE.2: one edge order for every clone. glia lists each graph's edges in
+    // build order, then its cross edges in NodeId order, and the NodeId hashes
+    // the RepoId; the key `(from, kind, to, weight)` is the export's own
+    // (engram's `EdgeKind` order, diff.rs's edge identity). Stable, and every
+    // duplicate is kept: Engram dedups to the strongest weight itself.
+    edges.sort_by(|a, b| edge_order(a).cmp(&edge_order(b)));
     stats.edges = edges.len();
 
     let gmap = Gmap {
@@ -1871,10 +1960,10 @@ mod tests {
     }
 
     /// `@inheritdoc IB` on `c::A::A::f` (LG.12). `heritage` = the IMPLEMENTS
-    /// target of `A`: `None` (no edge), `Some(999)` (a NodeId outside the
-    /// graph, as a cross-file base can leave it) or `Some(id)` of an
-    /// interface; `twin` adds a second interface named `IB`.
-    fn inheritdoc_graph(heritage: Option<u64>, twin: bool) -> MergedGraph {
+    /// targets of `A`, in edge order: none, `999` (a NodeId outside the
+    /// graph, as a cross-file base can leave it) or the ids of interfaces;
+    /// `twin` adds a second interface named `IB`.
+    fn inheritdoc_graph(heritage: &[u64], twin: bool) -> MergedGraph {
         let repo = RepoId(1);
         let tags = |json: &str| Cell { kind: cell_type::DOC_TAGS, payload: CellPayload::Json(json.into()) };
         type Row<'a> = (u64, &'a str, &'a str, NodeKindId, Option<u64>, Vec<Cell>);
@@ -1901,16 +1990,7 @@ mod tests {
             nav.record(NodeId(id), name, qname, kind, parent.map(NodeId));
             nodes.push(Node { id: NodeId(id), repo, confidence: Confidence::Strong, cells });
         }
-        let edges = heritage
-            .map(|to| glia_core::Edge {
-                from: NodeId(1),
-                to: NodeId(to),
-                category: ec::IMPLEMENTS,
-                confidence: Confidence::Strong,
-                cells: Vec::new(),
-            })
-            .into_iter()
-            .collect();
+        let edges = heritage.iter().map(|to| edge(1, *to, ec::IMPLEMENTS)).collect();
         MergedGraph::new(vec![RepoGraph {
             repo,
             nodes,
@@ -1942,12 +2022,12 @@ mod tests {
     #[test]
     fn inheritdoc_resolves_via_heritage_then_a_unique_short_name() {
         let base = vec!["c::IB::IB::f".to_string()];
-        assert_eq!(inheritdoc_edges(&inheritdoc_graph(None, false)), (base.clone(), (1, 0)));
-        assert_eq!(inheritdoc_edges(&inheritdoc_graph(Some(999), false)), (base.clone(), (1, 0)));
-        assert_eq!(inheritdoc_edges(&inheritdoc_graph(Some(999), true)), (vec![], (0, 1)));
+        assert_eq!(inheritdoc_edges(&inheritdoc_graph(&[], false)), (base.clone(), (1, 0)));
+        assert_eq!(inheritdoc_edges(&inheritdoc_graph(&[999], false)), (base.clone(), (1, 0)));
+        assert_eq!(inheritdoc_edges(&inheritdoc_graph(&[999], true)), (vec![], (0, 1)));
         let via_heritage = vec!["d::IB::IB::f".to_string()];
-        assert_eq!(inheritdoc_edges(&inheritdoc_graph(Some(5), true)), (via_heritage, (1, 0)));
-        assert_eq!(inheritdoc_edges(&inheritdoc_graph(Some(3), true)), (base, (1, 0)));
+        assert_eq!(inheritdoc_edges(&inheritdoc_graph(&[5], true)), (via_heritage, (1, 0)));
+        assert_eq!(inheritdoc_edges(&inheritdoc_graph(&[3], true)), (base, (1, 0)));
     }
 
     fn hint_of(gmap: &Gmap, key: &str) -> String {
@@ -2128,5 +2208,108 @@ mod tests {
         assert_eq!(g2.files, table(&[(1, "b.py"), (2, "a.py")]));
         assert_eq!(stats.files, 2);
         assert_eq!((span_file(&g2, "b"), span_file(&g2, "a")), (1, 2));
+    }
+
+    fn edge(from: u64, to: u64, category: EdgeCategoryId) -> glia_core::Edge {
+        glia_core::Edge {
+            from: NodeId(from),
+            to: NodeId(to),
+            category,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        }
+    }
+
+    /// DE.2: edges leave sorted by `(from, kind, to, weight)`, whatever order
+    /// glia's lists hold them in (its cross edges are NodeId-sorted, so the
+    /// order moved with the RepoId); a duplicate is kept.
+    #[test]
+    fn edges_sort_by_key_not_node_id() {
+        let mut merged = located_graph(&[
+            (3, "m::a", node_kind::FUNCTION, "m.py", 0),
+            (2, "m::b", node_kind::FUNCTION, "m.py", 2),
+            (1, "m::c", node_kind::FUNCTION, "m.py", 4),
+        ]);
+        merged.graphs[0].edges = vec![edge(1, 3, ec::CALLS)];
+        merged.cross_edges = vec![
+            edge(3, 1, ec::CALLS),
+            edge(3, 1, ec::CALLS),
+            edge(3, 2, ec::CALLS),
+            edge(3, 2, ec::DEFINES),
+        ];
+        let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
+        let got: Vec<(&str, EdgeKind, &str, Option<f32>)> = gmap
+            .edges
+            .iter()
+            .map(|e| (e.from.as_str(), e.kind, e.to.as_str(), e.weight))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("m::a", EdgeKind::Contains, "m::b", Some(1.0)),
+                ("m::a", EdgeKind::Calls, "m::b", Some(0.8)),
+                ("m::a", EdgeKind::Calls, "m::c", Some(0.8)),
+                ("m::a", EdgeKind::Calls, "m::c", Some(0.8)),
+                ("m::c", EdgeKind::Calls, "m::a", Some(0.8)),
+            ]
+        );
+        assert_eq!(stats.edges, 5);
+        // Nothing here ties on a row or a key.
+        assert_eq!((stats.hint_row_ties, stats.key_kind_ties), (0, 0));
+    }
+
+    /// DE.2: same-kind nodes sharing a row take their ordinals by qname, not
+    /// NodeId (`var lo, hi` on one line; ids here sort opposite to the
+    /// qnames); a node with no qname sorts after the named nodes of its row,
+    /// so it never moves their ordinals.
+    #[test]
+    fn hint_row_ties_rank_by_qname() {
+        let mut merged = located_graph(&[
+            (1, "fx::lo", node_kind::STATE_VAR, "vars.go", 2),
+            (9, "fx::hi", node_kind::STATE_VAR, "vars.go", 2),
+            (0, "fx::unnamed", node_kind::STATE_VAR, "vars.go", 2),
+            (5, "fx::later", node_kind::STATE_VAR, "vars.go", 4),
+        ]);
+        merged.graphs[0].nav.qname_by_id.remove(&NodeId(0));
+        let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
+        let kind = node_kind::STATE_VAR.0;
+        assert_eq!(hint_of(&gmap, "fx::hi"), format!("vars.go:{kind}:0"));
+        assert_eq!(hint_of(&gmap, "fx::lo"), format!("vars.go:{kind}:1"));
+        assert_eq!(hint_of(&gmap, "fx::later"), format!("vars.go:{kind}:3"));
+        assert_eq!(stats.skipped_nodes, 1);
+        // `hi` and `lo`; the unnamed node is tied too but not exported.
+        assert_eq!((stats.identity_hints, stats.hint_row_ties), (3, 2));
+    }
+
+    /// DE.2: two located, documented nodes of one qname (a CLASS and its
+    /// COMPONENT twin) key to the least kind id, not the lower NodeId; a twin
+    /// pair the DOC cell decides is no kind tie.
+    #[test]
+    fn key_ties_break_by_kind_not_node_id() {
+        let mut merged = located_graph(&[
+            (7, "web::Card", node_kind::CLASS, "card.ts", 3),
+            (2, "web::Card", node_kind::COMPONENT, "card.ts", 3),
+            (4, "web::Pane", node_kind::CLASS, "pane.ts", 1),
+            (8, "web::Pane", node_kind::COMPONENT, "pane.ts", 1),
+        ]);
+        let doc = Cell { kind: cell_type::DOC, payload: CellPayload::Text("A card.".into()) };
+        for n in &mut merged.graphs[0].nodes {
+            if n.id != NodeId(4) {
+                n.cells.push(doc.clone());
+            }
+        }
+        let (gmap, _, stats) = build_gmap(&merged, &std::env::temp_dir(), &ExportOptions::default());
+        assert_eq!(hint_of(&gmap, "web::Card"), format!("card.ts:{}:0", node_kind::CLASS.0));
+        assert_eq!(hint_of(&gmap, "web::Pane"), format!("pane.ts:{}:0", node_kind::COMPONENT.0));
+        assert_eq!((stats.duplicate_keys, stats.key_kind_ties), (2, 1));
+    }
+
+    /// DE.2: with two heritage targets named like the `@inheritdoc` base, the
+    /// least qname documents the override, in either edge order.
+    #[test]
+    fn inheritdoc_picks_the_least_matching_heritage_qname() {
+        let base = vec!["c::IB::IB::f".to_string()];
+        assert_eq!(inheritdoc_edges(&inheritdoc_graph(&[5, 3], true)), (base.clone(), (1, 0)));
+        assert_eq!(inheritdoc_edges(&inheritdoc_graph(&[3, 5], true)), (base, (1, 0)));
     }
 }
