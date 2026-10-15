@@ -23,6 +23,8 @@
 //!     `create_table :t`, knex / Sequelize `createTable`, Laravel
 //!     `Schema::create`, EF Core `migrationBuilder.CreateTable`
 //!   - SQLAlchemy / Django: `__tablename__ = '...'` / `db_table = '...'`
+//!   - Slick (DG.9): `extends Table[..](tag, <table>)` and the schema form
+//!     `Table[..](tag, <schema>, <table>)`, in a file that names `slick.`
 //!   - Mongoose: `mongoose.model('<Name>', ...)`
 //!   - DynamoDB: `TableName: '...'` / `TableName='...'`, `dynamodb.Table('...')`
 //!   - Beanie: the `name = '...'` line of a `class Settings:` block
@@ -35,8 +37,8 @@
 //!     INTO`, prose and comments are not Cypher; `::` and property-map values
 //!     are never labels.
 //!
-//! A declaration (ORM table, Mongoose, DynamoDB, Beanie) is named only by the
-//! single-line literal that starts its argument or assignment
+//! A declaration (ORM table, Slick table, Mongoose, DynamoDB, Beanie) is named
+//! only by the single-line literal that starts its argument or assignment
 //! ([`leading_literal`] / [`inline_literal`], LA.42), never by a later string,
 //! and every scanner's name must be [`entity_shaped`] at the emit funnel.
 //!
@@ -47,10 +49,11 @@
 //! unknown). The engine re-homes the module's ACCESSES_DATA edge to the
 //! innermost function or method holding those offsets
 //! (`anchor::rehome_to_owner`) and stamps the ACCESS_MODE edge cell from the
-//! verbs. A declaration (ORM table, Mongoose, DynamoDB, Beanie, SQL DDL, a
-//! migration DSL call) names a schema, not a statement: it is listed in
-//! [`DataAccess::declared`] and its module edge always stays. The edges
-//! this function returns are unchanged by LE.4a: the re-home is the engine's.
+//! verbs. A declaration (ORM table, Slick table, Mongoose, DynamoDB, Beanie,
+//! SQL DDL, a migration DSL call) names a schema, not a statement: it is
+//! listed in [`DataAccess::declared`] and its module edge always stays. The
+//! edges this function returns are unchanged by LE.4a: the re-home is the
+//! engine's.
 //! Precision: a statement built in one function and executed in another is
 //! attributed to the function whose body holds the literal.
 //!
@@ -302,6 +305,11 @@ pub fn extract_data_entity_access(
     // that starts the argument / assignment; `decl` feeds their marker.
     let mut decl = DeclStats::default();
     for name in scan_orm_table_decls(source, &mut decl) {
+        decl.funnel(&name);
+        sink.emit_declared(DataEntityFlavor::Sql, &name);
+    }
+    // DG.9: a Slick `extends Table[..](tag, <table>)` declares its table.
+    for name in scan_slick_tables(source, &mut decl) {
         decl.funnel(&name);
         sink.emit_declared(DataEntityFlavor::Sql, &name);
     }
@@ -2119,6 +2127,174 @@ fn assigned_value(s: &str) -> Option<&str> {
     Some(&s[i + 1..])
 }
 
+// ----------------------------------------------------------------------------
+// Slick (DG.9): `class X(tag: Tag) extends Table[<row>](tag, <table>)` and the
+// schema form `Table[<row>](tag, <schema>, <table>)`, in a file that names
+// `slick.` (`import slick.jdbc.PostgresProfile.api._`, `slick.lifted.Tag`).
+// ----------------------------------------------------------------------------
+
+/// Bytes [`scan_slick_tables`] reads for a `Table[` needle's type argument,
+/// and again for its constructor's argument list.
+const SLICK_SCAN_LIMIT: usize = 1024;
+
+/// The table names of every Slick `extends Table[..](..)` declaration in
+/// `source` (DG.9). Slick's `Table` constructor is `(tag, tableName)` or
+/// `(tag, schemaName: Option[String], tableName)`: with two top-level
+/// arguments the table is the second, with three the third (the schema,
+/// `Some(..)` / `None`, names nothing). The table argument must be one
+/// single-line string literal and nothing else (LA.42's rule): a variable,
+/// an interpolated `s".."` or a literal with more after it names nothing and
+/// counts `rejected_nonliteral`, as does a needle whose type argument or
+/// argument list does not close within [`SLICK_SCAN_LIMIT`] bytes or that
+/// passes any other argument count. Only a file that names `slick.` is read,
+/// so another library's `Table[..]` base is not Slick; a Slick table declared
+/// through an alias or a generic base (`extends BaseTable[T](tag, ..)`) is
+/// not read either.
+fn scan_slick_tables(source: &str, stats: &mut DeclStats) -> Vec<String> {
+    let mut out = Vec::new();
+    if !names_slick(source) {
+        return out;
+    }
+    let b = source.as_bytes();
+    let needle = "extends";
+    let mut search_from = 0;
+    while let Some(rel) = source[search_from..].find(needle) {
+        let pos = search_from + rel;
+        search_from = pos + needle.len();
+        if pos > 0 && is_word_byte(b[pos - 1]) {
+            continue;
+        }
+        // `extends`, whitespace (newlines too), then Slick's own `Table[`.
+        let mut k = search_from;
+        while b.get(k).is_some_and(u8::is_ascii_whitespace) {
+            k += 1;
+        }
+        if k == search_from || !b[k..].starts_with(b"Table[") {
+            continue;
+        }
+        stats.needles += 1;
+        let lit = slick_table_arg(source, k + "Table[".len()).unwrap_or(LeadingLit::NotLiteral);
+        if let Some(name) = stats.take(lit) {
+            match canonical_sql_name(name) {
+                Some(cleaned) => out.push(cleaned),
+                None => stats.rejected_shape += 1,
+            }
+        }
+    }
+    out
+}
+
+/// True when `source` names `slick.` as a whole word: an import (`import
+/// slick.jdbc.PostgresProfile.api._`) or a qualified path (`slick.lifted`).
+fn names_slick(source: &str) -> bool {
+    let b = source.as_bytes();
+    source
+        .match_indices("slick.")
+        .any(|(pos, _)| pos == 0 || !is_word_byte(b[pos - 1]))
+}
+
+/// What the table position of a Slick `Table[..](..)` holds, `i` just past
+/// the `Table[`: the type argument's balanced `[..]` skipped, then a `(`
+/// whose top-level arguments are two (`tag, <table>`) or three (`tag,
+/// <schema>, <table>`). The table argument reads as `Lit` only when it is one
+/// literal with nothing after it. `None` for any other shape.
+fn slick_table_arg(source: &str, i: usize) -> Option<LeadingLit<'_>> {
+    let b = source.as_bytes();
+    let mut k = close_of_brackets(b, i)?;
+    while b.get(k).is_some_and(u8::is_ascii_whitespace) {
+        k += 1;
+    }
+    if b.get(k) != Some(&b'(') {
+        return None;
+    }
+    let args = call_args(b, k + 1)?;
+    let table = match args.as_slice() {
+        [_, table] | [_, _, table] => table.clone(),
+        _ => return None,
+    };
+    let arg = &source[table];
+    match literal_after(arg, |c| c.is_ascii_whitespace()) {
+        (LeadingLit::Lit(_), past) if !arg[past..].trim().is_empty() => {
+            Some(LeadingLit::NotLiteral)
+        }
+        (lit, _) => Some(lit),
+    }
+}
+
+/// Offset just past the `]` closing a bracket opened just before `i`, nested
+/// brackets and `"` literals stepped over; `None` when it does not close
+/// within [`SLICK_SCAN_LIMIT`] bytes.
+fn close_of_brackets(b: &[u8], i: usize) -> Option<usize> {
+    let end = i.saturating_add(SLICK_SCAN_LIMIT).min(b.len());
+    let mut depth = 1usize;
+    let mut j = i;
+    while j < end {
+        match b[j] {
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j + 1);
+                }
+            }
+            b'"' => j = closing_quote(b, j, end)?,
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
+/// The top-level arguments of a call whose `(` sits just before `i`, as byte
+/// ranges between the `(` / `,` and the next top-level `,` / `)`; nested
+/// parens, brackets, braces and `"` literals are stepped over, and a trailing
+/// comma adds no argument. `None` when the call does not close within
+/// [`SLICK_SCAN_LIMIT`] bytes or a `]` / `}` closes nothing.
+fn call_args(b: &[u8], i: usize) -> Option<Vec<Range<usize>>> {
+    let end = i.saturating_add(SLICK_SCAN_LIMIT).min(b.len());
+    let mut args = Vec::new();
+    let mut depth = 0usize;
+    let mut start = i;
+    let mut j = i;
+    while j < end {
+        match b[j] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' if depth > 0 => depth -= 1,
+            b')' => {
+                if args.is_empty() || !b[start..j].trim_ascii().is_empty() {
+                    args.push(start..j);
+                }
+                return Some(args);
+            }
+            b']' | b'}' => return None,
+            b',' if depth == 0 => {
+                args.push(start..j);
+                start = j + 1;
+            }
+            b'"' => j = closing_quote(b, j, end)?,
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Offset of the `"` closing the literal whose opening `"` is at `open`,
+/// backslash escapes stepped over; `None` at a newline or at `end`.
+fn closing_quote(b: &[u8], open: usize, end: usize) -> Option<usize> {
+    let mut j = open + 1;
+    while j < end {
+        match b[j] {
+            b'\\' => j += 1,
+            b'"' => return Some(j),
+            b'\n' => return None,
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
 /// What a declaration's name position holds (LA.42). A declaration scanner
 /// names an entity only from `Lit`: never from a literal further on, which
 /// belongs to some other expression.
@@ -2171,8 +2347,8 @@ fn literal_after(s: &str, skip: fn(u8) -> bool) -> (LeadingLit<'_>, usize) {
     (LeadingLit::Malformed, 0)
 }
 
-/// What the declaration scanners (ORM table, Mongoose, DynamoDB, Beanie) read
-/// in one file, for the `[data-entity] decl` marker (LA.42). Every needle hit
+/// What the declaration scanners (ORM table, Slick, Mongoose, DynamoDB,
+/// Beanie) read in one file, for the `[data-entity] decl` marker (LA.42). Every needle hit
 /// lands in exactly one of `kept`, `rejected_nonliteral`, `rejected_shape`.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DeclStats {
@@ -4223,12 +4399,128 @@ console.log("SELECT email FROM users WHERE email LIKE 'demo-%@x.com' ORDER BY em
         }
     }
 
-    /// The four declaration scanners plus the funnel count, as
+    // ---- DG.9: Slick table declarations ----------------------------------
+    //
+    // Sample sources are ordinary (escaped) literals, never raw strings: a
+    // `\"users\"` argument starts with a backslash, so glia indexing this
+    // file mints no entity from them.
+
+    /// matrix/scala/db/Users.scala.
+    const SLICK_USERS: &str = "package shop\n\nimport slick.jdbc.PostgresProfile.api._\n\n\
+        class Users(tag: Tag) extends Table[(Long, String)](tag, \"users\") {\n  \
+        def id = column[Long](\"id\", O.PrimaryKey)\n  \
+        def email = column[String](\"email\")\n  \
+        def * = (id, email)\n}\n";
+
+    /// [`scan_slick_tables`] plus the funnel count, its names unsorted.
+    fn slick_stats(src: &str) -> (Vec<String>, DeclStats) {
+        let mut decl = DeclStats::default();
+        let names = scan_slick_tables(src, &mut decl);
+        for name in &names {
+            decl.funnel(name);
+        }
+        (names, decl)
+    }
+
+    #[test]
+    fn slick_table_declarations() {
+        assert_eq!(sorted_qnames(SLICK_USERS), ["data_entity:sql:users"]);
+        assert_eq!(
+            slick_stats(SLICK_USERS).1.marker(),
+            "[data-entity] decl needles=1 kept=1 rejected_nonliteral=0 rejected_shape=0"
+        );
+        assert_eq!(
+            decl_stats(SLICK_USERS).marker(),
+            slick_stats(SLICK_USERS).1.marker()
+        );
+        // A declaration: the module's ACCESSES_DATA edge stays (LE.4a).
+        let repo = RepoId(1);
+        let (out, access) = extract_data_entity_access(SLICK_USERS, module_id(repo), repo);
+        assert!(access.sites.is_empty(), "{:?}", access.sites);
+        assert_eq!(access.declared.len(), 1);
+        assert_eq!(out.edges.len(), 1);
+        assert_eq!(out.edges[0].from, module_id(repo));
+        assert_eq!(out.edges[0].to, access.declared[0]);
+        assert_eq!(out.edges[0].category, edge_category::ACCESSES_DATA);
+
+        // The 3-argument form: (tag, schema, table); the schema names nothing.
+        let shop = "import slick.jdbc.H2Profile.api._\n\n\
+                    class Orders(tag: Tag)\n    extends\n    Table[(Long, Option[String])](tag, Some(\"shop\"), \"orders\") {\n  \
+                    def id = column[Long](\"id\")\n}\n\
+                    class Audit(tag: Tag) extends Table[AuditRow](\n  tag,\n  None,\n  \"audit_log\"\n) {}\n";
+        assert_eq!(
+            sorted_qnames(shop),
+            ["data_entity:sql:audit_log", "data_entity:sql:orders"]
+        );
+        assert_eq!(slick_stats(shop).0, ["orders", "audit_log"]);
+
+        // A table name passed as a variable names nothing.
+        let var = "import slick.jdbc.PostgresProfile.api._\n\
+                   abstract class Named[T](tag: Tag, tableName: String) extends Table[T](tag, tableName) {\n  \
+                   def label = column[String](\"label\")\n}\n";
+        assert_eq!(sorted_qnames(var), Vec::<String>::new());
+        assert_eq!(
+            slick_stats(var).1,
+            DeclStats {
+                needles: 1,
+                kept: 0,
+                rejected_nonliteral: 1,
+                rejected_shape: 0
+            }
+        );
+
+        // `extends Table[` in a file that names no `slick.` is not Slick.
+        let plain =
+            "package grid\n\nclass Users(tag: Tag) extends Table[(Long, String)](tag, \"users\")\n";
+        assert_eq!(sorted_qnames(plain), Vec::<String>::new());
+        assert_eq!(slick_stats(plain).1, DeclStats::default());
+        // Nor does a word that only ends in `slick.`.
+        let unslick =
+            "import myslick.Table\nclass U(tag: Tag) extends Table[Int](tag, \"users\")\n";
+        assert_eq!(slick_stats(unslick).1, DeclStats::default());
+    }
+
+    #[test]
+    fn slick_table_shapes_outside_the_constructor_name_nothing() {
+        // A trailing comma adds no argument; a literal with more after it, an
+        // interpolated name, a one-argument call and a type argument that
+        // never closes are needles that name nothing.
+        let src = "import slick.jdbc.MySQLProfile.api._\n\
+                   class A(tag: Tag) extends Table[(Int, String)](\n  tag,\n  \"accounts\",\n) {}\n\
+                   class B(tag: Tag) extends Table[Int](tag, \"b_\" + suffix) {}\n\
+                   class C(tag: Tag) extends Table[Int](tag, s\"c_$env\") {}\n\
+                   class D(tag: Tag) extends Table[Int](tag) {}\n\
+                   class E(tag: Tag) extends Table[(Int, \"]\")](tag, \"quoted_bracket\") {}\n\
+                   class F(tag: Tag) extendsTable[Int](tag, \"glued\") {}\n\
+                   class G(tag: Tag) extends Table[Int](tag, \"bad name\") {}\n\
+                   class H(tag: Tag) extends Table[Int(tag, \"open\")\n";
+        let (names, stats) = slick_stats(src);
+        assert_eq!(names, ["accounts", "quoted_bracket"]);
+        assert_eq!(
+            stats,
+            DeclStats {
+                needles: 7,
+                kept: 2,
+                rejected_nonliteral: 4,
+                rejected_shape: 1
+            }
+        );
+        // This file's own samples are escaped literals: `\"users\"` starts
+        // with a backslash, so a self-index mints nothing from them.
+        let escaped = "import slick.jdbc.PostgresProfile.api._\n\
+                       class U(tag: Tag) extends Table[Int](tag, \\\"users\\\")\n";
+        let (names, stats) = slick_stats(escaped);
+        assert!(names.is_empty(), "{names:?}");
+        assert_eq!(stats.rejected_nonliteral, 1);
+    }
+
+    /// The five declaration scanners plus the funnel count, as
     /// `extract_data_entity_nodes` runs them.
     fn decl_stats(src: &str) -> DeclStats {
         let mut decl = DeclStats::default();
         let names = [
             scan_orm_table_decls(src, &mut decl),
+            scan_slick_tables(src, &mut decl),
             scan_mongoose_models(src, &mut decl),
             scan_dynamodb_tables(src, &mut decl),
             scan_beanie_documents(src, &mut decl),
