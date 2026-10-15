@@ -31,6 +31,8 @@ pub fn parse_file(
     };
 
     let module_id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MODULE, module_qname);
+    acc.module_id = Some(module_id);
+    acc.registered = container_registrations(root, src);
     acc.nodes.push(Node {
         id: module_id,
         repo,
@@ -60,6 +62,14 @@ pub fn parse_file(
         eprintln!(
             "[orm-ar] models={} table_cells={} in {}",
             acc.ar_models, acc.ar_table_cells, file_rel_path
+        );
+    }
+    // DH.13 fired_on marker:
+    //   `... 2>&1 | grep '^\[ruby-types\]'`
+    if acc.superclass_refs + acc.auto_inject_refs + acc.constructed_calls > 0 {
+        eprintln!(
+            "[ruby-types] superclass_refs={} auto_inject_refs={} constructed_calls={} path={}",
+            acc.superclass_refs, acc.auto_inject_refs, acc.constructed_calls, file_rel_path
         );
     }
 
@@ -108,6 +118,24 @@ struct Acc {
     /// file still sees every writer before anything is recorded.
     ivar_types:
         std::collections::HashMap<NodeId, std::collections::HashMap<String, Option<String>>>,
+    /// The file MODULE's id, set once by `parse_file`: the `from_module` of
+    /// every heritage / injection ref (DH.13).
+    module_id: Option<NodeId>,
+    /// DH.13 — the dry-container keys this file registers, full key
+    /// (namespaces `.`-joined) -> the registered class, or `None` when the
+    /// value names no class this file shows or two registrations disagree.
+    /// Read by [`collect_auto_inject`]; built by [`container_registrations`].
+    registered: std::collections::HashMap<String, Option<String>>,
+    /// (consumer CLASS, injected type) pairs already emitted (one INJECTS ref
+    /// per pair however often the key repeats).
+    inject_seen: std::collections::HashSet<(NodeId, String)>,
+    /// `class X < Base` INHERITS_FROM refs emitted (`[ruby-types]` marker).
+    superclass_refs: usize,
+    /// dry-auto_inject INJECTS refs emitted (`[ruby-types]` marker).
+    auto_inject_refs: usize,
+    /// `X.new.m(..)` call sites emitted as constructed receivers
+    /// (`[ruby-types]` marker).
+    constructed_calls: usize,
 }
 
 fn visit_body(
@@ -130,6 +158,9 @@ fn visit_body(
             "call" => {
                 collect_require(child, src, acc);
                 collect_call(child, src, parent_id, false, acc);
+                if acc.nav.kind_by_id.get(&parent_id) == Some(&node_kind::CLASS) {
+                    collect_auto_inject(child, src, parent_id, acc);
+                }
             }
             _ => {}
         }
@@ -168,6 +199,7 @@ fn visit_class(
     acc.nav.record(id, name, &qname, node_kind::CLASS, Some(parent_id));
 
     emit_ar_model_entity(node, name, src, id, repo, acc);
+    emit_superclass_ref(node, src, id, acc);
 
     if let Some(body) = node.child_by_field_name("body") {
         visit_body(body, src, file_rel, &qname, id, repo, acc);
@@ -471,6 +503,20 @@ fn collect_call(node: TsNode, src: &[u8], from: NodeId, ivars: bool, acc: &mut A
                 },
                 line: line_at(node),
             });
+        } else if recv.kind() == "call" && constructor_receiver(recv, src) {
+            // DH.13: `Calc.new.add(2, 3)` — the receiver constructs `Calc`.
+            // The receiver text (`Calc.new`, `Shop::Calc.new(1)`) goes out
+            // verbatim; the graph crate's `constructed_type` reads the
+            // postfix constructor and binds `add` on the type it names.
+            acc.constructed_calls += 1;
+            acc.calls.push(CallSite {
+                from,
+                qualifier: CallQualifier::ComplexReceiver {
+                    receiver: recv_text.to_string(),
+                    name: method_name.to_string(),
+                },
+                line: line_at(node),
+            });
         } else if ivars && recv.kind() == "instance_variable" {
             // `@repo.find(id)`: the receiver text is the `field_types` key
             // (`"@repo"`), which A6.2a's `receiver_field` passes through
@@ -516,6 +562,277 @@ fn collect_calls_in(
             }
         }
     }
+}
+
+/// DH.13: true when `recv` is a constructor call `X.new` / `A::X.new(..)`
+/// with no block — the receiver shape the graph crate's postfix
+/// `constructed_type` reads. A block constructor (`X.new { .. }.m`) carries
+/// its block in the text, which names no type the graph can read, so it is
+/// not emitted.
+fn constructor_receiver(recv: TsNode, src: &[u8]) -> bool {
+    recv.child_by_field_name("block").is_none() && ruby_new_type(recv, src).is_some()
+}
+
+// ============================================================================
+// Heritage and dependency injection (DH.13)
+// ============================================================================
+//
+// `class UserRepository < BaseRepository` is an INHERITS_FROM ref from the
+// CLASS; `build_ruby`'s `resolve_refs` binds its Bare name through the
+// module's symbols, then the repo-unique name, so a framework base
+// (`ActiveRecord::Base`, `Minitest::Test`) binds nothing. A scoped
+// superclass is reduced to its last segment (the Java G12.5 heritage-ref
+// precedent): `class Post < ActiveRecord::Base` would bind an app class
+// named `Base` when it is the repo's only one.
+//
+// dry-auto_inject (dry-rb.org/gems/dry-auto_inject): `Import =
+// Dry::AutoInject(Container)` builds a module per key list, and a class
+// mixes it in with `include Import["user_service", "repositories.orders"]`
+// (or a strategy: `Import.args[..]`, `.hash[..]`, `.kwargs[..]`; an alias
+// `Import[repo: "repositories.users"]`). Ruby's `include` takes a Module,
+// and `Const[<literals>]` returning one is the auto_inject builder, so the
+// shape names the library. Each key is one INJECTS ref from the class to the
+// type the key resolves to: the class this file's dry-container registers
+// under the key (`register("k") { K.new }`, `register(:k, K.new)`,
+// `register("k", K)`, inside `namespace(..)` blocks), else the key's last
+// `.` segment camelised (`user_service` -> `UserService`), dry-system's own
+// component-naming rule (Dry::Inflector over the key).
+
+/// The class a superclass expression names: a `constant` (`Base`) or the
+/// last segment of a `scope_resolution` (`Admin::Base` -> `Base`, `::Base`
+/// -> `Base`). Anything else (`Struct.new(:a)`, `DelegateClass(Foo)`)
+/// names no class the graph can bind -> None.
+fn superclass_name<'a>(class: TsNode<'a>, src: &'a [u8]) -> Option<&'a str> {
+    let base = class.child_by_field_name("superclass")?.named_child(0)?;
+    let name = match base.kind() {
+        "constant" => base,
+        "scope_resolution" => base.child_by_field_name("name")?,
+        _ => return None,
+    };
+    if name.kind() != "constant" {
+        return None;
+    }
+    Some(text_of(name, src)).filter(|n| !n.is_empty())
+}
+
+/// Emit `class_id INHERITS_FROM Bare(<superclass>)` for a class whose
+/// superclass is a constant path ([`superclass_name`]). The row is the
+/// superclass clause's own (LC.3b).
+fn emit_superclass_ref(class: TsNode, src: &[u8], class_id: NodeId, acc: &mut Acc) {
+    let (Some(name), Some(module_id)) = (superclass_name(class, src), acc.module_id) else {
+        return;
+    };
+    let line = class.child_by_field_name("superclass").map_or_else(|| line_at(class), line_at);
+    acc.refs.push(UnresolvedRef {
+        from: class_id,
+        from_module: module_id,
+        qualifier: CallQualifier::Bare(name.to_string()),
+        category: edge_category::INHERITS_FROM,
+        line,
+    });
+    acc.superclass_refs += 1;
+}
+
+/// A dry-auto_inject strategy method: `Import.args[..]` and friends.
+const AUTO_INJECT_STRATEGIES: &[&str] = &["args", "hash", "kwargs"];
+
+/// The dependency keys of `include <Import>[..]` when `call` is that shape:
+/// the argument is one `element_reference` whose object is a constant path
+/// (optionally `.args` / `.hash` / `.kwargs`), and whose elements are all
+/// literal keys (strings, symbols, or `alias: "key"` pairs). Any other
+/// `include` (`include Comparable`, `include Mod[some_var]`) -> None.
+fn auto_inject_keys(call: TsNode, src: &[u8]) -> Option<Vec<String>> {
+    if call.child_by_field_name("receiver").is_some()
+        || text_of(call.child_by_field_name("method")?, src) != "include"
+    {
+        return None;
+    }
+    let args = call.child_by_field_name("arguments")?;
+    if args.named_child_count() != 1 {
+        return None;
+    }
+    let elref = args.named_child(0)?;
+    if elref.kind() != "element_reference" {
+        return None;
+    }
+    let object = elref.child_by_field_name("object")?;
+    let builder = match object.kind() {
+        "call" => {
+            let strategy = text_of(object.child_by_field_name("method")?, src);
+            if !AUTO_INJECT_STRATEGIES.contains(&strategy)
+                || object.child_by_field_name("arguments").is_some()
+                || object.child_by_field_name("block").is_some()
+            {
+                return None;
+            }
+            object.child_by_field_name("receiver")?
+        }
+        _ => object,
+    };
+    if !matches!(builder.kind(), "constant" | "scope_resolution") {
+        return None;
+    }
+    let mut keys = Vec::new();
+    let mut cursor = elref.walk();
+    for el in elref.named_children(&mut cursor) {
+        if el.id() == object.id() || el.kind() == "comment" {
+            continue;
+        }
+        let key = match el.kind() {
+            "pair" => literal_key(el.child_by_field_name("value")?, src),
+            _ => literal_key(el, src),
+        }?;
+        keys.push(key);
+    }
+    (!keys.is_empty()).then_some(keys)
+}
+
+/// A literal dependency / registration key: a plain string (`"user_service"`),
+/// a symbol (`:user_service`) or a quoted symbol (`:"repositories.users"`).
+/// Interpolated text and every other node -> None.
+fn literal_key(node: TsNode, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "string" => plain_string_literal(node, src),
+        "simple_symbol" => {
+            let key = text_of(node, src).trim_start_matches(':');
+            (!key.is_empty()).then(|| key.to_string())
+        }
+        "delimited_symbol" => {
+            let mut out = String::new();
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                match child.kind() {
+                    "string_content" => out.push_str(text_of(child, src)),
+                    _ => return None,
+                }
+            }
+            (!out.is_empty()).then_some(out)
+        }
+        _ => None,
+    }
+}
+
+/// dry-system's component name for a key: its last `.` segment camelised
+/// (`user_service` -> `UserService`, `repositories.orders` -> `Orders`).
+/// None when the result is not a constant name (`"1st"`, `"a-b"`).
+fn key_class_name(key: &str) -> Option<String> {
+    let last = key.rsplit('.').next().unwrap_or(key);
+    let name = camelize_segment(last);
+    let mut chars = name.chars();
+    let constant = chars.next().is_some_and(|c| c.is_ascii_uppercase())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    constant.then_some(name)
+}
+
+/// One INJECTS ref from `class_id` per key of an auto_inject `include`
+/// ([`auto_inject_keys`]): the class this file registers under the key, else
+/// the key's camelised name ([`key_class_name`]). A key this file registers
+/// with a value naming no class gives nothing: the convention would be a
+/// guess the registration contradicts.
+fn collect_auto_inject(call: TsNode, src: &[u8], class_id: NodeId, acc: &mut Acc) {
+    let (Some(keys), Some(module_id)) = (auto_inject_keys(call, src), acc.module_id) else {
+        return;
+    };
+    for key in keys {
+        let ty = match acc.registered.get(&key) {
+            Some(registered) => registered.clone(),
+            None => key_class_name(&key),
+        };
+        let Some(ty) = ty else {
+            continue;
+        };
+        if !acc.inject_seen.insert((class_id, ty.clone())) {
+            continue;
+        }
+        acc.refs.push(UnresolvedRef {
+            from: class_id,
+            from_module: module_id,
+            qualifier: CallQualifier::Bare(ty),
+            category: edge_category::INJECTS,
+            line: line_at(call),
+        });
+        acc.auto_inject_refs += 1;
+    }
+}
+
+/// Every dry-container registration in the file: `register(<key>) { <v> }`,
+/// `register(<key>, <v>)` (any receiver: `extend Dry::Container::Mixin`
+/// registers on the class, `container.register` on an instance), keyed by
+/// the full key, `namespace(<ns>) do .. end` blocks `.`-joined in front.
+/// The value names a class when it is `K.new(..)`, `K` or `A::K` (last
+/// segment); a value naming none, or a key two registrations give different
+/// classes, maps to `None`.
+fn container_registrations(
+    root: TsNode,
+    src: &[u8],
+) -> std::collections::HashMap<String, Option<String>> {
+    let mut out = std::collections::HashMap::new();
+    let mut stack = vec![(root, String::new())];
+    while let Some((n, prefix)) = stack.pop() {
+        let mut child_prefix = prefix.clone();
+        if n.kind() == "call"
+            && let Some((method, key)) = registration_head(n, src)
+        {
+            let full = format!("{prefix}{key}");
+            match method {
+                "namespace" if n.child_by_field_name("block").is_some() => {
+                    child_prefix = format!("{full}.");
+                }
+                "register" => {
+                    let class = registered_class(n, src);
+                    out.entry(full)
+                        .and_modify(|seen: &mut Option<String>| {
+                            if *seen != class {
+                                *seen = None;
+                            }
+                        })
+                        .or_insert(class);
+                }
+                _ => {}
+            }
+        }
+        let mut cursor = n.walk();
+        for child in n.named_children(&mut cursor) {
+            stack.push((child, child_prefix.clone()));
+        }
+    }
+    out
+}
+
+/// `("register" | "namespace", key)` when `call` is one of those with a
+/// literal first argument.
+fn registration_head<'a>(call: TsNode<'a>, src: &'a [u8]) -> Option<(&'a str, String)> {
+    let method = text_of(call.child_by_field_name("method")?, src);
+    if method != "register" && method != "namespace" {
+        return None;
+    }
+    let first = call.child_by_field_name("arguments")?.named_child(0)?;
+    Some((method, literal_key(first, src)?))
+}
+
+/// The class a `register` call's value names: the block's last expression
+/// when there is a block, else the second positional argument.
+fn registered_class(call: TsNode, src: &[u8]) -> Option<String> {
+    let value = match call.child_by_field_name("block") {
+        Some(block) => {
+            let body = block.child_by_field_name("body")?;
+            let count = body.named_child_count();
+            body.named_child(u32::try_from(count.checked_sub(1)?).ok()?)?
+        }
+        None => {
+            let args = call.child_by_field_name("arguments")?;
+            let mut cursor = args.walk();
+            let mut positional = args.named_children(&mut cursor).filter(|a| a.kind() != "pair");
+            positional.nth(1)?
+        }
+    };
+    let name = match value.kind() {
+        "call" => return ruby_new_type(value, src),
+        "constant" => value,
+        "scope_resolution" => value.child_by_field_name("name")?,
+        _ => return None,
+    };
+    Some(text_of(name, src).to_string()).filter(|n| !n.is_empty())
 }
 
 // ============================================================================
@@ -2579,6 +2896,218 @@ end
         assert_eq!(
             ivar_types_of(&fp, "svc::Outer::Inner"),
             vec![("@repo".to_string(), "InnerRepo".to_string())]
+        );
+    }
+
+    // ---- DH.13: heritage, dry-auto_inject, constructed receivers -----------
+
+    /// `(from qname, Bare name, 0-based line)` of every ref of `category`.
+    fn bare_refs(
+        fp: &FileParse,
+        category: glia_core::EdgeCategoryId,
+    ) -> Vec<(String, String, u32)> {
+        let mut out: Vec<(String, String, u32)> = fp
+            .refs
+            .iter()
+            .filter(|r| r.category == category)
+            .map(|r| {
+                let from = fp.nav.qname_by_id.get(&r.from).cloned().unwrap_or_default();
+                let name = match &r.qualifier {
+                    CallQualifier::Bare(n) => n.clone(),
+                    other => format!("{other:?}"),
+                };
+                (from, name, r.line)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn module_of(qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, qname)
+    }
+
+    /// matrix/ruby/impl's `user_repository.rb`: the superclass clause is one
+    /// INHERITS_FROM ref from the CLASS, scoped to the file MODULE, at the
+    /// clause's own row.
+    #[test]
+    fn superclass_emits_inherits_ref() {
+        let source = "require_relative \"base_repository\"\n\nclass UserRepository < BaseRepository\n  def find(id)\n    { id: id }\n  end\nend\n";
+        let fp = parse_file(source, "user_repository.rb", "user_repository", repo()).unwrap();
+        assert_eq!(
+            bare_refs(&fp, edge_category::INHERITS_FROM),
+            vec![("user_repository::UserRepository".into(), "BaseRepository".into(), 2)]
+        );
+        assert!(fp.refs.iter().all(|r| r.from_module == module_of("user_repository")));
+    }
+
+    /// A scoped superclass is reduced to its last segment (the Java G12.5
+    /// heritage-ref precedent); a leading `::` is dropped the same way.
+    #[test]
+    fn scoped_superclass_uses_last_segment() {
+        let source = "module Admin\n  class A < Admin::Base\n  end\nend\nclass B < ::Base\nend\n";
+        let fp = parse_file(source, "a.rb", "a", repo()).unwrap();
+        assert_eq!(
+            bare_refs(&fp, edge_category::INHERITS_FROM),
+            vec![
+                ("a::Admin::A".into(), "Base".into(), 1),
+                ("a::B".into(), "Base".into(), 4),
+            ]
+        );
+        assert!(fp.refs.iter().all(|r| r.from_module == module_of("a")));
+    }
+
+    /// A superclass that is an expression (`Struct.new(..)`,
+    /// `DelegateClass(Foo)`) names no class: no ref. A class with no
+    /// superclass emits none either.
+    #[test]
+    fn struct_new_superclass_is_no_ref() {
+        let source = "class Point < Struct.new(:x, :y)\nend\nclass Wrap < DelegateClass(Foo)\nend\nclass Plain\nend\n";
+        let fp = parse_file(source, "p.rb", "p", repo()).unwrap();
+        assert!(bare_refs(&fp, edge_category::INHERITS_FROM).is_empty());
+    }
+
+    /// `include Import["user_service", "repositories.orders"]`: one INJECTS
+    /// ref per key, the last `.` segment camelised; the `.args` / `.kwargs`
+    /// strategies, a symbol, a quoted symbol and an alias pair are the same
+    /// builder. A repeated key emits once.
+    #[test]
+    fn auto_inject_keys_become_injects() {
+        let source = r#"
+class OrderController
+  include Import["user_service", "repositories.orders"]
+  include Import.args[:mailer]
+  include App::Deps.kwargs[:"billing.payment_gateway", repo: "repositories.users"]
+  include Import["user_service"]
+end
+"#;
+        let fp = parse_file(source, "order_controller.rb", "order_controller", repo()).unwrap();
+        let c = "order_controller::OrderController".to_string();
+        assert_eq!(
+            bare_refs(&fp, edge_category::INJECTS),
+            vec![
+                (c.clone(), "Mailer".into(), 3),
+                (c.clone(), "Orders".into(), 2),
+                (c.clone(), "PaymentGateway".into(), 4),
+                (c.clone(), "UserService".into(), 2),
+                (c, "Users".into(), 4),
+            ]
+        );
+        assert!(fp.refs.iter().all(|r| r.from_module == module_of("order_controller")));
+    }
+
+    /// A key the same file's container registers resolves to the registered
+    /// class, inside `namespace` blocks too, whatever the value form
+    /// (block constructor, positional constructor, the class itself); a
+    /// registration whose value names no class gives no ref at all, and an
+    /// unregistered key keeps the camelised name.
+    #[test]
+    fn auto_inject_registration_overrides_name() {
+        let source = r#"
+class Container
+  extend Dry::Container::Mixin
+  register("mailer") { SmtpMailer.new }
+  register(:clock, Clocks::SystemClock.new(utc: true))
+  register("cache", RedisCache)
+  register("builder") { build_thing }
+  namespace(:repositories) do
+    register(:users, memoize: true) do
+      Repos::PgUsers.new(db)
+    end
+  end
+end
+
+class Signup
+  include Import["mailer", "clock", "cache", "builder", "repositories.users", "audit_log"]
+end
+"#;
+        let fp = parse_file(source, "app.rb", "app", repo()).unwrap();
+        let c = "app::Signup".to_string();
+        assert_eq!(
+            bare_refs(&fp, edge_category::INJECTS),
+            vec![
+                (c.clone(), "AuditLog".into(), 15),
+                (c.clone(), "PgUsers".into(), 15),
+                (c.clone(), "RedisCache".into(), 15),
+                (c.clone(), "SmtpMailer".into(), 15),
+                (c, "SystemClock".into(), 15),
+            ]
+        );
+    }
+
+    /// Two registrations of one key with different classes: ambiguous, so the
+    /// key gives nothing rather than either class or the camelised name.
+    #[test]
+    fn conflicting_registrations_inject_nothing() {
+        let source = "container.register(:store) { MemStore.new }\ncontainer.register(:store) { DiskStore.new }\nclass A\n  include Import[:store]\nend\n";
+        let fp = parse_file(source, "a.rb", "a", repo()).unwrap();
+        assert!(bare_refs(&fp, edge_category::INJECTS).is_empty());
+    }
+
+    /// `include Comparable`, a computed key, a non-literal element, an
+    /// `include` with a receiver, and an auto_inject include in a `module`
+    /// body (a mixin, not a class) are not injections.
+    #[test]
+    fn plain_include_is_no_inject() {
+        let source = r#"
+class A
+  include Comparable
+  include Enumerable, Comparable
+  include Import[key_name]
+  include Import["a", key_name]
+  include Import.other["b"]
+  include Import.args("c")["d"]
+  obj.include Import["e"]
+end
+module Mixin
+  include Import["user_service"]
+end
+include Import["top_level"]
+"#;
+        let fp = parse_file(source, "a.rb", "a", repo()).unwrap();
+        assert!(bare_refs(&fp, edge_category::INJECTS).is_empty(), "{:?}", fp.refs);
+    }
+
+    /// `Calc.new.add(2, 3)`: the receiver is a constructor call, emitted as
+    /// `ComplexReceiver { Calc.new, add }` (its text verbatim, argument list
+    /// included); a block constructor or a chain past `new` is not.
+    #[test]
+    fn constructed_receiver_call_site() {
+        let source = r#"
+class CalcTest < Minitest::Test
+  def test_adds
+    assert_equal 5, Calc.new.add(2, 3)
+    Shop::Calc.new(1).sub
+    Calc.new { |c| c }.mul
+    Calc.build.div
+    calc.new.mod
+  end
+end
+"#;
+        let fp = parse_file(source, "calc_test.rb", "calc_test", repo()).unwrap();
+        assert_eq!(
+            ivar_call_sites(&fp),
+            vec![
+                ("Calc.new".to_string(), "add".to_string()),
+                ("Shop::Calc.new(1)".to_string(), "sub".to_string()),
+            ]
+        );
+        let test_adds = fp
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == "calc_test::CalcTest::test_adds")
+            .map(|(id, _)| *id);
+        assert!(test_adds.is_some());
+        assert!(
+            fp.calls
+                .iter()
+                .filter(|c| matches!(c.qualifier, CallQualifier::ComplexReceiver { .. }))
+                .all(|c| Some(c.from) == test_adds && (c.line == 3 || c.line == 4))
+        );
+        assert_eq!(
+            bare_refs(&fp, edge_category::INHERITS_FROM),
+            vec![("calc_test::CalcTest".into(), "Test".into(), 1)]
         );
     }
 }

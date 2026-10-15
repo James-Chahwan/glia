@@ -1010,6 +1010,10 @@ fn is_ts_family(ext: &str) -> bool {
 /// whose type is `with`'s return type), an anonymous body
 /// (`new Calc() { .. }`), a `!` — and every other shape (`newCalc()`,
 /// `renew()`, `new (getType())()`, `new()`, a variable) -> `None`.
+///
+/// DH.13: the postfix constructor, Ruby's `Calc.new.add(2, 3)` (receiver
+/// `Calc.new`), is read too ([`postfix_constructed_type`]): every prefix
+/// shape above is tried first and answers unchanged.
 fn constructed_type(site: &CallSite) -> Option<&str> {
     let text = match &site.qualifier {
         CallQualifier::ComplexReceiver { receiver, .. } => receiver.as_str(),
@@ -1021,6 +1025,12 @@ fn constructed_type(site: &CallSite) -> Option<&str> {
         Some(inner) => (inner.trim(), true),
         None => (text, false),
     };
+    prefix_constructed_type(text, parenthesised).or_else(|| postfix_constructed_type(text))
+}
+
+/// [`constructed_type`]'s prefix form, `new <Chain>(..)`, on the trimmed text
+/// (its one pair of outer parens already removed when `parenthesised`).
+fn prefix_constructed_type(text: &str, parenthesised: bool) -> Option<&str> {
     let after_new = text.strip_prefix("new")?;
     let body = after_new.trim_start();
     if body.len() == after_new.len() {
@@ -1070,6 +1080,59 @@ fn constructed_type(site: &CallSite) -> Option<&str> {
         return None;
     }
     (balanced_end(b, i, b'(', b')')? == b.len()).then(|| &body[segment.0..segment.1])
+}
+
+/// DH.13: the postfix constructor `<Chain>.new` / `<Chain>.new(<args>)`, the
+/// chain's last segment: `Calc.new`, `Calc.new(1)`, `Shop::Calc.new` ->
+/// `Calc`. The chain is `[A-Za-z0-9_]` segments joined by `::` or `.` (one
+/// leading `::` allowed); its last segment is `new`, reached by a `.` (so
+/// Rust's `Calc::new()` is not read), after at least one segment; then the
+/// text ends, or a balanced argument list ends it. A lowercase segment
+/// (`calc.new`) is read: the type lookup ([`constructed_type_id`]) rejects
+/// non-types. `self.new` / `this.new` name the receiver's own field `new`,
+/// not a type, and stay with the field lookup -> `None`, as does a chain
+/// past the constructor (`Calc.new.with(1)`) or a block (`Calc.new { .. }`).
+fn postfix_constructed_type(text: &str) -> Option<&str> {
+    // Every step advances over ASCII bytes only, so each index is a char
+    // boundary of `text`.
+    let b = text.as_bytes();
+    let mut i = if b.starts_with(b"::") { 2 } else { 0 };
+    // The segment before the current one, and whether the current one was
+    // reached by a `.`.
+    let (mut prev, mut dotted) = (None::<(usize, usize)>, false);
+    let last = loop {
+        let start = i;
+        while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+            i += 1;
+        }
+        if i == start {
+            return None;
+        }
+        if b[i..].starts_with(b"::") {
+            (prev, dotted) = (Some((start, i)), false);
+            i += 2;
+        } else if b.get(i) == Some(&b'.') {
+            (prev, dotted) = (Some((start, i)), true);
+            i += 1;
+        } else {
+            break (start, i);
+        }
+    };
+    let (ts, te) = prev?;
+    let ty = &text[ts..te];
+    if !dotted || &text[last.0..last.1] != "new" || matches!(ty, "self" | "this") {
+        return None;
+    }
+    while i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i == b.len() {
+        return Some(ty);
+    }
+    if b[i] != b'(' {
+        return None;
+    }
+    (balanced_end(b, i, b'(', b')')? == b.len()).then_some(ty)
 }
 
 /// The index just past the `close` that balances the `open` at `b[at]`,
@@ -2568,6 +2631,70 @@ mod tests {
             seen.marker().as_deref(),
             Some("[recv] constructed receivers: bound=2 unbound=2 (ext=?:1,java:1,ts:2)")
         );
+    }
+
+    /// DH.13: the postfix constructor, Ruby's `Calc.new.add(2, 3)`. The
+    /// chain's last segment before a `.new` (with or without an argument
+    /// list) is the type; `::new`, a chain past the constructor, a block,
+    /// and `self.new` / `this.new` (a field named `new`) are not read.
+    #[test]
+    fn constructed_type_postfix_new() {
+        let from = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, "m1::t");
+        let of = |qualifier: CallQualifier| {
+            constructed_type(&CallSite { from, qualifier, line: 0 }).map(str::to_string)
+        };
+        for (receiver, want) in [
+            ("Calc.new", "Calc"),
+            ("Calc.new(1)", "Calc"),
+            ("Calc.new()", "Calc"),
+            ("Shop::Calc.new", "Calc"),
+            ("::Calc.new", "Calc"),
+            ("Shop.Calc.new(1, \")\")", "Calc"),
+            ("Calc.new(\n  1,\n  2)", "Calc"),
+            ("Calc.new (1)", "Calc"),
+            ("  Calc.new  ", "Calc"),
+            ("(Calc.new)", "Calc"),
+            // Read as written; the type lookup rejects a non-type.
+            ("calc.new", "calc"),
+        ] {
+            assert_eq!(of(recv(receiver, "add")).as_deref(), Some(want), "{receiver:?}");
+        }
+        assert_eq!(of(attr("Calc.new", "add")).as_deref(), Some("Calc"));
+        for receiver in [
+            "Calc.new.with(1)",
+            "Calc.new(1).with",
+            "Calc.new { |c| c }",
+            "Calc.new do end",
+            "Calc.new(1)!",
+            "Calc::new()",
+            "Calc::new",
+            "new",
+            ".new",
+            "Calc.renew",
+            "Calc.newer",
+            "self.new",
+            "this.new",
+            "Calc.new(",
+            "Calc.",
+        ] {
+            assert_eq!(of(recv(receiver, "add")), None, "{receiver:?}");
+        }
+    }
+
+    /// DH.13: a Ruby `Calc.new.add(2, 3)` site (receiver `Calc.new`) binds the
+    /// constructed type's method through `build_ruby`, rule `receiver_type`;
+    /// `Calc.new.with(1).add` and Rust's `Calc::new()` bind nothing.
+    #[test]
+    fn postfix_new_receiver_binds_the_constructed_types_method() {
+        let (calc_file, add) = calc_module("m2");
+        let (caller, t) = constructing_caller(
+            vec![recv("Calc.new", "add"), recv("Calc.new.with(1)", "add"), recv("Calc::new()", "add")],
+            vec![],
+        );
+        let g = crate::build::build_ruby(repo(), vec![calc_file, caller]).unwrap();
+        assert_eq!(edges_of(&g, edge_category::CALLS), vec![(t, add)]);
+        assert_eq!(evidence_rule(&g, t, add, edge_category::CALLS), calls_rule("receiver_type"));
+        assert_eq!(g.unresolved_calls.len(), 2);
     }
 
     // ---- A6.3: TypeScript heritage through UnresolvedRef ---------------------

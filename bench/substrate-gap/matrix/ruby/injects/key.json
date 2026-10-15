@@ -1,18 +1,18 @@
 {
-  "framework": "ruby-injects",
+  "framework": "ruby-dry-auto-inject",
   "language": "ruby",
   "dirs": ["."],
   "mechanism": "injects",
   "cells": ["ruby/injects"],
   "expect_nodes": [
     {"kind": "CLASS", "name": "UserService", "note": "the injected dependency, and the mechanism LITERAL"},
-    {"kind": "CLASS", "name": "OrderController", "note": "the consumer, `def initialize(user_service)` — dry-container style explicit constructor injection, the canonical Ruby DI form (Ruby has no type hints, so the container registration is the only type signal)"}
+    {"kind": "CLASS", "name": "OrderController", "note": "the consumer: `include Import[\"user_service\"]`, the dry-auto_inject builder over the dry-container `Container`"}
   ],
   "expect_edges": [
     {"from": "OrderController", "to": "UserService", "category": "INJECTS",
-     "note": "INTENDED: consumer -> dependency. MEASURED ABSENT 2026-09-16: parsers/code/ruby has no INJECTS site. Ruby is also the HARDEST of the three cells in this packet to fix, because an untyped `initialize(user_service)` parameter carries no type at all — a fix must read the dry-container `register(:user_service) { UserService.new }` binding (or the `@user_service = user_service` assignment plus a name convention), not a parameter type. Recall 0/1."}
+     "note": "dry-auto_inject key `user_service` -> UserService: container.rb registers exactly that class (`register(\"user_service\") { UserService.new }`), and dry-system's inflection of the key gives the same name. Measured absent before DH.13 (the Ruby parser had no INJECTS site)."}
   ],
   "expect_cells": [],
   "forbid": [],
-  "note": "A15.12 structural gap-fill. Baseline 2026-09-16, installed 0.4.18 wheel: 6 nodes / 5 edges, zero INJECTS. `require 'dry/container'` mints no PACKAGE_DEP, so there is no DI-framework marker in the graph either."
+  "note": "DH.13 rewrite of the A15.12 probe: the old source required dry/container but used none of it, and its `def initialize(user_service)` was an untyped parameter that names no type, so no DI fact existed in the source. Now the real dry-rb API (dry-rb.org/gems/dry-auto_inject): `Import = Dry::AutoInject(Container)` + `include Import[\"user_service\"]`, the container registering the key. Same classes, same expected INJECTS edge."
 }

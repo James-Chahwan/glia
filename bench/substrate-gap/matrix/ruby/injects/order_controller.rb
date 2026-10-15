@@ -1,8 +1,9 @@
-require 'dry/container'
-require_relative 'user_service'
+require_relative "container"
 
 class OrderController
-  def initialize(user_service)
-    @user_service = user_service
+  include Import["user_service"]
+
+  def show(id)
+    user_service.find(id)
   end
 end
