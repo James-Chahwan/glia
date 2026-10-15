@@ -6,7 +6,7 @@ use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
 use crate::anchor::{self, Anchor, line_of};
 use crate::code_guard::LazyGuard;
-use crate::generated::generated_by_banner;
+use crate::generated::{generated_by_banner, is_generated};
 
 /// One `rpc` declaration inside a proto `service` block.
 pub struct ProtoRpc {
@@ -985,6 +985,12 @@ impl RpcPackageCell {
 /// stub needle that starts in a string literal or comment is no client site
 /// (`""` = no guard). fired_on, once per call that refused one:
 /// `[code-guard] grpc_client lang=<rust|python> dropped=<n> path=<path>`.
+///
+/// DE.8: a generated file ([`is_generated`]: a protoc / codegen file name or a
+/// generator header) yields nothing. A vendored `*_grpc.pb.go` or
+/// `*_pb2_grpc.py` declares a stub for every service of its proto, and none of
+/// them is a call site. fired_on, once per skipped file with gRPC context:
+/// `[grpc-client] skipped generated file pass=suffix path=<path>`.
 pub fn extract_grpc_client_nodes(
     source: &str,
     path: &str,
@@ -996,6 +1002,9 @@ pub fn extract_grpc_client_nodes(
         nav: CodeNav::default(),
         anchors: Vec::new(),
     };
+    if skips_generated("suffix", path, source) {
+        return out;
+    }
     let mut guard = LazyGuard::new(path, source);
     let hits = suffix_pattern_hits(source, &mut guard);
     guard.report("grpc_client");
@@ -1018,6 +1027,27 @@ pub fn extract_grpc_client_nodes(
     }
     report_dial_hosts("suffix", hosted, sites_seen);
     out
+}
+
+/// DE.8: true when a client pass must skip `path` because it is generated code
+/// ([`is_generated`]). The stubs a code generator writes (`func
+/// NewCartServiceClient(cc ..)`, `class CartServiceStub(object):`) construct no
+/// client, so neither client pass reads such a file and its services keep only
+/// the hand-written sites that call them. The server and proto-rpc passes keep
+/// their header-only rule ([`generated_by_banner`]).
+///
+/// fired_on, once per pass over a skipped file that carries gRPC context
+/// ([`file_has_grpc_context`]), i.e. one that could have held a client:
+/// `[grpc-client] skipped generated file pass=<suffix|known> path=<path>`. A
+/// skipped file is never scanned, so the line carries no site count.
+fn skips_generated(pass: &str, path: &str, source: &str) -> bool {
+    if !is_generated(path, source) {
+        return false;
+    }
+    if file_has_grpc_context(source) {
+        eprintln!("[grpc-client] skipped generated file pass={pass} path={path}");
+    }
+    true
 }
 
 /// CB.21 fired_on marker, once per client pass over a file whose sites
@@ -1154,6 +1184,10 @@ const CLIENT_SUFFIXES: &[&str] = &[
 /// fallback names that suppress a service here are the GUARDED ones, so a
 /// suffix name read only from a literal never hides a real stub of the same
 /// service.
+///
+/// DE.8: a generated file ([`is_generated`]) yields nothing, as for the
+/// fallback; fired_on `[grpc-client] skipped generated file pass=known
+/// path=<path>`.
 pub fn extract_known_grpc_client_nodes(
     source: &str,
     path: &str,
@@ -1166,7 +1200,7 @@ pub fn extract_known_grpc_client_nodes(
         nav: CodeNav::default(),
         anchors: Vec::new(),
     };
-    if known.is_empty() || !file_has_grpc_context(source) {
+    if known.is_empty() || !file_has_grpc_context(source) || skips_generated("known", path, source) {
         return out;
     }
     // The fallback's names count as already emitted: one node per client.
@@ -2754,6 +2788,94 @@ let db = makeDbClient(uri);
         // Declarations are rejected even without the banner.
         let bare = "import grpc\n\nclass GreeterServicer(object):\n    pass\n\ndef add_GreeterServicer_to_server(servicer, server):\n    pass\n";
         assert!(servers(bare).nodes.is_empty());
+    }
+
+    /// DE.8: neither client pass reads a generated file. The stubs protoc
+    /// writes for every service of a proto (`func NewCartServiceClient(cc ..)`,
+    /// `class CartServiceStub(object):`) mint no GRPC_CLIENT, whether the file
+    /// is known by its header or by its name; the hand-written call sites of
+    /// the grpc-generated-stubs fixture still mint theirs.
+    #[test]
+    fn client_passes_skip_generated_code() {
+        let shop = [svc("CartService"), svc("CatalogService"), svc("AdService")];
+        let both = |source: &str, path: &str, known: &[ProtoServiceRef]| {
+            let mut names = client_qnames(&extract_grpc_client_nodes(source, path, module_id(), repo()));
+            names.extend(client_qnames(&extract_known_grpc_client_nodes(source, path, module_id(), repo(), known)));
+            names
+        };
+        let stub_go = |banner: &str| {
+            let mut go = format!("{banner}package genproto\n\nimport (\n\tcontext \"context\"\n\n\tgrpc \"google.golang.org/grpc\"\n)\n");
+            for svc in ["CartService", "CatalogService", "AdService"] {
+                go.push_str(&format!(
+                    "\ntype {svc}Client interface {{}}\n\nfunc New{svc}Client(cc grpc.ClientConnInterface) {svc}Client {{\n\treturn &client{{cc}}\n}}\n\nfunc (c *client) Get(ctx context.Context) error {{\n\treturn c.cc.Invoke(ctx, \"/shop.{svc}/Get\", nil, nil)\n}}\n"
+                ));
+            }
+            go
+        };
+        let stub_py = |banner: &str| {
+            let mut py = format!("{banner}import grpc\n\nimport demo_pb2 as demo__pb2\n");
+            for svc in ["CartService", "CatalogService", "AdService"] {
+                py.push_str(&format!(
+                    "\n\nclass {svc}Stub(object):\n    def __init__(self, channel):\n        self.Get = channel.unary_unary('/shop.{svc}/Get')\n"
+                ));
+            }
+            py
+        };
+        let go_banner = "// Code generated by protoc-gen-go-grpc. DO NOT EDIT.\n// source: demo.proto\n\n";
+        let py_banner = "# Generated by the gRPC Python protocol compiler plugin. DO NOT EDIT!\n";
+        let all = |owner: &str| -> Vec<String> {
+            ["CartService", "CatalogService", "AdService"]
+                .iter()
+                .map(|s| format!("grpc_client:{s}{owner}"))
+                .collect()
+        };
+
+        // CONTROL: the stub text read as a hand-written file mints a client
+        // per service through the suffix pass (the pre-DE.8 false calls).
+        assert_eq!(both(&stub_go(""), "frontend/stubs.go", &shop), all(""));
+        assert_eq!(both(&stub_py(""), "recs/stubs.py", &shop), all(""));
+
+        // Generated by header, by name, or both: nothing from either pass.
+        for (source, path) in [
+            (stub_go(go_banner), "frontend/genproto/demo_grpc.pb.go"),
+            (stub_go(go_banner), "frontend/genproto/stubs.go"),
+            (stub_go(""), "catalog/genproto/demo_grpc.pb.go"),
+            (stub_py(py_banner), "recs/demo_pb2_grpc.py"),
+            (stub_py(py_banner), "recs/stubs.py"),
+            (stub_py(""), "recs/demo_pb2_grpc.py"),
+        ] {
+            assert!(is_generated(path, &source), "{path}");
+            assert!(both(&source, path, &shop).is_empty(), "{path}: generated stubs minted clients");
+        }
+
+        // The data-driven pass on its own: `Greeter` is no suffix-convention
+        // name, so only that pass reads `NewGreeterClient(` and only its own
+        // skip keeps a generated file silent.
+        let greeter = "// Code generated by protoc-gen-go-grpc. DO NOT EDIT.\npackage pb\n\nimport grpc \"google.golang.org/grpc\"\n\nfunc NewGreeterClient(cc grpc.ClientConnInterface) GreeterClient {\n\treturn &greeterClient{cc}\n}\n";
+        let known = [svc("Greeter")];
+        assert!(extract_known_grpc_client_nodes(greeter, "pb/greeter_grpc.pb.go", module_id(), repo(), &known).nodes.is_empty());
+        assert!(extract_known_grpc_client_nodes(greeter, "pb/greeter.go", module_id(), repo(), &known).nodes.is_empty());
+        let unbannered = greeter.replacen("// Code generated by protoc-gen-go-grpc. DO NOT EDIT.\n", "", 1);
+        assert_eq!(
+            client_qnames(&extract_known_grpc_client_nodes(&unbannered, "pb/greeter.go", module_id(), repo(), &known)),
+            vec!["grpc_client:Greeter".to_string()]
+        );
+        assert!(extract_known_grpc_client_nodes(&unbannered, "pb/greeter_grpc.pb.go", module_id(), repo(), &known).nodes.is_empty());
+
+        // The fixture's hand-written sites keep their clients, anchored there.
+        let rpc_go = "package main\n\nimport (\n\t\"context\"\n\n\tpb \"example.com/frontend/genproto\"\n\t\"google.golang.org/grpc\"\n)\n\nfunc getCart(ctx context.Context, conn *grpc.ClientConn, userID string) (*pb.Cart, error) {\n\treturn pb.NewCartServiceClient(conn).GetCart(ctx, &pb.GetCartRequest{UserId: userID})\n}\n\nfunc listProducts(ctx context.Context, conn *grpc.ClientConn) (*pb.ListProductsResponse, error) {\n\treturn pb.NewCatalogServiceClient(conn).ListProducts(ctx, &pb.Empty{})\n}\n";
+        let out = extract_grpc_client_nodes(rpc_go, "frontend/rpc.go", module_id(), repo());
+        assert_eq!(
+            client_qnames(&out),
+            vec!["grpc_client:CartService".to_string(), "grpc_client:CatalogService".to_string()]
+        );
+        assert_eq!(out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![10, 14]);
+        // The data-driven pass adds nothing the fallback already emitted.
+        assert!(extract_known_grpc_client_nodes(rpc_go, "frontend/rpc.go", module_id(), repo(), &shop).nodes.is_empty());
+
+        let server_py = "import grpc\n\nimport demo_pb2\nimport demo_pb2_grpc\n\n\ndef recommend(target):\n    channel = grpc.insecure_channel(target)\n    stub = demo_pb2_grpc.CatalogServiceStub(channel)\n    return stub.ListProducts(demo_pb2.Empty())\n";
+        assert!(!is_generated("recs/server.py", server_py));
+        assert_eq!(both(server_py, "recs/server.py", &shop), vec!["grpc_client:CatalogService".to_string()]);
     }
 
     /// A node of `kind` named `name` spanning `start..=end`, recorded in `nav`.

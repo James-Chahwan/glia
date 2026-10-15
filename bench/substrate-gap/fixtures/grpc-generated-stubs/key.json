@@ -1,0 +1,73 @@
+{
+  "framework": "grpc-generated-stubs",
+  "language": "go+python+proto",
+  "dirs": [
+    "."
+  ],
+  "mechanism": "grpc",
+  "cells": [
+    "go/grpc"
+  ],
+  "note": "DE.8: generated stubs (protoc-gen-go-grpc banner, gRPC Python plugin banner) mint no client sites. Baseline HEAD 84e2e71: 9 GRPC_CLIENT nodes in the generated files, 9 GRPC_CALLS (every service calls all three).",
+  "expect_nodes": [
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "grpc_client:CartService @frontend"
+    },
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "grpc_client:CatalogService @frontend"
+    },
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "grpc_client:CatalogService @recs"
+    },
+    {
+      "kind": "GRPC_SERVER",
+      "name": "grpc_server:CatalogService @catalog"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "grpc_client:CartService @frontend",
+      "to": "grpc:shop.CartService",
+      "category": "GRPC_CALLS"
+    },
+    {
+      "from": "grpc_client:CatalogService @frontend",
+      "to": "grpc:shop.CatalogService",
+      "category": "GRPC_CALLS"
+    },
+    {
+      "from": "grpc_client:CatalogService @recs",
+      "to": "grpc:shop.CatalogService",
+      "category": "GRPC_CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "grpc_client:AdService @frontend"
+    },
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "grpc_client:CartService @catalog"
+    },
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "grpc_client:CatalogService @catalog"
+    },
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "grpc_client:AdService @catalog"
+    },
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "grpc_client:CartService @recs"
+    },
+    {
+      "kind": "GRPC_CLIENT",
+      "name": "grpc_client:AdService @recs"
+    }
+  ]
+}

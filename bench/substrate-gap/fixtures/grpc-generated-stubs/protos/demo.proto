@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package shop;
+
+option go_package = "example.com/shop/genproto";
+
+service CartService {
+  rpc GetCart(GetCartRequest) returns (Cart) {}
+}
+
+service CatalogService {
+  rpc ListProducts(Empty) returns (ListProductsResponse) {}
+}
+
+service AdService {
+  rpc GetAds(AdRequest) returns (AdResponse) {}
+}
+
+message Empty {}
+
+message GetCartRequest {
+  string user_id = 1;
+}
+
+message Cart {
+  string user_id = 1;
+}
+
+message ListProductsResponse {
+  repeated string product_ids = 1;
+}
+
+message AdRequest {
+  repeated string context_keys = 1;
+}
+
+message AdResponse {
+  repeated string ads = 1;
+}
