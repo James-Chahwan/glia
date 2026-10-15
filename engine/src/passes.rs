@@ -6,10 +6,12 @@
 //! ([`crate::profile::CODE_PASSES`], LD.13), which owns their order.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::Path;
 
 use glia_code_domain::evidence::{self, Basis, Evidence, Location};
 use glia_code_domain::glia_config::TestPaths;
 use glia_code_domain::{bare_module_qname, edge_category, node_kind, same_stem_order};
+use glia_code_extractors::generated::{Generated, generated_by_banner, generated_by_name};
 use glia_core::{Confidence, Edge, NodeId, NodeKindId, RepoId};
 use glia_graph::{MergedGraph, RepoGraph};
 
@@ -873,6 +875,15 @@ fn is_identifier(s: &str) -> bool {
 /// by the skip-if-ORIGIN rule. Per declaring repo, after the stamping:
 /// `[provenance] declared tests repo=<label> patterns=<n> tagged=<d>`, where
 /// `tagged` counts node entries only the declared rule tagged.
+///
+/// DE.7: a node no earlier arm tagged whose POSITION file is generated code
+/// ([`generated_files`]: a codegen file name, else a generator header in the
+/// file's head) is stamped `generated`, after the test arms (a generated file
+/// under a test path stays `test_fixture`) and before `external`. protobuf
+/// output keeps its own `generated_proto` arm, by name
+/// ([`glia_code_extractors::generated::generated_by_name`]). The marker's
+/// `generated=` total splits into `name=` / `banner=` (this arm) and
+/// `qname=` (the androidTest arm).
 pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuildCtx) {
     use std::collections::HashSet;
 
@@ -903,6 +914,7 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuild
     };
     let external = |id: &NodeId| third_party.contains(id) && !paired.contains(id);
 
+    let mut generated = generated_files(ctx);
     let mut stats = ProvenanceStats::default();
     for g in &mut merged.graphs {
         let nodes = &mut g.nodes;
@@ -932,8 +944,9 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuild
             {
                 // Framework-generated test stubs — Capacitor's
                 // ExampleInstrumentedTest, anything under androidTest (G11).
+                stats.generated_qname += 1;
                 "generated"
-            } else if is_generated_proto(&file) {
+            } else if generated_by_name(&file) == Some(Generated::Proto) {
                 // protobuf-generated reflection code — `chatpb::*::Reset` etc.
                 // swamp recall on matching trigrams. Distinct from `generated`
                 // so engram can opt it back in independently. (glia-v3 #5)
@@ -953,6 +966,13 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuild
                 *tagged += 1;
                 stats.test_fixture_declared += 1;
                 "test_fixture"
+            } else if let Some(by) = generated.classify(n.repo, &file) {
+                // DE.7: generated code, by codegen name or generator header.
+                match by {
+                    GeneratedBy::Name => stats.generated_name += 1,
+                    GeneratedBy::Banner => stats.generated_banner += 1,
+                }
+                "generated"
             } else if kind == Some(node_kind::ENDPOINT) && external(&n.id) {
                 // A third-party HTTP endpoint (CG.4b, see the doc above).
                 EXTERNAL
@@ -1011,14 +1031,18 @@ fn is_external_origin(c: &glia_core::Cell) -> bool {
 /// `test_fixture` split by whether the path rule fired, only the qname rule,
 /// or only a repo's declared `[walk] tests` (CJ.4). The marker's
 /// `test_fixture=` total counts all three; the declared ones are reported
-/// per repo on their own `[provenance] declared tests` line.
+/// per repo on their own `[provenance] declared tests` line. `generated`
+/// splits by its rule too (DE.7): a codegen file name, a generator header,
+/// or the androidTest qname rule.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ProvenanceStats {
     test_fixture_path: usize,
     test_fixture_qname: usize,
     test_fixture_declared: usize,
     generated_proto: usize,
-    generated: usize,
+    generated_name: usize,
+    generated_banner: usize,
+    generated_qname: usize,
     dependency: usize,
     synthetic: usize,
     /// CG.4b: node ENTRIES stamped `external` (an id in two graphs of a repo
@@ -1027,12 +1051,11 @@ struct ProvenanceStats {
 }
 
 impl ProvenanceStats {
-    /// Count one stamped provenance; `test_fixture` is counted by its rule
-    /// at the stamp site.
+    /// Count one stamped provenance; `test_fixture` and `generated` are
+    /// counted by their rule at the stamp site.
     fn count(&mut self, provenance: &str) {
         match provenance {
             "generated_proto" => self.generated_proto += 1,
-            "generated" => self.generated += 1,
             "dependency" => self.dependency += 1,
             "synthetic" => self.synthetic += 1,
             EXTERNAL => self.external += 1,
@@ -1044,20 +1067,24 @@ impl ProvenanceStats {
     fn marker(&self) -> Option<String> {
         let test_fixture =
             self.test_fixture_path + self.test_fixture_qname + self.test_fixture_declared;
+        let generated = self.generated_name + self.generated_banner + self.generated_qname;
         let total = test_fixture
             + self.generated_proto
-            + self.generated
+            + generated
             + self.dependency
             + self.synthetic
             + self.external;
         (total > 0).then(|| {
             format!(
                 "[provenance] test_fixture={test_fixture} (path={} qname={}) generated_proto={} \
-                 generated={} dependency={} synthetic={} external={}",
+                 generated={generated} (name={} banner={} qname={}) dependency={} synthetic={} \
+                 external={}",
                 self.test_fixture_path,
                 self.test_fixture_qname,
                 self.generated_proto,
-                self.generated,
+                self.generated_name,
+                self.generated_banner,
+                self.generated_qname,
                 self.dependency,
                 self.synthetic,
                 self.external,
@@ -1086,20 +1113,87 @@ fn position_file(cells: &[glia_core::Cell]) -> Option<String> {
     None
 }
 
-/// Generated-protobuf source: codegen file extensions across the languages
-/// quokka-stack mixes (Go / Dart / TS / Python). The reflection-method noise
-/// (`Reset`/`String`/`ProtoReflect`/`Marshal`…) lives in these files. (glia-v3 #5)
-fn is_generated_proto(file: &str) -> bool {
-    file.ends_with(".pb.go")
-        || file.ends_with(".pb-grpc.go")
-        || file.ends_with(".pb.dart")
-        || file.ends_with(".pbjson.dart")
-        || file.ends_with(".pbenum.dart")
-        || file.ends_with(".pbserver.dart")
-        || file.ends_with(".pb.ts")
-        || file.ends_with("_pb2.py")
-        || file.ends_with("_pb2_grpc.py")
-        || file.contains(".pb.")
+/// Which rule classed a file `generated` (DE.7): the `[provenance]`
+/// marker's `name=` / `banner=` split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GeneratedBy {
+    /// A codegen file name ([`Generated::Codegen`]), no read.
+    Name,
+    /// A generator header in the file's head
+    /// ([`glia_code_extractors::generated::generated_by_banner`]).
+    Banner,
+}
+
+/// How much of a file [`GeneratedFiles`] reads for its header: the first
+/// [`glia_code_extractors::generated::BANNER_SCAN_LINES`] lines, never more
+/// than these bytes.
+const BANNER_READ_BYTES: u64 = 8 * 1024;
+
+/// The generated set of one provenance run (DE.7): each repo's files
+/// classified once, as the nodes positioned in them reach the `generated`
+/// arm (no earlier arm tagged them), and remembered. A codegen name is
+/// classed without a read; any other file is read under its repo's root
+/// ([`head_is_generated`]). A repo with no root in the build context (a
+/// layout merge, LC.10b, runs with none) is classed by name only: its
+/// members' stamps are kept by the skip-if-ORIGIN rule. Classification is a
+/// pure function of the path and the file's bytes, so the order nodes ask in
+/// never changes an answer.
+pub(crate) struct GeneratedFiles<'c> {
+    roots: HashMap<RepoId, &'c Path>,
+    /// Per repo (`RepoId.0`), per POSITION file: its classification.
+    classed: BTreeMap<u64, BTreeMap<String, Option<GeneratedBy>>>,
+}
+
+/// The empty generated set of a build: its repos' roots, nothing read yet.
+pub(crate) fn generated_files(ctx: &CodeBuildCtx) -> GeneratedFiles<'_> {
+    GeneratedFiles {
+        roots: ctx.inputs.iter().map(|i| (i.repo, i.root.as_path())).collect(),
+        classed: BTreeMap::new(),
+    }
+}
+
+impl GeneratedFiles<'_> {
+    /// How `repo`'s `file` (a repo-relative POSITION path) is generated
+    /// code, `None` when it is not, has no path, or cannot be read.
+    pub(crate) fn classify(&mut self, repo: RepoId, file: &str) -> Option<GeneratedBy> {
+        if file.is_empty() {
+            return None;
+        }
+        let classed = self.classed.entry(repo.0).or_default();
+        if let Some(by) = classed.get(file) {
+            return *by;
+        }
+        let by = if generated_by_name(file) == Some(Generated::Codegen) {
+            Some(GeneratedBy::Name)
+        } else {
+            let root = self.roots.get(&repo);
+            root.is_some_and(|root| head_is_generated(root, file)).then_some(GeneratedBy::Banner)
+        };
+        classed.insert(file.to_string(), by);
+        by
+    }
+}
+
+/// True when `root/file`'s head carries a generator header: the first
+/// [`BANNER_READ_BYTES`] bytes, lossily decoded, through
+/// [`glia_code_extractors::generated::generated_by_banner`]. A path that is
+/// absolute or climbs out of the root, and any read error, is `false`.
+fn head_is_generated(root: &Path, file: &str) -> bool {
+    use std::io::Read;
+    use std::path::Component;
+
+    let rel = Path::new(file);
+    if !rel.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir)) {
+        return false;
+    }
+    let Ok(f) = std::fs::File::open(root.join(rel)) else {
+        return false;
+    };
+    let mut head = Vec::new();
+    if f.take(BANNER_READ_BYTES).read_to_end(&mut head).is_err() {
+        return false;
+    }
+    generated_by_banner(&String::from_utf8_lossy(&head))
 }
 
 /// Test / fixture / seeder code, by file path or qname shape. (glia-v3 #6;
@@ -2551,13 +2645,18 @@ mod passes_tests {
 
     #[test]
     fn proto_and_test_fixture_detection() {
-        // generated_proto: codegen extensions across languages (glia-v3 #5).
-        assert!(is_generated_proto("chatpb/chat.pb.go"));
-        assert!(is_generated_proto("gen/chat.pb-grpc.go"));
-        assert!(is_generated_proto("lib/proto/chat.pbjson.dart"));
-        assert!(is_generated_proto("proto/chat_pb2.py"));
-        assert!(!is_generated_proto("src/chat.go"));
-        assert!(!is_generated_proto("src/app/chat.component.ts"));
+        // generated_proto: codegen extensions across languages (glia-v3 #5),
+        // the shared classifier's Proto names since DE.7.
+        let proto = |f: &str| generated_by_name(f) == Some(Generated::Proto);
+        assert!(proto("chatpb/chat.pb.go"));
+        assert!(proto("gen/chat.pb-grpc.go"));
+        assert!(proto("lib/proto/chat.pbjson.dart"));
+        assert!(proto("proto/chat_pb2.py"));
+        assert!(proto("lib/core/generated/quokka_chat.pbgrpc.dart"));
+        assert!(proto("web/gen/chat_grpc_pb.js"));
+        assert!(!proto("src/chat.go"));
+        assert!(!proto("src/app/chat.component.ts"));
+        assert!(!proto("lib/user.g.dart"));
         // test_fixture: paths + qname shapes (glia-v3 #6).
         assert!(is_test_fixture("services/auth_test.go", "turps::auth"));
         assert!(is_test_fixture("app/login.spec.ts", "quokka_web::login"));
@@ -2625,17 +2724,27 @@ mod passes_tests {
     #[test]
     fn provenance_marker_counts_path_apart_from_qname() {
         assert_eq!(ProvenanceStats::default().marker(), None);
-        let mut s = ProvenanceStats { test_fixture_path: 3, test_fixture_qname: 2, ..Default::default() };
-        for p in ["generated_proto", "generated", "generated", "dependency", "synthetic", "test_fixture", "external"] {
+        let mut s = ProvenanceStats {
+            test_fixture_path: 3,
+            test_fixture_qname: 2,
+            generated_name: 1,
+            generated_banner: 3,
+            generated_qname: 2,
+            ..Default::default()
+        };
+        // `test_fixture` and `generated` are counted at their stamp sites.
+        for p in ["generated_proto", "generated", "dependency", "synthetic", "test_fixture", "external"] {
             s.count(p);
         }
         assert_eq!(
             s.marker().as_deref(),
             Some(
-                "[provenance] test_fixture=5 (path=3 qname=2) generated_proto=1 generated=2 \
-                 dependency=1 synthetic=1 external=1"
+                "[provenance] test_fixture=5 (path=3 qname=2) generated_proto=1 generated=6 \
+                 (name=1 banner=3 qname=2) dependency=1 synthetic=1 external=1"
             )
         );
+        let only_banner = ProvenanceStats { generated_banner: 3, ..Default::default() };
+        assert!(only_banner.marker().is_some_and(|m| m.contains(" generated=3 (name=0 banner=3 qname=0) ")));
         let only_external = ProvenanceStats { external: 2, ..Default::default() };
         assert!(only_external.marker().is_some_and(|m| m.ends_with(" external=2")));
     }
@@ -2805,6 +2914,137 @@ mod passes_tests {
         // The marker's total counts the declared stamps too.
         let s = ProvenanceStats { test_fixture_path: 1, test_fixture_declared: 2, ..Default::default() };
         assert!(s.marker().is_some_and(|m| m.starts_with("[provenance] test_fixture=3 (path=1 qname=0)")));
+    }
+
+    /// DE.7: the generator heads the provenance pass reads, and the
+    /// hand-written edit warning it must not take for one.
+    #[test]
+    fn generated_banner_heads_and_the_hand_written_warning() {
+        for (what, head) in [
+            ("sqlc", "// Code generated by sqlc. DO NOT EDIT.\n// versions:\n//   sqlc v1.25.0\n\npackage db\n"),
+            ("protoc-py", "# -*- coding: utf-8 -*-\n# Generated by the protocol buffer compiler.  DO NOT EDIT!\n# source: chat.proto\n"),
+            ("dart", "//\n//  Generated code. Do not modify.\n//  source: quokka_chat.proto\n//\n"),
+            ("swaggo", "// Package docs Code generated by swaggo/swag. DO NOT EDIT\npackage docs\n"),
+            ("openapi", "/**\n * NOTE: This class is auto generated by OpenAPI Generator (https://openapi-generator.tech).\n * https://openapi-generator.tech\n * Do not edit the class manually.\n */\n"),
+        ] {
+            assert!(generated_by_banner(head), "{what}");
+        }
+        assert!(!generated_by_banner(
+            "// Limits. Do not edit without updating the migration.\npackage db\n\nconst MaxUsers = 10\n"
+        ));
+    }
+
+    /// DE.7: ORIGIN `generated` on the nodes of a generator-headed file (read
+    /// under the repo root) and of a codegen-named one (no read), after the
+    /// test arms and the protobuf name arm; nothing for a hand-written file,
+    /// an edit warning without `generated`, a missing file, a path that
+    /// climbs out of the root, or a repo the context has no root for (a
+    /// layout merge), where only names classify.
+    #[test]
+    fn generated_files_stamp_generated_after_the_test_arms() {
+        use std::path::PathBuf;
+
+        use crate::external::RepoInputs;
+
+        const SQLC: &str = "// Code generated by sqlc. DO NOT EDIT.\npackage db\n\nfunc GetUser(id int) string { return \"\" }\n";
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("repo");
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+            std::fs::write(path, body).expect("write");
+        };
+        write("db/queries_gen.go", SQLC);
+        write("db/store.go", "package db\n\nfunc NewStore() string { return GetUser(1) }\n");
+        write("db/limits.go", "// Limits. Do not edit without updating the migration.\npackage db\n\nfunc Limit() int { return 10 }\n");
+        write("db/queries_gen_test.go", SQLC);
+        std::fs::write(tmp.path().join("outside.go"), SQLC).expect("write");
+
+        let at = |file: &str| Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":3,"end_line":3}}"#)),
+        };
+        const OWN: &str = r#"{"provenance":"contract","source":"openapi"}"#;
+        let fx = node_kind::FUNCTION;
+        let build = || {
+            let mut a = Hand::new("test://de7-a");
+            let ids = [
+                a.add(fx, "GetUser", "db::queries_gen::GetUser", vec![at("db/queries_gen.go")]),
+                a.add(fx, "ListUsers", "db::queries_gen::ListUsers", vec![at("db/queries_gen.go")]),
+                a.add(fx, "NewStore", "db::store::NewStore", vec![at("db/store.go")]),
+                a.add(fx, "Limit", "db::limits::Limit", vec![at("db/limits.go")]),
+                a.add(fx, "userToJson", "lib::user.g::userToJson", vec![at("lib/user.g.dart")]),
+                a.add(fx, "TestGetUser", "db::queries_gen_test::TestGetUser", vec![at("db/queries_gen_test.go")]),
+                a.add(fx, "chat", "lib::chat.pbgrpc::chat", vec![at("lib/chat.pbgrpc.dart")]),
+                a.add(fx, "Gone", "db::gone::Gone", vec![at("db/gone.go")]),
+                a.add(fx, "Out", "out::Out", vec![at("../outside.go")]),
+                a.add(fx, "Own", "db::queries_gen::Own", vec![
+                    at("db/queries_gen.go"),
+                    Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(OWN.into()) },
+                ]),
+                a.add(fx, "seed", "db::queries_gen::seed", vec![]),
+            ];
+            // Repo B shares the paths but has no root in the context.
+            let mut b = Hand::new("test://de7-b");
+            let other = [
+                b.add(fx, "GetUser", "db::queries_gen::GetUser", vec![at("db/queries_gen.go")]),
+                b.add(fx, "userToJson", "lib::user.g::userToJson", vec![at("lib/user.g.dart")]),
+            ];
+            (MergedGraph::new(vec![a.graph(), b.graph()]), ids, other)
+        };
+        let ctx = CodeBuildCtx {
+            inputs: vec![RepoInputs {
+                repo: RepoId::from_canonical("test://de7-a"),
+                root: PathBuf::from(&root),
+                label: "a".into(),
+                config: None,
+            }],
+            overlay: true,
+        };
+        let origin = |p: &str| vec![format!(r#"{{"provenance":"{p}"}}"#)];
+        let none: Vec<String> = Vec::new();
+
+        let (mut m, ids, other) = build();
+        tag_synthetic_provenance(&mut m, &ctx);
+        let [get, list, store, limit, to_json, test, chat, gone, out, own, seed] = ids;
+        assert_eq!(origins(&m, get), origin("generated"), "a generator header");
+        assert_eq!(origins(&m, list), origin("generated"), "every node of the file");
+        assert_eq!(origins(&m, store), none, "hand-written");
+        assert_eq!(origins(&m, limit), none, "an edit warning without `generated`");
+        assert_eq!(origins(&m, to_json), origin("generated"), "a codegen name, never read");
+        assert_eq!(origins(&m, test), origin("test_fixture"), "a test path wins over a header");
+        assert_eq!(origins(&m, chat), origin("generated_proto"), "`.pbgrpc.dart` is protobuf output");
+        assert_eq!(origins(&m, gone), none, "a missing file is not generated");
+        assert_eq!(origins(&m, out), none, "never read outside the root");
+        assert_eq!(origins(&m, own), vec![OWN.to_string()], "an ORIGIN of its own is kept");
+        assert_eq!(origins(&m, seed), none, "no POSITION, nothing to read");
+        assert_eq!(origins(&m, other[0]), none, "no root: no header read");
+        assert_eq!(origins(&m, other[1]), origin("generated"), "no root: names still classify");
+
+        // Each file is classed once, whatever number of nodes it holds; a
+        // codegen name needs no file on disk.
+        let mut set = generated_files(&ctx);
+        let a = RepoId::from_canonical("test://de7-a");
+        assert_eq!(set.classify(a, "db/queries_gen.go"), Some(GeneratedBy::Banner));
+        assert_eq!(set.classify(a, "db/queries_gen.go"), Some(GeneratedBy::Banner));
+        assert_eq!(set.classify(a, "lib/user.g.dart"), Some(GeneratedBy::Name));
+        assert_eq!(set.classify(a, "db/store.go"), None);
+        assert_eq!(set.classify(a, ""), None);
+        assert_eq!(set.classed.values().map(BTreeMap::len).sum::<usize>(), 3, "one entry per file");
+
+        // A layout merge (no inputs) reads nothing: names only.
+        let (mut m, ids, _) = build();
+        tag_synthetic_provenance(&mut m, &CodeBuildCtx::empty());
+        assert_eq!(origins(&m, ids[0]), none);
+        assert_eq!(origins(&m, ids[4]), origin("generated"));
+
+        // A re-run changes nothing.
+        let (mut m, ids, _) = build();
+        tag_synthetic_provenance(&mut m, &ctx);
+        let before: Vec<Vec<String>> = ids.iter().map(|id| origins(&m, *id)).collect();
+        tag_synthetic_provenance(&mut m, &ctx);
+        let after: Vec<Vec<String>> = ids.iter().map(|id| origins(&m, *id)).collect();
+        assert_eq!(before, after);
     }
 
     #[test]

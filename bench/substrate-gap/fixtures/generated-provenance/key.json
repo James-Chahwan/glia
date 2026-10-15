@@ -1,0 +1,17 @@
+{
+  "framework": "generated-provenance",
+  "language": "go+dart+csharp",
+  "dirs": ["."],
+  "note": "DE.7: ORIGIN generated from a generator banner or a codegen file name. Baseline HEAD 84e2e71 (verifier grade, 0.5.1 leap wheel) and again at 19b03712 (0.5.2 W1 leap wheel): the 4 expect_nodes found, ORIGIN 0/3, no [provenance] line. The negatives (hand-written db/store.go and db/limits.go, whose `Do not edit` carries no `generated`, stay untagged) are asserted by engine/tests/generated_provenance.rs: grade.py's frozen forbid has no cell form.",
+  "expect_nodes": [
+    {"kind": "FUNCTION", "name": "GetUser"},
+    {"kind": "FUNCTION", "name": "userToJson"},
+    {"kind": "METHOD", "name": "Get"},
+    {"kind": "FUNCTION", "name": "NewStore"}
+  ],
+  "expect_cells": [
+    {"kind": "FUNCTION", "node": "db::queries_gen::GetUser", "cell": "ORIGIN", "contains": "\"provenance\":\"generated\""},
+    {"kind": "FUNCTION", "node": "lib::user.g::userToJson", "cell": "ORIGIN", "contains": "\"provenance\":\"generated\""},
+    {"kind": "METHOD", "node": "Gen::Data::Settings::Get", "cell": "ORIGIN", "contains": "\"provenance\":\"generated\""}
+  ]
+}
