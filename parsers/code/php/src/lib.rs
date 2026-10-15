@@ -1,4 +1,4 @@
-use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
+use glia_core::{Cell, CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId, RepoId};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use tree_sitter::{Node as TsNode, Parser};
@@ -46,6 +46,7 @@ pub fn parse_file(
         eloquent: Eloquent::prescan(root, src),
         module_qname: module_qname.to_string(),
         own_types: declared_types(root, src),
+        namespace_tails: namespace_tails(root, src),
         ..Acc::default()
     };
 
@@ -96,6 +97,16 @@ pub fn parse_file(
         eprintln!(
             "[php-use] {} use clauses shadowed by the file's own type name skipped file={file_rel_path}",
             acc.shadowed_uses
+        );
+    }
+
+    if let Some(line) = HeritageCounts::of(&acc.refs, &acc.nav).marker(file_rel_path) {
+        eprintln!("{line}");
+    }
+    if acc.namespace_named_bases > 0 {
+        eprintln!(
+            "[php-heritage] namespace-named bases skipped={} path={file_rel_path}",
+            acc.namespace_named_bases
         );
     }
 
@@ -294,6 +305,12 @@ struct Acc {
     endpoint_seen: std::collections::HashSet<NodeId>,
     /// Eloquent model / query-site state for this file (`[orm-eloquent]`).
     eloquent: Eloquent,
+    /// DH.14: the last `\` segment of every namespace this file declares
+    /// ([`namespace_tails`]), read up front for [`heritage_refs`]' stopgap.
+    namespace_tails: Vec<String>,
+    /// DH.14: heritage names [`heritage_refs`] skipped because they equal one
+    /// of `namespace_tails` — the `[php-heritage] namespace-named` count.
+    namespace_named_bases: usize,
 }
 
 /// `parent_qname` scopes functions; `type_scope` scopes classes / interfaces /
@@ -422,6 +439,14 @@ fn visit_class(
     });
     acc.nav
         .record(id, name, &qname, node_kind::CLASS, Some(parent_id));
+    // `parent_id` is the file MODULE or the braced namespace PACKAGE, as for
+    // `emit_ctor_injects` below: either scopes the heritage lookup.
+    if let Some(clause) = heritage_clause(node, "base_clause") {
+        heritage_refs(clause, src, name, id, parent_id, edge_category::INHERITS_FROM, acc);
+    }
+    if let Some(clause) = heritage_clause(node, "class_interface_clause") {
+        heritage_refs(clause, src, name, id, parent_id, edge_category::IMPLEMENTS, acc);
+    }
     if acc.eloquent.model_classes.contains(&node.id()) {
         emit_eloquent_model(node, src, name, id, repo, acc);
     }
@@ -492,6 +517,22 @@ fn visit_interface(
     });
     acc.nav
         .record(id, name, &qname, node_kind::INTERFACE, Some(parent_id));
+    // `interface A extends B, C`: INHERITS_FROM, as Java's interface extends.
+    if let Some(clause) = heritage_clause(node, "base_clause") {
+        heritage_refs(clause, src, name, id, parent_id, edge_category::INHERITS_FROM, acc);
+    }
+    // DH.14: the interface's method declarations are METHOD children of it
+    // (`interface_methods`), so A6.6 pairs each implementation's same-named
+    // method with them (method-level IMPLEMENTS). They have no body, so no
+    // calls; no `#[Route]` prefix applies to an interface.
+    if let Some(body) = node.child_by_field_name("body") {
+        let mut cursor = body.walk();
+        for child in body.named_children(&mut cursor) {
+            if child.kind() == "method_declaration" {
+                visit_method(child, src, file_rel, &qname, id, repo, "", acc);
+            }
+        }
+    }
     true
 }
 
@@ -528,7 +569,143 @@ fn visit_enum(
     });
     acc.nav
         .record(id, name, &qname, node_kind::ENUM, Some(parent_id));
+    // PHP 8.1: `enum Suit: string implements HasLabel`.
+    if let Some(clause) = heritage_clause(node, "class_interface_clause") {
+        heritage_refs(clause, src, name, id, parent_id, edge_category::IMPLEMENTS, acc);
+    }
     true
+}
+
+/// DH.14: the declaration's `kind` heritage clause (`base_clause`: a class's
+/// `extends B`, an interface's `extends A, B`; `class_interface_clause`:
+/// `implements A, B`), a direct child with no field name (tree-sitter-php 0.24).
+fn heritage_clause<'a>(decl: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
+    let mut cursor = decl.walk();
+    decl.named_children(&mut cursor).find(|k| k.kind() == kind)
+}
+
+/// DH.14: one Bare `category` ref from the declared type `from` per type name
+/// `clause` lists, in source order. The qualifier is the written name's last
+/// `\` segment: a fully-qualified `\App\Contracts\UserRepository`, a relative
+/// `Contracts\UserRepository` or `namespace\UserRepository` and an imported
+/// short name all reduce to `UserRepository`. The graph binds it
+/// (`resolve_refs`): the file's `use` bindings, then the scope's own types, then
+/// a type of that name unique in the repo; a framework base no in-repo type
+/// shares a name with binds nothing. A name equal to the declaring type's own
+/// `own` (`class TestCase extends \PHPUnit\Framework\TestCase`; PHP type
+/// names compare case-insensitively) is skipped: a type never extends itself,
+/// and the repo-unique lookup would bind it to itself. `from_module` scopes the
+/// lookup (the file MODULE, or a braced namespace's PACKAGE). Each ref's line
+/// is its name's own row (LC.3b), the clause's row unless the list wraps.
+///
+/// STOPGAP (DH.14): a name equal to the last segment of a namespace this file
+/// declares is skipped too (`namespace App\Command; class SyncCommand extends
+/// Command`, Laravel's `namespace App\Http\Middleware; class TrimStrings
+/// extends Middleware`). `resolve_refs` binds a Bare heritage name through the
+/// file MODULE's `module_symbols`, then `unique_global_function`, and both
+/// index the file's namespace PACKAGE by that segment, so the class would
+/// INHERITS_FROM its own namespace (C# `namespace App.Command { class X :
+/// Command }` binds so at HEAD). The cost: an in-repo base of that same short
+/// name is not linked either (Slim's `DomainRecordNotFoundException extends
+/// DomainException` inside `namespace App\Domain\DomainException`, which
+/// HEAD's lookup would bind to the PACKAGE too). A namespace declared in
+/// ANOTHER file is not seen here, so that collision still binds the PACKAGE:
+/// directly, or through the IMPORTS binding the import resolver draws by name
+/// alone (`tail_unique`: `use Illuminate\Console\Command;` binds a repo's
+/// `App\Command` namespace). Removal:
+/// once `resolve_refs` restricts a heritage target to a type kind (CLASS /
+/// INTERFACE / ENUM / STRUCT / TRAIT), delete this check, `Acc::namespace_tails`,
+/// `Acc::namespace_named_bases` and its marker line.
+fn heritage_refs(
+    clause: TsNode,
+    src: &[u8],
+    own: &str,
+    from: NodeId,
+    from_module: NodeId,
+    category: EdgeCategoryId,
+    acc: &mut Acc,
+) {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut cursor = clause.walk();
+    for written in clause.named_children(&mut cursor) {
+        if !matches!(written.kind(), "name" | "qualified_name" | "relative_name") {
+            continue;
+        }
+        let text = text_of(written, src).trim();
+        let last = text.rsplit('\\').next().unwrap_or(text).trim();
+        if last.is_empty() || last.eq_ignore_ascii_case(own) || !seen.insert(last.to_ascii_lowercase()) {
+            continue;
+        }
+        if acc.namespace_tails.iter().any(|t| t.eq_ignore_ascii_case(last)) {
+            acc.namespace_named_bases += 1;
+            continue;
+        }
+        acc.refs.push(UnresolvedRef {
+            from,
+            from_module,
+            qualifier: CallQualifier::Bare(last.to_string()),
+            category,
+            line: line_at(written),
+        });
+    }
+}
+
+/// DH.14: the last `\` segment of every namespace a file declares (statement
+/// and braced form), for [`heritage_refs`]' stopgap.
+fn namespace_tails(root: TsNode, src: &[u8]) -> Vec<String> {
+    let mut cursor = root.walk();
+    root.named_children(&mut cursor)
+        .filter(|c| c.kind() == "namespace_definition")
+        .filter_map(|c| c.child_by_field_name("name"))
+        .filter_map(|n| {
+            let text = text_of(n, src).trim();
+            let last = text.rsplit('\\').next().unwrap_or(text).trim();
+            (!last.is_empty()).then(|| last.to_string())
+        })
+        .collect()
+}
+
+/// DH.14: the heritage refs one PHP file emitted, by clause: a class's
+/// `extends` (`extends`), every name a class or enum `implements` lists
+/// (`implements`) and every name an interface `extends` lists
+/// (`interface_extends`). Read back off the parse's refs, so the marker counts
+/// exactly what the graph is handed.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct HeritageCounts {
+    extends: usize,
+    implements: usize,
+    interface_extends: usize,
+}
+
+impl HeritageCounts {
+    fn of(refs: &[UnresolvedRef], nav: &CodeNav) -> Self {
+        let mut counts = Self::default();
+        for r in refs {
+            if r.category == edge_category::IMPLEMENTS {
+                counts.implements += 1;
+            } else if r.category == edge_category::INHERITS_FROM {
+                if nav.kind_by_id.get(&r.from) == Some(&node_kind::INTERFACE) {
+                    counts.interface_extends += 1;
+                } else {
+                    counts.extends += 1;
+                }
+            }
+        }
+        counts
+    }
+
+    /// The fired_on line, once per file, `None` when the file emitted no
+    /// heritage ref:
+    /// `[php-heritage] extends=<n> implements=<n> interface_extends=<n> path=<file>`.
+    ///   `glia analyze <repo> 2>&1 | grep '^\[php-heritage\]'`
+    fn marker(&self, file_rel: &str) -> Option<String> {
+        (self.extends + self.implements + self.interface_extends > 0).then(|| {
+            format!(
+                "[php-heritage] extends={} implements={} interface_extends={} path={file_rel}",
+                self.extends, self.implements, self.interface_extends
+            )
+        })
+    }
 }
 
 fn visit_function(
@@ -2733,11 +2910,13 @@ interface Payable
             qnames_of(&fp, node_kind::INTERFACE),
             vec!["src::Billing::Payable"]
         );
+        // DH.14: an interface's method declarations are METHOD nodes too.
         assert_eq!(
             qnames_of(&fp, node_kind::METHOD),
             vec![
                 "src::Billing::Invoice::round",
-                "src::Billing::Invoice::total"
+                "src::Billing::Invoice::total",
+                "src::Billing::Payable::pay"
             ]
         );
         assert!(
@@ -4366,6 +4545,213 @@ class AuditService
             entity_id("audit_log"),
             edge_category::ACCESSES_DATA.0
         ));
+    }
+
+    /// DH.14: every heritage ref of a parse as `(from qname, category,
+    /// qualifier name, 0-based line)`, in emission order.
+    fn heritage_of(fp: &FileParse) -> Vec<(String, u32, String, u32)> {
+        fp.refs
+            .iter()
+            .filter(|r| {
+                r.category == edge_category::INHERITS_FROM || r.category == edge_category::IMPLEMENTS
+            })
+            .map(|r| {
+                let from = fp.nav.qname_by_id.get(&r.from).cloned().unwrap_or_default();
+                let CallQualifier::Bare(name) = &r.qualifier else {
+                    panic!("heritage refs are Bare: {:?}", r.qualifier);
+                };
+                (from, r.category.0, name.clone(), r.line)
+            })
+            .collect()
+    }
+
+    const INHERITS: u32 = edge_category::INHERITS_FROM.0;
+    const IMPLEMENTS: u32 = edge_category::IMPLEMENTS.0;
+
+    /// The heritage tuple `heritage_of` reads.
+    fn h(from: &str, category: u32, name: &str, line: u32) -> (String, u32, String, u32) {
+        (from.to_string(), category, name.to_string(), line)
+    }
+
+    #[test]
+    fn class_implements_interface_ref() {
+        // bench/substrate-gap/matrix/php/impl/src/EloquentUserRepository.php.
+        let source = "<?php\n\nnamespace App;\n\nclass EloquentUserRepository implements UserRepository\n{\n    public function find(int $id): array\n    {\n        return ['id' => $id];\n    }\n}\n";
+        let module = "src::EloquentUserRepository";
+        let fp = parse_file(source, "src/EloquentUserRepository.php", module, repo()).unwrap();
+        assert_eq!(
+            heritage_of(&fp),
+            [h("src::EloquentUserRepository", IMPLEMENTS, "UserRepository", 4)]
+        );
+        let class = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, module);
+        let r = fp.refs.iter().find(|r| r.category == edge_category::IMPLEMENTS).unwrap();
+        assert_eq!(r.from, class);
+        assert_eq!(
+            r.from_module,
+            NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module),
+            "a statement-form namespace scopes the lookup by the file MODULE"
+        );
+        let counts = &parse_counts(source, "src/EloquentUserRepository.php", module);
+        assert_eq!(
+            counts.marker("src/EloquentUserRepository.php").as_deref(),
+            Some("[php-heritage] extends=0 implements=1 interface_extends=0 path=src/EloquentUserRepository.php")
+        );
+    }
+
+    /// The [`HeritageCounts`] `parse_file` prints its marker from.
+    fn parse_counts(source: &str, file_rel: &str, module: &str) -> HeritageCounts {
+        let fp = parse_file(source, file_rel, module, repo()).unwrap();
+        HeritageCounts::of(&fp.refs, &fp.nav)
+    }
+
+    #[test]
+    fn class_extends_ref() {
+        let source = "<?php\nnamespace Shop;\n\nclass PgCatalog extends BaseCatalog\n{\n}\n";
+        let fp = parse_file(source, "src/PgCatalog.php", "src::PgCatalog", repo()).unwrap();
+        assert_eq!(heritage_of(&fp), [h("src::PgCatalog", INHERITS, "BaseCatalog", 3)]);
+        let none = parse_file("<?php\nclass Plain {}\n", "src/Plain.php", "src::Plain", repo())
+            .unwrap();
+        assert!(heritage_of(&none).is_empty());
+        assert_eq!(parse_counts("<?php\nclass Plain {}\n", "src/Plain.php", "src::Plain").marker("src/Plain.php"), None);
+    }
+
+    #[test]
+    fn multiple_implements() {
+        // One ref per listed interface, in source order, beside the extends;
+        // a multi-line list puts each name on its own row.
+        let source = "<?php\nnamespace App;\n\nfinal class Report extends Document implements Exportable, Countable,\n    \\JsonSerializable\n{\n}\n";
+        let fp = parse_file(source, "src/Report.php", "src::Report", repo()).unwrap();
+        assert_eq!(
+            heritage_of(&fp),
+            [
+                h("src::Report", INHERITS, "Document", 3),
+                h("src::Report", IMPLEMENTS, "Exportable", 3),
+                h("src::Report", IMPLEMENTS, "Countable", 3),
+                h("src::Report", IMPLEMENTS, "JsonSerializable", 4),
+            ]
+        );
+        assert_eq!(
+            parse_counts(source, "src/Report.php", "src::Report").marker("src/Report.php").as_deref(),
+            Some("[php-heritage] extends=1 implements=3 interface_extends=0 path=src/Report.php")
+        );
+    }
+
+    #[test]
+    fn interface_extends_refs() {
+        // engine/tests/implementors.rs's PHP source: `interface Catalog
+        // extends Readable` is INHERITS_FROM from the INTERFACE (the Java
+        // shape), and an interface's own method declarations are METHOD
+        // children of it, so A6.6 can pair an implementation with them.
+        let source = "<?php\nnamespace Shop;\ninterface Readable { public function read(string $id): string; }\ninterface Catalog extends Readable, \\Countable { public function search(string $q): array; }\n";
+        let fp = parse_file(source, "Repo.php", "Repo", repo()).unwrap();
+        assert_eq!(
+            heritage_of(&fp),
+            [h("Catalog", INHERITS, "Readable", 3), h("Catalog", INHERITS, "Countable", 3)]
+        );
+        let catalog = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::INTERFACE, "Catalog");
+        let search = method_id("Catalog::search");
+        assert_eq!(fp.nav.kind_by_id.get(&search), Some(&node_kind::METHOD));
+        assert_eq!(fp.nav.parent_of.get(&search), Some(&catalog));
+        assert!(has_edge(&fp, catalog, search, edge_category::DEFINES.0));
+        assert_eq!(qnames_of(&fp, node_kind::METHOD), ["Catalog::search", "Readable::read"]);
+        assert_eq!(
+            parse_counts(source, "Repo.php", "Repo").marker("Repo.php").as_deref(),
+            Some("[php-heritage] extends=0 implements=0 interface_extends=2 path=Repo.php")
+        );
+    }
+
+    #[test]
+    fn enum_implements_ref() {
+        // PHP 8.1: a backed enum implementing an interface.
+        let source = "<?php\nnamespace App\\Enums;\n\nenum Suit: string implements HasLabel\n{\n    case Hearts = 'H';\n}\n";
+        let fp = parse_file(source, "src/Enums/Suit.php", "src::Enums::Suit", repo()).unwrap();
+        assert_eq!(heritage_of(&fp), [h("src::Enums::Suit", IMPLEMENTS, "HasLabel", 3)]);
+        let r = &fp.refs[0];
+        assert_eq!(
+            fp.nav.kind_by_id.get(&r.from),
+            Some(&node_kind::ENUM),
+            "the enum is the implementer"
+        );
+    }
+
+    #[test]
+    fn qualified_name_uses_last_segment() {
+        // Fully-qualified, namespace-relative and `namespace\`-relative names
+        // all reduce to their last `\` segment; a braced namespace scopes the
+        // lookup by its PACKAGE (where its types are indexed).
+        let source = "<?php\nnamespace App\\Repos {\n    class Users extends \\Illuminate\\Database\\Eloquent\\Model implements \\App\\Contracts\\UserRepository, Contracts\\Audited, namespace\\Local {}\n}\n";
+        let fp = parse_file(source, "src/Repos.php", "src::Repos", repo()).unwrap();
+        assert_eq!(
+            heritage_of(&fp),
+            [
+                h("App::Repos::Users", INHERITS, "Model", 2),
+                h("App::Repos::Users", IMPLEMENTS, "UserRepository", 2),
+                h("App::Repos::Users", IMPLEMENTS, "Audited", 2),
+                h("App::Repos::Users", IMPLEMENTS, "Local", 2),
+            ]
+        );
+        let package = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::PACKAGE, "App::Repos");
+        assert!(fp.refs.iter().all(|r| r.from_module == package), "{:?}", fp.refs);
+    }
+
+    #[test]
+    fn a_base_named_like_its_subclass_is_skipped() {
+        // `class TestCase extends \PHPUnit\Framework\TestCase` names a vendor
+        // base; its last segment is the class's own name, which the
+        // repo-unique lookup would bind to the class itself.
+        let source = "<?php\nnamespace Tests;\n\nabstract class TestCase extends \\PHPUnit\\Framework\\TestCase implements Fixture {}\n";
+        let fp = parse_file(source, "tests/TestCase.php", "tests::TestCase", repo()).unwrap();
+        assert_eq!(heritage_of(&fp), [h("tests::TestCase", IMPLEMENTS, "Fixture", 3)]);
+    }
+
+    #[test]
+    fn a_base_named_like_a_namespace_of_the_file_is_skipped() {
+        // DH.14's stopgap: the graph's Bare heritage lookup would bind these
+        // to the file's own namespace PACKAGE (`App::Command`,
+        // `App::Http::Middleware`); the other clause names are unaffected.
+        let symfony = "<?php\nnamespace App\\Command;\n\nuse Symfony\\Component\\Console\\Command\\Command;\n\nclass SyncCommand extends Command implements Audited {}\n";
+        let fp = parse_file(symfony, "src/Command/SyncCommand.php", "src::Command::SyncCommand", repo())
+            .unwrap();
+        assert_eq!(heritage_of(&fp), [h("src::Command::SyncCommand", IMPLEMENTS, "Audited", 5)]);
+        let laravel = "<?php\n\nnamespace App\\Http\\Middleware;\n\nuse Illuminate\\Foundation\\Http\\Middleware\\TrimStrings as Middleware;\n\nclass TrimStrings extends Middleware\n{\n}\n";
+        let fp = parse_file(laravel, "app/Http/Middleware/TrimStrings.php", "app::Http::Middleware::TrimStrings", repo())
+            .unwrap();
+        assert!(heritage_of(&fp).is_empty(), "{:?}", heritage_of(&fp));
+        assert_eq!(
+            namespace_tails(
+                tree_root(laravel).root_node(),
+                laravel.as_bytes()
+            ),
+            ["Middleware"]
+        );
+    }
+
+    /// A tree-sitter-php parse of `source`, for the helpers that read a root.
+    fn tree_root(source: &str) -> tree_sitter::Tree {
+        let mut parser = Parser::new();
+        let lang: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
+        parser.set_language(&lang).unwrap();
+        parser.parse(source, None).unwrap()
+    }
+
+    #[test]
+    fn eloquent_model_detection_unchanged() {
+        // The Eloquent check still reads the base clause; the same clause now
+        // also yields the INHERITS_FROM ref (which binds only an in-repo
+        // `Model`).
+        let source = r#"<?php
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Model;
+
+class Flight extends Model
+{
+    protected $table = 'flights';
+}
+"#;
+        let fp = parse_file(source, "app/Models/Flight.php", "app::Models::Flight", repo()).unwrap();
+        assert_eq!(entity_names(&fp), vec!["data_entity:sql:Flight"]);
+        assert_eq!(heritage_of(&fp), [h("app::Models::Flight", INHERITS, "Model", 5)]);
     }
 
     #[test]

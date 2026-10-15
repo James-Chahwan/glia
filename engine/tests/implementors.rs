@@ -2,8 +2,8 @@
 //! method), transitively, and its supertypes, each row tiered by the weakest
 //! heritage edge on its path. The graph has held the edges since LD.7a / LD.7b
 //! / A6.6; before this the only route was a blast radius, which mixes them
-//! with CALLS / INJECTS rows and gives no tier, and says nothing at all for a
-//! PHP interface (no heritage edge is extracted there).
+//! with CALLS / INJECTS rows and gives no tier. PHP heritage clauses are
+//! extracted since DH.14.
 
 use glia_engine::generate_one;
 use glia_engine::implementors::{HierarchyDirection, Implementor, implementors};
@@ -281,26 +281,41 @@ fn go_promoted_methods_satisfy_an_interface() {
     );
 }
 
+/// DH.14: PHP heritage clauses are extracted, so the PHP chain answers like
+/// the Java one (`java_target_resolves_the_interface_not_its_file_module`):
+/// `interface Catalog extends Readable` is INHERITS_FROM, `class PgCatalog
+/// implements Catalog` IMPLEMENTS, both declared (FACT).
 #[test]
-fn php_heritage_is_blind_and_the_absence_says_so() {
+fn php_heritage_is_extracted() {
     let (_tmp, m) = build(&[("Repo.php", PHP)]);
-    // PHP qnames carry no namespace at HEAD: the interface is `Catalog`.
-    let a = implementors(&m, "Catalog", Down, true);
-    assert!(a.results.is_empty());
-    let absence = a.absence.expect("empty answer carries an absence");
-    assert_eq!((absence.tier, absence.reason), ("FACT", "no_edges"));
-    assert_eq!(absence.mechanisms, ["IMPLEMENTS", "INHERITS_FROM"]);
-    assert!(
-        absence.note.contains("`Catalog` (INTERFACE)"),
-        "{}",
-        absence.note
+    // A statement-form namespace in a root-level file: the types are
+    // directory-scoped (LB.7b), the repo root's empty scope, so `Readable`.
+    let a = implementors(&m, "Readable", Down, true);
+    assert!(a.absence.is_none(), "{:?}", a.absence);
+    assert_eq!(
+        rows(&a.results),
+        [
+            ("Catalog", 1, "INHERITS_FROM", "FACT", None),
+            ("PgCatalog", 2, "IMPLEMENTS", "FACT", Some("Catalog")),
+        ]
     );
-    let php: Vec<_> = absence
-        .caveats
-        .iter()
-        .map(|c| (c.language, c.edge_category))
-        .collect();
-    assert_eq!(php, [("php", "IMPLEMENTS"), ("php", "INHERITS_FROM")]);
+    assert!(a.results.iter().all(|r| r.kind != "MODULE"));
+    assert_eq!(a.results[1].file.as_deref(), Some("Repo.php"));
+
+    let catalog = implementors(&m, "Catalog", Down, true);
+    assert!(catalog.absence.is_none(), "{:?}", catalog.absence);
+    assert_eq!(
+        rows(&catalog.results),
+        [("PgCatalog", 1, "IMPLEMENTS", "FACT", None)]
+    );
+
+    // The interface's own method declarations are nodes, so A6.6 pairs the
+    // implementation's `search` with Catalog's.
+    let search = implementors(&m, "Catalog::search", Down, true);
+    assert_eq!(
+        rows(&search.results),
+        [("PgCatalog::search", 1, "IMPLEMENTS", "FACT", None)]
+    );
 }
 
 #[test]

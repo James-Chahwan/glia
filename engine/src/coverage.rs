@@ -188,17 +188,13 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "a Go route takes its group's prefix when the group is built from a string literal (`g := r.Group(\"/api\")`), held in a struct field (of its own package or an imported one) assigned it, or passed through a parameter or a struct field by a call the build has resolved (one ROUTE per mount); a prefix held in a constant or a variable or built at run time (fmt.Sprintf, os.Getenv), a group returned by a function, and a group passed through a call that is not resolved (a function value, a loop over registrars) are not read, so the route keeps its local path and pairs with a client only through the HTTP resolver's prefix folds",
         verify: "grep .Group( / .Route( / .Mount( and follow the group to its registrations",
     },
-    CoverageCaveat {
-        language: "php",
-        edge_category: "IMPLEMENTS",
-        note: "`class X implements I` clauses are not extracted: no PHP class has an IMPLEMENTS edge",
-        verify: "grep 'implements' for the interface name",
-    },
+    // DH.14: `extends` / `implements` (classes, interfaces, enums) are
+    // extracted; the row keeps the trait residual and the name binding.
     CoverageCaveat {
         language: "php",
         edge_category: "INHERITS_FROM",
-        note: "`class X extends Base` and `interface A extends B` clauses are not extracted, and traits (`use T;` in a class) are not nodes: no PHP type has an INHERITS_FROM edge",
-        verify: "grep 'extends' / 'use' for the type or trait name",
+        note: "traits (`use T;` in a class body) are not nodes, so trait use has no edge; an enum's own methods are not nodes, so an `enum E implements I` has the type-level IMPLEMENTS but no method-level one; `extends` / `implements` bind by the written name's last `\\` segment (through the file's `use` imports, then a type of that name unique in the repo), so a base outside the repo (`\\Illuminate\\...\\Model`, `TestCase`) binds an in-repo type of the same short name when the repo has exactly one, and a name two in-repo namespaces declare stays unresolved; a base named like the last segment of a namespace its own file declares (`namespace App\\Command; class X extends Command`) is not linked, and one named like a namespace declared in another file can bind that namespace instead of a type",
+        verify: "grep 'extends' / 'implements' / 'use' for the type or trait name",
     },
     // CB.10 / CB.18: the Swift call scope, measured on fixtures/swift-members
     // and swift-implicit-self plus a receiver probe of each shape below.
@@ -675,9 +671,14 @@ mod tests {
             r
         };
         assert_eq!(rows("main.go"), [("go", "IMPLEMENTS")]);
-        assert_eq!(
-            rows("Repo.php"),
-            [("php", "IMPLEMENTS"), ("php", "INHERITS_FROM")]
+        // DH.14: PHP heritage is extracted; only the trait residual is left.
+        assert_eq!(rows("Repo.php"), [("php", "INHERITS_FROM")]);
+        let php = coverage_report(&graph_with_file("Repo.php"));
+        let php_row = php.iter().find(|n| n.language == "php" && n.edge_category == "INHERITS_FROM");
+        assert!(
+            php_row.is_some_and(|n| n.note.contains("traits") && !n.note.contains("not extracted")),
+            "{:?}",
+            php_row.map(|n| n.note)
         );
         assert_eq!(
             rows("Repo.swift"),
