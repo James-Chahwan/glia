@@ -36,11 +36,12 @@ use crate::route::ModuleQnames;
 /// needles with their `[grpc-client]` /
 /// `[grpc-server-impl]` / `[proto-rpc]` markers, the A5.8 `[marker-anchor]`
 /// census and the LE.4a `[data-access]` census, the LB.4a / LB.8 owner
-/// segment, the CB.24 client-host stamp, then the A16.4 IMPORTS-cell
-/// filter. `const_table` is the repo's A11.1 table; `roots` are the walk's
-/// project roots (A8.4); `rust_crates` their Cargo packages, whose names the
-/// IMPORTS filter treats as intra-repo (LA.1b), as it does every specifier a
-/// `ts_aliases` key matches (A6.8). `wrappers` is the repo's
+/// segment, the CB.24 client-host stamp, the DF.8 external client-site mark,
+/// then the A16.4 IMPORTS-cell filter. `const_table` is the repo's A11.1
+/// table; `roots` are the walk's project roots (A8.4); `rust_crates` their
+/// Cargo packages, whose names the IMPORTS filter treats as intra-repo
+/// (LA.1b), as it does every specifier a `ts_aliases` key matches (A6.8).
+/// `wrappers` is the repo's
 /// `.glia/overlay.toml` when the build applies the overlay (`None` under
 /// `--no-overlay`): its `[[wrapper]]` stanzas feed the LF.2e stage
 /// (`external::WrapperPass`), after the CA.4 inferred Go collection wrappers
@@ -193,6 +194,13 @@ pub(super) fn apply_post_cache(
     // owner pass, whose owners group the facts and the sides; it mints and
     // re-keys nothing, so the ordering rule above holds.
     stamp_client_hosts(parses_by_lang, &owners).report(repo_label);
+
+    // DF.8: mark each WS_CLIENT / GRPC_CLIENT / GRAPHQL_OPERATION site hit
+    // that dials a public host outside the repo's configuration, CG.4a's rule
+    // for the channel clients. After the CB.24 stamp, which writes the GraphQL
+    // `hosts` it reads; it rewrites payloads only, so the ordering rule holds.
+    endpoint_fold::mark_external_clients(parses_by_lang.values_mut().flatten(), const_table)
+        .report(repo_label);
 
     // A16.4: drop intra-repo names from every IMPORTS cell. It needs the whole
     // repo's declarations, so like `apply_rpc_needles` it runs after the parse

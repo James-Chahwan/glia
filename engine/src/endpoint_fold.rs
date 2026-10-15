@@ -67,6 +67,20 @@
 //! marked, so the order the build hands the parses in never matters. Only
 //! the payload of a marked entry changes; every other entry is byte-identical.
 //!
+//! EXTERNAL CLIENT SITES (DF.8). The same rule for the channel clients:
+//! [`mark_external_clients`] appends `"external":true` to every JSON
+//! ENDPOINT_HIT of a WS_CLIENT / GRPC_CLIENT (CB.21: one hit per site,
+//! `{"via":"ws","host":..}`) or GRAPHQL_OPERATION (CB.24:
+//! `{"via":"graphql","hosts":[..]}`) whose every host is public and whose
+//! every site the configuration does not name. Those hosts are literal by
+//! construction (CB.21 records only a literal dial target, CB.24 only a
+//! literal client authority), and a site with no host (`{"via":"ws"}`) is
+//! never marked. It is its own call in `apply_post_cache`, after CB.24's
+//! `stamp_client_hosts`, because the GraphQL hosts do not exist yet when
+//! [`fold_repo`] runs. Each hit is judged on its own, so a client with one
+//! public site and one local site has one marked hit; whether the CLIENT is
+//! third-party (every hit marked) is the resolvers' reading, not this pass's.
+//!
 //! BUILDER PREFIXES (CH.5b). A TypeScript call site whose URL was read
 //! through a URL builder (`this.urls.buildApiUrl('protected/friends')`, CH.3a:
 //! ENDPOINT_HIT `"wrapper"`, CH.3b: `"wrapper_of"` = the receiver's type)
@@ -112,7 +126,7 @@ use glia_code_domain::glia_config::Origin;
 use glia_code_domain::project_roots::ProjectRoot;
 use glia_code_domain::{CodeNav, FileParse, GRAPH_TYPE, NavFact, cell_type, node_kind};
 use glia_code_extractors::constants::{ConstTable, fold_interpolations};
-use glia_core::{CellPayload, Confidence, Node, NodeId, RepoId};
+use glia_core::{CellPayload, Confidence, Node, NodeId, NodeKindId, RepoId};
 use serde::de::{Deserializer, MapAccess, Visitor};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
@@ -1255,6 +1269,140 @@ fn mark_external(parses: &mut [&mut FileParse], consts: &ConstTable) -> FoldStat
             if let Some(c) = fp.nodes.get_mut(node).and_then(|n| n.cells.get_mut(cell)) {
                 c.payload = CellPayload::Json(payload);
                 stats.external += 1;
+            }
+        }
+    }
+    stats
+}
+
+// ============================================================================
+// DF.8: external WebSocket / gRPC / GraphQL client sites
+// ============================================================================
+
+/// The channel-client kinds DF.8 marks: the sides whose ENDPOINT_HIT records
+/// the host they dial (CB.21 WS_CLIENT / GRPC_CLIENT, CB.24
+/// GRAPHQL_OPERATION).
+const CLIENT_KINDS: &[NodeKindId] = &[
+    node_kind::WS_CLIENT,
+    node_kind::GRPC_CLIENT,
+    node_kind::GRAPHQL_OPERATION,
+];
+
+/// DF.8: what [`mark_external_clients`] did to one repo, for the
+/// `[client-external]` marker.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ClientMarkStats {
+    /// WS_CLIENT site hits marked `"external":true`.
+    pub ws: usize,
+    /// GRPC_CLIENT site hits marked.
+    pub grpc: usize,
+    /// GRAPHQL_OPERATION hits marked.
+    pub graphql: usize,
+    /// Distinct sites the repo's configuration names ([`configured_sites`]).
+    pub configured: usize,
+}
+
+impl ClientMarkStats {
+    /// Count one marked hit of a `kind` side.
+    fn count(&mut self, kind: NodeKindId) {
+        match kind {
+            node_kind::WS_CLIENT => self.ws += 1,
+            node_kind::GRPC_CLIENT => self.grpc += 1,
+            node_kind::GRAPHQL_OPERATION => self.graphql += 1,
+            _ => {}
+        }
+    }
+
+    /// fired_on marker, once per repo where a client site hit was marked:
+    ///   `[client-external] marked ws=<a> grpc=<b> graphql=<c> sites (configured sites=<k>) repo=<label>`
+    pub(crate) fn report(&self, repo_label: &str) {
+        if self.ws + self.grpc + self.graphql > 0 {
+            eprintln!(
+                "[client-external] marked ws={} grpc={} graphql={} sites \
+                 (configured sites={}) repo={repo_label}",
+                self.ws, self.grpc, self.graphql, self.configured
+            );
+        }
+    }
+}
+
+/// Every JSON ENDPOINT_HIT of a [`CLIENT_KINDS`] node entry of `fp`, as
+/// `(node index, cell index, kind, fields)`: several per node, one per site.
+/// A non-JSON hit, or one that is not a JSON object, is skipped.
+fn client_hits(fp: &FileParse) -> impl Iterator<Item = (usize, usize, NodeKindId, Fields)> + '_ {
+    fp.nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| {
+            let kind = *fp.nav.kind_by_id.get(&n.id)?;
+            CLIENT_KINDS.contains(&kind).then_some((i, n, kind))
+        })
+        .flat_map(|(i, n, kind)| {
+            n.cells
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.kind == cell_type::ENDPOINT_HIT)
+                .filter_map(move |(c, cell)| {
+                    let CellPayload::Json(json) = &cell.payload else {
+                        return None;
+                    };
+                    Some((i, c, kind, serde_json::from_str(json).ok()?))
+                })
+        })
+}
+
+/// One client site hit is external: it is not marked yet, its host is
+/// literal ([`host_is_literal`], CG.4a's rule: these hits carry no
+/// `template`, so it holds), it names at least one host (`host`, else every
+/// `hosts` entry), and every one of them is public ([`is_public_host`]) with
+/// a site ([`site_of`]) the configuration does not name. One local or
+/// configured host in a GraphQL `hosts` list and the hit stays unmarked.
+fn client_is_external(fields: &Fields, sites: &BTreeSet<String>) -> bool {
+    if fields.has("external") || !host_is_literal(fields) {
+        return false;
+    }
+    let hosts = match fields.str("host") {
+        Some(host) => vec![host],
+        None => fields.strs("hosts"),
+    };
+    !hosts.is_empty()
+        && hosts.iter().all(|h| {
+            let host = host_only(h);
+            is_public_host(&host) && !sites.contains(&site_of(&host))
+        })
+}
+
+/// DF.8: append `"external":true` to every external client site hit
+/// ([`client_is_external`]) of the repo. Runs after CB.24's
+/// `stamp_client_hosts` (the GraphQL `hosts` exist only from there), over
+/// every parse: the sites are collected into a set over all of them first
+/// ([`configured_sites`], unchanged: config-shaped / pinned URL constants and
+/// the hosts of const-sourced HTTP call sites), then each hit is judged on
+/// its own, so the HashMap order the build hands the parses in never shows.
+/// Only a marked hit's payload changes (key order kept, `external` last);
+/// every other cell is byte-identical, and a second run marks nothing.
+pub(crate) fn mark_external_clients<'a>(
+    parses: impl IntoIterator<Item = &'a mut FileParse>,
+    consts: &ConstTable,
+) -> ClientMarkStats {
+    let mut parses: Vec<&mut FileParse> = parses.into_iter().collect();
+    let sites = configured_sites(&parses, consts);
+    let mut stats = ClientMarkStats {
+        configured: sites.len(),
+        ..ClientMarkStats::default()
+    };
+    for fp in parses.iter_mut() {
+        let marks: Vec<(usize, usize, NodeKindId, String)> = client_hits(fp)
+            .filter(|(_, _, _, fields)| client_is_external(fields, &sites))
+            .filter_map(|(node, cell, kind, mut fields)| {
+                fields.set("external", Value::Bool(true));
+                Some((node, cell, kind, serde_json::to_string(&fields).ok()?))
+            })
+            .collect();
+        for (node, cell, kind, payload) in marks {
+            if let Some(c) = fp.nodes.get_mut(node).and_then(|n| n.cells.get_mut(cell)) {
+                c.payload = CellPayload::Json(payload);
+                stats.count(kind);
             }
         }
     }
@@ -2761,5 +2909,315 @@ mod tests {
         let before = fp.clone();
         assert_eq!(fold_one(&mut fp, &ConstTable::default()), FoldStats::default());
         assert!(same(&fp, &before));
+    }
+
+    // ---- DF.8: external WebSocket / gRPC / GraphQL client sites -----------
+
+    /// One channel-client node entry the way CB.21 / CB.24 leave it: one
+    /// ENDPOINT_HIT per site, recorded under `func()`. Returns its index in
+    /// `fp.nodes`.
+    fn push_client(fp: &mut FileParse, kind: NodeKindId, qname: &str, hits: &[&str]) -> usize {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
+        fp.nodes.push(Node {
+            id,
+            repo: repo(),
+            confidence: Confidence::Medium,
+            cells: hits
+                .iter()
+                .map(|h| Cell {
+                    kind: cell_type::ENDPOINT_HIT,
+                    payload: CellPayload::Json((*h).to_string()),
+                })
+                .collect(),
+        });
+        let name = qname.split_once(':').map_or(qname, |(_, n)| n);
+        fp.nav.record(id, name, qname, kind, Some(func()));
+        fp.nodes.len() - 1
+    }
+
+    /// Cell `cell` of node `node`'s payload.
+    fn hit(fp: &FileParse, node: usize, cell: usize) -> &str {
+        match &fp.nodes[node].cells[cell].payload {
+            CellPayload::Json(s) => s,
+            other => panic!("not json: {other:?}"),
+        }
+    }
+
+    fn mark_one(fp: &mut FileParse, consts: &ConstTable) -> ClientMarkStats {
+        mark_external_clients(std::iter::once(fp), consts)
+    }
+
+    /// The fixture's `new WebSocket("wss://stream.binance.com/ws")`: the hit
+    /// gains `"external":true` appended, nothing else about the entry moves.
+    #[test]
+    fn ws_public_host_is_marked() {
+        let mut fp = file();
+        let ws = push_client(
+            &mut fp,
+            node_kind::WS_CLIENT,
+            "ws_client:/ws",
+            &[r#"{"via":"ws","host":"stream.binance.com"}"#],
+        );
+        let edges = fp.edges.clone();
+        let nav = fp.nav.qname_by_id.clone();
+        let stats = mark_one(&mut fp, &ConstTable::default());
+        assert_eq!(
+            stats,
+            ClientMarkStats { ws: 1, grpc: 0, graphql: 0, configured: 0 }
+        );
+        assert_eq!(hit(&fp, ws, 0), r#"{"via":"ws","host":"stream.binance.com","external":true}"#);
+        assert_eq!(fp.edges, edges);
+        assert_eq!(fp.nav.qname_by_id, nav);
+        assert_eq!(fp.nodes[ws].confidence, Confidence::Medium);
+    }
+
+    /// A site whose URL names no literal authority carries `{"via":"ws"}`:
+    /// nothing to judge, so it is never marked. On a node with a public site
+    /// too, each site is judged on its own.
+    #[test]
+    fn ws_site_without_host_is_not() {
+        let bare = r#"{"via":"ws"}"#;
+        let mut fp = file();
+        let alone = push_client(&mut fp, node_kind::WS_CLIENT, "ws_client:/feed", &[bare]);
+        let before = fp.clone();
+        assert_eq!(mark_one(&mut fp, &ConstTable::default()), ClientMarkStats::default());
+        assert!(same(&fp, &before));
+        assert_eq!(hit(&fp, alone, 0), bare);
+
+        let both = push_client(
+            &mut fp,
+            node_kind::WS_CLIENT,
+            "ws_client:/ws",
+            &[r#"{"via":"ws","host":"stream.binance.com"}"#, bare],
+        );
+        assert_eq!(mark_one(&mut fp, &ConstTable::default()).ws, 1);
+        assert_eq!(hit(&fp, both, 0), r#"{"via":"ws","host":"stream.binance.com","external":true}"#);
+        assert_eq!(hit(&fp, both, 1), bare);
+        assert_eq!(hit(&fp, alone, 0), bare);
+    }
+
+    /// `grpc.Dial("users-svc:50051")`, a localhost dial and a cluster name
+    /// are in-build services, never public; `geocoder.googleapis.com:443` is.
+    #[test]
+    fn grpc_internal_host_is_not() {
+        let mut fp = file();
+        let mut internal = Vec::new();
+        for (i, host) in ["users-svc:50051", "localhost:50051", "users.default.svc.cluster.local:50051", "10.0.0.7:50051"]
+            .iter()
+            .enumerate()
+        {
+            internal.push(push_client(
+                &mut fp,
+                node_kind::GRPC_CLIENT,
+                &format!("grpc_client:Svc{i}"),
+                &[&format!(r#"{{"via":"grpc","host":"{host}"}}"#)],
+            ));
+        }
+        let geo = push_client(
+            &mut fp,
+            node_kind::GRPC_CLIENT,
+            "grpc_client:Geocoder",
+            &[r#"{"via":"grpc","host":"geocoder.googleapis.com:443"}"#],
+        );
+        let stats = mark_one(&mut fp, &ConstTable::default());
+        assert_eq!((stats.ws, stats.grpc, stats.graphql), (0, 1, 0));
+        for n in internal {
+            assert!(!hit(&fp, n, 0).contains("external"), "{}", hit(&fp, n, 0));
+        }
+        assert_eq!(
+            hit(&fp, geo, 0),
+            r#"{"via":"grpc","host":"geocoder.googleapis.com:443","external":true}"#
+        );
+    }
+
+    /// CB.24's stamp: every host of the project's GraphQL client is public
+    /// and unconfigured, so the operation's hit is marked.
+    #[test]
+    fn graphql_hosts_all_public_marked() {
+        let mut fp = file();
+        let op = push_client(
+            &mut fp,
+            node_kind::GRAPHQL_OPERATION,
+            "graphql_op:GetUser",
+            &[r#"{"via":"graphql","hosts":["api.github.com","api.gitlab.com"]}"#],
+        );
+        let stats = mark_one(&mut fp, &ConstTable::default());
+        assert_eq!((stats.ws, stats.grpc, stats.graphql), (0, 0, 1));
+        assert_eq!(
+            hit(&fp, op, 0),
+            r#"{"via":"graphql","hosts":["api.github.com","api.gitlab.com"],"external":true}"#
+        );
+    }
+
+    /// One in-build host in the list (the project's client also points at
+    /// `users-svc`) and the hit is not external; an empty list names no host.
+    #[test]
+    fn graphql_mixed_hosts_not_marked() {
+        let mut fp = file();
+        let mixed = r#"{"via":"graphql","hosts":["api.github.com","users-svc"]}"#;
+        let empty = r#"{"via":"graphql","hosts":[]}"#;
+        let a = push_client(&mut fp, node_kind::GRAPHQL_OPERATION, "graphql_op:GetUser", &[mixed]);
+        let b = push_client(&mut fp, node_kind::GRAPHQL_OPERATION, "graphql_op:ListUsers", &[empty]);
+        let before = fp.clone();
+        assert_eq!(mark_one(&mut fp, &ConstTable::default()), ClientMarkStats::default());
+        assert!(same(&fp, &before));
+        assert_eq!(hit(&fp, a, 0), mixed);
+        assert_eq!(hit(&fp, b, 0), empty);
+    }
+
+    /// A config-shaped constant naming the site (`environment.wsUrl`) makes
+    /// it the repo's own: unmarked, and counted in `configured`. A bare local
+    /// constant configures nothing, as for HTTP call sites.
+    #[test]
+    fn configured_site_not_marked() {
+        let ws = r#"{"via":"ws","host":"stream.binance.com"}"#;
+        let configured = ts_table("export const environment = {\n  wsUrl: 'wss://stream.binance.com/ws',\n};\n");
+        let mut fp = file();
+        let n = push_client(&mut fp, node_kind::WS_CLIENT, "ws_client:/ws", &[ws]);
+        let stats = mark_one(&mut fp, &configured);
+        assert_eq!(
+            stats,
+            ClientMarkStats { ws: 0, grpc: 0, graphql: 0, configured: 1 }
+        );
+        assert_eq!(hit(&fp, n, 0), ws);
+
+        // The site covers every host under it, gRPC and GraphQL alike.
+        let mut fp = file();
+        let g = push_client(
+            &mut fp,
+            node_kind::GRAPHQL_OPERATION,
+            "graphql_op:Ticker",
+            &[r#"{"via":"graphql","hosts":["api.binance.com"]}"#],
+        );
+        assert_eq!(mark_one(&mut fp, &configured).graphql, 0);
+        assert!(!hit(&fp, g, 0).contains("external"));
+
+        // An overlay pin is the escape hatch whatever the key looks like.
+        let mut pinned = ConstTable::default();
+        assert!(pinned.pin("tickerBase", "wss://stream.binance.com"));
+        let mut fp = file();
+        push_client(&mut fp, node_kind::WS_CLIENT, "ws_client:/ws", &[ws]);
+        assert_eq!(mark_one(&mut fp, &pinned).ws, 0);
+
+        let local = ts_table("const url = 'wss://stream.binance.com/ws';\n");
+        let mut fp = file();
+        let n = push_client(&mut fp, node_kind::WS_CLIENT, "ws_client:/ws", &[ws]);
+        let stats = mark_one(&mut fp, &local);
+        assert_eq!((stats.ws, stats.configured), (1, 0));
+        assert!(hit(&fp, n, 0).ends_with(r#","external":true}"#));
+    }
+
+    /// An ENDPOINT hit is CG.4a's: this pass never touches one, whatever its
+    /// host, and an unregistered kind carrying a host is ignored too. The
+    /// HTTP call site's const-sourced host still configures its site.
+    #[test]
+    fn endpoint_nodes_untouched() {
+        let mut fp = file();
+        push_call(
+            &mut fp,
+            "/search",
+            r#"{"method":"GET","path":"/search","raw":"https://nominatim.openstreetmap.org/search","host":"nominatim.openstreetmap.org"}"#,
+        );
+        push_call(
+            &mut fp,
+            "/users",
+            r#"{"method":"GET","path":"/users","template":"${base}/users","host":"gw.binance.com"}"#,
+        );
+        let ws_server = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::WS_HANDLER, "ws:/ws");
+        fp.nodes.push(Node {
+            id: ws_server,
+            repo: repo(),
+            confidence: Confidence::Medium,
+            cells: vec![Cell {
+                kind: cell_type::ENDPOINT_HIT,
+                payload: CellPayload::Json(r#"{"via":"ws","host":"stream.binance.com"}"#.into()),
+            }],
+        });
+        fp.nav.record(ws_server, "/ws", "ws:/ws", node_kind::WS_HANDLER, Some(func()));
+        let before = fp.clone();
+        let stats = mark_one(&mut fp, &ConstTable::default());
+        assert_eq!(
+            stats,
+            ClientMarkStats { ws: 0, grpc: 0, graphql: 0, configured: 1 }
+        );
+        assert!(same(&fp, &before));
+
+        // That configured site covers a client dialling the same backend.
+        let ws = push_client(
+            &mut fp,
+            node_kind::WS_CLIENT,
+            "ws_client:/stream",
+            &[r#"{"via":"ws","host":"stream.binance.com"}"#],
+        );
+        assert_eq!(mark_one(&mut fp, &ConstTable::default()).ws, 0);
+        assert!(!hit(&fp, ws, 0).contains("external"));
+    }
+
+    /// The counters are per kind and per site hit, the sites are collected
+    /// over every parse before any hit is judged (either parse order marks
+    /// the same hits), and a second run marks nothing.
+    #[test]
+    fn stats_count_per_kind() {
+        let consts = ts_table("export const environment = {\n  apiUrl: 'https://api.shop.io',\n};\n");
+        let build = || {
+            let mut a = file();
+            push_client(
+                &mut a,
+                node_kind::WS_CLIENT,
+                "ws_client:/ws",
+                &[
+                    r#"{"via":"ws","host":"stream.binance.com"}"#,
+                    r#"{"via":"ws","host":"ws.kraken.com:443"}"#,
+                    r#"{"via":"ws","host":"localhost:8080"}"#,
+                ],
+            );
+            push_client(
+                &mut a,
+                node_kind::GRPC_CLIENT,
+                "grpc_client:Geocoder",
+                &[r#"{"via":"grpc","host":"geocoder.googleapis.com:443"}"#],
+            );
+            let mut b = file();
+            push_client(
+                &mut b,
+                node_kind::GRAPHQL_OPERATION,
+                "graphql_op:GetUser",
+                &[r#"{"via":"graphql","hosts":["api.github.com"]}"#],
+            );
+            push_client(
+                &mut b,
+                node_kind::GRAPHQL_OPERATION,
+                "graphql_op:Orders",
+                &[r#"{"via":"graphql","hosts":["graph.shop.io"]}"#],
+            );
+            // A const-sourced HTTP host in this parse configures its site for
+            // the other parse's clients.
+            push_call(
+                &mut b,
+                "/users",
+                r#"{"method":"GET","path":"/users","template":"${base}/users","host":"ws.kraken.com"}"#,
+            );
+            (a, b)
+        };
+        let want = ClientMarkStats { ws: 1, grpc: 1, graphql: 1, configured: 2 };
+        let mut runs = Vec::new();
+        for flip in [false, true] {
+            let (mut a, mut b) = build();
+            let parses: Vec<&mut FileParse> = if flip { vec![&mut b, &mut a] } else { vec![&mut a, &mut b] };
+            assert_eq!(mark_external_clients(parses, &consts), want, "flip={flip}");
+            runs.push((a, b));
+        }
+        let ((a0, b0), (a1, b1)) = (&runs[0], &runs[1]);
+        assert!(same(a0, a1) && same(b0, b1));
+        assert!(hit(a0, 1, 0).ends_with(r#""host":"stream.binance.com","external":true}"#));
+        assert!(!hit(a0, 1, 1).contains("external"), "kraken's site is configured");
+        assert!(!hit(a0, 1, 2).contains("external"));
+        assert!(!hit(b0, 2, 0).contains("external"), "shop.io is configured");
+
+        let (mut a, mut b) = runs.swap_remove(0);
+        let (once_a, once_b) = (a.clone(), b.clone());
+        let again = mark_external_clients(vec![&mut a, &mut b], &consts);
+        assert_eq!(again, ClientMarkStats { configured: 2, ..ClientMarkStats::default() });
+        assert!(same(&a, &once_a) && same(&b, &once_b));
     }
 }
