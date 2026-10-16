@@ -39,7 +39,10 @@ const POSITION: CellTypeId = cell_type::POSITION;
 /// Bodies shorter than this (whitespace-collapsed chars) carry no hash: a
 /// one-line stub matches too much to be evidence.
 const MIN_BODY_CHARS: usize = 40;
-const HINT_VERSION: &str = "v1";
+/// The version tag every [`Identity::hint`] starts with, and the only one
+/// [`Identity::parse_hint`] accepts. A side file that carries hints names it
+/// (glia-export-engram's `<out>.hints.jsonl` header, T12).
+pub const HINT_VERSION: &str = "v1";
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -93,14 +96,40 @@ impl Identity {
 
 /// The identity of `id`, or `None` when it has no MODULE ancestor (ROUTE,
 /// ENDPOINT, queue, config ... — their qnames are not path-derived) or no
-/// POSITION file. One linear node lookup: for many nodes build an
-/// [`IdentityIndex`] instead.
+/// POSITION file. One linear node lookup: for many nodes take
+/// [`identities`], or build an [`IdentityIndex`] to re-bind hints.
 pub fn identity_of(merged: &MergedGraph, id: NodeId) -> Option<Identity> {
     let g = merged
         .graphs
         .iter()
         .find(|g| g.nav.kind_by_id.contains_key(&id))?;
     derive(g, |n| g.nodes.iter().find(|x| x.id == n), id).map(|(_, ident)| ident)
+}
+
+/// [`identity_of`] for every node at once: for each id any graph's nav names,
+/// exactly `identity_of(merged, id)`, and no entry for an id it gives `None`.
+/// One derivation per node; `identity_of` scans one graph's nodes per call.
+///
+/// As in `identity_of`, an id is derived in the first graph (in graph order)
+/// whose nav names it, from that graph's first instance of the node. Each id
+/// is visited once and its result reads no other id's, so the order the nav's
+/// keys come in decides nothing. The map is for lookup only: a caller must
+/// never iterate it into output (NodeId is Hash, not Ord).
+pub fn identities(merged: &MergedGraph) -> HashMap<NodeId, Identity> {
+    let mut out: HashMap<NodeId, Identity> = HashMap::new();
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    for g in &merged.graphs {
+        let by_id = node_map(g);
+        for &id in g.nav.kind_by_id.keys() {
+            if !seen.insert(id) {
+                continue;
+            }
+            if let Some((_, ident)) = derive(g, |x| by_id.get(&x).copied(), id) {
+                out.insert(id, ident);
+            }
+        }
+    }
+    out
 }
 
 /// Where a moved node is found: which evidence tier bound it.

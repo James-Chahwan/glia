@@ -8,6 +8,9 @@
 //! diff apply checks `base_digest`, could not take one clone's diff onto a
 //! store seeded from the other.
 //!
+//! The T12 hints side file joins the compared artefacts: an `Identity` holds
+//! no RepoId, so the three copies write one hints file too.
+//!
 //! Three copies of one fixture: `fx-alpha` and `fx-beta` outside git (keys
 //! `dir:fx-alpha` / `dir:fx-beta`) and `fx-gamma` holding only a
 //! `.git/config` whose origin is the path remote `/elsewhere/fx-alpha.git`
@@ -20,7 +23,7 @@ use std::process::Command;
 
 use glia_code_domain::walk_gating::repo_identity;
 use glia_engram_export::diff::diff_path;
-use glia_engram_export::{meta_path, sidecar_path};
+use glia_engram_export::{hints_side_path, meta_path, sidecar_path};
 
 /// The copies, by directory name: each is its own RepoId.
 const COPIES: [&str; 3] = ["fx-alpha", "fx-beta", "fx-gamma"];
@@ -188,8 +191,12 @@ fn assert_all_equal(what: &str, per_copy: Vec<(&str, Vec<u8>)>) {
 fn two_clones_export_identical_bytes() {
     let s = Scratch::new("bytes");
     let errs: Vec<(&str, String)> = COPIES.iter().map(|c| (*c, s.export(c, "a", None))).collect();
-    let artefacts: [(&str, fn(&Path) -> PathBuf); 3] =
-        [("gmap", |p: &Path| p.to_path_buf()), ("files.json", sidecar_path), ("meta.json", meta_path)];
+    let artefacts: [(&str, fn(&Path) -> PathBuf); 4] = [
+        ("gmap", |p: &Path| p.to_path_buf()),
+        ("files.json", sidecar_path),
+        ("meta.json", meta_path),
+        ("hints.jsonl", hints_side_path),
+    ];
     for (label, path_of) in artefacts {
         assert_all_equal(label, COPIES.iter().map(|c| (*c, read(&path_of(&s.out(c, "a"))))).collect());
     }
@@ -223,4 +230,8 @@ fn two_clones_write_identical_diffs() {
     assert_all_equal("v6 since line", since.iter().map(|(c, l)| (*c, l.clone().into_bytes())).collect());
     assert_all_equal("gmap after the edit", COPIES.iter().map(|c| (*c, read(&s.out(c, "b")))).collect());
     assert_all_equal("diff", COPIES.iter().map(|c| (*c, read(&diff_path(&s.out(c, "b"))))).collect());
+    assert_all_equal(
+        "hints after the edit",
+        COPIES.iter().map(|c| (*c, read(&hints_side_path(&s.out(c, "b"))))).collect(),
+    );
 }

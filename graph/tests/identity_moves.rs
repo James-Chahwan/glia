@@ -1,16 +1,17 @@
 //! LB.6 — move-stable identity over hand-built graphs: the hint round-trip,
 //! every `rebind` tier (Exact / Moved SameName / Moved Identical / Ambiguous /
 //! Orphan), `detect_moves` on a synthetic prior/current pair, a declared rename
-//! beating a basename match, an unrelated same-name file being rejected, and
-//! `carry_file_tokens` keeping a first-sight token across two moves.
+//! beating a basename match, an unrelated same-name file being rejected,
+//! `carry_file_tokens` keeping a first-sight token across two moves, and
+//! (T12) the bulk `identities` equalling `identity_of` node by node.
 
 use std::collections::{BTreeMap, HashSet};
 
 use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
 use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, NodeKindId, RepoId};
 use glia_graph::identity::{
-    FileMove, Identity, IdentityIndex, MoveMap, MoveTier, Rebind, carry_file_tokens, detect_moves,
-    detect_moves_with, identity_of,
+    FileMove, HINT_VERSION, Identity, IdentityIndex, MoveMap, MoveTier, Rebind, carry_file_tokens,
+    detect_moves, detect_moves_with, identities, identity_of,
 };
 use glia_graph::{MergedGraph, RepoGraph, SymbolTable};
 
@@ -538,4 +539,56 @@ fn carry_file_tokens_keeps_first_sight_token_across_two_moves() {
     let fresh = t3.get("a.py").cloned().unwrap_or_default();
     assert_ne!(fresh, "a.py");
     assert!(!fresh.is_empty());
+}
+
+/// T12: the bulk derivation glia-export-engram's hints side file reads equals
+/// `identity_of` for every node, so the export and the cell store agree on a
+/// node's hint. Over `prior()` and `current()`, then a merge where one id sits
+/// in two graphs (the first graph decides, as in `identity_of`) and twice in
+/// one graph (its first instance decides), beside a node with no MODULE.
+#[test]
+fn identities_match_identity_of_for_every_node() {
+    let check = |g: &MergedGraph| {
+        let all = identities(g);
+        let mut seen = 0usize;
+        for rg in &g.graphs {
+            for n in &rg.nodes {
+                assert_eq!(all.get(&n.id), identity_of(g, n.id).as_ref(), "node {}", n.id.0);
+                seen += 1;
+            }
+        }
+        assert!(seen > 0);
+        for k in all.keys() {
+            assert!(identity_of(g, *k).is_some(), "id {} has no identity_of", k.0);
+        }
+        all
+    };
+    let (p, c) = (check(&prior()), check(&current()));
+    assert_eq!(p.len(), 6, "every prior node has a MODULE ancestor and a file");
+    assert_eq!(c.len(), 7);
+    assert_ne!(p.get(&id(F, "lib::big::compute_totals")).map(|i| i.body), Some(0));
+    assert!(identity_of(&prior(), id(ME, "a::users::User::get")).is_some_and(|i| i.hint().starts_with(HINT_VERSION)));
+
+    // One id in two graphs, the second with other CODE: the first decides.
+    let first = prior().graphs.remove(0);
+    let mut second = first.clone();
+    let fid = id(F, "lib::big::compute_totals");
+    for n in second.nodes.iter_mut().filter(|n| n.id == fid) {
+        for cell in n.cells.iter_mut().filter(|c| c.kind == cell_type::CODE) {
+            cell.payload = CellPayload::Text("def other(xs):\n    return [x * 2 for x in xs if x > 0]\n".into());
+        }
+    }
+    // A second instance of the same id in the first graph, after the first.
+    let mut first_dup = first.clone();
+    let dup = second.nodes.iter().find(|n| n.id == fid).cloned().expect("node");
+    first_dup.nodes.push(dup);
+    // And a node with no MODULE ancestor: no identity.
+    let route = graph(vec![file("r.py", vec![decl(node_kind::ROUTE, "GET /x", None, "")])]);
+    let mut graphs = vec![first_dup, second];
+    graphs.extend(route.graphs);
+    let merged = MergedGraph::new(graphs);
+    let all = check(&merged);
+    let want = identity_of(&prior(), fid).expect("function");
+    assert_eq!(all.get(&fid), Some(&want), "the first graph's first instance decides");
+    assert!(!all.contains_key(&id(node_kind::ROUTE, "GET /x")));
 }

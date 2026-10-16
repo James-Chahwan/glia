@@ -1,8 +1,8 @@
 //! `glia-export-engram` — write a resolved glia graph as an `engram_core::Gmap`
-//! bincode file (engram's Path-A seed) plus a `<out>.files.json` span sidecar
-//! and a `<out>.meta.json` build sidecar, and record the glia graph it
-//! exported in a `<out>.glia/` directory beside them (the LC.9 layout, the one
-//! `glia build` and the MCP read).
+//! bincode file (engram's Path-A seed) plus a `<out>.files.json` span sidecar,
+//! a `<out>.meta.json` build sidecar and a `<out>.hints.jsonl` hints side
+//! file, and record the glia graph it exported in a `<out>.glia/` directory
+//! beside them (the LC.9 layout, the one `glia build` and the MCP read).
 //!
 //! Which glia built a gmap (CK.3): `glia-export-engram -V` / `--version`
 //! prints glia's version line, `<release> (build <release>+p<PARSER_STAMP>)`
@@ -62,13 +62,14 @@
 //! an untouched node keeps its bytes, and `<out>.diff` gets the bincode
 //! `GmapDiff` from the prior (base) to this export (target), named by both
 //! gmaps' content digests; with no change it is still written, with every list
-//! empty. Write order: `<out>.diff` and `<out>.ppr.jsonl` beside `--out` are
-//! deleted first on every run, then the full gmap, `<out>.files.json` and
-//! `<out>.meta.json` are written (the next run's base), then the diff, then
-//! (with `--ppr-candidates`) the PPR side file, then `<out>.glia/`. A run
-//! refused (exit 6) or failing before the gmap write writes no meta. A run
-//! that stops between the gmap and the diff leaves a full gmap and no diff
-//! (Engram re-seeds from it); a diff that cannot be written is exit 7.
+//! empty. Write order: `<out>.diff`, `<out>.ppr.jsonl` and `<out>.hints.jsonl`
+//! beside `--out` are deleted first on every run, then the full gmap,
+//! `<out>.files.json` and `<out>.meta.json` are written (the next run's base),
+//! then the diff, then the hints side file, then (with `--ppr-candidates`) the
+//! PPR side file, then `<out>.glia/`. A run refused (exit 6) or failing before
+//! the gmap write writes no meta. A run that stops between the gmap and the
+//! diff leaves a full gmap and no diff (Engram re-seeds from it); a diff that
+//! cannot be written is exit 7.
 //!
 //! Every clone of one commit writes the same gmap, `files.json`, `meta.json`
 //! and `--since` diff bytes (DE.2): glia's NodeIds hash the repo identity (its
@@ -86,6 +87,20 @@
 //! without the flag leaves no side file: the stale one named another digest.
 //! A side file that cannot be removed is exit 5, one that cannot be written
 //! exit 8 (the gmap, its sidecars and the diff are already complete).
+//!
+//! Every run also writes `<out>.hints.jsonl` (T12; no flag): a header binding
+//! it to the gmap by its content digest (`gmap_digest`, as `.ppr.jsonl` and
+//! `meta.json` name it), then one `{"hint","key"}` row per exported fact,
+//! sorted by key, where `hint` is the LB.6 `Identity::hint` v1 string of the
+//! fact's glia node (the form glia's cell store keys a row by) or null when the
+//! node has none (`glia_engram_export::hints_side`). It prints
+//! `[engram-export] hints side: <facts> facts, <hinted> v1 hints, <ms> ms ->
+//! <path>` after the `glia build=` line. Engram reads it to give a cell write
+//! the v1 form of a fact; glia never reads it, and the gmap, sidecar, meta and
+//! diff bytes are the same beside it. `--since` does not touch it: the v1 form
+//! is basename-based and carries no file tokens. A stale one that cannot be
+//! removed is exit 5, one that cannot be written exit 9 (the gmap, its
+//! sidecars and the diff are already complete).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -96,12 +111,13 @@ use engram_core::{GMAP_FORMAT_VERSION, Gmap};
 use glia_engine::persist::{load_layout, persist_graph};
 use glia_engine::{GenerateResult, ParseCache, generate_one, generate_one_with_cache};
 use glia_engram_export::diff::{diff_gmaps, diff_path, read_gmap, write_diff};
+use glia_engram_export::hints_side::{HintsSideStats, write_hints_side_with};
 use glia_engram_export::ppr_side::{PprSideStats, write_ppr_side};
 use glia_engram_export::{
-    ExportOptions, build_gmap, history_dir, meta_path, position_paths, ppr_side_path, prior_tokens,
-    sidecar_path, write_engram_gmap,
+    ExportOptions, build_gmap_with_nodes, hints_side_path, history_dir, meta_path, position_paths,
+    ppr_side_path, prior_tokens, sidecar_path, write_engram_gmap,
 };
-use glia_graph::identity::{MoveMap, carry_file_tokens, detect_moves};
+use glia_graph::identity::{MoveMap, carry_file_tokens, detect_moves, identities};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -276,7 +292,6 @@ fn run(args: &Args) -> i32 {
         file_identity,
         prior_files: prior.as_ref().map(|p| p.gmap.files.clone()),
     };
-    let (gmap, _, mut stats) = build_gmap(&result.merged, repo_root, &opts);
     // A diff beside --out reaches the gmap that was there, which this run
     // replaces: drop it before the write, so no crash leaves it beside a gmap
     // it does not reach.
@@ -296,7 +311,31 @@ fn run(args: &Args) -> i32 {
         eprintln!("error removing the stale PPR side file {}: {e}", side_out.display());
         return 5;
     }
-    stats.digest = match write_engram_gmap(&gmap, &out_path) {
+    // The hints side file names the gmap its rows describe: the same rule, so
+    // a crash after the gmap write never leaves one naming another digest.
+    let hints_out = hints_side_path(&out_path);
+    if let Err(e) = std::fs::remove_file(&hints_out)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("error removing the stale hints side file {}: {e}", hints_out.display());
+        return 5;
+    }
+    // Build and write the gmap. The hints side file's identities (T12: one
+    // CODE hash per glia node) read only the graph, so they are derived on a
+    // second thread meanwhile and joined here; the bytes are the same either
+    // way, and a thread that cannot start or does not finish is redone inline.
+    let (gmap, mut stats, fact_nodes, written, (ids, ids_ms)) = std::thread::scope(|scope| {
+        let derive = || {
+            let started = Instant::now();
+            (identities(&result.merged), started.elapsed().as_millis())
+        };
+        let thread = std::thread::Builder::new().name("glia-export-hints".into()).spawn_scoped(scope, derive);
+        let (gmap, _, stats, fact_nodes) = build_gmap_with_nodes(&result.merged, repo_root, &opts);
+        let written = write_engram_gmap(&gmap, &out_path);
+        let ids = thread.ok().and_then(|t| t.join().ok()).unwrap_or_else(derive);
+        (gmap, stats, fact_nodes, written, ids)
+    });
+    stats.digest = match written {
         Ok(d) => d,
         Err(e) => {
             eprintln!("error writing {}: {e}", out_path.display());
@@ -318,6 +357,22 @@ fn run(args: &Args) -> i32 {
             }
         }
         None => None,
+    };
+    // The hints side file (T12), after the gmap whose digest its header names
+    // and the diff. Written on every run; a failure is its own exit code. Its
+    // time is the identity derivation's plus the rows' and the write's.
+    let hints: Option<(HintsSideStats, u128)> = {
+        let started = Instant::now();
+        match write_hints_side_with(&ids, &gmap, &fact_nodes, stats.digest, &hints_out) {
+            Ok(s) => Some((s, ids_ms + started.elapsed().as_millis())),
+            Err(e) => {
+                eprintln!("error writing the hints side file {}: {e}", hints_out.display());
+                if code == 0 {
+                    code = 9;
+                }
+                None
+            }
+        }
     };
     // The PPR candidate side file (DE.5), after the gmap whose digest its
     // header names. Opt-in, so a failure is its own exit code.
@@ -382,6 +437,17 @@ fn run(args: &Args) -> i32 {
         GMAP_FORMAT_VERSION,
         meta_path(&out_path).display(),
     );
+    // The T12 marker, every run: the rows written (one per fact), how many
+    // carry a v1 hint (the rest are null), and the time of deriving every
+    // node's identity (beside the gmap build) plus writing the file.
+    if let Some((s, ms)) = hints {
+        eprintln!(
+            "[engram-export] hints side: {} facts, {} v1 hints, {ms} ms -> {}",
+            s.facts,
+            s.hinted,
+            hints_out.display(),
+        );
+    }
     // The DE.5 marker, only with --ppr-candidates: the rows written (one per
     // Symbol / Proposition fact), K, the pushes over every fact's run, and the
     // wall time of computing and writing them.
