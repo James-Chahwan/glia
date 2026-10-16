@@ -388,6 +388,23 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W6 (DH.4, DH.7; DD.10): small duplicates for one owner of both files: `eventbus.rs`'s PHP helpers vs `queues.rs`'s,
   and `cli/src/cmd/blast_radius.rs`'s place / also_in formatting vs `query/find.rs`'s location_cell (move to
   `cli/src/common.rs`).
+- W7 (DH.16): Dart calls inside closures are not extracted (`collect_calls_in` in `parsers/code/dart/src/lib.rs` skips
+  `function_expression`), so `test('sums', () { total(..) })` mints no CALLS and matrix/dart/tests stays partial. Credit
+  a closure argument's calls to the enclosing FUNCTION / METHOD as DF.5 did for C++ lambdas and CA.1 for Go closures,
+  then re-measure the dart calls / tests cells (every package:test `test(..)` / `group(..)` body binds).
+- W7 (DF.21): residuals now written into the coverage rows: C++ heritage (no INHERITS_FROM, so base-member calls never
+  bind); C++ `auto` from a qualified call, member call, trailing return or init-capture; Swift return-value / chain
+  receivers and `any P` / `some P`; Dart `export` barrels, closure-body calls and parameter / local receivers; Laravel
+  job consumers HANDLED_BY `handle()` (the CL.4 way); Pub/Sub subscriptions created in code and topic refs across repos;
+  CMake `$<IF:..>` both branches and headers generated under CMAKE_CURRENT_BINARY_DIR.
+- W7 (DH.17b): Elixir, graph side: an INTERFACE's FUNCTION children into module_symbols, with enclosing_package /
+  bare_call_target treating an Elixir INTERFACE like a PACKAGE (then the parser's `BodyShape::is_contract` can drop
+  `!self.children`); IMPLEMENTS / INJECTS refs through ElixirModules' full-name index, not the repo-wide bare-name
+  fallback (`@behaviour Ecto.Type` -> an in-repo `MyApp.Type`); `import` / `use` keep their IMPORTS edge but bind no
+  alias, and `alias X, as: Y` binds Y; LocalModuleIndex declares an INTERFACE's dotted prefixes like PACKAGE prefixes;
+  StreamData `property` blocks as tests and ENDPOINTs for HTTP calls in test bodies.
+- W7 (DC.7b): a watch update deep-clones every group (50-221 ms on glia) by design; cutting it needs passes that do not
+  mutate group graphs (§A, A2).
 
 ## 3. Open questions for James
 
