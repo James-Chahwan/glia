@@ -44,7 +44,9 @@
 //! # Rules (DB.9b)
 //!
 //! Every build whose graph declares a rule (`declared_constraints`, the read
-//! `glia check` makes) is checked once (`check::check_rules`), and its
+//! `glia check` makes) is checked once (`check::check_rules_gated`, DT.7c:
+//! gated as `glia check` gates it, so a rule whose scope holds no located
+//! node checks nothing instead of erroring; no overlay is read), and its
 //! violations are kept as [`RuleHit`]s keyed `(rule_id, rule_kind, key)`, so
 //! two builds compare by identity, never by a count. A build that declares
 //! none is not checked: a rule-free try prints no `[check]` line and its
@@ -84,7 +86,8 @@
 //! |---|---|
 //! | [`RULE_DUPLICATE`] | merge placed it `AlreadyPresent`, or BASE declares a rule of its id (a cell-API rule, an anchored base stanza) |
 //! | [`RULE_ERROR`] | WITH's check reports an error for its id (`error` = the message, newlines flattened) |
-//! | [`RULE_ORPHANED`] | WITH declares no rule of its id: an `anchor` that binds nothing, or a scope with no PROJECT at or above it and no MODULE under it, so `glia check` never reads it |
+//! | [`RULE_ORPHANED`] | WITH declares no rule of its id: an `anchor` that binds nothing, or a scope with no PROJECT at or above it and no MODULE under it; glia check lists it under Rules that check nothing |
+//! | [`RULE_CHECKS_NOTHING`] | WITH's check lists it as `check::EMPTY_SCOPE`: its `from` / `to` / `via` / no_cycle `scope` holds no located node (`reason` / `fix` = check's), as `glia check` lists it under Rules that check nothing (DT.7c) |
 //! | [`RULE_VIOLATED`] | WITH holds a hit of its id |
 //! | [`RULE_HOLDS`] | otherwise |
 //!
@@ -96,8 +99,8 @@
 //! | verdict | a `[[constraint]]` stanza |
 //! |---|---|
 //! | [`KEEP`] | holds, no empty scope: true of the code as it is, and `glia check` keeps it true |
-//! | [`REVIEW`] | holds with an empty scope (a misspelt scope, or one meant to stay empty), or violated (the rule or the code is wrong; a blocking violation would make `glia check` exit 1, a heuristic one never) |
-//! | [`DROP`] | error (`glia check` would exit 2), orphaned (never read), duplicate (adds nothing) |
+//! | [`REVIEW`] | holds with an empty scope (a misspelt scope, or one meant to stay empty), checks_nothing (a misspelt scope, or one meant to fill later: for a person, as `glia check` lists it and fails CI only with `--strict`), or violated (the rule or the code is wrong; a blocking violation would make `glia check` exit 1, a heuristic one never) |
+//! | [`DROP`] | error (`glia check` would exit 2), orphaned (it checks nothing; glia check lists it), duplicate (adds nothing) |
 //!
 //! A graph stanza keeps its graph verdict, except that [`KEEP`] becomes
 //! [`REVIEW`] when its `rules` (WITHOUT(it) -> WITH) adds or resolves a hit
@@ -122,7 +125,9 @@
 //! `[overlay] try repo=<primary> stanzas=<n> builds=<b> verdicts keep=<k> review=<r> drop=<d> gaps <G0>→<G1> closed=<c> surface=<cli|engine>`,
 //! `G` the sum of [`GraphCounts::gaps_by_category`] of BASE and WITH. When the
 //! try has a rule part, a second line right after it:
-//! `[overlay] try-rules repo=<primary> rules=<R> (holds=<h> violated=<v> error=<e> orphaned=<o> duplicate=<u>) empty_scopes=<s> violations +<a> -<r> blocking=<b> errors=<n> surface=<cli|engine>`,
+//! `[overlay] try-rules repo=<primary> rules=<R> (holds=<h> violated=<v> error=<e> orphaned=<o> duplicate=<u> checks_nothing=<n>) empty_scopes=<s> violations +<a> -<r> blocking=<b> errors=<n> surface=<cli|engine>`,
+//! ` checks_nothing=<n>` printed only when `n` > 0 (DT.7c), so a try with none
+//! prints the DB.9b line byte for byte;
 //! `R` the candidate's `[[constraint]]` stanzas by status, `s` those holding
 //! with an empty scope, the rest the BASE -> WITH [`RulesDelta`] (grep
 //! `^\[overlay\] try-rules`; it does not start with `[overlay] try `). The
@@ -148,7 +153,8 @@ use crate::build::{
 };
 use crate::cache::ParseCache;
 use crate::check::{
-    self, DIVERGENCE, FORBID_EDGE, FORBID_PATH, NO_CYCLE, RULE, Violation, ViolationEdge,
+    self, CheckOptions, DIVERGENCE, FORBID_EDGE, FORBID_PATH, NO_CYCLE, RULE, Violation,
+    ViolationEdge,
 };
 use crate::external::declared::declared_constraints;
 use crate::gaps::{
@@ -181,6 +187,10 @@ pub const RULE_ERROR: &str = "error";
 pub const RULE_ORPHANED: &str = "orphaned";
 /// [`RuleTrial::status`]: the rule is already in the base.
 pub const RULE_DUPLICATE: &str = "duplicate";
+/// [`RuleTrial::status`]: WITH's check lists the rule as one that checks
+/// nothing (`check::EMPTY_SCOPE`: a scope it names holds no located node),
+/// as `glia check` does (DT.7c).
+pub const RULE_CHECKS_NOTHING: &str = "checks_nothing";
 
 /// How [`try_candidate`] runs. Made with `Default` plus field assignment.
 #[non_exhaustive]
@@ -324,8 +334,8 @@ impl RulesDelta {
 pub struct RuleTrial {
     /// The stanza's `id`.
     pub rule_id: String,
-    /// [`RULE_HOLDS`], [`RULE_VIOLATED`], [`RULE_ERROR`], [`RULE_ORPHANED`]
-    /// or [`RULE_DUPLICATE`].
+    /// [`RULE_HOLDS`], [`RULE_VIOLATED`], [`RULE_ERROR`], [`RULE_ORPHANED`],
+    /// [`RULE_CHECKS_NOTHING`] or [`RULE_DUPLICATE`].
     pub status: &'static str,
     /// WITH's hits of this rule.
     pub violations: usize,
@@ -338,6 +348,13 @@ pub struct RuleTrial {
     /// [`RULE_ERROR`]: check's message, newlines flattened to `; `.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// [`RULE_CHECKS_NOTHING`]: check's reason (`<role> scope `<s>` matches
+    /// no located node (..)`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// [`RULE_CHECKS_NOTHING`]: check's suggested fix.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
     /// The scopes its rule's positive `in_scope` / `under` literals name that
     /// hold no node on WITH, once each, in text order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -562,8 +579,12 @@ pub fn try_candidate(
             .values()
             .filter(|t| t.status == RULE_HOLDS && !t.empty_scopes.is_empty())
             .count();
+        let nothing = match status(RULE_CHECKS_NOTHING) {
+            0 => String::new(),
+            n => format!(" checks_nothing={n}"),
+        };
         eprintln!(
-            "[overlay] try-rules repo={primary} rules={} (holds={} violated={} error={} orphaned={} duplicate={}) empty_scopes={vacuous} violations +{} -{} blocking={} errors={} surface={surface}",
+            "[overlay] try-rules repo={primary} rules={} (holds={} violated={} error={} orphaned={} duplicate={}{nothing}) empty_scopes={vacuous} violations +{} -{} blocking={} errors={} surface={surface}",
             rule_trials.len(),
             status(RULE_HOLDS),
             status(RULE_VIOLATED),
@@ -659,12 +680,15 @@ fn rule_trial(id: &str, duplicate: bool, with: Option<&RuleState>) -> RuleTrial 
     let with = with.unwrap_or(&none);
     let hits: Vec<&RuleHit> = with.hits.values().filter(|h| h.rule_id == id).collect();
     let error = with.errors.get(id);
+    let nothing = with.nothing.get(id);
     let status = if duplicate {
         RULE_DUPLICATE
     } else if error.is_some() {
         RULE_ERROR
     } else if !with.ids.contains(id) {
         RULE_ORPHANED
+    } else if nothing.is_some() {
+        RULE_CHECKS_NOTHING
     } else if !hits.is_empty() {
         RULE_VIOLATED
     } else {
@@ -684,6 +708,12 @@ fn rule_trial(id: &str, duplicate: bool, with: Option<&RuleState>) -> RuleTrial 
         error: error
             .filter(|_| status == RULE_ERROR)
             .map(|m| m.trim_end().replace('\n', "; ")),
+        reason: nothing
+            .filter(|_| status == RULE_CHECKS_NOTHING)
+            .map(|(reason, _)| reason.clone()),
+        fix: nothing
+            .filter(|_| status == RULE_CHECKS_NOTHING)
+            .map(|(_, fix)| fix.clone()),
         empty_scopes: with.empty_scopes.get(id).cloned().unwrap_or_default(),
     }
 }
@@ -692,7 +722,7 @@ fn rule_trial(id: &str, duplicate: bool, with: Option<&RuleState>) -> RuleTrial 
 fn rule_verdict(t: &RuleTrial) -> &'static str {
     match t.status {
         RULE_HOLDS if t.empty_scopes.is_empty() => KEEP,
-        RULE_HOLDS | RULE_VIOLATED => REVIEW,
+        RULE_HOLDS | RULE_VIOLATED | RULE_CHECKS_NOTHING => REVIEW,
         _ => DROP,
     }
 }
@@ -739,6 +769,9 @@ struct RuleState {
     hits: BTreeMap<(String, &'static str, String), RuleHit>,
     /// Check's errors by rule id (several for one id joined by `; `).
     errors: BTreeMap<String, String>,
+    /// The rules check lists as checking nothing (`check::EMPTY_SCOPE`), by
+    /// id: the first row's `(reason, fix)`.
+    nothing: BTreeMap<String, (String, String)>,
     /// Every declared rule id (the reflexion model's component / layer
     /// declarations excluded, an erroring rule included).
     ids: BTreeSet<String>,
@@ -761,7 +794,7 @@ fn rule_state(merged: &MergedGraph, probe: &[String]) -> Option<RuleState> {
     if rules.is_empty() {
         return None;
     }
-    let report = check::check_rules(merged, &rules);
+    let report = check::check_rules_gated(merged, &rules, &CheckOptions::default());
     let mut by_id: BTreeMap<&str, &ConstraintRule> = BTreeMap::new();
     let mut state = RuleState::default();
     for (_, r) in &rules {
@@ -784,6 +817,14 @@ fn rule_state(merged: &MergedGraph, probe: &[String]) -> Option<RuleState> {
                 .hits
                 .entry((h.rule_id.clone(), h.rule_kind, h.key.clone()))
                 .or_insert(h);
+        }
+    }
+    for u in &report.unanchored {
+        if u.status == check::EMPTY_SCOPE {
+            state
+                .nothing
+                .entry(u.rule_id.clone())
+                .or_insert_with(|| (u.reason.clone(), u.fix.clone()));
         }
     }
     for (id, msg) in report.errors {

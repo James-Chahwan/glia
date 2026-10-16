@@ -10,7 +10,9 @@
 //! or a record, not an inferred edge, so `--no-overlay` does not switch it
 //! off. `glia check` re-reads it (DT.7b, [`declared_misses`]): it binds
 //! every rule stanza again through the same [`stanzas`] + [`bind_stanza`]
-//! and lists those that reached no CONSTRAINT cell.
+//! and lists those that reached no CONSTRAINT cell, after the rule stanzas
+//! the loader itself dropped and a whole file it ignored (DT.7c, the
+//! loader's [`Rejection`](glia_code_domain::glia_config::Rejection)s).
 //!
 //! ANCHOR, shared by the three kinds:
 //! 1. `anchor = "<qname>"` binds through the repo's
@@ -109,7 +111,7 @@
 //! declarations, not rules, and are reported on the model line.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use glia_code_domain::external_inputs::{
     ConstraintKind, ConstraintRule, merge_entry, parse_constraints, validate_declared_entry,
@@ -937,13 +939,17 @@ pub(crate) struct DeclaredMiss {
     pub(crate) root: String,
     /// The entry id (`component:<name>` / `layer:<name>` for the model's).
     pub(crate) id: String,
-    /// `constraint` (an allow included), `component` or `layer`.
+    /// `constraint` (an allow included), `component` or `layer`; `overlay`
+    /// for a whole file the loader ignored (DT.7c).
     pub(crate) section: &'static str,
-    /// `.glia/overlay.toml:<line>` of its header.
+    /// `.glia/overlay.toml:<line>` of its header (the whole file: of its
+    /// error, or `.glia/overlay.toml` when the error names no line).
     pub(crate) decl: String,
     /// [`ORPHANED`], [`REJECTED`] or [`ABSENT`].
     pub(crate) status: &'static str,
-    /// `orphaned: <where>`, `rejected: <why>` or [`ABSENT_REASON`].
+    /// `orphaned: <where>`, `rejected: <why>` (the loader's message for a
+    /// stanza it dropped; for a whole file, its message and the rule
+    /// headers it did not read) or [`ABSENT_REASON`].
     pub(crate) reason: String,
     /// What would make it check something.
     pub(crate) fix: String,
@@ -960,24 +966,48 @@ const CLAIM_FIX: &str =
 const VALIDATOR_FIX: &str = "correct the stanza as the message says, then rebuild";
 
 /// Every declared rule stanza of each repo's overlay that reached no
-/// CONSTRAINT cell of `merged`, in `roots` order and, per repo, in the
-/// build's stanza order (components, layers, constraints, each in file
-/// order). `roots` are `(RepoId.0, repo root)` pairs (a build's
-/// `GenerateResult::repo_roots`). Each root's `.glia/overlay.toml` is read
-/// again and its stanzas bound against `merged` through the build's own
-/// [`stanzas`] + [`bind_stanza`], so a miss is the build's verdict: a
-/// `reject` (a path two components claim) or a `validate_declared_entry`
-/// refusal is [`REJECTED`], a stanza that binds no node [`ORPHANED`], and one
-/// that binds but whose `(repo, overlay, id)` rule the graph does not hold
-/// [`ABSENT`] (a layout older than the overlay, or an entry the build could
-/// not merge). Decisions and notes are records, not rules: never listed.
-/// Writes no cell and prints no `[declared]` line (resolving a scope label
-/// may print its `[scope]` line again).
+/// CONSTRAINT cell of `merged`, in `roots` order. `roots` are `(RepoId.0,
+/// repo root)` pairs (a build's `GenerateResult::repo_roots`). Each root's
+/// `.glia/overlay.toml` is read again, and its rows come in two runs:
+///
+/// 1. The loader's (DT.7c), [`REJECTED`]: each `[[constraint]]` /
+///    `[[component]]` / `[[layer]]` stanza `glia_config` dropped (a
+///    version-2 key in a version-1 file, an exact path two components claim,
+///    a layer or allow naming a dropped component, a bad kind, ..), in the
+///    loader's order (components, layers, constraints, each in file order):
+///    id the stanza's (`<section>@<line>` when it has none), reason
+///    `rejected: <loader message>`, fix `Rejection::fix`. Or, when the loader
+///    ignored the WHOLE file (a TOML or schema error, an unsupported or
+///    missing `version`, unreadable bytes) and its text holds a rule header
+///    ([`rule_headers`]) or could not be read again, one row: id
+///    `.glia/overlay.toml`, section `overlay`, reason `rejected: <message>
+///    (rule stanzas not read: constraint=<c> component=<m> layer=<l>)`. A
+///    file with no rule header (only `[[edge]]` / `[[wrapper]]` ..) gives no
+///    row: its `[overlay] error:` line and `glia gaps` report it. A dropped
+///    decision or note is a record, not a rule: not listed.
+/// 2. The binder's (DT.7b): the kept stanzas bound against `merged` through
+///    the build's own [`stanzas`] + [`bind_stanza`], in the build's stanza
+///    order, so a miss is the build's verdict: a `reject` (a path two
+///    components claim through a label and its directory) or a
+///    `validate_declared_entry` refusal is [`REJECTED`], a stanza that binds
+///    no node [`ORPHANED`], and one that binds but whose `(repo, overlay,
+///    id)` rule the graph does not hold [`ABSENT`] (a layout older than the
+///    overlay, or an entry the build could not merge). A stanza the loader
+///    dropped never reaches [`stanzas`], so it is never a row twice.
+///
+/// Decisions and notes are records, not rules: never listed. Writes no cell
+/// and prints no `[declared]` line (resolving a scope label may print its
+/// `[scope]` line again). fired_on, once per root with a loader row, before
+/// the binder runs:
+/// `[check] overlay rejected root=<root> whole_file=<true|false> constraint=<c> component=<m> layer=<l>`
+/// (`<root>` as `roots` gives it; the counts the rows per section, or the
+/// ignored file's rule headers) - grep `^\[check\] overlay rejected`.
 pub(crate) fn declared_misses(merged: &MergedGraph, roots: &[(u64, PathBuf)]) -> Vec<DeclaredMiss> {
     let mut out = Vec::new();
     let mut held_rules: Option<BTreeSet<(u64, String)>> = None;
     for (repo, root) in roots {
         let Some(cfg) = glia_config::load(root) else { continue };
+        out.extend(loader_misses(root, &cfg));
         let c = &cfg.config;
         if c.constraint.is_empty() && c.component.is_empty() && c.layer.is_empty() {
             continue;
@@ -1021,6 +1051,103 @@ pub(crate) fn declared_misses(merged: &MergedGraph, roots: &[(u64, PathBuf)]) ->
                 reason,
                 fix,
             });
+        }
+    }
+    out
+}
+
+/// The sections whose dropped stanzas `glia check` lists: the rules and
+/// the reflexion model's declarations (a decision or note is a record).
+const RULE_SECTIONS: [&str; 3] = ["constraint", "component", "layer"];
+
+/// The loader's rows of one root ([`declared_misses`] run 1), and the
+/// `[check] overlay rejected` marker when there is one.
+fn loader_misses(root: &Path, cfg: &LoadedConfig) -> Vec<DeclaredMiss> {
+    let root_label = root.to_string_lossy().into_owned();
+    let decl_at = |line: Option<u32>| match line {
+        Some(l) => format!("{}:{l}", glia_config::OVERLAY_FILE),
+        None => glia_config::OVERLAY_FILE.to_string(),
+    };
+    let mut out = Vec::new();
+    let mut counts = [0usize; 3];
+    let mut whole_file = false;
+    for r in &cfg.rejections {
+        match r.section {
+            Some(section) => {
+                let Some(i) = RULE_SECTIONS.iter().position(|s| *s == section) else {
+                    continue;
+                };
+                counts[i] += 1;
+                let line = r.line.map_or_else(|| "?".to_string(), |l| l.to_string());
+                out.push(DeclaredMiss {
+                    root: root_label.clone(),
+                    id: r.id.clone().unwrap_or_else(|| format!("{section}@{line}")),
+                    section: RULE_SECTIONS[i],
+                    decl: decl_at(r.line),
+                    status: REJECTED,
+                    reason: format!("rejected: {}", r.message),
+                    fix: r.fix(),
+                });
+            }
+            None => {
+                let reason = match std::fs::read(root.join(glia_config::OVERLAY_FILE)) {
+                    Ok(bytes) => {
+                        counts = rule_headers(&String::from_utf8_lossy(&bytes));
+                        if counts.iter().all(|n| *n == 0) {
+                            continue;
+                        }
+                        format!(
+                            "rejected: {} (rule stanzas not read: constraint={} component={} layer={})",
+                            r.message, counts[0], counts[1], counts[2]
+                        )
+                    }
+                    Err(_) => format!("rejected: {} (no stanza of it is read)", r.message),
+                };
+                whole_file = true;
+                out.push(DeclaredMiss {
+                    root: root_label.clone(),
+                    id: glia_config::OVERLAY_FILE.to_string(),
+                    section: "overlay",
+                    decl: decl_at(r.line),
+                    status: REJECTED,
+                    reason,
+                    fix: r.fix(),
+                });
+            }
+        }
+    }
+    if !out.is_empty() {
+        eprintln!(
+            "[check] overlay rejected root={root_label} whole_file={whole_file} constraint={} component={} layer={}",
+            counts[0], counts[1], counts[2]
+        );
+    }
+    out
+}
+
+/// The `[[constraint]]`, `[[component]]` and `[[layer]]` table headers of an
+/// overlay's text, counted per section in that order: a line whose trimmed
+/// text is `[[`, optional spaces, the section name, optional spaces, `]]`,
+/// then nothing or a `# comment`.
+fn rule_headers(text: &str) -> [usize; 3] {
+    let mut out = [0; 3];
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("[[") else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        for (i, section) in RULE_SECTIONS.iter().enumerate() {
+            let Some(tail) = rest.strip_prefix(section) else {
+                continue;
+            };
+            let Some(after) = tail.trim_start().strip_prefix("]]") else {
+                continue;
+            };
+            let after = after.trim_start();
+            if after.is_empty() || after.starts_with('#') {
+                out[i] += 1;
+            }
         }
     }
     out
@@ -1462,5 +1589,12 @@ via = [\"./services/api/public/\"]
         assert_eq!(normalise_scope("./services/api/"), "services/api");
         assert_eq!(normalise_scope("/web"), "web");
         assert_eq!(normalise_scope("@shop/web"), "@shop/web");
+    }
+
+    #[test]
+    fn rule_headers_counts_rule_sections() {
+        let text = "\u{feff}[[component]]\nname = \"a\"\n  [[ constraint ]] # x\n[[constraint]]\n[[layer]]#top\n[[edge]]\n[constraint]\n[[constraints]]\n[[constraint]] x\n# [[layer]]\n";
+        assert_eq!(rule_headers(text), [2, 1, 1]);
+        assert_eq!(rule_headers("version = 1\n[[edge]]\nfrom = \"a\"\n"), [0, 0, 0]);
     }
 }

@@ -45,6 +45,14 @@ SUBDIR_FIXTURE = (pathlib.Path(__file__).resolve().parents[3]
                   / "bench" / "substrate-gap" / "fixtures" / "overlay-subdir-constraint")
 STALE_REASON = "orphaned: anchor=backend::internal::gone::Thing binds no node"
 
+# DT.7c fx-v1: a version-1 file whose second [[constraint]] (line 10) sets
+# the version-2 key `transitive`: the overlay loader drops that stanza.
+FX_V1_OVERLAY = ('version = 1\n\n[[constraint]]\nid = "handlers-no-repository"\nkind = "forbid_edge"\n'
+                 'from = "backend/internal/handlers"\nto = "backend/internal/repository"\n'
+                 'categories = ["CALLS"]\n\n[[constraint]]\nid = "frontend-no-backend"\nkind = "forbid_edge"\n'
+                 'from = "frontend"\nto = "backend"\ntransitive = true\n')
+V1_REASON = "rejected: `transitive` need `version = 2` (this file says version = 1) (stanza dropped)"
+
 REPORT_KEYS = ["rules", "checked", "unchecked", "errors", "violations", "reflexion"]
 # `unanchored` is serialised only when it holds a row (DT.7b).
 UNANCHORED_REPORT_KEYS = ["rules", "checked", "unchecked", "errors", "unanchored", "violations", "reflexion"]
@@ -163,6 +171,32 @@ def main() -> int:
         c.check("strict: the row blocks", [u.get("blocking") for u in strict.get("unanchored", [])] == [True],
                 strict.get("unanchored"))
         c.check("strict marker", "unchecked=0 errors=1 unanchored=1" in err and "blocking=1" in err, err[-600:])
+
+    with tempfile.TemporaryDirectory(prefix="glia-surface-check-rejected-") as tmp:
+        root = pathlib.Path(tmp) / "fx"
+        shutil.copytree(SUBDIR_FIXTURE, root)
+        (root / ".glia" / "overlay.toml").write_text(FX_V1_OVERLAY)
+        g = rg.generate(str(root))
+        report, err = stderr_of(g.check)
+        rows = report.get("unanchored", [])
+        row = rows[0] if rows else {}
+        c.check("a loader-dropped stanza is one rejected row (DT.7c)",
+                len(rows) == 1
+                and (row.get("rule_id"), row.get("section"), row.get("decl"), row.get("status"),
+                     row.get("reason"), row.get("blocking"))
+                == ("frontend-no-backend", "constraint", ".glia/overlay.toml:10", "rejected", V1_REASON, False),
+                rows)
+        c.check("the loader row's fix", str(row.get("fix", "")).startswith("set `version = 2`"), row.get("fix"))
+        c.check("a loader-dropped stanza is not an error", report.get("errors") == [], report.get("errors"))
+        marker = [ln for ln in err.splitlines() if ln.startswith("[check] overlay rejected root=")]
+        c.check("overlay rejected marker (DT.7c)",
+                len(marker) == 1
+                and marker[0].endswith(" whole_file=false constraint=1 component=0 layer=0"), err[-600:])
+        strict = g.check(strict=True)
+        errors = strict.get("errors", [])
+        c.check("strict: the loader row is an errors row",
+                len(errors) == 1 and errors[0][0] == "frontend-no-backend"
+                and errors[0][1].startswith("constraint .glia/overlay.toml:10: rejected: "), errors)
     return c.done()
 
 

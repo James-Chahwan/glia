@@ -58,7 +58,18 @@ impl PyGraph {
     /// scope=<raw> -> <path> (no PROJECT at or above it, no MODULE under
     /// it)`, `orphaned: component=<name> (..)`, ..), `rejected` (`rejected:
     /// <why>`) or `absent` (it binds, but this graph holds no rule for it: a
-    /// layout older than the overlay). `fix` suggests what would anchor it.
+    /// layout older than the overlay). A stanza the overlay loader itself
+    /// dropped (a version-2 key in a version-1 file, an exact path two
+    /// components claim, a layer or allow naming a dropped component, a bad
+    /// kind; DT.7c) is a `rejected` row at its line, `reason` `rejected:
+    /// <the loader's message> (stanza dropped)`, listed before the binder's
+    /// rows of its repo; a whole file the loader ignored (a TOML or schema
+    /// error, an unsupported or missing `version`) while it holds a rule
+    /// stanza is one row, `rule_id` `.glia/overlay.toml`, `section`
+    /// `overlay`, `reason` `rejected: <message> (rule stanzas not read:
+    /// constraint=<c> component=<m> layer=<l>)` (stderr: `[check] overlay
+    /// rejected root=<r> whole_file=<b> ..`). `fix` suggests what would
+    /// anchor it, or what to change so the loader keeps it.
     /// `blocking` is `strict`: by default the rows never fail CI; with
     /// `strict=True` each is also an `errors` row (an empty scope's message,
     /// or `<section> <decl>: <reason> - not evaluated`, then a `fix: ..`

@@ -44,7 +44,11 @@ pub(crate) enum RulesCmd {
     /// A declared rule that checks nothing - a stanza the build anchored
     /// nowhere (a stale `anchor`, a scope with no PROJECT at or above it and
     /// no MODULE under it), rejected (a path two components claim) or does
-    /// not hold, or a rule whose scope or `via` facade no located node sits
+    /// not hold, a stanza the overlay loader dropped (a version-2 key in a
+    /// version-1 file, an exact path two components claim, a layer or allow
+    /// naming a dropped component) or a whole file it ignored while it holds
+    /// a rule stanza (a TOML or schema error, an unsupported or missing
+    /// `version`), or a rule whose scope or `via` facade no located node sits
     /// in - is listed under "Rules that check nothing" with its reason and a
     /// fix, and does not fail CI unless --strict.
     /// Exit codes for CI: 0 nothing blocks, 1 a blocking violation, 2 a

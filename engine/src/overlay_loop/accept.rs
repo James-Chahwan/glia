@@ -16,10 +16,12 @@
 //!    `version = 2` (in place, its comment kept) only when a written rule sets
 //!    `rule` / `transitive` / `via` / `min_tier`, and that raise is refused
 //!    when it would also load a stanza the old version drops. Before merging,
-//!    a chosen rule `glia check` could not evaluate - one that does not
-//!    validate against the code schema and prelude, or defines no
-//!    `violation` - is refused ([`Candidate::unreadable_rules`]); `try` still
-//!    judges such a stanza.
+//!    a chosen rule glia check cannot read - one that does not validate
+//!    against the code schema and prelude, or defines no `violation` - is
+//!    refused ([`Candidate::unreadable_rules`]); `try` still judges such a
+//!    stanza. A rule whose scope holds no node is not refused: accept never
+//!    builds, the rule parses, and `glia check` then lists it under "Rules
+//!    that check nothing" (DT.7c; `try` judges it `checks_nothing`).
 //! 3. REMOVE: with gap ids, the repo is built with the file as it is (nothing
 //!    persisted, no parse cache written) and [`gaps_report`] run with its
 //!    root. Each id must be an `orphaned_rule`, `redundant_rule` or
@@ -126,8 +128,9 @@ pub struct AcceptSummary {
 /// Accept into `repo_path`'s `.glia/overlay.toml`: `candidate_text`'s chosen
 /// stanzas added and `opts.remove`'s rule rows removed, validated, written:
 /// see the module doc. `Err` (nothing written) when there is nothing to
-/// accept, the candidate is refused, a chosen rule is one `glia check` could
-/// not evaluate, a ref or gap id is unknown, a constant or rule id collides
+/// accept, the candidate is refused, a chosen rule is one glia check cannot
+/// read (it does not validate, or defines no violation), a ref or gap id is
+/// unknown, a constant or rule id collides
 /// with another value or body, the file cannot be read, the new text would
 /// not load as validated, or the write fails.
 pub fn accept(

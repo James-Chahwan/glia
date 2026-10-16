@@ -29,8 +29,9 @@
 //! declares is a duplicate when the bodies are equal by value, and refused
 //! otherwise: a candidate adds rules, never edits one.
 //! [`Candidate::unreadable_rules`] is `accept`'s guard against a rule
-//! `glia check` could not evaluate; parsing and merging never call it, so
-//! `try` still judges such a stanza.
+//! glia check cannot read (it does not validate, or defines no violation; a
+//! rule whose scope holds no node is not refused, DT.7c); parsing and
+//! merging never call it, so `try` still judges such a stanza.
 //!
 //! [`parse_candidate`] accepts a candidate only when the loader
 //! (`glia_config::parse_str`) reports no error on it: it is all-valid or
@@ -137,10 +138,13 @@ impl Candidate {
     }
 
     /// `accept`'s rule guard (DB.9a): per chosen `[[constraint]]` stanza (all,
-    /// or the ones `only` names) whose `rule` `glia check` could not evaluate,
-    /// one refusal line - a rule that does not validate against the code
-    /// schema and prelude ([`crate::rules::validate`], no graph; the reader
-    /// DB.4's `rotted_rule` uses), or one that defines no `violation` rule.
+    /// or the ones `only` names) whose `rule` glia check cannot read (it does
+    /// not validate, or defines no violation; a rule whose scope holds no node
+    /// is not refused, DT.7c: it parses, and glia check lists it as one that
+    /// checks nothing), one refusal line - a rule that does not validate
+    /// against the code schema and prelude ([`crate::rules::validate`], no
+    /// graph; the reader DB.4's `rotted_rule` uses), or one that defines no
+    /// `violation` rule.
     /// Empty when every chosen rule is readable. [`parse_candidate`] and
     /// [`merge`] never call it: `try` builds such a stanza and judges it.
     pub(crate) fn unreadable_rules(&self, only: Option<&[StanzaRef]>) -> Vec<String> {

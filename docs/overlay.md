@@ -137,9 +137,21 @@ MODULE under it)`, `orphaned: component=<name> (...)`), one it rejected (`reject
 a path two components claim), one this graph does not hold (`absent: ...`, a layout older than
 the overlay: rebuild), and a rule whose scope or `via` facade no located node sits in, are listed
 under "Rules that check nothing", each with its reason and a suggested fix (the nearest qname or
-path that would anchor it, or what to declare). They do not change the exit code: `glia check`
-still exits 0 or 1 by its violations. `glia check --strict` (`PyGraph.check(strict=True)`) makes
-each a rule error, so CI that wants every declared rule to run exits 2 on one. Decisions and notes
+path that would anchor it, or what to declare). So are the stanzas the loader itself drops (see
+"Validation"): a `[[constraint]]`, `[[component]]` or `[[layer]]` dropped at load (a version-2
+key in a version-1 file, an exact path two components claim, a layer or allow naming a dropped
+component, a bad kind) is a `rejected` row at its line with the loader's message (``rejected:
+`transitive` need `version = 2` (this file says version = 1) (stanza dropped)``) and what to
+change, listed before the other rows of its repo. A whole file the loader ignores (a TOML or
+schema error, an unsupported or missing `version`) while it holds a rule stanza is one row, id
+`.glia/overlay.toml`, section `overlay`, at the error's line: `rejected: <message> (rule stanzas
+not read: constraint=<c> component=<m> layer=<l>)`; such a file is never "no rules declared". A
+file with no rule stanza (only `[[edge]]` or `[[wrapper]]` stanzas) is not listed: its `[overlay]
+error:` line and `glia gaps` report it. stderr carries `[check] overlay rejected root=<root>
+whole_file=<true|false> constraint=<c> component=<m> layer=<l>` once per such repo. None of these
+rows changes the exit code: `glia check` still exits 0 or 1 by its violations. `glia check
+--strict` (`PyGraph.check(strict=True)`) makes each a rule error, so CI that wants every declared
+rule to run exits 2 on one. Decisions and notes
 are records, not rules, and are not listed (`glia gaps` reports a stale-anchor one as
 `orphaned_rule`).
 
@@ -269,7 +281,9 @@ never fail a build. Each one is printed once as `[overlay] error: .glia/overlay.
   it did; version 2 adds the `[[constraint]]` fields `rule`, `transitive`, `via` and `min_tier`
   (next section). A 0.5.1 glia ignores a version-2 file whole (`version = 2 is not supported`).
 - A stanza that parses but breaks a rule is **dropped on its own**. The rest of the file
-  still applies. The rules:
+  still applies. `glia check` lists a dropped `[[constraint]]` / `[[component]]` /
+  `[[layer]]`, and a whole file ignored while it holds one, under "Rules that check nothing"
+  (above), with the loader's message and a fix. The rules:
   - an `[[edge]]` category that is not an edge category name, or is `DEFINES`, `CONTAINS`
     or `CO_CHANGES`
   - a `route_prefix` that does not start with `/` or contains whitespace
@@ -547,10 +561,12 @@ duplicate. Bodies are compared by value, so formatting, key order and comments d
 rule with that id and another body is refused (`constraint "<id>" is already declared in
 .glia/overlay.toml with another body`, exit 1): a candidate adds rules and never edits one.
 
-Readable rules. Accept refuses a rule that `glia check` could not evaluate: one that does not
-validate against the code schema and the prelude (`rule "<id>" does not validate at
-<line>:<column>: <message>`, the check `rotted_rule` uses), or one that defines no `violation`
-predicate. Nothing is written. `try` builds such a stanza anyway and judges it.
+Readable rules. Accept refuses a rule that `glia check` cannot read: one that does not validate
+against the code schema and the prelude (`rule "<id>" does not validate at <line>:<column>:
+<message>`, the check `rotted_rule` uses), or one that defines no `violation` predicate. Nothing
+is written. `try` builds such a stanza anyway and judges it. A rule whose scope holds no node is
+not refused: accept never builds, the rule parses, and `glia check` then lists it under "Rules
+that check nothing" (`try` judges it `checks_nothing`).
 
 Origin. An unmarked stanza is `origin = "llm"`, the loader's default, so a rule a model wrote is
 marked as inference without any extra field.
@@ -580,7 +596,8 @@ its status is the first that applies:
 |---|---|
 | `duplicate` | the overlay as it is already declares its id (the same body, or a cell-API rule) |
 | `error` | `glia check` reports an error for it on with (its message, on one line) |
-| `orphaned` | with declares no rule of its id: an `anchor` that names no node, or a scope with no PROJECT at or above it and no MODULE under it, so `glia check` never reads it |
+| `orphaned` | with declares no rule of its id: an `anchor` that names no node, or a scope with no PROJECT at or above it and no MODULE under it; `glia check` lists it under "Rules that check nothing" |
+| `checks_nothing` | with's check lists it as one that checks nothing: a `from`, `to`, `via` or no_cycle `scope` it names holds no located node (its `reason` and `fix` are `glia check`'s, which lists it under "Rules that check nothing" and fails CI on it only with `--strict`) |
 | `violated` | with holds a hit of it |
 | `holds` | otherwise |
 
@@ -591,8 +608,8 @@ counts (`!in_scope(f, "legacy")` holds for every node).
 | verdict | a `[[constraint]]` stanza |
 |---|---|
 | `keep` | holds with no empty scope: true of the code as it is, and `glia check` keeps it true |
-| `review` | holds on an empty scope (a misspelt scope, or one meant to stay empty), or violated (the rule or the code is wrong; a blocking violation would make `glia check` exit 1, a heuristic one never does) |
-| `drop` | error (`glia check` would exit 2), orphaned (never read) or duplicate (adds nothing) |
+| `review` | holds on an empty scope (a misspelt scope, or one meant to stay empty), checks nothing (a misspelt scope, or one meant to fill later), or violated (the rule or the code is wrong; a blocking violation would make `glia check` exit 1, a heuristic one never does) |
+| `drop` | error (`glia check` would exit 2), orphaned (it checks nothing; `glia check` lists it) or duplicate (adds nothing) |
 
 A graph stanza keeps its graph verdict, except that `keep` becomes `review` when the build without
 it and the build with it differ in a declared rule's hits, or a rule errors only with it: an
@@ -617,14 +634,18 @@ statuses, then `violations +<a> -<r> (<b> blocking)` from base to with and the r
 error), the one place `--no-leave-one-out` names the statuses, and the verdict line reads
 `verdict: <v> - graph part <g> (<why>), rule part <r>`. In `--json` and from Python the report
 gains `rules` (`{delta, statuses, graph_verdict, rule_verdict}`), a rule stanza `rule` (`{rule_id,
-status, violations, tiers, blocking, hits}`, plus `error` and `empty_scopes` when set) and a graph
+status, violations, tiers, blocking, hits}`, plus `error`, `reason` / `fix` (a `checks_nothing`
+rule: `glia check`'s) and `empty_scopes` when set) and a graph
 stanza that moves hits `rules` (`{added, added_total, resolved, resolved_total, blocking,
 errors}`).
 
 When a try has a rule part, a second stderr line follows `[overlay] try ...`:
-`[overlay] try-rules repo=<label> rules=<R> (holds=<h> violated=<v> error=<e> orphaned=<o> duplicate=<u>) empty_scopes=<s> violations +<a> -<r> blocking=<b> errors=<n> surface=<cli|py|engine>`,
-`R` the candidate's `[[constraint]]` stanzas by status, `s` those that hold on an empty scope, and
-the rest the base -> with hits. Each rule-bearing build also prints check's own `[check]` line.
+`[overlay] try-rules repo=<label> rules=<R> (holds=<h> violated=<v> error=<e> orphaned=<o> duplicate=<u> checks_nothing=<n>) empty_scopes=<s> violations +<a> -<r> blocking=<b> errors=<n> surface=<cli|py|engine>`,
+` checks_nothing=<n>` only when `n` > 0, `R` the candidate's `[[constraint]]` stanzas by status,
+`s` those that hold on an empty scope, and the rest the base -> with hits. Each rule-bearing build
+also prints check's own `[check]` line (with ` unanchored=<n>` and a `[check] declared not
+checked:` line when a rule checks nothing; a try reads no overlay file, so those count only the
+empty scopes).
 
 ## History snapshot
 

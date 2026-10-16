@@ -8,7 +8,9 @@ functions over `glia_engine::overlay_loop` (CE.3b-CE.3d), the steps of
   (id first) plus `snippet`. Writes nothing.
 - `overlay_try(repo_paths, candidate, leave_one_out=True)` -> {stanzas, base,
   with, delta, verdict, closed, builds} + `rules` when a rule was checked
-  (DB.9b; a `[[constraint]]` stanza carries `rule`). `candidate` is TOML text,
+  (DB.9b; a `[[constraint]]` stanza carries `rule`, whose `status` is
+  `checks_nothing`, with `reason` / `fix`, when a scope it names holds no
+  located node, DT.7c). `candidate` is TOML text,
   not a path. Writes only the primary repo's parse cache.
 - `overlay_accept(repo_path, candidate=None, only=None, remove=None,
   dry_run=False)` -> {added, removed, duplicates, file, dry_run, written,
@@ -64,6 +66,17 @@ kind = "invariant"
 anchor = "collection::NewCollection"
 text = "the tree serves no route"
 rule = "violation(r) :- node(r, \\"ROUTE\\")."
+'''
+
+# DT.7c: a forbid_edge whose `from` holds no located node (anchored on a
+# FUNCTION, so the build declares it): glia check lists it under "Rules that
+# check nothing", and try judges it `checks_nothing` (review), not an error.
+EMPTY_CAND = '''[[constraint]]
+id = "nowhere-no-collection"
+kind = "forbid_edge"
+anchor = "collection::NewCollection"
+from = "nowhere"
+to = "collection.go"
 '''
 
 
@@ -185,6 +198,24 @@ def main() -> int:
                 rquick)
         c.check("a rule-free try has no rules key",
                 type(t) is dict and "rules" not in t, type(t) is dict and list(t))
+        et, err = stderr_of(lambda: rg.overlay_try([repo], EMPTY_CAND))
+        estanzas = et.get("stanzas", []) if type(et) is dict else []
+        er = estanzas[0].get("rule", {}) if len(estanzas) == 1 else {}
+        c.check("empty-scope try: two builds, constraint#1 review (DT.7c)",
+                et.get("builds") == 2
+                and [(s.get("stanza"), s.get("verdict")) for s in estanzas] == [("constraint#1", "review")], et)
+        c.check("status checks_nothing with check's reason and fix, no error",
+                er.get("status") == "checks_nothing"
+                and str(er.get("reason", "")).startswith("from scope `nowhere` matches no located node")
+                and bool(er.get("fix")) and "error" not in er, er)
+        erules = et.get("rules") or {}
+        c.check("empty-scope rule part: checks_nothing 1, no delta error",
+                erules.get("statuses") == {"checks_nothing": 1}
+                and (erules.get("delta") or {}).get("errors") == [], erules)
+        c.check("try-rules marker with checks_nothing",
+                f"[overlay] try-rules repo={repo} rules=1 (holds=0 violated=0 error=0 orphaned=0 duplicate=0 "
+                "checks_nothing=1) empty_scopes=0 violations +0 -0 blocking=0 errors=0 surface=py" in err,
+                err[-800:])
         c.check("no overlay file after the rule tries", not overlay.exists())
 
         # Accept: the only writer of .glia/overlay.toml.

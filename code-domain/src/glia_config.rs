@@ -27,6 +27,17 @@
 //! `glia check` time (DB.3a), never here, so a CONSTRAINT cell never depends
 //! on the rules parser (R1 §3, Q8).
 //!
+//! REJECTIONS (DT.7c). Every `[[section]]` stanza the loader drops, and the
+//! whole file when it is ignored, is also one [`Rejection`] in
+//! [`LoadedConfig::rejections`], beside its unchanged `errors` line: the
+//! section, the header line, the stanza's id (`component:<name>` /
+//! `layer:<name>` for the model's) and the message as the errors line spells
+//! it, with [`Rejection::fix`] saying what to change. `glia check` reads them
+//! (DT.7c, `external::declared::declared_misses`) to list a dropped rule
+//! stanza, or an ignored file holding one, under "Rules that check nothing".
+//! A `[walk]`, `[entrypoints]` or `[constants]` entry drop is not a stanza and
+//! has none. `errors` stays the one printed form.
+//!
 //! Every struct is `deny_unknown_fields`: a typo fails loudly instead of being
 //! silently ignored. Only the repo-root `.glia/overlay.toml` is read; a nested
 //! `.glia` is never walked (LF.1d), so sub-projects are addressed from the root
@@ -495,6 +506,82 @@ impl Origin {
     }
 }
 
+/// One stanza the loader dropped, or the whole file it ignored (DT.7c): the
+/// structured twin of a [`LoadedConfig::errors`] line, in the same order.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rejection {
+    /// The `[[section]]` of a dropped stanza (`constraint`, `component`, ..);
+    /// `None` when the whole file is ignored.
+    pub section: Option<&'static str>,
+    /// 1-based line of the stanza's header, or of the whole-file error
+    /// (`None` when the error names no line: a missing `version`, an
+    /// unreadable file).
+    pub line: Option<u32>,
+    /// The dropped stanza's id: a constraint's, decision's or note's `id`,
+    /// `component:<name>` / `layer:<name>` for the model's; `None` for every
+    /// other section, a blank id or name, and the whole file.
+    pub id: Option<String>,
+    /// The errors line after `.glia/overlay.toml[:<line>]: ` (and, for a
+    /// stanza, after its `[[<section>]] `): a stanza's ends `(stanza
+    /// dropped)`, the whole file's `the whole file is ignored` (or `cannot
+    /// read: ..`).
+    pub message: String,
+}
+
+impl Rejection {
+    /// The whole file was ignored (no section): its config is defaulted.
+    pub fn whole_file(&self) -> bool {
+        self.section.is_none()
+    }
+
+    /// What to change so the loader keeps it, read off the message (module
+    /// doc "REJECTIONS"; `docs/overlay.md` "Validation" lists the drops).
+    pub fn fix(&self) -> String {
+        let m = self.message.as_str();
+        let Some(section) = self.section else {
+            return if m.starts_with("unknown field") {
+                "correct or remove the key the message names: every section rejects unknown keys, so one misspelt key ignores the whole file (docs/overlay.md lists each section's keys)".to_string()
+            } else if m.contains("`version` is missing") {
+                format!(
+                    "add `version = 1` as the first line (`version = {LATEST_VERSION}` to use {})",
+                    V2_CONSTRAINT_FIELDS.join(" / ")
+                )
+            } else if m.starts_with("version = ") && m.contains("is not supported") {
+                format!(
+                    "set `version = {LATEST_VERSION}` (this glia reads versions {})",
+                    versions_list()
+                )
+            } else if m.contains("not valid UTF-8") {
+                format!("save {OVERLAY_FILE} as UTF-8")
+            } else if m.starts_with("cannot read") {
+                format!("make {OVERLAY_FILE} readable")
+            } else {
+                "correct the TOML at that line: a syntax error, a wrong type or a missing required field ignores the whole file (docs/overlay.md \"Validation\")".to_string()
+            };
+        };
+        if m.contains("need `version = ") {
+            format!(
+                "set `version = {LATEST_VERSION}` at the top of {OVERLAY_FILE} (version {LATEST_VERSION} loads every version-1 stanza as before), or remove the version-{LATEST_VERSION} keys from this stanza"
+            )
+        } else if m.contains("is already claimed by component") {
+            "give the path to one component: remove it from this stanza or from the component that claims it first (an exact-equal path is claimed once; nested paths are legal)".to_string()
+        } else if m.contains("is not a declared [[component]]") {
+            "declare that [[component]] or correct the name (a [[component]] the loader dropped is listed here too: fix it first)".to_string()
+        } else if m.starts_with("duplicate id") {
+            format!("give each [[{section}]] its own id: the first stanza with it is kept, this one is not")
+        } else if m.starts_with("duplicate name") {
+            format!("give each [[{section}]] its own name: the first stanza with it is kept, this one is not")
+        } else if m.contains("is listed twice") {
+            "list it once".to_string()
+        } else if m.contains("is already in layer") {
+            "put each component in one [[layer]]".to_string()
+        } else {
+            "correct the stanza as the message says (docs/overlay.md \"Validation\" lists what the loader drops)".to_string()
+        }
+    }
+}
+
 /// A parsed, validated config plus the loader's errors and the line table
 /// consumers use to record `.glia/overlay.toml:<line>` evidence.
 #[derive(Debug, Clone)]
@@ -502,6 +589,11 @@ pub struct LoadedConfig {
     pub config: GliaConfig,
     /// One line each, prefixed `.glia/overlay.toml[:<line>]: `.
     pub errors: Vec<String>,
+    /// Each dropped `[[section]]` stanza and an ignored whole file, as
+    /// [`Rejection`]s (DT.7c): the stanzas in the loader's order (project,
+    /// route_prefix, wrapper, edge, component, layer, constraint, decision,
+    /// note; each in file order), or the one whole-file rejection.
+    pub rejections: Vec<Rejection>,
     line_starts: Vec<usize>,
 }
 
@@ -556,12 +648,15 @@ impl LoadedConfig {
         }
     }
 
-    /// Drop every stanza whose check fails, recording one error per drop.
+    /// Drop every stanza whose check fails, recording one error and one
+    /// [`Rejection`] (its id read by `id`) per drop.
     fn keep<T>(
         &self,
-        section: &str,
+        section: &'static str,
         items: Vec<Spanned<T>>,
         errors: &mut Vec<String>,
+        rejections: &mut Vec<Rejection>,
+        id: impl Fn(&T) -> Option<String>,
         mut check: impl FnMut(&T) -> Result<(), String>,
     ) -> Vec<Spanned<T>> {
         let mut kept = Vec::with_capacity(items.len());
@@ -570,16 +665,30 @@ impl LoadedConfig {
                 Ok(()) => kept.push(item),
                 Err(e) => {
                     let line = self.line_of(item.span());
-                    errors.push(self.at(Some(line), &format!("[[{section}]] {e} (stanza dropped)")));
+                    let message = format!("{e} (stanza dropped)");
+                    errors.push(self.at(Some(line), &format!("[[{section}]] {message}")));
+                    rejections.push(Rejection {
+                        section: Some(section),
+                        line: Some(line),
+                        id: id(item.get_ref()),
+                        message,
+                    });
                 }
             }
         }
         kept
     }
 
+    /// The whole file is ignored: one errors line and one [`Rejection`].
+    fn reject_file(&mut self, line: Option<u32>, message: String) {
+        self.errors.push(self.at(line, &message));
+        self.rejections.push(Rejection { section: None, line, id: None, message });
+    }
+
     fn validate(&mut self, text: &str) {
         let mut cfg = std::mem::take(&mut self.config);
         let mut errors = Vec::new();
+        let mut rejections = Vec::new();
 
         if !SUPPORTED_VERSIONS.contains(&cfg.version) {
             let msg = if cfg.version == 0 {
@@ -594,7 +703,7 @@ impl LoadedConfig {
                     versions_list()
                 )
             };
-            self.errors.push(self.at(version_line(text), &msg));
+            self.reject_file(version_line(text), msg);
             return;
         }
         let version = cfg.version;
@@ -615,7 +724,7 @@ impl LoadedConfig {
         });
 
         let mut paths = BTreeSet::new();
-        cfg.project = self.keep("project", cfg.project, &mut errors, |p| {
+        cfg.project = self.keep("project", cfg.project, &mut errors, &mut rejections, |_| None, |p| {
             let rel = p.rel_path();
             if rel.is_empty() || rel == "." {
                 return Err(format!("path {:?} names the repo root", p.path));
@@ -656,16 +765,16 @@ impl LoadedConfig {
             false
         });
 
-        cfg.route_prefix = self.keep("route_prefix", cfg.route_prefix, &mut errors, |r| {
+        cfg.route_prefix = self.keep("route_prefix", cfg.route_prefix, &mut errors, &mut rejections, |_| None, |r| {
             if !r.prefix.starts_with('/') || r.prefix.chars().any(char::is_whitespace) {
                 return Err(format!("prefix {:?} must start with '/' and contain no whitespace", r.prefix));
             }
             Ok(())
         });
 
-        cfg.wrapper = self.keep("wrapper", cfg.wrapper, &mut errors, check_wrapper);
+        cfg.wrapper = self.keep("wrapper", cfg.wrapper, &mut errors, &mut rejections, |_| None, check_wrapper);
 
-        cfg.edge = self.keep("edge", cfg.edge, &mut errors, |e| {
+        cfg.edge = self.keep("edge", cfg.edge, &mut errors, &mut rejections, |_| None, |e| {
             if e.from.trim().is_empty() || e.to.trim().is_empty() {
                 return Err("from and to must be non-empty qnames".into());
             }
@@ -684,7 +793,8 @@ impl LoadedConfig {
         // the components that were KEPT.
         let mut names = BTreeSet::new();
         let mut claimed: BTreeMap<String, String> = BTreeMap::new();
-        cfg.component = self.keep("component", cfg.component, &mut errors, |c| {
+        let component_id = |c: &ComponentDecl| nonblank(&c.name).map(|n| format!("{COMPONENT_ID_PREFIX}{n}"));
+        cfg.component = self.keep("component", cfg.component, &mut errors, &mut rejections, component_id, |c| {
             check_model_name(&c.name)?;
             if names.contains(&c.name) {
                 return Err(format!("duplicate name {:?}", c.name));
@@ -717,7 +827,8 @@ impl LoadedConfig {
 
         let mut layers = BTreeSet::new();
         let mut layer_of: BTreeMap<String, String> = BTreeMap::new();
-        cfg.layer = self.keep("layer", cfg.layer, &mut errors, |l| {
+        let layer_id = |l: &LayerDecl| nonblank(&l.name).map(|n| format!("{LAYER_ID_PREFIX}{n}"));
+        cfg.layer = self.keep("layer", cfg.layer, &mut errors, &mut rejections, layer_id, |l| {
             check_model_name(&l.name)?;
             if layers.contains(&l.name) {
                 return Err(format!("duplicate name {:?}", l.name));
@@ -745,7 +856,7 @@ impl LoadedConfig {
         });
 
         let mut ids = BTreeSet::new();
-        cfg.constraint = self.keep("constraint", cfg.constraint, &mut errors, |c| {
+        cfg.constraint = self.keep("constraint", cfg.constraint, &mut errors, &mut rejections, |c| nonblank(&c.id), |c| {
             check_id(&c.id)?;
             if let Some(p) = [COMPONENT_ID_PREFIX, LAYER_ID_PREFIX].iter().find(|p| c.id.starts_with(**p)) {
                 return Err(format!("id {:?} uses the reserved {p:?} prefix", c.id));
@@ -773,7 +884,7 @@ impl LoadedConfig {
         });
 
         let mut ids = BTreeSet::new();
-        cfg.decision = self.keep("decision", cfg.decision, &mut errors, |d| {
+        cfg.decision = self.keep("decision", cfg.decision, &mut errors, &mut rejections, |d| nonblank(&d.id), |d| {
             check_id(&d.id)?;
             let present = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
             if !present(&d.title) && !present(&d.text) {
@@ -783,7 +894,7 @@ impl LoadedConfig {
         });
 
         let mut ids = BTreeSet::new();
-        cfg.note = self.keep("note", cfg.note, &mut errors, |n| {
+        cfg.note = self.keep("note", cfg.note, &mut errors, &mut rejections, |n| n.id.as_deref().and_then(nonblank), |n| {
             if n.anchor.trim().is_empty() {
                 return Err("anchor must be a non-empty qname".into());
             }
@@ -805,6 +916,7 @@ impl LoadedConfig {
 
         self.config = cfg;
         self.errors.extend(errors);
+        self.rejections.extend(rejections);
     }
 }
 
@@ -815,11 +927,11 @@ pub fn load(repo_root: &Path) -> Option<LoadedConfig> {
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(e) => return Some(failed(format!("{OVERLAY_FILE}: cannot read: {e}"))),
+        Err(e) => return Some(failed(format!("cannot read: {e}"))),
     };
     match String::from_utf8(bytes) {
         Ok(text) => Some(parse_str(&text)),
-        Err(_) => Some(failed(format!("{OVERLAY_FILE}: not valid UTF-8; the whole file is ignored"))),
+        Err(_) => Some(failed("not valid UTF-8; the whole file is ignored".to_string())),
     }
 }
 
@@ -828,7 +940,8 @@ pub fn parse_str(text: &str) -> LoadedConfig {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut line_starts = vec![0];
     line_starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
-    let mut loaded = LoadedConfig { config: GliaConfig::default(), errors: Vec::new(), line_starts };
+    let mut loaded =
+        LoadedConfig { config: GliaConfig::default(), errors: Vec::new(), rejections: Vec::new(), line_starts };
     match toml::from_str::<GliaConfig>(text) {
         Ok(cfg) => {
             loaded.config = cfg;
@@ -837,14 +950,24 @@ pub fn parse_str(text: &str) -> LoadedConfig {
         Err(e) => {
             let line = e.span().map(|s| loaded.line_of(s));
             let msg = e.message().replace('\n', "; ");
-            loaded.errors.push(loaded.at(line, &format!("{msg}; the whole file is ignored")));
+            loaded.reject_file(line, format!("{msg}; the whole file is ignored"));
         }
     }
     loaded
 }
 
-fn failed(msg: String) -> LoadedConfig {
-    LoadedConfig { config: GliaConfig::default(), errors: vec![msg], line_starts: vec![0] }
+/// A file that could not be read as text: `message` is the errors line
+/// after its `.glia/overlay.toml: ` prefix.
+fn failed(message: String) -> LoadedConfig {
+    let mut loaded =
+        LoadedConfig { config: GliaConfig::default(), errors: Vec::new(), rejections: Vec::new(), line_starts: vec![0] };
+    loaded.reject_file(None, message);
+    loaded
+}
+
+/// `s` unless it is blank: a [`Rejection::id`].
+fn nonblank(s: &str) -> Option<String> {
+    (!s.trim().is_empty()).then(|| s.to_string())
 }
 
 fn category_id(name: &str) -> Option<EdgeCategoryId> {
@@ -1771,5 +1894,242 @@ prefix = "orders"
         let l = parse_str("version = 1\n[walk]\nskip = [\"legacy\"]\n");
         assert!(l.errors.is_empty() && l.config.walk.tests.is_empty(), "{:?}", l.errors);
         assert!(l.config.walk.tests_matcher().is_none());
+    }
+
+    /// DT.7c's fx-dup + a layer and an allow naming the dropped component +
+    /// a version-1 transitive stanza (`fx-all`).
+    const FX_ALL: &str = r#"version = 1
+
+[[constraint]]
+id = "handlers-no-repository"
+kind = "forbid_edge"
+from = "backend/internal/handlers"
+to = "backend/internal/repository"
+categories = ["CALLS"]
+
+[[component]]
+name = "api"
+paths = ["backend"]
+
+[[component]]
+name = "web"
+paths = ["frontend"]
+
+[[component]]
+name = "api-copy"
+paths = ["backend"]
+
+[[layer]]
+name = "top"
+components = ["api-copy"]
+
+[[constraint]]
+id = "web-uses-copy"
+kind = "allow"
+from = "web"
+to = "api-copy"
+
+[[constraint]]
+id = "frontend-no-backend"
+kind = "forbid_edge"
+from = "frontend"
+to = "backend"
+transitive = true
+"#;
+
+    /// The handlers-no-repository stanza, headed by `head` and with `body`
+    /// in place of its categories line (line 8 when `head` is one line).
+    fn handlers_stanza(head: &str, last: &str) -> String {
+        format!(
+            "{head}\n[[constraint]]\nid = \"handlers-no-repository\"\nkind = \"forbid_edge\"\nfrom = \"backend/internal/handlers\"\nto = \"backend/internal/repository\"\n{last}\n"
+        )
+    }
+
+    fn row(r: &Rejection) -> (Option<&'static str>, Option<u32>, Option<&str>, &str) {
+        (r.section, r.line, r.id.as_deref(), r.message.as_str())
+    }
+
+    #[test]
+    fn rejections_mirror_dropped_stanzas() {
+        let l = parse_str(FX_ALL);
+        assert_eq!(
+            l.errors,
+            [
+                ".glia/overlay.toml:18: [[component]] path \"backend\" is already claimed by component \"api\" (stanza dropped)",
+                ".glia/overlay.toml:22: [[layer]] component \"api-copy\" is not a declared [[component]] (stanza dropped)",
+                ".glia/overlay.toml:26: [[constraint]] kind allow names \"api-copy\", which is not a declared [[component]] (stanza dropped)",
+                ".glia/overlay.toml:32: [[constraint]] `transitive` need `version = 2` (this file says version = 1) (stanza dropped)",
+            ]
+        );
+        let rows: Vec<_> = l.rejections.iter().map(row).collect();
+        assert_eq!(
+            rows,
+            [
+                (
+                    Some("component"),
+                    Some(18),
+                    Some("component:api-copy"),
+                    "path \"backend\" is already claimed by component \"api\" (stanza dropped)"
+                ),
+                (
+                    Some("layer"),
+                    Some(22),
+                    Some("layer:top"),
+                    "component \"api-copy\" is not a declared [[component]] (stanza dropped)"
+                ),
+                (
+                    Some("constraint"),
+                    Some(26),
+                    Some("web-uses-copy"),
+                    "kind allow names \"api-copy\", which is not a declared [[component]] (stanza dropped)"
+                ),
+                (
+                    Some("constraint"),
+                    Some(32),
+                    Some("frontend-no-backend"),
+                    "`transitive` need `version = 2` (this file says version = 1) (stanza dropped)"
+                ),
+            ]
+        );
+        assert!(l.rejections.iter().all(|r| !r.whole_file()));
+        // Each errors line is `<file>:<line>: [[<section>]] <message>`.
+        for (e, r) in l.errors.iter().zip(&l.rejections) {
+            let section = r.section.unwrap_or_default();
+            let line = r.line.unwrap_or_default();
+            assert_eq!(e, &format!("{OVERLAY_FILE}:{line}: [[{section}]] {}", r.message));
+        }
+        // A clean file has none; an entry drop (not a stanza) has none.
+        assert!(parse_str(FULL).rejections.is_empty());
+        let walk = parse_str("version = 1\n[walk]\nskip = [\"\"]\n[constants]\n\"1bad\" = \"x\"\n");
+        assert_eq!(walk.errors.len(), 2, "{:?}", walk.errors);
+        assert!(walk.rejections.is_empty(), "{:?}", walk.rejections);
+        // A blank id or name, and a section with no id, give no id.
+        let blank = parse_str("version = 1\n[[component]]\nname = \" \"\npaths = [\"a\"]\n[[edge]]\nfrom = \"a\"\nto = \"b\"\ncategory = \"DEFINES\"\n[[note]]\nanchor = \"a\"\ntext = \"\"\n");
+        let ids: Vec<(Option<&str>, Option<&str>)> =
+            blank.rejections.iter().map(|r| (r.section, r.id.as_deref())).collect();
+        assert_eq!(ids, [(Some("edge"), None), (Some("component"), None), (Some("note"), None)]);
+    }
+
+    #[test]
+    fn whole_file_rejections() {
+        let unknown = parse_str(&handlers_stanza("version = 2\n", "categorys = [\"CALLS\"]"));
+        let version3 = parse_str(&handlers_stanza("version = 3\n", "categories = [\"CALLS\"]"));
+        let missing = parse_str(&handlers_stanza("", "categories = [\"CALLS\"]"));
+        let syntax = parse_str(
+            "version = 1\n\n[[constraint]]\nid = \"handlers-no-repository\"\nkind = \"forbid_edge\"\nfrom = \"backend/internal/handlers\nto = \"backend/internal/repository\"\n",
+        );
+        for (l, line, message) in [
+            (
+                &unknown,
+                Some(8),
+                "unknown field `categorys`, expected one of `id`, `kind`, `from`, `to`, `categories`, `scope`, `anchor`, `text`, `origin`, `rule`, `transitive`, `via`, `min_tier`; the whole file is ignored",
+            ),
+            (
+                &version3,
+                Some(1),
+                "version = 3 is not supported (this glia reads versions 1 and 2); the whole file is ignored",
+            ),
+            (
+                &missing,
+                None,
+                "`version` is missing (1, or 2 to use rule / transitive / via / min_tier); the whole file is ignored",
+            ),
+            (&syntax, Some(6), "invalid basic string; the whole file is ignored"),
+        ] {
+            assert_eq!(l.rejections.len(), 1, "{:?}", l.rejections);
+            let r = &l.rejections[0];
+            assert_eq!(row(r), (None, line, None, message));
+            assert!(r.whole_file());
+            assert_eq!(l.errors, [l.at(line, message)]);
+            assert!(l.config.constraint.is_empty(), "the whole file is defaulted");
+        }
+
+        // Unreadable bytes and an unreadable file (a directory in its place).
+        let d = scratch_repo("rejected_bytes");
+        std::fs::write(d.join(OVERLAY_FILE), [0xff_u8, 0xfe, 0x00]).expect("write");
+        let l = load(&d).expect("present");
+        assert_eq!(row(&l.rejections[0]), (None, None, None, "not valid UTF-8; the whole file is ignored"));
+        assert_eq!(l.errors, [".glia/overlay.toml: not valid UTF-8; the whole file is ignored"]);
+        std::fs::remove_file(d.join(OVERLAY_FILE)).expect("rm");
+        std::fs::create_dir_all(d.join(OVERLAY_FILE)).expect("mkdir");
+        let l = load(&d).expect("present");
+        assert_eq!(l.rejections.len(), 1, "{:?}", l.rejections);
+        assert!(l.rejections[0].whole_file() && l.rejections[0].message.starts_with("cannot read: "));
+        assert_eq!(l.errors, [format!("{OVERLAY_FILE}: {}", l.rejections[0].message)]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn rejection_fixes() {
+        let fix_of = |text: &str, section: &str| -> String {
+            let l = parse_str(text);
+            let r = l.rejections.iter().find(|r| r.section == Some(section));
+            r.unwrap_or_else(|| panic!("no {section} rejection in {:?}", l.rejections)).fix()
+        };
+        let v1 = "version = 1\n";
+        // (a) a version-2 key in a version-1 file.
+        assert_eq!(
+            fix_of(&format!("{v1}[[constraint]]\nid = \"t\"\nkind = \"forbid_edge\"\nfrom = \"a\"\nto = \"b\"\ntransitive = true\n"), "constraint"),
+            "set `version = 2` at the top of .glia/overlay.toml (version 2 loads every version-1 stanza as before), or remove the version-2 keys from this stanza"
+        );
+        // (b) an exact path two components claim.
+        let claim = format!("{v1}[[component]]\nname = \"a\"\npaths = [\"x\"]\n[[component]]\nname = \"b\"\npaths = [\"x\"]\n");
+        assert_eq!(
+            fix_of(&claim, "component"),
+            "give the path to one component: remove it from this stanza or from the component that claims it first (an exact-equal path is claimed once; nested paths are legal)"
+        );
+        // (c) a layer or an allow naming an undeclared component.
+        let undeclared = "declare that [[component]] or correct the name (a [[component]] the loader dropped is listed here too: fix it first)";
+        assert_eq!(fix_of(FX_ALL, "layer"), undeclared);
+        let allow = parse_str(FX_ALL);
+        assert_eq!(allow.rejections[2].id.as_deref(), Some("web-uses-copy"));
+        assert_eq!(allow.rejections[2].fix(), undeclared);
+        // (d) a duplicate id, and a duplicate name.
+        assert_eq!(
+            fix_of(&format!("{v1}[[constraint]]\nid = \"t\"\nkind = \"no_cycle\"\n[[constraint]]\nid = \"t\"\nkind = \"no_cycle\"\n"), "constraint"),
+            "give each [[constraint]] its own id: the first stanza with it is kept, this one is not"
+        );
+        assert_eq!(
+            fix_of(&format!("{v1}[[component]]\nname = \"a\"\npaths = [\"x\"]\n[[component]]\nname = \"a\"\npaths = [\"y\"]\n"), "component"),
+            "give each [[component]] its own name: the first stanza with it is kept, this one is not"
+        );
+        // (e) one entry listed twice.
+        assert_eq!(fix_of(&format!("{v1}[[component]]\nname = \"a\"\npaths = [\"x\", \"x\"]\n"), "component"), "list it once");
+        // (f) a component in two layers.
+        assert_eq!(
+            fix_of(&format!("{v1}[[component]]\nname = \"a\"\npaths = [\"x\"]\n[[layer]]\nname = \"l1\"\ncomponents = [\"a\"]\n[[layer]]\nname = \"l2\"\ncomponents = [\"a\"]\n"), "layer"),
+            "put each component in one [[layer]]"
+        );
+        // Any other stanza drop.
+        assert_eq!(
+            fix_of(&format!("{v1}[[constraint]]\nid = \"t\"\nkind = \"forbid_edge\"\nfrom = \"a\"\n"), "constraint"),
+            "correct the stanza as the message says (docs/overlay.md \"Validation\" lists what the loader drops)"
+        );
+
+        // The whole file.
+        let whole = |text: &str| -> String {
+            let l = parse_str(text);
+            assert!(l.rejections.len() == 1 && l.rejections[0].whole_file(), "{:?}", l.rejections);
+            l.rejections[0].fix()
+        };
+        assert_eq!(
+            whole(&handlers_stanza("version = 2\n", "categorys = [\"CALLS\"]")),
+            "correct or remove the key the message names: every section rejects unknown keys, so one misspelt key ignores the whole file (docs/overlay.md lists each section's keys)"
+        );
+        assert_eq!(
+            whole(&handlers_stanza("", "categories = [\"CALLS\"]")),
+            "add `version = 1` as the first line (`version = 2` to use rule / transitive / via / min_tier)"
+        );
+        assert_eq!(
+            whole(&handlers_stanza("version = 3\n", "categories = [\"CALLS\"]")),
+            "set `version = 2` (this glia reads versions 1 and 2)"
+        );
+        assert_eq!(
+            whole("version = 1\n[[constraint]]\nid = \"t\nkind = \"no_cycle\"\n"),
+            "correct the TOML at that line: a syntax error, a wrong type or a missing required field ignores the whole file (docs/overlay.md \"Validation\")"
+        );
+        let file = |message: &str| Rejection { section: None, line: None, id: None, message: message.to_string() };
+        assert_eq!(file("not valid UTF-8; the whole file is ignored").fix(), "save .glia/overlay.toml as UTF-8");
+        assert_eq!(file("cannot read: Is a directory (os error 21)").fix(), "make .glia/overlay.toml readable");
     }
 }

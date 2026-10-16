@@ -163,11 +163,25 @@
 //! stanza hangs on no node (a stale `anchor`; a scope with no PROJECT at or
 //! above it and no MODULE under it; a layer or an allow whose component did
 //! not anchor), the build refuses it (a path two components claim, an entry
-//! `validate_declared_entry` refuses), the graph does not hold it (a layout
-//! older than the overlay), or a scope it names holds no located node. The
-//! build only says so on stderr (`[declared] orphaned ..`), and an orphaned
-//! or rejected stanza writes no cell, so [`declared_constraints`] never sees
-//! it. [`check_with_roots`], the form the CLI and pyo3 surfaces call with
+//! `validate_declared_entry` refuses), the overlay loader drops it, the graph
+//! does not hold it (a layout older than the overlay), or a scope it names
+//! holds no located node. The build only says so on stderr (`[declared]
+//! orphaned ..`, `[overlay] error: ..`), and an orphaned or rejected stanza
+//! writes no cell, so [`declared_constraints`] never sees it.
+//!
+//! The loader's drops (DT.7c) come first per repo: a `[[constraint]]`,
+//! `[[component]]` or `[[layer]]` stanza `glia_config` dropped (a version-2
+//! key in a version-1 file, an exact path two components claim, a layer or
+//! allow naming a dropped component, a bad kind) is a [`REJECTED`] row at its
+//! line, reason `rejected: <the loader's message>`, fix
+//! `glia_config::Rejection::fix`; a whole file the loader ignored (a TOML or
+//! schema error, an unsupported or missing `version`) while it holds a rule
+//! stanza is one row, id `.glia/overlay.toml`, section `overlay`, reason
+//! `rejected: <message> (rule stanzas not read: constraint=<c> component=<m>
+//! layer=<l>)`. So an overlay the loader killed is never "no rules
+//! declared", and the stanza that is only on stderr at build is listed
+//! (`[check] overlay rejected root=<r> whole_file=<b> constraint=<c>
+//! component=<m> layer=<l>`, once per such root). [`check_with_roots`], the form the CLI and pyo3 surfaces call with
 //! each repo's root, lists every one in [`CheckReport::unanchored`] with its
 //! reason and a suggested fix. It re-reads each root's
 //! `.glia/overlay.toml` and binds its `[[constraint]]`, `[[component]]` and
@@ -178,8 +192,9 @@
 //! `glia check` exits 0 / 1 by its violations, and the rows print under
 //! their own heading. [`CheckOptions::strict`] (`glia check --strict`,
 //! `PyGraph.check(strict=True)`) makes each a blocking errors row, exit 2.
-//! [`check`] and `check_rules` (review, the overlay loop) read no overlay and
-//! keep an empty scope a rule error.
+//! [`check`] and `check_rules` read no overlay and keep an empty scope a rule
+//! error; the overlay loop judges through `check_rules_gated`, where an
+//! empty scope checks nothing as in glia check.
 //!
 //! Multi-repo: scopes are repo-relative, so a rule is evaluated against every
 //! merged repo's nodes at that relative path; a cross-repo edge matches when
@@ -468,8 +483,9 @@ pub struct CheckReport {
     /// module doc "Rules that check nothing"): first the rules the graph holds
     /// whose scope no located node sits in ([`EMPTY_SCOPE`]), in rule order;
     /// then each repo's overlay stanzas that reached no CONSTRAINT cell
-    /// ([`ORPHANED`], [`REJECTED`], [`ABSENT`]), in roots order then file
-    /// order. Not serialised when empty, so a report with none keeps its
+    /// ([`ORPHANED`], [`REJECTED`], [`ABSENT`]), in roots order, per repo the
+    /// overlay loader's drops (or its one whole-file row, section `overlay`)
+    /// before the binder's misses, each in file order. Not serialised when empty, so a report with none keeps its
     /// 0.5.1 JSON.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unanchored: Vec<Unanchored>,
@@ -488,7 +504,8 @@ pub struct CheckReport {
 /// allow whose component did not anchor).
 pub const ORPHANED: &str = "orphaned";
 /// [`Unanchored::status`]: the build refused the stanza (a path another
-/// component claims, an entry `validate_declared_entry` refuses).
+/// component claims, an entry `validate_declared_entry` refuses), or the
+/// overlay loader dropped it, or ignored its whole file (DT.7c).
 pub const REJECTED: &str = "rejected";
 /// [`Unanchored::status`]: the stanza binds, but the graph holds no rule for
 /// it (a layout older than the overlay, an entry the build could not merge).
@@ -504,9 +521,12 @@ pub const EMPTY_SCOPE: &str = "empty_scope";
 pub struct Unanchored {
     /// The entry id (`component:<name>` / `layer:<name>` for the model's).
     pub rule_id: String,
-    /// `constraint` (an allow included), `component` or `layer`.
+    /// `constraint` (an allow included), `component` or `layer`; `overlay`
+    /// for a whole file the overlay loader ignored (DT.7c).
     pub section: &'static str,
-    /// `.glia/overlay.toml:<line>` of the stanza; `None` for a cell-API rule.
+    /// `.glia/overlay.toml:<line>` of the stanza (a whole file: of its error,
+    /// or `.glia/overlay.toml` when the error names no line); `None` for a
+    /// cell-API rule.
     pub decl: Option<String>,
     /// The root of the repo whose overlay declares it; `None` for an
     /// [`EMPTY_SCOPE`] row (a rule is evaluated against every merged repo).
@@ -517,8 +537,12 @@ pub struct Unanchored {
     /// <path> (no PROJECT at or above it, no MODULE under it)`, `orphaned:
     /// path=<raw> -> <path> (no PROJECT or MODULE)`, `orphaned:
     /// component=<name> (no root PROJECT; the component did not anchor)`,
-    /// `rejected: <why>`, `absent: ..`, or an empty scope's `<role> scope
-    /// `<s>` matches no located node (..)`.
+    /// `rejected: <why>` (the build's claim or validator refusal, or the
+    /// overlay loader's message for a stanza it dropped, `.. (stanza
+    /// dropped)`; for a whole file it ignored, `rejected: <message> (rule
+    /// stanzas not read: constraint=<c> component=<m> layer=<l>)`), `absent:
+    /// ..`, or an empty scope's `<role> scope `<s>` matches no located node
+    /// (..)`.
     pub reason: String,
     /// What would make it check something: the nearest qname or path that
     /// anchors it, what to declare, or the validator's message to act on.
@@ -637,8 +661,8 @@ pub fn default_forbid_categories() -> Vec<EdgeCategoryId> {
 
 /// Evaluate every rule [`declared_constraints`] reads from `merged`. A scope
 /// no node sits in is a [`CheckReport::errors`] row, and the overlay is not
-/// read: [`CheckReport::unanchored`] is empty (review and the overlay loop
-/// judge through this form).
+/// read: [`CheckReport::unanchored`] is empty (review judges through this
+/// form; the overlay loop through `check_rules_gated`).
 pub fn check(merged: &MergedGraph) -> CheckReport {
     check_rules(merged, &declared_constraints(merged))
 }
@@ -649,8 +673,10 @@ pub fn check(merged: &MergedGraph) -> CheckReport {
 /// nothing in [`CheckReport::unanchored`] (module doc "Rules that check
 /// nothing"): a rule whose scope no located node sits in, and each repo's
 /// `.glia/overlay.toml` `[[constraint]]` / `[[component]]` / `[[layer]]`
-/// stanza that reached no CONSTRAINT cell, bound again through the build's
-/// own binder. Non-blocking unless `opts.strict`.
+/// stanza that reached no CONSTRAINT cell: first those the overlay loader
+/// dropped (or the whole file it ignored while it holds one, DT.7c), then
+/// the kept ones bound again through the build's own binder. Non-blocking
+/// unless `opts.strict`.
 pub fn check_with_roots(
     merged: &MergedGraph,
     roots: &[(u64, PathBuf)],
@@ -695,6 +721,25 @@ pub(crate) fn check_rules(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule
     check_rules_with(merged, rules, reflexion::derive)
 }
 
+/// [`check_rules`] gated as [`check_with_roots`] gates it, with no roots
+/// (DT.7c; the overlay loop's form, and review's through DT.1p): a rule
+/// whose `from` / `to` / `via` facade / no_cycle `scope` no located node sits
+/// in is an [`EMPTY_SCOPE`] row of [`CheckReport::unanchored`] (reason and
+/// fix; blocking, and an errors row too, only under `opts.strict`), not a
+/// rule error, and no overlay is read, so no stanza miss is listed. Emits the
+/// marker.
+pub(crate) fn check_rules_gated(
+    merged: &MergedGraph,
+    rules: &[(NodeId, ConstraintRule)],
+    opts: &CheckOptions,
+) -> CheckReport {
+    let gate = Unanchoring {
+        misses: Vec::new(),
+        strict: opts.strict,
+    };
+    run_check(merged, rules, reflexion::derive, Some(gate))
+}
+
 /// [`check_rules`] with the reflexion model's relations derived by `derive`:
 /// `rules::reflexion::derive` for every caller but the test that pins what a
 /// failed evaluation reports.
@@ -708,7 +753,8 @@ pub(crate) fn check_rules_with(
 
 /// The one check body. `gate` `None` ([`check`], [`check_rules`]): an empty
 /// scope is an errors row and nothing is unanchored. `Some`
-/// ([`check_with_roots`]): an empty scope is an [`EMPTY_SCOPE`] row, the
+/// ([`check_with_roots`], [`check_rules_gated`] with no misses): an empty
+/// scope is an [`EMPTY_SCOPE`] row, the
 /// misses follow, and under `strict` each is an errors row too; all of it
 /// enters the report before the `[check]` marker, which counts it.
 fn run_check(

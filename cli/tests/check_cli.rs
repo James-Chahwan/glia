@@ -517,6 +517,133 @@ text = \"an anchor no node carries\"
     );
 }
 
+/// DT.7c fx-v1: a version-1 file whose second [[constraint]] sets the
+/// version-2 key `transitive`; the overlay loader drops that stanza.
+const FX_V1: &str = "version = 1
+
+[[constraint]]
+id = \"handlers-no-repository\"
+kind = \"forbid_edge\"
+from = \"backend/internal/handlers\"
+to = \"backend/internal/repository\"
+categories = [\"CALLS\"]
+
+[[constraint]]
+id = \"frontend-no-backend\"
+kind = \"forbid_edge\"
+from = \"frontend\"
+to = \"backend\"
+transitive = true
+";
+
+/// DT.7c: a stanza the overlay loader drops is listed under "Rules that
+/// check nothing" with the loader's message and a fix, not an error.
+/// Pre-fix (HEAD 03c30213, target/debug/glia): exit 1, `[check] rules=1 ..
+/// errors=0` and no row (the stanza only on stderr's `[overlay] error:`
+/// line); `--strict` exit 1.
+#[test]
+fn loader_rejected_stanza_is_listed_not_an_error() {
+    let fx = subdir_fixture("loader-v1", Some(FX_V1));
+    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    assert_eq!(code, 1, "{stdout}");
+    assert_eq!(
+        markers,
+        vec![
+            format!(
+                "[check] overlay rejected root={} whole_file=false constraint=1 component=0 layer=0",
+                fx.path()
+            ),
+            "[check] rules=1 checked=1 violations=1 (forbid_edge=1 no_cycle=0) unchecked=0 errors=0 unanchored=1".to_string(),
+            "[check] declared not checked: orphaned=0 rejected=1 absent=0 empty_scope=0 blocking=0".to_string(),
+            "[check] tiers fact=1 derived=0 heuristic=0".to_string(),
+            "[check] gate blocking=1 advisory=0".to_string(),
+        ]
+    );
+    assert!(
+        stdout.contains("- rules: 1 (checked 1, unchecked 0, errors 0, checking nothing 1)"),
+        "{stdout}"
+    );
+    let section = &stdout[stdout
+        .find("## Rules that check nothing")
+        .expect("the rules that check nothing")..];
+    assert!(
+        section.contains(
+            "- `frontend-no-backend` (constraint, .glia/overlay.toml:10): rejected: `transitive` need `version = 2` (this file says version = 1) (stanza dropped)\n  fix: set `version = 2` at the top of .glia/overlay.toml (version 2 loads every version-1 stanza as before), or remove the version-2 keys from this stanza\n"
+        ),
+        "{section}"
+    );
+    assert!(!stdout.contains("## rule errors"), "{stdout}");
+
+    let (code, json, _) = glia(&["check", &fx.path(), "--json"]);
+    assert_eq!(code, 1);
+    let v: serde_json::Value = serde_json::from_str(json.trim()).expect("JSON report");
+    assert_eq!(v["errors"], serde_json::json!([]), "{json}");
+    let row = &v["unanchored"][0];
+    assert_eq!(row["rule_id"], "frontend-no-backend", "{json}");
+    assert_eq!(row["section"], "constraint", "{json}");
+    assert_eq!(row["decl"], ".glia/overlay.toml:10", "{json}");
+    assert_eq!(row["status"], "rejected", "{json}");
+    assert_eq!(row["blocking"], false, "{json}");
+
+    let (code, stdout, _) = glia(&["check", &fx.path(), "--strict"]);
+    assert_eq!(code, 2, "{stdout}");
+    let errors = &stdout[stdout
+        .find("## rule errors (not evaluated)")
+        .expect("the rule errors section")..];
+    assert!(
+        errors.contains(
+            "- `frontend-no-backend`: constraint .glia/overlay.toml:10: rejected: `transitive` need `version = 2` (this file says version = 1) (stanza dropped) - not evaluated\n  fix: set `version = 2`"
+        ),
+        "{errors}"
+    );
+    assert!(!stdout.contains("## Rules that check nothing"), "{stdout}");
+}
+
+/// DT.7c fx-file: one misspelt key (`categorys`, line 8) ignores the whole
+/// file, which holds a rule stanza: one row, not "no rules declared".
+/// Pre-fix: "no rules declared", exit 0, `--strict` exit 0.
+#[test]
+fn whole_file_rejection_is_not_no_rules() {
+    let overlay = "version = 2
+
+[[constraint]]
+id = \"handlers-no-repository\"
+kind = \"forbid_edge\"
+from = \"backend/internal/handlers\"
+to = \"backend/internal/repository\"
+categorys = [\"CALLS\"]
+";
+    let fx = subdir_fixture("loader-file", Some(overlay));
+    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(!stdout.contains("no rules declared"), "{stdout}");
+    assert_eq!(
+        markers,
+        vec![
+            format!(
+                "[check] overlay rejected root={} whole_file=true constraint=1 component=0 layer=0",
+                fx.path()
+            ),
+            "[check] rules=0 checked=0 violations=0 (forbid_edge=0 no_cycle=0) unchecked=0 errors=0 unanchored=1".to_string(),
+            "[check] declared not checked: orphaned=0 rejected=1 absent=0 empty_scope=0 blocking=0".to_string(),
+        ]
+    );
+    for want in [
+        "- rules: 0 (checked 0, unchecked 0, errors 0, checking nothing 1)\n",
+        "- violations: 0 (blocking 0, advisory 0)\n",
+        "_(no violations)_",
+        "- `.glia/overlay.toml` (overlay, .glia/overlay.toml:8): rejected: unknown field `categorys`, expected one of `id`, `kind`, `from`, `to`, `categories`, `scope`, `anchor`, `text`, `origin`, `rule`, `transitive`, `via`, `min_tier`; the whole file is ignored (rule stanzas not read: constraint=1 component=0 layer=0)\n  fix: correct or remove the key the message names: every section rejects unknown keys, so one misspelt key ignores the whole file (docs/overlay.md lists each section's keys)\n",
+    ] {
+        assert!(stdout.contains(want), "missing {want:?} in:\n{stdout}");
+    }
+    let (code, stdout, _) = glia(&["check", &fx.path(), "--strict"]);
+    assert_eq!(code, 2, "{stdout}");
+    assert!(
+        stdout.contains("- rules: 0 (checked 0, unchecked 0, errors 1)\n"),
+        "{stdout}"
+    );
+}
+
 #[test]
 fn missing_repo_exits_2() {
     let (code, _, markers) = glia(&["check", "/nonexistent/glia-check-cli-no-such-repo"]);

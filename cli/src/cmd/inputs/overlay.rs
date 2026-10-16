@@ -20,9 +20,11 @@
 //! A candidate may carry `[[constraint]]` rules (DB.9a; handles
 //! `constraint#<n>`): a `forbid_edge`, a `no_cycle`, or an `invariant` with
 //! `rule`. `allow` and a prose invariant are refused (a person writes them
-//! by hand). `accept` refuses a rule `glia check` could not evaluate and a
-//! rule whose id the file already declares with another body; `try` judges
-//! every rule it is given.
+//! by hand). `accept` refuses a rule `glia check` cannot read (it does not
+//! validate, or defines no `violation`) and a rule whose id the file already
+//! declares with another body; `try` judges every rule it is given, a rule
+//! whose scope holds no located node as `checks_nothing` (review: `glia
+//! check` lists it under "Rules that check nothing", DT.7c).
 //!
 //! `try` renders the rule part of the report (DB.9c) when it has one: a
 //! `rules` column in the stanza table and a `rules (...)` block under it
@@ -54,9 +56,9 @@ use glia_engine::check::{DERIVED, FACT, HEURISTIC};
 use glia_engine::gaps::{CATEGORIES, DROP, GapRow, KEEP, REVIEW, verdict};
 use glia_engine::overlay_loop::{
     AcceptOptions, AcceptSummary, DEFAULT_SNIPPET_LINES, DEFAULT_TOP_K, GraphDelta, MAX_RULE_HITS,
-    Proposal, ProposeOptions, ProposedGap, RULE_DUPLICATE, RULE_ERROR, RULE_HOLDS, RULE_ORPHANED,
-    RULE_VIOLATED, RuleHit, RuleTrial, RulesDelta, Snippet, StanzaTrial, TryOptions, TryReport,
-    accept, propose, report_candidate, try_candidate,
+    Proposal, ProposeOptions, ProposedGap, RULE_CHECKS_NOTHING, RULE_DUPLICATE, RULE_ERROR,
+    RULE_HOLDS, RULE_ORPHANED, RULE_VIOLATED, RuleHit, RuleTrial, RulesDelta, Snippet,
+    StanzaTrial, TryOptions, TryReport, accept, propose, report_candidate, try_candidate,
 };
 
 use crate::common::build_options;
@@ -117,7 +119,9 @@ enum OverlayCmd {
     /// stanza, with all but that one, then report what moved and a keep /
     /// review / drop verdict per stanza. Every declared rule is checked on
     /// each build: a [[constraint]] stanza is judged on with (holds /
-    /// violated / error / orphaned / duplicate, its violations located), a
+    /// violated / error / orphaned / checks_nothing / duplicate, its
+    /// violations located; a rule whose scope holds no located node checks
+    /// nothing and is review, as `glia check` lists it), a
     /// graph stanza that moves a rule's violations is review, and the verdict
     /// combines the graph and rule parts. Writes only the parse cache. Exits
     /// 0, 2 on a build or candidate error.
@@ -494,6 +498,7 @@ fn print_totals(r: &TryReport) {
             RULE_ERROR,
             RULE_ORPHANED,
             RULE_DUPLICATE,
+            RULE_CHECKS_NOTHING,
         ]
         .iter()
         .filter_map(|s| {
@@ -609,6 +614,7 @@ fn rule_cell(s: &StanzaTrial) -> String {
                 tiers(&t.tiers),
                 t.blocking
             ),
+            RULE_CHECKS_NOTHING => "checks nothing".to_string(),
             other => other.to_string(),
         };
     }
@@ -663,7 +669,12 @@ fn rule_reason(t: &RuleTrial) -> String {
             "does not evaluate, `glia check` would exit 2: {}",
             flat(t.error.as_deref().unwrap_or("no message"))
         ),
-        RULE_ORPHANED => "binds no node (no `anchor` and no PROJECT at its scope, or an `anchor` that names no node): `glia check` never reads it".to_string(),
+        RULE_ORPHANED => "binds no node (an `anchor` no node carries, or a scope with no PROJECT at or above it and no MODULE under it): `glia check` lists it under \"Rules that check nothing\"".to_string(),
+        RULE_CHECKS_NOTHING => format!(
+            "checks nothing (`glia check` lists it under \"Rules that check nothing\"; it fails CI only with --strict): {}; fix: {}",
+            t.reason.as_deref().unwrap_or("a scope it names holds no located node"),
+            t.fix.as_deref().unwrap_or("check the spelling of its scopes")
+        ),
         RULE_DUPLICATE => "already declared: the overlay as it is holds a rule of this id".to_string(),
         other => other.to_string(),
     }

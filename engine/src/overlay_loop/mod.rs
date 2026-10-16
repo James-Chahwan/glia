@@ -39,8 +39,10 @@
 //! `accept` (CE.3d): [`accept`] is the only writer of `.glia/overlay.toml`:
 //! it merges a candidate's chosen stanzas, removes orphaned / redundant /
 //! rotted rules by gap id (by their identity, never a line), refuses a
-//! chosen rule `glia check` could not evaluate and any text the loader would
-//! not load as validated, writes atomically and returns the diff
+//! chosen rule glia check cannot read (one that does not validate, or
+//! defines no `violation`; a rule whose scope holds no node is written, and
+//! `glia check` lists it, DT.7c) and any text the loader would not load as
+//! validated, writes atomically and returns the diff
 //! ([`AcceptSummary`]).
 
 mod accept;
@@ -53,9 +55,9 @@ pub use propose::{
     DEFAULT_SNIPPET_LINES, DEFAULT_TOP_K, Proposal, ProposeOptions, ProposedGap, Snippet, propose,
 };
 pub use trial::{
-    GraphDelta, MAX_RULE_HITS, RULE_DUPLICATE, RULE_ERROR, RULE_HOLDS, RULE_ORPHANED,
-    RULE_VIOLATED, RuleHit, RuleTrial, RulesDelta, RulesReport, StanzaTrial, TryOptions, TryReport,
-    try_candidate,
+    GraphDelta, MAX_RULE_HITS, RULE_CHECKS_NOTHING, RULE_DUPLICATE, RULE_ERROR, RULE_HOLDS,
+    RULE_ORPHANED, RULE_VIOLATED, RuleHit, RuleTrial, RulesDelta, RulesReport, StanzaTrial,
+    TryOptions, TryReport, try_candidate,
 };
 pub use writer::{
     Candidate, Location, Merged, StanzaRef, merge, parse_candidate, report_candidate, without,

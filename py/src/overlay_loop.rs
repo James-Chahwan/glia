@@ -34,7 +34,8 @@
 //! `[overlay] candidate file=- stanzas=<n> (... entrypoints=<e> constraint=<k>) gap_links=<g> errors=<x>`,
 //! `[overlay] try repo=<primary> stanzas=<n> builds=<b> verdicts keep=<k> review=<r> drop=<d> gaps <G0>→<G1> closed=<c> surface=py`,
 //! then, when the try has a rule part,
-//! `[overlay] try-rules repo=<primary> rules=<R> (holds=<h> violated=<v> error=<e> orphaned=<o> duplicate=<u>) empty_scopes=<s> violations +<a> -<r> blocking=<b> errors=<n> surface=py`,
+//! `[overlay] try-rules repo=<primary> rules=<R> (holds=<h> violated=<v> error=<e> orphaned=<o> duplicate=<u> checks_nothing=<n>) empty_scopes=<s> violations +<a> -<r> blocking=<b> errors=<n> surface=py`
+//! (` checks_nothing=<n>` only when `n` > 0, DT.7c),
 //! `[overlay] accept repo=<repo> added=<a> (... entrypoints=<n> constraint=<k>) removed=<r> duplicates=<u> file=.glia/overlay.toml dry_run=<bool> surface=py`.
 //!
 //! A candidate may carry `[[constraint]]` rules (DB.9a; handles
@@ -42,8 +43,10 @@
 //! stanza and checks every declared rule on each build (DB.9b; the dict's
 //! `rules`, a stanza's `rule` / `rules`), `overlay_accept` writes them
 //! (moving the file to `version = 2` only when a rule needs it) and refuses,
-//! as `ValueError`, a rule `glia check` could not evaluate or an id the file
-//! declares with another body.
+//! as `ValueError`, a rule `glia check` cannot read (it does not validate,
+//! or defines no `violation`; a rule whose scope holds no node is written,
+//! and `overlay_try` judges it `checks_nothing`) or an id the file declares
+//! with another body.
 //!
 //! Transport only: the builds, verdicts, validation and markers live in the
 //! engine. The helpers the pyfunctions delegate to are pyo3-free, so
@@ -186,19 +189,22 @@ fn overlay_propose(
 /// the hit's identity within its rule, `line` 1-based, `file` / `line`
 /// `None` when unlocated), compared by `(rule_id, rule_kind, key)`, never by
 /// count. A stanza's `rule`: `{rule_id, status, violations, tiers,
-/// blocking, hits}` + `error` (status `error`) and `empty_scopes` (the
-/// scopes its `in_scope` / `under` literals name that hold no node), judged
-/// on `with`; `status` is `holds`, `violated`, `error` (`glia check` would
-/// exit 2), `orphaned` (it binds no node, so check never reads it) or
-/// `duplicate` (already declared). A graph stanza's `rules`: `{added,
+/// blocking, hits}` + `error` (status `error`), `reason` / `fix` (status
+/// `checks_nothing`: check's) and `empty_scopes` (the scopes its `in_scope`
+/// / `under` literals name that hold no node), judged on `with`; `status` is
+/// `holds`, `violated`, `error` (`glia check` would exit 2), `orphaned` (it
+/// binds no node; `glia check` lists it under "Rules that check nothing"),
+/// `checks_nothing` (a `from` / `to` / `via` / no_cycle `scope` it names
+/// holds no located node, which `glia check` lists, DT.7c) or `duplicate`
+/// (already declared). A graph stanza's `rules`: `{added,
 /// added_total, resolved, resolved_total, blocking, errors}` from the build
 /// without it to `with` (each list at most 20 hits; `errors`: `[id,
 /// message]` pairs). The dict's `rules`: `{delta, statuses,
 /// graph_verdict, rule_verdict}`, `delta` the same shape from `base` to
 /// `with`, `statuses` the `[[constraint]]` stanzas per status. Verdicts: a
 /// `[[constraint]]` stanza keeps when it holds with no empty scope, is review
-/// when it holds on an empty scope or is violated, and drops on error,
-/// orphaned or duplicate; a graph stanza's `keep` becomes `review` when its
+/// when it holds on an empty scope, checks nothing or is violated, and drops
+/// on error, orphaned or duplicate; a graph stanza's `keep` becomes `review` when its
 /// `rules` is present; `graph_verdict` is the graph rule, `keep` demoted to
 /// `review` when the base -> with delta moves a rule the candidate does not
 /// newly declare; `rule_verdict` is `None` without a `[[constraint]]`, else
@@ -251,8 +257,9 @@ fn overlay_try(
 /// unknown stanza handle or gap id, a result the loader would drop, a
 /// constant already pinned to another value, a rule id the file declares
 /// with another body (`constraint "<id>" is already declared`), a rule `glia
-/// check` could not evaluate (`does not validate`, or no `violation`
-/// predicate), or a failed read, build or write. Prints `[overlay] candidate file=- ...` (with a candidate) then
+/// check` cannot read (`does not validate`, or no `violation` predicate; a
+/// rule whose scope holds no node is written), or a failed read, build or
+/// write. Prints `[overlay] candidate file=- ...` (with a candidate) then
 /// `[overlay] accept repo=<repo> ... dry_run=<bool> surface=py`.
 #[pyfunction]
 #[pyo3(signature = (repo_path, candidate=None, only=None, remove=None, dry_run=false))]

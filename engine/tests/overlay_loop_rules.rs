@@ -27,8 +27,8 @@ use std::process::Command;
 
 use glia_engine::gaps::{DROP, KEEP, REVIEW};
 use glia_engine::overlay_loop::{
-    MAX_RULE_HITS, RULE_DUPLICATE, RULE_ERROR, RULE_HOLDS, RULE_ORPHANED, RULE_VIOLATED,
-    StanzaTrial, TryOptions, TryReport, try_candidate,
+    AcceptOptions, MAX_RULE_HITS, RULE_CHECKS_NOTHING, RULE_DUPLICATE, RULE_ERROR, RULE_HOLDS,
+    RULE_ORPHANED, RULE_VIOLATED, StanzaTrial, TryOptions, TryReport, accept, try_candidate,
 };
 
 /// The base overlay: one forbid_edge, scripts -> store.
@@ -79,7 +79,8 @@ anchor = "web::view::render"
 "#;
 
 /// The orphaned stanza: an `anchor` no node carries. Without it, `from =
-/// "webs"` hangs on the root PROJECT (DT.7a) and is a check error.
+/// "webs"` hangs on the root PROJECT (DT.7a) and checks nothing (DT.7c,
+/// [`empty_scope_rule_checks_nothing`]).
 const C6: &str = r#"[[constraint]]
 id = "orphan"
 kind = "forbid_edge"
@@ -538,5 +539,66 @@ fn capped_rule_moves_still_count() {
     assert_eq!(rules.graph_verdict, REVIEW);
     assert!(rules.statuses.is_empty());
     assert!(edge.rules.added.len() <= MAX_RULE_HITS);
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// C7, DT.7c: a forbid_edge whose `from` holds no located node, no anchor:
+/// it hangs on the root PROJECT, so WITH declares it and glia check lists it
+/// under "Rules that check nothing" (exit 0). Pre-fix (HEAD 03c30213,
+/// target/debug/glia): status `error`, verdict drop, `glia check would exit
+/// 2`, its id in `rules.delta.errors`.
+const C7: &str = r#"[[constraint]]
+id = "webs-no-store-edge"
+kind = "forbid_edge"
+from = "webs"
+to = "store"
+"#;
+
+#[test]
+fn empty_scope_rule_checks_nothing() {
+    let root = tmp("nothing");
+    let repo = py_tree(&root, Some(BASE_OVERLAY));
+    let report =
+        try_candidate(std::slice::from_ref(&repo), C7, &TryOptions::default()).expect("try");
+    assert_eq!(report.builds, 2, "{report:#?}");
+    assert_eq!(statuses(&report), [RULE_CHECKS_NOTHING]);
+    let s = &report.stanzas[0];
+    assert_eq!(s.verdict, REVIEW, "{s:#?}");
+    let t = s.rule.as_ref().expect("a rule trial");
+    assert_eq!(t.rule_id, "webs-no-store-edge");
+    assert_eq!(
+        t.reason.as_deref(),
+        Some("from scope `webs` matches no located node (no file sits under it and no PROJECT is at it)")
+    );
+    assert_eq!(
+        t.fix.as_deref(),
+        Some("check the spelling of `from`; `glia projects` lists the paths and labels a scope can name")
+    );
+    assert!(t.error.is_none(), "{t:#?}");
+    assert_eq!((t.violations, t.blocking), (0, 0));
+    let rules = report.rules.as_ref().expect("a rule part");
+    assert!(rules.delta.errors.is_empty(), "{rules:#?}");
+    assert!(rules.delta.is_empty(), "{rules:#?}");
+    assert_eq!(rules.statuses, counts(&[(RULE_CHECKS_NOTHING, 1)]));
+    assert_eq!(rules.rule_verdict, Some(REVIEW));
+    assert_eq!(rules.graph_verdict, DROP);
+    assert_eq!(report.verdict, REVIEW);
+    let json = serde_json::to_value(s).expect("json");
+    assert_eq!(json["rule"]["status"], "checks_nothing", "{json}");
+    assert_eq!(json["rule"]["reason"], t.reason.clone().unwrap_or_default().as_str());
+    assert_eq!(json["rule"]["fix"], t.fix.clone().unwrap_or_default().as_str());
+    assert!(json["rule"].get("error").is_none(), "{json}");
+    // The other statuses carry no reason / fix.
+    let held =
+        try_candidate(std::slice::from_ref(&repo), C1, &TryOptions::default()).expect("try");
+    let h = serde_json::to_value(&held.stanzas[0]).expect("json");
+    assert!(h["rule"].get("reason").is_none() && h["rule"].get("fix").is_none(), "{h}");
+
+    // accept writes it: it parses, accept never builds.
+    let mut opts = AcceptOptions::default();
+    opts.dry_run = true;
+    let summary = accept(&repo, Some(C7), &opts).expect("accept --dry-run");
+    assert_eq!(summary.added, counts(&[("constraint", 1)]));
+    assert!(!summary.written);
     std::fs::remove_dir_all(root).ok();
 }

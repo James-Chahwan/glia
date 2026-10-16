@@ -41,9 +41,11 @@
 //! Rules that check nothing (DT.7b): the report is `check_with_roots` over
 //! the build's repo roots, so a declared `[[constraint]]` / `[[component]]` /
 //! `[[layer]]` stanza the build anchored nowhere, rejected or does not hold,
-//! and a rule whose scope no located node sits in, print under `## Rules
-//! that check nothing`, each with its reason and a `fix:` line, after the
-//! unchecked list. They never change the exit code, and an overlay of only
+//! one the overlay loader dropped (`rejected: <the loader's message>`, at its
+//! line), a whole file the loader ignored while it holds such a stanza (one
+//! row, `` `.glia/overlay.toml` (overlay, ..) ``; DT.7c), and a rule whose
+//! scope no located node sits in, print under `## Rules that check nothing`,
+//! each with its reason and a `fix:` line, after the unchecked list. They never change the exit code, and an overlay of only
 //! such stanzas is not "no rules declared". `--strict` makes each an errors
 //! row (printed under `## rule errors (not evaluated)` with its `fix:` line,
 //! not under the heading above), so it exits 2. The summary line gains `,
@@ -72,7 +74,8 @@ pub(crate) struct Args {
     #[arg(long)]
     json: bool,
     /// Fail (exit 2) on a declared rule that checks nothing: a stanza the
-    /// build anchored nowhere, rejected or does not hold, or a rule whose
+    /// build anchored nowhere or rejected, one the overlay loader dropped or
+    /// a whole file it ignored, one the graph does not hold, or a rule whose
     /// scope no located node sits in. Without it they are listed, never a CI
     /// failure.
     #[arg(long)]

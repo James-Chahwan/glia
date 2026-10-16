@@ -536,7 +536,7 @@ fn py_rule_tree(root: &Path) -> PathBuf {
 /// holds, `#2` is violated by `web::app::show -> store::db::load`, `#3`
 /// holds on an empty scope (`webs`), `#4` does not evaluate, `#5` holds,
 /// `#6` binds no node (a stale `anchor`: without it, `from = "webs"` hangs
-/// on the root PROJECT, DT.7a, and is a check error), and `edge#1` adds a
+/// on the root PROJECT, DT.7a, and checks nothing), and `edge#1` adds a
 /// CALLS that breaks
 /// `scripts-no-store`. Version-less.
 fn seven_stanza_candidate(root: &Path) -> PathBuf {
@@ -701,6 +701,79 @@ fn try_shows_the_rule_part() {
         std::fs::read_to_string(overlay_file(&repo)).expect("read"),
         before,
         "try writes no overlay"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// DT.7c: a candidate rule whose `from` holds no located node checks
+/// nothing, as `glia check` lists it once accept writes it: review, with
+/// check's reason and fix, not a check error. Pre-fix (HEAD 03c30213,
+/// target/debug/glia): `| constraint#1 | drop | — | — | — | — | error |`,
+/// `drop - does not evaluate, `glia check` would exit 2: ..`, `rules: error
+/// 1; ..; errors: webs-no-store-edge`, `nothing to accept: every stanza is a
+/// drop`, `try-rules .. (holds=0 violated=0 error=1 orphaned=0 duplicate=0)`.
+#[test]
+fn try_judges_an_empty_scope_as_checking_nothing() {
+    let root = tmp("checks-nothing");
+    let repo = py_rule_tree(&root);
+    let cand = root.join("webs.toml");
+    std::fs::write(
+        &cand,
+        "[[constraint]]\nid = \"webs-no-store-edge\"\nkind = \"forbid_edge\"\nfrom = \"webs\"\nto = \"store\"\n",
+    )
+    .expect("write");
+    let (r, c) = (s(&repo), s(&cand));
+    let out = glia(&["overlay", "try", r, "--candidate", c]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    for want in [
+        "| constraint#1 | review | — | — | — | — | checks nothing |",
+        "- constraint#1 `webs-no-store-edge`: review - checks nothing (`glia check` lists it under \"Rules that check nothing\"; it fails CI only with --strict): from scope `webs` matches no located node (no file sits under it and no PROJECT is at it); fix: check the spelling of `from`; `glia projects` lists the paths and labels a scope can name\n",
+        "verdict: review - graph part drop (no gap category fell and the graph did not grow), rule part review\n",
+        "\nrules: checks_nothing 1; violations +0 -0 (0 blocking)\n",
+        "review before accepting: constraint#1",
+    ] {
+        assert!(stdout.contains(want), "missing {want:?} in:\n{stdout}");
+    }
+    assert!(!stdout.contains("errors:"), "{stdout}");
+    assert!(!stdout.contains("would exit 2"), "{stdout}");
+    for want in [
+        "[check] rules=2 checked=1 violations=0 (forbid_edge=0 no_cycle=0) unchecked=0 errors=0 unanchored=1\n".to_string(),
+        "[check] declared not checked: orphaned=0 rejected=0 absent=0 empty_scope=1 blocking=0\n".to_string(),
+        format!("[overlay] try repo={r} stanzas=1 builds=2 verdicts keep=0 review=1 drop=0 gaps 4→4 closed=0 surface=cli\n"),
+        format!("[overlay] try-rules repo={r} rules=1 (holds=0 violated=0 error=0 orphaned=0 duplicate=0 checks_nothing=1) empty_scopes=0 violations +0 -0 blocking=0 errors=0 surface=cli\n"),
+    ] {
+        assert!(stderr.contains(&want), "missing {want:?} in:\n{stderr}");
+    }
+
+    let out = glia(&["overlay", "try", r, "--candidate", c, "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let t = json(&out);
+    let rule = &t["stanzas"][0]["rule"];
+    assert_eq!(rule["status"], "checks_nothing", "{t}");
+    assert_eq!(
+        rule["reason"],
+        "from scope `webs` matches no located node (no file sits under it and no PROJECT is at it)",
+        "{t}"
+    );
+    assert!(rule["fix"].as_str().is_some_and(|f| f.starts_with("check the spelling of `from`")), "{t}");
+    assert!(rule.get("error").is_none(), "{t}");
+    assert_eq!(t["rules"]["statuses"], serde_json::json!({"checks_nothing": 1}), "{t}");
+    assert_eq!(t["rules"]["delta"]["errors"], serde_json::json!([]), "{t}");
+    assert_eq!(t["rules"]["graph_verdict"], "drop", "{t}");
+    assert_eq!(t["rules"]["rule_verdict"], "review", "{t}");
+    assert_eq!(t["verdict"], "review", "{t}");
+
+    // Accept writes it (it parses; accept never builds), and glia check then
+    // lists it the way try judged it.
+    let out = glia(&["overlay", "accept", r, "--candidate", c]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let out = glia(&["check", r]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("- `webs-no-store-edge` (constraint, .glia/overlay.toml:10): from scope `webs` matches no located node (no file sits under it and no PROJECT is at it)\n  fix: check the spelling of `from`; `glia projects` lists the paths and labels a scope can name\n"),
+        "{stdout}"
     );
     std::fs::remove_dir_all(root).ok();
 }
