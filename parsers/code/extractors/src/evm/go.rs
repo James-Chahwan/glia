@@ -26,9 +26,14 @@
 //!    composite literal `<field>: ..`, binds the value of
 //!    - `<N>.GetAbi()` / `<N>.ParseABI()` on a metadata declaration N of the
 //!      file (abigen v1 / v2): `Scope::Abi(N)` with N's entries;
-//!    - `abi.JSON(strings.NewReader(<N>))`: `Scope::Abi(N)` with N's entries
-//!      (none when N is declared in another file of the package, so the
-//!      resolver name-hints it); an inline literal that reads gives
+//!    - `abi.JSON(strings.NewReader(<N>))`: `Scope::Abi(N)` with N's entries;
+//!      when the file does not declare N (and its function binds no
+//!      parameter or local N, and N is no package `var` of the file) N is a
+//!      constant of another file of the package: no entries, and every site
+//!      of the binding carries the reference `AbiRef { name: N, from: "." }`
+//!      (DT.10g), which the engine's join fills from that file's
+//!      `NavFact::GoStringConst` ([`read_go_const_abi`]); unjoined, the
+//!      resolver name-hints it. An inline literal that reads gives
 //!      `Scope::Abi(<x>)` with its entries and counts as an ABI read;
 //!    - `bind.NewBoundContract(<addr>, <v> | *<v> | &<v>, ..)`: the value v
 //!      resolves to (step 6), else `Scope::Abi(<v>'s last segment)` with no
@@ -134,9 +139,9 @@
 //!    the wrapper sites minted, y the dynamic wrapper calls (also in the
 //!    `[evm-client]` line's `dynamic`). Grep `^\[evm-wrappers\] `.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use glia_code_domain::evm::{AbiEntry, ClientSide, EntryKind, Scope};
+use glia_code_domain::evm::{self, AbiEntry, AbiRef, ClientSide, EntryKind, Scope};
 
 use super::Site;
 use super::abi::read_json_abi;
@@ -554,6 +559,7 @@ fn read_file(source: &str, view: &str) -> (Vec<Site>, GoCounts, Vec<Wrapper>) {
         funcs: func_decls(view),
         locals: Vec::new(),
         fields: Vec::new(),
+        package_refs: BTreeSet::new(),
     };
     for (ctor, pkg, member) in ctors {
         let first = reader.locals.len();
@@ -563,8 +569,41 @@ fn read_file(source: &str, view: &str) -> (Vec<Site>, GoCounts, Vec<Wrapper>) {
     let (mut sites, handovers) = reader.sites(&mut counts);
     let wrappers = reader.infer_wrappers(handovers, &mut counts);
     sites.extend(reader.wrapper_sites(&wrappers, &mut counts));
+    // DT.10g: every site scoped by a package constant of another file
+    // (direct, wrapper and switch sites alike) names it for the engine's join.
+    for site in &mut sites {
+        if let Scope::Abi(name) = &site.scope
+            && site.abi.is_none()
+            && reader.package_refs.contains(name)
+        {
+            site.abi_ref = Some(AbiRef {
+                name: name.clone(),
+                from: evm::GO_PACKAGE.to_string(),
+            });
+        }
+    }
     sites.sort_by(|a, b| (a.at, &a.member).cmp(&(b.at, &b.member)));
     (sites, counts, wrappers)
+}
+
+/// The entries of a Go package-level string constant's value that holds a
+/// JSON ABI (DT.10g): `value` is the `NavFact::GoStringConst` text, a raw
+/// string's verbatim or an interpreted string's with its escapes kept, so it
+/// reads as JSON as it is or, failing that, unescaped per Go
+/// (`scan::go_string_literal`). Only a value starting with `[` is tried;
+/// `None` for anything that is no ABI.
+pub fn read_go_const_abi(value: &str) -> Option<Vec<AbiEntry>> {
+    if !value.trim_start().starts_with('[') {
+        return None;
+    }
+    read_json_abi(value).or_else(|| {
+        let quoted = format!("\"{value}\"");
+        let (text, end) = go_string_literal(&quoted, 0)?;
+        if end != quoted.len() {
+            return None;
+        }
+        read_json_abi(&text)
+    })
 }
 
 /// The side a site naming `member` reads with the ABI `entries` (step 7);
@@ -1040,6 +1079,9 @@ struct Reader<'a> {
     funcs: Vec<FuncDecl>,
     locals: Vec<Binding>,
     fields: Vec<Field>,
+    /// DT.10g: the identifiers `abi.JSON(strings.NewReader(<N>))` reads that
+    /// the file does not bind: constants of another file of the package.
+    package_refs: BTreeSet<String>,
 }
 
 impl Reader<'_> {
@@ -1066,6 +1108,13 @@ impl Reader<'_> {
             };
             if value.scope.is_none() {
                 counts.dynamic += 1;
+            }
+            if ctor == Ctor::Json
+                && value.entries.is_none()
+                && let Some(Scope::Abi(name)) = &value.scope
+                && !self.binds_in_file(name, at)
+            {
+                self.package_refs.insert(name.clone());
             }
             self.push_target(target, value, close);
         }
@@ -1400,6 +1449,7 @@ impl Reader<'_> {
                     args,
                     lib: LIB,
                     abi: entries,
+                    abi_ref: None,
                     at: m_at,
                 });
             }
@@ -1445,6 +1495,43 @@ impl Reader<'_> {
             side,
             dynamic,
         })
+    }
+
+    /// DT.10g: true when the file binds `name` where `at` sees it, so an
+    /// `abi.JSON` argument named so is no constant of another file: a package
+    /// `var` of the file, or the receiver, a parameter or a local (`name :=`,
+    /// `name, err :=`, `var name`) of the function holding `at`.
+    fn binds_in_file(&self, name: &str, at: usize) -> bool {
+        if self.package_vars.iter().any(|v| v == name) {
+            return true;
+        }
+        let Some(f) = self.func_at(at) else {
+            return false;
+        };
+        if f.receiver.as_deref() == Some(name) || f.params.iter().any(|p| p == name) {
+            return true;
+        }
+        let vb = self.view.as_bytes();
+        word_hits(self.view, name)
+            .into_iter()
+            .filter(|&k| f.body.0 < k && k < f.body.1)
+            .any(|k| {
+                let before = prev_non_ws(vb, k).map(|p| vb[p]);
+                let declared_by_var = prev_non_ws(vb, k)
+                    .and_then(|p| ident_start_before(vb, p + 1).map(|w| &self.view[w..=p]))
+                    == Some("var");
+                let mut j = skip_ws(vb, k + name.len());
+                // `name, err :=`: skip the rest of the left-hand side.
+                while vb.get(j) == Some(&b',') {
+                    j = skip_ws(vb, j + 1);
+                    match ident_end(vb, j) {
+                        Some(e) => j = skip_ws(vb, e),
+                        None => break,
+                    }
+                }
+                let short = vb.get(j) == Some(&b':') && vb.get(j + 1) == Some(&b'=');
+                declared_by_var || (short && before != Some(b'.'))
+            })
     }
 
     /// The index of the function whose body holds `at`.
@@ -1584,6 +1671,7 @@ impl Reader<'_> {
                     args: None,
                     lib: LIB,
                     abi: w.entries.clone(),
+                    abi_ref: None,
                     at: call.at,
                 });
             }
@@ -1639,6 +1727,7 @@ impl Reader<'_> {
                     args: None,
                     lib: LIB,
                     abi: entries.clone(),
+                    abi_ref: None,
                     at: s,
                 });
             }
@@ -2018,6 +2107,98 @@ func local() {
             "package level only; an interpreted string is unescaped (\\u0065, \\n)"
         );
         assert_eq!(read(src), (Vec::new(), counts(4, 0, 0)));
+    }
+
+    /// DT.10g: `abi.JSON(strings.NewReader(<N>))` with `N` declared in no
+    /// part of the file names the package constant `N` on every site of the
+    /// binding (wrapper sites too); a file constant, a parameter, a local and
+    /// a package var name none.
+    #[test]
+    fn go_package_const_reference_carries_abi_ref() {
+        let src = "package chain
+
+import (
+	\"strings\"
+
+	\"github.com/ethereum/go-ethereum/accounts/abi\"
+)
+
+const localABI = `[{\"type\":\"function\",\"name\":\"ping\",\"inputs\":[]}]`
+
+var varABI = load()
+
+func ReleaseCalldata(id [32]byte) ([]byte, error) {
+	parsed, err := abi.JSON(strings.NewReader(shopABI))
+	if err != nil {
+		return nil, err
+	}
+	return parsed.Pack(\"release\", id)
+}
+
+func pack(method string) ([]byte, error) {
+	shop, _ := abi.JSON(strings.NewReader(shopABI))
+	return shop.Pack(method)
+}
+
+func Freeze() ([]byte, error) { return pack(\"freeze\") }
+
+func Ping() ([]byte, error) {
+	l, _ := abi.JSON(strings.NewReader(localABI))
+	return l.Pack(\"ping\")
+}
+
+func FromParam(paramABI string) ([]byte, error) {
+	p, _ := abi.JSON(strings.NewReader(paramABI))
+	return p.Pack(\"a\")
+}
+
+func FromLocal() ([]byte, error) {
+	localStr := fetch()
+	q, _ := abi.JSON(strings.NewReader(localStr))
+	return q.Pack(\"b\")
+}
+
+func FromVar() ([]byte, error) {
+	v, _ := abi.JSON(strings.NewReader(varABI))
+	return v.Pack(\"c\")
+}
+";
+        let (sites, _) = scan(src, &code_view(src, "go"));
+        let rows: Vec<String> = sites
+            .iter()
+            .map(|s| {
+                let r = s
+                    .abi_ref
+                    .as_ref()
+                    .map_or_else(|| "-".to_string(), |r| format!("{}@{}", r.name, r.from));
+                format!("{}.{} ref={r}", s.scope.key(), s.member)
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "abi:shopABI.release ref=shopABI@.",
+                "abi:shopABI.freeze ref=shopABI@.",
+                "abi:localABI.ping ref=-",
+                "abi:paramABI.a ref=-",
+                "abi:localStr.b ref=-",
+                "abi:varABI.c ref=-",
+            ]
+        );
+    }
+
+    /// DT.10g: a GoStringConst value reads as a JSON ABI as written (a raw
+    /// string) or unescaped per Go (an interpreted one); anything else is no
+    /// ABI.
+    #[test]
+    fn go_const_values_read_raw_or_unescaped() {
+        let raw = r#"[{"type":"function","name":"release","inputs":[{"name":"id","type":"bytes32"}]}]"#;
+        let want = Some(vec![AbiEntry { kind: EntryKind::Fn, name: "release".into(), arity: Some(1) }]);
+        assert_eq!(read_go_const_abi(raw), want);
+        assert_eq!(read_go_const_abi(&raw.replace('"', "\\\"")), want, "interpreted, escapes kept");
+        for no in ["/api/v1", "[1, 2]", "", "{\"type\":\"function\"}", "[\\q]"] {
+            assert_eq!(read_go_const_abi(no), None, "{no:?}");
+        }
     }
 
     #[test]

@@ -24,6 +24,20 @@
 //! client node; the resolver unions its cells and pairs it only when every
 //! variant agrees.
 //!
+//! **Cross-file ABIs (DT.10g).** A site whose ABI binding the file imports
+//! (TS: `import { X } from '<spec>'`, `{ Y as X }`, a default import,
+//! `const { X } = require('<spec>')`) or names without declaring it (Go:
+//! `abi.JSON(strings.NewReader(<N>))` with `N` a constant of another file of
+//! the package) carries an [`evm::AbiRef`] in its cell (`abi_ref`, `from`
+//! [`evm::GO_PACKAGE`] for Go) and no entries; the cell variants are the
+//! distinct `(lib, abi, abi_ref)`. A TS-family file's exported ABI bindings
+//! (`export const|let <N> = <abi literal>`, `export default [..]` as
+//! `default`) are [`EvmNodes::abi_decls`], read whether or not the file
+//! calls a contract; the engine records them as `NavFact::EvmAbi` on the
+//! MODULE, and its post-cache join (engine/src/build/evm_abi.rs) fills a
+//! referencing cell's `abi` from them, or (Go) from the package's
+//! `NavFact::GoStringConst`s through [`read_go_const_abi`].
+//!
 //! Marker, once per file with a site or a dynamic construction ([`EvmNodes::markers`]):
 //! `[evm-client] lang=<ts|go> calls=<c> events=<e> sites=<s> (ethers=<n>
 //! hardhat=<n> typechain=<n> viem=<n> web3=<n> geth=<n>) abis=<a>
@@ -39,13 +53,14 @@ mod ts;
 
 use std::collections::BTreeMap;
 
-use glia_code_domain::evm::{self, AbiEntry, ClientFacts, ClientSide, Scope};
+use glia_code_domain::evm::{self, AbiEntry, AbiRef, ClientFacts, ClientHit, ClientSide, Scope};
 use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
 use glia_core::{Confidence, Node, NodeId, RepoId};
 
 use crate::anchor::{self, Anchor};
 
 pub use abi::read_json_abi;
+pub use go::read_go_const_abi;
 
 /// The language tags the TypeScript / JavaScript reader scans.
 const TS_FAMILY: &[&str] = &["typescript", "react", "angular", "vue"];
@@ -64,6 +79,11 @@ pub struct EvmNodes {
     /// One per site, for the engine's A5.8 anchor pass.
     pub anchors: Vec<Anchor>,
     pub counts: EvmCounts,
+    /// A TS-family file's exported ABI bindings (DT.10g, module doc), by
+    /// exported name (`default` for `export default [..]`), in source order;
+    /// empty for any other language. The engine moves them onto the MODULE as
+    /// `NavFact::EvmAbi`.
+    pub abi_decls: Vec<(String, Vec<AbiEntry>)>,
     /// The Go reader's `[evm-wrappers]` counts (DT.10f); zero for any other
     /// reader.
     go_wrappers: go::WrapperCounts,
@@ -107,6 +127,9 @@ pub(crate) struct Site {
     pub(crate) lib: &'static str,
     /// The ABI the receiver was built from; `None` when unknown.
     pub(crate) abi: Option<Vec<AbiEntry>>,
+    /// The ABI binding another file declares (DT.10g); `None` when the file
+    /// binds the ABI itself or the binding is no import.
+    pub(crate) abi_ref: Option<AbiRef>,
     /// The byte offset the anchor's line is read at.
     pub(crate) at: usize,
 }
@@ -115,17 +138,18 @@ pub(crate) struct Site {
 /// TS-family tag reads ethers, `go` reads go-ethereum. A language without a
 /// reader gives none.
 pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: RepoId) -> EvmNodes {
-    let (tag, sites, abis, not_in_abi, dynamic, go_wrappers) = match lang {
+    let (tag, sites, abis, not_in_abi, dynamic, go_wrappers, abi_decls) = match lang {
         "go" => {
             let view = scan::code_view(source, lang);
             let (sites, c) = go::scan(source, &view);
-            ("go", sites, c.abis, c.not_in_abi, c.dynamic, c.wrappers)
+            ("go", sites, c.abis, c.not_in_abi, c.dynamic, c.wrappers, Vec::new())
         }
         l if TS_FAMILY.contains(&l) => {
             let view = scan::code_view(source, lang);
             let (sites, c) = ts::scan(source, &view);
+            let decls = ts::exported_abis(source, &view);
             let none = go::WrapperCounts::default();
-            ("ts", sites, c.abis, c.not_in_abi, c.dynamic, none)
+            ("ts", sites, c.abis, c.not_in_abi, c.dynamic, none, decls)
         }
         _ => return EvmNodes::default(),
     };
@@ -135,6 +159,7 @@ pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: Re
     out.counts.not_in_abi = not_in_abi;
     out.counts.dynamic = dynamic;
     out.go_wrappers = go_wrappers;
+    out.abi_decls = abi_decls;
     out
 }
 
@@ -175,7 +200,7 @@ impl EvmNodes {
 }
 
 /// One node per `(side, scope key, member)` group of `sites`, with one cell
-/// per distinct `(lib, abi)` and one anchor per site (module doc).
+/// per distinct `(lib, abi, abi_ref)` and one anchor per site (module doc).
 fn mint(sites: &[Site], source: &str, module_id: NodeId, repo: RepoId) -> EvmNodes {
     let mut groups: BTreeMap<(ClientSide, String, &str), Vec<&Site>> = BTreeMap::new();
     for site in sites {
@@ -192,13 +217,16 @@ fn mint(sites: &[Site], source: &str, module_id: NodeId, repo: RepoId) -> EvmNod
             ClientSide::Event => (node_kind::EVENT_HANDLER, evm::event_qname(scope, member)),
         };
         let id = NodeId::from_parts(GRAPH_TYPE, repo, kind, &qname);
-        let mut variants: BTreeMap<(&str, Option<Vec<String>>), Vec<u32>> = BTreeMap::new();
+        type Variant<'s> = (&'s str, Option<Vec<String>>, Option<&'s AbiRef>);
+        let mut variants: BTreeMap<Variant<'_>, Vec<u32>> = BTreeMap::new();
         for site in &group {
             let abi = site
                 .abi
                 .as_ref()
                 .map(|e| e.iter().map(AbiEntry::to_key).collect());
-            let args = variants.entry((site.lib, abi)).or_default();
+            let args = variants
+                .entry((site.lib, abi, site.abi_ref.as_ref()))
+                .or_default();
             args.extend(site.args);
             out.anchors.push(Anchor {
                 node: id,
@@ -207,11 +235,15 @@ fn mint(sites: &[Site], source: &str, module_id: NodeId, repo: RepoId) -> EvmNod
         }
         let cells = variants
             .into_iter()
-            .map(|((lib, abi), args)| {
-                evm::client_cell(&ClientFacts {
-                    lib: lib.to_string(),
-                    args,
-                    abi,
+            .map(|((lib, abi, abi_ref), args)| {
+                evm::client_hit_cell(&ClientHit {
+                    facts: ClientFacts {
+                        lib: lib.to_string(),
+                        args,
+                        abi,
+                    },
+                    abi_ref: abi_ref.cloned(),
+                    abi_from: None,
                 })
             })
             .collect();
@@ -273,6 +305,7 @@ mod tests {
             args,
             lib,
             abi,
+            abi_ref: None,
             at,
         }
     }

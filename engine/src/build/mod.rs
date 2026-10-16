@@ -44,6 +44,7 @@
 mod angular_templates;
 pub(crate) mod assemble;
 pub(crate) mod c_includes;
+mod evm_abi;
 mod grafts;
 pub(crate) mod lang_build;
 pub(crate) mod memo;

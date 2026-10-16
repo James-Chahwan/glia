@@ -22,6 +22,7 @@ use glia_graph::rust_paths::RustCrate;
 
 use super::angular_templates;
 use super::assemble::FileConstTables;
+use super::evm_abi;
 use super::lang_build::TsAliasSet;
 use super::rpc_needles::{RpcContext, RpcNeedleCounts, apply_rpc_needles};
 use crate::arch::node_file;
@@ -32,7 +33,8 @@ use crate::http_owner;
 use crate::route::ModuleQnames;
 
 /// Run every post-cache graft over one repo's parses, in order: the LF.2e
-/// overlay wrapper scan and its http half, the A11.2 endpoint fold, the LA.6d
+/// overlay wrapper scan and its http half, the DT.10g cross-file EVM ABI join
+/// (`evm_abi`), the A11.2 endpoint fold, the LA.6d
 /// Next.js page graft, the LA.4 queue-topic const fold, the CB.3b event-name
 /// const fold, the DT.3b WebSocket client base fold, the DF.13 Python signal
 /// binding, the DG.7b akka-quartz conf
@@ -93,6 +95,11 @@ pub(super) fn apply_post_cache(
     if let Some(w) = wrappers.as_mut() {
         w.mint(WrapperPhase::Http, parses_by_lang, files, repo, &modules, parse_errors);
     }
+    // DT.10g: an EVM client whose ABI another file declares (a TS import, a Go
+    // constant of another file of the package) takes that file's entries, so
+    // `resolver:evm` identifies it by ABI. Here, while the nav facts it reads
+    // are present, and above every stamp that adds a key to a client hit.
+    evm_abi::join_evm_abis(parses_by_lang).report(repo_label);
     // A11.2: re-key client ENDPOINTs whose base the table resolves and record
     // their authority. Post-cache, so cached parses are folded too and the
     // cache keeps the pre-fold parse. CH.5b: a call site read through a URL

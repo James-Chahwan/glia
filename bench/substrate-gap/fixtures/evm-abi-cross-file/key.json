@@ -1,0 +1,68 @@
+{
+  "framework": "evm-abi-cross-file",
+  "language": "typescript",
+  "dirs": [
+    "web",
+    "api",
+    "contracts"
+  ],
+  "note": "DT.10g (T10). Before the join (DT.10a-f, i, j, k landed): evm_call:abi:SHOP_ABI.* and evm_call:abi:shopABI.release carry no ABI entries and pair nothing.",
+  "expect_nodes": [
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:SHOP_ABI.deposit",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:SHOP_ABI.release",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:shopABI.release",
+      "exact": true
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "evm_call:abi:SHOP_ABI.deposit",
+      "to": "evm:Escrow.deposit",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:SHOP_ABI.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:shopABI.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "RPC_CALL",
+      "node": "evm_call:abi:SHOP_ABI.release",
+      "cell": "ENDPOINT_HIT",
+      "contains": "\"abi_from\":\"src/abi.ts\""
+    }
+  ],
+  "forbid": [
+    {
+      "from": "evm_call:abi:SHOP_ABI.release",
+      "to": "evm:Vault.release",
+      "category": "RPC_CALLS",
+      "note": "PRECISION: legacy-abi.ts exports a Vault-shaped SHOP_ABI that pay.ts does not import"
+    },
+    {
+      "from": "evm_call:abi:shopABI.release",
+      "to": "evm:Vault.release",
+      "category": "RPC_CALLS"
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{ "name": "web", "dependencies": { "ethers": "^6.13.0" } }

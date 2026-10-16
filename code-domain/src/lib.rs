@@ -1573,6 +1573,15 @@ pub enum NavFact {
     /// ES star re-exports pass only exported names, so a private helper never
     /// leaks through a star.
     Exports { names: Vec<String> },
+    /// TypeScript / JavaScript (DT.10g), recorded by the engine from the EVM
+    /// client extractor on the file MODULE (engine/src/extract.rs), read by
+    /// the post-cache cross-file ABI join (engine/src/build/evm_abi.rs);
+    /// build-time only: this MODULE exports the ABI binding `name` (`export
+    /// const|let|var <name> = <abi literal>`, `default` for `export default
+    /// [..]`, CommonJS `(module.)?exports.<name> = ..`) whose entries are
+    /// these `evm::AbiEntry` keys, sorted and deduplicated. Every file records them, whether or not it calls a
+    /// contract, so a client that imports the binding finds them.
+    EvmAbi { name: String, entries: Vec<String> },
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,

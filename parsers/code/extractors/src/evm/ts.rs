@@ -142,6 +142,18 @@
 //!    member), and events `R.events.<E>(`, `R.getPastEvents('<E>'` and
 //!    `R.once('<E>'` (`allEvents` names none). No ethers stop list applies:
 //!    `R.methods.connect(..)` is the contract's `connect`.
+//! 10. **Cross-file ABIs (DT.10g).** An ABI argument (step 3, 7, 8 or 9)
+//!     that is an identifier with no ABI binding and no declaration in the
+//!     file, bound by a value import (`import { X } from '<spec>'`, `import {
+//!     Y as X }` naming `Y`, `import X` naming `default`, `const { X } =
+//!     require('<spec>')` and `{ Y: X }`; a `.json`, type-only or namespace
+//!     import is none), keeps `Scope::Abi(X)` with no entries and gives its
+//!     sites the reference `AbiRef { name, from: <spec> }`; rebinding and
+//!     every call form carry it. The `address` hint (step 8) is no reference.
+//!     Every file of the family, gated or not, declares its exported ABI
+//!     bindings ([`exported_abis`]): a top-level `export (const|let|var)
+//!     <N>(: T)? = <abi literal>`, `export default <abi literal>` (name
+//!     `default`) and CommonJS `(module.)?exports.<N> = <abi literal>`.
 
 use std::collections::BTreeSet;
 
@@ -171,6 +183,12 @@ const WEB3: &str = "web3";
 
 /// The suffix of a TypeChain factory class: `Escrow__factory` (step 7).
 const FACTORY_SUFFIX: &str = "__factory";
+
+/// The export a default import binds and `export default` declares (step 10).
+const DEFAULT_EXPORT: &str = "default";
+
+/// The export [`import_clause`] records for a namespace import `* as X`.
+const NAMESPACE: &str = "*";
 
 /// What a source must hold for any gate to open (step 1).
 const GATE_NEEDLES: &[&str] = &[
@@ -353,6 +371,18 @@ struct Gate {
     web3: bool,
 }
 
+impl AbiRef {
+    /// The scope, entries and cross-file reference a named argument gives;
+    /// `None` for an inline literal and for nothing readable.
+    fn named(self) -> Option<(Scope, Option<Vec<AbiEntry>>, Option<evm::AbiRef>)> {
+        match self {
+            AbiRef::Named(scope, abi) => Some((scope, abi, None)),
+            AbiRef::Imported(local, import) => Some((Scope::Abi(local), None, Some(import))),
+            AbiRef::Literal(_) | AbiRef::Dynamic => None,
+        }
+    }
+}
+
 impl Gate {
     fn any(self) -> bool {
         self.ethers || self.viem || self.web3
@@ -399,6 +429,8 @@ struct Binding {
     name: String,
     scope: Scope,
     abi: Option<Vec<AbiEntry>>,
+    /// The cross-file ABI its sites name (step 10).
+    abi_ref: Option<evm::AbiRef>,
     /// The client library its sites name (steps 5, 7, 8 and 9).
     lib: &'static str,
     /// The API its sites are read in.
@@ -420,6 +452,17 @@ struct Ctx<'a> {
     imports: &'a [JsonImport],
     /// Every name an import clause binds (step 8's "bound in the file").
     locals: &'a [String],
+    /// Every value import of the file (step 10).
+    value_imports: &'a [ValueImport],
+}
+
+/// One value import (step 10): the local name it binds, the export it names
+/// (`default` for a default import) and its specifier.
+#[derive(Debug, PartialEq, Eq)]
+struct ValueImport {
+    local: String,
+    name: String,
+    spec: String,
 }
 
 /// One `.json` import or require (step 7): the name it binds and, for a
@@ -430,11 +473,14 @@ struct JsonImport {
     contract: Option<String>,
 }
 
-/// What an ABI argument names (steps 3 and 7).
+/// What an ABI argument names (steps 3, 7 and 10).
 enum AbiRef {
     /// A scope known at the argument: a contract, an ABI binding or import,
     /// with the entries when they are known.
     Named(Scope, Option<Vec<AbiEntry>>),
+    /// An identifier a value import binds and the file does not (step 10):
+    /// `Scope::Abi(<local>)` with no entries, and the reference.
+    Imported(String, evm::AbiRef),
     /// An inline literal: scoped by the variable it lands in.
     Literal(Vec<AbiEntry>),
     /// Nothing readable.
@@ -530,6 +576,7 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
     counts.abis = abis.len();
     let imports = json_imports(source, view, &decls);
     let locals = import_locals(source, view);
+    let value_imports = value_imports(source, view);
     let ctx = Ctx {
         source,
         view,
@@ -537,6 +584,7 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
         abis: &abis,
         imports: &imports,
         locals: &locals,
+        value_imports: &value_imports,
     };
 
     let mut bindings: Vec<Binding> = Vec::new();
@@ -789,6 +837,13 @@ fn abi_ref(ctx: &Ctx, arg: AbiArg, at: usize) -> AbiRef {
             Some(contract) => AbiRef::Named(Scope::Contract(contract), None),
             None => {
                 let abi = abi_lookup(ctx.abis, &name, at);
+                if abi.is_none()
+                    && !ctx.decls.iter().any(|d| d.name == name)
+                    && let Some(v) = ctx.value_imports.iter().find(|v| v.local == name)
+                {
+                    let import = evm::AbiRef { name: v.name.clone(), from: v.spec.clone() };
+                    return AbiRef::Imported(name, import);
+                }
                 AbiRef::Named(Scope::Abi(name), abi)
             }
         },
@@ -825,7 +880,7 @@ fn bind_made(
         if !made.sync || matches!(access, Access::Other) {
             return;
         }
-        let AbiRef::Named(scope, abi) = made.abi else {
+        let Some((scope, abi, abi_ref)) = made.abi.named() else {
             counts.dynamic += 1;
             return;
         };
@@ -833,6 +888,7 @@ fn bind_made(
             name: String::new(),
             scope,
             abi,
+            abi_ref,
             lib: made.lib,
             api: made.api,
             at: made.close,
@@ -845,22 +901,25 @@ fn bind_made(
     let Some(target) = binding_target(ctx.view, ctx.decls, made.start) else {
         return;
     };
-    let (scope, abi) = match made.abi {
-        AbiRef::Named(scope, abi) => (scope, abi),
+    let (scope, abi, abi_ref) = match made.abi {
         AbiRef::Literal(entries) => {
             counts.abis += 1;
             let base = target.key.rsplit(['.', '#']).next().unwrap_or_default();
-            (Scope::Abi(base.to_string()), Some(entries))
+            (Scope::Abi(base.to_string()), Some(entries), None)
         }
-        AbiRef::Dynamic => {
-            counts.dynamic += 1;
-            return;
+        other => {
+            let Some(named) = other.named() else {
+                counts.dynamic += 1;
+                return;
+            };
+            named
         }
     };
     bindings.push(Binding {
         name: target.key,
         scope,
         abi,
+        abi_ref,
         lib: made.lib,
         api: made.api,
         at: made.close,
@@ -911,6 +970,7 @@ fn hardhat_bindings(
                     name: target.key,
                     scope,
                     abi: None,
+                    abi_ref: None,
                     lib: HARDHAT,
                     api: Api::Ethers,
                     at: close,
@@ -956,6 +1016,7 @@ fn typechain_bindings(
                 name: String::new(),
                 scope: Scope::Contract(contract),
                 abi: None,
+                abi_ref: None,
                 lib: TYPECHAIN,
                 api: Api::Ethers,
                 at: close,
@@ -1384,19 +1445,21 @@ fn option_site(
         counts.dynamic += 1;
         return;
     };
-    let (scope, abi) = match options_abi(ctx, opts, ns) {
-        AbiRef::Named(scope, abi) => (scope, abi),
+    let (scope, abi, abi_ref) = match options_abi(ctx, opts, ns) {
         AbiRef::Literal(entries) => {
             let Some(scope) = address_hint(ctx, opts) else {
                 counts.dynamic += 1;
                 return;
             };
             counts.abis += 1;
-            (scope, Some(entries))
+            (scope, Some(entries), None)
         }
-        AbiRef::Dynamic => {
-            counts.dynamic += 1;
-            return;
+        other => {
+            let Some(named) = other.named() else {
+                counts.dynamic += 1;
+                return;
+            };
+            named
         }
     };
     let args = match opts.get("args") {
@@ -1410,6 +1473,7 @@ fn option_site(
         name: String::new(),
         scope,
         abi,
+        abi_ref,
         lib: VIEM,
         api: Api::Viem,
         at: ns,
@@ -1580,7 +1644,10 @@ fn json_imports(source: &str, view: &str, decls: &[Decl]) -> Vec<JsonImport> {
         };
         if spec.ends_with(".json") {
             for (imported, local) in names {
-                if matches!(imported.as_deref(), None | Some("abi" | "default")) {
+                if matches!(
+                    imported.as_deref(),
+                    None | Some("abi" | DEFAULT_EXPORT | NAMESPACE)
+                ) {
                     push(&local, &spec);
                 }
             }
@@ -1638,7 +1705,8 @@ fn import_locals(source: &str, view: &str) -> Vec<String> {
 }
 
 /// The local names of one import clause, each with the export it binds
-/// (`None` for a default or a namespace import: the module's value).
+/// (`None` for a default import, [`NAMESPACE`] for a namespace import: the
+/// module's value).
 type ImportNames = Vec<(Option<String>, String)>;
 
 /// The names an `import` clause starting at `from` binds (`{ abi as A }` is
@@ -1674,7 +1742,7 @@ fn import_clause(source: &str, view: &str, from: usize) -> Option<(ImportNames, 
                 }
                 let n = skip_ws(vb, a_end);
                 let n_end = ident_end(vb, n)?;
-                names.push((None, view[n..n_end].to_string()));
+                names.push((Some(NAMESPACE.to_string()), view[n..n_end].to_string()));
                 k = skip_ws(vb, n_end);
             }
             _ => {
@@ -1700,6 +1768,18 @@ fn import_clause(source: &str, view: &str, from: usize) -> Option<(ImportNames, 
 /// `(const|let|var) { abi(: <A>)? } = require(..)` with `require` at `at`:
 /// the names bound to the `abi` property.
 fn destructured_abi(view: &str, at: usize) -> Option<Vec<String>> {
+    let names: Vec<String> = destructured(view, at)?
+        .into_iter()
+        .filter(|(key, _)| key == "abi")
+        .map(|(_, local)| local)
+        .collect();
+    (!names.is_empty()).then_some(names)
+}
+
+/// `(const|let|var) { <K>(: <L>)?, .. } = require(..)` with `require` at
+/// `at`: each `(property, local name)` the pattern binds (a default value
+/// dropped, a rest element or a nested pattern left out).
+fn destructured(view: &str, at: usize) -> Option<Vec<(String, String)>> {
     let vb = view.as_bytes();
     let eq = prev_non_ws(vb, at).filter(|&e| vb[e] == b'=')?;
     let close = prev_non_ws(vb, eq).filter(|&c| vb[c] == b'}')?;
@@ -1712,16 +1792,160 @@ fn destructured_abi(view: &str, at: usize) -> Option<Vec<String>> {
     if !matches!(&view[kw..kw_end], "const" | "let" | "var") {
         return None;
     }
-    let names: Vec<String> = split_args(view, open, close)
+    let names = split_args(view, open, close)
         .into_iter()
         .filter_map(|(s, e)| {
-            let (key, alias) = view[s..e]
-                .split_once(':')
-                .map_or((&view[s..e], None), |(k, a)| (k, Some(a)));
-            (key.trim() == "abi").then(|| alias.unwrap_or("abi").trim().to_string())
+            let text = &view[s..e];
+            let text = text.split_once('=').map_or(text, |(t, _)| t);
+            let (key, local) = text.split_once(':').unwrap_or((text, text));
+            let (key, local) = (key.trim(), local.trim());
+            (is_ident(key) && is_ident(local)).then(|| (key.to_string(), local.to_string()))
         })
         .collect();
-    (!names.is_empty()).then_some(names)
+    Some(names)
+}
+
+/// Step 10: every value import of the file, in source order: each import
+/// clause's named and default bindings (a namespace import is none) and
+/// each `(const|let|var) { X, Y: Z } = require('<spec>')`; a `.json`
+/// specifier is step 7's.
+fn value_imports(source: &str, view: &str) -> Vec<ValueImport> {
+    let vb = view.as_bytes();
+    let mut out = Vec::new();
+    for at in word_hits(view, "import") {
+        if at > 0 && vb[at - 1] == b'.' {
+            continue;
+        }
+        let Some((names, spec)) = import_clause(source, view, at + "import".len()) else {
+            continue;
+        };
+        if spec.ends_with(".json") {
+            continue;
+        }
+        for (imported, local) in names {
+            let name = match imported.as_deref() {
+                None => DEFAULT_EXPORT,
+                Some(NAMESPACE) => continue,
+                Some(name) => name,
+            };
+            if is_ident(&local) {
+                out.push(ValueImport { local, name: name.to_string(), spec: spec.clone() });
+            }
+        }
+    }
+    for at in word_hits(view, "require") {
+        if at > 0 && vb[at - 1] == b'.' {
+            continue;
+        }
+        let Some(open) = paren_after(vb, at + "require".len()) else {
+            continue;
+        };
+        let q = skip_ws(vb, open + 1);
+        let Some((spec, _)) = string_literal(source, q).filter(|(s, _)| !s.ends_with(".json"))
+        else {
+            continue;
+        };
+        for (name, local) in destructured(view, at).unwrap_or_default() {
+            out.push(ValueImport { local, name, spec: spec.clone() });
+        }
+    }
+    out
+}
+
+/// Step 10: the file's exported ABI bindings, by exported name, in source
+/// order: a top-level `export (const|let|var) <N>(: T)? = <abi literal>`,
+/// `export default <abi literal>` (name `default`) and `(module.)?exports.<N>
+/// = <abi literal>`, each literal read by `abi::read_abi`. Read whether or
+/// not any reader's gate is open: the file that declares an ABI need not
+/// import a client library.
+pub(super) fn exported_abis(source: &str, view: &str) -> Vec<(String, Vec<AbiEntry>)> {
+    if !source.contains("export") {
+        return Vec::new();
+    }
+    let vb = view.as_bytes();
+    // (offset of the statement, exported name, offset of the value)
+    let mut found: Vec<(usize, String, usize)> = Vec::new();
+    for at in word_hits(view, "export") {
+        if at > 0 && vb[at - 1] == b'.' {
+            continue;
+        }
+        let k = skip_ws(vb, at + "export".len());
+        let Some(end) = ident_end(vb, k) else {
+            continue;
+        };
+        match &view[k..end] {
+            DEFAULT_EXPORT => found.push((at, DEFAULT_EXPORT.to_string(), skip_ws(vb, end))),
+            "const" | "let" | "var" => {
+                let n = skip_ws(vb, end);
+                let Some(n_end) = ident_end(vb, n) else {
+                    continue;
+                };
+                if let Some(value) = assigned_value(vb, n_end) {
+                    found.push((at, view[n..n_end].to_string(), value));
+                }
+            }
+            _ => {}
+        }
+    }
+    for at in word_hits(view, "exports") {
+        let start = match at.checked_sub(1).map(|d| vb[d]) {
+            Some(b'.') => match ident_start_before(vb, at - 1) {
+                Some(m) if &view[m..at - 1] == "module" => m,
+                _ => continue,
+            },
+            _ => at,
+        };
+        let dot = skip_ws(vb, at + "exports".len());
+        if vb.get(dot) != Some(&b'.') {
+            continue;
+        }
+        let n = skip_ws(vb, dot + 1);
+        let Some(n_end) = ident_end(vb, n) else {
+            continue;
+        };
+        let eq = skip_ws(vb, n_end);
+        if vb.get(eq) == Some(&b'=') && !matches!(vb.get(eq + 1), Some(b'=' | b'>')) {
+            found.push((start, view[n..n_end].to_string(), skip_ws(vb, eq + 1)));
+        }
+    }
+    found.sort_by_key(|f| f.0);
+    let depths = brace_depths(vb, found.iter().map(|f| f.0));
+    found
+        .into_iter()
+        .zip(depths)
+        .filter(|(_, depth)| *depth == 0)
+        .filter_map(|((_, name, value), _)| Some((name, read_abi(source, view, value)?)))
+        .collect()
+}
+
+/// The value offset of a declarator whose name ends at `n_end`: past an
+/// optional type annotation and the `=`; `None` without an initializer.
+fn assigned_value(vb: &[u8], n_end: usize) -> Option<usize> {
+    let mut k = skip_ws(vb, n_end);
+    if vb.get(k) == Some(&b':') {
+        k = type_end(vb, k + 1)?;
+    }
+    (vb.get(k) == Some(&b'=') && !matches!(vb.get(k + 1), Some(b'=' | b'>')))
+        .then(|| skip_ws(vb, k + 1))
+}
+
+/// The `{`-nesting depth of the view at each of the ascending offsets
+/// `offsets`, in one pass (a `}` with no open brace keeps depth 0).
+fn brace_depths(vb: &[u8], offsets: impl Iterator<Item = usize>) -> Vec<usize> {
+    let mut out = Vec::new();
+    let (mut depth, mut k) = (0usize, 0usize);
+    for at in offsets {
+        while k < at.min(vb.len()) {
+            match vb[k] {
+                b'{' => depth += 1,
+                b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            k += 1;
+        }
+        out.push(depth);
+    }
+    out
 }
 
 /// The entries of ABI binding `name` as a use at `at` sees it: the nearest
@@ -2268,6 +2492,7 @@ fn rebind(source: &str, view: &str, decls: &[Decl], bindings: &mut Vec<Binding>)
                     name: target.key,
                     scope: from.scope.clone(),
                     abi: from.abi.clone(),
+                    abi_ref: from.abi_ref.clone(),
                     lib: from.lib,
                     api: from.api,
                     at: tail - 1,
@@ -2358,6 +2583,7 @@ fn push_call(
         args,
         lib: binding.lib,
         abi: binding.abi.clone(),
+        abi_ref: binding.abi_ref.clone(),
         at,
     });
 }
@@ -2385,6 +2611,7 @@ fn push_event(
         args: None,
         lib: binding.lib,
         abi: binding.abi.clone(),
+        abi_ref: binding.abi_ref.clone(),
         at,
     });
 }
@@ -2514,6 +2741,133 @@ const other = new Contract(addr, artifacts.Escrow.abi, p);
                 not_in_abi: 0,
                 dynamic: 2
             }
+        );
+    }
+
+    /// `<scope key>.<member> ref=<name>@<from>` (or `ref=-`) per site, in
+    /// file order.
+    fn refs(src: &str) -> Vec<String> {
+        let (sites, _) = scan(src, &code_view(src, "typescript"));
+        sites
+            .iter()
+            .map(|s| {
+                let r = s
+                    .abi_ref
+                    .as_ref()
+                    .map_or_else(|| "-".to_string(), |r| format!("{}@{}", r.name, r.from));
+                format!("{}.{} ref={r}", s.scope.key(), s.member)
+            })
+            .collect()
+    }
+
+    /// DT.10g: an ABI argument a value import binds (and the file does not)
+    /// names its export and specifier; a parameter, a local, an artifact, a
+    /// namespace member and the viem `address` hint name none.
+    #[test]
+    fn imported_abi_carries_abi_ref() {
+        let src = "import { Contract } from 'ethers';
+import { ESCROW_ABI } from './abi';
+import { VAULT as VAULT_ABI, type Abi } from '../shared/abis';
+import TokenAbi from './token-abi';
+import * as abis from './abis';
+import Escrow from '../artifacts/contracts/Escrow.sol/Escrow.json';
+const { GOV_ABI, PANEL: PANEL_ABI } = require('./gov');
+const a = new Contract(addr, ESCROW_ABI, p);
+a.deposit(1);
+const b = new Contract(addr, VAULT_ABI as Abi, p);
+b.release(1);
+const t = new Contract(addr, TokenAbi, p);
+t.transfer(1, 2);
+const g = new Contract(addr, GOV_ABI, p);
+g.vote(1);
+new Contract(addr, PANEL_ABI, p).open(1);
+function f(PARAM_ABI) {
+  const c = new Contract(addr, PARAM_ABI, p);
+  c.x(1);
+}
+const LOADED = load();
+const l = new Contract(addr, LOADED, p);
+l.y(1);
+const e = new Contract(addr, Escrow, p);
+e.release(1);
+const r = a.connect(signer);
+r.release(2);
+const n = new Contract(addr, abis.SHOP, p);
+n.z(1);
+";
+        assert_eq!(
+            refs(src),
+            [
+                "abi:ESCROW_ABI.deposit ref=ESCROW_ABI@./abi",
+                "abi:VAULT_ABI.release ref=VAULT@../shared/abis",
+                "abi:TokenAbi.transfer ref=default@./token-abi",
+                "abi:GOV_ABI.vote ref=GOV_ABI@./gov",
+                "abi:PANEL_ABI.open ref=PANEL@./gov",
+                "abi:PARAM_ABI.x ref=-",
+                "abi:LOADED.y ref=-",
+                "Escrow.release ref=-",
+                "abi:ESCROW_ABI.release ref=ESCROW_ABI@./abi",
+            ],
+            "a rebinding keeps the reference; a namespace member is dynamic"
+        );
+        let viem = "import { readContract } from 'viem/actions';
+import { escrowAbi } from './generated';
+import { ESCROW_ADDRESS } from './addresses';
+await readContract(client, { address: ESCROW_ADDRESS, abi: escrowAbi, functionName: 'release', args: [id] });
+await readContract(client, { address: ESCROW_ADDRESS, abi, functionName: 'deposit', args: [id] });
+";
+        assert_eq!(
+            refs(viem),
+            [
+                "abi:escrowAbi.release ref=escrowAbi@./generated",
+                "abi:ESCROW_ADDRESS.deposit ref=-",
+            ],
+            "an option call's imported `abi` is a reference, the address hint none"
+        );
+    }
+
+    /// DT.10g: every top-level exported ABI binding of a file, gated or not:
+    /// `export const|let|var`, `export default` and CommonJS `exports.<N>`;
+    /// a nested export, a non-ABI array and a function are none.
+    #[test]
+    fn exported_abi_is_declared() {
+        let src = "export const SHOP_ABI = [
+  'function deposit(bytes32 orderId) payable',
+  'function release(bytes32 orderId)',
+];
+export const NAMES = ['deposit', 'release'];
+export let TYPED: readonly string[] = ['event Released(bytes32 id)'] as const;
+export function helper() { return [1]; }
+export namespace Inner {
+  export const HIDDEN = ['function hidden()'];
+}
+export default [{ type: 'function', name: 'withdraw', inputs: [{ name: 'a', type: 'uint256' }] }];
+module.exports.LEGACY = ['function legacy(uint256 a)'];
+exports.OLD = ['function old()'];
+";
+        let decls: Vec<(String, Vec<String>)> = exported_abis(src, &code_view(src, "typescript"))
+            .into_iter()
+            .map(|(n, e)| (n, e.iter().map(AbiEntry::to_key).collect()))
+            .collect();
+        let row = |n: &str, e: &[&str]| (n.to_string(), e.iter().map(|k| k.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            decls,
+            [
+                row("SHOP_ABI", &["f:deposit/1", "f:release/1"]),
+                row("TYPED", &["e:Released/1"]),
+                row("default", &["f:withdraw/1"]),
+                row("LEGACY", &["f:legacy/1"]),
+                row("OLD", &["f:old/0"]),
+            ]
+        );
+        let out = crate::evm::extract_evm_clients(src, "typescript", glia_core::NodeId(1), glia_core::RepoId(1));
+        assert!(out.nodes.is_empty() && out.markers("src/abi.ts").is_empty(), "a declaring file calls nothing");
+        assert_eq!(out.abi_decls.len(), 5, "no client-library import needed");
+        assert!(
+            crate::evm::extract_evm_clients(src, "go", glia_core::NodeId(1), glia_core::RepoId(1))
+                .abi_decls
+                .is_empty(),
+            "only the TS family declares"
         );
     }
 

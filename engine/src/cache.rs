@@ -1061,6 +1061,10 @@ mod tests {
             NavFact::Exports {
                 names: vec!["Order".into(), "default".into(), "orderTotal".into()],
             },
+            NavFact::EvmAbi {
+                name: "SHOP_ABI".into(),
+                entries: vec!["e:Released/1".into(), "f:release/1".into()],
+            },
         ]
     }
 

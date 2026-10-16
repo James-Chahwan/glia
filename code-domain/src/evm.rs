@@ -30,6 +30,19 @@
 //! `abi` is omitted when the site's ABI is unknown. There is no `file` and no
 //! `host` key, so every file-keyed ENDPOINT_HIT reader skips it.
 //!
+//! **Cross-file ABIs (DT.10g).** A site whose ABI binding another file
+//! declares (a TS import, a Go package constant of another file) carries an
+//! [`AbiRef`] (`abi_ref`: the exported name and the import specifier, `"."`
+//! for the Go package) and no `abi`. The engine's post-cache join fills `abi`
+//! with the declaring file's entries and `abi_from` with that file, so the
+//! resolver identifies the call by ABI ([`ClientHit`], [`client_hit_cell`],
+//! [`read_client_hits`]):
+//!
+//! ```text
+//! {"via":"evm","lib":"ethers","args":[1],"abi":["f:deposit/1","f:release/1"],
+//!  "abi_ref":{"name":"SHOP_ABI","from":"./abi"},"abi_from":"src/abi.ts"}
+//! ```
+//!
 //! **Names.** [`name_key`] is the one normal form a client hint (an ABI const,
 //! a receiver, an address const) and a contract name are compared in.
 //!
@@ -354,6 +367,33 @@ pub struct ClientFacts {
     pub abi: Option<Vec<String>>,
 }
 
+/// The ABI binding a client site names when another file declares it
+/// (DT.10g): `name` is the binding as the declaring file exports it (a TS
+/// `import { Y as X }` names `Y`, a default import `default`) and `from` the
+/// specifier it is imported by (`./abi`), or `"."` for a constant of the
+/// site's Go package.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+pub struct AbiRef {
+    pub name: String,
+    pub from: String,
+}
+
+/// The `from` of a Go [`AbiRef`]: the site's own package directory.
+pub const GO_PACKAGE: &str = ".";
+
+/// One client cell whole (DT.10g): its [`ClientFacts`] plus the cross-file
+/// ABI fields, which [`read_client_cells`] leaves out.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClientHit {
+    pub facts: ClientFacts,
+    /// The ABI binding another file declares; `None` when the site's file
+    /// binds its ABI itself, or none is known.
+    pub abi_ref: Option<AbiRef>,
+    /// The repo-relative file the engine's join read `facts.abi` from;
+    /// `None` until a join fills it.
+    pub abi_from: Option<String>,
+}
+
 #[derive(Serialize)]
 struct ClientOut<'a> {
     via: &'a str,
@@ -361,6 +401,10 @@ struct ClientOut<'a> {
     args: Vec<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     abi: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    abi_ref: Option<&'a AbiRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    abi_from: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -370,16 +414,29 @@ struct ClientIn {
     args: Vec<u32>,
     #[serde(default)]
     abi: Option<Vec<String>>,
+    #[serde(default)]
+    abi_ref: Option<AbiRef>,
+    #[serde(default)]
+    abi_from: Option<String>,
 }
 
 /// The ENDPOINT_HIT cell of a client site group:
 /// `{"via":"evm","lib":"..","args":[..][,"abi":[..]]}`.
 pub fn client_cell(facts: &ClientFacts) -> Cell {
+    client_hit_cell(&ClientHit { facts: facts.clone(), abi_ref: None, abi_from: None })
+}
+
+/// The ENDPOINT_HIT cell of a client site group with its cross-file ABI
+/// fields: `{"via":"evm","lib":"..","args":[..][,"abi":[..]][,"abi_ref":{"name":"..","from":".."}][,"abi_from":".."]}`.
+/// Without either field it is [`client_cell`]'s bytes.
+pub fn client_hit_cell(hit: &ClientHit) -> Cell {
     let out = ClientOut {
         via: VIA,
-        lib: &facts.lib,
-        args: canonical(&facts.args),
-        abi: facts.abi.as_deref().map(canonical),
+        lib: &hit.facts.lib,
+        args: canonical(&hit.facts.args),
+        abi: hit.facts.abi.as_deref().map(canonical),
+        abi_ref: hit.abi_ref.as_ref(),
+        abi_from: hit.abi_from.as_deref(),
     };
     // A derived struct of strings and integers always serialises.
     let json = serde_json::to_string(&out).unwrap_or_default();
@@ -389,14 +446,27 @@ pub fn client_cell(facts: &ClientFacts) -> Cell {
 /// One [`ClientFacts`] per `via:evm` ENDPOINT_HIT cell of `cells`, in cell
 /// order; every other cell (an HTTP hit, a channel hit) is skipped.
 pub fn read_client_cells(cells: &[Cell]) -> Vec<ClientFacts> {
-    cells
-        .iter()
-        .filter(|c| c.kind == cell_type::ENDPOINT_HIT)
-        .filter_map(|c| {
-            let p: ClientIn = serde_json::from_str(payload_text(c)?).ok()?;
-            (p.via == VIA).then_some(ClientFacts { lib: p.lib, args: p.args, abi: p.abi })
-        })
-        .collect()
+    cells.iter().filter_map(read_client_hit).map(|h| h.facts).collect()
+}
+
+/// One [`ClientHit`] per `via:evm` ENDPOINT_HIT cell of `cells`, in cell
+/// order, as [`read_client_cells`] reads them.
+pub fn read_client_hits(cells: &[Cell]) -> Vec<ClientHit> {
+    cells.iter().filter_map(read_client_hit).collect()
+}
+
+/// The [`ClientHit`] of one cell; `None` for any cell that is no `via:evm`
+/// ENDPOINT_HIT.
+pub fn read_client_hit(cell: &Cell) -> Option<ClientHit> {
+    if cell.kind != cell_type::ENDPOINT_HIT {
+        return None;
+    }
+    let p: ClientIn = serde_json::from_str(payload_text(cell)?).ok()?;
+    (p.via == VIA).then_some(ClientHit {
+        facts: ClientFacts { lib: p.lib, args: p.args, abi: p.abi },
+        abi_ref: p.abi_ref,
+        abi_from: p.abi_from,
+    })
 }
 
 #[cfg(test)]
@@ -583,6 +653,52 @@ mod tests {
                 ClientFacts { lib: "geth".into(), args: vec![], abi: None },
                 ClientFacts { lib: "viem".into(), args: vec![0, 1], abi: None },
             ]
+        );
+    }
+
+    /// DT.10g: a client cell with a cross-file ABI reference writes `abi_ref`
+    /// (and, once joined, `abi_from`) after `abi`, reads back whole through
+    /// [`read_client_hits`], and [`read_client_cells`] keeps reading its facts.
+    #[test]
+    fn evm_client_hit_cell_round_trips_the_abi_ref_and_join() {
+        let abi_ref = AbiRef { name: "SHOP_ABI".into(), from: "./abi".into() };
+        let unjoined = ClientHit {
+            facts: ClientFacts { lib: "ethers".into(), args: vec![1], abi: None },
+            abi_ref: Some(abi_ref.clone()),
+            abi_from: None,
+        };
+        let cell = client_hit_cell(&unjoined);
+        assert_eq!(
+            json_of(&cell),
+            r#"{"via":"evm","lib":"ethers","args":[1],"abi_ref":{"name":"SHOP_ABI","from":"./abi"}}"#
+        );
+        assert_eq!(read_client_hits(std::slice::from_ref(&cell)), vec![unjoined.clone()]);
+        let joined = ClientHit {
+            facts: ClientFacts {
+                abi: Some(vec!["f:release/1".into(), "f:deposit/1".into()]),
+                ..unjoined.facts.clone()
+            },
+            abi_from: Some("src/abi.ts".into()),
+            ..unjoined
+        };
+        let cell = client_hit_cell(&joined);
+        assert_eq!(
+            json_of(&cell),
+            r#"{"via":"evm","lib":"ethers","args":[1],"abi":["f:deposit/1","f:release/1"],"abi_ref":{"name":"SHOP_ABI","from":"./abi"},"abi_from":"src/abi.ts"}"#
+        );
+        let read = read_client_hits(std::slice::from_ref(&cell));
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].abi_ref, Some(abi_ref));
+        assert_eq!(read[0].abi_from.as_deref(), Some("src/abi.ts"));
+        assert_eq!(
+            read_client_cells(&[cell])[0].abi,
+            Some(vec!["f:deposit/1".to_string(), "f:release/1".to_string()])
+        );
+        let plain = ClientFacts { lib: "geth".into(), args: vec![], abi: None };
+        assert_eq!(
+            client_hit_cell(&ClientHit { facts: plain.clone(), ..ClientHit::default() }),
+            client_cell(&plain),
+            "no cross-file field: client_cell's bytes"
         );
     }
 }

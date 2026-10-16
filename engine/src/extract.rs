@@ -340,9 +340,20 @@ pub(crate) fn apply_cross_cutting_extractors(
     // and paired by `resolver:evm`. Every lang runs it: the module dispatches
     // on `lang` and gates on an ethers / hardhat import itself. Per-file
     // `[evm-client]` marker.
-    let evm = evm::extract_evm_clients(source, lang, module_id, repo);
+    let mut evm = evm::extract_evm_clients(source, lang, module_id, repo);
     for m in evm.markers(path) {
         eprintln!("{m}");
+    }
+    // DT.10g: a TS-family file's exported ABI bindings, as `EvmAbi` facts on
+    // the file MODULE. Recorded on `fp.nav` itself (`merge_nav` drops an
+    // extractor's own facts, the CB.24 note below); cached with the parse, and
+    // the post-cache join (build/evm_abi.rs) fills the cells that import them.
+    for (name, entries) in std::mem::take(&mut evm.abi_decls) {
+        let mut entries: Vec<String> =
+            entries.iter().map(glia_code_domain::evm::AbiEntry::to_key).collect();
+        entries.sort();
+        entries.dedup();
+        fp.nav.record_fact(module_id, NavFact::EvmAbi { name, entries });
     }
     run_marked!(evm);
     run_with_edges!(
