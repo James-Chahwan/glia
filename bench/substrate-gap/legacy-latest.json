@@ -161,7 +161,7 @@
       "framework": "contract-openapi-server-variables",
       "language": "go",
       "per_category": {
-        "DOCUMENTS": 0.5
+        "DOCUMENTS": 1.0
       }
     },
     "contract-openapi-swaggo-yaml": {
@@ -2708,9 +2708,7 @@
     "grader_errors": [],
     "missing_cells": [],
     "missing_nodes": [],
-    "partial_cells": [
-      "contract-openapi-server-variables: DOCUMENTS 0.50"
-    ]
+    "partial_cells": []
   },
   "view": "run.py: per-fixture edge recall over fixtures/* plus its summary sections; the language x mechanism grid is results-latest.json"
 }

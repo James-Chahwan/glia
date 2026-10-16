@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "b5b4fcc2",
-  "after_wave": 6,
+  "measured_at_head": "6ca16ebe",
+  "after_wave": 7,
   "cargo_test_workspace": {
-    "passed": 5257,
+    "passed": 5337,
     "failed": 0
   },
   "history_passed": [
@@ -95,28 +95,27 @@
     5019,
     5106,
     5191,
-    5257
+    5257,
+    5337
   ],
   "run_py": {
     "fixtures": 377,
     "blind_spots": 0,
     "blind_spot_detail": "blind: []; missing nodes: []; missing cells: []. Those present at wave start are deliberate baselines for later packets unless your packet owns them.",
-    "partial": 1,
+    "partial": 0,
     "forbid_violations": 0,
     "missing_cells": 0,
     "grader_errors": 0,
     "blind_list": [],
-    "partial_list": [
-      "contract-openapi-server-variables: DOCUMENTS 0.50"
-    ],
+    "partial_list": [],
     "forbid_list": [],
     "missing_cells_list": [],
     "missing_nodes_list": []
   },
   "matrix_py": {
-    "full": 341,
-    "partial": 2,
-    "none": 3,
+    "full": 344,
+    "partial": 1,
+    "none": 1,
     "unknown": 136,
     "covered": 346,
     "grid": 482,

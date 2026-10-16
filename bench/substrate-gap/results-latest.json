@@ -1928,7 +1928,7 @@
     },
     "elixir/impl": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -1938,17 +1938,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "type"
     },
     "elixir/imports": {
       "extract": [
@@ -1976,7 +1976,7 @@
     },
     "elixir/injects": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -1986,17 +1986,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "di"
     },
     "elixir/kafka": {
       "extract": [
@@ -2278,16 +2278,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         1,
         1
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        2,
         2
       ],
       "via": "test"
@@ -8834,11 +8832,11 @@
   "totals": {
     "covered": 346,
     "error": 0,
-    "full": 341,
+    "full": 344,
     "grid": 510,
     "n/a": 28,
-    "none": 3,
-    "partial": 2,
+    "none": 1,
+    "partial": 1,
     "unknown": 136
   },
   "vocabulary": {
