@@ -352,8 +352,12 @@ pub(crate) fn closure_set(catalog: &Catalog, builtin: usize, terms: &[CTerm]) ->
 /// `bound` marks the variables bound before the body runs (missing entries are free);
 /// `first`, when given, runs first (the planner's delta literal). Then, greedily:
 /// any literal binding no new variable (a pure filter: a membership atom, a comparison
-/// or negation over bound variables, a fully bound builtin) in source order; else the
-/// eligible literal with the most bound columns (constants and bound variables; a
+/// or negation over bound variables, a fully bound builtin) in source order; else,
+/// among the eligible literals, one JOINED to what is bound (a column holding a
+/// variable already bound, or an assignment, which yields one binding per input)
+/// before any that is not, so a literal held only by constants (`seg(b, "engine")`
+/// after `seg(a, "parsers")` bound `a`) never runs as a cross product while a join
+/// on `a` waits; then the most bound columns (constants and bound variables; a
 /// builtin's `Const` columns, such as a closure's category set, never count), ties
 /// to the smaller known `size` (unknown = `usize::MAX`; an assignment is 1), then
 /// source order. A builtin
@@ -389,6 +393,9 @@ struct Shape {
     filter: bool,
     /// Can run now, binding something.
     eligible: bool,
+    /// Reads a variable already bound (or is an assignment): it extends the
+    /// bindings so far instead of multiplying them.
+    joined: bool,
     /// Constants and bound variables among its columns.
     bound: usize,
     size: usize,
@@ -417,8 +424,9 @@ fn pick(
         let better = match best {
             None => true,
             Some(b) => {
-                (s.bound, std::cmp::Reverse(s.size))
-                    > (shapes[b].bound, std::cmp::Reverse(shapes[b].size))
+                let o = &shapes[b];
+                (s.joined, s.bound, std::cmp::Reverse(s.size))
+                    > (o.joined, o.bound, std::cmp::Reverse(o.size))
             }
         };
         if better {
@@ -452,6 +460,7 @@ fn shape(
             Shape {
                 filter: runnable && !has_free_var(terms, bound),
                 eligible: runnable,
+                joined: terms.iter().any(|t| matches!(t, CTerm::Var(_)) && is_bound(t, bound)),
                 bound: terms.iter().enumerate().filter(selective).count(),
                 size: size(*p).unwrap_or(usize::MAX),
             }
@@ -459,6 +468,7 @@ fn shape(
         CLit::Neg(_, terms, _) => Shape {
             filter: !has_free_var(terms, bound),
             eligible: false,
+            joined: false,
             bound: 0,
             size: usize::MAX,
         },
@@ -467,8 +477,9 @@ fn shape(
             let assigns = *op == CmpOp::Eq
                 && ((matches!(l, CTerm::Var(_)) && !lb && rb)
                     || (matches!(r, CTerm::Var(_)) && !rb && lb));
-            // An assignment yields exactly one binding per input binding: size 1.
-            Shape { filter: lb && rb, eligible: assigns, bound: 1, size: 1 }
+            // An assignment yields exactly one binding per input binding: size 1, and
+            // never a cross product.
+            Shape { filter: lb && rb, eligible: assigns, joined: assigns, bound: 1, size: 1 }
         }
     }
 }
@@ -639,7 +650,7 @@ mod msg {
         format!(
             "recursive predicate `{sig}` is unseeded: its recursion starts from every row of \
              `{from}`; seed it (`{head} :- seed(x), ...`) or use reaches(x, y, \"CATS\"); magic \
-             sets seed it when every caller binds an argument (DA.12)"
+             sets seed it when every caller binds an argument"
         )
     }
 }
@@ -2195,7 +2206,7 @@ mod tests {
             [
                 "recursive predicate `tc/2` is unseeded: its recursion starts from every row of `edge/3`; \
               seed it (`tc(x, y) :- seed(x), ...`) or use reaches(x, y, \"CATS\"); magic sets seed it \
-              when every caller binds an argument (DA.12)"
+              when every caller binds an argument"
             ]
         );
         assert_eq!(a.warnings[0].severity, Severity::Warning);
@@ -2387,6 +2398,170 @@ mod tests {
         // (size 1 beats edge's 1,000), then edge with y bound, then the filters.
         let small_node = |p: PredId| Some(if p == edge { 1_000 } else { 10 });
         assert_eq!(sips_order(r, &a.preds, &c, &[], None, &small_node), vec![4, 3, 1, 0, 2]);
+    }
+
+    #[test]
+    fn sips_joins_before_a_constant_only_literal() {
+        // DA.17's case: `seg(b, "engine")` holds a constant but shares no bound
+        // variable once `seg(a, "parsers")` ran, so ranking it beside the join on `a`
+        // by its constant (and its smaller size) ran it as a cross product of the two
+        // scopes. The join runs first and leaves it a filter.
+        let c = catalog().with_attrs(&[crate::ir::AttrDecl { name: "seg", ty: ColType::Str }]);
+        let p = program(vec![
+            rule(
+                "f",
+                vec![v("a"), v("b")],
+                vec![
+                    pos("seg", vec![v("a"), s("parsers")]),
+                    pos("edge", vec![v("a"), v("b"), v("c")]),
+                    pos("carry_category", vec![v("c")]),
+                    pos("seg", vec![v("b"), s("engine")]),
+                ],
+            ),
+            // The same filter through an assignment: `s = "engine"` binds s, so
+            // seg(b, s) joins on it, and edge then joins on b.
+            rule(
+                "g",
+                vec![v("a"), v("b")],
+                vec![
+                    pos("seg", vec![v("a"), s("parsers")]),
+                    pos("edge", vec![v("a"), v("b"), v("c")]),
+                    pos("carry_category", vec![v("c")]),
+                    pos("seg", vec![v("b"), v("s")]),
+                    Literal::cmp(CmpOp::Eq, v("s"), s("engine")),
+                ],
+            ),
+        ]);
+        let a = ok_in(&p, &c);
+        let (seg, edge) = (id_of(&a, "seg"), id_of(&a, "edge"));
+        let size = |q: PredId| {
+            Some(match q {
+                q if q == seg => 2_000,
+                q if q == edge => 60_000,
+                _ => 2,
+            })
+        };
+        assert_eq!(sips_order(&a.rules[0], &a.preds, &c, &[], None, &size), vec![0, 1, 2, 3]);
+        assert_eq!(sips_order(&a.rules[1], &a.preds, &c, &[], None, &size), vec![4, 3, 1, 0, 2]);
+        // With nothing joined yet the constants still rank: seg(a, ..) and seg(b, ..)
+        // tie and source order starts from seg(a, ..).
+        assert_eq!(sips_order(&a.rules[0], &a.preds, &c, &[], None, &|_| None)[0], 0);
+    }
+
+    /// `in_seg(Node, Str)`: the builtin form of the `seg` attribute (node `i`'s
+    /// segment is `s<i % 10>`), memoised per node through `Lookup`.
+    struct InSeg {
+        order: Vec<glia_core::NodeId>,
+        index: crate::value::Lookup<glia_core::NodeId, u32>,
+    }
+
+    fn seg_of(i: u32) -> String {
+        format!("s{}", i % 10)
+    }
+
+    impl crate::source::Builtin for InSeg {
+        fn decl(&self) -> BuiltinDecl {
+            BuiltinDecl {
+                name: "in_seg".into(),
+                cols: vec![ColType::Node, ColType::Str],
+                bind: vec![BindReq::May, BindReq::Must],
+                tiered: false,
+                kind: BuiltinKind::Domain,
+            }
+        }
+
+        fn call(
+            &self,
+            args: &[Option<crate::value::ValueRef<'_>>],
+            out: &mut Vec<crate::source::BuiltinRow>,
+        ) -> Result<(), String> {
+            use crate::value::{Tier, Value, ValueRef};
+            let [node, Some(ValueRef::Str(scope))] = args else {
+                return Err("in_seg takes (node, bound scope)".to_string());
+            };
+            let row = |id: glia_core::NodeId| crate::source::BuiltinRow {
+                values: vec![Value::Node(id), Value::Str((*scope).to_string())],
+                tier: Tier::Fact,
+            };
+            match node {
+                Some(ValueRef::Node(id)) => {
+                    if self.index.get(id).is_some_and(|i| seg_of(*i) == *scope) {
+                        out.push(row(*id));
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    for (i, id) in self.order.iter().enumerate() {
+                        if seg_of(i as u32) == *scope {
+                            out.push(row(*id));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn attribute_filter_costs_like_the_builtin() {
+        // DA.17 measured `seg(x, "parsers")` about 74x slower than the builtin form
+        // at x1 (and unfinished at x10): the second scope filter ran as a cross
+        // product of the two scopes (sips_joins_before_a_constant_only_literal), 1,500
+        // x 1,500 bindings per variant here, against about 4,500 for the join. Both
+        // forms now plan the same join, so they answer alike in comparable time (best
+        // of 3 each; the cross product measured about 6x the builtin form at 6,000
+        // nodes, and grows with the square of a scope).
+        use crate::eval::{Options, run};
+        use crate::source::MemSource;
+        use crate::testkit::{GraphSpec, lcg_graph, node_id};
+        use crate::value::Value;
+        use glia_activation::algo::GraphSource;
+        use std::time::Instant;
+        const N: u32 = 15_000;
+        let spec = GraphSpec {
+            nodes: N,
+            edges: 45_000,
+            categories: vec!["CALLS", "USES", "IMPORTS"],
+            tier_mix: [70, 20, 10],
+            seed: 7,
+            salt: 1,
+        };
+        let mut g: MemSource = lcg_graph(&spec);
+        g.attr(crate::ir::AttrDecl { name: "seg", ty: ColType::Str });
+        let mut index = crate::value::Lookup::new();
+        for i in 0..N {
+            g.set_attr(node_id(1, i), 1, Value::Str(seg_of(i)));
+            index.insert(node_id(1, i), i);
+        }
+        let order = g.node_ids();
+        g.builtin(Box::new(InSeg { order, index }));
+        let attr = "f(a, b) :- seg(a, \"s3\"), edge(a, b, c), carry_category(c), seg(b, \"s7\").";
+        let builtin =
+            "f(a, b) :- in_seg(a, \"s3\"), edge(a, b, c), carry_category(c), in_seg(b, \"s7\").";
+        let best_of = |text: &str| {
+            let mut best = f64::MAX;
+            let mut rows = Vec::new();
+            for _ in 0..3 {
+                let t = Instant::now();
+                let ev = run("rules", text, &g, &Options::default());
+                let ev = ev.unwrap_or_else(|e| panic!("{e}"));
+                best = best.min(t.elapsed().as_secs_f64() * 1_000.0);
+                rows = ev.rows("f").unwrap_or_else(|e| panic!("{e}"));
+            }
+            (best, rows)
+        };
+        let (attr_ms, attr_rows) = best_of(attr);
+        let (builtin_ms, builtin_rows) = best_of(builtin);
+        let values = |rows: &[crate::eval::Row]| {
+            rows.iter().map(|r| (r.values.clone(), r.tier)).collect::<Vec<_>>()
+        };
+        assert!(!attr_rows.is_empty());
+        assert_eq!(values(&attr_rows), values(&builtin_rows));
+        eprintln!("[rules-bench] attr-filter attr_ms={attr_ms:.1} builtin_ms={builtin_ms:.1}");
+        assert!(
+            attr_ms <= 3.0 * builtin_ms + 50.0,
+            "attribute form {attr_ms:.1} ms vs builtin form {builtin_ms:.1} ms"
+        );
     }
 
     #[test]

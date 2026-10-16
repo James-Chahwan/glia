@@ -117,8 +117,8 @@ fn wide_fact(n: usize) -> String {
 
 const UNSEEDED_TC: &str = "rules:1:1: warning: recursive predicate `tc/2` is unseeded: its \
     recursion starts from every row of `edge/3`; seed it (`tc(x, y) :- seed(x), ...`) or use \
-    reaches(x, y, \"CATS\"); magic sets seed it when every caller binds an argument (DA.12) (in \
-    the rule for `tc/2`)";
+    reaches(x, y, \"CATS\"); magic sets seed it when every caller binds an argument (in the \
+    rule for `tc/2`)";
 
 const TC: &str = "tc(x, y) :- edge(x, y, \"CALLS\").\ntc(x, z) :- tc(x, y), edge(y, z, \"CALLS\").";
 
