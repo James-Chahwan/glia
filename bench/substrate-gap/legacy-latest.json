@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 377,
+  "fixtures": 378,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -2061,6 +2061,14 @@
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "ts-concrete-override-dispatch": {
+      "framework": "ts-concrete-override-dispatch",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPLEMENTS": 1.0
       }
     },
     "ts-config-alias-endpoints": {

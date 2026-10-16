@@ -8091,27 +8091,30 @@
     },
     "typescript/impl": {
       "extract": [
-        7,
-        7
+        8,
+        8
       ],
       "fixtures": [
+        "fixtures/ts-concrete-override-dispatch",
         "fixtures/ts-heritage-xfile",
         "fixtures/ts-iface-extends",
         "matrix/typescript/impl"
       ],
       "forbid": [
-        1,
-        1
+        3,
+        3
       ],
       "level": "full",
       "literal": [
         7,
         7
       ],
-      "reasons": [],
+      "reasons": [
+        "extract probed from mechanism kinds (fixture scopes no nodes)"
+      ],
       "route": [
-        5,
-        5
+        7,
+        7
       ],
       "via": "type"
     },
