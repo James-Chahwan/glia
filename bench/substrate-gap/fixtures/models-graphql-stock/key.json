@@ -1,0 +1,17 @@
+{
+  "framework": "models-graphql-stock",
+  "language": "graphql",
+  "dirs": ["console", "api"],
+  "note": "DT.1j (T1 GraphQL schema vs selection, extraction half): the SDL object type `type Item` is a MESSAGE_TYPE `message:graphql:Item` with its declared fields as SCHEMA_FIELDS (format graphql), a root field carries its return type as a graphql_returns MESSAGE_TYPE cell, and an operation carries its selection set as a graphql_selection MESSAGE_TYPE cell. The console selects `barcode`, which `type Item` lacks (DT.1n judges it). HEAD 2b80361b (verifier, on a copy): no MESSAGE_TYPE node, `[graphql-sdl] files=1 resolvers=4`; graded node 0/1, cells 0/3, forbid 0.",
+  "expect_nodes": [
+    {"kind": "MESSAGE_TYPE", "name": "message:graphql:Item", "exact": true, "note": "the SDL object type, one node"}
+  ],
+  "expect_cells": [
+    {"kind": "GRAPHQL_OPERATION", "node": "graphql_op:ListItems", "cell": "MESSAGE_TYPE", "contains": "\"name\":\"barcode\"", "note": "the operation's selection set, nested under items"},
+    {"kind": "GRAPHQL_RESOLVER", "node": "graphql_resolver:items", "cell": "MESSAGE_TYPE", "contains": "\"form\":\"graphql_returns\"", "note": "the root field's declared return type [Item!]!"},
+    {"kind": "MESSAGE_TYPE", "node": "message:graphql:Item", "cell": "SCHEMA_FIELDS", "contains": "\"name\":\"onHand\"", "note": "the type's declared fields"}
+  ],
+  "forbid": [
+    {"kind": "MESSAGE_TYPE", "max_nodes": 1, "note": "only Item: no Query / Mutation / scalar node (a named forbid would miss an owner-suffixed qname)"}
+  ]
+}

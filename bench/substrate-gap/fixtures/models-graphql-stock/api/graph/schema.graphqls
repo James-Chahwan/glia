@@ -1,0 +1,14 @@
+type Item {
+  id: ID!
+  label: String!
+  priceCents: Int!
+  onHand: Int!
+}
+
+type Query {
+  items(first: Int): [Item!]!
+}
+
+type Mutation {
+  adjustStock(id: ID!, delta: Int!): Item!
+}

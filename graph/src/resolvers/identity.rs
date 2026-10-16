@@ -471,11 +471,17 @@ fn manifest_project_key(c: &Candidate) -> Option<String> {
     same_as::project_dep_key(str_field(origin, "ecosystem")?, label)
 }
 
-/// `message_fqname`: MESSAGE_TYPEs by exact qname.
+/// DT.1j: the qname prefix of a GraphQL SDL type. A GraphQL type name has no
+/// namespace, so two repos declaring `type User` share a bare name, not a
+/// fully qualified one: such a type is never a `message_fqname` member.
+const GRAPHQL_TYPE_PREFIX: &str = "message:graphql:";
+
+/// `message_fqname`: MESSAGE_TYPEs by exact qname, GraphQL SDL types left out
+/// ([`GRAPHQL_TYPE_PREFIX`]).
 fn message_classes(rule: &IdentityRule, cands: &[Candidate]) -> BTreeMap<String, Members> {
     let mut classes: BTreeMap<String, Members> = BTreeMap::new();
     for (i, c) in cands.iter().enumerate() {
-        if pairs(rule, c.kind) {
+        if pairs(rule, c.kind) && !c.qname.starts_with(GRAPHQL_TYPE_PREFIX) {
             classes.entry(c.qname.to_string()).or_default().insert(i);
         }
     }
@@ -1338,6 +1344,31 @@ mod tests {
                  message_fqname=1 contract_op=0 contract_route=0 scip_symbol=0 body_hash=0 path_suffix=0 \
                  offsets=0/0"
             )
+        );
+    }
+
+    /// DT.1j: two repos each declaring GraphQL `type Item` (owner-free or
+    /// owned) form no `message_fqname` class, while proto messages of one
+    /// fully qualified name still star.
+    #[test]
+    fn graphql_types_are_never_message_fqname_members() {
+        let item = r#"{"fields":[{"name":"id","required":true,"type":"ID!"}],"format":"graphql"}"#;
+        let m = run(vec![
+            G::new("catalog")
+                .message("message:graphql:Item", item)
+                .message("message:graphql:Item @api", item)
+                .message("message:proto:shop.A", "[1]")
+                .build(),
+            G::new("stock")
+                .message("message:graphql:Item", item)
+                .message("message:graphql:Item @api", item)
+                .message("message:proto:shop.A", "[1]")
+                .build(),
+        ]);
+        assert_eq!(
+            stars(&m),
+            [row("message:proto:shop.A", "message:proto:shop.A", "message_fqname", Confidence::Strong)],
+            "only the proto message stars"
         );
     }
 

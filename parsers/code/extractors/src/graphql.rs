@@ -1,7 +1,8 @@
 use std::sync::OnceLock;
 
-use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
-use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
+use glia_code_domain::wire::{ModelField, ModelSchema, ServerWire, Shape, ShapeField, WireForm, WireFormat};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, edge_category, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
 use crate::anchor::{Anchor, line_of};
 use crate::cli::{CodeMap, Script};
@@ -659,7 +660,7 @@ pub fn extract_graphql_operation_nodes(
                 id,
                 repo,
                 confidence: Confidence::Medium,
-                cells: document_cells(doc),
+                cells: document_cells(doc, line),
             });
             nav.record(id, &op_name, &qname, node_kind::GRAPHQL_OPERATION, Some(module_id));
             anchors.push(Anchor { node: id, line });
@@ -680,14 +681,15 @@ pub fn extract_graphql_operation_nodes(
         if seen.insert(name.clone()) {
             let qname = format!("graphql_op:{name}");
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRAPHQL_OPERATION, &qname);
+            let line = line_of(source, at);
             nodes.push(Node {
                 id,
                 repo,
                 confidence,
-                cells: document_cells(doc),
+                cells: document_cells(doc, line),
             });
             nav.record(id, &name, &qname, node_kind::GRAPHQL_OPERATION, Some(module_id));
-            anchors.push(Anchor { node: id, line: line_of(source, at) });
+            anchors.push(Anchor { node: id, line });
         }
     }
 
@@ -695,11 +697,17 @@ pub fn extract_graphql_operation_nodes(
 }
 
 /// DT.11a: an operation's cells: its document as one CODE text cell, or none
-/// when it was read from no document.
-fn document_cells(doc: Option<&str>) -> Vec<Cell> {
-    doc.map(|d| Cell { kind: cell_type::CODE, payload: CellPayload::Text(d.to_string()) })
-        .into_iter()
-        .collect()
+/// when it was read from no document. DT.1j: then the selection set of the
+/// document's operation as a `graphql_selection` MESSAGE_TYPE cell
+/// ([`selection_cell`]), at the 1-based line of the site that minted the
+/// operation (`line` is that site's 0-indexed line).
+fn document_cells(doc: Option<&str>, line: u32) -> Vec<Cell> {
+    let Some(d) = doc else {
+        return Vec::new();
+    };
+    let mut cells = vec![Cell { kind: cell_type::CODE, payload: CellPayload::Text(d.to_string()) }];
+    cells.extend(selection_cell(d, line.saturating_add(1)));
+    cells
 }
 
 /// CODE mode, for every code file of every language
@@ -730,7 +738,7 @@ pub fn extract_graphql_resolver_nodes(
     names.extend(embedded.hits.into_iter().map(|h| (h.name, h.line)));
     names.sort_by_key(|&(_, line)| line);
 
-    resolver_nodes(names, module_id, repo)
+    resolver_nodes(names, &embedded.root_fields, module_id, repo)
 }
 
 /// LA.38: the GraphQL decorator family of one code file, as (name, 0-indexed
@@ -3660,12 +3668,21 @@ pub fn extract_graphql_sdl_file_nodes(
         .into_iter()
         .map(|h| (h.name, h.line))
         .collect();
-    resolver_nodes(names, module_id, repo)
+    resolver_nodes(names, &sdl_defs(source, 0).root_fields, module_id, repo)
 }
 
 /// One GRAPHQL_RESOLVER per distinct name, anchored at the line of its first
-/// occurrence in `names`.
-fn resolver_nodes(names: Vec<(String, u32)>, module_id: NodeId, repo: RepoId) -> GraphqlNodes {
+/// occurrence in `names`. DT.1j: a name that is a root field of `root_fields`
+/// (the token read of the same SDL, [`sdl_defs`]) carries that field's
+/// declared return type as a `graphql_returns` MESSAGE_TYPE cell
+/// ([`returns_cell`]); the first root field of the name wins, as the first
+/// occurrence anchors the node.
+fn resolver_nodes(
+    names: Vec<(String, u32)>,
+    root_fields: &[SdlField],
+    module_id: NodeId,
+    repo: RepoId,
+) -> GraphqlNodes {
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
     let mut anchors = Vec::new();
@@ -3674,11 +3691,17 @@ fn resolver_nodes(names: Vec<(String, u32)>, module_id: NodeId, repo: RepoId) ->
         if seen.insert(resolver_name.clone()) {
             let qname = format!("graphql_resolver:{resolver_name}");
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRAPHQL_RESOLVER, &qname);
+            let cells = root_fields
+                .iter()
+                .find(|f| f.name == resolver_name)
+                .map(returns_cell)
+                .into_iter()
+                .collect();
             nodes.push(Node {
                 id,
                 repo,
                 confidence: Confidence::Medium,
-                cells: vec![],
+                cells,
             });
             nav.record(id, &resolver_name, &qname, node_kind::GRAPHQL_RESOLVER, Some(module_id));
             anchors.push(Anchor { node: id, line });
@@ -3778,6 +3801,9 @@ fn sdl_resolvers(text: &str, base_line: u32) -> Vec<SdlHit> {
 #[derive(Default)]
 struct EmbeddedSdl {
     hits: Vec<SdlHit>,
+    /// DT.1j: the root fields of every marked literal's SDL ([`sdl_defs`]),
+    /// literal order: the return types the resolver nodes carry.
+    root_fields: Vec<SdlField>,
     literals: usize,
     /// Root type openers outside every marked literal: what the pre-LA.27
     /// scan minted from (comments, unmarked strings).
@@ -3815,7 +3841,9 @@ fn embedded_sdl(source: &str) -> EmbeddedSdl {
     };
     for &(start, end) in &regions {
         if let Some(body) = source.get(start..end) {
-            out.hits.extend(sdl_resolvers(body, line_of(source, start)));
+            let base = line_of(source, start);
+            out.hits.extend(sdl_resolvers(body, base));
+            out.root_fields.extend(sdl_defs(body, base).root_fields);
         }
     }
     out.unmarked_roots = SDL_RESOLVER_TYPES
@@ -4138,6 +4166,806 @@ fn extract_operation_from_body(body: &str) -> Option<String> {
         }
     }
     None
+}
+
+// ============================================================================
+// DT.1j — SDL types, root-field return types and operation selection sets
+// ============================================================================
+
+/// DT.1j: the SDL definition keywords whose blocks declare fields: an object
+/// type, an input object and an interface. Enums, scalars and unions declare
+/// no fields and mint nothing.
+const SDL_FIELD_TYPES: &[&str] = &["type", "input", "interface"];
+
+/// DT.1j: the root operation type names [`sdl_resolvers`] reads; a
+/// `schema { query: X }` block adds its own names ([`sdl_defs`]).
+const SDL_DEFAULT_ROOTS: &[&str] = &["Query", "Mutation", "Subscription"];
+
+/// DT.1j: the words that open a type-system definition, where a type header's
+/// `implements` name list stops (the legacy blank-separated form has no `&`).
+const SDL_DEFINITION_WORDS: &[&str] =
+    &["type", "input", "interface", "enum", "union", "scalar", "schema", "directive", "extend"];
+
+/// DT.1j: the deepest selection-set nesting [`selection_shape`] reads; a set
+/// below it is skipped and its object marked open.
+const MAX_SELECTION_DEPTH: usize = 32;
+
+/// DT.1j: one field an SDL block declares.
+struct SdlField {
+    name: String,
+    /// The type reference as written, blanks dropped (`[Item!]!`).
+    ty: String,
+    /// 0-indexed source line of the field's name.
+    line: u32,
+}
+
+/// DT.1j: one SDL object / input / interface type with every block of its
+/// name in one text merged (`extend type X` and a repeated `type X` add the
+/// fields the first block lacks).
+struct SdlTypeDef {
+    /// `type`, `input` or `interface`: the first non-`extend` block's keyword.
+    keyword: &'static str,
+    name: String,
+    fields: Vec<SdlField>,
+    /// 0-indexed lines of the definition (its first non-`extend` block when
+    /// it has one): the keyword's line through the closing brace.
+    start_line: u32,
+    end_line: u32,
+    /// Only `extend` blocks name the type in this text: its other fields are
+    /// declared elsewhere.
+    extend_only: bool,
+    /// A block holds a template hole (`${..}`) where fields may be spliced in.
+    holes: bool,
+}
+
+/// DT.1j: what [`sdl_defs`] read from one SDL text.
+#[derive(Default)]
+struct SdlDefs {
+    /// The non-root types, in first-block order.
+    types: Vec<SdlTypeDef>,
+    /// The fields of every root type block (`type` keyword only), in source
+    /// order.
+    root_fields: Vec<SdlField>,
+}
+
+/// 0-indexed lines of byte offsets in one text whose first line is source
+/// line `base`.
+struct LineIndex {
+    starts: Vec<usize>,
+    base: u32,
+}
+
+impl LineIndex {
+    fn new(text: &str, base: u32) -> LineIndex {
+        let mut starts = vec![0];
+        starts.extend(text.bytes().enumerate().filter(|&(_, c)| c == b'\n').map(|(i, _)| i + 1));
+        LineIndex { starts, base }
+    }
+
+    fn line(&self, at: usize) -> u32 {
+        let row = self.starts.partition_point(|&s| s <= at).saturating_sub(1);
+        self.base.saturating_add(u32::try_from(row).unwrap_or(u32::MAX))
+    }
+}
+
+/// Nothing but blanks between the start of `at`'s line (or of `b`) and `at`.
+fn starts_line(b: &[u8], at: usize) -> bool {
+    b[..at.min(b.len())].iter().rev().take_while(|&&c| c != b'\n').all(|&c| c == b' ' || c == b'\t' || c == b'\r')
+}
+
+/// The index past the GraphQL string opening at `i` (a `"` / `"""` block
+/// string, `\"""` escaped inside one); `None` when it never closes. A plain
+/// string never spans a line.
+fn sdl_string_end(b: &[u8], i: usize) -> Option<usize> {
+    if b.get(i..i + 3) == Some(&b"\"\"\""[..]) {
+        let mut k = i + 3;
+        while k < b.len() {
+            if b.get(k..k + 4) == Some(&b"\\\"\"\""[..]) {
+                k += 4;
+            } else if b.get(k..k + 3) == Some(&b"\"\"\""[..]) {
+                return Some(k + 3);
+            } else {
+                k += 1;
+            }
+        }
+        return None;
+    }
+    find_close(b, i + 1, b"\"", true).map(|e| e + 1)
+}
+
+/// [`gql_close`] with block strings read as one token ([`sdl_string_end`]),
+/// so a description holding a bracket or an odd quote cannot unbalance it.
+fn sdl_close(b: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while let Some(&c) = b.get(i) {
+        match c {
+            b'"' => {
+                i = sdl_string_end(b, i)?;
+                continue;
+            }
+            b'#' => {
+                i = gql_skip(b, i);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Past any `@directive` / `@directive(args)` from `i`, and the ignored
+/// tokens after each; `None` when an argument list never closes.
+fn sdl_skip_directives(s: &str, i: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut i = i;
+    while b.get(i) == Some(&b'@') {
+        i = gql_skip(b, gql_name(s, i + 1)?.1);
+        if b.get(i) == Some(&b'(') {
+            i = gql_skip(b, sdl_close(b, i)? + 1);
+        }
+    }
+    Some(i)
+}
+
+/// The end of the type reference at `i` (`Name`, `[..]`, each with an
+/// optional trailing `!`); `None` when none starts there.
+fn sdl_type_ref_end(s: &str, i: usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut end = match b.get(i)? {
+        b'[' => sdl_close(b, i)? + 1,
+        _ => gql_name(s, i)?.1,
+    };
+    let bang = gql_skip(b, end);
+    if b.get(bang) == Some(&b'!') {
+        end = bang + 1;
+    }
+    Some(end)
+}
+
+/// The end of an input field's default value starting at `i` (a string, a
+/// list / object, or a name / number token).
+fn sdl_value_end(b: &[u8], i: usize) -> usize {
+    match b.get(i) {
+        Some(b'"') => sdl_string_end(b, i).unwrap_or(b.len()),
+        Some(b'[' | b'{') => sdl_close(b, i).map_or(b.len(), |c| c + 1),
+        _ => {
+            let mut k = i;
+            while b.get(k).is_some_and(|c| c.is_ascii_alphanumeric() || b"-+._".contains(c)) {
+                k += 1;
+            }
+            k
+        }
+    }
+}
+
+/// The fields of the type block whose braces are `open` / `close`: each
+/// `name(args): Type = default @dir`, descriptions, argument lists (on one
+/// line or many), defaults and directives passed over. A field name seen
+/// twice keeps its first declaration; a token that is no field is stepped
+/// over.
+fn sdl_fields(s: &str, lines: &LineIndex, open: usize, close: usize) -> Vec<SdlField> {
+    let b = s.as_bytes();
+    let mut out: Vec<SdlField> = Vec::new();
+    let mut p = gql_skip(b, open + 1);
+    while p < close {
+        if b.get(p) == Some(&b'"') {
+            p = gql_skip(b, sdl_string_end(b, p).unwrap_or(close));
+            continue;
+        }
+        let Some((name, end)) = gql_name(s, p) else {
+            p = gql_skip(b, p + 1);
+            continue;
+        };
+        let line = lines.line(p);
+        let mut q = gql_skip(b, end);
+        if b.get(q) == Some(&b'(') {
+            match sdl_close(b, q) {
+                Some(c) if c < close => q = gql_skip(b, c + 1),
+                _ => break,
+            }
+        }
+        if b.get(q) != Some(&b':') {
+            p = q;
+            continue;
+        }
+        let ty_start = gql_skip(b, q + 1);
+        let Some(ty_end) = sdl_type_ref_end(s, ty_start).filter(|&e| e <= close) else {
+            p = ty_start.max(q + 1);
+            continue;
+        };
+        let ty: String = s[ty_start..ty_end].chars().filter(|c| !c.is_whitespace() && *c != ',').collect();
+        q = gql_skip(b, ty_end);
+        if b.get(q) == Some(&b'=') {
+            q = gql_skip(b, sdl_value_end(b, gql_skip(b, q + 1)));
+        }
+        q = sdl_skip_directives(s, q).unwrap_or(close);
+        if !out.iter().any(|f| f.name == name) {
+            out.push(SdlField { name: name.to_string(), ty, line });
+        }
+        p = q;
+    }
+    out
+}
+
+/// One `type` / `input` / `interface` block whose keyword ends at `kw_end`
+/// (`def_start` is where the definition starts, `extend` included): the
+/// block and the index to read on from. The header's `implements` list and
+/// directives are passed over; a block with no `{` declares no fields.
+fn sdl_type_block(
+    s: &str,
+    lines: &LineIndex,
+    keyword: &'static str,
+    extend: bool,
+    def_start: usize,
+    kw_end: usize,
+) -> (Option<SdlTypeDef>, usize) {
+    let b = s.as_bytes();
+    let Some((name, name_end)) = gql_name(s, gql_skip(b, kw_end)) else {
+        return (None, kw_end);
+    };
+    let mut j = gql_skip(b, name_end);
+    if let Some(("implements", end)) = gql_name(s, j) {
+        j = gql_skip(b, end);
+        loop {
+            if b.get(j) == Some(&b'&') {
+                j = gql_skip(b, j + 1);
+                continue;
+            }
+            match gql_name(s, j) {
+                Some((n, end)) if !SDL_DEFINITION_WORDS.contains(&n) => j = gql_skip(b, end),
+                _ => break,
+            }
+        }
+    }
+    let Some(j) = sdl_skip_directives(s, j) else {
+        return (None, b.len());
+    };
+    let start_line = lines.line(def_start);
+    let mut def = SdlTypeDef {
+        keyword,
+        name: name.to_string(),
+        fields: Vec::new(),
+        start_line,
+        end_line: start_line,
+        extend_only: extend,
+        holes: false,
+    };
+    if b.get(j) != Some(&b'{') {
+        return (Some(def), j);
+    }
+    let Some(close) = sdl_close(b, j) else {
+        return (None, b.len());
+    };
+    def.fields = sdl_fields(s, lines, j, close);
+    def.end_line = lines.line(close);
+    def.holes = s.get(j..close).is_some_and(|body| body.contains("${"));
+    (Some(def), close + 1)
+}
+
+/// The root type names a `schema { query: X .. }` block opened at `open`
+/// declares, appended to `roots`; the index past its `}`.
+fn sdl_schema_roots(s: &str, open: usize, roots: &mut Vec<String>) -> Option<usize> {
+    let b = s.as_bytes();
+    let close = sdl_close(b, open)?;
+    let mut i = gql_skip(b, open + 1);
+    while i < close {
+        let Some((_, end)) = gql_name(s, i) else {
+            i = gql_skip(b, i + 1);
+            continue;
+        };
+        let colon = gql_skip(b, end);
+        if b.get(colon) == Some(&b':')
+            && let Some((root, end)) = gql_name(s, gql_skip(b, colon + 1))
+        {
+            roots.push(root.to_string());
+            i = gql_skip(b, end);
+        } else {
+            i = colon.max(end);
+        }
+    }
+    Some(close + 1)
+}
+
+/// DT.1j: the SDL text's type definitions, read as GraphQL tokens (blanks,
+/// commas and `#` comments ignored; strings, descriptions and argument lists
+/// read whole): every `type` / `input` / `interface` block (with or without
+/// `extend`) and the `schema` block's root names. Blocks of a root type
+/// (Query / Mutation / Subscription, or a name the schema block gives) are
+/// its root fields; every other name is one [`SdlTypeDef`]. `enum`,
+/// `union`, `scalar` and `directive` definitions, and any other text
+/// (operations, template holes), are stepped over. `base_line` is the
+/// source line of the text's first line.
+///
+/// A definition counts only when its first word (`extend` included) starts
+/// its line, blanks aside, or the text: [`sdl_resolvers`]' rule, so the
+/// roots and fields both read agree, and an SDL written into a one-line
+/// string (glia's own tests, `\n` escapes) declares nothing.
+fn sdl_defs(text: &str, base_line: u32) -> SdlDefs {
+    let b = text.as_bytes();
+    let lines = LineIndex::new(text, base_line);
+    let mut blocks: Vec<SdlTypeDef> = Vec::new();
+    let mut roots: Vec<String> = SDL_DEFAULT_ROOTS.iter().map(|r| r.to_string()).collect();
+    let mut i = 0;
+    loop {
+        i = gql_skip(b, i);
+        let Some(&c) = b.get(i) else { break };
+        match c {
+            b'"' => match sdl_string_end(b, i) {
+                Some(e) => i = e,
+                None => break,
+            },
+            b'{' | b'(' | b'[' => match sdl_close(b, i) {
+                Some(e) => i = e + 1,
+                None => break,
+            },
+            _ => {
+                let Some((word, end)) = gql_name(text, i) else {
+                    i += 1;
+                    continue;
+                };
+                if !starts_line(b, i) {
+                    i = end;
+                    continue;
+                }
+                let (extend, kw, kw_end) = match word {
+                    "extend" => match gql_name(text, gql_skip(b, end)) {
+                        Some((w, e)) if w == "schema" || SDL_FIELD_TYPES.contains(&w) => (true, w, e),
+                        _ => {
+                            i = end;
+                            continue;
+                        }
+                    },
+                    w => (false, w, end),
+                };
+                if kw == "schema" {
+                    let open = sdl_skip_directives(text, gql_skip(b, kw_end));
+                    i = match open {
+                        Some(o) if b.get(o) == Some(&b'{') => match sdl_schema_roots(text, o, &mut roots) {
+                            Some(next) => next,
+                            None => break,
+                        },
+                        Some(o) => o,
+                        None => break,
+                    };
+                    continue;
+                }
+                let Some(keyword) = SDL_FIELD_TYPES.iter().copied().find(|k| *k == kw) else {
+                    i = end;
+                    continue;
+                };
+                let (block, next) = sdl_type_block(text, &lines, keyword, extend, i, kw_end);
+                blocks.extend(block);
+                i = next;
+            }
+        }
+    }
+
+    let mut defs = SdlDefs::default();
+    for block in blocks {
+        if roots.contains(&block.name) {
+            if block.keyword == "type" {
+                defs.root_fields.extend(block.fields);
+            }
+        } else {
+            merge_type(&mut defs.types, block);
+        }
+    }
+    defs
+}
+
+/// `block` merged into the type of its name in `types`, or appended: the
+/// fields the type lacks are added, and a non-`extend` block gives an
+/// extend-only type its keyword and lines.
+fn merge_type(types: &mut Vec<SdlTypeDef>, block: SdlTypeDef) {
+    let Some(def) = types.iter_mut().find(|t| t.name == block.name) else {
+        types.push(block);
+        return;
+    };
+    for f in block.fields {
+        if !def.fields.iter().any(|x| x.name == f.name) {
+            def.fields.push(f);
+        }
+    }
+    def.holes |= block.holes;
+    if def.extend_only && !block.extend_only {
+        def.keyword = block.keyword;
+        def.start_line = block.start_line;
+        def.end_line = block.end_line;
+        def.extend_only = false;
+    }
+}
+
+/// DT.1j: a root field's `graphql_returns` MESSAGE_TYPE cell: its declared
+/// return type as written (`raw`), as a [`Shape::Named`] of the element
+/// type with one array layer peeled (`[Item!]!` -> `Item`, array), at the
+/// field's 1-based line.
+fn returns_cell(f: &SdlField) -> Cell {
+    ServerWire::new(WireForm::GraphqlReturns, &f.ty, f.line.saturating_add(1), Shape::named(&f.ty)).cell()
+}
+
+/// DT.1j: the MESSAGE_TYPE nodes of SDL object / input / interface types.
+pub struct GraphqlTypes {
+    pub nodes: Vec<Node>,
+    /// The file MODULE DEFINES each type.
+    pub edges: Vec<Edge>,
+    pub nav: CodeNav,
+}
+
+/// DT.1j, WHOLE-FILE mode for a routed `.graphql` / `.graphqls` / `.gql`
+/// schema (`engine::route`): every object / input / interface type the file
+/// declares ([`sdl_defs`]) as a MESSAGE_TYPE ([`type_nodes`]).
+pub fn extract_graphql_sdl_file_types(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> GraphqlTypes {
+    type_nodes(sdl_defs(source, 0).types, path, module_id, repo)
+}
+
+/// DT.1j, CODE mode: the types of the SDL held in the file's GraphQL-marked
+/// literals ([`gql_literal_regions`], the regions
+/// [`extract_graphql_resolver_nodes`] reads its root fields from), every
+/// literal's blocks of one name merged as within one schema file. A file
+/// with no marked literal mints nothing.
+pub fn extract_graphql_embedded_types(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+) -> GraphqlTypes {
+    let mut types: Vec<SdlTypeDef> = Vec::new();
+    for (start, end) in gql_literal_regions(source) {
+        let Some(body) = source.get(start..end) else { continue };
+        for t in sdl_defs(body, line_of(source, start)).types {
+            merge_type(&mut types, t);
+        }
+    }
+    type_nodes(types, path, module_id, repo)
+}
+
+/// One MESSAGE_TYPE `message:graphql:<Name>` per type, under the file's
+/// MODULE (nav parent and a DEFINES edge), with a POSITION over its
+/// definition, an ORIGIN `{"provenance":"contract","source":"graphql",
+/// "decl":<keyword>}` and its fields as a SCHEMA_FIELDS [`ModelSchema`] of
+/// format graphql: each field's type as written, `required` when it ends in
+/// `!`, `array` when it is a list. The schema is `open` when the text names
+/// the type only through `extend` blocks or a block holds a template hole.
+/// No `extends`: an object type redeclares every interface field it
+/// implements, so its list is complete.
+fn type_nodes(types: Vec<SdlTypeDef>, path: &str, module_id: NodeId, repo: RepoId) -> GraphqlTypes {
+    let mut out = GraphqlTypes { nodes: Vec::new(), edges: Vec::new(), nav: CodeNav::default() };
+    let file = serde_json::to_string(path).unwrap_or_else(|_| String::from("\"\""));
+    for t in types {
+        let qname = format!("message:graphql:{}", t.name);
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MESSAGE_TYPE, &qname);
+        let schema = ModelSchema {
+            fields: t.fields.iter().map(|f| ModelField::new(&f.name, &f.ty, f.ty.ends_with('!'))).collect(),
+            open: t.extend_only || t.holes,
+            ..ModelSchema::new(WireFormat::Graphql)
+        };
+        let cells = vec![
+            Cell {
+                kind: cell_type::POSITION,
+                payload: CellPayload::Json(format!(
+                    r#"{{"file":{file},"start_line":{},"end_line":{}}}"#,
+                    t.start_line, t.end_line
+                )),
+            },
+            Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(format!(
+                    r#"{{"provenance":"contract","source":"graphql","decl":"{}"}}"#,
+                    t.keyword
+                )),
+            },
+            schema.cell(),
+        ];
+        out.nodes.push(Node { id, repo, confidence: Confidence::Strong, cells });
+        out.edges.push(Edge {
+            from: module_id,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
+        out.nav.record(id, &t.name, &qname, node_kind::MESSAGE_TYPE, Some(module_id));
+    }
+    out
+}
+
+/// DT.1j: the selection set of the first operation `doc` defines (a `query` /
+/// `mutation` / `subscription`, or a shorthand `{ .. }`), as a
+/// [`Shape::Object`] whose fields are its root selections, each with its
+/// sub-selection as a nested object; `None` when `doc` defines no operation.
+///
+/// - A field's [`ShapeField::name`] is its response key and
+///   [`ShapeField::field`] the schema field when it is aliased
+///   (`recent: orders`); arguments and directives are passed over. A field
+///   under `@include` / `@skip` is not `required`; every other one is.
+/// - A leaf is [`Shape::Open`] (its type is the schema's, not the
+///   document's); `__typename` and the other introspection fields are left
+///   out (every object type answers them).
+/// - A spread of a fragment the document defines is read in place (its
+///   fields not required under `@include` / `@skip`); a spread of any other
+///   fragment, an inline fragment (`... on T { .. }`, `... { .. }`) and a
+///   cyclic or too-deep spread mark the enclosing object open.
+/// - A set that stops parsing (a template hole `${..}` where a field should
+///   be, an unclosed bracket) keeps the fields read before it, and it and
+///   every enclosing object are open.
+pub fn selection_shape(doc: &str) -> Option<Shape> {
+    operation_selection(doc).map(|(_, _, shape)| shape)
+}
+
+/// [`selection_shape`] with the operation's type (`query` for a shorthand)
+/// and name.
+fn operation_selection(doc: &str) -> Option<(&str, Option<&str>, Shape)> {
+    let b = doc.as_bytes();
+    let mut fragments: Vec<(&str, usize)> = Vec::new();
+    let mut operation: Option<(&str, Option<&str>, usize)> = None;
+    // A `{` is a shorthand operation only where a definition may start: at
+    // the document's start or after a definition (or hole) closed, never
+    // after a name (`type Query {`).
+    let mut definition_starts = true;
+    let mut i = 0;
+    loop {
+        i = gql_skip(b, i);
+        let Some(&c) = b.get(i) else { break };
+        if c == b'{' {
+            if definition_starts {
+                operation.get_or_insert(("query", None, i));
+            }
+            match gql_close(b, i) {
+                Some(close) => i = close + 1,
+                None => break,
+            }
+            definition_starts = true;
+            continue;
+        }
+        if c == b'$' && b.get(i + 1) == Some(&b'{') {
+            match gql_close(b, i + 1) {
+                Some(close) => i = close + 1,
+                None => break,
+            }
+            definition_starts = true;
+            continue;
+        }
+        definition_starts = false;
+        let Some((word, end)) = gql_name(doc, i) else {
+            i += 1;
+            continue;
+        };
+        let open = match word {
+            "fragment" => {
+                let Some((name, end)) = gql_name(doc, gql_skip(b, end)) else {
+                    i = end;
+                    continue;
+                };
+                // `on Type`, then directives.
+                let mut j = gql_skip(b, end);
+                if let Some(("on", e)) = gql_name(doc, j) {
+                    j = gql_skip(b, e);
+                    if let Some((_, e)) = gql_name(doc, j) {
+                        j = gql_skip(b, e);
+                    }
+                }
+                let Some(j) = gql_skip_args_and_directives(doc, j) else { break };
+                if b.get(j) == Some(&b'{') {
+                    fragments.push((name, j));
+                }
+                j
+            }
+            "query" | "mutation" | "subscription" => {
+                let mut j = gql_skip(b, end);
+                let mut name = None;
+                if let Some((n, e)) = gql_name(doc, j) {
+                    name = Some(n);
+                    j = gql_skip(b, e);
+                }
+                let Some(j) = gql_skip_args_and_directives(doc, j) else { break };
+                if b.get(j) == Some(&b'{') {
+                    operation.get_or_insert((word, name, j));
+                }
+                j
+            }
+            _ => {
+                i = end;
+                continue;
+            }
+        };
+        if b.get(open) == Some(&b'{') {
+            match gql_close(b, open) {
+                Some(close) => i = close + 1,
+                None => break,
+            }
+            definition_starts = true;
+        } else {
+            i = open.max(end);
+        }
+    }
+    let (kind, name, open) = operation?;
+    let reader = SelectionReader { s: doc, b, fragments };
+    let mut fields = Vec::new();
+    let mut is_open = false;
+    if reader.set(open, 0, &mut Vec::new(), &mut fields, &mut is_open).is_none() {
+        is_open = true;
+    }
+    Some((kind, name, Shape::Object { fields, open: is_open }))
+}
+
+/// One document's selection sets, read with its fragment definitions at
+/// hand ([`selection_shape`]).
+struct SelectionReader<'a> {
+    s: &'a str,
+    b: &'a [u8],
+    /// Each fragment the document defines: its name and the `{` of its set.
+    fragments: Vec<(&'a str, usize)>,
+}
+
+impl<'a> SelectionReader<'a> {
+    /// Past the directives at `i`, and whether one is `@include` / `@skip`
+    /// (the selection may be absent from the response).
+    fn directives(&self, i: usize) -> Option<(usize, bool)> {
+        let mut i = i;
+        let mut conditional = false;
+        while self.b.get(i) == Some(&b'@') {
+            let (name, end) = gql_name(self.s, i + 1)?;
+            conditional |= matches!(name, "include" | "skip");
+            i = gql_skip(self.b, end);
+            if self.b.get(i) == Some(&b'(') {
+                i = gql_skip(self.b, gql_close(self.b, i)? + 1);
+            }
+        }
+        Some((i, conditional))
+    }
+
+    /// The selection set opened at `open`, its fields merged into `out`
+    /// ([`merge_selection`]) and `open_set` set when it is open; the index
+    /// past its `}`, or `None` when it stops parsing (`out` keeps what was
+    /// read). `stack` holds the fragments being read, so a cycle stops.
+    fn set(
+        &self,
+        open: usize,
+        depth: usize,
+        stack: &mut Vec<&'a str>,
+        out: &mut Vec<ShapeField>,
+        open_set: &mut bool,
+    ) -> Option<usize> {
+        let (s, b) = (self.s, self.b);
+        if depth >= MAX_SELECTION_DEPTH {
+            *open_set = true;
+            return Some(gql_close(b, open)? + 1);
+        }
+        let mut i = gql_skip(b, open + 1);
+        loop {
+            match *b.get(i)? {
+                b'}' => return Some(i + 1),
+                b'.' => {
+                    if b.get(i..i + 3) != Some(&b"..."[..]) {
+                        return None;
+                    }
+                    let j = gql_skip(b, i + 3);
+                    match gql_name(s, j) {
+                        Some((name, end)) if name != "on" => {
+                            let (next, conditional) = self.directives(gql_skip(b, end))?;
+                            let known = self.fragments.iter().find(|(f, _)| *f == name).map(|&(_, at)| at);
+                            match known {
+                                Some(at) if !stack.contains(&name) => {
+                                    stack.push(name);
+                                    let mut spread = Vec::new();
+                                    if self.set(at, depth + 1, stack, &mut spread, open_set).is_none() {
+                                        *open_set = true;
+                                    }
+                                    stack.pop();
+                                    for mut f in spread {
+                                        f.required &= !conditional;
+                                        merge_selection(out, f);
+                                    }
+                                }
+                                _ => *open_set = true,
+                            }
+                            i = next;
+                        }
+                        // An inline fragment, with a type condition or not.
+                        on => {
+                            let mut k = j;
+                            if let Some((_, end)) = on {
+                                k = gql_skip(b, gql_name(s, gql_skip(b, end))?.1);
+                            }
+                            let (k, _) = self.directives(k)?;
+                            if b.get(k) != Some(&b'{') {
+                                return None;
+                            }
+                            *open_set = true;
+                            i = gql_skip(b, gql_close(b, k)? + 1);
+                        }
+                    }
+                }
+                _ => {
+                    let (key, end) = gql_name(s, i)?;
+                    let mut field = key;
+                    let mut k = gql_skip(b, end);
+                    if b.get(k) == Some(&b':') {
+                        let (name, end) = gql_name(s, gql_skip(b, k + 1))?;
+                        field = name;
+                        k = gql_skip(b, end);
+                    }
+                    if b.get(k) == Some(&b'(') {
+                        k = gql_skip(b, gql_close(b, k)? + 1);
+                    }
+                    let (k, conditional) = self.directives(k)?;
+                    let mut next = k;
+                    let mut stopped = false;
+                    let shape = if b.get(k) == Some(&b'{') {
+                        let mut fields = Vec::new();
+                        let mut open_sub = false;
+                        match self.set(k, depth + 1, stack, &mut fields, &mut open_sub) {
+                            Some(end) => next = gql_skip(b, end),
+                            None => {
+                                open_sub = true;
+                                stopped = true;
+                            }
+                        }
+                        Shape::Object { fields, open: open_sub }
+                    } else {
+                        Shape::open("")
+                    };
+                    if !field.starts_with("__") {
+                        let mut f = ShapeField::new(key, !conditional, shape);
+                        if field != key {
+                            f.field = Some(field.to_string());
+                        }
+                        merge_selection(out, f);
+                    }
+                    if stopped {
+                        return None;
+                    }
+                    i = next;
+                }
+            }
+        }
+    }
+}
+
+/// `f` added to a selection's fields: a response key already present is
+/// required when either is, and two sub-selections of one key are merged
+/// field by field (GraphQL's field merging); otherwise the first stays.
+fn merge_selection(out: &mut Vec<ShapeField>, f: ShapeField) {
+    let Some(have) = out.iter_mut().find(|x| x.name == f.name) else {
+        out.push(f);
+        return;
+    };
+    have.required |= f.required;
+    if let (Shape::Object { fields, open }, Shape::Object { fields: more, open: more_open }) =
+        (&mut have.shape, f.shape)
+    {
+        *open |= more_open;
+        for m in more {
+            merge_selection(fields, m);
+        }
+    }
+}
+
+/// DT.1j: the `graphql_selection` MESSAGE_TYPE cell of the operation `doc`
+/// defines ([`operation_selection`]): `raw` is its type and name
+/// (`query ListItems`, `query` for an anonymous one), `line` the 1-based
+/// line of the site that minted it. `None` when `doc` defines no operation.
+fn selection_cell(doc: &str, line: u32) -> Option<Cell> {
+    let (kind, name, shape) = operation_selection(doc)?;
+    let raw = match name {
+        Some(n) => format!("{kind} {n}"),
+        None => kind.to_string(),
+    };
+    Some(ServerWire::new(WireForm::GraphqlSelection, &raw, line, shape).cell())
 }
 
 // ---- DH.8: Dart package:graphql documents ----
@@ -6731,5 +7559,252 @@ mod tests {
         assert!(op_qnames("const T = gql`type Query { users: [User] }`;\n").is_empty());
         let go = "package main\n\nimport \"github.com/machinebox/graphql\"\n\nfunc f() {\n\treq := graphql.NewRequest(`fragment F on Order { id }`)\n\t_ = req\n}\n";
         assert!(op_qnames(go).is_empty());
+    }
+
+    // ---- DT.1j: SDL types, root-field return types, selection sets ----
+    // Every source is a one-line Rust string (`\n` escapes), so glia's own
+    // build, reading this file as Rust, declares no type from it.
+
+    fn type_id(out: &GraphqlTypes, qname: &str) -> Option<NodeId> {
+        out.nav.qname_by_id.iter().find(|(_, q)| q.as_str() == qname).map(|(id, _)| *id)
+    }
+
+    fn type_qnames(out: &GraphqlTypes) -> Vec<&str> {
+        let mut q: Vec<&str> = out.nav.qname_by_id.values().map(String::as_str).collect();
+        q.sort_unstable();
+        q
+    }
+
+    fn type_cell(out: &GraphqlTypes, qname: &str, kind: glia_core::CellTypeId) -> Option<String> {
+        let id = type_id(out, qname)?;
+        out.nodes.iter().find(|n| n.id == id)?.cells.iter().find(|c| c.kind == kind).map(|c| match &c.payload {
+            CellPayload::Json(s) | CellPayload::Text(s) => s.clone(),
+            CellPayload::Bytes(_) => String::new(),
+        })
+    }
+
+    fn type_schema(out: &GraphqlTypes, qname: &str) -> Option<ModelSchema> {
+        let id = type_id(out, qname)?;
+        out.nodes.iter().find(|n| n.id == id)?.cells.iter().find_map(ModelSchema::from_cell)
+    }
+
+    /// `(name, type, required, array)` of each field, in order.
+    fn fields_of(schema: &ModelSchema) -> Vec<(&str, &str, bool, bool)> {
+        schema.fields.iter().map(|f| (f.name.as_str(), f.ty.as_str(), f.required, f.array)).collect()
+    }
+
+    fn wire_of(out: &GraphqlNodes, qname: &str) -> Option<ServerWire> {
+        let id = out.nav.qname_by_id.iter().find(|(_, q)| q.as_str() == qname).map(|(id, _)| *id)?;
+        out.nodes.iter().find(|n| n.id == id)?.cells.iter().find_map(ServerWire::from_cell)
+    }
+
+    /// `(name, field, required)` of a selection object's fields, and its
+    /// `open` flag.
+    fn keys(shape: &Shape) -> (Vec<(&str, Option<&str>, bool)>, bool) {
+        match shape {
+            Shape::Object { fields, open } => {
+                (fields.iter().map(|f| (f.name.as_str(), f.field.as_deref(), f.required)).collect(), *open)
+            }
+            other => panic!("not an object: {other:?}"),
+        }
+    }
+
+    fn sub<'s>(shape: &'s Shape, key: &str) -> &'s Shape {
+        match shape {
+            Shape::Object { fields, .. } => {
+                &fields.iter().find(|f| f.name == key).unwrap_or_else(|| panic!("no {key}")).shape
+            }
+            other => panic!("not an object: {other:?}"),
+        }
+    }
+
+    const STOCK_SDL: &str = "type Item implements Node & Priced @key(fields: \"id\") {\n  \"\"\"The id {of} the \"item\".\"\"\"\n  id: ID!\n  label: String! @deprecated(reason: \"use name\")\n  tags: [String!]\n  related(\n    first: Int = 10\n    after: String\n  ): [Item!]!\n}\n\ninput AdjustInput {\n  id: ID!\n  delta: Int! = 0\n  note: String = \"x\"\n  ids: [ID!] = [1, 2]\n}\n\ninterface Node {\n  id: ID!\n}\n\nenum Color { RED GREEN }\nscalar Date\nunion Thing = Item | Node\n\ntype Query {\n  items(first: Int): [Item!]!\n  count: Int\n}\n\nextend type Item {\n  sku: String\n  id: ID\n}\n";
+
+    /// DT.1j: every object / input / interface type of a schema file is one
+    /// MESSAGE_TYPE with its fields (descriptions, directives, defaults and a
+    /// multi-line argument list passed over; `extend type` merged, a field
+    /// it repeats keeping its first declaration); root types, enums,
+    /// scalars and unions mint none.
+    #[test]
+    fn sdl_types_become_message_types() {
+        let out = extract_graphql_sdl_file_types(STOCK_SDL, "api/schema.graphqls", module_id(), repo());
+        assert_eq!(
+            type_qnames(&out),
+            ["message:graphql:AdjustInput", "message:graphql:Item", "message:graphql:Node"]
+        );
+        let item = type_schema(&out, "message:graphql:Item").expect("Item fields");
+        assert_eq!(item.format, WireFormat::Graphql);
+        assert!(!item.open && item.extends.is_empty());
+        assert_eq!(
+            fields_of(&item),
+            [
+                ("id", "ID!", true, false),
+                ("label", "String!", true, false),
+                ("tags", "[String!]", false, true),
+                ("related", "[Item!]!", true, true),
+                ("sku", "String", false, false),
+            ]
+        );
+        let input = type_schema(&out, "message:graphql:AdjustInput").expect("input fields");
+        assert_eq!(
+            fields_of(&input),
+            [
+                ("id", "ID!", true, false),
+                ("delta", "Int!", true, false),
+                ("note", "String", false, false),
+                ("ids", "[ID!]", false, true),
+            ]
+        );
+        assert_eq!(
+            type_cell(&out, "message:graphql:Item", cell_type::POSITION).as_deref(),
+            Some(r#"{"file":"api/schema.graphqls","start_line":0,"end_line":9}"#),
+            "the type line through its closing brace (not the extend block)"
+        );
+        assert_eq!(
+            type_cell(&out, "message:graphql:Node", cell_type::ORIGIN).as_deref(),
+            Some(r#"{"provenance":"contract","source":"graphql","decl":"interface"}"#)
+        );
+        let item_id = type_id(&out, "message:graphql:Item").expect("Item");
+        assert!(out.edges.iter().any(|e| e.from == module_id()
+            && e.to == item_id
+            && e.category == edge_category::DEFINES));
+        assert_eq!(out.edges.len(), 3, "one DEFINES per type");
+        assert_eq!(out.nav.parent_of.get(&item_id), Some(&module_id()));
+        assert_eq!(out.nav.name_by_id.get(&item_id).map(String::as_str), Some("Item"));
+    }
+
+    /// DT.1j: a root field's resolver carries its declared return type; the
+    /// root type node and a scalar-returning field carry theirs too (the
+    /// scalar is never a model, so nothing judges it).
+    #[test]
+    fn root_fields_carry_their_return_type() {
+        let out = extract_graphql_sdl_file_nodes(STOCK_SDL, module_id(), repo());
+        let items = wire_of(&out, "graphql_resolver:items").expect("items returns");
+        assert_eq!(items.form, WireForm::GraphqlReturns);
+        assert_eq!((items.ty.as_str(), items.raw.as_str(), items.line), ("Item", "[Item!]!", 28));
+        assert_eq!(items.shape, Shape::Named { ty: "Item".into(), array: true, model: None });
+        let count = wire_of(&out, "graphql_resolver:count").expect("count returns");
+        assert_eq!(count.shape, Shape::named("Int"));
+        assert!(wire_of(&out, "graphql_resolver:Query").is_none(), "a root type returns nothing");
+        assert!(
+            items.to_payload().starts_with(r#"{"type":"Item","raw":"[Item!]!","form":"graphql_returns","window":"site","line":28,"#),
+            "{}",
+            items.to_payload()
+        );
+    }
+
+    /// DT.1j: a `schema` block's root names are roots; a type the text names
+    /// only through `extend` is open (its other fields live elsewhere); an
+    /// operation document declares no type.
+    #[test]
+    fn schema_roots_and_extend_only_types() {
+        let sdl = "schema {\n  query: RootQuery\n}\n\ntype RootQuery {\n  me: User\n}\n\nextend type User @key(fields: \"id\") {\n  orders: [Order!]!\n}\n";
+        let out = extract_graphql_sdl_file_types(sdl, "orders.graphql", module_id(), repo());
+        assert_eq!(type_qnames(&out), ["message:graphql:User"]);
+        let user = type_schema(&out, "message:graphql:User").expect("User");
+        assert!(user.open, "an extend-only type lists part of its fields");
+        assert_eq!(fields_of(&user), [("orders", "[Order!]!", true, true)]);
+        let doc = "query getUser($id: ID!) {\n  user(id: $id) { id }\n}\nfragment F on User { id }\n";
+        assert!(extract_graphql_sdl_file_types(doc, "client/getUser.graphql", module_id(), repo()).nodes.is_empty());
+    }
+
+    /// DT.1j: in a code file, the types of SDL in a GraphQL-marked literal
+    /// are MESSAGE_TYPEs at their source lines, and the literal's root
+    /// fields carry their return types; a template hole in a type opens it;
+    /// SDL written into a one-line string (escaped newlines, the way glia's
+    /// own tests hold it) or an unmarked literal declares nothing.
+    #[test]
+    fn embedded_sdl_types_and_return_types() {
+        let source = "import { gql } from \"graphql-tag\";\n\nexport const typeDefs = gql`\n  type Query {\n    products: [Product!]!\n  }\n  type Product {\n    id: ID!\n    name: String\n  }\n  type Shelf {\n    id: ID!\n    ${extraFields}\n  }\n`;\n";
+        let out = extract_graphql_embedded_types(source, "api/schema.ts", module_id(), repo());
+        assert_eq!(type_qnames(&out), ["message:graphql:Product", "message:graphql:Shelf"]);
+        assert_eq!(
+            type_cell(&out, "message:graphql:Product", cell_type::POSITION).as_deref(),
+            Some(r#"{"file":"api/schema.ts","start_line":6,"end_line":9}"#)
+        );
+        assert!(!type_schema(&out, "message:graphql:Product").expect("Product").open);
+        assert!(type_schema(&out, "message:graphql:Shelf").expect("Shelf").open, "a hole may splice fields in");
+        let resolvers = extract_graphql_resolver_nodes(source, "typescript", module_id(), repo());
+        let products = wire_of(&resolvers, "graphql_resolver:products").expect("products returns");
+        assert_eq!((products.ty.as_str(), products.line), ("Product", 5));
+
+        let escaped = "const S = gql`\\n  type Order {\\n    id: ID!\\n  }\\n`;\n";
+        assert!(extract_graphql_embedded_types(escaped, "x.rs", module_id(), repo()).nodes.is_empty());
+        let unmarked = "const S = `\n  type Order {\n    id: ID!\n  }\n`;\n";
+        assert!(extract_graphql_embedded_types(unmarked, "x.ts", module_id(), repo()).nodes.is_empty());
+    }
+
+    /// DT.1j: the selection set as nested objects: a response key with its
+    /// schema field when aliased, arguments and directives passed over, a
+    /// same-document fragment read in place (one key's sub-selections
+    /// merged), `@include` / `@skip` not required, `__typename` left out, and
+    /// an inline fragment opening its object.
+    #[test]
+    fn selection_shape_nests_aliases_and_fragments() {
+        let doc = "\n  query ListItems($first: Int, $withPrice: Boolean!) {\n    items(first: $first) @connection(key: \"x\") {\n      id\n      name: label\n      __typename\n      ...ItemParts\n      ... on Item { extra }\n      price @include(if: $withPrice)\n      owner { id }\n    }\n  }\n  fragment ItemParts on Item {\n    onHand\n    owner { name }\n  }\n";
+        let shape = selection_shape(doc).expect("an operation");
+        assert_eq!(keys(&shape), (vec![("items", None, true)], false));
+        let items = sub(&shape, "items");
+        assert_eq!(
+            keys(items),
+            (
+                vec![
+                    ("id", None, true),
+                    ("name", Some("label"), true),
+                    ("onHand", None, true),
+                    ("owner", None, true),
+                    ("price", None, false),
+                ],
+                true
+            )
+        );
+        assert_eq!(keys(sub(items, "owner")), (vec![("name", None, true), ("id", None, true)], false));
+        assert_eq!(*sub(items, "id"), Shape::open(""), "a leaf's type is the schema's");
+
+        // A root alias, a shorthand document, an unknown or cyclic spread.
+        let aliased = selection_shape("mutation { moved: adjustStock(id: 1, delta: 2) { id } }").expect("op");
+        assert_eq!(keys(&aliased).0, [("moved", Some("adjustStock"), true)]);
+        let shorthand = operation_selection("{ me { id } }").expect("op");
+        assert_eq!((shorthand.0, shorthand.1), ("query", None));
+        let spread = selection_shape("query Q { me { ...Elsewhere } }").expect("op");
+        assert_eq!(keys(sub(&spread, "me")), (vec![], true));
+        let cyclic = selection_shape("query Q { me { ...A } }\nfragment A on User { id ...A }").expect("op");
+        assert_eq!(keys(sub(&cyclic, "me")), (vec![("id", None, true)], true));
+        // A fragment spread under `@skip` makes its fields optional.
+        let skipped = selection_shape("query Q { me { ...A @skip(if: true) } } fragment A on User { id }").expect("op");
+        assert_eq!(keys(sub(&skipped, "me")).0, [("id", None, false)]);
+    }
+
+    /// DT.1j: a template hole where a field should be stops the read: the
+    /// fields before it are kept and every enclosing object is open; a
+    /// document defining no operation has no selection.
+    #[test]
+    fn selection_shape_stops_open_at_a_hole() {
+        let shape = selection_shape("query Q { items { id ${FIELDS} } }").expect("op");
+        assert!(matches!(&shape, Shape::Object { open: true, .. }));
+        assert_eq!(keys(sub(&shape, "items")), (vec![("id", None, true)], true));
+        assert!(selection_shape("fragment F on User { id }").is_none());
+        assert!(selection_shape("type Query { users: [User] }").is_none());
+        // A trailing fragment hole is no operation and closes nothing.
+        let held = selection_shape("query Q { items { ...ItemFields } }\n${ITEM_FIELDS}").expect("op");
+        assert_eq!(keys(sub(&held, "items")), (vec![], true));
+    }
+
+    /// DT.1j: an operation read from a document carries its selection as a
+    /// `graphql_selection` MESSAGE_TYPE beside its CODE, at the minting
+    /// site's 1-based line; `raw` is its type and name.
+    #[test]
+    fn operations_carry_their_selection() {
+        let source = "import { gql } from '@apollo/client';\n\nexport const LIST_ITEMS = gql`\n  query ListItems($first: Int) {\n    items(first: $first) {\n      id\n      barcode\n    }\n  }\n`;\n\nexport const ORDERS = gql`{ orders(last: 1) { id } }`;\n";
+        let out = extract_graphql_operation_nodes(source, "", module_id(), repo());
+        let list = wire_of(&out, "graphql_op:ListItems").expect("ListItems selection");
+        assert_eq!(list.form, WireForm::GraphqlSelection);
+        assert_eq!((list.ty.as_str(), list.raw.as_str(), list.line), ("", "query ListItems", 3));
+        assert!(list.to_payload().contains(r#""name":"barcode""#), "{}", list.to_payload());
+        let orders = wire_of(&out, "graphql_op:orders").expect("anonymous selection");
+        assert_eq!((orders.raw.as_str(), orders.line), ("query", 12));
+        // A needle named by its needle text read no document and carries none.
+        let bare = extract_graphql_operation_nodes("const { data } = useQuery(GET_USERS);", "", module_id(), repo());
+        assert!(bare.nodes.iter().all(|n| n.cells.is_empty()));
     }
 }

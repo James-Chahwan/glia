@@ -242,6 +242,7 @@ pub(crate) fn parse_repo_files_hashed(
         proto_fields,
         sdl_files,
         sdl_resolvers,
+        sdl_types,
         avro_files,
         avro_records,
         avro_enums,
@@ -368,9 +369,10 @@ pub(crate) fn parse_repo_files_hashed(
     // A10.4 fired_on marker: `.graphql` / `.graphqls` / `.gql` files are
     // walked and their SDL fields are GRAPHQL_RESOLVER nodes. `files` counts
     // every schema file routed, so `resolvers=0` flags operation-only
-    // documents.
+    // documents. DT.1j: `types` counts the MESSAGE_TYPE nodes minted from
+    // their object / input / interface types (never in `resolvers`).
     if sdl_files > 0 {
-        eprintln!("[graphql-sdl] files={sdl_files} resolvers={sdl_resolvers}");
+        eprintln!("[graphql-sdl] files={sdl_files} resolvers={sdl_resolvers} types={sdl_types}");
     }
 
     // A10.6 fired_on marker: `.avsc` files are walked and their named types
@@ -600,6 +602,8 @@ pub(crate) struct SynthTally {
     // A10.4 `[graphql-sdl]`.
     sdl_files: usize,
     sdl_resolvers: usize,
+    // DT.1j: MESSAGE_TYPE nodes from the schema files' SDL types.
+    sdl_types: usize,
     // A10.6 `[avro]`.
     avro_files: usize,
     avro_records: usize,
@@ -642,6 +646,7 @@ impl SynthTally {
         self.proto_fields += t.proto_fields;
         self.sdl_files += t.sdl_files;
         self.sdl_resolvers += t.sdl_resolvers;
+        self.sdl_types += t.sdl_types;
         self.avro_files += t.avro_files;
         self.avro_records += t.avro_records;
         self.avro_enums += t.avro_enums;
@@ -1061,7 +1066,9 @@ fn route_branches(
     // operations to pair with. LA.27: the file is read whole as SDL; a code
     // file reads SDL only inside a GraphQL-marked literal. Resolver side
     // only: a schema declares server fields, and the operation needles would
-    // mint client ops from its keywords.
+    // mint client ops from its keywords. DT.1j: plus a MESSAGE_TYPE per
+    // object / input / interface type, which the file MODULE DEFINES, so a
+    // types-only schema file is a parse too.
     if lang == "graphql" {
         *branch = "graphql";
         let module_id = synthetic_module_id(repo, path);
@@ -1072,10 +1079,22 @@ fn route_branches(
         } = glia_code_extractors::graphql::extract_graphql_sdl_file_nodes(
             source, module_id, repo,
         );
+        let types = glia_code_extractors::graphql::extract_graphql_sdl_file_types(
+            source, path, module_id, repo,
+        );
         t.sdl_files += 1;
         t.sdl_resolvers += nodes.len();
-        let fp = (!nodes.is_empty()).then(|| {
-            let mut fp = synthetic_parse(path, module_id, repo, vec![nodes], vec![], vec![nav], vec![]);
+        t.sdl_types += types.nodes.len();
+        let fp = (!nodes.is_empty() || !types.nodes.is_empty()).then(|| {
+            let mut fp = synthetic_parse(
+                path,
+                module_id,
+                repo,
+                vec![nodes, types.nodes],
+                vec![types.edges],
+                vec![nav, types.nav],
+                vec![],
+            );
             // A5.8: POSITION on each field, and the MODULE CONTAINS
             // fallback, since no function in a schema owns a field.
             glia_code_extractors::anchor::attach(&mut fp, path, module_id, &mut anchors);
@@ -1203,6 +1222,27 @@ pub(crate) fn parse_for_cache(
     }
     let mut stats = ExtractStats::default();
     apply_cross_cutting_extractors(&mut fp, source, path, lang, module_id, repo, &mut stats);
+    // DT.1j STOPGAP: the SDL object / input / interface types held in the
+    // file's GraphQL-marked literals, as MESSAGE_TYPE nodes its MODULE
+    // DEFINES. Here, not beside `extract_graphql_resolver_nodes` in
+    // `extract::apply_cross_cutting_extractors`, only because that call is
+    // given no file path (a type's POSITION needs one) and its `run_marked!`
+    // keeps no edges. Removal: call `extract_graphql_embedded_types` there
+    // through `run_with_edges!("graphql", ..)` (the same stamp, before the
+    // anchor pass) and delete this block; the parse is the same. fired_on,
+    // per file that minted one: `[graphql-sdl] code types=<n> path=<path>`.
+    {
+        let types =
+            glia_code_extractors::graphql::extract_graphql_embedded_types(source, path, module_id, repo);
+        if !types.nodes.is_empty() {
+            eprintln!("[graphql-sdl] code types={} path={path}", types.nodes.len());
+            let mut edges = types.edges;
+            evidence::stamp_missing(&mut edges, "extractor:graphql");
+            fp.nodes.extend(types.nodes);
+            fp.edges.extend(edges);
+            merge_nav(&mut fp.nav, types.nav);
+        }
+    }
     // G15: denormalize the file's library names onto every node as an
     // IMPORTS cell (one place, all languages). This is the RAW list:
     // telling a dependency from the repo's own module needs the whole
@@ -1733,6 +1773,58 @@ mod tests {
         assert!(
             !fp.nav.kind_by_id.values().any(|k| *k == node_kind::GRAPHQL_OPERATION),
             "a schema declares no client operations"
+        );
+
+        // DT.1j: the object type is a MESSAGE_TYPE the MODULE DEFINES, its
+        // edge stamped by the synthetic sweep; the root type is none.
+        let user = NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MESSAGE_TYPE, "message:graphql:User");
+        assert_eq!(fp.nav.kind_by_id.get(&user), Some(&node_kind::MESSAGE_TYPE));
+        assert_eq!(fp.nav.parent_of.get(&user), Some(&module_id));
+        let defines = fp
+            .edges
+            .iter()
+            .find(|e| e.from == module_id && e.to == user && e.category == edge_category::DEFINES)
+            .expect("MODULE DEFINES the type");
+        assert_eq!(
+            evidence::Evidence::of(defines).map(|ev| ev.emitter).as_deref(),
+            Some("extractor:graphql")
+        );
+        let types = fp.nav.kind_by_id.values().filter(|k| **k == node_kind::MESSAGE_TYPE).count();
+        assert_eq!(types, 1, "`type Query` is a root, never a MESSAGE_TYPE");
+
+        // A schema file of types only is a parse too.
+        let parses = route("api/types.graphql", "type Order {\n  id: ID!\n}\n");
+        let fp = &parses["graphql"][0];
+        let order = NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MESSAGE_TYPE, "message:graphql:Order");
+        assert_eq!(fp.nav.kind_by_id.get(&order), Some(&node_kind::MESSAGE_TYPE));
+    }
+
+    /// DT.1j: the SDL types of a code file's GraphQL-marked literal join its
+    /// cached parse as MESSAGE_TYPEs the file MODULE DEFINES, located in the
+    /// file and stamped `extractor:graphql` (route.rs's stopgap).
+    #[test]
+    fn embedded_sdl_types_join_the_code_parse() {
+        let src = "import { gql } from 'graphql-tag';\n\nexport const typeDefs = gql`\n  type Query {\n    products: [Product!]!\n  }\n  type Product {\n    id: ID!\n  }\n`;\n";
+        let parses = route("api/schema.ts", src);
+        let fp = &parses["typescript"][0];
+        let product =
+            NodeId::from_parts(GRAPH_TYPE, RepoId(1), node_kind::MESSAGE_TYPE, "message:graphql:Product");
+        let node = fp.nodes.iter().find(|n| n.id == product).expect("Product type");
+        let position = node.cells.iter().find(|c| c.kind == cell_type::POSITION).map(|c| match &c.payload {
+            CellPayload::Json(s) | CellPayload::Text(s) => s.clone(),
+            CellPayload::Bytes(_) => String::new(),
+        });
+        assert_eq!(position.as_deref(), Some(r#"{"file":"api/schema.ts","start_line":6,"end_line":8}"#));
+        let module = fp.nav.parent_of.get(&product).copied().expect("a nav parent");
+        assert_eq!(fp.nav.kind_by_id.get(&module), Some(&node_kind::MODULE));
+        let defines = fp
+            .edges
+            .iter()
+            .find(|e| e.from == module && e.to == product && e.category == edge_category::DEFINES)
+            .expect("MODULE DEFINES the type");
+        assert_eq!(
+            evidence::Evidence::of(defines).map(|ev| ev.emitter).as_deref(),
+            Some("extractor:graphql")
         );
     }
 

@@ -23,10 +23,15 @@
 //! represents it: each of these kinds is ONE SIDE of it in one service, the
 //! conjugate tier of ROUTE / ENDPOINT, so it takes the owner
 //! (`queue_producer:orders.created @services/orders`). The proto-declared
-//! GRPC_SERVICE (`grpc:<pkg>.<Svc>`) is the contract itself, like
-//! MESSAGE_TYPE: vendored copies of one `.proto` in two projects are one
-//! contract, so it is never owned. This is what a multi-repo build of the
-//! same services already gives (each repo its own RepoId); the monorepo now
+//! GRPC_SERVICE (`grpc:<pkg>.<Svc>`) is the contract itself, like a proto /
+//! Avro / JSON Schema MESSAGE_TYPE: vendored copies of one `.proto` in two
+//! projects are one contract, so it is never owned. A GraphQL SDL type
+//! (`message:graphql:<T>`, DT.1j) is the exception among MESSAGE_TYPEs: a
+//! GraphQL type name has no namespace, so `type User` in two services is a
+//! name coincidence, not one contract, and it takes its owner like the
+//! GRAPHQL_RESOLVER siblings its schema file declares
+//! (`message:graphql:User @services/users`). This is what a multi-repo build
+//! of the same services already gives (each repo its own RepoId); the monorepo now
 //! agrees. Within one project the A2.8 rule stands: one producer node per
 //! topic however many files publish.
 //!
@@ -166,10 +171,11 @@ enum Mechanism {
 
 /// Every kind the owner pass qualifies, with its mechanism and the qname
 /// prefix a node of that kind must carry to be owned (`""` = any). A kind
-/// absent here is never owned: GRPC_SERVICE and MESSAGE_TYPE are shared
-/// contracts. A node of a listed kind whose qname lacks the prefix (a
-/// Solidity-declared event, a code qname) is left alone and counted
-/// `declared`.
+/// absent here is never owned: GRPC_SERVICE is a shared contract. A node of a
+/// listed kind whose qname lacks the prefix (a Solidity-declared event, a
+/// code qname) is left alone and counted `declared`, except a MESSAGE_TYPE:
+/// only its GraphQL flavour is owned (DT.1j), and a proto / Avro / JSON
+/// Schema message is a shared contract, skipped before any census.
 const OWNED: &[(NodeKindId, Mechanism, &str)] = &[
     (node_kind::ROUTE, Mechanism::Http, ""),
     (node_kind::ENDPOINT, Mechanism::Http, ""),
@@ -179,6 +185,7 @@ const OWNED: &[(NodeKindId, Mechanism, &str)] = &[
     (node_kind::WS_CLIENT, Mechanism::Ws, ""),
     (node_kind::GRAPHQL_RESOLVER, Mechanism::Graphql, ""),
     (node_kind::GRAPHQL_OPERATION, Mechanism::Graphql, ""),
+    (node_kind::MESSAGE_TYPE, Mechanism::Graphql, GRAPHQL_TYPE_PREFIX),
     (node_kind::GRPC_CLIENT, Mechanism::Grpc, ""),
     (node_kind::GRPC_SERVER, Mechanism::Grpc, ""),
     (node_kind::RPC_PROCEDURE, Mechanism::Rpc, "rpc:"),
@@ -186,6 +193,10 @@ const OWNED: &[(NodeKindId, Mechanism, &str)] = &[
     (node_kind::EVENT_EMITTER, Mechanism::Event, "event_emit:"),
     (node_kind::EVENT_HANDLER, Mechanism::Event, "event_handle:"),
 ];
+
+/// DT.1j: the qname prefix of a GraphQL SDL type, the one owned MESSAGE_TYPE
+/// flavour.
+const GRAPHQL_TYPE_PREFIX: &str = "message:graphql:";
 
 /// The mechanism and required qname prefix of an owned kind.
 fn owned_row(kind: NodeKindId) -> Option<(Mechanism, &'static str)> {
@@ -277,7 +288,8 @@ pub(crate) struct OwnerStats {
     pub queue: usize,
     /// LB.8: qualified WS_HANDLER / WS_CLIENT nodes.
     pub ws: usize,
-    /// LB.8: qualified GRAPHQL_RESOLVER / GRAPHQL_OPERATION nodes.
+    /// LB.8: qualified GRAPHQL_RESOLVER / GRAPHQL_OPERATION nodes, and
+    /// (DT.1j) GraphQL SDL type MESSAGE_TYPEs.
     pub graphql: usize,
     /// LB.8: qualified GRPC_CLIENT / GRPC_SERVER nodes.
     pub grpc: usize,
@@ -487,6 +499,13 @@ fn plan_parse<'o>(
         let Some((mechanism, prefix)) = owned_row(kind) else {
             continue;
         };
+        // DT.1j: a shared-contract message (proto / Avro / JSON Schema) is
+        // not a channel side: skipped before any census, never `declared`.
+        if kind == node_kind::MESSAGE_TYPE
+            && !fp.nav.qname_by_id.get(&node.id).is_some_and(|q| q.starts_with(prefix))
+        {
+            continue;
+        }
         if !planned.insert(node.id) {
             continue;
         }
@@ -714,8 +733,8 @@ mod tests {
     }
 
     /// LB.8: every channel side is qualified and counted on the channel line;
-    /// the shared contracts (GRPC_SERVICE, MESSAGE_TYPE) are never owned; the
-    /// HTTP counters (and so the `[http-owner]` line) do not move.
+    /// the shared contracts (GRPC_SERVICE, a proto MESSAGE_TYPE) are never
+    /// owned; the HTTP counters (and so the `[http-owner]` line) do not move.
     #[test]
     fn channel_sides_are_owned_and_contracts_stay_shared() {
         let idx = OwnerIndex::from_roots(&[root("services/orders", "python"), root("web", "npm")]);
@@ -756,6 +775,40 @@ mod tests {
         }
         assert!(fp.nodes.iter().any(|n| n.id == svc), "GRPC_SERVICE is a shared contract");
         assert!(fp.nodes.iter().any(|n| n.id == msg), "MESSAGE_TYPE is a shared contract");
+    }
+
+    /// DT.1j: a GraphQL SDL type in a nested project takes the owner its
+    /// GRAPHQL_RESOLVER siblings take, with its DEFINES edge, and counts on
+    /// the channel line's `graphql`; a proto / Avro / JSON Schema
+    /// MESSAGE_TYPE in the same project is untouched and counted nowhere
+    /// (not `declared`, so the RPC / event line stays silent).
+    #[test]
+    fn graphql_sdl_types_are_owned_and_other_messages_are_not_counted() {
+        let idx = OwnerIndex::from_roots(&[root("api", "go")]);
+        let mut fp = FileParse::default();
+        let file = "api/graph/schema.graphqls";
+        let module = push(&mut fp, node_kind::MODULE, "schema", "api::graph::schema.graphqls", vec![position(file)]);
+        let field = push(&mut fp, node_kind::GRAPHQL_RESOLVER, "items", "graphql_resolver:items", vec![position(file)]);
+        let item = push(&mut fp, node_kind::MESSAGE_TYPE, "Item", "message:graphql:Item", vec![position(file)]);
+        fp.edges.push(Edge { from: module, to: item, category: edge_category::DEFINES, confidence: Confidence::Strong, cells: Vec::new() });
+        let proto = push(&mut fp, node_kind::MESSAGE_TYPE, "Item", "message:proto:stock.Item", vec![position("api/stock.proto")]);
+        let avro = push(&mut fp, node_kind::MESSAGE_TYPE, "Item", "message:avro:stock.Item", vec![position("api/item.avsc")]);
+        let json = push(&mut fp, node_kind::MESSAGE_TYPE, "Item", "message:jsonschema:Item", vec![position("api/item.schema.json")]);
+
+        let stats = qualify_repo([&mut fp], &idx, REPO);
+        assert_eq!(stats, OwnerStats { graphql: 2, chan_owners: 1, ..OwnerStats::default() });
+        let owned = id(node_kind::MESSAGE_TYPE, "message:graphql:Item @api");
+        assert!(fp.nodes.iter().any(|n| n.id == owned), "the SDL type is qualified");
+        assert!(!fp.nodes.iter().any(|n| n.id == item));
+        assert!(
+            fp.edges.iter().any(|e| e.from == module && e.to == owned && e.category == edge_category::DEFINES),
+            "its DEFINES edge follows the rekey"
+        );
+        assert_eq!(fp.nav.name_by_id.get(&owned).map(String::as_str), Some("Item"), "display name kept");
+        assert!(fp.nodes.iter().all(|n| n.id != field), "the resolver sibling takes the same owner");
+        for shared in [proto, avro, json] {
+            assert!(fp.nodes.iter().any(|n| n.id == shared), "a shared-contract message stays");
+        }
     }
 
     /// A channel side with no file is counted and left owner-free; a reference

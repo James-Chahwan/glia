@@ -395,12 +395,27 @@ fn payload_str(c: &Cell) -> Option<&str> {
     }
 }
 
+/// DT.1j: the qname prefix of a GraphQL SDL type (`message:graphql:<T>`).
+/// Such a type is no holder: it is the input of the GraphQL selection
+/// models pass, and a queue side's type named `Item` must not resolve to a
+/// GraphQL `type Item` by its bare name ([`message_types_by_name`]). GraphQL
+/// schema evolution in contract-breaks is a later step.
+const GRAPHQL_TYPE_PREFIX: &str = "message:graphql:";
+
+/// Every MESSAGE_TYPE (GraphQL SDL types excepted, [`GRAPHQL_TYPE_PREFIX`])
+/// and every contract-op DOC_SECTION of `merged`, folded by node id across
+/// the graphs that hold it.
 pub(crate) fn collect_holders(merged: &MergedGraph) -> BTreeMap<u64, Holder> {
     let mut out: BTreeMap<u64, Holder> = BTreeMap::new();
     for g in &merged.graphs {
         for n in &g.nodes {
             let message = match g.nav.kind_by_id.get(&n.id).copied() {
-                Some(k) if k == node_kind::MESSAGE_TYPE => true,
+                Some(k) if k == node_kind::MESSAGE_TYPE => {
+                    if g.nav.qname_by_id.get(&n.id).is_some_and(|q| q.starts_with(GRAPHQL_TYPE_PREFIX)) {
+                        continue;
+                    }
+                    true
+                }
                 Some(k) if k == node_kind::DOC_SECTION => false,
                 _ => continue,
             };
@@ -1506,6 +1521,63 @@ mod tests {
             Some(TypeChange::Changed)
         ));
         assert!(json_type_change("string", "any").is_none());
+    }
+
+    /// DT.1j: a GraphQL SDL type is no holder, so a queue side typed `Item`
+    /// resolves to the proto `shop.Item` of its repo, never to the GraphQL
+    /// `type Item` beside it; with the proto gone it resolves to nothing.
+    #[test]
+    fn graphql_types_are_no_holders() {
+        use glia_code_domain::{CodeNav, GRAPH_TYPE};
+        use glia_core::{Confidence, Node};
+        use glia_graph::RepoGraph;
+
+        let repo = RepoId(7);
+        let graph = |with_proto: bool| {
+            let mut nav = CodeNav::default();
+            let mut nodes = Vec::new();
+            let mut add = |q: &str, fields: &str| {
+                let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::MESSAGE_TYPE, q);
+                nodes.push(Node {
+                    id,
+                    repo,
+                    confidence: Confidence::Strong,
+                    cells: vec![Cell { kind: cell_type::SCHEMA_FIELDS, payload: CellPayload::Json(fields.into()) }],
+                });
+                nav.record(id, "Item", q, node_kind::MESSAGE_TYPE, None);
+                id
+            };
+            add(
+                "message:graphql:Item",
+                r#"{"fields":[{"name":"id","required":true,"type":"ID!"}],"format":"graphql"}"#,
+            );
+            let proto = with_proto
+                .then(|| add("message:proto:shop.Item", r#"{"format":"proto","fields":[{"name":"id","type":"string","number":1}]}"#));
+            let g = RepoGraph {
+                repo,
+                nodes,
+                edges: vec![],
+                symbols: Default::default(),
+                nav,
+                unresolved_calls: vec![],
+                unresolved_refs: vec![],
+                properties: Default::default(),
+            };
+            (MergedGraph::new(vec![g]), proto)
+        };
+
+        let (merged, proto) = graph(true);
+        let holders = collect_holders(&merged);
+        assert_eq!(holders.len(), 1, "only the proto message holds a contract");
+        let proto = proto.map(|p| p.0);
+        assert_eq!(holders.keys().next().copied(), proto);
+        let by_name = message_types_by_name(&holders);
+        assert_eq!(by_name.get(&(repo.0, "Item")).cloned(), proto.map(|p| vec![p]));
+
+        let (merged, _) = graph(false);
+        let holders = collect_holders(&merged);
+        assert!(holders.is_empty(), "a GraphQL type alone is no holder");
+        assert!(message_types_by_name(&holders).get(&(repo.0, "Item")).is_none());
     }
 
     #[test]
