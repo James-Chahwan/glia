@@ -314,9 +314,10 @@ fn build_solo(
     match lang {
         "python" => glia_graph::build_python(repo, parses),
         "go" => glia_graph::build_go(repo, parses),
-        "java" | "kotlin" | "csharp" | "php" | "scala" | "clojure" | "elixir" => {
+        "java" | "kotlin" | "csharp" | "php" | "scala" | "clojure" => {
             glia_graph::build_dotted(repo, parses)
         }
+        "elixir" => glia_graph::build_elixir(repo, parses),
         "rust" => glia_graph::build_rust(repo, parses, rust_crates),
         "ruby" => glia_graph::build_ruby(repo, parses),
         "c_cpp" => {

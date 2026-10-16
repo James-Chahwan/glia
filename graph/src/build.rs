@@ -391,8 +391,8 @@ where
 /// Build a per-repo graph for languages whose import paths are dotted
 /// (`foo.bar.Baz`) or already normalised to `::` form. Reuses the Python
 /// resolver because `.replace('.', "::")` is a no-op on already-`::` paths.
-/// Covers Java, Kotlin, C#, PHP, Scala, Clojure, Elixir; Rust has
-/// [`build_rust`].
+/// Covers Java, Kotlin, C#, PHP, Scala, Clojure; Rust has [`build_rust`],
+/// Elixir [`build_elixir`] (these passes plus its module-name call hook).
 pub fn build_dotted(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
     let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
     build_symbol_table(&mut g);
@@ -405,6 +405,43 @@ pub fn build_dotted(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
     emit_method_level_implements(&mut g);
     tally.report();
     Ok(g)
+}
+
+/// Build a per-repo Elixir graph (DH.17a): [`build_dotted`]'s passes, with
+/// `resolve_calls`' `extra_hook` = [`ElixirModules::resolve`]. Elixir module
+/// names are global atoms, so a remote call needs no `alias`:
+/// `Shop.Cart.total(..)`, and `Cart.total(..)` on a top-level `defmodule
+/// Cart`, bind the module's FUNCTION once every generic lookup (an `alias`
+/// import binding among them) missed, so no edge the shared passes draw
+/// moves. Prints `[elixir-calls] full-name remote calls bound=<n>
+/// ambiguous=<m>` once when either count is non-zero, then the LC.3d
+/// `[evidence-graph]` line.
+pub fn build_elixir(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
+    let (g, modules, tally) = elixir_passes(repo, parses);
+    if let Some(line) = modules.marker() {
+        eprintln!("{line}");
+    }
+    tally.report();
+    Ok(g)
+}
+
+/// [`build_elixir`]'s passes without its two stderr lines; the tests read
+/// the returned [`ElixirModules`]' counts.
+fn elixir_passes(
+    repo: RepoId,
+    parses: Vec<FileParse>,
+) -> (RepoGraph, ElixirModules, EvidenceTally) {
+    let (mut g, all_imports, all_calls, all_refs) = merge_parses(repo, parses);
+    build_symbol_table(&mut g);
+    let mut same = same_stem_table(&g);
+    resolve_imports_python(&mut g, &all_imports, &mut same);
+    same.report();
+    let modules = ElixirModules::new(&g, &all_imports);
+    let mut tally = EvidenceTally::default();
+    resolve_calls(&mut g, &all_calls, |g, site| modules.resolve(g, site), &mut tally);
+    resolve_refs(&mut g, &all_refs, &mut tally);
+    emit_method_level_implements(&mut g);
+    (g, modules, tally)
 }
 
 /// Build a per-repo Rust graph. Same passes as [`build_dotted`], plus the
@@ -4452,6 +4489,297 @@ impl CppCallScope {
         }
     }
 }
+
+// ============================================================================
+// Elixir module names (DH.17a)
+// ============================================================================
+
+/// The EVIDENCE emitter of every call [`ElixirModules`] binds.
+const ELIXIR_EMITTER: &str = "graph:elixir_modules";
+
+/// An Elixir graph's modules by full name, for the remote calls
+/// (`CallQualifier::Attribute { base: "Shop.Cart", name: "total" }`) the
+/// generic pass leaves unbound: it binds an Attribute base only through the
+/// caller file's import bindings, and Elixir module names are global atoms,
+/// so `Shop.Cart.total(..)` needs no `alias`.
+///
+/// The Elixir parser mints one PACKAGE per `defmodule` (one INTERFACE per
+/// `defprotocol`) whose last qname segment is the dotted name it was declared
+/// with (`lib::cart::Shop.Cart`); a module declared inside another
+/// (`defmodule Outer do defmodule Inner`, qname `..::Outer::Inner`) is
+/// `Outer.Inner`, the declared names of its module ancestors joined by `.`.
+///
+/// [`Self::resolve`] reads a call's base the way Elixir does, first rule
+/// that applies:
+/// - `__MODULE__` is the caller's own module (rule `module_self`;
+///   `__MODULE__.Item` is `<own>.Item`);
+/// - a head an `alias` / `import` / `use` line of the caller's file names
+///   (`alias Shop.Cart` names `Cart`, `alias Shop.{Cart, Order}` both)
+///   expands to that line's path (rule `alias_path`); a head two lines of one
+///   file expand differently binds nothing. The parser emits the three forms
+///   alike and the generic pass binds each by its last segment, so the hook
+///   reads them alike too. An aliased head never falls through to the
+///   global name: `alias Ext.Cart` + `Cart.total(..)` is `Ext.Cart` even
+///   where the repo holds a top-level `Cart`;
+/// - a head that a module enclosing the caller declares nested
+///   (`defmodule Inner` inside `Outer`) expands to `Outer.<base>`, Elixir's
+///   automatic alias for a nested module (rule `nested_alias`);
+/// - any other base is a full module name (rule `full_name`).
+///
+/// A full name two nodes declare (an umbrella's twin modules, a test
+/// support copy) binds nothing and counts as `ambiguous`; only a FUNCTION
+/// of the module is a target. The name index is a BTreeMap and every other
+/// map is read by key, never iterated for a pick, so a build is independent
+/// of HashMap order.
+struct ElixirModules {
+    /// Full module name -> its PACKAGE / INTERFACE; `None` when two share it.
+    by_name: BTreeMap<String, Option<NodeId>>,
+    /// Module node -> its full name.
+    full_of: HashMap<NodeId, String>,
+    /// Module node -> the first dotted segment of each module declared
+    /// directly inside it: the heads its automatic aliases bind.
+    nested_heads: HashMap<NodeId, BTreeSet<String>>,
+    /// File MODULE -> alias head -> the path it expands to; `None` when two
+    /// lines of the file expand the head differently.
+    aliases: HashMap<NodeId, BTreeMap<String, Option<String>>>,
+    bound: std::cell::Cell<usize>,
+    ambiguous: std::cell::Cell<usize>,
+}
+
+impl ElixirModules {
+    fn new(g: &RepoGraph, imports: &[ImportStmt]) -> Self {
+        let nav = &g.nav;
+        let mut by_name: BTreeMap<String, Option<NodeId>> = BTreeMap::new();
+        let mut full_of: HashMap<NodeId, String> = HashMap::new();
+        for (&id, &kind) in &nav.kind_by_id {
+            if !is_elixir_module_kind(kind) {
+                continue;
+            }
+            let Some(full) = elixir_full_name(nav, id) else {
+                continue;
+            };
+            // Node ids are unique keys, so a second entry is a second node.
+            by_name.entry(full.clone()).and_modify(|hit| *hit = None).or_insert(Some(id));
+            full_of.insert(id, full);
+        }
+        let mut nested_heads: HashMap<NodeId, BTreeSet<String>> = HashMap::new();
+        for &id in full_of.keys() {
+            if let Some(parent) = nav.parent_of.get(&id)
+                && full_of.contains_key(parent)
+                && let Some(seg) = own_segment(nav, id)
+            {
+                let head = seg.split('.').next().unwrap_or(seg);
+                nested_heads.entry(*parent).or_default().insert(head.to_string());
+            }
+        }
+        let mut aliases: HashMap<NodeId, BTreeMap<String, Option<String>>> = HashMap::new();
+        for stmt in imports {
+            let ImportTarget::Module { path, .. } = &stmt.target else {
+                continue;
+            };
+            let Some(&file) = g.symbols.module_by_qname.get(&stmt.from_module) else {
+                continue;
+            };
+            let heads = aliases.entry(file).or_default();
+            for (head, full) in alias_heads(path) {
+                heads
+                    .entry(head)
+                    .and_modify(|p| {
+                        if p.as_deref() != Some(full.as_str()) {
+                            *p = None;
+                        }
+                    })
+                    .or_insert(Some(full));
+            }
+        }
+        Self {
+            by_name,
+            full_of,
+            nested_heads,
+            aliases,
+            bound: std::cell::Cell::new(0),
+            ambiguous: std::cell::Cell::new(0),
+        }
+    }
+
+    /// `resolve_calls`' extra_hook: the FUNCTION a remote call names through
+    /// its base's module (the rules on [`ElixirModules`]); `None` for every
+    /// other site. Runs only after the generic lookups missed.
+    fn resolve(&self, g: &RepoGraph, site: &CallSite) -> Option<(NodeId, Evidence)> {
+        let CallQualifier::Attribute { base, name } = &site.qualifier else {
+            return None;
+        };
+        let (head, rest) = match base.split_once('.') {
+            Some((head, rest)) => (head, Some(rest)),
+            None => (base.as_str(), None),
+        };
+        let (full, rule) = if head == "__MODULE__" {
+            let own = self.enclosing(g, site.from)?;
+            match rest {
+                None => return self.function(g, own, name, "module_self"),
+                Some(rest) => (format!("{}.{rest}", self.full_of.get(&own)?), "module_self"),
+            }
+        } else if !is_alias_segment(head) {
+            return None;
+        } else if let Some(path) = enclosing_module(&g.nav, site.from)
+            .and_then(|file| self.aliases.get(&file))
+            .and_then(|heads| heads.get(head))
+        {
+            let path = self.expand_module_attr(g, site.from, path.as_deref()?)?;
+            match rest {
+                Some(rest) => (format!("{path}.{rest}"), "alias_path"),
+                None => (path, "alias_path"),
+            }
+        } else if let Some(outer) = self.nested_alias(g, site.from, head) {
+            (format!("{}.{base}", self.full_of.get(&outer)?), "nested_alias")
+        } else {
+            (base.clone(), "full_name")
+        };
+        match self.by_name.get(&full)? {
+            Some(module) => self.function(g, *module, name, rule),
+            None => {
+                self.ambiguous.set(self.ambiguous.get() + 1);
+                None
+            }
+        }
+    }
+
+    /// The FUNCTION `name` declared directly in `module`, counted as bound.
+    fn function(
+        &self,
+        g: &RepoGraph,
+        module: NodeId,
+        name: &str,
+        rule: &str,
+    ) -> Option<(NodeId, Evidence)> {
+        let to = *g.symbols.module_symbols.get(&module)?.get(name)?;
+        if g.nav.kind_by_id.get(&to) != Some(&node_kind::FUNCTION) {
+            return None;
+        }
+        self.bound.set(self.bound.get() + 1);
+        Some((to, graph_evidence(ELIXIR_EMITTER, rule)))
+    }
+
+    /// The innermost module enclosing `from` (`__MODULE__` in its body).
+    fn enclosing(&self, g: &RepoGraph, from: NodeId) -> Option<NodeId> {
+        let mut cur = from;
+        for _ in 0..=g.nav.parent_of.len() {
+            cur = *g.nav.parent_of.get(&cur)?;
+            if self.full_of.contains_key(&cur) {
+                return Some(cur);
+            }
+        }
+        None
+    }
+
+    /// The innermost module enclosing `from` that declares a module nested
+    /// directly in it whose first dotted segment is `head`.
+    fn nested_alias(&self, g: &RepoGraph, from: NodeId, head: &str) -> Option<NodeId> {
+        let mut cur = from;
+        for _ in 0..=g.nav.parent_of.len() {
+            cur = *g.nav.parent_of.get(&cur)?;
+            if self.nested_heads.get(&cur).is_some_and(|heads| heads.contains(head)) {
+                return Some(cur);
+            }
+        }
+        None
+    }
+
+    /// An alias path with `__MODULE__` (`alias __MODULE__.Item`) read from
+    /// the caller's own module; any other path as written.
+    fn expand_module_attr(&self, g: &RepoGraph, from: NodeId, path: &str) -> Option<String> {
+        let rest = match path.strip_prefix("__MODULE__") {
+            None => return Some(path.to_string()),
+            Some(rest) => rest,
+        };
+        let own = self.full_of.get(&self.enclosing(g, from)?)?;
+        Some(format!("{own}{rest}"))
+    }
+
+    /// `(bound, ambiguous)`: the calls this hook bound, and the calls whose
+    /// base named a full module name two modules declare.
+    fn counts(&self) -> (usize, usize) {
+        (self.bound.get(), self.ambiguous.get())
+    }
+
+    /// DH.17a fired_on, once per Elixir graph that bound or refused a call:
+    /// `[elixir-calls] full-name remote calls bound=<n> ambiguous=<m>`.
+    fn marker(&self) -> Option<String> {
+        let (bound, ambiguous) = self.counts();
+        (bound + ambiguous > 0).then(|| {
+            format!("[elixir-calls] full-name remote calls bound={bound} ambiguous={ambiguous}")
+        })
+    }
+}
+
+/// The kinds an Elixir module is minted as: PACKAGE (`defmodule`) and
+/// INTERFACE (`defprotocol`).
+fn is_elixir_module_kind(kind: NodeKindId) -> bool {
+    kind == node_kind::PACKAGE || kind == node_kind::INTERFACE
+}
+
+/// The last `::` segment of a node's qname: the dotted name an Elixir
+/// module was declared with.
+fn own_segment(nav: &CodeNav, id: NodeId) -> Option<&str> {
+    nav.qname_by_id.get(&id)?.rsplit("::").next()
+}
+
+/// An Elixir module's full name: its declared name, prefixed by those of the
+/// modules it is nested in, up to its file MODULE (`Outer.Inner`). `None`
+/// for a node whose ancestors are not modules up to a file.
+fn elixir_full_name(nav: &CodeNav, id: NodeId) -> Option<String> {
+    let mut segments = vec![own_segment(nav, id)?];
+    let mut cur = id;
+    for _ in 0..=nav.parent_of.len() {
+        let parent = *nav.parent_of.get(&cur)?;
+        match nav.kind_by_id.get(&parent).copied() {
+            Some(k) if k == node_kind::MODULE => {
+                segments.reverse();
+                return Some(segments.join("."));
+            }
+            Some(k) if is_elixir_module_kind(k) => {
+                segments.push(own_segment(nav, parent)?);
+                cur = parent;
+            }
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// An Elixir alias segment: an ASCII capital, then letters, digits and `_`
+/// (`Cart`, `V2`). A variable (`conn`), an Erlang module atom (`:lists`) or
+/// a call chain is not one.
+fn is_alias_segment(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_ascii_uppercase())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The `(head, path)` pairs one `alias` / `import` / `use` path binds:
+/// `Shop.Cart` -> `(Cart, Shop.Cart)`; `Shop.{Cart, Order}` -> both
+/// `(Cart, Shop.Cart)` and `(Order, Shop.Order)`. A head that is not an
+/// alias segment (an `unquote(..)` path, a variable) binds nothing.
+fn alias_heads(path: &str) -> Vec<(String, String)> {
+    let path = path.trim();
+    let mut out = Vec::new();
+    if let Some((prefix, multi)) = path.split_once(".{") {
+        let inner = multi.trim_end().trim_end_matches('}');
+        for member in inner.split(',').map(str::trim) {
+            let head = member.rsplit('.').next().unwrap_or(member);
+            if is_alias_segment(head) {
+                out.push((head.to_string(), format!("{}.{member}", prefix.trim())));
+            }
+        }
+    } else {
+        let head = path.rsplit('.').next().unwrap_or(path);
+        if is_alias_segment(head) {
+            out.push((head.to_string(), path.to_string()));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8017,5 +8345,327 @@ mod tests {
             edge_category::CALLS
         ));
         assert!(g.unresolved_calls.is_empty());
+    }
+
+    // ---- DH.17a: Elixir remote calls by module name ------------------------
+
+    /// One Elixir file shaped the way the Elixir parser emits it: MODULE
+    /// `file` holding `defmodule <module>` (PACKAGE `<file>::<module>`, named
+    /// by the module name's last dotted segment: `Shop.Cart` -> `Cart`) with
+    /// the FUNCTIONs `fns`, the file's `alias` / `import` / `use` paths
+    /// `imports`, and the Attribute calls `(caller fn, base, name)` its
+    /// functions make.
+    fn ex_module(
+        file: &str,
+        module: &str,
+        fns: &[&str],
+        imports: &[&str],
+        calls: &[(&str, &str, &str)],
+    ) -> FileParse {
+        let mut f = go_file(file, &[]);
+        let pkg = format!("{file}::{module}");
+        ex_push(&mut f, node_kind::PACKAGE, &pkg, gid(node_kind::MODULE, file));
+        for name in fns {
+            let qname = format!("{pkg}::{name}");
+            ex_push(&mut f, node_kind::FUNCTION, &qname, gid(node_kind::PACKAGE, &pkg));
+        }
+        f.imports = imports
+            .iter()
+            .map(|path| ImportStmt {
+                from_module: file.to_string(),
+                target: ImportTarget::Module { path: (*path).to_string(), alias: None },
+                line: 1,
+            })
+            .collect();
+        f.calls = calls
+            .iter()
+            .map(|&(caller, base, name)| CallSite {
+                from: gid(node_kind::FUNCTION, &format!("{pkg}::{caller}")),
+                qualifier: CallQualifier::Attribute {
+                    base: base.to_string(),
+                    name: name.to_string(),
+                },
+                line: 4,
+            })
+            .collect();
+        f
+    }
+
+    /// Add `qname` (a `kind` under `parent`) to `f` with its DEFINES edge,
+    /// named the way the Elixir parser names it.
+    fn ex_push(f: &mut FileParse, kind: glia_core::NodeKindId, qname: &str, parent: NodeId) {
+        let id = gid(kind, qname);
+        let seg = qname.rsplit("::").next().unwrap_or(qname);
+        let name =
+            if kind == node_kind::PACKAGE { seg.rsplit('.').next().unwrap_or(seg) } else { seg };
+        f.nav.record(id, name, qname, kind, Some(parent));
+        f.nodes.push(Node { id, repo: repo(), confidence: Confidence::Strong, cells: vec![] });
+        f.edges.push(glia_core::Edge {
+            from: parent,
+            to: id,
+            category: edge_category::DEFINES,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
+    }
+
+    /// `defmodule <module> do def total(xs) .. end` in file `file`.
+    fn ex_cart(file: &str, module: &str) -> FileParse {
+        ex_module(file, module, &["total"], &[], &[])
+    }
+
+    /// The CALLS edges the FUNCTION `from` draws, with the EVIDENCE
+    /// `(emitter, rule)` each carries, in [`sort_calls`] order.
+    fn calls_from(g: &RepoGraph, from: &str) -> Vec<(NodeId, String, String)> {
+        let from = gid(node_kind::FUNCTION, from);
+        let mut calls: Vec<_> = g
+            .edges
+            .iter()
+            .filter(|e| e.from == from && e.category == edge_category::CALLS)
+            .map(|e| {
+                let ev = Evidence::read(&e.cells).expect("every CALLS edge carries EVIDENCE");
+                (e.to, ev.emitter, ev.rule.unwrap_or_default())
+            })
+            .collect();
+        sort_calls(&mut calls);
+        calls
+    }
+
+    /// The rows [`calls_from`] reads for edges the hook drew:
+    /// `(target FUNCTION qname, rule)`, emitter `graph:elixir_modules`.
+    fn hooked(rows: &[(&str, &str)]) -> Vec<(NodeId, String, String)> {
+        let mut calls: Vec<_> = rows
+            .iter()
+            .map(|&(to, rule)| {
+                (gid(node_kind::FUNCTION, to), ELIXIR_EMITTER.to_string(), rule.to_string())
+            })
+            .collect();
+        sort_calls(&mut calls);
+        calls
+    }
+
+    /// A fixed order for `(target, emitter, rule)` rows (NodeId is not Ord).
+    fn sort_calls(calls: &mut [(NodeId, String, String)]) {
+        calls.sort_by(|a, b| (a.0.0, &a.1, &a.2).cmp(&(b.0.0, &b.1, &b.2)));
+    }
+
+    #[test]
+    fn elixir_full_name_remote_call_binds() {
+        let call = [("full", "Shop.Cart", "total")];
+        let caller = ex_module("lib::caller", "Shop.Caller", &["full"], &[], &call);
+        let parses = vec![ex_cart("lib::cart", "Shop.Cart"), caller];
+        let (g, modules, _) = elixir_passes(repo(), parses);
+        assert_eq!(
+            calls_from(&g, "lib::caller::Shop.Caller::full"),
+            hooked(&[("lib::cart::Shop.Cart::total", "full_name")])
+        );
+        assert!(g.unresolved_calls.is_empty());
+        assert_eq!(
+            modules.marker().as_deref(),
+            Some("[elixir-calls] full-name remote calls bound=1 ambiguous=0")
+        );
+    }
+
+    #[test]
+    fn elixir_top_level_module_call_binds() {
+        let call = [("checkout", "Cart", "total")];
+        let user = ex_module("lib::user", "User", &["checkout"], &[], &call);
+        let (g, modules, _) = elixir_passes(repo(), vec![ex_cart("lib::cart", "Cart"), user]);
+        assert_eq!(
+            calls_from(&g, "lib::user::User::checkout"),
+            hooked(&[("lib::cart::Cart::total", "full_name")])
+        );
+        assert_eq!(modules.counts(), (1, 0));
+    }
+
+    #[test]
+    fn elixir_alias_binding_unchanged() {
+        // `alias Shop.Cart` + `Cart.total([1, 2])`: the generic pass binds it
+        // through the import binding (HEAD's edge and rule); the hook never runs.
+        let caller = ex_module(
+            "lib::caller",
+            "Shop.Caller",
+            &["aliased"],
+            &["Shop.Cart"],
+            &[("aliased", "Cart", "total")],
+        );
+        let parses = vec![ex_cart("lib::cart", "Shop.Cart"), caller];
+        let (g, modules, _) = elixir_passes(repo(), parses.clone());
+        let total = gid(node_kind::FUNCTION, "lib::cart::Shop.Cart::total");
+        let want = vec![(total, "graph:calls".to_string(), "attribute".to_string())];
+        assert_eq!(calls_from(&g, "lib::caller::Shop.Caller::aliased"), want);
+        assert_eq!(modules.counts(), (0, 0));
+        assert_eq!(modules.marker(), None);
+        // The edge and rule the shared dotted builder draws.
+        let dotted = build_dotted(repo(), parses).unwrap();
+        assert_eq!(calls_from(&dotted, "lib::caller::Shop.Caller::aliased"), want);
+    }
+
+    #[test]
+    fn elixir_ambiguous_module_name_binds_nothing() {
+        let call = [("checkout", "Cart", "total")];
+        let user = ex_module("lib::user", "User", &["checkout"], &[], &call);
+        let twin = ex_cart("test::support::cart", "Cart");
+        let (g, modules, _) = elixir_passes(repo(), vec![ex_cart("lib::cart", "Cart"), twin, user]);
+        assert!(calls_from(&g, "lib::user::User::checkout").is_empty());
+        assert_eq!(g.unresolved_calls.len(), 1);
+        assert_eq!(
+            modules.marker().as_deref(),
+            Some("[elixir-calls] full-name remote calls bound=0 ambiguous=1")
+        );
+    }
+
+    #[test]
+    fn elixir_module_attribute_self_call() {
+        // `__MODULE__.helper()` binds the caller's own module, even when its
+        // name is shared (the enclosing node, not a name lookup);
+        // `__MODULE__.Item.new()` names the nested module by its full name.
+        let mut caller = ex_module(
+            "lib::caller",
+            "Shop.Caller",
+            &["own", "helper"],
+            &[],
+            &[("own", "__MODULE__", "helper"), ("own", "__MODULE__.Item", "new")],
+        );
+        let pkg = gid(node_kind::PACKAGE, "lib::caller::Shop.Caller");
+        ex_push(&mut caller, node_kind::PACKAGE, "lib::caller::Shop.Caller::Item", pkg);
+        let item = gid(node_kind::PACKAGE, "lib::caller::Shop.Caller::Item");
+        ex_push(&mut caller, node_kind::FUNCTION, "lib::caller::Shop.Caller::Item::new", item);
+        let twin = ex_module("lib::twin", "Shop.Caller", &[], &[], &[]);
+        let (g, modules, _) = elixir_passes(repo(), vec![caller, twin]);
+        assert_eq!(
+            calls_from(&g, "lib::caller::Shop.Caller::own"),
+            hooked(&[
+                ("lib::caller::Shop.Caller::helper", "module_self"),
+                ("lib::caller::Shop.Caller::Item::new", "module_self"),
+            ])
+        );
+        assert_eq!(modules.counts(), (2, 0));
+    }
+
+    #[test]
+    fn elixir_external_module_call_is_none() {
+        // `Enum.sum(xs)`, `:lists.sum(xs)`, `conn.assigns.user` and an
+        // in-repo module's undefined function: no edge, nothing counted.
+        let cart = ex_module(
+            "lib::cart",
+            "Cart",
+            &["total"],
+            &[],
+            &[
+                ("total", "Enum", "sum"),
+                ("total", ":lists", "sum"),
+                ("total", "conn.assigns", "user"),
+                ("total", "Cart", "missing"),
+            ],
+        );
+        let (g, modules, _) = elixir_passes(repo(), vec![cart]);
+        assert!(calls_from(&g, "lib::cart::Cart::total").is_empty());
+        assert_eq!(g.unresolved_calls.len(), 4);
+        assert_eq!(modules.marker(), None);
+    }
+
+    #[test]
+    fn elixir_nested_module_names_and_lexical_alias() {
+        // `defmodule Outer do defmodule Inner do def g ..` is `Outer.Inner`;
+        // inside Outer, `Inner.g()` is the nested module (Elixir's automatic
+        // alias), never the top-level `Inner`; elsewhere `Inner.g()` is the
+        // top-level one and `Outer.Inner.g()` the nested one.
+        let mut outer = ex_module("lib::outer", "Outer", &["f"], &[], &[("f", "Inner", "g")]);
+        let outer_pkg = gid(node_kind::PACKAGE, "lib::outer::Outer");
+        ex_push(&mut outer, node_kind::PACKAGE, "lib::outer::Outer::Inner", outer_pkg);
+        let inner_pkg = gid(node_kind::PACKAGE, "lib::outer::Outer::Inner");
+        ex_push(&mut outer, node_kind::FUNCTION, "lib::outer::Outer::Inner::g", inner_pkg);
+        let top = ex_module("lib::inner", "Inner", &["g"], &[], &[]);
+        let other = ex_module(
+            "lib::other",
+            "Other",
+            &["h"],
+            &[],
+            &[("h", "Inner", "g"), ("h", "Outer.Inner", "g")],
+        );
+        let (g, modules, _) = elixir_passes(repo(), vec![outer, top, other]);
+        assert_eq!(
+            calls_from(&g, "lib::outer::Outer::f"),
+            hooked(&[("lib::outer::Outer::Inner::g", "nested_alias")])
+        );
+        assert_eq!(
+            calls_from(&g, "lib::other::Other::h"),
+            hooked(&[
+                ("lib::inner::Inner::g", "full_name"),
+                ("lib::outer::Outer::Inner::g", "full_name"),
+            ])
+        );
+        assert_eq!(modules.counts(), (3, 0));
+    }
+
+    #[test]
+    fn elixir_alias_path_binds_a_shared_short_name() {
+        // `alias Shop.Cart` beside a second `Billing.Cart`: the short name is
+        // not repo-unique, so the import binds nothing and the generic pass
+        // misses; the alias names the full module, so the hook binds it.
+        // `alias Shop.{Order, Item}` aliases both.
+        let caller = ex_module(
+            "lib::caller",
+            "Shop.Caller",
+            &["run"],
+            &["Shop.Cart", "Shop.{Order, Item}"],
+            &[("run", "Cart", "total"), ("run", "Item", "total")],
+        );
+        let parses = vec![
+            ex_cart("lib::shop_cart", "Shop.Cart"),
+            ex_cart("lib::billing_cart", "Billing.Cart"),
+            ex_cart("lib::item", "Shop.Item"),
+            ex_cart("lib::other_item", "Other.Item"),
+            caller,
+        ];
+        let (g, modules, _) = elixir_passes(repo(), parses);
+        assert_eq!(
+            calls_from(&g, "lib::caller::Shop.Caller::run"),
+            hooked(&[
+                ("lib::shop_cart::Shop.Cart::total", "alias_path"),
+                ("lib::item::Shop.Item::total", "alias_path"),
+            ])
+        );
+        assert_eq!(modules.counts(), (2, 0));
+    }
+
+    #[test]
+    fn elixir_alias_shadows_the_global_name() {
+        // `alias Ext.Cart` (no such module in the repo) + `Cart.total(..)`
+        // means Ext.Cart: the top-level in-repo `Cart` is never the target.
+        let call = [("run", "Cart", "total")];
+        let caller = ex_module("lib::caller", "Caller", &["run"], &["Ext.Cart"], &call);
+        let billing = ex_cart("lib::billing_cart", "Billing.Cart");
+        let parses = vec![ex_cart("lib::cart", "Cart"), billing, caller];
+        let (g, modules, _) = elixir_passes(repo(), parses);
+        assert!(calls_from(&g, "lib::caller::Caller::run").is_empty());
+        assert_eq!(modules.counts(), (0, 0));
+    }
+
+    #[test]
+    fn elixir_build_is_independent_of_file_order() {
+        let files = || {
+            let caller = ex_module(
+                "lib::caller",
+                "Shop.Caller",
+                &["full"],
+                &[],
+                &[("full", "Shop.Cart", "total"), ("full", "Cart", "total")],
+            );
+            let carts = [("lib::cart", "Shop.Cart"), ("lib::a", "Cart"), ("lib::b", "Cart")];
+            let mut files: Vec<_> = carts.iter().map(|&(f, m)| ex_cart(f, m)).collect();
+            files.push(caller);
+            files
+        };
+        let (g1, m1, _) = elixir_passes(repo(), files());
+        let mut reversed = files();
+        reversed.reverse();
+        let (g2, m2, _) = elixir_passes(repo(), reversed);
+        let want = hooked(&[("lib::cart::Shop.Cart::total", "full_name")]);
+        assert_eq!(calls_from(&g1, "lib::caller::Shop.Caller::full"), want);
+        assert_eq!(calls_from(&g2, "lib::caller::Shop.Caller::full"), want);
+        assert_eq!(m1.counts(), (1, 1));
+        assert_eq!(m2.counts(), (1, 1));
     }
 }
