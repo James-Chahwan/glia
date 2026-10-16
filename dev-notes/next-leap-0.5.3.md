@@ -35,7 +35,7 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
 - 2026-10-16, on Engram's evaluation and corrections (answering "sure" to the session's recommendations): the
   determinism check runs now at 0.5.2 wave 5 (`3921a636`); the Kina + glia replays (re-keys with X1 off and on,
   `flat-ppr` vs `flat-fs`) run once at the 0.5.2 release candidate after W14; the 8 public streams only if those pass.
-  Engram builds no corrections writer for 0.5.3 (no measured source).
+  Corrections: James then, *"no still in 0.5.3"* - the Engram corrections writer stays in 0.5.3 (§B).
 
 ## 1. The train
 
@@ -108,10 +108,11 @@ links, so they must survive a rename.
     onnxruntime-linux-x64-gpu-1.20.1, ort features `cuda, load-dynamic, ndarray, half`, `ORT_DYLIB_PATH`,
     `CUDAExecutionProvider::default().build().error_on_failure()` (else silent CPU fallback); never combine
     `ort-download-binaries` with `load-dynamic`.
-- **Corrections as cells: no source yet; no Engram writer in 0.5.3 (James, 2026-10-16).** Engram forms no consolidated corrections today: its Cell C (lessons from
+- **Corrections as cells: IN 0.5.3 (James, 2026-10-16: "no still in 0.5.3"); Engram has no source yet.** Engram forms no consolidated corrections today: its Cell C (lessons from
   user corrections) failed its ceiling check on 2026-10-11 (2 of 13 recurrences in a later session) and was not built,
-  so an Engram writer of `.glia/cells.jsonl` would be a new, unmeasured Engram feature (James's call; engram-34 raised
-  it with him). glia's side already exists: the LF.1 sidecar and the `orphaned_cell` gaps row. Agreed lifetime rule
+  so the Engram writer of `.glia/cells.jsonl` is new Engram work (forming consolidated corrections, then exporting
+  them). It is judged on glia's side by whether the cells improve answers, not by Engram's recall ceiling, which
+  measured a different use (corrections as recall cues). glia's side already exists: the LF.1 sidecar and the `orphaned_cell` gaps row. Agreed lifetime rule
   for any writer: the writer owns its rows, glia never deletes another source's rows, an orphan is kept, reported and
   attached to nothing, and the writer re-anchors or deletes it on its next write; an entry `id` is a hash of the
   correction's content.

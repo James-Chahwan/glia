@@ -74,3 +74,4 @@ Recorded in `next-leap-0.5.3.md` §2 B ("Engram's embedding learnings", "Correct
 James's ruling, 2026-10-16 ("sure" to the session's recommendations): determinism now at wave 5 (`3921a636`);
 the Kina + glia replays once at the 0.5.2 release candidate after W14; the public streams only if those pass. No
 Engram corrections writer in 0.5.3.
+James then, 2026-10-16: *"no still in 0.5.3"* - the corrections writer stays in 0.5.3 (section 2, item 1).
