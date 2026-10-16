@@ -51,6 +51,14 @@ pub struct EventNodes {
 /// and MediatR's typed `_mediator.Publish(new X())` ([`judge_verb`]'s `new `
 /// check) mint nothing here. Last in each table, so a file the lower-case
 /// rows already named keeps its nodes and their order.
+///
+/// DH.7: `.instrument(` is Rails' ActiveSupport::Notifications emitter
+/// (`ActiveSupport::Notifications.instrument("order.placed", payload)`), the
+/// conjugate of the `.subscribe(` handler on the same receiver.
+/// [`VerbGate::Receiver`]: `notifications` is a bus-shaped receiver
+/// ([`BUS_RECEIVER_SUFFIXES`]), so an instrumentation call on any other
+/// receiver (`span.instrument(..)`, an OpenTelemetry instrumentor) mints
+/// nothing. In-process, so never broker-ambiguous.
 const EMITTER_PATTERNS: &[(&str, NameRule, bool, VerbGate)] = &[
     (".emit(", NameRule::Literal, false, VerbGate::Receiver),
     (".dispatch(", NameRule::Literal, false, VerbGate::Receiver),
@@ -61,6 +69,7 @@ const EMITTER_PATTERNS: &[(&str, NameRule, bool, VerbGate)] = &[
     (".trigger(", NameRule::Literal, false, VerbGate::Receiver),
     ("dispatchEvent(", NameRule::Literal, false, VerbGate::Receiver),
     (".Publish(", NameRule::Literal, true, VerbGate::Bus),
+    (".instrument(", NameRule::Literal, false, VerbGate::Receiver),
 ];
 
 const HANDLER_PATTERNS: &[(&str, NameRule, bool, VerbGate)] = &[
@@ -375,6 +384,15 @@ fn push_event_node(
     (id, true)
 }
 
+/// One framework's count in one typed pass of [`emit_event_nodes`]: the
+/// DG.3 `[eventbus] typed-bus` marker reports the distinct names, DH.7's
+/// `[eventbus] typed framework=` marker the sites.
+struct TypedTally {
+    framework: &'static str,
+    sites: usize,
+    names: BTreeSet<String>,
+}
+
 /// One side of the bus: what [`emit_event_nodes`] mints, from which needles.
 struct EventSide {
     /// `emitter` / `handler`: the A2.9 suppression and CB.3b fold markers.
@@ -390,6 +408,11 @@ struct EventSide {
     /// classes. It reads the guard itself for the occurrences that only gate
     /// a site (the enum's channel type, a receive, a pattern's `let`).
     buses: fn(&str, &mut LazyGuard<'_>) -> Vec<BusSite>,
+    /// DH.7: the typed framework buses ([`framework_emitters`] /
+    /// [`framework_handlers`]): Laravel events, Dart package:event_bus,
+    /// Phoenix.PubSub. Like `buses`, it reads the guard for the occurrences
+    /// that only gate a site (the `<?php` tag, an import, a namespace line).
+    frameworks: fn(&str, &mut LazyGuard<'_>) -> Vec<BusSite>,
     patterns: &'static [(&'static str, NameRule, bool, VerbGate)],
     /// DF.12: the side of a literal blinker site ([`blinker_literal_sites`])
     /// this side mints.
@@ -403,6 +426,7 @@ const EMITTER_SIDE: EventSide = EventSide {
     prefix: "event_emit:",
     typed: typed_emitters,
     buses: bus_emitters,
+    frameworks: framework_emitters,
     patterns: EMITTER_PATTERNS,
     signal_side: PySignalSide::Emit,
 };
@@ -414,6 +438,7 @@ const HANDLER_SIDE: EventSide = EventSide {
     prefix: "event_handle:",
     typed: typed_handlers,
     buses: bus_handlers,
+    frameworks: framework_handlers,
     patterns: HANDLER_PATTERNS,
     signal_side: PySignalSide::Handle,
 };
@@ -584,6 +609,14 @@ pub fn replace_event_nodes(fp: &mut FileParse, module_id: NodeId, lang: &str, fo
 ///   `... 2>&1 | grep '\[eventbus\] typed-bus'`
 ///   `[eventbus] typed-bus side=<emitter|handler> framework=<tokio-broadcast|akka-eventstream> n=<distinct names> path=<path>`
 ///
+/// DH.7: then the typed framework buses ([`framework_emitters`] /
+/// [`framework_handlers`]: Laravel events, Dart package:event_bus,
+/// Phoenix.PubSub), the same way: every site through the guard, Medium, every
+/// site anchored, into the same `seen` set. fired_on marker, per side of a
+/// file where that pass read a site, per framework (per-file pass only):
+///   `... 2>&1 | grep '\[eventbus\] typed framework='`
+///   `[eventbus] typed framework=<laravel|event_bus|phoenix_pubsub> side=<emitter|handler> n=<sites> path=<path>`
+///
 /// DF.12: last, in a `.py` file, the literal blinker sites of the side
 /// ([`blinker_literal_sites`]: `signal("x").send(..)`, `@signal("x").connect`),
 /// Medium, every site anchored, into the same `seen` set. fired_on marker, per
@@ -623,33 +656,46 @@ fn emit_event_nodes(
         anchors.push(Anchor { node: id, line: line_of(source, at) });
     }
 
-    // DG.3: the typed in-process buses, Medium like the type-keyed pass (a
-    // real type or variant names each site), every site anchored. The
-    // distinct names per framework feed the marker below.
-    let mut bus_names: Vec<(&'static str, BTreeSet<String>)> = Vec::new();
-    for (name, at, framework) in (side.buses)(source, &mut guard) {
-        if !guard.admits(at) {
-            continue;
-        }
-        let (id, _) = push_event_node(
-            &mut nodes,
-            &mut nav,
-            &mut seen,
-            &name,
-            side.kind,
-            side.prefix,
-            Confidence::Medium,
-            module_id,
-            repo,
-        );
-        anchors.push(Anchor { node: id, line: line_of(source, at) });
-        match bus_names.iter_mut().find(|(f, _)| *f == framework) {
-            Some((_, names)) => {
-                names.insert(name);
+    // DG.3: the typed in-process buses, then DH.7's typed framework buses,
+    // Medium like the type-keyed pass (a real type, variant or literal topic
+    // at a fixed argument names each site), every site anchored. The tallies
+    // per framework feed the markers below.
+    let mut typed_pass = |sites: Vec<BusSite>, guard: &mut LazyGuard<'_>| {
+        let mut tallies: Vec<TypedTally> = Vec::new();
+        for (name, at, framework) in sites {
+            if !guard.admits(at) {
+                continue;
             }
-            None => bus_names.push((framework, BTreeSet::from([name]))),
+            let (id, _) = push_event_node(
+                &mut nodes,
+                &mut nav,
+                &mut seen,
+                &name,
+                side.kind,
+                side.prefix,
+                Confidence::Medium,
+                module_id,
+                repo,
+            );
+            anchors.push(Anchor { node: id, line: line_of(source, at) });
+            match tallies.iter_mut().find(|t| t.framework == framework) {
+                Some(t) => {
+                    t.sites += 1;
+                    t.names.insert(name);
+                }
+                None => tallies.push(TypedTally {
+                    framework,
+                    sites: 1,
+                    names: BTreeSet::from([name]),
+                }),
+            }
         }
-    }
+        tallies
+    };
+    let sites = (side.buses)(source, &mut guard);
+    let bus_tallies = typed_pass(sites, &mut guard);
+    let sites = (side.frameworks)(source, &mut guard);
+    let framework_tallies = typed_pass(sites, &mut guard);
 
     let mut ctx = VerbCtx::default();
     for &(pattern, rule, ambiguous, gate) in side.patterns {
@@ -712,11 +758,18 @@ fn emit_event_nodes(
                 side.label
             );
         }
-        for (framework, names) in &bus_names {
+        for t in &bus_tallies {
             eprintln!(
-                "[eventbus] typed-bus side={} framework={framework} n={} path={path}",
+                "[eventbus] typed-bus side={} framework={} n={} path={path}",
                 side.label,
-                names.len()
+                t.framework,
+                t.names.len()
+            );
+        }
+        for t in &framework_tallies {
+            eprintln!(
+                "[eventbus] typed framework={} side={} n={} path={path}",
+                t.framework, side.label, t.sites
             );
         }
         guard.report(side.guard_label);
@@ -2017,7 +2070,8 @@ fn is_event_name(lit: &str) -> bool {
 // guard admits, so glia's own test literals mint nothing.
 
 /// DG.3: one typed-bus site — (event name, byte offset of the site,
-/// framework label for the `[eventbus] typed-bus` marker).
+/// framework label for the `[eventbus] typed-bus` marker, or, DH.7, for the
+/// `[eventbus] typed framework=` marker).
 type BusSite = (String, usize, &'static str);
 
 /// DG.3: which side of a typed bus a scan reads.
@@ -2429,6 +2483,614 @@ fn class_name<'s>(text: &'s str, follow: &[u8]) -> Option<&'s str> {
     }
     let name = text[..end].rsplit('.').next()?;
     is_type_name(name).then_some(name)
+}
+
+// ============================================================================
+// DH.7: typed framework buses — Laravel events, Dart package:event_bus,
+// Phoenix.PubSub
+// ============================================================================
+//
+// Three in-process buses no string-keyed row reads. Each pass returns EVERY
+// site, like the type-keyed needles: [`find_gated`] keeps one site per
+// string-keyed needle per file, while a Laravel listener file or a Phoenix
+// context typically holds several events.
+//
+// - Laravel events (laravel.com/docs/events) are keyed by the event CLASS (the
+//   MediatR precedent): `OrderPlaced::dispatch($id)` (the event Dispatchable
+//   trait), `event(new OrderPlaced($id))`, `Event::dispatch(new
+//   OrderPlaced($id))`, handled by a listener whose `handle(OrderPlaced $e)`
+//   names it (event discovery's rule) or by `Event::listen(OrderPlaced::class,
+//   ..)`. A queued JOB dispatches the same way (`SendWelcomeEmail::dispatch()`,
+//   queues.rs's, DH.2), so a static dispatch counts only for a class that is
+//   an event ([`laravel_event_class`]).
+// - Dart package:event_bus (pub.dev/packages/event_bus) is keyed by type too:
+//   `eventBus.fire(OrderPlaced('o-1'))`, `eventBus.on<OrderPlaced>()`, read
+//   only in a file importing the package, so a Flutter `.on<..>` or a game's
+//   `.fire(..)` mints nothing.
+// - Phoenix.PubSub (hexdocs.pm/phoenix_pubsub) takes the pubsub server first,
+//   `Phoenix.PubSub.broadcast(Shop.PubSub, "order_placed", msg)` /
+//   `subscribe(Shop.PubSub, "order_placed")`, so its topic is a positional
+//   argument no [`NameRule`] addresses ([`PHOENIX_PUBSUB_CALLS`]).
+//
+// A site names a real event or mints nothing (CB.3a): a variable, a Laravel
+// string event, an interpolated topic. All three buses are in-process, so the
+// nodes carry no transport ORIGIN (LB.8b) and the EventBusResolver pairs them
+// inside one project. Every site goes through [`emit_event_nodes`]' CJ.1a
+// guard, and each gate (the `<?php` tag, the import, the `Phoenix.PubSub`
+// mention) counts only at an offset the guard admits, so glia's own test
+// literals mint nothing. Byte walks over ASCII only: every offset is a
+// `match_indices` hit or an ASCII position next to one, so every slice is on
+// a char boundary.
+
+/// DH.7: the framework labels of the `[eventbus] typed framework=` marker.
+const LARAVEL: &str = "laravel";
+const DART_EVENT_BUS: &str = "event_bus";
+const PHOENIX_PUBSUB: &str = "phoenix_pubsub";
+
+/// The PHP open tag: a file without one is not PHP (its text is output).
+const PHP_OPEN_TAG: &str = "<?php";
+
+/// The event Dispatchable trait's static dispatchers (`X::dispatch(..)`); the
+/// facade's `Event::dispatch(new X(..))` shares the first. A job's trait
+/// (`...\Bus\Dispatchable`) adds `dispatchSync` / `dispatchAfterResponse`,
+/// which no event has.
+const LARAVEL_STATIC_DISPATCH: &[&str] = &["::dispatch(", "::dispatchIf(", "::dispatchUnless("];
+
+/// The global helper `event(new X(..))`.
+const LARAVEL_EVENT_HELPER: &str = "event(";
+
+/// The Event facade (`Illuminate\Support\Facades\Event`, also the global
+/// `\Event` alias): its dispatch names the event by its argument.
+const LARAVEL_EVENT_FACADE: &str = "Event";
+const LARAVEL_LISTEN: &str = "Event::listen(";
+
+/// The event Dispatchable trait a class may dispatch itself through.
+const LARAVEL_EVENT_TRAIT: &str = "Illuminate\\Foundation\\Events\\Dispatchable";
+const LARAVEL_DISPATCHABLE: &str = "Dispatchable";
+
+/// The namespace segments artisan's `make:event` / `make:listener` write to
+/// (`App\Events`, `App\Listeners`): the event's home, and the listener root
+/// event discovery reads.
+const LARAVEL_EVENTS_NS: &str = "Events";
+const LARAVEL_LISTENERS_NS: &str = "Listeners";
+
+/// The listener methods event discovery reads: `handle*` and `__invoke`.
+const LARAVEL_HANDLE_PREFIX: &str = "handle";
+const PHP_INVOKE: &str = "__invoke";
+const PHP_FUNCTION: &str = "function";
+
+/// DH.7: the package whose import makes `.fire(` / `.on<` an event bus.
+const DART_EVENT_BUS_IMPORT: &str = "package:event_bus/";
+const DART_FIRE: &str = ".fire(";
+const DART_ON: &str = ".on<";
+
+/// DH.7: a file naming this module reads [`PHOENIX_PUBSUB_CALLS`].
+const PHOENIX_PUBSUB_MODULE: &str = "Phoenix.PubSub";
+const PHOENIX_MODULE: &str = "Phoenix";
+
+/// DH.7: the Phoenix.PubSub calls that name a topic, each with the 0-based
+/// position of its topic argument and the side it reads
+/// (hexdocs.pm/phoenix_pubsub): `broadcast(pubsub, topic, msg)`,
+/// `broadcast_from(pubsub, from, topic, msg)`, `direct_broadcast(node,
+/// pubsub, topic, msg)`, their `!` and `local_` forms, and `subscribe(pubsub,
+/// topic)`. Each needle opens at `PubSub`, so `Phoenix.PubSub.x(` and an
+/// aliased `PubSub.x(` are one row ([`phoenix_call_start`]).
+const PHOENIX_PUBSUB_CALLS: &[(&str, usize, BusSide)] = &[
+    ("PubSub.broadcast(", 1, BusSide::Emit),
+    ("PubSub.broadcast!(", 1, BusSide::Emit),
+    ("PubSub.local_broadcast(", 1, BusSide::Emit),
+    ("PubSub.broadcast_from(", 2, BusSide::Emit),
+    ("PubSub.broadcast_from!(", 2, BusSide::Emit),
+    ("PubSub.local_broadcast_from(", 2, BusSide::Emit),
+    ("PubSub.direct_broadcast(", 2, BusSide::Emit),
+    ("PubSub.direct_broadcast!(", 2, BusSide::Emit),
+    ("PubSub.subscribe(", 1, BusSide::Handle),
+];
+
+fn framework_emitters(source: &str, guard: &mut LazyGuard<'_>) -> Vec<BusSite> {
+    framework_sites(source, guard, BusSide::Emit)
+}
+
+fn framework_handlers(source: &str, guard: &mut LazyGuard<'_>) -> Vec<BusSite> {
+    framework_sites(source, guard, BusSide::Handle)
+}
+
+/// One side's framework sites: Laravel, then package:event_bus, then
+/// Phoenix.PubSub, each in source order.
+fn framework_sites(source: &str, guard: &mut LazyGuard<'_>, side: BusSide) -> Vec<BusSite> {
+    let mut out = laravel_sites(source, guard, side);
+    out.extend(dart_event_bus_sites(source, guard, side));
+    out.extend(phoenix_pubsub_sites(source, guard, side));
+    out
+}
+
+/// Does `needle` occur at an offset the guard admits?
+fn admitted(source: &str, needle: &str, guard: &mut LazyGuard<'_>) -> bool {
+    source.match_indices(needle).any(|(at, _)| guard.admits(at))
+}
+
+/// Argument `index` (0-based), trimmed, of the call whose needle (ending in
+/// `(`) ends at `after`; `None` when the call has fewer arguments.
+fn call_arg<'s>(source: &'s str, after: usize, needle: &str, index: usize) -> Option<&'s str> {
+    let region = crate::queue_topic::arg_region(source, after, needle)?;
+    crate::queue_topic::split_args(region)
+        .get(index)
+        .map(|arg| arg.trim())
+}
+
+/// DH.7: one side's Laravel event sites, in a PHP file (one holding the open
+/// tag at an offset the guard admits).
+///
+/// * EMITTER: `X::dispatch(` / `::dispatchIf(` / `::dispatchUnless(` for an
+///   event class X ([`laravel_event_class`]) -> X, at X's offset; the facade's
+///   `Event::dispatch(new X(..))` and the helper `event(new X(..))` (a bare
+///   call or `\event(`, never `->event(`) -> X, any X ([`php_new_class`]).
+/// * HANDLER: in a file whose `namespace` holds a `Listeners` segment, each
+///   `handle*` / `__invoke` method's first-parameter classes
+///   ([`php_param_types`]), at its `function`; anywhere,
+///   `Event::listen(X::class, ..)` and `Event::listen(function (X $e) {..})`
+///   / `fn (X $e) => ..` -> X.
+///
+/// A class is named by its own short name, never by an import alias
+/// ([`php_resolve`]), so `use App\Events\OrderPlaced as Placed;
+/// Placed::dispatch()` pairs with `handle(OrderPlaced $e)`. A string event
+/// (`Event::dispatch('order.placed')`, `Event::listen('order.*', ..)`) names
+/// no class and mints nothing.
+fn laravel_sites(source: &str, guard: &mut LazyGuard<'_>, side: BusSide) -> Vec<BusSite> {
+    if !admitted(source, PHP_OPEN_TAG, guard) {
+        return Vec::new();
+    }
+    let b = source.as_bytes();
+    let mut out: Vec<BusSite> = Vec::new();
+    match side {
+        BusSide::Emit => {
+            for needle in LARAVEL_STATIC_DISPATCH {
+                for (at, _) in source.match_indices(needle) {
+                    let Some((start, written)) = php_name_before(source, at) else {
+                        continue;
+                    };
+                    let class = match php_short(written) {
+                        Some(LARAVEL_EVENT_FACADE) if *needle == LARAVEL_STATIC_DISPATCH[0] => {
+                            php_new_class(source, at + needle.len(), needle)
+                        }
+                        Some(LARAVEL_EVENT_FACADE) => None,
+                        _ => laravel_event_class(source, written),
+                    };
+                    if let Some(class) = class {
+                        out.push((class, start, LARAVEL));
+                    }
+                }
+            }
+            for (at, _) in source.match_indices(LARAVEL_EVENT_HELPER) {
+                if !php_bare_call(b, at) {
+                    continue;
+                }
+                let after = at + LARAVEL_EVENT_HELPER.len();
+                if let Some(class) = php_new_class(source, after, LARAVEL_EVENT_HELPER) {
+                    out.push((class, at, LARAVEL));
+                }
+            }
+        }
+        BusSide::Handle => {
+            if php_namespace(source).is_some_and(|ns| ns_holds(ns, LARAVEL_LISTENERS_NS)) {
+                for (at, list) in listener_methods(source) {
+                    for class in php_param_types(source, list) {
+                        out.push((class, at, LARAVEL));
+                    }
+                }
+            }
+            for (at, _) in source.match_indices(LARAVEL_LISTEN) {
+                if at > 0 && is_ident_byte(b[at - 1]) {
+                    continue;
+                }
+                let Some(arg) = call_arg(source, at + LARAVEL_LISTEN.len(), LARAVEL_LISTEN, 0)
+                else {
+                    continue;
+                };
+                if let Some(written) = arg.strip_suffix("::class") {
+                    if let Some((class, _)) = php_resolve(source, written.trim_end()) {
+                        out.push((class, at, LARAVEL));
+                    }
+                } else if let Some(list) = php_closure_list(arg) {
+                    for class in php_param_types(source, list) {
+                        out.push((class, at, LARAVEL));
+                    }
+                }
+            }
+        }
+    }
+    out.sort_by_key(|&(_, at, _)| at);
+    out
+}
+
+/// Is the class a static `::dispatch(` names (as `written`) a Laravel EVENT,
+/// and which? By the namespace PHP resolves it to ([`php_resolve`]): an
+/// `Events` segment (make:event's home) makes it one; so does a class the
+/// file declares itself while binding `Dispatchable` to the event trait
+/// ([`LARAVEL_EVENT_TRAIT`]; a job's is `...\Bus\Dispatchable`). Anything
+/// else, a `Jobs` class first of all, is DH.2's or nobody's.
+fn laravel_event_class(source: &str, written: &str) -> Option<String> {
+    let (class, ns) = php_resolve(source, written)?;
+    let declared = || {
+        php_declares_class(source, &class)
+            && crate::queues::php_use_target(source, LARAVEL_DISPATCHABLE)
+                .is_some_and(|t| t.eq_ignore_ascii_case(LARAVEL_EVENT_TRAIT))
+    };
+    (ns_holds(&ns, LARAVEL_EVENTS_NS) || declared()).then_some(class)
+}
+
+/// A PHP class name as written in this file, resolved by PHP's rules: (its own
+/// short name, the namespace it lives in). A qualified name carries both; an
+/// imported short name takes its import's target
+/// ([`crate::queues::php_use_target`]; an alias resolves to the class it
+/// binds); any other name lives in the file's own namespace
+/// ([`php_namespace`], `""` for the global one). `None` when the class is no
+/// uppercase-initial ASCII name ([`is_type_name`]: `self`, `static`,
+/// `object`, `string`).
+fn php_resolve(source: &str, written: &str) -> Option<(String, String)> {
+    let short = php_short(written)?;
+    let (class, ns) = if written.contains('\\') {
+        (short.to_string(), php_namespace_of(written).to_string())
+    } else if let Some(target) = crate::queues::php_use_target(source, short) {
+        (php_short(&target)?.to_string(), php_namespace_of(&target).to_string())
+    } else {
+        (short.to_string(), php_namespace(source).unwrap_or("").to_string())
+    };
+    is_type_name(&class).then_some((class, ns))
+}
+
+/// The last `\` segment of a PHP name, when non-empty.
+fn php_short(written: &str) -> Option<&str> {
+    written.rsplit('\\').next().filter(|s| !s.is_empty())
+}
+
+/// Everything before the last `\` of a PHP name (`""` for a bare name).
+fn php_namespace_of(written: &str) -> &str {
+    written.rsplit_once('\\').map_or("", |(ns, _)| ns)
+}
+
+/// Does namespace `ns` hold the segment `seg` (ASCII case ignored, PHP's
+/// rule for names)?
+fn ns_holds(ns: &str, seg: &str) -> bool {
+    ns.split('\\').any(|s| s.eq_ignore_ascii_case(seg))
+}
+
+/// The file's namespace: the first line opening `namespace <name>` (`;` or
+/// ` {` after it). A comment line (` * namespace ..`) opens none.
+fn php_namespace(source: &str) -> Option<&str> {
+    source.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix("namespace")?;
+        if !rest.starts_with(|c: char| c.is_ascii_whitespace()) {
+            return None;
+        }
+        let rest = rest.trim_start();
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '\\'))
+            .unwrap_or(rest.len());
+        rest.get(..end).filter(|ns| !ns.is_empty())
+    })
+}
+
+/// Does a line of the file declare `class <class>` (`final class X`,
+/// `abstract class X extends Y`), the keyword at a word edge? A line led by a
+/// comment declares nothing, and `X::class` is no declaration.
+fn php_declares_class(source: &str, class: &str) -> bool {
+    source.lines().any(|line| {
+        let t = line.trim_start();
+        if ["//", "#", "*", "/*"].iter().any(|c| t.starts_with(c)) {
+            return false;
+        }
+        let b = line.as_bytes();
+        line.match_indices("class").any(|(at, _)| {
+            let end = at + "class".len();
+            let edge = at == 0 || !(is_ident_byte(b[at - 1]) || b[at - 1] == b':');
+            if !edge || !b.get(end).is_some_and(u8::is_ascii_whitespace) {
+                return false;
+            }
+            let rest = line[end..].trim_start();
+            let name_end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            rest[..name_end].eq_ignore_ascii_case(class)
+        })
+    })
+}
+
+/// The PHP name ending at `at` (`OrderPlaced`, `\App\Events\OrderPlaced`) and
+/// its start, or `None` when there is none or it is a variable
+/// (`$event::dispatch(`).
+fn php_name_before(source: &str, at: usize) -> Option<(usize, &str)> {
+    let b = source.as_bytes();
+    let mut i = at;
+    while i > 0 && (b[i - 1].is_ascii_alphanumeric() || matches!(b[i - 1], b'_' | b'\\')) {
+        i -= 1;
+    }
+    if i == at || (i > 0 && b[i - 1] == b'$') {
+        return None;
+    }
+    Some((i, &source[i..at]))
+}
+
+/// Is the `event(` at `at` the global helper: a bare call or `\event(`, never
+/// a method (`->event(`, `::event(`), a longer name (`prevent(`) or a variable
+/// (`$event(`)?
+fn php_bare_call(b: &[u8], at: usize) -> bool {
+    at == 0 || !(is_ident_byte(b[at - 1]) || matches!(b[at - 1], b'>' | b':' | b'.'))
+}
+
+/// The class argument #0 of the call whose needle ends at `after` constructs:
+/// `new X(..)`, `new X`, `new \App\Events\X(..)` -> [`php_resolve`]'s class;
+/// anything else (`$event`, `'order.placed'`, `X::make()`, `new class {..}`)
+/// -> `None`.
+fn php_new_class(source: &str, after: usize, needle: &str) -> Option<String> {
+    let arg = call_arg(source, after, needle, 0)?;
+    let rest = arg.strip_prefix("new")?;
+    if !rest.starts_with(|c: char| c.is_ascii_whitespace() || c == '\\') {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '\\'))
+        .unwrap_or(rest.len());
+    let tail = rest[end..].trim_start();
+    if !(tail.is_empty() || tail.starts_with('(')) {
+        return None;
+    }
+    php_resolve(source, &rest[..end]).map(|(class, _)| class)
+}
+
+/// The listener methods of a file, as (offset of `function`, the text just
+/// past the `(` of its parameter list): each `function <name>(` whose name
+/// event discovery reads, `handle*` or `__invoke`.
+fn listener_methods(source: &str) -> Vec<(usize, &str)> {
+    let b = source.as_bytes();
+    let mut out = Vec::new();
+    for (at, _) in source.match_indices(PHP_FUNCTION) {
+        if at > 0 && is_ident_byte(b[at - 1]) {
+            continue;
+        }
+        let past = at + PHP_FUNCTION.len();
+        let name_at = skip_ws(b, past);
+        if name_at == past {
+            continue;
+        }
+        let name_end = (name_at..b.len())
+            .find(|&i| !is_ident_byte(b[i]))
+            .unwrap_or(b.len());
+        let name = &source[name_at..name_end];
+        if !(name.starts_with(LARAVEL_HANDLE_PREFIX) || name == PHP_INVOKE) {
+            continue;
+        }
+        let open = skip_ws(b, name_end);
+        if b.get(open) == Some(&b'(') {
+            out.push((at, &source[open + 1..]));
+        }
+    }
+    out
+}
+
+/// The text just past the `(` of a closure argument's parameter list
+/// (`function (X $e) {..}`, `fn (X $e) => ..`, `static fn(..)`); `None` for
+/// any other argument.
+fn php_closure_list(arg: &str) -> Option<&str> {
+    let arg = match arg.strip_prefix("static") {
+        Some(rest) if rest.starts_with(|c: char| c.is_ascii_whitespace()) => rest.trim_start(),
+        _ => arg,
+    };
+    let rest = ["function", "fn"].iter().find_map(|kw| arg.strip_prefix(kw))?;
+    rest.trim_start().strip_prefix('(')
+}
+
+/// The classes the FIRST parameter of a list (`list` is the text just past
+/// its `(`) is typed by: `OrderPlaced $e`, `?OrderPlaced $e`,
+/// `\App\Events\OrderPlaced $e`, a union `OrderRefunded|OrderCancelled $e`,
+/// each through [`php_resolve`]. An untyped or builtin-typed parameter
+/// (`$e`, `object $e`) names nothing.
+fn php_param_types(source: &str, list: &str) -> Vec<String> {
+    let Some(region) = crate::queue_topic::region_body(list) else {
+        return Vec::new();
+    };
+    let args = crate::queue_topic::split_args(region);
+    let Some(first) = args.first() else {
+        return Vec::new();
+    };
+    let Some(dollar) = first.find('$') else {
+        return Vec::new();
+    };
+    first[..dollar]
+        .trim_end()
+        .trim_end_matches(['&', '.'])
+        .split('|')
+        .filter_map(|t| t.split_whitespace().last())
+        .filter_map(|t| php_resolve(source, t.trim_start_matches('?')))
+        .map(|(class, _)| class)
+        .collect()
+}
+
+/// DH.7: one side's package:event_bus sites, in a file importing the package
+/// ([`dart_imports_event_bus`]). EMITTER: `.fire(` whose argument #0
+/// constructs a class ([`dart_constructed`]) -> the class. HANDLER:
+/// `.on<X>(` -> X ([`dart_on_type`]). Each at the needle's offset, in source
+/// order.
+fn dart_event_bus_sites(source: &str, guard: &mut LazyGuard<'_>, side: BusSide) -> Vec<BusSite> {
+    if !dart_imports_event_bus(source, guard) {
+        return Vec::new();
+    }
+    let mut out: Vec<BusSite> = Vec::new();
+    match side {
+        BusSide::Emit => {
+            for (at, _) in source.match_indices(DART_FIRE) {
+                let after = at + DART_FIRE.len();
+                if let Some(class) = call_arg(source, after, DART_FIRE, 0).and_then(dart_constructed) {
+                    out.push((class.to_string(), at, DART_EVENT_BUS));
+                }
+            }
+        }
+        BusSide::Handle => {
+            for (at, _) in source.match_indices(DART_ON) {
+                // The `<` of `.on<`.
+                if let Some(class) = dart_on_type(source, at + DART_ON.len() - 1) {
+                    out.push((class.to_string(), at, DART_EVENT_BUS));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Does a line of the file open `import` (at an offset the guard admits) and
+/// name [`DART_EVENT_BUS_IMPORT`]? A commented-out import does not.
+fn dart_imports_event_bus(source: &str, guard: &mut LazyGuard<'_>) -> bool {
+    source.match_indices(DART_EVENT_BUS_IMPORT).any(|(at, _)| {
+        let line_start = source[..at].rfind('\n').map_or(0, |i| i + 1);
+        let head = &source[line_start..at];
+        let indent = head.len() - head.trim_start().len();
+        head.trim_start().starts_with("import") && guard.admits(line_start + indent)
+    })
+}
+
+/// The class a Dart argument constructs: `OrderPlaced('o-1')`, `new
+/// OrderPlaced()`, `const LoggedOut()`, `ev.Refunded<String>('r')`, a named
+/// constructor `Cancelled.now()` -> the first uppercase-initial segment of a
+/// dotted call, the lowercase segments before it an import prefix. A value
+/// (`e`, `state.event`), a type literal (`Marker`) and a call on a value
+/// (`make()`) name no class.
+fn dart_constructed(arg: &str) -> Option<&str> {
+    let mut s = arg.trim_start();
+    for kw in ["new", "const"] {
+        if let Some(rest) = s.strip_prefix(kw)
+            && rest.starts_with(|c: char| c.is_ascii_whitespace())
+        {
+            s = rest.trim_start();
+            break;
+        }
+    }
+    let b = s.as_bytes();
+    let mut i = 0usize;
+    let mut class: Option<&str> = None;
+    loop {
+        let start = i;
+        while b.get(i).is_some_and(|&c| c.is_ascii_alphanumeric() || c == b'_') {
+            i += 1;
+        }
+        if i == start {
+            return None;
+        }
+        if class.is_none() && b[start].is_ascii_uppercase() {
+            class = Some(&s[start..i]);
+        }
+        if b.get(i) == Some(&b'<') {
+            i = angle_close(b, i)? + 1;
+        }
+        match b.get(i) {
+            Some(b'.') => i += 1,
+            Some(b'(') => return class.filter(|c| is_type_name(c)),
+            _ => return None,
+        }
+    }
+}
+
+/// The event type of a `.on<X>(` whose `<` is at `lt`: the head of X (an
+/// import `prefix.` stripped, its own type arguments ignored, so
+/// `on<Result<T>>()` reads `Result`), when the list closes and a call follows.
+fn dart_on_type(source: &str, lt: usize) -> Option<&str> {
+    let b = source.as_bytes();
+    let close = angle_close(b, lt)?;
+    if b.get(skip_ws(b, close + 1)) != Some(&b'(') {
+        return None;
+    }
+    let inner = source.get(lt + 1..close)?.trim_start();
+    let end = inner
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+        .unwrap_or(inner.len());
+    let head = inner[..end].rsplit('.').next()?;
+    is_type_name(head).then_some(head)
+}
+
+/// Index of the `>` closing the type-argument list whose `<` is at `open`,
+/// nested lists counted; `None` when a byte no type list holds (`(`, `)`,
+/// `;`, a brace, a line break) comes first, or it never closes.
+fn angle_close(b: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, &c) in b.iter().enumerate().skip(open) {
+        match c {
+            b'<' => depth += 1,
+            b'>' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            b'(' | b')' | b';' | b'{' | b'}' | b'\n' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// DH.7: one side's Phoenix.PubSub sites, in a file naming `Phoenix.PubSub`
+/// at an offset the guard admits: each [`PHOENIX_PUBSUB_CALLS`] call on
+/// `Phoenix.PubSub` or a bare (aliased) `PubSub` ([`phoenix_call_start`]),
+/// whose topic argument is wholly one quoted literal LA.41 accepts
+/// ([`whole_literal`]). A call a pipe feeds (`server |>
+/// Phoenix.PubSub.broadcast(t, m)`) has its server piped in, so its topic is
+/// one argument earlier. A variable, a module attribute (`@topic`), an
+/// interpolation or a concatenation names nothing. Each at the call's start,
+/// in source order.
+fn phoenix_pubsub_sites(source: &str, guard: &mut LazyGuard<'_>, side: BusSide) -> Vec<BusSite> {
+    if !admitted(source, PHOENIX_PUBSUB_MODULE, guard) {
+        return Vec::new();
+    }
+    let b = source.as_bytes();
+    let mut out: Vec<BusSite> = Vec::new();
+    for &(needle, topic, call_side) in PHOENIX_PUBSUB_CALLS {
+        if call_side != side {
+            continue;
+        }
+        for (at, _) in source.match_indices(needle) {
+            let Some(start) = phoenix_call_start(b, at) else {
+                continue;
+            };
+            let piped = source[..start].trim_end().ends_with("|>");
+            let Some(index) = topic.checked_sub(usize::from(piped)) else {
+                continue;
+            };
+            let name = call_arg(source, at + needle.len(), needle, index).and_then(whole_literal);
+            if let Some(name) = name {
+                out.push((name, start, PHOENIX_PUBSUB));
+            }
+        }
+    }
+    out.sort_by_key(|&(_, at, _)| at);
+    out
+}
+
+/// Where the PubSub call whose `PubSub` is at `at` starts: `at` for a bare
+/// (aliased) `PubSub`, the `Phoenix` of `Phoenix.PubSub`; `None` for another
+/// module's `PubSub` (`MyApp.PubSub`, `Shop.Phoenix.PubSub`) or a longer name
+/// (`MyPubSub`).
+fn phoenix_call_start(b: &[u8], at: usize) -> Option<usize> {
+    let before = |i: usize| i.checked_sub(1).and_then(|j| b.get(j)).copied();
+    match before(at) {
+        Some(c) if is_ident_byte(c) => None,
+        Some(b'.') => {
+            let start = at.checked_sub(PHOENIX_MODULE.len() + 1)?;
+            let named = b.get(start..at - 1) == Some(PHOENIX_MODULE.as_bytes());
+            let edge = !before(start).is_some_and(|c| is_ident_byte(c) || c == b'.');
+            (named && edge).then_some(start)
+        }
+        _ => Some(at),
+    }
+}
+
+/// The name a quoted literal names when it is the WHOLE argument
+/// (`"order_placed"`), by LA.41's rule ([`literal_after`]); a literal with
+/// more after it (`"order:" <> id`) names nothing.
+fn whole_literal(arg: &str) -> Option<String> {
+    match literal_after(arg, 0) {
+        LiteralAt::Name(name) if arg.len() == name.len() + 2 => Some(name),
+        _ => None,
+    }
 }
 
 // ============================================================================
@@ -4058,10 +4720,12 @@ mod tests {
             Vec::<String>::new()
         );
         // The topic is Phoenix.PubSub's SECOND argument (HEAD:
-        // event_handle:subscribe, the CF.11b elixir/eventbus probe).
+        // event_handle:subscribe, the CF.11b elixir/eventbus probe): the
+        // string-keyed `.subscribe(` row keys nothing by the server, and
+        // DH.7's Phoenix pass reads the topic.
         assert_eq!(
             handled(concat!("Phoenix.PubSub.subsc", "ribe(Shop.PubSub, \"order_placed\")")),
-            Vec::<String>::new()
+            vec![s("event_handle:order_placed")]
         );
         for arg in [
             "this.x, 1",
@@ -5122,5 +5786,283 @@ mod tests {
         let wide = "use tokio::sync::broadcast;\nfn f(tx: broadcast::Sender<Évent>, rx: broadcast::Receiver<Event>) {\n  let é = tx.send(Event::Ä(1)); let Ok(Event::Ü) = rx.recv() else { return };\n  match rx.recv() { Ok(Event::Ö(x)) => {} }\n}\nimport akka.actor\nx.eventStream.publish(Ärger(1)); x.eventStream.subscribe(r, classOf[Über])\n";
         let (emit, handle) = bus_qnames(wide, "a.rs");
         assert!(emit.is_empty() && handle.is_empty(), "{emit:?} {handle:?}");
+    }
+
+    // ---- DH.7: ActiveSupport, Laravel, package:event_bus, Phoenix.PubSub ----
+
+    /// The (node, 0-based line) anchors of one side's extraction, by qname.
+    fn anchor_lines(out: &EventNodes) -> Vec<(String, u32)> {
+        let mut v: Vec<(String, u32)> = out
+            .anchors
+            .iter()
+            .map(|a| (out.nav.qname_by_id[&a.node].clone(), a.line))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// matrix/ruby/eventbus/orders.rb, verbatim.
+    const AS_NOTIFICATIONS_MATRIX: &str = "class Orders\n  def place(order)\n    ActiveSupport::Notifications.instrument(\"order.placed\", order: order)\n  end\nend\n\nActiveSupport::Notifications.subscribe(\"order.placed\") do |event|\n  Rails.logger.info(event.payload)\nend\n";
+
+    #[test]
+    fn activesupport_instrument_pairs_subscribe() {
+        let (emit, handle) = bus_qnames(AS_NOTIFICATIONS_MATRIX, "orders.rb");
+        assert_eq!(emit, strs(&["event_emit:order.placed"]));
+        assert_eq!(handle, strs(&["event_handle:order.placed"]));
+        let out =
+            extract_event_emitter_nodes(AS_NOTIFICATIONS_MATRIX, "orders.rb", module_id(), repo());
+        assert_eq!(anchor_lines(&out), vec![(s("event_emit:order.placed"), 2)]);
+        // The block form; a constant-keyed instrument keeps CB.3a's path.
+        let block = "ActiveSupport::Notifications.instrument('cache.read', key: k) do\n  read\nend\nActiveSupport::Notifications.instrument(EVENT, payload)\n";
+        assert_eq!(bus_qnames(block, "c.rb").0, strs(&["event_emit:cache.read"]));
+        let constant = "ActiveSupport::Notifications.instrument(Orders::PLACED, payload)\n";
+        assert_eq!(bus_qnames(constant, "c.rb").0, strs(&["event_emit:Orders::PLACED"]));
+    }
+
+    #[test]
+    fn instrument_needs_a_bus_receiver() {
+        for src in [
+            "span.instrument(\"x\")\n",
+            "RequestsInstrumentor().instrument()\n",
+            "tracer.instrument(\"order.placed\") { run }\n",
+            // A variable names nothing.
+            "ActiveSupport::Notifications.instrument(name, payload)\n",
+        ] {
+            assert_eq!(bus_qnames(src, "a.rb"), (vec![], vec![]), "{src}");
+        }
+    }
+
+    /// matrix/php/eventbus/app/Events/OrderPlaced.php, verbatim.
+    const LARAVEL_EVENT: &str = "<?php\n\nnamespace App\\Events;\n\nuse Illuminate\\Foundation\\Events\\Dispatchable;\n\nclass OrderPlaced\n{\n    use Dispatchable;\n\n    public function __construct(public int $orderId) {}\n}\n";
+
+    /// matrix/php/eventbus/app/Listeners/SendReceipt.php, verbatim.
+    const LARAVEL_LISTENER: &str = "<?php\n\nnamespace App\\Listeners;\n\nuse App\\Events\\OrderPlaced;\n\nclass SendReceipt\n{\n    public function handle(OrderPlaced $event): void {}\n}\n\nfunction place(int $id): void\n{\n    OrderPlaced::dispatch($id);\n}\n";
+
+    #[test]
+    fn laravel_dispatch_event_and_listener() {
+        assert_eq!(bus_qnames(LARAVEL_EVENT, "app/Events/OrderPlaced.php"), (vec![], vec![]));
+        let path = "app/Listeners/SendReceipt.php";
+        let (emit, handle) = bus_qnames(LARAVEL_LISTENER, path);
+        assert_eq!(emit, strs(&["event_emit:OrderPlaced"]));
+        assert_eq!(handle, strs(&["event_handle:OrderPlaced"]));
+        let e = extract_event_emitter_nodes(LARAVEL_LISTENER, path, module_id(), repo());
+        let h = extract_event_handler_nodes(LARAVEL_LISTENER, path, module_id(), repo());
+        assert_eq!(anchor_lines(&e), vec![(s("event_emit:OrderPlaced"), 13)]);
+        assert_eq!(anchor_lines(&h), vec![(s("event_handle:OrderPlaced"), 8)]);
+        assert!(e.nodes.iter().chain(&h.nodes).all(|n| n.confidence == Confidence::Medium));
+        assert!(e.nodes.iter().chain(&h.nodes).all(|n| n.cells.is_empty()));
+
+        // dispatchIf / dispatchUnless, a group import with an alias (the event
+        // is the CLASS, never the alias), a fully-qualified class, the file's
+        // own Events namespace, and a class dispatching itself through the
+        // event Dispatchable trait. Every site anchors.
+        let more = "<?php\nnamespace App\\Http\\Controllers;\nuse App\\Events\\{OrderShipped, OrderRefunded as Refunded};\nclass C\n{\n    public function f($o)\n    {\n        OrderShipped::dispatchIf($o->ok, $o);\n        Refunded::dispatchUnless($o->ok, $o);\n        \\App\\Events\\OrderCancelled::dispatch($o);\n        OrderShipped::dispatch($o);\n    }\n}\n";
+        assert_eq!(
+            bus_qnames(more, "a.php").0,
+            strs(&["event_emit:OrderCancelled", "event_emit:OrderRefunded", "event_emit:OrderShipped"])
+        );
+        let out = extract_event_emitter_nodes(more, "a.php", module_id(), repo());
+        assert_eq!(out.anchors.len(), 4);
+        let own_ns = "<?php\nnamespace App\\Events;\nfunction again(): void { OrderPlaced::dispatch(1); }\n";
+        assert_eq!(bus_qnames(own_ns, "a.php").0, strs(&["event_emit:OrderPlaced"]));
+        let declared = "<?php\nnamespace Shop;\nuse Illuminate\\Foundation\\Events\\Dispatchable;\nclass Placed\n{\n    use Dispatchable;\n    public static function now(): void { Placed::dispatch(); }\n}\n";
+        assert_eq!(bus_qnames(declared, "a.php").0, strs(&["event_emit:Placed"]));
+    }
+
+    #[test]
+    fn laravel_job_dispatch_is_not_an_event() {
+        let job = "<?php\nnamespace App\\Http\\Controllers;\nuse App\\Jobs\\SendWelcomeEmail;\nclass C\n{\n    public function store()\n    {\n        SendWelcomeEmail::dispatch();\n    }\n}\n";
+        assert_eq!(bus_qnames(job, "a.php"), (vec![], vec![]));
+        // A class declared with the BUS Dispatchable is a job; the Bus facade,
+        // a `$var::dispatch`, `self::` and an unbound class name no event.
+        let bus_trait = "<?php\nnamespace App\\Support;\nuse Illuminate\\Foundation\\Bus\\Dispatchable;\nclass Rebuild\n{\n    use Dispatchable;\n    public function go(): void { Rebuild::dispatch(); }\n}\n";
+        assert_eq!(bus_qnames(bus_trait, "a.php"), (vec![], vec![]));
+        let misc = "<?php\nnamespace App\\Http;\nuse Illuminate\\Support\\Facades\\Bus;\nBus::dispatch(new Thing());\n$job::dispatch(1);\nself::dispatch();\nUnbound::dispatch();\n\\App\\Jobs\\Charge::dispatch();\n";
+        assert_eq!(bus_qnames(misc, "a.php"), (vec![], vec![]));
+        // Beside a job import the event keeps its node and the job mints none.
+        let mixed = "<?php\nuse App\\Events\\OrderPlaced;\nuse App\\Jobs\\SendWelcomeEmail;\nOrderPlaced::dispatch(1);\nSendWelcomeEmail::dispatch();\n";
+        assert_eq!(bus_qnames(mixed, "a.php"), (strs(&["event_emit:OrderPlaced"]), vec![]));
+    }
+
+    #[test]
+    fn laravel_event_helper_and_listen() {
+        let emit = "<?php\nuse App\\Events\\OrderShipped as Shipped;\nuse Illuminate\\Support\\Facades\\Event;\nfunction f($o) {\n    event(new OrderPlaced($o));\n    \\event(new Shipped);\n    Event::dispatch(new OrderRefunded($o));\n    $this->event(new Ignored($o));\n    event($o);\n    Event::dispatch('order.placed', [$o]);\n}\n";
+        assert_eq!(
+            bus_qnames(emit, "a.php"),
+            (
+                strs(&["event_emit:OrderPlaced", "event_emit:OrderRefunded", "event_emit:OrderShipped"]),
+                vec![]
+            )
+        );
+        let listen = "<?php\nnamespace App\\Providers;\nuse App\\Events\\OrderPlaced;\nuse App\\Events\\OrderShipped as Shipped;\nuse Illuminate\\Support\\Facades\\Event;\nclass EventServiceProvider\n{\n    public function boot(): void\n    {\n        Event::listen(OrderPlaced::class, SendReceipt::class);\n        Event::listen(function (Shipped $event) {});\n        Event::listen(fn (\\App\\Events\\OrderCancelled $e) => null);\n        Event::listen('order.*', fn ($name, $data) => null);\n        MyEvent::listen(Other::class);\n    }\n}\n";
+        assert_eq!(
+            bus_qnames(listen, "a.php"),
+            (
+                vec![],
+                strs(&[
+                    "event_handle:OrderCancelled",
+                    "event_handle:OrderPlaced",
+                    "event_handle:OrderShipped"
+                ])
+            )
+        );
+    }
+
+    #[test]
+    fn laravel_handle_outside_listeners_is_no_handler() {
+        let service = LARAVEL_LISTENER.replace("namespace App\\Listeners;", "namespace App\\Services;");
+        assert_eq!(
+            bus_qnames(&service, "a.php"),
+            (strs(&["event_emit:OrderPlaced"]), vec![])
+        );
+        // Not PHP at all: no open tag, no site on either side.
+        let bare = LARAVEL_LISTENER.replace("<?php\n", "");
+        assert_eq!(bus_qnames(&bare, "a.txt"), (vec![], vec![]));
+        // In a Listeners namespace: `handle*` and `__invoke`, a nullable type,
+        // a union, a fully-qualified type; an untyped or builtin-typed
+        // parameter, and a method event discovery does not read, name nothing.
+        let listeners = "<?php\nnamespace App\\Listeners\\Billing;\nuse App\\Events\\OrderPlaced;\nclass A\n{\n    public function handle(?OrderPlaced $e): void {}\n    public function handleShipped(\\App\\Events\\OrderShipped $e) {}\n    public function __invoke(OrderRefunded|OrderCancelled $e) {}\n    public function handleAny(object $e) {}\n    public function handleRaw($e) {}\n    public function report(Ledger $l) {}\n}\n";
+        assert_eq!(
+            bus_qnames(listeners, "a.php").1,
+            strs(&[
+                "event_handle:OrderCancelled",
+                "event_handle:OrderPlaced",
+                "event_handle:OrderRefunded",
+                "event_handle:OrderShipped"
+            ])
+        );
+    }
+
+    /// matrix/dart/eventbus/lib/orders.dart, verbatim.
+    const DART_EVENT_BUS_MATRIX: &str = "import 'package:event_bus/event_bus.dart';\n\nclass OrderPlaced {\n  final String id;\n  OrderPlaced(this.id);\n}\n\nfinal eventBus = EventBus();\n\nvoid wire() {\n  eventBus.on<OrderPlaced>().listen((e) => print(e.id));\n  eventBus.fire(OrderPlaced('o-1'));\n}\n";
+
+    #[test]
+    fn dart_event_bus_fire_and_on() {
+        let path = "lib/orders.dart";
+        let (emit, handle) = bus_qnames(DART_EVENT_BUS_MATRIX, path);
+        assert_eq!(emit, strs(&["event_emit:OrderPlaced"]));
+        assert_eq!(handle, strs(&["event_handle:OrderPlaced"]));
+        let e = extract_event_emitter_nodes(DART_EVENT_BUS_MATRIX, path, module_id(), repo());
+        let h = extract_event_handler_nodes(DART_EVENT_BUS_MATRIX, path, module_id(), repo());
+        assert_eq!(anchor_lines(&e), vec![(s("event_emit:OrderPlaced"), 11)]);
+        assert_eq!(anchor_lines(&h), vec![(s("event_handle:OrderPlaced"), 10)]);
+        // `new` / `const`, an import prefix, type arguments, a named
+        // constructor; a value, a type literal and an untyped `on()` name
+        // nothing.
+        let more = "import \"package:event_bus/event_bus.dart\";\nimport 'events.dart' as ev;\nvoid f(EventBus bus, Object e) {\n  bus.fire(new Shipped(1));\n  bus.fire(const LoggedOut());\n  bus.fire(ev.Refunded<String>('r'));\n  bus.fire(Cancelled.now());\n  bus.fire(e);\n  bus.fire(Marker);\n  bus.on<ev.Refunded>().listen(print);\n  bus.on<Result<Shipped>>().listen(print);\n  bus.on().listen(print);\n}\n";
+        assert_eq!(
+            bus_qnames(more, "lib/more.dart"),
+            (
+                strs(&[
+                    "event_emit:Cancelled",
+                    "event_emit:LoggedOut",
+                    "event_emit:Refunded",
+                    "event_emit:Shipped"
+                ]),
+                strs(&["event_handle:Refunded", "event_handle:Result"])
+            )
+        );
+    }
+
+    #[test]
+    fn dart_on_without_the_package_is_nothing() {
+        let flutter = DART_EVENT_BUS_MATRIX.replace(
+            "import 'package:event_bus/event_bus.dart';",
+            "import 'package:flutter/widgets.dart';",
+        );
+        assert_eq!(bus_qnames(&flutter, "lib/orders.dart"), (vec![], vec![]));
+        let commented =
+            DART_EVENT_BUS_MATRIX.replace("import 'package:event_bus", "// import 'package:event_bus");
+        assert_eq!(bus_qnames(&commented, "lib/orders.dart"), (vec![], vec![]));
+    }
+
+    /// matrix/elixir/eventbus/lib/orders.ex, verbatim.
+    const PHOENIX_PUBSUB_MATRIX: &str = "defmodule Orders do\n  def place(order) do\n    Phoenix.PubSub.broadcast(Shop.PubSub, \"order_placed\", {:order_placed, order})\n  end\n\n  def listen do\n    Phoenix.PubSub.subscribe(Shop.PubSub, \"order_placed\")\n  end\nend\n";
+
+    #[test]
+    fn phoenix_pubsub_broadcast_and_subscribe() {
+        let path = "lib/orders.ex";
+        let (emit, handle) = bus_qnames(PHOENIX_PUBSUB_MATRIX, path);
+        assert_eq!(emit, strs(&["event_emit:order_placed"]));
+        assert_eq!(handle, strs(&["event_handle:order_placed"]));
+        let e = extract_event_emitter_nodes(PHOENIX_PUBSUB_MATRIX, path, module_id(), repo());
+        let h = extract_event_handler_nodes(PHOENIX_PUBSUB_MATRIX, path, module_id(), repo());
+        assert_eq!(anchor_lines(&e), vec![(s("event_emit:order_placed"), 2)]);
+        assert_eq!(anchor_lines(&h), vec![(s("event_handle:order_placed"), 6)]);
+        // `broadcast!`, `broadcast_from` (topic #2), `local_broadcast`,
+        // `direct_broadcast` (topic #2), an aliased `PubSub.`, a pipe (the
+        // server is argument #0, so the topic moves up one).
+        let more = "defmodule Shop.Orders do\n  alias Phoenix.PubSub\n  def a(o), do: PubSub.broadcast!(Shop.PubSub, \"order:shipped\", o)\n  def b(o), do: Phoenix.PubSub.broadcast_from(Shop.PubSub, self(), \"order:refunded\", o)\n  def c(o), do: PubSub.local_broadcast(Shop.PubSub, \"order:cancelled\", o)\n  def d(o), do: Phoenix.PubSub.direct_broadcast(node(), Shop.PubSub, \"order:held\", o)\n  def e(o), do: Shop.PubSub |> Phoenix.PubSub.broadcast(\"order:paid\", o)\n  def f, do: PubSub.subscribe(Shop.PubSub, \"order:shipped\")\nend\n";
+        assert_eq!(
+            bus_qnames(more, "lib/shop/orders.ex"),
+            (
+                strs(&[
+                    "event_emit:order:cancelled",
+                    "event_emit:order:held",
+                    "event_emit:order:paid",
+                    "event_emit:order:refunded",
+                    "event_emit:order:shipped"
+                ]),
+                strs(&["event_handle:order:shipped"])
+            )
+        );
+    }
+
+    #[test]
+    fn phoenix_pubsub_variable_topic_reads_nothing() {
+        for src in [
+            "defmodule A do\n  @topic \"orders\"\n  def f(m), do: Phoenix.PubSub.broadcast(Shop.PubSub, @topic, m)\nend\n",
+            "def f(id, m), do: Phoenix.PubSub.broadcast(Shop.PubSub, \"order:#{id}\", m)\n",
+            "def f(id), do: Phoenix.PubSub.subscribe(Shop.PubSub, \"order:\" <> id)\n",
+            "def f(t), do: Phoenix.PubSub.subscribe(Shop.PubSub, t)\n",
+            // A wrapper module named PubSub is no Phoenix.PubSub call.
+            "# uses Phoenix.PubSub underneath\nMyApp.PubSub.broadcast(\"orders\", \"created\")\n",
+            // No Phoenix.PubSub in the file: the `PubSub.` is someone else's.
+            "PubSub.subscribe(Shop.PubSub, \"order_placed\")\n",
+        ] {
+            assert_eq!(bus_qnames(src, "lib/a.ex"), (vec![], vec![]), "{src}");
+        }
+    }
+
+    /// CJ.1a: a framework site inside a Rust doc comment or string literal
+    /// mints nothing; the same text read as its own language does.
+    #[test]
+    fn framework_sites_in_rust_literals_mint_nothing() {
+        let src = "/// Phoenix.PubSub.broadcast(Shop.PubSub, \"order_placed\", m)\nfn f() {\n    let s = \"Phoenix.PubSub.subscribe(Shop.PubSub, 'order_placed')\";\n}\n";
+        assert_eq!(
+            bus_qnames(src, "lib/a.ex"),
+            (strs(&["event_emit:order_placed"]), strs(&["event_handle:order_placed"]))
+        );
+        assert_eq!(bus_qnames(src, "src/a.rs"), (vec![], vec![]));
+        let dart = format!("{}\nfn f() {{ let s = \"eventBus.fire(OrderPlaced('o'))\"; }}\n", "import 'package:event_bus/event_bus.dart';");
+        assert_eq!(bus_qnames(&dart, "lib/a.dart").0, strs(&["event_emit:OrderPlaced"]));
+        assert_eq!(bus_qnames(&dart, "src/a.rs"), (vec![], vec![]));
+    }
+
+    #[test]
+    fn framework_scans_never_panic_on_truncated_or_multibyte_sources() {
+        let cuts = [
+            AS_NOTIFICATIONS_MATRIX,
+            LARAVEL_LISTENER,
+            LARAVEL_EVENT,
+            DART_EVENT_BUS_MATRIX,
+            PHOENIX_PUBSUB_MATRIX,
+        ];
+        for src in cuts {
+            for end in 0..=src.len() {
+                if let Some(head) = src.get(..end) {
+                    for path in ["a.php", "a.dart", "a.ex", "a.rs", ""] {
+                        let _ = bus_qnames(head, path);
+                    }
+                }
+            }
+        }
+        let wide = "<?php\nnamespace App\\Listeners;\nuse App\\Events\\Ünïcode;\nfunction handle(Ärger $é) {}\nÜnïcode::dispatch(1); event(new Ölf()); Event::listen(fn (Ü $e) => 1);\nimport 'package:event_bus/é.dart';\nbus.fire(Évent('x')); bus.on<Événement>();\nPhoenix.PubSub.broadcast(Shop.PubSub, \"é\", m) PubSub.subscribe(Shop.PubSub, \"ü\")\n";
+        // A type is an ASCII identifier, so no non-ASCII head names a class;
+        // a topic literal may be any script (LA.41's alphabet).
+        assert_eq!(
+            bus_qnames(wide, "a.php"),
+            (strs(&["event_emit:é"]), strs(&["event_handle:ü"]))
+        );
     }
 }
