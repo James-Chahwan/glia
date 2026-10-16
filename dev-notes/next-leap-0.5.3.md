@@ -611,6 +611,16 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   for scalar first results would leave only real misses in the count.
 - W18 (DT.5c, question for James): an external template's receiver CALLS carry the component's `templateUrl` row in its
   TS file, not the `.html` row, because CallSite has no file field; adding one touches every parser's CallSite literal.
+- W19 (DT.5g): the TS parser's collect_calls_in skips a `function f() {}` / `class K {}` declared inside any walked body (a
+  describe callback's `async function setup()`, a helper inside a method): only the name is recorded as a shadow, and the
+  declaration's calls, endpoints and value references are never read. Walking it (credited to the enclosing scope, as
+  nested arrows are) or minting a nested FUNCTION closes quokka's activities spec providers; an undeclared CALLS change,
+  so its own packet.
+- W19 (DT.5g): a Bare USES ref bound through a default import to a MODULE could look through to the module's
+  default-exported declaration (as heritage_through_module does for heritage); DT.5g drops those refs in the parser.
+- W19 (DT.5g): JSX attribute handlers (`onClick={handle}`) and `export default <expr>` objects are not value positions;
+  a React `export const X = memo(() => ..)` credits the arrow's calls to the STATE_VAR X, which the role fold cannot merge
+  with a COMPONENT overlay (untested on real React repos).
 
 ## 3. Open questions for James
 
