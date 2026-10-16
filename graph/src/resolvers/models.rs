@@ -84,7 +84,11 @@
 //! model, else (like any / null, a call no builder typed, an open value)
 //! it is never judged. No name is claimed absent from an open side (note
 //! `open`); a union whose members are all objects is compared as their
-//! merged fields (note `union`). Paths flatten as `items[].sku`. Arrays and
+//! merged fields (note `union`), and a client union of an envelope and a
+//! bare array (`{ activities: C[] } | C[]`, a client accepting both shapes)
+//! is compared by its member of the server value's kind (DT.1l's rule,
+//! [`union_member`]: a union matches when one member does). Paths flatten
+//! as `items[].sku`. Arrays and
 //! same-named fields recurse to [`MAX_DEPTH`], under inline roots too
 //! (`{ listings: Listing[] }` against `gin.H{"listings": ..}`). Where both
 //! sides are models with listed fields and [`confirms`] holds (at least one
@@ -127,14 +131,23 @@
 //! selection names the resolver's field. Variables and input types are not
 //! compared. See [`GraphqlPairs::marker`] for the fired_on line, printed by
 //! contract_fields (DT.1n's `graphql_selection` rows) and the engine test.
+//!
+//! **DT.1k: graphql_model identity.** The same pass joins a GraphQL client
+//! call's TS result model and gqlgen's generated Go model with the SDL type
+//! the call's root field returns, in one `graphql_model` SAME_AS class
+//! centred on the type's MESSAGE_TYPE: the TS parser's `graphql_result`
+//! MESSAGE_TYPE cell names the call's document and result type, the
+//! document binds to its `gql` STATE_VAR, the op minted in that const's span
+//! is the GRAPHQL_CALLS side, each result key's root field names the type,
+//! and field names confirm both members (see [`graphql_model_identity_in`]).
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use glia_activation::profile::IdentityTier;
+use glia_activation::profile::{IdentityRule, IdentityTier};
 use glia_code_domain::endpoint::{http_node_span, split_owner};
-use glia_code_domain::evidence::{Basis, Evidence, locate};
+use glia_code_domain::evidence::{Basis, Evidence, Location, locate};
 use glia_code_domain::profile::CODE_TABLES;
 use glia_code_domain::same_as;
 use glia_code_domain::wire::{
@@ -142,7 +155,8 @@ use glia_code_domain::wire::{
     element_type, hit_shapes, json_kind,
 };
 use glia_code_domain::{cell_type, edge_category, node_kind};
-use glia_core::{CellPayload, Confidence, Edge, NodeId, NodeKindId, RepoId};
+use glia_code_extractors::generated::{Generated, generated_by_banner, generated_by_name};
+use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId, NodeKindId, RepoId};
 
 use super::host::str_field;
 use super::{CrossGraphResolver, RuleTally, rule_evidence};
@@ -1104,6 +1118,30 @@ impl<'m> Ctx<'m> {
         out
     }
 
+    /// `rule` pairs `member`'s kind with `center`'s (each read in the first
+    /// graph holding it).
+    fn takes(&self, rule: &IdentityRule, member: NodeId, center: NodeId) -> bool {
+        self.kind_any(member)
+            .is_some_and(|k| rule.from.contains(&k))
+            && self.kind_any(center).is_some_and(|k| rule.to.contains(&k))
+    }
+
+    /// The project `id` belongs to ([`ProjectKey`]): its repo and the
+    /// deepest PROJECT of that repo enclosing its file, read in the first
+    /// graph holding it.
+    fn project_of(&self, m: &MergedGraph, projects: &ProjectPaths, id: NodeId) -> ProjectKey {
+        let Some(gi) = self.graphs(id).first().copied() else {
+            return (0, None);
+        };
+        let repo = m.graphs[gi].repo;
+        let owner = self.idx[gi]
+            .file_of
+            .get(&id)
+            .and_then(|f| projects.owner_of(repo, f))
+            .map(str::to_string);
+        (repo.0, owner)
+    }
+
     /// The kind of `id` in the first graph holding it.
     fn kind_any(&self, id: NodeId) -> Option<NodeKindId> {
         let gi = *self.graphs(id).first()?;
@@ -1929,6 +1967,60 @@ fn object_view(v: &ResolvedShape) -> Option<Cow<'_, ResolvedShape>> {
     Some(Cow::Owned(merged))
 }
 
+/// DT.1l's envelope-or-array rule: the member of a client union that the
+/// server value's kind matches, when the union has members of more than one
+/// kind (`{ activities: C[] } | C[]`, a client that accepts both shapes) and
+/// the server value is no union of its own: the one member of an object
+/// server value's kind (several object members: their union, compared as
+/// its merged fields) or the one array member of an array server value. A
+/// union matches when one member does. `None` for an all-object union
+/// ([`object_view`] merges it), a member of no known kind (`any`, an unbound
+/// name: it could be what travels), no member of the server's kind, two
+/// array members, or a server value of no known kind.
+fn union_member<'c>(
+    c: &'c ResolvedShape,
+    sd: Option<&str>,
+    s: &ResolvedShape,
+) -> Option<Cow<'c, ResolvedShape>> {
+    if !matches!(c.written, Shape::Union(_))
+        || matches!(s.written, Shape::Union(_))
+        || object_view(c).is_some()
+    {
+        return None;
+    }
+    let ks = outer_kind(sd, s)?;
+    if !matches!(ks, JsonKind::Object | JsonKind::Array) {
+        return None;
+    }
+    // Every member's kind is known: a member of no known kind (`any`, a
+    // name that bound nothing) could be what travels.
+    let kinds: Vec<JsonKind> = c
+        .members
+        .iter()
+        .map(|m| outer_kind(None, m))
+        .collect::<Option<_>>()?;
+    let same: Vec<&ResolvedShape> = c
+        .members
+        .iter()
+        .zip(&kinds)
+        .filter(|(_, k)| **k == ks)
+        .map(|(m, _)| m)
+        .collect();
+    match (same.as_slice(), &ks) {
+        ([one], _) => Some(Cow::Borrowed(*one)),
+        ([_, _, ..], JsonKind::Object) => Some(Cow::Owned(ResolvedShape {
+            written: Shape::Union(same.iter().map(|m| m.written.clone()).collect()),
+            format: c.format,
+            model: None,
+            array: false,
+            fields: BTreeMap::new(),
+            open: same.iter().any(|m| m.open),
+            members: same.into_iter().cloned().collect(),
+        })),
+        _ => None,
+    }
+}
+
 /// A value's type text: its declared text, else as written (an array in its
 /// format's spelling).
 fn type_text(declared: Option<&str>, v: &ResolvedShape) -> String {
@@ -2042,6 +2134,9 @@ impl Compared {
     ) -> usize {
         if matches!(c.written, Shape::Union(_)) || matches!(s.written, Shape::Union(_)) {
             self.notes.insert(NOTE_UNION);
+        }
+        if let Some(member) = union_member(c, sd, s) {
+            return self.values(None, &member, sd, s, path, depth);
         }
         let (kc, ks) = (outer_kind(cd, c), outer_kind(sd, s));
         if let (Some(a), Some(b)) = (&kc, &ks)
@@ -2216,21 +2311,45 @@ const PASS: &str = "models";
 /// persisted, HTTP_CALLS re-run by a merge before this pass), every list is
 /// sorted by content, and maps are only probed.
 ///
-/// fired_on, once per resolve where an ENDPOINT hit has an HTTP_CALLS pair,
-/// in this order: [`ClientWires::marker`], [`WirePairs::marker`], LC.3c's
-/// `[evidence-rules] resolver=models http_model=<n>` (only with an edge), then
+/// **DT.1k.** The pass also writes the `graphql_model` classes
+/// ([`graphql_model_identity_in`]): a GraphQL client call's result model and
+/// gqlgen's generated model joined with the schema type the call's root
+/// field returns, the type's MESSAGE_TYPE the center.
+///
+/// fired_on, in this order: once per resolve where an ENDPOINT hit has an
+/// HTTP_CALLS pair, [`ClientWires::marker`] and [`WirePairs::marker`]; once
+/// per resolve where a callable carries a `graphql_result` site, `[models]
+/// graphql results=<n> documents_resolved=<d> generated_models=<m>
+/// classes=<c>`; LC.3c's `[evidence-rules] resolver=models http_model=<h>
+/// graphql_model=<g>` (only with an edge); then, with the HTTP pair,
 /// `[models] classes=<c> edges=<e> diverged=<d> ambiguous_client=<a>
-/// ambiguous_project=<b> embed_reduced=<r>` (`d` the classes with a diverged
-/// edge; `a`, `b` and `r` count client models, see [`model_stars`]).
-/// grep: `... 2>&1 | grep '^\[models\] classes='`
+/// ambiguous_project=<b> embed_reduced=<r>` (the `http_model` classes; `d`
+/// the classes with a diverged edge; `a`, `b` and `r` count client models,
+/// see [`model_stars`]).
+/// grep: `... 2>&1 | grep '^\[models\] \(classes\|graphql results\)='`
 pub struct ModelResolver;
 
 impl CrossGraphResolver for ModelResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
-        let (edges, report) = model_identity(merged);
-        if let Some(r) = report {
-            r.print();
+        let ctx = OnceCell::new();
+        let (mut edges, http) = model_identity_in(merged, &ctx);
+        let (graphql, gql) = graphql_model_identity_in(merged, &ctx);
+        let mut tally = RuleTally::new(PASS, &same_as::MODEL_RULES);
+        tally.add(same_as::RULE_HTTP_MODEL, edges.len());
+        tally.add(same_as::RULE_GRAPHQL_MODEL, graphql.len());
+        if let Some(r) = &http {
+            eprintln!("{}", r.client_wires);
+            eprintln!("{}", r.wire_pairs);
         }
+        if let Some(g) = &gql {
+            eprintln!("{}", g.line());
+        }
+        tally.report();
+        if let Some(r) = &http {
+            eprintln!("{}", r.line());
+        }
+        edges.extend(graphql);
+        drop(ctx);
         merged.cross_edges.extend(edges);
     }
 }
@@ -2414,11 +2533,10 @@ impl ProjectPaths {
     }
 }
 
-/// What one models resolve found, for its markers.
+/// What one models resolve's `http_model` half found, for its markers.
 struct ModelReport {
     client_wires: String,
     wire_pairs: String,
-    tally: RuleTally,
     classes: usize,
     edges: usize,
     diverged: usize,
@@ -2438,18 +2556,30 @@ impl ModelReport {
             self.stars.embed_reduced,
         )
     }
+}
 
-    fn print(&self) {
-        eprintln!("{}", self.client_wires);
-        eprintln!("{}", self.wire_pairs);
-        self.tally.report();
-        eprintln!("{}", self.line());
+/// The confidence a SAME_AS edge of an identity rule's tier carries.
+fn tier_confidence(tier: IdentityTier) -> Confidence {
+    match tier {
+        IdentityTier::Fact => Confidence::Strong,
+        IdentityTier::Derived => Confidence::Medium,
+        IdentityTier::Heuristic => Confidence::Weak,
     }
 }
 
 /// The `http_model` SAME_AS edges of `m` and the report behind the markers;
 /// `None` when no ENDPOINT hit has an HTTP_CALLS pair.
+#[cfg(test)]
 fn model_identity(m: &MergedGraph) -> (Vec<Edge>, Option<ModelReport>) {
+    model_identity_in(m, &OnceCell::new())
+}
+
+/// [`model_identity`] with the resolution context the models resolve shares
+/// between its two rules, built on first use.
+fn model_identity_in<'m>(
+    m: &'m MergedGraph,
+    ctx: &OnceCell<Ctx<'m>>,
+) -> (Vec<Edge>, Option<ModelReport>) {
     let mut edges = Vec::new();
     if !m
         .cross_edges
@@ -2462,8 +2592,8 @@ fn model_identity(m: &MergedGraph) -> (Vec<Edge>, Option<ModelReport>) {
     if hits.is_empty() {
         return (edges, None);
     }
-    let ctx = Ctx::new(m);
-    let cw = wires_in(m, &ctx, hits);
+    let ctx = ctx.get_or_init(|| Ctx::new(m));
+    let cw = wires_in(m, ctx, hits);
     if cw.stats.routed == 0 {
         return (edges, None);
     }
@@ -2471,7 +2601,6 @@ fn model_identity(m: &MergedGraph) -> (Vec<Edge>, Option<ModelReport>) {
     let mut report = ModelReport {
         client_wires: cw.marker(),
         wire_pairs: wp.marker(),
-        tally: RuleTally::new(PASS, &same_as::MODEL_RULES),
         classes: 0,
         edges: 0,
         diverged: 0,
@@ -2480,17 +2609,9 @@ fn model_identity(m: &MergedGraph) -> (Vec<Edge>, Option<ModelReport>) {
     let Some(rule) = CODE_TABLES.identity_rule(same_as::RULE_HTTP_MODEL) else {
         return (edges, Some(report));
     };
-    let confidence = match rule.tier {
-        IdentityTier::Fact => Confidence::Strong,
-        IdentityTier::Derived => Confidence::Medium,
-        IdentityTier::Heuristic => Confidence::Weak,
-    };
+    let confidence = tier_confidence(rule.tier);
     let projects = ProjectPaths::of(m);
-    let takes = |p: &ModelPair| {
-        ctx.kind_any(p.client)
-            .is_some_and(|k| rule.from.contains(&k))
-            && ctx.kind_any(p.server).is_some_and(|k| rule.to.contains(&k))
-    };
+    let takes = |p: &ModelPair| ctx.takes(rule, p.client, p.server);
     let mut bases: HashMap<NodeId, BTreeSet<u64>> = HashMap::new();
     for p in wp.model_pairs.iter().filter(|p| takes(p)) {
         bases
@@ -2498,18 +2619,7 @@ fn model_identity(m: &MergedGraph) -> (Vec<Edge>, Option<ModelReport>) {
             .or_insert_with(|| ctx.extends_closure(p.server));
     }
     let embeds = |s: NodeId, other: NodeId| bases.get(&s).is_some_and(|b| b.contains(&other.0));
-    let project = |c: NodeId| -> ProjectKey {
-        let Some(gi) = ctx.graphs(c).first().copied() else {
-            return (0, None);
-        };
-        let repo = m.graphs[gi].repo;
-        let owner = ctx.idx[gi]
-            .file_of
-            .get(&c)
-            .and_then(|f| projects.owner_of(repo, f))
-            .map(str::to_string);
-        (repo.0, owner)
-    };
+    let project = |c: NodeId| ctx.project_of(m, &projects, c);
     let (stars, stats) = model_stars(&wp.model_pairs, takes, embeds, project);
     report.stars = stats;
     let ev_rule = |diverged: bool| same_as::evidence_rule(rule.name, diverged);
@@ -2537,7 +2647,6 @@ fn model_identity(m: &MergedGraph) -> (Vec<Edge>, Option<ModelReport>) {
         report.diverged += usize::from(diverged_class);
     }
     report.edges = edges.len();
-    report.tally.add(same_as::RULE_HTTP_MODEL, edges.len());
     (edges, Some(report))
 }
 
@@ -2687,11 +2796,19 @@ impl GraphqlPairs {
 /// to compare and is no pair; neither is a root field returning a type no
 /// MESSAGE_TYPE models (a scalar, an enum) that the op selects as a leaf.
 pub fn graphql_pairs(merged: &MergedGraph) -> GraphqlPairs {
-    let calls_at = |e: &&Edge| e.category == edge_category::GRAPHQL_CALLS;
-    if !merged.cross_edges.iter().any(|e| calls_at(&e)) {
+    if !merged
+        .cross_edges
+        .iter()
+        .any(|e| e.category == edge_category::GRAPHQL_CALLS)
+    {
         return GraphqlPairs::default();
     }
-    let ix = GqlIndex::new(merged);
+    gql_pairs_in(merged, &GqlIndex::new(merged))
+}
+
+/// [`graphql_pairs`] over a built index (DT.1k reads the index again).
+fn gql_pairs_in(merged: &MergedGraph, ix: &GqlIndex<'_>) -> GraphqlPairs {
+    let calls_at = |e: &&Edge| e.category == edge_category::GRAPHQL_CALLS;
     let mut calls: BTreeSet<(&str, &str, u64, u64)> = BTreeSet::new();
     for e in merged.cross_edges.iter().filter(calls_at) {
         if Evidence::of(e).is_some_and(|ev| ev.emitter != GRAPHQL_EMITTER) {
@@ -2704,7 +2821,7 @@ pub fn graphql_pairs(merged: &MergedGraph) -> GraphqlPairs {
     }
     let mut out = GraphqlPairs::default();
     for (op_qname, field_qname, op, field) in calls {
-        if let Some(p) = gql_pair(&ix, (op_qname, NodeId(op)), (field_qname, NodeId(field))) {
+        if let Some(p) = gql_pair(ix, (op_qname, NodeId(op)), (field_qname, NodeId(field))) {
             out.pairs.push(p);
         }
     }
@@ -2893,6 +3010,26 @@ impl<'m> GqlIndex<'m> {
             },
             (Some(_), Some(_)) => TypeAt::Conflicting(id),
             (None, _) => TypeAt::NoFields(id),
+        }
+    }
+}
+
+impl GqlIndex<'_> {
+    /// DT.1k: the schema type a pair names (its `schema_type`), its fields,
+    /// and whether a name may be claimed absent from it (not for an open
+    /// type or an interface).
+    fn schema_of(&self, p: &GraphqlPair) -> Option<(NodeId, ModelSchema, bool)> {
+        let repo = self.fields.get(&p.resolver.0)?.repo;
+        match self.type_at(repo, p.owner.as_deref(), &p.type_name) {
+            TypeAt::Found {
+                id,
+                schema,
+                interface,
+            } if p.schema_type == Some(NodeId(id)) => {
+                let closed = !(schema.open || interface);
+                Some((NodeId(id), schema, closed))
+            }
+            _ => None,
         }
     }
 }
@@ -3150,6 +3287,567 @@ impl GqlCompare<'_, '_> {
     }
 }
 
+// ---- DT.1k: graphql_model identity -----------------------------------------
+
+/// One `graphql_result` site (DT.1k's TS parser cell): a client call that
+/// types its result and names its document, on the callable issuing it.
+#[derive(Debug, Clone)]
+struct GqlResult {
+    /// The graph the cell was read from.
+    graph: usize,
+    from: NodeId,
+    /// The callable's repo-relative file.
+    file: String,
+    /// The call's 1-based line.
+    line: u32,
+    document: String,
+    shape: Shape,
+}
+
+/// Every `graphql_result` MESSAGE_TYPE site of `m` that names a document,
+/// an identical (node, payload) once across graphs, sorted by (file, line,
+/// document, payload).
+fn graphql_results(m: &MergedGraph, ctx: &Ctx<'_>) -> Vec<GqlResult> {
+    let mut seen: BTreeSet<(u64, &str)> = BTreeSet::new();
+    let mut out: Vec<(GqlResult, &str)> = Vec::new();
+    for (gi, g) in m.graphs.iter().enumerate() {
+        for n in &g.nodes {
+            for c in n.cells.iter().filter(|c| c.kind == cell_type::MESSAGE_TYPE) {
+                let (CellPayload::Json(p) | CellPayload::Text(p)) = &c.payload else {
+                    continue;
+                };
+                if !p.contains("\"form\":\"graphql_result\"") || !seen.insert((n.id.0, p.as_str()))
+                {
+                    continue;
+                }
+                let Some(w) = ServerWire::parse(p).filter(|w| w.form == WireForm::GraphqlResult)
+                else {
+                    continue;
+                };
+                let Some(document) = w.document else {
+                    continue;
+                };
+                let file = ctx.idx[gi].file_of.get(&n.id).cloned().unwrap_or_default();
+                let r = GqlResult {
+                    graph: gi,
+                    from: n.id,
+                    file,
+                    line: w.line,
+                    document,
+                    shape: w.shape,
+                };
+                out.push((r, p.as_str()));
+            }
+        }
+    }
+    out.sort_by(|(a, pa), (b, pb)| {
+        (&a.file, a.line, &a.document, pa).cmp(&(&b.file, b.line, &b.document, pb))
+    });
+    out.into_iter().map(|(r, _)| r).collect()
+}
+
+/// Every POSITION cell of `cells` as (file, first row, last row): the file
+/// as the payload writes it (both sides of a comparison read it the same
+/// way), a missing `end_line` the start row.
+fn position_spans(cells: &[Cell]) -> Vec<(&str, u32, u32)> {
+    cells
+        .iter()
+        .filter(|c| c.kind == cell_type::POSITION)
+        .filter_map(|c| {
+            let (CellPayload::Json(j) | CellPayload::Text(j)) = &c.payload else {
+                return None;
+            };
+            let file = str_field(j, "file").filter(|f| !f.is_empty())?;
+            let start = num_field(j, "start_line")?;
+            let end = num_field(j, "end_line").unwrap_or(start).max(start);
+            Some((file, start, end))
+        })
+        .collect()
+}
+
+/// The unsigned integer under `key` of a compact JSON payload.
+fn num_field(json: &str, key: &str) -> Option<u32> {
+    let pat = format!("\"{key}\":");
+    let rest = &json[json.find(&pat)? + pat.len()..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// Where each GRAPHQL_OPERATION was minted: (repo, file) -> its (row, op)
+/// sites, from every POSITION cell of every op node. Only probed.
+fn operation_sites(m: &MergedGraph) -> HashMap<(u64, &str), Vec<(u32, u64)>> {
+    let mut out: HashMap<(u64, &str), Vec<(u32, u64)>> = HashMap::new();
+    for g in &m.graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::GRAPHQL_OPERATION) {
+                continue;
+            }
+            for (file, start, _) in position_spans(&n.cells) {
+                let at = out.entry((n.repo.0, file)).or_default();
+                if !at.contains(&(start, n.id.0)) {
+                    at.push((start, n.id.0));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A struct's file is generated code, the way the provenance pass stamps
+/// ORIGIN `generated` (DE.7): a codegen file name, or a generator header on
+/// the file's MODULE CODE cell; a protobuf name (ORIGIN `generated_proto`)
+/// is not. An ORIGIN `generated` the node already carries (a layout merge
+/// reads persisted cells) counts too. The models pass runs before that post
+/// pass, so it reads the same evidence itself.
+fn is_generated_struct(ix: &GraphIndex<'_>, node: &glia_core::Node) -> bool {
+    let stamped = node.cells.iter().any(|c| {
+        c.kind == cell_type::ORIGIN
+            && matches!(&c.payload, CellPayload::Json(p) | CellPayload::Text(p)
+                if str_field(p, "provenance") == Some("generated"))
+    });
+    if stamped {
+        return true;
+    }
+    let Some(file) = ix.file_of.get(&node.id) else {
+        return false;
+    };
+    match generated_by_name(file) {
+        Some(Generated::Codegen) => return true,
+        Some(Generated::Proto) => return false,
+        None => {}
+    }
+    let Some(module) = ix
+        .module_by_file
+        .get(file)
+        .and_then(|m| ix.at.get(m))
+        .and_then(|i| ix.g.nodes.get(*i))
+    else {
+        return false;
+    };
+    module.cells.iter().any(|c| {
+        c.kind == cell_type::CODE
+            && matches!(&c.payload, CellPayload::Text(code) if generated_by_banner(code))
+    })
+}
+
+/// Every generated STRUCT with a `go` SCHEMA_FIELDS model
+/// ([`is_generated_struct`]): (repo, name) -> its (graph, id), first graph
+/// holding it, in graph and node order. Only probed.
+fn generated_structs<'m>(
+    m: &'m MergedGraph,
+    ctx: &Ctx<'_>,
+) -> HashMap<(u64, &'m str), Vec<(usize, NodeId)>> {
+    let mut out: HashMap<(u64, &str), Vec<(usize, NodeId)>> = HashMap::new();
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    for (gi, g) in m.graphs.iter().enumerate() {
+        let ix = &ctx.idx[gi];
+        for n in &g.nodes {
+            if ix.kind(n.id) != Some(node_kind::STRUCT)
+                || ix
+                    .schemas
+                    .get(&n.id)
+                    .is_none_or(|s| s.format != WireFormat::Go)
+                || !seen.insert(n.id)
+                || !is_generated_struct(ix, n)
+            {
+                continue;
+            }
+            let name = g.nav.name_by_id.get(&n.id).map_or("", String::as_str);
+            out.entry((n.repo.0, name)).or_default().push((gi, n.id));
+        }
+    }
+    out
+}
+
+/// What the `graphql_model` half of one models resolve found, for its
+/// marker.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct GraphqlModelReport {
+    /// `graphql_result` sites naming a document.
+    results: usize,
+    /// Of `results`: the document bound to a STATE_VAR.
+    documents_resolved: usize,
+    /// Classes a generated struct joined.
+    generated_models: usize,
+    classes: usize,
+}
+
+impl GraphqlModelReport {
+    fn line(&self) -> String {
+        format!(
+            "[models] graphql results={} documents_resolved={} generated_models={} classes={}",
+            self.results, self.documents_resolved, self.generated_models, self.classes
+        )
+    }
+}
+
+/// One client result key that reached a schema type and confirmed it.
+struct GqlJoin {
+    client: NodeId,
+    center: NodeId,
+    join: ModelJoin,
+}
+
+/// The `graphql_model` SAME_AS edges of `m` (see [`graphql_model_identity_in`]).
+#[cfg(test)]
+fn graphql_model_identity(m: &MergedGraph) -> (Vec<Edge>, Option<GraphqlModelReport>) {
+    graphql_model_identity_in(m, &OnceCell::new())
+}
+
+/// DT.1k: the `graphql_model` classes. `None` when no callable carries a
+/// `graphql_result` site naming a document; otherwise the report, with the
+/// edges when GRAPHQL_CALLS pairs reach a schema type.
+///
+/// 1. **The document.** A site's `document` binds in the callable's MODULE
+///    through [`bind_client_name`] (own symbols, import bindings with TS
+///    re-export barrels, `ns.NAME`), any kind, and is kept only when it is a
+///    STATE_VAR (`documents_resolved`).
+/// 2. **The operation.** The one GRAPHQL_OPERATION of the STATE_VAR's repo
+///    minted in its POSITION span (an op POSITION in that file, its row in
+///    the const's rows). None, or two (two documents in one const), joins
+///    nothing.
+/// 3. **The schema type.** The result type resolves as a client value in
+///    the callable's module ([`Ctx::resolve`]); each root key k of it (an
+///    object, a model's fields, or an all-object union's merged fields) is
+///    a response key of the op's selection, whose `field` (an alias's schema
+///    field, else k) is a root field f. The op's [`GraphqlPair`] with root
+///    field f, not refused, names the schema type T (DT.1n's lookup:
+///    `message:graphql:<T>` plus the resolver's owner, in its repo); two
+///    pairs naming two types join nothing.
+/// 4. **The client model.** The value at k, when it resolved to a client
+///    model, pairs T when [`confirms`] holds between the model's JSON names
+///    and T's field names (no case folding), diverged when the model lists a
+///    name T does not (an open or interface T claims none absent). A TS type
+///    alias (graphql-codegen's `type GetUsersQuery = {..}`) mints no node:
+///    its keys are unknown and no class forms.
+/// 5. **Stars.** [`model_stars`] over the pairs (no embed rule): a client
+///    model pairing two types joins neither, two client models of one
+///    project pairing one type are both dropped, one per project joins. The
+///    center is T. A star's generated model then joins it: the one STRUCT
+///    of T's repo and owning project whose name is T's, generated
+///    ([`is_generated_struct`]) and whose `go` field names confirm T's
+///    (two such structs: none), diverged when the two name sets differ.
+///    gqlgen's hand-written domain structs of the same name are never
+///    generated, so they never join.
+///
+/// Edges: member -> T, SAME_AS, the `graphql_model` row's tier (DERIVED,
+/// Medium), one EVIDENCE cell `resolver:models` rule `graphql_model` or
+/// `graphql_model/diverged`, located at the first joining call site (joins
+/// sorted by op qname, file, line), a generated struct at its own
+/// declaration.
+fn graphql_model_identity_in<'m>(
+    m: &'m MergedGraph,
+    ctx: &OnceCell<Ctx<'m>>,
+) -> (Vec<Edge>, Option<GraphqlModelReport>) {
+    let mut edges = Vec::new();
+    let any_result = m.graphs.iter().any(|g| {
+        g.nodes.iter().any(|n| {
+            n.cells.iter().any(|c| {
+                c.kind == cell_type::MESSAGE_TYPE
+                    && matches!(&c.payload, CellPayload::Json(p) | CellPayload::Text(p)
+                        if p.contains("\"form\":\"graphql_result\""))
+            })
+        })
+    });
+    if !any_result {
+        return (edges, None);
+    }
+    let ctx = ctx.get_or_init(|| Ctx::new(m));
+    let results = graphql_results(m, ctx);
+    if results.is_empty() {
+        return (edges, None);
+    }
+    let mut report = GraphqlModelReport {
+        results: results.len(),
+        ..GraphqlModelReport::default()
+    };
+    let has_calls = m
+        .cross_edges
+        .iter()
+        .any(|e| e.category == edge_category::GRAPHQL_CALLS);
+    let gix = GqlIndex::new(m);
+    let gp = if has_calls {
+        gql_pairs_in(m, &gix)
+    } else {
+        GraphqlPairs::default()
+    };
+    let mut pairs_of_op: HashMap<u64, Vec<&GraphqlPair>> = HashMap::new();
+    for p in gp
+        .pairs
+        .iter()
+        .filter(|p| p.refused.is_none() && p.schema_type.is_some())
+    {
+        pairs_of_op.entry(p.op.0).or_default().push(p);
+    }
+    let ops = operation_sites(m);
+
+    let mut joins: Vec<GqlJoin> = Vec::new();
+    // Each reached schema type's bare name and field names.
+    let mut centers: HashMap<u64, (String, BTreeSet<String>)> = HashMap::new();
+    for r in &results {
+        let Some(module) = ctx.module_of(r.graph, r.from) else {
+            continue;
+        };
+        let Some(doc) = bind_client_name(ctx.idx[r.graph].g, module, &r.document) else {
+            continue;
+        };
+        let Some(dg) = ctx.graph_of(doc, r.graph) else {
+            continue;
+        };
+        let dix = &ctx.idx[dg];
+        if dix.kind(doc) != Some(node_kind::STATE_VAR) {
+            continue;
+        }
+        report.documents_resolved += 1;
+        let Some(node) = dix.at.get(&doc).and_then(|i| dix.g.nodes.get(*i)) else {
+            continue;
+        };
+        let mut minted: BTreeSet<u64> = BTreeSet::new();
+        for (file, start, end) in position_spans(&node.cells) {
+            for (row, op) in ops.get(&(node.repo.0, file)).into_iter().flatten() {
+                if (start..=end).contains(row) {
+                    minted.insert(*op);
+                }
+            }
+        }
+        let (Some(&op), None) = (minted.first(), minted.iter().nth(1)) else {
+            continue;
+        };
+        let Some(sel) = gix
+            .ops
+            .get(&op)
+            .filter(|o| o.sites.len() == 1)
+            .and_then(|o| o.sites.first())
+        else {
+            continue;
+        };
+        let Shape::Object {
+            fields: selected, ..
+        } = &sel.shape
+        else {
+            continue;
+        };
+        let format = format_for_file(&r.file);
+        let names = Names::Client(Some((r.graph, module)));
+        let resolved = ctx.resolve(r.graph, names, &r.shape, format, WireDirection::Response, 0);
+        let Some(root) = object_view(&resolved) else {
+            continue;
+        };
+        for (key, field) in &root.fields {
+            let Some(client) = field.value.model else {
+                continue;
+            };
+            let Some(entry) = selected.iter().find(|f| f.name == *key) else {
+                continue;
+            };
+            let root_field = entry.field.as_deref().unwrap_or(&entry.name);
+            let reached: Vec<&GraphqlPair> = pairs_of_op
+                .get(&op)
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|p| p.root_field == root_field)
+                .collect();
+            let types: BTreeSet<u64> = reached
+                .iter()
+                .filter_map(|p| p.schema_type)
+                .map(|t| t.0)
+                .collect();
+            let (Some(&pair), 1) = (reached.first(), types.len()) else {
+                continue;
+            };
+            let Some((center, schema, closed)) = gix.schema_of(pair) else {
+                continue;
+            };
+            let names_of_center = schema.fields.iter().map(|f| f.name.clone()).collect();
+            centers
+                .entry(center.0)
+                .or_insert_with(|| (pair.type_name.clone(), names_of_center));
+            let server: BTreeSet<&str> = schema.fields.iter().map(|f| f.name.as_str()).collect();
+            let client_names: BTreeSet<&str> =
+                field.value.fields.keys().map(String::as_str).collect();
+            let Some(overlap) =
+                confirms(client_names.iter().copied(), server.iter().copied(), false)
+            else {
+                continue;
+            };
+            let diverged = closed && client_names.iter().any(|n| !server.contains(n));
+            joins.push(GqlJoin {
+                client,
+                center,
+                join: ModelJoin {
+                    direction: WireDirection::Response,
+                    route_qname: pair.op_qname.clone(),
+                    file: r.file.clone(),
+                    line: r.line,
+                    handler_qname: pair.resolver_qname.clone(),
+                    path: key.clone(),
+                    overlap,
+                    client_fields: client_names.len(),
+                    server_fields: server.len(),
+                    diverged,
+                },
+            });
+        }
+    }
+    let Some(rule) = CODE_TABLES.identity_rule(same_as::RULE_GRAPHQL_MODEL) else {
+        return (edges, Some(report));
+    };
+    if joins.is_empty() {
+        return (edges, Some(report));
+    }
+
+    // One ModelPair per (client, type), joins sorted as DT.1h sorts them.
+    let mut index: HashMap<(NodeId, NodeId), usize> = HashMap::new();
+    let mut model_pairs: Vec<ModelPair> = Vec::new();
+    for j in joins {
+        let at = *index.entry((j.client, j.center)).or_insert_with(|| {
+            model_pairs.push(ModelPair {
+                client: j.client,
+                client_qname: qname_of(m, j.client),
+                server: j.center,
+                server_qname: qname_of(m, j.center),
+                overlap: 0,
+                diverged: false,
+                joins: Vec::new(),
+            });
+            model_pairs.len() - 1
+        });
+        if let Some(mp) = model_pairs.get_mut(at) {
+            mp.overlap = mp.overlap.max(j.join.overlap);
+            mp.diverged |= j.join.diverged;
+            if !mp.joins.contains(&j.join) {
+                mp.joins.push(j.join);
+            }
+        }
+    }
+    let join_key = |j: &ModelJoin| {
+        (
+            j.route_qname.clone(),
+            j.file.clone(),
+            j.line,
+            j.handler_qname.clone(),
+            j.path.clone(),
+        )
+    };
+    for mp in &mut model_pairs {
+        mp.joins.sort_by_cached_key(join_key);
+    }
+    model_pairs.sort_by_cached_key(|mp| {
+        (
+            mp.client_qname.clone(),
+            mp.server_qname.clone(),
+            mp.joins.first().map(join_key),
+        )
+    });
+
+    let confidence = tier_confidence(rule.tier);
+    let projects = ProjectPaths::of(m);
+    let takes = |p: &ModelPair| ctx.takes(rule, p.client, p.server);
+    let project = |c: NodeId| ctx.project_of(m, &projects, c);
+    let (stars, _) = model_stars(&model_pairs, takes, |_, _| false, project);
+    let generated = generated_structs(m, ctx);
+    let ev_rule = |diverged: bool| same_as::evidence_rule(rule.name, diverged);
+    for star in &stars {
+        for p in &star.clients {
+            let mut ev = rule_evidence(PASS, &ev_rule(p.diverged));
+            if let Some(j) = p.joins.first() {
+                ev = match j.line.checked_sub(1) {
+                    Some(line) => ev.at(j.file.clone(), line),
+                    None => Evidence {
+                        file: Some(j.file.clone()),
+                        basis: Basis::File,
+                        ..ev
+                    },
+                };
+            }
+            edges.push(
+                Edge::new(p.client, star.server, edge_category::SAME_AS, confidence)
+                    .with_cell(ev.to_cell()),
+            );
+        }
+        report.classes += 1;
+        let Some((model, diverged, at)) = centers
+            .get(&star.server.0)
+            .and_then(|c| generated_model(ctx, &projects, &generated, star.server, c))
+        else {
+            continue;
+        };
+        if !ctx.takes(rule, model, star.server) {
+            continue;
+        }
+        let ev = rule_evidence(PASS, &ev_rule(diverged));
+        let ev = match at {
+            Some((file, Some(line))) => ev.at(file, line),
+            Some((file, None)) => Evidence {
+                file: Some(file),
+                basis: Basis::File,
+                ..ev
+            },
+            None => ev,
+        };
+        edges.push(
+            Edge::new(model, star.server, edge_category::SAME_AS, confidence)
+                .with_cell(ev.to_cell()),
+        );
+        report.generated_models += 1;
+    }
+    (edges, Some(report))
+}
+
+/// The generated model of the schema type `center` ([`graphql_model_identity_in`]
+/// step 5), `(name, field names)` the type's: the struct, whether its names
+/// differ from the type's, and its declaration's location.
+fn generated_model(
+    ctx: &Ctx<'_>,
+    projects: &ProjectPaths,
+    generated: &HashMap<(u64, &str), Vec<(usize, NodeId)>>,
+    center: NodeId,
+    (name, server): &(String, BTreeSet<String>),
+) -> Option<(NodeId, bool, Option<Location>)> {
+    let tg = ctx.graphs(center).first().copied()?;
+    let tix = &ctx.idx[tg];
+    let repo = tix.g.nodes.get(*tix.at.get(&center)?)?.repo;
+    let owner = tix
+        .file_of
+        .get(&center)
+        .and_then(|f| projects.owner_of(repo, f));
+    let mut found: Vec<(NodeId, bool, Option<Location>)> = Vec::new();
+    for &(gi, id) in generated
+        .get(&(repo.0, name.as_str()))
+        .into_iter()
+        .flatten()
+    {
+        let ix = &ctx.idx[gi];
+        let (Some(file), Some(fields)) = (ix.file_of.get(&id), ix.schemas.get(&id)) else {
+            continue;
+        };
+        if projects.owner_of(repo, file) != owner {
+            continue;
+        }
+        let names: BTreeSet<String> = fields.fields.iter().map(|f| f.name.clone()).collect();
+        let shared = (
+            names.iter().map(String::as_str),
+            server.iter().map(String::as_str),
+        );
+        if confirms(shared.0, shared.1, false).is_none() {
+            continue;
+        }
+        let at = ix
+            .at
+            .get(&id)
+            .and_then(|i| ix.g.nodes.get(*i))
+            .and_then(|n| locate(&n.cells));
+        found.push((id, names != *server, at));
+    }
+    match found.as_slice() {
+        [one] => Some(one.clone()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3201,6 +3899,13 @@ mod tests {
 
         fn module(&mut self, qname: &str, file: &str) -> NodeId {
             self.node(node_kind::MODULE, qname, None, vec![pos(file)])
+        }
+
+        /// `cell` added to the node `id`.
+        fn cell(&mut self, id: NodeId, cell: Cell) {
+            if let Some(n) = self.g.nodes.iter_mut().find(|n| n.id == id) {
+                n.cells.push(cell);
+            }
         }
 
         fn edge(&mut self, from: NodeId, to: NodeId, category: EdgeCategoryId) {
@@ -5511,5 +6216,702 @@ mod tests {
             GraphqlPairs::default()
         );
         assert_eq!(graphql_named("[[Item!]]!"), "Item");
+    }
+
+    // ---- DT.1l: the envelope-or-array union --------------------------------
+
+    /// A client accepting `{ items: Item[] } | Item[]` is compared by the
+    /// member of the server's kind: the envelope against an object write,
+    /// the bare array against an array write; either way the model pairs.
+    #[test]
+    fn an_envelope_or_array_union_compares_its_member_of_the_servers_kind() {
+        let item = |f: WireFormat, id: u64| {
+            model_of(
+                f,
+                id,
+                false,
+                false,
+                vec![mf(f, "id", "string", true), mf(f, "name", "string", true)],
+            )
+        };
+        let mut arr = item(TS, 1);
+        arr.array = true;
+        let envelope = inline(
+            TS,
+            false,
+            vec![fld("items", Some("Item[]"), true, arr.clone())],
+        );
+        let client = union_of(TS, vec![envelope, arr]);
+        let mut server_arr = item(GO, 11);
+        server_arr.array = true;
+        let server_obj = inline(
+            GO,
+            false,
+            vec![fld("items", None, true, server_arr.clone())],
+        );
+        for (server, path) in [(&server_obj, "items[]"), (&server_arr, "[]")] {
+            let c = compare(WireDirection::Response, &client, server, "");
+            assert!(changes(&c).is_empty(), "{path}: {:?}", c.changes);
+            assert_eq!(
+                c.models
+                    .iter()
+                    .map(|m| (m.client.0, m.server.0, m.path.as_str()))
+                    .collect::<Vec<_>>(),
+                [(1, 11, path)],
+                "{path}"
+            );
+            assert!(c.notes.contains(NOTE_UNION));
+        }
+        // A member of no known kind keeps the union unjudged.
+        let loose = union_of(TS, vec![client.members[0].clone(), val(TS, "any")]);
+        let c = compare(WireDirection::Response, &loose, &server_obj, "");
+        assert!(
+            c.changes.is_empty() && c.models.is_empty(),
+            "{:?}",
+            c.changes
+        );
+        // A server scalar matches no member: nothing is judged.
+        let c = compare(WireDirection::Response, &client, &val(GO, "string"), "");
+        assert!(c.changes.is_empty() && c.models.is_empty());
+        // Two array members against an array: no one member, nothing judged.
+        let mut other = item(TS, 2);
+        other.array = true;
+        let mut first = item(TS, 1);
+        first.array = true;
+        let two = union_of(TS, vec![first, other]);
+        let c = compare(WireDirection::Response, &two, &server_arr, "");
+        assert!(c.models.is_empty(), "{:?}", c.models);
+        // The envelope's drift is still named under its path.
+        let thin = model_of(GO, 12, true, false, vec![mf(GO, "id", "string", true)]);
+        let thin_obj = inline(GO, false, vec![fld("items", None, true, thin)]);
+        let c = compare(WireDirection::Response, &client, &thin_obj, "");
+        assert_eq!(changes(&c), [("items[].name", FIELD_MISSING, true)]);
+    }
+
+    // ---- DT.1k: graphql_model identity -------------------------------------
+
+    const BANNER: &str =
+        "// Code generated by github.com/99designs/gqlgen, DO NOT EDIT.\n\npackage model\n";
+
+    fn span(file: &str, start: u32, end: u32) -> Cell {
+        Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{file}","start_line":{start},"end_line":{end}}}"#
+            )),
+        }
+    }
+
+    /// A `graphql_result` site at 1-based `line` naming `doc`.
+    fn result(doc: &str, line: u32, shape: Shape) -> Cell {
+        let mut w = ServerWire::new(WireForm::GraphqlResult, "T", line, shape);
+        w.document = Some(doc.to_string());
+        w.cell()
+    }
+
+    /// `{ <key>: <ty> }`.
+    fn keyed(key: &str, ty: &str) -> Shape {
+        Shape::Object {
+            fields: vec![ShapeField::new(key, true, Shape::named(ty))],
+            open: false,
+        }
+    }
+
+    fn code(text: &str) -> Cell {
+        Cell {
+            kind: cell_type::CODE,
+            payload: CellPayload::Text(text.to_string()),
+        }
+    }
+
+    const ITEM_FIELDS: &[(&str, &str, bool)] = &[
+        ("id", "string", true),
+        ("label", "string", true),
+        ("priceCents", "int", true),
+        ("onHand", "int", true),
+    ];
+
+    /// One console function: (name, document, 1-based call line, result).
+    type Call<'a> = (&'a str, &'a str, u32, Shape);
+
+    /// The models-graphql-stock shape. console: documents.ts holds
+    /// LIST_ITEMS (rows `list`, minting ListItems at row 2), ADJUST_STOCK
+    /// (rows 14-21, AdjustStock at 14) and ALIASED (rows 30-35, Aliased at
+    /// 30, `stock: items`); types.ts InventoryItem (barcode beyond the
+    /// type); inventory.ts one FUNCTION per `calls`, importing the three
+    /// documents and InventoryItem. api: the SDL Item and its root fields
+    /// (` @<owner>` on the resolvers when `owner`), gqlgen's generated
+    /// model.Item and the hand-written stock.Item.
+    fn gql_stock(calls: &[Call<'_>], list: (u32, u32), owner: Option<&str>) -> (G, G) {
+        let mut c = G::new("console");
+        let docs = c.module("src::documents", "src/documents.ts");
+        let types = c.module("src::types", "src/types.ts");
+        let inv = c.module("src::inventory", "src/inventory.ts");
+        let item = c.node(
+            node_kind::INTERFACE,
+            "src::types::InventoryItem",
+            Some(types),
+            vec![
+                span("src/types.ts", 0, 6),
+                schema(
+                    WireFormat::Ts,
+                    &[
+                        ("id", "string", true),
+                        ("label", "string", true),
+                        ("priceCents", "number", true),
+                        ("onHand", "number", true),
+                        ("barcode", "string", true),
+                    ],
+                    &[],
+                ),
+            ],
+        );
+        c.symbol(types, "InventoryItem", item);
+        c.import(inv, "InventoryItem", item);
+        let consts = [
+            (
+                "LIST_ITEMS",
+                list,
+                "ListItems",
+                "query ListItems",
+                "query ListItems { items { id label priceCents onHand barcode } }",
+                2,
+            ),
+            (
+                "ADJUST_STOCK",
+                (14, 21),
+                "AdjustStock",
+                "mutation AdjustStock",
+                "mutation AdjustStock { adjustStock(id: 1) { id onHand } }",
+                14,
+            ),
+            (
+                "ALIASED",
+                (30, 35),
+                "Aliased",
+                "query Aliased",
+                "query Aliased { stock: items { id label } }",
+                30,
+            ),
+        ];
+        for (name, (start, end), op, raw, doc, row) in consts {
+            let v = c.node(
+                node_kind::STATE_VAR,
+                &format!("src::documents::{name}"),
+                Some(docs),
+                vec![span("src/documents.ts", start, end)],
+            );
+            c.symbol(docs, name, v);
+            c.import(inv, name, v);
+            c.node(
+                node_kind::GRAPHQL_OPERATION,
+                &format!("graphql_op:{op}"),
+                None,
+                vec![selection(raw, doc), span("src/documents.ts", row, row)],
+            );
+        }
+        for (name, doc, line, shape) in calls {
+            c.node(
+                node_kind::FUNCTION,
+                &format!("src::inventory::{name}"),
+                Some(inv),
+                vec![
+                    span("src/inventory.ts", line - 1, line + 2),
+                    result(doc, *line, shape.clone()),
+                ],
+            );
+        }
+
+        let mut a = G::new("api");
+        let sm = a.module("graph::schema", "graph/schema.graphqls");
+        a.node(
+            node_kind::MESSAGE_TYPE,
+            "message:graphql:Item",
+            Some(sm),
+            vec![
+                span("graph/schema.graphqls", 0, 5),
+                origin("type"),
+                sdl(
+                    &[
+                        ("id", "ID!"),
+                        ("label", "String!"),
+                        ("priceCents", "Int!"),
+                        ("onHand", "Int!"),
+                    ],
+                    false,
+                ),
+            ],
+        );
+        let at = |f: &str| match owner {
+            Some(o) => format!("graphql_resolver:{f} @{o}"),
+            None => format!("graphql_resolver:{f}"),
+        };
+        for (field, ty) in [("items", "[Item!]!"), ("adjustStock", "Item!")] {
+            a.node(
+                node_kind::GRAPHQL_RESOLVER,
+                &at(field),
+                Some(sm),
+                vec![returns(ty)],
+            );
+        }
+        let gen_mod = a.module("graph::model::models_gen", "graph/model/models_gen.go");
+        a.cell(gen_mod, code(BANNER));
+        a.node(
+            node_kind::STRUCT,
+            "graph::model::models_gen::Item",
+            Some(gen_mod),
+            vec![
+                span("graph/model/models_gen.go", 4, 9),
+                schema(WireFormat::Go, ITEM_FIELDS, &[]),
+            ],
+        );
+        let stock_mod = a.module("internal::stock::item", "internal/stock/item.go");
+        a.cell(
+            stock_mod,
+            code("package stock\n\n// Item is a warehouse row.\ntype Item struct {}\n"),
+        );
+        a.node(
+            node_kind::STRUCT,
+            "internal::stock::item::Item",
+            Some(stock_mod),
+            vec![
+                span("internal/stock/item.go", 4, 9),
+                schema(WireFormat::Go, ITEM_FIELDS, &[]),
+            ],
+        );
+        (c, a)
+    }
+
+    /// The GRAPHQL_CALLS the graphql resolver draws over [`gql_stock`].
+    fn gql_merged(c: G, a: G, owner: Option<&str>, console_first: bool) -> MergedGraph {
+        let (crepo, arepo) = (c.g.repo, a.g.repo);
+        let at = |f: &str| match owner {
+            Some(o) => format!("graphql_resolver:{f} @{o}"),
+            None => format!("graphql_resolver:{f}"),
+        };
+        let edge = |op: &str, field: &str| {
+            gql_calls(
+                NodeId::from_parts(
+                    GRAPH_TYPE,
+                    crepo,
+                    node_kind::GRAPHQL_OPERATION,
+                    &format!("graphql_op:{op}"),
+                ),
+                NodeId::from_parts(GRAPH_TYPE, arepo, node_kind::GRAPHQL_RESOLVER, &at(field)),
+                GRAPHQL_EMITTER,
+            )
+        };
+        let cross = vec![
+            edge("ListItems", "items"),
+            edge("AdjustStock", "adjustStock"),
+            edge("Aliased", "items"),
+        ];
+        let graphs = if console_first {
+            vec![c.g, a.g]
+        } else {
+            vec![a.g, c.g]
+        };
+        let mut m = MergedGraph::new(graphs);
+        m.cross_edges = cross;
+        m
+    }
+
+    fn fixture_calls() -> Vec<Call<'static>> {
+        vec![
+            (
+                "emptyShelves",
+                "LIST_ITEMS",
+                6,
+                keyed("items", "InventoryItem[]"),
+            ),
+            (
+                "adjust",
+                "ADJUST_STOCK",
+                11,
+                keyed("adjustStock", "InventoryItem"),
+            ),
+        ]
+    }
+
+    /// `(from, to, evidence)` of every `graphql_model` SAME_AS edge.
+    fn gql_same_as(m: &MergedGraph) -> Vec<(String, String, String)> {
+        same_as_rows(m)
+            .into_iter()
+            .filter(|r| r.2.contains("\"rule\":\"graphql_model"))
+            .map(|r| {
+                assert_eq!(r.3, Confidence::Medium, "DERIVED");
+                (r.0, r.1, r.2)
+            })
+            .collect()
+    }
+
+    fn ev(rule: &str, file: &str, line: u32) -> String {
+        format!(
+            r#"{{"emitter":"resolver:models","rule":"{rule}","file":"{file}","line":{line},"basis":"site"}}"#
+        )
+    }
+
+    /// The fixture: InventoryItem (barcode beyond the type: diverged) and
+    /// gqlgen's generated model.Item join message:graphql:Item, the client
+    /// edge at the first join by op qname (AdjustStock's call, 0-based
+    /// line 10), the generated one at its declaration; the hand-written
+    /// stock.Item joins nothing. Graph order changes nothing.
+    #[test]
+    fn graphql_model_joins_the_result_model_and_the_generated_model() {
+        let (c, a) = gql_stock(&fixture_calls(), (2, 12), None);
+        let mut m = gql_merged(c, a, None, true);
+        let (edges, report) = graphql_model_identity(&m);
+        let report = report.expect("graphql_result sites: the marker prints");
+        assert_eq!(
+            report.line(),
+            "[models] graphql results=2 documents_resolved=2 generated_models=1 classes=1"
+        );
+        assert_eq!(edges.len(), 2);
+        ModelResolver.resolve(&mut m);
+        let rows = gql_same_as(&m);
+        assert_eq!(
+            rows,
+            [
+                (
+                    "graph::model::models_gen::Item".to_string(),
+                    "message:graphql:Item".to_string(),
+                    ev("graphql_model", "graph/model/models_gen.go", 4),
+                ),
+                (
+                    "src::types::InventoryItem".to_string(),
+                    "message:graphql:Item".to_string(),
+                    ev("graphql_model/diverged", "src/inventory.ts", 10),
+                ),
+            ]
+        );
+        let (c, a) = gql_stock(&fixture_calls(), (2, 12), None);
+        let mut flipped = gql_merged(c, a, None, false);
+        ModelResolver.resolve(&mut flipped);
+        assert_eq!(gql_same_as(&flipped), rows, "graph order changes nothing");
+    }
+
+    /// An alias's response key reaches its schema field (`stock: items`):
+    /// one call through ALIASED alone forms the class; a model that lists
+    /// only the type's names is not diverged.
+    #[test]
+    fn an_aliased_result_key_reaches_its_root_field() {
+        let calls = [("aliased", "ALIASED", 32, keyed("stock", "InventoryItem[]"))];
+        let (mut c, a) = gql_stock(&calls, (2, 12), None);
+        // A model without barcode: the type's names only.
+        let types = NodeId::from_parts(GRAPH_TYPE, c.g.repo, node_kind::MODULE, "src::types");
+        let exact = c.node(
+            node_kind::INTERFACE,
+            "src::types::ExactItem",
+            Some(types),
+            vec![
+                span("src/types.ts", 8, 12),
+                schema(
+                    WireFormat::Ts,
+                    &[("id", "string", true), ("label", "string", true)],
+                    &[],
+                ),
+            ],
+        );
+        let inv = NodeId::from_parts(GRAPH_TYPE, c.g.repo, node_kind::MODULE, "src::inventory");
+        c.import(inv, "ExactItem", exact);
+        let fn_id = NodeId::from_parts(
+            GRAPH_TYPE,
+            c.g.repo,
+            node_kind::FUNCTION,
+            "src::inventory::aliased",
+        );
+        c.cell(fn_id, result("ALIASED", 33, keyed("stock", "ExactItem")));
+        let mut m = gql_merged(c, a, None, true);
+        let (_, report) = graphql_model_identity(&m);
+        // Two client models of one project pair Item: both dropped.
+        assert_eq!(
+            report.map(|r| r.line()).as_deref(),
+            Some("[models] graphql results=2 documents_resolved=2 generated_models=0 classes=0")
+        );
+        ModelResolver.resolve(&mut m);
+        assert!(gql_same_as(&m).is_empty());
+
+        let calls = [("aliased", "ALIASED", 32, keyed("stock", "ExactItem"))];
+        let (mut c, a) = gql_stock(&calls, (2, 12), None);
+        let exact = c.node(
+            node_kind::INTERFACE,
+            "src::types::ExactItem",
+            Some(types),
+            vec![
+                span("src/types.ts", 8, 12),
+                schema(
+                    WireFormat::Ts,
+                    &[("id", "string", true), ("label", "string", true)],
+                    &[],
+                ),
+            ],
+        );
+        c.import(inv, "ExactItem", exact);
+        let mut m = gql_merged(c, a, None, true);
+        ModelResolver.resolve(&mut m);
+        let rows = gql_same_as(&m);
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.0.as_str(), r.2.contains("/diverged")))
+                .collect::<Vec<_>>(),
+            [
+                ("graph::model::models_gen::Item", false),
+                ("src::types::ExactItem", false)
+            ]
+        );
+    }
+
+    /// One client model per project: two of one project pairing Item are both
+    /// dropped (no class, so no generated member either); in two projects
+    /// both join.
+    #[test]
+    fn graphql_model_keeps_one_client_model_per_project() {
+        let build = |two_projects: bool| {
+            let (mut c, a) = gql_stock(&fixture_calls(), (2, 12), None);
+            let admin_types = c.module("admin::src::types", "admin/src/types.ts");
+            let row = c.node(
+                node_kind::INTERFACE,
+                "admin::src::types::StockRow",
+                Some(admin_types),
+                vec![
+                    span("admin/src/types.ts", 0, 5),
+                    schema(
+                        WireFormat::Ts,
+                        &[("id", "string", true), ("onHand", "number", true)],
+                        &[],
+                    ),
+                ],
+            );
+            let admin = c.module("admin::src::rows", "admin/src/rows.ts");
+            let list = NodeId::from_parts(
+                GRAPH_TYPE,
+                c.g.repo,
+                node_kind::STATE_VAR,
+                "src::documents::LIST_ITEMS",
+            );
+            c.import(admin, "LIST_ITEMS", list);
+            c.import(admin, "StockRow", row);
+            c.node(
+                node_kind::FUNCTION,
+                "admin::src::rows::rows",
+                Some(admin),
+                vec![
+                    span("admin/src/rows.ts", 2, 5),
+                    result("LIST_ITEMS", 3, keyed("items", "StockRow[]")),
+                ],
+            );
+            let origin = |path: &str| Cell {
+                kind: cell_type::ORIGIN,
+                payload: CellPayload::Json(format!(
+                    r#"{{"label":"x","path":"{path}","provenance":"project_root"}}"#
+                )),
+            };
+            c.node(node_kind::PROJECT, "project:.", None, vec![origin("")]);
+            if two_projects {
+                c.node(
+                    node_kind::PROJECT,
+                    "project:admin",
+                    None,
+                    vec![origin("admin")],
+                );
+            }
+            let mut m = gql_merged(c, a, None, true);
+            ModelResolver.resolve(&mut m);
+            gql_same_as(&m).into_iter().map(|r| r.0).collect::<Vec<_>>()
+        };
+        assert!(build(false).is_empty(), "one project, two models: none");
+        assert_eq!(
+            build(true),
+            [
+                "admin::src::types::StockRow",
+                "graph::model::models_gen::Item",
+                "src::types::InventoryItem"
+            ]
+        );
+    }
+
+    /// A const holding two operations names neither; a type only under
+    /// another owner than its root field's is refused (DT.1n's
+    /// owner_mismatch); with no GRAPHQL_CALLS the marker still counts the
+    /// sites; with no site there is no marker.
+    #[test]
+    fn graphql_model_refuses_what_it_cannot_pin() {
+        let empty = [(
+            "emptyShelves",
+            "LIST_ITEMS",
+            6,
+            keyed("items", "InventoryItem[]"),
+        )];
+        let (c, a) = gql_stock(&empty, (2, 16), None);
+        let m = gql_merged(c, a, None, true);
+        let (edges, report) = graphql_model_identity(&m);
+        assert!(edges.is_empty());
+        assert_eq!(
+            report.map(|r| r.line()).as_deref(),
+            Some("[models] graphql results=1 documents_resolved=1 generated_models=0 classes=0"),
+            "LIST_ITEMS' rows 2-16 hold ListItems and AdjustStock"
+        );
+
+        let (c, a) = gql_stock(&fixture_calls(), (2, 12), Some("api"));
+        let m = gql_merged(c, a, Some("api"), true);
+        assert!(
+            graphql_pairs(&m)
+                .pairs
+                .iter()
+                .all(|p| p.refused == Some(REFUSED_OWNER)),
+            "message:graphql:Item has no @api copy"
+        );
+        let (edges, report) = graphql_model_identity(&m);
+        assert!(edges.is_empty());
+        assert_eq!(report.map(|r| r.classes), Some(0));
+
+        let (c, a) = gql_stock(&fixture_calls(), (2, 12), None);
+        let mut m = gql_merged(c, a, None, true);
+        m.cross_edges.clear();
+        let (edges, report) = graphql_model_identity(&m);
+        assert!(edges.is_empty());
+        assert_eq!(
+            report.map(|r| r.line()).as_deref(),
+            Some("[models] graphql results=2 documents_resolved=2 generated_models=0 classes=0")
+        );
+
+        let (c, a) = gql_stock(&[], (2, 12), None);
+        let m = gql_merged(c, a, None, true);
+        assert_eq!(graphql_model_identity(&m), (Vec::new(), None));
+        let unbound = [(
+            "emptyShelves",
+            "NOT_IMPORTED",
+            6,
+            keyed("items", "InventoryItem[]"),
+        )];
+        let (c, a) = gql_stock(&unbound, (2, 12), None);
+        let (_, report) = graphql_model_identity(&gql_merged(c, a, None, true));
+        assert_eq!(
+            report.map(|r| (r.results, r.documents_resolved)),
+            Some((1, 0))
+        );
+    }
+
+    /// The generated member: a generator header on the file's MODULE, a
+    /// codegen file name, or an ORIGIN `generated` already stamped (a
+    /// merge); never a protobuf file, a hand-written struct, or one of two
+    /// generated structs of the type's name in one project.
+    #[test]
+    fn the_generated_member_is_the_one_generated_struct_of_the_types_name() {
+        let members = |extra: &dyn Fn(&mut G)| {
+            let (c, mut a) = gql_stock(&fixture_calls(), (2, 12), None);
+            extra(&mut a);
+            let mut m = gql_merged(c, a, None, true);
+            ModelResolver.resolve(&mut m);
+            gql_same_as(&m).into_iter().map(|r| r.0).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            members(&|_| {}),
+            [
+                "graph::model::models_gen::Item",
+                "src::types::InventoryItem"
+            ]
+        );
+        // A second generated Item of the project: neither joins.
+        assert_eq!(
+            members(&|a: &mut G| {
+                let m2 = a.module("graph::model2::models_gen", "graph/model2/models_gen.go");
+                a.cell(m2, code(BANNER));
+                a.node(
+                    node_kind::STRUCT,
+                    "graph::model2::models_gen::Item",
+                    Some(m2),
+                    vec![
+                        span("graph/model2/models_gen.go", 4, 9),
+                        schema(WireFormat::Go, ITEM_FIELDS, &[]),
+                    ],
+                );
+            }),
+            ["src::types::InventoryItem"]
+        );
+        let generated = |file: &str, cells: Vec<Cell>, module_code: &str| {
+            let (_, mut a) = gql_stock(&[], (2, 12), None);
+            let md = a.module("x::m", file);
+            a.cell(md, code(module_code));
+            let mut all = vec![span(file, 1, 2)];
+            all.extend(cells);
+            let id = a.node(node_kind::STRUCT, "x::m::Item", Some(md), all);
+            let ix = GraphIndex::new(&a.g);
+            let node = a.g.nodes.iter().find(|n| n.id == id).cloned().unwrap();
+            is_generated_struct(&ix, &node)
+        };
+        let stamped = Cell {
+            kind: cell_type::ORIGIN,
+            payload: CellPayload::Json(r#"{"provenance":"generated"}"#.to_string()),
+        };
+        assert!(
+            generated("x/models_gen.go", vec![], BANNER),
+            "a generator header"
+        );
+        assert!(
+            generated("x/Models.Designer.cs", vec![], "class M {}"),
+            "a codegen name"
+        );
+        assert!(
+            generated("x/m.go", vec![stamped], "package m"),
+            "a stamped ORIGIN"
+        );
+        assert!(
+            !generated("x/m.pb.go", vec![], BANNER),
+            "protobuf output is generated_proto"
+        );
+        assert!(!generated(
+            "x/m.go",
+            vec![],
+            "package m\n// Item is hand-written.\n"
+        ));
+    }
+
+    /// DT.1q's barrels: a document named through a barrel's re-export (the
+    /// import binding DT.1q persists) or `ns.NAME` on a namespace import of
+    /// the barrel (its same-name re-export in the barrel's symbols) resolves
+    /// to its STATE_VAR.
+    #[test]
+    fn a_document_imported_through_a_barrel_resolves_to_its_state_var() {
+        for doc in ["LIST_ITEMS", "gql.LIST_ITEMS"] {
+            let (mut c, a) = gql_stock(&[], (2, 12), None);
+            let list = NodeId::from_parts(
+                GRAPH_TYPE,
+                c.g.repo,
+                node_kind::STATE_VAR,
+                "src::documents::LIST_ITEMS",
+            );
+            let item = NodeId::from_parts(
+                GRAPH_TYPE,
+                c.g.repo,
+                node_kind::INTERFACE,
+                "src::types::InventoryItem",
+            );
+            let barrel = c.module("src::graphql", "src/graphql/index.ts");
+            c.symbol(barrel, "LIST_ITEMS", list);
+            let page = c.module("src::page", "src/page.ts");
+            c.import(page, "LIST_ITEMS", list);
+            c.import(page, "gql", barrel);
+            c.import(page, "InventoryItem", item);
+            c.node(
+                node_kind::FUNCTION,
+                "src::page::load",
+                Some(page),
+                vec![
+                    span("src/page.ts", 3, 6),
+                    result(doc, 4, keyed("items", "InventoryItem[]")),
+                ],
+            );
+            assert_eq!(bind_client_name(&c.g, page, doc), Some(list), "{doc}");
+            let mut m = gql_merged(c, a, None, true);
+            let (_, report) = graphql_model_identity(&m);
+            assert_eq!(
+                report.map(|r| (r.documents_resolved, r.classes)),
+                Some((1, 1)),
+                "{doc}"
+            );
+            ModelResolver.resolve(&mut m);
+            assert_eq!(gql_same_as(&m).len(), 2, "{doc}");
+        }
     }
 }

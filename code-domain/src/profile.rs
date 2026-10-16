@@ -43,7 +43,8 @@
 //! DD.3: `identity_rules` is the code domain's ways two nodes are one
 //! thing, one [`IdentityRule`] per [`same_as::ALL_RULES`] name in that order
 //! (the identity resolver's eight [`same_as::RULES`], then DT.1h's
-//! `http_model`, which the models resolver writes):
+//! `http_model` and DT.1k's `graphql_model`, which the models resolver
+//! writes):
 //! the kinds each pairs, the key they share, the tier (FACT, DERIVED or
 //! HEURISTIC) and whether a class is contracted in walks. Three consumers
 //! read the rows: the identity resolver (which kinds a rule pairs), the tier
@@ -399,6 +400,20 @@ pub const CODE_TABLES: DomainTables = DomainTables {
             from: &[nk::INTERFACE, nk::CLASS],
             to: &[nk::STRUCT],
             key: "one HTTP exchange's client and server models, JSON field names confirm",
+            tier: IdentityTier::Derived,
+            walk: true,
+        },
+        // DT.1k: written by the models resolver. A GraphQL client call's TS
+        // result model (an INTERFACE / CLASS) or gqlgen's generated Go STRUCT
+        // and the SDL type the call's root field returns (a MESSAGE_TYPE
+        // `message:graphql:<T>`, the class's center): DERIVED (the graphql
+        // resolver paired the operation, the field names confirm it), and
+        // contracted in walks like `http_model`.
+        IdentityRule {
+            name: same_as::RULE_GRAPHQL_MODEL,
+            from: &[nk::INTERFACE, nk::CLASS, nk::STRUCT],
+            to: &[nk::MESSAGE_TYPE],
+            key: "a GraphQL result model or generated model and the schema type it returns",
             tier: IdentityTier::Derived,
             walk: true,
         },
@@ -839,6 +854,7 @@ mod tests {
                 ("body_hash", Heuristic, false),
                 ("path_suffix", Heuristic, false),
                 ("http_model", Derived, true),
+                ("graphql_model", Derived, true),
             ]
         );
 
@@ -866,6 +882,12 @@ mod tests {
         const SERVER: &[NodeKindId] = &[nk::STRUCT];
         assert_eq!(pairs("http_model"), Some((CLIENT, SERVER)));
         assert!(rule("http_model").is_some_and(|r| r.tier.collapses()), "http_model collapses");
+        const GQL_MEMBER: &[NodeKindId] = &[nk::INTERFACE, nk::CLASS, nk::STRUCT];
+        assert_eq!(pairs("graphql_model"), Some((GQL_MEMBER, MESSAGE)));
+        assert!(
+            rule("graphql_model").is_some_and(|r| r.tier.collapses()),
+            "graphql_model collapses"
+        );
 
         // Every key is a line, the rule names are the bare EVIDENCE rules.
         for r in rules {

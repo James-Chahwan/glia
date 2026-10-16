@@ -188,7 +188,8 @@ fn identity_report_lists_five_derived_classes() {
         same_as::ALL_RULES,
         "every table rule, in table order"
     );
-    assert_eq!(c.by_rule.last(), Some(&("http_model", 5)));
+    assert!(c.by_rule.contains(&("http_model", 5)), "{:?}", c.by_rule);
+    assert_eq!(c.by_rule.last(), Some(&("graphql_model", 0)));
     assert!(report.absence.is_none());
     for class in &report.classes {
         assert_eq!(

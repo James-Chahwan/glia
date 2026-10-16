@@ -2,20 +2,27 @@
   "framework": "models-graphql-stock",
   "language": "graphql",
   "dirs": ["console", "api"],
-  "note": "DT.1j (T1 GraphQL schema vs selection, extraction half): the SDL object type `type Item` is a MESSAGE_TYPE `message:graphql:Item` with its declared fields as SCHEMA_FIELDS (format graphql), a root field carries its return type as a graphql_returns MESSAGE_TYPE cell, and an operation carries its selection set as a graphql_selection MESSAGE_TYPE cell. The console selects `barcode`, which `type Item` lacks. HEAD 2b80361b (verifier, on a copy): no MESSAGE_TYPE node, `[graphql-sdl] files=1 resolvers=4`; graded node 0/1, cells 0/3, forbid 0. DT.1n (the compare half) judges each GRAPHQL_CALLS op's selection against the type its root field returns, so it needs both pairings: AdjustStock -> adjustStock and ListItems -> items, the second by the root field its document selects (DT.11a; the op name ListItems keys no resolver). Graded at d8051a4b (DT.11a landed in w15): GRAPHQL_CALLS 2/2. The verdicts are contract_fields rows, which no key field expresses: engine/tests/model_graphql.rs pins `mutation AdjustStock adjustStock` identical and `query ListItems items` breaking (barcode graphql_field_undefined).",
+  "note": "DT.1j (T1 GraphQL schema vs selection, extraction half): the SDL object type `type Item` is a MESSAGE_TYPE `message:graphql:Item` with its declared fields as SCHEMA_FIELDS (format graphql), a root field carries its return type as a graphql_returns MESSAGE_TYPE cell, and an operation carries its selection set as a graphql_selection MESSAGE_TYPE cell. The console selects `barcode`, which `type Item` lacks. HEAD 2b80361b (verifier, on a copy): no MESSAGE_TYPE node, `[graphql-sdl] files=1 resolvers=4`; graded node 0/1, cells 0/3, forbid 0. DT.1n (the compare half) judges each GRAPHQL_CALLS op's selection against the type its root field returns, so it needs both pairings: AdjustStock -> adjustStock and ListItems -> items, the second by the root field its document selects (DT.11a; the op name ListItems keys no resolver). Graded at d8051a4b (DT.11a landed in w15): GRAPHQL_CALLS 2/2. The verdicts are contract_fields rows, which no key field expresses: engine/tests/model_graphql.rs pins `mutation AdjustStock adjustStock` identical and `query ListItems items` breaking (barcode graphql_field_undefined). DT.1k (graphql_model identity): each client call types its result (`client.query<{ items: InventoryItem[] }>({ query: LIST_ITEMS })`, `client.mutate<{ adjustStock: InventoryItem }>({ mutation: ADJUST_STOCK })`), a graphql_result MESSAGE_TYPE cell on the calling FUNCTION naming its document; the models pass resolves the document to its STATE_VAR, the op minted in that const's span, the root field each result key selects and the type that field returns, and joins InventoryItem (diverged: barcode) and gqlgen's generated model.Item to message:graphql:Item in one SAME_AS class. The hand-written internal stock.Item has the same name and json names but is never generated, so it joins nothing; members join the center only.",
   "expect_nodes": [
     {"kind": "MESSAGE_TYPE", "name": "message:graphql:Item", "exact": true, "note": "the SDL object type, one node"}
   ],
   "expect_edges": [
     {"from": "graphql_op:AdjustStock", "to": "graphql_resolver:adjustStock", "category": "GRAPHQL_CALLS", "exact": true, "note": "the mutation's root field adjustStock (its op name keys it too)"},
-    {"from": "graphql_op:ListItems", "to": "graphql_resolver:items", "category": "GRAPHQL_CALLS", "exact": true, "note": "the query's root field items (DT.11a): the op name ListItems keys nothing"}
+    {"from": "graphql_op:ListItems", "to": "graphql_resolver:items", "category": "GRAPHQL_CALLS", "exact": true, "note": "the query's root field items (DT.11a): the op name ListItems keys nothing"},
+    {"from": "src::types::InventoryItem", "to": "message:graphql:Item", "category": "SAME_AS", "exact": true, "note": "the client result model (both calls' result keys reach Item) joins the schema type"},
+    {"from": "graph::model::models_gen::Item", "to": "message:graphql:Item", "category": "SAME_AS", "exact": true, "note": "gqlgen's generated model (ORIGIN generated, the type's name and json names) joins the schema type"}
   ],
   "expect_cells": [
     {"kind": "GRAPHQL_OPERATION", "node": "graphql_op:ListItems", "cell": "MESSAGE_TYPE", "contains": "\"name\":\"barcode\"", "note": "the operation's selection set, nested under items"},
     {"kind": "GRAPHQL_RESOLVER", "node": "graphql_resolver:items", "cell": "MESSAGE_TYPE", "contains": "\"form\":\"graphql_returns\"", "note": "the root field's declared return type [Item!]!"},
-    {"kind": "MESSAGE_TYPE", "node": "message:graphql:Item", "cell": "SCHEMA_FIELDS", "contains": "\"name\":\"onHand\"", "note": "the type's declared fields"}
+    {"kind": "MESSAGE_TYPE", "node": "message:graphql:Item", "cell": "SCHEMA_FIELDS", "contains": "\"name\":\"onHand\"", "note": "the type's declared fields"},
+    {"kind": "FUNCTION", "node": "src::inventory::emptyShelves", "cell": "MESSAGE_TYPE", "contains": "\"form\":\"graphql_result\"", "note": "the awaited client.query<T>({ query: LIST_ITEMS }) result type"},
+    {"kind": "FUNCTION", "node": "src::inventory::adjust", "cell": "MESSAGE_TYPE", "contains": "\"document\":\"ADJUST_STOCK\"", "note": "the client.mutate<T>({ mutation: ADJUST_STOCK }) document identifier"}
   ],
   "forbid": [
-    {"kind": "MESSAGE_TYPE", "max_nodes": 1, "note": "only Item: no Query / Mutation / scalar node (a named forbid would miss an owner-suffixed qname)"}
+    {"kind": "MESSAGE_TYPE", "max_nodes": 1, "note": "only Item: no Query / Mutation / scalar node (a named forbid would miss an owner-suffixed qname)"},
+    {"from": "internal::stock::item::Item", "to": "message:graphql:Item", "category": "SAME_AS", "note": "the hand-written warehouse row is never generated: it joins nothing"},
+    {"from": "src::types::InventoryItem", "to": "internal::stock::item::Item", "category": "SAME_AS", "note": "no client -> hand-written struct pair"},
+    {"from": "src::types::InventoryItem", "to": "graph::model::models_gen::Item", "category": "SAME_AS", "note": "members join the center only (a star)"}
   ]
 }

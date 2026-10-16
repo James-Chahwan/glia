@@ -111,6 +111,10 @@ fn parse_file_stats(
         acc.nav.record_fact(module_id, NavFact::Exports { names });
     }
 
+    // DT.1k: every import is read now, so the typed GraphQL client calls take
+    // their import gates and land on their callables.
+    attach_graphql_results(&mut acc);
+
     // DF.22a: every import is read now, so the `inject(T)`-shaped locals take
     // A7.1's gate, then the file's local-typed receivers are counted.
     record_inject_locals(&mut acc);
@@ -356,6 +360,10 @@ struct Acc {
     accessor_ref_seen: HashMap<(NodeId, String, bool), usize>,
     /// DT.5g: the `[ts-value-refs]` walk counters.
     value_stats: ValueRefStats,
+    /// DT.1k: typed GraphQL client calls ([`try_detect_graphql_result`]), in
+    /// walk order. Gated and attached to their callables by
+    /// [`attach_graphql_results`] once every import of the file is read.
+    graphql_results: Vec<GraphqlResultCand>,
 }
 
 /// DT.5g: a bare identifier read as a value by `from` (an argument, an array
@@ -2789,6 +2797,7 @@ fn collect_calls_in(
             }
             try_detect_endpoint(node, src, from, enclosing_class, acc);
             try_detect_typeorm_access(node, src, from, acc);
+            try_detect_graphql_result(node, src, from, acc);
         }
         if kind == "member_expression" {
             record_member_ref(node, src, from, acc);
@@ -5872,6 +5881,218 @@ fn object_string_prop(obj: TsNode, key: &str, src: &[u8]) -> Option<String> {
                 })
     })?;
     literal_string(pair.child_by_field_name("value")?, src)
+}
+
+// ============================================================================
+// DT.1k: GraphQL client result types
+// ============================================================================
+//
+// The TypeScript type a GraphQL client call reads its result as, and the
+// document it sends, as a MESSAGE_TYPE cell (`form` `graphql_result`, the
+// `document` identifier, the type's `shape`) on the callable issuing the call.
+// The models pass (graph/src/resolvers/models.rs, DT.1k) resolves the
+// document to its `gql` const, the operation minted in that const's span and
+// the schema type each result key's root field returns, and joins the model
+// at each key with that type (`graphql_model`).
+//
+// Callee shapes, the type argument always the call's first (on the call node,
+// also for `await recv.m<T>(..)`, [`awaited_generic_callee`]):
+//
+// - `<recv>.query|mutate|watchQuery|subscribe<T>({ query|mutation|document:
+//   DOC, .. })` (Apollo Client, apollo-angular): the object-argument key is
+//   the gate, so an RxJS `obs.subscribe<T>(next)` or a SQL client's
+//   `db.query<T>(sql)` writes nothing. No import gate: the client is usually
+//   a shared instance imported from the app's own module.
+// - `useQuery|useLazyQuery|useMutation|useSubscription|useSuspenseQuery<T>(
+//   DOC | { query: DOC })`, the hook a named import binds from a GraphQL
+//   client module, or `ns.useQuery<T>(..)` through a namespace import of one
+//   (graphql-codegen's generated hooks).
+// - urql's `<recv>.query|mutation|subscription<T>(DOC, ..)`, in a file
+//   importing urql or `@urql/*`.
+//
+// DOC is an identifier or `ns.NAME`; a document built inline (`gql`...``)
+// or by string concatenation names no const and writes nothing.
+// Fired-on: `[ts-wire] graphql_results=<n> file=<path>`, per file with one.
+
+/// DT.1k: Apollo / apollo-angular client methods whose options object names
+/// the document.
+const GQL_CLIENT_METHODS: &[&str] = &["query", "mutate", "watchQuery", "subscribe"];
+/// DT.1k: the options keys a client method reads its document from.
+const GQL_DOCUMENT_KEYS: &[&str] = &["query", "mutation", "document"];
+/// DT.1k: the hooks (Apollo Client React, urql) typed by their result.
+const GQL_HOOKS: &[&str] = &["useQuery", "useLazyQuery", "useMutation", "useSubscription", "useSuspenseQuery"];
+/// DT.1k: urql client methods taking the document positionally.
+const URQL_METHODS: &[&str] = &["query", "mutation", "subscription"];
+
+/// DT.1k: a module a GraphQL client call's hook or client comes from:
+/// `@apollo/client` (and its subpaths, `@apollo/client/core`), `apollo-angular`
+/// (and subpaths), `urql` and `@urql/*`.
+fn is_graphql_client_module(m: &str) -> bool {
+    m == "@apollo/client"
+        || m.starts_with("@apollo/client/")
+        || m == "apollo-angular"
+        || m.starts_with("apollo-angular/")
+        || is_urql_module(m)
+}
+
+/// DT.1k: `urql` or an `@urql/*` package.
+fn is_urql_module(m: &str) -> bool {
+    m == "urql" || m.starts_with("@urql/")
+}
+
+/// DT.1k: which import a candidate needs ([`attach_graphql_results`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GqlGate {
+    /// The options-object key already gated it.
+    Options,
+    /// A named import of a [`GQL_HOOKS`] hook from a GraphQL client module
+    /// binds this local name.
+    Hook(String),
+    /// A namespace import of a GraphQL client module binds this name.
+    Namespace(String),
+    /// The file imports urql.
+    Urql,
+}
+
+/// DT.1k: one typed GraphQL client call, before its gate.
+#[derive(Debug, Clone)]
+struct GraphqlResultCand {
+    from: NodeId,
+    gate: GqlGate,
+    wire: wire::ServerWire,
+}
+
+/// DT.1k: the document a client call names: an identifier (a shorthand
+/// option `{ query }` included), or `ns.NAME` on a namespace identifier.
+fn gql_document_name(arg: TsNode, src: &[u8]) -> Option<String> {
+    match arg.kind() {
+        "identifier" | "shorthand_property_identifier" => Some(text(arg, src).to_string()),
+        "member_expression" => {
+            let (object, property) = (arg.child_by_field_name("object")?, arg.child_by_field_name("property")?);
+            (object.kind() == "identifier" && property.kind() == "property_identifier")
+                .then(|| format!("{}.{}", text(object, src), text(property, src)))
+        }
+        _ => None,
+    }
+}
+
+/// DT.1k: the document an options object names under one of
+/// [`GQL_DOCUMENT_KEYS`] (the first key present, in that order).
+fn gql_options_document(arg: TsNode, src: &[u8]) -> Option<String> {
+    GQL_DOCUMENT_KEYS
+        .iter()
+        .find_map(|k| object_property(arg, k, src))
+        .and_then(|v| gql_document_name(v, src))
+}
+
+/// DT.1k: a typed GraphQL client call (see the section doc) as a candidate
+/// `graphql_result` site of `from`.
+fn try_detect_graphql_result(call: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    let (callee, type_args) = match awaited_generic_callee(call) {
+        Some(found) => found,
+        None => match (call.child_by_field_name("function"), call.child_by_field_name("type_arguments")) {
+            (Some(f), Some(t)) => (f, t),
+            _ => return,
+        },
+    };
+    let Some(ty) = first_named(type_args) else {
+        return;
+    };
+    let Some(first) = call.child_by_field_name("arguments").and_then(first_named) else {
+        return;
+    };
+    let found = match callee.kind() {
+        "member_expression" => {
+            let (Some(object), Some(property)) =
+                (callee.child_by_field_name("object"), callee.child_by_field_name("property"))
+            else {
+                return;
+            };
+            let method = text(property, src);
+            if GQL_CLIENT_METHODS.contains(&method)
+                && let Some(doc) = gql_options_document(first, src)
+            {
+                Some((doc, GqlGate::Options))
+            } else if URQL_METHODS.contains(&method)
+                && let Some(doc) = gql_document_name(first, src)
+            {
+                Some((doc, GqlGate::Urql))
+            } else if GQL_HOOKS.contains(&method) && object.kind() == "identifier" {
+                gql_document_name(first, src)
+                    .or_else(|| gql_options_document(first, src))
+                    .map(|doc| (doc, GqlGate::Namespace(text(object, src).to_string())))
+            } else {
+                None
+            }
+        }
+        "identifier" => gql_document_name(first, src)
+            .or_else(|| gql_options_document(first, src))
+            .map(|doc| (doc, GqlGate::Hook(text(callee, src).to_string()))),
+        _ => None,
+    };
+    let Some((document, gate)) = found else {
+        return;
+    };
+    let raw = collapse_ws(text(ty, src));
+    let mut w = wire::ServerWire::new(wire::WireForm::GraphqlResult, &raw, line_at(call).saturating_add(1), ts_type_shape(ty, src));
+    w.document = Some(document);
+    acc.graphql_results.push(GraphqlResultCand { from, gate, wire: w });
+}
+
+/// DT.1k: the candidates whose gate the file's imports open, each a
+/// MESSAGE_TYPE cell on its callable (sorted by line, one per distinct
+/// payload), and the `[ts-wire] graphql_results=` marker.
+fn attach_graphql_results(acc: &mut Acc) {
+    if acc.graphql_results.is_empty() {
+        return;
+    }
+    let mut hooks: HashSet<&str> = HashSet::new();
+    let mut namespaces: HashSet<&str> = HashSet::new();
+    let mut urql = false;
+    for imp in &acc.imports {
+        match &imp.target {
+            ImportTarget::Symbol { module, name, alias, .. } if is_graphql_client_module(module) => {
+                urql |= is_urql_module(module);
+                if GQL_HOOKS.contains(&name.as_str()) {
+                    hooks.insert(alias.as_deref().unwrap_or(name.as_str()));
+                }
+            }
+            ImportTarget::Module { path, alias } if is_graphql_client_module(path) => {
+                urql |= is_urql_module(path);
+                if let Some(a) = alias {
+                    namespaces.insert(a.as_str());
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut kept: Vec<(NodeId, wire::ServerWire)> = acc
+        .graphql_results
+        .iter()
+        .filter(|c| match &c.gate {
+            GqlGate::Options => true,
+            GqlGate::Hook(h) => hooks.contains(h.as_str()),
+            GqlGate::Namespace(ns) => namespaces.contains(ns.as_str()),
+            GqlGate::Urql => urql,
+        })
+        .map(|c| (c.from, c.wire.clone()))
+        .collect();
+    acc.graphql_results.clear();
+    kept.sort_by_key(|(_, w)| w.line);
+    let mut n = 0usize;
+    for (from, w) in kept {
+        let cell = w.cell();
+        let Some(node) = acc.nodes.iter_mut().find(|node| node.id == from) else {
+            continue;
+        };
+        if !node.cells.contains(&cell) {
+            node.cells.push(cell);
+            n += 1;
+        }
+    }
+    if n > 0 {
+        eprintln!("[ts-wire] graphql_results={n} file={}", acc.file_rel);
+    }
 }
 
 /// A TypeORM query site in a file importing TypeORM: `getRepository(User)`,
@@ -11983,5 +12204,164 @@ export class Hero {
         let m = |n: &str| id(node_kind::METHOD, &format!("src::hero::Hero::{n}"));
         assert_eq!(ruled(&p, m("init"), edge_category::USES, "method_ref"), [(m("onResize"), 2)]);
         assert_eq!(ruled(&p, m("init"), edge_category::CALLS, "accessor_read"), [(m("isDesktop"), 2)]);
+    }
+}
+
+/// DT.1k: typed GraphQL client calls as `graphql_result` MESSAGE_TYPE cells.
+#[cfg(test)]
+mod graphql_result_tests {
+    use super::*;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts_gql")
+    }
+
+    fn parse(src: &str) -> FileParse {
+        parse_file(src, "src/inventory.ts", "src::inventory", repo()).unwrap()
+    }
+
+    /// The `graphql_result` sites on the node `kind` `qname`.
+    fn results(p: &FileParse, kind: glia_core::NodeKindId, qname: &str) -> Vec<wire::ServerWire> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname);
+        p.nodes
+            .iter()
+            .filter(|n| n.id == id)
+            .flat_map(|n| n.cells.iter())
+            .filter_map(wire::ServerWire::from_cell)
+            .filter(|w| w.form == wire::WireForm::GraphqlResult)
+            .collect()
+    }
+
+    /// Every `graphql_result` site of the file, on any node.
+    fn every(p: &FileParse) -> usize {
+        p.nodes
+            .iter()
+            .flat_map(|n| n.cells.iter())
+            .filter_map(wire::ServerWire::from_cell)
+            .filter(|w| w.form == wire::WireForm::GraphqlResult)
+            .count()
+    }
+
+    fn func(name: &str) -> String {
+        format!("src::inventory::{name}")
+    }
+
+    /// The fixture's two Apollo client calls, awaited, in a file that imports
+    /// no GraphQL module (the client is the app's own instance): each callable
+    /// carries its result type, its document and the call's 1-based line.
+    #[test]
+    fn awaited_client_query_and_mutate() {
+        let src = "import { client } from './client';\n\
+                   import { LIST_ITEMS, ADJUST_STOCK } from './documents';\n\
+                   import { InventoryItem } from './types';\n\
+                   export async function emptyShelves(): Promise<InventoryItem[]> {\n\
+                   \x20 const { data } = await client.query<{ items: InventoryItem[] }>({ query: LIST_ITEMS, variables: { first: 100 } });\n\
+                   \x20 return data.items;\n}\n\
+                   export async function adjust(id: string): Promise<number> {\n\
+                   \x20 const { data } = await client.mutate<{ adjustStock: InventoryItem }>({ mutation: ADJUST_STOCK, variables: { id } });\n\
+                   \x20 return data!.adjustStock.onHand;\n}\n";
+        let p = parse(src);
+        let q = results(&p, node_kind::FUNCTION, &func("emptyShelves"));
+        assert_eq!(q.len(), 1, "{q:?}");
+        assert_eq!(q[0].document.as_deref(), Some("LIST_ITEMS"));
+        assert_eq!(q[0].line, 5);
+        assert_eq!(q[0].raw, "{ items: InventoryItem[] }");
+        assert_eq!(
+            q[0].shape.to_json(),
+            Shape::Object {
+                fields: vec![ShapeField::new("items", true, Shape::named("InventoryItem[]"))],
+                open: false,
+            }
+            .to_json()
+        );
+        let payload = q[0].to_payload();
+        assert!(payload.contains("\"form\":\"graphql_result\""), "{payload}");
+        let m = results(&p, node_kind::FUNCTION, &func("adjust"));
+        assert_eq!(m.len(), 1, "{m:?}");
+        assert_eq!(m[0].document.as_deref(), Some("ADJUST_STOCK"));
+        assert!(m[0].to_payload().contains("\"document\":\"ADJUST_STOCK\""));
+        assert_eq!(every(&p), 2);
+    }
+
+    /// apollo-angular, unawaited, in a class method: `watchQuery` / `mutate` /
+    /// `subscribe` with the document under `query`, `mutation` or a
+    /// shorthand key; `ns.DOC` is kept as written.
+    #[test]
+    fn apollo_angular_methods_on_a_class() {
+        let src = "import { Apollo } from 'apollo-angular';\n\
+                   import * as docs from './documents';\n\
+                   export class Stock {\n\
+                   \x20 constructor(private apollo: Apollo) {}\n\
+                   \x20 list() { return this.apollo.watchQuery<{ items: Item[] }>({ query: docs.GET_ITEMS }).valueChanges; }\n\
+                   \x20 bump(query: any) { return this.apollo.subscribe<{ bumped: Item }>({ query }); }\n\
+                   \x20 save() { return this.apollo.mutate<{ save: Item }>({ mutation: SAVE }); }\n\
+                   }\n";
+        let p = parse(src);
+        let m = |n: &str| results(&p, node_kind::METHOD, &format!("src::inventory::Stock::{n}"));
+        let docs = |n: &str| m(n).iter().map(|w| w.document.clone().unwrap_or_default()).collect::<Vec<_>>();
+        assert_eq!(docs("list"), ["docs.GET_ITEMS"]);
+        assert_eq!(docs("bump"), ["query"]);
+        assert_eq!(docs("save"), ["SAVE"]);
+    }
+
+    /// Hooks need their import: a named `useQuery` / `useMutation` (aliased
+    /// too) from `@apollo/client` or urql, or `ns.useQuery` on a namespace
+    /// import of one; react-query's `useQuery` writes nothing.
+    #[test]
+    fn hooks_take_the_import_gate() {
+        let src = "import { useQuery, useMutation as useM } from '@apollo/client';\n\
+                   import * as Apollo from '@apollo/client/react';\n\
+                   export function List() { const { data } = useQuery<{ items: Item[] }>(GET_ITEMS); return data; }\n\
+                   export function Save() { const [run] = useM<{ save: Item }>(SAVE); return run; }\n\
+                   export function Gen() { return Apollo.useQuery<GetItemsQuery>(GetItemsDocument); }\n";
+        let p = parse(src);
+        for (f, doc) in [("List", "GET_ITEMS"), ("Save", "SAVE"), ("Gen", "GetItemsDocument")] {
+            let r = results(&p, node_kind::FUNCTION, &func(f));
+            assert_eq!(r.iter().map(|w| w.document.as_deref()).collect::<Vec<_>>(), [Some(doc)], "{f}");
+        }
+        let other = "import { useQuery } from '@tanstack/react-query';\n\
+                     export function List() { return useQuery<Item[]>(KEY); }\n\
+                     export function State() { return useState<Item[]>(INITIAL); }\n";
+        assert_eq!(every(&parse(other)), 0, "no GraphQL hook import");
+        let urql = "import { useQuery } from 'urql';\n\
+                    export function List() { const [res] = useQuery<{ items: Item[] }>({ query: GET_ITEMS }); return res; }\n";
+        let r = results(&parse(urql), node_kind::FUNCTION, &func("List"));
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].document.as_deref(), Some("GET_ITEMS"));
+    }
+
+    /// The options-key gate keeps RxJS `subscribe<T>(next)` and a SQL
+    /// client's `query<T>(sql)` out; urql's positional `client.query<T>(DOC)`
+    /// needs an urql import; an untyped call, an inline document and a
+    /// non-identifier document write nothing.
+    #[test]
+    fn non_graphql_calls_write_nothing() {
+        let src = "import { Observable } from 'rxjs';\n\
+                   export function a(obs: Observable<Item>) { obs.subscribe<Item>((x) => x); }\n\
+                   export async function b(db: any) { return db.query<Row>(SQL); }\n\
+                   export async function c() { return client.query({ query: LIST_ITEMS }); }\n\
+                   export async function d() { return client.query<{ items: Item[] }>({ query: gql`query { items { id } }` }); }\n\
+                   export async function e() { return client.query<{ items: Item[] }>({ variables: { q } }); }\n\
+                   export async function f() { return client.query<{ items: Item[] }>({ query: docs[0] }); }\n";
+        assert_eq!(every(&parse(src)), 0);
+        let urql = "import { createClient } from '@urql/core';\n\
+                    export async function g() { return client.query<{ items: Item[] }>(GET_ITEMS, { first: 1 }).toPromise(); }\n";
+        let r = results(&parse(urql), node_kind::FUNCTION, &func("g"));
+        assert_eq!(r.iter().map(|w| w.document.as_deref()).collect::<Vec<_>>(), [Some("GET_ITEMS")]);
+        let no_urql = "export async function g() { return client.query<{ items: Item[] }>(GET_ITEMS).toPromise(); }\n";
+        assert_eq!(every(&parse(no_urql)), 0, "positional needs urql");
+    }
+
+    /// A named result type stays a name for the models pass to bind; two
+    /// calls of one callable are two sites, sorted by line, each once.
+    #[test]
+    fn named_result_and_two_calls() {
+        let src = "export async function both() {\n\
+                   \x20 await client.query<StockList>({ query: STOCK_LIST });\n\
+                   \x20 await client.mutate<{ restock: StockItem }>({ mutation: RESTOCK });\n}\n";
+        let p = parse(src);
+        let r = results(&p, node_kind::FUNCTION, &func("both"));
+        assert_eq!(r.iter().map(|w| (w.line, w.ty.as_str())).collect::<Vec<_>>(), [(2, "StockList"), (3, "")]);
+        assert_eq!(r[0].shape.to_json(), Shape::named("StockList").to_json());
     }
 }

@@ -6,6 +6,6 @@ cmd glia identity
   arg limit pos=- long=limit short=- required=false num_args=1 action=Set default=50 value_names=N global=false hidden=false
   arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
   arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false
-  arg rule pos=- long=rule short=- required=false num_args=1 action=Set default=- value_names=RULE global=false hidden=false values=package_name,manifest_name,message_fqname,contract_op,contract_route,scip_symbol,body_hash,path_suffix,http_model
+  arg rule pos=- long=rule short=- required=false num_args=1 action=Set default=- value_names=RULE global=false hidden=false values=package_name,manifest_name,message_fqname,contract_op,contract_route,scip_symbol,body_hash,path_suffix,http_model,graphql_model
   arg tier pos=- long=tier short=- required=false num_args=1 action=Set default=- value_names=TIER global=false hidden=false values=fact,derived,heuristic
   arg with pos=- long=with short=- required=false num_args=1 action=Append default=- value_names=WITH global=false hidden=false

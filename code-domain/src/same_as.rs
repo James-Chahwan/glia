@@ -13,7 +13,8 @@
 //!   rule name, `/diverged` appended when the two members' contents differ
 //!   ([`evidence_rule`] / [`split_evidence_rule`]; the `confirms:` rule of the
 //!   SCIP stage qualifies with `/` the same way). DT.1h adds the models
-//!   resolver's [`MODEL_RULES`] (`http_model`); [`ALL_RULES`] is both lists,
+//!   resolver's [`MODEL_RULES`] (`http_model`, DT.1k's `graphql_model`);
+//!   [`ALL_RULES`] is both lists,
 //!   and [`is_identity_emitter`] names the two resolvers whose SAME_AS rule
 //!   is a table row.
 //! - **Contract ops** ([`contract_op_key`]): an OpenAPI / AsyncAPI / swaggo /
@@ -79,16 +80,23 @@ pub const RULES: [&str; 8] = [
 /// `graph/src/resolvers/models.rs`).
 pub const RULE_HTTP_MODEL: &str = "http_model";
 
-/// The identity rules the models resolver writes (DT.1h), in rule order. The
-/// identity resolver writes [`RULES`] and never these: its classes are read
-/// off nodes, these off the HTTP exchanges another resolver paired.
-pub const MODEL_RULES: [&str; 1] = [RULE_HTTP_MODEL];
+/// DT.1k: the TS result model of a GraphQL client call, or the
+/// gqlgen-generated Go model, and the SDL type (`message:graphql:<T>`) the
+/// call's root field returns, confirmed by the field names both list (the
+/// models resolver, `graph/src/resolvers/models.rs`).
+pub const RULE_GRAPHQL_MODEL: &str = "graphql_model";
+
+/// The identity rules the models resolver writes (DT.1h, DT.1k), in rule
+/// order. The identity resolver writes [`RULES`] and never these: its
+/// classes are read off nodes, these off the HTTP exchanges and GraphQL
+/// operations another resolver paired.
+pub const MODEL_RULES: [&str; 2] = [RULE_HTTP_MODEL, RULE_GRAPHQL_MODEL];
 
 /// Every identity rule name, in table order: [`RULES`], then
 /// [`MODEL_RULES`]. The code domain's `identity_rules` table lists exactly
 /// these (`profile::CODE_TABLES`, its guard test pins it), and `glia identity
 /// --rule` takes exactly these.
-pub const ALL_RULES: [&str; 9] = [
+pub const ALL_RULES: [&str; 10] = [
     RULE_PACKAGE_NAME,
     RULE_MANIFEST_NAME,
     RULE_MESSAGE_FQNAME,
@@ -98,11 +106,12 @@ pub const ALL_RULES: [&str; 9] = [
     RULE_BODY_HASH,
     RULE_PATH_SUFFIX,
     RULE_HTTP_MODEL,
+    RULE_GRAPHQL_MODEL,
 ];
 
 /// The EVIDENCE emitters of SAME_AS edges whose rule names an identity
 /// table row: the identity resolver (DD.5, [`RULES`]) and the models
-/// resolver (DT.1h, [`MODEL_RULES`]), each its `resolver!` pass stamp. Any
+/// resolver (DT.1h / DT.1k, [`MODEL_RULES`]), each its `resolver!` pass stamp. Any
 /// other SAME_AS (an overlay `[[edge]]`) is tiered by its stage.
 pub const IDENTITY_EMITTERS: [&str; 2] = ["resolver:identity", "resolver:models"];
 
@@ -607,7 +616,7 @@ mod tests {
         assert_eq!(sorted.len(), RULES.len());
     }
 
-    /// DT.1h: ALL_RULES is RULES then MODEL_RULES, every name once and
+    /// DT.1h / DT.1k: ALL_RULES is RULES then MODEL_RULES, every name once and
     /// round-tripping its `/diverged` qualifier; the two identity emitters
     /// are the two resolvers' pass stamps.
     #[test]
@@ -620,6 +629,8 @@ mod tests {
         assert_eq!(sorted.len(), ALL_RULES.len());
         assert_eq!(evidence_rule(RULE_HTTP_MODEL, true), "http_model/diverged");
         assert_eq!(split_evidence_rule("http_model/diverged"), (RULE_HTTP_MODEL, true));
+        assert_eq!(evidence_rule(RULE_GRAPHQL_MODEL, true), "graphql_model/diverged");
+        assert_eq!(MODEL_RULES, [RULE_HTTP_MODEL, RULE_GRAPHQL_MODEL]);
         assert!(is_identity_emitter("resolver:identity"));
         assert!(is_identity_emitter("resolver:models"));
         assert!(!is_identity_emitter("resolver:http"));
