@@ -2,8 +2,9 @@
 //! per identity class: two or more nodes that are one thing - one package
 //! across repos, a package and the project that publishes it, one proto /
 //! Avro / JSON Schema message in several repos, and one contract operation
-//! declared several times. SCIP symbols (DD.7) and vendored copies (DD.6)
-//! are later rules over the same table.
+//! declared several times - and, as HEURISTIC candidates, a declaration
+//! vendored into another repo (DD.6). SCIP symbols (DD.7) are a later rule
+//! over the same table.
 //!
 //! **Nodes only.** The pass reads nodes, their qnames and cells, never
 //! another resolver's edges, so it can run anywhere in the Resolve stage and
@@ -14,7 +15,7 @@
 //!
 //! **Rules.** Which kinds a rule pairs and how surely (its tier) are the code
 //! domain's `CODE_TABLES.identity_rules` rows (DD.3), read by name, never a
-//! local list; the keys are `glia_code_domain::same_as`'s (DD.2). Five rules:
+//! local list; the keys are `glia_code_domain::same_as`'s (DD.2). Seven rules:
 //!
 //! - `package_name` (FACT): PACKAGE_DEPs whose `same_as::dep_identity_key`
 //!   agrees (`package:pypi:My_Lib` == `package:pypi:my-lib`; npm `requests`
@@ -42,6 +43,30 @@
 //!   reaches exactly one ROUTE through `HttpRouteMatcher` (the tiers and
 //!   order `link_contract_routes` pairs DOCUMENTS with). `any`-tier hits never
 //!   anchor, and an op reaching two routes anchors to neither.
+//! - `body_hash` and `path_suffix` (HEURISTIC, DD.6): vendored copies, CROSS
+//!   repo only (two directories of one repo are its own business). A
+//!   declaration (MODULE, FUNCTION, METHOD, CLASS, ... with a POSITION file)
+//!   is keyed by (kind, its local name chain below its MODULE - `""` for the
+//!   MODULE itself -, file basename) and digested by `same_as::code_digest`
+//!   (xxh64 of its CODE, read from the text or from an unresolved CodeSpan
+//!   alike, so a merge without the sources pairs as the joint build does;
+//!   `None` under 40 bytes). Two repos' declarations of one key pair when one
+//!   path is the other or a `/`-suffix of it; the stripped prefix is the
+//!   pair's vendoring offset (`third_party/money` for
+//!   `third_party/money/src/format.ts` vs `src/format.ts`). An offset is
+//!   CONFIRMED when one of its pairs is two equal digests of a declaration
+//!   below file level (a FUNCTION, CLASS, ...; a MODULE match alone confirms
+//!   nothing, since scaffolds write declaration-free files - an Angular CLI
+//!   `main.ts`, a Dockerfile - byte for byte into unrelated repos). In a
+//!   confirmed offset equal digests are `body_hash` and two different ones
+//!   `path_suffix`, MODULEs included; a path holding two declarations of one
+//!   key (two `g`s in one file) pairs them only byte-identically, never as a
+//!   diverged cross product. An unconfirmed offset pairs nothing,
+//!   so a same-path boilerplate file in two unrelated apps (`src/index.ts`,
+//!   `app.routes.ts`) never fuses them. Pairs
+//!   join per rule through `Classes::from_pairs` (a file copied into three
+//!   repos is one class). The copies are candidates: never collapsed, never
+//!   walked (the rows' `walk: false`).
 //!
 //! **Stars.** A class is a key with at least two distinct nodes. Its center
 //! is the member with the least (qname, kind id, index of the first graph
@@ -52,20 +77,26 @@
 //! EVIDENCE cell, emitter `resolver:identity`, rule `<rule>` or
 //! `<rule>/diverged` when the member's and the center's contents
 //! (`same_as::content_key`: a SCHEMA_FIELDS payload for a MESSAGE_TYPE or
-//! DOC_SECTION) are both known and differ. Confidence is the rule's tier:
-//! FACT Strong, DERIVED Medium. Every class, member set and key is a BTree,
+//! DOC_SECTION, the CODE digest for a declaration) are both known and differ
+//! (always for a `path_suffix` member, never for a `body_hash` one).
+//! Confidence is the rule's tier: FACT Strong, DERIVED Medium, HEURISTIC
+//! Weak. Every class, member set and key is a BTree,
 //! so emission order is total and hash-free (the Finalize sort fixes the
 //! stored order anyway). No node or node cell is written.
 //!
 //! fired_on, once per resolve that formed a class, after LC.3c's
 //! `[evidence-rules] resolver=identity package_name=<n> ...` (edges per rule):
 //! `[identity] classes=<c> edges=<e> diverged=<d> package_name=<n>
-//! manifest_name=<n> message_fqname=<n> contract_op=<n> contract_route=<n>`
-//! (classes per rule; `d` counts the classes with a diverged edge).
+//! manifest_name=<n> message_fqname=<n> contract_op=<n> contract_route=<n>
+//! body_hash=<n> path_suffix=<n> offsets=<confirmed>/<seen>` (classes per
+//! rule; `d` counts the classes with a diverged edge; `seen` the vendoring
+//! offsets any declaration pair had, `confirmed` those an identical pair
+//! confirmed).
 //! grep: `... 2>&1 | grep '^\[identity\] classes='`
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use glia_activation::algo::classes::Classes;
 use glia_activation::profile::{IdentityRule, IdentityTier};
 use glia_code_domain::evidence;
 use glia_code_domain::profile::CODE_TABLES;
@@ -85,12 +116,14 @@ use crate::types::RepoGraph;
 const PASS: &str = "identity";
 
 /// The rules this pass writes, in report and emission order.
-const PASS_RULES: [&str; 5] = [
+const PASS_RULES: [&str; 7] = [
     same_as::RULE_PACKAGE_NAME,
     same_as::RULE_MANIFEST_NAME,
     same_as::RULE_MESSAGE_FQNAME,
     same_as::RULE_CONTRACT_OP,
     same_as::RULE_CONTRACT_ROUTE,
+    same_as::RULE_BODY_HASH,
+    same_as::RULE_PATH_SUFFIX,
 ];
 
 /// SAME_AS stars over every identity class of the build (module doc).
@@ -131,6 +164,10 @@ struct Report {
     edges: usize,
     /// Classes with at least one diverged edge.
     diverged: usize,
+    /// Vendoring offsets confirmed by an identical pair, and every offset a
+    /// declaration pair had.
+    offsets_confirmed: usize,
+    offsets_seen: usize,
 }
 
 impl Report {
@@ -140,6 +177,8 @@ impl Report {
             classes: [0; PASS_RULES.len()],
             edges: 0,
             diverged: 0,
+            offsets_confirmed: 0,
+            offsets_seen: 0,
         }
     }
 
@@ -155,10 +194,12 @@ impl Report {
             .map(|(r, n)| format!("{r}={n}"))
             .collect();
         Some(format!(
-            "[identity] classes={total} edges={} diverged={} {}",
+            "[identity] classes={total} edges={} diverged={} {} offsets={}/{}",
             self.edges,
             self.diverged,
-            per_rule.join(" ")
+            per_rule.join(" "),
+            self.offsets_confirmed,
+            self.offsets_seen
         ))
     }
 
@@ -173,12 +214,31 @@ impl Report {
 /// The SAME_AS edges of `graphs` and the report behind the markers.
 fn identity_edges(graphs: &[RepoGraph]) -> (Vec<Edge>, Report) {
     let rule = |name: &str| CODE_TABLES.identity_rule(name);
-    let [package, manifest, message, contract_op, contract_route] = PASS_RULES.map(rule);
+    let [
+        package,
+        manifest,
+        message,
+        contract_op,
+        contract_route,
+        body_hash,
+        path_suffix,
+    ] = PASS_RULES.map(rule);
     let mut report = Report::new();
     let mut edges = Vec::new();
 
+    // The vendored rules pair across repos only, so a one-repo build never
+    // collects, locates or digests a declaration for them.
+    let multi_repo = graphs
+        .first()
+        .is_some_and(|first| graphs.iter().any(|g| g.repo != first.repo));
+    let vendored = if multi_repo {
+        [body_hash, path_suffix]
+    } else {
+        [None, None]
+    };
     let plain_kinds: Vec<NodeKindId> = [package, manifest, message]
         .into_iter()
+        .chain(vendored)
         .flatten()
         .flat_map(rule_kinds)
         .collect();
@@ -213,6 +273,19 @@ fn identity_edges(graphs: &[RepoGraph]) -> (Vec<Edge>, Report) {
     }
     if let Some(r) = contract_route {
         stars.emit(4, r, contract_route_classes(r, &cands, graphs).values());
+    }
+    let [body, suffix] = vendored;
+    if body.is_some() || suffix.is_some() {
+        let decls = vendored_candidates(graphs, &cands, &vendored);
+        let found = vendored_pairs(&offset_groups(&decls), &cands, body, suffix);
+        stars.report.offsets_confirmed = found.confirmed;
+        stars.report.offsets_seen = found.seen;
+        if let Some(r) = body {
+            stars.emit(5, r, vendored_classes(&found.body_hash, &cands).iter());
+        }
+        if let Some(r) = suffix {
+            stars.emit(6, r, vendored_classes(&found.path_suffix, &cands).iter());
+        }
     }
     (edges, report)
 }
@@ -490,6 +563,235 @@ fn origins(cells: &[Cell]) -> impl Iterator<Item = &str> {
         })
 }
 
+// ---- vendored copies (DD.6) --------------------------------------------------
+
+/// The most nav steps [`local_chain`] walks from a declaration up to its
+/// MODULE; a longer chain, or a parent cycle, drops the declaration.
+const MAX_CHAIN: usize = 64;
+
+/// One declaration of a vendored-copy index: its candidate and its CODE
+/// digest (`same_as::code_digest`: `None` without CODE or under 40 bytes).
+#[derive(Clone, Copy)]
+struct Decl {
+    cand: usize,
+    digest: Option<u64>,
+}
+
+/// What two copies of one declaration share wherever they sit: the kind id,
+/// the local name chain below the MODULE and the file basename.
+type DeclKey = (u32, String, String);
+
+/// One repo's declarations: key -> repo-relative path -> declarations.
+type RepoDecls = BTreeMap<DeclKey, BTreeMap<String, Vec<Decl>>>;
+
+/// A vendoring offset between two repos (indices in first-graph order, the
+/// first one less): the prefix stripped on the first repo's side and on the
+/// second's, without the joining `/`. One is `""`; both are for identical
+/// paths.
+type OffsetKey = (usize, usize, String, String);
+
+/// Two declarations of one key in two repos whose paths are path-suffix
+/// related. `ambiguous` when either path holds more than one declaration of
+/// the key: such a pair is a copy only when the digests agree.
+struct DeclPair {
+    a: Decl,
+    b: Decl,
+    ambiguous: bool,
+}
+
+/// What the vendored rules found: candidate pairs per rule, and the offsets.
+#[derive(Default)]
+struct VendoredPairs {
+    body_hash: Vec<(usize, usize)>,
+    path_suffix: Vec<(usize, usize)>,
+    confirmed: usize,
+    seen: usize,
+}
+
+/// Every candidate of a kind a vendored rule pairs, with a POSITION file and
+/// a local name chain, indexed per repo (in first-graph order).
+fn vendored_candidates(
+    graphs: &[RepoGraph],
+    cands: &[Candidate],
+    rules: &[Option<&'static IdentityRule>],
+) -> Vec<RepoDecls> {
+    let mut repos: Vec<RepoId> = Vec::new();
+    for g in graphs {
+        if !repos.contains(&g.repo) {
+            repos.push(g.repo);
+        }
+    }
+    let mut out: Vec<RepoDecls> = repos.iter().map(|_| RepoDecls::new()).collect();
+    for (i, c) in cands.iter().enumerate() {
+        if !rules.iter().flatten().any(|r| pairs(r, c.kind)) {
+            continue;
+        }
+        let Some(r) = repos.iter().position(|&r| r == c.repo) else {
+            continue;
+        };
+        let Some((file, _)) = evidence::locate(c.cells) else {
+            continue;
+        };
+        let Some(local) = local_chain(&graphs[c.graph], c.id) else {
+            continue;
+        };
+        let base = file.rsplit('/').next().unwrap_or_default().to_string();
+        out[r]
+            .entry((c.kind.0, local, base))
+            .or_default()
+            .entry(file)
+            .or_default()
+            .push(Decl {
+                cand: i,
+                digest: same_as::code_digest(c.cells),
+            });
+    }
+    out
+}
+
+/// The nav names from `id` up to, excluding, its MODULE, joined by `::`
+/// (`""` for a MODULE). `None` with no MODULE ancestor, a nameless step, or
+/// more than [`MAX_CHAIN`] steps (which a parent cycle always takes).
+fn local_chain(g: &RepoGraph, id: NodeId) -> Option<String> {
+    let mut names: Vec<&str> = Vec::new();
+    let mut cur = id;
+    for _ in 0..=MAX_CHAIN {
+        if *g.nav.kind_by_id.get(&cur)? == node_kind::MODULE {
+            names.reverse();
+            return Some(names.join("::"));
+        }
+        names.push(g.nav.name_by_id.get(&cur)?);
+        cur = *g.nav.parent_of.get(&cur)?;
+    }
+    None
+}
+
+/// `path` itself (when `with_self`) and every proper `/`-suffix of it, each as
+/// `(stripped prefix without its '/', suffix)`. `/` is ASCII, so every cut is
+/// a char boundary.
+fn suffixes(path: &str, with_self: bool) -> impl Iterator<Item = (&str, &str)> {
+    with_self
+        .then_some(("", path))
+        .into_iter()
+        .chain(
+            path.match_indices('/')
+                .map(move |(i, _)| (&path[..i], &path[i + 1..])),
+        )
+        .filter(|(_, s)| !s.is_empty())
+}
+
+/// Every declaration pair across two repos, grouped by vendoring offset. For
+/// each repo pair and each key both hold, every path of one side is looked
+/// up in the other side's paths under itself (first side only, so an
+/// identical path pairs once) and under each proper `/`-suffix: O(path depth)
+/// lookups per path, never an all-pairs scan of a key's bucket.
+fn offset_groups(repos: &[RepoDecls]) -> BTreeMap<OffsetKey, Vec<DeclPair>> {
+    let mut groups: BTreeMap<OffsetKey, Vec<DeclPair>> = BTreeMap::new();
+    for (x, rx) in repos.iter().enumerate() {
+        for (y, ry) in repos.iter().enumerate().skip(x + 1) {
+            for (key, px) in rx {
+                let Some(py) = ry.get(key) else {
+                    continue;
+                };
+                for (path, dx) in px {
+                    for (strip, s) in suffixes(path, true) {
+                        if let Some(dy) = py.get(s) {
+                            let offset = (x, y, strip.to_string(), String::new());
+                            push_pairs(groups.entry(offset).or_default(), dx, dy);
+                        }
+                    }
+                }
+                for (path, dy) in py {
+                    for (strip, s) in suffixes(path, false) {
+                        if let Some(dx) = px.get(s) {
+                            let offset = (x, y, String::new(), strip.to_string());
+                            push_pairs(groups.entry(offset).or_default(), dx, dy);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    groups
+}
+
+fn push_pairs(group: &mut Vec<DeclPair>, xs: &[Decl], ys: &[Decl]) {
+    let ambiguous = xs.len() > 1 || ys.len() > 1;
+    for &a in xs {
+        for &b in ys {
+            group.push(DeclPair { a, b, ambiguous });
+        }
+    }
+}
+
+/// The `body_hash` and `path_suffix` pairs of the confirmed offsets (module
+/// doc), each kept only for kinds its rule pairs. A pair confirms its offset
+/// when its digests agree and it is no MODULE pair.
+fn vendored_pairs(
+    groups: &BTreeMap<OffsetKey, Vec<DeclPair>>,
+    cands: &[Candidate],
+    body: Option<&IdentityRule>,
+    suffix: Option<&IdentityRule>,
+) -> VendoredPairs {
+    let identical = |p: &DeclPair| matches!((p.a.digest, p.b.digest), (Some(x), Some(y)) if x == y);
+    // A whole-file match confirms nothing on its own: a declaration-free file
+    // (an Angular CLI `main.ts`, a Dockerfile, a config file) is what a
+    // scaffold writes byte for byte into unrelated repos. A copied library
+    // shows identical declarations below file level.
+    let confirms = |p: &DeclPair| identical(p) && cands[p.a.cand].kind != node_kind::MODULE;
+    let takes = |rule: Option<&IdentityRule>, p: &DeclPair| {
+        rule.is_some_and(|r| pairs(r, cands[p.a.cand].kind) && pairs(r, cands[p.b.cand].kind))
+    };
+    let mut out = VendoredPairs {
+        seen: groups.len(),
+        ..VendoredPairs::default()
+    };
+    for group in groups.values() {
+        if !group.iter().any(confirms) {
+            continue;
+        }
+        out.confirmed += 1;
+        for p in group {
+            // A pair without two digests (no CODE, or under 40 bytes) is
+            // neither a copy nor a diverged one.
+            let (Some(x), Some(y)) = (p.a.digest, p.b.digest) else {
+                continue;
+            };
+            let pair = (p.a.cand, p.b.cand);
+            if x == y {
+                if takes(body, p) {
+                    out.body_hash.push(pair);
+                }
+            } else if !p.ambiguous && takes(suffix, p) {
+                out.path_suffix.push(pair);
+            }
+        }
+    }
+    out
+}
+
+/// The classes `pairs` (candidate indices) join, transitively, through
+/// DD.1's `Classes::from_pairs`, as candidate-index member sets in member
+/// order.
+fn vendored_classes(pairs: &[(usize, usize)], cands: &[Candidate]) -> Vec<Members> {
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+    let classes = Classes::from_pairs(pairs.iter().map(|&(a, b)| (cands[a].id, cands[b].id)));
+    // Lookup only, never iterated: the order below is the member sets'.
+    let at: HashMap<NodeId, usize> = pairs
+        .iter()
+        .flat_map(|&(a, b)| [a, b])
+        .map(|i| (cands[i].id, i))
+        .collect();
+    let mut out: Vec<Members> = classes
+        .classes()
+        .map(|(_, ids)| ids.iter().filter_map(|id| at.get(id).copied()).collect())
+        .collect();
+    out.sort();
+    out
+}
+
 // ---- stars -------------------------------------------------------------------
 
 /// The emitter of one resolve's stars: the candidates, the EVIDENCE cells
@@ -570,6 +872,7 @@ impl Stars<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glia_code_domain::code_span::CodeSpan;
     use glia_code_domain::evidence::Evidence;
     use glia_code_domain::{CodeNav, GRAPH_TYPE};
     use glia_core::Node;
@@ -579,6 +882,8 @@ mod tests {
         repo: RepoId,
         nodes: Vec<Node>,
         nav: CodeNav,
+        /// The MODULE of each file [`G::func`] declared into.
+        modules: BTreeMap<String, NodeId>,
     }
 
     impl G {
@@ -587,10 +892,22 @@ mod tests {
                 repo: RepoId::from_canonical(&format!("test://identity/{tag}")),
                 nodes: vec![],
                 nav: CodeNav::default(),
+                modules: BTreeMap::new(),
             }
         }
 
         fn add(&mut self, kind: NodeKindId, qname: &str, name: &str, cells: Vec<Cell>) -> NodeId {
+            self.add_under(kind, qname, name, cells, None)
+        }
+
+        fn add_under(
+            &mut self,
+            kind: NodeKindId,
+            qname: &str,
+            name: &str,
+            cells: Vec<Cell>,
+            parent: Option<NodeId>,
+        ) -> NodeId {
             let id = NodeId::from_parts(GRAPH_TYPE, self.repo, kind, qname);
             self.nodes.push(Node {
                 id,
@@ -598,8 +915,42 @@ mod tests {
                 confidence: Confidence::Strong,
                 cells,
             });
-            self.nav.record(id, name, qname, kind, None);
+            self.nav.record(id, name, qname, kind, parent);
             id
+        }
+
+        /// A FUNCTION `name` with CODE `code` in `file` (repo-relative), under
+        /// the file's MODULE, which carries no CODE (so only the functions
+        /// pair). Qnames are the path's `::` form, as the walker mints them.
+        fn func(mut self, file: &str, name: &str, code: CellPayload) -> Self {
+            let module_q = file.trim_end_matches(".ts").replace('/', "::");
+            let pos = |line: u32| {
+                json(
+                    cell_type::POSITION,
+                    &format!(r#"{{"file":"{file}","start_line":{line}}}"#),
+                )
+            };
+            let module = match self.modules.get(file) {
+                Some(&m) => m,
+                None => {
+                    let leaf = module_q.rsplit("::").next().unwrap_or_default().to_string();
+                    let m = self.add(node_kind::MODULE, &module_q, &leaf, vec![pos(0)]);
+                    self.modules.insert(file.to_string(), m);
+                    m
+                }
+            };
+            let code = Cell {
+                kind: cell_type::CODE,
+                payload: code,
+            };
+            self.add_under(
+                node_kind::FUNCTION,
+                &format!("{module_q}::{name}"),
+                name,
+                vec![code, pos(2)],
+                Some(module),
+            );
+            self
         }
 
         fn dep(mut self, qname: &str) -> Self {
@@ -888,7 +1239,8 @@ mod tests {
             report.line().as_deref(),
             Some(
                 "[identity] classes=1 edges=2 diverged=1 package_name=0 manifest_name=0 \
-                 message_fqname=1 contract_op=0 contract_route=0"
+                 message_fqname=1 contract_op=0 contract_route=0 body_hash=0 path_suffix=0 \
+                 offsets=0/0"
             )
         );
     }
@@ -1060,6 +1412,333 @@ mod tests {
         );
     }
 
+    // ---- vendored copies (DD.6) ----------------------------------------------
+
+    /// `text` padded with spaces to `n` bytes: a CODE body of an exact size.
+    fn body(n: usize, text: &str) -> CellPayload {
+        assert!(text.len() <= n, "{text:?} is longer than {n}");
+        CellPayload::Text(format!("{text:<n$}"))
+    }
+
+    /// `f`'s body, byte-identical in every copy (60 bytes).
+    fn f60() -> CellPayload {
+        body(60, "export function f(a: number) { return a * 2 + 1; }")
+    }
+
+    /// `g`'s body as the library has it, and as a copy diverged from it.
+    fn g_lib() -> CellPayload {
+        body(60, "export function g(s: string) { return s.trim(); }")
+    }
+
+    fn g_fork() -> CellPayload {
+        body(
+            60,
+            "export function g(s: string) { return s.toLowerCase(); }",
+        )
+    }
+
+    #[test]
+    fn vendored_identical() {
+        let m = run(vec![
+            G::new("lib").func("lib/a.ts", "f", f60()).build(),
+            G::new("app").func("vendor/lib/a.ts", "f", f60()).build(),
+        ]);
+        assert_eq!(
+            stars(&m),
+            [row(
+                "vendor::lib::a::f",
+                "lib::a::f",
+                "body_hash",
+                Confidence::Weak
+            )]
+        );
+    }
+
+    #[test]
+    fn vendored_diverged() {
+        let m = run(vec![
+            G::new("lib")
+                .func("lib/a.ts", "f", f60())
+                .func("lib/a.ts", "g", g_lib())
+                .build(),
+            G::new("app")
+                .func("vendor/lib/a.ts", "f", f60())
+                .func("vendor/lib/a.ts", "g", g_fork())
+                .build(),
+        ]);
+        assert_eq!(
+            stars(&m),
+            [
+                row(
+                    "vendor::lib::a::f",
+                    "lib::a::f",
+                    "body_hash",
+                    Confidence::Weak
+                ),
+                row(
+                    "vendor::lib::a::g",
+                    "lib::a::g",
+                    "path_suffix/diverged",
+                    Confidence::Weak
+                ),
+            ]
+        );
+        // One offset (``, `vendor`), confirmed by f; the MODULEs (no CODE)
+        // are pairs of it that emit nothing.
+        assert_eq!(
+            identity_edges(&m.graphs).1.line().as_deref(),
+            Some(
+                "[identity] classes=2 edges=2 diverged=1 package_name=0 manifest_name=0 \
+                 message_fqname=0 contract_op=0 contract_route=0 body_hash=1 path_suffix=1 \
+                 offsets=1/1"
+            )
+        );
+    }
+
+    #[test]
+    fn unconfirmed_offset() {
+        // The boilerplate trap: one path in two unrelated repos, no identical
+        // declaration under the offset.
+        let graphs = vec![
+            G::new("web")
+                .func(
+                    "src/index.ts",
+                    "main",
+                    body(60, "export function main() { bootWeb(); }"),
+                )
+                .build(),
+            G::new("admin")
+                .func(
+                    "src/index.ts",
+                    "main",
+                    body(60, "export function main() { bootAdmin(); }"),
+                )
+                .build(),
+        ];
+        let (edges, report) = identity_edges(&graphs);
+        assert!(edges.is_empty(), "{edges:?}");
+        assert_eq!((report.offsets_confirmed, report.offsets_seen), (0, 1));
+        assert_eq!(report.line(), None);
+    }
+
+    #[test]
+    fn module_match_confirms_nothing() {
+        // A byte-identical declaration-free file (a scaffold's `main.ts`) at
+        // one path in two apps whose same-path pages differ: no offset.
+        let boot = || body(60, "bootstrapApplication(AppComponent, appConfig);");
+        let app = |tag: &str, page: &str| {
+            let mut g = G::new(tag).func("src/pages/login.ts", "login", body(60, page));
+            let pos = json(
+                cell_type::POSITION,
+                r#"{"file":"src/main.ts","start_line":0}"#,
+            );
+            let code = Cell {
+                kind: cell_type::CODE,
+                payload: boot(),
+            };
+            g.add(node_kind::MODULE, "src::main", "main", vec![code, pos]);
+            g.build()
+        };
+        let graphs = vec![
+            app("kina", "export function login() { return swapLogin(); }"),
+            app(
+                "lapse",
+                "export function login() { return registerLogin(); }",
+            ),
+        ];
+        let (edges, report) = identity_edges(&graphs);
+        assert!(edges.is_empty(), "{edges:?}");
+        assert_eq!((report.offsets_confirmed, report.offsets_seen), (0, 1));
+    }
+
+    #[test]
+    fn short_bodies() {
+        // Equal 20-byte bodies have no digest, so they confirm nothing, and
+        // the diverged sibling under the same offset pairs nothing either.
+        let short = || body(20, "function f() {}");
+        let m = run(vec![
+            G::new("lib")
+                .func("lib/a.ts", "f", short())
+                .func("lib/a.ts", "g", g_lib())
+                .build(),
+            G::new("app")
+                .func("vendor/lib/a.ts", "f", short())
+                .func("vendor/lib/a.ts", "g", g_fork())
+                .build(),
+        ]);
+        assert!(stars(&m).is_empty(), "{:?}", stars(&m));
+    }
+
+    #[test]
+    fn span_and_text_agree() {
+        // A layout merged without its sources reads CODE back as a CodeSpan:
+        // the digest is the span's xxh64 of the same bytes.
+        let span = |file: &str, p: CellPayload| match p {
+            CellPayload::Text(t) => CodeSpan::of(file, 7, t.as_bytes()).to_payload(),
+            other => other,
+        };
+        let build = |spans: bool| {
+            let (f, g) = if spans {
+                (
+                    span("vendor/lib/a.ts", f60()),
+                    span("vendor/lib/a.ts", g_fork()),
+                )
+            } else {
+                (f60(), g_fork())
+            };
+            run(vec![
+                G::new("lib")
+                    .func("lib/a.ts", "f", f60())
+                    .func("lib/a.ts", "g", g_lib())
+                    .build(),
+                G::new("app")
+                    .func("vendor/lib/a.ts", "f", f)
+                    .func("vendor/lib/a.ts", "g", g)
+                    .build(),
+            ])
+        };
+        let (text, spans) = (build(false), build(true));
+        assert_eq!(stars(&text).len(), 2);
+        assert_eq!(stars(&text), stars(&spans));
+    }
+
+    #[test]
+    fn intra_repo() {
+        // Two copies inside one repo are that repo's business; the other repo
+        // holds no copy.
+        let m = run(vec![
+            G::new("app")
+                .func("lib/a.ts", "f", f60())
+                .func("vendor/lib/a.ts", "f", f60())
+                .build(),
+            G::new("other").dep("package:npm:react").build(),
+        ]);
+        assert!(stars(&m).is_empty(), "{:?}", stars(&m));
+        // And a one-repo build never indexes a declaration at all.
+        let solo = vec![
+            G::new("app")
+                .func("lib/a.ts", "f", f60())
+                .func("vendor/lib/a.ts", "f", f60())
+                .build(),
+        ];
+        assert_eq!(identity_edges(&solo).1.offsets_seen, 0);
+    }
+
+    #[test]
+    fn three_repos() {
+        let m = run(vec![
+            G::new("lib").func("lib/a.ts", "f", f60()).build(),
+            G::new("app").func("vendor/lib/a.ts", "f", f60()).build(),
+            G::new("cli")
+                .func("third_party/lib/a.ts", "f", f60())
+                .build(),
+        ]);
+        assert_eq!(
+            stars(&m),
+            [
+                row(
+                    "third_party::lib::a::f",
+                    "lib::a::f",
+                    "body_hash",
+                    Confidence::Weak
+                ),
+                row(
+                    "vendor::lib::a::f",
+                    "lib::a::f",
+                    "body_hash",
+                    Confidence::Weak
+                ),
+            ]
+        );
+        let report = identity_edges(&m.graphs).1;
+        assert_eq!(report.classes[5], 1, "one class, not two");
+        // lib-app and lib-cli; app's and cli's paths are no suffix of each other.
+        assert_eq!((report.offsets_confirmed, report.offsets_seen), (2, 2));
+    }
+
+    #[test]
+    fn ambiguous_key_pairs_only_identical() {
+        // The library's a.ts holds two FUNCTIONs named `g` (distinct qnames,
+        // one key): a copy's `g` pairs only with the one it is byte-identical
+        // to, never as a diverged copy of either.
+        let other = || body(60, "export function g(s: string) { return s.padStart(8); }");
+        let lib = |second_g: CellPayload| {
+            let mut g = G::new("lib")
+                .func("lib/a.ts", "f", f60())
+                .func("lib/a.ts", "g", g_lib());
+            let module = g.modules["lib/a.ts"];
+            let pos = json(cell_type::POSITION, r#"{"file":"lib/a.ts","start_line":9}"#);
+            let code = Cell {
+                kind: cell_type::CODE,
+                payload: second_g,
+            };
+            g.add_under(
+                node_kind::FUNCTION,
+                "lib::a::g#2",
+                "g",
+                vec![code, pos],
+                Some(module),
+            );
+            g.build()
+        };
+        let app = |g_body: CellPayload| {
+            G::new("app")
+                .func("vendor/lib/a.ts", "f", f60())
+                .func("vendor/lib/a.ts", "g", g_body)
+                .build()
+        };
+        let f_row = || {
+            row(
+                "vendor::lib::a::f",
+                "lib::a::f",
+                "body_hash",
+                Confidence::Weak,
+            )
+        };
+        // The copy's g differs from both: no path_suffix pair at all.
+        assert_eq!(stars(&run(vec![lib(other()), app(g_fork())])), [f_row()]);
+        // The copy's g is the second one byte for byte: that one pair only.
+        assert_eq!(
+            stars(&run(vec![lib(g_fork()), app(g_fork())])),
+            [
+                f_row(),
+                row(
+                    "vendor::lib::a::g",
+                    "lib::a::g#2",
+                    "body_hash",
+                    Confidence::Weak
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn local_chain_bounds() {
+        let mut g = G::new("a");
+        let module = g.add(node_kind::MODULE, "m", "m", vec![]);
+        let class = g.add_under(node_kind::CLASS, "m::C", "C", vec![], Some(module));
+        let method = g.add_under(node_kind::METHOD, "m::C::run", "run", vec![], Some(class));
+        let orphan = g.add(node_kind::FUNCTION, "x::f", "f", vec![]);
+        // A parent cycle with no MODULE on it.
+        let p = g.add(node_kind::CLASS, "y::P", "P", vec![]);
+        let q = g.add_under(node_kind::METHOD, "y::P::q", "q", vec![], Some(p));
+        g.nav.parent_of.insert(p, q);
+        let g = g.build();
+        assert_eq!(local_chain(&g, module).as_deref(), Some(""));
+        assert_eq!(local_chain(&g, method).as_deref(), Some("C::run"));
+        assert_eq!(local_chain(&g, orphan), None);
+        assert_eq!(local_chain(&g, q), None);
+    }
+
+    #[test]
+    fn suffix_cuts() {
+        let all: Vec<(&str, &str)> = suffixes("a/é/b.ts", true).collect();
+        assert_eq!(all, [("", "a/é/b.ts"), ("a", "é/b.ts"), ("a/é", "b.ts")]);
+        let proper: Vec<(&str, &str)> = suffixes("b.ts", false).collect();
+        assert!(proper.is_empty());
+        assert_eq!(suffixes("dir/", false).count(), 0, "no empty suffix");
+    }
+
     /// The evidence-rules tally counts edges per rule, the `[identity]` line
     /// classes per rule; both are silent with nothing to pair.
     #[test]
@@ -1084,14 +1763,15 @@ mod tests {
             report.tally.line().as_deref(),
             Some(
                 "[evidence-rules] resolver=identity package_name=3 manifest_name=0 message_fqname=0 \
-                 contract_op=0 contract_route=0"
+                 contract_op=0 contract_route=0 body_hash=0 path_suffix=0"
             )
         );
         assert_eq!(
             report.line().as_deref(),
             Some(
                 "[identity] classes=2 edges=3 diverged=0 package_name=2 manifest_name=0 \
-                 message_fqname=0 contract_op=0 contract_route=0"
+                 message_fqname=0 contract_op=0 contract_route=0 body_hash=0 path_suffix=0 \
+                 offsets=0/0"
             )
         );
     }

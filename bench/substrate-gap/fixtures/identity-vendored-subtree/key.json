@@ -1,0 +1,16 @@
+{
+  "framework": "identity-vendored-subtree",
+  "language": "typescript",
+  "dirs": ["money", "shop"],
+  "note": "DD.6: shop copies money under third_party/money/ (not vendor/, which the walk collapses to a REGION and never parses); format.ts is byte-identical (rule body_hash, HEURISTIC), parse.ts diverged (rule path_suffix with /diverged): same-as CANDIDATES, never collapsed (Q18). src/index.ts exists in both repos with different bodies: the offset ('','') is never confirmed, so the two `main`s and the two index.ts MODULEs are not paired. grade.py cannot read edge cells: engine/tests/identity_vendored.rs pins the rules.",
+  "expect_edges": [
+    {"from": "formatCents", "to": "formatCents", "category": "SAME_AS"},
+    {"from": "parseCents", "to": "parseCents", "category": "SAME_AS"},
+    {"from": "third_party::money::src::format", "to": "src::format", "category": "SAME_AS", "exact": true, "note": "the format.ts MODULEs (body_hash); exact, so the formatCents edge cannot stand in for it"},
+    {"from": "third_party::money::src::parse", "to": "src::parse", "category": "SAME_AS", "exact": true, "note": "the parse.ts MODULEs (path_suffix/diverged); exact, so the parseCents edge cannot stand in for it"}
+  ],
+  "forbid": [
+    {"from": "src::index::main", "to": "src::index::main", "category": "SAME_AS", "note": "PRECISION: same path, different body, unconfirmed offset"},
+    {"from": "src::index", "to": "src::index", "category": "SAME_AS", "note": "PRECISION: the two index.ts MODULEs, same path, different body"}
+  ]
+}
