@@ -454,6 +454,16 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   edge; if one ever does, the skip goes (`overlay_loop_rules.rs` pins the delta and fails first).
 - W12 (DD.14): under TopLevelDir / ProjectRoots keying, an unlocated SAME_AS member (PACKAGE_DEP) stays unplaced in
   `arch`; placing it needs the manifest's PROJECT, which has no edge to its dependencies today.
+- W13 (DD.15, with DD.11 / DD.12 / DD.16's open handoffs): one packet owning `engine/src/identity.rs`, `answers.rs`,
+  `trace.rs` and `tests_for.rs` adds `IdentityView::walk_members(rep)` / `in_walk_class(id)` and deletes the three
+  SAME_AS-endpoint stopgaps (`tests_for::WalkClasses`, `answers::walk_class_reps`, `trace::WalkNodes`).
+- W13 (DD.15): move the repo-label fallback (`collapse.repo_labels.is_empty() -> rev.after.repo_labels`) into
+  `diff_impact_from_delta`, so every caller of `diff_impact_vs_rev` / `diff_impact_from_delta` gets labelled
+  `also_in` repos and the CLI / py surfaces can call `diff_impact_vs_rev` again.
+- W13 (DB.8b): `reflexion::derive` runs unbudgeted (`max_rows = usize::MAX`); a finite budget must exceed |placed nodes| x
+  |declared paths| bindings for `owns`.
+- W13 (DB.9c; joins W0's fmt item): `py/src/overlay_loop.rs` is rustfmt-dirty outside DB.9c's lines; the one formatting
+  commit plus a fmt gate covers it.
 
 ## 3. Open questions for James
 
