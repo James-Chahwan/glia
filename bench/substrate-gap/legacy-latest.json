@@ -1493,8 +1493,7 @@
       "framework": "proto-field-drift",
       "language": "proto",
       "per_category": {
-        "SAME_AS": 1.0,
-        "SHARES_SCHEMA": 1.0
+        "SAME_AS": 1.0
       }
     },
     "py-accesses-data": {
@@ -2414,8 +2413,7 @@
       "framework": "xcut-proto-shared",
       "language": "proto",
       "per_category": {
-        "SAME_AS": 1.0,
-        "SHARES_SCHEMA": 1.0
+        "SAME_AS": 1.0
       }
     },
     "xcut-queue-anchor": {
@@ -2674,8 +2672,7 @@
       "language": "json",
       "per_category": {
         "DEFINES": 1.0,
-        "SAME_AS": 1.0,
-        "SHARES_SCHEMA": 1.0
+        "SAME_AS": 1.0
       }
     },
     "xstack-go-http": {
