@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 413,
+  "fixtures": 414,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -658,6 +658,16 @@
       "language": "typescript",
       "per_category": {
         "RPC_CALLS": 1.0
+      }
+    },
+    "evm-shop-stack": {
+      "framework": "evm-shop-stack",
+      "language": "typescript",
+      "per_category": {
+        "EVENT_FLOWS": 1.0,
+        "HANDLED_BY": 1.0,
+        "RPC_CALLS": 1.0,
+        "USES": 1.0
       }
     },
     "external-cells-sidecar": {

@@ -60,6 +60,7 @@ LANDED = {
     21: "DT.1h DT.1i DT.10d DT.10k",
     22: "DT.1l DT.1n DT.10f DT.10j",
     23: "DT.1k DT.10g",
+    24: "DT.1o DT.10h",
 }
 GROUP_ORDER = {"0": 0, "A": 1, "B": 2, "C": 3, "D": 4, "E": 5, "F": 6, "G": 7, "H": 8, "Z": 9}
 

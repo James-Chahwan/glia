@@ -8559,6 +8559,7 @@
     "fixtures/event-verb-fallback",
     "fixtures/event-verb-receivers",
     "fixtures/evm-abi-cross-file",
+    "fixtures/evm-shop-stack",
     "fixtures/external-cells-sidecar",
     "fixtures/external-channel-clients",
     "fixtures/framework-invoked-members",
