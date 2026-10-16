@@ -32,7 +32,7 @@ use glia_code_domain::glia_config::{self, LoadedConfig};
 use glia_code_domain::{edge_category, node_kind};
 use glia_engine::gaps::{
     DEAD_SYMBOL, DROP, GapRow, GapsOptions, GapsReport, KEEP, ORPHANED_RULE, REDUNDANT_RULE,
-    UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT, WRAPPED_SINK, gaps_report,
+    ROTTED_RULE, UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT, WRAPPED_SINK, gaps_report,
 };
 use glia_engine::overlay_loop::{
     AcceptOptions, Location, Proposal, ProposeOptions, StanzaRef, StanzaTrial, TryOptions,
@@ -1272,6 +1272,65 @@ fn accept_removes_rot_by_gap_id() {
         (0, 0),
         "{clean:#?}"
     );
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// DB.4: an invariant whose `rule` validates (the prelude's `calls/2`)...
+const KEPT_INVARIANT: &str = "\n[[constraint]]\nid = \"calls-exist\"\nkind = \"invariant\"\ntext = \"the jobs call\"\nrule = 'violation(f) :- calls(f, _).'\n";
+/// ... and one naming a node kind this glia does not have: a `rotted_rule`.
+const ROTTEN_INVARIANT: &str = "\n# written against an older glia\n[[constraint]]\nid = \"rotten\"\nkind = \"invariant\"\ntext = \"no route is a routee\"\nrule = 'violation(r) :- node(r, \"ROUTEE\").'\n";
+
+/// DB.4: a `rotted_rule` row is removed by its gap id like an orphaned one,
+/// by its `[[constraint]]` id: exactly its stanza (and its comment) goes.
+#[test]
+fn accept_removes_a_rotted_rule() {
+    let root = tmp("rotted");
+    let repo = nightly_repo(&root.join("repo"));
+    let base = format!("version = 2\n{KEPT_INVARIANT}{ROTTEN_INVARIANT}\n# end of overlay\n");
+    let file = overlay_of(&repo);
+    std::fs::create_dir_all(file.parent().expect("dir")).expect("mkdir");
+    std::fs::write(&file, &base).expect("write");
+    assert!(glia_config::parse_str(&base).errors.is_empty());
+
+    let before = rule_report(&repo);
+    assert_eq!(before.count(ROTTED_RULE), 1, "{before:#?}");
+    let rotten = row_of(&before, ROTTED_RULE, "constraint");
+    assert_eq!(rotten.qname, "rotten");
+    let id = rotten.id.clone();
+
+    // The dry run's diff removes the rotten stanza's lines and adds none.
+    let mut dry = remove(&[&id]);
+    dry.dry_run = true;
+    let summary = accept(&repo, None, &dry).expect("dry run");
+    assert!(summary.dry_run && !summary.written);
+    assert_eq!((summary.removed, summary.added.len()), (1, 0));
+    let changed = |sign: char, head: &str| -> Vec<String> {
+        summary
+            .diff
+            .lines()
+            .filter(|l| l.starts_with(sign) && !l.starts_with(head))
+            .map(|l| l[1..].to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    };
+    let stanza: Vec<String> = ROTTEN_INVARIANT
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    assert_eq!(changed('-', "---"), stanza, "{}", summary.diff);
+    assert!(changed('+', "+++").is_empty(), "{}", summary.diff);
+    assert_eq!(std::fs::read_to_string(&file).expect("read"), base);
+
+    let summary = accept(&repo, None, &remove(&[&id])).expect("accept");
+    assert_eq!(summary.removed, 1);
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("read"),
+        format!("version = 2\n{KEPT_INVARIANT}\n# end of overlay\n"),
+        "exactly the stanza and its comment are gone"
+    );
+    let after = rule_report(&repo);
+    assert_eq!(after.count(ROTTED_RULE), 0, "{after:#?}");
     std::fs::remove_dir_all(root).ok();
 }
 

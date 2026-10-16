@@ -395,7 +395,7 @@ the loop's commands and its rules.
 
 1. **Gaps.** `glia gaps <repo>` lists the blind spots: unpaired endpoints and routes, `<unresolved>`
    endpoint sinks, tag-only queues, dead-flagged symbols, and overlay rules that no longer
-   bind. Each row suggests a section to fill, and carries an `id` (`gap:<16 hex>`) that stays
+   bind or that this glia can no longer read. Each row suggests a section to fill, and carries an `id` (`gap:<16 hex>`) that stays
    the same across rebuilds: it is keyed by the node, stanza or sidecar row, never by a line
    or an ordinal, so a stanza can name the gap it targets and a re-run shows it gone.
 2. **Propose.** `glia overlay propose <repo>` is the work list: the rows a stanza could close
@@ -425,8 +425,11 @@ the loop's commands and its rules.
    (or a dry run, or nothing changed), 1 when the result would not validate (nothing written), 2 on
    a usage or build error.
 6. **Prune rot.** A rule that `gaps` reports as an `orphaned_rule` (it binds nothing: the code was
-   renamed or deleted) or a `redundant_rule` (the extractor now emits the same edge) is removed by
-   its gap id: `glia overlay accept <repo> --remove <gap id>`. The row's stanza is found by its
+   renamed or deleted), a `redundant_rule` (the extractor now emits the same edge) or a
+   `rotted_rule` (a `[[constraint]]` whose `rule` this glia can no longer read: a syntax error, or
+   a node kind, edge category or predicate it does not have; `detail` quotes the first rule error
+   with its line and column in the rule text) is removed by its gap id:
+   `glia overlay accept <repo> --remove <gap id>`. The row's stanza is found by its
    identity (an `[[edge]]`'s from / to / category, a `[[constraint]]` / `[[decision]]` / `[[note]]`
    id, an `[entrypoints]` pattern), never by a line, and every stanza with that identity goes.
    `--candidate` and `--remove` combine, so a renamed rule is replaced in one write. A

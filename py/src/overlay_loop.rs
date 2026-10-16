@@ -193,11 +193,12 @@ fn overlay_try(
 /// handles: `wrapper#1`, `constants.GATEWAY`; default every stanza) are
 /// merged in, keeping the file's comments and layout; a constant or pattern
 /// the file already holds counts in `duplicates`. `remove`: gap ids of
-/// `orphaned_rule` / `redundant_rule` rows (from `overlay_propose` or `gaps`)
-/// whose stanzas are deleted by identity, never by line. The result must
-/// load as validated, and is written atomically unless `dry_run` or
-/// unchanged (`written`). `added`: stanzas written per section; `removed`:
-/// entries deleted; `diff`: the unified diff before -> after.
+/// `orphaned_rule` / `redundant_rule` / `rotted_rule` rows (from
+/// `overlay_propose` or `gaps`) whose stanzas are deleted by identity, never
+/// by line. The result must load as validated, and is written atomically
+/// unless `dry_run` or unchanged (`written`). `added`: stanzas written per
+/// section; `removed`: entries deleted; `diff`: the unified diff before ->
+/// after.
 ///
 /// Raises `ValueError` (nothing written) with the engine's message for:
 /// neither a candidate nor `remove` (`nothing to accept`), `only` without a

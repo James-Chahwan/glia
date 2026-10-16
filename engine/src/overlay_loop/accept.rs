@@ -1,6 +1,6 @@
 //! The only writer of `.glia/overlay.toml` (CE.3d): chosen candidate
-//! stanzas in, orphaned / redundant rules out by gap id, validated by the
-//! loader, written atomically, shown as a diff.
+//! stanzas in, orphaned / redundant / rotted rules out by gap id, validated
+//! by the loader, written atomically, shown as a diff.
 //!
 //! [`accept`] runs, in order:
 //! 1. BASE: the file's text, or none (a new file starts from `version = 1`).
@@ -11,8 +11,10 @@
 //!    holds is a duplicate: nothing written for it.
 //! 3. REMOVE: with gap ids, the repo is built with the file as it is (nothing
 //!    persisted, no parse cache written) and [`gaps_report`] run with its
-//!    root. Each id must be an `orphaned_rule` or `redundant_rule` row (an id
-//!    no row has, or a row of another category, is an `Err` naming it). The
+//!    root. Each id must be an `orphaned_rule`, `redundant_rule` or
+//!    `rotted_rule` (DB.4: a `[[constraint]]` whose `rule` this glia cannot
+//!    read) row (an id no row has, or a row of another category, is an `Err`
+//!    naming it). The
 //!    row's stanza is found in BASE by the row's section and line (the text
 //!    the report read) only to learn its IDENTITY - an `[[edge]]`'s from / to
 //!    / category, a `[[constraint]]` / `[[decision]]` / `[[note]]` id (an
@@ -20,8 +22,8 @@
 //!    every entry with that identity is deleted from the document, never a
 //!    line range. Two identical stanzas (twin rows, one gap) both go, both
 //!    counted. Rule rows name only those sections: a `[[wrapper]]`,
-//!    `[[route_prefix]]` or `[constants]` entry is never an orphaned or
-//!    redundant rule, so it has no removal identity.
+//!    `[[route_prefix]]` or `[constants]` entry is never an orphaned,
+//!    redundant or rotted rule, so it has no removal identity.
 //! 4. VALIDATE: the new text must load (`glia_config::parse_str`) with no
 //!    error BASE did not have, and with BASE's section counts plus the
 //!    stanzas added minus the loader-kept stanzas removed; else `Err` and
@@ -50,7 +52,7 @@ use glia_code_domain::glia_config::{self, LoadedConfig, OVERLAY_FILE};
 
 use super::propose::{build_quiet, repo_roots};
 use super::writer::{Candidate, Location, StanzaRef, merge, parse_candidate};
-use crate::gaps::{GapRow, GapsOptions, ORPHANED_RULE, REDUNDANT_RULE, gaps_report};
+use crate::gaps::{GapRow, GapsOptions, ORPHANED_RULE, REDUNDANT_RULE, ROTTED_RULE, gaps_report};
 
 /// What a repo with no `.glia/overlay.toml` is measured against.
 const EMPTY_OVERLAY: &str = "version = 1\n";
@@ -77,8 +79,8 @@ pub struct AcceptOptions {
     /// The candidate stanzas to write, by [`StanzaRef`] display (`wrapper#1`,
     /// `constants.GATEWAY`); empty = every stanza.
     pub only: Vec<String>,
-    /// Gap ids (`gap:<16 hex>`) of `orphaned_rule` / `redundant_rule` rows
-    /// whose stanzas to remove.
+    /// Gap ids (`gap:<16 hex>`) of `orphaned_rule` / `redundant_rule` /
+    /// `rotted_rule` rows whose stanzas to remove.
     pub remove: Vec<String>,
     /// Validate and diff, write nothing.
     pub dry_run: bool,
@@ -354,9 +356,9 @@ fn removal_identities(
             ));
             continue;
         };
-        if row.category != ORPHANED_RULE && row.category != REDUNDANT_RULE {
+        if ![ORPHANED_RULE, REDUNDANT_RULE, ROTTED_RULE].contains(&row.category) {
             problems.push(format!(
-                "{id} is a {} row; only {ORPHANED_RULE} / {REDUNDANT_RULE} rows are removed",
+                "{id} is a {} row; only {ORPHANED_RULE} / {REDUNDANT_RULE} / {ROTTED_RULE} rows are removed",
                 row.category
             ));
             continue;

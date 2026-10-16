@@ -24,6 +24,7 @@
 //! | `suspected_edge` | CD.3b: an orphan of a learned (kind, category, kind) triple (a cross-service pairing the build already made at least twice) and a target its channel tokens match: `detail` names the category, the target qname in backticks and its location, then `score= channel= aa= ra= cochange= target_unpaired= triple=<KIND>-<CATEGORY>-><KIND> seen <n>x`; the row is the orphan, one per kept target (at most three); `draft` holds the paste-ready `[[edge]]` stanza (engine `suspected`) | heuristic (a suggestion: the overlay loop is its verifier) | `edge` |
 //! | `orphaned_rule` | a qname-bearing overlay stanza (`[[edge]]` from / to, `[[constraint]]` / `[[decision]]` / `[[note]]` anchor, `[entrypoints]` qname) that binds no node | fact | `remove` |
 //! | `redundant_rule` | an `[[edge]]` equal to an edge whose ORIGIN is not the overlay (the extractor caught up) | fact | `remove` |
+//! | `rotted_rule` | DB.4: a loader-kept `[[constraint]]` whose `rule` text this glia can no longer read (`rules::validate`: a parse error, an unknown kind / category / predicate, a wrong arity, a reserved prelude name); `detail` is the first diagnostic, `rule <line>:<col>: <message>` (+ how many more); a fact about this glia, not the code | fact | `remove` |
 //! | `orphaned_cell` | a `.glia/cells.jsonl` / `.glia/vectors.jsonl` row whose qname + hint bind nothing | fact | `glia cell ls --check --rekey` |
 //!
 //! `kind` is the node kind for a graph row, the overlay section for a rule
@@ -41,7 +42,7 @@
 //! | node rows (the endpoint / route / queue / dead-symbol / wrapped-sink categories) | the node's NodeId in decimal (path-independent since LB.1, distinct across repos) |
 //! | `cochange_no_edge` | `module_a` NodeId `\x1f` the other file |
 //! | `suspected_edge` | the orphan's NodeId `\x1f` the target's NodeId |
-//! | `orphaned_rule` / `redundant_rule` | repo id `\x1f` section `\x1f` the stanza's identity: `[[edge]]` from `\x1f` to `\x1f` category; `[[constraint]]` / `[[decision]]` id; `[[note]]` id, else anchor `\x1f` text; `[entrypoints]` the pattern |
+//! | `orphaned_rule` / `redundant_rule` / `rotted_rule` | repo id `\x1f` section `\x1f` the stanza's identity: `[[edge]]` from `\x1f` to `\x1f` category; `[[constraint]]` / `[[decision]]` id; `[[note]]` id, else anchor `\x1f` text; `[entrypoints]` the pattern |
 //! | `orphaned_cell` | repo id `\x1f` sidecar file `\x1f` cell type `\x1f` qname `\x1f` kind `\x1f` hint |
 //!
 //! `draft` (CD.3b) is set on `suspected_edge` rows only (left out of the
@@ -61,7 +62,7 @@
 //! the graph-category gaps) and [`verdict`] compares two counts; together
 //! they are how [`overlay_delta`] judges a candidate overlay.
 //!
-//! `wrapped_sink` and the last three categories read each repo's files (its
+//! `wrapped_sink` and the last four categories read each repo's files (its
 //! `.glia/overlay.toml`, its sidecars), so they need its root: with no roots
 //! they are not computed and are listed in [`GapsReport::skipped`] instead of
 //! `counts`, and an `<unresolved>` sink stays an `unresolved_endpoint`. Every qname binds through
@@ -74,7 +75,12 @@
 //! `[entrypoints]` qname (applied by LF.3b) is orphaned when no repo of the
 //! build has it (`<prefix>::*`: no qname under `<prefix>::`). A declared
 //! stanza with no anchor binds a scope's PROJECT, which is not a qname: the
-//! `[declared] orphaned ... scope=` stderr line reports that case.
+//! `[declared] orphaned ... scope=` stderr line reports that case. A
+//! `rotted_rule` reads no node: [`crate::rules::validate`] checks the text
+//! against the code schema and the prelude with no graph, so a stanza both
+//! anchored nowhere and unreadable is two gaps with two ids. A stanza the
+//! loader dropped (a version-1 file that sets `rule`) is not a row: the
+//! `[overlay] error` line already names it.
 //!
 //! Rows are sorted by (category order, file, line, qname, detail); a
 //! category is cut to `top_k_per_category` after sorting, and `counts` holds
@@ -134,10 +140,11 @@ pub const COCHANGE_NO_EDGE: &str = "cochange_no_edge";
 pub const SUSPECTED_EDGE: &str = "suspected_edge";
 pub const ORPHANED_RULE: &str = "orphaned_rule";
 pub const REDUNDANT_RULE: &str = "redundant_rule";
+pub const ROTTED_RULE: &str = "rotted_rule";
 pub const ORPHANED_CELL: &str = "orphaned_cell";
 
 /// Every category, in report order.
-pub const CATEGORIES: [&str; 12] = [
+pub const CATEGORIES: [&str; 13] = [
     UNPAIRED_ENDPOINT,
     AMBIGUOUS_ENDPOINT,
     UNRESOLVED_ENDPOINT,
@@ -149,11 +156,18 @@ pub const CATEGORIES: [&str; 12] = [
     SUSPECTED_EDGE,
     ORPHANED_RULE,
     REDUNDANT_RULE,
+    ROTTED_RULE,
     ORPHANED_CELL,
 ];
 
 /// The categories that read a repo's files, so need its root.
-const ROOT_CATEGORIES: [&str; 4] = [WRAPPED_SINK, ORPHANED_RULE, REDUNDANT_RULE, ORPHANED_CELL];
+const ROOT_CATEGORIES: [&str; 5] = [
+    WRAPPED_SINK,
+    ORPHANED_RULE,
+    REDUNDANT_RULE,
+    ROTTED_RULE,
+    ORPHANED_CELL,
+];
 
 /// The categories read off the graph alone: [`CATEGORIES`] minus
 /// [`ROOT_CATEGORIES`], what [`graph_counts`] counts. A root category reads
@@ -187,6 +201,12 @@ const STRUCTURAL: [EdgeCategoryId; 2] = [edge_category::DEFINES, edge_category::
 /// of the `with` count (those call sites count instead, when they pair with
 /// nothing).
 const ORPHAN_CATEGORIES: [&str; 3] = [UNPAIRED_ENDPOINT, UNRESOLVED_ENDPOINT, TAG_ONLY_QUEUE];
+
+/// The node kinds a `dead_symbol` row can be. The rules prelude's
+/// `symbol_kind/1` holds exactly these (`rules::prelude`), so `unreached/1`
+/// and the row read one list.
+pub(crate) const DEAD_SYMBOL_KINDS: [NodeKindId; 3] =
+    [node_kind::CLASS, node_kind::FUNCTION, node_kind::METHOD];
 
 /// Read straight off the graph's edges.
 pub const FACT: &str = "fact";
@@ -290,7 +310,7 @@ pub struct GraphCounts {
     pub edges_by_category: BTreeMap<&'static str, usize>,
     /// Per graph category (the categories that need no repo root: every one
     /// but `wrapped_sink`, `orphaned_rule`, `redundant_rule`,
-    /// `orphaned_cell`), its gap count; 0 kept.
+    /// `rotted_rule`, `orphaned_cell`), its gap count; 0 kept.
     pub gaps_by_category: BTreeMap<&'static str, usize>,
 }
 
@@ -1056,7 +1076,7 @@ fn collect_rows(
                     rows.push(node_row(TAG_ONLY_QUEUE, detail, "constants|wrapper", FACT));
                 }
             }
-            k if k == node_kind::FUNCTION || k == node_kind::METHOD || k == node_kind::CLASS => {
+            k if DEAD_SYMBOL_KINDS.contains(&k) => {
                 if let Some(live) = &live
                     && !live.contains(&n.id)
                     && !view.carry_in.contains(&n.id)
@@ -1109,7 +1129,7 @@ fn collect_rows(
         rows.extend(suspected);
     }
 
-    if want(ORPHANED_RULE) || want(REDUNDANT_RULE) || want(ORPHANED_CELL) {
+    if want(ORPHANED_RULE) || want(REDUNDANT_RULE) || want(ROTTED_RULE) || want(ORPHANED_CELL) {
         let mut ctx = RootCtx {
             merged,
             view: &view,
@@ -1603,6 +1623,30 @@ impl RootCtx<'_> {
                 _ => {}
             }
         }
+        if self.want.contains(&ROTTED_RULE) {
+            for s in &cfg.config.constraint {
+                let c = s.get_ref();
+                let Some(text) = c.rule.as_deref() else {
+                    continue;
+                };
+                let diags = crate::rules::validate(text);
+                let Some(detail) = rot_detail(&label, &c.id, &diags) else {
+                    continue;
+                };
+                rows.push(GapRow {
+                    id: ids.id(ROTTED_RULE, rule_key(repo, "constraint", &[&c.id])),
+                    category: ROTTED_RULE,
+                    qname: c.id.clone(),
+                    kind: "constraint",
+                    file: Some(OVERLAY_FILE.to_string()),
+                    line: Some(i64::from(cfg.line_of(s.span()))),
+                    detail,
+                    suggest: "remove",
+                    tier: FACT,
+                    draft: None,
+                });
+            }
+        }
         if !want_orphans {
             return;
         }
@@ -1769,6 +1813,20 @@ impl RootCtx<'_> {
     }
 }
 
+/// A `rotted_rule` row's detail: the first of `diags` located in the rule's
+/// own text, and how many more there are; `None` when the rule validates.
+fn rot_detail(label: &str, id: &str, diags: &[crate::rules::RuleDiagnostic]) -> Option<String> {
+    let first = diags.first()?;
+    let mut detail = format!(
+        "repo={label} constraint {id} rule {}:{}: {}",
+        first.line, first.column, first.message
+    );
+    if diags.len() > 1 {
+        detail.push_str(&format!(" (+{} more)", diags.len() - 1));
+    }
+    Some(detail)
+}
+
 /// The registry's `&'static` name for a cell type NAME, or `CELL` for one it
 /// does not know (the sidecar stage rejects that row; it can still be orphaned).
 fn cell_name(name: &str) -> &'static str {
@@ -1825,6 +1883,36 @@ fn rejected_edge_lines(cfg: &LoadedConfig) -> Vec<u32> {
 mod tests {
     use super::*;
     use glia_code_domain::glia_config::parse_str;
+
+    /// DB.4: a rule that validates is no row; a rotted one names its first
+    /// diagnostic, located in the rule text, and counts the rest.
+    #[test]
+    fn rot_detail_names_the_first_diagnostic() {
+        let valid = crate::rules::validate("violation(f) :- calls(f, _).");
+        assert!(valid.is_empty(), "{valid:?}");
+        assert_eq!(rot_detail("web", "ok", &valid), None);
+
+        let one = crate::rules::validate("violation(r) :- node(r, \"ROUTEE\").");
+        let detail = rot_detail("web", "rotten", &one).expect("rotted");
+        assert!(
+            detail.starts_with("repo=web constraint rotten rule 1:")
+                && detail.contains("unknown node kind `ROUTEE`")
+                && !detail.contains(" more)"),
+            "{detail}"
+        );
+
+        let mut two = one.clone();
+        two.extend(crate::rules::validate("violation(x) :- vanished(x)."));
+        assert_eq!(two.len(), 2, "{two:?}");
+        let first = &two[0];
+        assert_eq!(
+            rot_detail("web", "both", &two).expect("rotted"),
+            format!(
+                "repo=web constraint both rule {}:{}: {} (+1 more)",
+                first.line, first.column, first.message
+            )
+        );
+    }
 
     #[test]
     fn endpoint_parts_strip_owner_and_prefix() {

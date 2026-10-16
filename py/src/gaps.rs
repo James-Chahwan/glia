@@ -57,9 +57,11 @@ impl PyGraph {
     /// twice, and a target whose channel tokens match; heuristic; its `draft`
     /// is a paste-ready `# gap: <id>` + `[[edge]]` overlay stanza),
     /// then the overlay's own rot —
-    /// `orphaned_rule`, `redundant_rule`, `orphaned_cell`. `wrapped_sink` and
-    /// the last three read each repo's files through `repo_roots` (listed in
-    /// `skipped` for a graph that has none).
+    /// `orphaned_rule`, `redundant_rule`, `rotted_rule` (DB.4: a
+    /// `[[constraint]]` whose `rule` this glia can no longer read; fact),
+    /// `orphaned_cell`. `wrapped_sink` and the last four read each repo's
+    /// files through `repo_roots` (listed in `skipped` for a graph that has
+    /// none).
     /// `suggest` names the overlay section that could repair the row;
     /// `tier` is `fact` or `heuristic`. `counts`: the total per computed
     /// category, before `top_k`.
@@ -131,7 +133,7 @@ mod tests {
             gaps_of(&MergedGraph::new(Vec::new()), &BTreeMap::new(), None, None).expect("report");
         assert_eq!(
             serde_json::to_string(&empty).expect("json"),
-            r#"{"counts":{"ambiguous_endpoint":0,"cochange_no_edge":0,"dead_symbol":0,"suspected_edge":0,"tag_only_queue":0,"unpaired_endpoint":0,"unpaired_route":0,"unresolved_endpoint":0},"skipped":["wrapped_sink","orphaned_rule","redundant_rule","orphaned_cell"],"rows":[]}"#
+            r#"{"counts":{"ambiguous_endpoint":0,"cochange_no_edge":0,"dead_symbol":0,"suspected_edge":0,"tag_only_queue":0,"unpaired_endpoint":0,"unpaired_route":0,"unresolved_endpoint":0},"skipped":["wrapped_sink","orphaned_rule","redundant_rule","rotted_rule","orphaned_cell"],"rows":[]}"#
         );
         assert!(
             gaps_of(

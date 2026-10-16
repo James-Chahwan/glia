@@ -63,6 +63,7 @@ use super::facts::CodeFacts;
 use crate::answers::entrypoint_reachable;
 use crate::check::default_forbid_categories;
 use crate::cycles::module_import_graph;
+use crate::gaps::DEAD_SYMBOL_KINDS;
 use crate::profile::CODE_PROFILE;
 use crate::why;
 
@@ -71,9 +72,6 @@ pub const PRELUDE: &str = include_str!("prelude.dl");
 
 /// The source name the prelude's spans carry.
 const PRELUDE_SOURCE: &str = "prelude";
-
-/// The kinds `symbol_kind/1` holds: the ones gaps' `dead_symbol` row reads.
-const SYMBOL_KINDS: [NodeKindId; 3] = [node_kind::CLASS, node_kind::FUNCTION, node_kind::METHOD];
 
 /// Every predicate [`PRELUDE`] defines, as `(name, arity)`, in first-definition
 /// order: the names a user rule may not define (docs/rules.md, `## The prelude`).
@@ -326,7 +324,8 @@ impl EngineRelation<'_, '_> {
                 .into_iter()
                 .map(|c| fact(vec![text(edge_category::name(c))]))
                 .collect(),
-            Rel::SymbolKind => SYMBOL_KINDS
+            // The kinds gaps' `dead_symbol` row reads, from the one list.
+            Rel::SymbolKind => DEAD_SYMBOL_KINDS
                 .iter()
                 .map(|k| fact(vec![text(node_kind::name(*k))]))
                 .collect(),

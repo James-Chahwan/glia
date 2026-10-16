@@ -127,8 +127,9 @@ enum OverlayCmd {
         /// stanza of the candidate.
         #[arg(long, requires = "candidate")]
         only: Vec<String>,
-        /// Remove the stanza of this `orphaned_rule` / `redundant_rule` gap
-        /// (`gap:<16 hex>`, from `propose` or `glia gaps`). Repeatable.
+        /// Remove the stanza of this `orphaned_rule` / `redundant_rule` /
+        /// `rotted_rule` gap (`gap:<16 hex>`, from `propose` or `glia gaps`).
+        /// Repeatable.
         #[arg(long)]
         remove: Vec<String>,
         /// Validate and print the diff; write nothing.

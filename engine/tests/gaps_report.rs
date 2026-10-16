@@ -15,9 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use glia_engine::gaps::{
     AMBIGUOUS_ENDPOINT, CATEGORIES, COCHANGE_NO_EDGE, DEAD_SYMBOL, DROP, FACT, GapRow, GapsOptions,
-    GapsReport, HEURISTIC, KEEP, ORPHANED_CELL, ORPHANED_RULE, REDUNDANT_RULE, SUSPECTED_EDGE,
-    TAG_ONLY_QUEUE, UNPAIRED_ENDPOINT, UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT, WRAPPED_SINK,
-    gaps_report, graph_counts, overlay_delta,
+    GapsReport, HEURISTIC, KEEP, ORPHANED_CELL, ORPHANED_RULE, REDUNDANT_RULE, ROTTED_RULE,
+    SUSPECTED_EDGE, TAG_ONLY_QUEUE, UNPAIRED_ENDPOINT, UNPAIRED_ROUTE, UNRESOLVED_ENDPOINT,
+    WRAPPED_SINK, gaps_report, graph_counts, overlay_delta,
 };
 use glia_engine::{GenerateResult, generate_many, generate_one};
 
@@ -107,6 +107,7 @@ fn reports_the_probe_r1_shapes() {
             (SUSPECTED_EDGE, 0),
             (ORPHANED_RULE, 0),
             (REDUNDANT_RULE, 0),
+            (ROTTED_RULE, 0),
             (ORPHANED_CELL, 0),
         ],
         "{rep:#?}"
@@ -537,6 +538,97 @@ fn redundant_rule_stale_anchors_and_orphaned_cell() {
     assert_eq!(c.suggest, "glia cell ls --check --rekey");
 }
 
+/// DB.4: three version-2 invariants. `ok` reads the prelude's `calls/2` and
+/// the `in_scope/2` builtin and validates; `ghost` reads a predicate nothing
+/// defines and `rotten` a node kind the registry does not have, so both are
+/// `rotted_rule` rows at their stanza header lines. `rotten` is also anchored
+/// nowhere: its `orphaned_rule` row is a second, distinct gap.
+const ROTTED_OVERLAY: &str = r#"version = 2
+
+[[constraint]]
+id = "ok"
+kind = "invariant"
+text = "web code calls"
+rule = 'violation(f) :- calls(f, _), in_scope(f, "web").'
+
+[[constraint]]
+id = "ghost"
+kind = "invariant"
+text = "nothing vanished"
+rule = 'violation(x) :- vanished(x).'
+
+[[constraint]]
+id = "rotten"
+kind = "invariant"
+anchor = "src::client::gone"
+text = "no route is a routee"
+rule = 'violation(r) :- node(r, "ROUTEE").'
+"#;
+
+#[test]
+fn rotted_rule_names_the_bad_rule() {
+    let (web, api) = r1_pair("rotted");
+    write(&web, ".glia/overlay.toml", ROTTED_OVERLAY);
+    let paths = [s(&web), s(&api)];
+    let rep = report(&generate_many(&paths).expect("build"));
+    let again = report(&generate_many(&paths).expect("build"));
+    std::fs::remove_dir_all(web.parent().expect("parent")).ok();
+
+    let rotted = rows(&rep, ROTTED_RULE);
+    assert_eq!(rep.count(ROTTED_RULE), 2, "{rep:#?}");
+    let named: Vec<(&str, &str, Option<&str>, Option<i64>)> = rotted
+        .iter()
+        .map(|r| (r.qname.as_str(), r.kind, r.file.as_deref(), r.line))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("ghost", "constraint", Some(".glia/overlay.toml"), Some(9)),
+            ("rotten", "constraint", Some(".glia/overlay.toml"), Some(15)),
+        ],
+        "report order (file, line); each stanza's header line"
+    );
+    let (ghost, rotten) = (rotted[0], rotted[1]);
+    assert!(
+        ghost
+            .detail
+            .starts_with("repo=web constraint ghost rule 1:")
+            && ghost.detail.contains("vanished/1"),
+        "{}",
+        ghost.detail
+    );
+    assert!(
+        rotten
+            .detail
+            .starts_with("repo=web constraint rotten rule 1:")
+            && rotten.detail.contains("unknown node kind `ROUTEE`"),
+        "{}",
+        rotten.detail
+    );
+    for r in &rotted {
+        assert_eq!((r.suggest, r.tier), ("remove", FACT), "{r:#?}");
+    }
+
+    // Orphaned and rotted are two gaps of one stanza, with two ids.
+    let orphaned = rows(&rep, ORPHANED_RULE);
+    assert_eq!(orphaned.len(), 1, "{rep:#?}");
+    assert_eq!(
+        (
+            orphaned[0].qname.as_str(),
+            orphaned[0].kind,
+            orphaned[0].line
+        ),
+        ("src::client::gone", "constraint", Some(15))
+    );
+    assert_ne!(orphaned[0].id, rotten.id);
+
+    let ids = |r: &GapsReport| -> Vec<String> {
+        rows(r, ROTTED_RULE).iter().map(|r| r.id.clone()).collect()
+    };
+    assert_eq!(ids(&rep), ids(&again), "ids are stable across runs");
+    assert_ne!(ids(&rep)[0], ids(&rep)[1]);
+}
+
 #[test]
 fn tag_only_queue_is_reported() {
     let root = tmp("queue");
@@ -560,7 +652,7 @@ fn tag_only_queue_is_reported() {
 }
 
 /// `top_k_per_category` cuts rows after ranking, `category` keeps one
-/// category, and `counts` stay the totals; no root skips the four
+/// category, and `counts` stay the totals; no root skips the five
 /// root-reading categories; an unknown category is an error.
 #[test]
 fn options_cut_rows_not_counts() {
@@ -595,7 +687,13 @@ fn options_cut_rows_not_counts() {
     let bare = gaps_report(&r.merged, &[], &GapsOptions::default()).expect("report");
     assert_eq!(
         bare.skipped,
-        [WRAPPED_SINK, ORPHANED_RULE, REDUNDANT_RULE, ORPHANED_CELL]
+        [
+            WRAPPED_SINK,
+            ORPHANED_RULE,
+            REDUNDANT_RULE,
+            ROTTED_RULE,
+            ORPHANED_CELL
+        ]
     );
     assert!(!bare.counts.contains_key(ORPHANED_RULE));
 

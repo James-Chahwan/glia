@@ -51,7 +51,8 @@ project's own request / publish / collection helper so its call sites mint the s
 [[edge]] between two qnames read from the code - a suspected_edge row's `draft` is a \
 paste-ready stanza (section \"Example\"); `entrypoints` lists a symbol called from outside \
 the build in [entrypoints] (section \"Example\"); `remove` marks an overlay rule that binds \
-nothing or that the extractor now emits: remove it with `accept` and its gap id (section \
+nothing, that the extractor now emits, or whose `rule` this glia can no longer read: remove it \
+with `accept` and its gap id (section \
 \"The loop: gaps -> overlay -> overlay delta\"); `glia cell ls --check --rekey` repairs a \
 sidecar row, not the overlay. Write each stanza under a `# gap: <id>` comment naming its row, \
 keep the file loadable (section \"Validation\": a syntax error or an unknown key ignores the \
