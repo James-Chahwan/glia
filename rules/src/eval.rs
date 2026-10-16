@@ -29,6 +29,22 @@
 //! nothing to run is skipped. Negations read the complete relation and add no tier
 //! (Q5); a row carries the static negation cones of its recorded rule instead.
 //!
+//! **Minimal heights.** A row's recorded (rule, height) is its lowest-height
+//! derivation at its level, each lower-level row read at its own recorded height;
+//! explain (DA.15) searches below that height. A level's first round can derive a row
+//! from a long lower-level prefix before a later round finds a shorter derivation at
+//! that level (DA.15's counterexample), so a recursive stratum holds candidates back by
+//! height: each round inserts the candidates, new and held, at most one above the
+//! lowest height among them, and holds the rest. Any derivation not yet made reads a
+//! row inserted in this round or later, of height at least that lowest, so it is at
+//! least one above it and no inserted row can lose to it. The level ends when nothing
+//! is held and a round inserts nothing. A held candidate is one exec emitted, so the
+//! budget is unchanged; the extra rounds count in `rounds`. One height per row is kept,
+//! not one per level: a lower-level row is read at its own level's height even when
+//! this level reaches it in fewer steps (a FACT `tc(x, p)` of 7 hops that DERIVED edges
+//! reach in 3), so a row derived through it records the longer height, and its witness
+//! is a valid path of its tier but not always a shortest one.
+//!
 //! **Aggregates** run their one body over every level at once and hand the projected
 //! bindings to `aggregate::aggregate`, ordered by `ValueTable::cmp_rendered`.
 //!
@@ -54,6 +70,7 @@
 //! `tiers`; the counters it reported stay in `closure_stats`.
 
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 use std::time::Instant;
 
@@ -580,6 +597,72 @@ fn scc_sets(steps: &[Step], catalog: &Catalog, out: &mut Vec<CatSet>) {
     }
 }
 
+/// One round's candidate rows per own predicate (slot): flat rows and one meta each.
+type Candidates = Vec<(Vec<Handle>, Vec<RowMeta>)>;
+
+/// A recursive stratum's candidates held back for a later round of the level, by
+/// height (module doc, "Minimal heights"). Ordered by height, never iterated as a hash.
+#[derive(Default)]
+struct Waiting {
+    by_height: BTreeMap<u32, Candidates>,
+}
+
+impl Waiting {
+    fn is_empty(&self) -> bool {
+        self.by_height.is_empty()
+    }
+
+    /// The rows the next round inserts: of `adds` and the waiting rows, every one at
+    /// most one above the lowest height among them; the rest wait. `None` when both are
+    /// empty. `arity` is per slot.
+    fn next(&mut self, mut adds: Candidates, arity: &[usize]) -> Option<Candidates> {
+        let fresh_low = adds.iter().flat_map(|(_, metas)| metas.iter().map(|m| m.height)).min();
+        let waiting_low = self.by_height.keys().next().copied();
+        let low = match (fresh_low, waiting_low) {
+            (Some(a), Some(b)) => a.min(b),
+            (a, b) => a.or(b)?,
+        };
+        let cut = low.saturating_add(1);
+        let slots = adds.len();
+        for (slot, (rows, metas)) in adds.iter_mut().enumerate() {
+            if metas.iter().all(|m| m.height <= cut) {
+                continue;
+            }
+            let a = arity.get(slot).copied().unwrap_or(0);
+            let (mut keep_rows, mut keep_metas) = (Vec::new(), Vec::new());
+            for (i, meta) in metas.iter().enumerate() {
+                let Some(row) = rows.get(i * a..(i + 1) * a) else { continue };
+                if meta.height <= cut {
+                    keep_rows.extend_from_slice(row);
+                    keep_metas.push(*meta);
+                } else {
+                    let later = self
+                        .by_height
+                        .entry(meta.height)
+                        .or_insert_with(|| vec![(Vec::new(), Vec::new()); slots]);
+                    if let Some((r, m)) = later.get_mut(slot) {
+                        r.extend_from_slice(row);
+                        m.push(*meta);
+                    }
+                }
+            }
+            *rows = keep_rows;
+            *metas = keep_metas;
+        }
+        while let Some(entry) = self.by_height.first_entry()
+            && *entry.key() <= cut
+        {
+            for (slot, (rows, metas)) in entry.remove().into_iter().enumerate() {
+                if let Some((r, m)) = adds.get_mut(slot) {
+                    r.extend(rows);
+                    m.extend(metas);
+                }
+            }
+        }
+        Some(adds)
+    }
+}
+
 /// One evaluation's working state.
 struct State<'t, S: FactSource + ?Sized> {
     src: &'t S,
@@ -783,8 +866,11 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
         user: &Program,
     ) -> Result<(), RulesError> {
         let own = stratum.preds.as_slice();
+        let arity: Vec<usize> =
+            own.iter().map(|&p| an.preds.get(p as usize).map_or(0, |i| i.arity)).collect();
         for level in Tier::ALL {
             let mut first = true;
+            let mut waiting = Waiting::default();
             loop {
                 let mut adds: Vec<(Vec<Handle>, Vec<RowMeta>)> =
                     vec![(Vec::new(), Vec::new()); own.len()];
@@ -816,12 +902,20 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
                         }
                     }
                 }
-                if !ran {
+                let batch = if stratum.recursive {
+                    waiting.next(adds, &arity)
+                } else {
+                    ran.then_some(adds)
+                };
+                let Some(mut batch) = batch else {
+                    if ran {
+                        self.stats.rounds += 1;
+                    }
                     break;
-                }
+                };
                 let mut fresh = 0;
                 for (slot, &p) in own.iter().enumerate() {
-                    let (rows, metas) = &mut adds[slot];
+                    let (rows, metas) = &mut batch[slot];
                     let n = self.rels[p as usize].insert_round(level, rows, metas);
                     self.at_level[p as usize][usize::from(level.level())] += n;
                     self.stats.derived_rows += n;
@@ -832,7 +926,7 @@ impl<'t, S: FactSource + ?Sized> State<'t, S> {
                 }
                 self.stats.rounds += 1;
                 first = false;
-                if fresh == 0 || !stratum.recursive {
+                if !stratum.recursive || (fresh == 0 && waiting.is_empty()) {
                     break;
                 }
             }
@@ -1444,9 +1538,10 @@ r(x) :- seed2(x), tc(x, _z).
         let tc = ev.rows("tc").unwrap_or_default();
         assert_eq!(tc[2].at.meta, RowMeta { height: 3, rule: 1 });
         assert_eq!(tc[2].at.level, D);
-        // FACT: 3 rounds (2 hops, then a -> c, then nothing); DERIVED: 2 (c -> d, b -> d,
-        // a -> d, then nothing); HEURISTIC: no level-HEURISTIC input, so none.
-        assert_eq!(ev.stats().rounds, 5);
+        // FACT: 3 rounds (2 hops, then a -> c, then nothing); DERIVED: 3 (c -> d at
+        // height 1 and b -> d at 2, a -> d at 3 held back; then a -> d; then nothing);
+        // HEURISTIC: no level-HEURISTIC input, so none.
+        assert_eq!(ev.stats().rounds, 6);
     }
 
     #[test]
