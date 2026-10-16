@@ -2,7 +2,7 @@
 //! it owns (the A11.1 const table and its LF.2d overlay pins, the A12.1
 //! `[msgtype]` census, the quiet-panic scope that covers parse and grafts).
 //! DC.2 split it into callable stages: [`parse_and_graft`] (parse, const
-//! table, Cargo packages, post-cache grafts), the per-group build of
+//! table, Cargo and Dart packages, post-cache grafts), the per-group build of
 //! [`super::lang_build`] (plan, build, fold) and [`repo_markers`].
 
 use std::collections::HashMap;
@@ -21,7 +21,9 @@ use std::time::Instant;
 use super::BuildOptions;
 use super::c_includes::IncludeRoots;
 use super::grafts;
-use super::lang_build::{self, GroupCtx, GroupPlan, LangBuild, LanguageGraphs, TsAliasSet};
+use super::lang_build::{
+    self, DartPackages, GroupCtx, GroupPlan, LangBuild, LanguageGraphs, TsAliasSet,
+};
 use super::memo::{BuildMemo, ConstKey, ConstMemo, MemoStats};
 use super::rpc_needles::RpcContext;
 use super::timing::PhaseTimes;
@@ -253,6 +255,9 @@ pub(crate) struct Grafted {
     /// IMPORTS filter inside the grafts and by `build_rust`
     /// ([`GroupCtx::rust_crates`]).
     pub(crate) rust_crates: Vec<RustCrate>,
+    /// The repo's own Dart packages ([`DartPackages::from_roots`]), read by
+    /// the Dart import resolver ([`GroupCtx::dart_packages`], DF.4a).
+    pub(crate) dart_packages: DartPackages,
     /// Files the A11.1 const-table scan read, for the `[parallel]` line.
     pub(crate) const_files: usize,
     /// The engine pool's thread count, for the `[parallel]` line.
@@ -262,13 +267,13 @@ pub(crate) struct Grafted {
 }
 
 /// Stage 1 of a repo's assembly: parse `files` (reusing `cache` when given),
-/// build the const table and its LF.2d pins, read the Cargo packages and run
-/// the post-cache grafts, under the per-repo context `ctx`
+/// build the const table and its LF.2d pins, read the Cargo and Dart packages
+/// (DF.4a) and run the post-cache grafts, under the per-repo context `ctx`
 /// ([`RepoBuildCtx`]). `files` is the whole walked file set of the repo: a
 /// caller that holds its own file table (a watch session) injects it here.
 ///
 /// Its times (CA.9): `parse`, `const_scan` (the table, its `[const]` line and
-/// the LF.2d pins) and `grafts` (the Cargo-package read and
+/// the LF.2d pins) and `grafts` (the Cargo- and Dart-package reads and
 /// `grafts::apply_post_cache`).
 ///
 /// DC.4: with a cache, the walked files' content hashes are computed once
@@ -348,6 +353,8 @@ pub(crate) fn parse_and_graft(
     // (a sibling crate is not a dependency) and by `build_rust`.
     let started = Instant::now();
     let rust_crates = lang_build::rust_crates(files, roots);
+    // DF.4a: the pubspec packages, which own-package `package:` URIs name.
+    let dart_packages = DartPackages::from_roots(roots);
     // DC.4: the needle memo travels to `apply_rpc_needles` inside a per-repo
     // copy of the build's proto service set (`RpcContext::with_memo`), and
     // comes back with this build's fresh outputs below. Not when the build
@@ -390,6 +397,7 @@ pub(crate) fn parse_and_graft(
         parse_errors,
         times,
         rust_crates,
+        dart_packages,
         const_files,
         threads,
         rpc_files: rpc_added.files,
@@ -423,10 +431,17 @@ pub(super) fn build_graphs_for_repo(
         rust_crates: &grafted.rust_crates,
         ts_aliases: ctx.ts_aliases,
         c_includes: ctx.c_includes,
+        dart_packages: &grafted.dart_packages,
     };
     // A clean build reuses nothing: every group is built.
     let reuse: Vec<Option<LangBuild>> = Vec::new();
     let builds = lang_build::build_groups(groups, reuse, &group_ctx);
+    // DF.4a fired_on marker, once per repo whose Dart build resolved an
+    // own-package URI ([`DartPackages::marker`]):
+    //   `[dart-imports] own-package uris resolved=<n> packages=<k> repo=<label>`
+    if let Some(line) = grafted.dart_packages.marker(ctx.repo_label) {
+        eprintln!("{line}");
+    }
     let LanguageGraphs { graphs, keys, fills, pooled } = lang_build::fold_groups(
         builds,
         &recv_fields,

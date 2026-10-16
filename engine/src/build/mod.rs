@@ -1203,6 +1203,7 @@ mod stage_tests {
             rust_crates: &grafted.rust_crates,
             ts_aliases: &ts_aliases,
             c_includes: &c_includes,
+            dart_packages: &grafted.dart_packages,
         };
         let builds = build_groups(plan.groups, slots, &group_ctx);
         let kept = builds.clone();

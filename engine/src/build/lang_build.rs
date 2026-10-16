@@ -6,15 +6,17 @@
 //! dispatch, one shared TS-family graph (built by `build_typescript_family`,
 //! CH.1b; the `_` arm's languages keep `build_typescript`), and the import
 //! resolvers those arms take (relative, plus the A6.8 tsconfig `paths`
-//! aliases for the TS family) and the includer-relative step of the
+//! aliases for the TS family; the own-package `package:` URIs of
+//! [`DartPackages`] for Dart, DF.4a) and the includer-relative step of the
 //! `#include` resolver `build_c_cpp` takes (its search roots are
 //! [`super::c_includes`], CB.22).
 
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use glia_code_domain::project_roots::ProjectRoot;
+use glia_code_domain::project_roots::{LABEL_MANIFEST, ProjectRoot};
 use glia_code_domain::{
     FileParse, cell_type, edge_category, evidence, node_kind, recv_stats,
 };
@@ -33,9 +35,9 @@ use super::c_includes::{IncludeRoots, angle_includes, c_cpp_module_qnames};
 // "typescript"), and imports cross those tags. They build as a single graph
 // (their `extract::build_group` is "typescript") so intra-repo ref/import
 // resolution works across the tag boundary (Pattern E DI, Pattern B imports).
-// The `c_cpp` and `swift` (CB.18) arms and the `_`-arm langs (dart/solidity/
-// terraform) keep separate graphs — distinct symbol spaces that must not
-// cross-resolve.
+// The `c_cpp`, `swift` (CB.18) and `dart` (DF.4a) arms and the `_`-arm langs
+// (solidity/terraform) keep separate graphs — distinct symbol spaces that
+// must not cross-resolve.
 // ts_family accumulates in the sorted lang order and is the last pooled build
 // (CA.7), so graph/shard order stays deterministic. The LB.9b module plan
 // reads the same `build_group`.
@@ -95,6 +97,9 @@ pub(crate) struct GroupCtx<'a> {
     pub(crate) ts_aliases: &'a TsAliasSet,
     /// The C/C++ include search roots (CB.22, [`IncludeRoots::resolver`]).
     pub(crate) c_includes: &'a IncludeRoots,
+    /// The repo's own Dart packages, the Dart import resolver's input
+    /// ([`resolve_dart_source`], DF.4a).
+    pub(crate) dart_packages: &'a DartPackages,
 }
 
 /// What [`fold_groups`] hands back.
@@ -249,9 +254,7 @@ fn build_one_group(input: GroupInput, ctx: &GroupCtx<'_>) -> LangBuild {
             })
         })
     } else {
-        build_one(key, parses, |parses| {
-            build_solo(key, parses, ctx.repo, ctx.repo_label, ctx.rust_crates, ctx.c_includes)
-        })
+        build_one(key, parses, |parses| build_solo(key, parses, ctx))
     }
 }
 
@@ -296,17 +299,18 @@ pub(crate) fn fold_groups(
     LanguageGraphs { graphs, keys, fills, pooled }
 }
 
-/// One non-TS build group's graph: the `build_*` its language takes. The
-/// C/C++ build prints CB.22's `[c-includes]` line after it
-/// ([`IncludeRoots::marker`]), on the thread that ran it.
+/// One non-TS build group's graph: the `build_*` its language takes, with
+/// the repo-level inputs of `ctx` it reads. The C/C++ build prints CB.22's
+/// `[c-includes]` line after it ([`IncludeRoots::marker`]), on the thread
+/// that ran it. Dart takes [`resolve_dart_source`] (DF.4a); Solidity,
+/// Terraform and every other `_`-arm language keep
+/// [`resolve_relative_source`].
 fn build_solo(
     lang: &'static str,
     parses: Vec<FileParse>,
-    repo: RepoId,
-    repo_label: &str,
-    rust_crates: &[RustCrate],
-    c_includes: &IncludeRoots,
+    ctx: &GroupCtx<'_>,
 ) -> Result<RepoGraph, GraphError> {
+    let GroupCtx { repo, repo_label, rust_crates, c_includes, dart_packages, .. } = *ctx;
     match lang {
         "python" => glia_graph::build_python(repo, parses),
         "go" => glia_graph::build_go(repo, parses),
@@ -325,6 +329,9 @@ fn build_solo(
             graph
         }
         "swift" => glia_graph::build_swift(repo, parses, resolve_relative_source),
+        "dart" => glia_graph::build_typescript(repo, parses, |from, spec| {
+            resolve_dart_source(from, spec, dart_packages)
+        }),
         _ => glia_graph::build_typescript(repo, parses, resolve_relative_source),
     }
 }
@@ -973,8 +980,111 @@ pub(super) fn resolve_ts_source_aliased(
     aliases.scope_of(from_module)?.map(spec)
 }
 
+/// DF.4a: the repo's own Dart packages, read off the walk's project roots
+/// ([`DartPackages::from_roots`]): each `pubspec.yaml` root's declared
+/// `name:` and the qname of its directory, for [`resolve_dart_source`].
+///
+/// Read-only during the build but for the resolved-URI counter, an atomic:
+/// the Dart group builds on the engine pool (LG.1c), so one `&DartPackages`
+/// is shared across threads and the graph never depends on the count.
+#[derive(Debug, Default)]
+pub(crate) struct DartPackages {
+    /// Package name -> the qname of its project root (`""` for the repo
+    /// root); `None` when two pubspecs of the repo claim the name, which
+    /// then resolves nowhere (no guess between them).
+    by_name: BTreeMap<String, Option<String>>,
+    /// Own-package URI lookups [`resolve_dart_source`] mapped since the last
+    /// [`DartPackages::marker`]: one per import statement the graph builder
+    /// resolves (a `show A, B` import is two, CB.17).
+    resolved: AtomicUsize,
+}
+
+impl DartPackages {
+    /// The `dart`-ecosystem roots (`pubspec.yaml`) whose label is the
+    /// pubspec's own `name:` ([`LABEL_MANIFEST`]): `package:<name>/` names
+    /// that package's `lib/`, and a pubspec with no `name:` (whose label
+    /// fell back to its directory) names no package Dart could import.
+    pub(crate) fn from_roots(roots: &[ProjectRoot]) -> Self {
+        let mut by_name: BTreeMap<String, Option<String>> = BTreeMap::new();
+        for root in roots
+            .iter()
+            .filter(|r| r.ecosystem == "dart" && r.label_source == LABEL_MANIFEST)
+        {
+            let qname = root.rel_path.replace(['/', '\\'], "::");
+            by_name
+                .entry(root.label.clone())
+                .and_modify(|slot| *slot = None)
+                .or_insert(Some(qname));
+        }
+        Self { by_name, resolved: AtomicUsize::new(0) }
+    }
+
+    /// The project-root qname of in-repo package `name`, unless two pubspecs
+    /// claim it.
+    fn root_of(&self, name: &str) -> Option<&str> {
+        self.by_name.get(name)?.as_deref()
+    }
+
+    /// The package names that resolve (claimed by exactly one pubspec).
+    fn packages(&self) -> usize {
+        self.by_name.values().filter(|root| root.is_some()).count()
+    }
+
+    /// DF.4a fired_on marker, printed once per repo build after the language
+    /// builds, when any own-package URI resolved; takes the count, so the
+    /// next build of the same packages counts from zero:
+    ///   `[dart-imports] own-package uris resolved=<n> packages=<k> repo=<label>`
+    /// `n` = own-package lookups mapped, `k` = the repo's resolvable
+    /// package names.
+    pub(crate) fn marker(&self, repo_label: &str) -> Option<String> {
+        let n = self.resolved.swap(0, Ordering::Relaxed);
+        (n > 0).then(|| {
+            format!(
+                "[dart-imports] own-package uris resolved={n} packages={} repo={repo_label}",
+                self.packages()
+            )
+        })
+    }
+}
+
+/// DF.4a: the Dart import resolver. `package:<name>/<rest>.dart` with
+/// `<name>` one of the repo's own packages ([`DartPackages`]) names the file
+/// `<rest>.dart` under that package's `lib/`, so its module
+/// `<root qname>::lib::<rest, / -> ::>` (`package:shop/src/util.dart` ->
+/// `lib::src::util`; under a project at `apps/mobile`,
+/// `apps::mobile::lib::src::util`). Any other `package:` URI (another
+/// package, or a name two pubspecs claim), a `dart:` library, or a package
+/// URI that is not a `.dart` file under `lib/` is external: `None`.
+/// Everything else (`src/x.dart`, `../lib/cart.dart`) is
+/// [`resolve_relative_source`], unchanged.
+fn resolve_dart_source(from_module: &str, specifier: &str, pkgs: &DartPackages) -> Option<String> {
+    let spec = specifier.trim().trim_matches(|c| c == '"' || c == '\'');
+    if spec.starts_with("dart:") {
+        return None;
+    }
+    let Some(uri) = spec.strip_prefix("package:") else {
+        return resolve_relative_source(from_module, specifier);
+    };
+    let (name, rest) = uri.split_once('/')?;
+    let root = pkgs.root_of(name)?;
+    let parts: Vec<&str> = rest.split('/').filter(|p| !p.is_empty() && *p != ".").collect();
+    // A package URI never leaves its package's `lib/`.
+    if parts.contains(&"..") {
+        return None;
+    }
+    let (file, dirs) = parts.split_last()?;
+    let stem = file.strip_suffix(".dart").filter(|s| !s.is_empty())?;
+    let mut segs: Vec<&str> = root.split("::").filter(|s| !s.is_empty()).collect();
+    segs.push("lib");
+    segs.extend(dirs.iter().copied());
+    segs.push(stem);
+    pkgs.resolved.fetch_add(1, Ordering::Relaxed);
+    Some(segs.join("::"))
+}
+
 /// Relative-import resolver for the `swift` arm and the non-TS `_`-arm
-/// languages (dart / solidity / terraform). Handles dotted specifiers (`./x`,
+/// languages (solidity / terraform), and the non-`package:` half of
+/// [`resolve_dart_source`]. Handles dotted specifiers (`./x`,
 /// `../a/b`) AND bare filenames that carry a source extension (`import
 /// 'models.dart'`) — both resolve against the importing file's directory to
 /// the `path_to_qname` form. A bare specifier with no source extension (a
@@ -1368,5 +1478,220 @@ mod ts_alias_tests {
                 CellPayload::Bytes(_) => String::new(),
             });
         assert_eq!(cell.as_deref(), Some(r#"["@angular/core"]"#));
+    }
+}
+
+#[cfg(test)]
+mod dart_import_tests {
+    use super::*;
+
+    /// A `pubspec.yaml` root at `rel` declaring `name: <name>`, as the walk
+    /// detects it.
+    fn pubspec(rel: &str, name: &str) -> ProjectRoot {
+        ProjectRoot::new(rel.to_string(), "dart", "pubspec.yaml", Some(name.to_string()))
+    }
+
+    fn pkgs(roots: &[ProjectRoot]) -> DartPackages {
+        DartPackages::from_roots(roots)
+    }
+
+    /// An own-package URI names the file under that package's `lib/`, at the
+    /// repo root and under a nested project root, quoted or not; each mapped
+    /// lookup counts toward the marker, which takes the count.
+    #[test]
+    fn resolve_dart_source_maps_own_package() {
+        let root = pkgs(&[pubspec("", "shop")]);
+        assert_eq!(
+            resolve_dart_source("lib::cart", "package:shop/src/util.dart", &root).as_deref(),
+            Some("lib::src::util")
+        );
+        assert_eq!(
+            resolve_dart_source("test::cart_test", "'package:shop/cart.dart'", &root).as_deref(),
+            Some("lib::cart"),
+            "from outside lib/, the same module"
+        );
+        assert_eq!(
+            root.marker("fx").as_deref(),
+            Some("[dart-imports] own-package uris resolved=2 packages=1 repo=fx")
+        );
+        assert_eq!(root.marker("fx"), None, "the marker takes the count");
+
+        let nested = pkgs(&[pubspec("apps/mobile", "shop")]);
+        assert_eq!(
+            resolve_dart_source("apps::mobile::lib::cart", "package:shop/src/util.dart", &nested)
+                .as_deref(),
+            Some("apps::mobile::lib::src::util")
+        );
+        assert_eq!(
+            resolve_dart_source("tools::gen", "package:shop/./a/b/c.dart", &nested).as_deref(),
+            Some("apps::mobile::lib::a::b::c"),
+            "the importer's own directory plays no part"
+        );
+    }
+
+    /// Another package's URI and a `dart:` library are external, as is a
+    /// package URI that names no `.dart` file under `lib/`; none counts.
+    #[test]
+    fn foreign_package_is_external() {
+        let root = pkgs(&[pubspec("", "shop")]);
+        for spec in [
+            "package:flutter/material.dart",
+            "package:shop_extras/x.dart",
+            "dart:async",
+            "'dart:io'",
+            "package:shop",
+            "package:shop/",
+            "package:shop/src/util",
+            "package:shop/.dart",
+            "package:shop/../web/main.dart",
+        ] {
+            assert_eq!(resolve_dart_source("lib::cart", spec, &root), None, "{spec}");
+        }
+        assert_eq!(root.marker("fx"), None, "nothing resolved, no marker");
+        let none = DartPackages::default();
+        assert_eq!(
+            resolve_dart_source("lib::cart", "package:shop/src/util.dart", &none),
+            None,
+            "no pubspec, no own package"
+        );
+    }
+
+    /// A relative or bare `x.dart` import resolves exactly as
+    /// `resolve_relative_source` resolves it.
+    #[test]
+    fn relative_dart_import_unchanged() {
+        let root = pkgs(&[pubspec("", "shop")]);
+        for (from, spec, want) in [
+            ("lib::cart", "src/fmt.dart", Some("lib::src::fmt")),
+            ("test::cart_test", "../lib/cart.dart", Some("lib::cart")),
+            ("lib::src::fmt", "./money.dart", Some("lib::src::money")),
+            ("lib::cart", "\"models.dart\"", Some("lib::models")),
+        ] {
+            assert_eq!(resolve_dart_source(from, spec, &root).as_deref(), want, "{spec}");
+            assert_eq!(
+                resolve_dart_source(from, spec, &root),
+                resolve_relative_source(from, spec),
+                "{spec}"
+            );
+        }
+        assert_eq!(root.marker("fx"), None, "a relative import is not an own-package URI");
+    }
+
+    /// A name two pubspecs claim resolves to neither; the repo's other
+    /// packages are untouched.
+    #[test]
+    fn duplicate_package_name_maps_nothing() {
+        let p = pkgs(&[
+            pubspec("apps/twin_a", "twin"),
+            pubspec("apps/twin_b", "twin"),
+            pubspec("", "shop"),
+        ]);
+        assert_eq!(resolve_dart_source("apps::twin_a::lib::a", "package:twin/b.dart", &p), None);
+        assert_eq!(
+            resolve_dart_source("apps::twin_a::lib::a", "package:shop/cart.dart", &p).as_deref(),
+            Some("lib::cart")
+        );
+        assert_eq!(
+            p.marker("fx").as_deref(),
+            Some("[dart-imports] own-package uris resolved=1 packages=1 repo=fx")
+        );
+    }
+
+    /// Only `pubspec.yaml` roots that declare their `name:` are packages: an
+    /// npm or Cargo root of the same name and a pubspec whose label fell back
+    /// to its directory name none.
+    #[test]
+    fn dart_packages_from_roots() {
+        let roots = [
+            pubspec("", "shop"),
+            ProjectRoot::new("web".into(), "npm", "package.json", Some("web".into())),
+            ProjectRoot::new("crates/core".into(), "cargo", "Cargo.toml", Some("core".into())),
+            ProjectRoot::new("apps/nameless".into(), "dart", "pubspec.yaml", None),
+            pubspec("pkgs/ui", "ui"),
+        ];
+        let p = pkgs(&roots);
+        assert_eq!(p.root_of("shop"), Some(""));
+        assert_eq!(p.root_of("ui"), Some("pkgs::ui"));
+        assert_eq!(p.root_of("web"), None);
+        assert_eq!(p.root_of("core"), None);
+        assert_eq!(p.root_of("nameless"), None);
+        assert_eq!(p.packages(), 2);
+    }
+
+    fn write(dir: &Path, rel: &str, body: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// End to end through `generate_one`: an own-package import is an
+    /// IMPORTS edge (`graph:imports`; rule `symbol` for a `show` import,
+    /// `module` for an `as` one), the `show` / `as` binding behind it binds
+    /// the call, a relative import keeps its edge, and a foreign `package:` /
+    /// `dart:` import binds nothing.
+    #[test]
+    fn an_own_package_import_is_an_edge_and_binds_its_show_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(tmp.path(), "pubspec.yaml", "name: shop\n");
+        write(
+            tmp.path(),
+            "lib/cart.dart",
+            concat!(
+                "import 'dart:async';\n",
+                "import 'package:flutter/material.dart';\n",
+                "import 'package:shop/src/util.dart' show shout;\n",
+                "import 'package:shop/src/money.dart' as m;\n",
+                "import 'src/fmt.dart';\n",
+                "\n",
+                "String total(double x) {\n",
+                "  return shout(formatPrice(x + m.zero()));\n",
+                "}\n",
+            ),
+        );
+        write(tmp.path(), "lib/src/util.dart", "String shout(String s) {\n  return s;\n}\n");
+        write(tmp.path(), "lib/src/money.dart", "double zero() {\n  return 0.0;\n}\n");
+        write(tmp.path(), "lib/src/fmt.dart", "String formatPrice(double x) {\n  return '';\n}\n");
+        let result = crate::build::generate_one(tmp.path().to_str().unwrap()).unwrap();
+        let m = &result.merged;
+        let id_of = |q: &str| {
+            m.graphs.iter().find_map(|g| {
+                g.nodes
+                    .iter()
+                    .find(|n| g.nav.qname_by_id.get(&n.id).is_some_and(|nq| nq == q))
+                    .map(|n| n.id)
+            })
+        };
+        let edge = |cat, from: &str, to: &str| {
+            let (Some(f), Some(t)) = (id_of(from), id_of(to)) else {
+                return None;
+            };
+            m.all_edges().find(|e| e.category == cat && e.from == f && e.to == t)
+        };
+        for (target, rule) in [("lib::src::util", "symbol"), ("lib::src::money", "module")] {
+            let imports = edge(edge_category::IMPORTS, "lib::cart", target)
+                .unwrap_or_else(|| panic!("the own-package import of {target} binds"));
+            let ev = evidence::Evidence::of(imports).expect("evidence");
+            assert_eq!(ev.emitter, "graph:imports");
+            assert_eq!(ev.rule.as_deref(), Some(rule), "{target}");
+        }
+        assert!(
+            edge(edge_category::IMPORTS, "lib::cart", "lib::src::fmt").is_some(),
+            "the relative import keeps its edge"
+        );
+        assert!(
+            edge(edge_category::CALLS, "lib::cart::total", "lib::src::util::shout").is_some(),
+            "the `show` binding behind the import binds the call"
+        );
+        assert!(
+            edge(edge_category::CALLS, "lib::cart::total", "lib::src::money::zero").is_some(),
+            "the `as` prefix behind the import binds the call"
+        );
+        let cart = id_of("lib::cart").expect("importer");
+        let targets: Vec<NodeId> = m
+            .all_edges()
+            .filter(|e| e.category == edge_category::IMPORTS && e.from == cart)
+            .map(|e| e.to)
+            .collect();
+        assert_eq!(targets.len(), 3, "no edge for `dart:async` or `package:flutter`");
     }
 }
