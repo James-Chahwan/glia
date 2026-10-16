@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 404,
+  "fixtures": 406,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -733,6 +733,14 @@
       "per_category": {
         "CALLS": 1.0,
         "INHERITS_FROM": 1.0
+      }
+    },
+    "go-ethereum-contract-calls": {
+      "framework": "go-ethereum-contract-calls",
+      "language": "go",
+      "per_category": {
+        "RPC_CALLS": 1.0,
+        "USES": 1.0
       }
     },
     "go-field-dispatch": {
@@ -2200,6 +2208,16 @@
       "per_category": {
         "DEFINES": 1.0,
         "HAS_ATTRIBUTE": 1.0,
+        "USES": 1.0
+      }
+    },
+    "ts-ethers-call-forms": {
+      "framework": "ts-ethers-call-forms",
+      "language": "typescript",
+      "per_category": {
+        "EVENT_FLOWS": 1.0,
+        "HANDLED_BY": 1.0,
+        "RPC_CALLS": 1.0,
         "USES": 1.0
       }
     },
