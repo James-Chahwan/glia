@@ -1616,7 +1616,7 @@
     },
     "elixir/amqp": {
       "extract": [
-        1,
+        2,
         2
       ],
       "fixtures": [
@@ -1626,16 +1626,14 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "queue"
@@ -2002,7 +2000,7 @@
     },
     "elixir/kafka": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -2012,17 +2010,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "elixir/migrations": {
       "extract": [
@@ -2050,7 +2048,7 @@
     },
     "elixir/mqtt": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -2060,21 +2058,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "elixir/nats": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -2084,21 +2082,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "elixir/pubsub": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -2108,21 +2106,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "elixir/redis": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -2132,17 +2130,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "elixir/secrets": {
       "extract": [
@@ -2196,7 +2194,7 @@
     },
     "elixir/sqs_sns": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -2206,17 +2204,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "elixir/subproject": {
       "extract": [
@@ -2256,17 +2254,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "literal lost",
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "queue"
@@ -8545,6 +8540,7 @@
     "fixtures/dart-dio-generic-calls",
     "fixtures/dart-extensions-imports",
     "fixtures/dart-members",
+    "fixtures/dart-plain-import-calls",
     "fixtures/data-entity-literal-shape",
     "fixtures/docs-adr-decision",
     "fixtures/docs-link-past-cap",
@@ -8662,6 +8658,7 @@
     "fixtures/terraform-infra_references",
     "fixtures/test-fixture-paths",
     "fixtures/test-paths-declared",
+    "fixtures/test-paths-declared-tests",
     "fixtures/test-reports-coverage",
     "fixtures/test-reports-fail",
     "fixtures/trpc-create-caller",
@@ -8837,11 +8834,11 @@
   "totals": {
     "covered": 346,
     "error": 0,
-    "full": 333,
+    "full": 341,
     "grid": 510,
     "n/a": 28,
-    "none": 10,
-    "partial": 3,
+    "none": 3,
+    "partial": 2,
     "unknown": 136
   },
   "vocabulary": {

@@ -86,7 +86,7 @@ c_cpp            ●       ?       ?       ?       ?       ?       ?       ?    
 scala            ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 clojure          ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
 dart             ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ◐       ●       ●
-elixir           ●       ●       ·       ·       ·       ·       ?       ·       ·       ·       ◐       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ·       ◐       ●       ●
+elixir           ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ·       ·       ◐       ●       ●
 rust             ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 solidity         -       -       -       -       -       -       -       -       -       -       -       -       -       -       ●       -       -       -       -       -       -       -       -       ●       ●       ?       ●       ?       ?       ?
 terraform        ?       ?       ?       ?       ?       ?       ?       ?       -       ?       -       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       -       ?       -       ?       -       -       ?       ?       ?
@@ -95,15 +95,15 @@ kotlin           ●       ●       ?       ?       ?       ?       ?       ?  
 PER-MECHANISM  across 17 languages:
   http_client  ● 15  ◐ 0   · 0   ? 1   - 1   ! 0
   http_server  ● 14  ◐ 0   · 0   ? 2   - 1   ! 0
-  kafka        ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
-  amqp         ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
-  sqs_sns      ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
-  pubsub       ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
+  kafka        ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
+  amqp         ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
+  sqs_sns      ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
+  pubsub       ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
   azure_sb     ● 7   ◐ 0   · 0   ? 9   - 1   ! 0
-  nats         ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
-  redis        ● 10  ◐ 0   · 1   ? 4   - 2   ! 0
-  mqtt         ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
-  taskq        ● 10  ◐ 1   · 0   ? 4   - 2   ! 0
+  nats         ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
+  redis        ● 11  ◐ 0   · 0   ? 4   - 2   ! 0
+  mqtt         ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
+  taskq        ● 11  ◐ 0   · 0   ? 4   - 2   ! 0
   grpc         ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
   graphql      ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
   ws           ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
@@ -137,16 +137,16 @@ PER-LANGUAGE  across 30 mechanisms:
   scala        ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   clojure      ● 4   ◐ 0   · 0   ? 26  - 0   ! 0
   dart         ● 28  ◐ 1   · 0   ? 1   - 0   ! 0
-  elixir       ● 17  ◐ 2   · 10  ? 1   - 0   ! 0
+  elixir       ● 25  ◐ 1   · 3   ? 1   - 0   ! 0
   rust         ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   solidity     ● 4   ◐ 0   · 0   ? 4   - 22  ! 0
   terraform    ● 0   ◐ 0   · 0   ? 24  - 6   ! 0
   kotlin       ● 6   ◐ 0   · 0   ? 24  - 0   ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 333 full, 3 partial, 10 none, 136 unknown, 0 error, 28 n/a.
+COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 341 full, 2 partial, 3 none, 136 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 217
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 219
 
 ## Cells routed via an alternative mechanism
 
@@ -163,6 +163,10 @@ A `●` here does not mean the intended path fired — it means SOME path did. T
 | `dart/pubsub` | ● full | `queue` | `eventbus` |
 | `dart/redis` | ● full | `queue` | `eventbus` |
 | `dart/sqs_sns` | ● full | `queue` | `eventbus` |
+| `elixir/mqtt` | ● full | `queue` | `eventbus` |
+| `elixir/pubsub` | ● full | `queue` | `eventbus` |
+| `elixir/redis` | ● full | `queue` | `eventbus` |
+| `elixir/sqs_sns` | ● full | `queue` | `eventbus` |
 | `go/azure_sb` | ● full | `queue` | `eventbus` |
 | `go/mqtt` | ● full | `queue` | `eventbus` |
 | `go/pubsub` | ● full | `queue` | `eventbus` |

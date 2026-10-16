@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 375,
+  "fixtures": 377,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -479,6 +479,14 @@
       "per_category": {
         "CALLS": 1.0,
         "HAS_ATTRIBUTE": 1.0
+      }
+    },
+    "dart-plain-import-calls": {
+      "framework": "dart-plain-import-calls",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
       }
     },
     "dart-top-level-bodies": {
@@ -1985,6 +1993,13 @@
       "framework": "test-paths-declared",
       "language": "typescript",
       "per_category": {}
+    },
+    "test-paths-declared-tests": {
+      "framework": "test-paths-declared-tests",
+      "language": "typescript",
+      "per_category": {
+        "TESTS": 1.0
+      }
     },
     "test-reports-coverage": {
       "framework": "test-reports-coverage",
