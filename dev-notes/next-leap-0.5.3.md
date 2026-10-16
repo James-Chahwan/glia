@@ -14,6 +14,12 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
   can we possibly integrate engram ?"*, then *"yeah thats a 0.5.3 spec if ivee ever seen it so yeah lets spec up 0.5.3
   with what we also need but do the 0.5.2 uplift then hand over to repo-graph session"*. Order: 0.5.2 waves → the
   0.5.2 handoffs → this spec run.
+- 2026-10-16, on the first pass of this seed: *"a review queue for human input clarification with an agent should
+  work better why do we need a db export of the graph lmao can't we do somehting better then that"*; *"yeah lets get
+  the leftover list in 0.5.3"*; *"fix 2."* (the self-graph hygiene cluster); *"3. yep add it"* (watch memory budget);
+  *"4. is a good idea"* (one tier vocabulary); *"5. sounds good"* (runner fixes); and on find / flows: *"i noticed this
+  my self with my work at work when it did a cache search with flow it didn't find it because it thought the flow was
+  named cache thats probably something we should look at for find and flow"*. Recorded in §2 C and §2 F.
 
 ## 1. The train
 
@@ -63,12 +69,18 @@ could answer each (each needs James's ruling before it becomes a packet):
 
 - **Semantic search** → B's VECTOR tier.
 - **Learning from use** → Engram's learned gate, through B; never a glia-side learned ranking.
-- **Corrections that reach every agent through a review step**: glia's overlay loop shares an accepted stanza through
-  git only. Candidate: `overlay propose` writes pending candidates a reviewer lists and accepts.
+- **Corrections that reach every agent through a review step** — **IN (James, 2026-10-16), as a clarification queue,
+  not an accept list.** glia's overlay loop shares an accepted stanza through git only. What glia cannot settle
+  (an ambiguous bind, a `suspected_edge`, a rotted rule, a doc mention with two candidates, an unpaired client) becomes
+  a queued question carrying its evidence and candidate answers; an agent works it through with a human, and the answer
+  lands as the overlay stanza / DECISION cell it implies, with who answered and why. The queue and the answer format
+  are glia's (engine + CLI + pyo3); the conversation surface is repo-graph's MCP.
 - **Queries scoped to the caller's identity**: matters only if the shared cache or a hosted repo-graph serves more than
   one team. Candidate, likely out.
-- **Metadata readable by SQL engines**: `.gmap` is readable only through glia. Candidate: a Parquet / DuckDB
-  projection of nodes, edges and cells.
+- **Metadata readable by SQL engines** — **DROPPED (James, 2026-10-16: "why do we need a db export of the graph").**
+  A copy of the graph in another engine goes stale and loses the tiers and witnesses. The better answer ships in 0.5.2:
+  `glia query` (Datalog, plus GQL, the ISO graph query language) over the live graph, through the CLI, pyo3 and so the
+  MCP.
 - **Business meaning (glossary, metrics, lineage)**: a business-data domain is where glia would meet AWS Context head
   on. Not proposed; build-target graphs stay the first non-code domain.
 
@@ -87,6 +99,33 @@ could answer each (each needs James's ruling before it becomes a packet):
   receivers, Dart export barrels; Rust trait members, Juniper / Sangria; Elixir one-line defs, Absinthe
   import_fields, Ruby mixins.
 - Generated HTTP clients (0.5.2 §4.2 decision 5 kept generated-code provenance to gRPC sites).
+
+### F. Committed by James (2026-10-16)
+
+Not candidates: each becomes packets in the spec run.
+
+1. **The §E leftover list is a 0.5.3 group** (per-language precision residuals, with §D's), packeted like 0.5.2's DF /
+   DG / DH matrix groups and gated by the substrate-gap fixtures and the matrix.
+2. **Self-graph hygiene, fixed first** (§E W2 and W3): every needle scanner reads through the CJ.1 code guard (cron
+   YAML, CLI `INVOCATION_PATTERNS`, `data_entities.rs` SQL literals, the migration DSLs), the guard covers the other
+   languages' comments and strings (Ruby first), and glia's self-scan gains a zero-phantom gate. A declared
+   graph-content change.
+3. **A memory budget for long-lived watch.** DC.4's memos add one entry per walked path and a watch session keeps them;
+   multi-repo watch multiplies that. Measure RSS over repeated applies on the 0.5.2 WatchSession (DC.7a), then cap or
+   evict, with a `[watch]` RSS marker and a gate.
+4. **One tier vocabulary.** `rules::value::Tier`, the string consts in `why.rs` / `check.rs` and `implementors.rs`'s
+   enum become one code-domain type (§E W1, DA.3), before Engram's HEURISTIC rows add a fifth reading.
+5. **Runner fixes** (the 0.5.2 waves found both; the session landed them for the remaining 0.5.2 waves too):
+   `closeout.py` lists every followup it could not fold (no packet id, or ids of landed packets only) instead of
+   dropping it, and `gen_wave.py --only <ids> --resume <notes.json>` renders a continuation run of unreturned packets
+   (a Workflow resume re-runs every agent after the first changed one).
+6. **Concept search over flows (find and trace / flows).** `trace <word>` resolves the word to a node by qname, name or
+   find's top hit, and its entry-flow fallback matches flow keys made from entry names alone (`engine/src/trace.rs`
+   module doc), so "cache" finds a node or a flow *named* cache, never the flows that *go through* a cache (James hit
+   this at work). A flow should match a word through what it touches: hop names and qname words, data sources and
+   DATA_ENTITY kinds, mechanisms, external hosts, docs governing a hop. Rank by match tier, then the matching hop's
+   depth; show which hop matched. `find` gains the same view (the flows through its hits). §B's semantic tier feeds
+   this too (open question 2, in part).
 
 ### E. From the 0.5.2 waves
 
@@ -197,8 +236,8 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 
 ## 3. Open questions for James
 
-1. Section C: which candidates become packets (review queue, SQL projection, identity-scoped queries)?
-2. Section B: does `find`'s semantic tier also feed `pack` and blast-radius seeding, or stay in `find`?
+1. ~~Section C: which candidates become packets~~ — review queue IN as a clarification queue, SQL projection DROPPED (2026-10-16). Still open: identity-scoped queries (likely out).
+2. Section B: the semantic tier feeds `find` and the flow search (§F.6, 2026-10-16). Still open: does it also feed `pack` and blast-radius seeding?
 3. Does B ship with a glia-side writer for tests only (a fixture `.glia/vectors.jsonl`), or wait for Engram's writer?
 4. Section E (DE.1): an ambiguous bare doc mention — keep the one Weak bind, rank by proximity, or mint no edge?
 

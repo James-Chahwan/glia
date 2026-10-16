@@ -22,6 +22,17 @@ Wave 0 (the serial C0 packets) and single-packet waves render sequentially.
 Refuses to render a wave whose packets are not all file-disjoint, and prints
 which packets carry no correction so a missing one is a decision, not an
 accident.
+
+A continuation run (packets a failure left unreturned; 0.5.2 W4's reboot):
+
+    python3 gen_wave.py --release 052 4 /path/r052-w4-cont.js --only DC.5,DD.6 --resume notes.json
+
+--only renders just those packets of the wave, in wave order. --resume takes a JSON
+object {packet id: note}; each note is appended to that packet's prompt under
+"=== RESUME ===" (what the cut-off attempt left in the tree). A Workflow resume
+re-runs every agent after the first changed or unreturned one, so a wave whose
+failures sit mid-list continues as a NEW run of the unreturned packets, and
+closeout.py takes both run ids, comma-separated.
 """
 import json
 import sys
@@ -117,6 +128,15 @@ def main():
         del args[k:k + 2]
         if release not in RELEASES:
             sys.exit(f"unknown release {release!r} (known: {', '.join(RELEASES)})")
+    only, resume = None, {}
+    if "--only" in args:
+        k = args.index("--only")
+        only = [x for x in args[k + 1].split(",") if x]
+        del args[k:k + 2]
+    if "--resume" in args:
+        k = args.index("--resume")
+        resume = json.loads(Path(args[k + 1]).read_text())
+        del args[k:k + 2]
     wave, out = int(args[0]), Path(args[1])
     base = json.loads((HERE / "baseline.json").read_text())
     if release:
@@ -144,26 +164,37 @@ def main():
         if clash:
             sys.exit(f"wave {wave} is not file-disjoint: {clash}")
 
+    if only is not None:
+        stray = [i for i in only if i not in ids]
+        if stray:
+            sys.exit(f"--only names packets outside wave {wave}: {stray}")
+        ids = [i for i in ids if i in only]
+    stray = [i for i in resume if i not in ids]
+    if stray:
+        sys.exit(f"--resume notes for packets not rendered: {stray}")
+    cont = only is not None
     packets = [{**{k: P[i][k] for k in FIELDS if P[i].get(k) is not None},
                 "CORRECTION": corr.get(i)} for i in ids]
     loc = sum(p.get("loc", 0) for p in packets)
     shape = "one at a time, in order" if serial_run else "file-disjoint, concurrent"
     js = f"""export const meta = {{
-  name: '{name}',
-  description: 'Wave {wave} of {total}: {len(ids)} packets, {shape} ({", ".join(ids)})',
+  name: '{name}{"-cont" if cont else ""}',
+  description: '{"Continuation of wave" if cont else "Wave"} {wave} of {total}: {len(ids)} packets, {shape} ({", ".join(ids)})',
   phases: [{{ title: 'Wave {wave}', detail: '{len(ids)} implementing agents ({shape}), each committing its own packet on main' }}],
 }}
 
 const SHARED = {json.dumps(brief)};
 const SCHEMA = {json.dumps(RESULT_SCHEMA)};
 const PACKETS = {json.dumps(packets, indent=1)};
+const RESUME = {json.dumps(resume, indent=1)};
 
 phase('Wave {wave}')
-log('{len(ids)} packets, ~{loc} LOC, disjoint file sets')
+log('{"continuation: " if cont else ""}{len(ids)} packets, ~{loc} LOC, disjoint file sets')
 
 const run = p => agent(
   SHARED + '\\n\\n=== YOUR PACKET ===\\n' + JSON.stringify(p, null, 1) +
-  (p.CORRECTION ? '\\n\\n=== CORRECTION — THIS OVERRIDES THE SPEC ABOVE WHEREVER THEY DISAGREE ===\\n' + p.CORRECTION : ''),
+  (p.CORRECTION ? '\\n\\n=== CORRECTION — THIS OVERRIDES THE SPEC ABOVE WHEREVER THEY DISAGREE ===\\n' + p.CORRECTION : '') +
+  (RESUME[p.id] ? '\\n\\n=== RESUME ===\\n' + RESUME[p.id] : ''),
   {{ label: 'w{wave}:' + p.id, phase: 'Wave {wave}', schema: SCHEMA }}
 )
 const SERIAL = {'true' if serial_run else 'false'}

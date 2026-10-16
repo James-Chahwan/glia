@@ -284,17 +284,25 @@ def main():
         pat = re.compile(r"\b(A\d+\.\d+[a-z]?|L[A-G0]\.\d+[a-z]?)\b" if leap else r"\b(A\d+\.\d+[a-c]?)\b")
         cp = ROOT / ("dev-notes/leap-corrections.json" if leap else "dev-notes/packet-corrections.json")
     cf = json.loads(cp.read_text())
-    folded = {}
+    folded, unrouted = {}, []
     for r in res:
         src = packet_id(r["packet"])
         for t in r.get("followups") or []:
-            for tgt in set(pat.findall(t)) & rem:
+            named = set(pat.findall(t))
+            if not named & rem:
+                # no packet id, or only ids of landed packets: nothing to fold into, so the
+                # session routes it by hand (an owner by files_touched, or the next leap's seed)
+                unrouted.append((src, sorted(named), t.strip()))
+            for tgt in named & rem:
                 note = f"HANDOFF FROM {src} (w{wave}): {t.strip()}"
                 if note not in cf["corrections"].get(tgt, ""):
                     cf["corrections"][tgt] = (cf["corrections"].get(tgt, "") + "\n\n" + note).strip()
                     folded[tgt] = folded.get(tgt, 0) + 1
     cp.write_text(json.dumps(cf, indent=1))
     say(f"== handoffs folded: {folded or 'none'}")
+    say(f"== unrouted followups (route by hand): {len(unrouted)}")
+    for src, named, t in unrouted:
+        print(f"   [{src}{' names ' + ','.join(named) if named else ''}] {t}")
 
     head, _ = sh("git rev-parse --short HEAD")
     base.update({"measured_at_head": head.strip(), "after_wave": wave})
