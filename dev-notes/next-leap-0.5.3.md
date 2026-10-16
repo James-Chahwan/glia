@@ -28,6 +28,10 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
 - 2026-10-16, later: *"well shouldn't we bring parts of engram in if we need the embeddings ?"* and *"okay i don't
   understand the issue of using the embedding models thats tens of mb when it solves isn't it locally run in engram i
   swear"*: glia embeds locally itself (fastembed / bge-small, as Engram does), §B.
+- 2026-10-16: *"also its great to take this from engram and lets us focus on the substrate vs the specialisation"*.
+  The split this release follows: glia is the substrate (the graph, its embeddings, query and rules, the answers every
+  consumer reads); consumers are the specialisation (Engram: learning from use over session history and consolidated
+  memory; repo-graph: MCP transport and the human conversation surface, including the clarification queue's).
 
 ## 1. The train
 
