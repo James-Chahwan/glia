@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 370,
+  "fixtures": 374,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -922,6 +922,13 @@
       "language": "go",
       "per_category": {}
     },
+    "grpc-generated-stubs": {
+      "framework": "grpc-generated-stubs",
+      "language": "go+python+proto",
+      "per_category": {
+        "GRPC_CALLS": 1.0
+      }
+    },
     "grpc-host-narrowing": {
       "framework": "grpc-host-narrowing",
       "language": "go",
@@ -1043,6 +1050,13 @@
     "identity-proto-diverged": {
       "framework": "identity-proto-diverged",
       "language": "proto",
+      "per_category": {
+        "SAME_AS": 1.0
+      }
+    },
+    "identity-vendored-subtree": {
+      "framework": "identity-vendored-subtree",
+      "language": "typescript",
       "per_category": {
         "SAME_AS": 1.0
       }
@@ -1734,6 +1748,13 @@
       "framework": "rust-queue-precision",
       "language": "rust",
       "per_category": {}
+    },
+    "rust-trait-impl-precision": {
+      "framework": "rust-trait-impl-precision",
+      "language": "rust",
+      "per_category": {
+        "IMPLEMENTS": 1.0
+      }
     },
     "rust-typed-receivers": {
       "framework": "rust-typed-receivers",
@@ -2434,6 +2455,13 @@
     "xcut-queue-go-segmentio": {
       "framework": "xcut-queue-go-segmentio",
       "language": "go",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-java-producer-record": {
+      "framework": "java-kafka-producer-record-generic",
+      "language": "java",
       "per_category": {
         "QUEUE_FLOWS": 1.0
       }

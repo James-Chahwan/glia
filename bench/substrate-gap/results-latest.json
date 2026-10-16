@@ -2607,26 +2607,27 @@
     },
     "go/grpc": {
       "extract": [
-        5,
-        5
+        8,
+        8
       ],
       "fixtures": [
+        "fixtures/grpc-generated-stubs",
         "fixtures/xcut-grpc-grpc_calls",
         "fixtures/xcut-grpc-package-collision"
       ],
       "forbid": [
-        2,
-        2
+        8,
+        8
       ],
       "level": "full",
       "literal": [
-        5,
-        5
+        8,
+        8
       ],
       "reasons": [],
       "route": [
-        2,
-        2
+        5,
+        5
       ],
       "via": "grpc"
     },
@@ -3511,26 +3512,27 @@
     },
     "java/kafka": {
       "extract": [
-        4,
-        4
+        6,
+        6
       ],
       "fixtures": [
+        "fixtures/xcut-queue-java-producer-record",
         "fixtures/xcut-queue-java-spring",
         "matrix/java/kafka"
       ],
       "forbid": [
-        4,
-        4
+        5,
+        5
       ],
       "level": "full",
       "literal": [
-        4,
-        4
+        6,
+        6
       ],
       "reasons": [],
       "route": [
-        2,
-        2
+        3,
+        3
       ],
       "via": "queue"
     },
@@ -6477,16 +6479,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         2,
         2
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "type"
@@ -6859,7 +6859,7 @@
     },
     "scala/amqp": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -6869,17 +6869,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "scala/azure_sb": {
       "extract": [
@@ -7003,7 +7003,7 @@
     },
     "scala/cron": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -7013,17 +7013,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "cron"
     },
     "scala/db": {
       "extract": [
@@ -7269,7 +7269,7 @@
     },
     "scala/kafka": {
       "extract": [
-        1,
+        2,
         2
       ],
       "fixtures": [
@@ -7279,16 +7279,14 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "queue"
@@ -7367,7 +7365,7 @@
     },
     "scala/pubsub": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -7377,17 +7375,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": "eventbus"
+      "via": "queue"
     },
     "scala/redis": {
       "extract": [
@@ -7401,17 +7399,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
-      "reasons": [
-        "literal lost",
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "queue"
@@ -7468,7 +7463,7 @@
     },
     "scala/sqs_sns": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -7478,17 +7473,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "scala/subproject": {
       "extract": [
@@ -8614,6 +8609,7 @@
     "fixtures/identity-npm-package",
     "fixtures/identity-npm-workspace-lib",
     "fixtures/identity-proto-diverged",
+    "fixtures/identity-vendored-subtree",
     "fixtures/imports-local-filter",
     "fixtures/java-declarative-clients",
     "fixtures/java-enum-members",
@@ -8658,6 +8654,7 @@
     "fixtures/ruby-rails-scope",
     "fixtures/ruby-require-in-scope",
     "fixtures/rust-queue-precision",
+    "fixtures/rust-trait-impl-precision",
     "fixtures/rust-typed-receivers",
     "fixtures/scala-package-qnames",
     "fixtures/scip-python-dict-dispatch",
@@ -8853,11 +8850,11 @@
   "totals": {
     "covered": 346,
     "error": 0,
-    "full": 311,
+    "full": 318,
     "grid": 510,
     "n/a": 28,
-    "none": 27,
-    "partial": 8,
+    "none": 22,
+    "partial": 6,
     "unknown": 136
   },
   "vocabulary": {
