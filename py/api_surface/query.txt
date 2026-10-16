@@ -1,0 +1,3 @@
+# pyo3 surface of py/src/query.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.query(program: &str, outputs: Option<Vec<String>> = None, limit: Option<usize> = None, explain: bool = false, max_rows: Option<usize> = None) -> PyResult<Py<PyAny>>
+method PyGraph.query_gql(query: &str, limit: Option<usize> = None, explain: bool = false, max_rows: Option<usize> = None) -> PyResult<Py<PyAny>>
