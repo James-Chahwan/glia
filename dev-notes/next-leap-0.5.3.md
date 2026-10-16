@@ -221,7 +221,11 @@ Not candidates: each becomes packets in the spec run.
    multi-repo watch multiplies that. Measure RSS over repeated applies on the 0.5.2 WatchSession (DC.7a), then cap or
    evict, with a `[watch]` RSS marker and a gate.
    First data (DC.7a, W6): post-trim RSS 404 -> 432 -> 441 MB on glia and 180 -> 228 -> 241 MB on grpc-go over 3
-   updates, with paired incremental builds in the same process; whether it levels off is still unmeasured.
+   updates, with paired incremental builds in the same process. **It levels off** (DC.8, W9): 100 watch-only updates on
+   a glia copy (31,137 nodes / 104,825 edges, debug build, rss_mb after malloc_trim): first 562 MB, last 664, max 683;
+   means 597 (updates 1-10), 637 (11-25), 642 (26-50), 656 (51-75), 654 (76-100) - about +75 MB over the first ~12
+   updates, then flat at 615-685 MB. A held pyo3 WatchSession creeps about 80 MB over 12 updates on glia (DC.9). The
+   budget question is the plateau's size, not a leak.
    **The rules evaluator joins this budget** (James, 2026-10-16, on 0.5.2 DA.17: *"Yeah do a then"*). DA.17's RSS gate
    was restated from R1's proposed 150 MB to the measured 287,408 kB evaluator peak plus headroom (320 MB = 327,680 kB)
    for CHECK20 over glia x10 (300,130 nodes, 1,019,544 edges; whole process 449,728 kB vs R1's spike at 1,654,172 kB).
@@ -419,6 +423,13 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   writes ACCESS_MODE today, for no parser's ORM edges - Ruby, PHP, Go, Elixir alike); Repo calls inside ExUnit `test`
   blocks and module-attribute queries (`@query from(u in User)`) are unread; same-name schemas in different namespaces
   share one `data_entity:sql:User` (the A13.1 last-segment rule).
+- W9 (DD.16, DF.19): contract_route_classes (`graph/src/resolvers/identity.rs`) should try link_contract_routes'
+  ORIGIN `bases` / `annotated_base` tiers, through one shared lookup in `graph/src/resolvers/http.rs` that both it and
+  `engine/src/passes.rs` call; it adds SAME_AS contract_route edges and moves identity_resolver.rs pins, so its own
+  packet with a fixture.
+- W9 (DC.10a): the watch group key's `overlay_fp` is redundant with the post-graft parse fingerprints for every overlay
+  section today; dropping it would let an overlay change rebuild only the groups it moves.
+- W9 (DC.8): watch debounce has no max-latency cap, so a path whose (len, mtime) moves every tick is never applied.
 
 ## 3. Open questions for James
 
