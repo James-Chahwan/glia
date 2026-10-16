@@ -147,8 +147,12 @@ links, so they must survive a rename.
   keys, filtered paths), and only glia sees the whole tracked text. Engram uses it under its own rule (a live A/B for
   the note; name -> files as a needle-tested pool source). Measured on glia's tree (2026-10-16, Engram's rule, a
   Python count over `git ls-files`): 3,640 text files (33.2 MB), 52,764 tokens, 4,779 in more than 16 files; 2.7 MB of
-  JSONL per export, 0.6 MB deflated. Spec questions: tracked files from the git index vs the walk (which also reads
-  untracked, unignored files); a full file per `--since` step vs a token / file diff. Substrate value beyond Engram:
+  JSONL per export, 0.6 MB deflated. Settled with Engram (2026-10-16): tracked = the git index at the commit (like-for-like with its `git grep`,
+  and untracked files would break cross-clone byte identity); a full file per `--since` step, no diff format
+  (Engram's replay caches 852 glia steps, ~2.3 GB more at most); one file-id space: the export's file-table ids,
+  then path rows `{"f": <id>, "path": "<repo-relative>"}` for files outside the table, numbered after the
+  table's largest id, sorted by path and written before the token rows `{"t", "files", "n"}` /
+  `{"t", "common": true, "n"}`. Substrate value beyond Engram:
   `find`'s absence says "no node named X, but X occurs in <files>" (a FACT-tier "named but not modelled" signal),
   and `gaps` gains a named-but-not-modelled category over the same index. **Endorsed, 2026-10-16** (James: *"sick good
   gaps coverage and enhancements for glia"*): the vocabulary index is a glia substrate feature first, with Engram's
