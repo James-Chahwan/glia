@@ -32,13 +32,11 @@ mod prelude;
 pub use prelude::{PRELUDE, prelude_predicates};
 
 /// The reflexion model as rules: reflexion.dl evaluated over check's model EDB and
-/// read back into check's `ReflexionFacts` (DB.8a). `#[cfg(test)]` while check still
-/// derives natively and only the parity tests call `derive`: DB.8b, which makes
-/// `check_rules` call `reflexion::derive`, drops the attribute.
-#[cfg(test)]
+/// read back into check's `ReflexionFacts` (DB.8a); `check_rules` derives the model
+/// through it (DB.8b).
 pub(crate) mod reflexion;
 
-/// Native vs rules-layer reflexion parity on seven fixtures and a quokka probe
-/// (DB.8a).
+/// The reflexion goldens: seven fixtures' check reports, and a quokka probe, against
+/// reports captured from the native derivation DB.8b deleted (DB.8a, DB.8b).
 #[cfg(test)]
 mod reflexion_parity;

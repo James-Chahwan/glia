@@ -1,9 +1,11 @@
-//! The reflexion model as rules (DB.8a): [`REFLEXION`] (`reflexion.dl`) states check's
-//! CC-2 model (engine/src/check.rs module doc `# Reflexion model (check v2)`) as one
-//! stratified program, and [`derive`] evaluates it over check's EDB, reading the
-//! relations back into check's `ReflexionFacts`, the struct check's native derivation
-//! fills and `render_model` reads. The native derivation is the oracle: the parity
-//! tests (`rules::reflexion_parity`) hold the two to byte-identical `CheckReport` JSON.
+//! The reflexion model as rules (DB.8a, DB.8b): [`REFLEXION`] (`reflexion.dl`) states
+//! check's CC-2 model (engine/src/check.rs module doc `# Reflexion model (check v2)`)
+//! as one stratified program, and [`derive`] evaluates it over check's EDB, reading the
+//! relations back into check's `ReflexionFacts`, which `render_model` reads. It is
+//! check's one derivation of the model: `check_rules` calls it (DB.8b, which deleted
+//! the native one). The oracle is the goldens (`rules::reflexion_parity`,
+//! `engine/tests/data/reflexion/`): `CheckReport` JSON captured from the native
+//! derivation while DB.8a held the two byte-identical.
 //!
 //! **EDB.** Seven domain builtins beside the [`CodeFacts`] (whose `under` the program
 //! reads), every column bound or free, each FACT but `edge_site`:
@@ -27,13 +29,20 @@
 //! smallest allow id, else `layer:<upper>><lower>`; naming is rendering), `closed`,
 //! `convergence`, `divergence`, `absence`, and `unmapped_edges` = the `unmapped_edge`
 //! rows. [`derive_tiered`] also returns the rules layer's tier of each
-//! `dependent(C1, C2)`: the min over its sites of the site's tier, which the parity
+//! `dependent(C1, C2)`: the min over its sites of the site's tier, which the golden
 //! tests compare with the strongest-edge tier the matrix renders.
 //!
 //! The program is fixed and non-recursive, so it runs without a row budget: its
 //! largest relation, `owns`, is at most (placed nodes) x (declared paths), its EDB's
 //! product, never a closure the budget exists to stop. No magic rewrite either (it
-//! applies to recursion only).
+//! applies to recursion only). An `Err` is still possible (a builtin's failure, or a
+//! read-back finding a row of the wrong shape); check reports it as an errors row,
+//! exit 2.
+//!
+//! Fired-on marker, one line per evaluation, after the rules layer's `[rules] eval`
+//! line: `[rules] reflexion relations=<k> rows=<n>`, `k` the relations the program
+//! defines (15), `n` the rows it derived (`EvalStats::derived_rows`) — grep
+//! `^\[rules\] reflexion`.
 
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -108,12 +117,28 @@ pub(crate) fn derive_tiered<'m>(
     edb: ModelEdb,
     checked: Vec<EdgeCategoryId>,
 ) -> Result<(ReflexionFacts<'m>, DependentTiers), String> {
-    let program = parsed()?;
     let sites = edge_sites(merged, &checked);
-    let src = ModelFacts {
-        facts,
-        relations: model_relations(facts, &edb, &sites),
-    };
+    let relations = model_relations(facts, &edb, &sites);
+    evaluate_model(facts, edb, checked, sites, relations)
+}
+
+/// The relations [`REFLEXION`] defines: its distinct rule heads (15).
+fn relation_count(program: &Program) -> usize {
+    let heads: BTreeSet<String> = program.rules.iter().map(|r| r.head.signature()).collect();
+    heads.len()
+}
+
+/// Evaluate [`REFLEXION`] over `facts` and the EDB `relations` (built from `edb` and
+/// `sites` by [`model_relations`]) and read the result back. Emits the marker.
+fn evaluate_model<'m>(
+    facts: &CodeFacts<'m>,
+    edb: ModelEdb,
+    checked: Vec<EdgeCategoryId>,
+    sites: Vec<DepEdge<'m>>,
+    relations: Vec<ModelRelation>,
+) -> Result<(ReflexionFacts<'m>, DependentTiers), String> {
+    let program = parsed()?;
+    let src = ModelFacts { facts, relations };
     let mut options = Options::default();
     options.outputs = OUTPUTS.iter().map(|s| (*s).to_string()).collect();
     options.magic = false;
@@ -122,6 +147,11 @@ pub(crate) fn derive_tiered<'m>(
     for w in ev.warnings() {
         eprintln!("{w}");
     }
+    eprintln!(
+        "[rules] reflexion relations={} rows={}",
+        relation_count(program),
+        ev.stats().derived_rows
+    );
     let read = ReadBack { ev: &ev };
 
     let mut in_component: HashMap<NodeId, usize> = HashMap::new();
@@ -182,7 +212,6 @@ pub(crate) fn derive_tiered<'m>(
 
     let out = ReflexionFacts {
         components: edb.components,
-        component_path: edb.component_path,
         layer_of: edb.layer_of,
         allow: edb.allow,
         checked,
@@ -521,6 +550,8 @@ fn text(r: &Row, c: usize) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glia_code_domain::external_inputs::{ConstraintRule, parse_constraints};
+    use glia_core::CellPayload;
     use glia_rules::analysis::analyse;
     use glia_rules::source::{catalog_conflicts, catalog_of};
 
@@ -558,6 +589,7 @@ mod tests {
             }
         }
         assert_eq!(heads.len(), 15, "{heads:?}");
+        assert_eq!(relation_count(p), 15, "the marker's relations=");
         for o in OUTPUTS {
             assert!(heads.iter().any(|h| h == o), "{o} is not defined");
         }
@@ -679,5 +711,158 @@ mod tests {
             Some("layer:ui>core")
         );
         assert_eq!(allowed_label(&allow, &layer_of, (1, 2)), None);
+    }
+
+    /// Component entries as the overlay loader stores them, declared into an EDB.
+    fn declared(entries: &[(&str, &[&str])]) -> ModelEdb {
+        let rules: Vec<ConstraintRule> = entries
+            .iter()
+            .map(|(name, paths)| {
+                let paths: Vec<String> = paths.iter().map(|p| format!("{p:?}")).collect();
+                let json = format!(
+                    r#"[{{"id":"component:{name}","kind":"component","source":"overlay","name":"{name}","paths":[{}]}}]"#,
+                    paths.join(",")
+                );
+                parse_constraints(&CellPayload::Json(json))
+                    .pop()
+                    .expect("a component entry")
+            })
+            .collect();
+        ModelEdb::declare(&rules.iter().collect::<Vec<_>>())
+    }
+
+    /// The prelude over `edb` and no edge site, its `located` rows nodes `0..` at
+    /// `files`, its `project_path` rows the PROJECT nodes after them at `projects`.
+    fn evaluate_placed<'m>(
+        facts: &CodeFacts<'m>,
+        edb: ModelEdb,
+        files: &[&str],
+        projects: &[&str],
+    ) -> ReflexionFacts<'m> {
+        let mut relations = model_relations(facts, &edb, &[]);
+        let mut ids = (0u64..).map(NodeId);
+        let located: Vec<BuiltinRow> = files
+            .iter()
+            .zip(ids.by_ref())
+            .map(|(f, id)| fact(vec![Value::Node(id), string(f)]))
+            .collect();
+        let project_path: Vec<BuiltinRow> = projects
+            .iter()
+            .zip(ids)
+            .map(|(p, id)| fact(vec![Value::Node(id), string(p)]))
+            .collect();
+        for r in &mut relations {
+            match r.name {
+                "located" => r.rows = located.clone(),
+                "project_path" => r.rows = project_path.clone(),
+                _ => {}
+            }
+        }
+        evaluate_model(facts, edb, Vec::new(), Vec::new(), relations)
+            .expect("the prelude evaluates")
+            .0
+    }
+
+    /// The component of each of nodes `0..n`, by name.
+    fn owners(f: &ReflexionFacts<'_>, n: u64) -> Vec<Option<String>> {
+        (0..n)
+            .map(|i| {
+                f.in_component
+                    .get(&NodeId(i))
+                    .map(|c| f.components[*c].name.clone())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn owner_is_the_longest_path_on_a_segment_boundary() {
+        let g = empty();
+        let facts = CodeFacts::new(&g);
+        let s = |x: &str| Some(x.to_string());
+        let edb = declared(&[
+            ("web", &["web"]),
+            ("admin", &["web/admin"]),
+            ("api", &["./services/api/"]),
+        ]);
+        let files = [
+            "web/admin/panel.py",
+            "web/admin.py",
+            "web/app.py",
+            "services/api/h.py",
+            "webhooks/app.py",
+        ];
+        let f = evaluate_placed(&facts, edb, &files, &["."]);
+        assert_eq!(
+            owners(&f, 6),
+            [s("admin"), s("web"), s("web"), s("api"), None, None],
+            "the longest path; web/admin.py is on no segment boundary of web/admin; webhooks/ is not web's; nothing owns a PROJECT at `.`"
+        );
+        assert_eq!(
+            f.unmapped.get(&NodeId(4)).map(String::as_str),
+            Some("webhooks/app.py")
+        );
+        assert_eq!(f.unmapped.len(), 1, "a PROJECT is placed, not located");
+        // The root `.` owns what nothing longer does, a PROJECT at `.` too.
+        let edb = declared(&[("rest", &["."]), ("web", &["web"])]);
+        let f = evaluate_placed(&facts, edb, &["scripts/tool.py", "web/app.py"], &["."]);
+        assert_eq!(owners(&f, 3), [s("rest"), s("web"), s("rest")]);
+        assert!(f.unmapped.is_empty());
+    }
+
+    #[test]
+    fn allowed_follows_layers_and_allows() {
+        // 0 ui (strict, rank 0), 1 core (rank 1), 2 data (rank 2), 3 also in
+        // core; 4 has no layer.
+        let g = empty();
+        let facts = CodeFacts::new(&g);
+        let model = |layers: bool, allows: bool| {
+            let mut edb = no_model();
+            if layers {
+                for (c, name, rank, strict) in [
+                    (0, "ui", 0, true),
+                    (1, "core", 1, false),
+                    (2, "data", 2, false),
+                    (3, "core", 1, false),
+                ] {
+                    edb.layer_of.insert(
+                        c,
+                        LayerFact {
+                            name: name.to_string(),
+                            rank,
+                            strict,
+                        },
+                    );
+                }
+            }
+            if allows {
+                edb.allow
+                    .insert((0, 2), vec![("z-id".into(), None), ("a-id".into(), None)]);
+                edb.allow.insert((4, 0), vec![("up".into(), None)]);
+                edb.allow.insert((3, 2), vec![("core-data".into(), None)]);
+            }
+            evaluate_placed(&facts, edb, &[], &[])
+        };
+        let f = model(true, true);
+        let a = &f.allowed;
+        assert_eq!(a.get(&(0, 1)).map(String::as_str), Some("layer:ui>core"));
+        assert_eq!(
+            a.get(&(0, 2)).map(String::as_str),
+            Some("a-id"),
+            "smallest allow id; strict skips data"
+        );
+        assert_eq!(a.get(&(1, 2)).map(String::as_str), Some("layer:core>data"));
+        assert_eq!(
+            a.get(&(3, 2)).map(String::as_str),
+            Some("core-data"),
+            "an allow names it over a layer"
+        );
+        assert_eq!(a.get(&(4, 0)).map(String::as_str), Some("up"));
+        assert!(!a.contains_key(&(1, 3)), "same layer");
+        assert!(!a.contains_key(&(2, 1)), "upward");
+        assert!(!a.contains_key(&(1, 0)), "upward");
+        assert!(f.closed);
+        assert!(model(true, false).closed);
+        assert!(model(false, true).closed);
+        assert!(!model(false, false).closed);
     }
 }

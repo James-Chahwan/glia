@@ -1,28 +1,28 @@
-//! DB.8a parity: check's reflexion model derived natively (the oracle) and through
-//! the rules layer (`rules::reflexion`, `reflexion.dl`) must render byte-identical
-//! `CheckReport` JSON. Seven fixture trees, each built and checked both ways: the five
-//! scenarios of engine/tests/check_reflexion.rs re-created inline (closed layers with
-//! an allow, an allow the code never realises, an open model, the longest path
-//! winning, the unmapped counts), `root_component` (a `.` component, a PROJECT at the
-//! root, a component whose path is one file, `webhooks/` beside `web`) and
-//! `strict_and_ties` (a strict layer skipping one, two allows on one pair with
-//! `categories`, a two-path component, every edge held by two graphs). Each native
-//! report must also equal its golden, `engine/tests/data/reflexion/<name>.json`,
-//! regenerated from the NATIVE path only, under `GLIA_UPDATE_GOLDEN=1`.
+//! The reflexion goldens (DB.8a, DB.8b): check's reflexion model, derived through the
+//! rules layer (`rules::reflexion`, `reflexion.dl`), must render `CheckReport` JSON
+//! equal to the goldens `engine/tests/data/reflexion/<name>.json`, captured from the
+//! native derivation while DB.8a held the two byte-identical; DB.8b deleted the
+//! native code, so the goldens are the oracle. Seven fixture trees: the five scenarios
+//! of engine/tests/check_reflexion.rs re-created inline (closed layers with an allow,
+//! an allow the code never realises, an open model, the longest path winning, the
+//! unmapped counts), `root_component` (a `.` component, a PROJECT at the root, a
+//! component whose path is one file, `webhooks/` beside `web`) and `strict_and_ties`
+//! (a strict layer skipping one, two allows on one pair with `categories`, a two-path
+//! component, every edge held by two graphs). `GLIA_UPDATE_GOLDEN=1` rewrites them
+//! from the rules path: only for a declared change to the model's semantics.
 //!
-//! Beside the JSON, the derived relations are compared field by field (so a drift
-//! names its relation), and the rules layer's tier of every `dependent(C1, C2)` must
-//! be the strongest tier of the pair's edges, the tier the matrix renders: the
-//! lattice's min over derivations. The fixture test ends with
-//! `[reflexion] parity fixtures=<n> identical=<k>`.
+//! Beside the JSON, the rules layer's tier of every `dependent(C1, C2)` must be the
+//! strongest tier of the pair's edges, the tier the matrix renders: the lattice's min
+//! over derivations. The fixture test ends with `[reflexion] golden fixtures=<n>
+//! identical=<k>`.
 //!
 //! `quokka_parity` (ignored: it needs a local copy) builds `GLIA_PARITY_REPO`, a
 //! prepared repository whose `.glia/overlay.toml` is
-//! `engine/tests/data/reflexion/quokka.overlay.toml`, and prints `[reflexion] parity
-//! repo=<path> components=<c> deps=<d> identical=true` and the two derivations' cost.
-//! With `GLIA_PARITY_GOLDEN=<file>` it compares the native report with that file, or
-//! writes it under `GLIA_UPDATE_GOLDEN=1` (DB.8b's oracle once the native path is
-//! gone).
+//! `engine/tests/data/reflexion/quokka.overlay.toml`, and compares its report with
+//! `GLIA_PARITY_GOLDEN`, the native report DB.8a's run of the same copy wrote (not
+//! committed: it depends on a local repository), or writes it under
+//! `GLIA_UPDATE_GOLDEN=1`. It prints `[reflexion] golden repo=<path> components=<c>
+//! deps=<d> identical=true` and the derivation's cost.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -31,14 +31,11 @@ use std::time::Instant;
 use glia_code_domain::external_inputs::{ConstraintKind, ConstraintRule};
 use glia_core::NodeId;
 use glia_graph::MergedGraph;
-use glia_rules::source::FactSource;
 use glia_rules::value::Tier;
 
 use super::facts::CodeFacts;
 use super::reflexion;
-use crate::check::{
-    CheckReport, ModelEdb, ReflexionFacts, check_rules, check_rules_with, edge_site, native_derive,
-};
+use crate::check::{CheckReport, ModelEdb, ReflexionFacts, check_rules};
 use crate::external::declared::declared_constraints;
 
 const WEB_APP: &str =
@@ -315,58 +312,6 @@ fn model_of(rules: &[(NodeId, ConstraintRule)]) -> ModelEdb {
     m
 }
 
-/// Every relation of `f`, rendered in a checkout-stable order, one line each.
-fn relations(f: &ReflexionFacts<'_>, facts: &CodeFacts<'_>) -> Vec<String> {
-    let q = |id: NodeId| facts.render_node(id);
-    let mut out = vec![
-        format!(
-            "components {:?}",
-            f.components
-                .iter()
-                .map(|c| (&c.name, &c.paths, &c.decl))
-                .collect::<Vec<_>>()
-        ),
-        format!("component_path {:?}", f.component_path),
-        format!(
-            "layer_of {:?}",
-            f.layer_of
-                .iter()
-                .map(|(c, l)| (c, &l.name, l.rank, l.strict))
-                .collect::<Vec<_>>()
-        ),
-        format!("allow {:?}", f.allow),
-        format!("checked {:?}", f.checked),
-    ];
-    let mut in_component: Vec<(String, u64, usize)> = f
-        .in_component
-        .iter()
-        .map(|(n, c)| (q(*n), n.0, *c))
-        .collect();
-    in_component.sort();
-    out.push(format!("in_component {in_component:?}"));
-    let mut unmapped: Vec<(String, u64, &String)> = f
-        .unmapped
-        .iter()
-        .map(|(n, file)| (q(*n), n.0, file))
-        .collect();
-    unmapped.sort();
-    out.push(format!("unmapped {unmapped:?}"));
-    for (pair, edges) in &f.dep {
-        let sites: Vec<_> = edges
-            .iter()
-            .map(|d| (edge_site(d.edge, d.ev.as_ref()), d.tier, &d.note))
-            .collect();
-        out.push(format!("dep {pair:?} {sites:?}"));
-    }
-    out.push(format!("unmapped_edges {}", f.unmapped_edges));
-    out.push(format!("allowed {:?}", f.allowed));
-    out.push(format!("closed {}", f.closed));
-    out.push(format!("convergence {:?}", f.convergence));
-    out.push(format!("divergence {:?}", f.divergence));
-    out.push(format!("absence {:?}", f.absence));
-    out
-}
-
 /// The strongest tier of each pair's edges: the tier the matrix renders.
 fn strongest(f: &ReflexionFacts<'_>) -> BTreeMap<(usize, usize), Tier> {
     f.dep
@@ -382,40 +327,22 @@ fn strongest(f: &ReflexionFacts<'_>) -> BTreeMap<(usize, usize), Tier> {
         .collect()
 }
 
-/// The two derivations of `merged`'s model, relation by relation, and the
-/// `dependent` tier lattice: every disagreement, named.
-fn compare_relations(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule)]) -> Vec<String> {
+/// The `dependent` tier lattice of `merged`'s model: every pair whose rules-layer
+/// tier is not the strongest tier of its edges, named.
+fn tier_lattice(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule)]) -> Vec<String> {
     let facts = CodeFacts::new(merged);
     let edb = model_of(rules);
     if edb.components.is_empty() {
         return vec!["no component is declared".to_string()];
     }
     let checked = edb.checked();
-    let native = match native_derive(&facts, merged, edb, checked.clone()) {
-        Ok(f) => f,
-        Err(e) => return vec![format!("native derive failed: {e}")],
-    };
-    let (prelude, tiers) = match reflexion::derive_tiered(&facts, merged, model_of(rules), checked)
-    {
+    let (derived, tiers) = match reflexion::derive_tiered(&facts, merged, edb, checked) {
         Ok(x) => x,
         Err(e) => return vec![format!("prelude derive failed: {e}")],
     };
-    let (a, b) = (relations(&native, &facts), relations(&prelude, &facts));
-    let mut out: Vec<String> = a
-        .iter()
-        .zip(&b)
-        .filter(|(x, y)| x != y)
-        .map(|(x, y)| format!("native  {x}\nprelude {y}"))
-        .collect();
-    if a.len() != b.len() {
-        out.push(format!(
-            "{} native relation lines, {} prelude",
-            a.len(),
-            b.len()
-        ));
-    }
-    let name = |c: usize| native.components.get(c).map_or("?", |d| d.name.as_str());
-    let want = strongest(&native);
+    let name = |c: usize| derived.components.get(c).map_or("?", |d| d.name.as_str());
+    let want = strongest(&derived);
+    let mut out = Vec::new();
     for (pair, t) in &want {
         if tiers.get(pair) != Some(t) {
             out.push(format!(
@@ -428,16 +355,12 @@ fn compare_relations(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule)]) -
     }
     for pair in tiers.keys().filter(|p| !want.contains_key(p)) {
         out.push(format!(
-            "dependent({}, {}) has no native dep",
+            "dependent({}, {}) has no dep edge",
             name(pair.0),
             name(pair.1)
         ));
     }
     out
-}
-
-fn json(r: &CheckReport) -> String {
-    serde_json::to_string(r).expect("a report serialises")
 }
 
 fn golden_path(name: &str) -> PathBuf {
@@ -450,10 +373,10 @@ fn updating() -> bool {
     std::env::var("GLIA_UPDATE_GOLDEN").is_ok_and(|v| v == "1")
 }
 
-/// The native report against the golden at `path` (pretty JSON, one trailing
-/// newline), or written there when updating.
-fn against_golden(native: &CheckReport, path: &std::path::Path) -> Option<String> {
-    let pretty = serde_json::to_string_pretty(native).expect("a report serialises") + "\n";
+/// `report` against the golden at `path` (pretty JSON, one trailing newline), or
+/// written there when updating.
+fn against_golden(report: &CheckReport, path: &std::path::Path) -> Option<String> {
+    let pretty = serde_json::to_string_pretty(report).expect("a report serialises") + "\n";
     if updating() {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).expect("mkdir golden dir");
@@ -464,7 +387,7 @@ fn against_golden(native: &CheckReport, path: &std::path::Path) -> Option<String
     match std::fs::read_to_string(path) {
         Ok(golden) if golden == pretty => None,
         Ok(_) => Some(format!(
-            "{}: the native report differs from the golden (GLIA_UPDATE_GOLDEN=1 regenerates it from the native path)",
+            "{}: the report differs from the golden the native derivation captured\nreport {pretty}",
             path.display()
         )),
         Err(e) => Some(format!("{}: {e}", path.display())),
@@ -472,25 +395,23 @@ fn against_golden(native: &CheckReport, path: &std::path::Path) -> Option<String
 }
 
 #[test]
-fn fixtures_are_identical_native_and_prelude() {
+fn fixtures_equal_their_goldens() {
     let all = fixtures();
     let mut identical = 0;
     let mut failures: Vec<String> = Vec::new();
     for fx in &all {
         let (_tmp, merged) = build(fx);
         let rules = declared_constraints(&merged);
-        let native = check_rules(&merged, &rules);
-        let prelude = check_rules_with(&merged, &rules, reflexion::derive);
+        let report = check_rules(&merged, &rules);
         let mut bad: Vec<String> = Vec::new();
-        if native.reflexion.is_none() {
-            bad.push("no reflexion model was evaluated".to_string());
+        if report.reflexion.is_none() {
+            bad.push(format!(
+                "no reflexion model was evaluated: {:?}",
+                report.errors
+            ));
         }
-        let (n, p) = (json(&native), json(&prelude));
-        if n != p {
-            bad.push(format!("reports differ\nnative  {n}\nprelude {p}"));
-        }
-        bad.extend(compare_relations(&merged, &rules));
-        bad.extend(against_golden(&native, &golden_path(fx.name)));
+        bad.extend(tier_lattice(&merged, &rules));
+        bad.extend(against_golden(&report, &golden_path(fx.name)));
         if bad.is_empty() {
             identical += 1;
         } else {
@@ -498,7 +419,7 @@ fn fixtures_are_identical_native_and_prelude() {
         }
     }
     eprintln!(
-        "[reflexion] parity fixtures={} identical={identical}",
+        "[reflexion] golden fixtures={} identical={identical}",
         all.len()
     );
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
@@ -585,65 +506,53 @@ fn fixtures_cover_their_cases() {
 }
 
 #[test]
-#[ignore = "needs GLIA_PARITY_REPO, a prepared repository copy (module doc)"]
+#[ignore = "needs GLIA_PARITY_REPO and GLIA_PARITY_GOLDEN, a prepared repository copy and its native report (module doc)"]
 fn quokka_parity() {
     let Ok(repo) = std::env::var("GLIA_PARITY_REPO") else {
         panic!(
             "set GLIA_PARITY_REPO to a repository copy whose .glia/overlay.toml is engine/tests/data/reflexion/quokka.overlay.toml"
         );
     };
+    let Ok(golden) = std::env::var("GLIA_PARITY_GOLDEN") else {
+        panic!(
+            "set GLIA_PARITY_GOLDEN to the report DB.8a's native run of the same copy wrote (GLIA_UPDATE_GOLDEN=1 writes it)"
+        );
+    };
     let merged = crate::generate_one(&repo).expect("generate_one").merged;
     let rules = declared_constraints(&merged);
 
     let t = Instant::now();
-    let native = check_rules(&merged, &rules);
-    let native_check = t.elapsed();
-    let t = Instant::now();
-    let prelude = check_rules_with(&merged, &rules, reflexion::derive);
-    let prelude_check = t.elapsed();
+    let report = check_rules(&merged, &rules);
+    let check_time = t.elapsed();
 
-    // The derivations alone, over one set of code facts.
+    // The derivation alone, over code facts already read.
     let facts = CodeFacts::new(&merged);
     let edb = model_of(&rules);
     let checked = edb.checked();
     let _ = facts.files();
     let _ = facts.projects();
     let t = Instant::now();
-    let native_facts = native_derive(&facts, &merged, edb, checked.clone()).expect("native");
-    let native_derive_time = t.elapsed();
-    let t = Instant::now();
-    let prelude_facts =
-        reflexion::derive(&facts, &merged, model_of(&rules), checked).expect("prelude");
-    let prelude_derive_time = t.elapsed();
-    assert_eq!(
-        relations(&native_facts, &facts),
-        relations(&prelude_facts, &facts)
-    );
+    reflexion::derive(&facts, &merged, edb, checked).expect("the prelude evaluates");
+    let derive_time = t.elapsed();
     assert!(
-        compare_relations(&merged, &rules).is_empty(),
+        tier_lattice(&merged, &rules).is_empty(),
         "{:?}",
-        compare_relations(&merged, &rules)
+        tier_lattice(&merged, &rules)
     );
 
-    let (n, p) = (json(&native), json(&prelude));
-    assert_eq!(n, p, "native and prelude reports differ");
-    let m = native.reflexion.as_ref().expect("a model is declared");
-    if let Ok(golden) = std::env::var("GLIA_PARITY_GOLDEN")
-        && let Some(e) = against_golden(&native, std::path::Path::new(&golden))
-    {
+    let m = report.reflexion.as_ref().expect("a model is declared");
+    if let Some(e) = against_golden(&report, std::path::Path::new(&golden)) {
         panic!("{e}");
     }
     eprintln!(
-        "[reflexion] parity repo={repo} components={} deps={} identical=true",
+        "[reflexion] golden repo={repo} components={} deps={} identical=true",
         m.components.len(),
         m.matrix.len()
     );
     let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
     eprintln!(
-        "[reflexion] parity cost native_derive_ms={:.1} prelude_derive_ms={:.1} native_check_ms={:.1} prelude_check_ms={:.1}",
-        ms(native_derive_time),
-        ms(prelude_derive_time),
-        ms(native_check),
-        ms(prelude_check)
+        "[reflexion] golden cost derive_ms={:.1} check_ms={:.1}",
+        ms(derive_time),
+        ms(check_time)
     );
 }
