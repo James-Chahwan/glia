@@ -41,6 +41,9 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
   New order: 0.5.2 waves -> DZ.1 / DZ.2 (the 0.5.2 handoffs are written and committed; the repo-graph one is not
   sent) -> Engram's Kina + glia replays at the 0.5.2 release candidate -> this spec run -> 0.5.3 waves -> the combined
   repo-graph handover.
+- 2026-10-16: *"For 0.5.3 all follow must be completed within it also just so I can keep testing tomorrow etc do some
+  tweaks if need be before we go for the release"*. Every followup a 0.5.3 wave raises is finished inside 0.5.3: none
+  goes to a 0.5.4 seed (§4). 0.5.2 stays unreleased while James tests it; his tweaks land on main before the bump.
 
 ## 1. The train
 
@@ -487,3 +490,9 @@ All four answered 2026-10-16 (§0); recorded as rulings:
 After 0.5.2's DZ.2 (the repo-graph handover waits for 0.5.3, §0): the same method as 0.5.1 / 0.5.2 (per group a spec agent and an
 adversarial verifier, one integrator for wave 0 and the release docs), packet ids `E<group>.<n>[letter]` with `E0.*`
 as wave 0, packets in `dev-notes/leap-053-packets.json`, the runner's `--release 053` mode.
+
+**Followups finish inside 0.5.3** (James, 2026-10-16, §0). The 0.5.2 runner routed a followup to a later packet or to the
+next leap's seed; 0.5.3 does not defer. After the last scheduled wave (and after each wave whose close-out lists
+unrouted followups with no remaining owner), the session clusters them by file, specs each cluster as an `E<group>.<n>`
+packet with a fixture or test, schedules a follow-up wave, and repeats until a close-out lists none. The release docs
+packet runs last, after the final follow-up wave.
