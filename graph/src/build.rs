@@ -11,9 +11,10 @@ use glia_code_domain::{
 use glia_core::{Cell, Confidence, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 
 use crate::calls::{
-    EvidenceTally, InheritStats, SiteFiles, emit_abstract_implements, emit_method_level_implements,
-    emit_method_level_implements_with, enclosing_class_or_struct, enclosing_module, graph_evidence,
-    push_edge, resolve_calls, resolve_inherited_calls, resolve_refs, unique_global_type,
+    EvidenceTally, InheritStats, SiteFiles, emit_method_level_implements,
+    emit_method_level_implements_with, emit_override_implements, enclosing_class_or_struct,
+    enclosing_module, graph_evidence, push_edge, resolve_calls, resolve_inherited_calls,
+    resolve_refs, unique_global_type,
 };
 use crate::cpp_scope::{CppScope, implicit_this};
 use crate::go_mounts::MountStats;
@@ -302,10 +303,12 @@ where
 /// passes, then, once `resolve_refs` has bound the heritage edges, the two
 /// passes that follow INHERITS_FROM: an unbound `this.m()` / `super.m()`
 /// binds to the nearest superclass defining `m`
-/// (`calls::resolve_inherited_calls`), and a subclass method named like an
-/// `abstract` member of a superclass IMPLEMENTS it
-/// (`calls::emit_abstract_implements`). Prints the `[ts-inherit]`
-/// marker when either did anything.
+/// (`calls::resolve_inherited_calls`), and a subclass method overriding a
+/// superclass member IMPLEMENTS it at method level
+/// (`calls::emit_override_implements`): an `abstract` member as rule
+/// `abstract_override` (CH.1b), a concrete one as rule `concrete_override`
+/// (DF.22c), a constructor never. Prints the `[ts-inherit]` marker when
+/// either did anything.
 ///
 /// Two entry points because [`build_typescript`] also builds Dart, Solidity
 /// and Terraform, and Solidity writes a bare internal call as a self call:
@@ -344,7 +347,7 @@ where
     if inherit {
         let mut inh = InheritStats::default();
         resolve_inherited_calls(&mut g, &mut inh);
-        emit_abstract_implements(&mut g, &mut inh);
+        emit_override_implements(&mut g, &mut inh);
         inh.report();
     }
     emit_method_level_implements(&mut g);

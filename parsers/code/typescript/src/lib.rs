@@ -1740,7 +1740,7 @@ fn visit_abstract_method(
         Some(class_id),
     );
     // CH.1b: the graph crate pairs a subclass method of this name with it
-    // (`emit_abstract_implements`). A repeated signature returned above, so
+    // (`emit_override_implements`). A repeated signature returned above, so
     // one fact per METHOD.
     acc.nav.record_fact(method_id, NavFact::AbstractMethod);
     acc.abstract_stats.methods += 1;

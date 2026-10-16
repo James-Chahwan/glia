@@ -155,6 +155,18 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "fetch/axios at component or hook scope are extracted; calls hidden behind custom wrappers may be missed",
         verify: "grep fetch / axios / the wrapper name",
     },
+    // DF.22c: after DF.22a (parameter and local receivers), DF.22b (inherited
+    // receiver members) and DF.22c (concrete-override dispatch), measured on
+    // the ts-param-local-receivers / ts-inherited-calls /
+    // ts-concrete-override-dispatch fixtures and the wpf / shell / mem0 /
+    // nestjs / kina / quokka_web copies; the row names the receivers no rule
+    // types.
+    CoverageCaveat {
+        language: "typescript",
+        edge_category: "CALLS",
+        note: "TypeScript calls bind: a method call on a value (`x.m()`, `this.x.m()`) through the declared class of a field (a typed field, a constructor parameter, `inject(T)`), a parameter, or a local annotated with a class, initialised by `new T(..)` / `inject(T)` / `x as T` or aliasing `this.<field>`: to that class's own method, else to the nearest superclass method (`this.m()` and `super.m()` the same way from the enclosing class). An override is reached from the member a call binds through method-level IMPLEMENTS (dispatch), never as a call edge. Not bound: a receiver typed by an interface (TypeScript interface members are not nodes), by a call's result (`const s = make()`) or by a chain (`a.b.m()`), a module-level const read inside a function, and a name one body binds to two types (callbacks share their enclosing function's scope)",
+        verify: "grep the method name",
+    },
     // LA.6e: page flow (`glia pages`) judges only the links the LA.6c
     // extractor can read, so the navigations it counts but cannot judge
     // (`dynamic_skipped` in the `[nav-links]` marker) are declared here.
@@ -883,6 +895,24 @@ mod tests {
     /// the whole note and "" when it has no `Not bound:` sentence.
     fn bound_split(note: &'static str) -> (&'static str, &'static str) {
         note.split_once("Not bound:").unwrap_or((note, ""))
+    }
+
+    #[test]
+    fn typescript_calls_caveat_names_the_receiver_gaps() {
+        // DF.22a-c: field, parameter and local receivers bind, through the
+        // nearest superclass when the class inherits the member, and an
+        // override is the IMPLEMENTS hop. The row names what still does not.
+        assert!(lang_rows("src/app.ts", "typescript").contains(&("typescript", "CALLS")));
+        let note = row_note("src/app.ts", "typescript", "CALLS");
+        let (bound, unbound) = bound_split(note);
+        for part in ["parameter", "nearest superclass", "IMPLEMENTS", "`inject(T)`", "`new T(..)`"] {
+            assert!(bound.contains(part), "bound {part}: {note}");
+        }
+        for part in ["interface", "a call's result", "a chain", "module-level const", "two types"] {
+            assert!(unbound.contains(part), "not bound {part}: {note}");
+        }
+        // Control: a repo with no TypeScript file gets no typescript CALLS row.
+        assert!(!lang_rows("main.go", "typescript").contains(&("typescript", "CALLS")));
     }
 
     #[test]

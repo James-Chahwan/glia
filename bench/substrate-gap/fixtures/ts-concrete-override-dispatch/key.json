@@ -1,0 +1,63 @@
+{
+  "framework": "ts-concrete-override-dispatch",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "cells": [
+    "typescript/impl"
+  ],
+  "note": "DF.22c: a subclass method that overrides a CONCRETE superclass method IMPLEMENTS it at method level (EVIDENCE graph:iface rule concrete_override, Strong), as an override of an abstract member does since CH.1b (rule abstract_override): the one dispatch hop liveness (A7.8's implementer step) and dead_symbol (CH.1c) already follow. The call keeps binding the member its receiver declares (`this.key()` -> BaseStore::key); dispatch to UserStore::key and AuditStore::persist is the IMPLEMENTS hop, never a call edge. Constructors never pair. `super.key()` is rule super_method. Baseline (HEAD 22c65ee, debug CLI): no IMPLEMENTS.",
+  "expect_edges": [
+    {
+      "from": "UserStore/key",
+      "to": "BaseStore/key",
+      "category": "IMPLEMENTS",
+      "note": "concrete override"
+    },
+    {
+      "from": "AuditStore/persist",
+      "to": "BaseStore/persist",
+      "category": "IMPLEMENTS",
+      "note": "concrete override in a sibling subclass"
+    },
+    {
+      "from": "UserStore/key",
+      "to": "BaseStore/key",
+      "category": "CALLS",
+      "note": "super.key(): CH.1b control"
+    },
+    {
+      "from": "BaseStore/load",
+      "to": "BaseStore/key",
+      "category": "CALLS",
+      "note": "this.key() binds the declaring class's member: control"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src/stores.listener/StoresListener/onRequested",
+      "to": "src/audit-store/AuditStore/persist",
+      "category": "CALLS",
+      "note": "dispatch is the IMPLEMENTS hop, never a call edge"
+    },
+    {
+      "from": "src/base-store/BaseStore/load",
+      "to": "src/user-store/UserStore/key",
+      "category": "CALLS",
+      "note": "the override is reached through IMPLEMENTS, not a call edge"
+    },
+    {
+      "from": "src/base-store/BaseStore/key",
+      "to": "src/user-store/UserStore/key",
+      "category": "IMPLEMENTS",
+      "note": "override -> overridden, never reversed"
+    },
+    {
+      "from": "src/user-store/UserStore/constructor",
+      "to": "src/base-store/BaseStore/constructor",
+      "category": "IMPLEMENTS",
+      "note": "a constructor is never dispatched"
+    }
+  ]
+}

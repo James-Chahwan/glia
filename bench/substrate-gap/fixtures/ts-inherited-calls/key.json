@@ -4,7 +4,7 @@
   "dirs": [
     "."
   ],
-  "note": "CH-1 (CH.1b): in the TypeScript family a `this.m()` whose own class defines no `m` binds to the nearest superclass along INHERITS_FROM that does (any depth, CALLS rule inherited_method), `super.m()` binds to the nearest strict superclass's `m`, and a subclass method named like an ABSTRACT member of a superclass IMPLEMENTS it (method level, A6.6's direction, rule abstract_override); a concrete override is not IMPLEMENTS. The @OnEvent listener is the entry, so liveness carries find -> load -> fetchOne (abstract) -> the implementer UserRepo::fetchOne. Baseline (HEAD f8a46c0): BaseRepo is no node (abstract_class_declaration unvisited, CH.1), so every row below is missing.",
+  "note": "CH-1 (CH.1b): in the TypeScript family a `this.m()` whose own class defines no `m` binds to the nearest superclass along INHERITS_FROM that does (any depth, CALLS rule inherited_method), `super.m()` binds to the nearest strict superclass's `m`, and a subclass method named like an ABSTRACT member of a superclass IMPLEMENTS it (method level, A6.6's direction, rule abstract_override); a concrete override IMPLEMENTS it too, rule concrete_override (DF.22c). The @OnEvent listener is the entry, so liveness carries find -> load -> fetchOne (abstract) -> the implementer UserRepo::fetchOne. Baseline (HEAD f8a46c0): BaseRepo is no node (abstract_class_declaration unvisited, CH.1), so every row below is missing.",
   "expect_nodes": [
     {
       "kind": "CLASS",
@@ -47,15 +47,15 @@
       "to": "BaseRepo/fetchOne",
       "category": "IMPLEMENTS",
       "note": "implements the abstract member (method level)"
+    },
+    {
+      "from": "UserRepo/describe",
+      "to": "BaseRepo/describe",
+      "category": "IMPLEMENTS",
+      "note": "a concrete override IMPLEMENTS the member it overrides (DF.22c, rule concrete_override)"
     }
   ],
   "forbid": [
-    {
-      "from": "src/user-repo/UserRepo/describe",
-      "to": "src/base-repo/BaseRepo/describe",
-      "category": "IMPLEMENTS",
-      "note": "a concrete override is not IMPLEMENTS"
-    },
     {
       "from": "src/user-repo/UserRepo/describe",
       "to": "src/user-repo/UserRepo/describe",

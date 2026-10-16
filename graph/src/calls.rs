@@ -1447,11 +1447,11 @@ pub(crate) fn emit_method_level_implements_with(
 }
 
 // ============================================================================
-// Inherited calls and abstract overrides (CH.1b, TypeScript family)
+// Inherited calls and overrides (CH.1b, DF.22b, DF.22c; TypeScript family)
 // ============================================================================
 
 /// Deepest superclass chain [`resolve_inherited_calls`] and
-/// [`emit_abstract_implements`] climb; a longer one (or a cycle a bad merge
+/// [`emit_override_implements`] climb; a longer one (or a cycle a bad merge
 /// left, `A extends B`, `B extends A`) is cut here and by the visited set.
 const MAX_INHERIT_LEVELS: usize = 16;
 
@@ -1460,7 +1460,9 @@ const MAX_INHERIT_LEVELS: usize = 16;
 /// typed-receiver sites it bound (DF.22b: `this.store.m()`, `p.m()`,
 /// `new T().m()` whose declared class inherits `m`), the sites left
 /// unresolved because two superclasses at one level both define the name,
-/// and the method-level IMPLEMENTS [`emit_abstract_implements`] drew.
+/// and the method-level IMPLEMENTS [`emit_override_implements`] drew: to an
+/// abstract member (`implements`, CH.1b) and to a concrete one (`concrete`,
+/// DF.22c).
 ///
 /// `receiver_bound` counts constructed receivers too. CL.5a's
 /// `[recv] constructed receivers: bound=B unbound=U` line still counts what
@@ -1475,24 +1477,26 @@ pub(crate) struct InheritStats {
     receiver_bound: usize,
     ambiguous: usize,
     implements: usize,
+    concrete: usize,
 }
 
 impl InheritStats {
-    /// CH.1b / DF.22b fired_on marker, `None` when nothing bound and nothing
-    /// was ambiguous: `[ts-inherit] calls bound through superclasses: <n>
-    /// (self=<s> super=<p> receiver=<r> ambiguous=<a>) abstract
-    /// implements=<m>`, `<n>` = `<s> + <p> + <r>`.
+    /// CH.1b / DF.22b / DF.22c fired_on marker, `None` when every count is
+    /// 0: `[ts-inherit] calls bound through superclasses: <n> (self=<s>
+    /// super=<p> receiver=<r> ambiguous=<a>) abstract implements=<m>
+    /// concrete overrides=<c>`, `<n>` = `<s> + <p> + <r>`.
     fn marker(&self) -> Option<String> {
         let bound = self.self_bound + self.super_bound + self.receiver_bound;
-        (bound + self.ambiguous + self.implements > 0).then(|| {
+        (bound + self.ambiguous + self.implements + self.concrete > 0).then(|| {
             format!(
                 "[ts-inherit] calls bound through superclasses: {bound} (self={} super={} \
-                 receiver={} ambiguous={}) abstract implements={}",
+                 receiver={} ambiguous={}) abstract implements={} concrete overrides={}",
                 self.self_bound,
                 self.super_bound,
                 self.receiver_bound,
                 self.ambiguous,
-                self.implements
+                self.implements,
+                self.concrete
             )
         })
     }
@@ -1588,11 +1592,18 @@ fn nearest_definer(
 /// method is virtual and `this.m()` names the receiver's own class chain, so
 /// a site whose enclosing CLASS defines no `m` binds to the nearest
 /// superclass that does ([`nearest_definer`]); `super.m()` is the same lookup
-/// starting one level up. A bound site is a CALLS edge, EVIDENCE
-/// `graph:calls` / `inherited_method` at the call's own line (LC.3b); two
-/// definers at one level leave the site unresolved and count `ambiguous`.
-/// A `this.m()` whose own class DOES define `m` (left unresolved for another
-/// reason) is not an inherited call and stays as it is.
+/// starting one level up. A bound site is a CALLS edge at the call's own
+/// line (LC.3b), EVIDENCE `graph:calls` / `inherited_method` for a
+/// `this.m()`; two definers at one level leave the site unresolved and count
+/// `ambiguous`. A `this.m()` whose own class DOES define `m` (left
+/// unresolved for another reason) is not an inherited call and stays as it
+/// is.
+///
+/// DF.22c: a `super.m()` bind is EVIDENCE `graph:calls` / `super_method`
+/// ([`SUPER_METHOD`]). It is a non-virtual call: it runs exactly the parent's
+/// member and dispatches to no override of it, so engine's dead_symbol
+/// dispatch rule (`gaps::View::build`, CH.1c) reads the rule and lets no
+/// `super.m()` vouch for a sibling override of `m`.
 ///
 /// DF.22b: a call on a typed receiver (`this.store.m()`, a parameter or
 /// local `p.m()`, `new T().m()`) whose declared class defines no `m` is the
@@ -1656,6 +1667,12 @@ pub(crate) fn resolve_inherited_calls(g: &mut RepoGraph, stats: &mut InheritStat
     g.unresolved_calls = kept;
 }
 
+/// EVIDENCE rule of a `super.m()` CALLS (DF.22c), read by engine's
+/// dead_symbol dispatch rule (`gaps::SUPER_CALL_RULE`);
+/// engine/tests/dead_dispatch.rs `super_call_vouches_for_no_override` pins
+/// both ends.
+const SUPER_METHOD: &str = "super_method";
+
 /// Which of [`resolve_inherited_calls`]' lookups a site took.
 #[derive(Clone, Copy)]
 enum InheritWalk {
@@ -1672,7 +1689,8 @@ impl InheritWalk {
     /// The EVIDENCE rule of the CALLS edge the lookup binds.
     fn rule(self) -> &'static str {
         match self {
-            InheritWalk::SelfCall | InheritWalk::SuperCall => "inherited_method",
+            InheritWalk::SelfCall => "inherited_method",
+            InheritWalk::SuperCall => SUPER_METHOD,
             InheritWalk::Receiver { .. } => "inherited_receiver",
         }
     }
@@ -1773,24 +1791,30 @@ fn is_abstract_method(g: &RepoGraph, id: NodeId) -> bool {
         .is_some_and(|facts| facts.contains(&NavFact::AbstractMethod))
 }
 
-/// CH.1b: a subclass method named like an ABSTRACT member of a superclass
-/// implements it, so a method-level IMPLEMENTS joins them (A6.6's direction,
-/// implementation -> declaration), EVIDENCE `graph:iface` /
-/// `abstract_override`, Strong (an explicit `extends` plus the same name).
-/// The member is the one the subclass method overrides: the first level of
-/// its ancestors that defines the name ([`nearest_definer`]), so a
-/// grandchild implements a grandparent's abstract member when no class
-/// between defines the name, a concrete definer between them stops the walk
-/// (it is what the method overrides, and a concrete override is not an
-/// implementation of a declaration), and two definers at one level pair
-/// nothing. An abstract re-declaration in an abstract subclass pairs too, so
-/// the chain reaches the concrete methods below it.
+/// The method-level IMPLEMENTS of an override names the member it replaces
+/// at dispatch (A6.6's direction, override -> overridden): an `abstract`
+/// declaration (CH.1b, EVIDENCE `graph:iface` / `abstract_override`) or a
+/// concrete body (DF.22c, `graph:iface` / `concrete_override`), told apart by
+/// the rule; both Strong (an explicit `extends` plus the same name). A call
+/// binds the member its receiver declares, and every method that may run in
+/// its place is this one hop away, as an interface method's implementations
+/// are (A6.6): liveness (A7.8's implementer step), dead_symbol's dispatch rule
+/// (CH.1c), tests_for, blast and trace all follow it.
 ///
-/// Pairs are sorted by id and deduped, and one already present as an
-/// IMPLEMENTS edge is not pushed again.
-pub(crate) fn emit_abstract_implements(g: &mut RepoGraph, stats: &mut InheritStats) {
+/// The member is the one the subclass method overrides: the first level of
+/// its ancestors that defines the name ([`nearest_definer`]), so a grandchild
+/// pairs with a grandparent's member when no class between defines the name,
+/// a definer between them is what it overrides instead, and two definers at
+/// one level pair nothing. An abstract re-declaration in an abstract subclass
+/// pairs too, so the chain reaches the concrete methods below it. A method
+/// named `constructor` never pairs: `new` and `super(..)` invoke a
+/// constructor, dispatch never does.
+///
+/// Pairs are sorted by id (the rule riding along) and deduped, and one
+/// already present as an IMPLEMENTS edge is not pushed again.
+pub(crate) fn emit_override_implements(g: &mut RepoGraph, stats: &mut InheritStats) {
     let supers = superclasses(g);
-    let mut pairs: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut pairs: Vec<(NodeId, NodeId, &'static str)> = Vec::new();
     for &sub in supers.keys() {
         let Some(methods) = g.symbols.class_methods.get(&NodeId(sub)) else {
             continue;
@@ -1799,10 +1823,16 @@ pub(crate) fn emit_abstract_implements(g: &mut RepoGraph, stats: &mut InheritSta
             methods.iter().map(|(name, &mid)| (name.as_str(), mid)).collect();
         own.sort_unstable_by(|a, b| a.0.cmp(b.0).then(a.1.0.cmp(&b.1.0)));
         for (name, sub_mid) in own {
-            if let Definer::One(declared) = nearest_definer(g, &supers, NodeId(sub), name)
-                && is_abstract_method(g, declared)
-            {
-                pairs.push((sub_mid, declared));
+            if name == CONSTRUCTOR {
+                continue;
+            }
+            if let Definer::One(declared) = nearest_definer(g, &supers, NodeId(sub), name) {
+                let rule = if is_abstract_method(g, declared) {
+                    ABSTRACT_OVERRIDE
+                } else {
+                    CONCRETE_OVERRIDE
+                };
+                pairs.push((sub_mid, declared, rule));
             }
         }
     }
@@ -1812,15 +1842,29 @@ pub(crate) fn emit_abstract_implements(g: &mut RepoGraph, stats: &mut InheritSta
         .filter(|e| e.category == edge_category::IMPLEMENTS)
         .map(|e| (e.from, e.to))
         .collect();
-    pairs.sort_unstable_by_key(|(a, b)| (a.0, b.0));
-    pairs.dedup();
-    pairs.retain(|pair| !existing.contains(pair));
-    for &(from, to) in &pairs {
-        let ev = graph_evidence("graph:iface", "abstract_override");
+    pairs.sort_unstable_by_key(|(a, b, _)| (a.0, b.0));
+    pairs.dedup_by_key(|(a, b, _)| (*a, *b));
+    pairs.retain(|(from, to, _)| !existing.contains(&(*from, *to)));
+    for &(from, to, rule) in &pairs {
+        let ev = graph_evidence("graph:iface", rule);
         push_edge_with(g, from, to, edge_category::IMPLEMENTS, ev, Confidence::Strong);
+        if rule == ABSTRACT_OVERRIDE {
+            stats.implements += 1;
+        } else {
+            stats.concrete += 1;
+        }
     }
-    stats.implements += pairs.len();
 }
+
+/// The name of a TS class's constructor METHOD, which never pairs as an
+/// override ([`emit_override_implements`]).
+const CONSTRUCTOR: &str = "constructor";
+
+/// EVIDENCE rule of an override of an `abstract` member (CH.1b).
+const ABSTRACT_OVERRIDE: &str = "abstract_override";
+
+/// EVIDENCE rule of an override of a concrete member (DF.22c).
+const CONCRETE_OVERRIDE: &str = "concrete_override";
 
 /// Push one resolved edge, carrying `ev` as its EVIDENCE cell: the graph
 /// mechanism and branch that bound it ([`graph_evidence`], LC.3d). The
@@ -3379,18 +3423,38 @@ mod tests {
             .collect()
     }
 
-    /// The IMPLEMENTS edges `emit_abstract_implements` drew, sorted:
-    /// `(from, to, confidence)`.
-    fn abstract_implements(g: &RepoGraph) -> Vec<(NodeId, NodeId, Confidence)> {
-        let mut v: Vec<_> = with_evidence(g, edge_category::IMPLEMENTS)
+    /// The CALLS edges a `super.m()` bound (DF.22c, rule `super_method`):
+    /// `(from, to, line)`.
+    fn super_calls(g: &RepoGraph) -> Vec<(NodeId, NodeId, Option<u32>)> {
+        with_evidence(g, edge_category::CALLS)
             .into_iter()
             .filter(|(_, _, em, rule, _, _)| {
-                em == "graph:iface" && rule.as_deref() == Some("abstract_override")
+                em == "graph:calls" && rule.as_deref() == Some("super_method")
             })
+            .map(|(from, to, _, _, line, _)| (from, to, line))
+            .collect()
+    }
+
+    /// The IMPLEMENTS edges `emit_override_implements` drew with `rule`,
+    /// sorted: `(from, to, confidence)`.
+    fn overrides_with_rule(g: &RepoGraph, rule: &str) -> Vec<(NodeId, NodeId, Confidence)> {
+        let mut v: Vec<_> = with_evidence(g, edge_category::IMPLEMENTS)
+            .into_iter()
+            .filter(|(_, _, em, r, _, _)| em == "graph:iface" && r.as_deref() == Some(rule))
             .map(|(from, to, _, _, _, c)| (from, to, c))
             .collect();
         v.sort_by_key(|(a, b, _)| (a.0, b.0));
         v
+    }
+
+    /// The overrides of abstract members (CH.1b, rule `abstract_override`).
+    fn abstract_implements(g: &RepoGraph) -> Vec<(NodeId, NodeId, Confidence)> {
+        overrides_with_rule(g, "abstract_override")
+    }
+
+    /// The overrides of concrete members (DF.22c, rule `concrete_override`).
+    fn concrete_overrides(g: &RepoGraph) -> Vec<(NodeId, NodeId, Confidence)> {
+        overrides_with_rule(g, "concrete_override")
     }
 
     /// `A { load, describe }` <- `B { find: this.load(), describe }` <-
@@ -3449,7 +3513,8 @@ mod tests {
     }
 
     /// `A { d }` <- `B { d: super.d() }`: `super.d()` binds the superclass's
-    /// `d`, never the override it is written in.
+    /// `d`, never the override it is written in, and is rule `super_method`
+    /// (DF.22c), not `this.m()`'s `inherited_method`.
     #[test]
     fn super_call_skips_own_override() {
         let mut a = Shape::new();
@@ -3469,16 +3534,18 @@ mod tests {
             ),
         ];
         let g = crate::build::build_typescript_family(repo(), files, rel).unwrap();
-        assert_eq!(inherited_calls(&g), vec![(b_d, a_d, Some(10))]);
+        assert_eq!(super_calls(&g), vec![(b_d, a_d, Some(10))]);
+        assert!(inherited_calls(&g).is_empty(), "a super call is not inherited_method");
         assert!(!edges_of(&g, edge_category::CALLS).contains(&(b_d, b_d)));
         assert!(g.unresolved_calls.is_empty());
     }
 
     /// `A { abstract f, d, abstract g }` <- `B { f, d }` <- `C { f }`;
     /// `D extends A { f }`; `E extends B { g }`. An override of an abstract
-    /// member IMPLEMENTS it (a grandchild too, when no class between defines
-    /// the name); a concrete override does not, and a method whose nearest
-    /// definer is concrete (C::f, under B::f) pairs nothing.
+    /// member IMPLEMENTS it, rule `abstract_override` (a grandchild too, when
+    /// no class between defines the name); a concrete override (B::d) and a
+    /// method whose nearest definer is concrete (C::f, under B::f) pair with
+    /// that concrete member instead, rule `concrete_override` (DF.22c).
     #[test]
     fn abstract_override_implements() {
         let mut s = Shape::new();
@@ -3517,9 +3584,77 @@ mod tests {
         ];
         want.sort_by_key(|(a, b, _)| (a.0, b.0));
         assert_eq!(abstract_implements(&g), want);
+        let mut concrete = vec![(b_d, a_d, Confidence::Strong), (c_f, b_f, Confidence::Strong)];
+        concrete.sort_by_key(|(a, b, _)| (a.0, b.0));
+        assert_eq!(concrete_overrides(&g), concrete, "B::d overrides A::d, C::f overrides B::f");
         let implements = edges_of(&g, edge_category::IMPLEMENTS);
-        assert!(!implements.contains(&(b_d, a_d)), "a concrete override is not IMPLEMENTS");
-        assert!(!implements.iter().any(|(from, _)| *from == c_f), "C::f overrides B::f");
+        assert!(!implements.contains(&(c_f, a_f)), "C::f's nearest definer is B::f");
+    }
+
+    /// DF.22c: one module, `A { constructor, d, e }` <- `B { constructor, d }`
+    /// <- `C { d, e }`; `D extends A { e }`. Returns the parse and `[a_ctor,
+    /// a_d, a_e, b_ctor, b_d, c_d, c_e, d_e]`.
+    fn concrete_file() -> (FileParse, [NodeId; 8]) {
+        let mut s = Shape::new();
+        let m = s.add(node_kind::MODULE, "src::k", None);
+        let ca = s.add(node_kind::CLASS, "src::k::A", Some(m));
+        let a_ctor = s.add(node_kind::METHOD, "src::k::A::constructor", Some(ca));
+        let a_d = s.add(node_kind::METHOD, "src::k::A::d", Some(ca));
+        let a_e = s.add(node_kind::METHOD, "src::k::A::e", Some(ca));
+        let cb = s.add(node_kind::CLASS, "src::k::B", Some(m));
+        let b_ctor = s.add(node_kind::METHOD, "src::k::B::constructor", Some(cb));
+        let b_d = s.add(node_kind::METHOD, "src::k::B::d", Some(cb));
+        let cc = s.add(node_kind::CLASS, "src::k::C", Some(m));
+        let c_d = s.add(node_kind::METHOD, "src::k::C::d", Some(cc));
+        let c_e = s.add(node_kind::METHOD, "src::k::C::e", Some(cc));
+        let cd = s.add(node_kind::CLASS, "src::k::D", Some(m));
+        let d_e = s.add(node_kind::METHOD, "src::k::D::e", Some(cd));
+        let refs = vec![
+            heritage_ref(cb, m, "A", edge_category::INHERITS_FROM),
+            heritage_ref(cc, m, "B", edge_category::INHERITS_FROM),
+            heritage_ref(cd, m, "A", edge_category::INHERITS_FROM),
+        ];
+        (s.file(vec![], vec![], refs), [a_ctor, a_d, a_e, b_ctor, b_d, c_d, c_e, d_e])
+    }
+
+    /// DF.22c: over [`concrete_file`], every override of a concrete member
+    /// IMPLEMENTS the nearest definer above it (C::d -> B::d, not A::d; C::e
+    /// -> A::e across B, which defines no `e`), EVIDENCE `graph:iface` /
+    /// `concrete_override`, Strong; a constructor never pairs and nothing is
+    /// `abstract_override`. `build_typescript` pairs nothing; the pass over
+    /// its graph gives the family's pairs and marker.
+    #[test]
+    fn concrete_override_implements() {
+        let (file, [a_ctor, a_d, a_e, b_ctor, b_d, c_d, c_e, d_e]) = concrete_file();
+        let g = crate::build::build_typescript_family(repo(), vec![file], rel).unwrap();
+        let mut want = vec![
+            (b_d, a_d, Confidence::Strong),
+            (c_d, b_d, Confidence::Strong),
+            (c_e, a_e, Confidence::Strong),
+            (d_e, a_e, Confidence::Strong),
+        ];
+        want.sort_by_key(|(a, b, _)| (a.0, b.0));
+        assert_eq!(concrete_overrides(&g), want);
+        assert!(abstract_implements(&g).is_empty());
+        let implements = edges_of(&g, edge_category::IMPLEMENTS);
+        assert!(!implements.contains(&(b_ctor, a_ctor)), "a constructor is never dispatched");
+        assert!(!implements.iter().any(|(from, _)| *from == b_ctor));
+        assert!(!implements.contains(&(c_d, a_d)), "the nearest definer (B::d) wins");
+
+        let (file, _) = concrete_file();
+        let mut plain = build_typescript(repo(), vec![file], rel).unwrap();
+        assert!(concrete_overrides(&plain).is_empty(), "build_typescript pairs nothing");
+        let mut stats = InheritStats::default();
+        resolve_inherited_calls(&mut plain, &mut stats);
+        emit_override_implements(&mut plain, &mut stats);
+        assert_eq!(concrete_overrides(&plain), want);
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some(
+                "[ts-inherit] calls bound through superclasses: 0 (self=0 super=0 receiver=0 \
+                 ambiguous=0) abstract implements=0 concrete overrides=4"
+            )
+        );
     }
 
     /// A small hierarchy with an unbindable self call and a class whose base
@@ -3585,7 +3720,8 @@ mod tests {
     /// same edges), unbound sites stay unresolved in their original order,
     /// and only the TS family runs it: `build_typescript` (the `_`-arm
     /// languages' builder) binds no inherited site and pairs nothing. The
-    /// two passes over that graph then give the family's edges and marker.
+    /// two passes over that graph then give the family's edges and marker,
+    /// and a second [`emit_override_implements`] pushes nothing.
     #[test]
     fn inherit_walk_is_deterministic_and_ts_family_only() {
         let (files, [a_load, a_f, b_find, b_f, w_run, _]) = inherit_files();
@@ -3607,23 +3743,26 @@ mod tests {
         let mut plain = build_typescript(repo(), files, rel).unwrap();
         assert!(inherited_calls(&plain).is_empty());
         assert!(abstract_implements(&plain).is_empty());
+        assert!(concrete_overrides(&plain).is_empty());
         assert_eq!(plain.unresolved_calls.len(), 3, "every self call stays unresolved");
 
         let mut stats = InheritStats::default();
         resolve_inherited_calls(&mut plain, &mut stats);
-        emit_abstract_implements(&mut plain, &mut stats);
+        emit_override_implements(&mut plain, &mut stats);
         assert_eq!(sorted_edges(&plain), sorted_edges(&g));
         assert_eq!(plain.unresolved_calls, g.unresolved_calls);
         assert_eq!(
             stats.marker().as_deref(),
             Some(
                 "[ts-inherit] calls bound through superclasses: 1 (self=1 super=0 receiver=0 \
-                 ambiguous=0) abstract implements=1"
+                 ambiguous=0) abstract implements=1 concrete overrides=0"
             )
         );
         let before = plain.edges.len();
-        emit_abstract_implements(&mut plain, &mut InheritStats::default());
+        let mut again = InheritStats::default();
+        emit_override_implements(&mut plain, &mut again);
         assert_eq!(plain.edges.len(), before, "an IMPLEMENTS already present is not pushed again");
+        assert_eq!(again.marker(), None, "nothing new to count");
         assert_eq!(InheritStats::default().marker(), None);
     }
 
@@ -3656,7 +3795,7 @@ mod tests {
             stats.marker().as_deref(),
             Some(
                 "[ts-inherit] calls bound through superclasses: 0 (self=0 super=0 receiver=0 \
-                 ambiguous=1) abstract implements=0"
+                 ambiguous=1) abstract implements=0 concrete overrides=0"
             )
         );
     }
@@ -3753,13 +3892,13 @@ mod tests {
         let mut plain = build_typescript(repo(), files, rel).unwrap();
         let mut stats = InheritStats::default();
         resolve_inherited_calls(&mut plain, &mut stats);
-        emit_abstract_implements(&mut plain, &mut stats);
+        emit_override_implements(&mut plain, &mut stats);
         assert_eq!(sorted_edges(&plain), sorted_edges(&g));
         assert_eq!(
             stats.marker().as_deref(),
             Some(
                 "[ts-inherit] calls bound through superclasses: 3 (self=0 super=0 receiver=3 \
-                 ambiguous=0) abstract implements=0"
+                 ambiguous=0) abstract implements=0 concrete overrides=0"
             )
         );
 
@@ -3790,7 +3929,7 @@ mod tests {
             stats.marker().as_deref(),
             Some(
                 "[ts-inherit] calls bound through superclasses: 0 (self=0 super=0 receiver=0 \
-                 ambiguous=1) abstract implements=0"
+                 ambiguous=1) abstract implements=0 concrete overrides=0"
             )
         );
     }

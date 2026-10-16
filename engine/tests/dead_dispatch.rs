@@ -11,6 +11,12 @@
 //! whose only call into the declared member is its own delegation vouches for
 //! itself no more than a self-call does, a reached override stays live, and
 //! two reports over one graph give the same rows.
+//!
+//! DF.22c: an override of a CONCRETE TypeScript member IMPLEMENTS it too
+//! (rule `concrete_override`), so a template method's call into its own
+//! member vouches for the subclass's override, and a reached member makes its
+//! overrides live. A `super.m()` (rule `super_method`) runs exactly the
+//! parent's member: it vouches for no override, a sibling's included.
 
 use std::path::Path;
 
@@ -65,6 +71,44 @@ fn build_ts(with_listener: bool) -> MergedGraph {
     let bodies: Vec<(&str, String)> = TS_FILES
         .iter()
         .filter(|f| with_listener || !f.ends_with("users.listener.ts"))
+        .map(|f| {
+            let body =
+                std::fs::read_to_string(src.join(f)).unwrap_or_else(|e| panic!("read {f}: {e}"));
+            (*f, body)
+        })
+        .collect();
+    let files: Vec<(&str, &str)> = bodies.iter().map(|(f, b)| (*f, b.as_str())).collect();
+    build(&files)
+}
+
+/// DF.22c's `ts-concrete-override-dispatch` fixture: `BaseStore::load` /
+/// `save` call `key` / `persist`, `UserStore::key` and `AuditStore::persist`
+/// override them, the `@OnEvent` listener is the one entry.
+const TS_CONCRETE_FIXTURE: &str = "../bench/substrate-gap/fixtures/ts-concrete-override-dispatch";
+const TS_CONCRETE_FILES: [&str; 5] = [
+    "package.json",
+    "src/base-store.ts",
+    "src/user-store.ts",
+    "src/audit-store.ts",
+    "src/stores.listener.ts",
+];
+
+/// A template method calling its own concrete member, overridden below.
+const RENDERER_TS: &str = "export class Renderer {\n  render(): string {\n    return this.paint();\n  }\n\n  paint(): string {\n    return 'base';\n  }\n}\n";
+const FANCY_TS: &str = "import { Renderer } from './renderer';\n\nexport class FancyRenderer extends Renderer {\n  paint(): string {\n    return 'fancy';\n  }\n}\n";
+/// A concrete `Base::m`, one override calling `super.m()`, one not.
+const BASE_TS: &str = "export class Base {\n  m(): void {}\n}\n";
+const A_TS: &str = "import { Base } from './base';\n\nexport class A extends Base {\n  m(): void {\n    super.m();\n  }\n}\n";
+const B_TS: &str = "import { Base } from './base';\n\nexport class B extends Base {\n  m(): void {}\n}\n";
+/// A virtual call into `Base::m` through a constructor-parameter field.
+const CALLER_TS: &str = "import { Base } from './base';\n\nexport class Caller {\n  constructor(private readonly base: Base) {}\n\n  go(): void {\n    this.base.m();\n  }\n}\n";
+
+/// The `files` of the fixture at `fixture` (relative to the engine crate)
+/// copied into a tempdir and built.
+fn build_fixture(fixture: &str, files: &[&str]) -> MergedGraph {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture);
+    let bodies: Vec<(&str, String)> = files
+        .iter()
         .map(|f| {
             let body =
                 std::fs::read_to_string(src.join(f)).unwrap_or_else(|e| panic!("read {f}: {e}"));
@@ -214,4 +258,75 @@ fn withheld_rows_are_deterministic() {
     assert_eq!(ids(&a), ids(&b), "row ids");
     assert_eq!(a.counts, b.counts, "counts");
     assert_eq!(a, b, "whole report");
+}
+
+#[test]
+fn ts_template_method_override_is_not_dead() {
+    // Renderer::render's `this.paint()` binds Renderer::paint; at runtime a
+    // FancyRenderer runs its own override, which IMPLEMENTS Renderer::paint
+    // (concrete_override), so dispatch reaches it.
+    let m = build(&[("src/renderer.ts", RENDERER_TS), ("src/fancy.ts", FANCY_TS)]);
+    let rows = dead(&report(&m));
+    assert!(
+        !has(&rows, "::FancyRenderer::paint"),
+        "Renderer::render calls Renderer::paint, which dispatches to the override: {rows:?}"
+    );
+    assert!(has(&rows, "::Renderer::render"), "nothing calls render: still a row, got {rows:?}");
+    assert!(
+        !entrypoint_reachable(&m).contains(&node(&m, "::FancyRenderer::paint")),
+        "liveness is untouched: no entry reaches render"
+    );
+}
+
+#[test]
+fn super_call_vouches_for_no_override() {
+    // Base::m's only caller is A::m's `super.m()` (rule super_method): it runs
+    // Base::m itself, never B::m, so neither override is vouched for. This
+    // pins both ends of the rule string (graph writes it, gaps reads it).
+    let m = build(&[("src/base.ts", BASE_TS), ("src/a.ts", A_TS), ("src/b.ts", B_TS)]);
+    let rows = dead(&report(&m));
+    for row in ["::A::m", "::B::m"] {
+        assert!(has(&rows, row), "a super call dispatches to no override: {row} in {rows:?}");
+    }
+}
+
+#[test]
+fn a_virtual_call_vouches_for_every_override() {
+    // Caller::go's `this.base.m()` binds Base::m: dispatch may run either
+    // override, so neither is a row.
+    let m = build(&[
+        ("src/base.ts", BASE_TS),
+        ("src/a.ts", A_TS),
+        ("src/b.ts", B_TS),
+        ("src/caller.ts", CALLER_TS),
+    ]);
+    let rows = dead(&report(&m));
+    for row in ["::A::m", "::B::m"] {
+        assert!(!has(&rows, row), "Caller::go calls Base::m: {row} not in {rows:?}");
+    }
+    assert!(has(&rows, "::Caller::go"), "nothing calls go: still a row, got {rows:?}");
+}
+
+#[test]
+fn ts_concrete_override_reached_is_live() {
+    let m = build_fixture(TS_CONCRETE_FIXTURE, &TS_CONCRETE_FILES);
+    let live = entrypoint_reachable(&m);
+    for reached in ["::UserStore::key", "::AuditStore::persist"] {
+        assert!(
+            live.contains(&node(&m, reached)),
+            "the listener reaches load -> key / save -> persist, then the override (A7.8): {reached}"
+        );
+    }
+    let mut rows = dead(&report(&m));
+    rows.sort();
+    let mut want = [
+        "::BaseStore::constructor",
+        "::StoresListener::constructor",
+        "::UserStore::constructor",
+    ];
+    want.sort();
+    assert_eq!(rows.len(), want.len(), "exactly the three constructors: {rows:?}");
+    for suffix in want {
+        assert!(has(&rows, suffix), "{suffix} is a row: {rows:?}");
+    }
 }

@@ -19,7 +19,7 @@
 //! | `wrapped_sink` | an `unresolved_endpoint` whose every owner is named like a declared http `[[wrapper]]` (the owner's last qname segment equals the stanza's `call` after its last `.` / `::`, in the owner's repo): the sink is real, its identity now lives at the wrapper's call sites (LF.2e mints them); informational | fact | `none` |
 //! | `unpaired_route` | a ROUTE that is not a client-router page (ORIGIN `nav_route`, `graph::nav::is_nav_route`) with no incoming HTTP_CALLS | heuristic (a public API is legitimately uncalled in-stack) | `route_prefix\|edge` |
 //! | `tag_only_queue` | a QUEUE_PRODUCER / QUEUE_CONSUMER whose topic is a framework tag (`queues::is_framework_tag`) | fact | `constants\|wrapper` |
-//! | `dead_symbol` | a FUNCTION / METHOD / CLASS outside `entrypoint_reachable`, with no incoming carry edge, not a METHOD that IMPLEMENTS a METHOD with an incoming CALLS / USES from a third node, neither of the two (dispatch reaches it, CH.1c), not ORIGIN `test_fixture` | heuristic | `entrypoints` |
+//! | `dead_symbol` | a FUNCTION / METHOD / CLASS outside `entrypoint_reachable`, with no incoming carry edge, not a METHOD that IMPLEMENTS a METHOD with an incoming CALLS / USES from a third node, neither of the two (dispatch reaches it, CH.1c; a `super.m()` call, rule `super_method`, dispatches to no override, DF.22c), not ORIGIN `test_fixture` | heuristic | `entrypoints` |
 //! | `cochange_no_edge` | a file pair git history says changes together (a CO_CHANGES edge, LF.5b) that no static link joins ([`cochange_gaps`]); the row is the first file's MODULE, `detail` names the other file, the counts and the languages | heuristic (co-change is history, not proof of coupling) | `edge` |
 //! | `suspected_edge` | CD.3b: an orphan of a learned (kind, category, kind) triple (a cross-service pairing the build already made at least twice) and a target its channel tokens match: `detail` names the category, the target qname in backticks and its location, then `score= channel= aa= ra= cochange= target_unpaired= triple=<KIND>-<CATEGORY>-><KIND> seen <n>x`; the row is the orphan, one per kept target (at most three); `draft` holds the paste-ready `[[edge]]` stanza (engine `suspected`) | heuristic (a suggestion: the overlay loop is its verifier) | `edge` |
 //! | `orphaned_rule` | a qname-bearing overlay stanza (`[[edge]]` from / to, `[[constraint]]` / `[[decision]]` / `[[note]]` anchor, `[entrypoints]` qname) that binds no node | fact | `remove` |
@@ -114,11 +114,12 @@ use serde::de::DeserializeOwned;
 use twox_hash::XxHash64;
 
 use glia_code_domain::endpoint::split_owner;
+use glia_code_domain::evidence::Evidence;
 use glia_code_domain::external_inputs::{CELLS_FILE, CellRow, VECTORS_FILE, VectorRow};
 use glia_code_domain::glia_config::{self, LoadedConfig, OVERLAY_FILE, WrapperKind};
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_code_extractors::queues::is_framework_tag;
-use glia_core::{Cell, CellPayload, EdgeCategoryId, NodeId, NodeKindId, RepoId};
+use glia_core::{Cell, CellPayload, Edge, EdgeCategoryId, NodeId, NodeKindId, RepoId};
 use glia_graph::MergedGraph;
 use glia_graph::cells::{CellTarget, QnameIndex};
 use glia_graph::nav::{is_nav_route, nav_route_path};
@@ -619,6 +620,20 @@ fn row_order(a: &GapRow, b: &GapRow) -> std::cmp::Ordering {
 // The graph view: one pass over the nodes and one over the edges.
 // ---------------------------------------------------------------------------
 
+/// The EVIDENCE rule graph's `resolve_inherited_calls` stamps on a
+/// `super.m()` bind (DF.22c): a non-virtual call into the parent's member,
+/// which dispatches to no override of it. engine/tests/dead_dispatch.rs
+/// `super_call_vouches_for_no_override` pins both ends.
+const SUPER_CALL_RULE: &str = "super_method";
+
+/// True when `e` is a CALLS a `super.m()` bound ([`SUPER_CALL_RULE`]).
+/// Its EVIDENCE is read only for an edge into a METHOD some METHOD
+/// IMPLEMENTS, and only when the edge's `from` is not that implementer.
+fn is_super_call(e: &Edge) -> bool {
+    e.category == edge_category::CALLS
+        && Evidence::of(e).and_then(|ev| ev.rule).as_deref() == Some(SUPER_CALL_RULE)
+}
+
 /// One node, its first instance (graphs, then nodes, in `Vec` order).
 struct NodeView<'a> {
     id: NodeId,
@@ -638,7 +653,9 @@ struct View<'a> {
     carry_in: HashSet<NodeId>,
     /// METHODs dispatch reaches (CH.1c): the `from` of a METHOD -> METHOD
     /// IMPLEMENTS whose `to` has a CALLS / USES predecessor other than
-    /// itself and other than that `from`. Only looked up, never iterated.
+    /// itself and other than that `from`, through an edge that is no
+    /// `super.m()` call ([`is_super_call`], DF.22c). Only looked up, never
+    /// iterated.
     dispatch_in: HashSet<NodeId>,
     /// CALLS / USES predecessors, in edge order.
     callers: HashMap<NodeId, Vec<NodeId>>,
@@ -663,6 +680,10 @@ impl<'a> View<'a> {
             project_roots: BTreeMap::new(),
         };
         let mut methods: HashSet<NodeId> = HashSet::new();
+        // The CALLS / USES edges into each METHOD from another node, in edge
+        // order: what the dispatch rule below reads (the edge, not only its
+        // `from`, for its EVIDENCE rule). Only looked up, never iterated.
+        let mut calls_into: HashMap<NodeId, Vec<&'a Edge>> = HashMap::new();
         for g in &merged.graphs {
             for n in &g.nodes {
                 if v.repo_of.contains_key(&n.id) {
@@ -704,6 +725,9 @@ impl<'a> View<'a> {
             }
             if c == edge_category::CALLS || c == edge_category::USES {
                 v.callers.entry(e.to).or_default().push(e.from);
+                if e.from != e.to && methods.contains(&e.to) {
+                    calls_into.entry(e.to).or_default().push(e);
+                }
             }
             if c == edge_category::HANDLED_BY {
                 v.handlers.entry(e.from).or_default().push(e.to);
@@ -714,9 +738,11 @@ impl<'a> View<'a> {
         }
         // Dispatch (CH.1c, the dead-row half of A7.8's implementer step): a
         // call into a declared METHOD reaches each METHOD that IMPLEMENTS it.
-        // One hop: A6.6, CA.3b and CH.1b pair an implementation with the
-        // member it implements directly. The implementation's own call into
-        // the member vouches for it no more than a self-call does.
+        // One hop: A6.6, CA.3b, CH.1b and DF.22c pair an implementation or
+        // override with the member it replaces directly. The implementation's
+        // own call into the member vouches for it no more than a self-call
+        // does, and a `super.m()` (DF.22c) runs exactly the parent's member,
+        // so it vouches for no override, a sibling's included.
         for e in merged.all_edges() {
             if e.category != edge_category::IMPLEMENTS
                 || !methods.contains(&e.from)
@@ -724,10 +750,9 @@ impl<'a> View<'a> {
             {
                 continue;
             }
-            let called = v
-                .callers
+            let called = calls_into
                 .get(&e.to)
-                .is_some_and(|cs| cs.iter().any(|c| *c != e.to && *c != e.from));
+                .is_some_and(|es| es.iter().any(|c| c.from != e.from && !is_super_call(c)));
             if called {
                 v.dispatch_in.insert(e.from);
             }
