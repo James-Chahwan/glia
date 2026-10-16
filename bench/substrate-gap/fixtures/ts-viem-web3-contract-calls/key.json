@@ -1,0 +1,180 @@
+{
+  "framework": "ts-viem-web3-contract-calls",
+  "language": "typescript",
+  "dirs": [
+    "contracts",
+    "dapp"
+  ],
+  "note": "DT.10j (T10; viem / wagmi / web3.js / hardhat-viem). HEAD 99ee61c3 (W21 wheel: DT.10c, DT.10d, DT.10i landed): no RPC_CALL or evm EVENT_HANDLER from these files; grade.py nodes 0/8, edges 0/13, forbid 0; [evm-link] calls=0 events=0 paired=0 procedures=5 contracts=2.",
+  "expect_nodes": [
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.deposit",
+      "exact": true,
+      "note": "hardhat-viem"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.release",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:escrowAbi.release",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:escrowAbi.deposits",
+      "exact": true
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "evm_event:abi:escrowAbi.Released",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_JSON.release",
+      "exact": true
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "evm_event:abi:ESCROW_JSON.Released",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:vaultAbi.withdraw",
+      "exact": true
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "evm_call:Escrow.deposit",
+      "to": "evm:Escrow.deposit",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:Escrow.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:escrowAbi.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:escrowAbi.deposits",
+      "to": "evm:Escrow.deposits",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:ESCROW_JSON.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:vaultAbi.withdraw",
+      "to": "evm:Vault.withdraw",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "contracts::Escrow::Escrow::Released",
+      "to": "evm_event:abi:escrowAbi.Released",
+      "category": "EVENT_FLOWS",
+      "exact": true
+    },
+    {
+      "from": "contracts::Escrow::Escrow::Released",
+      "to": "evm_event:abi:ESCROW_JSON.Released",
+      "category": "EVENT_FLOWS",
+      "exact": true
+    },
+    {
+      "from": "src::escrow::releaseOrder",
+      "to": "evm_call:abi:escrowAbi.release",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "evm_event:abi:escrowAbi.Released",
+      "to": "src::escrow::watchReleases",
+      "category": "HANDLED_BY",
+      "exact": true
+    },
+    {
+      "from": "src::legacy::releaseLegacy",
+      "to": "evm_call:abi:ESCROW_JSON.release",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "src::vault::withdrawFromVault",
+      "to": "evm_call:abi:vaultAbi.withdraw",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "test::Escrow.viem::releaseOnChain",
+      "to": "evm_call:Escrow.release",
+      "category": "USES",
+      "exact": true
+    }
+  ],
+  "forbid": [
+    {
+      "from": "evm_call:abi:escrowAbi.release",
+      "to": "evm:Vault.release",
+      "category": "RPC_CALLS"
+    },
+    {
+      "from": "evm_call:abi:ESCROW_JSON.release",
+      "to": "evm:Vault.release",
+      "category": "RPC_CALLS"
+    },
+    {
+      "from": "contracts::Vault::Vault::Released",
+      "to": "evm_event:abi:escrowAbi.Released",
+      "category": "EVENT_FLOWS"
+    },
+    {
+      "from": "contracts::Vault::Vault::Released",
+      "to": "evm_event:abi:ESCROW_JSON.Released",
+      "category": "EVENT_FLOWS"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:escrowAbi.deposit",
+      "note": "in the ABI, never called"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:escrowAbi.read",
+      "note": "a viem instance member"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.write"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_JSON.methods"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_JSON.send"
+    },
+    {
+      "kind": "RPC_CALL",
+      "max_nodes": 6
+    }
+  ]
+}

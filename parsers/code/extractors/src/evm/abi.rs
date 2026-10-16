@@ -11,10 +11,22 @@
 //!   fragment makes the array no ABI (`['deposit', 'release']` is a list of
 //!   names, not an ABI).
 //! - **JSON** (solc / hardhat output, [`read_json_abi`]): an array of ABI
-//!   objects in strict JSON (quoted keys), each with a `type` (`function`,
-//!   `event`, `error`, `constructor`, `fallback`, `receive`, or absent for a
-//!   function), a string `name` and an `inputs` array whose length is the
-//!   arity. Any other item makes the array no ABI.
+//!   objects, each with a `type` (`function`, `event`, `error`,
+//!   `constructor`, `fallback`, `receive`, or absent for a function), a
+//!   string `name` and an `inputs` array whose length is the arity. Any other
+//!   item makes the array no ABI. In a TS / JS source the array may be a TS
+//!   object literal (DT.10j): bare or quoted keys, single or double quotes,
+//!   trailing commas and comments, normalised to JSON by
+//!   [`object_literal_json`]; a value that is no literal (an identifier, a
+//!   spread, a call, a template with `${..}`) makes it no ABI.
+//!
+//! viem's readers (DT.10j) wrap the array: `parseAbi([..])` reads the array
+//! inside (a human-readable `struct` signature declares no entry), and
+//! `parseAbiItem('<signature>')` / `parseAbiItem([..])` is the one-entry ABI
+//! of its signature (the first function or event of an array: the rest are
+//! the `struct`s it uses). Either may be read off a module (`viem.parseAbi`).
+//! A trailing `as const` / `satisfies Abi` is never read, so it changes
+//! nothing.
 //!
 //! An ABI needs at least one function or event. Entries are sorted and
 //! deduplicated (functions first, then events, each by name and arity), so
@@ -22,12 +34,36 @@
 
 use glia_code_domain::evm::{AbiEntry, EntryKind};
 
-use super::scan::{matching, split_args, string_literal};
+use super::scan::{ident_end, is_ident_byte, matching, skip_ws, split_args, string_literal};
 
-/// The entries of the ABI array literal whose `[` is at `start` (the same
-/// offset in `source` and its code `view`); `None` when the literal is no ABI.
+/// The entries of the ABI literal at `start` (the same offset in `source`
+/// and its code `view`): an array literal, or a `parseAbi(..)` /
+/// `parseAbiItem(..)` call (module doc); `None` when it is no ABI.
 pub(crate) fn read_abi(source: &str, view: &str, start: usize) -> Option<Vec<AbiEntry>> {
-    if view.as_bytes().get(start) != Some(&b'[') {
+    let vb = view.as_bytes();
+    if let Some((open, item)) = parse_abi_call(view, start) {
+        let close = matching(view, open)?;
+        let &(s, e) = split_args(view, open, close).first()?;
+        if !item {
+            return read_abi(source, view, s);
+        }
+        if matches!(vb[s], b'\'' | b'"' | b'`') {
+            let (text, end) = string_literal(source, s)?;
+            if end != e {
+                return None;
+            }
+            return fragment(&text)?.map(|entry| vec![entry]);
+        }
+        if vb[s] != b'[' {
+            return None;
+        }
+        let close = matching(view, s)?;
+        let first = human_readable(source, &split_args(view, s, close))?
+            .into_iter()
+            .next()?;
+        return Some(vec![first]);
+    }
+    if vb.get(start) != Some(&b'[') {
         return None;
     }
     let close = matching(view, start)?;
@@ -35,27 +71,109 @@ pub(crate) fn read_abi(source: &str, view: &str, start: usize) -> Option<Vec<Abi
     if items.is_empty() {
         return None;
     }
-    let vb = view.as_bytes();
     if items
         .iter()
         .all(|&(s, _)| matches!(vb[s], b'\'' | b'"' | b'`'))
     {
-        let mut entries = Vec::new();
-        for &(s, e) in &items {
-            let (text, end) = string_literal(source, s)?;
-            if end != e {
-                return None;
-            }
-            if let Some(entry) = fragment(&text)? {
-                entries.push(entry);
-            }
-        }
-        return canonical(entries);
+        return canonical(human_readable(source, &items)?);
     }
     if items.iter().all(|&(s, _)| vb[s] == b'{') {
-        return read_json_abi(source.get(start..=close)?);
+        return read_json_abi(source.get(start..=close)?).or_else(|| {
+            object_literal_json(source, view, start, close).and_then(|j| read_json_abi(&j))
+        });
     }
     None
+}
+
+/// `(<module>.)?parseAbi(` / `parseAbiItem(` at `start`: the offset of its
+/// `(` and whether it is `parseAbiItem`.
+fn parse_abi_call(view: &str, start: usize) -> Option<(usize, bool)> {
+    let vb = view.as_bytes();
+    let mut at = start;
+    let mut end = ident_end(vb, at)?;
+    let dot = skip_ws(vb, end);
+    if vb.get(dot) == Some(&b'.') {
+        at = skip_ws(vb, dot + 1);
+        end = ident_end(vb, at)?;
+    }
+    let item = match &view[at..end] {
+        "parseAbi" => false,
+        "parseAbiItem" => true,
+        _ => return None,
+    };
+    let open = skip_ws(vb, end);
+    (vb.get(open) == Some(&b'(')).then_some((open, item))
+}
+
+/// The entries of human-readable fragments `items` (string literals), in
+/// source order; `None` when any of them is no fragment.
+fn human_readable(source: &str, items: &[(usize, usize)]) -> Option<Vec<AbiEntry>> {
+    let mut entries = Vec::new();
+    for &(s, e) in items {
+        let (text, end) = string_literal(source, s)?;
+        if end != e {
+            return None;
+        }
+        if let Some(entry) = fragment(&text)? {
+            entries.push(entry);
+        }
+    }
+    Some(entries)
+}
+
+/// The TS / JS object-literal array between the brackets at `open` and
+/// `close` as JSON text (module doc): keys quoted, strings re-quoted, trailing
+/// commas dropped; `None` for any value JSON cannot hold.
+fn object_literal_json(source: &str, view: &str, open: usize, close: usize) -> Option<String> {
+    let vb = view.as_bytes();
+    let mut out = String::new();
+    let mut k = open;
+    while k <= close {
+        let c = vb[k];
+        match c {
+            b'[' | b']' | b'{' | b'}' | b':' => {
+                out.push(char::from(c));
+                k += 1;
+            }
+            b',' => {
+                if !matches!(vb.get(skip_ws(vb, k + 1)), Some(b']' | b'}')) {
+                    out.push(',');
+                }
+                k += 1;
+            }
+            b'\'' | b'"' | b'`' => {
+                let (text, end) = string_literal(source, k)?;
+                out.push_str(&serde_json::to_string(&text).ok()?);
+                k = end;
+            }
+            c if c.is_ascii_whitespace() => k += 1,
+            c if c.is_ascii_digit() || c == b'-' => {
+                let end = (k + 1..vb.len())
+                    .find(|&j| !(vb[j].is_ascii_digit() || vb[j] == b'.'))
+                    .unwrap_or(vb.len());
+                let number = &view[k..end];
+                if number.parse::<f64>().is_err() || vb.get(end).is_some_and(|&n| is_ident_byte(n))
+                {
+                    return None;
+                }
+                out.push_str(number);
+                k = end;
+            }
+            _ => {
+                let end = ident_end(vb, k)?;
+                let word = &view[k..end];
+                if vb.get(skip_ws(vb, end)) == Some(&b':') {
+                    out.push_str(&serde_json::to_string(word).ok()?);
+                } else if matches!(word, "true" | "false" | "null") {
+                    out.push_str(word);
+                } else {
+                    return None;
+                }
+                k = end;
+            }
+        }
+    }
+    Some(out)
 }
 
 /// The entries of a JSON ABI array (module doc); `None` for any other JSON
@@ -101,7 +219,7 @@ fn fragment(text: &str) -> Option<Option<AbiEntry>> {
     let kind = match kw {
         "function" => EntryKind::Fn,
         "event" => EntryKind::Event,
-        "error" | "constructor" | "fallback" | "receive" => return Some(None),
+        "error" | "constructor" | "fallback" | "receive" | "struct" => return Some(None),
         _ => return None,
     };
     let rest = rest.trim_start();
@@ -169,6 +287,13 @@ mod tests {
     fn read(src: &str) -> Option<Vec<String>> {
         let view = code_view(src, "typescript");
         let start = view.find('[')?;
+        read_abi(src, &view, start).map(|e| keys(&e))
+    }
+
+    /// The ABI read at the first `needle` of `src`'s code view.
+    fn read_at(src: &str, needle: &str) -> Option<Vec<String>> {
+        let view = code_view(src, "typescript");
+        let start = view.find(needle)?;
         read_abi(src, &view, start).map(|e| keys(&e))
     }
 
@@ -244,8 +369,90 @@ mod tests {
             read(src).expect("an ABI"),
             ["f:deposit/1", "f:legacy/0", "e:Released/2"]
         );
-        let unquoted = "const A = [{ type: 'function', name: 'deposit', inputs: [] }];";
-        assert_eq!(read(unquoted), None, "strict JSON only");
+    }
+
+    #[test]
+    fn object_literal_bare_keys_single_quotes_trailing_commas() {
+        // bench/substrate-gap/fixtures/ts-viem-web3-contract-calls/dapp/src/legacy.js.
+        let src = "const ESCROW_JSON = [
+  { type: 'function', name: 'release', inputs: [{ name: 'orderId', type: 'bytes32' }] },
+  { type: 'function', name: 'deposit', inputs: [{ name: 'orderId', type: 'bytes32' }], stateMutability: 'payable' },
+  // a comment between items
+  { type: 'event', name: 'Released', inputs: [{ name: 'orderId', type: 'bytes32', indexed: true }, { name: 'seller', type: 'address' }], anonymous: false, },
+  { 'type': \"function\", \"name\": `legacy`, inputs: [], gas: 21000 },
+];";
+        assert_eq!(
+            read(src).expect("an ABI"),
+            ["f:deposit/1", "f:legacy/0", "f:release/1", "e:Released/2"]
+        );
+        assert_eq!(
+            read("const A = [{ type: 'function', name: 'deposit', inputs: [] }];").expect("an ABI"),
+            ["f:deposit/0"]
+        );
+        for no_abi in [
+            "const A = [{ type: 'function', name: NAME, inputs: [] }];",
+            "const A = [{ ...base, name: 'f', inputs: [] }];",
+            "const A = [{ type: 'function', name: `f${x}`, inputs: [] }];",
+            "const A = [{ type: 'function', name: 'f', inputs: list }];",
+            "const A = [{ type: 'function', name: 'f', inputs: [], gas: 1n }];",
+            "const A = [{ name }];",
+            "const A = [{ a: 1 }, { b: 2 }];",
+        ] {
+            assert_eq!(read(no_abi), None, "{no_abi}");
+        }
+    }
+
+    #[test]
+    fn parse_abi_and_as_const() {
+        // ts-viem-web3-contract-calls dapp/src/escrow.ts and vault.ts.
+        let parsed = "export const escrowAbi = parseAbi([
+  'function deposit(bytes32 orderId) payable',
+  'function release(bytes32 orderId)',
+  'function deposits(bytes32) view returns (uint256)',
+  'event Released(bytes32 indexed orderId, address seller)',
+]);";
+        assert_eq!(
+            read_at(parsed, "parseAbi").expect("an ABI"),
+            ["f:deposit/1", "f:deposits/1", "f:release/1", "e:Released/2"]
+        );
+        let structs = "const a = viem.parseAbi([
+  'struct Order { bytes32 id; address seller; }',
+  'function settle(Order order, uint256 fee)',
+]);";
+        assert_eq!(read_at(structs, "viem").expect("an ABI"), ["f:settle/2"]);
+        let item = "const t = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)');";
+        assert_eq!(
+            read_at(item, "parseAbiItem").expect("an ABI"),
+            ["e:Transfer/3"]
+        );
+        let item_array = "const t = parseAbiItem([
+  'function settle(Order order)',
+  'function other()',
+  'struct Order { bytes32 id; }',
+]);";
+        assert_eq!(
+            read_at(item_array, "parseAbiItem").expect("an ABI"),
+            ["f:settle/1"]
+        );
+        let as_const = "export const vaultAbi = [
+  { type: 'function', name: 'withdraw', stateMutability: 'nonpayable', inputs: [{ name: 'amount', type: 'uint256' }], outputs: [] },
+  { type: 'function', name: 'release', stateMutability: 'nonpayable', inputs: [{ name: 'id', type: 'bytes32' }], outputs: [] },
+] as const satisfies Abi;";
+        assert_eq!(
+            read(as_const).expect("an ABI"),
+            ["f:release/1", "f:withdraw/1"]
+        );
+        for no_abi in [
+            "const a = parseAbi(signatures);",
+            "const a = parseAbi(['deposit']);",
+            "const a = parseAbiItem('error Nope()');",
+            "const a = parseAbiItem(sig);",
+            "const a = parseAbiParameters(['uint256 x']);",
+        ] {
+            let at = no_abi.find('p').expect("a call");
+            let view = code_view(no_abi, "typescript");
+            assert_eq!(read_abi(no_abi, &view, at), None, "{no_abi}");
+        }
     }
 
     #[test]

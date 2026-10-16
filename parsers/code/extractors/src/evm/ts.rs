@@ -1,12 +1,16 @@
 //! The TypeScript / JavaScript ethers client reader (DT.10c, DT.10i), with the
 //! hardhat, TypeChain and artifact bindings that name the contract (DT.10d,
-//! step 7).
+//! step 7), and the viem / wagmi and web3.js readers (DT.10j, steps 8-9).
 //!
-//! 1. **Gate.** The file imports or requires `ethers` (`ethers/..` and an
-//!    `@ethersproject/` path too), `hardhat` (whose `ethers` is ethers) or a
-//!    TypeChain output path (a `typechain` / `typechain-types` segment), or
-//!    holds a TypeChain `<C>__factory` identifier; otherwise nothing is read,
-//!    so a local `class Contract` mints nothing.
+//! 1. **Gate**, per library. ethers (steps 2-7): the file imports or
+//!    requires `ethers` (`ethers/..` and an `@ethersproject/` path too),
+//!    `hardhat` (whose `ethers` is ethers) or a TypeChain output path (a
+//!    `typechain` / `typechain-types` segment), or holds a TypeChain
+//!    `<C>__factory` identifier. viem (step 8): `viem` / `viem/..`, `wagmi` /
+//!    `wagmi/..` / `@wagmi/..`, or `hardhat` (whose `viem` is hardhat-viem).
+//!    web3.js (step 9): `web3` / `web3/..`. A reader whose gate is closed
+//!    reads nothing, so a local `class Contract` mints nothing, and neither
+//!    does a `new Contract` in a viem-only file.
 //! 2. **ABI bindings.** `(export )?(const|let|var) <N>(: T)? = <abi literal>`
 //!    at any depth, read by `abi::read_abi`. A binding whose literal does not
 //!    read is no ABI. An ABI binding is visible file-wide (the nearest one
@@ -99,10 +103,49 @@
 //!    Not read (DT.10h): a chai `expect(tx).to.emit(R, 'E')` (an assertion:
 //!    `R` is an argument, no access follows it), `hre.artifacts.readArtifact`
 //!    and a TypeChain type annotation alone (`const e: Escrow = ..`).
+//! 8. **viem / wagmi (DT.10j, lib `viem`).**
+//!    - Option calls: [`VIEM_CALLS`] and [`VIEM_EVENTS`] called bare
+//!      `f({..})`, as `f(client, {..})` or as `client.f({..})` (an explicit
+//!      `<..>` type argument list may come first; a definition `function
+//!      f(..)` / a method `f(..) {` is no call). The first `{` argument's
+//!      depth-1 keys are read: `abi` (an identifier, `<J>.abi`, an inline
+//!      literal or `parseAbi(..)`, the shorthand `abi`), `functionName` /
+//!      `eventName` (a string literal; for an event an array of them, one
+//!      site each), `args` (an array literal: its element count; absent, 0;
+//!      anything else, or absent beside a spread, unknown) and `address`.
+//!      The ABI resolves like a `new Contract` argument (step 3). With no ABI
+//!      binding to scope by (the shorthand `abi` bound by no declaration or
+//!      import of the file, or an inline literal) the `address` identifier is
+//!      the hint when its name key drops an address suffix (`ESCROW_ADDRESS`
+//!      is `Scope::Abi(ESCROW_ADDRESS)`, name key `escrow`; a bare `address`
+//!      names nothing). A non-literal name, an unreadable ABI and a missing
+//!      hint count `dynamic`; a call with no name key (`watchContractEvent`
+//!      over every event) is no site. [`VIEM_MULTI`] calls read each element
+//!      of their `contracts: [..]` array as one option call (an element that
+//!      is no object literal counts `dynamic`). A spread keeps only the
+//!      literal keys beside it.
+//!    - Instances: `getContract({ address, abi, client })` (its options read
+//!      as above), and hardhat-viem `(<x>.)?viem.deployContract('<C>', ..)` /
+//!      `getContractAt('<C>', ..)` (`Scope::Contract(<C>)`), bound by any
+//!      binding form of step 3 and scoped as step 4; `getContract(..)` is the
+//!      instance itself, so it is read chained too. On an instance `R`:
+//!      calls `R.(read|write|simulate|estimateGas).<m>(`, whose `args` is the
+//!      first argument's array length (none, or an options object first, is
+//!      0), and events `R.(watchEvent|getEvents|createEventFilter).<E>(`. No
+//!      namespace (`read`, `write`, `address`, `abi`, ..) is a member itself.
+//! 9. **web3.js (DT.10j, lib `web3`).** `new <w>(.<x>)*.eth.Contract(<abi>(,
+//!    <addr>)?(, ..)?)`, the ABI its FIRST argument (read as step 3's), bound
+//!    by any binding form of step 3 or chained. On it, calls
+//!    `R.methods.<m>(` / `R.methods['<m>'](` (a signature key spells the
+//!    arity), whose `args` is that call's argument count (a `.call()` /
+//!    `.send(..)` / `.estimateGas(..)` / `.encodeABI()` after it is no
+//!    member), and events `R.events.<E>(`, `R.getPastEvents('<E>'` and
+//!    `R.once('<E>'` (`allEvents` names none). No ethers stop list applies:
+//!    `R.methods.connect(..)` is the contract's `connect`.
 
 use std::collections::BTreeSet;
 
-use glia_code_domain::evm::{AbiEntry, ClientSide, EntryKind, Scope};
+use glia_code_domain::evm::{self, AbiEntry, ClientSide, EntryKind, Scope};
 
 use super::Site;
 use super::abi::read_abi;
@@ -120,8 +163,78 @@ const HARDHAT: &str = "hardhat";
 /// The client library of a TypeChain factory's site (step 7).
 const TYPECHAIN: &str = "typechain";
 
+/// The client library of a viem / wagmi site (step 8).
+const VIEM: &str = "viem";
+
+/// The client library of a web3.js site (step 9).
+const WEB3: &str = "web3";
+
 /// The suffix of a TypeChain factory class: `Escrow__factory` (step 7).
 const FACTORY_SUFFIX: &str = "__factory";
+
+/// What a source must hold for any gate to open (step 1).
+const GATE_NEEDLES: &[&str] = &[
+    "ethers",
+    "hardhat",
+    "typechain",
+    FACTORY_SUFFIX,
+    "viem",
+    "wagmi",
+    "web3",
+];
+
+/// The hardhat-viem helpers on `(<x>.)?viem` that name the contract (step 8).
+const VIEM_HELPERS: &[&str] = &["deployContract", "getContractAt"];
+
+/// viem actions and wagmi hooks / actions whose options name one contract
+/// function (step 8).
+const VIEM_CALLS: &[&str] = &[
+    "readContract",
+    "writeContract",
+    "writeContractAsync",
+    "simulateContract",
+    "estimateContractGas",
+    "prepareWriteContract",
+    "useReadContract",
+    "useWriteContract",
+    "useSimulateContract",
+    "useContractRead",
+    "useContractWrite",
+    "usePrepareContractWrite",
+    "useEstimateContractGas",
+];
+
+/// viem actions and wagmi hooks whose options name the events they read
+/// (step 8).
+const VIEM_EVENTS: &[&str] = &[
+    "watchContractEvent",
+    "getContractEvents",
+    "createContractEventFilter",
+    "useWatchContractEvent",
+    "useContractEvent",
+    "parseEventLogs",
+];
+
+/// viem / wagmi batch reads: each element of `contracts: [..]` is one option
+/// call (step 8).
+const VIEM_MULTI: &[&str] = &[
+    "multicall",
+    "readContracts",
+    "useReadContracts",
+    "useContractReads",
+];
+
+/// viem instance namespaces whose member is a contract function (step 8).
+const VIEM_CALL_NS: &[&str] = &["read", "write", "simulate", "estimateGas"];
+
+/// viem instance namespaces whose member is a contract event (step 8).
+const VIEM_EVENT_NS: &[&str] = &["watchEvent", "getEvents", "createEventFilter"];
+
+/// web3.js contract members whose first argument names an event (step 9).
+const WEB3_EVENT_MEMBERS: &[&str] = &["getPastEvents", "once"];
+
+/// The web3.js name of "every event": no event site (step 9).
+const WEB3_ALL_EVENTS: &str = "allEvents";
 
 /// The hardhat-ethers helpers on `(<x>.)?ethers` (step 7).
 const HARDHAT_HELPERS: &[&str] = &["getContractFactory", "getContractAt", "deployContract"];
@@ -216,8 +329,42 @@ pub(super) struct TsCounts {
     /// Members and events left out because the known ABI does not list them.
     pub(super) not_in_abi: usize,
     /// Contract constructions whose ABI argument is neither an identifier nor
-    /// a literal that reads, and calls through a non-literal element key.
+    /// a literal that reads, calls through a non-literal element key, and
+    /// viem option calls with a non-literal name or no ABI to scope by.
     pub(super) dynamic: usize,
+}
+
+/// The client API a contract binding's sites are read in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Api {
+    /// ethers (with hardhat-ethers and TypeChain): steps 5 and 6.
+    Ethers,
+    /// A viem contract instance: step 8.
+    Viem,
+    /// A web3.js contract: step 9.
+    Web3,
+}
+
+/// The readers a file opens (step 1).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Gate {
+    ethers: bool,
+    viem: bool,
+    web3: bool,
+}
+
+impl Gate {
+    fn any(self) -> bool {
+        self.ethers || self.viem || self.web3
+    }
+
+    fn union(self, other: Gate) -> Gate {
+        Gate {
+            ethers: self.ethers || other.ethers,
+            viem: self.viem || other.viem,
+            web3: self.web3 || other.web3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,8 +399,10 @@ struct Binding {
     name: String,
     scope: Scope,
     abi: Option<Vec<AbiEntry>>,
-    /// The client library its sites name (steps 5 and 7).
+    /// The client library its sites name (steps 5, 7, 8 and 9).
     lib: &'static str,
+    /// The API its sites are read in.
+    api: Api,
     /// The end of its initializer: a site must come after it, unless
     /// `hoisted`.
     at: usize,
@@ -269,6 +418,8 @@ struct Ctx<'a> {
     decls: &'a [Decl],
     abis: &'a [AbiBinding],
     imports: &'a [JsonImport],
+    /// Every name an import clause binds (step 8's "bound in the file").
+    locals: &'a [String],
 }
 
 /// One `.json` import or require (step 7): the name it binds and, for a
@@ -299,6 +450,7 @@ struct Made {
     close: usize,
     abi: AbiRef,
     lib: &'static str,
+    api: Api,
     /// The expression is the contract itself, not a promise of one, so a
     /// member call chained straight after it is a site.
     sync: bool,
@@ -358,10 +510,10 @@ enum Access {
 pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
     let mut counts = TsCounts::default();
     let mut sites = Vec::new();
-    if !gated(source, view) {
+    let gate = gated(source, view);
+    if !gate.any() {
         return (sites, counts);
     }
-    let vb = view.as_bytes();
     let decls = declarations(view);
     let abis: Vec<AbiBinding> = decls
         .iter()
@@ -377,15 +529,58 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
         .collect();
     counts.abis = abis.len();
     let imports = json_imports(source, view, &decls);
+    let locals = import_locals(source, view);
     let ctx = Ctx {
         source,
         view,
         decls: &decls,
         abis: &abis,
         imports: &imports,
+        locals: &locals,
     };
 
     let mut bindings: Vec<Binding> = Vec::new();
+    if gate.ethers {
+        ethers_constructions(&ctx, &mut sites, &mut counts, &mut bindings);
+        // Step 7: the bindings that name the contract.
+        let mut factories: Vec<Binding> = Vec::new();
+        hardhat_bindings(&ctx, &mut factories, &mut sites, &mut counts, &mut bindings);
+        typechain_bindings(&ctx, &mut factories, &mut sites, &mut counts, &mut bindings);
+        factory_products(&ctx, &factories, &mut sites, &mut counts, &mut bindings);
+    }
+    if gate.viem {
+        viem_instances(&ctx, &mut sites, &mut counts, &mut bindings);
+        viem_sites(&ctx, &mut sites, &mut counts);
+    }
+    if gate.web3 {
+        web3_bindings(&ctx, &mut sites, &mut counts, &mut bindings);
+    }
+    rebind(source, view, &decls, &mut bindings);
+
+    for receiver in keys(&bindings) {
+        for (start, end) in receiver_hits(view, &receiver) {
+            let Some(binding) = visible(&bindings, &receiver, start) else {
+                continue;
+            };
+            let Some(access) = access_on(binding.api, source, view, end) else {
+                continue;
+            };
+            record(&mut sites, &mut counts, binding, access);
+        }
+    }
+    sites.sort_by(|a, b| (a.at, &a.member).cmp(&(b.at, &b.member)));
+    (sites, counts)
+}
+
+/// Step 3: every `new (ethers.)?(Contract|BaseContract)(..)`.
+fn ethers_constructions(
+    ctx: &Ctx,
+    sites: &mut Vec<Site>,
+    counts: &mut TsCounts,
+    bindings: &mut Vec<Binding>,
+) {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
     for new_at in word_hits(view, "new") {
         if new_at > 0 && vb[new_at - 1] == b'.' {
             continue;
@@ -397,46 +592,23 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
         let made = Made {
             start: new_at,
             close,
-            abi: abi_ref(&ctx, abi_arg(source, view, arg), new_at),
+            abi: abi_ref(ctx, abi_arg(source, view, arg), new_at),
             lib: LIB,
+            api: Api::Ethers,
             sync: true,
         };
-        bind_made(&ctx, made, &mut sites, &mut counts, &mut bindings);
+        bind_made(ctx, made, sites, counts, bindings);
     }
-    // Step 7: the bindings that name the contract.
-    let mut factories: Vec<Binding> = Vec::new();
-    hardhat_bindings(&ctx, &mut factories, &mut sites, &mut counts, &mut bindings);
-    typechain_bindings(&ctx, &mut factories, &mut sites, &mut counts, &mut bindings);
-    factory_products(&ctx, &factories, &mut sites, &mut counts, &mut bindings);
-    rebind(source, view, &decls, &mut bindings);
-
-    for receiver in keys(&bindings) {
-        for (start, end) in receiver_hits(view, &receiver) {
-            let Some(access) = access(source, view, end) else {
-                continue;
-            };
-            let Some(binding) = visible(&bindings, &receiver, start) else {
-                continue;
-            };
-            record(&mut sites, &mut counts, binding, access);
-        }
-    }
-    sites.sort_by(|a, b| (a.at, &a.member).cmp(&(b.at, &b.member)));
-    (sites, counts)
 }
 
-/// Step 1: the file imports or requires an ethers, hardhat or TypeChain
-/// module, or names a TypeChain factory.
-fn gated(source: &str, view: &str) -> bool {
-    if !["ethers", "hardhat", "typechain", FACTORY_SUFFIX]
-        .iter()
-        .any(|needle| source.contains(needle))
-    {
-        return false;
+/// Step 1: the readers the file's imports and requires open (and a TypeChain
+/// factory identifier, which opens ethers on its own).
+fn gated(source: &str, view: &str) -> Gate {
+    let mut gate = Gate::default();
+    if !GATE_NEEDLES.iter().any(|needle| source.contains(needle)) {
+        return gate;
     }
-    if !factory_idents(view).is_empty() {
-        return true;
-    }
+    gate.ethers = !factory_idents(view).is_empty();
     let vb = view.as_bytes();
     for kw in ["from", "require", "import"] {
         for at in word_hits(view, kw) {
@@ -449,26 +621,31 @@ fn gated(source: &str, view: &str) -> bool {
             } else if kw == "require" {
                 continue;
             }
-            if let Some((spec, _)) = string_literal(source, k)
-                && is_client_module(&spec)
-            {
-                return true;
+            if let Some((spec, _)) = string_literal(source, k) {
+                gate = gate.union(module_gate(&spec));
             }
         }
     }
-    false
+    gate
 }
 
-/// An import specifier that brings ethers in: ethers itself, hardhat, or a
-/// TypeChain output directory (`../typechain-types`, `./typechain/..`).
-fn is_client_module(spec: &str) -> bool {
-    spec == "ethers"
-        || spec == "hardhat"
-        || spec.starts_with("ethers/")
-        || spec.starts_with("@ethersproject/")
-        || spec
-            .split('/')
-            .any(|seg| seg == "typechain" || seg == "typechain-types")
+/// The readers an import specifier opens (step 1): ethers for ethers
+/// itself, hardhat or a TypeChain output directory (`../typechain-types`,
+/// `./typechain/..`); viem for viem, wagmi or hardhat (hardhat-viem); web3
+/// for web3.
+fn module_gate(spec: &str) -> Gate {
+    let is =
+        |name: &str| spec == name || spec.strip_prefix(name).is_some_and(|t| t.starts_with('/'));
+    Gate {
+        ethers: is("ethers")
+            || spec == "hardhat"
+            || spec.starts_with("@ethersproject/")
+            || spec
+                .split('/')
+                .any(|seg| seg == "typechain" || seg == "typechain-types"),
+        viem: is("viem") || is("wagmi") || spec.starts_with("@wagmi/") || spec == "hardhat",
+        web3: is("web3"),
+    }
 }
 
 /// Every `const` / `let` / `var` declarator with a plain identifier name.
@@ -558,14 +735,19 @@ fn construction(view: &str, new_at: usize) -> Option<(usize, usize)> {
 }
 
 /// Classify an ABI argument `arg` (a construction's second, a
-/// `getContractAt`'s first; steps 3 and 7).
+/// `getContractAt`'s first, a web3.js construction's first, a viem `abi:`
+/// value; steps 3, 7, 8 and 9). An array literal or a viem `parseAbi(..)` /
+/// `parseAbiItem(..)` that reads is a literal.
 fn abi_arg(source: &str, view: &str, arg: Option<(usize, usize)>) -> AbiArg {
     let Some((s, e)) = arg else {
         return AbiArg::Dynamic;
     };
     let vb = view.as_bytes();
+    if let Some(entries) = read_abi(source, view, s) {
+        return AbiArg::Literal(entries);
+    }
     if vb[s] == b'[' {
-        return read_abi(source, view, s).map_or(AbiArg::Dynamic, AbiArg::Literal);
+        return AbiArg::Dynamic;
     }
     let Some(id_end) = ident_end(vb, s) else {
         return AbiArg::Dynamic;
@@ -639,7 +821,7 @@ fn bind_made(
     counts: &mut TsCounts,
     bindings: &mut Vec<Binding>,
 ) {
-    if let Some(access) = access(ctx.source, ctx.view, made.close + 1) {
+    if let Some(access) = access_on(made.api, ctx.source, ctx.view, made.close + 1) {
         if !made.sync || matches!(access, Access::Other) {
             return;
         }
@@ -652,6 +834,7 @@ fn bind_made(
             scope,
             abi,
             lib: made.lib,
+            api: made.api,
             at: made.close,
             block: (0, ctx.view.len()),
             hoisted: false,
@@ -679,6 +862,7 @@ fn bind_made(
         scope,
         abi,
         lib: made.lib,
+        api: made.api,
         at: made.close,
         block: target.block,
         hoisted: target.hoisted,
@@ -728,6 +912,7 @@ fn hardhat_bindings(
                     scope,
                     abi: None,
                     lib: HARDHAT,
+                    api: Api::Ethers,
                     at: close,
                     block: target.block,
                     hoisted: target.hoisted,
@@ -739,6 +924,7 @@ fn hardhat_bindings(
                 close,
                 abi,
                 lib: HARDHAT,
+                api: Api::Ethers,
                 sync: false,
             };
             bind_made(ctx, made, sites, counts, bindings);
@@ -771,6 +957,7 @@ fn typechain_bindings(
                 scope: Scope::Contract(contract),
                 abi: None,
                 lib: TYPECHAIN,
+                api: Api::Ethers,
                 at: close,
                 block: (0, vb.len()),
                 hoisted: false,
@@ -812,6 +999,7 @@ fn typechain_bindings(
             close,
             abi: AbiRef::Named(Scope::Contract(contract), None),
             lib: TYPECHAIN,
+            api: Api::Ethers,
             sync: true,
         };
         bind_made(ctx, made, sites, counts, bindings);
@@ -864,6 +1052,7 @@ fn factory_products(
                 close,
                 abi: AbiRef::Named(factory.scope.clone(), None),
                 lib: factory.lib,
+                api: Api::Ethers,
                 sync: false,
             };
             bind_made(ctx, made, sites, counts, bindings);
@@ -897,12 +1086,406 @@ fn product(ctx: &Ctx, factory: &Binding, start: usize, from: usize) -> Option<Ma
                     close,
                     abi: AbiRef::Named(factory.scope.clone(), None),
                     lib: factory.lib,
+                    api: Api::Ethers,
                     sync: name == "attach",
                 });
             }
             _ => return None,
         }
     }
+}
+
+/// Step 8: hardhat-viem `(<x>.)?viem.deployContract('<C>', ..)` /
+/// `getContractAt('<C>', ..)` contracts and viem `getContract({..})`
+/// instances.
+fn viem_instances(
+    ctx: &Ctx,
+    sites: &mut Vec<Site>,
+    counts: &mut TsCounts,
+    bindings: &mut Vec<Binding>,
+) {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    for &helper in VIEM_HELPERS {
+        for at in word_hits(view, helper) {
+            let Some(start) = member_of(view, at, "viem") else {
+                continue;
+            };
+            let Some(open) = paren_after(vb, at + helper.len()) else {
+                continue;
+            };
+            let Some(close) = matching(view, open) else {
+                continue;
+            };
+            let first = split_args(view, open, close).first().copied();
+            let Some(contract) = first.and_then(|(s, e)| contract_name(source, s, e)) else {
+                continue;
+            };
+            let made = Made {
+                start,
+                close,
+                abi: AbiRef::Named(Scope::Contract(contract), None),
+                lib: VIEM,
+                api: Api::Viem,
+                sync: false,
+            };
+            bind_made(ctx, made, sites, counts, bindings);
+        }
+    }
+    for at in word_hits(view, "getContract") {
+        let Some((open, close)) = option_call(view, at, "getContract".len()) else {
+            continue;
+        };
+        let Some(opts) = first_options(source, view, open, close) else {
+            continue;
+        };
+        let made = Made {
+            start: chain_start(view, at),
+            close,
+            abi: options_abi(ctx, &opts, at),
+            lib: VIEM,
+            api: Api::Viem,
+            sync: true,
+        };
+        bind_made(ctx, made, sites, counts, bindings);
+    }
+}
+
+/// Step 8: the viem / wagmi option calls ([`VIEM_CALLS`], [`VIEM_EVENTS`])
+/// and the batch reads ([`VIEM_MULTI`]).
+fn viem_sites(ctx: &Ctx, sites: &mut Vec<Site>, counts: &mut TsCounts) {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    let tables = [
+        (VIEM_CALLS, Some(ClientSide::Call)),
+        (VIEM_EVENTS, Some(ClientSide::Event)),
+        (VIEM_MULTI, None),
+    ];
+    for (names, side) in tables {
+        for &name in names {
+            for at in word_hits(view, name) {
+                let Some((open, close)) = option_call(view, at, name.len()) else {
+                    continue;
+                };
+                let Some(opts) = first_options(source, view, open, close) else {
+                    continue;
+                };
+                if let Some(side) = side {
+                    option_site(ctx, side, &opts, sites, counts);
+                    continue;
+                }
+                let Some((s, _)) = opts.get("contracts") else {
+                    continue;
+                };
+                let Some(list_close) = (vb[s] == b'[').then(|| matching(view, s)).flatten() else {
+                    counts.dynamic += 1;
+                    continue;
+                };
+                for (es, ee) in split_args(view, s, list_close) {
+                    match (vb[es] == b'{')
+                        .then(|| options(source, view, es, ee))
+                        .flatten()
+                    {
+                        Some(element) => {
+                            option_site(ctx, ClientSide::Call, &element, sites, counts)
+                        }
+                        None => counts.dynamic += 1,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The parentheses of a call of the identifier at `at` (`len` bytes long),
+/// past an explicit `<..>` type argument list; `None` when it is no call or
+/// is a definition: `function f(..)`, a method `f(..) {` or `f(..): T {`.
+fn option_call(view: &str, at: usize, len: usize) -> Option<(usize, usize)> {
+    let vb = view.as_bytes();
+    if let Some(p) = prev_non_ws(vb, at)
+        && let Some(w) = ident_start_before(vb, p + 1)
+        && &view[w..=p] == "function"
+    {
+        return None;
+    }
+    let mut k = skip_ws(vb, at + len);
+    if vb.get(k) == Some(&b'<') {
+        k = skip_ws(vb, type_args_end(vb, k)? + 1);
+    }
+    if vb.get(k) != Some(&b'(') {
+        return None;
+    }
+    let close = matching(view, k)?;
+    let after = skip_ws(vb, close + 1);
+    let defined = match vb.get(after) {
+        Some(b'{') => true,
+        Some(b':') => {
+            let t = (after + 1..vb.len().min(after + 1 + MAX_TYPE)).find(|&j| {
+                !(is_ident_byte(vb[j])
+                    || vb[j].is_ascii_whitespace()
+                    || b"<>[]|&.,'\"`".contains(&vb[j]))
+            });
+            t.is_some_and(|j| vb[j] == b'{')
+        }
+        _ => false,
+    };
+    (!defined).then_some((k, close))
+}
+
+/// The offset of the `>` closing the type argument list whose `<` is at
+/// `open`; `None` when it does not close within [`MAX_TYPE`] bytes or meets
+/// something no type holds.
+fn type_args_end(vb: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for k in open..vb.len().min(open + MAX_TYPE) {
+        match vb[k] {
+            b'<' => depth += 1,
+            b'>' if k > 0 && vb[k - 1] == b'=' => {}
+            b'>' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(k);
+                }
+            }
+            b';' | b'{' | b'}' | b'(' | b')' => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The depth-1 keys of one object literal (step 8).
+struct Opts {
+    /// `(key, value range)` in source order; a shorthand key is its own
+    /// value.
+    keys: Vec<(String, (usize, usize))>,
+    /// The object spreads another (`{ ...cfg, functionName: 'x' }`).
+    spread: bool,
+}
+
+impl Opts {
+    fn get(&self, key: &str) -> Option<(usize, usize)> {
+        self.keys.iter().find(|(k, _)| k == key).map(|&(_, v)| v)
+    }
+}
+
+/// The first `{` argument of the call whose parentheses are `open` /
+/// `close`, read as [`Opts`].
+fn first_options(source: &str, view: &str, open: usize, close: usize) -> Option<Opts> {
+    let vb = view.as_bytes();
+    let (s, e) = split_args(view, open, close)
+        .into_iter()
+        .find(|&(s, _)| vb[s] == b'{')?;
+    options(source, view, s, e)
+}
+
+/// The object literal `[s, e)` (its `{` at `s`) as [`Opts`]; `None` when its
+/// braces do not close at `e`.
+fn options(source: &str, view: &str, s: usize, e: usize) -> Option<Opts> {
+    let vb = view.as_bytes();
+    let close = matching(view, s)?;
+    if close + 1 != e && !view[close + 1..e].trim_start().starts_with("as ") {
+        return None;
+    }
+    let mut opts = Opts {
+        keys: Vec::new(),
+        spread: false,
+    };
+    for (ps, pe) in split_args(view, s, close) {
+        if view[ps..pe].starts_with("...") {
+            opts.spread = true;
+            continue;
+        }
+        let (key, key_end) = match ident_end(vb, ps) {
+            Some(k_end) => (view[ps..k_end].to_string(), k_end),
+            None => match string_literal(source, ps) {
+                Some(literal) => literal,
+                None => continue,
+            },
+        };
+        let colon = skip_ws(vb, key_end);
+        if colon >= pe {
+            opts.keys.push((key, (ps, key_end)));
+        } else if vb[colon] == b':' {
+            let (vs, ve) = trim(vb, colon + 1, pe);
+            if vs < ve {
+                opts.keys.push((key, (vs, ve)));
+            }
+        }
+    }
+    Some(opts)
+}
+
+/// The ABI an options object names (step 8): its `abi` value read as a
+/// `new Contract` argument, the `address` hint for a shorthand `abi` the
+/// file binds nowhere, [`AbiRef::Dynamic`] with no `abi` key.
+fn options_abi(ctx: &Ctx, opts: &Opts, at: usize) -> AbiRef {
+    let Some(range) = opts.get("abi") else {
+        return AbiRef::Dynamic;
+    };
+    match abi_arg(ctx.source, ctx.view, Some(range)) {
+        AbiArg::Ident(name) if name == "abi" && !bound_in_file(ctx, &name) => {
+            address_hint(ctx, opts).map_or(AbiRef::Dynamic, |scope| AbiRef::Named(scope, None))
+        }
+        arg => abi_ref(ctx, arg, at),
+    }
+}
+
+/// True when a declaration or an import of the file binds `name`.
+fn bound_in_file(ctx: &Ctx, name: &str) -> bool {
+    ctx.decls.iter().any(|d| d.name == name)
+        || ctx.imports.iter().any(|i| i.name == name)
+        || ctx.locals.iter().any(|l| l == name)
+}
+
+/// The scope an options object's `address` identifier hints (step 8): the
+/// identifier, when its name key drops an address suffix (`ESCROW_ADDRESS`,
+/// `escrowAddr`); `None` for any other `address` value.
+fn address_hint(ctx: &Ctx, opts: &Opts) -> Option<Scope> {
+    let range = opts.get("address")?;
+    let AbiArg::Ident(name) = abi_arg(ctx.source, ctx.view, Some(range)) else {
+        return None;
+    };
+    let flat: String = name
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    (evm::name_key(&name) != flat).then_some(Scope::Abi(name))
+}
+
+/// The sites of one viem option call `opts` on `side` (step 8).
+fn option_site(
+    ctx: &Ctx,
+    side: ClientSide,
+    opts: &Opts,
+    sites: &mut Vec<Site>,
+    counts: &mut TsCounts,
+) {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    let key = match side {
+        ClientSide::Call => "functionName",
+        ClientSide::Event => "eventName",
+    };
+    let Some((ns, ne)) = opts.get(key) else {
+        return;
+    };
+    let names = match (side, vb[ns]) {
+        (ClientSide::Event, b'[') => matching(view, ns).and_then(|close| {
+            split_args(view, ns, close)
+                .into_iter()
+                .map(|(s, e)| literal_name(source, view, s, e).map(|n| (n, s)))
+                .collect::<Option<Vec<_>>>()
+        }),
+        _ => literal_name(source, view, ns, ne).map(|n| vec![(n, ns)]),
+    };
+    let Some(names) = names.filter(|n| !n.is_empty()) else {
+        counts.dynamic += 1;
+        return;
+    };
+    let (scope, abi) = match options_abi(ctx, opts, ns) {
+        AbiRef::Named(scope, abi) => (scope, abi),
+        AbiRef::Literal(entries) => {
+            let Some(scope) = address_hint(ctx, opts) else {
+                counts.dynamic += 1;
+                return;
+            };
+            counts.abis += 1;
+            (scope, Some(entries))
+        }
+        AbiRef::Dynamic => {
+            counts.dynamic += 1;
+            return;
+        }
+    };
+    let args = match opts.get("args") {
+        Some((s, _)) if vb[s] == b'[' => matching(view, s)
+            .map(|close| split_args(view, s, close).len())
+            .and_then(|n| u32::try_from(n).ok()),
+        Some(_) => None,
+        None => (!opts.spread).then_some(0),
+    };
+    let binding = Binding {
+        name: String::new(),
+        scope,
+        abi,
+        lib: VIEM,
+        api: Api::Viem,
+        at: ns,
+        block: (0, view.len()),
+        hoisted: false,
+    };
+    for (member, at) in names {
+        let access = match side {
+            ClientSide::Call => Access::Call { member, at, args },
+            ClientSide::Event => Access::Event { event: member, at },
+        };
+        record(sites, counts, &binding, access);
+    }
+}
+
+/// The member a string literal `[s, e)` names (a trailing `as const` kept
+/// out); `None` for anything else.
+fn literal_name(source: &str, view: &str, s: usize, e: usize) -> Option<String> {
+    let (text, end) = string_literal(source, s)?;
+    let rest = view.get(end..e)?.trim();
+    if !(rest.is_empty() || rest.starts_with("as ") || rest.starts_with("satisfies ")) {
+        return None;
+    }
+    signature_key(&text).map(|(name, _)| name)
+}
+
+/// Step 9: every `new <w>(.<x>)*.eth.Contract(<abi>, ..)`.
+fn web3_bindings(
+    ctx: &Ctx,
+    sites: &mut Vec<Site>,
+    counts: &mut TsCounts,
+    bindings: &mut Vec<Binding>,
+) {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    for new_at in word_hits(view, "new") {
+        if new_at > 0 && vb[new_at - 1] == b'.' {
+            continue;
+        }
+        let Some((open, close)) = web3_construction(view, new_at) else {
+            continue;
+        };
+        let first = split_args(view, open, close).first().copied();
+        let made = Made {
+            start: new_at,
+            close,
+            abi: abi_ref(ctx, abi_arg(source, view, first), new_at),
+            lib: WEB3,
+            api: Api::Web3,
+            sync: true,
+        };
+        bind_made(ctx, made, sites, counts, bindings);
+    }
+}
+
+/// `new <w>(.<x>)*.eth.Contract(` at `new_at`: the offsets of its argument
+/// parentheses.
+fn web3_construction(view: &str, new_at: usize) -> Option<(usize, usize)> {
+    let vb = view.as_bytes();
+    let mut path: Vec<&str> = Vec::new();
+    let mut k = skip_ws(vb, new_at + "new".len());
+    loop {
+        let end = ident_end(vb, k)?;
+        path.push(&view[k..end]);
+        let next = skip_ws(vb, end);
+        if vb.get(next) != Some(&b'.') {
+            k = next;
+            break;
+        }
+        k = skip_ws(vb, next + 1);
+    }
+    if path.len() < 3 || path[path.len() - 2..] != ["eth", "Contract"] {
+        return None;
+    }
+    (vb.get(k) == Some(&b'(')).then_some(())?;
+    Some((k, matching(view, k)?))
 }
 
 /// The start of `(<x>.)*<object>.<member>` for the member named at `at`;
@@ -996,8 +1579,10 @@ fn json_imports(source: &str, view: &str, decls: &[Decl]) -> Vec<JsonImport> {
             continue;
         };
         if spec.ends_with(".json") {
-            for name in names {
-                push(&name, &spec);
+            for (imported, local) in names {
+                if matches!(imported.as_deref(), None | Some("abi" | "default")) {
+                    push(&local, &spec);
+                }
             }
         }
     }
@@ -1037,11 +1622,30 @@ fn import_equals(view: &str, at: usize) -> Option<&str> {
     (&view[kw..kw_end] == "import").then_some(&view[a_start..a_end])
 }
 
-/// The names an `import` clause starting at `from` binds that hold a JSON
-/// module's value or its `abi` (a default, a namespace, `{ abi as A }`,
-/// `{ abi }`, `{ default as A }`), and its specifier; `None` for a type-only
-/// import, a dynamic `import(..)` and a side-effect import.
-fn import_clause(source: &str, view: &str, from: usize) -> Option<(Vec<String>, String)> {
+/// Every local name an import clause binds (step 8): any specifier, any
+/// module.
+fn import_locals(source: &str, view: &str) -> Vec<String> {
+    let vb = view.as_bytes();
+    let mut out: Vec<String> = word_hits(view, "import")
+        .into_iter()
+        .filter(|&at| at == 0 || vb[at - 1] != b'.')
+        .filter_map(|at| import_clause(source, view, at + "import".len()))
+        .flat_map(|(names, _)| names.into_iter().map(|(_, local)| local))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The local names of one import clause, each with the export it binds
+/// (`None` for a default or a namespace import: the module's value).
+type ImportNames = Vec<(Option<String>, String)>;
+
+/// The names an `import` clause starting at `from` binds (`{ abi as A }` is
+/// `(Some("abi"), "A")`), and its specifier; `None` for a type-only import,
+/// a dynamic `import(..)` and a side-effect import. A `type` specifier inside
+/// the braces binds no value and is left out.
+fn import_clause(source: &str, view: &str, from: usize) -> Option<(ImportNames, String)> {
     let vb = view.as_bytes();
     let mut k = skip_ws(vb, from);
     let mut names = Vec::new();
@@ -1052,8 +1656,11 @@ fn import_clause(source: &str, view: &str, from: usize) -> Option<(Vec<String>, 
                 for (s, e) in split_args(view, k, close) {
                     let words: Vec<&str> = view[s..e].split_whitespace().collect();
                     match words.as_slice() {
-                        ["abi"] => names.push("abi".to_string()),
-                        ["abi" | "default", "as", alias] => names.push((*alias).to_string()),
+                        ["type", ..] => {}
+                        [name] => names.push((Some((*name).to_string()), (*name).to_string())),
+                        [name, "as", alias] => {
+                            names.push((Some((*name).to_string()), (*alias).to_string()));
+                        }
                         _ => {}
                     }
                 }
@@ -1067,7 +1674,7 @@ fn import_clause(source: &str, view: &str, from: usize) -> Option<(Vec<String>, 
                 }
                 let n = skip_ws(vb, a_end);
                 let n_end = ident_end(vb, n)?;
-                names.push(view[n..n_end].to_string());
+                names.push((None, view[n..n_end].to_string()));
                 k = skip_ws(vb, n_end);
             }
             _ => {
@@ -1075,7 +1682,7 @@ fn import_clause(source: &str, view: &str, from: usize) -> Option<(Vec<String>, 
                 match &view[k..end] {
                     "from" => break,
                     "type" => return None,
-                    name => names.push(name.to_string()),
+                    name => names.push((None, name.to_string())),
                 }
                 k = skip_ws(vb, end);
             }
@@ -1317,6 +1924,129 @@ fn access(source: &str, view: &str, from: usize) -> Option<Access> {
     Some(Access::Other)
 }
 
+/// What follows a receiver of a binding read in `api` (steps 5, 6, 8 and 9);
+/// `None` when no member access follows.
+fn access_on(api: Api, source: &str, view: &str, from: usize) -> Option<Access> {
+    match api {
+        Api::Ethers => access(source, view, from),
+        Api::Viem => viem_access(source, view, from),
+        Api::Web3 => web3_access(source, view, from),
+    }
+}
+
+/// What follows a viem instance (step 8): `.<ns>.<m>(` for a call or event
+/// namespace, anything else no site.
+fn viem_access(source: &str, view: &str, from: usize) -> Option<Access> {
+    let vb = view.as_bytes();
+    let Step::Name {
+        name: ns,
+        end,
+        dotted: true,
+        ..
+    } = step(source, view, from)?
+    else {
+        return Some(Access::Other);
+    };
+    let call = VIEM_CALL_NS.contains(&ns.as_str());
+    if !call && !VIEM_EVENT_NS.contains(&ns.as_str()) {
+        return Some(Access::Other);
+    }
+    Some(match step(source, view, end) {
+        Some(Step::Name { at, name, end, .. }) => match paren_after(vb, end) {
+            Some(paren) if call => Access::Call {
+                member: name,
+                at,
+                args: viem_args(view, paren),
+            },
+            Some(_) => Access::Event { event: name, at },
+            None => Access::Other,
+        },
+        Some(Step::Keyed {
+            literal: false,
+            end,
+        }) if paren_after(vb, end).is_some() => Access::Dynamic,
+        _ => Access::Other,
+    })
+}
+
+/// The ABI argument count of a viem instance call whose `(` is at `paren`
+/// (step 8): the first argument's array length; 0 with no argument or an
+/// options object first; `None` for anything else.
+fn viem_args(view: &str, paren: usize) -> Option<u32> {
+    let vb = view.as_bytes();
+    let close = matching(view, paren)?;
+    let n = match split_args(view, paren, close).first() {
+        None => 0,
+        Some(&(s, _)) => match vb[s] {
+            b'[' => split_args(view, s, matching(view, s)?).len(),
+            b'{' => 0,
+            _ => return None,
+        },
+    };
+    u32::try_from(n).ok()
+}
+
+/// What follows a web3.js contract (step 9): `.methods.<m>(`,
+/// `.events.<E>(`, `.getPastEvents('<E>'` / `.once('<E>'`, anything else no
+/// site.
+fn web3_access(source: &str, view: &str, from: usize) -> Option<Access> {
+    let vb = view.as_bytes();
+    let Step::Name {
+        at: ns_at,
+        name: ns,
+        end,
+        dotted: true,
+        ..
+    } = step(source, view, from)?
+    else {
+        return Some(Access::Other);
+    };
+    let next = step(source, view, end);
+    Some(match ns.as_str() {
+        "methods" => match next {
+            Some(Step::Name {
+                at,
+                name,
+                arity,
+                end,
+                ..
+            }) => match paren_after(vb, end) {
+                Some(paren) => Access::Call {
+                    member: name,
+                    at,
+                    args: arity.or_else(|| arg_count(view, paren)),
+                },
+                None => Access::Other,
+            },
+            Some(Step::Keyed {
+                literal: false,
+                end,
+            }) if paren_after(vb, end).is_some() => Access::Dynamic,
+            _ => Access::Other,
+        },
+        "events" => match next {
+            Some(Step::Name { at, name, end, .. })
+                if name != WEB3_ALL_EVENTS && paren_after(vb, end).is_some() =>
+            {
+                Access::Event { event: name, at }
+            }
+            _ => Access::Other,
+        },
+        m if WEB3_EVENT_MEMBERS.contains(&m) => paren_after(vb, end)
+            .and_then(|paren| literal_event(source, vb, paren))
+            .filter(|event| event != WEB3_ALL_EVENTS)
+            .map_or(Access::Other, |event| Access::Event { event, at: ns_at }),
+        _ => Access::Other,
+    })
+}
+
+/// The depth-0 argument count of the call whose `(` is at `paren`.
+fn arg_count(view: &str, paren: usize) -> Option<u32> {
+    matching(view, paren)
+        .map(|close| split_args(view, paren, close).len())
+        .and_then(|n| u32::try_from(n).ok())
+}
+
 /// A call of `member` (named at `at`) whose final `(` is at `paren`: a site
 /// unless the member is stop-listed. `args` is a signature key's spelled
 /// arity, else the final call's depth-0 argument count.
@@ -1324,11 +2054,7 @@ fn call(view: &str, at: usize, member: String, arity: Option<u32>, paren: usize)
     if ETHERS_MEMBERS.contains(&member.as_str()) {
         return Access::Other;
     }
-    let args = arity.or_else(|| {
-        matching(view, paren)
-            .map(|close| split_args(view, paren, close).len())
-            .and_then(|n| u32::try_from(n).ok())
-    });
+    let args = arity.or_else(|| arg_count(view, paren));
     Access::Call { member, at, args }
 }
 
@@ -1513,8 +2239,9 @@ fn class_body(view: &str, at: usize) -> Option<(usize, usize)> {
     }
 }
 
-/// Rebindings `<y> = R.connect(..)` / `R.attach(..)` on a bound receiver
-/// (step 3), followed until no new one binds (`y` may itself be rebound).
+/// Rebindings `<y> = R.connect(..)` / `R.attach(..)` on a bound ethers
+/// receiver (step 3), followed until no new one binds (`y` may itself be
+/// rebound).
 fn rebind(source: &str, view: &str, decls: &[Decl], bindings: &mut Vec<Binding>) {
     let mut rebound: BTreeSet<usize> = BTreeSet::new();
     loop {
@@ -1528,7 +2255,9 @@ fn rebind(source: &str, view: &str, decls: &[Decl], bindings: &mut Vec<Binding>)
                 if tail == end || step(source, view, tail).is_some() {
                     continue;
                 }
-                let Some(from) = visible(bindings, &receiver, start) else {
+                let Some(from) =
+                    visible(bindings, &receiver, start).filter(|b| b.api == Api::Ethers)
+                else {
                     continue;
                 };
                 let Some(target) = binding_target(view, decls, start) else {
@@ -1540,6 +2269,7 @@ fn rebind(source: &str, view: &str, decls: &[Decl], bindings: &mut Vec<Binding>)
                     scope: from.scope.clone(),
                     abi: from.abi.clone(),
                     lib: from.lib,
+                    api: from.api,
                     at: tail - 1,
                     block: target.block,
                     hoisted: target.hoisted,
@@ -2504,12 +3234,16 @@ const loose = ethers.deployContract('Token').mint(1);
         let (rows, counts) = read(src);
         assert_eq!(
             rows,
-            ["call Token.mint args=2 abi=- line=10"],
+            [
+                "call Token.mint args=2 abi=- line=10",
+                "call Token.mint args=2 abi=- line=17"
+            ],
             "ethers runtime members are no site; viem's deployContract is no hardhat-ethers \
-             helper; a member call on the promise is not read"
+             helper but hardhat-viem's (DT.10j), read in viem; a member call on the promise \
+             is not read"
         );
         assert_eq!(counts, TsCounts::default());
-        assert_eq!(libs(src), ["Token.mint hardhat"]);
+        assert_eq!(libs(src), ["Token.mint hardhat", "Token.mint viem"]);
     }
 
     #[test]
@@ -2812,6 +3546,487 @@ async function main() {
                 vec![2],
                 Some(vec!["f:balanceOf/1", "f:mint/2"])
             )]
+        );
+    }
+    #[test]
+    fn viem_write_read_simulate_with_function_name_and_args() {
+        let src = "import { parseAbi } from 'viem';
+import { readContract } from 'viem/actions';
+const escrowAbi = parseAbi([
+  'function deposit(bytes32 orderId) payable',
+  'function release(bytes32 orderId)',
+  'function deposits(bytes32) view returns (uint256)',
+  'function sweep()',
+]);
+export async function run(client: any, wallet: any, address: `0x${string}`, id: `0x${string}`, args: any) {
+  await wallet.writeContract({ address, abi: escrowAbi, functionName: 'deposit', args: [id], value: 1n });
+  await readContract(client, { address, abi: escrowAbi, functionName: 'deposits', args: [id] });
+  const { request } = await client.simulateContract<typeof escrowAbi, 'release'>({
+    address,
+    abi: escrowAbi as Abi,
+    functionName: 'release' as const,
+    args: [id] as const,
+  });
+  await wallet.writeContract(request);
+  await client.estimateContractGas({ address, abi: escrowAbi, functionName: 'sweep' });
+  await client.readContract({ address, abi: escrowAbi, functionName: 'withdraw', args: [id] });
+  await client.readContract({ address, abi: escrowAbi, functionName: 'deposits', args });
+  const c = new Contract(address, escrowAbi, wallet);
+  await c.release(id);
+}
+";
+        let (rows, counts) = read(src);
+        let abi = "abi=f:deposit/1,f:deposits/1,f:release/1,f:sweep/0";
+        assert_eq!(
+            rows,
+            [
+                format!("call abi:escrowAbi.deposit args=1 {abi} line=10"),
+                format!("call abi:escrowAbi.deposits args=1 {abi} line=11"),
+                format!("call abi:escrowAbi.release args=1 {abi} line=15"),
+                format!("call abi:escrowAbi.sweep args=0 {abi} line=19"),
+                format!("call abi:escrowAbi.deposits args=- {abi} line=21"),
+            ],
+            "every option-call shape; a type argument list, `as` casts and an absent `args` \
+             (0) read; a request object names nothing; a viem-only file reads no `new Contract`"
+        );
+        assert_eq!(
+            counts,
+            TsCounts {
+                abis: 1,
+                not_in_abi: 1,
+                dynamic: 0
+            },
+            "parseAbi binds the ABI; withdraw is not in it"
+        );
+        assert!(libs(src).iter().all(|l| l.ends_with(" viem")));
+    }
+
+    #[test]
+    fn viem_multicall_contracts_each() {
+        let src = "import { multicall } from 'viem/actions';
+import { useReadContracts } from 'wagmi';
+import { escrowAbi } from './abis';
+const vaultAbi = [
+  { type: 'function', name: 'balance', inputs: [{ name: 'who', type: 'address' }] },
+  { type: 'function', name: 'total', inputs: [] },
+] as const;
+export async function totals(client: any, escrow: `0x${string}`, vault: `0x${string}`, id: string) {
+  return multicall(client, {
+    contracts: [
+      { address: escrow, abi: escrowAbi, functionName: 'deposits', args: [id] },
+      { address: vault, abi: vaultAbi, functionName: 'balance', args: [escrow] },
+      { address: vault, abi: vaultAbi, functionName: 'total' },
+      someCall,
+    ],
+    allowFailure: false,
+  });
+}
+export function useTotals(vault: `0x${string}`) {
+  return useReadContracts({ contracts: [{ address: vault, abi: vaultAbi, functionName: 'total' }, { ...vaultContract, functionName: 'total' }] });
+}
+export const loose = (client: any, calls: any[]) => multicall(client, { contracts: calls });
+";
+        let (rows, counts) = read(src);
+        let vault = "abi=f:balance/1,f:total/0";
+        assert_eq!(
+            rows,
+            [
+                "call abi:escrowAbi.deposits args=1 abi=- line=11".to_string(),
+                format!("call abi:vaultAbi.balance args=1 {vault} line=12"),
+                format!("call abi:vaultAbi.total args=0 {vault} line=13"),
+                format!("call abi:vaultAbi.total args=0 {vault} line=20"),
+            ],
+            "each object element of `contracts` is one call; an imported ABI has no entries"
+        );
+        assert_eq!(
+            counts,
+            TsCounts {
+                abis: 1,
+                not_in_abi: 0,
+                dynamic: 3
+            },
+            "an element that is no object, a spread with no abi, a `contracts` that is no literal"
+        );
+    }
+
+    #[test]
+    fn viem_get_contract_read_write_watch_event() {
+        let src = "import { getContract, parseAbi } from 'viem';
+const escrowAbi = parseAbi([
+  'function deposit(bytes32 orderId) payable',
+  'function release(bytes32 orderId)',
+  'function deposits(bytes32) view returns (uint256)',
+  'event Released(bytes32 indexed orderId, address seller)',
+]);
+export class EscrowClient {
+  private contract = getContract({ address: ESCROW_ADDRESS, abi: escrowAbi, client: { public: pub, wallet } });
+  async pay(id: `0x${string}`) {
+    await this.contract.write.deposit([id], { value: 1n });
+    await this.contract.simulate.release([id]);
+    await this.contract.estimateGas.release([id], { account });
+    this.contract.watchEvent.Released({ orderId: id }, { onLogs: () => {} });
+    await this.contract.getEvents.Released();
+    console.log(this.contract.address, this.contract.abi);
+    await this.contract.read.withdraw();
+    await this.contract.read();
+    await this.contract.write.deposit({ value: 1n });
+  }
+}
+export const held = (id: `0x${string}`) =>
+  getContract({ address: ESCROW_ADDRESS, abi: escrowAbi, client }).read.deposits([id]);
+const inline = getContract({ address: a, abi: parseAbi(['function ping()']), client });
+inline.write.ping();
+const lost = getContract({ address: a, abi: loadAbi(), client });
+lost.read.deposits([id]);
+";
+        let (rows, counts) = read(src);
+        let abi = "abi=f:deposit/1,f:deposits/1,f:release/1,e:Released/2";
+        assert_eq!(
+            rows,
+            [
+                format!("call abi:escrowAbi.deposit args=1 {abi} line=11"),
+                format!("call abi:escrowAbi.release args=1 {abi} line=12"),
+                format!("call abi:escrowAbi.release args=1 {abi} line=13"),
+                format!("event abi:escrowAbi.Released args=- {abi} line=14"),
+                format!("event abi:escrowAbi.Released args=- {abi} line=15"),
+                format!("call abi:escrowAbi.deposit args=0 {abi} line=19"),
+                format!("call abi:escrowAbi.deposits args=1 {abi} line=23"),
+                "call abi:inline.ping args=0 abi=f:ping/0 line=25".to_string(),
+            ],
+            "a class field instance, a chained instance and an inline-ABI instance; no \
+             namespace is a member"
+        );
+        assert_eq!(
+            counts,
+            TsCounts {
+                abis: 2,
+                not_in_abi: 1,
+                dynamic: 1
+            },
+            "parseAbi bound and inline; withdraw is not in the ABI; loadAbi() is dynamic"
+        );
+    }
+
+    #[test]
+    fn hardhat_viem_deploy_contract_names_the_contract() {
+        let src = "import hre from 'hardhat';
+import { viem } from 'hardhat';
+describe('Escrow', () => {
+  let escrow;
+  beforeEach(async () => {
+    escrow = await hre.viem.deployContract('Escrow', [owner]);
+  });
+  it('deposits', async () => {
+    await escrow.write.deposit([id], { value: 1n });
+    expect(await escrow.read.deposits([id])).to.equal(1n);
+  });
+});
+async function attach(addr: `0x${string}`) {
+  const at = await viem.getContractAt('contracts/Vault.sol:Vault', addr);
+  await at.write.release([id]);
+  const viaEthers = await hre.ethers.getContractAt('Vault', addr);
+  await viaEthers.release(id);
+  const nope = await hre.viem.getContractAt(addr);
+  nope.write.release([id]);
+  const client = await hre.viem.getPublicClient();
+  await client.readContract({ address: addr, abi: vaultAbi, functionName: 'total' });
+}
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call Escrow.deposit args=1 abi=- line=9",
+                "call Escrow.deposits args=1 abi=- line=10",
+                "call Vault.release args=1 abi=- line=15",
+                "call Vault.release args=1 abi=- line=17",
+                "call abi:vaultAbi.total args=0 abi=- line=21",
+            ],
+            "deployContract / getContractAt on (hre.)viem name the contract; a hardhat \
+             import opens both readers; a getContractAt with no name binds nothing"
+        );
+        assert_eq!(counts, TsCounts::default());
+        assert_eq!(
+            libs(src),
+            [
+                "Escrow.deposit viem",
+                "Escrow.deposits viem",
+                "Vault.release viem",
+                "Vault.release hardhat",
+                "abi:vaultAbi.total viem",
+            ]
+        );
+    }
+
+    #[test]
+    fn wagmi_use_read_contract_and_use_watch_contract_event() {
+        let src = "import { useReadContract, useWatchContractEvent, useWriteContract, useSimulateContract, useContractEvent } from 'wagmi';
+import { parseEventLogs } from 'viem';
+import { escrowAbi } from '../generated';
+export function Held({ id }: { id: `0x${string}` }) {
+  const { data } = useReadContract({ address: ESCROW_ADDRESS, abi: escrowAbi, functionName: 'deposits', args: [id] });
+  useWatchContractEvent({
+    address: ESCROW_ADDRESS,
+    abi: escrowAbi,
+    eventName: 'Released',
+    onLogs(logs) { console.log(logs); },
+  });
+  useWatchContractEvent({ address: ESCROW_ADDRESS, abi: escrowAbi, onLogs });
+  const { writeContract } = useWriteContract();
+  const release = () => writeContract({ address: ESCROW_ADDRESS, abi: escrowAbi, functionName: 'release', args: [id] });
+  const { data: sim } = useSimulateContract({ address: ESCROW_ADDRESS, abi: escrowAbi, functionName: 'release', args: [id] });
+  useContractEvent({ address: ESCROW_ADDRESS, abi: escrowAbi, eventName: 'Funded', listener });
+  const logs = parseEventLogs({ abi: escrowAbi, eventName: ['Released', 'Funded'], logs: raw });
+  return <button onClick={release}>{String(data)}</button>;
+}
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call abi:escrowAbi.deposits args=1 abi=- line=5",
+                "event abi:escrowAbi.Released args=- abi=- line=9",
+                "call abi:escrowAbi.release args=1 abi=- line=14",
+                "call abi:escrowAbi.release args=1 abi=- line=15",
+                "event abi:escrowAbi.Funded args=- abi=- line=16",
+                "event abi:escrowAbi.Released args=- abi=- line=17",
+                "event abi:escrowAbi.Funded args=- abi=- line=17",
+            ],
+            "wagmi hooks read like viem actions; a watch with no eventName names nothing; \
+             parseEventLogs reads each name of its array"
+        );
+        assert_eq!(counts, TsCounts::default());
+    }
+
+    #[test]
+    fn web3_methods_and_events() {
+        let src = "const Web3 = require('web3');
+const ESCROW_JSON = [
+  { type: 'function', name: 'release', inputs: [{ name: 'orderId', type: 'bytes32' }] },
+  { type: 'function', name: 'connect', inputs: [] },
+  { type: 'event', name: 'Released', inputs: [{ name: 'orderId', type: 'bytes32', indexed: true }] },
+];
+async function run(web3, address, id, from) {
+  const escrow = new web3.eth.Contract(ESCROW_JSON, address);
+  await escrow.methods.release(id).send({ from });
+  await escrow.methods['release(bytes32)'](id).call();
+  await escrow.methods.connect().call();
+  await escrow.methods.withdraw(id).estimateGas();
+  escrow.events.Released({ filter: { orderId: id } }, cb);
+  escrow.events.allEvents({}, cb);
+  await escrow.getPastEvents('Released', { fromBlock: 0 });
+  escrow.once('Released', cb);
+  escrow.getPastEvents('allEvents');
+  console.log(escrow.options.address);
+  await new web3.eth.Contract(ESCROW_JSON, address).methods.release(id).call();
+  const token = new this.web3.eth.Contract(TOKEN_ABI);
+  token.methods.transfer(a, 1).send();
+  const bad = new web3.eth.Contract(loadAbi(), address);
+  bad.methods.release(id);
+  const viaEthers = new Contract(address, ESCROW_JSON, signer);
+  viaEthers.release(id);
+}
+";
+        let (rows, counts) = read(src);
+        let abi = "abi=f:connect/0,f:release/1,e:Released/1";
+        assert_eq!(
+            rows,
+            [
+                format!("call abi:ESCROW_JSON.release args=1 {abi} line=9"),
+                format!("call abi:ESCROW_JSON.release args=1 {abi} line=10"),
+                format!("call abi:ESCROW_JSON.connect args=0 {abi} line=11"),
+                format!("event abi:ESCROW_JSON.Released args=- {abi} line=13"),
+                format!("event abi:ESCROW_JSON.Released args=- {abi} line=15"),
+                format!("event abi:ESCROW_JSON.Released args=- {abi} line=16"),
+                format!("call abi:ESCROW_JSON.release args=1 {abi} line=19"),
+                "call abi:TOKEN_ABI.transfer args=2 abi=- line=21".to_string(),
+            ],
+            "methods / events / getPastEvents / once; send / call / estimateGas are no \
+             member; no ethers stop list; a web3-only file reads no `new Contract`"
+        );
+        assert_eq!(
+            counts,
+            TsCounts {
+                abis: 1,
+                not_in_abi: 1,
+                dynamic: 1
+            },
+            "the object-literal ABI; withdraw is not in it; loadAbi() is dynamic"
+        );
+        assert!(libs(src).iter().all(|l| l.ends_with(" web3")));
+        let ungated = "async function run(web3, a) {\n  const e = new web3.eth.Contract(ABI, a);\n  e.methods.release(1).send();\n}\n";
+        assert_eq!(
+            read(ungated),
+            (Vec::new(), TsCounts::default()),
+            "no web3 import"
+        );
+    }
+
+    #[test]
+    fn dynamic_function_name_counts_dynamic() {
+        let src = "import { readContract } from '@wagmi/core';
+import { parseEventLogs } from 'viem';
+import { escrowAbi } from './abi';
+export async function call(config: Config, fn: string, events: string[], opts: any) {
+  await readContract(config, { address: ESCROW_ADDRESS, abi: escrowAbi, functionName: fn, args: [] });
+  await readContract(config, { address: ESCROW_ADDRESS, abi: escrowAbi, functionName: `deposits`, args: [] });
+  await readContract(config, { address: ESCROW_ADDRESS, abi: loadAbi(), functionName: 'deposits' });
+  await readContract(config, { address: ESCROW_ADDRESS, abi: escrowAbi, functionName: `get${name}` });
+  await readContract(config, { ...base, functionName: 'deposits' });
+  await readContract(config, opts);
+  parseEventLogs({ abi: escrowAbi, eventName: events, logs });
+  parseEventLogs({ abi: escrowAbi, logs });
+}
+class Reader {
+  readContract({ abi, functionName }: Opts) { return functionName; }
+  simulateContract({ abi, functionName }: Opts): Promise<Result> { return run(abi, functionName); }
+}
+function writeContract({ abi, functionName }: Opts) { return functionName; }
+";
+        let (rows, counts) = read(src);
+        assert_eq!(rows, ["call abi:escrowAbi.deposits args=0 abi=- line=6"]);
+        assert_eq!(
+            counts,
+            TsCounts {
+                abis: 0,
+                not_in_abi: 0,
+                dynamic: 5
+            },
+            "a variable name, an unreadable ABI, a template with ${{..}}, a spread with no \
+             abi and an eventName variable; options in a variable and definitions are no call"
+        );
+    }
+
+    #[test]
+    fn shorthand_abi_falls_back_to_the_address_hint() {
+        let src = "import { readContract, writeContract } from 'viem/actions';
+export async function viaParams(client: any, abi: Abi, id: string, address: `0x${string}`) {
+  await readContract(client, { address: ESCROW_ADDRESS, abi, functionName: 'deposits', args: [id] });
+  await writeContract(client, { address: escrowAddr as `0x${string}`, abi: abi, functionName: 'release', args: [id] });
+  await readContract(client, { address, abi, functionName: 'deposits', args: [id] });
+  await readContract(client, { address: VAULT_ADDRESS, abi: ['function ping()'], functionName: 'ping' });
+  await readContract(client, { address: '0x01', abi: parseAbi(['function ping()']), functionName: 'ping' });
+  await readContract(client, { address: config.escrow, abi, functionName: 'deposits' });
+}
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call abi:ESCROW_ADDRESS.deposits args=1 abi=- line=3",
+                "call abi:escrowAddr.release args=1 abi=- line=4",
+                "call abi:VAULT_ADDRESS.ping args=0 abi=f:ping/0 line=6",
+            ],
+            "an `abi` the file binds nowhere, or an inline ABI, scopes by the address \
+             identifier when it names a contract"
+        );
+        assert_eq!(
+            counts,
+            TsCounts {
+                abis: 1,
+                not_in_abi: 0,
+                dynamic: 3
+            },
+            "a bare `address`, a literal address and a member path name nothing"
+        );
+        let bound = "import { readContract } from 'viem/actions';
+import { abi } from './generated/Escrow';
+readContract(client, { address: ESCROW_ADDRESS, abi, functionName: 'release', args: [id] });
+";
+        assert_eq!(
+            read(bound).0,
+            ["call abi:abi.release args=1 abi=- line=3"],
+            "an imported `abi` is the binding, not the hint"
+        );
+        let local = "import { parseAbi, readContract } from 'viem';
+const abi = parseAbi(['function release(bytes32)']);
+readContract(client, { address: ESCROW_ADDRESS, abi, functionName: 'release', args: [id] });
+";
+        assert_eq!(
+            read(local).0,
+            ["call abi:abi.release args=1 abi=f:release/1 line=3"]
+        );
+    }
+
+    #[test]
+    fn fixture_files_read_viem_wagmi_and_web3() {
+        // bench/substrate-gap/fixtures/ts-viem-web3-contract-calls/.
+        let fx = |path: &str| -> (String, Vec<String>) {
+            let root = concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../bench/substrate-gap/fixtures/ts-viem-web3-contract-calls/"
+            );
+            let src = std::fs::read_to_string(format!("{root}{path}")).expect("fixture file");
+            let out = crate::evm::extract_evm_clients(
+                &src,
+                "typescript",
+                glia_core::NodeId(1),
+                glia_core::RepoId(1),
+            );
+            let short = path.split_once('/').map_or(path, |(_, rest)| rest);
+            let mut lines = out.markers(short);
+            let mut q: Vec<String> = out.nav.qname_by_id.values().cloned().collect();
+            q.sort_unstable();
+            lines.extend(q);
+            (src, lines)
+        };
+        let line = |c: &str, l: &str, a: usize, p: &str| {
+            format!(
+                "[evm-client] lang=ts {c} (ethers=0 hardhat=0 typechain=0 {l} geth=0) abis={a} \
+                 not_in_abi=0 dynamic=0 path={p}"
+            )
+        };
+        assert_eq!(
+            fx("contracts/test/Escrow.viem.ts").1,
+            [
+                line(
+                    "calls=2 events=0 sites=2",
+                    "viem=2 web3=0",
+                    0,
+                    "test/Escrow.viem.ts"
+                ),
+                "evm_call:Escrow.deposit".to_string(),
+                "evm_call:Escrow.release".to_string(),
+            ]
+        );
+        assert_eq!(
+            fx("dapp/src/escrow.ts").1,
+            [
+                line(
+                    "calls=2 events=1 sites=4",
+                    "viem=4 web3=0",
+                    1,
+                    "src/escrow.ts"
+                ),
+                "evm_call:abi:escrowAbi.deposits".to_string(),
+                "evm_call:abi:escrowAbi.release".to_string(),
+                "evm_event:abi:escrowAbi.Released".to_string(),
+            ]
+        );
+        assert_eq!(
+            fx("dapp/src/legacy.js").1,
+            [
+                line(
+                    "calls=1 events=1 sites=2",
+                    "viem=0 web3=2",
+                    1,
+                    "src/legacy.js"
+                ),
+                "evm_call:abi:ESCROW_JSON.release".to_string(),
+                "evm_event:abi:ESCROW_JSON.Released".to_string(),
+            ]
+        );
+        assert_eq!(
+            fx("dapp/src/vault.ts").1,
+            [
+                line(
+                    "calls=1 events=0 sites=1",
+                    "viem=1 web3=0",
+                    1,
+                    "src/vault.ts"
+                ),
+                "evm_call:abi:vaultAbi.withdraw".to_string(),
+            ]
         );
     }
 }
