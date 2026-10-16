@@ -1,0 +1,144 @@
+{
+  "framework": "evm-shop-stack",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "DT.10h: examples-glia's Contract rows plus the Kina wallet / indexer / signer shapes in one repo. HEAD 7661c035: no RPC_PROCEDURE / RPC_CALL / EVENT_HANDLER.",
+  "expect_nodes": [
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "evm:Escrow.deposit",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_ABI.deposit",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:WALLET_ESCROW_ABI.confirm",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:recv:escrow.release",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:shopEscrowABI.confirm",
+      "exact": true
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "evm_event:abi:escrowABI.Deposited",
+      "exact": true
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "evm_event:abi:escrowABI.Released",
+      "exact": true
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "web::src::app::core::chain::escrow::payIntoEscrow",
+      "to": "evm_call:abi:ESCROW_ABI.deposit",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:ESCROW_ABI.deposit",
+      "to": "evm:Escrow.deposit",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm:Escrow.deposit",
+      "to": "contracts::contracts::Escrow::Escrow::deposit",
+      "category": "HANDLED_BY",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:WALLET_ESCROW_ABI.confirm",
+      "to": "evm:Escrow.confirm",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "api::internal::chain::escrow::Settler::Release",
+      "to": "evm_call:recv:escrow.release",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "evm_call:recv:escrow.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "api::internal::signer::signer::Signer::Confirm",
+      "to": "evm_call:abi:shopEscrowABI.confirm",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:shopEscrowABI.confirm",
+      "to": "evm:Escrow.confirm",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "contracts::contracts::Escrow::Escrow::Released",
+      "to": "evm_event:abi:escrowABI.Released",
+      "category": "EVENT_FLOWS",
+      "exact": true
+    },
+    {
+      "from": "contracts::contracts::Escrow::Escrow::Deposited",
+      "to": "evm_event:abi:escrowABI.Deposited",
+      "category": "EVENT_FLOWS",
+      "exact": true
+    },
+    {
+      "from": "evm_event:abi:escrowABI.Released",
+      "to": "api::internal::indexer::indexer::Indexer::Handle",
+      "category": "HANDLED_BY",
+      "exact": true
+    }
+  ],
+  "forbid": [
+    {
+      "from": "evm_call:recv:escrow.release",
+      "to": "evm:Vault.release",
+      "category": "RPC_CALLS"
+    },
+    {
+      "from": "contracts::contracts::Vault::Vault::Released",
+      "to": "evm_event:abi:escrowABI.Released",
+      "category": "EVENT_FLOWS"
+    },
+    {
+      "from": "evm_call:abi:ERC20_ABI.approve",
+      "to": "evm:Vault.approve",
+      "category": "RPC_CALLS",
+      "note": "PRECISION: Vault has approve but not balanceOf; a name-only rule would pair it"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:ESCROW_ABI.release",
+      "note": "in the web ABI, never called (examples-glia)"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:recv:rpc.BalanceAt"
+    },
+    {
+      "kind": "RPC_CALL",
+      "max_nodes": 5
+    }
+  ]
+}
