@@ -2,7 +2,8 @@
 """pyo3 surface, py/src/traversal.rs (LD.3c): `neighbours` with a direction
 and a category filter, and the walks `bfs`, `predecessors`, `reachable_by`,
 `shortest_path` over the merged graph. Rows are tuples of ints; `categories=None`
-keeps every category (DEFINES included). Shared helpers: test_build.py.
+keeps every category (DEFINES included), and a `categories` list takes ids or
+registry names, mixed (DT.9). Shared helpers: test_build.py.
 
 Over LD.1's 9-line app: `app` DEFINES `helper` and `main`, `main` CALLS
 `helper`. The repo dir is `ld2app` so the ids are the deterministic ones
@@ -112,6 +113,65 @@ def main() -> int:
                 call("shortest_path", main_, main_) == [(main_, None)], call("shortest_path", main_, main_))
         c.raises("shortest_path categories=[999]", ValueError,
                  lambda: g.shortest_path(helper, main_, "both", [999]), "999")
+
+        # DT.9: `categories` also takes registry names (ASCII case-insensitive,
+        # trimmed), mixed freely with ids; rows still carry ids.
+        by_id = call("neighbours", helper, "in", [calls])
+        for form in (["CALLS"], ["calls"], [" Calls "], ["calls", calls]):
+            got = call("neighbours", helper, "in", form)
+            c.check(f"neighbours(helper, 'in', {form!r}) equals the [CALLS id] call",
+                    got == [(main_, calls, "in")] and got == by_id, got)
+        mixed = call("neighbours", helper, "in", ["DEFINES", calls])
+        c.check("neighbours(helper, 'in', ['DEFINES', <CALLS id>]) equals the id call",
+                mixed == [(app, defines, "in"), (main_, calls, "in")]
+                and mixed == call("neighbours", helper, "in", [defines, calls]), mixed)
+
+        named, err_named = stderr_of(lambda: call("bfs", main_, "out", ["CALLS"]))
+        ided, err_ided = stderr_of(lambda: call("bfs", main_, "out", [calls]))
+        c.check("bfs(main, 'out', ['CALLS']) reaches helper at depth 1 via CALLS",
+                named == [(helper, 1, calls, main_)] and named == ided, named)
+        lines = [[ln for ln in e.splitlines() if ln.startswith("[traverse] op=bfs ")]
+                 for e in (err_named, err_ided)]
+        c.check("bfs marker with names equals the marker with ids",
+                lines[0] == lines[1] and len(lines[0]) == 1
+                and lines[0][0].startswith("[traverse] op=bfs walk=Forward seeds=1 reached=1 "), lines)
+        got = call("bfs", helper, "in", ["defines", "CALLS"])
+        c.check("bfs(helper, 'in', ['defines', 'CALLS']) equals the id call",
+                got == call("bfs", helper, "in", [defines, calls]) and len(got) == 2, got)
+
+        got = call("predecessors", helper, ["CALLS"])
+        c.check("predecessors(helper, ['CALLS']) equals the id call",
+                got == [main_] and got == call("predecessors", helper, [calls]), got)
+        got = call("reachable_by", helper, [main_, app], ["calls"])
+        c.check("reachable_by(helper, [main, app], ['calls']) equals the id call",
+                got == [main_] and got == call("reachable_by", helper, [main_, app], [calls]), got)
+        got = call("shortest_path", helper, main_, "both", ["CALLS"])
+        c.check("shortest_path(helper, main, 'both', ['CALLS']) equals the id call",
+                got == [(helper, None), (main_, calls)]
+                and got == call("shortest_path", helper, main_, "both", [calls]), got)
+        c.check("shortest_path(app, main, 'both', ['CALLS']) is None (DEFINES not followed)",
+                call("shortest_path", app, main_, "both", ["CALLS"]) is None,
+                call("shortest_path", app, main_, "both", ["CALLS"]))
+
+        c.raises("neighbours categories=['NOPE']", ValueError,
+                 lambda: g.neighbours(helper, "in", ["NOPE"]), "'NOPE'")
+        c.raises("bfs categories=['calls', 'NOPE']", ValueError,
+                 lambda: g.bfs(main_, "out", ["calls", "NOPE"]), "'NOPE'")
+        c.raises("predecessors categories=['NOPE']", ValueError,
+                 lambda: g.predecessors(helper, ["NOPE"]), "'NOPE'")
+        c.raises("reachable_by categories=['NOPE']", ValueError,
+                 lambda: g.reachable_by(helper, [main_], ["NOPE"]), "'NOPE'")
+        c.raises("shortest_path categories=['NOPE']", ValueError,
+                 lambda: g.shortest_path(helper, main_, "both", ["NOPE"]), "'NOPE'")
+        c.raises("categories='CALLS' (a bare str, not a list) is refused", TypeError,
+                 lambda: g.neighbours(helper, "in", "CALLS"))
+        # A non-str entry still takes the int extraction it took before names.
+        c.raises("categories=[-1] stays an OverflowError", OverflowError,
+                 lambda: g.neighbours(helper, "in", [-1]))
+        c.raises("categories=[2**40] stays an OverflowError", OverflowError,
+                 lambda: g.neighbours(helper, "in", [2**40]))
+        c.raises("categories=[1.5] stays a TypeError", TypeError,
+                 lambda: g.neighbours(helper, "in", [1.5]), "cannot be interpreted as an integer")
     return c.done()
 
 
