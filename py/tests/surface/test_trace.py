@@ -6,7 +6,9 @@ tree the pre-0.5.0 call returned as a bare list. LD.6: every hop carries a
 bool `to_live`. An unknown feature is an absence, never a ValueError. LD.4b:
 `entry_flows` returns every entry point's forward flow as a list of dicts, and
 a feature word naming a dead end or nothing yields to the entry flow its key
-names (`resolved_by == "entry_flow"`). Shared helpers: test_build.py."""
+names (`resolved_by == "entry_flow"`). DD.11: both take `collapse=True` last
+(identity classes walk as one node; a hop into a class carries `to_identity`,
+absent on the single-repo fixture here). Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import sys
@@ -25,9 +27,9 @@ def main() -> int:
     c = Checks("trace")
     c.check("cross_stack_trace signature",
             params(rg.PyGraph.cross_stack_trace)
-            == [("feature", None), ("depth", 6), ("to", None), ("max_paths", 10)],
+            == [("feature", None), ("depth", 6), ("to", None), ("max_paths", 10), ("collapse", True)],
             params(rg.PyGraph.cross_stack_trace))
-    c.check("entry_flows signature", params(rg.PyGraph.entry_flows) == [("depth", 6)],
+    c.check("entry_flows signature", params(rg.PyGraph.entry_flows) == [("depth", 6), ("collapse", True)],
             params(rg.PyGraph.entry_flows))
     with tempfile.TemporaryDirectory(prefix="glia-surface-trace-") as tmp:
         g = rg.generate(fixture_repo(tmp))

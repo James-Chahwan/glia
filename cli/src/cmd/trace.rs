@@ -1,8 +1,17 @@
 //! `glia trace` (P3 cross_stack_trace, LD.4a) — follow <feature> forward
 //! across service boundaries and print the ranked distinct paths it takes,
 //! each hop with its mechanism; `--to` asks for the paths between two nodes.
+//!
+//! DD.11: the walk crosses identity classes. A walk class (one message,
+//! contract op or SCIP symbol, or a package and its project, in several
+//! places) is one node of every path, shown as its display member; a hop into
+//! a FACT / DERIVED class appends `(also in: <repo> <file>:<line>, ...)` to its
+//! location cell (`; diverged` when the members' contents differ) and
+//! `--json` carries the hop's `to_identity`. `--no-collapse` is the
+//! per-member walk.
 
-use glia_engine::trace::{TraceAnswer, TraceOptions, cross_stack_trace};
+use glia_engine::identity::{Collapse, RowIdentity};
+use glia_engine::trace::{TraceAnswer, TraceHop, TraceOptions, cross_stack_trace};
 
 use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::generate_for;
@@ -27,6 +36,12 @@ pub(crate) struct Args {
     /// Keep the first N ranked paths (0 keeps every one).
     #[arg(long, default_value_t = 10)]
     max_paths: usize,
+    /// Walk every member of an identity class on its own. By default a
+    /// message, contract op or SCIP symbol found in several places (a walk
+    /// class) is one node of every path, so a path reaching one copy goes on
+    /// through every copy's successors.
+    #[arg(long)]
+    no_collapse: bool,
     /// Emit JSON instead of a table.
     #[arg(long)]
     json: bool,
@@ -44,6 +59,11 @@ pub(crate) fn run(args: Args) -> i32 {
     opts.depth = args.depth;
     opts.to = args.to.clone();
     opts.max_paths = args.max_paths;
+    opts.collapse = if args.no_collapse {
+        Collapse::off()
+    } else {
+        Collapse::with_labels(&result.repo_labels)
+    };
     let answer = cross_stack_trace(&result.merged, &args.feature, &opts);
     if args.json {
         println!("{}", serde_json::to_string(&answer).unwrap_or_default());
@@ -89,11 +109,7 @@ fn render(args: &Args, answer: &TraceAnswer) {
         println!("| depth | mechanism | xsvc | from | → to | live | location |");
         println!("|--:|---|:-:|---|---|:-:|---|");
         for h in &p.hops {
-            let loc = match (&h.to_file, h.to_line) {
-                (Some(f), Some(l)) => format!("{f}:{l}"),
-                (Some(f), None) => f.clone(),
-                _ => "—".to_string(),
-            };
+            let loc = location_cell(h);
             let xsvc = if h.cross_service { "✔" } else { "" };
             println!(
                 "| {} | {} | {} | `{}` | `{}` ({}) | {} | {} |",
@@ -115,4 +131,41 @@ fn render(args: &Args, answer: &TraceAnswer) {
             glia_engine::trace::EXPANSION_BUDGET
         );
     }
+}
+
+/// `file:line`, `file` or `None`.
+fn place(file: Option<&str>, line: Option<i64>) -> Option<String> {
+    match (file, line) {
+        (Some(f), Some(l)) => Some(format!("{f}:{l}")),
+        (Some(f), None) => Some(f.to_string()),
+        _ => None,
+    }
+}
+
+/// A hop's location cell: its destination's place (`—` without one), then,
+/// for a hop into an identity class, `(also in: ...; diverged)` - the
+/// `glia blast-radius` cell (DD.10).
+fn location_cell(h: &TraceHop) -> String {
+    let at = place(h.to_file.as_deref(), h.to_line).unwrap_or_else(|| "—".to_string());
+    match &h.to_identity {
+        Some(id) => format!("{at} {}", also_in(id, &h.to_qname)),
+        None => at,
+    }
+}
+
+/// `(also in: ...; diverged)`. An unlocated member is its repo, and its
+/// qname when that differs from the hop's (a PACKAGE_DEP class shares one
+/// qname, so its repo is what tells the members apart).
+fn also_in(id: &RowIdentity, qname: &str) -> String {
+    let others: Vec<String> = id
+        .also_in
+        .iter()
+        .map(|m| match place(m.file.as_deref(), m.line) {
+            Some(p) => format!("{} {p}", m.repo),
+            None if m.qname != qname => format!("{} `{}`", m.repo, m.qname),
+            None => m.repo.clone(),
+        })
+        .collect();
+    let diverged = if id.diverged { "; diverged" } else { "" };
+    format!("(also in: {}{diverged})", others.join(", "))
 }

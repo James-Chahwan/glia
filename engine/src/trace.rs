@@ -18,9 +18,10 @@
 //!   remains, or at `depth` hops. Two-node mode enumerates the directed paths
 //!   that end at the target. Enumeration is a depth-first walk over a
 //!   successor map built once per call from `MergedGraph::all_edges` (global
-//!   edge order, so deterministic), with one successor per distinct target: of
-//!   two edges `a -> b` the first in edge order speaks, the one the BFS tree
-//!   also reports.
+//!   edge order, so deterministic), or from the identity quotient's edges in
+//!   that same order (DD.11, "Identity" below), with one successor per
+//!   distinct target: of two edges `a -> b` the first in edge order speaks,
+//!   the one the BFS tree also reports.
 //!
 //! # Rank key (no scores)
 //!
@@ -98,10 +99,50 @@
 //! (two-node mode appends `to=<query> directed=<true|false|->`, `-` when no
 //! path was found) — grep `[trace] seed=`.
 //! The LD.6 `[live] annotate surface=trace` line still prints once per call.
+//!
+//! # Identity (DD.11)
+//!
+//! Both answers walk the identity quotient. One [`IdentityView`] per call,
+//! from [`TraceOptions::collapse`] (trace) or the `collapse` argument
+//! (flows). With walk classes (a message, contract op, SCIP symbol, or a
+//! package and its project, found in several places) the carry index, the
+//! successor map and so the BFS tree, the path enumeration and every entry
+//! flow run over [`IdentityView::quotient`]: a class is ONE node, so a path
+//! that reaches one copy continues through every copy's successors at zero
+//! hops, and two copies' identical paths are one distinct path. Without a
+//! walk class (collapse off, no SAME_AS edge, only `package_name` classes)
+//! the walk is the HEAD walk, byte for byte.
+//!
+//! - **Seeds.** The seed, the target and every entry walk from their walk
+//!   node ([`IdentityView::walk_rep`]). A target in the seed's walk class is
+//!   the zero-length path, as `seed == target` is. `seed` / `target` still
+//!   locate the nodes the queries resolved to. Two entries in one walk class
+//!   are one flow; its `entry` is the class's display member when that is one
+//!   of the entries, else the first of them in entry order.
+//! - **Hops.** A walk node that stands for a walk class shows the class's
+//!   display member (content-chosen, [`IdentityView::display`]; the walk
+//!   node's id is an internal handle) in `from_qname` and `to_*`; any other
+//!   walk node shows itself. `cross_service` / `cross_repo` compare the shown
+//!   ends, and the rank key's qname sequence is the shown nodes'. A hop into
+//!   a FACT / DERIVED class (walked or not: one `package:npm:react` reached
+//!   in one repo also carries it) carries `to_identity` with every other
+//!   member in `also_in`. A walk class's `to_live` holds when ANY member is
+//!   live (DD.10's rule).
+//! - **The two-node fallback** (`MergedGraph::shortest_path`, the undirected
+//!   last resort) stays on the raw graph; its hops show the raw nodes.
+//!
+//! fired_on, one line per answer and only when the view has a collapse
+//! class, after the `[trace] seed=` / `[flows] entries=` line:
+//! `[identity] collapse surface=trace|flows classes=<c> walk_classes=<w> folded=<f> rows=<n>`.
+//! `rows` is the `[live] annotate` rows count (trace: the BFS tree's hops;
+//! flows: every flow's hops), `folded` the class members those rows (and,
+//! for flows, the entries) stand for beyond the one each shows. grep
+//! `^\[identity\] collapse surface=trace` / `surface=flows`.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use glia_activation::algo::{Adjacency, CategorySet, Walk, reach};
+use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
 use glia_code_domain::{edge_category, endpoint};
 use glia_core::{EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::roles::roles_in;
@@ -111,6 +152,7 @@ use crate::absence::{self, Absence};
 use crate::answers::{Located, Locator, entrypoint_reachable, live_marker};
 use crate::arch::{ServiceKeying, default_keying, service_of};
 use crate::find::{self, FindOptions, FoundNode};
+use crate::identity::{Collapse, IdentityView, RowIdentity};
 use crate::profile::CODE_PROFILE;
 
 /// `TraceOptions::default().depth`.
@@ -137,6 +179,9 @@ pub struct TraceOptions {
     pub to: Option<String>,
     /// Keep the first `max_paths` ranked paths; `0` keeps every one.
     pub max_paths: usize,
+    /// Identity classes (DD.11, module doc "Identity"): on by default, with
+    /// no repo labels; `Collapse::off()` is the per-member walk.
+    pub collapse: Collapse,
 }
 
 impl Default for TraceOptions {
@@ -145,6 +190,7 @@ impl Default for TraceOptions {
             depth: DEFAULT_DEPTH,
             to: None,
             max_paths: DEFAULT_MAX_PATHS,
+            collapse: Collapse::default(),
         }
     }
 }
@@ -173,6 +219,11 @@ pub struct TraceHop {
     pub to_file: Option<String>,
     /// 1-based (see [`Located`]).
     pub to_line: Option<i64>,
+    /// The destination stands for a FACT / DERIVED identity class (DD.11):
+    /// its tier, rules and every other member (`also_in`). No JSON key when
+    /// `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_identity: Option<RowIdentity>,
 }
 
 /// One ranked path: its hops in order, and the three facts it ranks by.
@@ -266,13 +317,20 @@ pub fn cross_stack_trace_with_live(
     opts: &TraceOptions,
 ) -> TraceAnswer {
     let mut seed = resolve(merged, feature);
-    let adj = Adjacency::carry(merged, &CODE_PROFILE.tables);
-    let succ = Successors::carry(merged);
+    // DD.11: the walk runs over the identity quotient when the view has
+    // walk classes (module doc "Identity").
+    let view = IdentityView::new(merged, &opts.collapse);
+    let quotient = view.quotient(merged);
+    let walk = WalkNodes::new(merged, &view, live, quotient.is_some());
+    let (adj, succ) = match &quotient {
+        Some(q) => (Adjacency::carry(q, &CODE_PROFILE.tables), Successors::carry_over(q)),
+        None => (Adjacency::carry(merged, &CODE_PROFILE.tables), Successors::carry(merged)),
+    };
     // The entry-flow tier (LD.4b, module doc): one-node mode, a dead end or
     // nothing resolved, and an entry key naming the feature.
     if opts.to.is_none()
-        && !seed.id.is_some_and(|id| leaves(&succ, id))
-        && let Some(entry) = entry_seed(merged, &adj, feature, opts.depth)
+        && !seed.id.is_some_and(|id| leaves(&succ, view.walk_rep(id)))
+        && let Some(entry) = entry_seed(merged, &view, &adj, feature, opts.depth)
     {
         seed = Resolved {
             id: Some(entry),
@@ -284,6 +342,7 @@ pub fn cross_stack_trace_with_live(
         live_marker("trace", 0, 0);
         let absence = absence::unknown_symbol(merged, "trace", feature, &[], &seed.near);
         marker(feature, seed.by, 0, 0, false, opts, None);
+        view.collapse_marker("trace", 0, 0);
         return TraceAnswer {
             seed: None,
             target: None,
@@ -294,30 +353,33 @@ pub fn cross_stack_trace_with_live(
             absence: Some(absence),
         };
     };
+    let walk_seed = view.walk_rep(seed_id);
 
     let loc = Locator::new(merged);
-    let mut sides = Sides::new(merged, &loc);
+    let mut sides = Sides::new(merged, &loc, &view, &walk);
 
     // The BFS tree (LD.15b), unchanged: each reached node is one hop, in
     // discovery order, from the node that first reached it.
-    let hops: Vec<TraceHop> = reach::bfs(&adj, &[seed_id], Walk::Forward, opts.depth)
-        .reached
+    let reached = reach::bfs(&adj, &[walk_seed], Walk::Forward, opts.depth).reached;
+    let hops: Vec<TraceHop> = reached
         .iter()
-        .map(|r| sides.hop(live, r.depth, r.parent, r.id, r.via))
+        .map(|r| sides.hop(r.depth, r.parent, r.id, r.via))
         .collect();
     live_marker(
         "trace",
         hops.len(),
         hops.iter().filter(|h| h.to_live).count(),
     );
+    let folded: usize = reached.iter().map(|r| walk.folded(r.id)).sum();
+    let collapse_marker = || view.collapse_marker("trace", hops.len() + folded, hops.len());
 
     let seed_at = loc.locate(seed_id);
 
     let Some(to_query) = opts.to.as_deref() else {
-        let walk = enumerate(&succ, &mut sides, seed_id, None, opts);
-        let paths = materialize(&succ, &mut sides, live, &walk.kept);
+        let walked = enumerate(&succ, &mut sides, walk_seed, None, opts);
+        let paths = materialize(&succ, &mut sides, &walked.kept);
         let absence = paths.is_empty().then(|| {
-            let note = if opts.depth == 0 && leaves(&succ, seed_id) {
+            let note = if opts.depth == 0 && leaves(&succ, walk_seed) {
                 format!("depth 0 follows no edge from `{}`", seed_at.qname)
             } else {
                 format!("no carry edge leaves `{}` in this graph", seed_at.qname)
@@ -336,18 +398,19 @@ pub fn cross_stack_trace_with_live(
             feature,
             seed.by,
             paths.len(),
-            walk.expanded,
-            walk.truncated,
+            walked.expanded,
+            walked.truncated,
             opts,
             None,
         );
+        collapse_marker();
         return TraceAnswer {
             seed: Some(seed_at),
             target: None,
             resolved_by: seed.by,
             hops,
             paths,
-            truncated: walk.truncated,
+            truncated: walked.truncated,
             absence,
         };
     };
@@ -357,6 +420,7 @@ pub fn cross_stack_trace_with_live(
     let Some(target_id) = target.id else {
         let absence = absence::unknown_symbol(merged, "trace", to_query, &[], &target.near);
         marker(feature, seed.by, 0, 0, false, opts, None);
+        collapse_marker();
         return TraceAnswer {
             seed: Some(seed_at),
             target: None,
@@ -368,8 +432,10 @@ pub fn cross_stack_trace_with_live(
         };
     };
     let target_at = loc.locate(target_id);
+    let walk_target = view.walk_rep(target_id);
 
-    let (mut paths, expanded, truncated) = if seed_id == target_id {
+    // A target in the seed's walk class is the seed itself.
+    let (mut paths, expanded, truncated) = if walk_seed == walk_target {
         let zero = TracePath {
             rank: 1,
             hops: Vec::new(),
@@ -384,25 +450,26 @@ pub fn cross_stack_trace_with_live(
         // index: the enumeration never enters a node the target is out of
         // reach from.
         let mut to_target: HashMap<NodeId, usize> =
-            reach::bfs(&adj, &[target_id], Walk::Backward, opts.depth)
+            reach::bfs(&adj, &[walk_target], Walk::Backward, opts.depth)
                 .reached
                 .iter()
                 .map(|r| (r.id, r.depth))
                 .collect();
-        to_target.insert(target_id, 0);
-        let walk = enumerate(
+        to_target.insert(walk_target, 0);
+        let walked = enumerate(
             &succ,
             &mut sides,
-            seed_id,
-            Some((target_id, &to_target)),
+            walk_seed,
+            Some((walk_target, &to_target)),
             opts,
         );
         (
-            materialize(&succ, &mut sides, live, &walk.kept),
-            walk.expanded,
-            walk.truncated,
+            materialize(&succ, &mut sides, &walked.kept),
+            walked.expanded,
+            walked.truncated,
         )
     };
+    // The undirected last resort walks the raw graph (module doc).
     if paths.is_empty()
         && let Some(steps) = merged.shortest_path(seed_id, target_id, Reach::Both, None, opts.depth)
     {
@@ -433,6 +500,7 @@ pub fn cross_stack_trace_with_live(
         opts,
         directed,
     );
+    collapse_marker();
     TraceAnswer {
         seed: Some(seed_at),
         target: Some(target_at),
@@ -451,6 +519,10 @@ pub fn cross_stack_trace_with_live(
 /// entries with one key are two rows. Entries reaching nothing within `depth`
 /// have no row (`depth = 0` keeps none).
 ///
+/// Identity classes collapse (DD.11, module doc "Identity") with
+/// `repo_labels` naming the `also_in` repos: two entries in one walk class
+/// are one flow, and a walk class is one node of every flow.
+///
 /// Each hop's `to_live` is read off one [`entrypoint_reachable`] walk, run
 /// once per call; [`entry_flows_with_live`] takes the set instead.
 pub fn entry_flows(
@@ -458,31 +530,70 @@ pub fn entry_flows(
     repo_labels: &BTreeMap<u64, String>,
     depth: usize,
 ) -> Vec<EntryFlow> {
-    entry_flows_with_live(merged, &entrypoint_reachable(merged), repo_labels, depth)
+    entry_flows_with_live(
+        merged,
+        &entrypoint_reachable(merged),
+        repo_labels,
+        depth,
+        &Collapse::with_labels(repo_labels),
+    )
 }
 
 /// [`entry_flows`] over a live set the caller already holds (pyo3's `PyGraph`
 /// computes it once per graph): `live` must be [`entrypoint_reachable`] of
-/// `merged`.
+/// `merged`. `collapse` is the identity option (DD.11); `Collapse::off()`
+/// is one flow per entry over the raw graph, the pre-DD.11 answer.
 pub fn entry_flows_with_live(
     merged: &MergedGraph,
     live: &HashSet<NodeId>,
     repo_labels: &BTreeMap<u64, String>,
     depth: usize,
+    collapse: &Collapse,
 ) -> Vec<EntryFlow> {
     let entries = entries(merged);
+    let view = IdentityView::new(merged, collapse);
+    let quotient = view.quotient(merged);
+    let walk = WalkNodes::new(merged, &view, live, quotient.is_some());
     let loc = Locator::new(merged);
-    let mut sides = Sides::new(merged, &loc);
-    let adj = Adjacency::carry(merged, &CODE_PROFILE.tables);
+    let mut sides = Sides::new(merged, &loc, &view, &walk);
+    let adj = match &quotient {
+        Some(q) => Adjacency::carry(q, &CODE_PROFILE.tables),
+        None => Adjacency::carry(merged, &CODE_PROFILE.tables),
+    };
+    // One flow per walk node, in first-entry order: the entries of one walk
+    // class are one flow.
+    let mut groups: Vec<(NodeId, Vec<usize>)> = Vec::new();
+    let mut group_of: HashMap<NodeId, usize> = HashMap::new();
+    for (i, e) in entries.iter().enumerate() {
+        let w = view.walk_rep(e.id);
+        match group_of.get(&w) {
+            Some(&g) => groups[g].1.push(i),
+            None => {
+                group_of.insert(w, groups.len());
+                groups.push((w, vec![i]));
+            }
+        }
+    }
     let mut flows: Vec<EntryFlow> = Vec::new();
-    for e in &entries {
-        let reached = reach::bfs(&adj, &[e.id], Walk::Forward, depth).reached;
+    let mut folded = 0usize;
+    for (w, members) in &groups {
+        let reached = reach::bfs(&adj, &[*w], Walk::Forward, depth).reached;
         if reached.is_empty() {
             continue;
         }
+        // The row's entry: the class's display member when it is one of the
+        // class's entries, else the first of them (any other walk node shows
+        // itself, its one entry).
+        let display = walk.show(*w);
+        let e = members
+            .iter()
+            .map(|&i| &entries[i])
+            .find(|e| e.id == display)
+            .unwrap_or(&entries[members[0]]);
+        folded += walk.folded(*w) + reached.iter().map(|r| walk.folded(r.id)).sum::<usize>();
         let hops: Vec<TraceHop> = reached
             .iter()
-            .map(|r| sides.hop(live, r.depth, r.parent, r.id, r.via))
+            .map(|r| sides.hop(r.depth, r.parent, r.id, r.via))
             .collect();
         let mut mechanisms: Vec<&'static str> = Vec::new();
         for h in &hops {
@@ -491,7 +602,7 @@ pub fn entry_flows_with_live(
             }
         }
         let mut services: Vec<String> = Vec::new();
-        for id in std::iter::once(e.id).chain(reached.iter().map(|r| r.id)) {
+        for id in std::iter::once(e.id).chain(reached.iter().map(|r| walk.show(r.id))) {
             if let Some(s) = sides.service_label(id, repo_labels)
                 && !services.contains(&s)
             {
@@ -527,6 +638,7 @@ pub fn entry_flows_with_live(
         flows.len(),
         flows.iter().filter(|f| f.cross_service).count()
     );
+    view.collapse_marker("flows", rows + folded, rows);
     flows
 }
 
@@ -583,9 +695,11 @@ pub(crate) fn entries(merged: &MergedGraph) -> Vec<Entry<'_>> {
 /// The entry-flow tier's pick for `feature` (module doc): the entry whose key
 /// matches the feature's slug — equal before containing, then the larger reach
 /// within `depth`, then key, qname and id ascending — among the entries that
-/// reach at least one node. Only the matching entries are walked.
+/// reach at least one node. Only the matching entries are walked, each from
+/// its walk node (DD.11: `adj` may index the identity quotient).
 fn entry_seed(
     merged: &MergedGraph,
+    view: &IdentityView,
     adj: &Adjacency,
     feature: &str,
     depth: usize,
@@ -608,7 +722,9 @@ fn entry_seed(
         } else {
             continue;
         };
-        let reach = reach::bfs(adj, &[e.id], Walk::Forward, depth).reached.len();
+        let reach = reach::bfs(adj, &[view.walk_rep(e.id)], Walk::Forward, depth)
+            .reached
+            .len();
         if reach == 0 {
             continue;
         }
@@ -717,9 +833,79 @@ fn leaves(succ: &Successors, id: NodeId) -> bool {
         .is_some_and(|&ix| !succ.out[ix as usize].is_empty())
 }
 
+/// How a walk over the identity quotient (DD.11) shows its nodes: each walk
+/// class's representative (an internal handle, DD.1) stands for the class,
+/// shown as the class's display member, and the live set is mapped onto walk
+/// nodes (a class is live when any member is). Without walk classes it is the
+/// identity map over the raw `live` set.
+///
+/// Stopgap (DD.11 owns no `identity.rs`): the representatives are derived
+/// from the SAME_AS endpoints, exactly as `answers::walk_class_reps` (DD.10)
+/// does. Remove both when `IdentityView` gains a crate-visible walk-class
+/// lookup (`in_walk_class` / class sizes; DD.15 or DD.16, the next owner of
+/// `engine/src/identity.rs`).
+struct WalkNodes<'a> {
+    /// Walk-class representative -> (display member, class size).
+    classes: HashMap<NodeId, (NodeId, usize)>,
+    live: Cow<'a, HashSet<NodeId>>,
+}
+
+impl<'a> WalkNodes<'a> {
+    /// `walking`: the answer walks `view`'s quotient. Every member of a walk
+    /// class is an endpoint of a SAME_AS cross edge (the view reads its
+    /// classes from those), and each class has a member other than its
+    /// representative, which maps to it.
+    fn new(
+        merged: &MergedGraph,
+        view: &IdentityView,
+        live: &'a HashSet<NodeId>,
+        walking: bool,
+    ) -> Self {
+        if !walking {
+            return WalkNodes {
+                classes: HashMap::new(),
+                live: Cow::Borrowed(live),
+            };
+        }
+        let mut others: HashMap<NodeId, HashSet<NodeId>> = HashMap::new();
+        for e in merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::SAME_AS)
+        {
+            for id in [e.from, e.to] {
+                let rep = view.walk_rep(id);
+                if rep != id {
+                    others.entry(rep).or_default().insert(id);
+                }
+            }
+        }
+        let classes = others
+            .into_iter()
+            .map(|(rep, m)| (rep, (view.display(rep), m.len() + 1)))
+            .collect();
+        WalkNodes {
+            classes,
+            live: Cow::Owned(live.iter().map(|&n| view.walk_rep(n)).collect()),
+        }
+    }
+
+    /// The node a walk node shows.
+    fn show(&self, id: NodeId) -> NodeId {
+        self.classes.get(&id).map_or(id, |c| c.0)
+    }
+
+    /// The class members walk node `id` stands for beyond the one it shows.
+    fn folded(&self, id: NodeId) -> usize {
+        self.classes.get(&id).map_or(0, |c| c.1 - 1)
+    }
+}
+
 /// Per-node facts the hops need, computed once per node per call: the repo
 /// (the pre-LD.4a `repo_of` map, a later graph overwriting an earlier one),
-/// the qname, and the service key under `ProjectRoots` keying.
+/// the qname, and the service key under `ProjectRoots` keying. Hops of a walk
+/// ([`Self::hop`]) show their ends through [`WalkNodes`]; the two-node
+/// fallback's ([`Self::raw_hop`]) are raw nodes.
 struct Sides<'a> {
     loc: &'a Locator<'a>,
     repo_of: HashMap<NodeId, u64>,
@@ -728,10 +914,17 @@ struct Sides<'a> {
     /// `service_of` keys with no repo-label prefix: only equality matters.
     no_labels: BTreeMap<u64, String>,
     service: HashMap<NodeId, Option<String>>,
+    view: &'a IdentityView,
+    walk: &'a WalkNodes<'a>,
 }
 
 impl<'a> Sides<'a> {
-    fn new(merged: &'a MergedGraph, loc: &'a Locator<'a>) -> Self {
+    fn new(
+        merged: &'a MergedGraph,
+        loc: &'a Locator<'a>,
+        view: &'a IdentityView,
+        walk: &'a WalkNodes<'a>,
+    ) -> Self {
         let mut repo_of: HashMap<NodeId, u64> = HashMap::new();
         let mut qname_of: HashMap<NodeId, &'a str> = HashMap::new();
         for g in &merged.graphs {
@@ -749,11 +942,23 @@ impl<'a> Sides<'a> {
             keying: default_keying(merged),
             no_labels: BTreeMap::new(),
             service: HashMap::new(),
+            view,
+            walk,
         }
     }
 
     fn qname(&self, id: NodeId) -> &'a str {
         self.qname_of.get(&id).copied().unwrap_or("")
+    }
+
+    /// The qname walk node `id` shows (the rank key's).
+    fn walk_qname(&self, id: NodeId) -> &'a str {
+        self.qname(self.walk.show(id))
+    }
+
+    /// [`Self::cross`] of a walk hop, over the shown ends.
+    fn walk_cross(&mut self, from: NodeId, to: NodeId) -> (bool, bool) {
+        self.cross(self.walk.show(from), self.walk.show(to))
     }
 
     /// `(cross_service, cross_repo)` for a hop `from -> to`.
@@ -797,14 +1002,36 @@ impl<'a> Sides<'a> {
         Some(service_of("", repo, &ServiceKeying::PerRepo, labels))
     }
 
-    /// One located hop.
-    fn hop(
+    /// One located hop of a walk: `from` and `to` are walk nodes, shown
+    /// through [`WalkNodes::show`]; `to_live` is the walk's live set.
+    fn hop(&mut self, depth: usize, from: NodeId, to: NodeId, via: EdgeCategoryId) -> TraceHop {
+        let to_live = self.walk.live.contains(&to);
+        let (shown_from, shown_to) = (self.walk.show(from), self.walk.show(to));
+        self.located(depth, shown_from, shown_to, to, via, to_live)
+    }
+
+    /// One located hop between two raw nodes (the two-node fallback).
+    fn raw_hop(
         &mut self,
         live: &HashSet<NodeId>,
         depth: usize,
         from: NodeId,
         to: NodeId,
         via: EdgeCategoryId,
+    ) -> TraceHop {
+        self.located(depth, from, to, to, via, live.contains(&to))
+    }
+
+    /// The hop `from -> to` between two shown nodes; `class_of` is the node
+    /// whose identity class `to` stands for (the walk node, or `to`).
+    fn located(
+        &mut self,
+        depth: usize,
+        from: NodeId,
+        to: NodeId,
+        class_of: NodeId,
+        via: EdgeCategoryId,
+        to_live: bool,
     ) -> TraceHop {
         let (cross_service, cross_repo) = self.cross(from, to);
         let at = self.loc.locate(to);
@@ -816,9 +1043,10 @@ impl<'a> Sides<'a> {
             from_qname: self.loc.locate(from).qname,
             to_qname: at.qname,
             to_kind: at.kind,
-            to_live: live.contains(&to),
+            to_live,
             to_file: at.file,
             to_line: at.line,
+            to_identity: self.view.row_identity(class_of, to),
         }
     }
 }
@@ -834,6 +1062,13 @@ struct Successors {
 
 impl Successors {
     fn carry(merged: &MergedGraph) -> Self {
+        Self::carry_over(merged)
+    }
+
+    /// The carry successors of any [`GraphSource`] (DD.11: the merged graph,
+    /// or its identity quotient), in its edge order. A `MergedGraph`'s edges
+    /// are `all_edges()`, so `carry_over(merged)` is the pre-DD.11 map.
+    fn carry_over<G: GraphSource + ?Sized>(g: &G) -> Self {
         let keep = CategorySet::of(CODE_PROFILE.tables.carry_edges);
         let mut s = Successors {
             ids: Vec::new(),
@@ -841,7 +1076,7 @@ impl Successors {
             out: Vec::new(),
         };
         let mut seen: HashSet<(u32, u32)> = HashSet::new();
-        for e in merged.all_edges() {
+        for e in g.edges() {
             if !keep.contains(e.category) {
                 continue;
             }
@@ -966,7 +1201,7 @@ fn enumerate(
                 }
                 walked.expanded += 1;
                 frames[fi].extended = true;
-                let (svc, _) = sides.cross(succ.ids[node as usize], succ.ids[to as usize]);
+                let (svc, _) = sides.walk_cross(succ.ids[node as usize], succ.ids[to as usize]);
                 crossed.push(crossed[len] + usize::from(svc));
                 cats.push(cat);
                 on_path[to as usize] = true;
@@ -1022,8 +1257,8 @@ fn rank(cands: &mut Vec<Candidate>, succ: &Successors, sides: &Sides<'_>, max_pa
             .then_with(|| b.mechanisms.cmp(&a.mechanisms))
             .then_with(|| b.cats.len().cmp(&a.cats.len()))
             .then_with(|| {
-                let qa = a.nodes.iter().map(|&ix| sides.qname(succ.ids[ix as usize]));
-                let qb = b.nodes.iter().map(|&ix| sides.qname(succ.ids[ix as usize]));
+                let qa = a.nodes.iter().map(|&ix| sides.walk_qname(succ.ids[ix as usize]));
+                let qb = b.nodes.iter().map(|&ix| sides.walk_qname(succ.ids[ix as usize]));
                 qa.cmp(qb)
             })
             .then_with(|| {
@@ -1038,12 +1273,7 @@ fn rank(cands: &mut Vec<Candidate>, succ: &Successors, sides: &Sides<'_>, max_pa
 }
 
 /// Locate the kept candidates into ranked [`TracePath`]s.
-fn materialize(
-    succ: &Successors,
-    sides: &mut Sides<'_>,
-    live: &HashSet<NodeId>,
-    kept: &[Candidate],
-) -> Vec<TracePath> {
+fn materialize(succ: &Successors, sides: &mut Sides<'_>, kept: &[Candidate]) -> Vec<TracePath> {
     kept.iter()
         .enumerate()
         .map(|(i, c)| {
@@ -1054,7 +1284,6 @@ fn materialize(
                 .enumerate()
                 .map(|(d, (w, &cat))| {
                     sides.hop(
-                        live,
                         d + 1,
                         succ.ids[w[0] as usize],
                         succ.ids[w[1] as usize],
@@ -1068,7 +1297,8 @@ fn materialize(
 }
 
 /// The two-node fallback: `MergedGraph::shortest_path`'s steps as one
-/// undirected path, each hop's mechanism the category it traversed.
+/// undirected path, each hop's mechanism the category it traversed. Raw
+/// nodes, shown as themselves (DD.11).
 fn undirected_path(
     sides: &mut Sides<'_>,
     live: &HashSet<NodeId>,
@@ -1079,7 +1309,7 @@ fn undirected_path(
         .windows(2)
         .filter_map(|w| Some((w[0].0, w[1].0, w[1].1?)))
         .enumerate()
-        .map(|(d, (from, to, via))| sides.hop(live, d + 1, from, to, via))
+        .map(|(d, (from, to, via))| sides.raw_hop(live, d + 1, from, to, via))
         .collect();
     path_of(1, hops, false)
 }
@@ -1109,5 +1339,6 @@ mod tests {
     fn default_options() {
         let o = TraceOptions::default();
         assert_eq!((o.depth, o.to.as_deref(), o.max_paths), (6, None, 10));
+        assert_eq!(o.collapse, Collapse::default(), "identity collapse on by default");
     }
 }

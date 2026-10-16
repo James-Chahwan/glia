@@ -11,6 +11,10 @@
 //! LD.4b: `glia flows` over the same build (its `[flows] entries=` marker is
 //! relayed the same way), and the entry-flow tier that seeds `glia trace`
 //! with a route when the feature word names a dead end.
+//!
+//! DD.11: `--no-collapse` on both commands, and the `[identity] collapse
+//! surface=trace|flows` line on the identity-contract-ops fixture (one walk
+//! class of three contract ops), relayed the same way.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -235,4 +239,79 @@ fn flows_table_prints_one_row_per_flow() {
     let (out, markers) = flows(&[&api, "--depth", "0"]);
     assert!(stdout(&out).contains("_(no entry point reaches anything within 0 hops)_"));
     assert_eq!(markers, ["[flows] entries=1 flows=0 cross_service=0 depth<=0"]);
+}
+
+/// Run `glia <args>` with persistence off, exit 0 asserted; returns stdout
+/// and the `[identity] collapse` lines (relayed).
+fn identity_run(args: &[&str]) -> (String, Vec<String>) {
+    let out = Command::new(env!("CARGO_BIN_EXE_glia"))
+        .args(args)
+        .env("GLIA_NO_PERSIST", "1")
+        .output()
+        .expect("glia runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "glia {args:?} exited {:?}\n{stderr}", out.status);
+    let lines: Vec<String> = stderr
+        .lines()
+        .filter(|l| l.starts_with("[identity] collapse"))
+        .map(str::to_string)
+        .collect();
+    for l in &lines {
+        eprintln!("{l}");
+    }
+    (stdout(&out), lines)
+}
+
+/// DD.11: the three GET ops of identity-contract-ops (swagger, swaggo,
+/// feature.yaml) are one DERIVED walk class. A trace seeded at one op walks
+/// the class as one node, shown as its display member; `--no-collapse`
+/// walks the op itself. A hop into the class carries `to_identity` (JSON)
+/// and `(also in: ...)` (table). Each answer prints one `[identity] collapse
+/// surface=trace|flows` line by default and none with `--no-collapse`.
+#[test]
+fn identity_classes_collapse_unless_no_collapse() {
+    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/../bench/substrate-gap/fixtures/identity-contract-ops");
+    let ops = [
+        "contract::docs::swagger::GET:/orders",
+        "contract::features::orders::feature::GET:/api/orders",
+        "contract::main::GET:/orders",
+    ];
+
+    let (text, lines) = identity_run(&["trace", fixture, "contract::main::GET:/orders", "--json"]);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("[identity] collapse surface=trace classes="), "{lines:?}");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("stdout is JSON");
+    assert_eq!(v["seed"]["qname"], "contract::main::GET:/orders", "the seed is the query's node");
+    let first = &v["paths"][0]["hops"][0];
+    assert_eq!(first["mechanism"], "DOCUMENTS", "{v}");
+    assert_eq!(first["to_qname"], "GET /api/orders", "{v}");
+    let shown = first["from_qname"].as_str().expect("a from_qname");
+    assert!(ops.contains(&shown), "the class shows one of its ops: {shown}");
+
+    let (text, lines) = identity_run(&["trace", fixture, "contract::main::GET:/orders", "--json", "--no-collapse"]);
+    assert!(lines.is_empty(), "no collapse, no identity line: {lines:?}");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("stdout is JSON");
+    assert_eq!(v["paths"][0]["hops"][0]["from_qname"], "contract::main::GET:/orders", "{v}");
+    assert!(!text.contains("to_identity"), "{text}");
+
+    // A hop into the class (the undirected fallback: DOCUMENTS runs doc ->
+    // route) carries the class's identity.
+    let args = ["trace", fixture, "GET /api/orders", "--to", "contract::main::GET:/orders"];
+    let (text, lines) = identity_run(&[&args[..], &["--json"]].concat());
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let v: serde_json::Value = serde_json::from_str(&text).expect("stdout is JSON");
+    let hop = &v["paths"][0]["hops"][0];
+    assert_eq!(hop["to_qname"], "contract::main::GET:/orders", "{v}");
+    assert_eq!(hop["to_identity"]["tier"], "derived", "{v}");
+    assert_eq!(hop["to_identity"]["also_in"].as_array().map(Vec::len), Some(2), "{v}");
+    let (table, _) = identity_run(&args);
+    assert!(table.contains("(also in: "), "{table}");
+    let (table, _) = identity_run(&[&args[..], &["--no-collapse"]].concat());
+    assert!(!table.contains("(also in: "), "{table}");
+
+    let (_, lines) = identity_run(&["flows", fixture, "--json"]);
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("[identity] collapse surface=flows classes="), "{lines:?}");
+    let (_, lines) = identity_run(&["flows", fixture, "--json", "--no-collapse"]);
+    assert!(lines.is_empty(), "{lines:?}");
 }

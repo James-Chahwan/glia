@@ -4,6 +4,7 @@
 
 use pyo3::prelude::*;
 
+use glia_engine::identity::Collapse;
 use glia_engine::trace::{TraceOptions, cross_stack_trace_with_live, entry_flows_with_live};
 
 use crate::convert::to_py;
@@ -33,7 +34,16 @@ impl PyGraph {
     /// - `truncated`: the path search hit its step budget.
     /// - `absence`: set exactly when `paths` is empty (an unknown feature or
     ///   target, a dead end, an unreachable target). Never raises for those.
-    #[pyo3(signature = (feature, depth=6, to=None, max_paths=10))]
+    /// - `collapse` (DD.11, default `True`): identity classes. A walk class
+    ///   (one message, contract op or SCIP symbol, or a package and its
+    ///   project, in several places) is ONE node of the walk, so a path
+    ///   reaching one copy goes on through every copy's successors and two
+    ///   copies' identical paths are one path; its hops show the class's
+    ///   display member. A hop into a FACT / DERIVED class carries a
+    ///   `to_identity` dict `{tier, rules, diverged, also_in}` (`also_in`:
+    ///   `{repo, qname, file, line}` of every other member); other hops have
+    ///   no `to_identity` key. `collapse=False` is the per-member walk.
+    #[pyo3(signature = (feature, depth=6, to=None, max_paths=10, collapse=true))]
     fn cross_stack_trace(
         &self,
         py: Python<'_>,
@@ -41,11 +51,13 @@ impl PyGraph {
         depth: usize,
         to: Option<&str>,
         max_paths: usize,
+        collapse: bool,
     ) -> PyResult<Py<PyAny>> {
         let mut opts = TraceOptions::default();
         opts.depth = depth;
         opts.to = to.map(str::to_string);
         opts.max_paths = max_paths;
+        opts.collapse = collapse_of(self, collapse);
         let answer = cross_stack_trace_with_live(&self.merged, self.live(), feature, &opts);
         to_py(py, serde_json::to_string(&answer))
     }
@@ -68,9 +80,29 @@ impl PyGraph {
     /// - `mechanisms`: distinct hop edge categories, in first-seen order.
     /// - `hops`: the forward BFS tree, the hop dicts `cross_stack_trace`
     ///   returns.
-    #[pyo3(signature = (depth=6))]
-    fn entry_flows(&self, py: Python<'_>, depth: usize) -> PyResult<Py<PyAny>> {
-        let flows = entry_flows_with_live(&self.merged, self.live(), &self.repo_labels, depth);
+    /// - `collapse` (DD.11, default `True`): two entries in one walk class
+    ///   are one flow (its `entry` the class's display member when that is
+    ///   one of them), and a walk class is one node of every flow, as in
+    ///   `cross_stack_trace`. `collapse=False` is one flow per entry.
+    #[pyo3(signature = (depth=6, collapse=true))]
+    fn entry_flows(&self, py: Python<'_>, depth: usize, collapse: bool) -> PyResult<Py<PyAny>> {
+        let flows = entry_flows_with_live(
+            &self.merged,
+            self.live(),
+            &self.repo_labels,
+            depth,
+            &collapse_of(self, collapse),
+        );
         to_py(py, serde_json::to_string(&flows))
+    }
+}
+
+/// The identity option of a `collapse=` keyword: on with the build's repo
+/// labels, or off.
+fn collapse_of(graph: &PyGraph, on: bool) -> Collapse {
+    if on {
+        Collapse::with_labels(&graph.repo_labels)
+    } else {
+        Collapse::off()
     }
 }

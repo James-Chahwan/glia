@@ -23,6 +23,12 @@
 //!   `^\[feature-flows\] wrote [0-9]`), after the engine's own
 //!   `[feature-flows] wrote <dir> written=..` line.
 //!
+//! **Identity (DD.11).** The flows walk the identity quotient: two entries in
+//! one walk class (one SCIP symbol defined in two repos) are one flow, and a
+//! walk class is one node of every flow. `--no-collapse` is one flow per
+//! entry over the raw graph. Feature records (`--features` / `--out`) group
+//! the raw entries, so the flag conflicts with them.
+//!
 //! Exit 0 with zero features too (an empty `index.json` is an answer). Exit
 //! 2 for a build failure, a `--group-by` other than `feature` / `entry`, an
 //! `--out` inside a built repo but not under its `.glia/` (the next build
@@ -31,11 +37,12 @@
 
 use std::path::{Path, PathBuf};
 
-use glia_engine::GenerateResult;
 use glia_engine::feature_flows::{
     FlowGrouping, FlowOptions, INDEX_FILE, default_flows_dir, feature_flows, write_feature_flows,
 };
-use glia_engine::trace::{DEFAULT_DEPTH, EntryFlow, entry_flows};
+use glia_engine::identity::Collapse;
+use glia_engine::trace::{DEFAULT_DEPTH, EntryFlow, entry_flows_with_live};
+use glia_engine::{GenerateResult, entrypoint_reachable};
 
 use crate::common::generate_for;
 
@@ -54,6 +61,12 @@ pub(crate) struct Args {
     /// instead of a table. Writes nothing.
     #[arg(long)]
     json: bool,
+    /// One flow per entry point over the raw graph. By default two entry
+    /// points that are one identity (one SCIP symbol defined in two repos)
+    /// are one flow, and a message, contract op or SCIP symbol found in
+    /// several places is one node of every flow.
+    #[arg(long, conflicts_with = "feature_mode")]
+    no_collapse: bool,
     /// Group the entry flows into per-feature records (LG.3c): written to the
     /// repo's default flows dir (`<repo>/.glia/graph/flows`), or printed with
     /// --json.
@@ -89,7 +102,18 @@ pub(crate) fn run(args: Args) -> i32 {
         return run_features(&args, &result);
     }
     // The `[flows] entries=` fired_on marker is printed inside the engine.
-    let flows = entry_flows(&result.merged, &result.repo_labels, args.depth);
+    let collapse = if args.no_collapse {
+        Collapse::off()
+    } else {
+        Collapse::with_labels(&result.repo_labels)
+    };
+    let flows = entry_flows_with_live(
+        &result.merged,
+        &entrypoint_reachable(&result.merged),
+        &result.repo_labels,
+        args.depth,
+        &collapse,
+    );
     if args.json {
         println!("{}", serde_json::to_string(&flows).unwrap_or_default());
         return 0;
