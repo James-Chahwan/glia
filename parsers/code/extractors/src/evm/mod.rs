@@ -3,10 +3,11 @@
 //! `glia_code_domain::evm` (DT.10a), which `resolver:evm` (DT.10b) pairs to
 //! the Solidity procedures and events.
 //!
-//! A language reader (TypeScript / JavaScript ethers: [`ts`]) scans the
-//! file's code view ([`scan::code_view`]: comments, regex literals and the
-//! contents of string and template literals blanked, offsets kept) and
-//! returns one [`Site`] per call or subscription it can name. [`mint`] then
+//! A language reader (TypeScript / JavaScript ethers: [`ts`]; Go
+//! go-ethereum, DT.10e: [`go`]) scans the file's code view
+//! ([`scan::code_view`]: comments, regex literals and the contents of string,
+//! template, rune and raw-string literals blanked, offsets kept) and returns
+//! one [`Site`] per call or subscription it can name. [`mint`] then
 //! groups the sites by `(side, scope, member)`, one node per group:
 //! - a call is an RPC_CALL `evm_call:<scope>.<member>` and a subscription an
 //!   EVENT_HANDLER `evm_event:<scope>.<event>`, Confidence::Medium, nav name
@@ -31,6 +32,7 @@
 //! Grep `^\[evm-client\] `.
 
 mod abi;
+mod go;
 mod scan;
 mod ts;
 
@@ -66,7 +68,8 @@ pub struct EvmNodes {
 /// The `[evm-client]` marker's counts for one file.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct EvmCounts {
-    /// The reader's language in the marker (`ts`); empty when none ran.
+    /// The reader's language in the marker (`ts`, `go`); empty when none
+    /// ran.
     pub lang: &'static str,
     /// RPC_CALL nodes minted.
     pub calls: usize,
@@ -81,7 +84,8 @@ pub struct EvmCounts {
     pub abis: usize,
     /// Members and events a known ABI does not list.
     pub not_in_abi: usize,
-    /// Contract constructions whose ABI argument could not be read.
+    /// Contract constructions whose ABI argument could not be read, and (Go)
+    /// non-literal member names on a bound receiver.
     pub dynamic: usize,
 }
 
@@ -103,19 +107,28 @@ pub(crate) struct Site {
     pub(crate) at: usize,
 }
 
-/// The EVM client nodes of one file of language `lang` (module doc). A
-/// language without a reader gives none.
+/// The EVM client nodes of one file of language `lang` (module doc): a
+/// TS-family tag reads ethers, `go` reads go-ethereum. A language without a
+/// reader gives none.
 pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: RepoId) -> EvmNodes {
-    if !TS_FAMILY.contains(&lang) {
-        return EvmNodes::default();
-    }
-    let view = scan::code_view(source, lang);
-    let (sites, ts_counts) = ts::scan(source, &view);
+    let (tag, sites, abis, not_in_abi, dynamic) = match lang {
+        "go" => {
+            let view = scan::code_view(source, lang);
+            let (sites, c) = go::scan(source, &view);
+            ("go", sites, c.abis, c.not_in_abi, c.dynamic)
+        }
+        l if TS_FAMILY.contains(&l) => {
+            let view = scan::code_view(source, lang);
+            let (sites, c) = ts::scan(source, &view);
+            ("ts", sites, c.abis, c.not_in_abi, c.dynamic)
+        }
+        _ => return EvmNodes::default(),
+    };
     let mut out = mint(&sites, source, module_id, repo);
-    out.counts.lang = "ts";
-    out.counts.abis = ts_counts.abis;
-    out.counts.not_in_abi = ts_counts.not_in_abi;
-    out.counts.dynamic = ts_counts.dynamic;
+    out.counts.lang = tag;
+    out.counts.abis = abis;
+    out.counts.not_in_abi = not_in_abi;
+    out.counts.dynamic = dynamic;
     out
 }
 
@@ -393,8 +406,10 @@ mod tests {
         let go = extract_evm_clients(src, "go", NodeId(1), RepoId(1));
         assert!(
             go.nodes.is_empty() && go.markers("a.go").is_empty(),
-            "no Go reader yet"
+            "the Go reader gates on a go-ethereum import"
         );
+        let python = extract_evm_clients(src, "python", NodeId(1), RepoId(1));
+        assert!(python.nodes.is_empty() && python.markers("a.py").is_empty());
     }
 
     #[test]
@@ -461,6 +476,76 @@ export class EscrowClient {
                 "evm_call:abi:ESCROW_ABI.deposits",
                 "evm_event:abi:ESCROW_ABI.Released",
             ]
+        );
+    }
+
+    #[test]
+    fn extract_reads_the_go_fixture_shapes() {
+        // bench/substrate-gap/fixtures/go-ethereum-contract-calls/api/chain/.
+        let settler = include_str!(
+            "../../../../../bench/substrate-gap/fixtures/go-ethereum-contract-calls/api/chain/settler.go"
+        );
+        let calldata = include_str!(
+            "../../../../../bench/substrate-gap/fixtures/go-ethereum-contract-calls/api/chain/calldata.go"
+        );
+        let out = extract_evm_clients(settler, "go", NodeId(1), RepoId(1));
+        assert_eq!(
+            out.markers("chain/settler.go"),
+            [
+                "[evm-client] lang=go calls=2 events=0 sites=2 (ethers=0 hardhat=0 typechain=0 viem=0 web3=0 geth=2) abis=0 not_in_abi=0 dynamic=0 path=chain/settler.go"
+            ]
+        );
+        let mut qnames: Vec<&str> = out.nav.qname_by_id.values().map(String::as_str).collect();
+        qnames.sort_unstable();
+        assert_eq!(
+            qnames,
+            [
+                "evm_call:recv:escrow.deposits",
+                "evm_call:recv:escrow.release"
+            ]
+        );
+        let cells: Vec<ClientFacts> = out
+            .nodes
+            .iter()
+            .flat_map(|n| read_client_cells(&n.cells))
+            .collect();
+        assert_eq!(
+            cells,
+            [
+                ClientFacts {
+                    lib: "geth".to_string(),
+                    args: vec![1],
+                    abi: None
+                },
+                ClientFacts {
+                    lib: "geth".to_string(),
+                    args: vec![1],
+                    abi: None
+                },
+            ]
+        );
+        let out = extract_evm_clients(calldata, "go", NodeId(1), RepoId(1));
+        assert_eq!(
+            out.markers("chain/calldata.go"),
+            [
+                "[evm-client] lang=go calls=2 events=0 sites=2 (ethers=0 hardhat=0 typechain=0 viem=0 web3=0 geth=2) abis=1 not_in_abi=1 dynamic=0 path=chain/calldata.go"
+            ]
+        );
+        let mut qnames: Vec<&str> = out.nav.qname_by_id.values().map(String::as_str).collect();
+        qnames.sort_unstable();
+        assert_eq!(
+            qnames,
+            [
+                "evm_call:abi:escrowCallsABI.deposit",
+                "evm_call:abi:escrowCallsABI.release"
+            ]
+        );
+        assert!(
+            out.nodes
+                .iter()
+                .flat_map(|n| read_client_cells(&n.cells))
+                .all(|c| c.abi.as_deref()
+                    == Some(&["f:deposit/1".to_string(), "f:release/1".to_string()][..]))
         );
     }
 }

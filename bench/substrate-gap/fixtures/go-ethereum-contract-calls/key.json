@@ -1,0 +1,103 @@
+{
+  "framework": "go-ethereum-contract-calls",
+  "language": "go",
+  "dirs": [
+    "api",
+    "contracts"
+  ],
+  "note": "DT.10e (T10; examples-glia Settler.Release and Kina signer.go shapes). HEAD 7acee124 (W19 wheel): no RPC_CALL or RPC_CALLS; grade.py nodes 0/4, edges 0/6.",
+  "expect_nodes": [
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:recv:escrow.release",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:recv:escrow.deposits",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:escrowCallsABI.deposit",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:escrowCallsABI.release",
+      "exact": true
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "chain::settler::Settler::Release",
+      "to": "evm_call:recv:escrow.release",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "evm_call:recv:escrow.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true,
+      "note": "heuristic name_hint"
+    },
+    {
+      "from": "evm_call:recv:escrow.deposits",
+      "to": "evm:Escrow.deposits",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:escrowCallsABI.deposit",
+      "to": "evm:Escrow.deposit",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:escrowCallsABI.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "chain::calldata::ReleaseVia",
+      "to": "evm_call:abi:escrowCallsABI.release",
+      "category": "USES",
+      "exact": true
+    }
+  ],
+  "forbid": [
+    {
+      "from": "evm_call:recv:escrow.release",
+      "to": "evm:Vault.release",
+      "category": "RPC_CALLS"
+    },
+    {
+      "from": "evm_call:abi:escrowCallsABI.release",
+      "to": "evm:Vault.release",
+      "category": "RPC_CALLS"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:escrowCallsABI.withdraw",
+      "note": "not in the ABI; Vault has withdraw"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:recv:raw.eth_blockNumber"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:recv:raw.eth_chainId"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:recv:client.BalanceAt"
+    },
+    {
+      "kind": "RPC_CALL",
+      "max_nodes": 4
+    }
+  ]
+}

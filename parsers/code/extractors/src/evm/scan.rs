@@ -13,6 +13,13 @@
 //!
 //! The view's brackets are balanced wherever the source's code brackets are,
 //! which is what [`matching`], [`split_args`] and [`enclosing_block`] count.
+//!
+//! Go (DT.10e) has its own lexer: `//` and `/* */` comments are blanked, and
+//! so are the contents of interpreted strings (`".."`, backslash escapes, an
+//! unterminated one stopping at its line's end), runes (`'..'`) and raw
+//! strings (`` `..` ``, which may span lines: their newlines are kept like a
+//! block comment's). Go has no regex or template literal. A Go literal is read
+//! back from the source by [`go_string_literal`], unescaped per the Go spec.
 
 use super::TS_FAMILY;
 
@@ -30,12 +37,18 @@ const REGEX_KEYWORDS: &[&[u8]] = &[
 ];
 
 /// The code view of `source` (module doc). A TS-family tag gets the
-/// JavaScript lexer; a language this module has no lexer for gets its source
-/// back unchanged.
+/// JavaScript lexer and `go` the Go lexer; a language this module has no
+/// lexer for gets its source back unchanged.
 pub(crate) fn code_view(source: &str, lang: &str) -> String {
-    if !TS_FAMILY.contains(&lang) {
-        return source.to_string();
+    match lang {
+        "go" => go_view(source),
+        l if TS_FAMILY.contains(&l) => js_view(source),
+        _ => source.to_string(),
     }
+}
+
+/// The JavaScript / TypeScript code view (module doc).
+fn js_view(source: &str) -> String {
     let src = source.as_bytes();
     let mut out = src.to_vec();
     let mut prev: Option<usize> = None;
@@ -77,8 +90,54 @@ pub(crate) fn code_view(source: &str, lang: &str) -> String {
             i += 1;
         }
     }
-    // Every blanked range starts and ends at an ASCII delimiter, so `out` is
-    // UTF-8; the fallback (never taken) keeps every offset all the same.
+    into_view(out)
+}
+
+/// The Go code view (module doc): comments blanked, and the contents of
+/// interpreted strings, runes and raw strings.
+fn go_view(source: &str) -> String {
+    let src = source.as_bytes();
+    let mut out = src.to_vec();
+    let mut i = 0;
+    while i < src.len() {
+        let b = src[i];
+        let next = src.get(i + 1).copied();
+        if b == b'/' && next == Some(b'/') {
+            let end = line_end(src, i);
+            blank(&mut out, i, end);
+            i = end;
+        } else if b == b'/' && next == Some(b'*') {
+            let end = comment_end(src, i);
+            blank(&mut out, i, end);
+            i = end;
+        } else if b == b'"' || b == b'\'' {
+            let (end, closed) = string_end(src, i);
+            blank(&mut out, i + 1, if closed { end - 1 } else { end });
+            i = end;
+        } else if b == b'`' {
+            // A raw string has no escapes: it ends at the next backtick, or
+            // runs to the end of an unterminated file.
+            match src[i + 1..].iter().position(|&c| c == b'`') {
+                Some(p) => {
+                    blank(&mut out, i + 1, i + 1 + p);
+                    i += p + 2;
+                }
+                None => {
+                    blank(&mut out, i + 1, src.len());
+                    i = src.len();
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    into_view(out)
+}
+
+/// The view bytes as a string. Every blanked range starts and ends at an
+/// ASCII delimiter, so `out` is UTF-8; the fallback (never taken) keeps every
+/// offset all the same.
+fn into_view(out: Vec<u8>) -> String {
     String::from_utf8(out).unwrap_or_else(|e| {
         e.into_bytes()
             .into_iter()
@@ -368,6 +427,81 @@ pub(crate) fn string_literal(source: &str, at: usize) -> Option<(String, usize)>
     None
 }
 
+/// The value of the Go string literal whose opening quote (`"` or a backtick)
+/// is at `at` in `source`, and the offset just past its closing quote. An
+/// interpreted string is unescaped per the Go spec (`\a \b \f \n \r \t \v \\
+/// \"`, `\ooo`, `\xhh`, `\uhhhh`, `\Uhhhhhhhh`); a raw string is its text with
+/// every carriage return dropped. `None` for a rune, an unterminated literal,
+/// an interpreted string broken by a newline, an escape Go rejects in a string
+/// (`\'`, `\q`), and a value that is no UTF-8.
+pub(crate) fn go_string_literal(source: &str, at: usize) -> Option<(String, usize)> {
+    let b = source.as_bytes();
+    match *b.get(at)? {
+        b'`' => {
+            let p = b.get(at + 1..)?.iter().position(|&c| c == b'`')?;
+            let text = source.get(at + 1..at + 1 + p)?.replace('\r', "");
+            Some((text, at + p + 2))
+        }
+        b'"' => {
+            let mut out: Vec<u8> = Vec::new();
+            let mut j = at + 1;
+            while j < b.len() {
+                match b[j] {
+                    b'"' => return Some((String::from_utf8(out).ok()?, j + 1)),
+                    b'\n' => return None,
+                    b'\\' => {
+                        let e = *b.get(j + 1)?;
+                        j += 2;
+                        match e {
+                            b'a' => out.push(0x07),
+                            b'b' => out.push(0x08),
+                            b'f' => out.push(0x0c),
+                            b'n' => out.push(b'\n'),
+                            b'r' => out.push(b'\r'),
+                            b't' => out.push(b'\t'),
+                            b'v' => out.push(0x0b),
+                            b'\\' | b'"' => out.push(e),
+                            b'0'..=b'7' => {
+                                // `\ooo`: exactly three octal digits, at most 255.
+                                let v = digits_value(b.get(j - 1..j + 2)?, 8)?;
+                                out.push(u8::try_from(v).ok()?);
+                                j += 2;
+                            }
+                            b'x' => {
+                                let v = digits_value(b.get(j..j + 2)?, 16)?;
+                                out.push(u8::try_from(v).ok()?);
+                                j += 2;
+                            }
+                            b'u' | b'U' => {
+                                let n = if e == b'u' { 4 } else { 8 };
+                                let v = digits_value(b.get(j..j + n)?, 16)?;
+                                let c = char::from_u32(v)?;
+                                out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+                                j += n;
+                            }
+                            _ => return None,
+                        }
+                    }
+                    c => {
+                        out.push(c);
+                        j += 1;
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// The value of `digits` in `radix`; `None` when any byte is no such digit.
+fn digits_value(digits: &[u8], radix: u32) -> Option<u32> {
+    digits.iter().try_fold(0u32, |acc, &d| {
+        let v = char::from(d).to_digit(radix)?;
+        acc.checked_mul(radix)?.checked_add(v)
+    })
+}
+
 // ---- identifiers --------------------------------------------------------------
 
 /// A byte that can continue a JavaScript identifier (ASCII view).
@@ -470,6 +604,62 @@ mod tests {
     #[test]
     fn code_view_returns_other_languages_unchanged() {
         assert_eq!(code_view("x // y", "python"), "x // y");
+    }
+
+    #[test]
+    fn go_view_blanks_comments_strings_runes_and_raw_strings_keeping_offsets() {
+        let src = "x := a.Pack(\"f(1)\") // b.Pack(\"g\")\n/* c.Call(\n */ r := '\\''; q := 'x'\nconst A = `[\n {\"name\": \"h\"}\n]`\ny := \"esc \\\" d.Pack(2)\"\nz := \"open\nw.Pack(3)";
+        let v = code_view(src, "go");
+        assert_eq!(v.len(), src.len());
+        assert_eq!(v.matches('\n').count(), src.matches('\n').count());
+        for gone in ["f(1)", "b.Pack", "c.Call", "\"h\"", "d.Pack", "open"] {
+            assert!(!v.contains(gone), "{gone} stays in {v:?}");
+        }
+        assert!(v.contains("x := a.Pack(\"    \")"), "{v:?}");
+        assert!(v.contains("r := '  '; q := ' '"), "{v:?}");
+        assert!(v.contains("const A = `"), "{v:?}");
+        assert!(
+            v.contains("w.Pack(3)"),
+            "an unterminated string stops at its line's end: {v:?}"
+        );
+        let (open, close) = (v.find('`').expect("open"), v.rfind('`').expect("close"));
+        assert!(
+            v[open + 1..close].bytes().all(|c| c == b' ' || c == b'\n'),
+            "a raw string's newlines are kept, the rest blanked"
+        );
+        let unterminated = "a := `[\n{";
+        assert_eq!(code_view(unterminated, "go"), "a := ` \n ");
+    }
+
+    #[test]
+    fn go_string_literals_unescape_per_go() {
+        let src = r#"a("q\"\\\n\t\x41\101\u00e9\U0001F600", `raw \n "x"`)"#;
+        let at = src.find('"').expect("quote");
+        let (text, end) = go_string_literal(src, at).expect("reads");
+        assert_eq!(text, "q\"\\\n\tAA\u{e9}\u{1F600}");
+        assert_eq!(&src[end..end + 1], ",");
+        let at = src.find('`').expect("raw");
+        let (text, end) = go_string_literal(src, at).expect("reads");
+        assert_eq!(text, r#"raw \n "x""#, "a raw string has no escapes");
+        assert_eq!(&src[end..], ")");
+        assert_eq!(
+            go_string_literal("`a\r\nb`", 0).map(|t| t.0).as_deref(),
+            Some("a\nb"),
+            "a raw string drops carriage returns"
+        );
+        for bad in [
+            "\"open",
+            "\"line\nbreak\"",
+            "\"\\'\"",
+            "\"\\q\"",
+            "\"\\400\"",
+            "\"\\xZZ\"",
+            "\"\\xff\"",
+            "'r'",
+            "`open",
+        ] {
+            assert_eq!(go_string_literal(bad, 0), None, "{bad:?}");
+        }
     }
 
     #[test]
