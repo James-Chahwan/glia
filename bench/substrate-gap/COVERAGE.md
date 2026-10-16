@@ -85,7 +85,7 @@ swift            ●       ●       ?       ?       ?       ?       ?       ?  
 c_cpp            ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
 scala            ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 clojure          ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
-dart             ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ◐       ●       ●
+dart             ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 elixir           ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 rust             ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 solidity         -       -       -       -       -       -       -       -       -       -       -       -       -       -       ●       -       -       -       -       -       -       -       -       ●       ●       ?       ●       ?       ?       ?
@@ -120,7 +120,7 @@ PER-MECHANISM  across 17 languages:
   imports      ● 15  ◐ 0   · 0   ? 2   - 0   ! 0
   injects      ● 12  ◐ 0   · 0   ? 4   - 1   ! 0
   impl         ● 13  ◐ 0   · 0   ? 3   - 1   ! 0
-  tests        ● 10  ◐ 1   · 0   ? 6   - 0   ! 0
+  tests        ● 11  ◐ 0   · 0   ? 6   - 0   ! 0
   service      ● 11  ◐ 0   · 0   ? 6   - 0   ! 0
   subproject   ● 11  ◐ 0   · 0   ? 6   - 0   ! 0
 
@@ -136,7 +136,7 @@ PER-LANGUAGE  across 30 mechanisms:
   c_cpp        ● 3   ◐ 0   · 0   ? 27  - 0   ! 0
   scala        ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   clojure      ● 4   ◐ 0   · 0   ? 26  - 0   ! 0
-  dart         ● 28  ◐ 1   · 0   ? 1   - 0   ! 0
+  dart         ● 29  ◐ 0   · 0   ? 1   - 0   ! 0
   elixir       ● 29  ◐ 0   · 0   ? 1   - 0   ! 0
   rust         ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   solidity     ● 4   ◐ 0   · 0   ? 4   - 22  ! 0
@@ -144,9 +144,9 @@ PER-LANGUAGE  across 30 mechanisms:
   kotlin       ● 6   ◐ 0   · 0   ? 24  - 0   ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 345 full, 1 partial, 0 none, 136 unknown, 0 error, 28 n/a.
+COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 346 full, 0 partial, 0 none, 136 unknown, 0 error, 28 n/a.
 
-`legacy_only` (fixtures with no `cells`, graded by run.py only): 228
+`legacy_only` (fixtures with no `cells`, graded by run.py only): 235
 
 ## Cells routed via an alternative mechanism
 

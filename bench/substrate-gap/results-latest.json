@@ -1576,16 +1576,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         1,
         1
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        1,
+        2,
         2
       ],
       "via": "test"
@@ -8541,6 +8539,7 @@
     "fixtures/dart-dio-cascade-client",
     "fixtures/dart-dio-generic-calls",
     "fixtures/dart-extensions-imports",
+    "fixtures/dart-flutter-widgets",
     "fixtures/dart-members",
     "fixtures/dart-plain-import-calls",
     "fixtures/data-entity-literal-shape",
@@ -8574,6 +8573,7 @@
     "fixtures/go-route-struct-routers",
     "fixtures/go-split-receiver",
     "fixtures/go-sql-call-args",
+    "fixtures/go-test-file-routes",
     "fixtures/gqlgen-resolvers",
     "fixtures/graphql-decorator-scope",
     "fixtures/graphql-op-needle-precision",
@@ -8608,6 +8608,8 @@
     "fixtures/kotlin-flip-guard",
     "fixtures/kotlin-ktor-client",
     "fixtures/kotlin-local-receivers",
+    "fixtures/models-declared-fields",
+    "fixtures/models-graphql-stock",
     "fixtures/module-cross-language",
     "fixtures/module-same-group",
     "fixtures/module-synthetic-filename",
@@ -8651,6 +8653,7 @@
     "fixtures/self-scan-literal-channels",
     "fixtures/self-scan-literal-config",
     "fixtures/self-scan-literal-needles",
+    "fixtures/solidity-abi-procedures",
     "fixtures/solidity-natspec",
     "fixtures/solidity-state_var",
     "fixtures/sql-migration-ddl",
@@ -8705,6 +8708,7 @@
     "fixtures/xcut-queue-const-topic",
     "fixtures/xcut-queue-const-topic-java",
     "fixtures/xcut-queue-consumer-callbacks",
+    "fixtures/xcut-queue-go-nats-receivers",
     "fixtures/xcut-queue-mixed-topic-sites",
     "fixtures/xcut-queue-msgtype-go",
     "fixtures/xcut-queue-msgtype-go-mismatch",
@@ -8715,6 +8719,7 @@
     "fixtures/xcut-trpc",
     "fixtures/xcut-twirp-rpc",
     "fixtures/xcut-websocket-client-forms",
+    "fixtures/xcut-websocket-env-base",
     "fixtures/xcut-websocket-generic-route",
     "fixtures/xcut-websocket-go-route",
     "fixtures/xcut-websocket-param-path",
@@ -8844,11 +8849,11 @@
   "totals": {
     "covered": 346,
     "error": 0,
-    "full": 345,
+    "full": 346,
     "grid": 510,
     "n/a": 28,
     "none": 0,
-    "partial": 1,
+    "partial": 0,
     "unknown": 136
   },
   "vocabulary": {

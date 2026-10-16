@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 387,
+  "fixtures": 394,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -457,6 +457,14 @@
         "CALLS": 1.0
       }
     },
+    "dart-flutter-widgets": {
+      "framework": "dart-flutter-widgets",
+      "language": "dart",
+      "per_category": {
+        "CALLS": 1.0,
+        "USES": 1.0
+      }
+    },
     "dart-heritage": {
       "framework": "dart-heritage",
       "language": "dart",
@@ -907,6 +915,13 @@
         "ACCESSES_DATA": 1.0
       }
     },
+    "go-test-file-routes": {
+      "framework": "go-test-file-routes",
+      "language": "go",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
     "go-wire-di": {
       "framework": "go-wire-di",
       "language": "go",
@@ -1306,6 +1321,16 @@
         "IMPORTS": 1.0,
         "INJECTS": 1.0
       }
+    },
+    "models-declared-fields": {
+      "framework": "models-declared-fields",
+      "language": "go",
+      "per_category": {}
+    },
+    "models-graphql-stock": {
+      "framework": "models-graphql-stock",
+      "language": "graphql",
+      "per_category": {}
     },
     "module-cross-language": {
       "framework": "module-cross-language",
@@ -1896,6 +1921,13 @@
       "framework": "self-scan-literal-needles",
       "language": "rust",
       "per_category": {}
+    },
+    "solidity-abi-procedures": {
+      "framework": "solidity-abi-procedures",
+      "language": "solidity",
+      "per_category": {
+        "HANDLED_BY": 1.0
+      }
     },
     "solidity-calls": {
       "framework": "solidity-calls",
@@ -2528,6 +2560,15 @@
         "QUEUE_FLOWS": 1.0
       }
     },
+    "xcut-queue-go-nats-receivers": {
+      "framework": "xcut-queue-go-nats-receivers",
+      "language": "go",
+      "per_category": {
+        "HANDLED_BY": 1.0,
+        "QUEUE_FLOWS": 1.0,
+        "USES": 1.0
+      }
+    },
     "xcut-queue-go-segmentio": {
       "framework": "xcut-queue-go-segmentio",
       "language": "go",
@@ -2660,6 +2701,14 @@
       "framework": "xcut-websocket-client-forms",
       "language": "typescript",
       "per_category": {
+        "WS_CONNECTS": 1.0
+      }
+    },
+    "xcut-websocket-env-base": {
+      "framework": "xcut-websocket-env-base",
+      "language": "typescript",
+      "per_category": {
+        "USES": 1.0,
         "WS_CONNECTS": 1.0
       }
     },
