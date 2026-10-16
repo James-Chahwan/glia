@@ -397,6 +397,10 @@ pub fn extract_grpc_service_nodes(
 ///   - C#     `new Cart.CartServiceClient(channel)` → needle `ServiceClient(`,
 ///            prefix `Cart`, emits `CartService`.
 ///   - Node   `new pb.CartServiceClient(addr, ...)` → same as C#/Go shape.
+///   - Elixir `Shop.CartService.Stub.get_cart(channel, req)` → needle
+///            `Service.Stub.`, prefix `Cart` (the ident walk stops at the
+///            `.` before it, so the `Shop.` namespace is no part of the
+///            name), emits `CartService` (DH.12, elixir-grpc).
 const GRPC_CLIENT_PATTERNS: &[(&str, &str)] = &[
     ("ServiceClient(", "Service"),
     ("SvcClient(", "Svc"),
@@ -405,6 +409,9 @@ const GRPC_CLIENT_PATTERNS: &[(&str, &str)] = &[
     ("ServiceGrpc.newBlockingStub(", "Service"),
     ("ServiceGrpc.newStub(", "Service"),
     ("ServiceGrpc.newFutureStub(", "Service"),
+    // Elixir (elixir-grpc): a call on the generated `<Pkg>.<Service>.Stub` module.
+    ("Service.Stub.", "Service"),
+    ("Svc.Stub.", "Svc"),
 ];
 
 fn is_ident_byte(b: u8) -> bool {
@@ -550,6 +557,9 @@ const DIAL_CALLS: &[(&str, bool)] = &[
     ("Endpoint::from_static(", false),
     // Dart
     ("ClientChannel(", false),
+    // Elixir (elixir-grpc): `GRPC.Stub.connect("orders:50051")`, and
+    // `connect("orders", 50051, opts)`, whose second argument is the port.
+    ("GRPC.Stub.connect(", true),
 ];
 
 /// The target one client construction site dials, as `host[:port]`, or `None`.
@@ -753,8 +763,9 @@ const DECL_MODIFIERS: &[&str] = &[
     "open", "unsafe", "extern", "inline", "sealed", "partial", "readonly",
 ];
 
-/// Keywords that open a function in the languages the client passes read.
-const FUNCTION_WORDS: &[&str] = &["func", "def", "function", "fn", "fun"];
+/// Keywords that open a function in the languages the client passes read
+/// (Elixir's private `defp` beside its `def`).
+const FUNCTION_WORDS: &[&str] = &["func", "def", "defp", "function", "fn", "fun"];
 
 /// Words that open a block that is not a function (or a statement that is
 /// not a declaration): a line starting with one never bounds the search.
@@ -1134,6 +1145,8 @@ const GRPC_CONTEXT_NEEDLES: &[&str] = &[
     "grpcpp",
     // Dart
     "package:grpc/",
+    // Elixir (elixir-grpc): `GRPC.Stub.connect(..)`, `use GRPC.Stub, service: ..`
+    "GRPC.Stub",
 ];
 
 /// True when `source` carries any [`GRPC_CONTEXT_NEEDLES`] entry.
@@ -1165,6 +1178,8 @@ const CLIENT_SUFFIXES: &[&str] = &[
     "::Stub.new(",
     // C++ `Greeter::NewStub(`
     "::NewStub(",
+    // Elixir (elixir-grpc) `Helloworld.Greeter.Stub.say_hello(channel, req)`
+    ".Stub.",
 ];
 
 /// The data-driven client pass: a GRPC_CLIENT for every `known` service whose
@@ -3761,5 +3776,114 @@ let db = makeDbClient(uri);
         let out = extract_known_grpc_client_nodes(mixed, "src/orders.rs", module_id(), repo(), &[svc("OrderService")]);
         assert_eq!(client_qnames(&out), vec!["grpc_client:OrderService".to_string()]);
         assert_eq!(out.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![3]);
+    }
+
+    // ---- DH.12: elixir-grpc stubs -----------------------------------------
+
+    /// The matrix probe's client: `Shop.OrderService.Stub.get_order(channel,
+    /// ..)` mints one `OrderService` client through the suffix pass with no
+    /// proto in the client repo, and the `Shop.` namespace is no part of the
+    /// name. The stub module's own definition and an `alias` of it call nothing.
+    #[test]
+    fn elixir_stub_call_mints_client() {
+        let ex = include_str!("../../../../bench/substrate-gap/matrix/elixir/grpc/client/lib/order_client.ex");
+        let out = extract_grpc_client_nodes(ex, "lib/order_client.ex", module_id(), repo());
+        assert_eq!(client_qnames(&out), vec!["grpc_client:OrderService".to_string()]);
+        let id = out.nodes[0].id;
+        assert_eq!(out.nav.kind_by_id[&id], node_kind::GRPC_CLIENT);
+        assert_eq!(out.nav.name_by_id[&id], "OrderService");
+        assert_eq!(out.nav.parent_of[&id], module_id());
+        assert_eq!(out.anchors, vec![Anchor { node: id, line: 3 }]);
+
+        // `Svc`, and the pipe form the elixir-grpc README uses.
+        let pipe = "defmodule Billing.Client do\n  def charge(req) do\n    {:ok, ch} = GRPC.Stub.connect(\"pay:9000\")\n    ch |> Billing.PaySvc.Stub.charge(req)\n  end\nend\n";
+        let out = extract_grpc_client_nodes(pipe, "lib/billing.ex", module_id(), repo());
+        assert_eq!(client_qnames(&out), vec!["grpc_client:PaySvc".to_string()]);
+
+        let decl = "defmodule Shop.OrderService.Stub do\n  use GRPC.Stub, service: Shop.OrderService.Service\nend\n\ndefmodule Shop.Other do\n  alias Shop.OrderService.Stub\nend\n";
+        assert!(extract_grpc_client_nodes(decl, "lib/stub.ex", module_id(), repo()).nodes.is_empty());
+        let known = extract_known_grpc_client_nodes(decl, "lib/stub.ex", module_id(), repo(), &[svc("OrderService")]);
+        assert!(known.nodes.is_empty(), "a definition is no call site");
+    }
+
+    /// CB.21 over elixir-grpc: `GRPC.Stub.connect("host:port")` and the
+    /// three-argument `connect(host, port, opts)` name the host the stub
+    /// below them dials; a `defp` bounds the search, so a function handed its
+    /// channel records no host.
+    #[test]
+    fn elixir_stub_dial_host() {
+        let ex = "defmodule Orders.Client do\n\
+                  \x20 def fetch(id) do\n\
+                  \x20   {:ok, channel} = GRPC.Stub.connect(\"orders:50051\")\n\
+                  \x20   Shop.OrderService.Stub.get_order(channel, Shop.OrderRequest.new(id: id))\n\
+                  \x20 end\n\n\
+                  \x20 def fetch_split(id) do\n\
+                  \x20   {:ok, channel} = GRPC.Stub.connect(\"orders\", 50051, interceptors: [GRPC.Client.Interceptors.Logger])\n\
+                  \x20   channel |> Shop.OrderService.Stub.get_order(Shop.OrderRequest.new(id: id))\n\
+                  \x20 end\n\n\
+                  \x20 defp handed(channel, id) do\n\
+                  \x20   Shop.OrderService.Stub.get_order(channel, Shop.OrderRequest.new(id: id))\n\
+                  \x20 end\n\
+                  end\n";
+        let out = extract_grpc_client_nodes(ex, "lib/orders.ex", module_id(), repo());
+        assert_eq!(client_qnames(&out), vec!["grpc_client:OrderService".to_string()]);
+        assert_eq!(
+            dial_hits(&out),
+            vec![vec![host("orders:50051"), host("orders:50051"), r#"{"via":"grpc"}"#.to_string()]]
+        );
+        assert!(opens_function("defp handed(channel, id) do"));
+        assert!(opens_function("def get do"));
+        // The probe's own client file.
+        let probe = include_str!("../../../../bench/substrate-gap/matrix/elixir/grpc/client/lib/order_client.ex");
+        let out = extract_grpc_client_nodes(probe, "lib/order_client.ex", module_id(), repo());
+        assert_eq!(dial_hits(&out), vec![vec![host("localhost:50051")]]);
+    }
+
+    /// The known pass reads `<Service>.Stub.` for a service with no `Service`
+    /// / `Svc` suffix (hexdocs' `Helloworld.Greeter.Stub.say_hello`), only in
+    /// a file with gRPC context, which `GRPC.Stub` gives Elixir. DE.8: a
+    /// generated `.pb.ex` yields nothing through either pass.
+    #[test]
+    fn elixir_stub_needs_grpc_context_for_known_pass() {
+        let with = "defmodule Hello do\n  def run do\n    {:ok, channel} = GRPC.Stub.connect(\"localhost:50051\")\n    {:ok, reply} = channel |> Helloworld.Greeter.Stub.say_hello(Helloworld.HelloRequest.new(name: \"x\"))\n    reply\n  end\nend\n";
+        assert!(file_has_grpc_context(with));
+        let out = extract_known_grpc_client_nodes(with, "lib/hello.ex", module_id(), repo(), &[svc("Greeter")]);
+        assert_eq!(client_qnames(&out), vec!["grpc_client:Greeter".to_string()]);
+        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 3 }]);
+        assert_eq!(dial_hits(&out), vec![vec![host("localhost:50051")]]);
+        assert!(
+            extract_grpc_client_nodes(with, "lib/hello.ex", module_id(), repo()).nodes.is_empty(),
+            "Greeter has no Service suffix: the suffix pass is blind to it"
+        );
+
+        // A channel handed in and nothing naming GRPC.Stub: no context, no client.
+        let without = "defmodule Hello do\n  def run(channel, req) do\n    Helloworld.Greeter.Stub.say_hello(channel, req)\n  end\nend\n";
+        assert!(!file_has_grpc_context(without));
+        assert!(extract_known_grpc_client_nodes(without, "lib/hello.ex", module_id(), repo(), &[svc("Greeter")]).nodes.is_empty());
+
+        let generated = "defmodule Shop.OrderService.Stub do\n  use GRPC.Stub, service: Shop.OrderService.Service\nend\n\ndefmodule Shop.Warm do\n  def warm(ch), do: Shop.OrderService.Stub.get_order(ch, nil)\nend\n";
+        assert!(extract_grpc_client_nodes(generated, "lib/shop.pb.ex", module_id(), repo()).nodes.is_empty());
+        assert!(
+            extract_known_grpc_client_nodes(generated, "lib/shop.pb.ex", module_id(), repo(), &[svc("OrderService")])
+                .nodes
+                .is_empty()
+        );
+        // The same text hand-written mints its one call site.
+        let hand = extract_grpc_client_nodes(generated, "lib/shop.ex", module_id(), repo());
+        assert_eq!(client_qnames(&hand), vec!["grpc_client:OrderService".to_string()]);
+        assert_eq!(hand.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![5]);
+    }
+
+    /// Ruby's `Shop::OrderService::Stub.new(` still reads through the known
+    /// pass's `::Stub.new(` alone: the Elixir `.Stub.` needles never fire on
+    /// it, so one node with one site, and the suffix pass stays blind to it.
+    #[test]
+    fn ruby_stub_new_unchanged() {
+        let rb = "require 'grpc'\nrequire 'order_services_pb'\n\ndef fetch\n  stub = Shop::OrderService::Stub.new('orders:50051', :this_channel_is_insecure)\n  stub.get_order(Shop::OrderRequest.new(id: '1'))\nend\n";
+        let out = extract_known_grpc_client_nodes(rb, "lib/fetch.rb", module_id(), repo(), &[svc("OrderService")]);
+        assert_eq!(client_qnames(&out), vec!["grpc_client:OrderService".to_string()]);
+        assert_eq!(out.anchors, vec![Anchor { node: out.nodes[0].id, line: 4 }]);
+        assert_eq!(dial_hits(&out), vec![vec![host("orders:50051")]]);
+        assert!(extract_grpc_client_nodes(rb, "lib/fetch.rb", module_id(), repo()).nodes.is_empty());
     }
 }
