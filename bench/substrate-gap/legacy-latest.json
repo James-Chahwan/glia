@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 399,
+  "fixtures": 401,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -35,6 +35,14 @@
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "angular-template-receivers": {
+      "framework": "angular-template-receivers",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "USES": 1.0
       }
     },
     "angular-template-url-bindings": {
@@ -1338,7 +1346,9 @@
     "models-go-wire": {
       "framework": "models-go-wire",
       "language": "go",
-      "per_category": {}
+      "per_category": {
+        "USES": 1.0
+      }
     },
     "models-graphql-stock": {
       "framework": "models-graphql-stock",
@@ -2274,6 +2284,16 @@
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "ts-reexport-barrels": {
+      "framework": "ts-reexport-barrels",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0,
+        "INHERITS_FROM": 1.0,
+        "INJECTS": 1.0
       }
     },
     "ts-route-per-method": {

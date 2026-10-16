@@ -8497,6 +8497,7 @@
   "legacy_only": [
     "fixtures/angular-base-url",
     "fixtures/angular-inline-template-bindings",
+    "fixtures/angular-template-receivers",
     "fixtures/angular-template-url-bindings",
     "fixtures/arch-monorepo-flows",
     "fixtures/arch-monorepo-http",
@@ -8683,6 +8684,7 @@
     "fixtures/ts-inherited-calls",
     "fixtures/ts-method-by-value",
     "fixtures/ts-query-suffix-endpoints",
+    "fixtures/ts-reexport-barrels",
     "fixtures/ts-route-per-method",
     "fixtures/ts-signal-state-fields",
     "fixtures/ts-signal-xfile-reads",
