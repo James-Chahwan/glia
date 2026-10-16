@@ -29,7 +29,8 @@
 //! bash scripts/check-engram-export.sh
 //! engram-export/target/debug/glia-export-engram <repo> --out <file> \
 //!     [--since <prior>] [--no-persist] [--include-noise] \
-//!     [--exclude <glob>]... [--exclude-path <glob>]...
+//!     [--exclude <glob>]... [--exclude-path <glob>]... \
+//!     [--ppr-candidates <K>]
 //! ```
 //!
 //! `--exclude` drops nodes by KEY (the qname); `--exclude-path` drops every
@@ -61,9 +62,10 @@
 //! an untouched node keeps its bytes, and `<out>.diff` gets the bincode
 //! `GmapDiff` from the prior (base) to this export (target), named by both
 //! gmaps' content digests; with no change it is still written, with every list
-//! empty. Write order: `<out>.diff` beside `--out` is deleted first on every
-//! run, then the full gmap, `<out>.files.json` and `<out>.meta.json` are
-//! written (the next run's base), then the diff, then `<out>.glia/`. A run
+//! empty. Write order: `<out>.diff` and `<out>.ppr.jsonl` beside `--out` are
+//! deleted first on every run, then the full gmap, `<out>.files.json` and
+//! `<out>.meta.json` are written (the next run's base), then the diff, then
+//! (with `--ppr-candidates`) the PPR side file, then `<out>.glia/`. A run
 //! refused (exit 6) or failing before the gmap write writes no meta. A run
 //! that stops between the gmap and the diff leaves a full gmap and no diff
 //! (Engram re-seeds from it); a diff that cannot be written is exit 7.
@@ -73,18 +75,31 @@
 //! origin URL, or its directory name outside git), and the export orders by
 //! content alone. `[engram-export] v6 order: <e> edges sorted by key; hint row
 //! ties by qname=<t>; key ties by kind=<k>` reports the content tie-breaks.
+//!
+//! `--ppr-candidates <K>` (1..=200; DE.5) also writes `<out>.ppr.jsonl`: each
+//! Symbol and Proposition fact's top-K approximate personalised PageRank
+//! neighbours over the exported edges (`glia_engram_export::ppr_side`), its
+//! header naming the gmap's content digest, and prints `[engram-export] ppr
+//! side: <facts> facts, k=<K>, <pushes> pushes, <ms> ms -> <path>` after the
+//! `glia build=` line. It is data for Engram, never read by glia, and the
+//! gmap, sidecar, meta and diff bytes are the same with or without it. A run
+//! without the flag leaves no side file: the stale one named another digest.
+//! A side file that cannot be removed is exit 5, one that cannot be written
+//! exit 8 (the gmap, its sidecars and the diff are already complete).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use clap::Parser;
 use engram_core::{GMAP_FORMAT_VERSION, Gmap};
 use glia_engine::persist::{load_layout, persist_graph};
 use glia_engine::{GenerateResult, ParseCache, generate_one, generate_one_with_cache};
 use glia_engram_export::diff::{diff_gmaps, diff_path, read_gmap, write_diff};
+use glia_engram_export::ppr_side::{PprSideStats, write_ppr_side};
 use glia_engram_export::{
-    ExportOptions, build_gmap, history_dir, meta_path, position_paths, prior_tokens, sidecar_path,
-    write_engram_gmap,
+    ExportOptions, build_gmap, history_dir, meta_path, position_paths, ppr_side_path, prior_tokens,
+    sidecar_path, write_engram_gmap,
 };
 use glia_graph::identity::{MoveMap, carry_file_tokens, detect_moves};
 
@@ -122,6 +137,11 @@ struct Args {
     /// Repeatable.
     #[arg(long = "exclude-path")]
     exclude_path: Vec<String>,
+    /// Also write `<out>.ppr.jsonl`: each fact's top-K personalised PageRank
+    /// neighbours over the exported edges, bound to the gmap by its digest
+    /// (data for Engram; the gmap is unchanged). K is 1..=200.
+    #[arg(long = "ppr-candidates", value_name = "K", value_parser = clap::value_parser!(u16).range(1..=200))]
+    ppr_candidates: Option<u16>,
 }
 
 fn main() {
@@ -267,6 +287,15 @@ fn run(args: &Args) -> i32 {
         eprintln!("error removing the stale diff {}: {e}", diff_out.display());
         return 5;
     }
+    // The PPR side file names the gmap it was computed from: the same rule.
+    // Without --ppr-candidates nothing writes it back, so none is left.
+    let side_out = ppr_side_path(&out_path);
+    if let Err(e) = std::fs::remove_file(&side_out)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("error removing the stale PPR side file {}: {e}", side_out.display());
+        return 5;
+    }
     stats.digest = match write_engram_gmap(&gmap, &out_path) {
         Ok(d) => d,
         Err(e) => {
@@ -284,6 +313,24 @@ fn run(args: &Args) -> i32 {
                 Err(e) => {
                     eprintln!("error writing the diff {}: {e}", diff_out.display());
                     code = 7;
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+    // The PPR candidate side file (DE.5), after the gmap whose digest its
+    // header names. Opt-in, so a failure is its own exit code.
+    let side: Option<(PprSideStats, u128)> = match args.ppr_candidates {
+        Some(k) => {
+            let started = Instant::now();
+            match write_ppr_side(&gmap, stats.digest, usize::from(k), &side_out) {
+                Ok(s) => Some((s, started.elapsed().as_millis())),
+                Err(e) => {
+                    eprintln!("error writing the PPR side file {}: {e}", side_out.display());
+                    if code == 0 {
+                        code = 8;
+                    }
                     None
                 }
             }
@@ -335,6 +382,18 @@ fn run(args: &Args) -> i32 {
         GMAP_FORMAT_VERSION,
         meta_path(&out_path).display(),
     );
+    // The DE.5 marker, only with --ppr-candidates: the rows written (one per
+    // Symbol / Proposition fact), K, the pushes over every fact's run, and the
+    // wall time of computing and writing them.
+    if let Some((s, ms)) = side {
+        eprintln!(
+            "[engram-export] ppr side: {} facts, k={}, {} pushes, {ms} ms -> {}",
+            s.facts,
+            s.k,
+            s.pushes,
+            side_out.display(),
+        );
+    }
     // The v6 since marker (LG.8a): the diff just written, by digest and
     // counts, and what the parse cache reused for this build (since the cache
     // was last saved, by any writer: not the export diff).

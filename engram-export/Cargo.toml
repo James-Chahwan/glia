@@ -9,6 +9,9 @@ description = "Export a resolved glia MergedGraph as an engram_core::Gmap bincod
 glia-core = { path = "../core" }
 glia-code-domain = { path = "../code-domain" }
 glia-graph = { path = "../graph" }
+# activation::algo::ppr (DE.5): the push PPR behind the `--ppr-candidates`
+# side file. Already in the tree through glia-engine; this is one more edge.
+glia-activation = { path = "../activation" }
 # For the `glia-export-engram` bin (the `export-engram` subcommand moved out of
 # `cli` so the engine workspace stays free of the cross-repo engram-core dep).
 glia-engine = { path = "../engine" }
