@@ -51,7 +51,24 @@
 //!   else `contract_field_unset`. Both: JSON kinds that differ while both
 //!   are known (`wire::json_schema_kind` on the op's side) are
 //!   `contract_type_mismatch` (breaking). One row per (op, direction, client
-//!   model or call site) and verdict.
+//!   model or call site) and verdict;
+//! - `graphql_selection` (DT.1n): a GraphQL operation's selection under one
+//!   root field against the SDL type that root field returns, as
+//!   `glia_graph::graphql_pairs` compared them over the GRAPHQL_CALLS
+//!   pairing. Key `<op type> <op name> <root field>` (`query StockList
+//!   products`); producer = the schema type (MESSAGE_TYPE
+//!   `message:graphql:<T>`; the root field's GRAPHQL_RESOLVER when no type
+//!   node models it), consumer = the operation. Section `selection`: a
+//!   selected field the type does not declare is `consumer_only`, rule
+//!   `graphql_field_undefined` (breaking), named by its schema-field path
+//!   (`barcode`, `owner.email`; an alias resolved, the consumer text
+//!   `code: barcode`). A schema field the selection leaves out is no change
+//!   (a selection is a projection by design); variables and input types are
+//!   not compared. A refused pair is `unknown` with its reason
+//!   (`conflicting_selection`, `conflicting_returns`, `conflicting_fields`,
+//!   `no_fields`, `owner_mismatch`, `root_field_unmatched`); a root type no
+//!   MESSAGE_TYPE models (a union) is `unknown`, note `open`. One row per
+//!   (op, root field, schema type) and verdict.
 //!
 //! The rules are FACT-level statements about declared schemas; the pairing is
 //! DERIVED, hence every row's `tier`. Nothing is guessed: a side with no
@@ -73,8 +90,11 @@
 //! Fired-on marker, printed once per call that returns rows:
 //! `[contract-fields] pairs=<rows> schema_copy=.. topic=.. channel=.. route=..
 //! identical=.. compatible=.. breaking=.. unknown=.. http_model=..
-//! client_contract=..`; the wire compare's own `[models] pairs=..` line
-//! (`WirePairs::marker`) precedes it when any exchange was compared.
+//! client_contract=.. graphql_selection=..`; the wire compare's own
+//! `[models] pairs=..` line (`WirePairs::marker`) precedes it when any
+//! exchange was compared, and the GraphQL compare's `[models] graphql
+//! pairs=.. undefined_fields=.. open=.. refused=..` (`GraphqlPairs::marker`)
+//! when any GRAPHQL_CALLS pair had a selection to compare.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -87,7 +107,7 @@ use glia_code_domain::{cell_type, edge_category, node_kind, same_as};
 use glia_core::{Cell, CellPayload, Edge, NodeId, RepoId};
 use glia_graph::{
     ClientWire, MergedGraph, ResolvedField, ResolvedShape, WireChange, WireDirection, WirePair,
-    client_wires, normalise_http_path, wire_pairs,
+    client_wires, graphql_pairs, normalise_http_path, wire_pairs,
 };
 use serde_json::Value;
 
@@ -121,19 +141,23 @@ pub struct FieldChange {
     /// `fields` (proto / Avro), `request`, `response:<code>` or
     /// `payload[:<name>]`; `response` / `request` for an `http_model` row
     /// (DT.1i), the op's `response:<code>` / `request` for a
-    /// `client_contract` row.
+    /// `client_contract` row; `selection` for a `graphql_selection` row
+    /// (DT.1n).
     pub section: String,
     /// The flattened field name (`a.b`, `lines[].sku`); the producer's name
     /// when both sides declare it. An `http_model` change names the client's
     /// JSON path (`items[].sku`, `[].id` under a root array; the server's for
     /// a server-only name); a `client_contract` change the OpenAPI spelling
-    /// (`tags[]`, `items[].sku`, `$` for a scalar body).
+    /// (`tags[]`, `items[].sku`, `$` for a scalar body); a
+    /// `graphql_selection` change the schema-field path below the root field
+    /// (`barcode`, `owner.email`).
     pub field: String,
     /// `type`, `number`, `name`, `label`, `reserved`, `producer_only`,
     /// `consumer_only` or `unknown`; CC.8a's contract breaks add `required`
     /// (a field's requiredness changed) and `section` (a whole section
     /// declared on one side only); an `http_model` row's `required` is a
-    /// name the client requires and the server may omit.
+    /// name the client requires and the server may omit (a response) or the
+    /// server's binder requires and the client may leave out (a request).
     pub change: &'static str,
     /// The producer's type (a proto field number for `number`, the name for
     /// `name`, `reserved` for the side that reserves it).
@@ -149,11 +173,12 @@ pub struct FieldChange {
 #[non_exhaustive]
 pub struct FieldDiffRow {
     /// `schema_copy` | `topic` | `channel` | `route` | `http_model` |
-    /// `client_contract`.
+    /// `client_contract` | `graphql_selection`.
     pub pairing: &'static str,
     /// The message's qualified name, the topic, the channel, or `METHOD
     /// path`; `METHOD path response|request` for a model pairing (the
-    /// route's path for `http_model`, the op's for `client_contract`).
+    /// route's path for `http_model`, the op's for `client_contract`);
+    /// `<op type> <op name> <root field>` for `graphql_selection`.
     pub key: String,
     pub producer: FieldSide,
     pub consumer: FieldSide,
@@ -296,12 +321,13 @@ pub fn contract_fields(merged: &MergedGraph) -> Vec<FieldDiffRow> {
     }
 
     rows.extend(model_rows(merged, &holders, &loc, &mut side));
+    rows.extend(graphql_rows(merged, &loc));
 
     rows.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
     if !rows.is_empty() {
         let n = |f: &dyn Fn(&FieldDiffRow) -> bool| rows.iter().filter(|r| f(r)).count();
         eprintln!(
-            "[contract-fields] pairs={} schema_copy={} topic={} channel={} route={} identical={} compatible={} breaking={} unknown={} http_model={} client_contract={}",
+            "[contract-fields] pairs={} schema_copy={} topic={} channel={} route={} identical={} compatible={} breaking={} unknown={} http_model={} client_contract={} graphql_selection={}",
             rows.len(),
             n(&|r| r.pairing == "schema_copy"),
             n(&|r| r.pairing == "topic"),
@@ -313,6 +339,7 @@ pub fn contract_fields(merged: &MergedGraph) -> Vec<FieldDiffRow> {
             n(&|r| r.status == "unknown"),
             n(&|r| r.pairing == HTTP_MODEL),
             n(&|r| r.pairing == CLIENT_CONTRACT),
+            n(&|r| r.pairing == GRAPHQL_SELECTION),
         );
     }
     rows
@@ -1893,8 +1920,9 @@ fn wire_row(
 /// `consumer_only`, a server-only one (`json_field_unread`) `producer_only`,
 /// `json_field_may_be_absent` `required`; request: a client-only name
 /// (`json_field_dropped`) is `producer_only`, a server-only one
-/// (`json_required_missing`, `json_field_unset`) `consumer_only`; both:
-/// `json_type_mismatch` is `type`.
+/// (`json_required_missing`, `json_field_unset`) `consumer_only`,
+/// `json_required_may_be_unset` (the binder requires a name the client marks
+/// optional, DT.1n) `required`; both: `json_type_mismatch` is `type`.
 fn wire_change(dir: Dir, c: &WireChange) -> (&'static str, Option<&str>, Option<&str>) {
     let (client, server) = (c.client.as_deref(), c.server.as_deref());
     let (prod, cons) = match dir {
@@ -1903,7 +1931,7 @@ fn wire_change(dir: Dir, c: &WireChange) -> (&'static str, Option<&str>, Option<
     };
     let change = match c.rule {
         "json_type_mismatch" => "type",
-        "json_field_may_be_absent" => "required",
+        "json_field_may_be_absent" | "json_required_may_be_unset" => "required",
         _ => match (prod, cons) {
             (Some(_), None) => "producer_only",
             (None, Some(_)) => "consumer_only",
@@ -1941,6 +1969,73 @@ fn op_section(s: &Schema, dir: Dir) -> Option<(&str, &[Field])> {
                 })
         }
     }
+}
+
+// ---- GraphQL selection drift: graphql_selection (DT.1n) --------------------
+
+const GRAPHQL_SELECTION: &str = "graphql_selection";
+/// The section every `graphql_selection` change names.
+const SELECTION_SECTION: &str = "selection";
+
+/// Every `graphql_selection` row of `merged` (module doc), from DT.1n's
+/// [`graphql_pairs`]: one per (op, root field, schema type) and verdict.
+fn graphql_rows(merged: &MergedGraph, loc: &Locator<'_>) -> Vec<FieldDiffRow> {
+    let gp = graphql_pairs(merged);
+    if gp.pairs.is_empty() {
+        return Vec::new();
+    }
+    eprintln!("{}", gp.marker());
+    let wanted: BTreeSet<u64> = gp
+        .pairs
+        .iter()
+        .flat_map(|p| [Some(p.op), Some(p.resolver), p.schema_type])
+        .flatten()
+        .map(|n| n.0)
+        .collect();
+    let facts = NodeFacts::new(merged, &wanted);
+    let format = Some(WireFormat::Graphql);
+    type Seen<'a> = (u64, &'a str, u64, Vec<(&'a str, &'static str)>, Option<&'static str>);
+    let mut seen: BTreeSet<Seen<'_>> = BTreeSet::new();
+    let mut out = Vec::new();
+    for p in &gp.pairs {
+        let producer_id = p.schema_type.unwrap_or(p.resolver);
+        let note = p
+            .refused
+            .or_else(|| p.notes.contains(&NOTE_OPEN).then_some(NOTE_OPEN));
+        let sig = p.changes.iter().map(|c| (c.path.as_str(), c.rule)).collect();
+        if !seen.insert((p.op.0, p.root_field.as_str(), producer_id.0, sig, note)) {
+            continue;
+        }
+        let key = format!("{} {} {}", p.op_type, p.op_name, p.root_field);
+        let producer = facts.model(loc, producer_id, format);
+        let consumer = facts.site(loc, p.op, format, None, None);
+        out.push(match (p.refused, p.schema_type) {
+            (Some(reason), _) => row(GRAPHQL_SELECTION, key, producer, consumer, Err(reason)),
+            // The root's own type is modelled by no node (a union): nothing
+            // was compared.
+            (None, None) => row(GRAPHQL_SELECTION, key, producer, consumer, Err(NOTE_OPEN)),
+            (None, Some(_)) => {
+                let mut d = Diff::default();
+                for c in &p.changes {
+                    let field = c.path.rsplit('.').next().unwrap_or(&c.path);
+                    let selected = if c.key == field {
+                        c.key.clone()
+                    } else {
+                        format!("{}: {field}", c.key)
+                    };
+                    d.push(
+                        (SELECTION_SECTION, &c.path),
+                        "consumer_only",
+                        (None, Some(&selected)),
+                        c.rule,
+                        c.breaking,
+                    );
+                }
+                noted_row(GRAPHQL_SELECTION, key, producer, consumer, d, note)
+            }
+        });
+    }
+    out
 }
 
 // ---- the client's side of a contract op (OpenAPI spelling) -----------------

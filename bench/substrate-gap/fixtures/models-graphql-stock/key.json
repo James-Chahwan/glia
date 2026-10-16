@@ -2,9 +2,13 @@
   "framework": "models-graphql-stock",
   "language": "graphql",
   "dirs": ["console", "api"],
-  "note": "DT.1j (T1 GraphQL schema vs selection, extraction half): the SDL object type `type Item` is a MESSAGE_TYPE `message:graphql:Item` with its declared fields as SCHEMA_FIELDS (format graphql), a root field carries its return type as a graphql_returns MESSAGE_TYPE cell, and an operation carries its selection set as a graphql_selection MESSAGE_TYPE cell. The console selects `barcode`, which `type Item` lacks (DT.1n judges it). HEAD 2b80361b (verifier, on a copy): no MESSAGE_TYPE node, `[graphql-sdl] files=1 resolvers=4`; graded node 0/1, cells 0/3, forbid 0.",
+  "note": "DT.1j (T1 GraphQL schema vs selection, extraction half): the SDL object type `type Item` is a MESSAGE_TYPE `message:graphql:Item` with its declared fields as SCHEMA_FIELDS (format graphql), a root field carries its return type as a graphql_returns MESSAGE_TYPE cell, and an operation carries its selection set as a graphql_selection MESSAGE_TYPE cell. The console selects `barcode`, which `type Item` lacks. HEAD 2b80361b (verifier, on a copy): no MESSAGE_TYPE node, `[graphql-sdl] files=1 resolvers=4`; graded node 0/1, cells 0/3, forbid 0. DT.1n (the compare half) judges each GRAPHQL_CALLS op's selection against the type its root field returns, so it needs both pairings: AdjustStock -> adjustStock and ListItems -> items, the second by the root field its document selects (DT.11a; the op name ListItems keys no resolver). Graded at d8051a4b (DT.11a landed in w15): GRAPHQL_CALLS 2/2. The verdicts are contract_fields rows, which no key field expresses: engine/tests/model_graphql.rs pins `mutation AdjustStock adjustStock` identical and `query ListItems items` breaking (barcode graphql_field_undefined).",
   "expect_nodes": [
     {"kind": "MESSAGE_TYPE", "name": "message:graphql:Item", "exact": true, "note": "the SDL object type, one node"}
+  ],
+  "expect_edges": [
+    {"from": "graphql_op:AdjustStock", "to": "graphql_resolver:adjustStock", "category": "GRAPHQL_CALLS", "exact": true, "note": "the mutation's root field adjustStock (its op name keys it too)"},
+    {"from": "graphql_op:ListItems", "to": "graphql_resolver:items", "category": "GRAPHQL_CALLS", "exact": true, "note": "the query's root field items (DT.11a): the op name ListItems keys nothing"}
   ],
   "expect_cells": [
     {"kind": "GRAPHQL_OPERATION", "node": "graphql_op:ListItems", "cell": "MESSAGE_TYPE", "contains": "\"name\":\"barcode\"", "note": "the operation's selection set, nested under items"},

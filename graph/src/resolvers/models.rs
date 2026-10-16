@@ -76,7 +76,9 @@
 //! server may omit (omitempty) `json_field_may_be_absent`. A request (the
 //! client produces): a client-only name is `json_field_dropped`; a
 //! server-only name `json_required_missing` (breaking) when the binder
-//! requires it, else `json_field_unset`. Both: JSON kinds that differ while
+//! requires it, else `json_field_unset`; a name the binder requires and the
+//! client marks optional `json_required_may_be_unset` (breaking: a body
+//! without it is a 400; DT.1n closed this gap). Both: JSON kinds that differ while
 //! both are known, array against scalar included, are `json_type_mismatch`
 //! (breaking); an unknown name is an object only when it resolved to a
 //! model, else (like any / null, a call no builder typed, an open value)
@@ -103,10 +105,32 @@
 //! pairs two unrelated structs joins nothing, and two client models of one
 //! project paired with one struct are both dropped ([`ModelResolver`] has the
 //! rules and its marker, `[models] classes=..`).
+//!
+//! **DT.1n: GraphQL selection drift.** [`graphql_pairs`] reads every
+//! GRAPHQL_CALLS op -> resolver pair the `graphql` resolver drew (DT.11a:
+//! by the root fields the op's document selects) and compares the op's
+//! selection (DT.1j's `graphql_selection` MESSAGE_TYPE cell) under that root
+//! field with the SDL type the root field returns (its `graphql_returns`
+//! cell names `T`; the type is the MESSAGE_TYPE `message:graphql:<T>` plus
+//! the resolver's owner segment, in the resolver's repo). A selected field
+//! the type does not declare is `graphql_field_undefined` (breaking: the
+//! server rejects the document). Object-typed fields with a sub-selection
+//! recurse into the type their declared type names. A schema field the
+//! selection does not ask for is no change: a selection is a projection by
+//! design. Nothing is claimed absent from an open side (note `open`): an
+//! extend-only type or one with a template hole, an interface type, a
+//! selection with an inline fragment or an unknown spread, a sub-selected
+//! field whose type names no MESSAGE_TYPE (a union, a type outside the
+//! build). A pair is refused (nothing compared, the reason kept) on
+//! conflicting copies (two selections, return types or field lists of one
+//! node), on a type that exists only under another owner, or when no root
+//! selection names the resolver's field. Variables and input types are not
+//! compared. See [`GraphqlPairs::marker`] for the fired_on line, printed by
+//! contract_fields (DT.1n's `graphql_selection` rows) and the engine test.
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_activation::profile::IdentityTier;
 use glia_code_domain::endpoint::{http_node_span, split_owner};
@@ -114,8 +138,8 @@ use glia_code_domain::evidence::{Basis, Evidence, locate};
 use glia_code_domain::profile::CODE_TABLES;
 use glia_code_domain::same_as;
 use glia_code_domain::wire::{
-    JsonKind, ModelField, ModelSchema, ServerWire, Shape, WireForm, WireFormat, element_type,
-    hit_shapes, json_kind,
+    JsonKind, ModelField, ModelSchema, ServerWire, Shape, ShapeField, WireForm, WireFormat,
+    element_type, hit_shapes, json_kind,
 };
 use glia_code_domain::{cell_type, edge_category, node_kind};
 use glia_core::{CellPayload, Confidence, Edge, NodeId, NodeKindId, RepoId};
@@ -1354,6 +1378,10 @@ const FIELD_DROPPED: &str = "json_field_dropped";
 const REQUIRED_MISSING: &str = "json_required_missing";
 /// Request: a name the server binds and the client never sends.
 const FIELD_UNSET: &str = "json_field_unset";
+/// Request: a name the server's binder requires and the client may leave
+/// out (`discount?: string` against Go `binding:"required"`): a body
+/// without it is a 400 (DT.1n, the DT.1m request gap).
+const REQUIRED_MAY_BE_UNSET: &str = "json_required_may_be_unset";
 
 /// The handler has several distinct 2xx shapes and none overlaps the client
 /// most (a response), or several distinct binds (a request): nothing is
@@ -1376,11 +1404,12 @@ pub struct WireChange {
     /// `json_field_missing`, `json_field_optional_absent`,
     /// `json_field_unread`, `json_field_may_be_absent`,
     /// `json_type_mismatch` (a response); `json_field_dropped`,
-    /// `json_required_missing`, `json_field_unset`, `json_type_mismatch` (a
-    /// request).
+    /// `json_required_missing`, `json_required_may_be_unset`,
+    /// `json_field_unset`, `json_type_mismatch` (a request).
     pub rule: &'static str,
-    /// `json_field_missing`, `json_required_missing` and
-    /// `json_type_mismatch` break the exchange.
+    /// `json_field_missing`, `json_required_missing`,
+    /// `json_required_may_be_unset` and `json_type_mismatch` break the
+    /// exchange.
     pub breaking: bool,
     /// The client's type text at `path` (declared, else as written); `None`
     /// when the client does not list the name.
@@ -2125,6 +2154,12 @@ impl Compared {
                 self.push(&at, FIELD_MAY_BE_ABSENT, false, Some(ct), Some(st));
                 own += 1;
             }
+            if self.dir == WireDirection::Request && !cf.required && sf.bind_required {
+                let ct = type_text(cf.declared.as_deref(), &cf.value);
+                let st = type_text(sf.declared.as_deref(), &sf.value);
+                self.push(&at, REQUIRED_MAY_BE_UNSET, true, Some(ct), Some(st));
+                own += 1;
+            }
             own += self.values(
                 cf.declared.as_deref(),
                 &cf.value,
@@ -2504,6 +2539,615 @@ fn model_identity(m: &MergedGraph) -> (Vec<Edge>, Option<ModelReport>) {
     report.edges = edges.len();
     report.tally.add(same_as::RULE_HTTP_MODEL, edges.len());
     (edges, Some(report))
+}
+
+// ---- DT.1n: GraphQL selection drift ----------------------------------------
+
+/// The emitter of the GRAPHQL_CALLS edges a selection is paired by
+/// (graph/src/resolvers/graphql.rs). An overlay `[[edge]]` lands in Post and
+/// is not read, so the answer does not depend on when it is asked.
+const GRAPHQL_EMITTER: &str = "resolver:graphql";
+/// DT.1j's SDL type qname prefix (`message:graphql:<T>`, plus ` @owner`).
+const GRAPHQL_TYPE: &str = "message:graphql:";
+/// An operation's qname prefix.
+const GRAPHQL_OP: &str = "graphql_op:";
+/// A root field's qname prefix.
+const GRAPHQL_FIELD: &str = "graphql_resolver:";
+/// How many selection levels a compare descends: the selection reader's
+/// own depth (parsers/code/extractors/src/graphql.rs `MAX_SELECTION_DEPTH`),
+/// so it only guards.
+const GRAPHQL_MAX_LEVELS: usize = 32;
+
+/// A selected field the schema type does not declare: the server rejects
+/// the document at validation, so the operation fails at run time.
+const FIELD_UNDEFINED: &str = "graphql_field_undefined";
+
+/// Refused: the op node carries two different selections (two documents
+/// under one operation name).
+const REFUSED_SELECTION: &str = "conflicting_selection";
+/// Refused: the root field carries two different return types.
+const REFUSED_RETURNS: &str = "conflicting_returns";
+/// Refused: the schema type carries two different field lists.
+const REFUSED_FIELDS: &str = "conflicting_fields";
+/// Refused: the schema type carries no GraphQL field list.
+const REFUSED_NO_FIELDS: &str = "no_fields";
+/// Refused: the returned type exists only under another owner (or repo)
+/// than the root field's.
+const REFUSED_OWNER: &str = "owner_mismatch";
+/// Refused: no root selection of the op names the resolver's field (a pair
+/// keyed by a folded name).
+const REFUSED_ROOT: &str = "root_field_unmatched";
+
+/// A selected field the schema type does not declare.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GraphqlChange {
+    /// The schema-field path below the root field (`barcode`,
+    /// `owner.email`): each level's schema field, an alias resolved.
+    pub path: String,
+    /// The response key it was selected under (`code` for `code: barcode`,
+    /// else the field).
+    pub key: String,
+    /// The schema type that lacks it (`Item`).
+    pub type_name: String,
+    /// `graphql_field_undefined`.
+    pub rule: &'static str,
+    /// `graphql_field_undefined` breaks the operation.
+    pub breaking: bool,
+}
+
+/// One GRAPHQL_CALLS operation -> root field pair: the op's selection
+/// under that field against the schema type the field returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GraphqlPair {
+    pub op: NodeId,
+    pub op_qname: String,
+    /// `query` | `mutation` | `subscription`, as the document opens.
+    pub op_type: String,
+    /// The operation's name as written; an anonymous one's node name.
+    pub op_name: String,
+    /// The 1-based line of the site that minted the operation.
+    pub line: u32,
+    pub resolver: NodeId,
+    pub resolver_qname: String,
+    /// The resolver's LB.8 owner segment, if any: the schema type's too.
+    pub owner: Option<String>,
+    /// The resolver's field name, which the op's root selection names.
+    pub root_field: String,
+    /// The response keys the op selects the root field under, sorted (two
+    /// for `a: items .. b: items ..`).
+    pub response_keys: Vec<String>,
+    /// The root field's selection, its response keys' sub-selections merged
+    /// ([`Shape::Object`]); a leaf is [`Shape::Open`]. A leaf too when the
+    /// pair was refused before the selection was read.
+    pub selection: Shape,
+    /// The root field's declared return type as written (`[Item!]!`).
+    pub returns: String,
+    /// The 1-based line of the root field's declaration.
+    pub returns_line: u32,
+    /// The named type `returns` names, list and non-null wrappers peeled
+    /// (`Item`).
+    pub type_name: String,
+    /// The MESSAGE_TYPE `message:graphql:<type_name>` (+ the resolver's
+    /// owner) in the resolver's repo, when one exists.
+    pub schema_type: Option<NodeId>,
+    pub schema_type_qname: Option<String>,
+    /// Sorted by (path, rule).
+    pub changes: Vec<GraphqlChange>,
+    /// `open`, sorted: a side was open, so no name is claimed absent from it
+    /// (an open type, an interface, an open selection, a sub-selected field
+    /// whose type names no MESSAGE_TYPE; with no `schema_type`, the root's
+    /// own type: a union, a type outside the build).
+    pub notes: Vec<&'static str>,
+    /// Why nothing was compared: `conflicting_selection`,
+    /// `conflicting_returns`, `conflicting_fields`, `no_fields`,
+    /// `owner_mismatch`, `root_field_unmatched`.
+    pub refused: Option<&'static str>,
+}
+
+/// The counts behind [`GraphqlPairs::marker`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GraphqlPairStats {
+    pub pairs: usize,
+    /// `graphql_field_undefined` changes over every pair.
+    pub undefined_fields: usize,
+    /// Of `pairs`: noted `open`.
+    pub open: usize,
+    /// Of `pairs`: refused.
+    pub refused: usize,
+}
+
+/// Every [`GraphqlPair`] of a merged graph, sorted by (op qname, resolver
+/// qname), with its counts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GraphqlPairs {
+    pub pairs: Vec<GraphqlPair>,
+    pub stats: GraphqlPairStats,
+}
+
+impl GraphqlPairs {
+    /// The fired_on line: `[models] graphql pairs=<g> undefined_fields=<u>
+    /// open=<o> refused=<r>`.
+    pub fn marker(&self) -> String {
+        let s = &self.stats;
+        format!(
+            "[models] graphql pairs={} undefined_fields={} open={} refused={}",
+            s.pairs, s.undefined_fields, s.open, s.refused
+        )
+    }
+}
+
+/// Every GRAPHQL_CALLS op -> resolver pair the `graphql` resolver drew,
+/// compared selection against schema type (see the module doc's DT.1n
+/// part). An op with no selection cell (no document: a codegen hook) or a
+/// root field with no return-type cell (a code-first resolver) has nothing
+/// to compare and is no pair; neither is a root field returning a type no
+/// MESSAGE_TYPE models (a scalar, an enum) that the op selects as a leaf.
+pub fn graphql_pairs(merged: &MergedGraph) -> GraphqlPairs {
+    let calls_at = |e: &&Edge| e.category == edge_category::GRAPHQL_CALLS;
+    if !merged.cross_edges.iter().any(|e| calls_at(&e)) {
+        return GraphqlPairs::default();
+    }
+    let ix = GqlIndex::new(merged);
+    let mut calls: BTreeSet<(&str, &str, u64, u64)> = BTreeSet::new();
+    for e in merged.cross_edges.iter().filter(calls_at) {
+        if Evidence::of(e).is_some_and(|ev| ev.emitter != GRAPHQL_EMITTER) {
+            continue;
+        }
+        let (Some(op), Some(field)) = (ix.ops.get(&e.from.0), ix.fields.get(&e.to.0)) else {
+            continue;
+        };
+        calls.insert((op.qname, field.qname, e.from.0, e.to.0));
+    }
+    let mut out = GraphqlPairs::default();
+    for (op_qname, field_qname, op, field) in calls {
+        if let Some(p) = gql_pair(&ix, (op_qname, NodeId(op)), (field_qname, NodeId(field))) {
+            out.pairs.push(p);
+        }
+    }
+    let s = &mut out.stats;
+    s.pairs = out.pairs.len();
+    for p in &out.pairs {
+        s.undefined_fields += p
+            .changes
+            .iter()
+            .filter(|c| c.rule == FIELD_UNDEFINED)
+            .count();
+        s.open += usize::from(p.notes.contains(&NOTE_OPEN));
+        s.refused += usize::from(p.refused.is_some());
+    }
+    out
+}
+
+/// One GraphQL node's sites of one form, folded across the graphs that
+/// hold it: distinct (raw, shape), each at its least line.
+struct GqlNode<'m> {
+    qname: &'m str,
+    repo: u64,
+    sites: Vec<ServerWire>,
+}
+
+impl GqlNode<'_> {
+    fn add(&mut self, w: ServerWire) {
+        match self
+            .sites
+            .iter_mut()
+            .find(|s| s.raw == w.raw && s.shape == w.shape)
+        {
+            Some(have) => have.line = have.line.min(w.line),
+            None => self.sites.push(w),
+        }
+    }
+}
+
+/// One SDL type node, folded across graphs.
+#[derive(Default)]
+struct GqlType {
+    /// Distinct SCHEMA_FIELDS payloads.
+    payloads: BTreeSet<String>,
+    /// Its ORIGIN says `"decl":"interface"`.
+    interface: bool,
+}
+
+/// What a type name reaches from a root field's (repo, owner).
+enum TypeAt {
+    Found {
+        id: u64,
+        schema: ModelSchema,
+        interface: bool,
+    },
+    /// The node carries two different field lists.
+    Conflicting(u64),
+    /// The node carries no GraphQL field list.
+    NoFields(u64),
+    /// A type of that name exists only under another owner or repo.
+    Elsewhere,
+    /// No type of that name: a scalar, an enum, a union, one outside the
+    /// build.
+    Missing,
+}
+
+/// The GraphQL nodes of a merged graph, built once per [`graphql_pairs`]
+/// call; maps are only probed.
+struct GqlIndex<'m> {
+    /// GRAPHQL_OPERATION id -> its `graphql_selection` sites.
+    ops: HashMap<u64, GqlNode<'m>>,
+    /// GRAPHQL_RESOLVER id -> its `graphql_returns` sites.
+    fields: HashMap<u64, GqlNode<'m>>,
+    /// repo -> SDL type qname -> id.
+    types: HashMap<u64, HashMap<&'m str, u64>>,
+    facts: HashMap<u64, GqlType>,
+    /// SDL type id -> its qname.
+    type_qname: HashMap<u64, &'m str>,
+    /// Every SDL type's bare name (owner dropped).
+    names: HashSet<&'m str>,
+}
+
+impl<'m> GqlIndex<'m> {
+    fn new(m: &'m MergedGraph) -> Self {
+        let mut ix = GqlIndex {
+            ops: HashMap::new(),
+            fields: HashMap::new(),
+            types: HashMap::new(),
+            facts: HashMap::new(),
+            type_qname: HashMap::new(),
+            names: HashSet::new(),
+        };
+        for g in &m.graphs {
+            for n in &g.nodes {
+                let (Some(&kind), Some(qname)) =
+                    (g.nav.kind_by_id.get(&n.id), g.nav.qname_by_id.get(&n.id))
+                else {
+                    continue;
+                };
+                let (map, form) = match kind {
+                    k if k == node_kind::GRAPHQL_OPERATION => {
+                        (&mut ix.ops, WireForm::GraphqlSelection)
+                    }
+                    k if k == node_kind::GRAPHQL_RESOLVER => {
+                        (&mut ix.fields, WireForm::GraphqlReturns)
+                    }
+                    k if k == node_kind::MESSAGE_TYPE => {
+                        let Some(bare) = split_owner(qname).0.strip_prefix(GRAPHQL_TYPE) else {
+                            continue;
+                        };
+                        ix.names.insert(bare);
+                        ix.types
+                            .entry(n.repo.0)
+                            .or_default()
+                            .insert(qname.as_str(), n.id.0);
+                        ix.type_qname.entry(n.id.0).or_insert(qname.as_str());
+                        let t = ix.facts.entry(n.id.0).or_default();
+                        for c in &n.cells {
+                            let (CellPayload::Json(p) | CellPayload::Text(p)) = &c.payload else {
+                                continue;
+                            };
+                            if c.kind == cell_type::SCHEMA_FIELDS {
+                                t.payloads.insert(p.clone());
+                            } else if c.kind == cell_type::ORIGIN
+                                && str_field(p, "decl") == Some("interface")
+                            {
+                                t.interface = true;
+                            }
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let node = map.entry(n.id.0).or_insert_with(|| GqlNode {
+                    qname: qname.as_str(),
+                    repo: n.repo.0,
+                    sites: Vec::new(),
+                });
+                for w in n
+                    .cells
+                    .iter()
+                    .filter_map(ServerWire::from_cell)
+                    .filter(|w| w.form == form)
+                {
+                    node.add(w);
+                }
+            }
+        }
+        // By content, so a refused pair's heading and line do not depend on
+        // which graph held which copy.
+        for node in ix.ops.values_mut().chain(ix.fields.values_mut()) {
+            node.sites
+                .sort_by_cached_key(|w| (w.raw.clone(), w.shape.to_json(), w.line));
+        }
+        ix
+    }
+
+    /// The SDL type `name` as the root field of (`repo`, `owner`) reaches
+    /// it: `message:graphql:<name>` plus ` @<owner>`, in that repo.
+    fn type_at(&self, repo: u64, owner: Option<&str>, name: &str) -> TypeAt {
+        if name.is_empty() {
+            return TypeAt::Missing;
+        }
+        let qname = match owner {
+            Some(o) => format!("{GRAPHQL_TYPE}{name} @{o}"),
+            None => format!("{GRAPHQL_TYPE}{name}"),
+        };
+        let Some(&id) = self.types.get(&repo).and_then(|t| t.get(qname.as_str())) else {
+            return if self.names.contains(name) {
+                TypeAt::Elsewhere
+            } else {
+                TypeAt::Missing
+            };
+        };
+        let Some(t) = self.facts.get(&id) else {
+            return TypeAt::NoFields(id);
+        };
+        let mut payloads = t.payloads.iter();
+        match (payloads.next(), payloads.next()) {
+            (Some(one), None) => match ModelSchema::parse(one) {
+                Some(schema) if schema.format == WireFormat::Graphql => TypeAt::Found {
+                    id,
+                    schema,
+                    interface: t.interface,
+                },
+                _ => TypeAt::NoFields(id),
+            },
+            (Some(_), Some(_)) => TypeAt::Conflicting(id),
+            (None, _) => TypeAt::NoFields(id),
+        }
+    }
+}
+
+/// The named type a GraphQL type text names: every list and non-null
+/// wrapper peeled (`[[Item!]]!` -> `Item`).
+fn graphql_named(ty: &str) -> String {
+    let mut t = ty.to_string();
+    for _ in 0..GRAPHQL_MAX_LEVELS {
+        let (inner, array) = element_type(&t);
+        t = inner;
+        if !array {
+            break;
+        }
+    }
+    t
+}
+
+/// `path.name`, or `name` at the root.
+fn dotted(path: &str, name: &str) -> String {
+    if path.is_empty() {
+        name.to_string()
+    } else {
+        format!("{path}.{name}")
+    }
+}
+
+/// `more` merged into `have`: two sub-selections field by field by response
+/// key (open when either is), an object over a leaf.
+fn merge_selection_into(have: &mut Shape, more: &Shape) {
+    if let Shape::Object { fields, open } = have {
+        if let Shape::Object {
+            fields: extra,
+            open: extra_open,
+        } = more
+        {
+            *open |= *extra_open;
+            for f in extra {
+                match fields.iter_mut().find(|x| x.name == f.name) {
+                    Some(x) => {
+                        x.required |= f.required;
+                        merge_selection_into(&mut x.shape, &f.shape);
+                    }
+                    None => fields.push(f.clone()),
+                }
+            }
+        }
+        return;
+    }
+    if matches!(more, Shape::Object { .. }) {
+        *have = more.clone();
+    }
+}
+
+/// The pair for one GRAPHQL_CALLS edge; `None` when there is nothing to
+/// compare ([`graphql_pairs`]).
+fn gql_pair(
+    ix: &GqlIndex<'_>,
+    (op_qname, op): (&str, NodeId),
+    (field_qname, field): (&str, NodeId),
+) -> Option<GraphqlPair> {
+    let (o, r) = (ix.ops.get(&op.0)?, ix.fields.get(&field.0)?);
+    let (sel, ret) = (o.sites.first()?, r.sites.first()?);
+    let (base, owner) = split_owner(field_qname);
+    let root_field = base.strip_prefix(GRAPHQL_FIELD).unwrap_or(base);
+    let mut words = sel.raw.split_whitespace();
+    let op_type = words.next().unwrap_or("query");
+    let op_name = words.next().map(str::to_string).unwrap_or_else(|| {
+        let b = split_owner(op_qname).0;
+        b.strip_prefix(GRAPHQL_OP).unwrap_or(b).to_string()
+    });
+    let type_name = match &ret.shape {
+        Shape::Named { ty, .. } => graphql_named(ty),
+        _ => String::new(),
+    };
+    let mut p = GraphqlPair {
+        op,
+        op_qname: op_qname.to_string(),
+        op_type: op_type.to_string(),
+        op_name,
+        line: sel.line,
+        resolver: field,
+        resolver_qname: field_qname.to_string(),
+        owner: owner.map(str::to_string),
+        root_field: root_field.to_string(),
+        response_keys: Vec::new(),
+        selection: Shape::open(""),
+        returns: ret.raw.clone(),
+        returns_line: ret.line,
+        type_name,
+        schema_type: None,
+        schema_type_qname: None,
+        changes: Vec::new(),
+        notes: Vec::new(),
+        refused: None,
+    };
+    if o.sites.len() > 1 {
+        p.refused = Some(REFUSED_SELECTION);
+        return Some(p);
+    }
+    if r.sites.len() > 1 {
+        p.refused = Some(REFUSED_RETURNS);
+        return Some(p);
+    }
+    let entries: Vec<&ShapeField> = match &sel.shape {
+        Shape::Object { fields, .. } => fields
+            .iter()
+            .filter(|f| f.field.as_deref().unwrap_or(&f.name) == root_field)
+            .collect(),
+        _ => Vec::new(),
+    };
+    if entries.is_empty() {
+        p.refused = Some(REFUSED_ROOT);
+        return Some(p);
+    }
+    let mut keys: Vec<String> = entries.iter().map(|f| f.name.clone()).collect();
+    keys.sort();
+    keys.dedup();
+    p.response_keys = keys;
+    for f in &entries {
+        merge_selection_into(&mut p.selection, &f.shape);
+    }
+    let mut cmp = GqlCompare {
+        ix,
+        repo: r.repo,
+        owner,
+        changes: Vec::new(),
+        notes: BTreeSet::new(),
+    };
+    let typed = |p: &mut GraphqlPair, id: u64| {
+        p.schema_type = Some(NodeId(id));
+        p.schema_type_qname = ix.type_qname.get(&id).map(|q| (*q).to_string());
+    };
+    match ix.type_at(r.repo, owner, &p.type_name) {
+        TypeAt::Found {
+            id,
+            schema,
+            interface,
+        } => {
+            typed(&mut p, id);
+            if let Shape::Object { fields, open } = &p.selection {
+                let ty = TypeView {
+                    name: &p.type_name,
+                    schema: &schema,
+                    interface,
+                };
+                cmp.level(fields, *open, &ty, "", 0);
+            }
+        }
+        TypeAt::Conflicting(id) => {
+            typed(&mut p, id);
+            p.refused = Some(REFUSED_FIELDS);
+            return Some(p);
+        }
+        TypeAt::NoFields(id) => {
+            typed(&mut p, id);
+            p.refused = Some(REFUSED_NO_FIELDS);
+            return Some(p);
+        }
+        TypeAt::Elsewhere => {
+            p.refused = Some(REFUSED_OWNER);
+            return Some(p);
+        }
+        TypeAt::Missing => {
+            if !matches!(p.selection, Shape::Object { .. }) {
+                return None;
+            }
+            cmp.notes.insert(NOTE_OPEN);
+        }
+    }
+    cmp.changes
+        .sort_by(|a, b| (&a.path, a.rule).cmp(&(&b.path, b.rule)));
+    cmp.changes
+        .dedup_by(|a, b| a.path == b.path && a.rule == b.rule);
+    p.changes = cmp.changes;
+    p.notes = cmp.notes.into_iter().collect();
+    Some(p)
+}
+
+/// One selection compared level by level with the schema types it reaches.
+struct GqlCompare<'i, 'm> {
+    ix: &'i GqlIndex<'m>,
+    repo: u64,
+    owner: Option<&'i str>,
+    changes: Vec<GraphqlChange>,
+    notes: BTreeSet<&'static str>,
+}
+
+/// The schema type one selection level is compared with.
+struct TypeView<'a> {
+    name: &'a str,
+    schema: &'a ModelSchema,
+    interface: bool,
+}
+
+impl GqlCompare<'_, '_> {
+    /// The selected `fields` of one level against type `ty`: a field the
+    /// type lacks is undefined unless the type is open or an interface; a
+    /// sub-selected field recurses into the type its declared type names,
+    /// or notes `open` when that names no SDL type here.
+    fn level(
+        &mut self,
+        fields: &[ShapeField],
+        selection_open: bool,
+        ty: &TypeView<'_>,
+        path: &str,
+        depth: usize,
+    ) {
+        if selection_open {
+            self.notes.insert(NOTE_OPEN);
+        }
+        let claim = !(ty.schema.open || ty.interface);
+        if !claim {
+            self.notes.insert(NOTE_OPEN);
+        }
+        for f in fields {
+            let field = f.field.as_deref().unwrap_or(&f.name);
+            let at = dotted(path, field);
+            let Some(declared) = ty.schema.field(field) else {
+                if claim {
+                    self.changes.push(GraphqlChange {
+                        path: at,
+                        key: f.name.clone(),
+                        type_name: ty.name.to_string(),
+                        rule: FIELD_UNDEFINED,
+                        breaking: true,
+                    });
+                }
+                continue;
+            };
+            let Shape::Object { fields: sub, open } = &f.shape else {
+                continue;
+            };
+            if depth + 1 >= GRAPHQL_MAX_LEVELS {
+                self.notes.insert(NOTE_OPEN);
+                continue;
+            }
+            let named = graphql_named(&declared.ty);
+            match self.ix.type_at(self.repo, self.owner, &named) {
+                TypeAt::Found {
+                    schema, interface, ..
+                } => {
+                    let inner = TypeView {
+                        name: &named,
+                        schema: &schema,
+                        interface,
+                    };
+                    self.level(sub, *open, &inner, &at, depth + 1);
+                }
+                _ => {
+                    self.notes.insert(NOTE_OPEN);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4302,5 +4946,570 @@ mod tests {
         assert!(edges.is_empty() && report.is_none());
         let (edges, report) = model_identity(&MergedGraph::new(vec![]));
         assert!(edges.is_empty() && report.is_none());
+    }
+
+    // ---- DT.1n: the DT.1m request gap -------------------------------------
+
+    /// A name the Go binder requires and the client marks optional is a 400
+    /// waiting to happen; a response reads no binder.
+    #[test]
+    fn a_required_bind_the_client_may_omit_breaks_the_request() {
+        let client = model_of(
+            TS,
+            1,
+            false,
+            false,
+            vec![
+                mf(TS, "discount", "string", false),
+                mf(TS, "id", "string", true),
+                mf(TS, "memo", "string", false),
+            ],
+        );
+        let server = model_of(
+            GO,
+            11,
+            false,
+            false,
+            vec![
+                bound(mf(GO, "discount", "string", true)),
+                bound(mf(GO, "id", "string", true)),
+                mf(GO, "memo", "string", false),
+            ],
+        );
+        let req = compare(WireDirection::Request, &client, &server, "");
+        assert_eq!(changes(&req), [("discount", REQUIRED_MAY_BE_UNSET, true)]);
+        let c = &req.changes[0];
+        assert_eq!(
+            (c.client.as_deref(), c.server.as_deref()),
+            (Some("string"), Some("string"))
+        );
+        assert_eq!(
+            req.models
+                .iter()
+                .map(|m| (m.client.0, m.server.0, m.diverged))
+                .collect::<Vec<_>>(),
+            [(1, 11, true)],
+            "a requiredness disagreement diverges the pair"
+        );
+        let resp = compare(WireDirection::Response, &client, &server, "");
+        assert!(changes(&resp).is_empty(), "{:?}", resp.changes);
+    }
+
+    // ---- DT.1n: GraphQL selection drift ------------------------------------
+
+    /// A graphql SCHEMA_FIELDS cell of `(name, type)` fields.
+    fn sdl(fields: &[(&str, &str)], open: bool) -> Cell {
+        ModelSchema {
+            fields: fields
+                .iter()
+                .map(|(n, t)| ModelField::new(n, t, t.ends_with('!')))
+                .collect(),
+            open,
+            ..ModelSchema::new(WireFormat::Graphql)
+        }
+        .cell()
+    }
+
+    fn origin(decl: &str) -> Cell {
+        Cell {
+            kind: cell_type::ORIGIN,
+            payload: CellPayload::Json(format!(
+                r#"{{"provenance":"contract","source":"graphql","decl":"{decl}"}}"#
+            )),
+        }
+    }
+
+    fn returns(ty: &str) -> Cell {
+        ServerWire::new(WireForm::GraphqlReturns, ty, 9, Shape::named(ty)).cell()
+    }
+
+    /// `doc`'s `graphql_selection` cell, read the way the extractor reads it.
+    fn selection(raw: &str, doc: &str) -> Cell {
+        let shape = glia_code_extractors::graphql::selection_shape(doc).expect("an operation");
+        ServerWire::new(WireForm::GraphqlSelection, raw, 3, shape).cell()
+    }
+
+    fn gql_calls(from: NodeId, to: NodeId, emitter: &str) -> Edge {
+        Edge::new(from, to, edge_category::GRAPHQL_CALLS, Confidence::Strong)
+            .with_cell(Evidence::emitter(emitter).rule("root_field").to_cell())
+    }
+
+    /// The api's schema (Item, Owner, the interface Node, the extend-only
+    /// Draft) and root fields, in one graph.
+    fn schema_graph(tag: &str) -> G {
+        let mut g = G::new(tag);
+        let m = g.module("graph::schema", "graph/schema.graphqls");
+        let item = sdl(
+            &[
+                ("id", "ID!"),
+                ("label", "String!"),
+                ("owner", "Owner!"),
+                ("tags", "[String!]"),
+            ],
+            false,
+        );
+        g.node(
+            node_kind::MESSAGE_TYPE,
+            "message:graphql:Item @api",
+            Some(m),
+            vec![origin("type"), item],
+        );
+        let owner = sdl(&[("name", "String!")], false);
+        g.node(
+            node_kind::MESSAGE_TYPE,
+            "message:graphql:Owner @api",
+            Some(m),
+            vec![origin("type"), owner],
+        );
+        let node = sdl(&[("id", "ID!")], false);
+        g.node(
+            node_kind::MESSAGE_TYPE,
+            "message:graphql:Node @api",
+            Some(m),
+            vec![origin("interface"), node],
+        );
+        let draft = sdl(&[("id", "ID!")], true);
+        g.node(
+            node_kind::MESSAGE_TYPE,
+            "message:graphql:Draft @api",
+            Some(m),
+            vec![origin("type"), draft],
+        );
+        for (field, ty) in [
+            ("items", "[Item!]!"),
+            ("adjustStock", "Item!"),
+            ("node", "Node"),
+            ("draft", "Draft"),
+            ("search", "[SearchResult!]!"),
+            ("count", "Int!"),
+        ] {
+            g.node(
+                node_kind::GRAPHQL_RESOLVER,
+                &format!("graphql_resolver:{field} @api"),
+                Some(m),
+                vec![returns(ty)],
+            );
+        }
+        g
+    }
+
+    /// The console's ops, each paired with the root field it selects.
+    const OPS: &[(&str, &str, &str, &str)] = &[
+        (
+            "ListItems",
+            "query ListItems",
+            "query ListItems($first: Int) { items(first: $first) { id label barcode owner { name email } } }",
+            "items",
+        ),
+        (
+            "AdjustStock",
+            "mutation AdjustStock",
+            "mutation AdjustStock { adjustStock(id: 1) { id label } }",
+            "adjustStock",
+        ),
+        (
+            "Aliased",
+            "query Aliased",
+            "query Aliased { first: items { code: barcode id } second: items { label owner { name } } }",
+            "items",
+        ),
+        (
+            "Node",
+            "query Node",
+            "query Node { node(id: 1) { id whatever } }",
+            "node",
+        ),
+        (
+            "Draft",
+            "query Draft",
+            "query Draft { draft { id title } }",
+            "draft",
+        ),
+        (
+            "Search",
+            "query Search",
+            "query Search { search { ... on Item { id } } }",
+            "search",
+        ),
+        (
+            "Spread",
+            "query Spread",
+            "query Spread { items { id barcode ...Elsewhere } }",
+            "items",
+        ),
+        ("Count", "query Count", "query Count { count }", "count"),
+    ];
+
+    /// The schema graph, plus the console's ops in a second graph of the
+    /// same repo, with their GRAPHQL_CALLS (`schema_first`: graph order).
+    fn stock(schema_first: bool) -> MergedGraph {
+        let s = schema_graph("stock");
+        let mut c = G::new("stock");
+        let m = c.module("console::documents", "console/documents.ts");
+        let mut cross = Vec::new();
+        for (name, raw, doc, field) in OPS {
+            let op = c.node(
+                node_kind::GRAPHQL_OPERATION,
+                &format!("graphql_op:{name} @console"),
+                Some(m),
+                vec![selection(raw, doc)],
+            );
+            let to = NodeId::from_parts(
+                GRAPH_TYPE,
+                s.g.repo,
+                node_kind::GRAPHQL_RESOLVER,
+                &format!("graphql_resolver:{field} @api"),
+            );
+            cross.push(gql_calls(op, to, GRAPHQL_EMITTER));
+        }
+        let graphs = if schema_first {
+            vec![s.g, c.g]
+        } else {
+            vec![c.g, s.g]
+        };
+        let mut merged = MergedGraph::new(graphs);
+        merged.cross_edges = cross;
+        merged
+    }
+
+    fn gql_rows(
+        gp: &GraphqlPairs,
+    ) -> Vec<(
+        String,
+        Vec<(String, String, String)>,
+        Vec<&'static str>,
+        Option<&'static str>,
+    )> {
+        gp.pairs
+            .iter()
+            .map(|p| {
+                (
+                    format!("{} {} {}", p.op_type, p.op_name, p.root_field),
+                    p.changes
+                        .iter()
+                        .map(|c| (c.path.clone(), c.key.clone(), c.type_name.clone()))
+                        .collect(),
+                    p.notes.clone(),
+                    p.refused,
+                )
+            })
+            .collect()
+    }
+
+    fn ch(path: &str, key: &str, ty: &str) -> (String, String, String) {
+        (path.to_string(), key.to_string(), ty.to_string())
+    }
+
+    #[test]
+    fn graphql_selections_name_the_fields_their_type_lacks() {
+        let gp = graphql_pairs(&stock(true));
+        assert_eq!(
+            gp.marker(),
+            "[models] graphql pairs=7 undefined_fields=4 open=4 refused=0"
+        );
+        assert_eq!(
+            gql_rows(&gp),
+            [
+                (
+                    "mutation AdjustStock adjustStock".into(),
+                    vec![],
+                    vec![],
+                    None
+                ),
+                (
+                    "query Aliased items".into(),
+                    vec![ch("barcode", "code", "Item")],
+                    vec![],
+                    None
+                ),
+                ("query Draft draft".into(), vec![], vec![NOTE_OPEN], None),
+                (
+                    "query ListItems items".into(),
+                    vec![
+                        ch("barcode", "barcode", "Item"),
+                        ch("owner.email", "email", "Owner")
+                    ],
+                    vec![],
+                    None
+                ),
+                ("query Node node".into(), vec![], vec![NOTE_OPEN], None),
+                ("query Search search".into(), vec![], vec![NOTE_OPEN], None),
+                (
+                    "query Spread items".into(),
+                    vec![ch("barcode", "barcode", "Item")],
+                    vec![NOTE_OPEN],
+                    None
+                ),
+            ],
+            "Count selects a scalar root as a leaf: nothing to compare. Draft is extend-only (open), \
+             Node an interface, SearchResult no type here, Spread's unknown spread leaves it open: \
+             its listed barcode is still undefined"
+        );
+        let list = gp
+            .pairs
+            .iter()
+            .find(|p| p.op_name == "ListItems")
+            .expect("ListItems");
+        assert_eq!(
+            (
+                list.returns.as_str(),
+                list.type_name.as_str(),
+                list.schema_type_qname.as_deref(),
+                list.line,
+                list.returns_line
+            ),
+            ("[Item!]!", "Item", Some("message:graphql:Item @api"), 3, 9)
+        );
+        assert!(
+            list.changes
+                .iter()
+                .all(|c| c.breaking && c.rule == FIELD_UNDEFINED)
+        );
+        let search = gp
+            .pairs
+            .iter()
+            .find(|p| p.op_name == "Search")
+            .expect("Search");
+        assert_eq!(
+            (search.schema_type, search.type_name.as_str()),
+            (None, "SearchResult")
+        );
+    }
+
+    #[test]
+    fn an_aliased_selection_is_judged_by_its_schema_field() {
+        let gp = graphql_pairs(&stock(true));
+        let p = gp
+            .pairs
+            .iter()
+            .find(|p| p.op_name == "Aliased")
+            .expect("Aliased");
+        assert_eq!(p.response_keys, ["first", "second"]);
+        let Shape::Object { fields, open } = &p.selection else {
+            panic!("an object selection, got {:?}", p.selection);
+        };
+        assert!(!open);
+        assert_eq!(
+            fields
+                .iter()
+                .map(|f| (f.name.as_str(), f.field.as_deref()))
+                .collect::<Vec<_>>(),
+            [
+                ("code", Some("barcode")),
+                ("id", None),
+                ("label", None),
+                ("owner", None)
+            ],
+            "both response keys' sub-selections, merged"
+        );
+        assert_eq!(
+            p.changes.len(),
+            1,
+            "id, label and owner {{ name }} are Item's"
+        );
+    }
+
+    #[test]
+    fn conflicting_copies_are_refused() {
+        let mut merged = stock(true);
+        let mut copy = G::new("stock");
+        let m = copy.module("graph::other", "graph/other.graphqls");
+        copy.node(
+            node_kind::MESSAGE_TYPE,
+            "message:graphql:Owner @api",
+            Some(m),
+            vec![sdl(&[("name", "String!"), ("email", "String")], false)],
+        );
+        copy.node(
+            node_kind::GRAPHQL_RESOLVER,
+            "graphql_resolver:adjustStock @api",
+            Some(m),
+            vec![returns("Owner!")],
+        );
+        let c = copy.module("console::again", "console/again.ts");
+        copy.node(
+            node_kind::GRAPHQL_OPERATION,
+            "graphql_op:Aliased @console",
+            Some(c),
+            vec![selection("query Aliased", "query Aliased { items { id } }")],
+        );
+        merged.graphs.push(copy.g);
+        let gp = graphql_pairs(&merged);
+        let refused: Vec<(&str, Option<&'static str>)> = gp
+            .pairs
+            .iter()
+            .map(|p| (p.op_name.as_str(), p.refused))
+            .collect();
+        assert_eq!(
+            refused,
+            [
+                ("AdjustStock", Some(REFUSED_RETURNS)),
+                ("Aliased", Some(REFUSED_SELECTION)),
+                ("Draft", None),
+                ("ListItems", None),
+                ("Node", None),
+                ("Search", None),
+                ("Spread", None),
+            ]
+        );
+        let list = gp
+            .pairs
+            .iter()
+            .find(|p| p.op_name == "ListItems")
+            .expect("ListItems");
+        assert_eq!(
+            list.changes
+                .iter()
+                .map(|c| c.path.as_str())
+                .collect::<Vec<_>>(),
+            ["barcode"],
+            "Owner's two field lists: owner.email is not claimed"
+        );
+        assert_eq!(list.notes, [NOTE_OPEN]);
+
+        // A root type whose two copies disagree refuses the pair.
+        let mut merged = stock(true);
+        let mut copy = G::new("stock");
+        let m = copy.module("graph::other", "graph/other.graphqls");
+        copy.node(
+            node_kind::MESSAGE_TYPE,
+            "message:graphql:Item @api",
+            Some(m),
+            vec![sdl(&[("id", "ID!")], false)],
+        );
+        merged.graphs.push(copy.g);
+        let gp = graphql_pairs(&merged);
+        let list = gp
+            .pairs
+            .iter()
+            .find(|p| p.op_name == "ListItems")
+            .expect("ListItems");
+        assert_eq!(
+            (list.refused, list.changes.len()),
+            (Some(REFUSED_FIELDS), 0)
+        );
+        assert_eq!(
+            list.schema_type_qname.as_deref(),
+            Some("message:graphql:Item @api")
+        );
+        assert_eq!(gp.stats.refused, 4, "{}", gp.marker());
+    }
+
+    #[test]
+    fn a_type_under_another_owner_is_refused() {
+        let mut g = G::new("owners");
+        let m = g.module("graph::schema", "graph/schema.graphqls");
+        g.node(
+            node_kind::MESSAGE_TYPE,
+            "message:graphql:Item @other",
+            Some(m),
+            vec![sdl(&[("id", "ID!")], false)],
+        );
+        g.node(
+            node_kind::MESSAGE_TYPE,
+            "message:graphql:Thing",
+            Some(m),
+            vec![sdl(&[("id", "ID!")], false)],
+        );
+        let items = g.node(
+            node_kind::GRAPHQL_RESOLVER,
+            "graphql_resolver:items @api",
+            Some(m),
+            vec![returns("[Item!]!")],
+        );
+        let things = g.node(
+            node_kind::GRAPHQL_RESOLVER,
+            "graphql_resolver:things @api",
+            Some(m),
+            vec![returns("[Thing]")],
+        );
+        let bare = g.node(
+            node_kind::GRAPHQL_RESOLVER,
+            "graphql_resolver:thing",
+            Some(m),
+            vec![returns("Thing")],
+        );
+        let a = g.node(
+            node_kind::GRAPHQL_OPERATION,
+            "graphql_op:Items @web",
+            Some(m),
+            vec![selection("query Items", "query Items { items { id sku } }")],
+        );
+        let b = g.node(
+            node_kind::GRAPHQL_OPERATION,
+            "graphql_op:Things @web",
+            Some(m),
+            vec![selection(
+                "query Things",
+                "query Things { things { id sku } thing { id sku } }",
+            )],
+        );
+        let c = g.node(
+            node_kind::GRAPHQL_OPERATION,
+            "graphql_op:Misnamed @web",
+            Some(m),
+            vec![selection(
+                "query Misnamed",
+                "query Misnamed { Items { id } }",
+            )],
+        );
+        let mut merged = MergedGraph::new(vec![g.g]);
+        merged.cross_edges = vec![
+            gql_calls(a, items, GRAPHQL_EMITTER),
+            gql_calls(b, things, GRAPHQL_EMITTER),
+            gql_calls(b, bare, GRAPHQL_EMITTER),
+            gql_calls(c, items, GRAPHQL_EMITTER),
+            // An overlay's edge is not the resolver's pairing.
+            gql_calls(c, bare, "overlay"),
+        ];
+        let gp = graphql_pairs(&merged);
+        assert_eq!(
+            gql_rows(&gp),
+            [
+                (
+                    "query Items items".into(),
+                    vec![],
+                    vec![],
+                    Some(REFUSED_OWNER)
+                ),
+                (
+                    "query Misnamed items".into(),
+                    vec![],
+                    vec![],
+                    Some(REFUSED_ROOT)
+                ),
+                (
+                    "query Things thing".into(),
+                    vec![ch("sku", "sku", "Thing")],
+                    vec![],
+                    None
+                ),
+                (
+                    "query Things things".into(),
+                    vec![],
+                    vec![],
+                    Some(REFUSED_OWNER)
+                ),
+            ],
+            "Item lives under another owner; @api's Thing does not exist, the owner-free one \
+             serves only the owner-free field; Misnamed's root key folds onto items but names \
+             no `items` selection"
+        );
+        assert_eq!(
+            gp.marker(),
+            "[models] graphql pairs=4 undefined_fields=1 open=0 refused=3"
+        );
+    }
+
+    #[test]
+    fn graphql_pairs_are_deterministic_across_graph_order() {
+        let a = graphql_pairs(&stock(true));
+        assert_eq!(a, graphql_pairs(&stock(false)));
+        assert_eq!(a, graphql_pairs(&stock(true)));
+        assert_eq!(
+            graphql_pairs(&MergedGraph::new(vec![])),
+            GraphqlPairs::default()
+        );
+        assert_eq!(graphql_named("[[Item!]]!"), "Item");
     }
 }

@@ -758,6 +758,61 @@ fn client_contract_rules_over_a_variant() {
     assert!(raw.changes.is_empty());
 }
 
+/// DT.1n (the DT.1m request gap): the shop with NewInvoice's `customerName`
+/// made optional. CreateInvoiceRequest's gin binder requires it, so a body
+/// without it is a 400: the request row gains a breaking `required` change,
+/// rule `json_required_may_be_unset`.
+#[test]
+fn a_required_bind_the_client_may_omit_breaks_the_request_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    copy_tree(&fixture("models-http-shop"), tmp.path());
+    let ts = tmp.path().join("web/src/app/models/invoice.ts");
+    let text = std::fs::read_to_string(&ts).unwrap();
+    let old = "export interface NewInvoice {\n  customerName: string;";
+    assert!(text.contains(old), "the fixture's NewInvoice moved");
+    std::fs::write(&ts, text.replace(old, "export interface NewInvoice {\n  customerName?: string;")).unwrap();
+    let dirs: Vec<String> = ["web", "api"]
+        .iter()
+        .map(|d| tmp.path().join(d).to_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        fixture_dirs("models-http-shop")
+            .iter()
+            .map(|d| Path::new(d).file_name().unwrap().to_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        ["web", "api"],
+        "the variant builds the fixture's dirs"
+    );
+    let rows = rows_for(&dirs);
+    let req = only(&rows, "http_model", "POST /api/invoices request");
+    assert_eq!(
+        (req.status, req.note, changes(req)),
+        (
+            "breaking",
+            None,
+            vec![
+                ch(
+                    "request",
+                    "couponCode",
+                    "producer_only",
+                    (S, N),
+                    "json_field_dropped",
+                    false,
+                ),
+                ch(
+                    "request",
+                    "customerName",
+                    "required",
+                    (S, S),
+                    "json_required_may_be_unset",
+                    true,
+                ),
+            ]
+        ),
+        "{req:#?}"
+    );
+}
+
 #[test]
 fn model_rows_are_deterministic() {
     let dirs = fixture_dirs("models-http-shop");
