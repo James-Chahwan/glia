@@ -786,12 +786,20 @@ pub(crate) fn resolve_imports_slash(g: &mut RepoGraph, imports: &[ImportStmt]) {
 /// beside `util.ts` + `util.js`) binds the sibling the specifier's own
 /// extension names, else the one the importer's language loads first
 /// ([`SameStem::pick`]).
+///
+/// DF.4b: a Dart plain import (`import 'x.dart';`, no `show`, no `as`) binds
+/// every public top-level name of its library once every statement has run
+/// ([`bind_dart_library_names`]); a TS-family plain import stays a bare
+/// side-effect import that binds nothing.
 pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
     g: &mut RepoGraph,
     imports: &[ImportStmt],
     resolve_source: &R,
     same: &mut SameStem,
 ) {
+    // DF.4b: (importer, library) of each bound `.dart` import without an
+    // alias, in statement order.
+    let mut plain_dart: Vec<(NodeId, NodeId)> = Vec::new();
     for stmt in imports {
         let Some(from_mod_id) = g
             .symbols
@@ -812,13 +820,17 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
                     continue;
                 };
                 import_edge(g, from_mod_id, target_id, rule, stmt.line);
-                // Namespace import alias is the binding; bare side-effect has none.
+                // Namespace import alias is the binding; a TS bare side-effect
+                // import has none, a Dart plain import binds its library's
+                // names after the loop.
                 if let Some(a) = alias {
                     g.symbols
                         .module_import_bindings
                         .entry(from_mod_id)
                         .or_default()
                         .insert(a.clone(), target_id);
+                } else if spec_ext(path) == Some("dart") {
+                    plain_dart.push((from_mod_id, target_id));
                 }
             }
             ImportTarget::Symbol {
@@ -858,6 +870,127 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
             }
         }
     }
+    if let Some(line) = bind_dart_library_names(g, &plain_dart, same).marker() {
+        eprintln!("{line}");
+    }
+}
+
+/// What [`bind_dart_library_names`] did in one graph build.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DartLibraryNames {
+    /// (importer, name) pairs bound to the one plain-imported library
+    /// declaring the name.
+    pub(crate) bound: usize,
+    /// (importer, name) pairs two or more of the importer's plain imports
+    /// declare, left unbound (Dart rejects the use as ambiguous). A name the
+    /// importer declares or a `show` / `as` import binds is shadowed, never
+    /// counted here.
+    pub(crate) ambiguous: usize,
+}
+
+impl DartLibraryNames {
+    /// DF.4b fired_on, once per graph build that bound or dropped a name:
+    ///   `[imports] dart plain-import names bound={b} ambiguous={a}`
+    pub(crate) fn marker(&self) -> Option<String> {
+        let DartLibraryNames { bound, ambiguous } = *self;
+        (bound + ambiguous > 0)
+            .then(|| format!("[imports] dart plain-import names bound={bound} ambiguous={ambiguous}"))
+    }
+}
+
+/// A public Dart identifier: `[A-Za-z$][A-Za-z0-9_$]*`. A leading `_` makes
+/// a name library-private; a ROUTE / ENDPOINT child of a MODULE (named by its
+/// path) is no name the code can write.
+fn dart_public_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '$')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+/// DF.4b: a Dart plain import exposes every public top-level name of its
+/// library, so each name of `module_symbols[library]` passing
+/// [`dart_public_name`] binds in the importer's `module_import_bindings`
+/// (CALLS rule `import_binding`: bare calls, constructions and the base of a
+/// static call `Money.zero()`), unless
+///
+/// - two of the importer's plain imports declare it (distinct nodes): Dart
+///   rejects the use as ambiguous, so neither binds (counted `ambiguous`);
+/// - the importer declares it itself: a library's own declaration shadows
+///   every import;
+/// - a `show` / `as` import of the importer already bound it (the statement
+///   loop wrote those first): the explicit binding wins.
+///
+/// `plain` holds (importer, library) pairs in statement order; an importer
+/// whose own MODULE is not a `.dart` file ([`SameStem::importer_ext`]) is
+/// skipped, so TS / JS graphs are untouched. Names are collected in a
+/// BTreeMap, so the result is independent of HashMap order. `hide` is not
+/// represented on an `ImportTarget::Module`, so a hidden name counts as
+/// visible: it can only add an ambiguity drop, never a wrong binding.
+/// `export` directives are not read, so a barrel library re-exporting its
+/// `src/` files binds only its own declarations.
+pub(crate) fn bind_dart_library_names(
+    g: &mut RepoGraph,
+    plain: &[(NodeId, NodeId)],
+    same: &mut SameStem,
+) -> DartLibraryNames {
+    let mut stats = DartLibraryNames::default();
+    if plain.is_empty() {
+        return stats;
+    }
+    // Importers in first-import order, each with its libraries in statement order.
+    let mut slot: HashMap<NodeId, usize> = HashMap::new();
+    let mut by_importer: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
+    for &(importer, library) in plain {
+        if importer == library {
+            continue;
+        }
+        let i = *slot.entry(importer).or_insert_with(|| {
+            by_importer.push((importer, Vec::new()));
+            by_importer.len() - 1
+        });
+        let libraries = &mut by_importer[i].1;
+        if !libraries.contains(&library) {
+            libraries.push(library);
+        }
+    }
+    for (importer, libraries) in by_importer {
+        if same.importer_ext(g, importer).as_deref() != Some("dart") {
+            continue;
+        }
+        let mut seen: BTreeMap<&str, Vec<NodeId>> = BTreeMap::new();
+        for library in &libraries {
+            let Some(symbols) = g.symbols.module_symbols.get(library) else { continue };
+            for (name, &id) in symbols {
+                if !dart_public_name(name) {
+                    continue;
+                }
+                let ids = seen.entry(name.as_str()).or_default();
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        let own = g.symbols.module_symbols.get(&importer);
+        let explicit = g.symbols.module_import_bindings.get(&importer);
+        let mut add: Vec<(String, NodeId)> = Vec::new();
+        for (name, ids) in seen {
+            if own.is_some_and(|s| s.contains_key(name))
+                || explicit.is_some_and(|b| b.contains_key(name))
+            {
+                continue;
+            }
+            match ids.as_slice() {
+                [id] => add.push((name.to_string(), *id)),
+                _ => stats.ambiguous += 1,
+            }
+        }
+        if add.is_empty() {
+            continue;
+        }
+        stats.bound += add.len();
+        g.symbols.module_import_bindings.entry(importer).or_default().extend(add);
+    }
+    stats
 }
 
 /// The MODULE a TS-family import source names: `target_qname` itself
@@ -1526,5 +1659,245 @@ mod tests {
         let (stats, marker) = replay(&g, &imports);
         assert_eq!(stats, NamespaceStats::default());
         assert_eq!(marker, None);
+    }
+
+    // ---- DF.4b: Dart plain imports bind their library's public names --------
+
+    /// The engine's importer-relative Dart (and TS) source resolver: the
+    /// importer's directory plus the specifier, `.dart` / `.ts` stripped.
+    fn dart_source(from: &str, spec: &str) -> Option<String> {
+        let mut segs: Vec<&str> = from.split("::").collect();
+        segs.pop();
+        for part in spec.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    segs.pop();
+                }
+                p => segs.push(p.strip_suffix(".dart").or_else(|| p.strip_suffix(".ts")).unwrap_or(p)),
+            }
+        }
+        Some(segs.join("::"))
+    }
+
+    /// A library at `path` (MODULE `qname`): FUNCTIONs `fns`, then CLASSes
+    /// `(name, methods)`.
+    fn library(path: &str, qname: &str, fns: &[&str], classes: &[(&str, &[&str])]) -> FileParse {
+        let name = qname.rsplit("::").next().unwrap_or(qname);
+        let mut fp = file(path, qname, name, fns);
+        for (c, methods) in classes {
+            declares(&mut fp, module(qname), &format!("{qname}::{c}"), methods);
+        }
+        fp
+    }
+
+    /// `import '<spec>'` (`as <alias>` when given) in MODULE `qname`.
+    fn import_module(fp: &mut FileParse, qname: &str, spec: &str, alias: Option<&str>) {
+        fp.imports.push(ImportStmt {
+            from_module: qname.to_string(),
+            target: ImportTarget::Module { path: spec.to_string(), alias: alias.map(str::to_string) },
+            line: fp.imports.len() as u32,
+        });
+    }
+
+    /// `import '<spec>' show <name>;` in MODULE `qname`.
+    fn import_show(fp: &mut FileParse, qname: &str, spec: &str, name: &str) {
+        fp.imports.push(ImportStmt {
+            from_module: qname.to_string(),
+            target: ImportTarget::Symbol {
+                module: spec.to_string(),
+                name: name.to_string(),
+                alias: None,
+                level: 0,
+            },
+            line: fp.imports.len() as u32,
+        });
+    }
+
+    fn call(fp: &mut FileParse, caller: &str, qualifier: CallQualifier) {
+        fp.calls.push(CallSite { from: func(caller), qualifier, line: 7 });
+    }
+
+    fn bare(name: &str) -> CallQualifier {
+        CallQualifier::Bare(name.to_string())
+    }
+
+    /// Every CALLS target of `caller` with the rule that bound it, sorted.
+    fn calls_from(g: &RepoGraph, caller: &str) -> Vec<(NodeId, String)> {
+        let mut out: Vec<(NodeId, String)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::CALLS && e.from == func(caller))
+            .map(|e| (e.to, Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default()))
+            .collect();
+        out.sort_by_key(|(id, _)| id.0);
+        out
+    }
+
+    /// [`bind_dart_library_names`] replayed on a built graph with its
+    /// bindings reset to what the statement loop alone writes (the `show`
+    /// / `as` ones `keep` names), so the counts are the build's own.
+    fn replay_dart(
+        g: &mut RepoGraph,
+        plain: &[(&str, &str)],
+        keep: &[(&str, &str)],
+    ) -> DartLibraryNames {
+        let kept: Vec<(NodeId, String, NodeId)> = keep
+            .iter()
+            .map(|(importer, name)| {
+                let m = module(importer);
+                (m, name.to_string(), g.symbols.module_import_bindings[&m][*name])
+            })
+            .collect();
+        g.symbols.module_import_bindings.clear();
+        for (m, name, id) in kept {
+            g.symbols.module_import_bindings.entry(m).or_default().insert(name, id);
+        }
+        let pairs: Vec<(NodeId, NodeId)> =
+            plain.iter().map(|(a, b)| (module(a), module(b))).collect();
+        bind_dart_library_names(g, &pairs, &mut SameStem::default())
+    }
+
+    fn util_dart() -> FileParse {
+        library(
+            "lib/src/util.dart",
+            "lib::src::util",
+            &["formatPrice", "_hidden"],
+            &[("Money", &["zero", "add"])],
+        )
+    }
+
+    #[test]
+    fn plain_import_binds_public_names() {
+        let mut cart = library("lib/cart.dart", "lib::cart", &["total"], &[]);
+        import_module(&mut cart, "lib::cart", "src/util.dart", None);
+        call(&mut cart, "lib::cart::total", bare("formatPrice"));
+        call(&mut cart, "lib::cart::total", bare("Money"));
+        call(
+            &mut cart,
+            "lib::cart::total",
+            CallQualifier::Attribute { base: "Money".to_string(), name: "zero".to_string() },
+        );
+        let mut g = build_typescript(repo(), vec![util_dart(), cart], dart_source).expect("build");
+        assert_eq!(edges_of(&g, edge_category::IMPORTS, module("lib::cart")), [module("lib::src::util")]);
+        let mut want = vec![
+            (func("lib::src::util::formatPrice"), "import_binding".to_string()),
+            (class("lib::src::util::Money"), "import_binding".to_string()),
+            (method("lib::src::util::Money::zero"), "attribute".to_string()),
+        ];
+        want.sort_by_key(|(id, _)| id.0);
+        assert_eq!(calls_from(&g, "lib::cart::total"), want);
+        let stats = replay_dart(&mut g, &[("lib::cart", "lib::src::util")], &[]);
+        assert_eq!(stats, DartLibraryNames { bound: 2, ambiguous: 0 });
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some("[imports] dart plain-import names bound=2 ambiguous=0")
+        );
+    }
+
+    #[test]
+    fn private_names_are_not_bound() {
+        let mut cart = library("lib/cart.dart", "lib::cart", &["total"], &[]);
+        import_module(&mut cart, "lib::cart", "src/util.dart", None);
+        call(&mut cart, "lib::cart::total", bare("_hidden"));
+        let g = build_typescript(repo(), vec![util_dart(), cart], dart_source).expect("build");
+        assert!(calls_from(&g, "lib::cart::total").is_empty());
+        let bound = &g.symbols.module_import_bindings[&module("lib::cart")];
+        assert_eq!(bound.get("_hidden"), None);
+        assert_eq!(bound.get("formatPrice"), Some(&func("lib::src::util::formatPrice")));
+        // A path-named child (a ROUTE / ENDPOINT) is no Dart name either.
+        for (name, public) in
+            [("formatPrice", true), ("Money", true), ("$tag", true), ("_x", false), ("GET /a", false), ("1x", false), ("", false)]
+        {
+            assert_eq!(dart_public_name(name), public, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn two_plain_exporters_bind_neither() {
+        let fmt = library("lib/src/fmt.dart", "lib::src::fmt", &["shout", "pad"], &[]);
+        let other = library("lib/src/other.dart", "lib::src::other", &["shout"], &[]);
+        let mut clash = library("lib/clash.dart", "lib::clash", &["run"], &[]);
+        import_module(&mut clash, "lib::clash", "src/fmt.dart", None);
+        import_module(&mut clash, "lib::clash", "src/other.dart", None);
+        // The same library twice is one exporter, not an ambiguity.
+        import_module(&mut clash, "lib::clash", "./src/fmt.dart", None);
+        call(&mut clash, "lib::clash::run", bare("shout"));
+        call(&mut clash, "lib::clash::run", bare("pad"));
+        let mut g = build_typescript(repo(), vec![fmt, other, clash], dart_source).expect("build");
+        assert_eq!(
+            calls_from(&g, "lib::clash::run"),
+            [(func("lib::src::fmt::pad"), "import_binding".to_string())]
+        );
+        let stats = replay_dart(
+            &mut g,
+            &[
+                ("lib::clash", "lib::src::fmt"),
+                ("lib::clash", "lib::src::other"),
+                ("lib::clash", "lib::src::fmt"),
+            ],
+            &[],
+        );
+        assert_eq!(stats, DartLibraryNames { bound: 1, ambiguous: 1 });
+    }
+
+    #[test]
+    fn show_binding_wins_over_plain() {
+        let fmt = library("lib/src/fmt.dart", "lib::src::fmt", &["shout"], &[]);
+        let other = library("lib/src/other.dart", "lib::src::other", &["shout", "trim"], &[]);
+        let mut app = library("lib/app.dart", "lib::app", &["run"], &[]);
+        import_show(&mut app, "lib::app", "src/other.dart", "shout");
+        import_module(&mut app, "lib::app", "src/fmt.dart", None);
+        // `as` binds the prefix, never the library's names.
+        import_module(&mut app, "lib::app", "src/other.dart", Some("o"));
+        call(&mut app, "lib::app::run", bare("shout"));
+        call(&mut app, "lib::app::run", bare("trim"));
+        let mut g = build_typescript(repo(), vec![fmt, other, app], dart_source).expect("build");
+        assert_eq!(
+            calls_from(&g, "lib::app::run"),
+            [(func("lib::src::other::shout"), "import_binding".to_string())]
+        );
+        let bound = &g.symbols.module_import_bindings[&module("lib::app")];
+        assert_eq!(bound.get("o"), Some(&module("lib::src::other")));
+        assert_eq!(bound.get("trim"), None);
+        let stats =
+            replay_dart(&mut g, &[("lib::app", "lib::src::fmt")], &[("lib::app", "shout"), ("lib::app", "o")]);
+        assert_eq!(stats, DartLibraryNames::default());
+        assert_eq!(stats.marker(), None);
+    }
+
+    #[test]
+    fn own_definition_shadows_import() {
+        let mut cart = library("lib/cart.dart", "lib::cart", &["total", "formatPrice"], &[]);
+        import_module(&mut cart, "lib::cart", "src/util.dart", None);
+        call(&mut cart, "lib::cart::total", bare("formatPrice"));
+        call(&mut cart, "lib::cart::total", bare("Money"));
+        let mut g = build_typescript(repo(), vec![util_dart(), cart], dart_source).expect("build");
+        let mut want = vec![
+            (func("lib::cart::formatPrice"), "module_symbol".to_string()),
+            (class("lib::src::util::Money"), "import_binding".to_string()),
+        ];
+        want.sort_by_key(|(id, _)| id.0);
+        assert_eq!(calls_from(&g, "lib::cart::total"), want);
+        let stats = replay_dart(&mut g, &[("lib::cart", "lib::src::util")], &[]);
+        assert_eq!(stats, DartLibraryNames { bound: 1, ambiguous: 0 });
+    }
+
+    #[test]
+    fn ts_importer_untouched() {
+        let util = file("src/util.ts", "src::util", "util", &["fmt"]);
+        let mut app = file("src/app.ts", "src::app", "app", &["render"]);
+        // A TS side-effect import, and a `.ts` importer naming a `.dart`
+        // specifier: neither is a Dart plain import.
+        import_module(&mut app, "src::app", "./util", None);
+        import_module(&mut app, "src::app", "./util.dart", None);
+        call(&mut app, "src::app::render", bare("fmt"));
+        let mut g = build_typescript(repo(), vec![util, app], dart_source).expect("build");
+        let imported = edges_of(&g, edge_category::IMPORTS, module("src::app"));
+        assert_eq!(imported, [module("src::util"), module("src::util")]);
+        assert!(calls_from(&g, "src::app::render").is_empty());
+        assert!(!g.symbols.module_import_bindings.contains_key(&module("src::app")));
+        let stats = replay_dart(&mut g, &[("src::app", "src::util")], &[]);
+        assert_eq!(stats, DartLibraryNames::default());
     }
 }

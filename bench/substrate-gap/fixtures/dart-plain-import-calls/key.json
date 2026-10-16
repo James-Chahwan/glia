@@ -1,0 +1,52 @@
+{
+  "framework": "dart-plain-import-calls",
+  "language": "dart",
+  "dirs": [
+    "."
+  ],
+  "note": "DF.4b (CB.26 residual 'Dart plain-import calls', 2/2: library names). A plain `import 'x.dart';` (no `show`, no `as`) is ImportTarget::Module with no alias; graph/src/imports.rs resolve_imports_ts bound no name for it (right for a TS side-effect import, wrong for Dart, where a plain import exposes every public top-level name of the library), so a bare call, construction or static into the library (`shout('x')`, `formatPrice(c)`, `Money()`, `Money.zero()`) stayed unbound. The own-package URI `import 'package:shop/src/util.dart'` resolves since DF.4a (resolve_dart_source), so IMPORTS cart -> util already binds; the 5 CALLS are DF.4b's (bind_dart_library_names, rule import_binding). A name two plain imports both export (`shout` in clash.dart, from fmt and other) binds neither, and the private `_hidden` is never bound.",
+  "expect_edges": [
+    {
+      "from": "lib::cart",
+      "to": "lib::src::util",
+      "category": "IMPORTS"
+    },
+    {
+      "from": "lib::cart::Cart::total",
+      "to": "lib::src::util::formatPrice",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::cart::Cart::total",
+      "to": "lib::src::util::Money::zero",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::cart::Cart::total",
+      "to": "lib::src::fmt::shout",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::cart::main",
+      "to": "lib::src::util::formatPrice",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::cart::main",
+      "to": "lib::src::util::Money",
+      "category": "CALLS"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "lib::clash::run",
+      "to": "lib::src::fmt::shout",
+      "category": "CALLS"
+    },
+    {
+      "from": "lib::clash::run",
+      "to": "lib::src::other::shout",
+      "category": "CALLS"
+    }
+  ]
+}
