@@ -24,6 +24,13 @@
 //! rule whose id the file already declares with another body; `try` judges
 //! every rule it is given.
 //!
+//! `try` renders the rule part of the report (DB.9c) when it has one: a
+//! `rules` column in the stanza table and a `rules (...)` block under it
+//! (each `[[constraint]]` stanza's status with its located violations, each
+//! graph stanza's moved violations), a `rules:` totals line, and the verdict
+//! line split into its graph and rule parts. A rule-free try prints exactly
+//! the pre-0.5.2 text.
+//!
 //! Transport + rendering only: the builds, verdicts, validation and the
 //! `[overlay] propose|try|accept ... surface=cli` markers live in the engine.
 //! This module prints the `[overlay] candidate file=<path> ...` marker
@@ -43,11 +50,13 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use clap::Subcommand;
-use glia_engine::gaps::{CATEGORIES, DROP, GapRow, KEEP, REVIEW};
+use glia_engine::check::{DERIVED, FACT, HEURISTIC};
+use glia_engine::gaps::{CATEGORIES, DROP, GapRow, KEEP, REVIEW, verdict};
 use glia_engine::overlay_loop::{
-    AcceptOptions, AcceptSummary, DEFAULT_SNIPPET_LINES, DEFAULT_TOP_K, GraphDelta, Proposal,
-    ProposeOptions, ProposedGap, Snippet, TryOptions, TryReport, accept, propose, report_candidate,
-    try_candidate,
+    AcceptOptions, AcceptSummary, DEFAULT_SNIPPET_LINES, DEFAULT_TOP_K, GraphDelta, MAX_RULE_HITS,
+    Proposal, ProposeOptions, ProposedGap, RULE_DUPLICATE, RULE_ERROR, RULE_HOLDS, RULE_ORPHANED,
+    RULE_VIOLATED, RuleHit, RuleTrial, RulesDelta, Snippet, StanzaTrial, TryOptions, TryReport,
+    accept, propose, report_candidate, try_candidate,
 };
 
 use crate::common::build_options;
@@ -104,10 +113,14 @@ enum OverlayCmd {
         json: bool,
     },
     /// Try a candidate stanza file against the repo: build with the overlay
-    /// as it is (base), with every stanza merged in (with) and, per stanza,
-    /// with all but that one, then report what moved and a keep / review /
-    /// drop verdict per stanza. Writes only the parse cache. Exits 0, 2 on a
-    /// build or candidate error.
+    /// as it is (base), with every stanza merged in (with) and, per graph
+    /// stanza, with all but that one, then report what moved and a keep /
+    /// review / drop verdict per stanza. Every declared rule is checked on
+    /// each build: a [[constraint]] stanza is judged on with (holds /
+    /// violated / error / orphaned / duplicate, its violations located), a
+    /// graph stanza that moves a rule's violations is review, and the verdict
+    /// combines the graph and rule parts. Writes only the parse cache. Exits
+    /// 0, 2 on a build or candidate error.
     Try {
         /// Path to the repo root whose `.glia/overlay.toml` the candidate
         /// would join.
@@ -124,8 +137,8 @@ enum OverlayCmd {
         /// no per-stanza attribution.
         #[arg(long)]
         no_leave_one_out: bool,
-        /// Emit JSON (`{stanzas, base, with, delta, verdict, closed, builds}`)
-        /// instead of tables.
+        /// Emit JSON (`{stanzas, base, with, delta, verdict, closed, builds}`,
+        /// + `rules` when a rule was checked) instead of tables.
         #[arg(long)]
         json: bool,
     },
@@ -400,9 +413,14 @@ fn run_try(paths: &[String], candidate: &str, opts: &TryOptions, json: bool) -> 
     print_totals(&report);
     println!();
     print_stanzas(&report, opts.leave_one_out);
+    print_rule_block(&report);
     print_try_next(repo, candidate, &report);
     0
 }
+
+/// Hit lines a stanza's rule block shows; `--json` lists up to
+/// [`MAX_RULE_HITS`].
+const SHOWN_HITS: usize = 5;
 
 /// Why a verdict is what it is (`gaps::verdict`).
 fn verdict_reason(v: &str) -> &'static str {
@@ -442,13 +460,66 @@ fn print_totals(r: &TryReport) {
         println!("changed: nothing (no node kind, edge category or gap category moved)");
     }
     println!();
-    println!("verdict: {} - {}", r.verdict, verdict_reason(r.verdict));
+    match &r.rules {
+        // The rule part (DB.9b): the graph part's reason is a rule move when
+        // the counts alone keep.
+        Some(rules) => {
+            let g = rules.graph_verdict;
+            let why = if g == REVIEW && verdict(&r.base, &r.with) == KEEP {
+                "a declared rule's violations moved"
+            } else {
+                verdict_reason(g)
+            };
+            let rv = rules
+                .rule_verdict
+                .unwrap_or("none (no [[constraint]] stanza)");
+            println!(
+                "verdict: {} - graph part {g} ({why}), rule part {rv}",
+                r.verdict
+            );
+        }
+        None => println!("verdict: {} - {}", r.verdict, verdict_reason(r.verdict)),
+    }
     if r.closed.is_empty() {
         println!("closed: none of the linked gaps");
     } else {
         println!("closed: {}", r.closed.join(", "));
     }
     println!("builds: {}", r.builds);
+    if let Some(rules) = &r.rules {
+        // The only line naming the rule statuses under --no-leave-one-out.
+        let statuses: Vec<String> = [
+            RULE_HOLDS,
+            RULE_VIOLATED,
+            RULE_ERROR,
+            RULE_ORPHANED,
+            RULE_DUPLICATE,
+        ]
+        .iter()
+        .filter_map(|s| {
+            rules
+                .statuses
+                .get(s)
+                .filter(|n| **n > 0)
+                .map(|n| format!("{s} {n}"))
+        })
+        .collect();
+        let d = &rules.delta;
+        let mut line = String::from("rules: ");
+        if !statuses.is_empty() {
+            line.push_str(&statuses.join(", "));
+            line.push_str("; ");
+        }
+        line.push_str(&format!(
+            "violations +{} -{} ({} blocking)",
+            d.added_total, d.resolved_total, d.blocking
+        ));
+        if !d.errors.is_empty() {
+            let ids: Vec<&str> = d.errors.iter().map(|(id, _)| id.as_str()).collect();
+            line.push_str(&format!("; errors: {}", ids.join(", ")));
+        }
+        println!("{line}");
+    }
 }
 
 /// `KIND +n, KIND -m` of one delta map, `—` when empty.
@@ -471,8 +542,14 @@ fn print_stanzas(r: &TryReport, leave_one_out: bool) {
         println!("no stanza in the candidate");
         return;
     }
-    println!("| stanza | verdict | closes | nodes | edges | gaps |");
-    println!("|---|---|---|---|---|---|");
+    let ruled = has_rule_part(r);
+    if ruled {
+        println!("| stanza | verdict | closes | nodes | edges | gaps | rules |");
+        println!("|---|---|---|---|---|---|---|");
+    } else {
+        println!("| stanza | verdict | closes | nodes | edges | gaps |");
+        println!("|---|---|---|---|---|---|");
+    }
     for s in &r.stanzas {
         let closes = if s.closes.is_empty() {
             "—".to_string()
@@ -482,8 +559,13 @@ fn print_stanzas(r: &TryReport, leave_one_out: bool) {
         let GraphDelta {
             nodes, edges, gaps, ..
         } = &s.marginal;
+        let rules = if ruled {
+            format!(" {} |", cell(&rule_cell(s)))
+        } else {
+            String::new()
+        };
         println!(
-            "| {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} |{rules}",
             s.stanza,
             s.verdict,
             closes,
@@ -491,6 +573,190 @@ fn print_stanzas(r: &TryReport, leave_one_out: bool) {
             moves(edges),
             moves(gaps)
         );
+    }
+}
+
+/// Some stanza has a rule part: a `[[constraint]]` stanza's trial, or a
+/// graph stanza's moved violations.
+fn has_rule_part(r: &TryReport) -> bool {
+    r.stanzas
+        .iter()
+        .any(|s| s.rule.is_some() || !s.rules.is_empty())
+}
+
+/// `fact <n>, derived <n>, heuristic <n>`, zero tiers left out.
+fn tiers(t: &BTreeMap<&'static str, usize>) -> String {
+    let known = [FACT, DERIVED, HEURISTIC];
+    let rest = t.keys().copied().filter(|k| !known.contains(k));
+    known
+        .into_iter()
+        .chain(rest)
+        .filter_map(|k| t.get(k).filter(|n| **n > 0).map(|n| format!("{k} {n}")))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A stanza's `rules` cell: its rule's status (a `[[constraint]]` stanza),
+/// the violations it moves (a graph stanza), or `—`.
+fn rule_cell(s: &StanzaTrial) -> String {
+    if let Some(t) = &s.rule {
+        return match t.status {
+            RULE_HOLDS if t.empty_scopes.is_empty() => RULE_HOLDS.to_string(),
+            RULE_HOLDS => format!("holds, empty scope {}", t.empty_scopes.join(", ")),
+            RULE_VIOLATED => format!(
+                "{} violation(s) ({}; {} blocking)",
+                t.violations,
+                tiers(&t.tiers),
+                t.blocking
+            ),
+            other => other.to_string(),
+        };
+    }
+    if s.rules.is_empty() {
+        return "—".to_string();
+    }
+    let d = &s.rules;
+    let mut out = format!(
+        "+{} -{} ({} blocking)",
+        d.added_total, d.resolved_total, d.blocking
+    );
+    if !d.errors.is_empty() {
+        out.push_str(&format!(", {} error(s)", d.errors.len()));
+    }
+    out
+}
+
+/// `scope `a` holds no node` / `scopes `a`, `b` hold no node`.
+fn empty_scope_phrase(scopes: &[String]) -> String {
+    let named: Vec<String> = scopes.iter().map(|s| format!("`{s}`")).collect();
+    if named.len() == 1 {
+        format!("scope {} holds no node", named.join(", "))
+    } else {
+        format!("scopes {} hold no node", named.join(", "))
+    }
+}
+
+/// Why a `[[constraint]]` stanza's rule trial reads as it does.
+fn rule_reason(t: &RuleTrial) -> String {
+    match t.status {
+        RULE_HOLDS if t.empty_scopes.is_empty() => "holds on the code as it is".to_string(),
+        RULE_HOLDS => format!(
+            "holds, but {}: it may pass vacuously",
+            empty_scope_phrase(&t.empty_scopes)
+        ),
+        RULE_VIOLATED => {
+            let blocking = if t.blocking == 0 {
+                "none blocking".to_string()
+            } else {
+                format!("{} blocking: `glia check` exits 1 on them", t.blocking)
+            };
+            let mut out = format!(
+                "flags {} violation(s) in the code as it is ({blocking})",
+                t.violations
+            );
+            if !t.empty_scopes.is_empty() {
+                out.push_str(&format!(", and {}", empty_scope_phrase(&t.empty_scopes)));
+            }
+            out
+        }
+        RULE_ERROR => format!(
+            "does not evaluate, `glia check` would exit 2: {}",
+            flat(t.error.as_deref().unwrap_or("no message"))
+        ),
+        RULE_ORPHANED => "binds no node (no `anchor` and no PROJECT at its scope, or an `anchor` that names no node): `glia check` never reads it".to_string(),
+        RULE_DUPLICATE => "already declared: the overlay as it is holds a rule of this id".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// A message on one line: its line breaks as `; `.
+fn flat(message: &str) -> String {
+    message
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// One violation: `<rule_kind> [`<rule_id>`] `<key>` - <tier>[, advisory]
+/// at <file:line | file | —>`; the id is left out under its own rule.
+fn hit_line(h: &RuleHit, with_id: bool) -> String {
+    let at = match (h.file.as_deref(), h.line) {
+        (Some(f), Some(n)) => format!("{f}:{n}"),
+        (Some(f), None) => f.to_string(),
+        _ => "—".to_string(),
+    };
+    let id = if with_id {
+        format!(" `{}`", h.rule_id)
+    } else {
+        String::new()
+    };
+    let advisory = if h.blocking { "" } else { ", advisory" };
+    format!(
+        "{}{id} `{}` - {}{advisory} at {at}",
+        h.rule_kind, h.key, h.tier
+    )
+}
+
+/// Up to [`SHOWN_HITS`] signed hit lines, then how many more there are.
+fn print_hits(hits: &[(char, &RuleHit)], total: usize, with_id: bool) {
+    for (sign, h) in hits.iter().take(SHOWN_HITS) {
+        println!("    {sign} {}", hit_line(h, with_id));
+    }
+    let shown = hits.len().min(SHOWN_HITS);
+    if total > shown {
+        println!(
+            "    ... {} more (--json lists up to {MAX_RULE_HITS})",
+            total - shown
+        );
+    }
+}
+
+/// What a graph stanza does to the declared rules (`WITHOUT(it) -> WITH`).
+fn moved_reason(d: &RulesDelta) -> String {
+    let moved = d.added_total + d.resolved_total > 0;
+    match (moved, d.errors.len()) {
+        (true, 0) => "moves declared-rule violations".to_string(),
+        (true, n) => format!("moves declared-rule violations, and {n} rule(s) stop evaluating"),
+        (false, n) => format!("{n} rule(s) stop evaluating"),
+    }
+}
+
+/// The `rules (...)` block under the stanza table: per stanza with a rule
+/// part, in stanza order, its verdict and why, then its located hits (`+`
+/// added on WITH, `-` resolved).
+fn print_rule_block(r: &TryReport) {
+    if !has_rule_part(r) {
+        return;
+    }
+    println!();
+    println!("rules (glia check on the build with every stanza):");
+    for s in &r.stanzas {
+        if let Some(t) = &s.rule {
+            println!(
+                "- {} `{}`: {} - {}",
+                s.stanza,
+                t.rule_id,
+                s.verdict,
+                rule_reason(t)
+            );
+            let hits: Vec<(char, &RuleHit)> = t.hits.iter().map(|h| ('+', h)).collect();
+            print_hits(&hits, t.violations, false);
+        } else if !s.rules.is_empty() {
+            let d = &s.rules;
+            println!("- {}: {} - {}", s.stanza, s.verdict, moved_reason(d));
+            let hits: Vec<(char, &RuleHit)> = d
+                .added
+                .iter()
+                .map(|h| ('+', h))
+                .chain(d.resolved.iter().map(|h| ('-', h)))
+                .collect();
+            print_hits(&hits, d.added_total + d.resolved_total, true);
+            for (id, message) in &d.errors {
+                println!("    ! `{id}` does not evaluate: {}", flat(message));
+            }
+        }
     }
 }
 

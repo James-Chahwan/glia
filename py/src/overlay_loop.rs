@@ -9,12 +9,13 @@
 //!   snippets, ambiguous_root, guide}`, a row the `gaps` row (`id` first) plus
 //!   `snippet` (`{file, start_line, lines}` or `None`). Writes nothing.
 //! - `overlay_try(repo_paths, candidate, leave_one_out=True)` builds base,
-//!   base + candidate and, per stanza, the candidate without it: the engine's
-//!   `TryReport`, `{stanzas, base, with, delta, verdict, closed, builds}`.
-//!   Writes only the primary repo's parse cache
-//!   (`<repo>/.glia/graph/parse_cache.bin`) when it is one repo, as the CLI
-//!   does, and under `GLIA_NO_PERSIST=1` too: the house convention for a
-//!   cache-only build (engine `ParseCache::save`).
+//!   base + candidate and, per graph stanza, the candidate without it: the
+//!   engine's `TryReport`, `{stanzas, base, with, delta, verdict, closed,
+//!   builds}`, + `rules` (DB.9b) when a build checked a rule or the
+//!   candidate holds a `[[constraint]]`. Writes only the primary repo's
+//!   parse cache (`<repo>/.glia/graph/parse_cache.bin`) when it is one
+//!   repo, as the CLI does, and under `GLIA_NO_PERSIST=1` too: the house
+//!   convention for a cache-only build (engine `ParseCache::save`).
 //! - `overlay_accept(repo_path, candidate=None, only=None, remove=None,
 //!   dry_run=False)` is the only writer of `<repo>/.glia/overlay.toml`
 //!   (atomically; not on a dry run or when nothing changed): the engine's
@@ -32,10 +33,14 @@
 //! `[overlay] propose repo=<primary> rows=<n> snippets=<s> ambiguous_root=<a> surface=py`,
 //! `[overlay] candidate file=- stanzas=<n> (... entrypoints=<e> constraint=<k>) gap_links=<g> errors=<x>`,
 //! `[overlay] try repo=<primary> stanzas=<n> builds=<b> verdicts keep=<k> review=<r> drop=<d> gaps <G0>→<G1> closed=<c> surface=py`,
+//! then, when the try has a rule part,
+//! `[overlay] try-rules repo=<primary> rules=<R> (holds=<h> violated=<v> error=<e> orphaned=<o> duplicate=<u>) empty_scopes=<s> violations +<a> -<r> blocking=<b> errors=<n> surface=py`,
 //! `[overlay] accept repo=<repo> added=<a> (... entrypoints=<n> constraint=<k>) removed=<r> duplicates=<u> file=.glia/overlay.toml dry_run=<bool> surface=py`.
 //!
 //! A candidate may carry `[[constraint]]` rules (DB.9a; handles
-//! `constraint#<n>`): `overlay_try` judges them, `overlay_accept` writes them
+//! `constraint#<n>`): `overlay_try` judges them on the build with every
+//! stanza and checks every declared rule on each build (DB.9b; the dict's
+//! `rules`, a stanza's `rule` / `rules`), `overlay_accept` writes them
 //! (moving the file to `version = 2` only when a rule needs it) and refuses,
 //! as `ValueError`, a rule `glia check` could not evaluate or an id the file
 //! declares with another body.
@@ -153,10 +158,11 @@ fn overlay_propose(
     to_py(py, serde_json::to_string(&proposal))
 }
 
-/// **overlay_try** (CK.1, CE.3c): what would `.glia/overlay.toml` plus the
-/// `candidate` stanzas change, and which stanza changed what, as one dict
-/// `{stanzas, base, with, delta, verdict, closed, builds}` (`glia overlay
-/// try --json`).
+/// **overlay_try** (CK.1, CE.3c, DB.9b): what would `.glia/overlay.toml`
+/// plus the `candidate` stanzas change, and which stanza changed what, as one
+/// dict `{stanzas, base, with, delta, verdict, closed, builds}` + `rules`
+/// when a build checked a rule or the candidate holds a `[[constraint]]`
+/// (`glia overlay try --json`).
 ///
 /// `candidate` is the candidate's TOML text (not a path): overlay sections,
 /// entrypoints and `[[constraint]]` rules only (a `forbid_edge`, a
@@ -164,14 +170,42 @@ fn overlay_propose(
 /// invariant), each stanza under `# gap: <id>` comments naming the gaps it
 /// targets. The tree is built with the overlay as it is (`base`),
 /// with every stanza merged in (`with`) and, with `leave_one_out`, once per
-/// stanza without it. `base` / `with`: `{nodes_by_kind, edges_by_category,
-/// gaps_by_category}`; `delta`: `{nodes, edges, gaps}`, with minus base,
-/// zero entries left out; `verdict`: `keep` / `review` / `drop`; `closed`:
-/// the linked gap ids in base and not in with; `builds`: the distinct
-/// overlay texts built (at most N + 2). `stanzas` (empty without
-/// `leave_one_out`): per stanza in candidate order `{stanza, gaps, closes,
-/// marginal, verdict}`, `stanza` its handle (`wrapper#1`, `edge#2`,
-/// `constants.GATEWAY`, `entrypoints#1`, `constraint#1`).
+/// graph stanza without it (a `[[constraint]]` stanza costs no build).
+/// `base` / `with`: `{nodes_by_kind, edges_by_category, gaps_by_category}`;
+/// `delta`: `{nodes, edges, gaps}`, with minus base, zero entries left out;
+/// `verdict`: `keep` / `review` / `drop`; `closed`: the linked gap ids in
+/// base and not in with; `builds`: the distinct overlay texts built (at most
+/// 2 + the graph stanzas). `stanzas` (empty without `leave_one_out`): per
+/// stanza in candidate order `{stanza, gaps, closes, marginal, verdict}`,
+/// `stanza` its handle (`wrapper#1`, `edge#2`, `constants.GATEWAY`,
+/// `entrypoints#1`, `constraint#1`), + `rule` on a `[[constraint]]` stanza
+/// and `rules` on a graph stanza that moves a declared rule's violations.
+///
+/// Rules. Every build that declares a rule is checked, and its violations
+/// are hits `{rule_id, rule_kind, key, tier, blocking, file, line}` (`key`
+/// the hit's identity within its rule, `line` 1-based, `file` / `line`
+/// `None` when unlocated), compared by `(rule_id, rule_kind, key)`, never by
+/// count. A stanza's `rule`: `{rule_id, status, violations, tiers,
+/// blocking, hits}` + `error` (status `error`) and `empty_scopes` (the
+/// scopes its `in_scope` / `under` literals name that hold no node), judged
+/// on `with`; `status` is `holds`, `violated`, `error` (`glia check` would
+/// exit 2), `orphaned` (it binds no node, so check never reads it) or
+/// `duplicate` (already declared). A graph stanza's `rules`: `{added,
+/// added_total, resolved, resolved_total, blocking, errors}` from the build
+/// without it to `with` (each list at most 20 hits; `errors`: `[id,
+/// message]` pairs). The dict's `rules`: `{delta, statuses,
+/// graph_verdict, rule_verdict}`, `delta` the same shape from `base` to
+/// `with`, `statuses` the `[[constraint]]` stanzas per status. Verdicts: a
+/// `[[constraint]]` stanza keeps when it holds with no empty scope, is review
+/// when it holds on an empty scope or is violated, and drops on error,
+/// orphaned or duplicate; a graph stanza's `keep` becomes `review` when its
+/// `rules` is present; `graph_verdict` is the graph rule, `keep` demoted to
+/// `review` when the base -> with delta moves a rule the candidate does not
+/// newly declare; `rule_verdict` is `None` without a `[[constraint]]`, else
+/// `keep` / `drop` when every stanza's is, `review` otherwise; `verdict` is
+/// `graph_verdict` without a rule verdict, else `review` when either part
+/// is, `keep` when either keeps, `drop` otherwise. `rules` is judged with
+/// `leave_one_out=False` too (then only `statuses` names the stanzas).
 ///
 /// `repo_paths`: the first is the primary repo, whose overlay file the
 /// candidate would join; the rest merge in. Raises `ValueError` for an empty
@@ -180,7 +214,8 @@ fn overlay_propose(
 /// only the primary repo's parse cache (`<repo>/.glia/graph/parse_cache.bin`,
 /// one repo only, also under `GLIA_NO_PERSIST=1`); never the overlay file or
 /// a layout. Prints `[overlay] candidate file=- ...` then `[overlay] try
-/// repo=<primary> ... surface=py`.
+/// repo=<primary> ... surface=py` and, with a rule part, `[overlay] try-rules
+/// repo=<primary> rules=<R> (holds=<h> ...) ... surface=py`.
 #[pyfunction]
 #[pyo3(signature = (repo_paths, candidate, leave_one_out=true))]
 fn overlay_try(

@@ -497,3 +497,207 @@ fn rule_candidates_accept_and_collide() {
     );
     std::fs::remove_dir_all(root).ok();
 }
+
+/// DB.9b's Python tree (engine/tests/overlay_loop_rules.rs) under
+/// `<root>/py`: a PROJECT at the root and at web/, store/, scripts/;
+/// `web::app::show` calls `store::db::load`, and the overlay forbids
+/// scripts -> store (`scripts-no-store`).
+fn py_rule_tree(root: &Path) -> PathBuf {
+    let repo = root.join("py");
+    let files: [(&str, &str); 9] = [
+        ("pyproject.toml", "[project]\nname = \"py\"\n"),
+        ("web/pyproject.toml", "[project]\nname = \"web\"\n"),
+        ("store/pyproject.toml", "[project]\nname = \"store\"\n"),
+        ("scripts/pyproject.toml", "[project]\nname = \"scripts\"\n"),
+        (
+            "web/app.py",
+            "from store.db import load\n\n\ndef show(k):\n    return load(k)\n",
+        ),
+        ("web/view.py", "def render(x):\n    return x\n"),
+        (
+            "store/db.py",
+            "def load(k):\n    return k\n\n\ndef save(k, v):\n    return v\n",
+        ),
+        ("scripts/tool.py", "def run():\n    return 1\n"),
+        (
+            ".glia/overlay.toml",
+            "version = 1\n\n[[constraint]]\nid = \"scripts-no-store\"\nkind = \"forbid_edge\"\nfrom = \"scripts\"\nto = \"store\"\norigin = \"human\"\n",
+        ),
+    ];
+    for (rel, body) in files {
+        let p = repo.join(rel);
+        std::fs::create_dir_all(p.parent().expect("dir")).expect("mkdir");
+        std::fs::write(p, body).expect("write");
+    }
+    repo
+}
+
+/// `<root>/rules7.toml`, DB.9b's seven-stanza candidate: `constraint#1`
+/// holds, `#2` is violated by `web::app::show -> store::db::load`, `#3`
+/// holds on an empty scope (`webs`), `#4` does not evaluate, `#5` holds,
+/// `#6` binds no node, and `edge#1` adds a CALLS that breaks
+/// `scripts-no-store`. Version-less.
+fn seven_stanza_candidate(root: &Path) -> PathBuf {
+    let path = root.join("rules7.toml");
+    let text = r#"[[constraint]]
+id = "web-no-save"
+kind = "invariant"
+text = "web never saves"
+rule = "violation(a) :- edge(a, b, \"CALLS\"), in_scope(a, \"web\"), qname(b, \"store::db::save\")."
+
+[[constraint]]
+id = "web-no-store-calls"
+kind = "invariant"
+text = "web calls nothing in store"
+rule = "violation(a, b) :- edge(a, b, \"CALLS\"), in_scope(a, \"web\"), in_scope(b, \"store\")."
+
+[[constraint]]
+id = "webs-no-store"
+kind = "invariant"
+text = "webs calls nothing in store"
+rule = "violation(a, b) :- edge(a, b, \"CALLS\"), in_scope(a, \"webs\"), in_scope(b, \"store\")."
+
+[[constraint]]
+id = "rotten"
+kind = "invariant"
+text = "no routee"
+rule = "violation(r) :- node(r, \"ROUTEE\")."
+
+[[constraint]]
+id = "view-no-store"
+kind = "forbid_edge"
+from = "web/view.py"
+to = "store"
+anchor = "web::view::render"
+
+[[constraint]]
+id = "orphan"
+kind = "forbid_edge"
+from = "webs"
+to = "store"
+
+[[edge]]
+from = "scripts::tool::run"
+to = "store::db::save"
+category = "CALLS"
+"#;
+    std::fs::write(&path, text).expect("write");
+    path
+}
+
+/// DB.9c: the text form of `try` shows the rule part: a `rules` column, the
+/// per-stanza rule block with located hits, the `rules:` totals line and the
+/// verdict split into its graph and rule parts; `--no-leave-one-out` keeps
+/// the totals line. Pre-fix baseline (HEAD c675fe47): the 6-column table and
+/// `verdict: review - the graph improved, but a gap category rose too`.
+#[test]
+fn try_shows_the_rule_part() {
+    let root = tmp("rule-part");
+    let repo = py_rule_tree(&root);
+    let cand = seven_stanza_candidate(&root);
+    let (r, c) = (s(&repo), s(&cand));
+    let before = std::fs::read_to_string(overlay_file(&repo)).expect("read");
+
+    let out = glia(&["overlay", "try", r, "--candidate", c]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    for want in [
+        "| stanza | verdict | closes | nodes | edges | gaps | rules |\n|---|---|---|---|---|---|---|\n",
+        "| constraint#1 | keep | — | — | — | — | holds |",
+        "| constraint#2 | review | — | — | — | — | 1 violation(s) (fact 1; 1 blocking) |",
+        "| constraint#3 | review | — | — | — | — | holds, empty scope webs |",
+        "| constraint#4 | drop | — | — | — | — | error |",
+        "| constraint#6 | drop | — | — | — | — | orphaned |",
+        "| edge#1 | review | — | — | CALLS +1 | dead_symbol -1 | +1 -0 (0 blocking) |",
+        "\n\nrules (glia check on the build with every stanza):\n- constraint#1 `web-no-save`: keep - holds on the code as it is\n",
+        "- constraint#2 `web-no-store-calls`: review - flags 1 violation(s) in the code as it is (1 blocking: `glia check` exits 1 on them)\n    + rule `web::app::show, store::db::load` - fact at web/app.py:4\n",
+        "- constraint#3 `webs-no-store`: review - holds, but scope `webs` holds no node: it may pass vacuously\n",
+        "- constraint#4 `rotten`: drop - does not evaluate, `glia check` would exit 2: rotten (",
+        "- constraint#6 `orphan`: drop - binds no node",
+        "- edge#1: review - moves declared-rule violations\n    + forbid_edge `scripts-no-store` `scripts::tool::run -[CALLS]-> store::db::save` - heuristic, advisory at .glia/overlay.toml:",
+        "\nbuilds: 3\nrules: holds 3, violated 1, error 1, orphaned 1; violations +2 -0 (1 blocking); errors: rotten\n",
+        "verdict: review - graph part review (a declared rule's violations moved), rule part review\n",
+        "--only constraint#1 --only constraint#5",
+        "review before accepting: constraint#2, constraint#3, edge#1",
+    ] {
+        assert!(stdout.contains(want), "missing {want:?} in:\n{stdout}");
+    }
+    let rotten = stdout
+        .lines()
+        .find(|l| l.starts_with("- constraint#4 "))
+        .expect("the rotten rule's line");
+    assert!(rotten.contains("unknown node kind `ROUTEE`"), "{rotten}");
+    assert!(
+        !stdout.contains("a gap category rose too"),
+        "a rule-driven review reads as a rule move: {stdout}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "[overlay] try-rules repo={r} rules=6 (holds=3 violated=1 error=1 orphaned=1 duplicate=0) empty_scopes=1 violations +2 -0 blocking=1 errors=1 surface=cli"
+        )),
+        "{stderr}"
+    );
+
+    // --no-leave-one-out: no stanza rows, and the totals line still names
+    // every rule status.
+    let out = glia(&["overlay", "try", r, "--candidate", c, "--no-leave-one-out"]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        stdout.contains("per-stanza attribution skipped (--no-leave-one-out)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "rules: holds 3, violated 1, error 1, orphaned 1; violations +2 -0 (1 blocking); errors: rotten\n"
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("| stanza |"), "{stdout}");
+    assert!(!stdout.contains("rules (glia check"), "{stdout}");
+    assert!(
+        stdout.contains(
+            "verdict: review - graph part review (a declared rule's violations moved), rule part review"
+        ),
+        "{stdout}"
+    );
+
+    // --json: the rule part as the engine reports it.
+    let out = glia(&["overlay", "try", r, "--candidate", c, "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let t = json(&out);
+    assert_eq!(t["rules"]["rule_verdict"], "review", "{t}");
+    assert_eq!(t["rules"]["graph_verdict"], "review", "{t}");
+
+    // A rule-only candidate: the graph part is a drop, the verdict its rule
+    // part.
+    let one = root.join("one.toml");
+    std::fs::write(
+        &one,
+        "[[constraint]]\nid = \"no-routes\"\nkind = \"invariant\"\nanchor = \"web::view::render\"\ntext = \"t\"\nrule = 'violation(r) :- node(r, \"ROUTE\").'\n",
+    )
+    .expect("write");
+    let out = glia(&["overlay", "try", r, "--candidate", s(&one)]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(
+        stdout.contains(
+            "verdict: keep - graph part drop (no gap category fell and the graph did not grow), rule part keep\n"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\nrules: holds 1; violations +0 -0 (0 blocking)\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("| constraint#1 | keep | — | — | — | — | holds |"),
+        "{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(overlay_file(&repo)).expect("read"),
+        before,
+        "try writes no overlay"
+    );
+    std::fs::remove_dir_all(root).ok();
+}

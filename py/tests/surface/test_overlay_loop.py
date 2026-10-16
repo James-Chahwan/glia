@@ -7,8 +7,9 @@ functions over `glia_engine::overlay_loop` (CE.3b-CE.3d), the steps of
   -> {rows, counts, snippets, ambiguous_root, guide}; a row is the `gaps` row
   (id first) plus `snippet`. Writes nothing.
 - `overlay_try(repo_paths, candidate, leave_one_out=True)` -> {stanzas, base,
-  with, delta, verdict, closed, builds}. `candidate` is TOML text, not a path.
-  Writes only the primary repo's parse cache.
+  with, delta, verdict, closed, builds} + `rules` when a rule was checked
+  (DB.9b; a `[[constraint]]` stanza carries `rule`). `candidate` is TOML text,
+  not a path. Writes only the primary repo's parse cache.
 - `overlay_accept(repo_path, candidate=None, only=None, remove=None,
   dry_run=False)` -> {added, removed, duplicates, file, dry_run, written,
   diff}. The only writer of `.glia/overlay.toml`.
@@ -45,6 +46,25 @@ DEAD = [("dead_symbol", "chat_preview_repository::NewChatPreviewRepository"),
         ("dead_symbol", "collection::NewNamedCollection")]
 CANDIDATE_MARKER = ("[overlay] candidate file=- stanzas=2 (route_prefix=0 wrapper=1 edge=1 "
                     "constants=0 entrypoints=0 constraint=0) gap_links=0 errors=0")
+# DB.9c: two rules anchored on a FUNCTION, version-less. Neither reads a CALLS
+# edge, so neither depends on how the Go build resolves the generic
+# instantiation call `NewCollection[T](...)`. `collection-funcs` is violated
+# by the two FUNCTIONs of collection.go; the tree has no ROUTE, so
+# `no-routes` holds.
+RULE_CAND = '''[[constraint]]
+id = "collection-funcs"
+kind = "invariant"
+anchor = "collection::NewCollection"
+text = "collection.go declares no free function"
+rule = "violation(f) :- node(f, \\"FUNCTION\\"), in_scope(f, \\"collection.go\\")."
+
+[[constraint]]
+id = "no-routes"
+kind = "invariant"
+anchor = "collection::NewCollection"
+text = "the tree serves no route"
+rule = "violation(r) :- node(r, \\"ROUTE\\")."
+'''
 
 
 def go_repo(tmp: str) -> pathlib.Path:
@@ -128,6 +148,44 @@ def main() -> int:
         c.check("leave_one_out=False: two builds, no stanza rows",
                 two.get("builds") == 2 and two.get("stanzas") == [], two)
         c.check("no overlay file after the tries", not overlay.exists())
+
+        # Rules (DB.9b / DB.9c): a [[constraint]] stanza is judged on `with`,
+        # with no build of its own.
+        rt, err = stderr_of(lambda: rg.overlay_try([repo], RULE_CAND))
+        rstanzas = rt.get("stanzas", []) if type(rt) is dict else []
+        c.check("rule try: two builds, constraint#1 review, constraint#2 keep",
+                rt.get("builds") == 2
+                and [(s.get("stanza"), s.get("verdict")) for s in rstanzas]
+                == [("constraint#1", "review"), ("constraint#2", "keep")], rt)
+        r1 = rstanzas[0].get("rule", {}) if len(rstanzas) == 2 else {}
+        c.check("constraint#1 violated by collection.go's two FUNCTIONs, both blocking",
+                r1.get("status") == "violated" and r1.get("violations") == 2
+                and r1.get("blocking") == 2
+                and [h.get("key") for h in r1.get("hits", [])]
+                == ["collection::NewCollection", "collection::NewNamedCollection"], r1)
+        c.check("a hit is located: collection.go, 1-based line",
+                [(h.get("rule_id"), h.get("rule_kind"), h.get("tier"), h.get("file"),
+                  h.get("line")) for h in r1.get("hits", [])]
+                == [("collection-funcs", "rule", "fact", "collection.go", 15),
+                    ("collection-funcs", "rule", "fact", "collection.go", 20)], r1)
+        r2 = rstanzas[1].get("rule", {}) if len(rstanzas) == 2 else {}
+        c.check("constraint#2 holds", r2.get("status") == "holds", r2)
+        rules = rt.get("rules") or {}
+        c.check("rule part: rule verdict review, verdict review",
+                rules.get("rule_verdict") == "review" and rt.get("verdict") == "review"
+                and rules.get("statuses") == {"holds": 1, "violated": 1}, rules)
+        c.check("try-rules marker",
+                f"[overlay] try-rules repo={repo} rules=2 (holds=1 violated=1 error=0 "
+                "orphaned=0 duplicate=0) empty_scopes=0 violations +2 -0 blocking=2 errors=0 "
+                "surface=py" in err, err[-800:])
+        rquick = rg.overlay_try([repo], RULE_CAND, leave_one_out=False)
+        c.check("leave_one_out=False still judges the rules",
+                rquick.get("stanzas") == [] and rquick.get("builds") == 2
+                and (rquick.get("rules") or {}).get("statuses") == {"holds": 1, "violated": 1},
+                rquick)
+        c.check("a rule-free try has no rules key",
+                type(t) is dict and "rules" not in t, type(t) is dict and list(t))
+        c.check("no overlay file after the rule tries", not overlay.exists())
 
         # Accept: the only writer of .glia/overlay.toml.
         dry = rg.overlay_accept(repo, CAND, only=["wrapper#1"], dry_run=True)

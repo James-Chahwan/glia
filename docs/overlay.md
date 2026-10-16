@@ -412,13 +412,15 @@ the loop's commands and its rules.
    no `version` is checked as version 2. Keep it outside `.glia/`, whose files are fingerprinted
    build inputs.
 4. **Try.** `glia overlay try <repo> --candidate <file>` builds the tree with the overlay as it is
-   (base), with every candidate stanza merged in (with) and, per stanza, with every stanza but
-   that one. It reports each node kind, edge category and gap category that moved, and per stanza
+   (base), with every candidate stanza merged in (with) and, per graph stanza, with every stanza
+   but that one. It reports each node kind, edge category and gap category that moved, and per stanza
    (`wrapper#1`, `edge#2`, `constants.GATEWAY`, `entrypoints#1`, `constraint#1`) its marginal effect (with, minus
    the build without it), the linked gaps it `closes` (closed by it alone: back when it is left
-   out; the report's `closed` also counts gaps several stanzas close together) and a verdict. An
+   out; the report's `closed` also counts gaps several stanzas close together) and a verdict. A
+   `[[constraint]]` stanza is judged by its rule on with, and a declared rule's violations moving
+   is part of the verdict ("Judging a rule", below). An
    overlay never changes a parse, so every build reuses the cached parses; `builds` counts the
-   distinct overlay texts, at most N + 2 for N stanzas. `--no-leave-one-out` builds base and with
+   distinct overlay texts, at most 2 + the graph stanzas. `--no-leave-one-out` builds base and with
    only: the totals and the verdict, no per-stanza rows. It writes only the parse cache.
 5. **Accept.** `glia overlay accept <repo> --candidate <file> --only <stanza>` (repeatable; default
    every stanza) is the only writer of `.glia/overlay.toml`. It merges the chosen stanzas with their
@@ -446,8 +448,10 @@ The verdict. `try` (per stanza and for the whole candidate) and `glia gaps <repo
 fell, or some node kind or edge category other than `DEFINES` / `CONTAINS` rose; it *regressed* it
 when some gap category rose. `keep` = improved and not regressed, `review` = both (a person
 decides), `drop` = not improved. A stanza that closes a gap it links, and raises no gap category, is
-a `keep`. Accept only what the verdict keeps. The verdict measures; it cannot tell whether an added
-edge is right, which is why a stanza is written from the code it cites.
+a `keep`. A candidate with rules is judged by both parts: this graph rule, and its rules checked
+by `glia check` ("Judging a rule", below). Accept only what the verdict keeps. The verdict
+measures; it cannot tell whether an added edge is right, which is why a stanza is written from the
+code it cites.
 
 `glia gaps <repo> --overlay-delta` builds without and then with the overlay, counts each build
 whole (nodes by kind, edges by category, gaps by category for the categories that need no repo
@@ -523,6 +527,72 @@ glia drafts no rule. `propose` lists no rule rows: a rule states intent, and the
 what the code is. A rule glia could mine from structure would only restate the code as law, so the
 evidence of intent stays prose (an unchecked invariant, an ADR or `[[decision]]`, the person's
 request), and the model step translates it.
+
+### Judging a rule
+
+`try` runs `glia check` once on every build whose graph declares a rule (the file's, the
+candidate's, a cell-API rule) and keeps each violation as a hit keyed by its rule id, its rule
+kind and its identity within the rule: a `forbid_edge` or a divergence by evidence row (`<from>
+-[<category>]-> <to>`, plus one `<n> row(s) past check::MAX_EVIDENCE` hit for the rows check
+cuts), a `rule` or `forbid_path` violation by its subject, a `no_cycle` by its witness's qnames
+and member count. Two builds compare by those keys, never by a count, so a stanza that hides one
+violation and adds another moves two hits. A hit takes its row's tier and location, and blocks
+when `glia check` would exit 1 on it (its tier at or above the rule's `min_tier`). A build that
+declares no rule is not checked, and a rule-free try prints and serialises exactly as it did
+before rules.
+
+A `[[constraint]]` stanza only adds a rule, so it costs no build: it is judged on with alone, and
+its status is the first that applies:
+
+| status | when |
+|---|---|
+| `duplicate` | the overlay as it is already declares its id (the same body, or a cell-API rule) |
+| `error` | `glia check` reports an error for it on with (its message, on one line) |
+| `orphaned` | with declares no rule of its id: no `anchor` and no PROJECT at its scope, or an anchor that names no node, so `glia check` never reads it |
+| `violated` | with holds a hit of it |
+| `holds` | otherwise |
+
+Its empty scopes are the scopes its `rule`'s positive `in_scope(_, "s")` and `under(_, "p")`
+literals name that hold no node on with: such a rule may hold vacuously. A negated literal never
+counts (`!in_scope(f, "legacy")` holds for every node).
+
+| verdict | a `[[constraint]]` stanza |
+|---|---|
+| `keep` | holds with no empty scope: true of the code as it is, and `glia check` keeps it true |
+| `review` | holds on an empty scope (a misspelt scope, or one meant to stay empty), or violated (the rule or the code is wrong; a blocking violation would make `glia check` exit 1, a heuristic one never does) |
+| `drop` | error (`glia check` would exit 2), orphaned (never read) or duplicate (adds nothing) |
+
+A graph stanza keeps its graph verdict, except that `keep` becomes `review` when the build without
+it and the build with it differ in a declared rule's hits, or a rule errors only with it: an
+overlay stanza that adds or hides a rule's violation needs a person, as an `allow` does.
+
+The candidate's verdict has two parts. The graph part is the graph rule on base and with, `keep`
+demoted to `review` when base -> with moves a hit (or an error) of a rule the candidate does not
+newly declare. The rule part is `keep` when every `[[constraint]]` stanza keeps, `drop` when every
+one drops, and `review` otherwise; a candidate with no `[[constraint]]` stanza has none. The
+verdict is the graph part when there is no rule part; otherwise `review` when either part is
+review, `keep` when either keeps, and `drop` when both drop. A rule-only candidate's graph part is
+`drop` (nothing in the graph moved), so its verdict is its rule part. The rule part needs only
+base and with, so `--no-leave-one-out` judges it too, and `builds` stays at most 2 + the graph
+stanzas.
+
+The text form shows the rule part when there is one. The stanza table gains a `rules` column (a
+rule stanza's status, `<n> violation(s) (<tiers>; <b> blocking)` when violated; a graph stanza's
+moved hits as `+<added> -<resolved> (<b> blocking)`), and a `rules (glia check on the build with
+every stanza):` block under it gives each such stanza's verdict and reason with up to five located
+hits (`+` on with, `-` gone with it; `--json` lists up to 20). The totals gain a `rules:` line (the
+statuses, then `violations +<a> -<r> (<b> blocking)` from base to with and the rules that start to
+error), the one place `--no-leave-one-out` names the statuses, and the verdict line reads
+`verdict: <v> - graph part <g> (<why>), rule part <r>`. In `--json` and from Python the report
+gains `rules` (`{delta, statuses, graph_verdict, rule_verdict}`), a rule stanza `rule` (`{rule_id,
+status, violations, tiers, blocking, hits}`, plus `error` and `empty_scopes` when set) and a graph
+stanza that moves hits `rules` (`{added, added_total, resolved, resolved_total, blocking,
+errors}`).
+
+When a try has a rule part, a second stderr line follows `[overlay] try ...`:
+`[overlay] try-rules repo=<label> rules=<R> (holds=<h> violated=<v> error=<e> orphaned=<o> duplicate=<u>) empty_scopes=<s> violations +<a> -<r> blocking=<b> errors=<n> surface=<cli|py|engine>`,
+`R` the candidate's `[[constraint]]` stanzas by status, `s` those that hold on an empty scope, and
+the rest the base -> with hits. Each rule-bearing build also prints check's own `[check]` line.
 
 ## History snapshot
 
