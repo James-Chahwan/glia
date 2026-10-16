@@ -318,6 +318,44 @@ fn canonical_parse<S: serde::Serializer>(p: &FileParse, s: S) -> Result<S::Ok, S
     st.end()
 }
 
+/// DC.7b: xxh64 of `fp`'s canonical bincode, the exact bytes
+/// [`CacheEntry::payload`] writes for the parse ([`canonical_parse`]),
+/// streamed into the hasher with no buffer. Two parses fingerprint equal iff
+/// their canonical bytes are equal (up to an xxh64 collision, 2^-64 per
+/// comparison), so whatever order their hash containers were filled in. A
+/// watch session's group early cutoff compares post-graft parses through it
+/// (`watch::group_fingerprints`). `None` when the serializer fails, which no
+/// parse the cache can hold does: the caller then treats the parse as
+/// changed.
+pub(crate) fn parse_fingerprint(fp: &FileParse) -> Option<u64> {
+    use core::hash::Hasher;
+    use twox_hash::XxHash64;
+
+    /// An `io::Write` that feeds the hasher and never fails.
+    struct HashWriter(XxHash64);
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.write(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The parse as [`CacheEntry`]'s `parse` field serializes it.
+    struct Canonical<'a>(&'a FileParse);
+    impl serde::Serialize for Canonical<'_> {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            canonical_parse(self.0, s)
+        }
+    }
+
+    let mut w = HashWriter(XxHash64::with_seed(0));
+    bincode::serialize_into(&mut w, &Canonical(fp)).ok()?;
+    Some(w.0.finish())
+}
+
 /// `CodeNav` in the derived wire shape, each map in key order.
 struct CanonicalNav<'a>(&'a CodeNav);
 
@@ -990,7 +1028,47 @@ mod tests {
                 name: "Chat_StreamServer".into(),
                 shape: "BidiStreamingServer[Msg,Reply]".into(),
             },
+            NavFact::GoStringConst {
+                name: "apiBase".into(),
+                value: "/api/v1".into(),
+            },
+            NavFact::GoPackageName {
+                name: "server".into(),
+            },
         ]
+    }
+
+    /// DC.7b: a parse's fingerprint is xxh64 of the bytes its cache payload
+    /// holds for it (the payload's tail after `content_hash` and `lang`), so
+    /// it does not depend on the order the hash containers were filled in,
+    /// and any content change moves it.
+    #[test]
+    fn parse_fingerprint_hashes_the_canonical_bytes() {
+        use core::hash::Hasher;
+        let fwd: Vec<u64> = (0..24).collect();
+        let rev: Vec<u64> = (0..24).rev().collect();
+        let (a, b) = (rich_parse(24, &fwd), rich_parse(24, &rev));
+        let fp = parse_fingerprint(&a).expect("a fingerprint");
+        assert_eq!(Some(fp), parse_fingerprint(&b), "fill order moved the fingerprint");
+
+        let payload = CacheEntry::new(7, "rust", a.clone()).payload().expect("payload");
+        // bincode fixint: u64 content_hash, then u64 length + the lang bytes.
+        let tail = &payload[8 + 8 + "rust".len()..];
+        let mut h = twox_hash::XxHash64::with_seed(0);
+        h.write(tail);
+        assert_eq!(fp, h.finish(), "the payload's parse bytes");
+
+        let mut moved = a.clone();
+        moved.nav.record_return_type(NodeId(1_000_000), "pkg.Other");
+        assert_ne!(parse_fingerprint(&moved), Some(fp), "a nav change");
+        let mut fewer = a;
+        fewer.properties.clear();
+        assert_ne!(parse_fingerprint(&fewer), Some(fp), "a properties change");
+        assert_ne!(
+            parse_fingerprint(&FileParse::default()),
+            Some(fp),
+            "an empty parse"
+        );
     }
 
     /// CB.6: `CodeNav::nav_facts` (build-time, never in the store) survives a

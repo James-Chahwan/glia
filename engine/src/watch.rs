@@ -11,8 +11,25 @@
 //! stage calls `generate_one_inner` makes (parse and graft, plan / build / fold
 //! the groups, the per-repo markers, the region / project / docs graphs, the
 //! pass tail), so every update's graph is a clean build of the tree as the
-//! session read it, by construction. This packet rebuilds every language group
-//! from the warm cache; DC.7b adds the group early cutoff, DC.7c the stat poll.
+//! session read it, by construction. DC.7c adds the stat poll.
+//!
+//! Group early cutoff (DC.7b): a language group's pre-pass graph is a pure
+//! function of its ordered post-graft parses, the repo id and the repo-level
+//! inputs its builder reads ([`hidden_fp`]). The session keeps every group's
+//! last build ([`CachedGroup`]) under a fingerprint of exactly those inputs
+//! (each parse's canonical bincode through `cache::parse_fingerprint`, taken
+//! after the grafts, on the pool), plus the overlay and the proto service set
+//! (so a change of either rebuilds every group, as its `full_rebuild` reason
+//! says). An update rebuilds the groups whose fingerprint moved and reuses a
+//! clone of the others' cached builds. Every group costs one deep clone per
+//! update: the passes mutate the merged graph (node confidence, cells, intra
+//! edge evidence), so a cached pre-pass graph is never handed over by
+//! reference; a reused build is cloned out of the cache, a rebuilt one is
+//! cloned in before the fold moves its graph into the merged graph. A Low
+//! update with no `full_rebuild` reason and no SCIP snapshot (which
+//! reconfidences intra edges of any graph) then takes the located delta over
+//! the rebuilt groups' graphs and the region / project / docs graphs only
+//! (`delta::located_delta_scoped`); every other update takes the full one.
 //!
 //! Durability (Salsa's): a path is [`Durability::Low`] (a source file: only its
 //! read moves) or [`Durability::High`] (a repo-level input: `.glia/`, a
@@ -29,8 +46,8 @@
 //!   once per [`WatchSession::open`]; `files` counts the walked sources and docs
 //!   the build read, `groups` the language groups.
 //! - `[watch] update seq=<s> files +<a> ~<m> -<r> groups_rebuilt=<k>/<g> full_rebuild=<reason|none> nodes +<a> -<d> ~<m> ><v> edges +<a> -<r> ~<c> took=<ms> repo=<label>`
-//!   once per update that rebuilt (`>` counts moved nodes, `~` on edges the
-//!   reconfidenced ones).
+//!   once per update that rebuilt (`k` the language groups rebuilt of the
+//!   plan's `g`, `>` counts moved nodes, `~` on edges the reconfidenced ones).
 //! - `[watch] noop repo=<label> paths=<n>` for an update that changed nothing
 //!   (`n` = the paths it was given), and `[watch] outside repo=<label> paths=<n>`
 //!   when some given paths do not lie under the root.
@@ -44,8 +61,10 @@ use std::hash::Hasher as _;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use glia_code_domain::FileParse;
 use glia_code_domain::glia_config::{LoadedConfig, OVERLAY_FILE};
 use glia_code_domain::project_roots::{self, ProjectRoot};
+use glia_code_domain::snapshots::scip_dir;
 use glia_code_domain::walk_gating::{self, CONTROL_DIR, RepoIdentity, repo_identity};
 use glia_code_extractors::{grpc, migrations, packages};
 use glia_core::RepoId;
@@ -55,17 +74,20 @@ use twox_hash::XxHash64;
 use crate::build::assemble::{RepoBuildCtx, parse_and_graft, repo_markers};
 use crate::build::c_includes::IncludeRoots;
 use crate::build::lang_build::{
-    GroupCtx, GroupPlan, LanguageGraphs, TsAliasSet, build_groups, fold_groups, plan_groups,
+    GroupCtx, GroupInput, GroupPlan, LangBuild, LanguageGraphs, TsAliasSet, build_groups,
+    fold_groups, plan_groups,
 };
 use crate::build::rpc_needles::RpcContext;
 use crate::build::timing::{self, BuildTimes, PhaseTimes};
 use crate::build::{
     BuildOptions, Finished, GenerateResult, aux_graphs, finish_build, go_modules_for,
 };
-use crate::cache::ParseCache;
-use crate::delta::{DeltaCounts, DeltaEdge, DeltaNode, located_delta_counted};
+use crate::cache::{ParseCache, parse_fingerprint};
+use crate::delta::{
+    DeltaCounts, DeltaEdge, DeltaNode, DeltaScope, located_delta_counted, located_delta_scoped,
+};
 use crate::external::{RepoInputs, repo_inputs};
-use crate::extract::{GoModules, detect_language};
+use crate::extract::{GoModules, TS_FAMILY, detect_language};
 use crate::passes::GroupFill;
 use crate::walk::{
     FileStamp, Pending, Read, ReadRecord, RegionAnchor, Reuse, WalkPlan, plan_walk, read_one,
@@ -167,7 +189,11 @@ pub struct WatchFiles {
 /// `const_scan`, `grafts` and `language_build` are CA.9's repo phases,
 /// `resolve`, `post`, `finalize` and `external_cells` its build tail;
 /// `delta` is the located delta against the previous graph and `total` the
-/// whole [`WatchSession::apply`] call.
+/// whole [`WatchSession::apply`] call. DC.7b: `fingerprint` is the group
+/// fingerprints (every post-graft parse's, on the pool, and the group keys)
+/// and `clone` the group cache's deep clones (the reused builds cloned out,
+/// the rebuilt ones cloned in); `language_build` (plan, build and fold, also
+/// the `[timing] repo=` line's) leaves both out, so the phases add up.
 #[non_exhaustive]
 #[derive(Serialize, Debug, Clone, Copy, Default, PartialEq)]
 pub struct WatchPhases {
@@ -177,6 +203,8 @@ pub struct WatchPhases {
     pub const_scan: f64,
     pub grafts: f64,
     pub language_build: f64,
+    pub fingerprint: f64,
+    pub clone: f64,
     pub resolve: f64,
     pub post: f64,
     pub finalize: f64,
@@ -187,10 +215,14 @@ pub struct WatchPhases {
 
 /// One [`WatchSession::apply`]'s answer: the session's `seq` after it (left
 /// unchanged by an update that changed nothing), the files that moved, the
-/// language groups rebuilt (every group of the plan in DC.7a), the reason the
-/// update counts as a full rebuild (`identity`, `go_modules`, `overlay`,
-/// `proto_services`; `None` otherwise), the new totals, and the located delta
-/// against the previous graph (`delta::located_delta_counted`: rows sorted as
+/// language groups rebuilt (plan keys in plan order: the groups whose
+/// fingerprint moved, DC.7b; the others reuse their cached build), the reason
+/// the update counts as a full rebuild (`identity`, `go_modules`, `overlay`,
+/// `proto_services`; `None` otherwise; every group rebuilds under all but
+/// `go_modules`, which re-parses every file and still reuses a group whose
+/// parses come back equal), the new totals, and the located delta against
+/// the previous graph (`delta::located_delta_counted`, or
+/// `delta::located_delta_scoped` on a Low update: the same rows, sorted as
 /// `glia delta` sorts them, with their counts).
 #[non_exhaustive]
 #[derive(Serialize, Debug, Clone)]
@@ -236,7 +268,31 @@ pub struct WatchSession {
     services_fp: u64,
     cache: ParseCache,
     result: GenerateResult,
+    /// DC.7b: every language group's last pre-pass build whose fingerprint
+    /// could be taken, in plan order.
+    groups: Vec<CachedGroup>,
+    /// The plan key of each language graph of `result.merged`, index for
+    /// index (`LanguageGraphs::keys`); the region / project / docs graphs
+    /// follow them.
+    graph_keys: Vec<&'static str>,
     seq: u64,
+}
+
+/// One language group's pre-pass build (DC.7b), kept for the next update
+/// under the fingerprint of the inputs it was built from
+/// ([`group_fingerprints`]).
+struct CachedGroup {
+    key: &'static str,
+    fingerprint: u64,
+    build: LangBuild,
+}
+
+/// Where the refreshed group cache takes a group's entry from
+/// ([`refresh_groups`]): the previous cache's entry `i`, reused as it is, or
+/// a clone of this update's build.
+enum Slot {
+    Kept(usize),
+    Fresh(CachedGroup),
 }
 
 /// The repo-level inputs a build reads besides the walked files, and the
@@ -284,8 +340,16 @@ struct Built {
     result: GenerateResult,
     /// The plan's group keys, in plan order.
     groups: Vec<&'static str>,
+    /// The keys of the groups built (not reused), in plan order.
+    rebuilt: Vec<&'static str>,
+    /// The group cache this build leaves ([`refresh_groups`]), in plan order.
+    slots: Vec<Slot>,
+    /// `LanguageGraphs::keys` of the build.
+    graph_keys: Vec<&'static str>,
     phases: PhaseTimes,
     times: BuildTimes,
+    fingerprint: Duration,
+    clone: Duration,
 }
 
 impl Setup {
@@ -415,7 +479,7 @@ impl WatchSession {
             walk,
             read,
         };
-        let built = build(&at, &setup, &mut tree, &mut cache, started);
+        let built = build(&at, &setup, &mut tree, &mut cache, &[], services_fp, started);
         eprintln!(
             "[watch] open repo={root} files={walked} groups={} nodes={} edges={} took={}",
             built.groups.len(),
@@ -437,6 +501,8 @@ impl WatchSession {
             services_fp,
             cache,
             result: built.result,
+            groups: refresh_groups(Vec::new(), built.slots),
+            graph_keys: built.graph_keys,
             seq: 0,
         })
     }
@@ -516,20 +582,60 @@ impl WatchSession {
         }
         let services_fp = proto_services_fp(&tree.files);
         let full_rebuild = full_rebuild_reason(&self.setup, &setup, self.services_fp, services_fp);
-        let built = build(&at, &setup, &mut tree, &mut self.cache, started);
+        let built = build(
+            &at,
+            &setup,
+            &mut tree,
+            &mut self.cache,
+            &self.groups,
+            services_fp,
+            started,
+        );
         let delta_started = Instant::now();
-        let rows = located_delta_counted(&self.result.merged, &built.result.merged, &[]);
+        // DC.6's exactness condition: no graph outside the scope changed. A
+        // reused group's pre-pass graph is a clone of its last build, which
+        // holds on a Low update; a High input (the overlay, `.glia`, a
+        // manifest, ...) or a SCIP snapshot can move a clean graph after the
+        // passes, so those take the full delta.
+        let scoped = high.is_empty() && full_rebuild.is_none() && !scip_dir(&self.root).exists();
+        let rows = if scoped {
+            let scope = DeltaScope {
+                before: scope_side(
+                    &self.graph_keys,
+                    self.result.merged.graphs.len(),
+                    &built.rebuilt,
+                    &built.graph_keys,
+                ),
+                after: scope_side(
+                    &built.graph_keys,
+                    built.result.merged.graphs.len(),
+                    &built.rebuilt,
+                    &self.graph_keys,
+                ),
+                moves: !tree.changes.added.is_empty() || !tree.changes.removed.is_empty(),
+            };
+            located_delta_scoped(&self.result.merged, &built.result.merged, &scope)
+        } else {
+            located_delta_counted(&self.result.merged, &built.result.merged, &[])
+        };
         let delta = delta_started.elapsed();
         let Built {
             result,
             groups,
+            rebuilt,
+            slots,
+            graph_keys,
             phases,
             times,
+            fingerprint,
+            clone,
         } = built;
         let (walk, read) = (tree.walk, tree.read);
         let changes = std::mem::take(&mut tree.changes);
         self.commit_tree(tree, setup);
         self.services_fp = services_fp;
+        self.groups = refresh_groups(std::mem::take(&mut self.groups), slots);
+        self.graph_keys = graph_keys;
         self.seq += 1;
         drop(std::mem::replace(&mut self.result, result));
         crate::memory::release_freed_memory("watch_update");
@@ -541,7 +647,7 @@ impl WatchSession {
                 reused: stats.reused,
                 ..changes
             },
-            groups_rebuilt: groups.iter().map(|g| (*g).to_string()).collect(),
+            groups_rebuilt: rebuilt.iter().map(|g| (*g).to_string()).collect(),
             full_rebuild: full_rebuild.map(str::to_string),
             total_nodes: self.result.total_nodes,
             total_edges: self.result.total_edges,
@@ -555,6 +661,8 @@ impl WatchSession {
                 const_scan: ms(phases.const_scan),
                 grafts: ms(phases.grafts),
                 language_build: ms(phases.language_build),
+                fingerprint: ms(fingerprint),
+                clone: ms(clone),
                 resolve: ms(times.resolve),
                 post: ms(times.post),
                 finalize: ms(times.finalize),
@@ -829,15 +937,20 @@ impl WatchSession {
 }
 
 /// One build of `tree` through the DC.2 stages, composed exactly as
-/// `generate_one_inner` composes them (`build_graphs_for_repo` with no group
-/// reuse, then the region / project / docs graphs and `finish_build`, whose
-/// pass context is `CodeBuildCtx::new(inputs, opts)`), with `cache` held.
-/// Prints the `[timing] repo=` and `[timing] build` lines. Takes `tree.md`.
+/// `generate_one_inner` composes them (`build_graphs_for_repo`, then the
+/// region / project / docs graphs and `finish_build`, whose pass context is
+/// `CodeBuildCtx::new(inputs, opts)`), with `cache` held, and (DC.7b) each
+/// language group whose fingerprint matches its entry of `cached` taken from
+/// a clone of that entry's build instead of built. `services_fp` is the
+/// build's proto service set ([`proto_services_fp`]). Prints the `[timing]
+/// repo=` and `[timing] build` lines. Takes `tree.md`.
 fn build(
     at: &At<'_>,
     setup: &Setup,
     tree: &mut Tree,
     cache: &mut ParseCache,
+    cached: &[CachedGroup],
+    services_fp: u64,
     started: Instant,
 ) -> Built {
     let (root, label, opts) = (at.root, at.label, at.opts);
@@ -877,17 +990,37 @@ fn build(
         c_includes: &setup.c_includes,
         dart_packages: &g.dart_packages,
     };
-    let builds = build_groups(groups, Vec::new(), &group_ctx);
+    // DC.7b: the group fingerprints, then a clone of each matching cached
+    // build OUT into its reuse slot.
+    let fingerprint_started = Instant::now();
+    let fingerprints = group_fingerprints(&groups, &group_ctx, setup.overlay_fp, services_fp);
+    let fingerprint = fingerprint_started.elapsed();
+    let clone_started = Instant::now();
+    let (reuse, kept) = reuse_slots(&keys, &fingerprints, cached);
+    let mut clone = clone_started.elapsed();
+    let rebuilt: Vec<&'static str> = keys
+        .iter()
+        .zip(&kept)
+        .filter(|(_, kept)| kept.is_none())
+        .map(|(key, _)| *key)
+        .collect();
+    let builds = build_groups(groups, reuse, &group_ctx);
     if let Some(line) = g.dart_packages.marker(label) {
         eprintln!("{line}");
     }
+    // Each rebuilt group's build cloned IN before the fold moves its graph.
+    let clone_started = Instant::now();
+    let slots = cache_slots(&builds, &fingerprints, &kept);
+    clone += clone_started.elapsed();
     let LanguageGraphs {
         mut graphs,
+        keys: graph_keys,
         fills,
         pooled,
-        ..
     } = fold_groups(builds, &recv_fields, &mut g.parse_errors, label);
-    g.times.language_build = language_started.elapsed();
+    g.times.language_build = language_started
+        .elapsed()
+        .saturating_sub(fingerprint + clone);
     g.times.walk = tree.walk + tree.read;
     repo_markers(&graphs, &di_refs, &g, pooled, label);
     let mut fills: Vec<Option<GroupFill>> = fills.into_iter().map(Some).collect();
@@ -919,9 +1052,170 @@ fn build(
             repo_roots: BTreeMap::from([(setup.repo.0, label.to_string())]),
         },
         groups: keys,
+        rebuilt,
+        slots,
+        graph_keys,
         phases: g.times,
         times,
+        fingerprint,
+        clone,
     }
+}
+
+/// DC.7b: each group's fingerprint, in plan order: xxh64 of its key, the repo
+/// id, `overlay_fp` ([`overlay_fp`]), `services_fp` ([`proto_services_fp`]),
+/// its [`hidden_fp`] and its parse count and parses' fingerprints in plan
+/// order (`cache::parse_fingerprint`, every parse of the plan mapped on the
+/// pool at once). `None` for a group with a parse that could not be
+/// fingerprinted: it is always rebuilt and never cached.
+fn group_fingerprints(
+    groups: &[GroupInput],
+    ctx: &GroupCtx<'_>,
+    overlay_fp: u64,
+    services_fp: u64,
+) -> Vec<Option<u64>> {
+    let parses: Vec<&FileParse> = groups.iter().flat_map(|g| &g.parses).collect();
+    let (parse_fps, _threads) = crate::parallel::par_map_ordered(&parses, |p| parse_fingerprint(p));
+    let mut parse_fps = parse_fps.into_iter();
+    groups
+        .iter()
+        .map(|g| {
+            let mut h = XxHash64::with_seed(0);
+            h.write(g.key.as_bytes());
+            h.write_u8(0);
+            h.write_u64(ctx.repo.0);
+            h.write_u64(overlay_fp);
+            h.write_u64(services_fp);
+            h.write_u64(hidden_fp(g.key, ctx));
+            h.write_u64(g.parses.len() as u64);
+            let mut whole = true;
+            for fp in parse_fps.by_ref().take(g.parses.len()) {
+                match fp {
+                    Some(fp) => h.write_u64(fp),
+                    None => whole = false,
+                }
+            }
+            whole.then(|| h.finish())
+        })
+        .collect()
+}
+
+/// DC.7b: the repo-level inputs group `key`'s builder reads besides its
+/// parses and the repo id (lang_build's `build_one_group` / `build_solo`):
+/// the Cargo packages for `rust` (`build_rust`), the include roots for
+/// `c_cpp` (`build_c_cpp`'s resolver), the own Dart packages for `dart`
+/// (`resolve_dart_source`), the tsconfig aliases for the TS family's group
+/// (`build_typescript_family`); 0 for every other group. Each is hashed
+/// through its `Debug`, which holds only strings, vecs, options, ordered maps
+/// and counts, so it is a pure function of the content (`DartPackages`' own
+/// resolved-URI counter is in it too: a count left over could only cost a
+/// rebuild, never hide a change).
+///
+/// A later builder that reads a new repo-level input adds it to `GroupCtx`,
+/// and the exhaustive destructuring below stops compiling until it joins a
+/// row here: a builder input left out of the key is a stale group.
+fn hidden_fp(key: &str, ctx: &GroupCtx<'_>) -> u64 {
+    // `repo` is in every key already; `repo_label` only labels markers.
+    let GroupCtx {
+        repo: _,
+        repo_label: _,
+        rust_crates,
+        ts_aliases,
+        c_includes,
+        dart_packages,
+    } = *ctx;
+    let debug = match key {
+        "rust" => format!("{rust_crates:?}"),
+        "c_cpp" => format!("{c_includes:?}"),
+        "dart" => format!("{dart_packages:?}"),
+        _ if TS_FAMILY.contains(&key) => format!("{ts_aliases:?}"),
+        _ => return 0,
+    };
+    let mut h = XxHash64::with_seed(0);
+    h.write(debug.as_bytes());
+    h.finish()
+}
+
+/// DC.7b: the reuse slots `build_groups` takes, aligned with the plan `keys`:
+/// a clone of the cached build of a group whose key and fingerprint match an
+/// entry of `cached`, else `None`; and that entry's index in `cached`.
+fn reuse_slots(
+    keys: &[&'static str],
+    fingerprints: &[Option<u64>],
+    cached: &[CachedGroup],
+) -> (Vec<Option<LangBuild>>, Vec<Option<usize>>) {
+    let by_key: BTreeMap<&str, usize> = cached
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.key, i))
+        .collect();
+    keys.iter()
+        .zip(fingerprints)
+        .map(|(key, fp)| {
+            let hit = fp.and_then(|fp| {
+                by_key
+                    .get(key)
+                    .and_then(|&i| cached.get(i).filter(|c| c.fingerprint == fp).map(|c| (i, c)))
+            });
+            (hit.map(|(_, c)| c.build.clone()), hit.map(|(i, _)| i))
+        })
+        .unzip()
+}
+
+/// DC.7b: the group cache an update leaves, aligned with the plan: a reused
+/// group keeps its previous entry (`kept`), a rebuilt one with a fingerprint
+/// takes a clone of its build.
+fn cache_slots(builds: &[LangBuild], fingerprints: &[Option<u64>], kept: &[Option<usize>]) -> Vec<Slot> {
+    builds
+        .iter()
+        .zip(fingerprints)
+        .zip(kept)
+        .filter_map(|((build, fp), kept)| match kept {
+            Some(i) => Some(Slot::Kept(*i)),
+            None => fp.map(|fingerprint| {
+                Slot::Fresh(CachedGroup {
+                    key: build.key(),
+                    fingerprint,
+                    build: build.clone(),
+                })
+            }),
+        })
+        .collect()
+}
+
+/// DC.7b: the refreshed group cache: `slots` in plan order, a kept slot
+/// moving its entry out of `old` (the previous cache); a group that vanished
+/// from the plan is dropped with `old`.
+fn refresh_groups(old: Vec<CachedGroup>, slots: Vec<Slot>) -> Vec<CachedGroup> {
+    let mut old: Vec<Option<CachedGroup>> = old.into_iter().map(Some).collect();
+    slots
+        .into_iter()
+        .filter_map(|slot| match slot {
+            Slot::Kept(i) => old.get_mut(i).and_then(Option::take),
+            Slot::Fresh(group) => Some(group),
+        })
+        .collect()
+}
+
+/// DC.7b: one side of a Low update's [`DeltaScope`]: the indices of that
+/// side's language graphs (`keys`, index for index) whose group was rebuilt
+/// or is missing from the other side's graphs (`other`: a new or vanished
+/// group, or one whose reused build failed), plus every graph after them
+/// (the region / project / docs graphs, rebuilt every time) up to `graphs`.
+fn scope_side(
+    keys: &[&'static str],
+    graphs: usize,
+    rebuilt: &[&'static str],
+    other: &[&'static str],
+) -> BTreeSet<usize> {
+    let mut scope: BTreeSet<usize> = keys
+        .iter()
+        .enumerate()
+        .filter(|(_, key)| rebuilt.contains(key) || !other.contains(key))
+        .map(|(i, _)| i)
+        .collect();
+    scope.extend(keys.len()..graphs);
+    scope
 }
 
 /// `repo_inputs`' overlay config (it prints the `[overlay] loaded` line).
@@ -1252,7 +1546,8 @@ mod tests {
             "{:?}",
             u.files
         );
-        assert_eq!(u.groups_rebuilt, ["go", "python"]);
+        // DC.7b: the go group's parses are unchanged, so its build is reused.
+        assert_eq!(u.groups_rebuilt, ["python"]);
         assert_eq!(u.full_rebuild, None);
         assert!(
             u.nodes
@@ -1448,6 +1743,294 @@ mod tests {
         ] {
             assert_eq!(durability(rel), Durability::Low, "{rel}");
         }
+    }
+
+    /// [`repo`] plus TypeScript behind a root tsconfig `paths` alias that maps
+    /// nowhere yet, a Cargo workspace of one member crate `a` calling into a
+    /// crate dir `b` with no manifest yet, and a proto service.
+    fn mixed_repo(tmp: &Path) -> PathBuf {
+        let dir = repo(tmp);
+        write(&dir, "tsconfig.json", &tsconfig("web/none/*"));
+        write(
+            &dir,
+            "web/app.ts",
+            "import { util } from \"@lib/util\";\n\nexport function main(): number {\n  return util();\n}\n",
+        );
+        write(
+            &dir,
+            "web/lib/util.ts",
+            "export function util(): number {\n  return 1;\n}\n",
+        );
+        write(&dir, "Cargo.toml", "[workspace]\nmembers = [\"crates/a\"]\n");
+        write(
+            &dir,
+            "crates/a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n",
+        );
+        write(
+            &dir,
+            "crates/a/src/lib.rs",
+            "pub fn run() -> i32 {\n    b::helper()\n}\n",
+        );
+        write(
+            &dir,
+            "crates/b/src/lib.rs",
+            "pub fn helper() -> i32 {\n    1\n}\n",
+        );
+        write(&dir, "api/greet.proto", &proto(""));
+        dir
+    }
+
+    /// A root tsconfig whose one `paths` alias `@lib/*` maps to `target`.
+    fn tsconfig(target: &str) -> String {
+        format!(
+            "{{\n  \"compilerOptions\": {{\n    \"baseUrl\": \".\",\n    \"paths\": {{ \"@lib/*\": [\"{target}\"] }}\n  }}\n}}\n"
+        )
+    }
+
+    /// One proto service, with `extra` appended inside it.
+    fn proto(extra: &str) -> String {
+        format!(
+            "syntax = \"proto3\";\npackage greet;\n\nservice Greeter {{\n  rpc Hello (Req) returns (Rep);\n{extra}}}\n\nmessage Req {{}}\nmessage Rep {{}}\n"
+        )
+    }
+
+    fn open(dir: &Path) -> WatchSession {
+        WatchSession::open(dir.to_str().unwrap(), &BuildOptions::default()).unwrap()
+    }
+
+    /// The edits the cutoff tests make, each as (tag, the files it writes,
+    /// the paths it names), applied in order on one [`mixed_repo`] session.
+    type Edit = (&'static str, Vec<(&'static str, String)>, Vec<&'static str>);
+
+    fn edits() -> Vec<Edit> {
+        vec![
+            (
+                "python_body",
+                vec![(
+                    "a.py",
+                    "def foo():\n    return bar() + 1\n\ndef bar():\n    return 1\n".into(),
+                )],
+                vec!["a.py"],
+            ),
+            (
+                "tsconfig_paths",
+                vec![("tsconfig.json", tsconfig("web/lib/*"))],
+                vec!["tsconfig.json"],
+            ),
+            (
+                "cargo_member_add",
+                vec![
+                    (
+                        "Cargo.toml",
+                        "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n".into(),
+                    ),
+                    (
+                        "crates/b/Cargo.toml",
+                        "[package]\nname = \"b\"\nversion = \"0.1.0\"\n".into(),
+                    ),
+                ],
+                vec!["Cargo.toml", "crates/b/Cargo.toml"],
+            ),
+            (
+                "proto_service",
+                vec![(
+                    "api/greet.proto",
+                    proto("  rpc Bye (Req) returns (Rep);\n"),
+                )],
+                vec!["api/greet.proto"],
+            ),
+            (
+                "go_body",
+                vec![(
+                    "m.go",
+                    "package m\n\nfunc F() int { return G() + 1 }\n\nfunc G() int { return 1 }\n"
+                        .into(),
+                )],
+                vec!["m.go"],
+            ),
+            (
+                "python_add",
+                vec![("pkg/c.py", "def c():\n    return foo()\n".into())],
+                vec!["pkg/c.py"],
+            ),
+            ("python_remove", Vec::new(), vec!["pkg/c.py"]),
+        ]
+    }
+
+    /// Write `edit`'s files (an empty list removes its one named path) and
+    /// apply its paths.
+    fn run_edit(s: &mut WatchSession, dir: &Path, edit: &Edit) -> WatchUpdate {
+        let (_, files, paths) = edit;
+        if files.is_empty() {
+            for p in paths {
+                std::fs::remove_file(dir.join(p)).unwrap();
+            }
+        }
+        for (rel, body) in files {
+            write(dir, rel, body);
+        }
+        let paths: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        s.apply(&paths).unwrap()
+    }
+
+    #[test]
+    fn python_body_edit_rebuilds_only_python() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = mixed_repo(tmp.path());
+        let mut s = open(&dir);
+        let keys = cached_keys(&s);
+        let u = run_edit(&mut s, &dir, &edits()[0]);
+        assert_eq!(u.groups_rebuilt, ["python"]);
+        assert_eq!(u.full_rebuild, None);
+        assert_eq!(cached_keys(&s), keys, "every group stays cached");
+        assert_clean(&s, &dir, tmp.path(), "python_body");
+    }
+
+    #[test]
+    fn tsconfig_paths_edit_rebuilds_typescript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = mixed_repo(tmp.path());
+        let mut s = open(&dir);
+        let u = run_edit(&mut s, &dir, &edits()[1]);
+        assert!(
+            u.groups_rebuilt.iter().any(|k| k == "typescript"),
+            "{:?}",
+            u.groups_rebuilt
+        );
+        assert!(
+            !u.groups_rebuilt.iter().any(|k| k == "rust"),
+            "{:?}",
+            u.groups_rebuilt
+        );
+        assert_clean(&s, &dir, tmp.path(), "tsconfig_paths");
+    }
+
+    /// The new crate `b` holds no new source file: only the Cargo packages
+    /// `build_rust` resolves against move, so the rust group rebuilds through
+    /// its hidden input alone (a reused rust graph would leave `b::helper()`
+    /// unbound and differ from the clean build).
+    #[test]
+    fn cargo_member_add_rebuilds_rust() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = mixed_repo(tmp.path());
+        let mut s = open(&dir);
+        let u = run_edit(&mut s, &dir, &edits()[2]);
+        assert!(
+            u.groups_rebuilt.iter().any(|k| k == "rust"),
+            "{:?}",
+            u.groups_rebuilt
+        );
+        assert!(
+            !u.groups_rebuilt.iter().any(|k| k == "python" || k == "go"),
+            "{:?}",
+            u.groups_rebuilt
+        );
+        assert_clean(&s, &dir, tmp.path(), "cargo_member_add");
+    }
+
+    /// The plan keys the session caches a build for, in plan order.
+    fn cached_keys(s: &WatchSession) -> Vec<String> {
+        s.groups.iter().map(|c| c.key.to_string()).collect()
+    }
+
+    /// A proto service change is a full rebuild: the service set is in
+    /// every group's key, so every group rebuilds.
+    #[test]
+    fn proto_service_change_rebuilds_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = mixed_repo(tmp.path());
+        let mut s = open(&dir);
+        let keys = cached_keys(&s);
+        for key in ["go", "python", "rust", "typescript"] {
+            assert!(keys.iter().any(|k| k == key), "{key}: {keys:?}");
+        }
+        let u = run_edit(&mut s, &dir, &edits()[3]);
+        assert_eq!(u.full_rebuild.as_deref(), Some("proto_services"));
+        assert_eq!(u.groups_rebuilt, keys);
+        assert_eq!(cached_keys(&s), keys);
+        assert_clean(&s, &dir, tmp.path(), "proto_service");
+    }
+
+    /// A reused build that failed replays its `parse_errors` line at its fold
+    /// position: after the parse / graft lines, the groups' lines in plan
+    /// order, as a clean build whose go and TS builds failed would hold them;
+    /// and the scoped delta still equals the full one with those graphs gone.
+    #[test]
+    fn cached_error_keeps_clean_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = mixed_repo(tmp.path());
+        let mut s = open(&dir);
+        for c in &mut s.groups {
+            if c.key == "go" || c.key == "typescript" {
+                c.build = LangBuild::failed(c.key, &format!("{} graph: e", c.key));
+            }
+        }
+        let prev = s.result().merged.clone();
+        let u = run_edit(&mut s, &dir, &edits()[0]);
+        assert_eq!(u.groups_rebuilt, ["python"]);
+        let clean = generate_one(dir.to_str().unwrap()).unwrap();
+        let mut want = clean.parse_errors.clone();
+        want.extend(["go graph: e".to_string(), "typescript graph: e".to_string()]);
+        assert_eq!(s.result().parse_errors, want);
+        assert!(
+            !s.graph_keys.iter().any(|k| *k == "go" || *k == "typescript"),
+            "{:?}",
+            s.graph_keys
+        );
+        assert_eq!(
+            s.result().merged.graphs.len() + 2,
+            clean.merged.graphs.len(),
+            "two language graphs fewer"
+        );
+        let full = located_delta_counted(&prev, &s.result().merged, &[]);
+        assert!(
+            u.nodes.iter().any(|n| n.change == "removed" && n.qname.ends_with("F")),
+            "the go graph's nodes are gone: {:?}",
+            u.nodes
+        );
+        assert_eq!(json(&u.nodes), json(&full.nodes));
+        assert_eq!(json(&u.edges), json(&full.edges));
+        assert_eq!(json(&u.counts), json(&full.counts));
+        // The failed builds stay cached: a later update replays them again.
+        write(&dir, "a.py", "def foo():\n    return 3\n");
+        let u = s.apply(&[PathBuf::from("a.py")]).unwrap();
+        assert_eq!(u.groups_rebuilt, ["python"]);
+        assert_eq!(s.result().parse_errors, want);
+    }
+
+    /// Every edit's rows equal the located delta of the clean builds before
+    /// and after it (a scoped delta on a Low update, the full one otherwise).
+    #[test]
+    fn scoped_delta_equals_full() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = mixed_repo(tmp.path());
+        let mut s = open(&dir);
+        for edit in edits() {
+            let tag = edit.0;
+            let prev = generate_one(dir.to_str().unwrap()).unwrap();
+            let u = run_edit(&mut s, &dir, &edit);
+            let next = generate_one(dir.to_str().unwrap()).unwrap();
+            let (_, nodes, edges) = crate::delta::located_delta(&prev.merged, &next.merged);
+            assert!(
+                !nodes.is_empty() || !edges.is_empty(),
+                "{tag}: the edit moves the graph"
+            );
+            assert_eq!(json(&u.nodes), json(&nodes), "{tag}: node rows");
+            assert_eq!(json(&u.edges), json(&edges), "{tag}: edge rows");
+            assert_eq!(
+                u.counts.nodes_added + u.counts.nodes_removed + u.counts.nodes_modified
+                    + u.counts.nodes_moved,
+                nodes.len(),
+                "{tag}"
+            );
+            assert_clean(&s, &dir, tmp.path(), tag);
+        }
+    }
+
+    /// `v` as a `serde_json::Value`, for row comparisons.
+    fn json<T: serde::Serialize>(v: &T) -> serde_json::Value {
+        serde_json::to_value(v).expect("serialise")
     }
 
     /// A session moves between threads (a pyo3 class, a watcher thread).

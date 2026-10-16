@@ -360,6 +360,15 @@ impl LangBuild {
         self.lang
     }
 
+    /// A failed build of group `key` whose `parse_errors` line is `line`
+    /// (DC.7b's `watch::tests::cached_error_keeps_clean_order` caches one: no
+    /// `build_*` returns a `GraphError` today, so a test cannot get one from a
+    /// real build).
+    #[cfg(test)]
+    pub(crate) fn failed(key: &'static str, line: &str) -> Self {
+        Self { lang: key, graph: Err(line.to_string()), recv_bound: 0 }
+    }
+
     /// Append this build to the repo's lists: the sequential loop's
     /// per-group step.
     fn fold(
