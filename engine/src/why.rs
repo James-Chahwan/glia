@@ -27,6 +27,7 @@
 //! | `scip` | fact — bound by a type-aware SCIP indexer, the call / non-call split read at the site (CE.1d); note `resolved by a SCIP index (<tool>)`, or, for a name-only, inferred or unlocated parser / extractor / graph edge the index confirmed (rule `confirms:<old emitter>[/<old rule>]`, CE.1e), `confirmed by a SCIP index (<tool>) at <file>:<line>; first emitted by <old emitter>[ (<old rule>)]` |
 //! | `resolver`, `pass` | derived — paired by name / path / topic / convention |
 //! | `overlay`, `history` | heuristic — declared by a person or a model, or co-change in git |
+//! | `resolver:evm` rules `abi_hint` / `name_hint` | heuristic — a contract identified by its name key, not by the site or a covering ABI (DT.10b); note `name-matched contract (<rule>)` |
 //!
 //! One emitter is tiered by its rule, not its stage: a SAME_AS edge of the
 //! identity resolver (`resolver:identity`, DD.5) takes the tier of its rule's
@@ -108,6 +109,13 @@ const NAME_ONLY_RULES: &[(&str, &str)] = &[
     ("graph:nav", "suffix"),
     ("graph:nav", "href_suffix"),
 ];
+
+/// `(emitter, rule)` pairs of a derived-stage resolver that identify their
+/// target by a name key alone (DT.10b): the EVM resolver's contract named
+/// like the client's ABI binding or receiver, not named at the site
+/// (`contract`) or the one covering its ABI (`abi`).
+const HEURISTIC_PAIRING_RULES: &[(&str, &str)] =
+    &[("resolver:evm", "abi_hint"), ("resolver:evm", "name_hint")];
 
 /// Where an edge was asserted: repo-relative `file` and its 1-based `line`
 /// (LD.1), `None` when the evidence names the file only.
@@ -546,6 +554,14 @@ pub(crate) fn tier_of(ev: Option<&Evidence>, e: &Edge) -> (&'static str, Option<
     {
         return (HEURISTIC, Some(format!("name-only binding ({rule})")));
     }
+    if tier == DERIVED
+        && let Some(rule) = rule
+        && HEURISTIC_PAIRING_RULES
+            .iter()
+            .any(|&(em, r)| em == ev.emitter && r == rule)
+    {
+        return (HEURISTIC, Some(format!("name-matched contract ({rule})")));
+    }
     if tier == FACT && ev.basis == Basis::None {
         return (DERIVED, Some("no location recorded".to_string()));
     }
@@ -674,6 +690,45 @@ mod tests {
             let stage = emitter.split(':').next().unwrap_or("");
             assert_eq!(stage_tier(stage), Some(FACT), "{emitter}");
         }
+    }
+
+    #[test]
+    fn heuristic_pairing_rules_belong_to_derived_stages() {
+        for (emitter, _) in HEURISTIC_PAIRING_RULES {
+            let stage = emitter.split(':').next().unwrap_or("");
+            assert_eq!(stage_tier(stage), Some(DERIVED), "{emitter}");
+        }
+    }
+
+    /// DT.10b: an EVM pairing by a contract's name key is heuristic, located
+    /// or not, whatever its confidence.
+    #[test]
+    fn name_hint_and_abi_hint_are_heuristic() {
+        let edge = Edge::new(NodeId(1), NodeId(2), edge_category::RPC_CALLS, Confidence::Weak);
+        for rule in ["name_hint", "abi_hint"] {
+            let note = Some(format!("name-matched contract ({rule})"));
+            let bare = Evidence::emitter("resolver:evm").rule(rule);
+            assert_eq!(tier_of(Some(&bare), &edge), (HEURISTIC, note.clone()), "{rule}");
+            let placed = bare.at("web/src/pay.ts", 4);
+            assert_eq!(tier_of(Some(&placed), &edge), (HEURISTIC, note), "{rule} located");
+        }
+        let flows = Edge::new(NodeId(3), NodeId(4), edge_category::EVENT_FLOWS, Confidence::Weak);
+        let ev = Evidence::emitter("resolver:evm").rule("name_hint");
+        assert_eq!(tier_of(Some(&ev), &flows).0, HEURISTIC);
+    }
+
+    /// DT.10b: a contract named at the site or the one covering an ABI stays
+    /// derived; the hint rules of another emitter are not demoted.
+    #[test]
+    fn contract_and_abi_stay_derived() {
+        let edge = Edge::new(NodeId(1), NodeId(2), edge_category::RPC_CALLS, Confidence::Strong);
+        for rule in ["contract", "abi"] {
+            let ev = Evidence::emitter("resolver:evm").rule(rule);
+            assert_eq!(tier_of(Some(&ev), &edge), (DERIVED, None), "{rule}");
+        }
+        assert_eq!(tier_of(Some(&Evidence::emitter("resolver:evm")), &edge), (DERIVED, None));
+        let other = Evidence::emitter("resolver:rpc").rule("name_hint");
+        assert_eq!(tier_of(Some(&other), &edge), (DERIVED, None));
     }
 
     /// CC.3: confidence demotes only an inferred `graph` binding; a parser

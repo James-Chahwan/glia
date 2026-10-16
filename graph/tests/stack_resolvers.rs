@@ -1407,7 +1407,7 @@ fn event_resolver_owner_is_repo_scoped() {
 
 #[test]
 fn event_resolver_code_qname_event_is_unowned() {
-    // A Solidity-declared event keeps its code qname (never owned); it keys on
+    // A parser-declared event keeps its code qname (never owned); it keys on
     // its NAME and pairs an owned handler of any project.
     let (mut nodes, mut nav) = (Vec::new(), CodeNav::default());
     let (emitter, e) = make_node(repo_a(), node_kind::EVENT_EMITTER, "m::C::C::BidPlaced", Confidence::Medium);
@@ -1423,6 +1423,27 @@ fn event_resolver_code_qname_event_is_unowned() {
         .map(|e| (e.from, e.to))
         .collect();
     assert_eq!(edges, [(e, h)]);
+}
+
+#[test]
+fn event_resolver_never_pairs_a_solidity_event_by_name() {
+    // DT.10b (James's ruling, 2026-10-16): the same event declared in a
+    // `.sol` file is emitted on chain; it pairs only through resolver:evm,
+    // never with an in-process handler by name. Before DT.10b this pair
+    // was one EVENT_FLOWS edge; it is none.
+    let (mut nodes, mut nav) = (Vec::new(), CodeNav::default());
+    let (mut emitter, e) = make_node(repo_a(), node_kind::EVENT_EMITTER, "m::C::C::BidPlaced", Confidence::Medium);
+    emitter.cells.push(glia_core::Cell {
+        kind: glia_code_domain::cell_type::POSITION,
+        payload: glia_core::CellPayload::Json(r#"{"file":"contracts/C.sol","start_line":3,"end_line":3}"#.into()),
+    });
+    record(&mut nav, e, "BidPlaced", "m::C::C::BidPlaced", node_kind::EVENT_EMITTER);
+    nodes.push(emitter);
+    event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_HANDLER, "event_handle:BidPlaced @web", false);
+    event_side(&mut nodes, &mut nav, repo_a(), node_kind::EVENT_HANDLER, "event_handle:BidPlaced", false);
+    let mut merged = MergedGraph::new(vec![make_graph(repo_a(), nodes, nav)]);
+    EventBusResolver.resolve(&mut merged);
+    assert!(event_flows(&merged).is_empty(), "{:?}", event_flows(&merged));
 }
 
 // ============================================================================

@@ -24,14 +24,26 @@
 //! Every other pair is dropped and counted (`cross-owner-dropped`). Owners are
 //! compared together with the RepoId, so the same rel path in two repos is two
 //! projects.
+//!
+//! EVM EVENTS (DT.10b). A Solidity event (an EVENT_EMITTER with a code qname
+//! and a `.sol` POSITION, `evm::is_solidity_event`) is emitted on chain, never
+//! on an in-process bus, and an `evm_event:` EVENT_HANDLER is a chain
+//! subscription: both belong to `EvmContractResolver` (`resolver:evm`), which
+//! pairs a subscription to the event of the contract it identifies. Neither is
+//! indexed or paired here, so a Solidity `BidPlaced` no longer reaches an
+//! in-process `@EventListener(BidPlaced)` by name alone (James's ruling,
+//! 2026-10-16). fired_on, once per resolve that skipped one:
+//! `[eventbus-evm] solidity_events=<s> evm_subscriptions=<h> left to resolver:evm`
+//! (grep `^\[eventbus-evm\] `).
 
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use glia_code_domain::endpoint::split_owner;
-use glia_code_domain::{CodeNav, cell_type, edge_category, node_kind};
+use glia_code_domain::{CodeNav, cell_type, edge_category, evm, node_kind};
 use glia_core::{Cell, CellPayload, Edge, NodeId, RepoId};
 
+use super::evm::is_solidity_event;
 use super::{CrossGraphResolver, RuleTally, ServiceTarget, weakest};
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
@@ -44,15 +56,16 @@ pub struct EventBusResolver;
 
 /// EVENT_* nodes come from two places: the cross-cutting extractor, whose
 /// qnames carry an `event_emit:` / `event_handle:` prefix, and language parsers
-/// (Solidity today) whose qnames are ordinary code qnames like
-/// `Auction::Auction::BidPlaced`. Key on the prefix when it is there and on the
-/// node's simple NAME when it is not, so a Solidity `BidPlaced` can reach a
-/// Java `@EventListener(BidPlaced)`. `build_kind_index` is deliberately left
-/// alone — GraphQL, WebSocket and CLI all share it and none of them has a
-/// parser-side producer of the same kind.
+/// whose qnames are ordinary code qnames like `notify::Listener::OrderPlaced`.
+/// Key on the prefix when it is there and on the node's simple NAME when it is
+/// not. The one parser producer, Solidity (`Auction::Auction::BidPlaced`), is
+/// skipped before this is reached (module doc, EVM EVENTS): it pairs through
+/// `resolver:evm` only. `build_kind_index` is deliberately left alone —
+/// GraphQL, WebSocket and CLI all share it and none of them has a parser-side
+/// producer of the same kind.
 ///
 /// LB.8b: the owner segment is split off first and returned beside the key.
-/// A code qname never carries one, so a Solidity event is unowned.
+/// A code qname never carries one.
 fn event_key<'q>(
     nav: &CodeNav,
     id: NodeId,
@@ -455,47 +468,94 @@ fn normalise_event_key(raw: &str) -> String {
     }
 }
 
+/// The handler side of one resolve: every EVENT_HANDLER but an `evm_event:`
+/// subscription, keyed by its normalised event key.
+struct HandlerIndex<'g> {
+    /// Lookup-only map; each Vec keeps graph / node order, so the edges come
+    /// out in the same order on every run.
+    index: HashMap<String, Vec<HandlerEntry<'g>>>,
+    prefixed: usize,
+    by_name: usize,
+    /// DT.10b: `evm_event:` handlers left to `resolver:evm`.
+    evm_subscriptions: usize,
+    /// Any indexed handler carried an owner.
+    owned: bool,
+}
+
+fn handler_index(graphs: &[RepoGraph]) -> HandlerIndex<'_> {
+    let mut out = HandlerIndex {
+        index: HashMap::new(),
+        prefixed: 0,
+        by_name: 0,
+        evm_subscriptions: 0,
+        owned: false,
+    };
+    for g in graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::EVENT_HANDLER) {
+                continue;
+            }
+            let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
+                continue;
+            };
+            // DT.10b: a chain subscription has one owner, the evm resolver.
+            if qname.starts_with(evm::EVENT_PREFIX) {
+                out.evm_subscriptions += 1;
+                continue;
+            }
+            let Some((key, owner)) = event_key(&g.nav, n.id, qname, "event_handle:") else {
+                continue;
+            };
+            if qname.starts_with("event_handle:") {
+                out.prefixed += 1;
+            } else {
+                out.by_name += 1;
+            }
+            out.owned |= owner.is_some();
+            out.index
+                .entry(normalise_event_key(&key))
+                .or_default()
+                .push(HandlerEntry {
+                    target: ServiceTarget {
+                        id: n.id,
+                        confidence: n.confidence,
+                    },
+                    side: Side {
+                        repo: g.repo,
+                        owner,
+                        transport: is_transport(&n.cells),
+                    },
+                });
+        }
+    }
+    out
+}
+
+/// The DT.10b fired_on line: the EVM sides this resolve left to
+/// `resolver:evm`; `None` when there were none.
+fn evm_skip_line(solidity_events: usize, evm_subscriptions: usize) -> Option<String> {
+    (solidity_events + evm_subscriptions > 0).then(|| {
+        format!(
+            "[eventbus-evm] solidity_events={solidity_events} evm_subscriptions={evm_subscriptions} \
+             left to resolver:evm"
+        )
+    })
+}
+
 impl CrossGraphResolver for EventBusResolver {
     fn resolve(&self, merged: &mut MergedGraph) {
-        // Lookup-only map; each Vec keeps graph / node order, so the edges
-        // come out in the same order on every run.
-        let mut handler_index: HashMap<String, Vec<HandlerEntry<'_>>> = HashMap::new();
-        let mut prefixed = 0usize;
-        let mut by_name = 0usize;
-        let mut tally = OwnerTally::default();
-        for g in &merged.graphs {
-            for n in &g.nodes {
-                if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::EVENT_HANDLER) {
-                    continue;
-                }
-                let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
-                    continue;
-                };
-                let Some((key, owner)) = event_key(&g.nav, n.id, qname, "event_handle:") else {
-                    continue;
-                };
-                if qname.starts_with("event_handle:") {
-                    prefixed += 1;
-                } else {
-                    by_name += 1;
-                }
-                tally.owned |= owner.is_some();
-                handler_index
-                    .entry(normalise_event_key(&key))
-                    .or_default()
-                    .push(HandlerEntry {
-                        target: ServiceTarget {
-                            id: n.id,
-                            confidence: n.confidence,
-                        },
-                        side: Side {
-                            repo: g.repo,
-                            owner,
-                            transport: is_transport(&n.cells),
-                        },
-                    });
-            }
-        }
+        let HandlerIndex {
+            index: handler_index,
+            prefixed,
+            by_name,
+            evm_subscriptions,
+            owned,
+        } = handler_index(&merged.graphs);
+        let mut tally = OwnerTally {
+            owned,
+            ..OwnerTally::default()
+        };
+        let mut solidity_events = 0usize;
 
         let mut exact = 0usize;
         let mut folded = 0usize;
@@ -513,6 +573,12 @@ impl CrossGraphResolver for EventBusResolver {
                 let Some(qname) = g.nav.qname_by_id.get(&n.id) else {
                     continue;
                 };
+                // DT.10b: a Solidity event never pairs an in-process handler
+                // by name alone (module doc, EVM EVENTS).
+                if is_solidity_event(qname, n) {
+                    solidity_events += 1;
+                    continue;
+                }
                 let Some((raw, owner)) = event_key(&g.nav, n.id, qname, "event_emit:") else {
                     continue;
                 };
@@ -570,6 +636,9 @@ impl CrossGraphResolver for EventBusResolver {
             );
         }
         if let Some(line) = tally.line() {
+            eprintln!("{line}");
+        }
+        if let Some(line) = evm_skip_line(solidity_events, evm_subscriptions) {
             eprintln!("{line}");
         }
     }
@@ -927,6 +996,63 @@ mod tests {
         );
         assert_eq!(dep_name_key("pypi", "My__Lib.core"), "my-lib-core");
         assert_eq!(dep_name_key("npm", "My_Lib"), "My_Lib");
+    }
+
+    /// DT.10b (James's ruling, 2026-10-16): a Solidity event and an
+    /// `evm_event:` subscription belong to `resolver:evm`. Neither pairs
+    /// here, the subscription is not indexed (nor counted `by-name`), and a
+    /// non-Solidity code-qname emitter still keys by its name.
+    #[test]
+    fn evm_sides_are_left_to_the_evm_resolver() {
+        let mut g = channel_graph(
+            "dt10b-evm",
+            &[
+                (node_kind::EVENT_HANDLER, "event_handle:Released"),
+                (node_kind::EVENT_HANDLER, "evm_event:Escrow.Released"),
+                (node_kind::EVENT_HANDLER, "event_handle:Shipped"),
+            ],
+        );
+        let position = |file: &str| Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":3,"end_line":3}}"#)),
+        };
+        for (q, file) in [
+            ("contracts::Escrow::Escrow::Released", "contracts/Escrow.sol"),
+            ("src::orders::Orders::Shipped", "src/orders.ts"),
+        ] {
+            let id = NodeId::from_parts(GRAPH_TYPE, g.repo, node_kind::EVENT_EMITTER, q);
+            let name = q.rsplit("::").next().unwrap_or(q);
+            g.nav.record(id, name, q, node_kind::EVENT_EMITTER, None);
+            g.nodes.push(Node {
+                id,
+                repo: g.repo,
+                confidence: Confidence::Strong,
+                cells: vec![position(file)],
+            });
+        }
+        let graphs = vec![g];
+        let index = handler_index(&graphs);
+        assert_eq!(
+            (index.prefixed, index.by_name, index.evm_subscriptions),
+            (2, 0, 1),
+            "the subscription is skipped, not counted by-name"
+        );
+        let mut keys: Vec<&String> = index.index.keys().collect();
+        keys.sort();
+        assert_eq!(keys, ["released", "shipped"]);
+
+        let mut m = MergedGraph::new(graphs);
+        EventBusResolver.resolve(&mut m);
+        assert_eq!(
+            cross_pairs(&m, edge_category::EVENT_FLOWS),
+            [s("src::orders::Orders::Shipped", "event_handle:Shipped")],
+            "the Solidity Released never reaches event_handle:Released by name"
+        );
+        assert_eq!(
+            evm_skip_line(1, 1).as_deref(),
+            Some("[eventbus-evm] solidity_events=1 evm_subscriptions=1 left to resolver:evm")
+        );
+        assert_eq!(evm_skip_line(0, 0), None);
     }
 
     /// The ORIGIN reader decodes escapes and never reads a value that names

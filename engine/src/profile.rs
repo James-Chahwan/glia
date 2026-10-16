@@ -50,9 +50,9 @@ use glia_code_domain::{cell_type, evidence, node_kind};
 use glia_core::{NodeId, NodeKindId, RepoId};
 use glia_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
-    EventBusResolver, GqlgenResolver, GraphQLStackResolver, GrpcStackResolver, HttpStackResolver,
-    IacResolver, IdentityResolver, MergedGraph, QueueStackResolver, RpcStackResolver,
-    SharedSchemaResolver, WebSocketStackResolver,
+    EventBusResolver, EvmContractResolver, GqlgenResolver, GraphQLStackResolver,
+    GrpcStackResolver, HttpStackResolver, IacResolver, IdentityResolver, MergedGraph,
+    QueueStackResolver, RpcStackResolver, SharedSchemaResolver, WebSocketStackResolver,
 };
 
 use crate::build::BuildOptions;
@@ -160,6 +160,11 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
     },
     resolver!("grpc", GrpcStackResolver),
     resolver!("rpc", RpcStackResolver),
+    // DT.10b: EVM client calls / event subscriptions -> the Solidity
+    // procedure / event of the contract they identify (`contract` / `abi`
+    // derived, `abi_hint` / `name_hint` heuristic). Reads nodes and intra
+    // edges only.
+    resolver!("evm", EvmContractResolver),
     resolver!("queue", QueueStackResolver),
     resolver!("graphql", GraphQLStackResolver),
     // DT.5f: SDL GRAPHQL_RESOLVER -> the gqlgen template's Go method, by
@@ -357,10 +362,11 @@ mod tests {
 
     use super::*;
 
-    const HEAD_ORDER: [&str; 26] = [
+    const HEAD_ORDER: [&str; 27] = [
         "http",
         "grpc",
         "rpc",
+        "evm",
         "queue",
         "graphql",
         "gqlgen",
@@ -393,7 +399,8 @@ mod tests {
     /// ADR decisions follow the doc linker. DD.5's identity resolver is the
     /// last Resolve pass; DD.16 retired the `message_schema` and `package`
     /// resolvers its stars replaced, leaving fourteen; DT.5f's gqlgen
-    /// resolver follows the GraphQL one, making fifteen.
+    /// resolver follows the GraphQL one, making fifteen; DT.10b's evm
+    /// resolver follows the RPC one, making sixteen.
     #[test]
     fn code_passes_order_is_head_order() {
         assert_eq!(CODE_PASSES.validate(), Ok(()));
@@ -403,7 +410,7 @@ mod tests {
         let count = |st: Stage| stages.iter().filter(|s| **s == st).count();
         assert_eq!(
             (count(Stage::Resolve), count(Stage::Post), count(Stage::Finalize)),
-            (15, 9, 2)
+            (16, 9, 2)
         );
     }
 

@@ -15,6 +15,8 @@ use crate::types::RepoGraph;
 mod http;
 mod grpc;
 mod rpc;
+// DT.10b: EVM contract calls / event subscriptions -> Solidity procedures / events.
+mod evm;
 mod queue;
 mod graphql;
 // DT.5f: gqlgen's schema-first resolver sets (SDL field -> Go method).
@@ -36,6 +38,7 @@ mod host;
 pub use http::HttpStackResolver;
 pub use grpc::GrpcStackResolver;
 pub use rpc::RpcStackResolver;
+pub use evm::EvmContractResolver;
 pub use queue::QueueStackResolver;
 pub use graphql::GraphQLStackResolver;
 pub use gqlgen::GqlgenResolver;
