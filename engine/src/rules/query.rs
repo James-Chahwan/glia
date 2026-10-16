@@ -1,27 +1,37 @@
 //! `query` / `validate` (DB.2b): Datalog text over the code graph, as an answer.
 //!
 //! **Pipeline.** [`query`] parses the text (glia-rules' parser, spans tagged with
-//! `QueryOptions::source_name`, default `<query>`), analyses it against the code
-//! schema and evaluates it over [`CodeFacts`] within the row budget. The schema is
-//! the catalog of a `CodeFacts` (`glia_rules::source::catalog_of`): the core
-//! predicates (`node/2`, `edge/3`, `edge_conf/4`, `cell/3`, `edge_cell/5`, `kind/1`,
-//! `category/1`, `carry_category/1`), the code attributes
+//! `QueryOptions::source_name`, default `<query>`), merges in the prelude rules it
+//! reads (DB.2c, `prelude::merge`: the predicate prelude, pruned to what the program
+//! and its asked outputs read), analyses it against the code schema and evaluates
+//! it over `prelude::PreludeFacts` (the [`CodeFacts`] plus the engine relations)
+//! within the row budget. The schema is the catalog of that source
+//! (`glia_rules::source::catalog_of`): the core predicates (`node/2`, `edge/3`,
+//! `edge_conf/4`, `cell/3`, `edge_cell/5`, `kind/1`, `category/1`,
+//! `carry_category/1`), the code attributes
 //! ([`CODE_ATTRIBUTES`](super::CODE_ATTRIBUTES)) and the builtins (`reaches`, `scc`,
-//! the string tests, `in_scope/2`, `under/2`). A rule whose head names any of them
-//! is refused by analysis, as is an unknown node kind / edge category / cell type /
-//! predicate, an arity mismatch, an unsafe variable or an unstratifiable negation;
-//! the messages are glia-rules' table (`analysis::msg`) verbatim, so this layer adds
-//! no second wording. [`validate`] runs the same parse and analysis with no graph
-//! (the schema is static). [`evaluate_rule`] is the pipeline over a caller's facts
-//! for one output, every row explained (check's rule invariants).
+//! the string tests, `in_scope/2`, `under/2`, and the engine relations
+//! `dependency_category/1`, `symbol_kind/1`, `effect_sink/3`, `live/1`,
+//! `module_import/2`). A rule whose head names any of them is refused by analysis,
+//! as is an unknown node kind / edge category / cell type / predicate, an arity
+//! mismatch, an unsafe variable or an unstratifiable negation; the messages are
+//! glia-rules' table (`analysis::msg`) verbatim, so this layer adds no second
+//! wording. The one message of its own is the merge's: a rule whose head names a
+//! prelude predicate or engine relation, ``` `carry` is a prelude predicate
+//! (docs/rules.md); name yours differently ```. [`validate`] runs the same parse,
+//! merge and analysis with no graph (the schema is static). [`evaluate_rule`] is the
+//! pipeline over a caller's facts for one output, every row explained (check's rule
+//! invariants).
 //!
-//! **Outputs.** `QueryOptions::outputs` (`name` or `name/arity`), else the
-//! program's sinks: every predicate it defines that no rule of ANOTHER predicate
-//! reads (glia-rules' default, so a helper like `called` in `uncalled(f) :- ...,
-//! !called(f).` is not an output and the magic rewrite can still seed a recursive
-//! helper from its bound callers; outputs are never rewritten). Asked-for outputs
-//! are reported in the order asked, the sinks in first-definition order. An output
-//! no rule defines is an analysis error.
+//! **Outputs.** `QueryOptions::outputs` (`name` or `name/arity`; a prelude
+//! predicate may be asked for), else the user program's sinks: every predicate it
+//! defines that no rule of ANOTHER predicate reads (glia-rules' default rule,
+//! computed before the prelude joins, so no prelude predicate is ever a default
+//! output; a helper like `called` in `uncalled(f) :- ..., !called(f).` is not an
+//! output and the magic rewrite can still seed a recursive helper from its bound
+//! callers; outputs are never rewritten). Asked-for outputs are reported in the
+//! order asked, the sinks in first-definition order. An output no rule defines is an
+//! analysis error.
 //!
 //! **Rows.** A node value is rendered as qname + kind + 1-based file:line through
 //! the facts' ONE Locator (LD.1); strings and integers as they are. A row's `file`
@@ -36,8 +46,11 @@
 //! whose derivation goes through a negation carries the coverage caveats
 //! (`coverage::caveats_for`) of every edge category the negated sub-program reads,
 //! glia-rules' static, conservative cone (`eval::AbsenceCaveat`): a category read
-//! through a variable, `_` or `"*"` reads as every category. Positive atoms tier a
-//! row; negation only adds caveats.
+//! through a variable, `_` or `"*"` reads as every category. An engine relation the
+//! negated sub-program reaches adds the categories it is computed from
+//! (`prelude::relation_reads`: `!live(n)` reads every carry category), which
+//! glia-rules cannot see in a domain builtin. Positive atoms tier a row; negation
+//! only adds caveats.
 //!
 //! **Witnesses.** With `explain`, each shown row's minimal-height derivation
 //! (glia-rules' `Evaluation::explain_all`, one closure index for the answer) gives
@@ -58,7 +71,8 @@
 //! truncated silently.
 //!
 //! **Markers**, on stderr: glia-rules' `[rules] eval` / `[rules] closure` / `[rules]
-//! budget` lines, then, once per answered query, `[query] lang=<datalog|gql>
+//! budget` lines, the prelude's `[rules] prelude relations=<n> (...)` once per
+//! evaluation, then, once per answered query, `[query] lang=<datalog|gql>
 //! outputs=<o> rows=<r> fact=<f> derived=<d> heuristic=<h> caveated=<c>
 //! surface=<cli|py|engine>`, counted over the rows returned. Analysis warnings
 //! (singleton variables, unseeded recursion) print as glia-rules renders them,
@@ -83,6 +97,7 @@ use glia_rules::value::{Tier, Value};
 use serde::Serialize;
 
 use super::facts::{CodeFacts, located_edge, tier_name};
+use super::prelude::{self, PreludeFacts};
 use crate::absence::{self, Absence};
 use crate::check::{MAX_EVIDENCE, ViolationEdge};
 use crate::coverage::{CoverageNote, caveats_for};
@@ -262,48 +277,56 @@ pub fn query(
 ) -> Result<QueryAnswer, RuleError> {
     let facts = CodeFacts::new(merged);
     let source = source_name(opts);
-    let program = parse_program(source, text).map_err(|e| rule_error(&e, source, opts.surface))?;
+    let failed = |e: RulesError| rule_error(&e, source, opts.surface);
+    let user = parse_program(source, text).map_err(failed)?;
+    let program = prelude::merge(user, &opts.outputs).map_err(failed)?;
+    let outputs = if opts.outputs.is_empty() {
+        &program.sinks
+    } else {
+        &opts.outputs
+    };
     let run = Run {
-        outputs: &opts.outputs,
+        outputs,
         explain: opts.explain,
         budget: opts.row_budget,
         limit: opts.limit,
     };
-    let evaluated =
-        run_program(&facts, &program, &run).map_err(|e| rule_error(&e, source, opts.surface))?;
+    let src = PreludeFacts::new(merged, &facts);
+    let evaluated = run_program(&src, &program.program, &run).map_err(failed)?;
     Ok(answer(
         merged,
         &facts,
         "datalog",
         text,
-        &program,
+        &program.program,
         evaluated,
         opts.surface,
     ))
 }
 
-/// Parse and analyse `text` against the code schema with no graph: the error
-/// diagnostics, in recorded order; empty when the program is valid (warnings are
-/// not errors).
+/// Parse, merge the prelude into and analyse `text` against the code schema with
+/// no graph: the error diagnostics, in recorded order; empty when the program is
+/// valid (warnings are not errors).
 pub fn validate(text: &str) -> Vec<RuleDiagnostic> {
     let empty = MergedGraph::new(Vec::new());
     let facts = CodeFacts::new(&empty);
-    let program = match parse_program(DEFAULT_SOURCE, text) {
-        Ok(p) => p,
-        Err(e) => return diagnostics_of(&e),
-    };
-    match analyse(&program, &catalog_of(&facts)) {
-        Ok(_) => Vec::new(),
+    let src = PreludeFacts::new(&empty, &facts);
+    let checked = parse_program(DEFAULT_SOURCE, text)
+        .and_then(|user| prelude::merge(user, &[]))
+        .and_then(|m| analyse(&m.program, &catalog_of(&src)).map(|_| ()));
+    match checked {
+        Ok(()) => Vec::new(),
         Err(e) => diagnostics_of(&e),
     }
 }
 
-/// Evaluate the rule program `text` (spans named `source_name`) over `facts`, which
-/// must be facts over `merged`, for its one output `output`, every row explained:
-/// the rows in rendered order with their NodeIds kept (check renders subject and
-/// location). An error is its rendered text, `<source>:<line>:<col>: error: ...`
-/// for a parse or analysis error; a program that defines no `output` is ``rule
-/// defines no `<output>` predicate``. Prints no `[query]` line.
+/// Evaluate the rule program `text` (spans named `source_name`, the prelude merged
+/// in) over `facts`, which must be facts over `merged`, for its one output
+/// `output`, every row explained: the rows in rendered order with their NodeIds
+/// kept (check renders subject and location). An error is its rendered text,
+/// `<source>:<line>:<col>: error: ...` for a parse or analysis error; a program
+/// that defines no `output` is ``rule defines no `<output>` predicate``. Prints no
+/// `[query]` line.
 pub fn evaluate_rule(
     merged: &MergedGraph,
     facts: &CodeFacts<'_>,
@@ -312,19 +335,22 @@ pub fn evaluate_rule(
     output: &str,
 ) -> Result<Vec<RuleRow>, String> {
     let rendered = |e: RulesError| rule_error(&e, source_name, "").rendered;
-    let program = parse_program(source_name, text).map_err(rendered)?;
-    analyse(&program, &catalog_of(facts)).map_err(rendered)?;
-    if !program.rules.iter().any(|r| r.head.pred == output) {
+    let user = parse_program(source_name, text).map_err(rendered)?;
+    let defines_output = user.rules.iter().any(|r| r.head.pred == output);
+    let outputs = [output.to_string()];
+    let program = prelude::merge(user, &[]).map_err(rendered)?.program;
+    let src = PreludeFacts::new(merged, facts);
+    analyse(&program, &catalog_of(&src)).map_err(rendered)?;
+    if !defines_output {
         return Err(format!("rule defines no `{output}` predicate"));
     }
-    let outputs = [output.to_string()];
     let run = Run {
         outputs: &outputs,
         explain: true,
         budget: None,
         limit: None,
     };
-    let evaluated = run_program(facts, &program, &run).map_err(rendered)?;
+    let evaluated = run_program(&src, &program, &run).map_err(rendered)?;
     let mut nodes = Nodes::new(facts);
     let mut caveats = Caveats::new(merged);
     Ok(evaluated
@@ -389,23 +415,38 @@ pub(crate) struct EvalRow {
     pub(crate) witness_edges: usize,
 }
 
-/// Evaluate `program` over `facts` (module doc): outputs resolved and ordered, rows
-/// sorted by rendered values and cut, witnesses built when asked. Analysis
-/// warnings print on stderr.
+/// Evaluate `program` (the prelude already merged in, `prelude::merge`) over `src`,
+/// the code facts plus the engine relations (module doc): outputs resolved and
+/// ordered, rows sorted by rendered values and cut, witnesses built when asked.
+/// Analysis warnings print on stderr, then the `[rules] prelude relations=` marker,
+/// error or not; `src.built()` says afterwards which relations the run built.
 pub(crate) fn run_program(
-    facts: &CodeFacts<'_>,
+    src: &PreludeFacts<'_, '_>,
     program: &Program,
     run: &Run<'_>,
 ) -> Result<Evaluated, RulesError> {
+    let outputs = evaluate_outputs(src, program, run);
+    eprintln!("{}", src.marker());
+    Ok(Evaluated { outputs: outputs? })
+}
+
+/// [`run_program`]'s evaluation over `src`.
+fn evaluate_outputs(
+    src: &PreludeFacts<'_, '_>,
+    program: &Program,
+    run: &Run<'_>,
+) -> Result<Vec<EvalOutput>, RulesError> {
+    let facts = src.facts();
     let mut options = Options::default();
     options.outputs = run.outputs.to_vec();
     if let Some(cap) = run.budget {
         options.max_rows = cap;
     }
-    let mut ev = evaluate(program, facts, &options)?;
+    let mut ev = evaluate(program, src, &options)?;
     for w in ev.warnings() {
         eprintln!("{w}");
     }
+    let mut negations = Negations::new(program);
     let mut sigs = ev.outputs();
     sigs.sort_by_key(|sig| output_rank(program, run.outputs, sig));
     let mut nodes = Nodes::new(facts);
@@ -439,7 +480,7 @@ pub(crate) fn run_program(
                     None => (Vec::new(), 0),
                 };
                 EvalRow {
-                    negated: negated_categories(&r.absence),
+                    negated: negations.categories(&r.absence),
                     tier: r.tier,
                     values: r.values,
                     witness,
@@ -455,7 +496,7 @@ pub(crate) fn run_program(
             rows,
         });
     }
-    Ok(Evaluated { outputs })
+    Ok(outputs)
 }
 
 /// Where output `sig` (`name/arity`) is reported: its position among the outputs
@@ -540,18 +581,48 @@ fn sort_rows(rows: &mut Vec<Row>, nodes: &mut Nodes<'_, '_>) {
     rows.extend(order.into_iter().filter_map(|i| slots[i].take()));
 }
 
-/// The edge categories `caveats` read, in registry order; every category when one
-/// reads any.
-fn negated_categories(caveats: &[AbsenceCaveat]) -> Vec<&'static str> {
-    if caveats.is_empty() {
-        return Vec::new();
+/// The edge categories a row's negations read (Q5), with the engine relations'
+/// share memoised per negated predicate.
+struct Negations<'p> {
+    program: &'p Program,
+    /// `name/arity` -> the categories the engine relations it reaches read.
+    relations: BTreeMap<String, Vec<&'static str>>,
+}
+
+impl<'p> Negations<'p> {
+    fn new(program: &'p Program) -> Self {
+        Negations {
+            program,
+            relations: BTreeMap::new(),
+        }
     }
-    let any = caveats.iter().any(|c| c.any_category);
-    registry_categories()
-        .iter()
-        .map(|(_, n)| *n)
-        .filter(|n| any || caveats.iter().any(|c| c.categories.iter().any(|x| x == n)))
-        .collect()
+
+    /// The edge categories `caveats` read, glia-rules' cones plus the engine
+    /// relations each negated predicate reaches, in registry order; every category
+    /// when one reads any.
+    fn categories(&mut self, caveats: &[AbsenceCaveat]) -> Vec<&'static str> {
+        if caveats.is_empty() {
+            return Vec::new();
+        }
+        let any = caveats.iter().any(|c| c.any_category);
+        let mut named: Vec<&str> = caveats
+            .iter()
+            .flat_map(|c| c.categories.iter().map(String::as_str))
+            .collect();
+        for c in caveats {
+            let program = self.program;
+            let reads = self
+                .relations
+                .entry(c.negated.clone())
+                .or_insert_with(|| prelude::relation_reads(program, &c.negated));
+            named.extend(reads.iter().copied());
+        }
+        registry_categories()
+            .iter()
+            .map(|(_, n)| *n)
+            .filter(|n| any || named.contains(n))
+            .collect()
+    }
 }
 
 /// The code domain's edge categories, `(id, name)`.
@@ -762,10 +833,11 @@ fn answer(
 }
 
 /// Every edge category the rules of `outputs` read, through the predicates they
-/// reach (positive or negated), in registry order: an edge-family atom's constant
-/// category; the category set of a `reaches` / `scc` call (the carry set when it
-/// names none); every category for a category read through a variable, `_` or
-/// `"*"`.
+/// reach (positive or negated, the merged prelude's included), in registry order:
+/// an edge-family atom's constant category; the category set of a `reaches` /
+/// `scc` call (the carry set when it names none); the categories an engine relation
+/// is computed from (`prelude::RelationSpec::reads`); every category for a category
+/// read through a variable, `_` or `"*"`.
 fn categories_read(program: &Program, outputs: &[&str]) -> Vec<&'static str> {
     let defined = |p: &str| program.rules.iter().any(|r| r.head.pred == p);
     let mut seen: Vec<&str> = outputs.to_vec();
@@ -812,7 +884,11 @@ fn categories_read(program: &Program, outputs: &[&str]) -> Vec<&'static str> {
                         }
                         _ => all = true,
                     },
-                    _ => {}
+                    (name, n) => {
+                        if let Some(rel) = prelude::relation(name, n) {
+                            named.extend(rel.reads());
+                        }
+                    }
                 }
             }
         }

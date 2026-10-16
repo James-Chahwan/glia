@@ -46,6 +46,16 @@ glia does not ship the following in core, and will not accept them as contributi
 - **Lists of routes that reach data without authentication.** Whatever the intent of the person
   running it, an inventory of unauthenticated routes that reach data is an attack plan.
 
+## The query language reads structure only
+
+`glia query`, `PyGraph.query` / `query_gql` and a `[[constraint]]` `rule` evaluate Datalog (or a GQL
+read subset) over the structural graph only: nodes, their kinds and locations, edges and their
+categories, and cells. No value- or data-flow relation exists to query. The shipped prelude
+(`engine/src/rules/prelude.dl`, docs/rules.md) defines no authentication, authorization or security
+predicate (a test enforces it), and glia ships no rule that classifies routes by authentication.
+A repo owner can ask structural reachability questions of their own code; glia does not provide or
+curate security rules, and the list above is unchanged.
+
 ## Untrusted text is redacted before it is stored
 
 Config values that glia reads (Dockerfile `ENV`, `.env` files, k8s and compose environments) are

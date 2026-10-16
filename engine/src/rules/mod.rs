@@ -4,7 +4,7 @@
 //! reached by module path (`glia_engine::rules::<item>`): its owners declare
 //! their files here, namely facts.rs (DB.2a), query.rs (DB.2b, +DB.7c),
 //! prelude.rs and prelude.dl (DB.2c), and reflexion.rs, reflexion.dl and the
-//! `#[cfg(test)]` reflexion_parity.rs (DB.8a). Filled by DB.2a and DB.2b.
+//! `#[cfg(test)]` reflexion_parity.rs (DB.8a). Filled by DB.2a, DB.2b and DB.2c.
 
 /// CodeFacts, the code domain's FactSource over a MergedGraph (DB.2a). The module
 /// is crate-visible so check reaches `rules::facts::{located_edge, tier_name,
@@ -21,3 +21,10 @@ pub use query::{
     QueryAnswer, QueryOptions, QueryOutput, QueryRow, QueryValue, RuleDiagnostic, RuleError,
     RuleRow, evaluate_rule, query, validate,
 };
+
+/// The predicate prelude: structural predicates as rules (prelude.dl), merged into
+/// every program and pruned to what it reads, and the engine relations they read
+/// (DB.2c).
+mod prelude;
+
+pub use prelude::{PRELUDE, prelude_predicates};

@@ -1,0 +1,69 @@
+// The glia prelude (DB.2c): structural predicates over the code graph, merged into
+// every rule program and pruned to the predicates the program reads. A user rule may
+// not define one of these names, nor an engine relation's (docs/rules.md, `## The
+// prelude`).
+//
+// STRUCTURE ONLY (SECURITY.md, `The query language reads structure only`): every
+// predicate here reads nodes, kinds, locations, edges and their categories. None
+// names or classifies authentication, authorization, secrets, permissions or any
+// security property, none reads a value or data flow, and none reads source text
+// (a CODE, DOC, SCHEMA_FIELDS or ENV cell). The unit test
+// `rules::prelude::tests::prelude_is_structural_only` enforces it.
+//
+// Concepts, not raw categories: when the code profile changes (a carry edge added, a
+// category split), these rules change and user rules do not. `carry_category/1` is
+// glia-rules' core relation; dependency_category/1, symbol_kind/1, effect_sink/3,
+// live/1 and module_import/2 are the engine relations (engine/src/rules/prelude.rs).
+
+// A semantic edge: one reachability, blast radius and liveness follow.
+carry(A, B) :- edge(A, B, C), carry_category(C).
+
+// A dependency edge: IMPORTS plus the carry edges, less TESTS and DOCUMENTS (check's
+// default forbid set).
+depends(A, B) :- edge(A, B, C), dependency_category(C).
+
+// A call.
+calls(A, B) :- edge(A, B, "CALLS").
+
+// A use of a symbol (a type, a field, a function by value).
+uses(A, B) :- edge(A, B, "USES").
+
+// An import.
+imports(A, B) :- edge(A, B, "IMPORTS").
+
+// P defines C.
+defines(P, C) :- edge(P, C, "DEFINES").
+
+// P contains C (`contains/2` is the core string test).
+contains_node(P, C) :- edge(P, C, "CONTAINS").
+
+// A implements B.
+implements(A, B) :- edge(A, B, "IMPLEMENTS").
+
+// A inherits from B.
+inherits(A, B) :- edge(A, B, "INHERITS_FROM").
+
+// Route R is handled by H.
+handles(R, H) :- edge(R, H, "HANDLED_BY").
+
+// Route R has a handler.
+handled(R) :- handles(R, _).
+
+// A route with no handler in the graph.
+unhandled_route(R) :- node(R, "ROUTE"), !handled(R).
+
+// N has a test.
+tested(N) :- edge(_, N, "TESTS").
+
+// A CLASS, FUNCTION or METHOD no entry point reaches over the carry edges.
+unreached(N) :- node(N, K), symbol_kind(K), !live(N).
+
+// F has an external effect of class Class (db, http_call, queue_produce, ...) on sink
+// S: the profile's effect sinks, the first match classifying.
+effect(F, S, Class) :- edge(F, S, C), node(S, K), effect_sink(K, C, Class).
+
+// An edge whose ends sit in two repositories of the merge.
+cross_repo(A, B, C) :- edge(A, B, C), repo(A, R1), repo(B, R2), R1 != R2.
+
+// Module A imports module B: the import graph lifted to MODULE nodes.
+module_dep(A, B) :- module_import(A, B).

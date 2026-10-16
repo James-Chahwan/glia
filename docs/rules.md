@@ -114,14 +114,73 @@ category set, never as generic recursion, so `reaches` is the way to ask for rea
 ### Reserved names
 
 A rule may not define a core predicate, a code attribute or a builtin (`` `edge/2` is a built-in
-predicate and cannot be defined by a rule ``, whatever the arity), and names starting `__` are
-reserved for the evaluator's own rewriting.
+predicate and cannot be defined by a rule ``, whatever the arity), nor a prelude predicate or engine
+relation below (`` `carry` is a prelude predicate (docs/rules.md); name yours differently ``,
+whatever the arity), and names starting `__` are reserved for the evaluator's own rewriting.
+
+## The prelude
+
+Every program can read a set of named structural concepts, the **prelude**: rules shipped with
+glia (`engine/src/rules/prelude.dl`, `glia_engine::rules::PRELUDE`) over the core predicates and
+a few engine relations. A rule names the concept (`carry`, `depends`, `effect`, `unreached`) and
+the prelude says which categories, kinds and tables that means, read from the code profile, never
+listed by hand. When the profile changes (a carry edge added, a category split), the prelude's
+answers change and your rules do not.
+
+The prelude is merged into a program as it is read: only the prelude rules the program uses,
+directly or through other prelude rules, join it (plus those of a prelude predicate asked for as an
+output), so an unused one costs nothing, is never a default output, and adds no absence mechanism
+or caveat. The names are a contract: renaming one would break the rules that use it.
+
+| predicate | rule | holds when |
+|---|---|---|
+| `carry(A, B)` | `edge(A, B, C), carry_category(C)` | a semantic edge: one reachability, blast radius and liveness follow |
+| `depends(A, B)` | `edge(A, B, C), dependency_category(C)` | a dependency edge: IMPORTS plus the carry edges, less TESTS and DOCUMENTS (`glia check`'s default forbid set) |
+| `calls(A, B)` | `edge(A, B, "CALLS")` | a call |
+| `uses(A, B)` | `edge(A, B, "USES")` | a use of a symbol (a type, a field, a function by value) |
+| `imports(A, B)` | `edge(A, B, "IMPORTS")` | an import |
+| `defines(P, C)` | `edge(P, C, "DEFINES")` | `P` defines `C` |
+| `contains_node(P, C)` | `edge(P, C, "CONTAINS")` | `P` contains `C` (`contains/2` is the string test) |
+| `implements(A, B)` | `edge(A, B, "IMPLEMENTS")` | `A` implements `B` |
+| `inherits(A, B)` | `edge(A, B, "INHERITS_FROM")` | `A` inherits from `B` |
+| `handles(R, H)` | `edge(R, H, "HANDLED_BY")` | route `R` is handled by `H` |
+| `handled(R)` | `handles(R, _)` | route `R` has a handler |
+| `unhandled_route(R)` | `node(R, "ROUTE"), !handled(R)` | a route with no handler in the graph (caveated by HANDLED_BY) |
+| `tested(N)` | `edge(_, N, "TESTS")` | `N` has a test |
+| `unreached(N)` | `node(N, K), symbol_kind(K), !live(N)` | a CLASS, FUNCTION or METHOD no entry point reaches over the carry edges (caveated by every carry category) |
+| `effect(F, S, Class)` | `edge(F, S, C), node(S, K), effect_sink(K, C, Class)` | `F` reaches effect sink `S` directly, classed by the profile (`db`, `http_call`, `queue_produce`, ...) |
+| `cross_repo(A, B, C)` | `edge(A, B, C), repo(A, R1), repo(B, R2), R1 != R2` | an edge of category `C` whose ends sit in two repositories of a merge |
+| `module_dep(A, B)` | `module_import(A, B)` | MODULE `A` imports MODULE `B` |
+
+`unreached` is liveness alone, not `glia gaps`' `dead_symbol`: it keeps no dispatch or
+test-fixture exclusion, and a symbol it lists may still be called (its caveats say how). `effect`
+is one hop, the edge into the sink; `glia effects` walks the carry edges to the sinks a function
+reaches.
+
+**Engine relations.** Each is computed by the engine only when a rule the program uses reads it, and
+every column may be bound or free:
+
+| relation | rows | tier | a negation of it reads |
+|---|---|---|---|
+| `dependency_category(C)` | `glia check`'s default forbid categories | FACT | nothing |
+| `symbol_kind(K)` | `CLASS`, `FUNCTION`, `METHOD` (the kinds of `glia gaps`' `dead_symbol`) | FACT | nothing |
+| `effect_sink(K, C, Class)` | every (kind, category) pair the profile's effect sinks name, with the class the first matching sink gives it | FACT | nothing |
+| `live(N)` | the nodes liveness reaches from the entry points (`entrypoint_reachable`) | DERIVED (a computed walk) | every carry category |
+| `module_import(A, B)` | the import graph lifted to MODULE nodes (`glia cycles`' import graph): one row per module pair | the tier `glia why` gives the import behind it | IMPORTS |
+
+Every evaluation prints `[rules] prelude relations=<n> (dependency_category=<0|1> symbol_kind=<0|1>
+effect_sink=<0|1> live=<0|1> module_import=<0|1>)` on stderr: the relations it built.
+
+The prelude reads structure only: no prelude predicate or engine relation names authentication,
+authorization, secrets or any other security property, none reads a value or data flow, and none
+reads source text. A test enforces it (SECURITY.md).
 
 ## Outputs
 
 The predicates a query answers are the ones asked for (`QueryOptions::outputs`, as `name` or
-`name/arity`), in the order asked. With none asked, they are the program's **sinks**: every
-predicate it defines that no rule of another predicate reads, in first-definition order. So in
+`name/arity`; a prelude predicate may be asked for), in the order asked. With none asked, they are
+the program's **sinks**: every predicate it defines that no rule of another predicate reads, in
+first-definition order (a prelude predicate never is one). So in
 
 ```text
 uncalled(f) :- node(f, "FUNCTION"), !called(f).
@@ -170,7 +229,8 @@ extraction has known blind spots (`glia coverage`). So negation adds no tier, bu
 through a negation carries the **coverage caveats** of every edge category the negated sub-program
 reads: the caveat rows of `glia coverage` for those categories, for the languages in the graph.
 The categories are found statically and conservatively: an `edge` atom's constant category, a
-`reaches` / `scc` category set (the carry set when it names none), through every predicate the
+`reaches` / `scc` category set (the carry set when it names none), an engine relation's own
+categories (`live` reads every carry category, `module_import` IMPORTS), through every predicate the
 negated one reads. A category read through a variable, `_` or `"*"` counts as every category.
 Positive atoms only ever tier a row.
 
@@ -233,8 +293,9 @@ paths answer alike.
 ## What the evaluator reads
 
 Structure only: nodes, their kinds and locations, edges and their categories, and cells. There is
-no value- or data-flow relation to query, and glia ships no rule that classifies routes by
-authentication (SECURITY.md).
+no value- or data-flow relation to query, the prelude defines no authentication, authorization or
+security predicate, and glia ships no rule that classifies routes by authentication (SECURITY.md,
+`The query language reads structure only`).
 
 ## GQL read subset
 
