@@ -17,6 +17,7 @@ use glia_code_domain::endpoint::{
     ClientEndpoint, HitExtras, client_url_split, ident_before, is_http_client_receiver,
     normalise_client_path, push_client_endpoint_with,
 };
+use glia_code_domain::wire::{self, ModelField, ModelSchema, Shape, ShapeField, WireFormat};
 
 pub fn parse_file(
     source: &str,
@@ -55,6 +56,9 @@ pub fn parse_file(
     // DT.5e: read before the class walk, which tags a widget / State
     // subclass a COMPONENT only in a file importing a Flutter library.
     acc.flutter_import = imports_any(root, src, FLUTTER_IMPORT_PREFIXES);
+    // DT.1l: read before the class walk, which writes no model schema in a
+    // generated file.
+    acc.generated = dart_generated(file_rel_path, source);
     visit_top(root, src, file_rel_path, module_qname, module_id, repo, &mut acc);
     // DT.5e: every member is declared now, so a name passed by value can be
     // checked against the METHOD / FUNCTION it would name.
@@ -70,6 +74,9 @@ pub fn parse_file(
         eprintln!("{line}");
     }
     if let Some(line) = acc.dio_bound.marker(acc.dio_receivers.len(), file_rel_path) {
+        eprintln!("{line}");
+    }
+    if let Some(line) = acc.wire.marker(file_rel_path) {
         eprintln!("{line}");
     }
 
@@ -206,6 +213,15 @@ struct Acc {
     /// DT.5e: the names passed by value ([`record_name_ref`]), in walk order,
     /// bound once the whole file is declared ([`resolve_name_refs`]).
     name_refs: Vec<NameRef>,
+    /// DT.1l: the file is generated ([`dart_generated`]): it writes no model
+    /// schema.
+    generated: bool,
+    /// DT.1l: the models and Dio shapes this file wrote, for the
+    /// `[dart-wire]` marker.
+    wire: DartWireStats,
+    /// DT.1l: how many Dio calls each callable body holds, keyed by the body's
+    /// tree-sitter node id ([`dio_calls_in`]). Lookup-only.
+    dio_calls: HashMap<usize, usize>,
 }
 
 /// DT.5e: an identifier passed as a whole argument value (`onPressed:
@@ -419,6 +435,8 @@ fn visit_class(
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CLASS, &qname);
 
+    // DT.1l: where the CLASS node sits, for its SCHEMA_FIELDS cell.
+    let class_ix = acc.nodes.len();
     acc.nodes.push(Node {
         id,
         repo,
@@ -481,6 +499,10 @@ fn visit_class(
             // formal typed through the field types just recorded.
             if acc.injectable_import && is_injectable_class(node, src) {
                 emit_injects(child, src, id, parent_id, acc);
+            }
+            // DT.1l: a model class's JSON fields.
+            if let Some(schema) = dart_model_schema(node, child, src, acc) {
+                acc.nodes[class_ix].cells.push(schema.cell());
             }
         }
     }
@@ -2835,48 +2857,28 @@ fn try_detect_dart_endpoint(
     file_rel: &str,
     acc: &mut Acc,
 ) {
-    let Some((recv, verb_sel, sl)) = dart_client_call(n, src) else {
+    let Some(call) = dio_call(n, src, &acc.dio_receivers) else {
         return;
     };
-    // CH.5c: a receiver the file binds to a Dio is a client whatever its name.
-    let recv_name = text_of(recv, src);
-    let by_binding = !is_http_client_receiver(recv_name);
-    if by_binding && !acc.dio_receivers.contains(recv_name) {
-        return;
-    }
-    // Verb is the first identifier under the `.verb` selector.
-    let Some(method) = first_identifier_text(verb_sel, src) else {
-        return;
-    };
-    let method_l = method.to_ascii_lowercase();
-    if !HTTP_VERBS.contains(&method_l.as_str()) {
-        return;
-    }
-    // A3.3: normalise BEFORE the guard, so `dio.post('https://api/users')`
-    // becomes `/users` instead of being dropped as "not a path".
-    let raw = dart_string_path(sl, src);
-    let (path, changed) = normalise_client_path(&raw);
-    if !is_dart_request_path(&path) {
-        return; // not a request path (full-URL var, non-path first arg, etc.)
-    }
     // A11.5: the authority of the pre-normalisation literal, as `host`. Only
     // the host half is read: the path stays A3.3's normaliser's, so no qname
     // moves. `$base/users` has no authority; `https://$host/x` has a
     // placeholder one, which names no service.
-    let (host, _) = client_url_split(&raw);
+    let (host, _) = client_url_split(&call.raw);
     let pos = n.start_position();
     let ep = ClientEndpoint {
-        method: method_l.to_ascii_uppercase(),
-        path,
+        method: call.method.clone(),
+        path: call.path.clone(),
         file: file_rel.to_string(),
         line: pos.row + 1,
         col: pos.column + 1,
         confidence: Confidence::Strong,
     };
     let extras = HitExtras {
-        raw: changed.then_some(raw.as_str()),
+        raw: call.changed.then_some(call.raw.as_str()),
         host: host.as_deref(),
     };
+    let before = acc.nodes.len();
     push_client_endpoint_with(
         repo,
         &ep,
@@ -2887,8 +2889,70 @@ fn try_detect_dart_endpoint(
         &mut acc.nav,
         &mut acc.endpoint_seen,
     );
-    acc.dio_bound.endpoints += usize::from(by_binding);
+    acc.dio_bound.endpoints += usize::from(call.by_binding);
+    // DT.1l: the site that wrote the (method, path)'s ENDPOINT_HIT (the node
+    // just pushed) also states its shapes; a later site of the same endpoint
+    // in this file writes no hit of its own.
+    if acc.nodes.len() > before {
+        splice_dio_shapes(n, &call, before, src, acc);
+    }
 }
+
+/// One client call [`try_detect_dart_endpoint`] emits an ENDPOINT for.
+struct DioCall<'t> {
+    /// Upper-case HTTP verb.
+    method: String,
+    /// The path literal as written (interpolations as `${…}`).
+    raw: String,
+    /// The normalised request path.
+    path: String,
+    /// The normaliser rewrote `raw`.
+    changed: bool,
+    /// The receiver is a client only through the file's Dio bindings (CH.5c).
+    by_binding: bool,
+    /// The call's `arguments` (none for the relational-misparse shape, whose
+    /// one argument is the path literal).
+    args: Option<TsNode<'t>>,
+}
+
+/// The client call `<recv>.<verb>('<path>', ...)` held by `n`
+/// ([`dart_client_call`]), when `<recv>` names an HTTP client (dio / http /
+/// *client / api, or a name the file binds to a Dio) and the path is a
+/// request path. The one detector both the ENDPOINT walk and DT.1l's call
+/// count ([`dio_calls_in`]) read.
+fn dio_call<'t>(n: TsNode<'t>, src: &[u8], dio_receivers: &HashSet<String>) -> Option<DioCall<'t>> {
+    let (recv, verb_sel, sl, args) = dart_client_call(n, src)?;
+    // CH.5c: a receiver the file binds to a Dio is a client whatever its name.
+    let recv_name = text_of(recv, src);
+    let by_binding = !is_http_client_receiver(recv_name);
+    if by_binding && !dio_receivers.contains(recv_name) {
+        return None;
+    }
+    // Verb is the first identifier under the `.verb` selector.
+    let method = first_identifier_text(verb_sel, src)?.to_ascii_lowercase();
+    if !HTTP_VERBS.contains(&method.as_str()) {
+        return None;
+    }
+    // A3.3: normalise BEFORE the guard, so `dio.post('https://api/users')`
+    // becomes `/users` instead of being dropped as "not a path".
+    let raw = dart_string_path(sl, src);
+    let (path, changed) = normalise_client_path(&raw);
+    if !is_dart_request_path(&path) {
+        return None; // not a request path (full-URL var, non-path first arg, etc.)
+    }
+    Some(DioCall {
+        method: method.to_ascii_uppercase(),
+        raw,
+        path,
+        changed,
+        by_binding,
+        args,
+    })
+}
+
+/// [`dart_client_call`]'s parts: the receiver, the `.verb` selector, the path
+/// literal and the call's `arguments`.
+type ClientCallParts<'t> = (TsNode<'t>, TsNode<'t>, TsNode<'t>, Option<TsNode<'t>>);
 
 /// The receiver `identifier`, the `.verb` selector and the first argument's
 /// `string_literal` of a call `<recv>.<verb>(<args>)` held by `n`, in the three
@@ -2912,12 +2976,15 @@ fn try_detect_dart_endpoint(
 ///   result with `>`, so the shape names a generic call; its first argument
 ///   must be the literal itself.
 ///
+/// The fourth part is the call's `arguments` node (DT.1l reads its `data:`
+/// request), absent for the misparse shape.
+///
 /// None for anything else: the caller then mints nothing, as before.
-fn dart_client_call<'t>(n: TsNode<'t>, src: &[u8]) -> Option<(TsNode<'t>, TsNode<'t>, TsNode<'t>)> {
+fn dart_client_call<'t>(n: TsNode<'t>, src: &[u8]) -> Option<ClientCallParts<'t>> {
     let mut c = n.walk();
     let kids: Vec<TsNode> = n.named_children(&mut c).collect();
     if n.kind() == "relational_expression" {
-        return dart_generic_misparse(&kids, src);
+        return dart_generic_misparse(&kids, src).map(|(r, v, sl)| (r, v, sl, None));
     }
     if kids.len() < 3 || kids[0].kind() != "identifier" || kids[1].kind() != "selector" {
         return None;
@@ -2930,7 +2997,8 @@ fn dart_client_call<'t>(n: TsNode<'t>, src: &[u8]) -> Option<(TsNode<'t>, TsNode
         return None;
     }
     let sl = first_descendant_of_kind(args_sel, "string_literal")?;
-    Some((kids[0], kids[1], sl))
+    let args = first_descendant_of_kind(args_sel, "arguments");
+    Some((kids[0], kids[1], sl, args))
 }
 
 /// [`dart_client_call`]'s relational-misparse shape, over the outer
@@ -3889,6 +3957,1538 @@ fn entity_cells(node: &TsNode, src: &[u8], file_rel: &str) -> Vec<Cell> {
         });
     }
     cells
+}
+
+// ============================================================================
+// DT.1l: Dart wire models (SCHEMA_FIELDS) and Dio call shapes (ENDPOINT_HIT)
+// ============================================================================
+//
+// The client half of the models pass (DT.1g) for Dart, written in the
+// `wire` vocabulary (code-domain/src/wire.rs, format `dart`):
+//
+// - **Models.** A CLASS with a hand-written `factory C.fromJson(<p>)` whose
+//   first parameter is a `Map` carries SCHEMA_FIELDS: its JSON names are the
+//   string-literal subscripts `<p>['k']` the factory reads, in source order,
+//   deduped (Dart's wire names, never its field names: `j['display_name']`
+//   fills `displayName`). A key's `type` is the model a `C.fromJson(<p>['k'])`
+//   / `.map(C.fromJson)` reaches (`C`, `List<C>`), else the `as T` cast on the
+//   subscript, else the declared type of the field the named argument
+//   assigns the subscript to (directly: through casts, parentheses, `!` and
+//   `??` only, never a conversion call), else `dynamic`; `field` is that
+//   named argument when it differs; `required` holds when a non-nullable
+//   cast of it runs whenever the factory does (not in a branch, a loop or a
+//   closure: the factory throws without the key), or the directly assigned
+//   field is non-nullable with no `??` default. The schema is `open`
+//   when `<p>` escapes the literal reads (passed whole, spread, a computed
+//   subscript, iterated). A `@JsonSerializable` class instead lists its
+//   instance fields: `@JsonKey(name:)` renames, the class's `fieldRename`
+//   (snake / kebab / pascal / screamingSnake) applied otherwise,
+//   `@JsonKey(includeFromJson: false)` / `ignore: true` skipped, `required`
+//   when non-nullable with no `defaultValue` and no constructor default (or
+//   `@JsonKey(required: true)`). A generated file ([`dart_generated`]:
+//   protobuf, build_runner output, a generator banner) writes none: a
+//   protobuf `fromJson($core.String i, ..)` is no map reader. Zero keys, no
+//   cell.
+// - **Responses.** A Dio call's response is read inside its one callable
+//   body ([`enclosing_callable`]), only when that body holds exactly one Dio
+//   call (else counted `skipped_multi_call`): `<res>.data` for the call's
+//   result variable, or `(await <call>).data`, then the locals bound from it
+//   (`!`, `?? ..`, `as Map<..>`, subscripts, `whereType` / `cast` / `toList`
+//   / `where`, `first` / `last` / `single` / `[0]` an element). A
+//   string-literal subscript adds an envelope key, `C.fromJson(x)` names the
+//   model, `.map(C.fromJson)` / `.map((e) => C.fromJson(e))` an array of it,
+//   and several alternatives a Union ([`ReadTree::shape`]). A shape read only
+//   through a helper (`_parse(res.data)`) is not followed.
+// - **Requests.** A Dio call's `data:` argument: a map literal is an Object of
+//   its string keys (a collection-`if` key is not required, a spread or
+//   computed key leaves it open), `x.toJson()` the declared type of `x`;
+//   anything else writes no request.
+//
+// The shapes are spliced onto the ENDPOINT_HIT the site wrote, after every
+// other key, through `wire::append_hit_fields`; a hit with neither keeps its
+// bytes. The endpoint fold appends a folded `host` after them. Type names stay
+// unresolved text: the models pass binds them in the hit file's module
+// (DT.1g). fired_on: `[dart-wire] models=<m> (fromjson=<f> serializable=<s>)
+// skipped_generated=<g> responses=<r> requests=<q> skipped_multi_call=<k>
+// file=<path>`, per file with m+r+q+g > 0.
+
+/// DT.1l: the `[dart-wire]` counters of one file.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct DartWireStats {
+    /// Classes whose schema was read from a `fromJson` factory's keys.
+    fromjson: usize,
+    /// `@JsonSerializable` classes whose schema was read from their fields.
+    serializable: usize,
+    /// `fromJson` factories and `@JsonSerializable` classes in a generated
+    /// file, which write no schema.
+    skipped_generated: usize,
+    /// ENDPOINT_HITs that gained a `response`.
+    responses: usize,
+    /// ENDPOINT_HITs that gained a `request`.
+    requests: usize,
+    /// ENDPOINT_HITs whose callable holds more than one Dio call, so no
+    /// response was read.
+    skipped_multi_call: usize,
+}
+
+impl DartWireStats {
+    fn marker(&self, file_rel: &str) -> Option<String> {
+        #[cfg(test)]
+        LAST_DART_WIRE.with(|w| *w.borrow_mut() = self.clone());
+        let models = self.fromjson + self.serializable;
+        (models + self.responses + self.requests + self.skipped_generated > 0).then(|| {
+            format!(
+                "[dart-wire] models={models} (fromjson={} serializable={}) skipped_generated={} \
+                 responses={} requests={} skipped_multi_call={} file={file_rel}",
+                self.fromjson,
+                self.serializable,
+                self.skipped_generated,
+                self.responses,
+                self.requests,
+                self.skipped_multi_call
+            )
+        })
+    }
+}
+
+// The last file's `[dart-wire]` counters on this thread, which the tests read.
+#[cfg(test)]
+thread_local! {
+    static LAST_DART_WIRE: std::cell::RefCell<DartWireStats> =
+        std::cell::RefCell::new(DartWireStats::default());
+}
+
+/// Generated Dart file names: the protobuf plugin's files and build_runner
+/// output (json_serializable / freezed / auto_route / mockito). The same
+/// endings as the extractors' generated-file classifier (DE.7), which this
+/// parser cannot depend on without a new crate edge.
+const DART_GENERATED_SUFFIXES: &[&str] = &[
+    ".pb.dart",
+    ".pbjson.dart",
+    ".pbenum.dart",
+    ".pbserver.dart",
+    ".pbgrpc.dart",
+    ".g.dart",
+    ".freezed.dart",
+    ".gr.dart",
+    ".mocks.dart",
+];
+
+/// How many lines from the top [`dart_generated`] reads for a banner.
+const DART_BANNER_LINES: usize = 40;
+
+/// DT.1l: the file is machine-written: a [`DART_GENERATED_SUFFIXES`] name, or
+/// a `//` comment among its first [`DART_BANNER_LINES`] lines saying
+/// `generated code` (build_runner's banner), or comment lines saying
+/// `generated` beside `do not modify` / `do not edit` (protoc's
+/// `Generated code. Do not modify.`).
+fn dart_generated(file_rel: &str, source: &str) -> bool {
+    let base = file_rel.rsplit(['/', '\\']).next().unwrap_or(file_rel).to_ascii_lowercase();
+    if DART_GENERATED_SUFFIXES.iter().any(|s| base.ends_with(s)) {
+        return true;
+    }
+    let mut generated = false;
+    let mut keep_off = false;
+    for line in source.lines().take(DART_BANNER_LINES) {
+        let line = line.trim_start_matches('\u{feff}').trim();
+        if !(line.starts_with("//") || line.starts_with("/*") || line.starts_with('*')) {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("generated code") && lower.contains("modify") {
+            return true;
+        }
+        generated |= lower.contains("generated");
+        keep_off |= lower.contains("do not modify") || lower.contains("do not edit");
+        if generated && keep_off {
+            return true;
+        }
+    }
+    false
+}
+
+/// DT.1l: the SCHEMA_FIELDS of the class `class` (body `body`): its
+/// `@JsonSerializable` fields, else its `fromJson` factory's keys (see the
+/// section head). `None` for a class that is neither, a generated file's
+/// model (counted) and a schema with no field.
+fn dart_model_schema(class: TsNode, body: TsNode, src: &[u8], acc: &mut Acc) -> Option<ModelSchema> {
+    let serializable = class_annotation(class, "JsonSerializable", src);
+    let factory = from_json_factory(body, src);
+    if serializable.is_none() && factory.is_none() {
+        return None;
+    }
+    if acc.generated {
+        acc.wire.skipped_generated += 1;
+        return None;
+    }
+    let schema = match (serializable, factory) {
+        (Some(annotation), _) => {
+            let schema = serializable_schema(annotation, body, src);
+            acc.wire.serializable += usize::from(!schema.fields.is_empty());
+            schema
+        }
+        (None, Some(f)) => {
+            let schema = from_json_schema(&f, &class_fields(body, src), src)?;
+            acc.wire.fromjson += usize::from(!schema.fields.is_empty());
+            schema
+        }
+        (None, None) => return None,
+    };
+    (!schema.fields.is_empty()).then_some(schema)
+}
+
+/// A class's `fromJson` factory: its body and its first parameter.
+struct FromJson<'t> {
+    body: TsNode<'t>,
+    /// The first parameter's name, when it can hold the decoded JSON object
+    /// ([`MAP_PARAM_TYPES`] or untyped). A `String` (protobuf's
+    /// `fromJson($core.String i, ..)`) or any other type is no map reader.
+    map_param: Option<String>,
+}
+
+/// The first-parameter types a `fromJson` factory reads a decoded JSON object
+/// through: `Map<..>`, and the `dynamic` / `Object` a factory that also takes
+/// a list declares (`ActivityPage.fromJson(dynamic raw)`).
+const MAP_PARAM_TYPES: &[&str] = &["Map", "dynamic", "Object"];
+
+/// The `factory <C>.fromJson(..)` member of a class body.
+fn from_json_factory<'t>(body: TsNode<'t>, src: &[u8]) -> Option<FromJson<'t>> {
+    let mut members = body.walk();
+    for member in body.named_children(&mut members) {
+        if member.kind() != "class_member" {
+            continue;
+        }
+        let kids = named_kids(member);
+        let Some(sig) = kids
+            .iter()
+            .filter(|k| k.kind() == "method_signature")
+            .find_map(|m| named_kids(*m).into_iter().find(|p| p.kind() == "factory_constructor_signature"))
+        else {
+            continue;
+        };
+        if constructor_name(sig, src).as_deref() != Some("fromJson") {
+            continue;
+        }
+        let Some(fn_body) = kids.iter().copied().find(|k| k.kind() == "function_body") else {
+            continue;
+        };
+        let first = sig
+            .child_by_field_name("parameters")
+            .and_then(|list| first_formal_parameter(list));
+        let map_param = first.and_then(|p| {
+            let name = p.child_by_field_name("name")?;
+            let map_like = match param_type_head(p, src).as_deref() {
+                Some(head) => MAP_PARAM_TYPES.contains(&head),
+                None => named_kids(p).len() == 1,
+            };
+            map_like.then(|| text_of(name, src).to_string())
+        });
+        return Some(FromJson { body: fn_body, map_param });
+    }
+    None
+}
+
+/// The first `formal_parameter` of a parameter list, positional or not.
+fn first_formal_parameter(list: TsNode) -> Option<TsNode> {
+    let mut cursor = list.walk();
+    for p in list.named_children(&mut cursor) {
+        match p.kind() {
+            "formal_parameter" => return Some(p),
+            "optional_formal_parameters" => return first_formal_parameter(p),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The schema a `fromJson(Map ..)` factory reads (section head); `None` when
+/// its first parameter is no `Map`.
+fn from_json_schema(f: &FromJson, fields: &[(String, String)], src: &[u8]) -> Option<ModelSchema> {
+    let param = f.map_param.as_deref()?;
+    let mut flow = JsonFlow::new(src, FlowRoot::Param(param.to_string()));
+    flow.walk(f.body);
+    let tree = ReadTree::build(&flow.reads, &flow.key_at);
+    let mut schema = ModelSchema::new(WireFormat::Dart);
+    schema.open = flow.escaped;
+    for (key, _, t) in &tree.keys {
+        let assigned: Vec<(String, bool)> = flow
+            .key_sites
+            .iter()
+            .filter(|(k, _)| k == key)
+            .filter_map(|(_, sel)| assigned_field(*sel, f.body, fields, src))
+            .collect();
+        let label = assigned.first().map(|(l, _)| l.clone());
+        let declared = assigned
+            .iter()
+            .find(|(_, direct)| *direct)
+            .and_then(|(l, _)| fields.iter().find(|(n, _)| n == l))
+            .map(|(_, ty)| ty.clone());
+        let ty = t
+            .models
+            .first()
+            .cloned()
+            .or_else(|| t.each.as_ref().and_then(|e| e.models.first()).map(|m| format!("List<{m}>")))
+            .or_else(|| t.casts.first().cloned())
+            .or_else(|| declared.clone())
+            .unwrap_or_else(|| "dynamic".to_string());
+        let required = t.required() || declared.as_deref().is_some_and(|d| !dart_nullable(d) && !t.defaulted);
+        let mut field = ModelField::new(key, &ty, required);
+        field.field = label.filter(|l| l != key);
+        schema.fields.push(field);
+    }
+    Some(schema)
+}
+
+/// The class field a subscript's value is assigned to: the label of the
+/// nearest `named_argument` holding it (below the factory body `top`), when
+/// it names one of the class's `fields`; and whether the subscript IS the
+/// assigned value (only casts, parentheses, `!` and a `??` default between),
+/// so the field's declared type describes the wire value. Through a call or
+/// a conversion (`joinStatusFrom(j['s'])`, `(j['n'] as num?)?.toInt()`) the
+/// field is still named, its type is not.
+fn assigned_field(sel: TsNode, top: TsNode, fields: &[(String, String)], src: &[u8]) -> Option<(String, bool)> {
+    let only_bangs = |n: TsNode| {
+        let mut next = n.next_named_sibling();
+        while let Some(k) = next {
+            if k.kind() == "selector" && text_of(k, src).trim() != "!" {
+                return false;
+            }
+            next = k.next_named_sibling();
+        }
+        true
+    };
+    let mut direct = only_bangs(sel);
+    let mut at = sel;
+    while let Some(p) = at.parent() {
+        if p.id() == top.id() {
+            return None;
+        }
+        match p.kind() {
+            "named_argument" => {
+                let label = p.named_child(0).filter(|l| l.kind() == "label")?;
+                let name = text_of(label, src).trim_end_matches(':').trim();
+                return fields
+                    .iter()
+                    .any(|(n, _)| n == name)
+                    .then(|| (name.to_string(), direct));
+            }
+            "type_cast_expression" | "if_null_expression" => {}
+            "parenthesized_expression" => direct &= only_bangs(p),
+            _ => direct = false,
+        }
+        at = p;
+    }
+    None
+}
+
+/// A type text that admits null: `T?`, `dynamic`, `Null`, `Object?`.
+fn dart_nullable(ty: &str) -> bool {
+    let t = ty.trim();
+    t.ends_with('?') || matches!(t, "dynamic" | "Null" | "void")
+}
+
+/// The class's annotation `@<name>` / `@<name>(..)`.
+fn class_annotation<'t>(class: TsNode<'t>, name: &str, src: &[u8]) -> Option<TsNode<'t>> {
+    named_kids(class).into_iter().find(|a| {
+        a.kind() == "annotation" && a.child_by_field_name("name").is_some_and(|n| text_of(n, src) == name)
+    })
+}
+
+/// An annotation's named arguments: label -> its value nodes.
+fn annotation_args<'t>(annotation: TsNode<'t>, src: &[u8]) -> Vec<(String, Vec<TsNode<'t>>)> {
+    let Some(args) = named_kids(annotation)
+        .into_iter()
+        .find(|k| k.kind() == "annotation_arguments")
+    else {
+        return Vec::new();
+    };
+    named_kids(args)
+        .into_iter()
+        .filter(|a| a.kind() == "argument")
+        .filter_map(|a| a.named_child(0).filter(|n| n.kind() == "named_argument"))
+        .filter_map(|na| {
+            let kids = named_kids(na);
+            let (label, value) = kids.split_first()?;
+            (label.kind() == "label")
+                .then(|| (text_of(*label, src).trim_end_matches(':').trim().to_string(), value.to_vec()))
+        })
+        .collect()
+}
+
+/// The instance fields of a class body, in source order: `(name, type text)`.
+/// A static or untyped field is left out.
+fn class_fields(body: TsNode, src: &[u8]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for member in named_kids(body) {
+        if member.kind() != "class_member" {
+            continue;
+        }
+        out.extend(member_fields(member, src));
+    }
+    out
+}
+
+/// The instance fields one `class_member` declares: `(name, type text)`.
+/// Static fields, untyped fields and non-field members give none.
+fn member_fields(member: TsNode, src: &[u8]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for decl in named_kids(member) {
+        if decl.kind() != "declaration" {
+            continue;
+        }
+        let mut c = decl.walk();
+        if decl.children(&mut c).any(|t| t.kind() == "static") {
+            continue;
+        }
+        let Some(list) = named_kids(decl)
+            .into_iter()
+            .find(|k| k.kind() == "initialized_identifier_list")
+        else {
+            continue;
+        };
+        let Some(ty) = type_text(decl, list.id(), src) else {
+            continue;
+        };
+        for item in named_kids(list) {
+            if item.kind() != "initialized_identifier" {
+                continue;
+            }
+            if let Some(name) = item.child_by_field_name("name") {
+                out.push((text_of(name, src).to_string(), ty.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// The type a declaration-like node writes among its children before the
+/// child `stop` (a name or an identifier list): its `type_identifier`s (the
+/// grammar's `required` keyword excluded), `type_arguments`, function /
+/// record / void types and the `.` / `?` tokens between them, concatenated
+/// (`p.Member?`, `List<String>`). `None` when none is written.
+fn type_text(node: TsNode, stop: usize, src: &[u8]) -> Option<String> {
+    let mut out = String::new();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.id() == stop {
+            break;
+        }
+        match child.kind() {
+            "type_identifier" if text_of(child, src) != "required" => out.push_str(text_of(child, src)),
+            "type_arguments" | "function_type" | "record_type" | "void_type" => {
+                out.push_str(&text_of(child, src).split_whitespace().collect::<Vec<_>>().join(" "));
+            }
+            "?" | "." if !out.is_empty() => out.push_str(child.kind()),
+            _ => {}
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The type an `as T` `type_cast` names.
+fn cast_type(cast: TsNode, src: &[u8]) -> Option<String> {
+    type_text(cast, usize::MAX, src)
+}
+
+/// A `@JsonSerializable` class's schema: its instance fields (section head).
+fn serializable_schema(annotation: TsNode, body: TsNode, src: &[u8]) -> ModelSchema {
+    let rename = annotation_args(annotation, src)
+        .into_iter()
+        .find(|(l, _)| l == "fieldRename")
+        .and_then(|(_, v)| v.iter().rev().find_map(|n| first_identifier_text(*n, src).filter(|_| n.kind() == "selector")))
+        .unwrap_or_default();
+    let defaults = constructor_defaults(body, src);
+    let mut schema = ModelSchema::new(WireFormat::Dart);
+    for member in named_kids(body) {
+        if member.kind() != "class_member" {
+            continue;
+        }
+        let key = named_kids(member)
+            .into_iter()
+            .find(|a| a.kind() == "annotation" && a.child_by_field_name("name").is_some_and(|n| text_of(n, src) == "JsonKey"))
+            .map(|a| annotation_args(a, src))
+            .unwrap_or_default();
+        let flag = |name: &str, want: &str| {
+            key.iter()
+                .any(|(l, v)| l == name && v.first().is_some_and(|n| text_of(*n, src) == want))
+        };
+        if flag("includeFromJson", "false") || flag("ignore", "true") {
+            continue;
+        }
+        let renamed = key
+            .iter()
+            .find(|(l, _)| l == "name")
+            .and_then(|(_, v)| v.first().and_then(|n| literal_text(*n, src)));
+        let has_default = key.iter().any(|(l, _)| l == "defaultValue");
+        for (name, ty) in member_fields(member, src) {
+            let json = renamed.clone().unwrap_or_else(|| field_rename(&name, &rename));
+            let required = flag("required", "true")
+                || (!dart_nullable(&ty) && !has_default && !defaults.contains(&name));
+            let mut field = ModelField::new(&json, &ty, required);
+            field.field = Some(name).filter(|n| *n != json);
+            schema.fields.push(field);
+        }
+    }
+    schema
+}
+
+/// The field formals (`this.x`) any constructor of the class gives a default
+/// value (`{this.x = 1}`). Lookup-only.
+fn constructor_defaults(body: TsNode, src: &[u8]) -> HashSet<String> {
+    fn walk(list: TsNode, src: &[u8], out: &mut HashSet<String>) {
+        let kids = named_kids(list);
+        let optional = list.kind() == "optional_formal_parameters";
+        for (i, p) in kids.iter().enumerate() {
+            match p.kind() {
+                "optional_formal_parameters" => walk(*p, src, out),
+                "formal_parameter" => {
+                    let defaulted = optional
+                        && kids
+                            .get(i + 1)
+                            .is_some_and(|n| !matches!(n.kind(), "formal_parameter" | "annotation"));
+                    let field = named_kids(*p)
+                        .into_iter()
+                        .find(|c| c.kind() == "constructor_param")
+                        .and_then(|c| named_kids(c).into_iter().rfind(|i| i.kind() == "identifier"));
+                    if let (true, Some(f)) = (defaulted, field) {
+                        out.insert(text_of(f, src).to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "formal_parameter_list" {
+            walk(n, src, &mut out);
+            continue;
+        }
+        if matches!(n.kind(), "function_body" | "class_body") && n.id() != body.id() {
+            continue;
+        }
+        stack.extend(named_kids(n));
+    }
+    out
+}
+
+/// json_serializable's `FieldRename` applied to a field name: `snake`
+/// (`orderId` -> `order_id`), `kebab` (`order-id`), `pascal` (`OrderId`),
+/// `screamingSnake` (`ORDER_ID`); `none` or anything else keeps it.
+fn field_rename(name: &str, rename: &str) -> String {
+    let split = |sep: char| {
+        let mut out = String::with_capacity(name.len() + 4);
+        for (i, c) in name.chars().enumerate() {
+            if c.is_ascii_uppercase() && i > 0 {
+                out.push(sep);
+            }
+            out.push(c.to_ascii_lowercase());
+        }
+        out
+    };
+    match rename {
+        "snake" => split('_'),
+        "kebab" => split('-'),
+        "screamingSnake" => split('_').to_ascii_uppercase(),
+        "pascal" => {
+            let mut c = name.chars();
+            c.next()
+                .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+                .unwrap_or_default()
+        }
+        _ => name.to_string(),
+    }
+}
+
+/// The text of a string literal without interpolation or escapes; `None`
+/// for any other node, and for an empty literal.
+fn literal_text(node: TsNode, src: &[u8]) -> Option<String> {
+    if node.kind() != "string_literal" {
+        return None;
+    }
+    let mut out = String::new();
+    for part in named_kids(node) {
+        for piece in named_kids(part) {
+            if !piece.kind().starts_with("template_chars") {
+                return None;
+            }
+            out.push_str(text_of(piece, src));
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// A node's named children, comments dropped.
+fn named_kids(node: TsNode) -> Vec<TsNode> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|k| k.kind() != "comment")
+        .collect()
+}
+
+// ---- the JSON value flow ----------------------------------------------------
+
+/// One step from a JSON value to a part of it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Step {
+    /// A string-literal subscript: the value's key.
+    Key(String),
+    /// An element of an array value (`.map`, `[0]`, `.first`).
+    Each,
+}
+
+/// What one read did with the value at its path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Terminal {
+    /// `C.fromJson(v)`: the value is a `C`.
+    Model(String),
+    /// `v as T`.
+    Cast(String),
+    /// Read, with neither.
+    Plain,
+}
+
+/// One read of a JSON value: where (`path`), what was done with it, whether
+/// a `??` default covers it, and whether it is `firm`: a non-nullable cast
+/// that runs whenever the body does ([`JsonFlow::guarded`]), so the body
+/// throws when the part is absent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Read {
+    path: Vec<Step>,
+    terminal: Terminal,
+    defaulted: bool,
+    firm: bool,
+}
+
+/// Where a [`JsonFlow`]'s JSON comes from.
+enum FlowRoot<'t> {
+    /// A `fromJson` factory's map parameter: the object itself.
+    Param(String),
+    /// A Dio call: `.data` of its result variable (`var`), or of the
+    /// awaited call itself.
+    Dio { var: Option<String>, call: TsNode<'t> },
+}
+
+/// What an expression evaluates to.
+enum Flow {
+    /// A part of the JSON value, at `path`.
+    Json(Vec<Step>, bool),
+    /// The Dio `Response` before its `.data`.
+    Response,
+}
+
+/// How deep `.map((e) => ..)` callbacks nest before the flow stops following.
+const FLOW_DEPTH: u8 = 6;
+
+/// The iterable members that keep the value they are called on, for the
+/// flow: a filter, a cast or a copy of the same elements.
+const PASS_THROUGH: &[&str] = &["whereType", "cast", "toList", "toSet", "where"];
+
+/// DT.1l: the JSON reads of one callable body, from one [`FlowRoot`]:
+/// locals bound to a part of the value, and every read of a part (a key, a
+/// cast, a model). Single-pass in source order; the maps are only probed.
+struct JsonFlow<'t, 's> {
+    src: &'s [u8],
+    root: FlowRoot<'t>,
+    /// Local name -> the part it holds. Lookup-only.
+    locals: HashMap<String, Vec<Step>>,
+    /// Every read, in evaluation order (a re-evaluated read repeats).
+    reads: Vec<Read>,
+    /// A keyed path -> the least byte offset of a subscript reaching it, the
+    /// keys' source order. Lookup-only.
+    key_at: HashMap<Vec<Step>, usize>,
+    /// The subscript selectors that read a top-level key, with the key.
+    key_sites: Vec<(String, TsNode<'t>)>,
+    /// A [`FlowRoot::Param`] was used other than through literal subscripts.
+    escaped: bool,
+    depth: u8,
+    /// The body the first [`JsonFlow::walk`] visits.
+    top: Option<TsNode<'t>>,
+}
+
+impl<'t, 's> JsonFlow<'t, 's> {
+    fn new(src: &'s [u8], root: FlowRoot<'t>) -> Self {
+        JsonFlow {
+            src,
+            root,
+            locals: HashMap::new(),
+            reads: Vec::new(),
+            key_at: HashMap::new(),
+            key_sites: Vec::new(),
+            escaped: false,
+            depth: 0,
+            top: None,
+        }
+    }
+
+    /// Visit `top` in source order: bind each local whose initialiser is a
+    /// part of the value, and evaluate every selector chain, cast and `??`
+    /// (re-evaluating a nested one repeats its reads, which
+    /// [`ReadTree::build`] folds).
+    fn walk(&mut self, top: TsNode<'t>) {
+        self.top.get_or_insert(top);
+        let mut stack = vec![top];
+        while let Some(n) = stack.pop() {
+            match n.kind() {
+                "initialized_variable_definition" => self.bind(n),
+                "type_cast_expression" | "if_null_expression" | "relational_expression" => {
+                    self.eval_node(n);
+                }
+                "argument" | "named_argument" | "spread_element" => self.escape_whole(n),
+                _ => {}
+            }
+            let kids = named_kids(n);
+            let mut i = 0;
+            while i < kids.len() {
+                let len = kids[i + 1..].iter().take_while(|k| k.kind() == "selector").count();
+                if kids[i].kind() != "selector" && len > 0 {
+                    self.eval_parts(&kids[i..=i + len]);
+                }
+                i += 1 + len;
+            }
+            stack.extend(kids.into_iter().rev());
+        }
+    }
+
+    /// `<p>` passed whole (`f(json)`, `Base(raw: json)`) or spread
+    /// (`...json`): the factory reads keys this body does not list.
+    fn escape_whole(&mut self, n: TsNode) {
+        let kids = named_kids(n);
+        let value = match kids.as_slice() {
+            [only] => *only,
+            [label, only] if label.kind() == "label" => *only,
+            _ => return,
+        };
+        if let FlowRoot::Param(p) = &self.root
+            && value.kind() == "identifier"
+            && text_of(value, self.src) == p
+        {
+            self.escaped = true;
+        }
+    }
+
+    fn bind(&mut self, def: TsNode<'t>) {
+        let Some(name) = def.child_by_field_name("name").map(|n| text_of(n, self.src).to_string()) else {
+            return;
+        };
+        let mut c = def.walk();
+        let value: Vec<TsNode> = def
+            .children_by_field_name("value", &mut c)
+            .filter(|k| k.kind() != "comment")
+            .collect();
+        if value.is_empty() || self.is_root_name(&name) {
+            return;
+        }
+        match self.eval_parts(&value) {
+            Some(Flow::Json(path, _)) => {
+                self.locals.insert(name, path);
+            }
+            _ => {
+                self.locals.remove(&name);
+            }
+        }
+    }
+
+    fn is_root_name(&self, name: &str) -> bool {
+        match &self.root {
+            FlowRoot::Param(p) => p == name,
+            FlowRoot::Dio { var, .. } => var.as_deref() == Some(name),
+        }
+    }
+
+    fn read(&mut self, path: Vec<Step>, terminal: Terminal, defaulted: bool) {
+        self.reads.push(Read {
+            path,
+            terminal,
+            defaulted,
+            firm: false,
+        });
+    }
+
+    /// `n` may not run when the body does: it sits in a branch of a
+    /// conditional, an `if`, a collection `if`, a loop, a `switch` case, a
+    /// `catch`, a closure, the right side of `&&` / `||` / `??`.
+    fn guarded(&self, n: TsNode) -> bool {
+        let first_holds = |p: TsNode, at: TsNode| named_kids(p).first().is_some_and(|c| c.id() == at.id());
+        let mut at = n;
+        while let Some(p) = at.parent() {
+            if self.top.is_some_and(|t| t.id() == p.id()) {
+                return false;
+            }
+            let guarded = match p.kind() {
+                "conditional_expression" | "if_statement" | "if_element" | "logical_and_expression"
+                | "logical_or_expression" => !first_holds(p, at),
+                "if_null_expression" => {
+                    let mut c = p.walk();
+                    p.children(&mut c)
+                        .take_while(|k| k.kind() != "??")
+                        .all(|k| k.id() != at.id())
+                }
+                "function_expression" | "for_statement" | "while_statement" | "do_statement"
+                | "switch_statement_case" | "switch_expression_case" | "catch_clause" => true,
+                _ => false,
+            };
+            if guarded {
+                return true;
+            }
+            at = p;
+        }
+        false
+    }
+
+    fn lookup(&self, name: &str) -> Option<Flow> {
+        match &self.root {
+            FlowRoot::Param(p) if p == name => return Some(Flow::Json(Vec::new(), false)),
+            FlowRoot::Dio { var: Some(v), .. } if v == name => return Some(Flow::Response),
+            _ => {}
+        }
+        self.locals.get(name).map(|p| Flow::Json(p.clone(), false))
+    }
+
+    /// `n` is the Dio call, or it awaited / parenthesised.
+    fn is_call(&self, n: TsNode) -> bool {
+        let FlowRoot::Dio { call, .. } = &self.root else {
+            return false;
+        };
+        let mut at = n;
+        loop {
+            if at.id() == call.id() {
+                return true;
+            }
+            if !matches!(at.kind(), "unary_expression" | "await_expression" | "parenthesized_expression") {
+                return false;
+            }
+            match named_kids(at).as_slice() {
+                [only] => at = *only,
+                _ => return false,
+            }
+        }
+    }
+
+    /// The value of one whole expression node.
+    fn eval_node(&mut self, n: TsNode<'t>) -> Option<Flow> {
+        if self.is_call(n) {
+            return Some(Flow::Response);
+        }
+        match n.kind() {
+            "identifier" => self.lookup(text_of(n, self.src)),
+            "parenthesized_expression" | "argument" => self.eval_parts(&named_kids(n)),
+            "type_cast_expression" => {
+                let kids = named_kids(n);
+                let (cast, value) = kids.split_last()?;
+                if cast.kind() != "type_cast" {
+                    return None;
+                }
+                let Flow::Json(path, defaulted) = self.eval_parts(value)? else {
+                    return None;
+                };
+                if let Some(ty) = cast_type(*cast, self.src) {
+                    let firm = !dart_nullable(&ty) && !defaulted && !self.guarded(n);
+                    self.reads.push(Read {
+                        path: path.clone(),
+                        terminal: Terminal::Cast(ty),
+                        defaulted,
+                        firm,
+                    });
+                }
+                Some(Flow::Json(path, defaulted))
+            }
+            "if_null_expression" => {
+                let mut c = n.walk();
+                let lhs: Vec<TsNode> = n
+                    .children(&mut c)
+                    .take_while(|k| k.kind() != "??")
+                    .filter(|k| k.is_named() && k.kind() != "comment")
+                    .collect();
+                let Flow::Json(path, _) = self.eval_parts(&lhs)? else {
+                    return None;
+                };
+                self.read(path.clone(), Terminal::Plain, true);
+                Some(Flow::Json(path, true))
+            }
+            "relational_expression" => self.eval_generic_misparse(n),
+            _ => None,
+        }
+    }
+
+    /// A generic call on a JSON value that tree-sitter-dart 0.1.0 misparses
+    /// as a comparison (CH.5a's shape, [`dart_client_call`]):
+    /// `raw.whereType<Map<String, dynamic>>().map(C.fromJson)` is
+    /// `((raw.whereType < Map<String, dynamic>) > ()).map(..)`, the outer
+    /// `relational_expression` holding `[inner, ">", (args), selectors..]`
+    /// and the inner one the receiver chain before its `<`. The member before
+    /// the `<` is applied with the parenthesised arguments as its call: a
+    /// pass-through ([`PASS_THROUGH`]) with none, or `map<T>(cb)`; the outer
+    /// selectors then apply as usual.
+    fn eval_generic_misparse(&mut self, n: TsNode<'t>) -> Option<Flow> {
+        let kids = named_kids(n);
+        let [inner, close, args, rest @ ..] = kids.as_slice() else {
+            return None;
+        };
+        if inner.kind() != "relational_expression"
+            || text_of(*close, self.src) != ">"
+            || !matches!(args.kind(), "record_literal" | "parenthesized_expression")
+            || rest.iter().any(|k| k.kind() != "selector")
+        {
+            return None;
+        }
+        let chain = named_kids(*inner);
+        let open = chain.iter().position(|k| k.kind() == "relational_operator")?;
+        if text_of(chain[open], self.src) != "<" {
+            return None;
+        }
+        let (member, receiver) = chain[..open].split_last()?;
+        let SelectorPart::Member(m) = selector_part(*member, self.src) else {
+            return None;
+        };
+        let Flow::Json(mut path, defaulted) = self.eval_parts(receiver)? else {
+            return None;
+        };
+        let call_args = named_kids(*args);
+        if m == "map" {
+            path.push(Step::Each);
+            self.map_callback(&call_args, path);
+            return None;
+        }
+        if !PASS_THROUGH.contains(&m) || !call_args.is_empty() {
+            return None;
+        }
+        let mut cur = Flow::Json(path, defaulted);
+        let mut i = 0;
+        while i < rest.len() {
+            cur = self.step(cur, rest, &mut i)?;
+        }
+        Some(cur)
+    }
+
+    /// The value of a primary and its selectors. `C.fromJson(x)` (or
+    /// `p.C.fromJson(x)`) records `x` as a `C` and is no JSON.
+    fn eval_parts(&mut self, parts: &[TsNode<'t>]) -> Option<Flow> {
+        let (&head, sels) = parts.split_first()?;
+        if sels.is_empty() {
+            return self.eval_node(head);
+        }
+        if head.kind() == "identifier"
+            && let Some((model, call)) = from_json_call(head, sels, self.src)
+        {
+            if let Some(arg) = first_positional(call)
+                && let Some(Flow::Json(path, defaulted)) = self.eval_node(arg)
+            {
+                self.read(path, Terminal::Model(model), defaulted);
+            }
+            return None;
+        }
+        let mut cur = self.eval_node(head)?;
+        let mut i = 0;
+        while i < sels.len() {
+            cur = self.step(cur, sels, &mut i)?;
+        }
+        Some(cur)
+    }
+
+    /// Apply the selector at `sels[*i]` (and the call it takes) to `cur`.
+    fn step(&mut self, cur: Flow, sels: &[TsNode<'t>], i: &mut usize) -> Option<Flow> {
+        let sel = sels[*i];
+        *i += 1;
+        let (mut path, defaulted) = match cur {
+            Flow::Response => {
+                return matches!(selector_part(sel, self.src), SelectorPart::Member("data"))
+                    .then(|| Flow::Json(Vec::new(), false));
+            }
+            Flow::Json(path, defaulted) => (path, defaulted),
+        };
+        let at_root = path.is_empty();
+        if let Some(index) = subscript(sel, self.src) {
+            match index {
+                Index::Key(k) => {
+                    if at_root {
+                        self.key_sites.push((k.clone(), sel));
+                    }
+                    path.push(Step::Key(k));
+                    let at = sel.start_byte();
+                    let first = self.key_at.entry(path.clone()).or_insert(at);
+                    *first = (*first).min(at);
+                    self.read(path.clone(), Terminal::Plain, false);
+                }
+                Index::Int => path.push(Step::Each),
+                Index::Other => {
+                    self.escaped |= at_root;
+                    return None;
+                }
+            }
+            return Some(Flow::Json(path, defaulted));
+        }
+        match selector_part(sel, self.src) {
+            SelectorPart::TypeArgs => Some(Flow::Json(path, defaulted)),
+            SelectorPart::Opaque if text_of(sel, self.src).trim() == "!" => Some(Flow::Json(path, defaulted)),
+            SelectorPart::Member("map") => {
+                let call = sels
+                    .get(*i)
+                    .copied()
+                    .filter(|c| matches!(selector_part(*c, self.src), SelectorPart::Call))?;
+                *i += 1;
+                path.push(Step::Each);
+                let kids = first_positional(call).map(named_kids).unwrap_or_default();
+                self.map_callback(&kids, path);
+                None
+            }
+            SelectorPart::Member(m) if PASS_THROUGH.contains(&m) => {
+                while let Some(next) = sels.get(*i) {
+                    match selector_part(*next, self.src) {
+                        SelectorPart::TypeArgs => *i += 1,
+                        SelectorPart::Call => {
+                            *i += 1;
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
+                Some(Flow::Json(path, defaulted))
+            }
+            SelectorPart::Member("first" | "last" | "single" | "firstOrNull" | "lastOrNull") => {
+                path.push(Step::Each);
+                Some(Flow::Json(path, defaulted))
+            }
+            SelectorPart::Member("containsKey") => None,
+            _ => {
+                self.escaped |= at_root && matches!(self.root, FlowRoot::Param(_));
+                None
+            }
+        }
+    }
+
+    /// `.map(<cb>)` over an array whose element is at `elem`, `kids` the
+    /// callback argument's parts: a `C.fromJson` tear-off reads the element
+    /// as a `C`; a one-parameter closure is followed with its parameter bound
+    /// to the element.
+    fn map_callback(&mut self, kids: &[TsNode<'t>], elem: Vec<Step>) {
+        if let Some(model) = from_json_tear_off(kids, self.src) {
+            self.read(elem, Terminal::Model(model), false);
+            return;
+        }
+        let [cb] = kids else {
+            return;
+        };
+        if cb.kind() != "function_expression" || self.depth >= FLOW_DEPTH {
+            return;
+        }
+        let params: Vec<TsNode> = cb
+            .child_by_field_name("parameters")
+            .map(|l| named_kids(l).into_iter().filter(|p| p.kind() == "formal_parameter").collect())
+            .unwrap_or_default();
+        let [param] = params.as_slice() else {
+            // A two-parameter callback is a Map's `.map((k, v) => ..)`: over
+            // the factory's own parameter it reads every key.
+            self.escaped |= params.len() == 2 && elem == [Step::Each] && matches!(self.root, FlowRoot::Param(_));
+            return;
+        };
+        let Some(name) = param
+            .child_by_field_name("name")
+            .or_else(|| named_kids(*param).into_iter().rfind(|k| k.kind() == "identifier"))
+            .map(|n| text_of(n, self.src).to_string())
+        else {
+            return;
+        };
+        let Some(body) = cb.child_by_field_name("body") else {
+            return;
+        };
+        let saved = self.locals.insert(name.clone(), elem);
+        self.depth += 1;
+        match named_kids(body).as_slice() {
+            [block] if block.kind() == "block" => self.walk(*block),
+            parts => {
+                self.eval_parts(parts);
+            }
+        }
+        self.depth -= 1;
+        match saved {
+            Some(p) => self.locals.insert(name, p),
+            None => self.locals.remove(&name),
+        };
+    }
+}
+
+/// `C.fromJson(..)` / `p.C.fromJson(..)` at `head` + `sels`: the model name
+/// and the call selector.
+fn from_json_call<'t>(head: TsNode<'t>, sels: &[TsNode<'t>], src: &[u8]) -> Option<(String, TsNode<'t>)> {
+    let name = text_of(head, src);
+    let (model, rest) = match sels {
+        [m, rest @ ..] if is_dart_class_name(name) => (name.to_string(), (m, rest)),
+        [c, m, rest @ ..] if !is_dart_class_name(name) => match selector_part(*c, src) {
+            SelectorPart::Member(cls) if is_dart_class_name(cls) => (format!("{name}.{cls}"), (m, rest)),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let (m, rest) = rest;
+    let call = rest.first().copied()?;
+    (matches!(selector_part(*m, src), SelectorPart::Member("fromJson"))
+        && matches!(selector_part(call, src), SelectorPart::Call))
+    .then_some((model, call))
+}
+
+/// `C.fromJson` / `p.C.fromJson` as a value (a tear-off): the model name.
+fn from_json_tear_off(kids: &[TsNode], src: &[u8]) -> Option<String> {
+    let (head, sels) = kids.split_first()?;
+    if head.kind() != "identifier" {
+        return None;
+    }
+    let name = text_of(*head, src);
+    let parts: Vec<SelectorPart> = sels.iter().map(|s| selector_part(*s, src)).collect();
+    match parts.as_slice() {
+        [SelectorPart::Member("fromJson")] if is_dart_class_name(name) => Some(name.to_string()),
+        [SelectorPart::Member(cls), SelectorPart::Member("fromJson")] if is_dart_class_name(cls) => {
+            Some(format!("{name}.{cls}"))
+        }
+        _ => None,
+    }
+}
+
+/// The first positional `argument` of a call selector.
+fn first_positional(call: TsNode) -> Option<TsNode> {
+    let args = first_descendant_of_kind(call, "arguments")?;
+    named_kids(args)
+        .into_iter()
+        .filter(|a| a.kind() == "argument")
+        .find(|a| a.named_child(0).is_some_and(|n| n.kind() != "named_argument"))
+}
+
+/// What a subscript selector indexes with.
+enum Index {
+    /// A string literal: a key.
+    Key(String),
+    /// An integer literal: an element.
+    Int,
+    /// Anything else.
+    Other,
+}
+
+/// The index of a `[..]` / `?[..]` selector; `None` for any other selector.
+fn subscript(sel: TsNode, src: &[u8]) -> Option<Index> {
+    let inner = sel.named_child(0)?;
+    if !matches!(
+        inner.kind(),
+        "unconditional_assignable_selector" | "conditional_assignable_selector"
+    ) {
+        return None;
+    }
+    if !inner.child(0).is_some_and(|t| matches!(t.kind(), "[" | "?[" | "?")) {
+        return None;
+    }
+    let index = named_kids(inner).into_iter().next()?;
+    Some(match index.kind() {
+        "string_literal" => literal_text(index, src).map_or(Index::Other, Index::Key),
+        "decimal_integer_literal" | "hex_integer_literal" => Index::Int,
+        _ => Index::Other,
+    })
+}
+
+/// DT.1l: the reads of one flow folded into a tree of the value's parts.
+#[derive(Debug, Default)]
+struct ReadTree {
+    /// The models the part was read as (`C.fromJson`), first read first.
+    models: Vec<String>,
+    /// The `as T` casts on the part.
+    casts: Vec<String>,
+    /// A `??` default covers some read of it.
+    defaulted: bool,
+    /// Some read of it is firm ([`Read`]).
+    firm: bool,
+    /// Its keys, in source order: (key, first byte, part).
+    keys: Vec<(String, usize, ReadTree)>,
+    /// Its array element.
+    each: Option<Box<ReadTree>>,
+}
+
+impl ReadTree {
+    fn build(reads: &[Read], key_at: &HashMap<Vec<Step>, usize>) -> ReadTree {
+        let mut root = ReadTree::default();
+        for r in reads {
+            let mut node = &mut root;
+            for (i, step) in r.path.iter().enumerate() {
+                node = match step {
+                    Step::Key(k) => {
+                        let ix = match node.keys.iter().position(|(n, _, _)| n == k) {
+                            Some(ix) => ix,
+                            None => {
+                                let at = key_at.get(&r.path[..=i]).copied().unwrap_or(usize::MAX);
+                                node.keys.push((k.clone(), at, ReadTree::default()));
+                                node.keys.len() - 1
+                            }
+                        };
+                        &mut node.keys[ix].2
+                    }
+                    Step::Each => node.each.get_or_insert_with(Box::default),
+                };
+            }
+            match &r.terminal {
+                Terminal::Model(m) if !node.models.contains(m) => node.models.push(m.clone()),
+                Terminal::Cast(c) if !node.casts.contains(c) => node.casts.push(c.clone()),
+                _ => {}
+            }
+            node.defaulted |= r.defaulted;
+            node.firm |= r.firm;
+        }
+        root.sort_keys();
+        root
+    }
+
+    fn sort_keys(&mut self) {
+        self.keys.sort_by_key(|(_, at, _)| *at);
+        for (_, _, t) in &mut self.keys {
+            t.sort_keys();
+        }
+        if let Some(e) = &mut self.each {
+            e.sort_keys();
+        }
+    }
+
+    /// A key's part is always present: some firm read of it.
+    fn required(&self) -> bool {
+        self.firm
+    }
+
+    /// The part as a wire shape: an Object of its keys, each model it was
+    /// read as, an array of each model its elements were; one of them alone,
+    /// several a Union. `None` when it was read as none of these.
+    fn shape(&self, depth: usize) -> Option<Shape> {
+        if depth > SHAPE_DEPTH {
+            return None;
+        }
+        let mut members: Vec<Shape> = Vec::new();
+        if !self.keys.is_empty() {
+            let fields = self
+                .keys
+                .iter()
+                .map(|(k, _, t)| ShapeField::new(k, t.required(), t.value_shape(depth + 1)))
+                .collect();
+            members.push(Shape::Object { fields, open: false });
+        }
+        for m in &self.models {
+            members.push(Shape::Named {
+                ty: m.clone(),
+                array: false,
+                model: None,
+            });
+        }
+        for m in self.each.iter().flat_map(|e| e.models.iter()) {
+            members.push(Shape::Named {
+                ty: m.clone(),
+                array: true,
+                model: None,
+            });
+        }
+        let mut unique: Vec<Shape> = Vec::with_capacity(members.len());
+        for m in members {
+            if !unique.contains(&m) {
+                unique.push(m);
+            }
+        }
+        match unique.len() {
+            0 => None,
+            1 => unique.pop(),
+            _ => Some(Shape::Union(unique)),
+        }
+    }
+
+    /// A key's value: its [`ReadTree::shape`], else its cast type, else open.
+    fn value_shape(&self, depth: usize) -> Shape {
+        self.shape(depth)
+            .or_else(|| self.casts.first().map(|c| Shape::named(c)))
+            .unwrap_or_else(|| Shape::open("dynamic"))
+    }
+}
+
+/// How many levels of envelope keys a response shape lists.
+const SHAPE_DEPTH: usize = 4;
+
+// ---- Dio shapes ---------------------------------------------------------------
+
+/// DT.1l: splice the shapes the Dio call at `n` states onto the ENDPOINT_HIT
+/// of the node at `acc.nodes[at]` (the one the call just wrote).
+fn splice_dio_shapes(n: TsNode, call: &DioCall, at: usize, src: &[u8], acc: &mut Acc) {
+    let request = call.args.and_then(|a| dio_request_shape(a, src));
+    let response = match enclosing_callable(n) {
+        Some(body) if dio_calls_in(body, src, acc) == 1 => dio_response_shape(body, n, src),
+        Some(_) => {
+            acc.wire.skipped_multi_call += 1;
+            None
+        }
+        None => None,
+    };
+    if response.is_none() && request.is_none() {
+        return;
+    }
+    let Some(cell) = acc.nodes[at]
+        .cells
+        .iter_mut()
+        .find(|c| c.kind == cell_type::ENDPOINT_HIT)
+    else {
+        return;
+    };
+    let CellPayload::Json(payload) = &mut cell.payload else {
+        return;
+    };
+    *payload = wire::append_hit_fields(payload, response.as_ref(), request.as_ref());
+    acc.wire.responses += usize::from(response.is_some());
+    acc.wire.requests += usize::from(request.is_some());
+}
+
+/// The callable body a node sits in: the nearest method / function body or
+/// closure body.
+fn enclosing_callable(n: TsNode) -> Option<TsNode> {
+    let mut at = n;
+    while let Some(p) = at.parent() {
+        match p.kind() {
+            "function_body" | "function_expression_body" => return Some(p),
+            "class_body" | "source_file" => return None,
+            _ => at = p,
+        }
+    }
+    None
+}
+
+/// How many Dio calls ([`dio_call`]) the callable `body` holds, closures
+/// included; cached per body.
+fn dio_calls_in(body: TsNode, src: &[u8], acc: &mut Acc) -> usize {
+    if let Some(n) = acc.dio_calls.get(&body.id()) {
+        return *n;
+    }
+    let mut count = 0;
+    let mut stack = vec![body];
+    while let Some(n) = stack.pop() {
+        count += usize::from(dio_call(n, src, &acc.dio_receivers).is_some());
+        let mut c = n.walk();
+        stack.extend(n.named_children(&mut c));
+    }
+    acc.dio_calls.insert(body.id(), count);
+    count
+}
+
+/// The local a Dio call's result is bound to: `final res = await
+/// dio.get(..)` (typed or not).
+fn result_var(call: TsNode, src: &[u8]) -> Option<String> {
+    let mut at = call;
+    while let Some(p) = at.parent()
+        && matches!(p.kind(), "unary_expression" | "await_expression")
+    {
+        at = p;
+    }
+    let def = at.parent().filter(|p| p.kind() == "initialized_variable_definition")?;
+    let mut c = def.walk();
+    let value: Vec<TsNode> = def
+        .children_by_field_name("value", &mut c)
+        .filter(|k| k.kind() != "comment")
+        .collect();
+    let [only] = value.as_slice() else {
+        return None;
+    };
+    (only.id() == at.id())
+        .then(|| def.child_by_field_name("name").map(|n| text_of(n, src).to_string()))
+        .flatten()
+}
+
+/// DT.1l: the response the callable `body` reads off the Dio call `call`
+/// (section head); `None` when it reads no key and no model.
+fn dio_response_shape(body: TsNode, call: TsNode, src: &[u8]) -> Option<Shape> {
+    let var = result_var(call, src);
+    let mut flow = JsonFlow::new(src, FlowRoot::Dio { var, call });
+    flow.walk(body);
+    ReadTree::build(&flow.reads, &flow.key_at).shape(0)
+}
+
+/// DT.1l: the request a Dio call's `data:` argument sends (section head).
+fn dio_request_shape(args: TsNode, src: &[u8]) -> Option<Shape> {
+    let data = named_kids(args)
+        .into_iter()
+        .filter(|a| a.kind() == "argument")
+        .filter_map(|a| a.named_child(0).filter(|n| n.kind() == "named_argument"))
+        .find(|na| {
+            na.named_child(0)
+                .is_some_and(|l| l.kind() == "label" && text_of(l, src).trim_end_matches(':').trim() == "data")
+        })?;
+    let value: Vec<TsNode> = named_kids(data).into_iter().skip(1).collect();
+    match value.as_slice() {
+        [lit] if lit.kind() == "set_or_map_literal" => map_literal_shape(*lit, src, 2),
+        parts => to_json_type(parts, data, src).map(|t| Shape::named(&t)),
+    }
+}
+
+/// `x.toJson()`: the declared type of `x` ([`declared_type`]).
+fn to_json_type(parts: &[TsNode], at: TsNode, src: &[u8]) -> Option<String> {
+    let [recv, m, call] = parts else {
+        return None;
+    };
+    let empty_call = matches!(selector_part(*call, src), SelectorPart::Call)
+        && first_descendant_of_kind(*call, "argument").is_none();
+    (recv.kind() == "identifier" && matches!(selector_part(*m, src), SelectorPart::Member("toJson")) && empty_call)
+        .then(|| declared_type(text_of(*recv, src), at, src))
+        .flatten()
+}
+
+/// A map literal as an Object of its string keys; `None` for a set literal.
+/// A collection-`if` key is not required; a spread, a `for` or a computed key
+/// leaves it open. `depth` bounds nested literals.
+fn map_literal_shape(lit: TsNode, src: &[u8], depth: u8) -> Option<Shape> {
+    fn entries(node: TsNode, required: bool, src: &[u8], depth: u8, fields: &mut Vec<ShapeField>, open: &mut bool) -> bool {
+        match node.kind() {
+            "pair" => {
+                let key = node.child_by_field_name("key").and_then(|k| literal_text(k, src));
+                let Some(key) = key else {
+                    *open = true;
+                    return true;
+                };
+                let mut c = node.walk();
+                let value: Vec<TsNode> = node
+                    .children_by_field_name("value", &mut c)
+                    .filter(|k| k.kind() != "comment")
+                    .collect();
+                let shape = literal_value_shape(&value, node, src, depth);
+                match fields.iter_mut().find(|f| f.name == key) {
+                    Some(f) => f.required &= required,
+                    None => fields.push(ShapeField::new(&key, required, shape)),
+                }
+                true
+            }
+            "if_element" => {
+                for branch in ["consequence", "alternative"] {
+                    let mut c = node.walk();
+                    for b in node.children_by_field_name(branch, &mut c) {
+                        if !entries(b, false, src, depth, fields, open) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
+            "spread_element" | "for_element" => {
+                *open = true;
+                true
+            }
+            _ => false,
+        }
+    }
+    let mut fields = Vec::new();
+    let mut open = false;
+    for e in named_kids(lit) {
+        if !entries(e, true, src, depth, &mut fields, &mut open) {
+            return None;
+        }
+    }
+    Some(Shape::Object { fields, open })
+}
+
+/// One map-literal value as a shape: a literal by its Dart type, a nested map
+/// by its keys, a name (or its `.toJson()`) by its declared type, `x as T` by
+/// `T`, anything else open.
+fn literal_value_shape(value: &[TsNode], at: TsNode, src: &[u8], depth: u8) -> Shape {
+    let named = |t: &str| Shape::named(t);
+    match value {
+        [v] => match v.kind() {
+            "string_literal" => named("String"),
+            "decimal_integer_literal" | "hex_integer_literal" => named("int"),
+            "decimal_floating_point_literal" => named("double"),
+            "true" | "false" => named("bool"),
+            "null_literal" => named("Null"),
+            "list_literal" => named("List"),
+            "set_or_map_literal" if depth > 0 => {
+                map_literal_shape(*v, src, depth - 1).unwrap_or_else(|| Shape::open(text_of(*v, src)))
+            }
+            "identifier" => {
+                declared_type(text_of(*v, src), at, src).map_or_else(|| Shape::open(text_of(*v, src)), |t| named(&t))
+            }
+            "type_cast_expression" => named_kids(*v)
+                .last()
+                .filter(|c| c.kind() == "type_cast")
+                .and_then(|c| cast_type(*c, src))
+                .map_or_else(|| Shape::open(text_of(*v, src)), |t| named(&t)),
+            _ => Shape::open(&collapse_ws(text_of(*v, src))),
+        },
+        parts => match to_json_type(parts, at, src) {
+            Some(t) => named(&t),
+            None => Shape::open(&collapse_ws(
+                &parts.iter().map(|p| text_of(*p, src)).collect::<Vec<_>>().join(""),
+            )),
+        },
+    }
+}
+
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The type `name` is declared with where `at` reads it: a local declared
+/// before `at` in an enclosing block, a parameter of an enclosing function or
+/// closure, then a field of the enclosing class.
+fn declared_type(name: &str, at: TsNode, src: &[u8]) -> Option<String> {
+    let mut cur = at;
+    while let Some(p) = cur.parent() {
+        match p.kind() {
+            "block" => {
+                for stmt in named_kids(p) {
+                    if stmt.start_byte() >= at.start_byte() {
+                        break;
+                    }
+                    if stmt.kind() != "local_variable_declaration" {
+                        continue;
+                    }
+                    for def in named_kids(stmt) {
+                        let Some(n) = def.child_by_field_name("name") else {
+                            continue;
+                        };
+                        if def.kind() == "initialized_variable_definition" && text_of(n, src) == name {
+                            return type_text(def, n.id(), src);
+                        }
+                    }
+                }
+            }
+            "function_body" => {
+                let list = p
+                    .prev_named_sibling()
+                    .and_then(|sig| first_descendant_of_kind(sig, "formal_parameter_list"));
+                if let Some(t) = list.and_then(|l| param_type(l, name, src)) {
+                    return Some(t);
+                }
+            }
+            "function_expression" => {
+                if let Some(t) = p.child_by_field_name("parameters").and_then(|l| param_type(l, name, src)) {
+                    return Some(t);
+                }
+            }
+            "class_body" => {
+                return class_fields(p, src)
+                    .into_iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, t)| t);
+            }
+            _ => {}
+        }
+        cur = p;
+    }
+    None
+}
+
+/// The declared type of the parameter `name` in a `formal_parameter_list`.
+fn param_type(list: TsNode, name: &str, src: &[u8]) -> Option<String> {
+    for p in named_kids(list) {
+        match p.kind() {
+            "optional_formal_parameters" => {
+                if let Some(t) = param_type(p, name, src) {
+                    return Some(t);
+                }
+            }
+            "formal_parameter" => {
+                if let Some(n) = p.child_by_field_name("name")
+                    && text_of(n, src) == name
+                {
+                    return type_text(p, n.id(), src);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -7004,5 +8604,485 @@ void start(void Function() other) {
         let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "lib::w");
         visit_top(root, src, "lib/w.dart", "lib::w", module, repo(), &mut acc);
         assert_eq!((acc.flutter.widgets, acc.flutter.states), (2, 1));
+    }
+
+    // ---- DT.1l: Dart wire models and Dio shapes -----------------------------
+
+    /// DT.1l: the SCHEMA_FIELDS payload of the CLASS `qname`, if any.
+    fn schema_of(fp: &FileParse, qname: &str) -> Option<ModelSchema> {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, qname);
+        fp.nodes
+            .iter()
+            .filter(|n| n.id == id)
+            .flat_map(|n| n.cells.iter())
+            .find_map(ModelSchema::from_cell)
+    }
+
+    /// DT.1l: the `response` / `request` of the ENDPOINT `<method> <path>`.
+    fn shapes_of(fp: &FileParse, method: &str, path: &str) -> (Option<Shape>, Option<Shape>) {
+        endpoint_hit(fp, endpoint_id(method, path)).map_or((None, None), |p| wire::hit_shapes(&p))
+    }
+
+    fn named(ty: &str, array: bool) -> Shape {
+        Shape::Named {
+            ty: ty.to_string(),
+            array,
+            model: None,
+        }
+    }
+
+    /// The fixture's model: `models-dart-dio/app/lib/models/member.dart`.
+    const MEMBER_DART: &str = r#"class Member {
+  Member({this.memberId, this.handle, this.displayName, this.badges = const []});
+
+  final String? memberId;
+  final String? handle;
+  final String? displayName;
+  final List<String> badges;
+
+  factory Member.fromJson(Map<String, dynamic> j) => Member(
+        memberId: j['memberId'] as String?,
+        handle: j['handle'] as String?,
+        displayName: j['display_name'] as String?,
+        badges: (j['badges'] as List?)?.cast<String>() ?? const [],
+      );
+}
+"#;
+
+    /// The fixture's service: `models-dart-dio/app/lib/services/member_service.dart`.
+    const MEMBER_SERVICE_DART: &str = r#"import 'package:dio/dio.dart';
+import '../models/member.dart';
+
+class MemberService {
+  MemberService(this.dio);
+
+  final Dio dio;
+
+  Future<Member> get(String id) async {
+    final res = await dio.get<Map<String, dynamic>>('/api/members/$id');
+    return Member.fromJson(res.data ?? const {});
+  }
+
+  Future<List<Member>> list() async {
+    final res = await dio.get<dynamic>('/api/members');
+    final raw = res.data as Map<String, dynamic>;
+    return (raw['members'] as List)
+        .whereType<Map<String, dynamic>>()
+        .map(Member.fromJson)
+        .toList();
+  }
+
+  Future<void> rename(String id, String handle) async {
+    await dio.put('/api/members/$id', data: {'handle': handle, 'reason': 'user'});
+  }
+}
+"#;
+
+    /// DT.1l: a hand-written `fromJson`'s JSON names are its subscript keys,
+    /// in source order: `display_name`, not the field `displayName` it fills
+    /// (kept as `field`). Types come from the subscript's cast; `required`
+    /// needs a non-nullable type and no `??` default.
+    #[test]
+    fn dt1l_from_json_keys_types_and_required() {
+        let fp = parse_file(MEMBER_DART, "lib/models/member.dart", "lib::models::member", repo()).unwrap();
+        let schema = schema_of(&fp, "lib::models::member::Member").expect("SCHEMA_FIELDS on Member");
+        assert_eq!(schema.format, WireFormat::Dart);
+        assert!(!schema.open);
+        let rows: Vec<(&str, Option<&str>, &str, bool)> = schema
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.field.as_deref(), f.ty.as_str(), f.required))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("memberId", None, "String?", false),
+                ("handle", None, "String?", false),
+                ("display_name", Some("displayName"), "String?", false),
+                ("badges", None, "List?", false),
+            ]
+        );
+        assert_eq!(
+            schema.to_payload(),
+            r#"{"fields":[{"name":"memberId","required":false,"type":"String?"},{"name":"handle","required":false,"type":"String?"},{"field":"displayName","name":"display_name","required":false,"type":"String?"},{"name":"badges","required":false,"type":"List?"}],"format":"dart"}"#
+        );
+        let stats = LAST_DART_WIRE.with(|w| w.borrow().clone());
+        assert_eq!((stats.fromjson, stats.serializable), (1, 0));
+
+        // A block body, a nested model through fromJson (its type), a list of
+        // models, a non-nullable directly-assigned field (required), a value
+        // converted on the way (no declared type), and a map parameter that
+        // escapes (open).
+        let source = r#"class Order {
+  Order({required this.id, this.address, this.items = const [], this.state, this.total = 0});
+  final String id;
+  final Address? address;
+  final List<Item> items;
+  final OrderState? state;
+  final int total;
+  factory Order.fromJson(Map<String, dynamic> json) {
+    final raw = json['items'] as List?;
+    return Order(
+      id: json['id'],
+      address: json['address'] is Map<String, dynamic>
+          ? Address.fromJson(json['address'] as Map<String, dynamic>)
+          : null,
+      items: raw?.map((e) => Item.fromJson(e as Map<String, dynamic>)).toList() ?? const [],
+      state: stateFrom(json['state']),
+      total: (json['total'] as num?)?.toInt() ?? 0,
+    );
+  }
+}
+class Loose {
+  Loose(this.a);
+  final String a;
+  factory Loose.fromJson(Map<String, dynamic> j) => Loose(pick(j, 'a'));
+}
+class Child {
+  Child(this.base, this.extra);
+  final Base base;
+  final String? extra;
+  factory Child.fromJson(Map<String, dynamic> j) =>
+      Child(Base.fromJson(j), j['extra'] as String?);
+}
+"#;
+        let fp = parse_file(source, "lib/order.dart", "lib::order", repo()).unwrap();
+        let schema = schema_of(&fp, "lib::order::Order").expect("Order schema");
+        let rows: Vec<(&str, &str, bool, bool)> = schema
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.ty.as_str(), f.required, f.array))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("items", "List<Item>", false, true),
+                ("id", "String", true, false),
+                ("address", "Address", false, false),
+                ("state", "dynamic", false, false),
+                ("total", "num?", false, false),
+            ]
+        );
+        assert!(!schema.open);
+        assert_eq!(schema_of(&fp, "lib::order::Loose"), None, "zero literal keys, no cell");
+        let child = schema_of(&fp, "lib::order::Child").expect("Child schema");
+        assert!(child.open, "the map passed whole carries keys the body does not list");
+        assert_eq!(child.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["extra"]);
+    }
+
+    /// DT.1l: a `@JsonSerializable` class lists its instance fields: a
+    /// `@JsonKey(name:)` rename, the class's `fieldRename`, skipped
+    /// `includeFromJson: false` / `ignore: true` fields, and `required` from
+    /// nullability, `defaultValue` and constructor defaults.
+    #[test]
+    fn dt1l_json_serializable_fields() {
+        let source = r#"import 'package:json_annotation/json_annotation.dart';
+part 'order.g.dart';
+
+@JsonSerializable(fieldRename: FieldRename.snake)
+class Order {
+  Order(this.orderId, this.customerName, {this.notes = '', this.count = 0});
+  @JsonKey(name: 'id')
+  final String orderId;
+  final String customerName;
+  final String? notes;
+  final int count;
+  @JsonKey(includeFromJson: false)
+  final String local;
+  @JsonKey(ignore: true)
+  final String cache;
+  @JsonKey(defaultValue: 1)
+  final int pageSize;
+  static const kind = 'order';
+  factory Order.fromJson(Map<String, dynamic> json) => _$OrderFromJson(json);
+}
+
+@JsonSerializable(fieldRename: FieldRename.screamingSnake)
+class Shout {
+  Shout(this.userId);
+  final String userId;
+}
+
+@JsonSerializable(fieldRename: FieldRename.kebab)
+class Kebab {
+  Kebab(this.userId);
+  final String userId;
+}
+
+@JsonSerializable(fieldRename: FieldRename.pascal)
+class Pascal {
+  Pascal(this.userId);
+  final String userId;
+}
+"#;
+        let fp = parse_file(source, "lib/order.dart", "lib::order", repo()).unwrap();
+        let schema = schema_of(&fp, "lib::order::Order").expect("Order schema");
+        let rows: Vec<(&str, Option<&str>, &str, bool)> = schema
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.field.as_deref(), f.ty.as_str(), f.required))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("id", Some("orderId"), "String", true),
+                ("customer_name", Some("customerName"), "String", true),
+                ("notes", None, "String?", false),
+                ("count", None, "int", false),
+                ("page_size", Some("pageSize"), "int", false),
+            ]
+        );
+        let first = |q: &str| schema_of(&fp, q).map(|s| s.fields[0].name.clone());
+        assert_eq!(first("lib::order::Shout").as_deref(), Some("USER_ID"));
+        assert_eq!(first("lib::order::Kebab").as_deref(), Some("user-id"));
+        assert_eq!(first("lib::order::Pascal").as_deref(), Some("UserId"));
+        let stats = LAST_DART_WIRE.with(|w| w.borrow().clone());
+        assert_eq!((stats.fromjson, stats.serializable), (0, 4));
+    }
+
+    /// DT.1l: a protobuf `fromJson($core.String i, ..)` reads no map, and a
+    /// generated file (by name or by banner) writes no schema at all: its
+    /// factories are counted `skipped_generated`.
+    #[test]
+    fn dt1l_generated_and_protobuf_factories_write_nothing() {
+        let pb = r#"//
+//  Generated code. Do not modify.
+//  source: quokka_chat.proto
+//
+import 'package:protobuf/protobuf.dart' as $pb;
+import 'dart:core' as $core;
+
+class ChatMessage extends $pb.GeneratedMessage {
+  factory ChatMessage.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+  factory ChatMessage.fromMap(Map<String, dynamic> j) => ChatMessage(j['id']);
+}
+"#;
+        let fp = parse_file(pb, "lib/core/generated/quokka_chat.pb.dart", "lib::core::generated::quokka_chat.pb", repo())
+            .unwrap();
+        assert_eq!(schema_of(&fp, "lib::core::generated::quokka_chat.pb::ChatMessage"), None);
+        let stats = LAST_DART_WIRE.with(|w| w.borrow().clone());
+        assert_eq!(stats.skipped_generated, 1);
+        assert_eq!(
+            stats.marker("lib/core/generated/quokka_chat.pb.dart").as_deref(),
+            Some(
+                "[dart-wire] models=0 (fromjson=0 serializable=0) skipped_generated=1 responses=0 \
+                 requests=0 skipped_multi_call=0 file=lib/core/generated/quokka_chat.pb.dart"
+            )
+        );
+
+        // The same protobuf factory in a hand-written file is still no map
+        // reader: its first parameter is a String.
+        let fp = parse_file(pb.replace("Generated code. Do not modify.", "chat").as_str(), "lib/chat.dart", "lib::chat", repo())
+            .unwrap();
+        assert_eq!(schema_of(&fp, "lib::chat::ChatMessage"), None);
+
+        // A build_runner banner marks a file whatever its name.
+        let banner = format!("// GENERATED CODE - DO NOT MODIFY BY HAND\n\n{MEMBER_DART}");
+        let fp = parse_file(&banner, "lib/models/member.dart", "lib::models::member", repo()).unwrap();
+        assert_eq!(schema_of(&fp, "lib::models::member::Member"), None);
+        assert!(dart_generated("lib/a.freezed.dart", ""));
+        assert!(dart_generated("lib/a.g.dart", ""));
+        assert!(!dart_generated("lib/a.dart", MEMBER_DART));
+        assert!(!dart_generated("lib/a.dart", "// Generated by hand, edit freely\nclass A {}\n"));
+    }
+
+    /// DT.1l: the fixture's three calls: a direct response (`Member.fromJson`
+    /// of `res.data ?? ..`), an envelope (`raw['members']` mapped through
+    /// `Member.fromJson`, a non-nullable cast so required) and a `data:` map
+    /// literal request typed through the method's parameters.
+    #[test]
+    fn dt1l_dio_direct_envelope_and_request() {
+        let fp = parse_file(
+            MEMBER_SERVICE_DART,
+            "lib/services/member_service.dart",
+            "lib::services::member_service",
+            repo(),
+        )
+        .unwrap();
+        assert_eq!(shapes_of(&fp, "GET", "/api/members/${…}"), (Some(named("Member", false)), None));
+        let envelope = Shape::Object {
+            fields: vec![ShapeField::new("members", true, named("Member", true))],
+            open: false,
+        };
+        assert_eq!(shapes_of(&fp, "GET", "/api/members"), (Some(envelope), None));
+        let request = Shape::Object {
+            fields: vec![
+                ShapeField::new("handle", true, named("String", false)),
+                ShapeField::new("reason", true, named("String", false)),
+            ],
+            open: false,
+        };
+        assert_eq!(shapes_of(&fp, "PUT", "/api/members/${…}"), (None, Some(request)));
+        // The shapes follow every other key, so the old bytes are a prefix.
+        assert_eq!(
+            endpoint_hit(&fp, endpoint_id("GET", "/api/members/${…}")).as_deref(),
+            Some(
+                r#"{"method":"GET","path":"/api/members/${…}","file":"lib/services/member_service.dart","line":10,"col":17,"confidence":"strong","response":{"type":"Member"}}"#
+            )
+        );
+        let stats = LAST_DART_WIRE.with(|w| w.borrow().clone());
+        assert_eq!((stats.responses, stats.requests, stats.skipped_multi_call), (2, 1, 0));
+        assert_eq!(
+            stats.marker("lib/services/member_service.dart").as_deref(),
+            Some(
+                "[dart-wire] models=0 (fromjson=0 serializable=0) skipped_generated=0 responses=2 \
+                 requests=1 skipped_multi_call=0 file=lib/services/member_service.dart"
+            )
+        );
+    }
+
+    /// DT.1l: arrays and alternatives. `.map(C.fromJson)` and `.map((e) =>
+    /// C.fromJson(e))` over the data or a key are arrays of C; quokka's
+    /// `ActivityService.get()` reads either `data['result']` or `data` as an
+    /// ActivitySummary, a Union; a generic call misparsed as a comparison
+    /// (`raw.whereType<Map<String, dynamic>>()`) is still followed; an inline
+    /// `(await dio.get(..)).data` is the data too.
+    #[test]
+    fn dt1l_dio_arrays_unions_and_misparse() {
+        let source = r#"class ActivityService {
+  Future<ActivitySummary?> get(String id) async {
+    final dio = await _dio();
+    final res = await dio.get<Map<String, dynamic>>(
+      '/protected/activity/${Uri.encodeComponent(id)}',
+    );
+    final data = res.data;
+    if (data == null) return null;
+    final inner = data['result'];
+    if (inner is Map<String, dynamic>) return ActivitySummary.fromJson(inner);
+    return ActivitySummary.fromJson(data);
+  }
+
+  Future<List<ActivitySummary>> mine() async {
+    final dio = await _dio();
+    final res = await dio.get<dynamic>('/protected/activities/mine');
+    final raw = res.data;
+    if (raw is List) {
+      return raw
+          .whereType<Map<String, dynamic>>()
+          .map(ActivitySummary.fromJson)
+          .toList();
+    }
+    return const [];
+  }
+
+  Future<List<Tag>> tags() async {
+    final rows = (await dio.get<List<dynamic>>('/tags')).data!;
+    return rows.map((e) => Tag.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  Future<Tag> first() async {
+    final res = await dio.get<List<dynamic>>('/tags/first');
+    return Tag.fromJson(res.data!.first as Map<String, dynamic>);
+  }
+}
+"#;
+        let fp = parse_file(source, "lib/activity_service.dart", "lib::activity_service", repo()).unwrap();
+        let result = Shape::Object {
+            fields: vec![ShapeField::new("result", false, named("ActivitySummary", false))],
+            open: false,
+        };
+        assert_eq!(
+            shapes_of(&fp, "GET", "/protected/activity/${…}").0,
+            Some(Shape::Union(vec![result, named("ActivitySummary", false)]))
+        );
+        assert_eq!(
+            shapes_of(&fp, "GET", "/protected/activities/mine").0,
+            Some(named("ActivitySummary", true))
+        );
+        assert_eq!(shapes_of(&fp, "GET", "/tags").0, Some(named("Tag", true)));
+        assert_eq!(shapes_of(&fp, "GET", "/tags/first").0, Some(named("Tag", true)));
+    }
+
+    /// DT.1l: a callable holding two Dio calls reads no response for either
+    /// (counted); its requests are still read. A call whose result is never
+    /// read writes nothing, and its payload keeps its bytes.
+    #[test]
+    fn dt1l_two_dio_calls_read_no_response() {
+        let source = r#"class S {
+  Future<Member> both(String id) async {
+    final a = await dio.get('/members/$id');
+    final b = await dio.post('/audit', data: {'id': id});
+    return Member.fromJson(a.data);
+  }
+  Future<void> fire() async {
+    await dio.delete('/members');
+  }
+}
+"#;
+        let fp = parse_file(source, "lib/s.dart", "lib::s", repo()).unwrap();
+        assert_eq!(shapes_of(&fp, "GET", "/members/${…}"), (None, None));
+        let (response, request) = shapes_of(&fp, "POST", "/audit");
+        assert_eq!(response, None);
+        assert!(request.is_some(), "a request is read off the call itself");
+        assert_eq!(
+            endpoint_hit(&fp, endpoint_id("DELETE", "/members")).as_deref(),
+            Some(r#"{"method":"DELETE","path":"/members","file":"lib/s.dart","line":8,"col":5,"confidence":"strong"}"#)
+        );
+        let stats = LAST_DART_WIRE.with(|w| w.borrow().clone());
+        assert_eq!((stats.responses, stats.requests, stats.skipped_multi_call), (0, 1, 2));
+    }
+
+    /// DT.1l: requests. A map literal's keys (a collection-`if` key not
+    /// required, a spread leaving it open, literal and typed values), and
+    /// `x.toJson()` as x's declared type: a parameter, a local, a field.
+    /// Any other `data:` (a Map variable, FormData) writes none.
+    #[test]
+    fn dt1l_dio_requests() {
+        let source = r#"class AuthService {
+  AuthService(this.draft);
+  final ProfileDraft draft;
+
+  Future<void> login(String identifier, String password, int tries) async {
+    await dio.post('/auth/login', data: {
+      if (identifier.contains('@')) 'email': identifier else 'username': identifier,
+      'password': password,
+      'tries': tries,
+      'remember': true,
+      'meta': {'client': 'android'},
+      ...extra,
+    });
+  }
+
+  Future<void> save(UpdateUser req) async {
+    await dio.put('/user', data: req.toJson());
+  }
+
+  Future<void> local() async {
+    final NewGroup g = build();
+    await dio.post('/groups', data: g.toJson());
+  }
+
+  Future<void> field() async {
+    await dio.put('/profile', data: draft.toJson());
+  }
+
+  Future<void> raw(Map<String, dynamic> body) async {
+    await dio.post('/raw', data: body);
+    await dio.post('/form', data: FormData.fromMap({'a': 1}));
+  }
+}
+"#;
+        let fp = parse_file(source, "lib/auth.dart", "lib::auth", repo()).unwrap();
+        let meta = Shape::Object {
+            fields: vec![ShapeField::new("client", true, named("String", false))],
+            open: false,
+        };
+        let login = Shape::Object {
+            fields: vec![
+                ShapeField::new("email", false, named("String", false)),
+                ShapeField::new("username", false, named("String", false)),
+                ShapeField::new("password", true, named("String", false)),
+                ShapeField::new("tries", true, named("int", false)),
+                ShapeField::new("remember", true, named("bool", false)),
+                ShapeField::new("meta", true, meta),
+            ],
+            open: true,
+        };
+        assert_eq!(shapes_of(&fp, "POST", "/auth/login").1, Some(login));
+        assert_eq!(shapes_of(&fp, "PUT", "/user").1, Some(named("UpdateUser", false)));
+        assert_eq!(shapes_of(&fp, "POST", "/groups").1, Some(named("NewGroup", false)));
+        assert_eq!(shapes_of(&fp, "PUT", "/profile").1, Some(named("ProfileDraft", false)));
+        assert_eq!(shapes_of(&fp, "POST", "/raw"), (None, None));
+        assert_eq!(shapes_of(&fp, "POST", "/form"), (None, None));
     }
 }

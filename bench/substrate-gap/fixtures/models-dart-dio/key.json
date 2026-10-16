@@ -1,0 +1,20 @@
+{
+  "framework": "models-dart-dio",
+  "language": "dart",
+  "dirs": ["app", "api"],
+  "note": "DT.1l: Dart client models. A Flutter-style Dart client (Dio) reads club members from a gin API. The Dart Member model's JSON names are its hand-written fromJson subscript keys (j['display_name']), not its field names, so its SCHEMA_FIELDS (format dart) list memberId / handle / display_name / badges. Each Dio call's shape is read inside its one calling method: get() applies Member.fromJson to res.data (a direct Member response), list() casts res.data to a map and maps Member.fromJson over raw['members'] (an envelope {members: Member[]}), rename() sends a data: map literal ({handle, reason}). The gin side writes *models.Member (Get), gin.H{members: []models.Member} (List) and binds an anonymous {handle} (Rename). So the models pass pairs the Dart Member with models.Member as an http_model SAME_AS class, diverged: display_name is a client-only optional name (json_field_optional_absent) and the server's displayName goes unread (json_field_unread); the PUT request's reason is dropped (json_field_dropped). MemberService and the Members handler type are never model identities.",
+  "expect_edges": [
+    {"from": "endpoint:GET:/api/members/${…}", "to": "GET /api/members/:id", "category": "HTTP_CALLS", "exact": true, "note": "MemberService.get: res.data through Member.fromJson"},
+    {"from": "endpoint:GET:/api/members", "to": "GET /api/members", "category": "HTTP_CALLS", "exact": true, "note": "MemberService.list: the members envelope"},
+    {"from": "endpoint:PUT:/api/members/${…}", "to": "PUT /api/members/:id", "category": "HTTP_CALLS", "exact": true, "note": "MemberService.rename: a data: map literal request"},
+    {"from": "lib::models::member::Member", "to": "models::member::Member", "category": "SAME_AS", "exact": true, "note": "DT.1l + DT.1h http_model: diverged: display_name against displayName"}
+  ],
+  "expect_cells": [
+    {"kind": "CLASS", "node": "lib::models::member::Member", "cell": "SCHEMA_FIELDS", "contains": "\"name\":\"display_name\"", "note": "DT.1l: the fromJson subscript key, not the field name displayName"},
+    {"kind": "ENDPOINT", "node": "endpoint:GET:/api/members", "cell": "ENDPOINT_HIT", "contains": "\"name\":\"members\"", "note": "DT.1l: the envelope key raw['members'] read off res.data"}
+  ],
+  "forbid": [
+    {"from": "lib::services::member_service::MemberService", "to": "models::member::Member", "category": "SAME_AS", "note": "DT.1l: a service class is no model"},
+    {"from": "lib::models::member::Member", "to": "handlers::members::Members", "category": "SAME_AS", "note": "DT.1l: the handler type is no model, whatever its name"}
+  ]
+}
