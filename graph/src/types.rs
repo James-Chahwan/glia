@@ -39,6 +39,11 @@ pub struct SymbolTable {
     pub module_by_qname: HashMap<String, NodeId>,
     /// Module node id → (top-level def name → def node id).
     /// Used for `from X import Y` resolution and for module-attribute calls.
+    /// A TS / JS re-export barrel MODULE also holds the declarations it
+    /// re-exports under their own names (`export * from './user.model'`
+    /// passing `User`; DT.1q): each such pair already sits in its declaring
+    /// module's table. A renamed or MODULE-valued re-export
+    /// (`export { A as B }`, `export * as ns`) is never held here.
     pub module_symbols: HashMap<NodeId, HashMap<String, NodeId>>,
     /// Class node id → (method name → method node id).
     pub class_methods: HashMap<NodeId, HashMap<String, NodeId>>,

@@ -1038,6 +1038,29 @@ mod tests {
             NavFact::SliceResult {
                 elem: "models.Order".into(),
             },
+            NavFact::ReExportStar {
+                source: "./models".into(),
+                line: 0,
+            },
+            NavFact::ReExportNamespace {
+                source: "./util/format".into(),
+                exported: "fmt".into(),
+                line: 2,
+            },
+            NavFact::ReExportName {
+                source: "./audit".into(),
+                name: "AuditLog".into(),
+                exported: "Journal".into(),
+                line: 1,
+            },
+            NavFact::ExportLocal {
+                local: "User".into(),
+                exported: "Customer".into(),
+                line: 6,
+            },
+            NavFact::Exports {
+                names: vec!["Order".into(), "default".into(), "orderTotal".into()],
+            },
         ]
     }
 
@@ -1090,12 +1113,12 @@ mod tests {
             }
             p
         };
-        let fwd: Vec<u64> = (0..16).collect();
-        let rev: Vec<u64> = (0..16).rev().collect();
+        let fwd: Vec<u64> = (0..24).collect();
+        let rev: Vec<u64> = (0..24).rev().collect();
         let parse = fill(&fwd);
         // Scope `500 + i` holds the first `i % len + 1` facts, so scope
-        // `500 + len - 1` holds them all (`fill` covers 16 scopes).
-        assert!(facts.len() <= 16, "every_nav_fact outgrew fill's 16 scopes");
+        // `500 + len - 1` holds them all (`fill` covers 24 scopes).
+        assert!(facts.len() <= 24, "every_nav_fact outgrew fill's 24 scopes");
         assert_eq!(
             parse.nav.nav_facts[&NodeId(500 + facts.len() as u64 - 1)],
             facts,

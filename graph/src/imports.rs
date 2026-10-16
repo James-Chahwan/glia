@@ -13,6 +13,10 @@ use crate::build::{DirImport, GoPackages};
 use crate::calls::{graph_evidence, push_edge, unique_global_function, unique_global_module};
 use crate::types::RepoGraph;
 
+/// DT.1q: TS / JS re-export barrels (a child module, so [`ts_target`],
+/// [`spec_ext`], [`import_edge`] and [`SameStem`] stay private here).
+mod reexports;
+
 // ============================================================================
 // Same-stem siblings (LB.13)
 // ============================================================================
@@ -795,20 +799,35 @@ pub(crate) fn resolve_imports_slash(g: &mut RepoGraph, imports: &[ImportStmt]) {
 /// DT.1b: a source naming a directory with no same-stem file binds the
 /// directory's index module (`from '../models'` -> `models/index.ts`, rule
 /// `dir_index`, [`ts_target`]), relative and tsconfig-alias specifiers
-/// alike, so a named import binds the name `index.ts` declares. A re-export
-/// barrel (`export * from './x'`) emits no import statement, so a name the
-/// index only re-exports binds nothing. Prints the `[imports] dir-index`
-/// marker ([`DirIndexBinds::marker`]).
+/// alike, so a named import binds the name `index.ts` declares. Prints the
+/// `[imports] dir-index` marker ([`DirIndexBinds::marker`]).
+///
+/// DT.1q: a re-export barrel (`export * from './x'`, `export { A as B } from
+/// './x'`, `export * as ns from './x'`, a from-less `export { a as b }`)
+/// IMPORTS every module it re-exports from (rule `reexport`), and a name
+/// imported through barrels binds its declaring symbol as a direct import
+/// would, resolved as ECMA-262 ResolveExport ([`reexports::Barrels`]): own
+/// and indirect exports shadow the stars, two stars exporting distinct
+/// bindings give nothing, and a star never passes `default`. A same-name
+/// re-export joins the barrel's `module_symbols` (so `ns.f()` on a namespace
+/// import of a barrel binds too); a renamed or MODULE-valued entry binds
+/// only a named import of it. Prints the `[imports] reexport` marker
+/// ([`reexports::Barrels::marker`]) and returns its counters, which the tests
+/// read back (the builders drop them).
 pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
     g: &mut RepoGraph,
     imports: &[ImportStmt],
     resolve_source: &R,
     same: &mut SameStem,
-) {
+) -> reexports::ReexportStats {
     // DF.4b: (importer, library) of each bound `.dart` import without an
     // alias, in statement order.
     let mut plain_dart: Vec<(NodeId, NodeId)> = Vec::new();
     let mut dir_index = DirIndexBinds::default();
+    // DT.1q: the barrels' IMPORTS edges and export tables, before any
+    // statement binds a name through one.
+    let mut barrels = reexports::Barrels::read(g, imports, resolve_source, same);
+    barrels.materialize(g);
     for stmt in imports {
         let Some(from_mod_id) = g
             .symbols
@@ -860,17 +879,22 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
                 dir_index.record(rule, module);
                 import_edge(g, from_mod_id, target_mod_id, rule, stmt.line);
                 let bound = alias.clone().unwrap_or_else(|| name.clone());
-                // Default import — bind to the module itself.
-                // Named import — bind to the specific symbol inside that module.
+                // Default import — bind to the module itself (or what a
+                // barrel's `default` entry names, DT.1q).
+                // Named import — bind to the specific symbol inside that module
+                // (a barrel's same-name re-exports included), else a barrel's
+                // renamed or MODULE-valued entry (DT.1q).
                 let target_id = if name == "default" {
-                    Some(target_mod_id)
+                    Some(barrels.default_of(target_mod_id).unwrap_or(target_mod_id))
                 } else {
                     g.symbols
                         .module_symbols
                         .get(&target_mod_id)
                         .and_then(|s| s.get(name))
                         .copied()
+                        .or_else(|| barrels.module_entry(target_mod_id, name))
                 };
+                barrels.tally(target_mod_id, name, target_id);
                 if let Some(t) = target_id {
                     g.symbols
                         .module_import_bindings
@@ -887,6 +911,10 @@ pub(crate) fn resolve_imports_ts<R: Fn(&str, &str) -> Option<String>>(
     if let Some(line) = dir_index.marker() {
         eprintln!("{line}");
     }
+    if let Some(line) = barrels.marker() {
+        eprintln!("{line}");
+    }
+    barrels.stats()
 }
 
 /// What [`bind_dart_library_names`] did in one graph build.
@@ -1132,7 +1160,8 @@ impl DirIndexBinds {
 /// imported name), `package_dir` (a Go package directory, LA.13b),
 /// `same_stem` (the sibling of an ambiguous same-stem pair the importer's
 /// language loads, LB.13), `dir_index` (the index module of the directory a
-/// TS-family specifier names, DT.1b), `namespace` (the member of the declared
+/// TS-family specifier names, DT.1b), `reexport` (a TS / JS barrel -> each
+/// module it re-exports from, DT.1q), `namespace` (the member of the declared
 /// namespace PACKAGE a symbol import names, DF.2) or `tail_unique` (the repo-unique
 /// short name, a guess the full path could not confirm).
 /// `line` is the import statement's 0-based row (LC.3b, basis site).
@@ -2228,5 +2257,789 @@ mod tests {
         import_module(&mut main, "infra::main", "./modules/vpc", None);
         let g = build_typescript(repo(), vec![vpc, main], ts_source).expect("build");
         assert!(imports_from(&g, "infra::main").is_empty());
+    }
+
+    // ---- DT.1q: re-export barrels (ECMA-262 ResolveExport) ------------------
+
+    use reexports::{Barrels, ReexportStats};
+
+    /// The MODULE qname of a TS file path: extension dropped, `/` -> `::`.
+    fn ts_qname(path: &str) -> String {
+        path.rsplit_once('.').map_or(path, |(stem, _)| stem).replace('/', "::")
+    }
+
+    /// The TS parser's parse of `src` at `path`, its export facts included.
+    fn ts(path: &str, src: &str) -> FileParse {
+        glia_parser_typescript::parse_file(src, path, &ts_qname(path), repo()).expect("parse")
+    }
+
+    /// The TS family graph of `files` (path, source), and its import statements.
+    fn ts_graph(files: &[(&str, &str)]) -> (RepoGraph, Vec<ImportStmt>) {
+        let parses: Vec<FileParse> = files.iter().map(|(p, s)| ts(p, s)).collect();
+        let imports = all_imports(&parses);
+        (build_typescript_family(repo(), parses, ts_source).expect("build"), imports)
+    }
+
+    /// What MODULE `importer` binds `name` to.
+    fn binding(g: &RepoGraph, importer: &str, name: &str) -> Option<NodeId> {
+        g.symbols.module_import_bindings.get(&module(importer))?.get(name).copied()
+    }
+
+    /// `(target, rule)` of every `category` edge from `from`, sorted.
+    fn out_edges(g: &RepoGraph, category: EdgeCategoryId, from: NodeId) -> Vec<(NodeId, String)> {
+        let mut out: Vec<(NodeId, String)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == category && e.from == from)
+            .map(|e| (e.to, Evidence::of(e).and_then(|ev| ev.rule).unwrap_or_default()))
+            .collect();
+        out.sort_by_key(|(id, rule)| (id.0, rule.clone()));
+        out
+    }
+
+    fn rule(id: NodeId, rule: &str) -> (NodeId, String) {
+        (id, rule.to_string())
+    }
+
+    /// `g` as `resolve_imports_ts` found it: IMPORTS edges, import bindings
+    /// and materialised barrel rows undone, `module_symbols` rebuilt from the
+    /// nav as `build_symbol_table` writes it.
+    fn pre_imports(g: &RepoGraph) -> RepoGraph {
+        let mut g = g.clone();
+        g.edges.retain(|e| e.category != edge_category::IMPORTS);
+        g.symbols.module_import_bindings.clear();
+        g.symbols.module_symbols.clear();
+        for (parent, children) in &g.nav.children_of {
+            let kind = g.nav.kind_by_id.get(parent);
+            if kind != Some(&node_kind::MODULE) && kind != Some(&node_kind::PACKAGE) {
+                continue;
+            }
+            let entry = g.symbols.module_symbols.entry(*parent).or_default();
+            for child in children {
+                if let Some(name) = g.nav.name_by_id.get(child) {
+                    entry.insert(name.clone(), *child);
+                }
+            }
+        }
+        g
+    }
+
+    /// [`resolve_imports_ts`] replayed on `g`'s pre-import state, so the
+    /// counters are the build's own.
+    fn replay_ts(g: &RepoGraph, imports: &[ImportStmt]) -> ReexportStats {
+        let mut pre = pre_imports(g);
+        let mut same = same_stem_table(&pre);
+        resolve_imports_ts(&mut pre, imports, &ts_source, &mut same)
+    }
+
+    /// The fixture's shape (`ts-reexport-barrels`) with relative specifiers.
+    fn fixture() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (
+                "src/core/index.ts",
+                concat!(
+                    "export * from './models';\n",
+                    "export * from './services';\n",
+                    "export * as fmt from './util/format';\n",
+                ),
+            ),
+            (
+                "src/core/models/index.ts",
+                concat!(
+                    "export * from './user.model';\n",
+                    "export * from './order.model';\n",
+                ),
+            ),
+            (
+                "src/core/models/user.model.ts",
+                concat!(
+                    "export class User {\n",
+                    "  constructor(public id: string) {}\n",
+                    "}\n",
+                    "export function displayName(u: User): string { return u.id; }\n",
+                ),
+            ),
+            (
+                "src/core/models/order.model.ts",
+                concat!(
+                    "import { User } from './user.model';\n",
+                    "export class Order {}\n",
+                    "export function orderTotal(o: Order[]): number { return 0; }\n",
+                    "export function displayName(o: Order): string { return ''; }\n",
+                    "export { User as Customer };\n",
+                ),
+            ),
+            (
+                "src/core/services/index.ts",
+                concat!(
+                    "export * from './user.service';\n",
+                    "export { AuditLog as Journal } from './audit';\n",
+                ),
+            ),
+            (
+                "src/core/services/user.service.ts",
+                concat!(
+                    "export class UserService {\n",
+                    "  find(id: string) { return id; }\n",
+                    "}\n",
+                ),
+            ),
+            (
+                "src/core/services/audit.ts",
+                concat!(
+                    "export class AuditLog {\n",
+                    "  record(e: string): void {}\n",
+                    "}\n",
+                ),
+            ),
+            ("src/core/util/format.ts", "export function shout(s: string): string { return s; }\n"),
+            ("src/shared/index.js", "export * from './badge';\n"),
+            (
+                "src/shared/badge.ts",
+                concat!(
+                    "export function badgeLabel(n: number): string { return ''; }\n",
+                ),
+            ),
+            (
+                "src/legacy/user.service.ts",
+                concat!(
+                    "export class UserService {\n",
+                    "  find(id: string) { return id; }\n",
+                    "}\n",
+                    "export function shout(s: string) { return s; }\n",
+                ),
+            ),
+            (
+                "src/profile.ts",
+                concat!(
+                    "import { User, UserService, Journal, fmt, displayName } from './core';\n",
+                    "export class ProfilePage {\n",
+                    "  constructor(private users: UserService, private journal: Journal) {}\n",
+                    "  load(id: string): void {\n",
+                    "    const user: User = this.users.find(id);\n",
+                    "    this.journal.record('load');\n",
+                    "    fmt.shout(id);\n",
+                    "    displayName(user);\n",
+                    "  }\n",
+                    "}\n",
+                ),
+            ),
+            (
+                "src/vip.ts",
+                concat!(
+                    "import { Customer } from './core';\n",
+                    "export class VipCustomer extends Customer {}\n",
+                ),
+            ),
+            (
+                "src/orders.ts",
+                concat!(
+                    "import { Order, orderTotal } from './core';\n",
+                    "import { badgeLabel } from './shared';\n",
+                    "export class OrderList {\n",
+                    "  total(o: Order[]) { return orderTotal(o); }\n",
+                    "  label(n: number) { return badgeLabel(n); }\n",
+                    "}\n",
+                ),
+            ),
+            (
+                "src/report.ts",
+                concat!(
+                    "import { Journal } from 'journal-lib';\n",
+                    "export class ReportPage {\n",
+                    "  constructor(private journal: Journal) {}\n",
+                    "  open(): void { this.journal.record('open'); }\n",
+                    "}\n",
+                ),
+            ),
+        ]
+    }
+
+    #[test]
+    fn star_barrels_bind_through_two_levels() {
+        let (g, _) = ts_graph(&[
+            (
+                "src/core/models/user.ts",
+                concat!(
+                    "export class User { hello() {} }\n",
+                    "export function displayName(u: User) { return ''; }\n",
+                ),
+            ),
+            ("src/core/models/index.ts", "export * from './user';\n"),
+            ("src/core/index.ts", "export * from './models';\n"),
+            (
+                "src/app.ts",
+                concat!(
+                    "import { User, displayName } from './core';\n",
+                    "export function run(u: User) { displayName(u); }\n",
+                ),
+            ),
+        ]);
+        let user = class("src::core::models::user::User");
+        let name = func("src::core::models::user::displayName");
+        assert_eq!(binding(&g, "src::app", "User"), Some(user));
+        assert_eq!(binding(&g, "src::app", "displayName"), Some(name));
+        assert_eq!(calls_from(&g, "src::app::run"), [rule(name, "import_binding")]);
+        // Both barrels hold the same-name declarations their stars pass.
+        for barrel in ["src::core::index", "src::core::models::index"] {
+            let syms = &g.symbols.module_symbols[&module(barrel)];
+            assert_eq!(syms.get("User"), Some(&user), "{barrel}");
+            assert_eq!(syms.get("displayName"), Some(&name), "{barrel}");
+        }
+    }
+
+    #[test]
+    fn reexport_edges_name_each_statement() {
+        let (g, _) = ts_graph(&[
+            ("src/lib/a.ts", "export class A {}\nexport class B {}\n"),
+            (
+                "src/lib/index.ts",
+                concat!(
+                    "// the barrel\n",
+                    "\n",
+                    "export { A, B } from './a';\n",
+                    "export * from './a';\n",
+                ),
+            ),
+            ("src/app.ts", "import { A } from './lib';\nexport class X extends A {}\n"),
+        ]);
+        let a = module("src::lib::a");
+        let rows: Vec<(NodeId, Option<String>, Option<u32>)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::IMPORTS && e.from == module("src::lib::index"))
+            .map(|e| {
+                let ev = Evidence::of(e);
+                (e.to, ev.as_ref().and_then(|v| v.rule.clone()), ev.and_then(|v| v.line))
+            })
+            .collect();
+        // One edge per statement, at its own row: the two-name clause is one.
+        let reexport = Some(reexports::REEXPORT.to_string());
+        assert_eq!(rows, [(a, reexport.clone(), Some(2)), (a, reexport, Some(3))]);
+        // The importer IMPORTS the barrel it names, never the declaring module.
+        assert_eq!(imports_from(&g, "src::app"), [by_dir("src::lib::index")]);
+        assert_eq!(
+            out_edges(&g, edge_category::INHERITS_FROM, class("src::app::X")),
+            [rule(class("src::lib::a::A"), "import_binding")]
+        );
+    }
+
+    #[test]
+    fn named_reexport_binds_under_its_new_name() {
+        let (g, _) = ts_graph(&[
+            ("src/svc/audit.ts", "export class AuditLog { record() {} }\n"),
+            ("src/svc/index.ts", "export { AuditLog as Journal } from './audit';\n"),
+            (
+                "src/page.ts",
+                concat!(
+                    "import { Injectable } from '@angular/core';\n",
+                    "import { Journal, AuditLog } from './svc';\n",
+                    "@Injectable()\n",
+                    "export class Page {\n",
+                    "  constructor(private j: Journal) {}\n",
+                    "  go() { this.j.record(); }\n",
+                    "}\n",
+                ),
+            ),
+        ]);
+        let audit = class("src::svc::audit::AuditLog");
+        assert_eq!(binding(&g, "src::page", "Journal"), Some(audit));
+        // The barrel exports `Journal` only.
+        assert_eq!(binding(&g, "src::page", "AuditLog"), None);
+        assert_eq!(
+            out_edges(&g, edge_category::INJECTS, class("src::page::Page")),
+            [rule(audit, "import_binding")]
+        );
+        assert_eq!(
+            out_edges(&g, edge_category::CALLS, method("src::page::Page::go")),
+            [rule(method("src::svc::audit::AuditLog::record"), "receiver_type")]
+        );
+    }
+
+    #[test]
+    fn namespace_reexport_binds_the_module() {
+        let (g, _) = ts_graph(&[
+            ("src/util/format.ts", "export function shout(s: string) { return s; }\n"),
+            ("src/core.ts", "export * as fmt from './util/format';\n"),
+            (
+                "src/page.ts",
+                concat!(
+                    "import { fmt } from './core';\n",
+                    "export function run() { fmt.shout('x'); }\n",
+                ),
+            ),
+        ]);
+        assert_eq!(binding(&g, "src::page", "fmt"), Some(module("src::util::format")));
+        assert_eq!(
+            calls_from(&g, "src::page::run"),
+            [rule(func("src::util::format::shout"), "attribute")]
+        );
+    }
+
+    #[test]
+    fn local_export_of_an_import_reexports_it() {
+        let (g, _) = ts_graph(&[
+            ("src/models/user.ts", "export class User {}\n"),
+            (
+                "src/models/order.ts",
+                concat!(
+                    "import { User } from './user';\n",
+                    "export class Order {}\n",
+                    "export { User as Customer };\n",
+                ),
+            ),
+            ("src/models/index.ts", "export * from './order';\n"),
+            (
+                "src/vip.ts",
+                concat!(
+                    "import { Customer } from './models';\n",
+                    "export class Vip extends Customer {}\n",
+                ),
+            ),
+        ]);
+        let user = class("src::models::user::User");
+        assert_eq!(binding(&g, "src::vip", "Customer"), Some(user));
+        assert_eq!(
+            out_edges(&g, edge_category::INHERITS_FROM, class("src::vip::Vip")),
+            [rule(user, "import_binding")]
+        );
+    }
+
+    #[test]
+    fn local_export_renames_an_own_declaration() {
+        let (g, _) = ts_graph(&[
+            ("src/lib.ts", "function f() {}\nexport { f as g };\n"),
+            ("src/app.ts", "import { g } from './lib';\nexport function run() { g(); }\n"),
+        ]);
+        let f = func("src::lib::f");
+        assert_eq!(binding(&g, "src::app", "g"), Some(f));
+        assert_eq!(calls_from(&g, "src::app::run"), [rule(f, "import_binding")]);
+        assert!(!g.symbols.module_symbols[&module("src::lib")].contains_key("g"));
+    }
+
+    #[test]
+    fn distinct_star_declarations_bind_nothing() {
+        let (g, imports) = ts_graph(&[
+            ("src/m/a.ts", "export function displayName() {}\n"),
+            ("src/m/b.ts", "export function displayName() {}\n"),
+            ("src/m/index.ts", "export * from './a';\nexport * from './b';\n"),
+            ("src/core.ts", "export * from './m';\n"),
+            (
+                "src/app.ts",
+                concat!(
+                    "import { displayName } from './core';\n",
+                    "export function run() { displayName(); }\n",
+                ),
+            ),
+        ]);
+        assert_eq!(binding(&g, "src::app", "displayName"), None);
+        assert!(calls_from(&g, "src::app::run").is_empty());
+        for barrel in ["src::core", "src::m::index"] {
+            let syms = g.symbols.module_symbols.get(&module(barrel));
+            assert!(syms.is_none_or(|s| !s.contains_key("displayName")), "{barrel}");
+        }
+        // Ambiguous at both levels, and the import is left unbound.
+        let stats = replay_ts(&g, &imports);
+        assert_eq!((stats.ambiguous, stats.unbound, stats.bound), (2, 1, 0));
+    }
+
+    #[test]
+    fn one_declaration_through_two_stars_binds() {
+        // quokka's user.model.ts: `import { PendingFriendRequest } from
+        // './friend.model'; export type { PendingFriendRequest };`, both
+        // starred by models/index.ts.
+        let (g, _) = ts_graph(&[
+            ("src/m/friend.ts", "export class Pending {}\n"),
+            (
+                "src/m/user.ts",
+                concat!(
+                    "import { Pending } from './friend';\n",
+                    "export class User {}\n",
+                    "export type { Pending };\n",
+                ),
+            ),
+            ("src/m/index.ts", "export * from './user';\nexport * from './friend';\n"),
+            ("src/app.ts", "import { Pending } from './m';\nexport class X extends Pending {}\n"),
+        ]);
+        let pending = class("src::m::friend::Pending");
+        assert_eq!(binding(&g, "src::app", "Pending"), Some(pending));
+        assert_eq!(
+            out_edges(&g, edge_category::INHERITS_FROM, class("src::app::X")),
+            [rule(pending, "import_binding")]
+        );
+    }
+
+    #[test]
+    fn own_and_named_exports_shadow_stars() {
+        let (g, _) = ts_graph(&[
+            ("src/a.ts", "export class Thing {}\nexport class Other {}\n"),
+            ("src/b.ts", "export class Named {}\n"),
+            (
+                "src/barrel.ts",
+                concat!(
+                    "export * from './a';\n",
+                    "export { Named as Other } from './b';\n",
+                    "export class Thing {}\n",
+                ),
+            ),
+            ("src/mid.ts", "export * from './a';\nexport class Other {}\n"),
+            ("src/top.ts", "export * from './mid';\n"),
+            ("src/app.ts", "import { Thing, Other } from './barrel';\n"),
+            ("src/app2.ts", "import { Other, Thing } from './top';\n"),
+        ]);
+        assert_eq!(binding(&g, "src::app", "Thing"), Some(class("src::barrel::Thing")));
+        assert_eq!(binding(&g, "src::app", "Other"), Some(class("src::b::Named")));
+        // Inside the chain an exported declaration shadows the stars too.
+        assert_eq!(binding(&g, "src::app2", "Other"), Some(class("src::mid::Other")));
+        assert_eq!(binding(&g, "src::app2", "Thing"), Some(class("src::a::Thing")));
+    }
+
+    #[test]
+    fn nodeless_exports_shadow_stars() {
+        let (g, imports) = ts_graph(&[
+            // A local type alias beside a star exporting class Session.
+            ("src/s.ts", "export class Session {}\n"),
+            ("src/t.ts", "export type Session = { id: string };\nexport * from './s';\n"),
+            // A nodeless const re-exported by a from-less clause.
+            ("src/k2.ts", "export class X {}\n"),
+            ("src/k.ts", "const X = 1;\nexport { X };\nexport * from './k2';\n"),
+            // An external named re-export beside a star exporting the name.
+            ("src/obs.ts", "export class Observable {}\n"),
+            ("src/r.ts", "export { Observable } from 'rxjs';\nexport * from './obs';\n"),
+            (
+                "src/app.ts",
+                concat!(
+                    "import { Session } from './t';\n",
+                    "import { X } from './k';\n",
+                    "import { Observable } from './r';\n",
+                ),
+            ),
+        ]);
+        let k = g.symbols.module_symbols.get(&module("src::k"));
+        assert!(k.is_none_or(|s| !s.contains_key("X")), "X mints no node");
+        for name in ["Session", "X", "Observable"] {
+            assert_eq!(binding(&g, "src::app", name), None, "{name}");
+        }
+        let stats = replay_ts(&g, &imports);
+        assert_eq!((stats.unbound, stats.ambiguous, stats.external), (3, 0, 1));
+    }
+
+    #[test]
+    fn a_type_alias_and_a_class_from_two_stars_bind_nothing() {
+        // tsc's TS2308: the star exports conflict.
+        let (g, imports) = ts_graph(&[
+            ("src/a.ts", "export class Mode {}\n"),
+            ("src/b.ts", "export type Mode = 'x' | 'y';\n"),
+            ("src/i.ts", "export * from './a';\nexport * from './b';\n"),
+            ("src/app.ts", "import { Mode } from './i';\nexport class M extends Mode {}\n"),
+        ]);
+        assert_eq!(binding(&g, "src::app", "Mode"), None);
+        assert_eq!(replay_ts(&g, &imports).ambiguous, 1);
+    }
+
+    #[test]
+    fn star_never_reexports_default() {
+        let (g, _) = ts_graph(&[
+            ("src/w.ts", "export default class Widget {}\nexport function helper() {}\n"),
+            ("src/star.ts", "export * from './w';\n"),
+            ("src/named.ts", "export { default } from './w';\n"),
+            ("src/as.ts", "export { default as Widget } from './w';\n"),
+            ("src/own.ts", "class K {}\nexport { K as default };\n"),
+            ("src/plain.ts", "export function p() {}\n"),
+            ("src/via.ts", "export { default as P } from './plain';\n"),
+            (
+                "src/app.ts",
+                concat!(
+                    "import W from './star';\n",
+                    "import { helper } from './star';\n",
+                    "import W2 from './named';\n",
+                    "import { Widget } from './as';\n",
+                    "import K2 from './own';\n",
+                    "import { P } from './via';\n",
+                ),
+            ),
+        ]);
+        // A star passes `helper` but never the default: a default import of
+        // the star barrel binds the barrel itself (the default convention).
+        assert_eq!(binding(&g, "src::app", "W"), Some(module("src::star")));
+        assert_eq!(binding(&g, "src::app", "helper"), Some(func("src::w::helper")));
+        // `export { default } from` and `{ default as X } from` name it.
+        assert_eq!(binding(&g, "src::app", "W2"), Some(module("src::w")));
+        assert_eq!(binding(&g, "src::app", "Widget"), Some(module("src::w")));
+        // `{ X as default }` binds the declaration.
+        assert_eq!(binding(&g, "src::app", "K2"), Some(class("src::own::K")));
+        // A default no `export default` declares binds its MODULE, as a
+        // direct default import of it would.
+        assert_eq!(binding(&g, "src::app", "P"), Some(module("src::plain")));
+    }
+
+    #[test]
+    fn a_private_declaration_is_not_star_exported() {
+        // quokka core/chat: two private `function pickString` helpers.
+        let (g, _) = ts_graph(&[
+            ("src/a.ts", "function pickString() {}\nexport function useA() {}\n"),
+            ("src/b.ts", "export function pickString() {}\n"),
+            ("src/i.ts", "export * from './a';\nexport * from './b';\n"),
+            ("src/app.ts", "import { pickString, useA } from './i';\n"),
+        ]);
+        assert_eq!(binding(&g, "src::app", "pickString"), Some(func("src::b::pickString")));
+        assert_eq!(binding(&g, "src::app", "useA"), Some(func("src::a::useA")));
+    }
+
+    #[test]
+    fn reexport_cycles_terminate() {
+        let (g, imports) = ts_graph(&[
+            ("src/a.ts", "export * from './b';\nexport * from './c';\nexport function fa() {}\n"),
+            ("src/b.ts", "export * from './a';\nexport function fb() {}\n"),
+            ("src/c.ts", "export function x() {}\n"),
+            ("src/self.ts", "export * from './self';\nexport function s() {}\n"),
+            (
+                "src/app.ts",
+                concat!(
+                    "import { fa, fb, x, missing } from './a';\n",
+                    "import { fa as fa2, x as x2 } from './b';\n",
+                    "import { s } from './self';\n",
+                ),
+            ),
+        ]);
+        assert_eq!(binding(&g, "src::app", "fa"), Some(func("src::a::fa")));
+        assert_eq!(binding(&g, "src::app", "fb"), Some(func("src::b::fb")));
+        assert_eq!(binding(&g, "src::app", "x"), Some(func("src::c::x")));
+        assert_eq!(binding(&g, "src::app", "missing"), None);
+        assert_eq!(binding(&g, "src::app", "fa2"), Some(func("src::a::fa")));
+        assert_eq!(binding(&g, "src::app", "x2"), Some(func("src::c::x")));
+        assert_eq!(binding(&g, "src::app", "s"), Some(func("src::self::s")));
+        // A source naming its own file is dropped: no self edge.
+        assert!(imports_from(&g, "src::self").is_empty());
+        // `x` through a -> b -> a is cut once from a and once from b; the
+        // self star once.
+        let stats = replay_ts(&g, &imports);
+        assert_eq!((stats.cycles, stats.capped), (3, 0));
+    }
+
+    #[test]
+    fn a_chain_past_the_depth_cap_binds_nothing() {
+        let mut files: Vec<(String, String)> =
+            vec![("src/c0.ts".into(), "export function deep() {}\n".into())];
+        for i in 1..=40 {
+            files.push((format!("src/c{i}.ts"), format!("export * from './c{}';\n", i - 1)));
+        }
+        let mut app = String::new();
+        for i in [20, 32, 33, 40] {
+            app.push_str(&format!("import {{ deep as d{i} }} from './c{i}';\n"));
+        }
+        files.push(("src/app.ts".into(), app));
+        let refs: Vec<(&str, &str)> = files.iter().map(|(p, s)| (p.as_str(), s.as_str())).collect();
+        let (g, imports) = ts_graph(&refs);
+        let deep = func("src::c0::deep");
+        // A barrel binds through at most 32 levels, whichever barrel was
+        // resolved first.
+        assert_eq!(binding(&g, "src::app", "d20"), Some(deep));
+        assert_eq!(binding(&g, "src::app", "d32"), Some(deep));
+        assert_eq!(binding(&g, "src::app", "d33"), None);
+        assert_eq!(binding(&g, "src::app", "d40"), None);
+        let stats = replay_ts(&g, &imports);
+        assert!(stats.capped > 0, "{stats:?}");
+        assert_eq!(stats.cycles, 0);
+    }
+
+    #[test]
+    fn an_external_star_source_adds_no_edge() {
+        let (g, imports) = ts_graph(&[
+            ("src/a.ts", "export function f() {}\n"),
+            ("src/i.ts", "export * from 'rxjs';\nexport * from './a';\n"),
+            ("src/app.ts", "import { f } from './i';\n"),
+        ]);
+        assert_eq!(imports_from(&g, "src::i"), [rule(module("src::a"), reexports::REEXPORT)]);
+        assert_eq!(binding(&g, "src::app", "f"), Some(func("src::a::f")));
+        let stats = replay_ts(&g, &imports);
+        assert_eq!((stats.stars, stats.edges, stats.external), (2, 1, 1));
+    }
+
+    #[test]
+    fn a_namespace_import_of_a_barrel_calls_through() {
+        let (g, _) = ts_graph(&[
+            ("src/core/svc.ts", "export function fn() {}\n"),
+            ("src/core/index.ts", "export * from './svc';\n"),
+            (
+                "src/app.ts",
+                concat!(
+                    "import * as core from './core';\n",
+                    "export function run() { core.fn(); }\n",
+                ),
+            ),
+        ]);
+        assert_eq!(binding(&g, "src::app", "core"), Some(module("src::core::index")));
+        assert_eq!(
+            calls_from(&g, "src::app::run"),
+            [rule(func("src::core::svc::fn"), "attribute")]
+        );
+    }
+
+    #[test]
+    fn constructed_and_injected_types_bind_through_a_barrel() {
+        let classes = concat!(
+            "export class Api { get() {} }\n",
+            "export class Store { save() {} }\n",
+            "export class Repo { load() {} }\n",
+        );
+        let (g, _) = ts_graph(&[
+            ("src/core/svc.ts", classes),
+            ("src/core/index.ts", "export * from './svc';\n"),
+            // Same-named decoys, so no name guess can bind.
+            ("src/legacy.ts", classes),
+            (
+                "src/page.ts",
+                concat!(
+                    "import { Component, inject } from '@angular/core';\n",
+                    "import { Api, Store, Repo } from './core';\n",
+                    "@Component({ selector: 'p', template: '' })\n",
+                    "export class Page {\n",
+                    "  private store = inject(Store);\n",
+                    "  constructor(private repo: Repo) {}\n",
+                    "  run() {\n",
+                    "    new Api().get();\n",
+                    "    this.store.save();\n",
+                    "    this.repo.load();\n",
+                    "  }\n",
+                    "}\n",
+                ),
+            ),
+        ]);
+        let svc = |name: &str| class(&format!("src::core::svc::{name}"));
+        let injected: Vec<NodeId> = out_edges(&g, edge_category::INJECTS, class("src::page::Page"))
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let mut want = vec![svc("Repo"), svc("Store")];
+        want.sort_by_key(|id| id.0);
+        assert_eq!(injected, want);
+        let called: Vec<NodeId> = out_edges(&g, edge_category::CALLS, method("src::page::Page::run"))
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let mut want: Vec<NodeId> = ["Api::get", "Store::save", "Repo::load"]
+            .iter()
+            .map(|m| method(&format!("src::core::svc::{m}")))
+            .collect();
+        want.sort_by_key(|id| id.0);
+        assert_eq!(called, want);
+    }
+
+    #[test]
+    fn renamed_and_module_entries_stay_out_of_module_symbols() {
+        let (g, _) = ts_graph(&fixture());
+        let core = &g.symbols.module_symbols[&module("src::core::index")];
+        for name in ["Customer", "Journal", "fmt", "displayName"] {
+            assert!(!core.contains_key(name), "{name}");
+        }
+        for (name, want) in [
+            ("User", class("src::core::models::user.model::User")),
+            ("Order", class("src::core::models::order.model::Order")),
+            ("orderTotal", func("src::core::models::order.model::orderTotal")),
+            ("UserService", class("src::core::services::user.service::UserService")),
+        ] {
+            assert_eq!(core.get(name), Some(&want), "{name}");
+        }
+        // A named import binds each side-table entry.
+        let audit = class("src::core::services::audit::AuditLog");
+        assert_eq!(binding(&g, "src::profile", "Journal"), Some(audit));
+        assert_eq!(binding(&g, "src::profile", "fmt"), Some(module("src::core::util::format")));
+        assert_eq!(binding(&g, "src::vip", "Customer"), Some(class("src::core::models::user.model::User")));
+        assert_eq!(binding(&g, "src::profile", "displayName"), None);
+    }
+
+    #[test]
+    fn name_only_fallbacks_do_not_move() {
+        let (g, imports) = ts_graph(&fixture());
+        let mut pre = pre_imports(&g);
+        let mut names: BTreeSet<String> =
+            pre.symbols.module_symbols.values().flat_map(|s| s.keys().cloned()).collect();
+        names.extend(["Journal", "Customer", "fmt"].map(String::from));
+        let answers = |g: &RepoGraph| -> Vec<(String, Option<NodeId>, Option<NodeId>)> {
+            names
+                .iter()
+                .map(|n| (n.clone(), unique_global_function(g, n), crate::calls::unique_global_type(g, n)))
+                .collect()
+        };
+        let before = answers(&pre);
+        let mut same = same_stem_table(&pre);
+        let mut barrels = Barrels::read(&mut pre, &imports, &ts_source, &mut same);
+        barrels.materialize(&mut pre);
+        assert_eq!(answers(&pre), before);
+        assert_eq!(answers(&g), before);
+        // An externally imported `Journal` binds nothing: no INJECTS, no CALLS.
+        assert!(out_edges(&g, edge_category::INJECTS, class("src::report::ReportPage")).is_empty());
+        assert!(out_edges(&g, edge_category::CALLS, method("src::report::ReportPage::open")).is_empty());
+    }
+
+    #[test]
+    fn reexport_marker_counts() {
+        let (g, imports) = ts_graph(&fixture());
+        let mut pre = pre_imports(&g);
+        let mut same = same_stem_table(&pre);
+        let mut barrels = Barrels::read(&mut pre, &imports, &ts_source, &mut same);
+        barrels.materialize(&mut pre);
+        // Only the named imports of a barrel are tallied; replay the build.
+        let stats = replay_ts(&g, &imports);
+        assert_eq!(barrels.stats(), ReexportStats { bound: 0, unbound: 0, ..stats });
+        let expect = "[imports] reexport stars=6 named=1 namespace=1 local=1 edges=8 external=0 \
+                      entries=15 aliased=5 bound=8 unbound=1 ambiguous=2 cycles=0 capped=0";
+        assert_eq!(stats.marker().as_deref(), Some(expect));
+        assert_eq!(barrels.marker(), barrels.stats().marker());
+        assert_eq!(Barrels::default().marker(), None);
+    }
+
+    #[test]
+    fn parse_order_does_not_move_the_result() {
+        type Rows = Vec<(u64, u64, u32, String, Option<u32>)>;
+        let view = |g: &RepoGraph| -> (Rows, Vec<(u64, Vec<(String, u64)>)>, Vec<(u64, Vec<(String, u64)>)>) {
+            let mut edges: Rows = g
+                .edges
+                .iter()
+                .map(|e| {
+                    let ev = Evidence::of(e);
+                    let rule = ev.as_ref().and_then(|v| v.rule.clone()).unwrap_or_default();
+                    (e.from.0, e.to.0, e.category.0, rule, ev.and_then(|v| v.line))
+                })
+                .collect();
+            edges.sort();
+            let table = |t: &HashMap<NodeId, HashMap<String, NodeId>>| {
+                let mut rows: Vec<(u64, Vec<(String, u64)>)> = t
+                    .iter()
+                    .map(|(m, s)| {
+                        let mut s: Vec<(String, u64)> = s.iter().map(|(n, id)| (n.clone(), id.0)).collect();
+                        s.sort();
+                        (m.0, s)
+                    })
+                    .collect();
+                rows.sort();
+                rows
+            };
+            (edges, table(&g.symbols.module_symbols), table(&g.symbols.module_import_bindings))
+        };
+        let files = fixture();
+        let (fwd, _) = ts_graph(&files);
+        let rev: Vec<(&str, &str)> = files.iter().rev().copied().collect();
+        let (bwd, _) = ts_graph(&rev);
+        assert_eq!(view(&fwd), view(&bwd));
+    }
+
+    #[test]
+    fn a_dart_graph_is_unchanged() {
+        let index = library("lib/src/util.dart", "lib::src::util", &["fmt"], &[]);
+        let mut cart = library("lib/cart.dart", "lib::cart", &["total"], &[]);
+        import_show(&mut cart, "lib::cart", "src/util.dart", "fmt");
+        call(&mut cart, "lib::cart::total", bare("fmt"));
+        let parses = vec![index, cart];
+        let imports = all_imports(&parses);
+        let g = build_typescript(repo(), parses, dart_source).expect("build");
+        assert_eq!(imports_from(&g, "lib::cart"), [rule(module("lib::src::util"), "symbol")]);
+        let mut pre = pre_imports(&g);
+        let mut same = same_stem_table(&pre);
+        let barrels = Barrels::read(&mut pre, &imports, &dart_source, &mut same);
+        assert_eq!(barrels.stats(), ReexportStats::default());
+        assert_eq!(barrels.marker(), None);
+        assert!(pre.edges.iter().all(|e| e.category != edge_category::IMPORTS));
     }
 }

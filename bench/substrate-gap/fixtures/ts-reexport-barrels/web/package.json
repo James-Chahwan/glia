@@ -1,0 +1,1 @@
+{ "name": "barrel-web", "private": true, "dependencies": { "@angular/core": "17.3.0" } }

@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "baseUrl": "./",
+    "paths": {
+      "@app/core": ["src/app/core/index.ts"],
+      "@app/*": ["src/app/*"]
+    }
+  }
+}

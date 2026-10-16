@@ -1538,6 +1538,41 @@ pub enum NavFact {
     /// slice type, so the Go wire resolution (DT.1f) reads this fact to type
     /// a handler value that is such a call's result as an array of `T`.
     SliceResult { elem: String },
+    /// TypeScript / JavaScript (DT.1q), recorded by the TS parser on the file
+    /// MODULE, read by `graph/src/imports/reexports.rs`; build-time only:
+    /// `export * from '<source>'` on 0-based row `line`. `source` is the
+    /// specifier with its quotes stripped, as an [`ImportStmt`] path holds it.
+    /// A star re-exports every exported name of its source but `default`.
+    ReExportStar { source: String, line: u32 },
+    /// TypeScript / JavaScript (DT.1q), recorded by the TS parser on the file
+    /// MODULE, read by `graph/src/imports/reexports.rs`; build-time only:
+    /// `export * as <exported> from '<source>'` on 0-based row `line` (the
+    /// name is the source MODULE itself).
+    ReExportNamespace { source: String, exported: String, line: u32 },
+    /// TypeScript / JavaScript (DT.1q), recorded by the TS parser on the file
+    /// MODULE, read by `graph/src/imports/reexports.rs`; build-time only: one
+    /// specifier of `export { <name> as <exported> } from '<source>'` (an
+    /// `export type { .. } from` included) on 0-based row `line`. `default`
+    /// may stand on either side; a string module export name (`"a-b"`) has
+    /// its quotes stripped. `exported` is `name` when there is no `as`.
+    ReExportName { source: String, name: String, exported: String, line: u32 },
+    /// TypeScript / JavaScript (DT.1q), recorded by the TS parser on the file
+    /// MODULE, read by `graph/src/imports/reexports.rs`; build-time only: one
+    /// specifier of a from-less `export { <local> as <exported> }` (or
+    /// `export type { .. }`) on 0-based row `line`. The file exports whatever
+    /// its own `local` names: a declaration, an import, or a binding that
+    /// mints no node.
+    ExportLocal { local: String, exported: String, line: u32 },
+    /// TypeScript / JavaScript (DT.1q), recorded by the TS parser on the file
+    /// MODULE, read by `graph/src/imports/reexports.rs`; build-time only:
+    /// every name this file's own `export` declarations export, sorted and
+    /// deduped, whether or not it mints a node (a class, function, overload
+    /// signature, interface, type alias, enum, namespace, `declare` form,
+    /// `export import A = ..`, each `const` / `let` / `var` binding, and
+    /// `default` for `export default ..`). One fact per file with any name.
+    /// ES star re-exports pass only exported names, so a private helper never
+    /// leaks through a star.
+    Exports { names: Vec<String> },
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,

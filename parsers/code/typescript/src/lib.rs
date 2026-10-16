@@ -14,7 +14,7 @@
 //! All code-domain primitives live in `glia-code-domain` and are
 //! re-exported from this crate for convenience.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use glia_code_domain::NavFact;
 use glia_code_domain::data_entity;
@@ -103,6 +103,12 @@ fn parse_file_stats(
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
         visit_top(child, src, file_rel_path, module_qname, module_id, repo, &mut acc);
+    }
+    // DT.1q: the names the file's own `export` declarations export, one fact
+    // on the file MODULE (the graph's re-export resolution reads it).
+    if !acc.exported.is_empty() {
+        let names = acc.exported.iter().cloned().collect();
+        acc.nav.record_fact(module_id, NavFact::Exports { names });
     }
 
     // DF.22a: every import is read now, so the `inject(T)`-shaped locals take
@@ -317,6 +323,10 @@ struct Acc {
     /// DF.22a: `(scope, local)` -> what gave the local its first typed record.
     /// Read only by the `[ts-locals]` marker ([`local_stats`]).
     local_src: HashMap<(NodeId, String), LocalSrc>,
+    /// DT.1q: every name the file's own `export` declarations export
+    /// ([`record_exported_names`]), recorded as one [`NavFact::Exports`] on the
+    /// file MODULE after the visit loop.
+    exported: BTreeSet<String>,
 }
 
 /// DF.22a: what typed a local of a TS-family callable, for the `[ts-locals]`
@@ -659,6 +669,8 @@ fn visit_top(
         "import_statement" => collect_import(n, src, module_qname, acc),
         "export_statement" => {
             if let Some(decl) = n.child_by_field_name("declaration") {
+                // DT.1q: the names this declaration exports, node or not.
+                record_exported_names(n, decl, src, acc);
                 // G19: surface module-level exported data constants
                 // (`export const NAME = ...`) as STATE_VAR nodes. Arrow/function
                 // consts are still hoisted to Function nodes by visit_lexical.
@@ -666,6 +678,11 @@ fn visit_top(
                     visit_exported_const(decl, src, file_rel, module_qname, module_id, repo, acc);
                 }
                 visit_top(decl, src, file_rel, module_qname, module_id, repo, acc);
+            } else if n.child_by_field_name("value").is_some() {
+                // DT.1q: `export default <expr>;`.
+                acc.exported.insert(DEFAULT_EXPORT.to_string());
+            } else {
+                collect_reexport(n, src, module_id, acc);
             }
         }
         // CH.1: `abstract class X` is its own node kind with the same fields
@@ -696,6 +713,158 @@ fn visit_top(
             collect_calls_in(n, src, module_id, None, acc);
         }
         _ => {}
+    }
+}
+
+// ============================================================================
+// Exports and re-exports (DT.1q)
+// ============================================================================
+
+/// DT.1q: the export name of `export default ..` (ECMA-262's `"default"`):
+/// what a default import (`import X from`) names.
+const DEFAULT_EXPORT: &str = "default";
+
+/// DT.1q: insert into `acc.exported` every name `export <decl>` exports.
+/// `export default <decl>` exports `default` only (`export default class K`
+/// binds `K` in the file but exports no `K`). Otherwise the declaration's
+/// own name (a class, abstract class, function, generator, overload
+/// signature, interface, type alias, enum), an identifier-named namespace
+/// (`export namespace A.B` exports `A`), `export import A = B.C`, each
+/// `const` / `let` / `var` binding (every identifier of a destructuring
+/// pattern), and an `ambient_declaration`'s inner declaration (`export
+/// declare ..`). An ambient `declare module 'x'` exports nothing. Whether a
+/// name mints a node is the graph's question, not this one's.
+fn record_exported_names(stmt: TsNode, decl: TsNode, src: &[u8], acc: &mut Acc) {
+    let mut c = stmt.walk();
+    if stmt.children(&mut c).any(|ch| ch.kind() == "default") {
+        acc.exported.insert(DEFAULT_EXPORT.to_string());
+        return;
+    }
+    declared_names(decl, src, &mut acc.exported);
+}
+
+/// DT.1q: the names declaration `decl` binds at module scope, for
+/// [`record_exported_names`].
+fn declared_names(decl: TsNode, src: &[u8], out: &mut BTreeSet<String>) {
+    match decl.kind() {
+        "class_declaration"
+        | "abstract_class_declaration"
+        | "function_declaration"
+        | "generator_function_declaration"
+        | "function_signature"
+        | "interface_declaration"
+        | "type_alias_declaration"
+        | "enum_declaration" => {
+            if let Some(name) = child_text(decl, "name", src) {
+                out.insert(name.to_string());
+            }
+        }
+        "internal_module" | "module" => {
+            let Some(name) = decl.child_by_field_name("name") else { return };
+            match name.kind() {
+                "identifier" => {
+                    out.insert(text(name, src).to_string());
+                }
+                // `namespace A.B {}` binds `A`.
+                "nested_identifier" => {
+                    let full = text(name, src);
+                    if let Some(first) = full.split('.').next().map(str::trim)
+                        && !first.is_empty()
+                    {
+                        out.insert(first.to_string());
+                    }
+                }
+                // `declare module 'x' {}` binds no name.
+                _ => {}
+            }
+        }
+        "import_alias" => {
+            let mut c = decl.walk();
+            if let Some(id) = decl.named_children(&mut c).find(|ch| ch.kind() == "identifier") {
+                out.insert(text(id, src).to_string());
+            }
+        }
+        "lexical_declaration" | "variable_declaration" => {
+            let mut c = decl.walk();
+            for declarator in decl.named_children(&mut c) {
+                if declarator.kind() != "variable_declarator" {
+                    continue;
+                }
+                // Every identifier a destructuring pattern binds (DF.22a's
+                // walk): `export const { a, b: c } = o` exports `a c`.
+                if let Some(name) = declarator.child_by_field_name("name") {
+                    out.extend(pattern_names(name, src).into_iter().map(str::to_string));
+                }
+            }
+        }
+        "ambient_declaration" => {
+            let mut c = decl.walk();
+            for inner in decl.named_children(&mut c) {
+                declared_names(inner, src, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// DT.1q: an `export` statement with no declaration and no default value,
+/// as [`NavFact`]s on the file MODULE, `line` its 0-based row:
+/// `export * as ns from 's'` -> [`NavFact::ReExportNamespace`], each
+/// specifier of `export { a as b } from 's'` -> [`NavFact::ReExportName`],
+/// of a from-less `export { a as b }` -> [`NavFact::ExportLocal`], and
+/// `export * from 's'` -> [`NavFact::ReExportStar`]. `export = x` and
+/// `export as namespace X` record nothing. A `type` / `typeof` keyword on
+/// the statement or a specifier is ignored: a type-only re-export binds
+/// like any other, since heritage and receiver typing read types.
+fn collect_reexport(n: TsNode, src: &[u8], module_id: NodeId, acc: &mut Acc) {
+    let line = line_at(n);
+    let source = n.child_by_field_name("source").map(|s| strip_string_quotes(text(s, src)));
+    let mut clause_or_ns = false;
+    let mut c = n.walk();
+    for child in n.named_children(&mut c) {
+        match child.kind() {
+            "namespace_export" => {
+                clause_or_ns = true;
+                let Some(source) = source.clone() else { continue };
+                let mut nc = child.walk();
+                let Some(name) = child
+                    .named_children(&mut nc)
+                    .find(|x| matches!(x.kind(), "identifier" | "string"))
+                else {
+                    continue;
+                };
+                let exported = strip_string_quotes(text(name, src));
+                acc.nav.record_fact(module_id, NavFact::ReExportNamespace { source, exported, line });
+            }
+            "export_clause" => {
+                clause_or_ns = true;
+                let mut sc = child.walk();
+                for spec in child.named_children(&mut sc) {
+                    if spec.kind() != "export_specifier" {
+                        continue;
+                    }
+                    let Some(name_n) = spec.child_by_field_name("name") else { continue };
+                    let name = strip_string_quotes(text(name_n, src));
+                    let exported = spec
+                        .child_by_field_name("alias")
+                        .map_or_else(|| name.clone(), |a| strip_string_quotes(text(a, src)));
+                    let fact = match &source {
+                        Some(source) => NavFact::ReExportName {
+                            source: source.clone(),
+                            name,
+                            exported,
+                            line,
+                        },
+                        None => NavFact::ExportLocal { local: name, exported, line },
+                    };
+                    acc.nav.record_fact(module_id, fact);
+                }
+            }
+            _ => {}
+        }
+    }
+    if !clause_or_ns && let Some(source) = source {
+        acc.nav.record_fact(module_id, NavFact::ReExportStar { source, line });
     }
 }
 
@@ -10994,5 +11163,137 @@ mod wire_shape_tests {
             assert_eq!(shape.to_json(), raw, "{key}");
             assert!(hit.contains(&raw), "{key}: {hit}");
         }
+    }
+}
+
+#[cfg(test)]
+mod reexport_tests {
+    //! DT.1q: the export facts the graph's re-export resolution reads.
+    use super::*;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts-reexports")
+    }
+
+    /// The facts recorded on the file MODULE `src::<stem>` of `src`.
+    fn facts(src: &str, path: &str) -> Vec<NavFact> {
+        let stem = path.trim_start_matches("src/").rsplit_once('.').map_or(path, |(s, _)| s);
+        let qname = format!("src::{stem}");
+        let parse = parse_file(src, path, &qname, repo()).expect("parse");
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, &qname);
+        parse.nav.nav_facts.get(&module).cloned().unwrap_or_default()
+    }
+
+    fn star(source: &str, line: u32) -> NavFact {
+        NavFact::ReExportStar { source: source.into(), line }
+    }
+
+    fn named(source: &str, name: &str, exported: &str, line: u32) -> NavFact {
+        NavFact::ReExportName { source: source.into(), name: name.into(), exported: exported.into(), line }
+    }
+
+    fn local(local: &str, exported: &str, line: u32) -> NavFact {
+        NavFact::ExportLocal { local: local.into(), exported: exported.into(), line }
+    }
+
+    fn exports(names: &[&str]) -> NavFact {
+        NavFact::Exports { names: names.iter().map(|n| n.to_string()).collect() }
+    }
+
+    #[test]
+    fn reexport_statements_are_recorded() {
+        let src = "\
+export * from './models';
+export * as fmt from './util/format';
+export { A, B as C } from \"./ab\";
+export type { T } from './types';
+export { default as D, E as default } from './d';
+export { \"a-b\" as ab } from './kebab';
+";
+        assert_eq!(
+            facts(src, "src/index.ts"),
+            [
+                star("./models", 0),
+                NavFact::ReExportNamespace { source: "./util/format".into(), exported: "fmt".into(), line: 1 },
+                named("./ab", "A", "A", 2),
+                named("./ab", "B", "C", 2),
+                named("./types", "T", "T", 3),
+                // tree-sitter lexes `default` in a specifier as an identifier.
+                named("./d", "default", "D", 4),
+                named("./d", "E", "default", 4),
+                named("./kebab", "a-b", "ab", 5),
+            ]
+        );
+    }
+
+    #[test]
+    fn from_less_export_clause_records_export_local() {
+        let src = "\
+import { User } from './user.model';
+const KEY = 'k';
+export { User as Customer, KEY };
+export type { User };
+export = KEY;
+";
+        assert_eq!(
+            facts(src, "src/order.model.ts"),
+            [local("User", "Customer", 2), local("KEY", "KEY", 2), local("User", "User", 3)]
+        );
+    }
+
+    #[test]
+    fn exported_declarations_record_one_exports_fact() {
+        let src = "\
+export class A {}
+export abstract class B {}
+export function f() {}
+export function g(a: string): void;
+export function g(a: any) {}
+export function sig(a: string): void;
+export declare function df(): void;
+export const c1 = 1, c2 = () => 2;
+export const { d1, d2: e2, ...rest } = obj;
+export let l = 0;
+export interface I {}
+export type T = string;
+export enum E { X }
+export namespace N.Inner { export const z = 1; }
+export declare const decl: number;
+export default class K {}
+class Private {}
+function helper() {}
+";
+        let got = facts(src, "src/decls.ts");
+        assert_eq!(
+            got,
+            [exports(&[
+                "A", "B", "E", "I", "N", "T", "c1", "c2", "d1", "decl", "default", "df", "e2", "f", "g",
+                "l", "rest", "sig",
+            ])]
+        );
+        // The non-exported class and `K` (exported as `default` only) are
+        // absent; the namespace's inner export is no module export.
+        let NavFact::Exports { names } = &got[0] else { unreachable!() };
+        for absent in ["Private", "helper", "K", "z", "Inner"] {
+            assert!(!names.iter().any(|n| n == absent), "{absent}");
+        }
+    }
+
+    #[test]
+    fn export_default_expression_exports_default() {
+        assert_eq!(facts("export default { name: 'x' };\n", "src/cfg.ts"), [exports(&["default"])]);
+        assert_eq!(facts("export default function () {}\n", "src/fn.ts"), [exports(&["default"])]);
+        // `export as namespace` and a plain file record nothing.
+        assert!(facts("export as namespace Lib;\n", "src/umd.ts").is_empty());
+        assert!(facts("const x = 1;\n", "src/plain.ts").is_empty());
+    }
+
+    #[test]
+    fn a_js_path_records_the_same_facts() {
+        let src = "export * from './badge';\nexport function local() {}\n";
+        let ts = facts(src, "src/shared.ts");
+        assert_eq!(ts, [star("./badge", 0), exports(&["local"])]);
+        assert_eq!(facts(src, "src/shared.js"), ts);
+        assert_eq!(facts(src, "src/shared.jsx"), ts);
     }
 }

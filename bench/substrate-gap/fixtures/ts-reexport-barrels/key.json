@@ -1,0 +1,35 @@
+{
+  "framework": "ts-reexport-barrels",
+  "language": "typescript",
+  "dirs": ["."],
+  "expect_edges": [
+    {"from": "web::src::app::core::index", "to": "web::src::app::core::models::index", "category": "IMPORTS", "exact": true, "note": "`export * from './models'`: a directory source, models/index.ts (DT.1b's order), rule reexport"},
+    {"from": "web::src::app::core::index", "to": "web::src::app::core::services::index", "category": "IMPORTS", "exact": true},
+    {"from": "web::src::app::core::index", "to": "web::src::app::core::util::format", "category": "IMPORTS", "exact": true, "note": "`export * as fmt from './util/format'`"},
+    {"from": "web::src::app::core::models::index", "to": "web::src::app::core::models::user.model", "category": "IMPORTS", "exact": true},
+    {"from": "web::src::app::core::models::index", "to": "web::src::app::core::models::order.model", "category": "IMPORTS", "exact": true},
+    {"from": "web::src::app::core::services::index", "to": "web::src::app::core::services::user.service", "category": "IMPORTS", "exact": true},
+    {"from": "web::src::app::core::services::index", "to": "web::src::app::core::services::audit", "category": "IMPORTS", "exact": true, "note": "`export { AuditLog as Journal } from './audit'`"},
+    {"from": "web::src::app::shared::index", "to": "web::src::app::shared::badge", "category": "IMPORTS", "exact": true, "note": "a .js barrel"},
+    {"from": "web::src::app::features::profile::profile.page::ProfilePage", "to": "web::src::app::core::services::user.service::UserService", "category": "INJECTS", "exact": true, "note": "through @app/core -> services/index; legacy/user.service.ts also declares UserService, so global_unique refuses at HEAD"},
+    {"from": "web::src::app::features::profile::profile.page::ProfilePage", "to": "web::src::app::core::services::audit::AuditLog", "category": "INJECTS", "exact": true, "note": "Journal, the renamed named re-export"},
+    {"from": "web::src::app::features::profile::profile.page::ProfilePage::load", "to": "web::src::app::core::services::user.service::UserService::find", "category": "CALLS", "exact": true},
+    {"from": "web::src::app::features::profile::profile.page::ProfilePage::load", "to": "web::src::app::core::services::audit::AuditLog::record", "category": "CALLS", "exact": true},
+    {"from": "web::src::app::features::profile::profile.page::ProfilePage::load", "to": "web::src::app::core::util::format::shout", "category": "CALLS", "exact": true, "note": "fmt.shout(): the namespace re-export binds the MODULE"},
+    {"from": "web::src::app::features::orders::order-list.service::OrderListService::total", "to": "web::src::app::core::models::order.model::orderTotal", "category": "CALLS", "exact": true, "note": "two barrel levels: @app/core -> models/index -> order.model"},
+    {"from": "web::src::app::features::orders::order-list.service::OrderListService::label", "to": "web::src::app::shared::badge::badgeLabel", "category": "CALLS", "exact": true, "note": "@app/* wildcard alias -> shared/ (dir_index) -> index.js star"},
+    {"from": "web::src::app::features::profile::vip::VipCustomer", "to": "web::src::app::core::models::user.model::User", "category": "INHERITS_FROM", "exact": true, "note": "order.model.ts imports User and exports it as Customer; models/index and core/index star it"}
+  ],
+  "forbid": [
+    {"from": "web::src::app::features::profile::profile.page::ProfilePage::load", "to": "web::src::app::core::models::user.model::displayName", "category": "CALLS"},
+    {"from": "web::src::app::features::profile::profile.page::ProfilePage::load", "to": "web::src::app::core::models::order.model::displayName", "category": "CALLS"},
+    {"from": "web::src::app::features::profile::profile.page::ProfilePage", "to": "web::src::app::legacy::user.service::UserService", "category": "INJECTS"},
+    {"from": "web::src::app::features::profile::profile.page::ProfilePage::load", "to": "web::src::app::legacy::user.service::UserService::find", "category": "CALLS"},
+    {"from": "web::src::app::features::profile::profile.page::ProfilePage::load", "to": "web::src::app::legacy::user.service::shout", "category": "CALLS"},
+    {"from": "web::src::app::core::index", "to": "web::src::app::core::models::user.model", "category": "IMPORTS"},
+    {"from": "web::src::app::features::profile::profile.page", "to": "web::src::app::core::services::user.service", "category": "IMPORTS"},
+    {"from": "web::src::app::features::reports::report.page::ReportPage", "to": "web::src::app::core::services::audit::AuditLog", "category": "INJECTS", "note": "report.page imports Journal from the npm package journal-lib: the barrels' renamed `Journal` must not answer the name-only global_unique fallback"},
+    {"from": "web::src::app::features::reports::report.page::ReportPage::ngOnInit", "to": "web::src::app::core::services::audit::AuditLog::record", "category": "CALLS", "note": "the same guess through receiver typing's unique_global_function fallback"}
+  ],
+  "note": "DT.1q (T13): TS / JS re-export barrels, in quokka-stack a77d4cb's shape. There, 32 files import 118 names from '@app/core' through core/index.ts -> models|services/index.ts stars, and before this packet none of them binds. Kina 8ac238c's features/wallet/index.ts is 7 named re-export statements. Baseline (debug CLI, verifier copy): expect_edges 0/16, FORBID VIOLATIONS 0, dead_symbol 20. displayName is exported by both star sources of models/index.ts as distinct declarations: ECMA-262 ResolveExport makes it ambiguous at models/index and at core/index, so it binds nothing (forbid 1-2). legacy/user.service.ts is the same-named decoy a name guess would take (forbid 3-5). A barrel IMPORTS only the modules it names, and an importer gains no IMPORTS shortcut to the declaring module (forbid 6-7). A renamed re-export stays out of the name-indexed module_symbols, so an externally imported Journal binds nothing (forbid 8-9)."
+}
