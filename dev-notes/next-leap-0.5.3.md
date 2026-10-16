@@ -137,6 +137,20 @@ links, so they must survive a rename.
   the qname binds, report it (`target`), never pick silently. No 0.5.2 packet owns `cli/src/cmd/store/cell.rs` or
   `py/src/cells.rs`. Interim for any writer on 0.5.2: build first (`glia build`), then `cell set`, so the store
   captures the hint.
+- **Engram ask: the repo's identifier vocabulary** (engram-34, 2026-10-16; James picked 0.5.3).
+  `glia-export-engram --vocab` writes `<out>.vocab.jsonl`: every identifier-like token (`[A-Za-z_][A-Za-z0-9_]*`,
+  3+ chars) in the repo's tracked text at the exported commit, including everything the export filters (tests,
+  generated, vendored, noise, non-code); rows `{"t", "files": [file ids], "n"}` with `files` capped at 16 (`"common":
+  true` past it), sorted by token, bound to the gmap by digest like `.ppr.jsonl`. Why: Engram's "(not in memory: X)"
+  note caught 60/60 never-existed names on Kina and 43/60 on glia with 0 false flags, but only 0.74 / 0.61 of what it
+  flagged is truly absent from the repo; the rest are real names the export never emits as symbols (locals, fields,
+  keys, filtered paths), and only glia sees the whole tracked text. Engram uses it under its own rule (a live A/B for
+  the note; name -> files as a needle-tested pool source). Measured on glia's tree (2026-10-16, Engram's rule, a
+  Python count over `git ls-files`): 3,640 text files (33.2 MB), 52,764 tokens, 4,779 in more than 16 files; 2.7 MB of
+  JSONL per export, 0.6 MB deflated. Spec questions: tracked files from the git index vs the walk (which also reads
+  untracked, unignored files); a full file per `--since` step vs a token / file diff. Substrate value beyond Engram:
+  `find`'s absence could say "no node named X, but X occurs in <files>" (a FACT-tier "named but not modelled"
+  signal, and a blind-spot candidate for `gaps`).
 - **Spec item: scope-level conventions.** In glia, CONV is a free-text note on ONE node (overlay `[[note]]`; the
   format spec's "conversation history"), not a convention. A convention that covers a scope ("modals are centred,
   never bottom-anchored": every modal component) has no home: until it has one, Engram writes it as a CONV note on the
