@@ -116,6 +116,23 @@ links, so they must survive a rename.
   for any writer: the writer owns its rows, glia never deletes another source's rows, an orphan is kept, reported and
   attached to nothing, and the writer re-anchors or deletes it on its next write; an entry `id` is a hash of the
   correction's content.
+- **Engram's corrections writer, scoped** (engram-34, 2026-10-16, with James's rulings: code-naming corrections only;
+  Engram writes `.glia/cells.jsonl` and never commits it, James commits; the live writer reads the session transcript at
+  sleep, the hook log stays text-free). DECISION = a choice about what specific code does or keeps; process rules are
+  never exported. Few rows (Engram's read: about 7 of 46 recorded corrections name code, all Kina; 0 for glia). The
+  node is picked from the Symbol facts the corrected edits touched (or "no node", no row); `qname` + glia's
+  `identity_hint`, no `kind`. One row per (node, class), rewritten in place; `id = "engram:" + hash(class key + node
+  hint)`, `source = "api"`; written at each Engram sleep, only Engram's own rows touched. glia's answers to its
+  questions (from the code): free-form ids of 1..=128 chars; extra entry keys are stored but unread, so the why stays
+  in `text`; qname + hint binds without `kind` unless two same-qname nodes defeat the hint (`ambiguous`, nothing
+  applied); other writers exist (`glia cell` CLI, pyo3 `set_cell` / `write_cell`), so a writer takes
+  `.glia/cells.lock` (exclusive create, 30 s stale) or shells out to `glia cell set`, which adds validation and
+  redaction.
+- **Spec item: scope-level conventions.** In glia, CONV is a free-text note on ONE node (overlay `[[note]]`; the
+  format spec's "conversation history"), not a convention. A convention that covers a scope ("modals are centred,
+  never bottom-anchored": every modal component) has no home: until it has one, Engram writes it as a CONV note on the
+  corrected node (`convention: ...`). The spec run decides whether a convention attaches to a module / component /
+  project scope (the reflexion model's components are a candidate anchor) and which answers show it.
 - **Engram's half** (corrections, its own eval rule: a new candidate source enters its pool as a weight-0 feature and
   stays only if it beats its ablation) is a handoff ask, not a packet: `dev-notes/engram-ask-0.5.3.md`, unsent.
   Learning from use (the release gate over agent-session history) stays Engram's: glia has no session data.
