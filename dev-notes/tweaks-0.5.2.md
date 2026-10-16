@@ -55,7 +55,8 @@ Not testable here: GraphQL (neither repo uses it).
 
 ## Who does what, in order (the one plan every session follows)
 
-1. **glia (this session):** the tweak packets T1-T13 run as 0.5.2 waves W15+ with the usual close-outs, then a closing
+1. **glia (this session): DONE 2026-10-17** (W15-W26, 58 DT packets, close-out `ac5d2d5b`: 6217 tests, 414 fixtures
+   clean, matrix 346 full / 0 partial / 0 none). The tweak packets T1-T13 ran as 0.5.2 waves W15+ with the usual close-outs, then a closing
    docs packet that also updates the three DZ.2 handoffs with every new break. 0.5.2 is then code-complete again.
 2. **James:** tests 0.5.2 (Kina, quokka-stack, examples-glia); any tweak he finds lands on main first.
 3. **No 0.5.2 release** (James, 2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*, *"yeah sounds fine"*). The

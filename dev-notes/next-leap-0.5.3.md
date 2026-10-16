@@ -657,6 +657,20 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   The move test is the missing user of engine/tests/git_fixture's `git_mv` (the contract_breaks crate's dead_code warning).
 - W25 (DT.1p, DT.1m): WirePair.client_model is None for a union client root, so a union-judged model break is keyed on
   its ENDPOINT, not the model; naming the picked member there would fold it into the model pair's row.
+- W26 (DT.13, DT.1p): cli/src/cmd/contracts.rs's module doc and `--fields` help name only http_model / client_contract;
+  add graphql_selection (regenerate cli/surface/contracts.txt if the help text is in it).
+- W26 (DT.13; DT.11c, DT.6b, DT.3c): docs/overlay.md has no text for the implied GraphQL transport exemption and the
+  `graphql transport; ` detail, the withheld test-file routes or WS-served routes (the skills and CLAUDE.md carry them).
+- W26 (DT.13, DT.1k): engine/src/contract_fields.rs element_kind reads an envelope-or-array client union
+  (`{ activities: C[] } | C[]`) as no kind, so a pair the models pass confirms stays client_type_unresolved (quokka-stack
+  52 rows); it should read graph::resolvers::models::union_member (made pub(crate) / pub on the graph crate).
+- W26 (DT.13, DT.11z): a WebSocket base bound once per deployment (environment.ts + environment.prod.ts) stays unfolded;
+  port endpoint_fold::deployment_hosts to WS_CLIENT.
+- W26 (DT.13, DT.5g): a getter read through a typed receiver or injected field (`this.authService.isAuthenticated`)
+  should be a CALLS of the other class's accessor in graph/src/calls.rs's receiver pass (quokka-stack has 2).
+- W26 (DT.13), for the combined repo-graph handoff: optional wrapper fixes - `_dial_text` returns None for an HTTP
+  call-site payload (has `method`; DT.11b's GraphQL transport hits end `"via":"graphql"`) and renders `via=evm` hits by
+  library / ABI; `_cell_text` could render SCHEMA_FIELDS as `name: type` pairs.
 
 ## 3. Open questions for James
 
