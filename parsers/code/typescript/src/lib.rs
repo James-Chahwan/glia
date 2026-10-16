@@ -327,6 +327,59 @@ struct Acc {
     /// ([`record_exported_names`]), recorded as one [`NavFact::Exports`] on the
     /// file MODULE after the visit loop.
     exported: BTreeSet<String>,
+    /// DT.5g: bare identifiers read as a value ([`record_value_ref`]), one
+    /// per `(from, name)` in walk order with every site. Bound in
+    /// `resolve_intra_file` once every top-level declaration, import and
+    /// local of the file is known.
+    value_refs: Vec<ValueRef>,
+    /// DT.5g: `(from, name)` -> its index in `value_refs`.
+    value_ref_seen: HashMap<(NodeId, String), usize>,
+    /// DT.5g: names a nested `function` / `class` declaration binds inside a
+    /// walked body, per scope (the call walk skips the declaration itself):
+    /// they shadow a top-level symbol of that name, as a local does.
+    nested_decls: HashSet<(NodeId, String)>,
+    /// DT.5g: this file's top-level CLASSes by name (an `abstract class`
+    /// included), the in-file targets of a value reference.
+    classes: HashMap<String, NodeId>,
+    /// DT.5g: the module-level STATE_VARs G19 minted (`export const X = ..`),
+    /// by name: a value reference's in-file target, and the `from` of the
+    /// const's own initialiser walk.
+    const_vars: HashMap<String, NodeId>,
+    /// DT.5g: `this.<name>` read as the object of a further member read
+    /// (`this.form.value`) or written (`this.x = v`), as `(from, class, name,
+    /// row, write)`, one per `(from, name, write)` at its first source row.
+    /// Only an accessor target becomes an edge: a CALLS of the getter
+    /// (`accessor_read`) or setter (`accessor_write`). CH.4's `this_refs`
+    /// holds the plain value reads.
+    accessor_refs: Vec<(NodeId, NodeId, String, u32, bool)>,
+    /// DT.5g: `(from, name, write)` -> its index in `accessor_refs`.
+    accessor_ref_seen: HashMap<(NodeId, String, bool), usize>,
+    /// DT.5g: the `[ts-value-refs]` walk counters.
+    value_stats: ValueRefStats,
+}
+
+/// DT.5g: a bare identifier read as a value by `from` (an argument, an array
+/// element, an object value, a shorthand property, `export default x`).
+struct ValueRef {
+    from: NodeId,
+    name: String,
+    /// Each site as `(0-based row, callee)`: the callee identifier when the
+    /// site is a call's argument (`inject(AuthService)` -> `inject`). An
+    /// `inject` import binding's argument is DI (A7.1 / DF.22a), never a
+    /// value reference, so the edge's row (LC.3b) is the first site that is
+    /// not one.
+    sites: Vec<(u32, Option<String>)>,
+}
+
+/// DT.5g: what one file's walks fed the value references (the
+/// `[ts-value-refs]` marker's `const_inits=` / `decorators=`).
+#[derive(Default, Clone, Copy)]
+struct ValueRefStats {
+    /// Module-level `const X = <value>` initialisers walked (a function-valued
+    /// const is a FUNCTION, walked by `emit_function_value`, and not counted).
+    const_inits: usize,
+    /// Class decorators whose call arguments were walked as the class's code.
+    decorators: usize,
 }
 
 /// DF.22a: what typed a local of a TS-family callable, for the `[ts-locals]`
@@ -678,9 +731,14 @@ fn visit_top(
                     visit_exported_const(decl, src, file_rel, module_qname, module_id, repo, acc);
                 }
                 visit_top(decl, src, file_rel, module_qname, module_id, repo, acc);
-            } else if n.child_by_field_name("value").is_some() {
+            } else if let Some(value) = n.child_by_field_name("value") {
                 // DT.1q: `export default <expr>;`.
                 acc.exported.insert(DEFAULT_EXPORT.to_string());
+                // DT.5g: `export default bootstrap;` reads `bootstrap` as a
+                // value, the MODULE's.
+                if value.kind() == "identifier" {
+                    push_value_ref(acc, module_id, text(value, src), line_at(value), None);
+                }
             } else {
                 collect_reexport(n, src, module_id, acc);
             }
@@ -908,8 +966,25 @@ fn visit_class(
     });
     acc.nav
         .record(class_id, name, &class_qname, node_kind::CLASS, Some(module_id));
+    acc.classes.entry(name.to_string()).or_insert(class_id);
     if n.kind() == "abstract_class_declaration" {
         acc.abstract_stats.classes += 1;
+    }
+    // DT.5g: a class decorator's arguments run as the class's own code:
+    // `@Component({ imports: [TimeAgoPipe], providers: [..] })`, `@NgModule({
+    // declarations: [..] })`, `@Module({ controllers: [..] })`. Their calls
+    // and value references are the class's; the decorator callee itself is
+    // no CallSite (a decorator is applied, not called by the source).
+    for dec in class_decorators(n) {
+        let mut dc = dec.walk();
+        let Some(call) = dec.named_children(&mut dc).find(|c| c.kind() == "call_expression") else {
+            continue;
+        };
+        let Some(args) = call.child_by_field_name("arguments") else {
+            continue;
+        };
+        collect_calls_in(args, src, class_id, Some(class_id), acc);
+        acc.value_stats.decorators += 1;
     }
 
     // Class heritage: `class X extends Y implements I, J`.
@@ -2317,6 +2392,10 @@ fn visit_lexical(
 ) {
     // `const foo = () => {...}` or `const foo = function(){...}` are hoisted
     // to Function nodes. Other const/let bindings are data, not behaviour.
+    let is_const = {
+        let mut c = n.walk();
+        n.children(&mut c).any(|ch| ch.kind() == "const")
+    };
     let mut cursor = n.walk();
     for declarator in n.named_children(&mut cursor) {
         if declarator.kind() != "variable_declarator" {
@@ -2325,10 +2404,25 @@ fn visit_lexical(
         let Some(value) = declarator.child_by_field_name("value") else {
             continue;
         };
+        let name_n = declarator.child_by_field_name("name");
         if !matches!(value.kind(), "arrow_function" | "function_expression") {
+            // DT.5g: a module-level `const X = <value>` runs its initialiser
+            // at load: `export const appConfig = { providers: [provideI18n()]
+            // }`, `const WIZARD = ROUTES.filter(r => isWizard(r.path))`. Its
+            // calls, client HTTP calls and value references are X's STATE_VAR's
+            // when G19 minted one (visit_exported_const ran first), else the
+            // MODULE's, as a top-level expression statement's are.
+            if is_const {
+                let from = name_n
+                    .filter(|nn| nn.kind() == "identifier")
+                    .and_then(|nn| acc.const_vars.get(text(nn, src)).copied())
+                    .unwrap_or(module_id);
+                collect_calls_in(value, src, from, None, acc);
+                acc.value_stats.const_inits += 1;
+            }
             continue;
         }
-        let Some(name_n) = declarator.child_by_field_name("name") else {
+        let Some(name_n) = name_n else {
             continue;
         };
         if name_n.kind() != "identifier" {
@@ -2437,6 +2531,9 @@ fn visit_exported_const(
             node_kind::STATE_VAR,
             Some(module_id),
         );
+        // DT.5g: the in-file target of a value reference, and the `from` of
+        // this const's initialiser walk (visit_lexical, which runs next).
+        acc.const_vars.entry(name.to_string()).or_insert(const_id);
     }
 }
 
@@ -2666,7 +2763,20 @@ fn collect_calls_in(
                 | "abstract_class_declaration"
                 | "class_expression"
         ) {
+            // DT.5g: a nested `function f() {}` / `class K {}` binds `f` / `K`
+            // in the walked body, shadowing a top-level symbol of that name.
+            if matches!(
+                kind,
+                "function_declaration" | "class_declaration" | "abstract_class_declaration"
+            ) && let Some(name) = child_text(node, "name", src)
+            {
+                acc.nested_decls.insert((from, name.to_string()));
+            }
             continue;
+        }
+        // DT.5g: a bare identifier passed by value.
+        if matches!(kind, "identifier" | "shorthand_property_identifier") {
+            record_value_ref(node, src, from, acc);
         }
         if kind == "call_expression" {
             if let Some(q) = extract_call_qualifier(node, src) {
@@ -2747,6 +2857,12 @@ fn record_member_ref(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
 /// enclosing class (a module-level walk) records nothing. Whether the name is
 /// the class's METHOD (not a data field or a CH.2 STATE_VAR) is decided in
 /// `resolve_intra_file`, once every member of the class is known.
+///
+/// DT.5g: the two skipped reads are kept for the accessor CALLS
+/// ([`record_accessor_ref`]): an assignment target is a write (a setter runs),
+/// a further member read's object a read (a getter runs). A value read naming
+/// an accessor (`${this.apiUrl}/trades`) becomes its `accessor_read` CALLS in
+/// `resolve_intra_file`, through CH.4's own list.
 fn record_this_ref(
     node: TsNode,
     src: &[u8],
@@ -2771,22 +2887,29 @@ fn record_this_ref(
     {
         return;
     }
+    let name = text(property, src).to_string();
+    let row = line_at(node);
     if let Some(parent) = node.parent() {
         let is = |field: &str| parent.child_by_field_name(field) == Some(node);
         match parent.kind() {
             "call_expression" if is("function") => return,
-            "assignment_expression" | "augmented_assignment_expression" if is("left") => return,
+            // DT.5g: a write runs a setter; a further member read
+            // (`this.form.value`) runs a getter. Kept for the accessor CALLS
+            // only: neither passes a method by value.
+            "assignment_expression" | "augmented_assignment_expression" if is("left") => {
+                record_accessor_ref(acc, from, class, name, row, true);
+                return;
+            }
             "member_expression" if is("object") => {
                 let via = parent.child_by_field_name("property").map(|p| text(p, src));
                 if !matches!(via, Some("bind" | "call" | "apply")) {
+                    record_accessor_ref(acc, from, class, name, row, false);
                     return;
                 }
             }
             _ => {}
         }
     }
-    let name = text(property, src).to_string();
-    let row = line_at(node);
     match acc.this_ref_seen.get(&(from, name.clone())) {
         Some(&i) => {
             if let Some(entry) = acc.this_refs.get_mut(i) {
@@ -2796,6 +2919,90 @@ fn record_this_ref(
         None => {
             acc.this_ref_seen.insert((from, name.clone()), acc.this_refs.len());
             acc.this_refs.push((from, class, name, row));
+        }
+    }
+}
+
+/// DT.5g: record a `this.<name>` member read (`write` false) or assignment
+/// target (`write` true) of `class`, by `from`, once per `(from, name,
+/// write)` at its first source row (the call walk pops siblings right to
+/// left). Whether `name` is an accessor is decided in `resolve_intra_file`.
+fn record_accessor_ref(
+    acc: &mut Acc,
+    from: NodeId,
+    class: NodeId,
+    name: String,
+    row: u32,
+    write: bool,
+) {
+    let key = (from, name, write);
+    match acc.accessor_ref_seen.get(&key) {
+        Some(&i) => {
+            if let Some(entry) = acc.accessor_refs.get_mut(i) {
+                entry.3 = entry.3.min(row);
+            }
+        }
+        None => {
+            let (from, name, write) = key;
+            acc.accessor_ref_seen
+                .insert((from, name.clone(), write), acc.accessor_refs.len());
+            acc.accessor_refs.push((from, class, name, row, write));
+        }
+    }
+}
+
+/// DT.5g: record a bare identifier read as a VALUE by `from`, in one of the
+/// positions that hand a symbol on without calling it: a whole argument of
+/// a call or a `new` (`sort(byUrgency)`, `provideRouter(routes)`), an array
+/// element (`canActivate: [authGuard]`, `imports: [TimeAgoPipe]`), a pair's
+/// value (`useClass: AuthInterceptor`) or a shorthand property (`{ authGuard
+/// }`). `export default x` records through [`push_value_ref`] in `visit_top`.
+/// Not a value reference: a callee (a CallSite), a member's object
+/// (`environment.apiUrl`), a type, a destructuring pattern, an assignment
+/// target, a key. Whether the name binds (an in-file top-level declaration or
+/// a named import, neither shadowed by a local of `from`) is decided in
+/// `resolve_intra_file`.
+fn record_value_ref(node: TsNode, src: &[u8], from: NodeId, acc: &mut Acc) {
+    let Some(parent) = node.parent() else {
+        return;
+    };
+    let callee = match (node.kind(), parent.kind()) {
+        ("shorthand_property_identifier", "object") | ("identifier", "array") => None,
+        ("identifier", "pair") if parent.child_by_field_name("value") == Some(node) => None,
+        ("identifier", "arguments") => parent
+            .parent()
+            .filter(|p| matches!(p.kind(), "call_expression" | "new_expression"))
+            .and_then(|p| {
+                p.child_by_field_name("function")
+                    .or_else(|| p.child_by_field_name("constructor"))
+            })
+            .filter(|c| c.kind() == "identifier")
+            .map(|c| text(c, src).to_string()),
+        _ => return,
+    };
+    push_value_ref(acc, from, text(node, src), line_at(node), callee);
+}
+
+/// DT.5g: add a site of `name` read as a value by `from` at `row`, one
+/// [`ValueRef`] per `(from, name)` in walk order.
+fn push_value_ref(acc: &mut Acc, from: NodeId, name: &str, row: u32, callee: Option<String>) {
+    if name.is_empty() {
+        return;
+    }
+    match acc.value_ref_seen.get(&(from, name.to_string())) {
+        Some(&i) => {
+            if let Some(r) = acc.value_refs.get_mut(i) {
+                r.sites.push((row, callee));
+            }
+        }
+        None => {
+            acc.value_ref_seen
+                .insert((from, name.to_string()), acc.value_refs.len());
+            acc.value_refs.push(ValueRef {
+                from,
+                name: name.to_string(),
+                sites: vec![(row, callee)],
+            });
         }
     }
 }
@@ -5840,18 +6047,21 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     // by construction (`class_methods` is keyed by the enclosing class, so an
     // inherited method records nothing); METHOD targets only, since CH.2 maps
     // a STATE_VAR there too and a state read is never a USES, and no `get` /
-    // `set` accessor (`this.isDesktop` reads state through a getter); never a
-    // self-reference (`removeEventListener(.., this.onX)` inside `onX`).
+    // `set` accessor (`this.isDesktop` runs a getter: DT.5g's `accessor_read`
+    // CALLS below); never a self-reference (`removeEventListener(..,
+    // this.onX)` inside `onX`).
     let mut method_uses = 0usize;
     let mut method_targets: HashSet<NodeId> = HashSet::new();
+    let mut accessor_calls = AccessorCalls::default();
     for (from, class, name, row) in std::mem::take(&mut acc.this_refs) {
         let Some(&to) = acc.class_methods.get(&(class, name)) else {
             continue;
         };
-        if to == from
-            || out.nav.kind_by_id.get(&to) != Some(&node_kind::METHOD)
-            || acc.accessors.contains(&to)
-        {
+        if to == from || out.nav.kind_by_id.get(&to) != Some(&node_kind::METHOD) {
+            continue;
+        }
+        if acc.accessors.contains(&to) {
+            accessor_calls.add(from, to, row, false);
             continue;
         }
         let ev = evidence::Evidence::emitter(format!("parser:{}", lang_tag(&acc.file_rel)))
@@ -5889,6 +6099,110 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
             prefix.ambiguous,
             keys.into_iter().collect::<Vec<_>>().join(","),
             acc.file_rel
+        );
+    }
+
+    // DT.5g: a `this.<accessor>` read or write runs the getter / setter, a
+    // CALLS of it (rule `accessor_read` / `accessor_write`): the value reads
+    // CH.4's loop set aside, then the member reads and writes. Same class by
+    // construction, never a self-reference. After CH.3b's closure, which is
+    // read over the call edges it was specified on.
+    for (from, class, name, row, write) in std::mem::take(&mut acc.accessor_refs) {
+        let Some(&to) = acc.class_methods.get(&(class, name)) else {
+            continue;
+        };
+        if to != from && acc.accessors.contains(&to) {
+            accessor_calls.add(from, to, row, write);
+        }
+    }
+    let lang = lang_tag(&acc.file_rel);
+    let accessor_edges = accessor_calls.edges.len();
+    for (from, to, row, write) in accessor_calls.edges {
+        let rule = if write { "accessor_write" } else { "accessor_read" };
+        let ev = evidence::Evidence::emitter(format!("parser:{lang}"))
+            .rule(rule)
+            .line(row);
+        out.edges.push(
+            Edge::new(from, to, edge_category::CALLS, Confidence::Strong).with_cell(ev.to_cell()),
+        );
+    }
+
+    // DT.5g: a bare identifier passed by value names the symbol it binds: a
+    // USES from the scope that passes it. Not when a local, a parameter or a
+    // nested declaration of that scope shadows the name, and not an `inject`
+    // import binding's argument (DI). An in-file top-level FUNCTION, CLASS,
+    // module STATE_VAR or ENUM is an edge now (rule `value_ref`); a named
+    // import binding is a Bare USES ref the graph crate binds through the
+    // importer's import bindings (`graph:refs`, rule `import_binding`); one
+    // naming a third-party package stays an unresolved ref, as LA.30c's
+    // member refs do. A default or namespace import binds a MODULE and is
+    // skipped, as is every name neither declared in the file nor imported (a
+    // global, an undeclared name), so none of those reaches the persisted
+    // unresolved refs. A self-reference is dropped.
+    let value_refs = std::mem::take(&mut acc.value_refs);
+    let candidates = value_refs.len();
+    let (mut in_file, mut imported) = (0usize, 0usize);
+    {
+        let inject_bindings = inject_import_bindings(&out.imports);
+        let named_imports = named_import_bindings(&out.imports);
+        for vr in value_refs {
+            let Some(row) = vr
+                .sites
+                .iter()
+                .filter(|(_, c)| !c.as_deref().is_some_and(|c| inject_bindings.contains(c)))
+                .map(|(r, _)| *r)
+                .min()
+            else {
+                continue;
+            };
+            let shadowed = out
+                .nav
+                .local_types
+                .get(&vr.from)
+                .is_some_and(|l| l.contains_key(&vr.name))
+                || acc.nested_decls.contains(&(vr.from, vr.name.clone()));
+            if shadowed {
+                continue;
+            }
+            let in_file_target = acc
+                .module_functions
+                .get(&vr.name)
+                .or_else(|| acc.classes.get(&vr.name))
+                .or_else(|| acc.const_vars.get(&vr.name))
+                .or_else(|| acc.enums.get(&vr.name))
+                .copied();
+            if let Some(to) = in_file_target {
+                if to == vr.from {
+                    continue;
+                }
+                let ev = evidence::Evidence::emitter(format!("parser:{lang}"))
+                    .rule("value_ref")
+                    .line(row);
+                out.edges.push(
+                    Edge::new(vr.from, to, edge_category::USES, Confidence::Strong)
+                        .with_cell(ev.to_cell()),
+                );
+                in_file += 1;
+            } else if named_imports.contains(vr.name.as_str())
+                && let Some(module_id) = acc.module_id
+            {
+                out.refs.push(UnresolvedRef {
+                    from: vr.from,
+                    from_module: module_id,
+                    qualifier: CallQualifier::Bare(vr.name),
+                    category: edge_category::USES,
+                    line: row,
+                });
+                imported += 1;
+            }
+        }
+    }
+    let vs = acc.value_stats;
+    if candidates + vs.const_inits + vs.decorators + accessor_edges > 0 {
+        eprintln!(
+            "[ts-value-refs] refs={candidates} in_file={in_file} imported={imported} \
+             const_inits={} decorators={} accessor_calls={accessor_edges} file={}",
+            vs.const_inits, vs.decorators, acc.file_rel
         );
     }
 
@@ -6031,6 +6345,46 @@ fn resolve_intra_file(mut acc: Acc) -> Result<FileParse, ParseError> {
     wire_stats.report(&acc.file_rel);
 
     Ok(out)
+}
+
+/// DT.5g: the accessor CALLS of one file, one per `(from, accessor, write)`
+/// in first-seen order, each at its smallest source row.
+#[derive(Default)]
+struct AccessorCalls {
+    edges: Vec<(NodeId, NodeId, u32, bool)>,
+    seen: HashMap<(NodeId, NodeId, bool), usize>,
+}
+
+impl AccessorCalls {
+    fn add(&mut self, from: NodeId, to: NodeId, row: u32, write: bool) {
+        match self.seen.get(&(from, to, write)) {
+            Some(&i) => {
+                if let Some(e) = self.edges.get_mut(i) {
+                    e.2 = e.2.min(row);
+                }
+            }
+            None => {
+                self.seen.insert((from, to, write), self.edges.len());
+                self.edges.push((from, to, row, write));
+            }
+        }
+    }
+}
+
+/// DT.5g: the local names a named import binds (`a` for `import { a }`, `b`
+/// for `import { a as b }`), the import bindings a value reference may name.
+/// A default import (`import X from`) and a namespace import (`import * as
+/// ns`) bind a MODULE and are left out.
+fn named_import_bindings(imports: &[ImportStmt]) -> HashSet<&str> {
+    imports
+        .iter()
+        .filter_map(|imp| match &imp.target {
+            ImportTarget::Symbol { name, alias, .. } if name != DEFAULT_EXPORT => {
+                Some(alias.as_deref().unwrap_or(name.as_str()))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Local names bound to an imported `inject` function: `inject` for
@@ -10279,7 +10633,8 @@ export class Hero {
     /// (`this.rafId`), a CH.2 STATE_VAR (`this.label`, a signal), an inherited
     /// method (`this.handle`, defined on the superclass) passed by value and a
     /// getter read (`this.isDesktop`, a METHOD read as state) mint no USES:
-    /// same class, METHOD targets only, no accessor.
+    /// same class, METHOD targets only, no accessor (DT.5g makes the getter
+    /// read a CALLS, rule `accessor_read`, never a USES).
     #[test]
     fn other_class_state_and_data_mint_nothing() {
         let src = "\
@@ -11295,5 +11650,338 @@ function helper() {}
         assert_eq!(ts, [star("./badge", 0), exports(&["local"])]);
         assert_eq!(facts(src, "src/shared.js"), ts);
         assert_eq!(facts(src, "src/shared.jsx"), ts);
+    }
+}
+
+#[cfg(test)]
+mod value_ref_tests {
+    //! DT.5g: module-level const initialisers and class decorator arguments
+    //! are walked, a bare identifier passed by value is a USES of the symbol
+    //! it binds (rule `value_ref` in-file, a Bare USES ref when imported), and
+    //! a `this.<accessor>` read or write is a CALLS of the accessor.
+    use super::*;
+    use glia_code_domain::evidence::{Basis, Evidence};
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://ts-value-refs")
+    }
+
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    fn parse(src: &str, path: &str, qname: &str) -> FileParse {
+        parse_file(src, path, qname, repo()).expect("parse")
+    }
+
+    /// The Bare USES refs `parse` holds from `from`, as `(name, row)`.
+    fn uses_refs(parse: &FileParse, from: NodeId) -> Vec<(String, u32)> {
+        let mut out: Vec<(String, u32)> = parse
+            .refs
+            .iter()
+            .filter(|r| r.from == from && r.category == edge_category::USES)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => Some((n.clone(), r.line)),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Every Bare USES ref's name, whoever holds it.
+    fn all_uses_ref_names(parse: &FileParse) -> Vec<String> {
+        let mut out: Vec<String> = parse
+            .refs
+            .iter()
+            .filter(|r| r.category == edge_category::USES)
+            .filter_map(|r| match &r.qualifier {
+                CallQualifier::Bare(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The `(to, rule, row)` of every `category` edge from `from` whose
+    /// evidence names `rule`.
+    fn ruled(parse: &FileParse, from: NodeId, category: glia_core::EdgeCategoryId, rule: &str) -> Vec<(NodeId, u32)> {
+        parse
+            .edges
+            .iter()
+            .filter(|e| e.from == from && e.category == category)
+            .filter_map(|e| {
+                let ev = Evidence::of(e)?;
+                (ev.rule.as_deref() == Some(rule)).then(|| {
+                    assert_eq!(ev.basis, Basis::Site, "{rule} is a site");
+                    (e.to, ev.line.expect("a site row"))
+                })
+            })
+            .collect()
+    }
+
+    fn bare_calls_from(parse: &FileParse, from: NodeId) -> Vec<String> {
+        let mut out: Vec<String> = parse
+            .calls
+            .iter()
+            .filter(|c| c.from == from)
+            .filter_map(|c| match &c.qualifier {
+                CallQualifier::Bare(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    const APP_CONFIG: &str = "\
+import { ApplicationConfig } from '@angular/core';
+import { HTTP_INTERCEPTORS, provideHttpClient, withInterceptors } from '@angular/common/http';
+import { provideRouter } from '@angular/router';
+import { routes } from './app.routes';
+import { jwtInterceptor } from './core/interceptors/jwt.interceptor';
+import { AuthInterceptor } from './core/interceptors/auth.interceptor';
+import { provideI18n } from './core/i18n';
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideRouter(routes),
+    provideHttpClient(withInterceptors([jwtInterceptor])),
+    { provide: HTTP_INTERCEPTORS, useClass: AuthInterceptor, multi: true },
+    provideI18n(),
+  ],
+};
+";
+
+    /// An exported object const's calls are its G19 STATE_VAR's, and the
+    /// names it passes by value are Bare USES refs from it (an external
+    /// import included: the graph crate leaves that one unbound).
+    #[test]
+    fn exported_const_initialiser_is_the_state_vars() {
+        let p = parse(APP_CONFIG, "src/app/app.config.ts", "src::app::app.config");
+        let cfg = id(node_kind::STATE_VAR, "src::app::app.config::appConfig");
+        assert_eq!(
+            bare_calls_from(&p, cfg),
+            ["provideHttpClient", "provideI18n", "provideRouter", "withInterceptors"]
+        );
+        assert_eq!(
+            uses_refs(&p, cfg),
+            [
+                ("AuthInterceptor".to_string(), 12),
+                ("HTTP_INTERCEPTORS".to_string(), 12),
+                ("jwtInterceptor".to_string(), 11),
+                ("routes".to_string(), 10),
+            ]
+        );
+        let module = id(node_kind::MODULE, "src::app::app.config");
+        assert!(bare_calls_from(&p, module).is_empty(), "{:?}", p.calls);
+    }
+
+    /// A non-exported const has no STATE_VAR: its initialiser's calls and
+    /// value references are the MODULE's, as a top-level statement's are; a
+    /// callback parameter (`r`) is a local and binds nothing.
+    #[test]
+    fn non_exported_const_initialiser_is_the_modules() {
+        let src = "\
+import { LISTING_ROUTES } from './listing.routes';
+function isListingWizard(path: string): boolean { return path.startsWith('w'); }
+function byPath(a: any, b: any): number { return 0; }
+const LISTING_WIZARD_ROUTES = LISTING_ROUTES.filter(r => isListingWizard(r.path)).sort(byPath);
+let later = isListingWizard('x');
+";
+        let p = parse(src, "src/app/listing.ts", "src::app::listing");
+        let module = id(node_kind::MODULE, "src::app::listing");
+        let wizard = id(node_kind::FUNCTION, "src::app::listing::isListingWizard");
+        let by_path = id(node_kind::FUNCTION, "src::app::listing::byPath");
+        let calls = ruled(&p, module, edge_category::CALLS, "intra_file");
+        assert_eq!(calls, [(wizard, 3)], "one const call; a `let` is not walked");
+        assert_eq!(ruled(&p, module, edge_category::USES, "value_ref"), [(by_path, 3)]);
+        assert!(all_uses_ref_names(&p).is_empty(), "LISTING_ROUTES is a callee's object: {:?}", p.refs);
+    }
+
+    /// A route table's guard is a USES ref from the `routes` STATE_VAR; a
+    /// shorthand property `{ authGuard }` is one too; the lazy route's arrow
+    /// parameter `m` binds nothing.
+    #[test]
+    fn route_guard_and_shorthand_are_refs() {
+        let src = "\
+import { Routes } from '@angular/router';
+import { authGuard, adminGuard } from './core/guards/auth.guard';
+
+export const routes: Routes = [
+  { path: 'trades', canActivate: [authGuard], loadComponent: () => import('./home/home.page').then((m) => m.HomePage) },
+];
+export const guards = { adminGuard };
+";
+        let p = parse(src, "src/app/app.routes.ts", "src::app::app.routes");
+        let routes = id(node_kind::STATE_VAR, "src::app::app.routes::routes");
+        let guards = id(node_kind::STATE_VAR, "src::app::app.routes::guards");
+        assert_eq!(uses_refs(&p, routes), [("authGuard".to_string(), 4)]);
+        assert_eq!(uses_refs(&p, guards), [("adminGuard".to_string(), 6)]);
+        assert_eq!(all_uses_ref_names(&p), ["adminGuard", "authGuard"]);
+    }
+
+    /// `export default bootstrap` reads the in-file function as a value: a
+    /// USES from the MODULE, rule `value_ref`. A default or namespace import
+    /// passed by value binds a MODULE and records nothing.
+    #[test]
+    fn export_default_identifier_and_default_imports() {
+        let src = "\
+import Widget from './widget';
+import * as ns from './ns';
+function bootstrap() { register(Widget, ns); }
+export default bootstrap;
+";
+        let p = parse(src, "src/main.ts", "src::main");
+        let module = id(node_kind::MODULE, "src::main");
+        let boot = id(node_kind::FUNCTION, "src::main::bootstrap");
+        assert_eq!(ruled(&p, module, edge_category::USES, "value_ref"), [(boot, 3)]);
+        assert!(all_uses_ref_names(&p).is_empty(), "{:?}", p.refs);
+        let main = p.nav.nav_facts.get(&module).cloned().unwrap_or_default();
+        assert!(
+            main.contains(&NavFact::Exports { names: [DEFAULT_EXPORT.to_string()].into() }),
+            "DT.1q's default export is kept: {main:?}"
+        );
+    }
+
+    /// A class decorator's arguments are the class's own code: standalone
+    /// `imports`, `providers` and `useClass` are refs from the CLASS, a call
+    /// in them (`forwardRef`) is its CallSite, the decorator callee is none,
+    /// and the class naming itself (`useExisting`) mints no self-edge.
+    #[test]
+    fn class_decorator_arguments_are_the_classes() {
+        let src = "\
+import { Component, forwardRef } from '@angular/core';
+import { NG_VALUE_ACCESSOR } from '@angular/forms';
+import { TimeAgoPipe } from '../shared/time-ago.pipe';
+import { KsInputDirective } from '../shared/ks-input.directive';
+import { TradeService, MockTradeService } from '../core/trade.service';
+
+@Component({
+  selector: 'ks-home',
+  standalone: true,
+  imports: [TimeAgoPipe, KsInputDirective],
+  providers: [
+    { provide: TradeService, useClass: MockTradeService },
+    { provide: NG_VALUE_ACCESSOR, useExisting: forwardRef(() => HomePage), multi: true },
+    { provide: 'self', useExisting: HomePage },
+  ],
+  template: '<p></p>',
+})
+export class HomePage {}
+";
+        let p = parse(src, "src/app/home/home.page.ts", "src::app::home::home.page");
+        let page = id(node_kind::CLASS, "src::app::home::home.page::HomePage");
+        let names: Vec<String> = uses_refs(&p, page).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(
+            names,
+            ["KsInputDirective", "MockTradeService", "NG_VALUE_ACCESSOR", "TimeAgoPipe", "TradeService"]
+        );
+        assert_eq!(bare_calls_from(&p, page), ["forwardRef"], "the decorator callee is no CallSite");
+        assert!(!p.edges.iter().any(|e| e.from == page && e.to == page), "{:?}", p.edges);
+    }
+
+    /// A parameter, a local, a nested declaration of the passing scope and
+    /// an `inject(T)` argument shadow or bind nothing; a function passed by
+    /// value is a USES edge, the comparator control.
+    #[test]
+    fn shadows_and_inject_bind_nothing() {
+        let src = "\
+import { inject } from '@angular/core';
+import { AuthService } from './auth.service';
+interface Item { urgency: number }
+export function byUrgency(a: Item, b: Item): number { return b.urgency - a.urgency; }
+export function byName(a: Item, b: Item): number { return a.urgency - b.urgency; }
+function sortWith(byName: (a: Item, b: Item) => number, items: Item[]): Item[] {
+  return [...items].sort(byName);
+}
+function sortLocal(items: Item[]): Item[] {
+  const byUrgency = (a: Item, b: Item) => 0;
+  return items.sort(byUrgency);
+}
+function sortNested(items: Item[]): Item[] {
+  function byName(a: Item, b: Item) { return 0; }
+  return items.sort(byName);
+}
+export const authGuard = () => { const auth = inject(AuthService); return auth.ok(); };
+export function sorted(items: Item[]): Item[] { return [...items].sort(byUrgency); }
+";
+        let p = parse(src, "src/app/home/home.page.ts", "src::app::home::home.page");
+        let f = |n: &str| id(node_kind::FUNCTION, &format!("src::app::home::home.page::{n}"));
+        for scope in ["sortWith", "sortLocal", "sortNested", "authGuard"] {
+            assert!(
+                !p.edges.iter().any(|e| e.from == f(scope) && e.category == edge_category::USES),
+                "{scope}: {:?}",
+                p.edges
+            );
+        }
+        assert!(all_uses_ref_names(&p).is_empty(), "inject(AuthService) is DI: {:?}", p.refs);
+        assert_eq!(ruled(&p, f("sorted"), edge_category::USES, "value_ref"), [(f("byUrgency"), 17)]);
+    }
+
+    /// A `this.<getter>` read (a value read in a template, a member read's
+    /// object) is a CALLS of the getter, rule `accessor_read`, one per scope
+    /// at its first row; a setter write is a CALLS, rule `accessor_write`; a
+    /// plain field write and a never-read getter bind nothing.
+    #[test]
+    fn accessor_reads_and_writes_are_calls() {
+        let src = "\
+export class TradeService {
+  private base = '';
+  private get apiUrl() { return this.base; }
+  private get unused() { return 1; }
+  get form() { return { value: 1 }; }
+  set label(v: string) { this.base = v; }
+
+  list() {
+    const a = `${this.apiUrl}/trades`;
+    const b = `${this.apiUrl}/other`;
+    return this.form.value;
+  }
+  rename(v: string) {
+    this.label = v;
+    this.base = v;
+  }
+}
+";
+        let p = parse(src, "src/app/core/trade.service.ts", "src::app::core::trade.service");
+        let m = |n: &str| id(node_kind::METHOD, &format!("src::app::core::trade.service::TradeService::{n}"));
+        let mut reads = ruled(&p, m("list"), edge_category::CALLS, "accessor_read");
+        reads.sort_by_key(|(_, row)| *row);
+        assert_eq!(reads, [(m("apiUrl"), 8), (m("form"), 10)]);
+        assert_eq!(ruled(&p, m("rename"), edge_category::CALLS, "accessor_write"), [(m("label"), 13)]);
+        assert!(
+            !p.edges.iter().any(|e| e.to == m("unused") && e.category == edge_category::CALLS),
+            "{:?}",
+            p.edges
+        );
+        assert!(
+            !p.edges.iter().any(|e| e.from == m("label") && e.category == edge_category::CALLS),
+            "a plain field write binds nothing: {:?}",
+            p.edges
+        );
+        assert!(
+            !p.edges.iter().any(|e| e.category == edge_category::USES),
+            "a getter read is never a USES: {:?}",
+            p.edges
+        );
+    }
+
+    /// CH.4 is unchanged: a method passed by value is a USES `method_ref`,
+    /// and a getter read beside it is a CALLS, never a USES.
+    #[test]
+    fn method_by_value_stays_a_method_ref() {
+        let src = "\
+export class Hero {
+  get isDesktop(): boolean { return true; }
+  init(): void { window.addEventListener('resize', this.onResize); if (this.isDesktop) {} }
+  onResize(): void {}
+}
+";
+        let p = parse(src, "src/hero.ts", "src::hero");
+        let m = |n: &str| id(node_kind::METHOD, &format!("src::hero::Hero::{n}"));
+        assert_eq!(ruled(&p, m("init"), edge_category::USES, "method_ref"), [(m("onResize"), 2)]);
+        assert_eq!(ruled(&p, m("init"), edge_category::CALLS, "accessor_read"), [(m("isDesktop"), 2)]);
     }
 }
