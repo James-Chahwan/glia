@@ -173,6 +173,17 @@ const TYPE_EMITTER_NEEDLES: &[&str] = &[
 /// MediatR's `.Send(new ` is a different needle and unaffected.
 const AWS_V3_SEND: &str = ".send(new ";
 
+/// DG.2: broker envelope types a client sends through the same lowercase
+/// `.send(new ` spelling: the Kafka producer's `producer.send(new
+/// ProducerRecord<String, String>("orders", v))` (Java, Kotlin, and Scala's
+/// `[..]` form). queues.rs owns that call (its `ProducerRecord` row reads the
+/// topic), so [`scan_type_needles`] reads such a token as no event site under
+/// [`AWS_V3_SEND`] only. Gated on the TYPE, never on the file's broker imports:
+/// a lowercase mediator's `.send(new PlaceOrder(id))` in a file that also
+/// imports Kafka keeps its typed event. A mediator request type literally
+/// named `ProducerRecord` loses its event (accepted).
+const BROKER_ENVELOPES: &[&str] = &["ProducerRecord"];
+
 /// A receiver reads as an in-process bus when its name (lowercased, leading
 /// `_` / `$` / `@` stripped) ends with one of these: `eventBus`, `this.bus`,
 /// `PubSub`, `ActiveSupport::Notifications`, `this.events`, `_mediator`,
@@ -1137,6 +1148,7 @@ fn suppressed(side: &str, needle: &str, name: &str) {
 /// pattern under its own switch:
 ///   `GLIA_EVENT_DEBUG=1 ... 2>&1 | grep '\[eventbus\] verb-gate'`
 ///   `GLIA_EVENT_DEBUG=1 ... 2>&1 | grep '\[eventbus\] aws-sdk command skipped'`
+///   `GLIA_EVENT_DEBUG=1 ... 2>&1 | grep '\[eventbus\] broker envelope skipped'` (DG.2)
 ///   `GLIA_EVENT_DEBUG=1 ... 2>&1 | grep '\[eventbus\] bad-name'`
 ///   `GLIA_EVENT_DEBUG=1 ... 2>&1 | grep '\[eventbus\] unnamed'`
 fn event_debug() -> bool {
@@ -1792,7 +1804,13 @@ fn queue_owned_publish(source: &str, at: usize) -> bool {
 /// the needle. The string-keyed path calls `find` ONCE per needle, so a file
 /// publishing three event types contributed one node; the type-keyed pass
 /// walks the whole file. [`AWS_V3_SEND`] is skipped in a file importing
-/// `@aws-sdk/`: there it is a service-client command, not an event.
+/// `@aws-sdk/`: there it is a service-client command, not an event. DG.2: and
+/// under [`AWS_V3_SEND`] a [`BROKER_ENVELOPES`] token is no event site in any
+/// file: it is a broker publish queues.rs reads.
+///
+/// fired_on (`GLIA_EVENT_DEBUG=1`), one line per skipped site:
+///   `[eventbus] aws-sdk command skipped type=<T>`
+///   `[eventbus] broker envelope skipped type=<T>`
 fn scan_type_needles<'a>(
     source: &str,
     needles: impl Iterator<Item = (&'a str, Option<char>)>,
@@ -1801,6 +1819,7 @@ fn scan_type_needles<'a>(
     let aws_sdk = source.contains("@aws-sdk/");
     for (needle, close) in needles {
         let skip = aws_sdk && needle == AWS_V3_SEND;
+        let envelopes = needle == AWS_V3_SEND;
         let mut from = 0usize;
         while let Some(rel) = source[from..].find(needle) {
             let site = from + rel;
@@ -1813,10 +1832,16 @@ fn scan_type_needles<'a>(
                 None => extract_type_token(&source[at..], None),
             };
             if let Some(token) = token {
-                if !skip {
+                if skip {
+                    if event_debug() {
+                        eprintln!("[eventbus] aws-sdk command skipped type={token}");
+                    }
+                } else if envelopes && BROKER_ENVELOPES.contains(&token.as_str()) {
+                    if event_debug() {
+                        eprintln!("[eventbus] broker envelope skipped type={token}");
+                    }
+                } else {
                     out.push((token, site));
-                } else if event_debug() {
-                    eprintln!("[eventbus] aws-sdk command skipped type={token}");
                 }
             }
             from = at;
@@ -3548,6 +3573,40 @@ mod tests {
         // MediatR send (the type needle wants the type right after `new `).
         let mediatr = concat!("_mediator.Send(new ", "CreateOrder(id));");
         assert_eq!(emitted(mediatr), vec!["event_emit:CreateOrder"]);
+    }
+
+    #[test]
+    fn kafka_producer_record_send_is_no_typed_event() {
+        // HEAD: event_emit:ProducerRecord, the lowercase mediator needle
+        // reading the Kafka envelope as an in-process event. Split with
+        // `concat!` so glia's own build reads no event site here.
+        let java = concat!(
+            "import org.apache.kafka.clients.producer.ProducerRecord;\n",
+            "p.send(new ",
+            "ProducerRecord<String, String>(\"orders\", b));\n"
+        );
+        let scala = concat!(
+            "import org.apache.kafka.clients.producer.ProducerRecord\n",
+            "producer.send(new ",
+            "ProducerRecord[String, String](\"orders\", body))\n"
+        );
+        let diamond = concat!("p.send(new ", "ProducerRecord<>(\"orders\", b));\n");
+        for src in [java, scala, diamond] {
+            assert_eq!(emitted(src), Vec::<String>::new(), "{src}");
+        }
+        // The skip is keyed by the TYPE, not the file's imports: a lowercase
+        // mediator beside a Kafka import keeps its typed event.
+        let mediator = concat!(
+            "import org.apache.kafka.clients.producer.KafkaProducer;\n",
+            "mediator.send(new ",
+            "PlaceOrder(id));\n"
+        );
+        assert_eq!(emitted(mediator), vec!["event_emit:PlaceOrder"]);
+        // Every other type needle is untouched: MediatR's `.Send(new ` reads
+        // even an envelope-named type.
+        let mediatr = concat!("_mediator.Send(new ", "ProducerRecord(x));");
+        assert_eq!(emitted(mediatr), vec!["event_emit:ProducerRecord"]);
+        assert_eq!(BROKER_ENVELOPES, &["ProducerRecord"]);
     }
 
     #[test]

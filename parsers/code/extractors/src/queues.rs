@@ -536,6 +536,36 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // they stay unpaired. A class that inherits ShouldQueue from a base job
     // (`class Charge extends BaseJob`) has no consumer node of its own.
     ("ShouldQueue", QueueFramework::Laravel, &[], TopicRule::EnclosingSymbol),
+    // ---- DG.2: Scala connectors -------------------------------------------------
+    // Alpakka (Akka) and its Pekko Connectors fork, and redis4cats. Every gate
+    // is the connector's PACKAGE, lowercased (the DG.2 gate consts after
+    // DECLARE_PATTERNS), so the needle's own words never pass it. Every row
+    // sits BEFORE the A2.9 block, so the Redis generic `.subscribe(` row yields
+    // to a call one of these read.
+    // Alpakka AMQP: `AmqpSource.atMostOnceSource(NamedQueueSourceSettings(
+    // conn, "orders"), bufferSize = 10)`, the queue arg #1 (arg #0 is the
+    // connection provider). A temporary queue bound to an exchange
+    // (`TemporaryQueueSourceSettings(conn, exchange)`) names no queue.
+    ("NamedQueueSourceSettings(", QueueFramework::RabbitMQ, ALPAKKA_AMQP_GATE, TopicRule::ArgIndex(1)),
+    // Alpakka SQS: `SqsSource("https://sqs.../orders")(sqs)`, `SqsSource(url,
+    // settings)`; the URL folds. The trailing `(` keeps `SqsSourceSettings(`
+    // out.
+    ("SqsSource(", QueueFramework::Sqs, ALPAKKA_SQS_GATE, TopicRule::ArgLiteral),
+    // Alpakka Google Pub/Sub: `GooglePubSub.subscribe("orders", config)`. The
+    // argument is a SUBSCRIPTION, so it pairs only when spelled like its topic
+    // (the JS `.subscription(` row's COVERAGE_CAVEATS gap). The gate joins
+    // `broker_signals`, so eventbus.rs no longer reads the `pubsub`-suffixed
+    // receiver as an in-process bus here.
+    ("GooglePubSub.subscribe(", QueueFramework::PubSub, ALPAKKA_PUBSUB_GATE, TopicRule::ArgLiteral),
+    // redis4cats: `pubSub.subscribe(RedisChannel("orders"))`, `pubSub.psubscribe(
+    // RedisPattern("orders.*"))` (a glob, paired only literally). The needle
+    // spells the channel constructor, so arg #0 of `RedisChannel(` IS the
+    // channel. A library row, not a generic verb ([`is_generic_verb_row`]): it
+    // reads arg #0 normally, and the A2.9 `.subscribe(` row yields to the
+    // site it claimed. A channel held in a `val` and passed by name is the
+    // A2.9 row's, and keeps its framework tag.
+    (".subscribe(RedisChannel(", QueueFramework::RedisPubSub, REDIS4CATS_GATE, TopicRule::ArgLiteral),
+    (".psubscribe(RedisPattern(", QueueFramework::RedisPubSub, REDIS4CATS_GATE, TopicRule::ArgLiteral),
     // ---- A2.9: broker pub/sub that used to live in eventbus.rs ----------
     // These verbs are the broadest needles in the table, so every row below is
     // a GENERIC-VERB row ([`is_generic_verb_row`]): it yields to any earlier
@@ -639,14 +669,19 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // `Template.` keeps this off a bare `.send(` while matching any spelling of
     // the field (kafkaTemplate / KafkaTemplate / ordersTemplate).
     ("Template.send(", QueueFramework::Kafka, &["springframework.kafka"], TopicRule::ArgLiteral),
-    // Java/Scala — plain client, diamond form: `new ProducerRecord<>("orders", v)`.
-    // KNOWN MISS: the explicit-generics form `new ProducerRecord<String,String>(`.
-    // CL.3 taught `queue_topic::arg_region` to step over a `<...>` list, but
-    // only after a MEMBER-CALL needle (one holding a `.`, `.SubscribeAsync<T>(`):
-    // after a dotless TYPE needle the list opens a constructor whose argument
-    // is config (`new KafkaConsumer<>(props)`). A `ProducerRecord` row needs
-    // that guard lifted for its own needle (0.5.2).
-    ("ProducerRecord<>(", QueueFramework::Kafka, &["kafka"], TopicRule::ArgLiteral),
+    // Java / Scala / Kotlin — the plain client's record, `ProducerRecord(topic,
+    // ..)` in every JVM spelling: Java's diamond `new ProducerRecord<>("orders",
+    // v)` and explicit `new ProducerRecord<String, String>("orders", v)`,
+    // Scala's `new ProducerRecord[String, String]("orders", v)`, Kotlin's
+    // `ProducerRecord<String, String>("orders", v)`. DG.2: one constructor
+    // rule (`TopicRule::CtorArgLiteral`) steps over one `<..>` or `[..]` list
+    // and reads arg #0, which every overload makes the topic; a mention that
+    // constructs nothing (the import, `ProducerRecord<K, V> r = ..`) is no
+    // site. `arg_region` still never steps over a dotless TYPE needle's list
+    // (`new KafkaConsumer<>(props)` reads config), which is why this is its
+    // own rule. The `.send(new ProducerRecord..)` around it is this row's, not
+    // an in-process typed event (eventbus.rs `BROKER_ENVELOPES`).
+    ("ProducerRecord", QueueFramework::Kafka, &["kafka"], TopicRule::CtorArgLiteral),
     // Go — segmentio/kafka-go: `w.WriteMessages(ctx, kafka.Message{Topic: "x"})`.
     (".WriteMessages(", QueueFramework::Kafka, &["kafka-go", "segmentio"], TopicRule::Keyed(&["topic"])),
     ("kafka.NewWriter(", QueueFramework::Kafka, &["kafka-go", "segmentio"], TopicRule::Keyed(&["topic"])),
@@ -901,6 +936,31 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // class living under a `Jobs` namespace reads as a Laravel job.
     ("::dispatch(", QueueFramework::Laravel, LARAVEL_JOBS_GATE, TopicRule::Receiver),
     (LARAVEL_DISPATCH_HELPER, QueueFramework::Laravel, LARAVEL_JOBS_GATE, TopicRule::ArgReceiver),
+    // ---- DG.2: Scala connectors (see the CONSUMER_PATTERNS block) ---------------
+    // Before the A2.9 block, so the generic `.publish(` verb rows yield to a
+    // call these read.
+    // Alpakka AMQP: `AmqpSink.simple(AmqpWriteSettings(conn).withRoutingKey(
+    // "orders"))`, the routing key naming the queue on the default and direct
+    // exchanges, and a per-message `WriteMessage(bytes).withRoutingKey("orders")`.
+    // Read off the builder method itself: `AmqpWriteSettings(conn)` closes its
+    // own argument list before it. An exchange-only writer
+    // (`.withExchange("logs")`, fanout) names no queue and mints nothing.
+    // KNOWN IMPRECISION: a consumer's `TemporaryQueueSourceSettings(conn, ex)
+    // .withRoutingKey("k")` and a `BindingDeclaration(q, ex).withRoutingKey(
+    // "k")` spell the same builder method and read as a producer of `k`.
+    (".withRoutingKey(", QueueFramework::RabbitMQ, ALPAKKA_AMQP_GATE, TopicRule::ArgLiteral),
+    // Alpakka SQS: `SqsPublishSink("https://sqs.../orders")(sqs)` and the flow
+    // form `SqsPublishFlow(url, settings)`; the URL folds.
+    ("SqsPublishSink(", QueueFramework::Sqs, ALPAKKA_SQS_GATE, TopicRule::ArgLiteral),
+    ("SqsPublishFlow(", QueueFramework::Sqs, ALPAKKA_SQS_GATE, TopicRule::ArgLiteral),
+    // Alpakka Google Pub/Sub: `GooglePubSub.publish("orders", config)`, the
+    // topic arg #0. Its `.publish(` is no in-process twin (the consumer row's
+    // gate note).
+    ("GooglePubSub.publish(", QueueFramework::PubSub, ALPAKKA_PUBSUB_GATE, TopicRule::ArgLiteral),
+    // redis4cats: `pubSub.publish(RedisChannel("orders"))` (a Pipe) and
+    // `pubSub.publish(RedisChannel("orders"), msg)`. A library row, like the
+    // consumer's.
+    (".publish(RedisChannel(", QueueFramework::RedisPubSub, REDIS4CATS_GATE, TopicRule::ArgLiteral),
     // ---- A2.9: broker pub/sub (see the CONSUMER_PATTERNS block) -----------
     // Redis pub/sub — `r.publish('notifications', payload)`. Placed AFTER the
     // NATS / RabbitMQ / SNS rows: a file importing both is attributed to the
@@ -989,6 +1049,20 @@ const LARAVEL_JOBS_GATE: &[&str] = &["\\jobs\\"];
 /// The `dispatch(` helper's needle, which [`laravel_job_at`] reads apart from
 /// the static `::dispatch(` row: its job is the class argument #0 constructs.
 const LARAVEL_DISPATCH_HELPER: &str = "dispatch(";
+
+// ---- DG.2: Scala connector gates, shared by both tables ----------------------
+// Each is the connector's PACKAGE as an import spells it, lowercased: Akka's
+// Alpakka `akka.stream.alpakka.<x>` and Pekko Connectors'
+// `org.apache.pekko.stream.connectors.<x>`, never a word the needle holds.
+/// Alpakka AMQP: `akka.stream.alpakka.amqp`, `..pekko.stream.connectors.amqp`.
+const ALPAKKA_AMQP_GATE: &[&str] = &["alpakka.amqp", "connectors.amqp"];
+/// Alpakka SQS: `akka.stream.alpakka.sqs`, `..pekko.stream.connectors.sqs`.
+const ALPAKKA_SQS_GATE: &[&str] = &["alpakka.sqs", "connectors.sqs"];
+/// Alpakka Google Cloud Pub/Sub: `akka.stream.alpakka.googlecloud.pubsub`,
+/// `..pekko.stream.connectors.googlecloud.pubsub`.
+const ALPAKKA_PUBSUB_GATE: &[&str] = &["alpakka.googlecloud.pubsub", "connectors.googlecloud.pubsub"];
+/// redis4cats: `dev.profunktor.redis4cats`.
+const REDIS4CATS_GATE: &[&str] = &["redis4cats"];
 
 /// CL.1: rows whose library gate a Python file may miss while still calling
 /// the task. The canonical Celery caller (`from tasks import process_order` +
@@ -7839,5 +7913,147 @@ await myconsumer.run({ eachMessage: notMine });\n";
         // A Laravel job file mints no event and no broker verb node.
         let ev = crate::eventbus::extract_event_emitter_nodes(LARAVEL_CONTROLLER, PHP_PATH, module_id(), repo());
         assert!(ev.nodes.is_empty(), "{:?}", ev.nav.qname_by_id.values().collect::<Vec<_>>());
+    }
+
+    // ---- DG.2: Scala connectors and the ProducerRecord constructor ---------
+
+    const SCALA_PATH: &str = "src/main/scala/shop/Orders.scala";
+
+    fn scala(src: &str) -> (Vec<String>, Vec<String>) {
+        at(src, SCALA_PATH)
+    }
+
+    /// The event nodes eventbus.rs reads from the same file, both sides.
+    fn scala_events(src: &str) -> Vec<String> {
+        let mut v: Vec<String> = [
+            crate::eventbus::extract_event_emitter_nodes(src, SCALA_PATH, module_id(), repo()),
+            crate::eventbus::extract_event_handler_nodes(src, SCALA_PATH, module_id(), repo()),
+        ]
+        .iter()
+        .flat_map(|r| r.nav.qname_by_id.values().cloned())
+        .collect();
+        v.sort();
+        v
+    }
+
+    /// matrix/scala/amqp, both files.
+    const ALPAKKA_AMQP_CONSUMER: &str = "package shop\n\nimport akka.stream.alpakka.amqp.{AmqpConnectionProvider, NamedQueueSourceSettings}\nimport akka.stream.alpakka.amqp.scaladsl.AmqpSource\n\nobject OrderConsumer {\n  def source(conn: AmqpConnectionProvider) =\n    AmqpSource.atMostOnceSource(NamedQueueSourceSettings(conn, \"orders\"), bufferSize = 10)\n}\n";
+    const ALPAKKA_AMQP_PUBLISHER: &str = "package shop\n\nimport akka.stream.alpakka.amqp.{AmqpConnectionProvider, AmqpWriteSettings}\nimport akka.stream.alpakka.amqp.scaladsl.AmqpSink\n\nobject OrderPublisher {\n  def sink(conn: AmqpConnectionProvider) =\n    AmqpSink.simple(AmqpWriteSettings(conn).withRoutingKey(\"orders\"))\n}\n";
+
+    #[test]
+    fn scala_alpakka_amqp_rows() {
+        assert_eq!(scala(ALPAKKA_AMQP_CONSUMER), (strs(&["queue_consumer:orders"]), vec![]));
+        assert_eq!(scala(ALPAKKA_AMQP_PUBLISHER), (vec![], strs(&["queue_producer:orders"])));
+        // Pekko Connectors spell the same API under their own package.
+        let pekko = ALPAKKA_AMQP_PUBLISHER.replace("akka.stream.alpakka.amqp", "org.apache.pekko.stream.connectors.amqp");
+        assert_eq!(scala(&pekko), (vec![], strs(&["queue_producer:orders"])));
+        // A per-message routing key reads the same way.
+        let per_message = "import akka.stream.alpakka.amqp.WriteMessage\nval m = WriteMessage(ByteString(s)).withRoutingKey(\"orders\")\n";
+        assert_eq!(scala(per_message), (vec![], strs(&["queue_producer:orders"])));
+        // An exchange-only (fanout) writer names no queue: nothing, no tag.
+        let fanout = "import akka.stream.alpakka.amqp.AmqpWriteSettings\nval s = AmqpSink.simple(AmqpWriteSettings(conn).withExchange(\"logs\"))\n";
+        assert_eq!(scala(fanout), (vec![], vec![]));
+        // Outside an Alpakka file the builder method is nobody's.
+        let other = "val s = Settings(conn).withRoutingKey(\"orders\")\n";
+        assert_eq!(scala(other), (vec![], vec![]));
+    }
+
+    /// matrix/scala/sqs_sns, both files.
+    const ALPAKKA_SQS_POLLER: &str = "package shop\n\nimport akka.stream.alpakka.sqs.scaladsl.SqsSource\nimport software.amazon.awssdk.services.sqs.SqsAsyncClient\n\nobject OrderPoller {\n  def source(implicit sqs: SqsAsyncClient) = SqsSource(\"https://sqs.us-east-1.amazonaws.com/123/orders\")\n}\n";
+    const ALPAKKA_SQS_ENQUEUER: &str = "package shop\n\nimport akka.stream.alpakka.sqs.scaladsl.SqsPublishSink\nimport software.amazon.awssdk.services.sqs.SqsAsyncClient\n\nobject OrderEnqueuer {\n  def sink(implicit sqs: SqsAsyncClient) = SqsPublishSink(\"https://sqs.us-east-1.amazonaws.com/123/orders\")\n}\n";
+
+    #[test]
+    fn scala_alpakka_sqs_rows() {
+        // The queue URL folds to its name on both sides.
+        assert_eq!(scala(ALPAKKA_SQS_POLLER), (strs(&["queue_consumer:orders"]), vec![]));
+        assert_eq!(scala(ALPAKKA_SQS_ENQUEUER), (vec![], strs(&["queue_producer:orders"])));
+        let flow = "import akka.stream.alpakka.sqs.scaladsl.SqsPublishFlow\nval f = SqsPublishFlow(\"https://sqs.us-east-1.amazonaws.com/123/orders\", settings)\n";
+        assert_eq!(scala(flow), (vec![], strs(&["queue_producer:orders"])));
+        // The settings constructor is no source.
+        let settings = "import akka.stream.alpakka.sqs.SqsSourceSettings\nval s = SqsSourceSettings().withWaitTime(10.seconds)\n";
+        assert_eq!(scala(settings), (vec![], vec![]));
+        // Pekko Connectors.
+        let pekko = ALPAKKA_SQS_POLLER.replace("akka.stream.alpakka.sqs", "org.apache.pekko.stream.connectors.sqs");
+        assert_eq!(scala(&pekko), (strs(&["queue_consumer:orders"]), vec![]));
+    }
+
+    /// matrix/scala/pubsub, both files.
+    const ALPAKKA_PUBSUB_LISTENER: &str = "package shop\n\nimport akka.stream.alpakka.googlecloud.pubsub.PubSubConfig\nimport akka.stream.alpakka.googlecloud.pubsub.scaladsl.GooglePubSub\n\nobject OrderListener {\n  def source(config: PubSubConfig) = GooglePubSub.subscribe(\"orders\", config)\n}\n";
+    const ALPAKKA_PUBSUB_PUBLISHER: &str = "package shop\n\nimport akka.stream.alpakka.googlecloud.pubsub.PubSubConfig\nimport akka.stream.alpakka.googlecloud.pubsub.scaladsl.GooglePubSub\n\nobject OrderPublisher {\n  def flow(config: PubSubConfig) = GooglePubSub.publish(\"orders\", config)\n}\n";
+
+    #[test]
+    fn scala_alpakka_google_pubsub_rows_have_no_event_twin() {
+        assert_eq!(scala(ALPAKKA_PUBSUB_LISTENER), (strs(&["queue_consumer:orders"]), vec![]));
+        assert_eq!(scala(ALPAKKA_PUBSUB_PUBLISHER), (vec![], strs(&["queue_producer:orders"])));
+        // HEAD read the `pubsub`-suffixed receiver as an in-process bus
+        // (event_emit:orders + event_handle:orders); the connector gate is a
+        // broker signal now, so eventbus.rs yields both verbs.
+        for g in [ALPAKKA_AMQP_GATE, ALPAKKA_SQS_GATE, ALPAKKA_PUBSUB_GATE, REDIS4CATS_GATE] {
+            for s in g {
+                assert!(broker_signals().contains(s), "{s}");
+            }
+        }
+        assert_eq!(scala_events(ALPAKKA_PUBSUB_LISTENER), Vec::<String>::new());
+        assert_eq!(scala_events(ALPAKKA_PUBSUB_PUBLISHER), Vec::<String>::new());
+        let pekko = ALPAKKA_PUBSUB_PUBLISHER.replace("akka.stream.alpakka.googlecloud.pubsub", "org.apache.pekko.stream.connectors.googlecloud.pubsub");
+        assert_eq!(scala(&pekko), (vec![], strs(&["queue_producer:orders"])));
+        assert_eq!(scala_events(&pekko), Vec::<String>::new());
+    }
+
+    /// matrix/scala/redis, both files.
+    const REDIS4CATS_LISTENER: &str = "package shop\n\nimport dev.profunktor.redis4cats.data.RedisChannel\nimport dev.profunktor.redis4cats.pubsub.PubSubCommands\n\nobject OrderListener {\n  def stream[F[_]](pubSub: PubSubCommands[F, fs2.Stream[F, *], String, String]) =\n    pubSub.subscribe(RedisChannel(\"orders\"))\n}\n";
+    const REDIS4CATS_NOTIFIER: &str = "package shop\n\nimport dev.profunktor.redis4cats.data.RedisChannel\nimport dev.profunktor.redis4cats.pubsub.PubSubCommands\n\nobject OrderNotifier {\n  def pipe[F[_]](pubSub: PubSubCommands[F, fs2.Stream[F, *], String, String]) =\n    pubSub.publish(RedisChannel(\"orders\"))\n}\n";
+
+    #[test]
+    fn scala_redis4cats_channels() {
+        // HEAD: `queue_*:unresolved:redispubsub` on both sides (the A2.9 verb
+        // rows read only a LEADING literal).
+        assert_eq!(scala(REDIS4CATS_LISTENER), (strs(&["queue_consumer:orders"]), vec![]));
+        assert_eq!(scala(REDIS4CATS_NOTIFIER), (vec![], strs(&["queue_producer:orders"])));
+        let pattern = "import dev.profunktor.redis4cats.data.RedisPattern\npubSub.psubscribe(RedisPattern(\"orders.*\"))\n";
+        assert_eq!(scala(pattern), (strs(&["queue_consumer:orders.*"]), vec![]));
+        // The two-argument publish names the channel the same way.
+        let two = "import dev.profunktor.redis4cats.data.RedisChannel\npubSub.publish(RedisChannel(\"orders\"), msg)\n";
+        assert_eq!(scala(two), (vec![], strs(&["queue_producer:orders"])));
+        // A channel held in a val names nothing at the call: HEAD's tag.
+        let held = "import dev.profunktor.redis4cats.data.RedisChannel\nval ch = RedisChannel(\"orders\")\npubSub.subscribe(ch)\npubSub.publish(ch)\n";
+        assert_eq!(
+            scala(held),
+            (
+                vec![format!("queue_consumer:{UNRESOLVED_PREFIX}redispubsub")],
+                vec![format!("queue_producer:{UNRESOLVED_PREFIX}redispubsub")]
+            )
+        );
+        // Library rows, not bare verbs: they read arg #0 and never yield.
+        for needle in [".subscribe(RedisChannel(", ".psubscribe(RedisPattern(", ".publish(RedisChannel("] {
+            assert!(!is_generic_verb_row(needle, &QueueFramework::RedisPubSub), "{needle}");
+            assert!(!yields_to_earlier_rows(needle, &QueueFramework::RedisPubSub), "{needle}");
+        }
+    }
+
+    #[test]
+    fn producer_record_reads_its_topic_after_type_arguments() {
+        let orders = || (vec![], strs(&["queue_producer:orders"]));
+        // matrix/scala/kafka's producer: Scala `[..]` type arguments.
+        let scala_record = "package shop\n\nimport akka.kafka.ProducerSettings\nimport akka.kafka.scaladsl.Producer\nimport org.apache.kafka.clients.producer.ProducerRecord\n\nobject OrderProducer {\n  def record(body: String) = new ProducerRecord[String, String](\"orders\", body)\n}\n";
+        assert_eq!(scala(scala_record), orders());
+        // Java explicit generics (the Kafka javadoc's spelling), the Java
+        // diamond (HEAD's only row), and Kotlin without `new`.
+        let java_generic = "import org.apache.kafka.clients.producer.ProducerRecord;\nclass P { void s(KafkaProducer<String, String> p, String b) { p.send(new ProducerRecord<String, String>(\"orders\", b)); } }\n";
+        let java_diamond = "import org.apache.kafka.clients.producer.ProducerRecord;\nclass P { void s() { p.send(new ProducerRecord<>(\"orders\", b)); } }\n";
+        let kotlin = "import org.apache.kafka.clients.producer.ProducerRecord\nfun s() { producer.send(ProducerRecord<String, String>(\"orders\", v)) }\n";
+        for src in [java_generic, java_diamond, kotlin] {
+            assert_eq!(at(src, "src/P.java"), orders(), "{src}");
+        }
+        // A declaration line and an import construct nothing: no site, no tag.
+        let decl = "import org.apache.kafka.clients.producer.ProducerRecord;\nclass P { void s(ProducerRecord<String, String> r) { p.send(r); } }\n";
+        assert_eq!(at(decl, "src/P.java"), (vec![], vec![]));
+        // Without a Kafka import the type is nobody's.
+        assert_eq!(at("class P { Object r = new ProducerRecord<>(\"orders\", b); }\n", "src/P.java"), (vec![], vec![]));
+        // The marker: the row fires under its own needle.
+        assert!(PRODUCER_PATTERNS
+            .iter()
+            .any(|(n, f, _, r)| *n == "ProducerRecord" && *f == QueueFramework::Kafka && matches!(r, TopicRule::CtorArgLiteral)));
+        assert!(!PRODUCER_PATTERNS.iter().any(|(n, ..)| *n == "ProducerRecord<>("));
     }
 }

@@ -160,6 +160,20 @@ pub enum TopicRule {
     /// `topic name` and `topic Topics::ORDERS` mint nothing. Never an
     /// expression: the LA.4 fold has no slot to read here.
     BareArg,
+    // --- DG.2: A CONSTRUCTOR WHOSE FIRST ARGUMENT IS THE TOPIC ---------------
+    /// DG.2: a dotless TYPE needle read only where it is CONSTRUCTED, arg #0's
+    /// literal ([`ctor_region`]): Kafka's `ProducerRecord(topic, ..)` in every
+    /// JVM spelling, Java `new ProducerRecord<String, String>("orders", v)`
+    /// and its diamond `<>`, Scala `new ProducerRecord[String, String](
+    /// "orders", v)`, Kotlin `ProducerRecord<String, String>("orders", v)`
+    /// with no `new`. One optional type-argument list (`<..>` or `[..]`) is
+    /// stepped over, then a `(` must follow: a declaration
+    /// (`ProducerRecord<K, V> r = ..`), an import line and `classOf[
+    /// ProducerRecord[..]]` are no site at all ([`scan_guarded`] drops them).
+    /// A non-literal arg #0 goes to the LA.4 fold. The needle reads only at a
+    /// word edge ([`bare_word_ok`]), so `MyProducerRecord(` and
+    /// `ProducerRecords` are not it.
+    CtorArgLiteral,
 }
 
 /// Bound on occurrences examined per needle per file — generated files can
@@ -255,6 +269,11 @@ pub fn scan(source: &str, needle: &str, rule: TopicRule) -> Vec<TopicHit> {
 /// `topic` word that names nothing (`topic = x`, `topic Topics::ORDERS`) is
 /// no call of the framework. A [`TopicRule::Declared`] occurrence is always a hit, with
 /// no topic and no expression.
+///
+/// DG.2: a [`TopicRule::CtorArgLiteral`] occurrence that constructs nothing
+/// ([`ctor_region`] finds no `(`) is dropped at the same point: a type named in
+/// an import or a declaration is no call. A constructor whose arg #0 is no
+/// literal stays a hit, with its expression for the LA.4 fold.
 pub(crate) fn scan_guarded(
     source: &str,
     needle: &str,
@@ -299,6 +318,9 @@ pub(crate) fn scan_guarded(
                 Some(job) => verbatim(Some(job)),
                 None => continue,
             },
+            // DG.2: a mention that constructs nothing (a declaration, an
+            // import) is no site at all (see the variant's doc).
+            TopicRule::CtorArgLiteral if ctor_region(source, after).is_none() => continue,
             _ => topic_at(source, after, needle, rule),
         };
         let (topic, form, expr) = match read {
@@ -440,6 +462,10 @@ fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option
     if let TopicRule::Chain(keys) = rule {
         return keyed_literal(chain_region(source, after), keys);
     }
+    // DG.2: the constructor's own argument list, past its type arguments.
+    if let TopicRule::CtorArgLiteral = rule {
+        return arg_literal(ctor_region(source, after)?, 0);
+    }
     let region = arg_region(source, after, needle);
     match rule {
         TopicRule::ArgLiteral => arg_literal(region?, 0),
@@ -478,6 +504,10 @@ fn expr_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option<
     // CL.3: `.queueName(QUEUE)` hands `QUEUE` to the LA.4 const fold.
     if let TopicRule::Chain(keys) = rule {
         return keyed_expr(chain_region(source, after), keys);
+    }
+    // DG.2: `new ProducerRecord<>(TOPIC, v)` hands `TOPIC` to the LA.4 fold.
+    if let TopicRule::CtorArgLiteral = rule {
+        return arg_expr(ctor_region(source, after)?, 0);
     }
     let region = arg_region(source, after, needle);
     match rule {
@@ -581,6 +611,71 @@ fn skip_type_args(s: &str) -> Option<&str> {
                     }
                 }
                 b';' | b'(' | b')' | b'{' | b'}' | b'=' | b'\n' | b'\r' => return None,
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// DG.2: the argument region of the constructor call a [`TopicRule::CtorArgLiteral`]
+/// needle names, or `None` when the occurrence constructs nothing. After the
+/// needle: spaces and tabs (never a newline: an import line's next line is
+/// not its call), then at most one balanced type-argument list, a Java /
+/// Kotlin `<..>` ([`skip_type_args`]; the diamond `<>` is an empty one) or a
+/// Scala `[..]` ([`skip_scala_type_args`]), spaces and tabs again, then the
+/// next byte must be `(`. `ProducerRecord<K, V> r = ..` (a declaration),
+/// `import ..ProducerRecord;` and `classOf[ProducerRecord[K, V]]` read
+/// `None`. The rule is its own variant because a dotless TYPE needle under
+/// [`arg_region`] may NOT step over type arguments (`new KafkaConsumer<>(
+/// props)` reads client config); a `ProducerRecord`'s arg #0 is always the
+/// topic.
+fn ctor_region(source: &str, after: usize) -> Option<&str> {
+    let mut rest = source.get(after..)?.trim_start_matches([' ', '\t']);
+    if rest.starts_with('<') {
+        rest = skip_type_args(rest)?;
+    } else if rest.starts_with('[') {
+        rest = skip_scala_type_args(rest)?;
+    }
+    region_body(rest.trim_start_matches([' ', '\t']).strip_prefix('(')?)
+}
+
+/// DG.2: `s` (which opens with `[`) past its balanced Scala type-argument
+/// list: nested `[]` counted (`[F[_], String]`), quoted text stepped over.
+/// `None` when the list does not close within [`MAX_REGION`] bytes, or when a
+/// byte no type list on one line holds comes first (`;`, a newline, `(`, `)`,
+/// `{`, `}`): that `[` opened an index or an array, not type arguments. `=` is
+/// NOT a stop, unlike [`skip_type_args`]: a Scala function type spells `=>`
+/// (`[String => Int]`). Every byte that ends the walk is ASCII, so the slice
+/// lands on a char boundary.
+fn skip_scala_type_args(s: &str) -> Option<&str> {
+    let b = s.as_bytes();
+    let limit = b.len().min(MAX_REGION);
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < limit {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+        } else {
+            match c {
+                b'\'' | b'"' | b'`' => quote = Some(c),
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return s.get(i + 1..);
+                    }
+                }
+                b';' | b'(' | b')' | b'{' | b'}' | b'\n' | b'\r' => return None,
                 _ => {}
             }
         }
@@ -1082,8 +1177,16 @@ fn ident_at(s: &str) -> Option<String> {
 /// DH.1: [`TopicRule::BareArg`] joins it. Karafka's `topic ` needle also
 /// occurs inside `subtopic :x` and `my_topic "y"`, which are no route; the
 /// after-edge test passes the quote or `:` a real `topic :orders` puts there.
+///
+/// DG.2: [`TopicRule::CtorArgLiteral`] joins it: the `ProducerRecord` type
+/// needle also occurs inside `MyProducerRecord(` and `ProducerRecords`, which
+/// construct no Kafka record; the after-edge test passes the `<`, `[` or `(`
+/// a real constructor puts there.
 fn bare_word_ok(source: &str, offset: usize, needle: &str, rule: TopicRule) -> bool {
-    let bare = matches!(rule, TopicRule::Receiver | TopicRule::BareArg)
+    let bare = matches!(
+        rule,
+        TopicRule::Receiver | TopicRule::BareArg | TopicRule::CtorArgLiteral
+    )
         && needle
             .as_bytes()
             .first()
@@ -2774,6 +2877,74 @@ mod tests {
             ),
             Some("orders".into())
         );
+    }
+
+    #[test]
+    fn skip_scala_type_args_balances_and_aborts() {
+        // Balanced, nested, and the rest handed back unconsumed.
+        assert_eq!(skip_scala_type_args("[String, String](\"o\")"), Some("(\"o\")"));
+        assert_eq!(skip_scala_type_args("[F[_], Map[K, List[V]]](x)"), Some("(x)"));
+        // A function type's `=>` is no stop; a quote holding `]` is stepped over.
+        assert_eq!(skip_scala_type_args("[String => Int](f)"), Some("(f)"));
+        assert_eq!(skip_scala_type_args("[\"]\" , A]]"), Some("]"));
+        // An empty list closes.
+        assert_eq!(skip_scala_type_args("[](x)"), Some("(x)"));
+        // Aborts: a `(` / `{` / `;` / newline before the close, unclosed, or
+        // longer than MAX_REGION.
+        assert_eq!(skip_scala_type_args("[a(1)]"), None);
+        assert_eq!(skip_scala_type_args("[a{1}]"), None);
+        assert_eq!(skip_scala_type_args("[a; b]"), None);
+        assert_eq!(skip_scala_type_args("[String,\n String](x)"), None);
+        assert_eq!(skip_scala_type_args("[String, String"), None);
+        let long = format!("[{}]", "A".repeat(MAX_REGION));
+        assert_eq!(skip_scala_type_args(&long), None);
+        // Multi-byte text inside the list slices cleanly.
+        assert_eq!(skip_scala_type_args("[Événement](x)"), Some("(x)"));
+    }
+
+    #[test]
+    fn ctor_arg_literal_reads_arg0_after_type_arguments() {
+        let rule = TopicRule::CtorArgLiteral;
+        let topics = |src: &str| -> Vec<Option<String>> {
+            scan(src, "ProducerRecord", rule).into_iter().map(|h| h.topic).collect()
+        };
+        let o = || vec![Some("orders".to_string())];
+        // Java explicit generics, Java diamond, Scala `[..]`, Kotlin without
+        // `new`, and no type arguments at all.
+        assert_eq!(topics("new ProducerRecord<String, String>(\"orders\", v)"), o());
+        assert_eq!(topics("new ProducerRecord<>(\"orders\", v)"), o());
+        assert_eq!(topics("new ProducerRecord[String, String](\"orders\", body)"), o());
+        assert_eq!(topics("val r = ProducerRecord<String, String>(\"orders\", v)"), o());
+        assert_eq!(topics("new ProducerRecord(\"orders\", v)"), o());
+        assert_eq!(topics("new ProducerRecord<Map<K, V>, String>(\n  \"orders\", v)"), o());
+        // Spaces around the type-argument list are the constructor's too.
+        assert_eq!(topics("new ProducerRecord <String, String> (\"orders\", v)"), o());
+        assert_eq!(topics("new ProducerRecord[String, String] (\"orders\", v)"), o());
+        // No construction: no site at all, not a site without a topic.
+        for src in [
+            "import org.apache.kafka.clients.producer.ProducerRecord;",
+            "ProducerRecord<String, String> r = build();",
+            "val c = classOf[ProducerRecord[String, String]]",
+            "ProducerRecord.class",
+            "new MyProducerRecord(\"orders\")",
+            "List<ProducerRecords> all;",
+            "ProducerRecords(\"orders\")",
+            "import shop.ProducerRecord\n(\"orders\", v)",
+        ] {
+            assert!(scan(src, "ProducerRecord", rule).is_empty(), "{src}");
+        }
+        // A declaration and its constructor on one line: one site.
+        assert_eq!(
+            topics("ProducerRecord<String, String> r = new ProducerRecord<>(\"orders\", v);"),
+            o()
+        );
+        // A non-literal arg #0 is a hit carrying its expression (LA.4).
+        let hits = scan("new ProducerRecord<String, String>(Topics.ORDERS, v)", "ProducerRecord", rule);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].topic, None);
+        assert_eq!(hits[0].expr.as_deref(), Some("Topics.ORDERS"));
+        // The dotless ArgLiteral rule still does not step over the list.
+        assert_eq!(one("new ProducerRecord<String, String>(\"orders\", v)", "ProducerRecord", TopicRule::ArgLiteral), None);
     }
 
     #[test]

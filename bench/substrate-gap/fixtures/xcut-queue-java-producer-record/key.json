@@ -1,0 +1,40 @@
+{
+  "framework": "java-kafka-producer-record-generic",
+  "language": "java",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "kafka",
+  "cells": [
+    "java/kafka"
+  ],
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "orders"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "orders"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "orders",
+      "to": "orders",
+      "category": "QUEUE_FLOWS",
+      "note": "producer (server) -> consumer (client), paired on the topic"
+    }
+  ],
+  "expect_cells": [],
+  "forbid": [
+    {
+      "kind": "EVENT_EMITTER",
+      "name": "ProducerRecord",
+      "max_nodes": 0,
+      "note": "the Kafka envelope sent through `p.send(new ProducerRecord<..>(..))` is a broker publish, not an in-process typed event (eventbus.rs `.send(new ` mediator needle); HEAD 84e2e71 debug CLI: event_emit:ProducerRecord present"
+    }
+  ],
+  "note": "DG.2: before it, the producer row was the Java diamond `ProducerRecord<>(` only (CL.3 KNOWN MISS, deferred to 0.5.2) and the send minted event_emit:ProducerRecord; baseline HEAD 84e2e71 debug CLI: queue_consumer:orders + event_emit:ProducerRecord, no producer."
+}
