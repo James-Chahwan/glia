@@ -1,0 +1,103 @@
+{
+  "framework": "ts-query-suffix-endpoints",
+  "language": "typescript",
+  "dirs": [
+    "web",
+    "server"
+  ],
+  "note": "DT.4 (T4; Kina smr.service.ts `${this.base}/smr${q}` with base = adminBase(), Kina admin.component.ts `${this.adminBase}/smr${q}`, examples-glia `${this.base}${query}`): a trailing interpolation whose const (or inline) value is a `?`-led query string is not part of the request path. HEAD 7661c035: endpoint:GET:/api/orders${…}, endpoint:GET:/admin/smr${…} and endpoint:GET:${…}/smr${…} pair nothing; the `${this.base}/${id}` and POST `${…}/smr` controls pair.",
+  "expect_nodes": [
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:/api/orders",
+      "exact": true,
+      "note": "${this.base}${query}, query = status ? `?status=${status}` : ''"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:/admin/smr",
+      "exact": true,
+      "note": "`/admin/smr${q}` and the inline `${term ? '?q=' + term : ''}`"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:${…}/smr",
+      "exact": true,
+      "note": "Kina's shape: base = adminBase(), a call, so the base stays ${…}"
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:/api/products${…}",
+      "exact": true,
+      "note": "CONTROL: suffix = archived ? '/archived' : '' is a path, kept"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "endpoint:GET:/api/orders",
+      "to": "GET /api/orders",
+      "category": "HTTP_CALLS",
+      "exact": true
+    },
+    {
+      "from": "endpoint:GET:/admin/smr",
+      "to": "GET /admin/smr",
+      "category": "HTTP_CALLS",
+      "exact": true
+    },
+    {
+      "from": "endpoint:GET:${…}/smr",
+      "to": "GET /admin/smr",
+      "category": "HTTP_CALLS",
+      "exact": true,
+      "note": "through the base fold its POST sibling already uses"
+    },
+    {
+      "from": "endpoint:GET:/api/orders/${…}",
+      "to": "GET /api/orders/:id",
+      "category": "HTTP_CALLS",
+      "exact": true,
+      "note": "CONTROL: pairs at HEAD"
+    },
+    {
+      "from": "endpoint:POST:${…}/smr",
+      "to": "POST /admin/smr",
+      "category": "HTTP_CALLS",
+      "exact": true,
+      "note": "CONTROL: pairs at HEAD (base_fold)"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:/api/orders${…}",
+      "max_nodes": 0
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:/admin/smr${…}",
+      "max_nodes": 0
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:${…}/smr${…}",
+      "max_nodes": 0
+    },
+    {
+      "kind": "ENDPOINT",
+      "name": "endpoint:GET:/api/products",
+      "max_nodes": 0,
+      "note": "a non-query suffix must not be dropped"
+    },
+    {
+      "from": "endpoint:GET:/api/orders",
+      "to": "GET /api/orders/:id",
+      "category": "HTTP_CALLS"
+    },
+    {
+      "from": "endpoint:GET:/api/products${…}",
+      "to": "GET /api/products",
+      "category": "HTTP_CALLS"
+    }
+  ]
+}

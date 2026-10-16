@@ -177,6 +177,15 @@ fn parse_file_stats(
             ea.aliases
         );
     }
+    // DT.4: call-site URLs whose trailing query-string substitution
+    // (`${q}`, `const q = s ? `?status=${s}` : ''`) was dropped from the
+    // path, per file.
+    if ea.query_suffixes > 0 {
+        eprintln!(
+            "[ts-endpoints] query suffixes={} file={file_rel_path}",
+            ea.query_suffixes
+        );
+    }
 
     resolve_intra_file(acc).map(|parse| (parse, ff, ab, sf, ls, gate, ea))
 }
@@ -194,6 +203,7 @@ fn endpoint_arg_stats(acc: &Acc) -> EndpointArgStats {
     });
     for cand in emitted {
         stats.aliases += usize::from(cand.alias.is_some());
+        stats.query_suffixes += usize::from(cand.query.is_some());
         if cand.path == UNRESOLVED_PATH {
             stats.unresolved += 1;
             continue;
@@ -505,8 +515,13 @@ struct EndpointCandidate {
     read: ArgRead,
     /// DF.20: the class members (`this.api`) whose config-expression value
     /// [`classify_template`] substituted into `template`, comma-joined in
-    /// template order. Serialised as `"alias"` on ENDPOINT_HIT, last.
+    /// template order. Serialised as `"alias"` on ENDPOINT_HIT, after
+    /// `wrapper_of`.
     alias: Option<String>,
+    /// DT.4: the trailing query-string substitution [`classify_template`]
+    /// dropped from `path` and `template` ([`query_suffix`]: the `const` it
+    /// names, or `inline`). Serialised as `"query"` on ENDPOINT_HIT, last.
+    query: Option<String>,
 }
 
 /// The path text of an HTTP call whose URL argument could not be read.
@@ -545,6 +560,8 @@ struct PathArg {
     read: ArgRead,
     /// DF.20: see `EndpointCandidate::alias`.
     alias: Option<String>,
+    /// DT.4: see `EndpointCandidate::query`.
+    query: Option<String>,
 }
 
 impl PathArg {
@@ -559,6 +576,7 @@ impl PathArg {
             wrapper_recv: None,
             read: ArgRead::Direct,
             alias: None,
+            query: None,
         }
     }
 
@@ -593,6 +611,10 @@ struct EndpointArgStats {
     /// member (the `[ts-endpoints] member aliases=` count); orthogonal to the
     /// arms above.
     aliases: usize,
+    /// DT.4: call sites whose trailing query-string substitution was dropped
+    /// from the path (the `[ts-endpoints] query suffixes=` count); orthogonal
+    /// to the arms above.
+    query_suffixes: usize,
 }
 
 impl EndpointArgStats {
@@ -2994,6 +3016,7 @@ fn push_endpoint(
         wrapper_recv,
         read,
         alias,
+        query,
     } = arg;
     // A3.3: the single funnel for every client-call shape, so host + query
     // stripping happens once. A normaliser, never a filter: interpolated bases
@@ -3022,6 +3045,7 @@ fn push_endpoint(
         class,
         read,
         alias,
+        query,
     });
 }
 
@@ -3574,13 +3598,31 @@ fn binds_name(pattern: TsNode, name: &str, src: &[u8]) -> bool {
 /// resolves folds to nothing, leaving the node as it was. A member that is no
 /// config expression (or a literal, which the table's own binding of the
 /// member folds, as on HEAD) keeps `${this.<m>}`.
+///
+/// DT.4: when the template's LAST named child is a substitution
+/// [`query_suffix`] reads as a query string (`${q}` with
+/// `const q = s ? `?status=${s}` : ''`, or an inline
+/// `${t ? '?q=' + t : ''}`), it is written to neither string and `query`
+/// names it: a query string is not part of the request path. The identity
+/// above still holds (both strings lose the same child), and has_subst /
+/// confidence count only the substitutions kept, so `` `/admin/smr${q}` ``
+/// reads exactly as the literal `'/admin/smr'` does. A template that is
+/// nothing but that substitution keeps it (no path precedes it), as does a
+/// `?`-led value anywhere but the end. It reads a declaration, never a value,
+/// so it applies with or without `aliases_ok`.
 fn classify_template(template: TsNode, src: &[u8], aliases_ok: bool) -> PathArg {
     let mut out = String::new();
     let mut source = String::new();
     let mut has_subst = false;
     let mut aliases: Vec<String> = Vec::new();
     let mut cursor = template.walk();
-    for child in template.named_children(&mut cursor) {
+    let children: Vec<TsNode> = template.named_children(&mut cursor).collect();
+    let query = match children.as_slice() {
+        [_, .., last] if last.kind() == "template_substitution" => query_suffix(*last, src),
+        _ => None,
+    };
+    let kept = children.len() - usize::from(query.is_some());
+    for child in children.into_iter().take(kept) {
         match child.kind() {
             "template_substitution" => {
                 has_subst = true;
@@ -3612,6 +3654,61 @@ fn classify_template(template: TsNode, src: &[u8], aliases_ok: bool) -> PathArg 
         wrapper_recv: None,
         read: ArgRead::Direct,
         alias: (!aliases.is_empty()).then(|| aliases.join(",")),
+        query,
+    }
+}
+
+/// DT.4: what a template's trailing `template_substitution` holds when it is
+/// a query string, read off the declaration the site names, never off a
+/// value: an identifier whose `const` ([`local_const_value`], CH.3a arm d's
+/// rules) [`is_query_string`] -> that identifier; an expression that is
+/// itself one (`${t ? '?q=' + t : ''}`) -> `inline`. A parameter, a `let` /
+/// `var`, a shadowed name, a call (`${qs(p)}`) or a member (`${this.q}`)
+/// is None: no value data-flow.
+fn query_suffix(subst: TsNode, src: &[u8]) -> Option<String> {
+    let expr = sole_named(subst)?;
+    if expr.kind() == "identifier" {
+        let value = local_const_value(expr, src)?;
+        return is_query_string(value, src).then(|| text(expr, src).to_string());
+    }
+    is_query_string(expr, src).then(|| "inline".to_string())
+}
+
+/// DT.4: true when `expr` is shaped as a URL query string: a `?`-led string
+/// or template; a ternary whose two branches are each one or empty (the
+/// optional-query idiom: neither runtime value adds to the request path);
+/// `( .. )` of one; `'?k=' + v` (a `+` whose left operand is one).
+/// `archived ? '/archived' : ''` (a path segment) and `c ? '?a=1' : '/x'` are
+/// not.
+fn is_query_string(expr: TsNode, src: &[u8]) -> bool {
+    match expr.kind() {
+        "string" => strip_string_quotes(text(expr, src)).starts_with('?'),
+        "template_string" => expr
+            .named_child(0)
+            .is_some_and(|c| c.kind() == "string_fragment" && text(c, src).starts_with('?')),
+        "ternary_expression" => ["consequence", "alternative"].iter().all(|f| {
+            expr.child_by_field_name(f)
+                .is_some_and(|b| is_query_string(b, src) || is_empty_string(b, src))
+        }),
+        "parenthesized_expression" => sole_named(expr).is_some_and(|e| is_query_string(e, src)),
+        "binary_expression" => {
+            expr.child_by_field_name("operator")
+                .is_some_and(|op| text(op, src) == "+")
+                && expr
+                    .child_by_field_name("left")
+                    .is_some_and(|l| is_query_string(l, src))
+        }
+        _ => false,
+    }
+}
+
+/// DT.4: `''`, `""`, an empty template, or `( .. )` of one.
+fn is_empty_string(expr: TsNode, src: &[u8]) -> bool {
+    match expr.kind() {
+        "string" => strip_string_quotes(text(expr, src)).is_empty(),
+        "template_string" => expr.named_child_count() == 0,
+        "parenthesized_expression" => sole_named(expr).is_some_and(|e| is_empty_string(e, src)),
+        _ => false,
     }
 }
 
@@ -3900,8 +3997,12 @@ fn downgrade(c: Confidence) -> Confidence {
 /// the enclosing class records one (a constructor parameter property, an
 /// annotated field or an `inject(T)` field).
 ///
-/// `alias` (DF.20) is written last, skipped the same way: only a template
-/// that read a config-expression class member (`this.api`) names it.
+/// `alias` (DF.20) follows `wrapper_of`, skipped the same way: only a
+/// template that read a config-expression class member (`this.api`) names it.
+///
+/// `query` (DT.4) is written last, skipped the same way: only a template whose
+/// trailing query-string substitution [`classify_template`] dropped names it
+/// (the `const` the substitution read, or `inline`).
 fn endpoint_hit_cell(cand: &EndpointCandidate, wrapper_of: Option<&str>) -> Cell {
     #[derive(serde::Serialize)]
     struct Payload<'a> {
@@ -3921,6 +4022,8 @@ fn endpoint_hit_cell(cand: &EndpointCandidate, wrapper_of: Option<&str>) -> Cell
         wrapper_of: Option<&'a str>,
         #[serde(skip_serializing_if = "Option::is_none")]
         alias: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        query: Option<&'a str>,
     }
     let conf_str = match cand.confidence {
         Confidence::Strong => "strong",
@@ -3939,6 +4042,7 @@ fn endpoint_hit_cell(cand: &EndpointCandidate, wrapper_of: Option<&str>) -> Cell
         wrapper: cand.wrapper.as_deref(),
         wrapper_of,
         alias: cand.alias.as_deref(),
+        query: cand.query.as_deref(),
     })
     .unwrap_or_else(|_| String::from("{}"));
     Cell {
@@ -6010,6 +6114,335 @@ export class S {
         assert_eq!(stats.aliases, 0);
     }
 
+    /// DT.4: the ENDPOINT_HIT JSON texts of the ENDPOINT with `path`.
+    fn hit_texts(parse: &FileParse, method: &str, path: &str) -> Vec<String> {
+        parse
+            .nodes
+            .iter()
+            .filter(|n| n.id == endpoint_id(repo(), method, path))
+            .flat_map(|n| n.cells.iter())
+            .filter_map(|c| match &c.payload {
+                CellPayload::Json(s) if c.kind == cell_type::ENDPOINT_HIT => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// DT.4: no ENDPOINT of `parse` has a qname in `qnames`.
+    fn no_endpoint(parse: &FileParse, qnames: &[&str]) {
+        let got = endpoint_qnames(parse);
+        for q in qnames {
+            assert!(!got.iter().any(|g| g == q), "{q} minted: {got:?}");
+        }
+    }
+
+    /// DT.4: `const q = s ? `?status=${s}` : ''` read at the site drops the
+    /// trailing `${q}` from path and template: the literal path, Strong, no
+    /// template, `query` = the const, written last.
+    #[test]
+    fn trailing_const_query_is_dropped() {
+        let src = "\
+export class SmrService {
+    constructor(private http: any) {}
+    list(s: string) {
+        const q = s ? `?status=${encodeURIComponent(s)}` : '';
+        return this.http.get(`/admin/smr${q}`);
+    }
+}
+";
+        let (parse, .., stats) =
+            parse_file_stats(src, "src/smr.service.ts", "src::smr", repo()).unwrap();
+        assert!(method_calls(
+            &parse,
+            "src::smr",
+            "SmrService::list",
+            "GET",
+            "/admin/smr"
+        ));
+        no_endpoint(&parse, &["endpoint:GET:/admin/smr${…}"]);
+        let hit = sole_hit(&parse, "GET", "/admin/smr");
+        assert!(hit.get("template").is_none(), "{hit}");
+        assert!(hit.get("raw").is_none(), "{hit}");
+        assert_eq!(hit["confidence"], "strong");
+        assert_eq!(hit["query"], "q");
+        let texts = hit_texts(&parse, "GET", "/admin/smr");
+        assert!(
+            texts[0].ends_with(r#","query":"q"}"#),
+            "query is last: {texts:?}"
+        );
+        assert_eq!(stats.query_suffixes, 1);
+    }
+
+    /// DT.4 (examples-glia `${this.base}${query}`): a config-aliased readonly
+    /// base keeps DF.20's template and alias; only the query goes.
+    #[test]
+    fn member_base_with_query() {
+        let src = "\
+export class OrderService {
+    private readonly base = `${environment.apiUrl}/orders`;
+    constructor(private http: any) {}
+    list(status?: string) {
+        const query = status ? `?status=${status}` : '';
+        return this.http.get(`${this.base}${query}`);
+    }
+}
+";
+        let (parse, .., stats) =
+            parse_file_stats(src, "src/order.service.ts", "src::order", repo()).unwrap();
+        assert!(method_calls(
+            &parse,
+            "src::order",
+            "OrderService::list",
+            "GET",
+            "${…}"
+        ));
+        no_endpoint(&parse, &["endpoint:GET:${…}${…}"]);
+        let hit = sole_hit(&parse, "GET", "${…}");
+        assert_eq!(hit["template"], "${environment.apiUrl}/orders");
+        assert_eq!(hit["alias"], "this.base");
+        assert_eq!(hit["query"], "query");
+        assert_eq!(hit["confidence"], "medium");
+        let texts = hit_texts(&parse, "GET", "${…}");
+        assert!(
+            texts[0].ends_with(r#","alias":"this.base","query":"query"}"#),
+            "{texts:?}"
+        );
+        assert_eq!((stats.aliases, stats.query_suffixes), (1, 1));
+    }
+
+    /// DT.4 (Kina smr.service.ts): a base built by a call is no config
+    /// expression, so `${this.base}` stays; the query still goes.
+    #[test]
+    fn call_base_with_query() {
+        let src = "\
+export class SmrAdminService {
+    private readonly base = adminBase();
+    constructor(private http: any) {}
+    list(status?: string) {
+        const q = status ? `?status=${encodeURIComponent(status)}` : '';
+        return this.http.get(`${this.base}/smr${q}`);
+    }
+}
+";
+        let parse = parse_file(src, "src/smr-admin.service.ts", "src::sa", repo()).unwrap();
+        assert!(method_calls(
+            &parse,
+            "src::sa",
+            "SmrAdminService::list",
+            "GET",
+            "${…}/smr"
+        ));
+        no_endpoint(&parse, &["endpoint:GET:${…}/smr${…}"]);
+        let hit = sole_hit(&parse, "GET", "${…}/smr");
+        assert_eq!(hit["template"], "${this.base}/smr");
+        assert_eq!(hit["query"], "q");
+        assert!(hit.get("alias").is_none(), "{hit}");
+    }
+
+    /// DT.4: an inline optional query (`'?q=' + t`, a `?`-led template, a
+    /// parenthesised ternary, an empty template branch) is `inline`.
+    #[test]
+    fn inline_ternary_query() {
+        let src = "\
+export class S {
+    constructor(private http: any) {}
+    a(term: string) { return this.http.get(`/admin/smr${term ? '?q=' + term : ''}`); }
+    b(p: number) { return this.http.get(`/api/b${(p ? `?page=${p}` : \"\")}`); }
+    c(p: number) { return this.http.get(`/api/c${p > 1 ? `?page=${p}` : ``}`); }
+    d(x: string) { return this.http.get(`/api/d${x ? '?a=' + x + '&b=' + x : ('')}`); }
+}
+";
+        let (parse, .., stats) = parse_file_stats(src, "src/s.ts", "src::s", repo()).unwrap();
+        for (m, path) in [
+            ("a", "/admin/smr"),
+            ("b", "/api/b"),
+            ("c", "/api/c"),
+            ("d", "/api/d"),
+        ] {
+            assert!(
+                method_calls(&parse, "src::s", &format!("S::{m}"), "GET", path),
+                "{m}"
+            );
+            let hit = sole_hit(&parse, "GET", path);
+            assert_eq!(hit["query"], "inline", "{m}");
+            assert!(hit.get("template").is_none(), "{m}: {hit}");
+        }
+        assert_eq!(stats.query_suffixes, 4);
+    }
+
+    /// DT.4: a URL read through a `const` (CH.3a arm d) drops the query its
+    /// template ends with too: the read only ever drops text.
+    #[test]
+    fn indirect_template_query_is_dropped() {
+        let src = "\
+export class S {
+    constructor(private http: any) {}
+    list(s: string) {
+        const q = s ? `?s=${s}` : '';
+        const url = `/api/list${q}`;
+        return this.http.get(url);
+    }
+}
+";
+        let (parse, .., ea) = parse_file_stats(src, "src/s.ts", "src::s", repo()).unwrap();
+        assert!(method_calls(
+            &parse,
+            "src::s",
+            "S::list",
+            "GET",
+            "/api/list"
+        ));
+        assert_eq!(sole_hit(&parse, "GET", "/api/list")["query"], "q");
+        assert_eq!((ea.local, ea.query_suffixes), (1, 1));
+    }
+
+    /// DT.4 CONTROL: a suffix const that is a path segment
+    /// (`archived ? '/archived' : ''`) is part of the path: kept.
+    #[test]
+    fn path_suffix_const_is_kept() {
+        let src = "\
+export class ProductService {
+    constructor(private http: any) {}
+    list(archived: boolean) {
+        const suffix = archived ? '/archived' : '';
+        return this.http.get(`${environment.apiUrl}/products${suffix}`);
+    }
+}
+";
+        let (parse, .., stats) = parse_file_stats(src, "src/p.ts", "src::p", repo()).unwrap();
+        let hit = sole_hit(&parse, "GET", "${…}/products${…}");
+        assert_eq!(hit["template"], "${environment.apiUrl}/products${suffix}");
+        assert!(hit.get("query").is_none(), "{hit}");
+        assert_eq!(stats.query_suffixes, 0);
+    }
+
+    /// DT.4 CONTROL: a ternary with one query branch and one path branch is
+    /// not a query: kept.
+    #[test]
+    fn mixed_branch_is_kept() {
+        let src = "\
+export class S {
+    constructor(private http: any) {}
+    m(c: boolean) {
+        const s = c ? '?a=1' : '/x';
+        return this.http.get(`/api/m${s}`);
+    }
+}
+";
+        let parse = parse_file(src, "src/s.ts", "src::s", repo()).unwrap();
+        let hit = sole_hit(&parse, "GET", "/api/m${…}");
+        assert_eq!(hit["template"], "/api/m${s}");
+        assert!(hit.get("query").is_none(), "{hit}");
+    }
+
+    /// DT.4 CONTROL: no value data-flow: a parameter (Kina's
+    /// `${BACKEND}${urlPath}`), a member, a call and a `?`-led string that is
+    /// not a `const` declaration all keep their `${…}`.
+    #[test]
+    fn parameter_suffix_is_kept() {
+        let src = "\
+export class S {
+    private readonly q = '?a=1';
+    constructor(private http: any) {}
+    p(url: string, q: string) { return this.http.get(`${url}${q}`); }
+    m() { return this.http.get(`/api/m${this.q}`); }
+    c(p: any) { return this.http.get(`/api/c${qs(p)}`); }
+    o(o: boolean) { return this.http.get(`/api/o${o || '?x'}`); }
+}
+";
+        let (parse, .., stats) = parse_file_stats(src, "src/s.ts", "src::s", repo()).unwrap();
+        for (m, path) in [
+            ("p", "${…}${…}"),
+            ("m", "/api/m${…}"),
+            ("c", "/api/c${…}"),
+            ("o", "/api/o${…}"),
+        ] {
+            assert!(
+                method_calls(&parse, "src::s", &format!("S::{m}"), "GET", path),
+                "{m}"
+            );
+            assert!(sole_hit(&parse, "GET", path).get("query").is_none(), "{m}");
+        }
+        assert_eq!(stats.query_suffixes, 0);
+    }
+
+    /// DT.4 CONTROL: a trailing path parameter is unchanged (examples-glia
+    /// `${this.base}/${id}`), as is a trailing const that is no query.
+    #[test]
+    fn path_param_unchanged() {
+        let src = "\
+export class OrderService {
+    private readonly base = `${environment.apiUrl}/orders`;
+    constructor(private http: any) {}
+    get(id: string) { return this.http.get(`${this.base}/${id}`); }
+    named() {
+        const id = 'latest';
+        return this.http.get(`/api/named/${id}`);
+    }
+}
+";
+        let parse = parse_file(src, "src/order.service.ts", "src::order", repo()).unwrap();
+        let hit = sole_hit(&parse, "GET", "${…}/${…}");
+        assert_eq!(hit["template"], "${environment.apiUrl}/orders/${id}");
+        assert!(hit.get("query").is_none(), "{hit}");
+        let hit = sole_hit(&parse, "GET", "/api/named/${…}");
+        assert!(hit.get("query").is_none(), "{hit}");
+    }
+
+    /// DT.4 CONTROL: only the template's LAST child is a candidate (a query
+    /// ends a URL), and a template that is nothing but the query keeps it.
+    #[test]
+    fn middle_query_const_is_kept() {
+        let src = "\
+export class S {
+    constructor(private http: any) {}
+    mid(c: boolean) {
+        const q = c ? '?a=1' : '';
+        return this.http.get(`/api/x${q}/y`);
+    }
+    only(c: boolean) {
+        const q = c ? '?a=1' : '';
+        return this.http.get(`${q}`);
+    }
+}
+";
+        let (parse, .., stats) = parse_file_stats(src, "src/s.ts", "src::s", repo()).unwrap();
+        let hit = sole_hit(&parse, "GET", "/api/x${…}/y");
+        assert_eq!(hit["template"], "/api/x${q}/y");
+        assert!(hit.get("query").is_none(), "{hit}");
+        let hit = sole_hit(&parse, "GET", "${…}");
+        assert_eq!(hit["template"], "${q}");
+        assert!(hit.get("query").is_none(), "{hit}");
+        assert_eq!(stats.query_suffixes, 0);
+    }
+
+    /// DT.4 CONTROL: only a `const` is read: a `let`, and a module `const`
+    /// that a nearer `let` shadows, keep their `${…}`.
+    #[test]
+    fn let_query_is_kept() {
+        let src = "\
+const outer = '?z=1';
+export class S {
+    constructor(private http: any) {}
+    l(c: boolean) {
+        let q = c ? '?a=1' : '';
+        return this.http.get(`/api/l${q}`);
+    }
+    s(c: boolean) {
+        let outer = '?y=1';
+        return this.http.get(`/api/s${outer}`);
+    }
+    t() { return this.http.get(`/api/t${outer}`); }
+}
+";
+        let (parse, .., stats) = parse_file_stats(src, "src/s.ts", "src::s", repo()).unwrap();
+        assert!(sole_hit(&parse, "GET", "/api/l${…}").get("query").is_none());
+        assert!(sole_hit(&parse, "GET", "/api/s${…}").get("query").is_none());
+        // The module `const` itself, unshadowed, is read.
+        assert_eq!(sole_hit(&parse, "GET", "/api/t")["query"], "outer");
+        assert_eq!(stats.query_suffixes, 1);
+    }
+
     /// CH.3a (f): a single-argument non-URL call around a template (no `/`
     /// in its static text) is no URL: `<unresolved>`, no wrapper.
     #[test]
@@ -6059,7 +6492,8 @@ export class FriendService {
                 field: 0,
                 method: 1,
                 unresolved: 1,
-                aliases: 0
+                aliases: 0,
+                query_suffixes: 0
             }
         );
         let geo = "\
@@ -6086,7 +6520,8 @@ export class GeoService {
                 field: 1,
                 method: 0,
                 unresolved: 2,
-                aliases: 0
+                aliases: 0,
+                query_suffixes: 0
             }
         );
         // A shape-2 call whose base is no import alias emits nothing: not counted.
