@@ -233,6 +233,19 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W3 (DH.21): libcurl: handle state is per function (options set in a helper read as GET), the handle key is textual
   (`curl` ≠ `self->curl`), and non-literal URLs (an `snprintf` buffer, `BASE "/x"`) name nothing; a const-table fold
   of `#define BASE "http://.."` would cover the macro case.
+- W4 (DG.13a): Rust: no method-level IMPLEMENTS (the parser mints no METHOD under a trait, `visit_type`), and no
+  IMPLEMENTS at all for an impl whose self type is declared in another file (glia's own `impl GraphSource for
+  MergedGraph` / `for RepoGraph` in `graph/src/traversal.rs`), for tuples, references, blanket impls and impls inside
+  fn bodies; the self type could bind by the same path rules (`type_in_scope`).
+- W4 (DC.5): glia's self-graph (the installed MCP) has no nodes for the functions in `engine/src/build/mod.rs` and
+  `assemble.rs` (`finish_build`, `build_graphs_for_repo`); check on HEAD with the self-graph hygiene group (§F.2).
+- W4 (DG.7b): HOCON `include` and `${X}` substitutions are not followed; a Quartz schedule whose expression comes only
+  from an included file or an env substitution is dropped (counted in `unresolved=`).
+- W4 (DG.2): Alpakka AMQP: a consumer-side `TemporaryQueueSourceSettings(..).withRoutingKey("k")` or
+  `BindingDeclaration(..).withRoutingKey("k")` reads as a producer of `k`; gate `.withRoutingKey(` on a receiver chain
+  rooted at AmqpWriteSettings / WriteMessage.
+- W4 (DE.4): `engram-export/tests/keep_v6.rs`'s list of tests pinning `--since` accuracy could name DE.4's four
+  `diff.rs` rename tests (no 0.5.2 packet owns the file).
 
 ## 3. Open questions for James
 
