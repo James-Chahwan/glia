@@ -165,6 +165,15 @@ links, so they must survive a rename.
   and `gaps` gains a named-but-not-modelled category over the same index. **Endorsed, 2026-10-16** (James: *"sick good
   gaps coverage and enhancements for glia"*): the vocabulary index is a glia substrate feature first, with Engram's
   `--vocab` export as one reader of it.
+- **One hint format between glia and Engram** (engram-34, 2026-10-16, writing the first real row into Kina, James
+  approved). For one node two "identity hints" exist: the gmap's `identity_hint` from glia-export-engram,
+  `frontend/src/app/app.routes.ts:3:0` (anchor file, kind code, ordinal; DE.3), and the cell store's `Identity::hint`
+  (`graph/src/identity.rs`, LB.6), `v1|3|app.routes.ts|9bdbdf56d843b8d0|entryGuard`. The cell store keeps and rekeys by
+  the second, Engram holds the first, so Engram cannot match a row's stored hint against its facts and follows rows by
+  qname until this lands. **Decision (the session's, James can overrule):** the `v1|..` form is the one shared key - it
+  names the node and hashes its content, where the ordinal form can pass to a sibling after a deletion. glia-export-engram
+  writes it per fact in a digest-bound side file `<out>.hints.jsonl` (as `.ppr.jsonl` is; no GMAP contract change), and
+  `glia cell set --hint` / pyo3 `hint=` take that form.
 - **Spec item: scope-level conventions.** In glia, CONV is a free-text note on ONE node (overlay `[[note]]`; the
   format spec's "conversation history"), not a convention. A convention that covers a scope ("modals are centred,
   never bottom-anchored": every modal component) has no home: until it has one, Engram writes it as a CONV note on the
