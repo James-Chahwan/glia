@@ -55,24 +55,21 @@ Not testable here: GraphQL (neither repo uses it).
 
 ## Who does what, in order (the one plan every session follows)
 
-1. **glia (this session):** the tweak packets T1-T12 run as 0.5.2 waves W15+ with the usual close-outs, then a closing
+1. **glia (this session):** the tweak packets T1-T13 run as 0.5.2 waves W15+ with the usual close-outs, then a closing
    docs packet that also updates the three DZ.2 handoffs with every new break. 0.5.2 is then code-complete again.
 2. **James:** tests 0.5.2 (Kina, quokka-stack, examples-glia); any tweak he finds lands on main first.
-3. **James:** the release - bump the workspace, `py/pyproject.toml` and `engram-export/Cargo.toml` to 0.5.2, rebuild the
-   wheel, re-measure README Numbers, tag, push, publish. That commit is the release candidate (RC).
-4. **Engram session:** installs that glia, runs the Kina + glia replays at the RC (flat-ppr vs flat-fs, X1 off / on,
-   the `since` pairing totals), switches its corrections writer to `--hint` with the v1 hints from `<out>.hints.jsonl`.
-5. **neuropil:** applies `dev-notes/neuropil-handoff-0.5.2.md` after the release (no change needed before).
-6. **repo-graph:** held. It upgrades 0.5.1 -> 0.5.3 from one combined handoff after 0.5.3 (James: "Hold repo graph for
-   post 0.5.3").
-7. **glia:** the 0.5.3 spec run from `dev-notes/next-leap-0.5.3.md`, its waves, follow-up waves until no followup is
-   left, then the combined repo-graph handover.
-
-James, 2026-10-17: *"okay after this we should test kina and quokka-stack again and hopefully we can rul the 0.5.3 answer
-any questions then begin build overnight"*. So after the last tweak wave (DT.13): the Kina + quokka-stack demos are re-run
-on the tweaked glia (step 2), then the 0.5.3 spec run (step 7) with its open questions to James, then the 0.5.3 waves
-overnight. Steps 4-6 do not block the spec run. The 0.5.2 release commit (step 3) has to land before the first 0.5.3 wave,
-so the RC stays a plain main commit with no 0.5.3 code in it.
+3. **No 0.5.2 release** (James, 2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*, *"yeah sounds fine"*). The
+   commit after DT.13 gets the local marker tag `0.5.2-complete` (no bump, no publish).
+4. **glia + James:** the Kina + quokka-stack demos re-run on the tweaked glia (*"okay after this we should test kina and
+   quokka-stack again and hopefully we can rul the 0.5.3 answer any questions then begin build overnight"*).
+5. **Engram session:** builds glia at `0.5.2-complete` from source, runs the Kina + glia replays there (flat-ppr vs
+   flat-fs, X1 off / on, the `since` pairing totals) and switches its corrections writer to `--hint` with the v1 hints
+   from `<out>.hints.jsonl`.
+6. **glia:** the 0.5.3 spec run from `dev-notes/next-leap-0.5.3.md` (open questions to James), then its waves (overnight),
+   follow-up waves until no followup is left, then the release: one bump 0.5.1 -> 0.5.3 (workspace, `py/pyproject.toml`,
+   `engram-export/Cargo.toml`), wheel, README numbers, tag, push, publish.
+7. **Consumers:** repo-graph, neuropil and Engram each take ONE combined 0.5.1 -> 0.5.3 handoff written by 0.5.3's release
+   docs packet (it merges the three 0.5.2 handoffs). Never message the repo-graph session before then.
 
 ## Spec run and rulings (2026-10-16)
 

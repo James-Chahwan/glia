@@ -53,6 +53,15 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
   (T8), pyo3 category names (T9), smart contracts across the stack (T10), GraphQL root-field pairing (T11), and one hint
   format with `glia cell set --hint` (T12, the §B "caller hint" and "one hint format" items). The 0.5.3 spec run reads
   this seed minus those, and re-measures after the tweaks land.
+- 2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*, then *"yeah sounds fine"*. **0.5.2 is never released.** The
+  commit where the 0.5.2 tweaks end (DT.13) gets a local marker tag `0.5.2-complete` (no bump, no publish); Engram's Kina
+  + glia replays and its `--hint` writer switch run at that tag, built from source (binaries there print
+  `0.5.1+p<stamp>`). The version goes 0.5.1 -> 0.5.3 in one bump (Cargo workspace, `py/pyproject.toml`,
+  `engram-export/Cargo.toml`) at the end of 0.5.3. 0.5.3's release docs packet merges all three 0.5.2 handoffs
+  (`dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.2.md`) into one combined 0.5.1 -> 0.5.3 handoff per consumer,
+  and folds README / py/README's 0.5.2 sections into 0.5.3's. Also *"okay after this we should test kina and quokka-stack
+  again and hopefully we can rul the 0.5.3 answer any questions then begin build overnight"*: after DT.13, the Kina +
+  quokka-stack demos re-run, then this spec run, then 0.5.3's waves.
 
 ## 1. The train
 
