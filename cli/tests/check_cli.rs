@@ -1,6 +1,14 @@
 //! LE.8 — `glia check`, driving the real binary: its exit code is the CI
-//! contract. 1 when a declared rule is violated, 0 when every rule holds (or
-//! none is declared), 2 when a rule cannot be evaluated.
+//! contract. 1 when a violation is BLOCKING (DB.3d: its tier reaches its
+//! rule's `min_tier` and is not heuristic), 0 when nothing blocks (every rule
+//! holds, none is declared, or every violation is advisory), 2 when a rule
+//! cannot be evaluated.
+//!
+//! DB.3d renders DB.3a's rule-invariant rows (`_violation <k>: ..`, with the
+//! subject, its location, the witness edges and the Q5 caveats) and DB.3b's
+//! transitive forbid_edge hits (`_path <k> into ..`, the witness in path
+//! order), marks an advisory violation on its tier line, and prints the
+//! summary `- violations: <V> (blocking <B>, advisory <A>)`.
 //!
 //! The `[check]` stderr line is the LE.8 fired_on marker, followed on a
 //! violation by CC.3's `[check] tiers ..` line and DB.3a's `[check] gate
@@ -42,6 +50,9 @@ kind = \"invariant\"
 scope = \"services/api\"
 text = \"charges are idempotent\"
 ";
+
+/// The root PROJECT an unscoped invariant anchors on (LF.4a).
+const ROOT_MANIFEST: (&str, &str) = ("pyproject.toml", "[project]\nname = \"root\"\n");
 
 /// `to` names a path no file sits under: the rule cannot be evaluated.
 const GHOST_RULE: &str = "version = 1
@@ -238,6 +249,67 @@ fn rule_error_exits_2() {
     assert!(stdout.contains("## rule errors"), "{stdout}");
     assert!(
         stdout.contains("- `web-no-ghost`: to scope `ghost`"),
+        "{stdout}"
+    );
+
+    // Rule invariants that do not analyse (DB.3a): errors, never checked,
+    // each diagnostic printed verbatim on its own line, in source order.
+    let rotten = r#"version = 2
+
+[[constraint]]
+id = "rotten"
+kind = "invariant"
+text = "a rule naming an unknown kind"
+rule = "violation(r) :- node(r, \"ROUTEE\")."
+
+[[constraint]]
+id = "rotten2"
+kind = "invariant"
+text = "a rule naming two unknown names"
+rule = "violation(r) :- node(r, \"ROUTEE\"), edge(r, _, \"CALLZ\")."
+"#;
+    let fx = Fixture::new(
+        "rotten",
+        &[
+            ROOT_MANIFEST,
+            ("web/app.py", WEB_APP),
+            ("services/api/internal.py", INTERNAL),
+            (".glia/overlay.toml", rotten),
+        ],
+    );
+    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    assert_eq!(code, 2, "{stdout}");
+    assert_eq!(
+        markers,
+        vec![
+            "[check] rules=2 checked=0 violations=0 (forbid_edge=0 no_cycle=0) unchecked=0 errors=2"
+        ]
+    );
+    let errors = &stdout[stdout
+        .find("## rule errors (not evaluated)")
+        .expect("the rule errors section")..];
+    let line = errors
+        .lines()
+        .find(|l| l.starts_with("- `rotten`: "))
+        .unwrap_or_else(|| panic!("rotten is listed: {stdout}"));
+    assert!(
+        line.starts_with("- `rotten`: rotten (.glia/overlay.toml:3):1:")
+            && line.contains("unknown node kind `ROUTEE`"),
+        "{line}"
+    );
+    let two: Vec<&str> = errors
+        .lines()
+        .skip_while(|l| !l.starts_with("- `rotten2`: "))
+        .take(2)
+        .collect();
+    assert!(
+        two.len() == 2
+            && two[0].starts_with("- `rotten2`: rotten2 (.glia/overlay.toml:9):1:25: error: unknown node kind `ROUTEE`")
+            && two[1].starts_with("  rotten2 (.glia/overlay.toml:9):1:47: error: unknown edge category `CALLZ`"),
+        "one diagnostic per line, the second under the bullet: {errors}"
+    );
+    assert!(
+        stdout.contains("- violations: 0 (blocking 0, advisory 0)"),
         "{stdout}"
     );
 }
@@ -448,5 +520,382 @@ to = \"web\"
     assert!(
         stdout.contains("_(none: every located file maps to a component)_"),
         "{stdout}"
+    );
+}
+
+/// The advisory mark a non-blocking violation's tier line carries (DB.3d).
+const ADVISORY: &str = "advisory (below this rule's min_tier; does not fail CI)";
+
+/// DB.3a's tree (engine/tests/check_rule_invariants.rs) beyond the two
+/// manifests [`Fixture`] writes: root, store/ and scripts/ projects;
+/// web/admin.py calls store/db.py's `load` (a FACT CALLS, line 5),
+/// web/client.py `requests.get`s the `/orders` route services/api/server.py
+/// serves (a resolver-paired, DERIVED HTTP_CALLS), handlers.py's `unused` is
+/// called by nothing and scripts/tool.py's `run` calls nothing.
+const DB3A_SOURCES: [(&str, &str); 10] = [
+    ROOT_MANIFEST,
+    ("store/pyproject.toml", "[project]\nname = \"store\"\n"),
+    ("scripts/pyproject.toml", "[project]\nname = \"scripts\"\n"),
+    (
+        "web/app.py",
+        "from services.api.handlers import get_order\n\n\ndef show(o):\n    return get_order(o)\n",
+    ),
+    (
+        "web/admin.py",
+        "from store.db import load\n\n\ndef audit(k):\n    return load(k)\n",
+    ),
+    (
+        "web/client.py",
+        "import requests\n\n\ndef orders():\n    return requests.get(\"http://api/orders\")\n",
+    ),
+    (
+        "services/api/handlers.py",
+        "from store.db import load\n\n\ndef get_order(o):\n    return load(o)\n\n\ndef unused():\n    return 1\n",
+    ),
+    (
+        "services/api/server.py",
+        "from flask import Flask\n\napp = Flask(__name__)\n\n\n@app.get(\"/orders\")\ndef list_orders():\n    return []\n",
+    ),
+    ("store/db.py", "def load(k):\n    return k\n"),
+    ("scripts/tool.py", "def run():\n    return 0\n"),
+];
+
+fn db3a_fixture(tag: &str, overlay: &str) -> Fixture {
+    let files: Vec<(&str, &str)> = DB3A_SOURCES
+        .iter()
+        .copied()
+        .chain(std::iter::once((".glia/overlay.toml", overlay)))
+        .collect();
+    Fixture::new(tag, &files)
+}
+
+/// The declared edge that is scripts/'s only way into store/: HEURISTIC.
+const SCRIPTS_EDGE: &str = "
+[[edge]]
+from = \"scripts::tool::run\"
+to = \"store::db::load\"
+category = \"CALLS\"
+";
+
+/// The rule invariants DB.3a evaluates: one fact row with a CALLS witness,
+/// one negated row with no witness and the CALLS caveats.
+const RULE_INVARIANTS: &str = r#"version = 2
+
+[[constraint]]
+id = "web-no-store"
+kind = "invariant"
+text = "web never calls the store directly"
+rule = "violation(a, b) :- calls(a, b), in_scope(a, \"web\"), in_scope(b, \"store\")."
+
+[[constraint]]
+id = "api-called"
+kind = "invariant"
+text = "every api handler is called"
+rule = "violation(f) :- node(f, \"FUNCTION\"), in_scope(f, \"services/api/handlers.py\"), !called(f). called(f) :- edge(_, f, \"CALLS\")."
+"#;
+
+/// (1) A rule invariant's row is a located violation with its witness and
+/// caveats, never a cycle; a fact row blocks. HEAD (DB.3a) printed each row
+/// as `_cycle <k>: <n> node(s) in the component` with no subject.
+#[test]
+fn rule_violation_section_and_exit_1() {
+    let fx = db3a_fixture("rule-section", RULE_INVARIANTS);
+    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    assert_eq!(code, 1, "{stdout}");
+    assert_eq!(
+        markers,
+        vec![
+            "[check] rules=2 checked=2 violations=2 (forbid_edge=0 no_cycle=0) unchecked=0 errors=0",
+            "[check] tiers fact=2 derived=0 heuristic=0",
+            "[check] gate blocking=2 advisory=0",
+        ]
+    );
+    for want in [
+        "- violations: 2 (blocking 2, advisory 0)",
+        "### web-no-store (rule, .glia/overlay.toml:3) - 1 violation(s)",
+        "_violation 1: `web::admin::audit`, `store::db::load` - tier fact at web/admin.py:4_",
+        "| 1 | CALLS | `web::admin::audit` | `store::db::load` | web/admin.py:5 | graph:calls | fact |",
+        "### api-called (rule, .glia/overlay.toml:9) - 1 violation(s)",
+        "_violation 1: `services::api::handlers::unused` - tier fact at services/api/handlers.py:8_",
+    ] {
+        assert!(stdout.contains(want), "missing {want:?}:\n{stdout}");
+    }
+    assert!(
+        !stdout.contains("_cycle") && !stdout.contains(ADVISORY),
+        "a rule row is no cycle, and a fact row blocks: {stdout}"
+    );
+    // The negated row: no witness table, its Q5 caveats in the absence style.
+    let section = &stdout[stdout
+        .find("### api-called")
+        .expect("the api-called section")..];
+    let section = &section[..section.find("### web-no-store").unwrap_or(section.len())];
+    assert!(
+        !section.contains("| # | category |"),
+        "a row no edge derives has no witness table: {section}"
+    );
+    let caveats = section.lines().filter(|l| l.starts_with("  ⚠ ")).count();
+    assert!(
+        (1..=5).contains(&caveats),
+        "the negation read CALLS: at most 5 caveats per row: {section}"
+    );
+    assert!(
+        section
+            .lines()
+            .filter(|l| l.starts_with("  ⚠ "))
+            .all(
+                |l| (l.starts_with("  ⚠ CALLS (") || l.starts_with("  ⚠ * (")) && l.contains("): ")
+            ),
+        "`  ⚠ <category> (<language>): <note>`, the rows for CALLS: {section}"
+    );
+}
+
+/// (2) Only a heuristic violation: reported with the advisory mark, exit 0.
+/// HEAD exited 1 on it, and on the version-1 forbid_edge broken only by the
+/// same declared edge.
+#[test]
+fn advisory_only_exits_0() {
+    let overlay = format!(
+        "version = 2
+{SCRIPTS_EDGE}
+[[constraint]]
+id = \"scripts-no-store\"
+kind = \"invariant\"
+text = \"scripts never call the store\"
+rule = \"violation(a, b) :- calls(a, b), in_scope(a, \\\"scripts\\\"), in_scope(b, \\\"store\\\").\"
+"
+    );
+    let fx = db3a_fixture("advisory-rule", &overlay);
+    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    assert_eq!(code, 0, "a heuristic violation never fails CI: {stdout}");
+    assert_eq!(
+        markers.last().map(String::as_str),
+        Some("[check] gate blocking=0 advisory=1"),
+        "{markers:?}"
+    );
+    for want in [
+        "- violations: 1 (blocking 0, advisory 1)".to_string(),
+        format!(
+            "_violation 1: `scripts::tool::run`, `store::db::load` - tier heuristic, {ADVISORY} at scripts/tool.py:1_"
+        ),
+        "| 1 | CALLS | `scripts::tool::run` | `store::db::load` |".to_string(),
+        "| overlay:edge | heuristic".to_string(),
+    ] {
+        assert!(stdout.contains(&want), "missing {want:?}:\n{stdout}");
+    }
+
+    // A version-1 forbid_edge broken only by the declared edge: advisory too.
+    let overlay = format!(
+        "version = 1
+{SCRIPTS_EDGE}
+[[constraint]]
+id = \"scripts-direct\"
+kind = \"forbid_edge\"
+from = \"scripts\"
+to = \"store\"
+"
+    );
+    let fx = db3a_fixture("advisory-forbid", &overlay);
+    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(
+        markers.last().map(String::as_str),
+        Some("[check] gate blocking=0 advisory=1"),
+        "{markers:?}"
+    );
+    for want in [
+        "### scripts-direct (forbid_edge, .glia/overlay.toml:8) - 1 violation(s)".to_string(),
+        format!("_1 forbidden edge(s), tier heuristic, {ADVISORY}:_"),
+        "- violations: 1 (blocking 0, advisory 1)".to_string(),
+    ] {
+        assert!(stdout.contains(&want), "missing {want:?}:\n{stdout}");
+    }
+}
+
+/// web/client.py `requests.get`s the `/orders` route services/api/server.py
+/// serves: the forbidden edge is a resolver-paired, DERIVED HTTP_CALLS.
+fn http_fixture(tag: &str, min_tier: &str) -> Fixture {
+    let overlay = format!(
+        "version = 2
+
+[[constraint]]
+id = \"web-no-api-http\"
+kind = \"forbid_edge\"
+from = \"web\"
+to = \"services/api\"
+categories = [\"HTTP_CALLS\"]
+{min_tier}"
+    );
+    Fixture::new(
+        tag,
+        &[
+            ("web/client.py", DB3A_SOURCES[5].1),
+            ("services/api/server.py", DB3A_SOURCES[7].1),
+            (".glia/overlay.toml", &overlay),
+        ],
+    )
+}
+
+/// (2b) `min_tier = "fact"` makes a derived violation advisory: exit 0 and
+/// the mark on its tier line. The same rule at the default gate blocks. HEAD
+/// exited 1 for both.
+#[test]
+fn min_tier_fact_derived_is_advisory() {
+    let fx = http_fixture("min-tier-fact", "min_tier = \"fact\"\n");
+    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    assert_eq!(code, 0, "{stdout}");
+    assert_eq!(
+        markers.last().map(String::as_str),
+        Some("[check] gate blocking=0 advisory=1"),
+        "{markers:?}"
+    );
+    for want in [
+        format!("_1 forbidden edge(s), tier derived, {ADVISORY}:_"),
+        "| 1 | HTTP_CALLS | `endpoint:GET:/orders @web` | `GET /orders @services/api` | web/client.py:5 | resolver:http | derived |".to_string(),
+        "- violations: 1 (blocking 0, advisory 1)".to_string(),
+    ] {
+        assert!(stdout.contains(&want), "missing {want:?}:\n{stdout}");
+    }
+
+    let fx = http_fixture("min-tier-default", "");
+    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    assert_eq!(code, 1, "the default min_tier is derived: {stdout}");
+    assert_eq!(
+        markers.last().map(String::as_str),
+        Some("[check] gate blocking=1 advisory=0"),
+        "{markers:?}"
+    );
+    for want in [
+        "_1 forbidden edge(s), tier derived:_",
+        "- violations: 1 (blocking 1, advisory 0)",
+    ] {
+        assert!(stdout.contains(want), "missing {want:?}:\n{stdout}");
+    }
+    assert!(!stdout.contains(ADVISORY), "{stdout}");
+}
+
+/// (3) DB.3b's fx1 with its via rule: one `_path` per hit of `to`, its
+/// witness hops in path order. HEAD printed each hit as a cycle.
+#[test]
+fn forbid_path_section() {
+    let overlay = "version = 2
+
+[[constraint]]
+id = \"web-no-api\"
+kind = \"forbid_edge\"
+from = \"web\"
+to = \"services/api\"
+transitive = true
+via = [\"services/api/public\"]
+";
+    let fx = Fixture::new(
+        "forbid-path",
+        &[
+            ("shared/pyproject.toml", "[project]\nname = \"shared\"\n"),
+            (
+                "web/app.py",
+                "from shared.util import helper\nfrom services.api.public.facade import get\n\n\ndef page():\n    return helper()\n\n\ndef other():\n    return get()\n",
+            ),
+            (
+                "shared/util.py",
+                "from services.api.internal.db import query\n\n\ndef helper():\n    return query()\n",
+            ),
+            (
+                "services/api/public/facade.py",
+                "from services.api.internal.db import write\n\n\ndef get():\n    return write()\n",
+            ),
+            (
+                "services/api/internal/db.py",
+                "def query():\n    return 1\n\n\ndef write():\n    return 2\n",
+            ),
+            (".glia/overlay.toml", overlay),
+        ],
+    );
+    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    assert_eq!(code, 1, "{stdout}");
+    assert_eq!(
+        markers,
+        vec![
+            "[check] rules=1 checked=1 violations=2 (forbid_edge=0 no_cycle=0) unchecked=0 errors=0",
+            "[check] tiers fact=2 derived=0 heuristic=0",
+            "[check] gate blocking=2 advisory=0",
+        ]
+    );
+    assert!(
+        stdout.contains("### web-no-api (forbid_path, .glia/overlay.toml:3) - 2 violation(s)"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("_cycle"), "a path is no cycle: {stdout}");
+    // Each witness in path order, right under its own heading.
+    let in_order = |lines: &[&str]| {
+        let mut from = 0;
+        for l in lines {
+            match stdout[from..].find(l) {
+                Some(i) => from += i + l.len(),
+                None => panic!("missing {l:?} after byte {from}:\n{stdout}"),
+            }
+        }
+    };
+    in_order(&[
+        "_path 1 into `services::api::internal::db` - 2 hop(s), tier fact:_",
+        "| 1 | IMPORTS | `web::app` | `shared::util` | web/app.py:1 | graph:imports | fact |",
+        "| 2 | IMPORTS | `shared::util` | `services::api::internal::db` | shared/util.py:1 | graph:imports | fact |",
+        "_path 2 into `services::api::internal::db::query` - 2 hop(s), tier fact:_",
+        "| 1 | CALLS | `web::app::page` | `shared::util::helper` | web/app.py:6 | graph:calls | fact |",
+        "| 2 | CALLS | `shared::util::helper` | `services::api::internal::db::query` | shared/util.py:5 | graph:calls | fact |",
+    ]);
+}
+
+/// More than 50 violations in one rule: the first 50 and a note; `--json`
+/// lists all.
+#[test]
+fn a_rule_prints_at_most_50_violations() {
+    let many: String = (1..=51)
+        .map(|i| format!("def f{i}():\n    return {i}\n\n\n"))
+        .collect();
+    let overlay = r#"version = 2
+
+[[constraint]]
+id = "no-functions"
+kind = "invariant"
+text = "many.py defines nothing"
+rule = "violation(f) :- node(f, \"FUNCTION\"), in_scope(f, \"services/api/many.py\")."
+"#;
+    let fx = Fixture::new(
+        "capped",
+        &[
+            ROOT_MANIFEST,
+            ("services/api/many.py", &many),
+            (".glia/overlay.toml", overlay),
+        ],
+    );
+    let (code, stdout, _) = glia(&["check", &fx.path()]);
+    assert_eq!(code, 1, "{stdout}");
+    assert!(
+        stdout.contains("### no-functions (rule, .glia/overlay.toml:3) - 51 violation(s)"),
+        "{stdout}"
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|l| l.starts_with("_violation "))
+            .count(),
+        50,
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("_violation 50: ") && !stdout.contains("_violation 51: "),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("_(showing 50 of 51; --json lists all)_"),
+        "{stdout}"
+    );
+    let (code, json, _) = glia(&["check", &fx.path(), "--json"]);
+    assert_eq!(code, 1);
+    let v: serde_json::Value = serde_json::from_str(json.trim()).expect("JSON report");
+    assert_eq!(
+        v["violations"].as_array().map(Vec::len),
+        Some(51),
+        "--json lists all"
     );
 }

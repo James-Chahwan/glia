@@ -18,22 +18,33 @@ mod spec_status;
 pub(crate) enum RulesCmd {
     /// Check (LE.8): evaluate the declared `[[constraint]]` rules of
     /// `.glia/overlay.toml` (and cell-API rules) against the graph.
-    /// `forbid_edge` lists every direct edge from scope `from` to scope `to`
-    /// (tier fact); `no_cycle` lists each cycle among the modules (or, with
-    /// `categories`, the nodes) in its scope (tier derived); `invariant`
-    /// rules are listed as unchecked. A node is in a scope only when its
-    /// file sits under that path (or it is a PROJECT there): a node with no
-    /// file never matches. Scopes are repo-relative, so with --with a rule
-    /// is evaluated against every merged repo's nodes at that path.
+    /// `forbid_edge` lists every direct edge from scope `from` to scope `to`;
+    /// with `transitive = true` (overlay version 2) it lists every path from
+    /// `from` through a third scope into `to`, one per node of `to` reached,
+    /// with its witness hops in order; a path entering through a `via`
+    /// facade is allowed. `no_cycle` lists each cycle among the modules (or,
+    /// with `categories`, the nodes) in its scope. An `invariant` is
+    /// unchecked text, or, with a `rule` (Datalog), checked: each row of its
+    /// `violation` predicate is a violation, with its subject, location,
+    /// witness edges and the coverage caveats of what its negations read.
+    /// A node is in a scope only when its file sits under that path (or it
+    /// is a PROJECT there): a node with no file never matches. Scopes are
+    /// repo-relative, so with --with a rule is evaluated against every
+    /// merged repo's nodes at that path.
     /// A reflexion model (`[[component]]` paths, `[[layer]]`s, `kind =
     /// "allow"` rules; CC.5b) prints first: its components, the component
     /// dependency matrix (convergence / divergence, or observed when no
     /// layer or allow closes it), each allow no edge realises with its
     /// coverage caveats, and the files no component owns. A divergence is a
     /// violation, listed per edge.
-    /// Exit codes for CI: 0 no violations, 1 violations, 2 a build error or
-    /// a rule that could not be evaluated (unknown edge category, a scope no
-    /// node sits in, an allow naming an undeclared component).
+    /// Every violation is tiered fact, derived or heuristic. It blocks when
+    /// its tier is at least its rule's `min_tier` (`fact` or `derived`, the
+    /// default derived) and is not heuristic; any other is advisory, marked
+    /// and never a CI failure.
+    /// Exit codes for CI: 0 nothing blocks, 1 a blocking violation, 2 a
+    /// build error or a rule that could not be evaluated (unknown edge
+    /// category, a scope or `via` facade no node sits in, an allow naming an
+    /// undeclared component, a `rule` that does not parse or analyse).
     Check(check::Args),
     /// Cycles (LE.6b): cross-service event loops first (a node-level loop
     /// through queue / event hops, with a located witness), then call loops,

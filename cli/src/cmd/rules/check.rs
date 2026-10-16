@@ -1,19 +1,33 @@
 //! `glia check` (LE.8) — the CI gate over the engine's `check::check`: every
 //! declared `[[constraint]]` rule evaluated, one section per violated rule
-//! with its located evidence. Exit 0 clean, 1 on a violation, 2 on a build
-//! failure or a rule that could not be evaluated. `--json` is the report.
-//! Each evidence row carries the tier `glia why` gives that edge (CC.3), its
-//! note in parentheses; the exit code never reads the tier.
+//! with its located evidence. Exit 0 when nothing blocks, 1 on a BLOCKING
+//! violation, 2 on a build failure or a rule that could not be evaluated
+//! (DB.3d). `--json` is the report. Each evidence row carries the tier `glia
+//! why` gives that edge (CC.3), its note in parentheses.
+//!
+//! The exit code reads only [`Violation::blocking`], which the engine sets
+//! from the violation's tier and its rule's `min_tier` (DB.3a; a heuristic
+//! violation never blocks, 0.5.2 Q2). A non-blocking violation is printed in
+//! full with [`ADVISORY`] on its tier line, and the summary splits the count
+//! (`- violations: <V> (blocking <B>, advisory <A>)`).
+//!
+//! Per kind: a forbid_edge rule's and a reflexion divergence's edges in one
+//! table; each cycle of a no_cycle rule with a shortest witness; each
+//! `violation` row of a rule invariant (DB.3a) with its subject, location,
+//! witness edges and Q5 coverage caveats; each hit of a transitive
+//! forbid_edge (DB.3b) with its witness hops in path order. At most
+//! [`MAX_PRINTED_PER_RULE`] violations print per rule.
 //!
 //! A declared reflexion model (CC.5b) prints as a `## reflexion model` section
 //! before the violations (CC.5c): its components, the component dependency
 //! matrix, the absences with their coverage caveats and the unmapped files.
 //! Its divergences are violations, one per-edge section each like a
-//! forbid_edge rule's, so they exit 1.
+//! forbid_edge rule's, gated at the default `min_tier`.
 
+use glia_engine::CoverageNote;
 use glia_engine::check::{
-    CONVERGENCE, CheckReport, DIVERGENCE, FORBID_EDGE, MAX_EVIDENCE, MAX_UNMAPPED_SAMPLE,
-    Reflexion, Violation, ViolationEdge, check,
+    CONVERGENCE, CheckReport, DIVERGENCE, FORBID_EDGE, FORBID_PATH, MAX_EVIDENCE,
+    MAX_UNMAPPED_SAMPLE, NO_CYCLE, RULE, Reflexion, Violation, ViolationEdge, check,
 };
 
 use crate::common::generate_for;
@@ -30,25 +44,43 @@ pub(crate) struct Args {
     json: bool,
 }
 
-/// Exit code: 2 when a rule could not be evaluated, else 1 on a violation,
-/// else 0.
+/// Exit code: 2 when a rule could not be evaluated, else 1 when any
+/// violation is blocking, else 0 (an advisory violation is reported, never a
+/// CI failure).
 fn exit_code(r: &CheckReport) -> i32 {
     if !r.errors.is_empty() {
         2
-    } else if !r.violations.is_empty() {
+    } else if r.violations.iter().any(|v| v.blocking) {
         1
     } else {
         0
     }
 }
 
+/// Appended to a non-blocking violation's tier: its tier is below its rule's
+/// `min_tier`, or heuristic, which never blocks (0.5.2 Q2).
+const ADVISORY: &str = ", advisory (below this rule's min_tier; does not fail CI)";
+
+/// [`ADVISORY`] when `v` does not block, else nothing.
+fn advisory(v: &Violation) -> &'static str {
+    if v.blocking { "" } else { ADVISORY }
+}
+
+/// Violations printed per rule; `--json` lists all.
+const MAX_PRINTED_PER_RULE: usize = 50;
+
 /// `file:line`, `file`, or `—`.
-fn at(e: &ViolationEdge) -> String {
-    match (e.file.as_deref(), e.line) {
+fn located(file: Option<&str>, line: Option<i64>) -> String {
+    match (file, line) {
         (Some(f), Some(l)) => format!("{f}:{l}"),
         (Some(f), None) => f.to_string(),
         _ => "—".to_string(),
     }
+}
+
+/// An evidence row's site, as [`located`].
+fn at(e: &ViolationEdge) -> String {
+    located(e.file.as_deref(), e.line)
 }
 
 /// The row's tier, with its note in parentheses when it has one.
@@ -77,8 +109,23 @@ fn print_edges(rows: &[ViolationEdge]) {
     println!();
 }
 
-/// Caveat lines printed per absence; `--json` carries them all.
+/// Caveat lines printed per absence (and per rule row); `--json` carries
+/// them all.
 const MAX_ABSENCE_CAVEATS: usize = 5;
+
+/// At most [`MAX_ABSENCE_CAVEATS`] `  ⚠ <category> (<language>): <note>`
+/// lines, then how many more `--json` lists.
+fn print_caveats(caveats: &[CoverageNote]) {
+    for c in caveats.iter().take(MAX_ABSENCE_CAVEATS) {
+        println!("  ⚠ {} ({}): {}", c.edge_category, c.language, c.note);
+    }
+    if caveats.len() > MAX_ABSENCE_CAVEATS {
+        println!(
+            "  _(+{} more caveat(s); --json lists all)_",
+            caveats.len() - MAX_ABSENCE_CAVEATS
+        );
+    }
+}
 
 /// A forbid_edge rule and a reflexion divergence report edges (`count` is the
 /// edges, the evidence at most [`MAX_EVIDENCE`] of them); a no_cycle rule
@@ -87,8 +134,76 @@ fn per_edge(rule_kind: &str) -> bool {
     rule_kind == FORBID_EDGE || rule_kind == DIVERGENCE
 }
 
+/// A rule row's subject: each head value in backticks, `, `-joined; `—` for
+/// a row with no head value.
+fn subject(v: &Violation) -> String {
+    if v.subject.is_empty() {
+        "—".to_string()
+    } else {
+        format!("`{}`", v.subject.join("`, `"))
+    }
+}
+
+/// One violation `k` (1-based within its rule): its heading line, its
+/// evidence table, and what the table leaves out.
+fn print_violation(k: usize, v: &Violation) {
+    let mark = advisory(v);
+    match v.rule_kind {
+        FORBID_EDGE => println!("_{} forbidden edge(s), tier {}{mark}:_", v.count, v.tier),
+        DIVERGENCE => println!(
+            "_{} edge(s) the model does not allow, tier {}{mark}:_",
+            v.count, v.tier
+        ),
+        NO_CYCLE => println!(
+            "_cycle {k}: {} node(s) in the component, tier {}{mark}; a shortest cycle through it:_",
+            v.count, v.tier
+        ),
+        RULE => println!(
+            "_violation {k}: {} - tier {}{mark} at {}_",
+            subject(v),
+            v.tier,
+            located(v.file.as_deref(), v.line)
+        ),
+        FORBID_PATH => println!(
+            "_path {k} into {} - {} hop(s), tier {}{mark}:_",
+            subject(v),
+            v.count,
+            v.tier
+        ),
+        // `rule_kind` is a string, not an enum: a kind with no arm above
+        // still prints its subject, count and tier, then its rows.
+        other => println!(
+            "_{other} {k}: {} - count {}, tier {}{mark}:_",
+            subject(v),
+            v.count,
+            v.tier
+        ),
+    }
+    println!();
+    // A rule row no edge derives has no witness: its caveats say why "no
+    // edge" may be a blind extraction (Q5).
+    if v.rule_kind != RULE || !v.evidence.is_empty() {
+        print_edges(&v.evidence);
+    }
+    let capped = per_edge(v.rule_kind) || v.rule_kind == RULE;
+    if capped && v.count > v.evidence.len() {
+        println!(
+            "_(showing the first {} of {}; at most {MAX_EVIDENCE} are listed)_",
+            v.evidence.len(),
+            v.count
+        );
+        println!();
+    }
+    if !v.caveats.is_empty() {
+        print_caveats(&v.caveats);
+        println!();
+    }
+}
+
 /// One section per violated rule: a forbid_edge rule's edges, a reflexion
-/// divergence's edges, or each cycle of a no_cycle rule with its witness.
+/// divergence's edges, each cycle of a no_cycle rule with its witness, each
+/// row of a rule invariant, or each hit of a transitive forbid_edge; at most
+/// [`MAX_PRINTED_PER_RULE`] of them.
 fn print_rule(group: &[&Violation]) {
     let Some(first) = group.first() else {
         return;
@@ -104,32 +219,15 @@ fn print_rule(group: &[&Violation]) {
         first.rule_id, first.rule_kind
     );
     println!();
-    for (i, v) in group.iter().enumerate() {
-        if v.rule_kind == FORBID_EDGE {
-            println!("_{} forbidden edge(s), tier {}:_", v.count, v.tier);
-        } else if v.rule_kind == DIVERGENCE {
-            println!(
-                "_{} edge(s) the model does not allow, tier {}:_",
-                v.count, v.tier
-            );
-        } else {
-            println!(
-                "_cycle {}: {} node(s) in the component, tier {}; a shortest cycle through it:_",
-                i + 1,
-                v.count,
-                v.tier
-            );
-        }
+    for (i, v) in group.iter().take(MAX_PRINTED_PER_RULE).enumerate() {
+        print_violation(i + 1, v);
+    }
+    if group.len() > MAX_PRINTED_PER_RULE {
+        println!(
+            "_(showing {MAX_PRINTED_PER_RULE} of {}; --json lists all)_",
+            group.len()
+        );
         println!();
-        print_edges(&v.evidence);
-        if v.count > v.evidence.len() && per_edge(v.rule_kind) {
-            println!(
-                "_(showing the first {} of {}; at most {MAX_EVIDENCE} are listed)_",
-                v.evidence.len(),
-                v.count
-            );
-            println!();
-        }
     }
 }
 
@@ -198,15 +296,7 @@ fn print_model(m: &Reflexion) {
             a.rule_id,
             a.decl.as_deref().unwrap_or("cell API"),
         );
-        for c in a.caveats.iter().take(MAX_ABSENCE_CAVEATS) {
-            println!("  ⚠ {} ({}): {}", c.edge_category, c.language, c.note);
-        }
-        if a.caveats.len() > MAX_ABSENCE_CAVEATS {
-            println!(
-                "  _(+{} more caveat(s); --json lists all)_",
-                a.caveats.len() - MAX_ABSENCE_CAVEATS
-            );
-        }
+        print_caveats(&a.caveats);
     }
     println!();
     println!("### unmapped");
@@ -269,7 +359,12 @@ pub(crate) fn run(args: Args) -> i32 {
         report.unchecked.len(),
         report.errors.len()
     );
-    println!("- violations: {}", report.violations.len());
+    let blocking = report.violations.iter().filter(|v| v.blocking).count();
+    println!(
+        "- violations: {} (blocking {blocking}, advisory {})",
+        report.violations.len(),
+        report.violations.len() - blocking
+    );
     println!();
     if let Some(m) = &report.reflexion {
         print_model(m);
@@ -303,8 +398,14 @@ pub(crate) fn run(args: Args) -> i32 {
     if !report.errors.is_empty() {
         println!("## rule errors (not evaluated)");
         println!();
+        // A rule's parse or analysis error is one diagnostic per line, in
+        // source order (DA.16): the first on the bullet, the rest under it.
         for (id, msg) in &report.errors {
-            println!("- `{id}`: {msg}");
+            let mut lines = msg.lines();
+            println!("- `{id}`: {}", lines.next().unwrap_or_default());
+            for l in lines {
+                println!("  {l}");
+            }
         }
         println!();
     }
