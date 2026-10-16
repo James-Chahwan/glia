@@ -148,12 +148,50 @@
 //! Seeds are deduplicated and ordered by (qname, id). More than
 //! [`MAX_SEEDS`] is an error, never a silent cut.
 //!
+//! # Identity (DD.12)
+//!
+//! The walk runs over the identity quotient. One [`IdentityView`] per answer,
+//! from [`TestsForArgs::collapse`]; without a collapse class (collapse off,
+//! no SAME_AS edge) it is empty and the answer is its HEAD self, byte for
+//! byte. With one:
+//!
+//! - **Walk**: with walk classes (messages, contract ops, SCIP symbols, a
+//!   package and its project; not `package_name`), the [`Adjacency`] indexes
+//!   [`IdentityView::quotient`] of the walk's graph, so a class is ONE node: a
+//!   change to billing's copy of a SCIP-identical function finds the tests of
+//!   shop's copy, at the same depth. The quotient is taken over the already
+//!   filtered graph, so the edges into a test case and the TESTS pairings
+//!   stay out of it. Seeds go through [`IdentityView::walk_rep`]: two seeds
+//!   in one walk class are one seed, the first by (qname, id) kept.
+//! - **Cases**: a walk-class node is a test case when ANY member is one
+//!   ([`TestIndex::is_case`]); its row shows a member that is a case: the
+//!   class's display member ([`IdentityView::display`]) when it is one, else
+//!   the first case member by (file, line, qname), unlocated last. A class
+//!   mixing a case and a non-case (a function that is a test in one repo
+//!   only) is a case as a whole; only the case member's own incoming edges are
+//!   dropped, so the walk still goes on through the other members' callers
+//!   (a test calling the non-case copy exercises the seed through it).
+//! - **Rows**: a row's `path` shows a walk-class hop as the class's display
+//!   member, and the seed's own class as the seed (the last entry is still the
+//!   seed). The signals are read on the shown case. The ranked rows are folded
+//!   by the shown case's collapse class ([`IdentityView::fold`]) BEFORE
+//!   `scope` and `limit`, so two test copies in one class are one row
+//!   carrying `identity {tier, rules, diverged, also_in}` and never spend two
+//!   slots; `scope` reads the shown row's file. A row outside every class has
+//!   no `identity` key.
+//! - The rev and diff modes read the same option; rev mode labels `also_in`
+//!   with the delta build's repo labels when the option carries none.
+//!
 //! fired_on markers, per answer: always
 //! `[tests-for] seeds=<S> tests=<T> fact=<F> derived=<D> heuristic=<H> untested=<U> files=<N>`
 //! — grep `^\[tests-for\] seeds=` — then, when the signal pass ran,
 //! `[tests-for] signals failed_last_run=<A> on_failing_trace=<B> cochange=<C> cochange_only=<D> omitted=<E>`
 //! — grep `^\[tests-for\] signals `. Both count the rows returned (after
-//! `scope` and `limit`); `omitted` is what `limit` cut.
+//! `scope` and `limit`); `omitted` is what `limit` cut. Then, only when the
+//! view has a collapse class,
+//! `[identity] collapse surface=tests_for classes=<c> walk_classes=<w> folded=<f> rows=<n>`
+//! (DD.12; `f` the rows the fold dropped, `n` the rows returned) — grep
+//! `^\[identity\] collapse surface=tests_for`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -168,6 +206,7 @@ use crate::absence::{self, Absence};
 use crate::answers::{Locator, in_scope, resolve_scope};
 use crate::external::signals::{self, FailRole};
 use crate::find::{self, FindOptions, FoundNode};
+use crate::identity::{Collapse, IdentityView, RowIdentity};
 use crate::passes::{FN_TESTS_EMITTER, FN_TESTS_RULE};
 
 /// [`TestsForArgs::default`]'s `max_depth`.
@@ -228,6 +267,9 @@ pub struct TestsForArgs {
     /// Read the FAIL / churn ATTN / CO_CHANGES signals, rank by them and add
     /// the co-change-only rows (default `true`; module docs).
     pub signals: bool,
+    /// Identity classes (DD.12, module docs "Identity"): on by default, with
+    /// no repo labels; `Collapse::off()` is the per-member walk and rows.
+    pub collapse: Collapse,
 }
 
 impl Default for TestsForArgs {
@@ -238,6 +280,7 @@ impl Default for TestsForArgs {
             module_level: true,
             limit: None,
             signals: true,
+            collapse: Collapse::default(),
         }
     }
 }
@@ -276,6 +319,11 @@ pub struct TestHit {
     pub fails: Option<u32>,
     /// With `fails`: the runs the test snapshot held.
     pub window: Option<u32>,
+    /// The row stands for a FACT / DERIVED identity class of test cases
+    /// (DD.12): its tier, rules and every other member (`also_in`). Absent
+    /// (no key) outside a class, and with collapse off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<RowIdentity>,
 }
 
 /// The answer (module docs).
@@ -392,11 +440,24 @@ pub fn tests_for_rev(repo_path: &str, base: &str, args: &TestsForArgs) -> Result
 /// `rev <rev.answer.base>`, the rev as `graph_delta_vs_rev` was given it.
 /// `Err` beyond [`MAX_SEEDS`] seeds only. `rev` holds both sides' graphs, so
 /// a caller that keeps it alive to ask more questions
-/// (`diff_impact::diff_impact_from_delta`) holds two graphs in memory.
+/// (`diff_impact::diff_impact_from_delta`) holds two graphs in memory. An
+/// enabled `args.collapse` with no repo labels takes `rev.after`'s (DD.12).
 pub fn tests_for_delta(
     rev: &crate::delta::RevDelta,
     args: &TestsForArgs,
 ) -> Result<TestsFor, String> {
+    let labelled;
+    let args = if args.collapse.enabled
+        && args.collapse.repo_labels.is_empty()
+        && !rev.after.repo_labels.is_empty()
+    {
+        let mut with = args.clone();
+        with.collapse = Collapse::with_labels(&rev.after.repo_labels);
+        labelled = with;
+        &labelled
+    } else {
+        args
+    };
     let ids = rev_seeds(rev);
     let merged = &rev.after.merged;
     let base = &rev.answer.base;
@@ -616,6 +677,7 @@ fn answer_for(
         return Err("tests_for: a limit of 0 keeps no test; give 1 or more".to_string());
     }
     let loc = Locator::new(merged);
+    let view = IdentityView::new(merged, &args.collapse);
     let mut seeds: Vec<(String, NodeId)> = Vec::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
     for &id in ids {
@@ -623,22 +685,34 @@ fn answer_for(
             seeds.push((loc.locate(id).qname, id));
         }
     }
+    seeds.sort_by(|a, b| (&a.0, a.1.0).cmp(&(&b.0, b.1.0)));
+    // DD.12: one seed per walk node (a node, or a whole walk class), the
+    // first by (qname, id) kept. Without walk classes every seed is its own.
+    let mut walk_seen: HashSet<NodeId> = HashSet::new();
+    seeds.retain(|(_, id)| walk_seen.insert(view.walk_rep(*id)));
     if seeds.len() > MAX_SEEDS {
         return Err(format!(
             "tests_for: {} seeds, more than the {MAX_SEEDS} one answer walks from; narrow the change",
             seeds.len()
         ));
     }
-    seeds.sort_by(|a, b| (&a.0, a.1.0).cmp(&(&b.0, b.1.0)));
 
     let idx = TestIndex::build(merged);
     let source = ReachSource { merged, idx: &idx };
-    let adj = Adjacency::build(&source, &CategorySet::of(&TEST_REACH));
+    let categories = CategorySet::of(&TEST_REACH);
+    // DD.12: over the identity quotient when the view has walk classes.
+    let quotient = view.quotient(&source);
+    let adj = match &quotient {
+        Some(q) => Adjacency::build(q, &categories),
+        None => Adjacency::build(&source, &categories),
+    };
+    let classes = WalkClasses::new(merged, &view, &idx, &loc, quotient.is_some());
 
     let mut rows: BTreeMap<u64, Row> = BTreeMap::new();
     let mut untested: Vec<String> = Vec::new();
     for (qname, seed) in &seeds {
         let seed_key = (qname.as_str(), *seed);
+        let walk_seed = view.walk_rep(*seed);
         let mut tested = false;
         if idx.is_case(*seed) {
             add_hit(
@@ -671,30 +745,39 @@ fn answer_for(
                 tested = true;
             }
         }
-        let walk = reach::bfs(&adj, &[*seed], Walk::Backward, args.max_depth);
+        let walk = reach::bfs(&adj, &[walk_seed], Walk::Backward, args.max_depth);
         let parent: HashMap<NodeId, (NodeId, EdgeCategoryId)> = walk
             .reached
             .iter()
             .map(|r| (r.id, (r.parent, r.via)))
             .collect();
         for r in &walk.reached {
-            if !idx.is_case(r.id) {
+            // A walk node: a node, or a walk class's representative (DD.12),
+            // which is a case when any member is and shows that member.
+            let Some(case) = classes.case(&idx, r.id) else {
                 continue;
-            }
+            };
             // The walk runs backward, so each hop from the test toward the
             // seed is the node it was reached from, over the reaching edge.
+            // A walk-class hop shows its display member, the seed's own
+            // class the seed.
             let mut path = Vec::with_capacity(r.depth);
             let mut at = r.id;
-            while at != *seed {
+            while at != walk_seed {
                 let Some(&(next, via)) = parent.get(&at) else {
                     break;
                 };
-                path.push((next, via));
+                let shown = if next == walk_seed {
+                    *seed
+                } else {
+                    classes.show(&view, next)
+                };
+                path.push((shown, via));
                 at = next;
             }
             add_hit(
                 &mut rows,
-                r.id,
+                case,
                 seed_key,
                 Hit {
                     rank: 1,
@@ -740,7 +823,7 @@ fn answer_for(
         sig.add_cochange_rows(&idx, &seeds, &mut rows);
     }
 
-    let mut tests: Vec<TestHit> = rows
+    let mut ranked: Vec<(NodeId, TestHit)> = rows
         .into_iter()
         .map(|(id, row)| {
             let test = NodeId(id);
@@ -759,7 +842,7 @@ fn answer_for(
                 .iter()
                 .map(|&(n, c)| (loc.locate(n).qname, edge_category::name(c)))
                 .collect();
-            TestHit {
+            let hit = TestHit {
                 qname: at.qname,
                 name: at.name,
                 kind: at.kind,
@@ -774,15 +857,23 @@ fn answer_for(
                 cochange_permille,
                 fails,
                 window,
-            }
+                identity: None,
+            };
+            (test, hit)
         })
         .collect();
+    ranked.sort_by(|a, b| row_order(&a.1, &b.1));
+    // DD.12: fold by the shown case's identity class BEFORE scope and the
+    // cut, so a class never spends two slots (module docs "Identity").
+    let before_fold = ranked.len();
+    let ranked = view.fold(ranked, |r| r.0, |r, identity| r.1.identity = Some(identity));
+    let folded = before_fold - ranked.len();
+    let mut tests: Vec<TestHit> = ranked.into_iter().map(|(_, t)| t).collect();
     let found = tests.len();
     if let Some(raw) = args.scope.as_deref() {
         let scope = resolve_scope(merged, raw);
         tests.retain(|t| t.file.as_deref().is_none_or(|f| in_scope(f, &scope)));
     }
-    tests.sort_by(row_order);
     let omitted = match args.limit {
         Some(n) if tests.len() > n => {
             let cut = tests.len() - n;
@@ -818,6 +909,8 @@ fn answer_for(
             tests.iter().filter(|t| t.reason == COCHANGE_REASON).count(),
         );
     }
+    // fired_on marker (DD.12), only with a collapse class.
+    view.collapse_marker("tests_for", tests.len() + folded, tests.len());
     let absence = if !tests.is_empty() {
         None
     } else if seeds.is_empty() {
@@ -1214,6 +1307,90 @@ fn is_test_fixture(cells: &[glia_core::Cell]) -> bool {
             }
             _ => false,
         })
+}
+
+/// The walk classes a walk over the identity quotient (DD.12) meets: each
+/// representative (an internal handle, DD.1) with its members, and the case
+/// member its row shows (module docs "Identity"). Empty without walk classes,
+/// so every walk node is then a raw node.
+///
+/// Stopgap (DD.12 owns no `identity.rs`): the members are read off the
+/// SAME_AS cross-edge endpoints, as `answers::walk_class_reps` (DD.10) and
+/// `trace::WalkNodes` (DD.11) do: every member of a walk class is an endpoint
+/// of a SAME_AS cross edge (the view reads its classes from those), and
+/// [`IdentityView::walk_rep`] maps it onto its class. Remove it when
+/// `IdentityView` gains a crate-visible walk-class member lookup (DD.15 or
+/// DD.16, the next owner of `engine/src/identity.rs`).
+struct WalkClasses {
+    /// Representative -> the case member its row shows, `None` when no
+    /// member is a case.
+    classes: BTreeMap<u64, Option<NodeId>>,
+}
+
+impl WalkClasses {
+    /// `walking`: the answer walks `view`'s quotient.
+    fn new(
+        merged: &MergedGraph,
+        view: &IdentityView,
+        idx: &TestIndex,
+        loc: &Locator<'_>,
+        walking: bool,
+    ) -> Self {
+        let mut members: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
+        if walking {
+            for e in merged
+                .cross_edges
+                .iter()
+                .filter(|e| e.category == edge_category::SAME_AS)
+            {
+                for id in [e.from, e.to] {
+                    let rep = view.walk_rep(id);
+                    if rep != id {
+                        let m = members.entry(rep.0).or_default();
+                        m.insert(rep.0);
+                        m.insert(id.0);
+                    }
+                }
+            }
+        }
+        let classes = members
+            .into_iter()
+            .map(|(rep, ids)| {
+                let display = view.display(NodeId(rep));
+                let cases: Vec<NodeId> = ids.into_iter().map(NodeId).filter(|&m| idx.is_case(m)).collect();
+                let shown = if cases.contains(&display) {
+                    Some(display)
+                } else {
+                    cases.into_iter().min_by(|&a, &b| {
+                        let (la, lb) = (loc.locate(a), loc.locate(b));
+                        (la.file.is_none(), &la.file, la.line.is_none(), la.line, &la.qname, a.0)
+                            .cmp(&(lb.file.is_none(), &lb.file, lb.line.is_none(), lb.line, &lb.qname, b.0))
+                    })
+                };
+                (rep, shown)
+            })
+            .collect();
+        WalkClasses { classes }
+    }
+
+    /// The test case walk node `id` shows: a walk class's case member, or
+    /// `id` itself when it is a case; `None` when it is none.
+    fn case(&self, idx: &TestIndex, id: NodeId) -> Option<NodeId> {
+        match self.classes.get(&id.0) {
+            Some(shown) => *shown,
+            None => idx.is_case(id).then_some(id),
+        }
+    }
+
+    /// The node a path hop onto walk node `id` shows: a walk class's display
+    /// member, or `id`.
+    fn show(&self, view: &IdentityView, id: NodeId) -> NodeId {
+        if self.classes.contains_key(&id.0) {
+            view.display(id)
+        } else {
+            id
+        }
+    }
 }
 
 /// The walk's graph (module docs): every edge of the merge minus the edges

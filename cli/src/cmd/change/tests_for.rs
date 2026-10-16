@@ -26,6 +26,14 @@
 //! `--no-overlay`, `--limit 0`), an unreadable `--diff`, a git / build failure
 //! or more seeds than the engine walks from.
 //!
+//! DD.12: identity classes collapse by default. A walk class (one message,
+//! contract op, SCIP symbol, or a package and its project, in several places)
+//! is one node in the walk, so a change to one copy finds the tests that
+//! exercise any copy, and test rows of one FACT / DERIVED class are one row:
+//! its location cell appends `(also in: <repo> <file>:<line>, ...)` and
+//! `; diverged` when the members' contents differ, and `--json` carries the
+//! row's `identity`. `--no-collapse` is the per-member walk and rows.
+//!
 //! `--base` builds through the engine's graph delta (LE.1b), which saves the
 //! working tree's parse-cache sidecar (`<repo>/.glia/graph/parse_cache.bin`,
 //! self-gitignored) as an incremental build does, under `GLIA_NO_PERSIST=1`
@@ -34,10 +42,13 @@
 //! Fired-on markers: the engine's
 //! `[tests-for] seeds=<S> tests=<T> fact=<F> derived=<D> heuristic=<H> untested=<U> files=<N>`,
 //! then, unless `--no-signals`,
-//! `[tests-for] signals failed_last_run=<A> on_failing_trace=<B> cochange=<C> cochange_only=<D> omitted=<E>`.
+//! `[tests-for] signals failed_last_run=<A> on_failing_trace=<B> cochange=<C> cochange_only=<D> omitted=<E>`,
+//! then, with an identity class and no `--no-collapse`,
+//! `[identity] collapse surface=tests_for classes=<c> walk_classes=<w> folded=<f> rows=<n>`.
 
 use std::io::Read;
 
+use glia_engine::identity::{Collapse, RowIdentity};
 use glia_engine::tests_for::{
     COCHANGE, DEFAULT_MAX_DEPTH, TestHit, TestsFor, TestsForArgs, tests_for, tests_for_diff,
     tests_for_rev,
@@ -77,6 +88,13 @@ pub(crate) struct Args {
     /// no co-change row.
     #[arg(long)]
     no_signals: bool,
+    /// Walk and list every member of an identity class on its own. By
+    /// default a message, contract op or SCIP symbol found in several places
+    /// (a walk class) is one node in the walk, so a change to one copy finds
+    /// the tests of every copy, and test cases of one FACT / DERIVED SAME_AS
+    /// class are one row naming the other places (`also in`).
+    #[arg(long)]
+    no_collapse: bool,
     /// Additional repos to merge in (cross-service). Repeatable. Not with
     /// `--base`.
     #[arg(long)]
@@ -89,13 +107,39 @@ pub(crate) struct Args {
     files_only: bool,
 }
 
-/// `file:line`, `file`, or `—`.
-fn at(t: &TestHit) -> String {
-    match (t.file.as_deref(), t.line) {
-        (Some(f), Some(l)) => format!("{f}:{l}"),
-        (Some(f), None) => f.to_string(),
-        _ => "—".to_string(),
+/// `file:line`, `file` or `None`.
+fn place(file: Option<&str>, line: Option<i64>) -> Option<String> {
+    match (file, line) {
+        (Some(f), Some(l)) => Some(format!("{f}:{l}")),
+        (Some(f), None) => Some(f.to_string()),
+        _ => None,
     }
+}
+
+/// `file:line`, `file`, or `—`; for a row that stands for an identity class
+/// (DD.12), then `(also in: <repo> <file>:<line>, ...; diverged)`.
+fn at(t: &TestHit) -> String {
+    let at = place(t.file.as_deref(), t.line).unwrap_or_else(|| "—".to_string());
+    match &t.identity {
+        Some(id) => format!("{at} {}", also_in(id, &t.qname)),
+        None => at,
+    }
+}
+
+/// `(also in: ...; diverged)`. An unlocated member is its repo, and its
+/// qname when that differs from the row's.
+fn also_in(id: &RowIdentity, qname: &str) -> String {
+    let others: Vec<String> = id
+        .also_in
+        .iter()
+        .map(|m| match place(m.file.as_deref(), m.line) {
+            Some(p) => format!("{} {p}", m.repo),
+            None if m.qname != qname => format!("{} `{}`", m.repo, m.qname),
+            None => m.repo.clone(),
+        })
+        .collect();
+    let diverged = if id.diverged { "; diverged" } else { "" };
+    format!("(also in: {}{diverged})", others.join(", "))
 }
 
 /// `test -[CALLS]-> a -[TESTS]-> seed`, or `(changed)` for a changed test.
@@ -226,15 +270,20 @@ fn answer(args: &Args, opts: &TestsForArgs) -> Result<TestsFor, String> {
                     .to_string(),
             );
         }
+        // The engine labels `also_in` with the delta build's repo labels.
         return tests_for_rev(&args.repo, base, opts);
     }
     let diff = args.diff.as_deref().map(read_diff).transpose()?;
     let built = generate_for(&args.repo, &args.with)?;
+    let mut opts = opts.clone();
+    if opts.collapse.enabled {
+        opts.collapse = Collapse::with_labels(&built.repo_labels);
+    }
     match diff {
-        Some(text) => tests_for_diff(&built.merged, &text, opts),
+        Some(text) => tests_for_diff(&built.merged, &text, &opts),
         None => {
             let qnames: Vec<&str> = args.qnames.iter().map(String::as_str).collect();
-            tests_for(&built.merged, &qnames, opts)
+            tests_for(&built.merged, &qnames, &opts)
         }
     }
 }
@@ -246,6 +295,11 @@ pub(crate) fn run(args: Args) -> i32 {
     opts.module_level = !args.no_module_level;
     opts.limit = args.limit;
     opts.signals = !args.no_signals;
+    opts.collapse = if args.no_collapse {
+        Collapse::off()
+    } else {
+        Collapse::default()
+    };
     let a = match answer(&args, &opts) {
         Ok(a) => a,
         Err(e) => {

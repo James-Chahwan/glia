@@ -7,6 +7,8 @@
 //! marker; asserting it here makes it a tested contract. Grep it from a run:
 //! `glia tests-for <repo> <qname> 2>&1 >/dev/null | grep '^\[tests-for\] seeds='`.
 //! CC.9a's `[tests-for] signals ..` line follows it unless `--no-signals`.
+//! DD.12: `--no-collapse`, and the `[identity] collapse surface=tests_for`
+//! line on two repos whose SCIP snapshots make identity classes.
 //!
 //! The `--base` test needs a `git` binary: without one it FAILS with a
 //! message saying so, never skips. Its git calls run hermetically (fixed
@@ -435,4 +437,152 @@ fn exactly_one_seed_source() {
         Some(2),
         "clap refuses --json with --files-only"
     );
+}
+
+// ---- DD.12: identity classes ------------------------------------------------
+
+/// Two repos in a scratch dir (removed on drop), each with a
+/// `.glia/scip-snapshot/` written the DD.7 way: one package `money`, so the
+/// two `format_cents` are one FACT `scip_symbol` walk class, and so are the
+/// two `tests/test_fmt.py::test_format` test cases.
+/// - billing `lib/money.py`: `invoice` -> `format_cents`; tests
+///   `test_invoice` -> `invoice`, `test_format` -> `format_cents`.
+/// - shop `app/money.py`: `checkout` -> `format_cents`; tests
+///   `test_checkout` -> `checkout`, `test_format` -> `format_cents`.
+struct ScipRepos(PathBuf);
+
+impl Drop for ScipRepos {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl ScipRepos {
+    fn new(tag: &str) -> Self {
+        use glia_code_domain::snapshots::{
+            ScipDefRow, ScipDocumentRecord, ScipMeta, ScipSymbolRecord, source_hash, write_scip,
+        };
+        let root = std::env::temp_dir().join(format!("glia-dd12-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let files = [
+            ("billing/lib/money.py", "def format_cents(cents):\n    return \"%.2f\" % (cents / 100)\n\n\ndef invoice(cents):\n    return format_cents(cents)\n"),
+            ("billing/tests/test_invoice.py", "from lib.money import invoice\n\n\ndef test_invoice():\n    invoice(100)\n"),
+            ("billing/tests/test_fmt.py", "from lib.money import format_cents\n\n\ndef test_format():\n    assert format_cents(100) == \"1.00\"\n"),
+            ("shop/app/money.py", "def format_cents(cents):\n    return \"%.2f EUR\" % (cents / 100)\n\n\ndef checkout(cents):\n    return format_cents(cents)\n"),
+            ("shop/tests/test_money.py", "from app.money import checkout\n\n\ndef test_checkout():\n    checkout(100)\n"),
+            ("shop/tests/test_fmt.py", "from app.money import format_cents\n\n\ndef test_format():\n    assert format_cents(100) == \"1.00 EUR\"\n"),
+        ];
+        for (rel, text) in files {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().expect("a parent dir")).expect("fixture dir");
+            std::fs::write(&p, text).expect("fixture write");
+        }
+        for (repo, dir) in [("billing", "lib"), ("shop", "app")] {
+            let repo = root.join(repo);
+            let doc = |path: String, s: u32, line: u32, name: &str| {
+                let bytes = std::fs::read(repo.join(&path)).expect("source");
+                ScipDocumentRecord {
+                    path,
+                    language: "python".to_string(),
+                    source_hash: source_hash(&bytes),
+                    defs: vec![ScipDefRow { s, line, name: name.to_string() }],
+                    refs: Vec::new(),
+                }
+            };
+            let symbol = |id: u32, descriptor: &str| ScipSymbolRecord {
+                id,
+                symbol: format!("scip-python python money 1.0.0 {descriptor}"),
+                implements: Vec::new(),
+            };
+            let documents = vec![
+                doc(format!("{dir}/money.py"), 0, 0, "format_cents"),
+                doc("tests/test_fmt.py".to_string(), 1, 3, "test_format"),
+            ];
+            let symbols = vec![
+                symbol(0, "`money`/format_cents()."),
+                symbol(1, "`tests.test_fmt`/test_format()."),
+            ];
+            let meta = ScipMeta::new("scip-python".to_string(), "0.6.0".to_string(), String::new(), 0);
+            write_scip(&repo, meta, &documents, &symbols).expect("write snapshot");
+        }
+        ScipRepos(root)
+    }
+
+    /// `glia tests-for <billing> lib::money::format_cents --with <shop> <args>`.
+    fn tests_for(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_glia"))
+            .arg("tests-for")
+            .arg(self.0.join("billing"))
+            .arg("lib::money::format_cents")
+            .arg("--with")
+            .arg(self.0.join("shop"))
+            .args(args)
+            .env("GLIA_NO_PERSIST", "1")
+            .output()
+            .expect("run glia")
+    }
+}
+
+/// The `[identity] collapse` stderr lines.
+fn identity_lines(o: &Output) -> Vec<String> {
+    stderr(o)
+        .lines()
+        .filter(|l| l.starts_with("[identity] collapse"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// DD.12: by default a change to billing's `format_cents` finds shop's
+/// `test_checkout` (it reaches shop's SCIP-identical copy) and lists the two
+/// `test_format` copies as one row naming shop's (`also in`); the answer
+/// prints one `[identity] collapse surface=tests_for` line. `--no-collapse`
+/// is the per-member walk: billing's tests only, no identity, no line.
+#[test]
+fn identity_classes_collapse_unless_no_collapse() {
+    let r = ScipRepos::new("collapse");
+
+    let out = r.tests_for(&["--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        identity_lines(&out),
+        ["[identity] collapse surface=tests_for classes=2 walk_classes=2 folded=0 rows=4"],
+        "{}",
+        stderr(&out)
+    );
+    let v: Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
+    let qnames: Vec<&str> = v["tests"]
+        .as_array()
+        .expect("tests list")
+        .iter()
+        .filter_map(|t| t["qname"].as_str())
+        .collect();
+    assert!(qnames.contains(&"tests::test_money::test_checkout"), "{v}");
+    assert_eq!(
+        qnames.iter().filter(|q| **q == "tests::test_fmt::test_format").count(),
+        1,
+        "{v}"
+    );
+    let fmt = v["tests"]
+        .as_array()
+        .and_then(|t| t.iter().find(|t| t["qname"] == "tests::test_fmt::test_format"))
+        .expect("the test_format row");
+    assert_eq!(fmt["identity"]["tier"], "fact", "{fmt}");
+    assert_eq!(fmt["identity"]["also_in"][0]["repo"], "shop", "{fmt}");
+
+    let out = r.tests_for(&[]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("tests/test_fmt.py:4 (also in: shop tests/test_fmt.py:4; diverged)"),
+        "{}",
+        stdout(&out)
+    );
+
+    let out = r.tests_for(&["--json", "--no-collapse"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(identity_lines(&out).is_empty(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(!text.contains("test_checkout"), "{text}");
+    assert!(!text.contains("\"identity\""), "{text}");
+    let out = r.tests_for(&["--no-collapse"]);
+    assert!(!stdout(&out).contains("(also in: "), "{}", stdout(&out));
 }

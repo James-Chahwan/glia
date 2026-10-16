@@ -6,8 +6,10 @@ depth=6, scope=None, module_level=True, limit=None, signals=True)`,
 change as a native dict {seeds, tests, omitted, test_files, untested,
 unresolved, absence}, every row tiered fact / derived / heuristic, carrying
 its signals and co-change confidence, and located on a 1-based line; an
-engine error raises ValueError. `tests_for_rev` needs a `git` binary. Shared
-helpers: test_build.py."""
+engine error raises ValueError. `tests_for_rev` needs a `git` binary. DD.12:
+all three take `collapse=True` last (identity classes walk as one node; a row
+standing for a class carries `identity`, absent on the single-repo fixture
+here, so `collapse=False` answers the same). Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import os
@@ -43,7 +45,8 @@ DIFF = ("--- a/shop/orders/service.py\n+++ b/shop/orders/service.py\n@@ -1,2 +1,
         " def price(order):\n"
         '-    return sum(i["p"] for i in order["items"])\n'
         '+    return sum(i["p"] * 1 for i in order["items"])\n')
-KW = [("depth", 6), ("scope", None), ("module_level", True), ("limit", None), ("signals", True)]
+KW = [("depth", 6), ("scope", None), ("module_level", True), ("limit", None), ("signals", True),
+      ("collapse", True)]
 
 
 def shape(d) -> list:
@@ -101,6 +104,11 @@ def main() -> int:
         c.check("no signal on any row", type(d) is dict and all(t.get("signals") == [] and t.get("cochange_permille")
                                                                   is None for t in d.get("tests", [])), d)
         c.check("nothing omitted", type(d) is dict and d.get("omitted") == 0, d)
+        raw, err = stderr_of(lambda: g.tests_for([PRICE], collapse=False))
+        c.check("collapse=False on a class-free graph is the default answer", raw == d, raw)
+        c.check("no class, no identity key or line", type(d) is dict
+                and all("identity" not in t for t in d.get("tests", []))
+                and "[identity] collapse" not in err, err[-400:])
 
         c.check("bare name, no module level",
                 shape(g.tests_for(["price"], module_level=False)) == SHAPE[:2])
