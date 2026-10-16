@@ -128,6 +128,15 @@ links, so they must survive a rename.
   applied); other writers exist (`glia cell` CLI, pyo3 `set_cell` / `write_cell`), so a writer takes
   `.glia/cells.lock` (exclusive create, 30 s stale) or shells out to `glia cell set`, which adds validation and
   redaction.
+- **A caller hint on the cell write surfaces** (engram-34, 2026-10-16). `glia cell set` (`SetArgs`: repo, qname, cell,
+  json / text / file, kind, model, dims) and pyo3 `write_cell` / `PyGraph.set_cell` take no hint; the store's
+  `CellWrite::with_hint` already does, and the store keeps the caller's hint over the bound node's. Today the hint is
+  captured only when `.glia/graph` is fresh, so a writer after edits (Engram at sleep) writes a hint-less `pending`
+  row; it binds by qname at the next build, and a later rename orphans it (`--rekey` needs a hint). Add `--hint` /
+  `hint=`, validated as an identity hint; when the layout is fresh and the caller's hint names a different node than
+  the qname binds, report it (`target`), never pick silently. No 0.5.2 packet owns `cli/src/cmd/store/cell.rs` or
+  `py/src/cells.rs`. Interim for any writer on 0.5.2: build first (`glia build`), then `cell set`, so the store
+  captures the hint.
 - **Spec item: scope-level conventions.** In glia, CONV is a free-text note on ONE node (overlay `[[note]]`; the
   format spec's "conversation history"), not a convention. A convention that covers a scope ("modals are centred,
   never bottom-anchored": every modal component) has no home: until it has one, Engram writes it as a CONV note on the
