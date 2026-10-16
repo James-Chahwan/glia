@@ -183,6 +183,13 @@ links, so they must survive a rename.
   names the node and hashes its content, where the ordinal form can pass to a sibling after a deletion. glia-export-engram
   writes it per fact in a digest-bound side file `<out>.hints.jsonl` (as `.ppr.jsonl` is; no GMAP contract change), and
   `glia cell set --hint` / pyo3 `hint=` take that form.
+- **Value flow from config into channel names** (James, 2026-10-16: *"is it nessacary at some point and we should not it
+  for later"*). Production services name their NATS subjects, Kafka topics, queues and base URLs in config: an env var
+  with a default (`getenv("ORDER_SUBJECT_TEMPLATE", "shop.orders.%s.placed")`), a YAML / TOML key, a struct field set at
+  start-up (`Publisher.template <- cfg.SubjectTemplate`). The 0.5.2 tweaks fold literals, same-package helper functions and
+  `fmt.Sprintf` templates; a value that travels through config and struct fields stays an unresolved tag with a caveat.
+  Needed: one value-flow reader (config key -> default / file value -> the field or variable it is assigned to -> the call
+  that names the channel), shared by queues, HTTP / WebSocket base URLs and gRPC targets.
 - **Spec item: scope-level conventions.** In glia, CONV is a free-text note on ONE node (overlay `[[note]]`; the
   format spec's "conversation history"), not a convention. A convention that covers a scope ("modals are centred,
   never bottom-anchored": every modal component) has no home: until it has one, Engram writes it as a CONV note on the

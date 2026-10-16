@@ -65,3 +65,21 @@ Not testable here: GraphQL (neither repo uses it).
    post 0.5.3").
 7. **glia:** the 0.5.3 spec run from `dev-notes/next-leap-0.5.3.md`, its waves, follow-up waves until no followup is
    left, then the combined repo-graph handover.
+
+## Spec run and rulings (2026-10-16)
+
+Specced by `wf_ba54b0e2-6de` (T1-T11: five clusters, each a spec agent and an adversarial verifier) and `wf_cfa53bab-d42`
+(T12): 52 packets plus the docs close-out DT.13 = 53 packets, about 20,300 LOC, scheduled as W15-W25 in
+`dev-notes/leap-052-packets.json` (W0-W14 unchanged, `schedule_052.py --verify` green). Each verifier's smaller open
+questions take that verifier's recommended default; anything deferred is routed by the close-outs (0.5.3 seed).
+
+James's rulings on the five raised:
+1. An orphaned / rejected stanza is not an error by default (*"how can we do better it seems odd to break with an
+   error"*): `glia check` lists it under "Rules that check nothing" with the reason and a suggested fix, non-blocking;
+   `--strict` / `strict=True` makes it exit 2 (correction on DT.7b).
+2. Drop the name-only pairing of Solidity events in EventBusResolver (*"yeah sure"*; correction on DT.10b).
+3. Contract-model classes collapse in answers (*"i guess so that makes sense"*; DT.1h).
+4. JSON-tag renames in `contract-breaks` / review: explained, awaiting James.
+5. Config-templated subjects: noted for later (*"is it nessacary at some point and we should not it for later"*; the
+   0.5.3 seed's value-flow item).
+
