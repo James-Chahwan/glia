@@ -18,12 +18,15 @@
 //! `BuildOptions::with_overlay_text`, never through the file, and such a
 //! build is never persisted.
 //!
-//! `trial` (CE.3c): [`try_candidate`] builds the tree with the overlay as it
-//! is, with the candidate merged in and, per stanza, with every stanza but
-//! that one, all on one in-memory parse cache, and reports every category's
-//! delta ([`GraphDelta`]), each stanza's marginal effect and the target gaps
-//! it closes ([`StanzaTrial`]), and a keep / review / drop verdict
-//! ([`TryReport`]). It writes nothing but the parse cache.
+//! `trial` (CE.3c, + DB.9b): [`try_candidate`] builds the tree with the
+//! overlay as it is, with the candidate merged in and, per graph stanza, with
+//! every stanza but that one, all on one in-memory parse cache, and reports
+//! every category's delta ([`GraphDelta`]), each stanza's marginal effect and
+//! the target gaps it closes ([`StanzaTrial`]), a keep / review / drop
+//! verdict ([`TryReport`]) and, for the declared rules, the violations each
+//! build adds or resolves ([`RulesDelta`], [`RuleHit`]), with every
+//! `[[constraint]]` stanza judged on WITH ([`RuleTrial`], [`RulesReport`]).
+//! It writes nothing but the parse cache.
 //!
 //! `propose` (CE.3d): [`propose`] is the model step's work list - every gap
 //! an overlay could close (`glia gaps` rows, ids included), each with the
@@ -49,7 +52,11 @@ pub use accept::{AcceptOptions, AcceptSummary, accept};
 pub use propose::{
     DEFAULT_SNIPPET_LINES, DEFAULT_TOP_K, Proposal, ProposeOptions, ProposedGap, Snippet, propose,
 };
-pub use trial::{GraphDelta, StanzaTrial, TryOptions, TryReport, try_candidate};
+pub use trial::{
+    GraphDelta, MAX_RULE_HITS, RULE_DUPLICATE, RULE_ERROR, RULE_HOLDS, RULE_ORPHANED,
+    RULE_VIOLATED, RuleHit, RuleTrial, RulesDelta, RulesReport, StanzaTrial, TryOptions, TryReport,
+    try_candidate,
+};
 pub use writer::{
     Candidate, Location, Merged, StanzaRef, merge, parse_candidate, report_candidate, without,
 };
