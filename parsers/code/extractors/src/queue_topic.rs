@@ -174,6 +174,18 @@ pub enum TopicRule {
     /// word edge ([`bare_word_ok`]), so `MyProducerRecord(` and
     /// `ProducerRecords` are not it.
     CtorArgLiteral,
+    // --- DH.3: A COMMAND VECTOR WHOSE VERB IS A LITERAL ---------------------
+    /// DH.3: a raw command vector in the argument region, the quoted literal
+    /// right after the element equal (ASCII case-insensitive) to the command
+    /// ([`command_arg`]): package:redis's `cmd.send_object(['PUBLISH',
+    /// 'orders', payload])`. The command must OPEN its vector (the region's
+    /// first argument, or the first element of a list inside it), the way a
+    /// Redis command always does, so `['SET', 'publish', v]` is no publish. A
+    /// call whose vector names another command (`['SET', k, v]`) is no site at
+    /// all ([`scan_guarded`] drops it); the command with no literal after it
+    /// (`['PUBLISH', channel, m]`) is a site that reads no topic, so it keeps
+    /// the framework tag. Never an expression: the LA.4 fold has no slot here.
+    CommandArg(&'static str),
 }
 
 /// Bound on occurrences examined per needle per file — generated files can
@@ -274,6 +286,11 @@ pub fn scan(source: &str, needle: &str, rule: TopicRule) -> Vec<TopicHit> {
 /// ([`ctor_region`] finds no `(`) is dropped at the same point: a type named in
 /// an import or a declaration is no call. A constructor whose arg #0 is no
 /// literal stays a hit, with its expression for the LA.4 fold.
+///
+/// DH.3: a [`TopicRule::CommandArg`] occurrence whose argument region holds no
+/// vector opened by the command is dropped at the same point (the command IS
+/// the site: a `send_object(['SET', k, v])` is no publish). One whose command
+/// has no literal after it stays a hit, with no topic and no expression.
 pub(crate) fn scan_guarded(
     source: &str,
     needle: &str,
@@ -321,6 +338,14 @@ pub(crate) fn scan_guarded(
             // DG.2: a mention that constructs nothing (a declaration, an
             // import) is no site at all (see the variant's doc).
             TopicRule::CtorArgLiteral if ctor_region(source, after).is_none() => continue,
+            // DH.3: the literal after the command, or no site at all when
+            // no vector opens with the command (see the doc above).
+            TopicRule::CommandArg(cmd) => {
+                match arg_region(source, after, needle).and_then(|r| command_arg(r, cmd)) {
+                    Some(read) => read,
+                    None => continue,
+                }
+            }
             _ => topic_at(source, after, needle, rule),
         };
         let (topic, form, expr) = match read {
@@ -486,9 +511,9 @@ fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option
             let region = region?;
             keyed_literal(region, keys).or_else(|| arg_literal(region, 0))
         }
-        // `NoIdentity`, the A2.5 identity rules and DH.1's `Declared` /
-        // `BareArg` never read an argument region; `scan` dispatches them
-        // before it gets here.
+        // `NoIdentity`, the A2.5 identity rules, DH.1's `Declared` /
+        // `BareArg` and DH.3's `CommandArg` never read an argument region
+        // here; `scan` dispatches them before it gets here.
         _ => None,
     }
 }
@@ -496,9 +521,13 @@ fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option
 /// LA.4: the identifier expression in the slot [`topic_at`] read no literal
 /// from — the same region, the same argument, the same key, tried in the same
 /// order. `NoIdentity` and the A2.5 identity rules never carry one, nor do
-/// DH.1's `Declared` (no slot) and `BareArg` (a literal or no site).
+/// DH.1's `Declared` (no slot) and `BareArg` (a literal or no site) and DH.3's
+/// `CommandArg` (a command vector's literal, no expression slot).
 fn expr_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option<String> {
-    if matches!(rule, TopicRule::Declared | TopicRule::BareArg) {
+    if matches!(
+        rule,
+        TopicRule::Declared | TopicRule::BareArg | TopicRule::CommandArg(_)
+    ) {
         return None;
     }
     // CL.3: `.queueName(QUEUE)` hands `QUEUE` to the LA.4 const fold.
@@ -1218,6 +1247,52 @@ fn bare_arg(source: &str, after: usize) -> Option<Folded> {
         return read_literal(arg, 0);
     }
     read_literal(source, j)
+}
+
+/// Bound on the lists [`command_arg`] steps into below the argument region:
+/// `send_object(['PUBLISH', ..])` is one, Redix's pipeline
+/// `[["PUBLISH", ..], ..]` two.
+const MAX_COMMAND_DEPTH: usize = 3;
+
+/// DH.3 [`TopicRule::CommandArg`] — the command vector in `region`. Walks the
+/// region's arguments and, depth-first in order, the elements of every list
+/// inside them ([`split_args`], so nesting and quoting are respected); the
+/// first vector whose FIRST element is a literal equal to `cmd` (ASCII
+/// case-insensitive) names the topic in its NEXT element. `Some(Some(t))`:
+/// that element starts with a quoted literal, folded ([`fold_topic`]).
+/// `Some(None)`: the command with no literal after it (a channel in a
+/// variable), a site that reads no topic. `None`: no vector opens with the
+/// command, so the call is no site.
+fn command_arg(region: &str, cmd: &str) -> Option<Option<Folded>> {
+    command_in(region, cmd, 0)
+}
+
+fn command_in(list: &str, cmd: &str, depth: usize) -> Option<Option<Folded>> {
+    let elems: Vec<&str> = split_args(list).into_iter().map(str::trim).collect();
+    let opens = elems
+        .first()
+        .and_then(|e| read_literal(e, 0))
+        .is_some_and(|(verb, _)| verb.eq_ignore_ascii_case(cmd));
+    if opens {
+        return Some(elems.get(1).and_then(|e| read_literal(e, 0)));
+    }
+    if depth >= MAX_COMMAND_DEPTH {
+        return None;
+    }
+    elems
+        .iter()
+        .find_map(|e| list_body(e).and_then(|inner| command_in(inner, cmd, depth + 1)))
+}
+
+/// DH.3: the body of a list literal element, `[..]`, or Dart's typed
+/// `<Object>[..]` (one balanced `<..>` stepped over, [`skip_type_args`]).
+fn list_body(elem: &str) -> Option<&str> {
+    let t = if elem.starts_with('<') {
+        skip_type_args(elem)?.trim_start()
+    } else {
+        elem
+    };
+    region_body(t.strip_prefix('[')?)
 }
 
 /// [`TopicRule::Receiver`] — the chain immediately before the needle.
@@ -3388,5 +3463,93 @@ mod tests {
                 .map(|(i, _)| i)
                 .collect::<Vec<_>>()
         );
+    }
+
+    // ---- DH.3: CommandArg ---------------------------------------------------
+
+    const SEND_OBJECT: TopicRule = TopicRule::CommandArg("publish");
+
+    fn command(src: &str) -> Vec<(Option<String>, Option<String>)> {
+        scan(src, ".send_object(", SEND_OBJECT)
+            .into_iter()
+            .map(|h| (h.topic, h.expr))
+            .collect()
+    }
+
+    #[test]
+    fn command_arg_reads_after_the_command() {
+        // package:redis: the channel is the element right after `PUBLISH`,
+        // never the payload.
+        let src = "await cmd.send_object(['PUBLISH', 'orders', 'order-1']);\n";
+        assert_eq!(command(src), vec![(Some("orders".to_string()), None)]);
+        assert_eq!(
+            command_arg("['PUBLISH', 'orders', 'x']", "publish"),
+            Some(Some(("orders".to_string(), TopicForm::Literal)))
+        );
+        // A positional command, a typed Dart list, Redix's `conn` first and a
+        // pipeline of vectors (the first publish names the hit).
+        for (region, topic) in [
+            ("'PUBLISH', 'orders', payload", "orders"),
+            ("<Object>['PUBLISH', \"orders\", body]", "orders"),
+            ("conn, [\"PUBLISH\", \"orders\", payload]", "orders"),
+            (
+                "conn, [[\"SET\", \"k\", \"v\"], [\"PUBLISH\", \"news\", m]]",
+                "news",
+            ),
+        ] {
+            assert_eq!(
+                command_arg(region, "publish").and_then(|r| r.map(|(t, _)| t)),
+                Some(topic.to_string()),
+                "{region}"
+            );
+        }
+        // Every occurrence is its own hit.
+        let two = "cmd.send_object(['PUBLISH', 'a', x]);\ncmd.send_object(['PUBLISH', 'b', y]);\n";
+        assert_eq!(
+            command(two),
+            vec![(Some("a".to_string()), None), (Some("b".to_string()), None)]
+        );
+    }
+
+    #[test]
+    fn command_arg_is_case_insensitive() {
+        for verb in ["publish", "Publish", "PUBLISH", "pUbLiSh"] {
+            let src = format!("cmd.send_object(['{verb}', 'orders', 'x']);\n");
+            assert_eq!(
+                command(&src),
+                vec![(Some("orders".to_string()), None)],
+                "{verb}"
+            );
+        }
+        // The VERB is compared case-insensitively; the channel keeps its case.
+        assert_eq!(
+            command("cmd.send_object([\"PUBLISH\", \"Orders.V1\", m]);\n"),
+            vec![(Some("Orders.V1".to_string()), None)]
+        );
+        // `PUBLISHX` is another command.
+        assert!(command("cmd.send_object(['PUBLISHX', 'orders', 'x']);\n").is_empty());
+    }
+
+    #[test]
+    fn command_arg_without_the_command_reads_nothing() {
+        // Another command, an empty vector, no vector: no site at all.
+        for src in [
+            "cmd.send_object(['SET', 'k', 'v']);\n",
+            "cmd.send_object(['GET', 'orders']);\n",
+            "cmd.send_object([]);\n",
+            "cmd.send_object(args);\n",
+        ] {
+            assert!(command(src).is_empty(), "{src:?}");
+        }
+        // The command must OPEN its vector: a key spelled `publish` is no verb.
+        assert!(command("cmd.send_object(['SET', 'publish', 'v']);\n").is_empty());
+        assert_eq!(command_arg("'SET', 'publish', 'v'", "publish"), None);
+        // The command with no literal after it: a site, no topic, and no
+        // expression for the LA.4 fold.
+        assert_eq!(
+            command("cmd.send_object(['PUBLISH', channel, m]);\n"),
+            vec![(None, None)]
+        );
+        assert_eq!(command_arg("['PUBLISH']", "publish"), Some(None));
     }
 }

@@ -91,6 +91,11 @@ pub enum QueueFramework {
     /// `SendWelcomeEmail::dispatch($user)` or `dispatch(new
     /// SendWelcomeEmail($user))`. See [`laravel_job_at`].
     Laravel,
+    // --- DH.3: a task queue whose job is a TYPE STRING -----------------------
+    /// redis_task_queue (Dart): the task TYPE string, the CL.4 asynq shape:
+    /// `client.enqueue(Task('email:welcome', payload))` + `worker.handle(
+    /// 'email:welcome', (task, ctx) async { .. })`.
+    RedisTaskQueue,
 }
 
 impl QueueFramework {
@@ -119,6 +124,7 @@ impl QueueFramework {
             QueueFramework::Asynq => "asynq",
             QueueFramework::Apalis => "apalis",
             QueueFramework::Laravel => "laravel",
+            QueueFramework::RedisTaskQueue => "redis_task_queue",
         }
     }
 }
@@ -258,8 +264,10 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // JS — AWS SDK v3: `new ReceiveMessageCommand({ QueueUrl: "..." })`.
     ("ReceiveMessageCommand(", QueueFramework::Sqs, &["@aws-sdk/client-sqs"], TopicRule::Keyed(&["queueurl"])),
     // JS — SDK v2 / v3 aggregated client `sqs.receiveMessage({ QueueUrl })`;
-    // Java — SDK v2 builder `.queueUrl("...")`, v1 `com.amazonaws`.
-    (".receiveMessage(", QueueFramework::Sqs, &["aws-sdk", "awssdk.services.sqs", "amazonaws.services.sqs"], TopicRule::Keyed(&["queueurl"])),
+    // Java — SDK v2 builder `.queueUrl("...")`, v1 `com.amazonaws`. DH.3:
+    // Dart — aws_sqs_api (agilord's aws_client) `sqs.receiveMessage(queueUrl:
+    // '..')`, a named parameter the keyed scan reads.
+    (".receiveMessage(", QueueFramework::Sqs, &["aws-sdk", "awssdk.services.sqs", "amazonaws.services.sqs", AWS_SQS_DART_GATE], TopicRule::Keyed(&["queueurl"])),
     // C# — AWSSDK.SQS: `ReceiveMessageAsync(new ReceiveMessageRequest { QueueUrl = "..." })`.
     (".ReceiveMessageAsync(", QueueFramework::Sqs, &["amazon.sqs", "awssdk"], TopicRule::Keyed(&["queueurl"])),
     // GCP — JS `pubsub.subscription('orders-worker')`, Python
@@ -566,6 +574,32 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // A2.9 row's, and keeps its framework tag.
     (".subscribe(RedisChannel(", QueueFramework::RedisPubSub, REDIS4CATS_GATE, TopicRule::ArgLiteral),
     (".psubscribe(RedisPattern(", QueueFramework::RedisPubSub, REDIS4CATS_GATE, TopicRule::ArgLiteral),
+    // ---- DH.3: Dart clients -----------------------------------------------------
+    // A Dart file names a package only in its `import 'package:<name>/..'`
+    // line, so every gate is that URI prefix, lowercased (the DH.3 gate consts
+    // after DECLARE_PATTERNS): `.consume(`, `.sub(` and `.handle(` are common
+    // Dart method names, and a local could hold any bare word. Every row sits
+    // BEFORE the A2.9 block, so the generic `.subscribe(` rows yield to a call
+    // one of these read.
+    // dart_amqp: `final queue = await channel.queue('orders');` + `final
+    // consumer = await queue.consume();`. The consume names no queue
+    // (`TopicRule::Declared`): CL.1's declare pass binds it to the file's one
+    // `.queue(` declaration ([`DECLARE_PATTERNS`]); two declared queues bind
+    // nothing and keep the framework tag.
+    (".consume(", QueueFramework::RabbitMQ, DART_AMQP_GATE, TopicRule::Declared),
+    // dart_nats: `client.sub('orders')`, `client.sub('orders', queueGroup:
+    // 'workers')`. The trailing `(` keeps `.subscribe(` out.
+    (".sub(", QueueFramework::Nats, DART_NATS_GATE, TopicRule::ArgLiteral),
+    // googleapis pubsub/v1 (the generated REST client):
+    // `api.projects.subscriptions.pull(PullRequest(..),
+    // 'projects/shop/subscriptions/orders')`, the resource name arg #1, folded
+    // to its last segment (the A2.6 GCP rule). A subscription pairs only when
+    // spelled like its topic (the JS `.subscription(` row's COVERAGE_CAVEATS
+    // gap).
+    (".subscriptions.pull(", QueueFramework::PubSub, GOOGLEAPIS_PUBSUB_GATE, TopicRule::ArgIndex(1)),
+    // redis_task_queue: `worker.handle('email:welcome', (task, ctx) async {
+    // .. })`, the task TYPE string (the CL.4 asynq `.HandleFunc(` shape).
+    (".handle(", QueueFramework::RedisTaskQueue, REDIS_TASK_QUEUE_GATE, TopicRule::ArgLiteral),
     // ---- A2.9: broker pub/sub that used to live in eventbus.rs ----------
     // These verbs are the broadest needles in the table, so every row below is
     // a GENERIC-VERB row ([`is_generic_verb_row`]): it yields to any earlier
@@ -726,8 +760,9 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     (".SendMessageAsync(", QueueFramework::Sqs, &["amazon.sqs", "awssdk"], TopicRule::Keyed(&["queueurl"])),
     // JS — SDK v2 / v3 aggregated `sqs.sendMessage({ QueueUrl })`; Java — SDK v2
     // builder `.queueUrl("...")`. The real Java package is
-    // `software.amazon.awssdk.services.sqs`, hence the `services.` gate.
-    (".sendMessage(", QueueFramework::Sqs, &["aws-sdk", "awssdk.services.sqs", "amazonaws.services.sqs"], TopicRule::Keyed(&["queueurl"])),
+    // `software.amazon.awssdk.services.sqs`, hence the `services.` gate. DH.3:
+    // Dart — aws_sqs_api `sqs.sendMessage(queueUrl: '..', messageBody: b)`.
+    (".sendMessage(", QueueFramework::Sqs, &["aws-sdk", "awssdk.services.sqs", "amazonaws.services.sqs", AWS_SQS_DART_GATE], TopicRule::Keyed(&["queueurl"])),
     // SNS — boto3 / JS / Java: `sns.publish(TopicArn="arn:aws:sns:...:orders")`.
     // BROAD needle; since A2.9 eventbus.rs no longer mints an EVENT_EMITTER
     // twin in a file these signals gate. C# spells it `PublishAsync`, so it
@@ -961,6 +996,48 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // `pubSub.publish(RedisChannel("orders"), msg)`. A library row, like the
     // consumer's.
     (".publish(RedisChannel(", QueueFramework::RedisPubSub, REDIS4CATS_GATE, TopicRule::ArgLiteral),
+    // ---- DH.3: Dart clients (see the CONSUMER_PATTERNS block) -------------------
+    // Before the A2.9 block, so the generic `.publish(` verb rows yield to a
+    // call these read.
+    // googleapis pubsub/v1: `api.projects.topics.publish(PublishRequest(..),
+    // 'projects/shop/topics/orders')`, the resource name arg #1, folded to its
+    // last segment. Before the dart_amqp `.publish(` row, which a file
+    // importing both clients would also read on this call.
+    (".topics.publish(", QueueFramework::PubSub, GOOGLEAPIS_PUBSUB_GATE, TopicRule::ArgIndex(1)),
+    // dart_amqp: `final queue = await channel.queue('orders');` +
+    // `queue.publish('order-1')`. `Queue.publish(message)`'s argument is the
+    // PAYLOAD, so the row names no queue (`TopicRule::Declared`): CL.1's
+    // declare pass binds it to the file's one declared queue, from the
+    // producer-side table ([`PRODUCER_DECLARE_PATTERNS`]). KNOWN IMPRECISION:
+    // an `exchange.publish(msg, 'key')` in a file that also declares exactly
+    // one queue binds to that queue, not to its routing key; in a file
+    // declaring none it keeps the framework tag.
+    (".publish(", QueueFramework::RabbitMQ, DART_AMQP_GATE, TopicRule::Declared),
+    // kafka_dart (the librdkafka binding): `producer.sendMessage(topic:
+    // 'orders', payload: b, key: k)`, a named parameter. HEAD's `producer.send`
+    // row prefix-matches the same call, finds no bracket after its needle and
+    // reads nothing; CL.1's rule (i) (overlap, same framework, named) drops its
+    // tag beside this row's node.
+    (".sendMessage(", QueueFramework::Kafka, KAFKA_DART_GATE, TopicRule::Keyed(&["topic"])),
+    // mqtt_client: `client.publishMessage('sensors/temp', MqttQos.atLeastOnce,
+    // builder.payload!)`. A library row, not a generic verb
+    // ([`is_generic_verb_row`]): it reads arg #0 normally.
+    (".publishMessage(", QueueFramework::Mqtt, MQTT_CLIENT_GATE, TopicRule::ArgLiteral),
+    // dart_nats: `client.pubString('orders', 'order-1')` and the bytes form
+    // `client.pub('orders', data)`. The `(` right after `pub` keeps the second
+    // off `.pubString(` and `.publish(`.
+    (".pubString(", QueueFramework::Nats, DART_NATS_GATE, TopicRule::ArgLiteral),
+    (".pub(", QueueFramework::Nats, DART_NATS_GATE, TopicRule::ArgLiteral),
+    // package:redis: pub/sub publishes through the raw command API,
+    // `cmd.send_object(['PUBLISH', 'orders', payload])`, the channel the
+    // element after the command (`TopicRule::CommandArg`). Any other command
+    // (`['SET', k, v]`) is no site at all. A library row: `.send_object(` is
+    // no shared verb.
+    (".send_object(", QueueFramework::RedisPubSub, DART_REDIS_GATE, TopicRule::CommandArg("publish")),
+    // redis_task_queue: `client.enqueue(Task('email:welcome', payload),
+    // queue: 'default')`; arg #0 is the Task constructor, whose first literal
+    // is the task TYPE. The `queue:` is broker routing, never the job.
+    (".enqueue(", QueueFramework::RedisTaskQueue, REDIS_TASK_QUEUE_GATE, TopicRule::ArgLiteral),
     // ---- A2.9: broker pub/sub (see the CONSUMER_PATTERNS block) -----------
     // Redis pub/sub — `r.publish('notifications', payload)`. Placed AFTER the
     // NATS / RabbitMQ / SNS rows: a file importing both is attributed to the
@@ -990,13 +1067,14 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
 // `q, _ := ch.QueueDeclare("orders", ..)` + `ch.Consume(q.Name, ..)`, pika's
 // `queue_declare(queue="jobs")` + `basic_consume(queue=qname, ..)`.
 // ---------------------------------------------------------------------------
-/// Queue DECLARATIONS, scanned on the consumer side only and never a consumer
-/// site by themselves. When a file declares EXACTLY ONE queue of a framework,
-/// each consumer-row hit of that framework that named no topic (an "unnamed
+/// Queue DECLARATIONS, scanned on the consumer side and never a consumer site
+/// by themselves. When a file declares EXACTLY ONE queue of a framework, each
+/// consumer-row hit of that framework that named no topic (an "unnamed
 /// consume") becomes a consumer site of the declared queue, at the CONSUME
 /// call's offset; zero or two-plus declared queues bind nothing (ambiguous),
 /// and the unnamed consume keeps HEAD's framework tag. Same tuple shape and
-/// gate rules as [`CONSUMER_PATTERNS`].
+/// gate rules as [`CONSUMER_PATTERNS`]. DH.3: the producer side has its own
+/// table, [`PRODUCER_DECLARE_PATTERNS`].
 const DECLARE_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // Python — pika / amqp: `ch.queue_declare(queue="orders")`, receiver-free.
     // DG.1: Rust — lapin `channel.queue_declare("orders", opts, args)`.
@@ -1011,6 +1089,32 @@ const DECLARE_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // (`ch.queue("", exclusive: true)`) reads no name and so counts as an
     // unnamed declaration: ambiguous, nothing binds.
     (".queue(", QueueFramework::RabbitMQ, BUNNY_GATE, TopicRule::ArgLiteral),
+    // DH.3: Dart — dart_amqp `final queue = await channel.queue('orders');`,
+    // the queue an unnamed `queue.consume()` consumes. `channel.queue('')` (a
+    // server-named queue) reads no name: ambiguous, nothing binds.
+    (".queue(", QueueFramework::RabbitMQ, DART_AMQP_GATE, TopicRule::ArgLiteral),
+];
+
+// ---- DH.3: A PRODUCER DECLARES ITS QUEUE TOO ---------------------------------
+// CL.1's binding (`bind_declared_queues`) is side-agnostic: it binds every
+// unnamed hit of a declared framework to the file's one declared queue. Only
+// the table was consumer-side. dart_amqp publishes THROUGH the declaration,
+// `final queue = await channel.queue('orders'); queue.publish('order-1');`,
+// and no publish argument names the queue.
+// ---------------------------------------------------------------------------
+/// Queue DECLARATIONS read on the PRODUCER side: when a producer file declares
+/// EXACTLY ONE queue of a framework, each producer-row hit of that framework
+/// that named no topic (an "unnamed publish") becomes a producer site of the
+/// declared queue, at the PUBLISH call's offset; zero or two-plus declared
+/// queues bind nothing and the unnamed publish keeps the framework tag. Same
+/// tuple shape and gate rules as [`DECLARE_PATTERNS`], and its gates join
+/// [`broker_signals`]. Holds only the libraries whose publish call names no
+/// queue: a Bunny / pika / RabbitMQ.Client producer names its routing key, so
+/// those declarations stay consumer-side and no other producer file changes.
+const PRODUCER_DECLARE_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
+    // dart_amqp: `final queue = await channel.queue('orders');` +
+    // `queue.publish('order-1')`.
+    (".queue(", QueueFramework::RabbitMQ, DART_AMQP_GATE, TopicRule::ArgLiteral),
 ];
 
 // ---- DH.1: Ruby gem gates, shared by the three tables ------------------------
@@ -1064,6 +1168,31 @@ const ALPAKKA_PUBSUB_GATE: &[&str] = &["alpakka.googlecloud.pubsub", "connectors
 /// redis4cats: `dev.profunktor.redis4cats`.
 const REDIS4CATS_GATE: &[&str] = &["redis4cats"];
 
+// ---- DH.3: Dart package gates, shared by the tables ---------------------------
+// Each is the `package:<name>/` URI prefix a Dart `import` line spells,
+// lowercased (the gate reads the lowercased file), so a Dart file is gated by
+// what it imports, never by a word a local could hold. The `/` ends the
+// package name: `package:redis/` is not `package:redis_task_queue/`.
+/// dart_amqp: `import 'package:dart_amqp/dart_amqp.dart';`.
+const DART_AMQP_GATE: &[&str] = &["package:dart_amqp/"];
+/// kafka_dart: `import 'package:kafka_dart/kafka_dart.dart';`.
+const KAFKA_DART_GATE: &[&str] = &["package:kafka_dart/"];
+/// mqtt_client: `package:mqtt_client/mqtt_client.dart`, `../mqtt_server_client.dart`.
+const MQTT_CLIENT_GATE: &[&str] = &["package:mqtt_client/"];
+/// dart_nats: `import 'package:dart_nats/dart_nats.dart';`.
+const DART_NATS_GATE: &[&str] = &["package:dart_nats/"];
+/// googleapis Pub/Sub: `import 'package:googleapis/pubsub/v1.dart';`, never the
+/// other googleapis APIs.
+const GOOGLEAPIS_PUBSUB_GATE: &[&str] = &["package:googleapis/pubsub/"];
+/// package:redis: `import 'package:redis/redis.dart';`.
+const DART_REDIS_GATE: &[&str] = &["package:redis/"];
+/// aws_sqs_api: `import 'package:aws_sqs_api/sqs-2012-11-05.dart';`, one
+/// entry of the A2.6 `.receiveMessage(` / `.sendMessage(` gates.
+const AWS_SQS_DART_GATE: &str = "package:aws_sqs_api/";
+/// redis_task_queue: `import 'package:redis_task_queue/redis_task_queue.dart';`.
+/// A task queue, so never a broker signal ([`is_broker`]).
+const REDIS_TASK_QUEUE_GATE: &[&str] = &["package:redis_task_queue/"];
+
 /// CL.1: rows whose library gate a Python file may miss while still calling
 /// the task. The canonical Celery caller (`from tasks import process_order` +
 /// `process_order.delay(order_id)`) never mentions `celery`. When such a row's
@@ -1116,7 +1245,8 @@ fn is_broker(f: &QueueFramework) -> bool {
         | QueueFramework::Hangfire
         | QueueFramework::Asynq
         | QueueFramework::Apalis
-        | QueueFramework::Laravel => false,
+        | QueueFramework::Laravel
+        | QueueFramework::RedisTaskQueue => false,
     }
 }
 
@@ -1137,6 +1267,7 @@ fn broker_signals() -> &'static [&'static str] {
             .iter()
             .chain(PRODUCER_PATTERNS)
             .chain(DECLARE_PATTERNS)
+            .chain(PRODUCER_DECLARE_PATTERNS)
         {
             if !is_broker(framework) {
                 continue;
@@ -1298,7 +1429,7 @@ pub fn extract_queue_producer_nodes(
         module_id,
         repo,
         PRODUCER_PATTERNS,
-        &[],
+        PRODUCER_DECLARE_PATTERNS,
         node_kind::QUEUE_PRODUCER,
         "queue_producer:",
         None,
@@ -1367,7 +1498,7 @@ pub fn extract_queue_nodes_with_consts(
         module_id,
         repo,
         PRODUCER_PATTERNS,
-        &[],
+        PRODUCER_DECLARE_PATTERNS,
         node_kind::QUEUE_PRODUCER,
         "queue_producer:",
         Some(resolve),
@@ -1675,7 +1806,7 @@ fn python_imported_names(source: &str) -> BTreeSet<String> {
 /// the SAME call (pika `channel.basic_publish` beside `basic_publish(`), or a
 /// liveness row in a file another row had already named, stood a sentinel
 /// beside the real node. Such a row is now DEFERRED, and after the last row
-/// (and, consumer side, the [`DECLARE_PATTERNS`] pass) each of its hits is
+/// (and the declare pass, [`DECLARE_PATTERNS`] / [`PRODUCER_DECLARE_PATTERNS`]) each of its hits is
 /// explained by [`explain_hit`]. A deferred tag whose hits are ALL explained
 /// is not recorded, and its callbacks move to the node that explained each
 /// hit; one unexplained hit records it exactly as before (Weak, the row's
@@ -1687,9 +1818,11 @@ fn python_imported_names(source: &str) -> BTreeSet<String> {
 /// unresolved second topic (`producer.produce(topicVar, ..)` beside a named
 /// `producer.send`).
 ///
-/// CL.1 — DECLARE BINDING (consumer side, `declares` non-empty): see
-/// [`DECLARE_PATTERNS`]. An unnamed consume is a consumer-row hit that named
-/// no topic, is not a `NoIdentity` row's and overlaps no hit that named one.
+/// CL.1 — DECLARE BINDING (`declares` non-empty): see [`DECLARE_PATTERNS`]. An
+/// unnamed consume is a row hit that named no topic, is not a `NoIdentity`
+/// row's and overlaps no hit that named one. DH.3: the producer side passes
+/// [`PRODUCER_DECLARE_PATTERNS`], so an unnamed PUBLISH binds the same way
+/// (the marker's `consume=` then names the publish needle).
 ///
 /// LA.4 (A11.7): `resolve` is `None` on the per-file (cached) path. The
 /// engine's post-cache const fold passes a resolver: an occurrence that read
@@ -1821,13 +1954,17 @@ fn emit_queue_nodes(
         // A12.1: the byte offset rides along too — it anchors the MESSAGE_TYPE scan.
         // LA.4: the resolver only ever sees a row that may name a topic by an
         // identifier; everything else reads exactly as it always has.
-        // DH.1: a Declared or BareArg hit never carries an expression to fold.
+        // DH.1: a Declared or BareArg hit never carries an expression to fold;
+        // DH.3: nor does a CommandArg hit.
         let folds = resolve.filter(|_| {
             !is_generic_verb_row(pattern, framework)
                 && !is_identity_rule(rule)
                 && !matches!(
                     rule,
-                    TopicRule::NoIdentity | TopicRule::Declared | TopicRule::BareArg
+                    TopicRule::NoIdentity
+                        | TopicRule::Declared
+                        | TopicRule::BareArg
+                        | TopicRule::CommandArg(_)
                 )
         });
         let mut reads: Vec<Option<(String, TopicForm)>> = hits
@@ -2160,7 +2297,9 @@ struct DeclareState<'s, 'p, 'g> {
 /// that framework becomes a consumer site of it at the consume call's offset
 /// (LE.4c anchors it to the consuming function), its callbacks follow, and
 /// its span records the binding, which explains it to the deferred-tag pass.
-/// Zero or two-plus declared queues bind nothing.
+/// Zero or two-plus declared queues bind nothing. DH.3: side-agnostic; on the
+/// producer side `declares` is [`PRODUCER_DECLARE_PATTERNS`] and an unnamed
+/// publish becomes a producer site the same way (it carries no callbacks).
 fn bind_declared_queues(
     ctx: DeclareCtx<'_>,
     declares: &[(&str, QueueFramework, &[&str], TopicRule)],
@@ -5102,13 +5241,13 @@ public class AuditFunction
         let all = [
             Celery, Dramatiq, BullMQ, Sidekiq, Oban, Nats, RabbitMQ, Kafka, RedisList, Sqs, Sns,
             PubSub, AzureServiceBus, Mqtt, RedisPubSub, Jms, JobRunr, Hangfire, Asynq, Apalis,
-            Laravel,
+            Laravel, RedisTaskQueue,
         ];
         for f in &all {
             match f {
                 Celery | Dramatiq | BullMQ | Sidekiq | Oban | Nats | RabbitMQ | Kafka
                 | RedisList | Sqs | Sns | PubSub | AzureServiceBus | Mqtt | RedisPubSub | Jms
-                | JobRunr | Hangfire | Asynq | Apalis | Laravel => {}
+                | JobRunr | Hangfire | Asynq | Apalis | Laravel | RedisTaskQueue => {}
             }
             assert!(is_framework_tag(&framework_tag(f)), "{f:?}");
         }
@@ -8055,5 +8194,293 @@ await myconsumer.run({ eachMessage: notMine });\n";
             .iter()
             .any(|(n, f, _, r)| *n == "ProducerRecord" && *f == QueueFramework::Kafka && matches!(r, TopicRule::CtorArgLiteral)));
         assert!(!PRODUCER_PATTERNS.iter().any(|(n, ..)| *n == "ProducerRecord<>("));
+    }
+
+    // ---- DH.3: Dart clients -------------------------------------------------
+
+    const DART_PATH: &str = "lib/client.dart";
+
+    fn dart(src: &str) -> (Vec<String>, Vec<String>) {
+        at(src, DART_PATH)
+    }
+
+    fn dart_tag(side: &str, framework: &str) -> Vec<String> {
+        vec![format!("queue_{side}:{UNRESOLVED_PREFIX}{framework}")]
+    }
+
+    /// matrix/dart/amqp, both files.
+    const DART_AMQP_WORKER: &str = "import 'package:dart_amqp/dart_amqp.dart';\n\nFuture<void> consume(Client client) async {\n  final channel = await client.channel();\n  final queue = await channel.queue('orders');\n  final consumer = await queue.consume();\n  consumer.listen((msg) => print(msg.payloadAsString));\n}\n";
+    const DART_AMQP_PUBLISHER: &str = "import 'package:dart_amqp/dart_amqp.dart';\n\nFuture<void> publish(Client client) async {\n  final channel = await client.channel();\n  final queue = await channel.queue('orders');\n  queue.publish('order-1');\n}\n";
+
+    #[test]
+    fn dart_amqp_declared_queue_names_consume_and_publish() {
+        let c = extract_queue_consumer_nodes(DART_AMQP_WORKER, "client/lib/worker.dart", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"RabbitMQ""#));
+        // The site is the CONSUME call (line 5), never the declaration.
+        assert_eq!(c.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![5]);
+        let p = extract_queue_producer_nodes(DART_AMQP_PUBLISHER, "server/lib/publisher.dart", module_id(), repo());
+        // The producer-side declare pass binds the unnamed publish: no tag,
+        // and the payload `'order-1'` is never the queue.
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"RabbitMQ""#));
+        assert_eq!(p.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![5]);
+        assert!(p.callbacks.is_empty());
+        // Each file is one side only: a declaration is no site by itself.
+        assert_eq!(dart(DART_AMQP_WORKER), (strs(&["queue_consumer:orders"]), vec![]));
+        assert_eq!(dart(DART_AMQP_PUBLISHER), (vec![], strs(&["queue_producer:orders"])));
+        // A Dart file that also talks to Redis: the generic `.publish(` verb
+        // row yields to the dart_amqp row that read the call first.
+        let with_redis = DART_AMQP_PUBLISHER.replace(
+            "import 'package:dart_amqp/dart_amqp.dart';\n",
+            "import 'package:dart_amqp/dart_amqp.dart';\nimport 'package:redis/redis.dart';\n",
+        );
+        let p = extract_queue_producer_nodes(&with_redis, DART_PATH, module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(!framework_of(&p).contains("RedisPubSub"));
+        // A dart_amqp file is a broker file: eventbus.rs mints no
+        // verb-fallback EVENT_EMITTER beside the queue node.
+        let ev = crate::eventbus::extract_event_emitter_nodes(DART_AMQP_PUBLISHER, DART_PATH, module_id(), repo());
+        assert!(ev.nodes.is_empty(), "{:?}", ev.nav.qname_by_id.values().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn dart_amqp_two_declarations_bind_nothing() {
+        let head = "import 'package:dart_amqp/dart_amqp.dart';\n\nFuture<void> run(Channel channel) async {\n";
+        // Two declared queues: ambiguous on both sides, so the unnamed call
+        // keeps the deferred framework tag and names neither queue.
+        let two = format!("{head}  final orders = await channel.queue('orders');\n  final audit = await channel.queue('audit');\n  final consumer = await orders.consume();\n  orders.publish('x');\n}}\n");
+        assert_eq!(
+            dart(&two),
+            (dart_tag("consumer", "rabbitmq"), dart_tag("producer", "rabbitmq"))
+        );
+        // A server-named queue reads no name: ambiguous too.
+        let server_named = format!("{head}  final q = await channel.queue('');\n  await q.consume();\n  q.publish('x');\n}}\n");
+        assert_eq!(
+            dart(&server_named),
+            (dart_tag("consumer", "rabbitmq"), dart_tag("producer", "rabbitmq"))
+        );
+        // No declaration at all (the queue is a parameter): nothing to bind.
+        let none = "import 'package:dart_amqp/dart_amqp.dart';\n\nvoid run(Queue q) {\n  q.consume();\n  q.publish('x');\n}\n";
+        assert_eq!(
+            dart(none),
+            (dart_tag("consumer", "rabbitmq"), dart_tag("producer", "rabbitmq"))
+        );
+        // The same calls without the dart_amqp import are nobody's.
+        let other = "import 'package:collection/collection.dart';\n\nvoid run(Jobs jobs, Stream s, Bus bus) {\n  final q = jobs.queue('orders');\n  s.consume();\n  bus.publish('order-1');\n}\n";
+        assert_eq!(dart(other), (vec![], vec![]));
+    }
+
+    /// matrix/dart/kafka, both files.
+    const KAFKA_DART_CONSUMER: &str = "import 'package:kafka_dart/kafka_dart.dart';\n\nFuture<void> consume() async {\n  final consumer = await KafkaFactory.createAndInitializeConsumer(\n    bootstrapServers: 'localhost:9092',\n    groupId: 'shop',\n  );\n  await consumer.subscribe(['orders']);\n  final message = await consumer.pollMessage();\n  print(message?.payload.value);\n}\n";
+    const KAFKA_DART_PRODUCER: &str = "import 'package:kafka_dart/kafka_dart.dart';\n\nFuture<void> publish(String body) async {\n  final producer = await KafkaFactory.createAndInitializeProducer(\n    bootstrapServers: 'localhost:9092',\n  );\n  await producer.sendMessage(topic: 'orders', payload: body, key: 'k');\n  await producer.flush();\n}\n";
+
+    #[test]
+    fn kafka_dart_send_message_drops_the_prefix_tag() {
+        let p = extract_queue_producer_nodes(KAFKA_DART_PRODUCER, "server/lib/producer.dart", module_id(), repo());
+        // Was [`queue_producer:unresolved:kafka`]: HEAD's `producer.send` row
+        // prefix-matches `producer.sendMessage(` and reads nothing; the
+        // `.sendMessage(` row names the topic and explains that hit (CL.1
+        // rule (i)), so the file mints exactly one node.
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"Kafka""#));
+        // The consumer is HEAD's `consumer.subscribe` row, unchanged.
+        assert_eq!(dart(KAFKA_DART_CONSUMER), (strs(&["queue_consumer:orders"]), vec![]));
+        // A topic held in a variable names nothing: one tag, as before.
+        let var = KAFKA_DART_PRODUCER.replace("topic: 'orders'", "topic: topicName");
+        assert_eq!(dart(&var).1, dart_tag("producer", "kafka"));
+    }
+
+    #[test]
+    fn mqtt_client_publish_message() {
+        // matrix/dart/mqtt, both files.
+        let sensor = "import 'package:mqtt_client/mqtt_client.dart';\nimport 'package:mqtt_client/mqtt_server_client.dart';\n\nvoid report(MqttServerClient client) {\n  final builder = MqttClientPayloadBuilder()..addString('21');\n  client.publishMessage('sensors/temp', MqttQos.atLeastOnce, builder.payload!);\n}\n";
+        let listener = "import 'package:mqtt_client/mqtt_client.dart';\nimport 'package:mqtt_client/mqtt_server_client.dart';\n\nvoid listen(MqttServerClient client) {\n  client.subscribe('sensors/temp', MqttQos.atMostOnce);\n}\n";
+        let p = extract_queue_producer_nodes(sensor, "server/lib/sensor.dart", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:sensors/temp"]));
+        assert!(framework_of(&p).contains(r#""framework":"Mqtt""#));
+        assert_eq!(dart(listener), (strs(&["queue_consumer:sensors/temp"]), vec![]));
+        // A library row, not a generic verb: it never yields and reads arg #0.
+        assert!(!is_generic_verb_row(".publishMessage(", &QueueFramework::Mqtt));
+        assert!(!yields_to_earlier_rows(".publishMessage(", &QueueFramework::Mqtt));
+        // The JS GCP `pubsub.topic('orders').publishMessage(..)` is not an
+        // mqtt_client file: still exactly HEAD's `.topic(` node.
+        let gcp = "const { PubSub } = require('@google-cloud/pubsub');\nawait pubsub.topic('orders').publishMessage({ data });\n";
+        let p = extract_queue_producer_nodes(gcp, "src/p.js", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(!framework_of(&p).contains("Mqtt"));
+    }
+
+    #[test]
+    fn dart_nats_pub_string_pub_and_sub() {
+        // matrix/dart/nats, both files.
+        let publisher = "import 'package:dart_nats/dart_nats.dart';\n\nvoid publish(Client client) {\n  client.pubString('orders', 'order-1');\n}\n";
+        let subscriber = "import 'package:dart_nats/dart_nats.dart';\n\nvoid listen(Client client) {\n  final sub = client.sub('orders');\n  sub.stream.listen((msg) => print(msg.string));\n}\n";
+        let p = extract_queue_producer_nodes(publisher, "server/lib/pub.dart", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"Nats""#));
+        assert_eq!(dart(publisher).0, Vec::<String>::new());
+        let c = extract_queue_consumer_nodes(subscriber, "client/lib/sub.dart", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"Nats""#));
+        // The bytes form, a queue group, and no double read: `.pub(` is not
+        // `.pubString(`, `.sub(` is not `.subscribe(`.
+        let bytes = "import 'package:dart_nats/dart_nats.dart';\nvoid f(Client c, Uint8List d) {\n  c.pub('payments', d);\n  c.pubString('orders', 'x');\n  c.sub('audit', queueGroup: 'workers');\n}\n";
+        assert_eq!(
+            dart(bytes),
+            (strs(&["queue_consumer:audit"]), strs(&["queue_producer:orders", "queue_producer:payments"]))
+        );
+        // Without the dart_nats import `.pub(` / `.sub(` are nobody's.
+        let other = "import 'package:math_expressions/math_expressions.dart';\nvoid f(Num a) {\n  a.sub('1');\n  a.pub('x', 2);\n}\n";
+        assert_eq!(dart(other), (vec![], vec![]));
+    }
+
+    #[test]
+    fn googleapis_pubsub_resource_paths() {
+        // matrix/dart/pubsub, both files.
+        let publisher = "import 'package:googleapis/pubsub/v1.dart';\n\nFuture<void> publish(PubsubApi api, String data) async {\n  await api.projects.topics.publish(PublishRequest(messages: [PubsubMessage(data: data)]), 'projects/shop/topics/orders');\n}\n";
+        let listener = "import 'package:googleapis/pubsub/v1.dart';\n\nFuture<void> pull(PubsubApi api) async {\n  await api.projects.subscriptions.pull(PullRequest(maxMessages: 10), 'projects/shop/subscriptions/orders');\n}\n";
+        let p = extract_queue_producer_nodes(publisher, "server/lib/publisher.dart", module_id(), repo());
+        // The resource name folds to its last segment (the A2.6 GCP rule).
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"PubSub""#));
+        let c = extract_queue_consumer_nodes(listener, "client/lib/listener.dart", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"PubSub""#));
+        // The request (arg #0) is never the name: a resource name held in a
+        // variable is the framework tag.
+        let var = publisher.replace("'projects/shop/topics/orders'", "topicName");
+        assert_eq!(dart(&var).1, dart_tag("producer", "pubsub"));
+        // Another googleapis API is no Pub/Sub file.
+        let storage = publisher.replace("package:googleapis/pubsub/v1.dart", "package:googleapis/storage/v1.dart");
+        assert_eq!(dart(&storage), (vec![], vec![]));
+    }
+
+    #[test]
+    fn dart_redis_publish_command() {
+        // matrix/dart/redis, both files.
+        let notifier = "import 'package:redis/redis.dart';\n\nFuture<void> notify(Command cmd) async {\n  await cmd.send_object(['PUBLISH', 'orders', 'order-1']);\n}\n";
+        let listener = "import 'package:redis/redis.dart';\n\nFuture<void> listen(Command cmd) async {\n  final pubsub = PubSub(cmd);\n  pubsub.subscribe(['orders']);\n  pubsub.getStream().listen((msg) => print(msg));\n}\n";
+        let p = extract_queue_producer_nodes(notifier, "server/lib/notifier.dart", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"RedisPubSub""#));
+        // The consumer is HEAD's A2.9 `.subscribe(` row, unchanged.
+        assert_eq!(dart(listener), (strs(&["queue_consumer:orders"]), vec![]));
+        // Any other command is no publish: no node and no tag.
+        let set = "import 'package:redis/redis.dart';\n\nFuture<void> cache(Command cmd) async {\n  await cmd.send_object(['SET', 'k', 'v']);\n}\n";
+        assert_eq!(dart(set), (vec![], vec![]));
+        // Beside a publish, only the publish is a site.
+        let both = set.replace("['SET', 'k', 'v']);\n", "['SET', 'k', 'v']);\n  await cmd.send_object(['PUBLISH', 'orders', 'x']);\n");
+        assert_eq!(dart(&both), (vec![], strs(&["queue_producer:orders"])));
+        // A channel held in a variable: a publish whose topic is unknown.
+        let var = notifier.replace("'PUBLISH', 'orders',", "'PUBLISH', channel,");
+        assert_eq!(dart(&var).1, dart_tag("producer", "redispubsub"));
+        // A library row: never a generic verb.
+        assert!(!is_generic_verb_row(".send_object(", &QueueFramework::RedisPubSub));
+        // `package:redis_task_queue/` is not `package:redis/`.
+        let taskq = notifier.replace("package:redis/redis.dart", "package:redis_task_queue/redis_task_queue.dart");
+        assert_eq!(dart(&taskq), (vec![], vec![]));
+    }
+
+    #[test]
+    fn aws_sqs_api_named_queue_url() {
+        // matrix/dart/sqs_sns, both files.
+        let enqueue = "import 'package:aws_sqs_api/sqs-2012-11-05.dart';\n\nFuture<void> enqueue(SQS sqs, String body) async {\n  await sqs.sendMessage(queueUrl: 'https://sqs.us-east-1.amazonaws.com/123/orders', messageBody: body);\n}\n";
+        let poller = "import 'package:aws_sqs_api/sqs-2012-11-05.dart';\n\nFuture<void> poll(SQS sqs) async {\n  await sqs.receiveMessage(queueUrl: 'https://sqs.us-east-1.amazonaws.com/123/orders');\n}\n";
+        let p = extract_queue_producer_nodes(enqueue, "server/lib/enqueue.dart", module_id(), repo());
+        // The URL folds to the queue name.
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"Sqs""#));
+        let c = extract_queue_consumer_nodes(poller, "client/lib/poller.dart", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"Sqs""#));
+        // The body is never the queue; a URL in a variable is the tag.
+        let var = enqueue.replace("queueUrl: 'https://sqs.us-east-1.amazonaws.com/123/orders'", "queueUrl: url");
+        assert_eq!(dart(&var).1, dart_tag("producer", "sqs"));
+        // kafka_dart's `.sendMessage(` row is not read in an SQS file.
+        assert!(!framework_of(&p).contains("Kafka"));
+    }
+
+    #[test]
+    fn redis_task_queue_enqueue_and_handle() {
+        // matrix/dart/taskq, both files.
+        let signup = "import 'package:redis_task_queue/redis_task_queue.dart';\n\nFuture<void> signup(String userId) async {\n  final client = await QueueClient.connect();\n  await client.enqueue(Task('email:welcome', {'user_id': userId}), queue: 'default');\n}\n";
+        let worker = "import 'package:redis_task_queue/redis_task_queue.dart';\n\nFuture<void> main() async {\n  final worker = await Worker.connect(workerId: 'worker-1', queues: {'default': 1});\n  worker.handle('email:welcome', (task, context) async {\n    print(task.payload['user_id']);\n  });\n  await worker.run();\n}\n";
+        let p = extract_queue_producer_nodes(signup, "server/lib/signup.dart", module_id(), repo());
+        // The task TYPE, never the `queue:` routing or the payload.
+        assert_eq!(qnames(&p), strs(&["queue_producer:email:welcome"]));
+        assert!(framework_of(&p).contains(r#""framework":"RedisTaskQueue""#));
+        assert!(framework_of(&p).contains(r#""family":"redis_task_queue""#));
+        let c = extract_queue_consumer_nodes(worker, "client/bin/worker.dart", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:email:welcome"]));
+        assert_eq!(dart(worker).1, Vec::<String>::new());
+        assert_eq!(dart(signup).0, Vec::<String>::new());
+        // Without the import `.handle(` / `.enqueue(` are nobody's.
+        let other = "import 'package:shelf/shelf.dart';\nvoid f(Router r, Jobs q) {\n  r.handle('/x', h);\n  q.enqueue(Task('email:welcome'));\n}\n";
+        assert_eq!(dart(other), (vec![], vec![]));
+        // A task queue, not a broker.
+        assert!(!is_broker(&QueueFramework::RedisTaskQueue));
+        assert_eq!(QueueFramework::RedisTaskQueue.family(), "redis_task_queue");
+        assert_eq!(
+            framework_tag(&QueueFramework::RedisTaskQueue),
+            format!("{UNRESOLVED_PREFIX}redistaskqueue")
+        );
+        // Its gate joins no broker signal (the file still spells `redis`,
+        // which the A2.9 Redis rows' gate holds, as at HEAD).
+        assert!(!broker_signals().contains(&"package:redis_task_queue/"));
+    }
+
+    #[test]
+    fn producer_declare_table_is_derived_into_broker_signals() {
+        // The producer-side table holds only the dart_amqp declaration, its
+        // gates are lowercase (the gate reads a lowercased file), and they join
+        // the derived broker gate eventbus.rs reads.
+        assert!(!PRODUCER_DECLARE_PATTERNS.is_empty());
+        for (needle, f, signals, rule) in PRODUCER_DECLARE_PATTERNS {
+            assert_eq!(*signals, DART_AMQP_GATE, "{needle}");
+            assert_eq!(*f, QueueFramework::RabbitMQ, "{needle}");
+            assert!(matches!(rule, TopicRule::ArgLiteral), "{needle}");
+            for s in *signals {
+                assert_eq!(s.to_string(), s.to_ascii_lowercase(), "{s}");
+                assert!(broker_signals().contains(s), "{s}");
+            }
+        }
+        // Every DH.3 broker gate joins it; the task queue's does not.
+        for s in [
+            "package:dart_amqp/",
+            "package:kafka_dart/",
+            "package:mqtt_client/",
+            "package:dart_nats/",
+            "package:googleapis/pubsub/",
+            "package:redis/",
+            AWS_SQS_DART_GATE,
+        ] {
+            assert!(broker_signals().contains(&s), "{s}");
+        }
+        // No other producer file changes: with the table or without it, a
+        // RabbitMQ producer of every other client reads the same nodes.
+        let others: [(&str, &str); 4] = [
+            ("server/publisher.rb", "require \"bunny\"\nch = Bunny.new.tap(&:start).create_channel\nq = ch.queue(\"orders\")\nch.default_exchange.publish(\"x\", routing_key: q.name)\n"),
+            ("server/main.go", "package main\n\nimport amqp \"github.com/rabbitmq/amqp091-go\"\n\nfunc send(ch *amqp.Channel) {\n\tq, _ := ch.QueueDeclare(\"orders\", false, false, false, false, nil)\n\tch.Publish(\"\", q.Name, false, false, amqp.Publishing{})\n}\n"),
+            ("server/send.py", "import pika\nch.queue_declare(queue='hello')\nch.basic_publish(exchange='', routing_key=qname, body=b)\n"),
+            ("server/Send.cs", "using RabbitMQ.Client;\nchannel.QueueDeclare(queue: \"hello\", durable: false);\nchannel.BasicPublish(exchange: \"\", routingKey: key, body: body);\n"),
+        ];
+        for (path, src) in others {
+            let without = emit_queue_nodes(
+                src,
+                path,
+                module_id(),
+                repo(),
+                PRODUCER_PATTERNS,
+                &[],
+                node_kind::QUEUE_PRODUCER,
+                "queue_producer:",
+                None,
+                &mut ConstFoldCounts::default(),
+            );
+            let with = extract_queue_producer_nodes(src, path, module_id(), repo());
+            assert_eq!(qnames(&with), qnames(&without), "{path}");
+            assert!(!qnames(&with).is_empty(), "{path}");
+        }
     }
 }
