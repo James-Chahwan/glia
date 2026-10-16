@@ -32,6 +32,10 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
   The split this release follows: glia is the substrate (the graph, its embeddings, query and rules, the answers every
   consumer reads); consumers are the specialisation (Engram: learning from use over session history and consolidated
   memory; repo-graph: MCP transport and the human conversation surface, including the clarification queue's).
+- 2026-10-16, on Engram's evaluation and corrections (answering "sure" to the session's recommendations): the
+  determinism check runs now at 0.5.2 wave 5 (`3921a636`); the Kina + glia replays (re-keys with X1 off and on,
+  `flat-ppr` vs `flat-fs`) run once at the 0.5.2 release candidate after W14; the 8 public streams only if those pass.
+  Engram builds no corrections writer for 0.5.3 (no measured source).
 
 ## 1. The train
 
@@ -104,7 +108,7 @@ links, so they must survive a rename.
     onnxruntime-linux-x64-gpu-1.20.1, ort features `cuda, load-dynamic, ndarray, half`, `ORT_DYLIB_PATH`,
     `CUDAExecutionProvider::default().build().error_on_failure()` (else silent CPU fallback); never combine
     `ort-download-binaries` with `load-dynamic`.
-- **Corrections as cells: no source yet.** Engram forms no consolidated corrections today: its Cell C (lessons from
+- **Corrections as cells: no source yet; no Engram writer in 0.5.3 (James, 2026-10-16).** Engram forms no consolidated corrections today: its Cell C (lessons from
   user corrections) failed its ceiling check on 2026-10-11 (2 of 13 recurrences in a later session) and was not built,
   so an Engram writer of `.glia/cells.jsonl` would be a new, unmeasured Engram feature (James's call; engram-34 raised
   it with him). glia's side already exists: the LF.1 sidecar and the `orphaned_cell` gaps row. Agreed lifetime rule

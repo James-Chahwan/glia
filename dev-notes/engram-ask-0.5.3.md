@@ -70,3 +70,7 @@ Recorded in `next-leap-0.5.3.md` §2 B ("Engram's embedding learnings", "Correct
   (old addresses), so the re-key test is re-keys with X1 off and on. The headline is the current flat-fs body under
   Engram's per-stream rule over 10 streams; PPR enters as a registered needle test (`flat-ppr` vs `flat-fs`, Kina +
   glia first). Determinism runs first at the wave-5 commit; the replays wait for James's scope call.
+
+James's ruling, 2026-10-16 ("sure" to the session's recommendations): determinism now at wave 5 (`3921a636`);
+the Kina + glia replays once at the 0.5.2 release candidate after W14; the public streams only if those pass. No
+Engram corrections writer in 0.5.3.
