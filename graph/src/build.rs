@@ -28,6 +28,8 @@ use crate::rust_paths::{
 use crate::swift_scope::{SwiftModuleTypes, implicit_self};
 use crate::types::{GraphError, RepoGraph, SymbolTable};
 
+mod go_wire;
+
 // ============================================================================
 // Public entry point
 // ============================================================================
@@ -102,9 +104,25 @@ pub fn build_python(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, G
 /// replaced by its target in every method signature before the
 /// implicit-IMPLEMENTS compare ([`resolve_go_alias_sigs`]); `[go-alias]`
 /// prints what it rewrote.
+///
+/// DT.1f: once the calls and refs are bound, every handler's JSON response /
+/// bind wire cell (DT.1e) is typed to its in-repo STRUCT through the same
+/// receiver facts, the model written into the cell, a handler -USES-> STRUCT
+/// edge drawn, and every Go STRUCT's SCHEMA_FIELDS field typed the same way
+/// ([`go_wire`]); `[go-wire] resolved` prints what it found.
 pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, GraphError> {
-    let GoPasses { g, split, implicit, packages, receivers, mounts, embeds, handlers, aliases } =
-        build_go_passes(repo, parses);
+    let GoPasses {
+        g,
+        split,
+        implicit,
+        packages,
+        receivers,
+        mounts,
+        embeds,
+        handlers,
+        aliases,
+        wire,
+    } = build_go_passes(repo, parses);
     if let Some(line) = split.marker() {
         eprintln!("{line}");
     }
@@ -135,6 +153,9 @@ pub fn build_go(repo: RepoId, parses: Vec<FileParse>) -> Result<RepoGraph, Graph
     }
     if let Some(stats) = aliases {
         eprintln!("{}", stats.marker());
+    }
+    if let Some(line) = wire.marker() {
+        eprintln!("{line}");
     }
     Ok(g)
 }
@@ -205,6 +226,8 @@ struct GoPasses {
     /// CI.6: the type aliases resolved in method signatures, `None` when no
     /// file declared one.
     aliases: Option<AliasStats>,
+    /// DT.1f: the wire cells and struct schemas typed to in-repo STRUCTs.
+    wire: go_wire::WireStats,
 }
 
 /// [`build_go`]'s passes, returning the stats its markers print.
@@ -242,6 +265,10 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
     let handlers = packages.bind_type_handlers(&mut g, &mut refs);
     resolve_refs(&mut g, &refs, &mut tally);
     let embeds = embed_binds.push(&mut g, &packages.promoted);
+    // DT.1f: the handlers' wire values typed through the facts the calls were
+    // bound with (the promoted-member index included); edges appended last,
+    // so a graph with no wire cell keeps its edge order.
+    let wire = go_wire::resolve(&mut g, &packages);
     // CI.6: the signatures name an in-repo type alias by its target before
     // CA.3b compares them (and CI.2b's promoted method sets read them).
     let aliases = resolve_go_alias_sigs(&mut g, &packages);
@@ -271,6 +298,7 @@ fn build_go_passes(repo: RepoId, parses: Vec<FileParse>) -> GoPasses {
         embeds,
         handlers,
         aliases,
+        wire,
     }
 }
 

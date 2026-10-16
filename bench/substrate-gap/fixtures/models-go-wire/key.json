@@ -2,7 +2,15 @@
   "framework": "models-go-wire",
   "language": "go",
   "dirs": ["."],
-  "note": "DT.1e: every known-2xx / unknown-status JSON write and every JSON bind in a Go handler (gin, echo, fiber, net/http encoding/json, chi render) is one MESSAGE_TYPE cell (code-domain wire::ServerWire, window site) on the handler, its value classified as written: a call chain (self. for the receiver), a type, a field chain, an envelope's keys, an inline struct; a local is replaced by its declaration (`v, ok := f.store.Vehicle(..)` -> the call; `var req models.RegisterVehicle` -> the type). The receiver must be typed by the framework's Context / Ctx through this file's import. A non-2xx write (the 404 Problem, the 400 gin.H error) is skipped by its STATUS, never by key name. DT.1f resolves each value to its in-repo STRUCT.",
+  "note": "DT.1e: every known-2xx / unknown-status JSON write and every JSON bind in a Go handler (gin, echo, fiber, net/http encoding/json, chi render) is one MESSAGE_TYPE cell (code-domain wire::ServerWire, window site) on the handler, its value classified as written: a call chain (self. for the receiver), a type, a field chain, an envelope's keys, an inline struct; a local is replaced by its declaration (`v, ok := f.store.Vehicle(..)` -> the call; `var req models.RegisterVehicle` -> the type). The receiver must be typed by the framework's Context / Ctx through this file's import. A non-2xx write (the 404 Problem, the 400 gin.H error) is skipped by its STATUS, never by key name. DT.1f: the Go build types each value to its in-repo STRUCT (a written type through the file's imports, a call through its callee's declared result or NavFact::SliceResult, a field chain), writes `model` (and the top-level `type`) into the cell, and draws handler -USES-> STRUCT per (handler, struct, form), EVIDENCE graph:go_wire rule json_response / json_bind; a 404 body never reaches a cell, so it draws no edge.",
+  "expect_edges": [
+    {"from": "web::fleet::Fleet::List", "to": "models::vehicle::Vehicle", "category": "USES", "exact": true, "note": "f.store.Vehicles() -> Store.Vehicles' SliceResult []*models.Vehicle"},
+    {"from": "web::fleet::Fleet::Get", "to": "models::vehicle::Vehicle", "category": "USES", "exact": true, "note": "v from f.store.Vehicle(..), whose first result is *models.Vehicle"},
+    {"from": "web::fleet::Fleet::Register", "to": "models::vehicle::RegisterVehicle", "category": "USES", "exact": true, "note": "the json_bind of var req models.RegisterVehicle"},
+    {"from": "web::fleet::Fleet::Register", "to": "models::vehicle::Vehicle", "category": "USES", "exact": true, "note": "the 201 response &models.Vehicle{..}"},
+    {"from": "web::fleet::Fleet::Trips", "to": "models::vehicle::Trip", "category": "USES", "exact": true, "note": "the gin.H envelope's trips key, f.store.Trips(..) -> []models.Trip"},
+    {"from": "legacy::report::Report", "to": "models::vehicle::Report", "category": "USES", "exact": true, "note": "json.NewEncoder(w).Encode(rep), rep a models.Report"}
+  ],
   "expect_cells": [
     {"kind": "METHOD", "node": "web::fleet::Fleet::List", "cell": "MESSAGE_TYPE", "contains": "\"form\":\"json_response\"", "note": "c.JSON(http.StatusOK, ..) is a JSON response"},
     {"kind": "METHOD", "node": "web::fleet::Fleet::List", "cell": "MESSAGE_TYPE", "contains": "\"call\":\"self.store.Vehicles()\"", "note": "the call chain, the receiver written self"},
@@ -10,6 +18,14 @@
     {"kind": "METHOD", "node": "web::fleet::Fleet::Register", "cell": "MESSAGE_TYPE", "contains": "\"form\":\"json_bind\"", "note": "c.ShouldBindJSON(&req)"},
     {"kind": "METHOD", "node": "web::fleet::Fleet::Register", "cell": "MESSAGE_TYPE", "contains": "\"type\":\"models.Vehicle\"", "note": "v := &models.Vehicle{..}, the composite's type"},
     {"kind": "METHOD", "node": "web::fleet::Fleet::Trips", "cell": "MESSAGE_TYPE", "contains": "\"name\":\"trips\"", "note": "a gin.H envelope's keys"},
-    {"kind": "FUNCTION", "node": "legacy::report::Report", "cell": "MESSAGE_TYPE", "contains": "\"type\":\"models.Report\"", "note": "json.NewEncoder(w).Encode(rep) with w an http.ResponseWriter, implicit 200"}
+    {"kind": "FUNCTION", "node": "legacy::report::Report", "cell": "MESSAGE_TYPE", "contains": "\"type\":\"models.Report\"", "note": "json.NewEncoder(w).Encode(rep) with w an http.ResponseWriter, implicit 200"},
+    {"kind": "METHOD", "node": "web::fleet::Fleet::List", "cell": "MESSAGE_TYPE", "contains": "\"model\":\"models::vehicle::Vehicle\"", "note": "the call's SliceResult typed in store.go"},
+    {"kind": "METHOD", "node": "web::fleet::Fleet::Trips", "cell": "MESSAGE_TYPE", "contains": "\"model\":\"models::vehicle::Trip\"", "note": "the envelope field's model"}
+  ],
+  "forbid": [
+    {"from": "web::fleet::Fleet::Get", "to": "models::vehicle::Problem", "category": "USES", "note": "the 404 body is skipped by status, so it never models"},
+    {"from": "web::fleet::Fleet::List", "to": "models::vehicle::Trip", "category": "USES", "note": "List serialises Vehicles only"},
+    {"from": "web::fleet::Fleet::Register", "to": "web::fleet::Fleet", "category": "USES", "note": "the receiver is no wire model"},
+    {"from": "legacy::report::Mount", "to": "models::vehicle::Report", "category": "USES", "note": "Mount registers the handler; it writes no body"}
   ]
 }
