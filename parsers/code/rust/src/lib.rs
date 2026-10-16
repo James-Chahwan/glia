@@ -41,6 +41,7 @@ pub fn parse_file(
     acc.nav
         .record(module_id, module_simple, module_qname, node_kind::MODULE, None);
     acc.file_module = Some(module_id);
+    acc.di = DiFrameworks::of(source);
 
     // The file MODULE stays `nodes[0]`: engine `apply_rpc_needles` pairs a
     // parse to its file by `fp.nodes.first()`.
@@ -106,6 +107,8 @@ struct Acc {
     /// The file MODULE: the `from_module` of every enum-variant USES ref
     /// (LA.3). `None` only when a test drives `collect_calls_in` directly.
     file_module: Option<NodeId>,
+    /// The web frameworks this file names, gating [`extractor_injects`] (DG.13b).
+    di: DiFrameworks,
 }
 
 /// Where an item is declared: the file MODULE, or an inline `mod x { .. }`
@@ -318,6 +321,7 @@ fn visit_function(
     });
     acc.nav
         .record(id, name, &qname, node_kind::FUNCTION, Some(scope.id));
+    extractor_injects(node, src, id, &[], acc);
 
     if let Some(body) = node.child_by_field_name("body") {
         collect_local_types(node, body, src, id, None, acc);
@@ -347,6 +351,8 @@ fn visit_impl(
     let parent_id = type_ids.get(base_name).copied().unwrap_or(scope.id);
     // What `Self` names in a method body's local types (LA.35a).
     let impl_type = rust_type_name(type_node, src, None);
+    // The impl's own type parameters name nothing a method extracts (DG.13b).
+    let impl_params = type_params(node, src);
 
     // G12.5 — Rust has no `extends`; a trait impl `impl Trait for Type` carries
     // the `trait` field. A trait of the same container is an IMPLEMENTS edge
@@ -396,6 +402,7 @@ fn visit_impl(
             });
             acc.nav
                 .record(id, name, &qname, node_kind::METHOD, Some(parent_id));
+            extractor_injects(child, src, id, &impl_params, acc);
 
             if let Some(fn_body) = child.child_by_field_name("body") {
                 collect_local_types(child, fn_body, src, id, impl_type.as_deref(), acc);
@@ -454,6 +461,216 @@ fn is_negative_impl(node: TsNode) -> bool {
     let mut cursor = node.walk();
     let negative = node.children(&mut cursor).any(|c| !c.is_named() && c.kind() == "!");
     negative
+}
+
+// ============================================================================
+// Web-framework extractor injection (DG.13b)
+// ============================================================================
+//
+// axum, actix-web and Rocket inject shared state through a handler's
+// extractor parameter: the router's `.with_state(s)` / `.layer(Extension(s))`,
+// `App::app_data(Data::new(s))` or `.manage(s)` hands `s` to every handler
+// that names `State<T>` / `Extension<T>`, `web::Data<T>` or `&State<T>`. The
+// parser reads the injected type off the parameter's AST and emits an INJECTS
+// ref from the handler; the graph crate binds it by Rust path rules
+// (`RustIndex::resolve_type_refs`, the `extractor_injects` row), so an
+// extern crate's type never binds a same-named repo type.
+
+/// The web frameworks a file's source names. A framework's extractor
+/// wrappers are read only in a file that mentions its crate, so a user type
+/// named `State` or `Data` elsewhere is never an extractor.
+#[derive(Clone, Copy, Default)]
+struct DiFrameworks {
+    axum: bool,
+    actix: bool,
+    rocket: bool,
+}
+
+impl DiFrameworks {
+    fn of(source: &str) -> Self {
+        DiFrameworks {
+            axum: source.contains("axum"),
+            actix: source.contains("actix_web"),
+            rocket: source.contains("rocket"),
+        }
+    }
+
+    fn any(self) -> bool {
+        self.axum || self.actix || self.rocket
+    }
+
+    /// The type argument of a parameter type that is an injecting extractor
+    /// of a framework this file names: axum `State<T>` / `Extension<T>`
+    /// (also `extract::` / `axum::extract::` / `axum::`), actix-web
+    /// `Data<T>` / `web::Data<T>` / `actix_web::web::Data<T>`, Rocket
+    /// `&State<T>` / `State<'_, T>` / `rocket::State<T>`. `behind_ref`: `ty`
+    /// sat under `&`, which only Rocket's guard is taken by.
+    fn extractor_arg<'a>(self, ty: TsNode<'a>, src: &[u8], behind_ref: bool) -> Option<TsNode<'a>> {
+        if ty.kind() == "reference_type" {
+            if behind_ref {
+                return None;
+            }
+            return self.extractor_arg(ty.child_by_field_name("type")?, src, true);
+        }
+        if ty.kind() != "generic_type" {
+            return None;
+        }
+        let (prefix, last) = split_type_path(text_of(ty.child_by_field_name("type")?, src))?;
+        let under = |crates: &[&str]| prefix.iter().all(|s| crates.contains(s));
+        let extractor = match last {
+            "State" | "Extension" if self.axum && !behind_ref && under(&["axum", "extract"]) => true,
+            "Data" if self.actix && !behind_ref && under(&["actix_web", "web"]) => true,
+            "State" if self.rocket && under(&["rocket"]) => true,
+            _ => false,
+        };
+        if extractor { first_type_arg(ty) } else { None }
+    }
+}
+
+/// Wrappers shared state is held through, peeled to the type they hold:
+/// `Arc<dyn Repo>` and `Mutex<AppState>` inject `Repo` and `AppState`.
+const STATE_WRAPPERS: &[&str] = &["Arc", "Rc", "Box", "Mutex", "RwLock"];
+
+/// The first segment a path-qualified [`STATE_WRAPPERS`] name is peeled
+/// under (`std::sync::Arc`, `tokio::sync::Mutex`); a wrapper of any other
+/// path is a type of its own.
+const WRAPPER_CRATES: &[&str] = &["std", "alloc", "core", "tokio", "parking_lot"];
+
+/// std types an extractor may hold that name no repo type (a bare name; a
+/// path such as `std::collections::HashMap` reaches the graph crate, which
+/// drops an extern crate's path as external).
+const STD_HELD: &[&str] = &[
+    "String", "Vec", "HashMap", "HashSet", "BTreeMap", "BTreeSet", "VecDeque", "Self",
+];
+
+/// DG.13b: one INJECTS ref per (fn, injected type) for the extractor
+/// parameters of `fn_node` ([`DiFrameworks::extractor_arg`]), from `fn_id`,
+/// in source order, each at its parameter's 0-based row. The injected type
+/// is the extractor's argument with `&` / `&mut` / `dyn` / `impl` and
+/// [`STATE_WRAPPERS`] peeled ([`injected_type`]); a type parameter of the fn
+/// or of its `impl` (`outer`) names nothing.
+fn extractor_injects(fn_node: TsNode, src: &[u8], fn_id: NodeId, outer: &[&str], acc: &mut Acc) {
+    let di = acc.di;
+    if !di.any() {
+        return;
+    }
+    let (Some(from_module), Some(params)) =
+        (acc.file_module, fn_node.child_by_field_name("parameters"))
+    else {
+        return;
+    };
+    let mut generics = type_params(fn_node, src);
+    generics.extend_from_slice(outer);
+    let mut seen: Vec<CallQualifier> = Vec::new();
+    let mut cursor = params.walk();
+    for p in params.named_children(&mut cursor) {
+        if p.kind() != "parameter" {
+            continue;
+        }
+        let Some(qualifier) = p
+            .child_by_field_name("type")
+            .and_then(|t| di.extractor_arg(t, src, false))
+            .and_then(|arg| injected_type(arg, src, &generics))
+        else {
+            continue;
+        };
+        if seen.contains(&qualifier) {
+            continue;
+        }
+        seen.push(qualifier.clone());
+        acc.refs.push(UnresolvedRef {
+            from: fn_id,
+            from_module,
+            qualifier,
+            category: edge_category::INJECTS,
+            line: line_at(p),
+        });
+    }
+}
+
+/// The names of `item`'s type parameters (`fn f<S: Repo>`, `impl<T> X<T>`).
+fn type_params<'a>(item: TsNode<'a>, src: &'a [u8]) -> Vec<&'a str> {
+    let Some(list) = item.child_by_field_name("type_parameters") else {
+        return Vec::new();
+    };
+    let mut cursor = list.walk();
+    list.named_children(&mut cursor)
+        .filter(|p| p.kind() == "type_parameter")
+        .filter_map(|p| p.child_by_field_name("name"))
+        .map(|n| text_of(n, src))
+        .collect()
+}
+
+/// The first type argument of a `generic_type` (`State<'_, Db>` -> `Db`).
+fn first_type_arg(generic: TsNode) -> Option<TsNode> {
+    let args = generic.child_by_field_name("type_arguments")?;
+    let mut cursor = args.walk();
+    let first = args
+        .named_children(&mut cursor)
+        .find(|a| !matches!(a.kind(), "lifetime" | "line_comment" | "block_comment"));
+    first
+}
+
+/// `a::b::C` -> (`[a, b]`, `C`), a leading `::` dropped.
+fn split_type_path(path: &str) -> Option<(Vec<&str>, &str)> {
+    let path = path.trim();
+    let path = path.strip_prefix("::").unwrap_or(path);
+    let mut segs: Vec<&str> = path.split("::").map(str::trim).collect();
+    let last = segs.pop()?;
+    Some((segs, last))
+}
+
+/// The type an extractor argument injects, as the ref qualifier the graph
+/// crate binds: `&T` / `&mut T` / `dyn T` / `impl T` / `dyn T + Send` and
+/// `Arc<T>` / `Rc<T>` / `Box<T>` / `Mutex<T>` / `RwLock<T>` (std / tokio /
+/// parking_lot paths too) peel to `T`; then `Repo` / `Repo<X>` is
+/// `Bare("Repo")` and `crate::repo::Repo` is `Attribute { base:
+/// "crate::repo", name: "Repo" }`. A primitive, tuple, array, slice, fn
+/// type, [`STD_HELD`] name or type parameter (`generics`) names nothing.
+fn injected_type(ty: TsNode, src: &[u8], generics: &[&str]) -> Option<CallQualifier> {
+    match ty.kind() {
+        "reference_type" => injected_type(ty.child_by_field_name("type")?, src, generics),
+        "dynamic_type" | "abstract_type" => {
+            injected_type(ty.child_by_field_name("trait")?, src, generics)
+        }
+        "bounded_type" => {
+            let mut cursor = ty.walk();
+            let first = ty.named_children(&mut cursor).find(|c| {
+                c.kind() != "lifetime"
+                    && !(c.kind() == "type_identifier"
+                        && matches!(text_of(*c, src), "Send" | "Sync" | "Unpin"))
+            });
+            injected_type(first?, src, generics)
+        }
+        "generic_type" => {
+            let path = ty.child_by_field_name("type")?;
+            let (prefix, last) = split_type_path(text_of(path, src))?;
+            let wrapper = STATE_WRAPPERS.contains(&last)
+                && prefix.first().is_none_or(|c| WRAPPER_CRATES.contains(c));
+            if wrapper {
+                return injected_type(first_type_arg(ty)?, src, generics);
+            }
+            named_type(path, src, generics)
+        }
+        "type_identifier" | "scoped_type_identifier" => named_type(ty, src, generics),
+        _ => None,
+    }
+}
+
+/// A type path node as a ref qualifier ([`injected_type`]).
+fn named_type(path: TsNode, src: &[u8], generics: &[&str]) -> Option<CallQualifier> {
+    match path.kind() {
+        "type_identifier" => {
+            let name = text_of(path, src);
+            (!STD_HELD.contains(&name) && !generics.contains(&name))
+                .then(|| CallQualifier::Bare(name.to_string()))
+        }
+        "scoped_type_identifier" => Some(CallQualifier::Attribute {
+            base: text_of(path.child_by_field_name("path")?, src).to_string(),
+            name: text_of(path.child_by_field_name("name")?, src).to_string(),
+        }),
+        _ => None,
+    }
 }
 
 /// G19 — module-level `const`/`static` surfaced as STATE_VAR.
@@ -2461,6 +2678,125 @@ impl !Send for SqlRepo {}
             .map(|e| (e.from, e.to))
             .collect();
         assert_eq!(direct, vec![(sql, local)], "the in-file trait keeps HEAD's direct edge");
+    }
+
+    /// The INJECTS refs of a parse as `(from qname, qualifier, line)`, each
+    /// asserted to carry the file MODULE as `from_module`.
+    fn inject_refs(fp: &FileParse, module_q: &str) -> Vec<(String, CallQualifier, u32)> {
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, module_q);
+        fp.refs
+            .iter()
+            .filter(|r| r.category == edge_category::INJECTS)
+            .map(|r| {
+                assert_eq!(r.from_module, module);
+                let from = fp.nav.qname_by_id.get(&r.from).cloned().unwrap_or_default();
+                (from, r.qualifier.clone(), r.line)
+            })
+            .collect()
+    }
+
+    fn q_bare(name: &str) -> CallQualifier {
+        CallQualifier::Bare(name.to_string())
+    }
+
+    fn q_path(base: &str, name: &str) -> CallQualifier {
+        CallQualifier::Attribute {
+            base: base.to_string(),
+            name: name.to_string(),
+        }
+    }
+
+    fn inject(from: &str, q: CallQualifier, line: u32) -> (String, CallQualifier, u32) {
+        (from.to_string(), q, line)
+    }
+
+    /// DG.13b: axum `State<T>` / `Extension<T>` extractors inject their held
+    /// type, `&` / `dyn` / `Arc` / `Mutex` / `tokio::sync::RwLock` peeled, one
+    /// ref per (fn, type) at the parameter's 0-based row, from a fn or a
+    /// method; a std type, a primitive, a tuple or a type parameter (of the
+    /// fn or its impl) injects nothing, and neither does any extractor in a
+    /// file that never names axum.
+    #[test]
+    fn axum_state_extension_inject_refs() {
+        let source = r#"
+use axum::{extract::State, Extension};
+use std::sync::{Arc, Mutex};
+
+async fn list_users(State(repo): State<Arc<dyn UserRepository>>) -> String { String::new() }
+async fn shared(Extension(s): Extension<Arc<Mutex<AppState>>>, State(n): State<String>) {}
+async fn path(State(r): axum::extract::State<crate::repo::Repo<u8>>, State(p): State<&'static str>) {}
+async fn generic<S: Clone>(State(s): State<S>, State(t): State<(A, B)>, State(v): State<Vec<A>>) {}
+async fn twice(State(a): State<Arc<AppState>>, Extension(b): Extension<AppState>) {}
+async fn bounded(State(r): State<Arc<dyn UserRepository + Send + Sync>>, State(m): State<tokio::sync::RwLock<Cache>>) {}
+async fn plain(repo: Arc<dyn UserRepository>, n: u32) {}
+pub struct Handlers<T>(T);
+impl<T> Handlers<T> {
+    async fn method(&self, State(s): State<std::sync::Arc<AppState>>, State(t): State<T>) {}
+}
+"#;
+        let fp = parse_file(source, "src/routes.rs", "src::routes", repo()).unwrap();
+        assert_eq!(
+            inject_refs(&fp, "src::routes"),
+            vec![
+                inject("src::routes::list_users", q_bare("UserRepository"), 4),
+                inject("src::routes::shared", q_bare("AppState"), 5),
+                inject("src::routes::path", q_path("crate::repo", "Repo"), 6),
+                inject("src::routes::twice", q_bare("AppState"), 8),
+                inject("src::routes::bounded", q_bare("UserRepository"), 9),
+                inject("src::routes::bounded", q_bare("Cache"), 9),
+                inject("src::routes::Handlers::method", q_bare("AppState"), 13),
+            ],
+        );
+
+        let no_framework = r#"
+struct State<T>(T);
+async fn list(State(pool): State<PgPool>, Extension(e): Extension<Repo>) {}
+"#;
+        let fp = parse_file(no_framework, "src/other.rs", "src::other", repo()).unwrap();
+        assert_eq!(
+            inject_refs(&fp, "src::other"),
+            vec![],
+            "a file that never names axum reads no extractor"
+        );
+    }
+
+    /// DG.13b: actix-web `web::Data<T>` / `Data<T>` and Rocket `&State<T>` /
+    /// `State<'_, T>` inject their held type; each framework's wrapper is
+    /// read only in a file that names its crate.
+    #[test]
+    fn actix_data_and_rocket_state() {
+        let actix = r#"
+use actix_web::{web, web::Data, HttpResponse};
+async fn index(data: web::Data<AppState>, db: actix_web::web::Data<Mutex<Db>>) -> HttpResponse { todo() }
+async fn bare(pool: Data<Pool>, s: State<Other>, r: &Data<Ref>) {}
+"#;
+        let fp = parse_file(actix, "src/app.rs", "src::app", repo()).unwrap();
+        assert_eq!(
+            inject_refs(&fp, "src::app"),
+            vec![
+                inject("src::app::index", q_bare("AppState"), 2),
+                inject("src::app::index", q_bare("Db"), 2),
+                inject("src::app::bare", q_bare("Pool"), 3),
+            ],
+            "State is no actix extractor, and Data is never taken by reference"
+        );
+
+        let rocket = r#"
+use rocket::State;
+#[get("/")]
+fn index(db: &State<Db>, cfg: &rocket::State<Config>, old: State<'_, Legacy>) -> String { todo() }
+fn other(d: Data<Body>, e: Extension<Thing>) {}
+"#;
+        let fp = parse_file(rocket, "src/main.rs", "src::main", repo()).unwrap();
+        assert_eq!(
+            inject_refs(&fp, "src::main"),
+            vec![
+                inject("src::main::index", q_bare("Db"), 3),
+                inject("src::main::index", q_bare("Config"), 3),
+                inject("src::main::index", q_bare("Legacy"), 3),
+            ],
+            "Data and Extension are no Rocket extractors"
+        );
     }
 
     #[test]

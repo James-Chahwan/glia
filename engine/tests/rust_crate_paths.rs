@@ -569,3 +569,63 @@ fn trait_impl_across_files() {
         "the site is the impl's trait, 0-based"
     );
 }
+
+/// DG.13b: an axum handler's `State<Arc<dyn UserRepository>>` extractor in
+/// routes.rs injects the trait declared in repo.rs, bound through the file's
+/// `use crate::repo::UserRepository;`, with EVIDENCE `graph:rust_paths` /
+/// `extractor_injects` at the parameter's line; `State<PgPool>` under `use
+/// sqlx::PgPool;` names sqlx's pool and never the crate's own `struct
+/// PgPool`.
+#[test]
+fn state_injection_across_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    write(root, "Cargo.toml", "[package]\nname = \"shop\"\n");
+    write(
+        root,
+        "src/lib.rs",
+        "pub mod db;\npub mod repo;\npub mod routes;\n",
+    );
+    write(
+        root,
+        "src/repo.rs",
+        "pub trait UserRepository: Send + Sync {\n    fn all(&self) -> Vec<String>;\n}\n",
+    );
+    write(root, "src/db.rs", "pub struct PgPool;\n");
+    write(
+        root,
+        "src/routes.rs",
+        "use std::sync::Arc;\n\nuse axum::extract::State;\nuse sqlx::PgPool;\n\n\
+         use crate::repo::UserRepository;\n\n\
+         pub async fn list_users(State(repo): State<Arc<dyn UserRepository>>) -> String {\n    \
+         repo.all().join(\",\")\n}\n\n\
+         pub async fn health(State(pool): State<PgPool>) -> &'static str {\n    \"ok\"\n}\n",
+    );
+    let r = generate_one(root.to_str().expect("utf-8 path")).expect("builds");
+    let injects = edges_of(&r, edge_category::INJECTS);
+    assert_eq!(
+        injects,
+        vec![(
+            "src::routes::list_users".to_string(),
+            "src::repo::UserRepository".to_string()
+        )],
+        "INJECTS = {injects:?}"
+    );
+    let qname = qnames(&r);
+    let edge = r
+        .merged
+        .all_edges()
+        .find(|e| {
+            e.category == edge_category::INJECTS
+                && qname.get(&e.to).map(String::as_str) == Some("src::repo::UserRepository")
+        })
+        .expect("the INJECTS edge");
+    let ev = glia_code_domain::evidence::Evidence::of(edge).expect("EVIDENCE cell");
+    assert_eq!(ev.emitter, "graph:rust_paths");
+    assert_eq!(ev.rule.as_deref(), Some("extractor_injects"));
+    assert_eq!(
+        (ev.file.as_deref(), ev.line),
+        (Some("src/routes.rs"), Some(7)),
+        "the site is the extractor parameter, 0-based"
+    );
+}

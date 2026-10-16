@@ -40,7 +40,9 @@
 //! (the scope's `use`, its own item, its globs, a `crate::` / `super::` /
 //! workspace-crate path), never by a repo-wide name, so `use
 //! std::fmt::Display; impl Display for X` never binds a crate's own `trait
-//! Display`.
+//! Display`. DG.13b adds the INJECTS row: a web-framework handler's
+//! extractor parameter (axum `State<T>` / `Extension<T>`, actix-web
+//! `web::Data<T>`, Rocket `&State<T>`) injects its held type, bound the same way.
 //!
 //! Every lookup is by key, and every candidate list is sorted by qname before
 //! a tie-break, so no winner is ever picked by iterating a `HashMap`.
@@ -128,8 +130,21 @@ pub(crate) const MOD_ITEM: &str = "mod_item";
 /// listed category here instead of the generic `resolve_refs`, whose
 /// repo-wide name fallback would bind `use std::fmt::Display; impl Display
 /// for X` to a crate's own `trait Display`. A new Rust type ref is one row.
-pub(crate) const TYPE_REF_CATEGORIES: &[(EdgeCategoryId, &[NodeKindId], &str)] =
-    &[(edge_category::IMPLEMENTS, &[node_kind::INTERFACE], "trait_impl")];
+///
+/// DG.13b's INJECTS row is a web-framework handler's extractor (axum
+/// `State<Arc<dyn Repo>>` / `Extension<T>`, actix-web `web::Data<T>`, Rocket
+/// `&State<T>`), from the handler fn to the injected STRUCT / ENUM / trait.
+/// It resolves in the fn's module scope like any type ref: a `use` in the
+/// fn's body is not in scope for its signature (rustc E0412), so a fn-scoped
+/// binding never names a parameter's type.
+pub(crate) const TYPE_REF_CATEGORIES: &[(EdgeCategoryId, &[NodeKindId], &str)] = &[
+    (edge_category::IMPLEMENTS, &[node_kind::INTERFACE], "trait_impl"),
+    (
+        edge_category::INJECTS,
+        &[node_kind::STRUCT, node_kind::ENUM, node_kind::INTERFACE],
+        "extractor_injects",
+    ),
+];
 
 const TYPE_ROWS: usize = TYPE_REF_CATEGORIES.len();
 
@@ -2567,6 +2582,18 @@ mod tests {
             });
         }
 
+        /// A handler `from` whose extractor parameter injects `qualifier`,
+        /// as the parser's INJECTS ref (DG.13b).
+        fn injects(&mut self, from: NodeId, qualifier: CallQualifier) {
+            self.refs.push(UnresolvedRef {
+                from,
+                from_module: self.module,
+                qualifier,
+                category: edge_category::INJECTS,
+                line: 7,
+            });
+        }
+
         fn parse(self) -> FileParse {
             FileParse {
                 nodes: self.nodes,
@@ -3024,6 +3051,92 @@ mod tests {
             unbound(&g),
             vec!["cache::Cache".to_string(), "globbed::Glob".to_string()],
             "Store is ambiguous; the opaque glob withholds the fallback"
+        );
+    }
+
+    /// Every INJECTS edge as `(from qname, to qname)`, sorted, each asserted
+    /// to carry EVIDENCE `graph:rust_paths` / `extractor_injects` at the
+    /// ref's line.
+    fn injects(g: &RepoGraph) -> Vec<(String, String)> {
+        let q = |id: &NodeId| g.nav.qname_by_id.get(id).cloned().unwrap_or_default();
+        let mut out: Vec<(String, String)> = g
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::INJECTS)
+            .map(|e| {
+                let ev = Evidence::of(e).expect("an INJECTS edge carries EVIDENCE");
+                assert_eq!(
+                    (ev.emitter.as_str(), ev.rule.as_deref(), ev.line),
+                    ("graph:rust_paths", Some("extractor_injects"), Some(7)),
+                );
+                (q(&e.from), q(&e.to))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// DG.13b: a handler's extractor type binds through its module's `use`
+    /// (a trait, or a STRUCT / ENUM by path), while `use sqlx::PgPool;`
+    /// names sqlx's type and never the crate's own `struct PgPool`; a `use`
+    /// in the fn's body is not in scope for its signature (rustc E0412).
+    #[test]
+    fn injects_bind_the_imported_type_not_a_same_named_external() {
+        let mut db = File::new("src::db");
+        let m = db.module;
+        db.add(node_kind::STRUCT, "src::db::PgPool", Some(m));
+        db.add(node_kind::STRUCT, "src::db::Conn", Some(m));
+        let mut repo_rs = File::new("src::repo");
+        let m = repo_rs.module;
+        repo_rs.add(node_kind::INTERFACE, "src::repo::UserRepository", Some(m));
+        repo_rs.add(node_kind::ENUM, "src::repo::Mode", Some(m));
+        let mut state = File::new("src::state");
+        let m = state.module;
+        state.add(node_kind::STRUCT, "src::state::AppState", Some(m));
+        let mut routes = File::new("src::routes");
+        let m = routes.module;
+        routes.use_item("sqlx", "PgPool");
+        routes.use_item("crate::repo", "UserRepository");
+        // `async fn list(State(pool): State<PgPool>, State(repo):
+        // State<Arc<dyn UserRepository>>, Extension(s):
+        // Extension<crate::state::AppState>, Extension(m):
+        // Extension<crate::repo::Mode>)`
+        let list = routes.add(node_kind::FUNCTION, "src::routes::list", Some(m));
+        routes.injects(list, bare("PgPool"));
+        routes.injects(list, bare("UserRepository"));
+        routes.injects(list, path("crate::state", "AppState"));
+        routes.injects(list, path("crate::repo", "Mode"));
+        // `async fn scoped(State(c): State<Conn>) { use crate::db::Conn; }`
+        let scoped = routes.add(node_kind::FUNCTION, "src::routes::scoped", Some(m));
+        routes.use_in("src::routes::scoped", "crate::db", "Conn");
+        routes.injects(scoped, bare("Conn"));
+        let lib = File::new("src::lib");
+        let parses = vec![
+            lib.parse(),
+            db.parse(),
+            repo_rs.parse(),
+            state.parse(),
+            routes.parse(),
+        ];
+        let g = build_rust(repo(), parses, &[krate("shop", "")]).expect("builds");
+        assert_eq!(
+            injects(&g),
+            vec![
+                pair("src::routes::list", "src::repo::Mode"),
+                pair("src::routes::list", "src::repo::UserRepository"),
+                pair("src::routes::list", "src::state::AppState"),
+            ],
+        );
+        let unbound: Vec<String> = g
+            .unresolved_refs
+            .iter()
+            .filter(|r| r.category == edge_category::INJECTS)
+            .filter_map(|r| g.nav.qname_by_id.get(&r.from).cloned())
+            .collect();
+        assert_eq!(
+            unbound,
+            vec!["src::routes::scoped".to_string()],
+            "sqlx's PgPool is dropped as external; the fn-body use binds no signature type"
         );
     }
 
