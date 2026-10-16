@@ -621,6 +621,9 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W19 (DT.5g): JSX attribute handlers (`onClick={handle}`) and `export default <expr>` objects are not value positions;
   a React `export const X = memo(() => ..)` credits the arrow's calls to the STATE_VAR X, which the role fold cannot merge
   with a COMPONENT overlay (untested on real React repos).
+- W20 (DT.10i, by design): an ethers class-field binding is read only inside its own class body (a subclass in another
+  file calling `this.escrow.fn()` is not read); `R[name]` with a const-held name counts dynamic and is not folded through
+  the const table; `this.x = new ..` outside any class (a JS function constructor) binds nothing.
 
 ## 3. Open questions for James
 
