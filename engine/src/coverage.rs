@@ -51,11 +51,15 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         note: "topics passed as parameters, runtime variables or env vars - and constants that are ambiguous, or lower-case bindings in another file - are extracted as an unresolved framework tag and never paired; literal constants the repo table resolves are folded",
         verify: "grep the topic constant or env var name",
     },
+    // DF.21: DF.14 pairs a subscriber through a Terraform subscription ->
+    // topic binding; measured on matrix/python/pubsub and probes of each
+    // residual below (interpolated name, `var.` / `module.` topic, a topic in
+    // another repo, a subscription created in code).
     CoverageCaveat {
         language: "*",
         edge_category: "QUEUE_FLOWS",
-        note: "GCP Pub/Sub subscriptions are named independently of their topic, so publisher and subscriber pair only when both name the topic",
-        verify: "check the subscription-to-topic binding in IaC",
+        note: "GCP Pub/Sub subscribers name a subscription, not a topic: a subscriber pairs with a topic's publishers when both name the topic, or when a Terraform `google_pubsub_subscription` of the same repo binds its subscription to the topic (`topic = \"orders\"` or `projects/<p>/topics/orders`, or a `google_pubsub_topic.<r>.name` / `.id` reference; DERIVED, Medium, rule binding). A subscription created in code (`create_subscription`) or by gcloud / the console, a Terraform subscription name or topic that is interpolated (`\"${var.env}-orders\"`) or read from a variable or a module output (`var.topic`, `module.x.name`), a topic resource declared in another repo of the build, and a subscription bound to two topics pair nothing",
+        verify: "check the subscription-to-topic binding in IaC (google_pubsub_subscription.topic) or the code that creates the subscription",
     },
     CoverageCaveat {
         language: "*",
@@ -82,28 +86,33 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     // LA.27 (James's call): SDL inside code is read only from GraphQL-marked
     // literals, so unmarked SDL is a declared recall gap, not a silent one.
     // CB.1 names `.graphqls`; CB.24 adds the client base-URL narrowing rule.
+    // DF.21: DF.8 / DF.9's external clients, measured on
+    // fixtures/external-channel-clients (`[channel-external] via=graphql`).
     CoverageCaveat {
         language: "*",
         edge_category: "GRAPHQL_CALLS",
-        note: "GraphQL SDL embedded in code is read only from a GraphQL-marked literal: a gql / graphql tag or call, a buildSchema / MustParseSchema / ParseSchema / from_definition argument, a /* GraphQL */ or #graphql literal, a GRAPHQL / GQL heredoc, or a literal bound to a variable or key named typeDefs / type_defs. SDL kept unmarked in a differently named variable (a plain template in `const schema = ...`, a Go string passed to MustParseSchema by name) is not read: its root types and fields mint no GRAPHQL_RESOLVER, so its clients' operations pair with nothing. `.graphql` / `.graphqls` / `.gql` files are read whole. A client's base URL narrows its project's operations to one server only when it is one literal absolute URL (Apollo `uri`, HttpLink / createHttpLink, urql createClient / new Client, graphql-request GraphQLClient) whose host names a nested project or an IaC service; a relative, env-var or interpolated URL leaves an operation paired with every server that declares the field.",
-        verify: "grep 'type Query {' / 'type Mutation {' outside .graphql / .graphqls / .gql files and read the variable that holds it; for an operation paired with several servers, read the client's uri / url",
+        note: "GraphQL SDL embedded in code is read only from a GraphQL-marked literal: a gql / graphql tag or call, a buildSchema / MustParseSchema / ParseSchema / from_definition argument, a /* GraphQL */ or #graphql literal, a GRAPHQL / GQL heredoc, or a literal bound to a variable or key named typeDefs / type_defs. SDL kept unmarked in a differently named variable (a plain template in `const schema = ...`, a Go string passed to MustParseSchema by name) is not read: its root types and fields mint no GRAPHQL_RESOLVER, so its clients' operations pair with nothing. `.graphql` / `.graphqls` / `.gql` files are read whole. A client's base URL narrows its project's operations to one server only when it is one literal absolute URL (Apollo `uri`, HttpLink / createHttpLink, urql createClient / new Client, graphql-request GraphQLClient) whose host names a nested project or an IaC service; a relative, env-var or interpolated URL leaves an operation paired with every server that declares the field. An operation whose every client URL is a literal public host (a dotted DNS name: not localhost, an IP, an internal TLD or a documentation domain) that no configuration constant of the repo names (a SCREAMING_CASE or dotted key, a `.glia/overlay.toml [constants]` pin) and that names no project or IaC service of the build is external (its ENDPOINT_HIT carries `\"external\":true`) and pairs with no server, even one declaring the field; a client with one host-less or internal site still pairs.",
+        verify: "grep 'type Query {' / 'type Mutation {' outside .graphql / .graphqls / .gql files and read the variable that holds it; for an operation paired with several servers, or with none, read the client's uri / url",
     },
     // LA.18b: a path-less upgrade handler (gorilla, nhooyr, raw ASP.NET) pairs
     // only through the routes that reach its upgrading function, and a client
     // whose URL the extractor could not read pairs nothing. CB.21: the host
-    // narrowing a client's literal URL allows.
+    // narrowing a client's literal URL allows. DF.21: DF.8 / DF.9's external
+    // clients, measured on fixtures/external-channel-clients (`[channel-external]
+    // via=ws`; the localhost `/feed` control still pairs).
     CoverageCaveat {
         language: "*",
         edge_category: "WS_CONNECTS",
-        note: "a WebSocket upgrade whose route is registered more than one call away from the upgrading function, or through a router glia does not extract, stays unpaired; a client whose URL has no static path is not paired; a client matching several same-path handlers narrows to one service only when its URL's static head carries a literal host naming a nested project or an IaC service (compose / Kubernetes service, deployment, statefulset, image), otherwise it pairs with all of them",
-        verify: "grep the upgrade call and the route registration; for a client paired with several handlers, read its URL",
+        note: "a WebSocket upgrade whose route is registered more than one call away from the upgrading function, or through a router glia does not extract, stays unpaired; a client whose URL has no static path is not paired; a client matching several same-path handlers narrows to one service only when its URL's static head carries a literal host naming a nested project or an IaC service (compose / Kubernetes service, deployment, statefulset, image), otherwise it pairs with all of them; a client whose every site dials a literal public host (a dotted DNS name: not localhost, an IP, an internal TLD or a documentation domain) that no configuration constant of the repo names and that names no project or IaC service of the build is external (its ENDPOINT_HIT carries `\"external\":true`) and pairs with no handler, even one of the same path; a client with one host-less or internal site still pairs",
+        verify: "grep the upgrade call and the route registration; for a client paired with several handlers, or with none, read its URL",
     },
     // CB.21: a gRPC stub's dial host narrows same-named services, read only
-    // from a literal target.
+    // from a literal target. DF.21: DF.8 / DF.9's external stubs, measured on
+    // fixtures/grpc-external-dial (`[channel-external] via=grpc`).
     CoverageCaveat {
         language: "*",
         edge_category: "GRPC_CALLS",
-        note: "a gRPC client stub whose service several projects declare narrows to one only when its dial target is a literal (the constructor's own argument, or the nearest dial above it in the same function: grpc.Dial / DialContext / NewClient, grpc(.aio).*_channel, forTarget / forAddress, GrpcChannel.ForAddress, tonic from_static, ClientChannel) whose host names a nested project or an IaC service; a target read from config or env, or a unix: / xds: target, names no host, so the stub stays unnarrowed: paired with every such service, or with none when the pick is ambiguous",
+        note: "a gRPC client stub whose service several projects declare narrows to one only when its dial target is a literal (the constructor's own argument, or the nearest dial above it in the same function: grpc.Dial / DialContext / NewClient, grpc(.aio).*_channel, forTarget / forAddress, GrpcChannel.ForAddress, tonic from_static, ClientChannel) whose host names a nested project or an IaC service; a target read from config or env, or a unix: / xds: target, names no host, so the stub stays unnarrowed: paired with every such service, or with none when the pick is ambiguous; a stub whose every dial target is a literal public host (a dotted DNS name: not localhost, an IP, an internal TLD or a documentation domain) that no configuration constant of the repo names and that names no project or IaC service of the build is external (its ENDPOINT_HIT carries `\"external\":true`) and pairs with no service, even one of the same name; a stub with one host-less or internal target still pairs",
         verify: "grep the dial call and the address it is given",
     },
     // LA.17: Connect / Twirp procedures come from the build's .proto set and
@@ -118,11 +127,14 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     // LA.33: a consumer is HANDLED_BY its callback only for these client
     // shapes; every other consumer keeps LE.4c's subscribing-function edge.
     // CL.4: asynq's mux handler is the callback; a JobRunr / Hangfire job is
-    // HANDLED_BY its own method through the LE.4c anchor.
+    // HANDLED_BY its own method through the LE.4c anchor. DF.21: DG.1's
+    // apalis workers bind their handler fn (matrix/rust/taskq); DH.2's Laravel
+    // job consumer is anchored on its class line (matrix/php/taskq: CONTAINS
+    // only).
     CoverageCaveat {
         language: "*",
         edge_category: "HANDLED_BY",
-        note: "a queue consumer is HANDLED_BY its callback only for kafkajs eachMessage/eachBatch, amqplib consume, BullMQ Worker, nats subscribe (JS callback, Go Subscribe/QueueSubscribe), pika basic_consume and asynq HandleFunc / Handle, and only when the callback is a name, a member, this/self.method or a one-call inline function; other consumers are HANDLED_BY the function that subscribes",
+        note: "a queue consumer is HANDLED_BY its callback only for kafkajs eachMessage/eachBatch, amqplib consume, BullMQ Worker, nats subscribe (JS callback, Go Subscribe/QueueSubscribe), pika basic_consume, asynq HandleFunc / Handle and apalis `.build_fn(` / `.build(` workers (the handler fn), and only when the callback is a name, a member, this/self.method or a one-call inline function; a Laravel queued job's consumer sits on its `ShouldQueue` class line, CONTAINED by the job class and HANDLED_BY nothing (not its `handle()` method); other consumers are HANDLED_BY the function that subscribes",
         verify: "grep the consumer call and read its callback argument",
     },
     CoverageCaveat {
@@ -181,12 +193,15 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
         verify: "check the method signatures and receivers against the interface",
     },
     // CB.11 / CB.20 / CB.23: struct-held routers and group mounts, measured
-    // on fixtures/go-route-struct-routers and go-route-mounts.
+    // on fixtures/go-route-struct-routers and go-route-mounts. DF.21: DF.7's
+    // constant prefixes, measured on fixtures/go-route-const-prefix plus a
+    // probe of a package var, a function-body const, fmt.Sprintf / os.Getenv
+    // and a returned group (each route keeps its local path).
     CoverageCaveat {
         language: "go",
         edge_category: "HANDLED_BY",
-        note: "a Go route takes its group's prefix when the group is built from a string literal (`g := r.Group(\"/api\")`), held in a struct field (of its own package or an imported one) assigned it, or passed through a parameter or a struct field by a call the build has resolved (one ROUTE per mount); a prefix held in a constant or a variable or built at run time (fmt.Sprintf, os.Getenv), a group returned by a function, and a group passed through a call that is not resolved (a function value, a loop over registrars) are not read, so the route keeps its local path and pairs with a client only through the HTTP resolver's prefix folds",
-        verify: "grep .Group( / .Route( / .Mount( and follow the group to its registrations",
+        note: "a Go route takes its group's prefix when the group is built from a string literal (`g := r.Group(\"/api\")`) or a package-level string constant - of the same file, another file of the package or an imported package, alone or joined to literals (`r.Group(apiPrefix)`, `r.Group(AdminPrefix + \"/x\")`, `r.Group(paths.Shared)`) -, held in a struct field (of its own package or an imported one) assigned it, or passed through a parameter or a struct field by a call the build has resolved (one ROUTE per mount); a prefix held in a variable, a constant declared inside a function body, or one built at run time (fmt.Sprintf, os.Getenv), a group returned by a function, and a group passed through a call that is not resolved (a function value, a loop over registrars) are not read, so the route keeps its local path and pairs with a client only through the HTTP resolver's prefix folds",
+        verify: "grep .Group( / .Route( / .Mount( and follow the group, and the variable its prefix is read from, to its registrations",
     },
     // DH.14: `extends` / `implements` (classes, interfaces, enums) are
     // extracted; the row keeps the trait residual and the name binding.
@@ -198,10 +213,13 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     },
     // CB.10 / CB.18: the Swift call scope, measured on fixtures/swift-members
     // and swift-implicit-self plus a receiver probe of each shape below.
+    // DF.21: DF.3's parameter / local receivers, measured on
+    // fixtures/swift-local-receivers plus a two-target probe (Store declared
+    // in App and Admin) of each not-bound shape.
     CoverageCaveat {
         language: "swift",
         edge_category: "CALLS",
-        note: "Swift calls bind: a bare call inside a type to the type's own member (implicit self, across its extensions in other files) before a same-named free function, else to a function of the same file; a static call or construction (`T.m()`, `T()`) on a type declared in the same module; a method call through a stored property's declared type, optional chaining included (init, deinit, subscripts and computed properties are METHOD nodes). Not bound: a receiver typed by a parameter or a local (`let r: Repo = ..`, `let r = Repo()`), a function's return value or a chain (`make().load()`), a protocol-typed receiver (a protocol's requirements are not nodes), a closure-held function (`let f = { .. }; f()`), a free function declared in another file of the module, and anything declared in another module (an `import`ed target)",
+        note: "Swift calls bind: a bare call inside a type to the type's own member (implicit self, across its extensions in other files) before a same-named free function, else to a function of the same file; a static call or construction (`T.m()`, `T()`) on a type declared in the same module; a method call through a stored property's declared type when that type's name is unique in the repo, optional chaining included; and a method call on a receiver typed by a parameter (closure parameters included) or a local - its annotation (`let r: Repo`, `Repo?`) or its constructor (`let r = Repo()`, `Repo.init()`) - on that type in the caller's own module (init, deinit, subscripts and computed properties are METHOD nodes). Not bound: a function's return value or a chain (`let r = make()`, `Store.make().load()`), a protocol-typed receiver (`any P`, `some P`; a protocol's requirements are not nodes), a stored property whose type name two modules declare, a local name bound to two types in one function (nested blocks share one scope), a closure-held function (`let f = { .. }; f()`), a free function declared in another file of the module, and anything declared in another module (an `import`ed target)",
         verify: "grep the callee name across *.swift",
     },
     CoverageCaveat {
@@ -224,26 +242,32 @@ static COVERAGE_CAVEATS: &[CoverageCaveat] = &[
     },
     // CB.9 / CB.17: constructors, operators and extension members are nodes;
     // measured on fixtures/dart-members, dart-extensions-imports and a probe
-    // of each receiver shape below.
+    // of each receiver shape below. DF.21: DF.4a's own-package URIs and
+    // DF.4b's plain imports, measured on fixtures/dart-plain-import-calls plus
+    // a probe of an `export` barrel, a `hide` clash, closures and receivers.
     CoverageCaveat {
         language: "dart",
         edge_category: "CALLS",
-        note: "Dart constructors, factories, operators, abstract members and extension members are METHOD nodes. Calls bind: a bare call inside a class to its own member (implicit this) before a top-level function of the library; a call through a typed field (`final Repo repo;`, `final _r = Repo()`); a same-file type's constructions and statics; and, through an import with a `show` list or an `as` prefix, the imported library's functions, constructors and statics. Not bound: a bare call, construction or static call into a library pulled in by a plain `import 'x.dart';` (no `show` / `as`), a receiver typed by a parameter or a local, a function's return value or a chain (`make().value()`), a `dynamic` receiver, an extension-method call and an operator expression (`a + b`) at the call site, and a closure-held function",
-        verify: "grep the callee name across *.dart",
+        note: "Dart constructors, factories, operators, abstract members and extension members are METHOD nodes. Calls bind: a bare call inside a class to its own member (implicit this) before a top-level function of the library; a call through a typed field (`final Repo repo;`, `final _r = Repo()`); a same-file type's constructions and statics; through an import with a `show` list or an `as` prefix, the imported library's functions, constructors and statics; and through a plain `import 'x.dart';` every public top-level name of x (bare calls, constructions, statics). An import resolves by relative path or by an own-package `package:<pubspec name>/..` URI (to that package's lib/ file); another package's URI and `dart:` stay external. A name two plain imports both declare binds neither, and a `hide` list is not read, so a name hidden from one plain import and taken from another binds neither; a `show` / `as` binding or the importer's own declaration wins. Not bound: a name reached only through an `export` re-export (a barrel library), a receiver typed by a parameter or a local (`void f(Repo r)`, `final r = Repo()`), a function's return value or a chain (`make().value()`), a `dynamic` receiver, an extension-method call and an operator expression (`a + b`) at the call site, a closure-held function, and any call inside a closure (`xs.forEach((x) { f(x); })`, `(x) => f(x)`)",
+        verify: "grep the callee name across *.dart, and for a name behind a barrel, the `export` lines that re-export it",
     },
     // CB.19 / CB.22 / CB.25: the C/C++ residual, measured on fixtures/
     // cpp-declarations, cpp-include-paths and cpp-call-scope plus a probe of
-    // each shape below. Keyed "c_cpp", the detect_language tag.
+    // each shape below. Keyed "c_cpp", the detect_language tag. DF.21: DF.5's
+    // lambda bodies and `auto` receivers, measured on
+    // fixtures/cpp-lambda-auto-receivers plus a probe of each not-bound shape;
+    // DF.6's generator expressions on fixtures/cpp-cmake-genex-includes plus
+    // a probe of every head listed.
     CoverageCaveat {
         language: "c_cpp",
         edge_category: "CALLS",
-        note: "C/C++ calls resolve by name, and a qname carries no signature, so an overload set is one node. A bare call in a member binds the class's own (or an inherited) member first; `Type::m()` / `ns::f()` bind through C++ name lookup; a call on a receiver binds through the declared type of a field, parameter or typed local (`using` applied), and a virtual call binds that static type's member, never an override. A function in another file is reached only through an include glia resolves (see IMPORTS); one reached through a header prototype binds when exactly one non-static definition of it sits in a .c / .cc / .cpp / .cxx file, or, among several, the one beside the declaring header. Not bound: a call through a function pointer or a variable holding a lambda, a template-dependent call (`t.f()` on a template parameter), a macro-expanded call, a call inside a lambda body, and a receiver declared `auto` or reached through a chain or a function's return (`make().f()`)",
+        note: "C/C++ calls resolve by name, and a qname carries no signature, so an overload set is one node. A bare call in a member binds the class's own member first; `Type::m()` / `ns::f()` bind through C++ name lookup; a call on a receiver binds through the declared type of a field, parameter or typed local (`using` applied), or of an `auto` local initialised by an unqualified call (`auto b = make_box(); b.get()`, typed by the callee's declared return type, rule receiver_return), and a virtual call binds that static type's member, never an override. A call inside a lambda body is a call of the function holding the lambda (its parameters and locals are that function's). A function in another file is reached only through an include glia resolves (see IMPORTS); one reached through a header prototype binds when exactly one non-static definition of it sits in a .c / .cc / .cpp / .cxx file, or, among several, the one beside the declaring header. Not bound: a member only a base class declares (the C/C++ parser emits no INHERITS_FROM, so `get()` / `this->put()` in a subclass binds nothing), a call through a function pointer or a variable holding a lambda (`f(3)`; a lambda is no node), a template-dependent call (`t.f()` on a template parameter), a macro-expanded call, a chain or a direct return (`make().f()`), and a receiver that is an `auto` local initialised by a qualified call (`auto u = ns::make()`), a member call (`auto c = b.clone()`) or a function declared with a trailing return type (`auto make() -> Box`), or a lambda init-capture (`[k = make()]`)",
         verify: "grep the callee name across the .c / .cc / .cpp / .h / .hpp files",
     },
     CoverageCaveat {
         language: "c_cpp",
         edge_category: "IMPORTS",
-        note: "a quoted include resolves against the includer's directory, then the repo's search roots; an angle include through the search roots only. The roots: the -I / -isystem / -iquote dirs of a compile_commands.json at the repo root or in its depth-1 build* / out / cmake-build-* dirs (and the same under each CMake project root), CMake include_directories / target_include_directories in the CMakeLists.txt beside the walked files (an argument holding a generator expression `$<..>`, or a variable other than the list's own dir and the project / source root, is skipped), and include/ under the repo root and each project root; a root outside the repo, or holding no walked C/C++ file, is dropped. Other build systems (Bazel, Meson, Make CFLAGS, autotools) are not read, and a macro-named include (`#include HDR`) records nothing. A system or third-party header is no node: its first path segment is listed in the MODULE's IMPORTS cell",
+        note: "a quoted include resolves against the includer's directory, then the repo's search roots; an angle include through the search roots only. The roots: the -I / -isystem / -iquote dirs of a compile_commands.json at the repo root or in its depth-1 build* / out / cmake-build-* dirs (and the same under each CMake project root), CMake include_directories / target_include_directories in the CMakeLists.txt beside the walked files, and include/ under the repo root and each project root; a root outside the repo, or holding no walked C/C++ file, is dropped. A CMake generator expression is unwrapped: the dir of a `$<BUILD_INTERFACE:..>` / `$<BUILD_LOCAL_INTERFACE:..>`, a `$<1:..>` or a conditional `$<$<CONFIG:..>:..>` / `$<$<BOOL:..>:..>` is read (the condition is not evaluated: every configuration's dirs are roots), while `$<INSTALL_INTERFACE:..>`, `$<0:..>`, any other generator expression (`$<TARGET_PROPERTY:..>`, `$<JOIN:..>`, `$<IF:..>`, whose branches are not taken) and a dir still holding `$<` after unwrapping are skipped; a variable other than the list's own dir and the project / source root is skipped too, so `${CMAKE_CURRENT_BINARY_DIR}` (generated headers in the build tree, which is not walked) adds nothing. Other build systems (Bazel, Meson, Make CFLAGS, autotools) are not read, and a macro-named include (`#include HDR`) records nothing. A system or third-party header is no node: its first path segment is listed in the MODULE's IMPORTS cell",
         verify: "grep '#include' in the file and read the build's -I flags (compile_commands.json, CMakeLists.txt, Makefile, BUILD)",
     },
     // A14.1 / A14.2 — the Kotlin rows. `.kt` has its own parser since A14.2
@@ -559,10 +583,13 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), 1);
         let note = rows[0].note;
-        for client in ["kafkajs", "amqplib", "BullMQ", "nats", "pika", "asynq"] {
+        // DG.1: apalis workers bind their handler fn too (DF.21).
+        for client in ["kafkajs", "amqplib", "BullMQ", "nats", "pika", "asynq", "apalis"] {
             assert!(note.contains(client), "{client}: {note}");
         }
         assert!(note.contains("the function that subscribes"), "{note}");
+        // DH.2: a Laravel job consumer is anchored on its class line (DF.21).
+        assert!(note.contains("Laravel") && note.contains("HANDLED_BY nothing"), "{note}");
         assert_eq!(rows[0].edges_found, 0);
         assert_eq!(
             edge_category::name(edge_category::HANDLED_BY),
@@ -813,7 +840,7 @@ mod tests {
         assert_eq!(lang_rows("lib/codec.c", "c_cpp"), want);
         // Control: a repo with no C/C++ file gets no c_cpp row.
         assert!(lang_rows("main.go", "c_cpp").is_empty());
-        // CALLS names the residual CB.19 / CB.25 leave, measured.
+        // CALLS names the residual CB.19 / CB.25 / DF.5 leave, measured.
         let calls = row_note("src/a.cpp", "c_cpp", "CALLS");
         for gap in [
             "overload set is one node",
@@ -823,12 +850,17 @@ mod tests {
             "macro",
             "lambda body",
             "`auto`",
+            "receiver_return",
+            "base class",
+            "trailing return type",
+            "init-capture",
             "exactly one non-static definition",
             "only through an include",
         ] {
             assert!(calls.contains(gap), "{gap}: {calls}");
         }
-        // IMPORTS names the search roots CB.22 reads and what it does not.
+        // IMPORTS names the search roots CB.22 reads, the generator
+        // expressions DF.6 unwraps, and what it does not read.
         let imports = row_note("include/a.hh", "c_cpp", "IMPORTS");
         for part in [
             "includer's directory",
@@ -836,6 +868,9 @@ mod tests {
             "target_include_directories",
             "include/",
             "generator expression",
+            "BUILD_INTERFACE",
+            "INSTALL_INTERFACE",
+            "CMAKE_CURRENT_BINARY_DIR",
             "Bazel",
             "Meson",
             "Make",
@@ -844,27 +879,40 @@ mod tests {
         }
     }
 
+    /// A `... Not bound: ...` row split into its bound and not-bound halves;
+    /// the whole note and "" when it has no `Not bound:` sentence.
+    fn bound_split(note: &'static str) -> (&'static str, &'static str) {
+        note.split_once("Not bound:").unwrap_or((note, ""))
+    }
+
     #[test]
     fn swift_and_dart_calls_caveats_name_the_cb_residual() {
         // CB.10 / CB.18: members, extension members and same-module statics
-        // bind; the row names the receivers that still do not.
+        // bind; DF.3: parameter and local receivers bind too. The row names
+        // the receivers that still do not.
         assert!(lang_rows("Sources/App/Cart.swift", "swift").contains(&("swift", "CALLS")));
         let swift = row_note("Sources/App/Cart.swift", "swift", "CALLS");
+        let (bound, unbound) = bound_split(swift);
+        for part in ["extension", "stored property", "parameter", "a local", "Repo.init()"] {
+            assert!(bound.contains(part), "bound {part}: {swift}");
+        }
         for part in [
-            "extension",
-            "stored property",
-            "protocol",
+            "protocol-typed",
+            "return value",
+            "two modules declare",
+            "two types in one function",
             "closure",
-            "a parameter or a local",
             "another file",
             "another module",
         ] {
-            assert!(swift.contains(part), "{part}: {swift}");
+            assert!(unbound.contains(part), "not bound {part}: {swift}");
         }
         // CB.9 / CB.17: constructors, operators and extension members are
-        // nodes; the row names the plain-import and receiver residual.
+        // nodes; DF.4a / DF.4b: own-package URIs and plain imports bind. The
+        // row names the barrel, closure and receiver residual.
         assert!(lang_rows("lib/app.dart", "dart").contains(&("dart", "CALLS")));
         let dart = row_note("lib/app.dart", "dart", "CALLS");
+        let (bound, unbound) = bound_split(dart);
         for part in [
             "constructors",
             "operators",
@@ -872,10 +920,13 @@ mod tests {
             "`show`",
             "`as`",
             "plain `import",
-            "`dynamic`",
-            "a parameter or a local",
+            "package:",
+            "`hide`",
         ] {
-            assert!(dart.contains(part), "{part}: {dart}");
+            assert!(bound.contains(part), "bound {part}: {dart}");
+        }
+        for part in ["`export`", "`dynamic`", "a parameter or a local", "inside a closure"] {
+            assert!(unbound.contains(part), "not bound {part}: {dart}");
         }
         // Control: neither row reaches a repo without the language.
         assert!(lang_rows("main.go", "swift").is_empty());
@@ -896,6 +947,10 @@ mod tests {
             "constant",
             "function value",
             "imported",
+            // DF.7: a package-level constant is read; a function-body one is not.
+            "package-level string constant",
+            "a constant declared inside a function body",
+            "a variable",
         ] {
             assert!(note.contains(part), "{part}: {note}");
         }
@@ -935,10 +990,82 @@ mod tests {
         let grpc = note("GRPC_CALLS");
         assert_eq!(grpc.len(), 1, "the gRPC row is keyed by its own mechanism");
         assert!(grpc[0].contains("dial target") && grpc[0].contains("IaC"), "{}", grpc[0]);
+        // DF.8 / DF.9: an all-external client pairs nothing, on each channel.
+        for row in [gql[0], ws[0], grpc[0]] {
+            assert!(
+                row.contains("literal public host") && row.contains("is external"),
+                "{row}"
+            );
+        }
         assert_eq!(
             edge_category::name(edge_category::GRPC_CALLS),
             "GRPC_CALLS",
             "edges_found is keyed by this spelling"
         );
+    }
+
+    #[test]
+    fn df_residual_rows_name_what_remains() {
+        // DF.21: each row DF narrowed no longer lists the residual DF fixed,
+        // and names what is still partial, measured on the DF fixtures.
+        let swift = row_note("Sources/App/Cart.swift", "swift", "CALLS");
+        let (_, unbound) = bound_split(swift);
+        assert!(!unbound.contains("a parameter or a local"), "DF.3: {swift}");
+        assert!(!unbound.contains("let r = Repo()"), "DF.3: {swift}");
+        assert!(unbound.contains("`any P`, `some P`"), "{swift}");
+
+        let dart = row_note("lib/app.dart", "dart", "CALLS");
+        let (_, unbound) = bound_split(dart);
+        assert!(!unbound.contains("plain `import"), "DF.4b: {dart}");
+        assert!(!unbound.contains("a library pulled in"), "DF.4b: {dart}");
+        assert!(unbound.contains("barrel"), "{dart}");
+
+        let calls = row_note("src/a.cpp", "c_cpp", "CALLS");
+        let (bound, unbound) = bound_split(calls);
+        assert!(!unbound.contains("lambda body"), "DF.5: {calls}");
+        assert!(!unbound.contains("a receiver declared `auto`"), "DF.5: {calls}");
+        assert!(bound.contains("auto b = make_box()"), "DF.5: {calls}");
+        assert!(unbound.contains("(`make().f()`)"), "{calls}");
+        // The bound half no longer claims an inherited member binds.
+        assert!(!bound.contains("inherited"), "{calls}");
+
+        let imports = row_note("include/a.hh", "c_cpp", "IMPORTS");
+        assert!(
+            !imports.contains("an argument holding a generator expression"),
+            "DF.6: {imports}"
+        );
+        assert!(imports.contains("`$<BUILD_INTERFACE:..>`"), "DF.6: {imports}");
+        assert!(imports.contains("`$<IF:..>`"), "{imports}");
+
+        let go = row_note("main.go", "go", "HANDLED_BY");
+        assert!(!go.contains("held in a constant"), "DF.7: {go}");
+        assert!(go.contains("`r.Group(paths.Shared)`"), "DF.7: {go}");
+
+        let report = coverage_report(&MergedGraph::new(Vec::new()));
+        let pubsub: Vec<_> = report
+            .iter()
+            .filter(|n| n.edge_category == "QUEUE_FLOWS" && n.note.contains("Pub/Sub"))
+            .map(|n| n.note)
+            .collect();
+        assert_eq!(pubsub.len(), 1, "{pubsub:?}");
+        assert!(!pubsub[0].contains("pair only when both name the topic"), "DF.14: {}", pubsub[0]);
+        for part in ["Terraform", "google_pubsub_subscription", "rule binding", "created in code", "another repo"] {
+            assert!(pubsub[0].contains(part), "{part}: {}", pubsub[0]);
+        }
+        let pubsub_verify = report
+            .iter()
+            .find(|n| n.edge_category == "QUEUE_FLOWS" && n.note.contains("Pub/Sub"))
+            .map(|n| n.verify)
+            .unwrap_or_default();
+        assert!(pubsub_verify.contains("google_pubsub_subscription"), "{pubsub_verify}");
+
+        for cat in ["WS_CONNECTS", "GRAPHQL_CALLS", "GRPC_CALLS"] {
+            let row = report
+                .iter()
+                .find(|n| n.language == "*" && n.edge_category == cat)
+                .map(|n| n.note)
+                .unwrap_or_default();
+            assert!(row.contains("`\"external\":true`"), "DF.9 {cat}: {row}");
+        }
     }
 }
