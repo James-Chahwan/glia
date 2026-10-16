@@ -633,6 +633,16 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W21 (DT.10d, question for James): hardhat test sites hang off the test MODULE (CONTAINS, not a carry edge), so
   `tests-for` on a Solidity function does not reach the mocha test; that needs FUNCTION nodes for `it(..)` / `beforeEach`
   callbacks.
+- W22 (DT.10f, DT.10k): an EVM name argument held in a function-local `<id> := "<lit>"` or a same-file
+  `const <X><E>EventName = "<E>"` is not resolved (CA.4's no-value-tracking rule; abigen v2's UnpackXEvent
+  `event := "Released"` counts dynamic=2 per event).
+- W22 (DT.10j): not read: a spread of a same-file config object (`{ ...escrowContract, functionName: 'x' }`, a common
+  wagmi pattern) counts dynamic; viem `encodeFunctionData` / `decodeFunctionResult` / `decodeEventLog` (the TS twin of
+  Go's Pack); the standalone `web3-eth-contract` `new Contract(abi, addr)`; truffle's global `web3` without an import.
+- W22 (DT.1l, James's call): quokka's GroupUser / GroupLastMessage read every key through a same-file
+  `_pick(j, ['userID', 'userId', 'UserID'])` helper, so they write no SCHEMA_FIELDS (21 of quokka's 23 fromJson models
+  do); a same-file key-alias helper rule (a Map plus a List<String> of literals, the body subscripting the map by an
+  element) is interprocedural.
 
 ## 3. Open questions for James
 
