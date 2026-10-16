@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
-use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
-use glia_core::{Confidence, Node, NodeId, RepoId};
+use glia_code_domain::{CodeNav, GRAPH_TYPE, cell_type, node_kind};
+use glia_core::{Cell, CellPayload, Confidence, Node, NodeId, RepoId};
 
 use crate::anchor::{Anchor, line_of};
 use crate::cli::{CodeMap, Script};
@@ -319,7 +319,9 @@ fn accept(family: Family, arg: ArgShape, ctx: GqlContext, ident_before: bool) ->
 }
 
 /// The needle lines that carry GraphQL evidence, as (operation name, 0-indexed
-/// line) in source order, and the tally for the `[graphql-ops]` marker.
+/// line, the document the name was read from) in source order, and the tally
+/// for the `[graphql-ops]` marker. DT.11a: a line named by its needle text
+/// read no document (`None`).
 /// CJ.1b: a needle occurrence `guard` refuses (it starts in a Rust / Python
 /// string literal or comment) carries no evidence.
 ///
@@ -328,10 +330,10 @@ fn accept(family: Family, arg: ArgShape, ctx: GqlContext, ident_before: bool) ->
 /// graphql_flutter) the kept call's own `gql(..)` document names it first
 /// ([`dart_document_name`]): `client.query(QueryOptions(document:
 /// gql(listOrders)))` is the operation its `listOrders` constant declares.
-fn scan_operation_needles(
-    source: &str,
+fn scan_operation_needles<'s>(
+    source: &'s str,
     guard: &mut LazyGuard<'_>,
-) -> (Vec<(String, u32)>, NeedleTally) {
+) -> (Vec<(String, u32, Option<&'s str>)>, NeedleTally) {
     let mut hits = Vec::new();
     let mut tally = NeedleTally::default();
     let b = source.as_bytes();
@@ -378,18 +380,18 @@ fn scan_operation_needles(
                 // The needle's `(` is its last byte.
                 let document = tally.dart.as_mut().map(|d| {
                     let found = dart_document_name(source, hit + pattern.len() - 1);
-                    match found.as_ref().map(|(_, doc)| *doc) {
+                    match found.as_ref().map(|(_, how, _)| *how) {
                         Some(DartDoc::Constant) => d.constant += 1,
                         Some(DartDoc::Inline) => d.inline += 1,
                         None => d.unread += 1,
                     }
-                    found.map(|(name, _)| name)
+                    found.map(|(name, _, doc)| (name, Some(doc)))
                 });
-                let op_name = document
+                let (op_name, doc) = document
                     .flatten()
-                    .or_else(|| extract_gql_operation_name(source, trimmed))
-                    .unwrap_or_else(|| pattern.trim_end_matches('(').to_string());
-                hits.push((op_name, u32::try_from(line_no).unwrap_or(u32::MAX)));
+                    .or_else(|| extract_gql_operation_name(source))
+                    .unwrap_or_else(|| (pattern.trim_end_matches('(').to_string(), None));
+                hits.push((op_name, u32::try_from(line_no).unwrap_or(u32::MAX), doc));
                 break;
             }
         }
@@ -614,10 +616,16 @@ const METHOD_MODIFIERS: &[&str] = &[
 ];
 
 /// Client-side GRAPHQL_OPERATION nodes: the operation needles
-/// ([`scan_operation_needles`]), the named operations of `` gql` ``
-/// templates ([`extract_gql_template_operations`]) and the literal documents
-/// of Go machinebox / C# GraphQL.Client requests ([`client_request_operations`],
+/// ([`scan_operation_needles`]), the operations of `` gql` `` templates
+/// ([`extract_gql_template_operations`]) and the literal documents of Go
+/// machinebox / C# GraphQL.Client requests ([`client_request_operations`],
 /// CL.6a).
+///
+/// DT.11a: every node minted from a document carries that document as its
+/// CODE cell ([`document_cells`]), the one carrier of the document: the
+/// GraphQL resolver pairs the operation by the root fields it selects
+/// ([`operation_root_fields`]). A needle named by its needle text read no
+/// document and carries none.
 ///
 /// `path` selects CJ.1b's literal / comment guard: in a Rust or Python file an
 /// operation needle, `` gql` `` tag or client request that starts in a string
@@ -643,7 +651,7 @@ pub fn extract_graphql_operation_nodes(
             eprintln!("{marker}");
         }
     }
-    for (op_name, line) in hits {
+    for (op_name, line, doc) in hits {
         if seen.insert(op_name.clone()) {
             let qname = format!("graphql_op:{op_name}");
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRAPHQL_OPERATION, &qname);
@@ -651,7 +659,7 @@ pub fn extract_graphql_operation_nodes(
                 id,
                 repo,
                 confidence: Confidence::Medium,
-                cells: vec![],
+                cells: document_cells(doc),
             });
             nav.record(id, &op_name, &qname, node_kind::GRAPHQL_OPERATION, Some(module_id));
             anchors.push(Anchor { node: id, line });
@@ -666,9 +674,9 @@ pub fn extract_graphql_operation_nodes(
     {
         eprintln!("{marker}");
     }
-    let templates = templates.into_iter().map(|(name, at)| (name, at, Confidence::Strong));
-    let requests = requests.into_iter().map(|(name, at)| (name, at, Confidence::Medium));
-    for (name, at, confidence) in templates.chain(requests) {
+    let templates = templates.into_iter().map(|(name, at, doc)| (name, at, doc, Confidence::Strong));
+    let requests = requests.iter().map(|(name, at, doc)| (name.clone(), *at, Some(doc.as_str()), Confidence::Medium));
+    for (name, at, doc, confidence) in templates.chain(requests) {
         if seen.insert(name.clone()) {
             let qname = format!("graphql_op:{name}");
             let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::GRAPHQL_OPERATION, &qname);
@@ -676,7 +684,7 @@ pub fn extract_graphql_operation_nodes(
                 id,
                 repo,
                 confidence,
-                cells: vec![],
+                cells: document_cells(doc),
             });
             nav.record(id, &name, &qname, node_kind::GRAPHQL_OPERATION, Some(module_id));
             anchors.push(Anchor { node: id, line: line_of(source, at) });
@@ -684,6 +692,14 @@ pub fn extract_graphql_operation_nodes(
     }
 
     GraphqlNodes { nodes, nav, anchors }
+}
+
+/// DT.11a: an operation's cells: its document as one CODE text cell, or none
+/// when it was read from no document.
+fn document_cells(doc: Option<&str>) -> Vec<Cell> {
+    doc.map(|d| Cell { kind: cell_type::CODE, payload: CellPayload::Text(d.to_string()) })
+        .into_iter()
+        .collect()
 }
 
 /// CODE mode, for every code file of every language
@@ -4041,23 +4057,54 @@ fn is_ident(s: &str) -> bool {
     chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-fn extract_gql_operation_name(source: &str, _line: &str) -> Option<String> {
+/// The operation a needle line names from the file's FIRST document tag (the
+/// first tag form, in this order, that occurs), with that document (DT.11a:
+/// the literal's body up to its closing quote, `None` when it never closes).
+/// `None` when that first document names no operation.
+fn extract_gql_operation_name(source: &str) -> Option<(String, Option<&str>)> {
     for tag in ["gql`", "gql(`", "gql(\"", "graphql(`", "graphql(\""] {
         if let Some(idx) = source.find(tag) {
-            let after = &source[idx + tag.len()..];
-            return extract_operation_from_body(after);
+            let start = idx + tag.len();
+            let after = &source[start..];
+            let quote = tag.as_bytes()[tag.len() - 1];
+            return extract_operation_from_body(after).map(|name| (name, quoted_body(source, start, quote)));
         }
     }
     None
 }
 
-/// Every named operation in a `` gql` `` template, with the byte offset of
-/// its `` gql` `` tag. CJ.1b: a tag `guard` refuses (it starts in a Rust /
+/// DT.11a: the body of the JS string / template literal whose text starts at
+/// `start` and which `quote` closes: everything up to the first unescaped
+/// `quote`, untrimmed. `None` when it never closes (the document is not
+/// known to end anywhere).
+fn quoted_body(source: &str, start: usize, quote: u8) -> Option<&str> {
+    let b = source.as_bytes();
+    let mut i = start;
+    while let Some(&c) = b.get(i) {
+        if c == b'\\' {
+            i += 2;
+            continue;
+        }
+        if c == quote {
+            return source.get(start..i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Every operation in a `` gql` `` template, with the byte offset of its
+/// `` gql` `` tag and its document (DT.11a: the template body between the
+/// backticks, untrimmed, so it starts on the tag's line; `None` for a
+/// template that never closes). A named document is named by its operation
+/// name; an anonymous or shorthand one (`` gql`{ orders { id } }` ``) by its
+/// first root field ([`first_root_field`], CL.6a's rule for client requests)
+/// when it closes. CJ.1b: a tag `guard` refuses (it starts in a Rust /
 /// Python literal or comment) is no template.
-fn extract_gql_template_operations(
-    source: &str,
+fn extract_gql_template_operations<'s>(
+    source: &'s str,
     guard: &mut LazyGuard<'_>,
-) -> Vec<(String, usize)> {
+) -> Vec<(String, usize, Option<&'s str>)> {
     let mut ops = Vec::new();
     let mut search_from = 0;
     while let Some(idx) = source[search_from..].find("gql`") {
@@ -4067,8 +4114,11 @@ fn extract_gql_template_operations(
         if !guard.admits(tag) {
             continue;
         }
-        if let Some(name) = extract_operation_from_body(&source[abs..]) {
-            ops.push((name, tag));
+        let doc = quoted_body(source, abs, b'`');
+        let name = extract_operation_from_body(doc.unwrap_or(&source[abs..]))
+            .or_else(|| doc.filter(|d| is_anonymous_operation(d)).and_then(first_root_field));
+        if let Some(name) = name {
+            ops.push((name, tag, doc));
         }
     }
     ops
@@ -4176,8 +4226,9 @@ fn dart_call_close(b: &[u8], open: usize) -> Option<usize> {
 /// ([`extract_operation_from_body`]): an inline literal, or an identifier
 /// bound to a string constant in the same file ([`dart_const_document`]).
 /// `None` when no `gql(..)` in the call names an operation (an anonymous
-/// `query { .. }`, a document built in another file).
-fn dart_document_name(source: &str, open: usize) -> Option<(String, DartDoc)> {
+/// `query { .. }`, a document built in another file). DT.11a: with the
+/// document the name was read from (the literal's body).
+fn dart_document_name(source: &str, open: usize) -> Option<(String, DartDoc, &str)> {
     let b = source.as_bytes();
     let close = dart_call_close(b, open)?;
     let mut i = open + 1;
@@ -4194,17 +4245,16 @@ fn dart_document_name(source: &str, open: usize) -> Option<(String, DartDoc)> {
         if tag && b.get(paren) == Some(&b'(') {
             let arg = skip_ascii_ws(b, paren + 1);
             let named = match dart_literal(b, arg) {
-                Some((start, end, _)) => source
-                    .get(start..end)
-                    .and_then(extract_operation_from_body)
-                    .map(|name| (name, DartDoc::Inline)),
+                Some((start, end, _)) => source.get(start..end).and_then(|doc| {
+                    extract_operation_from_body(doc).map(|name| (name, DartDoc::Inline, doc))
+                }),
                 None => {
                     let end = cs_ident_end(b, arg, close);
                     source
                         .get(arg..end)
                         .filter(|id| is_ident(id) && b.get(skip_ascii_ws(b, end)) == Some(&b')'))
                         .and_then(|id| dart_const_document(source, id))
-                        .map(|name| (name, DartDoc::Constant))
+                        .map(|(name, doc)| (name, DartDoc::Constant, doc))
                 }
             };
             if named.is_some() {
@@ -4220,8 +4270,9 @@ fn dart_document_name(source: &str, open: usize) -> Option<(String, DartDoc)> {
 /// `const listOrders = r"""query Orders {..}""";` (also `final` / `var`,
 /// `static const String x = '...'`), read from the first declaration line
 /// whose words before the name are all [`DART_DECL_WORDS`] (so a commented
-/// line is none) and whose `=` binds a literal.
-fn dart_const_document(source: &str, ident: &str) -> Option<String> {
+/// line is none) and whose `=` binds a literal; with that literal's body
+/// (DT.11a).
+fn dart_const_document<'s>(source: &'s str, ident: &str) -> Option<(String, &'s str)> {
     let b = source.as_bytes();
     source.match_indices(ident).find_map(|(at, _)| {
         let end = at + ident.len();
@@ -4238,7 +4289,8 @@ fn dart_const_document(source: &str, ident: &str) -> Option<String> {
             return None;
         }
         let (start, body_end, _) = dart_literal(b, skip_ascii_ws(b, eq + 1))?;
-        source.get(start..body_end).and_then(extract_operation_from_body)
+        let doc = source.get(start..body_end)?;
+        extract_operation_from_body(doc).map(|name| (name, doc))
     })
 }
 
@@ -4285,7 +4337,10 @@ impl ClientRequestTally {
 }
 
 /// CL.6a: the operations of the GraphQL client requests in `source`, as
-/// (name, needle byte offset) in source order, plus the marker tally:
+/// (name, needle byte offset, document) in source order, plus the marker
+/// tally. DT.11a: the document is the literal's text as the request sends it
+/// (a Go raw string or an unescaped literal is the file's own bytes; escapes
+/// are decoded):
 /// - Go: `<recv>.NewRequest(<literal>)` in a file importing
 ///   machinebox/graphql ([`machinebox_receivers`]);
 /// - C#: `new GraphQLRequest` / `new GraphQLHttpRequest` with a
@@ -4302,7 +4357,7 @@ impl ClientRequestTally {
 fn client_request_operations(
     source: &str,
     guard: &mut LazyGuard<'_>,
-) -> (Vec<(String, usize)>, ClientRequestTally) {
+) -> (Vec<(String, usize, String)>, ClientRequestTally) {
     let b = source.as_bytes();
     let mut tally = ClientRequestTally::default();
     let mut sites: Vec<(usize, Option<String>)> = Vec::new();
@@ -4348,13 +4403,16 @@ fn client_request_operations(
     sites.sort_by_key(|&(at, _)| at);
     let mut ops = Vec::new();
     for (at, doc) in sites {
-        let doc = doc.as_deref();
-        if let Some(name) = doc.and_then(extract_operation_from_body) {
+        let Some(doc) = doc else {
+            tally.unread += 1;
+            continue;
+        };
+        if let Some(name) = extract_operation_from_body(&doc) {
             tally.named += 1;
-            ops.push((name, at));
-        } else if let Some(field) = doc.and_then(first_root_field) {
+            ops.push((name, at, doc));
+        } else if let Some(field) = first_root_field(&doc) {
             tally.root_field += 1;
-            ops.push((field, at));
+            ops.push((field, at, doc));
         } else {
             tally.unread += 1;
         }
@@ -4677,42 +4735,129 @@ fn gql_skip_args_and_directives(s: &str, i: usize) -> Option<usize> {
     }
 }
 
-/// The first root field `body` selects: past blanks, commas and `#`
-/// comments, an optional `query` / `mutation` / `subscription` keyword with
-/// an optional name, variable list and directives, then the `{`. An alias
-/// (`recent: orders`) names the field after it; an introspection field
-/// (`__typename`) is passed over. `None` for a fragment, a spread or any
-/// other shape.
+/// DT.11a: true when `doc`'s operation carries no name: a shorthand `{ .. }`
+/// or a bare `query` / `mutation` / `subscription` keyword followed by no
+/// name (`query ($n: Int) { .. }`). A named document whose name
+/// [`extract_operation_from_body`] misses (`query\nOrders { .. }`) is never
+/// named by its root field.
+fn is_anonymous_operation(doc: &str) -> bool {
+    let b = doc.as_bytes();
+    match gql_name(doc, gql_skip(b, 0)) {
+        Some(("query" | "mutation" | "subscription", end)) => gql_name(doc, gql_skip(b, end)).is_none(),
+        Some(_) => false,
+        None => true,
+    }
+}
+
+/// The first root field `body` selects ([`operation_root_fields`]), the
+/// field a resolver is keyed by: CL.6a's name for an anonymous client
+/// request, and DT.11a's for an anonymous `` gql` `` template.
 fn first_root_field(body: &str) -> Option<String> {
-    let b = body.as_bytes();
+    operation_root_fields(body).into_iter().next()
+}
+
+/// DT.11a: every top-level field the document's operation selects, in
+/// order, deduped: the fields the GraphQL resolver pairs the operation by
+/// (`graph/src/resolvers/graphql.rs`). The walk passes blanks, commas and `#`
+/// comments, an optional `query` / `mutation` / `subscription` keyword with
+/// an optional name, variable list and directives, then reads the selection
+/// set after the `{`:
+/// - a field after an alias names the field (`recent: orders` -> `orders`),
+///   and its arguments, directives and sub-selection are skipped;
+/// - an introspection field (`__typename`, `__schema`) is passed over;
+/// - an inline fragment (`... on Query { f }`, `... @include(if: $x) { f }`)
+///   contributes its fields; a fragment spread (`...F`) contributes nothing.
+///
+/// A fragment definition, SDL (`type Query { .. }`) or any other shape gives
+/// none. A document that stops parsing part way (an unclosed bracket, a
+/// template hole `${..}` where a field should be) gives the fields read
+/// before it.
+pub fn operation_root_fields(doc: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let b = doc.as_bytes();
     let mut i = gql_skip(b, 0);
-    if let Some((word, end)) = gql_name(body, i)
+    if let Some((word, end)) = gql_name(doc, i)
         && matches!(word, "query" | "mutation" | "subscription")
     {
         i = gql_skip(b, end);
-        if let Some((_, end)) = gql_name(body, i) {
+        if let Some((_, end)) = gql_name(doc, i) {
             i = gql_skip(b, end);
         }
-        i = gql_skip_args_and_directives(body, i)?;
+        let Some(open) = gql_skip_args_and_directives(doc, i) else {
+            return fields;
+        };
+        i = open;
     }
-    if b.get(i) != Some(&b'{') {
-        return None;
+    if b.get(i) == Some(&b'{') {
+        // `None` is a document that stops parsing: keep what was read.
+        let _ = read_root_selection(doc, i, &mut fields);
     }
-    i = gql_skip(b, i + 1);
+    fields
+}
+
+/// The root selection set opened at `open`, its fields appended to `fields`
+/// ([`operation_root_fields`]'s rules). Inline fragments are read in place,
+/// one brace level per open fragment, so no recursion is needed. `None` when
+/// the set stops parsing before it closes.
+fn read_root_selection(s: &str, open: usize, fields: &mut Vec<String>) -> Option<()> {
+    let b = s.as_bytes();
+    // The operation's own `{` plus one per open inline fragment.
+    let mut depth = 1usize;
+    let mut i = gql_skip(b, open + 1);
     loop {
-        let (mut field, end) = gql_name(body, i)?;
-        i = gql_skip(b, end);
-        if b.get(i) == Some(&b':') {
-            let (name, end) = gql_name(body, gql_skip(b, i + 1))?;
-            field = name;
-            i = gql_skip(b, end);
-        }
-        if !field.starts_with("__") {
-            return Some(field.to_string());
-        }
-        i = gql_skip_args_and_directives(body, i)?;
-        if b.get(i) == Some(&b'{') {
-            i = gql_skip(b, gql_close(b, i)? + 1);
+        match *b.get(i)? {
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(());
+                }
+                i = gql_skip(b, i + 1);
+            }
+            b'.' => {
+                if b.get(i..i + 3) != Some(b"...") {
+                    return None;
+                }
+                let mut j = gql_skip(b, i + 3);
+                // `... on Type`: an inline fragment with a type condition;
+                // `...Name`: a spread; `... @dir {` / `... {`: an inline
+                // fragment without one.
+                let inline = match gql_name(s, j) {
+                    Some(("on", end)) => {
+                        j = gql_skip(b, gql_name(s, gql_skip(b, end))?.1);
+                        true
+                    }
+                    Some((_, end)) => {
+                        j = gql_skip(b, end);
+                        false
+                    }
+                    None => true,
+                };
+                j = gql_skip_args_and_directives(s, j)?;
+                if inline {
+                    if b.get(j) != Some(&b'{') {
+                        return None;
+                    }
+                    depth += 1;
+                    j = gql_skip(b, j + 1);
+                }
+                i = j;
+            }
+            _ => {
+                let (mut field, end) = gql_name(s, i)?;
+                i = gql_skip(b, end);
+                if b.get(i) == Some(&b':') {
+                    let (name, end) = gql_name(s, gql_skip(b, i + 1))?;
+                    field = name;
+                    i = gql_skip(b, end);
+                }
+                if !field.starts_with("__") && !fields.iter().any(|f| f == field) {
+                    fields.push(field.to_string());
+                }
+                i = gql_skip_args_and_directives(s, i)?;
+                if b.get(i) == Some(&b'{') {
+                    i = gql_skip(b, gql_close(b, i)? + 1);
+                }
+            }
         }
     }
 }
@@ -5337,7 +5482,7 @@ mod tests {
         let mixed = "import { useQuery } from '@tanstack/react-query';\nimport { request } from 'graphql-request';\nuseQuery(['users'], () => request(API, USERS));";
         assert_eq!(op_qnames(mixed), vec!["graphql_op:request".to_string()]);
         let (hits, tally) = scan_operation_needles(mixed, &mut LazyGuard::new("", mixed));
-        assert_eq!(hits, vec![("request".to_string(), 2)]);
+        assert_eq!(hits, vec![("request".to_string(), 2, None)]);
         assert_eq!((tally.kept, tally.hook), (1, 1));
     }
 
@@ -5407,7 +5552,7 @@ mod tests {
 
         let users = "import { request, gql } from 'graphql-request';\nconst Q = gql(DOC);\nawait request(url, Q);";
         let (hits, tally) = scan_operation_needles(users, &mut LazyGuard::new("", users));
-        assert_eq!(hits, vec![("request".to_string(), 2)]);
+        assert_eq!(hits, vec![("request".to_string(), 2, None)]);
         assert_eq!(
             tally.marker().as_deref(),
             Some("[graphql-ops] kept=1 rejected=0 hook=0 client=0 request=0 context=client+graphql-request+gql-tag")
@@ -6416,7 +6561,8 @@ mod tests {
     fn dart_gql_const_document_names_the_op() {
         assert_eq!(op_qnames(DART_ORDERS), ["graphql_op:Orders"]);
         let (hits, tally) = scan_operation_needles(DART_ORDERS, &mut LazyGuard::new("", DART_ORDERS));
-        assert_eq!(hits, [("Orders".to_string(), 11)], "minted at the needle line");
+        let named: Vec<(&str, u32)> = hits.iter().map(|(n, l, _)| (n.as_str(), *l)).collect();
+        assert_eq!(named, [("Orders", 11)], "minted at the needle line");
         assert_eq!(
             tally.marker().as_deref(),
             Some("[graphql-ops] kept=1 rejected=0 hook=0 client=0 request=0 context=gql-tag")
@@ -6463,5 +6609,127 @@ mod tests {
         // A template-tagged document still names the call.
         let tagged = "import { gql } from '@apollo/client';\nconst ORDERS = gql`query Orders { orders { id } }`;\nclient.query({ query: ORDERS });\n";
         assert_eq!(op_qnames(tagged), ["graphql_op:Orders"]);
+    }
+    /// DT.11a: the CODE text of the operation qname `qname` in `out`.
+    fn op_code<'a>(out: &'a GraphqlNodes, qname: &str) -> Vec<&'a str> {
+        let id = out
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == qname)
+            .map(|(id, _)| *id)
+            .unwrap_or_else(|| panic!("no {qname}: {:?}", out.nav.qname_by_id.values().collect::<Vec<_>>()));
+        out.nodes
+            .iter()
+            .filter(|n| n.id == id)
+            .flat_map(|n| &n.cells)
+            .filter(|c| c.kind == cell_type::CODE)
+            .map(|c| match &c.payload {
+                CellPayload::Text(t) => t.as_str(),
+                other => panic!("CODE is text: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// DT.11a: the root fields in order and deduped, the field behind an
+    /// alias, an inline fragment's fields with or without a type condition,
+    /// no spread, no introspection field; a fragment definition, SDL and a
+    /// non-document give none, a document that stops parsing gives what came
+    /// before.
+    #[test]
+    fn operation_root_fields_reads_aliases_inline_fragments_and_skips_typename() {
+        for (doc, want) in [
+            ("query Dashboard { me { id } recent: orders(last: 5) { id } }", &["me", "orders"][..]),
+            ("\n  query StockList($first: Int) {\n    products(first: $first) { id name }\n  }\n", &["products"][..]),
+            ("query Products { __typename me { id } }", &["me"][..]),
+            ("{ a: me { id } b: me { name } orders }", &["me", "orders"][..]),
+            ("query Q @live { ... on Query { users { id } } ... @include(if: $x) { stats } ...Rest me }", &["users", "stats", "me"][..]),
+            ("query { ...OnlySpreads ...onUser }", &[][..]),
+            ("mutation M($id: ID!) { restock(id: $id, input: {qty: 2, note: \"}\"}) @auth { id } }", &["restock"][..]),
+            ("# c\n{ orders(last: 1) { id } }", &["orders"][..]),
+            ("fragment F on Query { users }", &[][..]),
+            ("type Query { products: [Product] }", &[][..]),
+            ("schema { query: Query }", &[][..]),
+            ("{ orders { id } ${MORE} }", &["orders"][..]),
+            ("{ orders(", &["orders"][..]),
+            ("", &[][..]),
+        ] {
+            assert_eq!(operation_root_fields(doc), want, "{doc:?}");
+        }
+    }
+
+    /// DT.11a: an anonymous `` gql` `` document is named by its first root
+    /// field (CL.6a's client-request rule), a named one keeps its name, and
+    /// a template that never closes names nothing it would not at HEAD.
+    #[test]
+    fn anonymous_template_is_named_by_first_root_field() {
+        let src = "import { gql } from '@apollo/client/core';\nexport const RECENT = gql`\n  {\n    orders(last: 1) { id }\n  }\n`;\nexport const SHIPPED = gql`query ($n: Int) { __typename shipments(first: $n) { id } }`;\nexport const NAMED = gql`query Recent { orders { id } }`;\n";
+        assert_eq!(op_qnames(src), ["graphql_op:Recent", "graphql_op:orders", "graphql_op:shipments"]);
+        let open = "const X = gql`\n  { orders { id } }\n";
+        assert!(op_qnames(open).is_empty(), "an unclosed anonymous template is no document");
+        let named = "const X = gql`query\n  Named { orders { id } }`;\n";
+        assert!(op_qnames(named).is_empty(), "a named document is never named by its root field");
+        let open_named = "const X = gql`query Open { orders { id } }\n";
+        assert_eq!(op_qnames(open_named), ["graphql_op:Open"], "HEAD's name rule");
+        assert!(op_code(&extract_graphql_operation_nodes(open_named, "", module_id(), repo()), "graphql_op:Open").is_empty());
+    }
+
+    /// DT.11a: a template operation carries its document, the untrimmed
+    /// body between the backticks, so it starts on the tag's line.
+    #[test]
+    fn template_op_carries_its_document() {
+        let src = "export const STOCK_LIST = gql`\n  query StockList($first: Int) {\n    products(first: $first) { id sku }\n  }\n`;\nexport const RESTOCK = gql`mutation Restock { restock { id } }`;\n";
+        let out = extract_graphql_operation_nodes(src, "", module_id(), repo());
+        assert_eq!(
+            op_code(&out, "graphql_op:StockList"),
+            ["\n  query StockList($first: Int) {\n    products(first: $first) { id sku }\n  }\n"]
+        );
+        assert_eq!(op_code(&out, "graphql_op:Restock"), ["mutation Restock { restock { id } }"]);
+        let anonymous = extract_graphql_operation_nodes("const R = gql`{ orders { id } }`;\n", "", module_id(), repo());
+        assert_eq!(op_code(&anonymous, "graphql_op:orders"), ["{ orders { id } }"]);
+    }
+
+    /// DT.11a: a needle named from the file's first document carries that
+    /// document; one named by its needle text carries none; a Dart call
+    /// carries its own constant's or inline literal's document.
+    #[test]
+    fn needle_op_carries_its_document() {
+        let tagged = "import { gql } from '@apollo/client';\nclient.query({ query: ORDERS });\nconst ORDERS = gql`query Orders { orders { id } }`;\n";
+        let out = extract_graphql_operation_nodes(tagged, "", module_id(), repo());
+        assert_eq!(out.anchors.first().map(|a| a.line), Some(1), "minted at the needle line");
+        assert_eq!(op_code(&out, "graphql_op:Orders"), ["query Orders { orders { id } }"]);
+        let call = "import { gql } from '@apollo/client';\nconst ORDERS = gql(\"query Orders { orders { id } }\");\nclient.query({ query: ORDERS });\n";
+        let out = extract_graphql_operation_nodes(call, "", module_id(), repo());
+        assert_eq!(op_code(&out, "graphql_op:Orders"), ["query Orders { orders { id } }"]);
+        let bare = extract_graphql_operation_nodes("const { data } = useQuery(GET_USERS);", "", module_id(), repo());
+        assert!(op_code(&bare, "graphql_op:useQuery").is_empty());
+
+        let out = extract_graphql_operation_nodes(DART_ORDERS, "", module_id(), repo());
+        assert_eq!(op_code(&out, "graphql_op:Orders"), ["\n  query Orders {\n    orders {\n      id\n    }\n  }\n"]);
+        let inline = "import 'package:graphql/client.dart';\nfinal f = client.query(QueryOptions(document: gql(r'query Inline { orders { id } }')));\n";
+        let out = extract_graphql_operation_nodes(inline, "", module_id(), repo());
+        assert_eq!(op_code(&out, "graphql_op:Inline"), ["query Inline { orders { id } }"]);
+    }
+
+    /// DT.11a: a Go machinebox / C# GraphQL.Client request carries the
+    /// document it sends, named or anonymous.
+    #[test]
+    fn client_request_op_carries_its_document() {
+        let go = "package main\n\nimport \"github.com/machinebox/graphql\"\n\nfunc f() {\n\treq := graphql.NewRequest(`query { orders { id } }`)\n\t_ = req\n}\n";
+        let out = extract_graphql_operation_nodes(go, "client.go", module_id(), repo());
+        assert_eq!(op_code(&out, "graphql_op:orders"), ["query { orders { id } }"]);
+        let cs = "using GraphQL.Client.Http;\nvar r = new GraphQLRequest { Query = @\"query BookShelf { books { title } }\" };\n";
+        let out = extract_graphql_operation_nodes(cs, "x.cs", module_id(), repo());
+        assert_eq!(op_code(&out, "graphql_op:BookShelf"), ["query BookShelf { books { title } }"]);
+    }
+
+    /// DT.11a: a fragment definition, in a template or a request, is no
+    /// operation and names nothing by a root field.
+    #[test]
+    fn fragment_definition_mints_nothing() {
+        assert!(op_qnames("export const PARTS = gql`\n  fragment UserParts on User { id name }\n`;\n").is_empty());
+        assert!(op_qnames("const T = gql`type Query { users: [User] }`;\n").is_empty());
+        let go = "package main\n\nimport \"github.com/machinebox/graphql\"\n\nfunc f() {\n\treq := graphql.NewRequest(`fragment F on Order { id }`)\n\t_ = req\n}\n";
+        assert!(op_qnames(go).is_empty());
     }
 }

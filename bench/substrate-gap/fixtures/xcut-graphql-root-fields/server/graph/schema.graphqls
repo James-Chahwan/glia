@@ -1,0 +1,22 @@
+type Product {
+  id: ID!
+  name: String!
+}
+
+type Order {
+  id: ID!
+}
+
+type User {
+  id: ID!
+}
+
+type Query {
+  products(first: Int): [Product!]!
+  orders(last: Int): [Order!]!
+  me: User
+}
+
+type Mutation {
+  restock(id: ID!): Product!
+}

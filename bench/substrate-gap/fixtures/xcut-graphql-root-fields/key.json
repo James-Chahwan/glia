@@ -1,0 +1,26 @@
+{
+  "framework": "xcut-graphql-root-fields",
+  "language": "typescript",
+  "dirs": ["client", "server"],
+  "mechanism": "graphql",
+  "note": "DT.11a (T11): a GraphQL operation pairs with the resolvers of the ROOT FIELDS its document selects, not its operation name (the examples-glia admin / gqlgen shape: `query StockList { products .. }` against `type Query { products .. }`). HEAD a584c98a (debug CLI merge client server): `[graphql-sdl] files=1 resolvers=6`, `[graphql-resolve] 2 pairs; dropped: type-level=2, unkeyable=0, no-match=2; narrowed-by-host=0`; GRAPHQL_CALLS Restock -> restock and a FALSE Products -> products (that document selects `me`); StockList and Dashboard unpaired; the anonymous `{ orders(last: 1) .. }` template mints no operation. Leap wheel grade at HEAD: GRAPHQL_CALLS 1/6 (Restock only), CODE 0/1, node graphql_op:orders missing, FORBID VIOLATIONS 1 (Products -> products).",
+  "expect_nodes": [
+    {"kind": "GRAPHQL_OPERATION", "name": "graphql_op:orders", "exact": true, "note": "the anonymous document, named by its first root field (CL.6a's rule)"}
+  ],
+  "expect_edges": [
+    {"from": "graphql_op:StockList", "to": "graphql_resolver:products", "category": "GRAPHQL_CALLS", "exact": true, "note": "op name differs from its root field: unpaired at HEAD"},
+    {"from": "graphql_op:Dashboard", "to": "graphql_resolver:me", "category": "GRAPHQL_CALLS", "exact": true, "note": "multi-root document: first root field"},
+    {"from": "graphql_op:Dashboard", "to": "graphql_resolver:orders", "category": "GRAPHQL_CALLS", "exact": true, "note": "multi-root document: the field behind the alias `recent: orders`"},
+    {"from": "graphql_op:Restock", "to": "graphql_resolver:restock", "category": "GRAPHQL_CALLS", "exact": true, "note": "control: name and root field agree (pairs at HEAD)"},
+    {"from": "graphql_op:Products", "to": "graphql_resolver:me", "category": "GRAPHQL_CALLS", "exact": true, "note": "`__typename` is passed over; the document selects `me`"},
+    {"from": "graphql_op:orders", "to": "graphql_resolver:orders", "category": "GRAPHQL_CALLS", "exact": true, "note": "the anonymous document's root field"}
+  ],
+  "expect_cells": [
+    {"kind": "GRAPHQL_OPERATION", "node": "graphql_op:StockList", "cell": "CODE", "contains": "products(first: $first)", "note": "the operation carries its document"}
+  ],
+  "forbid": [
+    {"from": "graphql_op:Products", "to": "graphql_resolver:products", "category": "GRAPHQL_CALLS", "note": "the name-only pair present at HEAD: root fields replace the name key"},
+    {"from": "graphql_op:StockList", "to": "graphql_resolver:me", "category": "GRAPHQL_CALLS", "note": "a document pairs only the fields it selects"},
+    {"from": "graphql_op:Dashboard", "to": "graphql_resolver:products", "category": "GRAPHQL_CALLS", "note": "a document pairs only the fields it selects"}
+  ]
+}

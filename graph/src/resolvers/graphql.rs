@@ -28,20 +28,41 @@
 //! [`GraphQLStackResolver::third_party_clients`] lists such operations by the
 //! same predicate.
 //!
+//! ROOT FIELDS (DT.11a). An operation read from a document carries it as its
+//! CODE cell (the extractor, `glia_code_extractors::graphql`), and pairs by
+//! the ROOT FIELDS that document selects
+//! (`glia_code_extractors::graphql::operation_root_fields`), not by its
+//! operation name: `query StockList { products { .. } }` pairs
+//! `graphql_resolver:products`, and `query Products { me { .. } }` pairs `me`
+//! and never `products`. The fields replace the name key whenever any is
+//! read; an operation with no document (a codegen hook `useGetUserQuery()`,
+//! a document built at run time, one selecting only fragment spreads, a CODE
+//! span a loaded layout could not read back) keeps HEAD's name key. Every
+//! field key reaching a resolver gives one pair per (operation, resolver),
+//! and such a pair's evidence rule is `root_field` unless a host narrowed
+//! it. The root TYPE is not checked: the resolver index is field-only, so a
+//! field served under both `Query` and `Subscription` pairs both.
+//!
 //! fired_on marker, once per build with GraphQL to resolve:
 //!   `[graphql-resolve] 2 pairs; dropped: type-level=2, unkeyable=0, no-match=0; narrowed-by-host=1`
 //! `narrowed-by-host` counts operations whose resolvers a host narrowed.
-//! Then, when a third-party operation was left unpaired (DF.9):
+//! Then, once per build with a keyable operation (DT.11a):
+//!   `[graphql-root-fields] ops=2 fields=2 pairs=2 name_key_ops=0`
+//! `ops` / `fields` count the operations keyed by root fields and their
+//! field keys, `pairs` the pairs those operations made, and `name_key_ops`
+//! the operations keyed by their name. Then, when a third-party operation was
+//! left unpaired (DF.9):
 //!   `[channel-external] via=graphql clients=<n> hosts=<k>`
 
 use std::collections::{HashMap, HashSet};
 
 use glia_code_domain::endpoint::split_owner;
-use glia_code_domain::{edge_category, node_kind};
-use glia_core::{Edge, NodeId};
+use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_code_extractors::graphql::operation_root_fields;
+use glia_core::{Cell, CellPayload, Edge, NodeId};
 
 use super::host::{ExternalSides, SideNarrowing, third_party_sides};
-use super::{CrossGraphResolver, RuleTally, build_kind_index, weakest};
+use super::{CrossGraphResolver, RuleTally, ServiceTarget, build_kind_index, weakest};
 use crate::merged::MergedGraph;
 use crate::types::RepoGraph;
 
@@ -90,7 +111,18 @@ impl CrossGraphResolver for GraphQLStackResolver {
             }
         }
 
+        // DT.11a: every operation's CODE cells, over every graph entry of it.
+        let mut documents: HashMap<NodeId, Vec<&Cell>> = HashMap::new();
+        for g in &merged.graphs {
+            for n in &g.nodes {
+                if g.nav.kind_by_id.get(&n.id) == Some(&node_kind::GRAPHQL_OPERATION) {
+                    documents.entry(n.id).or_default().extend(n.cells.iter().filter(|c| c.kind == cell_type::CODE));
+                }
+            }
+        }
+
         let (mut pairs, mut unkeyable, mut no_match) = (0usize, 0usize, 0usize);
+        let mut roots = RootFieldTally::default();
         // CB.24: an operation's hosts narrow its resolvers; the operations
         // narrowed (distinct ids) and the `host` rule's tally.
         let mut narrowing = SideNarrowing::new(
@@ -99,7 +131,7 @@ impl CrossGraphResolver for GraphQLStackResolver {
             node_kind::GRAPHQL_RESOLVER,
         );
         let mut narrowed: HashSet<NodeId> = HashSet::new();
-        let mut rules = RuleTally::new("graphql", &["host"]);
+        let mut rules = RuleTally::new("graphql", &["host", "root_field"]);
         let mut external = ExternalSides::default();
         for g in &merged.graphs {
             for n in &g.nodes {
@@ -112,10 +144,13 @@ impl CrossGraphResolver for GraphQLStackResolver {
                 let Some(op_name) = split_owner(qname).0.strip_prefix("graphql_op:") else {
                     continue;
                 };
-                let Some(key) = gql_key(op_name) else {
+                let docs = documents.get(&n.id).map_or(&[][..], Vec::as_slice);
+                let (keys, source) = op_keys(docs, op_name);
+                if keys.is_empty() {
                     unkeyable += 1;
                     continue;
-                };
+                }
+                roots.keyed(source, keys.len());
                 // DF.9 (CG.4b's rule): an operation that queries only public
                 // hosts outside the build pairs with nothing, whatever
                 // resolver of the build serves its field.
@@ -123,11 +158,11 @@ impl CrossGraphResolver for GraphQLStackResolver {
                     external.add(n.id, hosts);
                     continue;
                 }
-                let Some(targets) = by_key.get(&key) else {
+                let mut targets = key_targets(&by_key, &keys);
+                if targets.is_empty() {
                     no_match += 1;
                     continue;
-                };
-                let mut targets = targets.clone();
+                }
                 let by_host = narrowing.narrow(n.id, &mut targets, |t| t.id);
                 if by_host {
                     narrowed.insert(n.id);
@@ -142,9 +177,14 @@ impl CrossGraphResolver for GraphQLStackResolver {
                     };
                     if by_host {
                         edge.cells.push(rules.cell("host"));
+                    } else if source == KeySource::RootField {
+                        edge.cells.push(rules.cell("root_field"));
                     }
                     merged.cross_edges.push(edge);
                     pairs += 1;
+                    if source == KeySource::RootField {
+                        roots.pairs += 1;
+                    }
                 }
             }
         }
@@ -159,7 +199,91 @@ impl CrossGraphResolver for GraphQLStackResolver {
                 narrowed.len()
             );
         }
+        if let Some(line) = roots.marker() {
+            eprintln!("{line}");
+        }
         external.report("graphql");
+    }
+}
+
+/// DT.11a: where an operation's pairing keys came from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum KeySource {
+    /// The root fields its document selects.
+    RootField,
+    /// Its operation name (no document, or one with no root field read).
+    OpName,
+}
+
+/// DT.11a: the field keys an operation pairs by, and where they came from:
+/// the [`gql_key`] of every root field that
+/// [`operation_root_fields`] reads from the operation's CODE text cells
+/// (`docs`, the union over every graph entry of it, first seen first), else
+/// `gql_key(op_name)`. Root fields REPLACE the name key once any is read, so
+/// `query Users { me }` never keys `users`; when none of them is keyable the
+/// keys are empty (the operation is unkeyable). A CODE payload that is not
+/// text (an unresolved CD.7c span) reads no field.
+fn op_keys(docs: &[&Cell], op_name: &str) -> (Vec<String>, KeySource) {
+    let mut fields: Vec<String> = Vec::new();
+    for c in docs {
+        let (true, CellPayload::Text(doc)) = (c.kind == cell_type::CODE, &c.payload) else {
+            continue;
+        };
+        for f in operation_root_fields(doc) {
+            if !fields.contains(&f) {
+                fields.push(f);
+            }
+        }
+    }
+    if fields.is_empty() {
+        return (gql_key(op_name).into_iter().collect(), KeySource::OpName);
+    }
+    let mut keys: Vec<String> = Vec::new();
+    for key in fields.iter().filter_map(|f| gql_key(f)) {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    (keys, KeySource::RootField)
+}
+
+/// DT.11a: the resolvers `keys` reach, in key order, each key's list as the
+/// index holds it (one key's list is HEAD's target list). There is one pair
+/// per (operation, resolver) however many root fields name it: [`op_keys`]
+/// dedups the keys, and a resolver sits under one name, so under one key.
+fn key_targets(by_key: &HashMap<String, Vec<ServiceTarget>>, keys: &[String]) -> Vec<ServiceTarget> {
+    keys.iter().filter_map(|k| by_key.get(k)).flatten().copied().collect()
+}
+
+/// DT.11a: the `[graphql-root-fields]` counts.
+#[derive(Default)]
+struct RootFieldTally {
+    ops: usize,
+    fields: usize,
+    pairs: usize,
+    name_key_ops: usize,
+}
+
+impl RootFieldTally {
+    /// Count one keyable operation keyed by `source` with `keys` keys.
+    fn keyed(&mut self, source: KeySource, keys: usize) {
+        match source {
+            KeySource::RootField => {
+                self.ops += 1;
+                self.fields += keys;
+            }
+            KeySource::OpName => self.name_key_ops += 1,
+        }
+    }
+
+    /// The marker line, or `None` when no operation was keyable.
+    fn marker(&self) -> Option<String> {
+        (self.ops + self.name_key_ops > 0).then(|| {
+            format!(
+                "[graphql-root-fields] ops={} fields={} pairs={} name_key_ops={}",
+                self.ops, self.fields, self.pairs, self.name_key_ops
+            )
+        })
     }
 }
 
@@ -372,6 +496,113 @@ mod host_tests {
             );
             assert!(merged.cross_edges.iter().all(|e| e.cells.is_empty()), "{hits:?}");
         }
+    }
+}
+
+/// DT.11a: pairing by the root fields of an operation's document.
+#[cfg(test)]
+mod root_field_tests {
+    use super::super::tests::{channel_graph, cross_pairs};
+    use super::*;
+    use glia_code_domain::evidence::Evidence;
+
+    /// A graph of `ops` (qname, document or none) and resolvers `fields`.
+    fn graph(tag: &str, ops: &[(&str, Option<&str>)], fields: &[&str]) -> RepoGraph {
+        let resolvers: Vec<String> = fields.iter().map(|f| format!("graphql_resolver:{f}")).collect();
+        let mut spec: Vec<_> = ops.iter().map(|(q, _)| (node_kind::GRAPHQL_OPERATION, *q)).collect();
+        spec.extend(resolvers.iter().map(|q| (node_kind::GRAPHQL_RESOLVER, q.as_str())));
+        let mut g = channel_graph(tag, &spec);
+        for (n, (_, doc)) in g.nodes.iter_mut().zip(ops) {
+            n.cells = doc
+                .iter()
+                .map(|d| Cell { kind: cell_type::CODE, payload: CellPayload::Text((*d).to_string()) })
+                .collect();
+        }
+        g
+    }
+
+    fn run(g: RepoGraph) -> MergedGraph {
+        let mut merged = MergedGraph::new(vec![g]);
+        merged.run(&GraphQLStackResolver);
+        merged
+    }
+
+    fn pairs(m: &MergedGraph) -> Vec<(String, String)> {
+        cross_pairs(m, edge_category::GRAPHQL_CALLS)
+    }
+
+    fn p(op: &str, field: &str) -> (String, String) {
+        (format!("graphql_op:{op}"), format!("graphql_resolver:{field}"))
+    }
+
+    fn rules(m: &MergedGraph) -> Vec<Option<String>> {
+        m.cross_edges.iter().map(|e| Evidence::read(&e.cells).and_then(|ev| ev.rule)).collect()
+    }
+
+    /// examples-glia's admin console: `query StockList` selects `products`.
+    #[test]
+    fn root_field_pairs_unlike_name() {
+        let doc = "\n  query StockList($first: Int) {\n    products(first: $first) { id sku }\n  }\n";
+        let m = run(graph("gql-rf", &[("graphql_op:StockList", Some(doc))], &["products", "stockList"]));
+        assert_eq!(pairs(&m), vec![p("StockList", "products")]);
+        assert_eq!(rules(&m), vec![Some("root_field".to_string())]);
+    }
+
+    /// Every root field pairs, an alias by the field behind it; a field
+    /// named twice pairs once.
+    #[test]
+    fn multi_root_document_pairs_each() {
+        let doc = "query Dashboard { me { id } recent: orders(last: 5) { id } again: me { name } }";
+        let m = run(graph("gql-multi", &[("graphql_op:Dashboard", Some(doc))], &["me", "orders", "products"]));
+        assert_eq!(pairs(&m), vec![p("Dashboard", "me"), p("Dashboard", "orders")]);
+        assert_eq!(rules(&m), vec![Some("root_field".to_string()); 2]);
+    }
+
+    /// `query Products { __typename me }` reaches `me`, never `products`;
+    /// a document whose only root field keys nothing is unkeyable, not its
+    /// name.
+    #[test]
+    fn root_fields_replace_the_name_key() {
+        let m = run(graph(
+            "gql-replace",
+            &[
+                ("graphql_op:Products", Some("query Products { __typename me { id } }")),
+                ("graphql_op:GetUsers", Some("query GetUsers { u }")),
+            ],
+            &["products", "me", "getUsers"],
+        ));
+        assert_eq!(pairs(&m), vec![p("Products", "me")]);
+    }
+
+    /// An operation with no document (a codegen hook), only fragment
+    /// spreads, or an unresolved CD.7c span keeps the name key and the bare
+    /// stamp; two graph entries of one operation pool their documents.
+    #[test]
+    fn no_document_falls_back_to_name() {
+        let span = r#"{"code_span":{"file":"src/q.ts","start":0,"end":9,"xxh64":"0000000000000000"}}"#;
+        let mut g = graph(
+            "gql-name",
+            &[
+                ("graphql_op:useGetUserQuery", None),
+                ("graphql_op:listUsers", Some("query listUsers { ...UserList }")),
+                ("graphql_op:orders", None),
+            ],
+            &["getUser", "listUsers", "orders", "me"],
+        );
+        g.nodes[2].cells = vec![Cell { kind: cell_type::CODE, payload: CellPayload::Json(span.into()) }];
+        let m = run(g);
+        assert_eq!(
+            pairs(&m),
+            vec![p("listUsers", "listUsers"), p("orders", "orders"), p("useGetUserQuery", "getUser")]
+        );
+        assert!(rules(&m).iter().all(Option::is_none), "{:?}", rules(&m));
+
+        // The second entry of `graphql_op:orders` holds the document.
+        let first = graph("gql-pool", &[("graphql_op:orders", None)], &["me", "orders"]);
+        let second = graph("gql-pool", &[("graphql_op:orders", Some("{ me { id } }"))], &[]);
+        let mut m = MergedGraph::new(vec![first, second]);
+        m.run(&GraphQLStackResolver);
+        assert_eq!(pairs(&m), vec![p("orders", "me"), p("orders", "me")]);
     }
 }
 
