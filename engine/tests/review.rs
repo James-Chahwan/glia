@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 use git_fixture::GitRepo;
 use glia_engine::check::Violation;
 use glia_engine::delta::graph_delta_vs_rev;
+use glia_engine::identity::Collapse;
 use glia_engine::review::{
     MarkdownOptions, Review, ReviewArgs, render_markdown, review, review_vs_rev,
 };
@@ -696,5 +697,470 @@ fn markdown_empty_review() {
     assert_eq!(
         md(&r),
         "## glia review vs `HEAD`\n**0 new violation(s)** | 0 resolved | 0 changed nodes | impact 0 | tests 0 (0 seeds untested) | edges +0 -0\n\nNo graph change vs HEAD.\n"
+    );
+}
+
+// ============================================================================
+// DB.3c: rule and forbid_path violations by subject; the gate is min_tier
+// ============================================================================
+
+/// DB.3a's tree (engine/tests/check_rule_invariants.rs) under git: five
+/// manifest projects, the root's included, so an unscoped invariant anchors
+/// on the root PROJECT. web/app.py calls only the api; the api's
+/// `get_order` loads from the store and its `unused` is called by nothing.
+const RULE_TREE: [(&str, &str); 9] = [
+    ("pyproject.toml", "[project]\nname = \"root\"\n"),
+    ("web/pyproject.toml", "[project]\nname = \"web\"\n"),
+    ("services/api/pyproject.toml", "[project]\nname = \"api\"\n"),
+    ("store/pyproject.toml", "[project]\nname = \"store\"\n"),
+    ("scripts/pyproject.toml", "[project]\nname = \"scripts\"\n"),
+    ("web/app.py", SHOW),
+    ("services/api/handlers.py", HANDLERS),
+    ("store/db.py", "def load(k):\n    return k\n"),
+    ("scripts/tool.py", TOOL),
+];
+const SHOW: &str =
+    "from services.api.handlers import get_order\n\n\ndef show(o):\n    return get_order(o)\n";
+/// [`SHOW`] plus `f` (line 9), calling the store directly (line 10).
+const SHOW_AND_F: &str = "from services.api.handlers import get_order\nfrom store.db import load\n\n\ndef show(o):\n    return get_order(o)\n\n\ndef f(k):\n    return load(k)\n";
+const HANDLERS: &str = "from store.db import load\n\n\ndef get_order(o):\n    return load(o)\n\n\ndef unused():\n    return 1\n";
+/// [`HANDLERS`] plus a second uncalled handler, `also_unused` (line 12).
+const HANDLERS_PLUS: &str = "from store.db import load\n\n\ndef get_order(o):\n    return load(o)\n\n\ndef unused():\n    return 1\n\n\ndef also_unused():\n    return 2\n";
+/// scripts/ never touches the store.
+const TOOL: &str = "def run():\n    return 0\n\n\ndef other():\n    return 1\n";
+/// `run` loads from the store (an IMPORTS and a CALLS, both facts).
+const TOOL_LOADS: &str = "from store.db import load\n\n\ndef run():\n    return load(0)\n\n\ndef other():\n    return 1\n";
+
+/// DB.3a's `web-no-store` invariant (`[[constraint]]` on line 3).
+const WEB_NO_STORE: &str = r#"version = 2
+
+[[constraint]]
+id = "web-no-store"
+kind = "invariant"
+text = "web never calls the store directly"
+rule = "violation(a, b) :- calls(a, b), in_scope(a, \"web\"), in_scope(b, \"store\")."
+"#;
+/// DB.3a's negation-only `api-called` invariant: its rows derive from no edge.
+const API_CALLED: &str = r#"version = 2
+
+[[constraint]]
+id = "api-called"
+kind = "invariant"
+text = "every api handler is called"
+rule = "violation(f) :- node(f, \"FUNCTION\"), in_scope(f, \"services/api/handlers.py\"), !called(f). called(f) :- edge(_, f, \"CALLS\")."
+"#;
+/// DB.3a's `scripts-no-store` invariant.
+const SCRIPTS_NO_STORE: &str = r#"version = 2
+
+[[constraint]]
+id = "scripts-no-store"
+kind = "invariant"
+text = "scripts never call the store"
+rule = "violation(a, b) :- calls(a, b), in_scope(a, \"scripts\"), in_scope(b, \"store\")."
+"#;
+/// A version-1 direct forbid_edge, scripts -> store, default categories.
+const SCRIPTS_DIRECT: &str = r#"version = 1
+
+[[constraint]]
+id = "scripts-direct"
+kind = "forbid_edge"
+from = "scripts"
+to = "store"
+"#;
+/// An overlay `[[edge]]` (a HEURISTIC CALLS) from `from` to the store's load.
+fn declared_call(from: &str) -> String {
+    format!("\n[[edge]]\nfrom = \"{from}\"\nto = \"store::db::load\"\ncategory = \"CALLS\"\n")
+}
+
+/// [`RULE_TREE`] committed on `main`, with `overlay` (none when empty) and
+/// each `(path, text)` of `with` over the tree.
+fn committed_rules(overlay: &str, with: &[(&str, &str)]) -> GitRepo {
+    let repo = GitRepo::init();
+    for (rel, src) in RULE_TREE.iter().chain(with) {
+        repo.write(rel, src);
+    }
+    if !overlay.is_empty() {
+        repo.write(".glia/overlay.toml", overlay);
+    }
+    repo.commit("rules");
+    repo
+}
+
+/// `(rule id, kind, subject, tier, blocking)` of each violation.
+type Classed<'a> = (&'a str, &'a str, Vec<&'a str>, &'a str, bool);
+
+fn classed(v: &[Violation]) -> Vec<Classed<'_>> {
+    v.iter()
+        .map(|v| {
+            (
+                v.rule_id.as_str(),
+                v.rule_kind,
+                v.subject.iter().map(String::as_str).collect(),
+                v.tier,
+                v.blocking,
+            )
+        })
+        .collect()
+}
+
+/// (1) The working tree adds a call web -> store and the version-2 overlay
+/// declaring `web-no-store` (the rules are the working tree's, so the base is
+/// checked against it too): one new RULE violation, by subject, that blocks.
+#[test]
+fn rule_violation_added_is_new_and_blocking() {
+    let repo = committed_rules("", &[]);
+    repo.write(".glia/overlay.toml", WEB_NO_STORE);
+    repo.write("web/app.py", SHOW_AND_F);
+    let r = run(&repo);
+    assert!(r.check_errors.is_empty(), "{:#?}", r.check_errors);
+    assert_eq!(
+        classed(&r.new_violations),
+        [(
+            "web-no-store",
+            "rule",
+            vec!["web::app::f", "store::db::load"],
+            "fact",
+            true
+        )],
+        "{:#?}",
+        r.new_violations
+    );
+    assert!(r.blocking, "{r:#?}");
+    assert!(
+        r.resolved_violations.is_empty(),
+        "{:#?}",
+        r.resolved_violations
+    );
+    let v = &r.new_violations[0];
+    assert_eq!(rows(v), [("CALLS", "web/app.py:10".to_string(), "fact")]);
+    let text = md(&r);
+    assert!(
+        text.starts_with("## glia review vs `HEAD`\n**1 new violation(s)** | 0 resolved |"),
+        "no advisory, no suffix:\n{text}"
+    );
+    let want = "### New violations (blocking)\n\n#### web-no-store (rule, .glia/overlay.toml:3)\n\n_subject: `web::app::f`, `store::db::load` - tier fact at web/app.py:9_\n\n| category | from | to | at | tier |\n|---|---|---|---|---|\n| CALLS | `web::app::f` | `store::db::load` | web/app.py:10 | fact |\n";
+    assert!(text.contains(want), "missing {want:?} in:\n{text}");
+    assert!(!text.contains("### New violations (advisory"), "{text}");
+}
+
+/// (2) A negation-only rule row derives from no edge, so it has no evidence
+/// row to compare: its subject is its identity. The change adds a second
+/// uncalled handler: exactly that subject is new, the base's `unused` is
+/// neither; the change the other way resolves it.
+#[test]
+fn negation_only_violation_is_classed() {
+    let repo = committed_rules(API_CALLED, &[]);
+    repo.write("services/api/handlers.py", HANDLERS_PLUS);
+    let r = run(&repo);
+    assert!(r.check_errors.is_empty(), "{:#?}", r.check_errors);
+    assert_eq!(
+        classed(&r.new_violations),
+        [(
+            "api-called",
+            "rule",
+            vec!["services::api::handlers::also_unused"],
+            "fact",
+            true
+        )],
+        "{:#?}",
+        r.new_violations
+    );
+    let v = &r.new_violations[0];
+    assert!(v.evidence.is_empty() && v.count == 0, "{v:#?}");
+    assert!(!v.caveats.is_empty(), "Q5: the negation read CALLS: {v:#?}");
+    assert!(r.blocking, "{r:#?}");
+    assert!(
+        r.resolved_violations.is_empty(),
+        "{:#?}",
+        r.resolved_violations
+    );
+    let text = md(&r);
+    assert!(
+        text.contains("#### api-called (rule, .glia/overlay.toml:3)\n\n_subject: `services::api::handlers::also_unused` - tier fact at services/api/handlers.py:12_\n\n⚠ "),
+        "{text}"
+    );
+    let caveats = text.lines().filter(|l| l.starts_with("⚠ ")).count();
+    assert_eq!(caveats, v.caveats.len().min(5), "{text}");
+
+    let back = committed_rules(API_CALLED, &[("services/api/handlers.py", HANDLERS_PLUS)]);
+    back.write("services/api/handlers.py", HANDLERS);
+    let r = run(&back);
+    assert!(r.new_violations.is_empty(), "{:#?}", r.new_violations);
+    assert!(!r.blocking, "{r:#?}");
+    assert_eq!(
+        classed(&r.resolved_violations),
+        [(
+            "api-called",
+            "rule",
+            vec!["services::api::handlers::also_unused"],
+            "fact",
+            true
+        )],
+        "{:#?}",
+        r.resolved_violations
+    );
+}
+
+/// (3) A new violation below its rule's min_tier (here heuristic: an overlay
+/// edge) is reported, under its own heading, and does not block (0.5.2 Q2).
+#[test]
+fn advisory_new_violation_does_not_block() {
+    let repo = committed_rules(SCRIPTS_NO_STORE, &[]);
+    repo.write(
+        ".glia/overlay.toml",
+        &format!("{SCRIPTS_NO_STORE}{}", declared_call("scripts::tool::run")),
+    );
+    let r = run(&repo);
+    assert!(r.check_errors.is_empty(), "{:#?}", r.check_errors);
+    assert_eq!(
+        classed(&r.new_violations),
+        [(
+            "scripts-no-store",
+            "rule",
+            vec!["scripts::tool::run", "store::db::load"],
+            "heuristic",
+            false
+        )],
+        "{:#?}",
+        r.new_violations
+    );
+    assert!(!r.blocking, "{r:#?}");
+    assert_eq!(r.counts.new_violations, 1);
+    let text = md(&r);
+    assert!(
+        text.starts_with(
+            "## glia review vs `HEAD`\n**1 new violation(s)** (1 advisory) | 0 resolved |"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("### New violations (advisory: below the rule's min_tier)\n\n#### scripts-no-store (rule, .glia/overlay.toml:3)\n\n_subject: `scripts::tool::run`, `store::db::load` - tier heuristic at scripts/tool.py:1_\n\n| category | from | to | at | tier |\n|---|---|---|---|---|\n| CALLS | `scripts::tool::run` | `store::db::load` | .glia/overlay.toml:"),
+        "{text}"
+    );
+    assert!(!text.contains("### New violations (blocking)"), "{text}");
+}
+
+/// fx1 (engine/tests/check_transitive.rs): web/ reaches the api's internals
+/// through shared/, and its public facade through the allowed `via`.
+const FX1: [(&str, &str); 7] = [
+    ("web/pyproject.toml", "[project]\nname = \"web\"\n"),
+    ("shared/pyproject.toml", "[project]\nname = \"shared\"\n"),
+    ("services/api/pyproject.toml", "[project]\nname = \"api\"\n"),
+    ("web/app.py", FX1_WEB),
+    (
+        "shared/util.py",
+        "from services.api.internal.db import query\n\n\ndef helper():\n    return query()\n",
+    ),
+    (
+        "services/api/public/facade.py",
+        "from services.api.internal.db import write\n\n\ndef get():\n    return write()\n",
+    ),
+    (
+        "services/api/internal/db.py",
+        "def query():\n    return 1\n\n\ndef write():\n    return 2\n",
+    ),
+];
+const FX1_WEB: &str = "from shared.util import helper\nfrom services.api.public.facade import get\n\n\ndef page():\n    return helper()\n\n\ndef other():\n    return get()\n";
+/// [`FX1_WEB`] with `page` also calling `query` directly: a one-hop FACT
+/// path (and a one-hop import of the db module) to the two existing hits.
+const FX1_WEB_DIRECT: &str = "from shared.util import helper\nfrom services.api.public.facade import get\nfrom services.api.internal.db import query\n\n\ndef page():\n    return helper() + query()\n\n\ndef other():\n    return get()\n";
+/// [`FX1_WEB`] plus `third`, calling the internal `write` past the facade.
+const FX1_WEB_WRITE: &str = "from shared.util import helper\nfrom services.api.public.facade import get\nfrom services.api.internal.db import write\n\n\ndef page():\n    return helper()\n\n\ndef other():\n    return get()\n\n\ndef third():\n    return write()\n";
+/// DB.3b's acceptance rule: web never reaches services/api except through
+/// its public facade.
+const VIA: &str = r#"version = 2
+
+[[constraint]]
+id = "web-no-api"
+kind = "forbid_edge"
+from = "web"
+to = "services/api"
+transitive = true
+via = ["services/api/public"]
+"#;
+
+fn committed_fx1() -> GitRepo {
+    let repo = GitRepo::init();
+    for (rel, src) in FX1 {
+        repo.write(rel, src);
+    }
+    repo.write(".glia/overlay.toml", VIA);
+    repo.commit("fx1");
+    repo
+}
+
+/// (4) A forbid_path violation is one hit, identified by the node reached: a
+/// shorter path into an existing hit changes its witness, not its identity
+/// (neither new nor resolved); a path into a node the base did not reach is
+/// that one hit, new.
+#[test]
+fn forbid_path_witness_change_is_not_new() {
+    let repo = committed_fx1();
+    repo.write("web/app.py", FX1_WEB_DIRECT);
+    let r = run(&repo);
+    assert!(r.check_errors.is_empty(), "{:#?}", r.check_errors);
+    assert!(
+        r.new_violations.is_empty() && r.resolved_violations.is_empty(),
+        "new {:#?}\nresolved {:#?}",
+        r.new_violations,
+        r.resolved_violations
+    );
+    assert!(!r.blocking, "{r:#?}");
+    assert!(
+        r.edges.iter().any(|e| e.change == "added"
+            && e.from_qname == "web::app::page"
+            && e.to_qname == "services::api::internal::db::query"),
+        "the shorter path is in the graph: {:#?}",
+        r.edges
+    );
+
+    let repo = committed_fx1();
+    repo.write("web/app.py", FX1_WEB_WRITE);
+    let r = run(&repo);
+    assert!(r.check_errors.is_empty(), "{:#?}", r.check_errors);
+    assert_eq!(
+        classed(&r.new_violations),
+        [(
+            "web-no-api",
+            "forbid_path",
+            vec!["services::api::internal::db::write"],
+            "fact",
+            true
+        )],
+        "{:#?}",
+        r.new_violations
+    );
+    assert!(r.blocking, "{r:#?}");
+    assert!(
+        r.resolved_violations.is_empty(),
+        "{:#?}",
+        r.resolved_violations
+    );
+    let text = md(&r);
+    assert!(
+        text.contains("#### web-no-api (forbid_path, .glia/overlay.toml:3)\n\n_subject: `services::api::internal::db::write` - tier fact at services/api/internal/db.py:5_\n\n| category | from | to | at | tier |\n|---|---|---|---|---|\n| CALLS | `web::app::third` | `services::api::internal::db::write` | web/app.py:15 | fact |\n"),
+        "{text}"
+    );
+}
+
+/// (6) A direct forbid_edge the base already broke with facts, to which the
+/// change adds only a declared (heuristic) edge: the new violation is that
+/// one row, its tier the row's, and its gate recomputed from it, so it does
+/// not block.
+#[test]
+fn reduced_violation_reads_its_own_tier() {
+    let repo = committed_rules(SCRIPTS_DIRECT, &[("scripts/tool.py", TOOL_LOADS)]);
+    repo.write(
+        ".glia/overlay.toml",
+        &format!("{SCRIPTS_DIRECT}{}", declared_call("scripts::tool::other")),
+    );
+    let r = run(&repo);
+    assert!(r.check_errors.is_empty(), "{:#?}", r.check_errors);
+    assert_eq!(
+        classed(&r.new_violations),
+        [("scripts-direct", "forbid_edge", vec![], "heuristic", false)],
+        "{:#?}",
+        r.new_violations
+    );
+    let v = &r.new_violations[0];
+    assert_eq!(v.count, 1, "{v:#?}");
+    let got: Vec<(&str, &str, &str, &str)> = v
+        .evidence
+        .iter()
+        .map(|e| {
+            (
+                e.category,
+                e.from_qname.as_str(),
+                e.to_qname.as_str(),
+                e.tier,
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [(
+            "CALLS",
+            "scripts::tool::other",
+            "store::db::load",
+            "heuristic"
+        )]
+    );
+    assert!(!r.blocking, "{r:#?}");
+    assert!(
+        r.resolved_violations.is_empty(),
+        "{:#?}",
+        r.resolved_violations
+    );
+    let text = md(&r);
+    assert!(
+        text.contains("### New violations (advisory: below the rule's min_tier)\n\n#### scripts-direct (forbid_edge, .glia/overlay.toml:3)\n\n| category"),
+        "a forbid_edge violation renders no subject line:\n{text}"
+    );
+}
+
+/// DD.10 handoff: one repo whose web/ manifest starts depending on the api
+/// project (`manifest_name`, a FACT identity class of the dependency and the
+/// PROJECT it names). The added dependency is an impact seed that stands for
+/// the class; its `also_in` names the repo by the working tree's label, as
+/// `tests_for_delta` does, not `repo#<id % 1000>` (HEAD before DB.3c:
+/// `repo#873` beside the label `repo`).
+#[test]
+fn impact_identity_names_the_repo_by_its_label() {
+    let repo = GitRepo::init();
+    repo.write("web/pyproject.toml", "[project]\nname = \"web\"\n");
+    repo.write("services/api/pyproject.toml", "[project]\nname = \"api\"\n");
+    repo.write("web/app.py", WEB_APP_CLEAN);
+    repo.write("services/api/internal.py", INTERNAL);
+    repo.commit("clean");
+    repo.write(
+        "web/pyproject.toml",
+        "[project]\nname = \"web\"\ndependencies = [\"api\"]\n",
+    );
+    let rev = graph_delta_vs_rev(repo.path(), "HEAD").expect("delta");
+    let label = rev
+        .after
+        .repo_labels
+        .values()
+        .next()
+        .cloned()
+        .expect("the working tree's label");
+    let r = review(&rev, &ReviewArgs::default()).expect("review");
+    let seed = r
+        .impact
+        .seeds
+        .iter()
+        .find(|s| s.qname == "package:pypi:api")
+        .expect("the added dependency is a seed");
+    let v = serde_json::to_value(seed).expect("serialises");
+    let also = v["identity"]["also_in"]
+        .as_array()
+        .expect("the seed stands for its class");
+    let repos: Vec<&str> = also.iter().filter_map(|a| a["repo"].as_str()).collect();
+    assert_eq!(repos, [label.as_str()], "{v:#}");
+    assert_eq!(also[0]["qname"], "project:services/api", "{v:#}");
+
+    // A caller's own labels win; `Collapse::off()` is the raw answer.
+    let mut args = ReviewArgs::default();
+    args.blast.collapse = Collapse::off();
+    let raw = review(&rev, &args).expect("review");
+    assert!(
+        !serde_json::to_string(&raw.impact)
+            .expect("serialises")
+            .contains("also_in"),
+        "{:#?}",
+        raw.impact
+    );
+    let mut args = ReviewArgs::default();
+    args.blast.collapse = Collapse::with_labels(&BTreeMap::from([(
+        rev.after.merged.graphs[0].repo.0,
+        "mine".to_string(),
+    )]));
+    let own = review(&rev, &args).expect("review");
+    assert!(
+        serde_json::to_string(&own.impact)
+            .expect("serialises")
+            .contains("\"repo\":\"mine\""),
+        "{:#?}",
+        own.impact
     );
 }

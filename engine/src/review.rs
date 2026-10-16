@@ -14,7 +14,9 @@
 //! # The parts
 //!
 //! - `changed` + `impact`: `diff_impact::diff_impact_from_delta` (LE.2 / CC.1)
-//!   with [`ReviewArgs::blast`]; the impact rows keep the engine's ranking and
+//!   with [`ReviewArgs::blast`] (an enabled identity collapse with no repo
+//!   labels labelled with the working tree's, DD.10, as `tests_for_delta`
+//!   labels its own); the impact rows keep the engine's ranking and
 //!   are cut to `max_impact` (`counts.impact` is the uncut length);
 //! - `tests`: `tests_for::tests_for_delta` (LE.3b / CC.1) with
 //!   [`ReviewArgs::tests`], cut to `max_tests` (`counts.tests` is the uncut
@@ -46,14 +48,28 @@
 //! - no_cycle: the strongly-connected component's sorted member qnames (the
 //!   witness is one cycle through it; the members are its identity). A module
 //!   joining an existing cycle therefore makes the grown cycle NEW and the old
-//!   one resolved, even when the shortest witness did not change.
+//!   one resolved, even when the shortest witness did not change;
+//! - rule (DB.3a) and forbid_path (DB.3b): the violation's `subject` under
+//!   the rule id (a rule row's head values rendered; a transitive hit's
+//!   qname). A rule row may derive from no edge (a negation-only row such as
+//!   "every handler is called" has no evidence), and a forbid_path witness
+//!   moves whenever a shorter or better-tier path appears, so neither is
+//!   identified by its rows: a fresh path into a node the base already
+//!   reached is the same violation, not a new one.
 //!
 //! `new_violations` are the working tree's violations with at least one
 //! identity the base lacks, each reduced to its new evidence rows (`count` =
-//! the new rows; a no_cycle violation is kept whole, its `count` the
-//! component's size, as `check` reports it). `resolved_violations` are the
-//! base's violations the same way round. `blocking` is `!new_violations
-//! .is_empty()`.
+//! the new rows; a no_cycle, rule or forbid_path violation is kept whole, as
+//! `check` reports it). `resolved_violations` are the base's violations the
+//! same way round. A reduced violation's `tier` is its strongest kept row's
+//! and its `blocking` is recomputed from that tier under its rule's
+//! `min_tier` (`check::is_blocking`; the working tree's rule of that id, the
+//! default for a `reflexion:` divergence), so a fact-broken rule to which a
+//! change adds only an overlay edge reports one heuristic, advisory row.
+//! The review's `blocking` is whether a NEW violation blocks: one at or above
+//! its rule's `min_tier`, never a heuristic one (0.5.2 Q2). An advisory new
+//! violation is listed, and counted in `counts.new_violations`, but does not
+//! fail the gate.
 //!
 //! A rule that errors on the BASE side (its scope matches no node there: a
 //! directory the change creates) counts as no violation there, so its
@@ -75,9 +91,13 @@
 //! import-only no_cycle) and its row shape (EVIDENCE site else the `from`
 //! node's location, `why::tier_of`). Every row identity check lists is
 //! unioned into the index, so a drift between the two can only make an edge
-//! read as pre-existing, never as new. Any other kind is compared on check's
-//! listed rows; when a side lists fewer rows than its `count`, the rows it
-//! cannot see are left unclassed and `check_errors` says so. REMOVAL: when
+//! read as pre-existing, never as new. A transitive forbid_edge is left out
+//! of the index on purpose: check lists every forbid_path violation uncapped
+//! (one per hit, sorted by subject), as it lists every rule row, and both
+//! are classed by subject. Any other kind (a reflexion divergence) is
+//! compared on check's listed rows; when a side lists fewer rows than its
+//! `count`, the rows it cannot see are left unclassed and `check_errors` says
+//! so. REMOVAL: when
 //! `check::check_rules` exposes each violation's full identity (every
 //! forbidden edge uncapped, a cycle's member set), read that and delete
 //! `RuleIndex`, `Scopes` and `Sub`.
@@ -88,12 +108,20 @@
 //! `review_vs_rev(format="markdown")` returns: GitHub / GitLab flavoured and
 //! a function of the [`Review`] and [`MarkdownOptions`] alone (two renders
 //! are byte-identical; nothing is printed). ``## glia review vs `<base>` ``
-//! and a headline of the counts, then `### New violations (blocking)` (only
-//! when one exists: a `#### <rule id> (<kind>, <decl>)` table per
-//! violation), `### Check errors` (when any: the working tree's rule errors
-//! and the rules only partly compared), `### Tests to run`, `### Impact`,
-//! `### Edge changes` (grouped by tier, facts first), `### Changed nodes` and
-//! `### Resolved violations` (when any).
+//! and a headline of the counts (`**<N> new violation(s)**`, followed by
+//! ` (<A> advisory)` only when `A` of them do not block), then `### New
+//! violations (blocking)` (only when a blocking one exists: a `#### <rule
+//! id> (<kind>, <decl>)` table per violation), `### New violations
+//! (advisory: below the rule's min_tier)` (only when an advisory one exists),
+//! `### Check errors` (when any: the working tree's rule errors and the rules
+//! only partly compared), `### Tests to run`, `### Impact`, `### Edge
+//! changes` (grouped by tier, facts first), `### Changed nodes` and `###
+//! Resolved violations` (when any). A rule or forbid_path violation renders
+//! its identity first, ``_subject: `<a>`, `<b>` - tier <t> at
+//! <file:line>_`` (no ` at` when the subject is unlocated), then its witness
+//! table when it has rows, then up to 5 of its coverage caveats, one line
+//! each, `⚠ <category> (<language>): <note>`, a cut list followed by `_(<shown>
+//! of <total> caveats)_`.
 //!
 //! Every location is `file:line`, 1-based; a removed edge or node and a
 //! resolved violation's row are marked `(at <base>)`, where they are
@@ -112,7 +140,10 @@
 //! Once per review:
 //! `[review] base=<rev> changed=<C> seeds=<S> impact=<I> tests=<T> untested=<U> edges +<a> -<r> (fact=<F> derived=<D> heuristic=<H>) violations new=<N> resolved=<R> blocking=<true|false>`
 //! — grep `^\[review\] base=`. `edges +a -r` counts the added and removed
-//! rows; the tier split counts every edge row, reconfidenced included. The
+//! rows; the tier split counts every edge row, reconfidenced included;
+//! `new=` counts every new violation, advisory ones included, and
+//! `blocking=` is the gate (a new violation at or above its rule's
+//! `min_tier`). The
 //! component answers print their own lines: one `[delta]` pair (from
 //! [`review_vs_rev`] only), one `[diff-impact]`, one `[tests-for]`, and two
 //! `[check] rules=` lines (the working tree's first, then the base's).
@@ -130,13 +161,14 @@ use glia_graph::MergedGraph;
 
 use crate::answers::{BlastOptions, BlastRadius, Locator, in_scope, project_roots};
 use crate::check::{
-    self, CheckReport, DERIVED, FACT, FORBID_EDGE, HEURISTIC, NO_CYCLE, Violation, ViolationEdge,
-    check_rules, default_forbid_categories,
+    self, CheckReport, DEFAULT_MIN_TIER, DERIVED, FACT, FORBID_EDGE, FORBID_PATH, HEURISTIC,
+    NO_CYCLE, RULE, Violation, ViolationEdge, check_rules, default_forbid_categories,
 };
 use crate::cycles::module_import_graph;
 use crate::delta::{RevDelta, graph_delta_vs_rev};
 use crate::diff_impact::{ChangedNode, diff_impact_from_delta};
 use crate::external::declared::declared_constraints;
+use crate::identity::Collapse;
 use crate::tests_for::{TestsFor, TestsForArgs, tests_for_delta};
 use crate::why::tier_of;
 
@@ -151,6 +183,8 @@ pub const DEFAULT_MAX_TESTS: usize = 50;
 #[derive(Clone, Debug)]
 pub struct ReviewArgs {
     /// The impact radius: `BlastOptions::default()` (both directions, depth 4).
+    /// An enabled `collapse` with no repo labels takes the working tree's
+    /// (`rev.after.repo_labels`), so `also_in` rows name the repo.
     pub blast: BlastOptions,
     /// The tests walk: `TestsForArgs::default()`.
     pub tests: TestsForArgs,
@@ -233,7 +267,7 @@ pub struct Review {
     /// Every added / removed / reconfidenced edge, facts first.
     pub edges: Vec<ReviewEdge>,
     /// The working tree's violations the base does not have, reduced to their
-    /// new rows.
+    /// new rows; advisory ones (`blocking` false) included.
     pub new_violations: Vec<Violation>,
     /// The base's violations the working tree does not have, reduced to their
     /// resolved rows.
@@ -241,7 +275,9 @@ pub struct Review {
     /// `(rule id, message)`: the working tree's rule errors, plus a rule a
     /// side lists too few rows of to classify (module docs).
     pub check_errors: Vec<(String, String)>,
-    /// A new violation exists.
+    /// A new BLOCKING violation exists: one at or above its rule's
+    /// `min_tier`, never a heuristic one (`Violation::blocking`, module docs
+    /// "New and resolved violations"). The CI gate.
     pub blocking: bool,
 }
 
@@ -260,7 +296,22 @@ pub fn review_vs_rev(repo_path: &str, base: &str, args: &ReviewArgs) -> Result<R
 pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
     let (before, after) = (&rev.before.merged, &rev.after.merged);
 
-    let di = diff_impact_from_delta(rev, &args.blast);
+    // DD.10: an enabled collapse with no repo labels takes the working
+    // tree's, as `tests_for_delta` does (DD.12), so an impact row's
+    // `also_in` names the repo by its label, not `repo#<id % 1000>`.
+    let labelled;
+    let blast = if args.blast.collapse.enabled
+        && args.blast.collapse.repo_labels.is_empty()
+        && !rev.after.repo_labels.is_empty()
+    {
+        let mut with = args.blast.clone();
+        with.collapse = Collapse::with_labels(&rev.after.repo_labels);
+        labelled = with;
+        &labelled
+    } else {
+        &args.blast
+    };
+    let di = diff_impact_from_delta(rev, blast);
     let mut impact = di.impact;
     let impact_total = impact.results.len();
     impact.results.truncate(args.max_impact);
@@ -287,6 +338,7 @@ pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
     let then_report = check_rules(before, &rules);
     let now_index = RuleIndex::build(after, &now, &rules);
     let then_index = RuleIndex::build(before, &then, &rules);
+    let gates = min_tiers(&rules);
     let mut check_errors = now_report.errors.clone();
     let now_errors: HashSet<&str> = now_report
         .errors
@@ -305,6 +357,7 @@ pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
             name: "base",
         },
         &now_errors,
+        &gates,
         "new",
         &mut check_errors,
     );
@@ -320,6 +373,7 @@ pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
             name: "working tree",
         },
         &now_errors,
+        &gates,
         "resolved",
         &mut check_errors,
     );
@@ -347,7 +401,7 @@ pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
         impact,
         tests,
         edges,
-        blocking: !new_violations.is_empty(),
+        blocking: new_violations.iter().any(|v| v.blocking),
         new_violations,
         resolved_violations,
         check_errors,
@@ -407,10 +461,18 @@ impl Default for MarkdownOptions {
 pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
     let c = &r.counts;
     let max = opts.max_rows;
+    let (blocking, advisory): (Vec<&Violation>, Vec<&Violation>) =
+        r.new_violations.iter().partition(|v| v.blocking);
+    let advisory_note = if advisory.is_empty() {
+        String::new()
+    } else {
+        format!(" ({} advisory)", advisory.len())
+    };
     let mut blocks: Vec<String> = vec![format!(
-        "## glia review vs {}\n**{} new violation(s)** | {} resolved | {} changed nodes | impact {} | tests {} ({} seeds untested) | edges +{} -{}",
+        "## glia review vs {}\n**{} new violation(s)**{} | {} resolved | {} changed nodes | impact {} | tests {} ({} seeds untested) | edges +{} -{}",
         code(&r.base),
         c.new_violations,
+        advisory_note,
         c.resolved_violations,
         c.nodes_changed,
         c.impact,
@@ -432,9 +494,15 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
         check_errors_md(&mut blocks, r, max);
         return finish(blocks);
     }
-    if !r.new_violations.is_empty() {
+    if !blocking.is_empty() {
         blocks.push("### New violations (blocking)".to_string());
-        for v in &r.new_violations {
+        for v in blocking {
+            violation_md(&mut blocks, v, max, None);
+        }
+    }
+    if !advisory.is_empty() {
+        blocks.push("### New violations (advisory: below the rule's min_tier)".to_string());
+        for v in advisory {
             violation_md(&mut blocks, v, max, None);
         }
     }
@@ -580,10 +648,15 @@ where
     }
 }
 
+/// Caveat lines a rule / forbid_path violation lists in markdown.
+const MAX_CAVEAT_LINES: usize = 5;
+
 /// One violation: its heading and its evidence rows. A per-edge kind's total
 /// is its `count` (the rows beyond `check::MAX_EVIDENCE` included); a
-/// no_cycle's rows are one shortest cycle through its `count` members.
-/// `located_at`: the rev a resolved violation's rows are located in.
+/// no_cycle's rows are one shortest cycle through its `count` members; a rule
+/// or forbid_path violation's identity line comes first, its caveats last
+/// (module docs "Markdown"). `located_at`: the rev a resolved violation's
+/// rows are located in.
 fn violation_md(blocks: &mut Vec<String>, v: &Violation, max: usize, located_at: Option<&str>) {
     blocks.push(match v.decl.as_deref() {
         Some(decl) => format!(
@@ -594,6 +667,27 @@ fn violation_md(blocks: &mut Vec<String>, v: &Violation, max: usize, located_at:
         ),
         None => format!("#### {} ({})", text(&v.rule_id), text(v.rule_kind)),
     });
+    let by_subject = v.rule_kind == RULE || v.rule_kind == FORBID_PATH;
+    if by_subject {
+        let subject: Vec<String> = v.subject.iter().map(|s| code(s)).collect();
+        let mut line = format!(
+            "_subject: {} - tier {}",
+            if subject.is_empty() {
+                DASH.to_string()
+            } else {
+                subject.join(", ")
+            },
+            text(v.tier)
+        );
+        if v.file.is_some() {
+            line.push_str(&format!(" at {}", at(v.file.as_deref(), v.line)));
+            if let Some(rev) = located_at {
+                line.push_str(&format!(" (at {})", text(rev)));
+            }
+        }
+        line.push('_');
+        blocks.push(line);
+    }
     let total = if v.rule_kind == NO_CYCLE {
         blocks.push(format!(
             "_(one shortest cycle through the {} members of its strongly-connected component)_",
@@ -622,6 +716,26 @@ fn violation_md(blocks: &mut Vec<String>, v: &Violation, max: usize, located_at:
         total,
         max,
     );
+    if by_subject && !v.caveats.is_empty() {
+        let lines: Vec<String> = v
+            .caveats
+            .iter()
+            .take(MAX_CAVEAT_LINES)
+            .map(|c| {
+                format!(
+                    "⚠ {} ({}): {}",
+                    text(c.edge_category),
+                    text(c.language),
+                    text(c.note)
+                )
+            })
+            .collect();
+        let shown = lines.len();
+        blocks.push(lines.join("\n"));
+        if shown < v.caveats.len() {
+            blocks.push(format!("_({shown} of {} caveats)_", v.caveats.len()));
+        }
+    }
 }
 
 /// `### Check errors`: the working tree's rule errors and the rules only
@@ -898,19 +1012,45 @@ impl Side<'_> {
     }
 }
 
+/// Rule id -> the `min_tier` its violations block at (`check::min_tier_of`)
+/// over the working tree's rules, which both sides are checked against; the
+/// first rule of an id wins. A `reflexion:` divergence has no entry: it reads
+/// [`DEFAULT_MIN_TIER`], as check gates it.
+fn min_tiers(rules: &[(NodeId, ConstraintRule)]) -> HashMap<&str, &'static str> {
+    let mut out: HashMap<&str, &'static str> = HashMap::new();
+    for (_, rule) in rules {
+        out.entry(rule.id.as_str())
+            .or_insert_with(|| check::min_tier_of(rule));
+    }
+    out
+}
+
 /// The violations of `this` whose identity `other` lacks, each reduced to its
 /// unmatched rows (module docs). `skip`: rule ids never compared (the working
-/// tree's rule errors). `verb` names the result in a note.
+/// tree's rule errors). `gates`: [`min_tiers`], which a reduced violation's
+/// `blocking` is recomputed under. `verb` names the result in a note.
 fn compare(
     this: Side<'_>,
     other: Side<'_>,
     skip: &HashSet<&str>,
+    gates: &HashMap<&str, &'static str>,
     verb: &str,
     notes: &mut Vec<(String, String)>,
 ) -> Vec<Violation> {
     let mut out: Vec<Violation> = Vec::new();
     for v in &this.report.violations {
         if skip.contains(v.rule_id.as_str()) {
+            continue;
+        }
+        // A rule row and a transitive hit are their subject (module docs):
+        // check lists both uncapped, so the other side's own list is whole.
+        if v.rule_kind == RULE || v.rule_kind == FORBID_PATH {
+            let known = other
+                .violations_of(&v.rule_id)
+                .any(|o| o.rule_kind == v.rule_kind && o.subject == v.subject);
+            if !known {
+                out.push(v.clone());
+            }
             continue;
         }
         if v.rule_kind == NO_CYCLE {
@@ -944,7 +1084,7 @@ fn compare(
                 .collect();
             if !fresh.is_empty() {
                 fresh.sort_by(row_order);
-                out.push(reduced(v, fresh.len(), fresh));
+                out.push(reduced(v, fresh.len(), fresh, gates));
             }
             continue;
         }
@@ -988,18 +1128,31 @@ fn compare(
                 ),
             ));
         }
-        out.push(reduced(v, fresh.len(), fresh));
+        out.push(reduced(v, fresh.len(), fresh, gates));
     }
     out
 }
 
 /// `v` with its evidence narrowed to `rows` (sorted tier-first, as check
 /// sorts them) and capped like check's; `count` the full number, the tier the
-/// strongest row's.
-fn reduced(v: &Violation, count: usize, mut rows: Vec<ViolationEdge>) -> Violation {
+/// strongest row's, and `blocking` recomputed from that tier under its rule's
+/// `min_tier` (`gates`, [`DEFAULT_MIN_TIER`] for a divergence): the full
+/// violation's gate read its own strongest row, which the change may not
+/// have added.
+fn reduced(
+    v: &Violation,
+    count: usize,
+    mut rows: Vec<ViolationEdge>,
+    gates: &HashMap<&str, &'static str>,
+) -> Violation {
     rows.truncate(check::MAX_EVIDENCE);
     let mut out = v.clone();
     out.tier = rows.first().map_or(v.tier, |r| r.tier);
+    let min_tier = gates
+        .get(v.rule_id.as_str())
+        .copied()
+        .unwrap_or(DEFAULT_MIN_TIER);
+    out.blocking = check::is_blocking(out.tier, min_tier);
     out.count = count;
     out.evidence = rows;
     out
@@ -1034,7 +1187,9 @@ impl RuleIndex {
                 continue;
             };
             match &rule.kind {
-                // A transitive rule is unchecked (check.rs evaluate): no rows.
+                // A transitive rule's violations are forbid_path hits, which
+                // `compare` classes by subject from check's own uncapped
+                // list (module docs "Why an index"): no rows here.
                 ConstraintKind::ForbidEdge {
                     from,
                     to,

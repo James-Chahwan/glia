@@ -99,10 +99,16 @@ fn rev_answer(
 /// kind, file, line, change, seed}`; `impact` is `blast_radius`'s dict;
 /// `tests` is `tests_for`'s; `edges` rows `{change, from_qname, to_qname,
 /// category, tier, note, site_file, site_line, emitter}`; each violation
-/// `check`'s `{rule_id, rule_kind, decl, severity, tier, count, evidence}`,
-/// reduced to its new (or resolved) rows; `check_errors` `(rule id, message)`
-/// pairs; `blocking` is True when a new violation exists (a CI gate fails on
-/// it; a violation the base already had never blocks). `format="markdown"`
+/// `check`'s `{rule_id, rule_kind, decl, severity, tier, blocking, count,
+/// evidence}` (plus `subject`, `file`, `line`, `caveats` on a rule or
+/// forbid_path violation), a per-edge one reduced to its new (or resolved)
+/// rows with its `tier` and `blocking` read from them; a rule or forbid_path
+/// violation is new or resolved by its `subject`; `check_errors` `(rule id,
+/// message)` pairs; `blocking` is True when a new BLOCKING violation exists:
+/// one at or above its rule's `min_tier` (default `derived`), never a
+/// heuristic one (a CI gate fails on it; an advisory new violation is listed
+/// but does not block, and a violation the base already had never blocks).
+/// `format="markdown"`
 /// returns the markdown PR report `glia review` prints (`str`), each table
 /// cut at `markdown_rows`. Lines are 1-based. Builds both sides itself and
 /// saves the parse-cache sidecar (`<repo>/.glia/graph/parse_cache.bin`,

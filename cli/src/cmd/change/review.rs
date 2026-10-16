@@ -14,9 +14,15 @@
 //! the engine's lists (the counts stay uncut). Every `file:line` is 1-based
 //! (LD.1).
 //!
-//! Exit 1 when the change adds a violation (`blocking`), in both modes: a
-//! violation the base already had does not fail the gate (`glia check` fails
-//! on any). 0 otherwise. 2 on `--no-overlay` (both sides are built with the
+//! Exit 1 when the change adds a BLOCKING violation (`blocking`), in both
+//! modes: a new violation at or above its rule's `min_tier` (default
+//! `derived`), never a heuristic one (0.5.2 Q2). A new advisory violation is
+//! listed (markdown: under `### New violations (advisory: below the rule's
+//! min_tier)`, and ` (<A> advisory)` in the headline) and does not fail the
+//! gate; nor does a violation the base already had (`glia check` fails on
+//! any blocking one). Rule-invariant and transitive (forbid_path) violations
+//! are new or resolved by their subject, not their witness rows. 0
+//! otherwise. 2 on `--no-overlay` (both sides are built with the
 //! repo's overlay, as for `glia delta`) or a git / build failure, with the
 //! engine's message. The rev pair is one repo, so there is no `--with`
 //! (clap refuses it, exit 2).
