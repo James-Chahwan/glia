@@ -17,6 +17,10 @@
 //! member vouches for the subclass's override, and a reached member makes its
 //! overrides live. A `super.m()` (rule `super_method`) runs exactly the
 //! parent's member: it vouches for no override, a sibling's included.
+//!
+//! DT.5d: a live owner's constructor is live (an invoked-member hop), so the
+//! two TS fixtures' constructor rows are gone; the dispatch assertions are
+//! unchanged.
 
 use std::path::Path;
 
@@ -234,16 +238,17 @@ fn ts_reached_override_is_live() {
         entrypoint_reachable(&m).contains(&node(&m, "::UserRepo::fetchOne")),
         "the listener reaches find -> load -> fetchOne -> UserRepo::fetchOne (A7.8)"
     );
+    // DT.5d: the live listener's constructor runs (an invoked-member hop),
+    // so it is live and no row.
+    assert!(
+        entrypoint_reachable(&m).contains(&node(&m, "::UsersListener::constructor")),
+        "a live owner's constructor is live (DT.5d)"
+    );
     let mut rows = dead(&report(&m));
     rows.sort();
-    let mut want = [
-        "::AdminRepo",
-        "::AdminRepo::audit",
-        "::AdminRepo::findAdmin",
-        "::UsersListener::constructor",
-    ];
+    let mut want = ["::AdminRepo", "::AdminRepo::audit", "::AdminRepo::findAdmin"];
     want.sort();
-    assert_eq!(rows.len(), want.len(), "exactly the four rows: {rows:?}");
+    assert_eq!(rows.len(), want.len(), "exactly the three rows: {rows:?}");
     for suffix in want {
         assert!(has(&rows, suffix), "{suffix} is a row: {rows:?}");
     }
@@ -317,16 +322,15 @@ fn ts_concrete_override_reached_is_live() {
             "the listener reaches load -> key / save -> persist, then the override (A7.8): {reached}"
         );
     }
-    let mut rows = dead(&report(&m));
-    rows.sort();
-    let mut want = [
+    // DT.5d: the three constructors were the rows until a live owner's
+    // constructor became live (an invoked-member hop).
+    for ctor in [
         "::BaseStore::constructor",
         "::StoresListener::constructor",
         "::UserStore::constructor",
-    ];
-    want.sort();
-    assert_eq!(rows.len(), want.len(), "exactly the three constructors: {rows:?}");
-    for suffix in want {
-        assert!(has(&rows, suffix), "{suffix} is a row: {rows:?}");
+    ] {
+        assert!(live.contains(&node(&m, ctor)), "a live owner's constructor is live: {ctor}");
     }
+    let rows = dead(&report(&m));
+    assert!(rows.is_empty(), "no dead row: {rows:?}");
 }

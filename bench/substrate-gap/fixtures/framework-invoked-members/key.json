@@ -1,0 +1,60 @@
+{
+  "framework": "framework-invoked-members",
+  "language": "typescript+dart+python",
+  "dirs": [
+    "web",
+    "mobile",
+    "jobs"
+  ],
+  "note": "DT.5d (T5 (b) and (d)): members a framework or the runtime invokes on an instance of a used owner - Angular lifecycle hooks and ControlValueAccessor members of a component / service, and constructors (TS `constructor`, Dart `<T>::<T>`, Python `__init__`) - are live once their owner is (a walk-local hop, never a stored edge) and are no dead_symbol row while their owner has an incoming carry edge; ORIGIN generated / generated_proto nodes are no dead_symbol row. Liveness is not graph content, so the rows are asserted by engine/tests/dead_framework.rs; this key pins the shapes and that no hop is materialised as an edge. HEAD 5dfe4c72 (debug CLI, `glia gaps web --with mobile --with jobs`): 22 dead_symbol rows - OrdersPage::constructor / ngOnInit / ngOnDestroy / ngOnDestroyLater, OrderService::constructor / ngOnDestroy, AmountInputComponent's four CVA members, Friend::Friend / fromJson, Orphan and Orphan::Orphan, ReportService with its constructor and hook, ChatMessage and its three generated members (ORIGIN generated_proto), Worker::__init__; `[live] profile=code entrypoints=3 (kind=1 role=2 declared=0) owners=0 implementers=0 reached=5/43`.",
+  "expect_nodes": [
+    {
+      "kind": "METHOD",
+      "name": "OrdersPage::ngOnInit"
+    },
+    {
+      "kind": "METHOD",
+      "name": "OrderService::constructor"
+    },
+    {
+      "kind": "METHOD",
+      "name": "AmountInputComponent::writeValue"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Friend::Friend"
+    },
+    {
+      "kind": "METHOD",
+      "name": "Worker::__init__"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "OrdersPage",
+      "to": "OrderService",
+      "category": "INJECTS",
+      "note": "what makes OrderService live"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "OrdersPage",
+      "to": "ngOnInit",
+      "category": "CALLS",
+      "note": "the lifecycle hop is walk-local, never an edge"
+    },
+    {
+      "from": "OrderService",
+      "to": "constructor",
+      "category": "CALLS",
+      "note": "the constructor hop is walk-local, never an edge"
+    },
+    {
+      "from": "lib::models::friend::Friend",
+      "to": "lib::models::friend::Friend::Friend",
+      "category": "CALLS",
+      "note": "the constructor hop is walk-local, never an edge"
+    }
+  ]
+}

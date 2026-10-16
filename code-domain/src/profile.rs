@@ -49,6 +49,16 @@
 //! collapse, HEURISTIC never). SAME_AS itself weighs 0 in PPR and is in no
 //! carry or community list: identity reaches a walk or a ranking only through
 //! the quotient (`glia_activation::algo::classes`, DD.1), never as an edge.
+//!
+//! DT.5d: [`INVOKED_MEMBERS`] is the code domain's table of members a
+//! framework or the runtime invokes on an instance of their owner, with no
+//! source line spelling the call: Angular's lifecycle hooks, the
+//! ControlValueAccessor / Validator, PipeTransform, HttpInterceptor and
+//! route-guard members, and each language's constructor. Liveness reads it
+//! as a walk-local hop from a live owner to such a member (engine
+//! `answers::invoked_members`), and `glia gaps` withholds such a member's
+//! dead_symbol row while its owner has an incoming carry edge. Neither
+//! stores an edge. [`invoked_member`] is the one matcher.
 
 use glia_activation::profile::{
     ActivationPreset, DomainTables, EffectSink, EntryRule, IdentityRule, IdentityTier, NamedEntry,
@@ -380,9 +390,308 @@ pub const CODE_TABLES: DomainTables = DomainTables {
     ],
 };
 
+/// DT.5d: one row of [`INVOKED_MEMBERS`]: METHODs a framework or the runtime
+/// calls on an instance of their owner, so a live owner makes them live.
+///
+/// A METHOD matches when its file's extension is one of `exts` (compared
+/// ignoring ASCII case), its owner carries one of `owner_roles` (its kind
+/// when that is a role kind, or a ROLE cell; empty = any owner), and its name
+/// is one of `names`, or (`named_like_owner`) exactly its owner's name, the
+/// constructor of Dart, Java, C# and C++.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvokedMembers {
+    /// What invokes the member: `angular` or `constructor`.
+    pub framework: &'static str,
+    pub owner_roles: &'static [NodeKindId],
+    pub exts: &'static [&'static str],
+    pub names: &'static [&'static str],
+    pub named_like_owner: bool,
+}
+
+impl InvokedMembers {
+    /// Does this row match `member_name` in a file of extension `ext`, owned
+    /// by `owner_name` carrying `owner_roles`?
+    pub fn matches(
+        &self,
+        owner_roles: &[NodeKindId],
+        owner_name: &str,
+        member_name: &str,
+        ext: &str,
+    ) -> bool {
+        self.names_member(owner_name, member_name)
+            && self.exts.iter().any(|e| e.eq_ignore_ascii_case(ext))
+            && (self.owner_roles.is_empty()
+                || self.owner_roles.iter().any(|r| owner_roles.contains(r)))
+    }
+
+    /// The name half of [`Self::matches`], cheap enough to test before the
+    /// file and the owner's roles are read.
+    pub fn names_member(&self, owner_name: &str, member_name: &str) -> bool {
+        !member_name.is_empty()
+            && (self.names.contains(&member_name)
+                || (self.named_like_owner && member_name == owner_name))
+    }
+}
+
+/// The TypeScript / JavaScript extensions. The walk routes `.ts` / `.tsx` /
+/// `.js` / `.jsx` to the TS family parser today; `.mts` / `.cts` / `.mjs` /
+/// `.cjs` (like Python's `.pyi`) match once a parser reads them.
+const JS_FAMILY: &[&str] = &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"];
+/// An Angular member is a TypeScript member.
+const TS_ONLY: &[&str] = &["ts"];
+/// The languages whose constructor is the METHOD named like its class: Dart
+/// (CB.9), Java, C#, and every file the C / C++ parser reads (a header's
+/// in-class constructor, an out-of-line `Foo::Foo` in a source or a
+/// `.inl` / `.ipp` / `.tpp` a header includes).
+const CTOR_LIKE_OWNER: &[&str] = &[
+    "dart", "java", "cs", "cpp", "cc", "cxx", "hpp", "hh", "h", "hxx", "inl", "ipp", "tpp",
+];
+
+/// DT.5d: the framework- and runtime-invoked members, first match wins.
+///
+/// - Angular calls a lifecycle hook on every instance it creates of a
+///   component, directive, pipe, service or guard; the forms API calls a
+///   ControlValueAccessor's / Validator's members on the component or
+///   directive bound as `NG_VALUE_ACCESSOR` / `NG_VALIDATORS`; the template
+///   compiler calls a pipe's `transform`; the HTTP client calls an
+///   interceptor's `intercept` (a NestJS interceptor's too, an
+///   `@Injectable` SERVICE in both); the router calls a guard's
+///   `canActivate` family. `resolve` and `handleError` are left out as too
+///   generic a name, and third-party loaders (Transloco's `getTranslation`)
+///   as out of scope.
+/// - DI or `new` runs the constructor of every instance it makes: TS / JS
+///   `constructor`, Python `__init__`, Ruby `initialize`, PHP `__construct`,
+///   Swift `init`, and the METHOD named like its class in Dart (CB.9's
+///   `<T>::<T>`), Java, C# and C++ (a constructor declared only in a header
+///   included).
+///
+/// engine/tests/dead_framework.rs builds a one-file graph per constructor
+/// language and asserts its parser mints the constructor METHOD this table
+/// names.
+pub const INVOKED_MEMBERS: &[InvokedMembers] = &[
+    InvokedMembers {
+        framework: "angular",
+        owner_roles: &[nk::COMPONENT, nk::DIRECTIVE, nk::PIPE, nk::SERVICE, nk::GUARD],
+        exts: TS_ONLY,
+        names: &[
+            "ngOnInit",
+            "ngOnChanges",
+            "ngDoCheck",
+            "ngAfterContentInit",
+            "ngAfterContentChecked",
+            "ngAfterViewInit",
+            "ngAfterViewChecked",
+            "ngOnDestroy",
+        ],
+        named_like_owner: false,
+    },
+    InvokedMembers {
+        framework: "angular",
+        owner_roles: &[nk::COMPONENT, nk::DIRECTIVE],
+        exts: TS_ONLY,
+        names: &[
+            "writeValue",
+            "registerOnChange",
+            "registerOnTouched",
+            "setDisabledState",
+            "validate",
+            "registerOnValidatorChange",
+        ],
+        named_like_owner: false,
+    },
+    InvokedMembers {
+        framework: "angular",
+        owner_roles: &[nk::PIPE],
+        exts: TS_ONLY,
+        names: &["transform"],
+        named_like_owner: false,
+    },
+    InvokedMembers {
+        framework: "angular",
+        owner_roles: &[nk::SERVICE],
+        exts: TS_ONLY,
+        names: &["intercept"],
+        named_like_owner: false,
+    },
+    InvokedMembers {
+        framework: "angular",
+        owner_roles: &[nk::SERVICE, nk::GUARD],
+        exts: TS_ONLY,
+        names: &["canActivate", "canActivateChild", "canDeactivate", "canMatch", "canLoad"],
+        named_like_owner: false,
+    },
+    InvokedMembers {
+        framework: "constructor",
+        owner_roles: &[],
+        exts: JS_FAMILY,
+        names: &["constructor"],
+        named_like_owner: false,
+    },
+    InvokedMembers {
+        framework: "constructor",
+        owner_roles: &[],
+        exts: &["py", "pyi"],
+        names: &["__init__"],
+        named_like_owner: false,
+    },
+    InvokedMembers {
+        framework: "constructor",
+        owner_roles: &[],
+        exts: &["rb"],
+        names: &["initialize"],
+        named_like_owner: false,
+    },
+    InvokedMembers {
+        framework: "constructor",
+        owner_roles: &[],
+        exts: &["php"],
+        names: &["__construct"],
+        named_like_owner: false,
+    },
+    InvokedMembers {
+        framework: "constructor",
+        owner_roles: &[],
+        exts: &["swift"],
+        names: &["init"],
+        named_like_owner: false,
+    },
+    InvokedMembers {
+        framework: "constructor",
+        owner_roles: &[],
+        exts: CTOR_LIKE_OWNER,
+        names: &[],
+        named_like_owner: true,
+    },
+];
+
+/// DT.5d: the framework tag (`angular`, `constructor`) of the first
+/// [`INVOKED_MEMBERS`] row matching a METHOD called `member_name`, in a file
+/// of extension `ext` (no dot), owned by `owner_name` carrying
+/// `owner_roles`; `None` when none does.
+pub fn invoked_member(
+    owner_roles: &[NodeKindId],
+    owner_name: &str,
+    member_name: &str,
+    ext: &str,
+) -> Option<&'static str> {
+    INVOKED_MEMBERS
+        .iter()
+        .find(|r| r.matches(owner_roles, owner_name, member_name, ext))
+        .map(|r| r.framework)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DT.5d: every row matches its positive case, and the role, extension
+    /// and name gates keep the look-alikes out.
+    #[test]
+    fn invoked_members_match_their_rows() {
+        let comp: &[NodeKindId] = &[nk::COMPONENT];
+        let svc: &[NodeKindId] = &[nk::SERVICE];
+        let none: &[NodeKindId] = &[];
+        let m = invoked_member;
+        // (a) lifecycle hooks, on every Angular role.
+        for role in [nk::COMPONENT, nk::DIRECTIVE, nk::PIPE, nk::SERVICE, nk::GUARD] {
+            for hook in INVOKED_MEMBERS[0].names {
+                assert_eq!(m(&[role], "Owner", hook, "ts"), Some("angular"), "{hook}");
+            }
+        }
+        assert_eq!(m(comp, "Page", "ngOnDestroyLater", "ts"), None, "a hook look-alike");
+        assert_eq!(m(none, "Plain", "ngOnInit", "ts"), None, "no Angular role");
+        assert_eq!(m(comp, "Page", "ngOnInit", "js"), None, "Angular is TypeScript");
+        // (b) ControlValueAccessor / Validator members.
+        for member in INVOKED_MEMBERS[1].names {
+            assert_eq!(m(comp, "AmountInput", member, "ts"), Some("angular"), "{member}");
+            assert_eq!(m(&[nk::DIRECTIVE], "D", member, "ts"), Some("angular"), "{member}");
+            assert_eq!(m(svc, "S", member, "ts"), None, "{member} on a SERVICE");
+        }
+        // (c) PipeTransform.
+        assert_eq!(m(&[nk::PIPE], "MoneyPipe", "transform", "ts"), Some("angular"));
+        assert_eq!(m(svc, "Mapper", "transform", "ts"), None, "transform on a SERVICE");
+        assert_eq!(m(comp, "Page", "transform", "ts"), None);
+        // (d) HttpInterceptor (and NestJS interceptors).
+        assert_eq!(m(svc, "AuthInterceptor", "intercept", "ts"), Some("angular"));
+        assert_eq!(m(comp, "Page", "intercept", "ts"), None);
+        // (e) route guards.
+        for member in INVOKED_MEMBERS[4].names {
+            assert_eq!(m(&[nk::GUARD], "AuthGuard", member, "ts"), Some("angular"), "{member}");
+            assert_eq!(m(svc, "AuthGuard", member, "ts"), Some("angular"), "{member}");
+            assert_eq!(m(&[nk::PIPE], "P", member, "ts"), None, "{member} on a PIPE");
+        }
+        // (f)-(j) constructors by name, any owner, gated by extension.
+        for ext in JS_FAMILY {
+            assert_eq!(m(none, "Repo", "constructor", ext), Some("constructor"), "{ext}");
+        }
+        assert_eq!(m(svc, "OrderService", "constructor", "ts"), Some("constructor"));
+        assert_eq!(m(none, "Repo", "constructor", "go"), None, "a `constructor` in a .go file");
+        assert_eq!(m(none, "Repo", "constructor", "py"), None);
+        for (ext, name) in [
+            ("py", "__init__"),
+            ("pyi", "__init__"),
+            ("rb", "initialize"),
+            ("php", "__construct"),
+            ("swift", "init"),
+        ] {
+            assert_eq!(m(none, "Worker", name, ext), Some("constructor"), "{ext} {name}");
+        }
+        assert_eq!(m(none, "Worker", "__init__", "rb"), None);
+        assert_eq!(m(none, "Worker", "initialize", "py"), None);
+        assert_eq!(m(none, "Worker", "init", "ts"), None);
+        // (k) the METHOD named like its owner.
+        for ext in CTOR_LIKE_OWNER {
+            assert_eq!(m(none, "Friend", "Friend", ext), Some("constructor"), "{ext}");
+            assert_eq!(m(none, "Friend", "fromJson", ext), None, "{ext}: a factory");
+        }
+        assert_eq!(m(none, "Friend", "Friend", "ts"), None, "TS names its constructor");
+        assert_eq!(m(none, "Friend", "Friend", "py"), None);
+        assert_eq!(m(none, "", "", "dart"), None, "an empty name matches nothing");
+        // The extension compares ignoring ASCII case; the name exactly.
+        assert_eq!(m(none, "Repo", "constructor", "TS"), Some("constructor"));
+        assert_eq!(m(none, "Repo", "Constructor", "ts"), None);
+        // The first match wins: a component's constructor is a constructor.
+        assert_eq!(m(comp, "Page", "constructor", "ts"), Some("constructor"));
+    }
+
+    /// The table's shape: Angular rows are TypeScript only and role-gated,
+    /// constructor rows take any owner; `names_member` is the name half.
+    #[test]
+    fn invoked_members_table_shape() {
+        let frameworks: Vec<&str> = INVOKED_MEMBERS.iter().map(|r| r.framework).collect();
+        assert_eq!(frameworks, [
+            "angular",
+            "angular",
+            "angular",
+            "angular",
+            "angular",
+            "constructor",
+            "constructor",
+            "constructor",
+            "constructor",
+            "constructor",
+            "constructor",
+        ]);
+        for r in INVOKED_MEMBERS {
+            match r.framework {
+                "angular" => {
+                    assert_eq!(r.exts, TS_ONLY);
+                    assert!(!r.owner_roles.is_empty() && !r.names.is_empty());
+                    assert!(!r.named_like_owner);
+                }
+                _ => {
+                    assert!(r.owner_roles.is_empty());
+                    assert!(r.names.is_empty() == r.named_like_owner, "names or named_like_owner");
+                }
+            }
+            for e in r.exts {
+                assert!(!e.starts_with('.') && e.to_ascii_lowercase() == *e, "{e}");
+            }
+        }
+        let ctor = INVOKED_MEMBERS[10];
+        assert!(ctor.names_member("Foo", "Foo") && !ctor.names_member("Foo", "foo"));
+        assert!(!INVOKED_MEMBERS[0].names_member("Page", "Page"));
+    }
 
     #[test]
     fn code_tables_validate() {

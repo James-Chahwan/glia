@@ -90,8 +90,73 @@ struct LiveWalk {
     owners: usize,
     /// Nodes made live by an IMPLEMENTS edge into a live node.
     implementers: usize,
+    /// Members first reached over an invoked-member hop from their live
+    /// owner (DT.5d): lifecycle hooks, framework-bound members, constructors.
+    invoked: usize,
     /// Every node in the merged graph.
     total: usize,
+}
+
+/// DT.5d: every METHOD a framework or the runtime invokes on an instance of
+/// its owner, as `(member, owner, framework)`: a METHOD whose direct
+/// `parent_of` is an [`OWNER_KINDS`] node and that
+/// [`glia_code_domain::profile::invoked_member`] matches, given the owner's
+/// roles (`glia_graph::roles::roles_in` of its kind and cells), both names
+/// and the extension of the METHOD's POSITION file
+/// (`glia_code_domain::evidence::locate`). A METHOD with no POSITION file
+/// matches nothing.
+///
+/// The one matcher [`live_walk`] (the invoked hop) and `gaps` (the
+/// follows-its-owner rule) share. Built in `merged.graphs` / `g.nodes` order,
+/// each METHOD once (its first instance); the name gate runs before the file
+/// and the roles are read, so a graph pays the JSON reads only for the few
+/// METHODs a row names.
+pub(crate) fn invoked_members(merged: &MergedGraph) -> Vec<(NodeId, NodeId, &'static str)> {
+    use glia_code_domain::profile::{INVOKED_MEMBERS, invoked_member};
+    let mut out = Vec::new();
+    let mut seen: HashSet<NodeId> = HashSet::new();
+    for g in &merged.graphs {
+        // The owners' cells, looked up only, filled on first need.
+        let mut cells_of: Option<HashMap<NodeId, &[Cell]>> = None;
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::METHOD) {
+                continue;
+            }
+            let Some(&owner) = g.nav.parent_of.get(&n.id) else { continue };
+            let Some(&owner_kind) = g.nav.kind_by_id.get(&owner) else { continue };
+            if !OWNER_KINDS.contains(&owner_kind) {
+                continue;
+            }
+            let name = g.nav.name_by_id.get(&n.id).map(String::as_str).unwrap_or("");
+            let owner_name = g.nav.name_by_id.get(&owner).map(String::as_str).unwrap_or("");
+            if !INVOKED_MEMBERS.iter().any(|r| r.names_member(owner_name, name)) {
+                continue;
+            }
+            let Some((file, _)) = glia_code_domain::evidence::locate(&n.cells) else { continue };
+            let ext =
+                std::path::Path::new(&file).extension().and_then(|e| e.to_str()).unwrap_or("");
+            let cells = cells_of
+                .get_or_insert_with(|| {
+                    g.nodes
+                        .iter()
+                        .filter(|o| {
+                            g.nav.kind_by_id.get(&o.id).is_some_and(|k| OWNER_KINDS.contains(k))
+                        })
+                        .map(|o| (o.id, o.cells.as_slice()))
+                        .collect()
+                })
+                .get(&owner)
+                .copied()
+                .unwrap_or(&[]);
+            let roles = glia_graph::roles::roles_in(Some(owner_kind), cells);
+            if let Some(framework) = invoked_member(&roles, owner_name, name, ext)
+                && seen.insert(n.id)
+            {
+                out.push((n.id, owner, framework));
+            }
+        }
+    }
+    out
 }
 
 /// The entrypoint-reachable ("live") node set: every entrypoint plus everything
@@ -114,8 +179,8 @@ struct LiveWalk {
 /// string, a plugin hook loaded by reflection, a library's public API). The
 /// walk carries on `CODE_PROFILE.tables.carry_edges`.
 ///
-/// Two steps besides the forward carry walk (A7.8), each applied as a node is
-/// popped from the queue:
+/// Three steps besides the forward carry walk (A7.8, DT.5d), each applied as
+/// a node is popped from the queue:
 /// - **Owner.** A live METHOD makes its owning CLASS / STRUCT / INTERFACE (its
 ///   direct `parent_of`) live. DEFINES stays out of the carry edges, since
 ///   pulling in a whole container is the impact fan-out that list exists to
@@ -130,19 +195,33 @@ struct LiveWalk {
 ///   otherwise the canonical false-dead: the real `UserService` has no inbound
 ///   carry edge. INHERITS_FROM stays forward-only: a live base class does not
 ///   make its subclasses live.
+/// - **Invoked member (DT.5d).** A live owner makes live each of its METHODs
+///   a framework or the runtime calls on an instance of it, with no source
+///   line to read the call from ([`invoked_members`], the code domain's
+///   `profile::INVOKED_MEMBERS` table): Angular lifecycle hooks of a
+///   component / directive / pipe / service / guard, the ControlValueAccessor
+///   / Validator members of a component or directive, a pipe's `transform`,
+///   a service's `intercept`, a guard's or service's `canActivate` family, and the
+///   constructor (TS / JS `constructor`, Python `__init__`, Ruby
+///   `initialize`, PHP `__construct`, Swift `init`, the METHOD named like
+///   its class in Dart, Java, C# and C++). Only from a live owner, and still
+///   no walk down to any other sibling method.
+///
+/// Every step is a walk-local hop: no edge is stored or returned.
 ///
 /// Prints `[live] profile=P entrypoints=E (kind=K role=R declared=D) owners=O
-/// implementers=I reached=N/M` once per call — one line per liveness
-/// computation, so one per blast-radius query, as `[scope]` / `[locate]` print
-/// per query: `P` is the profile's graph type, `kind` counts entries by kind /
-/// name, `role` the ones only a ROLE cell made entries (LB.3b), `declared` the
-/// ones only an ENTRYPOINT cell made entries (LF.3b), `owners` /
-/// `implementers` the nodes each A7.8 step made live, `N` the live set and `M`
-/// every node.
+/// implementers=I invoked=V reached=N/M` once per call — one line per
+/// liveness computation, so one per blast-radius query, as `[scope]` /
+/// `[locate]` print per query: `P` is the profile's graph type, `kind` counts
+/// entries by kind / name, `role` the ones only a ROLE cell made entries
+/// (LB.3b), `declared` the ones only an ENTRYPOINT cell made entries (LF.3b),
+/// `owners` / `implementers` / `invoked` the nodes each step made live (a
+/// member a carry edge reached first counts in none), `N` the live set and
+/// `M` every node.
 pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<NodeId> {
     let w = live_walk(merged);
     eprintln!(
-        "[live] profile={} entrypoints={} (kind={} role={} declared={}) owners={} implementers={} reached={}/{}",
+        "[live] profile={} entrypoints={} (kind={} role={} declared={}) owners={} implementers={} invoked={} reached={}/{}",
         CODE_PROFILE.tables.graph_type,
         w.by_kind + w.by_role + w.by_decl,
         w.by_kind,
@@ -150,6 +229,7 @@ pub fn entrypoint_reachable(merged: &MergedGraph) -> std::collections::HashSet<N
         w.by_decl,
         w.owners,
         w.implementers,
+        w.invoked,
         w.live.len(),
         w.total
     );
@@ -165,13 +245,16 @@ pub(crate) fn is_declared_entry(cells: &[Cell]) -> bool {
 }
 
 /// What the liveness walk follows (LD.15b): the carry edges, plus the two
-/// A7.8 steps as walk-local hops the walk takes like edges — never stored,
-/// never returned. `hops` holds every owner hop (METHOD -> its owning type,
-/// tagged DEFINES), then every implementer hop (interface -> implementer, an
-/// IMPLEMENTS edge reversed, in edge order), and the carry edges follow them.
-/// The index keeps each node's outgoing list in that global order, so a node
-/// popped by the walk takes its owner hop, then its implementer hops, then its
-/// carry edges — the order the per-node queue loop this replaced applied them.
+/// A7.8 steps and the DT.5d invoked-member step as walk-local hops the walk
+/// takes like edges — never stored, never returned. `hops` holds every owner
+/// hop (METHOD -> its owning type, tagged DEFINES), then every implementer
+/// hop (interface -> implementer, an IMPLEMENTS edge reversed, in edge
+/// order), then every invoked hop (owner -> invoked member, tagged DEFINES,
+/// in [`invoked_members`] order), and the carry edges follow them. The index
+/// keeps each node's outgoing list in that global order, so a node popped by
+/// the walk takes its owner hop, then its implementer hops, then its invoked
+/// hops, then its carry edges — the order the per-node queue loop this
+/// replaced applied the first two.
 struct LiveSource<'a> {
     merged: &'a MergedGraph,
     hops: Vec<Edge>,
@@ -203,7 +286,9 @@ fn live_hop(from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> Ed
 /// made a node live is read off the hop that reached it: a node reached from
 /// `p` is `p`'s owner when `p`'s owner hop names it (that hop is first in
 /// `p`'s list, so it always wins), else an implementer when an implementer
-/// hop `p -> it` exists (those precede every carry edge), else a carry edge.
+/// hop `p -> it` exists (those precede every carry edge), else an invoked
+/// member when it was reached over DEFINES (no carry edge is one) and an
+/// invoked hop `p -> it` exists, else a carry edge.
 /// Every iteration is over a `Vec` (`merged.graphs`, `g.nodes`, the edges);
 /// the maps are only looked up, never iterated, so the counts are
 /// deterministic.
@@ -216,6 +301,7 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
         by_decl: 0,
         owners: 0,
         implementers: 0,
+        invoked: 0,
         total: 0,
     };
     let mut owner_of: HashMap<NodeId, NodeId> = HashMap::new();
@@ -263,6 +349,13 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
             hops.push(live_hop(e.to, e.from, edge_category::IMPLEMENTS));
         }
     }
+    // DT.5d: live owner -> each member a framework or the runtime invokes.
+    let mut invoked_hops: HashSet<(NodeId, NodeId)> = HashSet::new();
+    for (member, owner, _) in invoked_members(merged) {
+        if invoked_hops.insert((owner, member)) {
+            hops.push(live_hop(owner, member, edge_category::DEFINES));
+        }
+    }
     let src = LiveSource { merged, hops, carry: CategorySet::of(t.carry_edges) };
     let adj = Adjacency::build(&src, &CategorySet::all());
     for r in reach::bfs(&adj, &seeds, Walk::Forward, usize::MAX).reached {
@@ -271,6 +364,8 @@ fn live_walk(merged: &MergedGraph) -> LiveWalk {
             w.owners += 1;
         } else if implementer_hops.contains(&(r.parent, r.id)) {
             w.implementers += 1;
+        } else if r.via == edge_category::DEFINES && invoked_hops.contains(&(r.parent, r.id)) {
+            w.invoked += 1;
         }
     }
     w
@@ -2825,6 +2920,96 @@ mod live_tests {
         // Implementers: Repo (via IRepo) and Repo::find (via IRepo::find).
         // Owners: Ctrl (via get); IRepo and Repo were already live.
         assert_eq!((w.owners, w.implementers), (1, 2));
+    }
+
+    /// DT.5d: a live owner makes its framework- and runtime-invoked members
+    /// live (hooks, constructors), never its other methods; a member a carry
+    /// edge reached first counts as a carry hit; a dead owner's members stay
+    /// dead; no edge is added. Three classes: an entry component, the service
+    /// it injects and a service nothing injects.
+    #[test]
+    fn invoked_members_follow_a_live_owner() {
+        use glia_code_domain::cell_type;
+        use glia_core::{Cell, CellPayload};
+        let mut g = G::default();
+        let module = g.node(node_kind::MODULE, "app", None);
+        let page = g.node(node_kind::CLASS, "app::Page", Some(module));
+        let page_init = g.node(node_kind::METHOD, "app::Page::ngOnInit", Some(page));
+        let page_ctor = g.node(node_kind::METHOD, "app::Page::constructor", Some(page));
+        let page_later = g.node(node_kind::METHOD, "app::Page::ngOnInitLater", Some(page));
+        let svc = g.node(node_kind::CLASS, "app::Svc", Some(module));
+        let svc_ctor = g.node(node_kind::METHOD, "app::Svc::constructor", Some(svc));
+        let svc_destroy = g.node(node_kind::METHOD, "app::Svc::ngOnDestroy", Some(svc));
+        let svc_list = g.node(node_kind::METHOD, "app::Svc::list", Some(svc));
+        let idle = g.node(node_kind::CLASS, "app::Idle", Some(module));
+        let idle_ctor = g.node(node_kind::METHOD, "app::Idle::constructor", Some(idle));
+        let idle_destroy = g.node(node_kind::METHOD, "app::Idle::ngOnDestroy", Some(idle));
+        g.edge(page, svc, edge_category::INJECTS);
+        g.edge(page_init, svc_list, edge_category::CALLS);
+        // ngOnInit's call reaches the hook before Svc is popped.
+        g.edge(page_init, svc_destroy, edge_category::CALLS);
+        let role = |r: &str| Cell {
+            kind: cell_type::ROLE,
+            payload: CellPayload::Json(format!("{{\"roles\":[\"{r}\"]}}")),
+        };
+        let at = |f: &str| Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!("{{\"file\":\"{f}\",\"start_line\":1}}")),
+        };
+        for n in &mut g.nodes {
+            let file = if n.id == page || [page_init, page_ctor, page_later].contains(&n.id) {
+                "src/app/page.ts"
+            } else if n.id == svc || [svc_ctor, svc_destroy, svc_list].contains(&n.id) {
+                "src/app/svc.ts"
+            } else {
+                "src/app/idle.ts"
+            };
+            n.cells.push(at(file));
+            if n.id == page {
+                n.cells.push(role("COMPONENT"));
+            } else if n.id == svc || n.id == idle {
+                n.cells.push(role("SERVICE"));
+            }
+        }
+        let edges_before = g.edges.len();
+        let merged = g.merged();
+
+        assert_eq!(
+            super::invoked_members(&merged),
+            [
+                (page_init, page, "angular"),
+                (page_ctor, page, "constructor"),
+                (svc_ctor, svc, "constructor"),
+                (svc_destroy, svc, "angular"),
+                (idle_ctor, idle, "constructor"),
+                (idle_destroy, idle, "angular"),
+            ],
+            "node order, the look-alike and the plain method left out"
+        );
+
+        let w = live_walk(&merged);
+        for (id, what) in [
+            (page_init, "the entry component's hook"),
+            (page_ctor, "its constructor"),
+            (svc_ctor, "the injected service's constructor"),
+            (svc_destroy, "its hook"),
+            (svc_list, "what the hook calls"),
+        ] {
+            assert!(w.live.contains(&id), "{what} is live");
+        }
+        for (id, what) in [
+            (page_later, "a hook look-alike"),
+            (idle, "a service nothing injects"),
+            (idle_ctor, "its constructor"),
+            (idle_destroy, "its hook"),
+        ] {
+            assert!(!w.live.contains(&id), "{what} stays dead");
+        }
+        // Invoked: Page::ngOnInit, Page::constructor, Svc::constructor;
+        // Svc::ngOnDestroy was reached over ngOnInit's CALLS first.
+        assert_eq!((w.by_role, w.owners, w.implementers, w.invoked), (1, 0, 0, 3));
+        assert_eq!(entrypoint_reachable(&merged), w.live);
+        assert_eq!(merged.all_edges().count(), edges_before, "the hop is never stored");
     }
 
     /// LF.3b: a FUNCTION nothing calls is an entry once it carries an

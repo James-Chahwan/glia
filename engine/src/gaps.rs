@@ -19,7 +19,7 @@
 //! | `wrapped_sink` | an `unresolved_endpoint` whose every owner is named like a declared http `[[wrapper]]` (the owner's last qname segment equals the stanza's `call` after its last `.` / `::`, in the owner's repo): the sink is real, its identity now lives at the wrapper's call sites (LF.2e mints them); informational | fact | `none` |
 //! | `unpaired_route` | a ROUTE that is not a client-router page (ORIGIN `nav_route`, `graph::nav::is_nav_route`) with no incoming HTTP_CALLS | heuristic (a public API is legitimately uncalled in-stack) | `route_prefix\|edge` |
 //! | `tag_only_queue` | a QUEUE_PRODUCER / QUEUE_CONSUMER whose topic is a framework tag (`queues::is_framework_tag`) | fact | `constants\|wrapper` |
-//! | `dead_symbol` | a FUNCTION / METHOD / CLASS outside `entrypoint_reachable`, with no incoming carry edge, not a METHOD that IMPLEMENTS a METHOD with an incoming CALLS / USES from a third node, neither of the two (dispatch reaches it, CH.1c; a `super.m()` call, rule `super_method`, dispatches to no override, DF.22c), not ORIGIN `test_fixture` | heuristic | `entrypoints` |
+//! | `dead_symbol` | a FUNCTION / METHOD / CLASS outside `entrypoint_reachable`, with no incoming carry edge, not a METHOD that IMPLEMENTS a METHOD with an incoming CALLS / USES from a third node, neither of the two (dispatch reaches it, CH.1c; a `super.m()` call, rule `super_method`, dispatches to no override, DF.22c), not ORIGIN `test_fixture`, not ORIGIN `generated` / `generated_proto` (DT.5d: generated code), not a framework- or runtime-invoked METHOD (an Angular lifecycle hook or form / pipe / interceptor / guard member, a constructor: `answers::invoked_members`) whose owner has an incoming carry edge (DT.5d: such a member is a row exactly when its owner is) | heuristic | `entrypoints` |
 //! | `cochange_no_edge` | a file pair git history says changes together (a CO_CHANGES edge, LF.5b) that no static link joins ([`cochange_gaps`]); the row is the first file's MODULE, `detail` names the other file, the counts and the languages | heuristic (co-change is history, not proof of coupling) | `edge` |
 //! | `suspected_edge` | CD.3b: an orphan of a learned (kind, category, kind) triple (a cross-service pairing the build already made at least twice) and a target its channel tokens match: `detail` names the category, the target qname in backticks and its location, then `score= channel= aa= ra= cochange= target_unpaired= triple=<KIND>-<CATEGORY>-><KIND> seen <n>x`; the row is the orphan, one per kept target (at most three); `draft` holds the paste-ready `[[edge]]` stanza (engine `suspected`) | heuristic (a suggestion: the overlay loop is its verifier) | `edge` |
 //! | `orphaned_rule` | a qname-bearing overlay stanza (`[[edge]]` from / to, `[[constraint]]` / `[[decision]]` / `[[note]]` anchor, `[entrypoints]` qname) that binds no node | fact | `remove` |
@@ -101,6 +101,11 @@
 //! - `[dead-dispatch] dead_symbol rows withheld: <n> (implementations of a called method)`
 //!   once per report that computes `dead_symbol` (and per [`graph_counts`])
 //!   when the CH.1c dispatch rule keeps `n > 0` rows out;
+//! - `[dead-framework] dead_symbol rows withheld: invoked=<i> generated=<g>`
+//!   once per report that computes `dead_symbol` (and per [`graph_counts`])
+//!   when the DT.5d rules keep any row out: `g` generated-code candidates
+//!   (checked first), `i` invoked members of an owner with an incoming carry
+//!   edge (checked after dispatch);
 //! - `[overlay] <rules> rules, +<M> edges, orphans <K>→<J>, gaps <G0>→<G1>, verdict=<keep|review|drop>`
 //!   once per [`overlay_delta`], the review's accept-loop line; `G` is the
 //!   sum of [`GraphCounts::gaps_by_category`].
@@ -208,6 +213,12 @@ const ORPHAN_CATEGORIES: [&str; 3] = [UNPAIRED_ENDPOINT, UNRESOLVED_ENDPOINT, TA
 /// and the row read one list.
 pub(crate) const DEAD_SYMBOL_KINDS: [NodeKindId; 3] =
     [node_kind::CLASS, node_kind::FUNCTION, node_kind::METHOD];
+
+/// DT.5d: the ORIGIN provenances of generated code, never a `dead_symbol`
+/// row: nobody authored the symbol, so nobody deletes it (a protobuf
+/// message's unused accessors, say). `hotspots` and `patterns` leave the same
+/// two out (DE.7).
+const GENERATED_PROVENANCE: [&str; 2] = ["generated", "generated_proto"];
 
 /// Read straight off the graph's edges.
 pub const FACT: &str = "fact";
@@ -657,6 +668,9 @@ struct View<'a> {
     /// `super.m()` call ([`is_super_call`], DF.22c). Only looked up, never
     /// iterated.
     dispatch_in: HashSet<NodeId>,
+    /// DT.5d: each framework- or runtime-invoked METHOD's owner
+    /// ([`crate::answers::invoked_members`]). Only looked up, never iterated.
+    invoked_owner: HashMap<NodeId, NodeId>,
     /// CALLS / USES predecessors, in edge order.
     callers: HashMap<NodeId, Vec<NodeId>>,
     /// HANDLED_BY targets, in edge order.
@@ -675,6 +689,10 @@ impl<'a> View<'a> {
             http_in: HashSet::new(),
             carry_in: HashSet::new(),
             dispatch_in: HashSet::new(),
+            invoked_owner: crate::answers::invoked_members(merged)
+                .into_iter()
+                .map(|(member, owner, _)| (member, owner))
+                .collect(),
             callers: HashMap::new(),
             handlers: HashMap::new(),
             project_roots: BTreeMap::new(),
@@ -924,6 +942,9 @@ fn collect_rows(
     let mut ids = Ids::default();
     // dead_symbol candidates only dispatch keeps out (CH.1c).
     let mut withheld = 0usize;
+    // DT.5d: candidates that are generated code, and framework- or
+    // runtime-invoked members of an owner with an incoming carry edge.
+    let (mut generated, mut invoked) = (0usize, 0usize);
 
     for n in &view.nodes {
         let mut node_row =
@@ -1107,8 +1128,21 @@ fn collect_rows(
                     && !view.carry_in.contains(&n.id)
                     && !provenance_is(n.cells, "test_fixture")
                 {
+                    // Generated code is no authored symbol to delete.
+                    if GENERATED_PROVENANCE.iter().any(|p| provenance_is(n.cells, p)) {
+                        generated += 1;
+                        continue;
+                    }
                     if view.dispatch_in.contains(&n.id) {
                         withheld += 1;
+                        continue;
+                    }
+                    // An invoked member is a row exactly when its owner is:
+                    // a live owner made it live already, and an owner with
+                    // an incoming carry edge (a dead caller's included, as
+                    // dispatch reads it) is no row.
+                    if view.invoked_owner.get(&n.id).is_some_and(|o| view.carry_in.contains(o)) {
+                        invoked += 1;
                         continue;
                     }
                     rows.push(node_row(
@@ -1125,6 +1159,11 @@ fn collect_rows(
     if want(DEAD_SYMBOL) && withheld > 0 {
         eprintln!(
             "[dead-dispatch] dead_symbol rows withheld: {withheld} (implementations of a called method)"
+        );
+    }
+    if want(DEAD_SYMBOL) && (invoked > 0 || generated > 0) {
+        eprintln!(
+            "[dead-framework] dead_symbol rows withheld: invoked={invoked} generated={generated}"
         );
     }
 
