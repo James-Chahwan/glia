@@ -478,6 +478,22 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W14 (DZ.1, DD.16): `scripts/eval_substrate.py:229` keeps a PackageResolver row for category 31, and
   `bench/substrate-gap/matrix_vocab.py` REPO_PAIRWISE_CATEGORIES / AUTHORING.md's "SHARES_* (all seven)" still list
   SHARES_DEPENDENCY, which no resolver emits since DD.16 (drop it while test_matrix.py stays green).
+- Kina demo of the four bets (2026-10-16, `git archive` of Kina 8ac238c, glia c4987609) - candidates for 0.5.2 tweaks
+  before the release, else 0.5.3 (James decides):
+  - **A `forbid_edge` between directories inside one project never anchors.** `from = "backend/internal/handlers"` (a
+    directory of the `backend` project) prints `[declared] orphaned constraint ... (no PROJECT)` on stderr and the rule
+    silently leaves `glia check` (`rules=1`, not 2): the commonest layering rule (handlers -> repository inside one
+    service) cannot be written as a forbid; the same check as a rule invariant works (8 handler methods call repository
+    methods directly, FACT, located). Extends §D's "a `[[constraint]]` with no anchor is orphaned silently".
+  - Routes registered in `_test.go` files count as product routes: `unhandled_route` lists `GET /panic` and
+    `POST /api/auth/password/reset/:token` from `backend/internal/middleware/accesslog_test.go`.
+  - `glia check` repeats every coverage caveat paragraph under every violation (three long HANDLED_BY paragraphs per
+    row); print each caveat once per rule.
+  - GQL answers carry no location (`at` is `-`), while the same Datalog query locates every row.
+  - **Smart contracts are not modelled across the stack.** Kina's `EscrowManager` is defined in `contracts/` (Solidity,
+    Hardhat), called from the frontend (ethers, 7+ files) and the backend (`ethclient` in `signer.go` / `indexer.go`);
+    no edge joins a TS / Go contract call to the Solidity function, and identity has no ABI rule. A contract-call
+    extractor plus an identity rule (Solidity contract <-> its ABI clients) is the cross-stack link a dApp needs.
 
 ## 3. Open questions for James
 
