@@ -59,6 +59,18 @@ impl Scratch {
         s
     }
 
+    /// The scratch dirs with a copy of substrate-gap fixture `fixture` as the
+    /// repo (`key.json` left out), in place of the shop.
+    fn fixture(name: &str, fixture: &str) -> Self {
+        let s = Scratch::shop(name);
+        std::fs::remove_dir_all(&s.top).expect("clear the shop");
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../bench/substrate-gap/fixtures")
+            .join(fixture);
+        copy_tree(&src, &s.top);
+        s
+    }
+
     fn path(&self) -> &str {
         self.top.to_str().expect("utf-8 scratch path")
     }
@@ -107,6 +119,21 @@ impl Scratch {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_glia"));
         cmd.arg("diff-impact").arg(self.path()).args(args);
         self.hermetic(cmd).output().expect("run glia")
+    }
+}
+
+/// Every file under `src` copied to the same place under `dst`, `key.json`
+/// (the grader's) left out.
+fn copy_tree(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst).expect("mkdir");
+    for entry in std::fs::read_dir(src).expect("read fixture dir") {
+        let entry = entry.expect("dir entry");
+        let to = dst.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &to);
+        } else if entry.file_name() != "key.json" {
+            std::fs::copy(entry.path(), &to).expect("copy fixture file");
+        }
     }
 }
 
@@ -246,4 +273,58 @@ fn stdin_deletion_only_diff_names_the_file() {
         "{}",
         stderr(&out)
     );
+}
+
+/// `main.go` of identity-contract-ops with one line added to `listOrders`.
+const LIST_ORDERS_EDITED_LINE: &str = "\tc.Header(\"X-Total\", \"0\")\n";
+
+/// The `also_in` repos of the impact's DOC_SECTION row: the class of the
+/// three `GET /api/orders` contract ops (DERIVED), reached from `listOrders`.
+fn also_in_repos(v: &Value) -> Vec<String> {
+    let row = v["impact"]["results"]
+        .as_array()
+        .expect("impact.results")
+        .iter()
+        .find(|r| r["kind"] == "DOC_SECTION")
+        .unwrap_or_else(|| panic!("a DOC_SECTION row: {v}"));
+    row["identity"]["also_in"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the class row carries also_in: {row}"))
+        .iter()
+        .map(|a| a["repo"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// DD.15 (DD.10's handoff): a collapsed impact row's `also_in` names each
+/// member's repo by the build's label in both modes, as `glia review` does,
+/// never the `repo#<id % 1000>` fallback. Before: `repo#455` in both.
+#[test]
+fn identity_rows_name_the_repo() {
+    let s = Scratch::fixture("identity", "identity-contract-ops");
+    let main = std::fs::read_to_string(s.top.join("main.go")).expect("main.go");
+    let at = main.find("\tc.JSON(200").expect("listOrders' body");
+    let edited = format!("{}{LIST_ORDERS_EDITED_LINE}{}", &main[..at], &main[at..]);
+
+    // Pasted mode: the hunk lands in listOrders.
+    let line = main[..at].lines().count() + 1;
+    let hunk = format!(
+        "--- a/main.go\n+++ b/main.go\n@@ -{l},2 +{l},3 @@\n+{LIST_ORDERS_EDITED_LINE} \tc.JSON(200, []string{{}})\n }}\n",
+        l = line
+    );
+    let diff = s.outside("orders.diff", &hunk);
+    let out = s.diff_impact(&["--diff", &diff, "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let v: Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
+    assert_eq!(v["changed"][0]["qname"], "main::listOrders", "{v}");
+    assert_eq!(also_in_repos(&v), ["repo", "repo"], "{v}");
+
+    // Rev mode: the same edit against HEAD.
+    s.git(&["init", "-q"]);
+    s.git(&["add", "-A"]);
+    s.git(&["commit", "-q", "-m", "orders"]);
+    s.write("main.go", &edited);
+    let out = s.diff_impact(&["--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let v: Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
+    assert_eq!(also_in_repos(&v), ["repo", "repo"], "{v}");
 }

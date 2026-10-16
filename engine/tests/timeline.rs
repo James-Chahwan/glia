@@ -286,3 +286,20 @@ fn errors_are_named() {
     bad.head = "--output=x".to_string();
     assert!(build_timeline(repo.path(), &bad).is_err(), "an option is never a rev");
 }
+
+/// DD.15 (DD.9's handoff): the suggestions of an unknown-node absence are raw
+/// `find` candidates, as every other absence's (`find::search`): the two
+/// copies of one identity class (`react`, a FACT `package_name` class of
+/// DD.5's identity-npm-package) are two suggestions, never folded to one row.
+/// Before: `find_nodes` under the default collapse folded them, so the second
+/// suggestion was gone.
+#[test]
+fn unknown_node_suggestions_stay_raw() {
+    let npm = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bench/substrate-gap/fixtures/identity-npm-package");
+    let repos = [npm.join("web"), npm.join("admin")].map(|p| p.to_string_lossy().into_owned());
+    let built = glia_engine::generate_many(&repos).unwrap_or_else(|e| panic!("{repos:?} builds: {e}"));
+    let answer = edge_history(&built.merged, &TimelineStore::default(), "react", None);
+    let why = answer.absence.expect("an unknown node carries its absence");
+    assert_eq!(why.reason, "unknown_symbol");
+    assert_eq!(why.suggestions, ["package:npm:react", "package:npm:react"], "{why:?}");
+}

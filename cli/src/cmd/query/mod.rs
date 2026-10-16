@@ -78,6 +78,13 @@ pub(crate) enum QueryCmd {
     /// located, with its HITS authority and hub scores; tier derived. Exits 0
     /// with rows, 1 with none (the absence says why), 2 on an error.
     Hubs(hubs::Args),
+    /// Identity (DD.15): the identity classes - nodes the build says are one
+    /// thing (a package, a message, a contract op, a SCIP symbol: fact /
+    /// derived, collapsed in answers) and same-as candidates (vendored
+    /// copies: heuristic, never collapsed) - by rule and tier, each member
+    /// located, diverged copies with their variants. Exits 0 with classes, 1
+    /// with none (the absence says why), 2 on an error.
+    Identity(identity::Args),
     /// Implementors (LD.7c): who implements or extends a type, or overrides a
     /// method, over IMPLEMENTS / INHERITS_FROM — the whole hierarchy unless
     /// `--direct`, the supertypes with `--up`. Each row is located, names the
@@ -146,6 +153,7 @@ pub(crate) fn run(c: QueryCmd) -> i32 {
         QueryCmd::Flows(a) => flows::run(a),
         QueryCmd::Hotspots(a) => hotspots::run(a),
         QueryCmd::Hubs(a) => hubs::run(a),
+        QueryCmd::Identity(a) => identity::run(a),
         QueryCmd::Implementors(a) => implementors::run(a),
         QueryCmd::Pack(a) => pack::run(a),
         QueryCmd::Pages(a) => pages::run(a),

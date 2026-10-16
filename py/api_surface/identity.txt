@@ -1,0 +1,2 @@
+# pyo3 surface of py/src/identity.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+method PyGraph.identity_classes(tier: Option<String> = None, rule: Option<String> = None, diverged_only: bool = false, limit: Option<usize> = None) -> PyResult<Py<PyAny>>

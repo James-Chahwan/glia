@@ -671,8 +671,10 @@ fn unknown_node(
             mechanisms.push(cat);
         }
     }
+    // Raw candidates, as every absence's suggestions: `find::search` never
+    // folds an identity class (DD.9), so two copies are two suggestions.
     let opts = FindOptions { top_k: absence::SUGGESTIONS, ..FindOptions::default() };
-    let near = find::find_nodes(merged, q, &opts).results;
+    let near = find::search(merged, q, &opts).rows;
     let mut a = absence::unknown_symbol(merged, "timeline", q, &mechanisms, &near);
     a.note = if candidates.is_empty() {
         format!("no node of {} has the qname `{q}` or a qname ending `::{q}`", window(store))

@@ -12,9 +12,11 @@
 //! seeds the radius), the edges the change added or removed (rev mode), the
 //! diff files no node placed (pasted mode), then the radius in
 //! `blast-radius`'s column layout, always with its `seed` column: the seed
-//! whose wave reached the row first. `--json` prints the engine's
-//! `DiffImpact` (`{base, changed, edges_added, edges_removed, impact,
-//! unresolved_diff_files}`). Every `file:line` is 1-based (LD.1).
+//! whose wave reached the row first. A row standing for an identity class
+//! names its other members' repos by the build's labels (DD.10). `--json`
+//! prints the engine's `DiffImpact` (`{base, changed, edges_added,
+//! edges_removed, impact, unresolved_diff_files}`). Every `file:line` is
+//! 1-based (LD.1).
 //!
 //! Exit 0 on an answer (an empty radius prints its absence), 2 on a usage
 //! error (`--base` with `--diff`, `--with` or `--no-overlay` in rev mode), an
@@ -28,11 +30,13 @@
 //! Fired-on marker: the engine's
 //! `[diff-impact] mode=<rev|diff> base=<rev|-> changed=<C> seeds=<S> impact=<I> edges +<a> -<r> unresolved_files=<U>`.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 
 use glia_engine::BlastOptions;
-use glia_engine::delta::DeltaEdge;
-use glia_engine::diff_impact::{DiffImpact, diff_impact_from_diff, diff_impact_vs_rev};
+use glia_engine::delta::{DeltaEdge, graph_delta_vs_rev};
+use glia_engine::diff_impact::{DiffImpact, diff_impact_from_delta, diff_impact_from_diff};
+use glia_engine::identity::Collapse;
 use glia_graph::Reach;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
@@ -95,7 +99,8 @@ fn answer(args: &Args, opts: &BlastOptions) -> Result<DiffImpact, String> {
         }
         let text = read_diff(src)?;
         let built = generate_for(&args.repo, &args.with)?;
-        let mut a = diff_impact_from_diff(&built.merged, &text, opts);
+        let opts = labelled(opts, &built.repo_labels);
+        let mut a = diff_impact_from_diff(&built.merged, &text, &opts);
         if let Some(x) = a.impact.absence.as_mut() {
             x.unparsed_files = built.parse_errors.len();
         }
@@ -109,7 +114,21 @@ fn answer(args: &Args, opts: &BlastOptions) -> Result<DiffImpact, String> {
             "--no-overlay does not apply to --base: both sides are built with the repo's overlay".to_string(),
         );
     }
-    diff_impact_vs_rev(&args.repo, args.base.as_deref().unwrap_or("HEAD"), opts)
+    // `diff_impact_vs_rev`'s two steps, so the radius gets the working
+    // tree's labels between them.
+    let rev = graph_delta_vs_rev(&args.repo, args.base.as_deref().unwrap_or("HEAD"))?;
+    Ok(diff_impact_from_delta(&rev, &labelled(opts, &rev.after.repo_labels)))
+}
+
+/// `opts` with the build's repo labels when its collapse is on and has none
+/// (DD.10, as `glia review` does), so a collapsed row's `also_in` names each
+/// repo by its label, not `repo#<id % 1000>`.
+fn labelled(opts: &BlastOptions, labels: &BTreeMap<u64, String>) -> BlastOptions {
+    let mut opts = opts.clone();
+    if opts.collapse.enabled && opts.collapse.repo_labels.is_empty() {
+        opts.collapse = Collapse::with_labels(labels);
+    }
+    opts
 }
 
 pub(crate) fn run(args: Args) -> i32 {

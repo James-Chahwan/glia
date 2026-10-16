@@ -8,18 +8,24 @@
 //! `diff_impact_vs_rev(repo_path, base="HEAD", ..)` builds the repo's working
 //! tree and the rev itself (LE.1b's graph delta), so it takes a path. Each
 //! returns the engine's answer as a native dict (LD.2); a bad `direction` or
-//! an engine `Err` raises `ValueError`.
+//! an engine `Err` raises `ValueError`. A row standing for an identity class
+//! names its other members' repos by the build's labels (DD.10), as
+//! `review_vs_rev` does.
 //!
 //! Transport only: the seeds, the radius, the location of every row and the
 //! `[diff-impact] mode=..` marker live in the engine. The helpers the pyo3
 //! entry points delegate to are pyo3-free, so `cargo test -p glia-py`
 //! covers them (see the crate doc).
 
+use std::collections::BTreeMap;
+
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use glia_engine::BlastOptions;
-use glia_engine::diff_impact::{DiffImpact, diff_impact_from_diff, diff_impact_vs_rev};
+use glia_engine::delta::graph_delta_vs_rev;
+use glia_engine::diff_impact::{DiffImpact, diff_impact_from_delta, diff_impact_from_diff};
+use glia_engine::identity::Collapse;
 use glia_graph::MergedGraph;
 
 use crate::blast::reach_named;
@@ -28,7 +34,8 @@ use crate::graph::PyGraph;
 use crate::registry::ModuleFns;
 
 /// The engine's options from the keyword arguments both entry points take;
-/// `Err` names a bad `direction`.
+/// `Err` names a bad `direction`. The caller sets the collapse's repo labels
+/// from its build ([`labelled`]).
 fn options(
     direction: &str,
     depth: usize,
@@ -45,9 +52,19 @@ fn options(
     Ok(opts)
 }
 
-/// The body of [`PyGraph::diff_impact`], minus pyo3.
+/// `opts` collapsing with the build's repo `labels`, so a collapsed row's
+/// `also_in` names each repo by its label, not `repo#<id % 1000>` (DD.10).
+fn labelled(mut opts: BlastOptions, labels: &BTreeMap<u64, String>) -> BlastOptions {
+    opts.collapse = Collapse::with_labels(labels);
+    opts
+}
+
+/// The body of [`PyGraph::diff_impact`], minus pyo3; `labels` are the
+/// graph's (`PyGraph::repo_labels`).
+#[allow(clippy::too_many_arguments)]
 fn diff_answer(
     merged: &MergedGraph,
+    labels: &BTreeMap<u64, String>,
     diff_text: &str,
     direction: &str,
     depth: usize,
@@ -55,11 +72,13 @@ fn diff_answer(
     live_only: bool,
     scope: Option<&str>,
 ) -> Result<DiffImpact, String> {
-    let opts = options(direction, depth, top_k, live_only, scope)?;
+    let opts = labelled(options(direction, depth, top_k, live_only, scope)?, labels);
     Ok(diff_impact_from_diff(merged, diff_text, &opts))
 }
 
-/// The body of [`diff_impact_vs_rev_py`], minus pyo3.
+/// The body of [`diff_impact_vs_rev_py`], minus pyo3: the engine's
+/// `diff_impact_vs_rev` in its two steps, so the radius gets the working
+/// tree's labels between them.
 fn rev_answer(
     repo_path: &str,
     base: &str,
@@ -70,7 +89,8 @@ fn rev_answer(
     scope: Option<&str>,
 ) -> Result<DiffImpact, String> {
     let opts = options(direction, depth, top_k, live_only, scope)?;
-    diff_impact_vs_rev(repo_path, base, &opts)
+    let rev = graph_delta_vs_rev(repo_path, base)?;
+    Ok(diff_impact_from_delta(&rev, &labelled(opts, &rev.after.repo_labels)))
 }
 
 #[pymethods]
@@ -103,7 +123,7 @@ impl PyGraph {
         live_only: bool,
         scope: Option<&str>,
     ) -> PyResult<Py<PyAny>> {
-        let answer = diff_answer(&self.merged, diff_text, direction, depth, top_k, live_only, scope)
+        let answer = diff_answer(&self.merged, &self.repo_labels, diff_text, direction, depth, top_k, live_only, scope)
             .map_err(PyValueError::new_err)?;
         to_py(py, serde_json::to_string(&answer))
     }
@@ -229,7 +249,7 @@ mod tests {
     fn diff_helper_returns_the_documented_object() {
         let (_scratch, top) = shop("diff");
         let built = glia_engine::generate_one(top.to_str().expect("utf-8")).expect("build");
-        let a = diff_answer(&built.merged, DIFF, "backward", 4, None, false, None).expect("answer");
+        let a = diff_answer(&built.merged, &built.repo_labels, DIFF, "backward", 4, None, false, None).expect("answer");
         let text = serde_json::to_string(&a).expect("serialises");
         let order: Vec<usize> = [
             "\"base\":",
@@ -254,11 +274,11 @@ mod tests {
                 ("shop::b::checkout".to_string(), 2, "shop::a::price".to_string()),
             ]
         );
-        let cut = diff_answer(&built.merged, DIFF, "backward", 1, None, false, None).expect("depth 1");
+        let cut = diff_answer(&built.merged, &built.repo_labels, DIFF, "backward", 1, None, false, None).expect("depth 1");
         assert_eq!(rows(&value(&cut)), [("shop::a::place".to_string(), 1, "shop::a::price".to_string())]);
-        let fwd = diff_answer(&built.merged, DIFF, "forward", 4, None, false, None).expect("forward");
+        let fwd = diff_answer(&built.merged, &built.repo_labels, DIFF, "forward", 4, None, false, None).expect("forward");
         assert!(fwd.impact.results.is_empty() && fwd.impact.absence.is_some());
-        let err = diff_answer(&built.merged, DIFF, "sideways", 4, None, false, None).expect_err("bad direction");
+        let err = diff_answer(&built.merged, &built.repo_labels, DIFF, "sideways", 4, None, false, None).expect_err("bad direction");
         assert!(err.contains("sideways"), "{err}");
         let o = options("both", 2, Some(3), true, Some("shop")).expect("options");
         assert_eq!((o.depth, o.top_k, o.live_only, o.scope.as_deref()), (2, Some(3), true, Some("shop")));
@@ -289,5 +309,58 @@ mod tests {
         );
         let err = rev_answer(repo, "no-such-rev", "both", 4, None, false, None).expect_err("unknown rev");
         assert!(err.contains("no-such-rev"), "{err}");
+    }
+
+    /// The `also_in` repos of the impact's DOC_SECTION row (the class of the
+    /// three `GET /api/orders` contract ops of identity-contract-ops).
+    fn also_in_repos(v: &serde_json::Value) -> Vec<String> {
+        let row = v["impact"]["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .find(|r| r["kind"] == "DOC_SECTION")
+            .unwrap_or_else(|| panic!("a DOC_SECTION row: {v}"));
+        row["identity"]["also_in"]
+            .as_array()
+            .unwrap_or_else(|| panic!("the class row carries also_in: {row}"))
+            .iter()
+            .map(|a| a["repo"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// DD.15 (DD.10's handoff): both entry points collapse with the build's
+    /// repo labels, so `also_in` names the repo (`repo`), never the
+    /// `repo#<id % 1000>` fallback the unlabelled default gave.
+    #[test]
+    fn identity_rows_name_the_repo() {
+        let root = std::env::temp_dir().join(format!("glia-dd15-py-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let scratch = Scratch(root.clone());
+        let top = root.join("repo");
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bench/substrate-gap/fixtures/identity-contract-ops");
+        for rel in ["go.mod", "main.go", "docs/swagger.yaml", "features/orders/feature.yaml"] {
+            let to = top.join(rel);
+            std::fs::create_dir_all(to.parent().expect("parent")).expect("scratch dir");
+            std::fs::copy(src.join(rel), &to).expect("copy fixture file");
+        }
+        let main = std::fs::read_to_string(top.join("main.go")).expect("main.go");
+        let at = main.find("\tc.JSON(200").expect("listOrders' body");
+        let line = main[..at].lines().count() + 1;
+        let added = "\tc.Header(\"X-Total\", \"0\")\n";
+        let hunk = format!("--- a/main.go\n+++ b/main.go\n@@ -{line},2 +{line},3 @@\n+{added} \tc.JSON(200, []string{{}})\n }}\n");
+        let repo = top.to_str().expect("utf-8");
+
+        let built = glia_engine::generate_one(repo).expect("build");
+        let a = diff_answer(&built.merged, &built.repo_labels, &hunk, "both", 4, None, false, None).expect("answer");
+        assert_eq!(also_in_repos(&value(&a)), ["repo", "repo"]);
+
+        let gitconfig = scratch.0.join("gitconfig");
+        std::fs::write(&gitconfig, "").expect("empty gitconfig");
+        git(&top, &gitconfig, &["init", "-q"]);
+        git(&top, &gitconfig, &["add", "-A"]);
+        git(&top, &gitconfig, &["commit", "-q", "-m", "orders"]);
+        std::fs::write(top.join("main.go"), format!("{}{added}{}", &main[..at], &main[at..])).expect("edit");
+        let a = rev_answer(repo, "HEAD", "both", 4, None, false, None).expect("answer");
+        assert_eq!(also_in_repos(&value(&a)), ["repo", "repo"]);
     }
 }

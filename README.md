@@ -214,6 +214,7 @@ glia hotspots <REPO> [--include-tests] [--json] [--level module|symbol|both] [--
     churn rank beside PageRank centrality rank (the `centrality` preset), no
     composite score. Reads the history snapshot (`glia history sync`, `--blame` for
     symbols). Heuristic. Exits 1 with no rows (no_history / no_match).
+glia identity <REPO> [--diverged-only] [--json] [--limit <N>] [--rule <RULE>] [--tier fact|derived|heuristic] [--with <WITH>]...
 
 # One symbol, channel or signal
 glia find <REPO> <QUERY> [--json] [--kind <KIND>]... [--no-collapse] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
