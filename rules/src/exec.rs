@@ -1326,10 +1326,12 @@ mod tests {
         let tiers = edge_tiers(&g);
         let reaches = || pos("reaches", vec![v("a"), v("b"), s("CALLS")]);
         let function = || pos("node", vec![v("a"), s("FUNCTION")]);
+        // reaches first: neither literal binds a column (a category set is no key), so
+        // source order runs the walk with both ends free.
         let small = vec![
+            reaches(),
             pos("index", vec![v("a"), v("i")]),
             Literal::cmp(CmpOp::Lt, v("i"), Term::int(2)),
-            reaches(),
         ];
         let rules = vec![
             rule("pair", vec![v("a"), v("b")], small),

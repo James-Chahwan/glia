@@ -349,7 +349,8 @@ pub(crate) fn closure_set(catalog: &Catalog, builtin: usize, terms: &[CTerm]) ->
 /// `first`, when given, runs first (the planner's delta literal). Then, greedily:
 /// any literal binding no new variable (a pure filter: a membership atom, a comparison
 /// or negation over bound variables, a fully bound builtin) in source order; else the
-/// eligible literal with the most bound columns (constants and bound variables), ties
+/// eligible literal with the most bound columns (constants and bound variables; a
+/// builtin's `Const` columns, such as a closure's category set, never count), ties
 /// to the smaller known `size` (unknown = `usize::MAX`; an assignment is 1), then
 /// source order. A builtin
 /// whose `Must` / `Const` columns are not all bound is not eligible, nor is a negation
@@ -434,16 +435,20 @@ fn shape(
     match lit {
         CLit::Pos(p, terms, _) => {
             let info = preds.get(*p as usize);
-            let runnable = terms.iter().enumerate().all(|(c, t)| {
-                match info.and_then(|i| i.bind_req(catalog, c)) {
-                    Some(BindReq::Must | BindReq::Const) => is_bound(t, bound),
-                    Some(BindReq::May) | None => true,
-                }
+            let req = |c: usize| info.and_then(|i| i.bind_req(catalog, c));
+            let runnable = terms.iter().enumerate().all(|(c, t)| match req(c) {
+                Some(BindReq::Must | BindReq::Const) => is_bound(t, bound),
+                Some(BindReq::May) | None => true,
             });
+            // A builtin's `Const` column (a closure's category set or depth) is a literal
+            // in every call, so it selects nothing: counting it ranked `reaches(a, b,
+            // "CALLS")` with both ends free above a literal that binds one end.
+            let selective =
+                |(c, t): &(usize, &CTerm)| req(*c) != Some(BindReq::Const) && is_bound(t, bound);
             Shape {
                 filter: runnable && !has_free_var(terms, bound),
                 eligible: runnable,
-                bound: terms.iter().filter(|t| is_bound(t, bound)).count(),
+                bound: terms.iter().enumerate().filter(selective).count(),
                 size: size(*p).unwrap_or(usize::MAX),
             }
         }
@@ -2243,6 +2248,39 @@ mod tests {
         // (size 1 beats edge's 1,000), then edge with y bound, then the filters.
         let small_node = |p: PredId| Some(if p == edge { 1_000 } else { 10 });
         assert_eq!(sips_order(r, &a.preds, &c, &[], None, &small_node), vec![4, 3, 1, 0, 2]);
+    }
+
+    #[test]
+    fn sips_does_not_count_a_builtin_const_column() {
+        // DA.10's probe: `reaches`' category set is a literal in every call, so the
+        // literal that binds an end (in_scope's Must constant) runs first and the walk
+        // starts from a bound node instead of every node.
+        let c = catalog().with_builtins(vec![in_scope()]);
+        let p = program(vec![rule(
+            "hit",
+            vec![v("a")],
+            vec![
+                pos("reaches", vec![v("a"), v("b"), s("CALLS")]),
+                pos("in_scope", vec![v("b"), s("store")]),
+            ],
+        )]);
+        let a = ok_in(&p, &c);
+        let r = &a.rules[0];
+        assert_eq!(sips_order(r, &a.preds, &c, &[], None, &|_| None), vec![1, 0]);
+        // reaches/4's depth constant is no key either: node(a, _) and the walk tie at
+        // nothing bound and source order runs node first, so the walk gets `a` bound
+        // (counting the two constants ranked the walk first with both ends free).
+        let p = program(vec![rule(
+            "near",
+            vec![v("a"), v("b")],
+            vec![
+                pos("node", vec![v("a"), Term::wild()]),
+                pos("reaches", vec![v("a"), v("b"), s("CALLS"), Term::int(3)]),
+            ],
+        )]);
+        let a = ok(&p);
+        let r = &a.rules[0];
+        assert_eq!(sips_order(r, &a.preds, &c, &[], None, &|_| None), vec![0, 1]);
     }
 
     #[test]
