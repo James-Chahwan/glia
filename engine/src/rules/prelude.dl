@@ -4,10 +4,10 @@
 // prelude`).
 //
 // STRUCTURE ONLY (SECURITY.md, `The query language reads structure only`): every
-// predicate here reads nodes, kinds, locations, edges and their categories. None
-// names or classifies authentication, authorization, secrets, permissions or any
-// security property, none reads a value or data flow, and none reads source text
-// (a CODE, DOC, SCHEMA_FIELDS or ENV cell). The unit test
+// predicate here reads nodes, kinds, locations, provenance (an ORIGIN cell's), edges
+// and their categories. None names or classifies authentication, authorization,
+// secrets, permissions or any security property, none reads a value or data flow,
+// and none reads source text (a CODE, DOC, SCHEMA_FIELDS or ENV cell). The unit test
 // `rules::prelude::tests::prelude_is_structural_only` enforces it.
 //
 // Concepts, not raw categories: when the code profile changes (a carry edge added, a
@@ -49,8 +49,9 @@ handles(R, H) :- edge(R, H, "HANDLED_BY").
 // Route R has a handler.
 handled(R) :- handles(R, _).
 
-// A route with no handler in the graph.
-unhandled_route(R) :- node(R, "ROUTE"), !handled(R).
+// A route with no handler in the graph, test-file routes (ORIGIN test_fixture: only
+// test code registers them, DT.6a) excluded.
+unhandled_route(R) :- node(R, "ROUTE"), !handled(R), !origin(R, "test_fixture").
 
 // N has a test.
 tested(N) :- edge(_, N, "TESTS").

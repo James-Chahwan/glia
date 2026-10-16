@@ -153,7 +153,7 @@ or caveat. The names are a contract: renaming one would break the rules that use
 | `inherits(A, B)` | `edge(A, B, "INHERITS_FROM")` | `A` inherits from `B` |
 | `handles(R, H)` | `edge(R, H, "HANDLED_BY")` | route `R` is handled by `H` |
 | `handled(R)` | `handles(R, _)` | route `R` has a handler |
-| `unhandled_route(R)` | `node(R, "ROUTE"), !handled(R)` | a route with no handler in the graph (caveated by HANDLED_BY) |
+| `unhandled_route(R)` | `node(R, "ROUTE"), !handled(R), !origin(R, "test_fixture")` | a route with no handler in the graph, test-file routes excluded (caveated by HANDLED_BY) |
 | `tested(N)` | `edge(_, N, "TESTS")` | `N` has a test |
 | `unreached(N)` | `node(N, K), symbol_kind(K), !live(N)` | a CLASS, FUNCTION or METHOD no entry point reaches over the carry edges (caveated by every carry category) |
 | `effect(F, S, Class)` | `edge(F, S, C), node(S, K), effect_sink(K, C, Class)` | `F` reaches effect sink `S` directly, classed by the profile (`db`, `http_call`, `queue_produce`, ...) |

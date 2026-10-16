@@ -22,7 +22,12 @@
 //!    neither (`<unresolved>` in it or an `unresolved:` framework tag: those
 //!    are `unresolved_endpoint`'s / `tag_only_queue`'s rows), nor is a node a
 //!    cell marks `"external":true` (a third-party call, CG.4a), nor a ROUTE
-//!    that is a client-router page (`nav::is_nav_route`).
+//!    that is a client-router page (`nav::is_nav_route`), nor a ROUTE only
+//!    test code registers (DT.6b: ORIGIN `test_fixture`, read through
+//!    `passes::test_route_ids`, the predicate DT.6a's `http` pass keeps such
+//!    a route out of the route index by, so no row proposes an HTTP_CALLS
+//!    the resolver would refuse). The learned triples are unchanged: no
+//!    cross edge involves a test route.
 //! 3. **Channel.** [`tokens`] of `graph::channel_of(qname, name)`: the path
 //!    cut at `?` / `#`, split on `/`; a whole-segment `${…}`, `:id`, `{id}`,
 //!    `<id>` or `*` is the wildcard PARAM, a `${…}` glued to a literal is
@@ -154,14 +159,18 @@ struct Cand {
 }
 
 /// Every `suspected_edge` row of `merged`, unsorted, ids handed out by `ids`
-/// (key `orphan \x1f target`). Prints the `[suspected]` line.
+/// (key `orphan \x1f target`). `test_routes` is
+/// `passes::test_route_ids(merged, ..)`, the ROUTEs only test code
+/// registers: neither an orphan nor a target (DT.6b). Prints the
+/// `[suspected]` line.
 pub(crate) fn suspected_rows(
     merged: &MergedGraph,
     loc: &Locator,
     ids: &mut Ids,
+    test_routes: &HashSet<NodeId>,
 ) -> (Vec<GapRow>, SuspectedStats) {
     let mut stats = SuspectedStats::default();
-    let rows = compute(merged, loc, ids, &mut stats);
+    let rows = compute(merged, loc, ids, test_routes, &mut stats);
     eprintln!("{stats}");
     (rows, stats)
 }
@@ -170,6 +179,7 @@ fn compute(
     merged: &MergedGraph,
     loc: &Locator,
     ids: &mut Ids,
+    test_routes: &HashSet<NodeId>,
     stats: &mut SuspectedStats,
 ) -> Vec<GapRow> {
     let nodes = node_refs(merged);
@@ -228,7 +238,7 @@ fn compute(
 
     // Per node: can its channel pair at all (tokens are read per triple:
     // HTTP splits the method off).
-    let pairable: Vec<bool> = nodes.iter().map(pairable).collect();
+    let pairable: Vec<bool> = nodes.iter().map(|n| pairable(n, test_routes)).collect();
 
     let mut cands: Vec<Cand> = Vec::new();
     let mut pairs: Vec<(NodeId, NodeId)> = Vec::new();
@@ -493,8 +503,9 @@ fn learn(merged: &MergedGraph, kind_of: &dyn Fn(NodeId) -> Option<NodeKindId>) -
 
 /// Can this node take part: its channel was read (no `<unresolved>`, no
 /// `unresolved:` framework tag), no cell marks it external, and it is not a
-/// client-router page.
-fn pairable(n: &NodeRef<'_>) -> bool {
+/// client-router page nor a ROUTE only test code registers (in
+/// `test_routes`, DT.6b).
+fn pairable(n: &NodeRef<'_>, test_routes: &HashSet<NodeId>) -> bool {
     let bare = n
         .channel
         .split_once(' ')
@@ -503,7 +514,7 @@ fn pairable(n: &NodeRef<'_>) -> bool {
     !(bare.contains("<unresolved>")
         || is_framework_tag(bare)
         || is_external(n.cells)
-        || (n.kind == node_kind::ROUTE && is_nav_route(n.cells)))
+        || (n.kind == node_kind::ROUTE && (is_nav_route(n.cells) || test_routes.contains(&n.id))))
 }
 
 /// A cell (CG.4a's ENDPOINT_HIT) says the node is a third-party call.
@@ -759,12 +770,71 @@ mod tests {
         let m = MergedGraph::new(Vec::new());
         let loc = Locator::new(&m);
         let mut ids = Ids::default();
-        let (rows, stats) = suspected_rows(&m, &loc, &mut ids);
+        let (rows, stats) = suspected_rows(&m, &loc, &mut ids, &HashSet::new());
         assert!(rows.is_empty());
         assert_eq!(stats, SuspectedStats::default());
         assert_eq!(
             stats.to_string(),
             "[suspected] triples=0 orphans=0 candidates=0 kept=0 by="
         );
+    }
+
+    /// DT.6b: a ROUTE stamped ORIGIN `test_fixture` (only test code
+    /// registers it, DT.6a) is neither an orphan nor a target, read through
+    /// `passes::test_route_ids` as `gaps` reads it; the same ROUTE unstamped
+    /// pairs, and the stamp on an ENDPOINT changes nothing (the rule is a
+    /// ROUTE's).
+    #[test]
+    fn pairable_skips_test_routes() {
+        use glia_code_domain::cell_type;
+        use glia_core::{Confidence, Node, RepoId};
+
+        let repo = RepoId::from_canonical("test://suspected/test-routes");
+        let fixture = || Cell {
+            kind: cell_type::ORIGIN,
+            payload: CellPayload::Json(r#"{"provenance":"test_fixture"}"#.to_string()),
+        };
+        let mut nav = glia_code_domain::CodeNav::default();
+        let mut nodes = Vec::new();
+        for (kind, qname, stamped) in [
+            (node_kind::ROUTE, "GET /boom", true),
+            (node_kind::ROUTE, "GET /orders", false),
+            (node_kind::ENDPOINT, "endpoint:GET:/api/boom", true),
+        ] {
+            let id = NodeId::from_parts(glia_code_domain::GRAPH_TYPE, repo, kind, qname);
+            nav.record(id, qname, qname, kind, None);
+            nodes.push(Node {
+                id,
+                repo,
+                confidence: Confidence::Medium,
+                cells: if stamped { vec![fixture()] } else { Vec::new() },
+            });
+        }
+        let m = MergedGraph::new(vec![glia_graph::RepoGraph {
+            repo,
+            nodes,
+            edges: Vec::new(),
+            nav,
+            symbols: glia_graph::SymbolTable::default(),
+            unresolved_calls: Vec::new(),
+            unresolved_refs: Vec::new(),
+            properties: Default::default(),
+        }]);
+        let tests = crate::passes::test_route_ids(&m, &crate::profile::CodeBuildCtx::empty());
+        let refs = node_refs(&m);
+        let got: Vec<(&str, bool)> = refs
+            .iter()
+            .map(|n| (n.qname, pairable(n, &tests)))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("GET /boom", false),
+                ("GET /orders", true),
+                ("endpoint:GET:/api/boom", true),
+            ]
+        );
+        // With no test-route set, the stamped route pairs as before DT.6b.
+        assert!(pairable(&refs[0], &HashSet::new()));
     }
 }

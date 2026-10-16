@@ -13,11 +13,11 @@
 //!
 //! | category | what | tier | suggest |
 //! |---|---|---|---|
-//! | `unpaired_endpoint` | an ENDPOINT (not `<unresolved>`) with no outgoing HTTP_CALLS, and not one whose ORIGIN provenance is `external` (every call site names a public host outside the build, CA-13: a third-party API is not a gap) | fact; heuristic when its ENDPOINT_HIT records a `host` (it may be a third-party API) | `constants` for a `${…}` / `/{}` path, `route_prefix\|edge` when a route of its method (or `ANY`) has a path that is a proper suffix of it (`detail` names it), else `edge` |
+//! | `unpaired_endpoint` | an ENDPOINT (not `<unresolved>`) with no outgoing HTTP_CALLS, and not one whose ORIGIN provenance is `external` (every call site names a public host outside the build, CA-13: a third-party API is not a gap) | fact; heuristic when its ENDPOINT_HIT records a `host` (it may be a third-party API) | `constants` for a `${…}` / `/{}` path, `route_prefix\|edge` when a route of its method (or `ANY`) has a path that is a proper suffix of it (`detail` names it; never a test-file route, DT.6b), else `edge` |
 //! | `ambiguous_endpoint` | an ENDPOINT whose HTTP_CALLS targets span >= 2 repos or >= 2 project roots | fact | `constants\|route_prefix` |
 //! | `unresolved_endpoint` | `endpoint:<M>:<unresolved>` with no outgoing HTTP_CALLS; `detail` names its owner (the CALLS / USES predecessor) | fact | `wrapper` |
 //! | `wrapped_sink` | an `unresolved_endpoint` whose every owner is named like a declared http `[[wrapper]]` (the owner's last qname segment equals the stanza's `call` after its last `.` / `::`, in the owner's repo): the sink is real, its identity now lives at the wrapper's call sites (LF.2e mints them); informational | fact | `none` |
-//! | `unpaired_route` | a ROUTE that is not a client-router page (ORIGIN `nav_route`, `graph::nav::is_nav_route`) with no incoming HTTP_CALLS and no WebSocket client connecting through it (DT.3c: the route lent its path to a generic upgrade handler and a client paired with it at its best tier, `glia_graph::WebSocketStackResolver::served_routes`) | heuristic (a public API is legitimately uncalled in-stack) | `route_prefix\|edge` |
+//! | `unpaired_route` | a ROUTE that is not a client-router page (ORIGIN `nav_route`, `graph::nav::is_nav_route`) with no incoming HTTP_CALLS and no WebSocket client connecting through it (DT.3c: the route lent its path to a generic upgrade handler and a client paired with it at its best tier, `glia_graph::WebSocketStackResolver::served_routes`), and not ORIGIN `test_fixture` (a route only test code registers, DT.6a: every registration site a test path or a `[walk] tests` match, `passes::test_route_ids`; DT.6b withholds it, counted on its own marker) | heuristic (a public API is legitimately uncalled in-stack) | `route_prefix\|edge` |
 //! | `tag_only_queue` | a QUEUE_PRODUCER / QUEUE_CONSUMER whose topic is a framework tag (`queues::is_framework_tag`) | fact | `constants\|wrapper` |
 //! | `dead_symbol` | a FUNCTION / METHOD / CLASS outside `entrypoint_reachable`, with no incoming carry edge, not a METHOD that IMPLEMENTS a METHOD with an incoming CALLS / USES from a third node, neither of the two (dispatch reaches it, CH.1c; a `super.m()` call, rule `super_method`, dispatches to no override, DF.22c), not ORIGIN `test_fixture`, not ORIGIN `generated` / `generated_proto` (DT.5d: generated code), not a framework- or runtime-invoked METHOD (an Angular lifecycle hook or form / pipe / interceptor / guard member, a constructor: `answers::invoked_members`) whose owner has an incoming carry edge (DT.5d: such a member is a row exactly when its owner is) | heuristic | `entrypoints` |
 //! | `cochange_no_edge` | a file pair git history says changes together (a CO_CHANGES edge, LF.5b) that no static link joins ([`cochange_gaps`]); the row is the first file's MODULE, `detail` names the other file, the counts and the languages | heuristic (co-change is history, not proof of coupling) | `edge` |
@@ -101,6 +101,11 @@
 //! - `[dead-dispatch] dead_symbol rows withheld: <n> (implementations of a called method)`
 //!   once per report that computes `dead_symbol` (and per [`graph_counts`])
 //!   when the CH.1c dispatch rule keeps `n > 0` rows out;
+//! - `[gaps] unpaired_route rows withheld: <n> (test-file routes)` once per
+//!   report that computes `unpaired_route` (and per [`graph_counts`]) when
+//!   `n > 0` ROUTEs with no incoming HTTP_CALLS are kept out of it because
+//!   only test code registers them (DT.6b); the `rows=` line's
+//!   `unpaired_route=` is the rows left;
 //! - `[gaps] ws-served routes=<n>` once per report, before its `rows=` line,
 //!   when `n > 0` ROUTEs with no incoming HTTP_CALLS are kept out of
 //!   `unpaired_route` because a WebSocket client connects through them
@@ -137,7 +142,7 @@ use glia_graph::normalise_http_path;
 use crate::answers::{Locator, entrypoint_reachable};
 use crate::build::{BuildOptions, generate_many_opts, generate_one_opts};
 use crate::external::signals;
-use crate::profile::CODE_PROFILE;
+use crate::profile::{CODE_PROFILE, CodeBuildCtx};
 
 pub const UNPAIRED_ENDPOINT: &str = "unpaired_endpoint";
 pub const AMBIGUOUS_ENDPOINT: &str = "ambiguous_endpoint";
@@ -691,6 +696,14 @@ struct View<'a> {
     /// ([`glia_graph::WebSocketStackResolver::served_routes`]). Only looked
     /// up, never iterated.
     ws_served: HashSet<NodeId>,
+    /// DT.6b: the ROUTEs only test code registers
+    /// ([`crate::passes::test_route_ids`], the one predicate DT.6a's `http`
+    /// pass and provenance stamp read), read with an empty build context as a
+    /// layout merge reads it: a built ROUTE's ORIGIN `test_fixture` stamp,
+    /// written with the repos' declared `[walk] tests` in hand, decides.
+    /// Never an `unpaired_route` row, a `suffix_of=` candidate or a
+    /// `suspected_edge` side. Only looked up, never iterated.
+    test_routes: HashSet<NodeId>,
 }
 
 impl<'a> View<'a> {
@@ -711,6 +724,7 @@ impl<'a> View<'a> {
             handlers: HashMap::new(),
             project_roots: BTreeMap::new(),
             ws_served: glia_graph::WebSocketStackResolver::served_routes(&merged.graphs),
+            test_routes: crate::passes::test_route_ids(merged, &CodeBuildCtx::empty()),
         };
         let mut methods: HashSet<NodeId> = HashSet::new();
         // The CALLS / USES edges into each METHOD from another node, in edge
@@ -925,7 +939,8 @@ fn declared_wrappers(roots: &[(u64, PathBuf)]) -> Wrapped {
 
 /// What [`collect_rows`] returns: the rows, unsorted, and how many ROUTEs
 /// the DT.3c WebSocket rule kept out of `unpaired_route` (counted only when
-/// that category is wanted).
+/// that category is wanted). The DT.6b test routes it keeps out are printed
+/// by `collect_rows` itself.
 struct Collected {
     rows: Vec<GapRow>,
     ws_served: usize,
@@ -950,11 +965,17 @@ fn collect_rows(
     );
     let mut rows = Vec::new();
 
-    // Server routes (method, normalised path), for the route_prefix suggestion.
+    // Server routes (method, normalised path), for the route_prefix
+    // suggestion: no client-router page, and no route only test code
+    // registers (DT.6b: an endpoint is never told its route is a fixture).
     let routes: Vec<(Option<&str>, String, NodeId)> = view
         .nodes
         .iter()
-        .filter(|n| n.kind == node_kind::ROUTE && !is_nav_route(n.cells))
+        .filter(|n| {
+            n.kind == node_kind::ROUTE
+                && !is_nav_route(n.cells)
+                && !view.test_routes.contains(&n.id)
+        })
         .filter_map(|n| {
             let path = normalise_http_path(nav_route_path(n.qname)?);
             Some((route_method(n.qname), path, n.id))
@@ -970,6 +991,8 @@ fn collect_rows(
     let (mut generated, mut invoked) = (0usize, 0usize);
     // DT.3c: routes a WebSocket client connects through.
     let mut ws_served = 0usize;
+    // DT.6b: routes only test code registers.
+    let mut test_withheld = 0usize;
 
     for n in &view.nodes {
         let mut node_row =
@@ -1123,6 +1146,13 @@ fn collect_rows(
                     ws_served += 1;
                     continue;
                 }
+                // DT.6b: a route only test code registers is no gap of the
+                // product. Counted here, inside the arm: a failing guard
+                // would fall through to `_` uncounted.
+                if view.test_routes.contains(&n.id) {
+                    test_withheld += 1;
+                    continue;
+                }
                 let handlers = view.handlers.get(&n.id).map(Vec::as_slice).unwrap_or(&[]);
                 let detail = match view.named(handlers) {
                     Some(h) => format!("no incoming HTTP_CALLS; handler={h}"),
@@ -1197,6 +1227,9 @@ fn collect_rows(
             "[dead-framework] dead_symbol rows withheld: invoked={invoked} generated={generated}"
         );
     }
+    if want(UNPAIRED_ROUTE) && test_withheld > 0 {
+        eprintln!("[gaps] unpaired_route rows withheld: {test_withheld} (test-file routes)");
+    }
 
     if want(COCHANGE_NO_EDGE) {
         for p in cochange_audit(merged, "gaps") {
@@ -1220,7 +1253,8 @@ fn collect_rows(
     }
 
     if want(SUSPECTED_EDGE) {
-        let (suspected, _) = crate::suspected::suspected_rows(merged, &loc, &mut ids);
+        let (suspected, _) =
+            crate::suspected::suspected_rows(merged, &loc, &mut ids, &view.test_routes);
         rows.extend(suspected);
     }
 
@@ -2169,6 +2203,16 @@ mod tests {
             id
         }
 
+        /// An ORIGIN `provenance` cell on node `id`.
+        fn stamp(&mut self, id: NodeId, provenance: &str) {
+            if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
+                n.cells.push(Cell {
+                    kind: cell_type::ORIGIN,
+                    payload: CellPayload::Json(format!(r#"{{"provenance":"{provenance}"}}"#)),
+                });
+            }
+        }
+
         fn edge(&mut self, from: NodeId, to: NodeId, category: EdgeCategoryId) {
             self.edges.push(Edge {
                 from,
@@ -2264,6 +2308,70 @@ mod tests {
         let (rows, n, served) = route_rows(&ws_build(&["ws"], true));
         assert_eq!(rows, ["GET /admin/live", "GET /live/orders"]);
         assert_eq!((n, served), (2, 0));
+    }
+
+    /// DT.6b: a ROUTE stamped ORIGIN `test_fixture` (only test code
+    /// registers it, DT.6a) is no `unpaired_route` row and no unpaired
+    /// endpoint's `suffix_of=` candidate; the same route unstamped is both.
+    /// The graph count overlay_delta judges by moves with the rows.
+    #[test]
+    fn test_fixture_route_is_withheld() {
+        let build = |stamped: bool| {
+            let mut s = G::new("server");
+            let boom = s.node(node_kind::ROUTE, "GET /boom");
+            if stamped {
+                s.stamp(boom, "test_fixture");
+            }
+            s.node(node_kind::ROUTE, "POST /orders");
+            let mut c = G::new("client");
+            c.node(node_kind::ENDPOINT, "endpoint:GET:/api/boom");
+            MergedGraph::new(vec![s.build(), c.build()])
+        };
+        let rows = |m: &MergedGraph, category: &str| -> Vec<(String, &'static str, String)> {
+            let rep = gaps_report(m, &[], &GapsOptions::default()).expect("no filter");
+            rep.rows
+                .into_iter()
+                .filter(|r| r.category == category)
+                .map(|r| (r.qname, r.suggest, r.detail))
+                .collect()
+        };
+        let plain = build(false);
+        assert_eq!(
+            rows(&plain, UNPAIRED_ROUTE)
+                .iter()
+                .map(|(q, ..)| q.as_str())
+                .collect::<Vec<_>>(),
+            ["GET /boom", "POST /orders"]
+        );
+        let ep = rows(&plain, UNPAIRED_ENDPOINT);
+        assert_eq!(ep.len(), 1, "{ep:?}");
+        assert_eq!(ep[0].1, "route_prefix|edge");
+        assert!(ep[0].2.contains("; suffix_of=GET /boom ("), "{ep:?}");
+
+        let stamped = build(true);
+        assert_eq!(
+            rows(&stamped, UNPAIRED_ROUTE)
+                .iter()
+                .map(|(q, ..)| q.as_str())
+                .collect::<Vec<_>>(),
+            ["POST /orders"]
+        );
+        assert_eq!(
+            rows(&stamped, UNPAIRED_ENDPOINT),
+            [(
+                "endpoint:GET:/api/boom".to_string(),
+                "edge",
+                "no HTTP_CALLS target".to_string()
+            )]
+        );
+        assert_eq!(
+            graph_counts(&stamped).gaps_by_category.get(UNPAIRED_ROUTE),
+            Some(&1)
+        );
+        assert_eq!(
+            graph_counts(&plain).gaps_by_category.get(UNPAIRED_ROUTE),
+            Some(&2)
+        );
     }
 
     #[test]
