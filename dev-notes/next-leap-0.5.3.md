@@ -442,6 +442,13 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   check to validate (`engine/src/rules/query.rs`) or to the row.
 - W11 (DB.3b): each transitive forbid rule re-tiers every kept edge of its chain (`edge_tier_of` -> `Evidence::of`);
   several transitive rules over one big merge could share one per-edge level vector on Ctx, keyed by edge ordinal.
+- W12 (DB.3c, DB.3d): review renders a rule / forbid_path identity as `_subject: ... - tier <t> at <file:line>_`, the
+  witness table, then up to 5 `⚠` caveat lines with a `(<shown> of <total> caveats)` footer; check's rendering landed in
+  the same wave, so confirm the two surfaces match and share one renderer.
+- W12 (DB.9b): `overlay try` skips leave-one-out for `[[constraint]]` stanzas because no declared rule mints a node or
+  edge; if one ever does, the skip goes (`overlay_loop_rules.rs` pins the delta and fails first).
+- W12 (DD.14): under TopLevelDir / ProjectRoots keying, an unlocated SAME_AS member (PACKAGE_DEP) stays unplaced in
+  `arch`; placing it needs the manifest's PROJECT, which has no edge to its dependencies today.
 
 ## 3. Open questions for James
 
