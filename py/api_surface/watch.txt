@@ -1,0 +1,7 @@
+# pyo3 surface of py/src/watch.rs. Regenerate in the commit that changes it: GLIA_UPDATE_SURFACE=1 cargo test --manifest-path py/Cargo.toml --test api_surface
+class WatchSession (name = "WatchSession")
+new WatchSession.__new__(repo: &str, overlay: bool = true) -> PyResult<Self>
+method WatchSession.apply(paths: Vec<PathBuf>) -> PyResult<Py<PyAny>>
+method WatchSession.persist() -> PyResult<()>
+method WatchSession.poll() -> PyResult<Option<Py<PyAny>>>
+method WatchSession.snapshot() -> PyGraph
