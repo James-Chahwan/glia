@@ -25,6 +25,9 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
   never blast-radius); *"3. A first and get the hand off to engram ready we may need to decide what happens to engram
   soon"* (fixtures, contract and validator in glia first; the Engram ask drafted in `dev-notes/engram-ask-0.5.3.md`,
   not sent); *"4. D yeap totally a great call"* (proximity, then the clarification queue).
+- 2026-10-16, later: *"well shouldn't we bring parts of engram in if we need the embeddings ?"* and *"okay i don't
+  understand the issue of using the embedding models thats tens of mb when it solves isn't it locally run in engram i
+  swear"*: glia embeds locally itself (fastembed / bge-small, as Engram does), §B.
 
 ## 1. The train
 
@@ -45,26 +48,38 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
 - **Multi-repo watch** (`glia watch --with`).
 - **Org-internal package routing** (sibling-repo imports resolved to the sibling's symbols, on 0.5.2's SAME_AS).
 
-### B. Engram, data only (proposed 2026-10-15)
+### B. Embeddings in glia; Engram, data only (proposed 2026-10-15, revised 2026-10-16)
 
-Engram's boundary holds: `engram-core` is the only shared crate, Engram depends on no glia crate, and side files
-cross as data, never as a code dependency (R2-engram §2 and Engram's 2026-10-02 answer). 0.5.2's Engram anchors
-(cross-clone determinism, re-key pairing) are the prerequisite: Engram's learning lives on experience → code links,
-so they must survive a rename.
+James, 2026-10-16: *"well shouldn't we bring parts of engram in if we need the embeddings ?"*, then *"okay i don't
+understand the issue of using the embedding models thats tens of mb when it solves isn't it locally run in engram i
+swear"*. So glia embeds itself, locally, with the library Engram uses (fastembed-rs on the ONNX runtime, bge-small;
+`engram-live`'s `local-embed` feature): inference runs in-process, the model downloads once. glia depends on fastembed
+directly and copies no Engram code, so the boundary holds: `engram-core` is the only shared crate, Engram depends on
+no glia crate, and anything between them crosses as side files (R2-engram §2, Engram's 2026-10-02 answer). 0.5.2's
+Engram anchors (cross-clone determinism, re-key pairing) still matter: Engram's learning lives on experience → code
+links, so they must survive a rename.
 
-- **Semantic tier in `find`.** Engram writes per-qname embeddings as VECTOR cells into `.glia/vectors.jsonl` (the
-  LF.1 sidecar, `external_inputs::VECTORS_FILE`; a build loads them as cells, but no answer queries them today). `find` gains a nearest-vector
-  tier below its lexical tiers, HEURISTIC, reported as its own match tier, never mixed into the lexical order. glia
-  takes no embedding-model dependency.
-- **Corrections as cells.** Engram's consolidated corrections land as DECISION / CONV cells on the node they name
-  (`external_inputs::WRITABLE` = CONSTRAINT, DECISION, CONV, VECTOR), HEURISTIC, `source = "api"`.
-- **A written cell contract** for Engram as a writer: which cell types, the `source` value, the tier, how a
-  re-keyed node's cells follow it (0.5.2 DE's identity_hint pairing).
-- **The Engram half** (writing the sidecars, Engram's own eval rule: a new candidate source enters its pool as a
-  weight-0 feature and stays only if it beats its ablation) belongs to the Engram session: a handoff ask, not a
-  packet.
-- Rule for every row that comes from Engram: learning ranks, it never decides what is true. A FACT / DERIVED row
-  is never promoted or hidden by a learned score.
+- **`glia embed`, a snapshot step (never inside `glia build`,** like `history sync` / `scip import`): embeds each
+  node's text - name, qname, leading_doc and code, since Engram measured full text beating name + qname 78 vs 54 of
+  100 - and writes VECTOR rows to `.glia/vectors.jsonl` (the LF.1 sidecar, `external_inputs::VECTORS_FILE`; a build
+  already loads it as cells). Each vector is cached by a hash of its text, so a re-run embeds only changed nodes; rows
+  carry `model` and `dims`. Its own crate behind a Cargo feature (the CLI on; whether the PyPI wheel ships it is
+  measured in the spec run). Vectors stay outside the byte-identical layout gate: float differences across machines
+  move only HEURISTIC ranks.
+- **Semantic tier** in `find` and the flow search (§F.6), and `pack` as a fallback (§3): the query text is embedded
+  in-process with the sidecar's model; HEURISTIC, reported as its own match tier with its similarity, never mixed into
+  the lexical order. Blast-radius never seeds from vectors.
+- **The sidecar stays writer-agnostic:** the written VectorRow contract and its validator (rows whose qname matches
+  no node, mixed models, wrong dims) hold for any writer, and Engram can read glia's vectors (same model, same space)
+  instead of embedding again.
+- **Corrections as cells.** If Engram continues, its consolidated corrections land as DECISION / CONV cells on the node
+  they name (`external_inputs::WRITABLE` = CONSTRAINT, DECISION, CONV, VECTOR), HEURISTIC, `source = "api"`, under a
+  written contract (cell types, `source`, tier, how a re-keyed node's cells follow it through identity_hint).
+- **Engram's half** (corrections, its own eval rule: a new candidate source enters its pool as a weight-0 feature and
+  stays only if it beats its ablation) is a handoff ask, not a packet: `dev-notes/engram-ask-0.5.3.md`, unsent.
+  Learning from use (the release gate over agent-session history) stays Engram's: glia has no session data.
+- Rule for every learned or embedded row: it ranks, it never decides what is true. A FACT / DERIVED row is never
+  promoted or hidden by a learned or similarity score.
 
 ### C. Gaps from the AWS Context comparison (candidates for James, from public sources)
 
@@ -260,12 +275,10 @@ All four answered 2026-10-16 (§0); recorded as rulings:
    first, filtering by the host.
 2. The semantic tier feeds `find` and the flow search (§F.6), and **`pack` as a fallback only** (seeds only when
    nothing matches by name, each labelled HEURISTIC with its similarity). Blast-radius never seeds from vectors.
-3. **glia's half first, against fixtures:** fixture `.glia/vectors.jsonl` files and a deterministic test-only
-   embedding, the written cell contract (VectorRow: qname, kind, hint, model, dims, b64), and a check reporting rows
-   with a missing qname, mixed models or wrong dims. glia takes no embedding model: a text query's vector comes from
-   the caller with its `model` name, which must match the sidecar's; with none, the semantic tier is skipped and the
-   answer's absence says so. The Engram ask is `dev-notes/engram-ask-0.5.3.md` (draft; James decides Engram's
-   direction before it is sent).
+3. **glia's half first, against fixtures** (fixture `.glia/vectors.jsonl` files, a deterministic test-only embedding,
+   the VectorRow contract and its validator), **then glia embeds itself** (revised 2026-10-16, §B): `glia embed` with
+   fastembed / bge-small, the query embedded in-process. The Engram ask (`dev-notes/engram-ask-0.5.3.md`, draft)
+   shrinks to corrections as cells and reading glia's vectors; James decides Engram's direction before it is sent.
 4. An ambiguous bare doc mention: **proximity, then the clarification queue.** Bind the one candidate a recorded rule
    picks (same directory / project / service as the doc, or its owner also named in the section) at Weak with the rule
    as evidence; when no rule separates them, mint no edge, queue the question (§2 C) and report a gaps row. Measure at
