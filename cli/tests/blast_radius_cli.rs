@@ -119,3 +119,50 @@ fn every_query_unknown_exits_3_with_the_absence() {
     assert_eq!(v["absence"]["reason"], "unknown_symbol", "{v}");
     assert_eq!(v["results"], serde_json::json!([]), "{v}");
 }
+
+/// DD.10: the three ops of one contract class (identity-contract-ops: the
+/// swagger op, the swaggo op and the feature.yaml op, DERIVED) are one
+/// DOC_SECTION row with its `identity` by default and three rows with
+/// `--no-collapse`. The `[identity] collapse surface=blast_radius` stderr line
+/// is DD.10's fired_on marker, printed beside the unchanged `[blast]` line.
+#[test]
+fn identity_classes_collapse_unless_no_collapse() {
+    let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/../bench/substrate-gap/fixtures/identity-contract-ops");
+    let args = ["blast-radius", fixture, "GET /api/orders", "--direction", "backward", "--depth", "1"];
+    let docs = |v: &serde_json::Value| -> Vec<serde_json::Value> {
+        v["results"].as_array().expect("results").iter().filter(|r| r["kind"] == "DOC_SECTION").cloned().collect()
+    };
+
+    let out = glia(&[&args[..], &["--json"]].concat());
+    assert!(out.status.success(), "exit {:?}\n{}", out.status, String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    let rows = docs(&v);
+    assert_eq!(rows.len(), 1, "one row for the class: {v}");
+    let id = &rows[0]["identity"];
+    assert_eq!(id["tier"], "derived", "{v}");
+    assert_eq!(id["rules"], serde_json::json!(["contract_op", "contract_route"]), "{v}");
+    assert_eq!(id["also_in"].as_array().map(Vec::len), Some(2), "{v}");
+    assert_eq!(marker(&out), "[blast] seeds=1 unresolved=0 reached=1 linked_seeds=0 walk=Backward");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let lines: Vec<&str> = stderr.lines().filter(|l| l.starts_with("[identity] collapse surface=blast_radius")).collect();
+    assert_eq!(lines.len(), 1, "one identity line per answer:\n{stderr}");
+    eprintln!("{}", lines[0]);
+    assert!(lines[0].ends_with(" folded=0 rows=1"), "{}", lines[0]);
+
+    let out = glia(&[&args[..], &["--json", "--no-collapse"]].concat());
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+    let rows = docs(&v);
+    assert_eq!(rows.len(), 3, "one row per op: {v}");
+    assert!(rows.iter().all(|r| r.get("identity").is_none()), "{v}");
+    assert_eq!(marker(&out), "[blast] seeds=1 unresolved=0 reached=3 linked_seeds=0 walk=Backward");
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("[identity] collapse"), "no class, no identity line");
+
+    // The table's location cell names the other places.
+    let out = glia(&args);
+    assert!(out.status.success());
+    let table = String::from_utf8_lossy(&out.stdout);
+    let row = table.lines().find(|l| l.contains("| DOC_SECTION |")).expect("the class row");
+    assert!(row.contains(" (also in: "), "{table}");
+    assert_eq!(table.lines().filter(|l| l.contains("| DOC_SECTION |")).count(), 1, "{table}");
+}

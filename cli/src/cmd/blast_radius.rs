@@ -3,8 +3,16 @@
 //! one call. Many seeds are one walk and one ranking (LD.5): each row names
 //! the seed whose wave reached it, and a seed another seed reaches in one
 //! hop is listed as linked, never dropped.
+//!
+//! DD.10: identity classes collapse by default. A walk class (one message,
+//! contract op, SCIP symbol, or a package and its project, in several places)
+//! is one node in the walk, and a FACT / DERIVED class is one row: its
+//! location cell appends `(also in: <repo> <file>:<line>, ...)` and
+//! `; diverged` when the members' contents differ, and `--json` carries the
+//! row's `identity`. `--no-collapse` is the per-member walk and rows.
 
-use glia_engine::{BlastOptions, BlastRadius};
+use glia_engine::identity::{Collapse, RowIdentity};
+use glia_engine::{BlastAnswer, BlastOptions, BlastRadius};
 use glia_graph::Reach;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
@@ -41,6 +49,12 @@ pub(crate) struct Args {
     /// dropped.
     #[arg(long)]
     scope: Option<String>,
+    /// Walk and list every member of an identity class on its own. By
+    /// default a package, message, contract op or SCIP symbol found in
+    /// several places (a FACT / DERIVED SAME_AS class) is one row naming the
+    /// other places (`also in`), and a walk class is one node in the walk.
+    #[arg(long)]
+    no_collapse: bool,
     /// Emit JSON instead of a table.
     #[arg(long)]
     json: bool,
@@ -68,6 +82,11 @@ pub(crate) fn run(args: Args) -> i32 {
     opts.top_k = args.top_k;
     opts.live_only = args.live_only;
     opts.scope = args.scope.clone();
+    opts.collapse = if args.no_collapse {
+        Collapse::off()
+    } else {
+        Collapse::with_labels(&result.repo_labels)
+    };
     let queries: Vec<&str> = args.qnames.iter().map(String::as_str).collect();
     let mut answer = glia_engine::blast_radius(&result.merged, &queries, &opts);
     if let Some(a) = answer.absence.as_mut() {
@@ -117,11 +136,6 @@ fn render(answer: &BlastRadius, queries: &[&str], dir: &str, depth: usize) {
         println!("|--:|--:|:-:|---|---|---|---|");
     }
     for a in &answer.results {
-        let loc = match (&a.file, a.line) {
-            (Some(f), Some(l)) => format!("{f}:{l}"),
-            (Some(f), None) => f.clone(),
-            _ => "—".to_string(),
-        };
         let seed = if many { format!(" `{}` |", a.seed) } else { String::new() };
         println!(
             "| {:.4} | {} | {} | {} | {} | `{}` |{seed} {} |",
@@ -131,7 +145,44 @@ fn render(answer: &BlastRadius, queries: &[&str], dir: &str, depth: usize) {
             a.reason,
             a.kind,
             a.qname,
-            loc
+            location_cell(a)
         );
     }
+}
+
+/// `file:line`, `file` or `None`.
+fn place(file: Option<&str>, line: Option<i64>) -> Option<String> {
+    match (file, line) {
+        (Some(f), Some(l)) => Some(format!("{f}:{l}")),
+        (Some(f), None) => Some(f.to_string()),
+        _ => None,
+    }
+}
+
+/// The table's location cell: the row's place (`—` without one), then, for a
+/// row that stands for an identity class, `(also in: <repo> <file>:<line>,
+/// ...; diverged)`.
+fn location_cell(a: &BlastAnswer) -> String {
+    let at = place(a.file.as_deref(), a.line).unwrap_or_else(|| "—".to_string());
+    match &a.identity {
+        Some(id) => format!("{at} {}", also_in(id, &a.qname)),
+        None => at,
+    }
+}
+
+/// `(also in: ...; diverged)`. An unlocated member is its repo, and its
+/// qname when that differs from the row's (a PACKAGE_DEP class shares one
+/// qname, so its repo is what tells the members apart).
+fn also_in(id: &RowIdentity, qname: &str) -> String {
+    let others: Vec<String> = id
+        .also_in
+        .iter()
+        .map(|m| match place(m.file.as_deref(), m.line) {
+            Some(p) => format!("{} {p}", m.repo),
+            None if m.qname != qname => format!("{} `{}`", m.repo, m.qname),
+            None => m.repo.clone(),
+        })
+        .collect();
+    let diverged = if id.diverged { "; diverged" } else { "" };
+    format!("(also in: {}{diverged})", others.join(", "))
 }

@@ -4,6 +4,7 @@
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use glia_engine::BlastOptions;
+use glia_engine::identity::Collapse;
 use glia_graph::Reach;
 
 use crate::convert::to_py;
@@ -44,7 +45,19 @@ impl PyGraph {
     /// locatable file (ENDPOINT/ROUTE/doc spaces) are KEPT. `scope` narrows
     /// WITHIN a repo — under a multi-repo merge each repo's paths are relative
     /// to its OWN root, so a path passed as a separate repo will not match.
-    #[pyo3(signature = (qnames, direction="both", depth=4, top_k=None, live_only=false, scope=None))]
+    ///
+    /// `collapse` (DD.10, default `True`): identity classes. A walk class (one
+    /// message, contract op or SCIP symbol, or a package and its project, in
+    /// several places) is ONE node in the walk and the ranking, so a change
+    /// reaching one copy reaches the other copies' neighbours at zero hops; a
+    /// FACT / DERIVED class is ONE row, folded before `scope` and `top_k`,
+    /// carrying an `identity` dict `{tier, rules, diverged, also_in}`
+    /// (`also_in`: `{repo, qname, file, line}` of every other member, `repo`
+    /// a build label). A seed in a class carries its `identity` too. Rows and
+    /// seeds outside a class have no `identity` key. `collapse=False` is the
+    /// per-member walk and rows.
+    #[pyo3(signature = (qnames, direction="both", depth=4, top_k=None, live_only=false, scope=None, collapse=true))]
+    #[allow(clippy::too_many_arguments)]
     fn blast_radius(
         &self,
         py: Python<'_>,
@@ -54,6 +67,7 @@ impl PyGraph {
         top_k: Option<usize>,
         live_only: bool,
         scope: Option<&str>,
+        collapse: bool,
     ) -> PyResult<Py<PyAny>> {
         let queries = seed_queries(qnames)?;
         let mut opts = BlastOptions::default();
@@ -62,6 +76,11 @@ impl PyGraph {
         opts.top_k = top_k;
         opts.live_only = live_only;
         opts.scope = scope.map(str::to_string);
+        opts.collapse = if collapse {
+            Collapse::with_labels(&self.repo_labels)
+        } else {
+            Collapse::off()
+        };
         let queries: Vec<&str> = queries.iter().map(String::as_str).collect();
         let answer = glia_engine::blast_radius(&self.merged, &queries, &opts);
         to_py(py, serde_json::to_string(&answer))

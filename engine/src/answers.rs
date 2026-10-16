@@ -3,6 +3,7 @@
 // so the CLI, pyo3/MCP, and future TUI/3d-viewer all share one implementation.
 // ============================================================================
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk, reach};
@@ -14,12 +15,15 @@ use glia_graph::{MergedGraph, Reach, RepoGraph};
 
 use crate::absence::{self, Absence, Answer};
 use crate::find::{self, FindOptions};
+use crate::identity::{Collapse, IdentityView, RowIdentity};
 use crate::profile::CODE_PROFILE;
 
 /// One node in a blast-radius answer: identity, kind, why it is here
-/// (`reason`), PPR `score`, `file`:`line`, `live`, and the `seed` whose wave
-/// reached it. Serialized straight to pyo3/CLI. Produced by [`blast_radius`],
-/// never built by a struct literal outside this crate (LD.9):
+/// (`reason`), PPR `score`, `file`:`line`, `live`, the `seed` whose wave
+/// reached it, and — for a row that stands for a FACT / DERIVED identity
+/// class (DD.10) — the class's `identity`. Serialized straight to pyo3/CLI.
+/// Produced by [`blast_radius`], never built by a struct literal outside this
+/// crate (LD.9):
 ///
 /// ```compile_fail
 /// let _ = glia_engine::BlastAnswer {
@@ -34,6 +38,7 @@ use crate::profile::CODE_PROFILE;
 ///     file: None,
 ///     line: None,
 ///     seed: String::new(),
+///     identity: None,
 /// };
 /// ```
 #[derive(serde::Serialize, Debug, Clone)]
@@ -57,6 +62,13 @@ pub struct BlastAnswer {
     /// one seed, that seed; with several, the root of the node's parent chain
     /// in the one multi-seed walk.
     pub seed: String,
+    /// DD.10: this row stands for a FACT / DERIVED identity class (one
+    /// contract op, message, SCIP symbol or package in several places): its
+    /// tier, rules, whether the members' contents differ, and every other
+    /// member (`also_in`). Absent from the JSON outside a class, so such a
+    /// row serialises exactly as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<RowIdentity>,
 }
 
 /// Types whose liveness a live METHOD they declare implies (A7.8): the
@@ -325,6 +337,11 @@ pub struct BlastOptions {
     /// located under it, BEFORE the `top_k` cut, and prefers an in-scope
     /// candidate when a bare name is ambiguous ([`resolve_seed`]).
     pub scope: Option<String>,
+    /// DD.10: identity classes (Q17). On by default: a walk class (messages,
+    /// contract ops, SCIP symbols, a package and its project) is one node in
+    /// the walk and the ranking, and a FACT / DERIVED class is one row with
+    /// its `identity`. [`Collapse::off`] is the raw per-member answer.
+    pub collapse: Collapse,
 }
 
 impl Default for BlastOptions {
@@ -335,6 +352,7 @@ impl Default for BlastOptions {
             top_k: None,
             live_only: false,
             scope: None,
+            collapse: Collapse::default(),
         }
     }
 }
@@ -358,6 +376,11 @@ pub struct BlastSeed {
     /// 1-based (see [`Located`]).
     pub line: Option<i64>,
     pub linked_seeds: Vec<String>,
+    /// DD.10: the seed's FACT / DERIVED identity class, when it is in one:
+    /// its class-mates (`also_in`), which a walk class makes part of the seed
+    /// itself (never rows). Absent from the JSON outside a class.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<RowIdentity>,
 }
 
 /// A multi-seed blast radius (LD.5): the seeds, the queries that named no
@@ -404,10 +427,18 @@ pub struct BlastRadius {
 /// carry edges), `no_match` when `scope`, `live_only`, `top_k = Some(0)` or
 /// `depth = 0` removed every row.
 ///
+/// Identity (DD.10, `opts.collapse`, on by default): a walk class (messages,
+/// contract ops, SCIP symbols, a package and its project) is one node in the
+/// walk and the PPR, and a FACT / DERIVED class is one row carrying its
+/// `identity`, folded before `scope` and `top_k`; without a SAME_AS edge the
+/// answer is unchanged byte for byte. The rules are on `radius`.
+///
 /// fired_on marker, once per answer:
 /// `[blast] seeds=S unresolved=U reached=R linked_seeds=L walk=W` — `R` is
-/// the closure the walk reached (before `live_only`, `scope` and `top_k`),
-/// `L` the seed-to-seed links. Grep token `[blast] seeds=`.
+/// the closure the walk reached (before `live_only`, `scope` and `top_k`;
+/// a walk class counts once), `L` the seed-to-seed links. Grep token
+/// `[blast] seeds=`. With a collapse class, also
+/// `[identity] collapse surface=blast_radius classes=<c> walk_classes=<w> folded=<f> rows=<n>`.
 pub fn blast_radius(merged: &MergedGraph, queries: &[&str], opts: &BlastOptions) -> BlastRadius {
     let scope = opts.scope.as_deref();
     let mut seeds: Vec<(String, NodeId)> = Vec::new();
@@ -440,43 +471,80 @@ pub(crate) fn blast_radius_seeded(
 }
 
 /// The one multi-seed answer behind [`blast_radius`] and
-/// [`blast_radius_seeded`].
+/// [`blast_radius_seeded`] (and so behind `diff_impact` and `review`).
+///
+/// DD.10, identity: one [`IdentityView`] of `merged` under `opts.collapse`.
+/// Without a collapse class (collapse off, or no SAME_AS edge) it is empty
+/// and this is the HEAD answer byte for byte. With one:
+///
+/// - **Seeds** are distinct by walk node: two seeds in one walk class are one
+///   seed, the first query kept, and the class-mates of a seed are the seed
+///   itself, never rows. Each seed carries its class (`identity`).
+/// - **Walk**: with walk classes, the walk and the PPR run over the view's
+///   quotient ([`glia_graph::blast_radius_over`]), so a class is one node: a
+///   change reaching one SCIP-identical copy reaches the other copy's callers
+///   at zero hops, and a carry edge inside a class (a SHARES_SCHEMA pair that
+///   is also one class) is dropped, so the pair is walked once. Without walk
+///   classes the walk is the HEAD walk. `reached` counts walk nodes.
+/// - **Liveness** stays the raw graph's [`entrypoint_reachable`] set; a walk
+///   class is live (kept by `live_only`, flagged `live`) when ANY member is.
+/// - **Rows**: a walk class's row shows the class's display member (chosen by
+///   content, [`IdentityView::display`]); any other hit shows the node the
+///   walk reached. Every row of a FACT / DERIVED class carries `identity`
+///   (`also_in` = every member but the shown one), and the rows are folded
+///   ([`IdentityView::fold`]) BEFORE `scope` and `top_k`, so a non-walk class
+///   (one `package:npm:react` reached in two repos) keeps its best-scored row
+///   and never spends two `top_k` slots. `scope` reads the shown node's file.
+///
+/// fired_on, beside the `[blast] seeds=` line and only when the view has a
+/// collapse class: `[identity] collapse surface=blast_radius classes=<c>
+/// walk_classes=<w> folded=<f> rows=<n>`, `f` the rows the fold dropped, `n`
+/// the answer's rows.
 fn radius(
     merged: &MergedGraph,
     seeds: &[(String, NodeId)],
     unresolved: Vec<String>,
     opts: &BlastOptions,
 ) -> BlastRadius {
-    // One seed per node, the first display query kept.
+    let view = IdentityView::new(merged, &opts.collapse);
+    // One seed per walk node (a node, or a whole walk class), the first
+    // display query kept.
     let mut distinct: HashSet<NodeId> = HashSet::new();
     let seeds: Vec<(&str, NodeId)> = seeds
         .iter()
-        .filter(|(_, id)| distinct.insert(*id))
+        .filter(|(_, id)| distinct.insert(view.walk_rep(*id)))
         .map(|(q, id)| (q.as_str(), *id))
         .collect();
     let ids: Vec<NodeId> = seeds.iter().map(|&(_, id)| id).collect();
+    let walk_seeds: Vec<NodeId> = ids.iter().map(|&id| view.walk_rep(id)).collect();
 
     let mut out: Vec<BlastAnswer> = Vec::new();
     let mut reached = 0usize;
     let mut dead = 0usize;
+    let mut folded = 0usize;
     let mut kept_in_scope = 0usize;
     let mut blast_seeds: Vec<BlastSeed> = Vec::with_capacity(seeds.len());
     if !ids.is_empty() {
         let loc = Locator::new(merged);
         let live = entrypoint_reachable(merged);
+        let quotient = view.quotient(merged);
+        // A walk class is live when any member is: the live set mapped onto
+        // the walk's nodes (the raw set itself when nothing is contracted).
+        let (walk_live, class_reps): (Cow<'_, HashSet<NodeId>>, HashSet<NodeId>) =
+            if quotient.is_some() {
+                let mapped = live.iter().map(|&n| view.walk_rep(n)).collect();
+                (Cow::Owned(mapped), walk_class_reps(merged, &view))
+            } else {
+                (Cow::Borrowed(&live), HashSet::new())
+            };
         // `live_only` is a filter on the ranking plan: it drops rows from the
         // ranked closure and keeps the rest in order, so scope and `top_k`
         // below see what the post-sort filter they replaced saw.
-        let live_filter = LiveFilter::new(&live);
-        let filters: Vec<&dyn FilterPredicate<MergedGraph>> =
-            if opts.live_only { vec![&live_filter] } else { Vec::new() };
-        let hits = merged.blast_radius_filtered(
-            &ids,
-            opts.direction,
-            opts.depth,
-            &CODE_PROFILE.tables,
-            &filters,
-        );
+        let live_filter = LiveFilter::new(&walk_live);
+        let hits = match &quotient {
+            Some(q) => blast_walk(q, &walk_seeds, opts, &live_filter),
+            None => blast_walk(merged, &walk_seeds, opts, &live_filter),
+        };
         dead = live_filter.dropped.get();
         reached = hits.len() + dead;
 
@@ -491,13 +559,16 @@ fn radius(
                 file: at.file,
                 line: at.line,
                 linked_seeds: Vec::new(),
+                identity: view.row_identity(id, id),
             });
         }
         for (i, links) in linked.iter().enumerate() {
             blast_seeds[i].linked_seeds =
                 links.iter().map(|&j| blast_seeds[j].qname.clone()).collect();
         }
-        let seed_qname: HashMap<NodeId, &str> = ids
+        // A hit's `seed` is a walk node: the seed itself, or its class's
+        // representative.
+        let seed_qname: HashMap<NodeId, &str> = walk_seeds
             .iter()
             .zip(&blast_seeds)
             .map(|(&id, s)| (id, s.qname.as_str()))
@@ -506,22 +577,31 @@ fn radius(
         out = hits
             .iter()
             .map(|h| {
-                let at = loc.locate(h.id);
+                // A walk class is one node whose id is its representative,
+                // an internal handle: the row shows the class's display
+                // member. Any other hit is the node the walk reached.
+                let shown = if class_reps.contains(&h.id) { view.display(h.id) } else { h.id };
+                let at = loc.locate(shown);
                 BlastAnswer {
-                    id: h.id.0,
+                    id: shown.0,
                     qname: at.qname,
                     name: at.name,
                     kind: at.kind,
                     reason: edge_category::name(h.reason),
                     depth: h.depth,
                     score: h.score,
-                    live: live.contains(&h.id),
+                    live: walk_live.contains(&h.id),
                     file: at.file,
                     line: at.line,
                     seed: seed_qname.get(&h.seed).map(|q| q.to_string()).unwrap_or_default(),
+                    identity: view.row_identity(h.id, shown),
                 }
             })
             .collect();
+        // Fold BEFORE scope and the cut: a class never spends two slots.
+        let ranked = out.len();
+        out = view.fold(out, |a| NodeId(a.id), |a, identity| a.identity = Some(identity));
+        folded = ranked - out.len();
         // Scope BEFORE the cut: filtering after `truncate` would spend the
         // budget on out-of-scope nodes and return fewer (or zero) in-scope
         // answers.
@@ -540,6 +620,8 @@ fn radius(
         unresolved.len(),
         opts.direction
     );
+    // fired_on marker (DD.10), only with a collapse class.
+    view.collapse_marker("blast_radius", out.len() + folded, out.len());
 
     let absence = out.is_empty().then(|| {
         blast_absence(merged, &blast_seeds, &unresolved, opts, reached, dead, kept_in_scope)
@@ -550,6 +632,36 @@ fn radius(
         results: out,
         absence,
     }
+}
+
+/// One blast walk over `g` (the merged graph, or its identity quotient):
+/// `opts`' direction and depth over the code domain's carry edges, with
+/// `live` as the plan's filter under `live_only`.
+fn blast_walk<G: GraphSource + ?Sized>(
+    g: &G,
+    seeds: &[NodeId],
+    opts: &BlastOptions,
+    live: &LiveFilter<'_>,
+) -> Vec<glia_graph::BlastHit> {
+    let filters: Vec<&dyn FilterPredicate<G>> = if opts.live_only { vec![live] } else { Vec::new() };
+    glia_graph::blast_radius_over(g, seeds, opts.direction, opts.depth, &CODE_PROFILE.tables, &filters)
+}
+
+/// The representatives of `view`'s walk classes: the ids a walk over its
+/// quotient reaches for a class. Every member of a walk class is an endpoint
+/// of a SAME_AS cross edge (the view reads its classes from those), and each
+/// class has a member other than its representative, which maps to it.
+fn walk_class_reps(merged: &MergedGraph, view: &IdentityView) -> HashSet<NodeId> {
+    merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::SAME_AS)
+        .flat_map(|e| [e.from, e.to])
+        .filter_map(|id| {
+            let rep = view.walk_rep(id);
+            (rep != id).then_some(rep)
+        })
+        .collect()
 }
 
 /// Why a [`blast_radius`] came back empty. `reached` is the walk's closure,
@@ -674,7 +786,9 @@ fn linked_seeds(merged: &MergedGraph, ids: &[NodeId], opts: &BlastOptions) -> Ve
 }
 
 /// `live_only` as an activation-plan filter (LD.12c): keeps a node only when
-/// it is in the [`entrypoint_reachable`] set it borrows. Its drops are counted
+/// it is in the live set it borrows — [`entrypoint_reachable`], mapped onto
+/// the walk's nodes when it runs over an identity quotient (DD.10: a walk
+/// class is kept when any member is live). Its drops are counted
 /// under `live` on the `[activation] plan` debug line, and in `dropped`, so an
 /// answer `live_only` emptied says so (LD.5).
 struct LiveFilter<'a> {
@@ -688,12 +802,14 @@ impl<'a> LiveFilter<'a> {
     }
 }
 
-impl FilterPredicate<MergedGraph> for LiveFilter<'_> {
+/// Over any graph source: the blast walk runs over the merged graph or its
+/// identity quotient (DD.10), whose nodes are walk nodes.
+impl<G: ?Sized> FilterPredicate<G> for LiveFilter<'_> {
     fn name(&self) -> &'static str {
         "live"
     }
 
-    fn keep(&self, _: &MergedGraph, id: NodeId, _: f64) -> bool {
+    fn keep(&self, _: &G, id: NodeId, _: f64) -> bool {
         let keep = self.live.contains(&id);
         if !keep {
             self.dropped.set(self.dropped.get() + 1);

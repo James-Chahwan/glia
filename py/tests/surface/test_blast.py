@@ -21,7 +21,7 @@ def main() -> int:
         ids = node_ids(g)
         c.check("signature", params(rg.PyGraph.blast_radius) == [
             ("qnames", None), ("direction", "both"), ("depth", 4), ("top_k", None),
-            ("live_only", False), ("scope", None)], params(rg.PyGraph.blast_radius))
+            ("live_only", False), ("scope", None), ("collapse", True)], params(rg.PyGraph.blast_radius))
 
         a = g.blast_radius("app::helper")
         c.check("blast_radius -> dict", type(a) is dict, type(a))

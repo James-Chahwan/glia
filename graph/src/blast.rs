@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-use glia_activation::algo::{self, Adjacency, Walk};
+use glia_activation::algo::{self, Adjacency, GraphSource, Walk};
 use glia_activation::plan::{ActivationPlan, FilterPredicate};
 use glia_activation::profile::DomainTables;
 use glia_core::{EdgeCategoryId, NodeId};
@@ -90,24 +90,7 @@ impl MergedGraph {
     }
 
     /// [`Self::blast_radius`] with `filters` run over the ranked closure
-    /// (LD.12c): the closure is ranked by one
-    /// [`ActivationPlan::rank`] — PPR seeded at `seeds`, every closure node at
-    /// its score or 0.0 where PPR gave it none, sorted by score (desc) then
-    /// node id (asc) — and each filter drops nodes from it in registration
-    /// order. A filter only removes rows, so the kept rows are the unfiltered
-    /// answer's rows in the same order. Nothing is truncated here: a caller's
-    /// `top_k` cut comes after its own post-steps.
-    ///
-    /// A hit's `seed` is read off the walk's parent chain in discovery order:
-    /// a node reached from a seed belongs to that seed, any other node to its
-    /// parent's seed (a parent is always discovered before its child). The
-    /// walk expands the seeds in input order and each node's edges in edge
-    /// order (LD.15a), so a node two seeds reach at the same depth belongs to
-    /// the one listed first — never to a `HashMap` iteration order.
-    ///
-    /// `GLIA_ACTIVATION_DEBUG=1` prints the plan's
-    /// `[activation] plan mode=rank .. filters=[..] universe=N kept=N dropped=[..]`
-    /// line, `universe` being the closure.
+    /// (LD.12c): [`blast_radius_over`] with `self` as the graph source.
     pub fn blast_radius_filtered(
         &self,
         seeds: &[NodeId],
@@ -116,80 +99,120 @@ impl MergedGraph {
         tables: &DomainTables,
         filters: &[&dyn FilterPredicate<MergedGraph>],
     ) -> Vec<BlastHit> {
-        use glia_activation::Direction;
-        use std::collections::{HashMap, HashSet};
-
-        // Deduplicated, first occurrence kept: the walk's start order and the
-        // PPR personalisation (uniform over distinct seeds).
-        let mut is_seed: HashSet<NodeId> = HashSet::with_capacity(seeds.len());
-        let seeds: Vec<NodeId> = seeds.iter().copied().filter(|s| is_seed.insert(*s)).collect();
-
-        // First-reach (depth, reason) per node: a BFS over the carry edges'
-        // CSR index (LD.15b), so depth is the shortest carry-path from the
-        // nearest seed and `reason` the category of the edge that first put
-        // the node in scope - exactly what the per-node edge scan it replaced
-        // returned.
-        let walk = match reach {
-            Reach::Forward => Walk::Forward,
-            Reach::Backward => Walk::Backward,
-            Reach::Both => Walk::Both,
-        };
-        let adj = Adjacency::carry(self, tables);
-        let b = algo::reach::bfs(&adj, &seeds, walk, max_depth);
-        if reach_debug() {
-            // fired_on marker (LD.15b), a cost diagnostic: `scanned` is the
-            // incidences the walk examined, at most two per kept edge.
-            eprintln!(
-                "[reach] blast walk={walk:?} seeds={} depth<={max_depth} reached={} scanned={} index_nodes={} kept={}",
-                seeds.len(),
-                b.reached.len(),
-                b.scanned,
-                adj.len(),
-                adj.kept_edges()
-            );
-        }
-        if b.reached.is_empty() {
-            return Vec::new();
-        }
-        // (depth, reason, seed) per reached node, in discovery order: the
-        // parent is a seed, or was reached (and attributed) earlier.
-        let mut first: HashMap<NodeId, (usize, EdgeCategoryId, NodeId)> =
-            HashMap::with_capacity(b.reached.len());
-        for r in &b.reached {
-            let seed = if is_seed.contains(&r.parent) {
-                r.parent
-            } else {
-                first.get(&r.parent).map_or(r.parent, |&(_, _, s)| s)
-            };
-            first.insert(r.id, (r.depth, r.via, seed));
-        }
-        let closure: Vec<NodeId> = b.reached.iter().map(|r| r.id).collect();
-
-        // Rank the closure by one PPR over every seed, then filter it: one
-        // plan. A closure node PPR never scored stays in at 0.0.
-        let mut config = tables.activation_config(None);
-        config.direction = match reach {
-            Reach::Forward => Direction::Forward,
-            Reach::Backward => Direction::Backward,
-            Reach::Both => Direction::Undirected,
-        };
-        config.top_k = usize::MAX; // score the whole closure, no truncation
-        let mut plan = ActivationPlan::new(config);
-        for f in filters {
-            plan = plan.filter(*f);
-        }
-        let view = plan.rank(self, &seeds, &closure);
-
-        // The view's order (score desc, id asc) is the answer's order.
-        view.scores
-            .into_iter()
-            .filter_map(|(id, score)| {
-                first
-                    .get(&id)
-                    .map(|&(depth, reason, seed)| BlastHit { id, depth, reason, score, seed })
-            })
-            .collect()
+        blast_radius_over(self, seeds, reach, max_depth, tables, filters)
     }
+}
+
+/// The body of [`MergedGraph::blast_radius_filtered`] over any
+/// [`GraphSource`] (DD.10): the engine runs it over an identity quotient
+/// (`glia_activation::algo::classes::Quotient`), where every walk class is one
+/// node, so a change reaching one copy of a SCIP-identical function reaches
+/// the other copy's callers at zero hops, and a carry edge between two
+/// members of one class (a SHARES_SCHEMA pair that is also one class) is
+/// gone, so the pair is walked once. Over a `MergedGraph` it is exactly the
+/// method's answer.
+///
+/// The closure is ranked by one [`ActivationPlan::rank`] — PPR seeded at
+/// `seeds`, every closure node at its score or 0.0 where PPR gave it none,
+/// sorted by score (desc) then node id (asc) — and each filter drops nodes
+/// from it in registration order. A filter only removes rows, so the kept
+/// rows are the unfiltered answer's rows in the same order. Nothing is
+/// truncated here: a caller's `top_k` cut comes after its own post-steps.
+///
+/// A hit's `seed` is read off the walk's parent chain in discovery order:
+/// a node reached from a seed belongs to that seed, any other node to its
+/// parent's seed (a parent is always discovered before its child). The
+/// walk expands the seeds in input order and each node's edges in edge
+/// order (LD.15a), so a node two seeds reach at the same depth belongs to
+/// the one listed first — never to a `HashMap` iteration order.
+///
+/// Every id is one of `g`'s: over a quotient, a hit or seed in a class is
+/// its representative, which the caller maps back to a member it shows.
+///
+/// `GLIA_ACTIVATION_DEBUG=1` prints the plan's
+/// `[activation] plan mode=rank .. filters=[..] universe=N kept=N dropped=[..]`
+/// line, `universe` being the closure.
+pub fn blast_radius_over<G: GraphSource + ?Sized>(
+    g: &G,
+    seeds: &[NodeId],
+    reach: Reach,
+    max_depth: usize,
+    tables: &DomainTables,
+    filters: &[&dyn FilterPredicate<G>],
+) -> Vec<BlastHit> {
+    use glia_activation::Direction;
+    use std::collections::{HashMap, HashSet};
+
+    // Deduplicated, first occurrence kept: the walk's start order and the
+    // PPR personalisation (uniform over distinct seeds).
+    let mut is_seed: HashSet<NodeId> = HashSet::with_capacity(seeds.len());
+    let seeds: Vec<NodeId> = seeds.iter().copied().filter(|s| is_seed.insert(*s)).collect();
+
+    // First-reach (depth, reason) per node: a BFS over the carry edges'
+    // CSR index (LD.15b), so depth is the shortest carry-path from the
+    // nearest seed and `reason` the category of the edge that first put
+    // the node in scope - exactly what the per-node edge scan it replaced
+    // returned.
+    let walk = match reach {
+        Reach::Forward => Walk::Forward,
+        Reach::Backward => Walk::Backward,
+        Reach::Both => Walk::Both,
+    };
+    let adj = Adjacency::carry(g, tables);
+    let b = algo::reach::bfs(&adj, &seeds, walk, max_depth);
+    if reach_debug() {
+        // fired_on marker (LD.15b), a cost diagnostic: `scanned` is the
+        // incidences the walk examined, at most two per kept edge.
+        eprintln!(
+            "[reach] blast walk={walk:?} seeds={} depth<={max_depth} reached={} scanned={} index_nodes={} kept={}",
+            seeds.len(),
+            b.reached.len(),
+            b.scanned,
+            adj.len(),
+            adj.kept_edges()
+        );
+    }
+    if b.reached.is_empty() {
+        return Vec::new();
+    }
+    // (depth, reason, seed) per reached node, in discovery order: the
+    // parent is a seed, or was reached (and attributed) earlier.
+    let mut first: HashMap<NodeId, (usize, EdgeCategoryId, NodeId)> =
+        HashMap::with_capacity(b.reached.len());
+    for r in &b.reached {
+        let seed = if is_seed.contains(&r.parent) {
+            r.parent
+        } else {
+            first.get(&r.parent).map_or(r.parent, |&(_, _, s)| s)
+        };
+        first.insert(r.id, (r.depth, r.via, seed));
+    }
+    let closure: Vec<NodeId> = b.reached.iter().map(|r| r.id).collect();
+
+    // Rank the closure by one PPR over every seed, then filter it: one
+    // plan. A closure node PPR never scored stays in at 0.0.
+    let mut config = tables.activation_config(None);
+    config.direction = match reach {
+        Reach::Forward => Direction::Forward,
+        Reach::Backward => Direction::Backward,
+        Reach::Both => Direction::Undirected,
+    };
+    config.top_k = usize::MAX; // score the whole closure, no truncation
+    let mut plan = ActivationPlan::new(config);
+    for f in filters {
+        plan = plan.filter(*f);
+    }
+    let view = plan.rank(g, &seeds, &closure);
+
+    // The view's order (score desc, id asc) is the answer's order.
+    view.scores
+        .into_iter()
+        .filter_map(|(id, score)| {
+            first
+                .get(&id)
+                .map(|&(depth, reason, seed)| BlastHit { id, depth, reason, score, seed })
+        })
+        .collect()
 }
 
 /// `GLIA_ALGO_DEBUG=1` turns on the `[reach] blast` line, read once - the
@@ -387,5 +410,69 @@ mod tests {
 
         // No seeds, no walk.
         assert!(merged.blast_radius(&[], Reach::Both, 4, &CODE_TABLES).is_empty());
+    }
+
+    /// DD.10: the free fn over a `MergedGraph` is the method, bit for bit,
+    /// filters included.
+    #[test]
+    fn blast_radius_over_a_merged_graph_is_the_method() {
+        let merged = MergedGraph::new(vec![flow_graph()]);
+        let id = |q: &str| NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, q);
+        let (b, c) = (id("m::b"), id("m::c"));
+        for reach in [Reach::Forward, Reach::Backward, Reach::Both] {
+            assert_eq!(
+                rows(&blast_radius_over(&merged, &[c], reach, 4, &CODE_TABLES, &[])),
+                rows(&merged.blast_radius(&[c], reach, 4, &CODE_TABLES)),
+                "{reach:?}"
+            );
+        }
+        let drop_b = DropOne(b);
+        assert_eq!(
+            rows(&blast_radius_over(&merged, &[c], Reach::Both, 4, &CODE_TABLES, &[&drop_b])),
+            rows(&merged.blast_radius_filtered(&[c], Reach::Both, 4, &CODE_TABLES, &[&drop_b])),
+        );
+    }
+
+    /// Drops one named node from a walk over any source.
+    struct DropAny(NodeId);
+
+    impl<G: ?Sized> FilterPredicate<G> for DropAny {
+        fn name(&self) -> &'static str {
+            "drop"
+        }
+
+        fn keep(&self, _: &G, id: NodeId, _: f64) -> bool {
+            id != self.0
+        }
+    }
+
+    /// DD.10: over a quotient a class is one node. a→b→c, d→c with {a, d}
+    /// one class: forward from a reaches c in ONE hop through d's edge, and
+    /// d (a's class-mate) is never a hit; the raw walk reaches c in two.
+    #[test]
+    fn blast_radius_over_a_quotient_crosses_a_class_at_zero_hops() {
+        use glia_activation::algo::classes::{Classes, Quotient};
+
+        let merged = MergedGraph::new(vec![flow_graph()]);
+        let id = |q: &str| NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, q);
+        let (a, b, c, d) = (id("m::a"), id("m::b"), id("m::c"), id("m::d"));
+        let depth_of = |hits: &[BlastHit], n: NodeId| hits.iter().find(|h| h.id == n).map(|h| h.depth);
+
+        let raw = merged.blast_radius(&[a], Reach::Forward, 4, &CODE_TABLES);
+        assert_eq!((depth_of(&raw, b), depth_of(&raw, c)), (Some(1), Some(2)));
+
+        let classes = Classes::from_pairs([(a, d)]);
+        let q = Quotient::new(&merged, &classes);
+        let seed = q.rep(a);
+        let hits = blast_radius_over(&q, &[seed], Reach::Forward, 4, &CODE_TABLES, &[]);
+        assert_eq!((depth_of(&hits, b), depth_of(&hits, c)), (Some(1), Some(1)), "{hits:?}");
+        assert!(hits.iter().all(|h| h.id != a && h.id != d), "a class-mate is never a hit: {hits:?}");
+        assert!(hits.iter().all(|h| h.seed == seed), "{hits:?}");
+
+        // A filter over the quotient drops a row and keeps the rest in order.
+        let drop_b = DropAny(b);
+        let kept = blast_radius_over(&q, &[seed], Reach::Forward, 4, &CODE_TABLES, &[&drop_b]);
+        let expected: Vec<BlastHit> = hits.iter().filter(|h| h.id != b).cloned().collect();
+        assert_eq!(rows(&kept), rows(&expected));
     }
 }
