@@ -36,6 +36,11 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
   determinism check runs now at 0.5.2 wave 5 (`3921a636`); the Kina + glia replays (re-keys with X1 off and on,
   `flat-ppr` vs `flat-fs`) run once at the 0.5.2 release candidate after W14; the 8 public streams only if those pass.
   Corrections: James then, *"no still in 0.5.3"* - the Engram corrections writer stays in 0.5.3 (§B).
+- 2026-10-16: *"Hold repo graph for post 0.5.3 better to do all changes at once"*. The repo-graph handover moves after
+  0.5.3: repo-graph takes 0.5.2 and 0.5.3 together, from one combined handoff written by 0.5.3's release docs packet.
+  New order: 0.5.2 waves -> DZ.1 / DZ.2 (the 0.5.2 handoffs are written and committed; the repo-graph one is not
+  sent) -> Engram's Kina + glia replays at the 0.5.2 release candidate -> this spec run -> 0.5.3 waves -> the combined
+  repo-graph handover.
 
 ## 1. The train
 
@@ -469,6 +474,6 @@ All four answered 2026-10-16 (§0); recorded as rulings:
 
 ## 4. Spec run
 
-After 0.5.2's DZ.2 and the repo-graph handoff: the same method as 0.5.1 / 0.5.2 (per group a spec agent and an
+After 0.5.2's DZ.2 (the repo-graph handover waits for 0.5.3, §0): the same method as 0.5.1 / 0.5.2 (per group a spec agent and an
 adversarial verifier, one integrator for wave 0 and the release docs), packet ids `E<group>.<n>[letter]` with `E0.*`
 as wave 0, packets in `dev-notes/leap-053-packets.json`, the runner's `--release 053` mode.
