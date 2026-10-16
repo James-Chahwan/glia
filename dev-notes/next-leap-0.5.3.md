@@ -228,7 +228,8 @@ Not candidates: each becomes packets in the spec run.
    Where the memory goes (DA.17, at x10): about 115 B per edge row before any rule runs (EDB rows plus Relation indexes
    and the value table), the carry edge/3 relation 92,084 kB, node/2 46,104 kB, scc over carry 46,988 kB, reaches from
    every ROUTE 87,788 kB, one direct forbid 99,388 kB. The representation work is in `rules/src/{relation,value,eval,
-   closure}.rs`; 0.5.3 sets one memory budget for watch and rules together.
+   closure}.rs`; 0.5.3 sets one memory budget for watch and rules together; when it lands, `X10_RSS_GATE_KB` in `rules/tests/cost.rs`
+   comes back down toward 153,600 kB (x10 peak at 0.5.2 W7: 287,236 kB).
 4. **One tier vocabulary.** `rules::value::Tier`, the string consts in `why.rs` / `check.rs` and `implementors.rs`'s
    enum become one code-domain type (§E W1, DA.3), before Engram's HEURISTIC rows add a fifth reading.
 5. **Runner fixes** (the 0.5.2 waves found both; the session landed them for the remaining 0.5.2 waves too):
