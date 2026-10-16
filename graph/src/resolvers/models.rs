@@ -148,6 +148,18 @@
 //! requiredness and declaring node; the paths below which a name may travel
 //! unlisted are `open`. The engine's `contract_breaks::model_breaks` judges a
 //! side at a git rev against the same side in the working tree through them.
+//!
+//! **DT.1p: a union client root judged by its member.** A client root that
+//! is a union is open at `""` in [`wire_fields`], so its exchange was never
+//! judged (quokka-stack: 17 of 97 exchanges). [`ResolvedShape::judged_against`]
+//! takes the member the compare reads before flattening: the members that
+//! name nothing (an open value with no model, no field and no member:
+//! `Record<string, unknown>` behind a `type UnknownRecord` alias, `unknown`,
+//! `any`, a name bound to nothing) are dropped, then [`union_member`]'s
+//! member of the server value's kind (DT.1l), else [`object_view`]'s merged
+//! all-object union, as the compare merges it. An all-open root (every
+//! member names nothing, `void`, `unknown`) and a union with no member of
+//! the server's kind are kept whole, so their exchange stays unjudged.
 
 use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
@@ -2027,6 +2039,87 @@ fn union_member<'c>(
         })),
         _ => None,
     }
+}
+
+impl ResolvedShape {
+    /// DT.1p (module doc): the client value a model-break exchange flattens
+    /// with [`wire_fields`], `self` being the client root and `server` the
+    /// server value it meets at the root. For a union client root (and a
+    /// server value that is no union, of kind object or array): the union
+    /// with its members that name nothing dropped, then the one member of
+    /// the server's kind ([`union_member`]: several object members are
+    /// merged, as [`object_view`] merges an all-object union), else, for an
+    /// object server value, the union's merged object view. A merged view is
+    /// an inline object: its names are the members' names, each required only
+    /// when every member requires it, open when any member is. `self` when no
+    /// member is picked: not a union, every member names nothing, no member
+    /// of the server's kind, a server value of another kind.
+    pub fn judged_against(&self, server: &ResolvedShape) -> Cow<'_, ResolvedShape> {
+        judged_member(self, server).unwrap_or(Cow::Borrowed(self))
+    }
+}
+
+/// A union member that names nothing: an open value with no model, no field,
+/// no member and no array layer (`Record<string, unknown>` behind an alias,
+/// `unknown`, `any`, a name bound to nothing).
+fn names_nothing(m: &ResolvedShape) -> bool {
+    m.open && m.model.is_none() && m.fields.is_empty() && m.members.is_empty() && !m.array
+}
+
+/// `view` (an [`object_view`] of a union) as an inline object, so
+/// [`wire_fields`] lists its names instead of opening the union.
+fn as_inline(view: ResolvedShape) -> ResolvedShape {
+    ResolvedShape {
+        written: Shape::Object {
+            fields: Vec::new(),
+            open: view.open,
+        },
+        ..view
+    }
+}
+
+/// [`ResolvedShape::judged_against`]'s pick; `None` keeps the root whole.
+fn judged_member<'c>(c: &'c ResolvedShape, s: &ResolvedShape) -> Option<Cow<'c, ResolvedShape>> {
+    if !matches!(c.written, Shape::Union(_)) || matches!(s.written, Shape::Union(_)) {
+        return None;
+    }
+    let ks = outer_kind(None, s)?;
+    if !matches!(ks, JsonKind::Object | JsonKind::Array) {
+        return None;
+    }
+    let typed: Vec<&ResolvedShape> = c.members.iter().filter(|m| !names_nothing(m)).collect();
+    let narrowed: Cow<'c, ResolvedShape> = match typed.as_slice() {
+        [] => return None,
+        _ if typed.len() == c.members.len() => Cow::Borrowed(c),
+        [one] => Cow::Borrowed(*one),
+        _ => Cow::Owned(ResolvedShape {
+            written: Shape::Union(typed.iter().map(|m| m.written.clone()).collect()),
+            format: c.format,
+            model: None,
+            array: false,
+            fields: BTreeMap::new(),
+            open: typed.iter().any(|m| m.open),
+            members: typed.into_iter().cloned().collect(),
+        }),
+    };
+    if !matches!(narrowed.written, Shape::Union(_)) {
+        // One typed member left: judged when it is of the server's kind.
+        return (outer_kind(None, &narrowed).as_ref() == Some(&ks)).then_some(narrowed);
+    }
+    let merged = |u: &ResolvedShape| object_view(u).map(|v| Cow::Owned(as_inline(v.into_owned())));
+    if let Some(member) = union_member(&narrowed, None, s) {
+        let member = member.into_owned();
+        if !matches!(member.written, Shape::Union(_)) {
+            return Some(Cow::Owned(member));
+        }
+        // Several object members of the server's kind: their merged view.
+        return merged(&member);
+    }
+    // An all-object union against an object: the compare's merged view.
+    if ks == JsonKind::Object {
+        return merged(&narrowed);
+    }
+    None
 }
 
 /// A value's type text: its declared text, else as written (an array in its
@@ -7469,6 +7562,82 @@ mod tests {
             [""],
             "an open root opens the whole side"
         );
+    }
+
+    /// DT.1p: a union client root is flattened as the member its server value
+    /// meets (quokka-stack's `X | UnknownRecord | Y[]` roots), and an all-open
+    /// root, or a union with no member of the server's kind, stays open.
+    #[test]
+    fn a_union_client_root_is_judged_by_the_member_its_server_value_meets() {
+        let summary = |id| model_of(TS, id, true, false, vec![mf(TS, "title", "string", true)]);
+        let list = model_of(
+            TS,
+            1,
+            false,
+            false,
+            vec![fld("activities", Some("ActivitySummary[]"), true, summary(2))],
+        );
+        let unknown_record = val(TS, "UnknownRecord");
+        assert!(names_nothing(&unknown_record), "an alias bound to nothing names nothing");
+        let envelope = inline(
+            GO,
+            false,
+            vec![fld(
+                "activities",
+                None,
+                true,
+                model_of(GO, 10, true, false, vec![mf(GO, "title", "string", true)]),
+            )],
+        );
+        let client = union_of(TS, vec![list.clone(), unknown_record.clone(), summary(2)]);
+        assert_eq!(opens(&wire_fields(&client)), [""], "a union root opens the side whole");
+        let judged = client.judged_against(&envelope);
+        assert_eq!(judged.model, Some(NodeId(1)), "the one object member: {judged:?}");
+        let w = wire_fields(&judged);
+        assert_eq!(keys(&w), ["", "activities", "activities[].title"]);
+        assert!(w.open.is_empty(), "{:?}", w.open);
+
+        // The envelope-or-array union of DT.1l against a bare array.
+        let either = union_of(TS, vec![list.clone(), summary(2)]);
+        let bare = model_of(GO, 10, true, false, vec![mf(GO, "title", "string", true)]);
+        assert_eq!(either.judged_against(&bare).model, Some(NodeId(2)));
+        assert_eq!(keys(&wire_fields(&either.judged_against(&bare))), ["", "title"]);
+
+        // An envelope or its bare object, against an object: the merged view,
+        // each name required only when every member requires it.
+        let item = model_of(TS, 3, false, false, vec![mf(TS, "title", "string", true)]);
+        let result = inline(TS, false, vec![fld("result", Some("Item"), true, item.clone())]);
+        let merged = union_of(TS, vec![result, item]).judged_against(&envelope).into_owned();
+        let w = wire_fields(&merged);
+        assert_eq!(keys(&w), ["", "result", "result.title", "title"]);
+        assert!(w.open.is_empty(), "{:?}", w.open);
+        assert_eq!(
+            (w.fields[""].kind, w.fields["result"].required, w.fields["title"].required),
+            (Some("object"), false, false)
+        );
+        // Two typed objects beside an open record: their merged view too.
+        let other = model_of(TS, 4, false, false, vec![mf(TS, "id", "string", true)]);
+        let two = union_of(TS, vec![other, unknown_record.clone(), list.clone()]);
+        assert_eq!(
+            keys(&wire_fields(&two.judged_against(&envelope))),
+            ["", "activities", "activities[].title", "id"]
+        );
+
+        // Kept whole: every member names nothing; no member of the server's
+        // kind; a scalar server value; a server union; no union at all.
+        let still_open = |c: &ResolvedShape, s: &ResolvedShape| {
+            matches!(c.judged_against(s), Cow::Borrowed(_))
+                && opens(&wire_fields(&c.judged_against(s))) == [""]
+        };
+        let nothing = union_of(TS, vec![unknown_record.clone(), val(TS, "unknown")]);
+        assert!(still_open(&nothing, &envelope), "an all-open root");
+        let array_only = union_of(TS, vec![unknown_record.clone(), summary(2)]);
+        assert!(still_open(&array_only, &envelope), "no object member left");
+        let text = union_of(TS, vec![val(TS, "string"), unknown_record.clone()]);
+        assert!(still_open(&text, &val(GO, "string")), "a scalar server value");
+        assert!(still_open(&client, &union_of(GO, vec![envelope.clone(), bare.clone()])));
+        assert!(still_open(&unknown_record, &envelope), "no union");
+        assert_eq!(list.judged_against(&envelope).model, Some(NodeId(1)), "a model is itself");
     }
 
     #[test]

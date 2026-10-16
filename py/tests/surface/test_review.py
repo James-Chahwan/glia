@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """pyo3 surface, py/src/review.rs (CC.6b): the module function
 `review_vs_rev(repo_path, base="HEAD", format="dict", markdown_rows=20,
-depth=4, max_tests=50, max_impact=50)` builds the git rev `base` and the
-working tree of the repo at `repo_path` and returns the engine's review as a
-native dict {base, counts, changed, impact, tests, edges, new_violations,
-resolved_violations, check_errors, blocking} (`blocking` is True only for a
-violation the base did not have), or with format="markdown" the markdown PR
-report `glia review` prints, as a str. Any other format, or an engine error,
+depth=4, max_tests=50, max_impact=50, models_min_tier="fact")` builds the git
+rev `base` and the working tree of the repo at `repo_path` and returns the
+engine's review as a native dict {base, counts, changed, impact, tests, edges,
+new_violations, resolved_violations, model_breaks, check_errors, blocking}
+(`blocking` is True only for a blocking violation the base did not have, or a
+model break (DT.1p) whose pairing is at or above `models_min_tier`: by
+default none in 0.5.2), or with format="markdown" the markdown PR report
+`glia review` prints, as a str. Any other format or tier, or an engine error,
 raises ValueError. Needs a `git` binary. Shared helpers: test_build.py."""
 from __future__ import annotations
 
@@ -30,9 +32,14 @@ TEST_PAY = "from web.app import pay\n\n\ndef test_pay():\n    assert pay(1) == 1
 RULES = ("version = 1\n\n[[constraint]]\nid = \"web-no-api-internals\"\nkind = \"forbid_edge\"\n"
          "from = \"web\"\nto = \"services/api\"\ncategories = [\"IMPORTS\", \"CALLS\"]\n")
 KEYS = ["base", "counts", "changed", "impact", "tests", "edges", "new_violations",
-        "resolved_violations", "check_errors", "blocking"]
+        "resolved_violations", "model_breaks", "check_errors", "blocking"]
 KW = [("repo_path", None), ("base", "HEAD"), ("format", "dict"), ("markdown_rows", 20), ("depth", 4),
-      ("max_tests", 50), ("max_impact", 50)]
+      ("max_tests", 50), ("max_impact", 50), ("models_min_tier", "fact")]
+# DT.1p: the engine's model-breaks-shop fixture (py/tests/surface -> the repo root).
+MODEL_SHOP = pathlib.Path(__file__).resolve().parents[3] / "engine" / "tests" / "data" / "model-breaks-shop"
+TAG = '`json:"customerName"`'
+RENAMED = '`json:"customer_name"`'
+ADVISORY = "### Model breaks (advisory: an inferred client <-> server pairing below the models min tier)"
 MARKER_TAIL = " edges +2 -0 (fact=2 derived=0 heuristic=0) violations new=1 resolved=0 blocking=true"
 ROW = "| IMPORTS | `web::app` | `services::api::internal` | web/app.py:1 | fact |"
 
@@ -117,6 +124,9 @@ def main() -> int:
                  "unknown format `xml`: expected one of dict, markdown")
         c.raises("unknown rev raises", ValueError, lambda: rg.review_vs_rev(str(top), base="no-such-rev"),
                  "no-such-rev")
+        c.raises("bad models_min_tier raises before any build", ValueError,
+                 lambda: rg.review_vs_rev(str(pathlib.Path(tmp) / "nowhere"), models_min_tier="x"),
+                 "unknown models min tier `x`: expected one of fact, derived")
 
         old = pathlib.Path(tmp) / "old"
         committed(old, WEB_APP)
@@ -130,6 +140,30 @@ def main() -> int:
         plain.mkdir()
         c.raises("not a git work tree raises", ValueError, lambda: rg.review_vs_rev(str(plain)),
                  "not a git work tree")
+
+        # DT.1p: the model-breaks-shop fixture, v1 then the json tag rename as v2.
+        shop = pathlib.Path(tmp) / "model-shop"
+        for src in sorted(MODEL_SHOP.rglob("*")):
+            if src.is_file():
+                dst = shop / src.relative_to(MODEL_SHOP)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text(src.read_text())
+        git(shop, "init", "-q")
+        git(shop, "add", "-A")
+        git(shop, "commit", "-q", "-m", "v1")
+        order = shop / "api" / "internal" / "models" / "order.go"
+        order.write_text(order.read_text().replace(TAG, RENAMED, 1))
+        git(shop, "commit", "-q", "-am", "v2")
+        r = rg.review_vs_rev(str(shop), base="HEAD~1")
+        breaks = r.get("model_breaks") or [{}]
+        c.check("an inferred model break is listed and advisory",
+                (r.get("blocking"), len(r.get("model_breaks") or []), breaks[0].get("pairing"),
+                 (r.get("counts") or {}).get("model_breaks"))
+                == (False, 1, "http_model", 1), r.get("model_breaks"))
+        md = rg.review_vs_rev(str(shop), base="HEAD~1", format="markdown")
+        c.check("markdown: the advisory model section", ADVISORY in md, md[:800])
+        d = rg.review_vs_rev(str(shop), base="HEAD~1", models_min_tier="derived")
+        c.check("models_min_tier='derived' makes it block", d.get("blocking") is True, d.get("model_breaks"))
     return c.done()
 
 

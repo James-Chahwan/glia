@@ -30,11 +30,17 @@
 //!   change: added, removed, reconfidenced; category; from; to), so a
 //!   reviewer reads the observed facts first;
 //! - the rules: [`declared_constraints`] of the WORKING TREE (the rules as the
-//!   change leaves them) evaluated by `check::check_rules` over the working
-//!   tree and over the base. Taking the rules from one side on purpose: a
-//!   change that deletes its rule is not rewarded with "resolved" (the rule is
-//!   simply absent on both sides then), and a rule the change adds reports
-//!   what the base already broke as pre-existing, not new.
+//!   change leaves them) evaluated by `check::check_rules_gated` (DT.7c, gated
+//!   as `glia check` gates them, with no roots) over the working tree and over
+//!   the base. Taking the rules from one side on purpose: a change that
+//!   deletes its rule is not rewarded with "resolved" (the rule is simply
+//!   absent on both sides then), and a rule the change adds reports what the
+//!   base already broke as pre-existing, not new;
+//! - `model_breaks` (DT.1p): the inferred client <-> server model breaks of
+//!   the same rev pair (`contract_breaks::model_breaks_of`, DT.1o), the
+//!   BREAKING rows only (a PR report; a compatible model change is
+//!   contract-breaks' business), each blocking or advisory under
+//!   [`ReviewArgs::models_min_tier`] (below).
 //!
 //! # New and resolved violations
 //!
@@ -67,15 +73,31 @@
 //! default for a `reflexion:` divergence), so a fact-broken rule to which a
 //! change adds only an overlay edge reports one heuristic, advisory row.
 //! The review's `blocking` is whether a NEW violation blocks: one at or above
-//! its rule's `min_tier`, never a heuristic one (0.5.2 Q2). An advisory new
-//! violation is listed, and counted in `counts.new_violations`, but does not
-//! fail the gate.
+//! its rule's `min_tier`, never a heuristic one (0.5.2 Q2), or a model row
+//! blocks (below). An advisory new violation is listed, and counted in
+//! `counts.new_violations`, but does not fail the gate.
 //!
-//! A rule that errors on the BASE side (its scope matches no node there: a
-//! directory the change creates) counts as no violation there, so its
-//! working-tree violations are all new. A rule that errors on the WORKING
-//! TREE side goes to `check_errors` and is compared on neither side: the rule
-//! cannot be evaluated as the change leaves it.
+//! A rule whose scope matches no node on the BASE side (a directory the
+//! change creates) checks nothing there, so its working-tree violations are
+//! all new. A rule that checks nothing on the WORKING TREE side (DT.7b /
+//! DT.7c, James's ruling 1: listed, not an error; a `from` / `to` / `via` /
+//! no_cycle scope no located node sits in) is listed in `unanchored` with its
+//! reason and fix, is never blocking and never a rule error, and is compared
+//! on neither side: the base's violations of a rule that no longer checks
+//! anything are not "resolved". A rule that errors on the WORKING TREE side
+//! (an unknown category, a rule text that does not parse) goes to
+//! `check_errors` and is compared on neither side either: the rule cannot be
+//! evaluated as the change leaves it.
+//!
+//! # Model breaks (DT.1p)
+//!
+//! `model_breaks` lists the breaking inferred-model rows; a row blocks when
+//! `check::is_blocking(tier, models_min_tier)` holds. The default
+//! `models_min_tier` is `fact` (check's vocabulary, `fact` | `derived`, not
+//! check's default `derived`): an inferred pairing is advisory (James's
+//! ruling 4, 2026-10-17), and every HTTP / GraphQL pairing glia 0.5.2 infers
+//! is derived, so by default no model row blocks. The review's `blocking` is
+//! a new blocking violation OR a blocking model row.
 //!
 //! ## Why an index beside `check_rules` (stopgap)
 //!
@@ -109,19 +131,34 @@
 //! a function of the [`Review`] and [`MarkdownOptions`] alone (two renders
 //! are byte-identical; nothing is printed). ``## glia review vs `<base>` ``
 //! and a headline of the counts (`**<N> new violation(s)**`, followed by
-//! ` (<A> advisory)` only when `A` of them do not block), then `### New
-//! violations (blocking)` (only when a blocking one exists: a `#### <rule
-//! id> (<kind>, <decl>)` table per violation), `### New violations
-//! (advisory: below the rule's min_tier)` (only when an advisory one exists),
-//! `### Check errors` (when any: the working tree's rule errors and the rules
-//! only partly compared), `### Tests to run`, `### Impact`, `### Edge
-//! changes` (grouped by tier, facts first), `### Changed nodes` and `###
-//! Resolved violations` (when any). A rule or forbid_path violation renders
-//! its identity first, ``_subject: `<a>`, `<b>` - tier <t> at
-//! <file:line>_`` (no ` at` when the subject is unlocated), then its witness
-//! table when it has rows, then up to 5 of its coverage caveats, one line
-//! each, `⚠ <category> (<language>): <note>`, a cut list followed by `_(<shown>
-//! of <total> caveats)_`.
+//! ` (<A> advisory)` only when `A` of them do not block; when `M` model
+//! breaks exist it ends ` | <M> model break(s)`, then ` (<A> advisory)` when
+//! `A` of them do not block), then `### New violations (blocking)` (only when
+//! a blocking one exists: a `#### <rule id> (<kind>, <decl>)` table per
+//! violation), `### New violations (advisory: below the rule's min_tier)`
+//! (only when an advisory one exists), `### Model breaks (blocking)` and
+//! `### Model breaks (advisory: an inferred client <-> server pairing below
+//! the models min tier)` (each only when such a row exists: one table `|
+//! pairing | via | tier | rule | field | before | after | client | server |`,
+//! one line per breaking change; `via` the first exchange's key, ` (+<n>)`
+//! for the rest; a site is the side's qname then the `file:line` of the
+//! change's field there, else of the side, ` (at <base>)` on a site read
+//! from the rev, a dash for none), `### Check errors` (when any: the working
+//! tree's rule errors and the rules only partly compared), `### Rules that
+//! check nothing` (when any: one bullet per `unanchored` row, its reason,
+//! then its `fix:`), `### Tests to run`, `### Impact`, `### Edge changes`
+//! (grouped by tier, facts first), `### Changed nodes` and `### Resolved
+//! violations` (when any). A rule or forbid_path violation renders its
+//! identity first, ``_subject: `<a>`, `<b>` - tier <t> at <file:line>_`` (no
+//! ` at` when the subject is unlocated), then its witness table when it has
+//! rows. A rule's coverage caveats print ONCE per section (DT.8a's fold,
+//! after check): under the rule's first violation there, the caveats of
+//! every violation of the rule in that section deduplicated by (category,
+//! language, note) in first-seen order, up to 5 lines, `⚠ <category>
+//! (<language>): <note>`, a cut list followed by `_(<shown> of <total>
+//! caveats)_`; its later violations print none (a rule's negations are
+//! static, so every row carried the same list). JSON keeps every
+//! violation's own list. [`caveat_fold`] counts what the fold saved.
 //!
 //! Every location is `file:line`, 1-based; a removed edge or node and a
 //! resolved violation's row are marked `(at <base>)`, where they are
@@ -143,10 +180,13 @@
 //! rows; the tier split counts every edge row, reconfidenced included;
 //! `new=` counts every new violation, advisory ones included, and
 //! `blocking=` is the gate (a new violation at or above its rule's
-//! `min_tier`). The
+//! `min_tier`, or a blocking model row). The line is otherwise unchanged by
+//! DT.1p: the model counts are on the `[model-breaks] base=` line. The
 //! component answers print their own lines: one `[delta]` pair (from
-//! [`review_vs_rev`] only), one `[diff-impact]`, one `[tests-for]`, and two
-//! `[check] rules=` lines (the working tree's first, then the base's).
+//! [`review_vs_rev`] only), one `[diff-impact]`, one `[tests-for]`, two
+//! `[check] rules=` lines (the working tree's first, then the base's), and
+//! one `[model-breaks] base=<rev> min_tier=<t> ..` line, after the `[check]`
+//! lines and before `[review] base=`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -161,9 +201,16 @@ use glia_graph::MergedGraph;
 
 use crate::answers::{BlastOptions, BlastRadius, Locator, in_scope, project_roots};
 use crate::check::{
-    self, CheckReport, DEFAULT_MIN_TIER, DERIVED, FACT, FORBID_EDGE, FORBID_PATH, HEURISTIC,
-    NO_CYCLE, RULE, Violation, ViolationEdge, check_rules, default_forbid_categories,
+    self, CheckOptions, CheckReport, DEFAULT_MIN_TIER, DERIVED, EMPTY_SCOPE, FACT, FORBID_EDGE,
+    FORBID_PATH, HEURISTIC, NO_CYCLE, RULE, Unanchored, Violation, ViolationEdge,
+    check_rules_gated, default_forbid_categories,
 };
+use crate::contract_breaks::{
+    MODEL_MIN_TIERS, ModelBreak, ModelBreakArgs, ModelSite, check_models_min_tier,
+    model_breaks_of,
+};
+use crate::contract_fields::FieldSide;
+use crate::coverage::CoverageNote;
 use crate::cycles::module_import_graph;
 use crate::delta::{RevDelta, graph_delta_vs_rev};
 use crate::diff_impact::{ChangedNode, diff_impact_from_delta};
@@ -195,6 +242,12 @@ pub struct ReviewArgs {
     /// Test rows kept ([`DEFAULT_MAX_TESTS`]); `counts.tests` is uncut and
     /// `tests.absence` is the uncut answer's, as for `max_impact`.
     pub max_tests: usize,
+    /// The weakest pairing tier at which a breaking inferred-model row blocks
+    /// (`contract_breaks::MODEL_MIN_TIERS`; module docs "Model breaks"):
+    /// `fact` (the default: every pairing glia 0.5.2 infers is derived, so
+    /// its rows are advisory) or `derived`. [`review_vs_rev`] refuses any
+    /// other value before building; [`review`] judges one as `fact`.
+    pub models_min_tier: &'static str,
 }
 
 impl Default for ReviewArgs {
@@ -204,6 +257,7 @@ impl Default for ReviewArgs {
             tests: TestsForArgs::default(),
             max_impact: DEFAULT_MAX_IMPACT,
             max_tests: DEFAULT_MAX_TESTS,
+            models_min_tier: MODEL_MIN_TIERS[0],
         }
     }
 }
@@ -246,6 +300,9 @@ pub struct ReviewCounts {
     pub untested_seeds: usize,
     pub new_violations: usize,
     pub resolved_violations: usize,
+    /// `model_breaks.len()`: the breaking inferred-model rows, advisory ones
+    /// included.
+    pub model_breaks: usize,
     /// Every edge row by tier; a tier no row has is absent.
     pub edges_by_tier: BTreeMap<&'static str, usize>,
 }
@@ -272,21 +329,34 @@ pub struct Review {
     /// The base's violations the working tree does not have, reduced to their
     /// resolved rows.
     pub resolved_violations: Vec<Violation>,
+    /// The breaking inferred client <-> server model rows of the change
+    /// (module docs "Model breaks"), `contract_breaks`' order; advisory ones
+    /// (`blocking` false) included.
+    pub model_breaks: Vec<ModelBreak>,
     /// `(rule id, message)`: the working tree's rule errors, plus a rule a
     /// side lists too few rows of to classify (module docs).
     pub check_errors: Vec<(String, String)>,
-    /// A new BLOCKING violation exists: one at or above its rule's
-    /// `min_tier`, never a heuristic one (`Violation::blocking`, module docs
-    /// "New and resolved violations"). The CI gate.
+    /// The working tree's rules that check nothing (`check::EMPTY_SCOPE`
+    /// rows, reason and fix; module docs "New and resolved violations"):
+    /// never blocking, never a rule error. Not serialised when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unanchored: Vec<Unanchored>,
+    /// A new BLOCKING violation exists (one at or above its rule's
+    /// `min_tier`, never a heuristic one: `Violation::blocking`, module docs
+    /// "New and resolved violations"), or a blocking model row
+    /// (`ModelBreak::blocking`, module docs "Model breaks"). The CI gate.
     pub blocking: bool,
 }
 
 /// The review of the working tree's change against git rev `base` (module
-/// docs): one `graph_delta_vs_rev`, then [`review`]. `Err` on its errors (not
-/// a directory, not a git work tree, an unknown rev, a failed build) and on
-/// `tests_for_delta`'s (more than `tests_for::MAX_SEEDS` seeds). Like the
+/// docs): one `graph_delta_vs_rev`, then [`review`]. `Err` on an unknown
+/// [`ReviewArgs::models_min_tier`] (`unknown models min tier `<x>`: expected
+/// one of fact, derived`, before anything is built), on the delta's errors
+/// (not a directory, not a git work tree, an unknown rev, a failed build) and
+/// on `tests_for_delta`'s (more than `tests_for::MAX_SEEDS` seeds). Like the
 /// delta, it saves the working tree's parse-cache sidecar, never a layout.
 pub fn review_vs_rev(repo_path: &str, base: &str, args: &ReviewArgs) -> Result<Review, String> {
+    check_models_min_tier(args.models_min_tier)?;
     let rev = graph_delta_vs_rev(repo_path, base)?;
     review(&rev, args)
 }
@@ -334,16 +404,28 @@ pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
     let edges = review_edges(rev, &then, &now);
 
     let rules = declared_constraints(after);
-    let now_report = check_rules(after, &rules);
-    let then_report = check_rules(before, &rules);
+    // DT.7c's gated form, as glia check gates: a scope no located node sits
+    // in is an EMPTY_SCOPE row of `unanchored`, not a rule error.
+    let gated = CheckOptions::default();
+    let now_report = check_rules_gated(after, &rules, &gated);
+    let then_report = check_rules_gated(before, &rules, &gated);
     let now_index = RuleIndex::build(after, &now, &rules);
     let then_index = RuleIndex::build(before, &then, &rules);
     let gates = min_tiers(&rules);
     let mut check_errors = now_report.errors.clone();
+    let unanchored: Vec<Unanchored> = now_report
+        .unanchored
+        .iter()
+        .filter(|u| u.status == EMPTY_SCOPE)
+        .cloned()
+        .collect();
+    // Compared on neither side: the working tree's rule errors and its rules
+    // that check nothing (module docs).
     let now_errors: HashSet<&str> = now_report
         .errors
         .iter()
         .map(|(id, _)| id.as_str())
+        .chain(unanchored.iter().map(|u| u.rule_id.as_str()))
         .collect();
     let new_violations = compare(
         Side {
@@ -378,6 +460,18 @@ pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
         &mut check_errors,
     );
 
+    let mut model_breaks = model_breaks_of(
+        &rev.answer.base,
+        before,
+        &rev.after,
+        &rev.delta,
+        &ModelBreakArgs {
+            min_tier: args.models_min_tier,
+        },
+    )
+    .rows;
+    model_breaks.retain(|m| m.status == "breaking");
+
     let mut edges_by_tier: BTreeMap<&'static str, usize> = BTreeMap::new();
     for e in &edges {
         *edges_by_tier.entry(e.tier).or_insert(0) += 1;
@@ -392,6 +486,7 @@ pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
         untested_seeds: tests.untested.len(),
         new_violations: new_violations.len(),
         resolved_violations: resolved_violations.len(),
+        model_breaks: model_breaks.len(),
         edges_by_tier,
     };
     let answer = Review {
@@ -401,10 +496,13 @@ pub fn review(rev: &RevDelta, args: &ReviewArgs) -> Result<Review, String> {
         impact,
         tests,
         edges,
-        blocking: new_violations.iter().any(|v| v.blocking),
+        blocking: new_violations.iter().any(|v| v.blocking)
+            || model_breaks.iter().any(|m| m.blocking),
         new_violations,
         resolved_violations,
+        model_breaks,
         check_errors,
+        unanchored,
     };
     marker(&answer);
     Ok(answer)
@@ -468,8 +566,16 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
     } else {
         format!(" ({} advisory)", advisory.len())
     };
+    let (model_blocking, model_advisory): (Vec<&ModelBreak>, Vec<&ModelBreak>) =
+        r.model_breaks.iter().partition(|m| m.blocking);
+    // DT.1p: only with a model break, so every pre-DT.1p headline holds.
+    let model_note = match (r.model_breaks.len(), model_advisory.len()) {
+        (0, _) => String::new(),
+        (m, 0) => format!(" | {m} model break(s)"),
+        (m, a) => format!(" | {m} model break(s) ({a} advisory)"),
+    };
     let mut blocks: Vec<String> = vec![format!(
-        "## glia review vs {}\n**{} new violation(s)**{} | {} resolved | {} changed nodes | impact {} | tests {} ({} seeds untested) | edges +{} -{}",
+        "## glia review vs {}\n**{} new violation(s)**{} | {} resolved | {} changed nodes | impact {} | tests {} ({} seeds untested) | edges +{} -{}{model_note}",
         code(&r.base),
         c.new_violations,
         advisory_note,
@@ -484,7 +590,8 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
     let unchanged = r.changed.is_empty()
         && r.edges.is_empty()
         && r.new_violations.is_empty()
-        && r.resolved_violations.is_empty();
+        && r.resolved_violations.is_empty()
+        && r.model_breaks.is_empty();
     if unchanged {
         let note = r.impact.absence.as_ref().map_or_else(
             || format!("no graph change vs {}", r.base),
@@ -492,21 +599,30 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
         );
         blocks.push(sentence(&note));
         check_errors_md(&mut blocks, r, max);
+        unanchored_md(&mut blocks, r);
         return finish(blocks);
     }
     if !blocking.is_empty() {
         blocks.push("### New violations (blocking)".to_string());
-        for v in blocking {
-            violation_md(&mut blocks, v, max, None);
-        }
+        violations_md(&mut blocks, &blocking, max, None);
     }
     if !advisory.is_empty() {
         blocks.push("### New violations (advisory: below the rule's min_tier)".to_string());
-        for v in advisory {
-            violation_md(&mut blocks, v, max, None);
-        }
+        violations_md(&mut blocks, &advisory, max, None);
+    }
+    if !model_blocking.is_empty() {
+        blocks.push("### Model breaks (blocking)".to_string());
+        model_breaks_md(&mut blocks, &model_blocking, &r.base, max);
+    }
+    if !model_advisory.is_empty() {
+        blocks.push(
+            "### Model breaks (advisory: an inferred client <-> server pairing below the models min tier)"
+                .to_string(),
+        );
+        model_breaks_md(&mut blocks, &model_advisory, &r.base, max);
     }
     check_errors_md(&mut blocks, r, max);
+    unanchored_md(&mut blocks, r);
 
     blocks.push("### Tests to run".to_string());
     if c.tests == 0 {
@@ -583,11 +699,178 @@ pub fn render_markdown(r: &Review, opts: &MarkdownOptions) -> String {
 
     if !r.resolved_violations.is_empty() {
         blocks.push("### Resolved violations".to_string());
-        for v in &r.resolved_violations {
-            violation_md(&mut blocks, v, max, Some(&r.base));
-        }
+        let resolved: Vec<&Violation> = r.resolved_violations.iter().collect();
+        violations_md(&mut blocks, &resolved, max, Some(&r.base));
     }
     finish(blocks)
+}
+
+/// What the markdown's caveat fold (module docs "Markdown", DT.8a's after
+/// check) printed and saved. `glia review` reports it as `[review] caveats
+/// rules=<r> lines=<l> folded=<f>`.
+#[non_exhaustive]
+#[derive(serde::Serialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CaveatFold {
+    /// Caveat blocks printed: one per (section, rule) with a caveat.
+    pub rules: usize,
+    /// `⚠` lines those blocks printed.
+    pub lines: usize,
+    /// The lines one block per violation (the pre-fold layout) would have
+    /// printed beyond `lines`.
+    pub folded: usize,
+}
+
+/// The caveat fold of [`render_markdown`]'s three violation sections (new
+/// blocking, new advisory, resolved): the same plan the renderer prints, so
+/// the counts are its own.
+pub fn caveat_fold(r: &Review) -> CaveatFold {
+    let (blocking, advisory): (Vec<&Violation>, Vec<&Violation>) =
+        r.new_violations.iter().partition(|v| v.blocking);
+    let resolved: Vec<&Violation> = r.resolved_violations.iter().collect();
+    let mut fold = CaveatFold::default();
+    for section in [&blocking, &advisory, &resolved] {
+        for (v, block) in section.iter().zip(caveat_plan(section)) {
+            let per_row = if by_subject(v) {
+                v.caveats.len().min(MAX_CAVEAT_LINES)
+            } else {
+                0
+            };
+            let lines = block.len().min(MAX_CAVEAT_LINES);
+            if lines > 0 {
+                fold.rules += 1;
+            }
+            fold.lines += lines;
+            fold.folded += per_row;
+        }
+    }
+    fold.folded = fold.folded.saturating_sub(fold.lines);
+    fold
+}
+
+/// A rule or forbid_path violation: identified by subject, and the kinds
+/// that carry coverage caveats.
+fn by_subject(v: &Violation) -> bool {
+    v.rule_kind == RULE || v.rule_kind == FORBID_PATH
+}
+
+/// The caveat block each violation of one section prints (module docs
+/// "Markdown"): a rule's first violation there takes every caveat of the
+/// rule's violations in the section, deduplicated by (category, language,
+/// note) in first-seen order; every other violation takes none.
+fn caveat_plan<'v>(section: &[&'v Violation]) -> Vec<Vec<&'v CoverageNote>> {
+    let mut first: HashSet<&str> = HashSet::new();
+    section
+        .iter()
+        .map(|v| {
+            if !by_subject(v) || !first.insert(v.rule_id.as_str()) {
+                return Vec::new();
+            }
+            let mut seen: HashSet<(&str, &str, &str)> = HashSet::new();
+            section
+                .iter()
+                .filter(|o| o.rule_id == v.rule_id && by_subject(o))
+                .flat_map(|o| o.caveats.iter())
+                .filter(|c| seen.insert((c.edge_category, c.language, c.note)))
+                .collect()
+        })
+        .collect()
+}
+
+/// One section's violations, each with its [`caveat_plan`] block.
+fn violations_md(
+    blocks: &mut Vec<String>,
+    section: &[&Violation],
+    max: usize,
+    located_at: Option<&str>,
+) {
+    for (v, caveats) in section.iter().zip(caveat_plan(section)) {
+        violation_md(blocks, v, &caveats, max, located_at);
+    }
+}
+
+/// One model-break section (module docs "Markdown"): one table, a line per
+/// breaking change of `rows`, cut at `max` with `_(<shown> of <total>)_`.
+fn model_breaks_md(blocks: &mut Vec<String>, rows: &[&ModelBreak], base: &str, max: usize) {
+    let lines: Vec<Vec<String>> = rows
+        .iter()
+        .flat_map(|m| {
+            let via = match m.exchanges.split_first() {
+                Some((first, [])) => code(&first.key),
+                Some((first, rest)) => format!("{} (+{})", code(&first.key), rest.len()),
+                None => DASH.to_string(),
+            };
+            m.changes.iter().filter(|c| c.breaking).map(move |c| {
+                vec![
+                    text(m.pairing),
+                    via.clone(),
+                    text(m.tier),
+                    text(c.rule),
+                    code(&c.field),
+                    c.before.as_deref().map_or_else(|| DASH.to_string(), text),
+                    c.after.as_deref().map_or_else(|| DASH.to_string(), text),
+                    model_site(&m.client, c.client.as_ref(), base),
+                    model_site(&m.server, c.server.as_ref(), base),
+                ]
+            })
+        })
+        .collect();
+    let total = lines.len();
+    push_table(
+        blocks,
+        &[
+            "pairing", "via", "tier", "rule", "field", "before", "after", "client", "server",
+        ],
+        lines,
+        total,
+        max,
+    );
+}
+
+/// A model row's side: its qname, then the change's field site there, else
+/// the side's own location; ` (at <base>)` on a site read from the rev, a
+/// dash for none.
+fn model_site(side: &FieldSide, field: Option<&ModelSite>, base: &str) -> String {
+    let loc = match field.filter(|s| s.file.is_some()) {
+        Some(s) => {
+            let mut loc = at(s.file.as_deref(), s.line);
+            if s.at_base {
+                loc.push_str(&format!(" (at {})", text(base)));
+            }
+            loc
+        }
+        None => at(side.file.as_deref(), side.line),
+    };
+    format!("{} {loc}", code(&side.qname))
+}
+
+/// `### Rules that check nothing` (DT.7b / DT.7c): one bullet per
+/// [`Review::unanchored`] row, its reason, then its fix; nothing when there
+/// are none.
+fn unanchored_md(blocks: &mut Vec<String>, r: &Review) {
+    if r.unanchored.is_empty() {
+        return;
+    }
+    blocks.push("### Rules that check nothing".to_string());
+    blocks.push(
+        "_declared, but nothing is evaluated for them; never a blocking violation or a rule error_"
+            .to_string(),
+    );
+    let lines: Vec<String> = r
+        .unanchored
+        .iter()
+        .map(|u| {
+            let decl = u.decl.as_deref().unwrap_or("cell API");
+            format!(
+                "- {} ({}, {}): {}\n  fix: {}",
+                code(&u.rule_id),
+                text(u.section),
+                text(decl),
+                text(&u.reason),
+                text(&u.fix)
+            )
+        })
+        .collect();
+    blocks.push(lines.join("\n"));
 }
 
 /// The blocks, one blank line apart, ending in one newline.
@@ -648,16 +931,23 @@ where
     }
 }
 
-/// Caveat lines a rule / forbid_path violation lists in markdown.
+/// Caveat lines one rule's caveat block lists in markdown.
 const MAX_CAVEAT_LINES: usize = 5;
 
 /// One violation: its heading and its evidence rows. A per-edge kind's total
 /// is its `count` (the rows beyond `check::MAX_EVIDENCE` included); a
 /// no_cycle's rows are one shortest cycle through its `count` members; a rule
-/// or forbid_path violation's identity line comes first, its caveats last
-/// (module docs "Markdown"). `located_at`: the rev a resolved violation's
-/// rows are located in.
-fn violation_md(blocks: &mut Vec<String>, v: &Violation, max: usize, located_at: Option<&str>) {
+/// or forbid_path violation's identity line comes first, then its rows, then
+/// `caveats`, its [`caveat_plan`] block (empty for every violation of a rule
+/// but the section's first; module docs "Markdown"). `located_at`: the rev a
+/// resolved violation's rows are located in.
+fn violation_md(
+    blocks: &mut Vec<String>,
+    v: &Violation,
+    caveats: &[&CoverageNote],
+    max: usize,
+    located_at: Option<&str>,
+) {
     blocks.push(match v.decl.as_deref() {
         Some(decl) => format!(
             "#### {} ({}, {})",
@@ -667,8 +957,8 @@ fn violation_md(blocks: &mut Vec<String>, v: &Violation, max: usize, located_at:
         ),
         None => format!("#### {} ({})", text(&v.rule_id), text(v.rule_kind)),
     });
-    let by_subject = v.rule_kind == RULE || v.rule_kind == FORBID_PATH;
-    if by_subject {
+    let subject_kind = by_subject(v);
+    if subject_kind {
         let subject: Vec<String> = v.subject.iter().map(|s| code(s)).collect();
         let mut line = format!(
             "_subject: {} - tier {}",
@@ -716,9 +1006,8 @@ fn violation_md(blocks: &mut Vec<String>, v: &Violation, max: usize, located_at:
         total,
         max,
     );
-    if by_subject && !v.caveats.is_empty() {
-        let lines: Vec<String> = v
-            .caveats
+    if subject_kind && !caveats.is_empty() {
+        let lines: Vec<String> = caveats
             .iter()
             .take(MAX_CAVEAT_LINES)
             .map(|c| {
@@ -732,8 +1021,8 @@ fn violation_md(blocks: &mut Vec<String>, v: &Violation, max: usize, located_at:
             .collect();
         let shown = lines.len();
         blocks.push(lines.join("\n"));
-        if shown < v.caveats.len() {
-            blocks.push(format!("_({shown} of {} caveats)_", v.caveats.len()));
+        if shown < caveats.len() {
+            blocks.push(format!("_({shown} of {} caveats)_", caveats.len()));
         }
     }
 }

@@ -329,13 +329,13 @@ glia patterns <REPO> [--base <REV>] [--group-by service|package] [--json] [--min
     --min-support sighted handlers is the convention, and every handler off it a
     located DIVERGENCE. Blind handlers are listed, never counted. Counts, not rules;
     --base keeps the divergences the change touched.
-glia review <REPO> [--base <REV>] [--depth <N>] [--json] [--markdown-rows <N>] [--max-impact <N>] [--max-tests <N>]
+glia review <REPO> [--base <REV>] [--depth <N>] [--json] [--markdown-rows <N>] [--max-impact <N>] [--max-tests <N>] [--models-min-tier fact|derived]
     The PR report for the working tree's change against a rev (default HEAD): the
     changed nodes, their ranked impact, the tests to run, every added / removed edge
     with its tier, and the declared rules checked on both sides. Markdown for a PR
     comment. A CI gate: exits 1 only on a new BLOCKING violation (at or above its
     rule's min_tier; an advisory one is listed under its own heading, not failed).
-glia contract-breaks <REPO> [--avro backward|forward|full] [--base <REV>] [--breaking-only] [--json] [--with <REPO>]...
+glia contract-breaks <REPO> [--avro backward|forward|full] [--base <REV>] [--breaking-only] [--json] [--models-min-tier fact|derived] [--with <REPO>]...
     Did the change against a rev (default HEAD) break a client? Every OpenAPI /
     AsyncAPI op and proto / Avro / JSON Schema type paired old -> new and judged by
     its format's evolution rules, one row per field change; every client whose call

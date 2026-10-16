@@ -9,18 +9,27 @@
 //! pyo3 `review_vs_rev(format="markdown")` returns, for a PR comment), its
 //! tables cut at `--markdown-rows` with `_(<shown> of <total>)_`. `--json`
 //! prints the engine's `Review` (`{base, counts, changed, impact, tests,
-//! edges, new_violations, resolved_violations, check_errors, blocking}`).
+//! edges, new_violations, resolved_violations, model_breaks, check_errors,
+//! blocking}`, plus `unanchored` when a rule checks nothing).
 //! `--depth` bounds the impact radius; `--max-impact` / `--max-tests` cut
 //! the engine's lists (the counts stay uncut). Every `file:line` is 1-based
 //! (LD.1).
 //!
-//! Exit 1 when the change adds a BLOCKING violation (`blocking`), in both
-//! modes: a new violation at or above its rule's `min_tier` (default
-//! `derived`), never a heuristic one (0.5.2 Q2). A new advisory violation is
-//! listed (markdown: under `### New violations (advisory: below the rule's
-//! min_tier)`, and ` (<A> advisory)` in the headline) and does not fail the
+//! Exit 1 when the change adds a BLOCKING violation or a BLOCKING model
+//! break (`blocking`), in both modes: a new violation at or above its rule's
+//! `min_tier` (default `derived`), never a heuristic one (0.5.2 Q2), or a
+//! breaking inferred client <-> server model row (DT.1p, the engine's
+//! `contract_breaks::model_breaks`) whose pairing tier is at or above
+//! `--models-min-tier` (`fact`, the default, or `derived`; every pairing glia
+//! 0.5.2 infers is derived, so by default a model break is advisory). A new
+//! advisory violation or model break is listed (markdown: under `### New
+//! violations (advisory: below the rule's min_tier)` / `### Model breaks
+//! (advisory: an inferred client <-> server pairing below the models min
+//! tier)`, and ` (<A> advisory)` in the headline) and does not fail the
 //! gate; nor does a violation the base already had (`glia check` fails on
-//! any blocking one). Rule-invariant and transitive (forbid_path) violations
+//! any blocking one). A rule that checks nothing in the working tree (a
+//! scope no located node sits in; DT.7b / DT.7c) is listed under `### Rules
+//! that check nothing` with its fix, and never fails the gate. Rule-invariant and transitive (forbid_path) violations
 //! are new or resolved by their subject, not their witness rows. 0
 //! otherwise. 2 on `--no-overlay` (both sides are built with the
 //! repo's overlay, as for `glia delta`) or a git / build failure, with the
@@ -32,13 +41,21 @@
 //! does, under `GLIA_NO_PERSIST=1` too; never a `.gmap` layout.
 //!
 //! Fired-on markers: the engine's
+//! `[model-breaks] base=<rev> min_tier=<t> exchanges=<E> .. unjudged=<U>`
+//! and
 //! `[review] base=<rev> changed=<C> seeds=<S> impact=<I> tests=<T> untested=<U> edges +<a> -<r> (fact=<F> derived=<D> heuristic=<H>) violations new=<N> resolved=<R> blocking=<bool>`
 //! once per run (grep `^\[review\] base=`), then this surface's
-//! `[review] surface=cli format=<markdown|json> exit=<0|1>`.
+//! `[review] surface=cli format=<markdown|json> exit=<0|1>`. In markdown, a
+//! rule's coverage caveats print once per section (DT.8a's fold, the
+//! engine's `review::caveat_fold`); when a caveat block printed, after the
+//! report: `[review] caveats rules=<r> lines=<l> folded=<f>` (`r` the blocks,
+//! `l` their `⚠` lines, `f` the lines a block per violation would have
+//! printed beyond `l`).
 
+use glia_engine::contract_breaks::MODEL_MIN_TIERS;
 use glia_engine::review::{
     DEFAULT_MARKDOWN_ROWS, DEFAULT_MAX_IMPACT, DEFAULT_MAX_TESTS, MarkdownOptions, ReviewArgs,
-    render_markdown, review_vs_rev,
+    caveat_fold, render_markdown, review_vs_rev,
 };
 
 use crate::common::build_options;
@@ -52,8 +69,8 @@ pub(crate) struct Args {
     #[arg(long, value_name = "REV", default_value = "HEAD")]
     base: String,
     /// Emit the review as JSON (`{base, counts, changed, impact, tests,
-    /// edges, new_violations, resolved_violations, check_errors, blocking}`)
-    /// instead of the markdown report.
+    /// edges, new_violations, resolved_violations, model_breaks,
+    /// check_errors, blocking}`) instead of the markdown report.
     #[arg(long)]
     json: bool,
     /// Rows per markdown table; a cut table ends with `_(<shown> of
@@ -69,15 +86,40 @@ pub(crate) struct Args {
     /// Impact rows the review keeps (`counts.impact` stays the uncut total).
     #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_IMPACT)]
     max_impact: usize,
+    /// The weakest pairing tier at which an inferred client <-> server model
+    /// break fails the gate: fact (the default; every pairing glia 0.5.2
+    /// infers is derived, so its rows are advisory) or derived; a heuristic
+    /// pairing never fails it.
+    #[arg(
+        long,
+        value_name = "TIER",
+        default_value = MODEL_MIN_TIERS[0],
+        value_parser = clap::builder::PossibleValuesParser::new(MODEL_MIN_TIERS),
+    )]
+    models_min_tier: String,
 }
 
-/// The engine's arguments from the flags.
-fn engine_args(depth: usize, max_tests: usize, max_impact: usize) -> ReviewArgs {
+/// The engine's arguments from the flags; `Err` names a tier outside
+/// [`MODEL_MIN_TIERS`] in the engine's words (clap has already refused one,
+/// so this only guards the `&'static str` lookup).
+fn engine_args(
+    depth: usize,
+    max_tests: usize,
+    max_impact: usize,
+    models_min_tier: &str,
+) -> Result<ReviewArgs, String> {
+    let Some(tier) = MODEL_MIN_TIERS.iter().copied().find(|t| *t == models_min_tier) else {
+        return Err(format!(
+            "unknown models min tier `{models_min_tier}`: expected one of {}",
+            MODEL_MIN_TIERS.join(", ")
+        ));
+    };
     let mut args = ReviewArgs::default();
     args.blast.depth = depth;
     args.max_tests = max_tests;
     args.max_impact = max_impact;
-    args
+    args.models_min_tier = tier;
+    Ok(args)
 }
 
 pub(crate) fn run(args: Args) -> i32 {
@@ -88,7 +130,18 @@ pub(crate) fn run(args: Args) -> i32 {
         );
         return 2;
     }
-    let engine = engine_args(args.depth, args.max_tests, args.max_impact);
+    let engine = match engine_args(
+        args.depth,
+        args.max_tests,
+        args.max_impact,
+        &args.models_min_tier,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 2;
+        }
+    };
     let review = match review_vs_rev(&args.repo, &args.base, &engine) {
         Ok(r) => r,
         Err(e) => {
@@ -111,6 +164,13 @@ pub(crate) fn run(args: Args) -> i32 {
         let mut opts = MarkdownOptions::default();
         opts.max_rows = args.markdown_rows;
         print!("{}", render_markdown(&review, &opts));
+        let fold = caveat_fold(&review);
+        if fold.rules > 0 {
+            eprintln!(
+                "[review] caveats rules={} lines={} folded={}",
+                fold.rules, fold.lines, fold.folded
+            );
+        }
     }
     exit
 }
@@ -121,13 +181,20 @@ mod tests {
 
     #[test]
     fn engine_args_carry_the_flags() {
-        let a = engine_args(2, 7, 9);
-        assert_eq!((a.blast.depth, a.max_tests, a.max_impact), (2, 7, 9));
-        let e = ReviewArgs::default();
-        let d = engine_args(e.blast.depth, DEFAULT_MAX_TESTS, DEFAULT_MAX_IMPACT);
+        let a = engine_args(2, 7, 9, "derived").expect("a tier");
         assert_eq!(
-            (d.blast.depth, d.max_tests, d.max_impact),
-            (e.blast.depth, e.max_tests, e.max_impact)
+            (a.blast.depth, a.max_tests, a.max_impact, a.models_min_tier),
+            (2, 7, 9, "derived")
         );
+        let e = ReviewArgs::default();
+        let d = engine_args(e.blast.depth, DEFAULT_MAX_TESTS, DEFAULT_MAX_IMPACT, "fact")
+            .expect("the default tier");
+        assert_eq!(
+            (d.blast.depth, d.max_tests, d.max_impact, d.models_min_tier),
+            (e.blast.depth, e.max_tests, e.max_impact, e.models_min_tier)
+        );
+        assert_eq!(e.models_min_tier, "fact", "the ruling's default");
+        let err = engine_args(4, 50, 50, "heuristic").expect_err("no such gate");
+        assert_eq!(err, "unknown models min tier `heuristic`: expected one of fact, derived");
     }
 }

@@ -7,5 +7,6 @@ cmd glia review
   arg markdown_rows pos=- long=markdown-rows short=- required=false num_args=1 action=Set default=20 value_names=N global=false hidden=false
   arg max_impact pos=- long=max-impact short=- required=false num_args=1 action=Set default=50 value_names=N global=false hidden=false
   arg max_tests pos=- long=max-tests short=- required=false num_args=1 action=Set default=50 value_names=N global=false hidden=false
+  arg models_min_tier pos=- long=models-min-tier short=- required=false num_args=1 action=Set default=fact value_names=TIER global=false hidden=false values=fact,derived
   arg no_overlay pos=- long=no-overlay short=- required=false num_args=0 action=SetTrue default=false value_names=NO_OVERLAY global=true hidden=false
   arg repo pos=1 long=- short=- required=true num_args=1 action=Set default=- value_names=REPO global=false hidden=false

@@ -9,12 +9,23 @@
 //! merges (the provider at the rev and at its working tree, each with the
 //! client repos), so a client in ANOTHER repo that loses its provider is an
 //! orphan too.
+//!
+//! DT.1p: every answer folds the inferred client <-> server model breaks
+//! (DT.1o's judge) into `models` over the `model-breaks-shop` fixture
+//! ([`model_shop`]): the v2 json tag rename is one advisory row by default
+//! (`advisory` 1, `breaking` 0), blocking under `models_min_tier` `derived`,
+//! judged across a `--with` merge too, and a union client root (`Order |
+//! UnknownRecord`) is judged by its member. fired_on: `[model-breaks]
+//! base=<rev> ..`, after the unchanged `[contract-breaks] base=` line.
 
 mod git_fixture;
+mod model_shop;
+
+use std::path::Path;
 
 use git_fixture::GitRepo;
 use glia_engine::contract_breaks::{
-    ContractBreakArgs, ContractBreaks, SchemaChange, contract_breaks_vs_rev,
+    ContractBreakArgs, ContractBreaks, ModelBreak, SchemaChange, contract_breaks_vs_rev,
     contract_breaks_vs_rev_with,
 };
 use glia_engine::contract_fields::FieldChange;
@@ -654,4 +665,291 @@ fn client_git_work_tree_is_not_rolled_back() {
         ("endpoint:GET:/orders", "GET /orders @services/api", "target_removed")
     );
     assert_eq!(b.breaking, 1);
+}
+
+// ---- DT.1p: inferred-model breaks in the answer ----------------------------
+
+fn models_at(tier: &'static str) -> ContractBreakArgs {
+    let mut a = ContractBreakArgs::default();
+    a.models_min_tier = tier;
+    a
+}
+
+fn vs(repo: &GitRepo, base: &str, args: &ContractBreakArgs) -> ContractBreaks {
+    contract_breaks_vs_rev(repo.path(), base, args)
+        .unwrap_or_else(|e| panic!("contract breaks vs {base}: {e}"))
+}
+
+/// One model row: pairing, direction, both sides located, status, tier,
+/// blocking, then each change's (field, rule, before -> after).
+fn model(m: &ModelBreak) -> (String, Vec<String>, Vec<String>) {
+    let side = |f: &glia_engine::contract_fields::FieldSide| {
+        format!(
+            "{} {}:{}",
+            f.qname,
+            f.file.as_deref().unwrap_or("?"),
+            f.line.map_or_else(|| "?".to_string(), |l| l.to_string())
+        )
+    };
+    (
+        format!(
+            "{} {} | {} | {} | {} {} blocking={}",
+            m.pairing,
+            m.direction,
+            side(&m.client),
+            side(&m.server),
+            m.status,
+            m.tier,
+            m.blocking
+        ),
+        m.exchanges.iter().map(|e| e.key.clone()).collect(),
+        m.changes
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} {} {} -> {}",
+                    c.field,
+                    c.rule,
+                    c.before.as_deref().unwrap_or("-"),
+                    c.after.as_deref().unwrap_or("-")
+                )
+            })
+            .collect(),
+    )
+}
+
+const ORDER_EXCHANGES: [&str; 3] = [
+    "GET /api/orders/:id",
+    "PATCH /api/orders/:id/status",
+    "POST /api/orders",
+];
+
+fn strings(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+/// (a) The v2 rename is one breaking http_model row, advisory under the
+/// default `fact` gate: listed in `models`, counted in `advisory`, not in
+/// `breaking`, so the gate passes and no absence is set.
+#[test]
+fn an_inferred_model_break_is_advisory_by_default() {
+    let repo = model_shop::renamed();
+    let b = vs(&repo, "HEAD~1", &ContractBreakArgs::default());
+    assert_eq!(ContractBreakArgs::default().models_min_tier, "fact");
+    assert!(b.schemas.is_empty() && b.orphaned_clients.is_empty(), "{}", dump(&b));
+    assert_eq!(
+        b.models.iter().map(model).collect::<Vec<_>>(),
+        [(
+            "http_model response | web::src::app::core::models::order::Order web/src/app/core/models/order.ts:9 | api::internal::models::order::Order api/internal/models/order.go:20 | breaking derived blocking=false".to_string(),
+            strings(&ORDER_EXCHANGES),
+            strings(&["customerName json_name_changed customerName -> customer_name"]),
+        )],
+        "{:#?}",
+        b.models
+    );
+    assert_eq!((b.breaking, b.advisory), (0, 1));
+    assert!(b.absence.is_none(), "{:?}", b.absence);
+}
+
+/// (b) Opting in with `derived` makes the derived pairing's break block:
+/// `breaking` 1, `advisory` 0, the row `blocking`; `breaking_only` keeps it.
+#[test]
+fn the_derived_models_min_tier_makes_the_break_block() {
+    let repo = model_shop::renamed();
+    let b = vs(&repo, "HEAD~1", &models_at("derived"));
+    assert_eq!((b.breaking, b.advisory, b.models.len()), (1, 0, 1), "{:#?}", b.models);
+    assert!(b.models[0].blocking, "{:#?}", b.models[0]);
+    let mut only = models_at("derived");
+    only.breaking_only = true;
+    let b = vs(&repo, "HEAD~1", &only);
+    assert_eq!((b.breaking, b.advisory, b.models.len()), (1, 0, 1), "breaking_only keeps a breaking row");
+    let mut only = ContractBreakArgs::default();
+    only.breaking_only = true;
+    let b = vs(&repo, "HEAD~1", &only);
+    assert_eq!((b.breaking, b.advisory, b.models.len()), (0, 1, 1), "an advisory row is breaking too");
+}
+
+/// (c) A tier outside `fact` / `derived` is refused before anything is
+/// built, with and without clients (the path does not exist).
+#[test]
+fn an_unknown_models_min_tier_is_refused_before_building() {
+    for tier in ["heuristic", "Fact", ""] {
+        let args = models_at(tier);
+        let want = format!("unknown models min tier `{tier}`: expected one of fact, derived");
+        let err = contract_breaks_vs_rev("/nonexistent/dt1p", "HEAD", &args).expect_err("bad tier");
+        assert_eq!(err, want);
+        let clients = ["/nonexistent/dt1p-client".to_string()];
+        let err = contract_breaks_vs_rev_with("/nonexistent/dt1p", "HEAD", &clients, &args)
+            .expect_err("bad tier");
+        assert_eq!(err, want, "the tier is checked before the clients");
+    }
+}
+
+/// (d) A compatible model change (a new omitempty server field) is listed,
+/// counted in neither `breaking` nor `advisory`; `breaking_only` drops it,
+/// and the absence then names the judged exchanges and the row it left out.
+#[test]
+fn a_compatible_model_change_is_listed_and_breaking_only_drops_it() {
+    let repo = model_shop::renamed();
+    model_shop::edit(
+        &repo,
+        "api/internal/models/order.go",
+        "\tInternalNote string      `json:\"-\"`\n",
+        "\tInternalNote string      `json:\"-\"`\n\tNotes        string      `json:\"notes,omitempty\"`\n",
+    );
+    let b = vs(&repo, "HEAD", &ContractBreakArgs::default());
+    assert_eq!(
+        b.models.iter().map(|m| (m.status, m.changes[0].rule)).collect::<Vec<_>>(),
+        [("compatible", "response_field_added")]
+    );
+    assert_eq!((b.breaking, b.advisory), (0, 0));
+    assert!(b.absence.is_none());
+    let mut only = ContractBreakArgs::default();
+    only.breaking_only = true;
+    let b = vs(&repo, "HEAD", &only);
+    assert!(b.models.is_empty(), "{:#?}", b.models);
+    let a = b.absence.as_ref().expect("nothing listed");
+    assert_eq!(
+        a.note,
+        "no contract (OpenAPI / AsyncAPI op or message type) in either graph and no client edge removed vs HEAD; 7 client <-> server model exchanges judged, none breaking (1 compatible row left out by breaking_only)"
+    );
+}
+
+/// (e) No change: the absence is the schema-only note plus the judged
+/// exchanges' clause.
+#[test]
+fn no_model_change_adds_the_judged_clause_to_the_absence() {
+    let repo = model_shop::renamed();
+    let b = vs(&repo, "HEAD", &ContractBreakArgs::default());
+    assert!(b.models.is_empty() && b.schemas.is_empty(), "{}", dump(&b));
+    let a = b.absence.as_ref().expect("an absence");
+    assert_eq!(
+        (a.reason, a.note.as_str()),
+        (
+            "no_match",
+            "no contract (OpenAPI / AsyncAPI op or message type) in either graph and no client edge removed vs HEAD; 7 client <-> server model exchanges judged, none changed what a client reads or sends"
+        )
+    );
+}
+
+/// Every file under `dir`, relative to it, sorted.
+fn files_under(dir: &Path, at: &Path, out: &mut Vec<String>) {
+    let mut entries: Vec<_> = std::fs::read_dir(at)
+        .unwrap_or_else(|e| panic!("read {}: {e}", at.display()))
+        .map(|e| e.expect("fixture dir entry").path())
+        .collect();
+    entries.sort();
+    for p in entries {
+        if p.is_dir() {
+            files_under(dir, &p, out);
+        } else {
+            let rel = p.strip_prefix(dir).expect("under the dir");
+            out.push(rel.to_str().expect("utf-8 path").to_string());
+        }
+    }
+}
+
+fn copy_tree(from: &Path, write: &dyn Fn(&str, &str)) {
+    let mut files = Vec::new();
+    files_under(from, from, &mut files);
+    for rel in &files {
+        let text = std::fs::read_to_string(from.join(rel))
+            .unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        write(rel, &text);
+    }
+}
+
+/// (f) `--with`: the fixture's api/ as the provider repo (v1, then the
+/// rename committed as v2) and its web/ as a plain client dir. The client's
+/// typed calls pair across the merge, so the one row joins the client repo's
+/// Order with the provider's, located in each repo.
+#[test]
+fn a_typed_client_in_another_repo_is_judged() {
+    let api = GitRepo::init();
+    copy_tree(&model_shop::fixture().join("api"), &|rel, text| api.write(rel, text));
+    api.commit("v1");
+    let order = api.root().join("internal/models/order.go");
+    let text = std::fs::read_to_string(&order).expect("order.go");
+    std::fs::write(&order, text.replacen("`json:\"customerName\"`", "`json:\"customer_name\"`", 1))
+        .expect("rename");
+    api.commit("v2");
+    let client = tempfile::tempdir().expect("client dir");
+    copy_tree(&model_shop::fixture().join("web"), &|rel, text| {
+        let p = client.path().join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("client parent dir");
+        std::fs::write(&p, text).expect("client write");
+    });
+    let clients = [client.path().to_str().expect("utf-8").to_string()];
+
+    let b = contract_breaks_vs_rev_with(api.path(), "HEAD~1", &clients, &ContractBreakArgs::default())
+        .unwrap_or_else(|e| panic!("with the client: {e}"));
+    assert_eq!(
+        b.models.iter().map(model).collect::<Vec<_>>(),
+        [(
+            "http_model response | src::app::core::models::order::Order src/app/core/models/order.ts:9 | internal::models::order::Order internal/models/order.go:20 | breaking derived blocking=false".to_string(),
+            strings(&ORDER_EXCHANGES),
+            strings(&["customerName json_name_changed customerName -> customer_name"]),
+        )],
+        "{:#?}",
+        b.models
+    );
+    let m = &b.models[0];
+    assert_ne!(m.client.repo_id, m.server.repo_id, "the client is the other repo's");
+    assert_eq!((b.breaking, b.advisory), (0, 1));
+
+    let alone = vs(&api, "HEAD~1", &ContractBreakArgs::default());
+    assert!(alone.models.is_empty(), "without the client nothing pairs: {:#?}", alone.models);
+}
+
+/// (g) DT.1p's member read: a client root typed `Order | UnknownRecord`
+/// (quokka-stack's defensive cast, `type UnknownRecord = Record<string,
+/// unknown>`) is open at its root, so before DT.1p its GET exchange was
+/// unjudged and only the PATCH / POST row was listed. Its `Order` member is
+/// what the object the handler writes meets, so the GET is judged too: its
+/// own row (DT.1m names no client model for a union, so its client side is
+/// the ENDPOINT), the rename located at the member's field.
+#[test]
+fn a_union_client_root_is_judged_by_its_member() {
+    let repo = model_shop::v1();
+    let service = "web/src/app/core/services/order.service.ts";
+    model_shop::edit(&repo, service, "this.http.get<Order>(", "this.http.get<Order | UnknownRecord>(");
+    let text = std::fs::read_to_string(repo.root().join(service)).expect("service");
+    repo.write(service, &format!("{text}\ntype UnknownRecord = Record<string, unknown>;\n"));
+    repo.commit("v1: a defensive cast");
+    model_shop::edit(
+        &repo,
+        "api/internal/models/order.go",
+        "`json:\"customerName\"`",
+        "`json:\"customer_name\"`",
+    );
+    let b = vs(&repo, "HEAD", &ContractBreakArgs::default());
+    let rename = strings(&["customerName json_name_changed customerName -> customer_name"]);
+    let server = "api::internal::models::order::Order api/internal/models/order.go:20";
+    assert_eq!(
+        b.models.iter().map(model).collect::<Vec<_>>(),
+        [
+            (
+                format!("http_model response | endpoint:GET:/api/orders/${{…}} @web web/src/app/core/services/order.service.ts:14 | {server} | breaking derived blocking=false"),
+                strings(&["GET /api/orders/:id"]),
+                rename.clone(),
+            ),
+            (
+                format!("http_model response | web::src::app::core::models::order::Order web/src/app/core/models/order.ts:9 | {server} | breaking derived blocking=false"),
+                strings(&["PATCH /api/orders/:id/status", "POST /api/orders"]),
+                rename,
+            ),
+        ],
+        "{:#?}",
+        b.models
+    );
+    let at = |s: &Option<glia_engine::contract_breaks::ModelSite>| {
+        s.as_ref().map(|s| format!("{}:{}", s.file.as_deref().unwrap_or("?"), s.line.unwrap_or(0)))
+    };
+    let c = &b.models[0].changes[0];
+    assert_eq!(
+        (at(&c.client).as_deref(), at(&c.server).as_deref()),
+        (Some("web/src/app/core/models/order.ts:11"), Some("api/internal/models/order.go:22")),
+        "the member's field: {c:#?}"
+    );
+    assert_eq!((b.breaking, b.advisory), (0, 2));
 }

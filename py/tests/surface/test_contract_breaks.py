@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """pyo3 surface, py/src/contract_breaks.rs (CC.8b): the module function
 `contract_breaks_vs_rev(repo_path, base="HEAD", avro="backward",
-breaking_only=False, with_repos=None)` builds the git rev `base` and the
-working tree of the repo at `repo_path` (with `with_repos`, CC.8c, each side
-beside the same client repos) and returns the engine's contract breaks as a native dict
-{base, schemas, orphaned_clients, breaking, absence}: every contract paired old
--> new and judged by its format's evolution rules, one `changes` entry per
-declared difference, lines 1-based; `breaking` counts the breaking schema rows
-plus the orphaned clients. A bad `avro` mode or an engine error raises
-ValueError. Needs a `git` binary. Shared helpers: test_build.py."""
+breaking_only=False, with_repos=None, models_min_tier="fact")` builds the git
+rev `base` and the working tree of the repo at `repo_path` (with `with_repos`,
+CC.8c, each side beside the same client repos) and returns the engine's
+contract breaks as a native dict {base, schemas, models, orphaned_clients,
+breaking, advisory, absence}: every contract paired old -> new and judged by
+its format's evolution rules, one `changes` entry per declared difference,
+lines 1-based; `models` (DT.1p) the inferred client <-> server model rows;
+`breaking` counts the breaking schema rows plus the orphaned clients plus the
+model rows that block at `models_min_tier` ("fact", the default, makes every
+0.5.2 pairing advisory: counted in `advisory`). A bad `avro` mode or
+`models_min_tier` (before any build) or an engine error raises ValueError.
+Needs a `git` binary. Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import os
@@ -43,12 +47,17 @@ ORDERS_V1 = (
 )
 TOTAL = "                  total:\n                    type: number\n"
 CURRENCY = "                  currency:\n                    type: string\n"
-KEYS = ["base", "schemas", "orphaned_clients", "breaking", "absence"]
+KEYS = ["base", "schemas", "models", "orphaned_clients", "breaking", "advisory", "absence"]
 ROW_KEYS = ["kind", "key", "format", "before", "after", "status", "change", "tier", "note", "changes"]
 CHANGE_KEYS = ["section", "field", "change", "producer", "consumer", "rule", "breaking"]
 SIDE_KEYS = ["repo_id", "qname", "format", "file", "line"]
 KW = [("repo_path", None), ("base", "HEAD"), ("avro", "backward"), ("breaking_only", False),
-      ("with_repos", None)]
+      ("with_repos", None), ("models_min_tier", "fact")]
+# DT.1p: the engine's model-breaks-shop fixture (py/tests/surface -> the repo root).
+MODEL_SHOP = pathlib.Path(__file__).resolve().parents[3] / "engine" / "tests" / "data" / "model-breaks-shop"
+TAG = '`json:"customerName"`'
+RENAMED = '`json:"customer_name"`'
+
 MARKER = ("[contract-breaks] base=HEAD pairs=1 breaking=1 compatible=0 unknown=0 "
           "removed=0 added=0 orphaned_clients=0")
 WITH_MARKER = "[contract-breaks] clients=1 built_twice=1"
@@ -131,6 +140,9 @@ def main() -> int:
 
         c.raises("bad avro mode raises", ValueError, lambda: rg.contract_breaks_vs_rev(str(top), avro="x"),
                  "unknown avro mode `x`")
+        c.raises("bad models_min_tier raises before any build", ValueError,
+                 lambda: rg.contract_breaks_vs_rev(str(pathlib.Path(tmp) / "nowhere"), models_min_tier="x"),
+                 "unknown models min tier `x`: expected one of fact, derived")
         c.raises("unknown rev raises", ValueError,
                  lambda: rg.contract_breaks_vs_rev(str(top), base="no-such-rev"), "no-such-rev")
         plain = pathlib.Path(tmp) / "plain"
@@ -165,6 +177,33 @@ def main() -> int:
         c.raises("a client that is not a directory raises", ValueError,
                  lambda: rg.contract_breaks_vs_rev(str(api), with_repos=[str(pathlib.Path(tmp) / "nope")]),
                  "not a directory")
+
+        # DT.1p: the model-breaks-shop fixture, v1 then the json tag rename as v2.
+        shop = pathlib.Path(tmp) / "shop"
+        for src in sorted(MODEL_SHOP.rglob("*")):
+            if src.is_file():
+                dst = shop / src.relative_to(MODEL_SHOP)
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_text(src.read_text())
+        git(shop, "init", "-q")
+        git(shop, "add", "-A")
+        git(shop, "commit", "-q", "-m", "v1")
+        order = shop / "api" / "internal" / "models" / "order.go"
+        order.write_text(order.read_text().replace(TAG, RENAMED, 1))
+        git(shop, "commit", "-q", "-am", "v2")
+        m, err = stderr_of(lambda: rg.contract_breaks_vs_rev(str(shop), base="HEAD~1"))
+        m = m if type(m) is dict else {}
+        rows = m.get("models") or [{}]
+        change = (rows[0].get("changes") or [{}])[0]
+        c.check("an inferred model break is advisory by default",
+                (m.get("breaking"), m.get("advisory"), len(m.get("models") or []), rows[0].get("pairing"),
+                 change.get("rule"), rows[0].get("blocking"))
+                == (0, 1, 1, "http_model", "json_name_changed", False), m)
+        c.check("model marker", "[model-breaks] base=HEAD~1 min_tier=fact exchanges=7" in err, err[-600:])
+        d = rg.contract_breaks_vs_rev(str(shop), base="HEAD~1", models_min_tier="derived")
+        c.check("models_min_tier='derived' makes it block",
+                (d.get("breaking"), d.get("advisory"), (d.get("models") or [{}])[0].get("blocking"))
+                == (1, 0, True), d)
     return c.done()
 
 

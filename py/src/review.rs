@@ -3,15 +3,17 @@
 //! pyo3 twin of `glia review`.
 //!
 //! The module function `review_vs_rev(repo_path, base="HEAD", format="dict",
-//! markdown_rows=20, depth=4, max_tests=50, max_impact=50)` builds the repo's
-//! working tree and the rev itself (LE.1b's graph delta), so it takes a path.
-//! `format="dict"` returns the engine's `Review` as a native dict (LD.2):
-//! `{base, counts, changed, impact, tests, edges, new_violations,
-//! resolved_violations, check_errors, blocking}`; `format="markdown"` returns
-//! the markdown PR report `glia review` prints, as a `str`. Any other
-//! `format`, or an engine `Err` (not a git work tree, an unknown rev, a failed
-//! build), raises `ValueError`; the format is checked before anything is
-//! built.
+//! markdown_rows=20, depth=4, max_tests=50, max_impact=50,
+//! models_min_tier="fact")` builds the repo's working tree and the rev itself
+//! (LE.1b's graph delta), so it takes a path. `format="dict"` returns the
+//! engine's `Review` as a native dict (LD.2): `{base, counts, changed,
+//! impact, tests, edges, new_violations, resolved_violations, model_breaks,
+//! check_errors, blocking}` (plus `unanchored` when a rule checks nothing);
+//! `format="markdown"` returns the markdown PR report `glia review` prints,
+//! as a `str`. Any other `format`, a `models_min_tier` outside the engine's
+//! `contract_breaks::MODEL_MIN_TIERS`, or an engine `Err` (not a git work
+//! tree, an unknown rev, a failed build), raises `ValueError`; the format and
+//! the tier are checked before anything is built.
 //!
 //! Transport only: the review, the renderer, the location of every row and
 //! the `[review] base=..` marker live in the engine; this module adds one
@@ -22,6 +24,7 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+use glia_engine::contract_breaks::MODEL_MIN_TIERS;
 use glia_engine::review::{
     DEFAULT_MARKDOWN_ROWS, DEFAULT_MAX_IMPACT, DEFAULT_MAX_TESTS, MarkdownOptions, Review,
     ReviewArgs, render_markdown, review_vs_rev,
@@ -40,13 +43,26 @@ enum Answer {
     Markdown(String),
 }
 
-/// The engine's arguments from the keyword arguments.
-fn engine_args(depth: usize, max_tests: usize, max_impact: usize) -> ReviewArgs {
+/// The engine's arguments from the keyword arguments; `Err` names a
+/// `models_min_tier` outside [`MODEL_MIN_TIERS`] in the engine's own words.
+fn engine_args(
+    depth: usize,
+    max_tests: usize,
+    max_impact: usize,
+    models_min_tier: &str,
+) -> Result<ReviewArgs, String> {
+    let Some(tier) = MODEL_MIN_TIERS.iter().copied().find(|t| *t == models_min_tier) else {
+        return Err(format!(
+            "unknown models min tier `{models_min_tier}`: expected one of {}",
+            MODEL_MIN_TIERS.join(", ")
+        ));
+    };
     let mut args = ReviewArgs::default();
     args.blast.depth = depth;
     args.max_tests = max_tests;
     args.max_impact = max_impact;
-    args
+    args.models_min_tier = tier;
+    Ok(args)
 }
 
 /// `format` as one of [`FORMATS`]; `Err` names it and the valid ones.
@@ -63,25 +79,43 @@ fn check_format(format: &str) -> Result<&'static str, String> {
         })
 }
 
-/// The body of [`review_vs_rev_py`], minus pyo3. The format is checked before
-/// anything is built.
-fn rev_answer(
-    repo_path: &str,
-    base: &str,
-    format: &str,
+/// The keyword arguments of one call (the pyo3 signature's, minus the path
+/// and the rev).
+struct Kw<'a> {
+    format: &'a str,
     markdown_rows: usize,
     depth: usize,
     max_tests: usize,
     max_impact: usize,
-) -> Result<Answer, String> {
-    let format = check_format(format)?;
-    let review = review_vs_rev(repo_path, base, &engine_args(depth, max_tests, max_impact))?;
+    models_min_tier: &'a str,
+}
+
+impl Default for Kw<'_> {
+    /// The pyo3 signature's defaults.
+    fn default() -> Self {
+        Kw {
+            format: FORMATS[0],
+            markdown_rows: DEFAULT_MARKDOWN_ROWS,
+            depth: ReviewArgs::default().blast.depth,
+            max_tests: DEFAULT_MAX_TESTS,
+            max_impact: DEFAULT_MAX_IMPACT,
+            models_min_tier: MODEL_MIN_TIERS[0],
+        }
+    }
+}
+
+/// The body of [`review_vs_rev_py`], minus pyo3. The format and the tier are
+/// checked before anything is built.
+fn rev_answer(repo_path: &str, base: &str, kw: &Kw<'_>) -> Result<Answer, String> {
+    let format = check_format(kw.format)?;
+    let args = engine_args(kw.depth, kw.max_tests, kw.max_impact, kw.models_min_tier)?;
+    let review = review_vs_rev(repo_path, base, &args)?;
     eprintln!("[review] surface=py format={format}");
     if format == FORMATS[0] {
         return Ok(Answer::Dict(Box::new(review)));
     }
     let mut opts = MarkdownOptions::default();
-    opts.max_rows = markdown_rows;
+    opts.max_rows = kw.markdown_rows;
     Ok(Answer::Markdown(render_markdown(&review, &opts)))
 }
 
@@ -94,8 +128,10 @@ fn rev_answer(
 /// (`.glia/overlay.toml` `[[constraint]]`) checked on both sides.
 ///
 /// `format="dict"` (default) returns a dict `{base, counts, changed, impact,
-/// tests, edges, new_violations, resolved_violations, check_errors,
-/// blocking}`: `counts` uncut by the row caps; `changed` rows `{id, qname,
+/// tests, edges, new_violations, resolved_violations, model_breaks,
+/// check_errors, blocking}` (plus `unanchored`, the rules that check nothing,
+/// `{rule_id, section, decl, repo, status, reason, fix, blocking}`, when
+/// any): `counts` uncut by the row caps; `changed` rows `{id, qname,
 /// kind, file, line, change, seed}`; `impact` is `blast_radius`'s dict;
 /// `tests` is `tests_for`'s; `edges` rows `{change, from_qname, to_qname,
 /// category, tier, note, site_file, site_line, emitter}`; each violation
@@ -104,18 +140,25 @@ fn rev_answer(
 /// forbid_path violation), a per-edge one reduced to its new (or resolved)
 /// rows with its `tier` and `blocking` read from them; a rule or forbid_path
 /// violation is new or resolved by its `subject`; `check_errors` `(rule id,
-/// message)` pairs; `blocking` is True when a new BLOCKING violation exists:
-/// one at or above its rule's `min_tier` (default `derived`), never a
-/// heuristic one (a CI gate fails on it; an advisory new violation is listed
-/// but does not block, and a violation the base already had never blocks).
+/// message)` pairs; `model_breaks` (DT.1p) the breaking inferred client <->
+/// server model rows, as `contract_breaks_vs_rev`'s `models` rows;
+/// `blocking` is True when a new BLOCKING violation exists: one at or above
+/// its rule's `min_tier` (default `derived`), never a heuristic one, or a
+/// model row blocks: its pairing tier is at or above `models_min_tier`
+/// (`"fact"`, the default, or `"derived"`; every pairing glia 0.5.2 infers is
+/// derived, so by default a model break is advisory). A CI gate fails on it;
+/// an advisory new violation or model break is listed but does not block,
+/// and a violation the base already had never blocks.
 /// `format="markdown"`
 /// returns the markdown PR report `glia review` prints (`str`), each table
 /// cut at `markdown_rows`. Lines are 1-based. Builds both sides itself and
 /// saves the parse-cache sidecar (`<repo>/.glia/graph/parse_cache.bin`,
 /// self-gitignored) as `generate(incremental=True)` does, never a `.gmap`
-/// layout. Raises ValueError on another `format` or a git or build failure.
+/// layout. Raises ValueError on another `format`, a `models_min_tier` other
+/// than `"fact"` / `"derived"` (`unknown models min tier `x`: expected one of
+/// fact, derived`, before any build), or a git or build failure.
 #[pyfunction]
-#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=50, max_impact=50))]
+#[pyo3(name = "review_vs_rev", signature = (repo_path, base="HEAD", format="dict", markdown_rows=20, depth=4, max_tests=50, max_impact=50, models_min_tier="fact"))]
 #[allow(clippy::too_many_arguments)]
 fn review_vs_rev_py(
     py: Python<'_>,
@@ -126,17 +169,17 @@ fn review_vs_rev_py(
     depth: usize,
     max_tests: usize,
     max_impact: usize,
+    models_min_tier: &str,
 ) -> PyResult<Py<PyAny>> {
-    let answer = rev_answer(
-        repo_path,
-        base,
+    let kw = Kw {
         format,
         markdown_rows,
         depth,
         max_tests,
         max_impact,
-    )
-    .map_err(PyValueError::new_err)?;
+        models_min_tier,
+    };
+    let answer = rev_answer(repo_path, base, &kw).map_err(PyValueError::new_err)?;
     match answer {
         Answer::Dict(review) => to_py(py, serde_json::to_string(&review)),
         Answer::Markdown(text) => Ok(text.into_pyobject(py)?.into_any().unbind()),
@@ -248,7 +291,7 @@ mod tests {
     fn rev_helper_returns_dict_or_markdown() {
         let (_scratch, top) = violating("formats");
         let repo = top.to_str().expect("utf-8");
-        let Ok(Answer::Dict(r)) = rev_answer(repo, "HEAD", "dict", 20, 4, 50, 50) else {
+        let Ok(Answer::Dict(r)) = rev_answer(repo, "HEAD", &Kw::default()) else {
             panic!("format=dict is the review");
         };
         let v: serde_json::Value =
@@ -268,6 +311,7 @@ mod tests {
             "edges",
             "new_violations",
             "resolved_violations",
+            "model_breaks",
             "check_errors",
             "blocking",
         ];
@@ -278,7 +322,11 @@ mod tests {
             (Some("HEAD"), Some(true))
         );
 
-        let Ok(Answer::Markdown(text)) = rev_answer(repo, "HEAD", "markdown", 20, 4, 50, 50) else {
+        let markdown = Kw {
+            format: "markdown",
+            ..Kw::default()
+        };
+        let Ok(Answer::Markdown(text)) = rev_answer(repo, "HEAD", &markdown) else {
             panic!("format=markdown is the report");
         };
         assert!(
@@ -287,7 +335,12 @@ mod tests {
         );
         assert_eq!(text, render_markdown(&r, &MarkdownOptions::default()));
 
-        let Ok(Answer::Markdown(cut)) = rev_answer(repo, "HEAD", "markdown", 1, 4, 50, 50) else {
+        let one_row = Kw {
+            format: "markdown",
+            markdown_rows: 1,
+            ..Kw::default()
+        };
+        let Ok(Answer::Markdown(cut)) = rev_answer(repo, "HEAD", &one_row) else {
             panic!("format=markdown is the report");
         };
         assert!(
@@ -295,7 +348,12 @@ mod tests {
             "markdown_rows reaches the renderer:\n{cut}"
         );
 
-        let Ok(Answer::Dict(capped)) = rev_answer(repo, "HEAD", "dict", 20, 4, 0, 0) else {
+        let no_rows = Kw {
+            max_tests: 0,
+            max_impact: 0,
+            ..Kw::default()
+        };
+        let Ok(Answer::Dict(capped)) = rev_answer(repo, "HEAD", &no_rows) else {
             panic!("format=dict is the review");
         };
         assert!(capped.tests.tests.is_empty() && capped.impact.results.is_empty());
@@ -304,17 +362,40 @@ mod tests {
             (r.counts.tests, r.counts.impact)
         );
 
-        let err = rev_answer(repo, "HEAD", "xml", 20, 4, 50, 50).expect_err("xml is no format");
+        let xml = Kw {
+            format: "xml",
+            ..Kw::default()
+        };
+        let err = rev_answer(repo, "HEAD", &xml).expect_err("xml is no format");
         assert_eq!(err, "unknown format `xml`: expected one of dict, markdown");
-        let err = rev_answer(repo, "no-such-rev", "dict", 20, 4, 50, 50).expect_err("unknown rev");
+        let err = rev_answer(repo, "no-such-rev", &Kw::default()).expect_err("unknown rev");
         assert!(err.contains("no-such-rev"), "{err}");
+        let x = Kw {
+            models_min_tier: "x",
+            ..Kw::default()
+        };
+        let err = rev_answer("/nonexistent/dt1p", "HEAD", &x).expect_err("bad tier");
+        assert_eq!(
+            err, "unknown models min tier `x`: expected one of fact, derived",
+            "refused before any build: the path is never read"
+        );
     }
 
     #[test]
     fn engine_args_carry_the_keywords() {
-        let a = engine_args(2, 7, 9);
-        assert_eq!((a.blast.depth, a.max_tests, a.max_impact), (2, 7, 9));
+        let a = engine_args(2, 7, 9, "derived").expect("a tier");
+        assert_eq!(
+            (a.blast.depth, a.max_tests, a.max_impact, a.models_min_tier),
+            (2, 7, 9, "derived")
+        );
         let d = ReviewArgs::default();
         assert_eq!(d.blast.depth, 4, "the signature's depth default");
+        assert_eq!(d.models_min_tier, "fact", "the signature's models_min_tier default");
+        let k = Kw::default();
+        assert_eq!(
+            (k.format, k.markdown_rows, k.depth, k.max_tests, k.max_impact, k.models_min_tier),
+            ("dict", 20, 4, 50, 50, "fact"),
+            "Kw::default is the pyo3 signature's"
+        );
     }
 }

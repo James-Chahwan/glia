@@ -14,6 +14,13 @@
 //! stderr line is the fired_on marker; asserting it here makes it a tested
 //! contract. Grep it from a run of the binary:
 //! `glia contract-breaks <repo> 2>&1 >/dev/null | grep '^\[contract-breaks\] base='`.
+//!
+//! DT.1p: the inferred client <-> server model breaks over the engine's
+//! `model-breaks-shop` fixture (copied into the scratch repo: v1, the
+//! one-line json tag rename, v2): one advisory row by default (exit 0, the
+//! `- models:` line, the `## models` section, the `[model-breaks] base=..`
+//! line after `[contract-breaks] base=`), blocking under `--models-min-tier
+//! derived` (exit 1); `heuristic` is a clap usage error (exit 2).
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -106,6 +113,30 @@ impl Scratch {
         s
     }
 
+    /// The engine's `model-breaks-shop` fixture committed as `v1`, then its
+    /// first `json:"customerName"` tag (Order.CustomerName) renamed to
+    /// `customer_name` and committed as `v2` (DT.1p).
+    fn model_shop(name: &str) -> Self {
+        let s = Scratch::git_repo(name);
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine/tests/data/model-breaks-shop");
+        let mut files = Vec::new();
+        files_under(&fixture, &fixture, &mut files);
+        for rel in &files {
+            let text = std::fs::read_to_string(fixture.join(rel))
+                .unwrap_or_else(|e| panic!("read fixture {rel}: {e}"));
+            s.write(rel, &text);
+        }
+        s.commit("v1");
+        let order = s.top.join("api/internal/models/order.go");
+        let text = std::fs::read_to_string(&order).expect("order.go");
+        assert!(text.contains("`json:\"customerName\"`"), "the fixture's tag");
+        std::fs::write(&order, text.replacen("`json:\"customerName\"`", "`json:\"customer_name\"`", 1))
+            .expect("rename");
+        s.commit("v2");
+        s
+    }
+
     fn path(&self) -> &str {
         self.top.to_str().expect("utf-8 scratch path")
     }
@@ -175,6 +206,23 @@ impl Scratch {
         let mut args = vec!["contract-breaks", self.path()];
         args.extend_from_slice(extra);
         self.glia(&args)
+    }
+}
+
+/// Every file under `at`, relative to `dir`, sorted.
+fn files_under(dir: &std::path::Path, at: &std::path::Path, out: &mut Vec<String>) {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(at)
+        .unwrap_or_else(|e| panic!("read {}: {e}", at.display()))
+        .map(|e| e.expect("fixture dir entry").path())
+        .collect();
+    entries.sort();
+    for p in entries {
+        if p.is_dir() {
+            files_under(dir, &p, out);
+        } else {
+            let rel = p.strip_prefix(dir).expect("under the fixture");
+            out.push(rel.to_str().expect("utf-8 fixture path").to_string());
+        }
     }
 }
 
@@ -283,9 +331,13 @@ fn json_is_the_engine_answer_and_keeps_the_exit_code() {
     let v = json(&o);
     let mut keys: Vec<&str> = v.as_object().expect("an object").keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["absence", "base", "breaking", "orphaned_clients", "schemas"], "{v}");
+    assert_eq!(
+        keys,
+        ["absence", "advisory", "base", "breaking", "models", "orphaned_clients", "schemas"],
+        "{v}"
+    );
     let text = stdout(&o);
-    let order: Vec<usize> = ["\"base\":", "\"schemas\":", "\"orphaned_clients\":", "\"breaking\":", "\"absence\":"]
+    let order: Vec<usize> = ["\"base\":", "\"schemas\":", "\"models\":", "\"orphaned_clients\":", "\"breaking\":", "\"advisory\":", "\"absence\":"]
         .iter()
         .map(|k| text.rfind(k).unwrap_or(usize::MAX))
         .collect();
@@ -462,4 +514,67 @@ fn no_overlay_is_refused() {
     let o = s.glia(&["--no-overlay", "contract-breaks", s.path()]);
     assert_eq!(o.status.code(), Some(2), "{}", show(&o));
     assert!(stderr(&o).contains("--no-overlay"), "{}", show(&o));
+}
+
+/// DT.1p: the v2 json tag rename is one inferred-model row. By default it is
+/// advisory: exit 0, `breaking` 0, the `- models:` line, the `## models`
+/// row, and the model marker after the unchanged schema marker; under
+/// `--models-min-tier derived` it blocks (exit 1).
+#[test]
+fn inferred_model_break_is_advisory() {
+    let s = Scratch::model_shop("model-breaks");
+    let o = s.breaks(&["--base", "HEAD~1"]);
+    assert_eq!(o.status.code(), Some(0), "an advisory row passes the gate\n{}", show(&o));
+    let out = stdout(&o);
+    for want in [
+        "- breaking: 0 (0 contract changes, 0 orphaned clients) | unknown: 0 | compatible: 0\n- models: 1 breaking (0 blocking, 1 advisory) | 0 compatible | min tier fact\n",
+        "## models\n\n_Inferred client <-> server models, judged against what the client reads or sends; a breaking row fails the gate only at or above `--models-min-tier` (fact)._\n",
+    ] {
+        assert!(out.contains(want), "missing {want:?}\n{}", show(&o));
+    }
+    assert_eq!(
+        section_rows(&out, "models"),
+        ["| http_model | `GET /api/orders/:id` +2 | breaking | advisory | derived | server | **json_name_changed** | `customerName` | customerName | customer_name | `web::src::app::core::models::order::Order` web/src/app/core/models/order.ts:11 | `api::internal::models::order::Order` api/internal/models/order.go:22 |"],
+        "{}",
+        show(&o)
+    );
+    assert!(!out.contains("no contract change"), "a model row is a change\n{}", show(&o));
+    let err = stderr(&o);
+    let lines: Vec<&str> = err
+        .lines()
+        .filter(|l| l.starts_with("[contract-breaks] ") || l.starts_with("[model-breaks] ") || l.starts_with("[absence] "))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "[contract-breaks] base=HEAD~1 pairs=0 breaking=0 compatible=0 unknown=0 removed=0 added=0 orphaned_clients=0",
+            "[model-breaks] base=HEAD~1 min_tier=fact exchanges=7 http=5 graphql=2 rows=1 breaking=1 blocking=0 advisory=1 compatible=0 new_pairings=0 lost=0 unjudged=0",
+        ],
+        "{}",
+        show(&o)
+    );
+
+    let o = s.breaks(&["--base", "HEAD~1", "--json"]);
+    assert_eq!(o.status.code(), Some(0), "{}", show(&o));
+    let v = json(&o);
+    assert_eq!(
+        (v["breaking"].as_u64(), v["advisory"].as_u64(), v["models"][0]["pairing"].as_str(), v["models"][0]["changes"][0]["rule"].as_str()),
+        (Some(0), Some(1), Some("http_model"), Some("json_name_changed")),
+        "{v}"
+    );
+
+    let o = s.breaks(&["--base", "HEAD~1", "--models-min-tier", "derived"]);
+    assert_eq!(o.status.code(), Some(1), "derived: the break fails the gate\n{}", show(&o));
+    let out = stdout(&o);
+    assert!(
+        out.contains("- breaking: 1 (0 contract changes, 0 orphaned clients, 1 blocking model break) | unknown: 0 | compatible: 0\n- models: 1 breaking (1 blocking, 0 advisory) | 0 compatible | min tier derived\n"),
+        "{}",
+        show(&o)
+    );
+    assert!(section_rows(&out, "models")[0].contains(" | breaking | blocking | derived | "), "{}", show(&o));
+
+    let o = s.breaks(&["--base", "HEAD~1", "--models-min-tier", "heuristic"]);
+    assert_eq!(o.status.code(), Some(2), "clap refuses the tier\n{}", show(&o));
+    assert!(stderr(&o).contains("fact, derived"), "{}", show(&o));
+    assert!(markers(&o).is_empty(), "nothing is built\n{}", show(&o));
 }

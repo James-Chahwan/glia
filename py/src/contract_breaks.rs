@@ -3,56 +3,73 @@
 //! pyo3 twin of `glia contract-breaks`.
 //!
 //! The module function `contract_breaks_vs_rev(repo_path, base="HEAD",
-//! avro="backward", breaking_only=False, with_repos=None)` builds the repo's
-//! working tree and the rev itself (LE.1b's graph delta), so it takes a path;
-//! `with_repos` (CC.8c) lists client repos built beside the provider on both
-//! sides (`contract_breaks_vs_rev_with`), so a client in another repo that
-//! lost its provider is an orphan too. It returns the
-//! engine's `ContractBreaks` as a native dict (LD.2): `{base, schemas,
-//! orphaned_clients, breaking, absence}`. An `avro` mode outside the engine's
-//! `AVRO_MODES` or an engine `Err` (not a git work tree, an unknown rev, a
-//! failed build) raises `ValueError`.
+//! avro="backward", breaking_only=False, with_repos=None,
+//! models_min_tier="fact")` builds the repo's working tree and the rev
+//! itself (LE.1b's graph delta), so it takes a path; `with_repos` (CC.8c)
+//! lists client repos built beside the provider on both sides
+//! (`contract_breaks_vs_rev_with`), so a client in another repo that lost
+//! its provider is an orphan too, and its typed calls are judged as model
+//! exchanges (DT.1p). It returns the engine's `ContractBreaks` as a native
+//! dict (LD.2): `{base, schemas, models, orphaned_clients, breaking,
+//! advisory, absence}`. An `avro` mode outside the engine's `AVRO_MODES`, a
+//! `models_min_tier` outside its `MODEL_MIN_TIERS` (both checked before any
+//! build) or an engine `Err` (not a git work tree, an unknown rev, a failed
+//! build) raises `ValueError`.
 //!
 //! Transport only: the pairing, the evolution rules, the orphaned clients,
-//! the location of every row and the `[contract-breaks] base=..` marker live
-//! in the engine. The helpers the pyo3 entry point delegates to are pyo3-free,
+//! the inferred-model judge, the location of every row and the
+//! `[contract-breaks] base=..` / `[model-breaks] base=..` markers live in the
+//! engine. The helpers the pyo3 entry point delegates to are pyo3-free,
 //! so `cargo test -p glia-py` covers them (see the crate doc).
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use glia_engine::contract_breaks::{
-    AVRO_MODES, ContractBreakArgs, ContractBreaks, contract_breaks_vs_rev_with,
+    AVRO_MODES, ContractBreakArgs, ContractBreaks, MODEL_MIN_TIERS, contract_breaks_vs_rev_with,
 };
 
 use crate::convert::to_py;
 use crate::registry::ModuleFns;
 
 /// The engine's arguments from the keyword arguments; `Err` names a mode
-/// outside [`AVRO_MODES`] in the engine's own words.
-fn engine_args(avro: &str, breaking_only: bool) -> Result<ContractBreakArgs, String> {
+/// outside [`AVRO_MODES`] or a tier outside [`MODEL_MIN_TIERS`] in the
+/// engine's own words.
+fn engine_args(
+    avro: &str,
+    breaking_only: bool,
+    models_min_tier: &str,
+) -> Result<ContractBreakArgs, String> {
     let Some(mode) = AVRO_MODES.iter().copied().find(|m| *m == avro) else {
         return Err(format!(
             "unknown avro mode `{avro}`: expected one of {}",
             AVRO_MODES.join(", ")
         ));
     };
+    let Some(tier) = MODEL_MIN_TIERS.iter().copied().find(|t| *t == models_min_tier) else {
+        return Err(format!(
+            "unknown models min tier `{models_min_tier}`: expected one of {}",
+            MODEL_MIN_TIERS.join(", ")
+        ));
+    };
     let mut args = ContractBreakArgs::default();
     args.avro_mode = mode;
     args.breaking_only = breaking_only;
+    args.models_min_tier = tier;
     Ok(args)
 }
 
-/// The body of [`contract_breaks_vs_rev_py`], minus pyo3. The mode is checked
-/// before anything is built; no `with_repos` is none.
+/// The body of [`contract_breaks_vs_rev_py`], minus pyo3. The mode and the
+/// tier are checked before anything is built; no `with_repos` is none.
 fn rev_answer(
     repo_path: &str,
     base: &str,
     avro: &str,
     breaking_only: bool,
     with_repos: Option<&[String]>,
+    models_min_tier: &str,
 ) -> Result<ContractBreaks, String> {
-    let args = engine_args(avro, breaking_only)?;
+    let args = engine_args(avro, breaking_only, models_min_tier)?;
     contract_breaks_vs_rev_with(repo_path, base, with_repos.unwrap_or_default(), &args)
 }
 
@@ -64,7 +81,8 @@ fn rev_answer(
 /// (`"backward"`: the new schema reads what the old one wrote, `"forward"`:
 /// the old reads the new, `"full"`: both).
 ///
-/// Returns a dict `{base, schemas, orphaned_clients, breaking, absence}`:
+/// Returns a dict `{base, schemas, models, orphaned_clients, breaking,
+/// advisory, absence}`:
 /// `schemas` rows `{kind, key, format, before, after, status, change, tier,
 /// note, changes}` (`status` `breaking` | `unknown` | `compatible`; `before`
 /// / `after` the declaration at the rev / in the working tree, each `{repo_id,
@@ -72,22 +90,36 @@ fn rev_answer(
 /// producer, consumer, rule, breaking}` per declared difference, `producer`
 /// the rev's side); `orphaned_clients` rows `{client_qname, file, line,
 /// category, target_qname, reason, tier}` for every client whose call lost
-/// its provider; `breaking` the breaking schema rows plus the orphaned
-/// clients (a CI gate fails when it is above 0); `absence` a dict saying why
-/// when nothing is listed, else `None`. `breaking_only=True` lists only the
-/// breaking schema rows; `breaking` and the orphans are the same either way.
+/// its provider; `models` (DT.1p) the inferred client <-> server model rows
+/// `{pairing, direction, client, server, exchanges, status, change, changed,
+/// tier, blocking, note, changes}` (`pairing` `http_model` |
+/// `graphql_selection`; `exchanges` `{key, tier, client_site, server_site}`;
+/// `changes` `{field, change, side, rule, breaking, before, after, client,
+/// server}`, each site `{file, line, at_base}`); `breaking` the breaking
+/// schema rows plus the orphaned clients plus the BLOCKING model rows (a CI
+/// gate fails when it is above 0); `advisory` the breaking model rows below
+/// `models_min_tier`; `absence` a dict saying why when nothing is listed,
+/// else `None`. `breaking_only=True` lists only the breaking schema and
+/// model rows; `breaking`, `advisory` and the orphans are the same either
+/// way. `models_min_tier` (`"fact"`, the default, or `"derived"`; check's
+/// vocabulary) is the weakest pairing tier at which a breaking model row
+/// blocks: every pairing glia 0.5.2 infers is derived, so by default a model
+/// row is advisory; a heuristic pairing never blocks.
 /// `with_repos` (a list of paths, default `None`) adds client repos: both
 /// sides are then built as multi-repo merges, the provider at the rev and at
 /// its working tree, each beside the same clients at their own trees, so a
-/// client in another repo that lost its provider is in `orphaned_clients`.
-/// Every client is built twice, once per side.
+/// client in another repo that lost its provider is in `orphaned_clients`,
+/// and its typed calls are judged in `models`. Every client is built twice,
+/// once per side.
 /// Lines are 1-based. Builds both sides itself and saves the parse-cache
 /// sidecar (`<repo>/.glia/graph/parse_cache.bin`, self-gitignored) of the
 /// repo and of every client as `generate(incremental=True)` does, never a
-/// `.gmap` layout. Raises ValueError on a bad `avro` mode, a client that is
-/// not a directory, or a git or build failure.
+/// `.gmap` layout. Raises ValueError on a bad `avro` mode or
+/// `models_min_tier` (`unknown models min tier `x`: expected one of fact,
+/// derived`, before any build), a client that is not a directory, or a git
+/// or build failure.
 #[pyfunction]
-#[pyo3(name = "contract_breaks_vs_rev", signature = (repo_path, base="HEAD", avro="backward", breaking_only=false, with_repos=None))]
+#[pyo3(name = "contract_breaks_vs_rev", signature = (repo_path, base="HEAD", avro="backward", breaking_only=false, with_repos=None, models_min_tier="fact"))]
 fn contract_breaks_vs_rev_py(
     py: Python<'_>,
     repo_path: &str,
@@ -95,9 +127,17 @@ fn contract_breaks_vs_rev_py(
     avro: &str,
     breaking_only: bool,
     with_repos: Option<Vec<String>>,
+    models_min_tier: &str,
 ) -> PyResult<Py<PyAny>> {
-    let answer = rev_answer(repo_path, base, avro, breaking_only, with_repos.as_deref())
-        .map_err(PyValueError::new_err)?;
+    let answer = rev_answer(
+        repo_path,
+        base,
+        avro,
+        breaking_only,
+        with_repos.as_deref(),
+        models_min_tier,
+    )
+    .map_err(PyValueError::new_err)?;
     to_py(py, serde_json::to_string(&answer))
 }
 
@@ -155,12 +195,19 @@ mod tests {
     #[test]
     fn modes_map_and_a_bad_one_is_refused_before_any_build() {
         for mode in AVRO_MODES {
-            let a = engine_args(mode, false).expect("an engine mode");
+            let a = engine_args(mode, false, "fact").expect("an engine mode");
             assert_eq!(a.avro_mode, *mode);
         }
-        let err = rev_answer("/nonexistent/cc8b", "HEAD", "x", false, None).expect_err("bad mode");
+        for tier in MODEL_MIN_TIERS {
+            let a = engine_args("backward", false, tier).expect("an engine tier");
+            assert_eq!(a.models_min_tier, *tier);
+        }
+        let err = rev_answer("/nonexistent/dt1p", "HEAD", "backward", false, None, "heuristic")
+            .expect_err("bad tier");
+        assert_eq!(err, "unknown models min tier `heuristic`: expected one of fact, derived");
+        let err = rev_answer("/nonexistent/cc8b", "HEAD", "x", false, None, "fact").expect_err("bad mode");
         assert_eq!(err, "unknown avro mode `x`: expected one of backward, forward, full");
-        let err = rev_answer("/nonexistent/cc8b", "HEAD", "backward", false, None)
+        let err = rev_answer("/nonexistent/cc8b", "HEAD", "backward", false, None, "fact")
             .expect_err("not a directory");
         assert!(!err.contains("avro"), "the mode passed; the engine refused the path: {err}");
     }
@@ -185,9 +232,9 @@ mod tests {
         std::fs::write(top.join("openapi.yaml"), ORDERS_V1.replace(TOTAL, "")).expect("write v2");
 
         let repo = top.to_str().expect("utf-8");
-        let a = rev_answer(repo, "HEAD", "backward", false, None).expect("answer");
+        let a = rev_answer(repo, "HEAD", "backward", false, None, "fact").expect("answer");
         let text = serde_json::to_string(&a).expect("serialises");
-        let order: Vec<usize> = ["\"base\":", "\"schemas\":", "\"orphaned_clients\":", "\"breaking\":", "\"absence\":"]
+        let order: Vec<usize> = ["\"base\":", "\"schemas\":", "\"models\":", "\"orphaned_clients\":", "\"breaking\":", "\"advisory\":", "\"absence\":"]
             .iter()
             .map(|k| text.rfind(k).unwrap_or(usize::MAX))
             .collect();
@@ -197,6 +244,7 @@ mod tests {
         let v = value(&a);
         assert_eq!(v["base"], "HEAD");
         assert_eq!(v["breaking"], 1, "{v}");
+        assert_eq!((v["advisory"].as_u64(), v["models"].as_array().map(Vec::len)), (Some(0), Some(0)), "{v}");
         assert!(v["absence"].is_null(), "{v}");
         let c = &v["schemas"][0]["changes"][0];
         assert_eq!(
@@ -210,9 +258,9 @@ mod tests {
             format!("{ORDERS_V1}                  currency:\n                    type: string\n"),
         )
         .expect("write v3");
-        let all = value(&rev_answer(repo, "HEAD", "backward", false, None).expect("compatible"));
+        let all = value(&rev_answer(repo, "HEAD", "backward", false, None, "fact").expect("compatible"));
         assert_eq!((all["breaking"].as_u64(), all["schemas"][0]["status"].as_str()), (Some(0), Some("compatible")));
-        let only = value(&rev_answer(repo, "HEAD", "full", true, None).expect("breaking only"));
+        let only = value(&rev_answer(repo, "HEAD", "full", true, None, "fact").expect("breaking only"));
         assert_eq!(only["schemas"], serde_json::json!([]), "{only}");
         assert_eq!(only["absence"]["reason"], "no_match", "{only}");
     }
@@ -251,7 +299,7 @@ mod tests {
 
         let repo = top.to_str().expect("utf-8");
         let clients = [root.join("client").to_str().expect("utf-8").to_string()];
-        let v = value(&rev_answer(repo, "HEAD", "backward", false, Some(&clients)).expect("answer"));
+        let v = value(&rev_answer(repo, "HEAD", "backward", false, Some(&clients), "fact").expect("answer"));
         assert_eq!(v["breaking"], 1, "{v}");
         let o = &v["orphaned_clients"][0];
         assert_eq!(
@@ -259,12 +307,12 @@ mod tests {
             (Some("endpoint:GET:/orders"), Some("HTTP_CALLS"), Some("target_removed"), Some("web/client.py")),
             "{v}"
         );
-        let alone = value(&rev_answer(repo, "HEAD", "backward", false, None).expect("alone"));
+        let alone = value(&rev_answer(repo, "HEAD", "backward", false, None, "fact").expect("alone"));
         assert_eq!(alone["orphaned_clients"], serde_json::json!([]), "{alone}");
-        let none = value(&rev_answer(repo, "HEAD", "backward", false, Some(&[])).expect("empty list"));
+        let none = value(&rev_answer(repo, "HEAD", "backward", false, Some(&[]), "fact").expect("empty list"));
         assert_eq!(none["orphaned_clients"], serde_json::json!([]), "an empty list is no client: {none}");
         let missing = ["/nonexistent/cc8c-client".to_string()];
-        let err = rev_answer(repo, "HEAD", "backward", false, Some(&missing)).expect_err("no such client");
+        let err = rev_answer(repo, "HEAD", "backward", false, Some(&missing), "fact").expect_err("no such client");
         assert_eq!(err, "not a directory: /nonexistent/cc8c-client");
     }
 }

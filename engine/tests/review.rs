@@ -15,8 +15,16 @@
 //! `markdown_*` tests pin the whole document of the new-violation change,
 //! the cell escaping, the per-table row cap with its `_(shown of total)_`
 //! footer, the resolved-only and empty reviews, and determinism.
+//!
+//! DT.1p — the inferred client <-> server model breaks of the change
+//! (`model_breaks`, over the `model-breaks-shop` fixture, [`model_shop`]):
+//! advisory by default, blocking under `models_min_tier` `derived`, in the
+//! headline and their own markdown sections; a rule that checks nothing is
+//! listed (DT.7c), not a rule error; a rule's coverage caveats print once
+//! per section (DT.8a's fold).
 
 mod git_fixture;
+mod model_shop;
 
 use std::collections::BTreeMap;
 
@@ -25,7 +33,7 @@ use glia_engine::check::Violation;
 use glia_engine::delta::graph_delta_vs_rev;
 use glia_engine::identity::Collapse;
 use glia_engine::review::{
-    MarkdownOptions, Review, ReviewArgs, render_markdown, review, review_vs_rev,
+    MarkdownOptions, Review, ReviewArgs, caveat_fold, render_markdown, review, review_vs_rev,
 };
 
 const MANIFESTS: [(&str, &str); 2] = [
@@ -1163,4 +1171,185 @@ fn impact_identity_names_the_repo_by_its_label() {
         "{:#?}",
         own.impact
     );
+}
+
+// ============================================================================
+// DT.1p: inferred-model breaks, rules that check nothing, the caveat fold
+// ============================================================================
+
+fn review_at(repo: &GitRepo, base: &str, tier: &'static str) -> Review {
+    let mut args = ReviewArgs::default();
+    args.models_min_tier = tier;
+    review_vs_rev(repo.path(), base, &args).expect("review")
+}
+
+/// The fixture's one model-break line, in both model sections' table.
+const MODEL_ROW: &str = "| http_model | `GET /api/orders/:id` (+2) | derived | json_name_changed | `customerName` | customerName | customer_name | `web::src::app::core::models::order::Order` web/src/app/core/models/order.ts:11 | `api::internal::models::order::Order` api/internal/models/order.go:22 |";
+
+/// (1) The v2 json tag rename is one breaking model row, advisory under the
+/// default `fact` gate: listed and counted, the headline says so, and the
+/// review does not block.
+#[test]
+fn model_break_is_advisory() {
+    let repo = model_shop::renamed();
+    let r = review_at(&repo, "HEAD~1", ReviewArgs::default().models_min_tier);
+    assert_eq!(ReviewArgs::default().models_min_tier, "fact");
+    assert_eq!(r.model_breaks.len(), 1, "{:#?}", r.model_breaks);
+    let m = &r.model_breaks[0];
+    assert_eq!(
+        (m.pairing, m.status, m.tier, m.blocking, m.changes[0].rule),
+        ("http_model", "breaking", "derived", false, "json_name_changed")
+    );
+    assert_eq!(r.counts.model_breaks, 1);
+    assert!(!r.blocking, "an advisory model break does not block");
+    assert!(r.new_violations.is_empty() && r.check_errors.is_empty(), "{r:#?}");
+    let text = md(&r);
+    let headline = text.lines().nth(1).expect("a headline");
+    assert!(
+        headline.starts_with("**0 new violation(s)** | 0 resolved |")
+            && headline.ends_with(" | 1 model break(s) (1 advisory)"),
+        "{headline}"
+    );
+    let want = format!(
+        "### Model breaks (advisory: an inferred client <-> server pairing below the models min tier)\n\n| pairing | via | tier | rule | field | before | after | client | server |\n|---|---|---|---|---|---|---|---|---|\n{MODEL_ROW}\n"
+    );
+    assert!(text.contains(&want), "missing {want:?} in:\n{text}");
+    assert!(!text.contains("### Model breaks (blocking)"), "{text}");
+    let json: serde_json::Value = serde_json::from_str(&json(&r)).expect("JSON");
+    assert_eq!(json["model_breaks"][0]["pairing"], "http_model");
+    assert_eq!(json["counts"]["model_breaks"], 1);
+    assert!(json.get("unanchored").is_none(), "no rule checks nothing: {json}");
+}
+
+/// (2) `models_min_tier` `derived` makes the derived pairing's break block:
+/// the review blocks, the row moves to `### Model breaks (blocking)`, and
+/// the headline has no advisory count.
+#[test]
+fn models_min_tier_derived_blocks() {
+    let repo = model_shop::renamed();
+    let r = review_at(&repo, "HEAD~1", "derived");
+    assert!(r.blocking, "{:#?}", r.model_breaks);
+    assert!(r.model_breaks[0].blocking);
+    let text = md(&r);
+    assert!(
+        text.lines().nth(1).is_some_and(|h| h.ends_with(" | 1 model break(s)")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("### Model breaks (blocking)\n\n| pairing | via | tier | rule | field | before | after | client | server |\n|---|---|---|---|---|---|---|---|---|\n{MODEL_ROW}\n")),
+        "{text}"
+    );
+    assert!(!text.contains("### Model breaks (advisory"), "{text}");
+}
+
+/// (3) A tier outside `fact` / `derived` is refused before anything is built.
+#[test]
+fn an_unknown_models_min_tier_is_refused_before_building() {
+    let mut args = ReviewArgs::default();
+    args.models_min_tier = "heuristic";
+    let err = review_vs_rev("/nonexistent/dt1p", "HEAD", &args).expect_err("bad tier");
+    assert_eq!(err, "unknown models min tier `heuristic`: expected one of fact, derived");
+}
+
+/// (4) A change with no model exchange: no model row, the pre-DT.1p report.
+#[test]
+fn no_model_exchange_keeps_the_report() {
+    let repo = committed(WEB_APP_CLEAN);
+    repo.write("web/app.py", WEB_APP);
+    let r = run(&repo);
+    assert!(r.model_breaks.is_empty());
+    assert_eq!(r.counts.model_breaks, 0);
+    assert_eq!(md(&r), GOLDEN_NEW, "no model break: no headline suffix, no section");
+}
+
+/// A version-1 forbid_edge whose `from` scope (`webs`) holds no located node;
+/// it hangs on the root PROJECT (DT.7a), so the graph holds it.
+const WEBS_DIRECT: &str = r#"version = 1
+
+[[constraint]]
+id = "webs-direct"
+kind = "forbid_edge"
+from = "webs"
+to = "store"
+"#;
+
+/// (5) DT.7c in review: a rule whose scope no located node sits in checks
+/// nothing. It is listed with its reason and fix under `### Rules that check
+/// nothing`, never a rule error, never blocking; the rest of the review is
+/// unchanged by it.
+#[test]
+fn a_rule_that_checks_nothing_is_listed_not_an_error() {
+    let repo = committed_rules(WEBS_DIRECT, &[]);
+    repo.write("web/app.py", SHOW_AND_F);
+    let r = run(&repo);
+    assert!(r.check_errors.is_empty(), "not a rule error: {:#?}", r.check_errors);
+    assert_eq!(
+        r.unanchored
+            .iter()
+            .map(|u| (u.rule_id.as_str(), u.status, u.blocking))
+            .collect::<Vec<_>>(),
+        [("webs-direct", "empty_scope", false)],
+        "{:#?}",
+        r.unanchored
+    );
+    let u = &r.unanchored[0];
+    assert!(u.reason.contains("`webs`") && !u.fix.is_empty(), "{u:#?}");
+    assert!(!r.blocking && r.new_violations.is_empty(), "{r:#?}");
+    let text = md(&r);
+    let want = format!(
+        "### Rules that check nothing\n\n_declared, but nothing is evaluated for them; never a blocking violation or a rule error_\n\n- `webs-direct` (constraint, .glia/overlay.toml:3): {}\n  fix: ",
+        u.reason.replace('`', "\\`")
+    );
+    assert!(text.contains(&want), "missing {want:?} in:\n{text}");
+    assert!(!text.contains("### Check errors"), "{text}");
+    let json: serde_json::Value = serde_json::from_str(&json(&r)).expect("JSON");
+    assert_eq!(json["unanchored"][0]["rule_id"], "webs-direct", "{json}");
+}
+
+/// [`HANDLERS`] plus two uncalled handlers, `also_unused` (line 12) and
+/// `third_unused` (line 16).
+const HANDLERS_TWO_MORE: &str = "from store.db import load\n\n\ndef get_order(o):\n    return load(o)\n\n\ndef unused():\n    return 1\n\n\ndef also_unused():\n    return 2\n\n\ndef third_unused():\n    return 3\n";
+
+/// (6) DT.8a's fold in review: the change adds two uncalled handlers, two new
+/// violations of the negation-only `api-called` rule, each carrying the same
+/// coverage caveats. The markdown prints them once, under the rule's first
+/// violation; the JSON keeps each violation's own list.
+#[test]
+fn a_rules_caveats_print_once_per_section() {
+    let repo = committed_rules(API_CALLED, &[]);
+    repo.write("services/api/handlers.py", HANDLERS_TWO_MORE);
+    let r = run(&repo);
+    assert_eq!(
+        classed(&r.new_violations)
+            .iter()
+            .map(|c| c.2.clone())
+            .collect::<Vec<_>>(),
+        [
+            vec!["services::api::handlers::also_unused"],
+            vec!["services::api::handlers::third_unused"]
+        ],
+        "{:#?}",
+        r.new_violations
+    );
+    let per_row = r.new_violations[0].caveats.len();
+    assert!(per_row > 0 && r.new_violations[1].caveats.len() == per_row, "{:#?}", r.new_violations);
+    let text = md(&r);
+    let blocks: Vec<&str> = text.split("\n\n").filter(|b| b.starts_with("⚠ ")).collect();
+    assert_eq!(blocks.len(), 1, "one caveat paragraph for the rule:\n{text}");
+    assert_eq!(blocks[0].lines().count(), per_row.min(5), "{text}");
+    let second = text
+        .split("_subject: `services::api::handlers::third_unused`")
+        .nth(1)
+        .expect("the second violation");
+    assert!(!second.split("### ").next().unwrap_or("").contains("⚠ "), "{text}");
+    let fold = caveat_fold(&r);
+    assert_eq!(
+        (fold.rules, fold.lines, fold.folded),
+        (1, per_row.min(5), per_row.min(5)),
+        "{fold:?}"
+    );
+    let json: serde_json::Value = serde_json::from_str(&json(&r)).expect("JSON");
+    for v in json["new_violations"].as_array().expect("violations") {
+        assert_eq!(v["caveats"].as_array().map(Vec::len), Some(per_row), "{v}");
+    }
 }

@@ -12,7 +12,9 @@
 //! route or op, handler or resolver, endpoint or op, hit file), its client
 //! root (the client model, else the ENDPOINT / op), its server root (the
 //! server model, else the handler / the schema MESSAGE_TYPE), both sides
-//! flattened (`glia_graph::wire_fields` / `graphql_fields_all`), the static
+//! flattened (`glia_graph::wire_fields` / `graphql_fields_all`; a union
+//! client root as the member its server value meets,
+//! `ResolvedShape::judged_against`, DT.1p), the static
 //! breaking changes DT.1m / DT.1n found, and its sites (the ENDPOINT_HIT's
 //! file and 1-based line and the handler site's line; the op's and the root
 //! field's locations). Hits that share an ident keep the first by line. An
@@ -748,10 +750,14 @@ fn exchanges_of(rev: &Rev<'_>) -> Vec<Exchange> {
                         .iter()
                         .find(|s| Some(s.line) == p.server_line)
                 });
-            let (cf, sf) = (
-                client.map(wire_fields).unwrap_or_default(),
-                site.map(|s| wire_fields(&s.shape)).unwrap_or_default(),
-            );
+            // DT.1p: a union client root is flattened as the member the
+            // server value meets (`ResolvedShape::judged_against`).
+            let cf = match (client, site) {
+                (Some(c), Some(s)) => wire_fields(&c.judged_against(&s.shape)),
+                (Some(c), None) => wire_fields(c),
+                (None, _) => WireFields::default(),
+            };
+            let sf = site.map(|s| wire_fields(&s.shape)).unwrap_or_default();
             let judgeable = !p.notes.contains(&PAIR_AMBIGUOUS)
                 && client.is_some()
                 && site.is_some()

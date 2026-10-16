@@ -76,20 +76,33 @@
 //! is located in the after graph, the target named from the before graph.
 //!
 //! ORDER. Schema rows by (status: breaking < unknown < compatible, kind, key),
-//! orphans by (category, client, target); `breaking` is the breaking schema
-//! rows plus the orphans. An answer with no row carries an [`Absence`]
+//! `models` rows breaking first, then by (pairing, direction, client, server)
+//! (the child module's order), orphans by (category, client, target);
+//! `breaking` is the breaking schema rows plus the orphans plus the BLOCKING
+//! model rows, `advisory` the breaking model rows that do not block. An
+//! answer with no row in any of the three lists carries an [`Absence`]
 //! (reason `no_match`, FACT) saying why.
 //!
-//! INFERRED MODELS (DT.1o). The child module `models` judges the contracts
-//! nobody declared: every client <-> server model exchange the graph pairs
-//! (DT.1m's `http_model` call site against handler, DT.1n's
+//! INFERRED MODELS (DT.1o, DT.1p). The child module `models` judges the
+//! contracts nobody declared: every client <-> server model exchange the
+//! graph pairs (DT.1m's `http_model` call site against handler, DT.1n's
 //! `graphql_selection` operation against schema type), the server's change
 //! against what its client reads or sends and the client's against what is
 //! served, one row per (client model, server model) pair with located field
-//! lines. [`model_breaks`] answers from a [`RevDelta`]; rows break under the
-//! advisory gate (`check::is_blocking` at min tier `fact` by default, so a
-//! derived pairing never blocks unless the caller opts in with `derived`).
-//! See `contract_breaks/models.rs`.
+//! lines. [`model_breaks`] answers from a [`RevDelta`] alone; every
+//! contract-breaks answer folds the same rows into [`ContractBreaks::models`]
+//! (the single-repo pair and the `--with` merge alike, so a typed client in
+//! another repo is judged too). THE GATE: a breaking model row blocks when
+//! `check::is_blocking(tier, models_min_tier)` holds, check's vocabulary
+//! ([`MODEL_MIN_TIERS`]: `fact` | `derived`; a heuristic pairing never
+//! blocks). THE DEFAULT is `fact`, not check's `derived`: an inferred pairing
+//! is advisory (James's ruling 4, 2026-10-17), and every HTTP / GraphQL
+//! pairing glia 0.5.2 infers is derived, so by default a model row is listed
+//! and counted in `advisory`, never in `breaking`. THE FLAG is
+//! [`ContractBreakArgs::models_min_tier`] (`glia contract-breaks
+//! --models-min-tier`, pyo3 `models_min_tier=`); `derived` makes a derived
+//! pairing's break fail the gate. `breaking_only` drops the compatible model
+//! rows as it drops compatible schema rows. See `contract_breaks/models.rs`.
 //!
 //! Language-level public API (cargo-semver-checks parity) stays out: the
 //! graph has no visibility or signature cell.
@@ -97,10 +110,13 @@
 //! Fired-on marker, one per answer:
 //! `[contract-breaks] base=<rev> pairs=<P> breaking=<B> compatible=<C> unknown=<U> removed=<R> added=<A> orphaned_clients=<O>`
 //! (`pairs` counts every paired contract, identical ones included; the
-//! status counts are schema rows before `breaking_only` filters them), and,
-//! after it, once per [`contract_breaks_vs_rev_with`] call given at least one
-//! client: `[contract-breaks] clients=<given> built_twice=<distinct clients
-//! built on both sides>`.
+//! status counts are schema rows before `breaking_only` filters them, so the
+//! line is unchanged by the model rows), then the models' own
+//! `[model-breaks] base=<rev> min_tier=<t> exchanges=<E> .. unjudged=<U>`
+//! line (`contract_breaks/models.rs`), and, after both, once per
+//! [`contract_breaks_vs_rev_with`] call given at least one client:
+//! `[contract-breaks] clients=<given> built_twice=<distinct clients built on
+//! both sides>`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -126,6 +142,8 @@ pub use models::{
     MODEL_MIN_TIERS, ModelBreak, ModelBreakArgs, ModelBreaks, ModelChange, ModelExchange, ModelSite,
     model_breaks,
 };
+// DT.1p: review folds the same judge into its own answer.
+pub(crate) use models::model_breaks_of;
 
 /// The accepted [`ContractBreakArgs::avro_mode`] values, default first.
 pub const AVRO_MODES: &[&str] = &["backward", "forward", "full"];
@@ -141,9 +159,16 @@ pub struct ContractBreakArgs {
     /// refuses any other value; [`contract_breaks`] judges one as `full`, the
     /// strictest.
     pub avro_mode: &'static str,
-    /// List only `breaking` schema rows. [`ContractBreaks::breaking`] and the
-    /// orphaned clients are the same either way.
+    /// List only `breaking` schema and model rows. [`ContractBreaks::breaking`],
+    /// [`ContractBreaks::advisory`] and the orphaned clients are the same
+    /// either way.
     pub breaking_only: bool,
+    /// The weakest pairing tier at which a breaking inferred-model row blocks
+    /// ([`MODEL_MIN_TIERS`]; module docs INFERRED MODELS): `fact` (the
+    /// default: every pairing glia 0.5.2 infers is derived, so its rows are
+    /// advisory) or `derived`. [`contract_breaks_vs_rev`] refuses any other
+    /// value; [`contract_breaks`] judges one as `fact`.
+    pub models_min_tier: &'static str,
 }
 
 impl Default for ContractBreakArgs {
@@ -151,6 +176,7 @@ impl Default for ContractBreakArgs {
         ContractBreakArgs {
             avro_mode: "backward",
             breaking_only: false,
+            models_min_tier: MODEL_MIN_TIERS[0],
         }
     }
 }
@@ -212,10 +238,18 @@ pub struct ContractBreaks {
     /// The rev as given.
     pub base: String,
     pub schemas: Vec<SchemaChange>,
+    /// The inferred client <-> server model rows (module docs INFERRED
+    /// MODELS), the compatible ones left out under `breaking_only`.
+    pub models: Vec<ModelBreak>,
     pub orphaned_clients: Vec<OrphanedClient>,
-    /// Breaking schema rows plus orphaned clients.
+    /// Breaking schema rows plus orphaned clients plus blocking model rows:
+    /// the CI gate (above 0 fails it).
     pub breaking: usize,
-    /// `Some` exactly when `schemas` and `orphaned_clients` are both empty.
+    /// Breaking model rows below the models min tier: listed, never in
+    /// `breaking`.
+    pub advisory: usize,
+    /// `Some` exactly when `schemas`, `models` and `orphaned_clients` are all
+    /// empty.
     pub absence: Option<Absence>,
 }
 
@@ -232,7 +266,8 @@ const PRIMITIVE: &str = "contract_breaks";
 
 /// The contract breaks of the working tree at `repo_path` against git rev
 /// `base` (module docs). `Err` on an unknown [`ContractBreakArgs::avro_mode`]
-/// (checked before anything is built) and on `delta::graph_delta_vs_rev`'s
+/// or [`ContractBreakArgs::models_min_tier`] (checked before anything is
+/// built) and on `delta::graph_delta_vs_rev`'s
 /// errors: not a directory, not a git work tree, an unknown rev, a failed
 /// build. Like the delta, it saves the working tree's parse-cache sidecar,
 /// never a layout.
@@ -304,15 +339,29 @@ pub fn contract_breaks_vs_rev_with(
     Ok(answer)
 }
 
-/// `Err` naming a mode outside [`AVRO_MODES`].
+/// `Err` naming a mode outside [`AVRO_MODES`] or a models min tier outside
+/// [`MODEL_MIN_TIERS`].
 fn check_mode(args: &ContractBreakArgs) -> Result<(), String> {
-    if AVRO_MODES.contains(&args.avro_mode) {
+    if !AVRO_MODES.contains(&args.avro_mode) {
+        return Err(format!(
+            "unknown avro mode `{}`: expected one of {}",
+            args.avro_mode,
+            AVRO_MODES.join(", ")
+        ));
+    }
+    check_models_min_tier(args.models_min_tier)
+}
+
+/// `Err` naming a models min tier outside [`MODEL_MIN_TIERS`]: `unknown
+/// models min tier `<x>`: expected one of fact, derived`. The surfaces'
+/// one message (contract-breaks and review, CLI and pyo3).
+pub(crate) fn check_models_min_tier(tier: &str) -> Result<(), String> {
+    if MODEL_MIN_TIERS.contains(&tier) {
         return Ok(());
     }
     Err(format!(
-        "unknown avro mode `{}`: expected one of {}",
-        args.avro_mode,
-        AVRO_MODES.join(", ")
+        "unknown models min tier `{tier}`: expected one of {}",
+        MODEL_MIN_TIERS.join(", ")
     ))
 }
 
@@ -494,13 +543,25 @@ fn breaks_of(
         pairing.pairs.len(),
         orphans.len(),
     );
-    let breaking = n_breaking + orphans.len();
+    let judged = model_breaks_of(
+        &base,
+        before,
+        after_build,
+        delta,
+        &ModelBreakArgs {
+            min_tier: args.models_min_tier,
+        },
+    );
+    let mut models = judged.rows;
+    let breaking = n_breaking + orphans.len() + judged.blocking;
     let listed = rows.len();
+    let listed_models = models.len();
     if args.breaking_only {
         rows.retain(|r| r.status == "breaking");
+        models.retain(|r| r.status == "breaking");
     }
-    let absence = (rows.is_empty() && orphans.is_empty()).then(|| {
-        let note = if old.is_empty() && new.is_empty() && lost.is_empty() {
+    let absence = (rows.is_empty() && models.is_empty() && orphans.is_empty()).then(|| {
+        let mut note = if old.is_empty() && new.is_empty() && lost.is_empty() {
             format!(
                 "no contract (OpenAPI / AsyncAPI op or message type) in either graph and no client edge removed vs {base}"
             )
@@ -518,6 +579,23 @@ fn breaks_of(
                 absence::plural(pairing.pairs.len(), "pair", "pairs"),
             )
         };
+        // Byte-identical to the schema-only note when no model exchange
+        // was judged (the CC.8a-c pins).
+        if judged.judged > 0 {
+            let what = if listed_models > 0 {
+                format!(
+                    "none breaking ({listed_models} compatible {} left out by breaking_only)",
+                    absence::plural(listed_models, "row", "rows"),
+                )
+            } else {
+                "none changed what a client reads or sends".to_string()
+            };
+            note.push_str(&format!(
+                "; {} client <-> server model {} judged, {what}",
+                judged.judged,
+                absence::plural(judged.judged, "exchange", "exchanges"),
+            ));
+        }
         let mechanisms: Vec<&'static str> = CLIENT_CATEGORIES.iter().map(|&c| edge_category::name(c)).collect();
         let mut a = absence::empty(after, PRIMITIVE, &format!("rev {base}"), "no_match", note, &mechanisms, None);
         a.unparsed_files = after_build.parse_errors.len();
@@ -526,8 +604,10 @@ fn breaks_of(
     ContractBreaks {
         base,
         schemas: rows,
+        models,
         orphaned_clients: orphans,
         breaking,
+        advisory: judged.advisory,
         absence,
     }
 }
