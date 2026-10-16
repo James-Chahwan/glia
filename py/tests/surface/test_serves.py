@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""pyo3 surface, py/src/serves.rs (LD.8b): `serves(channel, mechanism="auto")`
-answers who serves an HTTP `METHOD /path` or a queue topic with the LD.8a
-envelope {results, absence} as a native dict; an unknown mechanism raises
-ValueError. Shared helpers: test_build.py."""
+"""pyo3 surface, py/src/serves.rs (LD.8b): `serves(channel, mechanism="auto",
+collapse=True)` answers who serves an HTTP `METHOD /path` or a queue topic with
+the LD.8a envelope {results, absence} as a native dict; an unknown mechanism
+raises ValueError. DD.13: `collapse` folds identity classes among servers and
+their handlers (`identity` / `handler_identity` keys, only when set); a graph
+with no FACT / DERIVED class answers the same either way, with neither key. The
+SCIP-identical-handler case is `cargo test -p glia-py` (py/src/serves.rs) and
+engine/tests/identity_collapse_serves.rs. Shared helpers: test_build.py."""
 from __future__ import annotations
 
 import pathlib
@@ -25,7 +29,8 @@ LOCATED_KEYS = ["id", "name", "qname", "kind", "file", "line"]
 
 def main() -> int:
     c = Checks("serves")
-    c.check("serves signature", params(rg.PyGraph.serves) == [("channel", None), ("mechanism", "auto")],
+    c.check("serves signature",
+            params(rg.PyGraph.serves) == [("channel", None), ("mechanism", "auto"), ("collapse", True)],
             params(rg.PyGraph.serves))
     with tempfile.TemporaryDirectory(prefix="glia-surface-serves-") as tmp:
         root = pathlib.Path(tmp)
@@ -55,6 +60,10 @@ def main() -> int:
                 and type(hs[0].get("line")) is int, hs)
         c.check("handler keys", hs and list(hs[0]) == LOCATED_KEYS, hs and list(hs[0]))
         c.check("no absence", a.get("absence", 1) is None if type(a) is dict else False, a)
+        c.check("a server outside any identity class has no identity keys",
+                all("identity" not in r and "handler_identity" not in r for r in rows), rows)
+        raw = g.serves("POST /orders", collapse=False)
+        c.check("collapse=False on a class-free graph is the same answer", raw == a, (raw, a))
 
         miss = g.serves("DELETE /orders")
         ab = miss["absence"]

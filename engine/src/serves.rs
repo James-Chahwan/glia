@@ -39,9 +39,27 @@
 //! No taint or auth reasoning: this answers where a channel is handled, never
 //! which routes reach data without auth.
 //!
-//! fired_on marker, once per call:
+//! Identity classes (DD.13): [`serves_with`] reads the graph's SAME_AS
+//! classes through one [`IdentityView`] (DD.8). A server row in a FACT /
+//! DERIVED class with an earlier row folds into it (the first row is kept and
+//! carries `identity`), and within each server, handlers of one class keep
+//! the first; every kept handler that stands for a class is named in the
+//! server's `handler_identity` with that class's identity, `also_in` being
+//! its other members. No shipped identity rule pairs ROUTEs or
+//! QUEUE_CONSUMERs (a route is per service), so in practice only handlers are
+//! tagged: two repos running one SCIP-identical handler (DD.7) show each
+//! handler with the other repo's copy. HEURISTIC candidates (vendored copies)
+//! never fold or tag (Q18). [`Collapse::off`], or a graph with no FACT /
+//! DERIVED SAME_AS edge, is the uncollapsed answer byte for byte.
+//!
+//! fired_on markers, once per call:
 //! `[serves] mechanism=<http|queue> channel='<c>' servers=<n> match=<tiers|->`
-//! — grep token `[serves] mechanism=`. An external row's tier is `external`.
+//! — grep token `[serves] mechanism=`. An external row's tier is `external`;
+//! `servers` counts the rows returned (after the identity fold).
+//! `[identity] collapse surface=serves classes=<c> walk_classes=<w> folded=<f> rows=<n>`
+//! — only when the graph has a collapse class; `folded` is the server rows
+//! plus the handler entries the fold dropped, `rows` the servers returned.
+//! grep `^\[identity\] collapse surface=serves`.
 //!
 //! Module slot declared by L0.2; its API is reached as
 //! `glia_engine::serves::<item>`, never flattened into the crate root.
@@ -56,6 +74,7 @@ use glia_graph::{HttpRouteMatcher, MergedGraph, normalise_http_path};
 
 use crate::absence::{self, Answer, mechanisms_for_kind};
 use crate::answers::{Located, Locator, entrypoint_reachable, live_marker};
+use crate::identity::{Collapse, IdentityView, RowIdentity};
 
 /// The mechanisms [`serves`] accepts, in the order its error names them.
 const MECHANISMS: [&str; 3] = ["auto", "http", "queue"];
@@ -114,6 +133,26 @@ pub struct Server {
     /// The hosts outside the build this row's client calls (match
     /// `external`), sorted; empty for every in-repo server.
     pub external_hosts: Vec<String>,
+    /// DD.13: set when this row stands for a FACT / DERIVED identity class
+    /// of servers (the class's later rows folded into it); no JSON key when
+    /// `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<RowIdentity>,
+    /// DD.13: one entry per handler in `handlers` that stands for a FACT /
+    /// DERIVED identity class, in handler order (that server's other handlers
+    /// of the class folded into it); no JSON key when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub handler_identity: Vec<HandlerIdentity>,
+}
+
+/// One handler of a [`Server`] that stands for an identity class (DD.13):
+/// `qname` is the handler shown in `handlers`, `identity.also_in` the class's
+/// other members (`this handler is the same code as shop's`).
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HandlerIdentity {
+    pub qname: String,
+    pub identity: RowIdentity,
 }
 
 /// Who serves `channel`. `mechanism` is `auto`, `http` or `queue` (any case);
@@ -138,13 +177,20 @@ pub struct Server {
 ///
 /// `Err` only for an unknown `mechanism`. Each server's `live` is read off
 /// one [`entrypoint_reachable`] walk; [`serves_with_live`] takes the set.
+/// Identity classes collapse with [`Collapse::default()`] (on, no repo
+/// labels); [`serves_with`] takes the option.
 pub fn serves(
     merged: &MergedGraph,
     channel: &str,
     mechanism: &str,
 ) -> Result<Answer<Server>, String> {
-    let mech = mechanism_of(channel, mechanism)?;
-    Ok(answer(merged, &entrypoint_reachable(merged), channel, mech))
+    serves_with(
+        merged,
+        &entrypoint_reachable(merged),
+        channel,
+        mechanism,
+        &Collapse::default(),
+    )
 }
 
 /// [`serves`] over a live set the caller already holds (pyo3's `PyGraph`
@@ -155,8 +201,24 @@ pub fn serves_with_live(
     channel: &str,
     mechanism: &str,
 ) -> Result<Answer<Server>, String> {
+    serves_with(merged, live, channel, mechanism, &Collapse::default())
+}
+
+/// [`serves_with_live`] with identity classes treated as `collapse` says
+/// (DD.13, module doc): on, servers of one FACT / DERIVED class fold to the
+/// first row (`identity` set) and each server's handlers of one class to the
+/// first (`handler_identity` naming it), `also_in` labelled with
+/// `collapse.repo_labels`; [`Collapse::off`] is the raw rows.
+pub fn serves_with(
+    merged: &MergedGraph,
+    live: &HashSet<NodeId>,
+    channel: &str,
+    mechanism: &str,
+    collapse: &Collapse,
+) -> Result<Answer<Server>, String> {
     let mech = mechanism_of(channel, mechanism)?;
-    Ok(answer(merged, live, channel, mech))
+    let view = IdentityView::new(merged, collapse);
+    Ok(answer(merged, live, channel, mech, &view))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,12 +274,16 @@ fn answer(
     live: &HashSet<NodeId>,
     channel: &str,
     mech: Mechanism,
+    view: &IdentityView,
 ) -> Answer<Server> {
     let channel = channel.trim();
-    let answer = match mech {
+    let mut answer = match mech {
         Mechanism::Http => http(merged, live, channel),
         Mechanism::Queue => queue(merged, live, channel),
     };
+    // The fold keeps the first row of every class, so a found answer stays
+    // found and `absence` stays exactly the empty case's.
+    answer.results = fold_identity(view, std::mem::take(&mut answer.results));
     let mut tiers: Vec<&str> = Vec::new();
     for s in &answer.results {
         if !tiers.contains(&s.r#match) {
@@ -235,6 +301,39 @@ fn answer(
         answer.results.len()
     );
     answer
+}
+
+/// DD.13's fold (module doc): the servers through [`IdentityView::fold`]
+/// (keyed by server id, `identity` set on the kept row), then each kept
+/// server's handlers the same way, every kept handler of a class recorded in
+/// `handler_identity`. Prints the `[identity] collapse surface=serves` line
+/// when the view has a collapse class; an empty view returns `rows` as is.
+fn fold_identity(view: &IdentityView, rows: Vec<Server>) -> Vec<Server> {
+    if view.is_empty() {
+        return rows;
+    }
+    let servers_before = rows.len();
+    let mut rows = view.fold(rows, |s| NodeId(s.id), |s, identity| s.identity = Some(identity));
+    let mut handlers_folded = 0usize;
+    for s in &mut rows {
+        let before = s.handlers.len();
+        let mut tagged: Vec<HandlerIdentity> = Vec::new();
+        s.handlers = view.fold(
+            std::mem::take(&mut s.handlers),
+            |h| NodeId(h.id),
+            |h, identity| {
+                tagged.push(HandlerIdentity {
+                    qname: h.qname.clone(),
+                    identity,
+                })
+            },
+        );
+        handlers_folded += before - s.handlers.len();
+        s.handler_identity = tagged;
+    }
+    let folded = servers_before - rows.len() + handlers_folded;
+    view.collapse_marker("serves", rows.len() + folded, rows.len());
+    rows
 }
 
 // ---- HTTP ------------------------------------------------------------------
@@ -596,6 +695,8 @@ fn servers(
                     .map(|hs| hs.iter().map(|h| loc.locate(*h)).collect())
                     .unwrap_or_default(),
                 external_hosts: Vec::new(),
+                identity: None,
+                handler_identity: Vec::new(),
             }
         })
         .collect();
@@ -612,6 +713,8 @@ fn servers(
             confidence: confidence_name(*confidence),
             handlers: Vec::new(),
             external_hosts: hosts.clone(),
+            identity: None,
+            handler_identity: Vec::new(),
         }
     }));
     live_marker("serves", rows.len(), rows.iter().filter(|r| r.live).count());
