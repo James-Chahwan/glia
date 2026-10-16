@@ -239,9 +239,9 @@ pub(crate) fn apply_cross_cutting_extractors(
     stats: &mut ExtractStats,
 ) {
     use glia_code_extractors::{
-        anchor, angular, cli, config, cron, data_entities, data_sources, eventbus, graphql, grpc,
-        nav_links, nav_routes, openapi_annot, queues, react, secrets_flags, services, trpc,
-        ts_routes, vue, websocket,
+        anchor, angular, angular_template, cli, config, cron, data_entities, data_sources,
+        eventbus, graphql, grpc, nav_links, nav_routes, openapi_annot, queues, react,
+        secrets_flags, services, trpc, ts_routes, vue, websocket,
     };
 
     macro_rules! run {
@@ -499,6 +499,22 @@ pub(crate) fn apply_cross_cutting_extractors(
         run!(angular::extract_angular_nodes(
             source, &module_qname, module_id, repo
         ));
+        // DT.5a: an inline `template:` / `host:` binding that calls or reads
+        // a METHOD of its own component is a CALLS / USES from the CLASS, at
+        // the binding's row. The template is this file's text, so the edges
+        // are cached with the parse; `bind_inline` prints the per-file
+        // `[angular-template] inline` marker. `stamp_missing` is a backstop:
+        // every edge carries its own EVIDENCE.
+        let mut out = angular_template::bind_inline(
+            source,
+            path,
+            &fp.nodes,
+            &fp.nav,
+            &module_qname,
+            repo,
+        );
+        evidence::stamp_missing(&mut out.edges, angular_template::EMITTER);
+        fp.edges.extend(out.edges);
     }
     if matches!(lang, "vue" | "typescript") {
         let module_qname = fp

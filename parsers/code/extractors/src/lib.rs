@@ -1,5 +1,6 @@
 pub mod anchor;
 pub mod angular;
+pub mod angular_template;
 pub mod cli;
 mod code_guard;
 pub mod config;

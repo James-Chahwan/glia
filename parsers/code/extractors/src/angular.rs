@@ -93,6 +93,267 @@ fn scan_decorated_classes(source: &str) -> Vec<(String, NodeKindId)> {
     out
 }
 
+/// One `@Component(` / `@Directive(` decorator and what its metadata says
+/// about the class's bindings (DT.5a): the inline `template:` and the `host:`
+/// entries, read as text, for [`crate::angular_template::bind_inline`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecoratedClass {
+    /// The decorated class's simple name; `None` when no `class <Name>`
+    /// follows the decorator.
+    pub name: Option<String>,
+    /// COMPONENT or DIRECTIVE.
+    pub kind: NodeKindId,
+    /// The `template:` value when it is ONE string literal.
+    pub template: Option<InlineTemplate>,
+    /// A `template:` key whose value is no single literal (a concatenation,
+    /// an identifier, a call): read as nothing.
+    pub template_unread: bool,
+    /// The `host:` object's entries with a quoted value, in source order.
+    pub host: Vec<HostEntry>,
+}
+
+/// An inline template literal: its raw content (escapes kept, so offsets stay
+/// the file's) and the byte offset of its first char in the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineTemplate {
+    pub text: String,
+    pub start: usize,
+}
+
+/// One `host:` entry (`'(document:keydown.escape)': 'onEscape()'`,
+/// `class: 'x'`): its key without quotes, its quoted value's content and the
+/// key's 0-based row in the file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostEntry {
+    pub key: String,
+    pub value: String,
+    pub row: u32,
+}
+
+/// Every `@Component(` / `@Directive(` decorator of `source`, in source order
+/// (DT.5a). The argument is balanced through [`find_balanced_paren`] and the
+/// class named by [`find_next_class_name`], as [`scan_decorated_classes`]
+/// does; inside the argument's object only first-level `template` / `host`
+/// keys are read. Text-level, UTF-8 safe: every slice is cut at an ASCII
+/// delimiter.
+pub fn decorated_classes(source: &str) -> Vec<DecoratedClass> {
+    const DECORATORS: &[(&str, NodeKindId)] = &[
+        ("@Component(", node_kind::COMPONENT),
+        ("@Directive(", node_kind::DIRECTIVE),
+    ];
+    let mut found: Vec<(usize, DecoratedClass)> = Vec::new();
+    for &(needle, kind) in DECORATORS {
+        let mut from = 0;
+        while let Some(rel) = source[from..].find(needle) {
+            let pos = from + rel;
+            let arg = pos + needle.len();
+            let Some(off) = find_balanced_paren(&source[arg..]) else {
+                from = arg;
+                continue;
+            };
+            let close = arg + off;
+            let mut dc = DecoratedClass {
+                name: find_next_class_name(&source[close + 1..]),
+                kind,
+                template: None,
+                template_unread: false,
+                host: Vec::new(),
+            };
+            read_metadata(source, arg, close, &mut dc);
+            found.push((pos, dc));
+            from = close + 1;
+        }
+    }
+    found.sort_by_key(|(pos, _)| *pos);
+    found.into_iter().map(|(_, dc)| dc).collect()
+}
+
+/// The first-level `template` / `host` keys of the object literal in
+/// `source[start..end]` (a decorator's argument).
+fn read_metadata(source: &str, start: usize, end: usize, dc: &mut DecoratedClass) {
+    let b = source.as_bytes();
+    let i = skip_trivia(b, start, end);
+    if b.get(i) != Some(&b'{') {
+        return;
+    }
+    for (key, vs, ve) in object_entries(b, i + 1, end) {
+        match key.as_str() {
+            "template" => match single_literal(b, vs, ve) {
+                Some((s, e)) => {
+                    dc.template = Some(InlineTemplate {
+                        text: source[s..e].to_string(),
+                        start: s,
+                    });
+                    dc.template_unread = false;
+                }
+                None => dc.template_unread = dc.template.is_none(),
+            },
+            "host" if b.get(vs) == Some(&b'{') => {
+                for (hk, hvs, hve) in object_entries(b, vs + 1, ve) {
+                    if let Some((s, e)) = single_literal(b, hvs, hve) {
+                        dc.host.push(HostEntry {
+                            key: hk.key,
+                            value: source[s..e].to_string(),
+                            row: glia_code_domain::line_of(source, hk.at),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// An object key and the byte offset it starts at.
+struct Key {
+    key: String,
+    at: usize,
+}
+
+impl Key {
+    fn as_str(&self) -> &str {
+        &self.key
+    }
+}
+
+/// The `key: value` entries of the object whose body starts at `i` (past
+/// its `{`) and ends at its matching `}` or `end`: each key (quoted or bare)
+/// and its value's trimmed byte range. A shorthand entry (`{ template }`)
+/// has an empty range; a spread or computed key is skipped.
+fn object_entries(b: &[u8], mut i: usize, end: usize) -> Vec<(Key, usize, usize)> {
+    let mut out = Vec::new();
+    loop {
+        i = skip_trivia(b, i, end);
+        while i < end && b[i] == b',' {
+            i = skip_trivia(b, i + 1, end);
+        }
+        if i >= end || b[i] == b'}' {
+            return out;
+        }
+        let at = i;
+        let key = match b[i] {
+            q @ (b'\'' | b'"') => {
+                let close = skip_string(b, i, end);
+                i = close;
+                (close >= at + 2 && b[close - 1] == q)
+                    .then(|| String::from_utf8_lossy(&b[at + 1..close - 1]).into_owned())
+            }
+            c if is_ident_byte(c) && !c.is_ascii_digit() => {
+                while i < end && is_ident_byte(b[i]) {
+                    i += 1;
+                }
+                Some(String::from_utf8_lossy(&b[at..i]).into_owned())
+            }
+            _ => None,
+        };
+        let Some(key) = key else {
+            // A spread or a computed key: skip the entry.
+            i = value_end(b, at + 1, end);
+            continue;
+        };
+        let j = skip_trivia(b, i, end);
+        if b.get(j) != Some(&b':') || j >= end {
+            out.push((Key { key, at }, j, j));
+            i = value_end(b, j, end);
+            continue;
+        }
+        let vs = skip_trivia(b, j + 1, end);
+        let ve = value_end(b, vs, end);
+        let mut te = ve;
+        while te > vs && b[te - 1].is_ascii_whitespace() {
+            te -= 1;
+        }
+        out.push((Key { key, at }, vs, te));
+        i = ve;
+    }
+}
+
+fn is_ident_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_' || c == b'$'
+}
+
+/// The end of the value starting at `i`: the first `,` or closing bracket at
+/// depth 0, past strings, comments and nested brackets.
+fn value_end(b: &[u8], mut i: usize, end: usize) -> usize {
+    let mut depth = 0usize;
+    while i < end {
+        match b[i] {
+            b'\'' | b'"' | b'`' => {
+                i = skip_string(b, i, end);
+                continue;
+            }
+            b'/' if b.get(i + 1) == Some(&b'/') || b.get(i + 1) == Some(&b'*') => {
+                i = skip_trivia(b, i, end);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => {
+                if depth == 0 {
+                    return i;
+                }
+                depth -= 1;
+            }
+            b',' if depth == 0 => return i,
+            _ => {}
+        }
+        i += 1;
+    }
+    end
+}
+
+/// The content range of the value `b[vs..ve]` when it is exactly one string
+/// literal (`'..'`, `".."` or a backtick literal), else `None`.
+fn single_literal(b: &[u8], vs: usize, ve: usize) -> Option<(usize, usize)> {
+    let q = *b.get(vs)?;
+    if !matches!(q, b'\'' | b'"' | b'`') {
+        return None;
+    }
+    let close = skip_string(b, vs, ve);
+    (close >= vs + 2 && b[close - 1] == q && skip_trivia(b, close, ve) >= ve)
+        .then_some((vs + 1, close - 1))
+}
+
+/// The offset just past the string literal opening at `b[i]` (escapes
+/// honoured), or `end` when it never closes.
+fn skip_string(b: &[u8], i: usize, end: usize) -> usize {
+    let q = b[i];
+    let mut j = i + 1;
+    while j < end {
+        if b[j] == b'\\' {
+            j += 2;
+            continue;
+        }
+        if b[j] == q {
+            return j + 1;
+        }
+        j += 1;
+    }
+    end
+}
+
+/// The first offset at or after `i` that is neither whitespace nor inside a
+/// `//` or `/* */` comment.
+fn skip_trivia(b: &[u8], mut i: usize, end: usize) -> usize {
+    while i < end {
+        if b[i].is_ascii_whitespace() {
+            i += 1;
+        } else if b[i] == b'/' && b.get(i + 1) == Some(&b'/') {
+            while i < end && b[i] != b'\n' {
+                i += 1;
+            }
+        } else if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+            i += 2;
+            while i < end && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
+                i += 1;
+            }
+            i = (i + 2).min(end);
+        } else {
+            break;
+        }
+    }
+    i
+}
+
 /// Given `s` starting after a `(`, return the offset of the matching `)`,
 /// skipping nested parens, brackets, braces, and string literals.
 fn find_balanced_paren(s: &str) -> Option<usize> {
@@ -363,6 +624,67 @@ RouterModule.forRoot(routes);
                 ("page:/users/:id", "UserDetailComponent"),
             ]
         );
+    }
+
+    /// DT.5a: a backtick template's raw content and first offset, the
+    /// first-level `host:` entries (quoted and bare keys, quoted values only)
+    /// and the class the decorator names.
+    #[test]
+    fn decorated_classes_read_template_and_host() {
+        let src = "@Component({\n  selector: 'x', // template: 'no'\n  host: { class: 'block', '(document:keydown.escape)': \"onEscape()\", role, tabindex: 0 },\n  template: `<b (click)=\"go()\">\u{1F600}</b>`,\n  styles: [`b { template: 1 }`],\n})\nexport class AComponent {}\n";
+        let got = decorated_classes(src);
+        assert_eq!(got.len(), 1);
+        let dc = &got[0];
+        assert_eq!(dc.name.as_deref(), Some("AComponent"));
+        assert_eq!(dc.kind, node_kind::COMPONENT);
+        assert!(!dc.template_unread);
+        let t = dc.template.as_ref().expect("template");
+        assert_eq!(t.text, "<b (click)=\"go()\">\u{1F600}</b>");
+        assert_eq!(&src[t.start..t.start + 2], "<b");
+        assert_eq!(
+            dc.host,
+            vec![
+                HostEntry {
+                    key: "class".into(),
+                    value: "block".into(),
+                    row: 2
+                },
+                HostEntry {
+                    key: "(document:keydown.escape)".into(),
+                    value: "onEscape()".into(),
+                    row: 2
+                },
+            ]
+        );
+    }
+
+    /// DT.5a: a single-quote template reads; a concatenated or identifier
+    /// template reads nothing and is marked unread; `templateUrl` is no
+    /// template; a directive carries its host.
+    #[test]
+    fn decorated_classes_single_quote_concat_and_directive() {
+        let src = "@Component({ template: '<i>{{ a() }}</i>' })\nclass One {}\n\
+                   @Component({ template: '<i>' + x + '</i>' })\nclass Two {}\n\
+                   @Component({ template: TPL })\nclass Three {}\n\
+                   @Component({ templateUrl: './four.html' })\nclass Four {}\n\
+                   @Directive({ selector: '[d]', host: { '[class.on]': 'isOn()' } })\nclass Dir {}\n";
+        let got = decorated_classes(src);
+        let names: Vec<_> = got
+            .iter()
+            .map(|d| d.name.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(names, ["One", "Two", "Three", "Four", "Dir"]);
+        assert_eq!(
+            got[0].template.as_ref().map(|t| t.text.as_str()),
+            Some("<i>{{ a() }}</i>")
+        );
+        for d in &got[1..3] {
+            assert!(d.template.is_none() && d.template_unread, "{:?}", d.name);
+        }
+        assert!(got[3].template.is_none() && !got[3].template_unread);
+        assert_eq!(got[4].kind, node_kind::DIRECTIVE);
+        assert_eq!(got[4].host.len(), 1);
+        assert_eq!(got[4].host[0].row, 8);
     }
 
     /// CH.1: `abstract` between the decorator and `class` no longer hides the

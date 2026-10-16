@@ -22,8 +22,9 @@ use std::path::Path;
 use glia_code_domain::node_kind;
 use glia_engine::generate_one;
 
-/// One anchor per cross-cutting extractor needle (54). Each is written next to
-/// a 4-byte char at every pad that puts a window cut inside it.
+/// One anchor per cross-cutting extractor needle (55). Each is written next to
+/// a 4-byte char at every pad that puts a window cut inside it. DT.5a: the
+/// last drives the Angular inline-template scanner (`angular_template`).
 const NEEDLES: &[&str] = &[
     "MATCH (p:Person) ",
     "merge ",
@@ -79,6 +80,7 @@ const NEEDLES: &[&str] = &[
     "http.HandleFunc(\"/x\", ",
     "@app.route('/x')",
     "@router.get('/x')",
+    "@Component({ template: '<i (click)=\"go()\">{{ a() }}</i>' })",
 ];
 
 /// The Clojure parser's own route / client needles (LA.22c), written as

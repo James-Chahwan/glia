@@ -1,0 +1,95 @@
+{
+  "framework": "angular-inline-template-bindings",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "DT.5a (T5, Kina's shape: standalone components with inline `template:` strings in Angular 17 control flow and `host:` metadata). A component METHOD bound only from its template or its host bindings is called by Angular, so the component CLASS gets a CALLS (a call in a binding) or USES (a reference) edge to it, EVIDENCE `extractor:angular_template` at the binding's row. Template locals are scoped: the first @for's `entry` shadows the method in its header (the track expression) and block, the second @for's `row` only inside its own block. HEAD 5dfe4c72 (debug CLI + the glia-leap wheel): CALLS 0/8, FORBID VIOLATIONS 0; `glia gaps --category dead_symbol` lists all 11 METHODs.",
+  "expect_edges": [
+    {
+      "from": "OfferListComponent",
+      "to": "refresh",
+      "category": "CALLS",
+      "note": "(click)=\"refresh()\""
+    },
+    {
+      "from": "OfferListComponent",
+      "to": "isBusy",
+      "category": "CALLS",
+      "note": "[disabled]=\"isBusy()\" and host [class.busy]"
+    },
+    {
+      "from": "OfferListComponent",
+      "to": "canEdit",
+      "category": "CALLS",
+      "note": "@if (canEdit())"
+    },
+    {
+      "from": "OfferListComponent",
+      "to": "summary",
+      "category": "CALLS",
+      "note": "{{ summary(offers()) }}"
+    },
+    {
+      "from": "OfferListComponent",
+      "to": "trackById",
+      "category": "CALLS",
+      "note": "@for track expression"
+    },
+    {
+      "from": "OfferListComponent",
+      "to": "remove",
+      "category": "CALLS",
+      "note": "(remove)=\"remove(entry.id)\""
+    },
+    {
+      "from": "OfferListComponent",
+      "to": "row",
+      "category": "CALLS",
+      "note": "{{ row() }} outside the @for whose loop variable is `row`"
+    },
+    {
+      "from": "OfferListComponent",
+      "to": "onEscape",
+      "category": "CALLS",
+      "note": "host '(document:keydown.escape)'"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src::app::offers::offer-list.component::OfferListComponent",
+      "to": "src::app::offers::offer-list.component::OfferListComponent::entry",
+      "category": "CALLS"
+    },
+    {
+      "from": "src::app::offers::offer-list.component::OfferListComponent",
+      "to": "src::app::offers::offer-list.component::OfferListComponent::entry",
+      "category": "USES"
+    },
+    {
+      "from": "src::app::offers::offer-list.component::OfferListComponent",
+      "to": "src::app::offers::offer-list.component::OfferListComponent::row",
+      "category": "USES"
+    },
+    {
+      "from": "src::app::offers::offer-list.component::OfferListComponent",
+      "to": "src::app::offers::offer-list.component::OfferListComponent::reload",
+      "category": "CALLS"
+    },
+    {
+      "from": "src::app::offers::offer-list.component::OfferListComponent",
+      "to": "src::app::offers::offer-list.component::OfferListComponent::reload",
+      "category": "USES"
+    },
+    {
+      "from": "src::app::offers::offer-list.component::OfferListComponent",
+      "to": "src::app::offers::offer-list.component::OfferListComponent::exportCsv",
+      "category": "CALLS"
+    },
+    {
+      "from": "src::app::offers::offer-list.component::OfferListComponent",
+      "to": "src::app::offers::offer-list.component::OfferListComponent::exportCsv",
+      "category": "USES"
+    }
+  ]
+}
