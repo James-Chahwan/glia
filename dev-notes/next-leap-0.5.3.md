@@ -251,8 +251,26 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 
 1. ~~Section C: which candidates become packets~~ — review queue IN as a clarification queue, SQL projection DROPPED (2026-10-16). Still open: identity-scoped queries (likely out).
 2. Section B: the semantic tier feeds `find` and the flow search (§F.6, 2026-10-16). Still open: does it also feed `pack` and blast-radius seeding?
-3. Does B ship with a glia-side writer for tests only (a fixture `.glia/vectors.jsonl`), or wait for Engram's writer?
+3. Does B ship with a glia-side writer for tests only (a fixture `.glia/vectors.jsonl`), or wait for Engram's writer? Inside it: glia takes no embedding model, so a text query (`find cache`) needs its query vector from the caller (repo-graph / Engram); glia alone can rank only "nodes like this node".
 4. Section E (DE.1): an ambiguous bare doc mention — keep the one Weak bind, rank by proximity, or mint no edge?
+
+Recommendations (the session's, 2026-10-16, awaiting James):
+- Q1 identity-scoped queries: **out of 0.5.3.** No shared glia graph is hosted today; the access decision belongs to
+  the host (repo-graph). Revisit with a hosted repo-graph; then the first step is provenance on every node and cell
+  (repo, doc space) that a host filters on, not filtering inside every glia answer.
+- Q2 semantic tier beyond find / flows: **`pack` yes, as a fallback only; blast-radius no.** Pack takes semantic
+  seeds only when nothing matches by name (the rule its fuzzy seeds follow today), each labelled HEURISTIC with its
+  similarity, so a guess never crowds out a name match. Blast-radius is an assertion ("these break"): pick the nodes
+  with `find` first, then run blast-radius on them. 0.5.4's agent before / after measures whether pack's fallback helps.
+- Q3 test writer: **fixtures + contract + validator in glia now; Engram's writer through a handoff.** glia ships
+  fixture `.glia/vectors.jsonl` files and a deterministic test-only embedding, the written cell contract (VectorRow:
+  qname, kind, hint, model, dims, payload), and a check that reports rows with a missing qname, mixed models or wrong
+  dims. A text query's vector comes from the caller with its `model` name, which must match the sidecar's; with none,
+  the semantic tier is skipped and the answer's absence says so.
+- Q4 ambiguous bare doc mention: **proximity, then the clarification queue.** Bind the one candidate a recorded rule
+  picks (same directory / project / service as the doc, or its owner also named in the section) at Weak with the rule
+  as evidence; when no rule separates them, mint no edge and queue the question (§2 C) with a gaps row. Measure at spec
+  time how many of glia's 240 / quokka-stack's 193 / Kina's 4 proximity settles.
 
 ## 4. Spec run
 
