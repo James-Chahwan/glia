@@ -16,7 +16,7 @@ use glia_code_domain::{
 };
 use glia_code_extractors::constants::ConstTable;
 use glia_code_extractors::next_pages::{self, NextRoots, PageRouter};
-use glia_code_extractors::{anchor, cron, eventbus, queue_topic, queues};
+use glia_code_extractors::{anchor, cron, eventbus, openapi_annot, queue_topic, queues};
 use glia_core::{Cell, CellPayload, NodeId, NodeKindId, RepoId};
 use glia_graph::rust_paths::RustCrate;
 
@@ -38,8 +38,9 @@ use crate::route::ModuleQnames;
 /// needles with their `[grpc-client]` /
 /// `[grpc-server-impl]` / `[proto-rpc]` markers, the A5.8 `[marker-anchor]`
 /// census and the LE.4a `[data-access]` census, the LB.4a / LB.8 owner
-/// segment, the CB.24 client-host stamp, the DF.8 external client-site mark,
-/// then the A16.4 IMPORTS-cell filter. `const_table` is the repo's A11.1
+/// segment, the CB.24 client-host stamp, the DF.19 annotated OpenAPI base
+/// stamp, the DF.8 external client-site mark, then the A16.4 IMPORTS-cell
+/// filter. `const_table` is the repo's A11.1
 /// table and `file_tables` the per-file scans it was merged from (DC.3: the
 /// queue / event const folds read a file's own bindings there instead of
 /// re-scanning it); `roots` are the walk's project roots (A8.4);
@@ -214,6 +215,14 @@ pub(super) fn apply_post_cache(
     // owner pass, whose owners group the facts and the sides; it mints and
     // re-keys nothing, so the ordering rule above holds.
     stamp_client_hosts(parses_by_lang, &owners).report(repo_label);
+
+    // DF.19: a base-less OpenAPI op of a project whose Go code declares one
+    // swaggo general-info `@BasePath` records that base, which the
+    // contract-link pass then pairs it through (rule `annotated_base`).
+    // Beside the CB.24 stamp and for the same reason: the owners group the
+    // bases and the ops, and it rewrites ORIGIN payloads only, so the
+    // ordering rule above holds.
+    stamp_annotated_bases(parses_by_lang, files, &owners).report(repo_label);
 
     // DF.8: mark each WS_CLIENT / GRPC_CLIENT / GRAPHQL_OPERATION site hit
     // that dials a public host outside the repo's configuration, CG.4a's rule
@@ -450,6 +459,159 @@ fn stamp_client_hosts(
         }
     }
     stats
+}
+
+/// DF.19: per-repo tallies of the annotated-base stamp.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AnnotatedBaseStats {
+    /// Distinct OpenAPI op ids stamped with an `annotated_base`.
+    ops: usize,
+    /// Owners whose one general-info base stamped at least one op.
+    bases: usize,
+}
+
+impl AnnotatedBaseStats {
+    /// fired_on marker, once per repo where an op was stamped:
+    ///   `[contract-base] annotated ops=<n> bases=<k> repo=<label>`
+    fn report(&self, repo_label: &str) {
+        if self.ops > 0 {
+            eprintln!(
+                "[contract-base] annotated ops={} bases={} repo={repo_label}",
+                self.ops, self.bases
+            );
+        }
+    }
+}
+
+/// DF.19: swaggo writes a Go service's base in code (`// @BasePath /api` in
+/// the general-info block above `main`) and generates `docs/swagger.json`
+/// from it with no `basePath` of its own, so every op path of that document
+/// lacks the prefix the routes are mounted under. This graft gives such an
+/// op the base its own project declares.
+///
+/// Bases: every walked `.go` file holding `@BasePath` is read with
+/// `openapi_annot::swaggo_general_base` (the first comment run with
+/// `@BasePath` and no `@Router`), grouped by owner (`owners`, the longest
+/// nested project root enclosing the file; `None` outside every one). An
+/// owner qualifies when its files name exactly ONE distinct base and that
+/// base is not the root (`@BasePath /` folds to "" and counts as a base, so
+/// a root block beside an `/api` block is two bases and stamps nothing):
+/// two general-info blocks in one project are two APIs, and which one the
+/// document came from is unknown. Several files repeating one base keep the
+/// first `file:line` in walk order.
+///
+/// Ops: a DOC_SECTION whose ORIGIN says `provenance: contract`, `source:
+/// openapi`, `path` == `raw_path` (the document joined no base) and carries
+/// no `bases` (DF.18: a document listing two or more servers chose its own)
+/// gains `"annotated_base":"/api","annotated_at":"<file>:<1-based line>"`,
+/// appended to the payload so its key order is kept, when its POSITION file
+/// is in a qualifying owner. Every parse holding the op id is stamped alike
+/// (an op whose json and yaml twins share a qname is one node).
+///
+/// Post-cache, over `files`, so a `@BasePath` edit re-stamps a cached op
+/// and incremental == clean. Order-free: each rewrite is a function of the
+/// node and the owner table alone, both tables are BTreeMaps, and the
+/// counts are set sizes.
+fn stamp_annotated_bases(
+    parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
+    files: &[(String, String)],
+    owners: &http_owner::OwnerIndex,
+) -> AnnotatedBaseStats {
+    let mut stats = AnnotatedBaseStats::default();
+    // owner -> base -> the first `file:line` naming it, in walk order.
+    let mut declared: BTreeMap<Option<String>, BTreeMap<String, String>> = BTreeMap::new();
+    for (path, text) in files {
+        if !path.ends_with(".go") || !text.contains("@BasePath") {
+            continue;
+        }
+        let Some((base, line)) = openapi_annot::swaggo_general_base(text) else {
+            continue;
+        };
+        declared
+            .entry(owners.owner_of(path).map(str::to_string))
+            .or_default()
+            .entry(base)
+            .or_insert_with(|| format!("{path}:{}", line + 1));
+    }
+    let annotated: BTreeMap<Option<String>, (String, String)> = declared
+        .into_iter()
+        .filter_map(|(owner, bases)| {
+            let mut it = bases.into_iter();
+            let one = it.next()?;
+            (it.next().is_none() && !one.0.is_empty()).then_some((owner, one))
+        })
+        .collect();
+    if annotated.is_empty() {
+        return stats;
+    }
+    let mut stamped: HashSet<NodeId> = HashSet::new();
+    let mut used: BTreeSet<Option<String>> = BTreeSet::new();
+    for fp in parses_by_lang.values_mut().flatten() {
+        let FileParse { nodes, nav, .. } = fp;
+        for node in nodes.iter_mut() {
+            if nav.kind_by_id.get(&node.id) != Some(&node_kind::DOC_SECTION) {
+                continue;
+            }
+            let Some(owner) = node_file(node).map(|f| owners.owner_of(&f).map(str::to_string))
+            else {
+                continue;
+            };
+            let Some((base, at)) = annotated.get(&owner) else {
+                continue;
+            };
+            let Some(json) = node.cells.iter_mut().find_map(|c| match &mut c.payload {
+                CellPayload::Json(j) if c.kind == cell_type::ORIGIN => Some(j),
+                _ => None,
+            }) else {
+                continue;
+            };
+            if !is_base_less_openapi_op(json) {
+                continue;
+            }
+            let Some(with_base) = with_annotated_base(json, base, at) else {
+                continue;
+            };
+            *json = with_base;
+            stamped.insert(node.id);
+            used.insert(owner);
+        }
+    }
+    stats.ops = stamped.len();
+    stats.bases = used.len();
+    stats
+}
+
+/// DF.19: an OpenAPI op ORIGIN whose document joined no base onto its path
+/// (`path` == `raw_path`), listed no second server (`bases`) and is not
+/// stamped yet.
+fn is_base_less_openapi_op(json: &str) -> bool {
+    // Cheap reject: every non-OpenAPI ORIGIN (nav routes, annotations, ...).
+    if !json.contains(r#""openapi""#) {
+        return false;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return false;
+    };
+    let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str);
+    s("provenance") == Some("contract")
+        && s("source") == Some("openapi")
+        && s("path").is_some()
+        && s("path") == s("raw_path")
+        && v.get("bases").is_none()
+        && v.get("annotated_base").is_none()
+}
+
+/// `{..}` -> `{..,"annotated_base":"<base>","annotated_at":"<at>"}`: the two
+/// fields appended before the object's closing brace, so every existing key
+/// keeps its place. `None` on a payload that is not a JSON object's text.
+fn with_annotated_base(json: &str, base: &str, at: &str) -> Option<String> {
+    let body = json.trim_end().strip_suffix('}')?;
+    let quote = |s: &str| serde_json::to_string(s).ok();
+    Some(format!(
+        r#"{body},"annotated_base":{},"annotated_at":{}}}"#,
+        quote(base)?,
+        quote(at)?
+    ))
 }
 
 /// The ENDPOINT_HIT CB.24 stamps on a side: `{"via":"<via>","hosts":[..]}`,
@@ -1784,6 +1946,108 @@ mod client_host_tests {
 
         let again = stamp_client_hosts(&mut by_lang, &owners);
         assert_eq!(again, ClientHostStats { graphql: 2, rpc: 1, sides: 0 });
+    }
+
+    /// DF.19: a contract op DOC_SECTION of `file` whose ORIGIN is `origin`.
+    fn op(fp: &mut FileParse, q: &str, file: &str, origin: &str) -> NodeId {
+        let id = push(fp, node_kind::DOC_SECTION, q, file);
+        let cell = Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(origin.into()) };
+        if let Some(n) = fp.nodes.iter_mut().find(|n| n.id == id) {
+            n.cells.push(cell);
+        }
+        id
+    }
+
+    /// The ORIGIN payloads of every copy of `id`, in parse order.
+    fn origins(by_lang: &HashMap<&'static str, Vec<FileParse>>, id: NodeId) -> Vec<String> {
+        let mut langs: Vec<&&str> = by_lang.keys().collect();
+        langs.sort();
+        langs
+            .into_iter()
+            .flat_map(|l| &by_lang[*l])
+            .flat_map(|fp| fp.nodes.iter().filter(move |n| n.id == id))
+            .flat_map(|n| &n.cells)
+            .filter(|c| c.kind == cell_type::ORIGIN)
+            .filter_map(|c| match &c.payload {
+                CellPayload::Json(j) => Some(j.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// DF.19: services/turps declares one general-info base, so its
+    /// base-less OpenAPI op (both twins of one id) is stamped with it and
+    /// the 1-based line; services/billing declares two, and a document with
+    /// a base of its own, a document listing several servers and a swaggo
+    /// annotation op are never stamped. A second run stamps nothing.
+    #[test]
+    fn stamp_annotated_bases_per_owner() {
+        let owners = http_owner::OwnerIndex::from_roots(&[
+            ProjectRoot::new("services/turps".into(), "go", "manifest", None),
+            ProjectRoot::new("services/billing".into(), "go", "manifest", None),
+        ]);
+        let general = |base: &str| {
+            format!("package main\n\n// @title API\n// @BasePath {base}\nfunc main() {{}}\n")
+        };
+        let files: Vec<(String, String)> = vec![
+            ("services/turps/main.go".into(), general("/api")),
+            ("services/turps/cmd/again.go".into(), general("/api/")),
+            ("services/billing/main.go".into(), general("/billing")),
+            ("services/billing/cmd/admin.go".into(), general("/admin")),
+            ("services/turps/notes.md".into(), "// @BasePath /md".into()),
+        ];
+        let base_less = r#"{"provenance":"contract","source":"openapi","method":"POST","path":"/auth/login","raw_path":"/auth/login","operation_id":"login"}"#;
+        let (mut json, _) = parse("services/turps/docs/swagger.json");
+        let login = op(&mut json, "contract::docs::swagger::POST:/auth/login", "services/turps/docs/swagger.json", base_less);
+        let based = op(
+            &mut json,
+            "contract::docs::swagger::GET:/v2/me",
+            "services/turps/docs/swagger.json",
+            r#"{"provenance":"contract","source":"openapi","method":"GET","path":"/v2/me","raw_path":"/me"}"#,
+        );
+        let listed = op(
+            &mut json,
+            "contract::docs::swagger::GET:/stats",
+            "services/turps/docs/swagger.json",
+            r#"{"provenance":"contract","source":"openapi","method":"GET","path":"/stats","raw_path":"/stats","bases":["","/admin"]}"#,
+        );
+        let annot = op(
+            &mut json,
+            "contract::Server::users::GET:/users",
+            "services/turps/Server/users.go",
+            r#"{"provenance":"contract","source":"swaggo","method":"GET","path":"/users","raw_path":"/users"}"#,
+        );
+        let billing = op(&mut json, "contract::billing::POST:/auth/login", "services/billing/docs/swagger.json", base_less);
+        let (mut yaml, _) = parse("services/turps/docs/swagger.yaml");
+        op(&mut yaml, "contract::docs::swagger::POST:/auth/login", "services/turps/docs/swagger.yaml", base_less);
+        let mut by_lang: HashMap<&'static str, Vec<FileParse>> = HashMap::new();
+        by_lang.insert("json", vec![json]);
+        by_lang.insert("yaml", vec![yaml]);
+
+        let stats = stamp_annotated_bases(&mut by_lang, &files, &owners);
+        assert_eq!(stats, AnnotatedBaseStats { ops: 1, bases: 1 });
+        let stamped = r#"{"provenance":"contract","source":"openapi","method":"POST","path":"/auth/login","raw_path":"/auth/login","operation_id":"login","annotated_base":"/api","annotated_at":"services/turps/main.go:4"}"#;
+        assert_eq!(origins(&by_lang, login), vec![stamped, stamped], "both twins, key order kept");
+        for id in [based, listed, annot, billing] {
+            assert!(
+                origins(&by_lang, id).iter().all(|o| !o.contains("annotated_base")),
+                "{:?}",
+                origins(&by_lang, id)
+            );
+        }
+
+        let again = stamp_annotated_bases(&mut by_lang, &files, &owners);
+        assert_eq!(again, AnnotatedBaseStats::default());
+        assert_eq!(origins(&by_lang, login), vec![stamped, stamped]);
+
+        // `@BasePath /` is the root: no base to stamp.
+        let root = vec![("services/turps/main.go".to_string(), general("/"))];
+        let (mut json, _) = parse("services/turps/docs/swagger.json");
+        let login = op(&mut json, "contract::docs::swagger::POST:/auth/login", "services/turps/docs/swagger.json", base_less);
+        let mut by_lang: HashMap<&'static str, Vec<FileParse>> = HashMap::new();
+        by_lang.insert("json", vec![json]);
+        assert_eq!(stamp_annotated_bases(&mut by_lang, &root, &owners), AnnotatedBaseStats::default());
+        assert_eq!(origins(&by_lang, login), vec![base_less]);
     }
 
     /// CB.24: a repo with no nested root groups every file under the repo

@@ -18,9 +18,12 @@
 //!   pairing `passes::link_contract_routes` made (A10.2). `confidence` is
 //!   that edge's, which the pass caps at the ROUTE's own confidence (a route
 //!   no client calls is demoted to `medium` by the http pass), and `pairing`
-//!   is the pass's rule from the edge's EVIDENCE: `exact`, or `prefix` for
-//!   every inferred pairing (API-prefix strip, `ANY` route, server-base
-//!   retry), which is never above `medium`.
+//!   is the pass's rule from the edge's EVIDENCE, in the pass's lookup order:
+//!   `exact` (the declared path), `server_base` (another server base the
+//!   document lists, DF.19), `annotated_base` (the project's swaggo
+//!   general-info `@BasePath`, for a document that declares no base; never
+//!   above `medium`, DF.19), or `prefix` for every inferred pairing
+//!   (API-prefix strip, `ANY` route, raw-path retry), never above `medium`.
 //!   One row per (op, route): two features declaring `GET /orders` give two
 //!   rows on the one route, and an op two owners serve (LB.4) gives one row
 //!   per ROUTE node — rows key on the ROUTE, never on the path string;
@@ -83,9 +86,10 @@ pub struct SpecStatusRow {
     /// The DOCUMENTS edge's confidence (`strong` | `medium` | `weak`) on an
     /// implemented row; `None` otherwise.
     pub confidence: Option<&'static str>,
-    /// How the contract-link pass paired the op with the route: `exact` |
-    /// `prefix` (its EVIDENCE rule). `None` on other rows, and on a DOCUMENTS
-    /// edge another emitter (an overlay stanza) asserted.
+    /// How the contract-link pass paired the op with the route (its EVIDENCE
+    /// rule): `exact` | `server_base` | `annotated_base` | `prefix`. `None`
+    /// on other rows, and on a DOCUMENTS edge another emitter (an overlay
+    /// stanza) asserted.
     pub pairing: Option<&'static str>,
     pub route: Option<Located>,
     /// The first function the route is HANDLED_BY.
@@ -439,8 +443,9 @@ fn route_method_path(qname: &str, cells: &[Cell]) -> (String, String) {
     }
 }
 
-/// The contract-link pass's rule on a DOCUMENTS edge (`exact` | `prefix`), or
-/// `None` when another emitter asserted the edge.
+/// The contract-link pass's rule on a DOCUMENTS edge (`exact` |
+/// `server_base` | `annotated_base` | `prefix`), or `None` when another
+/// emitter asserted the edge.
 fn pairing_rule(cells: &[Cell]) -> Option<&'static str> {
     let ev = Evidence::read(cells)?;
     if ev.emitter != "pass:contract_link" {
@@ -448,6 +453,8 @@ fn pairing_rule(cells: &[Cell]) -> Option<&'static str> {
     }
     match ev.rule.as_deref()? {
         "exact" => Some("exact"),
+        "server_base" => Some("server_base"),
+        "annotated_base" => Some("annotated_base"),
         "prefix" => Some("prefix"),
         _ => None,
     }

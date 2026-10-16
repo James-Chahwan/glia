@@ -442,3 +442,233 @@ fn file_stem_is_the_fallback_feature() {
         "admin's /purge: its service declares nothing"
     );
 }
+
+// ----------------------------------------------------------------------
+// DF.19 — OpenAPI bases used: `server_base` and `annotated_base` pairings
+// ----------------------------------------------------------------------
+
+/// The ORIGIN payload of the contract DOC_SECTION whose qname ends with
+/// `tail` (an op qname is `contract::<dir>::<stem>::<METHOD>:<path>`).
+fn op_origin(r: &glia_engine::GenerateResult, tail: &str) -> String {
+    use glia_code_domain::{cell_type, node_kind};
+    use glia_core::CellPayload;
+    r.merged
+        .graphs
+        .iter()
+        .flat_map(|g| {
+            g.nodes.iter().filter(move |n| {
+                g.nav.kind_by_id.get(&n.id) == Some(&node_kind::DOC_SECTION)
+                    && g.nav
+                        .qname_by_id
+                        .get(&n.id)
+                        .is_some_and(|q| q.starts_with("contract::") && q.ends_with(tail))
+            })
+        })
+        .flat_map(|n| n.cells.iter())
+        .find_map(|c| match &c.payload {
+            CellPayload::Json(j) if c.kind == cell_type::ORIGIN => Some(j.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no contract op ending {tail}"))
+}
+
+/// bench/substrate-gap/fixtures/contract-openapi-server-variables, file for
+/// file (key.json aside).
+fn server_variables_tree(root: &Path) {
+    write(root, "go.mod", "module example.com/svc\n\ngo 1.22\n");
+    write(
+        root,
+        "admin/openapi.json",
+        "{\"openapi\":\"3.0.0\",\"info\":{\"title\":\"admin\",\"version\":\"1\"},\"servers\":[{\"url\":\"http://localhost:8080\"},{\"url\":\"https://api.example.com/admin\"}],\n \
+         \"paths\":{\"/stats\":{\"get\":{\"operationId\":\"stats\",\"responses\":{\"200\":{\"description\":\"ok\"}}}}}}\n",
+    );
+    write(
+        root,
+        "docs/openapi.yaml",
+        "openapi: 3.0.0\n\
+         info:\n\
+         \x20 title: svc\n\
+         \x20 version: \"1\"\n\
+         servers:\n\
+         \x20 - url: \"{scheme}://api.example.com/{basePath}\"\n\
+         \x20   variables:\n\
+         \x20     scheme:\n\
+         \x20       default: https\n\
+         \x20     basePath:\n\
+         \x20       default: api/v1\n\
+         paths:\n\
+         \x20 /users:\n\
+         \x20   get:\n\
+         \x20     operationId: listUsers\n\
+         \x20     responses:\n\
+         \x20       \"200\":\n\
+         \x20         description: ok\n",
+    );
+    write(
+        root,
+        "api/routes.go",
+        "package api\n\
+         \n\
+         import \"github.com/gin-gonic/gin\"\n\
+         \n\
+         func Register(r *gin.Engine) {\n\
+         \tv1 := r.Group(\"/api/v1\")\n\
+         \tv1.GET(\"/users\", listUsers)\n\
+         \tr.GET(\"/admin/stats\", stats)\n\
+         }\n\
+         \n\
+         func listUsers(c *gin.Context) {}\n\
+         func stats(c *gin.Context)     {}\n",
+    );
+}
+
+/// The admin document lists a root dev server first and the API base
+/// second; `/stats` pairs `GET /admin/stats` through the second server's base
+/// (rule `server_base`), so the route is no longer undeclared.
+#[test]
+fn server_base_pairs_the_second_server() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    server_variables_tree(dir.path());
+    let r = build(dir.path());
+    assert!(
+        op_origin(&r, "GET:/stats").contains(r#""bases":["","/admin"]"#),
+        "DF.18 records both bases"
+    );
+    let s = spec_status(&r.merged, &r.repo_labels, None);
+    let stats = row(&s, Some("openapi"), IMPLEMENTED, "/stats");
+    assert_eq!(stats.pairing, Some("server_base"), "{s:#?}");
+    assert_eq!(at(&stats.route), Some(("api/routes.go".into(), 8)));
+    assert!(
+        !s.rows.iter().any(|r| r.status == UNDECLARED),
+        "GET /admin/stats is documented now: {s:#?}"
+    );
+    assert_eq!(
+        s.summary(),
+        "features=1 declared=2 implemented=2 declared_missing=0 undeclared=0 ungoverned=0"
+    );
+}
+
+/// DF.18's variable fold puts the base in `path` itself, so the op pairs
+/// exactly (a regression pin for the lookup order: the declared path first).
+#[test]
+fn variable_base_is_exact() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    server_variables_tree(dir.path());
+    let s = status_of(dir.path(), None);
+    let users = row(&s, Some("openapi"), IMPLEMENTED, "/api/v1/users");
+    assert_eq!(users.pairing, Some("exact"), "{s:#?}");
+    assert_eq!(at(&users.route), Some(("api/routes.go".into(), 7)));
+}
+
+/// A swaggo service: the general-info block declares `@BasePath /api` in
+/// code, and the generated docs/swagger.json declares no base of its own.
+fn swaggo_tree(root: &Path, general_base: &str) {
+    write(root, "go.mod", "module example.com/turps\n\ngo 1.22\n");
+    write(
+        root,
+        "main.go",
+        &format!(
+            "package main\n\
+             \n\
+             import \"github.com/gin-gonic/gin\"\n\
+             \n\
+             // @title           Turps API\n\
+             // @version         1.0\n\
+             // @BasePath        {general_base}\n\
+             func main() {{\n\
+             \tr := gin.Default()\n\
+             \tapi := r.Group(\"/api\")\n\
+             \tapi.POST(\"/auth/login\", login)\n\
+             \tr.Run()\n\
+             }}\n\
+             \n\
+             func login(c *gin.Context) {{}}\n"
+        ),
+    );
+    write(root, "docs/swagger.json", &swagger_json(None));
+}
+
+/// A swaggo-generated Swagger 2.0 document declaring `POST /auth/login`, with
+/// `basePath` when `base` is given.
+fn swagger_json(base: Option<&str>) -> String {
+    let base = base
+        .map(|b| format!("    \"basePath\": \"{b}\",\n"))
+        .unwrap_or_default();
+    format!(
+        "{{\n    \"swagger\": \"2.0\",\n    \"info\": {{\n        \"contact\": {{}}\n    }},\n{base}    \
+         \"paths\": {{\n        \"/auth/login\": {{\n            \"post\": {{\n                \
+         \"summary\": \"Log in\",\n                \"responses\": {{\n                    \
+         \"200\": {{\n                        \"description\": \"OK\"\n                    }}\n                \
+         }}\n            }}\n        }}\n    }}\n}}\n"
+    )
+}
+
+/// The document declares no base, its project's general-info block declares
+/// `/api`: the op is stamped with that base (1-based line of the
+/// `@BasePath`) and pairs `POST /api/auth/login` exactly under it, at Medium
+/// (rule `annotated_base`), never through the API-prefix guess.
+#[test]
+fn annotated_base_pairs_base_less_swagger() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    swaggo_tree(dir.path(), "/api");
+    let r = build(dir.path());
+    let origin = op_origin(&r, "POST:/auth/login");
+    assert!(
+        origin.contains(r#""annotated_base":"/api","annotated_at":"main.go:7""#),
+        "{origin}"
+    );
+    let s = spec_status(&r.merged, &r.repo_labels, None);
+    let login = row(&s, Some("swagger"), IMPLEMENTED, "/auth/login");
+    assert_eq!(login.pairing, Some("annotated_base"), "{s:#?}");
+    assert_eq!(login.confidence, Some("medium"));
+    assert_eq!(at(&login.route), Some(("main.go".into(), 11)));
+    assert_eq!(
+        s.summary(),
+        "features=1 declared=1 implemented=1 declared_missing=0 undeclared=0 ungoverned=0"
+    );
+}
+
+/// Two general-info blocks naming different bases in one project: which one
+/// generated the document is unknown, so no op is annotated and the pairing
+/// stays the API-prefix guess.
+#[test]
+fn two_general_bases_annotate_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    swaggo_tree(dir.path(), "/api");
+    write(
+        dir.path(),
+        "cmd/admin/main.go",
+        "package main\n\
+         \n\
+         // @title    Admin API\n\
+         // @BasePath /admin\n\
+         func main() {}\n",
+    );
+    let r = build(dir.path());
+    let origin = op_origin(&r, "POST:/auth/login");
+    assert!(!origin.contains("annotated_base"), "{origin}");
+    let s = spec_status(&r.merged, &r.repo_labels, None);
+    let login = row(&s, Some("swagger"), IMPLEMENTED, "/auth/login");
+    assert_eq!(login.pairing, Some("prefix"), "{s:#?}");
+}
+
+/// A document that declares its own base is never annotated: its `path`
+/// already carries the base it chose (`/billing`), and the raw-path retry
+/// pairs it as before (`prefix`).
+#[test]
+fn document_with_a_base_is_not_annotated() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    swaggo_tree(dir.path(), "/api");
+    write(
+        dir.path(),
+        "docs/swagger.json",
+        &swagger_json(Some("/billing")),
+    );
+    let r = build(dir.path());
+    let origin = op_origin(&r, "POST:/billing/auth/login");
+    assert!(origin.contains(r#""raw_path":"/auth/login""#), "{origin}");
+    assert!(!origin.contains("annotated_base"), "{origin}");
+    let s = spec_status(&r.merged, &r.repo_labels, None);
+    let login = row(&s, Some("swagger"), IMPLEMENTED, "/billing/auth/login");
+    assert_eq!(login.pairing, Some("prefix"), "{s:#?}");
+}

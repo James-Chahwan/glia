@@ -675,13 +675,24 @@ pub(crate) fn link_doc_sections(merged: &mut MergedGraph) {
 ///
 /// Matching is the HTTP resolver's own route index and tiers 1-4
 /// (`HttpRouteMatcher`), so a contract pairs with exactly the routes a client
-/// calling the same `METHOD path` would. Confidence:
-/// - `Strong` — the declared `(method, path)` hit a route outright;
-/// - `Medium` — it needed an API-prefix strip (an OpenAPI `servers: /api/v1`
-///   base), the route's `ANY` method, or the un-prefixed `raw_path` retry (a
-///   server base that is not API-shaped, e.g. `/billing-svc`).
+/// calling the same `METHOD path` would. The lookup order, each step taken
+/// only when every earlier one found no exact route, and its EVIDENCE rule:
+/// 1. the declared `(method, path)` hits a route outright — `exact`, `Strong`;
+/// 2. DF.19: each other server base the document lists (ORIGIN `bases`,
+///    DF.18; the first is already in `path`) joined onto `raw_path` hits a
+///    route outright — `server_base`, `Strong`: the document declared it;
+/// 3. DF.19: the project's swaggo general-info `@BasePath` (ORIGIN
+///    `annotated_base`, stamped by `build::grafts` on a base-less document)
+///    joined onto `raw_path` hits a route outright — `annotated_base`,
+///    `Medium`: the base is read from code, not from the document;
+/// 4. the declared path's own inferred tiers (an API-prefix strip of an
+///    OpenAPI `servers: /api/v1` base, the route's `ANY` method), else the
+///    un-prefixed `raw_path` retry (a server base that is not API-shaped,
+///    e.g. `/billing-svc`) — `prefix`, `Medium`.
 ///
-/// Neither is ever above the ROUTE node's own confidence.
+/// A step-2 / step-3 lookup that reaches routes only through an inferred
+/// tier is dropped, so a base never adds a guess the old ladder would not
+/// have made. No tier is ever above the ROUTE node's own confidence.
 ///
 /// A10.3: an AsyncAPI channel op (`action` + `channel`, no `method`) pairs the
 /// same way with the queue node named for its channel — see
@@ -694,9 +705,10 @@ pub(crate) fn link_contract_routes(merged: &mut MergedGraph) {
     let (edges, stats) = contract_route_edges(merged);
     if stats.ops > 0 {
         eprintln!(
-            "[contract-link] ops={} exact={} prefix={} unmatched={} edges={}",
+            "[contract-link] ops={} exact={} based={} prefix={} unmatched={} edges={}",
             stats.ops,
             stats.exact,
+            stats.based,
             stats.prefix,
             stats.unmatched,
             edges.len() - stats.channel_edges
@@ -718,8 +730,9 @@ pub(crate) fn link_contract_routes(merged: &mut MergedGraph) {
 
 /// Counters behind the `[contract-link]` markers.
 ///
-/// HTTP half: `exact` + `prefix` + `unmatched` == `ops`: each op is counted
-/// once, by the tier that paired it (`prefix` = every non-exact pairing, see
+/// HTTP half: `exact` + `based` + `prefix` + `unmatched` == `ops`: each op
+/// is counted once, by the step that paired it (`based` = `server_base` or
+/// `annotated_base`, `prefix` = every inferred pairing, see
 /// `link_contract_routes`).
 ///
 /// Channel half (A10.3): `paired` + `channel_unmatched` == `channels`;
@@ -729,6 +742,7 @@ pub(crate) fn link_contract_routes(merged: &mut MergedGraph) {
 struct ContractLinkStats {
     ops: usize,
     exact: usize,
+    based: usize,
     prefix: usize,
     unmatched: usize,
     channels: usize,
@@ -744,6 +758,83 @@ struct ContractOp {
     method: String,
     path: String,
     raw_path: Option<String>,
+    /// DF.18: every server base of a document listing two or more, in
+    /// document order (the first is the one joined into `path`); empty
+    /// otherwise.
+    bases: Vec<String>,
+    /// DF.19: the project's swaggo general-info base, on an op of a
+    /// document that declared none (`build::grafts`).
+    annotated_base: Option<String>,
+}
+
+/// How the contract-link pass paired an op, as its EVIDENCE rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkRule {
+    /// The declared path, outright.
+    Exact,
+    /// Another server base the document lists, outright (DF.19).
+    ServerBase,
+    /// The project's annotated `@BasePath`, outright (DF.19).
+    AnnotatedBase,
+    /// An inferred tier or the raw-path retry.
+    Prefix,
+}
+
+impl LinkRule {
+    fn name(self) -> &'static str {
+        match self {
+            LinkRule::Exact => "exact",
+            LinkRule::ServerBase => "server_base",
+            LinkRule::AnnotatedBase => "annotated_base",
+            LinkRule::Prefix => "prefix",
+        }
+    }
+
+    /// The tier's ceiling: only a pairing the document itself declares is
+    /// `Strong`.
+    fn cap(self, route: Confidence) -> Confidence {
+        match self {
+            LinkRule::Exact | LinkRule::ServerBase => route,
+            LinkRule::AnnotatedBase | LinkRule::Prefix => weaker(Confidence::Medium, route),
+        }
+    }
+}
+
+/// `join_base("/admin", "/stats")` -> `/admin/stats`: leading-slashed and
+/// never double-slashed, as the contract extractor joins a server base.
+fn join_base(base: &str, raw: &str) -> String {
+    let mut s = String::with_capacity(base.len() + raw.len() + 1);
+    s.push_str(base.trim_end_matches('/'));
+    s.push('/');
+    s.push_str(raw.trim_start_matches('/'));
+    s
+}
+
+/// DF.19 steps 2-3 of the lookup order (`link_contract_routes`): each listed
+/// server base in document order, then the annotated base; the first whose
+/// join onto `raw_path` hits a route outright wins. A join equal to the
+/// declared path was step 1 and is skipped.
+fn based_hits(
+    matcher: &glia_graph::HttpRouteMatcher,
+    op: &ContractOp,
+) -> Option<(Vec<glia_graph::RouteMatch>, LinkRule)> {
+    let raw = op.raw_path.as_deref()?;
+    let listed = op.bases.iter().map(|b| (b.as_str(), LinkRule::ServerBase));
+    let annotated = op
+        .annotated_base
+        .iter()
+        .map(|b| (b.as_str(), LinkRule::AnnotatedBase));
+    for (base, rule) in listed.chain(annotated) {
+        let path = join_base(base, raw);
+        if path == op.path {
+            continue;
+        }
+        let hits = matcher.lookup(&op.method, &path);
+        if hits.first().is_some_and(|h| h.exact) {
+            return Some((hits, rule));
+        }
+    }
+    None
 }
 
 /// A10.3: the message half of a contract operation, read off its ORIGIN cell.
@@ -797,23 +888,33 @@ fn contract_route_edges(merged: &MergedGraph) -> (Vec<Edge>, ContractLinkStats) 
     for (op_id, op) in &ops {
         let mut hits = matcher.lookup(&op.method, &op.path);
         // Every hit comes from one tier, so the first speaks for all of them.
-        let mut exact = hits.first().is_some_and(|h| h.exact);
+        let mut rule = if hits.first().is_some_and(|h| h.exact) {
+            LinkRule::Exact
+        } else {
+            LinkRule::Prefix
+        };
+        if rule != LinkRule::Exact
+            && let Some((based, by)) = based_hits(&matcher, op)
+        {
+            hits = based;
+            rule = by;
+        }
         if hits.is_empty()
             && let Some(raw) = op.raw_path.as_deref()
             && raw != op.path
         {
             hits = matcher.lookup(&op.method, raw);
             // Dropping the server base is itself an inference.
-            exact = false;
+            rule = LinkRule::Prefix;
         }
         if hits.is_empty() {
             stats.unmatched += 1;
             continue;
         }
-        if exact {
-            stats.exact += 1;
-        } else {
-            stats.prefix += 1;
+        match rule {
+            LinkRule::Exact => stats.exact += 1,
+            LinkRule::ServerBase | LinkRule::AnnotatedBase => stats.based += 1,
+            LinkRule::Prefix => stats.prefix += 1,
         }
         let mut seen: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
         for h in hits {
@@ -822,13 +923,10 @@ fn contract_route_edges(merged: &MergedGraph) -> (Vec<Edge>, ContractLinkStats) 
             if !seen.insert(h.route) {
                 continue;
             }
-            // Non-exact pairings are capped at Medium; a weaker route stays weaker.
-            let confidence = match h.confidence {
-                Confidence::Strong if !exact => Confidence::Medium,
-                c => c,
-            };
-            let rule = if exact { "exact" } else { "prefix" };
-            let ev = Evidence::emitter("pass:contract_link").rule(rule);
+            // Inferred and annotated pairings are capped at Medium; a weaker
+            // route stays weaker.
+            let confidence = rule.cap(h.confidence);
+            let ev = Evidence::emitter("pass:contract_link").rule(rule.name());
             edges.push(
                 Edge::new(*op_id, h.route, edge_category::DOCUMENTS, confidence)
                     .with_cell(ev.to_cell()),
@@ -985,7 +1083,28 @@ fn http_op(v: &serde_json::Value) -> Option<ContractOp> {
     }
     let path = v.get("path")?.as_str()?.to_string();
     let raw_path = v.get("raw_path").and_then(|p| p.as_str()).map(str::to_string);
-    Some(ContractOp { method, path, raw_path })
+    let bases = v
+        .get("bases")
+        .and_then(|b| b.as_array())
+        .map(|b| {
+            b.iter()
+                .filter_map(|x| x.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let annotated_base = v
+        .get("annotated_base")
+        .and_then(|b| b.as_str())
+        .filter(|b| !b.is_empty())
+        .map(str::to_string);
+    Some(ContractOp {
+        method,
+        path,
+        raw_path,
+        bases,
+        annotated_base,
+    })
 }
 
 /// A10.3: the channel operation a contract ORIGIN declares. An ORIGIN with a
@@ -2846,6 +2965,87 @@ mod passes_tests {
         assert_eq!(stats, ContractLinkStats { ops: 2, exact: 0, prefix: 1, unmatched: 1, ..Default::default() });
     }
 
+    /// DF.19: the lookup order. The declared path wins outright (`exact`,
+    /// even with an annotated base on the op); then another listed server
+    /// base (`server_base`, Strong); then the annotated `@BasePath`
+    /// (`annotated_base`, Medium), which pairs the one route under it where
+    /// the API-prefix guess paired both mounts; a base reaching a route only
+    /// through an inferred tier is dropped and the old ladder answers.
+    #[test]
+    fn contract_link_pairs_through_listed_and_annotated_bases() {
+        let mut h = Hand::new("test://contract-link/bases");
+        let admin_stats = h.route("GET", "/admin/stats");
+        let api_login = h.route("POST", "/api/auth/login");
+        let v1_login = h.route("POST", "/v1/auth/login");
+        let healthz = h.route("GET", "/healthz");
+        let api_orders = h.route("GET", "/api/orders");
+        let with = |origin: String, extra: &str| {
+            let body = origin.strip_suffix('}').unwrap_or(&origin).to_string();
+            format!("{body}{extra}}}")
+        };
+        let stats_op = h.doc(
+            "contract::admin::GET:/stats",
+            &with(op_origin("GET", "/stats", "/stats"), r#","bases":["","/admin"]"#),
+        );
+        let annotated = r#","annotated_base":"/api","annotated_at":"main.go:7""#;
+        let login_op = h.doc(
+            "contract::docs::swagger::POST:/auth/login",
+            &with(op_origin("POST", "/auth/login", "/auth/login"), annotated),
+        );
+        let health_op = h.doc(
+            "contract::docs::swagger::GET:/healthz",
+            &with(op_origin("GET", "/healthz", "/healthz"), annotated),
+        );
+        let orders_op = h.doc(
+            "contract::orders::GET:/orders",
+            &with(op_origin("GET", "/orders", "/orders"), r#","bases":["","/v2"]"#),
+        );
+        let merged = MergedGraph::new(vec![h.graph()]);
+
+        let (edges, stats) = contract_route_edges(&merged);
+        let rules = |from: NodeId| -> Vec<(NodeId, Confidence, Option<String>)> {
+            edges
+                .iter()
+                .filter(|e| e.from == from)
+                .map(|e| (e.to, e.confidence, Evidence::of(e).and_then(|ev| ev.rule)))
+                .collect()
+        };
+        let rule = |r: &str| Some(r.to_string());
+        assert_eq!(rules(stats_op), vec![(admin_stats, Confidence::Strong, rule("server_base"))]);
+        assert_eq!(
+            rules(login_op),
+            vec![(api_login, Confidence::Medium, rule("annotated_base"))],
+            "the annotated base pairs one mount, not the guess's two ({v1_login:?})"
+        );
+        assert_eq!(rules(health_op), vec![(healthz, Confidence::Strong, rule("exact"))]);
+        assert_eq!(
+            rules(orders_op),
+            vec![(api_orders, Confidence::Medium, rule("prefix"))],
+            "`/v2/orders` reaches /api/orders only by a prefix strip: dropped"
+        );
+        assert_eq!(
+            stats,
+            ContractLinkStats { ops: 4, exact: 1, based: 2, prefix: 1, unmatched: 0, ..Default::default() }
+        );
+
+        // Control: the same login op without its annotated base is HEAD's
+        // guess, both mounts at `prefix`.
+        let mut h = Hand::new("test://contract-link/bases-control");
+        let api_login = h.route("POST", "/api/auth/login");
+        let v1_login = h.route("POST", "/v1/auth/login");
+        let op = h.doc(
+            "contract::docs::swagger::POST:/auth/login",
+            &op_origin("POST", "/auth/login", "/auth/login"),
+        );
+        let (edges, stats) = contract_route_edges(&MergedGraph::new(vec![h.graph()]));
+        let mut got = documents(&edges, op);
+        got.sort_by_key(|(id, _)| id.0);
+        let mut want = vec![(api_login, Confidence::Medium), (v1_login, Confidence::Medium)];
+        want.sort_by_key(|(id, _)| id.0);
+        assert_eq!(got, want);
+        assert_eq!(stats, ContractLinkStats { ops: 1, prefix: 1, ..Default::default() });
+    }
+
     #[test]
     fn contract_link_pairs_across_repos_and_lands_in_cross_edges() {
         let mut spec = Hand::new("test://contract-link/spec");
@@ -2877,6 +3077,25 @@ mod passes_tests {
         assert_eq!(stats, ContractLinkStats { ops: 1, exact: 0, prefix: 0, unmatched: 1, ..Default::default() });
     }
 
+    /// DF.18 / DF.19: `bases` is read as a string array and `annotated_base`
+    /// as a non-empty string; neither is required.
+    #[test]
+    fn contract_op_reads_bases_and_annotated_base() {
+        let origin = |j: &str| vec![Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(j.into()) }];
+        let op = contract_op(&origin(
+            r#"{"provenance":"contract","source":"openapi","method":"GET","path":"/stats","raw_path":"/stats","bases":["","/admin"],"operation_id":"stats"}"#,
+        ));
+        assert_eq!(op.map(|o| o.bases), Some(vec![String::new(), "/admin".to_string()]));
+        let op = contract_op(&origin(
+            r#"{"provenance":"contract","source":"openapi","method":"POST","path":"/auth/login","raw_path":"/auth/login","annotated_base":"/api","annotated_at":"turps/Server/server.go:29"}"#,
+        ));
+        assert_eq!(op.and_then(|o| o.annotated_base), Some("/api".to_string()));
+        let op = contract_op(&origin(
+            r#"{"provenance":"contract","source":"openapi","method":"GET","path":"/x","raw_path":"/x","annotated_base":""}"#,
+        ));
+        assert_eq!(op.map(|o| (o.bases, o.annotated_base)), Some((vec![], None)));
+    }
+
     #[test]
     fn contract_op_reads_only_http_contract_origins() {
         let origin = |j: &str| vec![Cell { kind: cell_type::ORIGIN, payload: CellPayload::Json(j.into()) }];
@@ -2889,6 +3108,8 @@ mod passes_tests {
                 method: "GET".into(),
                 path: "/api/v1/users".into(),
                 raw_path: Some("/users".into()),
+                bases: vec![],
+                annotated_base: None,
             })
         );
         // An AsyncAPI channel op is not an HTTP op.
