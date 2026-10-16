@@ -1,6 +1,6 @@
 ---
 name: glia
-description: Answer structural questions about a codebase with the glia CLI, no MCP server needed. Use it for where X is defined, what changing X (or a diff) affects, how feature Y flows across services, what calls, serves or implements X, what X writes or sends, which tests cover a change, what a change did to the graph, a PR review of a change, whether a change breaks an API client, what usually changes with a change, the context for a task packed to a token budget, where the churning, load-bearing or tightly coupled code is, what is one thing across repos, and any structural question a Datalog or GQL query can ask. Reach for it before grep when the question is about structure, not text.
+description: Answer structural questions about a codebase with the glia CLI, no MCP server needed. Use it for where X is defined, what changing X (or a diff) affects, how feature Y flows across services, what calls, serves or implements X, what X writes or sends, which tests cover a change, what a change did to the graph, a PR review of a change, whether a change breaks an API client, whether a frontend's model of an API matches what the backend sends, what usually changes with a change, the context for a task packed to a token budget, where the churning, load-bearing or tightly coupled code is, what is one thing across repos, and any structural question a Datalog or GQL query can ask. Reach for it before grep when the question is about structure, not text.
 ---
 
 # glia from the command line
@@ -27,6 +27,7 @@ glia parses a repo into one cross-language graph and answers questions from it. 
 | What did my change do to the graph? | `glia delta <repo> --json` |
 | My change as one PR report: impact, tests, edges, new rule violations? | `glia review <repo> --base main --json` |
 | Did my change break a client of an API or message contract? | `glia contract-breaks <repo> --base main --json` |
+| Does the frontend's model of an API response or request match the backend's (or the OpenAPI op, or the GraphQL schema)? | `glia contracts <repo> --with <backend> --fields --json` |
 | What usually changes along with my change? | `glia cochange <repo> --base main --json` |
 | Are there loops between services, or import cycles? | `glia cycles <repo> --json` |
 | Does the code break the repo's declared rules or architecture? | `glia check <repo> --json` |
@@ -35,7 +36,7 @@ glia parses a repo into one cross-language graph and answers questions from it. 
 | What are the tightly coupled clusters? | `glia communities <repo> --json` |
 | What carries the most load: utilities, orchestrators, cross-service connectors? | `glia hubs <repo> --json` |
 | A structural question no command answers (every route with no handler, every call from `web/` into `api/`)? | `glia query <repo> -e '<datalog>' --json`, `glia query <repo> --gql -e "MATCH ..." --json` |
-| Which packages, messages or contract ops are one thing across these repos, and which copies diverged? | `glia identity <repo> --with <other> --json` |
+| Which packages, messages, contract ops or client / server models are one thing across these repos, and which copies diverged? | `glia identity <repo> --with <other> --json` |
 | Where is glia blind in this repo? | `glia coverage <repo> --json` |
 | What could glia not pair? What looks dead? | `glia gaps <repo> --json` |
 | Which docs govern X? | `glia docs-for <repo> X --json` |
@@ -44,7 +45,7 @@ glia parses a repo into one cross-language graph and answers questions from it. 
 
 The rest of the CLI:
 - `glia pages <repo>`: frontend router pages and dead links.
-- `glia contracts <repo>`: producer vs consumer message types per queue topic.
+- `glia contracts <repo>`: producer vs consumer message types per queue topic; `--fields` diffs fields (schema copies, OpenAPI vs Pact, and the client / server models in the table above).
 - `glia spec-status <repo>`: OpenAPI / feature.yaml operations implemented or missing.
 - `glia projects <repo>`: the labels `--scope` takes.
 - `glia impact <repo> X`: plain reachability, unranked.
@@ -70,11 +71,12 @@ Flags most commands share:
 - **Tier.** `tier` is `fact` (declared in the source), `derived` (inferred by a resolver, e.g. a client URL paired to a route) or `heuristic` (paired by name). Case varies by command. Weigh the answer by it.
 - **Empty answers.** An empty answer is not "nothing exists". It carries `absence: {tier, reason, note, caveats, suggestions}`. Each caveat names an edge kind glia is known to miss (`edge_category`, `language`), how many it did find (`edges_found`) and what to grep instead (`verify`).
 - **Blind spots.** `glia coverage <repo> --json` lists the same caveats for the whole repo. Run it once before trusting "not found".
-- **Identity.** With `--with`, one package, message, contract op or SCIP symbol that several repos hold is one row, its best copy, with `identity: {tier, rules, diverged, also_in}`. `also_in` lists the other copies with their `repo`, `qname`, `file` and `line`, and `diverged: true` means the copies differ (a message's fields, say). Vendored copies are `heuristic` candidates in `glia identity` and are never folded.
+- **Identity.** With `--with`, one package, message, contract op or SCIP symbol that several repos hold is one row, its best copy, with `identity: {tier, rules, diverged, also_in}`. `also_in` lists the other copies with their `repo`, `qname`, `file` and `line`, and `diverged: true` means the copies differ (a message's fields, say). Vendored copies are `heuristic` candidates in `glia identity` and are never folded. A frontend model and the server struct of the HTTP exchange it reads (rule `http_model`), and a GraphQL client's result model with its schema type (`graphql_model`), are `derived` classes too, inside one repo as well: in a monorepo `find` shows a TS interface and its Go struct as one row, the other one under `also_in`.
 - **External sinks.** A call whose every site dials a public host outside the build (`fetch("https://nominatim.openstreetmap.org/search?…")`) is an ENDPOINT marked external, never paired with a route. `effects` rows name the host in `external_hosts`; the table's downstream cell reads `external: <host>`. `serves "GET /search" --json` lists it after any route, `"kind":"ENDPOINT","match":"external"`, so the channel is answered, not absent. `external_hosts` is `[]` on every other row. Such a call is real traffic, not a gap.
 - **Docs.** `docs-for` and the `DOCUMENTS` edges read only the markdown the build ingests. That is the well-known files (`README*.md`, `CLAUDE.md`, ...) and the `docs/` tree at the repo root and at every project root, a top-level `.ai/` tree, ADR directories, SDD feature docs (`features/<feature>/*.md`, spec-kit `specs/<NNN-slug>/`) and synced docs (`glia docs sync`). A section documents a symbol only when it names it in single backticks. A README inside a source directory is not read. `glia coverage` states this as a `DOCUMENTS` row.
-- **Dead symbols.** A `gaps` `dead_symbol` row is a function, method or class with no entry point reaching it and no incoming call or use. A method that IMPLEMENTS a called method (an interface method, an abstract member) is never one: dispatch reaches it.
-- **Exit codes.** 0 for any answer, empty included, except: `pack`, `hotspots`, `hubs`, `cochange`, `splits`, `query` and `identity` exit 1 when the answer is empty. `why` exits 1 when no edge joins the two nodes (it still prints a witness path). `check` exits 1 on a BLOCKING violation: one whose tier is at least its rule's `min_tier` (default `derived`). A `heuristic` violation never blocks; it is listed as advisory. `review` exits 1 when the change adds a blocking violation, and `contract-breaks` when a change is breaking or leaves a client with no provider. `blast-radius` exits 3 when no seed resolved. 2 means a usage, git or build error, a query that does not parse or analyse, or a rule `check` could not evaluate.
+- **Dead symbols.** A `gaps` `dead_symbol` row is a function, method or class with no entry point reaching it and no incoming call or use. Never a row: a method that IMPLEMENTS a called method (an interface method, an abstract member: dispatch reaches it); the members a framework or the runtime calls on a class something uses (Angular lifecycle hooks, form-control and validator members, pipe `transform`, interceptors, guards, Flutter `build` / `createState` / `dispose`, ...) and its constructor; generated code (ORIGIN `generated` / `generated_proto`). stderr counts what it held back: `[dead-framework] dead_symbol rows withheld: invoked=<i> generated=<g>`. A method an Angular template or `host:` binding calls (inline or through `templateUrl`), a member a decorator binds (`@HostListener`, an `@Input` setter), what a Flutter widget's closures call and a TypeScript function passed by value (a route guard, a provider, a comparator) are reached through real edges, so they are not dead either.
+- **Unpaired routes and endpoints.** `unpaired_route` leaves out a route a WebSocket client connects through (`[gaps] ws-served routes=<n>`) and a route only test code registers (`[gaps] unpaired_route rows withheld: <n> (test-file routes)`). A GraphQL client's HTTP transport (`endpoint:POST:/graphql`) is no `unpaired_endpoint` when its project's operations pair a resolver on a server with no route at that path; any other unpaired transport's `detail` starts `graphql transport; ` (`[gaps] graphql transports implied=<n> unpaired=<m>`).
+- **Exit codes.** 0 for any answer, empty included, except: `pack`, `hotspots`, `hubs`, `cochange`, `splits`, `query` and `identity` exit 1 when the answer is empty. `why` exits 1 when no edge joins the two nodes (it still prints a witness path). `check` exits 1 on a BLOCKING violation: one whose tier is at least its rule's `min_tier` (default `derived`). A `heuristic` violation never blocks; it is listed as advisory. A declared rule that checks nothing (a stanza anchored nowhere or rejected, one the graph does not hold, a scope no node sits in) is listed under `unanchored` ("Rules that check nothing") with its reason and a fix, and changes the exit code only with `--strict` (then 2). `review` exits 1 when the change adds a blocking violation or a blocking model break, and `contract-breaks` when a change is breaking, leaves a client with no provider, or is a blocking model break. A model break (a client / server model drifted across the change) blocks only at or above `--models-min-tier` (default `fact`, so the resolver-paired `derived` rows are advisory: counted in `advisory`, not `breaking`). `blast-radius` exits 3 when no seed resolved. 2 means a usage, git or build error, a query that does not parse or analyse, or a rule `check` could not evaluate.
 
 ## Cost, and what gets written
 
@@ -96,6 +98,7 @@ Every example below was run from the root of the repo its comment names. Most ar
 - `orders-proto`: `proto/orders.proto` declares `message OrderCreated { string order_id = 1; int64 total_cents = 2; repeated string sku = 3; }` on `main`. The change makes `total_cents` a `string` and adds `string currency = 4`.
 - `shop`: a Python git repo whose `orders/service.py` and `orders/models.py` changed together in all five of their commits, and `util/money.py` together with `billing/charge.py` in three of its four. `glia history sync . --blame` has been run.
 - `identity-proto-diverged`: `orders/`, `billing/` and `shipping/` each hold `proto/orders.proto` with `message OrderCreated`; shipping's copy has an extra field.
+- `models-http-contract`: an Angular `portal/` reads `GET /api/plans/:id` as its `Plan` interface (id, name, priceCents, trialDays); the gin handler in `billing/` writes `planBody` (id, name, priceCents), and the `swagger.json` op documenting the route declares the same three.
 
 ```bash
 # arch-monorepo-flows: api/ gateway/ web/ worker/ in one repo; one service per top-level dir
@@ -187,18 +190,30 @@ glia delta . --json
 
 # loop, with the audit() change uncommitted; without --json it prints markdown for a PR comment; "blocking" is true (exit 1) only when the change adds a blocking rule violation
 glia review . --base main --json
-{"base":"main","counts":{"nodes_changed":3,"seeds":2,"edges_added":2,"edges_removed":0,"impact":8,"tests":0,"untested_seeds":2,"new_violations":0,"resolved_violations":0,"edges_by_tier":{"fact":2}},
+{"base":"main","counts":{"nodes_changed":3,"seeds":2,"edges_added":2,"edges_removed":0,"impact":8,"tests":0,"untested_seeds":2,"new_violations":0,"resolved_violations":0,"model_breaks":0,"edges_by_tier":{"fact":2}},
  "changed":[{"qname":"billing::billing::audit","kind":"FUNCTION","file":"billing/billing.ts","line":5,"change":"added","seed":true},…],"impact":{"seeds":[…],…,"results":[…],…},
  "tests":{"seeds":[…],"tests":[],…,"untested":["billing::billing::audit","billing::billing::settle"],…,"absence":{"tier":"FACT","reason":"no_edges",…}},
  "edges":[{"change":"added","from_qname":"billing::billing::settle","to_qname":"billing::billing::audit","category":"CALLS","tier":"fact","site_file":"billing/billing.ts","site_line":4,…},…],
- "new_violations":[],"resolved_violations":[],"check_errors":[],"blocking":false}
+ "new_violations":[],"resolved_violations":[],"model_breaks":[],"check_errors":[],"blocking":false}
 
 # orders-proto, with the change uncommitted; "producer" is the base side, "consumer" the working tree; exit 1: a change is breaking
 glia contract-breaks . --base main --json
 {"base":"main","schemas":[{"kind":"message","key":"shop.v1.OrderCreated","format":"proto","before":{…},"after":{"qname":"message:proto:shop.v1.OrderCreated","file":"proto/orders.proto","line":5,…},"status":"breaking","change":"modified","tier":"fact",…,
   "changes":[{"section":"fields","field":"total_cents","change":"type","producer":"int64","consumer":"string","rule":"proto_wire_type","breaking":true},
              {"section":"fields","field":"currency","change":"consumer_only","producer":null,"consumer":"string","rule":"proto_unknown_field","breaking":false}],…}],
- "orphaned_clients":[],"breaking":1,"absence":null}
+ "models":[],"orphaned_clients":[],"breaking":1,"advisory":0,"absence":null}
+# "models" judges the inferred client / server models the same way (a JSON rename, a field removed or now optional, a new required
+# request field), one row per model pair with both field lines; advisory unless --models-min-tier derived, as the 0.5.2 pairs are derived
+
+# models-http-contract; a client field the server never writes is json_field_missing (breaking); "producer" is the server side
+glia contracts portal --with billing --fields --json
+{"topics":[],"fields":[{"pairing":"client_contract","key":"GET /api/plans/{id} response","producer":{"qname":"contract::docs::swagger::GET:/api/plans/{id}","format":"openapi","file":"docs/swagger.json","line":6,…},
+  "consumer":{"qname":"src::app::plan.service::Plan","format":"ts","file":"src/app/plan.service.ts","line":4,…},"status":"breaking","tier":"derived","note":null,
+  "changes":[{"section":"response:200","field":"trialDays","change":"consumer_only","producer":null,"consumer":"number","rule":"contract_field_undeclared","breaking":true}]},
+ {"pairing":"http_model","key":"GET /api/plans/:id response","producer":{"qname":"handlers::plans::planBody","format":"go","file":"handlers/plans.go","line":9,…},
+  "consumer":{"qname":"src::app::plan.service::Plan","format":"ts","file":"src/app/plan.service.ts","line":4,…},"status":"breaking","tier":"derived","note":null,
+  "changes":[{"section":"response","field":"trialDays","change":"consumer_only","producer":null,"consumer":"number","rule":"json_field_missing","breaking":true}]}]}
+# a GraphQL operation's selection against its schema type is pairing graphql_selection (a selected field the type lacks: graphql_field_undefined)
 
 # shop, with orders/service.py edited; confidence is per mille of the antecedent's own commits; "link":"none" (no static edge) marks a blind spot
 glia cochange . --base main --json
@@ -223,6 +238,9 @@ glia check . --json
 # allowed facades), kind = "invariant" with a Datalog rule = '...' whose violation/N rows are its violations, and
 # min_tier = "fact" | "derived" (default derived): a violation weaker than min_tier, and every heuristic one, is listed as
 # advisory and leaves the exit code at 0. The stderr line `[check] gate blocking=<b> advisory=<a>` counts them.
+# A rule that checks nothing (a misspelt scope, a stanza the loader dropped) is an "unanchored" row with "reason" and "fix",
+# printed under "## Rules that check nothing"; --strict makes it a rule error (exit 2). A rule scoped to a directory inside a
+# project anchors on that project.
 
 # xcut-flag-read-fn: svc/checkout.py reads LaunchDarkly flags, new-checkout inside checkout() and promo-banner at module scope
 glia flags . --json

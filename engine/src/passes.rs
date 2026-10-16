@@ -1555,7 +1555,12 @@ fn route_test_rule(cells: &[Cell]) -> TestRule {
 
 /// DT.6a: the ROUTE ids every registration site of which is test code - the
 /// one predicate the `http` Resolve pass (CODE_PASSES, which keeps them out
-/// of the route index) and [`tag_synthetic_provenance`]'s ROUTE arm read.
+/// of the route index) and [`tag_synthetic_provenance`]'s ROUTE arm read, and
+/// since DT.6b the route answers too: gaps' `View::build` (with an empty
+/// `ctx`, as a layout merge reads it: unpaired_route withholds such a ROUTE,
+/// and unpaired_endpoint's `suffix_of` / `route_prefix|edge` candidates skip
+/// it) and, through that View, suspected's `pairable` (neither orphan nor
+/// target of a suspected_edge).
 ///
 /// Per ROUTE id over EVERY entry (an id in several graphs of a repo, or a
 /// layout merge's members): an entry with an ORIGIN cell is test iff that

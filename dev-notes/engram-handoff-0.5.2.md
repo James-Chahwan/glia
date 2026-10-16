@@ -1,9 +1,18 @@
 # glia 0.5.2 has landed - engram read-side handoff
 
+**This file is the 0.5.2 half of a combined 0.5.1 -> 0.5.3 handoff, which 0.5.3's release docs packet
+writes. There is no 0.5.2 release** (James, 2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*): the
+version goes 0.5.1 -> 0.5.3 in one bump, so the pin is `=0.5.3`. Meanwhile Engram builds the exporter
+from source at the local tag `0.5.2-complete`, whose binaries print `0.5.1+p<stamp>`. Section 7 adds the
+tweaks (DT.1a-DT.13, waves W15-W26), among them the hints side file and `glia cell set --hint` for the
+corrections writer.
+
 **From:** the glia session, 2026-10-16, written by the docs packet DZ.2 after glia's last code wave.
 **To:** an engram session.
 **Status:** no contract change. `GMAP_FORMAT_VERSION` stays 6, `engram-core` is untouched, and glia
-0.5.2 edits no Engram file. Engram needs **no code change**. What changes: every export's bytes once
+0.5.2 edits no Engram file. Engram needs **no code change** to keep reading exports; the tweaks add one
+recommended change, the corrections writer passing `--hint` from `<out>.hints.jsonl` (section 7.2). What
+changes: every export's bytes once
 (cross-clone determinism), identity hints on ENDPOINT and `page:` facts, how `--since` pairs re-keys and
 renames, an opt-in PPR side file, generated files leaving the export, SAME_AS edges as Cooccurs 0.3 in
 place of SHARES_DEPENDENCY, and the keys of the facts whose qname moved (section 4). These are the 0.5.2
@@ -13,23 +22,24 @@ determinism and re-key pairing, `dev-notes/research-0.5.2/R2-engram.md`).
 **This doc re-measures nothing.** Every number comes from the landed packet's commit body or report
 (cited by commit), or from Engram's own determinism check at glia `3921a636` (recorded in glia's
 `dev-notes/engram-ask-0.5.3.md` section 5). The Kina + glia replays (re-keys with X1 off and on, and
-`flat-ppr` vs `flat-fs`) run once at the 0.5.2 release candidate after W14 (James, 2026-10-16); they
-are Engram's measurement of all of this.
+`flat-ppr` vs `flat-fs`) run once at `0.5.2-complete`, after the tweaks (James, 2026-10-16 and
+2026-10-17); they are Engram's measurement of all of this.
 
 0.5.2 is glia's "four bets": 153 packets (`dev-notes/leap-052-packets.json` in glia), 151 landed in
-waves W0-W13 since v0.5.1 (`84e2e71`), and W14 is the two docs packets. It is not tagged or pushed yet,
-and stays unreleased while James tests it: everything here comes from the local `/home/ivy/Code/glia`
-checkout at `12f58844`. Packet ids are glossed in words; the hash after an id is the glia commit that
+waves W0-W13 since v0.5.1 (`84e2e71`), and W14 is the two docs packets; the tweaks followed in W15-W26
+(section 7). It is never released (it ships in 0.5.3) and nothing is pushed: sections 1-6 come from the
+local `/home/ivy/Code/glia` checkout at `12f58844`, section 7 from the tweaks' commits up to `9a8e56e0`. Packet ids are glossed in words; the hash after an id is the glia commit that
 landed it.
 
 ---
 
 ## 1. TL;DR
 
-1. **Pin `=0.5.2`:** build the exporter from glia's `v0.5.2` tag (section 2). The excluded
-   `glia-engram-export` crate now carries the release version (`engram-export/Cargo.toml:3` reads 0.5.1
-   at HEAD and moves to 0.5.2 at the bump), so `glia-export-engram -V`, `<out>.meta.json`'s
-   `glia_version` and its `exporter_version` all read 0.5.2.
+1. **Pin `=0.5.3`; until then build at `0.5.2-complete`** (section 2). The excluded
+   `glia-engram-export` crate carries the release version (`engram-export/Cargo.toml:3` reads 0.5.1
+   until the one 0.5.1 -> 0.5.3 bump), so at `0.5.2-complete` `glia-export-engram -V`,
+   `<out>.meta.json`'s `glia_version` and its `exporter_version` read 0.5.1 (build `0.5.1+p<stamp>`),
+   and 0.5.3 after the release.
 2. **Every clone of one commit exports the same bytes** (DE.2, `f2d12c54`). The eval's single-clone
    determinism check and its one cached export series (`docs/eval-plan-2026-09.md:582-592`, "Organ
    verdict v3, first attempt: blocked by its determinism check", and `:622`, "every run reads one cached
@@ -50,19 +60,24 @@ landed it.
    half of SHARES_SCHEMA are never emitted (D0.1, DD.16; section 3.7).
 8. **Keys that move** (section 4): fact keys follow glia qnames, and a handful of families re-key; the
    table says which `--since` pass carries each one.
-9. **`.gitignore`:** add `*.engram-gmap.ppr.jsonl`; and `*.engram-gmap.meta.json`, which the 0.5.1
-   handoff asked for and Engram's `.gitignore` still lacks (checked at Engram `cbf09bb`).
+9. **`.gitignore`:** add `*.engram-gmap.ppr.jsonl` and `*.engram-gmap.hints.jsonl` (DT.12a, section
+   7.1); and `*.engram-gmap.meta.json`, which the 0.5.1 handoff asked for and Engram's `.gitignore` still
+   lacks (checked at Engram `cbf09bb`).
+10. **The tweaks (section 7):** every export also writes `<out>.hints.jsonl` (each fact's v1 identity
+   hint); `glia cell set --hint` / pyo3 `hint=` take it; and more facts and edges for TS / Go / Dart /
+   Solidity code, with a few keys re-keyed.
 
 ## 2. The pin
 
 Engram links no glia crate: `engram-core` is the only thing the two repos share, and 0.5.2 did not
 touch it. The exporter is glia's `engram-export` crate, built by glia's `scripts/check-engram-export.sh`.
-The exact pin is the exporter built at the `v0.5.2` tag, `glia-engram-export =0.5.2`:
+The exact pin is the exporter built at the `v0.5.3` tag, `glia-engram-export =0.5.3`. There is no
+`v0.5.2`; until 0.5.3 is released, build at the local marker tag `0.5.2-complete`:
 
 ```
-git -C /home/ivy/Code/glia describe --tags --exact-match      # expect v0.5.2
+git -C /home/ivy/Code/glia describe --tags --exact-match      # expect 0.5.2-complete (v0.5.3 once released)
 /home/ivy/Code/glia/engram-export/target/debug/glia-export-engram -V
-#   glia-export-engram 0.5.2 (build 0.5.2+p<16 hex>)
+#   glia-export-engram 0.5.1 (build 0.5.1+p<16 hex>) at 0.5.2-complete; 0.5.3 (build 0.5.3+p<16 hex>) at v0.5.3
 ```
 
 A gmap already written names its glia in `<out>.meta.json` (`glia_version`, `exporter_version`,
@@ -347,7 +362,7 @@ files' facts; DG.1 / DG.2 / DH.1 / DH.2 / DH.4's eventbus verb-fallback `event_e
 | DE.5 PPR side file (`4504f2d6`) | `--ppr-candidates <K>`, `ppr_side` module, `<out>.ppr.jsonl`, exit 8; `Cargo.toml` gains `glia-activation` | optional reader; `.gitignore` line |
 | DE.6 keep pins (`cc67f519`) | `engram-export/tests/keep_v6.rs` is the one place pinning the three kept behaviours: `leading_doc` reaching `Symbol.doc` in 8 languages (Python, Go, TypeScript, Rust, Java, Dart, Solidity `@notice`, C# `<summary>`), the 500-byte `cap_prose`, and `--since` accuracy through CK.2's `diff.rs` tests and `since_v6.rs`'s `B_COUNTS` | none |
 | DE.7 generated provenance (`db774107`) | `generated` nodes drop through `DROP_PROVENANCE`; the `[provenance]` group | section 3.6 |
-| version | the crate version moved to the release (0.4.13 at the 0.5.1 handoff, 0.5.1 now, 0.5.2 at the bump), so `exporter=` in the `glia build=` line and `exporter_version` in meta.json read the release | none |
+| version | the crate version moved to the release (0.4.13 at the 0.5.1 handoff, 0.5.1 now and at `0.5.2-complete`, 0.5.3 at the one bump), so `exporter=` in the `glia build=` line and `exporter_version` in meta.json read the release | none |
 
 Every other exporter marker is unchanged in shape.
 
@@ -375,8 +390,154 @@ Engram calls none of them.
 - **Not measured:** SAME_AS on a single-repo Engram export; CK.2's 0.5.1 trade-off (a root route
   re-registered under a mount prefix, or a route whose method changed, is removed + added); glia's own
   repo under DE.7 / DE.8 beyond "unchanged".
-- **Engram's replays at the release candidate** (James, 2026-10-16): Kina + glia, re-keys with X1 off
+- **Engram's replays at `0.5.2-complete`** (James, 2026-10-16 / 2026-10-17): Kina + glia, re-keys with X1 off
   and on, `flat-ppr` vs `flat-fs`; the 8 public streams only if those pass.
 - **Closed:** cross-clone determinism (DE.2, and Engram's PASS at `3921a636`); endpoint hints (DE.3);
   the hint pass's cross-pairs (DE.4). Q20-25 are answered by Engram (no v7, `cap_prose` stays 500 bytes,
   side files as data only, no PPR default read path).
+
+## 7. The 0.5.2 tweaks (DT.1a-DT.13, waves W15-W26, 2026-10-17)
+
+After the W14 docs, James ran 0.5.2 against Kina and quokka-stack and asked for the gaps they showed to
+be fixed inside 0.5.2 (`dev-notes/tweaks-0.5.2.md`, T1-T13): 57 packets, `5af245f6`..`40332f16` plus
+this docs packet. T12 is Engram's: one hint format between glia and Engram (James, 2026-10-16: *"yeah
+sure lets get everyone aligned"*), from Engram's first real correction row (Kina `entryGuard`: the
+gmap's `identity_hint` `frontend/src/app/app.routes.ts:3:0`, the cell store's `Identity::hint`
+`v1|3|app.routes.ts|9bdbdf56d843b8d0|entryGuard`, so Engram could not match one to the other). Numbers
+are the commits' own; nothing here was re-run against an Engram checkout.
+
+### 7.1 `<out>.hints.jsonl` on every export (DT.12a, `5bf66c91`)
+
+- **What.** Every `glia-export-engram` run writes `<out>.hints.jsonl` beside the gmap (`x.engram-gmap`
+  -> `x.engram-gmap.hints.jsonl`), after the `--since` diff and before the PPR side file: each fact's
+  LB.6 v1 identity hint, the form glia's cell store keys a CONSTRAINT / DECISION / CONV row by. No glia
+  code reads it, and the gmap, `files.json`, `meta.json` keys, the `--since` diff, `<out>.glia/` and the
+  PPR side file are byte-identical with or without it; `GMAP_FORMAT_VERSION` stays 6.
+- **Format** (`engram-export/src/hints_side.rs`). JSONL, every object's keys sorted. Line 1 is the
+  header `{"facts":<n>,"gmap_digest":"<16 hex>","hint_version":"v1","hinted":<h>,"hints_side":1}`;
+  `gmap_digest` is `engram_core::content_digest` of the gmap, as `meta.json`'s `gmap_digest` and the PPR
+  side file use it, and `facts` is `gmap.nodes.len()`, so a reader can check the file is complete. Then
+  one row per gmap node, sorted by key: `{"hint":"v1|<kind id>|<file basename>|<body:016x>|<local>"|null,"key":"<key>"}`.
+- **Engram must:** read the file; drop it when its `gmap_digest` is not the gmap's; map key -> hint and
+  pass that hint with each cell write (7.2). **`null`** means the fact has no move-stable identity (no
+  MODULE ancestor or no POSITION file: ENDPOINTs, ROUTEs, config and data-entity nodes, doc sections,
+  non-code files; and a NatSpec tag fact, which has no glia node of its own): write the row without a
+  hint. **Hints are not unique** (two `index.ts` modules share a basename): a hint narrows a qname
+  several nodes share and never stands alone. Add `*.engram-gmap.hints.jsonl` to `.gitignore`.
+- **Exit codes and marker.** A stale hints file is removed with the stale diff / PPR file before the
+  gmap write (exit 5 when it cannot be); exit 9 when the hints file cannot be written (the gmap, its
+  sidecars and the diff are already complete). stderr, after the `glia build=` line:
+  `[engram-export] hints side: <facts> facts, <hinted> v1 hints, <ms> ms -> <path>`.
+- **Measured** (Kina `8ac238c`, git archive copies): `hints side: 5699 facts, 5162 v1 hints`; header
+  `{"facts":5699,"gmap_digest":"7d054d0b312f512e","hint_version":"v1","hinted":5162,"hints_side":1}`
+  equal to `meta.json`'s digest; the entryGuard row `v1|3|app.routes.ts|9bdbdf56d843b8d0|entryGuard`;
+  two copies byte-identical; `glia cell set` on a fresh layout stored the row's hint for 7 / 7 sampled
+  keys (5 hinted, 2 null); wall time 1.00x (the identities are derived on a second thread beside the
+  gmap write).
+- **Additive Rust API:** `glia_engram_export::{build_gmap_with_nodes, hints_side_path, hints_side}`,
+  `glia_graph::identity::{identities, HINT_VERSION}` (now pub). PARSER_STAMP moved (graph is hashed).
+
+### 7.2 The corrections writer: `glia cell set --hint` (DT.12b, `e3699f97`)
+
+- **Pass the hint.** `glia cell set <repo> <qname> <CELL> --hint <v1> ...`, pyo3
+  `glia_py.write_cell(.., dims=None, hint=None)` and `PyGraph.set_cell(.., dims=None, hint=None)` take
+  the row's hint from `<out>.hints.jsonl`. The binding rule is unchanged: the qname (and kind) wins, and
+  the hint narrows twins or re-binds a moved node, exactly as the next build binds the row (Kina's Cart
+  METHOD / ATTRIBUTE twin is `Ambiguous` by qname and `Bound(METHOD)` with its hint).
+- **Refused, nothing written:** a hint that is not a v1 identity hint, names an unregistered node-kind
+  id, or names a kind other than `--kind`: `error: invalid cell write: hint "<h>" is not a v1 identity
+  hint ...`, exit 2 (pyo3 `ValueError`). **The gmap's `identity_hint` form (`file:kind:ordinal`) is
+  refused this way**: never pass it.
+- **`target=hint_differs` is applied, but flagged.** When a fresh layout binds the qname to a node
+  whose own hint differs from the caller's (fields `kind` / `file` / `body` / `local`, or `no_identity`),
+  the write is applied and the outcome reads `target=hint_differs`; the marker ends ` differs=<fields>`
+  and stdout gains `note: <qname>'s own hint is <h>; --hint differs in <fields>`. Kina, `entryGuard`
+  after its body edit + `glia build`: `[cells] write qname=.. id=000002 rows=2 target=hint_differs
+  write_through=applied surface=cli differs=body`. 20 sampled rows of the hints file all read
+  `target=bound`.
+- **Outcome shape:** `CellWriteOutcome` (`#[non_exhaustive]`) and the pyo3 outcome dict gain
+  `node_hint` (the bound node's own v1 hint) and `hint_differs` on every write; `target` gains the value
+  `hint_differs` (only when a hint is passed). `CellWriteOutcome::set_binding` is new.
+
+### 7.3 What the tweaks change in an export
+
+The exporter is unchanged by every packet but DT.12a. What moves is the graph it exports. The `--since`
+pass named below is read from `engram-export/src/diff.rs` (its `alike_paths` rule), not measured.
+
+- **Keys that move:**
+  - DT.4 (`3a830b3f`): an ENDPOINT whose URL ends in a query interpolation drops it:
+    `endpoint:GET:/api/orders${…}` -> `endpoint:GET:/api/orders` (examples-glia), Kina
+    `endpoint:GET:${…}/smr${…}` -> `endpoint:GET:${…}/smr` and `endpoint:GET:/admin/smr${…}` ->
+    `endpoint:GET:/admin/smr`. Pass 2's alike rule wants the shorter path to END the longer one, and a
+    dropped trailing segment does not; pass 5 refuses an unalike route pair: removed + added (a fresh
+    FactId), and where the new key already existed the old fact is only removed.
+  - DT.3a (`8429d100`) / DT.3b (`d405c8e6`): WebSocket clients leave the generic `ws_client:ws`
+    (`ws_client:ws @web` -> `ws_client:/live/orders @web`, quokka `ws_client:ws @quokka_web` ->
+    `ws_client:/api/protected/chat/ws @quokka_web`), and a config base folds (`ws_client:/prices` ->
+    `ws_client:/rt/prices`). A WS_CLIENT is not route-like, its old and new names share no word, so
+    passes 3-5 do not pair it: removed + added.
+  - DT.2c (`1986a9cc`): NATS producer subjects carry `*` tokens (`queue_producer:orders.` ->
+    `queue_producer:orders.*.placed`, `queue_producer:shop.orders.%s.placed` ->
+    `queue_producer:shop.orders.*.placed`); a built consumer subject is `queue_consumer:unresolved:nats`.
+    Queue keys mostly carry no hint: removed + added.
+  - DT.11a (`717cfbdd`): an anonymous GraphQL document's op is a new key `graphql_op:<first root field>`.
+  - Between EVM packets only (no 0.5.1 export had either): DT.10k (`62533102`) re-keys an abigen call
+    `evm_call:recv:contract.<m>` -> `evm_call:abi:<X>MetaData.<m>`.
+- **New facts:** Solidity RPC_PROCEDURE `evm:<Contract>.<fn>` (DT.10a `fb811da7`, Kina +38; its CODE cell
+  is JSON, and the exporter reads only text CODE cells, so the fact has a span and no code text); EVM
+  client RPC_CALL `evm_call:<scope>.<fn>` / EVENT_HANDLER `evm_event:<scope>.<E>` (DT.10c `f5dad689`,
+  DT.10i `1d7b02d9`, DT.10d `347d9087`, DT.10j `79a4ca79`, DT.10e `53593205`, DT.10f `6606dce9`, DT.10k;
+  Kina +8 (DT.10c), +6 (DT.10i), +27 (DT.10d) and +8 (DT.10f) RPC_CALLs and +13 EVENT_HANDLERs
+  (DT.10k)), each positioned at its first call site, so hinted; MESSAGE_TYPE `message:graphql:<T>` (DT.1j `a52201dd`); queue tags in mixed-row files (DT.2a
+  `1a7acd56`) and nats.go / JetStream queue nodes on any receiver (DT.2b `ec7c885c`); ENDPOINTs for
+  awaited generic axios / HttpClient calls (DT.1d `0685f7a4`), Dio calls inside Flutter closures (DT.5e
+  `787fe464`, quokka `POST /api/auth/refresh`) and GraphQL client transports (`endpoint:POST:<path>`,
+  DT.11b `c8673f13`). A product ROUTE also registered in an earlier-sorting test file, or whose URL
+  tail ends `_test` / `_spec` / `.test` / `.spec`, loses ORIGIN `test_fixture` (DT.6a `5112e840`), so Engram's seed drop set no longer drops it
+  (no test-bed node moved).
+- **Modified facts** (the first `--since` lists them): every GRAPHQL_OPERATION read from a document now
+  carries the document as a text CODE cell (DT.11a), so its fact gains code text.
+- **Removed facts:** spurious GRAPHQL_RESOLVERs read from a root field's multi-line argument list or
+  description (DT.11b); the RabbitMQ / SNS tag of a `.Publish(` a NATS row read, in a file importing both
+  (DT.2b). **Undeclared, DT.10j:** in an ethers file a member that a TS object-literal / parseAbi /
+  human-readable ABI does not list is no longer an RPC_CALL (counted `not_in_abi=`); builds between
+  DT.10c and DT.10j minted it, no 0.5.1 export did.
+- **Edges** (gmap EdgeKind by `CATEGORY_MAP`): **Imports 0.5** from USES and IMPORTS grow most: TS
+  value references (DT.5g `9d4494af`, Kina +1026 USES), handler -> STRUCT (DT.1f `4dee0a11`, Kina USES
+  4 -> 54), Angular template / host / decorator USES (DT.5a `b0856ea5`, DT.5b `402ca6e6`, DT.5c
+  `e22c2d21`), Dart `method_ref` (DT.5e), USES into queue tags (DT.2a), IMPORTS `dir_index` (DT.1b
+  `f4dd85de`, Kina +82) and `reexport` (DT.1q `e7dfb31d`, quokka +35). **Calls 0.8:** Angular CLASS ->
+  METHOD template calls (Kina +342, quokka +245) and class-scope receivers (Kina +68), TS
+  `accessor_read` / `accessor_write` (Kina +91), Dart closure and construction calls (quokka +86).
+  **Causes:** RPC_CALLS / EVENT_FLOWS `resolver:evm` (Kina 54 pairs at DT.10h; an ABI declared in
+  another file pairs by `abi` since DT.10g `e2fe3ca6`, which removes a `name_hint` pair the joined ABI
+  contradicts), gqlgen HANDLED_BY
+  (DT.5f `6a8b49c3`), procedure HANDLED_BY its METHOD (DT.10a), GRAPHQL_CALLS by root field (DT.11a),
+  HTTP_CALLS from the new ENDPOINTs and the GraphQL transports, QUEUE_FLOWS rule `pattern` (Weak, DT.2c),
+  WS_CONNECTS from the re-keyed clients; removed: name-only Solidity EVENT_FLOWS (DT.10b `b53fbd67`),
+  HTTP_CALLS into test-only routes (DT.6a), a tail-only WS_CONNECTS (DT.3b), name-only GraphQL pairs
+  whose document selects other fields (DT.11a). **Cooccurs 0.3:** SAME_AS `http_model` / `graphql_model`
+  stars (DT.1h `44f20d6b`, DT.1k `bbe70ea0`): a client model -> the server struct of its HTTP exchange,
+  a GraphQL result model or gqlgen struct -> `message:graphql:<T>`; they form inside one repo, so a
+  single-repo Engram export now carries SAME_AS (quokka-stack: 19 http_model classes). A queue argument
+  passed by name (`subject="x"`) now reads its value (**undeclared, DT.2c**).
+- **Not in the gmap** (cells the exporter does not read): SCHEMA_FIELDS on TS / Go / Dart / GraphQL
+  models (DT.1c `2009dc35`, DT.1l `f247e21e`, DT.1j), MESSAGE_TYPE wire cells (DT.1e `d5e6f011`, DT.1f,
+  DT.1j, DT.1k), the new ENDPOINT_HIT keys (`response` / `request` DT.1d / DT.1l, `query` DT.4, `host`
+  DT.3b, `"via":"graphql"` DT.11b) except that each hit's `file` / `line` still anchors its ENDPOINT,
+  ROLE COMPONENT on Flutter widgets (DT.5e), and CONSTRAINT cells, which a sub-project `[[constraint]]`
+  now writes on its enclosing PROJECT or a MODULE (DT.7a `8dbf40f9`; Engram sees them through the cell
+  store and `glia check`, which now lists rules that check nothing, DT.7b `f542b49b`, DT.7c `6c301ec0`).
+- **Answers Engram may call:** `glia query --gql` / `query_gql` property rows are located (DT.8b
+  `75bf3def`; `glia_rules::gql::Compiled` gains `pub anchor`); `glia check` markdown prints a rule's
+  caveats once (DT.8a `f0dd035a`); the coverage caveats for QUEUE_FLOWS / WS_CONNECTS / GRAPHQL_CALLS
+  (DT.11z `71a13fe2`) and RPC_CALLS / EVENT_FLOWS (DT.10h `2fc07e62`) read differently; `gaps` drops
+  WS-served routes (DT.3c `18af8bb5`), test-only routes (DT.6b `b3537e71`), implied GraphQL transports
+  (DT.11c `02f78792`), invoked members and generated code (DT.5d `5dd52313`); `contracts --fields` gains
+  the model-drift pairings (DT.1i `d8051a4b`, DT.1n `12a430d5`) and contract-breaks / review the model
+  breaks (DT.1o `86b76fe5`, DT.1p `40332f16`); pyo3 traversal takes category names (DT.9 `b1ecad68`).
+- **The build:** PARSER_STAMP moved, so the first export after the upgrade reparses everything; no
+  registry id and no format change.
+
+Every DT packet: declared no break, DT.1a (`5af245f6`), DT.1g (`eddf53b4`), DT.1m (`62fa15c4`), DT.1o
+and DT.13; the rest are above.

@@ -30,12 +30,16 @@ is the release; `build_stamp()` is `<release>+p<16 hex>`, the hex half a
 content hash of every graph-shaping source file, so two builds of one release
 that parse differently report different stamps.
 
-## What's new in 0.5.2
+## Coming in 0.5.3: the 0.5.2 work (unreleased)
 
-**Pin exactly: `glia-py==0.5.2`.** 0.5.2 keeps the API conventions below, but it adds
-answers, changes graph contents and removes two deprecated names, and each glia release is
-pinned exactly. The store format is unchanged (format 3); `load_from_gmap` rebuilds a layout
-another glia build wrote, so a 0.5.1 layout is rebuilt once, with the new graph contents.
+**There is no glia-py 0.5.2.** The 0.5.2 work below was never published: it ships in 0.5.3,
+and the version goes from 0.5.1 to 0.5.3 in one step. Pin that release exactly when it is out
+(`glia-py==0.5.3`); until then the latest on PyPI is 0.5.1, and a wheel built from source at
+the `0.5.2-complete` tag still reports `version()` 0.5.1 (`build_stamp()` `0.5.1+p<hex>`).
+It keeps the API conventions below, but it adds answers, changes graph contents and removes
+two deprecated names. The store format is unchanged (format 3); `load_from_gmap` rebuilds a
+layout another glia build wrote, so a 0.5.1 layout is rebuilt once, with the new graph
+contents.
 
 - **Rules and queries.** `PyGraph.query(program, outputs=None, limit=None, explain=False,
   max_rows=None)` evaluates a Datalog program over the graph, with the predicate prelude
@@ -94,6 +98,52 @@ another glia build wrote, so a 0.5.1 layout is rebuilt once, with the new graph 
     Python blinker / Django signals and a GCP Pub/Sub subscription bound to its topic by
     Terraform.
   - An ambiguous doc mention links the same symbol in every clone of a repo.
+- **The tweaks** (the gaps two real full-stack repos showed):
+  - **Contract models.** TypeScript interfaces and field-only classes, Go structs, Dart
+    models and GraphQL schema types carry their fields (a SCHEMA_FIELDS cell); a typed HTTP
+    call site records the response and request shape it reads and sends (`response` /
+    `request` on its ENDPOINT_HIT), and a Go handler what it writes and binds. A client model
+    and the server struct of its HTTP exchange form an identity class (rule `http_model`), as
+    does a GraphQL client's result model with its schema type (`graphql_model`): `find`,
+    `blast_radius` and the other collapsing answers fold them, inside one repo too.
+    `identity_classes(rule=...)` accepts both rules.
+  - **`contract_fields`** returns three new pairings: `http_model` (client model against
+    server model, response and request), `client_contract` (client against the OpenAPI op
+    documenting its route) and `graphql_selection` (an operation's selection against its
+    schema type).
+  - **`contract_breaks_vs_rev(.., models_min_tier="fact")` and `review_vs_rev(..,
+    models_min_tier="fact")`.** Both judge the inferred models against the rev: the
+    contract-breaks dict gains `models` and `advisory`, the review dict `model_breaks`,
+    `counts["model_breaks"]` and, when non-empty, `unanchored`. A model row blocks only at or
+    above `models_min_tier` (`"fact"` by default, so the resolver-paired rows are advisory);
+    an unknown tier raises `ValueError` before any build.
+  - **`PyGraph.check(strict=False)`.** It reads each repo root's `.glia/overlay.toml`, and a
+    declared rule that checks nothing (anchored nowhere, rejected by the loader, absent from
+    the graph, or scoped where no node sits) is listed under `unanchored` with a reason and a
+    fix instead of passing silently; an empty-scope rule leaves `errors` for it unless
+    `strict=True`. `overlay_try`'s rule status may read `checks_nothing` (verdict review, with
+    `reason` / `fix`), and `overlay_accept` refuses only a rule that does not parse or defines
+    no `violation`.
+  - **Traversal takes category names.** `neighbours`, `bfs`, `predecessors`, `reachable_by` and
+    `shortest_path` accept `categories=["CALLS", "imports", 9]`: ids or registry names, mixed,
+    case-insensitive. An unknown name raises `ValueError` naming it; rows still carry ids.
+  - **`set_cell(.., hint=None)` / `write_cell(.., hint=None)`** take a node's v1 identity hint
+    (`v1|<kind id>|<file name>|<body hash>|<local name>`), validated (`ValueError` on a
+    malformed or kind-contradicting one). The outcome dict gains `node_hint` and
+    `hint_differs`, and `target` reads `hint_differs` when a fresh build binds the qname to a
+    node whose own hint differs.
+  - **`query_gql`** rows that return properties only carry `file` / `line`, the first
+    property's node, as the Datalog form does.
+  - **Graph content.** TS directory imports and re-export barrels bind; NATS calls on any
+    receiver mint queue nodes, subjects folded on the NATS grammar (`orders.*.placed`); a
+    WebSocket client's URL is read through the local, field, builder or config base that holds
+    it; a trailing query-string interpolation leaves an endpoint's path; a GraphQL operation
+    pairs by the root fields it selects, and its client's transport is an HTTP call; Solidity
+    functions are EVM procedures that ethers, hardhat, TypeChain, viem, wagmi, web3.js and
+    go-ethereum client calls pair with; gqlgen resolver methods are handlers; Angular template
+    and host bindings, Flutter widget trees and TypeScript values passed by reference are
+    edges; a used class's framework-invoked members and constructors are live, and generated
+    code and test-only routes leave `gaps`. Rebuild any stored graph.
 
 ## What's new in 0.5.1
 
@@ -103,7 +153,7 @@ graph contents and the store format, and each glia release is pinned exactly.
 - **New `PyGraph` answers.** `pack` / `pack_ids` (the context for a query, packed to
   a token budget), `hotspots`, `cochange`, `flags` (stale feature flags),
   `communities`, `splits`, `hubs`, `duplicate_flows`, and `patterns`, out of
-  experimental (the `_experimental` name warned in 0.5.1 and was removed in 0.5.2). `tests_for` /
+  experimental (the `_experimental` name warned in 0.5.1 and is gone in 0.5.3). `tests_for` /
   `tests_for_diff` gain `limit=` and `signals=` (rank by recent failures and
   co-change).
 - **New module functions.** `review_vs_rev` is the PR report for a change against
@@ -111,8 +161,8 @@ graph contents and the store format, and each glia release is pinned exactly.
   and `cochange_vs_rev`. `timeline_build` / `timeline_history` / `timeline_as_of`
   say when each edge appeared and went over recent commits. `overlay_propose` /
   `overlay_try` / `overlay_accept` run the overlay loop in-process. `patterns_vs_rev`
-  is new; its deprecated `_experimental` alias was kept through 0.5.1 and removed in
-  0.5.2. `tests_ingest` gains `window=` / `reset=`: a re-ingest keeps a rolling
+  is new; its deprecated `_experimental` alias was kept through 0.5.1 and is gone in
+  0.5.3. `tests_ingest` gains `window=` / `reset=`: a re-ingest keeps a rolling
   window of runs.
 - **Answer shapes.** `effects` and `serves` rows gain `external_hosts`, the
   third-party hosts a sink calls (`[]` for in-repo rows). `serves` lists such an
@@ -152,7 +202,7 @@ every contract at once.
 - **Answers, not just a graph.** `blast_radius` (multi-seed), `diff_impact`,
   `graph_delta`, `tests_for`, `effects`, `why`, `cycles`, `check`, `spec_status`,
   `serves`, `implementors`, `entry_flows`, `feature_flows`, `patterns` (shipped as
-  an `_experimental` name, deprecated in 0.5.1 and removed in 0.5.2),
+  an `_experimental` name, deprecated in 0.5.1 and gone in 0.5.3),
   `gaps` and `page_flow`. Each returns located rows with a confidence tier, a
   `live` flag, and an `absence` that says what the graph could not see.
 - **Evidence on every edge.** Each edge records the extractor, parser, resolver

@@ -76,7 +76,17 @@ parsers/code/
                 generated (0.5.2, DE.7): the one generated-file classifier
                 (`is_generated`: protoc / codegen names, or a generator banner in the
                 first 40 comment lines), read by ORIGIN `generated` and the gRPC
-                client needles (a vendored stub mints no GRPC_CLIENT, DE.8)
+                client needles (a vendored stub mints no GRPC_CLIENT, DE.8);
+                evm/ (0.5.2 tweaks, DT.10c-DT.10k): EVM contract clients, one module
+                per reader over a shared code view (scan.rs) and ABI reader (abi.rs:
+                human-readable, JSON, TS object-literal, parseAbi): ts.rs (ethers,
+                hardhat, TypeChain, artifact imports, viem / wagmi, web3.js) and go.rs
+                (go-ethereum: JSON ABI consts, abi.JSON / NewBoundContract bindings,
+                abigen metadata, events, same-file method-name wrappers); each mints
+                RPC_CALL `evm_call:<scope>.<fn>` / EVENT_HANDLER `evm_event:<scope>.<E>`
+                with an evm ENDPOINT_HIT (`[evm-client] lang=ts|go ..`,
+                `[evm-wrappers]`); angular_template (DT.5a-DT.5c): the Angular
+                template / host-metadata scanner and binder (`[angular-template]`)
 stamp/              Build identity: RELEASE + PARSER_STAMP (content hash of every
                     graph-shaping source). Keys the parse cache, so a parser fix
                     invalidates caches without a version bump.
@@ -90,7 +100,10 @@ engram-export/      (excluded) glia -> engram_core::Gmap exporter; needs ../Engr
                     same bytes (DE.2); ENDPOINTs and `page:` ROUTEs anchor identity hints and
                     `--since` pairs re-keyed endpoints and renamed symbols (DE.3, DE.4);
                     `--ppr-candidates <K>` writes `<out>.ppr.jsonl`, each fact's top-K push-PPR
-                    neighbours, bound to the gmap by its digest (DE.5)
+                    neighbours, bound to the gmap by its digest (DE.5); every run writes
+                    `<out>.hints.jsonl` (DT.12a), each fact's LB.6 `Identity::hint` v1 form (or
+                    null), bound to the gmap by `gmap_digest`, the key `glia cell set --hint`
+                    takes (DT.12b; `[engram-export] hints side: ..`, exit 9 when unwritten)
 ```
 
 Parsers live at `parsers/<domain>/<language>/`. When a non-code domain lands (0.5.0 ships the seam, not a domain), its parsers nest alongside `parsers/code/`.
@@ -118,7 +131,10 @@ The facade rules:
    the root. The slot's owner fills its file; no later packet edits a facade (in 0.5.0
    only LD.11a, the crate rename, touched `engine/src/lib.rs` after wave 0; in 0.5.1 only
    the wave-0 C0.* packets touched the engine, graph and py facades; in 0.5.2 only the
-   wave-0 D0.* packets touched a facade, the workspace Cargo.toml or Cargo.lock).
+   wave-0 D0.* packets touched a facade, the workspace Cargo.toml or Cargo.lock, until the
+   tweaks: DT.1a and DT.10a declared code-domain's `wire` / `evm` slots in its lib.rs, which
+   also holds `NavFact` (DT.1a, DT.1q, DT.10g appended variants), and DT.1g, DT.5f and DT.10b
+   added their resolvers' `mod` lines; no tweak touched Cargo.toml or Cargo.lock).
 3. **A spec step "FACADE: `pub use x::{..}`" or "`mod x;`" is already done** — skip it
    and call the item by its module path from `cli` / `py`.
 4. Two globbed modules exporting one name raise `ambiguous_glob_reexports`: rename,
@@ -159,7 +175,18 @@ engine/src/   lib.rs        facade (rules above)
                                            apply_python_signals (DF.13), stamp_annotated_bases
                                            (DF.19) and graft_quartz_conf_schedules (DG.7b); the
                                            queue / event const folds run on the pool (DC.3,
-                                           `[const-fold] pooled`)
+                                           `[const-fold] pooled`); the 0.5.2 tweaks add
+                                           apply_ws_client_bases (a WS client's config base
+                                           folded through the const table, DT.3b, `[ws-base]`)
+                                           and the two child-module grafts below
+                            angular_templates.rs  graft_template_urls (DT.5b): a component's
+                                           `templateUrl` .html (the walk admits an .html beside a
+                                           same-stem .ts) bound to its CLASS's members and receivers
+                                           (`[angular-template] external ..`)
+                            evm_abi.rs     join_evm_abis (DT.10g): an exported TS ABI const imported
+                                           by relative path (NavFact::EvmAbi), or a Go string const
+                                           of another file of the package (NavFact::GoStringConst),
+                                           fills its clients' evm cell (`[evm-abi-join] ..`)
                             rpc_needles.rs RpcContext, apply_rpc_needles, graft_rpc_markers
                             lang_build.rs  plan_groups / build_groups / fold_groups — the
                                            per-language build groups (DC.2; build_groups takes a
@@ -186,13 +213,22 @@ engine/src/   lib.rs        facade (rules above)
                             test module's root functions, CL.5b), the post-pass fns; the
                             evidence fill split (DC.5): each language group's intra edges are
                             filled at group build (GroupFill) and Finalize re-fills only what
-                            changed (`[evidence-split] graphs=..`)
-              profile.rs    CODE_PASSES — every build pass in run order (14 Resolve passes: 13
-                            resolvers then identity, 9 post-passes, evidence fill + determinism
-                            sort); run_code_passes_with(merged, &CodeBuildCtx) is the whole build
-                            tail (run_code_passes is gone, DD.7); CodeBuildCtx::for_merge passes a
-                            layout merge's recorded SCIP roots, so merge == joint build
-              coverage.rs   coverage_report          answers.rs   the P3 primitives
+                            changed (`[evidence-split] graphs=..`); test_route_ids (DT.6a), the
+                            one test-only-ROUTE predicate the `http` pass, the provenance stamp
+                            and (DT.6b) gaps / suspected read
+              profile.rs    CODE_PASSES — every build pass in run order (17 Resolve passes: 15
+                            cross-graph resolvers, then models and identity; 9 post-passes,
+                            evidence fill + determinism sort); run_code_passes_with(merged,
+                            &CodeBuildCtx) is the whole build tail (run_code_passes is gone, DD.7);
+                            CodeBuildCtx::for_merge passes a layout merge's recorded SCIP roots, so
+                            merge == joint build
+              coverage.rs   coverage_report; the caveat rows every absence reads. The reflexion
+                            golden engine/tests/data/reflexion/allow_absence.json embeds the
+                            universal rows (RPC_CALLS' EVM reading and the `*` EVENT_FLOWS row
+                            since DT.10h; QUEUE_FLOWS / WS_CONNECTS / GRAPHQL_CALLS, DT.11z), so
+                            editing one regenerates it: `GLIA_UPDATE_GOLDEN=1 cargo test -p
+                            glia-engine --lib rules::reflexion_parity`, declared as a cli_output break
+              answers.rs    the P3 primitives
               cache.rs      incremental parse cache (the GLIAPCZ1 lz4 frame, CD.7a)
               arch.rs       service_map (glia arch)
               endpoint_fold.rs  client base-URL fold onto the ENDPOINT path
@@ -206,7 +242,10 @@ engine/src/   lib.rs        facade (rules above)
               spec_status LE.9b        gaps LF.2c (+LF.2e, LF.5c)   feature_flows LG.3a
   0.5.1 public slots (C0.2), owner (+ extenders):
               pack CC.4b               review CC.6a (+CC.6b)   flags CC.7b
-              contract_breaks CC.8a (+CC.8c)   hotspots CC.10a   cochange CC.11a (+CC.11b)
+              contract_breaks CC.8a (+CC.8c; 0.5.2 tweaks: contract_breaks/models.rs, the
+                        inferred-model judge model_breaks, DT.1o, wired into contract-breaks and
+                        review with a min-tier gate, DT.1p)
+              hotspots CC.10a   cochange CC.11a (+CC.11b)
               communities CD.1d        splits CD.2b (+CD.2c)   hubs CD.4b
               duplicate_flows CD.4e    timeline CD.5c
               shared_cache/ CE.2a (+CE.2b, CE.2d) — directory module, engine half only
@@ -240,15 +279,28 @@ engine/src/   lib.rs        facade (rules above)
 graph/src/    lib.rs        facade (rules above)
               types.rs build.rs imports.rs calls.rs merged.rs traversal.rs
               blast.rs signal.rs
-              resolvers/    one module per mechanism (http, grpc, rpc, queue, graphql,
-                            websocket, eventbus, shared_schema, db, cron, config, iac,
-                            cli) + identity.rs (IdentityResolver, the SAME_AS stars, D0.5
-                            slot, DD.5 + DD.6 + DD.7) + mod.rs; message_schema and package
+              build/go_wire.rs  (DT.1f) a child of build.rs: types each Go handler wire cell
+                            (DT.1e) to its in-repo STRUCT through GoPackages and writes
+                            handler -USES-> STRUCT (emitter graph:go_wire)
+              imports/reexports.rs  (DT.1q) a child of imports.rs: TS / JS re-export
+                            barrels resolved as ECMA-262 ResolveExport (Barrels::read /
+                            materialize), IMPORTS rule `reexport`
+              resolvers/    one module per mechanism (http, grpc, rpc, evm, queue, graphql,
+                            gqlgen, websocket, eventbus, shared_schema, db, cron, config, iac,
+                            cli) + models.rs (the contract-model pass: client_wires, wire_pairs,
+                            graphql_pairs, wire_fields and ModelResolver, the http_model /
+                            graphql_model SAME_AS stars, DT.1g-DT.1o) + identity.rs
+                            (IdentityResolver, the SAME_AS stars, D0.5 slot, DD.5 + DD.6 +
+                            DD.7) + mod.rs; message_schema and package
                             are gone (DD.16: their SHARES_SCHEMA message pairs and
                             SHARES_DEPENDENCY clique are SAME_AS stars now); host.rs is the
                             shared host narrowing (service alias index, narrow_by_host)
                             the http / websocket / grpc / graphql / rpc resolvers use (CB.12);
-                            external WS / gRPC / GraphQL clients stay out of pairing (DF.9)
+                            external WS / gRPC / GraphQL clients stay out of pairing (DF.9);
+                            evm.rs (EvmContractResolver, DT.10b) pairs EVM client calls and
+                            subscriptions to the Solidity procedure / event of the contract
+                            they identify; gqlgen.rs (GqlgenResolver, DT.5f) pairs SDL
+                            GRAPHQL_RESOLVERs with gqlgen's Go resolver methods
   public slots (glia_graph::<slot>::<item>):
               rust_paths LA.1a (+LA.1b, LA.3)   roles LB.3a (+LA.21a)
               identity LB.6                     cells LF.1a
@@ -260,7 +312,18 @@ graph/src/    lib.rs        facade (rules above)
   flat 0.5.2 additions: blast_radius_over (blast radius over any GraphSource, so an
               answer walks the identity Quotient, DD.10) and cross_links_with (the service
               links with SAME_AS classes one link per service pair and collapse classes
-              counted once, arch's reading, DD.14)
+              counted once, arch's reading, DD.14). The 0.5.2 tweaks add (each struct /
+              enum #[non_exhaustive], the three resolvers unit structs): client_wires and
+              ClientWire, ClientWires, ClientWireStats,
+              ResolvedShape (+ judged_against, DT.1p), ResolvedField, RouteHandler, RouteSide,
+              ServerSite, WireDirection (DT.1g); wire_pairs and WirePairs, WirePairStats,
+              WirePair, WireChange, ModelPair, ModelJoin (DT.1m); graphql_pairs and
+              GraphqlPairs, GraphqlPair, GraphqlChange, GraphqlPairStats (DT.1n);
+              wire_fields, graphql_fields, graphql_fields_all, WireField, WireFields (DT.1o);
+              the resolvers ModelResolver (DT.1h), EvmContractResolver (DT.10b) and
+              GqlgenResolver (DT.5f); WebSocketStackResolver::served_routes (DT.3c);
+              MountedHttpResolver::without_routes (DT.6a); and on the identity slot
+              identity::{identities, HINT_VERSION} (DT.12a)
 
 code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_type) — ids
                             are allocated here and nowhere else; walk_gating, project_roots
@@ -269,8 +332,17 @@ code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_ty
                     snapshots LF.5a (+LF.6a)   code_span CD.7c
                     same_as D0.1 + DD.2 (the eight identity rule names, the shared
                     contract-op key, package normalisation, the SCIP key, content
-                    digests); project_roots gains ProjectRoot.label_source
-                    (manifest | dir | root | declared, DD.4)
+                    digests; the 0.5.2 tweaks add RULE_HTTP_MODEL / RULE_GRAPHQL_MODEL,
+                    MODEL_RULES [&str; 2], ALL_RULES [&str; 10] (RULES then MODEL_RULES),
+                    IDENTITY_EMITTERS / is_identity_emitter, DT.1h, DT.1k); project_roots
+                    gains ProjectRoot.label_source (manifest | dir | root | declared, DD.4)
+                    0.5.2 tweaks: wire DT.1a (the contract-model JSON vocabulary: ModelSchema
+                    SCHEMA_FIELDS format ts / go / dart / graphql, wire Shape, ServerWire,
+                    append_hit_fields, json_kind)   evm DT.10a (+DT.10g: the EVM qname
+                    prefixes `evm:` / `evm_call:` / `evm_event:`, Scope, AbiEntry, the
+                    procedure and client cells, AbiRef / ClientHit); profile gains
+                    INVOKED_MEMBERS / invoked_member (DT.5d, + DT.5e's flutter row);
+                    glia_config gains Rejection / LoadedConfig.rejections (DT.7c)
 
 py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by name,
                             then add_class PyGraph — never edited for a new API
@@ -343,11 +415,12 @@ source files
    → per-language parser (tree-sitter → ExtractedItems)
    → extractors (cross-cutting: HTTP, gRPC, queues, data_sources, CLI)
    → graph builder (resolves intra-repo references)
-   → CODE_PASSES (engine/src/profile.rs): the 13 cross-graph resolvers (HttpStack, gRPC, RPC,
-     Queue, GraphQL, WebSocket, EventBus, SharedSchema, CLI, DB, Cron, Config, IaC), then
-     Identity (SAME_AS stars, the last Resolve pass), then the 9 post-passes, the evidence fill
-     (group fills taken at language build, re-filled only where something changed, DC.5) and
-     the determinism sort — `[passes] domain=code resolve=14 post=9 finalize=2`
+   → CODE_PASSES (engine/src/profile.rs): the 15 cross-graph resolvers (HttpStack, gRPC, RPC,
+     EVM, Queue, GraphQL, gqlgen, WebSocket, EventBus, SharedSchema, CLI, DB, Cron, Config, IaC),
+     then models (the http_model / graphql_model SAME_AS stars, after http and graphql, DT.1h)
+     and Identity (SAME_AS stars, the last Resolve pass), then the 9 post-passes, the evidence
+     fill (group fills taken at language build, re-filled only where something changed, DC.5)
+     and the determinism sort — `[passes] domain=code resolve=17 post=9 finalize=2`
    → merged graph
    → .gmap layout at <repo>/.glia/graph/ (rkyv + mmap, sharded)
    → [optional] activation (PPR) / projection-text / pyo3 → Python
@@ -411,6 +484,78 @@ once per build (a layout merge prints no `external_cells=`; the stage and per-pa
 `PassReport::elapsed` / `pass_elapsed`), and `[timing] persist writer=<w> <ms> dir=<dir>` once
 per layout write.
 
+**The 0.5.2 tweaks' markers (DT, waves W15-W25)**, each on stderr, grouped by what they watch:
+- *Contract models (T1).* Per file: `[model-schemas] lang=typescript interfaces=<i> classes=<c>
+  fields=<f> open=<o> file=<p>` / `[model-schemas] lang=go structs=<s> fields=<f> embeds=<e>
+  skipped=<k> file=<p>` (DT.1c); `[ts-wire] responses=<r> requests=<q> (typed= inline= literal=
+  annotated= fetch=) request_unknown_client=<u> awaited_generic=<a> file=<f>` (DT.1d) and
+  `[ts-wire] graphql_results=<n> file=<f>` (DT.1k); `[go-wire] responses=<r> binds=<b>
+  skipped_status=<s> unknown_status=<u> shapes(type= call= chain= object= open=) slice_results=<n>
+  in <file>` (DT.1e); `[dart-wire] models=<m> (fromjson= serializable=) skipped_generated=<g>
+  responses=<r> requests=<q> skipped_multi_call=<k> file=<p>` (DT.1l). Per Go graph: `[go-wire]
+  resolved sites=<r>/<t> models=<m> (type= call= chain=) unresolved=<u> uses=<n> nested=<k>`
+  (DT.1f). Per resolve with an HTTP-paired shaped hit: `[models] client_wires hits=<h> routed=<r>
+  response=<s> request=<q> client_models=<c> unresolved_client=<u> server_sites=<v>
+  server_unknown_status=<k> open=<o> weak_pairing=<w>` (DT.1g), `[models] pairs=<p> response=<r>
+  request=<q> model_pairs=<m> changes=<c> breaking=<b> ambiguous_server=<a> open=<o>` (DT.1m),
+  `[models] classes=<c> edges=<e> diverged=<d> ambiguous_client=<a> ambiguous_project=<p>
+  embed_reduced=<r>` (DT.1h), `[models] graphql results=<r> documents_resolved=<d>
+  generated_models=<g> classes=<c>` (DT.1k) and `[evidence-rules] resolver=models http_model=<h>
+  graphql_model=<g>`; `[models] graphql pairs=<g> undefined_fields=<u> open=<o> refused=<r>`
+  (DT.1n). The answers: `[contract-fields] pairs=.. unknown=<n> http_model=<n> client_contract=<n>
+  graphql_selection=<n>` (DT.1i, DT.1n); `[model-breaks] base=<rev> min_tier=<t> exchanges=<E>
+  http=<h> graphql=<g> rows=<n> breaking=<b> blocking=<k> advisory=<a> compatible=<c>
+  new_pairings=<p> lost=<l> unjudged=<U>` once per contract-breaks / review run (DT.1o, DT.1p);
+  `[review] caveats rules=<r> lines=<l> folded=<f>` (DT.1p).
+- *Imports.* `[imports] dir-index binds=<n> (relative=<r> alias=<a>)` (DT.1b) and `[imports]
+  reexport stars=<s> named=<n> namespace=<p> local=<l> edges=<e> external=<x> entries=<t>
+  aliased=<r> bound=<b> unbound=<u> ambiguous=<a> cycles=<c> capped=<k>` (DT.1q), once per
+  TS-like graph build that has one.
+- *Queues (T2).* `[queues] tag framework=<F> side=<s> sites=<n> (mixed_rows=<m>) path=<f>`
+  (DT.2a); `[queues] go-nats side=<s> sites=<n> (typed=<t> untyped=<u>) dropped=<d> (foreign=<f>
+  multi_broker=<m>) path=<f>` (DT.2b); `[queues] subject-fold side=<s> folded=<n> (concat=
+  template= sprintf= func=) expr=<e> dynamic=<d> path=<f>` and `[queues] resolver placeholder
+  producers=<p> paired=<q>` (DT.2c).
+- *WebSocket (T3) and HTTP (T4, T6).* `[ws] client urls read=<n> (local= field= builder=
+  url_struct=) unread=<x> in <path>` (DT.3a); `[ws-base] folded <n> client sites in <f> files
+  (unresolved=<u>) repo=<label>` (DT.3b); `[gaps] ws-served routes=<n>` (DT.3c);
+  `[ts-endpoints] query suffixes=<q> file=<p>` (DT.4); `[http] test routes excluded from route
+  index: <n>` (DT.6a; `[http] routes=`, `[http-qname] routes=` and `[http-owner] index routes=`
+  drop by it); `[gaps] unpaired_route rows withheld: <n> (test-file routes)` (DT.6b).
+- *Liveness and UI code (T5).* `[angular-template] inline file=<p> components=<c> calls=<k>
+  uses=<u> unbound=<n> shadowed=<s> unread=<r> no_class=<m> receivers=<v> decorated=<d>` (DT.5a,
+  DT.5c) and `[angular-template] external repo=<label> components=<c> templates=<t> missing=<m>
+  calls=<k> uses=<u> unbound=<n> shadowed=<s> no_class=<x> receivers=<v>` (DT.5b, DT.5c);
+  `[recv] class-scope receivers bound=<b> unbound=<u>` (DT.5c); `[live] profile=.. owners=<o>
+  implementers=<i> invoked=<v> reached=<r>/<t>` and `[dead-framework] dead_symbol rows withheld:
+  invoked=<i> generated=<g>` (DT.5d); `[dart-calls] self= bare= local_skip= closures= creations=
+  method_refs= file=` and `[dart-flutter] components=<n> (widgets=<w> states=<s>) file=<p>`
+  (DT.5e); `[gqlgen] root structs=<s> object_structs=<o> paired fields=<f> roots=<r> unpaired=<u>
+  ambiguous=<a>` and `[evidence-rules] resolver=gqlgen gqlgen_field=<n> gqlgen_root=<n>`
+  (DT.5f); `[ts-value-refs] refs=<r> in_file=<i> imported=<m> const_inits=<c> decorators=<d>
+  accessor_calls=<a> file=<p>` (DT.5g).
+- *Rules and check (T7, T8).* `[declared] .. anchor_enclosing=<e>` (DT.7a); `[check] rules=<R> ..
+  errors=<E> unanchored=<n>` and `[check] declared not checked: orphaned=<o> rejected=<r>
+  absent=<a> empty_scope=<e> blocking=<b>` (DT.7b); `[check] overlay rejected root=<r>
+  whole_file=<b> constraint=<c> component=<m> layer=<l>` and the try-rules suffix
+  ` checks_nothing=<n>` (DT.7c); `[check] caveats rules=<r> lines=<l> folded=<f>` (DT.8a);
+  `[gql] anchor column=<var> rows=<n> merged=<m>` (DT.8b).
+- *Smart contracts (T10).* `[sol-abi] procedures=<n> (functions=<f> getters=<g> abstract=<a>)
+  contracts=<c> path=<f>` (DT.10a); `[evm-link] calls= events= paired= edges= (contract= abi=
+  abi_hint= name_hint=) unmatched= ambiguous= conflict= not_declared= arity_mismatch=
+  not_in_abi= procedures= contracts=` and `[eventbus-evm] solidity_events=<s>
+  evm_subscriptions=<h> left to resolver:evm` (DT.10b); `[evm-client] lang=ts|go calls=
+  events= sites= (ethers= hardhat= typechain= viem= web3= geth=) abis= not_in_abi= dynamic=
+  path=` per file (DT.10c-DT.10k; `lang=go` from DT.10e); `[evm-wrappers] wrappers=<w> (direct=
+  forwarded= ambiguous=) sites=<s> dynamic=<y> path=<f>` (DT.10f); `[evm-abi-join] joined=<j>
+  unresolved=<u> ambiguous=<a> declarations=<d> repo=<label>` (DT.10g).
+- *GraphQL (T11).* `[graphql-sdl] files=<f> resolvers=<r> types=<t>` and `[graphql-sdl] code
+  types=<n> path=<p>` (DT.1j); `[graphql-root-fields] ops=<o> fields=<f> pairs=<p>
+  name_key_ops=<k>` (DT.11a); `[graphql-transport] endpoints=<n> (absolute= relative= template=)
+  skipped_ws=<w> path=<f>` (DT.11b); `[gaps] graphql transports implied=<n> unpaired=<m>` (DT.11c).
+- *Hints (T12).* `[cells] write .. target=hint_differs .. differs=<fields>` (DT.12b) and
+  `[engram-export] hints side: <facts> facts, <hinted> v1 hints, <ms> ms -> <path>` (DT.12a).
+
 ## Parser-vs-Graph Split (locked at v0.4.3b)
 
 Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems` with unresolved references (`UnresolvedRef`). The graph builder walks the tree to turn those into concrete edges uniformly across languages.
@@ -430,6 +575,45 @@ Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems`
   locals (annotated, `new T()`, `inject(T)`, `x as T`, `this.<field>` aliases; locals in
   top-level describe / it callbacks share the file's scope; DF.22a, `[ts-locals]`), and a typed
   receiver reads another class's STATE_VAR (rule `receiver_state`, DF.17).
+  0.5.2 tweaks, TS family:
+  - **Directory imports (DT.1b).** `ts_target` (graph/src/imports.rs) binds a specifier that
+    names no file extension from a TS / JS / Vue importer to `<dir>::index` (exactly, or through
+    the same-stem pick of an index.ts + index.js pair) once the exact module and same-stem
+    lookups fail; a file always wins over the directory of its stem. IMPORTS rule `dir_index`,
+    `[imports] dir-index binds=<n> (relative=<r> alias=<a>)`.
+  - **Re-export barrels (DT.1q).** The TS parser records `NavFact::ReExportStar` /
+    `ReExportNamespace` / `ReExportName` / `ExportLocal` and one `Exports` (every name the file's
+    own `export` declarations export, node or not). `resolve_imports_ts` resolves them as
+    ECMA-262 ResolveExport in `graph/src/imports/reexports.rs`, with one IMPORTS edge from each
+    barrel to each module it re-exports from (rule `reexport`). The barrel's `module_symbols`
+    gains its same-name re-exported declarations; renamed, namespace and default entries bind
+    only through a named import (a build-time side table). A local or indirect export shadows
+    the stars even when it mints no node, two star sources exporting distinct bindings give
+    nothing, `export *` never re-exports `default`, a path set ends cycles and depth 32 ends
+    chains. A ref a name-only fallback bound to the same target is re-emitted `import_binding`
+    (heuristic -> fact).
+  - **Value references and accessors (DT.5g).** A module-level `const X = <value>` initialiser
+    and a class decorator's arguments are walked (credited to X's STATE_VAR, the MODULE or the
+    class); an identifier passed by value (a whole call / `new` argument, an array element, a
+    pair value, a shorthand property, `export default <id>`) is a USES of the in-file top-level
+    FUNCTION / CLASS / STATE_VAR / ENUM it names (rule `value_ref`) or a Bare USES ref the graph
+    binds through a named import; a `this.<accessor>` read or write is a CALLS of the accessor
+    (rules `accessor_read` / `accessor_write`). `[ts-value-refs] ..`.
+  - **Angular templates (DT.5a-DT.5c).** An inline `template:` / `host:` binding, and a
+    `templateUrl` .html (the walk admits one beside a same-stem .ts; a post-cache graft binds
+    it, `engine/src/build/angular_templates.rs`), that calls or reads a METHOD of its component
+    is a CALLS / USES from the CLASS (EVIDENCE `extractor:angular_template`, rules template_call
+    / template_ref / host_call / host_ref, at the binding's row). A one-hop `member.m()` in a
+    template is a CallSite from the CLASS with qualifier `this.<member>`, bound by
+    `calls::receiver_type`, which now reads a CLASS / STRUCT / ENUM caller's OWN field type
+    (`[recv] class-scope receivers bound= unbound=`); `@HostListener` / `@HostBinding` /
+    `@Input` and query setters are USES from their class (rules host_listener / host_binding /
+    input_setter / query_setter).
+  - **Client wire shapes (DT.1d, DT.4).** A typed or bodied HTTP call site's `response` /
+    `request` shape is spliced last onto its ENDPOINT_HIT (wire::append_hit_fields), and an
+    awaited generic call (`await axios.get<T>(..)`) mints its ENDPOINT; a URL whose last
+    substitution is a query string (`${base}/smr${q}`) drops it from the path and records
+    `"query":"<ident>"|"inline"` on the hit (`[ts-endpoints] query suffixes=`).
 - Go resolves more than calls through its package model (graph/src/build.rs). Struct
   embeds bind as STRUCT INHERITS_FROM edges (`bind_go_embeds`), and `GoPromoted` /
   `GoPackages::method_on` promote embedded methods and fields to calls and to implicit
@@ -446,7 +630,16 @@ Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems`
   DF.15); a method-value route handler on a typed parameter or local (`h *TokensHandler`,
   `h := NewTokensHandler()`) binds through its type text, rule `local_type_method` (DF.16,
   `[go-routes] receiver-method handlers=<n> local-method=<m>`); a route-group prefix held in a
-  constant folds (DF.7).
+  constant folds (DF.7). 0.5.2 tweaks: the Go parser writes one wire::ServerWire MESSAGE_TYPE
+  cell (form `json_response` / `json_bind`, window `site`) per known-2xx / unknown-status JSON
+  write and per JSON bind in a gin / echo / fiber / net/http / chi handler, skipping a non-2xx
+  status (DT.1e), plus `NavFact::SliceResult` on `[]T` results; `graph/src/build/go_wire.rs`
+  then types each cell's value to its in-repo STRUCT (a written type through the imports, a
+  call through its callee's first result, a chain through SCHEMA_FIELDS) and writes one
+  handler -USES-> STRUCT per (handler, struct, form), emitter `graph:go_wire`, rules
+  `json_response` / `json_bind` (Strong from a written type, Medium through call / chain
+  typing); the cell's shapes gain `model` and a STRUCT's SCHEMA_FIELDS fields their nested
+  `model` (DT.1f).
 - Rust: `impl Trait for Type` with an imported or path-qualified trait is IMPLEMENTS, and axum
   `State` / `Extension`, actix-web `web::Data` and Rocket `&State` handler parameters are INJECTS
   to the held type, both bound by Rust path rules through `RustIndex::resolve_type_refs`, never by
@@ -456,6 +649,14 @@ Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems`
   INHERITS_FROM. PHP `extends` / `implements` are heritage edges (DH.14), and a `use` of a
   declared namespace binds that namespace's member (DF.2). Dart resolves own-package
   `package:<pubspec name>/..` URIs (DF.4a) and binds a plain import's public names (DF.4b).
+  0.5.2 tweaks (DT.5e): a call inside a Dart closure is its enclosing member's, `const T(..)` /
+  `new T(..)` is a call, a METHOD / FUNCTION passed by name is a USES (rule `method_ref`), and a
+  class extending one of 13 Flutter / Riverpod / flutter_hooks bases gets ROLE COMPONENT (an
+  entry); `INVOKED_MEMBERS`' flutter row makes `build` / `createState` / `initState` /
+  `dispose` .. of a used one live. DT.1l: a `factory C.fromJson` / `@JsonSerializable` class
+  writes SCHEMA_FIELDS format dart, and a Dio call's response / request shape joins its
+  ENDPOINT_HIT. Solidity (DT.10a): one RPC_PROCEDURE `evm:<Contract>.<fn>` per external /
+  public function, interface member and public getter, HANDLED_BY its METHOD / STATE_VAR.
 - An `extra_hook` seam on `resolve_calls` lets a language contribute resolution the generic
   walker misses; it is consulted only after every generic lookup failed. Five builders use it:
   `build_rust` hands it the path resolver in `graph/src/rust_paths.rs` (`crate::` / `self::` /
@@ -513,7 +714,18 @@ rule the identity rule (`message_fqname`, or `message_fqname/diverged` when that
 differ from the center's; `code_domain::same_as::evidence_rule`); no SHARES_DEPENDENCY edge and
 no message SHARES_SCHEMA pair is written (DD.16); a PROJECT's ORIGIN cell gains `label_source`
 (DD.4), a generated file's nodes ORIGIN `generated` (DE.7) and an unpaired third-party WS / gRPC /
-GraphQL client ORIGIN `external` (DF.10). Rules are query-time and store nothing (Q8).
+GraphQL client ORIGIN `external` (DF.10). Rules are query-time and store nothing (Q8). The 0.5.2
+tweaks keep the format too, and move content again: SCHEMA_FIELDS (code-domain `wire::ModelSchema`,
+format ts / go / dart / graphql) on TS interfaces and field-only classes, Go structs, Dart models
+and GraphQL SDL types (DT.1c, DT.1l, DT.1j); MESSAGE_TYPE wire cells on Go handlers (DT.1e,
+`model` keys from DT.1f), GraphQL root fields (`graphql_returns`), operations (`graphql_selection`)
+and TS callables issuing a typed GraphQL call (`graphql_result`, DT.1k); trailing `response` /
+`request` keys on TS and Dart HTTP ENDPOINT_HITs (DT.1d, DT.1l), `query` on a query-suffixed one
+(DT.4), `host` on a folded WS client's (DT.3b) and `"via":"graphql"` on a GraphQL transport
+ENDPOINT's (DT.11b); the evm cells (a JSON CODE on each RPC_PROCEDURE, an evm ENDPOINT_HIT on each
+client, DT.10a / DT.10c, `abi_ref` / `abi_from` since DT.10g); SAME_AS rules `http_model` /
+`graphql_model` (emitter `resolver:models`); and a CODE text cell on every GRAPHQL_OPERATION read
+from a document (DT.11a).
 
 Projections on top of the store:
 - **Binary** — the `.gmap` itself, consumed by activation and the pyo3 layer
@@ -532,7 +744,10 @@ and never pick one inline in a parser. An id is **locked once allocated** — it
 into every `.gmap` on disk, so reusing or renumbering one silently corrupts old stores.
 
 0.5.2 allocates one id, edge category 37 SAME_AS (D0.1): an identity class's member -> its
-center, written by IdentityResolver (DD.5). The next free ids are node 50 / edge 38 / cell 26.
+center, written by IdentityResolver (DD.5) and, for client <-> server models, ModelResolver
+(DT.1h). The 0.5.2 tweaks (DT) allocate none: EVM procedures and clients reuse RPC_PROCEDURE /
+RPC_CALL / EVENT_HANDLER and RPC_CALLS / EVENT_FLOWS, GraphQL schema types MESSAGE_TYPE, model
+fields SCHEMA_FIELDS. The next free ids are node 50 / edge 38 / cell 26.
 SHARES_DEPENDENCY (31) stays registered with no emitter since DD.16 (an id is never reused), so an
 old layout still decodes it.
 
@@ -553,17 +768,28 @@ Some(preset))`; `MergedGraph::blast_radius` takes `&DomainTables`. The graph, st
 projection crates read `CODE_TABLES` directly (they cannot depend on the engine); a new
 entry kind, carry edge or weight is one table row there, never a list in a consumer.
 
-Identity is a table too (DD.3): `CODE_TABLES.identity_rules` holds the eight ways two nodes are
-one thing, one `IdentityRule` per `same_as::RULES` name (the kinds it pairs, the key, the tier and
-whether a class walks): `package_name` (FACT, never walks: a registry package would join every
+Identity is a table too (DD.3): `CODE_TABLES.identity_rules` holds the ten ways two nodes are
+one thing, one `IdentityRule` per `same_as::ALL_RULES` name (the kinds it pairs, the key, the tier
+and whether a class walks): `package_name` (FACT, never walks: a registry package would join every
 dependant), `manifest_name` (FACT, a dependency and the project its manifest names), `message_fqname`
 (FACT), `contract_op` / `contract_route` (DERIVED), `scip_symbol` (FACT, DD.7), `body_hash` /
-`path_suffix` (HEURISTIC vendored copies, DD.6: same-as candidates, never collapsed). SAME_AS
+`path_suffix` (HEURISTIC vendored copies, DD.6: same-as candidates, never collapsed), and the two
+`MODEL_RULES` the models pass writes (emitter `resolver:models`, so `same_as::is_identity_emitter`
+names both emitters): `http_model` (DERIVED, walks; a client INTERFACE / CLASS -> the server STRUCT
+of one HTTP exchange whose JSON names confirm it, DT.1h) and `graphql_model` (DERIVED, walks; a
+GraphQL client call's result model or gqlgen's generated STRUCT -> the SDL MESSAGE_TYPE
+`message:graphql:<T>` its root field returns, DT.1k); either is `/diverged` when the fields
+differ. Liveness reads one more table (DT.5d): `INVOKED_MEMBERS`, the members a framework or the
+runtime calls (Angular lifecycle hooks, CVA / Validator members, pipe `transform`, interceptors,
+guards, Flutter `build` / `createState` / .., and constructors per language), which a used owner's
+walk-local hop reaches (`invoked_member`, the one matcher). SAME_AS
 weighs 0 in PPR and is in no carry or community list: identity reaches a walk or a ranking only
 through the quotient (`algo::classes::Quotient`), never as an edge. Answers collapse FACT /
 DERIVED classes to one row carrying `identity {tier, rules, diverged, also_in}` (Q17), and walk
-classes (messages, contract ops, SCIP symbols, package <-> project) are one node in blast radius,
-trace / flows and tests-for walks and their PPR (DD.10-DD.12).
+classes (messages, contract ops, SCIP symbols, package <-> project, client <-> server models) are
+one node in blast radius, trace / flows and tests-for walks and their PPR (DD.10-DD.12). A model
+class forms inside one repo too (a monorepo's TS interface and Go struct), so a single-repo answer
+can fold a client model into its server model.
 
 ## Adding a New Language Parser
 
@@ -589,10 +815,18 @@ its `pub use resolvers::{…}` list only if it must be public. Register it by ad
 pass (resolver, post-pass, external stage) is a `PassSpec` there with its `Stage`, `after` and
 `populates`, never a new call in `engine/src/build/`; the `code_passes_order_is_head_order`
 and `populates_is_exact` tests pin the order and the declared cell types.
-`resolvers/http.rs` is the canonical example. Shipped: 13 resolvers (HTTP, gRPC, RPC, Queue,
-GraphQL, WebSocket, EventBus, SharedSchema, CLI, DB, Cron, Config, IaC) and Identity, the last
-Resolve pass (SAME_AS, DD.5); MessageSchema and Package were removed in 0.5.2 (DD.16), their
-pairs now identity classes. See `dev-notes/glia-memory/project_040_stack_resolvers_backlog.md`.
+`resolvers/http.rs` is the canonical example. Shipped: 15 cross-graph resolvers, in pass order
+http (a written-out `PassSpec`: it takes the overlay's route mounts and, since DT.6a, leaves the
+test-only ROUTEs out of its index), then 14 `resolver!` rows: grpc, rpc, evm (EvmContractResolver,
+DT.10b), queue, graphql, gqlgen (GqlgenResolver, DT.5f), websocket, eventbus, shared_schema, cli,
+db, cron, config, iac; then `models` (a `PassSpec` with `after: ["http", "graphql"]`, the
+http_model / graphql_model SAME_AS stars, DT.1h / DT.1k) and Identity, the last Resolve pass
+(SAME_AS, DD.5): 17 Resolve passes in all. MessageSchema and Package were removed in 0.5.2
+(DD.16), their pairs now identity classes. `resolver:evm`'s `abi_hint` / `name_hint` pairs are
+HEURISTIC (Weak; `why::HEURISTIC_PAIRING_RULES`), so a check violation through one is advisory;
+its `contract` / `abi` pairs and gqlgen's are DERIVED. EventBusResolver leaves Solidity events and
+`evm_event:` handlers to resolver:evm (James's ruling 2, `[eventbus-evm]`). See
+`dev-notes/glia-memory/project_040_stack_resolvers_backlog.md`.
 
 ## Key Design Decisions
 
@@ -616,7 +850,12 @@ pairs now identity classes. See `dev-notes/glia-memory/project_040_stack_resolve
   Markers: `[rules] eval strata=.. rules=.. rounds=.. ms=..`, `[rules] closure cats=<c>
   mode=<m> bfs=<n> rows=<r>`, `[rules] budget pred=<p> rows=<n> cap=<c>`, `[rules] magic
   pred=<p> adornment=<a> sites=<n>`, `[rules] explain pred=<p> tier=<t> height=<h> ..`,
-  `[rules] prelude relations=<n> (..)`.
+  `[rules] prelude relations=<n> (..)`. The 0.5.2 tweaks: a GQL `RETURN` of properties only is
+  located at the first property's node, as its Datalog twin is (`gql::Compiled.anchor`, a hidden
+  trailing column folded away, `[gql] anchor ..`, DT.8b; an aggregate row stays unlocated); the
+  prelude's `unhandled_route` skips a ROUTE stamped ORIGIN `test_fixture` (`origin/2` reads no
+  edge, so the caveats stay HANDLED_BY's, DT.6b); a row through a `resolver:evm` `abi_hint` /
+  `name_hint` edge tiers heuristic.
 - **Publish gate.** Only `py/` publishes to PyPI (as `glia-py`, imported as `glia_py`). Everything else is internal workspace.
 - **No Python fallback.** After v0.4.10c, Python is a thin pyo3 wrapper; there is no parallel Python implementation to keep in sync.
 
@@ -641,7 +880,10 @@ the identity quotient (a walk class is one node in the BFS and the PPR). HEURIST
 candidates (vendored copies) stay separate rows (Q18). `--no-collapse` (pyo3: `collapse=False`, the
 last keyword) is the raw pre-identity answer: no quotient walk, no identity tag. Not collapsed:
 pack, hubs, hotspots, communities, duplicate-flows, effects, implementors, why and gaps rows.
-`[identity] collapse surface=<s> ..` fires on stderr once per collapsing answer.
+`[identity] collapse surface=<s> ..` fires on stderr once per collapsing answer. Since the 0.5.2
+tweaks the classes include client <-> server models (`http_model`, DT.1h) and GraphQL result /
+generated models with their schema type (`graphql_model`, DT.1k), both DERIVED and walking; `why`
+reads a SAME_AS edge of either emitter as an identity edge.
 
 CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surface/`
 (regenerate: `GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface`). Most take
@@ -651,7 +893,20 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   repo keys services by top-level directory; `SHARES_*`, `SAME_AS` and `DOCUMENTS` only with
   `--include-shared`; a SAME_AS class is one link per (service pair, class) at its weakest
   edge and other links count class-mapped endpoint pairs once, `--no-collapse` the raw star,
-  DD.14), `projects`, `contracts` (`--fields [--breaking-only]`, LE.10d),
+  DD.14), `projects`, `contracts` (`--fields [--breaking-only]`, LE.10d; the 0.5.2 tweaks add
+  three `fields` pairings: `http_model`, each client call site's model against the server model
+  of its HTTP exchange, response and request (DT.1i, the wire compare of DT.1m: rules
+  json_field_missing, json_field_optional_absent, json_field_unread, json_field_may_be_absent,
+  json_field_dropped, json_required_missing, json_field_unset, json_type_mismatch and, DT.1n,
+  json_required_may_be_unset); `client_contract`, a client against the OpenAPI op that
+  DOCUMENTS its route (contract_field_undeclared, contract_field_optional_undeclared,
+  contract_field_unread, contract_request_field_undeclared, contract_required_missing,
+  contract_field_unset, contract_type_mismatch); `graphql_selection`, each GRAPHQL_CALLS op's
+  selection against the SDL type its root field returns (graphql_field_undefined, DT.1n). Notes
+  `open` and `union` ride on a verdict; a row that compared nothing is `unknown` with
+  `ambiguous_server`, `client_type_unresolved` / `server_type_unresolved` / `op_type_unresolved`,
+  or a GraphQL refusal reason; `[contract-fields] .. http_model=<n> client_contract=<n>
+  graphql_selection=<n>`),
   `impact`, `blast-radius` (many seeds are one walk and one ranking, LD.5; `--no-collapse`,
   DD.10), `trace` (ranked distinct paths, `--to`, `--max-paths`, LD.4a; a class hop shows its
   display member with an `(also in: ..)` cell, `--no-collapse`, DD.11), `resolve`, `coverage` (+ the
@@ -676,7 +931,9 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   the identity classes by rule and tier, each member located, diverged copies with their
   variants: FACT / DERIVED classes collapse in answers, HEURISTIC same-as candidates never; exits
   0 with classes, 1 with none, 2 on an error; `[identity] report classes=<c> fact=<f> derived=<d>
-  heuristic=<h> diverged=<x>`). 0.5.1:
+  heuristic=<h> diverged=<x>`; `--rule` takes the ten `same_as::ALL_RULES` names and `by_rule`
+  lists them in that order, `http_model` and `graphql_model` last, DT.1h / DT.1k). A `--gql` row
+  that returns properties only is located at the first property's node (DT.8b). 0.5.1:
   `pack <repo> <query> [--budget <tokens>] [--preset repair|review|onboard|centrality]`
   (CC.4c; the context for a query packed to a token budget, each node at the most detail
   the budget buys; stdout is the pack text alone), `hotspots [--level module|symbol|both]`
@@ -697,7 +954,21 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   1 only when the change adds a BLOCKING violation, an advisory one under its own heading),
   `contract-breaks [--base <rev>] [--avro backward|forward|full] [--breaking-only]
   [--with <repo>]` (CC.8b / CC.8c; every contract judged against itself across the
-  change, plus the clients left with no provider; exits 1 on either), `cochange
+  change, plus the clients left with no provider; exits 1 on either). The 0.5.2 tweaks put the
+  inferred contract models in both PR gates (DT.1o, DT.1p): every http_model / graphql_selection
+  exchange judged rev -> working tree (`contract_breaks::model_breaks`), one row per client <->
+  server model pair with located field lines (rules json_name_changed / request_json_name_changed,
+  response_field_removed / _added / _type_changed / _now_optional, request_field_removed /
+  _added, new_required_request_field, request_type_changed, schema_field_removed /
+  _type_changed / _now_nullable, and the client-side wire rules; notes `open`, `new_pairing`),
+  tiered by why's reading of the joining edges and blocking only at or above
+  `--models-min-tier fact|derived` (default `fact`, so the resolver-paired, derived rows of
+  0.5.2 are advisory). contract-breaks gains `models` and `advisory` (`breaking` adds only the
+  blocking model rows) and a `## models` section; review gains `model_breaks`,
+  `counts.model_breaks`, `### Model breaks (blocking)` / `(advisory: ..)` tables and blocks on a
+  blocking model row; review also checks rules through check's gate (an empty-scope rule goes to
+  `unanchored`, `### Rules that check nothing`, never blocking) and prints a rule's caveats once
+  per section (`[review] caveats rules= lines= folded=`); `[model-breaks] ..` on both. `cochange
   [<file>...] [--base <rev>]` (CC.11c; what usually changes with the change, a
   directional confidence and whether a static link joins them; exits 1 with no rows),
   `timeline build|history|as-of` (CD.5d; the last `--revs` commits as edge validity
@@ -717,14 +988,30 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   CC.5c, evaluated through `engine/src/rules/reflexion.dl` since DB.8b; 0.5.2 evaluates an `invariant` with
   a Datalog `rule` (DB.3a) and a `transitive` forbid_edge as `forbid_path` violations, `via`
   facades never walked through (DB.3b, Q3), and gates on `min_tier = fact|derived` (default
-  derived; a heuristic violation is advisory under any setting and never exits 1, Q2): exits 0
-  when nothing blocks, 1 on a blocking violation, 2 on a build error or a rule it cannot
-  evaluate; `[check] gate blocking=<b> advisory=<a>`, DB.3d), `spec-status` (LE.9b; a row's
+  derived; a heuristic violation is advisory under any setting and never exits 1, Q2); a declared
+  rule that checks nothing is listed under 'Rules that check nothing' with a reason and a fix,
+  non-blocking unless `--strict` (exit 2) (DT.7b, DT.7c; `[check] declared not checked: ..`,
+  `[check] overlay rejected root=<r> whole_file=<b> constraint=<c> component=<m> layer=<l>`).
+  Such a rule is one of: a stanza the build anchored nowhere (orphaned); one the binder or the
+  overlay loader rejected (a version-2 key in a version-1 file, a path two components claim, a
+  layer / allow naming a dropped component; a TOML / schema / version error ignores the whole
+  file and is one `overlay` row); one the graph does not hold (absent); a rule whose scope no
+  located node sits in (empty_scope). A sub-project `[[constraint]]` with no `anchor` anchors on
+  the deepest PROJECT enclosing its scope, else the smallest-id MODULE under it (DT.7a,
+  `[declared] .. anchor_enclosing=`). The markdown prints a rule's coverage caveats once, under
+  its heading (DT.8a, `[check] caveats rules=<r> lines=<l> folded=<f>`; --json keeps them per
+  violation). Exits 0 when nothing blocks, 1 on a blocking violation, 2 on a build error or a
+  rule it cannot evaluate (and, under `--strict`, on a rule that checks nothing);
+  `[check] gate blocking=<b> advisory=<a>`, DB.3d), `spec-status` (LE.9b; a row's
   `pairing` is `exact`, `server_base` (another server base the OpenAPI document lists),
   `annotated_base` (the project's swaggo `@BasePath` for a base-less document, at most medium)
   or `prefix`, DF.19). 0.5.1: `flags [--status dead|undefined|single_site|quiet]` (CC.7c; the
   stale feature-flag report, exits 0).
-- store: `inspect <path>` (LC.4), `cell set|rm|ls` (LF.1c). 0.5.1: `cache push|pull|gc`
+- store: `inspect <path>` (LC.4), `cell set|rm|ls` (LF.1c; `cell set --hint <v1>` passes a
+  caller's LB.6 identity hint, the form engram-export's `<out>.hints.jsonl` lists: a non-v1,
+  unregistered-kind or kind-contradicting hint exits 2 and writes nothing, and a fresh layout
+  whose binding differs from it reports `target=hint_differs` (applied, flagged) with a `note:`
+  line and the marker's ` differs=<fields>`, DT.12b). 0.5.1: `cache push|pull|gc`
   (CE.2c; the shared parse cache over a directory or HTTPS object store, objects signed
   with a blake3 keyed MAC; `--layout` moves a whole `.glia/graph/` layout, CE.2d; HTTPS
   through `ureq`, CE.2e). The transport lives in the glia binary only: neither
@@ -736,15 +1023,31 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   `[dead-dispatch]`; a `super.m()` call (rule super_method) vouches for nothing there, and TS
   concrete overrides join the dispatch rule through rule concrete_override, DF.22c;
   `rotted_rule`, a FACT row per `[[constraint]]` whose `rule` this glia can no longer read,
-  suggest `remove`, DB.4), `history sync` (LF.5d), `tests ingest`
+  suggest `remove`, DB.4; the 0.5.2 tweaks: `unpaired_route` withholds a ROUTE a WebSocket
+  client connects through, DT.3c, `glia_graph::WebSocketStackResolver::served_routes`, `[gaps]
+  ws-served routes=<n>`, and a ROUTE only test code registers, ORIGIN `test_fixture`, DT.6b,
+  `[gaps] unpaired_route rows withheld: <n> (test-file routes)`, which unpaired_endpoint's
+  `suffix_of` / `route_prefix|edge` candidates and `suspected_edge` skip too; an unpaired
+  `"via":"graphql"` transport whose project's operations pair a resolver on a server holding
+  no route at its last segment is no unpaired_endpoint, and any other unpaired transport's
+  detail starts `graphql transport; ` (with `route_at_server=<qname> (<repo>)` when the server
+  holds such a route), DT.11c, `[gaps] graphql transports implied=<n> unpaired=<m>`;
+  `dead_symbol` withholds a used owner's framework- and runtime-invoked members and
+  constructors (`INVOKED_MEMBERS`: liveness takes a walk-local owner -> member hop) and every
+  ORIGIN `generated` / `generated_proto` node, DT.5d, `[dead-framework] dead_symbol rows
+  withheld: invoked=<i> generated=<g>`, the `[live]` line gaining `invoked=`), `history sync`
+  (LF.5d), `tests ingest`
   (LF.6d; a rolling window of runs, `--window`, `--reset`, CC.9b). 0.5.1: `overlay
   propose|try|accept` (CE.3e; the overlay loop, `skills/glia-overlay/SKILL.md`; 0.5.2,
   DB.9a-c, Q9: a candidate may also hold `[[constraint]]` rules, handles `constraint#<n>`;
   try judges a rule by the check delta on the build with every stanza and demotes a graph
-  stanza that adds or hides a declared rule's violation to review; accept refuses a rule check
-  cannot evaluate and moves the file to `version = 2` in place only when a written rule needs
-  it; `[overlay] try-rules ..`; `--remove` takes orphaned_rule / redundant_rule / rotted_rule
-  ids), `scip import <repo> <index.scip>` (CE.1c; writes `.glia/scip-snapshot/`, which the
+  stanza that adds or hides a declared rule's violation to review; a rule stanza's try status
+  gains `checks_nothing` (its from / to / via / scope holds no node: verdict review, `reason` /
+  `fix`, check's own reading since DT.7b, through check::check_rules_gated, DT.7c); accept
+  refuses only a rule that does not parse or defines no `violation`, and moves the file to
+  `version = 2` in place only when a written rule needs it; `[overlay] try-rules ..` (gaining
+  ` checks_nothing=<n>` when one does); `--remove` takes orphaned_rule / redundant_rule /
+  rotted_rule ids), `scip import <repo> <index.scip>` (CE.1c; writes `.glia/scip-snapshot/`, which the
   CE.1d build stage reads as FACT-tier CALLS / USES / IMPLEMENTS / INHERITS_FROM, and the
   identity pass, through `CodeBuildCtx.scip_roots`, as `scip_symbol` classes, DD.7). A snapshot
   step never runs inside a build. `.glia/overlay.toml` `version = 2` (DB.1, Q7) adds the
@@ -776,7 +1079,9 @@ diagnostics) and `identity_classes(tier=None, rule=None, diverged_only=False, li
 function `tests_for_rev`); traversal —
 `neighbours(node_id, direction="out", categories=None)` -> `(id, category,
 "out"|"in")`, `bfs`, `predecessors`, `reachable_by`, `shortest_path` (categories=None is
-every category, DEFINES included; LD.3c) — `set_cell` / `remove_cell` (+ `activate`,
+every category, DEFINES included; LD.3c; `categories` takes ids or registry names, mixed,
+case-insensitive, `["CALLS", "imports", 9]`, an unknown name a `ValueError` naming it, DT.9;
+rows still carry ids) — `set_cell` / `remove_cell` (+ `activate`,
 `node_cells`, `dense_text*`, `nodes_json` / `edges_json`, `save_to*`). Module functions:
 `generate` / `generate_many`, `load_from_gmap` (rebuilds a stale or old layout, LC.8),
 `is_stale`, `merge_gmaps`, `graph_delta`, `diff_impact_vs_rev`, `tests_for_rev`,
@@ -789,7 +1094,17 @@ every category, DEFINES included; LD.3c) — `set_cell` / `remove_cell` (+ `acti
 transport over `overlay_loop::{propose, try_candidate, accept}`; `candidate` is TOML
 text, a refusal is a `ValueError`, markers end `surface=py`; since DB.9b the try dict gains
 `rules` when a build checked a rule or the candidate holds a `[[constraint]]`, and stanza
-dicts `rule` / `rules`; `overlay_accept` raises `ValueError` on a rule check cannot evaluate).
+dicts `rule` / `rules`; `overlay_accept` raises `ValueError` on a rule that does not parse or
+defines no `violation`). The 0.5.2 tweaks: `PyGraph.check(strict=False)` reads each repo root's
+overlay and gains `unanchored` (only when a row exists; an empty-scope rule leaves `errors` for
+it unless `strict=True`, DT.7b, DT.7c); `contract_breaks_vs_rev(.., models_min_tier="fact")` and
+`review_vs_rev(.., models_min_tier="fact")` (the dicts gain `models` / `advisory` and
+`model_breaks` / `unanchored`, a bad tier a `ValueError` before any build, DT.1p);
+`PyGraph.set_cell(.., dims=None, hint=None)` / `write_cell(.., dims=None, hint=None)` with the
+outcome's `node_hint` / `hint_differs` (DT.12b); `contract_fields` returns the `http_model`,
+`client_contract` and `graphql_selection` rows (DT.1i, DT.1n); `query_gql` property rows carry
+`file` / `line` (DT.8b); `overlay_try`'s rule status may read `checks_nothing` with `reason` /
+`fix` (DT.7c).
 Classes: `PyGraph`, and 0.5.2's `WatchSession(repo, overlay=True)` (DC.9: `apply(paths)` /
 `poll()` return a WatchUpdate dict (`poll` None when nothing changed), `snapshot()` a PyGraph of
 the current build, `persist()` writes the layout and cache; the GIL is released while the engine
@@ -826,7 +1141,14 @@ CODE_ATTRIBUTES, PRELUDE, prelude_predicates}` (QueryOptions / QueryAnswer; DB.2
 `watch::{WatchSession, durability}` (DC.7a-c), `identity::{identity_classes, IdentityView,
 Collapse}` (DD.8, DD.15), `memory::release_freed_memory` (DE.10), `serves::serves_with` and
 `arch::service_map_collapsed` (the collapse-aware forms, DD.13 / DD.14), and on the graph facade
-`glia_graph::{blast_radius_over, cross_links_with}` (DD.10, DD.14).
+`glia_graph::{blast_radius_over, cross_links_with}` (DD.10, DD.14). The 0.5.2 tweaks:
+`check::{check_with_roots, CheckOptions, Unanchored, ORPHANED, REJECTED, ABSENT, EMPTY_SCOPE}`
+and `CheckReport.unanchored` (DT.7b), `contract_breaks::{model_breaks, ModelBreak, ModelBreaks,
+ModelBreakArgs, ModelChange, ModelExchange, ModelSite, MODEL_MIN_TIERS}` (DT.1o) with
+`ContractBreakArgs` / `ReviewArgs.models_min_tier`, `ContractBreaks.{models, advisory}`,
+`Review.{model_breaks, unanchored}` and `review::{caveat_fold, CaveatFold}` (DT.1p),
+`overlay_loop::RULE_CHECKS_NOTHING` and `RuleTrial.{reason, fix}` (DT.7c), and the graph
+facade's contract-model items (Module layout above).
 A `*_with_live` variant takes a precomputed liveness set, so a caller answering several
 questions over one graph computes `entrypoint_reachable` once.
 
@@ -886,16 +1208,34 @@ questions over one graph computes `entrypoint_reachable` once.
   every crate can be pinned `=0.5.1`. The handoff docs
   (`dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.1.md`, each with the exact pin and
   every declared break) cover W0–W19.
-- **0.5.2 — the four bets: landed (W0–W14), release pending James.** Scope in
+- **0.5.2 — the four bets + the tweaks: landed, never released; ships in 0.5.3.** James,
+  2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*: no 0.5.2 bump, tag or publish; the
+  version goes 0.5.1 -> 0.5.3 in one bump at the end of 0.5.3, and the commit after DT.13 gets
+  the local marker tag `0.5.2-complete` (a build there reports `0.5.1+p<stamp>`). Scope in
   `dev-notes/next-leap-0.5.2.md` (§0.1 the binding decisions Q1–Q25, §4.2 the defaults the
   packets took), research `dev-notes/research-0.5.2/`, packets in
-  `dev-notes/leap-052-packets.json` (153 packets, the gap run's DB.9a-c and DF.22a-c among
-  them), overrides in `dev-notes/leap-052-corrections.json`, schedule and LANDED waves in
-  `dev-notes/wave-runner/schedule_052.py` (15 waves, runner `--release 052`). The name stays
-  0.5.2 and consumers pin it exactly, so it may break contracts, each break declared by its
-  packet; the handoffs are `dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.2.md` (DZ.2;
-  repo-graph's is held to be sent with 0.5.3's as one combined handover, James 2026-10-16).
-  The version bump is the release step after the docs, never inside a packet. Groups: D0 the
+  `dev-notes/leap-052-packets.json` (153 packets in W0–W14, the gap run's DB.9a-c and DF.22a-c
+  among them, then the 57 tweak packets DT.1a–DT.13 in W15–W26), overrides in
+  `dev-notes/leap-052-corrections.json`, schedule and LANDED waves in
+  `dev-notes/wave-runner/schedule_052.py` (27 waves, runner `--release 052`). It may break
+  contracts, each break declared by its packet; the handoffs are
+  `dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.2.md` (DZ.2, then DT.13 for the tweaks):
+  the 0.5.2 half of one combined 0.5.1 -> 0.5.3 handoff per consumer, which 0.5.3's release docs
+  packet writes (repo-graph is held for it, James 2026-10-16). The tweaks
+  (`dev-notes/tweaks-0.5.2.md`, the gaps the Kina and quokka-stack demos showed): T1 contract
+  models (DT.1a-DT.1q: SCHEMA_FIELDS on TS / Go / Dart / GraphQL models, client wire shapes, Go
+  server wire cells, the `models` pass with http_model / graphql_model identity, contract_fields
+  drift rows, inferred-model breaks in contract-breaks / review, TS directory imports and
+  re-export barrels); T2 NATS queues (DT.2a-c); T3 WebSockets inside HTTP routes (DT.3a-c); T4
+  query-string suffixes (DT.4); T5 dead_symbol precision in UI code (DT.5a-g: Angular templates,
+  framework-invoked members, Flutter widget trees, gqlgen, TS value references); T6 test-file
+  routes (DT.6a-b); T7 sub-project constraints and rules that check nothing (DT.7a-c); T8 check
+  caveats once and located GQL rows (DT.8a-b); T9 traversal category names (DT.9); T10 smart
+  contracts across the stack (DT.10a-k: Solidity procedures, resolver:evm, ethers / hardhat /
+  TypeChain / viem / wagmi / web3.js and go-ethereum clients); T11 GraphQL root fields,
+  transports and implied transports (DT.11a-c, DT.11z); T12 one hint format with Engram
+  (DT.12a-b); DT.13 these docs. The version bump is the release step after the docs, never
+  inside a packet. Groups: D0 the
   wave-0 slots, SAME_AS = edge 37 (the release's only id) and the one dependency commit (the
   glia-rules crate, no external crate); DA the glia-rules Datalog crate; DB rules in the engine
   (`glia query` + GQL, check's rule invariants / transitive forbid / min_tier, review's
@@ -913,8 +1253,9 @@ questions over one graph computes `entrypoint_reachable` once.
   tests` feeding TESTS, Python signals, the Pub/Sub Terraform binding, the Go package clause,
   OpenAPI bases, TS typed receivers / inherited calls / concrete overrides); DG / DH the rest
   of the coverage matrix (Rust and Scala, then Ruby, PHP, Dart, Elixir, Swift, Clojure, C);
-  DZ these docs and the handoffs. The matrix stands at 345 full, 1 partial (dart/tests), 0
-  none, 136 unknown, 28 n/a. No FORMAT_VERSION change.
+  DZ these docs and the handoffs. The matrix stands at 346 full, 0 partial (DT.5e closed
+  dart/tests), 0 none, 136 unknown, 28 n/a, over 414 graded fixtures. No FORMAT_VERSION change
+  and no registry id beyond SAME_AS.
 - **After 0.5.2** (the leap doc's §1 train; seed `dev-notes/next-leap-0.5.3.md`): **0.5.3**
   scale — Stack Graphs-style incremental resolution with watch's A2 body-only fast path,
   build-target graphs (the likely first real non-code domain), multi-repo `glia watch --with`,

@@ -1,4 +1,10 @@
-# neuropil handoff - glia 0.5.2 (the four bets, 2026-10-16)
+# neuropil handoff - glia 0.5.2 (the four bets 2026-10-16, the tweaks 2026-10-17)
+
+**This file is the 0.5.2 half of a combined 0.5.1 -> 0.5.3 handoff, which 0.5.3's release docs packet
+writes. There is no 0.5.2 release** (James, 2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*): the
+version goes 0.5.1 -> 0.5.3 in one bump, every pin below reads `=0.5.3`, and the local tag
+`0.5.2-complete` marks the commit where 0.5.2 ends. Section 10 adds the tweaks (DT.1a-DT.13, waves
+W15-W26) to the W0-W14 content below.
 
 The third glia -> neuropil handoff, after `neuropil-handoff-0.5.0.md` and `neuropil-handoff-0.5.1.md`.
 neuropil is glia's in-process Rust consumer: it path-depends on six glia crates and calls
@@ -36,9 +42,10 @@ an id is the glia commit that landed it.
    handoff's sections 2-3 first; 0.5.2 stacks on top, and its pin (section 2) replaces 0.5.1's. The
    0.5.1 handoff's section 3 re-keys happen in the same move, so state is re-set once for both.
 2. **0.5.2 adds no compile break.** With the 0.5.0 section 2 edits applied, the check reports
-   **new=0 errors** under `--all-targets` against glia `12f58844` (section 1). Every 0.5.2 api_signature
+   **new=0 errors** under `--all-targets` against glia `12f58844` (section 1), and again with the
+   tweaks, against glia `9a8e56e0` + DT.13 (section 10.1). Every 0.5.2 api_signature
    break (section 4) is on an item neuropil never names: grep of `crates/` finds 0 hits for each.
-3. **Pin exactly, all six crates:** `version = "=0.5.2"` on every glia path dependency (section 2).
+3. **Pin exactly, all six crates:** `version = "=0.5.3"` on every glia path dependency (section 2).
    Since 0.5.1 every glia crate takes the workspace version, so the 0.5.1 handoff's "only glia-engine
    carries the release version" no longer holds.
 4. **Persisted state re-keys once for the nodes whose qname or kind moved** (section 3): Go ROUTEs on
@@ -53,14 +60,14 @@ an id is the glia commit that landed it.
 6. **Optional, in-process:** `glia_engine::watch::WatchSession` is the "per-shard incremental rebuild
    path" `watcher.rs:1-7` waits for (v1.1); `glia_engine::memory::release_freed_memory` after dropping
    a `GenerateResult` (section 7).
-7. **Reinstall the `glia` binary from the v0.5.2 tag** with neuropil's move: the hooks prompt
+7. **Reinstall the `glia` binary from the v0.5.3 tag** with neuropil's move: the hooks prompt
    (`hooks_install_prompt.rs`) installs hooks that run `glia build .`, and two glia versions writing one
    `.glia/graph/` rebuild each other's layout ("written by another glia build").
 
 Bump order:
-1. glia is bumped and tagged by James (`[workspace.package].version` in `Cargo.toml:74`,
-   `py/pyproject.toml:7`, the excluded `engram-export/Cargo.toml:3`, all 0.5.1 -> 0.5.2 together).
-   0.5.2 stays unreleased while James tests it (`12f58844`).
+1. glia is bumped and tagged by James at the end of 0.5.3 (`[workspace.package].version` in
+   `Cargo.toml:74`, `py/pyproject.toml:7`, the excluded `engram-export/Cargo.toml:3`, all 0.5.1 ->
+   0.5.3 together, tag `v0.5.3`). 0.5.2 is never released; `0.5.2-complete` is a local marker tag.
 2. In neuropil: the 0.5.0 handoff sections 2-3, the pin (section 2 here), `cargo check --workspace
    --all-targets`, then the re-test (section 8), re-setting state for this doc's section 3 and the
    0.5.1 handoff's section 3 together.
@@ -107,13 +114,14 @@ error until neuropil renames. The `NEUROPIL_DIR` recipe above stands in for it, 
 
 | where | 0.5.0 handoff asked | 0.5.2 adds |
 |---|---|---|
-| `Cargo.toml:112-117` | `repo-graph-<x> = { path = "../glia/<dir>" }` -> `glia-<x> = { path = ... }`; projection-text feature `driver` -> `research` | `version = "=0.5.2"` on all six: `glia-core`, `glia-code-domain`, `glia-graph`, `glia-engine`, `glia-activation`, `glia-projection-text` (e.g. `glia-engine = { path = "../glia/engine", version = "=0.5.2" }`) |
+| `Cargo.toml:112-117` | `repo-graph-<x> = { path = "../glia/<dir>" }` -> `glia-<x> = { path = ... }`; projection-text feature `driver` -> `research` | `version = "=0.5.3"` on all six: `glia-core`, `glia-code-domain`, `glia-graph`, `glia-engine`, `glia-activation`, `glia-projection-text` (e.g. `glia-engine = { path = "../glia/engine", version = "=0.5.3" }`) |
 | `crates/neuropil-app/Cargo.toml:86-94` | `repo-graph-<x>.workspace = true` -> `glia-<x>.workspace = true` | nothing |
 | `crates/**/*.rs` | 165 `repo_graph_*` path tokens -> `glia_*` (0.5.0 handoff section 2) | nothing |
 
 All six crates read `version.workspace = true` (checked: the copy's lock lists every glia package at
 0.5.1, the workspace version). A `version` on a path dependency must match the crate's own version, so
-add the pin after James's bump: until then glia HEAD reads 0.5.1 and `=0.5.2` fails resolution.
+add the pin after James's 0.5.3 bump: until then glia HEAD (and `0.5.2-complete`) reads 0.5.1 and
+`=0.5.3` fails resolution.
 
 ## 3. What re-keys: qname-keyed state and NodeId anchors
 
@@ -299,7 +307,7 @@ and is not `#[non_exhaustive]`: an exhaustive `match` outside glia would break (
 - **DE.8** ("neuropil state keyed by a removed `grpc_client:` qname goes stale"): correct, section 3.
 - **The 0.5.1 handoff, section 2** ("only glia-engine takes `=0.5.1`; the other five keep their own
   crate versions"): superseded. The 0.5.1 bump moved every glia crate to the workspace version, so all
-  six take `=0.5.2`.
+  six take `=0.5.3` (there is no 0.5.2 release).
 
 ## 7. Optional: new in-process primitives
 
@@ -344,8 +352,10 @@ python3 tools/visual_regression.py compare
   section 2 edits are in.
 - **Pending, neuropil session:** the 0.5.0 handoff sections 2, 3 and 6, this doc's section 2 pin and
   section 8 (with the 0.5.1 and 0.5.2 re-keys).
-- **Pending, James:** testing, the 0.5.2 bump and tag, then `cargo install --path cli --locked` from the
-  tag so the `glia` on PATH matches.
+- **Landed after this doc was first written:** the tweaks, W15-W26 (section 10); DT.13 re-ran section
+  1's check at the tweaks' last code commit: `new=0`.
+- **Pending, James:** testing, the one 0.5.1 -> 0.5.3 bump and tag at the end of 0.5.3, then `cargo
+  install --path cli --locked` from the tag so the `glia` on PATH matches.
 - **Pending, glia (not owned by a packet):** `check-neuropil.sh` still copies neuropil verbatim (the
   0.5.0 handoff's open item).
 - **Checked, no neuropil change:** D0.3-D0.8 (empty module slots); DA.1-DA.20 (the `glia-rules`
@@ -354,3 +364,116 @@ python3 tools/visual_regression.py compare
   DC.1-DC.10b beyond section 7 (build-stage refactors, byte-identical; watch parity gates); DD.1 / DD.2 /
   DD.8; DE.2-DE.6 (engram-export only); DE.10 (section 7); DE.11 (pyo3 / CLI only); DF.21 (coverage
   text); DH.16 (fixture data).
+
+## 10. The 0.5.2 tweaks (DT.1a-DT.13, waves W15-W26, 2026-10-17)
+
+After the W14 docs, James ran 0.5.2 against Kina (an Angular + Go + Solidity app) and quokka-stack (an
+Angular / Flutter + Go app) and asked for the gaps they showed to be fixed inside 0.5.2
+(`dev-notes/tweaks-0.5.2.md`, T1-T13): 57 packets, `5af245f6`..`40332f16` plus this docs packet.
+Sources: each packet's landed commit body (its `Declared breaks` paragraph) and the routed handoff
+paragraphs in `dev-notes/leap-052-corrections.json`; neuropil read read-only at the same `b140d1e` with
+the same 50 dirty paths.
+
+### 10.1 The compile check, re-run
+
+DT.13 re-ran section 1's recipe unchanged (copy under `~/.cache/glia-DT.13/npcheck/`, deleted
+afterwards; neuropil's `git status` 50 dirty paths before and after), against the glia tree at `9a8e56e0`
+plus DT.13's one source edit (a doc comment in `engine/src/passes.rs`, so the stamp is the commit's):
+
+```
+[neuropil-check] note - neuropil differs from the baseline's (b140d1ede58ff6e77e8e7326a6a4cf21e822959e dirty=50 src=b690b6b4f6db -> unknown src=73b04787b8a9): NEW/FIXED may be neuropil's own edits, not the leap's
+[neuropil-check] ok - new=0 fixed=0 preexisting=0 in 115.1s against glia 0.5.1+p99eb5b8878cba966 (neuropil unknown, lock drift +40 -26)
+```
+
+`errors.txt` empty; cargo `Finished ... in 1m 54s`; the lock drift is W14's (+40 / -26): the tweaks add
+no crate. Every API change below is on an item neuropil never names: a grep of `crates/` for `NavFact`,
+`CellWriteOutcome`, `glia_config`, `check::`, `same_as`, `INVOKED_MEMBERS`, `ModelResolver`,
+`client_wires`, `wire_pairs`, `served_routes`, `without_routes`, `EvmContractResolver`,
+`GqlgenResolver`, `HttpStackResolver`, `WebSocketStackResolver`, `identities(`, `ContractBreaks`,
+`ReviewCounts`, `RuleTrial` and `CheckReport` finds 0 hits.
+
+### 10.2 What re-keys (qname, so NodeId)
+
+As section 3, `NodeId = xxhash(graph_type, repo, kind, qname)`: hidden nodes, bookmarks and anchored
+annotations on these stop matching once.
+
+| family | packet (commit) | old -> new |
+|---|---|---|
+| TS client ENDPOINTs with a trailing query interpolation | DT.4 (`3a830b3f`) | `endpoint:GET:/api/orders${…}` -> `endpoint:GET:/api/orders` (examples-glia); Kina `endpoint:GET:${…}/smr${…}` -> `endpoint:GET:${…}/smr`, `endpoint:GET:/admin/smr${…}` -> `endpoint:GET:/admin/smr`. The hit drops the substitution from `template` and gains `"query":"<ident>"\|"inline"` after `alias` |
+| WebSocket clients | DT.3a (`8429d100`), DT.3b (`d405c8e6`) | `ws_client:ws` -> the path the code builds: `ws_client:ws @web` -> `ws_client:/live/orders @web` (examples-glia), `ws_client:ws @quokka_web` -> `ws_client:/api/protected/chat/ws @quokka_web` (quokka, a builder-read client: the node and its WS_CONNECTS are Weak); a config-member base folds (`ws_client:/prices` -> `ws_client:/rt/prices`) and the hit gains `host` |
+| NATS producers and consumers | DT.2c (`1986a9cc`) | `queue_producer:<leading literal>` (`orders.`, `orders-`, `audit.`) -> `queue_producer:<subject with * tokens>` or `queue_producer:unresolved:nats`; `queue_producer:shop.orders.%s.placed` -> `queue_producer:shop.orders.*.placed`; `orders.${id}.placed` / `orders.{order_id}.placed` -> `orders.*.placed`; a built consumer subject -> `queue_consumer:unresolved:nats`. A `*` is a literal character to a qname filter |
+| anonymous GraphQL documents | DT.11a (`717cfbdd`) | new `graphql_op:<first root field>` for `{ orders { .. } }` / `query ($n: Int) { .. }` |
+| EVM clients, between EVM packets | DT.10k (`62533102`) | `evm_call:recv:contract.<m>` (DT.10e, an abigen receiver) -> `evm_call:abi:<X>MetaData.<m>` (or `abi:<X>ABI`); no 0.5.1 build had either |
+
+### 10.3 Engine API changes, against neuropil (0 hits each)
+
+| packet (commit) | item: old -> new |
+|---|---|
+| DT.1a (`5af245f6`), DT.1q (`e7dfb31d`), DT.10g (`e2fe3ca6`) | `glia_code_domain::NavFact` gains `SliceResult`, `ReExportStar`, `ReExportNamespace`, `ReExportName`, `ExportLocal`, `Exports`, `EvmAbi` (appended; build-time only, old bincode tags kept); new public slots `glia_code_domain::wire` (the contract-model JSON vocabulary) and `::evm` (DT.10a `fb811da7`; DT.10g adds `AbiRef`, `GO_PACKAGE`, `ClientHit`, `client_hit_cell`, `read_client_hit(s)`) |
+| DT.1h (`44f20d6b`), DT.1k (`bbe70ea0`) | new `same_as::ALL_RULES` `[&str; 10]` (`RULES` `[&str; 8]` then `MODEL_RULES` `[&str; 2]`; DT.1h made them 9 and 1, DT.1k 10 and 2), `RULE_HTTP_MODEL`, `RULE_GRAPHQL_MODEL`, `IDENTITY_EMITTERS` / `is_identity_emitter`; `CODE_TABLES.identity_rules` 8 -> 10 rows; `glia_graph::ModelResolver`; CODE_PASSES Resolve 14 -> 17 (`gqlgen` DT.5f `6a8b49c3`, `evm` DT.10b `b53fbd67`, `models`) |
+| DT.1g, DT.1m, DT.1n, DT.1o, DT.1p | new flat `glia_graph::{client_wires, wire_pairs, graphql_pairs, wire_fields, graphql_fields, graphql_fields_all}` and their `#[non_exhaustive]` types; `ResolvedShape::judged_against`; `glia_engine::contract_breaks::{model_breaks, ModelBreak, ..}`; `ContractBreaks.{models, advisory}`, `Review.{model_breaks, unanchored}`, `ReviewCounts.model_breaks`, `ContractBreakArgs` / `ReviewArgs.models_min_tier`, `review::{caveat_fold, CaveatFold}` |
+| DT.5d (`5dd52313`), DT.5e (`787fe464`) | `glia_code_domain::profile::{InvokedMembers, INVOKED_MEMBERS, invoked_member}` (11 rows + the flutter row) |
+| DT.6a (`5112e840`), DT.3c (`18af8bb5`), DT.10b, DT.5f | `MountedHttpResolver::without_routes`; `WebSocketStackResolver::served_routes`; `glia_graph::{EvmContractResolver, GqlgenResolver}` (unit structs) |
+| DT.7b (`f542b49b`), DT.7c (`6c301ec0`) | `glia_engine::check::{check_with_roots, CheckOptions, Unanchored, ORPHANED, REJECTED, ABSENT, EMPTY_SCOPE}`, `CheckReport.unanchored`; `glia_config::Rejection`, `LoadedConfig.rejections`; `overlay_loop::RULE_CHECKS_NOTHING`, `RuleTrial.{reason, fix}` |
+| DT.8b (`75bf3def`) | `glia_rules::gql::Compiled` gains `pub anchor: Option<String>` (a struct literal or exhaustive destructuring breaks) |
+| DT.12a (`5bf66c91`), DT.12b (`e3699f97`) | `glia_graph::identity::{identities, HINT_VERSION}` (now pub); `glia_store` `CellWriteOutcome.{node_hint, hint_differs}`, `CellWriteOutcome::set_binding`, `write_cell` refusing a non-v1 hint |
+| DT.11b (`c8673f13`), DT.3b, DT.11a | `glia_code_extractors::graphql::{graphql_transport_endpoints, TransportNodes, TransportCounts, operation_root_fields}`, `websocket::{extract_ws_client_nodes_with_consts, replace_ws_client_nodes, WsClientFold, WsFoldCounts}` (`publish = false` crate) |
+
+### 10.4 Behaviour changes with no required code change
+
+- **New node families** (none re-keys an existing one): RPC_PROCEDURE `evm:<Contract>.<fn>` per external
+  / public Solidity function, interface member and public getter, HANDLED_BY its METHOD (DT.10a: Kina
+  +38); RPC_CALL `evm_call:<scope>.<fn>` and EVENT_HANDLER `evm_event:<scope>.<E>` EVM clients (DT.10c
+  `f5dad689`, DT.10i `1d7b02d9`, DT.10d `347d9087`, DT.10j `79a4ca79`, DT.10e `53593205`, DT.10f
+  `6606dce9`, DT.10k), paired by RPC_CALLS / EVENT_FLOWS `resolver:evm`; MESSAGE_TYPE
+  `message:graphql:<T>` per SDL object / input / interface type (DT.1j `a52201dd`); `unresolved:<family>`
+  queue tags in mixed-row files with USES / HANDLED_BY into them (DT.2a `1a7acd56`); nats.go /
+  JetStream queue nodes on any receiver (DT.2b `ec7c885c`); ENDPOINTs for awaited generic axios calls
+  (DT.1d `0685f7a4`), Dio calls inside closures (DT.5e) and GraphQL client transports
+  (`endpoint:POST:<path>`, DT.11b). **Display:** RPC_CALLS (34) already prints `?` in `hud.rs:1516-1550`
+  `edge_category_name`; RPC_PROCEDURE / RPC_CALL are in neither `tier_stack.rs:54-60`'s surface kinds
+  nor `kind_to_sub` (`:181`), nor `code_viewer.rs:430-447`'s route-like set, so EVM nodes land in the
+  default lane. Optional arms.
+- **Removed:** EventBusResolver's name-only Solidity event pairs (DT.10b; 0 on every test bed); spurious
+  GRAPHQL_RESOLVERs from multi-line argument lists (DT.11b); the RabbitMQ / SNS reading of a `.Publish(`
+  a NATS row read (DT.2b); a tail-only WS_CONNECTS (DT.3b); name-only GraphQL pairs whose document
+  selects other fields (DT.11a); HTTP_CALLS into test-only ROUTEs (DT.6a); a name-only ref bound to a
+  different node than the barrel's (DT.1q). **Undeclared, DT.10j:** in an ethers file a member that a TS
+  object-literal / parseAbi / human-readable ABI does not list is no longer an RPC_CALL (counted
+  `not_in_abi=`); builds between DT.10c and DT.10j minted it, no 0.5.1 build did.
+- **Edges:** IMPORTS `dir_index` (DT.1b `f4dd85de`, Kina +82) and `reexport` (DT.1q, quokka +35; 49
+  INJECTS re-ruled `global_unique` -> `import_binding`); handler -USES-> STRUCT `graph:go_wire` (DT.1f
+  `4dee0a11`, Kina USES 4 -> 54); TS USES `value_ref`, CALLS `accessor_read` / `accessor_write` (DT.5g
+  `9d4494af`, Kina +1026 USES, +91 CALLS); Angular CLASS -> METHOD CALLS / USES (DT.5a `b0856ea5` Kina
+  +342, DT.5b `402ca6e6` quokka +245, DT.5c `e22c2d21` Kina +68 class-scope receiver CALLS; DT.5c also
+  changes `calls::receiver_type` for a `this.<f>` site from a CLASS to read that class's own field);
+  Dart CALLS / USES `method_ref` (DT.5e, quokka +86 / +24); gqlgen HANDLED_BY (DT.5f); GRAPHQL_CALLS by
+  root field, rule `root_field` (DT.11a); QUEUE_FLOWS `pattern` (Weak, DT.2c); SAME_AS `http_model` /
+  `graphql_model` (DT.1h, DT.1k), emitter `resolver:models`, also inside one repo. A named queue argument
+  (`subject="x"`) now reads its value (**undeclared, DT.2c**).
+- **Liveness and roles** (neuropil's `flow.rs` animations and tier lanes): Flutter widget / State
+  classes carry ROLE COMPONENT and are entries (DT.5e); a used owner's framework- and runtime-invoked
+  members and constructors are live (DT.5d); Solidity contracts' external surface is live (DT.10a).
+- **Cells** (`hud.rs` / `code_viewer.rs` print Json raw; neuropil parses none): SCHEMA_FIELDS on TS
+  interfaces and field-only classes, Go structs, Dart models and GraphQL types (DT.1c `2009dc35`, DT.1l
+  `f247e21e`, DT.1j); MESSAGE_TYPE wire cells on Go handlers (DT.1e `d5e6f011`, `model` keys DT.1f),
+  GraphQL resolvers / operations (DT.1j) and TS GraphQL callers (DT.1k); trailing `response` / `request`
+  on TS / Dart ENDPOINT_HITs (DT.1d, DT.1l), `query` (DT.4), `host` on a folded WS client (DT.3b),
+  `"via":"graphql"` on a transport ENDPOINT (DT.11b), evm hits and a JSON CODE on each procedure
+  (DT.10a-DT.10g); a CODE text cell on every GRAPHQL_OPERATION read from a document (DT.11a); a
+  sub-project `[[constraint]]` now writes its CONSTRAINT entry on the enclosing PROJECT or a MODULE
+  (DT.7a `8dbf40f9`), where it wrote none.
+- **Answers neuropil does not call:** `glia check` / `PyGraph.check` list rules that check nothing
+  (DT.7b, DT.7c; CI exit codes move for an empty-scope rule, 2 -> 0 / 1, and for a sub-project rule
+  that is now checked); caveats once per rule (DT.8a `f0dd035a`); located GQL rows (DT.8b);
+  `contracts --fields` model drift (DT.1i `d8051a4b`, DT.1n `12a430d5`); model breaks in contract-breaks
+  / review (DT.1o `86b76fe5`, DT.1p `40332f16`); `gaps` drops WS-served routes (DT.3c), test-only routes
+  (DT.6b `b3537e71`) and implied GraphQL transports (DT.11c `02f78792`); the coverage caveats for
+  QUEUE_FLOWS / WS_CONNECTS / GRAPHQL_CALLS (DT.11z `71a13fe2`) and RPC_CALLS / EVENT_FLOWS (DT.10h
+  `2fc07e62`); pyo3 traversal category names (DT.9 `b1ecad68`); `glia cell set --hint` (DT.12b).
+- **The build:** PARSER_STAMP moved again (parsers, extractors, graph, engine); neuropil's
+  `generate_one` keeps no parse cache. New stderr lines at boot are listed in CLAUDE.md's marker list
+  (`[passes] domain=code resolve=17`, `[models] ..`, `[evm-link]`, `[imports] reexport`, ...).
+
+Every DT packet: declared no break, DT.1a, DT.1g, DT.1m, DT.1o, DT.13; DT.12a is engram-export only
+(`<out>.hints.jsonl`); the rest are above.

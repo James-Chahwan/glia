@@ -1,4 +1,9 @@
-# repo-graph handoff - glia 0.5.2 (the four bets, 2026-10-16)
+# repo-graph handoff - glia 0.5.2 (the four bets 2026-10-16, the tweaks 2026-10-17)
+
+**This file is the 0.5.2 half of a combined 0.5.1 -> 0.5.3 handoff, which 0.5.3's release docs packet
+writes. There is no 0.5.2 release** (James, 2026-10-17: *"can't we just go 0.5.1-> 0.5.3 release"*): the
+version goes 0.5.1 -> 0.5.3 in one bump, and the local tag `0.5.2-complete` marks the commit where 0.5.2
+ends. Section 9 lists the tweaks (DT.1a-DT.13, waves W15-W26) on top of the W0-W14 content below.
 
 **Status: held: repo-graph upgrades from 0.5.1 straight to 0.5.3; this file is the 0.5.2 half of that
 handoff.** James, 2026-10-16: *"Hold repo graph for post 0.5.3 better to do all changes at once"*. This
@@ -46,7 +51,7 @@ before. One registry id was allocated: edge category 37, SAME_AS (D0.1, `9d180f0
 cell type was added.
 
 What repo-graph has to do, in the combined 0.5.3 handoff:
-1. **Pin exactly** (section 1): `glia-py==0.5.2` for this half; the combined handoff pins 0.5.3.
+1. **Pin exactly** (section 1): `glia-py==0.5.3`. There is no glia-py 0.5.2.
 2. **Adopt `WatchSession`** (Q14, section 3): one session per repo instead of a full
    `generate(incremental=True)` per change in `_watch_rebuild` (`server.py:165-172`). Seven steps,
    with the measured memory cost.
@@ -54,8 +59,8 @@ What repo-graph has to do, in the combined 0.5.3 handoff:
    `external` on a dialled client in `read`.
 
 What changes under the wrapper with no code change: answers fold FACT / DERIVED identity classes into
-one row (in a single-repo MCP graph only contract-op, contract-route and workspace-package classes
-exist); SHARES_DEPENDENCY is no longer emitted; generated gRPC stubs stop "calling" every service; many
+one row (in a single-repo MCP graph: contract-op, contract-route and workspace-package classes, and since
+the tweaks client <-> server model classes, section 9); SHARES_DEPENDENCY is no longer emitted; generated gRPC stubs stop "calling" every service; many
 more edges in Python, TS, Go, Dart, Swift, C/C++, Rust, Scala, Ruby, PHP, Elixir and Clojure repos; the
 coverage footer's text; new stderr lines, among them one `[memory] malloc_trim` line per dropped
 PyGraph, which makes `_release_freed_memory` (`server.py:120-134`) redundant (keeping it is harmless).
@@ -63,31 +68,32 @@ PyGraph, which makes `_release_freed_memory` (`server.py:120-134`) redundant (ke
 New primitives worth an MCP mode (section 5): `PyGraph.query` / `query_gql` (a candidate single
 `query` tool for P4), `PyGraph.identity_classes`, `glia_py.WatchSession`.
 
-Bump order. Nothing is pushed before James says go, and 0.5.2 stays unreleased while James tests it
-(`12f58844`):
-1. **glia (James):** bump `[workspace.package].version` (`Cargo.toml:74`), `py/pyproject.toml:7` and
-   the excluded `engram-export/Cargo.toml:3` from 0.5.1 to 0.5.2 together, tag `v0.5.2`, let
-   `wheels-py.yml` publish `glia-py` 0.5.2.
+Bump order. Nothing is pushed before James says go, and 0.5.2 is never released:
+1. **glia (James):** at the end of 0.5.3, one bump of `[workspace.package].version` (`Cargo.toml:74`),
+   `py/pyproject.toml:7` and the excluded `engram-export/Cargo.toml:3` from 0.5.1 to 0.5.3 together,
+   tag `v0.5.3`, let `wheels-py.yml` publish `glia-py` 0.5.3. The 0.5.2 code is marked by the local tag
+   `0.5.2-complete` (no bump, no publish).
 2. **repo-graph:** held; it takes 0.5.2 and 0.5.3 together from the combined handoff.
 
-Tell builds apart with `glia_py.build_stamp()`: the W13 close-out wheel reads `0.5.1+p0c104fe6f8df1704`
-(the version field still says 0.5.1 before the bump); the released wheel reads `0.5.2+p<hash>`.
+Tell builds apart with `glia_py.build_stamp()`: the W13 close-out wheel reads `0.5.1+p0c104fe6f8df1704`,
+a wheel built at `0.5.2-complete` reads `0.5.1+p<hash>` (the version field says 0.5.1 until the 0.5.3
+bump), and the released wheel reads `0.5.3+p<hash>`.
 
 ## 1. The pin
 
 | file:line (HEAD `0f8ecfa`) | now | change to |
 |---|---|---|
-| `pyproject.toml:31` | `"glia-py==0.5.1",  # glia pins consumers exactly per release (0.5.1 breaks the graph contents)` | `"glia-py==0.5.2",` (the combined handoff: `==0.5.3`) |
+| `pyproject.toml:31` | `"glia-py==0.5.1",  # glia pins consumers exactly per release (0.5.1 breaks the graph contents)` | `"glia-py==0.5.3",` |
 | `CLAUDE.md:24` | runtime deps `glia-py==0.5.1` | the same pin |
-| `CLAUDE.md:105-109` | "glia 0.5.1 boundary notes", "Exact pin `glia-py==0.5.1`" | a 0.5.2 (0.5.3) boundary note from sections 2-3 |
-| `README.md:26-30` | "engine (glia 0.5.1, pinned exactly) ... Reinstall the CLI from the `v0.5.1` tag" | the new tag |
+| `CLAUDE.md:105-109` | "glia 0.5.1 boundary notes", "Exact pin `glia-py==0.5.1`" | a 0.5.3 boundary note from sections 2-3 and 9 (and the 0.5.3 half) |
+| `README.md:26-30` | "engine (glia 0.5.1, pinned exactly) ... Reinstall the CLI from the `v0.5.1` tag" | `glia 0.5.3`, the `v0.5.3` tag |
 
 `tests/test_packaging.py` already counts `==` as capped (`CLAUDE.md:109`), so the pin needs no test
-change. The exact pin also means the published wrapper does not pick up glia-py 0.5.2 on its own.
+change. The exact pin also means the published wrapper does not pick up glia-py 0.5.3 on its own.
 
 **Mixed versions while repo-graph is held.** FORMAT_VERSION stays 3, so a 0.5.1 layout is not an old
-format, but its build stamp differs: whichever of the MCP server (glia-py 0.5.1) and a 0.5.2 `glia`
-CLI (`glia build`, the `install-hooks` hooks, `glia watch`) loads the other's `.glia/graph/` rebuilds it
+format, but its build stamp differs: whichever of the MCP server (glia-py 0.5.1) and a `glia` CLI built
+from `0.5.2-complete` or later (`glia build`, the `install-hooks` hooks, `glia watch`) loads the other's `.glia/graph/` rebuilds it
 first (`[gmap] rebuilt <dir> (written by another glia build (...))`), on every alternation. And a 0.5.1
 engine ignores a version-2 `.glia/overlay.toml` whole (DB.1, row 9), so the MCP graph then lacks that
 file's entrypoints, wrappers and edges. Use one glia version per repo during the hold.
@@ -382,7 +388,7 @@ The engine's `memory::release_freed_memory` runs on its own (DE.10, section 2 ro
 ## 7. Re-test
 
 ```
-# a local 0.5.2 wheel (before PyPI), in a throwaway venv (never ~/.venvs/glia-leap or the user site)
+# a wheel built at the 0.5.2-complete tag (before the 0.5.3 release), in a throwaway venv (never ~/.venvs/glia-leap or the user site)
 python3 -m venv /tmp/rg-052 && /tmp/rg-052/bin/pip install /home/ivy/Code/glia/target/wheels/glia_py-*.whl
 /tmp/rg-052/bin/python -c "import glia_py as g; print(g.version(), g.build_stamp(), len(g.category_names()))"
 #   expect the stamp of the wheel you built and 37 categories
@@ -415,8 +421,12 @@ repo from the glia session).
   136 unknown / 28 n/a, `[engram-export] check: ok - build + 95 tests passed`, the wheel
   `glia_py-0.5.1-cp311-abi3-manylinux_2_39_x86_64.whl` (stamp `0.5.1+p0c104fe6f8df1704`, api surface OK,
   every pyo3 surface test green, `test_watch` 35 checks and `test_query` 39 included).
+- **Landed after this doc was first written:** the tweaks, W15-W26 (DT.1a-DT.13, section 9). The W25
+  close-out (`8293cb00`) measured 6,217 workspace tests passing, 414 substrate-gap fixtures with 0 blind
+  spots and the matrix at 346 full / 0 partial / 0 none / 136 unknown / 28 n/a.
 - **Held:** this handoff (repo-graph takes 0.5.2 and 0.5.3 together). Release steps (not packets):
-  James's testing, the bump of every version field (section 0), the tag, the PyPI publish.
+  James's testing, then at the end of 0.5.3 the one 0.5.1 -> 0.5.3 bump of every version field
+  (section 0), the tag, the PyPI publish.
 - **Open on glia's side, for the wrapper's benefit (0.5.3):** multi-repo watch (Q13, a `--with` option
   for `glia watch`); watch's body-only fast path (Q15); a memory budget for long-lived sessions (0.5.3
   seed section F.3); org-internal package routing (Q19).
@@ -430,3 +440,133 @@ repo from the glia session).
   (watch parity gates); DD.1 / DD.2 / DD.8 (classes, keys, the identity view); DE.2-DE.6
   (engram-export only); DF.1 / DF.3 / DF.4a / DF.5 / DF.11-DF.13 / DF.15-DF.17 and DG.1-DG.9 / DG.11 /
   DG.13a / DG.13b (additive content, section 4c); DH.16 (fixture data).
+
+## 9. The 0.5.2 tweaks (DT.1a-DT.13, waves W15-W26, 2026-10-17)
+
+After the W14 docs, James ran 0.5.2 against Kina (an Angular + Go + Solidity app) and quokka-stack (an
+Angular / Flutter + Go app) and asked for the gaps they showed to be fixed inside 0.5.2
+(`dev-notes/tweaks-0.5.2.md`, T1-T13): 57 packets, `5af245f6`..`40332f16` plus this docs packet. Sources
+as in the header: each packet's landed commit body (its `Declared breaks` paragraph) and the routed
+handoff paragraphs in `dev-notes/leap-052-corrections.json`. Wrapper sites were read at repo-graph HEAD
+`0f8ecfa` again (the same 12 modified and 4 untracked paths; nothing at a cited line moved).
+
+**Still no code change.** No pyo3 method the wrapper calls changed its signature or return shape. The
+traversal methods' `categories` parameter type moved (DT.9), but the wrapper passes `None`
+(`graph.py:114`, `:126`, `:137`). What the wrapper shows changes: fewer `⊘` marks, folded model rows in
+`find` / `impact` / `trace`, new nodes and edges, a longer coverage footer, and two `read` cells that now
+render oddly (rows 2 and 3, optional fixes).
+
+### 9.1 Breaks that reach the wrapper
+
+| # | packet (commit) | old -> new | wrapper site and action |
+|---|---|---|---|
+| 1 | DT.1h http_model identity (`44f20d6b`), DT.1k graphql_model identity (`bbe70ea0`) | a new `models` Resolve pass (`[passes] domain=code resolve=14` -> `resolve=17` with DT.5f's gqlgen and DT.10b's evm) writes SAME_AS client model -> server model (rule `http_model[/diverged]`: a TS interface / class or Dart model -> the Go struct of one HTTP exchange) and result model / gqlgen struct -> `message:graphql:<T>` (`graphql_model`), emitter `resolver:models`, DERIVED, walking. **Inside one repo too**: quokka-stack forms 19 http_model classes (8 with an Android member); examples-glia gains the graphql_model class of `StockItem` (admin) and gqlgen's `models_gen::Product` -> `message:graphql:Product @api`. The identity report's `by_rule` gains `http_model`, `graphql_model` (8 -> 10 entries; Rust `same_as::ALL_RULES` `[&str; 9]` -> `[&str; 10]`, `MODEL_RULES` `[&str; 1]` -> `[&str; 2]` across DT.1h / DT.1k); `glia identity --rule` accepts both. | `find` (`graph.py:155`), `impact` (`server.py:437`) and `trace` (`server.py:520`, `:608`, `graph.py:69`) fold a client model and its server struct into one row with `identity.also_in`, and walks cross the class: a Go struct's blast radius now reaches the TS code reading it. Section 0's "only contract-op, contract-route and workspace-package classes" no longer holds. **Optional:** the row 2-4 renders of section 2. |
+| 2 | DT.11b GraphQL transport as an HTTP call (`c8673f13`) | each Apollo / urql / graphql-request client mints `endpoint:POST:<path>` whose ENDPOINT_HIT is an HTTP call-site payload ending `"host":..,"via":"graphql"` (`{"method":"POST","path":"/graphql","file":"src/client.ts","line":5,"col":8,"confidence":"strong","raw":"http://localhost:8080/graphql","host":"localhost:8080","via":"graphql"}`), plus HTTP_CALLS to the server's route | **Rendering bug, optional fix.** `_dial_text` (`server.py:724-739`) treats every payload with `via` as a channel client's dial target, so `read` of such an ENDPOINT shows `dials: localhost:8080 (graphql)` instead of the `called by (cross-stack)` caller. Return None from `_dial_text` when the payload has `method` (an HTTP call site). |
+| 3 | DT.10c-DT.10k EVM clients (`f5dad689` and later) | new RPC_CALL `evm_call:<scope>.<fn>` and EVENT_HANDLER `evm_event:<scope>.<E>` nodes carry an ENDPOINT_HIT `{"via":"evm","lib":"ethers","args":[..],"abi":[..]}` (no host; `abi_ref` / `abi_from` since DT.10g) | **Rendering, optional.** `_dial_text` renders it `dials: host not named in source (evm)`. Render `via == "evm"` as the library and ABI (`ethers, abi ESCROW_ABI (evm)`), or skip it. |
+| 4 | DT.1c declared model fields (`2009dc35`), DT.1l Dart models (`f247e21e`), DT.1j GraphQL types (`a52201dd`) | every TS interface / field-only class, Go struct, Dart `fromJson` / `@JsonSerializable` model and GraphQL SDL type gains SCHEMA_FIELDS `{"extends"?,"fields":[{"name","type","required",..}],"format":"ts\|go\|dart\|graphql","open"?}` (Kina 128 structs + 130 interfaces, quokka-stack 97 + 75); `message:graphql:<T>` MESSAGE_TYPE nodes are new | `read` lists SCHEMA_FIELDS as `fields` (`_CELL_LABEL_OVERRIDES`, `server.py:658`), and `_cell_text`'s dict branch (`:718-719`) prints `fields=[{...}] format=ts`, cut at 400 chars. **Optional:** render `name: type` pairs, `?` when not required. |
+| 5 | DT.1e Go wire cells (`d5e6f011`), DT.1f typed (`4dee0a11`), DT.1j / DT.1k GraphQL cells | Go handlers gain MESSAGE_TYPE cells (form `json_response` / `json_bind`, `model` keys from DT.1f); GraphQL root fields `graphql_returns`, operations `graphql_selection`, TS callables issuing a typed GraphQL call `graphql_result` | orient's dense map (`server.py:296`, `:300`) shows a `:msgtype` line per cell and a model-field line per SCHEMA_FIELDS node, so `DENSE_TEXT_MAX_CHARS` (50,000, `:274-276`) truncates a large repo's full map sooner. No change; raise the cap or scope the map if it bites. |
+| 6 | DT.1d TS wire shapes (`0685f7a4`), DT.1l Dart (`f247e21e`), DT.4 query suffix (`3a830b3f`), DT.3b WS host (`d405c8e6`) | ENDPOINT_HIT payloads gain trailing `response` / `request` (TS / Dart), `query` (after `alias`) and, on a folded WS client, `host` | `_cell_text` prints the first six fields (`:719`); `_dial_text` now shows the WS host where it said `host not named in source`. No change. |
+| 7 | DT.5a-DT.5g dead-symbol precision (`b0856ea5`, `402ca6e6`, `e22c2d21`, `5dd52313`, `787fe464`, `6a8b49c3`, `9d4494af`), DT.10a Solidity procedures (`fb811da7`), DT.1b / DT.1q imports (`f4dd85de`, `e7dfb31d`) | a used owner's framework- and runtime-invoked members and constructors are live (a walk-local hop; the `[live]` line gains `invoked=`); Angular inline / `templateUrl` / host bindings, template receivers and decorator-bound members, Flutter closures / constructions / method refs and widget classes (ROLE COMPONENT, entries), gqlgen resolver methods, TS values passed by reference and getter reads, Solidity external functions are edges or entries; generated code is no `dead_symbol` row. Kina `dead_symbol` 517 -> 52 and quokka-stack 748 -> 124 across the packets (each step measured on its own base; DT.5a alone, the declared break: Kina 517 -> 208, quokka-stack 748 -> 741). DT.5b's walk reads an `.html` beside a same-stem `.ts` (no node or MODULE; the `[parallel] walk .. read <n> files` count grows) and binds it to the component that names it in `templateUrl` | `⊘` (`server.py:981-985`) and the impact note's dead count (`:485`) flip to live for those symbols; `live_only=True` keeps more rows. No change. |
+| 8 | DT.11z channel caveats (`71a13fe2`), DT.10h EVM caveats (`2fc07e62`) | `coverage()` rewrites the `*` QUEUE_FLOWS, WS_CONNECTS and GRAPHQL_CALLS notes, extends the universal RPC_CALLS note and verify with the EVM reading and adds one universal `*` EVENT_FLOWS row (contract-event subscriptions); every absence that reads RPC_CALLS or EVENT_FLOWS carries them | `_coverage_note` (`server.py:1008-1028`) prints `recs[:8]` capped at 200 chars: the footer text changes and the new row may enter the eight. No change. |
+| 9 | DT.9 traversal category names (`b1ecad68`) | `neighbours` / `bfs` / `predecessors` / `reachable_by` / `shortest_path` take `categories=["CALLS", "imports", 9]` (ids or registry names, mixed, case-insensitive); an unknown name is a `ValueError` naming it; rows still carry ids; `py/api_surface/traversal.txt` `Option<Vec<u32>>` -> `Option<Vec<CategoryArg>>` | **Correction to DT.9's note** ("the wrapper may drop its category_names() id lookup before traversal calls"): the wrapper looks no id up before a traversal call; it passes `None` (`graph.py:114`, `:126`, `:137`), and `CATEGORY_NAMES` (`graph.py:22`) decodes the ids the rows carry, so it stays. A future filtered call can pass names. |
+| 10 | DT.6a test-only routes (`5112e840`), DT.6b (`b3537e71`) | HTTP_CALLS into a ROUTE every registration site of which is test code are gone; a product ROUTE no longer carries ORIGIN `test_fixture`; `gaps` withholds test-only routes and `suffix_of` / `suspected_edge` skip them; the prelude's `unhandled_route` excludes them | a client that calls a test-only route loses that hop in `impact` / `trace` (no test-bed pair moved: Kina 6 and examples-glia 1 such routes have no product caller); the wrapper calls no `gaps` / `query`. No change. Rust (additive): `MountedHttpResolver::without_routes`. |
+
+### 9.2 Answers the wrapper does not call (for P4 or a later mode)
+
+The wrapper calls none of these (grep of `repo_graph/` at `0f8ecfa`: 0 hits). Several packets' notes name
+a "repo-graph check tool", a "contracts tool" or "the wrapper's result dict": **correction**, no such
+wrapper code exists today; the rows apply when P4 adds those modes.
+
+| packet (commit) | old -> new |
+|---|---|
+| DT.1i model drift (`d8051a4b`), DT.1n GraphQL selection drift (`12a430d5`) | `PyGraph.contract_fields()` / `glia contracts --fields` return three new pairings where they returned none: `http_model` (each client call site's model against the server model of its HTTP exchange, response and request; rules json_field_missing, json_field_optional_absent, json_field_unread, json_field_may_be_absent, json_field_dropped, json_required_missing, json_field_unset, json_type_mismatch, and DT.1n's json_required_may_be_unset as a `required` change), `client_contract` (a client against the OpenAPI op that DOCUMENTS its route: contract_field_undeclared, contract_field_optional_undeclared, contract_field_unread, contract_request_field_undeclared, contract_required_missing, contract_field_unset, contract_type_mismatch) and `graphql_selection` (graphql_field_undefined). Notes `open` / `union` ride on a verdict; a row that compared nothing is `unknown` with `ambiguous_server`, `client_type_unresolved`, `server_type_unresolved`, `op_type_unresolved` or a GraphQL refusal (`conflicting_selection`, `owner_mismatch`, ...). The `[contract-fields]` marker gains `http_model=<n> client_contract=<n> graphql_selection=<n>`. Measured: examples-glia http_model 7, Kina 142, quokka-stack 71 + 32 client_contract (DT.1i); quokka-stack 103 -> 146 rows with Dart models (DT.1l). |
+| DT.1p model breaks in the PR gates (`40332f16`), on DT.1o's judge (`86b76fe5`) | `contract_breaks_vs_rev(.., models_min_tier="fact")`: dict keys `{base, schemas, orphaned_clients, breaking, absence}` -> `{base, schemas, models, orphaned_clients, breaking, advisory, absence}`; `breaking` also counts blocking model rows (none by default: the 0.5.2 pairs are derived). `review_vs_rev(.., models_min_tier="fact")`: gains `model_breaks` (after `resolved_violations`), `counts.model_breaks` and, when non-empty, `unanchored`; `blocking` also on a blocking model row; markdown gains the headline suffix ` \| <M> model break(s)[ (<A> advisory)]`, `### Model breaks (blocking)` / `(advisory: ..)` and `### Rules that check nothing`; a rule's caveats print once per section. CLI `--models-min-tier fact\|derived` on both; an unknown tier is a `ValueError` before any build. stderr `[model-breaks] ..`, `[review] caveats ..`. |
+| DT.7b rules that check nothing (`f542b49b`), DT.7c loader-rejected stanzas (`6c301ec0`), DT.7a sub-project anchors (`8dbf40f9`) | `PyGraph.check()` -> `check(strict=False)`; it reads each repo root's overlay; the dict gains `unanchored` when a row exists (section `overlay` and loader `rejected` rows since DT.7c); an empty-scope rule leaves `errors` for `unanchored` unless `strict=True`. CLI `glia check --strict`; `## Rules that check nothing`; `- rules:` gains `, checking nothing <n>`; an empty-scope rule exits 0 / 1 by its violations, not 2. A sub-project `[[constraint]]` now anchors on its enclosing PROJECT or a MODULE, so it is checked (Kina's demo rules 1 -> 2, +1 forbid_edge violation of 8 FACT edges): CI exit codes can move. `overlay_try`'s rule `status` gains `checks_nothing` (with `reason` / `fix`, verdict review) where an empty scope read `error`. |
+| DT.8a check caveats once (`f0dd035a`) | `glia check` markdown: a rule's coverage caveats print once, under its heading (Kina 24 `⚠` lines -> 3); --json and `PyGraph.check()` unchanged; new stderr `[check] caveats rules=<r> lines=<l> folded=<f>`. |
+| DT.8b located GQL rows (`75bf3def`) | `PyGraph.query_gql` rows that return properties only carry `file` / `line` (the first property's node) where they had none; aggregate rows stay unlocated. Rust: `glia_rules::gql::Compiled` gains `pub anchor: Option<String>`. |
+| DT.12b cell hints (`e3699f97`) | `PyGraph.set_cell(.., dims=None, hint=None)` / `glia_py.write_cell(.., dims=None, hint=None)`: a caller's v1 identity hint, validated (`ValueError` on a non-v1, unregistered-kind or kind-contradicting hint); the outcome dict gains `node_hint` and `hint_differs` on every write, and `target` reads `hint_differs` when a fresh layout's binding differs. `glia cell set --hint`. |
+| DT.3c WS-served routes (`18af8bb5`), DT.11c implied GraphQL transports (`02f78792`) | `gaps()`: a ROUTE a WebSocket client connects through is no `unpaired_route` (examples-glia 3 -> 2, quokka-stack 10 -> 9); an unpaired `"via":"graphql"` transport whose project's operations pair a resolver on a server with no route at its segment is no `unpaired_endpoint`, and any other unpaired transport's detail starts `graphql transport; ` (with `route_at_server=<qname> (<repo>)` when the server holds such a route); overlay-loop gap ids and counts move with them. Rust: `glia_graph::WebSocketStackResolver::served_routes`. |
+| DT.5d liveness (`5dd52313`) | `gaps()` `dead_symbol` loses a used owner's invoked members and constructors and every ORIGIN `generated` / `generated_proto` row (Kina 517 -> 427 and quokka-stack 748 -> 512 on its base); `overlay_propose`'s dead_symbol candidates drop with it. |
+
+### 9.3 Graph content (no wrapper code parses it)
+
+- **Re-keyed (qname, so NodeId):** DT.4 (`3a830b3f`): a trailing query interpolation leaves the client
+  path, `endpoint:GET:/api/orders${…}` -> `endpoint:GET:/api/orders` (examples-glia), Kina
+  `endpoint:GET:${…}/smr${…}` -> `endpoint:GET:${…}/smr` and `endpoint:GET:/admin/smr${…}` ->
+  `endpoint:GET:/admin/smr`, newly paired. DT.3a (`8429d100`) / DT.3b (`d405c8e6`): WS clients leave
+  the generic `ws_client:ws`, `ws_client:ws @web` -> `ws_client:/live/orders @web` (examples-glia),
+  `ws_client:ws @quokka_web` -> `ws_client:/api/protected/chat/ws @quokka_web` (Weak, builder-read), a
+  config base folds (`ws_client:/prices` -> `ws_client:/rt/prices`). DT.2c (`1986a9cc`): NATS producer
+  subjects carry `*` tokens (`queue_producer:orders.` -> `queue_producer:orders.*.placed`,
+  `queue_producer:shop.orders.%s.placed` -> `queue_producer:shop.orders.*.placed`); a dynamic consumer
+  subject is `queue_consumer:unresolved:nats`. Datalog / GQL match a `*` literally. DT.11a
+  (`717cfbdd`): an anonymous GraphQL document's op is `graphql_op:<first root field>` (new), and every
+  GRAPHQL_OPERATION read from a document gains the document as a CODE text cell (delta / review see an
+  edited document as a modified op).
+- **Added nodes:** DT.2a (`1a7acd56`) `unresolved:<family>` queue tags in mixed-row files, anchored at
+  every unexplained site, in every broker family; DT.2b (`ec7c885c`) nats.go / JetStream queue nodes on
+  any receiver (examples-glia `queue_consumer:shop.shipments.* @api`, quokka
+  `queue_producer:unresolved:nats @turps`); DT.1d awaited generic axios / HttpClient ENDPOINTs; DT.5e
+  ENDPOINTs for Dio calls inside closures (quokka `POST /api/auth/refresh`); DT.11b transport
+  ENDPOINTs; DT.1j `message:graphql:<T>` MESSAGE_TYPEs; DT.10a RPC_PROCEDURE `evm:<Contract>.<fn>`
+  (Kina +38); DT.10c-DT.10k RPC_CALL / EVENT_HANDLER EVM clients (ethers DT.10c `f5dad689`, call forms
+  DT.10i `1d7b02d9`, hardhat / TypeChain / artifacts DT.10d `347d9087`, viem / wagmi / web3.js DT.10j
+  `79a4ca79`, go-ethereum DT.10e `53593205`, wrappers DT.10f `6606dce9`, events / abigen DT.10k
+  `62533102`), and DT.10g (`e2fe3ca6`): an ABI declared in another file (an exported TS const imported
+  by relative path, a Go string const of another file of the package) fills the client's evm cell
+  (`abi_ref` / `abi_from`), so the call pairs by `abi` (DERIVED) and a contradicted `name_hint` pair is
+  removed.
+- **Removed:** DT.10b (`b53fbd67`) EventBusResolver no longer pairs a Solidity event with an in-process
+  EVENT_HANDLER by name (0 such edges on every test bed); DT.11b spurious GRAPHQL_RESOLVERs read from a
+  root field's multi-line argument list or description; DT.2b the RabbitMQ / SNS reading of a
+  `.Publish(` a NATS row read, in a file importing both; DT.3b a WS_CONNECTS that paired a tail-only
+  path through another route; DT.11a name-only GraphQL pairs whose document selects other fields
+  (`Products -> products`); DT.6a HTTP_CALLS into test-only routes; DT.1q a name-only ref that bound a
+  different same-named node than the barrel's (replaced). Between EVM packets (no 0.5.1 consumer saw
+  either): **undeclared, DT.10j**, in an ethers file a member that a TS object-literal / parseAbi /
+  human-readable ABI does not list is no longer an RPC_CALL (counted `not_in_abi=`), where DT.10c-era
+  builds minted it against an unknown ABI; DT.10k re-keys an abigen call site
+  `evm_call:recv:contract.<m>` (DT.10e) -> `evm_call:abi:<X>MetaData.<m>`.
+- **Added edges and evidence:** IMPORTS rules `dir_index` (DT.1b, Kina +82) and `reexport` (DT.1q,
+  quokka +35; 49 INJECTS re-ruled `global_unique` -> `import_binding`, heuristic -> fact in `why`);
+  handler -USES-> STRUCT `graph:go_wire` (DT.1f, Kina USES 4 -> 54); TS USES `value_ref` and CALLS
+  `accessor_read` / `accessor_write` (DT.5g, Kina +1026 USES, +91 CALLS); Angular CLASS -> METHOD
+  CALLS / USES `extractor:angular_template` (DT.5a Kina +342, DT.5b quokka +245) and class-scope
+  receiver CALLS (DT.5c, Kina +68); Dart CALLS / USES `method_ref` and ROLE COMPONENT (DT.5e, quokka
+  +86 CALLS, +24 USES); gqlgen HANDLED_BY `resolver:gqlgen` (DT.5f: trace from a GraphQL op continues
+  into Go, examples-glia dead_symbol 25 -> 21); GRAPHQL_CALLS rule `root_field` (DT.11a: examples-glia
+  `StockList -> products` added); QUEUE_FLOWS rule `pattern` (Weak) for `*` producers (DT.2c); a named
+  queue argument (`subject="x"`, `subject: x`) now reads its value (**undeclared, DT.2c**: a literal is
+  as before; an identifier becomes the LA.4 expression where nothing was read); RPC_CALLS / EVENT_FLOWS
+  `resolver:evm` (`contract` / `abi` DERIVED, `abi_hint` / `name_hint` HEURISTIC and Weak, so a check
+  violation through one is advisory); SAME_AS `http_model` / `graphql_model` (row 1). PPR, community,
+  hub and pack rankings move with the new IMPORTS, USES and CALLS.
+
+### 9.4 Stderr (the server relays and parses none)
+
+New: `[model-schemas]`, `[ts-wire]`, `[go-wire]`, `[dart-wire]`, `[models] client_wires / pairs /
+classes / graphql results / graphql pairs`, `[evidence-rules] resolver=models`, `[contract-fields]
+.. http_model= client_contract= graphql_selection=`, `[model-breaks]`, `[review] caveats`, `[imports]
+dir-index`, `[imports] reexport`, `[queues] tag`, `[queues] go-nats`, `[queues] subject-fold`,
+`[queues] resolver placeholder`, `[ws] client urls`, `[ws-base]`, `[gaps] ws-served routes`,
+`[ts-endpoints] query suffixes`, `[http] test routes excluded from route index`, `[gaps] unpaired_route
+rows withheld`, `[angular-template] inline` (with ` no_class=`) / `external`, `[recv] class-scope
+receivers`, `[dead-framework]`, `[dart-flutter]`, `[gqlgen]`, `[ts-value-refs]`, `[check] declared not
+checked`, `[check] overlay rejected`, `[check] caveats`, `[gql] anchor`, `[sol-abi]`, `[evm-link]`,
+`[eventbus-evm]`, `[evm-client] lang=ts|go`, `[evm-wrappers]`, `[evm-abi-join]`, `[graphql-sdl] code
+types`, `[graphql-root-fields]`, `[graphql-transport]`, `[gaps] graphql transports`. Changed:
+`[passes] domain=code resolve=17`; `[live] .. invoked=`; `[declared] .. anchor_enclosing=`; `[check]
+rules= .. unanchored=`; `[overlay] try-rules (.. checks_nothing=)`; `[graphql-sdl] .. types=`;
+`[dart-calls] .. closures= creations= method_refs=`; `[http] routes=`, `[http-qname] routes=`,
+`[http-owner] index routes=` drop by the test routes; `[cells] write .. differs=`; `[channel-owner]`
+and `[marker-anchor]` counts grow. The CLAUDE.md marker list has every format.
+
+### 9.5 Every DT packet, for the merge
+
+Declared no break (additive, no answer moves): DT.1a wire vocabulary (`5af245f6`), DT.1g client_wires
+(`eddf53b4`), DT.1m wire_pairs (`62fa15c4`), DT.1o the model-breaks engine (`86b76fe5`), DT.13 these
+docs. Everything else is in 9.1-9.4: DT.1b-DT.1f, DT.1h-DT.1l, DT.1n, DT.1p, DT.1q, DT.2a-DT.2c,
+DT.3a-DT.3c, DT.4, DT.5a-DT.5g, DT.6a, DT.6b, DT.7a-DT.7c, DT.8a, DT.8b, DT.9, DT.10a-DT.10k, DT.11a-DT.11c,
+DT.11z, DT.12a (engram-export only: `<out>.hints.jsonl`), DT.12b. PARSER_STAMP moved with most of
+them, so the first build after the upgrade reparses everything; FORMAT_VERSION stays 3 and no registry
+id was allocated.
