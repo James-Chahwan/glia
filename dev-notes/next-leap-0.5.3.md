@@ -406,6 +406,19 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   StreamData `property` blocks as tests and ENDPOINTs for HTTP calls in test bodies.
 - W7 (DC.7b): a watch update deep-clones every group (50-221 ms on glia) by design; cutting it needs passes that do not
   mutate group graphs (§A, A2).
+- W8 (DA.18): rules witnesses are shortest at the row's own level only: a row keeps one height, so a lower-level prefix
+  is read at its own level's height (graph 4: 99 of 3,812 tc rows longer than the lattice BFS depth). Per-level heights
+  (relation.rs Batch heights per level, the exec.rs binding height from the view's level, explain.rs searching under
+  the level's height) make every witness BFS-shortest at its tier; widen oracle.rs test 9 to every row of every graph.
+- W8 (DB.2b, DA.19, DA.14b): the rules row budget counts only fully emitted bindings, so a join that multiplies
+  intermediate bindings runs unbudgeted (budget per step, or count Scan / Lookup emissions); and it counts bindings plus
+  inserted rows (about 2N for N rows), while the Budget error says "derived rows". Both belong with §F.3's evaluator work.
+- W8 (DA.19): closure.rs's test oracle uses HashSet; switching it to BTreeSet lets `rules/tests/determinism.rs`'s source
+  guard drop its `in_test` exemption.
+- W8 (DH.18): ACCESS_MODE for parser ORM edges (Ecto's Repo function names read vs write; only the extractor re-home pass
+  writes ACCESS_MODE today, for no parser's ORM edges - Ruby, PHP, Go, Elixir alike); Repo calls inside ExUnit `test`
+  blocks and module-attribute queries (`@query from(u in User)`) are unread; same-name schemas in different namespaces
+  share one `data_entity:sql:User` (the A13.1 last-segment rule).
 
 ## 3. Open questions for James
 
