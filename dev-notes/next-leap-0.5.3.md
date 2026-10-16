@@ -437,6 +437,11 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   not (a SCIP CONFIRM of an already-Strong edge); reporting evidence re-stamps is a new row kind and a declared break.
 - W10 (DD.13): `serves` folds identity classes of servers only; if an identity rule ever pairs routes or consumers,
   decide whether the kept server absorbs the folded rows' handlers.
+- W11 (DB.4, DB.3b): a `[[constraint]] rule` with no `violation` output predicate is a `glia check` error (exit 2)
+  but no `rotted_rule` gaps row, because the row reads `rules::validate`, which has no output-predicate check; add the
+  check to validate (`engine/src/rules/query.rs`) or to the row.
+- W11 (DB.3b): each transitive forbid rule re-tiers every kept edge of its chain (`edge_tier_of` -> `Evidence::of`);
+  several transitive rules over one big merge could share one per-edge level vector on Ctx, keyed by edge ordinal.
 
 ## 3. Open questions for James
 
