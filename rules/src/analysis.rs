@@ -123,6 +123,10 @@ pub(crate) type PredId = u32;
 /// so its program is Invalid and the placeholder never leaves analysis.
 const NO_PRED: PredId = PredId::MAX;
 
+/// The most arguments a predicate may take: relation and plan columns are `u8`
+/// (DA.7, DA.10), so column 255 is the last one an index or a plan step can name.
+const MAX_ARITY: usize = 256;
+
 /// One predicate the program defines or reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PredInfo {
@@ -575,6 +579,22 @@ mod msg {
         "`_` may not appear in a head".to_string()
     }
 
+    pub(super) fn wild_comparison() -> String {
+        "`_` may not appear in a comparison".to_string()
+    }
+
+    pub(super) fn too_many_args(name: &str, arity: usize) -> String {
+        format!("a predicate may have at most {} arguments; `{name}` has {arity}", super::MAX_ARITY)
+    }
+
+    /// `count` with no variable, or `min` / `max` / `sum` with other than one.
+    pub(super) fn aggregate_vars(op: super::AggOp, found: usize) -> String {
+        match op {
+            super::AggOp::Count => "`count` takes at least one variable".to_string(),
+            _ => format!("`{op}` takes one variable, found {found}"),
+        }
+    }
+
     pub(super) fn needs_bound(sig: &str, argno: usize) -> String {
         format!("`{sig}` needs argument {argno} bound before the call")
     }
@@ -818,7 +838,8 @@ impl<'a> Cx<'a> {
 
     /// Check (c) and allocate the IDB predicates, in first-definition order: per rule,
     /// its head's id, `None` when the head cannot define a predicate (an EDB / builtin
-    /// name, or the arity of an earlier definition differs).
+    /// name, or the arity of an earlier definition differs). A first definition wider
+    /// than [`MAX_ARITY`] is an error but keeps its id.
     fn heads(&mut self, allow_synthetic: bool) -> Vec<Option<PredId>> {
         let catalog = self.catalog;
         let mut out = Vec::with_capacity(self.program.rules.len());
@@ -843,7 +864,11 @@ impl<'a> Cx<'a> {
             if synthetic && !allow_synthetic {
                 self.error(rule.head.span, &sig, msg::reserved());
             }
-            // Held even when reserved, so the bodies that read it raise no second error.
+            if arity > MAX_ARITY {
+                self.error(rule.head.span, &sig, msg::too_many_args(name, arity));
+            }
+            // Held even when reserved or too wide, so the bodies that read it raise no
+            // second error.
             let id = self.new_pred(name, arity, PredKind::Idb, synthetic);
             self.by_name.insert(name.clone(), id);
             out.push(Some(id));
@@ -892,6 +917,12 @@ impl<'a> Cx<'a> {
                 continue;
             }
             if decl.cols.len() == arity {
+                // A domain declaration wider than a plan can address: refused here, at
+                // the call, as an IDB head is in `heads`.
+                if arity > MAX_ARITY {
+                    self.error(a.span, rule_sig, msg::too_many_args(&a.pred, arity));
+                    return None;
+                }
                 return Some(self.builtin_pred(b));
             }
             arities.push(decl.cols.len());
@@ -1011,9 +1042,10 @@ impl<'a> Cx<'a> {
         ok.then_some(CatSet::Of(ids))
     }
 
-    /// Compile one rule and run its per-rule checks: `_` in a head, (a), (b), (d), (e)
-    /// and the singleton warning. `None` when its head did not resolve (an error is
-    /// recorded).
+    /// Compile one rule and run its per-rule checks: `_` in a head, each aggregate's
+    /// variable count (`count` one or more, `min` / `max` / `sum` exactly one), (a),
+    /// (b), (d), (e) with a negated builtin's `_`, and the singleton warning. `None`
+    /// when its head did not resolve (an error is recorded).
     fn rule(&mut self, index: usize, rule: &Rule, head: Option<PredId>) -> Option<CRule> {
         let sig = rule.head.signature();
         let mut vars = Vars::default();
@@ -1028,6 +1060,11 @@ impl<'a> Cx<'a> {
                     head_terms.push(plain_term(t, &mut vars));
                 }
                 HeadArg::Agg(a) => {
+                    let found = a.vars.len();
+                    let fits = if a.op == AggOp::Count { found > 0 } else { found == 1 };
+                    if !fits {
+                        self.error(a.span, &sig, msg::aggregate_vars(a.op, found));
+                    }
                     let ids = a.vars.iter().map(|v| vars.id(v, a.span)).collect();
                     aggs.push((a.op, ids));
                     head_terms.push(CTerm::Wild);
@@ -1050,6 +1087,14 @@ impl<'a> Cx<'a> {
                             Some(p) => self.typed_term(p, col, t, &mut vars, &sig, &atom_sig),
                             None => plain_term(t, &mut vars),
                         });
+                    }
+                    // A negated builtin runs as a filter over bound columns: `_` in a
+                    // `Must` column leaves the call nothing to test (a positive call's `_`
+                    // is `builtin_binding`'s, which never counts `_` bound).
+                    if let Some(p) = pred
+                        && !positive
+                    {
+                        self.negated_must_wild(p, &a.args, a.span, &sig);
                     }
                     match pred {
                         Some(p) if positive => body.push(CLit::Pos(p, terms, a.span)),
@@ -1095,7 +1140,8 @@ impl<'a> Cx<'a> {
 
     /// Check (e) over the set of bound variables: positive relation atoms and a
     /// builtin's `May` columns bind, then assignments (`y = <bound>`) to a fixpoint;
-    /// every head, aggregated, negated and compared variable must be bound.
+    /// every head, aggregated, negated and compared variable must be bound, and a
+    /// comparison holds no `_`.
     fn safety(&mut self, rule: &Rule, cr: &CRule, vars: &Vars, loose: &[u16], sig: &str) {
         let mut bound = vec![false; usize::from(cr.nvars)];
         let set = |bound: &mut Vec<bool>, v: u16| {
@@ -1175,12 +1221,16 @@ impl<'a> Cx<'a> {
                 }
                 Literal::Cmp(c) => {
                     for t in [&c.left, &c.right] {
-                        if let Term::Var { name, span } = t
-                            && unbound(name)
-                            && !seen.contains(&name.as_str())
-                        {
-                            seen.push(name);
-                            errors.push((*span, msg::unbound_comparison(name)));
+                        match t {
+                            Term::Var { name, span }
+                                if unbound(name) && !seen.contains(&name.as_str()) =>
+                            {
+                                seen.push(name);
+                                errors.push((*span, msg::unbound_comparison(name)));
+                            }
+                            // `_` stands for no value a comparison could test.
+                            Term::Wild(span) => errors.push((*span, msg::wild_comparison())),
+                            _ => {}
                         }
                     }
                 }
@@ -1215,6 +1265,24 @@ impl<'a> Cx<'a> {
             bind_literal(lit, &mut bound);
         }
         for (span, message) in errors {
+            self.error(span, sig, message);
+        }
+    }
+
+    /// Check (e) for a negated builtin `!b(args)` (`p`): a `_` in a `Must` column is an
+    /// error at the call, worded as `builtin_binding`'s for a positive call.
+    fn negated_must_wild(&mut self, p: PredId, args: &[Term], span: Span, sig: &str) {
+        let Some(info) = self.info(p) else { return };
+        let errors: Vec<String> = args
+            .iter()
+            .enumerate()
+            .filter(|(col, t)| {
+                matches!(t, Term::Wild(_))
+                    && info.bind_req(self.catalog, *col) == Some(BindReq::Must)
+            })
+            .map(|(col, _)| msg::needs_bound(&info.signature(), col + 1))
+            .collect();
+        for message in errors {
             self.error(span, sig, message);
         }
     }
@@ -1927,6 +1995,77 @@ mod tests {
             messages(&errors(&unbound)),
             ["aggregated variable `z` of `fan/2` is not bound by the body"]
         );
+    }
+
+    #[test]
+    fn wildcards_arity_and_aggregate_variables() {
+        let c = catalog().with_builtins(vec![in_scope()]);
+        let node = || pos("node", vec![v("x"), Term::wild()]);
+        // `_` in a comparison, and in a negated builtin's Must column.
+        let p = program(vec![
+            rule("v", vec![v("x")], vec![node(), Literal::cmp(CmpOp::Ne, v("x"), Term::wild())]),
+            rule("w", vec![v("x")], vec![node(), neg("starts_with", vec![Term::wild(), s("n")])]),
+        ]);
+        assert_eq!(
+            messages(&errors_in(&p, &c)),
+            [
+                "`_` may not appear in a comparison",
+                "`starts_with/2` needs argument 1 bound before the call",
+            ]
+        );
+        // In a negated relation atom, or a negated builtin's May column, `_` is a wildcard.
+        let p = program(vec![rule(
+            "v",
+            vec![v("x")],
+            vec![
+                node(),
+                neg("edge", vec![v("x"), Term::wild(), s("CALLS")]),
+                neg("in_scope", vec![Term::wild(), s("cli")]),
+            ],
+        )]);
+        assert!(analyse(&p, &c).is_ok());
+
+        // Arity: 256 arguments fit a u8 column; 257 do not, for a head or a domain call.
+        let fact = |n: usize| program(vec![Rule::fact("wide", vec![Term::int(0); n])]);
+        assert!(analyse(&fact(MAX_ARITY), &c).is_ok());
+        let d = errors(&fact(MAX_ARITY + 1));
+        assert_eq!(messages(&d), ["a predicate may have at most 256 arguments; `wide` has 257"]);
+        assert_eq!(d[0].predicate.as_deref(), Some("wide/257"));
+        let wide = BuiltinDecl {
+            name: "wide_call".into(),
+            cols: vec![ColType::Str; MAX_ARITY + 1],
+            bind: vec![BindReq::May; MAX_ARITY + 1],
+            tiered: false,
+            kind: BuiltinKind::Domain,
+        };
+        let cw = catalog().with_builtins(vec![wide]);
+        let call = pos("wide_call", vec![Term::wild(); MAX_ARITY + 1]);
+        let p = program(vec![rule("v", vec![v("x")], vec![node(), call])]);
+        assert_eq!(
+            messages(&errors_in(&p, &cw)),
+            ["a predicate may have at most 256 arguments; `wide_call` has 257"]
+        );
+
+        // Aggregate variables: count takes one or more, min / max / sum exactly one. A
+        // `count()` cannot be written (the parser wants a variable), only built.
+        let agg = |op: AggOp, vars: &[&str]| {
+            program(vec![Rule::new(
+                "s",
+                vec![v("x").into(), HeadArg::agg(op, vars)],
+                vec![
+                    pos("edge", vec![v("x"), v("a"), s("CALLS")]),
+                    pos("edge", vec![v("x"), v("b"), s("USES")]),
+                ],
+            )])
+        };
+        let texts = |op: AggOp, vars: &[&str]| -> Vec<String> {
+            errors(&agg(op, vars)).into_iter().map(|d| d.message).collect()
+        };
+        assert_eq!(texts(AggOp::Count, &[]), ["`count` takes at least one variable"]);
+        assert_eq!(texts(AggOp::Sum, &["a", "b"]), ["`sum` takes one variable, found 2"]);
+        assert_eq!(texts(AggOp::Min, &[]), ["`min` takes one variable, found 0"]);
+        assert!(analyse(&agg(AggOp::Count, &["a", "b"]), &c).is_ok());
+        assert!(analyse(&agg(AggOp::Max, &["a"]), &c).is_ok());
     }
 
     #[test]

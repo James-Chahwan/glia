@@ -1421,7 +1421,6 @@ mod tests {
                 vec![
                     pos("node", vec![v("x"), Term::wild()]),
                     Literal::cmp(CmpOp::Eq, v("z"), v("x")),
-                    Literal::cmp(CmpOp::Ne, v("x"), Term::wild()),
                 ],
             ),
             rule(
@@ -1460,7 +1459,8 @@ mod tests {
         );
         let (x2, z2) = (var(&an, 2, "x"), var(&an, 2, "z"));
         let w = first("w", 2);
-        assert_eq!(w.len(), 2, "`x != _` plans no step: {w:?}");
+        // Analysis rejects `x != _` (DA.16), so no comparison here holds a `_`.
+        assert_eq!(w.len(), 2, "{w:?}");
         assert_eq!(w[1], Step::Assign { var: z2, from: KeyPart::Var(x2) });
         let (x3, t3) = (var(&an, 3, "x"), var(&an, 3, "t"));
         // `!reaches(x, _, ..)` is a filter once node binds x, so it runs before cell.
