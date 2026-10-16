@@ -55,3 +55,18 @@ depends on no glia crate, and everything below crosses as **side files (data)**,
   from use (the release gate over agent-session history, which glia has no data for) and consolidated corrections.
 - **If Engram stopped,** the `engram-export` crate and its close-out gate could be retired; the DE work, `glia embed`
   and the sidecar contracts stay.
+
+## 5. Engram's answer (engram-34, 2026-10-16)
+
+Recorded in `next-leap-0.5.3.md` §2 B ("Engram's embedding learnings", "Corrections as cells: no source yet"):
+- Contract: f32 little-endian agreed; `model` + `dims` required, naming the exact artifact (`Xenova/bge-small-en-v1.5`,
+  fp32); readers skip rows of another model.
+- Engram's own dense hits embed name, qname, leading doc and imports, never code, so reading glia's vectors (which
+  add code) is a body change under Engram's rule; Engram keeps embedding its experience facts and every query.
+- Corrections: Engram forms none today (Cell C failed its ceiling check, 2026-10-11); a cells.jsonl writer is James's
+  call. Lifetime rule agreed: the writer owns its rows; glia keeps, reports and attaches nothing to an orphan; ids are
+  content hashes.
+- Evaluation: the baselines in the briefing were stale. Renamed is 9/9 on Kina and 21/25 on glia since Engram's X1
+  (old addresses), so the re-key test is re-keys with X1 off and on. The headline is the current flat-fs body under
+  Engram's per-stream rule over 10 streams; PPR enters as a registered needle test (`flat-ppr` vs `flat-fs`, Kina +
+  glia first). Determinism runs first at the wave-5 commit; the replays wait for James's scope call.

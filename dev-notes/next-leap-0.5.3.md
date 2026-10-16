@@ -83,9 +83,34 @@ links, so they must survive a rename.
 - **The sidecar stays writer-agnostic:** the written VectorRow contract and its validator (rows whose qname matches
   no node, mixed models, wrong dims) hold for any writer, and Engram can read glia's vectors (same model, same space)
   instead of embedding again.
-- **Corrections as cells.** If Engram continues, its consolidated corrections land as DECISION / CONV cells on the node
-  they name (`external_inputs::WRITABLE` = CONSTRAINT, DECISION, CONV, VECTOR), HEURISTIC, `source = "api"`, under a
-  written contract (cell types, `source`, tier, how a re-keyed node's cells follow it through identity_hint).
+- **Engram's embedding learnings** (engram-34's answer, 2026-10-16, measured unless dated; binding for the spec run):
+  - Model: fastembed-rs `EmbeddingModel::BGESmallENV15` = `Xenova/bge-small-en-v1.5`, `onnx/model.onnx`, fp32, 384
+    dims, CLS pooling (ort 2.0.0-rc.9 / ORT 1.20). Not `BGESmallENV15Q`, a different artifact. Rows name the exact
+    artifact in `model`; a reader skips rows whose model differs from its query model.
+  - Text: Engram embeds name, qname, leading doc (500-char cap) and up to 10 imports not already in name + qname; never
+    a code body. Its 78-vs-54 was that text vs name + qname + imports (the gap was paraphrased questions, 28 vs 9 of
+    44). **Code bodies were never measured**: the spec run A/Bs them. fastembed silently truncates at 512 tokens, so
+    code goes LAST and truncation never eats the doc.
+  - Query: the raw question, same function, no BGE instruction prefix (untested; a reader-side A/B). fastembed
+    L2-normalises; rank by raw cosine (a hashed sparse projection lost 11-13 of 100 lookups).
+  - **No cosine floor means "no match".** A dense tier is never silent, and Engram's best silence rule failed held-out.
+    So the semantic tier never decides presence: `find` / the flow search / `pack`'s fallback keep the lexical absence
+    ("nothing matches by name") beside any semantic rows.
+  - Determinism: on CPU a text's vector is bit-identical alone, padded or batched (256-text chunks), so the text-hash
+    cache holds. GPU bit-identity is untested: the determinism gate stays CPU-only.
+  - Gotchas: the model cache defaults to `.fastembed_cache` under the CWD (set `FASTEMBED_CACHE_DIR` to a fixed user
+    cache, never a repo dir); two ORT sessions at once thrash (13 s vs 0.8 s), and each takes every core, so cap
+    intra-op threads and never embed concurrently with a build's rayon pool. GPU recipe (if wanted): Microsoft's
+    onnxruntime-linux-x64-gpu-1.20.1, ort features `cuda, load-dynamic, ndarray, half`, `ORT_DYLIB_PATH`,
+    `CUDAExecutionProvider::default().build().error_on_failure()` (else silent CPU fallback); never combine
+    `ort-download-binaries` with `load-dynamic`.
+- **Corrections as cells: no source yet.** Engram forms no consolidated corrections today: its Cell C (lessons from
+  user corrections) failed its ceiling check on 2026-10-11 (2 of 13 recurrences in a later session) and was not built,
+  so an Engram writer of `.glia/cells.jsonl` would be a new, unmeasured Engram feature (James's call; engram-34 raised
+  it with him). glia's side already exists: the LF.1 sidecar and the `orphaned_cell` gaps row. Agreed lifetime rule
+  for any writer: the writer owns its rows, glia never deletes another source's rows, an orphan is kept, reported and
+  attached to nothing, and the writer re-anchors or deletes it on its next write; an entry `id` is a hash of the
+  correction's content.
 - **Engram's half** (corrections, its own eval rule: a new candidate source enters its pool as a weight-0 feature and
   stays only if it beats its ablation) is a handoff ask, not a packet: `dev-notes/engram-ask-0.5.3.md`, unsent.
   Learning from use (the release gate over agent-session history) stays Engram's: glia has no session data.
