@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use glia_code_domain::{CodeNav, FileParse, NavFact, edge_category, evidence};
+use glia_code_domain::{CodeNav, FileParse, NavFact, edge_category, evidence, node_kind};
 use glia_core::{NodeId, RepoId};
 
 /// The repo's `go.mod` set (LA.13), what [`parse_one_with_go_modules`] maps
@@ -451,6 +451,30 @@ pub(crate) fn apply_cross_cutting_extractors(
                 fp.nav.record_fact(module_id, NavFact::ClientHost { via: via.into(), host, line });
             }
         }
+        // DT.11b: a GraphQL client's transport is an HTTP call, so each
+        // Apollo / urql / graphql-request client built on an http(s),
+        // root-relative or template URL mints `endpoint:POST:<path>` (ENDPOINT_HIT
+        // `"via":"graphql"`), CALLed from the METHOD / FUNCTION / STATE_VAR
+        // holding the URL (a module-level `export const client = new
+        // ApolloClient(..)` is its STATE_VAR), else the MODULE. The endpoint
+        // fold, owner pass and HttpStackResolver treat it as any client
+        // ENDPOINT. Cached with the parse. fired_on, per file that minted one
+        // or skipped a WebSocket client: `[graphql-transport] endpoints=<n>
+        // (absolute=<a> relative=<r> template=<t>) skipped_ws=<w> path=<file>`.
+        {
+            let idx = anchor::build_span_index(
+                &fp.nodes,
+                &fp.nav,
+                &[node_kind::METHOD, node_kind::FUNCTION, node_kind::STATE_VAR],
+            );
+            let transport = graphql::graphql_transport_endpoints(source, path, repo, &|line| {
+                anchor::owner_of_line(&idx, line).unwrap_or(module_id)
+            });
+            if let Some(marker) = transport.marker(path) {
+                eprintln!("{marker}");
+            }
+            run_with_edges!("graphql", transport);
+        }
         // LA.6b: Angular Router / React Router / vue-router tables, ONE walk
         // per file (the three framework extractors below used to scan `path:`
         // each, minting one literal up to three times on a plain `.ts`). Not
@@ -613,6 +637,22 @@ pub(crate) fn apply_cross_cutting_extractors(
         fp.nodes.extend(svc.nodes);
         fp.edges.extend(svc.edges);
         merge_nav(&mut fp.nav, svc.nav);
+    }
+
+    // DT.1j: the SDL object / input / interface types held in the file's
+    // GraphQL-marked literals (the literals `extract_graphql_resolver_nodes`
+    // reads its root fields from), as MESSAGE_TYPE nodes its MODULE DEFINES.
+    // No other step reads them (a MESSAGE_TYPE is no marker or service kind),
+    // and they go in LAST, where `route::parse_for_cache` added them before
+    // DT.11b moved the call here, so every parse keeps its node and edge
+    // order byte for byte. fired_on, per file that minted one: `[graphql-sdl]
+    // code types=<n> path=<path>`.
+    {
+        let types = graphql::extract_graphql_embedded_types(source, path, module_id, repo);
+        if !types.nodes.is_empty() {
+            eprintln!("[graphql-sdl] code types={} path={path}", types.nodes.len());
+        }
+        run_with_edges!("graphql", types);
     }
 }
 

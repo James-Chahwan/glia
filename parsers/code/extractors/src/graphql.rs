@@ -554,9 +554,9 @@ impl DecoratorCensus {
 const RESOLVER_FIELD_DECORATORS: &[&str] =
     &["@Query(", "@Mutation(", "@Subscription(", "@ResolveField("];
 
-/// GraphQL SDL root type openers: the root is a resolver, and so is each
-/// field of its block. [`sdl_resolvers`] reads them at the start of a line,
-/// also after `extend `.
+/// GraphQL SDL root type openers, matched as text: the `[graphql-sdl-code]`
+/// marker counts the ones outside every marked literal (`unmarked_roots`).
+/// The resolvers themselves are read as tokens ([`sdl_defs`], DT.11b).
 const SDL_RESOLVER_TYPES: &[&str] = &["type Query {", "type Mutation {", "type Subscription {"];
 
 /// LA.27: template tags whose body is a GraphQL document.
@@ -3664,11 +3664,9 @@ pub fn extract_graphql_sdl_file_nodes(
     module_id: NodeId,
     repo: RepoId,
 ) -> GraphqlNodes {
-    let names = sdl_resolvers(source, 0)
-        .into_iter()
-        .map(|h| (h.name, h.line))
-        .collect();
-    resolver_nodes(names, &sdl_defs(source, 0).root_fields, module_id, repo)
+    let defs = sdl_defs(source, 0);
+    let names = defs.resolvers.into_iter().map(|h| (h.name, h.line)).collect();
+    resolver_nodes(names, &defs.root_fields, module_id, repo)
 }
 
 /// One GRAPHQL_RESOLVER per distinct name, anchored at the line of its first
@@ -3748,54 +3746,6 @@ struct SdlHit {
     root: bool,
 }
 
-/// The root type a trimmed SDL line opens (`type Query {`, also after
-/// `extend `), by name.
-fn sdl_root(trimmed: &str) -> Option<&'static str> {
-    let t = trimmed
-        .strip_prefix("extend ")
-        .map_or(trimmed, str::trim_start);
-    SDL_RESOLVER_TYPES
-        .iter()
-        .copied()
-        .find(|opener| t.starts_with(opener))
-        .map(|opener| opener.trim_start_matches("type ").trim_end_matches(" {"))
-}
-
-/// The SDL block scan: each root type opened at the start of a line, and each
-/// field inside its block up to the line that starts with `}`. `text` is SDL
-/// (a whole schema file, or one marked literal's body); its first line is
-/// source line `base_line`, so anchors stay source lines. A root opener in
-/// the middle of a line never counts.
-fn sdl_resolvers(text: &str, base_line: u32) -> Vec<SdlHit> {
-    let mut hits = Vec::new();
-    let mut in_root = false;
-    for (i, line) in text.lines().enumerate() {
-        let line_no = base_line.saturating_add(u32::try_from(i).unwrap_or(u32::MAX));
-        let trimmed = line.trim();
-        if in_root {
-            if trimmed.starts_with('}') {
-                in_root = false;
-            } else if let Some(field) = sdl_field_name(trimmed) {
-                hits.push(SdlHit {
-                    name: field,
-                    line: line_no,
-                    root: false,
-                });
-            }
-            continue;
-        }
-        if let Some(root) = sdl_root(trimmed) {
-            hits.push(SdlHit {
-                name: root.to_string(),
-                line: line_no,
-                root: true,
-            });
-            in_root = true;
-        }
-    }
-    hits
-}
-
 /// SDL read from one code file's GraphQL-marked literals, plus the counts the
 /// `[graphql-sdl-code]` marker reports.
 #[derive(Default)]
@@ -3842,8 +3792,9 @@ fn embedded_sdl(source: &str) -> EmbeddedSdl {
     for &(start, end) in &regions {
         if let Some(body) = source.get(start..end) {
             let base = line_of(source, start);
-            out.hits.extend(sdl_resolvers(body, base));
-            out.root_fields.extend(sdl_defs(body, base).root_fields);
+            let defs = sdl_defs(body, base);
+            out.hits.extend(defs.resolvers);
+            out.root_fields.extend(defs.root_fields);
         }
     }
     out.unmarked_roots = SDL_RESOLVER_TYPES
@@ -4059,23 +4010,6 @@ fn method_name_from_line(line: &str) -> Option<String> {
     Some(token.to_string())
 }
 
-/// Extract the field name from an SDL field line, e.g. `getUser(id: ID!): User`
-/// or `getUser: User` → `getUser`.
-fn sdl_field_name(line: &str) -> Option<String> {
-    if line.starts_with('#') {
-        return None;
-    }
-    let name: String = line
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
-    if name.is_empty() || !is_ident(&name) {
-        None
-    } else {
-        Some(name)
-    }
-}
-
 fn is_ident(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
@@ -4177,8 +4111,9 @@ fn extract_operation_from_body(body: &str) -> Option<String> {
 /// no fields and mint nothing.
 const SDL_FIELD_TYPES: &[&str] = &["type", "input", "interface"];
 
-/// DT.1j: the root operation type names [`sdl_resolvers`] reads; a
-/// `schema { query: X }` block adds its own names ([`sdl_defs`]).
+/// DT.1j: the default root operation type names; a `schema { query: X }`
+/// block adds its own names ([`sdl_defs`]). DT.11b: only these roots and
+/// their fields are GRAPHQL_RESOLVERs ([`SdlDefs::resolvers`]).
 const SDL_DEFAULT_ROOTS: &[&str] = &["Query", "Mutation", "Subscription"];
 
 /// DT.1j: the words that open a type-system definition, where a type header's
@@ -4226,6 +4161,14 @@ struct SdlDefs {
     /// The fields of every root type block (`type` keyword only), in source
     /// order.
     root_fields: Vec<SdlField>,
+    /// DT.11b: the resolver names, in source order: each `type` block of a
+    /// default root ([`SDL_DEFAULT_ROOTS`], `extend` included) at its
+    /// keyword's line, then each of its fields at the field name's line.
+    /// The token read replaced DT.1j's line scan (`sdl_resolvers`), which
+    /// took the first word of every line of a root block as a field: each
+    /// line of a multi-line argument list (`items(\n first: Int\n)` minted
+    /// `first`) and of a description.
+    resolvers: Vec<SdlHit>,
 }
 
 /// 0-indexed lines of byte offsets in one text whose first line is source
@@ -4486,8 +4429,7 @@ fn sdl_schema_roots(s: &str, open: usize, roots: &mut Vec<String>) -> Option<usi
 /// source line of the text's first line.
 ///
 /// A definition counts only when its first word (`extend` included) starts
-/// its line, blanks aside, or the text: [`sdl_resolvers`]' rule, so the
-/// roots and fields both read agree, and an SDL written into a one-line
+/// its line, blanks aside, or the text, so an SDL written into a one-line
 /// string (glia's own tests, `\n` escapes) declares nothing.
 fn sdl_defs(text: &str, base_line: u32) -> SdlDefs {
     let b = text.as_bytes();
@@ -4553,6 +4495,18 @@ fn sdl_defs(text: &str, base_line: u32) -> SdlDefs {
     for block in blocks {
         if roots.contains(&block.name) {
             if block.keyword == "type" {
+                if SDL_DEFAULT_ROOTS.contains(&block.name.as_str()) {
+                    defs.resolvers.push(SdlHit {
+                        name: block.name.clone(),
+                        line: block.start_line,
+                        root: true,
+                    });
+                    defs.resolvers.extend(block.fields.iter().map(|f| SdlHit {
+                        name: f.name.clone(),
+                        line: f.line,
+                        root: false,
+                    }));
+                }
                 defs.root_fields.extend(block.fields);
             }
         } else {
@@ -5903,6 +5857,14 @@ fn matching_close(b: &[u8], open: usize) -> Option<usize> {
 /// A key is an identifier right after the `{` or a `,`; a matching key bound
 /// to anything but one absolute-URL literal ends the search with `None`.
 fn top_level_url(source: &str, open: usize, close: usize, keys: &[&str]) -> Option<(usize, String)> {
+    top_level_value(source, open, close, keys).and_then(|at| single_url_literal(source, at))
+}
+
+/// The offset of the value bound to the first top-level key of the object
+/// literal spanning `open..=close` that is one of `keys` (whitespace after
+/// its `:` skipped), [`top_level_url`]'s key rule. DT.11b reads the
+/// transport URL and the GET opt-ins through it.
+fn top_level_value(source: &str, open: usize, close: usize, keys: &[&str]) -> Option<usize> {
     let b = source.as_bytes();
     let mut depth = 0usize;
     let mut expect_key = true;
@@ -5938,7 +5900,7 @@ fn top_level_url(source: &str, open: usize, close: usize, keys: &[&str]) -> Opti
                 let end = i + b[i..close].iter().take_while(|&&x| is_ident_byte(x)).count();
                 let colon = skip_ascii_ws(b, end);
                 if keys.contains(&&source[i..end]) && b.get(colon) == Some(&b':') {
-                    return single_url_literal(source, skip_ascii_ws(b, colon + 1));
+                    return Some(skip_ascii_ws(b, colon + 1));
                 }
                 i = end;
                 expect_key = false;
@@ -5973,6 +5935,673 @@ fn single_url_literal(source: &str, at: usize) -> Option<(usize, String)> {
     Some((at, host))
 }
 
+// ============================================================================
+// DT.11b — a GraphQL client's transport is an HTTP call
+// ============================================================================
+
+/// DT.11b: what a transport constructor's URL argument is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UrlArg {
+    /// The `uri` / `url` key of the first argument, an options object.
+    Options,
+    /// The first positional argument (graphql-request's `GraphQLClient`),
+    /// with an optional options object second.
+    Positional,
+}
+
+/// DT.11b: the options key that sends queries as GET, and the values that
+/// turn it on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GetOptIn {
+    /// Apollo's `useGETForQueries: true`.
+    Apollo,
+    /// urql's `preferGetMethod`: any value but `false` (`true`,
+    /// `'within-url-limit'`, `'force'`).
+    Urql,
+    /// graphql-request's `method: 'GET'`.
+    Request,
+    /// The constructor has no GET mode.
+    None,
+}
+
+/// DT.11b: one GraphQL client constructor whose argument names the server
+/// URL, and the packages that export it. A WebSocket constructor
+/// (graphql-ws's `createClient`) is listed so that its site is attributed
+/// to it and counted `skipped_ws=`, never read as urql's `createClient`.
+struct TransportCtor {
+    callee: &'static str,
+    /// Called with `new`.
+    new: bool,
+    arg: UrlArg,
+    /// Module names ([`module_is`]): a constructor counts only in a file that
+    /// imports one of them ([`ctor_for`]).
+    packages: &'static [&'static str],
+    /// The client dials a WebSocket: no HTTP call.
+    ws: bool,
+    get: GetOptIn,
+}
+
+const APOLLO_CLIENT_PACKAGES: &[&str] = &["@apollo/client", "apollo-client", "apollo-boost"];
+const APOLLO_LINK_PACKAGES: &[&str] = &["@apollo/client", "apollo-link-http"];
+const URQL_PACKAGES: &[&str] = &["urql", "@urql/"];
+
+/// DT.11b: the transport constructors, in the order a callee shared by two
+/// packages (`createClient`: urql, graphql-ws) is attributed when no named
+/// import binds it.
+const TRANSPORT_CTORS: &[TransportCtor] = &[
+    TransportCtor {
+        callee: "ApolloClient",
+        new: true,
+        arg: UrlArg::Options,
+        packages: APOLLO_CLIENT_PACKAGES,
+        ws: false,
+        get: GetOptIn::Apollo,
+    },
+    TransportCtor {
+        callee: "HttpLink",
+        new: true,
+        arg: UrlArg::Options,
+        packages: APOLLO_LINK_PACKAGES,
+        ws: false,
+        get: GetOptIn::Apollo,
+    },
+    TransportCtor {
+        callee: "createHttpLink",
+        new: false,
+        arg: UrlArg::Options,
+        packages: APOLLO_LINK_PACKAGES,
+        ws: false,
+        get: GetOptIn::Apollo,
+    },
+    TransportCtor {
+        callee: "createClient",
+        new: false,
+        arg: UrlArg::Options,
+        packages: URQL_PACKAGES,
+        ws: false,
+        get: GetOptIn::Urql,
+    },
+    TransportCtor {
+        callee: "Client",
+        new: true,
+        arg: UrlArg::Options,
+        packages: URQL_PACKAGES,
+        ws: false,
+        get: GetOptIn::Urql,
+    },
+    TransportCtor {
+        callee: "createClient",
+        new: false,
+        arg: UrlArg::Options,
+        packages: &["graphql-ws"],
+        ws: true,
+        get: GetOptIn::None,
+    },
+    TransportCtor {
+        callee: GQL_REQUEST_CTOR,
+        new: true,
+        arg: UrlArg::Positional,
+        packages: &["graphql-request"],
+        ws: false,
+        get: GetOptIn::Request,
+    },
+];
+
+/// The evidence emitter and rule of a transport CALLS edge.
+const TRANSPORT_EMITTER: &str = "extractor:graphql";
+const TRANSPORT_RULE: &str = "graphql_transport";
+
+/// DT.11b: the transport ENDPOINTs one file's GraphQL clients mint
+/// ([`graphql_transport_endpoints`]).
+pub struct TransportNodes {
+    pub nodes: Vec<Node>,
+    /// One CALLS per (site, method), from the site's owner, each with its
+    /// EVIDENCE (emitter `extractor:graphql`, rule `graphql_transport`).
+    pub edges: Vec<Edge>,
+    pub nav: CodeNav,
+    pub counts: TransportCounts,
+}
+
+/// DT.11b: the `[graphql-transport]` counts: ENDPOINTs minted per (site,
+/// method), by the URL's form, and the client sites that dial a WebSocket.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransportCounts {
+    /// An absolute `http(s)://` literal.
+    pub absolute: usize,
+    /// A root-relative literal (`/graphql`).
+    pub relative: usize,
+    /// A template or an identifier chain the endpoint fold resolves.
+    pub template: usize,
+    /// A `ws://` / `wss://` URL, or a graphql-ws client: no ENDPOINT.
+    pub skipped_ws: usize,
+}
+
+impl TransportCounts {
+    /// The ENDPOINTs minted (one per site and method).
+    pub fn endpoints(&self) -> usize {
+        self.absolute + self.relative + self.template
+    }
+}
+
+impl TransportNodes {
+    /// The per-file fired_on line, or `None` when the file minted no
+    /// ENDPOINT and skipped no WebSocket client.
+    pub fn marker(&self, path: &str) -> Option<String> {
+        let c = self.counts;
+        (c.endpoints() + c.skipped_ws > 0).then(|| {
+            format!(
+                "[graphql-transport] endpoints={} (absolute={} relative={} template={}) skipped_ws={} path={path}",
+                c.endpoints(),
+                c.absolute,
+                c.relative,
+                c.template,
+                c.skipped_ws
+            )
+        })
+    }
+}
+
+/// DT.11b: the URL argument as written.
+enum UrlValue<'s> {
+    /// One string literal with no `${..}`: its body.
+    Literal(&'s str),
+    /// A backtick template with at least one `${..}`: its body.
+    Template(&'s str),
+    /// An identifier chain (`environment.graphqlUrl`, `GRAPHQL_URL`).
+    Chain(&'s str),
+}
+
+/// How a transport URL was read, for [`TransportCounts`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UrlForm {
+    Absolute,
+    Relative,
+    Template,
+}
+
+/// DT.11b: the ENDPOINT a transport URL names.
+struct TransportTarget {
+    /// The request path, `${…}` for each substitution, query dropped.
+    path: String,
+    /// The text the path was normalised from, when normalising changed it.
+    raw: Option<String>,
+    /// A literal authority (`host[:port]`).
+    host: Option<String>,
+    /// The URL source with each `${expr}` kept, for the endpoint fold.
+    template: Option<String>,
+    form: UrlForm,
+    confidence: Confidence,
+}
+
+/// What a transport URL dials.
+enum Dial {
+    Http(TransportTarget),
+    Ws,
+}
+
+/// DT.11b: the value starting at `at` as a [`UrlValue`], and the index past
+/// it, when it is followed by `,` / `}` / `)` (so not a concatenation, a
+/// call or a member read of a call). `undefined` / `null` / `this` and the
+/// boolean literals are no URL.
+fn url_value(source: &str, at: usize) -> Option<(UrlValue<'_>, usize)> {
+    let b = source.as_bytes();
+    let c = *b.get(at)?;
+    let (value, end) = match c {
+        b'"' | b'\'' | b'`' => {
+            let end = skip_js_literal(b, at)?;
+            let body = source.get(at + 1..end - 1)?;
+            if c == b'`' && body.contains("${") {
+                (UrlValue::Template(body), end)
+            } else {
+                (UrlValue::Literal(body), end)
+            }
+        }
+        _ if c.is_ascii_alphabetic() || c == b'_' || c == b'$' => {
+            let mut end = at;
+            loop {
+                end += b[end..].iter().take_while(|&&x| is_ident_byte(x)).count();
+                let next_starts = b
+                    .get(end + 1)
+                    .is_some_and(|&x| x.is_ascii_alphabetic() || x == b'_' || x == b'$');
+                if b.get(end) == Some(&b'.') && next_starts {
+                    end += 1;
+                    continue;
+                }
+                break;
+            }
+            let chain = source.get(at..end)?;
+            if matches!(chain, "undefined" | "null" | "this" | "true" | "false") {
+                return None;
+            }
+            (UrlValue::Chain(chain), end)
+        }
+        _ => return None,
+    };
+    matches!(b.get(skip_ascii_ws(b, end)), Some(b',' | b'}' | b')')).then_some((value, end))
+}
+
+/// `body` with every `${..}` substitution (braces balanced) replaced by the
+/// `${…}` placeholder the TypeScript client parser writes.
+fn placeholder_text(body: &str) -> String {
+    let b = body.as_bytes();
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+    let mut copied = 0;
+    while i < b.len() {
+        if b[i] == b'$' && b.get(i + 1) == Some(&b'{') {
+            let mut depth = 0usize;
+            let mut j = i + 1;
+            while j < b.len() {
+                match b[j] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            out.push_str(&body[copied..i]);
+            out.push_str("${…}");
+            i = (j + 1).min(b.len());
+            copied = i;
+            continue;
+        }
+        i += 1;
+    }
+    out.push_str(&body[copied..]);
+    out
+}
+
+/// True when `url` starts with `scheme` (`ws://`), ASCII case-insensitive.
+fn has_scheme(url: &str, scheme: &str) -> bool {
+    url.get(..scheme.len()).is_some_and(|h| h.eq_ignore_ascii_case(scheme))
+}
+
+fn is_ws_url(url: &str) -> bool {
+    has_scheme(url, "ws://") || has_scheme(url, "wss://")
+}
+
+fn is_http_url(url: &str) -> bool {
+    has_scheme(url, "http://") || has_scheme(url, "https://")
+}
+
+/// A root-relative path (`/graphql`), not a protocol-relative URL (`//h/x`).
+fn is_root_relative(url: &str) -> bool {
+    url.starts_with('/') && !url.starts_with("//")
+}
+
+/// DT.11b: what the URL value dials, or `None` when it names no endpoint
+/// (a bare word, a protocol-relative URL, any other expression).
+///
+/// - A literal: `ws://` / `wss://` -> [`Dial::Ws`]; `http(s)://` -> its path
+///   and literal host (`endpoint::client_url_split`); root-relative -> its
+///   path. Strong: read at the site.
+/// - A template: its `${…}` form read the same way (an interpolated host is
+///   no host), with the source kept as `template` for the endpoint fold.
+///   Medium, the TypeScript client parser's tier for a template.
+/// - An identifier chain: path `${…}`, `template` `${<chain>}`. Medium.
+fn transport_target(value: &UrlValue<'_>) -> Option<Dial> {
+    use glia_code_domain::endpoint::{client_url_split, normalise_client_path};
+    let read = |url: &str, form: UrlForm, template: Option<String>, confidence: Confidence| {
+        let url = url.trim();
+        if is_ws_url(url) {
+            return Some(Dial::Ws);
+        }
+        let absolute = is_http_url(url);
+        let leads_with_hole = form == UrlForm::Template && url.starts_with("${…}");
+        if !absolute && !is_root_relative(url) && !leads_with_hole {
+            return None;
+        }
+        let (path, changed) = normalise_client_path(url);
+        let host = if absolute { client_url_split(url).0 } else { None };
+        Some(Dial::Http(TransportTarget {
+            path,
+            raw: changed.then(|| url.to_string()),
+            host,
+            template,
+            form,
+            confidence,
+        }))
+    };
+    match value {
+        UrlValue::Literal(body) => {
+            let form = if is_http_url(body.trim()) {
+                UrlForm::Absolute
+            } else {
+                UrlForm::Relative
+            };
+            read(body, form, None, Confidence::Strong)
+        }
+        UrlValue::Template(body) => read(
+            &placeholder_text(body),
+            UrlForm::Template,
+            Some(body.to_string()),
+            Confidence::Medium,
+        ),
+        UrlValue::Chain(chain) => Some(Dial::Http(TransportTarget {
+            path: "${…}".to_string(),
+            raw: None,
+            host: None,
+            template: Some(format!("${{{chain}}}")),
+            form: UrlForm::Template,
+            confidence: Confidence::Medium,
+        })),
+    }
+}
+
+/// `module` names `package` or a subpath of it (`@apollo/client/core`); a
+/// package ending in `/` is a scope prefix (`@urql/`).
+fn module_is(module: &str, package: &str) -> bool {
+    if package.ends_with('/') {
+        return module.starts_with(package);
+    }
+    module == package
+        || module
+            .strip_prefix(package)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Some quoted string of `source` is one of `packages` as a whole module name
+/// ([`quoted_module_at`], [`gql_context`]'s rule).
+fn imports_package(source: &str, packages: &[&str]) -> bool {
+    let b = source.as_bytes();
+    b.iter().enumerate().any(|(i, &c)| {
+        (c == b'\'' || c == b'"') && packages.iter().any(|p| quoted_module_at(b, i + 1, p))
+    })
+}
+
+/// The module an ES `import` statement binds the local name `local` from:
+/// `import { local } from 'm'`, `import { x as local } from 'm'`, `import
+/// local from 'm'` or `import local, { .. } from 'm'` (an `import type` too).
+/// `None` when no import binds it (a namespace import, a `require`, a
+/// global).
+fn import_binding<'s>(source: &'s str, local: &str) -> Option<&'s str> {
+    let b = source.as_bytes();
+    for (at, _) in source.match_indices("import") {
+        let end = at + "import".len();
+        if ident_byte_before(b, at) || b.get(end).is_some_and(|&c| is_ident_byte(c)) {
+            continue;
+        }
+        // The clause runs to the `from` keyword (a whole word: never the
+        // head of `fromEvent`); a quote or `;` first is a side-effect import
+        // (`import 'x'`) or no import statement at all.
+        let Some(from_rel) = source[end..].match_indices("from").map(|(i, _)| i).find(|&i| {
+            let at = end + i;
+            !ident_byte_before(b, at) && !b.get(at + "from".len()).is_some_and(|&c| is_ident_byte(c))
+        }) else {
+            continue;
+        };
+        let clause = &source[end..end + from_rel];
+        if clause.contains(['\'', '"', '`', ';', '(']) {
+            continue;
+        }
+        let module_at = skip_ascii_ws(b, end + from_rel + "from".len());
+        let Some(&q) = b.get(module_at).filter(|&&q| q == b'\'' || q == b'"') else {
+            continue;
+        };
+        let Some(module) = find_close(b, module_at + 1, &[q], true).and_then(|e| source.get(module_at + 1..e))
+        else {
+            continue;
+        };
+        let binds = clause
+            .split(['{', '}', ','])
+            .map(str::trim)
+            .filter(|item| !item.is_empty() && !item.starts_with('*'))
+            .any(|item| {
+                let item = item.strip_prefix("type ").map_or(item, str::trim_start);
+                let name = item.rsplit_once(" as ").map_or(item, |(_, alias)| alias).trim();
+                name == local
+            });
+        if binds {
+            return Some(module);
+        }
+    }
+    None
+}
+
+/// DT.11b: which constructor `callee` is in this file. A named import of
+/// `callee` decides: the constructor whose packages hold its module, or none
+/// when the module is another library's (`import { createClient } from
+/// 'redis'`). Unbound, the first constructor (table order) whose package the
+/// file imports.
+fn ctor_for(source: &str, callee: &str) -> Option<&'static TransportCtor> {
+    let mut ctors = TRANSPORT_CTORS.iter().filter(|c| c.callee == callee);
+    match import_binding(source, callee) {
+        Some(module) => ctors.find(|c| c.packages.iter().any(|p| module_is(module, p))),
+        None => ctors.find(|c| imports_package(source, c.packages)),
+    }
+}
+
+/// The GET opt-in of the options object spanning `open..=close`.
+fn sends_get(source: &str, open: usize, close: usize, get: GetOptIn) -> bool {
+    let b = source.as_bytes();
+    let key = match get {
+        GetOptIn::Apollo => "useGETForQueries",
+        GetOptIn::Urql => "preferGetMethod",
+        GetOptIn::Request => "method",
+        GetOptIn::None => return false,
+    };
+    let Some(at) = top_level_value(source, open, close, &[key]) else {
+        return false;
+    };
+    let word = || {
+        let end = at + b[at..close].iter().take_while(|&&c| is_ident_byte(c)).count();
+        &source[at..end]
+    };
+    match get {
+        GetOptIn::Apollo => word() == "true",
+        // A string (`'within-url-limit'`, `'force'`) or any word but `false`.
+        GetOptIn::Urql => matches!(b.get(at), Some(b'\'' | b'"')) || !matches!(word(), "" | "false"),
+        GetOptIn::Request => match url_value(source, at) {
+            Some((UrlValue::Literal(m), _)) => m.trim().eq_ignore_ascii_case("GET"),
+            _ => false,
+        },
+        GetOptIn::None => false,
+    }
+}
+
+/// One call site of a transport constructor ([`transport_sites`]).
+struct TransportSite {
+    /// The offset of the URL value.
+    at: usize,
+    /// The span (`{` to `}`) of the call's options object, if any.
+    options: Option<(usize, usize)>,
+    ctor: &'static TransportCtor,
+}
+
+/// Every call site of `ctor` in `source` with a URL argument: the options
+/// object's `uri` / `url` value, or (positional) the first argument and the
+/// options object after it, if any.
+fn transport_sites(source: &str, ctor: &'static TransportCtor) -> Vec<TransportSite> {
+    let b = source.as_bytes();
+    let mut out = Vec::new();
+    for (at, _) in source.match_indices(ctor.callee) {
+        if ident_byte_before(b, at) || in_line_comment(b, at) || (ctor.new && !preceded_by_new(b, at)) {
+            continue;
+        }
+        let Some(open) = call_open(b, at + ctor.callee.len()) else {
+            continue;
+        };
+        let arg = skip_ascii_ws(b, open + 1);
+        match ctor.arg {
+            UrlArg::Options => {
+                if b.get(arg) != Some(&b'{') {
+                    continue;
+                }
+                let Some(close) = matching_close(b, arg) else {
+                    continue;
+                };
+                if let Some(at) = top_level_value(source, arg, close, GQL_URL_KEYS) {
+                    out.push(TransportSite { at, options: Some((arg, close)), ctor });
+                }
+            }
+            UrlArg::Positional => {
+                let Some((_, end)) = url_value(source, arg) else {
+                    continue;
+                };
+                let next = skip_ascii_ws(b, end);
+                let options = (b.get(next) == Some(&b','))
+                    .then(|| skip_ascii_ws(b, next + 1))
+                    .filter(|&o| b.get(o) == Some(&b'{'))
+                    .and_then(|o| matching_close(b, o).map(|c| (o, c)));
+                out.push(TransportSite { at: arg, options, ctor });
+            }
+        }
+    }
+    out
+}
+
+/// The 1-based byte column of offset `at`.
+fn column_of(b: &[u8], at: usize) -> usize {
+    let start = b[..at.min(b.len())]
+        .iter()
+        .rposition(|&c| c == b'\n')
+        .map_or(0, |i| i + 1);
+    at - start + 1
+}
+
+/// `"template"` (when given) and `"via":"graphql"` appended to the
+/// ENDPOINT_HIT payload `push_client_endpoint_with` wrote, after its
+/// `raw` / `host`.
+fn append_transport_fields(node: &mut Node, template: Option<&str>) {
+    for cell in node.cells.iter_mut().filter(|c| c.kind == cell_type::ENDPOINT_HIT) {
+        let CellPayload::Json(json) = &mut cell.payload else {
+            continue;
+        };
+        if json.pop() != Some('}') {
+            continue;
+        }
+        if let Some(t) = template {
+            json.push_str(",\"template\":");
+            json.push_str(&serde_json::to_string(t).unwrap_or_else(|_| String::from("\"\"")));
+        }
+        json.push_str(r#","via":"graphql"}"#);
+    }
+}
+
+/// DT.11b: the HTTP call a GraphQL client's transport makes, as a client
+/// ENDPOINT.
+///
+/// Every Apollo `new ApolloClient({ uri })` / `new HttpLink({ uri })` /
+/// `createHttpLink({ uri })`, urql `createClient({ url })` / `new Client({
+/// url })` and graphql-request `new GraphQLClient(url, ..)` whose URL is an
+/// `http(s)://` or root-relative literal, a template or an identifier chain
+/// ([`transport_target`]) mints `endpoint:POST:<path>` through the one
+/// client-ENDPOINT writer (`endpoint::push_client_endpoint_with`, `raw` /
+/// `host` as for any client), its ENDPOINT_HIT ending in `"template"` (a
+/// non-literal URL, which the engine's endpoint fold resolves) and
+/// `"via":"graphql"`, and a CALLS from `owner_of(<0-based line of the
+/// URL>)`. GET is minted too when the same options object opts queries into
+/// it (Apollo `useGETForQueries: true`, urql `preferGetMethod`,
+/// graphql-request `method: 'GET'`).
+///
+/// A constructor counts only in a file importing its own package
+/// ([`ctor_for`]): `createClient` and `Client` are everyday names (a Redis
+/// client is `createClient({ url })`), and graphql-ws's `createClient({ url:
+/// 'ws://..' })` sits beside Apollo in the canonical subscription setup. A
+/// `ws://` / `wss://` URL or a graphql-ws client mints nothing and is
+/// counted `skipped_ws`. A client with no readable URL (an `HttpLink` built
+/// elsewhere and passed as `link`) mints nothing here; its `HttpLink` site
+/// mints the transport.
+pub fn graphql_transport_endpoints(
+    source: &str,
+    path: &str,
+    repo: RepoId,
+    owner_of: &dyn Fn(u32) -> NodeId,
+) -> TransportNodes {
+    use glia_code_domain::endpoint::{ClientEndpoint, HitExtras, push_client_endpoint_with};
+    use glia_code_domain::evidence::{self, Evidence};
+
+    let mut out = TransportNodes {
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        nav: CodeNav::default(),
+        counts: TransportCounts::default(),
+    };
+    if !TRANSPORT_CTORS.iter().any(|c| source.contains(c.callee)) {
+        return out;
+    }
+    let b = source.as_bytes();
+    let mut sites: Vec<TransportSite> = Vec::new();
+    let mut callees: Vec<&str> = Vec::new();
+    for c in TRANSPORT_CTORS {
+        if callees.contains(&c.callee) || !source.contains(c.callee) {
+            continue;
+        }
+        callees.push(c.callee);
+        if let Some(ctor) = ctor_for(source, c.callee) {
+            sites.extend(transport_sites(source, ctor));
+        }
+    }
+    sites.sort_by_key(|s| s.at);
+    sites.dedup_by_key(|s| s.at);
+
+    let mut seen = std::collections::HashSet::new();
+    for TransportSite { at, options, ctor } in sites {
+        let Some((value, _)) = url_value(source, at) else {
+            continue;
+        };
+        if ctor.ws {
+            out.counts.skipped_ws += 1;
+            continue;
+        }
+        let target = match transport_target(&value) {
+            Some(Dial::Http(t)) => t,
+            Some(Dial::Ws) => {
+                out.counts.skipped_ws += 1;
+                continue;
+            }
+            None => continue,
+        };
+        let get = options.is_some_and(|(o, c)| sends_get(source, o, c, ctor.get));
+        let line0 = line_of(source, at);
+        let owner = owner_of(line0);
+        for method in std::iter::once("POST").chain(get.then_some("GET")) {
+            let ep = ClientEndpoint {
+                method: method.to_string(),
+                path: target.path.clone(),
+                file: path.to_string(),
+                line: line0 as usize + 1,
+                col: column_of(b, at),
+                confidence: target.confidence,
+            };
+            let extras = HitExtras {
+                raw: target.raw.as_deref(),
+                host: target.host.as_deref(),
+            };
+            let before = out.nodes.len();
+            push_client_endpoint_with(
+                repo,
+                &ep,
+                extras,
+                owner,
+                &mut out.nodes,
+                &mut out.edges,
+                &mut out.nav,
+                &mut seen,
+            );
+            if out.nodes.len() > before
+                && let Some(node) = out.nodes.last_mut()
+            {
+                append_transport_fields(node, target.template.as_deref());
+            }
+            if let Some(e) = out.edges.last_mut() {
+                evidence::attach(e, Evidence::emitter(TRANSPORT_EMITTER).rule(TRANSPORT_RULE).at(path, line0));
+            }
+            match target.form {
+                UrlForm::Absolute => out.counts.absolute += 1,
+                UrlForm::Relative => out.counts.relative += 1,
+                UrlForm::Template => out.counts.template += 1,
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5986,6 +6615,223 @@ mod tests {
 
     fn hosts(v: &[(&str, u32)]) -> Vec<(String, u32)> {
         v.iter().map(|&(h, l)| (h.to_string(), l)).collect()
+    }
+
+    // DT.11b: a GraphQL client's transport ENDPOINT.
+
+    fn transport_owner() -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::STATE_VAR, "src::client::client")
+    }
+
+    fn transport(src: &str) -> TransportNodes {
+        graphql_transport_endpoints(src, "src/client.ts", repo(), &|_| transport_owner())
+    }
+
+    /// `(qname, ENDPOINT_HIT payload)` of every minted ENDPOINT, in order.
+    fn transport_hits(out: &TransportNodes) -> Vec<(String, String)> {
+        out.nodes
+            .iter()
+            .map(|n| {
+                let qname = out.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default();
+                let hit = n
+                    .cells
+                    .iter()
+                    .find_map(|c| match (&c.payload, c.kind == cell_type::ENDPOINT_HIT) {
+                        (CellPayload::Json(j), true) => Some(j.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                (qname, hit)
+            })
+            .collect()
+    }
+
+    fn transport_qnames(src: &str) -> Vec<String> {
+        transport_hits(&transport(src)).into_iter().map(|(q, _)| q).collect()
+    }
+
+    #[test]
+    fn transport_absolute_uri() {
+        let src = "import { ApolloClient, InMemoryCache } from '@apollo/client/core';\n\nexport const client = new ApolloClient({\n  uri: 'http://localhost:8080/graphql',\n  cache: new InMemoryCache(),\n});\n";
+        let lines = std::cell::RefCell::new(Vec::new());
+        let out = graphql_transport_endpoints(src, "src/client.ts", repo(), &|line| {
+            lines.borrow_mut().push(line);
+            transport_owner()
+        });
+        assert_eq!(*lines.borrow(), [3], "the owner is asked for the URL's 0-based row");
+        assert_eq!(
+            transport_hits(&out),
+            [(
+                "endpoint:POST:/graphql".to_string(),
+                r#"{"method":"POST","path":"/graphql","file":"src/client.ts","line":4,"col":8,"confidence":"strong","raw":"http://localhost:8080/graphql","host":"localhost:8080","via":"graphql"}"#.to_string()
+            )]
+        );
+        assert_eq!(out.edges.len(), 1);
+        let e = &out.edges[0];
+        assert_eq!((e.from, e.to, e.category), (transport_owner(), out.nodes[0].id, edge_category::CALLS));
+        let ev = glia_code_domain::evidence::Evidence::of(e).expect("evidence");
+        assert_eq!(ev.emitter, "extractor:graphql");
+        assert_eq!(ev.rule.as_deref(), Some("graphql_transport"));
+        assert_eq!((ev.file.as_deref(), ev.line), (Some("src/client.ts"), Some(3)));
+        assert_eq!(
+            out.counts,
+            TransportCounts { absolute: 1, relative: 0, template: 0, skipped_ws: 0 }
+        );
+        assert_eq!(
+            out.marker("src/client.ts").as_deref(),
+            Some("[graphql-transport] endpoints=1 (absolute=1 relative=0 template=0) skipped_ws=0 path=src/client.ts")
+        );
+    }
+
+    #[test]
+    fn transport_relative_uri() {
+        let src = "import { HttpLink } from '@apollo/client';\nconst link = new HttpLink({ uri: '/graphql?op=1' });\n";
+        let out = transport(src);
+        assert_eq!(
+            transport_hits(&out),
+            [(
+                "endpoint:POST:/graphql".to_string(),
+                r#"{"method":"POST","path":"/graphql","file":"src/client.ts","line":2,"col":34,"confidence":"strong","raw":"/graphql?op=1","via":"graphql"}"#.to_string()
+            )]
+        );
+        assert_eq!(out.counts.relative, 1);
+        // `createHttpLink` and urql `new Client` read the same way; a bare
+        // word and a protocol-relative URL name no endpoint.
+        let more = "import { createHttpLink } from '@apollo/client';\nimport { Client } from '@urql/core';\nconst a = createHttpLink({ uri: '/api/graphql' });\nconst b = new Client({ url: '/gql', exchanges: [] });\nconst c = createHttpLink({ uri: 'graphql' });\nconst d = createHttpLink({ uri: '//cdn.example.com/graphql' });\n";
+        assert_eq!(transport_qnames(more), ["endpoint:POST:/api/graphql", "endpoint:POST:/gql"]);
+    }
+
+    #[test]
+    fn transport_env_uri_records_template() {
+        let src = "import { ApolloClient } from '@apollo/client';\nimport { environment } from './environments/environment';\nexport const a = new ApolloClient({ uri: environment.graphqlUrl, cache });\nexport const b = new ApolloClient({ uri: `${environment.apiUrl}/graphql`, cache });\nexport const c = new ApolloClient({ uri: `http://localhost:${port}/graphql`, cache });\n";
+        let out = transport(src);
+        let hits = transport_hits(&out);
+        assert_eq!(
+            hits.iter().map(|(q, _)| q.as_str()).collect::<Vec<_>>(),
+            ["endpoint:POST:${…}", "endpoint:POST:${…}/graphql", "endpoint:POST:/graphql"]
+        );
+        assert!(hits[0].1.ends_with(r#""confidence":"medium","template":"${environment.graphqlUrl}","via":"graphql"}"#), "{}", hits[0].1);
+        assert!(hits[1].1.ends_with(r#""confidence":"medium","template":"${environment.apiUrl}/graphql","via":"graphql"}"#), "{}", hits[1].1);
+        // An interpolated authority is no host; the path is read through it.
+        assert!(hits[2].1.ends_with(r#""raw":"http://localhost:${…}/graphql","template":"http://localhost:${port}/graphql","via":"graphql"}"#), "{}", hits[2].1);
+        assert!(!hits[2].1.contains("\"host\""));
+        assert_eq!(out.counts.template, 3);
+        // A concatenation, a call, a nested key and a shorthand key read
+        // nothing.
+        for body in [
+            "new ApolloClient({ uri: base + '/graphql' })",
+            "new ApolloClient({ uri: graphqlUrl() })",
+            "new ApolloClient({ headers: { uri: '/graphql' } })",
+            "new ApolloClient({ uri })",
+            "new ApolloClient({ uri: undefined })",
+        ] {
+            let src = format!("import {{ ApolloClient }} from '@apollo/client';\nconst c = {body};\n");
+            assert!(transport(&src).nodes.is_empty(), "{body}");
+        }
+    }
+
+    #[test]
+    fn transport_get_for_queries_adds_get() {
+        let apollo = "import { ApolloClient } from '@apollo/client';\nconst c = new ApolloClient({ uri: '/graphql', useGETForQueries: true, cache });\n";
+        assert_eq!(transport_qnames(apollo), ["endpoint:POST:/graphql", "endpoint:GET:/graphql"]);
+        let out = transport(apollo);
+        assert_eq!(out.edges.len(), 2);
+        assert_eq!(out.counts.relative, 2);
+        let urql = "import { createClient } from 'urql';\nconst c = createClient({ url: '/graphql', preferGetMethod: 'within-url-limit', exchanges });\n";
+        assert_eq!(transport_qnames(urql), ["endpoint:POST:/graphql", "endpoint:GET:/graphql"]);
+        let request = "import { GraphQLClient } from 'graphql-request';\nconst c = new GraphQLClient('/graphql', { method: 'GET' });\n";
+        assert_eq!(transport_qnames(request), ["endpoint:POST:/graphql", "endpoint:GET:/graphql"]);
+        for body in [
+            "import { ApolloClient } from '@apollo/client';\nconst c = new ApolloClient({ uri: '/graphql', useGETForQueries: false });\n",
+            "import { createClient } from 'urql';\nconst c = createClient({ url: '/graphql', preferGetMethod: false });\n",
+            "import { GraphQLClient } from 'graphql-request';\nconst c = new GraphQLClient('/graphql', { method: 'POST' });\n",
+            "import { ApolloClient } from '@apollo/client';\nconst c = new ApolloClient({ uri: '/graphql', defaultOptions: { useGETForQueries: true } });\n",
+        ] {
+            assert_eq!(transport_qnames(body), ["endpoint:POST:/graphql"], "{body}");
+        }
+    }
+
+    #[test]
+    fn transport_ws_url_mints_nothing() {
+        // The canonical Apollo subscription setup: graphql-ws's createClient
+        // beside the HTTP client (the fixture's shape).
+        let src = "import { ApolloClient, InMemoryCache, gql } from '@apollo/client/core';\nimport { createClient } from 'graphql-ws';\n\nexport const client = new ApolloClient({\n  uri: 'http://localhost:8080/graphql',\n  cache: new InMemoryCache(),\n});\n\nexport const wsClient = createClient({ url: 'ws://localhost:8080/subscriptions' });\n";
+        let out = transport(src);
+        assert_eq!(transport_hits(&out).into_iter().map(|(q, _)| q).collect::<Vec<_>>(), ["endpoint:POST:/graphql"]);
+        assert_eq!(out.counts, TransportCounts { absolute: 1, relative: 0, template: 0, skipped_ws: 1 });
+        assert_eq!(
+            out.marker("src/client.ts").as_deref(),
+            Some("[graphql-transport] endpoints=1 (absolute=1 relative=0 template=0) skipped_ws=1 path=src/client.ts")
+        );
+        // A graphql-ws client on a non-literal URL is a WebSocket too, and
+        // an HTTP constructor handed a ws:// / wss:// URL dials no HTTP.
+        let ws = "import { createClient } from 'graphql-ws';\nimport { ApolloClient } from '@apollo/client';\nconst w = createClient({ url: config.wsUrl });\nconst a = new ApolloClient({ uri: 'wss://api.example.com/graphql' });\nconst b = new ApolloClient({ uri: `ws://${host}/graphql` });\n";
+        let out = transport(ws);
+        assert!(out.nodes.is_empty());
+        assert_eq!(out.counts.skipped_ws, 3);
+        assert_eq!(
+            out.marker("src/client.ts").as_deref(),
+            Some("[graphql-transport] endpoints=0 (absolute=0 relative=0 template=0) skipped_ws=3 path=src/client.ts")
+        );
+    }
+
+    #[test]
+    fn transport_ctor_needs_its_own_package() {
+        // createClient bound from redis in an Apollo file.
+        let redis = "import { ApolloClient } from '@apollo/client';\nimport { createClient } from 'redis';\nconst r = createClient({ url: 'http://cache:6379/' });\n";
+        let out = transport(redis);
+        assert!(out.nodes.is_empty());
+        assert_eq!(out.marker("src/client.ts"), None);
+        // Unbound (a require), and the file imports no urql.
+        let required = "import { ApolloClient } from '@apollo/client';\nconst { createClient } = require('redis');\nconst r = createClient({ url: 'http://cache:6379/' });\n";
+        assert!(transport(required).nodes.is_empty());
+        // No GraphQL client package at all.
+        assert!(transport("const c = new ApolloClient({ uri: '/graphql' });\n").nodes.is_empty());
+        // urql's createClient, aliased graphql-ws beside it.
+        let urql = "import { createClient } from 'urql';\nimport { createClient as createWsClient } from 'graphql-ws';\nconst ws = createWsClient({ url: 'ws://x/graphql' });\nconst c = createClient({ url: 'http://catalog-svc/graphql', exchanges });\n";
+        assert_eq!(transport_qnames(urql), ["endpoint:POST:/graphql"]);
+        // `Client` and `HttpLink` inside longer names, a comment, and a
+        // constructor called without `new`.
+        let lookalikes = "import { ApolloClient, HttpLink } from '@apollo/client';\nconst a = new MyHttpLink({ uri: '/a' });\n// new ApolloClient({ uri: '/b' })\nconst c = ApolloClient({ uri: '/c' });\n";
+        assert!(transport(lookalikes).nodes.is_empty());
+    }
+
+    #[test]
+    fn graphql_request_positional_url() {
+        let src = "import { GraphQLClient } from 'graphql-request';\n\nconst gql = new GraphQLClient(\"http://users-svc/graphql\", { headers: {} });\n";
+        let hits = transport_hits(&transport(src));
+        assert_eq!(
+            hits,
+            [(
+                "endpoint:POST:/graphql".to_string(),
+                r#"{"method":"POST","path":"/graphql","file":"src/client.ts","line":3,"col":31,"confidence":"strong","raw":"http://users-svc/graphql","host":"users-svc","via":"graphql"}"#.to_string()
+            )]
+        );
+        // A positional value that names nothing.
+        assert!(transport("import { GraphQLClient } from 'graphql-request';\nconst g = new GraphQLClient(endpointFor(env));\n").nodes.is_empty());
+    }
+
+    /// DT.11b (the DT.1j handoff): a root field's argument list spanning
+    /// lines, and a description in a root block, mint no resolver; the line
+    /// scan this replaced read `first`, `after` and `Fetch` as fields.
+    #[test]
+    fn sdl_multiline_arguments_are_not_resolvers() {
+        let sdl = "type Query {\n  items(\n    first: Int\n    after: String\n  ): [Item!]!\n  \"\"\"\n  Fetch the user\n  \"\"\"\n  me: User\n}\n\nextend type Query {\n  version: String\n}\n";
+        let out = extract_graphql_sdl_file_nodes(sdl, module_id(), repo());
+        let mut qnames: Vec<&str> = out.nav.qname_by_id.values().map(String::as_str).collect();
+        qnames.sort_unstable();
+        assert_eq!(
+            qnames,
+            [
+                "graphql_resolver:Query",
+                "graphql_resolver:items",
+                "graphql_resolver:me",
+                "graphql_resolver:version"
+            ]
+        );
+        assert_eq!(anchor_line(&out, "graphql_resolver:items"), Some(1));
+        assert_eq!(anchor_line(&out, "graphql_resolver:me"), Some(8));
+        assert_eq!(anchor_line(&out, "graphql_resolver:version"), Some(12));
     }
 
     /// CB.24: Apollo's client options name the base URL under `uri`; a TS

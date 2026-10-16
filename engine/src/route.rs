@@ -1222,27 +1222,6 @@ pub(crate) fn parse_for_cache(
     }
     let mut stats = ExtractStats::default();
     apply_cross_cutting_extractors(&mut fp, source, path, lang, module_id, repo, &mut stats);
-    // DT.1j STOPGAP: the SDL object / input / interface types held in the
-    // file's GraphQL-marked literals, as MESSAGE_TYPE nodes its MODULE
-    // DEFINES. Here, not beside `extract_graphql_resolver_nodes` in
-    // `extract::apply_cross_cutting_extractors`, only because that call is
-    // given no file path (a type's POSITION needs one) and its `run_marked!`
-    // keeps no edges. Removal: call `extract_graphql_embedded_types` there
-    // through `run_with_edges!("graphql", ..)` (the same stamp, before the
-    // anchor pass) and delete this block; the parse is the same. fired_on,
-    // per file that minted one: `[graphql-sdl] code types=<n> path=<path>`.
-    {
-        let types =
-            glia_code_extractors::graphql::extract_graphql_embedded_types(source, path, module_id, repo);
-        if !types.nodes.is_empty() {
-            eprintln!("[graphql-sdl] code types={} path={path}", types.nodes.len());
-            let mut edges = types.edges;
-            evidence::stamp_missing(&mut edges, "extractor:graphql");
-            fp.nodes.extend(types.nodes);
-            fp.edges.extend(edges);
-            merge_nav(&mut fp.nav, types.nav);
-        }
-    }
     // G15: denormalize the file's library names onto every node as an
     // IMPORTS cell (one place, all languages). This is the RAW list:
     // telling a dependency from the repo's own module needs the whole

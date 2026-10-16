@@ -1,0 +1,28 @@
+{
+  "framework": "xcut-graphql-transport",
+  "language": "typescript",
+  "dirs": ["client", "server"],
+  "mechanism": "graphql",
+  "note": "DT.11b (T11, examples-glia admin/src/client.ts + api/cmd/server/main.go): an Apollo client built on uri http://localhost:8080/graphql POSTs to the gin server's `POST /graphql` (gqlgen) route, so its transport is an ENDPOINT `endpoint:POST:/graphql` (ENDPOINT_HIT via graphql, host localhost:8080) CALLed from the STATE_VAR `client` and paired by HttpStackResolver. The graphql-ws client in the same file (`createClient({ url: 'ws://..' })`) is a WebSocket transport and mints no ENDPOINT. HEAD a52201dd (debug CLI): `[client-hosts] graphql=2 rpc=0 sides=1`, `[http] routes=2 endpoints=0 paired=0 (exact=0 any=0 eprefix=0 rprefix=0 base=0 suffix=0)`, `[graphql-resolve] 1 pairs`; gaps unpaired_route 2 (`POST /graphql`, `GET /graphql/playground`). The SDL's multi-line `items(` argument list minted `graphql_resolver:first` and `graphql_resolver:after` (GRAPHQL_RESOLVER 5: Query, products, items, first, after); the token read (sdl_defs) mints Query, products, items.",
+  "expect_nodes": [
+    {"kind": "ENDPOINT", "name": "endpoint:POST:/graphql", "exact": true, "note": "the Apollo client's transport"},
+    {"kind": "GRAPHQL_RESOLVER", "name": "graphql_resolver:items", "exact": true, "note": "a root field whose argument list spans lines"}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:POST:/graphql", "to": "POST /graphql", "category": "HTTP_CALLS", "note": "HttpStackResolver pairs the transport with the gqlgen route"},
+    {"from": "client::client", "to": "endpoint:POST:/graphql", "category": "CALLS", "note": "owned by the call-initialised STATE_VAR"},
+    {"from": "graphql_op:Products", "to": "graphql_resolver:products", "category": "GRAPHQL_CALLS", "note": "control: the operation pairing is unchanged"}
+  ],
+  "expect_cells": [
+    {"kind": "ENDPOINT", "node": "endpoint:POST:/graphql", "cell": "ENDPOINT_HIT", "contains": "\"via\":\"graphql\""},
+    {"kind": "ENDPOINT", "node": "endpoint:POST:/graphql", "cell": "ENDPOINT_HIT", "contains": "\"host\":\"localhost:8080\""}
+  ],
+  "forbid": [
+    {"from": "endpoint:POST:/graphql", "to": "GET /graphql/playground", "category": "HTTP_CALLS", "note": "method + path, never a prefix"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/graphql", "note": "no useGETForQueries: POST only"},
+    {"kind": "ENDPOINT", "name": "endpoint:POST:/subscriptions", "note": "the graphql-ws client dials ws://, no HTTP call"},
+    {"kind": "ENDPOINT", "name": "endpoint:GET:/subscriptions"},
+    {"kind": "GRAPHQL_RESOLVER", "name": "graphql_resolver:first", "note": "an argument of items, not a root field"},
+    {"kind": "GRAPHQL_RESOLVER", "name": "graphql_resolver:after", "note": "an argument of items, not a root field"}
+  ]
+}

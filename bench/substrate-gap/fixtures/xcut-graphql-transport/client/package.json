@@ -1,0 +1,10 @@
+{
+  "name": "client",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@apollo/client": "^3.10.0",
+    "graphql": "^16.8.1",
+    "graphql-ws": "^5.16.0"
+  }
+}
