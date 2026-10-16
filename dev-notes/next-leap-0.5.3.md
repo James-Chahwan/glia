@@ -585,6 +585,10 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   are records, so declared_misses does not list them (gaps' orphaned_rule reports stale-anchor ones).
 - W16 (DT.1j, self-graph hygiene): embedded SDL (resolvers and now types) is unguarded in `.rs` files by design (CJ.1b);
   only the line-start rule keeps it out of glia's own one-line test strings.
+- DT.1q spec (verifier defaults): Dart `export` directives (quokka has 2, both in generated protobuf code) and CommonJS
+  re-exports (`module.exports = require(..)`) are not followed; the same NavFacts could carry them. A renamed re-export
+  (`export { A as B } from`) binds through a named import only, never `ns.B` on a namespace import of the barrel (kept out
+  of module_symbols so the name-only `global_unique` fallbacks cannot bind it).
 
 ## 3. Open questions for James
 
