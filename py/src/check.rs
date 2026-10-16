@@ -22,16 +22,30 @@ impl PyGraph {
     ///
     /// Returns a dict `{rules, checked, unchecked, errors, violations,
     /// reflexion}`:
-    /// `rules` read, `checked` evaluated (forbid_edge + no_cycle, plus the
-    /// allows of an evaluated model), `unchecked` the ids of the rules no
-    /// query evaluates (invariant), `errors` `[rule_id, message]` pairs for
-    /// a rule that could not be evaluated (an unknown edge category, a scope
-    /// no node sits in, an allow naming an undeclared component).
+    /// `rules` read, `checked` evaluated (forbid_edge + no_cycle + invariants
+    /// with a `rule`, plus the allows of an evaluated model), `unchecked` the
+    /// ids of the rules no query evaluates (an invariant without `rule`, a
+    /// transitive forbid_edge), `errors` `[rule_id, message]` pairs for a
+    /// rule that could not be evaluated (an unknown edge category, a scope no
+    /// node sits in, an allow naming an undeclared component, an invariant
+    /// `rule` that does not parse or analyse: `<id> (<decl>):<line>:<col>:
+    /// error: ...`, line and column 1-based in the rule text).
     /// `violations`, sorted by rule id: `{rule_id, rule_kind, decl, severity,
-    /// tier, count, evidence}` — a forbid_edge rule's direct edges from scope
-    /// `from` into scope `to` (`count` every edge, evidence at most 100,
-    /// strongest tier first), or one no_cycle cycle (`count` the nodes in its
-    /// component, evidence a shortest cycle). Evidence rows are
+    /// tier, blocking, count, evidence}`, plus `subject`, `file`, `line` and
+    /// `caveats` when set. `rule_kind` is `forbid_edge` (a rule's direct
+    /// edges from scope `from` into scope `to`: `count` every edge, evidence
+    /// at most 100, strongest tier first), `no_cycle` (one cycle: `count` the
+    /// nodes in its component, evidence a shortest cycle), `rule` (one
+    /// `violation` row of an invariant's Datalog `rule`: `subject` the row's
+    /// values rendered, a node as its qname; `file` / `line` its first
+    /// node's location; `evidence` the row's witness edges, `count` all of
+    /// them; `caveats` the coverage notes of the edge categories its
+    /// negations read, since a blind extraction looks like a missing edge),
+    /// `forbid_path` (a transitive forbid_edge hit) or `divergence` (below).
+    /// `blocking` is whether the violation fails CI: its tier is at least as
+    /// strong as its rule's `min_tier` (`fact` | `derived`, default
+    /// `derived`) and it is not `heuristic`; a heuristic violation is
+    /// reported and never blocking. Evidence rows are
     /// `{from_qname, to_qname, category, file, line, emitter, tier, note}`
     /// with 1-based lines; `tier` is the one `why()` gives that edge (`fact`
     /// read at a site, `derived` paired by a resolver or pass or inferred
@@ -58,8 +72,9 @@ impl PyGraph {
     /// edges_to_mapped, sample}` for the code no component owns. Each
     /// divergence is also a violation, `rule_id` `reflexion:<from>-><to>`,
     /// `rule_kind` `divergence`, `decl` the `from` component's stanza,
-    /// `count` and evidence as forbid_edge's. `glia check` renders the model
-    /// as its `## reflexion model` section (CC.5c).
+    /// `count` and evidence as forbid_edge's, `blocking` under the default
+    /// `min_tier` (the model has no per-rule gate). `glia check` renders the
+    /// model as its `## reflexion model` section (CC.5c).
     fn check(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         to_py(py, check_json(&self.merged))
     }
@@ -121,6 +136,10 @@ mod tests {
         // CC.3: every row carries why's tier and note; two observed imports
         // are facts, and the computed cycle is derived.
         assert_eq!(row["tier"], "derived", "{json}");
+        // DB.3a: a derived violation blocks under the default min_tier; a
+        // no_cycle violation has no subject, so none is serialised.
+        assert_eq!(row["blocking"], true, "{json}");
+        assert!(row.get("subject").is_none(), "{json}");
         for hop in row["evidence"].as_array().into_iter().flatten() {
             assert_eq!(hop["tier"], "fact", "{json}");
             assert!(hop["note"].is_null(), "{json}");

@@ -3,7 +3,8 @@
 //! none is declared), 2 when a rule cannot be evaluated.
 //!
 //! The `[check]` stderr line is the LE.8 fired_on marker, followed on a
-//! violation by CC.3's `[check] tiers ..` line; asserting them here makes
+//! violation by CC.3's `[check] tiers ..` line and DB.3a's `[check] gate
+//! blocking=<B> advisory=<A>` line; asserting them here makes
 //! their counts a tested contract, and relaying them lets
 //! `cargo test -p glia-cli --test check_cli -- --nocapture 2>&1 | grep '^\[check\]'`
 //! show it. A repo that declares a reflexion model (CC.5b) prints CC.5b's
@@ -129,6 +130,7 @@ fn violations_exit_1_with_located_tables() {
         vec![
             "[check] rules=3 checked=2 violations=2 (forbid_edge=1 no_cycle=1) unchecked=1 errors=0",
             "[check] tiers fact=1 derived=1 heuristic=0",
+            "[check] gate blocking=2 advisory=0",
         ]
     );
     assert!(
@@ -329,6 +331,7 @@ fn reflexion_section_and_exit_code() {
             "[reflexion] components=3 closed=true deps=3 convergences=2 divergences=1 absences=0 unmapped_files=1",
             "[check] rules=0 checked=0 violations=1 (forbid_edge=0 no_cycle=0) unchecked=0 errors=0",
             "[check] tiers fact=1 derived=0 heuristic=0",
+            "[check] gate blocking=1 advisory=0",
         ]
     );
     assert!(

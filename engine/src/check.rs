@@ -26,12 +26,14 @@
 //!   strongly-connected component, its evidence a shortest witness cycle and
 //!   its `count` the component's size. An unscoped rule checks the whole
 //!   graph.
-//! - `invariant {text, rule}` (a `rule` is overlay version 2's Datalog text,
-//!   DB.1, evaluated once DB.3a lands), a `forbid_edge` with `transitive`
+//! - `invariant {text, rule}` with a `rule` (overlay version 2's Datalog
+//!   text, DB.1): evaluated through the rules layer, one [`RULE`]
+//!   [`Violation`] per `violation` row (module doc "Rule invariants and
+//!   min_tier").
+//! - `invariant {text}` without a `rule`, a `forbid_edge` with `transitive`
 //!   (DB.1, evaluated once DB.3b lands) and any kind this crate cannot
 //!   evaluate: listed in [`CheckReport::unchecked`], never dropped, never
-//!   mis-evaluated as a direct-edge rule. A rule's `min_tier` (DB.1) is read
-//!   by DB.3a's gate; it does not change this module's verdicts yet.
+//!   mis-evaluated as a direct-edge rule.
 //!
 //! # Tiers (CC.3)
 //!
@@ -55,11 +57,45 @@
 //!   import keeps its heuristic tier; its note names the stanza, not who
 //!   declared it).
 //!
-//! Exit codes do not read the tier: a heuristic-only violation still fails
-//! CI; the tier tells the reader how sure the graph is.
+//! - rule: the row's tier, the rules layer's lattice (the min over its
+//!   derivations of the max over their inputs), named as `why` names it.
+//!
+//! # Rule invariants and min_tier
+//!
+//! An invariant's `rule` is parsed and analysed at CHECK time (R1 §3), the
+//! prelude merged in, and evaluated by `rules::evaluate_rule` over the same
+//! `CodeFacts` (DB.2a) this check reads its scopes from, so one `Locator`
+//! serves the whole check. Its source name is `<id> (<decl>)` (`cell API`
+//! for a rule with no decl), so an error reads `<id>
+//! (.glia/overlay.toml:<n>):<line>:<col>: error: ...` with the line and
+//! column 1-based within the rule text. A parse error, an analysis error (an
+//! unknown node kind / edge category / cell type / predicate, an unsafe
+//! variable, an unstratifiable negation), a program that defines no
+//! `violation` predicate, and a rule whose entry did not come from
+//! `.glia/overlay.toml` (the only place rule text is declared, 0.5.2 Q9: no
+//! write path stores one elsewhere) are [`CheckReport::errors`] rows; the
+//! rule is not counted checked. Each `violation` row, in the rules layer's
+//! rendered order, is one [`RULE`] [`Violation`]: `subject` the head values
+//! rendered (a node's qname, a string as is, an int in decimal), `file` /
+//! `line` the first node value's location, `tier` the row's, `evidence` the
+//! row's minimal derivation's leaf edges located (at most [`MAX_EVIDENCE`],
+//! `count` all of them; a row derived from no edge has none), `caveats` the
+//! coverage caveats of every edge category the row's negations read (Q5:
+//! "no edge" may be a blind extraction). Every row is listed, uncapped.
+//!
+//! Every [`Violation`] carries `blocking`: whether it fails CI. A rule's
+//! `min_tier` (DB.1: `fact` | `derived`, default [`DEFAULT_MIN_TIER`]) is the
+//! weakest tier that blocks: [`is_blocking`] is true when the violation's
+//! tier is at least as strong as its rule's [`min_tier_of`], and never for a
+//! [`HEURISTIC`] violation (0.5.2 Q2: an overlay edge, a co-change or a name
+//! guess is reported, never a CI failure). It applies to every kind:
+//! forbid_edge, no_cycle and rule alike; a reflexion divergence uses
+//! [`DEFAULT_MIN_TIER`] (the model has no per-rule gate). A non-blocking
+//! violation is reported in full; `glia check`'s exit code reads `blocking`
+//! (DB.3d).
 //!
 //! SCOPE MEMBERSHIP IS STRICT. A node is in scope `X` only when the file one
-//! [`Locator`] places it in sits under `X` on a path-segment boundary (`web`
+//! `Locator` places it in sits under `X` on a path-segment boundary (`web`
 //! holds `web/app.py`, not `webhooks/app.py`), or it is a PROJECT whose path
 //! does. A node no file places (a SQL table, a queue topic) is in no scope:
 //! the keep-unlocatable leniency of `node_in_scope` (right for filtering a
@@ -97,7 +133,7 @@
 //! | `component_path(C, Path)` | EDB: each component entry's resolved paths |
 //! | `layer_of(C, Rank, Strict)` | EDB: each layer entry's components; rank 0 is the top |
 //! | `allow(C1, C2)` | EDB: each allow entry without an error |
-//! | `located(N, F)` | EDB: the file one [`Locator`] places `N` in (strict, as forbid_edge) |
+//! | `located(N, F)` | EDB: the file one `Locator` places `N` in (strict, as forbid_edge) |
 //! | `edge(From, Category, To, E)` | EDB: every edge whose category is checked |
 //! | `in_component(N, C)` | `located(N, F), component_path(C, P), under(F, P), not shadowed(F, P)` |
 //! | `shadowed(F, P)` | `component_path(_, P2), under(F, P2), longer(P2, P)` |
@@ -136,19 +172,29 @@
 //! - [`Unmapped`]: the files holding a located MODULE / CLASS / FUNCTION /
 //!   METHOD that no component owns.
 //!
-//! Fired-on marker, one line per call (two when a rule is violated):
+//! Fired-on marker, one line per call (three when a rule is violated):
 //! `[check] rules=<R> checked=<C> violations=<V> (forbid_edge=<F> no_cycle=<N>) unchecked=<U> errors=<E>`,
 //! where `V` counts [`Violation`] records (a forbid_edge rule makes at most
-//! one, a no_cycle rule one per cycle, the reflexion model one per
-//! divergent pair) and `F` / `N` split out the forbid_edge and no_cycle
-//! ones only; when `V` > 0 a second line
+//! one, a no_cycle rule one per cycle, a rule invariant one per row, the
+//! reflexion model one per divergent pair) and `F` / `N` split out the
+//! forbid_edge and no_cycle ones only; when `V` > 0 a second line
 //! `[check] tiers fact=<F> derived=<D> heuristic=<H>` splits them by tier
-//! (CC.3) — grep `^\[check\] tiers`. A check with a model prints, before
-//! them, `[reflexion] components=<C> closed=<true|false> deps=<P>
-//! convergences=<V> divergences=<D> absences=<A> unmapped_files=<U>` (`P`
-//! counts dependent component pairs) — grep `^\[reflexion\]`.
+//! (CC.3) — grep `^\[check\] tiers` — and a third
+//! `[check] gate blocking=<B> advisory=<A>` splits them by `blocking`
+//! (`B` + `A` = `V`) — grep `^\[check\] gate`. When at least one rule
+//! invariant or transitive forbid_edge was evaluated, a last line
+//! `[rules] check invariant=<I> rows=<R> transitive=<T> hits=<H> (imports=<a> symbols=<b> mixed=<c>)`
+//! counts the rule invariants evaluated and their rows, and the transitive
+//! rules, their hits and the chains walked (DB.3b) — grep
+//! `^\[rules\] check`. The rules layer's own `[rules] prelude` / `[rules]
+//! eval` lines print during each rule's evaluation, before these. A check
+//! with a model prints, before them, `[reflexion] components=<C>
+//! closed=<true|false> deps=<P> convergences=<V> divergences=<D>
+//! absences=<A> unmapped_files=<U>` (`P` counts dependent component pairs)
+//! — grep `^\[reflexion\]`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 use glia_activation::algo::cycles::{strongly_connected, witness_cycle};
 use glia_activation::algo::{Adjacency, CategorySet, GraphSource};
@@ -158,17 +204,32 @@ use glia_code_domain::{edge_category, node_kind};
 use glia_core::{Edge, EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
 
-use crate::answers::{Locator, in_scope, project_roots};
 use crate::coverage::{CoverageNote, caveats_for};
 use crate::cycles::module_import_graph;
 use crate::external::declared::declared_constraints;
 use crate::profile::CODE_PROFILE;
+use crate::rules::facts::located_edge;
+use crate::rules::{CodeFacts, evaluate_rule};
 use crate::why::tier_of;
 
 /// [`Violation::rule_kind`] of a forbidden-edge rule.
 pub const FORBID_EDGE: &str = "forbid_edge";
 /// [`Violation::rule_kind`] of a no-cycle rule.
 pub const NO_CYCLE: &str = "no_cycle";
+/// [`Violation::rule_kind`] of one `violation` row of an invariant's `rule`
+/// (module doc "Rule invariants and min_tier").
+pub const RULE: &str = "rule";
+/// [`Violation::rule_kind`] of one hit of a transitive forbid_edge rule: a
+/// path from scope `from` through a third scope into `to` (DB.3b).
+pub const FORBID_PATH: &str = "forbid_path";
+/// The `min_tier` of a rule that sets none, and of a reflexion divergence:
+/// a [`FACT`] or [`DERIVED`] violation blocks (0.5.2 Q2).
+pub const DEFAULT_MIN_TIER: &str = DERIVED;
+/// The `output` a rule invariant's program defines: its violation rows.
+const RULE_OUTPUT: &str = "violation";
+/// The only `ConstraintRule::source` whose `rule` is evaluated: rule text is
+/// declared in `.glia/overlay.toml` and nowhere else (0.5.2 Q9).
+const RULE_SOURCE: &str = "overlay";
 /// [`Violation::severity`]: an explicit human rule is broken (an observed
 /// convention that is broken is a DIVERGENCE, LE.7's business).
 pub const VIOLATION: &str = "VIOLATION";
@@ -219,13 +280,15 @@ pub struct ViolationEdge {
 }
 
 /// One broken rule: all of a forbid_edge rule's edges, one cycle of a
-/// no_cycle rule, or one divergent component pair of the reflexion model.
+/// no_cycle rule, one `violation` row of a rule invariant, or one divergent
+/// component pair of the reflexion model.
 #[non_exhaustive]
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct Violation {
     /// The rule's id; `reflexion:<C1>-><C2>` for a divergence.
     pub rule_id: String,
-    /// [`FORBID_EDGE`], [`NO_CYCLE`] or [`DIVERGENCE`].
+    /// [`FORBID_EDGE`], [`NO_CYCLE`], [`RULE`], [`FORBID_PATH`] or
+    /// [`DIVERGENCE`].
     pub rule_kind: &'static str,
     /// `.glia/overlay.toml:<line>` of the stanza (a divergence: of C1's
     /// `[[component]]`); `None` for a cell-API rule.
@@ -234,14 +297,36 @@ pub struct Violation {
     pub severity: &'static str,
     /// forbid_edge and divergence: the strongest evidence row's tier.
     /// no_cycle: [`DERIVED`], or [`HEURISTIC`] when a hop of the witness is
-    /// (module doc "Tiers").
+    /// (module doc "Tiers"). rule: the row's tier.
     pub tier: &'static str,
+    /// Whether it fails CI: `tier` is at least as strong as its rule's
+    /// `min_tier` and is not [`HEURISTIC`] ([`is_blocking`]; module doc
+    /// "Rule invariants and min_tier"). A non-blocking violation is advisory.
+    pub blocking: bool,
     /// forbid_edge and divergence: the edges, all of them (the evidence lists
     /// at most [`MAX_EVIDENCE`]). no_cycle: the nodes (modules, for an import
     /// rule) in the cycle's strongly-connected component; the evidence is
-    /// one shortest cycle through it.
+    /// one shortest cycle through it. rule: the row's witness leaf edges,
+    /// all of them.
     pub count: usize,
     pub evidence: Vec<ViolationEdge>,
+    /// rule: the row's head values rendered (a node's qname, a string as is,
+    /// an int in decimal); forbid_path: the hit's qname. Empty (and not
+    /// serialised) for forbid_edge, no_cycle and divergence, which their edge
+    /// rows and member sets identify.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub subject: Vec<String>,
+    /// The first node of `subject`, located; `None` (not serialised) when it
+    /// has none or no file places it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// 1-based.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<i64>,
+    /// rule: the coverage caveats of every edge category the row's negations
+    /// read (Q5). Empty (not serialised) otherwise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub caveats: Vec<CoverageNote>,
 }
 
 /// Every declared rule, evaluated.
@@ -251,19 +336,24 @@ pub struct CheckReport {
     /// CONSTRAINT rules read: every entry but the reflexion model's component
     /// and layer declarations (an allow is a rule).
     pub rules: usize,
-    /// forbid_edge + no_cycle rules evaluated, plus the allows of an
-    /// evaluated model (a rule with an error is not).
+    /// forbid_edge + no_cycle rules and rule invariants evaluated, plus the
+    /// allows of an evaluated model (a rule with an error is not: a rule
+    /// invariant whose text does not parse or analyse is an error, not
+    /// checked).
     pub checked: usize,
-    /// Ids of the rules no graph query evaluates (`invariant`), in rule order.
+    /// Ids of the rules no graph query evaluates (an `invariant` without a
+    /// `rule`, a transitive forbid_edge until DB.3b), in rule order.
     pub unchecked: Vec<String>,
     /// `(entry id, message)`: a rule that could not be evaluated (an unknown
     /// edge category, a scope no node sits in, an allow naming an undeclared
-    /// component) is skipped; a model declaration in error (a layer naming an
-    /// undeclared component, a component on a path another owns) keeps the
-    /// rest of its entry. Rules first, in rule order; then the model's.
+    /// component, a rule invariant's parse / analysis / evaluation error) is
+    /// skipped; a model declaration in error (a layer naming an undeclared
+    /// component, a component on a path another owns) keeps the rest of its
+    /// entry. Rules first, in rule order; then the model's.
     pub errors: Vec<(String, String)>,
-    /// Sorted by rule id; a rule's cycles in the order of their first member.
-    /// A closed reflexion model's divergences are here too.
+    /// Sorted by rule id; a rule's cycles in the order of their first member,
+    /// a rule invariant's rows in the rules layer's rendered order. A closed
+    /// reflexion model's divergences are here too.
     pub violations: Vec<Violation>,
     /// The reflexion model, evaluated (module doc "Reflexion model"); `None`
     /// when no component is declared.
@@ -391,6 +481,7 @@ pub(crate) fn check_rules(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule
         violations: Vec::new(),
         reflexion: None,
     };
+    let mut stats = RuleStats::default();
     if !rules.is_empty() || !decls.is_empty() {
         let mut ctx = Ctx::new(merged);
         let mut model = ModelEdb::declare(&decls);
@@ -405,15 +496,27 @@ pub(crate) fn check_rules(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule
             match evaluate(&mut ctx, rule) {
                 Outcome::Unchecked => report.unchecked.push(rule.id.clone()),
                 Outcome::Error(msg) => report.errors.push((rule.id.clone(), msg)),
-                Outcome::Checked(found) => {
+                Outcome::Checked(mut found) => {
                     report.checked += 1;
+                    if is_rule_invariant(rule) {
+                        stats.invariant += 1;
+                        stats.rows += found.len();
+                    }
+                    let min_tier = min_tier_of(rule);
+                    for v in &mut found {
+                        v.blocking = is_blocking(v.tier, min_tier);
+                    }
                     report.violations.extend(found);
                 }
             }
         }
         report.errors.append(&mut model.errors);
         if !model.components.is_empty() {
-            let (reflexion, divergences) = evaluate_model(&mut ctx, model);
+            let (reflexion, mut divergences) = evaluate_model(&mut ctx, model);
+            // The model has no per-rule gate.
+            for v in &mut divergences {
+                v.blocking = is_blocking(v.tier, DEFAULT_MIN_TIER);
+            }
             report.violations.extend(divergences);
             report.reflexion = Some(reflexion);
         }
@@ -445,8 +548,65 @@ pub(crate) fn check_rules(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule
             tier(DERIVED),
             tier(HEURISTIC),
         );
+        let blocking = report.violations.iter().filter(|v| v.blocking).count();
+        eprintln!(
+            "[check] gate blocking={} advisory={}",
+            blocking,
+            report.violations.len() - blocking,
+        );
+    }
+    if stats.invariant + stats.transitive > 0 {
+        eprintln!(
+            "[rules] check invariant={} rows={} transitive={} hits={} (imports={} symbols={} mixed={})",
+            stats.invariant,
+            stats.rows,
+            stats.transitive,
+            stats.hits,
+            stats.imports,
+            stats.symbols,
+            stats.mixed,
+        );
     }
     report
+}
+
+/// What the `[rules] check` marker counts (module doc): the rule invariants
+/// evaluated and their `violation` rows; the transitive forbid_edge rules
+/// evaluated, their hits and the chains walked, by chain (`imports`,
+/// `symbols`, `mixed`), which DB.3b's evaluator adds to.
+#[derive(Default)]
+struct RuleStats {
+    invariant: usize,
+    rows: usize,
+    transitive: usize,
+    hits: usize,
+    imports: usize,
+    symbols: usize,
+    mixed: usize,
+}
+
+/// An invariant with Datalog `rule` text: evaluated by [`rule_invariant`].
+fn is_rule_invariant(rule: &ConstraintRule) -> bool {
+    matches!(rule.kind, ConstraintKind::Invariant { rule: Some(_), .. })
+}
+
+/// The weakest tier that makes `rule`'s violations block: its `min_tier`
+/// (`fact` | `derived`, validated at load by DB.1), else
+/// [`DEFAULT_MIN_TIER`]. Any other spelling, possible only in a hand-edited
+/// cell, reads as the default.
+pub(crate) fn min_tier_of(rule: &ConstraintRule) -> &'static str {
+    match rule.min_tier.as_deref() {
+        Some(FACT) => FACT,
+        Some(DERIVED) => DERIVED,
+        _ => DEFAULT_MIN_TIER,
+    }
+}
+
+/// Whether a violation of `tier` fails CI under `min_tier`: the tier is at
+/// least as strong as `min_tier`, and it is never [`HEURISTIC`] (0.5.2 Q2:
+/// a heuristic violation is reported, never blocking, whatever the gate).
+pub(crate) fn is_blocking(tier: &str, min_tier: &str) -> bool {
+    tier != HEURISTIC && tier_rank(tier) <= tier_rank(min_tier)
 }
 
 /// Sort rank of a tier, strongest first; an unknown spelling sorts last.
@@ -468,14 +628,22 @@ enum Outcome {
 fn evaluate(ctx: &mut Ctx<'_>, rule: &ConstraintRule) -> Outcome {
     // Only the kinds this module evaluates reach the category check: an
     // invariant's categories are never read.
-    // A transitive forbid_edge (DB.3b) and an invariant, with or without its
-    // Datalog `rule` (DB.3a), are listed unchecked until their evaluators land:
-    // the direct-edge walk below would under-report a transitive rule.
+    // A transitive forbid_edge (DB.3b) and an invariant without a Datalog
+    // `rule` are listed unchecked: the direct-edge walk below would
+    // under-report a transitive rule, and prose has no query.
     match &rule.kind {
         ConstraintKind::ForbidEdge {
             transitive: false, ..
         }
         | ConstraintKind::NoCycle { .. } => {}
+        ConstraintKind::Invariant {
+            rule: Some(text), ..
+        } => {
+            return match rule_invariant(ctx, rule, text) {
+                Ok(found) => Outcome::Checked(found),
+                Err(e) => Outcome::Error(e),
+            };
+        }
         _ => return Outcome::Unchecked,
     }
     let categories = match categories_of(&rule.categories) {
@@ -526,120 +694,77 @@ fn categories_of(names: &[String]) -> Result<Vec<EdgeCategoryId>, String> {
     }
 }
 
-/// Per-call node facts: every node's located file (once), the PROJECT
-/// paths, and the members of each scope a rule names.
+/// Per-call node facts: one [`CodeFacts`] (DB.2a) over the merged graph,
+/// owning the check's one [`Locator`](crate::answers::Locator), which holds
+/// every node's located file, the PROJECT paths and the members of each
+/// scope a rule names (each computed once); a rule invariant evaluates over
+/// the same facts.
 struct Ctx<'a> {
     merged: &'a MergedGraph,
-    loc: Locator<'a>,
-    /// Every node of every graph with the file the locator places it in.
-    files: HashMap<NodeId, Option<String>>,
-    /// PROJECT node -> its repo-relative path (`.` = the root).
-    projects: HashMap<NodeId, String>,
-    scopes: HashMap<String, HashSet<NodeId>>,
+    facts: CodeFacts<'a>,
     qnames: HashMap<NodeId, String>,
 }
 
 impl<'a> Ctx<'a> {
     fn new(merged: &'a MergedGraph) -> Self {
-        let loc = Locator::new(merged);
-        let path_of: HashMap<String, String> = project_roots(merged)
-            .into_iter()
-            .map(|p| (p.qname, p.path))
-            .collect();
-        let mut files: HashMap<NodeId, Option<String>> = HashMap::new();
-        let mut projects: HashMap<NodeId, String> = HashMap::new();
-        for g in &merged.graphs {
-            for n in &g.nodes {
-                if files.contains_key(&n.id) {
-                    continue;
-                }
-                files.insert(n.id, loc.file_of(n.id));
-                if g.nav.kind_by_id.get(&n.id) == Some(&node_kind::PROJECT)
-                    && let Some(p) = g.nav.qname_by_id.get(&n.id).and_then(|q| path_of.get(q))
-                {
-                    projects.insert(n.id, p.clone());
-                }
-            }
-        }
         Ctx {
             merged,
-            loc,
-            files,
-            projects,
-            scopes: HashMap::new(),
+            facts: CodeFacts::new(merged),
             qnames: HashMap::new(),
         }
     }
 
-    /// The nodes strictly in `scope`, computed once per scope.
-    fn members(&mut self, scope: &str) -> &HashSet<NodeId> {
-        if !self.scopes.contains_key(scope) {
-            let mut set = HashSet::new();
-            for (id, file) in &self.files {
-                let located = file.as_deref().is_some_and(|f| in_scope(f, scope));
-                let project = self.projects.get(id).is_some_and(|p| in_scope(p, scope));
-                if located || project {
-                    set.insert(*id);
-                }
-            }
-            self.scopes.insert(scope.to_string(), set);
-        }
-        &self.scopes[scope]
+    /// Every node of every graph with the file the locator places it in.
+    fn files(&self) -> &HashMap<NodeId, Option<String>> {
+        self.facts.files()
     }
 
-    /// The members of `scope`, or the error that names the empty scope.
-    fn scope(&mut self, scope: &str, role: &str) -> Result<HashSet<NodeId>, String> {
-        let set = self.members(scope);
+    /// PROJECT node -> its repo-relative path (`.` = the root).
+    fn projects(&self) -> &HashMap<NodeId, String> {
+        self.facts.projects()
+    }
+
+    /// The nodes strictly in `scope` (`CodeFacts::members`: literal, no label
+    /// resolution), or the error that names the empty scope.
+    fn scope(&self, scope: &str, role: &str) -> Result<Rc<HashSet<NodeId>>, String> {
+        let set = self.facts.members(scope);
         if set.is_empty() {
             return Err(format!(
                 "{role} scope `{scope}` matches no located node (no file sits under it and no PROJECT is at it)"
             ));
         }
-        Ok(set.clone())
+        Ok(set)
     }
 
     fn qname(&mut self, id: NodeId) -> String {
         if let Some(q) = self.qnames.get(&id) {
             return q.clone();
         }
-        let q = self.loc.locate(id).qname;
+        let q = self.facts.locator().locate(id).qname;
         self.qnames.insert(id, q.clone());
         q
     }
 
     /// One located evidence row: at the edge's EVIDENCE site when it names a
-    /// file, else at the `from` node. `(tier, note)` is `why::tier_of` over
-    /// the edge, computed by the caller that holds it.
+    /// file, else at the `from` node (`rules::facts::located_edge`, the row
+    /// the rules layer locates a witness edge as). `(tier, note)` is
+    /// `why::tier_of` over the edge, computed by the caller that holds it.
     fn row(
-        &mut self,
+        &self,
         from: NodeId,
         category: EdgeCategoryId,
         to: NodeId,
         ev: Option<&Evidence>,
-        (tier, note): (&'static str, Option<String>),
+        tier: (&'static str, Option<String>),
     ) -> ViolationEdge {
-        let f = self.loc.locate(from);
-        let site = ev.and_then(|e| {
-            e.file
-                .clone()
-                .map(|file| (Some(file), e.line.map(|l| i64::from(l) + 1)))
-        });
-        let (file, line) = site.unwrap_or((f.file, f.line));
-        ViolationEdge {
-            from_qname: f.qname,
-            to_qname: self.qname(to),
-            category: edge_category::name(category),
-            file,
-            line,
-            emitter: ev.map(|e| e.emitter.clone()),
-            tier,
-            note,
-        }
+        located_edge(self.facts.locator(), from, category, to, ev, tier)
     }
 }
 
 /// A [`Violation`] of `(rule id, decl)`, its evidence capped at
-/// [`MAX_EVIDENCE`].
+/// [`MAX_EVIDENCE`]. `blocking` is stamped by [`check_rules`] from the rule's
+/// `min_tier`; `subject` / `file` / `line` / `caveats` are a rule row's,
+/// set by [`rule_invariant`].
 fn violation(
     (rule_id, decl): (String, Option<String>),
     kind: &'static str,
@@ -654,14 +779,58 @@ fn violation(
         decl,
         severity: VIOLATION,
         tier,
+        blocking: false,
         count,
         evidence,
+        subject: Vec::new(),
+        file: None,
+        line: None,
+        caveats: Vec::new(),
     }
 }
 
 /// `(id, decl)` of a rule, for [`violation`].
 fn id_decl(rule: &ConstraintRule) -> (String, Option<String>) {
     (rule.id.clone(), rule.decl.clone())
+}
+
+// ============================================================================
+// rule invariants (module doc "Rule invariants and min_tier")
+// ============================================================================
+
+/// `text`, an invariant's Datalog `rule`, evaluated through the rules layer
+/// over the check's facts: one [`RULE`] [`Violation`] per `violation` row,
+/// in rendered order, or the rendered error (`<id> (<decl>):<line>:<col>:
+/// error: ...`) that skips the rule. A rule whose entry is not the overlay's
+/// is an error too (module doc).
+fn rule_invariant(
+    ctx: &Ctx<'_>,
+    rule: &ConstraintRule,
+    text: &str,
+) -> Result<Vec<Violation>, String> {
+    if rule.source != RULE_SOURCE {
+        return Err(format!(
+            "a `rule` is evaluated only when declared in .glia/overlay.toml (0.5.2 Q9); this entry's source is `{}` (the rule is skipped)",
+            rule.source
+        ));
+    }
+    let source_name = format!(
+        "{} ({})",
+        rule.id,
+        rule.decl.as_deref().unwrap_or("cell API")
+    );
+    let rows = evaluate_rule(ctx.merged, &ctx.facts, &source_name, text, RULE_OUTPUT)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let mut v = violation(id_decl(rule), RULE, r.tier, r.witness_edges, r.witness);
+            v.subject = r.subject;
+            v.file = r.file;
+            v.line = r.line;
+            v.caveats = r.caveats;
+            v
+        })
+        .collect())
 }
 
 /// Strongest tier first (so the [`MAX_EVIDENCE`] cut keeps the facts), then
@@ -778,7 +947,7 @@ fn no_cycle(
     scope: Option<&str>,
     cats: &[EdgeCategoryId],
 ) -> Result<Vec<Violation>, String> {
-    let keep: Option<HashSet<NodeId>> = match scope {
+    let keep: Option<Rc<HashSet<NodeId>>> = match scope {
         Some(s) => Some(ctx.scope(s, "no_cycle")?),
         None => None,
     };
@@ -1173,8 +1342,9 @@ fn in_component_rel(
     component_path: &BTreeMap<String, usize>,
 ) -> HashMap<NodeId, usize> {
     let mut out = HashMap::new();
-    for (id, file) in &ctx.files {
-        let place = ctx.projects.get(id).or(file.as_ref());
+    let projects = ctx.projects();
+    for (id, file) in ctx.files() {
+        let place = projects.get(id).or(file.as_ref());
         if let Some(c) = place.and_then(|p| owner(component_path, p)) {
             out.insert(*id, c);
         }
@@ -1205,7 +1375,7 @@ fn owner(component_path: &BTreeMap<String, usize>, path: &str) -> Option<usize> 
 
 /// `unmapped(N, F) :- located(N, F), not in_component(N, _).`
 fn unmapped_rel(ctx: &Ctx<'_>, in_component: &HashMap<NodeId, usize>) -> HashMap<NodeId, String> {
-    ctx.files
+    ctx.files()
         .iter()
         .filter(|(id, _)| !in_component.contains_key(id))
         .filter_map(|(id, f)| f.clone().map(|f| (*id, f)))
@@ -1543,11 +1713,55 @@ mod tests {
         assert_eq!(t, [FACT, DERIVED, HEURISTIC, "other"]);
     }
 
-    /// DB.1's interim posture: a transitive forbid_edge and a rule invariant
-    /// (overlay version 2) are listed unchecked - never judged by the direct
-    /// walk - while the direct rule over the same scopes still is.
+    /// The one rule a CONSTRAINT payload of one entry holds.
+    fn one_rule(entry: &str) -> ConstraintRule {
+        let payload = glia_core::CellPayload::Json(format!("[{entry}]"));
+        glia_code_domain::external_inputs::parse_constraints(&payload)
+            .pop()
+            .expect("a well-formed entry")
+    }
+
     #[test]
-    fn transitive_forbid_and_rule_invariant_are_unchecked() {
+    fn heuristic_never_blocks_and_min_tier_gates_the_rest() {
+        for min in [FACT, DERIVED] {
+            assert!(!is_blocking(HEURISTIC, min), "Q2: {min}");
+            assert!(is_blocking(FACT, min), "a fact always blocks: {min}");
+        }
+        assert!(is_blocking(DERIVED, DERIVED));
+        assert!(
+            !is_blocking(DERIVED, FACT),
+            "min_tier = fact: derived is advisory"
+        );
+        assert!(
+            !is_blocking(HEURISTIC, HEURISTIC),
+            "no gate admits a heuristic"
+        );
+        assert!(
+            !is_blocking("other", DERIVED),
+            "an unknown tier is never stronger"
+        );
+    }
+
+    #[test]
+    fn min_tier_reads_the_rule_or_the_default() {
+        let mut r = one_rule(r#"{"id":"r","kind":"no_cycle","source":"overlay"}"#);
+        assert_eq!(r.min_tier, None);
+        assert_eq!(min_tier_of(&r), DEFAULT_MIN_TIER);
+        assert_eq!(DEFAULT_MIN_TIER, DERIVED);
+        r.min_tier = Some("fact".into());
+        assert_eq!(min_tier_of(&r), FACT);
+        r.min_tier = Some("derived".into());
+        assert_eq!(min_tier_of(&r), DERIVED);
+        r.min_tier = Some("heuristic".into());
+        assert_eq!(min_tier_of(&r), DEFAULT_MIN_TIER, "a hand-edited spelling");
+    }
+
+    /// A transitive forbid_edge is listed unchecked until DB.3b - never
+    /// judged by the direct walk - while the direct rule over the same scopes
+    /// still is, and a rule invariant (overlay version 2) is evaluated: its
+    /// prelude predicate has no row here, so it is checked and clean.
+    #[test]
+    fn transitive_forbid_is_unchecked_and_rule_invariant_is_evaluated() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let overlay = "version = 2
 
@@ -1590,17 +1804,35 @@ rule = \"violation(r) :- unhandled_route(r).\"
         }
         let r = crate::generate_one(tmp.path().to_str().expect("utf-8")).expect("generate_one");
         let report = check(&r.merged);
-        assert_eq!((report.rules, report.checked), (3, 1), "{report:?}");
-        let mut unchecked = report.unchecked.clone();
-        unchecked.sort_unstable();
-        assert_eq!(unchecked, ["rule", "transitive"]);
+        assert_eq!((report.rules, report.checked), (3, 2), "{report:?}");
+        assert_eq!(report.unchecked, ["transitive"]);
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         let ids: Vec<&str> = report
             .violations
             .iter()
             .map(|v| v.rule_id.as_str())
             .collect();
-        assert_eq!(ids, ["direct"], "only the direct rule is evaluated");
+        assert_eq!(ids, ["direct"], "no route, so the rule has no row");
+        assert!(report.violations[0].blocking, "a fact import blocks");
+    }
+
+    /// Rule text is declared only in the overlay (Q9): a `rule` on an entry
+    /// of another source (no write path stores one) is an error, never run.
+    #[test]
+    fn rule_from_another_source_is_an_error() {
+        let empty = MergedGraph::new(Vec::new());
+        let ctx = Ctx::new(&empty);
+        let rule = one_rule(
+            r#"{"id":"api-rule","kind":"invariant","source":"api","text":"t","rule":"violation(r) :- node(r, \"ROUTE\")."}"#,
+        );
+        assert!(is_rule_invariant(&rule), "{rule:?}");
+        assert!(matches!(
+            evaluate(&mut Ctx::new(&empty), &rule),
+            Outcome::Error(_)
+        ));
+        let err = rule_invariant(&ctx, &rule, "violation(r) :- node(r, \"ROUTE\").")
+            .expect_err("not the overlay's");
+        assert!(err.contains("source is `api`"), "{err}");
     }
 
     #[test]

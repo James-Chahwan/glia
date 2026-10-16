@@ -26,9 +26,28 @@ FILES = (
      'text = "charges are idempotent"\n'),
 )
 
+# DB.3a: a version-2 invariant whose Datalog `rule` names every pkg/a.py
+# FUNCTION nothing calls; b.py calls `used`, so `orphan` is the one row.
+RULE_FILES = (
+    ("pkg/pyproject.toml", '[project]\nname = "pkg"\n'),
+    ("pkg/a.py", "def used():\n    return 1\n\n\ndef orphan():\n    return 2\n"),
+    ("pkg/b.py", "from pkg.a import used\n\n\ndef main():\n    return used()\n"),
+    (".glia/overlay.toml", 'version = 2\n\n[[constraint]]\nid = "a-all-called"\nkind = "invariant"\n'
+     'scope = "pkg"\ntext = "every pkg/a.py function is called"\n'
+     'rule = "violation(f) :- node(f, \\"FUNCTION\\"), in_scope(f, \\"pkg/a.py\\"), !called(f). '
+     'called(f) :- edge(_, f, \\"CALLS\\")."\n'),
+)
+
 REPORT_KEYS = ["rules", "checked", "unchecked", "errors", "violations", "reflexion"]
-VIOLATION_KEYS = ["rule_id", "rule_kind", "decl", "severity", "tier", "count", "evidence"]
+VIOLATION_KEYS = ["rule_id", "rule_kind", "decl", "severity", "tier", "blocking", "count", "evidence"]
+RULE_VIOLATION_KEYS = VIOLATION_KEYS + ["subject", "file", "line", "caveats"]
 EDGE_KEYS = ["from_qname", "to_qname", "category", "file", "line", "emitter", "tier", "note"]
+
+
+def write_tree(root: pathlib.Path, files) -> None:
+    for rel, src in files:
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(src)
 
 
 def main() -> int:
@@ -36,15 +55,14 @@ def main() -> int:
     c.check("check signature", params(rg.PyGraph.check) == [], params(rg.PyGraph.check))
     with tempfile.TemporaryDirectory(prefix="glia-surface-check-") as tmp:
         root = pathlib.Path(tmp) / "shop"
-        for rel, src in FILES:
-            (root / rel).parent.mkdir(parents=True, exist_ok=True)
-            (root / rel).write_text(src)
+        write_tree(root, FILES)
         g = rg.generate(str(root))
 
         report, err = stderr_of(g.check)
         c.check("marker", "[check] rules=3 checked=2 violations=2 (forbid_edge=1 no_cycle=1) "
                 "unchecked=1 errors=0" in err, err[-400:])
         c.check("tiers marker (CC.3)", "[check] tiers fact=1 derived=1 heuristic=0" in err, err[-400:])
+        c.check("gate marker (DB.3a)", "[check] gate blocking=2 advisory=0" in err, err[-400:])
         c.check("check -> dict", type(report) is dict, type(report))
         c.check("report keys in engine field order", list(report) == REPORT_KEYS, list(report))
         c.check("counts are ints", type(report.get("rules")) is int and report.get("rules") == 3
@@ -61,6 +79,8 @@ def main() -> int:
         c.check("violation keys in engine field order", list(cyc) == VIOLATION_KEYS, list(cyc))
         c.check("cycle tier derived", cyc.get("tier") == "derived" and cyc.get("severity") == "VIOLATION",
                 cyc)
+        c.check("derived and fact violations block (DB.3a)",
+                [v.get("blocking") for v in rows] == [True, True], [v.get("blocking") for v in rows])
         c.check("cycle decl", cyc.get("decl") == ".glia/overlay.toml:10", cyc.get("decl"))
         w = cyc.get("evidence", [])
         c.check("2-hop witness a -> b -> a",
@@ -77,6 +97,29 @@ def main() -> int:
         c.check("evidence rows carry why's tier (CC.3)",
                 [(e.get("tier"), e.get("note")) for e in fe.get("evidence", [])] == [("fact", None), ("fact", None)]
                 and [h.get("tier") for h in w] == ["fact", "fact"], (fe.get("evidence"), w))
+
+    with tempfile.TemporaryDirectory(prefix="glia-surface-check-rule-") as tmp:
+        root = pathlib.Path(tmp) / "lib"
+        write_tree(root, RULE_FILES)
+        g = rg.generate(str(root))
+        report, err = stderr_of(g.check)
+        c.check("rule marker (DB.3a)",
+                "[rules] check invariant=1 rows=1 transitive=0 hits=0 (imports=0 symbols=0 mixed=0)" in err,
+                err[-600:])
+        c.check("rule invariant checked", (report.get("rules"), report.get("checked"), report.get("unchecked"),
+                                           report.get("errors")) == (1, 1, [], []), report)
+        rows = report.get("violations", [])
+        c.check("one rule violation", [v.get("rule_kind") for v in rows] == ["rule"], rows)
+        rv = rows[0] if rows else {}
+        c.check("rule violation keys in engine field order", list(rv) == RULE_VIOLATION_KEYS, list(rv))
+        c.check("rule subject is the uncalled function's qname", rv.get("subject") == ["pkg::a::orphan"], rv)
+        c.check("rule violation located, 1-based int line",
+                rv.get("file") == "pkg/a.py" and type(rv.get("line")) is int and rv.get("line") >= 1, rv)
+        c.check("a fact row blocks", rv.get("tier") == "fact" and rv.get("blocking") is True, rv)
+        c.check("no edge derives it", rv.get("evidence") == [] and rv.get("count") == 0, rv)
+        c.check("the negation's CALLS caveats (Q5)",
+                bool(rv.get("caveats")) and all(n.get("edge_category") in ("CALLS", "*")
+                                                for n in rv.get("caveats", [])), rv.get("caveats"))
     return c.done()
 
 
