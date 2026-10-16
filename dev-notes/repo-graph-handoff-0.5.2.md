@@ -1,0 +1,432 @@
+# repo-graph handoff - glia 0.5.2 (the four bets, 2026-10-16)
+
+**Status: held: repo-graph upgrades from 0.5.1 straight to 0.5.3; this file is the 0.5.2 half of that
+handoff.** James, 2026-10-16: *"Hold repo graph for post 0.5.3 better to do all changes at once"*. This
+file is committed and not sent. 0.5.3's release docs packet merges it with the 0.5.3 half into one
+combined handoff. So that the merge needs no re-derivation, every row below names the glia packet and
+commit, the change (old -> new) and the wrapper site, and the pin in section 1 is the one the combined
+handoff replaces with 0.5.3's.
+
+The fifth glia -> repo-graph handoff, after `repo-graph-handoff-0.5.1.md`. 0.5.2 is "the four bets":
+153 packets in `dev-notes/leap-052-packets.json` (plan: `dev-notes/next-leap-0.5.2.md`), 151 landed in
+waves W0-W13 on glia's local `main` since v0.5.1 (`84e2e71`); W14 is the two docs packets (DZ.1 the
+release docs, DZ.2 these handoffs). Groups: DA the `glia-rules` Datalog crate, DB rules in the engine
+(check, `glia query`, GQL), DC `glia watch` and `WatchSession`, DD cross-repo identity (SAME_AS), DE
+Engram anchors and engine hygiene, DF the 0.5.1 language deferrals, DG / DH the rest of the coverage
+matrix. Breaks were allowed when a packet declared them, and **consumers pin the release exactly**.
+
+Sources, in order of authority:
+- the landed code at glia HEAD `12f58844` (the W13 close-out `f468af11` plus two plan commits) and the
+  pyo3 / CLI surface snapshots, diffed `v0.5.1..HEAD -- py/api_surface/ cli/surface/` (section 5 lists
+  the diff);
+- each packet's landed `breaking` report and commit body. Where a report differs from its spec, the
+  report wins, and where a report is wrong about the wrapper this doc says so;
+- the specs' `breaking` blocks in `dev-notes/leap-052-packets.json`, and the routed handoff paragraphs
+  in `dev-notes/leap-052-corrections.json`.
+
+Every wrapper `file:line` was read at repo-graph HEAD `0f8ecfa` (mcp-repo-graph 0.5.2 on
+`glia-py==0.5.1`), read-only. The working tree also holds 12 modified and 4 untracked paths (a one-shot
+CLI, `repo_graph/cli.py`); its `server.py` change sits inside `main()` after line 1122, so every
+`server.py` line number below line 1122 is the same in the working tree. Short names: `server.py`,
+`graph.py`, `watcher.py`, `init.py` live in `repo_graph/`. Packet ids are glossed in words; the hash
+after an id is the glia commit that landed it.
+
+---
+
+## 0. TL;DR
+
+**The wrapper runs on 0.5.2 without a code change.** Every pyo3 call it makes still binds: `generate`,
+`save_to_default`, `default_gmap_dir`, `version`, `load_from_gmap`, `activate`, `dense_text`,
+`dense_text_subset`, `resolve`, `node_cells`, `governing_docs`, `coverage`, `node_count`, `edge_count`,
+`cross_edge_count`, `nodes_json`, `bfs`, `predecessors`, `shortest_path`, `kind_names`,
+`category_names`, `cell_type_names`, `entry_kinds` are unchanged in `py/api_surface/`; `find`,
+`blast_radius`, `cross_stack_trace` and `entry_flows` gained `collapse=True` as their LAST keyword, so
+the wrapper's positional calls (`graph.py:155`, `server.py:437`, `:520`, `:608`, `graph.py:69`) bind as
+before. One registry id was allocated: edge category 37, SAME_AS (D0.1, `9d180f01`). No node kind or
+cell type was added.
+
+What repo-graph has to do, in the combined 0.5.3 handoff:
+1. **Pin exactly** (section 1): `glia-py==0.5.2` for this half; the combined handoff pins 0.5.3.
+2. **Adopt `WatchSession`** (Q14, section 3): one session per repo instead of a full
+   `generate(incremental=True)` per change in `_watch_rebuild` (`server.py:165-172`). Seven steps,
+   with the measured memory cost.
+3. **Optional renders** (section 2): the `identity` of a collapsed row and a hop's `to_identity`;
+   `external` on a dialled client in `read`.
+
+What changes under the wrapper with no code change: answers fold FACT / DERIVED identity classes into
+one row (in a single-repo MCP graph only contract-op, contract-route and workspace-package classes
+exist); SHARES_DEPENDENCY is no longer emitted; generated gRPC stubs stop "calling" every service; many
+more edges in Python, TS, Go, Dart, Swift, C/C++, Rust, Scala, Ruby, PHP, Elixir and Clojure repos; the
+coverage footer's text; new stderr lines, among them one `[memory] malloc_trim` line per dropped
+PyGraph, which makes `_release_freed_memory` (`server.py:120-134`) redundant (keeping it is harmless).
+
+New primitives worth an MCP mode (section 5): `PyGraph.query` / `query_gql` (a candidate single
+`query` tool for P4), `PyGraph.identity_classes`, `glia_py.WatchSession`.
+
+Bump order. Nothing is pushed before James says go, and 0.5.2 stays unreleased while James tests it
+(`12f58844`):
+1. **glia (James):** bump `[workspace.package].version` (`Cargo.toml:74`), `py/pyproject.toml:7` and
+   the excluded `engram-export/Cargo.toml:3` from 0.5.1 to 0.5.2 together, tag `v0.5.2`, let
+   `wheels-py.yml` publish `glia-py` 0.5.2.
+2. **repo-graph:** held; it takes 0.5.2 and 0.5.3 together from the combined handoff.
+
+Tell builds apart with `glia_py.build_stamp()`: the W13 close-out wheel reads `0.5.1+p0c104fe6f8df1704`
+(the version field still says 0.5.1 before the bump); the released wheel reads `0.5.2+p<hash>`.
+
+## 1. The pin
+
+| file:line (HEAD `0f8ecfa`) | now | change to |
+|---|---|---|
+| `pyproject.toml:31` | `"glia-py==0.5.1",  # glia pins consumers exactly per release (0.5.1 breaks the graph contents)` | `"glia-py==0.5.2",` (the combined handoff: `==0.5.3`) |
+| `CLAUDE.md:24` | runtime deps `glia-py==0.5.1` | the same pin |
+| `CLAUDE.md:105-109` | "glia 0.5.1 boundary notes", "Exact pin `glia-py==0.5.1`" | a 0.5.2 (0.5.3) boundary note from sections 2-3 |
+| `README.md:26-30` | "engine (glia 0.5.1, pinned exactly) ... Reinstall the CLI from the `v0.5.1` tag" | the new tag |
+
+`tests/test_packaging.py` already counts `==` as capped (`CLAUDE.md:109`), so the pin needs no test
+change. The exact pin also means the published wrapper does not pick up glia-py 0.5.2 on its own.
+
+**Mixed versions while repo-graph is held.** FORMAT_VERSION stays 3, so a 0.5.1 layout is not an old
+format, but its build stamp differs: whichever of the MCP server (glia-py 0.5.1) and a 0.5.2 `glia`
+CLI (`glia build`, the `install-hooks` hooks, `glia watch`) loads the other's `.glia/graph/` rebuilds it
+first (`[gmap] rebuilt <dir> (written by another glia build (...))`), on every alternation. And a 0.5.1
+engine ignores a version-2 `.glia/overlay.toml` whole (DB.1, row 9), so the MCP graph then lacks that
+file's entrypoints, wrappers and edges. Use one glia version per repo during the hold.
+
+## 2. Breaks that reach the wrapper
+
+Every row names the glia packet and commit, what changed (old -> new), and the wrapper site. None asks
+for a code edit; rows 2-4 and 15 offer an optional render.
+
+| # | packet (commit) | old -> new | wrapper site and action |
+|---|---|---|---|
+| 1 | D0.1 SAME_AS allocated as edge category 37 (`9d180f01`); DD.5 the identity resolver emits it (`1b631092`) | `category_names()` 36 -> 37 rows. SAME_AS cross edges (EVIDENCE emitter `resolver:identity`, rule `package_name` / `manifest_name` / `message_fqname` / `contract_op` / `contract_route` / `scip_symbol`, optionally `/diverged`; FACT rules Strong, DERIVED Medium; DD.6's HEURISTIC `body_hash` / `path_suffix/diverged` Weak) join each member to the class centre, the least (qname, kind, first graph index). A single repo gains them only for contract-op classes (with `contract_route`) and workspace-package classes (`manifest_name`). A merge of quokka-stack + quokka_web prints `[identity] classes=94 edges=134 diverged=0 package_name=17 manifest_name=0 message_fqname=0 contract_op=39 contract_route=38` (DD.5), and `glia identity` counts 17 FACT + 39 DERIVED classes once overlapping op and route classes join (DD.15). `why` / `check` tier them by rule, note `identity class (<rule>[, diverged])`. | `graph.py:22` builds `CATEGORY_NAMES` by name: `same_as`. `_MECH_ICON` (`server.py:498`) has no entry, so a SAME_AS hop renders with the default arrow. No change. |
+| 2 | DD.9 find collapses identity classes (`acd819ef`) | a FACT / DERIVED class is one row (the best-ranked member) plus `identity` {`tier`, `rules`, `diverged`, `also_in`: [{`repo`, `qname`, `file`, `line`}]}; before, one row per member. Rows outside a class are byte-identical (the key is absent). `PyGraph.find(query, top_k=20, kinds=None, scope=None, collapse=True)`; `glia find --no-collapse`. | `graph.py:155` `find(query, top_k)` binds. `find_nodes` maps `r["id"]`, which is the shown member. **Optional:** `_render_located` (`server.py:326`) can print `also in: <repo> <file>:<line>` from `identity.also_in`. |
+| 3 | DD.10 blast radius walks the identity quotient (`1604b425`) | a walk class (manifest_name, message_fqname, contract_op, contract_route, scip_symbol) is one node in the BFS and the PPR, so **scores move** on a graph with walk classes; a FACT / DERIVED class is one row with `identity`; two seeds in one walk class are one seed. `blast_radius(..., scope=None, collapse=True)`; `glia blast-radius --no-collapse`. | `server.py:437` `blast_radius(names, dir_engine, depth, None, live_only)` binds. Rows may gain `identity` (render as in row 2). |
+| 4 | DD.11 trace and flows walk the quotient (`6938c604`) | a class is crossed at zero hops; paths, ranks and flow rows change when walk classes exist; two entries in one walk class are one flow; a hop into a FACT / DERIVED class gains `to_identity`. `cross_stack_trace(feature, depth=6, to=None, max_paths=10, collapse=True)`, `entry_flows(depth=6, collapse=True)`; `glia trace` / `glia flows` `--no-collapse` (on `flows` it conflicts with `--features` / `--out`); the trace table's location cell ends `(also in: ...; diverged)`. | `server.py:520`, `:608` and `graph.py:69` bind. `graph.py:74-77` `flows` keys by `key` and already collapsed duplicates. **Optional:** `_render_hop` (`server.py:538`) can show `to_identity.also_in`. |
+| 5 | DD.12 tests-for (`5e293e54`), DD.13 serves (`da4e9857`), DD.14 arch (`1934981b`), DD.15 diff-impact labels (`9262a597`) | `tests_for` / `tests_for_diff` / `tests_for_rev`, `serves`, `service_map` gain `collapse=True` (last); test rows gain `identity`, serves rows `identity` / `handler_identity`; `service_map` counts a SAME_AS class once per service pair (from <= to, even with `collapse=False`) and class-mapped endpoint pairs once (two OpenAPI copies of one route: DOCUMENTS count 2 -> 1); under per-repo keying an unlocated SAME_AS member (a PACKAGE_DEP) is placed in its repo's service for links only (Kina + lapse: 5 -> 55 SAME_AS links, unplaced 72 -> 22). `diff_impact` / `diff_impact_vs_rev` rows' `identity.also_in[].repo`: `repo#<id % 1000>` -> the build's repo label. `timeline_history`'s unknown-symbol suggestions stay raw (two members of one class are two suggestions). | the wrapper calls none of these (grep of `repo_graph/`: 0 hits). |
+| 6 | DD.16 SAME_AS stars replace SHARES_DEPENDENCY and the message half of SHARES_SCHEMA (`14c6ae40`) | SHARES_DEPENDENCY (31) is never emitted (a `package_name` SAME_AS star per shared package); SHARES_SCHEMA (16) is never emitted between MESSAGE_TYPEs (a `message_fqname` star per shared message; CLASS / INTERFACE / STRUCT SHARES_SCHEMA stay). The `[schema-link]` stderr line is gone; `[passes] domain=code resolve=14` (0.5.1: 15; DD.5's identity added one, DD.16 removed `package` and `message_schema`). | the single-repo MCP graph never had either category; a merge shows SAME_AS in their place, rendered by name. No change. |
+| 7 | DE.11 the 0.5.0 pattern aliases removed (`a7f2c70a`) | `PyGraph.patterns_experimental` and `glia_py.patterns_vs_rev_experimental` raise AttributeError (were DeprecationWarning aliases); `glia patterns --experimental` exits 2 | the wrapper calls neither (grep: 0 hits) |
+| 8 | DE.10 freed heap released when a PyGraph drops (`4f1d2dea`) | each dropped PyGraph runs glibc `malloc_trim(0)` and prints `[memory] malloc_trim site=pygraph_drop rss_mb=<before>-><after>` (Linux glibc only; `GLIA_MALLOC_TRIM=0` opts out). The rebuild-and-swap pattern stops creeping: glia, VmRSS rebuild 15 minus rebuild 1, `+607 / +635 / +591 / +629 MB` on the W0 HEAD wheel -> `-139 / -127 / -160 / -155 MB` with DE.10 (grpc-go `+297 / +258 / +340` -> `-49 / -52 / -46`). | `_release_freed_memory` (`server.py:120-134`, called at `:161`) is redundant on glia >= 0.5.2; it runs after the engine's trim and finds little. Keep or drop it. The server relays one more stderr line per swap. |
+| 9 | DB.1 overlay `version = 2` (`00177a71`) | `[[constraint]]` gains `rule` (an invariant's Datalog text), `transitive` + `via` (forbid_edge) and `min_tier` (`fact` / `derived`). **A 0.5.1 glia ignores a version-2 overlay whole.** The cell API refuses any CONSTRAINT entry carrying `rule`: `glia cell set` exits 2 and writes nothing, a `.glia/cells.jsonl` row is rejected, pyo3 `set_cell` / `write_cell` refuse it. Overlay error text: "this glia reads version 1" -> "this glia reads versions 1 and 2". | the wrapper writes no cell (grep: 0 hits for `set_cell` / `write_cell`). Mixed versions: section 1. |
+| 10 | DB.3a rule invariants and the min_tier gate (`333ec252`), DB.3b transitive forbid (`bda10135`), DB.3d check's rendering and exit (`afcea62d`) | `check()` violations gain `blocking` (after `tier`) and, on the new rule kinds `rule` / `forbid_path`, `subject` / `file` / `line` / `caveats`. An invariant with `rule` is evaluated (was unchecked); a `transitive = true` forbid_edge reports one `forbid_path` violation per hit. A violation weaker than its rule's `min_tier` (default derived) is advisory, never blocking. **`glia check` exits 1 only on a blocking violation** (was: any violation); the summary reads `- violations: V (blocking B, advisory A)`; new stderr `[check] gate blocking=<B> advisory=<A>` and `[rules] check ...`. | the wrapper calls neither `check` nor `glia check` (grep). A CI job that gates on `glia check --json` should read `blocking`. |
+| 11 | DB.3c review reads min_tier (`dd71fc94`) | `review_vs_rev()["blocking"]` and `glia review`'s exit 1 need a new violation at or above its rule's min_tier (a heuristic-only new violation no longer fails); rule / forbid_path violations are classed new / resolved by `subject`; the markdown headline gains ` (<A> advisory)` when A > 0, `### New violations (blocking)` lists only blocking ones and a new `### New violations (advisory: below the rule's min_tier)` section lists the rest; the impact `also_in` repo is a label. | the wrapper does not call review |
+| 12 | DB.4 gaps `rotted_rule` (`50d22541`) | `gaps::CATEGORIES` 12 -> 13 (`rotted_rule`, after `redundant_rule`: a `[[constraint]]` whose `rule` this glia can no longer read, a FACT row); `skipped` with no roots lists it; the `[gaps] rows=` marker gains `rotted_rule=<n>`; `glia gaps --category` / `glia overlay propose --category` accept it; `overlay_accept(remove=)` / `glia overlay accept --remove` take its ids. Row shape unchanged. | the wrapper calls neither `gaps` nor `overlay_*` (grep: 0 hits) |
+| 13 | DB.9a rules through the overlay loop (`fb22da3d`), DB.9b try judges rules by the check delta (`48a94843`), DB.9c try shows the rule part (`521a1b90`) | a candidate may hold `[[constraint]]` rules (handles `constraint#<n>`); `[overlay] candidate` / `[overlay] accept` markers gain ` constraint=<n>`; new `[overlay] try-rules` line; `overlay_try`'s dict gains optional `rules` and per-stanza `rule` / `rules`; a graph stanza that adds or hides a declared rule's violation is `review` (was `keep`); the verdict line becomes `verdict: <v> - graph part <g> (<why>), rule part <rv>` when a rule part exists; a rule that does not validate is refused (`ValueError` in py, exit 1). accept raises a file to `version = 2` only when a written rule needs it, and a 0.5.1 glia ignores a file so raised. | the wrapper calls no `overlay_*` (grep: 0 hits). A future overlay mode reads `verdict` and the rule part. |
+| 14 | DF.21 DF close-out caveats (`9e57112a`), DF.22c concrete overrides (`8a4b6557`), DH.14 PHP heritage (`a08fc669`) | `coverage()` note text changes for swift / dart / c_cpp CALLS, c_cpp IMPORTS, go HANDLED_BY, `*` QUEUE_FLOWS (Pub/Sub), `*` GRAPHQL_CALLS / WS_CONNECTS / GRPC_CALLS and `*` HANDLED_BY (queue callbacks): row count, order and keys unchanged (DF.21). A TS repo gains a typescript CALLS row (DF.22c). The php IMPLEMENTS row is gone and the php INHERITS_FROM note becomes the residual (traits and enum methods are not nodes, last-segment binding) (DH.14). | `_coverage_note` (`server.py:1008-1028`) prints `recs[:8]` capped at 200 characters: the orient blind-spots footer shows the new text, and on TS repos the new row may enter the eight. No change. |
+| 15 | DF.8 external WS / gRPC / GraphQL client sites marked (`f1de14d9`), DF.10 they say so (`1f150479`) | the `ENDPOINT_HIT` of a WS_CLIENT / GRPC_CLIENT / GRAPHQL_OPERATION site gains a trailing `"external":true` when every host is public and unconfigured (`{"via":"ws","host":"stream.binance.com","external":true}`); a gRPC host carries its port (`geocoder.googleapis.com:443`). Such a client gains ORIGIN `{"provenance":"external"}`, `effects` / `serves` rows name it in `external_hosts`, and `glia gaps` no longer lists it as a `suspected_edge` orphan. | **Correction to DF.8's note** ("`_cell_text` and the read footer render `external`"): `_dial_text` (`server.py:724-739`) handles every payload with `via` and renders only `host (via)`, so `read` shows `dials: stream.binance.com (ws)` with no external mark. **Optional:** append ` external` when `data.get("external")`. |
+| 16 | DF.20 TS endpoint bases held in a class member or a config const fold (`7d2f16a2`) | `ENDPOINT_HIT` gains a trailing `"alias":"this.<m>"` beside the substituted `template` / `folded_from` / `host` | `_cell_text` (`server.py:678-721`) prints the first six fields (method, path, file, line, col, confidence), so `read` is unchanged |
+| 17 | DF.14 GCP Pub/Sub subscription -> topic binding from Terraform (`3b271bf4`) | `google_pubsub_topic` / `google_pubsub_subscription` INFRA_RESOURCE nodes carry a second CODE cell, Json `{"pubsub":"topic","name":..}` / `{"pubsub":"subscription","name":..,"topic":..}` (or `topic_ref`), after the text CODE cell; new QUEUE_FLOWS (rule `binding`, at most Medium) | `_READ_CELL_TYPES` excludes CODE, so `read` is unchanged |
+| 18 | DF.19 OpenAPI server bases in the contract link (`61de0c5b`) | `spec_status` pairing gains `server_base` / `annotated_base` (`implemented (server_base, <conf>)`); an op of a swaggo repo with one `@BasePath` gains ORIGIN `annotated_base` / `annotated_at`; a guessed prefix pair to several routes keeps only the exact route under the base (quokka: 180 -> 178 DOCUMENTS) | the wrapper does not call `spec_status`; `governing_docs` (`server.py:777`) reaches a swagger op through the exact base |
+| 19 | DE.1 graph content stops depending on the RepoId (`98650a9c`) | an ambiguous backticked doc mention binds the least (qname, kind, graph index) candidate instead of the lowest NodeId: such a DOCUMENTS edge can move once at the upgrade (one copy, before -> after: Kina 4, glia 159, quokka-stack 127 edges moved) | `_governing_docs_note` (`server.py:773`) may name a different section for such a symbol. No change. |
+| 20 | DE.7 generated-code provenance (`db774107`) | nodes of a file whose head carries a generator header, or named `.g.dart` / `.freezed.dart` / `.gr.dart` / `.mocks.dart` / `.g.cs` / `.designer.cs`, gain ORIGIN `generated`; `.pbgrpc.dart` / `_pb.js` / `_grpc_pb.js` / `_pb.d.ts` gain `generated_proto`. `hotspots` and `patterns` drop them. The `[provenance]` line's `generated=<n>` becomes `generated=<n> (name=<a> banner=<b> qname=<c>)` | the server parses no stderr. No change. |
+| 21 | DE.9 requirements.txt / Pipfile root a Python project (`e0370f74`), DG.12 sbt sub-projects (`ff881e56`) | new PROJECT nodes, so `project_roots()` / `glia projects` / `glia arch` rows change and `--scope` accepts the new labels; a `[[project]]` stanza at a root labelled by its directory now gives that root its declared label (`[roots] declared=.. relabelled=<r>`) | the wrapper's `refresh` / `orient` print no project list. No change. |
+| 22 | D0.2 the `glia-rules` crate, the one Cargo.lock change (`35cfec86`), and every packet that edits a hashed source | PARSER_STAMP / BUILD_STAMP move, so every parse cache reparses and every `.glia/graph/` layout rebuilds once at the upgrade | the first `load_from_gmap` (`server.py:190`) or `refresh` is a full build |
+
+## 3. Adopt `WatchSession` (Q14)
+
+Leap doc section 0.1, Q14: "repo-graph adopts `WatchSession`: yes, a handoff item for its session".
+What the wrapper does today: `start_watcher(REPO_PATH, _watch_rebuild)` (`server.py:1143`) debounces
+watchdog write events (`watcher.py:54-77`, `DEBOUNCE_SEC = 0.3`) into `_watch_rebuild()`
+(`server.py:165-172`), which calls `_build_graph(REPO_PATH, incremental=True)` (`server.py:137-162`): a
+whole `generate` (every file walked, unchanged files' parses from the cache, every group rebuilt, every
+pass rerun), then `save_to_default` on every event batch, then the swap and `_release_freed_memory()`.
+
+`glia_py.WatchSession` (DC.9, `902c5456`, over `glia_engine::watch`, DC.7a-c `b5b4fcc2` / `d30fc67b` /
+`9bbf002c`) holds the walk table, the parse cache, DC.4's graft memos and each language group's last
+build in the process. `apply(paths)` re-reads only the named paths and rebuilds only the groups whose
+inputs changed (early cutoff on a per-group fingerprint), and its output equals a clean build byte for
+byte (`engine/tests/watch_parity.rs`, DC.10a / DC.10b). The surface (`py/api_surface/watch.txt`):
+
+```
+glia_py.WatchSession(repo, overlay=True)
+WatchSession.apply(paths) -> dict          # {seq, files {added, modified, removed, reparsed, reused},
+                                           #  groups_rebuilt, full_rebuild, total_nodes, total_edges,
+                                           #  counts, nodes, edges, phase_ms}
+WatchSession.poll() -> dict | None         # its own stat scan, then apply; None when nothing changed
+WatchSession.snapshot() -> PyGraph         # an independent copy; later updates never change it
+WatchSession.persist() -> None             # <repo>/.glia/graph/ (writer `watch`) + parse_cache.bin
+```
+
+The seven steps:
+
+1. **Open one session per repo, off the request path.** Where the watcher starts (`main()`,
+   `server.py:1141-1144`), open `glia_py.WatchSession(REPO_PATH)` on a background thread, so
+   `mcp.run()` is not delayed; the first tool calls keep using `get_graph()`'s `load_from_gmap`
+   (`server.py:175-195`). Keep `overlay=True` (the default): `persist()` refuses an `overlay=False`
+   session with `ValueError`, the rule `save_to_default` already applies. Opening loads
+   `<repo>/.glia/graph/parse_cache.bin` once and builds once (DC.9: glia 2.18 s, grpc-go 1.37 s); it
+   raises `ValueError` when the path is not a directory. `[watch] open repo=.. files=.. groups=..
+   nodes=.. edges=.. took=..` and `[watch] session repo=<repo> overlay=true surface=py` go to stderr.
+2. **Accumulate paths in the Debouncer.** `apply()` re-reads only the paths it is given. `Debouncer`
+   (`watcher.py:54-77`) keeps a `set` under its `_lock`: `trigger(path)` adds to it and restarts the
+   timer; the timer callback swaps the set out under the lock and calls `on_change(paths)`.
+   `_Handler.on_any_event` (`watcher.py:105-113`) passes `event.src_path` and, for a move,
+   `event.dest_path` too, each through `is_ignored`: today it keeps only `dest_path or src_path`
+   (`watcher.py:110`), which is enough for a full rebuild but leaves a moved file's old path in a
+   session. A directory event may be passed as a path; `apply` accepts files and directories, absolute
+   under the repo or repo-relative.
+3. **Apply, then swap in a snapshot.** `_watch_rebuild(paths)` becomes: `upd = session.apply(sorted(paths))`;
+   when `upd["seq"]` moved (an update that changed nothing keeps `seq` and has no rows), install
+   `RustGraph(session.snapshot(), REPO_PATH)` as `_graph` and keep `_release_freed_memory()` after the
+   swap (step 7). `apply` raises `RuntimeError` when the repo is no longer a directory; the session
+   keeps its previous state, so log it and keep serving.
+4. **Persist on an interval and at shutdown, never per event.** Drop `save_to_default` from the watch
+   path. After an update, call `session.persist()` when the last persist is older than an interval
+   (`glia watch` defaults to `--persist-every 60` seconds) and once at exit (`atexit`). `persist()`
+   writes the layout and the parse cache under `<repo>/.glia/graph/`, which `is_ignored`'s layout-dir
+   prefix rule (`watcher.py:39-51`) already skips, so a persist never triggers an update. A write
+   error is `OSError`. `_build_graph` keeps `save_to_default` for `refresh` and the cold path.
+5. **One caller at a time.** The session takes one call at a time: a second Python thread calling into
+   it during `apply` / `poll` gets pyo3's `RuntimeError` "Already borrowed" instead of waiting.
+   `threading.Timer` fires each debounce on a new thread, and a slow `apply` (glia: 1.81 s mean) can
+   overlap the next fire, so hold `_rebuild_lock` (`server.py:60`) around every session call. The GIL
+   is released while the engine works (`__init__`, `apply`, `poll`, `snapshot`, `persist`), so tool
+   calls keep answering on the previous snapshot meanwhile.
+6. **Keep the event filter; rename the wrapper's own `[watch]` lines.** Keep `WRITE_EVENTS`
+   (`watcher.py:34`, the read-event loop fix) and `is_ignored`. glia now prints `[watch] open`,
+   `[watch] update seq=.. files +a ~m -r groups_rebuilt=<k>/<n> full_rebuild=.. nodes +a -r ~m >v
+   edges +a -r ~c took=.. repo=..`, `[watch] noop`, `[watch] outside`, `[watch] poll` and
+   `[watch] session` on the same stderr, so rename `[watch] rebuilt:` and `[watch] rebuild failed:`
+   (`server.py:170`, `:172`) and `[watch] watching` (`:1144`), for example to `[repo-graph] watch ...`.
+7. **Memory, `refresh` and fallbacks.** A held session costs about twice a generate loop's steady
+   state (parse cache + group cache + current result + one snapshot) and creeps slowly. DC.9's rows
+   (`bench/rss/results.jsonl`, source `DC.9 wheel (HEAD+DC.9)`, 12 updates, VmRSS):
+
+   | repo | session open | update 1 -> 12 | peak HWM | mean s / update | control: generate + save loop, same wheel |
+   |---|---|---|---|---|---|
+   | glia@9c7c6faa (edit in `engine/src/watch.rs`) | 658 MB | 668 -> 748 MB | 1118 MB | 2.69 (apply 1.81, persist 0.73) | 510 -> 391 MB (rebuild 2: 301), 2.45 s |
+   | grpc-go@6f50403 (edit in `server.go`) | 278 MB | 290 -> 327 MB | 482 MB | 1.32 (apply 1.02, persist 0.25) | 240 -> 173 MB (rebuild 2: 142), 2.49 s |
+
+   It levels off (DC.8, W9, `dev-notes/next-leap-0.5.3.md` section F.3): 100 watch-only updates on a
+   glia copy rose about 75 MB over the first ~12 updates, then stayed flat at 615-685 MB. The snapshot
+   costs what a fresh `generate` costs; the engine trims freed heap after each update (site
+   `watch_update`) and when the old PyGraph drops (`pygraph_drop`), so `_release_freed_memory()` after
+   the swap is harmless and redundant. `refresh(full=False)` (`server.py:845-864`) can call
+   `session.poll()` and swap on a dict; `refresh(full=True)`, or a `repo_path` that retargets the
+   server, keeps `_build_graph(target, incremental=False)` and then re-opens the session for the new
+   target (the old one is dropped). Without watchdog (`start_watcher` returns None), a timer calling
+   `session.poll()` gives the same freshness (`glia watch` polls every 500 ms); with
+   `REPO_GRAPH_WATCH=0` no session is opened.
+
+`glia watch <repo> [--debounce-ms <N>] [--persist-every <S>] [--poll-ms <N>]` (DC.8, `1f749b76`) is the
+same loop as a foreground CLI: NDJSON per update on stdout, a persist on the interval and on exit,
+SIGINT / SIGTERM / stdin EOF to stop, `--no-overlay` refused (exit 2). Q14 picks the embedded session;
+the CLI is the alternative for a non-Python consumer.
+
+## 4. Graph content: what the answers show differently
+
+No wrapper code parses these qnames, caches them across rebuilds or keys state on them (`graph.py`
+rebuilds its index from `nodes_json()` on every load, and `flows` is recomputed). They change golden
+outputs, counts and the names `find` / `impact` / `trace` / `read` / `orient` print.
+
+### 4a. Identity changes (qname or NodeId)
+
+| packet (commit) | old -> new | measured |
+|---|---|---|
+| DE.9 requirements.txt / Pipfile roots (`e0370f74`) | HTTP / channel qnames under a NESTED python root gain the owner suffix: `GET /health` -> `GET /health @svc/email`, `grpc_client:ProductCatalogService` -> `... @src/recommendationservice`; a node two such services shared unowned splits into one per owner; new `project:<dir>` PROJECTs | microservices-demo: 21 qnames gone, 35 new, nodes 3,083 -> 3,097; `(outside projects)` 23 files / 366 nodes -> 11 / 101 |
+| DG.12 sbt sub-projects (`ff881e56`) | ROUTE / ENDPOINT / QUEUE_* / WS_* / GRAPHQL_* / GRPC_* / RPC qnames of files under a member gain ` @<dir>`; new `project:<dir>` PROJECTs (ecosystem sbt) | fixture only |
+| DF.7 Go route-group prefixes held in a constant (`0fab4960`) | `<METHOD> <local>[ @owner]` -> `<METHOD> <const prefix><local>[ @owner]` (`GET /items` -> `GET /api/v1/items`) | quokka-stack and grpc-go unchanged |
+| DF.18 OpenAPI server bases (`78645340`) | an op of a document whose first server url is templated with defaulted variables: `contract::docs::openapi::GET:/users` -> `contract::docs::openapi::GET:/api/v1/users` (name `GET /api/v1/users`); a multi-server document's ops gain ORIGIN `bases` | no bench, matrix or quokka op moved |
+| DF.20 TS endpoint bases from config (`7d2f16a2`) | `endpoint:<M>:${…}/<rest>` -> `endpoint:<M>:<base path>/<rest>`: Kina `endpoint:GET:${…}/stats @frontend` -> `endpoint:GET:/admin/stats @frontend`, `${…}/trades` -> `/api/trades` | Kina: 85 call sites, ENDPOINTs 112 -> 103 (9 merge into an existing real-path node); HTTP_CALLS exact 48 -> 85, base 45 -> 1 |
+| DG.10 Akka / Pekko HTTP path matchers composed (`774de9b4`) | `ANY /<first literal>` -> `ANY /<pathPrefix segments>/<every matcher segment>` (`ANY /ws` -> `ANY /ws/chat`, `ANY /users` -> `ANY /api/users`; `Segment` -> `:segment`, number / UUID matchers -> `:id`, `Remaining` -> `*`); ROUTEs read from a non-directive `path(` or an unreadable matcher are removed | fixtures and matrix probes |
+| DH.20 Swift Vapor routes (`121041d3`) | `GET /users/id` -> `GET /users/:id`; `PATCH /todos/todoID/patched` -> `PATCH /todos/:todoID`; phantom ROUTEs from `.get(` calls with no `use:` and no trailing closure (`GET /id` from `req.parameters.get("id")`) removed | fixtures |
+| DH.17b Elixir behaviours (`8f72df22`) | a pure behaviour module (`@callback` only) is INTERFACE instead of PACKAGE: same qname, new NodeId | fixtures |
+| DH.8 GraphQL roots for graphql-ruby / Absinthe; Dart operation names (`edfba300`) | Dart package:graphql `graphql_op:client.query` / `client.mutate` / `client.subscribe` -> `graphql_op:<OpName>` when the call's `gql(..)` document is a same-file constant or an inline literal | fixtures |
+| DH.1 Ruby (`41f4c589`), DH.2 PHP (`214105be`), DH.3 Dart (`4d96781a`), DH.4 Elixir (`57ae47f1`) broker rows | framework tags replaced by named queues: Ruby `queue_producer:unresolved:sns` -> `queue_producer:<topic>`; php-amqplib `queue_producer:unresolved:rabbitmq` -> `queue_producer:<routing key>`, php-rdkafka `queue_consumer:unresolved:kafka` -> `queue_consumer:<topic>`; kafka_dart `queue_producer:unresolved:kafka` -> `queue_producer:<topic>`; Oban pipe form `queue_producer:unresolved:oban` -> `queue_producer:<Worker>`; plus new `queue_producer:<t>` / `queue_consumer:<t>` nodes (Laravel jobs as `<JobClass>`) | fixtures and matrix probes |
+
+The DH packets declared `node_id` for nodes they ADD with no qname moved: DH.5 `config:env:<NAME>` from
+Dart / Elixir / Laravel env reads (`d7230be3`); DH.6 `config:flag:<key>` / `config:secret:aws_sm/<ref>`
+(`c4bb7da0`); DH.7 `event_emit:<name>` / `event_handle:<name>` for ActiveSupport::Notifications, Laravel
+events, Dart event_bus, Phoenix.PubSub (`6db8612a`); DH.9 Ratchet `ws:<path>`, Dart `ws_client:<path>`
+(`df81a9c1`); DH.10 `cli:<name>` CLI_COMMANDs for package:args, Mix tasks, composer `bin`, gemspec
+`executables` (a gemspec with an executable is a manifest MODULE) and CLI_INVOCATIONs (`9c895029`);
+DH.11 `data_entity:sql:<table>` from sqflite and Ecto migrations (`13902a97`); DH.12 elixir-grpc
+`grpc_client:<Service>` (`ab306320`); DH.13 Ruby INHERITS_FROM / INJECTS / constructed-receiver CALLS,
+edges only (`e8223e1f`); DH.14 PHP interface METHODs `<Interface>::<method>` (`a08fc669`); DH.15 Dart
+injectable INJECTS and shelf_router HANDLED_BY, edges only (`304037c1`); DH.17a Elixir remote CALLS,
+edges only (`77e8d9fa`); DH.17b ExUnit FUNCTIONs `<module>::test <name>` (spaces in the qname, as ROUTE
+names have); DH.18 Ecto `data_entity:sql:<Model>` (`411c063e`); DH.19 Compojure / reitit HANDLED_BY,
+edges only (`db240e69`); DH.21 libcurl `endpoint:<METHOD>:<path>` (`837297c7`).
+
+### 4b. Removed nodes and edges
+
+| packet (commit) | what goes | measured |
+|---|---|---|
+| DE.8 generated gRPC stubs mint no GRPC_CLIENT (`38b4f41e`) | GRPC_CLIENT nodes minted only by generated stubs (`*_grpc.pb.go`, `*_pb2_grpc.py`, `*.pbgrpc.dart` ...) and their GRPC_CALLS; a client a hand-written site also mints keeps its qname and moves POSITION to that site | microservices-demo: Go services 36 -> 13 GRPC_CALLS, Python 18 -> 3; `glia arch` out column productcatalogservice 9 -> 0, shippingservice 9 -> 0; quokka-stack `grpc_client:QuokkaChatService @quokka_android` now at `lib/core/services/chat_service.dart:58`; grpc-go GRPC_CLIENT 28 -> 21 |
+| DD.16 (`14c6ae40`) | SHARES_DEPENDENCY, message SHARES_SCHEMA (section 2, row 6) | 99 / 99 multi-dir fixtures' `contract_fields` unchanged |
+| DF.9 external WS / gRPC / GraphQL clients stay out of pairing (`b4b8565f`) | WS_CONNECTS / GRPC_CALLS / GRAPHQL_CALLS from a client whose every hit is `external` and whose hosts name no service | 3 fixture edges |
+| DF.2 PHP symbol imports bind through declared namespaces (`7fbc75f2`) | a `.php` import into an undeclared namespace under the repo's own root namespace no longer takes the `tail_unique` guess; a symbol import into a declared namespace that lacks the member, or has two, binds nothing (PHP and C# `using static`) | symfony-demo loses 2 wrong IMPORTS |
+| DF.19 (`61de0c5b`) | an OpenAPI op paired to several routes by the API-prefix guess keeps only the exact route under its base | quokka 180 -> 178 DOCUMENTS |
+| DF.22a TS parameter and local receivers (`4135c395`) | a constructor-body bare `x.m()` that bound through field `x` loses its edge when a constructor local named `x` of another type shadows it | 0 edges removed on 7 real copies and 115 TS fixtures |
+| DF.4b Dart plain imports (`2692e523`) | a Dart name HEAD bound through a repo-unique fallback now binds through the plain import first | 0 edges lost across the 41 Dart fixtures and probes; game_template 480 -> 497 edges, provider_shopper 194 -> 196 |
+| DF.6 CMake generator expressions (`72a67c22`) | an angle include HEAD bound through a later root (`include/` or a compile_commands dir) can bind through an earlier genex root holding the same header | the other 12 C/C++ fixture dirs: node and edge sets identical |
+| DG.1 Rust brokers (`4dac65bb`), DG.2 Scala brokers (`089e03d8`), DH.1 / DH.2 / DH.4 broker gates | eventbus verb-fallback EVENT_EMITTER / EVENT_HANDLER phantoms (`publisher.publish(..)`, `.subscribe(`, `.on(`) in files that name one of the new broker libraries, in any language (C / C++ files naming `google/cloud/pubsub` included); Alpakka GooglePubSub EVENT twins, `unresolved:redispubsub` tags, `event_emit:ProducerRecord` | fixtures |
+
+### 4c. New edges and evidence
+
+- **Identity (DD.5-DD.7, `1b631092`, `fe20779b`, `16020321`):** SAME_AS stars (section 2, row 1); multi-repo
+  merges also get HEURISTIC Weak SAME_AS for vendored copies (`body_hash`, `path_suffix/diverged`,
+  never collapsed): quokka-stack + quokka_web 670 Weak edges (`body_hash=537 path_suffix=133
+  offsets=1/1`). Repos with SCIP snapshots on both sides get FACT `scip_symbol`. `glia identity` on quokka-stack --with quokka_web:
+  726 classes (fact 17, derived 39, heuristic 670, diverged 133); Kina --with lapse: 55.
+- **TypeScript (DF.17 `04f17964`, DF.22a-c):** CALLS rule `receiver_state` into another class's STATE_VAR
+  (DERIVED, like `receiver_type`, never name-only; Kina `[recv]` typescript= 313 -> 444); CALLS rule `receiver_type` from class-typed parameters and
+  locals, top-level test callbacks included (shell 234 -> 400, mem0 0 -> 359 binds; mem0 dead_symbol
+  496 -> 426 rows); CALLS rule `inherited_receiver` (DF.22b `5ebb3db5`); method-level IMPLEMENTS rule
+  `concrete_override`, Strong (DF.22c: wpf +3, shell +4, mem0 +4), so overrides of a called member are
+  live and leave `dead_symbol`. `dead_symbol` rows change three ways: a method that gains its first
+  caller leaves, TS overrides of a called member are withheld, overridden concrete members leave; a
+  `super.m()` call (rule `super_method`) vouches for no override. `patterns`, `check` and the
+  reflexion model read the new edges. **cell_value:** a TS `super.m()` CALLS edge's EVIDENCE rule
+  changes from `inherited_method` to `super_method` (`this.m()` keeps `inherited_method`). No qname
+  moves.
+- **Go:** DF.15 an un-aliased import binds the package clause name (`d2f0be22`); DF.16 method-value
+  handlers of a typed parameter or local bind through the type (`511a2c0c`): an existing name-bound
+  handler's EVIDENCE goes `graph:refs` / `global_unique_method` -> `graph:go_packages` /
+  `package_type_method` or `local_type_method`, so its `why` tier rises heuristic -> fact.
+- **PHP / C# (DF.1 `e39dfe8a`, DF.2):** group `use \A\B\{..}` parses (the rest of such a file used to be
+  lost); a symbol import bound through a declared namespace has EVIDENCE rule `namespace` and tiers FACT
+  in `why` (was HEURISTIC `tail_unique`), the same for C# `using static`.
+- **Dart (DF.4a `edf4079b`, DF.4b):** own-package `package:<name>/..` IMPORTS; plain-import CALLS (rule
+  `import_binding`); heritage / INJECTS refs into plainly imported libraries keep their target but go
+  `global_unique` -> `import_binding` (heuristic -> fact in `why`; game_template 2 INHERITS_FROM + 2
+  IMPLEMENTS). That rule change is a cell_value break DF.4b's spec did not declare; it is inherent to the
+  declared mechanism (the session routed it here so the handoffs list it).
+- **Swift (DF.3 `314956fe`), C/C++ (DF.5 `f8c3956e`, DF.6, DH.21):** local / parameter receivers (rule
+  `local_receiver`), lambda calls and `auto` locals (rule `receiver_return`), CMake genex include roots,
+  libcurl ENDPOINTs + HTTP_CALLS.
+- **Python (DF.12 `5bec20cd`, DF.13 `dc4b37a7`):** blinker / Django signal EVENT nodes and
+  cross-file EVENT_FLOWS (owner edges rule `python_signal`).
+- **Declared tests (DF.11 `a18f668b`):** `[walk] tests` in `.glia/overlay.toml` now feeds the TESTS pass
+  (rule `declared_name`).
+- **Rust / Scala (DG.1-DG.13b):** Rust broker / task-queue rows, tokio broadcast and Akka EventStream
+  events, async-graphql / Caliban resolvers, axum / Akka WebSocket handlers, aws-sdk-secretsmanager /
+  LaunchDarkly / Scala env CONFIG reads (`glia flags` includes Rust LaunchDarkly), tokio-cron-scheduler /
+  akka-quartz CRON_JOBs, scopt CLI, Slick DATA_ENTITYs, http4s HANDLED_BY, ScalaTest / MUnit case
+  FUNCTIONs `<suite>::<description>` with TESTS (DG.11 `c8357fbb`), Rust `impl Trait for Type`
+  IMPLEMENTS across files (DG.13a `2d99ca0e`, rule `trait_impl`: glia's `CrossGraphResolver` gains 17
+  implementors) and axum / actix-web / Rocket state INJECTS (DG.13b `4bee7730`, EVIDENCE
+  `graph:rust_paths` / `extractor_injects`).
+- **Elixir (DH.17a `77e8d9fa`, DH.17b):** remote CALLS by full module name (EVIDENCE
+  `graph:elixir_modules`, rules `full_name` / `alias_path` / `nested_alias` / `module_self`),
+  `@behaviour` IMPLEMENTS, `Application.compile_env` INJECTS, ExUnit test FUNCTIONs with TESTS.
+- **Queues / config (DF.14, DH.5, DH.6):** Pub/Sub topic -> subscription QUEUE_FLOWS (rule `binding`,
+  Medium); Dart / Elixir / Laravel env READS_CONFIG; Ruby / Elixir / PHP flags and secrets.
+
+### 4d. Stderr lines (the server relays them and parses none)
+
+- **New:** `[memory] malloc_trim`; `[groups]`, `[const-fold]`, `[evidence-split]`; `[graft-memo]` (on
+  incremental and in-process repeat builds: `refresh`, the watcher, a `WatchSession`); `[identity]`;
+  `[identity] collapse surface=<find|blast_radius|trace|flows|tests_for|serves|arch>`;
+  `[scip] identity`; `[rules] eval`, `[rules] check`, `[rules] reflexion`; `[check] gate`;
+  `[query] lang=.. surface=..`; `[watch] ...`; `[ts-locals]`; `[elixir-calls]`, `[elixir-types]`;
+  `[c-http-client]`; `[eventbus] typed`; `[config] env-read`; `[event-py-signals]`;
+  `[grpc-client] skipped generated file`; `[imports] dart plain-import names bound=<b> ambiguous=<a>`;
+  `[overlay] try-rules`.
+- **Changed:**
+  - `[ts-inherit] calls bound through superclasses: <n> (self=<s> super=<p> receiver=<r> ambiguous=<a>) abstract implements=<m> concrete overrides=<c>`;
+  - `[recv]` counts; `[provenance] ... generated=<n> (name=<a> banner=<b> qname=<c>)`;
+  - `[c-includes] ... genex=<g>`; `[cpp-scope] ... receiver_return=<n>`; `[swift-scope] ... local_receiver=<n>`;
+  - `[go-mounts] ... const_prefixes= const_unresolved=`; `[go-routes] registrations= ... consts=`;
+    `[go-routes] receiver-method handlers=<r> local-method=<n> in <file>`;
+    `[go-package] root-package ... clause_named=<n>`;
+  - `[cron] code .. nestjs=<n> tokio=<n> akka_quartz=<n> ..`;
+    `[cli-decl] manifest ... (pyproject= setup= npm= cargo= composer= gemspec=)`;
+  - `[queues] resolver ... binding=<b>`; `[contract-link] ops=.. based=<b>`;
+    `[roots] declared=.. relabelled=<r>`; `[gaps] rows= .. rotted_rule=<n>`;
+  - `[overlay] candidate` / `[overlay] accept` `... constraint=<n>`;
+  - `[identity] ... scip_symbol=<n> body_hash=<n> path_suffix=<n> offsets=<c>/<s>` and
+    `[evidence-rules] resolver=identity ... scip_symbol=<n> body_hash=<n> path_suffix=<n>`; an
+    incomplete SCIP snapshot prints `[scip] snapshot incomplete` twice per build;
+    `[passes] domain=code resolve=14`;
+  - `[const]` bindings / conflicts counts include config-expression bindings (DF.20); the walk's
+    `[parallel] walk .. read <n> files` count includes HOCON `.conf` files (DG.7b).
+- **Gone:** `[schema-link]`.
+
+## 5. New primitives worth adopting
+
+From the surface diff (`v0.5.1..HEAD`): new `py/api_surface/{query,identity,watch}.txt`; `collapse=True`
+appended to `find`, `blast_radius`, `cross_stack_trace`, `entry_flows`, `tests_for`, `tests_for_diff`,
+`tests_for_rev`, `serves`, `service_map`; `patterns_experimental` / `patterns_vs_rev_experimental`
+removed. CLI: new `glia query`, `glia identity`, `glia watch`; `--no-collapse` on `find`, `blast-radius`,
+`trace`, `flows`, `tests-for`, `serves`, `arch`; `rotted_rule` in `gaps` / `overlay propose`
+`--category`; SAME_AS in `hubs --category`; `patterns --experimental` gone.
+
+| primitive (pyo3) | returns | fits | packet (commit) |
+|---|---|---|---|
+| `PyGraph.query(program, outputs=None, limit=None, explain=False, max_rows=None)`, `PyGraph.query_gql(query, limit=None, explain=False, max_rows=None)` | `{language, outputs, results, absence}`: Datalog over the code graph (the predicate prelude merged in: `calls`, `imports`, `depends`, `handles`, `unhandled_route`, `tested`, `unreached`, `cross_repo`, `module_dep` ...) or a GQL `MATCH .. WHERE .. RETURN` read; every row tiered and located; a parse, analysis, budget or evaluation error raises `ValueError` with the rendered diagnostics; a budget stop names `max_rows=<n>` | a single `query` MCP tool for P4 (collapse the six tools' structural questions into one surface); CLI twin `glia query <repo> [<file>] -e <text> [--gql] --json` (exit 0 rows / 1 none / 2 an error, the error text on stderr only) | DB.2a-DB.2c, DB.7a-DB.7c, DB.5 (`940b6137`), DB.6 (`8420aa44`) |
+| `PyGraph.identity_classes(tier=None, rule=None, diverged_only=False, limit=None)` | the identity report: counts, per-rule counts, classes with members located, diverged copies with their variants; ValueError on an unknown tier or rule | an `orient` note in a merged session ("these N packages / messages / contract ops are one thing across repos") | DD.8 (`a7da80dc`), DD.15 (`9262a597`) |
+| `glia_py.WatchSession(repo, overlay=True)` | section 3 | replaces `_watch_rebuild`'s full generate | DC.7a-DC.7c, DC.9 (`902c5456`) |
+| `collapse=` on the answers above | `identity` / `to_identity` / `handler_identity` keys on folded rows | render `also_in`; pass `collapse=False` to see every member | DD.9-DD.14 |
+
+The engine's `memory::release_freed_memory` runs on its own (DE.10, section 2 row 8): no call needed.
+
+## 6. Needs no change (checked)
+
+- **Registry decoding** (`graph.py:21-28`, `server.py:650`): one new category, decoded by name; no node
+  kind or cell type.
+- **Every call site in section 0:** signatures unchanged, or a new keyword last.
+- **The watcher filter** (`watcher.py:24-51`): 0.5.2 writes only inside `default_gmap_dir()` or into
+  `.glia/` inputs that should trigger a rebuild; `glia watch` / `WatchSession.persist()` write the same
+  layout dir.
+- **`init.py:36-45`**: `generate(incremental=True)` + `save_to_default` + `default_gmap_dir` unchanged.
+- **Evidence strings:** the wrapper parses no emitter or rule, so the new rules (`super_method`,
+  `receiver_state`, `inherited_receiver`, `concrete_override`, `import_binding`, `namespace`,
+  `local_type_method`, `python_signal`, `binding`, `declared_name`, the SAME_AS rules) need nothing.
+- **DD.3 `DomainTables.identity_rules`** (`92a960fd`, api_signature): a Rust struct field; the wrapper
+  builds no profile. **DD.7 `IdentityResolver`** becomes `IdentityResolver<'a>` with `new()` /
+  `with_scip()` (`16020321`): Rust only.
+- **DD.4 PROJECT ORIGIN `label_source`** (`efa0ac66`): the wrapper reads no PROJECT ORIGIN.
+- **DF.22b's `[ts-inherit]` and DF.22a's `[recv]` / `[ts-locals]` changes**: stderr only.
+
+## 7. Re-test
+
+```
+# a local 0.5.2 wheel (before PyPI), in a throwaway venv (never ~/.venvs/glia-leap or the user site)
+python3 -m venv /tmp/rg-052 && /tmp/rg-052/bin/pip install /home/ivy/Code/glia/target/wheels/glia_py-*.whl
+/tmp/rg-052/bin/python -c "import glia_py as g; print(g.version(), g.build_stamp(), len(g.category_names()))"
+#   expect the stamp of the wheel you built and 37 categories
+
+# the wrapper's suites, then the WatchSession port against a scratch copy of a repo
+cd /home/ivy/Code/repo-graph && /tmp/rg-052/bin/pip install -e ".[dev]" && /tmp/rg-052/bin/pytest -m "not perf"
+/tmp/rg-052/bin/pytest -m e2e
+
+# a session's update equals a clean build: edit a file in a scratch copy of a repo (generate() writes
+# under the repo it builds), then
+/tmp/rg-052/bin/python - <scratch-copy> <<'PY'
+import sys, glia_py as g
+r = sys.argv[1]; s = g.WatchSession(r)
+u = s.apply(["<edited file>"]); snap = s.snapshot(); fresh = g.generate(r)
+print(u["seq"], snap.node_count() == fresh.node_count(), snap.edge_count() == fresh.edge_count())
+PY
+
+# glia side: the wheel matches the pinned surface
+cd /home/ivy/Code/glia && ~/.venvs/glia-leap/bin/python py/check_api_surface.py
+```
+
+The wrapper suite was not run for this handoff (glia's rule: never call the wheel's `generate()` on a
+repo from the glia session).
+
+## 8. Done vs pending
+
+- **Landed:** W0-W13, 151 packets (all green but DH.16, a bench fixture recorded `partial`), and the docs
+  packets DZ.1 / DZ.2 in W14. The W13 close-out (`f468af11`) measured 5,552 workspace tests passing,
+  378 substrate-gap fixtures with 0 blind spots, the coverage matrix at 345 full / 1 partial / 0 none /
+  136 unknown / 28 n/a, `[engram-export] check: ok - build + 95 tests passed`, the wheel
+  `glia_py-0.5.1-cp311-abi3-manylinux_2_39_x86_64.whl` (stamp `0.5.1+p0c104fe6f8df1704`, api surface OK,
+  every pyo3 surface test green, `test_watch` 35 checks and `test_query` 39 included).
+- **Held:** this handoff (repo-graph takes 0.5.2 and 0.5.3 together). Release steps (not packets):
+  James's testing, the bump of every version field (section 0), the tag, the PyPI publish.
+- **Open on glia's side, for the wrapper's benefit (0.5.3):** multi-repo watch (Q13, a `--with` option
+  for `glia watch`); watch's body-only fast path (Q15); a memory budget for long-lived sessions (0.5.3
+  seed section F.3); org-internal package routing (Q19).
+- **Checked, no wrapper change:** D0.3-D0.8 (wave 0: empty module slots); DA.1-DA.20 (the
+  `glia-rules` crate: `publish = false`, no out-of-repo consumer; its oracle, determinism, budget and
+  toy proof tests); DB.2a-DB.2c, DB.7a-DB.7c (the engine rules slot and GQL, reached through
+  `query` / `query_gql`); DB.8a / DB.8b (check's reflexion model now runs through `reflexion.dl`: report,
+  stdout and exit codes byte-identical; one more `[rules] reflexion relations=15 rows=<n>` line; a check
+  with a model costs the rules evaluation, quokka debug derive 12.8 ms -> 188.5-210 ms, whole check
+  39.1 -> 215-231 ms); DC.1-DC.6 (build-stage refactors and speed-ups, byte-identical); DC.10a / DC.10b
+  (watch parity gates); DD.1 / DD.2 / DD.8 (classes, keys, the identity view); DE.2-DE.6
+  (engram-export only); DF.1 / DF.3 / DF.4a / DF.5 / DF.11-DF.13 / DF.15-DF.17 and DG.1-DG.9 / DG.11 /
+  DG.13a / DG.13b (additive content, section 4c); DH.16 (fixture data).
