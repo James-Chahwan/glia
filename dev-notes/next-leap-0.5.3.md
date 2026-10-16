@@ -643,6 +643,15 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   `_pick(j, ['userID', 'userId', 'UserID'])` helper, so they write no SCHEMA_FIELDS (21 of quokka's 23 fromJson models
   do); a same-file key-alias helper rule (a Map plus a List<String> of literals, the body subscripting the map by an
   element) is interprocedural.
+- W23 (DT.1k): a GraphQL document built by string concatenation, or an inline gql`` at the call site, stays unresolved;
+  graphql-codegen TypedDocumentNode results typed by a type alias (`type GetUsersQuery = {..}`) mint no node, so they form
+  no graphql_model class (checkable once TS type aliases carry shapes).
+- W23 (DT.10g): the cross-file ABI join (engine/src/build/evm_abi.rs) does not follow TS re-export barrels
+  (`export { X } from './abi'`): DT.1q's ReExportName / ReExportStar / ExportLocal facts sit in the parses Index::build
+  reads, so a chain is a lookup; also unread: a local export list `const X = [..]; export { X }` (ExportLocal covers it)
+  and tsconfig path aliases (TsAliasSet could be passed in). A Go ABI held in a package `var` of another file is not a
+  GoStringConst (DF.7's FileConsts records consts only). ClientHit could fold into graph/src/resolvers/evm.rs ClientFacts
+  (change the test helper `cell()` to `..Default::default()` first).
 
 ## 3. Open questions for James
 
