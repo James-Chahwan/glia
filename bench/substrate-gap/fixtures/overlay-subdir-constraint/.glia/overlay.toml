@@ -1,0 +1,24 @@
+version = 2
+
+[[constraint]]
+id = "handlers-no-repository"
+kind = "forbid_edge"
+from = "backend/internal/handlers"
+to = "backend/internal/repository"
+categories = ["CALLS"]
+text = "handlers go through a service"
+
+[[constraint]]
+id = "frontend-acyclic"
+kind = "no_cycle"
+scope = "frontend/src"
+
+[[constraint]]
+id = "acyclic"
+kind = "no_cycle"
+
+[[constraint]]
+id = "stale-anchor"
+kind = "invariant"
+anchor = "backend::internal::gone::Thing"
+text = "an anchor no node carries"

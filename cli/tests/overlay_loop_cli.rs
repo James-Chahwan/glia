@@ -535,7 +535,9 @@ fn py_rule_tree(root: &Path) -> PathBuf {
 /// `<root>/rules7.toml`, DB.9b's seven-stanza candidate: `constraint#1`
 /// holds, `#2` is violated by `web::app::show -> store::db::load`, `#3`
 /// holds on an empty scope (`webs`), `#4` does not evaluate, `#5` holds,
-/// `#6` binds no node, and `edge#1` adds a CALLS that breaks
+/// `#6` binds no node (a stale `anchor`: without it, `from = "webs"` hangs
+/// on the root PROJECT, DT.7a, and is a check error), and `edge#1` adds a
+/// CALLS that breaks
 /// `scripts-no-store`. Version-less.
 fn seven_stanza_candidate(root: &Path) -> PathBuf {
     let path = root.join("rules7.toml");
@@ -575,6 +577,7 @@ id = "orphan"
 kind = "forbid_edge"
 from = "webs"
 to = "store"
+anchor = "webs::gone::nothing"
 
 [[edge]]
 from = "scripts::tool::run"

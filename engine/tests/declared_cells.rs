@@ -1,16 +1,19 @@
 //! LF.4a: `.glia/overlay.toml` `[[constraint]]`, `[[decision]]` and
 //! `[[note]]` stanzas land as CONSTRAINT / DECISION / CONV entries on the node
 //! each anchors on - an `anchor` qname, else the PROJECT node its scope names
-//! - and a build with them is as byte-reproducible as one without.
+//! (for a constraint, DT.7a: else the deepest PROJECT above its scope, else
+//! the smallest-id MODULE under it) - and a build with them is as
+//! byte-reproducible as one without.
 //!
 //! The layout and overlay file are the substrate-gap fixture
 //! `overlay-declared-cells`, copied into a temp dir per test so a test can
 //! edit them.
 
 use std::path::Path;
+use std::process::Command;
 
 use glia_code_domain::external_inputs::{ConstraintKind, ConstraintRule, parse_constraints};
-use glia_code_domain::{cell_type, glia_config};
+use glia_code_domain::{cell_type, glia_config, node_kind};
 use glia_core::{CellPayload, CellTypeId, NodeId};
 use glia_engine::{
     BuildOptions, GenerateResult, ParseCache, generate_one, generate_one_opts, generate_one_with_cache,
@@ -109,8 +112,149 @@ fn label_scope_resolves() {
     );
 }
 
-/// A scope no PROJECT sits at, an anchor no node carries, and an unscoped
-/// rule in a repo without a root manifest are orphaned: no cell anywhere.
+const CHILD_ENV: &str = "GLIA_DT7A_CHILD_BUILD";
+
+/// The child half of [`declared_lines`]: a no-op unless the parent set
+/// [`CHILD_ENV`], in which case it builds that repo so its stderr (with
+/// `--nocapture`) carries the `[declared]` markers.
+#[test]
+fn child_build_for_stderr() {
+    if let Ok(dir) = std::env::var(CHILD_ENV) {
+        generate_one(&dir).expect("build");
+    }
+}
+
+/// The `[declared]` stderr lines of a build of `dir`, from a child run of
+/// this test binary.
+fn declared_lines(dir: &str) -> Vec<String> {
+    let exe = std::env::current_exe().expect("test binary path");
+    let out = Command::new(exe)
+        .args(["--exact", "child_build_for_stderr", "--nocapture", "--test-threads=1"])
+        .env(CHILD_ENV, dir)
+        .output()
+        .expect("re-run the test binary");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "child build failed: {stderr}");
+    stderr.lines().filter(|l| l.starts_with("[declared]")).map(String::from).collect()
+}
+
+/// The `file` of a node's first POSITION cell.
+fn position_file(cells: &[glia_core::Cell]) -> Option<String> {
+    cells.iter().filter(|c| c.kind == cell_type::POSITION).find_map(|c| match &c.payload {
+        CellPayload::Json(s) | CellPayload::Text(s) => {
+            serde_json::from_str::<serde_json::Value>(s).ok()?.get("file")?.as_str().map(String::from)
+        }
+        CellPayload::Bytes(_) => None,
+    })
+}
+
+/// The smallest-id MODULE of the build whose POSITION file lies under `dir`
+/// (`.` = any), as the CC.5a component fallback picks it, and its qname.
+fn smallest_module_under(r: &GenerateResult, dir: &str) -> (NodeId, String) {
+    let under = |f: &str| dir == "." || f == dir || f.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'));
+    r.merged
+        .graphs
+        .iter()
+        .flat_map(|g| {
+            g.nodes
+                .iter()
+                .filter(|n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::MODULE))
+                .filter(|n| position_file(&n.cells).is_some_and(|f| under(&f)))
+                .map(|n| (n.id, g.nav.qname_by_id.get(&n.id).cloned().unwrap_or_default()))
+        })
+        .min_by_key(|(id, _)| id.0)
+        .expect("a MODULE under the path")
+}
+
+/// DT.7a: a constraint whose scope lies inside a project (here a file of
+/// it) hangs on the deepest PROJECT above it. Its entry is the one a
+/// project-scoped stanza stores but for `from` / `from_raw`, `glia check`
+/// evaluates it, and the marker counts it as `anchor_enclosing`; the
+/// project-scoped stanza's marker keeps HEAD's shape. Pre-fix baseline (HEAD
+/// a584c98a): no CONSTRAINT cell, `orphaned=1`, `scope=services/api/app.py
+/// -> services/api/app.py (no PROJECT)`.
+#[test]
+fn subdir_scope_anchors_on_the_enclosing_project() {
+    let stanza = |from: &str| {
+        format!("version = 1\n\n[[constraint]]\nid = \"api-no-web\"\nkind = \"forbid_edge\"\nfrom = \"{from}\"\nto = \"web\"\ncategories = [\"CALLS\"]\n")
+    };
+    let (sub_tmp, proj_tmp) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let sub_dir = repo(sub_tmp.path(), Some(&stanza("services/api/app.py")), None);
+    let proj_dir = repo(proj_tmp.path(), Some(&stanza("services/api")), None);
+    let sub = generate_one(&sub_dir).unwrap();
+    let proj = generate_one(&proj_dir).unwrap();
+    let at_project = cell(&proj, "project:services/api", cell_type::CONSTRAINT);
+    assert_eq!(
+        at_project,
+        [r#"[{"categories":["CALLS"],"decl":".glia/overlay.toml:3","from":"services/api","from_raw":"services/api","id":"api-no-web","kind":"forbid_edge","origin":"llm","source":"overlay","to":"web","to_raw":"web"}]"#]
+    );
+    assert_eq!(
+        cell(&sub, "project:services/api", cell_type::CONSTRAINT),
+        [at_project[0].replace(
+            r#""from":"services/api","from_raw":"services/api""#,
+            r#""from":"services/api/app.py","from_raw":"services/api/app.py""#
+        )]
+    );
+    assert_eq!(all_of(&sub, cell_type::CONSTRAINT).len(), 1);
+    let report = glia_engine::check::check(&sub.merged);
+    assert_eq!((report.rules, report.checked), (1, 1), "{report:#?}");
+    assert!(report.errors.is_empty() && report.unchecked.is_empty(), "{report:#?}");
+
+    assert_eq!(
+        declared_lines(&sub_dir),
+        [
+            format!("[declared] repo={sub_dir} constraint=1 decision=0 note=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=0 anchor_enclosing=1)"),
+            "[declared] rules=1 (forbid_edge=1 no_cycle=0 invariant=0)".to_string(),
+        ]
+    );
+    assert_eq!(
+        declared_lines(&proj_dir),
+        [
+            format!("[declared] repo={proj_dir} constraint=1 decision=0 note=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=1)"),
+            "[declared] rules=1 (forbid_edge=1 no_cycle=0 invariant=0)".to_string(),
+        ]
+    );
+}
+
+/// DT.7a: an unscoped rule in a repo with no root manifest (no PROJECT at
+/// or above `.`) hangs on the smallest-id MODULE of the repo, as a
+/// component does (CC.5a), and `glia check` reads it. Pre-fix baseline (HEAD
+/// a584c98a): no CONSTRAINT cell, `scope= -> . (no PROJECT)`.
+#[test]
+fn unscoped_rule_without_root_manifest_anchors_on_a_module() {
+    let tmp = tempfile::tempdir().unwrap();
+    let overlay = "version = 1\n\n[[constraint]]\nid = \"acyclic\"\nkind = \"no_cycle\"\n";
+    let dir = repo(tmp.path(), Some(overlay), None);
+    let r = generate_one(&dir).unwrap();
+    let (module, qname) = smallest_module_under(&r, ".");
+    assert_eq!(
+        cell(&r, &qname, cell_type::CONSTRAINT),
+        [r#"[{"decl":".glia/overlay.toml:3","id":"acyclic","kind":"no_cycle","origin":"llm","source":"overlay"}]"#]
+    );
+    let holders: Vec<NodeId> = r
+        .merged
+        .graphs
+        .iter()
+        .flat_map(|g| &g.nodes)
+        .filter(|n| n.cells.iter().any(|c| c.kind == cell_type::CONSTRAINT))
+        .map(|n| n.id)
+        .collect();
+    assert!(!holders.is_empty() && holders.iter().all(|id| *id == module), "{holders:?} vs {module:?}");
+    let report = glia_engine::check::check(&r.merged);
+    assert_eq!((report.rules, report.checked), (1, 1), "{report:#?}");
+    assert_eq!(
+        declared_lines(&dir),
+        [
+            format!("[declared] repo={dir} constraint=1 decision=0 note=0 anchored=1 orphaned=0 (anchor_qname=0 anchor_project=0 anchor_module=1)"),
+            "[declared] rules=1 (forbid_edge=0 no_cycle=1 invariant=0)".to_string(),
+        ]
+    );
+}
+
+/// A constraint scope with no PROJECT at or above it and no MODULE under it,
+/// a decision scope no PROJECT sits at, and an anchor no node carries are
+/// orphaned; the unscoped rule in this repo without a root manifest is not
+/// (DT.7a: it hangs on the smallest-id MODULE, and is the one cell written).
 #[test]
 fn orphan_scope_is_counted() {
     let tmp = tempfile::tempdir().unwrap();
@@ -135,10 +279,27 @@ title = \"a path that is not a project\"
 anchor = \"services::api::app::gone\"
 text = \"stale anchor\"
 ";
-    let r = generate_one(&repo(tmp.path(), Some(overlay), None)).unwrap();
-    for t in [cell_type::CONSTRAINT, cell_type::DECISION, cell_type::CONV] {
+    let dir = repo(tmp.path(), Some(overlay), None);
+    let r = generate_one(&dir).unwrap();
+    for t in [cell_type::DECISION, cell_type::CONV] {
         assert!(all_of(&r, t).is_empty(), "cell {t:?} was written: {:?}", all_of(&r, t));
     }
+    let (_, module) = smallest_module_under(&r, ".");
+    assert_eq!(
+        cell(&r, &module, cell_type::CONSTRAINT),
+        [r#"[{"decl":".glia/overlay.toml:8","id":"unscoped","kind":"invariant","origin":"llm","source":"overlay","text":"charges are idempotent"}]"#]
+    );
+    assert_eq!(all_of(&r, cell_type::CONSTRAINT).len(), 1, "nope-acyclic stays orphaned");
+    assert_eq!(
+        declared_lines(&dir),
+        [
+            format!("[declared] repo={dir} constraint=2 decision=1 note=1 anchored=1 orphaned=3 (anchor_qname=0 anchor_project=0 anchor_module=1)"),
+            "[declared] orphaned constraint id=nope-acyclic .glia/overlay.toml:3 scope=nope -> nope (no PROJECT at or above it, no MODULE under it)".to_string(),
+            "[declared] orphaned decision id=d .glia/overlay.toml:13 scope=web/src -> web/src (no PROJECT)".to_string(),
+            "[declared] orphaned note id=note#1 .glia/overlay.toml:18 anchor=services::api::app::gone".to_string(),
+            "[declared] rules=1 (forbid_edge=0 no_cycle=0 invariant=1)".to_string(),
+        ]
+    );
 }
 
 /// An unscoped rule anchors on the repo root's PROJECT when one exists.

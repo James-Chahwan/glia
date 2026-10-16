@@ -78,11 +78,14 @@ to = "store"
 anchor = "web::view::render"
 "#;
 
+/// The orphaned stanza: an `anchor` no node carries. Without it, `from =
+/// "webs"` hangs on the root PROJECT (DT.7a) and is a check error.
 const C6: &str = r#"[[constraint]]
 id = "orphan"
 kind = "forbid_edge"
 from = "webs"
 to = "store"
+anchor = "webs::gone::nothing"
 "#;
 
 const EDGE: &str = r#"[[edge]]

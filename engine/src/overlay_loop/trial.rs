@@ -84,7 +84,7 @@
 //! |---|---|
 //! | [`RULE_DUPLICATE`] | merge placed it `AlreadyPresent`, or BASE declares a rule of its id (a cell-API rule, an anchored base stanza) |
 //! | [`RULE_ERROR`] | WITH's check reports an error for its id (`error` = the message, newlines flattened) |
-//! | [`RULE_ORPHANED`] | WITH declares no rule of its id: no `anchor` and no PROJECT at its scope, or an anchor that binds nothing, so `glia check` never reads it |
+//! | [`RULE_ORPHANED`] | WITH declares no rule of its id: an `anchor` that binds nothing, or a scope with no PROJECT at or above it and no MODULE under it, so `glia check` never reads it |
 //! | [`RULE_VIOLATED`] | WITH holds a hit of its id |
 //! | [`RULE_HOLDS`] | otherwise |
 //!

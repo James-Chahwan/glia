@@ -1,0 +1,10 @@
+{
+  "framework": "overlay-subdir-constraint",
+  "language": "go",
+  "dirs": ["."],
+  "note": "DT.7a (T7, Kina `from = backend/internal/handlers`): a [[constraint]] whose scope is a directory inside a project hangs on the deepest PROJECT above it. HEAD 7661c035: all four stanzas orphaned (`(no PROJECT)` x3, a stale anchor), no CONSTRAINT cell anywhere, glia check exit 0 'no rules declared'. The unscoped `acyclic` (no root manifest) hangs on the smallest-id MODULE (engine/tests/declared_cells.rs pins which); stale-anchor stays orphaned (DT.7b makes it a glia check error).",
+  "expect_cells": [
+    {"kind": "PROJECT", "node": "project:backend", "cell": "CONSTRAINT", "contains": "handlers-no-repository", "note": "from = backend/internal/handlers: no PROJECT at the path, the enclosing project:backend holds it"},
+    {"kind": "PROJECT", "node": "project:frontend", "cell": "CONSTRAINT", "contains": "frontend-acyclic"}
+  ]
+}

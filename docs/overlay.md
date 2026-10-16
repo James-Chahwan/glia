@@ -117,6 +117,18 @@ text = "retries are safe"                 # 1..=4096 chars; id defaults to note#
 by = "james"
 ```
 
+Anchors. A `[[constraint]]`, `[[decision]]` or `[[note]]` with `anchor = "<qname>"` hangs on that
+node, and an anchor that names no node orphans the stanza (it never falls back to a scope). A
+`[[constraint]]` without `anchor` (an allow aside: see "Reflexion model") hangs by its scope, the
+`from` of a forbid_edge and the `scope` of a no_cycle / invariant (none is the repo root): on the
+PROJECT at that path, else on the deepest PROJECT above it (`from = "backend/internal/handlers"`
+hangs on `project:backend`; a root PROJECT encloses every path), else, in a repo with no root
+manifest, on the smallest-id MODULE under it. Where a rule hangs only stores it: `glia check`
+evaluates the rule's own scopes, so a misspelt directory inside a project is reported there (`from
+scope ... matches no located node`), not dropped. A `[[decision]]` without `anchor` hangs on the
+PROJECT at its `scope` only. A stanza that hangs nowhere is orphaned: the build prints
+`[declared] orphaned <section> id=<id> <decl> ...` on stderr, and `glia check` never reads it.
+
 `origin` is accepted on `[[route_prefix]]`, `[[wrapper]]`, `[[edge]]`, `[[constraint]]` and `[[component]]`.
 Stanza ids are 1-128 characters with no control characters, unique within their section.
 Component and layer names are 1-118 characters (their entry ids are `component:<name>` /
@@ -554,7 +566,7 @@ its status is the first that applies:
 |---|---|
 | `duplicate` | the overlay as it is already declares its id (the same body, or a cell-API rule) |
 | `error` | `glia check` reports an error for it on with (its message, on one line) |
-| `orphaned` | with declares no rule of its id: no `anchor` and no PROJECT at its scope, or an anchor that names no node, so `glia check` never reads it |
+| `orphaned` | with declares no rule of its id: an `anchor` that names no node, or a scope with no PROJECT at or above it and no MODULE under it, so `glia check` never reads it |
 | `violated` | with holds a hit of it |
 | `holds` | otherwise |
 

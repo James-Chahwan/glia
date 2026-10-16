@@ -19,10 +19,19 @@
 //! 2. Otherwise the scope field - a constraint's `from` for forbid_edge, its
 //!    `scope` for no_cycle / invariant, a decision's `scope` - resolves
 //!    through `answers::resolve_scope` (a project path, label or qname ->
-//!    its path) and binds the PROJECT node of this repo whose path it is. An
-//!    absent, `.` or empty scope is the repo root's PROJECT, when one exists.
-//!    A path no PROJECT sits at orphans the stanza: declare a `[[project]]`
-//!    (LF.3a) to give it one.
+//!    its path); an absent, `.` or empty scope is the repo root, `.`.
+//!    - A constraint (DT.7a) binds the PROJECT of this repo at that path,
+//!      else the deepest PROJECT of this repo above it (a root PROJECT
+//!      encloses every path: `backend/internal/handlers` hangs on
+//!      `project:backend`), else the smallest-id MODULE of this repo whose
+//!      POSITION file lies under it (the CC.5a component fallback, for a repo
+//!      with no root manifest; `.` takes any file); with none of the three it
+//!      is orphaned. Only where the entry is STORED depends on this: the
+//!      entry carries its scopes resolved, and `glia check` reads those,
+//!      never the node.
+//!    - A decision binds the PROJECT node of this repo whose path it is; a
+//!      path no PROJECT sits at orphans it: declare a `[[project]]` (LF.3a)
+//!      to give it one.
 //!
 //! THE MODEL'S ANCHORS (CC.5a), after rule 1 (`anchor`, on a component or an
 //! allow; a layer takes none):
@@ -75,15 +84,18 @@
 //! fired_on markers. Once per repo whose file declares a constraint, decision
 //! or note (an allow is a constraint):
 //!   `[declared] repo=<label> constraint=<c> decision=<d> note=<n> anchored=<a> orphaned=<o> (anchor_qname=<q> anchor_project=<p>)`
-//! with ` anchor_module=<m>` inside the parentheses only when an allow bound
-//! through a component's MODULE, and a trailing ` rejected=<x>` only when an
+//! with ` anchor_enclosing=<e>` inside the parentheses only when a constraint
+//! bound through a PROJECT above its scope, then ` anchor_module=<m>` only
+//! when a constraint bound through a MODULE under its scope or an allow
+//! through its component's MODULE, and a trailing ` rejected=<x>` only when an
 //! entry failed its rules or met a cell that is not an entry array. Once per
 //! repo whose file declares a model (a component, a layer or an allow):
 //!   `[declared] model repo=<label> components=<c> layers=<l> allows=<a> anchored=<n> orphaned=<o>`
 //! (+ ` rejected=<x>`), counting those three kinds. Then one detail line per
 //! stanza that did not anchor, at most [`MAX_DETAIL_LINES`] per repo:
 //!   `[declared] orphaned <section> id=<id> <decl> anchor=<qname>`,
-//!   `[declared] orphaned <section> id=<id> <decl> scope=<raw> -> <path> (no PROJECT)`,
+//!   `[declared] orphaned constraint id=<id> <decl> scope=<raw> -> <path> (no PROJECT at or above it, no MODULE under it)`,
+//!   `[declared] orphaned decision id=<id> <decl> scope=<raw> -> <path> (no PROJECT)`,
 //!   `[declared] orphaned component id=<id> <decl> path=<raw> -> <path> (no PROJECT or MODULE)` or
 //!   `[declared] orphaned <layer|constraint> id=<id> <decl> component=<name> (no root PROJECT; the component did not anchor)`.
 //!
@@ -118,8 +130,13 @@ const MAX_DETAIL_LINES: usize = 32;
 #[derive(Debug, Clone, Copy)]
 enum Via {
     Qname,
+    /// The PROJECT at the scope (a component's: at its first path, else the
+    /// repo root's).
     Project,
-    /// A component's smallest-id MODULE under its first path (CC.5a).
+    /// A constraint's deepest PROJECT above its scope (DT.7a).
+    Enclosing,
+    /// The smallest-id MODULE under a component's first path (CC.5a) or a
+    /// constraint's scope (DT.7a).
     Module,
 }
 
@@ -133,6 +150,7 @@ struct Tally {
     note: usize,
     anchor_qname: usize,
     anchor_project: usize,
+    anchor_enclosing: usize,
     anchor_module: usize,
     orphaned: usize,
     rejected: usize,
@@ -151,6 +169,7 @@ impl Tally {
             match via {
                 Via::Qname => self.anchor_qname += 1,
                 Via::Project => self.anchor_project += 1,
+                Via::Enclosing => self.anchor_enclosing += 1,
                 Via::Module => self.anchor_module += 1,
             }
         }
@@ -176,8 +195,13 @@ impl Tally {
 enum Target {
     /// `anchor = <qname>`: binds, or orphans the stanza (never a fallback).
     Qname(String),
-    /// The scope that picks a PROJECT: `None` is the repo root.
+    /// A decision's scope: the PROJECT at it, `None` the repo root's.
     Scope(Option<String>),
+    /// A `[[constraint]]` (not an allow) without `anchor`: forbid_edge's
+    /// `from`, no_cycle / invariant's `scope` (`None` is the repo root). The
+    /// PROJECT at it, else the deepest PROJECT above it, else the smallest-id
+    /// MODULE under it (DT.7a).
+    RuleScope(Option<String>),
     /// A component without `anchor`: the PROJECT at `path` (its first
     /// resolved path, `raw` as written), else the root PROJECT, else this
     /// repo's smallest-id MODULE under `path`.
@@ -270,6 +294,25 @@ impl Anchors {
         })
     }
 
+    /// The deepest PROJECT of this repo at or above `path`: among the build's
+    /// PROJECT paths that bind in THIS repo (as [`Self::project_at`] binds),
+    /// the one with the most segments that is `.` or `path` lies under. A
+    /// PROJECT only another repo of a `--with` build declares never binds
+    /// here; one repo has one PROJECT per path, so there is no tie (the
+    /// smaller NodeId would win).
+    fn enclosing_project(&self, path: &str) -> Option<NodeId> {
+        let depth = |p: &str| if p == "." { 0 } else { p.split('/').count() };
+        self.projects
+            .iter()
+            .filter(|p| p.path == "." || is_under(path, &p.path))
+            .filter_map(|p| match self.idx.resolve(&p.qname, Some("PROJECT"), None) {
+                CellTarget::Bound(id) | CellTarget::Ambiguous(id) => Some((depth(&p.path), id)),
+                _ => None,
+            })
+            .max_by_key(|&(d, id)| (d, std::cmp::Reverse(id.0)))
+            .map(|(_, id)| id)
+    }
+
     /// The smallest-id MODULE of this repo whose POSITION file lies under
     /// `path` (`.` = every file).
     fn module_under(&mut self, merged: &MergedGraph, path: &str) -> Option<NodeId> {
@@ -298,6 +341,15 @@ impl Anchors {
         self.project_at(path)
             .or_else(|| self.project_at("."))
             .map(|id| (id, Via::Project))
+            .or_else(|| self.module_under(merged, path).map(|id| (id, Via::Module)))
+    }
+
+    /// Where a `[[constraint]]` without `anchor` hangs, its scope resolved
+    /// to `path` (see the module docs, ANCHOR rule 2).
+    fn rule_anchor(&mut self, merged: &MergedGraph, path: &str) -> Option<(NodeId, Via)> {
+        self.project_at(path)
+            .map(|id| (id, Via::Project))
+            .or_else(|| self.enclosing_project(path).map(|id| (id, Via::Enclosing)))
             .or_else(|| self.module_under(merged, path).map(|id| (id, Via::Module)))
     }
 }
@@ -518,7 +570,7 @@ fn stanzas(cfg: &LoadedConfig, merged: &MergedGraph, anchors: &mut Anchors) -> V
             cell: cell_type::CONSTRAINT,
             id: d.id.clone(),
             decl,
-            target: d.anchor.clone().map_or(Target::Scope(scope), Target::Qname),
+            target: d.anchor.clone().map_or(Target::RuleScope(scope), Target::Qname),
             declared: true,
             model: false,
             component: None,
@@ -625,6 +677,13 @@ pub(super) fn apply_declared_cells(
                     .map(|id| (id, Via::Project))
                     .ok_or_else(|| format!("scope={raw} -> {path} (no PROJECT)"))
             }
+            Target::RuleScope(scope) => {
+                let raw = scope.clone().unwrap_or_default();
+                let path = anchors.path_of(merged, &raw);
+                anchors.rule_anchor(merged, &path).ok_or_else(|| {
+                    format!("scope={raw} -> {path} (no PROJECT at or above it, no MODULE under it)")
+                })
+            }
             Target::Component { raw, path } => anchors
                 .component_anchor(merged, path)
                 .ok_or_else(|| format!("path={raw} -> {path} (no PROJECT or MODULE)")),
@@ -695,14 +754,15 @@ fn report(label: &str, t: &Tally) {
     let nonzero = |key: &str, n: usize| if n > 0 { format!(" {key}={n}") } else { String::new() };
     if t.constraint + t.decision + t.note > 0 {
         eprintln!(
-            "[declared] repo={label} constraint={} decision={} note={} anchored={} orphaned={} (anchor_qname={} anchor_project={}{}){}",
+            "[declared] repo={label} constraint={} decision={} note={} anchored={} orphaned={} (anchor_qname={} anchor_project={}{}{}){}",
             t.constraint,
             t.decision,
             t.note,
-            t.anchor_qname + t.anchor_project + t.anchor_module,
+            t.anchor_qname + t.anchor_project + t.anchor_enclosing + t.anchor_module,
             t.orphaned,
             t.anchor_qname,
             t.anchor_project,
+            nonzero("anchor_enclosing", t.anchor_enclosing),
             nonzero("anchor_module", t.anchor_module),
             nonzero("rejected", t.rejected),
         );
@@ -1030,6 +1090,73 @@ via = [\"./services/api/public/\"]
             s.contains(r#""transitive":true,"via":["services/api/public"],"via_raw":["./services/api/public/"]"#),
             "{s}"
         );
+    }
+
+    /// DT.7a: the enclosing PROJECT is the deepest of THIS repo at or above
+    /// the path (web/admin over web over .), and a deeper PROJECT that only
+    /// another repo of the build declares never binds.
+    #[test]
+    fn enclosing_project_picks_the_deepest_of_this_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        for (root, path, body) in [
+            (&a, "pyproject.toml", "[project]\nname = \"shop\"\n"),
+            (&a, "web/pyproject.toml", "[project]\nname = \"web\"\n"),
+            (&a, "web/app.py", "def show():\n    return 1\n"),
+            (&a, "web/admin/pyproject.toml", "[project]\nname = \"admin\"\n"),
+            (&a, "web/admin/panel.py", "def panel():\n    return 2\n"),
+            (&b, "web/admin/panel/pyproject.toml", "[project]\nname = \"panel\"\n"),
+            (&b, "web/admin/panel/x.py", "def x():\n    return 3\n"),
+        ] {
+            let p = root.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        let paths = [a.to_str().unwrap().to_string(), b.to_str().unwrap().to_string()];
+        let r = crate::generate_many(&paths).unwrap();
+        let repo_with = |qname: &str| {
+            r.merged
+                .graphs
+                .iter()
+                .find(|g| g.nav.qname_by_id.values().any(|q| q == qname))
+                .map(|g| g.repo)
+                .unwrap()
+        };
+        let anchors_of = |repo, root: &std::path::Path| {
+            let input = RepoInputs {
+                repo,
+                root: root.to_path_buf(),
+                label: root.to_string_lossy().to_string(),
+                config: None,
+            };
+            Anchors::build(&r.merged, &input)
+        };
+        let (repo_a, repo_b) = (repo_with("project:web/admin"), repo_with("project:web/admin/panel"));
+        assert_ne!(repo_a, repo_b);
+        let qname_in = |repo, id: Option<NodeId>| {
+            let id = id?;
+            r.merged.graphs.iter().filter(|g| g.repo == repo).find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+        };
+        let in_a = anchors_of(repo_a, &a);
+        // Every PROJECT of the build is in the vocabulary, b's included.
+        assert!(in_a.projects.iter().any(|p| p.path == "web/admin/panel"));
+        for (path, want) in [
+            ("web/admin/panel/views", "project:web/admin"),
+            ("web/admin", "project:web/admin"),
+            ("web/src", "project:web"),
+            ("webapp", "project:."),
+            (".", "project:."),
+        ] {
+            assert_eq!(qname_in(repo_a, in_a.enclosing_project(path)).as_deref(), Some(want), "{path}");
+        }
+        let in_b = anchors_of(repo_b, &b);
+        assert_eq!(
+            qname_in(repo_b, in_b.enclosing_project("web/admin/panel/x.py")).as_deref(),
+            Some("project:web/admin/panel")
+        );
+        // b has no root manifest, and a's projects do not bind in b.
+        assert_eq!(in_b.enclosing_project("web/admin"), None);
+        assert_eq!(in_b.enclosing_project("."), None);
     }
 
     #[test]
