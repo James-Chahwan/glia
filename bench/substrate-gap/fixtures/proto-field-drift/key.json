@@ -16,11 +16,6 @@
     {
       "from": "message:proto:shop.v1.OrderCreated",
       "to": "message:proto:shop.v1.OrderCreated",
-      "category": "SHARES_SCHEMA"
-    },
-    {
-      "from": "message:proto:shop.v1.OrderCreated",
-      "to": "message:proto:shop.v1.OrderCreated",
       "category": "SAME_AS",
       "note": "DD.5: one identity class (message_fqname/diverged: the consumer's copy drifted)"
     }
@@ -43,6 +38,14 @@
       "node": "message:proto:shop.v1.OrderCreated",
       "cell": "SCHEMA_FIELDS",
       "contains": "\"oneof\":\"payer\""
+    }
+  ],
+  "forbid": [
+    {
+      "from": "message:proto:shop.v1.OrderCreated",
+      "to": "message:proto:shop.v1.OrderCreated",
+      "category": "SHARES_SCHEMA",
+      "note": "DD.16: the copies are one SAME_AS star; LE.10c's schema_copy row reads that class"
     }
   ]
 }

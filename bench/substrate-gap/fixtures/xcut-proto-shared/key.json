@@ -2,12 +2,14 @@
   "framework": "xcut-proto-shared",
   "language": "proto",
   "dirs": ["svc-a", "svc-b"],
-  "note": "A10.7 — two services vendoring the same .proto. The two MESSAGE_TYPE nodes are per-repo islands until MessageSchemaResolver joins them on the full qname message:proto:shop.OrderPlaced.",
+  "note": "A10.7 — two services vendoring the same .proto. The two MESSAGE_TYPE nodes are per-repo islands until the identity resolver joins them on the full qname message:proto:shop.OrderPlaced (DD.5: one SAME_AS star, rule message_fqname). DD.16 retired the SHARES_SCHEMA message pair it replaced. Baseline before DD.16: 1 SHARES_SCHEMA between the OrderPlaced copies.",
   "expect_nodes": [
     {"kind": "MESSAGE_TYPE", "name": "OrderPlaced", "note": "declared in both services"}
   ],
   "expect_edges": [
-    {"from": "OrderPlaced", "to": "OrderPlaced", "category": "SHARES_SCHEMA", "note": "same message:proto:shop.OrderPlaced in two repos"},
     {"from": "OrderPlaced", "to": "OrderPlaced", "category": "SAME_AS", "note": "DD.5: one identity class (message_fqname), one star edge"}
+  ],
+  "forbid": [
+    {"from": "message:proto:shop.OrderPlaced", "to": "message:proto:shop.OrderPlaced", "category": "SHARES_SCHEMA", "note": "DD.16: the message pair is the SAME_AS star now, never a SHARES_SCHEMA edge"}
   ]
 }

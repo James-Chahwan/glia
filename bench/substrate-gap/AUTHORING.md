@@ -48,7 +48,7 @@ first four rows are pinned by `test_matrix.py`
 | `HTTP_CALLS` `GRPC_CALLS` `RPC_CALLS` | yes | `xstack-go-http`, `xcut-grpc-grpc_calls`, `xcut-trpc`: 1 → 1 |
 | `QUEUE_FLOWS` `WS_CONNECTS` `GRAPHQL_CALLS` `EVENT_FLOWS` | yes | `xcut-queue-queue_flows`, `xcut-websocket-ws_connects`, `xcut-graphql-graphql_calls`, `xcut-eventbus-spring`: 1 → 1 |
 | `CLI_INVOKES` | yes | `xcli-invokes`: 2 → 2 |
-| `SHARES_*` (all seven) | **no** — same-repo pairs are skipped | `xcut-proto-shared` `SHARES_SCHEMA`, `xdata-source-shares` `SHARES_DATA_SOURCE`, `xiac-terraform-k8s` `SHARES_INFRA_REF`, `xpoly-data-entity` `SHARES_DATA_ENTITY`: 1 → 0 |
+| `SHARES_*` (all seven) | **no** — same-repo pairs are skipped | `xschema-csharp-namespace` `SHARES_SCHEMA`, `xdata-source-shares` `SHARES_DATA_SOURCE`, `xiac-terraform-k8s` `SHARES_INFRA_REF`, `xpoly-data-entity` `SHARES_DATA_ENTITY`: 1 → 0 |
 | stack edge, different count | yes, but not the same edges | `matrix/python/amqp`, `matrix/csharp/amqp` `QUEUE_FLOWS` 2 → 1 (same-qname merge); `xstack-host-pairing` `HTTP_CALLS` 2 → 4 (host narrowing is per repo) |
 
 The scaffolder **refuses to overwrite** an existing cell without `--force`,

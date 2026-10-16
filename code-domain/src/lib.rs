@@ -142,7 +142,9 @@ pub mod node_kind {
     // v0.4.x — Package-deps resolver entity kind. One node per declared
     // ecosystem package, qname `package:<ecosystem>:<name>` (e.g.
     // `package:npm:react`, `package:cargo:tokio`, `package:gomod:github.com/gin-gonic/gin`).
-    // PackageResolver pairs across repos by full qname.
+    // The identity resolver's `package_name` rule joins one package across
+    // repos into a SAME_AS star (`same_as::dep_identity_key`; DD.5, DD.16
+    // retired the SHARES_DEPENDENCY clique it replaced).
     pub const PACKAGE_DEP: NodeKindId = NodeKindId(40);
 
     // v0.4.13 — collapsed-region anchor. One node stands in for a whole
@@ -374,8 +376,10 @@ pub mod edge_category {
     pub const SHARES_INFRA_REF: EdgeCategoryId = EdgeCategoryId(29);
 
     // v0.4.x — Package-deps resolver. Module (manifest file) → package node.
-    // SHARES_DEPENDENCY pairs PACKAGE_DEP nodes across repos when multiple
-    // services depend on the same package.
+    // SHARES_DEPENDENCY paired PACKAGE_DEP nodes across repos when multiple
+    // services depend on the same package; since DD.16 no pass emits it (the
+    // SAME_AS `package_name` star replaced it). The id stays registered and
+    // locked: old `.gmap`s carry it.
     pub const DEPENDS_ON: EdgeCategoryId = EdgeCategoryId(30);
     pub const SHARES_DEPENDENCY: EdgeCategoryId = EdgeCategoryId(31);
 

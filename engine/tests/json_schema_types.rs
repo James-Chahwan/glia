@@ -1,19 +1,22 @@
 //! LA.16 (programme A10.12) acceptance: JSON Schema files become located
 //! MESSAGE_TYPE nodes, `message:jsonschema:<root>[.<def>]`, and two services
-//! that vendor the same schema are joined by MessageSchemaResolver.
+//! that vendor the same schema are joined by the identity resolver: one
+//! SAME_AS star edge, rule `message_fqname` (DD.5; DD.16 retired the
+//! SHARES_SCHEMA message pair it replaced).
 //!
 //! The unit tests in `parsers/code/extractors/src/schemas.rs` prove the sniff
 //! and the scanner, and `walk.rs` proves admission. This builds the committed
 //! substrate fixture `xschema-jsonschema-shared` through `generate_many` (the
 //! entry `bench/substrate-gap` grades through, which writes nothing into the
 //! repos): the schema files survive the walk, route to the "json" group, and
-//! the shared root pairs across the two repos, while billing's data file whose
+//! the shared root joins across the two repos, while billing's data file whose
 //! nested object only looks schema-shaped mints nothing.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 
-use glia_code_domain::{cell_type, edge_category, node_kind};
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{cell_type, edge_category, node_kind, same_as};
 use glia_core::{CellPayload, NodeId, RepoId};
 use glia_engine::generate_many;
 
@@ -99,19 +102,27 @@ fn json_schemas_are_shared_message_types() {
         "exactly five, no extras"
     );
 
-    // One SHARES_SCHEMA cross-edge joins the two OrderCreated roots.
+    // One SAME_AS star edge (rule message_fqname) joins the two OrderCreated
+    // roots, and no SHARES_SCHEMA edge does (DD.16).
     let roots = &by_qname["message:jsonschema:OrderCreated"];
     assert_eq!(roots.len(), 2);
     let root_ids: HashSet<NodeId> = roots.iter().map(|(_, id, _)| *id).collect();
-    let shares: Vec<_> = r
-        .merged
-        .cross_edges
-        .iter()
-        .filter(|e| e.category == edge_category::SHARES_SCHEMA)
-        .filter(|e| root_ids.contains(&e.from) && root_ids.contains(&e.to))
-        .collect();
-    assert_eq!(shares.len(), 1, "one pair for one shared root");
-    assert_ne!(shares[0].from, shares[0].to);
+    let joining = |category| -> Vec<&glia_core::Edge> {
+        r.merged
+            .all_edges()
+            .filter(|e| e.category == category)
+            .filter(|e| root_ids.contains(&e.from) && root_ids.contains(&e.to))
+            .collect()
+    };
+    let same = joining(edge_category::SAME_AS);
+    assert_eq!(same.len(), 1, "one star edge for one shared root");
+    assert_ne!(same[0].from, same[0].to);
+    let rule = Evidence::of(same[0]).and_then(|ev| ev.rule);
+    assert_eq!(rule.as_deref(), Some(same_as::RULE_MESSAGE_FQNAME), "{:?}", same[0]);
+    assert!(
+        joining(edge_category::SHARES_SCHEMA).is_empty(),
+        "the message pair is the SAME_AS star now"
+    );
 
     // OrderCreated DEFINES OrderCreated.Address in each repo.
     for (repo, root, _) in roots {

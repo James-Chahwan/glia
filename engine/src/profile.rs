@@ -51,8 +51,8 @@ use glia_core::{NodeId, NodeKindId, RepoId};
 use glia_graph::{
     CliInvocationResolver, ConfigResolver, CronResolver, CrossGraphResolver, DbResolver,
     EventBusResolver, GraphQLStackResolver, GrpcStackResolver, HttpStackResolver, IacResolver,
-    IdentityResolver, MergedGraph, MessageSchemaResolver, PackageResolver, QueueStackResolver,
-    RpcStackResolver, SharedSchemaResolver, WebSocketStackResolver,
+    IdentityResolver, MergedGraph, QueueStackResolver, RpcStackResolver, SharedSchemaResolver,
+    WebSocketStackResolver,
 };
 
 use crate::build::BuildOptions;
@@ -160,17 +160,17 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
     resolver!("websocket", WebSocketStackResolver),
     resolver!("eventbus", EventBusResolver),
     resolver!("shared_schema", SharedSchemaResolver),
-    // A10.7 — MESSAGE_TYPE nodes joined across repos on the exact qname.
-    resolver!("message_schema", MessageSchemaResolver),
     resolver!("cli", CliInvocationResolver),
     resolver!("db", DbResolver),
     resolver!("cron", CronResolver),
     resolver!("config", ConfigResolver),
     resolver!("iac", IacResolver),
-    resolver!("package", PackageResolver),
     // DD.5: SAME_AS identity stars, the last Resolve pass. It reads nodes
     // only (never another resolver's edges), so its place is a convention:
-    // last, beside the SHARES_* pairings DD.16 retires. DD.7: plus the SCIP
+    // last. Its `package_name` and `message_fqname` stars replaced the
+    // PACKAGE_DEP SHARES_DEPENDENCY clique and the MESSAGE_TYPE SHARES_SCHEMA
+    // pairs (DD.16), so a shared package or message is joined here alone (an
+    // answer that walks reads the identity quotient). DD.7: plus the SCIP
     // keys of every snapshot under the context's SCIP roots (the SCIP stage
     // reads the same snapshots again in Post).
     PassSpec {
@@ -349,7 +349,7 @@ mod tests {
 
     use super::*;
 
-    const HEAD_ORDER: [&str; 27] = [
+    const HEAD_ORDER: [&str; 25] = [
         "http",
         "grpc",
         "rpc",
@@ -358,13 +358,11 @@ mod tests {
         "websocket",
         "eventbus",
         "shared_schema",
-        "message_schema",
         "cli",
         "db",
         "cron",
         "config",
         "iac",
-        "package",
         "identity",
         "external_edges",
         "downgrade_test_paths",
@@ -379,12 +377,13 @@ mod tests {
         "sort_cross_edges",
     ];
 
-    /// The registry reproduces the pre-LD.13 hardcoded tail exactly:
+    /// The registry began as the pre-LD.13 hardcoded tail exactly:
     /// `run_all_resolvers` (15), `post_passes` (6), then fill-then-sort as
     /// the last two steps (LC.3a); LF.2b's external edges are the first
     /// post-pass, LE.3a's TEST cells follow the TESTS emitter, and LF.4b's
     /// ADR decisions follow the doc linker. DD.5's identity resolver is the
-    /// sixteenth and last Resolve pass.
+    /// last Resolve pass; DD.16 retired the `message_schema` and `package`
+    /// resolvers its stars replaced, leaving fourteen.
     #[test]
     fn code_passes_order_is_head_order() {
         assert_eq!(CODE_PASSES.validate(), Ok(()));
@@ -394,7 +393,7 @@ mod tests {
         let count = |st: Stage| stages.iter().filter(|s| **s == st).count();
         assert_eq!(
             (count(Stage::Resolve), count(Stage::Post), count(Stage::Finalize)),
-            (16, 9, 2)
+            (14, 9, 2)
         );
     }
 

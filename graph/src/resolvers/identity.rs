@@ -34,7 +34,8 @@
 //!   key maps .NET to extracts a PACKAGE_DEP, so the question of whether a
 //!   stem is a declared name never reaches a class.
 //! - `message_fqname` (FACT): MESSAGE_TYPEs with one qname (flavour and fully
-//!   qualified name are already in it, as `MessageSchemaResolver` keys them).
+//!   qualified name are already in it, as the retired `message_schema`
+//!   resolver keyed them).
 //! - `contract_op` (DERIVED): contract-op DOC_SECTIONs (an ORIGIN
 //!   `same_as::contract_op_key` reads) of one repo and one owning PROJECT
 //!   with one match key: `METHOD` + the parameter-folded path

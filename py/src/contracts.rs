@@ -134,7 +134,7 @@ mod tests {
         let json = contract_fields_json(&merged).expect("serialises");
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         let rows = v.as_array().expect("a JSON array, not an object");
-        assert_eq!(rows.len(), 1, "one SHARES_SCHEMA pair: {json}");
+        assert_eq!(rows.len(), 1, "one message_fqname copy pair: {json}");
         let row = rows[0].as_object().expect("a row is an object");
         let key_at = |k: &str| json.find(&format!("\"{k}\":")).unwrap_or(usize::MAX);
         let order = [

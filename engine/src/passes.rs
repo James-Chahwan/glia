@@ -1324,9 +1324,10 @@ fn is_identifier(s: &str) -> bool {
 /// Tag the substrate-only synthetic node kinds with an `ORIGIN` cell so
 /// consumers (the engram exporter, neuropil) can filter them by coordinate
 /// rather than string-matching keys. These nodes are real and load-bearing for
-/// the cross-repo resolvers (`PackageResolver` pairs `package:npm:*`,
-/// `EventBusResolver` pairs `event_*`), so they are NOT dropped here — only
-/// categorised. (glia-v2 G6/G9/G11)
+/// the cross-repo passes (the identity resolver's `package_name` rule joins
+/// `package:npm:*` into SAME_AS stars, DD.16; `EventBusResolver` pairs
+/// `event_*`), so they are NOT dropped here — only categorised. (glia-v2
+/// G6/G9/G11)
 ///
 /// CG.4b (CA-13): an ENDPOINT the HTTP resolver left out of pairing as a
 /// third-party call (every call site marked external by the endpoint fold,

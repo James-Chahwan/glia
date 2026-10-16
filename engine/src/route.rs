@@ -969,8 +969,9 @@ fn route_branches(
         }
         // LA.16 (A10.12): a JSON Schema that is not an API contract
         // declares MESSAGE_TYPEs, the shape a `.proto` message or an
-        // `.avsc` record gets, so MessageSchemaResolver can pair them
-        // across repos. A contract keeps the A10.8 path below.
+        // `.avsc` record gets, so the identity resolver's `message_fqname`
+        // rule can join them across repos (one SAME_AS star, DD.16). A
+        // contract keeps the A10.8 path below.
         if glia_code_extractors::contracts::sniff_json_contract(source).is_none()
             && glia_code_extractors::schemas::sniff_json_schema(source)
         {

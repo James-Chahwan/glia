@@ -128,7 +128,7 @@ fn fields_table_over_proto_drift() {
         "{text}"
     );
     let rows = field_rows(&text);
-    assert_eq!(rows.len(), 1, "one SHARES_SCHEMA pair: {text}");
+    assert_eq!(rows.len(), 1, "one message_fqname copy pair: {text}");
     let row = rows[0];
     assert!(
         row.starts_with(

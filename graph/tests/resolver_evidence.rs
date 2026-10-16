@@ -404,19 +404,6 @@ fn db_edge_names_entity_or_provider() {
     assert_eq!(m.cross_edges.len(), 3, "{:?}", m.cross_edges);
 }
 
-/// The single-rule pairwise resolver sharing DB's pair emitter attaches no
-/// evidence of its own: LC.3a's emitter-only stamp is its whole story.
-#[test]
-fn message_schema_edge_carries_no_rule_of_its_own() {
-    let mut a = G::new("msg-a");
-    let ua = a.node(node_kind::MESSAGE_TYPE, "message:proto:shop.User");
-    let mut b = G::new("msg-b");
-    let ub = b.node(node_kind::MESSAGE_TYPE, "message:proto:shop.User");
-    let m = resolve(vec![a.build(), b.build()], &MessageSchemaResolver);
-    let e = edge(&m, ua, ub, edge_category::SHARES_SCHEMA);
-    assert!(Evidence::of(e).is_none(), "{e:?}");
-}
-
 // ============================================================================
 // Identity (DD.5) — SAME_AS stars name one of five rules, `/diverged` optional
 // ============================================================================

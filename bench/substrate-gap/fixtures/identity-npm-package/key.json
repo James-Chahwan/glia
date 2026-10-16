@@ -2,7 +2,7 @@
   "framework": "identity-npm-package",
   "language": "typescript",
   "dirs": ["web", "admin"],
-  "note": "DD.5: a package both repos declare is one identity class (rule package_name, FACT): one SAME_AS star edge per class, member -> the class's first-graph copy (equal qnames). Baseline HEAD 84e2e71: 2 SHARES_DEPENDENCY edges, no SAME_AS category.",
+  "note": "DD.5: a package both repos declare is one identity class (rule package_name, FACT): one SAME_AS star edge per class, member -> the class's first-graph copy (equal qnames). Baseline HEAD 84e2e71: 2 SHARES_DEPENDENCY edges, no SAME_AS category. DD.16 retired PackageResolver: the stars alone, no SHARES_DEPENDENCY.",
   "expect_nodes": [
     {"kind": "PACKAGE_DEP", "name": "package:npm:react"}
   ],
@@ -12,6 +12,8 @@
   ],
   "forbid": [
     {"from": "package:npm:left-pad", "to": "package:npm:left-pad", "category": "SAME_AS", "note": "only web declares it"},
-    {"from": "package:npm:typescript", "to": "package:npm:typescript", "category": "SAME_AS", "note": "only admin declares it"}
+    {"from": "package:npm:typescript", "to": "package:npm:typescript", "category": "SAME_AS", "note": "only admin declares it"},
+    {"from": "package:npm:react", "to": "package:npm:react", "category": "SHARES_DEPENDENCY", "note": "DD.16: the package_name star replaced the SHARES_DEPENDENCY clique"},
+    {"from": "package:npm:lodash", "to": "package:npm:lodash", "category": "SHARES_DEPENDENCY", "note": "DD.16: either shared package"}
   ]
 }

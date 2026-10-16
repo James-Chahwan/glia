@@ -794,6 +794,11 @@ def test_anchor_clojure_kafka_is_unknown():
 # Every category a cross-graph resolver (graph/src/resolvers/) emits. Intra-graph
 # categories such as IMPORTS are left out: single-dir qnames carry the dir
 # prefix, so their edges move for reasons that have nothing to do with RepoIds.
+# SHARES_DEPENDENCY stays although no resolver emits it since DD.16 (the SAME_AS
+# package_name star replaced it): a registered category, a vacuous member here
+# and in REPO_PAIRWISE_CATEGORIES. SAME_AS is left out: it is not repo-pairwise
+# (a monorepo's workspace package <-> project and contract-op classes form
+# inside one repo, while two copies of one message in one repo are one node).
 CROSS_GRAPH_CATEGORIES = frozenset({
     "HTTP_CALLS", "GRPC_CALLS", "RPC_CALLS", "QUEUE_FLOWS", "GRAPHQL_CALLS",
     "WS_CONNECTS", "EVENT_FLOWS", "CLI_INVOKES",
@@ -803,7 +808,9 @@ CROSS_GRAPH_CATEGORIES = frozenset({
 
 # Two-dir fixtures, each with the cross-graph category it exists to show.
 PAIRING_PROBES = [
-    ("xcut-proto-shared", "SHARES_SCHEMA"),
+    # DD.16: xcut-proto-shared's message pair is a SAME_AS star now; the DTO
+    # pair SharedSchemaResolver still emits is the SHARES_SCHEMA probe.
+    ("xschema-csharp-namespace", "SHARES_SCHEMA"),
     ("xdata-source-shares", "SHARES_DATA_SOURCE"),
     ("xiac-terraform-k8s", "SHARES_INFRA_REF"),
     ("xpoly-data-entity", "SHARES_DATA_ENTITY"),

@@ -7,10 +7,14 @@
 //! LE.10a (proto / Avro on MESSAGE_TYPE) and LE.10b (OpenAPI / AsyncAPI / Pact
 //! on contract-op DOC_SECTIONs) wrote, over pairings the graph already holds:
 //!
-//! - `schema_copy`: every SHARES_SCHEMA edge between two MESSAGE_TYPE nodes
-//!   (producer = edge.from). The pair has no direction, so a format whose rules
-//!   do (Avro: reader vs writer) is judged both ways, and gets one row per
-//!   direction only when the two verdicts differ;
+//! - `schema_copy`: every cross-repo pair of one SAME_AS `message_fqname`
+//!   class (DD.5's identity star; DD.16 retired the SHARES_SCHEMA message pairs
+//!   it replaced), producer = the copy of the earlier graph, as the pair was
+//!   oriented before; plus any SHARES_SCHEMA edge between two MESSAGE_TYPE
+//!   nodes (none is resolver-made any more, an overlay `[[edge]]` can declare
+//!   one; producer = edge.from). The pair has no direction, so a format whose
+//!   rules do (Avro: reader vs writer) is judged both ways, and gets one row
+//!   per direction only when the two verdicts differ;
 //! - `topic`: a paired `message_contracts` row whose producer and consumer
 //!   types resolve, by their last `.` segment and uniquely within their own
 //!   repo, to a MESSAGE_TYPE. Two sides resolving to one node (one shared
@@ -36,8 +40,11 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use glia_code_domain::{cell_type, edge_category, node_kind};
-use glia_core::{Cell, CellPayload, NodeId};
+use glia_activation::algo::CategorySet;
+use glia_activation::algo::classes::Classes;
+use glia_code_domain::evidence::Evidence;
+use glia_code_domain::{cell_type, edge_category, node_kind, same_as};
+use glia_core::{Cell, CellPayload, Edge, NodeId, RepoId};
 use glia_graph::{MergedGraph, normalise_http_path};
 use serde_json::Value;
 
@@ -447,21 +454,63 @@ pub(crate) fn qualified_name(qname: &str) -> &str {
 
 // ---- pairings --------------------------------------------------------------
 
-/// SHARES_SCHEMA edges between two MESSAGE_TYPE holders, one per unordered
-/// pair (a node folded from two graphs can repeat its edge).
+/// The `schema_copy` pairs between two MESSAGE_TYPE holders, one per
+/// unordered pair: every cross-repo pair of a SAME_AS `message_fqname` class,
+/// and every SHARES_SCHEMA edge (an overlay's; no resolver emits one between
+/// messages since DD.16).
+///
+/// A class's pairs are oriented as the `message_schema` resolver emitted them
+/// before DD.16 replaced it with the identity star: the members as the graphs
+/// hold them (graph order, then node order; a node folded from two graphs
+/// counts at each), and each `i < j` of two different repos is `(i, j)`. So
+/// the producer is the earlier graph's copy and the rows are those of HEAD.
+/// All oriented pairs are then deduplicated in one ascending sweep (a node
+/// folded from two graphs can name a pair both ways), the first kept.
 fn schema_copies(merged: &MergedGraph, holders: &BTreeMap<u64, Holder>) -> Vec<(u64, u64)> {
     let is_message = |id: u64| holders.get(&id).is_some_and(|h| h.message);
-    let edges: BTreeSet<(u64, u64)> = merged
+    let mut edges: BTreeSet<(u64, u64)> = merged
         .all_edges()
         .filter(|e| e.category == edge_category::SHARES_SCHEMA)
         .map(|e| (e.from.0, e.to.0))
         .filter(|(f, t)| f != t && is_message(*f) && is_message(*t))
         .collect();
+    let classes = Classes::from_source(
+        merged,
+        &CategorySet::of(&[edge_category::SAME_AS]),
+        is_message_fqname,
+    );
+    if !classes.is_empty() {
+        let mut members: BTreeMap<u64, Vec<(u64, RepoId)>> = BTreeMap::new();
+        for g in &merged.graphs {
+            for n in &g.nodes {
+                if is_message(n.id.0) && classes.class_of(n.id).is_some() {
+                    members.entry(classes.rep(n.id).0).or_default().push((n.id.0, n.repo));
+                }
+            }
+        }
+        for copies in members.values() {
+            for (i, a) in copies.iter().enumerate() {
+                for b in &copies[i + 1..] {
+                    if a.1 != b.1 && a.0 != b.0 {
+                        edges.insert((a.0, b.0));
+                    }
+                }
+            }
+        }
+    }
     let mut taken: HashSet<(u64, u64)> = HashSet::new();
     edges
         .into_iter()
         .filter(|&(f, t)| taken.insert((f.min(t), f.max(t))))
         .collect()
+}
+
+/// A SAME_AS edge of the `message_fqname` rule (`/diverged` or not): the one
+/// identity rule whose members are schema copies.
+fn is_message_fqname(e: &Edge) -> bool {
+    Evidence::of(e)
+        .and_then(|ev| ev.rule)
+        .is_some_and(|r| same_as::split_evidence_rule(&r).0 == same_as::RULE_MESSAGE_FQNAME)
 }
 
 #[derive(Clone, Copy)]

@@ -21,11 +21,9 @@ mod websocket;
 mod eventbus;
 mod shared_schema;
 mod db;
-mod message_schema;
 mod cron;
 mod config;
 mod iac;
-mod package;
 mod cli;
 // 0.5.2 (D0.5): SAME_AS identity stars (DD.5-DD.7).
 mod identity;
@@ -42,11 +40,9 @@ pub use websocket::WebSocketStackResolver;
 pub use eventbus::EventBusResolver;
 pub use shared_schema::SharedSchemaResolver;
 pub use db::DbResolver;
-pub use message_schema::MessageSchemaResolver;
 pub use cron::CronResolver;
 pub use config::ConfigResolver;
 pub use iac::IacResolver;
-pub use package::PackageResolver;
 pub use cli::CliInvocationResolver;
 pub use identity::IdentityResolver;
 pub use http::normalise_http_path;
@@ -124,12 +120,12 @@ pub(crate) fn weakest(a: Confidence, b: Confidence) -> Confidence {
 /// Emit one edge per cross-repo pair in `refs`, returning how many were added.
 /// Same-repo pairs are skipped: a repo's own duplicates are not a cross-service
 /// join. `confidence: None` means `weakest(a, b)`; `Some(c)` forces `c` (the
-/// DB provider pass forces `Weak` — see [`DbResolver::resolve`]). Shared by
-/// the exact-qname pairwise resolvers (`DbResolver`, `MessageSchemaResolver`).
+/// DB provider pass forces `Weak` — see [`DbResolver::resolve`]). Used by the
+/// exact-qname pairwise resolver, [`DbResolver`].
 ///
 /// LC.3c: `ev` is the rule evidence every emitted edge carries (the DB entity
 /// and provider passes); `None` leaves the edges bare for LC.3a's
-/// emitter-only stamp in the engine (`MessageSchemaResolver`, one rule).
+/// emitter-only stamp in the engine.
 fn emit_cross_repo_pairs(
     refs: &[(NodeId, RepoId, Confidence)],
     category: EdgeCategoryId,

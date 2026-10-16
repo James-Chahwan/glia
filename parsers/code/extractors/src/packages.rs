@@ -1,9 +1,10 @@
 //! Package dependency extraction (v0.4.x — task #10).
 //!
 //! Emits `PACKAGE_DEP` nodes per declared dependency in a manifest file with
-//! `DEPENDS_ON` edges from the manifest's module. `PackageResolver` then
-//! pairs same-qname nodes across repos to surface "service A and service B
-//! both depend on `react@^18`" cross-service signal.
+//! `DEPENDS_ON` edges from the manifest's module. The identity resolver's
+//! `package_name` rule then joins one package's nodes across repos into a
+//! SAME_AS star (DD.5, DD.16) to surface "service A and service B both depend
+//! on `react@^18`" cross-service signal.
 //!
 //! Single qname shape: `package:<ecosystem>:<name>`. Ecosystems:
 //!   - `npm`        — package.json `dependencies` / `devDependencies` /

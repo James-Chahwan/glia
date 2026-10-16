@@ -1,9 +1,9 @@
 //! LE.10c acceptance: `contract_fields` diffs the DECLARED fields of both
 //! sides of every contract pairing the graph already holds — two repos' copies
-//! of one message (SHARES_SCHEMA), a queue topic whose sides are typed, an
-//! AsyncAPI channel's publish / subscribe ops, and an OpenAPI op against a
-//! Pact interaction — and judges each difference by that format's own
-//! compatibility rules.
+//! of one message (a SAME_AS `message_fqname` class, DD.16), a queue topic
+//! whose sides are typed, an AsyncAPI channel's publish / subscribe ops, and
+//! an OpenAPI op against a Pact interaction — and judges each difference by
+//! that format's own compatibility rules.
 //!
 //! The trees are LE.10a / LE.10b's committed substrate-gap fixtures, built
 //! with `generate_many` over the dirs their key.json names, so the rows are
@@ -79,7 +79,7 @@ fn proto_copy_drift() {
     assert_eq!(
         rows.len(),
         1,
-        "one SHARES_SCHEMA pair, rules symmetric: one row: {rows:#?}"
+        "one message_fqname copy pair, rules symmetric: one row: {rows:#?}"
     );
     let r = only_row(&rows, "schema_copy");
     assert_eq!(r.key, "shop.v1.OrderCreated");
@@ -100,8 +100,9 @@ fn proto_copy_drift() {
     assert_eq!(t.change, "type");
     assert_eq!(t.section, "fields");
     assert!(t.breaking);
-    // The row keeps SHARES_SCHEMA's orientation: edge.from is the first
-    // repo's copy (the resolver pairs in build order), the producer dir.
+    // The row keeps the pre-DD.16 SHARES_SCHEMA orientation: the producer is
+    // the first repo's copy (the SAME_AS class's members in build order), the
+    // producer dir.
     assert_eq!(
         (t.producer.as_deref(), t.consumer.as_deref()),
         (Some("int64"), Some("int32"))
