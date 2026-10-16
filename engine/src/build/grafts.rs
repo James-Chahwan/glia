@@ -16,7 +16,7 @@ use glia_code_domain::{
 };
 use glia_code_extractors::constants::ConstTable;
 use glia_code_extractors::next_pages::{self, NextRoots, PageRouter};
-use glia_code_extractors::{anchor, cron, eventbus, openapi_annot, queue_topic, queues};
+use glia_code_extractors::{anchor, cron, eventbus, openapi_annot, queue_topic, queues, websocket};
 use glia_core::{Cell, CellPayload, NodeId, NodeKindId, RepoId};
 use glia_graph::rust_paths::RustCrate;
 
@@ -33,7 +33,8 @@ use crate::route::ModuleQnames;
 /// Run every post-cache graft over one repo's parses, in order: the LF.2e
 /// overlay wrapper scan and its http half, the A11.2 endpoint fold, the LA.6d
 /// Next.js page graft, the LA.4 queue-topic const fold, the CB.3b event-name
-/// const fold, the DF.13 Python signal binding, the DG.7b akka-quartz conf
+/// const fold, the DT.3b WebSocket client base fold, the DF.13 Python signal
+/// binding, the DG.7b akka-quartz conf
 /// schedules, the LF.2e wrappers' queue half, the A5.2 / A5.3 / LA.17 RPC
 /// needles with their `[grpc-client]` /
 /// `[grpc-server-impl]` / `[proto-rpc]` markers, the A5.8 `[marker-anchor]`
@@ -115,6 +116,12 @@ pub(super) fn apply_post_cache(
     let (event_stats, event_pool) = apply_event_const_names(parses_by_lang, &folds, parse_errors);
     event_stats.report(repo_label);
     report_const_fold_pool(queue_pool, event_pool, repo_label);
+    // DT.3b: WebSocket clients whose URL base sits in the configuration fold
+    // through the same tables and the same cache rule, as the A11.2 endpoint
+    // fold does for HTTP clients. Above the owner pass (WS_CLIENT is an owned
+    // kind), and above the CB.24 stamp and the DF.8 external mark, which read
+    // the hosts it records.
+    apply_ws_client_bases(parses_by_lang, &folds, parse_errors).report(repo_label);
     // DF.13: blinker / Django signal sites, named through the repo's signal
     // table. After the CB.3b fold, whose re-emit it extends (one helper,
     // `event_fold_one`, so the two cannot drift), and in the same seam: above
@@ -1097,6 +1104,103 @@ fn apply_event_const_names(
         }
     }
     (stats, FoldPool { files: targets.len(), threads })
+}
+
+/// DT.3b: a WS_CLIENT node.
+fn is_ws_client_node(nav: &CodeNav, id: NodeId) -> bool {
+    nav.kind_by_id.get(&id) == Some(&node_kind::WS_CLIENT)
+}
+
+/// DT.3b: per-repo tallies of the WebSocket client base fold.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct WsBaseStats {
+    /// Files whose WS_CLIENT nodes were swapped (at least one site folded).
+    files: usize,
+    /// Client sites whose URL text a configured literal changed.
+    folded: usize,
+    /// Client sites whose member chain nothing bound (or whose bound value
+    /// read no path), left on their per-file reading.
+    unresolved: usize,
+}
+
+impl WsBaseStats {
+    /// fired_on marker, once per repo where any client URL offered the fold a
+    /// member chain:
+    ///   `[ws-base] folded {n} client sites in {f} files (unresolved={u}) repo=<label>`
+    fn report(&self, repo_label: &str) {
+        if self.folded + self.unresolved > 0 {
+            eprintln!(
+                "[ws-base] folded {} client sites in {} files (unresolved={}) repo={repo_label}",
+                self.folded, self.files, self.unresolved
+            );
+        }
+    }
+}
+
+/// DT.3b (tweaks T3): a WebSocket client whose URL base sits in the
+/// configuration is keyed by the configured URL's path, and records its host,
+/// as the A11.2 endpoint fold keys an HTTP client: `new
+/// WebSocket(environment.feedUrl)` with `feedUrl: 'ws://feed-svc:8080/rt/feed'`
+/// mints `ws_client:/rt/feed` with ENDPOINT_HIT `"host":"feed-svc:8080"`, and
+/// `` `${environment.wsBase}/prices` `` with a base `ws://feed-svc:8080/rt`
+/// mints `ws_client:/rt/prices`, so the tail alone never pairs another route.
+///
+/// The per-file client scan reads such a URL's chain as one dynamic piece: a
+/// lookup reads other files, and the scan's output is cached by the file's own
+/// hash (the constants.rs cache rule). So this pass re-runs the text-only
+/// client scan — no tree-sitter — with a resolver, for the files whose parse
+/// already holds a WS_CLIENT (every client site minted one), cached parses
+/// included; the cache keeps the pre-fold parse and the fold re-runs every
+/// build, so a base edited in environment.ts re-keys a cache-served client.
+///
+/// The resolver is LA.4's ([`fold_one`]): a SAME-FILE binding at any shape,
+/// a binding in another file only when the chain is constant-shaped (dotted or
+/// SCREAMING_CASE, `ConstTable::resolve_identity`), a `.glia/overlay.toml`
+/// `[constants]` pin (already in `consts`), an ambiguous key never: a base
+/// bound per deployment (environment.ts and environment.prod.ts) keeps the
+/// per-file reading. An env read never resolves.
+///
+/// DC.3's split: targets in file order ([`fold_targets`], WS anchors carry
+/// `anchor::position_cell`'s POSITION, the CB.3b encoding), each fold on the
+/// engine pool, then stats, swap and error lines in target (= file) order.
+/// A file's client nodes are swapped (`websocket::replace_ws_client_nodes`)
+/// only when at least one site folded, so every other file is untouched.
+fn apply_ws_client_bases(
+    parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
+    inputs: &FoldInputs<'_>,
+    parse_errors: &mut Vec<String>,
+) -> WsBaseStats {
+    let mut stats = WsBaseStats::default();
+    let targets = fold_targets(parses_by_lang, inputs, is_ws_client_node, event_position);
+    if targets.is_empty() {
+        return stats;
+    }
+    let (outs, _threads) = crate::parallel::par_map_ordered(&targets, |t| {
+        fold_one(inputs, t, |source, path, resolve| {
+            let (module, repo) = (t.module_id, inputs.repo);
+            websocket::extract_ws_client_nodes_with_consts(source, path, module, repo, resolve)
+        })
+    });
+    for (t, out) in targets.iter().zip(outs) {
+        let Some(fold) = out else {
+            parse_errors.push(format!("{}: PANIC (ws base fold)", inputs.path(t)));
+            continue;
+        };
+        stats.folded += fold.counts.folded;
+        stats.unresolved += fold.counts.unresolved;
+        if fold.counts.folded == 0 {
+            continue;
+        }
+        stats.files += 1;
+        // WS client nodes carry no edges of their own (their module and owner
+        // edges are the anchor pass's), so there is no extractor edge to stamp:
+        // the swap stamps what it re-anchors `extractor:anchor` rule
+        // `const_fold`.
+        if let Some(fp) = parses_by_lang.get_mut(t.lang).and_then(|p| p.get_mut(t.slot)) {
+            websocket::replace_ws_client_nodes(fp, t.module_id, t.lang, fold);
+        }
+    }
+    stats
 }
 
 /// CB.3b / DF.13: one file's event nodes re-emitted through the CB.3b
@@ -2415,6 +2519,168 @@ mod const_fold_tests {
         let sites = site_qnames(&gone.by_lang);
         assert!(!sites.contains("queue_consumer:billing.paid"), "{sites:?}");
         assert!(sites.contains("queue_producer:orders.created"), "{sites:?}");
+    }
+}
+
+#[cfg(test)]
+mod ws_base_tests {
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    use super::super::assemble::build_const_table;
+    use super::super::go_modules_for;
+    use super::*;
+    use crate::cache::CacheEntry;
+    use crate::route::parse_repo_files;
+    use crate::walk::walk_source_files;
+    use glia_code_domain::walk_gating::repo_identity;
+
+    fn write(dir: &Path, rel: &str, body: &str) {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// The xcut-websocket-env-base client, plus a file whose client URL is a
+    /// literal (never a target that folds) and one whose chain nothing binds.
+    fn write_repo(dir: &Path) {
+        write(dir, "package.json", "{ \"name\": \"feed-client\" }\n");
+        write(
+            dir,
+            "src/environment.ts",
+            "export const environment = { feedUrl: 'ws://feed-svc:8080/rt/feed', wsBase: 'ws://feed-svc:8080/rt' };\n",
+        );
+        write(
+            dir,
+            "src/live.ts",
+            concat!(
+                "import { environment } from './environment';\n\n",
+                "export function openFeed(): WebSocket {\n",
+                "  return new WebSocket(environment.feedUrl);\n",
+                "}\n\n",
+                "export function openPrices(): WebSocket {\n",
+                "  return new WebSocket(`${environment.wsBase}/prices`);\n",
+                "}\n",
+            ),
+        );
+        write(
+            dir,
+            "src/literal.ts",
+            "export const open = () => new WebSocket('ws://chat-svc/ws/chat');\n",
+        );
+        write(
+            dir,
+            "src/unbound.ts",
+            "import { environment } from './environment';\nexport const open = () => new WebSocket(`${environment.missing}/ws/x`);\n",
+        );
+    }
+
+    struct Parsed {
+        files: Vec<(String, String)>,
+        repo: RepoId,
+        by_lang: HashMap<&'static str, Vec<FileParse>>,
+    }
+
+    fn parsed(root: &Path) -> Parsed {
+        let label = root.to_str().unwrap();
+        let repo = RepoId::from_canonical(&repo_identity(root).key);
+        let (files, _regions, _md, roots) = walk_source_files(root);
+        let go = go_modules_for(root, &roots, label);
+        let (by_lang, errors) = parse_repo_files(&files, repo, &go, None, label);
+        assert!(errors.is_empty(), "{errors:?}");
+        Parsed { files, repo, by_lang }
+    }
+
+    fn client_qnames(by_lang: &HashMap<&'static str, Vec<FileParse>>) -> BTreeSet<String> {
+        by_lang
+            .values()
+            .flatten()
+            .flat_map(|fp| {
+                fp.nav
+                    .qname_by_id
+                    .iter()
+                    .filter(|(id, _)| is_ws_client_node(&fp.nav, **id))
+                    .map(|(_, q)| q.clone())
+            })
+            .collect()
+    }
+
+    /// The canonical cache payload of every parse, languages sorted.
+    fn payloads(by_lang: &HashMap<&'static str, Vec<FileParse>>) -> Vec<Vec<u8>> {
+        let mut langs: Vec<&&'static str> = by_lang.keys().collect();
+        langs.sort();
+        langs
+            .into_iter()
+            .flat_map(|lang| {
+                by_lang[*lang]
+                    .iter()
+                    .map(move |fp| CacheEntry::new(0, lang, fp.clone()).payload().expect("payload"))
+            })
+            .collect()
+    }
+
+    fn fold(
+        p: &Parsed,
+        threads: usize,
+    ) -> (WsBaseStats, HashMap<&'static str, Vec<FileParse>>, Vec<String>) {
+        let mut scan_errors = Vec::new();
+        let (consts, tables, _, _) = build_const_table(&p.files, &mut scan_errors);
+        assert!(scan_errors.is_empty(), "{scan_errors:?}");
+        let modules = ModuleQnames::plan(&p.files);
+        let inputs = FoldInputs {
+            files: &p.files,
+            repo: p.repo,
+            modules: &modules,
+            consts: &consts,
+            file_tables: &tables,
+        };
+        let mut by_lang = p.by_lang.clone();
+        let mut errors = Vec::new();
+        let stats = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .expect("pool")
+            .install(|| apply_ws_client_bases(&mut by_lang, &inputs, &mut errors));
+        (stats, by_lang, errors)
+    }
+
+    /// DT.3b: the configured bases re-key their clients in the one file that
+    /// holds them; the literal client is untouched and the unbound chain is
+    /// counted, not folded; the pool size changes nothing.
+    #[test]
+    fn ws_client_bases_fold_through_the_repo_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("client");
+        write_repo(&root);
+        let p = parsed(&root);
+        assert_eq!(
+            client_qnames(&p.by_lang),
+            ["ws_client:/prices", "ws_client:/ws/chat", "ws_client:/ws/x", "ws_client:ws"]
+                .map(String::from)
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+        let (stats, by_lang, errors) = fold(&p, 1);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(stats, WsBaseStats { files: 1, folded: 2, unresolved: 1 });
+        assert_eq!(
+            client_qnames(&by_lang),
+            ["ws_client:/rt/feed", "ws_client:/rt/prices", "ws_client:/ws/chat", "ws_client:/ws/x"]
+                .map(String::from)
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+        // Only live.ts changed: every other parse is byte-identical.
+        let before = payloads(&p.by_lang);
+        let after = payloads(&by_lang);
+        assert_eq!(before.len(), after.len());
+        let changed = before.iter().zip(&after).filter(|(a, b)| a != b).count();
+        assert_eq!(changed, 1);
+        // The pool's order-preserving map: 8 threads == 1.
+        let (stats8, by_lang8, errors8) = fold(&p, 8);
+        assert_eq!(stats8, stats);
+        assert_eq!(errors8, errors);
+        assert!(payloads(&by_lang8) == after, "folded parses by threads");
     }
 }
 

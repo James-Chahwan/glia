@@ -13,7 +13,7 @@
 //! preceded by one, so Dart's `Dio()` is not socket.io's `io(`.
 //!
 //! Names: a server path is kept verbatim (`/chat/{room}` stays templated); a
-//! client argument goes through [`client_path`], which reads the static tail
+//! client argument goes through [`path_of_text`], which reads the static tail
 //! of a concatenation or template literal and strips `ws(s)://` /
 //! `http(s)://` + authority. Anything unreadable falls back to `ws`
 //! (`default` for the path-less NestJS row), exactly as before the rewrite,
@@ -70,6 +70,25 @@
 //! [`builder_literal`]). A node every one of whose sites read it through a
 //! builder is Weak; the resolver's WS_CONNECTS takes the weakest side.
 //!
+//! DT.3b: a client URL whose base sits in the repo's configuration folds
+//! through the const table, as the A11.2 HTTP endpoint fold does. The lookup
+//! reads other files, so it cannot run here (the `constants.rs` CACHE RULE):
+//! the engine re-runs the client scan post-cache through
+//! [`extract_ws_client_nodes_with_consts`] with the repo table as a resolver,
+//! and swaps a file's WS_CLIENT nodes ([`replace_ws_client_nodes`]) when a
+//! site folded. The fold changes the one per-site reading ([`ClientUrl::path`]
+//! / [`ClientUrl::host`], through [`client_text`]): a member chain in a
+//! template's `${..}`, a Dart `$name` / `${..}`, a `+` piece or the whole
+//! argument is replaced by the literal the resolver binds it to, so
+//! `new WebSocket(environment.feedUrl)` reads `ws://feed-svc:8080/rt/feed`
+//! (`/rt/feed`, host `feed-svc:8080`) and `` `${environment.wsBase}/prices` ``
+//! with `wsBase = 'ws://feed-svc:8080/rt'` reads `/rt/prices`, never the tail
+//! alone. A bare lower-case identifier or `this.<m>` that is the whole
+//! argument is DT.3a's scoped read ([`client_url`]), not the file-wide
+//! table's ([`ClientUrl::foldable`]); a folded text that no longer reads a
+//! path where the plain one did is refused ([`ClientUrl::url_text`]). With no
+//! resolver the scan is byte for byte the per-file one.
+//!
 //! Anchors: the name is read per site, so EVERY site is anchored and
 //! `anchor::attach` gives each owning function its HANDLED_BY (server) or USES
 //! (client) edge. Python decorators anchor at the decorated `def` line
@@ -78,7 +97,7 @@
 //!
 //! Hosts (CB.21): every CLIENT site stacks one ENDPOINT_HIT on its node,
 //! `{"via":"ws","host":"chat-svc:8080"}` when the URL's static head names a
-//! literal authority ([`client_host`]), `{"via":"ws"}` otherwise. The graph
+//! literal authority ([`host_of_text`]), `{"via":"ws"}` otherwise. The graph
 //! crate's ws resolver narrows a client's same-path handlers to the service
 //! its hosts name; one hostless site blocks that, as on the HTTP side.
 //!
@@ -114,15 +133,16 @@
 //! another packet's file set, the rule A2.8 followed for `escape_json`).
 //! Follow-up: one shared call-argument reader for both.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glia_code_domain::endpoint::{channel_hit_cell, client_url_split};
-use glia_code_domain::{CodeNav, GRAPH_TYPE, node_kind};
+use glia_code_domain::{CodeNav, FileParse, GRAPH_TYPE, node_kind};
 use glia_core::{Confidence, Node, NodeId, NodeKindId, RepoId};
 
 use crate::anchor::{Anchor, line_of};
 use crate::cli::CodeMap;
 use crate::code_guard::LazyGuard;
+use crate::marker_swap;
 use crate::queue_topic::{LOOKAHEAD_LINES, MAX_HITS_PER_NEEDLE, MAX_REGION, clip};
 
 pub struct WsNodes {
@@ -145,9 +165,9 @@ enum PathRead {
     KeyedOrArg(&'static [&'static str]),
     /// `MapHub<T>("/x")`: argument 0 of the call after the matching `>`.
     AfterAngle,
-    /// [`client_path`] on positional argument `n`.
+    /// [`path_of_text`] on positional argument `n`.
     Client(usize),
-    /// DH.9, Dart: [`client_path`] on positional argument `n` once
+    /// DH.9, Dart: [`path_of_text`] on positional argument `n` once
     /// [`client_uri_arg`] stepped into a `Uri.parse(..)` / `Uri.tryParse(..)`
     /// wrapper, every quoted literal read with Dart interpolation
     /// ([`Interp::Dart`]).
@@ -509,6 +529,8 @@ pub fn extract_ws_handler_nodes(
             label: "handlers",
             hits: false,
         },
+        None,
+        &mut WsFoldCounts::default(),
     )
 }
 
@@ -523,14 +545,121 @@ pub fn extract_ws_client_nodes(
         path,
         module_id,
         repo,
-        Side {
-            rows: CLIENT_ROWS,
-            kind: node_kind::WS_CLIENT,
-            prefix: "ws_client:",
-            label: "clients",
-            hits: true,
-        },
+        CLIENT_SIDE,
+        None,
+        &mut WsFoldCounts::default(),
     )
+}
+
+/// The client half of the scan, shared by the per-file pass and the DT.3b
+/// fold so the two cannot drift.
+const CLIENT_SIDE: Side = Side {
+    rows: CLIENT_ROWS,
+    kind: node_kind::WS_CLIENT,
+    prefix: "ws_client:",
+    label: "clients",
+    hits: true,
+};
+
+/// DT.3b: the resolver the engine's post-cache fold hands the client scan
+/// (the LA.4 resolver over the repo const table): a source expression in,
+/// the literal it is bound to out.
+type Resolve<'r> = &'r dyn Fn(&str) -> Option<String>;
+
+/// DT.3b: what the post-cache base fold read in one file.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct WsFoldCounts {
+    /// Client sites whose URL text the resolver changed (a member chain
+    /// replaced by its literal) and whose folded reading stood.
+    pub folded: usize,
+    /// Client sites that offered the resolver a member chain and kept their
+    /// plain reading: nothing bound it (a parameter, a runtime value, an
+    /// ambiguous or env-read key), or the literal it bound read no path where
+    /// the plain text did. A site that folded is never counted here, even
+    /// when another of its chains (a path parameter) stayed unread.
+    pub unresolved: usize,
+}
+
+/// DT.3b: one file's WS_CLIENT nodes re-emitted through a resolver.
+pub struct WsClientFold {
+    pub nodes: WsNodes,
+    pub counts: WsFoldCounts,
+    /// The file the nodes were read from, which [`replace_ws_client_nodes`]
+    /// hands [`crate::anchor::attach`] when it re-anchors them.
+    pub path: String,
+}
+
+/// DT.3b: the file's WS_CLIENT nodes, emitted exactly as
+/// [`extract_ws_client_nodes`] emits them except that every member chain in a
+/// client URL that `resolve` binds to a literal holding no `${` is read as
+/// that literal (module doc). So `new WebSocket(environment.feedUrl)` mints
+/// `ws_client:/rt/feed` with an ENDPOINT_HIT naming `feed-svc:8080`, and
+/// `` new WebSocket(`${environment.wsBase}/prices`) `` mints
+/// `ws_client:/rt/prices`, not the tail-only `ws_client:/prices`.
+///
+/// Resolution needs the whole repo's const table, which is not a function of
+/// this file, so the engine calls this AFTER the parse cache (never inside the
+/// per-file extractors) and swaps the file's client nodes with
+/// [`replace_ws_client_nodes`] only when `counts.folded > 0`. The fold prints
+/// none of the per-file `[ws]` / `[code-guard]` lines: each file reports once
+/// per parse; the engine's `[ws-base]` line reports the fold.
+pub fn extract_ws_client_nodes_with_consts(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> WsClientFold {
+    let mut counts = WsFoldCounts::default();
+    let nodes = scan(
+        source,
+        path,
+        module_id,
+        repo,
+        CLIENT_SIDE,
+        Some(resolve),
+        &mut counts,
+    );
+    WsClientFold {
+        nodes,
+        counts,
+        path: path.to_string(),
+    }
+}
+
+/// DT.3b: swap every WS_CLIENT node of one file's parse for `fold`'s, through
+/// the swap the LA.4 queue and CB.3b event folds share
+/// ([`marker_swap::swap`]): the old nodes, their owner edges (`function
+/// -USES-> ws_client:..`, the anchor pass's), nav entries and every edge /
+/// ref naming a gone id (a client whose path moved) go; the fold's nodes go
+/// back in place, each site's ENDPOINT_HIT as the scan wrote it, re-anchored
+/// (POSITION, then the owner edge or the module CONTAINS fallback, stamped
+/// `extractor:anchor` rule `const_fold`), and the IMPORTS cell re-attached
+/// when the old nodes carried it. Client nodes carry no edges of their own (a
+/// WS marker reaches its module through `anchor::attach` only, the events
+/// precedent) and no callbacks, so there is nothing to re-bind. Only the WS
+/// client scan mints WS_CLIENT, so every one of them is the scan's.
+pub fn replace_ws_client_nodes(
+    fp: &mut FileParse,
+    module_id: NodeId,
+    lang: &str,
+    fold: WsClientFold,
+) {
+    let old: HashSet<NodeId> = fp
+        .nav
+        .kind_by_id
+        .iter()
+        .filter(|(_, k)| **k == node_kind::WS_CLIENT)
+        .map(|(id, _)| *id)
+        .collect();
+    let WsClientFold { nodes, path, .. } = fold;
+    let fresh = marker_swap::MarkerNodes {
+        nodes: nodes.nodes,
+        edges: Vec::new(),
+        navs: vec![nodes.nav],
+        anchors: nodes.anchors,
+    };
+    marker_swap::swap(fp, module_id, lang, &old, fresh, &path, |_| {});
 }
 
 struct Side {
@@ -546,7 +675,20 @@ struct Side {
 /// Rows in table order, sites in byte order: node order and anchor order are
 /// a function of the file's text alone. The name map is only ever looked up,
 /// never iterated.
-fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -> WsNodes {
+///
+/// DT.3b: `resolve` is `None` on the per-file (cached) path, which is then
+/// unchanged; the engine's post-cache fold passes one (clients only), every
+/// client URL reads through it ([`ClientUrl::url_text`]), `counts` tallies the
+/// sites it folded or left unread, and the per-file marker lines stay quiet.
+fn scan(
+    source: &str,
+    path: &str,
+    module_id: NodeId,
+    repo: RepoId,
+    side: Side,
+    resolve: Option<Resolve<'_>>,
+    counts: &mut WsFoldCounts,
+) -> WsNodes {
     let mut nodes = Vec::new();
     let mut nav = CodeNav::default();
     let mut anchors = Vec::new();
@@ -572,10 +714,17 @@ fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -
             continue;
         }
         for offset in sites(source, r.needle, &mut guard) {
-            let url = client_url(source, offset, r);
+            let url = client_url(source, offset, r, resolve);
             let read = read_name(source, offset, r, url.as_ref(), &mut blocks);
             if let Some(u) = &url {
                 reads.count(u, read.is_some());
+                if resolve.is_some() {
+                    match u.fold_read() {
+                        FoldRead::Folded => counts.folded += 1,
+                        FoldRead::Unread => counts.unresolved += 1,
+                        FoldRead::Plain => {}
+                    }
+                }
             }
             let via_builder = read.is_some() && url.as_ref().is_some_and(|u| u.builder);
             let Some(name) = read.or_else(|| fallback(r).map(str::to_string)) else {
@@ -636,18 +785,6 @@ fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -
         }
     }
 
-    for (framework, ids) in &per_framework {
-        if !ids.is_empty() {
-            eprintln!(
-                "[ws] {} framework={framework} n={} in {path}",
-                side.label,
-                ids.len()
-            );
-        }
-    }
-    if hosted > 0 {
-        eprintln!("[ws] client hosts sites={hosted} in {path}");
-    }
     // DT.3a: a node every one of whose sites read it through a URL builder is
     // Weak (CH.3a arm a's tier: the builder may transform the path).
     for (node, (builder, plain)) in nodes.iter_mut().zip(builder_site.iter().zip(&plain_site)) {
@@ -655,17 +792,32 @@ fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -
             node.confidence = Confidence::Weak;
         }
     }
-    if reads.read + reads.unread > 0 {
-        eprintln!(
-            "[ws] client urls read={} (local={} field={} builder={} url_struct={}) unread={} in {path}",
-            reads.read, reads.local, reads.field, reads.builder, reads.url_struct, reads.unread
-        );
+    // DT.3b: the fold stays quiet: each file reports once per parse.
+    if resolve.is_none() {
+        for (framework, ids) in &per_framework {
+            if !ids.is_empty() {
+                eprintln!(
+                    "[ws] {} framework={framework} n={} in {path}",
+                    side.label,
+                    ids.len()
+                );
+            }
+        }
+        if hosted > 0 {
+            eprintln!("[ws] client hosts sites={hosted} in {path}");
+        }
+        if reads.read + reads.unread > 0 {
+            eprintln!(
+                "[ws] client urls read={} (local={} field={} builder={} url_struct={}) unread={} in {path}",
+                reads.read, reads.local, reads.field, reads.builder, reads.url_struct, reads.unread
+            );
+        }
+        guard.report(if side.kind == node_kind::WS_HANDLER {
+            "ws_handler"
+        } else {
+            "ws_client"
+        });
     }
-    guard.report(if side.kind == node_kind::WS_HANDLER {
-        "ws_handler"
-    } else {
-        "ws_client"
-    });
 
     WsNodes {
         nodes,
@@ -1025,23 +1177,18 @@ fn after_angle(source: &str, start: usize) -> Option<usize> {
     None
 }
 
-/// The request path a client URL argument names, or `None` when it cannot be
-/// read. The argument is split into top-level `+` pieces ([`client_text`]): a
-/// string literal is static text, a template literal is static text with each
-/// `${...}` span a dynamic piece, anything else is dynamic. With a dynamic piece, the text
-/// after the LAST one is the path when it starts with `/`; otherwise a static
-/// head that is a full `scheme://host/path` URL is. The scheme + authority are
-/// stripped and a query / fragment is dropped; only a result starting with
-/// `/` is accepted.
+/// The request path a client URL names, or `None` when it cannot be read, on
+/// the URL already read as text ([`client_text`]: top-level `+` pieces, a
+/// string literal static text, a template literal static text with each
+/// `${...}` span a dynamic piece, anything else dynamic). With a dynamic
+/// piece, the text after the LAST one is the path when it starts with `/`;
+/// otherwise a static head that is a full `scheme://host/path` URL is. The
+/// scheme + authority are stripped and a query / fragment is dropped; only a
+/// result starting with `/` is accepted.
 ///
 /// `"ws://" + location.host + "/ws/chat"` -> `/ws/chat`,
 /// `` `${base}/ws/admin` `` -> `/ws/admin`,
 /// `"wss://api.example.com/echo"` -> `/echo`, `url` -> `None`.
-fn client_path(arg: &str, interp: Interp) -> Option<String> {
-    path_of_text(client_text(arg, interp)?)
-}
-
-/// [`client_path`]'s rule on a URL already read as text ([`client_text`]).
 fn path_of_text(text: String) -> Option<String> {
     let candidate = match (text.find(DYNAMIC), text.rfind(DYNAMIC)) {
         (Some(first), Some(last)) => {
@@ -1118,9 +1265,13 @@ fn client_uri_arg(arg: &str) -> &str {
 /// literal is static text, a template literal is static text with each
 /// `${...}` span a [`DYNAMIC`], anything else is one [`DYNAMIC`]. Under
 /// [`Interp::Dart`] a quoted literal's `$name` / `${expr}` are [`DYNAMIC`] too.
-/// `None` for an empty argument. Shared by [`client_path`] and
-/// [`client_host`], so the two read one argument identically.
-fn client_text(arg: &str, interp: Interp) -> Option<String> {
+/// `None` for an empty argument. The one reader of a client URL's text:
+/// [`ClientUrl::path`] ([`path_of_text`]) and [`ClientUrl::host`]
+/// ([`host_of_text`]) read one argument identically.
+///
+/// DT.3b: with a resolver in `fold`, every span or piece that is a member
+/// chain ([`Fold::push`]) is the literal it binds, when it binds one.
+fn client_text(arg: &str, interp: Interp, fold: &mut Fold<'_>) -> Option<String> {
     let arg = arg.trim();
     if arg.is_empty() {
         return None;
@@ -1131,26 +1282,82 @@ fn client_text(arg: &str, interp: Interp) -> Option<String> {
         match leading_literal(piece) {
             Some((lit, rest)) if rest.trim().is_empty() => {
                 if piece.starts_with('`') {
-                    push_template(&mut text, lit);
+                    push_template(&mut text, lit, fold);
                 } else if interp == Interp::Dart {
-                    push_dart(&mut text, lit);
+                    push_dart(&mut text, lit, fold);
                 } else {
                     text.push_str(lit);
                 }
             }
-            _ => text.push(DYNAMIC),
+            _ => fold.push(&mut text, piece),
         }
     }
     Some(text)
 }
 
+/// DT.3b: the post-cache fold's member-chain reader, threaded through
+/// [`client_text`] (`resolve` is `None` on the per-file pass, and every
+/// dynamic piece is one [`DYNAMIC`], as before), and what it did to one URL.
+struct Fold<'r> {
+    resolve: Option<Resolve<'r>>,
+    /// A member chain was replaced by its literal.
+    folded: bool,
+    /// A member chain was offered to the resolver and stayed [`DYNAMIC`].
+    unread: bool,
+}
+
+impl<'r> Fold<'r> {
+    fn new(resolve: Option<Resolve<'r>>) -> Self {
+        Fold {
+            resolve,
+            folded: false,
+            unread: false,
+        }
+    }
+
+    /// A dynamic piece of a URL (a `${..}` / Dart span's expression, a `+`
+    /// piece, the whole argument) into `out`: the literal the resolver binds
+    /// it to when it is a member chain ([`is_member_chain`]: `environment.wsBase`,
+    /// `this.base`, `WS_URL`) and that literal is one ([`is_folded_literal`]),
+    /// else one [`DYNAMIC`]. A call, an operator or an optional chain is
+    /// never offered.
+    fn push(&mut self, out: &mut String, expr: &str) {
+        let expr = expr.trim();
+        let Some(resolve) = self.resolve.filter(|_| is_member_chain(expr)) else {
+            out.push(DYNAMIC);
+            return;
+        };
+        match resolve(expr).filter(|v| is_folded_literal(v)) {
+            Some(value) => {
+                out.push_str(&value);
+                self.folded = true;
+            }
+            None => {
+                out.push(DYNAMIC);
+                self.unread = true;
+            }
+        }
+    }
+}
+
+/// DT.3b: a resolved value [`Fold::push`] may splice into a URL: non-empty,
+/// no `${` (a value that still interpolates is no literal; the const table
+/// never binds one, the guard is the contract), no control char (a name never
+/// holds one, [`valid_name`]) and no whitespace.
+fn is_folded_literal(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains("${")
+        && !value.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
 /// The URL schemes a client argument's static head may start with for its
-/// authority to be read ([`client_host`]), the ones [`normalise_ws_path`]
+/// authority to be read ([`host_of_text`]), the ones [`normalise_ws_path`]
 /// strips.
 const WS_SCHEMES: [&str; 4] = ["ws://", "wss://", "http://", "https://"];
 
-/// CB.21: the authority a client URL argument dials, `host[:port]` with any
-/// userinfo dropped, or `None` when the source does not spell it.
+/// CB.21: the authority a client URL dials, `host[:port]` with any userinfo
+/// dropped, or `None` when the source does not spell it, on the URL already
+/// read as text ([`client_text`]).
 ///
 /// Read off the argument's STATIC HEAD, the text before its first dynamic
 /// piece (the whole argument when it is one literal), which must start with
@@ -1164,11 +1371,10 @@ const WS_SCHEMES: [&str; 4] = ["ws://", "wss://", "http://", "https://"];
 /// `"wss://api.example.com/ws?token=" + t` -> `api.example.com`,
 /// `"ws://" + location.host + "/ws"` -> `None`, `` `${base}/ws` `` -> `None`,
 /// `"ws://chat-svc:" + port + "/ws"` -> `None`.
-fn client_host(arg: &str, interp: Interp) -> Option<String> {
-    let text = client_text(arg, interp)?;
+fn host_of_text(text: &str) -> Option<String> {
     let (head, dynamic) = match text.find(DYNAMIC) {
         Some(i) => (text.get(..i)?, true),
-        None => (text.as_str(), false),
+        None => (text, false),
     };
     let rest = WS_SCHEMES.iter().find_map(|s| head.strip_prefix(s))?;
     if dynamic && !rest.contains(['/', '?', '#']) {
@@ -1177,21 +1383,39 @@ fn client_host(arg: &str, interp: Interp) -> Option<String> {
     client_url_split(head).0
 }
 
-/// Template-literal content into `out`, each `${...}` span as [`DYNAMIC`].
-fn push_template(out: &mut String, lit: &str) {
+/// Template-literal content into `out`, each `${...}` span as [`DYNAMIC`]
+/// (DT.3b: or, with a resolver, its expression's literal, [`Fold::push`]; a
+/// span that never closes is always [`DYNAMIC`]).
+fn push_template(out: &mut String, lit: &str, fold: &mut Fold<'_>) {
     let mut rest = lit;
     while let Some(open) = rest.find("${") {
         out.push_str(rest.get(..open).unwrap_or(""));
-        out.push(DYNAMIC);
         let body = rest.get(open + 2..).unwrap_or("");
+        push_span(out, body, fold);
         rest = body.get(span_end(body)..).unwrap_or("");
     }
     out.push_str(rest);
 }
 
+/// The `${..}` span whose text starts at `body` (just inside the `${`) into
+/// `out`: its expression through [`Fold::push`] when it closes, else one
+/// [`DYNAMIC`].
+fn push_span(out: &mut String, body: &str, fold: &mut Fold<'_>) {
+    match span_close(body).and_then(|close| body.get(..close)) {
+        Some(expr) => fold.push(out, expr),
+        None => out.push(DYNAMIC),
+    }
+}
+
 /// For the text just inside a `${`: the offset just past its matching `}`, or
 /// the end of `body` when it never closes.
 fn span_end(body: &str) -> usize {
+    span_close(body).map_or(body.len(), |close| close + 1)
+}
+
+/// For the text just inside a `${`: the offset of its matching `}`, or `None`
+/// when it never closes.
+fn span_close(body: &str) -> Option<usize> {
     let mut depth = 1i32;
     for (i, c) in body.char_indices() {
         match c {
@@ -1199,19 +1423,20 @@ fn span_end(body: &str) -> usize {
             '}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return i + 1;
+                    return Some(i);
                 }
             }
             _ => {}
         }
     }
-    body.len()
+    None
 }
 
 /// DH.9: Dart literal content into `out`, each `$name` / `${expr}`
-/// interpolation as [`DYNAMIC`]. A `\`-escaped char (`\$`) is kept as written
-/// and never interpolates, as every other client literal keeps its escapes.
-fn push_dart(out: &mut String, lit: &str) {
+/// interpolation as [`DYNAMIC`] (DT.3b: or, with a resolver, its literal,
+/// [`Fold::push`]). A `\`-escaped char (`\$`) is kept as written and never
+/// interpolates, as every other client literal keeps its escapes.
+fn push_dart(out: &mut String, lit: &str, fold: &mut Fold<'_>) {
     let mut rest = lit;
     while let Some(at) = rest.find(['$', '\\']) {
         out.push_str(rest.get(..at).unwrap_or(""));
@@ -1224,16 +1449,18 @@ fn push_dart(out: &mut String, lit: &str) {
                 1 + c.len_utf8()
             }
             (Some('$'), Some('{')) => {
-                out.push(DYNAMIC);
-                2 + span_end(tail.get(2..).unwrap_or(""))
+                let body = tail.get(2..).unwrap_or("");
+                push_span(out, body, fold);
+                2 + span_end(body)
             }
             (Some('$'), Some(c)) if c.is_ascii_alphabetic() || c == '_' => {
-                out.push(DYNAMIC);
-                1 + tail
+                let len = tail
                     .bytes()
                     .skip(1)
                     .take_while(|b| is_ident_byte(*b))
-                    .count()
+                    .count();
+                fold.push(out, tail.get(1..1 + len).unwrap_or(""));
+                1 + len
             }
             (Some(c), _) => {
                 out.push(c);
@@ -1283,11 +1510,14 @@ enum UrlVia {
 /// One client site's URL ([`client_url`]): the text its path and host are
 /// read from, a slice of the source, and how that text was reached. A
 /// binding is followed once (depth one), never to a second binding.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct ClientUrl<'s> {
     text: &'s str,
     interp: Interp,
     via: UrlVia,
+    /// DT.3b: the post-cache fold's resolver (`None` on the per-file pass),
+    /// which [`Self::url_text`] reads `text` through.
+    resolve: Option<Resolve<'s>>,
     /// `text` is a URL builder call's one literal ([`builder_literal`]): read
     /// root-relative ([`root_relative`]), and the node is Weak.
     builder: bool,
@@ -1299,19 +1529,98 @@ struct ClientUrl<'s> {
 }
 
 impl ClientUrl<'_> {
-    /// The request path the site names ([`client_path`]'s rule).
+    /// The request path the site names ([`path_of_text`]'s rule; a builder's
+    /// literal root-relative, [`root_relative`]).
     fn path(&self) -> Option<String> {
+        self.path_of(self.url_text()?.0)
+    }
+
+    /// CB.21: the literal authority the site dials ([`host_of_text`]). DT.3b:
+    /// in the fold, the authority of the configured URL the site folded to;
+    /// written in another file, which DF.8's external mark reads as configured
+    /// when a config-shaped constant holds it.
+    fn host(&self) -> Option<String> {
+        host_of_text(&self.url_text()?.0)
+    }
+
+    /// DT.3b: what the fold did to this site's URL ([`WsFoldCounts`]).
+    fn fold_read(&self) -> FoldRead {
+        self.url_text().map_or(FoldRead::Plain, |(_, read)| read)
+    }
+
+    /// [`Self::path`] on a text already read.
+    fn path_of(&self, text: String) -> Option<String> {
         if self.builder {
-            path_of_text(root_relative(client_text(self.text, self.interp)?))
+            path_of_text(root_relative(text))
         } else {
-            client_path(self.text, self.interp)
+            path_of_text(text)
         }
     }
 
-    /// CB.21: the literal authority the site dials ([`client_host`]).
-    fn host(&self) -> Option<String> {
-        client_host(self.text, self.interp)
+    /// The site's URL as text ([`client_text`]), and what the fold did to it.
+    /// With no resolver, or a URL that is not [`Self::foldable`], the plain
+    /// text. In the DT.3b fold, the text with every member chain the resolver
+    /// binds replaced by its literal, unless that text reads no path where the
+    /// plain one does (a value that is no URL base, `true/prices`): then the
+    /// plain text stands and the site is unread.
+    fn url_text(&self) -> Option<(String, FoldRead)> {
+        let plain = client_text(self.text, self.interp, &mut Fold::new(None))?;
+        let Some(resolve) = self.resolve.filter(|_| self.foldable()) else {
+            return Some((plain, FoldRead::Plain));
+        };
+        let mut fold = Fold::new(Some(resolve));
+        let folded = client_text(self.text, self.interp, &mut fold)?;
+        if !fold.folded {
+            let read = if fold.unread {
+                FoldRead::Unread
+            } else {
+                FoldRead::Plain
+            };
+            return Some((plain, read));
+        }
+        let loses_path =
+            self.path_of(folded.clone()).is_none() && self.path_of(plain.clone()).is_some();
+        Some(if loses_path {
+            (plain, FoldRead::Unread)
+        } else {
+            (folded, FoldRead::Folded)
+        })
     }
+
+    /// DT.3b: the whole argument is not a bare lower-case identifier or a
+    /// `this.<m>` read straight off the call. Those are DT.3a's scoped reads
+    /// ([`local_binding`], [`class_field_init`]): one they left unread is a
+    /// `let`, a parameter, a mutable field or a binding out of reach, which
+    /// the file-wide const table cannot tell apart. A SCREAMING_CASE name
+    /// (an imported config constant) folds.
+    fn foldable(&self) -> bool {
+        let t = self.text.trim();
+        let owned_by_dt3a = self.via == UrlVia::Direct
+            && !self.builder
+            && !self.url_struct
+            && ((is_js_ident(t) && !is_screaming(t))
+                || t.strip_prefix("this.").is_some_and(is_js_ident));
+        !owned_by_dt3a
+    }
+}
+
+/// DT.3b: what the base fold did to one client site's URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FoldRead {
+    /// No member chain was offered to the resolver (or there is none).
+    Plain,
+    /// A member chain was replaced by its literal, and the reading stood.
+    Folded,
+    /// A member chain was offered and the plain reading stands.
+    Unread,
+}
+
+/// `s` is SCREAMING_CASE: upper-case letters, digits and `_`, at least one
+/// letter (the constants.rs cross-file trust rule's shape).
+fn is_screaming(s: &str) -> bool {
+    s.bytes()
+        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        && s.bytes().any(|b| b.is_ascii_uppercase())
 }
 
 /// The `[ws] client urls` marker's counts for one file.
@@ -1362,13 +1671,19 @@ impl UrlReads {
 /// An initializer is read like an argument: a builder call in it is a builder
 /// read, and under [`Interp::Dart`] its `Uri.parse(..)` is stepped into again.
 /// Anything else, or a binding that cannot be found, is the argument itself.
-fn client_url<'s>(source: &'s str, offset: usize, r: &WsRow) -> Option<ClientUrl<'s>> {
+fn client_url<'s>(
+    source: &'s str,
+    offset: usize,
+    r: &WsRow,
+    resolve: Option<Resolve<'s>>,
+) -> Option<ClientUrl<'s>> {
     let after = offset.checked_add(r.needle.len())?;
     let (arg, interp) = client_url_arg(source, after, r.read)?;
     let direct = ClientUrl {
         text: arg,
         interp,
         via: UrlVia::Direct,
+        resolve,
         builder: false,
         url_struct: false,
         counted: false,
@@ -1488,7 +1803,7 @@ fn builder_literal(expr: &str) -> Option<&str> {
     }
     let mut text = String::new();
     if arg.starts_with('`') {
-        push_template(&mut text, lit);
+        push_template(&mut text, lit, &mut Fold::new(None));
     } else {
         text.push_str(lit);
     }
@@ -2323,6 +2638,14 @@ mod tests {
     }
     fn handlers(src: &str) -> WsNodes {
         extract_ws_handler_nodes(src, "t.src", module_id(), repo())
+    }
+    /// The path one client URL argument names, read plain.
+    fn client_path(arg: &str, interp: Interp) -> Option<String> {
+        path_of_text(client_text(arg, interp, &mut Fold::new(None))?)
+    }
+    /// The host one client URL argument dials, read plain.
+    fn client_host(arg: &str, interp: Interp) -> Option<String> {
+        host_of_text(&client_text(arg, interp, &mut Fold::new(None))?)
     }
     fn clients(src: &str) -> WsNodes {
         extract_ws_client_nodes(src, "t.src", module_id(), repo())
@@ -3543,7 +3866,7 @@ mod tests {
         let mut blocks = None;
         for r in CLIENT_ROWS.iter().filter(|r| gate_holds(src, r.gate)) {
             for offset in sites(src, r.needle, &mut guard) {
-                let url = client_url(src, offset, r);
+                let url = client_url(src, offset, r, None);
                 let read = read_name(src, offset, r, url.as_ref(), &mut blocks);
                 if let Some(u) = &url {
                     reads.count(u, read.is_some());
@@ -3928,6 +4251,374 @@ mod tests {
         assert_eq!(
             go_url_struct_path("url.URL{Path: \"/a\"}.ResolveReference(b)"),
             None
+        );
+    }
+
+    // ---- DT.3b: the post-cache base fold ----------------------------------
+
+    /// A resolver over fixed `(expr, literal)` pairs, as the engine's LA.4
+    /// resolver hands one over (exact keys only here).
+    fn table(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |expr: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == expr)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    /// The fixture's environment.ts.
+    const ENV: &[(&str, &str)] = &[
+        ("environment.feedUrl", "ws://feed-svc:8080/rt/feed"),
+        ("environment.wsBase", "ws://feed-svc:8080/rt"),
+        ("environment.liveUrl", "ws://localhost:8080"),
+        ("environment.flag", "true"),
+        ("WS_URL", "wss://stream.example.org/ws"),
+        ("base", "ws://local-svc/rt"),
+        ("url", "ws://wrong-svc/wrong"),
+        ("Env.wsBase", "ws://dart-svc:9000/rt"),
+    ];
+
+    const PATH_TS: &str = "src/live.ts";
+
+    fn folded(src: &str) -> WsClientFold {
+        extract_ws_client_nodes_with_consts(src, PATH_TS, module_id(), repo(), &table(ENV))
+    }
+
+    fn fold_qnames(fold: &WsClientFold) -> Vec<String> {
+        qnames(&fold.nodes)
+    }
+
+    /// The fixture's live.ts.
+    const LIVE: &str = "import { environment } from './environment';\n\
+        \n\
+        export function openFeed(): WebSocket {\n\
+        \x20 return new WebSocket(environment.feedUrl);\n\
+        }\n\
+        \n\
+        export function openPrices(): WebSocket {\n\
+        \x20 return new WebSocket(`${environment.wsBase}/prices`);\n\
+        }\n";
+
+    /// A whole-argument config member folds to its configured URL: the path
+    /// is the URL's, the host its authority.
+    #[test]
+    fn with_consts_folds_whole_member_url() {
+        let src = "const ws = new WebSocket(environment.feedUrl);\n";
+        assert_eq!(qnames(&clients(src)), vec!["ws_client:ws"]);
+        let fold = folded(src);
+        assert_eq!(fold_qnames(&fold), vec!["ws_client:/rt/feed"]);
+        assert_eq!(fold.counts, WsFoldCounts { folded: 1, unresolved: 0 });
+        assert_eq!(
+            hits(&fold.nodes)[0].1,
+            vec![r#"{"via":"ws","host":"feed-svc:8080"}"#.to_string()]
+        );
+        assert_eq!(fold.path, PATH_TS);
+        // A base with no path names no path either way, but records its host.
+        let bare = folded("const ws = new WebSocket(environment.liveUrl);\n");
+        assert_eq!(fold_qnames(&bare), vec!["ws_client:ws"]);
+        assert_eq!(bare.counts, WsFoldCounts { folded: 1, unresolved: 0 });
+        assert_eq!(
+            hits(&bare.nodes)[0].1,
+            vec![r#"{"via":"ws","host":"localhost:8080"}"#.to_string()]
+        );
+        // A SCREAMING_CASE import is a config constant; DT.3a's local read
+        // of the same file's own const still wins.
+        let imported = folded("import { WS_URL } from './config';\nnew WebSocket(WS_URL);\n");
+        assert_eq!(fold_qnames(&imported), vec!["ws_client:/ws"]);
+        assert_eq!(
+            hits(&imported.nodes)[0].1,
+            vec![r#"{"via":"ws","host":"stream.example.org"}"#.to_string()]
+        );
+        let own = folded("const WS_URL = 'ws://own-svc/own';\nnew WebSocket(WS_URL);\n");
+        assert_eq!(fold_qnames(&own), vec!["ws_client:/own"]);
+        assert_eq!(own.counts, WsFoldCounts::default());
+    }
+
+    /// A template's base keeps its own path in front of the tail, so the tail
+    /// alone never names the client; a `+` piece and a DT.3a local read fold
+    /// the same way.
+    #[test]
+    fn with_consts_folds_template_base_with_path() {
+        let plain = clients(LIVE);
+        assert_eq!(qnames(&plain), vec!["ws_client:ws", "ws_client:/prices"]);
+        let fold = folded(LIVE);
+        assert_eq!(fold_qnames(&fold), vec!["ws_client:/rt/feed", "ws_client:/rt/prices"]);
+        assert!(!fold_qnames(&fold).contains(&"ws_client:/prices".to_string()));
+        assert_eq!(fold.counts, WsFoldCounts { folded: 2, unresolved: 0 });
+        assert_eq!(
+            anchored(&fold.nodes),
+            vec![
+                ("ws_client:/rt/feed".to_string(), 3),
+                ("ws_client:/rt/prices".to_string(), 7)
+            ]
+        );
+        for (_, payloads) in hits(&fold.nodes) {
+            assert_eq!(payloads, vec![r#"{"via":"ws","host":"feed-svc:8080"}"#.to_string()]);
+        }
+        let concat = folded("new WebSocket(environment.wsBase + '/prices');\n");
+        assert_eq!(fold_qnames(&concat), vec!["ws_client:/rt/prices"]);
+        // examples-glia: the const local's template keeps its id and gains
+        // the configured host.
+        let feed = folded(ORDER_FEED);
+        assert_eq!(fold_qnames(&feed), vec!["ws_client:/live/orders"]);
+        assert_eq!(feed.counts, WsFoldCounts { folded: 1, unresolved: 0 });
+        assert_eq!(
+            hits(&feed.nodes)[0].1,
+            vec![r#"{"via":"ws","host":"localhost:8080"}"#.to_string()]
+        );
+        // A same-file template span folds through the resolver too.
+        let span = folded("new WebSocket(`${base}/prices`);\n");
+        assert_eq!(fold_qnames(&span), vec!["ws_client:/rt/prices"]);
+    }
+
+    /// A chain nothing binds keeps the plain reading and counts unresolved;
+    /// so does a bound value that would lose the path, and a site with no
+    /// chain counts nothing.
+    #[test]
+    fn with_consts_unresolved_keeps_the_tail() {
+        let src = "new WebSocket(`${environment.missing}/prices`);\n";
+        let fold = folded(src);
+        assert_eq!(fold_qnames(&fold), vec!["ws_client:/prices"]);
+        assert_eq!(fold.counts, WsFoldCounts { folded: 0, unresolved: 1 });
+        assert_eq!(hits(&fold.nodes)[0].1, vec![r#"{"via":"ws"}"#.to_string()]);
+        // `true/prices` reads no path where `/prices` did: refused.
+        let flag = folded("new WebSocket(`${environment.flag}/prices`);\n");
+        assert_eq!(fold_qnames(&flag), vec!["ws_client:/prices"]);
+        assert_eq!(flag.counts, WsFoldCounts { folded: 0, unresolved: 1 });
+        // A call, an env read and a literal offer the resolver nothing.
+        let none = folded(
+            "new WebSocket(`${cfg()}/a`);\n\
+             new WebSocket(\"ws://h/b\");\n",
+        );
+        assert_eq!(fold_qnames(&none), vec!["ws_client:/a", "ws_client:/b"]);
+        assert_eq!(none.counts, WsFoldCounts::default());
+        // A bare lower-case identifier or `this.<m>` passed whole is DT.3a's
+        // scoped read: a `let` or a parameter is never folded from the
+        // file-wide table.
+        let owned = folded(
+            "function open(url: string) {\n\
+             \x20 return new WebSocket(url);\n}\n\
+             class A {\n\
+             \x20 private base = 'x';\n\
+             \x20 open() { return new WebSocket(this.base); }\n}\n",
+        );
+        assert_eq!(fold_qnames(&owned), vec!["ws_client:ws"]);
+        assert_eq!(owned.counts, WsFoldCounts::default());
+        // A folded site is counted once, as folded, even with a path
+        // parameter left dynamic.
+        let param = folded("new WebSocket(`${environment.wsBase}/rooms/${roomId}`);\n");
+        assert_eq!(fold_qnames(&param), vec!["ws_client:/rt/rooms/"]);
+        assert_eq!(param.counts, WsFoldCounts { folded: 1, unresolved: 0 });
+        assert_eq!(
+            hits(&param.nodes)[0].1,
+            vec![r#"{"via":"ws","host":"feed-svc:8080"}"#.to_string()]
+        );
+    }
+
+    /// Dart's `$name` / `${expr}` interpolations fold like a template span.
+    #[test]
+    fn with_consts_dart_dollar_base() {
+        let src = "import 'package:web_socket_channel/web_socket_channel.dart';\n\
+                   final a = WebSocketChannel.connect(Uri.parse('${Env.wsBase}/prices'));\n\
+                   final b = WebSocketChannel.connect(Uri.parse('$base/feed'));\n";
+        assert_eq!(qnames(&clients(src)), vec!["ws_client:/prices", "ws_client:/feed"]);
+        let fold = extract_ws_client_nodes_with_consts(
+            src,
+            "lib/live.dart",
+            module_id(),
+            repo(),
+            &table(ENV),
+        );
+        assert_eq!(fold_qnames(&fold), vec!["ws_client:/rt/prices", "ws_client:/rt/feed"]);
+        assert_eq!(fold.counts, WsFoldCounts { folded: 2, unresolved: 0 });
+        assert_eq!(
+            hits(&fold.nodes),
+            vec![
+                (
+                    "ws_client:/rt/prices".to_string(),
+                    vec![r#"{"via":"ws","host":"dart-svc:9000"}"#.to_string()]
+                ),
+                (
+                    "ws_client:/rt/feed".to_string(),
+                    vec![r#"{"via":"ws","host":"local-svc"}"#.to_string()]
+                ),
+            ]
+        );
+        // An escaped `\$` never interpolates.
+        let escaped = "import 'package:web_socket_channel/web_socket_channel.dart';\n\
+                       final c = WebSocketChannel.connect(Uri.parse('ws://h/\\$base/x'));\n";
+        let fold = extract_ws_client_nodes_with_consts(
+            escaped,
+            "lib/e.dart",
+            module_id(),
+            repo(),
+            &table(ENV),
+        );
+        assert_eq!(fold.counts, WsFoldCounts::default());
+    }
+
+    /// The function span the swap test's parse holds: lines 2..=4 and 6..=8
+    /// (0-indexed) of [`LIVE`].
+    fn live_fn(name: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::FUNCTION, &format!("live::{name}"))
+    }
+
+    /// The engine's `merge_nav`, for the hand-assembled parse.
+    fn merge(dst: &mut CodeNav, src: CodeNav) {
+        dst.name_by_id.extend(src.name_by_id);
+        dst.qname_by_id.extend(src.qname_by_id);
+        dst.kind_by_id.extend(src.kind_by_id);
+        dst.parent_of.extend(src.parent_of);
+        for (k, v) in src.children_of {
+            dst.children_of.entry(k).or_default().extend(v);
+        }
+    }
+
+    /// The per-file pass over [`LIVE`]: a MODULE, its two FUNCTIONs, the
+    /// handler and client scans, the anchor pass, then the router's IMPORTS
+    /// cell, as `apply_cross_cutting_extractors` and the router lay them out.
+    fn live_parse(src: &str) -> FileParse {
+        use glia_core::{Cell, CellPayload};
+        let module = module_id();
+        let node = |id, cells| Node {
+            id,
+            repo: repo(),
+            confidence: Confidence::Strong,
+            cells,
+        };
+        let span = |start: u32, end: u32| Cell {
+            kind: glia_code_domain::cell_type::POSITION,
+            payload: CellPayload::Json(format!(
+                r#"{{"file":"{PATH_TS}","start_line":{start},"end_line":{end}}}"#
+            )),
+        };
+        let mut fp = FileParse {
+            nodes: vec![
+                node(module, vec![]),
+                node(live_fn("openFeed"), vec![span(2, 4)]),
+                node(live_fn("openPrices"), vec![span(6, 8)]),
+            ],
+            ..Default::default()
+        };
+        fp.nav.record(module, "live", "live", node_kind::MODULE, None);
+        for f in ["openFeed", "openPrices"] {
+            fp.nav
+                .record(live_fn(f), f, &format!("live::{f}"), node_kind::FUNCTION, Some(module));
+        }
+        let mut anchors = Vec::new();
+        for out in [
+            extract_ws_handler_nodes(src, PATH_TS, module, repo()),
+            extract_ws_client_nodes(src, PATH_TS, module, repo()),
+        ] {
+            fp.nodes.extend(out.nodes);
+            anchors.extend(out.anchors);
+            merge(&mut fp.nav, out.nav);
+        }
+        crate::anchor::attach(&mut fp, PATH_TS, module, &mut anchors);
+        fp.imports.push(glia_code_domain::ImportStmt {
+            from_module: "live".into(),
+            target: glia_code_domain::ImportTarget::Module {
+                path: "./environment".into(),
+                alias: None,
+            },
+            line: 0,
+        });
+        glia_code_domain::attach_imports_cell(&mut fp, "typescript");
+        fp
+    }
+
+    /// The literal spelling of [`LIVE`]: what the fold must lay out.
+    const LIVE_LITERAL: &str = "import { environment } from './environment';\n\
+        \n\
+        export function openFeed(): WebSocket {\n\
+        \x20 return new WebSocket('ws://feed-svc:8080/rt/feed');\n\
+        }\n\
+        \n\
+        export function openPrices(): WebSocket {\n\
+        \x20 return new WebSocket('ws://feed-svc:8080/rt/prices');\n\
+        }\n";
+
+    #[test]
+    fn replace_ws_client_nodes_re_anchors() {
+        use glia_code_domain::{cell_type, edge_category, evidence};
+        let client = |q: &str| NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::WS_CLIENT, q);
+        let mut fp = live_parse(LIVE);
+        let (generic, tail) = (client("ws_client:ws"), client("ws_client:/prices"));
+        assert!(fp.nav.kind_by_id.contains_key(&generic));
+        assert!(fp.edges.iter().any(|e| e.to == tail && e.category == edge_category::USES));
+
+        let fold = folded(LIVE);
+        assert_eq!(fold.counts.folded, 2);
+        replace_ws_client_nodes(&mut fp, module_id(), "typescript", fold);
+        let literal = live_parse(LIVE_LITERAL);
+
+        // Nodes (cells in the per-file order: ENDPOINT_HIT, POSITION, IMPORTS),
+        // nav and child order are the literal file's.
+        assert_eq!(fp.nodes, literal.nodes);
+        assert_eq!(fp.nav.qname_by_id, literal.nav.qname_by_id);
+        assert_eq!(fp.nav.kind_by_id, literal.nav.kind_by_id);
+        assert_eq!(fp.nav.parent_of, literal.nav.parent_of);
+        assert_eq!(fp.nav.children_of, literal.nav.children_of);
+        // USES moved to the re-keyed nodes; nothing names a gone id.
+        let (feed, prices) = (client("ws_client:/rt/feed"), client("ws_client:/rt/prices"));
+        let uses: Vec<(NodeId, NodeId)> = fp
+            .edges
+            .iter()
+            .filter(|e| e.category == edge_category::USES)
+            .map(|e| (e.from, e.to))
+            .collect();
+        assert_eq!(uses, vec![(live_fn("openFeed"), feed), (live_fn("openPrices"), prices)]);
+        assert!(
+            !fp.edges
+                .iter()
+                .any(|e| [generic, tail].iter().any(|g| e.from == *g || e.to == *g))
+        );
+        assert!(!fp.nav.qname_by_id.contains_key(&generic));
+        // Re-anchored post-cache: `extractor:anchor` rule `const_fold`.
+        assert!(fp.edges.iter().all(|e| evidence::Evidence::of(e).is_some_and(
+            |ev| ev.emitter == "extractor:anchor" && ev.rule.as_deref() == Some("const_fold")
+        )));
+        assert_eq!(crate::anchor::census(&fp), crate::anchor::census(&literal));
+        for n in fp.nodes.iter().filter(|n| n.id == feed || n.id == prices) {
+            assert_eq!(n.cells.iter().filter(|c| c.kind == cell_type::IMPORTS).count(), 1);
+            assert_eq!(n.cells.last().map(|c| c.kind), Some(cell_type::IMPORTS));
+        }
+    }
+
+    /// The per-file scan is the fold with no resolver: a file whose URLs hold
+    /// no chain the resolver binds yields the same nodes, nav and anchors
+    /// through either, and the per-file entry point reads no table.
+    #[test]
+    fn without_consts_is_byte_identical() {
+        let srcs = [
+            LIVE,
+            ORDER_FEED,
+            "const a = new WebSocket(\"ws://\" + location.host + \"/ws\");\n\
+             const b = new WebSocket(url);\n",
+            "import 'package:web_socket_channel/web_socket_channel.dart';\n\
+             final a = WebSocketChannel.connect(Uri.parse('$host/ws/a'));\n",
+            "import \"github.com/gorilla/websocket\"\n\
+             c, _, _ := websocket.DefaultDialer.Dial(\"ws://chat-svc/ws\", nil)\n",
+        ];
+        let nothing = |_: &str| -> Option<String> { None };
+        for src in srcs {
+            let plain = clients(src);
+            let fold = extract_ws_client_nodes_with_consts(src, "t.src", module_id(), repo(), &nothing);
+            assert_eq!(plain.nodes, fold.nodes.nodes, "{src}");
+            assert_eq!(plain.nav.qname_by_id, fold.nodes.nav.qname_by_id, "{src}");
+            assert_eq!(plain.nav.children_of, fold.nodes.nav.children_of, "{src}");
+            assert_eq!(plain.anchors, fold.nodes.anchors, "{src}");
+            assert_eq!(fold.counts.folded, 0, "{src}");
+        }
+        // The per-file pass over the fixture is still HEAD's reading.
+        assert_eq!(qnames(&clients(LIVE)), vec!["ws_client:ws", "ws_client:/prices"]);
+        assert_eq!(
+            hits(&clients(LIVE)),
+            vec![
+                ("ws_client:ws".to_string(), vec![r#"{"via":"ws"}"#.to_string()]),
+                ("ws_client:/prices".to_string(), vec![r#"{"via":"ws"}"#.to_string()]),
+            ]
         );
     }
 }

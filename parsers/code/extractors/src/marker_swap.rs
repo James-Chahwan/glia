@@ -1,4 +1,4 @@
-//! The post-cache marker-node swap, shared by the engine's two const folds.
+//! The post-cache marker-node swap, shared by the engine's const folds.
 //!
 //! A per-file extractor names some marker sites by an identifier it cannot
 //! resolve: a lookup reads other files, and the extractor's output is cached by
@@ -7,9 +7,11 @@
 //! resolver, and when a site folded it swaps the file's marker nodes for the
 //! re-run's. LA.4's queue topics were the first ([`crate::queues::replace_queue_nodes`]),
 //! CB.3b's constant-keyed event sites the second
-//! ([`crate::eventbus::replace_event_nodes`]); this is the kind-agnostic body
-//! they share. The caller picks WHICH nodes are replaced (`old`); [`swap`] does
-//! the rest the same way for every kind.
+//! ([`crate::eventbus::replace_event_nodes`]), DT.3b's WebSocket clients whose
+//! URL base sits in the configuration the third
+//! ([`crate::websocket::replace_ws_client_nodes`]); this is the kind-agnostic
+//! body they share. The caller picks WHICH nodes are replaced (`old`); [`swap`]
+//! does the rest the same way for every kind.
 
 use std::collections::HashSet;
 

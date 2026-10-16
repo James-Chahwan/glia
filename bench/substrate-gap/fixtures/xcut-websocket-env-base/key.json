@@ -1,0 +1,73 @@
+{
+  "framework": "xcut-websocket-env-base",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "ws",
+  "note": "DT.3b (tweaks T3): a WebSocket client whose URL base sits in the repo config folds through the const table post-cache, as the A11.2 HTTP endpoint fold does. The gin server upgrades in feed, mounted at GET /rt/feed and GET /rt/prices (the /rt group) and at the decoy GET /prices. The client dials `new WebSocket(environment.feedUrl)` (a whole-URL config member) and `` new WebSocket(`${environment.wsBase}/prices`) `` with `wsBase: 'ws://feed-svc:8080/rt'` (a base with a path). Baseline at HEAD 5bf66c91 (debug CLI merge client server, and grade.py on the wave-15 wheel): openFeed mints the generic ws_client:ws and openPrices the template tail ws_client:/prices, which pairs ws:ws through the decoy route alone: `[ws-resolve] 1 pairs (exact=0 suffix=0 param=0 inherited=1 wildcard=0 host=0) dropped-generic=1 narrowed-by-host=0`; gaps client --with server unpaired_route 3; recall 0/4 edges, 0/1 cells, 2 forbid violations.",
+  "expect_nodes": [
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:/rt/feed",
+      "exact": true,
+      "note": "the whole member folds to its configured URL, whose path is the name"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:/rt/prices",
+      "exact": true,
+      "note": "the folded base keeps its /rt path in front of the template tail"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "ws_client:/rt/feed",
+      "to": "ws:ws",
+      "category": "WS_CONNECTS",
+      "exact": true,
+      "note": "LA.18b inherited: GET /rt/feed HANDLED_BY feed, which upgrades"
+    },
+    {
+      "from": "ws_client:/rt/prices",
+      "to": "ws:ws",
+      "category": "WS_CONNECTS",
+      "exact": true,
+      "note": "LA.18b inherited: GET /rt/prices HANDLED_BY feed"
+    },
+    {
+      "from": "live::openFeed",
+      "to": "ws_client:/rt/feed",
+      "category": "USES",
+      "note": "the re-keyed node is re-anchored in its function"
+    },
+    {
+      "from": "live::openPrices",
+      "to": "ws_client:/rt/prices",
+      "category": "USES",
+      "note": "the re-keyed node is re-anchored in its function"
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "WS_CLIENT",
+      "node": "ws_client:/rt/feed",
+      "cell": "ENDPOINT_HIT",
+      "contains": "\"host\":\"feed-svc:8080\"",
+      "note": "the folded URL's authority is the host the site dials"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:/prices",
+      "note": "PRECISION: the template's tail alone pairs the decoy GET /prices"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:ws",
+      "note": "PRECISION: a configured URL is no generic client"
+    }
+  ]
+}
