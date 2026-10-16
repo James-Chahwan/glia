@@ -64,8 +64,15 @@ links, so they must survive a rename.
   100 - and writes VECTOR rows to `.glia/vectors.jsonl` (the LF.1 sidecar, `external_inputs::VECTORS_FILE`; a build
   already loads it as cells). Each vector is cached by a hash of its text, so a re-run embeds only changed nodes; rows
   carry `model` and `dims`. Its own crate behind a Cargo feature (the CLI on; whether the PyPI wheel ships it is
-  measured in the spec run). Vectors stay outside the byte-identical layout gate: float differences across machines
-  move only HEURISTIC ranks.
+  measured in the spec run). Determinism needs no special handling: the text-hash cache gives one machine the same
+  vectors every run, and nothing gates on cross-machine layout bytes (James: the byte-identical concern "could be
+  overstated").
+- **When embeds run** (James: *"we could have a way to determine when to run the embeds"*). The cache makes a run
+  cost only the changed nodes, so the question is the trigger. Candidates for the spec run:
+  `glia watch` embeds changed nodes in the background after an apply, debounced; `install-hooks` adds a post-commit /
+  post-merge `glia embed`; a semantic query counts nodes whose text hash has no vector and embeds them inline under a
+  small threshold, else answers from what it has with an absence caveat ("<n> nodes not embedded; run glia embed");
+  an explicit `glia embed` always works. A `[embed]` marker reports embedded / cached / stale counts.
 - **Semantic tier** in `find` and the flow search (§F.6), and `pack` as a fallback (§3): the query text is embedded
   in-process with the sidecar's model; HEURISTIC, reported as its own match tier with its similarity, never mixed into
   the lexical order. Blast-radius never seeds from vectors.
