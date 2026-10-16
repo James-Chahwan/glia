@@ -45,6 +45,15 @@ actually built. Items join this list as 0.5.2's waves surface them (close-out fo
   tweaks if need be before we go for the release"*. Every followup a 0.5.3 wave raises is finished inside 0.5.3: none
   goes to a 0.5.4 seed (§4). 0.5.2 stays unreleased while James tests it; his tweaks land on main before the bump.
 
+- 2026-10-16, alignment (*"yeah sure lets get everyone aligned sorry this got a bit confusing"*): items MOVED out of this
+  seed into the 0.5.2 tweaks (`dev-notes/tweaks-0.5.2.md`, T1-T12), so they are not 0.5.3 work any more: the client <->
+  server contract model (T1), NATS dynamic / config subjects (T2), WebSocket inside an HTTP route (T3), the trailing query
+  interpolation (T4), dead_symbol framework noise (T5), test-file routes (T6), in-project forbid anchoring and visible
+  orphaned constraints (T7, the forbid part of §D's orphaned-constraint item), check caveats once and located GQL rows
+  (T8), pyo3 category names (T9), smart contracts across the stack (T10), GraphQL root-field pairing (T11), and one hint
+  format with `glia cell set --hint` (T12, the §B "caller hint" and "one hint format" items). The 0.5.3 spec run reads
+  this seed minus those, and re-measures after the tweaks land.
+
 ## 1. The train
 
 | release | contents |

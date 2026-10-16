@@ -30,6 +30,13 @@ James, 2026-10-16: *"lets consider this pre 0.5.3 work and part of 0.5.2"* - T10
 tweak is `~/Code/examples-glia` (expected answers and baseline: `dev-notes/examples-glia-expected.md`), plus the Kina and
 quokka-stack shapes above, each turned into a substrate-gap fixture.
 
+| T12 | **One hint format between glia and Engram** | Engram's first real correction row (Kina `entryGuard`): the gmap's `identity_hint` is `frontend/src/app/app.routes.ts:3:0`, the cell store's `Identity::hint` is `v1\|3\|app.routes.ts\|9bdbdf56d843b8d0\|entryGuard` | Engram cannot match a row's stored hint to its facts; `glia cell set` takes no hint |
+
+T12 (James, 2026-10-16: *"yeah sure lets get everyone aligned"*): the `v1|..` form is the shared key; glia-export-engram
+writes each fact's v1 hint into a digest-bound `<out>.hints.jsonl` (rows `{key, hint}`, a header with `gmap_digest`, as
+`.ppr.jsonl`; no GMAP contract change), and `glia cell set --hint` / pyo3 `write_cell` / `PyGraph.set_cell` `hint=` take
+that form, validated, with a reported target when a fresh layout's binding disagrees.
+
 Checked and fine: gRPC (quokka's Android client and turps' WS-to-gRPC bridge both pair to `grpc:chat.QuokkaChatService`).
 Not testable here: GraphQL (neither repo uses it).
 
@@ -43,3 +50,18 @@ Not testable here: GraphQL (neither repo uses it).
   `GET /api/user/wallet` have no frontend caller.
 - quokka's Android app sends `PUT /api/protected/settings/account`; turps registers only `DELETE`.
 - Kina: 8 handler methods call repository methods directly (the layering rule in the demo).
+
+## Who does what, in order (the one plan every session follows)
+
+1. **glia (this session):** the tweak packets T1-T12 run as 0.5.2 waves W15+ with the usual close-outs, then a closing
+   docs packet that also updates the three DZ.2 handoffs with every new break. 0.5.2 is then code-complete again.
+2. **James:** tests 0.5.2 (Kina, quokka-stack, examples-glia); any tweak he finds lands on main first.
+3. **James:** the release - bump the workspace, `py/pyproject.toml` and `engram-export/Cargo.toml` to 0.5.2, rebuild the
+   wheel, re-measure README Numbers, tag, push, publish. That commit is the release candidate (RC).
+4. **Engram session:** installs that glia, runs the Kina + glia replays at the RC (flat-ppr vs flat-fs, X1 off / on,
+   the `since` pairing totals), switches its corrections writer to `--hint` with the v1 hints from `<out>.hints.jsonl`.
+5. **neuropil:** applies `dev-notes/neuropil-handoff-0.5.2.md` after the release (no change needed before).
+6. **repo-graph:** held. It upgrades 0.5.1 -> 0.5.3 from one combined handoff after 0.5.3 (James: "Hold repo graph for
+   post 0.5.3").
+7. **glia:** the 0.5.3 spec run from `dev-notes/next-leap-0.5.3.md`, its waves, follow-up waves until no followup is
+   left, then the combined repo-graph handover.
