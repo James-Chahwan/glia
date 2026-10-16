@@ -1,7 +1,7 @@
 # glia 0.5.3 — scale, plus the Engram sidecars (scope seed)
 
 Seeded 2026-10-15 at `6da2965`, before any 0.5.2 wave ran. This is a scope list, not a spec: the packet spec run
-happens after 0.5.2 lands and its repo-graph handoff is done, so every packet is verified against what 0.5.2
+happens after 0.5.2 lands (its repo-graph handover is held until after 0.5.3, §0), so every packet is verified against what 0.5.2
 actually built. Items join this list as 0.5.2's waves surface them (close-out followups with no 0.5.2 owner).
 
 ## 0. Decisions (verbatim)
