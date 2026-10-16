@@ -36,15 +36,32 @@ activation/         Spreading activation — domain-agnostic PPR with configurab
                     also the domain-free build-pass registry (`passes`: Stage, PassSpec,
                     PassRegistry) — build-time, so PARSER_STAMP hashes it — and `algo`:
                     GraphSource, CategorySet, the CSR Adjacency index, `algo::reach`
-                    (bfs / reachable / reachable_by, O(V+E) per walk), `algo::delta`
-                    (graph delta), `algo::cycles` (Tarjan SCC), and the 0.5.1 slots
+                    (bfs / reachable / reachable_by, O(V+E) per walk; `bfs_levels`, the
+                    levelled multi-source BFS with mask, rank and plus modes the rules
+                    closures and transitive forbid walk, DA.1), `algo::delta` (graph
+                    delta), `algo::cycles` (Tarjan SCC), the 0.5.1 slots
                     `algo::community` (label propagation, seeded Leiden, CD.1a/b),
                     `algo::cut` (Stoer-Wagner / Dinic, CD.2a), `algo::linkpred`
                     (CD.3a), `algo::hubs` (degree / HITS, CD.4a), `algo::minhash`
                     (MinHash + LSH, CD.4d), `algo::timeline` (validity intervals,
-                    CD.5a); `plan` (one
+                    CD.5a), and 0.5.2's `algo::classes` (identity classes: UnionFind
+                    with min-id roots, Classes, and the Quotient GraphSource a walk
+                    over a class runs on, DD.1) and `algo::ppr` (push PPR,
+                    Andersen-Chung-Lang, over an Adjacency, DE.5); `plan` (one
                     ActivationPlan over the RankingSignal / FilterPredicate / SynthHook
-                    hooks) and `profile` (DomainTables / DomainProfile)
+                    hooks) and `profile` (DomainTables / DomainProfile; 0.5.2 adds
+                    IdentityRule / IdentityTier and `DomainTables.identity_rules`, DD.3)
+rules/              glia-rules (0.5.2, DA): the Datalog evaluator. Depends on glia-core and
+                    glia-activation ONLY (the `dependency_guard` test in rules/tests/toy.rs
+                    pins it), and is query-time: not a HASHED_ROOTS entry, so a rules change
+                    never moves PARSER_STAMP. A string-named IR (ir), one lexer (lexer)
+                    shared by the Datalog parser (parser) and the GQL front end (gql/),
+                    analysis + strata, a planner, a levelled semi-naive evaluator (eval /
+                    exec over relation), the reaches / scc closures over
+                    activation::algo (closure), provenance + explain, aggregates, magic
+                    sets. A domain plugs in by implementing `source::FactSource`
+                    (a GraphSource); the code domain's is engine::rules::CodeFacts, and
+                    the toy proof is `cargo test -p glia-rules --test toy` (Q10)
 parsers/code/
   python/  go/  typescript/  rust/  java/  csharp/  ruby/  php/  swift/
   c_cpp/   scala/  clojure/  dart/  elixir/  solidity/  terraform/
@@ -55,16 +72,25 @@ parsers/code/
                 eventbus, graphql, ts_routes, angular/react/vue route extractors;
                 code_guard (private): the one .rs / .py string-literal and comment
                 guard (LazyGuard) every needle scanner reads through, so glia's own
-                needle tables and test literals mint nothing (CJ.1a-c, `[code-guard]`)
+                needle tables and test literals mint nothing (CJ.1a-c, `[code-guard]`);
+                generated (0.5.2, DE.7): the one generated-file classifier
+                (`is_generated`: protoc / codegen names, or a generator banner in the
+                first 40 comment lines), read by ORIGIN `generated` and the gRPC
+                client needles (a vendored stub mints no GRPC_CLIENT, DE.8)
 stamp/              Build identity: RELEASE + PARSER_STAMP (content hash of every
                     graph-shaping source). Keys the parse cache, so a parser fix
                     invalidates caches without a version bump.
 py/                 pyo3 bindings — the only Rust crate published to PyPI (as glia-py, module glia_py)
 toy-domain/         test-only second domain (publish = false) proving the domain seam; never a dependency of a shipped crate
+                    (the rules layer's own toy proof is inline in rules/tests/toy.rs, so this list is unchanged)
 engram-export/      (excluded) glia -> engram_core::Gmap exporter; needs ../Engram; build/test only via scripts/check-engram-export.sh.
                     Writes <out> plus <out>.files.json and <out>.meta.json (glia version, BUILD_STAMP,
                     gmap_digest; CK.3), and <out>.glia/, the history layout `--since` reads;
-                    `-V` prints glia's version line
+                    `-V` prints glia's version line. 0.5.2: every clone of one commit exports the
+                    same bytes (DE.2); ENDPOINTs and `page:` ROUTEs anchor identity hints and
+                    `--since` pairs re-keyed endpoints and renamed symbols (DE.3, DE.4);
+                    `--ppr-candidates <K>` writes `<out>.ppr.jsonl`, each fact's top-K push-PPR
+                    neighbours, bound to the gmap by its digest (DE.5)
 ```
 
 Parsers live at `parsers/<domain>/<language>/`. When a non-code domain lands (0.5.0 ships the seam, not a domain), its parsers nest alongside `parsers/code/`.
@@ -85,24 +111,33 @@ The facade rules:
    items (engine `walk`/`route`/`passes`/`docs`/`endpoint_fold`; graph `calls`/`imports`/
    `signal`/`traversal`) are not globbed. `engine::arch` and `engine::cache` are
    `pub mod` with an explicit, partial flat list.
-2. **Every new 0.5.0 / 0.5.1 primitive is a public module slot**, reached by module
-   path — `glia_engine::delta::graph_delta_vs_rev`, `::persist::load_layout`,
-   `::profile::CODE_PROFILE`, `::pack::pack`, `glia_graph::roles::roles_in` — never
-   flattened into the root. The slot's owner fills its file; no later packet edits a
-   facade (in 0.5.0 only LD.11a, the crate rename, touched `engine/src/lib.rs` after
-   wave 0; in 0.5.1 only the wave-0 C0.* packets touched the engine, graph and py
-   facades).
+2. **Every new 0.5.0 / 0.5.1 / 0.5.2 primitive is a public module slot**, reached by
+   module path — `glia_engine::delta::graph_delta_vs_rev`, `::persist::load_layout`,
+   `::profile::CODE_PROFILE`, `::pack::pack`, `::rules::query`, `::watch::WatchSession`,
+   `::identity::identity_classes`, `glia_graph::roles::roles_in` — never flattened into
+   the root. The slot's owner fills its file; no later packet edits a facade (in 0.5.0
+   only LD.11a, the crate rename, touched `engine/src/lib.rs` after wave 0; in 0.5.1 only
+   the wave-0 C0.* packets touched the engine, graph and py facades; in 0.5.2 only the
+   wave-0 D0.* packets touched a facade, the workspace Cargo.toml or Cargo.lock).
 3. **A spec step "FACADE: `pub use x::{..}`" or "`mod x;`" is already done** — skip it
    and call the item by its module path from `cli` / `py`.
 4. Two globbed modules exporting one name raise `ambiguous_glob_reexports`: rename,
    never `#[allow]`. A slot still doc-only at release is dead weight: the release docs
-   packet (LG.4b in 0.5.0, CZ.2 in 0.5.1) fails on any slot file whose only lines are
-   `//!` (`grep -v '^//!' <file> | grep -c .` is 0), and a dropped owner's slot is
-   deleted with its `mod` line. At 0.5.1 every tracked `.rs` file has code.
+   packet (LG.4b in 0.5.0, CZ.2 in 0.5.1, DZ.1 in 0.5.2) fails on any slot file whose
+   only lines are `//!` (`grep -v '^//!' <file> | grep -c .` is 0), and a dropped owner's
+   slot is deleted with its `mod` line. At 0.5.2 every tracked `.rs` file has code, the
+   34 D0 slot files included (none was dropped; D0.8's `cmd/query/query.rs` became
+   `rules_query.rs` in DB.5).
 
 ```
 engine/src/   lib.rs        facade (rules above)
-              walk.rs       repo walk, gitignore, region graph
+              walk.rs       repo walk, gitignore, region graph; plan_walk / read_walk (DC.1:
+                            a held walk table reuses each file whose stat stamp did not
+                            move, `[walk] reuse root=<r> reused=<n> read=<m> of <t>`); the
+                            HOCON `.conf` files akka-quartz names schedules in (DG.7b); sbt
+                            sub-projects as PROJECT roots (DG.12); requirements.txt /
+                            Pipfile python roots (DE.9); a `[[project]]` label names a
+                            detected root whose manifest names nothing (`relabelled=`)
               route.rs      per-file routing (yaml/Dockerfile/manifest/dotenv/.proto), parse cache;
                             ModuleQnames::plan names each file's MODULE (same-stem code files,
                             LB.9b / LB.13, and every C/C++ file, LB.10a, are named by file
@@ -110,23 +145,53 @@ engine/src/   lib.rs        facade (rules above)
                             sibling, `[imports] same-stem picks`)
               extract.rs    detect_language, parse_one, parse_one_with, cross-cutting extractors
               build/        mod.rs         GenerateResult, generate_one* / generate_many* pipeline;
-                                           assemble_many (generate_many before its passes run)
+                                           assemble_many (generate_many before its passes run);
+                                           DC.2's callable stages: aux_graphs (the region /
+                                           project / docs graphs) and finish_build (the
+                                           CODE_PASSES tail), so WatchSession runs the same fns
                             assemble.rs    build_graphs_for_repo, build_const_table (panics go
-                                           quiet through parallel::quiet; SuppressPanicHook is gone)
-                            grafts.rs      apply_post_cache — every post-cache graft goes here
+                                           quiet through parallel::quiet; SuppressPanicHook is gone);
+                                           parse_and_graft (route / parse / extract + grafts) and
+                                           repo_markers, the per-repo stages (DC.2)
+                            grafts.rs      apply_post_cache — every post-cache graft goes here;
+                                           0.5.2 adds the external WS / gRPC / GraphQL client
+                                           marking (endpoint_fold::mark_external_clients, DF.8),
+                                           apply_python_signals (DF.13), stamp_annotated_bases
+                                           (DF.19) and graft_quartz_conf_schedules (DG.7b); the
+                                           queue / event const folds run on the pool (DC.3,
+                                           `[const-fold] pooled`)
                             rpc_needles.rs RpcContext, apply_rpc_needles, graft_rpc_markers
-                            lang_build.rs  build_language_graphs — per-language build + markers;
-                                           rust_crates (the Cargo packages build_rust resolves against)
+                            lang_build.rs  plan_groups / build_groups / fold_groups — the
+                                           per-language build groups (DC.2; build_groups takes a
+                                           reuse slot a watch fills with cached builds) + markers;
+                                           GroupCtx holds every repo-level builder input, and
+                                           watch.rs hidden_fp destructures it exhaustively, so a
+                                           new input fails to compile until it joins a row (DC.7b);
+                                           rust_crates (the Cargo packages build_rust resolves
+                                           against), DartPackages (pubspec names, DF.4a)
+                            memo.rs        BuildMemo on ParseCache (DC.4): per-file const-table
+                                           scans, RPC needle halves and pure non-code routing
+                                           outcomes replayed for unchanged files by a caller that
+                                           holds a cache across builds (watch, in-process rev
+                                           builds), `[graft-memo] const hit=..`; in memory only
                             c_includes.rs  IncludeRoots / IncludeResolver — C/C++ include search
                                            roots (compile_commands.json, CMake, include/; CB.22)
                             timing.rs      the per-phase `[timing]` stderr timers (CA.9)
               docs.rs       markdown ingest; include_doc / DocRule: the well-known files and docs/
                             at the repo root and every PROJECT root, .ai/, ADR dirs, SDD feature
                             docs (features/<f>/*.md, spec-kit specs/<NNN-slug>/; CJ.2, `[docs] scope:`)
-              passes.rs     doc-linker, TESTS edges (module pairs, then fn-level from a test
-                            module's root functions, CL.5b), the post-pass fns
-              profile.rs    CODE_PASSES — every build pass in run order (15 resolvers, 9 post-passes,
-                            evidence fill + determinism sort); run_code_passes is the whole build tail
+              passes.rs     doc-linker (an ambiguous bare mention binds the least-qname
+                            candidate, DE.1), TESTS edges (module pairs, a `[walk] tests`
+                            module by stem, rule declared_name, DF.11, then fn-level from a
+                            test module's root functions, CL.5b), the post-pass fns; the
+                            evidence fill split (DC.5): each language group's intra edges are
+                            filled at group build (GroupFill) and Finalize re-fills only what
+                            changed (`[evidence-split] graphs=..`)
+              profile.rs    CODE_PASSES — every build pass in run order (14 Resolve passes: 13
+                            resolvers then identity, 9 post-passes, evidence fill + determinism
+                            sort); run_code_passes_with(merged, &CodeBuildCtx) is the whole build
+                            tail (run_code_passes is gone, DD.7); CodeBuildCtx::for_merge passes a
+                            layout merge's recorded SCIP roots, so merge == joint build
               coverage.rs   coverage_report          answers.rs   the P3 primitives
               cache.rs      incremental parse cache (the GLIAPCZ1 lz4 frame, CD.7a)
               arch.rs       service_map (glia arch)
@@ -146,8 +211,23 @@ engine/src/   lib.rs        facade (rules above)
               duplicate_flows CD.4e    timeline CD.5c
               shared_cache/ CE.2a (+CE.2b, CE.2d) — directory module, engine half only
                         (the transport is CLI-only); key.rs, export.rs, import.rs, layout.rs
-              overlay_loop/ CE.3b (+CE.3c, CE.3d) — directory module; writer.rs, trial.rs,
+              overlay_loop/ CE.3b (+CE.3c, CE.3d; 0.5.2: DB.9a-c, [[constraint]] candidates
+                        judged by the check delta) — directory module; writer.rs, trial.rs,
                         propose.rs, accept.rs, each declared in its mod.rs
+  0.5.2 public slots (D0.6), owner (+ extenders):
+              rules/   DB.2a (+DB.2b, DB.2c, DB.7c, DB.8a, DB.8b) — directory module: facts.rs
+                       (CodeFacts, the code FactSource, CODE_ATTRIBUTES), query.rs (query /
+                       validate / query_gql / evaluate_rule), prelude.rs + prelude.dl (the
+                       predicate prelude, PRELUDE), reflexion.rs + reflexion.dl (check's
+                       reflexion model as rules; the goldens in engine/tests/data/reflexion/
+                       are its only oracle: a change to reflexion.dl's semantics regenerates
+                       them with GLIA_UPDATE_GOLDEN=1 and declares it, DB.8b)
+              watch    DC.7a (+DC.7b, DC.7c) — WatchSession, WatchUpdate, Durability
+              identity DD.8 (+DD.9-DD.15) — IdentityView, Collapse, RowIdentity,
+                       identity_classes: SAME_AS read into the collapse and walk classes
+              memory   DE.10 — release_freed_memory (glibc malloc_trim(0) after a big drop;
+                       GLIA_MALLOC_TRIM=0 turns it off, `[memory] malloc_trim site=<s>
+                       rss_mb=<before>-><after>`)
   private slots (items pub(crate)):
               http_owner LB.4a         rekey LB.4a (LC.2 edits)   git_rev LE.1b
               adr LF.4b                parallel LG.1a (+LG.1b, LG.1c)
@@ -161,10 +241,14 @@ graph/src/    lib.rs        facade (rules above)
               types.rs build.rs imports.rs calls.rs merged.rs traversal.rs
               blast.rs signal.rs
               resolvers/    one module per mechanism (http, grpc, rpc, queue, graphql,
-                            websocket, eventbus, shared_schema, message_schema, db,
-                            cron, config, iac, package, cli) + mod.rs; host.rs is the
+                            websocket, eventbus, shared_schema, db, cron, config, iac,
+                            cli) + identity.rs (IdentityResolver, the SAME_AS stars, D0.5
+                            slot, DD.5 + DD.6 + DD.7) + mod.rs; message_schema and package
+                            are gone (DD.16: their SHARES_SCHEMA message pairs and
+                            SHARES_DEPENDENCY clique are SAME_AS stars now); host.rs is the
                             shared host narrowing (service alias index, narrow_by_host)
-                            the http / websocket / grpc / graphql / rpc resolvers use (CB.12)
+                            the http / websocket / grpc / graphql / rpc resolvers use (CB.12);
+                            external WS / gRPC / GraphQL clients stay out of pairing (DF.9)
   public slots (glia_graph::<slot>::<item>):
               rust_paths LA.1a (+LA.1b, LA.3)   roles LB.3a (+LA.21a)
               identity LB.6                     cells LF.1a
@@ -173,12 +257,20 @@ graph/src/    lib.rs        facade (rules above)
   private slots (items pub(crate)):
               go_mounts CB.20 (Go group mounts)   swift_scope CB.18 (SwiftModuleTypes, the
               Swift call hook)   cpp_scope CB.25 (CppScope, C++ name lookup)
+  flat 0.5.2 additions: blast_radius_over (blast radius over any GraphSource, so an
+              answer walks the identity Quotient, DD.10) and cross_links_with (the service
+              links with SAME_AS classes one link per service pair and collapse classes
+              counted once, arch's reading, DD.14)
 
 code-domain/src/  lib.rs    the id registries (node_kind, edge_category, cell_type) — ids
                             are allocated here and nowhere else; walk_gating, project_roots
   public slots:     data_entity A13.1   evidence LC.3a   external_inputs LF.1a (+LF.4a)
                     glia_config LF.2a (+LG.3d)   profile LD.14a (+LD.14b, LD.6, LE.4d)
                     snapshots LF.5a (+LF.6a)   code_span CD.7c
+                    same_as D0.1 + DD.2 (the eight identity rule names, the shared
+                    contract-op key, package normalisation, the SCIP key, content
+                    digests); project_roots gains ProjectRoot.label_source
+                    (manifest | dir | root | declared, DD.4)
 
 py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by name,
                             then add_class PyGraph — never edited for a new API
@@ -196,7 +288,12 @@ py/src/       lib.rs        #[pymodule]: every registered ModuleFns sorted by na
   0.5.1 private slots (C0.4): pack CC.4c   review CC.6b   flags CC.7c
               contract_breaks CC.8b (+CC.8c)   hotspots CC.10b   cochange CC.11c
               communities CD.1e   splits CD.2d   hubs CD.4c   duplicate_flows CD.4f
-              timeline CD.5d   overlay_loop CK.1 (C0.9)
+              timeline CD.5d   overlay_loop CK.1 (C0.9; DB.9b's rules in the try dict)
+  0.5.2 private slots (D0.7): query DB.6 (PyGraph.query / query_gql)
+              identity DD.15 (PyGraph.identity_classes)
+              watch DC.9 (the WatchSession class: apply / poll / snapshot / persist,
+              the GIL released while the engine works)
+              graph.rs: a PyGraph drop calls memory::release_freed_memory (DE.10)
 
 cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
               common.rs     shared helpers (generate_for, print_json, node lookup,
@@ -209,10 +306,11 @@ cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
                   query   pages LA.6e, find LD.3b, flows LD.4b, implementors LD.7c,
                           serves LD.8b, why LE.5; 0.5.1: pack CC.4c, hotspots CC.10b,
                           communities CD.1e, splits CD.2d, hubs CD.4c,
-                          duplicate-flows CD.4f
+                          duplicate-flows CD.4f; 0.5.2: query DB.5 (rules_query.rs),
+                          identity DD.15
                   change  delta LE.1c, diff-impact LE.2, tests-for LE.3b, patterns LE.7b;
                           0.5.1: review CC.6b, contract-breaks CC.8b (+CC.8c),
-                          cochange CC.11c, timeline CD.5d
+                          cochange CC.11c, timeline CD.5d; 0.5.2: watch DC.8
                   rules   effects LE.4d, cycles LE.6b, check LE.8, spec-status LE.9b;
                           0.5.1: flags CC.7c
                   store   inspect LC.4, cell LF.1c; 0.5.1: cache/ CE.2c (+CE.2d, CE.2e)
@@ -232,7 +330,7 @@ cli/src/      main.rs       Cli (global options), enum Cmd, main() dispatch
   (C0.5) were declared as doc-only slots (`mod <name>;` plus one `//!` paragraph, no
   items); each owner added `Args`, `run`, its variant `<Name>(<module>::Args)` (the doc
   comment is clap's about) and its arm, and regenerated `cli/surface/<cmd>.txt`. All 14
-  are filled.
+  are filled, and so are 0.5.2's three (D0.8: identity, query, watch).
 - **Snapshot ownership:** the packet that claims `py/src/<m>.rs` owns
   `py/api_surface/<m>.txt` and `py/tests/surface/test_<m>.py`; the packet that claims
   `cli/src/cmd/<..>/<c>.rs` owns `cli/surface/<c>.txt` (global options:
@@ -245,13 +343,39 @@ source files
    → per-language parser (tree-sitter → ExtractedItems)
    → extractors (cross-cutting: HTTP, gRPC, queues, data_sources, CLI)
    → graph builder (resolves intra-repo references)
-   → CODE_PASSES (engine/src/profile.rs): the 15 cross-graph resolvers (HttpStack, gRPC, RPC,
-     Queue, GraphQL, WebSocket, EventBus, SharedSchema, MessageSchema, CLI, DB, Cron, Config,
-     IaC, Package), then the post-passes, evidence fill and determinism sort
+   → CODE_PASSES (engine/src/profile.rs): the 13 cross-graph resolvers (HttpStack, gRPC, RPC,
+     Queue, GraphQL, WebSocket, EventBus, SharedSchema, CLI, DB, Cron, Config, IaC), then
+     Identity (SAME_AS stars, the last Resolve pass), then the 9 post-passes, the evidence fill
+     (group fills taken at language build, re-filled only where something changed, DC.5) and
+     the determinism sort — `[passes] domain=code resolve=14 post=9 finalize=2`
    → merged graph
    → .gmap layout at <repo>/.glia/graph/ (rkyv + mmap, sharded)
    → [optional] activation (PPR) / projection-text / pyo3 → Python
+   → [query time] rules (glia-rules over engine::rules::CodeFacts): `glia query`, check's rule
+     invariants and reflexion model; identity collapse (engine::identity) on the answers
 ```
+
+Graph content does not depend on where a tree is checked out: the doc linker binds an ambiguous
+mention to the least (qname, kind, graph) candidate and history binds a file's MODULE by least
+qname, never by the RepoId-derived NodeId, so two clones of one commit (another remote or
+directory name) build the same qname-level graph (DE.1, `engine/tests/repo_id_invariance.rs`;
+`[doclink] tie-break by qname: qualified=<q> bare=<b>`). A node id still hashes the RepoId, and
+RepoId-ordered tie-breaks remain in pick_primary, cochange, overlay bind, declared and cells
+(the 0.5.3 seed, §D).
+
+**Watch (DC.1-DC.10b).** `engine::watch::WatchSession` keeps one repo's build open: the walk
+table with stat stamps (DC.1), one ParseCache with its in-memory build memos (DC.4) and the last
+GenerateResult. `apply(paths)` reruns the same DC.2 stage fns a clean build calls, rebuilding only
+the language groups whose fingerprint moved (DC.7b: the post-graft parses, repo id, overlay, proto
+service set and each builder's hidden inputs) and taking the scoped located delta when it can
+(DC.6); every update's graph is a clean build of the tree as the session read it, which
+`engine/tests/watch_parity.rs` (scripted, DC.10a) and its seeded random sequences (DC.10b) check
+byte for byte. A path is Low (a source file) or High (`.glia/`, a `.gitignore`, a manifest, a
+`go.mod`, a tsconfig, include sources, a migration: re-plans the walk), `watch::durability`; an
+overlay, identity, Go-module or proto-service change is a `full_rebuild` with its reason. `poll()`
+is a stat scan (no notify crate) with a racy-mtime rule (DC.7c). Single repo; persists only when
+asked (`persist`, `save_cache`). After each update the replaced graph is dropped and freed heap
+returned (`memory::release_freed_memory("watch_update")`, DE.10).
 
 **Parallel build (LG.1a–c).** The walk's reads, the per-file route / parse / extract, the
 const-table scan, the RPC needle pass, a multi-repo build's per-repo walks and the per-language
@@ -266,7 +390,19 @@ still reach the embedding app's hook. fired_on, on stderr:
 `[parallel] <repo>: routed <n> files on <t> threads (...)` and
 `[parallel] <repo>: const-scan <c> files, rpc-needles <r> files, <g> language graphs on <t> threads`
 once per repo. Per-language builder markers interleave at default threads;
-`GLIA_THREADS=1` keeps them in sequential order.
+`GLIA_THREADS=1` keeps them in sequential order. 0.5.2 adds, once per repo,
+`[groups] repo=<label> built=<b> reused=<r> keys=<k1,k2,..>` (the build groups, DC.2; a clean
+build prints `reused=0`), `[const-fold] pooled queue_files=<q> event_files=<e> threads=<t>
+repo=<label>` (DC.3) and `[walk] reuse root=<r> reused=<n> read=<m> of <t>` (DC.1); for a caller
+that holds a cache, `[graft-memo] const hit=<h>/<n> needles hit=<h>/<n> noncode hit=<h>/<n>
+repo=<label>` (DC.4); once per build `[evidence-split] graphs=<g> group_filled=<n> refilled=<r>
+fallback_graphs=<f> cross=<c>` (DC.5); per scoped delta `[delta] scoped graphs before=<b>
+after=<a> ids=<i> keys=<k> moves=<on|off>` (DC.6); the session's `[watch] open` / `update` /
+`noop` / `poll` lines (DC.7a, DC.7c); `[memory] malloc_trim site=<site> rss_mb=<before>-><after>`
+per trim (DE.10); `[imports] dart plain-import names bound=<b> ambiguous=<a>` (DF.4b); and the
+identity pass's `[identity] classes=<c> edges=<e> diverged=<d> <rule>=<n>... offsets=<o>/<t>`
+(DD.5) and the answers' `[identity] collapse surface=<s> classes=<c> walk_classes=<w> folded=<f>
+rows=<r>` (DD.8).
 Per-phase timers (CA.9, `engine/src/build/timing.rs`; wall time on the orchestrating thread,
 milliseconds truncated to one decimal, stderr only — never a cache, `.gmap`, manifest, stdout
 or answer): `[timing] repo=<label> walk=<ms> parse=<ms> const_scan=<ms> grafts=<ms> language_build=<ms>`
@@ -282,11 +418,18 @@ Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems`
 - `SelfMethod` walks to the enclosing `CLASS` / `STRUCT` / equivalent. In the TS family
   (`build_typescript_family`, which lang_build's TS group calls) an unbound `this.m()` /
   `super.m()` then follows INHERITS_FROM to the nearest ancestor defining m: the TS parser
-  emits `CallQualifier::SuperMethod` for `super.m()`, which starts one level up, and
-  `resolve_inherited_calls` binds both (CALLS rule `inherited_method`).
-  `emit_abstract_implements` pairs an override with the abstract member it implements
-  (`NavFact::AbstractMethod`, method-level IMPLEMENTS rule `abstract_override`) (CH.1b,
-  `[ts-inherit]`).
+  emits `CallQualifier::SuperMethod` for `super.m()`, which starts one level up.
+  `resolve_inherited_calls` binds `this.m()` (CALLS rule `inherited_method`), `super.m()`
+  (rule `super_method`, DF.22c) and a typed-receiver call whose class inherits m (rule
+  `inherited_receiver`, DF.22b). `emit_override_implements` (renamed from
+  emit_abstract_implements) pairs an override with the member it overrides: abstract
+  (`NavFact::AbstractMethod`, method-level IMPLEMENTS rule `abstract_override`, CH.1b) or
+  concrete (rule `concrete_override`, DF.22c). Constructors never pair (`[ts-inherit] calls
+  bound through superclasses: <n> (self= super= receiver= ambiguous=) abstract implements=<a>
+  concrete overrides=<c>`). The TS parser fills `CodeNav::local_types` for parameters and
+  locals (annotated, `new T()`, `inject(T)`, `x as T`, `this.<field>` aliases; locals in
+  top-level describe / it callbacks share the file's scope; DF.22a, `[ts-locals]`), and a typed
+  receiver reads another class's STATE_VAR (rule `receiver_state`, DF.17).
 - Go resolves more than calls through its package model (graph/src/build.rs). Struct
   embeds bind as STRUCT INHERITS_FROM edges (`bind_go_embeds`), and `GoPromoted` /
   `GoPackages::method_on` promote embedded methods and fields to calls and to implicit
@@ -297,17 +440,36 @@ Parsers **extract**; graph crate **resolves**. Parsers emit raw `ExtractedItems`
   another file of the package (CI.4). `build_go` also resolves in-repo
   type aliases (`NavFact::TypeAlias`, `resolve_go_alias_sigs` over `alias_scope`) in method
   signatures before the implicit-IMPLEMENTS compare (CI.6, `[go-alias]`). A call in a
-  package-var initialiser is a CALLS of the var's STATE_VAR (CI.1, parser-side).
+  package-var initialiser is a CALLS of the var's STATE_VAR (CI.1, parser-side). 0.5.2: an
+  un-aliased import binds the imported package's `package` clause name (`NavFact::GoPackageName`,
+  read by resolve_imports_go / GoPackages / bind_go_embeds: `store` for `internal/v2store`,
+  DF.15); a method-value route handler on a typed parameter or local (`h *TokensHandler`,
+  `h := NewTokensHandler()`) binds through its type text, rule `local_type_method` (DF.16,
+  `[go-routes] receiver-method handlers=<n> local-method=<m>`); a route-group prefix held in a
+  constant folds (DF.7).
+- Rust: `impl Trait for Type` with an imported or path-qualified trait is IMPLEMENTS, and axum
+  `State` / `Extension`, actix-web `web::Data` and Rocket `&State` handler parameters are INJECTS
+  to the held type, both bound by Rust path rules through `RustIndex::resolve_type_refs`, never by
+  bare name (DG.13a, DG.13b, `[rust-types] implements=<b>/<r> injects=<b>/<r> ..`).
+- Ruby `Calc.new.add(..)` binds through the constructed type (CL.5a's rule, extended to Ruby's
+  postfix `.new` by DH.13), so Minitest methods get function-level TESTS; `class X < Base` is
+  INHERITS_FROM. PHP `extends` / `implements` are heritage edges (DH.14), and a `use` of a
+  declared namespace binds that namespace's member (DF.2). Dart resolves own-package
+  `package:<pubspec name>/..` URIs (DF.4a) and binds a plain import's public names (DF.4b).
 - An `extra_hook` seam on `resolve_calls` lets a language contribute resolution the generic
-  walker misses; it is consulted only after every generic lookup failed. Four builders use it:
+  walker misses; it is consulted only after every generic lookup failed. Five builders use it:
   `build_rust` hands it the path resolver in `graph/src/rust_paths.rs` (`crate::` / `self::` /
   `super::` / `Self::` / workspace-crate paths), fed the walk's Cargo packages as `RustCrate`s by
   `lang_build::rust_crates` (LA.1a); `build_go` hands it `GoPackages` (a package is its
   directory, LA.13b; typed receivers, CA.2b); `build_c_cpp` hands it `CppCallScope` (out-of-line
   members and directly `#include`d headers, LB.10c), then `CppScope` (`graph/src/cpp_scope.rs`:
   C++ name lookup, CB.25); `build_swift` hands it `SwiftModuleTypes`
-  (`graph/src/swift_scope.rs`: implicit self across extensions, cross-file static calls, CB.18).
-  Every other builder passes `|_, _| None`.
+  (`graph/src/swift_scope.rs`: implicit self across extensions, cross-file static calls, CB.18;
+  0.5.2: parameters and locals type their receivers, DF.3); `build_elixir` hands it
+  `ElixirModules` (remote calls by full module name, un-aliased top-level modules,
+  `__MODULE__.f(..)`, nested-module automatic aliases and alias paths, DH.17a,
+  `[elixir-calls] full-name remote calls bound=<b> ambiguous=<a>`). Every other builder passes
+  `|_, _| None`.
 - Parsers must not short-circuit this: extract what the AST makes available; don't cap at what old regex heuristics happened to capture.
 
 ## Format Spec — `.gmap`
@@ -344,6 +506,15 @@ Format 3 (0.5.1) is compression, no new ids:
   by `glia timeline build` and read by `timeline history` / `as-of`; `RepoMeta.rev` records the
   commit a layout was built at, read from `.git` with no git process.
 
+0.5.2 changes no on-disk layout: `FORMAT_VERSION` stays 3 and `MANIFEST_VERSION` 2. What a
+layout holds moves: SAME_AS (edge 37) is an ordinary cross edge, one star per identity class
+(every member -> the class's center, the least (qname, kind, graph index) member), its EVIDENCE
+rule the identity rule (`message_fqname`, or `message_fqname/diverged` when that copy's fields
+differ from the center's; `code_domain::same_as::evidence_rule`); no SHARES_DEPENDENCY edge and
+no message SHARES_SCHEMA pair is written (DD.16); a PROJECT's ORIGIN cell gains `label_source`
+(DD.4), a generated file's nodes ORIGIN `generated` (DE.7) and an unpaired third-party WS / gRPC /
+GraphQL client ORIGIN `external` (DF.10). Rules are query-time and store nothing (Q8).
+
 Projections on top of the store:
 - **Binary** — the `.gmap` itself, consumed by activation and the pyo3 layer
 - **Dense text** — sigil-based projection with prefix/default/module dedup and scope collapse
@@ -359,6 +530,11 @@ Locked `u32` IDs for `NodeKind`, `EdgeCategory`, `CellType`. Qualified names use
 `RESERVED ids` block; take the next free value there, in the same commit as the emitter,
 and never pick one inline in a parser. An id is **locked once allocated** — it is baked
 into every `.gmap` on disk, so reusing or renumbering one silently corrupts old stores.
+
+0.5.2 allocates one id, edge category 37 SAME_AS (D0.1): an identity class's member -> its
+center, written by IdentityResolver (DD.5). The next free ids are node 50 / edge 38 / cell 26.
+SHARES_DEPENDENCY (31) stays registered with no emitter since DD.16 (an id is never reused), so an
+old layout still decodes it.
 
 IDs ref: `dev-notes/glia-memory/reference_kind_category_ids.md` and `reference_code_domain_registries.md`.
 
@@ -376,6 +552,18 @@ radius, cross-stack trace and liveness follow), `effect_sinks`, the base
 Some(preset))`; `MergedGraph::blast_radius` takes `&DomainTables`. The graph, store and
 projection crates read `CODE_TABLES` directly (they cannot depend on the engine); a new
 entry kind, carry edge or weight is one table row there, never a list in a consumer.
+
+Identity is a table too (DD.3): `CODE_TABLES.identity_rules` holds the eight ways two nodes are
+one thing, one `IdentityRule` per `same_as::RULES` name (the kinds it pairs, the key, the tier and
+whether a class walks): `package_name` (FACT, never walks: a registry package would join every
+dependant), `manifest_name` (FACT, a dependency and the project its manifest names), `message_fqname`
+(FACT), `contract_op` / `contract_route` (DERIVED), `scip_symbol` (FACT, DD.7), `body_hash` /
+`path_suffix` (HEURISTIC vendored copies, DD.6: same-as candidates, never collapsed). SAME_AS
+weighs 0 in PPR and is in no carry or community list: identity reaches a walk or a ranking only
+through the quotient (`algo::classes::Quotient`), never as an edge. Answers collapse FACT /
+DERIVED classes to one row carrying `identity {tier, rules, diverged, also_in}` (Q17), and walk
+classes (messages, contract ops, SCIP symbols, package <-> project) are one node in blast radius,
+trace / flows and tests-for walks and their PPR (DD.10-DD.12).
 
 ## Adding a New Language Parser
 
@@ -401,20 +589,38 @@ its `pub use resolvers::{…}` list only if it must be public. Register it by ad
 pass (resolver, post-pass, external stage) is a `PassSpec` there with its `Stage`, `after` and
 `populates`, never a new call in `engine/src/build/`; the `code_passes_order_is_head_order`
 and `populates_is_exact` tests pin the order and the declared cell types.
-`resolvers/http.rs` is the canonical example. Shipped (15): HTTP, gRPC, RPC, Queue, GraphQL,
-WebSocket, EventBus, SharedSchema, MessageSchema, CLI, DB, Cron, Config, IaC, Package. See
-`dev-notes/glia-memory/project_040_stack_resolvers_backlog.md`.
+`resolvers/http.rs` is the canonical example. Shipped: 13 resolvers (HTTP, gRPC, RPC, Queue,
+GraphQL, WebSocket, EventBus, SharedSchema, CLI, DB, Cron, Config, IaC) and Identity, the last
+Resolve pass (SAME_AS, DD.5); MessageSchema and Package were removed in 0.5.2 (DD.16), their
+pairs now identity classes. See `dev-notes/glia-memory/project_040_stack_resolvers_backlog.md`.
 
 ## Key Design Decisions
 
 - **Tree-sitter, not regex.** 0.4.x moved to AST extraction; 0.2.0 regex is not a ceiling.
 - **Zero-copy store.** rkyv + mmap; writes rebuild the whole file.
 - **Domain-agnostic core.** `core` and `activation` know nothing about code. Code lives in `code-domain` and the parsers.
-- **Generic graph algorithms live in `activation::algo`, over `GraphSource`, never in engine.** Reachability (`algo::reach`, LD.15a), graph delta (`algo::delta`, LE.1a) and Tarjan SCC (`algo::cycles`, LE.6a); 0.5.1 adds label propagation and seeded Leiden with `modularity` (`algo::community`, CD.1a/b), Stoer-Wagner and the minimum s-t cut (`algo::cut`, CD.2a), neighbourhood pair scoring (`algo::linkpred::score_pairs`, CD.3a), degree tables and HITS (`algo::hubs`, CD.4a), MinHash + LSH (`algo::minhash`, CD.4d) and validity spans over consecutive snapshots (`algo::timeline::TimelineBuilder`, CD.5a). A graph type opts in by implementing `GraphSource`, and a walk runs over a per-query CSR `Adjacency`, never a scan of the edge list per visited node; the engine answers that use them (`communities`, `splits`, `hubs`, `duplicate_flows`, `timeline`, the `suspected_edge` gap) add the code-domain reading on top: labels, services, located rows, tiers.
+- **Generic graph algorithms live in `activation::algo`, over `GraphSource`, never in engine.** Reachability (`algo::reach`, LD.15a; `bfs_levels`, DA.1), graph delta (`algo::delta`, LE.1a) and Tarjan SCC (`algo::cycles`, LE.6a); 0.5.2 adds identity classes and the quotient (`algo::classes`, DD.1) and push PPR (`algo::ppr`, DE.5); 0.5.1 adds label propagation and seeded Leiden with `modularity` (`algo::community`, CD.1a/b), Stoer-Wagner and the minimum s-t cut (`algo::cut`, CD.2a), neighbourhood pair scoring (`algo::linkpred::score_pairs`, CD.3a), degree tables and HITS (`algo::hubs`, CD.4a), MinHash + LSH (`algo::minhash`, CD.4d) and validity spans over consecutive snapshots (`algo::timeline::TimelineBuilder`, CD.5a). A graph type opts in by implementing `GraphSource`, and a walk runs over a per-query CSR `Adjacency`, never a scan of the edge list per visited node; the engine answers that use them (`communities`, `splits`, `hubs`, `duplicate_flows`, `timeline`, the `suspected_edge` gap) add the code-domain reading on top: labels, services, located rows, tiers.
+- **Rules are query-time (0.5.2, Q8).** Datalog runs over the built graph when asked (`glia
+  query`, check's rule invariants and reflexion model); it stores no derived edge, and glia-rules
+  is not a HASHED_ROOTS entry, so a rules change never invalidates a parse cache. Every row carries
+  a tier from the Q5 lattice: the min over derivations of the max over inputs, evaluated exactly
+  (each stratum to fixpoint with FACT inputs, then +DERIVED, then +HEURISTIC); a negated row adds
+  the coverage caveats of what the negation reads, an aggregate takes its weakest contributing
+  row. Rows sort by rendered values (never NodeIds); the crate's one hash map is
+  `value::Lookup`, which cannot be iterated, so map order never reaches an output; evaluation is
+  single-threaded; `eval::DEFAULT_MAX_ROWS` caps the rows one evaluation derives at 5,000,000
+  (`--max-rows` / `max_rows=` override it; past it, a `Budget` error naming the head); and the
+  `__a_` / `__m_` prefixes (any `__` name) are reserved for the magic-sets rewrite. The query
+  language reads structure only: no prelude predicate names an auth / security property, and
+  there is no value-flow relation (SECURITY.md). Reference: `docs/rules.md` (the Datalog dialect, the prelude, the GQL subset).
+  Markers: `[rules] eval strata=.. rules=.. rounds=.. ms=..`, `[rules] closure cats=<c>
+  mode=<m> bfs=<n> rows=<r>`, `[rules] budget pred=<p> rows=<n> cap=<c>`, `[rules] magic
+  pred=<p> adornment=<a> sites=<n>`, `[rules] explain pred=<p> tier=<t> height=<h> ..`,
+  `[rules] prelude relations=<n> (..)`.
 - **Publish gate.** Only `py/` publishes to PyPI (as `glia-py`, imported as `glia_py`). Everything else is internal workspace.
 - **No Python fallback.** After v0.4.10c, Python is a thin pyo3 wrapper; there is no parallel Python implementation to keep in sync.
 
-## Query & Answer Surface (v6 P2/P3, 0.5.0, 0.5.1)
+## Query & Answer Surface (v6 P2/P3, 0.5.0, 0.5.1, 0.5.2)
 
 Answer-shaped primitives live in the **engine** (shared by CLI + pyo3/MCP + future
 TUI), not composed by the consumer. Each is one call: complete, ranked, located.
@@ -428,23 +634,49 @@ HEURISTIC (a name guess, an overlay, git history, a clustering or a model) — n
 unexplained score; where an answer ranks by two signals (hotspots) it shows both ranks,
 never a blend.
 
+Identity (0.5.2, DD.8-DD.15, Q17). `find`, `blast-radius`, `trace`, `flows`, `tests-for`,
+`serves` and `arch` collapse every FACT / DERIVED identity class to one row, the class's best
+member, carrying `identity {tier, rules, diverged, also_in[{repo, qname, file, line}]}`, and walk
+the identity quotient (a walk class is one node in the BFS and the PPR). HEURISTIC same-as
+candidates (vendored copies) stay separate rows (Q18). `--no-collapse` (pyo3: `collapse=False`, the
+last keyword) is the raw pre-identity answer: no quotient walk, no identity tag. Not collapsed:
+pack, hubs, hotspots, communities, duplicate-flows, effects, implementors, why and gaps rows.
+`[identity] collapse surface=<s> ..` fires on stderr once per collapsing answer.
+
 CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surface/`
 (regenerate: `GLIA_UPDATE_SURFACE=1 cargo test --manifest-path cli/Cargo.toml cli_surface`). Most take
 `--with <repo>` (repeatable, merge first) and `--json`; `--scope` takes a path or a
 `glia projects` label. By `cli/src/cmd/` area:
 - pre-0.5.0 (`cmd/<command>.rs`): `analyze`, `arch` (A9.2 `service_map`; a single
-  repo keys services by top-level directory; `SHARES_*` / `DOCUMENTS` only with
-  `--include-shared`), `projects`, `contracts` (`--fields [--breaking-only]`, LE.10d),
-  `impact`, `blast-radius` (many seeds are one walk and one ranking, LD.5), `trace`
-  (ranked distinct paths, `--to`, `--max-paths`, LD.4a), `resolve`, `coverage` (+ the
+  repo keys services by top-level directory; `SHARES_*`, `SAME_AS` and `DOCUMENTS` only with
+  `--include-shared`; a SAME_AS class is one link per (service pair, class) at its weakest
+  edge and other links count class-mapped endpoint pairs once, `--no-collapse` the raw star,
+  DD.14), `projects`, `contracts` (`--fields [--breaking-only]`, LE.10d),
+  `impact`, `blast-radius` (many seeds are one walk and one ranking, LD.5; `--no-collapse`,
+  DD.10), `trace` (ranked distinct paths, `--to`, `--max-paths`, LD.4a; a class hop shows its
+  display member with an `(also in: ..)` cell, `--no-collapse`, DD.11), `resolve`, `coverage` (+ the
   co-change audit, LF.5c), `docs-for`, `docs sync|push` (`sync --source
   confluence|notion|mediawiki|dir`, CE.4b-CE.4f), `merge` (`--gmap`, `--workspace`,
   `--layout`, LC.10c), `build`, `install-hooks` (`--pair`, LG.2).
-- query: `pages` (LA.6e), `find` (LD.3b), `flows` (LD.4b; `--features` / `--out`, LG.3c),
-  `implementors` (LD.7c), `serves <repo> <channel> [--mechanism auto|http|queue]`
-  (LD.8b; an HTTP channel also lists each ENDPOINT stamped ORIGIN `external` for that
-  verb + path, match `external`, `Server.external_hosts`, CJ.3), `why <repo> <from> <to>`
-  (LE.5; exits 1 when not found). 0.5.1:
+- query: `pages` (LA.6e), `find` (LD.3b; `--no-collapse`, DD.9), `flows` (LD.4b;
+  `--features` / `--out`, LG.3c; `--no-collapse`, which conflicts with `--features` /
+  `--out`, DD.11), `implementors` (LD.7c), `serves <repo> <channel> [--mechanism
+  auto|http|queue]` (LD.8b; an HTTP channel also lists each ENDPOINT stamped ORIGIN `external`
+  for that verb + path, match `external`, `Server.external_hosts`, CJ.3; a server row in a
+  class folds into the first with `identity`, a server's handlers of one class keep the first
+  and `handler_identity` names each, `--no-collapse`, DD.13), `why <repo> <from> <to>`
+  (LE.5; exits 1 when not found). 0.5.2: `query <repo> [<file>] [-e <text>] [--gql]
+  [--output <pred>]... [--limit <n>] [--max-rows <n>] [--explain]` (DB.5,
+  `cmd/query/rules_query.rs`; Datalog from a file, `-e` or stdin, or with `--gql` a GQL read
+  query, over the code graph plus the prelude; one table per output, the program's sinks or each
+  `--output`; `--explain` adds each row's located witness; exits 0 with rows, 1 with none (the
+  absence), 2 on a usage, parse, analysis, row-budget or build error, diagnostics as
+  `<source>:<line>:<col>: error: <message>`; `[query] lang=<l> outputs=<o> rows=<r> ..`), `identity
+  <repo> [--tier fact|derived|heuristic] [--rule <rule>] [--diverged-only] [--limit <n>]` (DD.15;
+  the identity classes by rule and tier, each member located, diverged copies with their
+  variants: FACT / DERIVED classes collapse in answers, HEURISTIC same-as candidates never; exits
+  0 with classes, 1 with none, 2 on an error; `[identity] report classes=<c> fact=<f> derived=<d>
+  heuristic=<h> diverged=<x>`). 0.5.1:
   `pack <repo> <query> [--budget <tokens>] [--preset repair|review|onboard|centrality]`
   (CC.4c; the context for a query packed to a token budget, each node at the most detail
   the budget buys; stdout is the pack text alone), `hotspots [--level module|symbol|both]`
@@ -455,25 +687,42 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   [--threshold <jaccard>]` (CD.4f; exact and near groups of entry flows). `pack`,
   `hotspots`, `hubs` and `splits` exit 1 on an empty answer.
 - change: `delta [--base <rev>] [--edges-only] [--category <NAME>]...` (LE.1c),
-  `diff-impact` (LE.2), `tests-for` (LE.3b; ranked by failure count, failing trace and
-  co-change, `--limit`, `--no-signals`, CC.9a / CC.9b), `patterns` (LE.7b; out of experimental
-  since CC.12b, `--experimental` hidden and accepted until 0.5.2; `--group-by
+  `diff-impact` (LE.2; impact rows name their `also_in` repos, DD.15), `tests-for` (LE.3b;
+  ranked by failure count, failing trace and co-change, `--limit`, `--no-signals`, CC.9a /
+  CC.9b; test rows of one class fold, `--no-collapse`, DD.12), `patterns` (LE.7b; out of
+  experimental since CC.12b, the `--experimental` flag removed in 0.5.2, DE.11; `--group-by
   service|package`, CA.5b). 0.5.1: `review [--base <rev>]` (CC.6b; the PR report in one
   call: changed nodes, ranked impact, tests to run, edges by tier, rule violations new and
-  resolved; markdown for a PR comment, exits 1 when the change adds a violation),
+  resolved, rule and forbid_path violations by subject, DB.3c; markdown for a PR comment, exits
+  1 only when the change adds a BLOCKING violation, an advisory one under its own heading),
   `contract-breaks [--base <rev>] [--avro backward|forward|full] [--breaking-only]
   [--with <repo>]` (CC.8b / CC.8c; every contract judged against itself across the
   change, plus the clients left with no provider; exits 1 on either), `cochange
   [<file>...] [--base <rev>]` (CC.11c; what usually changes with the change, a
   directional confidence and whether a static link joins them; exits 1 with no rows),
   `timeline build|history|as-of` (CD.5d; the last `--revs` commits as edge validity
-  spans in the `timeline.gmap` sidecar). A git or build error exits 2.
-- rules: `effects` (LE.4d; an external ENDPOINT sink names its host, downstream
-  `external: <host>`, `EffectRow.external_hosts`, CJ.3, `[effects-external]`), `cycles`
-  (LE.6b), `check` (LE.8; exits 0 clean, 1 on
-  violations, 2 on an error; renders the reflexion model — `[[component]]`, `[[layer]]`,
-  `kind = "allow"` — as a `## reflexion model` section, CC.5b / CC.5c), `spec-status`
-  (LE.9b). 0.5.1: `flags [--status dead|undefined|single_site|quiet]` (CC.7c; the
+  spans in the `timeline.gmap` sidecar). A git or build error exits 2. 0.5.2: `watch <repo>
+  [--poll-ms <n>] [--debounce-ms <n>] [--persist-every <s>]` (DC.8; a foreground loop over
+  `WatchSession`, no daemon, socket or pidfile, one repo: a ready line, then one NDJSON
+  WatchUpdate per update that changed the graph; stat-polls every `--poll-ms` (500), applies a
+  batch once still for `--debounce-ms` (200), persists the layout and parse cache every
+  `--persist-every` seconds (60; 0 = exit only) and on exit; stops on SIGINT / SIGTERM / stdin EOF
+  with exit 0, refuses `--no-overlay` (2), 2 on a bad repo or a build error, 5 when a persist
+  fails; `[watch] listening` / `emitted` / `persisted` / `exit` lines).
+- rules: `effects` (LE.4d; an external sink names its host, downstream `external: <host>`,
+  `EffectRow.external_hosts`: an ENDPOINT (CJ.3, `[effects-external]`) and, since DF.8-DF.10,
+  the WS / gRPC / GraphQL clients ORIGIN-stamped `external`, sinks `ws_send` / `rpc_call` /
+  `graphql_op`), `cycles` (LE.6b), `check` (LE.8; renders the reflexion model —
+  `[[component]]`, `[[layer]]`, `kind = "allow"` — as a `## reflexion model` section, CC.5b /
+  CC.5c, evaluated through `engine/src/rules/reflexion.dl` since DB.8b; 0.5.2 evaluates an `invariant` with
+  a Datalog `rule` (DB.3a) and a `transitive` forbid_edge as `forbid_path` violations, `via`
+  facades never walked through (DB.3b, Q3), and gates on `min_tier = fact|derived` (default
+  derived; a heuristic violation is advisory under any setting and never exits 1, Q2): exits 0
+  when nothing blocks, 1 on a blocking violation, 2 on a build error or a rule it cannot
+  evaluate; `[check] gate blocking=<b> advisory=<a>`, DB.3d), `spec-status` (LE.9b; a row's
+  `pairing` is `exact`, `server_base` (another server base the OpenAPI document lists),
+  `annotated_base` (the project's swaggo `@BasePath` for a base-less document, at most medium)
+  or `prefix`, DF.19). 0.5.1: `flags [--status dead|undefined|single_site|quiet]` (CC.7c; the
   stale feature-flag report, exits 0).
 - store: `inspect <path>` (LC.4), `cell set|rm|ls` (LF.1c). 0.5.1: `cache push|pull|gc`
   (CE.2c; the shared parse cache over a directory or HTTPS object store, objects signed
@@ -484,16 +733,30 @@ CLI: every subcommand and flag is in README.md `## CLI`, rendered from `cli/surf
   merge with one relative path in two repos gives two alike rows; `suspected_edge` rows
   carry a paste-ready `[[edge]]` draft, CD.3b; `dead_symbol` withholds a METHOD that
   IMPLEMENTS a METHOD with an incoming CALLS / USES from a third node, CH.1c,
-  `[dead-dispatch]`), `history sync` (LF.5d), `tests ingest`
+  `[dead-dispatch]`; a `super.m()` call (rule super_method) vouches for nothing there, and TS
+  concrete overrides join the dispatch rule through rule concrete_override, DF.22c;
+  `rotted_rule`, a FACT row per `[[constraint]]` whose `rule` this glia can no longer read,
+  suggest `remove`, DB.4), `history sync` (LF.5d), `tests ingest`
   (LF.6d; a rolling window of runs, `--window`, `--reset`, CC.9b). 0.5.1: `overlay
-  propose|try|accept` (CE.3e; the overlay loop, `skills/glia-overlay/SKILL.md`), `scip
-  import <repo> <index.scip>` (CE.1c; writes `.glia/scip-snapshot/`, which the CE.1d
-  build stage reads as FACT-tier CALLS / USES / IMPLEMENTS / INHERITS_FROM). A snapshot
-  step never runs inside a build. `.glia/overlay.toml` `[walk] tests = [..]` (CJ.4,
-  `WalkConfig::tests_matcher`: gitignore syntax, repo-root anchored, additive) gives
-  matching nodes ORIGIN `test_fixture` (`[provenance] declared tests`). It is user config
-  like `[walk] skip`: applied under `--no-overlay` and never a candidate section, so neither
-  `overlay try` nor `--overlay-delta` measures it. The TESTS pass does not read it yet.
+  propose|try|accept` (CE.3e; the overlay loop, `skills/glia-overlay/SKILL.md`; 0.5.2,
+  DB.9a-c, Q9: a candidate may also hold `[[constraint]]` rules, handles `constraint#<n>`;
+  try judges a rule by the check delta on the build with every stanza and demotes a graph
+  stanza that adds or hides a declared rule's violation to review; accept refuses a rule check
+  cannot evaluate and moves the file to `version = 2` in place only when a written rule needs
+  it; `[overlay] try-rules ..`; `--remove` takes orphaned_rule / redundant_rule / rotted_rule
+  ids), `scip import <repo> <index.scip>` (CE.1c; writes `.glia/scip-snapshot/`, which the
+  CE.1d build stage reads as FACT-tier CALLS / USES / IMPLEMENTS / INHERITS_FROM, and the
+  identity pass, through `CodeBuildCtx.scip_roots`, as `scip_symbol` classes, DD.7). A snapshot
+  step never runs inside a build. `.glia/overlay.toml` `version = 2` (DB.1, Q7) adds the
+  `[[constraint]]` fields `rule`, `transitive`, `via` and `min_tier`; a version-1 file keeps
+  loading, and rule text is declared only there: the cell API refuses a CONSTRAINT entry with a
+  `rule` (Q9). `[walk] tests = [..]` (CJ.4, `WalkConfig::tests_matcher`: gitignore syntax,
+  repo-root anchored, additive) gives matching nodes ORIGIN `test_fixture` (`[provenance]
+  declared tests`), and the TESTS pass reads it (DF.11): a declared test module pairs the app
+  module of its stem (affix stripped when present), rule `declared_name`, and CL.5b derives its
+  function-level TESTS; a layout merge still pairs declared tests by name only. It is user
+  config like `[walk] skip`: applied under `--no-overlay` and never a candidate section, so
+  neither `overlay try` nor `--overlay-delta` measures it.
 - hidden: `hook pre-commit|commit-msg`, the runners `install-hooks --pair` writes.
 
 pyo3 (`PyGraph`): `blast_radius`, `cross_stack_trace`, `entry_flows`,
@@ -502,25 +765,38 @@ pyo3 (`PyGraph`): `blast_radius`, `cross_stack_trace`, `entry_flows`,
 `implementors`, `serves`, `why`, `diff_impact`, `tests_for` / `tests_for_diff`
 (`limit=`, `signals=`), `effects` (and `serves`: each row carries `external_hosts`, CJ.3),
 `cycles`, `check`, `spec_status`, `gaps`, `patterns`
-(CC.12b; the 0.5.0 `patterns_experimental` stays until 0.5.2 as a DeprecationWarning
-alias), and 0.5.1's `pack` / `pack_ids`, `flags`, `hotspots`, `cochange`,
-`communities`, `splits`, `hubs`, `duplicate_flows`; traversal —
+(CC.12b; its 0.5.0 `_experimental` alias was removed in 0.5.2, DE.11), 0.5.1's `pack` /
+`pack_ids`, `flags`, `hotspots`, `cochange`, `communities`, `splits`, `hubs`,
+`duplicate_flows`, and 0.5.2's `query(program, outputs=None, limit=None, explain=False,
+max_rows=None)` / `query_gql(query, limit=None, explain=False, max_rows=None)` (DB.6; the
+QueryAnswer as a dict, a parse / analysis / budget error a `ValueError` with the rendered
+diagnostics) and `identity_classes(tier=None, rule=None, diverged_only=False, limit=None)`
+(DD.15); `find`, `blast_radius`, `cross_stack_trace`, `entry_flows`, `tests_for`,
+`tests_for_diff`, `serves` and `service_map` take a trailing `collapse=True` (and the module
+function `tests_for_rev`); traversal —
 `neighbours(node_id, direction="out", categories=None)` -> `(id, category,
 "out"|"in")`, `bfs`, `predecessors`, `reachable_by`, `shortest_path` (categories=None is
 every category, DEFINES included; LD.3c) — `set_cell` / `remove_cell` (+ `activate`,
 `node_cells`, `dense_text*`, `nodes_json` / `edges_json`, `save_to*`). Module functions:
 `generate` / `generate_many`, `load_from_gmap` (rebuilds a stale or old layout, LC.8),
 `is_stale`, `merge_gmaps`, `graph_delta`, `diff_impact_vs_rev`, `tests_for_rev`,
-`patterns_vs_rev` (alias `patterns_vs_rev_experimental`, deprecated, until 0.5.2),
+`patterns_vs_rev` (its deprecated `_experimental` alias removed in 0.5.2, DE.11),
 `overlay_delta`, `history_sync`, `tests_ingest`, `write_cell` / `remove_cell`,
 `kind_names` / `category_names` / `cell_type_names` / `entry_kinds`, and 0.5.1's
 `review_vs_rev` (`format="dict"|"markdown"`), `contract_breaks_vs_rev` (`with_repos=`),
 `cochange_vs_rev`, `timeline_build` / `timeline_history` / `timeline_as_of`, and
 `overlay_propose` / `overlay_try` / `overlay_accept` (CK.1, `py/src/overlay_loop.rs`:
 transport over `overlay_loop::{propose, try_candidate, accept}`; `candidate` is TOML
-text, a refusal is a `ValueError`, markers end `surface=py`). The cache transport and
-`scip import` are CLI-only. An answer is a native dict / list; only `*_json` returns JSON
-text (LD.2). The committed surface is `py/api_surface/<module>.txt`.
+text, a refusal is a `ValueError`, markers end `surface=py`; since DB.9b the try dict gains
+`rules` when a build checked a rule or the candidate holds a `[[constraint]]`, and stanza
+dicts `rule` / `rules`; `overlay_accept` raises `ValueError` on a rule check cannot evaluate).
+Classes: `PyGraph`, and 0.5.2's `WatchSession(repo, overlay=True)` (DC.9: `apply(paths)` /
+`poll()` return a WatchUpdate dict (`poll` None when nothing changed), `snapshot()` a PyGraph of
+the current build, `persist()` writes the layout and cache; the GIL is released while the engine
+works). A PyGraph drop returns freed heap to the OS (`memory::release_freed_memory
+("pygraph_drop")`, glibc `malloc_trim(0)`; `GLIA_MALLOC_TRIM=0` turns it off, DE.10). The cache
+transport, `scip import` and `glia watch`'s loop are CLI-only. An answer is a native dict / list;
+only `*_json` returns JSON text (LD.2). The committed surface is `py/api_surface/<module>.txt`.
 
 Engine entry points — flat: `blast_radius`, `resolve_signal_located`,
 `coverage_report`, `governing_docs`, `entrypoint_reachable`, `locate_node`,
@@ -543,7 +819,14 @@ cochange_multi, cochange_vs_rev}`, `communities::communities`, `splits::splits`,
 load_timeline, edge_history, as_of}`, `shared_cache::{file_key, export_entries,
 cache_rows, wanted, import_entries, layout_key, export_layout, install_layout}` (the
 engine half of the shared cache: keys, export, verified import; no transport) and
-`overlay_loop::{propose, try_candidate, accept, parse_candidate, merge, without}`.
+`overlay_loop::{propose, try_candidate, accept, parse_candidate, merge, without}` (0.5.2
+adds the rule trial types `RuleHit`, `RulesDelta`, `RuleTrial`, `RulesReport`, DB.9b).
+0.5.2, by module path: `rules::{query, query_gql, validate, evaluate_rule, CodeFacts,
+CODE_ATTRIBUTES, PRELUDE, prelude_predicates}` (QueryOptions / QueryAnswer; DB.2a-c, DB.7c),
+`watch::{WatchSession, durability}` (DC.7a-c), `identity::{identity_classes, IdentityView,
+Collapse}` (DD.8, DD.15), `memory::release_freed_memory` (DE.10), `serves::serves_with` and
+`arch::service_map_collapsed` (the collapse-aware forms, DD.13 / DD.14), and on the graph facade
+`glia_graph::{blast_radius_over, cross_links_with}` (DD.10, DD.14).
 A `*_with_live` variant takes a precomputed liveness set, so a caller answering several
 questions over one graph computes `entrypoint_reachable` once.
 
@@ -595,7 +878,7 @@ questions over one graph computes `entrypoint_reachable` once.
   row semantics, Go / JVM / .NET brokers, JobRunr / Hangfire / asynq, constructed
   receivers, fn-level TESTS, GraphQL clients and HotChocolate, .NET env and appsettings,
   Go EventBus, NestJS cron, JVM process launches); CZ.3 these docs and the handoffs. No
-  registry id is allocated (the next free ids stay node 50 / edge 37 / cell 26); the
+  registry id is allocated (edge 37 stayed open until 0.5.2's SAME_AS took it); the
   WASM reader was dropped (CD.6b / CD.6c). It is
   released: `main` and the `v0.5.1` tag pushed, `glia-py` 0.5.1 published by `wheels-py.yml`. The bump: the Cargo workspace and
   `py/pyproject.toml` read 0.5.1, every glia crate takes the workspace version
@@ -603,20 +886,46 @@ questions over one graph computes `entrypoint_reachable` once.
   every crate can be pinned `=0.5.1`. The handoff docs
   (`dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.1.md`, each with the exact pin and
   every declared break) cover W0–W19.
-- **After 0.5.1** (the leap doc's §1 train): **0.5.2** the four bets — `glia watch`, a
-  Datalog rule layer (with a GQL front-end), cross-repo identity, and Engram anchors (the Engram
-  session's 2026-10-02 reframing of "Engram PPR memory"); scope `dev-notes/next-leap-0.5.2.md` (§0.1 the binding
-  decisions, §4.2 the defaults awaiting James), research `dev-notes/research-0.5.2/`, 153 packets in
-  `dev-notes/leap-052-packets.json` (15 waves, `schedule_052.py`, runner `--release 052`), not started; plus the finishing
-  batch's deferrals (README `## Roadmap`: PHP short-name imports, CB.26's residuals, the
-  rest of the matrix cells, WS / gRPC / GraphQL external marking, `[walk] tests` feeding
-  the TESTS pass). **0.5.3** scale —
-  Stack Graphs-style incremental resolution, build-target graphs (the likely first real
-  non-code domain). **0.5.4** proof — precision rate on real repos, agent before/after,
-  big-repo per-phase timings, calibrated confidence, `decide/` and `glia judge` on our own
-  model. Still later from the 0.5.0 list: dominators (once middleware is extracted and the
-  security gate is ruled on), RuntimeZone, LSP, per-graph-area rebuilds. The §6 "Gated"
-  items stay out (`SECURITY.md`).
+- **0.5.2 — the four bets: landed (W0–W14), release pending James.** Scope in
+  `dev-notes/next-leap-0.5.2.md` (§0.1 the binding decisions Q1–Q25, §4.2 the defaults the
+  packets took), research `dev-notes/research-0.5.2/`, packets in
+  `dev-notes/leap-052-packets.json` (153 packets, the gap run's DB.9a-c and DF.22a-c among
+  them), overrides in `dev-notes/leap-052-corrections.json`, schedule and LANDED waves in
+  `dev-notes/wave-runner/schedule_052.py` (15 waves, runner `--release 052`). The name stays
+  0.5.2 and consumers pin it exactly, so it may break contracts, each break declared by its
+  packet; the handoffs are `dev-notes/{repo-graph,neuropil,engram}-handoff-0.5.2.md` (DZ.2;
+  repo-graph's is held to be sent with 0.5.3's as one combined handover, James 2026-10-16).
+  The version bump is the release step after the docs, never inside a packet. Groups: D0 the
+  wave-0 slots, SAME_AS = edge 37 (the release's only id) and the one dependency commit (the
+  glia-rules crate, no external crate); DA the glia-rules Datalog crate; DB rules in the engine
+  (`glia query` + GQL, check's rule invariants / transitive forbid / min_tier, review's
+  blocking gate, overlay version 2, `rotted_rule`, the prelude, the reflexion model as rules,
+  rules through the overlay loop); DC `glia watch` (walk reuse, stage fns, build memos, the
+  evidence-fill split, the scoped delta, WatchSession with group early cutoff and the stat
+  poll, the CLI loop, pyo3, the parity gates); DD cross-repo identity (classes and the
+  quotient, identity rules, IdentityResolver with SAME_AS stars for packages, manifests,
+  messages, contract ops, SCIP symbols and vendored copies, collapse in seven answers, `glia
+  identity`, the Q16 replacement of SHARES_DEPENDENCY and the message SHARES_SCHEMA); DE
+  Engram anchors and engine hygiene (RepoId-independent content, engram-export determinism and
+  re-key pairing, push PPR side file, generated-code provenance, python requirements roots,
+  `malloc_trim` after a PyGraph drop, the 0.5.0 pattern aliases removed); DF the 0.5.1
+  deferrals (PHP imports, CB.26's residuals, external WS / gRPC / GraphQL clients, `[walk]
+  tests` feeding TESTS, Python signals, the Pub/Sub Terraform binding, the Go package clause,
+  OpenAPI bases, TS typed receivers / inherited calls / concrete overrides); DG / DH the rest
+  of the coverage matrix (Rust and Scala, then Ruby, PHP, Dart, Elixir, Swift, Clojure, C);
+  DZ these docs and the handoffs. The matrix stands at 345 full, 1 partial (dart/tests), 0
+  none, 136 unknown, 28 n/a. No FORMAT_VERSION change.
+- **After 0.5.2** (the leap doc's §1 train; seed `dev-notes/next-leap-0.5.3.md`): **0.5.3**
+  scale — Stack Graphs-style incremental resolution with watch's A2 body-only fast path,
+  build-target graphs (the likely first real non-code domain), multi-repo `glia watch --with`,
+  org-internal package routing on SAME_AS; plus James's 2026-10-16 additions there (local
+  embeddings and `glia embed`, a clarification queue, one tier vocabulary, a watch / rules
+  memory budget, concept search over flows, the self-graph hygiene cluster) and the 0.5.2
+  waves' leftovers (§D, §E). **0.5.4** proof — precision rate on real repos, agent
+  before/after, big-repo per-phase timings, calibrated confidence, `decide/` and `glia judge`
+  on our own model. Still later from the 0.5.0 list: dominators (once middleware is extracted
+  and the security gate is ruled on), RuntimeZone, LSP, per-graph-area rebuilds. The §6
+  "Gated" items stay out (`SECURITY.md`).
 
 ## Memory
 

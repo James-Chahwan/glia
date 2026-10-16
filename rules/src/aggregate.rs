@@ -220,8 +220,9 @@ fn distinct<'s>(
 
 /// The spec fits the input: `cells` handles are `n` rows of `width`, every column
 /// an op or the head names exists, and every op has the variables it takes. The
-/// op-arity texts are reachable from rule text (the IR round-trips `sum(n, m)`); the
-/// rest guard the caller's projection.
+/// op-arity texts are no longer reachable from rule text: analysis rejects a wrong
+/// aggregate variable count first, located at the aggregate (DA.16), so here they
+/// guard IR built by hand, like the rest guard the caller's projection.
 fn check(
     spec: &AggSpec,
     width: usize,

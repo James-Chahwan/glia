@@ -122,6 +122,11 @@ Stanza ids are 1-128 characters with no control characters, unique within their 
 Component and layer names are 1-118 characters (their entry ids are `component:<name>` /
 `layer:<name>`, so a `[[constraint]]` id may not start with either prefix).
 Every `*_arg` is a 0-based positional index, at most 8.
+A `[[project]]` path that a manifest already roots keeps the detected root (`shadowed=` on the
+`[roots] declared=` line), unless that manifest names no project (a `requirements.txt` or `Pipfile`
+root, or one named after its directory): then the root takes the declared label and keeps its
+ecosystem and manifest (`relabelled=`, DG.12). The PROJECT's ORIGIN cell records where its label
+came from as `label_source`: `manifest`, `dir`, `root` or `declared` (DD.4).
 
 ## `[walk]`: skips and declared test paths
 
@@ -331,9 +336,10 @@ carries a `rule` key, whatever its `source` says: `` `rule` (Datalog text) is de
 proposes goes through the overlay file like any other stanza, written by `glia overlay accept`
 (section "Rules through the loop").
 
-Until the evaluators land in this release, `glia check` lists a transitive `forbid_edge` and every
-`invariant` as unchecked (the `unchecked=` count of its `[check]` line) rather than judging them
-with the direct-edge walk.
+`glia check` judges all three: a transitive `forbid_edge` as `forbid_path` violations (DB.3b), an
+`invariant` with `rule` through the rules layer (DB.3a), each violation blocking only at or above
+its `min_tier`. Only an `invariant` without `rule` is listed as unchecked (the `unchecked=` count
+of its `[check]` line); `[check] gate blocking=<b> advisory=<a>` counts the gate.
 
 ## Reflexion model
 

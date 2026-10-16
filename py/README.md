@@ -30,6 +30,71 @@ is the release; `build_stamp()` is `<release>+p<16 hex>`, the hex half a
 content hash of every graph-shaping source file, so two builds of one release
 that parse differently report different stamps.
 
+## What's new in 0.5.2
+
+**Pin exactly: `glia-py==0.5.2`.** 0.5.2 keeps the API conventions below, but it adds
+answers, changes graph contents and removes two deprecated names, and each glia release is
+pinned exactly. The store format is unchanged (format 3); `load_from_gmap` rebuilds a layout
+another glia build wrote, so a 0.5.1 layout is rebuilt once, with the new graph contents.
+
+- **Rules and queries.** `PyGraph.query(program, outputs=None, limit=None, explain=False,
+  max_rows=None)` evaluates a Datalog program over the graph, with the predicate prelude
+  merged in. `PyGraph.query_gql(query, limit=None, explain=False, max_rows=None)` answers a
+  GQL read query (`MATCH ... WHERE ... RETURN`). Both return the QueryAnswer as a dict
+  (`language`, `outputs`, `results`, `absence`). Each row's values are located, each row
+  carries a `tier`, a row derived through a negation carries its coverage `caveats`, and
+  `explain=True` adds witnesses. A parse, analysis or row-budget error raises `ValueError`
+  with the rendered diagnostics. The dialect and the GQL subset are documented in the repo's
+  `docs/rules.md`.
+- **`glia_py.WatchSession(repo, overlay=True)`.** One repo's incremental build, held open in
+  the process. `apply(paths)` updates it from the files you saw change, and `poll()` from its
+  own stat scan (it returns `None` when nothing changed). Each update is a dict: `seq`,
+  `files`, `groups_rebuilt`, `full_rebuild`, the totals, the located `nodes` / `edges` delta
+  rows and `phase_ms`. Only the language group whose inputs moved is rebuilt. `snapshot()` is
+  an independent `PyGraph` of the current build, and `persist()` writes `<repo>/.glia/graph/`
+  plus the parse cache. The GIL is released while the engine works. Drive one session from
+  one thread.
+- **Cross-repo identity.** One package, message, contract op or SCIP symbol in several repos
+  is one identity class (new edge category `SAME_AS`). `find`, `blast_radius`,
+  `cross_stack_trace`, `entry_flows`, `tests_for`, `tests_for_diff`, `serves` and
+  `service_map`, plus the module function `tests_for_rev`, collapse such a class to one row
+  carrying `identity` (`tier`, `rules`, `diverged`, `also_in`: the other repos' copies,
+  located). Each gains a trailing `collapse=True` keyword; `collapse=False` returns the raw
+  rows. `serves` rows also gain `handler_identity`. `PyGraph.identity_classes(tier=None,
+  rule=None, diverged_only=False, limit=None)` lists the classes.
+- **Memory.** Dropping a `PyGraph` returns freed heap to the OS (glibc `malloc_trim`). A
+  process that calls `generate()` in a loop now levels off instead of growing: 15 rebuilds of
+  glia went from 410 -> 1,017 MB to 404 -> 265 MB. Set `GLIA_MALLOC_TRIM=0` to turn the trim
+  off.
+- **Removed.** The 0.5.0 `_experimental` spellings of `PyGraph.patterns` and
+  `glia_py.patterns_vs_rev`, deprecated in 0.5.1. Call `patterns` / `patterns_vs_rev`.
+- **Answer and overlay changes.** `check` evaluates `[[constraint]]` rules with a Datalog `rule`
+  and transitive forbids (overlay `version = 2`). Each violation carries `blocking`, true when
+  its tier is at least its rule's `min_tier` (a heuristic one never blocks). `review_vs_rev`'s
+  `blocking` is set only by a new blocking violation. `gaps` gains the `rotted_rule` category. `overlay_try`'s dict gains
+  `rules` when a build checked a rule or the candidate holds a `[[constraint]]`, and stanza
+  dicts gain `rule` / `rules`. `overlay_accept` raises `ValueError` on a rule that `glia check`
+  cannot evaluate. The cell API (`set_cell`, `write_cell`) refuses a CONSTRAINT entry with a
+  `rule`, since rule text is declared only in `.glia/overlay.toml`.
+- **Graph content a caller sees.** Rebuild any stored graph.
+  - SAME_AS stars replace the SHARES_DEPENDENCY edges between repos sharing a package, and the
+    SHARES_SCHEMA edges between copies of one message. SHARES_SCHEMA now pairs DTOs only.
+  - Nodes in generated files carry ORIGIN `generated`, and a vendored generated gRPC stub no
+    longer makes a service "call" every service. A third-party WebSocket, gRPC or GraphQL
+    client is ORIGIN `external` and never paired. `effects` and `serves` name its host in
+    `external_hosts`.
+  - `.glia/overlay.toml` `[walk] tests` now adds TESTS edges, not only provenance.
+  - TypeScript parameters and locals type their receivers. Inherited typed-receiver calls bind
+    to the superclass method, and concrete overrides IMPLEMENTS the member they override.
+    Go imports bind the package's `package` clause name. Rust trait impls across files are
+    IMPLEMENTS. Ruby, PHP and Elixir gain heritage edges, and Dart own-package imports and
+    plain imports resolve.
+  - The coverage matrix's remaining none / partial cells for Rust, Scala, Ruby, PHP, Dart and
+    Elixir (brokers, buses, GraphQL, WebSockets, cron, CLIs, ORMs, config) now extract, as do
+    Python blinker / Django signals and a GCP Pub/Sub subscription bound to its topic by
+    Terraform.
+  - An ambiguous doc mention links the same symbol in every clone of a repo.
+
 ## What's new in 0.5.1
 
 **Pin exactly: `glia-py==0.5.1`.** 0.5.1 keeps 0.5.0's API conventions, but it changes
@@ -38,7 +103,7 @@ graph contents and the store format, and each glia release is pinned exactly.
 - **New `PyGraph` answers.** `pack` / `pack_ids` (the context for a query, packed to
   a token budget), `hotspots`, `cochange`, `flags` (stale feature flags),
   `communities`, `splits`, `hubs`, `duplicate_flows`, and `patterns`, out of
-  experimental (`patterns_experimental` warns and goes in 0.5.2). `tests_for` /
+  experimental (the `_experimental` name warned in 0.5.1 and was removed in 0.5.2). `tests_for` /
   `tests_for_diff` gain `limit=` and `signals=` (rank by recent failures and
   co-change).
 - **New module functions.** `review_vs_rev` is the PR report for a change against
@@ -46,7 +111,7 @@ graph contents and the store format, and each glia release is pinned exactly.
   and `cochange_vs_rev`. `timeline_build` / `timeline_history` / `timeline_as_of`
   say when each edge appeared and went over recent commits. `overlay_propose` /
   `overlay_try` / `overlay_accept` run the overlay loop in-process. `patterns_vs_rev`
-  is new, and `patterns_vs_rev_experimental` stays as a deprecated alias until
+  is new; its deprecated `_experimental` alias was kept through 0.5.1 and removed in
   0.5.2. `tests_ingest` gains `window=` / `reset=`: a re-ingest keeps a rolling
   window of runs.
 - **Answer shapes.** `effects` and `serves` rows gain `external_hosts`, the
@@ -86,8 +151,8 @@ every contract at once.
 
 - **Answers, not just a graph.** `blast_radius` (multi-seed), `diff_impact`,
   `graph_delta`, `tests_for`, `effects`, `why`, `cycles`, `check`, `spec_status`,
-  `serves`, `implementors`, `entry_flows`, `feature_flows`, `patterns` (`patterns_experimental` is a
-  deprecated alias for one release),
+  `serves`, `implementors`, `entry_flows`, `feature_flows`, `patterns` (shipped as
+  an `_experimental` name, deprecated in 0.5.1 and removed in 0.5.2),
   `gaps` and `page_flow`. Each returns located rows with a confidence tier, a
   `live` flag, and an `absence` that says what the graph could not see.
 - **Evidence on every edge.** Each edge records the extractor, parser, resolver
@@ -134,8 +199,8 @@ Every function and `PyGraph` method follows these rules (since 0.5.0, LD.2):
 - **Node ids are Python `int`s.** They are `u64` and often above `2**63`, so
   never round-trip them through `float`.
 - **Lines are 1-based** in every answer record and in `nodes_json`.
-- **One lookup.** `find(query, top_k=20, kinds=None, scope=None)` is the name /
-  qname search. When `q` is a node's exact qname or name,
+- **One lookup.** `find(query, top_k=20, kinds=None, scope=None, collapse=True)` is
+  the name / qname search. When `q` is a node's exact qname or name,
   `find(q, top_k=1)["results"][0]` is the node `blast_radius(q)` starts from.
   `kinds` takes node-kind names in any case (`["FUNCTION", "CLASS"]`).
   `scope` is a filter: nodes whose file lies outside it are dropped, and

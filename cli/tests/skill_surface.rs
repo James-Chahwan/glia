@@ -32,8 +32,8 @@ use std::path::{Path, PathBuf};
 const SKILLS_REL: &str = "skills";
 
 /// Per skill directory, the commands its worked examples show with `--json`:
-/// `glia` (LG.15, plus the eight 0.5.1 answers CZ.2 added) and `glia-overlay`
-/// (CE.3f). A subcommand is its surface section path, `overlay propose`.
+/// `glia` (LG.15, plus the eight 0.5.1 answers CZ.2 added and 0.5.2's `query` /
+/// `identity`, DZ.1) and `glia-overlay` (CE.3f). A subcommand is its surface section path, `overlay propose`.
 const EXAMPLED: [(&str, &[&str]); 2] = [
     (
         "glia",
@@ -65,6 +65,9 @@ const EXAMPLED: [(&str, &[&str]); 2] = [
             "cochange",
             "communities",
             "hubs",
+            // 0.5.2 (DZ.1): the rules query (DB.5) and the identity classes (DD.15).
+            "query",
+            "identity",
         ],
     ),
     (

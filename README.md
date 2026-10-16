@@ -41,35 +41,48 @@ $ glia tests-for grpc-go call::invoke
 
 `●` is reachable from an entry point (a route, a `main`, a test, a consumer); `⊘` is not. The rest of the answer surface, each a CLI command, a pyo3 method and (through repo-graph) an MCP mode:
 
-- **A change:** `delta` (graph diff against a git rev), `diff-impact`, `review` (one PR report: impact, tests to run, every added or removed edge with its tier, rule violations new vs resolved), `tests-for`, `contract-breaks` (OpenAPI / proto / Avro / AsyncAPI field evolution against a rev), `cochange` (files that usually change with these).
-- **Structure:** `trace` and `flows` (entry point to sinks, across services), `serves` (who handles a channel), `implementors`, `arch` (services and the links between them), `communities`, `splits` (where a service could be cut), `hubs`, `hotspots` (churn x centrality), `duplicate-flows`, `cycles`, `timeline` (edges over git history), `pack` (the ranked neighbourhood of a question, fitted to a token budget).
-- **Rules:** `check` (forbidden edges, cycles, declared components and layers), `patterns` (the handler convention a population follows, and who diverges), `effects` (the data, config and external calls a function reaches), `flags` (dead, undefined and stale feature flags), `spec-status` (which declared operations a route implements).
-- **What the graph cannot see:** `coverage` (per-language blind spots), `gaps` (orphan endpoints, dead symbols, co-change pairs with no edge), and an overlay loop (`overlay propose / try / accept`) that turns a gap into a measured `.glia/overlay.toml` stanza.
+- **A change:** `delta` (graph diff against a git rev), `diff-impact`, `review` (one PR report: impact, tests to run, every added or removed edge with its tier, rule violations new vs resolved), `tests-for`, `contract-breaks` (OpenAPI / proto / Avro / AsyncAPI field evolution against a rev), `cochange` (files that usually change with these), `watch` (keep the build open and stream what each edit did to the graph).
+- **Structure:** `trace` and `flows` (entry point to sinks, across services), `serves` (who handles a channel), `implementors`, `arch` (services and the links between them), `identity` (what is one thing across repos: a package, a message, a contract op, a SCIP symbol, a vendored copy), `communities`, `splits` (where a service could be cut), `hubs`, `hotspots` (churn x centrality), `duplicate-flows`, `cycles`, `timeline` (edges over git history), `pack` (the ranked neighbourhood of a question, fitted to a token budget).
+- **Rules and queries:** `check` (forbidden edges and paths, cycles, Datalog rule invariants, declared components and layers; each rule's `min_tier` decides what fails CI), `query` (your own Datalog, or a GQL read query, over the graph: every row located and tiered; [docs/rules.md](./docs/rules.md)), `patterns` (the handler convention a population follows, and who diverges), `effects` (the data, config and external calls a function reaches), `flags` (dead, undefined and stale feature flags), `spec-status` (which declared operations a route implements).
+- **What the graph cannot see:** `coverage` (per-language blind spots), `gaps` (orphan endpoints, dead symbols, co-change pairs with no edge, rules this glia can no longer read), and an overlay loop (`overlay propose / try / accept`) that turns a gap into a measured `.glia/overlay.toml` stanza, and judges a rule an agent proposes by the violations it finds on the code as it is.
 - **Inputs from outside the source:** git history, test reports and lcov, SCIP indexes, Confluence / Notion / MediaWiki / local docs, a shared parse cache. Each is a snapshot the next build reads; a build never fetches.
 
 The full command list with every flag is in [CLI](#cli).
 
 ## Across services
 
-Point it at several repos (or a monorepo) and the cross-graph resolvers pair what each side declares: an HTTP client call to the route it hits (through base URLs, API prefixes and router mounts), a gRPC stub to its service, a producer to its consumer on a topic, a tRPC / Connect / Twirp call to its procedure, a GraphQL operation to its resolver, a WebSocket client to its handler, a CLI invocation to its command, and the shared resources: one table, one env var, one image, one package, one message schema. `glia merge` builds several repos as one graph (or merges pre-built layouts); `glia arch` lists the services and the links between them.
+Point it at several repos (or a monorepo) and the cross-graph resolvers pair what each side declares: an HTTP client call to the route it hits (through base URLs, API prefixes, router mounts and OpenAPI server bases), a gRPC stub to its service, a producer to its consumer on a topic, a tRPC / Connect / Twirp call to its procedure, a GraphQL operation to its resolver, a WebSocket client to its handler, a CLI invocation to its command, and the shared resources: one table, one env var, one image. A client that dials a third-party host (an HTTP, WebSocket, gRPC or GraphQL client) is marked `external` and never paired.
+
+**Identity across repos.** One package, one proto / Avro / JSON Schema message, one contract op or one SCIP symbol in several repos is one identity class: the last resolver joins its copies with SAME_AS edges, one star per class, FACT or DERIVED by rule. Answers show such a class once, at its best member, with the other repos under `also_in` (`find`, `blast-radius`, `trace`, `flows`, `tests-for`, `serves`, `arch`), and walks treat a message, a contract op or a SCIP symbol as one node, so a blast radius crosses into every repo that shares it. Copies that differ are kept and marked `diverged`, and vendored copies (a declaration copied into another repo under a vendoring path, byte-identical or diverged) are HEURISTIC candidates, never collapsed. `--no-collapse` shows the raw rows; `glia identity` lists the classes.
+
+`glia merge` builds several repos as one graph (or merges pre-built layouts); `glia arch` lists the services and the links between them.
 
 ## Coverage
 
 **17 languages** (tree-sitter): Python, Go, TypeScript / JavaScript, Rust, Java, Kotlin, C#, Ruby, PHP, Swift, C / C++, Scala, Clojure, Dart, Elixir, Solidity, Terraform; plus React, Vue and Angular parsers stacked on TypeScript.
 
-**How much of it is measured.** `bench/substrate-gap/` holds 346 fixture repos, each a small project with a graded key of the nodes, edges and cells it must produce and the ones it must not; none is blind. They fill a 17-language x 30-mechanism coverage matrix ([`COVERAGE.md`](./bench/substrate-gap/COVERAGE.md)): 243 cells full, 34 partial, 69 none, 136 not yet probed and 28 that cannot apply. A cell that reads none or partial is a known gap, and `glia coverage` prints the same caveats for the repo you point it at.
+**How much of it is measured.** `bench/substrate-gap/` holds 378 fixture repos, each a small project with a graded key of the nodes, edges and cells it must produce and the ones it must not; none is blind. They fill a 17-language x 30-mechanism coverage matrix ([`COVERAGE.md`](./bench/substrate-gap/COVERAGE.md)): 345 cells full, 1 partial (Dart's function-level TESTS, through closure calls), 0 none, 136 not yet probed and 28 that cannot apply. In 0.5.1 it read 243 full, 34 partial and 69 none: 0.5.2's DF, DG and DH groups measured and closed every none and all but one partial cell. A cell that reads partial is a known gap, and `glia coverage` prints the same caveats for the repo you point it at.
 
 **~30 web framework extractors** across those languages:
-Flask, FastAPI, Django, Celery, Rails, Sinatra, Laravel, Symfony, Slim, Spring, Quarkus, Dropwizard, Javalin, Ktor, WebFlux, Micronaut, JAX-RS, ASP.NET (controllers + Minimal API), Express, Koa, Hono, Fastify, NestJS, Next.js (Pages + App Router), SvelteKit, Hapi.js, Bun.serve, Axum, Actix, Rocket, Tide, Poem, Salvo, Gin, Echo, Chi, Fiber, Gorilla Mux, stdlib `net/http`, Phoenix, React Router, Angular Router, Vue Router.
+Flask, FastAPI, Django, Celery, Rails, Sinatra, Laravel, Symfony, Slim, Spring, Quarkus, Dropwizard, Javalin, Ktor, WebFlux, Micronaut, JAX-RS, ASP.NET (controllers + Minimal API), Express, Koa, Hono, Fastify, NestJS, Next.js (Pages + App Router), SvelteKit, Hapi.js, Bun.serve, Axum, Actix, Rocket, Tide, Poem, Salvo, Gin, Echo, Chi, Fiber, Gorilla Mux, stdlib `net/http`, Phoenix, http4s, Akka / Pekko HTTP, Vapor, Compojure, reitit, shelf_router, React Router, Angular Router, Vue Router.
 
 **Queues, jobs, events and other channels** across those languages: Kafka, RabbitMQ, SQS / SNS, GCP Pub/Sub, Azure Service Bus, NATS, MQTT, Redis lists and pub/sub, JMS, Celery, Dramatiq, Sidekiq, Oban and BullMQ, including Go broker clients (streadway / amqp091-go, azservicebus, cloud.google.com/go/pubsub, go-redis, aws-sdk-go SQS / SNS, confluent-kafka-go, kafka-go `Writer` literals), JVM and .NET broker builders (Azure Service Bus Java builders, AWS SDK v2 request builders, MQTTnet, Spring Cloud GCP `PubSubTemplate`, Spring Data Redis lists, NATS.Net v2, Google.Cloud.PubSub.V1), and the JobRunr, Hangfire and asynq task queues, whose job is named by the method or task type it runs. In-process event buses, Go's asaskevich/EventBus included. GraphQL servers and clients, HotChocolate code-first resolvers and Go machinebox/graphql / C# GraphQL.Client requests included. Cron schedules, NestJS `@Cron` / `@Interval` included. CLI invocations, JVM `ProcessBuilder` / `Runtime.exec` launches included. HTTP clients, Dart Dio generic calls (`dio.get<T>(..)`) and Dio base URLs included.
 
-**Inside a language** the graph builder resolves calls, imports and heritage per language, beyond plain names. Two examples: in the TypeScript family a `this.m()` / `super.m()` binds through superclasses, and an override of an abstract member IMPLEMENTS it. In Go, struct embeds are INHERITS_FROM and their methods are promoted to calls and interface satisfaction; in-repo type aliases are resolved before signatures are compared; package-var initialisers call; repository-root package imports are recorded. A call on a freshly constructed object (`new Calc().add(..)`) binds through the constructed type. Every language gets function-level TESTS edges from a test module's root functions.
+**0.5.2 filled the rest of the matrix** for the languages that had gaps:
+- **Rust:** lapin, azservicebus, async-nats, google-cloud-pubsub and aws-sdk-sqs / aws-sdk-sns brokers and apalis jobs; tokio broadcast buses; async-graphql roots; axum WebSockets; tokio-cron-scheduler; aws-sdk-secretsmanager and LaunchDarkly reads; trait impls across files as IMPLEMENTS and axum / actix-web / Rocket handler state as INJECTS, bound by Rust path rules.
+- **Scala:** Alpakka AMQP / SQS / Google Pub/Sub, redis4cats and Kafka `ProducerRecord`; the Akka / Pekko EventStream; Caliban roots; Akka / Pekko HTTP WebSockets and routes, http4s handlers; akka-quartz-scheduler jobs, including schedules named in `application.conf`; scopt CLIs and `scala.sys.process` launches; Slick tables; `sys.env` reads; ScalaTest / MUnit cases as functions, so they get TESTS edges; sbt sub-projects as project roots.
+- **Ruby:** Bunny, Karafka, google-cloud-pubsub and aws-sdk-sqs / aws-sdk-sns; ActiveSupport::Notifications; graphql-ruby roots; Flipper flags and aws-sdk secrets; gemspec executables; `class X < Base` heritage, dry-auto_inject, and `Calc.new.add(..)` binding through the constructed type.
+- **PHP:** php-amqplib, php-rdkafka, NATS, Google Pub/Sub, aws-sdk-php, php-mqtt, phpredis / Predis and Laravel queued jobs; Laravel events; Ratchet WebSocket servers; Laravel `env()`; LaunchDarkly; composer `bin` and Symfony Process; `extends` / `implements` heritage and interface methods; namespaced and grouped `use` imports.
+- **Dart:** dart_amqp, kafka_dart, mqtt_client, dart_nats, googleapis Pub/Sub, package:redis, aws_sqs_api and redis_task_queue; package:event_bus; package:graphql documents; web_socket_channel / dart:io clients; `Platform.environment`; package:args commands and dart:io Process; sqflite tables; injectable DI; shelf_router handlers; own-package `package:` imports and plain-import name binding.
+- **Elixir:** AMQP, brod / broadway_kafka, tortoise, Gnat, broadway_cloud_pub_sub, Redix, ExAws.SQS and Oban's pipe form; Phoenix.PubSub; Absinthe roots; elixir-grpc stubs; `System.get_env`; Mix tasks and `System.cmd`; Ecto schemas, repo calls and migrations; remote calls by full module name; behaviours as INTERFACE with `@behaviour` IMPLEMENTS; `compile_env` injection; ExUnit tests as functions.
+- **Elsewhere:** Python blinker and Django signals, paired across files through their imports; a GCP Pub/Sub subscription bound to its topic by Terraform; C libcurl clients; Swift parameter and local receivers; C++ lambda calls and `auto` locals typed by the callee's return type; CMake generator-expression include dirs; Go route prefixes held in constants, typed handler bases and the `package` clause name; TypeScript endpoint bases from config members and consts; OpenAPI server bases and swaggo `@BasePath` for `spec-status` and contract pairing.
 
-**15 cross-graph resolvers** that pair entities across repo boundaries:
-HTTP (frontend Endpoint ↔ backend Route), gRPC (client ↔ proto service), RPC (tRPC / Connect / Twirp call ↔ procedure), Queue (producer ↔ consumer, including raw Redis lists), GraphQL, WebSocket, EventBus, CLI invocation ↔ command, shared message schemas (proto / Avro / JSON Schema types), shared schema imports, shared data entities (SQL Tables / NoSQL Collections / Graph-DB Labels), Cron schedules, Config keys (env vars across services), IaC resources (Dockerfile-built images ↔ k8s manifest references), Package dependencies.
+**Inside a language** the graph builder resolves calls, imports and heritage per language, beyond plain names. Two examples: in the TypeScript family, parameters and locals type their receivers (annotated, `new T()`, `inject(T)`, `x as T`, `this.<field>` aliases); a `this.m()`, `super.m()` or typed-receiver call binds through superclasses; and an override of an abstract or a concrete member IMPLEMENTS it, so liveness and dead-symbol dispatch reach it. In Go, struct embeds are INHERITS_FROM and their methods are promoted to calls and interface satisfaction; in-repo type aliases are resolved before signatures are compared; package-var initialisers call; repository-root package imports are recorded and an import binds its package's `package` clause name. A call on a freshly constructed object (`new Calc().add(..)`, Ruby's `Calc.new.add(..)`) binds through the constructed type. Every language gets function-level TESTS edges from a test module's root functions.
 
-**Non-source files** flow through bypass extractors: YAML (`.github/workflows/`, k8s manifests, docker-compose, OpenAPI / AsyncAPI), Dockerfiles, `.env` files, package manifests (`package.json`, `pyproject.toml`, `requirements.txt`, `Cargo.toml`, `go.mod`, `Gemfile`, `composer.json`), migration `.sql`, Prisma schemas, `.proto`, `.graphql`, Avro `.avsc`, JSON Schema and contract `.json`, .NET `appsettings*.json` (every key a `config:setting:<Section:Key>` that C# `IConfiguration` reads pair with, and an env define `Section__Key` defines it too), and markdown docs. Markdown is read from the well-known files (`README*.md`, `ARCHITECTURE.md`, `CLAUDE.md`, ...) and the `docs/` tree at the repo root and at every project root, a top-level `.ai/` tree, ADR directories, SDD feature docs (`features/<feature>/*.md`, spec-kit `specs/<NNN-slug>/`) and synced external docs (`glia docs sync`). A section documents a symbol it names in backticks; `glia coverage` states that scope.
+**13 cross-graph resolvers and the identity pass** that pair entities across repo boundaries:
+HTTP (frontend Endpoint ↔ backend Route), gRPC (client ↔ proto service), RPC (tRPC / Connect / Twirp call ↔ procedure), Queue (producer ↔ consumer, including raw Redis lists and a Terraform-bound Pub/Sub subscription), GraphQL, WebSocket, EventBus, CLI invocation ↔ command, shared schema imports, shared data entities (SQL Tables / NoSQL Collections / Graph-DB Labels), Cron schedules, Config keys (env vars across services), IaC resources (Dockerfile-built images ↔ k8s manifest references); then identity (SAME_AS: one package across repos, a package and the project its manifest names, one proto / Avro / JSON Schema message, one contract op, one SCIP symbol, and vendored copies as candidates). The 0.5.1 Package and MessageSchema resolvers are gone: their pairs are identity classes now.
+
+**Non-source files** flow through bypass extractors: YAML (`.github/workflows/`, k8s manifests, docker-compose, OpenAPI / AsyncAPI), Dockerfiles, `.env` files, package manifests (`package.json`, `pyproject.toml`, `requirements.txt`, `Cargo.toml`, `go.mod`, `Gemfile`, `composer.json`), migration `.sql`, Prisma schemas, `.proto`, `.graphql`, Avro `.avsc`, JSON Schema and contract `.json`, .NET `appsettings*.json` (every key a `config:setting:<Section:Key>` that C# `IConfiguration` reads pair with, and an env define `Section__Key` defines it too), and markdown docs. A `requirements.txt` or `Pipfile` beside Python code roots a project, and an sbt `build.sbt`'s sub-projects are project roots. Generated code (protoc and codegen file names, or a generator banner in the first 40 comment lines) is marked ORIGIN `generated`, and a vendored generated gRPC stub is no client. Markdown is read from the well-known files (`README*.md`, `ARCHITECTURE.md`, `CLAUDE.md`, ...) and the `docs/` tree at the repo root and at every project root, a top-level `.ai/` tree, ADR directories, SDD feature docs (`features/<feature>/*.md`, spec-kit `specs/<NNN-slug>/`) and synced external docs (`glia docs sync`). A section documents a symbol it names in backticks; `glia coverage` states that scope.
 
 ## Numbers
 
@@ -84,6 +97,18 @@ Measured on 2026-10-02 at v0.5.1, release build, 16 cores, best of 3 (`glia anal
 
 The graph is byte-identical at any thread count. A rebuild reuses a per-file parse cache, so only changed files are parsed again.
 
+**`glia watch` (0.5.2).** A held session re-reads only the edited file, rebuilds only the language group whose inputs moved and computes the delta over the rebuilt graphs. Measured 2026-10-16 at the 0.5.2 release candidate (`9de9114b`), release build, 16 cores, default threads, on an otherwise idle machine, with `bench_one_line_edit`: three one-line edits of one file, each `[watch] update took=` beside a disk-incremental `glia build` of the same tree run right after it (`generate_one_incremental`: cache load, build, save):
+
+| repo, edited file | groups rebuilt | watch update | incremental build |
+|---|--:|--:|--:|
+| glia, a Python file (`bench/substrate-gap/grade.py`) | 1 of 26 | 529 / 478 / 460 ms | 1.40 / 1.38 / 1.35 s |
+| glia, a Rust file (`engine/src/delta.rs`) | 1 of 26 | 1245 / 1148 / 1146 ms | 1.42 / 1.40 / 1.39 s |
+| grpc-go, a Go file (`server.go`) | 1 of 5 | 903 / 875 / 866 ms | 0.93 / 0.94 / 0.91 s |
+
+Opening the session (one full build) took 1.22-1.27 s on glia and 0.81 s on grpc-go. A first run minutes earlier read within 8% of these, and its phase times show where an update goes: the Rust and Go updates are mostly that one group's rebuild (531-560 ms for glia's Rust group, 601-614 ms for grpc-go's Go group), while the Python update rebuilds a small group (25-27 ms), so the passes (resolve + post + finalize, about 175 ms), the grafts (67-74 ms) and cloning the reused groups out of the cache (47-129 ms) dominate it. Earlier numbers under sibling-build load, in the DC.7a / DC.7b commit bodies, read higher (glia Python 601-731 ms, Rust 1685-3101 ms, grpc-go 1035-1337 ms).
+
+**Memory (0.5.2).** A Python process that calls `generate()` repeatedly no longer grows: a PyGraph drop returns freed heap to the OS (glibc `malloc_trim`). `bench/rss/rss_loop.py`, 15 rebuilds in one process (Linux glibc, three runs agree): glia 410 -> 1,017 MB before, 404 -> 265 MB after; grpc-go 223 -> 520 MB before, 219 -> 170 MB after. A held pyo3 `WatchSession` over 12 updates: glia 668 -> 748 MB, grpc-go 290 -> 327 MB.
+
 ## Install
 
 ```
@@ -97,7 +122,7 @@ cp target/release/glia ~/.local/bin/
 pip install glia-py          # abi3 pyo3 wheels for Linux / macOS / Windows (x86_64 + arm64), import glia_py
 ```
 
-A build runs its walk reads, per-file parse / extract, const-table scan, RPC needle pass and per-language graph builds (all but the TypeScript family's) on the engine's own thread pool, one thread per core; `GLIA_THREADS=N` sets the size (unset or `0` = every core, clamped to 1..=256, `1` = the single-threaded path), the graph is byte-identical at any size, and stderr carries `[parallel]` lines (one per walk, two per repo) naming the thread count.
+A build runs its walk reads, per-file parse / extract, const-table scan, queue / event const folds, RPC needle pass and per-language graph builds (the TypeScript family's one graph last) on the engine's own thread pool, one thread per core; `GLIA_THREADS=N` sets the size (unset or `0` = every core, clamped to 1..=256, `1` = the single-threaded path), the graph is byte-identical at any size, and stderr carries `[parallel]` lines (one per walk, two per repo) naming the thread count.
 
 For LLM / MCP usage see [repo-graph](https://github.com/James-Chahwan/repo-graph), which wraps the wheel as an MCP server with six tools: `orient`, `find`, `impact`, `trace`, `read` and `refresh`.
 
@@ -105,7 +130,7 @@ For LLM / MCP usage see [repo-graph](https://github.com/James-Chahwan/repo-graph
 
 ## CLI
 
-Every subcommand and flag of `glia`, written from the committed CLI surface snapshots in `cli/surface/` (LG.6a) and held to them by `cli/tests/readme_surface.rs`: every command has a usage line, every flag a line shows is declared and every flag a command declares is shown, and every `a|b` value set is the snapshot's. `glia <command> --help` has the full text. `--with <repo>` (repeatable) merges more repos in first, so the resolvers pair across them; `--json` prints JSON instead of tables; `--scope` takes a repo-relative path or a project label from `glia projects`. The global `--no-overlay` builds without `.glia/overlay.toml`'s `[[edge]]` stanzas, the extraction-only graph ([docs/overlay.md](./docs/overlay.md)).
+Every subcommand and flag of `glia`, written from the committed CLI surface snapshots in `cli/surface/` (LG.6a) and held to them by `cli/tests/readme_surface.rs`: every command has a usage line, every flag a line shows is declared and every flag a command declares is shown, and every `a|b` value set is the snapshot's. `glia <command> --help` has the full text. `--with <repo>` (repeatable) merges more repos in first, so the resolvers pair across them; `--json` prints JSON instead of tables; `--scope` takes a repo-relative path or a project label from `glia projects`. The global `--no-overlay` builds without `.glia/overlay.toml`'s `[[edge]]` stanzas, the extraction-only graph ([docs/overlay.md](./docs/overlay.md)). The answers that collapse identity classes (`find`, `blast-radius`, `trace`, `flows`, `tests-for`, `serves`, `arch`) show a FACT / DERIVED class once, its best member carrying `identity` (`tier`, `rules`, `diverged`, `also_in`: the other repos' copies, located); `--no-collapse` is the raw answer, one row per member, with no identity tag. `glia query` and `glia check`'s `rule` read the Datalog dialect and the GQL subset in [docs/rules.md](./docs/rules.md).
 
 ```
 # Build, merge, store
@@ -153,8 +178,10 @@ glia cache gc <STORE> [--json] [--keep-stamps <KEEP_STAMPS>] [--max-bytes <BYTES
 # The whole stack
 glia arch <REPO> [--include-shared] [--json] [--mermaid] [--no-collapse] [--with <WITH>]...
     The services and the cross-service links between them, each with its mechanism
-    and channel. One repo keys services by top-level directory; SHARES_* and
-    DOCUMENTS links show only with --include-shared.
+    and channel. One repo keys services by top-level directory; SHARES_*, SAME_AS and
+    DOCUMENTS links show only with --include-shared. A SAME_AS identity class is one
+    link per service pair at its weakest edge, and two copies of one class count once
+    in every other link; --no-collapse shows the raw SAME_AS star.
 glia projects <REPO> [--json] [--with <WITH>]...
     The manifest-rooted sub-projects (label, ecosystem, path): the --scope vocabulary.
 glia coverage <REPO> [--json] [--with <WITH>]...
@@ -167,8 +194,9 @@ glia gaps <REPO> [--category <CATEGORY>] [--json] [--overlay-delta] [--top-k <TO
     Ranked blind spots (unpaired / ambiguous / unresolved endpoints, uncalled routes,
     tag-only queues, dead symbols (never an implementation of a method something
     calls, which dispatch reaches), co-change without an edge, suspected edges,
-    overlay rot), each with a stable gap id and the overlay section that could
-    repair it. suspected_edge rows (heuristic) print a paste-ready [[edge]] stanza
+    overlay rot: orphaned and redundant rules, and rotted_rule, a [[constraint]] whose
+    `rule` this glia can no longer read), each with a stable gap id and the overlay
+    section that could repair it. suspected_edge rows (heuristic) print a paste-ready [[edge]] stanza
     after their table ("paste into <repo>/.glia/overlay.toml ..."). --overlay-delta:
     what an overlay edit did, with a keep / review / drop verdict. Exits 0.
 glia contracts <REPO> [--breaking-only] [--fields] [--json] [--mismatch-only] [--with <WITH>]...
@@ -179,10 +207,13 @@ glia pages <REPO> [--dead-only] [--json] [--with <WITH>]...
 glia flows <REPO> [--depth <DEPTH>] [--feature <FEATURE>] [--features] [--group-by feature|entry] [--json] [--no-collapse] [--out <OUT>] [--scope <SCOPE>] [--with <WITH>]...
     Every entry point's forward flow: reach, mechanisms, whether it crosses a service,
     keyed by the feature word `glia trace` takes. --features / --out group them into
-    per-feature records (<feature>.yaml + index.json).
+    per-feature records (<feature>.yaml + index.json). A hop through an identity class
+    shows its best member; --no-collapse (not with --features / --out) walks the raw graph.
 glia spec-status <REPO> [--feature <FEATURE>] [--json] [--status implemented|declared_missing|undeclared] [--with <WITH>]...
     Per feature, the declared API ops (OpenAPI, feature.yaml) a route implements, the
-    ones still missing, and routes no op declares.
+    ones still missing, and routes no op declares. Each implemented row says how it
+    paired: exact, server_base (another server the document lists), annotated_base (the
+    project's swaggo @BasePath, for a document with no base) or prefix (an inferred strip).
 glia cycles <REPO> [--json] [--kind event|import|all] [--scope <SCOPE>] [--with <WITH>]...
     Cross-service event loops with a located witness, call loops, service-level
     possible loops, then module import cycles.
@@ -215,10 +246,16 @@ glia hotspots <REPO> [--include-tests] [--json] [--level module|symbol|both] [--
     composite score. Reads the history snapshot (`glia history sync`, `--blame` for
     symbols). Heuristic. Exits 1 with no rows (no_history / no_match).
 glia identity <REPO> [--diverged-only] [--json] [--limit <N>] [--rule <RULE>] [--tier fact|derived|heuristic] [--with <WITH>]...
+    The identity classes: what the build says is one thing across repos (a package, a
+    message, a contract op, a SCIP symbol: fact / derived, collapsed in answers) and the
+    same-as candidates (vendored copies: heuristic, never collapsed), by rule and tier,
+    each member located, diverged copies with their variants. Exits 0 with classes, 1
+    with none (the absence says why), 2 on an error.
 
 # One symbol, channel or signal
 glia find <REPO> <QUERY> [--json] [--kind <KIND>]... [--no-collapse] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
     The ranked, located nodes a symbol, qname or fragment names, with the match tier.
+    One row per identity class, folded before the --top-k cut.
 glia resolve <REPO> <SIGNAL> [--json] [--kind <KIND>] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
     A stacktrace, diff, test id or free text -> the ranked, located nodes it names.
 glia impact <REPO> <QNAME> [--depth <DEPTH>] [--direction forward|backward|both]
@@ -226,9 +263,12 @@ glia impact <REPO> <QNAME> [--depth <DEPTH>] [--direction forward|backward|both]
 glia blast-radius <REPO> <QNAME>... [--depth <DEPTH>] [--direction forward|backward|both] [--json] [--live-only] [--no-collapse] [--scope <SCOPE>] [--top-k <TOP_K>] [--with <WITH>]...
     Edge-category-aware, PPR-ranked, located closure around one or more seeds, each
     row naming its seed, edge reason and `live` flag; import / contain edges excluded.
+    A shared message, contract op or SCIP symbol is one node of the walk, so the radius
+    crosses into every repo that shares it.
 glia trace <REPO> <FEATURE> [--depth <DEPTH>] [--json] [--max-paths <MAX_PATHS>] [--no-collapse] [--to <TO>] [--with <WITH>]...
     Ranked distinct paths from a feature across service boundaries, each hop with its
-    mechanism; --to gives the paths between two nodes.
+    mechanism; --to gives the paths between two nodes. A hop through an identity class
+    shows its best member and an `(also in: ..)` cell.
 glia why <REPO> <FROM> <TO> [--category <CATEGORY>] [--json] [--with <WITH>]...
     Every edge between two nodes with its emitter, rule, call site, confidence and
     FACT / DERIVED / HEURISTIC tier; with none, a witness path. Exits 1 when not found.
@@ -239,11 +279,14 @@ glia serves <REPO> <CHANNEL> [--json] [--mechanism auto|http|queue] [--no-collap
     Who serves `METHOD /path` or a queue topic, through the resolver's own matcher. An
     HTTP channel also lists, after the routes, each third-party ENDPOINT the code calls
     on that verb and path (match `external`, `external_hosts` in --json). An empty
-    answer is a FACT with the mechanism's caveats and near misses.
+    answer is a FACT with the mechanism's caveats and near misses. Servers of one
+    identity class fold into the first (`identity`), and a server's handlers of one
+    class keep the first (`handler_identity`).
 glia effects <REPO> <QNAMES>... [--class <CLASS>]... [--cross-service] [--depth <DEPTH>] [--json] [--scope <SCOPE>] [--with <WITH>]... [--writes-only]
     The effect sinks downstream of the seeds (DB read / write, queue produce, outbound
     HTTP / RPC / WS / GraphQL call, event emit), each with its witness path. A call to a
-    third-party host names it (`external: <host>`, `external_hosts` in --json).
+    third-party host names it (`external: <host>`, `external_hosts` in --json): an HTTP
+    ENDPOINT, or a WebSocket, gRPC or GraphQL client marked external.
 glia docs-for <REPO> <QNAME> [--json] [--scope <SCOPE>] [--with <WITH>]...
     The doc sections that DOCUMENT a symbol, from the markdown the build reads: the
     well-known files and docs/ trees at the repo root and every project root, .ai/,
@@ -257,6 +300,14 @@ glia pack <REPO> <QUERY> [--budget <BUDGET>] [--bytes-per-token <BYTES_PER_TOKEN
     the pack only, a summary goes to stderr; --json is the pack with its manifest.
     Exits 1 when the pack is empty (the absence says why).
 glia query <REPO> [<FILE>] [-e <TEXT>] [--explain] [--gql] [--json] [--limit <N>] [--max-rows <N>] [--output <PRED>]... [--with <WITH>]...
+    A Datalog program from <FILE>, -e or stdin (with --gql, a GQL read query: MATCH ...
+    WHERE ... RETURN) over the code graph, the predicate prelude merged in
+    (docs/rules.md). One table per output (the program's sinks, or each --output, cut
+    to --limit, default 200): every value located, every row tiered fact / derived /
+    heuristic, a row through a negation with its coverage caveats; --explain adds each
+    row's witness edges; --json is the QueryAnswer. Exits 0 with rows, 1 with none (the
+    absence says why), 2 on a usage, parse, analysis, row-budget (--max-rows) or build
+    error, each diagnostic as `<source>:<line>:<col>: error: <message>`.
 
 # A change (git rev or pasted diff)
 glia delta <REPO> [--base <BASE>] [--category <CATEGORY>]... [--edges-only] [--json]
@@ -271,6 +322,7 @@ glia tests-for <REPO> [QNAMES]... [--base <REV>] [--depth <DEPTH>] [--diff <FILE
     in recent runs, on a failing trace, co-changes with a seed's module; a test found
     only by co-change is a heuristic `cochange` row). --no-signals ranks structurally
     only; --limit keeps the first N; --files-only prints test files for a runner.
+    Test rows of one identity class fold into one; --no-collapse keeps them all.
 glia patterns <REPO> [--base <REV>] [--group-by service|package] [--json] [--min-share <MIN_SHARE>] [--min-support <MIN_SUPPORT>] [--scope <SCOPE>] [--with <WITH>]...
     Pattern conformance: per service (or package), each route handler's role chain
     to its first effect sink; the chain held by --min-share percent of at least
@@ -281,7 +333,8 @@ glia review <REPO> [--base <REV>] [--depth <N>] [--json] [--markdown-rows <N>] [
     The PR report for the working tree's change against a rev (default HEAD): the
     changed nodes, their ranked impact, the tests to run, every added / removed edge
     with its tier, and the declared rules checked on both sides. Markdown for a PR
-    comment. A CI gate: exits 1 only on a NEW violation.
+    comment. A CI gate: exits 1 only on a new BLOCKING violation (at or above its
+    rule's min_tier; an advisory one is listed under its own heading, not failed).
 glia contract-breaks <REPO> [--avro backward|forward|full] [--base <REV>] [--breaking-only] [--json] [--with <REPO>]...
     Did the change against a rev (default HEAD) break a client? Every OpenAPI /
     AsyncAPI op and proto / Avro / JSON Schema type paired old -> new and judged by
@@ -306,13 +359,25 @@ glia timeline as-of <REPO> <REV> [--json]
     The graph at one rev of the window (an index, or a commit id prefix of 7+ hex
     chars): its counts by category. history and as-of read the sidecar, never rebuild.
 glia watch <REPO> [--debounce-ms <N>] [--persist-every <S>] [--poll-ms <N>]
+    Keep one repo's build open and stream what each change does to the graph: a
+    foreground loop, no daemon, socket or pidfile. Prints a ready line, then one NDJSON
+    object per update on stdout (the files that moved, the groups rebuilt, the totals,
+    the located delta rows). Stat-polls every --poll-ms (500), applies a batch once it
+    stays still for --debounce-ms (200), and writes <repo>/.glia/graph/ and the parse
+    cache every --persist-every seconds (60; 0 = only on exit) and on exit. Stops on
+    SIGINT, SIGTERM or stdin EOF with exit 0; refuses --no-overlay; 2 on a bad repo or
+    a build error, 5 when a persist fails.
 
 # Rules
 glia check <REPO> [--json] [--with <WITH>]...
-    Evaluate .glia/overlay.toml's [[constraint]] rules (forbid_edge, no_cycle) and its
-    reflexion model ([[component]], [[layer]], `allow` rules: the component matrix,
-    divergences, absences, unmapped files) to located, tiered VIOLATIONs. Exits 0
-    clean, 1 on violations, 2 on an error: CI-ready.
+    Evaluate .glia/overlay.toml's [[constraint]] rules (forbid_edge, transitive
+    forbid_edge with `via` facades, no_cycle, and version 2's `invariant` with a
+    Datalog `rule`) and its reflexion model ([[component]], [[layer]], `allow` rules:
+    the component matrix, divergences, absences, unmapped files) to located, tiered
+    VIOLATIONs. A violation blocks when its tier is at least its rule's min_tier (fact
+    or derived, default derived); a heuristic one is advisory under any setting. Exits
+    0 when nothing blocks, 1 on a blocking violation, 2 on an error or a rule it
+    cannot evaluate: CI-ready.
 glia flags <REPO> [--json] [--quiet-days <QUIET_DAYS>] [--scope <SCOPE>] [--status dead|undefined|single_site|quiet]... [--with <WITH>]...
     Stale feature flags (LaunchDarkly / OpenFeature / Unleash / Flagsmith / Split
     reads, Flipt definitions), each with its readers and definitions: dead and
@@ -358,12 +423,17 @@ glia overlay propose <REPO> [--category <CATEGORY>]... [--json] [--snippet-lines
 glia overlay try <REPO> --candidate <CANDIDATE> [--json] [--no-leave-one-out] [--with <WITH>]...
     Build a candidate stanza file against the repo (base, with it, and without each
     stanza in turn) and report what each stanza changes and a keep / review / drop
-    verdict. --no-leave-one-out: two builds, no per-stanza attribution.
+    verdict. --no-leave-one-out: two builds, no per-stanza attribution. A
+    [[constraint]] rule stanza is judged by `glia check` on the build with every
+    stanza (holds / violated / error / orphaned / duplicate), and a graph stanza that
+    adds or hides a declared rule's violation is review.
 glia overlay accept <REPO> [--candidate <CANDIDATE>] [--dry-run] [--json] [--only <ONLY>]... [--remove <REMOVE>]...
-    Merge chosen candidate stanzas (--only `edge#2`) into .glia/overlay.toml, or
-    remove orphaned / redundant rules by gap id, validated and written atomically:
-    the only writer of that file. Exits 0 written (or --dry-run), 1 when validation
-    refuses, 2 on an error. The overlay commands refuse --no-overlay.
+    Merge chosen candidate stanzas (--only `edge#2`, `constraint#1`) into
+    .glia/overlay.toml, or remove orphaned, redundant or rotted rules by gap id,
+    validated and written atomically: the only writer of that file. It refuses a rule
+    `glia check` could not evaluate, and moves the file to `version = 2` only when a
+    written rule needs it. Exits 0 written (or --dry-run), 1 when validation refuses,
+    2 on an error. The overlay commands refuse --no-overlay.
 glia cell set <REPO> <QNAME> <CELL> [--dims <DIMS>] [--file <PATH>] [--json <ENTRY>] [--kind <KIND>] [--model <MODEL>] [--text <TEXT>]
     Write a CONSTRAINT / DECISION / CONV entry (one of --json, --text, --file) or a
     VECTOR (--file, --model, --dims) on a node; kept in .glia/cells.jsonl /
@@ -385,25 +455,28 @@ source files
      resources, config files, ...)
    → graph builder (resolves intra-repo references)
    → cross-graph resolvers (HttpStack, gRPC, RPC, Queue, GraphQL,
-     WebSocket, EventBus, SharedSchema, MessageSchema, CLI, DB, Cron,
-     Config, IaC, Package), then the post-passes (overlay edges, TESTS,
-     doc links, evidence), all one ordered pass registry
+     WebSocket, EventBus, SharedSchema, CLI, DB, Cron, Config, IaC),
+     then identity (SAME_AS), then the post-passes (overlay edges,
+     TESTS, doc links, evidence), all one ordered pass registry
    → MergedGraph
    → .gmap layout (rkyv + mmap, sharded, self-describing header,
      format 3: interned evidence strings, CODE cells as spans),
      dense text projection, JSON, or pyo3 → Python
+   → at query time: Datalog rules and GQL (glia-rules), identity
+     collapse on the answers; glia watch keeps a build open
 ```
 
 Workspace crates:
 - `core/`: `Node`, `Edge`, `QName`, `RepoId`, shared primitives.
-- `code-domain/`: code-specific registries (49 NodeKind, 36 EdgeCategory, 25 CellType IDs) and the code domain's profile tables.
+- `code-domain/`: code-specific registries (49 NodeKind, 37 EdgeCategory, 25 CellType IDs; 0.5.2 added SAME_AS) and the code domain's profile tables, identity rules included.
 - `parsers/code/<lang>/`: one crate per language. `parsers/code/extractors/` for cross-cutting (gRPC, queues, WebSocket, EventBus, GraphQL, CLI, data-sources, data-entities, cron, config, IaC, packages, ts-routes, React, Angular, Vue).
-- `graph/`: per-repo builder, MergedGraph, all 15 cross-graph resolvers, blast radius.
-- `engine/`: orchestration (walk, parse, build, passes, persist) and every answer primitive. Used by `py/` and `cli/`.
+- `graph/`: per-repo builder, MergedGraph, the 13 cross-graph resolvers and the identity resolver, blast radius.
+- `engine/`: orchestration (walk, parse, build, passes, persist), every answer primitive, the rules layer over the code graph, identity collapse and the watch session. Used by `py/` and `cli/`.
+- `rules/`: `glia-rules`, the Datalog evaluator: parser, GQL front end, stratified semi-naive evaluation with tiers, magic sets, aggregates, explain. Depends on `core/` and `activation/` only.
 - `cli/`: the `glia` binary, one file per command. `py/`: the pyo3 bindings published as `glia-py`.
 - `store/`: `.gmap` container (rkyv + mmap, atomic write).
 - `projection-text/`: dense sigil projection for LLM context.
-- `activation/`: Personalised PageRank, the pass registry, the domain profile and the generic algorithms (reachability, graph delta, SCC), all domain-agnostic.
+- `activation/`: Personalised PageRank (power iteration and push), the pass registry, the domain profile and the generic algorithms (reachability, levelled BFS, graph delta, SCC, communities, cuts, hubs, MinHash, identity classes and their quotient), all domain-agnostic.
 - `doc-sources/`: Confluence ingestion behind `glia docs`. `snapshots/`: the git-history and test-report snapshot writers. `stamp/`: the build identity that keys the parse cache.
 - `toy-domain/`: a test-only second domain proving the domain seam; never a dependency of a shipped crate.
 
@@ -412,7 +485,7 @@ Workspace crates:
 | Tool | What it does well | What glia adds |
 |---|---|---|
 | Sourcegraph / ctags | intra-repo symbol search at scale | cross-service edges (HTTP/gRPC/queue/shared-DB), declarative resolver layer |
-| CodeQL / Semgrep | deep semantic per-file analysis, custom rules | wider substrate (more languages, more frameworks, less depth per query), works out of the box |
+| CodeQL / Semgrep | deep semantic per-file analysis, custom rules | wider substrate (more languages, more frameworks, less depth per query), works out of the box; structural Datalog rules over the cross-service graph, no data flow |
 | Apiiro / Endor / Snyk | dependency-graph + vuln matching | the dependency graph as one layer of a cross-service graph (shared packages across services, next to IaC, config and queue links); no vulnerability matching by design ([SECURITY.md](./SECURITY.md)) |
 | Codebase-Memory MCP | LLM-targeted graph of one codebase | multi-repo merge + cross-service resolvers, pure-Rust core |
 | SocratiCode | LLM-driven code Q&A | structural index, not LLM-derived; deterministic, repeatable |
@@ -498,7 +571,7 @@ Embed-injection port to llama.cpp's `llama_batch.embd` API is feasible (API veri
 - **0. Wave 0.** The module, CLI and pyo3 slots every later packet fills (C0.2–C0.6) and the one dependency commit: `lz4_flex`, `blake3`, `toml_edit`, `ureq` (C0.7).
 - **A. Dogfood fixes.** Go calls inside func literals are CALLS of the enclosing function (CA.1); Go receivers typed from a call's result, parameters, locals and package vars (CA.2a, CA.2b); Go implicit IMPLEMENTS checked by method signature, a one-method interface by package reach (CA.3a, CA.3b); Go collection wrappers inferred without an overlay (CA.4); Go route handlers that are a method value of the receiver (CA.5a); `patterns` counts sighted handlers only and groups by package on request (CA.5b); Kotlin parameter and local receiver types, and Ktor-client ENDPOINTs (CA.6a, CA.6b); the TypeScript family built on the engine pool (CA.7); exact matching in the substrate grader (CA.8); per-phase `[timing]` build timers (CA.9).
 - **B. Language and HTTP / RPC / event backlog.** `.graphqls` routed to the SDL scan and C++ header extensions to the C/C++ parser (CB.1); the contract YAML sniff reads every top-level line and needs a version value (CB.2); no verb-named events, and constant-keyed event sites folded to the constant's literal (CB.3a, CB.3b); a decorated TS method anchored at its first decorator (CB.4); in-process events paired across nested projects linked into one process (CB.5); per-scope language facts in CodeNav (CB.6); PHP `use` read from the AST (CB.7); Dart constructors, operators, enum constants, extensions and `as` / `show` / `hide` imports (CB.9, CB.17); Swift infix calls, init / subscript / computed-property bodies and implicit `self` (CB.10, CB.18); Go routers held on a struct field and router mounts resolved at build time (CB.11, CB.20, CB.23); host narrowing as a shared resolver module, then WebSocket, gRPC, GraphQL and tRPC clients narrowed by their dial host or base URL (CB.12, CB.21, CB.24); tRPC server-side callers (CB.13); Python GraphQL field resolvers (CB.14); a namespace PACKAGE resolves each member against its own file's imports (CB.15); Ruby `require` inside a class body (CB.16); C/C++ `extern "C"`, templates, unions and nested types, include search paths and C++ call scope (CB.19, CB.22, CB.25); coverage caveats name what is still partial (CB.26).
-- **C. New answers.** One precomputed graph delta behind `diff-impact` and `tests-for` (CC.1); one reader for the history and test signals (CC.2); `check` tiers each violation (CC.3) and evaluates a reflexion model: `[[component]]`, `[[layer]]`, `allow` rules, the component matrix, divergences, absences, unmapped files (CC.5a–c); `glia pack`, context packed to a token budget over a fidelity ladder (CC.4a–c); `glia review`, the PR report that fails CI only on a new violation (CC.6a, CC.6b); `glia flags`, stale feature flags with flag reads homed on the reading function (CC.7a–c); `glia contract-breaks`, format evolution rules against a git rev and orphaned clients, across `--with` client repos (CC.8a–c); predictive test selection, `tests-for` ranked by failure and co-change signals over a rolling window of test runs (CC.9a, CC.9b); `glia hotspots`, churn rank beside centrality rank under the new `centrality` activation preset, which weighs DEFINES / CONTAINS / DOCUMENTS / TESTS at 0 (CC.10a, CC.10b); `glia cochange`, co-change suggestions with directional confidence (CC.11a–c); `patterns` out of experimental against a written promotion criterion, the `_experimental` names kept as DeprecationWarning aliases until 0.5.2 (CC.12a, CC.12b).
+- **C. New answers.** One precomputed graph delta behind `diff-impact` and `tests-for` (CC.1); one reader for the history and test signals (CC.2); `check` tiers each violation (CC.3) and evaluates a reflexion model: `[[component]]`, `[[layer]]`, `allow` rules, the component matrix, divergences, absences, unmapped files (CC.5a–c); `glia pack`, context packed to a token budget over a fidelity ladder (CC.4a–c); `glia review`, the PR report that fails CI only on a new violation (CC.6a, CC.6b); `glia flags`, stale feature flags with flag reads homed on the reading function (CC.7a–c); `glia contract-breaks`, format evolution rules against a git rev and orphaned clients, across `--with` client repos (CC.8a–c); predictive test selection, `tests-for` ranked by failure and co-change signals over a rolling window of test runs (CC.9a, CC.9b); `glia hotspots`, churn rank beside centrality rank under the new `centrality` activation preset, which weighs DEFINES / CONTAINS / DOCUMENTS / TESTS at 0 (CC.10a, CC.10b); `glia cochange`, co-change suggestions with directional confidence (CC.11a–c); `patterns` out of experimental against a written promotion criterion, the `_experimental` names kept as DeprecationWarning aliases through 0.5.1 and removed in 0.5.2 (CC.12a, CC.12b; DE.11).
 - **D. Algorithms and store format 3.** In `activation::algo`: seeded Leiden, label propagation and modularity (CD.1a, CD.1b), Stoer-Wagner and Dinic min cuts (CD.2a), link-prediction scores (CD.3a), degree and HITS (CD.4a), MinHash / LSH (CD.4d), validity intervals over a run of snapshots (CD.5a); the domain profile's `community_weights` (CD.1c). On top of them: `glia communities` (CD.1d, CD.1e), `glia splits` (CD.2b–d), the `suspected_edge` gap with a paste-ready `[[edge]]` stanza (CD.3b, CD.3c), `glia hubs` (CD.4b, CD.4c), `glia duplicate-flows` (CD.4e, CD.4f), and the time-travel graph `glia timeline build|history|as-of` with its `timeline.gmap` sidecar and the commit each layout was built at (CD.5b–d). `glia-graph` depends on no tree-sitter crate outside its tests (CD.6a). The store: an lz4-framed parse cache (CD.7a), `.gmap` FORMAT_VERSION 3 with interned EVIDENCE cells (CD.7b), and CODE cells stored as spans into the source (CD.7c).
 - **E. External inputs and caches.** `glia scip import` with a dependency-free SCIP decoder, and a build stage that binds a SCIP index as FACT-tier CALLS / USES / IMPLEMENTS / INHERITS_FROM and confirms name-only edges (CE.1a–e); a shared parse cache of content-addressed, MAC-signed objects over a directory or HTTPS store, `glia cache push|pull|gc` (CE.2a–c, CE.2e), and the whole-layout cache: a clean checkout at a built tree pulls the finished `.glia/graph/` layout (`glia cache push|pull --layout`; key = build stamp, repo identity, HEAD tree, `.glia` inputs, target, walk digest) (CE.2d); the overlay loop: stable gap ids and a keep / review / drop verdict (CE.3a), builds from candidate overlay text and a format-preserving writer (CE.3b), `overlay try` (CE.3c, `glia_engine::overlay_loop::try_candidate`), `propose` and `accept` (CE.3d), `glia overlay propose|try|accept` (CE.3e) and the `glia-overlay` agent skill (CE.3f); doc sources beyond Confluence: source-neutral pages merged by container (CE.4a), a local wiki directory (CE.4b), wikitext to Markdown (CE.4c), MediaWiki's Action API with a bearer token and no cookie login (CE.4d), Notion databases and page trees (CE.4e, CE.4f).
 - **F. Matrix probes.** Graded fixtures measure unknown cells of the coverage matrix for Python, Go, TypeScript, Java, C#, Ruby, PHP, Rust, Scala, Dart and Elixir (CF.1–CF.11); an explicit not-applicable list and a Kotlin row (CF.13a, CF.13b).
@@ -511,19 +584,28 @@ Embed-injection port to llama.cpp's `llama_batch.embd` API is feasible (API veri
   - **L. The matrix slice.** A queue framework tag only for an unexplained call, and a RabbitMQ declare is no consumer (CL.1). Go broker rows (CL.2). JVM / .NET broker rows (CL.3). JobRunr / Hangfire / asynq jobs (CL.4). Calls on a constructed object (CL.5a). Function-level TESTS (CL.5b). Go / C# GraphQL client requests (CL.6a) and HotChocolate resolvers (CL.6b). C# environment reads (CL.7a) and .NET `appsettings*.json` with the env cross-define (CL.7b). The Go asaskevich/EventBus (CL.8). NestJS `@Cron` / `@Interval` (CL.9). JVM process launches (CL.10). Two probe fixes (CL.11).
 - **Z. This refresh.** README `## CLI` held to `cli/surface/` by `cli/tests/readme_surface.rs` (CZ.1); CLAUDE.md and the `glia` skill (CZ.2); the finishing batch's docs and the three consumer handoffs (CZ.3).
 
-**Next: 0.5.2, four bets** (research in [`dev-notes/research-0.5.2/`](./dev-notes/research-0.5.2/); packets after 0.5.1 ships): `glia watch`, incremental rebuilds on CA.9's measured phase costs; a Datalog rule layer with a GQL / Cypher read front-end; cross-repo identity (node dedupe across merged repos); Engram PPR memory. The finishing batch's deferrals go there too:
-- PHP short-name symbol imports and `use \App\{X}`.
-- CB.26's measured residuals.
-- The rest of the matrix none / partial cells: Ruby, PHP, Rust, Scala, Dart and Elixir broker rows, Python blinker / Django signals, a GCP subscription-to-topic binding.
-- WS / gRPC / GraphQL external-endpoint marking.
-- An OpenAPI `basePath` for spec-status.
-- In TypeScript: typed-receiver inherited calls, concrete-override dispatch, cross-file signal reads.
-- The Go `package` clause.
-- `[walk] tests` feeding the TESTS pass.
+**0.5.2, the four bets (landed in waves W0–W14; the release is James's step):** a Datalog rule layer with a GQL read front end, `glia watch`, cross-repo identity and Engram anchors, plus every 0.5.1 deferral and the rest of the coverage matrix: 153 packets in 15 waves. It keeps the name 0.5.2 and consumers pin it exactly, so it may break: each break is declared by its packet and listed in the repo-graph, neuropil and Engram handoff docs (`dev-notes/*-handoff-0.5.2.md`). One registry id is allocated, edge category 37 SAME_AS, and the store format stays 3. Scope and the 25 resolved questions: [`dev-notes/next-leap-0.5.2.md`](./dev-notes/next-leap-0.5.2.md) §0.1; every packet: [`dev-notes/leap-052-packets.json`](./dev-notes/leap-052-packets.json), with [`dev-notes/leap-052-corrections.json`](./dev-notes/leap-052-corrections.json).
+- **0. Wave 0.** SAME_AS = edge 37 and the `same_as` slot (D0.1); the `glia-rules` crate, the release's one dependency commit and no external crate (D0.2); the module, pyo3 and CLI slots every later packet fills (D0.3–D0.8).
+- **A. The rules crate (`glia-rules`).** Levelled multi-source BFS in `activation::algo::reach` (DA.1); the rule IR and diagnostics (DA.2); the tier lattice and value table (DA.3); one lexer for Datalog and GQL (DA.4); stratification and analysis (DA.5a, DA.5b); the `FactSource` seam and the lazy EDB loader (DA.6); relation storage with (height, rule) provenance (DA.7); grouped count / min / max / sum (DA.8); the Datalog parser (DA.9); per-stratum plans (DA.10); `reaches` / `scc` over `activation::algo` (DA.11); magic sets for unseeded recursion (DA.12); a deterministic test kit (DA.13); the step interpreter and the levelled semi-naive evaluator with the row budget (DA.14a, DA.14b); `explain`, a row's minimal-height witness (DA.15); gates: every diagnostic by its text (DA.16), cost over glia's own graph (DA.17), an oracle (DA.18), determinism and budget (DA.19), and the toy proof, a nameless domain implementing `FactSource` inline (DA.20).
+- **B. Rules in the engine.** Overlay `version = 2`: `rule`, `transitive`, `via`, `min_tier` on `[[constraint]]` (DB.1); `CodeFacts`, `rules::query` / `validate` and the predicate prelude, which reads structure only (DB.2a–c, SECURITY.md); `glia check` evaluates rule invariants (DB.3a) and transitive forbids (DB.3b), gates on `min_tier` (DB.3d), and `glia review` blocks only on a new blocking violation (DB.3c); `rotted_rule` gaps (DB.4); `glia query` and `PyGraph.query` / `query_gql` (DB.5, DB.6); the GQL read subset parsed, lowered and answered (DB.7a–c); the reflexion model as rules, byte-identical to the native code it then replaced (DB.8a, DB.8b); rules through the overlay loop: `[[constraint]]` candidates, judged by the check delta, shown in the try report (DB.9a–c).
+- **C. `glia watch`.** Walk reuse by stat stamp (DC.1); callable build stages (DC.2); the const folds on the pool (DC.3); in-memory build memos (DC.4); the evidence fill split per group (DC.5); the scoped located delta (DC.6); `WatchSession` (DC.7a), group early cutoff by fingerprint (DC.7b) and the stat poll (DC.7c); `glia watch` (DC.8) and `glia_py.WatchSession` (DC.9); scripted and seeded-random parity gates against clean builds (DC.10a, DC.10b).
+- **D. Cross-repo identity.** Identity classes and the quotient in `activation::algo::classes` (DD.1); the identity keys (DD.2) and the profile's eight identity rules, SAME_AS weighted 0 in PPR (DD.3); PROJECT `label_source` (DD.4); the identity resolver: packages, manifests, messages (diverged when the fields differ), contract ops (DD.5), vendored copies as heuristic candidates (DD.6) and SCIP symbols (DD.7); the identity view (DD.8); collapse in `find` (DD.9), `blast-radius` (DD.10), `trace` / `flows` (DD.11), `tests-for` (DD.12), `serves` (DD.13) and `arch` (DD.14); `glia identity` and `PyGraph.identity_classes` (DD.15); SAME_AS stars replace the SHARES_DEPENDENCY clique and the message SHARES_SCHEMA pairs (DD.16).
+- **E. Engram anchors and engine hygiene.** Graph content independent of the RepoId (DE.1); engram-export: the same bytes from every clone (DE.2), endpoint and page anchors and re-keyed endpoint pairing (DE.3), renamed-symbol pairing in `--since` (DE.4), push PPR and the `--ppr-candidates` side file (DE.5), leading docs and the prose cap pinned (DE.6); generated-code provenance (DE.7), so vendored gRPC stubs make no false calls (DE.8); `requirements.txt` / `Pipfile` Python roots (DE.9); freed heap returned after a `PyGraph` drop (DE.10); the 0.5.0 pattern aliases removed (DE.11).
+- **F. The 0.5.1 deferrals.** PHP grouped and namespaced `use` (DF.1, DF.2); CB.26's residuals: Swift parameter and local receivers (DF.3), Dart own-package URIs and plain imports (DF.4a, DF.4b), C++ lambda calls and `auto` locals (DF.5), CMake generator expressions (DF.6), Go route prefixes in constants (DF.7); external WebSocket / gRPC / GraphQL clients marked, kept out of pairing and labelled in `effects` (DF.8–DF.10); `[walk] tests` feeding the TESTS pass (DF.11); Python blinker / Django signals within and across files (DF.12, DF.13); the Pub/Sub subscription-to-topic Terraform binding (DF.14); the Go `package` clause (DF.15); Go typed handler bases (DF.16); TS cross-class STATE_VAR reads (DF.17); OpenAPI server bases recorded and used by `spec-status` and contract pairing (DF.18, DF.19); TS endpoint bases from config (DF.20); the coverage caveats rewritten for what is still partial (DF.21); TS parameters and locals typing their receivers, inherited typed-receiver calls and concrete-override IMPLEMENTS (DF.22a–c).
+- **G. The matrix rest: Rust and Scala.** Rust brokers and apalis (DG.1); Scala brokers (DG.2); typed buses (DG.3); async-graphql and Caliban (DG.4); axum and Akka / Pekko WebSockets (DG.5); Rust and Scala config, secret and flag reads (DG.6); tokio-cron-scheduler (DG.7a) and akka-quartz with `application.conf` schedules (DG.7b); Scala CLIs (DG.8); Slick tables (DG.9); http4s and Akka routes (DG.10); ScalaTest / MUnit cases (DG.11); sbt sub-projects (DG.12); Rust trait impls (DG.13a) and framework injection (DG.13b).
+- **H. The matrix rest: Ruby, PHP, Dart, Elixir and the stragglers.** Broker rows for Ruby (DH.1), PHP (DH.2), Dart (DH.3) and Elixir (DH.4); Dart / Elixir / Laravel env reads (DH.5); flags and secrets (DH.6); framework event buses (DH.7); graphql-ruby, Absinthe and Dart GraphQL (DH.8); Ratchet and Dart WebSockets (DH.9); CLIs in four languages (DH.10); sqflite and Ecto migrations (DH.11); elixir-grpc (DH.12); Ruby heritage, injection and `.new` calls (DH.13); PHP heritage (DH.14); Dart injectable and shelf_router (DH.15); the Dart tests fixture (DH.16); Elixir remote calls (DH.17a) and behaviours, injection and ExUnit tests (DH.17b); Ecto schemas (DH.18); Compojure / reitit handlers (DH.19); Vapor routes (DH.20); libcurl clients (DH.21).
+- **Z. This refresh.** README, CLAUDE.md, the two skills and the Python README (DZ.1); the three consumer handoffs (DZ.2).
 
-Then 0.5.3 (Stack Graphs-style incremental resolution, build-target graphs) and 0.5.4 (precision on real repos, agent before / after, calibrated confidence). The train is §1 of the 0.5.1 leap doc.
+**Next: 0.5.3, scale** (seed: [`dev-notes/next-leap-0.5.3.md`](./dev-notes/next-leap-0.5.3.md); packets after 0.5.2 ships): Stack Graphs-style incremental resolution with watch's body-only fast path, build-target graphs, multi-repo `glia watch --with`, org-internal package routing on SAME_AS; local embeddings (`glia embed`) feeding a semantic tier in `find` and the flow search; a clarification queue; one tier vocabulary; one memory budget for watch sessions and the rules evaluator; concept search over flows. The gaps 0.5.2 measured and left go there too:
+- Dart's function-level TESTS through closure calls (the one partial matrix cell).
+- Go generic instantiation calls (`F[T](..)`); TS interface members as METHOD nodes, call-initialised and `inject()` locals, module-level instances, statics inherited through a subclass, superclass STATE_VARs, default-imported class types; Angular lifecycle hooks and constructors listed as dead.
+- PACKAGE_DEPs from Maven, Gradle, pubspec, mix and csproj manifests; rows that do not collapse yet (`pack`, `hubs`, `hotspots`, `communities`, `duplicate-flows`, `effects`, `implementors`, `why`, `gaps`); a vendored library inside a vendor region.
+- tRPC external marking, Swift protocol receivers, Dart `export` barrels, Rust trait members as nodes, Juniper / Sangria, Elixir one-line `def`, Absinthe `import_fields`, Ruby mixins, generated HTTP clients.
+- RepoId-ordered tie-breaks left in pick_primary, cochange, overlay bind, declared and cells; a witness path among equal alternatives can differ between checkouts; a `[[constraint]]` with no anchor and no PROJECT scope is orphaned without a report; `[walk] tests` is invisible to a layout merge.
 
-**Later (not in 0.5.1):** dominators (once middleware is extracted and the security gate is ruled on); a RuntimeZone resolver; LSP; per-graph-area rebuilds, if a big repo is slow after LG.1; org-internal-package routing (sibling-repo imports); one dispatcher for the non-tree-sitter file branches and one shared home for the duplicated extractor helpers (`looks_like_url_path`); query-specific distillation over composition / synth cells / vectors (the research direction in Experimental notes). The per-language gaps the 0.5.0 spec runs found are in §7.6 of its leap doc. A non-code domain builds on the 0.5.0 seam (header registries, container sections, the domain profile, pass composition); none is scheduled.
+Then 0.5.4 (precision on real repos, agent before / after, calibrated confidence, `decide/` and `glia judge`). The train is §1 of the 0.5.3 seed.
+
+**Later (not in 0.5.3):** dominators (once middleware is extracted and the security gate is ruled on); a RuntimeZone resolver; LSP; per-graph-area rebuilds, if a big repo is slow after LG.1; one dispatcher for the non-tree-sitter file branches and one shared home for the duplicated extractor helpers (`looks_like_url_path`); query-specific distillation over composition / synth cells / vectors (the research direction in Experimental notes). The per-language gaps the 0.5.0 spec runs found are in §7.6 of its leap doc. A non-code domain builds on the 0.5.0 seam (header registries, container sections, the domain profile, pass composition); build-target graphs in 0.5.3 are the likely first.
 
 ## License
 

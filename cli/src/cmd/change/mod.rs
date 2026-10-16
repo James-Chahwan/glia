@@ -75,8 +75,9 @@ pub(crate) enum ChangeCmd {
     /// checked on both sides, each violation new or resolved. Prints markdown
     /// for a PR comment (`--json`: the review). Saves the parse-cache sidecar
     /// as `delta` does, never a layout. A CI gate: exits 1 when the change
-    /// adds a violation (one the base already had passes), 0 otherwise, 2 on
-    /// a usage, git or build error.
+    /// adds a blocking violation (at or above its rule's `min_tier`; an
+    /// advisory one is listed, not failed, and one the base already had
+    /// passes), 0 otherwise, 2 on a usage, git or build error.
     Review(review::Args),
     /// Cochange (CC.11c): what else usually changes with this change — for
     /// the given files (repo-relative) or the working tree's change against a

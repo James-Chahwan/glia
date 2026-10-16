@@ -40,7 +40,8 @@ glia does not ship the following in core, and will not accept them as contributi
   structural map into a list of exploitation targets.
 - **Joining package or call reachability to vulnerability (CVE) feeds.** A list of the services that
   reach a known-vulnerable function is a ready-made attack graph. glia emits the dependency substrate
-  (`PACKAGE_DEP`, `PackageResolver`) and stops there.
+  (`PACKAGE_DEP` nodes, and since 0.5.2 the SAME_AS identity class that joins one package across
+  repos) and stops there.
 - **Mass-corpus crawling or bulk-scan modes.** glia analyses only the repos you point it at. It does not
   fetch, crawl or batch-scan code it was not given (`glia merge` takes repos already on disk).
 - **Lists of routes that reach data without authentication.** Whatever the intent of the person

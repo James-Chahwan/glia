@@ -27,5 +27,5 @@
   ],
   "expect_cells": [],
   "forbid": [],
-  "note": "Rails ActiveSupport::Notifications.instrument / .subscribe || CF.6b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=1/2 literal=1/2 route=0/1 forbid=0/0) via=eventbus. Predicted extractor gap (backlog, not fixed by the probe): handler fires (`ActiveSupport::Notifications.subscribe(\"x\")`); the emitter verb `.instrument(\"x\", ..)` is not in parsers/code/extractors/src/eventbus.rs EMITTER_PATTERNS."
+  "note": "Rails ActiveSupport::Notifications.instrument / .subscribe || CF.6b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=1/2 literal=1/2 route=0/1 forbid=0/0) via=eventbus. Predicted extractor gap (backlog, not fixed by the probe): handler fires (`ActiveSupport::Notifications.subscribe(\"x\")`); the emitter verb `.instrument(\"x\", ..)` is not in parsers/code/extractors/src/eventbus.rs EMITTER_PATTERNS. || DH.7 (0.5.2): FULL. EMITTER_PATTERNS gained `.instrument(` gated on a bus-shaped receiver, so `ActiveSupport::Notifications.instrument(\"order.placed\", ..)` emits and pairs with the `.subscribe(` handler; the gap above is closed."
 }

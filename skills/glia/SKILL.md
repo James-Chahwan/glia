@@ -1,6 +1,6 @@
 ---
 name: glia
-description: Answer structural questions about a codebase with the glia CLI, no MCP server needed. Use it for where X is defined, what changing X (or a diff) affects, how feature Y flows across services, what calls, serves or implements X, what X writes or sends, which tests cover a change, what a change did to the graph, a PR review of a change, whether a change breaks an API client, what usually changes with a change, the context for a task packed to a token budget, and where the churning, load-bearing or tightly coupled code is. Reach for it before grep when the question is about structure, not text.
+description: Answer structural questions about a codebase with the glia CLI, no MCP server needed. Use it for where X is defined, what changing X (or a diff) affects, how feature Y flows across services, what calls, serves or implements X, what X writes or sends, which tests cover a change, what a change did to the graph, a PR review of a change, whether a change breaks an API client, what usually changes with a change, the context for a task packed to a token budget, where the churning, load-bearing or tightly coupled code is, what is one thing across repos, and any structural question a Datalog or GQL query can ask. Reach for it before grep when the question is about structure, not text.
 ---
 
 # glia from the command line
@@ -34,6 +34,8 @@ glia parses a repo into one cross-language graph and answers questions from it. 
 | What changes often and has much depending on it? | `glia hotspots <repo> --json` |
 | What are the tightly coupled clusters? | `glia communities <repo> --json` |
 | What carries the most load: utilities, orchestrators, cross-service connectors? | `glia hubs <repo> --json` |
+| A structural question no command answers (every route with no handler, every call from `web/` into `api/`)? | `glia query <repo> -e '<datalog>' --json`, `glia query <repo> --gql -e "MATCH ..." --json` |
+| Which packages, messages or contract ops are one thing across these repos, and which copies diverged? | `glia identity <repo> --with <other> --json` |
 | Where is glia blind in this repo? | `glia coverage <repo> --json` |
 | What could glia not pair? What looks dead? | `glia gaps <repo> --json` |
 | Which docs govern X? | `glia docs-for <repo> X --json` |
@@ -51,6 +53,7 @@ The rest of the CLI:
 - `glia duplicate-flows <repo>`: entry points whose flows reach the same nodes (an aliased route, a v1 / v2 pair, copies drifting apart).
 - `glia timeline build <repo>`, then `glia timeline history <repo> <qname>`: when each edge of a node appeared and went, over the last 20 commits.
 - `glia scip import <repo> <index.scip>`: load a compiler-grade SCIP index; the next answer reads its references as FACT-tier CALLS / USES / IMPLEMENTS / INHERITS_FROM.
+- `glia watch <repo>`: keep the build open in the foreground and print one NDJSON line per change saying what it did to the graph (a ready line first); it rewrites `<repo>/.glia/graph/` on exit and every 60 s. For a long session, not for one question.
 
 `glia <command> --help` lists every flag.
 
@@ -58,6 +61,7 @@ Flags most commands share:
 - `--with <repo>` (repeatable) merges more repos in, so links pair across them. With one service per repo, pass the others this way. Each row's file stays relative to its own repo's root.
 - `--scope <path-or-label>` narrows the answer within a repo.
 - The ranked walks also take `--top-k`, `--depth` and `--direction forward|backward|both`.
+- `--no-collapse` (on `find`, `blast-radius`, `trace`, `flows`, `tests-for`, `serves` and `arch`) shows one row per copy instead of one per identity class.
 
 ## Reading an answer
 
@@ -66,10 +70,11 @@ Flags most commands share:
 - **Tier.** `tier` is `fact` (declared in the source), `derived` (inferred by a resolver, e.g. a client URL paired to a route) or `heuristic` (paired by name). Case varies by command. Weigh the answer by it.
 - **Empty answers.** An empty answer is not "nothing exists". It carries `absence: {tier, reason, note, caveats, suggestions}`. Each caveat names an edge kind glia is known to miss (`edge_category`, `language`), how many it did find (`edges_found`) and what to grep instead (`verify`).
 - **Blind spots.** `glia coverage <repo> --json` lists the same caveats for the whole repo. Run it once before trusting "not found".
+- **Identity.** With `--with`, one package, message, contract op or SCIP symbol that several repos hold is one row, its best copy, with `identity: {tier, rules, diverged, also_in}`. `also_in` lists the other copies with their `repo`, `qname`, `file` and `line`, and `diverged: true` means the copies differ (a message's fields, say). Vendored copies are `heuristic` candidates in `glia identity` and are never folded.
 - **External sinks.** A call whose every site dials a public host outside the build (`fetch("https://nominatim.openstreetmap.org/search?…")`) is an ENDPOINT marked external, never paired with a route. `effects` rows name the host in `external_hosts`; the table's downstream cell reads `external: <host>`. `serves "GET /search" --json` lists it after any route, `"kind":"ENDPOINT","match":"external"`, so the channel is answered, not absent. `external_hosts` is `[]` on every other row. Such a call is real traffic, not a gap.
 - **Docs.** `docs-for` and the `DOCUMENTS` edges read only the markdown the build ingests. That is the well-known files (`README*.md`, `CLAUDE.md`, ...) and the `docs/` tree at the repo root and at every project root, a top-level `.ai/` tree, ADR directories, SDD feature docs (`features/<feature>/*.md`, spec-kit `specs/<NNN-slug>/`) and synced docs (`glia docs sync`). A section documents a symbol only when it names it in single backticks. A README inside a source directory is not read. `glia coverage` states this as a `DOCUMENTS` row.
 - **Dead symbols.** A `gaps` `dead_symbol` row is a function, method or class with no entry point reaching it and no incoming call or use. A method that IMPLEMENTS a called method (an interface method, an abstract member) is never one: dispatch reaches it.
-- **Exit codes.** 0 for any answer, empty included, except: `pack`, `hotspots`, `hubs`, `cochange` and `splits` exit 1 when the answer is empty. `why` exits 1 when no edge joins the two nodes (it still prints a witness path). `check` exits 1 on a violation, `review` when the change adds one, and `contract-breaks` when a change is breaking or leaves a client with no provider. `blast-radius` exits 3 when no seed resolved. 2 means a usage, git or build error, or a rule `check` could not evaluate.
+- **Exit codes.** 0 for any answer, empty included, except: `pack`, `hotspots`, `hubs`, `cochange`, `splits`, `query` and `identity` exit 1 when the answer is empty. `why` exits 1 when no edge joins the two nodes (it still prints a witness path). `check` exits 1 on a BLOCKING violation: one whose tier is at least its rule's `min_tier` (default `derived`). A `heuristic` violation never blocks; it is listed as advisory. `review` exits 1 when the change adds a blocking violation, and `contract-breaks` when a change is breaking or leaves a client with no provider. `blast-radius` exits 3 when no seed resolved. 2 means a usage, git or build error, a query that does not parse or analyse, or a rule `check` could not evaluate.
 
 ## Cost, and what gets written
 
@@ -79,6 +84,7 @@ Flags most commands share:
 - `flows --features` without `--json` writes `<repo>/.glia/graph/flows/`.
 - `glia history sync` writes `<repo>/.glia/history-snapshot/`. `glia timeline build` writes `<repo>/.glia/graph/timeline.gmap`, and `timeline history` rebuilds and rewrites a stale `.glia/graph/` layout.
 - `glia build <repo>` writes the `.glia/graph/` layout that the MCP server and Python bindings load. The CLI does not need it.
+- `glia watch <repo>` writes the same layout and the parse cache on exit and every `--persist-every` seconds (60 by default). It does not read `GLIA_NO_PERSIST`: writing the layout is what it is for, so never run it on a repo you must not write to.
 - **`GLIA_NO_PERSIST=1`** is for probing a repo you must not write to: set it on every call. It stops glia rewriting a stale layout (`glia merge --gmap`, `timeline history`) and `timeline build` writing its sidecar. It does not stop the parse cache, the flows files or the history snapshot above. On such a repo, use the `--diff` forms and `flows --features --json` instead: `git -C <repo> diff | GLIA_NO_PERSIST=1 glia diff-impact <repo> --diff - --json`.
 
 ## Worked examples
@@ -89,6 +95,7 @@ Every example below was run from the root of the repo its comment names. Most ar
 - `loop`: `orders/` emits `order.placed`, `billing/` handles it and emits `payment.settled`, and `orders/` handles that. The change adds `audit()` to `billing/billing.ts` and calls it from `settle()`.
 - `orders-proto`: `proto/orders.proto` declares `message OrderCreated { string order_id = 1; int64 total_cents = 2; repeated string sku = 3; }` on `main`. The change makes `total_cents` a `string` and adds `string currency = 4`.
 - `shop`: a Python git repo whose `orders/service.py` and `orders/models.py` changed together in all five of their commits, and `util/money.py` together with `billing/charge.py` in three of its four. `glia history sync . --blame` has been run.
+- `identity-proto-diverged`: `orders/`, `billing/` and `shipping/` each hold `proto/orders.proto` with `message OrderCreated`; shipping's copy has an extra field.
 
 ```bash
 # arch-monorepo-flows: api/ gateway/ web/ worker/ in one repo; one service per top-level dir
@@ -178,7 +185,7 @@ glia delta . --json
  "nodes":[{"change":"added","qname":"billing::billing::audit","kind":"FUNCTION","file":"billing/billing.ts","line":5,…},…],
  "edges":[{"change":"added","from_qname":"billing::billing::settle","to_qname":"billing::billing::audit","category":"CALLS","site_file":"billing/billing.ts","site_line":4,…},…]}
 
-# loop, with the audit() change uncommitted; without --json it prints markdown for a PR comment; "blocking" is true (exit 1) only when the change adds a rule violation
+# loop, with the audit() change uncommitted; without --json it prints markdown for a PR comment; "blocking" is true (exit 1) only when the change adds a blocking rule violation
 glia review . --base main --json
 {"base":"main","counts":{"nodes_changed":3,"seeds":2,"edges_added":2,"edges_removed":0,"impact":8,"tests":0,"untested_seeds":2,"new_violations":0,"resolved_violations":0,"edges_by_tier":{"fact":2}},
  "changed":[{"qname":"billing::billing::audit","kind":"FUNCTION","file":"billing/billing.ts","line":5,"change":"added","seed":true},…],"impact":{"seeds":[…],…,"results":[…],…},
@@ -206,12 +213,16 @@ glia cycles . --json
 # a repo with web/ and services/api/ (a pyproject.toml each) whose web/app.py imports and calls services/api/internal.py;
 # .glia/overlay.toml has a [[constraint]] kind = "forbid_edge" from "web" to "services/api", categories IMPORTS + CALLS; exit 1
 glia check . --json
-{"rules":1,"checked":1,"unchecked":[],"errors":[],"violations":[{"rule_id":"web-no-api-internals","rule_kind":"forbid_edge","decl":".glia/overlay.toml:3","severity":"VIOLATION","tier":"fact","count":2,
+{"rules":1,"checked":1,"unchecked":[],"errors":[],"violations":[{"rule_id":"web-no-api-internals","rule_kind":"forbid_edge","decl":".glia/overlay.toml:3","severity":"VIOLATION","tier":"fact","blocking":true,"count":2,
   "evidence":[{"from_qname":"web::app","to_qname":"services::api::internal","category":"IMPORTS","file":"web/app.py","line":1,"emitter":"graph:imports",…},…]}],"reflexion":null}
 # The same file can declare a reflexion model: [[component]] stanzas (a name and its paths), [[layer]] stanzas ranking them top
 # first, and [[constraint]] kind = "allow" from one component to another. check then judges every dependency between two
 # components: a convergence, a divergence (a violation, exit 1), or an absence (an allow no edge realises, with caveats).
 # The table output prints this as a `## reflexion model` section; --json puts it under "reflexion" (matrix, absences, unmapped).
+# With version = 2 a [[constraint]] can also take transitive = true (a path through any third scope counts; via = [..] names
+# allowed facades), kind = "invariant" with a Datalog rule = '...' whose violation/N rows are its violations, and
+# min_tier = "fact" | "derived" (default derived): a violation weaker than min_tier, and every heuristic one, is listed as
+# advisory and leaves the exit code at 0. The stderr line `[check] gate blocking=<b> advisory=<a>` counts them.
 
 # xcut-flag-read-fn: svc/checkout.py reads LaunchDarkly flags, new-checkout inside checkout() and promo-banner at module scope
 glia flags . --json
@@ -247,6 +258,30 @@ glia coverage . --json
  {"language":"*","edge_category":"DOCUMENTS","note":"repo markdown is ingested only from: the well-known files (README*.md, …) at the repo root and at each PROJECT root, a docs/ tree at the repo root or at a PROJECT root, a top-level .ai/ tree, ADR directories (…), SDD feature docs (…) and synced external docs (`glia docs sync`); … A doc section DOCUMENTS a symbol only when it names it in a single-backtick span …",…,"edges_found":0},…,
  {"language":"go","edge_category":"IMPLEMENTS","note":"implicit interface satisfaction is inferred (Medium, DERIVED) from method names and, where the parser read both, signatures (parameter and result types, with a type alias declared in the repo resolved through the method's package and imports; …); a one-method interface pairs only across an import path (…), and a pair with a side in a _test.go file only when that test file imports the other side's package directly (or both share a package); …; methods promoted through embedded fields count (…); …","verify":"check the method signatures and receivers against the interface","edges_found":0},…]
 
+# xstack-go-http; Datalog from -e (or a file, or stdin): the routes and their handlers. Without --json, one table per output
+glia query . -e 'served(r, h) :- handles(r, h), node(r, "ROUTE").' --json
+{"language":"datalog","outputs":[{"predicate":"served","arity":2,"columns":["r","h"],"total":1,"shown":1}],
+ "results":[{"predicate":"served","values":[{"node":{"qname":"GET /users","kind":"ROUTE","file":"server/main.go","line":13}},
+                                            {"node":{"qname":"server::main::listUsers","kind":"FUNCTION","file":"server/main.go","line":9}}],"tier":"fact","file":"server/main.go","line":13}],"absence":null}
+# a negation reads an absence, so its rows carry the coverage caveats of what it negated
+glia query . -e 'uncalled(f) :- node(f, "FUNCTION"), !calls(_, f).' --json
+{…,"results":[{"predicate":"uncalled","values":[{"node":{"qname":"client::client::FetchUsers",…,"line":8}}],"tier":"fact",…,
+  "caveats":[{"language":"*","edge_category":"CALLS","note":"calls through reflection, dynamic dispatch, or higher-order indirection are not resolved",…}]},…],"absence":null}
+# the same evaluator behind a GQL read query; the client-to-route hop is resolver-paired, so the row is derived
+glia query . --gql -e 'MATCH (f:FUNCTION)-[:CALLS]->(e:ENDPOINT)-[:HTTP_CALLS]->(r:ROUTE) RETURN f, r' --json
+{"language":"gql","outputs":[{"predicate":"result","arity":2,"columns":["f","r"],"total":1,"shown":1}],
+ "results":[{"predicate":"result","values":[{"node":{"qname":"client::client::FetchUsers","kind":"FUNCTION","file":"client/client.go","line":8}},
+                                             {"node":{"qname":"GET /users","kind":"ROUTE","file":"server/main.go","line":13}}],"tier":"derived",…}],"absence":null}
+# The predicates (node, edge, qname, file, in_scope, reaches, ...), the prelude (handles, calls, unreached, effect, ...) and the GQL subset:
+# https://github.com/James-Chahwan/glia/blob/main/docs/rules.md. A query that matches nothing exits 1 with the absence.
+
+# identity-proto-diverged; one message in three repos is one class; variant 1 is shipping's copy with the extra field
+glia identity orders --with billing --with shipping --json
+{"counts":{"classes":1,"members":3,"fact":1,"derived":0,"heuristic":0,"diverged":1,"by_rule":[["package_name",0],["manifest_name",0],["message_fqname",1],…]},
+ "classes":[{"key":"message:proto:shop.v1.OrderCreated","tier":"fact","rules":["message_fqname"],"collapses":true,"walks":true,"diverged":true,"variants":2,
+             "members":[{"repo":"orders","qname":"message:proto:shop.v1.OrderCreated","kind":"MESSAGE_TYPE","file":"proto/orders.proto","line":5,"variant":0},
+                        {"repo":"billing",…,"variant":0},{"repo":"shipping",…,"variant":1}]}],"omitted":0,"absence":null}
+
 # xstack-go-http; "suggest" names the .glia/overlay.toml section that could repair the row
 glia gaps . --json
 {"counts":{"dead_symbol":1,"unpaired_endpoint":0,"tag_only_queue":0,…},"skipped":[],
@@ -257,7 +292,7 @@ glia docs-for . list_orders --json
 {"results":[{"qname":"docs::doc::adr::0001-use-flask-for-orders::decision","kind":"DOC_SECTION","file":"doc/adr/0001-use-flask-for-orders.md","line":11,…}],"absence":null}
 ```
 
-Declaring rules, edges glia misses and extra entry points in `.glia/overlay.toml`: https://github.com/James-Chahwan/glia/blob/main/docs/overlay.md. Test code in a directory glia does not know as a test path (`playwright/`, `qa/`) is declared there with `[walk] tests`; the `glia-overlay` skill covers it and the rest of the overlay loop.
+Declaring rules, edges glia misses and extra entry points in `.glia/overlay.toml`: https://github.com/James-Chahwan/glia/blob/main/docs/overlay.md. The Datalog a `rule` or `glia query` takes, the prelude of named concepts and the GQL subset: https://github.com/James-Chahwan/glia/blob/main/docs/rules.md. Test code in a directory glia does not know as a test path (`playwright/`, `qa/`) is declared there with `[walk] tests`; the `glia-overlay` skill covers it and the rest of the overlay loop.
 
 ## Install
 

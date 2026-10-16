@@ -300,7 +300,7 @@ fn a_pre_existing_violation_exits_0() {
     assert_eq!(
         check.status.code(),
         Some(1),
-        "check fails on any violation\n{}",
+        "check fails on a blocking violation (this one is fact)\n{}",
         show(&check)
     );
 }

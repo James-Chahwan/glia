@@ -7,7 +7,7 @@
 //! each caller, and the synth passes as separate bins that reloaded the graph.
 //! A plan borrows the hooks and runs them in one fixed order:
 //!
-//! 1. PPR over `g.node_ids()` / `g.edges()` ([`crate::ppr_vector`]);
+//! 1. PPR over `g.node_ids()` / `g.edges()` (the crate's power-iteration PPR);
 //! 2. [`DegreeSpecificity`] over the whole score vector, when
 //!    `config.node_specificity` is not [`Specificity::None`];
 //! 3. the universe: every node with a score above 0 ([`ActivationPlan::run`]),

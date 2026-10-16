@@ -573,8 +573,8 @@ pub enum ConstraintKind {
     /// No edge from a node in scope `from` to a node in scope `to`. With
     /// `transitive` (overlay version 2, DB.1), no path either: a path through
     /// any third scope counts, except one that enters `to` through a `via`
-    /// facade scope (resolved paths, like `from` / `to`). Evaluated by DB.3b;
-    /// until then the checker lists a transitive rule as unchecked.
+    /// facade scope (resolved paths, like `from` / `to`). A transitive rule is
+    /// evaluated as `forbid_path` violations by `engine::check` (DB.3b).
     ForbidEdge { from: String, to: String, transitive: bool, via: Vec<String> },
     /// No cycle among the nodes in `scope` (`None` = the whole graph).
     NoCycle { scope: Option<String> },

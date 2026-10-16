@@ -1,7 +1,7 @@
 //! Evaluation::explain (DA.15): a row's minimal-height derivation at its tier, as a
 //! [`Witness`] tree, after Souffle's provenance (Zhao, Subotic, Scholz, TOPLAS 2020).
-//! Every derived row records the (rule, height) of the first derivation at its level
-//! (DA.14b). A proof is found by searching over those records. Nothing is evaluated
+//! Every derived row records the (rule, height) of its lowest-height derivation at its
+//! level (eval.rs, "Minimal heights"). A proof is found by searching over those records. Nothing is evaluated
 //! again.
 //!
 //! **The search.** A row of rule R with height H at level L is explained by

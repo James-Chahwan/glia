@@ -61,7 +61,12 @@ cmpop    := '=' | '!=' | '<>' | '<' | '<=' | '>' | '>='
   Rows are sets, so `count` counts distinct values.
 - Comments run `//` to the end of the line, or `/* ... */` (not nested).
 - A 0-arity atom takes parentheses in a body (`done()`); a 0-arity head may be bare (`ok.`).
-- Two-character operators lex greedily, so `<-` is one token: write `a < -1`, never `a<-1`.
+- Two-character operators lex greedily, so `<-` is one token: write `a < -1`, never `a<-1`
+  (and `{n: -1}`, never `{n:-1}`, in GQL).
+- Identifiers are ASCII (letters, digits, `_`); a non-ASCII letter outside a string is an
+  `unexpected character` error. A string constant may hold any UTF-8.
+- A line ends at `\n` (a `\r\n` pair counts once); a lone `\r` is not a line break, so it
+  does not end a `//` comment or move a diagnostic's line.
 
 ## The schema
 

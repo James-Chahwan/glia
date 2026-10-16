@@ -143,9 +143,10 @@
 //! numbers; the same script on a pre-CA build (2170ff8) reads 0 of 3 repos
 //! judged, the numbers LE.7a's module docs started from. The promotion is a
 //! rename, never a change of verdict: the report is the 0.5.0 one without its
-//! `experimental` key. The surfaces keep the pre-promotion spellings until
-//! 0.5.2: `glia patterns --experimental` (hidden, prints a note) and the
-//! pyo3 `_experimental` names (DeprecationWarning aliases).
+//! `experimental` key. The pre-promotion spellings, `glia patterns
+//! --experimental` (hidden, printed a note) and the pyo3 `_experimental`
+//! names (DeprecationWarning aliases), were kept through 0.5.1 and removed in
+//! 0.5.2 (DE.11).
 //!
 //! # Security
 //!

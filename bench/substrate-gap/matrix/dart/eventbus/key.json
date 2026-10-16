@@ -27,5 +27,5 @@
   ],
   "expect_cells": [],
   "forbid": [],
-  "note": "package:event_bus: typed on<T>() / fire(T) || CF.10c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): package:event_bus `eventBus.fire(OrderPlaced(..))` / `eventBus.on<OrderPlaced>()`: typed; `fire(` is not an emitter verb in parsers/code/extractors/src/eventbus.rs."
+  "note": "package:event_bus: typed on<T>() / fire(T) || CF.10c baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): NONE (extract=0/2 literal=0/2 route=0/1 forbid=0/0) via=None. Predicted extractor gap (backlog, not fixed by the probe): package:event_bus `eventBus.fire(OrderPlaced(..))` / `eventBus.on<OrderPlaced>()`: typed; `fire(` is not an emitter verb in parsers/code/extractors/src/eventbus.rs. || DH.7 (0.5.2): FULL. package:event_bus is a typed framework bus: `fire(X(..))` emits and `on<X>()` handles, named by the event class; the gap above is closed."
 }
