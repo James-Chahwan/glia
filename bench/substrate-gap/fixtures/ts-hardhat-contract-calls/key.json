@@ -1,0 +1,133 @@
+{
+  "framework": "ts-hardhat-contract-calls",
+  "language": "typescript",
+  "dirs": [
+    "contracts"
+  ],
+  "note": "DT.10d (T10; Kina EscrowManager.test.js / provision_demo_wallets.js shapes). HEAD ad52b2eb (W20 wheel, DT.10c + DT.10i landed): no RPC_CALL from these files, settle.ts counts one dynamic construction; grade.py nodes 0/6, edges 0/7, cells 0/2.",
+  "expect_nodes": [
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.deposit",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.deposits",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.release",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Token.mint",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Token.approve",
+      "exact": true,
+      "note": "minted, never paired: not_declared"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:token.mint",
+      "exact": true
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "evm_call:Escrow.deposit",
+      "to": "evm:Escrow.deposit",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:Escrow.deposits",
+      "to": "evm:Escrow.deposits",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:Escrow.release",
+      "to": "evm:Escrow.release",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:Token.mint",
+      "to": "evm:Token.mint",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "scripts::settle::settle",
+      "to": "evm_call:Escrow.release",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "scripts::settle::settleByArtifact",
+      "to": "evm_call:Escrow.release",
+      "category": "USES",
+      "exact": true
+    },
+    {
+      "from": "scripts::settle::topUp",
+      "to": "evm_call:abi:token.mint",
+      "category": "USES",
+      "exact": true
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "RPC_CALL",
+      "node": "evm_call:Escrow.release",
+      "cell": "ENDPOINT_HIT",
+      "contains": "\"lib\":\"typechain\""
+    },
+    {
+      "kind": "RPC_CALL",
+      "node": "evm_call:Escrow.release",
+      "cell": "ENDPOINT_HIT",
+      "contains": "\"lib\":\"ethers\""
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.connect"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Escrow.getAddress"
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:Token.waitForDeployment"
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "evm_event:Escrow.Released",
+      "note": "chai .to.emit is an assertion, not a subscription"
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "evm:Token.approve",
+      "note": "inherited from OpenZeppelin: no procedure"
+    },
+    {
+      "from": "evm_call:abi:token.mint",
+      "to": "evm:Token.mint",
+      "category": "RPC_CALLS",
+      "note": "PRECISION: the inline ABI lists balanceOf, which Token only inherits from out of the repo"
+    },
+    {
+      "kind": "RPC_CALL",
+      "max_nodes": 7
+    }
+  ]
+}

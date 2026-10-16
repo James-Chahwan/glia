@@ -1,0 +1,1 @@
+{ "name": "escrow-contracts", "private": true, "devDependencies": { "hardhat": "2.22.2", "@nomicfoundation/hardhat-toolbox": "5.0.0" } }

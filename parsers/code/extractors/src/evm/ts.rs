@@ -1,8 +1,12 @@
-//! The TypeScript / JavaScript ethers client reader (DT.10c, DT.10i).
+//! The TypeScript / JavaScript ethers client reader (DT.10c, DT.10i), with the
+//! hardhat, TypeChain and artifact bindings that name the contract (DT.10d,
+//! step 7).
 //!
 //! 1. **Gate.** The file imports or requires `ethers` (`ethers/..` and an
-//!    `@ethersproject/` path too) or `hardhat` (whose `ethers` is ethers);
-//!    otherwise nothing is read, so a local `class Contract` mints nothing.
+//!    `@ethersproject/` path too), `hardhat` (whose `ethers` is ethers) or a
+//!    TypeChain output path (a `typechain` / `typechain-types` segment), or
+//!    holds a TypeChain `<C>__factory` identifier; otherwise nothing is read,
+//!    so a local `class Contract` mints nothing.
 //! 2. **ABI bindings.** `(export )?(const|let|var) <N>(: T)? = <abi literal>`
 //!    at any depth, read by `abi::read_abi`. A binding whose literal does not
 //!    read is no ABI. An ABI binding is visible file-wide (the nearest one
@@ -17,13 +21,16 @@
 //!      `this.<x>`.
 //!
 //!    The ABI argument (an identifier may carry a TS `!` or `as T`): an
-//!    identifier with an ABI binding is `Scope::Abi(<identifier>)` with its
-//!    entries; any other identifier (an import) `Scope::Abi(<identifier>)`
-//!    with no entries; an inline literal that reads `Scope::Abi(<x>)` with its
-//!    entries; anything else (a call, a member path) binds nothing and counts
-//!    `dynamic`. A rebinding `<y> = R.connect(..)` / `R.attach(..)` (any of
-//!    the binding forms above, on a bound receiver `R`) binds `y` to R's
-//!    scope and entries.
+//!    artifact import `<A>` or `<A>.abi` (step 7) is `Scope::Contract(<C>)`;
+//!    a TypeChain `<C>__factory.abi` is `Scope::Contract(<C>)`; an identifier
+//!    with an ABI binding is `Scope::Abi(<identifier>)` with its entries; any
+//!    other identifier (an import) `Scope::Abi(<identifier>)` with no
+//!    entries, and so is `<J>.abi` for any other `.json` import `J`; an
+//!    inline literal that reads `Scope::Abi(<x>)` with its entries; anything
+//!    else (a call, a member path) binds nothing and counts `dynamic`. A
+//!    rebinding `<y> = R.connect(..)` / `R.attach(..)` (any of the binding
+//!    forms above, on a bound receiver `R`) binds `y` to R's scope, entries
+//!    and library.
 //! 4. **Scope.** A `const` / `let` binding is visible from the end of its
 //!    initializer to the end of its innermost enclosing block; a `var`
 //!    binding file-wide. A bare assignment binds in the block of the nearest
@@ -53,7 +60,8 @@
 //!    applies to the member after the chain: `R.connect(s).getAddress()` is
 //!    none). With ABI entries known, a member that is no function of them
 //!    mints nothing and counts `not_in_abi`. `args` is the depth-0 argument
-//!    count of the final call; `lib` is `ethers`. A non-literal element key
+//!    count of the final call; `lib` is the binding's (`ethers`, or step
+//!    7's `hardhat` / `typechain`). A non-literal element key
 //!    `R[name](` is no site and counts `dynamic`. A chain on an unbound
 //!    receiver is not read.
 //! 6. **Event sites** on `R`: `R.(on|once|addListener|queryFilter)('<E>'` (a
@@ -61,6 +69,36 @@
 //!    (so `R.on(R.filters.E(), ..)` and `R.queryFilter(R.filters.E(), ..)`
 //!    are one site each, at the filter). With entries known, only an event
 //!    of them.
+//! 7. **Contract-naming bindings (DT.10d).** Each is an ethers contract, so
+//!    steps 3-6 read it (links, rebinding, every call form, the stop list):
+//!    - hardhat (lib `hardhat`), on `ethers` or `<x>.ethers` (`hre.ethers`):
+//!      `getContractFactory('<C>', ..)` binds a FACTORY (any binding form of
+//!      step 3, scoped as step 4); `getContractAt('<C>', ..)` and
+//!      `deployContract('<C>', ..)` bind `Scope::Contract(<C>)`;
+//!      `getContractAt(<abi>, ..)` reads its first argument as a `new
+//!      Contract` ABI argument (an inline literal binds `Scope::Abi(<x>)`
+//!      with its entries and counts in `abis`). A fully qualified name
+//!      `'contracts/E.sol:C'` names `C`.
+//!    - TypeChain (lib `typechain`): `<C>__factory.connect(<addr>,
+//!      <runner>)`, bound or chained (`.<m>(` straight after), is
+//!      `Scope::Contract(<C>)`; `new <C>__factory(<signer>)` is a FACTORY,
+//!      bound or used inline.
+//!    - A factory `F` (bound or inline, after any `.connect(..)` links, which
+//!      keep it a factory): `F.deploy(..)` and `F.attach(..)` bind
+//!      `Scope::Contract(<C>)` with F's library, and so do OpenZeppelin
+//!      `upgrades.deployProxy(F, ..)` and `upgrades.upgradeProxy(<proxy>, F,
+//!      ..)`. Only `attach` (and TypeChain's `connect`) returns the contract
+//!      itself, so only they are read chained; the others return a promise.
+//!    - Artifact imports: `import <A> from '<..>/<File>.sol/<C>.json'`,
+//!      `import * as <A>`, `import { abi as <A> }` / `{ abi }`, `const <A> =
+//!      require('..')` (and `require('..').abi`), `const { abi(: <A>)? } =
+//!      require('..')`, the hardhat `artifacts/contracts/` and foundry `out/`
+//!      layouts alike. Any other `.json` import is an ABI of unknown entries.
+//!      Imports are file-wide.
+//!
+//!    Not read (DT.10h): a chai `expect(tx).to.emit(R, 'E')` (an assertion:
+//!    `R` is an argument, no access follows it), `hre.artifacts.readArtifact`
+//!    and a TypeChain type annotation alone (`const e: Escrow = ..`).
 
 use std::collections::BTreeSet;
 
@@ -73,8 +111,24 @@ use super::scan::{
     skip_ws, split_args, string_literal, trim, word_hits,
 };
 
-/// The client library every site of this reader names.
+/// The client library of a `new Contract` site (steps 3 and 5).
 const LIB: &str = "ethers";
+
+/// The client library of a hardhat-ethers helper's site (step 7).
+const HARDHAT: &str = "hardhat";
+
+/// The client library of a TypeChain factory's site (step 7).
+const TYPECHAIN: &str = "typechain";
+
+/// The suffix of a TypeChain factory class: `Escrow__factory` (step 7).
+const FACTORY_SUFFIX: &str = "__factory";
+
+/// The hardhat-ethers helpers on `(<x>.)?ethers` (step 7).
+const HARDHAT_HELPERS: &[&str] = &["getContractFactory", "getContractAt", "deployContract"];
+
+/// OpenZeppelin `upgrades` helpers that take a factory, and the index of the
+/// argument that is the factory (step 7).
+const UPGRADES_HELPERS: &[(&str, usize)] = &[("deployProxy", 0), ("upgradeProxy", 1)];
 
 /// ethers `BaseContract` members and runtime methods: never an ABI call site,
 /// skipped before the ABI check and never counted.
@@ -198,12 +252,56 @@ struct Binding {
     name: String,
     scope: Scope,
     abi: Option<Vec<AbiEntry>>,
+    /// The client library its sites name (steps 5 and 7).
+    lib: &'static str,
     /// The end of its initializer: a site must come after it, unless
     /// `hoisted`.
     at: usize,
     block: (usize, usize),
     /// A `this.` binding, visible in its whole class body (step 4).
     hoisted: bool,
+}
+
+/// What [`scan`] reads every binding against.
+struct Ctx<'a> {
+    source: &'a str,
+    view: &'a str,
+    decls: &'a [Decl],
+    abis: &'a [AbiBinding],
+    imports: &'a [JsonImport],
+}
+
+/// One `.json` import or require (step 7): the name it binds and, for a
+/// hardhat / foundry artifact, the contract it holds.
+#[derive(Debug, PartialEq, Eq)]
+struct JsonImport {
+    name: String,
+    contract: Option<String>,
+}
+
+/// What an ABI argument names (steps 3 and 7).
+enum AbiRef {
+    /// A scope known at the argument: a contract, an ABI binding or import,
+    /// with the entries when they are known.
+    Named(Scope, Option<Vec<AbiEntry>>),
+    /// An inline literal: scoped by the variable it lands in.
+    Literal(Vec<AbiEntry>),
+    /// Nothing readable.
+    Dynamic,
+}
+
+/// An expression that gives a contract (steps 3 and 7): a construction, a
+/// factory product, a hardhat or TypeChain helper call.
+struct Made {
+    /// Its first byte, where [`binding_target`] reads the binding from.
+    start: usize,
+    /// Its final `)`.
+    close: usize,
+    abi: AbiRef,
+    lib: &'static str,
+    /// The expression is the contract itself, not a promise of one, so a
+    /// member call chained straight after it is a site.
+    sync: bool,
 }
 
 /// What a construction or rebinding binds (step 3).
@@ -216,6 +314,8 @@ struct Target {
 /// The ABI argument of a construction.
 enum AbiArg {
     Ident(String),
+    /// `<x>.abi`.
+    Member(String),
     Literal(Vec<AbiEntry>),
     Dynamic,
 }
@@ -276,6 +376,14 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
         })
         .collect();
     counts.abis = abis.len();
+    let imports = json_imports(source, view, &decls);
+    let ctx = Ctx {
+        source,
+        view,
+        decls: &decls,
+        abis: &abis,
+        imports: &imports,
+    };
 
     let mut bindings: Vec<Binding> = Vec::new();
     for new_at in word_hits(view, "new") {
@@ -285,55 +393,21 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
         let Some((open, close)) = construction(view, new_at) else {
             continue;
         };
-        let arg = abi_arg(source, view, &split_args(view, open, close));
-        // A chained call on the construction (step 5).
-        if let Some(access) = access(source, view, close + 1) {
-            if matches!(access, Access::Other) {
-                continue;
-            }
-            let AbiArg::Ident(name) = arg else {
-                counts.dynamic += 1;
-                continue;
-            };
-            let abi = abi_lookup(&abis, &name, new_at);
-            let chained = Binding {
-                name: String::new(),
-                scope: Scope::Abi(name),
-                abi,
-                at: close,
-                block: (0, vb.len()),
-                hoisted: false,
-            };
-            record(&mut sites, &mut counts, &chained, access);
-            continue;
-        }
-        let Some(target) = binding_target(view, &decls, new_at) else {
-            continue;
+        let arg = split_args(view, open, close).get(1).copied();
+        let made = Made {
+            start: new_at,
+            close,
+            abi: abi_ref(&ctx, abi_arg(source, view, arg), new_at),
+            lib: LIB,
+            sync: true,
         };
-        let (scope, abi) = match arg {
-            AbiArg::Ident(abi_name) => {
-                let abi = abi_lookup(&abis, &abi_name, new_at);
-                (Scope::Abi(abi_name), abi)
-            }
-            AbiArg::Literal(entries) => {
-                counts.abis += 1;
-                let base = target.key.rsplit(['.', '#']).next().unwrap_or_default();
-                (Scope::Abi(base.to_string()), Some(entries))
-            }
-            AbiArg::Dynamic => {
-                counts.dynamic += 1;
-                continue;
-            }
-        };
-        bindings.push(Binding {
-            name: target.key,
-            scope,
-            abi,
-            at: close,
-            block: target.block,
-            hoisted: target.hoisted,
-        });
+        bind_made(&ctx, made, &mut sites, &mut counts, &mut bindings);
     }
+    // Step 7: the bindings that name the contract.
+    let mut factories: Vec<Binding> = Vec::new();
+    hardhat_bindings(&ctx, &mut factories, &mut sites, &mut counts, &mut bindings);
+    typechain_bindings(&ctx, &mut factories, &mut sites, &mut counts, &mut bindings);
+    factory_products(&ctx, &factories, &mut sites, &mut counts, &mut bindings);
     rebind(source, view, &decls, &mut bindings);
 
     for receiver in keys(&bindings) {
@@ -351,10 +425,17 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, TsCounts) {
     (sites, counts)
 }
 
-/// Step 1: the file imports or requires an ethers or hardhat module.
+/// Step 1: the file imports or requires an ethers, hardhat or TypeChain
+/// module, or names a TypeChain factory.
 fn gated(source: &str, view: &str) -> bool {
-    if !source.contains("ethers") && !source.contains("hardhat") {
+    if !["ethers", "hardhat", "typechain", FACTORY_SUFFIX]
+        .iter()
+        .any(|needle| source.contains(needle))
+    {
         return false;
+    }
+    if !factory_idents(view).is_empty() {
+        return true;
     }
     let vb = view.as_bytes();
     for kw in ["from", "require", "import"] {
@@ -378,12 +459,16 @@ fn gated(source: &str, view: &str) -> bool {
     false
 }
 
-/// An import specifier that brings ethers in.
+/// An import specifier that brings ethers in: ethers itself, hardhat, or a
+/// TypeChain output directory (`../typechain-types`, `./typechain/..`).
 fn is_client_module(spec: &str) -> bool {
     spec == "ethers"
         || spec == "hardhat"
         || spec.starts_with("ethers/")
         || spec.starts_with("@ethersproject/")
+        || spec
+            .split('/')
+            .any(|seg| seg == "typechain" || seg == "typechain-types")
 }
 
 /// Every `const` / `let` / `var` declarator with a plain identifier name.
@@ -472,9 +557,10 @@ fn construction(view: &str, new_at: usize) -> Option<(usize, usize)> {
     Some((open, matching(view, open)?))
 }
 
-/// Classify a construction's second argument (step 3).
-fn abi_arg(source: &str, view: &str, args: &[(usize, usize)]) -> AbiArg {
-    let Some(&(s, e)) = args.get(1) else {
+/// Classify an ABI argument `arg` (a construction's second, a
+/// `getContractAt`'s first; steps 3 and 7).
+fn abi_arg(source: &str, view: &str, arg: Option<(usize, usize)>) -> AbiArg {
+    let Some((s, e)) = arg else {
         return AbiArg::Dynamic;
     };
     let vb = view.as_bytes();
@@ -484,17 +570,551 @@ fn abi_arg(source: &str, view: &str, args: &[(usize, usize)]) -> AbiArg {
     let Some(id_end) = ident_end(vb, s) else {
         return AbiArg::Dynamic;
     };
+    let mut rest = view[id_end..e].trim_start();
+    // `<x>.abi`: an artifact's or a TypeChain factory's ABI (step 7).
+    let mut member = false;
+    if let Some(after) = rest.strip_prefix('.') {
+        let after = after.trim_start();
+        match after.strip_prefix("abi") {
+            Some(tail) if !tail.bytes().next().is_some_and(is_ident_byte) => {
+                rest = tail.trim_start();
+                member = true;
+            }
+            _ => return AbiArg::Dynamic,
+        }
+    }
     // A TS non-null `!` or an `as T` cast keeps the identifier.
-    let rest = view[id_end..e].trim_start();
     let rest = rest.strip_prefix('!').unwrap_or(rest).trim_start();
     let cast = rest
         .strip_prefix("as")
         .is_some_and(|t| t.starts_with(char::is_whitespace));
-    if rest.is_empty() || cast {
-        AbiArg::Ident(view[s..id_end].to_string())
-    } else {
-        AbiArg::Dynamic
+    if !rest.is_empty() && !cast {
+        return AbiArg::Dynamic;
     }
+    let name = view[s..id_end].to_string();
+    if member {
+        AbiArg::Member(name)
+    } else {
+        AbiArg::Ident(name)
+    }
+}
+
+/// What ABI argument `arg`, used at `at`, names (steps 3 and 7).
+fn abi_ref(ctx: &Ctx, arg: AbiArg, at: usize) -> AbiRef {
+    let import = |name: &str| ctx.imports.iter().find(|i| i.name == name);
+    match arg {
+        AbiArg::Ident(name) => match import(&name).and_then(|i| i.contract.clone()) {
+            Some(contract) => AbiRef::Named(Scope::Contract(contract), None),
+            None => {
+                let abi = abi_lookup(ctx.abis, &name, at);
+                AbiRef::Named(Scope::Abi(name), abi)
+            }
+        },
+        AbiArg::Member(name) => {
+            if let Some(contract) = factory_contract(&name) {
+                return AbiRef::Named(Scope::Contract(contract.to_string()), None);
+            }
+            match import(&name) {
+                Some(JsonImport {
+                    contract: Some(contract),
+                    ..
+                }) => AbiRef::Named(Scope::Contract(contract.clone()), None),
+                Some(_) => AbiRef::Named(Scope::Abi(name), None),
+                None => AbiRef::Dynamic,
+            }
+        }
+        AbiArg::Literal(entries) => AbiRef::Literal(entries),
+        AbiArg::Dynamic => AbiRef::Dynamic,
+    }
+}
+
+/// Bind or read what `made` gives (steps 3, 5 and 7): a member access
+/// straight after a `sync` expression is a chained site on it (an inline
+/// literal or an unreadable ABI counts `dynamic` there); with nothing after
+/// it, the variable it lands in is a binding.
+fn bind_made(
+    ctx: &Ctx,
+    made: Made,
+    sites: &mut Vec<Site>,
+    counts: &mut TsCounts,
+    bindings: &mut Vec<Binding>,
+) {
+    if let Some(access) = access(ctx.source, ctx.view, made.close + 1) {
+        if !made.sync || matches!(access, Access::Other) {
+            return;
+        }
+        let AbiRef::Named(scope, abi) = made.abi else {
+            counts.dynamic += 1;
+            return;
+        };
+        let chained = Binding {
+            name: String::new(),
+            scope,
+            abi,
+            lib: made.lib,
+            at: made.close,
+            block: (0, ctx.view.len()),
+            hoisted: false,
+        };
+        record(sites, counts, &chained, access);
+        return;
+    }
+    let Some(target) = binding_target(ctx.view, ctx.decls, made.start) else {
+        return;
+    };
+    let (scope, abi) = match made.abi {
+        AbiRef::Named(scope, abi) => (scope, abi),
+        AbiRef::Literal(entries) => {
+            counts.abis += 1;
+            let base = target.key.rsplit(['.', '#']).next().unwrap_or_default();
+            (Scope::Abi(base.to_string()), Some(entries))
+        }
+        AbiRef::Dynamic => {
+            counts.dynamic += 1;
+            return;
+        }
+    };
+    bindings.push(Binding {
+        name: target.key,
+        scope,
+        abi,
+        lib: made.lib,
+        at: made.close,
+        block: target.block,
+        hoisted: target.hoisted,
+    });
+}
+
+/// Step 7, hardhat: `getContractFactory` factories, `getContractAt` and
+/// `deployContract` contracts on `(<x>.)?ethers`.
+fn hardhat_bindings(
+    ctx: &Ctx,
+    factories: &mut Vec<Binding>,
+    sites: &mut Vec<Site>,
+    counts: &mut TsCounts,
+    bindings: &mut Vec<Binding>,
+) {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    for &helper in HARDHAT_HELPERS {
+        for at in word_hits(view, helper) {
+            let Some(start) = member_of(view, at, "ethers") else {
+                continue;
+            };
+            let Some(open) = paren_after(vb, at + helper.len()) else {
+                continue;
+            };
+            let Some(close) = matching(view, open) else {
+                continue;
+            };
+            let first = split_args(view, open, close).first().copied();
+            let named = first.and_then(|(s, e)| contract_name(source, s, e));
+            let abi = match (helper, named) {
+                (_, Some(contract)) => AbiRef::Named(Scope::Contract(contract), None),
+                ("getContractAt", None) => abi_ref(ctx, abi_arg(source, view, first), at),
+                _ => continue,
+            };
+            if helper == "getContractFactory" {
+                if access(source, view, close + 1).is_some() {
+                    continue;
+                }
+                let (AbiRef::Named(scope, _), Some(target)) =
+                    (abi, binding_target(view, ctx.decls, start))
+                else {
+                    continue;
+                };
+                factories.push(Binding {
+                    name: target.key,
+                    scope,
+                    abi: None,
+                    lib: HARDHAT,
+                    at: close,
+                    block: target.block,
+                    hoisted: target.hoisted,
+                });
+                continue;
+            }
+            let made = Made {
+                start,
+                close,
+                abi,
+                lib: HARDHAT,
+                sync: false,
+            };
+            bind_made(ctx, made, sites, counts, bindings);
+        }
+    }
+}
+
+/// Step 7, TypeChain: `<C>__factory.connect(..)` contracts and `new
+/// <C>__factory(..)` factories (a product used inline is read here).
+fn typechain_bindings(
+    ctx: &Ctx,
+    factories: &mut Vec<Binding>,
+    sites: &mut Vec<Site>,
+    counts: &mut TsCounts,
+    bindings: &mut Vec<Binding>,
+) {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    for (at, end, contract) in factory_idents(view) {
+        let start = chain_start(view, at);
+        let new_at = prev_non_ws(vb, start)
+            .and_then(|p| ident_start_before(vb, p + 1))
+            .filter(|&w| view[w..start].trim_end() == "new");
+        if let Some(new_at) = new_at {
+            let Some(close) = paren_after(vb, end).and_then(|open| matching(view, open)) else {
+                continue;
+            };
+            let factory = Binding {
+                name: String::new(),
+                scope: Scope::Contract(contract),
+                abi: None,
+                lib: TYPECHAIN,
+                at: close,
+                block: (0, vb.len()),
+                hoisted: false,
+            };
+            if let Some(made) = product(ctx, &factory, new_at, close + 1) {
+                bind_made(ctx, made, sites, counts, bindings);
+                continue;
+            }
+            if access(source, view, close + 1).is_some() {
+                continue;
+            }
+            if let Some(target) = binding_target(view, ctx.decls, new_at) {
+                factories.push(Binding {
+                    name: target.key,
+                    block: target.block,
+                    hoisted: target.hoisted,
+                    ..factory
+                });
+            }
+            continue;
+        }
+        let Some(Step::Name {
+            name,
+            end: n_end,
+            dotted: true,
+            ..
+        }) = step(source, view, end)
+        else {
+            continue;
+        };
+        if name != "connect" {
+            continue;
+        }
+        let Some(close) = paren_after(vb, n_end).and_then(|open| matching(view, open)) else {
+            continue;
+        };
+        let made = Made {
+            start,
+            close,
+            abi: AbiRef::Named(Scope::Contract(contract), None),
+            lib: TYPECHAIN,
+            sync: true,
+        };
+        bind_made(ctx, made, sites, counts, bindings);
+    }
+}
+
+/// Step 7: what a bound factory gives, `F.deploy(..)` / `F.attach(..)` and
+/// `upgrades.deployProxy(F, ..)` / `upgrades.upgradeProxy(<proxy>, F, ..)`.
+fn factory_products(
+    ctx: &Ctx,
+    factories: &[Binding],
+    sites: &mut Vec<Site>,
+    counts: &mut TsCounts,
+    bindings: &mut Vec<Binding>,
+) {
+    let view = ctx.view;
+    let vb = view.as_bytes();
+    for key in keys(factories) {
+        for (start, end) in receiver_hits(view, &key) {
+            let Some(factory) = visible(factories, &key, start) else {
+                continue;
+            };
+            if let Some(made) = product(ctx, factory, start, end) {
+                bind_made(ctx, made, sites, counts, bindings);
+            }
+        }
+    }
+    for &(helper, index) in UPGRADES_HELPERS {
+        for at in word_hits(view, helper) {
+            let Some(start) = member_of(view, at, "upgrades") else {
+                continue;
+            };
+            let Some(open) = paren_after(vb, at + helper.len()) else {
+                continue;
+            };
+            let Some(close) = matching(view, open) else {
+                continue;
+            };
+            let Some(&(s, e)) = split_args(view, open, close).get(index) else {
+                continue;
+            };
+            if ident_end(vb, s) != Some(e) {
+                continue;
+            }
+            let Some(factory) = visible(factories, &view[s..e], s) else {
+                continue;
+            };
+            let made = Made {
+                start,
+                close,
+                abi: AbiRef::Named(factory.scope.clone(), None),
+                lib: factory.lib,
+                sync: false,
+            };
+            bind_made(ctx, made, sites, counts, bindings);
+        }
+    }
+}
+
+/// The contract a factory expression `[start, from)` gives through
+/// `.deploy(..)` (a promise) or `.attach(..)` (the contract), past any
+/// `.connect(..)` links, which keep a factory; `None` for anything else.
+fn product(ctx: &Ctx, factory: &Binding, start: usize, from: usize) -> Option<Made> {
+    let (source, view) = (ctx.source, ctx.view);
+    let vb = view.as_bytes();
+    let mut k = from;
+    loop {
+        let Step::Name {
+            name,
+            end,
+            dotted: true,
+            ..
+        } = step(source, view, k)?
+        else {
+            return None;
+        };
+        let close = matching(view, paren_after(vb, end)?)?;
+        match name.as_str() {
+            "connect" => k = close + 1,
+            "deploy" | "attach" => {
+                return Some(Made {
+                    start,
+                    close,
+                    abi: AbiRef::Named(factory.scope.clone(), None),
+                    lib: factory.lib,
+                    sync: name == "attach",
+                });
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The start of `(<x>.)*<object>.<member>` for the member named at `at`;
+/// `None` when the member is not read off an identifier `object`.
+fn member_of(view: &str, at: usize, object: &str) -> Option<usize> {
+    let vb = view.as_bytes();
+    let dot = prev_non_ws(vb, at).filter(|&d| vb[d] == b'.')?;
+    let o_end = prev_non_ws(vb, dot)? + 1;
+    let o_start = ident_start_before(vb, o_end)?;
+    (&view[o_start..o_end] == object).then(|| chain_start(view, o_start))
+}
+
+/// The start of the dotted identifier path ending with the identifier at
+/// `at`: `hre.ethers` from `ethers`, `types.Escrow__factory` from
+/// `Escrow__factory`.
+fn chain_start(view: &str, at: usize) -> usize {
+    let vb = view.as_bytes();
+    let mut start = at;
+    while let Some(dot) = prev_non_ws(vb, start)
+        && vb[dot] == b'.'
+        && let Some(e) = prev_non_ws(vb, dot)
+        && let Some(s) = ident_start_before(vb, e + 1)
+    {
+        start = s;
+    }
+    start
+}
+
+/// The contract a string argument `[s, e)` names: `'Escrow'`, or the last
+/// part of a fully qualified `'contracts/Escrow.sol:Escrow'`.
+fn contract_name(source: &str, s: usize, e: usize) -> Option<String> {
+    let (text, end) = string_literal(source, s)?;
+    if end != e {
+        return None;
+    }
+    let name = text.rsplit(':').next()?.trim();
+    is_ident(name).then(|| name.to_string())
+}
+
+/// The contract of a TypeChain factory identifier `<C>__factory`.
+fn factory_contract(ident: &str) -> Option<&str> {
+    ident
+        .strip_suffix(FACTORY_SUFFIX)
+        .filter(|contract| is_ident(contract))
+}
+
+/// Every TypeChain factory identifier of the view: its start, its end and
+/// the contract it names.
+fn factory_idents(view: &str) -> Vec<(usize, usize, String)> {
+    let vb = view.as_bytes();
+    view.match_indices(FACTORY_SUFFIX)
+        .filter_map(|(k, _)| {
+            let end = k + FACTORY_SUFFIX.len();
+            if vb.get(end).is_some_and(|&c| is_ident_byte(c)) {
+                return None;
+            }
+            let start = ident_start_before(vb, end)?;
+            let contract = factory_contract(&view[start..end])?;
+            Some((start, end, contract.to_string()))
+        })
+        .collect()
+}
+
+/// The contract a hardhat / foundry artifact path names:
+/// `<..>/<File>.sol/<C>.json` gives `C`.
+fn artifact_contract(spec: &str) -> Option<String> {
+    let mut parts = spec.rsplit('/');
+    let contract = parts.next()?.strip_suffix(".json")?;
+    let file = parts.next()?;
+    (file.len() > ".sol".len() && file.ends_with(".sol") && is_ident(contract))
+        .then(|| contract.to_string())
+}
+
+/// Every `.json` import and require of the file (step 7).
+fn json_imports(source: &str, view: &str, decls: &[Decl]) -> Vec<JsonImport> {
+    let vb = view.as_bytes();
+    let mut out = Vec::new();
+    let mut push = |name: &str, spec: &str| {
+        if is_ident(name) {
+            out.push(JsonImport {
+                name: name.to_string(),
+                contract: artifact_contract(spec),
+            });
+        }
+    };
+    for at in word_hits(view, "import") {
+        if at > 0 && vb[at - 1] == b'.' {
+            continue;
+        }
+        let Some((names, spec)) = import_clause(source, view, at + "import".len()) else {
+            continue;
+        };
+        if spec.ends_with(".json") {
+            for name in names {
+                push(&name, &spec);
+            }
+        }
+    }
+    for at in word_hits(view, "require") {
+        if at > 0 && vb[at - 1] == b'.' {
+            continue;
+        }
+        let Some(open) = paren_after(vb, at + "require".len()) else {
+            continue;
+        };
+        let q = skip_ws(vb, open + 1);
+        let Some((spec, _)) = string_literal(source, q).filter(|(s, _)| s.ends_with(".json"))
+        else {
+            continue;
+        };
+        if let Some(d) = decls.iter().find(|d| d.init == Some(at)) {
+            push(&d.name, &spec);
+        } else if let Some(name) = import_equals(view, at) {
+            push(name, &spec);
+        } else if let Some(names) = destructured_abi(view, at) {
+            for name in names {
+                push(&name, &spec);
+            }
+        }
+    }
+    out
+}
+
+/// TypeScript `import <A> = require(..)` with `require` at `at`: `A`.
+fn import_equals(view: &str, at: usize) -> Option<&str> {
+    let vb = view.as_bytes();
+    let eq = prev_non_ws(vb, at).filter(|&e| vb[e] == b'=')?;
+    let a_end = prev_non_ws(vb, eq)? + 1;
+    let a_start = ident_start_before(vb, a_end)?;
+    let kw_end = prev_non_ws(vb, a_start)? + 1;
+    let kw = ident_start_before(vb, kw_end)?;
+    (&view[kw..kw_end] == "import").then_some(&view[a_start..a_end])
+}
+
+/// The names an `import` clause starting at `from` binds that hold a JSON
+/// module's value or its `abi` (a default, a namespace, `{ abi as A }`,
+/// `{ abi }`, `{ default as A }`), and its specifier; `None` for a type-only
+/// import, a dynamic `import(..)` and a side-effect import.
+fn import_clause(source: &str, view: &str, from: usize) -> Option<(Vec<String>, String)> {
+    let vb = view.as_bytes();
+    let mut k = skip_ws(vb, from);
+    let mut names = Vec::new();
+    loop {
+        match *vb.get(k)? {
+            b'{' => {
+                let close = matching(view, k)?;
+                for (s, e) in split_args(view, k, close) {
+                    let words: Vec<&str> = view[s..e].split_whitespace().collect();
+                    match words.as_slice() {
+                        ["abi"] => names.push("abi".to_string()),
+                        ["abi" | "default", "as", alias] => names.push((*alias).to_string()),
+                        _ => {}
+                    }
+                }
+                k = skip_ws(vb, close + 1);
+            }
+            b'*' => {
+                let a = skip_ws(vb, k + 1);
+                let a_end = ident_end(vb, a)?;
+                if &view[a..a_end] != "as" {
+                    return None;
+                }
+                let n = skip_ws(vb, a_end);
+                let n_end = ident_end(vb, n)?;
+                names.push(view[n..n_end].to_string());
+                k = skip_ws(vb, n_end);
+            }
+            _ => {
+                let end = ident_end(vb, k)?;
+                match &view[k..end] {
+                    "from" => break,
+                    "type" => return None,
+                    name => names.push(name.to_string()),
+                }
+                k = skip_ws(vb, end);
+            }
+        }
+        if vb.get(k) == Some(&b',') {
+            k = skip_ws(vb, k + 1);
+        }
+    }
+    let from_end = k + "from".len();
+    let q = skip_ws(vb, from_end);
+    let (spec, _) = string_literal(source, q)?;
+    Some((names, spec))
+}
+
+/// `(const|let|var) { abi(: <A>)? } = require(..)` with `require` at `at`:
+/// the names bound to the `abi` property.
+fn destructured_abi(view: &str, at: usize) -> Option<Vec<String>> {
+    let vb = view.as_bytes();
+    let eq = prev_non_ws(vb, at).filter(|&e| vb[e] == b'=')?;
+    let close = prev_non_ws(vb, eq).filter(|&c| vb[c] == b'}')?;
+    let open = (0..close).rev().find(|&k| vb[k] == b'{')?;
+    if matching(view, open) != Some(close) {
+        return None;
+    }
+    let kw_end = prev_non_ws(vb, open)? + 1;
+    let kw = ident_start_before(vb, kw_end)?;
+    if !matches!(&view[kw..kw_end], "const" | "let" | "var") {
+        return None;
+    }
+    let names: Vec<String> = split_args(view, open, close)
+        .into_iter()
+        .filter_map(|(s, e)| {
+            let (key, alias) = view[s..e]
+                .split_once(':')
+                .map_or((&view[s..e], None), |(k, a)| (k, Some(a)));
+            (key.trim() == "abi").then(|| alias.unwrap_or("abi").trim().to_string())
+        })
+        .collect();
+    (!names.is_empty()).then_some(names)
 }
 
 /// The entries of ABI binding `name` as a use at `at` sees it: the nearest
@@ -919,6 +1539,7 @@ fn rebind(source: &str, view: &str, decls: &[Decl], bindings: &mut Vec<Binding>)
                     name: target.key,
                     scope: from.scope.clone(),
                     abi: from.abi.clone(),
+                    lib: from.lib,
                     at: tail - 1,
                     block: target.block,
                     hoisted: target.hoisted,
@@ -1005,7 +1626,7 @@ fn push_call(
         scope: binding.scope.clone(),
         member,
         args,
-        lib: LIB,
+        lib: binding.lib,
         abi: binding.abi.clone(),
         at,
     });
@@ -1032,7 +1653,7 @@ fn push_event(
         scope: binding.scope.clone(),
         member: event,
         args: None,
-        lib: LIB,
+        lib: binding.lib,
         abi: binding.abi.clone(),
         at,
     });
@@ -1042,6 +1663,7 @@ fn push_event(
 mod tests {
     use super::*;
     use crate::evm::scan::code_view;
+    use glia_code_domain::evm::{ClientFacts, read_client_cells};
 
     /// `(side, qname-ish key, args, abi keys)` per site, in file order.
     fn read(src: &str) -> (Vec<String>, TsCounts) {
@@ -1071,6 +1693,15 @@ mod tests {
 
     fn line(src: &str, at: usize) -> usize {
         src[..at].matches('\n').count() + 1
+    }
+
+    /// `<scope key>.<member> <lib>` per site, in file order.
+    fn libs(src: &str) -> Vec<String> {
+        let (sites, _) = scan(src, &code_view(src, "typescript"));
+        sites
+            .iter()
+            .map(|s| format!("{}.{} {}", s.scope.key(), s.member, s.lib))
+            .collect()
     }
 
     const ABI: &str = "const ESCROW_ABI = [
@@ -1737,6 +2368,450 @@ export class WalletService {
             rows.iter()
                 .any(|r| r.starts_with("call abi:ESCROW_ABI.createTrade args=2 ")),
             "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn hardhat_factory_deploy_and_connect_chain() {
+        // Kina contracts/test/EscrowManager.test.js, condensed: `let escrow;`
+        // at describe level, the assignment in beforeEach.
+        let src = r#"const { expect } = require("chai");
+const { ethers } = require("hardhat");
+
+describe("EscrowManager", function () {
+  let escrow;
+  let token;
+
+  beforeEach(async function () {
+    const MockToken = await ethers.getContractFactory("MockERC20");
+    token = await MockToken.deploy("Mock USDT", "mUSDT", 6);
+    await token.mint(seller.address, 1);
+    const EscrowManager = await ethers.getContractFactory("EscrowManager");
+    escrow = await EscrowManager.deploy(
+      await token.getAddress(),
+      platform.address,
+    );
+    await token.connect(seller).approve(await escrow.getAddress(), ethers.MaxUint256);
+  });
+
+  describe("Happy path", function () {
+    it("creates a trade", async function () {
+      const tx = await escrow.connect(seller).createTrade(buyer.address, AMOUNT);
+      const trade = await escrow.getTrade(0);
+      expect(await token.balanceOf(await escrow.getAddress())).to.equal(AMOUNT);
+    });
+  });
+});
+describe("Other", function () {
+  it("reads nothing", async function () {
+    await escrow.createTrade(a, b);
+    await EscrowManager.deploy(1);
+  });
+});
+"#;
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call MockERC20.mint args=2 abi=- line=11",
+                "call MockERC20.approve args=2 abi=- line=17",
+                "call EscrowManager.createTrade args=2 abi=- line=22",
+                "call EscrowManager.getTrade args=1 abi=- line=23",
+                "call MockERC20.balanceOf args=1 abi=- line=24",
+            ],
+            "a factory's deploy binds the describe-level `let`; the connect chain and \
+             every it(..) block read it; the factory and getAddress are no site; \
+             another describe sees neither"
+        );
+        assert_eq!(counts, TsCounts::default());
+        assert!(libs(src).iter().all(|l| l.ends_with(" hardhat")));
+    }
+
+    #[test]
+    fn get_contract_at_name_and_inline_abi() {
+        // Kina contracts/scripts/provision_demo_wallets.js, condensed.
+        let src = format!(
+            "const hre = require(\"hardhat\");\n{ABI}\
+async function main() {{
+  const [deployer] = await hre.ethers.getSigners();
+  const audd = await hre.ethers.getContractAt(
+    [\"function mint(address to, uint256 amount) external\",
+     \"function balanceOf(address) view returns (uint256)\",
+     \"function decimals() view returns (uint8)\"],
+    deploy.stablecoin,
+    deployer
+  );
+  const auddBal = await audd.balanceOf(w.address);
+  const tx = await audd.mint(w.address, need, {{ nonce: nonce++ }});
+  await audd.transfer(w.address, 1);
+  const escrow = await hre.ethers.getContractAt('contracts/EscrowManager.sol:EscrowManager', deploy.address);
+  await escrow.freeze(1);
+  const viaConst = await ethers.getContractAt(ESCROW_ABI, deploy.address);
+  await viaConst.release(id);
+  const dyn = await ethers.getContractAt(loadAbi(), deploy.address);
+  await dyn.release(id);
+  await hre.ethers.getContractAt('EscrowManager', a).then((c) => c.freeze(2));
+}}
+"
+        );
+        let (rows, counts) = read(&src);
+        let audd = "abi=f:balanceOf/1,f:decimals/0,f:mint/2";
+        assert_eq!(
+            rows,
+            [
+                format!("call abi:audd.balanceOf args=1 {audd} line=16"),
+                format!("call abi:audd.mint args=3 {audd} line=17"),
+                "call EscrowManager.freeze args=1 abi=- line=20".to_string(),
+                "call abi:ESCROW_ABI.release args=1 abi=f:deposit/1,f:release/1,e:Released/2 line=22"
+                    .to_string(),
+            ],
+            "a name (a qualified one too) is the contract; an inline ABI scopes by \
+             its variable; an ABI const reads like a `new Contract` argument"
+        );
+        assert_eq!(
+            counts,
+            TsCounts {
+                abis: 2,
+                not_in_abi: 1,
+                dynamic: 1
+            },
+            "the inline literal counts as an ABI; transfer is not in it; loadAbi() is dynamic"
+        );
+        assert!(libs(&src).iter().all(|l| l.ends_with(" hardhat")));
+    }
+
+    #[test]
+    fn deploy_contract_and_wait_for_deployment_is_stop_listed() {
+        let src = "import { ethers } from 'hardhat';
+describe('Token', () => {
+  let token;
+  beforeEach(async () => {
+    token = await ethers.deployContract('Token', [1000n]);
+    await token.waitForDeployment();
+    await token.deploymentTransaction()?.wait();
+  });
+  it('mints', async () => {
+    await token.mint(owner.address, 5);
+    expect(await token.getAddress()).to.properAddress;
+    await token.deployed();
+    console.log(token.target, token.interface);
+  });
+});
+const v = await hre.viem.deployContract('Token');
+await v.write.mint([a, 1n]);
+const loose = ethers.deployContract('Token').mint(1);
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            ["call Token.mint args=2 abi=- line=10"],
+            "ethers runtime members are no site; viem's deployContract is no hardhat-ethers \
+             helper; a member call on the promise is not read"
+        );
+        assert_eq!(counts, TsCounts::default());
+        assert_eq!(libs(src), ["Token.mint hardhat"]);
+    }
+
+    #[test]
+    fn typechain_connect_chained_and_bound() {
+        let src = "import { Escrow__factory, Token__factory } from '../typechain-types';
+import * as types from '../typechain-types';
+import { Contract } from 'ethers';
+
+export async function run(addr: string, signer: Signer, other: Signer) {
+  await Escrow__factory.connect(addr, signer).release(id);
+  const escrow = Escrow__factory.connect(addr, signer);
+  await escrow.deposit(id, { value: 1 });
+  await escrow.connect(other).release(id);
+  const factory = new Token__factory(signer);
+  const token = await factory.deploy(1000n);
+  await token.mint(a, 1);
+  const attached = new Token__factory(signer).attach(addr);
+  await attached.balanceOf(a);
+  await new Token__factory(signer).attach(addr).connect(other).mint(a, 2);
+  await types.Escrow__factory.connect(addr, signer).deposits(id);
+  const iface = Escrow__factory.createInterface();
+  const abiOnly = new Contract(addr, Escrow__factory.abi, signer);
+  await abiOnly.release(id);
+  await escrow.getAddress();
+}
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call Escrow.release args=1 abi=- line=6",
+                "call Escrow.deposit args=2 abi=- line=8",
+                "call Escrow.release args=1 abi=- line=9",
+                "call Token.mint args=2 abi=- line=12",
+                "call Token.balanceOf args=1 abi=- line=14",
+                "call Token.mint args=2 abi=- line=15",
+                "call Escrow.deposits args=1 abi=- line=16",
+                "call Escrow.release args=1 abi=- line=19",
+            ]
+        );
+        assert_eq!(counts, TsCounts::default());
+        let libs = libs(src);
+        assert_eq!(libs.iter().filter(|l| l.ends_with(" typechain")).count(), 7);
+        assert_eq!(
+            libs.last().map(String::as_str),
+            Some("Escrow.release ethers"),
+            "`new Contract(.., Escrow__factory.abi, ..)` is an ethers construction"
+        );
+        // The gate: a TypeChain factory identifier is enough on its own.
+        let bare = "const e = Escrow__factory.connect(a, s);\ne.release(1);\n";
+        assert_eq!(read(bare).0, ["call Escrow.release args=1 abi=- line=2"]);
+        let path = "import { Escrow } from './typechain/contracts';\nconst c = new Contract(a, ABI, s);\nc.go();\n";
+        assert_eq!(read(path).0, ["call abi:ABI.go args=0 abi=- line=3"]);
+    }
+
+    #[test]
+    fn artifact_import_names_the_contract_other_json_does_not() {
+        let src = "import { Contract } from 'ethers';
+import { ethers } from 'hardhat';
+import EscrowArtifact from '../artifacts/contracts/Escrow.sol/Escrow.json';
+import { abi as tokenAbi } from '../out/Token.sol/Token.json';
+import * as Vault from '../artifacts/contracts/vault/Vaults.sol/Vault.json';
+import settings from './settings.json';
+import EscrowDbg from '../artifacts/contracts/Escrow.sol/Escrow.dbg.json';
+const Pool = require('../artifacts/contracts/Pool.sol/Pool.json');
+const { abi: lendAbi } = require('../out/Lend.sol/Lend.json');
+const bondAbi = require('../out/Bond.sol/Bond.json').abi;
+import Vote = require('../out/Gov.sol/Vote.json');
+
+export async function wire(a: string, s: any) {
+  new Contract(a, EscrowArtifact.abi, s).release(id);
+  const token = new Contract(a, tokenAbi, s);
+  token.mint(a, 1);
+  const vault = new Contract(a, Vault.abi, s);
+  vault.sweep();
+  const pool = new Contract(a, Pool.abi, s);
+  pool.swap(1);
+  const lend = new Contract(a, lendAbi, s);
+  lend.borrow(1);
+  const bond = new Contract(a, bondAbi, s);
+  bond.redeem();
+  const conf = new Contract(a, settings.abi, s);
+  conf.apply(1);
+  const dbg = new Contract(a, EscrowDbg.abi, s);
+  dbg.release(1);
+  const other = new Contract(a, config.abi, s);
+  other.go();
+  const viaAt = await ethers.getContractAt(EscrowArtifact.abi, a);
+  await viaAt.deposit(id);
+  const vote = new Contract(a, Vote, s);
+  vote.cast(1);
+}
+";
+        let view = code_view(src, "typescript");
+        let imports = json_imports(src, &view, &declarations(&view));
+        let pairs: Vec<(&str, Option<&str>)> = imports
+            .iter()
+            .map(|i| (i.name.as_str(), i.contract.as_deref()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                ("EscrowArtifact", Some("Escrow")),
+                ("tokenAbi", Some("Token")),
+                ("Vault", Some("Vault")),
+                ("settings", None),
+                ("EscrowDbg", None),
+                ("Pool", Some("Pool")),
+                ("lendAbi", Some("Lend")),
+                ("bondAbi", Some("Bond")),
+                ("Vote", Some("Vote")),
+            ]
+        );
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call Escrow.release args=1 abi=- line=14",
+                "call Token.mint args=2 abi=- line=16",
+                "call Vault.sweep args=0 abi=- line=18",
+                "call Pool.swap args=1 abi=- line=20",
+                "call Lend.borrow args=1 abi=- line=22",
+                "call Bond.redeem args=0 abi=- line=24",
+                "call abi:settings.apply args=1 abi=- line=26",
+                "call abi:EscrowDbg.release args=1 abi=- line=28",
+                "call Escrow.deposit args=1 abi=- line=32",
+                "call Vote.cast args=1 abi=- line=34",
+            ],
+            "an artifact (hardhat or foundry layout) names its contract; any other JSON \
+             import is an ABI of unknown entries; a member of no import is dynamic"
+        );
+        assert_eq!(
+            counts,
+            TsCounts {
+                abis: 0,
+                not_in_abi: 0,
+                dynamic: 1
+            }
+        );
+        assert_eq!(
+            libs(src).iter().rev().nth(1).map(String::as_str),
+            Some("Escrow.deposit hardhat")
+        );
+    }
+
+    #[test]
+    fn chai_to_emit_is_not_a_subscription() {
+        let src = "const { expect } = require('chai');
+const { ethers } = require('hardhat');
+it('emits', async () => {
+  const escrow = await ethers.deployContract('Escrow');
+  await expect(escrow.release(id)).to.emit(escrow, 'Released').withArgs(id);
+  await expect(tx).to.be.revertedWithCustomError(escrow, 'NotSeller');
+  await expect(escrow.connect(s).release(id)).to.changeTokenBalances(token, [a], [1]);
+  escrow.on('Released', cb);
+  const art = await hre.artifacts.readArtifact('Escrow');
+  const c = new ethers.Contract(a, art.abi, s);
+  c.release(1);
+});
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call Escrow.release args=1 abi=- line=5",
+                "call Escrow.release args=1 abi=- line=7",
+                "event Escrow.Released args=- abi=- line=8",
+            ],
+            "a chai matcher takes the contract as an argument: no subscription; a \
+             readArtifact ABI is not read"
+        );
+        assert_eq!(
+            counts,
+            TsCounts {
+                abis: 0,
+                not_in_abi: 0,
+                dynamic: 1
+            }
+        );
+    }
+
+    #[test]
+    fn upgrades_proxies_and_factory_links() {
+        let src = "const { ethers, upgrades } = require('hardhat');
+async function main() {
+  const Box = await ethers.getContractFactory('contracts/Box.sol:Box');
+  const box = await upgrades.deployProxy(Box, [42], { initializer: 'store' });
+  await box.store(7);
+  const BoxV2 = await hre.ethers.getContractFactory('BoxV2', signer);
+  const upgraded = await hre.upgrades.upgradeProxy(await box.getAddress(), BoxV2);
+  await upgraded.increment();
+  const again = await Box.connect(admin).deploy();
+  await again.retrieve();
+  const at = Box.attach(addr);
+  await at.store(1);
+  await Box.attach(addr).retrieve();
+  await (await Box.deploy()).store(2);
+  const fromInline = await (await ethers.getContractFactory('Box')).deploy();
+  await fromInline.store(3);
+  const stray = await upgrades.deployProxy(Unbound, []);
+  await stray.store(4);
+}
+";
+        let (rows, counts) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call Box.store args=1 abi=- line=5",
+                "call BoxV2.increment args=0 abi=- line=8",
+                "call Box.retrieve args=0 abi=- line=10",
+                "call Box.store args=1 abi=- line=12",
+                "call Box.retrieve args=0 abi=- line=13",
+            ],
+            "deployProxy / upgradeProxy read their factory argument; a factory's \
+             connect link keeps it a factory; an inline promise and an unbound factory \
+             are not read"
+        );
+        assert_eq!(counts, TsCounts::default());
+    }
+
+    #[test]
+    fn fixture_files_name_the_contract() {
+        // bench/substrate-gap/fixtures/ts-hardhat-contract-calls/contracts/.
+        let test_js = include_str!(
+            "../../../../../bench/substrate-gap/fixtures/ts-hardhat-contract-calls/contracts/test/Escrow.test.js"
+        );
+        let settle = include_str!(
+            "../../../../../bench/substrate-gap/fixtures/ts-hardhat-contract-calls/contracts/scripts/settle.ts"
+        );
+        let extract = |src: &str| {
+            crate::evm::extract_evm_clients(
+                src,
+                "typescript",
+                glia_core::NodeId(1),
+                glia_core::RepoId(1),
+            )
+        };
+        let qnames = |out: &crate::evm::EvmNodes| {
+            let mut q: Vec<String> = out.nav.qname_by_id.values().cloned().collect();
+            q.sort_unstable();
+            q
+        };
+        let out = extract(test_js);
+        assert_eq!(
+            out.markers("test/Escrow.test.js"),
+            [
+                "[evm-client] lang=ts calls=5 events=0 sites=5 (ethers=0 hardhat=5 typechain=0 viem=0 web3=0 geth=0) abis=0 not_in_abi=0 dynamic=0 path=test/Escrow.test.js"
+            ]
+        );
+        assert_eq!(
+            qnames(&out),
+            [
+                "evm_call:Escrow.deposit",
+                "evm_call:Escrow.deposits",
+                "evm_call:Escrow.release",
+                "evm_call:Token.approve",
+                "evm_call:Token.mint",
+            ]
+        );
+        let out = extract(settle);
+        assert_eq!(
+            out.markers("scripts/settle.ts"),
+            [
+                "[evm-client] lang=ts calls=4 events=0 sites=5 (ethers=1 hardhat=3 typechain=1 viem=0 web3=0 geth=0) abis=1 not_in_abi=0 dynamic=0 path=scripts/settle.ts"
+            ]
+        );
+        assert_eq!(
+            qnames(&out),
+            [
+                "evm_call:Escrow.deposits",
+                "evm_call:Escrow.release",
+                "evm_call:abi:token.balanceOf",
+                "evm_call:abi:token.mint",
+            ]
+        );
+        let cells_of = |qname: &str| -> Vec<ClientFacts> {
+            out.nodes
+                .iter()
+                .filter(|n| out.nav.qname_by_id[&n.id] == qname)
+                .flat_map(|n| read_client_cells(&n.cells))
+                .collect()
+        };
+        let facts = |lib: &str, args: Vec<u32>, abi: Option<Vec<&str>>| ClientFacts {
+            lib: lib.to_string(),
+            args,
+            abi: abi.map(|a| a.into_iter().map(str::to_string).collect()),
+        };
+        assert_eq!(
+            cells_of("evm_call:Escrow.release"),
+            [
+                facts("ethers", vec![1], None),
+                facts("typechain", vec![1], None)
+            ],
+            "the artifact construction and the TypeChain connect: one cell per library"
+        );
+        assert_eq!(
+            cells_of("evm_call:abi:token.mint"),
+            [facts(
+                "hardhat",
+                vec![2],
+                Some(vec!["f:balanceOf/1", "f:mint/2"])
+            )]
         );
     }
 }
