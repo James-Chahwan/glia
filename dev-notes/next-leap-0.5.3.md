@@ -589,6 +589,20 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   re-exports (`module.exports = require(..)`) are not followed; the same NavFacts could carry them. A renamed re-export
   (`export { A as B } from`) binds through a named import only, never `ns.B` on a namespace import of the barrel (kept out
   of module_symbols so the name-only `global_unique` fallbacks cannot bind it).
+- W17 (DT.6b): `unhandled_route` still lists client-router redirects (Kina's five `page:/...` `redirectTo` routes); a
+  nav-route exclusion is a separate prelude decision.
+- W17 (DT.1d): request-side residuals: a receiver field typed AxiosInstance / AxiosStatic writes no request (counted
+  request_unknown_client) although axios fixes its body position; a `.then(r => r.json())` fetch chain and ky's
+  `.json<T>()` post-call typing are not read; `await this.repo.find<Foo>(1)` yields no CallSite (extract_call_qualifier
+  sees an await_expression callee; awaited_generic_callee could unwrap it).
+- W17 (DT.1e): Go wire residuals: an encoder held in a local (`enc := json.NewEncoder(w); enc.Encode(v)`), a context
+  passed into a helper under another name or type, gin `ShouldBindWith` / `ShouldBindBodyWith(binding.JSON)`.
+- W17 (DT.2c): an overlay-pinned queue topic is not minted Weak: the queue fold's resolver would have to report
+  ConstTable::is_pinned (e.g. extract_queue_nodes_with_consts taking a resolver returning (value, pinned)); spans
+  engine/src/build/grafts.rs and parsers/code/extractors/src/queues.rs.
+- W17 (DT.11b): GraphQL transport residuals: apollo-angular `httpLink.create({ uri })`, aliased imports
+  (`import { ApolloClient as AC }`), namespace calls (`new Apollo.ApolloClient(..)`) and CommonJS-destructured urql mint no
+  transport ENDPOINT.
 
 ## 3. Open questions for James
 
