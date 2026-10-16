@@ -19,7 +19,7 @@
       "from": "cart_test",
       "to": "total",
       "category": "TESTS",
-      "note": "INTENDED: the function-level TESTS edge (Python / TypeScript only at HEAD)"
+      "note": "INTENDED: function-level TESTS (CL.5b) from CALLS main -> total. Missing since DH.16: the call sits in the `test('sums', () {..})` closure, and the Dart parser's collect_calls_in does not enter a function_expression, so no call is emitted"
     },
     {
       "from": "cart_test",
@@ -30,5 +30,5 @@
   ],
   "expect_cells": [],
   "forbid": [],
-  "note": "package:test test('..', () { expect(total(..), ..) }) || CF.10b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=1/1 literal=1/1 route=1/2 forbid=0/0) via=test. Predicted extractor gap (backlog, not fixed by the probe): the module-level TESTS edge pairs (`cart_test` -> `cart`); the function-level TESTS edge exists only for Python / TypeScript."
+  "note": "package:test test('..', () { expect(total(..), ..) }) || DH.16 (0.5.2 W7): pubspec.yaml added (`name: shop`) - a Dart package always declares its name, and `package:shop/cart.dart` resolves only through it. With it, DF.4a's own-package URI resolution forms IMPORTS test::cart_test -> lib::cart and DF.4b's plain import exposes `total`. The function-level TESTS row is still missing: `total([1, 2])` is inside the closure passed to test(), and the Dart parser does not extract calls from a nested closure (collect_calls_in skips function_expression), so there is no CALLS main -> total for CL.5b to read. The same call directly in main() binds CALLS and the fn-level TESTS. || CF.10b baseline 2026-09-30 (HEAD 2170ff8, glia_py 0.5.0 wheel): PARTIAL (extract=1/1 literal=1/1 route=1/2 forbid=0/0) via=test."
 }
