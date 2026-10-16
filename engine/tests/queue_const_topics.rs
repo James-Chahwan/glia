@@ -94,12 +94,38 @@ fn const_topics_fold_and_pair() {
     let r = fixture("xcut-queue-const-topic", &["producer", "consumer"]);
     let m = &r.merged;
     // Exactly the two constant-named topics: no `audit-log` borrowed from a
-    // lower-case binding in another file, no `topic` minted from the
-    // parameter, and no sentinel left behind by the parameter site.
+    // lower-case binding in another file and no `topic` minted from the
+    // parameter. DT.2a: the parameter site (`publishTo(topic)`, unresolved
+    // after the fold, beside the folded sites of its row) is the framework
+    // tag's, as the QUEUE_FLOWS caveat promises; LA.4 left no sentinel.
     assert_eq!(
         qnames(m, node_kind::QUEUE_PRODUCER),
-        set(&["queue_producer:orders", "queue_producer:payments"])
+        set(&[
+            "queue_producer:orders",
+            "queue_producer:payments",
+            "queue_producer:unresolved:kafka"
+        ])
     );
+    let tag = node_id(
+        m,
+        node_kind::QUEUE_PRODUCER,
+        "queue_producer:unresolved:kafka",
+    );
+    assert_eq!(
+        positions(m, tag),
+        vec![r#"{"file":"publish.ts","start_line":16,"end_line":16}"#.to_string()]
+    );
+    let publish_to = node_id(m, node_kind::FUNCTION, "publish::publishTo");
+    assert!(
+        m.all_edges()
+            .any(|e| e.from == publish_to && e.to == tag && e.category == edge_category::USES),
+        "the parameter site anchors the tag in publishTo"
+    );
+    assert!(!flows(
+        m,
+        "queue_producer:unresolved:kafka",
+        "queue_consumer:orders"
+    ));
     assert_eq!(
         qnames(m, node_kind::QUEUE_CONSUMER),
         set(&["queue_consumer:orders", "queue_consumer:payments"])

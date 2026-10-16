@@ -1711,9 +1711,14 @@ struct HitSpan<'p> {
     row: usize,
 }
 
-/// CL.1: a row whose every hit read no topic. The per-row fallback minted its
+/// CL.1: a row with a hit that read no topic. The per-row fallback minted its
 /// framework tag on the spot; it is now recorded after the declare pass, and
 /// only when one of its hits stays unexplained ([`explain_hit`]).
+///
+/// DT.2a: deferred whenever ONE hit read no topic, not only when every hit
+/// did. A row that names `'audit.events'` at one site and reads `topic` or
+/// `cfg.topic` at another used to lose the identifier sites outright; they
+/// are the QUEUE_FLOWS caveat's "unresolved framework tag".
 struct DeferredTag<'p> {
     row: usize,
     needle: &'p str,
@@ -1722,8 +1727,41 @@ struct DeferredTag<'p> {
     handler: Option<HandlerRule>,
     /// `pending.len()` when the row ran: where the tag used to be created.
     slot: usize,
-    /// Indices into the span list, in hit order (never empty).
+    /// Indices into the span list of the hits that read NO topic, in hit
+    /// order (never empty). A named hit is its topic's site, never the tag's.
     hits: Vec<usize>,
+    /// DT.2a: another hit of the row named a topic (a mixed row).
+    mixed: bool,
+}
+
+/// DT.2a: what one tag node (one `unresolved:<framework>` per side per file)
+/// recorded, for the `[queues] tag` marker.
+struct TagTally<'p> {
+    framework: &'p QueueFramework,
+    /// Call sites recorded into the tag, in every deferred row it came from.
+    sites: usize,
+    /// Deferred rows feeding it that also named a topic at another site.
+    mixed_rows: usize,
+}
+
+/// DT.2a: the span indices one surviving deferred tag records as its sites,
+/// in hit order: every hit [`explain_hit`] left unexplained. A row none of
+/// whose hits named a topic (the only kind deferred before DT.2a) keeps its
+/// FIRST hit as a site too, explained or not, as it always had, so DT.2a
+/// only ever adds a site. A mixed row records its unexplained hits alone: its
+/// first hit may be the literal one, and an explained topic-less hit there
+/// is a named topic's call (rule (ii)), never the tag's.
+fn tag_sites(tag: &DeferredTag<'_>, why: &[Option<Explained>]) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::new();
+    if !tag.mixed {
+        out.extend(tag.hits.first().copied());
+    }
+    for (&i, w) in tag.hits.iter().zip(why) {
+        if w.is_none() && !out.contains(&i) {
+            out.push(i);
+        }
+    }
+    out
 }
 
 /// CL.1: why a deferred tag's hit needs no tag, and which node (if any)
@@ -1934,14 +1972,24 @@ fn python_imported_names(source: &str) -> BTreeSet<String> {
 /// (and the declare pass, [`DECLARE_PATTERNS`] / [`PRODUCER_DECLARE_PATTERNS`]) each of its hits is
 /// explained by [`explain_hit`]. A deferred tag whose hits are ALL explained
 /// is not recorded, and its callbacks move to the node that explained each
-/// hit; one unexplained hit records it exactly as before (Weak, the row's
-/// first hit's site, every hit's callback). The rule only ever REMOVES a tag
-/// the per-row fallback minted, and a surviving tag lands at the row it used
+/// hit; one unexplained hit records it (Weak, every hit's callback, and,
+/// DT.2a, a site at every unexplained hit, [`tag_sites`]). The explain rule
+/// only ever REMOVES a tag the per-row fallback minted (DT.2a's mixed rows,
+/// below, are new tags), and a surviving tag lands at the row it used
 /// to be created at (`Pending::rank`), so a file whose tags all survive emits
 /// what it did before. A per-file "a named node silences every tag of its
 /// framework" rule was weighed and rejected: it would hide a genuinely
 /// unresolved second topic (`producer.produce(topicVar, ..)` beside a named
 /// `producer.send`).
+///
+/// DT.2a — A MIXED ROW DEFERS TOO. The deferral used to need EVERY hit of a
+/// row to read no topic, so `producer.send({ topic: 'audit' })` beside
+/// `producer.send({ topic: topic })` lost the identifier site: no tag, no
+/// USES. A row now defers its topic-less hits whenever it has one, and
+/// [`explain_hit`] judges them as before, so only an identifier-led slot
+/// (`topic`, `cfg.topic`, `ORDERS_TOPIC` the LA.4 fold could not resolve)
+/// survives beside a literal of its framework: a hit with no identifier
+/// expression is explained by rule (ii).
 ///
 /// CL.1 — DECLARE BINDING (`declares` non-empty): see [`DECLARE_PATTERNS`]. An
 /// unnamed consume is a row hit that named no topic, is not a `NoIdentity`
@@ -1967,6 +2015,10 @@ fn python_imported_names(source: &str) -> BTreeSet<String> {
 /// fired_on (DH.2, `GLIA_QUEUE_DEBUG=1`): a Laravel row's hits that name no
 /// job class ([`laravel_job_at`]):
 ///   `[queues] laravel-no-job needle='<n>' side=<consumer|producer> dropped=<k> file=<path>`
+///
+/// fired_on (DT.2a, always, per-file pass only): a tag with two or more sites
+/// or one fed by a mixed row, once per tag per file:
+///   `[queues] tag framework=<F> side=<producer|consumer> sites=<n> (mixed_rows=<m>) path=<path>`
 #[allow(clippy::too_many_arguments)]
 fn emit_queue_nodes(
     source: &str,
@@ -2220,8 +2272,16 @@ fn emit_queue_nodes(
         // liveness signal — Go's `r.ReadMessage(ctx)`), so falling back to a
         // topic-less framework tag here would manufacture exactly the all-to-all
         // tag pairing A2.1 removed. Every other rule keeps the fallback, which
-        // CL.1 defers until every row has run.
-        if topics.is_empty() && !no_identity {
+        // CL.1 defers until every row has run. DT.2a: for every row with a hit
+        // that read no topic, holding only those hits; a named hit beside them
+        // makes it a mixed row.
+        let unnamed: Vec<usize> = reads
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.is_none())
+            .map(|(k, _)| first_span + k)
+            .collect();
+        if !unnamed.is_empty() && !no_identity {
             deferred.push(DeferredTag {
                 row,
                 needle: pattern,
@@ -2229,7 +2289,8 @@ fn emit_queue_nodes(
                 framework,
                 handler,
                 slot: pending.len(),
-                hits: (first_span..spans.len()).collect(),
+                hits: unnamed,
+                mixed: !topics.is_empty(),
             });
         }
     }
@@ -2260,6 +2321,7 @@ fn emit_queue_nodes(
     // CL.1: the deferred tags, in row order. `named` is taken BEFORE any tag
     // is recorded, so a tag never explains another.
     let named_len = pending.len();
+    let mut tallies: Vec<TagTally<'_>> = Vec::new();
     for tag in &deferred {
         let named: Vec<usize> = pending
             .iter()
@@ -2277,28 +2339,43 @@ fn emit_queue_nodes(
             // A2.3: `Weak`, not `Medium` — the tag proves the framework is
             // live in this file and nothing else. The `seen` key is
             // `{topic}:{framework:?}`, so one tag per (framework, direction)
-            // per file however many rows of that framework deferred one. Its
-            // site is the row's first occurrence, the one thing that WAS read.
+            // per file however many rows of that framework deferred one.
+            // DT.2a: its sites are every unexplained topic-less call
+            // ([`tag_sites`]), so a second dynamic site in another function
+            // anchors there too; the first record mints the node, later ones
+            // append (`lines` capped at MAX_SITES, anchors uncapped).
             let label = framework_tag(tag.framework);
-            let Some(first) = tag.hits.first().and_then(|&i| spans.get(i)) else {
-                continue;
-            };
-            let site = (queue_topic::line_of(source, first.start), first.start);
-            if record_site(
-                &mut pending,
-                &mut seen,
-                &label,
-                tag.framework,
-                repo,
-                kind,
-                prefix,
-                Confidence::Weak,
-                site,
-            ) {
-                if let Some(p) = pending.last_mut() {
-                    p.rank = (tag.slot, 0, tag.row);
+            let sites = tag_sites(tag, &why);
+            for &i in &sites {
+                let Some(s) = spans.get(i) else { continue };
+                let site = (queue_topic::line_of(source, s.start), s.start);
+                if record_site(
+                    &mut pending,
+                    &mut seen,
+                    &label,
+                    tag.framework,
+                    repo,
+                    kind,
+                    prefix,
+                    Confidence::Weak,
+                    site,
+                ) {
+                    if let Some(p) = pending.last_mut() {
+                        p.rank = (tag.slot, 0, tag.row);
+                    }
+                    fired_on(tag.needle, tag.rule, tag.framework, &label, path);
                 }
-                fired_on(tag.needle, tag.rule, tag.framework, &label, path);
+            }
+            match tallies.iter_mut().find(|t| t.framework == tag.framework) {
+                Some(t) => {
+                    t.sites += sites.len();
+                    t.mixed_rows += usize::from(tag.mixed);
+                }
+                None => tallies.push(TagTally {
+                    framework: tag.framework,
+                    sites: sites.len(),
+                    mixed_rows: usize::from(tag.mixed),
+                }),
             }
             // LA.33: every topic-less occurrence is the sentinel's; its
             // handler is a queue handler whatever the topic.
@@ -2361,6 +2438,17 @@ fn emit_queue_nodes(
                 tag.needle,
                 tag.framework,
                 reasons.join(",")
+            );
+        }
+    }
+    // DT.2a: the per-file pass reports each tag that gained what DT.2a adds
+    // (a second site, or a mixed row's); the const fold stays quiet, as the
+    // CJ.1a guard report below does, so a file reports once per parse.
+    if resolve.is_none() {
+        for t in tallies.iter().filter(|t| t.sites >= 2 || t.mixed_rows > 0) {
+            eprintln!(
+                "[queues] tag framework={:?} side={side} sites={} (mixed_rows={}) path={path}",
+                t.framework, t.sites, t.mixed_rows
             );
         }
     }
@@ -5482,9 +5570,17 @@ public class AuditFunction
     #[test]
     fn mixed_literal_and_constant_sites_in_one_file() {
         let src = "import { Kafka } from 'kafkajs';\nawait producer.send({ topic: 'audit', messages });\nawait producer.send({ topic: ORDERS_TOPIC, messages });\n";
-        // Per-file: the literal site names a topic, so the constant site is
-        // simply lost — no sentinel, no orders.
-        assert_eq!(producers(src), vec!["queue_producer:audit".to_string()]);
+        // Per-file: the literal site names a topic and the constant site,
+        // unresolved before the fold, is the framework tag's (DT.2a; HEAD
+        // lost it — no sentinel, no orders).
+        assert_eq!(
+            producers(src),
+            vec![
+                "queue_producer:audit".to_string(),
+                "queue_producer:unresolved:kafka".to_string()
+            ]
+        );
+        // The fold resolves the constant, so the tag is gone again.
         let f = folded(src, &[("ORDERS_TOPIC", "orders")]);
         assert_eq!(
             qnames(&f.producers),
@@ -5785,6 +5881,153 @@ public class AuditFunction
         assert_eq!(
             anchors_of(&p),
             vec![("queue_producer:unresolved:kafka".to_string(), 2)]
+        );
+    }
+
+    // ---- DT.2a: a mixed row mints the tag; a tag anchors every site ------
+
+    /// bench/substrate-gap/fixtures/xcut-queue-mixed-topic-sites/producer/src/publish.ts
+    const MIXED_KAFKAJS: &str = "import { Kafka } from 'kafkajs';\n\nconst kafka = new Kafka({ clientId: 'shop', brokers: ['kafka:9092'] });\nconst producer = kafka.producer();\n\nexport async function audit(e: { id: string }): Promise<void> {\n  await producer.send({ topic: 'audit.events', messages: [{ value: JSON.stringify(e) }] });\n}\n\nexport async function forward(topic: string, value: string): Promise<void> {\n  await producer.send({ topic: topic, messages: [{ value }] });\n}\n\nexport async function route(cfg: { topic: string }, value: string): Promise<void> {\n  await producer.send({ topic: cfg.topic, messages: [{ value }] });\n}\n";
+
+    fn code_sites(r: &QueueNodes, qname: &str) -> usize {
+        let Some(n) = r
+            .nodes
+            .iter()
+            .find(|n| r.nav.qname_by_id.get(&n.id).map(String::as_str) == Some(qname))
+        else {
+            return 0;
+        };
+        payload(cell_of(n, cell_type::CODE)).matches("\"line\":").count()
+    }
+
+    #[test]
+    fn mixed_row_mints_the_tag_kafkajs() {
+        // One `producer.send` row: a literal in `audit` (line 6), a parameter
+        // in `forward` (line 10), an identifier chain in `route` (line 14).
+        let p = extract_queue_producer_nodes(MIXED_KAFKAJS, "src/publish.ts", module_id(), repo());
+        assert_eq!(
+            qnames(&p),
+            vec![
+                "queue_producer:audit.events".to_string(),
+                "queue_producer:unresolved:kafka".to_string()
+            ]
+        );
+        assert_eq!(
+            anchors_of(&p),
+            vec![
+                ("queue_producer:audit.events".to_string(), 6),
+                ("queue_producer:unresolved:kafka".to_string(), 10),
+                ("queue_producer:unresolved:kafka".to_string(), 14),
+            ],
+            "the literal site is never the tag's"
+        );
+        assert_eq!(code_sites(&p, "queue_producer:unresolved:kafka"), 2);
+        let tag = p
+            .nodes
+            .iter()
+            .find(|n| n.confidence == Confidence::Weak)
+            .map(position);
+        assert_eq!(
+            tag.as_deref(),
+            Some(r#"{"file":"src/publish.ts","start_line":10,"end_line":10}"#)
+        );
+        // Neither identifier resolves, so the fold keeps the same nodes.
+        let f = extract_queue_nodes_with_consts(
+            MIXED_KAFKAJS,
+            "src/publish.ts",
+            module_id(),
+            repo(),
+            &resolver(&[("ORDERS_TOPIC", "orders")]),
+        );
+        assert_eq!(qnames(&f.producers), qnames(&p));
+        assert_eq!(
+            f.counts,
+            ConstFoldCounts {
+                folded: 0,
+                unresolved: 2
+            }
+        );
+    }
+
+    #[test]
+    fn mixed_row_go_nc() {
+        let src = "package events\n\nimport \"github.com/nats-io/nats.go\"\n\nfunc A(nc *nats.Conn) { nc.Publish(\"orders\", nil) }\n\nfunc B(nc *nats.Conn, s string) { nc.Publish(s, nil) }\n";
+        let p = extract_queue_producer_nodes(src, "events/publisher.go", module_id(), repo());
+        assert_eq!(
+            qnames(&p),
+            vec![
+                "queue_producer:orders".to_string(),
+                "queue_producer:unresolved:nats".to_string()
+            ]
+        );
+        assert_eq!(
+            anchors_of(&p),
+            vec![
+                ("queue_producer:orders".to_string(), 4),
+                ("queue_producer:unresolved:nats".to_string(), 6),
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_row_on_the_consumer_side() {
+        let src = "import { Kafka } from 'kafkajs';\nasync function a() { await consumer.subscribe({ topic: 'orders' }); }\nasync function b(t: string) { await consumer.subscribe({ topic: t }); }\n";
+        let c = extract_queue_consumer_nodes(src, "src/worker.ts", module_id(), repo());
+        assert_eq!(
+            anchors_of(&c),
+            vec![
+                ("queue_consumer:orders".to_string(), 1),
+                ("queue_consumer:unresolved:kafka".to_string(), 2),
+            ]
+        );
+    }
+
+    #[test]
+    fn tag_anchors_every_unexplained_site() {
+        let src = "package events\n\nimport \"github.com/nats-io/nats.go\"\n\nfunc A(nc *nats.Conn) { nc.Publish(subjectA, a) }\n\nfunc B(nc *nats.Conn) { nc.Publish(subjectB, b) }\n\nfunc C(nc *nats.Conn) { nc.Publish(subjectC, c) }\n";
+        let p = extract_queue_producer_nodes(src, "events/publisher.go", module_id(), repo());
+        assert_eq!(qnames(&p), vec!["queue_producer:unresolved:nats".to_string()]);
+        assert_eq!(p.nodes.len(), 1);
+        assert_eq!(
+            anchors_of(&p),
+            vec![
+                ("queue_producer:unresolved:nats".to_string(), 4),
+                ("queue_producer:unresolved:nats".to_string(), 6),
+                ("queue_producer:unresolved:nats".to_string(), 8),
+            ]
+        );
+        assert_eq!(code_sites(&p, "queue_producer:unresolved:nats"), 3);
+        assert_eq!(p.edges.len(), 1, "one module CONTAINS for the one tag");
+    }
+
+    #[test]
+    fn explained_hits_still_drop_the_tag() {
+        // Rule (ii) in a mixed row: a call-shaped slot carries no identifier
+        // expression, so beside the named `audit` it is that topic's call.
+        let ts = "import { Kafka } from 'kafkajs';\nawait producer.send({ topic: 'audit', messages });\nawait producer.send(buildRecord(x));\n";
+        assert_eq!(producers(ts), vec!["queue_producer:audit".to_string()]);
+        // segmentio: the topic sits on the writer; `WriteMessages` names none.
+        let go = "package p\n\nimport \"github.com/segmentio/kafka-go\"\n\nvar w = &kafka.Writer{Topic: \"orders\"}\n\nfunc Send(v []byte) { w.WriteMessages(ctx, kafka.Message{Value: v}) }\n\nfunc Again(v []byte) { w.WriteMessages(ctx, kafka.Message{Value: v}) }\n";
+        let p = extract_queue_producer_nodes(go, "p/send.go", module_id(), repo());
+        assert_eq!(qnames(&p), vec!["queue_producer:orders".to_string()]);
+    }
+
+    #[test]
+    fn an_all_topic_less_row_keeps_its_first_site() {
+        // `channel.basic_publish` reads arg #0 and names nothing at either
+        // call; the first is `orders`'s call (rule (i), overlap with the
+        // named `basic_publish(` hit), the second reads the identifier `ex`.
+        // DT.2a adds the second as a site and keeps the first, which HEAD
+        // anchored the tag at, so it removes no edge.
+        let src = "import pika\n\n\ndef a(channel, b):\n    channel.basic_publish(exchange='', routing_key='orders', body=b)\n\n\ndef c(channel, b, ex, rk):\n    channel.basic_publish(ex, rk, b)\n";
+        let p = extract_queue_producer_nodes(src, "pub.py", module_id(), repo());
+        assert_eq!(
+            anchors_of(&p),
+            vec![
+                ("queue_producer:unresolved:rabbitmq".to_string(), 4),
+                ("queue_producer:unresolved:rabbitmq".to_string(), 8),
+                ("queue_producer:orders".to_string(), 4),
+            ]
         );
     }
 

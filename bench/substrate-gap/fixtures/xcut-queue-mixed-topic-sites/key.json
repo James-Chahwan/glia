@@ -1,0 +1,83 @@
+{
+  "framework": "xcut-queue-mixed-topic-sites",
+  "language": "typescript",
+  "dirs": [
+    "producer",
+    "consumer"
+  ],
+  "mechanism": "kafka",
+  "note": "DT.2a: one kafkajs `producer.send` row names a literal topic at one site (`audit`) and reads an identifier at two others (`forward`: `topic: topic`, `route`: `topic: cfg.topic`), neither of which the LA.4 const fold can resolve. The QUEUE_FLOWS caveat promises those sites are an unresolved framework tag. Baseline at HEAD 5dfe4c72 / a584c98a (glia 0.5.1+pd2c8c82058d631f0, merge of producer + consumer): nodes queue_producer:audit.events and queue_consumer:audit.events only; USES src::publish::audit -> queue_producer:audit.events only; forward and route mint no node and have no USES (the tag was deferred only when EVERY hit of a row read no topic); stderr `[queue-const] folded 0 topic sites in 0 files (unresolved=2)` and `[queues] resolver paired=1 skipped_unresolved=0 ...`. Graded on qnames, never on a raw count.",
+  "expect_nodes": [
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:audit.events",
+      "exact": true,
+      "note": "the literal site in audit"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "queue_producer:unresolved:kafka",
+      "exact": true,
+      "note": "the identifier sites in forward and route, beside the literal of the same row"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "queue_producer:audit.events",
+      "to": "queue_consumer:audit.events",
+      "category": "QUEUE_FLOWS",
+      "exact": true,
+      "note": "the literal pairs as before"
+    },
+    {
+      "from": "src::publish::forward",
+      "to": "queue_producer:unresolved:kafka",
+      "category": "USES",
+      "exact": true,
+      "note": "`topic: topic` (a parameter) anchors in its function"
+    },
+    {
+      "from": "src::publish::route",
+      "to": "queue_producer:unresolved:kafka",
+      "category": "USES",
+      "exact": true,
+      "note": "`topic: cfg.topic`, a second unexplained site in another function, anchors too"
+    },
+    {
+      "from": "src::publish::audit",
+      "to": "queue_producer:audit.events",
+      "category": "USES",
+      "exact": true,
+      "note": "the literal site's owner is unchanged"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "queue_producer:unresolved:kafka",
+      "to": "queue_consumer:audit.events",
+      "category": "QUEUE_FLOWS",
+      "note": "a tag is structurally unpairable (A2.3)"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "topic",
+      "note": "the identifier is no topic name"
+    },
+    {
+      "kind": "QUEUE_PRODUCER",
+      "name": "cfg.topic",
+      "note": "the identifier chain is no topic name"
+    },
+    {
+      "from": "src::publish::audit",
+      "to": "queue_producer:unresolved:kafka",
+      "category": "USES",
+      "note": "the literal site is never the tag's"
+    },
+    {
+      "kind": "QUEUE_CONSUMER",
+      "name": "queue_consumer:unresolved:kafka",
+      "note": "the consumer names its topic at its only site"
+    }
+  ]
+}
