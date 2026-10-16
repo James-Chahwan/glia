@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 394,
+  "fixtures": 399,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -35,6 +35,14 @@
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "angular-template-url-bindings": {
+      "framework": "angular-template-url-bindings",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "USES": 1.0
       }
     },
     "arch-monorepo-flows": {
@@ -1327,9 +1335,19 @@
       "language": "go",
       "per_category": {}
     },
+    "models-go-wire": {
+      "framework": "models-go-wire",
+      "language": "go",
+      "per_category": {}
+    },
     "models-graphql-stock": {
       "framework": "models-graphql-stock",
       "language": "graphql",
+      "per_category": {}
+    },
+    "models-ts-wire-shapes": {
+      "framework": "models-ts-wire-shapes",
+      "language": "typescript",
       "per_category": {}
     },
     "module-cross-language": {
@@ -2450,6 +2468,15 @@
         "GRAPHQL_CALLS": 1.0
       }
     },
+    "xcut-graphql-transport": {
+      "framework": "xcut-graphql-transport",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "GRAPHQL_CALLS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
     "xcut-grpc-csharp": {
       "framework": "xcut-grpc-csharp",
       "language": "proto+csharp",
@@ -2617,6 +2644,14 @@
       "language": "typescript",
       "per_category": {
         "QUEUE_FLOWS": 1.0
+      }
+    },
+    "xcut-queue-nats-subject-fold": {
+      "framework": "xcut-queue-nats-subject-fold",
+      "language": "go",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0,
+        "USES": 1.0
       }
     },
     "xcut-queue-nest-processor": {
