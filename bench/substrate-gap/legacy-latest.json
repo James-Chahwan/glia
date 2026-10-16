@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 378,
+  "fixtures": 387,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -28,6 +28,13 @@
       "language": "typescript",
       "per_category": {
         "INJECTS": 1.0
+      }
+    },
+    "angular-inline-template-bindings": {
+      "framework": "angular-inline-template-bindings",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0
       }
     },
     "arch-monorepo-flows": {
@@ -634,6 +641,13 @@
         "WS_CONNECTS": 1.0
       }
     },
+    "framework-invoked-members": {
+      "framework": "framework-invoked-members",
+      "language": "typescript+dart+python",
+      "per_category": {
+        "INJECTS": 1.0
+      }
+    },
     "generated-provenance": {
       "framework": "generated-provenance",
       "language": "go+dart+csharp",
@@ -898,6 +912,13 @@
       "language": "go",
       "per_category": {
         "INJECTS": 1.0
+      }
+    },
+    "gqlgen-resolvers": {
+      "framework": "gqlgen-resolvers",
+      "language": "go+graphql",
+      "per_category": {
+        "HANDLED_BY": 1.0
       }
     },
     "graphql-decorator-scope": {
@@ -1373,6 +1394,11 @@
     "overlay-entrypoints": {
       "framework": "overlay-entrypoints",
       "language": "python",
+      "per_category": {}
+    },
+    "overlay-subdir-constraint": {
+      "framework": "overlay-subdir-constraint",
+      "language": "go",
       "per_category": {}
     },
     "php-braced-use": {
@@ -2086,6 +2112,14 @@
         "HANDLED_BY": 1.0
       }
     },
+    "ts-dir-index-imports": {
+      "framework": "ts-dir-index-imports",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "IMPORTS": 1.0
+      }
+    },
     "ts-endpoint-receiver-gate": {
       "framework": "ts-endpoint-receiver-gate",
       "language": "typescript",
@@ -2176,6 +2210,13 @@
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "ts-query-suffix-endpoints": {
+      "framework": "ts-query-suffix-endpoints",
+      "language": "typescript",
+      "per_category": {
+        "HTTP_CALLS": 1.0
       }
     },
     "ts-receiver-inherited-calls": {
@@ -2362,6 +2403,13 @@
       "language": "typescript",
       "per_category": {}
     },
+    "xcut-graphql-root-fields": {
+      "framework": "xcut-graphql-root-fields",
+      "language": "typescript",
+      "per_category": {
+        "GRAPHQL_CALLS": 1.0
+      }
+    },
     "xcut-graphql-sdl": {
       "framework": "xcut-graphql-sdl",
       "language": "graphql+typescript",
@@ -2501,6 +2549,14 @@
         "QUEUE_FLOWS": 1.0
       }
     },
+    "xcut-queue-mixed-topic-sites": {
+      "framework": "xcut-queue-mixed-topic-sites",
+      "language": "typescript",
+      "per_category": {
+        "QUEUE_FLOWS": 1.0,
+        "USES": 1.0
+      }
+    },
     "xcut-queue-msgtype-go": {
       "framework": "xcut-queue-msgtype",
       "language": "go",
@@ -2634,6 +2690,14 @@
       "framework": "xcut-websocket-precision",
       "language": "typescript+go",
       "per_category": {
+        "WS_CONNECTS": 1.0
+      }
+    },
+    "xcut-websocket-route-upgrade-local-url": {
+      "framework": "xcut-websocket-route-upgrade-local-url",
+      "language": "typescript",
+      "per_category": {
+        "USES": 1.0,
         "WS_CONNECTS": 1.0
       }
     },
