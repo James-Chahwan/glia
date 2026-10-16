@@ -55,6 +55,10 @@ pub mod code_span;
 /// Identity rule names, keys and normalisers for SAME_AS classes. (DD.2)
 pub mod same_as;
 
+/// The contract-model wire vocabulary: model SCHEMA_FIELDS, wire shapes,
+/// server-site MESSAGE_TYPE cells and JSON kinds. (DT.1a)
+pub mod wire;
+
 // ============================================================================
 // Node kinds
 // ============================================================================
@@ -1517,6 +1521,13 @@ pub enum NavFact {
     /// reads the clauses of a directory's non-test files as the name an
     /// import of that directory binds.
     GoPackageName { name: String },
+    /// Go (DT.1a, recorded by DT.1e): this callable's first result is a
+    /// slice or array of a named type, `[]T` / `[]*T` / `[N]T`; `elem` is `T`
+    /// as `go_type_ref` writes it (pointer stripped, qualifier kept:
+    /// `models.Order`). [`CodeNav::return_types`] deliberately records no
+    /// slice type, so the Go wire resolution (DT.1f) reads this fact to type
+    /// a handler value that is such a call's result as an array of `T`.
+    SliceResult { elem: String },
 }
 
 /// Where a Go router group's prefix comes from (CB.6; recorded by CB.23,
