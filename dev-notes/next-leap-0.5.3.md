@@ -603,6 +603,14 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W17 (DT.11b): GraphQL transport residuals: apollo-angular `httpLink.create({ uri })`, aliased imports
   (`import { ApolloClient as AC }`), namespace calls (`new Apollo.ApolloClient(..)`) and CommonJS-destructured urql mint no
   transport ENDPOINT.
+- W18 (DT.11c): an unowned GRAPHQL_RESOLVER (an SDL file outside every project) looks routes up under owner None only,
+  so a route inside a nested project of that repo is not seen and the transport is exempted; reading an unowned resolver
+  as covering every project of its repo is the conservative alternative.
+- W18 (DT.1f): Kina `[go-wire] unresolved=51` is mostly calls whose first result is a predeclared scalar (return_types
+  records nothing for scalars, so a scalar looks unknown), plus `err.Error()` and function-local types; a Go parser fact
+  for scalar first results would leave only real misses in the count.
+- W18 (DT.5c, question for James): an external template's receiver CALLS carry the component's `templateUrl` row in its
+  TS file, not the `.html` row, because CallSite has no file field; adding one touches every parser's CallSite literal.
 
 ## 3. Open questions for James
 
