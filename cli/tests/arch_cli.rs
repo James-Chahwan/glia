@@ -99,3 +99,129 @@ fn arch_mermaid_emits_a_link() {
     );
     assert!(String::from_utf8_lossy(&out.stderr).contains("[arch] 2 services,"));
 }
+
+// ----------------------------------------------------------------------------
+// DD.14 — identity classes in `glia arch`
+// ----------------------------------------------------------------------------
+
+/// Three repos declaring react (one package_name class, stored as a two-edge
+/// star), each with its own code, under cargo's per-test scratch dir.
+struct ThreeRepos {
+    root: PathBuf,
+}
+
+impl ThreeRepos {
+    fn new(tag: &str) -> Self {
+        let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("dd14-arch-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for repo in ["alpha", "beta", "gamma"] {
+            let dir = root.join(repo);
+            std::fs::create_dir_all(dir.join("src")).expect("mkdir");
+            std::fs::write(
+                dir.join("package.json"),
+                format!(
+                    "{{\"name\": \"{repo}\", \"version\": \"1.0.0\", \"dependencies\": {{\"react\": \"^18.2.0\"}}}}\n"
+                ),
+            )
+            .expect("write package.json");
+            std::fs::write(
+                dir.join("src/index.js"),
+                format!("export function {repo}Main() {{\n  return \"{repo}\";\n}}\n"),
+            )
+            .expect("write index.js");
+        }
+        Self { root }
+    }
+
+    /// `glia arch alpha --with beta --with gamma <flags>`: (SAME_AS link rows
+    /// `from -> to`, stderr).
+    fn arch(&self, flags: &[&str]) -> (Vec<String>, String) {
+        let path = |r: &str| self.root.join(r).to_string_lossy().into_owned();
+        let (beta, gamma) = (path("beta"), path("gamma"));
+        let mut args = vec!["arch".to_string(), path("alpha")];
+        for w in [&beta, &gamma] {
+            args.push("--with".to_string());
+            args.push(w.clone());
+        }
+        args.extend(flags.iter().map(|f| f.to_string()));
+        let out = Command::new(env!("CARGO_BIN_EXE_glia"))
+            .args(&args)
+            .env("GLIA_NO_PERSIST", "1")
+            .output()
+            .expect("glia runs");
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert!(out.status.success(), "glia {args:?} exited {:?}\n{stderr}", out.status);
+        for line in stderr.lines() {
+            if line.starts_with("[arch] ") || line.starts_with("[identity] collapse surface=arch") {
+                eprintln!("{line}");
+            }
+        }
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout is JSON");
+        let rows = v["links"]
+            .as_array()
+            .expect("links array")
+            .iter()
+            .filter(|l| l["mechanism"] == "SAME_AS")
+            .map(|l| {
+                format!(
+                    "{} -> {} {} x{} {}",
+                    l["from"].as_str().unwrap_or("?"),
+                    l["to"].as_str().unwrap_or("?"),
+                    l["channel"].as_str().unwrap_or("?"),
+                    l["count"],
+                    l["confidence"].as_str().unwrap_or("?"),
+                )
+            })
+            .collect();
+        (rows, stderr)
+    }
+}
+
+impl Drop for ThreeRepos {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn arch_same_as_class_links_every_service_pair() {
+    let repos = ThreeRepos::new("collapse");
+    let (rows, stderr) = repos.arch(&["--include-shared", "--json"]);
+    assert_eq!(
+        rows,
+        [
+            "alpha -> beta react x1 strong",
+            "alpha -> gamma react x1 strong",
+            "beta -> gamma react x1 strong",
+        ]
+    );
+    assert!(
+        stderr.contains("[identity] collapse surface=arch classes=1 walk_classes=0 folded=0 rows=3"),
+        "fired_on marker missing or wrong:\n{stderr}"
+    );
+    assert!(stderr.contains("[arch] 3 services, 3 links (keying=per_repo "), "{stderr}");
+
+    // --no-collapse: the stored star, two links into the center's service.
+    let (raw, raw_err) = repos.arch(&["--include-shared", "--json", "--no-collapse"]);
+    assert_eq!(raw.len(), 2, "{raw:?}");
+    assert!(raw.iter().all(|r| r.ends_with(" react x1 strong")), "{raw:?}");
+    assert!(!raw_err.contains("[identity] collapse surface=arch"), "off prints no collapse line");
+
+    // Without --include-shared no SAME_AS link is shown, collapsed or not.
+    let (hidden, _) = repos.arch(&["--json"]);
+    assert!(hidden.is_empty(), "{hidden:?}");
+    let (hidden_raw, _) = repos.arch(&["--json", "--no-collapse"]);
+    assert!(hidden_raw.is_empty(), "{hidden_raw:?}");
+}
+
+#[test]
+fn arch_no_collapse_is_identical_on_a_class_free_stack() {
+    let collapsed = glia_arch("--json");
+    let out = Command::new(env!("CARGO_BIN_EXE_glia"))
+        .args(["arch", &fixture("arch_monorepo"), "--json", "--no-collapse"])
+        .output()
+        .expect("glia runs");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.stdout, collapsed.stdout, "no SAME_AS edge: one answer");
+}

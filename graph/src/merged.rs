@@ -1,8 +1,9 @@
 //! `MergedGraph` — the multi-repo container plus its node-lookup surface
 //! (name / qname / span resolution, subsetting, clustering).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use glia_activation::algo::classes::Classes;
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::{CodeNav, edge_category, node_kind};
 use glia_core::{Confidence, Edge, EdgeCategoryId, Node, NodeId, NodeKindId, canonical_edge_cmp};
@@ -366,7 +367,10 @@ impl MergedGraph {
 /// `pick_primary`.
 ///
 /// CO_CHANGES (LF.5b) is undirected too: the history stage orients each pair
-/// by file path, which says nothing about which service is `from`.
+/// by file path, which says nothing about which service is `from`. So is
+/// SAME_AS (DD.14): the identity resolver points every member of a class at a
+/// center it picks by content (DD.5), which says nothing about either side's
+/// service.
 const SYMMETRIC: &[EdgeCategoryId] = &[
     edge_category::SHARES_SCHEMA,
     edge_category::SHARES_DATA_ENTITY,
@@ -375,6 +379,7 @@ const SYMMETRIC: &[EdgeCategoryId] = &[
     edge_category::SHARES_INFRA_REF,
     edge_category::SHARES_DEPENDENCY,
     edge_category::CO_CHANGES,
+    edge_category::SAME_AS,
 ];
 
 /// The one channel of every CO_CHANGES link. Two modules that change together
@@ -475,9 +480,55 @@ pub fn channel_of(qname: &str, name: &str) -> String {
 ///
 /// Output is sorted and deterministic — `BTreeMap` ordering plus first-write-
 /// wins example qnames plus symmetric-mechanism normalisation.
+///
+/// Every SAME_AS edge is a row of its own here, the raw star a class is
+/// stored as; [`cross_links_with`] reads them as classes.
 pub fn cross_links(
     merged: &MergedGraph,
     key_of: &dyn Fn(NodeId) -> Option<String>,
+) -> (Vec<CrossLink>, usize) {
+    cross_links_with(merged, key_of, None, None)
+}
+
+/// DD.14 — [`cross_links`] reading identity as classes. With both class sets
+/// `None` it IS `cross_links`.
+///
+/// - `same_as` (the classes of every SAME_AS edge, any tier): a SAME_AS edge
+///   whose two ends are one class of it is not bucketed by itself. Each such
+///   class instead gives ONE row per unordered pair of the distinct service
+///   keys of its members (`from < to`), mechanism `SAME_AS`, so a class of
+///   three repos stored as a two-edge star is three links, one per pair,
+///   never two links into the center's service. A member `key_of` cannot
+///   place is counted in `unplaced` once (not once per edge); a class whose
+///   members all sit under one key is one self link (`from == to`), which the
+///   caller drops and counts as it does every other. Per row: `count` is the
+///   classes on it (+1 per class), `confidence` the weakest SAME_AS edge
+///   confidence of those classes (the identity resolver writes FACT Strong,
+///   DERIVED Medium, HEURISTIC Weak). The channel and the example qnames are
+///   chosen by CONTENT, never by NodeId (the class minimum moves when a
+///   RepoId does): the channel is the least non-empty `channel_of` of the
+///   class's members, each example the least qname among the members under
+///   that key, and a row several classes share keeps the least
+///   `(example_from, example_to)`. A SAME_AS edge whose ends are not one
+///   class of `same_as` buckets by itself, as in `cross_links`.
+/// - `collapse` (the FACT / DERIVED classes, the ones an answer folds): every
+///   other edge buckets as before, but an edge with an end in one of its
+///   classes counts once per distinct `(collapse.rep(from),
+///   collapse.rep(to))` pair in its bucket (unordered for a [`SYMMETRIC`]
+///   mechanism), so two copies of one contract op documenting one route are
+///   one DOCUMENTS edge, not two. An edge between two nodes in no class is
+///   +1 as in `cross_links`, so a bucket no class touches keeps its count.
+///   `confidence` stays the weakest of EVERY edge in the bucket, and the
+///   bucket set is the same as without `collapse`: only counts change.
+///
+/// Deterministic: buckets are a `BTreeMap`, classes are read in
+/// representative order and every per-class choice is a minimum, so neither
+/// the edge order nor a NodeId decides a row.
+pub fn cross_links_with(
+    merged: &MergedGraph,
+    key_of: &dyn Fn(NodeId) -> Option<String>,
+    same_as: Option<&Classes>,
+    collapse: Option<&Classes>,
 ) -> (Vec<CrossLink>, usize) {
     // (qname, name) lookup, built by walking `g.nodes` — never by iterating
     // `nav`'s HashMaps, whose order is per-process (CODE_RULES §3).
@@ -498,12 +549,29 @@ pub fn cross_links(
         confidence: Confidence,
         example_from: String,
         example_to: String,
+        /// The distinct class-mapped `(from, to)` pairs counted, only under
+        /// `collapse`.
+        pairs: BTreeSet<(u64, u64)>,
     }
 
     let mut buckets: BTreeMap<(String, String, &'static str, String), Agg> = BTreeMap::new();
     let mut unplaced = 0usize;
+    // Representative of a `same_as` class -> the weakest SAME_AS edge
+    // confidence inside it.
+    let mut class_confidence: BTreeMap<u64, Confidence> = BTreeMap::new();
 
     for e in &merged.cross_edges {
+        if e.category == edge_category::SAME_AS
+            && let Some(classes) = same_as
+            && classes.class_of(e.from).is_some()
+            && classes.same(e.from, e.to)
+        {
+            class_confidence
+                .entry(classes.rep(e.from).0)
+                .and_modify(|c| *c = weakest(*c, e.confidence))
+                .or_insert(e.confidence);
+            continue;
+        }
         let (Some(from_key), Some(to_key)) = (key_of(e.from), key_of(e.to)) else {
             unplaced += 1;
             continue;
@@ -521,24 +589,108 @@ pub fn cross_links(
         if channel.is_empty() {
             channel = channel_of(tq, tname);
         }
-        let swap = SYMMETRIC.contains(&e.category) && from_key > to_key;
+        let symmetric = SYMMETRIC.contains(&e.category);
+        let swap = symmetric && from_key > to_key;
         let (from_key, to_key, example_from, example_to) = if swap {
             (to_key, from_key, tq.to_string(), fq.to_string())
         } else {
             (from_key, to_key, fq.to_string(), tq.to_string())
         };
-        buckets
+        // Only an edge with an end in a collapse class is counted by its
+        // class-mapped pair; one between two class-free nodes is +1, as in
+        // `cross_links`, so a bucket no class touches keeps its count.
+        let pair = collapse
+            .filter(|c| c.class_of(e.from).is_some() || c.class_of(e.to).is_some())
+            .map(|c| {
+                let (a, b) = (c.rep(e.from).0, c.rep(e.to).0);
+                if symmetric && a > b { (b, a) } else { (a, b) }
+            });
+        let agg = buckets
             .entry((from_key, to_key, edge_category::name(e.category), channel))
-            .and_modify(|a| {
-                a.count += 1;
-                a.confidence = weakest(a.confidence, e.confidence);
-            })
             .or_insert_with(|| Agg {
-                count: 1,
+                count: 0,
                 confidence: e.confidence,
                 example_from,
                 example_to,
+                pairs: BTreeSet::new(),
             });
+        agg.confidence = weakest(agg.confidence, e.confidence);
+        match pair {
+            Some(p) => {
+                if agg.pairs.insert(p) {
+                    agg.count += 1;
+                }
+            }
+            None => agg.count += 1,
+        }
+    }
+
+    if let Some(classes) = same_as {
+        let mechanism = edge_category::name(edge_category::SAME_AS);
+        for (rep, members) in classes.classes() {
+            // Only a class some SAME_AS edge formed is a SAME_AS link.
+            let Some(&confidence) = class_confidence.get(&rep.0) else {
+                continue;
+            };
+            let channel = members
+                .iter()
+                .map(|m| {
+                    let (q, name) = meta.get(m).copied().unwrap_or(("", ""));
+                    channel_of(q, name)
+                })
+                .filter(|c| !c.is_empty())
+                .min()
+                .unwrap_or_default();
+            // Service key -> the least member qname under it.
+            let mut keys: BTreeMap<String, &str> = BTreeMap::new();
+            for m in members {
+                let Some(key) = key_of(*m) else {
+                    unplaced += 1;
+                    continue;
+                };
+                let q = meta.get(m).map(|(q, _)| *q).unwrap_or("");
+                keys.entry(key)
+                    .and_modify(|least| {
+                        if q < *least {
+                            *least = q;
+                        }
+                    })
+                    .or_insert(q);
+            }
+            let keys: Vec<(String, &str)> = keys.into_iter().collect();
+            let mut rows: Vec<(usize, usize)> = Vec::new();
+            if keys.len() == 1 {
+                rows.push((0, 0));
+            }
+            for i in 0..keys.len() {
+                for j in (i + 1)..keys.len() {
+                    rows.push((i, j));
+                }
+            }
+            for (i, j) in rows {
+                let (from_key, example_from) = &keys[i];
+                let (to_key, example_to) = &keys[j];
+                let key = (from_key.clone(), to_key.clone(), mechanism, channel.clone());
+                buckets
+                    .entry(key)
+                    .and_modify(|a| {
+                        a.count += 1;
+                        a.confidence = weakest(a.confidence, confidence);
+                        let shown = (a.example_from.as_str(), a.example_to.as_str());
+                        if (*example_from, *example_to) < shown {
+                            a.example_from = example_from.to_string();
+                            a.example_to = example_to.to_string();
+                        }
+                    })
+                    .or_insert_with(|| Agg {
+                        count: 1,
+                        confidence,
+                        example_from: example_from.to_string(),
+                        example_to: example_to.to_string(),
+                        pairs: BTreeSet::new(),
+                    });
+            }
+        }
     }
 
     let links: Vec<CrossLink> = buckets
@@ -1103,6 +1255,193 @@ mod tests {
         assert_eq!(links[0].channel, "orders.v2");
         assert_eq!(links[0].count, 2);
         assert_eq!(links[0].confidence, Confidence::Weak, "weakest member wins");
+    }
+
+    // ------------------------------------------------------------------
+    // DD.14 — cross_links_with: SAME_AS as classes, flows counted by class
+    // ------------------------------------------------------------------
+
+    fn weak_edge(from: NodeId, to: NodeId, category: glia_core::EdgeCategoryId) -> Edge {
+        let mut e = xedge(from, to, category);
+        e.confidence = Confidence::Weak;
+        e
+    }
+
+    fn same_as_classes(merged: &MergedGraph) -> Classes {
+        Classes::from_pairs(
+            merged
+                .cross_edges
+                .iter()
+                .filter(|e| e.category == edge_category::SAME_AS)
+                .map(|e| (e.from, e.to)),
+        )
+    }
+
+    /// SAME_AS is symmetric: a member -> center edge from service `b` into
+    /// `a` lands `a -> b`, examples swapped with the keys.
+    #[test]
+    fn cross_links_keeps_same_as_from_le_to() {
+        let ra = RepoId::from_canonical("test://sa-a");
+        let rb = RepoId::from_canonical("test://sa-b");
+        let g_a = synth_repo_graph(ra, &[("a::Order", node_kind::MESSAGE_TYPE)]);
+        let g_b = synth_repo_graph(rb, &[("b::Order", node_kind::MESSAGE_TYPE)]);
+        let keys = keys_for(&[(&g_a, "a"), (&g_b, "b")]);
+        let a = id_of(ra, node_kind::MESSAGE_TYPE, "a::Order");
+        let b = id_of(rb, node_kind::MESSAGE_TYPE, "b::Order");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        merged.cross_edges = vec![xedge(b, a, edge_category::SAME_AS)];
+
+        let (links, unplaced) = cross_links(&merged, &|id| keys.get(&id).cloned());
+        assert_eq!(unplaced, 0);
+        assert_eq!(links.len(), 1, "{links:?}");
+        let l = &links[0];
+        assert_eq!((l.from.as_str(), l.to.as_str(), l.mechanism), ("a", "b", "SAME_AS"));
+        assert_eq!((l.example_from_qname.as_str(), l.example_to_qname.as_str()), ("a::Order", "b::Order"));
+        assert_eq!(l.channel, "Order");
+    }
+
+    /// Three repos' copies of one package, stored as a two-edge star into
+    /// `a`'s copy: `cross_links` gives the star (two rows, both touching `a`),
+    /// `cross_links_with` one row per service pair, each counting the class
+    /// once at its weakest edge. An unplaced member is counted once, and a
+    /// class inside one service is one self link.
+    #[test]
+    fn cross_links_with_reads_a_same_as_class_per_service_pair() {
+        const PKG: &str = "package:npm:react";
+        let repos: Vec<RepoId> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|r| RepoId::from_canonical(&format!("test://sa3-{r}")))
+            .collect();
+        let graphs: Vec<RepoGraph> = repos
+            .iter()
+            .map(|r| synth_repo_graph(*r, &[(PKG, node_kind::PACKAGE_DEP), ("m::Dto", node_kind::CLASS)]))
+            .collect();
+        // `d` is unplaced; a and c's Dto copies are both keyed "a".
+        let mut keys = keys_for(&[(&graphs[0], "a"), (&graphs[1], "b"), (&graphs[2], "c")]);
+        let pkg = |i: usize| id_of(repos[i], node_kind::PACKAGE_DEP, PKG);
+        let dto = |i: usize| id_of(repos[i], node_kind::CLASS, "m::Dto");
+        keys.insert(dto(2), "a".to_string());
+        let mut merged = MergedGraph::new(graphs);
+        merged.cross_edges = vec![
+            xedge(pkg(1), pkg(0), edge_category::SAME_AS),
+            weak_edge(pkg(2), pkg(0), edge_category::SAME_AS),
+            xedge(pkg(3), pkg(0), edge_category::SAME_AS),
+            xedge(dto(2), dto(0), edge_category::SAME_AS),
+        ];
+        let key = |id: NodeId| keys.get(&id).cloned();
+
+        let (star, star_unplaced) = cross_links(&merged, &key);
+        let star_rows: Vec<(&str, &str)> = star
+            .iter()
+            .filter(|l| l.mechanism == "SAME_AS" && l.channel == PKG)
+            .map(|l| (l.from.as_str(), l.to.as_str()))
+            .collect();
+        assert_eq!(star_rows, [("a", "b"), ("a", "c")], "control: the raw star");
+        assert_eq!(star_unplaced, 1, "the d -> a edge");
+
+        let classes = same_as_classes(&merged);
+        assert_eq!(classes.len(), 2);
+        let (links, unplaced) = cross_links_with(&merged, &key, Some(&classes), None);
+        assert_eq!(unplaced, 1, "d's copy, once");
+        let rows: Vec<(&str, &str, &str, usize, Confidence)> = links
+            .iter()
+            .map(|l| (l.from.as_str(), l.to.as_str(), l.channel.as_str(), l.count, l.confidence))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("a", "a", "Dto", 1, Confidence::Strong),
+                ("a", "b", PKG, 1, Confidence::Weak),
+                ("a", "c", PKG, 1, Confidence::Weak),
+                ("b", "c", PKG, 1, Confidence::Weak),
+            ],
+            "every pair of the class's services, the weakest edge of the class; \
+             the Dto class sits in one service: a self link"
+        );
+        assert!(links.iter().all(|l| l.mechanism == "SAME_AS"));
+        assert_eq!(links[3].example_from_qname, PKG);
+
+        // The edge order decides nothing.
+        let mut reversed = merged.clone();
+        reversed.cross_edges.reverse();
+        let (again, again_unplaced) = cross_links_with(&reversed, &key, Some(&classes), None);
+        assert_eq!((again, again_unplaced), (links, unplaced));
+    }
+
+    /// Two copies of one contract op (one collapse class) documenting one
+    /// route: one DOCUMENTS edge under `collapse`, two without; confidence is
+    /// the weakest of every edge either way, and the bucket set is unchanged.
+    #[test]
+    fn cross_links_with_counts_class_mapped_pairs_once() {
+        let rw = RepoId::from_canonical("test://cc-web");
+        let ra = RepoId::from_canonical("test://cc-api");
+        let g_w = synth_repo_graph(
+            rw,
+            &[
+                ("contract::docs::a::openapi::GET:/orders", node_kind::DOC_SECTION),
+                ("contract::docs::b::openapi::GET:/orders", node_kind::DOC_SECTION),
+            ],
+        );
+        let g_a = synth_repo_graph(ra, &[("GET /orders", node_kind::ROUTE), ("GET /items", node_kind::ROUTE)]);
+        let keys = keys_for(&[(&g_w, "web"), (&g_a, "api")]);
+        let op_a = id_of(rw, node_kind::DOC_SECTION, "contract::docs::a::openapi::GET:/orders");
+        let op_b = id_of(rw, node_kind::DOC_SECTION, "contract::docs::b::openapi::GET:/orders");
+        let orders = id_of(ra, node_kind::ROUTE, "GET /orders");
+        let mut merged = MergedGraph::new(vec![g_w, g_a]);
+        merged.cross_edges = vec![
+            xedge(op_a, orders, edge_category::DOCUMENTS),
+            weak_edge(op_b, orders, edge_category::DOCUMENTS),
+            xedge(op_b, op_a, edge_category::SAME_AS),
+        ];
+        let key = |id: NodeId| keys.get(&id).cloned();
+        let classes = same_as_classes(&merged);
+        let documents = |links: &[CrossLink]| -> Vec<(String, String, usize, Confidence)> {
+            links
+                .iter()
+                .filter(|l| l.mechanism == "DOCUMENTS")
+                .map(|l| (l.from.clone(), l.to.clone(), l.count, l.confidence))
+                .collect()
+        };
+
+        let (raw, _) = cross_links(&merged, &key);
+        let want = |count| vec![("web".to_string(), "api".to_string(), count, Confidence::Weak)];
+        assert_eq!(documents(&raw), want(2), "control: one per op");
+        let (folded, unplaced) = cross_links_with(&merged, &key, Some(&classes), Some(&classes));
+        assert_eq!(unplaced, 0);
+        assert_eq!(documents(&folded), want(1), "one op, documented once");
+        let (only_collapse, _) = cross_links_with(&merged, &key, None, Some(&classes));
+        assert_eq!(documents(&only_collapse), want(1));
+        // The class inside one service: a self link.
+        let same_as: Vec<(&str, &str, usize)> = folded
+            .iter()
+            .filter(|l| l.mechanism == "SAME_AS")
+            .map(|l| (l.from.as_str(), l.to.as_str(), l.count))
+            .collect();
+        assert_eq!(same_as, [("web", "web", 1)]);
+    }
+
+    /// No SAME_AS class, no collapse class: `cross_links_with` is
+    /// `cross_links`, row for row.
+    #[test]
+    fn cross_links_with_no_classes_is_cross_links() {
+        let ra = RepoId::from_canonical("test://nc-a");
+        let rb = RepoId::from_canonical("test://nc-b");
+        let g_a = synth_repo_graph(ra, &[("endpoint:GET:/users", node_kind::ENDPOINT)]);
+        let g_b = synth_repo_graph(rb, &[("route:/users", node_kind::ROUTE)]);
+        let keys = keys_for(&[(&g_a, "a"), (&g_b, "b")]);
+        let ep = id_of(ra, node_kind::ENDPOINT, "endpoint:GET:/users");
+        let route = id_of(rb, node_kind::ROUTE, "route:/users");
+        let mut merged = MergedGraph::new(vec![g_a, g_b]);
+        merged.cross_edges = vec![
+            xedge(ep, route, edge_category::HTTP_CALLS),
+            weak_edge(ep, route, edge_category::HTTP_CALLS),
+        ];
+        let key = |id: NodeId| keys.get(&id).cloned();
+        let empty = Classes::default();
+        let head = cross_links(&merged, &key);
+        assert_eq!(head.0[0].count, 2);
+        assert_eq!(cross_links_with(&merged, &key, Some(&empty), Some(&empty)), head);
+        assert_eq!(cross_links_with(&merged, &key, None, None), head);
     }
 
     #[test]

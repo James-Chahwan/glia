@@ -17,17 +17,26 @@
 //!    Flutter / React Native app generates (`android/`, `ios/`, …) are never
 //!    keyed: they fold into the app that owns them (LA.5).
 //! 3. [`service_map`] — the rendered answer: services, the links between them
-//!    (via `glia_graph::cross_links`), and the honest residuals
+//!    (via `glia_graph::cross_links_with`), and the honest residuals
 //!    (`self_links`, `unlocated_nodes`).
+//!
+//! Identity classes (DD.14, [`service_map_collapsed`]): a SAME_AS class is one
+//! link per pair of the services its members sit in, and every other link
+//! counts the distinct class-mapped endpoint pairs, so one contract op
+//! declared twice documents its route once. `Collapse::off()` is the raw
+//! member -> center star.
 //!
 //! Nothing here reaches `MergedGraph`: the human repo label rides on
 //! `GenerateResult`, deliberately, so the `.gmap` bytes are unchanged.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use glia_activation::algo::classes::Classes;
 use glia_code_domain::{cell_type, edge_category, node_kind};
-use glia_core::{CellPayload, Confidence, EdgeCategoryId, Node, NodeId};
-use glia_graph::{MergedGraph, cross_links};
+use glia_core::{CellPayload, Confidence, Edge, EdgeCategoryId, Node, NodeId};
+use glia_graph::{MergedGraph, cross_links, cross_links_with};
+
+use crate::identity::{Collapse, IdentityView};
 
 // ============================================================================
 // 1. node → file
@@ -544,16 +553,53 @@ fn confidence_name(c: Confidence) -> &'static str {
     }
 }
 
-/// The service map under [`default_keying`].
+/// The service map under [`default_keying`], identity classes collapsed
+/// (`Collapse::default()`, [`service_map_collapsed`]).
 pub fn service_map(merged: &MergedGraph, repo_labels: &BTreeMap<u64, String>) -> ServiceMap {
     service_map_with(merged, repo_labels, &default_keying(merged))
 }
 
-/// The service map under an explicit keying.
+/// The service map under an explicit keying, identity classes collapsed
+/// (`Collapse::default()`, [`service_map_collapsed`]).
 pub fn service_map_with(
     merged: &MergedGraph,
     repo_labels: &BTreeMap<u64, String>,
     keying: &ServiceKeying,
+) -> ServiceMap {
+    service_map_collapsed(merged, repo_labels, keying, &Collapse::default())
+}
+
+/// The service map under `keying`, reading identity (DD.14) as `collapse`
+/// says.
+///
+/// - **On** (the default): the SAME_AS links come from the classes of every
+///   SAME_AS edge, any tier (so vendored candidates show as sharing links
+///   too): ONE row per pair of the services a class's members sit in, `count`
+///   the classes on that pair, `confidence` the class's weakest edge. Every
+///   other link counts the distinct endpoint pairs once their ends are
+///   mapped through the FACT / DERIVED classes, the ones every answer folds
+///   (`engine::identity`'s collapse set, read through [`IdentityView`]): two
+///   copies of one op documenting one route are one DOCUMENTS edge.
+///   Vendored copies are separate deployments and keep their own flows.
+/// - **Off** (`Collapse::off()`, `glia arch --no-collapse`): `cross_links`,
+///   one row per stored star edge (`member -> center`).
+///
+/// Either way, under [`ServiceKeying::PerRepo`] a SAME_AS member with no file
+/// (a PACKAGE_DEP: a manifest's dependency has no POSITION) is placed in its
+/// repo's service for the links, as `glia identity` names it by its repo; it
+/// stays out of the service summaries and is still counted in
+/// `unlocated_nodes`. Under a single-repo keying it stays unplaced. A graph
+/// with no SAME_AS edge answers exactly as before, either way.
+///
+/// fired_on, beside the unchanged `[arch] <n> services, <m> links ...`:
+/// `[identity] collapse surface=arch classes=<c> walk_classes=<w> folded=<f> rows=<n>`
+/// once, when collapse is on and a FACT / DERIVED class exists; `folded` is
+/// the cross edges a class-mapped pair already counted, `rows` the link rows.
+pub fn service_map_collapsed(
+    merged: &MergedGraph,
+    repo_labels: &BTreeMap<u64, String>,
+    keying: &ServiceKeying,
+    collapse: &Collapse,
 ) -> ServiceMap {
     let (files, unlocated_nodes) = file_index(merged);
 
@@ -600,7 +646,66 @@ pub fn service_map_with(
         }
     }
 
-    let (raw, unplaced) = cross_links(merged, &|id| svc_of.get(&id).cloned());
+    // A SAME_AS member no file places (a PACKAGE_DEP) still belongs to its
+    // repo's service under PerRepo; links only, never the summaries.
+    let mut member_svc: HashMap<NodeId, String> = HashMap::new();
+    let same_as_edges: Vec<&Edge> = merged
+        .cross_edges
+        .iter()
+        .filter(|e| e.category == edge_category::SAME_AS)
+        .collect();
+    if matches!(keying, ServiceKeying::PerRepo) && !same_as_edges.is_empty() {
+        let ends: HashSet<NodeId> = same_as_edges.iter().flat_map(|e| [e.from, e.to]).collect();
+        for g in &merged.graphs {
+            for n in &g.nodes {
+                if ends.contains(&n.id) && !svc_of.contains_key(&n.id) {
+                    member_svc
+                        .entry(n.id)
+                        .or_insert_with(|| service_of("", g.repo.0, keying, repo_labels));
+                }
+            }
+        }
+    }
+    let key_of = |id: NodeId| svc_of.get(&id).or_else(|| member_svc.get(&id)).cloned();
+
+    // Off, or no SAME_AS edge at all: the raw links, exactly as before.
+    let view = (collapse.enabled && !same_as_edges.is_empty())
+        .then(|| IdentityView::new(merged, collapse));
+    let mut folded = 0usize;
+    let (raw, unplaced) = match &view {
+        Some(view) => {
+            let same_as = Classes::from_pairs(same_as_edges.iter().map(|e| (e.from, e.to)));
+            // The view's collapse classes: a SAME_AS edge joins two members of
+            // one FACT / DERIVED class exactly when both display as one node
+            // (`display` is one member per class and the node itself outside
+            // every class), so these pairs rebuild exactly that set.
+            let folds = Classes::from_pairs(
+                same_as_edges
+                    .iter()
+                    .filter(|e| e.from != e.to && view.display(e.from) == view.display(e.to))
+                    .map(|e| (e.from, e.to)),
+            );
+            let collapse_set = (!folds.is_empty()).then_some(&folds);
+            let (raw, unplaced) = cross_links_with(merged, &key_of, Some(&same_as), collapse_set);
+            if collapse_set.is_some() {
+                let same_as_name = edge_category::name(edge_category::SAME_AS);
+                let placed = merged
+                    .cross_edges
+                    .iter()
+                    .filter(|e| e.category != edge_category::SAME_AS)
+                    .filter(|e| key_of(e.from).is_some() && key_of(e.to).is_some())
+                    .count();
+                let counted: usize = raw
+                    .iter()
+                    .filter(|l| l.mechanism != same_as_name)
+                    .map(|l| l.count)
+                    .sum();
+                folded = placed.saturating_sub(counted);
+            }
+            (raw, unplaced)
+        }
+        None => cross_links(merged, &key_of),
+    };
     let buckets = raw.len();
     let mut self_links = 0usize;
     let mut links: Vec<ServiceLink> = Vec::new();
@@ -671,6 +776,11 @@ pub fn service_map_with(
                 folded.join(", ")
             );
         }
+    }
+
+    // DD.14 fired_on: silent unless a FACT / DERIVED class exists.
+    if let Some(view) = &view {
+        view.collapse_marker("arch", links.len() + folded, links.len());
     }
 
     // fired_on marker. Carries A9.1's `buckets` / `unplaced` too — `cross_links`

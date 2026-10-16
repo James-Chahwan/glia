@@ -151,7 +151,7 @@ glia cache gc <STORE> [--json] [--keep-stamps <KEEP_STAMPS>] [--max-bytes <BYTES
     the oldest objects over --max-bytes (K / M / G suffixes).
 
 # The whole stack
-glia arch <REPO> [--include-shared] [--json] [--mermaid] [--with <WITH>]...
+glia arch <REPO> [--include-shared] [--json] [--mermaid] [--no-collapse] [--with <WITH>]...
     The services and the cross-service links between them, each with its mechanism
     and channel. One repo keys services by top-level directory; SHARES_* and
     DOCUMENTS links show only with --include-shared.

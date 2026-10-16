@@ -1,8 +1,17 @@
 //! `glia arch` (A9.4) — the human surface over A9.2's service map: the
 //! services in the stack and the cross-service links between them, as a
 //! table, `--json` or `--mermaid`.
+//!
+//! DD.14: identity is read as classes (`glia_engine::arch::
+//! service_map_collapsed`). A SAME_AS class is one link per pair of the
+//! services its members sit in, and every other link counts its edges once
+//! per class-mapped endpoint pair. `--no-collapse` is the raw star: one link
+//! per stored `member -> center` SAME_AS edge, every edge counted.
+//! `--include-shared` still gates every non-flow link, SAME_AS included.
 
 use std::collections::BTreeMap;
+
+use glia_engine::identity::Collapse;
 
 use crate::common::{edge_category_name, generate_for};
 
@@ -19,11 +28,17 @@ pub(crate) struct Args {
     /// Emit a Mermaid `graph LR` instead of a table.
     #[arg(long, conflicts_with = "json")]
     mermaid: bool,
-    /// Also show non-flow links (SHARES_SCHEMA / SHARES_CONFIG /
+    /// Also show non-flow links (SAME_AS / SHARES_SCHEMA / SHARES_CONFIG /
     /// DOCUMENTS / …), hidden by default: the co-ownership ones are O(n²)
     /// across merged repos and none of them is a call between services.
     #[arg(long)]
     include_shared: bool,
+    /// One SAME_AS link per stored identity edge (the member -> center star)
+    /// and every cross edge counted, as built. By default an identity class
+    /// is one link per pair of the services it spans, and two copies of one
+    /// thing (a FACT / DERIVED class) count once in every other link.
+    #[arg(long)]
+    no_collapse: bool,
 }
 
 pub(crate) fn run(args: Args) -> i32 {
@@ -37,8 +52,20 @@ pub(crate) fn run(args: Args) -> i32 {
             return 2;
         }
     };
-    // The `[arch] …` fired_on marker is emitted here, inside the engine.
-    let mut map = glia_engine::service_map(&result.merged, &result.repo_labels);
+    let collapse = if args.no_collapse {
+        Collapse::off()
+    } else {
+        Collapse::with_labels(&result.repo_labels)
+    };
+    // The `[arch] …` and `[identity] collapse surface=arch …` fired_on markers
+    // are emitted here, inside the engine.
+    let keying = glia_engine::arch::default_keying(&result.merged);
+    let mut map = glia_engine::arch::service_map_collapsed(
+        &result.merged,
+        &result.repo_labels,
+        &keying,
+        &collapse,
+    );
     if !include_shared {
         drop_non_flow_links(&mut map);
     }
@@ -53,10 +80,11 @@ pub(crate) fn run(args: Args) -> i32 {
 }
 
 /// Keep only the directional flow links (`FLOW_MECHANISMS`) — a real call from
-/// `from` to `to`. Everything else `cross_links` returns is co-ownership
-/// (`SHARES_SCHEMA`, `SHARES_DEPENDENCY`, …) or documentation (`DOCUMENTS`):
-/// true, but not traffic. The `SHARES_*` ones are also O(n²) across merged
-/// repos, so one shared npm dependency would bury every real call.
+/// `from` to `to`. Everything else `cross_links_with` returns is co-ownership
+/// (`SAME_AS`, `SHARES_SCHEMA`, …) or documentation (`DOCUMENTS`): true, but
+/// not traffic. SAME_AS is one link per service pair per identity class, so it
+/// is O(n²) across merged repos: the npm dependencies every repo shares would
+/// bury every real call.
 ///
 /// Recomputes `inbound` / `outbound`: those count *surviving link rows*, so
 /// leaving them at the unfiltered value would print an `in`/`out` column that
