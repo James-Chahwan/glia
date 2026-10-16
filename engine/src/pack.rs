@@ -8,7 +8,8 @@
 //! # The pipeline
 //!
 //! 1. **Seeds.** [`pack`] resolves the query through [`find_nodes`] (its first
-//!    [`PackArgs::seeds`] rows, [`PackArgs::scope`] applied). A seed found by
+//!    [`PackArgs::seeds`] rows, [`PackArgs::scope`] applied, identity collapse
+//!    off: every matching member of a SAME_AS class seeds). A seed found by
 //!    `exact_qname` / `exact_name` / `exact_ci` / `qname_suffix` is tier `fact`,
 //!    one found by a fuzzier find tier `heuristic`, and `matched` names the tier.
 //!    When any row is a fact, the heuristic rows are not seeds: fuzzy seeds
@@ -95,6 +96,7 @@ use glia_projection_text::ladder::{Fidelity, Pick, render_node, render_pack, ren
 use crate::absence::{self, Absence};
 use crate::answers::{Locator, in_scope, resolve_scope};
 use crate::find::{FindOptions, find_nodes};
+use crate::identity::Collapse;
 
 /// `PackArgs::default().budget_tokens`.
 pub const DEFAULT_BUDGET_TOKENS: usize = 8000;
@@ -222,9 +224,12 @@ pub fn estimate_tokens(bytes: usize, bytes_per_token_x10: u32) -> usize {
 /// [`find_nodes`], then the pipeline in the module doc. Prints one
 /// `[pack] query=...` line.
 pub fn pack(merged: &MergedGraph, query: &str, args: &PackArgs) -> Pack {
+    // Not one of the collapsing answers (DD.9): every member of an identity
+    // class that matches is its own seed, as before the fold.
     let opts = FindOptions {
         top_k: args.seeds.max(1),
         scope: args.scope.clone(),
+        collapse: Collapse::off(),
         ..FindOptions::default()
     };
     let found = find_nodes(merged, query, &opts);

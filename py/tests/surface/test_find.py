@@ -3,16 +3,26 @@
 lookup (find_node, find_nodes_by_qname and resolve_signal are gone), and
 `find` / `resolve` return the LD.8a envelope as a native dict. LD.6: every
 row carries a bool `live`, read off one liveness walk per graph (PyGraph caches
-it, so only the first answer prints the `[live] profile=` walk line).
+it, so only the first answer prints the `[live] profile=` walk line). DD.9:
+`find(..., collapse=True)` folds a FACT / DERIVED identity class (a package two
+repos declare) to one row carrying `identity`; `collapse=False` is the raw rows.
 Shared helpers: test_build.py."""
 from __future__ import annotations
 
+import pathlib
 import sys
 import tempfile
 
 from test_build import Checks, fixture_repo, node_ids, params, rg, stderr_of
 
 FIND_KEYS = ["id", "qname", "name", "kind", "live", "file", "line", "match"]
+IDENTITY_KEYS = ["tier", "rules", "diverged", "also_in"]
+ALSO_IN_KEYS = ["repo", "qname", "file", "line"]
+
+
+def manifest(repo: str, extra: str) -> str:
+    return ('{"name": "%s", "dependencies": {"react": "^18.2.0", "%s": "1.0.0"}}\n'
+            % (repo, extra))
 RESOLVE_KEYS = ["id", "qname", "name", "kind", "score", "live", "file", "line"]
 
 
@@ -21,7 +31,8 @@ def main() -> int:
     for gone in ("resolve_signal", "find_node", "find_nodes_by_qname"):
         c.check(f"PyGraph.{gone} removed", not hasattr(rg.PyGraph, gone))
     c.check("find signature",
-            params(rg.PyGraph.find) == [("query", None), ("top_k", 20), ("kinds", None), ("scope", None)],
+            params(rg.PyGraph.find) == [("query", None), ("top_k", 20), ("kinds", None), ("scope", None),
+                                        ("collapse", True)],
             params(rg.PyGraph.find))
 
     with tempfile.TemporaryDirectory(prefix="glia-surface-find-") as tmp:
@@ -75,6 +86,36 @@ def main() -> int:
         c.check("resolve live flags: main / helper live, module and step_0 dead",
                 (live.get("app::main"), live.get("app::helper"), live.get("app"), live.get("app::step_0"))
                 == (True, True, False, False), live)
+        c.check("a row outside any identity class has no identity key",
+                all("identity" not in r for r in rows), rows[:1])
+
+    # DD.9: a package both repos declare is one identity class (package_name).
+    with tempfile.TemporaryDirectory(prefix="glia-surface-find-identity-") as tmp:
+        root = pathlib.Path(tmp)
+        for repo, extra in (("web", "left-pad"), ("admin", "typescript")):
+            (root / repo).mkdir()
+            (root / repo / "package.json").write_text(manifest(repo, extra))
+            (root / repo / "index.js").write_text("export const x = 1;\n")
+        g = rg.generate_many([str(root / "web"), str(root / "admin")])
+        a, err = stderr_of(lambda: g.find("package:npm:react"))
+        c.check("collapse marker", "[identity] collapse surface=find classes=" in err, err[-400:])
+        rows = a["results"]
+        c.check("collapse: one row per class", len(rows) == 1, rows)
+        row = rows[0] if rows else {}
+        c.check("collapsed row keys: FIND_KEYS + identity", list(row) == FIND_KEYS + ["identity"], list(row))
+        ident = row.get("identity") or {}
+        c.check("identity keys", list(ident) == IDENTITY_KEYS, ident)
+        c.check("identity tier / rules", (ident.get("tier"), ident.get("rules")) == ("fact", ["package_name"]),
+                ident)
+        also = ident.get("also_in") or []
+        c.check("also_in: the other repo", len(also) == 1 and list(also[0]) == ALSO_IN_KEYS
+                and also[0]["repo"] in ("web", "admin") and also[0]["qname"] == "package:npm:react",
+                also)
+        raw = g.find("package:npm:react", collapse=False)["results"]
+        c.check("collapse=False: one row per member", len(raw) == 2, raw)
+        c.check("collapse=False rows carry no identity", all("identity" not in r for r in raw), raw)
+        c.check("the collapsed row is the best-ranked member", raw and row.get("id") == raw[0]["id"],
+                (row.get("id"), raw[:1]))
     return c.done()
 
 

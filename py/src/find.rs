@@ -11,6 +11,7 @@ use glia_code_domain::node_kind;
 use glia_core::{NodeId, NodeKindId};
 use glia_engine::absence::Answer;
 use glia_engine::find::{FindOptions, FoundNode, find_nodes_with_live};
+use glia_engine::identity::Collapse;
 use glia_graph::MergedGraph;
 
 use crate::convert::to_py;
@@ -41,7 +42,10 @@ fn kinds_by_name(names: &[String]) -> Result<Vec<NodeKindId>, String> {
 /// The whole body of [`PyGraph::find`], minus pyo3 — kept pyo3-free so
 /// `cargo test -p glia-py` covers it (see the crate doc). An empty
 /// `kinds` list filters nothing, as `glia find` with no `--kind`. `live` is
-/// the graph's cached `entrypoint_reachable` set (`PyGraph::live`).
+/// the graph's cached `entrypoint_reachable` set (`PyGraph::live`);
+/// `collapse` is `Collapse::with_labels(&PyGraph::repo_labels)` or
+/// `Collapse::off()` (DD.9).
+#[allow(clippy::too_many_arguments)]
 fn find_answer(
     merged: &MergedGraph,
     live: &HashSet<NodeId>,
@@ -49,6 +53,7 @@ fn find_answer(
     top_k: usize,
     kinds: &[String],
     scope: Option<String>,
+    collapse: Collapse,
     unparsed_files: usize,
 ) -> Result<Answer<FoundNode>, String> {
     let kinds = kinds_by_name(kinds)?;
@@ -56,6 +61,7 @@ fn find_answer(
     opts.top_k = top_k;
     opts.kinds = (!kinds.is_empty()).then_some(kinds);
     opts.scope = scope;
+    opts.collapse = collapse;
     let mut answer = find_nodes_with_live(merged, live, query, &opts);
     if let Some(a) = answer.absence.as_mut() {
         a.unparsed_files = unparsed_files;
@@ -88,7 +94,15 @@ impl PyGraph {
     /// valid ones. `scope` (a repo-relative path or a project label, see
     /// `project_roots`) is a FILTER applied before `top_k`: a node whose file
     /// is outside it is dropped, one with no file is kept.
-    #[pyo3(signature = (query, top_k=20, kinds=None, scope=None))]
+    ///
+    /// `collapse` (DD.9, default `True`): a FACT / DERIVED identity class (one
+    /// package, message or contract op in several repos or files) is ONE row,
+    /// the best-ranked matching member, folded before `top_k` so a class never
+    /// takes two slots; that row gains an `identity` dict `{tier, rules,
+    /// diverged, also_in}` (`also_in`: `{repo, qname, file, line}` of every
+    /// other member, `repo` a build label). Rows outside a class have no
+    /// `identity` key. `collapse=False` is one row per member.
+    #[pyo3(signature = (query, top_k=20, kinds=None, scope=None, collapse=true))]
     fn find(
         &self,
         py: Python<'_>,
@@ -96,7 +110,13 @@ impl PyGraph {
         top_k: usize,
         kinds: Option<Vec<String>>,
         scope: Option<String>,
+        collapse: bool,
     ) -> PyResult<Py<PyAny>> {
+        let collapse = if collapse {
+            Collapse::with_labels(&self.repo_labels)
+        } else {
+            Collapse::off()
+        };
         let answer = find_answer(
             &self.merged,
             self.live(),
@@ -104,6 +124,7 @@ impl PyGraph {
             top_k,
             kinds.as_deref().unwrap_or_default(),
             scope,
+            collapse,
             self.parse_errors.len(),
         )
         .map_err(PyValueError::new_err)?;
@@ -179,22 +200,22 @@ mod tests {
     fn find_is_the_engine_find_with_kind_names() {
         let merged = built("kinds");
         let live = glia_engine::entrypoint_reachable(&merged);
-        let all = find_answer(&merged, &live, "helper", 20, &[], None, 0).expect("answer");
+        let all = find_answer(&merged, &live, "helper", 20, &[], None, Collapse::default(), 0).expect("answer");
         let engine = find_nodes(&merged, "helper", &FindOptions::default());
         assert_eq!(all.results, engine.results);
         assert_eq!(all.results.first().map(|r| r.qname.as_str()), Some("app::helper"));
         // LD.6: `main` calls `helper`, so both are live; the rows carry it.
         assert!(all.results.first().is_some_and(|r| r.live), "{:?}", all.results);
 
-        let funcs = find_answer(&merged, &live, "helper", 0, &["function".into()], None, 0).expect("answer");
+        let funcs = find_answer(&merged, &live, "helper", 0, &["function".into()], None, Collapse::default(), 0).expect("answer");
         assert!(!funcs.results.is_empty());
         assert!(funcs.results.iter().all(|r| r.kind == "FUNCTION"), "{:?}", funcs.results);
 
-        let bad = find_answer(&merged, &live, "helper", 20, &["FUNCTOIN".into()], None, 0);
+        let bad = find_answer(&merged, &live, "helper", 20, &["FUNCTOIN".into()], None, Collapse::default(), 0);
         let err = bad.expect_err("an unknown kind name is an error");
         assert!(err.contains("unknown kind 'FUNCTOIN'") && err.contains("FUNCTION"), "{err}");
 
-        let scoped = find_answer(&merged, &live, "helper", 0, &[], Some("svc".into()), 0).expect("answer");
+        let scoped = find_answer(&merged, &live, "helper", 0, &[], Some("svc".into()), Collapse::default(), 0).expect("answer");
         assert!(!scoped.results.is_empty());
         assert!(
             scoped.results.iter().all(|r| r.file.as_deref().is_none_or(|f| f.starts_with("svc/"))),
@@ -202,9 +223,50 @@ mod tests {
             scoped.results
         );
 
-        let none = find_answer(&merged, &live, "zzqqxx", 20, &[], None, 7).expect("answer");
+        let none = find_answer(&merged, &live, "zzqqxx", 20, &[], None, Collapse::default(), 7).expect("answer");
         assert!(none.results.is_empty());
         let absence = none.absence.expect("an empty answer carries its absence");
         assert_eq!((absence.reason, absence.unparsed_files), ("no_match", 7));
+    }
+
+    /// DD.9: `collapse=True` (the build's labels) folds a package two repos
+    /// declare to one row whose `also_in` names the other repo by label;
+    /// `collapse=False` is the two raw rows, with no `identity` key.
+    #[test]
+    fn collapse_folds_a_shared_package() {
+        let root = std::env::temp_dir().join(format!("glia-dd9-find-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (repo, dep) in [("web", "left-pad"), ("admin", "typescript")] {
+            std::fs::create_dir_all(root.join(repo)).expect("temp dir");
+            std::fs::write(
+                root.join(repo).join("package.json"),
+                format!(
+                    "{{\"name\": \"{repo}\", \"dependencies\": {{\"react\": \"^18.2.0\", \"{dep}\": \"1.0.0\"}}}}\n"
+                ),
+            )
+            .expect("write manifest");
+            std::fs::write(root.join(repo).join("index.js"), "export const x = 1;\n").expect("write source");
+        }
+        let paths = [root.join("web"), root.join("admin")].map(|p| p.to_string_lossy().into_owned());
+        let built = glia_engine::generate_many(&paths);
+        let _ = std::fs::remove_dir_all(&root);
+        let built = built.expect("build");
+        let live = glia_engine::entrypoint_reachable(&built.merged);
+        let q = "package:npm:react";
+
+        let on = Collapse::with_labels(&built.repo_labels);
+        let one = find_answer(&built.merged, &live, q, 20, &[], None, on, 0).expect("answer");
+        assert_eq!(one.results.len(), 1, "{:?}", one.results);
+        let id = one.results[0].identity.as_ref().expect("identity");
+        assert_eq!((id.tier, id.rules.as_slice()), ("fact", ["package_name"].as_slice()));
+        assert_eq!(id.also_in.len(), 1, "{:?}", id.also_in);
+        let labels: Vec<&str> = built.repo_labels.values().map(String::as_str).collect();
+        assert!(labels.contains(&id.also_in[0].repo.as_str()), "{:?} vs {labels:?}", id.also_in);
+        let text = serde_json::to_string(&one).expect("json");
+        assert!(text.contains("\"identity\":{\"tier\":\"fact\""), "{text}");
+
+        let two = find_answer(&built.merged, &live, q, 20, &[], None, Collapse::off(), 0).expect("answer");
+        assert_eq!(two.results.len(), 2, "{:?}", two.results);
+        assert!(!serde_json::to_string(&two).expect("json").contains("\"identity\""));
     }
 }

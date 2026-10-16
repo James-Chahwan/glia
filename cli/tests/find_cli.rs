@@ -5,7 +5,8 @@
 //! The `[find] query=` stderr line is the LD.3b fired_on marker; asserting it
 //! here makes it a tested contract, and relaying it lets
 //! `cargo test -p glia-cli --test find_cli -- --nocapture 2>&1 | grep '^\[find\] query='`
-//! show it.
+//! show it. DD.9's `[identity] collapse surface=find` line is relayed and
+//! asserted the same way.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -48,7 +49,7 @@ fn glia(args: &[&str]) -> Output {
         .output()
         .expect("glia runs");
     for line in String::from_utf8_lossy(&out.stderr).lines() {
-        if line.starts_with("[find] ") {
+        if line.starts_with("[find] ") || line.starts_with("[identity] collapse ") {
             eprintln!("{line}");
         }
     }
@@ -144,4 +145,75 @@ fn table_names_the_tier_and_location() {
         stdout.contains("| exact_name | ⊘ | FUNCTION | `users::get_user` | users.py:1 |"),
         "{stdout}"
     );
+}
+
+/// A DD.5 identity fixture repo (committed under bench/substrate-gap).
+fn identity_fixture(name: &str, repo: &str) -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../bench/substrate-gap/fixtures")
+        .join(name)
+        .join(repo)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// DD.9: the package both repos declare is one row naming the other repo;
+/// `--no-collapse` is the two raw rows. Before DD.9 the default printed the
+/// two rows.
+#[test]
+fn identity_class_is_one_row_unless_no_collapse() {
+    let web = identity_fixture("identity-npm-package", "web");
+    let admin = identity_fixture("identity-npm-package", "admin");
+    let q = "package:npm:react";
+    let out = ok(&["find", &web, q, "--with", &admin, "--json"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("[identity] collapse surface=find classes=2 walk_classes=0 folded=1 rows=1"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("[find] query='package:npm:react' matched=2"), "{stderr}");
+    let one = rows(&out);
+    assert_eq!(one.len(), 1, "{one:#?}");
+    let id = &one[0]["identity"];
+    assert_eq!(id["tier"], "fact", "{id}");
+    assert_eq!(id["rules"], serde_json::json!(["package_name"]), "{id}");
+    assert_eq!(id["diverged"], false, "{id}");
+    let also = id["also_in"].as_array().expect("also_in");
+    assert_eq!(also.len(), 1, "{id}");
+    assert_eq!(also[0]["repo"], "admin", "{id}");
+    assert_eq!(also[0]["qname"], q, "{id}");
+    assert!(also[0]["file"].is_null() && also[0]["line"].is_null(), "{id}");
+
+    let raw = ok(&["find", &web, q, "--with", &admin, "--no-collapse", "--json"]);
+    let stderr = String::from_utf8_lossy(&raw.stderr);
+    assert!(!stderr.contains("[identity] collapse "), "--no-collapse builds no view: {stderr}");
+    let two = rows(&raw);
+    assert_eq!(two.len(), 2, "{two:#?}");
+    assert!(two.iter().all(|r| r.get("identity").is_none()), "{two:#?}");
+    assert_eq!(two[0]["id"], one[0]["id"], "the collapsed row is the best-ranked member");
+
+    // The table names the other repo in the location cell.
+    let table = ok(&["find", &web, q, "--with", &admin]);
+    let stdout = String::from_utf8_lossy(&table.stdout);
+    assert!(
+        stdout.contains("| exact_qname | ⊘ | PACKAGE_DEP | `package:npm:react` | — (also in: admin) |"),
+        "{stdout}"
+    );
+}
+
+/// A located class (DD.5's contract ops in one repo): the table lists each
+/// other member as `<repo> <file>:<line>`.
+#[test]
+fn identity_table_lists_located_members() {
+    let repo = identity_fixture("identity-contract-ops", ".");
+    let out = ok(&["find", &repo, "GET:/orders"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let row = stdout
+        .lines()
+        .find(|l| l.starts_with("| qname_suffix |"))
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert_eq!(stdout.lines().filter(|l| l.starts_with("| qname_suffix |")).count(), 1, "{stdout}");
+    assert!(row.contains(" (also in: "), "{row}");
+    assert!(row.contains("features/orders/feature.yaml:"), "the feature op: {row}");
+    assert!(!row.contains("diverged"), "{row}");
 }

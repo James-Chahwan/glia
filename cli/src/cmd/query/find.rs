@@ -3,10 +3,17 @@
 //! `find::find_nodes` does the work; this parses `--kind` names and prints.
 //! `--json` is the LD.8a envelope `{results, absence}`; an empty table prints
 //! the absence block under `_(no match)_`.
+//!
+//! DD.9: a FACT / DERIVED identity class (one package, message or contract op
+//! in several places) is one row; its location cell appends `(also in: <repo>
+//! <file>:<line>, ...)` and `; diverged` when the members' contents differ,
+//! and `--json` carries the row's `identity`. `--no-collapse` is one row per
+//! member.
 
 use glia_code_domain::node_kind;
 use glia_core::NodeKindId;
-use glia_engine::find::{DEFAULT_TOP_K, FindOptions, find_nodes};
+use glia_engine::find::{DEFAULT_TOP_K, FindOptions, FoundNode, find_nodes};
+use glia_engine::identity::Collapse;
 
 use crate::cmd::resolve::{live_glyph, print_absence};
 use crate::common::generate_for;
@@ -33,6 +40,11 @@ pub(crate) struct Args {
     /// are kept, not dropped.
     #[arg(long)]
     scope: Option<String>,
+    /// One row per member of an identity class. By default a package,
+    /// message or contract op found in several places (a FACT / DERIVED
+    /// SAME_AS class) is one row naming the other places (`also in`).
+    #[arg(long)]
+    no_collapse: bool,
     /// Emit JSON instead of a table.
     #[arg(long)]
     json: bool,
@@ -75,6 +87,11 @@ pub(crate) fn run(args: Args) -> i32 {
     opts.top_k = args.top_k;
     opts.kinds = (!kinds.is_empty()).then_some(kinds);
     opts.scope = args.scope;
+    opts.collapse = if args.no_collapse {
+        Collapse::off()
+    } else {
+        Collapse::with_labels(&result.repo_labels)
+    };
     let mut answer = find_nodes(&result.merged, &args.query, &opts);
     if let Some(a) = answer.absence.as_mut() {
         a.unparsed_files = result.parse_errors.len();
@@ -93,12 +110,45 @@ pub(crate) fn run(args: Args) -> i32 {
     println!("| match | live | kind | qname | location |");
     println!("|---|:-:|---|---|---|");
     for r in &answer.results {
-        let loc = match (&r.file, r.line) {
-            (Some(f), Some(l)) => format!("{f}:{l}"),
-            (Some(f), None) => f.clone(),
-            _ => "—".to_string(),
-        };
-        println!("| {} | {} | {} | `{}` | {} |", r.r#match, live_glyph(r.live), r.kind, r.qname, loc);
+        println!(
+            "| {} | {} | {} | `{}` | {} |",
+            r.r#match,
+            live_glyph(r.live),
+            r.kind,
+            r.qname,
+            location_cell(r)
+        );
     }
     0
+}
+
+/// `file:line`, `file` or `—`.
+fn place(file: Option<&str>, line: Option<i64>) -> Option<String> {
+    match (file, line) {
+        (Some(f), Some(l)) => Some(format!("{f}:{l}")),
+        (Some(f), None) => Some(f.to_string()),
+        _ => None,
+    }
+}
+
+/// The table's location cell: the row's place, then, for a row that stands
+/// for an identity class, `(also in: <repo> <file>:<line>, ...; diverged)`.
+/// An unlocated member is its repo (and its qname when that differs from the
+/// row's: a PACKAGE_DEP class shares one qname, so its repo is what differs).
+fn location_cell(r: &FoundNode) -> String {
+    let at = place(r.file.as_deref(), r.line).unwrap_or_else(|| "—".to_string());
+    let Some(id) = &r.identity else {
+        return at;
+    };
+    let others: Vec<String> = id
+        .also_in
+        .iter()
+        .map(|a| match place(a.file.as_deref(), a.line) {
+            Some(p) => format!("{} {p}", a.repo),
+            None if a.qname != r.qname => format!("{} `{}`", a.repo, a.qname),
+            None => a.repo.clone(),
+        })
+        .collect();
+    let diverged = if id.diverged { "; diverged" } else { "" };
+    format!("{at} (also in: {}{diverged})", others.join(", "))
 }

@@ -37,6 +37,20 @@
 //! the single-node resolution blast / trace seed on. Every other tier: total
 //! degree desc, qname length asc, qname asc, NodeId asc. Each key ends on the
 //! NodeId, so the order is total and no `HashMap` iteration order reaches it.
+//!
+//! # Identity classes (DD.9)
+//!
+//! The public answer ([`find_nodes`]) folds each FACT / DERIVED identity
+//! class (`crate::identity`, Q17) to ONE row: the best-ranked matching member,
+//! which carries [`FoundNode::identity`] (`tier`, `rules`, `diverged` and
+//! `also_in`, every other member of the class, matched or not). The fold runs
+//! on the ranked candidates BEFORE the `top_k` cut, so a class never spends
+//! two slots, and keeps the ranked order. A node in no class keeps `identity`
+//! `None`, which serialises to nothing: its row is byte-identical to the
+//! uncollapsed one. HEURISTIC candidates (vendored copies) never fold.
+//! [`FindOptions::collapse`] `Collapse::off()` is the raw per-member answer
+//! (`glia find --no-collapse`). The seed resolvers (trace, tests-for,
+//! governing docs, absence suggestions) call [`search`], which never folds.
 
 use std::collections::{HashMap, HashSet};
 
@@ -46,6 +60,7 @@ use glia_graph::MergedGraph;
 
 use crate::absence::{self, Answer};
 use crate::answers::{Locator, entrypoint_reachable, in_scope, live_marker, resolve_scope};
+use crate::identity::{Collapse, IdentityView, RowIdentity};
 
 /// `FindOptions::default().top_k`.
 pub const DEFAULT_TOP_K: usize = 20;
@@ -67,6 +82,11 @@ pub struct FoundNode {
     pub line: Option<i64>,
     /// The tier that matched, e.g. `"exact_name"` or `"name_word"`.
     pub r#match: &'static str,
+    /// Set when this row stands for a FACT / DERIVED identity class (DD.9):
+    /// the class's tier and rules, whether its members' contents differ, and
+    /// every other member (`also_in`). Absent from the JSON when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<RowIdentity>,
 }
 
 /// What [`find_nodes`] returns and from where. Start from `default()` and set
@@ -83,6 +103,11 @@ pub struct FindOptions {
     /// `/`-boundary prefix match on the located file, and a node with no
     /// locatable file is KEPT.
     pub scope: Option<String>,
+    /// Identity classes (DD.9): enabled by default, each FACT / DERIVED class
+    /// is one row with [`FoundNode::identity`], folded before `top_k`.
+    /// `Collapse::off()` keeps one row per member. Set the build's repo
+    /// labels (`Collapse::with_labels`) so `also_in` names repos by label.
+    pub collapse: Collapse,
 }
 
 impl Default for FindOptions {
@@ -91,6 +116,7 @@ impl Default for FindOptions {
             top_k: DEFAULT_TOP_K,
             kinds: None,
             scope: None,
+            collapse: Collapse::default(),
         }
     }
 }
@@ -106,9 +132,12 @@ impl Default for FindOptions {
 /// O(E) degree pass, run only when more than one candidate survives the
 /// filters, plus one O(V + E) liveness walk (`entrypoint_reachable`) for the
 /// rows' `live` flags (LD.6); [`find_nodes_with_live`] takes the live set
-/// instead. Prints one `[find] query=...` line and one `[live] annotate
-/// surface=find` line per call, and one `[absence] primitive=find` line when
-/// the answer is empty.
+/// instead. With `opts.collapse` on, one scan of the cross edges for SAME_AS
+/// (the identity view, DD.9); only a graph with a collapse class pays more.
+/// Prints one `[find] query=...` line (the candidates before the fold) and one
+/// `[live] annotate surface=find` line per call, one `[identity] collapse
+/// surface=find` line when the graph has a collapse class, and one
+/// `[absence] primitive=find` line when the answer is empty.
 pub fn find_nodes(merged: &MergedGraph, query: &str, opts: &FindOptions) -> Answer<FoundNode> {
     find_nodes_with_live(merged, &entrypoint_reachable(merged), query, opts)
 }
@@ -122,7 +151,11 @@ pub fn find_nodes_with_live(
     query: &str,
     opts: &FindOptions,
 ) -> Answer<FoundNode> {
-    let mut found = search(merged, query, opts);
+    let view = IdentityView::new(merged, &opts.collapse);
+    let mut found = search_with(merged, query, opts, Some(&view));
+    // `folded` counts every candidate the fold dropped (also those below the
+    // cut), `rows` is the answer's row count.
+    view.collapse_marker("find", found.rows.len() + found.folded, found.rows.len());
     for r in &mut found.rows {
         r.live = live.contains(&NodeId(r.id));
     }
@@ -155,6 +188,8 @@ pub(crate) struct Found {
     pub(crate) rows: Vec<FoundNode>,
     /// Matches `opts.scope` filtered out (0 without a scope).
     pub(crate) out_of_scope: usize,
+    /// Ranked candidates the identity fold dropped (0 without a view).
+    pub(crate) folded: usize,
 }
 
 /// The search itself, without the envelope: what an answer that resolves its
@@ -162,13 +197,29 @@ pub(crate) struct Found {
 /// become its suggestions without a second pass. Every row's `live` is
 /// `false` here: [`find_nodes_with_live`] sets it, and a caller that only
 /// reads qnames (suggestions, the exact-match seed) pays no liveness walk.
+/// It never folds identity classes: a seed resolver keeps every member.
 pub(crate) fn search(merged: &MergedGraph, query: &str, opts: &FindOptions) -> Found {
+    search_with(merged, query, opts, None)
+}
+
+/// [`search`], then, with a non-empty `view`, the identity fold on the ranked
+/// candidates before the `top_k` cut (module doc): the first candidate of a
+/// collapse class is its row, with `identity = view.row_identity(id, id)`,
+/// and the class's later candidates are dropped. `opts.collapse` is not read
+/// here: the caller built `view` from it.
+pub(crate) fn search_with(
+    merged: &MergedGraph,
+    query: &str,
+    opts: &FindOptions,
+    view: Option<&IdentityView>,
+) -> Found {
     let q = Query::new(query);
     if q.raw.is_empty() {
         log_marker(&q.raw, &[], opts.top_k);
         return Found {
             rows: Vec::new(),
             out_of_scope: 0,
+            folded: 0,
         };
     }
 
@@ -198,6 +249,7 @@ pub(crate) fn search(merged: &MergedGraph, query: &str, opts: &FindOptions) -> F
                 declaration: kind.is_some_and(is_declaration_kind),
                 qname_len: qname.chars().count(),
                 qname: qname.to_string(),
+                identity: None,
             });
         }
     }
@@ -248,9 +300,16 @@ pub(crate) fn search(merged: &MergedGraph, query: &str, opts: &FindOptions) -> F
 
     log_marker(&q.raw, &cands, opts.top_k);
 
+    let ranked = cands.len();
+    let cands = match view {
+        Some(view) => view.fold(cands, |c| c.id, |c, identity| c.identity = Some(identity)),
+        None => cands,
+    };
+    let folded = ranked - cands.len();
+
     let keep = if opts.top_k == 0 { cands.len() } else { opts.top_k };
     let rows = cands
-        .iter()
+        .into_iter()
         .take(keep)
         .map(|c| {
             let l = loc.locate(c.id);
@@ -263,10 +322,15 @@ pub(crate) fn search(merged: &MergedGraph, query: &str, opts: &FindOptions) -> F
                 file: l.file,
                 line: l.line,
                 r#match: c.tier.label(),
+                identity: c.identity,
             }
         })
         .collect();
-    Found { rows, out_of_scope }
+    Found {
+        rows,
+        out_of_scope,
+        folded,
+    }
 }
 
 /// Is `row` an exact match (`exact_qname` / `exact_name`)? Those two tiers are
@@ -284,6 +348,8 @@ struct Candidate {
     declaration: bool,
     qname_len: usize,
     qname: String,
+    /// Set by the identity fold on the row that stands for its class.
+    identity: Option<RowIdentity>,
 }
 
 /// Match tiers, best first; the derived `Ord` IS the tier order.
