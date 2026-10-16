@@ -1,0 +1,117 @@
+{
+  "framework": "solidity-abi-procedures",
+  "language": "solidity",
+  "dirs": [
+    "."
+  ],
+  "note": "DT.10a (T10 server half). HEAD 7661c035 (debug CLI, code c4987609): no RPC_PROCEDURE; deposit / release / Escrow are dead_symbol rows.",
+  "expect_nodes": [
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "evm:Escrow.deposit",
+      "exact": true
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "evm:Escrow.release",
+      "exact": true,
+      "note": "both overloads, one node"
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "evm:Escrow.seller",
+      "exact": true,
+      "note": "public immutable getter"
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "evm:Escrow.deposits",
+      "exact": true,
+      "note": "public mapping getter"
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "evm:IEscrow.deposit",
+      "exact": true,
+      "note": "an interface member is external"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "evm:Escrow.deposit",
+      "to": "contracts::Escrow::Escrow::deposit",
+      "category": "HANDLED_BY",
+      "exact": true
+    },
+    {
+      "from": "evm:Escrow.release",
+      "to": "contracts::Escrow::Escrow::release",
+      "category": "HANDLED_BY",
+      "exact": true
+    },
+    {
+      "from": "evm:Escrow.deposits",
+      "to": "contracts::Escrow::Escrow::deposits",
+      "category": "HANDLED_BY",
+      "exact": true
+    },
+    {
+      "from": "evm:IEscrow.deposit",
+      "to": "contracts::Escrow::IEscrow::deposit",
+      "category": "HANDLED_BY",
+      "exact": true
+    }
+  ],
+  "expect_cells": [
+    {
+      "kind": "RPC_PROCEDURE",
+      "node": "evm:Escrow.release",
+      "cell": "CODE",
+      "contains": "\"arities\":[1,2]"
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "node": "evm:Escrow.deposit",
+      "cell": "CODE",
+      "contains": "\"mutability\":\"payable\""
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "node": "evm:Escrow.deposits",
+      "cell": "CODE",
+      "contains": "\"getter\":true"
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "node": "evm:Escrow.deposit",
+      "cell": "POSITION",
+      "contains": "Escrow.sol"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "evm:Escrow._credit",
+      "note": "internal"
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "evm:Escrow.total",
+      "note": "private state"
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "evm:Fees.cut",
+      "note": "a library is linked, not called through an ABI"
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "evm:Escrow.constructor"
+    },
+    {
+      "kind": "RPC_PROCEDURE",
+      "name": "evm:Escrow.release",
+      "max_nodes": 1
+    }
+  ]
+}

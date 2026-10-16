@@ -348,7 +348,9 @@ fn connect_procedures_take_the_owner() {
 }
 
 /// A Solidity `event` is an EVENT_EMITTER with a code qname: never owned, and
-/// counted `declared` on the marker.
+/// counted `declared` on the marker. Since DT.10a the `function bid() public`
+/// is also an RPC_PROCEDURE `evm:Auction.bid`, whose qname lacks the `rpc:`
+/// prefix, so it is the second `declared` channel node (`declared=2`).
 #[test]
 fn solidity_declared_events_keep_code_qnames() {
     let td = tempfile::tempdir().unwrap();
@@ -366,7 +368,7 @@ fn solidity_declared_events_keep_code_qnames() {
     assert_eq!(owner.len(), 1, "{owner:?}");
     assert!(
         owner[0].starts_with(
-            "[channel-owner] qualified rpc=0 event=0 over 0 owners (declared=1 unplaced=0 foreign=0) repo="
+            "[channel-owner] qualified rpc=0 event=0 over 0 owners (declared=2 unplaced=0 foreign=0) repo="
         ),
         "{}",
         owner[0]

@@ -61,9 +61,12 @@ contract Vault {
 }
 ";
 
-/// The `[engram-export] v6 since:` counts for the A -> B edit.
+/// The `[engram-export] v6 since:` counts for the A -> B edit. DT.10a: the
+/// public `balances` getter and `deposit` are RPC_PROCEDUREs `evm:Vault.<m>`,
+/// whose qnames name no file, so the move leaves them in place, modified
+/// location-only (8 -> 10, 7 -> 9).
 const B_COUNTS: &str =
-    "added=1 removed=1 modified=8 (moved=4 location_only=7) edges +1/-0; parse cache ";
+    "added=1 removed=1 modified=10 (moved=4 location_only=9) edges +1/-0; parse cache ";
 
 /// A scratch dir holding the repo (`fx/`) and the exports (`out/`), removed
 /// on drop. The repo dir is `fx` in every scratch, so every run has one repo
@@ -263,6 +266,8 @@ fn since_writes_the_diff_and_seeds_file_ids() {
         vault("::Vault"),
         vault("::Vault::balances"),
         vault("::Vault::deposit"),
+        same("evm:Vault.balances", true),
+        same("evm:Vault.deposit", true),
     ]
     .into_iter()
     .collect();

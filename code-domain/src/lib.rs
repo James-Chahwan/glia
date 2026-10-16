@@ -55,6 +55,10 @@ pub mod code_span;
 /// Identity rule names, keys and normalisers for SAME_AS classes. (DD.2)
 pub mod same_as;
 
+/// The EVM contract vocabulary: procedure / client qnames, scopes, the name
+/// key, ABI entries and the procedure and client cells. (DT.10a)
+pub mod evm;
+
 /// The contract-model wire vocabulary: model SCHEMA_FIELDS, wire shapes,
 /// server-site MESSAGE_TYPE cells and JSON kinds. (DT.1a)
 pub mod wire;
@@ -534,7 +538,7 @@ pub mod cell_type {
     pub const ROUTE_METHOD: CellTypeId = CellTypeId(5);
     /// One client call site, a compact JSON cell stacked once per site (the
     /// graph builder appends the cells of every copy of a node), so a side's
-    /// cells are the union of its sites. Two payloads:
+    /// cells are the union of its sites. Three payloads:
     ///
     /// - HTTP, on an ENDPOINT: `{"method","path","file","line","col",
     ///   "confidence"[,"raw"][,"host"]}` (`endpoint::endpoint_hit_json`;
@@ -548,6 +552,12 @@ pub mod cell_type {
     ///   source spells it as a literal. No `file`, so every file-keyed reader
     ///   skips it; the channel resolvers' host narrowing reads `host` exactly
     ///   as the HTTP resolver's does, and a hostless site blocks narrowing.
+    /// - EVM client, on an RPC_CALL `evm_call:..` or an EVENT_HANDLER
+    ///   `evm_event:..` (DT.10a): `{"via":"evm","lib":"<lib>","args":[..]
+    ///   [,"abi":["e:<Event>/<n>","f:<fn>/<n>",..]]}` (`evm::client_cell`,
+    ///   read by `evm::read_client_cells`), one per distinct `(lib, abi)` of
+    ///   the node's sites. No `file` and no `host`, so every file-keyed reader
+    ///   and the host narrowing skip it.
     pub const ENDPOINT_HIT: CellTypeId = CellTypeId(6);
     /// The tests that cover a node DIRECTLY: the sources of the TESTS edges
     /// into it (the Python parser's function-level edges, the engine's module

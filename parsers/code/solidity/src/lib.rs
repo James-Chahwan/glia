@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
+use glia_code_domain::evm;
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 use glia_doc::DocTag;
 use tree_sitter::{Node as TsNode, Parser};
@@ -60,6 +61,14 @@ pub fn parse_file(
             ns.tags, ns.param, ns.ret, ns.notice, ns.dev, ns.other, ns.nodes, file_rel_path
         );
     }
+    // DT.10a fired_on marker, once per file with at least one EVM procedure.
+    let abi = &acc.abi;
+    if abi.procedures > 0 {
+        eprintln!(
+            "[sol-abi] procedures={} (functions={} getters={} abstract={}) contracts={} path={}",
+            abi.procedures, abi.functions, abi.getters, abi.abstract_, abi.contracts, file_rel_path
+        );
+    }
 
     Ok(FileParse {
         nodes: acc.nodes,
@@ -81,6 +90,42 @@ struct Acc {
     refs: Vec<UnresolvedRef>,
     nav: CodeNav,
     natspec: NatspecStats,
+    abi: AbiStats,
+}
+
+/// Per-file tallies behind the `[sol-abi]` marker (DT.10a): procedures
+/// emitted, split into functions and getters, the abstract ones among them,
+/// and the contracts / interfaces holding at least one.
+#[derive(Default)]
+struct AbiStats {
+    procedures: usize,
+    functions: usize,
+    getters: usize,
+    abstract_: usize,
+    contracts: usize,
+}
+
+/// One contract member an ABI client can reach, gathered while the contract
+/// body is visited and emitted as an RPC_PROCEDURE after it (DT.10a).
+struct ProcEntry {
+    facts: evm::ProcedureFacts,
+    /// The METHOD / STATE_VAR the procedure is HANDLED_BY; `None` for a getter
+    /// whose STATE_VAR the noise gate dropped (the module CONTAINS it).
+    handler: Option<NodeId>,
+    /// The first declaration's POSITION.
+    position: Cell,
+}
+
+/// A contract's ABI-visible members by name: overloads collapse onto one
+/// entry, and the map's order is the emit order.
+type ContractAbi = BTreeMap<String, ProcEntry>;
+
+/// The contract a member is declared in: its simple name and its kind
+/// (CLASS for a contract, INTERFACE, PACKAGE for a library).
+#[derive(Clone, Copy)]
+struct Owner<'a> {
+    name: &'a str,
+    kind: glia_core::NodeKindId,
 }
 
 /// Visit the file root's declarations. `module_qname` / `module_id` are the
@@ -161,12 +206,14 @@ fn visit_contract(
     // its `inheritance_specifier` children appear directly under the contract.
     collect_heritage(node, src, id, module_id, local_interfaces, acc);
 
+    let owner = Owner { name, kind };
+    let mut abi = ContractAbi::new();
     if let Some(body) = node.child_by_field_name("body") {
         let mut c = body.walk();
         for child in body.named_children(&mut c) {
             match child.kind() {
                 "function_definition" => {
-                    visit_function(child, src, file_rel, &qname, id, repo, acc);
+                    visit_function(child, src, file_rel, &qname, id, repo, owner, &mut abi, acc);
                 }
                 "event_definition" => {
                     visit_event(child, src, file_rel, &qname, id, repo, acc);
@@ -178,14 +225,185 @@ fn visit_contract(
                     visit_struct_decl(child, src, file_rel, &qname, id, repo, acc);
                 }
                 "state_variable_declaration" => {
-                    visit_state_variable(child, src, file_rel, &qname, id, repo, acc);
+                    visit_state_variable(child, src, file_rel, &qname, id, repo, owner, &mut abi, acc);
                 }
                 _ => {}
             }
         }
     }
+    emit_procedures(&abi, owner, id, module_id, repo, acc);
 }
 
+/// Emit one RPC_PROCEDURE `evm:<Contract>.<member>` per ABI-visible member of
+/// one contract (DT.10a), in member-name order. Each carries the first
+/// declaration's POSITION and the evm CODE cell, is HANDLED_BY its METHOD /
+/// STATE_VAR (or, for a getter the noise gate dropped, CONTAINed by the
+/// module), and is recorded with the contract as its nav parent under the nav
+/// name `<Contract>.<member>`, so a by-name lookup among the contract's
+/// children (SelfMethod) never finds it. No DEFINES: a procedure is not a
+/// declaration of the contract body.
+fn emit_procedures(
+    abi: &ContractAbi,
+    owner: Owner<'_>,
+    contract_id: NodeId,
+    module_id: NodeId,
+    repo: RepoId,
+    acc: &mut Acc,
+) {
+    if abi.is_empty() {
+        return;
+    }
+    acc.abi.contracts += 1;
+    let contract = owner.name;
+    for (member, entry) in abi {
+        let qname = evm::procedure_qname(contract, member);
+        let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::RPC_PROCEDURE, &qname);
+        acc.nodes.push(Node {
+            id,
+            repo,
+            confidence: Confidence::Strong,
+            cells: vec![entry.position.clone(), evm::procedure_cell(&entry.facts)],
+        });
+        acc.nav.record(
+            id,
+            &format!("{contract}.{member}"),
+            &qname,
+            node_kind::RPC_PROCEDURE,
+            Some(contract_id),
+        );
+        let edge = match entry.handler {
+            Some(handler) => Edge {
+                from: id,
+                to: handler,
+                category: edge_category::HANDLED_BY,
+                confidence: Confidence::Strong,
+                cells: Vec::new(),
+            },
+            None => Edge {
+                from: module_id,
+                to: id,
+                category: edge_category::CONTAINS,
+                confidence: Confidence::Strong,
+                cells: Vec::new(),
+            },
+        };
+        acc.edges.push(edge);
+        acc.abi.procedures += 1;
+        if entry.facts.getter {
+            acc.abi.getters += 1;
+        } else {
+            acc.abi.functions += 1;
+        }
+        if entry.facts.abstract_ {
+            acc.abi.abstract_ += 1;
+        }
+    }
+}
+
+/// The first declaration of a member: its mutability, getter flag, abstract
+/// flag, handler and POSITION.
+struct FirstDecl {
+    mutability: String,
+    getter: bool,
+    abstract_: bool,
+    handler: Option<NodeId>,
+    position: Cell,
+}
+
+/// Record one ABI-visible declaration of `member` with `arity` parameters.
+/// The first declaration (`first`, built only then) gives the entry its
+/// facts, handler and POSITION; an overload adds its arity.
+fn record_member(
+    abi: &mut ContractAbi,
+    member: &str,
+    arity: u32,
+    first: impl FnOnce() -> FirstDecl,
+) {
+    if let Some(entry) = abi.get_mut(member) {
+        entry.facts.arities.push(arity);
+        return;
+    }
+    let d = first();
+    abi.insert(
+        member.to_string(),
+        ProcEntry {
+            facts: evm::ProcedureFacts {
+                arities: vec![arity],
+                mutability: d.mutability,
+                getter: d.getter,
+                abstract_: d.abstract_,
+            },
+            handler: d.handler,
+            position: d.position,
+        },
+    );
+}
+
+/// True when a client can call function `node` through the contract's ABI:
+/// every function of an INTERFACE; in a CLASS (a contract or an abstract
+/// contract) one whose `visibility` is `external` or `public`, or one with no
+/// `visibility` at all (Solidity < 0.5 defaults to public; 0.5+ rejects
+/// such a function). Never in a PACKAGE: a library function is linked or
+/// delegatecalled, not called through a client ABI.
+fn callable(node: TsNode, src: &[u8], kind: glia_core::NodeKindId) -> bool {
+    if kind == node_kind::INTERFACE {
+        return true;
+    }
+    if kind != node_kind::CLASS {
+        return false;
+    }
+    match named_child_of_kind(node, "visibility") {
+        Some(v) => matches!(text_of(v, src).trim(), "external" | "public"),
+        None => true,
+    }
+}
+
+/// The first direct named child of `node` whose kind is `kind`.
+fn named_child_of_kind<'a>(node: TsNode<'a>, kind: &str) -> Option<TsNode<'a>> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor).find(|c| c.kind() == kind)
+}
+
+/// The number of arguments a public getter of a state variable of type `ty`
+/// takes: one per `mapping` key down the `value_type` chain, plus one per
+/// array dimension (`mapping(bytes32 => mapping(address => uint256))` -> 2,
+/// `address[]` -> 1, `address` -> 0).
+fn getter_arity(ty: TsNode) -> u32 {
+    let mut arity = 0;
+    let mut cur = ty;
+    loop {
+        if cur.child_by_field_name("key_type").is_some()
+            && let Some(value) = cur.child_by_field_name("value_type")
+        {
+            arity += 1;
+            cur = value;
+            continue;
+        }
+        let mut cursor = cur.walk();
+        let is_array = cur.children(&mut cursor).any(|c| !c.is_named() && c.kind() == "[");
+        if is_array && let Some(inner) = named_child_of_kind(cur, "type_name") {
+            arity += 1;
+            cur = inner;
+            continue;
+        }
+        return arity;
+    }
+}
+
+/// The POSITION cell of a node's own span (the one `entity_cells` writes).
+fn position_cell(node: &TsNode, file_rel: &str) -> Cell {
+    Cell {
+        kind: cell_type::POSITION,
+        payload: CellPayload::Json(glia_doc::position_json(node, file_rel)),
+    }
+}
+
+/// Emit a METHOD for a contract function and, when a client can reach it
+/// ([`callable`]), record it in the contract's `abi` (DT.10a): its arity (the
+/// direct `parameter` children; return parameters sit under `return_type`),
+/// its `state_mutability` (`nonpayable` when absent), abstract when it is an
+/// interface member or has no body, and the METHOD as its handler.
+#[allow(clippy::too_many_arguments)]
 fn visit_function(
     node: TsNode,
     src: &[u8],
@@ -193,6 +411,8 @@ fn visit_function(
     parent_qname: &str,
     parent_id: NodeId,
     repo: RepoId,
+    owner: Owner<'_>,
+    abi: &mut ContractAbi,
     acc: &mut Acc,
 ) {
     let Some(name_node) = node.child_by_field_name("name") else {
@@ -202,11 +422,30 @@ fn visit_function(
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::METHOD, &qname);
 
+    let cells = entity_cells(&node, src, file_rel, &mut acc.natspec);
+    if callable(node, src, owner.kind) {
+        let mut cursor = node.walk();
+        let arity = node.named_children(&mut cursor).filter(|c| c.kind() == "parameter").count();
+        record_member(abi, name, u32::try_from(arity).unwrap_or(u32::MAX), || FirstDecl {
+            mutability: named_child_of_kind(node, "state_mutability")
+                .map(|m| text_of(m, src).trim().to_string())
+                .filter(|m| !m.is_empty())
+                .unwrap_or_else(|| evm::NONPAYABLE.to_string()),
+            getter: false,
+            abstract_: owner.kind == node_kind::INTERFACE || node.child_by_field_name("body").is_none(),
+            handler: Some(id),
+            position: cells
+                .iter()
+                .find(|c| c.kind == cell_type::POSITION)
+                .cloned()
+                .unwrap_or_else(|| position_cell(&node, file_rel)),
+        });
+    }
     acc.nodes.push(Node {
         id,
         repo,
         confidence: Confidence::Strong,
-        cells: entity_cells(&node, src, file_rel, &mut acc.natspec),
+        cells,
     });
     acc.edges.push(Edge {
         from: parent_id,
@@ -371,6 +610,14 @@ fn visit_struct_decl(
 /// literal primitive or absent. Keep vars carrying a doc or a non-trivial
 /// type / initializer (so e.g. `mapping(...) public x;` or `uint x = a + b;`
 /// survive even without NatSpec).
+///
+/// A `public` var of a contract (CLASS) is a getter a client can call
+/// (DT.10a), recorded in `abi` BEFORE the gate, which drops an undocumented
+/// literal-initialised var such as `uint256 public constant FEE = 100;`:
+/// arity [`getter_arity`], mutability `view`, handler the STATE_VAR when the
+/// gate keeps it. tree-sitter-solidity 1.2.13 gives a state variable a
+/// `visibility` FIELD (a function has a `visibility` child).
+#[allow(clippy::too_many_arguments)]
 fn visit_state_variable(
     node: TsNode,
     src: &[u8],
@@ -378,6 +625,8 @@ fn visit_state_variable(
     parent_qname: &str,
     parent_id: NodeId,
     repo: RepoId,
+    owner: Owner<'_>,
+    abi: &mut ContractAbi,
     acc: &mut Acc,
 ) {
     let Some(name_node) = node.child_by_field_name("name") else {
@@ -394,12 +643,22 @@ fn visit_state_variable(
         .child_by_field_name("value")
         .map(is_literal_primitive)
         .unwrap_or(false);
-    if doc.is_none() && trivial_value {
-        return;
-    }
-
+    let gated = doc.is_none() && trivial_value;
     let qname = format!("{parent_qname}::{name}");
     let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::STATE_VAR, &qname);
+    if owner.kind == node_kind::CLASS && is_public_state(node, src) {
+        let arity = node.child_by_field_name("type").map(getter_arity).unwrap_or(0);
+        record_member(abi, name, arity, || FirstDecl {
+            mutability: "view".to_string(),
+            getter: true,
+            abstract_: false,
+            handler: (!gated).then_some(id),
+            position: position_cell(&node, file_rel),
+        });
+    }
+    if gated {
+        return;
+    }
 
     acc.nodes.push(Node {
         id,
@@ -416,6 +675,14 @@ fn visit_state_variable(
     });
     acc.nav
         .record(id, name, &qname, node_kind::STATE_VAR, Some(parent_id));
+}
+
+/// True when a state variable declares `public` in one of its `visibility`
+/// fields.
+fn is_public_state(node: TsNode, src: &[u8]) -> bool {
+    let mut cursor = node.walk();
+    node.children_by_field_name("visibility", &mut cursor)
+        .any(|v| text_of(v, src).trim() == "public")
 }
 
 /// True if `value` is a literal primitive (number / string / bool).
@@ -1285,5 +1552,354 @@ contract C {
                 r#"{"tag":"param","name":"tradeId","text":"The trade."}]}"#,
             ))
         );
+    }
+
+    // ---- DT.10a: EVM procedures -------------------------------------------
+
+    /// Every RPC_PROCEDURE qname of `fp`, sorted.
+    fn procedures(fp: &FileParse) -> Vec<String> {
+        let mut out: Vec<String> = fp
+            .nodes
+            .iter()
+            .filter(|n| fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::RPC_PROCEDURE))
+            .filter_map(|n| fp.nav.qname_by_id.get(&n.id).cloned())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The facts of procedure `qname`, read through the evm vocabulary.
+    fn facts(fp: &FileParse, qname: &str) -> evm::ProcedureFacts {
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::RPC_PROCEDURE, qname);
+        let node = fp.nodes.iter().find(|n| n.id == id).unwrap_or_else(|| panic!("no {qname}"));
+        evm::read_procedure_cell(&node.cells).unwrap_or_else(|| panic!("no evm cell on {qname}"))
+    }
+
+    /// The (from, to) qnames of every `category` edge of `fp`.
+    fn edge_qnames(fp: &FileParse, category: glia_core::EdgeCategoryId) -> Vec<(String, String)> {
+        let q = |id: &NodeId| fp.nav.qname_by_id.get(id).cloned().unwrap_or_default();
+        let mut out: Vec<(String, String)> =
+            fp.edges.iter().filter(|e| e.category == category).map(|e| (q(&e.from), q(&e.to))).collect();
+        out.sort();
+        out
+    }
+
+    const ESCROW: &str = r#"// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+interface IEscrow {
+    function deposit(bytes32 orderId) external payable;
+}
+
+library Fees {
+    function cut(uint256 amount) external pure returns (uint256) {
+        return amount / 100;
+    }
+}
+
+contract Escrow is IEscrow {
+    address public immutable seller;
+    mapping(bytes32 => uint256) public deposits;
+    uint256 private total;
+
+    event Deposited(bytes32 indexed orderId, uint256 amount);
+
+    constructor(address seller_) {
+        seller = seller_;
+    }
+
+    function deposit(bytes32 orderId) external payable {
+        _credit(orderId, msg.value);
+        emit Deposited(orderId, msg.value);
+    }
+
+    function release(bytes32 orderId) public {
+        _credit(orderId, 0);
+    }
+
+    function release(bytes32 orderId, address to) public {
+        require(to != address(0), "to");
+        _credit(orderId, 0);
+    }
+
+    function _credit(bytes32 orderId, uint256 amount) internal {
+        deposits[orderId] += amount;
+        total += amount;
+    }
+
+    receive() external payable {}
+}
+"#;
+
+    #[test]
+    fn external_and_public_functions_are_procedures() {
+        let fp = parse_file(ESCROW, "contracts/Escrow.sol", "contracts::Escrow", repo()).unwrap();
+        assert_eq!(
+            procedures(&fp),
+            [
+                "evm:Escrow.deposit",
+                "evm:Escrow.deposits",
+                "evm:Escrow.release",
+                "evm:Escrow.seller",
+                "evm:IEscrow.deposit",
+            ]
+        );
+        assert_eq!(
+            edge_qnames(&fp, edge_category::HANDLED_BY),
+            [
+                ("evm:Escrow.deposit".to_string(), "contracts::Escrow::Escrow::deposit".to_string()),
+                ("evm:Escrow.deposits".to_string(), "contracts::Escrow::Escrow::deposits".to_string()),
+                ("evm:Escrow.release".to_string(), "contracts::Escrow::Escrow::release".to_string()),
+                ("evm:Escrow.seller".to_string(), "contracts::Escrow::Escrow::seller".to_string()),
+                ("evm:IEscrow.deposit".to_string(), "contracts::Escrow::IEscrow::deposit".to_string()),
+            ]
+        );
+        // Each procedure: one node, the contract as nav parent, the nav name
+        // `<Contract>.<member>`, its POSITION first then the evm CODE cell,
+        // and no DEFINES into it.
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::RPC_PROCEDURE, "evm:Escrow.deposit");
+        let escrow = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "contracts::Escrow::Escrow");
+        assert_eq!(fp.nav.parent_of.get(&id), Some(&escrow));
+        assert_eq!(fp.nav.name_by_id.get(&id).map(String::as_str), Some("Escrow.deposit"));
+        let node = fp.nodes.iter().find(|n| n.id == id).unwrap();
+        assert_eq!(node.cells.len(), 2);
+        assert_eq!(node.cells[0].kind, cell_type::POSITION);
+        let CellPayload::Json(pos) = &node.cells[0].payload else { panic!("POSITION payload") };
+        assert!(pos.contains("contracts/Escrow.sol"), "{pos}");
+        let method = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::METHOD, "contracts::Escrow::Escrow::deposit");
+        let method_pos = fp
+            .nodes
+            .iter()
+            .find(|n| n.id == method)
+            .and_then(|n| n.cells.iter().find(|c| c.kind == cell_type::POSITION))
+            .unwrap();
+        assert_eq!(&node.cells[0], method_pos, "the procedure sits at its function");
+        assert!(!fp.edges.iter().any(|e| e.to == id), "nothing points INTO a handled procedure");
+        assert_eq!(fp.nodes.iter().filter(|n| n.id == id).count(), 1);
+        // A by-name lookup of a contract member still finds only the METHOD.
+        assert!(
+            fp.calls.iter().any(|c| matches!(&c.qualifier, CallQualifier::SelfMethod(n) if n == "_credit"))
+        );
+    }
+
+    #[test]
+    fn internal_private_library_constructor_receive_mint_nothing() {
+        let fp = parse_file(ESCROW, "contracts/Escrow.sol", "contracts::Escrow", repo()).unwrap();
+        let procs = procedures(&fp);
+        for absent in [
+            "evm:Escrow._credit",
+            "evm:Escrow.total",
+            "evm:Fees.cut",
+            "evm:Escrow.constructor",
+            "evm:Escrow.receive",
+            "evm:Escrow.Deposited",
+        ] {
+            assert!(!procs.iter().any(|p| p == absent), "{absent} in {procs:?}");
+        }
+        // The library function and the internal one stay METHODs.
+        for kept in ["contracts::Escrow::Fees::cut", "contracts::Escrow::Escrow::_credit"] {
+            assert!(fp.nav.qname_by_id.values().any(|q| q == kept), "{kept}");
+        }
+        let source = r#"
+pragma solidity ^0.8.0;
+contract C {
+    uint256 internal a;
+    uint256 b;
+    function hidden() private {}
+    modifier onlyOwner() { _; }
+    fallback() external payable {}
+}
+function free(uint256 x) pure returns (uint256) { return x; }
+"#;
+        let fp = parse_file(source, "C.sol", "C", repo()).unwrap();
+        assert!(procedures(&fp).is_empty(), "{:?}", procedures(&fp));
+    }
+
+    #[test]
+    fn missing_visibility_is_public() {
+        let source = "pragma solidity ^0.4.24; contract Old { function ping() { } }";
+        let fp = parse_file(source, "Old.sol", "Old", repo()).unwrap();
+        assert_eq!(procedures(&fp), ["evm:Old.ping"]);
+        let f = facts(&fp, "evm:Old.ping");
+        assert_eq!(f.arities, [0]);
+        assert_eq!(f.mutability, "nonpayable");
+        assert!(!f.abstract_);
+    }
+
+    #[test]
+    fn overloads_share_one_procedure_with_both_arities() {
+        let fp = parse_file(ESCROW, "contracts/Escrow.sol", "contracts::Escrow", repo()).unwrap();
+        let release = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::RPC_PROCEDURE, "evm:Escrow.release");
+        assert_eq!(fp.nodes.iter().filter(|n| n.id == release).count(), 1);
+        assert_eq!(
+            fp.edges.iter().filter(|e| e.from == release && e.category == edge_category::HANDLED_BY).count(),
+            1,
+            "both overloads share the one METHOD id"
+        );
+        let node = fp.nodes.iter().find(|n| n.id == release).unwrap();
+        let code = node.cells.iter().find(|c| c.kind == cell_type::CODE).unwrap();
+        let CellPayload::Json(json) = &code.payload else { panic!("CODE payload") };
+        assert_eq!(
+            json,
+            r#"{"via":"evm","arities":[1,2],"mutability":"nonpayable","getter":false,"abstract":false}"#
+        );
+        // The first declaration's POSITION: the one-parameter `release`.
+        let CellPayload::Json(pos) = &node.cells[0].payload else { panic!("POSITION payload") };
+        let first_line = ESCROW.lines().position(|l| l.contains("function release(bytes32 orderId) public")).unwrap();
+        assert!(pos.contains(&format!("\"start_line\":{first_line}")), "{pos} vs line {first_line}");
+    }
+
+    #[test]
+    fn getters_have_key_arity() {
+        let source = r#"
+pragma solidity ^0.8.0;
+contract Bank {
+    mapping(bytes32 => mapping(address => uint256)) public allowance;
+    address[] public owners;
+    address public immutable seller;
+    mapping(address => uint256[]) public history;
+    uint256[2][] public grid;
+}
+"#;
+        let fp = parse_file(source, "Bank.sol", "Bank", repo()).unwrap();
+        for (q, arity) in [
+            ("evm:Bank.allowance", 2),
+            ("evm:Bank.owners", 1),
+            ("evm:Bank.seller", 0),
+            ("evm:Bank.history", 2),
+            ("evm:Bank.grid", 2),
+        ] {
+            let f = facts(&fp, q);
+            assert_eq!(f.arities, [arity], "{q}");
+            assert!(f.getter, "{q}");
+            assert_eq!(f.mutability, "view", "{q}");
+            assert!(!f.abstract_, "{q}");
+        }
+    }
+
+    #[test]
+    fn state_var_visibility_is_a_field() {
+        // tree-sitter-solidity 1.2.13: `visibility` is a FIELD of a state
+        // variable and a CHILD of a function. A reader that looks for a child
+        // on the state variable finds nothing; this pins the shape it reads.
+        let source = "contract S { uint256 public x = a + b; function f() public {} }";
+        let mut parser = Parser::new();
+        parser.set_language(&tree_sitter_solidity::LANGUAGE.into()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let mut found = (false, false);
+        let mut stack = vec![tree.root_node()];
+        while let Some(n) = stack.pop() {
+            match n.kind() {
+                "state_variable_declaration" => {
+                    let field = n.child_by_field_name("visibility").map(|v| text_of(v, source.as_bytes()));
+                    assert_eq!(field, Some("public"));
+                    found.0 = true;
+                }
+                "function_definition" => {
+                    let child = named_child_of_kind(n, "visibility").map(|v| text_of(v, source.as_bytes()));
+                    assert_eq!(child, Some("public"));
+                    found.1 = true;
+                }
+                _ => {}
+            }
+            let mut c = n.walk();
+            stack.extend(n.named_children(&mut c));
+        }
+        assert_eq!(found, (true, true));
+        let fp = parse_file(source, "S.sol", "S", repo()).unwrap();
+        assert_eq!(procedures(&fp), ["evm:S.f", "evm:S.x"]);
+    }
+
+    #[test]
+    fn gated_public_constant_getter_is_contained_by_the_module() {
+        // At tree-sitter-solidity 1.2.13 a state variable's `value` is an
+        // `expression` wrapper, so the noise gate's literal test never sees
+        // the `100` and keeps the STATE_VAR: the getter is HANDLED_BY it.
+        let source = r#"
+pragma solidity ^0.8.0;
+contract Fee {
+    uint256 public constant FEE = 100;
+}
+"#;
+        let fp = parse_file(source, "contracts/Fee.sol", "contracts::Fee", repo()).unwrap();
+        assert_eq!(procedures(&fp), ["evm:Fee.FEE"]);
+        assert_eq!(
+            edge_qnames(&fp, edge_category::HANDLED_BY),
+            [("evm:Fee.FEE".to_string(), "contracts::Fee::Fee::FEE".to_string())]
+        );
+        let f = facts(&fp, "evm:Fee.FEE");
+        assert_eq!((f.arities.as_slice(), f.getter), (&[0][..], true));
+
+        // The gated branch: a getter recorded with no handler (what the gate's
+        // early return leaves) is CONTAINed by the module and never HANDLED_BY
+        // a guessed handler; it keeps the var's own POSITION.
+        let module = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::MODULE, "contracts::Fee");
+        let class = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::CLASS, "contracts::Fee::Fee");
+        let position = Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(r#"{"file":"contracts/Fee.sol","start_line":3,"end_line":3}"#.into()),
+        };
+        let mut abi = ContractAbi::new();
+        record_member(&mut abi, "FEE", 0, || FirstDecl {
+            mutability: "view".to_string(),
+            getter: true,
+            abstract_: false,
+            handler: None,
+            position: position.clone(),
+        });
+        let mut acc = Acc::default();
+        emit_procedures(&abi, Owner { name: "Fee", kind: node_kind::CLASS }, class, module, repo(), &mut acc);
+        let id = NodeId::from_parts(GRAPH_TYPE, repo(), node_kind::RPC_PROCEDURE, "evm:Fee.FEE");
+        assert_eq!(acc.edges.len(), 1);
+        let e = &acc.edges[0];
+        assert_eq!((e.from, e.to, e.category), (module, id, edge_category::CONTAINS));
+        assert_eq!(acc.nodes.len(), 1);
+        assert_eq!(acc.nodes[0].cells[0], position);
+        assert_eq!(acc.nav.parent_of.get(&id), Some(&class));
+        assert_eq!((acc.abi.procedures, acc.abi.getters, acc.abi.contracts), (1, 1, 1));
+    }
+
+    #[test]
+    fn interface_members_are_abstract_procedures() {
+        let source = r#"
+pragma solidity ^0.8.0;
+interface IERC20 {
+    function totalSupply() external view returns (uint256);
+    function transfer(address to, uint256 amount) external returns (bool);
+}
+abstract contract Base {
+    function hook(uint256 x) public virtual;
+    function done() public {}
+}
+"#;
+        let fp = parse_file(source, "I.sol", "I", repo()).unwrap();
+        assert_eq!(
+            procedures(&fp),
+            ["evm:Base.done", "evm:Base.hook", "evm:IERC20.totalSupply", "evm:IERC20.transfer"]
+        );
+        let total = facts(&fp, "evm:IERC20.totalSupply");
+        assert_eq!((total.arities.as_slice(), total.mutability.as_str(), total.abstract_), (&[0][..], "view", true));
+        let transfer = facts(&fp, "evm:IERC20.transfer");
+        assert_eq!((transfer.arities.as_slice(), transfer.abstract_), (&[2][..], true), "returns are not params");
+        assert!(facts(&fp, "evm:Base.hook").abstract_, "no body");
+        assert!(!facts(&fp, "evm:Base.done").abstract_);
+    }
+
+    #[test]
+    fn mutability_is_read() {
+        let source = r#"
+pragma solidity ^0.8.0;
+contract M {
+    function a() external payable {}
+    function b() external view returns (uint256) { return 1; }
+    function c() public pure returns (uint256) { return 2; }
+    function d() public {}
+}
+"#;
+        let fp = parse_file(source, "M.sol", "M", repo()).unwrap();
+        for (q, m) in [("evm:M.a", "payable"), ("evm:M.b", "view"), ("evm:M.c", "pure"), ("evm:M.d", "nonpayable")] {
+            assert_eq!(facts(&fp, q).mutability, m, "{q}");
+        }
     }
 }
