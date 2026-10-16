@@ -29,7 +29,8 @@
 //! hardhat=<n> typechain=<n> viem=<n> web3=<n> geth=<n>) abis=<a>
 //! not_in_abi=<i> dynamic=<d> path=<file>`; c / e count the file's nodes, s
 //! its sites (split by library in the parenthesis), a the ABI bindings read.
-//! Grep `^\[evm-client\] `.
+//! Grep `^\[evm-client\] `. A Go file with a method-name wrapper (DT.10f)
+//! adds the reader's `[evm-wrappers]` line ([`go`] step 9).
 
 mod abi;
 mod go;
@@ -63,6 +64,9 @@ pub struct EvmNodes {
     /// One per site, for the engine's A5.8 anchor pass.
     pub anchors: Vec<Anchor>,
     pub counts: EvmCounts,
+    /// The Go reader's `[evm-wrappers]` counts (DT.10f); zero for any other
+    /// reader.
+    go_wrappers: go::WrapperCounts,
 }
 
 /// The `[evm-client]` marker's counts for one file.
@@ -111,16 +115,17 @@ pub(crate) struct Site {
 /// TS-family tag reads ethers, `go` reads go-ethereum. A language without a
 /// reader gives none.
 pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: RepoId) -> EvmNodes {
-    let (tag, sites, abis, not_in_abi, dynamic) = match lang {
+    let (tag, sites, abis, not_in_abi, dynamic, go_wrappers) = match lang {
         "go" => {
             let view = scan::code_view(source, lang);
             let (sites, c) = go::scan(source, &view);
-            ("go", sites, c.abis, c.not_in_abi, c.dynamic)
+            ("go", sites, c.abis, c.not_in_abi, c.dynamic, c.wrappers)
         }
         l if TS_FAMILY.contains(&l) => {
             let view = scan::code_view(source, lang);
             let (sites, c) = ts::scan(source, &view);
-            ("ts", sites, c.abis, c.not_in_abi, c.dynamic)
+            let none = go::WrapperCounts::default();
+            ("ts", sites, c.abis, c.not_in_abi, c.dynamic, none)
         }
         _ => return EvmNodes::default(),
     };
@@ -129,23 +134,33 @@ pub fn extract_evm_clients(source: &str, lang: &str, module_id: NodeId, repo: Re
     out.counts.abis = abis;
     out.counts.not_in_abi = not_in_abi;
     out.counts.dynamic = dynamic;
+    out.go_wrappers = go_wrappers;
     out
 }
 
 impl EvmNodes {
     /// The file's marker lines (module doc): the `[evm-client]` line when the
-    /// file had a site or a dynamic construction, else none.
+    /// file had a site or a dynamic construction, then the `[evm-wrappers]`
+    /// line when it had a Go method-name wrapper.
     pub fn markers(&self, path: &str) -> Vec<String> {
         let c = &self.counts;
-        if c.sites + c.dynamic == 0 {
-            return Vec::new();
+        let mut lines = Vec::new();
+        if c.sites + c.dynamic > 0 {
+            lines.push(self.client_marker(path));
         }
+        lines.extend(self.go_wrappers.marker(path));
+        lines
+    }
+
+    /// The `[evm-client]` line (module doc).
+    fn client_marker(&self, path: &str) -> String {
+        let c = &self.counts;
         let libs: Vec<String> = LIBS
             .iter()
             .zip(c.by_lib)
             .map(|(lib, n)| format!("{lib}={n}"))
             .collect();
-        vec![format!(
+        format!(
             "[evm-client] lang={} calls={} events={} sites={} ({}) abis={} not_in_abi={} dynamic={} path={path}",
             c.lang,
             c.calls,
@@ -155,7 +170,7 @@ impl EvmNodes {
             c.abis,
             c.not_in_abi,
             c.dynamic
-        )]
+        )
     }
 }
 

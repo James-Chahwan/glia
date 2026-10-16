@@ -18,7 +18,7 @@
 //! 3. **Functions** ([`func_decls`]). Every top-level `func (<recv>
 //!    <Type>)? <Name>[<tparams>]?(<params>) <results> {..}` with its receiver
 //!    name, receiver type name (`*` and type parameters dropped), parameter
-//!    names and balanced body. Parameters split at depth-0 commas, so the
+//!    names and types, and balanced body. Parameters split at depth-0 commas, so the
 //!    grouped `chainName, contractAddr, method string` names every one, and a
 //!    variadic `args ...any` is the last.
 //! 4. **Bindings.** The first left-hand element of `<x>(, <err>)? := ..`,
@@ -91,18 +91,50 @@
 //!    mints nothing and counts `not_in_abi`; with none (`Scope::Recv`, an ABI
 //!    of another file) every name-literal site mints and the resolver decides.
 //!    A name in a JSON-RPC namespace ([`JSON_RPC`]) never mints and is not
-//!    counted. A non-literal name on a bound receiver
-//!    (`parsedABI.Pack(method, args...)`, Kina signer.go) mints nothing and
-//!    counts `dynamic` (DT.10f reads those through their wrappers); the
-//!    receiver-type rule binds nothing, so abigen's forwarding `Raw` methods
-//!    (`_Escrow.Contract.EscrowCaller.contract.Call(opts, result, method,
-//!    ..)`) count nothing.
+//!    counted. A non-literal name mints nothing: a bare parameter of its
+//!    function hands the name over (step 9); any other on a bound receiver
+//!    counts `dynamic`, and on an unbound one nothing, so abigen's
+//!    forwarding `Raw` methods (`_Escrow.Contract.EscrowCaller.contract.Call(
+//!    opts, result, method, ..)`, named like a needle) count nothing.
 //! 8. **Event switches** ([`Reader::switch_sites`]). A `for <k>(, <v>)? :?=
 //!    range <r>.Events {` loop, and inside its block a `switch <k> {` or
 //!    `switch <v>.Name {`: every string literal of a `case "A"(, "B")*:` list
 //!    of that switch's own body (a nested switch's cases are deeper) is an
 //!    event site of r's scope, read at the literal (Kina indexer.go
 //!    processLog). A switch on any other tag contributes nothing.
+//! 9. **Method-name wrappers** (DT.10f, [`Reader::infer_wrappers`]; the CA.4
+//!    rule, read inside one file). A function whose `string` parameter is
+//!    handed bare to a step-7 name position is a wrapper at that parameter's index
+//!    (DIRECT), with the site's scope and entries (a `Scope::Recv` one
+//!    keeps it, so the resolver name-hints its sites) and side: Pack /
+//!    Methods / Transact / Call a call, Events / FilterLogs / WatchLogs /
+//!    UnpackLog / UnpackLogIntoMap an event, Unpack / UnpackIntoInterface
+//!    whichever the ABI lists at each site. A function handing its own
+//!    parameter bare to a wrapper's index is a wrapper at that index too
+//!    (FORWARDING), with the wrapper's scope and side, to depth
+//!    [`MAX_DEPTH`] and never back into a wrapper already read. Kina
+//!    signer.go: `submitTo(.., method string, ..)` packs `method`, `submit`
+//!    forwards it, eight methods call `s.submit(ctx, chain, "freeze", ..)`.
+//!    - A method wrapper is called `<x>.W(`, a function wrapper `W(`; its
+//!      definition is no call. Every call whose argument at the index is ONE
+//!      string literal is a site at the call: the wrapper's scope, entries
+//!      and side, args unknown, owned by the calling function. A bare
+//!      parameter of the caller forwards (never dynamic); anything else (a
+//!      local, a concatenation, a call) is no site and counts `dynamic`.
+//!    - PRECISION: no value is tracked through an assignment. A name that
+//!      two functions of the file declare (two receiver types), or whose
+//!      parameter reaches two scopes or both sides, is no wrapper and counts
+//!      `ambiguous`; its geth sites fall back to the step-7 count. A
+//!      function named like a needle ([`GETH_METHODS`]) is never a wrapper.
+//!      Sites are same-file only.
+//!
+//!    Marker, once per file with a wrapper: `[evm-wrappers] wrappers=<w>
+//!    (direct=<d> forwarded=<f> ambiguous=<a>) sites=<s> dynamic=<y>
+//!    path=<file>`, one count per (function, parameter), w = d + f + a; s
+//!    the wrapper sites minted, y the dynamic wrapper calls (also in the
+//!    `[evm-client]` line's `dynamic`). Grep `^\[evm-wrappers\] `.
+
+use std::collections::BTreeMap;
 
 use glia_code_domain::evm::{AbiEntry, ClientSide, EntryKind, Scope};
 
@@ -168,9 +200,43 @@ pub(super) struct GoCounts {
     pub(super) abis: usize,
     /// Members left out because the known ABI does not list them.
     pub(super) not_in_abi: usize,
-    /// Bindings whose ABI argument could not be read, and non-literal names
-    /// on bound receivers.
+    /// Bindings whose ABI argument could not be read, non-literal names on
+    /// bound receivers that hand no parameter over, and the dynamic wrapper
+    /// calls (step 9).
     pub(super) dynamic: usize,
+    /// The `[evm-wrappers]` marker's counts (step 9).
+    pub(super) wrappers: WrapperCounts,
+}
+
+/// The `[evm-wrappers]` marker's counts for one file (step 9).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct WrapperCounts {
+    /// Wrappers whose parameter reaches a geth name position.
+    pub(super) direct: usize,
+    /// Wrappers whose parameter reaches another wrapper's.
+    pub(super) forwarded: usize,
+    /// Wrappers left out: a name two functions declare, or a parameter
+    /// reaching two scopes or both sides.
+    pub(super) ambiguous: usize,
+    /// Sites minted at wrapper calls.
+    pub(super) sites: usize,
+    /// Wrapper calls whose name argument is neither one string literal nor
+    /// a parameter of the caller.
+    pub(super) dynamic: usize,
+}
+
+impl WrapperCounts {
+    /// The `[evm-wrappers]` line of the file at `path`; `None` without a
+    /// wrapper.
+    pub(super) fn marker(&self, path: &str) -> Option<String> {
+        let w = self.direct + self.forwarded + self.ambiguous;
+        (w > 0).then(|| {
+            format!(
+                "[evm-wrappers] wrappers={w} (direct={} forwarded={} ambiguous={}) sites={} dynamic={} path={path}",
+                self.direct, self.forwarded, self.ambiguous, self.sites, self.dynamic
+            )
+        })
+    }
 }
 
 /// One package-level ABI declaration (step 2).
@@ -195,6 +261,10 @@ struct ValueSpec {
 /// One top-level function or method declaration (step 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FuncDecl {
+    /// The function or method name.
+    name: String,
+    /// The name's offset: the definition, never a call (step 9).
+    name_at: usize,
     /// The method receiver's name; `None` for a function or an unnamed
     /// receiver.
     receiver: Option<String>,
@@ -203,6 +273,9 @@ struct FuncDecl {
     receiver_type: Option<String>,
     /// The parameter names in order; empty when the parameters are unnamed.
     params: Vec<String>,
+    /// Each parameter's type text, a grouped name taking its group's
+    /// (`chainName, method string` are both `string`).
+    param_types: Vec<String>,
     /// The offsets of the body's braces.
     body: (usize, usize),
 }
@@ -327,6 +400,100 @@ impl Needle {
                 | Needle::UnpackLogIntoMap
         )
     }
+
+    /// The side the needle's name position reads.
+    fn name_side(self) -> NameSide {
+        if self.event() {
+            NameSide::Event
+        } else if self.decodes() {
+            NameSide::Decode
+        } else {
+            NameSide::Call
+        }
+    }
+}
+
+/// What a name position reads (steps 7 and 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameSide {
+    /// A function: a call site.
+    Call,
+    /// An event: an event site.
+    Event,
+    /// The decoding forms: a call where the ABI lists the name as a
+    /// function, an event where it lists an event, else no site.
+    Decode,
+}
+
+/// How deep a forwarding chain is read (step 9, CA.4's MAX_DEPTH): a direct
+/// wrapper is depth 1, a function forwarding into it depth 2.
+const MAX_DEPTH: usize = 3;
+
+/// go-ethereum's own name-taking members: a function named like one is never
+/// a wrapper (step 9). abigen's Raw bindings forward these, and their own
+/// sites are read directly.
+const GETH_METHODS: &[&str] = &[
+    "Pack",
+    "Unpack",
+    "UnpackIntoInterface",
+    "Transact",
+    "Call",
+    "FilterLogs",
+    "WatchLogs",
+    "UnpackLog",
+    "UnpackLogIntoMap",
+];
+
+/// A parameter handed bare to a name position (step 9): a geth site's
+/// (direct) or a wrapper call's (forwarded).
+#[derive(Debug, Clone)]
+struct Handover {
+    /// The function whose parameter it is: an index into `Reader::funcs`.
+    func: usize,
+    /// The parameter's index.
+    arg: usize,
+    scope: Scope,
+    entries: Option<Vec<AbiEntry>>,
+    side: NameSide,
+    /// A geth site on a bound receiver: step 7's `dynamic` when no wrapper
+    /// forms.
+    dynamic: bool,
+}
+
+/// One method-name wrapper (step 9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Wrapper {
+    name: String,
+    /// A method, called `<x>.W(`; else a function, called `W(`.
+    method: bool,
+    /// The index of the parameter that names the member.
+    arg: usize,
+    scope: Scope,
+    entries: Option<Vec<AbiEntry>>,
+    side: NameSide,
+    /// 1 for a direct wrapper, up to [`MAX_DEPTH`] for a forwarding one.
+    depth: usize,
+}
+
+/// What a wrapper call hands at the wrapper's index (step 9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Handed {
+    /// One string literal: the member.
+    Literal(String),
+    /// A bare parameter of the caller, by index.
+    Param(usize),
+    /// Anything else: dynamic.
+    Other,
+}
+
+/// One call of a wrapper (step 9).
+#[derive(Debug)]
+struct WrapperCall {
+    /// The wrapper name's offset at the call.
+    at: usize,
+    /// The calling function: an index into `Reader::funcs`.
+    caller: Option<usize>,
+    handed: Handed,
 }
 
 /// A receiver selector chain (step 6).
@@ -344,10 +511,16 @@ struct Chain<'v> {
 
 /// The sites of one Go file (module doc) over its code `view`.
 pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, GoCounts) {
+    let (sites, counts, _) = read_file(source, view);
+    (sites, counts)
+}
+
+/// [`scan`], with the file's method-name wrappers (step 9).
+fn read_file(source: &str, view: &str) -> (Vec<Site>, GoCounts, Vec<Wrapper>) {
     let mut counts = GoCounts::default();
     let imports = geth_imports(source, view);
     if imports.is_empty() {
-        return (Vec::new(), counts);
+        return (Vec::new(), counts, Vec::new());
     }
     let package = |paths: &[&str]| {
         imports
@@ -387,8 +560,67 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, GoCounts) {
         reader.bind(ctor, pkg, member, &mut counts);
         reader.hand_off(first);
     }
-    let sites = reader.sites(&mut counts);
-    (sites, counts)
+    let (mut sites, handovers) = reader.sites(&mut counts);
+    let wrappers = reader.infer_wrappers(handovers, &mut counts);
+    sites.extend(reader.wrapper_sites(&wrappers, &mut counts));
+    sites.sort_by(|a, b| (a.at, &a.member).cmp(&(b.at, &b.member)));
+    (sites, counts, wrappers)
+}
+
+/// The side a site naming `member` reads with the ABI `entries` (step 7);
+/// `None` when it mints nothing, counted `not_in_abi` when the ABI is known.
+fn site_side(
+    side: NameSide,
+    entries: Option<&[AbiEntry]>,
+    member: &str,
+    counts: &mut GoCounts,
+) -> Option<ClientSide> {
+    let lists = |kind: EntryKind| {
+        entries.is_some_and(|es| es.iter().any(|e| e.kind == kind && e.name == member))
+    };
+    let side = match side {
+        NameSide::Call => ClientSide::Call,
+        NameSide::Event => ClientSide::Event,
+        NameSide::Decode if lists(EntryKind::Fn) => ClientSide::Call,
+        NameSide::Decode if lists(EntryKind::Event) => ClientSide::Event,
+        NameSide::Decode => {
+            // A decoding form names a function or an event of the ABI it
+            // reads; no ABI, no site.
+            if entries.is_some() {
+                counts.not_in_abi += 1;
+            }
+            return None;
+        }
+    };
+    let kind = match side {
+        ClientSide::Call => EntryKind::Fn,
+        ClientSide::Event => EntryKind::Event,
+    };
+    if entries.is_some() && !lists(kind) {
+        counts.not_in_abi += 1;
+        return None;
+    }
+    Some(side)
+}
+
+/// The one scope and side the hand-overs `hs` of one (function, parameter)
+/// agree on, with the entries one of them knows (step 9); `None` when they
+/// reach two scopes or both sides. A decoding form joins either side.
+fn merge_handovers(hs: &[Handover]) -> Option<(Scope, Option<Vec<AbiEntry>>, NameSide)> {
+    let first = hs.first()?;
+    if hs.iter().any(|h| h.scope != first.scope) {
+        return None;
+    }
+    let mut side = NameSide::Decode;
+    for h in hs {
+        side = match (side, h.side) {
+            (NameSide::Decode, s) | (s, NameSide::Decode) => s,
+            (a, b) if a == b => a,
+            _ => return None,
+        };
+    }
+    let entries = hs.iter().find_map(|h| h.entries.clone());
+    Some((first.scope.clone(), entries, side))
 }
 
 /// Step 1: the `(import path, package name)` of every go-ethereum import;
@@ -685,6 +917,7 @@ fn func_decls(view: &str) -> Vec<FuncDecl> {
         let Some(name_end) = ident_end(vb, k) else {
             continue;
         };
+        let (name, name_at) = (view[k..name_end].to_string(), k);
         k = skip_ws(vb, name_end);
         if vb.get(k) == Some(&b'[') {
             let Some(close) = matching(view, k) else {
@@ -698,7 +931,9 @@ fn func_decls(view: &str) -> Vec<FuncDecl> {
         let Some(p_close) = matching(view, k) else {
             continue;
         };
-        let params = param_names(view, &split_args(view, k, p_close));
+        let (params, param_types) = param_names(view, &split_args(view, k, p_close))
+            .into_iter()
+            .unzip();
         let Some(open) = body_open(view, p_close + 1) else {
             continue;
         };
@@ -706,9 +941,12 @@ fn func_decls(view: &str) -> Vec<FuncDecl> {
             continue;
         };
         out.push(FuncDecl {
+            name,
+            name_at,
             receiver,
             receiver_type,
             params,
+            param_types,
             body: (open, close),
         });
     }
@@ -739,10 +977,10 @@ fn named_piece(view: &str, s: usize, e: usize) -> Option<String> {
     (typed && !TYPE_KEYWORDS.contains(&name)).then(|| name.to_string())
 }
 
-/// The names of a parameter list's pieces: a named piece's name, and a bare
-/// identifier grouped with a later type (`a, b string`); none when no piece
-/// is named.
-fn param_names(view: &str, pieces: &[(usize, usize)]) -> Vec<String> {
+/// The `(name, type)` of a parameter list's pieces: a named piece's name and
+/// type, and a bare identifier grouped with a later type (`a, b string`)
+/// with that type; none when no piece is named.
+fn param_names(view: &str, pieces: &[(usize, usize)]) -> Vec<(String, String)> {
     let named: Vec<Option<String>> = pieces
         .iter()
         .map(|&(s, e)| named_piece(view, s, e))
@@ -750,13 +988,20 @@ fn param_names(view: &str, pieces: &[(usize, usize)]) -> Vec<String> {
     if named.iter().all(Option::is_none) {
         return Vec::new();
     }
-    pieces
-        .iter()
-        .zip(named)
-        .filter_map(|(&(s, e), name)| {
-            name.or_else(|| is_ident(&view[s..e]).then(|| view[s..e].to_string()))
-        })
-        .collect()
+    let mut out = Vec::new();
+    let mut ty = String::new();
+    for (&(s, e), name) in pieces.iter().zip(named).rev() {
+        match name {
+            Some(name) => {
+                ty = view[s + name.len()..e].trim().to_string();
+                out.push((name, ty.clone()));
+            }
+            None if is_ident(&view[s..e]) => out.push((view[s..e].to_string(), ty.clone())),
+            None => {}
+        }
+    }
+    out.reverse();
+    out
 }
 
 /// The `{` opening the body after a signature's parameters end at `from`;
@@ -1076,11 +1321,13 @@ impl Reader<'_> {
         self.fields.extend(found);
     }
 
-    /// Step 7: every call site of the file.
-    fn sites(&self, counts: &mut GoCounts) -> Vec<Site> {
+    /// Step 7: every call site of the file, and the parameters handed bare
+    /// to a name position (step 9's direct hand-overs).
+    fn sites(&self, counts: &mut GoCounts) -> (Vec<Site>, Vec<Handover>) {
         let (source, view) = (self.source, self.view);
         let vb = view.as_bytes();
         let mut sites = Vec::new();
+        let mut handovers = Vec::new();
         for &(word, needle) in NEEDLES {
             for m_at in word_hits(view, word) {
                 let Some(dot) = prev_non_ws(vb, m_at).filter(|&d| vb[d] == b'.') else {
@@ -1126,7 +1373,9 @@ impl Reader<'_> {
                     (name_at, args)
                 };
                 let Some(member) = literal(source, name_at.0, name_at.1) else {
-                    if self
+                    if let Some(h) = self.handover(&chain, m_at, name_at, needle.name_side()) {
+                        handovers.push(h);
+                    } else if self
                         .binding_of(&chain, m_at)
                         .is_some_and(|v| v.scope.is_some())
                     {
@@ -1140,33 +1389,10 @@ impl Reader<'_> {
                 let Some((scope, entries)) = self.scope_of(&chain, m_at) else {
                     continue;
                 };
-                let lists = |kind: EntryKind| {
-                    entries
-                        .as_ref()
-                        .is_some_and(|es| es.iter().any(|e| e.kind == kind && e.name == member))
-                };
-                let side = if needle.event() {
-                    ClientSide::Event
-                } else if !needle.decodes() || lists(EntryKind::Fn) {
-                    ClientSide::Call
-                } else if lists(EntryKind::Event) {
-                    ClientSide::Event
-                } else {
-                    // A decoding form names a function or an event of the
-                    // ABI it reads; no ABI, no site.
-                    if entries.is_some() {
-                        counts.not_in_abi += 1;
-                    }
+                let Some(side) = site_side(needle.name_side(), entries.as_deref(), &member, counts)
+                else {
                     continue;
                 };
-                let kind = match side {
-                    ClientSide::Call => EntryKind::Fn,
-                    ClientSide::Event => EntryKind::Event,
-                };
-                if entries.is_some() && !lists(kind) {
-                    counts.not_in_abi += 1;
-                    continue;
-                }
                 sites.push(Site {
                     side,
                     scope,
@@ -1179,7 +1405,189 @@ impl Reader<'_> {
             }
         }
         sites.extend(self.switch_sites(counts));
-        sites.sort_by(|a, b| (a.at, &a.member).cmp(&(b.at, &b.member)));
+        (sites, handovers)
+    }
+
+    /// Step 9's direct hand-over: the geth site on `chain` at `at` whose name
+    /// argument `name` is a bare `string` parameter of its function; `None`
+    /// when it is none, the function is named like a needle, or the site's
+    /// binding is dynamic.
+    fn handover(
+        &self,
+        chain: &Chain<'_>,
+        at: usize,
+        name: (usize, usize),
+        side: NameSide,
+    ) -> Option<Handover> {
+        let text = &self.view[name.0..name.1];
+        if !is_ident(text) {
+            return None;
+        }
+        let func = self.func_index_at(at)?;
+        let f = &self.funcs[func];
+        if GETH_METHODS.contains(&f.name.as_str()) {
+            return None;
+        }
+        let arg = f.params.iter().position(|p| p == text)?;
+        if f.param_types.get(arg).map(String::as_str) != Some("string") {
+            // ethclient's `FilterLogs(ctx, query)` hands a FilterQuery.
+            return None;
+        }
+        let (scope, entries) = self.scope_of(chain, at)?;
+        let dynamic = self
+            .binding_of(chain, at)
+            .is_some_and(|v| v.scope.is_some());
+        Some(Handover {
+            func,
+            arg,
+            scope,
+            entries,
+            side,
+            dynamic,
+        })
+    }
+
+    /// The index of the function whose body holds `at`.
+    fn func_index_at(&self, at: usize) -> Option<usize> {
+        self.funcs
+            .iter()
+            .position(|f| f.body.0 < at && at < f.body.1)
+    }
+
+    /// Step 9: the wrappers the `direct` hand-overs make, then those that
+    /// forward into them, level by level to [`MAX_DEPTH`]. A (function,
+    /// parameter) is read once (the cycle guard), at its shallowest depth.
+    fn infer_wrappers(&self, direct: Vec<Handover>, counts: &mut GoCounts) -> Vec<Wrapper> {
+        let mut wrappers: Vec<Wrapper> = Vec::new();
+        let mut seen: Vec<(String, usize)> = Vec::new();
+        let mut level = direct;
+        for depth in 1..=MAX_DEPTH {
+            let mut groups: BTreeMap<(String, usize), Vec<Handover>> = BTreeMap::new();
+            for h in level {
+                let key = (self.funcs[h.func].name.clone(), h.arg);
+                if !seen.contains(&key) {
+                    groups.entry(key).or_default().push(h);
+                }
+            }
+            let mut fresh = Vec::new();
+            for (key, hs) in groups {
+                let unique = self.funcs.iter().filter(|f| f.name == key.0).count() == 1;
+                match merge_handovers(&hs).filter(|_| unique) {
+                    Some((scope, entries, side)) => fresh.push(Wrapper {
+                        method: self.funcs[hs[0].func].receiver_type.is_some(),
+                        name: key.0.clone(),
+                        arg: key.1,
+                        scope,
+                        entries,
+                        side,
+                        depth,
+                    }),
+                    None => {
+                        counts.wrappers.ambiguous += 1;
+                        counts.dynamic += hs.iter().filter(|h| h.dynamic).count();
+                    }
+                }
+                seen.push(key);
+            }
+            level = Vec::new();
+            if depth < MAX_DEPTH {
+                for w in &fresh {
+                    for call in self.wrapper_calls(w) {
+                        let (Handed::Param(arg), Some(func)) = (&call.handed, call.caller) else {
+                            continue;
+                        };
+                        if GETH_METHODS.contains(&self.funcs[func].name.as_str()) {
+                            continue;
+                        }
+                        level.push(Handover {
+                            func,
+                            arg: *arg,
+                            scope: w.scope.clone(),
+                            entries: w.entries.clone(),
+                            side: w.side,
+                            dynamic: false,
+                        });
+                    }
+                }
+            }
+            wrappers.extend(fresh);
+        }
+        counts.wrappers.direct = wrappers.iter().filter(|w| w.depth == 1).count();
+        counts.wrappers.forwarded = wrappers.len() - counts.wrappers.direct;
+        wrappers
+    }
+
+    /// Every call of the wrapper `w` in the file (step 9): `<x>.W(` for a
+    /// method, `W(` for a function, never its definition, with what it hands
+    /// at `w`'s index. A call with fewer arguments is none.
+    fn wrapper_calls(&self, w: &Wrapper) -> Vec<WrapperCall> {
+        let view = self.view;
+        let vb = view.as_bytes();
+        let mut out = Vec::new();
+        for at in word_hits(view, &w.name) {
+            if self.funcs.iter().any(|f| f.name_at == at) {
+                continue;
+            }
+            let dotted = prev_non_ws(vb, at).is_some_and(|p| vb[p] == b'.');
+            if dotted != w.method {
+                continue;
+            }
+            let open = skip_ws(vb, at + w.name.len());
+            if vb.get(open) != Some(&b'(') {
+                continue;
+            }
+            let Some(close) = matching(view, open) else {
+                continue;
+            };
+            let Some(&(s, e)) = split_args(view, open, close).get(w.arg) else {
+                continue;
+            };
+            let caller = self.func_index_at(at);
+            let handed = match literal(self.source, s, e) {
+                Some(member) => Handed::Literal(member),
+                None => caller
+                    .and_then(|c| self.funcs[c].params.iter().position(|p| *p == view[s..e]))
+                    .map_or(Handed::Other, Handed::Param),
+            };
+            out.push(WrapperCall { at, caller, handed });
+        }
+        out
+    }
+
+    /// Step 9's sites: every wrapper call handing one string literal, read
+    /// as a site of the wrapper's scope; a call handing neither a literal nor
+    /// a parameter of its caller counts `dynamic`.
+    fn wrapper_sites(&self, wrappers: &[Wrapper], counts: &mut GoCounts) -> Vec<Site> {
+        let mut sites = Vec::new();
+        for w in wrappers {
+            for call in self.wrapper_calls(w) {
+                let member = match call.handed {
+                    Handed::Literal(member) => member,
+                    Handed::Param(_) => continue,
+                    Handed::Other => {
+                        counts.wrappers.dynamic += 1;
+                        counts.dynamic += 1;
+                        continue;
+                    }
+                };
+                if !is_ident(&member) || JSON_RPC.iter().any(|ns| member.starts_with(ns)) {
+                    continue;
+                }
+                let Some(side) = site_side(w.side, w.entries.as_deref(), &member, counts) else {
+                    continue;
+                };
+                counts.wrappers.sites += 1;
+                sites.push(Site {
+                    side,
+                    scope: w.scope.clone(),
+                    member,
+                    args: None,
+                    lib: LIB,
+                    abi: w.entries.clone(),
+                    at: call.at,
+                });
+            }
+        }
         sites
     }
 
@@ -1511,7 +1919,42 @@ mod tests {
             abis,
             not_in_abi,
             dynamic,
+            wrappers: WrapperCounts::default(),
         }
+    }
+
+    /// `(direct, forwarded, ambiguous, sites, dynamic)` as the marker counts.
+    fn wrapped(w: (usize, usize, usize, usize, usize)) -> WrapperCounts {
+        let (direct, forwarded, ambiguous, sites, dynamic) = w;
+        WrapperCounts {
+            direct,
+            forwarded,
+            ambiguous,
+            sites,
+            dynamic,
+        }
+    }
+
+    /// `<name>/<arg> <scope key> <side> depth=<d> abi=<keys|->` per wrapper
+    /// (step 9), in inference order.
+    fn wrappers(src: &str) -> Vec<String> {
+        let (_, _, ws) = read_file(src, &code_view(src, "go"));
+        ws.iter()
+            .map(|w| {
+                let abi = w.entries.as_ref().map_or_else(
+                    || "-".to_string(),
+                    |e| e.iter().map(AbiEntry::to_key).collect::<Vec<_>>().join(","),
+                );
+                format!(
+                    "{}/{} {} {:?} depth={} abi={abi}",
+                    w.name,
+                    w.arg,
+                    w.scope.key(),
+                    w.side,
+                    w.depth
+                )
+            })
+            .collect()
     }
 
     const HEAD: &str = "package chain
@@ -1892,7 +2335,8 @@ func (s *Settler) Balance(ctx context.Context) (*big.Int, error) {
 
     #[test]
     fn non_literal_name_is_dynamic() {
-        // Kina backend/internal/signer/signer.go submitTo.
+        // Kina backend/internal/signer/signer.go submitTo, its name read
+        // through a local rather than handed over as its parameter.
         let src = format!(
             "{HEAD}{}",
             r#"
@@ -1901,10 +2345,11 @@ func (s *PlatformSigner) submitTo(ctx context.Context, chainName, contractAddr, 
 	if err != nil {
 		return "", fmt.Errorf("parse abi: %w", err)
 	}
-	data, err := parsedABI.Pack(method, args...)
+	name := strings.ToLower(method)
+	data, err := parsedABI.Pack(name, args...)
 	contract := bind.NewBoundContract(common.HexToAddress(contractAddr), parsedABI, client, client, client)
 	tx, err := contract.RawTransact(auth, data)
-	s.escrow.Transact(opts, method, data)
+	s.escrow.Transact(opts, name, data)
 	return tx.Hash().Hex(), nil
 }
 "#
@@ -1912,8 +2357,10 @@ func (s *PlatformSigner) submitTo(ctx context.Context, chainName, contractAddr, 
         assert_eq!(
             read(&src),
             (Vec::new(), counts(1, 0, 1)),
-            "an unbound receiver's non-literal name is not counted"
+            "no value is tracked through a local; an unbound receiver's non-literal name \
+             is not counted"
         );
+        assert!(wrappers(&src).is_empty());
     }
 
     #[test]
@@ -2064,6 +2511,23 @@ func (c Box[T]) Len() {}
             (Some("c"), Some("Box"), vec![], "{}"),
             "type parameters are dropped"
         );
+        assert_eq!(
+            funcs[0].param_types,
+            ["context.Context", "string", "string", "string", "...any"],
+            "a grouped name takes its group's type"
+        );
+        assert_eq!(funcs[1].param_types, ["map[K]V", "func(K) V"]);
+        assert_eq!(funcs[3].param_types, ["chan int", "<-chan int"]);
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["submitTo", "Map", "unnamed", "chans", "Deposits", "Len"]
+        );
+        assert!(
+            funcs.iter().all(|f| src[f.name_at..].starts_with(&f.name)
+                && src[..f.name_at].trim_end().ends_with([')', 'c'])),
+            "name_at is the definition's name, after `func` or the receiver"
+        );
     }
 
     #[test]
@@ -2071,7 +2535,7 @@ func (c Box[T]) Len() {}
         let src = format!(
             "{HEAD}{}",
             r#"
-func f(c *bind.BoundContract, client *ethclient.Client, q ethereum.FilterQuery, name string) {
+func f(c *bind.BoundContract, client *ethclient.Client, q ethereum.FilterQuery) {
 	parsed, _ := abi.JSON(strings.NewReader(escrowABI))
 	id := parsed.Events["Released"].ID
 	_ = parsed.Events["Gone"]
@@ -2080,7 +2544,7 @@ func f(c *bind.BoundContract, client *ethclient.Client, q ethereum.FilterQuery, 
 	c.UnpackLog(&ev, "Released", log)
 	c.UnpackLogIntoMap(m, "Released", log)
 	client.FilterLogs(ctx, q)
-	_ = parsed.Events[name]
+	_ = parsed.Events[eventName(q)]
 	bc := bind.NewBoundContract(addr, parsed, b, b, b)
 	bc.WatchLogs(wopts, "Released")
 	bc.FilterLogs(fopts, "deposit")
@@ -2105,7 +2569,7 @@ func f(c *bind.BoundContract, client *ethclient.Client, q ethereum.FilterQuery, 
             c,
             counts(1, 3, 1),
             "Gone, the function deposit as an event and the event Released as a call \
-             are not in the ABI; Events[name] on a bound receiver is dynamic"
+             are not in the ABI; Events[eventName(q)] on a bound receiver is dynamic"
         );
     }
 
@@ -2571,5 +3035,394 @@ func (idx *Indexer) processLog(ctx context.Context, vlog types.Log) error {{
             .collect();
         want.sort_unstable();
         assert_eq!(qnames, want);
+    }
+
+    // ---- step 9: method-name wrappers (DT.10f) ----
+
+    /// bench/substrate-gap/fixtures/go-ethereum-method-wrappers (Kina
+    /// backend/internal/signer/signer.go's shape).
+    const SIGNER: &str = include_str!(
+        "../../../../../bench/substrate-gap/fixtures/go-ethereum-method-wrappers/backend/signer/signer.go"
+    );
+
+    /// SIGNER's ABI as `read` prints it.
+    const SIGNER_KEYS: &str = "f:freeze/1,f:resolveDispute/3,f:unfreeze/1";
+
+    #[test]
+    fn direct_pack_wrapper() {
+        let ws = wrappers(SIGNER);
+        assert_eq!(
+            ws[0],
+            format!("submitTo/3 abi:escrowManagerABI Call depth=1 abi={SIGNER_KEYS}"),
+            "parsedABI.Pack(method, args...) hands submitTo's fourth parameter over"
+        );
+        assert_eq!(
+            read(SIGNER).1.wrappers.direct,
+            1,
+            "logCall hands its parameter to log.Printf, no name position"
+        );
+    }
+
+    #[test]
+    fn forwarding_wrapper() {
+        assert_eq!(
+            wrappers(SIGNER),
+            [
+                format!("submitTo/3 abi:escrowManagerABI Call depth=1 abi={SIGNER_KEYS}"),
+                format!("submit/2 abi:escrowManagerABI Call depth=2 abi={SIGNER_KEYS}"),
+                format!("Forward/2 abi:escrowManagerABI Call depth=3 abi={SIGNER_KEYS}"),
+            ],
+            "s.submitTo(ctx, chainName, \"\", method, args...) forwards submit's method; \
+             Forward forwards its name into submit"
+        );
+    }
+
+    #[test]
+    fn literal_calls_are_sites_with_the_wrapper_scope() {
+        let (rows, c) = read(SIGNER);
+        assert_eq!(
+            rows,
+            [
+                format!(
+                    "call abi:escrowManagerABI.resolveDispute args=- abi={SIGNER_KEYS} line=39"
+                ),
+                format!("call abi:escrowManagerABI.freeze args=- abi={SIGNER_KEYS} line=43"),
+                format!("call abi:escrowManagerABI.unfreeze args=- abi={SIGNER_KEYS} line=47"),
+            ],
+            "s.logCall(\"resolveDispute\") is no wrapper call"
+        );
+        assert_eq!(
+            c,
+            GoCounts {
+                wrappers: wrapped((1, 2, 0, 3, 1)),
+                ..counts(1, 0, 1)
+            },
+            "the Pack site hands its name over; Retry's local `m` is the one dynamic call"
+        );
+        let out = crate::evm::extract_evm_clients(
+            SIGNER,
+            "go",
+            glia_core::NodeId(1),
+            glia_core::RepoId(1),
+        );
+        assert_eq!(
+            out.markers("signer/signer.go"),
+            [
+                "[evm-client] lang=go calls=3 events=0 sites=3 (ethers=0 hardhat=0 typechain=0 viem=0 web3=0 geth=3) abis=1 not_in_abi=0 dynamic=1 path=signer/signer.go",
+                "[evm-wrappers] wrappers=3 (direct=1 forwarded=2 ambiguous=0) sites=3 dynamic=1 path=signer/signer.go",
+            ]
+        );
+        let lines: Vec<u32> = out.anchors.iter().map(|a| a.line).collect();
+        assert_eq!(lines, [42, 38, 46], "0-based, one per call, by node");
+    }
+
+    #[test]
+    fn logging_function_is_not_a_wrapper() {
+        let src = format!(
+            "{HEAD}{}",
+            r#"
+type Signer struct{}
+
+func (s *Signer) logCall(method string) {
+	log.Printf("calling %s", method)
+	fmt.Println(method)
+}
+
+func (s *Signer) describe(method string) string { return "call " + method }
+
+func (s *Signer) Release(id [32]byte) {
+	s.logCall("release")
+	_ = s.describe("deposit")
+}
+"#
+        );
+        assert_eq!(read(&src), (Vec::new(), counts(1, 0, 0)));
+        assert!(wrappers(&src).is_empty());
+    }
+
+    #[test]
+    fn local_variable_argument_is_dynamic() {
+        let src = format!(
+            "{HEAD}{}",
+            r#"
+var parsed, _ = abi.JSON(strings.NewReader(escrowABI))
+
+func pack(method string, args ...any) ([]byte, error) { return parsed.Pack(method, args...) }
+
+func Calls(id [32]byte, names []string) {
+	m := "deposit"
+	pack(m, id)
+	pack("de"+"posit", id)
+	pack(names[0], id)
+	pack(strings.ToLower("RELEASE"), id)
+	pack("release", id)
+	pack()
+}
+"#
+        );
+        let (rows, c) = read(&src);
+        assert_eq!(
+            rows,
+            [format!(
+                "call abi:escrowABI.release args=- abi={KEYS} line=26"
+            )],
+            "one string literal only; a call with too few arguments is none"
+        );
+        assert_eq!(
+            c,
+            GoCounts {
+                wrappers: wrapped((1, 0, 0, 1, 4)),
+                ..counts(1, 0, 4)
+            }
+        );
+    }
+
+    #[test]
+    fn forward_is_not_dynamic() {
+        let src = format!(
+            "{HEAD}{}",
+            r#"
+var parsed, _ = abi.JSON(strings.NewReader(escrowABI))
+
+func pack(method string) ([]byte, error) { return parsed.Pack(method) }
+
+func relay(name string) ([]byte, error) { return pack(name) }
+
+type Raw struct{}
+
+func (r *Raw) Call(method string) ([]byte, error) { return pack(method) }
+
+type A struct{}
+type B struct{}
+
+func (a *A) hop(name string) ([]byte, error) { return pack(name) }
+func (b *B) hop(name string) ([]byte, error) { return pack(name) }
+
+func Use() {
+	relay("deposit")
+	hop("release")
+}
+"#
+        );
+        let (rows, c) = read(&src);
+        assert_eq!(
+            rows,
+            [format!(
+                "call abi:escrowABI.deposit args=- abi={KEYS} line=33"
+            )],
+            "Raw.Call is named like a needle; hop is declared twice; a bare call of a \
+             method is none"
+        );
+        assert_eq!(
+            c,
+            GoCounts {
+                wrappers: wrapped((1, 1, 1, 1, 0)),
+                ..counts(1, 0, 0)
+            },
+            "every parameter handed on is a forward, wrapper or not: never dynamic"
+        );
+    }
+
+    #[test]
+    fn two_receivers_same_name_is_ambiguous() {
+        let src = format!(
+            "{HEAD}{}",
+            r#"
+var parsed, _ = abi.JSON(strings.NewReader(escrowABI))
+
+type A struct{}
+type B struct{}
+
+func (a *A) send(method string) ([]byte, error) { return parsed.Pack(method) }
+func (b *B) send(method string) ([]byte, error) { return parsed.Pack(method) }
+
+func both(c *bind.BoundContract, method string) {
+	parsed.Pack(method)
+	c.FilterLogs(opts, method)
+}
+
+func (a *A) Deposit() {
+	a.send("deposit")
+	both(nil, "release")
+}
+"#
+        );
+        assert_eq!(
+            read(&src),
+            (
+                Vec::new(),
+                GoCounts {
+                    wrappers: wrapped((0, 0, 2, 0, 0)),
+                    ..counts(1, 0, 3)
+                }
+            ),
+            "send names two methods; both's parameter reaches the ABI as a call and the \
+             receiver c as an event; their bound Pack sites keep step 7's count"
+        );
+        let out =
+            crate::evm::extract_evm_clients(&src, "go", glia_core::NodeId(1), glia_core::RepoId(1));
+        assert_eq!(
+            out.markers("a.go"),
+            [
+                "[evm-client] lang=go calls=0 events=0 sites=0 (ethers=0 hardhat=0 typechain=0 viem=0 web3=0 geth=0) abis=1 not_in_abi=0 dynamic=3 path=a.go",
+                "[evm-wrappers] wrappers=2 (direct=0 forwarded=0 ambiguous=2) sites=0 dynamic=0 path=a.go",
+            ]
+        );
+    }
+
+    #[test]
+    fn geth_method_names_are_never_wrappers() {
+        let src = format!(
+            r#"// Code generated - DO NOT EDIT.
+package escrowbind
+
+import (
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+)
+
+var EscrowMetaData = &bind.MetaData{{
+	ABI: {META_ABI},
+}}
+
+func (_Escrow *EscrowRaw) Call(opts *bind.CallOpts, result *[]interface{{}}, method string, params ...interface{{}}) error {{
+	return _Escrow.Contract.EscrowCaller.contract.Call(opts, result, method, params...)
+}}
+
+func (_Escrow *EscrowRaw) Transact(opts *bind.TransactOpts, method string, params ...interface{{}}) (*types.Transaction, error) {{
+	return _Escrow.Contract.EscrowTransactor.contract.Transact(opts, method, params...)
+}}
+
+func (_Escrow *EscrowTransactorRaw) Transact(opts *bind.TransactOpts, method string, params ...interface{{}}) (*types.Transaction, error) {{
+	return _Escrow.Contract.contract.Transact(opts, method, params...)
+}}
+
+func (_Escrow *EscrowFilterer) FilterLogs(opts *bind.FilterOpts, name string) error {{
+	_, _, err := _Escrow.contract.FilterLogs(opts, name)
+	return err
+}}
+
+func Use(raw *EscrowRaw, opts *bind.TransactOpts) {{
+	raw.Transact(opts, "deposit")
+}}
+"#
+        );
+        let (rows, c) = read(&src);
+        assert!(wrappers(&src).is_empty());
+        assert_eq!(
+            rows,
+            ["call recv:raw.deposit args=0 abi=- line=30"],
+            "the Raw call is step 7's own site, on an unbound receiver"
+        );
+        assert_eq!(c, counts(1, 0, 0), "the Raw forwards count nothing");
+    }
+
+    #[test]
+    fn depth_bound_and_cycle_guard() {
+        let src = format!(
+            "{HEAD}{}",
+            r#"
+var parsed, _ = abi.JSON(strings.NewReader(escrowABI))
+
+func pack1(method string) ([]byte, error) { return parsed.Pack(method) }
+func pack2(m string) ([]byte, error)      { return pack1(m) }
+func pack3(m string) ([]byte, error)      { return pack2(m) }
+func pack4(m string) ([]byte, error)      { return pack3(m) }
+
+func ping(m string) ([]byte, error) { return pong(m) }
+func pong(m string) ([]byte, error) {
+	ping(m)
+	return parsed.Pack(m)
+}
+
+func Use() {
+	pack4("deposit")
+	pack3("release")
+	ping("deposit")
+}
+"#
+        );
+        assert_eq!(
+            wrappers(&src),
+            [
+                format!("pack1/0 abi:escrowABI Call depth=1 abi={KEYS}"),
+                format!("pong/0 abi:escrowABI Call depth=1 abi={KEYS}"),
+                format!("pack2/0 abi:escrowABI Call depth=2 abi={KEYS}"),
+                format!("ping/0 abi:escrowABI Call depth=2 abi={KEYS}"),
+                format!("pack3/0 abi:escrowABI Call depth=3 abi={KEYS}"),
+            ],
+            "pack4 is depth 4; pong's call back into ping reads no new wrapper"
+        );
+        let (rows, c) = read(&src);
+        assert_eq!(
+            rows,
+            [
+                format!("call abi:escrowABI.release args=- abi={KEYS} line=31"),
+                format!("call abi:escrowABI.deposit args=- abi={KEYS} line=32"),
+            ]
+        );
+        assert_eq!(
+            c,
+            GoCounts {
+                wrappers: wrapped((2, 3, 0, 2, 0)),
+                ..counts(1, 0, 0)
+            }
+        );
+    }
+
+    #[test]
+    fn event_wrapper() {
+        let src = format!(
+            "{HEAD}{}",
+            r#"
+type Indexer struct {
+	parsedABI abi.ABI
+}
+
+func New() *Indexer {
+	parsed, _ := abi.JSON(strings.NewReader(escrowABI))
+	return &Indexer{parsedABI: parsed}
+}
+
+func (idx *Indexer) event(name string) abi.Event { return idx.parsedABI.Events[name] }
+
+func (idx *Indexer) decode(out any, name string, data []byte) error {
+	return idx.parsedABI.UnpackIntoInterface(out, name, data)
+}
+
+func (idx *Indexer) Handle(data []byte) {
+	_ = idx.event("Released")
+	_ = idx.event("deposit")
+	_ = event("Released")
+	idx.decode(&ev, "Released", data)
+	idx.decode(&out, "deposit", data)
+	idx.decode(&out, "gone", data)
+}
+"#
+        );
+        assert_eq!(
+            wrappers(&src),
+            [
+                format!("decode/1 abi:escrowABI Decode depth=1 abi={KEYS}"),
+                format!("event/0 abi:escrowABI Event depth=1 abi={KEYS}"),
+            ]
+        );
+        let (rows, c) = read(&src);
+        assert_eq!(
+            rows,
+            [
+                format!("event abi:escrowABI.Released args=- abi={KEYS} line=32"),
+                format!("event abi:escrowABI.Released args=- abi={KEYS} line=35"),
+                format!("call abi:escrowABI.deposit args=- abi={KEYS} line=36"),
+            ],
+            "a bare event(..) calls no method; a decoding wrapper reads each name's side"
+        );
+        assert_eq!(
+            c,
+            GoCounts {
+                wrappers: wrapped((2, 0, 0, 3, 0)),
+                ..counts(1, 2, 0)
+            },
+            "deposit is no event; gone is in neither list"
+        );
     }
 }
