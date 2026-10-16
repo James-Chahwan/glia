@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 406,
+  "fixtures": 409,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -743,6 +743,15 @@
         "USES": 1.0
       }
     },
+    "go-ethereum-events-abigen": {
+      "framework": "go-ethereum-events-abigen",
+      "language": "go",
+      "per_category": {
+        "EVENT_FLOWS": 1.0,
+        "HANDLED_BY": 1.0,
+        "RPC_CALLS": 1.0
+      }
+    },
     "go-field-dispatch": {
       "framework": "go-field-dispatch",
       "language": "go",
@@ -1363,11 +1372,20 @@
       "language": "graphql",
       "per_category": {}
     },
+    "models-http-contract": {
+      "framework": "models-http-contract",
+      "language": "typescript",
+      "per_category": {
+        "DOCUMENTS": 1.0,
+        "HTTP_CALLS": 1.0
+      }
+    },
     "models-http-shop": {
       "framework": "models-http-shop",
       "language": "typescript",
       "per_category": {
-        "HTTP_CALLS": 1.0
+        "HTTP_CALLS": 1.0,
+        "SAME_AS": 1.0
       }
     },
     "models-ts-wire-shapes": {
@@ -2237,6 +2255,14 @@
       "per_category": {
         "CALLS": 1.0,
         "IMPORTS": 1.0
+      }
+    },
+    "ts-hardhat-contract-calls": {
+      "framework": "ts-hardhat-contract-calls",
+      "language": "typescript",
+      "per_category": {
+        "RPC_CALLS": 1.0,
+        "USES": 1.0
       }
     },
     "ts-heritage-xfile": {
