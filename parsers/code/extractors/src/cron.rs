@@ -22,8 +22,14 @@
 //!      `@Interval(ms)` from `@nestjs/schedule` on a provider method (CL.9)
 //!  15. tokio-cron-scheduler — `Job::new_async("0 0 3 * * *", |_, _| ..)` and
 //!      the other scheduled `Job` constructors in a Rust file (DG.7a)
+//!  16. akka-quartz-scheduler (and its Pekko fork) — `createSchedule(..)` in
+//!      Scala / Java / Kotlin, and `.schedule("Name", ..)` of a schedule named
+//!      in `application.conf` (`akka.quartz.schedules.Name.expression`). The
+//!      config form is a REF (`cron:@quartz-conf:Name:Name`, [`AKKA_QUARTZ_REF`])
+//!      that the engine's post-cache graft re-keys to `cron:<expression>:Name`
+//!      through [`hocon_quartz_schedules`] and [`rekey_quartz_refs`] (DG.7b)
 //!
-//! Sources 5–15 are CODE sources: a job whose handler is nameable also
+//! Sources 5–16 are CODE sources: a job whose handler is nameable also
 //! carries a `CRON_JOB --HANDLED_BY--> handler` [`UnresolvedRef`] (bound by the
 //! graph builder's `resolve_refs`), so trace / blast-radius walk from a job
 //! into the code it runs. YAML jobs (sidekiq's included) carry none: they live
@@ -47,8 +53,11 @@
 //! (descriptors such as `@daily` become their 5-field expansion) so a robfig
 //! `@hourly` job and a manifest's `0 * * * *` share one identity.
 
+use std::collections::BTreeMap;
+
 use glia_code_domain::{
-    CallQualifier, CodeNav, GRAPH_TYPE, UnresolvedRef, edge_category, line_of, node_kind,
+    CallQualifier, CodeNav, FileParse, GRAPH_TYPE, UnresolvedRef, cell_type, edge_category,
+    line_of, node_kind,
 };
 use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, RepoId};
 
@@ -68,7 +77,7 @@ struct CronJob {
     target: String,
     /// workflow / k8s / node-cron / celery / scheduled-annot / quartz /
     /// hangfire / robfig / gocron / apscheduler / whenever / sidekiq_cron /
-    /// laravel / oban / nestjs / tokio_cron
+    /// laravel / oban / nestjs / tokio_cron / akka_quartz
     source: &'static str,
     /// The code the job runs, `Bare(fn)` or `Attribute { base, name }`, with
     /// the 0-based row of the construct that registers it (the scheduling
@@ -102,6 +111,7 @@ struct CodeCounts {
     spring: usize,
     nestjs: usize,
     tokio: usize,
+    akka_quartz: usize,
     whenever: usize,
     sidekiq: usize,
     laravel: usize,
@@ -118,6 +128,7 @@ impl CodeCounts {
             "scheduled_annot" => self.spring += 1,
             "nestjs" => self.nestjs += 1,
             "tokio_cron" => self.tokio += 1,
+            "akka_quartz" => self.akka_quartz += 1,
             "whenever" => self.whenever += 1,
             "sidekiq_cron" => self.sidekiq += 1,
             "laravel" => self.laravel += 1,
@@ -134,6 +145,7 @@ impl CodeCounts {
             + self.spring
             + self.nestjs
             + self.tokio
+            + self.akka_quartz
     }
 
     fn script_total(&self) -> usize {
@@ -147,14 +159,15 @@ fn is_script_source(source: &str) -> bool {
 }
 
 /// LA.19a fired_on: `[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0
-/// spring=0 nestjs=0 tokio=0 handler_refs=1 path=Jobs.java`, or `None` when
-/// the file declared no code-sourced job. The prefix and field order are
-/// stable; `nestjs=` (CL.9) follows `spring=`, and `tokio=` (DG.7a,
-/// tokio-cron-scheduler) follows `nestjs=`.
+/// spring=0 nestjs=0 tokio=0 akka_quartz=0 handler_refs=1 path=Jobs.java`, or
+/// `None` when the file declared no code-sourced job. The prefix and field
+/// order are stable; `nestjs=` (CL.9) follows `spring=`, `tokio=` (DG.7a,
+/// tokio-cron-scheduler) follows `nestjs=`, and `akka_quartz=` (DG.7b, a
+/// created job and a conf REF alike) follows `tokio=`.
 fn code_marker(c: &CodeCounts, handler_refs: usize, path: &str) -> Option<String> {
     (c.total() > 0).then(|| {
         format!(
-            "[cron] code jobs={} quartz={} hangfire={} go={} apscheduler={} spring={} nestjs={} tokio={} handler_refs={handler_refs} path={path}",
+            "[cron] code jobs={} quartz={} hangfire={} go={} apscheduler={} spring={} nestjs={} tokio={} akka_quartz={} handler_refs={handler_refs} path={path}",
             c.total(),
             c.quartz,
             c.hangfire,
@@ -163,6 +176,7 @@ fn code_marker(c: &CodeCounts, handler_refs: usize, path: &str) -> Option<String
             c.spring,
             c.nestjs,
             c.tokio,
+            c.akka_quartz,
         )
     })
 }
@@ -232,6 +246,11 @@ pub fn extract_cron_nodes(
     if matches!(ext, "java" | "kt" | "kts" | "groovy" | "scala") && source.contains("org.quartz") {
         jobs.extend(extract_quartz(source));
     }
+    // DG.7b: akka-quartz-scheduler / pekko-quartz-scheduler, gated on the
+    // extension object's own name.
+    if matches!(ext, "scala" | "java" | "kt" | "kts") && source.contains(QUARTZ_EXT) {
+        jobs.extend(extract_akka_quartz(source));
+    }
     if matches!(ext, "cs" | "vb" | "fs") && source.contains("Hangfire") {
         jobs.extend(extract_hangfire(source));
     }
@@ -258,12 +277,7 @@ pub fn extract_cron_nodes(
         let qname = format!("cron:{}:{}", job.schedule, job.target);
         let id = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CRON_JOB, &qname);
         if seen.insert(qname.clone()) {
-            let payload = format!(
-                r#"{{"schedule":"{}","target":"{}","source":"{}"}}"#,
-                escape_json(&job.schedule),
-                escape_json(&job.target),
-                job.source,
-            );
+            let payload = job_code_payload(&job.schedule, &job.target, job.source);
             nodes.push(Node {
                 id,
                 repo,
@@ -327,6 +341,18 @@ pub fn extract_cron_nodes(
 
 fn escape_json(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// A CRON_JOB's CODE cell payload. One spelling, shared by the per-file pass
+/// and [`rekey_quartz_refs`], so a re-keyed job reads exactly like one minted
+/// with its schedule.
+fn job_code_payload(schedule: &str, target: &str, source: &str) -> String {
+    format!(
+        r#"{{"schedule":"{}","target":"{}","source":"{}"}}"#,
+        escape_json(schedule),
+        escape_json(target),
+        source,
+    )
 }
 
 // ----------------------------------------------------------------------------
@@ -1722,6 +1748,641 @@ fn calls_a_path(args: &str) -> bool {
     false
 }
 
+// --- akka-quartz-scheduler ------------------------------------------------------
+
+/// The schedule prefix of an akka-quartz job whose cron expression the
+/// per-file pass cannot read (DG.7b): `.schedule("Nightly", ..)` names a
+/// schedule declared in `application.conf`, another file. The job is minted as
+/// `cron:@quartz-conf:Nightly:Nightly` (nav name `@quartz-conf:Nightly`), and
+/// the engine's post-cache graft re-keys it through [`rekey_quartz_refs`] to
+/// `cron:<expression>:Nightly`, or drops it when no conf names the schedule.
+/// No REF survives a build.
+pub const AKKA_QUARTZ_REF: &str = "@quartz-conf:";
+
+/// The extension object both akka-quartz-scheduler and pekko-quartz-scheduler
+/// name; the file gate and the receiver spelling.
+const QUARTZ_EXT: &str = "QuartzSchedulerExtension";
+
+/// The methods that start a job on a schedule declared elsewhere: arg #0 (or
+/// `name = ..`) is the schedule's name.
+const QUARTZ_STARTS: [&str; 2] = ["schedule", "scheduleJob"];
+
+/// The methods that define a schedule in code, each with the positional index
+/// of its `cronExpression` argument: `createSchedule(name, description,
+/// cronExpression, ..)`, and the create-and-start forms whose receiver and
+/// message come first (`createJobSchedule` / `rescheduleJob` /
+/// `updateJobSchedule(name, receiver, msg, description, cronExpression, ..)`).
+const QUARTZ_DEFINES: [(&str, usize); 4] = [
+    ("createSchedule", 2),
+    ("createJobSchedule", 4),
+    ("rescheduleJob", 4),
+    ("updateJobSchedule", 4),
+];
+
+/// akka-quartz-scheduler (gate: `QuartzSchedulerExtension` in a Scala / Java /
+/// Kotlin file; DG.7b), over the file with its comments blanked. The receivers
+/// are the extension itself (`QuartzSchedulerExtension(system)`,
+/// `QuartzSchedulerExtension.get(system)`) and every name a statement binds
+/// it to ([`quartz_receivers`]); a call on any other receiver is ignored.
+///
+/// A [`QUARTZ_DEFINES`] call names its schedule by arg #0 (or `name = ..`):
+/// with a cron-literal `cronExpression` (positional or named) it is the job
+/// `cron:<expression>:<name>`; any other expression is unread and mints
+/// nothing. Either way the name counts as created in this file, so a
+/// [`QUARTZ_STARTS`] call of it adds nothing (the library refuses to create a
+/// schedule its config already declares). A start of any other name is the
+/// conf REF `cron:@quartz-conf:<name>:<name>` ([`AKKA_QUARTZ_REF`]). The job
+/// runs an `ActorRef`, never a code symbol, so no job carries a handler.
+fn extract_akka_quartz(source: &str) -> Vec<CronJob> {
+    let clean = blank_comments(source, CommentStyle::C);
+    let src = clean.as_str();
+    let ends: Vec<usize> = quartz_receiver_calls(src)
+        .iter()
+        .map(|(end, _)| *end)
+        .collect();
+    let names = quartz_receivers(src);
+    let on_receiver = |dot: usize| {
+        let before = src.get(..dot).unwrap_or_default().trim_end();
+        if before.ends_with(')') {
+            return ends.contains(&before.len());
+        }
+        ident_before(before, before.len()).is_some_and(|id| names.contains(&id))
+    };
+    // Every receiver call, in source order: (offset, method, args).
+    let mut sites: Vec<(usize, &str, Vec<&str>)> = Vec::new();
+    let methods = QUARTZ_DEFINES.iter().map(|(m, _)| *m).chain(QUARTZ_STARTS);
+    for method in methods {
+        let needle = format!(".{method}(");
+        for (dot, _) in src.match_indices(needle.as_str()) {
+            if !on_receiver(dot) {
+                continue;
+            }
+            if let Some((args, _)) = call_args(src, dot + needle.len()) {
+                sites.push((dot, method, args));
+            }
+        }
+    }
+    sites.sort_by_key(|(at, ..)| *at);
+    let mut created: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    for (_, method, args) in &sites {
+        let Some(&(_, expr_at)) = QUARTZ_DEFINES.iter().find(|(m, _)| m == method) else {
+            continue;
+        };
+        let Some(name) = quartz_arg(args, 0, "name").and_then(string_literal) else {
+            continue;
+        };
+        if let Some(schedule) = quartz_arg(args, expr_at, "cronExpression")
+            .and_then(string_literal)
+            .and_then(|raw| normalise_schedule(&raw))
+        {
+            out.push(CronJob {
+                schedule,
+                target: name.clone(),
+                source: "akka_quartz",
+                handler: None,
+            });
+        }
+        created.push(name);
+    }
+    for (_, method, args) in &sites {
+        if !QUARTZ_STARTS.contains(method) {
+            continue;
+        }
+        let Some(name) = quartz_arg(args, 0, "name").and_then(string_literal) else {
+            continue;
+        };
+        if created.contains(&name) {
+            continue;
+        }
+        out.push(CronJob {
+            schedule: format!("{AKKA_QUARTZ_REF}{name}"),
+            target: name,
+            source: "akka_quartz",
+            handler: None,
+        });
+    }
+    out
+}
+
+/// The byte offset just past each `QuartzSchedulerExtension(<x>)` /
+/// `QuartzSchedulerExtension.get(<x>)` / `.apply(<x>)` call of `source`, with
+/// the name its statement binds the result to, if any ([`quartz_binding`]).
+/// A longer identifier ending in the name (`MyQuartzSchedulerExtension(`) is
+/// not the extension.
+fn quartz_receiver_calls(source: &str) -> Vec<(usize, Option<&str>)> {
+    let mut out = Vec::new();
+    for (pos, _) in source.match_indices(QUARTZ_EXT) {
+        if ident_before(source, pos).is_some() {
+            continue;
+        }
+        let after = pos + QUARTZ_EXT.len();
+        let rest = source.get(after..).unwrap_or_default();
+        let open = ["(", ".get(", ".apply("]
+            .iter()
+            .find(|p| rest.starts_with(**p))
+            .map(|p| after + p.len());
+        let Some((_, end)) = open.and_then(|o| call_args(source, o)) else {
+            continue;
+        };
+        out.push((end, quartz_binding(source, pos)));
+    }
+    out
+}
+
+/// The names `source` binds the extension to: `val scheduler =
+/// QuartzSchedulerExtension(system)`, `private val s: QuartzSchedulerExtension
+/// = ..`, Java's `QuartzSchedulerExtension s = QuartzSchedulerExtension.get(sys);`,
+/// `this.scheduler = ..`, a `def ext = ..`. Deduplicated, in source order.
+fn quartz_receivers(source: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    for (_, name) in quartz_receiver_calls(source) {
+        if let Some(n) = name
+            && !out.contains(&n)
+        {
+            out.push(n);
+        }
+    }
+    out
+}
+
+/// The identifier the statement holding byte `pos` assigns to: the statement
+/// head (from the last `;` / `{` / `}` before `pos`) must end in a single `=`
+/// (an optional `new` before the call), and the last line of its left side,
+/// type ascription dropped, ends in the name. A keyword is no name.
+fn quartz_binding(source: &str, pos: usize) -> Option<&str> {
+    let head = source.get(..pos)?;
+    let start = head.rfind([';', '{', '}']).map_or(0, |i| i + 1);
+    let mut stmt = head.get(start..)?.trim_end();
+    if let Some(rest) = stmt.strip_suffix("new")
+        && !rest.bytes().next_back().is_some_and(is_ident_byte)
+    {
+        stmt = rest.trim_end();
+    }
+    let lhs = stmt.strip_suffix('=')?;
+    if lhs.ends_with(['=', '!', '<', '>', ':', '+', '-', '*', '/', '|', '&']) {
+        return None;
+    }
+    let lhs = lhs.rsplit('\n').next().unwrap_or(lhs).trim_end();
+    let lhs = match lhs.rfind(':') {
+        Some(i) => lhs.get(..i)?.trim_end(),
+        None => lhs,
+    };
+    let name = ident_before(lhs, lhs.len())?;
+    let keyword = matches!(
+        name,
+        "val" | "var" | "def" | "lazy" | "final" | "private" | "protected" | "return" | "this"
+    );
+    (!keyword).then_some(name)
+}
+
+/// Argument `index` of a Scala / Kotlin call, counting positional arguments
+/// only, or the named argument `name = ..` wherever it sits.
+fn quartz_arg<'s>(args: &[&'s str], index: usize, name: &str) -> Option<&'s str> {
+    let mut positional = 0usize;
+    for arg in args {
+        match named_arg(arg) {
+            Some((n, value)) => {
+                if n == name {
+                    return Some(value);
+                }
+            }
+            None => {
+                if positional == index {
+                    return Some(arg);
+                }
+                positional += 1;
+            }
+        }
+    }
+    None
+}
+
+/// `name = value` (a named argument), not `a == b` or a lambda `x => ..`.
+fn named_arg(arg: &str) -> Option<(&str, &str)> {
+    let name = leading_ident(arg)?;
+    let rest = arg.get(name.len()..)?.trim_start();
+    let value = rest.strip_prefix('=')?;
+    if value.starts_with(['=', '>']) {
+        return None;
+    }
+    Some((name, value.trim()))
+}
+
+// --- akka-quartz-scheduler: the HOCON half ----------------------------------------
+
+/// DG.7b: a Typesafe-config (HOCON) file the walk reads for its
+/// `akka.quartz.schedules`: an `application.conf` / `reference.conf`
+/// anywhere, or any `*.conf` under a `resources` directory (the sbt / Maven
+/// layout, `src/main/resources/prod.conf`). An `nginx/site.conf` is not one.
+pub fn is_hocon_conf_path(path: &str) -> bool {
+    let norm = path.replace('\\', "/");
+    let mut segs: Vec<&str> = norm.split('/').collect();
+    let Some(base) = segs.pop() else {
+        return false;
+    };
+    if base.len() <= ".conf".len() || !base.ends_with(".conf") {
+        return false;
+    }
+    base == "application.conf" || base == "reference.conf" || segs.contains(&"resources")
+}
+
+/// One open `{` / `[` of a HOCON scan: an object's key path segments (empty
+/// for an unkeyed `{`), or `None` for an array, inside which nothing is a
+/// schedule setting.
+type HoconFrame = Option<Vec<String>>;
+
+/// One setting's value, as far as [`hocon_quartz_schedules`] reads it.
+enum HoconValue {
+    /// A quoted (or triple-quoted) string, or an unquoted run.
+    Text(String),
+    /// Exactly one optional substitution `${?X}`: it applies only when X is
+    /// set, so an earlier literal stays the default.
+    OptionalSub,
+    /// A required substitution or a concatenation: a value glia cannot read.
+    Unreadable,
+}
+
+/// Every `akka.quartz.schedules.<Name>.expression` (or `pekko.quartz..`) of a
+/// HOCON text: `(name, normalised expression, 0-based line)`. Not a HOCON
+/// implementation: a scanner that keeps a key-path stack across `{` / `[` and
+/// their closers, string- and comment-aware (`#`, `//`, quoted keys and
+/// values, `"""` strings), so the three spellings of one setting read alike:
+/// nested blocks (`akka { quartz { schedules { N { expression = ".." } } } }`),
+/// dotted heads (`akka.quartz.schedules { N { .. } }`) and fully dotted keys
+/// (`akka.quartz.schedules.N.expression = ".."`), with `=` or `:`, the value
+/// quoted or not. HOCON's later-definition-wins rule holds within the text: a
+/// redefinition replaces the entry (and its line); a required substitution
+/// (`${X}`), a concatenation or a value that is no cron expression
+/// ([`normalise_schedule`]) clears it; a lone `${?X}` leaves it. An `include`
+/// is not followed. Entries are in the order of their winning definition.
+pub fn hocon_quartz_schedules(text: &str) -> Vec<(String, String, u32)> {
+    let bytes = text.as_bytes();
+    let mut frames: Vec<HoconFrame> = Vec::new();
+    let mut out: Vec<(String, String, u32)> = Vec::new();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' | b'\r' | b'\n' | b',' => i += 1,
+            b'#' => i = hocon_eol(bytes, i),
+            b'/' if bytes.get(i + 1) == Some(&b'/') => i = hocon_eol(bytes, i),
+            b'{' => {
+                frames.push(Some(Vec::new()));
+                i += 1;
+            }
+            b'[' => {
+                frames.push(None);
+                i += 1;
+            }
+            b'}' | b']' => {
+                frames.pop();
+                i += 1;
+            }
+            _ => {
+                let key_at = i;
+                let Some((key, after)) = hocon_key(text, i) else {
+                    i = hocon_eol(bytes, i);
+                    continue;
+                };
+                i = hocon_skip_blanks(bytes, after);
+                if key.len() == 1
+                    && key[0] == "include"
+                    && !matches!(bytes.get(i), Some(b'=' | b':' | b'{'))
+                {
+                    i = hocon_eol(bytes, i);
+                    continue;
+                }
+                let assign = match bytes.get(i) {
+                    Some(b'=' | b':') => 1,
+                    Some(b'+') if bytes.get(i + 1) == Some(&b'=') => 2,
+                    Some(b'{') => 0,
+                    _ => continue,
+                };
+                i = hocon_skip_blanks(bytes, i + assign);
+                match bytes.get(i) {
+                    Some(b'{') => {
+                        frames.push((assign < 2).then_some(key));
+                        i += 1;
+                    }
+                    Some(b'[') => {
+                        frames.push(None);
+                        i += 1;
+                    }
+                    _ if assign == 0 => {}
+                    _ => {
+                        let (value, next) = hocon_value(text, i);
+                        i = next;
+                        if assign == 2 {
+                            continue;
+                        }
+                        let Some(name) = quartz_setting_name(&frames, &key) else {
+                            continue;
+                        };
+                        let schedule = match value {
+                            HoconValue::OptionalSub => continue,
+                            HoconValue::Text(v) => normalise_schedule(&v),
+                            HoconValue::Unreadable => None,
+                        };
+                        out.retain(|(n, ..)| *n != name);
+                        if let Some(expr) = schedule {
+                            out.push((name, expr, line_of(text, key_at)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The schedule name iff the full path of `key` under `frames` is
+/// `(akka|pekko).quartz.schedules.<Name>.expression`.
+fn quartz_setting_name(frames: &[HoconFrame], key: &[String]) -> Option<String> {
+    let mut path: Vec<&str> = Vec::new();
+    for frame in frames {
+        path.extend(frame.as_ref()?.iter().map(String::as_str));
+    }
+    path.extend(key.iter().map(String::as_str));
+    match path.as_slice() {
+        [root, "quartz", "schedules", name, "expression"] if matches!(*root, "akka" | "pekko") => {
+            Some((*name).to_string())
+        }
+        _ => None,
+    }
+}
+
+/// The index of the newline ending the line holding `i` (or the text's end).
+fn hocon_eol(bytes: &[u8], i: usize) -> usize {
+    bytes
+        .get(i..)
+        .and_then(|r| r.iter().position(|b| *b == b'\n'))
+        .map_or(bytes.len(), |n| i + n)
+}
+
+/// Past the spaces and tabs at `i` (a newline is not skipped).
+fn hocon_skip_blanks(bytes: &[u8], mut i: usize) -> usize {
+    while matches!(bytes.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+    i
+}
+
+/// True when byte `i` ends an unquoted key segment.
+fn hocon_key_stop(bytes: &[u8], i: usize) -> bool {
+    match bytes[i] {
+        b' ' | b'\t' | b'\r' | b'\n' | b'.' | b'=' | b':' | b'{' | b'}' | b'[' | b']' | b','
+        | b'#' | b'"' | b'+' | b'$' => true,
+        b'/' => bytes.get(i + 1) == Some(&b'/'),
+        _ => false,
+    }
+}
+
+/// The key path starting at byte `i` (`a.b."c.d"` is `[a, b, c.d]`), and the
+/// index just past it; `None` when no key starts there.
+fn hocon_key(text: &str, mut i: usize) -> Option<(Vec<String>, usize)> {
+    let bytes = text.as_bytes();
+    let mut segs = Vec::new();
+    loop {
+        if bytes.get(i) == Some(&b'"') {
+            let end = skip_string(bytes, i, bytes.len())?;
+            segs.push(hocon_unescape(text.get(i + 1..end - 1)?));
+            i = end;
+        } else {
+            let start = i;
+            while i < bytes.len() && !hocon_key_stop(bytes, i) {
+                i += 1;
+            }
+            if i == start {
+                return None;
+            }
+            segs.push(text.get(start..i)?.to_string());
+        }
+        if bytes.get(i) != Some(&b'.') {
+            return Some((segs, i));
+        }
+        i += 1;
+    }
+}
+
+/// The value starting at byte `i` and the index of the byte that ends it (a
+/// newline, `,`, `}`, `]` or a comment, outside strings and `${..}`).
+fn hocon_value(text: &str, i: usize) -> (HoconValue, usize) {
+    let bytes = text.as_bytes();
+    let mut j = i;
+    while j < bytes.len() {
+        match bytes[j] {
+            b'"' => {
+                j = if bytes.get(j..j + 3) == Some(b"\"\"\"") {
+                    bytes
+                        .get(j + 3..)
+                        .and_then(|r| r.windows(3).position(|w| w == b"\"\"\""))
+                        .map_or(bytes.len(), |n| j + 3 + n + 3)
+                } else {
+                    skip_string(bytes, j, bytes.len()).unwrap_or(bytes.len())
+                };
+            }
+            b'$' if bytes.get(j + 1) == Some(&b'{') => {
+                j = bytes
+                    .get(j..)
+                    .and_then(|r| r.iter().position(|b| *b == b'}'))
+                    .map_or(bytes.len(), |n| j + n + 1);
+            }
+            b'\n' | b',' | b'}' | b']' | b'#' => break,
+            b'/' if bytes.get(j + 1) == Some(&b'/') => break,
+            _ => j += 1,
+        }
+    }
+    let end = j.min(bytes.len());
+    let raw = text.get(i..end).unwrap_or_default().trim();
+    let value = if raw.len() >= 6 && raw.starts_with("\"\"\"") && raw.ends_with("\"\"\"") {
+        match raw.get(3..raw.len() - 3) {
+            Some(inner) if !inner.contains("\"\"\"") => HoconValue::Text(inner.to_string()),
+            _ => HoconValue::Unreadable,
+        }
+    } else if raw.starts_with('"') {
+        let rb = raw.as_bytes();
+        match skip_string(rb, 0, rb.len()) {
+            Some(close) if close == rb.len() => {
+                HoconValue::Text(hocon_unescape(raw.get(1..close - 1).unwrap_or_default()))
+            }
+            _ => HoconValue::Unreadable,
+        }
+    } else if raw.starts_with("${?") && raw.ends_with('}') && raw.matches("${").count() == 1 {
+        HoconValue::OptionalSub
+    } else if raw.contains("${") || raw.contains('"') {
+        HoconValue::Unreadable
+    } else {
+        HoconValue::Text(raw.to_string())
+    };
+    (value, end)
+}
+
+/// A JSON string body with `\"` and `\\` unescaped; other escapes kept.
+fn hocon_unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(n @ ('"' | '\\')) => out.push(n),
+                Some(n) => {
+                    out.push('\\');
+                    out.push(n);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// What one [`rekey_quartz_refs`] call did to a parse.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct QuartzRekey {
+    /// REF jobs the table named, now `cron:<expression>:<name>`.
+    pub rekeyed: usize,
+    /// REF jobs no conf names, dropped with their nav record and edges.
+    pub unresolved: usize,
+}
+
+/// DG.7b: resolve `fp`'s akka-quartz conf REFs ([`AKKA_QUARTZ_REF`]) through
+/// `table` (schedule name -> normalised expression, the repo's conf
+/// schedules). A hit moves the node to `cron:<expression>:<name>` (its NodeId
+/// re-derived from that qname under `repo`; nav name = the expression; the
+/// CODE cell's `schedule` = the expression) with every edge end, ref and nav
+/// slot that held the old id; when the parse already holds that job, the REF
+/// folds into it and a duplicated edge is dropped. A miss removes the node,
+/// its nav record, its edges and refs: an unnamed schedule is no job. The
+/// qname spelling lives here, with the per-file pass that minted the REF; the
+/// engine supplies only the table. Node order is the parse's, so no HashMap
+/// order reaches the result.
+pub fn rekey_quartz_refs(
+    fp: &mut FileParse,
+    table: &BTreeMap<String, String>,
+    repo: RepoId,
+) -> QuartzRekey {
+    let mut stats = QuartzRekey::default();
+    let ref_qname = format!("cron:{AKKA_QUARTZ_REF}");
+    let mut refs: Vec<(NodeId, String)> = Vec::new();
+    for n in &fp.nodes {
+        if fp.nav.kind_by_id.get(&n.id) != Some(&node_kind::CRON_JOB)
+            || !fp
+                .nav
+                .qname_by_id
+                .get(&n.id)
+                .is_some_and(|q| q.starts_with(&ref_qname))
+            || refs.iter().any(|(id, _)| *id == n.id)
+        {
+            continue;
+        }
+        let Some(name) = fp
+            .nav
+            .name_by_id
+            .get(&n.id)
+            .and_then(|s| s.strip_prefix(AKKA_QUARTZ_REF))
+        else {
+            continue;
+        };
+        refs.push((n.id, name.to_string()));
+    }
+    for (old, name) in refs {
+        match table.get(&name) {
+            Some(expr) => {
+                rekey_quartz_job(fp, old, &name, expr, repo);
+                stats.rekeyed += 1;
+            }
+            None => {
+                drop_quartz_job(fp, old);
+                stats.unresolved += 1;
+            }
+        }
+    }
+    stats
+}
+
+/// [`rekey_quartz_refs`]'s hit: move REF `old` to the job `cron:<expr>:<name>`.
+fn rekey_quartz_job(fp: &mut FileParse, old: NodeId, name: &str, expr: &str, repo: RepoId) {
+    let qname = format!("cron:{expr}:{name}");
+    let new = NodeId::from_parts(GRAPH_TYPE, repo, node_kind::CRON_JOB, &qname);
+    if fp.nodes.iter().any(|n| n.id == new) {
+        fp.nodes.retain(|n| n.id != old);
+    } else {
+        for n in fp.nodes.iter_mut().filter(|n| n.id == old) {
+            n.id = new;
+            for c in n.cells.iter_mut().filter(|c| c.kind == cell_type::CODE) {
+                c.payload = CellPayload::Json(job_code_payload(expr, name, "akka_quartz"));
+            }
+        }
+    }
+    let swap = |id: &mut NodeId| {
+        if *id == old {
+            *id = new;
+        }
+    };
+    for e in fp.edges.iter_mut() {
+        swap(&mut e.from);
+        swap(&mut e.to);
+    }
+    for r in fp.refs.iter_mut() {
+        swap(&mut r.from);
+    }
+    // A REF folded into a job the parse already held may now duplicate one
+    // of its edges: keep the first of each (from, to, category).
+    let mut kept: Vec<(NodeId, NodeId, glia_core::EdgeCategoryId)> = Vec::new();
+    fp.edges.retain(|e| {
+        if e.from != new && e.to != new {
+            return true;
+        }
+        let key = (e.from, e.to, e.category);
+        let fresh = !kept.contains(&key);
+        if fresh {
+            kept.push(key);
+        }
+        fresh
+    });
+    let nav = &mut fp.nav;
+    let held = nav.qname_by_id.contains_key(&new);
+    nav.name_by_id.remove(&old);
+    nav.qname_by_id.remove(&old);
+    nav.kind_by_id.remove(&old);
+    if let Some(parent) = nav.parent_of.remove(&old) {
+        if let Some(kids) = nav.children_of.get_mut(&parent) {
+            match kids.iter().position(|k| *k == old) {
+                Some(at) if !held => kids[at] = new,
+                _ => kids.retain(|k| *k != old),
+            }
+        }
+        if !held {
+            nav.parent_of.insert(new, parent);
+        }
+    }
+    nav.children_of.remove(&old);
+    if !held {
+        nav.name_by_id.insert(new, expr.to_string());
+        nav.qname_by_id.insert(new, qname);
+        nav.kind_by_id.insert(new, node_kind::CRON_JOB);
+    }
+}
+
+/// [`rekey_quartz_refs`]'s miss: remove REF `old` and everything naming it.
+fn drop_quartz_job(fp: &mut FileParse, old: NodeId) {
+    fp.nodes.retain(|n| n.id != old);
+    fp.edges.retain(|e| e.from != old && e.to != old);
+    fp.refs.retain(|r| r.from != old);
+    let nav = &mut fp.nav;
+    nav.name_by_id.remove(&old);
+    nav.qname_by_id.remove(&old);
+    nav.kind_by_id.remove(&old);
+    if let Some(parent) = nav.parent_of.remove(&old)
+        && let Some(kids) = nav.children_of.get_mut(&parent)
+    {
+        kids.retain(|k| *k != old);
+    }
+    nav.children_of.remove(&old);
+}
+
 // --- APScheduler ---------------------------------------------------------------
 
 /// APScheduler (gate `apscheduler`): the `@s.scheduled_job(trigger, **kw)`
@@ -2037,6 +2698,9 @@ enum CommentStyle {
     Hash,
     /// PHP: `#` (not a `#[..]` attribute), `//` and `/* .. */`.
     Php,
+    /// Scala / Java / Kotlin (DG.7b): `//` and `/* .. */`; a `#` is code
+    /// (a Scala type projection).
+    C,
 }
 
 /// `source` with every comment byte replaced by a space (newlines kept), so
@@ -2078,19 +2742,21 @@ fn blank_comments(source: &str, style: CommentStyle) -> String {
                 }
                 continue;
             }
-            b'#' if !(style == CommentStyle::Php && bytes.get(i + 1) == Some(&b'[')) => {
+            b'#' if style == CommentStyle::Hash
+                || (style == CommentStyle::Php && bytes.get(i + 1) != Some(&b'[')) =>
+            {
                 let end = eol(i);
                 blank(i, end);
                 i = end;
                 continue;
             }
-            b'/' if style == CommentStyle::Php && bytes.get(i + 1) == Some(&b'/') => {
+            b'/' if style != CommentStyle::Hash && bytes.get(i + 1) == Some(&b'/') => {
                 let end = eol(i);
                 blank(i, end);
                 i = end;
                 continue;
             }
-            b'/' if style == CommentStyle::Php && bytes.get(i + 1) == Some(&b'*') => {
+            b'/' if style != CommentStyle::Hash && bytes.get(i + 1) == Some(&b'*') => {
                 let end = bytes
                     .get(i + 2..)
                     .and_then(|r| r.windows(2).position(|w| w == b"*/"))
@@ -4071,7 +4737,7 @@ sched.add_job(lambda: None, "cron", second=30, minute="*/2")
         assert_eq!(
             code_marker(&c, 1, "Jobs.java").as_deref(),
             Some(
-                "[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 tokio=0 handler_refs=1 path=Jobs.java"
+                "[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 tokio=0 akka_quartz=0 handler_refs=1 path=Jobs.java"
             )
         );
         c.bump("robfig");
@@ -4080,7 +4746,7 @@ sched.add_job(lambda: None, "cron", second=30, minute="*/2")
         assert_eq!(
             code_marker(&c, 3, "w.go").as_deref(),
             Some(
-                "[cron] code jobs=4 quartz=1 hangfire=0 go=2 apscheduler=0 spring=1 nestjs=0 tokio=0 handler_refs=3 path=w.go"
+                "[cron] code jobs=4 quartz=1 hangfire=0 go=2 apscheduler=0 spring=1 nestjs=0 tokio=0 akka_quartz=0 handler_refs=3 path=w.go"
             )
         );
     }
@@ -4116,7 +4782,7 @@ sched.add_job(lambda: None, "cron", second=30, minute="*/2")
         assert_eq!(
             code_marker(&c, 1, "src/tasks.service.ts").as_deref(),
             Some(
-                "[cron] code jobs=1 quartz=0 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=1 tokio=0 handler_refs=1 path=src/tasks.service.ts"
+                "[cron] code jobs=1 quartz=0 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=1 tokio=0 akka_quartz=0 handler_refs=1 path=src/tasks.service.ts"
             )
         );
         // A 6-field NestJS expression (seconds first), options, stacked
@@ -4794,7 +5460,7 @@ config :my_app, Oban,
         assert_eq!(
             code_marker(&c, 0, "x").as_deref(),
             Some(
-                "[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 tokio=0 handler_refs=0 path=x"
+                "[cron] code jobs=1 quartz=1 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 tokio=0 akka_quartz=0 handler_refs=0 path=x"
             ),
             "the LA.19a marker is unchanged by script jobs"
         );
@@ -4956,7 +5622,7 @@ async fn purge() {}
         assert_eq!(
             code_marker(&c, out.refs.len(), "src/jobs.rs").as_deref(),
             Some(
-                "[cron] code jobs=1 quartz=0 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 tokio=1 handler_refs=1 path=src/jobs.rs"
+                "[cron] code jobs=1 quartz=0 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 tokio=1 akka_quartz=0 handler_refs=1 path=src/jobs.rs"
             )
         );
     }
@@ -4998,5 +5664,426 @@ async fn purge() {}
         );
         assert_eq!(rust_path_handler("MyJob"), None);
         assert_eq!(rust_path_handler("Vec::<u8>::new"), None);
+    }
+
+    // --- DG.7b akka-quartz-scheduler ----------------------------------------
+
+    /// The matrix fixture's Jobs.scala.
+    const AKKA_JOBS: &str = r#"package shop
+
+import akka.actor.{ActorRef, ActorSystem}
+import com.typesafe.akka.extension.quartz.QuartzSchedulerExtension
+
+object Jobs {
+  def start(system: ActorSystem, purger: ActorRef): Unit =
+    QuartzSchedulerExtension(system).schedule("Nightly", purger, "purge")
+}
+"#;
+
+    fn hocon(text: &str) -> Vec<(String, String, u32)> {
+        hocon_quartz_schedules(text)
+    }
+
+    fn entry(name: &str, expr: &str, line: u32) -> (String, String, u32) {
+        (name.to_string(), expr.to_string(), line)
+    }
+
+    #[test]
+    fn hocon_quartz_schedules_three_spellings() {
+        // Nested blocks, with comments of both kinds and a description.
+        let nested = r#"# scheduler config
+akka {
+  quartz {
+    schedules {
+      // every night
+      Nightly {
+        description = "purge {old} rows"
+        expression = "0 0 3 * * ?"   # 3am
+      }
+    }
+  }
+}
+"#;
+        assert_eq!(hocon(nested), [entry("Nightly", "0 0 3 * * ?", 7)]);
+        // A dotted head, `:` separators, a quoted key, an `=`-object.
+        let dotted_head = r#"akka.quartz.schedules {
+  "Every30Seconds": {
+    expression: "*/30 * * ? * *"
+  }
+  Hourly = { expression = "0 0 * * * ?" }
+}
+"#;
+        assert_eq!(
+            hocon(dotted_head),
+            [
+                entry("Every30Seconds", "*/30 * * ? * *", 2),
+                entry("Hourly", "0 0 * * * ?", 4)
+            ]
+        );
+        // Fully dotted keys, the Pekko fork's root, a mixed spelling.
+        let dotted = "akka.quartz.schedules.Nightly.expression = \"0 0 3 * * ?\"\n\
+                      pekko.quartz.schedules.Weekly.expression: \"0 0 4 ? * SUN\"\n\
+                      akka { quartz.schedules.Monthly.expression = \"0 0 5 1 * ?\" }\n";
+        assert_eq!(
+            hocon(dotted),
+            [
+                entry("Nightly", "0 0 3 * * ?", 0),
+                entry("Weekly", "0 0 4 ? * SUN", 1),
+                entry("Monthly", "0 0 5 1 * ?", 2)
+            ]
+        );
+        // `${X}` is not followed (it replaces an earlier literal); a lone
+        // `${?X}` keeps it; a value that is no cron expression is dropped;
+        // an include line, an array and other roots are not schedules.
+        let subs = r#"include "base.conf"
+akka.quartz.schedules {
+  A { expression = "0 0 1 * * ?" }
+  A { expression = ${A_CRON} }
+  B { expression = "0 0 2 * * ?" }
+  B { expression = ${?B_CRON} }
+  C { expression = "not a cron" }
+  D { expression = "0 0 3 * * ?" }
+  D.expression = "0 0 6 * * ?"
+}
+akka.quartz.calendars { Holidays { expression = "0 0 9 * * ?" } }
+myapp.quartz.schedules { E { expression = "0 0 7 * * ?" } }
+akka.quartz.list = [ { schedules { F { expression = "0 0 8 * * ?" } } } ]
+"#;
+        assert_eq!(
+            hocon(subs),
+            [entry("B", "0 0 2 * * ?", 4), entry("D", "0 0 6 * * ?", 8)]
+        );
+        // A `//` inside a quoted value is no comment; unbalanced text is safe.
+        assert_eq!(
+            hocon(
+                "akka.quartz.schedules.X.description = \"a // b\"\nakka.quartz.schedules.X.expression = \"0 15 10 ? * MON-FRI\"\n"
+            ),
+            [entry("X", "0 15 10 ? * MON-FRI", 1)]
+        );
+        assert!(hocon("akka { quartz { schedules { N { expression = \"0 0").is_empty());
+        assert!(hocon("}}} ]] akka.quartz.schedules.N.expression").is_empty());
+        assert!(
+            hocon("ünïcode = \"é\"\nakka.quartz.schedules.É.expression = \"0 0 3 * * ?\"").len()
+                == 1
+        );
+    }
+
+    #[test]
+    fn akka_quartz_create_schedule_in_code() {
+        let positional = r#"import com.typesafe.akka.extension.quartz.QuartzSchedulerExtension
+object Jobs {
+  val scheduler = QuartzSchedulerExtension(system)
+  scheduler.createSchedule("Nightly", None, "0 0 3 * * ?", None)
+  scheduler.schedule("Nightly", purger, "purge")
+}
+"#;
+        let out = run(positional, "src/main/scala/Jobs.scala");
+        assert_eq!(cron_qnames(&out), ["cron:0 0 3 * * ?:Nightly"]);
+        assert!(out.refs.is_empty(), "an ActorRef job carries no handler");
+        let named = r#"import org.apache.pekko.extension.quartz.QuartzSchedulerExtension
+class Boot(system: ActorSystem) {
+  private val quartz: QuartzSchedulerExtension = QuartzSchedulerExtension(system)
+  def go(): Unit = {
+    quartz.createSchedule("Nightly", description = Some("purge"), cronExpression = "0 0 3 * * ?")
+    quartz.createJobSchedule(name = "Hourly", receiver = a, msg = Tick, cronExpression = "@hourly")
+    quartz.rescheduleJob("Weekly", a, Tick, None, "0 0 4 ? * SUN")
+  }
+}
+"#;
+        assert_eq!(
+            sorted_qnames(&run(named, "Boot.scala")),
+            [
+                "cron:0 * * * *:Hourly",
+                "cron:0 0 3 * * ?:Nightly",
+                "cron:0 0 4 ? * SUN:Weekly"
+            ]
+        );
+        let java = r#"import com.typesafe.akka.extension.quartz.QuartzSchedulerExtension;
+public class Jobs {
+  void start(ActorSystem system, ActorRef purger) {
+    QuartzSchedulerExtension scheduler = QuartzSchedulerExtension.get(system);
+    scheduler.createSchedule("Nightly", Option.empty(), "0 0 3 * * ?", Option.empty(), TimeZone.getDefault());
+  }
+}
+"#;
+        assert_eq!(
+            cron_qnames(&run(java, "Jobs.java")),
+            ["cron:0 0 3 * * ?:Nightly"]
+        );
+        // A schedule created from a variable is unread, yet still created
+        // here: the start of that name is no conf REF.
+        let unread = r#"import com.typesafe.akka.extension.quartz.QuartzSchedulerExtension
+object Jobs {
+  val s = QuartzSchedulerExtension(system)
+  s.createSchedule("Nightly", None, cfg.nightly)
+  s.schedule("Nightly", purger, "purge")
+}
+"#;
+        assert!(run(unread, "Jobs.scala").nodes.is_empty());
+    }
+
+    #[test]
+    fn akka_quartz_schedule_without_create_is_a_ref() {
+        let out = run(AKKA_JOBS, "Jobs.scala");
+        assert_eq!(cron_qnames(&out), ["cron:@quartz-conf:Nightly:Nightly"]);
+        assert_eq!(
+            out.nav.name_by_id.values().collect::<Vec<_>>(),
+            ["@quartz-conf:Nightly"]
+        );
+        assert_eq!(out.edges.len(), 1);
+        assert_eq!(out.edges[0].category, edge_category::SCHEDULES);
+        let CellPayload::Json(payload) = &out.nodes[0].cells[0].payload else {
+            panic!("CRON_JOB CODE cell is JSON");
+        };
+        assert_eq!(
+            payload,
+            r#"{"schedule":"@quartz-conf:Nightly","target":"Nightly","source":"akka_quartz"}"#
+        );
+        // Bound names, a chained receiver on its own line, scheduleJob.
+        let bound = r#"import com.typesafe.akka.extension.quartz.QuartzSchedulerExtension
+class Boot {
+  lazy val ext =
+    QuartzSchedulerExtension(context.system)
+  this.ext.scheduleJob("Hourly", self, Tick)
+  QuartzSchedulerExtension(context.system)
+    .schedule(name = "Weekly", receiver = self, msg = Tick)
+}
+"#;
+        assert_eq!(
+            sorted_qnames(&run(bound, "Boot.scala")),
+            [
+                "cron:@quartz-conf:Hourly:Hourly",
+                "cron:@quartz-conf:Weekly:Weekly"
+            ]
+        );
+        // A Kotlin file reads the same; a commented-out call does not.
+        let kotlin = "import com.typesafe.akka.extension.quartz.QuartzSchedulerExtension\n\
+                      val scheduler = QuartzSchedulerExtension.get(system)\n\
+                      // scheduler.schedule(\"Old\", a, b)\n\
+                      /* scheduler.schedule(\"Older\", a, b) */\n\
+                      fun go() { scheduler.schedule(\"Nightly\", purger, \"purge\") }\n";
+        assert_eq!(
+            cron_qnames(&run(kotlin, "Jobs.kt")),
+            ["cron:@quartz-conf:Nightly:Nightly"]
+        );
+        // The gate: the extension's name and a JVM file.
+        assert!(
+            run(
+                &AKKA_JOBS.replace("QuartzSchedulerExtension", "Quartz"),
+                "Jobs.scala"
+            )
+            .nodes
+            .is_empty()
+        );
+        assert!(run(AKKA_JOBS, "jobs.rs").nodes.is_empty());
+        assert!(run(AKKA_JOBS, "jobs.ts").nodes.is_empty());
+    }
+
+    #[test]
+    fn schedule_on_another_receiver_is_ignored() {
+        let src = r#"import com.typesafe.akka.extension.quartz.QuartzSchedulerExtension
+object Jobs {
+  val scheduler = QuartzSchedulerExtension(system)
+  system.scheduler.scheduleOnce(5.seconds, actor, Tick)
+  timers.schedule("Nightly", actor, Tick)
+  other.createSchedule("Hourly", None, "0 0 * * * ?")
+  MyQuartzSchedulerExtension(system).schedule("Weekly", a, b)
+  if (scheduler == QuartzSchedulerExtension(system)) ()
+  scheduler.schedule(nightlyName, purger, "purge")
+}
+"#;
+        let out = run(src, "Jobs.scala");
+        assert!(out.nodes.is_empty(), "{:?}", cron_qnames(&out));
+        // Only the extension and the names bound to it are receivers.
+        assert_eq!(quartz_receivers(src), ["scheduler"]);
+        assert_eq!(
+            quartz_receivers(
+                "QuartzSchedulerExtension s = QuartzSchedulerExtension.get(sys);\nx == QuartzSchedulerExtension(sys)\n"
+            ),
+            ["s"]
+        );
+    }
+
+    #[test]
+    fn akka_quartz_marker() {
+        let out = run(AKKA_JOBS, "Jobs.scala");
+        let mut c = CodeCounts::default();
+        c.bump("akka_quartz");
+        assert_eq!(out.nodes.len(), 1);
+        assert_eq!(
+            code_marker(&c, out.refs.len(), "Jobs.scala").as_deref(),
+            Some(
+                "[cron] code jobs=1 quartz=0 hangfire=0 go=0 apscheduler=0 spring=0 nestjs=0 tokio=0 akka_quartz=1 handler_refs=0 path=Jobs.scala"
+            )
+        );
+    }
+
+    #[test]
+    fn is_hocon_conf_path_cases() {
+        for yes in [
+            "application.conf",
+            "src/main/resources/application.conf",
+            "lib/reference.conf",
+            "src/main/resources/prod.conf",
+            "svc\\src\\main\\resources\\dev.conf",
+        ] {
+            assert!(is_hocon_conf_path(yes), "{yes}");
+        }
+        for no in [
+            "nginx/site.conf",
+            "etc/supervisord.conf",
+            "resources.conf",
+            "src/main/resources/.conf",
+            "src/main/resources/application.conf.bak",
+            "application.json",
+        ] {
+            assert!(!is_hocon_conf_path(no), "{no}");
+        }
+    }
+
+    /// A parse holding the module, a conf REF for `Nightly` (with its
+    /// SCHEDULES edge, as `extract_cron_nodes` mints it) and one for `Gone`.
+    fn quartz_ref_parse(repo: RepoId) -> FileParse {
+        let src = r#"import com.typesafe.akka.extension.quartz.QuartzSchedulerExtension
+object Jobs {
+  val q = QuartzSchedulerExtension(system)
+  q.schedule("Nightly", a, b)
+  q.schedule("Gone", a, b)
+}
+"#;
+        let module = module_id(repo);
+        let out = extract_cron_nodes(src, "Jobs.scala", module, repo);
+        let mut fp = FileParse::default();
+        fp.nodes.push(Node {
+            id: module,
+            repo,
+            confidence: Confidence::Strong,
+            cells: Vec::new(),
+        });
+        fp.nav
+            .record(module, "Jobs", "Jobs", node_kind::MODULE, None);
+        fp.nodes.extend(out.nodes);
+        fp.edges.extend(out.edges);
+        for (id, q) in &out.nav.qname_by_id {
+            fp.nav.record(
+                *id,
+                &out.nav.name_by_id[id],
+                q,
+                out.nav.kind_by_id[id],
+                Some(module),
+            );
+        }
+        fp
+    }
+
+    #[test]
+    fn rekey_quartz_refs_hits_and_misses() {
+        let repo = RepoId(1);
+        let module = module_id(repo);
+        let mut fp = quartz_ref_parse(repo);
+        assert_eq!(fp.nodes.len(), 3);
+        let table: BTreeMap<String, String> = [("Nightly".to_string(), "0 0 3 * * ?".to_string())]
+            .into_iter()
+            .collect();
+        let stats = rekey_quartz_refs(&mut fp, &table, repo);
+        assert_eq!(
+            stats,
+            QuartzRekey {
+                rekeyed: 1,
+                unresolved: 1
+            }
+        );
+
+        let job = NodeId::from_parts(
+            GRAPH_TYPE,
+            repo,
+            node_kind::CRON_JOB,
+            "cron:0 0 3 * * ?:Nightly",
+        );
+        let ids: Vec<NodeId> = fp.nodes.iter().map(|n| n.id).collect();
+        assert_eq!(ids, [module, job]);
+        assert_eq!(fp.nav.qname_by_id[&job], "cron:0 0 3 * * ?:Nightly");
+        assert_eq!(fp.nav.name_by_id[&job], "0 0 3 * * ?");
+        assert_eq!(fp.nav.kind_by_id[&job], node_kind::CRON_JOB);
+        assert_eq!(fp.nav.parent_of[&job], module);
+        assert_eq!(fp.nav.children_of[&module], [job]);
+        assert_eq!(fp.nav.qname_by_id.len(), 2, "{:?}", fp.nav.qname_by_id);
+        let edges: Vec<(NodeId, NodeId)> = fp.edges.iter().map(|e| (e.from, e.to)).collect();
+        assert_eq!(edges, [(module, job)]);
+        let CellPayload::Json(payload) = &fp.nodes[1].cells[0].payload else {
+            panic!("CRON_JOB CODE cell is JSON");
+        };
+        assert_eq!(
+            payload,
+            r#"{"schedule":"0 0 3 * * ?","target":"Nightly","source":"akka_quartz"}"#
+        );
+        // Idempotent: a re-keyed job is no REF.
+        assert_eq!(
+            rekey_quartz_refs(&mut fp, &table, repo),
+            QuartzRekey::default()
+        );
+
+        // An empty table drops every REF and keeps a job created in code.
+        let mut fp = quartz_ref_parse(repo);
+        let created = extract_cron_nodes(
+            "import com.typesafe.akka.extension.quartz.QuartzSchedulerExtension\n\
+             QuartzSchedulerExtension(s).createSchedule(\"Nightly\", None, \"0 0 3 * * ?\")\n",
+            "Other.scala",
+            module,
+            repo,
+        );
+        fp.nodes.extend(created.nodes);
+        fp.edges.extend(created.edges);
+        for (id, q) in &created.nav.qname_by_id {
+            fp.nav.record(
+                *id,
+                &created.nav.name_by_id[id],
+                q,
+                node_kind::CRON_JOB,
+                Some(module),
+            );
+        }
+        rekey_quartz_refs(&mut fp, &BTreeMap::new(), repo);
+        let before: Vec<NodeId> = fp.nodes.iter().map(|n| n.id).collect();
+        assert_eq!(before, [module, job], "misses are dropped");
+        assert!(
+            fp.edges.iter().all(|e| e.to == job),
+            "a dropped REF keeps no edge"
+        );
+        // A REF whose job the parse already holds folds into it: one node,
+        // one SCHEDULES edge.
+        let mut fp = quartz_ref_parse(repo);
+        fp.nodes.push(Node {
+            id: job,
+            repo,
+            confidence: Confidence::Medium,
+            cells: Vec::new(),
+        });
+        fp.edges.push(Edge {
+            from: module,
+            to: job,
+            category: edge_category::SCHEDULES,
+            confidence: Confidence::Medium,
+            cells: Vec::new(),
+        });
+        fp.nav.record(
+            job,
+            "0 0 3 * * ?",
+            "cron:0 0 3 * * ?:Nightly",
+            node_kind::CRON_JOB,
+            Some(module),
+        );
+        let stats = rekey_quartz_refs(&mut fp, &table, repo);
+        assert_eq!(
+            stats,
+            QuartzRekey {
+                rekeyed: 1,
+                unresolved: 1
+            }
+        );
+        let ids: Vec<NodeId> = fp.nodes.iter().map(|n| n.id).collect();
+        assert_eq!(ids, [module, job]);
+        assert_eq!(fp.edges.len(), 1, "the duplicate SCHEDULES edge is dropped");
+        assert_eq!(fp.nav.children_of[&module], [job]);
     }
 }

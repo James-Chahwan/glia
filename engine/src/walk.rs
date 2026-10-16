@@ -816,6 +816,11 @@ fn is_bypass_path(path: &str) -> bool {
         // A13.16: a Prisma schema (`schema.prisma`, or any `.prisma` of a
         // prismaSchemaFolder), the file that declares the stack's data model.
         || glia_code_extractors::prisma::is_prisma_schema(path)
+        // DG.7b: a HOCON `application.conf` / `reference.conf`, or a `*.conf`
+        // under `resources/`. Read into `files` for the akka-quartz conf
+        // graft (`build::grafts`) only: no route branch takes it (detect_language
+        // has no HOCON arm), so it is never parsed, const-scanned or a MODULE.
+        || glia_code_extractors::cron::is_hocon_conf_path(path)
 }
 
 /// LA.6c: an Angular CLI component template (`home.component.html`). Read only
@@ -1110,6 +1115,54 @@ mod walk_tests {
         let (files, ..) = walk_source_files(&root);
         let read: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(read, ["prisma/schema.prisma"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// DG.7b: a HOCON conf is read (it matches no language), so the
+    /// akka-quartz graft sees it; a `.conf` outside `resources/` that is no
+    /// `application.conf` / `reference.conf` is not. The read conf is never
+    /// routed: the router skips it, so it mints no MODULE.
+    #[test]
+    fn walk_reads_hocon_confs() {
+        let root = walk_tmp("hocon");
+        for d in ["svc/src/main/resources", "nginx", "lib"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let conf = "akka.quartz.schedules { Nightly { expression = \"0 0 3 * * ?\" } }\n";
+        for rel in [
+            "application.conf",
+            "svc/src/main/resources/prod.conf",
+            "lib/reference.conf",
+            "nginx/site.conf",
+            "notes.conf",
+        ] {
+            std::fs::write(root.join(rel), conf).unwrap();
+        }
+        let (files, ..) = walk_source_files(&root);
+        let mut read: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        read.sort_unstable();
+        assert_eq!(
+            read,
+            ["application.conf", "lib/reference.conf", "svc/src/main/resources/prod.conf"]
+        );
+        assert!(read.iter().all(|p| crate::route::parser_route(p).is_none()), "{read:?}");
+        let r = crate::build::generate_one(root.to_str().unwrap()).unwrap();
+        let modules: Vec<&String> = r
+            .merged
+            .graphs
+            .iter()
+            .flat_map(|g| {
+                g.nav
+                    .qname_by_id
+                    .iter()
+                    .filter(|(id, _)| {
+                        g.nav.kind_by_id.get(id) == Some(&glia_code_domain::node_kind::MODULE)
+                    })
+                    .map(|(_, q)| q)
+            })
+            .filter(|q| q.contains("conf"))
+            .collect();
+        assert!(modules.is_empty(), "a conf is no MODULE: {modules:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

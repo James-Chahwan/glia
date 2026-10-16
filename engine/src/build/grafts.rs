@@ -16,7 +16,7 @@ use glia_code_domain::{
 };
 use glia_code_extractors::constants::ConstTable;
 use glia_code_extractors::next_pages::{self, NextRoots, PageRouter};
-use glia_code_extractors::{anchor, eventbus, queue_topic, queues};
+use glia_code_extractors::{anchor, cron, eventbus, queue_topic, queues};
 use glia_core::{Cell, CellPayload, NodeId, NodeKindId, RepoId};
 use glia_graph::rust_paths::RustCrate;
 
@@ -33,8 +33,8 @@ use crate::route::ModuleQnames;
 /// Run every post-cache graft over one repo's parses, in order: the LF.2e
 /// overlay wrapper scan and its http half, the A11.2 endpoint fold, the LA.6d
 /// Next.js page graft, the LA.4 queue-topic const fold, the CB.3b event-name
-/// const fold, the DF.13 Python signal binding, the LF.2e wrappers' queue
-/// half, the A5.2 / A5.3 / LA.17 RPC
+/// const fold, the DF.13 Python signal binding, the DG.7b akka-quartz conf
+/// schedules, the LF.2e wrappers' queue half, the A5.2 / A5.3 / LA.17 RPC
 /// needles with their `[grpc-client]` /
 /// `[grpc-server-impl]` / `[proto-rpc]` markers, the A5.8 `[marker-anchor]`
 /// census and the LE.4a `[data-access]` census, the LB.4a / LB.8 owner
@@ -120,6 +120,12 @@ pub(super) fn apply_post_cache(
     // the owner pass and the A16.4 filter, so the swapped nodes are
     // owner-qualified and IMPORTS-filtered like every event node.
     apply_python_signals(parses_by_lang, &folds, roots, parse_errors).report(repo_label);
+    // DG.7b: akka-quartz jobs started by a schedule name that a HOCON conf
+    // declares, re-keyed to the conf's expression. Post-cache over `files`, so
+    // a conf edit re-keys a cache-served job. CRON_JOB is no owned kind and no
+    // needle input (CLASS / STRUCT / METHOD / FUNCTION), so neither the LB.8
+    // rule nor the DC.4 NeedleKey is touched by where it runs.
+    graft_quartz_conf_schedules(parses_by_lang, files, repo).report(repo_label);
     // LF.2e: the wrappers' queue half, AFTER the const fold (which rebuilds a
     // folded file's queue nodes from the queue scan and would drop a wrapper
     // node) and above the owner pass, like every graft that mints an owned kind.
@@ -223,6 +229,84 @@ pub(super) fn apply_post_cache(
     filter_imports_cells(parses_by_lang, rust_crates, ts_aliases, repo_label);
 
     rpc_added
+}
+
+/// DG.7b: per-repo tallies of the akka-quartz conf join.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct QuartzConfStats {
+    /// HOCON confs walked (`cron::is_hocon_conf_path`).
+    confs: usize,
+    /// Distinct schedule names the confs declare with a cron expression.
+    schedules: usize,
+    /// Conf REF jobs re-keyed to their schedule's expression.
+    rekeyed: usize,
+    /// ... dropped, no conf naming their schedule.
+    unresolved: usize,
+    /// Later conf definitions of a name that differ from the first one's.
+    conflicts: usize,
+}
+
+impl QuartzConfStats {
+    /// fired_on marker, once per repo with a HOCON conf or a conf REF:
+    ///   `[cron] akka-quartz confs={f} schedules={s} rekeyed={r} unresolved={u} conflicts={c} repo=<label>`
+    fn report(&self, repo_label: &str) {
+        if self.confs + self.rekeyed + self.unresolved > 0 {
+            eprintln!(
+                "[cron] akka-quartz confs={} schedules={} rekeyed={} unresolved={} conflicts={} repo={repo_label}",
+                self.confs, self.schedules, self.rekeyed, self.unresolved, self.conflicts
+            );
+        }
+    }
+}
+
+/// DG.7b: akka-quartz-scheduler's config form. `.schedule("Nightly", ..)`
+/// names a schedule whose expression lives in a HOCON file
+/// (`akka.quartz.schedules.Nightly.expression`), so the per-file pass mints a
+/// REF (`cron:@quartz-conf:Nightly:Nightly`) and this graft resolves it.
+///
+/// The table, schedule name -> expression, is read from every walked conf
+/// (`cron::hocon_quartz_schedules`; the walk admits `cron::is_hocon_conf_path`
+/// files and the router skips them) in walk (sorted path) order: the first
+/// definition of a name wins and a differing later one counts as a conflict.
+/// It is a BTreeMap and parses are visited in sorted language order, then walk
+/// order, so no HashMap order reaches an id. Then `cron::rekey_quartz_refs`
+/// re-keys each hit to `cron:<expression>:<name>` and drops each miss. Like
+/// the const folds it runs on the router's output, cached parses included,
+/// and the cache keeps the REF: a conf edit re-keys a cache-served job, so
+/// incremental == clean.
+fn graft_quartz_conf_schedules(
+    parses_by_lang: &mut HashMap<&'static str, Vec<FileParse>>,
+    files: &[(String, String)],
+    repo: RepoId,
+) -> QuartzConfStats {
+    let mut stats = QuartzConfStats::default();
+    let mut table: BTreeMap<String, String> = BTreeMap::new();
+    for (path, text) in files {
+        if !cron::is_hocon_conf_path(path) {
+            continue;
+        }
+        stats.confs += 1;
+        for (name, expr, _line) in cron::hocon_quartz_schedules(text) {
+            match table.get(&name) {
+                None => {
+                    table.insert(name, expr);
+                }
+                Some(first) if *first != expr => stats.conflicts += 1,
+                Some(_) => {}
+            }
+        }
+    }
+    stats.schedules = table.len();
+    let mut langs: Vec<&'static str> = parses_by_lang.keys().copied().collect();
+    langs.sort_unstable();
+    for lang in langs {
+        for fp in parses_by_lang.get_mut(lang).into_iter().flatten() {
+            let r = cron::rekey_quartz_refs(fp, &table, repo);
+            stats.rekeyed += r.rekeyed;
+            stats.unresolved += r.unresolved;
+        }
+    }
+    stats
 }
 
 /// The client-host `via` (`NavFact::ClientHost`) and the side kind it
@@ -2067,5 +2151,94 @@ mod const_fold_tests {
         let sites = site_qnames(&gone.by_lang);
         assert!(!sites.contains("queue_consumer:billing.paid"), "{sites:?}");
         assert!(sites.contains("queue_producer:orders.created"), "{sites:?}");
+    }
+}
+
+#[cfg(test)]
+mod quartz_conf_tests {
+    use super::*;
+
+    const REPO: RepoId = RepoId(12);
+
+    /// A Scala parse of `path` with its MODULE first and the cron extractor's
+    /// output merged in, as the router hands it over.
+    fn scala_parse(path: &str, source: &str) -> FileParse {
+        let module = NodeId::from_parts(glia_code_domain::GRAPH_TYPE, REPO, node_kind::MODULE, path);
+        let mut fp = FileParse::default();
+        fp.nodes.push(glia_core::Node {
+            id: module,
+            repo: REPO,
+            confidence: glia_core::Confidence::Strong,
+            cells: Vec::new(),
+        });
+        fp.nav.record(module, path, path, node_kind::MODULE, None);
+        let out = cron::extract_cron_nodes(source, path, module, REPO);
+        fp.nodes.extend(out.nodes);
+        fp.edges.extend(out.edges);
+        merge_nav(&mut fp.nav, out.nav);
+        fp
+    }
+
+    fn start(name: &str) -> String {
+        format!(
+            "import com.typesafe.akka.extension.quartz.QuartzSchedulerExtension\n\
+             object J {{ QuartzSchedulerExtension(sys).schedule(\"{name}\", a, b) }}\n"
+        )
+    }
+
+    fn cron_qnames(by_lang: &HashMap<&'static str, Vec<FileParse>>) -> Vec<String> {
+        let mut out: Vec<String> = by_lang
+            .values()
+            .flatten()
+            .flat_map(|fp| {
+                fp.nodes.iter().filter_map(|n| {
+                    (fp.nav.kind_by_id.get(&n.id) == Some(&node_kind::CRON_JOB))
+                        .then(|| fp.nav.qname_by_id.get(&n.id).cloned())
+                        .flatten()
+                })
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// DG.7b: the conf table is first-wins over walk order, a differing later
+    /// definition counts as a conflict, a REF the table names is re-keyed in
+    /// whichever language's parse holds it, and one it does not is dropped.
+    #[test]
+    fn graft_quartz_conf_schedules_first_wins_and_drops_misses() {
+        let files: Vec<(String, String)> = vec![
+            (
+                "a/src/main/resources/application.conf".into(),
+                "akka.quartz.schedules { Nightly { expression = \"0 0 3 * * ?\" } }\n".into(),
+            ),
+            (
+                "b/src/main/resources/application.conf".into(),
+                "akka.quartz.schedules.Nightly.expression = \"0 0 4 * * ?\"\n\
+                 pekko.quartz.schedules.Hourly.expression = \"0 0 * * * ?\"\n"
+                    .into(),
+            ),
+            ("nginx/site.conf".into(), "akka.quartz.schedules.Gone.expression = \"0 0 5 * * ?\"\n".into()),
+        ];
+        let mut by_lang: HashMap<&'static str, Vec<FileParse>> = HashMap::new();
+        by_lang.insert(
+            "scala",
+            vec![scala_parse("a/Jobs.scala", &start("Nightly")), scala_parse("b/Gone.scala", &start("Gone"))],
+        );
+        by_lang.insert("java", vec![scala_parse("c/Hourly.java", &start("Hourly"))]);
+        let stats = graft_quartz_conf_schedules(&mut by_lang, &files, REPO);
+        assert_eq!(
+            stats,
+            QuartzConfStats { confs: 2, schedules: 2, rekeyed: 2, unresolved: 1, conflicts: 1 }
+        );
+        assert_eq!(cron_qnames(&by_lang), ["cron:0 0 * * * ?:Hourly", "cron:0 0 3 * * ?:Nightly"]);
+        // The graft is idempotent over its own output.
+        let again = graft_quartz_conf_schedules(&mut by_lang, &files, REPO);
+        assert_eq!((again.rekeyed, again.unresolved), (0, 0));
+
+        // No conf and no REF: no marker input at all.
+        let mut none: HashMap<&'static str, Vec<FileParse>> = HashMap::new();
+        none.insert("scala", vec![scala_parse("x.scala", "object X\n")]);
+        assert_eq!(graft_quartz_conf_schedules(&mut none, &[], REPO), QuartzConfStats::default());
     }
 }
