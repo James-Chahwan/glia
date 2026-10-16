@@ -1367,6 +1367,16 @@ fn is_identifier(s: &str) -> bool {
 /// ([`glia_code_extractors::generated::generated_by_name`]). The marker's
 /// `generated=` total splits into `name=` / `banner=` (this arm) and
 /// `qname=` (the androidTest arm).
+///
+/// DT.6a: a ROUTE is judged by EVERY registration site, never by its first
+/// POSITION or its qname ([`test_route_ids`], the one predicate the `http`
+/// Resolve pass reads too): a ROUTE in that set is stamped `test_fixture`,
+/// counted under `path=` when its first site is a test path, else under the
+/// repo's declared `tagged=`; a ROUTE outside it skips both test arms (the
+/// qname rule, which reads `GET /api/ab_test` as a test symbol, included)
+/// and falls through to the generated / external arms. So a route
+/// registered in `main.go` AND an earlier-sorting `api_test.go` stays
+/// unstamped. Every other kind is unchanged.
 pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuildCtx) {
     use std::collections::HashSet;
 
@@ -1375,14 +1385,14 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuild
 
     // (repo, label, matcher, tagged): in `ctx.inputs` order, so the marker
     // lines are too.
-    let mut declared: Vec<(RepoId, &str, TestPaths, usize)> = ctx
-        .inputs
-        .iter()
-        .filter_map(|input| {
-            let matcher = input.config.as_ref()?.config.walk.tests_matcher()?;
-            Some((input.repo, input.label.as_str(), matcher, 0))
-        })
-        .collect();
+    let mut declared: Vec<(RepoId, &str, TestPaths, usize)> =
+        declared_tests(ctx).map(|(repo, label, matcher)| (repo, label, matcher, 0)).collect();
+    // DT.6a: the test-only ROUTEs, by the matchers just built. Only probed.
+    let test_routes = {
+        let matchers: Vec<(RepoId, &TestPaths)> =
+            declared.iter().map(|(repo, _, matcher, _)| (*repo, matcher)).collect();
+        test_routes_with(merged, &matchers)
+    };
 
     // CG.4b's endpoints and DF.10's channel clients: one set, only probed.
     let mut third_party = glia_graph::HttpStackResolver::third_party_endpoints(&merged.graphs);
@@ -1439,20 +1449,26 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuild
                 // swamp recall on matching trigrams. Distinct from `generated`
                 // so engram can opt it back in independently. (glia-v3 #5)
                 "generated_proto"
-            } else if is_test_fixture(&file, qname) {
+            } else if let Some(rule) = if kind == Some(node_kind::ROUTE) {
+                // DT.6a: a ROUTE by every registration site, see the doc.
+                test_routes.contains(&n.id).then(|| route_test_rule(&n.cells))
+            } else {
+                node_test_rule(&declared, n.repo, &file, qname)
+            } {
                 // test files + seeders/load-testers — droppable by default at
                 // recall, opt-in via engram's --include-tests. (glia-v3 #6;
-                // the path rule, CG.2a, counted apart from a qname-only hit)
-                if is_test_path(&file).is_some() {
-                    stats.test_fixture_path += 1;
-                } else {
-                    stats.test_fixture_qname += 1;
+                // the path rule, CG.2a, counted apart from a qname-only hit
+                // and from CJ.4's declared `[walk] tests` patterns)
+                match rule {
+                    TestRule::Path => stats.test_fixture_path += 1,
+                    TestRule::Qname => stats.test_fixture_qname += 1,
+                    TestRule::Declared => {
+                        if let Some((.., tagged)) = declared.iter_mut().find(|(r, ..)| *r == n.repo) {
+                            *tagged += 1;
+                        }
+                        stats.test_fixture_declared += 1;
+                    }
                 }
-                "test_fixture"
-            } else if let Some(tagged) = declared_hit(&mut declared, n.repo, &file) {
-                // CJ.4: the repo's own `[walk] tests` patterns.
-                *tagged += 1;
-                stats.test_fixture_declared += 1;
                 "test_fixture"
             } else if let Some(by) = generated.classify(n.repo, &file) {
                 // DE.7: generated code, by codegen name or generator header.
@@ -1486,22 +1502,131 @@ pub(crate) fn tag_synthetic_provenance(merged: &mut MergedGraph, ctx: &CodeBuild
     }
 }
 
-/// The tagged-count slot of `repo`'s declared `[walk] tests` (CJ.4) when its
-/// matcher matches `file`; `None` for an empty file (a node with no POSITION)
-/// or a repo that declares none. Linear: a build holds a handful of repos.
-fn declared_hit<'d>(
-    declared: &'d mut [(RepoId, &str, TestPaths, usize)],
+/// Every built repo's declared `[walk] tests` matcher (CJ.4) with its
+/// label, in `ctx.inputs` order; a repo that declares none is absent. User
+/// config: built with or without `--no-overlay`. A layout merge's empty
+/// `ctx` yields none.
+fn declared_tests(ctx: &CodeBuildCtx) -> impl Iterator<Item = (RepoId, &str, TestPaths)> {
+    ctx.inputs.iter().filter_map(|input| {
+        let matcher = input.config.as_ref()?.config.walk.tests_matcher()?;
+        Some((input.repo, input.label.as_str(), matcher))
+    })
+}
+
+/// The `[provenance]` rule that classed a node `test_fixture`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestRule {
+    /// [`is_test_path`] (CG.2a).
+    Path,
+    /// [`is_test_qname`] only (glia-v3 #6); never a ROUTE's (DT.6a).
+    Qname,
+    /// The repo's declared `[walk] tests` only (CJ.4).
+    Declared,
+}
+
+/// A non-ROUTE node's test rule: the path rule on its POSITION `file`, then
+/// the qname rule (together [`is_test_fixture`]), then the repo's declared
+/// `[walk] tests` (CJ.4; never for an empty file, a node with no
+/// POSITION). Linear in `declared`: a build holds a handful of repos.
+fn node_test_rule(
+    declared: &[(RepoId, &str, TestPaths, usize)],
     repo: RepoId,
     file: &str,
-) -> Option<&'d mut usize> {
-    if file.is_empty() {
-        return None;
+    qname: &str,
+) -> Option<TestRule> {
+    if is_test_fixture(file, qname) {
+        return Some(if is_test_path(file).is_some() { TestRule::Path } else { TestRule::Qname });
     }
-    declared
-        .iter_mut()
-        .find(|(r, ..)| *r == repo)
-        .filter(|(_, _, matcher, _)| matcher.matches(file))
-        .map(|(.., tagged)| tagged)
+    let hit = !file.is_empty()
+        && declared.iter().any(|(r, _, matcher, _)| *r == repo && matcher.matches(file));
+    hit.then_some(TestRule::Declared)
+}
+
+/// The rule a test-only ROUTE entry (DT.6a, one in [`test_route_ids`]) is
+/// counted under: `Path` when its first registration site is a test path,
+/// else `Declared` (a site only the repo's `[walk] tests` matched). A stamped
+/// entry carries no ORIGIN, so every site of it is test code.
+fn route_test_rule(cells: &[Cell]) -> TestRule {
+    match route_site_files(cells).first() {
+        Some(file) if is_test_path(file).is_none() => TestRule::Declared,
+        _ => TestRule::Path,
+    }
+}
+
+/// DT.6a: the ROUTE ids every registration site of which is test code - the
+/// one predicate the `http` Resolve pass (CODE_PASSES, which keeps them out
+/// of the route index) and [`tag_synthetic_provenance`]'s ROUTE arm read.
+///
+/// Per ROUTE id over EVERY entry (an id in several graphs of a repo, or a
+/// layout merge's members): an entry with an ORIGIN cell is test iff that
+/// provenance is `test_fixture` (a member layout's stamp: a merge runs with
+/// an empty `ctx`); an entry without one is test iff it has at least one
+/// site file ([`route_site_files`]: every POSITION `file`, every JSON
+/// ROUTE_METHOD `file`) and every site file is test code: not protobuf
+/// output ([`generated_by_name`]) and a test path ([`is_test_path`]) or a
+/// match of the repo's declared `[walk] tests` ([`declared_tests`]). The
+/// qname rule is never consulted: a ROUTE qname is `METHOD /path`, and
+/// [`is_test_qname`] reads the URL `/api/ab_test` as a test symbol. The id
+/// is a test route iff every entry is. Only probed, never iterated into an
+/// output.
+pub(crate) fn test_route_ids(merged: &MergedGraph, ctx: &CodeBuildCtx) -> HashSet<NodeId> {
+    let declared: Vec<(RepoId, TestPaths)> =
+        declared_tests(ctx).map(|(repo, _, matcher)| (repo, matcher)).collect();
+    let matchers: Vec<(RepoId, &TestPaths)> =
+        declared.iter().map(|(repo, matcher)| (*repo, matcher)).collect();
+    test_routes_with(merged, &matchers)
+}
+
+/// [`test_route_ids`] over already built declared matchers.
+fn test_routes_with(merged: &MergedGraph, declared: &[(RepoId, &TestPaths)]) -> HashSet<NodeId> {
+    let mut verdict: HashMap<NodeId, bool> = HashMap::new();
+    for g in &merged.graphs {
+        for n in &g.nodes {
+            if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ROUTE) {
+                continue;
+            }
+            let matcher = declared.iter().find(|(r, _)| *r == n.repo).map(|(_, m)| *m);
+            let test = route_entry_is_test(&n.cells, matcher);
+            verdict.entry(n.id).and_modify(|v| *v &= test).or_insert(test);
+        }
+    }
+    verdict.into_iter().filter_map(|(id, test)| test.then_some(id)).collect()
+}
+
+/// One ROUTE entry's verdict for [`test_route_ids`].
+fn route_entry_is_test(cells: &[Cell], declared: Option<&TestPaths>) -> bool {
+    let origins: Vec<&Cell> = cells.iter().filter(|c| c.kind == cell_type::ORIGIN).collect();
+    if !origins.is_empty() {
+        return origins.iter().any(|c| cell_json_str(c, "provenance").as_deref() == Some("test_fixture"));
+    }
+    let sites = route_site_files(cells);
+    !sites.is_empty()
+        && sites.iter().all(|file| {
+            generated_by_name(file) != Some(Generated::Proto)
+                && (is_test_path(file).is_some() || declared.is_some_and(|m| m.matches(file)))
+        })
+}
+
+/// A ROUTE entry's registration-site files, in cell order: every POSITION
+/// `file` and every JSON ROUTE_METHOD `file` (a bare-verb Text ROUTE_METHOD
+/// names none). Empty files are skipped.
+fn route_site_files(cells: &[Cell]) -> Vec<String> {
+    cells
+        .iter()
+        .filter(|c| c.kind == cell_type::POSITION || c.kind == cell_type::ROUTE_METHOD)
+        .filter_map(|c| cell_json_str(c, "file"))
+        .filter(|file| !file.is_empty())
+        .collect()
+}
+
+/// The string field `key` of a cell's JSON payload (Json or Text), `None`
+/// when the payload is not a JSON object or the field is not a string.
+fn cell_json_str(c: &Cell, key: &str) -> Option<String> {
+    let (CellPayload::Json(s) | CellPayload::Text(s)) = &c.payload else {
+        return None;
+    };
+    let v: serde_json::Value = serde_json::from_str(s).ok()?;
+    v.get(key)?.as_str().map(str::to_string)
 }
 
 /// The provenance of a third-party HTTP endpoint (CG.4b) or channel client
@@ -3417,6 +3542,118 @@ mod passes_tests {
         assert!(only_banner.marker().is_some_and(|m| m.contains(" generated=3 (name=0 banner=3 qname=0) ")));
         let only_external = ProvenanceStats { external: 2, ..Default::default() };
         assert!(only_external.marker().is_some_and(|m| m.ends_with(" external=2")));
+    }
+
+    /// DT.6a: a ROUTE is test-only iff EVERY registration site of every
+    /// entry is test code (POSITION and JSON ROUTE_METHOD files alike), or an
+    /// entry carries a member layout's `test_fixture` stamp; its qname never
+    /// counts. The provenance arm stamps exactly that set.
+    #[test]
+    fn test_route_ids_reads_every_site() {
+        use std::path::PathBuf;
+
+        use crate::external::RepoInputs;
+        use glia_code_domain::glia_config;
+
+        let pos = |file: &str| Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":11,"end_line":11}}"#)),
+        };
+        let site = |file: &str| Cell {
+            kind: cell_type::ROUTE_METHOD,
+            payload: CellPayload::Json(format!(
+                r#"{{"method":"GET","handler":null,"file":"{file}","line":12,"col":2}}"#
+            )),
+        };
+        let stamp = |p: &str| Cell {
+            kind: cell_type::ORIGIN,
+            payload: CellPayload::Json(format!(r#"{{"provenance":"{p}"}}"#)),
+        };
+        let rt = node_kind::ROUTE;
+        let build = || {
+            let mut h = Hand::new("test://dt6a");
+            let mixed = h.add(rt, "GET /api/orders", "GET /api/orders", vec![
+                pos("api_test.go"),
+                pos("main.go"),
+                site("main.go"),
+                site("api_test.go"),
+            ]);
+            let boom = h.add(rt, "GET /boom", "GET /boom", vec![pos("api_test.go"), site("api_test.go")]);
+            let dir = h.add(rt, "GET /health-test", "GET /health-test", vec![
+                pos("test/router.go"),
+                site("test/router.go"),
+            ]);
+            let ab = h.add(rt, "GET /api/ab_test", "GET /api/ab_test", vec![pos("main.go"), site("main.go")]);
+            let qa = h.add(rt, "GET /qa-only", "GET /qa-only", vec![pos("qa/routes.go"), site("qa/routes.go")]);
+            // A member layout's stamp, with a product site: the stamp decides.
+            let member =
+                h.add(rt, "GET /legacy", "GET /legacy", vec![pos("main.go"), stamp("test_fixture")]);
+            let generated =
+                h.add(rt, "GET /gen", "GET /gen", vec![pos("api_test.go"), stamp("generated")]);
+            // No site file at all (a bare-verb ROUTE_METHOD names none).
+            let bare = h.route("GET", "/bare");
+            let proto =
+                h.add(rt, "GET /pb", "GET /pb", vec![pos("test/api.pb.go"), site("test/api.pb.go")]);
+            // One id in two graphs of the repo: the second entry's product
+            // site makes it product, and an all-test twin keeps it test.
+            let split = h.add(rt, "GET /split", "GET /split", vec![pos("x_test.go")]);
+            let twins = h.add(rt, "GET /twins", "GET /twins", vec![pos("x_test.go")]);
+            let mut twin = Hand::new("test://dt6a");
+            twin.add(rt, "GET /split", "GET /split", vec![pos("split.go")]);
+            twin.add(rt, "GET /twins", "GET /twins", vec![site("y_test.go")]);
+            let ids = [mixed, boom, dir, ab, qa, member, generated, bare, proto, split, twins];
+            (MergedGraph::new(vec![h.graph(), twin.graph()]), ids)
+        };
+        let ctx = |declared: bool| CodeBuildCtx {
+            inputs: vec![RepoInputs {
+                repo: RepoId::from_canonical("test://dt6a"),
+                root: PathBuf::from("dt6a"),
+                label: "dt6a".into(),
+                config: declared.then(|| glia_config::parse_str("version = 1\n[walk]\ntests = [\"qa/\"]\n")),
+            }],
+            overlay: true,
+            group_fills: Vec::new(),
+            scip_roots: Vec::new(),
+        };
+
+        let (m, [mixed, boom, dir, ab, qa, member, generated, bare, proto, split, twins]) = build();
+        let tests = test_route_ids(&m, &ctx(true));
+        assert!(!tests.contains(&mixed), "main.go + api_test.go is a product route");
+        assert!(tests.contains(&boom), "every site a _test.go file");
+        assert!(tests.contains(&dir), "a test/ directory");
+        assert!(!tests.contains(&ab), "the qname rule never reads a ROUTE URL");
+        assert!(tests.contains(&qa), "a declared [walk] tests match");
+        assert!(tests.contains(&member), "an entry stamped test_fixture");
+        assert!(!tests.contains(&generated), "another provenance is not test");
+        assert!(!tests.contains(&bare), "no site file, no test route");
+        assert!(!tests.contains(&proto), "protobuf output is never a test site");
+        assert!(!tests.contains(&split), "every entry must be test");
+        assert!(tests.contains(&twins), "every entry is test");
+        assert_eq!(tests.len(), 5);
+        // Undeclared, `qa/` is app code; a layout merge's empty context
+        // keeps only the stamp arm and the path rule.
+        let undeclared = test_route_ids(&m, &ctx(false));
+        assert!(!undeclared.contains(&qa));
+        assert_eq!(test_route_ids(&m, &CodeBuildCtx::empty()), undeclared);
+
+        // The provenance arm stamps the same set, and nothing else: the
+        // mixed route and the `_test`-tailed URL stay unstamped (HEAD stamped
+        // both, by first POSITION and by the qname rule).
+        let (mut m, ids) = build();
+        tag_synthetic_provenance(&mut m, &ctx(true));
+        let fixture = vec![r#"{"provenance":"test_fixture"}"#.to_string()];
+        for id in [boom, dir, qa, twins] {
+            assert!(origins(&m, id).iter().all(|o| *o == fixture[0]) && !origins(&m, id).is_empty());
+        }
+        for id in [mixed, ab, bare, split] {
+            assert!(origins(&m, id).is_empty(), "{id:?} stays unstamped");
+        }
+        assert_eq!(origins(&m, member), fixture, "a member's stamp is kept");
+        assert_eq!(origins(&m, proto), vec![r#"{"provenance":"generated_proto"}"#.to_string()]);
+        assert_eq!(ids.len(), 11);
+        // route_test_rule: a declared-only site counts under declared.
+        assert_eq!(route_test_rule(&[pos("qa/routes.go")]), TestRule::Declared);
+        assert_eq!(route_test_rule(&[pos("qa/x_test.go"), pos("qa/routes.go")]), TestRule::Path);
     }
 
     /// The ORIGIN payloads of every entry of `id`.

@@ -115,13 +115,30 @@ impl RouteMounts {
 /// [`HttpStackResolver`] bound to a set of [`RouteMounts`], as the
 /// [`CrossGraphResolver`] a pass registry runs (LF.2d). Made by
 /// [`HttpStackResolver::with_mounts`].
+///
+/// DT.6a: [`MountedHttpResolver::without_routes`] also keeps a set of ROUTE
+/// ids out of the route index: the engine passes the routes every one of
+/// whose registration sites is test code, so no tier pairs a client with a
+/// route only a test registers.
 pub struct MountedHttpResolver<'a> {
     mounts: &'a RouteMounts,
+    without: Option<&'a HashSet<NodeId>>,
+}
+
+impl<'a> MountedHttpResolver<'a> {
+    /// This resolver with `routes` kept out of the route index (DT.6a): an
+    /// excluded ROUTE is never a target at any tier (no strong, stripped or
+    /// mounted key), is not counted in `[http] routes=`, and is counted once
+    /// per id on `[http] test routes excluded from route index: <n>`. The set
+    /// is only probed, so its order never reaches an output.
+    pub fn without_routes(self, routes: &'a HashSet<NodeId>) -> Self {
+        Self { without: Some(routes), ..self }
+    }
 }
 
 impl CrossGraphResolver for MountedHttpResolver<'_> {
     fn resolve(&self, merged: &mut MergedGraph) {
-        HttpStackResolver.resolve_with_mounts(merged, self.mounts);
+        HttpStackResolver.resolve_scoped(merged, self.mounts, self.without);
     }
 }
 
@@ -148,7 +165,7 @@ impl HttpStackResolver {
 
     /// This resolver with `mounts` applied, as a [`CrossGraphResolver`].
     pub fn with_mounts(mounts: &RouteMounts) -> MountedHttpResolver<'_> {
-        MountedHttpResolver { mounts }
+        MountedHttpResolver { mounts, without: None }
     }
 
     /// Pair every ENDPOINT with the ROUTEs serving it, every mounted ROUTE
@@ -165,6 +182,18 @@ impl HttpStackResolver {
     /// the mounted `(METHOD, path)` keys, `paired` the edges emitted through
     /// one.
     pub fn resolve_with_mounts(&self, merged: &mut MergedGraph, mounts: &RouteMounts) {
+        self.resolve_scoped(merged, mounts, None);
+    }
+
+    /// [`Self::resolve_with_mounts`] with the ROUTE ids in `without` kept out
+    /// of the route index (DT.6a, [`MountedHttpResolver::without_routes`]).
+    /// `None` is exactly `resolve_with_mounts`.
+    fn resolve_scoped(
+        &self,
+        merged: &mut MergedGraph,
+        mounts: &RouteMounts,
+        without: Option<&HashSet<NodeId>>,
+    ) {
         // Read ONCE per build. Never per lookup: the env read would show up in
         // every match and `normalise_http_path` (which is `pub`, and used by
         // fixtures and tests) must stay a pure function of its argument.
@@ -172,9 +201,10 @@ impl HttpStackResolver {
         let mut stats = HttpMatchStats::default();
         let mut rules = RuleTally::new("http", &MatchTier::RULES);
         let (index, stripped, owners) =
-            build_route_index(&merged.graphs, &prefixes, mounts, &mut stats);
+            build_route_index(&merged.graphs, &prefixes, mounts, without, &mut stats);
         let tails = build_mount_tails(&index);
         stats.report_nav_excluded();
+        stats.report_test_excluded();
         // A11.4: built from nodes, never from cross-edges, so where this
         // resolver sits in the Resolve stage of CODE_PASSES does not matter.
         let (aliases, project_aliases) = build_service_alias_index(&merged.graphs, &owners);
@@ -384,6 +414,10 @@ struct HttpMatchStats {
     routes: usize,
     /// Client-router NAV routes kept out of the index (A3.4).
     nav_excluded: usize,
+    /// DT.6a: ROUTE ids kept out of the index because every registration
+    /// site is test code ([`MountedHttpResolver::without_routes`]), once per
+    /// id.
+    test_excluded: usize,
     endpoints: usize,
     paired: usize,
     exact: usize,
@@ -561,6 +595,16 @@ impl HttpMatchStats {
         }
     }
 
+    /// DT.6a fired_on marker, right after the nav-routes line: the ROUTE ids
+    /// the engine kept out of the index as test-only registrations. Printed
+    /// only when one was, and by the resolver alone (an
+    /// [`HttpRouteMatcher`] excludes nothing).
+    fn report_test_excluded(&self) {
+        if self.test_excluded > 0 {
+            eprintln!("[http] test routes excluded from route index: {}", self.test_excluded);
+        }
+    }
+
     /// A3.1 fired_on marker. Silent on a build with no HTTP surface at all, so
     /// a non-web repo does not grow a line of zeroes on every generate.
     fn report(&self) {
@@ -729,10 +773,15 @@ impl HostScoped for (RouteTarget, MatchTier) {
 /// under every `(METHOD, prefix + path)` in the strong `index` (never the
 /// stripped one), with a `mounted` target whose confidence is the weaker of
 /// the route's and the mount's ([`index_mounted`]).
+///
+/// DT.6a: a ROUTE whose id is in `without` is skipped like a nav route (no
+/// key, no owner, not counted in `routes`), counted once per id in
+/// `test_excluded`.
 fn build_route_index(
     graphs: &[RepoGraph],
     prefixes: &[String],
     mounts: &RouteMounts,
+    without: Option<&HashSet<NodeId>>,
     stats: &mut HttpMatchStats,
 ) -> (RouteIndex, RouteIndex, Owners) {
     let mut index: RouteIndex = HashMap::new();
@@ -745,6 +794,7 @@ fn build_route_index(
     let mut stripped: RouteIndex = HashMap::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
     let mut mounted_seen: HashSet<NodeId> = HashSet::new();
+    let mut excluded_seen: HashSet<NodeId> = HashSet::new();
     for g in graphs {
         for n in &g.nodes {
             if g.nav.kind_by_id.get(&n.id) != Some(&node_kind::ROUTE) {
@@ -764,6 +814,14 @@ fn build_route_index(
             // SPA would otherwise become an HTTP_CALLS target.
             if is_nav_route(&n.cells) {
                 stats.nav_excluded += 1;
+                continue;
+            }
+            // DT.6a: a route only test code registers serves no product
+            // client. It stays a node; it only leaves the pool.
+            if without.is_some_and(|w| w.contains(&n.id)) {
+                if excluded_seen.insert(n.id) {
+                    stats.test_excluded += 1;
+                }
                 continue;
             }
             let first = seen.insert(n.id);
@@ -885,7 +943,7 @@ impl HttpRouteMatcher {
         // A contract pairs DECLARED paths: a gateway mount is not part of an
         // OpenAPI path, so the matcher never sees one (LF.2d).
         let (index, stripped, _owners) =
-            build_route_index(graphs, &prefixes, &RouteMounts::default(), &mut scratch);
+            build_route_index(graphs, &prefixes, &RouteMounts::default(), None, &mut scratch);
         Self { index, stripped, prefixes }
     }
 
@@ -1628,7 +1686,7 @@ mod tests {
         );
         let mut stats = HttpMatchStats::default();
         let (index, _, owners) =
-            build_route_index(std::slice::from_ref(&g), &[], &RouteMounts::default(), &mut stats);
+            build_route_index(std::slice::from_ref(&g), &[], &RouteMounts::default(), None, &mut stats);
         let targets = index
             .get(&("GET".to_string(), "/health".to_string()))
             .map(Vec::as_slice)
@@ -1945,6 +2003,123 @@ mod tests {
         (to, u[0], o[0])
     }
 
+    /// DT.6a: web (`endpoint:GET:/reset`, `endpoint:GET:/users`,
+    /// `endpoint:GET:/api/boom`), a server with `GET /reset`, `GET /users` and
+    /// `GET /boom`, and a second server with a product `GET /users`. Returns
+    /// the HTTP_CALLS `(from, to)` pairs with `without` excluded (`None`: the
+    /// plain mounted resolver), the endpoint ids, and the route ids
+    /// `[reset, users, boom, users2]`.
+    fn pair_with_exclusion(
+        without: Option<&HashSet<NodeId>>,
+    ) -> (Vec<(NodeId, NodeId)>, Vec<NodeId>, Vec<NodeId>) {
+        let (web, eps) = repo_graph(
+            RepoId(611),
+            vec![
+                (node_kind::ENDPOINT, "endpoint:GET:/reset", vec![]),
+                (node_kind::ENDPOINT, "endpoint:GET:/users", vec![]),
+                (node_kind::ENDPOINT, "endpoint:GET:/api/boom", vec![]),
+            ],
+        );
+        let (server, mut routes) = repo_graph(
+            RepoId(612),
+            vec![
+                (node_kind::ROUTE, "GET /reset", vec![text_get()]),
+                (node_kind::ROUTE, "GET /users", vec![text_get()]),
+                (node_kind::ROUTE, "GET /boom", vec![text_get()]),
+            ],
+        );
+        let (other, users2) =
+            repo_graph(RepoId(613), vec![(node_kind::ROUTE, "GET /users", vec![text_get()])]);
+        routes.extend(users2);
+        let mut merged = MergedGraph::new(vec![web, server, other]);
+        let mounts = RouteMounts::default();
+        let resolver = HttpStackResolver::with_mounts(&mounts);
+        match without {
+            Some(w) => resolver.without_routes(w).resolve(&mut merged),
+            None => resolver.resolve(&mut merged),
+        }
+        let mut pairs: Vec<(NodeId, NodeId)> = merged
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::HTTP_CALLS)
+            .map(|e| (e.from, e.to))
+            .collect();
+        pairs.sort_by_key(|(f, t)| (f.0, t.0));
+        (pairs, eps, routes)
+    }
+
+    #[test]
+    fn excluded_route_is_never_a_target() {
+        let (all, eps, r) = pair_with_exclusion(None);
+        let (reset, users, boom) = (eps[0], eps[1], eps[2]);
+        // HEAD: the exact pair, both `GET /users` collisions, and the
+        // endpoint-prefix strip `/api/boom` -> `/boom`.
+        let mut want = vec![(reset, r[0]), (users, r[1]), (users, r[3]), (boom, r[2])];
+        want.sort_by_key(|(f, t)| (f.0, t.0));
+        assert_eq!(all, want);
+
+        let excluded: HashSet<NodeId> = [r[0], r[1], r[2]].into_iter().collect();
+        let (kept, _, _) = pair_with_exclusion(Some(&excluded));
+        // The exact match whose only route is excluded pairs nothing, the
+        // collision keeps the product route only, and the strip into an
+        // excluded route is gone.
+        assert_eq!(kept, vec![(users, r[3])]);
+
+        // Counted once per id, however many entries carry it.
+        let (mut g, ids) = repo_graph(RepoId(614), vec![(node_kind::ROUTE, "GET /x", vec![text_get()])]);
+        let dup = g.nodes[0].clone();
+        g.nodes.push(dup);
+        let one: HashSet<NodeId> = ids.iter().copied().collect();
+        let mut stats = HttpMatchStats::default();
+        let (index, stripped, _) = build_route_index(
+            std::slice::from_ref(&g),
+            &["api".to_string()],
+            &RouteMounts::default(),
+            Some(&one),
+            &mut stats,
+        );
+        assert_eq!((stats.routes, stats.test_excluded), (0, 1));
+        assert!(index.is_empty() && stripped.is_empty());
+    }
+
+    #[test]
+    fn resolve_with_mounts_is_unchanged() {
+        // No exclusion is exactly the pre-DT.6a resolver: the trait's
+        // `resolve`, `resolve_with_mounts` and an empty `without_routes` set
+        // emit the same edges, cells and order.
+        let run = |how: u8| {
+            let (web, _) = repo_graph(
+                RepoId(621),
+                vec![
+                    (node_kind::ENDPOINT, "endpoint:GET:/users", vec![]),
+                    (node_kind::ENDPOINT, "endpoint:GET:/api/boom", vec![]),
+                ],
+            );
+            let (server, _) = repo_graph(
+                RepoId(622),
+                vec![
+                    (node_kind::ROUTE, "GET /users", vec![text_get()]),
+                    (node_kind::ROUTE, "GET /boom", vec![text_get()]),
+                ],
+            );
+            let mut merged = MergedGraph::new(vec![web, server]);
+            let mounts = RouteMounts::default();
+            let none = HashSet::new();
+            match how {
+                0 => HttpStackResolver.resolve(&mut merged),
+                1 => HttpStackResolver.resolve_with_mounts(&mut merged, &mounts),
+                2 => HttpStackResolver::with_mounts(&mounts).resolve(&mut merged),
+                _ => HttpStackResolver::with_mounts(&mounts).without_routes(&none).resolve(&mut merged),
+            }
+            merged.cross_edges
+        };
+        let head = run(0);
+        assert_eq!(head.len(), 2);
+        for how in 1..=3 {
+            assert_eq!(run(how), head, "variant {how}");
+        }
+    }
+
     #[test]
     fn host_naming_a_service_keeps_only_that_services_route() {
         let (to, users, orders) = pair_web_users_orders(
@@ -2222,7 +2397,7 @@ mod tests {
         assert_eq!(hit_hosts(endpoints[0].cells.iter().copied()), None);
         // The route is counted, and indexed, once.
         let mut stats = HttpMatchStats::default();
-        let (index, _, _) = build_route_index(&merged.graphs, &[], &RouteMounts::default(), &mut stats);
+        let (index, _, _) = build_route_index(&merged.graphs, &[], &RouteMounts::default(), None, &mut stats);
         assert_eq!(stats.routes, 1);
         assert_eq!(index.get(&("GET".to_string(), "/user/2fa".to_string())).map(Vec::len), Some(1));
     }
@@ -2466,7 +2641,7 @@ mod tests {
 
         // The mounted index: keys land in the strong index only, counted.
         let mut stats = HttpMatchStats::default();
-        let (index, stripped, _) = build_route_index(&mounted.graphs, &["api".to_string()], &mounts, &mut stats);
+        let (index, stripped, _) = build_route_index(&mounted.graphs, &["api".to_string()], &mounts, None, &mut stats);
         assert_eq!((stats.mount_routes, stats.mount_keys), (2, 2));
         let key = ("GET".to_string(), "/orders-svc/users".to_string());
         let hit = index.get(&key).expect("mounted key");
@@ -2515,7 +2690,7 @@ mod tests {
         let prefixes = vec!["api".to_string()];
         let mut stats = HttpMatchStats::default();
         let (index, stripped, _) =
-            build_route_index(std::slice::from_ref(&g), &prefixes, &gateway, &mut stats);
+            build_route_index(std::slice::from_ref(&g), &prefixes, &gateway, None, &mut stats);
         let tails = build_mount_tails(&index);
         let qnames = g.nav.qname_by_id.clone();
         move |method, path| {

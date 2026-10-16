@@ -142,7 +142,10 @@ macro_rules! resolver {
 /// cross edges land in (before the Finalize sort fixes the stored order).
 pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegistry::new(&[
     // LF.2d: the HTTP resolver with the build's `[[route_prefix]]` mounts. No
-    // mounts (no overlay, or none declared) is the plain resolver.
+    // mounts (no overlay, or none declared) is the plain resolver. DT.6a: the
+    // ROUTEs only test code registers (`passes::test_route_ids`, the
+    // predicate the `tag_synthetic_provenance` post-pass stamps by) are kept
+    // out of its route index.
     PassSpec {
         name: "http",
         stage: Stage::Resolve,
@@ -150,7 +153,9 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
         populates: &[],
         run: |m, ctx| {
             let mounts = RepoInputs::route_mounts(m, &ctx.inputs, ctx.overlay);
-            resolve(m, &HttpStackResolver::with_mounts(&mounts), "resolver:http")
+            let tests = passes::test_route_ids(m, ctx);
+            let resolver = HttpStackResolver::with_mounts(&mounts).without_routes(&tests);
+            resolve(m, &resolver, "resolver:http")
         },
     },
     resolver!("grpc", GrpcStackResolver),

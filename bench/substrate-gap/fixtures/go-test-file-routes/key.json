@@ -1,0 +1,24 @@
+{
+  "framework": "go-test-file-routes",
+  "language": "go",
+  "dirs": ["server", "web"],
+  "note": "DT.6a (T6; Kina accesslog_test.go / apperr_test.go / refusal_audit_test.go / clientip_test.go / requestid_test.go, examples-glia orders_test.go GET /boom): a ROUTE registered only in test code is no HTTP_CALLS target, directly or through a prefix strip; GET /api/orders (main.go AND api_test.go, which sorts first) and GET /api/ab_test (main.go; the symbol-qname test rule misreads its URL) stay product routes (engine/tests/test_file_routes.rs pins both unstamped; key.json has no negative cell form). HEAD 7661c035: the reset and /api/boom endpoints pair test-only routes.",
+  "expect_nodes": [
+    {"kind": "ROUTE", "name": "GET /boom", "exact": true, "note": "the node stays; it only leaves the route pool"},
+    {"kind": "ROUTE", "name": "POST /api/auth/password/reset/:token", "exact": true},
+    {"kind": "ROUTE", "name": "GET /api/orders", "exact": true},
+    {"kind": "ROUTE", "name": "GET /api/ab_test", "exact": true}
+  ],
+  "expect_edges": [
+    {"from": "endpoint:GET:/api/orders", "to": "GET /api/orders", "category": "HTTP_CALLS", "exact": true, "note": "CONTROL: the product route keeps pairing although a test file registers it too"},
+    {"from": "endpoint:GET:/api/ab_test", "to": "GET /api/ab_test", "category": "HTTP_CALLS", "exact": true, "note": "CONTROL: a product route whose URL tail reads `_test` keeps pairing"}
+  ],
+  "expect_cells": [
+    {"kind": "ROUTE", "node": "GET /boom", "cell": "ORIGIN", "contains": "test_fixture"},
+    {"kind": "ROUTE", "node": "GET /health-test", "cell": "ORIGIN", "contains": "test_fixture", "note": "a test/ directory"}
+  ],
+  "forbid": [
+    {"from": "endpoint:POST:/api/auth/password/reset/${…}", "to": "POST /api/auth/password/reset/:token", "category": "HTTP_CALLS", "note": "a test-only route is no product server"},
+    {"from": "endpoint:GET:/api/boom", "to": "GET /boom", "category": "HTTP_CALLS", "note": "nor through the endpoint-prefix strip"}
+  ]
+}
