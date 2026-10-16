@@ -91,12 +91,21 @@
 //! `reaches` path, each read in or against edge direction), and the trailing end-node
 //! value glia-rules adds is dropped; such a row is located at its first node value
 //! with the path column counting as its start node, its witness rows are kept with or
-//! without `explain`, and a witness cut by the leaf cap renders `a ... b`; the rows
-//! are sorted stably by the ORDER BY keys' rendered values (DESC flips a key), the
-//! shown rendered tuple breaking ties; then cut to the query's LIMIT, then to
-//! `QueryOptions::limit` (`total` keeps the uncut count). ORDER BY compares rendered
-//! values (qnames, strings, integers), never NodeIds, so the order is
-//! checkout-stable.
+//! without `explain`, and a witness cut by the leaf cap renders `a ... b`; a RETURN of
+//! properties (`RETURN h.qname, s.qname`: no node, path or aggregate item) is
+//! located as the Datalog `x(h, s)` is (DT.8b): `gql::Compiled::anchor` names the
+//! first property's node variable, which is appended to every `result` head when
+//! each rule's positive body reads it, each row is located at that hidden trailing
+//! value, which is then dropped, and rows equal in every shown column fold back into
+//! one (DISTINCT kept): the strongest tier, the first `(file, line)` among the
+//! strongest with its witness, the negated categories' union (`[gql] anchor
+//! column=<var> rows=<evaluated> merged=<folded>`; the row budget counts the
+//! evaluated rows, one per anchor node; a row whose shown values hold a node keeps
+//! its first node value's location); the rows are sorted stably by the ORDER BY
+//! keys' rendered values (DESC flips a key), the shown rendered tuple breaking ties;
+//! then cut to the query's LIMIT, then to `QueryOptions::limit` (`total` keeps the
+//! uncut count). ORDER BY compares rendered values (qnames, strings, integers), never
+//! NodeIds, so the order is checkout-stable.
 //!
 //! The evaluator reads structure only: nodes, kinds, locations, edges and cells
 //! (SECURITY.md); docs/rules.md is the language reference.
@@ -207,7 +216,9 @@ pub struct QueryRow {
     /// `fact` | `derived` | `heuristic`.
     pub tier: &'static str,
     /// The first node value's location (1-based line); a GQL path column counts as
-    /// its path's start node.
+    /// its path's start node, and a GQL row of properties is located at the first
+    /// property's node (`RETURN h.qname` at `h`). An aggregate row, or a row with no
+    /// node to locate, has none.
     pub file: Option<String>,
     pub line: Option<i64>,
     /// The coverage caveats of the categories the row's negations read (Q5).
@@ -350,11 +361,22 @@ pub fn query_gql(
         order_by,
         limit,
         path_column,
+        anchor,
         ..
     } = compiled;
     if let Some(name) = program.sources.first_mut() {
         *name = source.to_string();
     }
+    let anchor = anchor.filter(|v| anchors_every_rule(&program, &output, v));
+    if let Some(v) = &anchor {
+        for rule in program.rules.iter_mut().filter(|r| r.head.pred == output) {
+            rule.head.args.push(HeadArg::Term(Term::var(v.as_str())));
+        }
+    }
+    let anchor = anchor.map(|var| Anchor {
+        column: columns.len(),
+        var,
+    });
     let outputs = [output];
     let program = prelude::merge(program, &outputs).map_err(failed)?.program;
     let run = Run {
@@ -372,6 +394,7 @@ pub fn query_gql(
         order_by,
         limit: cut_of(limit, opts.limit),
         path_column,
+        anchor,
     };
     let mut nodes = Nodes::new(&facts);
     for out in &mut evaluated.outputs {
@@ -711,6 +734,59 @@ struct GqlShape {
     /// The query's LIMIT, then the caller's: the smaller.
     limit: Option<usize>,
     path_column: Option<usize>,
+    /// A RETURN of properties: the hidden column its rows are located at (DT.8b).
+    anchor: Option<Anchor>,
+}
+
+/// The anchor of a GQL RETURN of properties (`gql::Compiled::anchor`): the node
+/// variable appended to every `result` head, at `column` (= the shown columns).
+struct Anchor {
+    column: usize,
+    var: String,
+}
+
+/// Whether every `result` rule of `program` reads `var` in a positive body atom (so
+/// appending it to the head keeps the rule safe), and there is such a rule.
+fn anchors_every_rule(program: &Program, output: &str, var: &str) -> bool {
+    let mut rules = program
+        .rules
+        .iter()
+        .filter(|r| r.head.pred == output)
+        .peekable();
+    rules.peek().is_some()
+        && rules.all(|r| {
+            r.head.args.iter().all(|a| matches!(a, HeadArg::Term(_)))
+                && r.body.iter().any(|lit| match lit {
+                    Literal::Pos(a) => a
+                        .args
+                        .iter()
+                        .any(|t| matches!(t, Term::Var { name, .. } if name == var)),
+                    _ => false,
+                })
+        })
+}
+
+/// A location as a fold compares it: located before unlocated, then by file, then
+/// by line.
+fn location_key(at: &(Option<String>, Option<i64>)) -> (bool, &str, bool, i64) {
+    (
+        at.0.is_none(),
+        at.0.as_deref().unwrap_or_default(),
+        at.1.is_none(),
+        at.1.unwrap_or_default(),
+    )
+}
+
+/// The union of two registry-ordered category lists, in registry order.
+fn union_categories(a: &[&'static str], b: &[&'static str]) -> Vec<&'static str> {
+    if b.iter().all(|c| a.contains(c)) {
+        return a.to_vec();
+    }
+    registry_categories()
+        .iter()
+        .map(|(_, n)| *n)
+        .filter(|n| a.contains(n) || b.contains(n))
+        .collect()
 }
 
 /// The query's LIMIT cut by the caller's.
@@ -723,13 +799,17 @@ fn cut_of(query: Option<u64>, caller: Option<usize>) -> Option<usize> {
 }
 
 impl GqlShape {
-    /// Columns, the path column, ORDER BY, then LIMIT, on one output's rows.
+    /// Columns, the path column, the anchor, ORDER BY, then LIMIT, on one output's
+    /// rows.
     fn apply(&self, out: &mut EvalOutput, nodes: &mut Nodes<'_, '_>) {
         let n = self.columns.len();
         if let Some(c) = self.path_column {
             for r in &mut out.rows {
                 self.path(r, c, nodes);
             }
+        }
+        if let Some(a) = &self.anchor {
+            Self::anchor(out, a, nodes);
         }
         out.columns = self.columns.clone();
         out.arity = n;
@@ -750,6 +830,58 @@ impl GqlShape {
         if let Some(cut) = self.limit {
             out.rows.truncate(cut);
         }
+    }
+
+    /// Locate each row at its hidden anchor column and drop it, then fold rows equal
+    /// in every shown column into one (rows stay DISTINCT, module doc **GQL**): its
+    /// tier the strongest of theirs, its location, witness and values the first
+    /// `(file, line)` among the strongest (located before unlocated, ties keeping
+    /// the rendered order), its negated categories their union. A row whose shown
+    /// values hold a node (a Node-typed attribute, `a.parent`) keeps the first node
+    /// value's location. Prints `[gql] anchor column=<var> rows=<evaluated>
+    /// merged=<folded>`.
+    fn anchor(out: &mut EvalOutput, a: &Anchor, nodes: &mut Nodes<'_, '_>) {
+        let evaluated = std::mem::take(&mut out.rows);
+        let before = evaluated.len();
+        let mut folded: Vec<(EvalRow, (Option<String>, Option<i64>))> = Vec::with_capacity(before);
+        let mut index: BTreeMap<Vec<Key>, usize> = BTreeMap::new();
+        for mut r in evaluated {
+            let at = match r.values.get(a.column) {
+                Some(Value::Node(id)) => Some(*id),
+                _ => None,
+            };
+            r.values.truncate(a.column);
+            if !r.values.iter().any(|v| matches!(v, Value::Node(_))) {
+                r.at = at;
+            }
+            let loc = match r.at {
+                Some(id) => nodes.first_location(&[Value::Node(id)]),
+                None => nodes.first_location(&r.values),
+            };
+            let key = keys_of(&r.values, nodes);
+            match index.get(&key).and_then(|&i| folded.get_mut(i)) {
+                Some((kept, kept_loc)) => {
+                    let negated = union_categories(&kept.negated, &r.negated);
+                    let stronger =
+                        (r.tier, location_key(&loc)) < (kept.tier, location_key(kept_loc));
+                    if stronger {
+                        *kept = r;
+                        *kept_loc = loc;
+                    }
+                    kept.negated = negated;
+                }
+                None => {
+                    index.insert(key, folded.len());
+                    folded.push((r, loc));
+                }
+            }
+        }
+        eprintln!(
+            "[gql] anchor column={} rows={before} merged={}",
+            a.var,
+            before - folded.len()
+        );
+        out.rows = folded.into_iter().map(|(r, _)| r).collect();
     }
 
     /// Replace column `c` (the path's start node) with the rendered path and drop

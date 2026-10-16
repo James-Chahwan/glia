@@ -156,6 +156,19 @@ def main() -> int:
                 [r["values"][0]["str"] for r in grows]
                 == ["services::api::public::facade::get", "shared::util::helper", "web::app::other",
                     "web::app::page"], grows)
+        c.check("gql aggregate rows are groups: not located",
+                [(r.get("file"), r.get("line")) for r in grows] == [(None, None)] * 4, grows)
+        # DT.8b: a RETURN of properties is located at the first property's node.
+        props = g.query_gql("MATCH (a:FUNCTION)-[:CALLS]->(b) WHERE a.qname STARTS WITH 'web::' "
+                            "RETURN a.qname, b.qname")
+        prows = props.get("results", [])
+        c.check("gql property rows: values as strings",
+                [[v.get("str") for v in r["values"]] for r in prows]
+                == [["web::app::other", "services::api::public::facade::get"],
+                    ["web::app::page", "shared::util::helper"]], prows)
+        c.check("gql property rows located at the first property's node, int line",
+                [(r.get("file"), type(r.get("line")) is int, r.get("line")) for r in prows]
+                == [("web/app.py", True, 9), ("web/app.py", True, 5)], prows)
         glim = g.query_gql(GQL + " LIMIT 3", limit=2)
         c.check("gql: limit= cuts after the query's LIMIT, total uncut",
                 (glim["outputs"][0]["total"], glim["outputs"][0]["shown"]) == (4, 2), glim.get("outputs"))

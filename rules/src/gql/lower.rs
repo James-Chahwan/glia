@@ -46,6 +46,15 @@
 //! replaces the column with the row's witness and shows `columns.len()` values. Glia
 //! returns endpoint pairs, so ANY SHORTEST and a bare path variable lower alike.
 //!
+//! **Anchor (DT.8b).** A RETURN of properties (`RETURN h.qname, s.qname`) holds no
+//! node, so nothing locates its rows. [`Compiled::anchor`] names the node variable of
+//! the first property item (`h`), set only when no item is a node variable, a path
+//! variable or an aggregate (those rows are located already, or are groups); the
+//! program is unchanged. The engine appends it to the `result` heads as one hidden
+//! trailing column, locates each row at it, drops it and folds rows equal in every
+//! shown column back into one, so rows stay DISTINCT. It is a MATCH node variable
+//! read by its pattern atom and its attribute atom, so no singleton blanks it.
+//!
 //! **Limits**, each a located diagnostic: more than 64 alternatives, a bounded
 //! repetition above 8 hops, an unrolled lower bound above 8 hops, an undirected
 //! variable-length relationship, and the reserved names (`result` and the `gql_`
@@ -94,6 +103,10 @@ pub struct Compiled {
     /// The column a path variable fills; its head holds one trailing column more
     /// (module doc).
     pub path_column: Option<usize>,
+    /// The node variable a row of properties is located at (module doc, **Anchor**):
+    /// the first property's, when no RETURN item is a node, a path or an aggregate.
+    /// The program does not hold it; the engine adds it as a hidden trailing column.
+    pub anchor: Option<String>,
 }
 
 /// One ORDER BY key, resolved to a column of [`Compiled::columns`].
@@ -607,7 +620,7 @@ impl<'q> Lower<'q> {
             let lowered = self.expand(c);
             alts = product(&alts, &lowered);
         }
-        let (head, pre, columns, path_column) = self.ret(q);
+        let (head, pre, columns, path_column, anchor) = self.ret(q);
         let order_by = self.order(q);
         if !self.diags.is_empty() {
             return None;
@@ -663,6 +676,7 @@ impl<'q> Lower<'q> {
             order_by,
             limit: q.limit,
             path_column,
+            anchor,
         };
         Some((compiled, alternatives))
     }
@@ -1230,13 +1244,21 @@ impl<'q> Lower<'q> {
     // RETURN, ORDER BY
     // ------------------------------------------------------------------------
 
-    /// The head, the attribute atoms its items read, the columns and the path column.
-    fn ret(&mut self, q: &Query) -> (Vec<HeadArg>, Conj, Vec<String>, Option<usize>) {
+    /// The head, the attribute atoms its items read, the columns, the path column and
+    /// the anchor (module doc).
+    fn ret(
+        &mut self,
+        q: &Query,
+    ) -> (Vec<HeadArg>, Conj, Vec<String>, Option<usize>, Option<String>) {
         let mut head = Vec::with_capacity(q.items.len() + 1);
         let mut pre = Vec::new();
         let mut columns = Vec::with_capacity(q.items.len());
         let mut path_column = None;
         let mut trailing = None;
+        // The first property item's node variable, and whether an item is a node, a
+        // path or an aggregate (then no anchor: the row is located, or is a group).
+        let mut first_prop: Option<String> = None;
+        let mut located = false;
         for (i, item) in q.items.iter().enumerate() {
             let span = match &item.expr {
                 RetExpr::Operand(o) => o.span(),
@@ -1246,6 +1268,15 @@ impl<'q> Lower<'q> {
                 Some(a) => a.name.clone(),
                 None => self.slice(span),
             });
+            match &item.expr {
+                RetExpr::Operand(Operand::Var(_)) | RetExpr::Agg(_) => located = true,
+                RetExpr::Operand(Operand::Prop { var, .. })
+                    if first_prop.is_none() && self.kind(&var.name) == Some(VarKind::Node) =>
+                {
+                    first_prop = Some(var.name.clone());
+                }
+                RetExpr::Operand(_) => {}
+            }
             match &item.expr {
                 RetExpr::Operand(Operand::Var(id))
                     if self.kind(&id.name) == Some(VarKind::Path) =>
@@ -1297,7 +1328,8 @@ impl<'q> Lower<'q> {
             }
         }
         head.extend(trailing.map(HeadArg::Term));
-        (head, pre, columns, path_column)
+        let anchor = if located { None } else { first_prop };
+        (head, pre, columns, path_column, anchor)
     }
 
     /// Each key is a column: an alias, else an item written the same way.

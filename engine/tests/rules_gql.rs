@@ -1,7 +1,8 @@
 //! DB.7c — `glia_engine::rules::query_gql`: a GQL read query compiled by
 //! `glia_rules::gql::compile`, evaluated over the code graph with the prelude, its
 //! rows rendered and tiered as Datalog's, then ORDER BY (by rendered values), LIMIT
-//! and the path column applied.
+//! and the path column applied. A row of properties is located at the first
+//! property's node, rows equal in every shown column staying one row (DT.8b).
 //!
 //! The fixture is DB.2a's fx1 (engine/tests/rules_facts.rs, engine/tests/rules_query.rs):
 //! three manifest projects (web/, shared/, services/api/); web/app.py `page()` calls
@@ -105,6 +106,20 @@ fn strs(xs: &[&str]) -> Vec<String> {
     xs.iter().map(|s| s.to_string()).collect()
 }
 
+/// Every row's `(file, line)`.
+fn located(a: &QueryAnswer) -> Vec<(Option<String>, Option<i64>)> {
+    a.results.iter().map(|r| (r.file.clone(), r.line)).collect()
+}
+
+/// Every row's values as text, tier and location: what a GQL property row and its
+/// Datalog twin (node values, rendered as qnames) must agree on.
+fn shown(a: &QueryAnswer) -> Vec<(Vec<String>, &'static str, Option<String>, Option<i64>)> {
+    a.results
+        .iter()
+        .map(|r| (texts(r), r.tier, r.file.clone(), r.line))
+        .collect()
+}
+
 #[test]
 fn match_where_return_order() {
     let (_tmp, merged) = fx1();
@@ -142,10 +157,18 @@ fn match_where_return_order() {
             matches!(r.values[0], QueryValue::Str(_)),
             "an attribute is a string"
         );
-        // No node value: the row is not located.
-        assert_eq!((r.file.as_deref(), r.line), (None, None));
         assert!(r.caveats.is_empty() && r.witness.is_empty());
     }
+    // No node value, but every item is a property: the row is located at `a`, the
+    // first property's node (DT.8b): other() at web/app.py:9, page() at :5.
+    assert_eq!(
+        located(&a),
+        [
+            (Some("web/app.py".to_string()), Some(9)),
+            (Some("web/app.py".to_string()), Some(5)),
+            (Some("web/app.py".to_string()), Some(5)),
+        ]
+    );
     assert!(a.absence.is_none());
 
     // DESC flips the key; the default rendered order still breaks ties.
@@ -226,6 +249,144 @@ fn datalog_parity() {
     assert_eq!(g.outputs[0].total, d.outputs[0].total);
 }
 
+/// DT.8b: a GQL row of properties is located where the Datalog form that returns the
+/// first property's node locates it: `RETURN a.qname, b.qname` as `x(a, b)`, `RETURN
+/// b.qname, a.qname` as `x(b, a)`; values, tiers and order equal too.
+#[test]
+fn property_rows_are_located_like_datalog() {
+    let (_tmp, merged) = fx1();
+    let twin = |head: &str| {
+        let text = format!(
+            "x({head}) :- edge(a, b, \"CALLS\"), node(a, \"FUNCTION\"), node(b, \"FUNCTION\"), \
+             qname(a, q), starts_with(q, \"web::\")."
+        );
+        query(&merged, &text, &opts()).unwrap_or_else(|e| panic!("{}", e.rendered))
+    };
+    let g = gql(&merged, WEB_CALLS, &opts());
+    let d = twin("a, b");
+    assert_eq!(shown(&g), shown(&d));
+    assert_eq!(g.results.len(), 3);
+
+    // The anchor is the FIRST property's node, whichever pattern end it reads.
+    let g = gql(
+        &merged,
+        "MATCH (a:FUNCTION)-[:CALLS]->(b:FUNCTION) WHERE a.qname STARTS WITH 'web::' \
+         RETURN b.qname, a.qname",
+        &opts(),
+    );
+    let d = twin("b, a");
+    assert_eq!(shown(&g), shown(&d));
+    let files: Vec<Option<&str>> = g.results.iter().map(|r| r.file.as_deref()).collect();
+    assert_eq!(
+        files,
+        [
+            Some("services/api/internal/db.py"),
+            Some("services/api/public/facade.py"),
+            Some("shared/util.py"),
+        ]
+    );
+
+    // A RETURN that already holds a node keeps Datalog's rule, its first node value:
+    // `a` here, not the property's `b`.
+    let n = gql(
+        &merged,
+        "MATCH (a:FUNCTION)-[:CALLS]->(b:FUNCTION) WHERE a.qname STARTS WITH 'web::' \
+         RETURN b.qname, a",
+        &opts(),
+    );
+    let files: Vec<Option<&str>> = n.results.iter().map(|r| r.file.as_deref()).collect();
+    assert_eq!(files, [Some("web/app.py"); 3]);
+}
+
+/// DT.8b: rows stay DISTINCT on the shown columns. Two nodes with one shown value
+/// fold back into one row, its tier the strongest of theirs and its location the
+/// first `(file, line)` among the strongest.
+#[test]
+fn equal_property_rows_stay_one_row() {
+    let (_tmp, merged) = build(&[
+        (
+            "alpha/x.py",
+            "def run():\n    return 0\n\n\ndef other():\n    return 0\n",
+        ),
+        (
+            "beta/y.py",
+            "def helper():\n    return 1\n\n\ndef run():\n    return helper()\n",
+        ),
+        (
+            "gamma/z.py",
+            "class B:\n    def go(self):\n        return 1\n\n\n\
+             class A:\n    def go(self):\n        return 2\n",
+        ),
+        (
+            ".glia/overlay.toml",
+            "version = 1\n\n[[edge]]\nfrom = \"alpha::x::run\"\nto = \"alpha::x::other\"\n\
+             category = \"CALLS\"\n",
+        ),
+    ]);
+    let one = |a: &QueryAnswer| (a.outputs[0].total, a.outputs[0].shown, a.results.len());
+
+    // alpha::x::run and beta::y::run: one row, at the earlier file.
+    let run = gql(
+        &merged,
+        "MATCH (f:FUNCTION) WHERE f.name = 'run' RETURN f.name",
+        &opts(),
+    );
+    assert_eq!(one(&run), (1, 1, 1));
+    assert_eq!(
+        shown(&run),
+        [(
+            strs(&["run"]),
+            "fact",
+            Some("alpha/x.py".to_string()),
+            Some(1)
+        )]
+    );
+
+    // gamma::z::A::go sorts first by qname, but B.go is the earlier line.
+    let go = gql(&merged, "MATCH (m:METHOD) RETURN m.name", &opts());
+    assert_eq!(one(&go), (1, 1, 1));
+    assert_eq!(
+        shown(&go),
+        [(
+            strs(&["go"]),
+            "fact",
+            Some("gamma/z.py".to_string()),
+            Some(2)
+        )]
+    );
+
+    // alpha's run calls only through the overlay (heuristic), beta's through a parsed
+    // call (fact): the row is FACT, as the unanchored answer's, and located at the
+    // FACT caller although alpha/x.py is the earlier file.
+    let callers = gql(
+        &merged,
+        "MATCH (f:FUNCTION)-[:CALLS]->(g:FUNCTION) RETURN f.name",
+        &opts(),
+    );
+    assert_eq!(one(&callers), (1, 1, 1));
+    assert_eq!(
+        shown(&callers),
+        [(
+            strs(&["run"]),
+            "fact",
+            Some("beta/y.py".to_string()),
+            Some(5)
+        )]
+    );
+    let d = query(
+        &merged,
+        "x(n) :- edge(f, g, \"CALLS\"), node(f, \"FUNCTION\"), node(g, \"FUNCTION\"), \
+         name(f, n).",
+        &opts(),
+    )
+    .unwrap_or_else(|e| panic!("{}", e.rendered));
+    assert_eq!(
+        rows(&callers),
+        rows(&d),
+        "the shown values and tier are Datalog's"
+    );
+}
+
 #[test]
 fn reachability_across_scopes() {
     let (_tmp, merged) = fx1();
@@ -268,6 +429,12 @@ fn aggregate_and_limit() {
         ]
     );
     assert!(matches!(a.results[0].values[1], QueryValue::Int(2)));
+    // A row of an aggregate is a group: not located (DT.8b anchors no aggregate).
+    assert!(
+        located(&a).iter().all(|l| *l == (None, None)),
+        "{:?}",
+        located(&a)
+    );
 
     // The caller's limit cuts after the query's own; total stays the uncut count.
     let mut one = opts();

@@ -150,7 +150,11 @@ impl PyGraph {
     /// Returns the dict `query` returns, with `language` `"gql"` and one
     /// output, `result`, whose `columns` are the RETURN items' aliases, else
     /// their text (`a.qname`, `count(*)`). A property is a `{"str": ...}` or
-    /// `{"int": ...}` value, a node variable a located node. A path variable
+    /// `{"int": ...}` value, a node variable a located node. A row of
+    /// properties (`RETURN h.qname, s.qname`) carries the `file` / `line` of
+    /// the first property's node, `h`, as `query`'s `x(h, s)` does; rows equal
+    /// in every shown column stay one row; an aggregate's row is a group and
+    /// is not located. A path variable
     /// (`p = (a)-[:CALLS*]->(b) RETURN p`) is the row's rendered path
     /// (`a -CALLS-> b`), its witness kept. ORDER BY sorts by rendered values
     /// (DESC flips a key; ties keep the rendered order), the query's LIMIT
@@ -403,6 +407,37 @@ mod tests {
         );
         assert!(q["results"][0]["values"][0]["str"].is_string(), "{q}");
         assert!(q["results"][0]["values"][1]["int"].is_i64(), "{q}");
+        // An aggregate's row is a group: not located.
+        assert!(
+            q["results"][0]["file"].is_null() && q["results"][0]["line"].is_null(),
+            "{q}"
+        );
+        // DT.8b: a RETURN of properties is located at the first property's node.
+        let props = g(
+            "MATCH (a:FUNCTION)-[:CALLS]->(b) WHERE a.qname STARTS WITH 'web::' \
+             RETURN a.qname, b.qname",
+            options(None, None, false, None),
+        );
+        assert_eq!(
+            rendered(&props),
+            [
+                ["web::app::other", "services::api::public::facade::get"],
+                ["web::app::page", "shared::util::helper"],
+            ]
+        );
+        let at: Vec<(&serde_json::Value, &serde_json::Value)> = props["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| (&r["file"], &r["line"]))
+            .collect();
+        assert_eq!(
+            at,
+            [
+                (&"web/app.py".into(), &9.into()),
+                (&"web/app.py".into(), &5.into())
+            ]
+        );
         let lim = g(
             &format!("{gql} LIMIT 3"),
             options(None, Some(2), false, None),

@@ -235,13 +235,16 @@ fn gql_mode() {
     );
     assert!(s.contains("## result - 2 row(s)"), "{s}");
     assert!(s.contains("| # | a.qname | b.qname | tier | at |"), "{s}");
-    // Attribute values are strings: printed as is, the row unlocated.
+    // Attribute values are strings, printed as is; the row is located at `a`, the
+    // first property's node, as the Datalog `x(a, b)` rows are (DT.8b).
     assert!(
-        s.contains("| 1 | web::app::other | services::api::public::facade::get | fact | — |"),
+        s.contains(
+            "| 1 | web::app::other | services::api::public::facade::get | fact | web/app.py:9 |"
+        ),
         "{s}"
     );
     assert!(
-        s.contains("| 2 | web::app::page | shared::util::helper | fact | — |"),
+        s.contains("| 2 | web::app::page | shared::util::helper | fact | web/app.py:5 |"),
         "{s}"
     );
     assert!(
@@ -251,6 +254,31 @@ fn gql_mode() {
         "{:?}",
         markers(&out)
     );
+    // The anchor's fired_on marker: two evaluated rows, none folded.
+    assert!(
+        stderr(&out)
+            .lines()
+            .any(|l| l == "[gql] anchor column=a rows=2 merged=0"),
+        "{}",
+        stderr(&out)
+    );
+    // An aggregate row is a group: still unlocated, and no anchor runs.
+    let agg = glia(
+        &[
+            &fx,
+            "--gql",
+            "-e",
+            "MATCH (a:FUNCTION)-[:CALLS]->(b) RETURN a.qname, count(b) AS n",
+        ],
+        None,
+        0,
+    );
+    let s = stdout(&agg);
+    assert!(
+        s.contains("| 1 | services::api::public::facade::get | 1 | fact | — |"),
+        "{s}"
+    );
+    assert!(!stderr(&agg).contains("[gql] anchor"), "{}", stderr(&agg));
     assert_eq!(exit_marker(&out), "[query] surface=cli exit=0");
 
     // A GQL query from a file names the file in its diagnostics.

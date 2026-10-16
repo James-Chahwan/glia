@@ -391,6 +391,44 @@ fn path_column() {
     );
 }
 
+/// DT.8b: a RETURN of properties names the node variable its rows are located at,
+/// the first property's; the program is unchanged (the engine adds the column). A
+/// RETURN holding a node, a path or an aggregate names none.
+#[test]
+fn anchor_names_the_first_property_variable() {
+    let text = "MATCH (a:FUNCTION)-[:CALLS]->(b) RETURN a.qname, b.qname";
+    let c = compile(text);
+    assert_eq!(c.anchor.as_deref(), Some("a"));
+    assert_eq!(
+        c.program.to_string(),
+        "result(_g0, _g1) :- node(a, \"FUNCTION\"), edge(a, b, \"CALLS\"), qname(a, _g0), \
+         qname(b, _g1).\n"
+    );
+    assert_eq!(
+        rows(text),
+        [r(&["f1", "f2"]), r(&["f1", "f4"]), r(&["f2", "f3"]), r(&["f3", "f4"])]
+    );
+    // The first property, whichever pattern end it reads; type(r) is no node.
+    let flipped = compile("MATCH (a:FUNCTION)-[:CALLS]->(b) RETURN b.qname AS to, a.qname");
+    assert_eq!(flipped.anchor.as_deref(), Some("b"));
+    let typed = compile("MATCH (a {qname: 'm1'})-[r]->(b) RETURN type(r), b.qname");
+    assert_eq!(typed.anchor.as_deref(), Some("b"));
+    // A WHERE property names no anchor of its own.
+    let filtered = compile("MATCH (a)-[:CALLS]->(b) WHERE a.qname = 'f1' RETURN b.qname");
+    assert_eq!(filtered.anchor.as_deref(), Some("b"));
+    for text in [
+        "MATCH (a:FUNCTION)-[:CALLS]->(b) RETURN a",
+        "MATCH (a:FUNCTION)-[:CALLS]->(b) RETURN a.qname, b",
+        "MATCH p = (a)-[:CALLS*]->(b) RETURN p",
+        "MATCH p = (a {qname: 'f1'})-[:CALLS*]->(b) RETURN b.qname, p",
+        "MATCH (a:FUNCTION)-[:CALLS]->(b) RETURN a.qname, count(b)",
+        "MATCH (a)-[:CALLS]->(b) RETURN count(*)",
+        "MATCH (a {qname: 'm1'})-[r]->(b) RETURN type(r)",
+    ] {
+        assert_eq!(compile(text).anchor, None, "{text}");
+    }
+}
+
 #[test]
 fn diagnostics_are_located() {
     let d = gql::compile("MATCH (a) RETURN a ORDER BY b").expect_err("unknown key");

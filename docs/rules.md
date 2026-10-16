@@ -380,6 +380,19 @@ attribute value and an unrolled intermediate get a fresh `_g<n>`, and helper pre
 (`a.qname`, `count(*)`). A property is a string or integer value; a node variable is a located
 node, as in Datalog.
 
+- **Location.** A row's `file` / `line` are its first node value's, as in Datalog. A row of
+  properties (`RETURN h.qname, s.qname`: no node, path or aggregate item) is located at the first
+  property's node, `h`, where the Datalog `x(h, s)` locates it. The engine evaluates `h` as a
+  hidden trailing column, takes the row's location from it and drops it; rows equal in every
+  shown column stay one row (DISTINCT), located at the first `file:line` among the rows of the
+  strongest tier, with that row's witness. `[gql] anchor column=h rows=<evaluated>
+  merged=<folded>` on stderr counts them. The evaluation holds one row per anchor node, so a
+  property query near the row budget stops sooner than its shown row count suggests (`RETURN
+  m.name` over 855 distinct names evaluates 1,477 rows on one large repo). Not located: an
+  aggregate row (a group), a RETURN of `type(r)` or literals only, and a Datalog head of strings
+  (the program says what it returns). A row that already holds a node (a node variable, a path,
+  `a.parent`) is located as before.
+
 - **Order.** Rows come in rendered order, then are sorted stably by the ORDER BY keys' rendered
   values: qnames, strings and integers, never node ids, so the order is the same on every
   checkout. `DESC` flips a key, and the full rendered row breaks ties.
