@@ -7,6 +7,7 @@ says why it is empty. The evaluator is the `glia-rules` crate; the code domain's
 answer shape are the engine's (`glia_engine::rules`).
 
 Entry points (Rust): `rules::query(merged, text, &QueryOptions)` answers a program,
+`rules::query_gql(merged, text, &QueryOptions)` answers a GQL read query (below),
 `rules::validate(text)` checks one against the code schema without a graph, and
 `rules::evaluate_rule(merged, facts, source, text, "violation")` evaluates a rule invariant's
 program for `glia check`. The command-line, Python and `glia check` surfaces of 0.5.2 call them,
@@ -301,6 +302,10 @@ security predicate, and glia ships no rule that classifies routes by authenticat
 
 A GQL read query (MATCH ... WHERE ... RETURN) is compiled to a rule program whose output is
 `result`, so it shares the Datalog evaluator, the tier lattice, the caveats and the row budget.
+It is a read *subset* of GQL (ISO/IEC 39075) and openCypher, not a conforming implementation: the
+deviations below are deliberate. The engine entry point is
+`rules::query_gql(merged, text, &QueryOptions)`; it returns the same answer shape as a Datalog
+query, with `language: "gql"`.
 
 ```text
 query    := match+ [WHERE expr] RETURN [DISTINCT] item (',' item)* [ORDER BY key (',' key)*] [LIMIT int] [';']
@@ -324,6 +329,33 @@ A label is a node kind (`(f:FUNCTION)`), a relationship type an edge category (`
 property a code attribute (`a.qname`, `{qname: 'web::app::page'}`), and a function call a builtin
 (`in_scope(a, 'web')`). Keywords compare case-insensitively.
 
+**Lowering.** Every pattern variable is a rule variable of the same name; an anonymous node, an
+attribute value and an unrolled intermediate get a fresh `_g<n>`, and helper predicates are named
+`gql_<what><n>`.
+
+| construct | lowered to |
+|---|---|
+| `(a:FUNCTION)`, `(a:CLASS\|METHOD)` | `node(a, "FUNCTION")`; one alternative per label. A node no atom binds gets `node(a, _)` |
+| `(a {qname: 'x'})`, `a.qname` | the attribute atom `qname(a, "x")`, `qname(a, _g0)` |
+| `(a)-[:CALLS]->(b)` | `edge(a, b, "CALLS")`; `<-` swaps the ends, `-[]-` is two alternatives, no type is `edge(a, b, _)` |
+| `-[:CALLS\|USES]->` | `gql_hop0(a, b)`, one rule per type: `gql_hop0(x, y) :- edge(x, y, "CALLS").` |
+| `-[r]->`, `type(r)` | `edge(a, b, r)`: `r` is the category |
+| `-[:CALLS*]->`, `+`, `{1,}` | `reaches(a, b, "CALLS")` (`"*"` when untyped): reachability, never unrolled |
+| `{0,}`; `{m,}` | `reaches` plus the alternative `a = b`; m - 1 hops, then `reaches` |
+| `*m..n`, `{m,n}` (n at most 8) | one alternative per length, unrolled: `{2,3}` is `edge(a, _g0, "CALLS"), edge(_g0, b, "CALLS")` and a three-hop body |
+| `WHERE` AND / OR / NOT | negation normal form (NOT flips a comparison), then one rule body per disjunct |
+| `=`, `<>`, `<`, `<=`, `>`, `>=` | a comparison |
+| `STARTS WITH`, `ENDS WITH`, `CONTAINS` | `starts_with`, `ends_with`, `contains` |
+| `IN ['x', 'y']` | a fact table: `gql_in0("x"). gql_in0("y").` |
+| `NOT (pattern)`, `NOT EXISTS {pattern}` | a helper over the pattern, negated: `!gql_not0(f)`, `gql_not0(f) :- edge(_, f, "CALLS").` |
+| a pattern or `EXISTS {..}` in `WHERE` | inlined; its own variables are local |
+| `in_scope(a, 'web')`, `live(f)` | the builtin of that name: `in_scope`, `under`, the string tests, an engine relation (`live`, `symbol_kind`, `effect_sink`, `dependency_category`, `module_import`) |
+| `RETURN a, b.qname` | the head `result(a, _g0)`, with `qname(b, _g0)` in the body |
+| `count(n)`, `min`, `max`, `sum` | a grouped head `result(_g0, count(n))`; over several alternatives through one union helper `gql_match0` |
+| `count(*)` | `count` over every MATCH node and relationship variable |
+| `p = [ANY SHORTEST] (a)-[..*]->(b)` | the head holds `a` and `b`; the engine renders the row's witness as `p` |
+| `ORDER BY`, `LIMIT` | applied by the engine to the rendered rows |
+
 **Semantics.**
 
 - Rows are DISTINCT (`RETURN DISTINCT` changes nothing), and `count(*)` counts the distinct
@@ -336,6 +368,30 @@ property a code attribute (`a.qname`, `{qname: 'web::app::page'}`), and a functi
 - Variables of a WHERE pattern that MATCH does not bind are local to it (existential).
 - A bare path variable (`p = (a)-[:CALLS*]->(b)`) is the same as `ANY SHORTEST`: glia returns
   endpoint pairs, each with one shortest witness.
+
+**Answers.** One output, `result`, whose columns are the RETURN items' aliases, else their text
+(`a.qname`, `count(*)`). A property is a string or integer value; a node variable is a located
+node, as in Datalog.
+
+- **Order.** Rows come in rendered order, then are sorted stably by the ORDER BY keys' rendered
+  values: qnames, strings and integers, never node ids, so the order is the same on every
+  checkout. `DESC` flips a key, and the full rendered row breaks ties.
+- **LIMIT** cuts the sorted rows, then the caller's limit (`QueryOptions::limit`) cuts them again;
+  `total` keeps the uncut count. `SKIP` is refused.
+- **A path column** (`RETURN p`) is the row's witness rendered as the walk from the path's start
+  to its end, qnames joined by hops: `a -CALLS-> b -CALLS-> c`, and `<-CALLS-` for a hop walked
+  against its edge (`p = (c)<-[:CALLS*]-(a)` renders `c <-CALLS- b <-CALLS- a`). The walk is the
+  first run of the witness's edge leaves that joins the two ends, so an edge another pattern of
+  the query binds is not mistaken for a hop. A zero-hop path (`{0,}`) renders as its one node,
+  and a walk the witness's leaf cap cut renders as `a ... c`. The witness is the shortest path at
+  the row's tier, ties broken by qname (`## Witnesses`), so a path row is checkout-stable. The
+  row is located at the path's start node and carries its witness rows with or without
+  `explain`. Two paths with different end nodes are two rows.
+
+**Errors.** A GQL query's diagnostics name `<gql>`, or the caller's source name
+(`QueryOptions::source_name`) when it names one other than `<query>`. A parse error and every
+refusal below are kind `parse`; an unknown label, relationship type or property is kind
+`analysis`, located at the label (`unknown node kind `ROUTEE`; did you mean `ROUTE`?`).
 
 **Refused**, each by name at its keyword, with a message citing this page: `OPTIONAL MATCH`,
 `WITH`, `UNWIND`, `UNION`, `CALL`, `CREATE`, `MERGE`, `SET`, `DELETE`, `DETACH DELETE`, `REMOVE`,
@@ -359,3 +415,99 @@ located diagnostic:
 
 **Spacing.** The lexer reads `:-` and `<-` as one token each, so a negative literal after `:` or
 `<` needs a space: `{n: -1}`, never `{n:-1}`; `a < -1`, never `a<-1`.
+
+### Worked examples
+
+Each is answered on the three-project fixture of `## A first query` (`web/app.py` `page()` calls
+`shared.util.helper` and `other()` calls `services.api.public.facade.get`; `helper()` calls
+`services.api.internal.db.query`; `get()` calls `db.write`; one overlay `[[edge]]` adds
+`web::app::page -> services::api::internal::db::write` CALLS). engine/tests/rules_gql.rs pins
+every answer here.
+
+**1. Match, filter, order.**
+
+```text
+MATCH (a:FUNCTION)-[:CALLS]->(b:FUNCTION) WHERE a.qname STARTS WITH 'web::'
+RETURN a.qname, b.qname ORDER BY a.qname
+```
+
+| a.qname | b.qname | tier |
+|---|---|---|
+| `web::app::other` | `services::api::public::facade::get` | fact |
+| `web::app::page` | `services::api::internal::db::write` | heuristic |
+| `web::app::page` | `shared::util::helper` | fact |
+
+`ORDER BY a.qname` ties on `web::app::page`; the full rendered row breaks the tie.
+
+**2. The same query in Datalog.** The query above lowers to
+
+```text
+result(_g0, _g1) :- node(a, "FUNCTION"), edge(a, b, "CALLS"), node(b, "FUNCTION"),
+                    qname(a, _g0), starts_with(_g0, "web::"), qname(b, _g1).
+```
+
+and this hand-written program gives the same rows with the same tiers, from the same evaluator:
+
+```text
+result(x, y) :- edge(a, b, "CALLS"), node(a, "FUNCTION"), node(b, "FUNCTION"),
+                qname(a, x), qname(b, y), starts_with(x, "web::").
+```
+
+**3. Reachability across scopes.**
+
+```text
+MATCH (a)-[:CALLS*]->(b) WHERE in_scope(a, 'web') AND in_scope(b, 'services/api')
+RETURN DISTINCT b.qname ORDER BY b.qname
+```
+
+| b.qname | tier |
+|---|---|
+| `services::api::internal::db::query` | fact |
+| `services::api::internal::db::write` | fact |
+| `services::api::public::facade::get` | fact |
+
+`db::write` is FACT although one way to it is the overlay edge: `other -> get -> write` is parsed,
+and a `reaches` row takes its best path's tier.
+
+**4. Aggregate and limit.**
+
+```text
+MATCH (m:MODULE)-[:IMPORTS]->(n) RETURN m.qname AS module, count(n) AS imports
+ORDER BY imports DESC, module LIMIT 2
+```
+
+| module | imports | tier |
+|---|---|---|
+| `web::app` | 2 | fact |
+| `services::api::public::facade` | 1 | fact |
+
+`total` is 3: `shared::util` also imports one name, and LIMIT cut it.
+
+**5. A negated pattern.**
+
+```text
+MATCH (f:FUNCTION) WHERE NOT ()-[:CALLS]->(f) RETURN f.qname
+```
+
+| f.qname | tier |
+|---|---|
+| `web::app::other` | fact |
+| `web::app::page` | fact |
+
+Both rows carry the `CALLS` coverage caveats (`## Negation and coverage caveats`): "nothing calls
+it" holds in the graph, and the caveats say where extraction is blind.
+
+**6. A path.**
+
+```text
+MATCH p = ANY SHORTEST (a {qname: 'web::app::page'})-[:CALLS*]->
+          (b {qname: 'services::api::internal::db::query'})
+RETURN p
+```
+
+| p | tier | at |
+|---|---|---|
+| `web::app::page -CALLS-> shared::util::helper -CALLS-> services::api::internal::db::query` | fact | web/app.py:5 |
+
+Its witness rows are the two calls, each at its call site. The overlay edge from `page` leads to
+`db::write`, not to `db::query`, so it is in no path here.

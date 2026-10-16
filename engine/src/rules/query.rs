@@ -78,6 +78,26 @@
 //! (singleton variables, unseeded recursion) print as glia-rules renders them,
 //! `<source>:<line>:<col>: warning: ...`.
 //!
+//! **GQL (DB.7c).** [`query_gql`] compiles a GQL read query with
+//! `glia_rules::gql::compile` (its diagnostics, lowering refusals included, are a
+//! `parse` error), merges the prelude into the program and evaluates its one output
+//! `result` through the same pipeline, rows sorted and tiered as above. Spans name
+//! `QueryOptions::source_name`, `<gql>` when it is empty or the default `<query>`.
+//! Then, in order: the columns are the compiled ones (an item's alias, else its
+//! text); a path column (`p = (a)-[..*]->(b) RETURN p`) is replaced by the row's
+//! rendered path, `a -CALLS-> b <-USES- c` (qnames; `<-` a hop walked against its
+//! edge), the walk from the path's start to its end through the first contiguous run
+//! of the witness's edge leaves that connects them (one leaf is one edge or one
+//! `reaches` path, each read in or against edge direction), and the trailing end-node
+//! value glia-rules adds is dropped; such a row is located at its first node value
+//! with the path column counting as its start node, its witness rows are kept with or
+//! without `explain`, and a witness cut by the leaf cap renders `a ... b`; the rows
+//! are sorted stably by the ORDER BY keys' rendered values (DESC flips a key), the
+//! shown rendered tuple breaking ties; then cut to the query's LIMIT, then to
+//! `QueryOptions::limit` (`total` keeps the uncut count). ORDER BY compares rendered
+//! values (qnames, strings, integers), never NodeIds, so the order is
+//! checkout-stable.
+//!
 //! The evaluator reads structure only: nodes, kinds, locations, edges and cells
 //! (SECURITY.md); docs/rules.md is the language reference.
 
@@ -90,6 +110,8 @@ use glia_graph::MergedGraph;
 use glia_rules::analysis::analyse;
 use glia_rules::diag::{Diagnostic, RulesError};
 use glia_rules::eval::{AbsenceCaveat, Options, Row, evaluate};
+use glia_rules::explain::{EdgeHop, Leaf, Witness};
+use glia_rules::gql;
 use glia_rules::ir::{HeadArg, Literal, Program, Term};
 use glia_rules::parser::parse_program;
 use glia_rules::source::catalog_of;
@@ -123,7 +145,8 @@ pub struct QueryOptions {
     pub explain: bool,
     /// The row budget; `None` is glia-rules' `DEFAULT_MAX_ROWS`.
     pub row_budget: Option<usize>,
-    /// The name diagnostics and spans carry (`<query>` when empty).
+    /// The name diagnostics and spans carry (`<query>` when empty; [`query_gql`]'s is
+    /// `<gql>` when this is empty or `<query>`).
     pub source_name: String,
     /// Who asked: `cli`, `py` or `engine` (the marker's `surface=` and the budget
     /// hint).
@@ -183,14 +206,15 @@ pub struct QueryRow {
     pub values: Vec<QueryValue>,
     /// `fact` | `derived` | `heuristic`.
     pub tier: &'static str,
-    /// The first node value's location (1-based line).
+    /// The first node value's location (1-based line); a GQL path column counts as
+    /// its path's start node.
     pub file: Option<String>,
     pub line: Option<i64>,
     /// The coverage caveats of the categories the row's negations read (Q5).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub caveats: Vec<CoverageNote>,
-    /// With `explain`: the derivation's leaf edges, located, at most
-    /// `check::MAX_EVIDENCE`.
+    /// With `explain`, or a GQL path column: the derivation's leaf edges, located,
+    /// at most `check::MAX_EVIDENCE`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub witness: Vec<ViolationEdge>,
 }
@@ -299,6 +323,66 @@ pub fn query(
         "datalog",
         text,
         &program.program,
+        evaluated,
+        opts.surface,
+    ))
+}
+
+/// Answer the GQL read query `text` over `merged` (module doc, **GQL**): one output,
+/// `result`, with the query's columns, ORDER BY, LIMIT and path column applied.
+pub fn query_gql(
+    merged: &MergedGraph,
+    text: &str,
+    opts: &QueryOptions,
+) -> Result<QueryAnswer, RuleError> {
+    let source = gql_source_name(opts);
+    let failed = |e: RulesError| rule_error(&e, source, opts.surface);
+    let compiled = gql::compile(text).map_err(|mut diags| {
+        for d in &mut diags {
+            d.source_name = source.to_string();
+        }
+        failed(RulesError::Parse(diags))
+    })?;
+    let gql::Compiled {
+        mut program,
+        output,
+        columns,
+        order_by,
+        limit,
+        path_column,
+        ..
+    } = compiled;
+    if let Some(name) = program.sources.first_mut() {
+        *name = source.to_string();
+    }
+    let outputs = [output];
+    let program = prelude::merge(program, &outputs).map_err(failed)?.program;
+    let run = Run {
+        outputs: &outputs,
+        explain: opts.explain || path_column.is_some(),
+        budget: opts.row_budget,
+        limit: None,
+    };
+    let facts = CodeFacts::new(merged);
+    let src = PreludeFacts::new(merged, &facts);
+    let mut evaluated =
+        run_program_with(&src, &program, &run, path_column.is_some()).map_err(failed)?;
+    let shape = GqlShape {
+        columns,
+        order_by,
+        limit: cut_of(limit, opts.limit),
+        path_column,
+    };
+    let mut nodes = Nodes::new(&facts);
+    for out in &mut evaluated.outputs {
+        shape.apply(out, &mut nodes);
+    }
+    Ok(answer(
+        merged,
+        &facts,
+        "gql",
+        text,
+        &program,
         evaluated,
         opts.surface,
     ))
@@ -413,6 +497,13 @@ pub(crate) struct EvalRow {
     /// With explain: the leaf edges, located and capped.
     pub(crate) witness: Vec<ViolationEdge>,
     pub(crate) witness_edges: usize,
+    /// Through [`run_program_with`]`(.., true)`: the witness's edge leaves,
+    /// depth-first and left to right, one segment per leaf (an edge, or a `reaches`
+    /// path), uncapped.
+    pub(crate) segments: Vec<Vec<EdgeHop>>,
+    /// The node the row is located at when it is not its first node value (a GQL
+    /// path row: the path's start).
+    pub(crate) at: Option<NodeId>,
 }
 
 /// Evaluate `program` (the prelude already merged in, `prelude::merge`) over `src`,
@@ -425,16 +516,28 @@ pub(crate) fn run_program(
     program: &Program,
     run: &Run<'_>,
 ) -> Result<Evaluated, RulesError> {
-    let outputs = evaluate_outputs(src, program, run);
+    run_program_with(src, program, run, false)
+}
+
+/// [`run_program`], each explained row also keeping its witness's edge leaves as hop
+/// segments when `segments` is set (a GQL path column, [`query_gql`]).
+fn run_program_with(
+    src: &PreludeFacts<'_, '_>,
+    program: &Program,
+    run: &Run<'_>,
+    segments: bool,
+) -> Result<Evaluated, RulesError> {
+    let outputs = evaluate_outputs(src, program, run, segments);
     eprintln!("{}", src.marker());
     Ok(Evaluated { outputs: outputs? })
 }
 
-/// [`run_program`]'s evaluation over `src`.
+/// [`run_program_with`]'s evaluation over `src`.
 fn evaluate_outputs(
     src: &PreludeFacts<'_, '_>,
     program: &Program,
     run: &Run<'_>,
+    keep_segments: bool,
 ) -> Result<Vec<EvalOutput>, RulesError> {
     let facts = src.facts();
     let mut options = Options::default();
@@ -475,9 +578,14 @@ fn evaluate_outputs(
             .into_iter()
             .enumerate()
             .map(|(i, r)| {
-                let (witness, witness_edges) = match witnesses.get(i) {
+                let w = witnesses.get(i);
+                let (witness, witness_edges) = match w {
                     Some(w) => locate_witness(facts, &edges, &w.leaf_edges()),
                     None => (Vec::new(), 0),
+                };
+                let segments = match w {
+                    Some(w) if keep_segments => edge_segments(w),
+                    _ => Vec::new(),
                 };
                 EvalRow {
                     negated: negations.categories(&r.absence),
@@ -485,6 +593,8 @@ fn evaluate_outputs(
                     values: r.values,
                     witness,
                     witness_edges,
+                    segments,
+                    at: None,
                 }
             })
             .collect();
@@ -557,28 +667,213 @@ enum Key {
     Node(String, Option<String>, Option<i64>),
 }
 
+/// `values`' sort keys.
+fn keys_of(values: &[Value], nodes: &mut Nodes<'_, '_>) -> Vec<Key> {
+    values
+        .iter()
+        .map(|v| match v {
+            Value::Int(i) => Key::Int(*i),
+            Value::Str(s) => Key::Str(s.clone()),
+            Value::Node(id) => {
+                let n = nodes.get(*id);
+                Key::Node(n.qname.clone(), n.file.clone(), n.line)
+            }
+        })
+        .collect()
+}
+
+/// Reorder `rows` to `order`, a permutation of its indexes.
+fn permute<T>(rows: &mut Vec<T>, order: Vec<usize>) {
+    let mut slots: Vec<Option<T>> = std::mem::take(rows).into_iter().map(Some).collect();
+    rows.extend(
+        order
+            .into_iter()
+            .filter_map(|i| slots.get_mut(i).and_then(Option::take)),
+    );
+}
+
 /// Sort `rows` by their rendered value tuples, stably over glia-rules' order.
 fn sort_rows(rows: &mut Vec<Row>, nodes: &mut Nodes<'_, '_>) {
-    let keyed: Vec<Vec<Key>> = rows
-        .iter()
-        .map(|r| {
-            r.values
-                .iter()
-                .map(|v| match v {
-                    Value::Int(i) => Key::Int(*i),
-                    Value::Str(s) => Key::Str(s.clone()),
-                    Value::Node(id) => {
-                        let n = nodes.get(*id);
-                        Key::Node(n.qname.clone(), n.file.clone(), n.line)
-                    }
-                })
-                .collect()
-        })
-        .collect();
+    let keyed: Vec<Vec<Key>> = rows.iter().map(|r| keys_of(&r.values, nodes)).collect();
     let mut order: Vec<usize> = (0..rows.len()).collect();
     order.sort_by(|&a, &b| keyed[a].cmp(&keyed[b]));
-    let mut slots: Vec<Option<Row>> = std::mem::take(rows).into_iter().map(Some).collect();
-    rows.extend(order.into_iter().filter_map(|i| slots[i].take()));
+    permute(rows, order);
+}
+
+// ============================================================================
+// GQL post-processing
+// ============================================================================
+
+/// What [`query_gql`] applies to the evaluated `result` rows (module doc, **GQL**).
+struct GqlShape {
+    columns: Vec<String>,
+    order_by: Vec<gql::OrderKey>,
+    /// The query's LIMIT, then the caller's: the smaller.
+    limit: Option<usize>,
+    path_column: Option<usize>,
+}
+
+/// The query's LIMIT cut by the caller's.
+fn cut_of(query: Option<u64>, caller: Option<usize>) -> Option<usize> {
+    let query = query.map(|n| usize::try_from(n).unwrap_or(usize::MAX));
+    match (query, caller) {
+        (Some(q), Some(c)) => Some(q.min(c)),
+        (q, c) => q.or(c),
+    }
+}
+
+impl GqlShape {
+    /// Columns, the path column, ORDER BY, then LIMIT, on one output's rows.
+    fn apply(&self, out: &mut EvalOutput, nodes: &mut Nodes<'_, '_>) {
+        let n = self.columns.len();
+        if let Some(c) = self.path_column {
+            for r in &mut out.rows {
+                self.path(r, c, nodes);
+            }
+        }
+        out.columns = self.columns.clone();
+        out.arity = n;
+        let keyed: Vec<Vec<Key>> = out.rows.iter().map(|r| keys_of(&r.values, nodes)).collect();
+        let mut order: Vec<usize> = (0..out.rows.len()).collect();
+        order.sort_by(|&a, &b| {
+            self.order_by
+                .iter()
+                .map(|k| {
+                    let o = keyed[a].get(k.column).cmp(&keyed[b].get(k.column));
+                    if k.descending { o.reverse() } else { o }
+                })
+                .find(|o| o.is_ne())
+                .unwrap_or_else(|| keyed[a].cmp(&keyed[b]))
+        });
+        permute(&mut out.rows, order);
+        out.total = out.rows.len();
+        if let Some(cut) = self.limit {
+            out.rows.truncate(cut);
+        }
+    }
+
+    /// Replace column `c` (the path's start node) with the rendered path and drop
+    /// the trailing end node; the row is located at its first node value as it was.
+    fn path(&self, r: &mut EvalRow, c: usize, nodes: &mut Nodes<'_, '_>) {
+        let n = self.columns.len();
+        let ends = match (r.values.get(c), r.values.get(n)) {
+            (Some(Value::Node(start)), Some(Value::Node(end))) => Some((*start, *end)),
+            _ => None,
+        };
+        r.at = r.values.iter().take(n).find_map(|v| match v {
+            Value::Node(id) => Some(*id),
+            _ => None,
+        });
+        let segments = std::mem::take(&mut r.segments);
+        r.values.truncate(n);
+        if let (Some((start, end)), Some(slot)) = (ends, r.values.get_mut(c)) {
+            *slot = Value::Str(render_path(nodes, &segments, start, end));
+        }
+    }
+}
+
+/// A witness's edge leaves, depth-first and left to right, one hop segment per
+/// leaf (an edge, or a `reaches` / `scc` path in edge direction); empty paths
+/// skipped. An explicit stack: a proof can be deep.
+fn edge_segments(w: &Witness) -> Vec<Vec<EdgeHop>> {
+    let mut out = Vec::new();
+    let mut stack = vec![w];
+    while let Some(w) = stack.pop() {
+        match &w.leaf {
+            Some(Leaf::Edge(h)) => out.push(vec![*h]),
+            Some(Leaf::Path(hops)) if !hops.is_empty() => out.push(hops.clone()),
+            _ => {}
+        }
+        stack.extend(w.support.iter().rev());
+    }
+    out
+}
+
+/// One step of a rendered path: the hop and whether it is walked in edge direction.
+type Step = (EdgeHop, bool);
+
+/// `seg` walked from `at`: in edge direction when its first hop leaves `at`, else
+/// against it when its last hop enters `at`; every hop must continue the walk. The
+/// steps and the node the walk ends at.
+fn follow(seg: &[EdgeHop], at: NodeId) -> Option<(Vec<Step>, NodeId)> {
+    let (first, last) = (seg.first()?, seg.last()?);
+    let mut cur = at;
+    let mut steps = Vec::with_capacity(seg.len());
+    if first.from == at {
+        for h in seg {
+            if h.from != cur {
+                return None;
+            }
+            steps.push((*h, true));
+            cur = h.to;
+        }
+    } else if last.to == at {
+        for h in seg.iter().rev() {
+            if h.to != cur {
+                return None;
+            }
+            steps.push((*h, false));
+            cur = h.from;
+        }
+    } else {
+        return None;
+    }
+    Some((steps, cur))
+}
+
+/// The walk from `start` to `end`, at least one hop long, through the first
+/// contiguous run of `segments` (in witness order) that connects them; `None` when
+/// no run does (a zero-hop path, or a witness cut by the leaf cap).
+fn path_walk(segments: &[Vec<EdgeHop>], start: NodeId, end: NodeId) -> Option<Vec<Step>> {
+    for first in 0..segments.len() {
+        let mut at = start;
+        let mut steps = Vec::new();
+        for seg in &segments[first..] {
+            let Some((more, next)) = follow(seg, at) else {
+                break;
+            };
+            steps.extend(more);
+            at = next;
+            if at == end {
+                return Some(steps);
+            }
+        }
+    }
+    None
+}
+
+/// The path from `start` to `end` as text: `a -CALLS-> b <-USES- c` (qnames); `a`
+/// alone for a zero-hop path, `a ... b` when the witness holds no walk between them.
+fn render_path(
+    nodes: &mut Nodes<'_, '_>,
+    segments: &[Vec<EdgeHop>],
+    start: NodeId,
+    end: NodeId,
+) -> String {
+    let mut out = nodes.get(start).qname.clone();
+    match path_walk(segments, start, end) {
+        Some(steps) => {
+            for (h, forward) in steps {
+                let category = category_name(h.category);
+                if forward {
+                    out.push_str(&format!(" -{category}-> {}", nodes.get(h.to).qname));
+                } else {
+                    out.push_str(&format!(" <-{category}- {}", nodes.get(h.from).qname));
+                }
+            }
+        }
+        None if start == end => {}
+        None => out.push_str(&format!(" ... {}", nodes.get(end).qname)),
+    }
+    out
+}
+
+/// An edge category's registry name; an id outside the registry as its number.
+fn category_name(id: glia_core::EdgeCategoryId) -> String {
+    registry_categories()
+        .iter()
+        .find(|(c, _)| *c == id)
+        .map_or_else(|| id.0.to_string(), |(_, n)| (*n).to_string())
 }
 
 /// The edge categories a row's negations read (Q5), with the engine relations'
@@ -793,7 +1088,10 @@ fn answer(
             shown: o.rows.len(),
         });
         for r in o.rows {
-            let (file, line) = nodes.first_location(&r.values);
+            let (file, line) = match r.at {
+                Some(id) => nodes.first_location(&[Value::Node(id)]),
+                None => nodes.first_location(&r.values),
+            };
             results.push(QueryRow {
                 predicate: o.name.clone(),
                 values: r.values.iter().map(|v| nodes.value(v)).collect(),
@@ -909,6 +1207,14 @@ fn source_name(opts: &QueryOptions) -> &str {
         DEFAULT_SOURCE
     } else {
         &opts.source_name
+    }
+}
+
+/// A GQL query's source name: the caller's, `<gql>` when it is empty or `<query>`.
+fn gql_source_name(opts: &QueryOptions) -> &str {
+    match opts.source_name.as_str() {
+        "" | DEFAULT_SOURCE => gql::SOURCE_NAME,
+        name => name,
     }
 }
 

@@ -14,12 +14,13 @@ pub(crate) mod facts;
 pub use facts::{CODE_ATTRIBUTES, CodeFacts};
 
 /// `query` / `validate`: Datalog text over the code graph as a located, tiered
-/// answer; `evaluate_rule` for check's rule invariants (DB.2b).
+/// answer; `evaluate_rule` for check's rule invariants (DB.2b); `query_gql`, a GQL
+/// read query over the same pipeline (DB.7c).
 mod query;
 
 pub use query::{
     QueryAnswer, QueryOptions, QueryOutput, QueryRow, QueryValue, RuleDiagnostic, RuleError,
-    RuleRow, evaluate_rule, query, validate,
+    RuleRow, evaluate_rule, query, query_gql, validate,
 };
 
 /// The predicate prelude: structural predicates as rules (prelude.dl), merged into
