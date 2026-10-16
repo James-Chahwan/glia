@@ -23,6 +23,7 @@ cmd glia cell set
   arg dims pos=- long=dims short=- required=false num_args=1 action=Set default=- value_names=DIMS global=false hidden=false
   arg file pos=- long=file short=- required=false num_args=1 action=Set default=- value_names=PATH global=false hidden=false
   arg help pos=- long=help short=h required=false num_args=0 action=Help default=- value_names=- global=false hidden=false
+  arg hint pos=- long=hint short=- required=false num_args=1 action=Set default=- value_names=HINT global=false hidden=false
   arg json pos=- long=json short=- required=false num_args=1 action=Set default=- value_names=ENTRY global=false hidden=false
   arg kind pos=- long=kind short=- required=false num_args=1 action=Set default=- value_names=KIND global=false hidden=false
   arg model pos=- long=model short=- required=false num_args=1 action=Set default=- value_names=MODEL global=false hidden=false

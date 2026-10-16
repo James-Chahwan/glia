@@ -3,30 +3,38 @@
 //! VECTOR) under `.glia/cells.lock`, and write through into a persisted gmap
 //! only when that gmap is fresh right now, so a write never makes a stale
 //! layout look fresh and a warm load serves what a rebuild would build.
+//!
+//! DT.12b: a caller's hint must be a v1 identity hint that agrees with the
+//! write's kind; the write binds by the qname as the build does, and a bound
+//! node whose own hint differs is reported `hint_differs` with the fields.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use glia_code_domain::cell_type;
+use glia_code_domain::{cell_type, node_kind};
 use glia_code_domain::external_inputs::{
     CELLS_FILE, CellRow, CellWrite, VECTORS_FILE, VectorRow, read_rows,
 };
 use glia_code_domain::snapshots::REDACTED;
-use glia_core::{Cell, CellPayload, CellTypeId, RepoId};
+use glia_core::{Cell, CellPayload, CellTypeId, NodeId, NodeKindId, RepoId};
 use glia_engine::persist::layout_meta;
 use glia_engine::{generate_many, generate_one};
 use glia_graph::MergedGraph;
 use glia_graph::cells::{CellTarget, QnameIndex, apply_cell_write};
+use glia_graph::identity::identity_of;
 use glia_store::{
-    CELLS_LOCK, CellRemoval, MANIFEST_NAME, WriteThrough, default_gmap_dir, is_gmap_stale,
-    read_merged_sharded, remove_cell_entry, write_cell, write_merged_sharded,
+    CELLS_LOCK, CellRemoval, MANIFEST_NAME, StoreError, WriteThrough, default_gmap_dir,
+    is_gmap_stale, read_merged_sharded, remove_cell_entry, write_cell, write_merged_sharded,
     write_merged_sharded_meta,
 };
 use serde_json::json;
 
 const SOURCE: &str = "def charge(order_id):\n    return order_id\n\n\ndef refund(order_id):\n    return charge(order_id)\n";
 const VECTOR: [u8; 8] = [0, 0, 128, 63, 0, 0, 0, 64];
+/// A Python METHOD and the ATTRIBUTE `self.total` mints share
+/// `app::Cart::total` (the DT.12b measured twin).
+const CART: &str = "class Cart:\n    def total(self): return sum(item.price * item.quantity for item in self.items)\n    def summary(self): handler = self.total; return handler()\n";
 
 /// `<tmp>/<name>` holding `a.py`.
 fn repo(tmp: &Path, name: &str) -> PathBuf {
@@ -347,4 +355,137 @@ fn lock_expires_and_blocks() {
     assert!(err.contains("cells.lock"), "{err}");
     assert!(lock.exists(), "another writer's live lock is left alone");
     assert_eq!(cell_rows(&root).len(), 1);
+}
+
+/// The id of the node `qname` names with kind `kind`.
+fn node_of(m: &MergedGraph, qname: &str, kind: NodeKindId) -> NodeId {
+    let ids: Vec<NodeId> = m
+        .graphs
+        .iter()
+        .flat_map(|g| g.nodes.iter().map(move |n| (g, n.id)))
+        .filter(|(g, id)| {
+            g.nav.qname_by_id.get(id).is_some_and(|q| q == qname) && g.nav.kind_by_id.get(id) == Some(&kind)
+        })
+        .map(|(_, id)| id)
+        .collect();
+    assert_eq!(ids.len(), 1, "exactly one {kind:?} is {qname}");
+    ids[0]
+}
+
+/// The node's own v1 hint, as a fresh build derives it.
+fn own_hint(root: &Path, qname: &str, kind: NodeKindId) -> String {
+    let m = build(root);
+    identity_of(&m, node_of(&m, qname, kind)).expect("a v1 identity").hint()
+}
+
+/// `hint` with its `|`-separated field `at` (0 = version) replaced.
+fn with_field(hint: &str, at: usize, value: &str) -> String {
+    let mut parts: Vec<&str> = hint.split('|').collect();
+    parts[at] = value;
+    parts.join("|")
+}
+
+/// A hint that is not v1, names an unregistered kind, or contradicts the
+/// write's kind is refused before anything is written.
+#[test]
+fn caller_hint_is_validated() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = repo(tmp.path(), "repo");
+    let dir = persist(&root);
+    let before = shards(&dir);
+    let function = own_hint(&root, "a::charge", node_kind::FUNCTION);
+    let refused = [
+        (conv("x").with_hint(Some("a.py:1:0".into())), "is not a v1 identity hint"),
+        (conv("x").with_hint(Some("v1|999|a.py|0000000000000000|f".into())), "node kind id 999, which is not registered"),
+        (conv("x").with_hint(Some(function)).with_kind(Some("CLASS".into())), "names a FUNCTION but kind is CLASS"),
+    ];
+    for (w, why) in refused {
+        let err = write_cell(&root, Some(&dir), None, &w).unwrap_err();
+        assert!(matches!(err, StoreError::Invalid(_)), "{err:?}");
+        assert!(err.to_string().contains(why), "{err} lacks {why:?}");
+    }
+    assert!(!root.join(CELLS_FILE).exists(), "a refused hint writes no row");
+    assert!(!root.join(CELLS_LOCK).exists(), "nor takes the lock");
+    assert_eq!(shards(&dir), before, "the layout is untouched");
+    assert!(!is_gmap_stale(&dir, &root));
+}
+
+/// The node's own hint binds as the qname does and is stored with the row.
+#[test]
+fn an_agreeing_hint_binds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = repo(tmp.path(), "repo");
+    let dir = persist(&root);
+    let hint = own_hint(&root, "a::charge", node_kind::FUNCTION);
+    let out = write_cell(&root, Some(&dir), None, &conv("agreed").with_hint(Some(hint.clone()))).unwrap();
+    assert_eq!((out.target.as_str(), out.write_through), ("bound", WriteThrough::Applied));
+    assert_eq!(out.node_hint.as_deref(), Some(hint.as_str()));
+    assert!(out.hint_differs.is_empty(), "{:?}", out.hint_differs);
+    assert_eq!(cell_rows(&root)[0].hint.as_deref(), Some(hint.as_str()));
+}
+
+/// A hint whose fields differ from the qname's node still binds by the qname
+/// and is applied, as the next build applies it, and the report names the
+/// fields; with no layout there is nothing to compare against.
+#[test]
+fn a_differing_hint_is_reported_and_applied() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = repo(tmp.path(), "repo");
+    let dir = persist(&root);
+    let own = own_hint(&root, "a::charge", node_kind::FUNCTION);
+    // SOURCE's bodies are under 40 chars: the own body field is all zeros.
+    assert_eq!(own.split('|').nth(3), Some("0000000000000000"), "{own}");
+    let body = with_field(&own, 3, "0123456789abcdef");
+    let out = write_cell(&root, Some(&dir), None, &conv("moved on").with_hint(Some(body.clone()))).unwrap();
+    assert_eq!((out.target.as_str(), out.write_through), ("hint_differs", WriteThrough::Applied));
+    assert_eq!(out.hint_differs, ["body"]);
+    assert_eq!(out.node_hint.as_deref(), Some(own.as_str()));
+    assert_eq!(out.hint.as_deref(), Some(body.as_str()), "the outcome names the caller's hint");
+    let node = node_of(&build(&root), "a::charge", node_kind::FUNCTION);
+    assert_eq!(out.node, Some(node.0), "the qname's node");
+    let warm = read_merged_sharded(&dir).unwrap();
+    let rebuilt = payload(&build(&root), "a::charge", cell_type::CONV);
+    assert!(rebuilt.is_some());
+    assert_eq!(payload(&warm, "a::charge", cell_type::CONV), rebuilt, "write-through == rebuild");
+    assert!(!is_gmap_stale(&dir, &root));
+    assert_eq!(cell_rows(&root)[0].hint.as_deref(), Some(body.as_str()), "the row stores the caller's hint");
+
+    let local = with_field(&own, 4, "other");
+    let out = write_cell(&root, Some(&dir), None, &conv("renamed?").with_hint(Some(local))).unwrap();
+    assert_eq!((out.target.as_str(), out.hint_differs.as_slice()), ("hint_differs", ["local".to_string()].as_slice()));
+
+    let none = write_cell(&root, None, None, &conv("no layout").with_hint(Some(own_hint(&root, "a::charge", node_kind::FUNCTION))))
+        .unwrap();
+    assert_eq!((none.target.as_str(), none.node_hint.as_deref()), ("pending", None));
+    assert!(none.hint_differs.is_empty());
+}
+
+/// Two nodes share a qname: with no hint and no kind the write is ambiguous,
+/// the METHOD's own hint singles it out, and that hint with the other kind is
+/// refused.
+#[test]
+fn a_hint_singles_out_one_of_two_twins() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("twin");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(root.join("app.py"), CART).unwrap();
+    let dir = persist(&root);
+    let w = || CellWrite::entry("app::Cart::total", cell_type::CONV, json!({ "text": "twin" }));
+    let out = write_cell(&root, Some(&dir), None, &w()).unwrap();
+    assert_eq!(out.target, "ambiguous");
+    assert_eq!(out.hint, None, "an ambiguous row captures no hint");
+
+    let m = build(&root);
+    let method = node_of(&m, "app::Cart::total", node_kind::METHOD);
+    node_of(&m, "app::Cart::total", node_kind::ATTRIBUTE);
+    let hint = identity_of(&m, method).expect("the METHOD's identity").hint();
+    let out = write_cell(&root, Some(&dir), None, &w().with_hint(Some(hint.clone()))).unwrap();
+    assert_eq!((out.target.as_str(), out.node), ("bound", Some(method.0)));
+    assert_eq!(out.node_hint.as_deref(), Some(hint.as_str()));
+    assert!(out.hint_differs.is_empty());
+
+    let err = write_cell(&root, Some(&dir), None, &w().with_hint(Some(hint)).with_kind(Some("ATTRIBUTE".into())))
+        .unwrap_err();
+    assert!(matches!(err, StoreError::Invalid(_)), "{err:?}");
+    assert!(err.to_string().contains("names a METHOD but kind is ATTRIBUTE"), "{err}");
 }

@@ -30,8 +30,22 @@
 //!
 //! Where the write lands is reported, never guessed: `target` is `bound`,
 //! `rekeyed` (a HEURISTIC re-bind through the hint, with its `tier`),
-//! `ambiguous` (several nodes, nothing applied), `orphaned` (no node), or
-//! `pending` when no fresh layout was read (the next build binds the row).
+//! `hint_differs` (bound by the qname and applied, as the next build applies
+//! it, but the caller's hint is not the bound node's own: `node_hint` and
+//! `hint_differs` say which fields differ), `ambiguous` (several nodes,
+//! nothing applied), `orphaned` (no node), or `pending` when no fresh layout
+//! was read (the next build binds the row; there is no node to compare a
+//! hint against). The binding rule is the build's (`QnameIndex::resolve`):
+//! the exact qname (and kind) wins, and the hint only narrows several qname
+//! matches or re-binds a moved node, so a disagreeing hint is reported, never
+//! obeyed against the qname.
+//!
+//! A caller's hint must be an `identity::Identity` v1 hint
+//! (`v1|<kind id>|<file>|<body:016x>|<local>`) naming a registered node kind
+//! that agrees with the write's `kind`; any other is refused before the lock
+//! (`StoreError::Invalid`), so nothing is written. Rows already in a
+//! hand-edited sidecar are not re-validated: the build and `ls --check` keep
+//! ignoring a hint they cannot parse.
 //!
 //! Scale: the write-through deserialises the whole layout, which suits single
 //! tool writes; a bulk import writes the sidecar (no `gmap_dir`) and rebuilds.
@@ -52,7 +66,7 @@ use glia_code_domain::{cell_type, node_kind};
 use glia_core::{CellTypeId, NodeId, RepoId};
 use glia_graph::MergedGraph;
 use glia_graph::cells::{CellTarget, QnameIndex, apply_cell_write};
-use glia_graph::identity::identity_of;
+use glia_graph::identity::{Identity, identity_of};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -75,6 +89,12 @@ const LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 const FREE_TEXT_FIELDS: [&str; 2] = ["text", "title"];
 /// `target` when no fresh layout was read: the next build binds the row.
 const PENDING: &str = "pending";
+/// `target` when the row bound by its qname and the bound node's own v1 hint
+/// differs from the caller's.
+const HINT_DIFFERS: &str = "hint_differs";
+/// The `hint_differs` field of a bound node with no v1 identity (an
+/// ENDPOINT, a ROUTE: no MODULE ancestor or no POSITION file).
+const NO_IDENTITY: &str = "no_identity";
 
 /// What a write did to the persisted layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -130,9 +150,12 @@ pub struct CellWriteOutcome {
     pub entry: Option<Value>,
     /// Rows in the sidecar file after the write.
     pub rows: usize,
-    /// `bound` | `rekeyed` | `ambiguous` | `orphaned` | `pending` (see the
-    /// module doc); a surface that applies the write in memory as well may
-    /// report its own binding.
+    /// `bound` | `rekeyed` | `hint_differs` | `ambiguous` | `orphaned` |
+    /// `pending` (see the module doc); a surface that applies the write in
+    /// memory as well may report its own binding ([`Self::set_binding`]).
+    /// `hint_differs`: bound by the qname and applied, as the next build
+    /// applies it, but the bound node's own hint differs from the caller's
+    /// (see `node_hint` / `hint_differs`).
     pub target: String,
     /// The evidence tier of a `rekeyed` binding (`identical`, `same-name`).
     pub tier: Option<String>,
@@ -141,6 +164,14 @@ pub struct CellWriteOutcome {
     pub write_through: WriteThrough,
     /// Secret spans the A13.7 redaction replaced in the free text.
     pub redacted: usize,
+    /// The bound (or rekeyed) node's own v1 hint, read from the layout the
+    /// write bound in; `None` with no fresh layout, no node, or a node with no
+    /// v1 identity.
+    pub node_hint: Option<String>,
+    /// The caller's hint fields that differ from the bound node's own, in the
+    /// order `kind`, `file`, `body`, `local` (`no_identity` when the node has
+    /// none); empty unless `target` is `hint_differs`.
+    pub hint_differs: Vec<String>,
 }
 
 impl CellWriteOutcome {
@@ -151,6 +182,64 @@ impl CellWriteOutcome {
         self.tier = tier;
         self.node = node;
     }
+
+    /// Record where the row bound in `merged` and compare `caller_hint` (the
+    /// hint the caller passed, not one filled from the graph) with the bound
+    /// node's own: `node_hint`, `hint_differs`, and `target` `hint_differs`
+    /// when they differ. A surface that applies the write to its own graph
+    /// calls this with that graph's binding.
+    pub fn set_binding(&mut self, merged: &MergedGraph, t: &CellTarget, caller_hint: Option<&str>) {
+        self.set_target(t);
+        self.set_hint_report(hint_report(merged, t, caller_hint));
+    }
+
+    fn set_hint_report(&mut self, (node_hint, differs): (Option<String>, Vec<String>)) {
+        self.node_hint = node_hint;
+        if !differs.is_empty() {
+            self.target = HINT_DIFFERS.into();
+        }
+        self.hint_differs = differs;
+    }
+}
+
+/// `(node_hint, hint_differs)` of a binding: the bound or rekeyed node's own
+/// v1 hint, and, only for a `Bound` row whose caller gave a hint, the fields
+/// that differ (`kind`, `file`, `body`, `local`; `no_identity` for a node
+/// with none). A rekeyed row keeps its own target and tier: the hint did the
+/// binding there. Ambiguous / orphaned / rejected rows have no node.
+fn hint_report(merged: &MergedGraph, t: &CellTarget, caller: Option<&str>) -> (Option<String>, Vec<String>) {
+    let (id, bound) = match t {
+        CellTarget::Bound(id) => (*id, true),
+        CellTarget::Rekeyed { id, .. } => (*id, false),
+        _ => return (None, Vec::new()),
+    };
+    let own = identity_of(merged, id);
+    let node_hint = own.as_ref().map(Identity::hint);
+    let differs = match (bound, caller) {
+        (true, Some(h)) => match (&own, Identity::parse_hint(h)) {
+            (None, _) => vec![NO_IDENTITY.to_string()],
+            (Some(own), Some(given)) => differing_fields(own, &given),
+            // write_cell refuses an unparseable caller hint; a surface
+            // passing one anyway learns nothing it can compare.
+            (Some(_), None) => Vec::new(),
+        },
+        _ => Vec::new(),
+    };
+    (node_hint, differs)
+}
+
+/// The fields of `given` that differ from `own`, in hint order.
+fn differing_fields(own: &Identity, given: &Identity) -> Vec<String> {
+    [
+        ("kind", own.kind != given.kind),
+        ("file", own.file != given.file),
+        ("body", own.body != given.body),
+        ("local", own.local != given.local),
+    ]
+    .into_iter()
+    .filter(|(_, d)| *d)
+    .map(|(f, _)| f.to_string())
+    .collect()
 }
 
 /// `(target, tier, node)` of a binding.
@@ -261,7 +350,7 @@ pub fn write_cell(
     };
 
     let mut layout = Layout::open(repo_root, gmap_dir, repo);
-    let (bound, hint) = match &mut layout.state {
+    let (bound, hint, report) = match &mut layout.state {
         LayoutState::Fresh { merged, idx, .. } => {
             let hint = w.hint.clone().or_else(|| hint_of(merged, idx, &w.qname, w.kind.as_deref()));
             let target = apply_cell_write(merged, idx, &stored.clone().with_hint(hint.clone()))
@@ -269,9 +358,12 @@ pub fn write_cell(
             if let CellTarget::Rejected(e) = &target {
                 return Err(invalid(e.clone()));
             }
-            (Some(target), hint)
+            // Compared while the layout is held (`finish` consumes it), with
+            // the caller's hint only: a `hint_of` fill is the node's own.
+            let report = hint_report(merged, &target, w.hint.as_deref());
+            (Some(target), hint, Some(report))
         }
-        LayoutState::Skip(_) => (None, w.hint.clone()),
+        LayoutState::Skip(_) => (None, w.hint.clone(), None),
     };
 
     sidecar.upsert(&stored.with_hint(hint.clone()))?;
@@ -290,9 +382,14 @@ pub fn write_cell(
         node: None,
         write_through,
         redacted: prepared.redacted,
+        node_hint: None,
+        hint_differs: Vec::new(),
     };
     if let Some(t) = &bound {
         out.set_target(t);
+    }
+    if let Some(report) = report {
+        out.set_hint_report(report);
     }
     Ok(out)
 }
@@ -338,6 +435,8 @@ pub fn remove_cell_entry(
         node: None,
         write_through,
         redacted: 0,
+        node_hint: None,
+        hint_differs: Vec::new(),
     };
     if let Some(t) = &bound {
         out.set_target(t);
@@ -581,6 +680,9 @@ fn prepare(w: &CellWrite) -> Result<Prepared, StoreError> {
     {
         return Err(invalid(format!("unknown node kind {k:?}")));
     }
+    if let Some(h) = &w.hint {
+        check_hint(h, w.kind.as_deref())?;
+    }
     let is_vector = w.cell == cell_type::VECTOR;
     match &w.payload {
         WritePayload::Entry(v) if !is_vector => {
@@ -609,6 +711,27 @@ fn prepare(w: &CellWrite) -> Result<Prepared, StoreError> {
             "cell type {} does not take this payload: VECTOR takes bytes, CONSTRAINT / DECISION / CONV a JSON entry",
             cell_name(w.cell)
         ))),
+    }
+}
+
+/// A caller's hint must be a v1 [`Identity`] hint naming a registered node
+/// kind, and that kind must be the write's `kind` when it names one (a hint
+/// of the other kind would be ignored on re-bind while `kind` picked the
+/// other twin, with no word).
+fn check_hint(h: &str, kind: Option<&str>) -> Result<(), StoreError> {
+    let ident = Identity::parse_hint(h).ok_or_else(|| {
+        invalid(format!(
+            "hint {h:?} is not a v1 identity hint (v1|<kind id>|<file>|<body:016x>|<local>, the form `glia cell ls --json` and glia-export-engram's <out>.hints.jsonl carry)"
+        ))
+    })?;
+    let name = node_kind::ALL
+        .iter()
+        .find(|(id, _)| *id == ident.kind)
+        .map(|(_, n)| *n)
+        .ok_or_else(|| invalid(format!("hint {h:?} names node kind id {}, which is not registered", ident.kind.0)))?;
+    match kind {
+        Some(k) if k != name => Err(invalid(format!("hint {h:?} names a {name} but kind is {k}"))),
+        _ => Ok(()),
     }
 }
 
@@ -777,6 +900,29 @@ mod tests {
         assert!(msg(entry_on_vector).contains("VECTOR takes bytes"));
         let kind = CellWrite::entry("a", cell_type::CONV, json!({"text": "x"})).with_kind(Some("NOPE".into()));
         assert!(msg(kind).contains("NOPE"));
+    }
+
+    #[test]
+    fn prepare_refuses_a_hint_that_is_not_v1_or_contradicts_kind() {
+        let msg = |w: CellWrite| prepare(&w).err().map(|e| e.to_string()).unwrap_or_default();
+        let conv = |hint: &str| CellWrite::entry("a", cell_type::CONV, json!({"text": "x"})).with_hint(Some(hint.into()));
+        assert!(msg(conv("a.py:1:0")).contains("is not a v1 identity hint"));
+        assert!(msg(conv("v2|3|a.py|0000000000000000|f")).contains("is not a v1 identity hint"));
+        assert!(msg(conv("v1|999|a.py|0000000000000000|f")).contains("node kind id 999, which is not registered"));
+        let function = "v1|3|a.py|0000000000000000|f";
+        assert!(msg(conv(function).with_kind(Some("CLASS".into()))).contains("names a FUNCTION but kind is CLASS"));
+        assert!(prepare(&conv(function)).is_ok());
+        assert!(prepare(&conv(function).with_kind(Some("FUNCTION".into()))).is_ok());
+    }
+
+    #[test]
+    fn differing_fields_come_in_hint_order() {
+        let own = Identity { kind: node_kind::FUNCTION, file: "a.py".into(), local: "f".into(), body: 0 };
+        assert!(differing_fields(&own, &own).is_empty());
+        let given = Identity { kind: node_kind::CLASS, file: "b.py".into(), local: "g".into(), body: 7 };
+        assert_eq!(differing_fields(&own, &given), ["kind", "file", "body", "local"]);
+        let body = Identity { body: 7, ..own.clone() };
+        assert_eq!(differing_fields(&own, &body), ["body"]);
     }
 
     #[test]

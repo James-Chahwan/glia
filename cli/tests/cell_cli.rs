@@ -327,3 +327,84 @@ fn usage_errors_exit_2_and_a_missing_row_exits_1() {
     assert!(gone.stdout.contains("no CONV api/000009 on a::charge"), "{}", gone.stdout);
     assert!(!Path::new(root).join(".glia/cells.jsonl").exists());
 }
+
+/// `hint` with its `|`-separated field `at` (0 = version) replaced.
+fn with_field(hint: &str, at: usize, value: &str) -> String {
+    let mut parts: Vec<&str> = hint.split('|').collect();
+    parts[at] = value;
+    parts.join("|")
+}
+
+/// DT.12b: `set --hint` takes the v1 hint `ls --json` shows. The node's own
+/// hint binds; a hint that differs is applied by the qname and reported
+/// `hint_differs` with the fields; a non-v1 hint or one that contradicts
+/// `--kind` exits 2 and writes nothing; and a hint alone singles out one of
+/// two nodes sharing a qname.
+#[test]
+fn set_hint_binds_reports_and_refuses() {
+    let repo = Scratch::new("hint");
+    repo.write("a.py", CHARGE);
+    let root = repo.path();
+    ok(&["build", root]);
+    ok(&["cell", "set", root, "a::charge", "CONV", "--text", "one"]);
+    let listed = ok(&["cell", "ls", root, "--json"]).json();
+    let hint = listed["rows"][0]["hint"].as_str().unwrap_or_default().to_string();
+    assert!(hint.starts_with("v1|3|a.py|"), "the row carries the node's hint: {listed}");
+
+    let bound = ok(&["cell", "set", root, "a::charge", "CONV", "--text", "two", "--hint", &hint]);
+    assert!(
+        bound.stderr.contains("[cells] write qname=a::charge cell=CONV id=000002 rows=2 target=bound write_through=applied surface=cli\n"),
+        "{}",
+        bound.stderr
+    );
+    assert!(!bound.stdout.contains("note:"), "{}", bound.stdout);
+
+    let flipped = with_field(&hint, 3, if hint.split('|').nth(3) == Some("0123456789abcdef") { "fedcba9876543210" } else { "0123456789abcdef" });
+    let differs = ok(&["cell", "set", root, "a::charge", "CONV", "--text", "three", "--hint", &flipped]);
+    assert!(
+        differs.stderr.contains(
+            "[cells] write qname=a::charge cell=CONV id=000003 rows=3 target=hint_differs write_through=applied surface=cli differs=body"
+        ),
+        "{}",
+        differs.stderr
+    );
+    assert!(
+        differs.stdout.contains(&format!("note: a::charge's own hint is {hint}; --hint differs in body")),
+        "{}",
+        differs.stdout
+    );
+    let rows = repo.cell_rows();
+    assert_eq!(rows[2]["hint"].as_str(), Some(flipped.as_str()), "the row stores the caller's hint: {rows:?}");
+
+    let sidecar = std::fs::read(repo.0.join(".glia/cells.jsonl")).expect("cells.jsonl");
+    let gmap = glia(&["cell", "set", root, "a::charge", "CONV", "--text", "x", "--hint", "a.py:1:0"]);
+    assert_eq!(gmap.code, 2, "{}\n{}", gmap.stdout, gmap.stderr);
+    assert!(gmap.stderr.contains(r#"error: invalid cell write: hint "a.py:1:0" is not a v1 identity hint"#), "{}", gmap.stderr);
+    let kind = glia(&["cell", "set", root, "a::charge", "CONV", "--text", "x", "--hint", &hint, "--kind", "CLASS"]);
+    assert_eq!(kind.code, 2, "{}\n{}", kind.stdout, kind.stderr);
+    assert!(kind.stderr.contains("names a FUNCTION but kind is CLASS"), "{}", kind.stderr);
+    assert_eq!(std::fs::read(repo.0.join(".glia/cells.jsonl")).expect("cells.jsonl"), sidecar, "a refused hint writes nothing");
+
+    let twin = Scratch::new("hint-twin");
+    twin.write("a.py", "class Foo:\n    pass\n\n\ndef Foo():\n    return 1\n");
+    let troot = twin.path();
+    ok(&["build", troot]);
+    let amb = ok(&["cell", "set", troot, "a::Foo", "CONV", "--text", "which one?"]);
+    assert!(amb.stderr.contains("target=ambiguous"), "{}", amb.stderr);
+    ok(&["cell", "set", troot, "a::Foo", "CONV", "--text", "the function", "--kind", "FUNCTION"]);
+    let rows = twin.cell_rows();
+    let function = rows
+        .iter()
+        .find(|r| r["kind"] == "FUNCTION")
+        .and_then(|r| r["hint"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(function.starts_with("v1|3|a.py|"), "{rows:?}");
+    let by_hint = ok(&["cell", "set", troot, "a::Foo", "DECISION", "--json", r#"{"id":"d1","title":"t"}"#, "--hint", &function]);
+    assert!(by_hint.stderr.contains("target=bound write_through=applied surface=cli"), "{}", by_hint.stderr);
+    let check = glia(&["cell", "ls", troot, "--check", "--json"]).json();
+    let decision = check["rows"].as_array().and_then(|r| r.iter().find(|r| r["cell"] == "DECISION")).cloned().unwrap_or_default();
+    assert_eq!((decision["status"].as_str(), decision["kind"].is_null()), (Some("bound"), true), "{check}");
+    assert_eq!(decision["node"]["kind"], "FUNCTION", "{check}");
+    assert_eq!(decision["hint"].as_str(), Some(function.as_str()), "{check}");
+}

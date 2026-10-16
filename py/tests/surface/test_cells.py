@@ -2,7 +2,9 @@
 """pyo3 surface, py/src/cells.rs (LF.1b): the cell write API. A write lands in
 the repo's `.glia` sidecar, in its default layout while that is fresh, and in
 the live PyGraph, so a fresh generate() and a warm load_from_gmap() both show
-it. Also `PyGraph.save_to(dir, repo_path=...)` (py/src/graph.rs). Shared
+it. Also `PyGraph.save_to(dir, repo_path=...)` (py/src/graph.rs). DT.12b:
+`hint=` takes the node's v1 identity hint, refuses any other form, and a hint
+that differs from the qname's node reads `target == "hint_differs"`. Shared
 helpers: test_build.py."""
 from __future__ import annotations
 
@@ -29,10 +31,13 @@ def main() -> int:
     c = Checks("cells")
     c.check("write_cell signature",
             [p for p, _ in params(rg.write_cell)]
-            == ["repo_path", "qname", "cell_type", "payload", "kind", "model", "dims"],
+            == ["repo_path", "qname", "cell_type", "payload", "kind", "model", "dims", "hint"],
             params(rg.write_cell))
     c.check("remove_cell default source",
             params(rg.remove_cell)[-1] == ("source", "api"), params(rg.remove_cell))
+    c.check("set_cell ends with hint",
+            [p for p, _ in params(rg.PyGraph.set_cell)][-2:] == ["dims", "hint"],
+            params(rg.PyGraph.set_cell))
     c.check("save_to takes repo_path",
             params(rg.PyGraph.save_to) == [("dir", None), ("repo_path", None)],
             params(rg.PyGraph.save_to))
@@ -51,6 +56,26 @@ def main() -> int:
                 "[cells] write qname=app::helper cell=CONV id=000001 rows=1 target=bound "
                 "write_through=applied surface=pyo3" in err, err)
         c.check("sidecar written", os.path.isfile(os.path.join(repo, ".glia", "cells.jsonl")))
+        c.check("set_cell: the dict carries node_hint", "node_hint" in out and "hint_differs" in out, out)
+        own = out.get("hint") or ""
+        c.check("set_cell: the row's hint is v1", own.startswith("v1|"), out)
+
+        out = g.set_cell("app::helper", "CONV", '{"text": "agreed"}', hint=own)
+        c.check("set_cell(hint=own): bound", out.get("target") == "bound", out)
+        c.check("set_cell(hint=own): node_hint", out.get("node_hint") == own, out)
+        c.check("set_cell(hint=own): nothing differs", out.get("hint_differs") == [], out)
+        parts = own.split("|")
+        parts[3] = "fedcba9876543210" if parts[3:4] == ["0123456789abcdef"] else "0123456789abcdef"
+        out, err = stderr_of(lambda: g.set_cell("app::helper", "CONV", '{"text": "moved"}', hint="|".join(parts)))
+        c.check("set_cell(hint=body flipped): hint_differs", out.get("target") == "hint_differs", out)
+        c.check("set_cell(hint=body flipped): the field", out.get("hint_differs") == ["body"], out)
+        c.check("set_cell(hint=body flipped): marker", "surface=pyo3 differs=body" in err, err)
+        c.raises("set_cell(hint=gmap form) refused", ValueError,
+                 lambda: g.set_cell("app::helper", "CONV", '{"text": "x"}', hint="a.py:1:0"), "v1")
+        c.raises("write_cell(hint=gmap form) refused", ValueError,
+                 lambda: rg.write_cell(repo, "app::helper", "CONV", '{"text": "x"}', hint="a.py:1:0"), "v1")
+        for i in ("000002", "000003"):
+            g.remove_cell("app::helper", "CONV", i)
         c.check("layout stays fresh", rg.is_stale(d, repo) is False)
         live = cell(g, "app::helper", CONV_ID)
         c.check("live graph carries the CONV", live is not None and '"text":"x"' in live, live)

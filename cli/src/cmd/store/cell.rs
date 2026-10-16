@@ -9,7 +9,19 @@
 //! move-stable hint into the row then). Each prints the pyo3 marker shape
 //! with `surface=cli`:
 //! `[cells] write|remove qname=<q> cell=<C> id=<id|-> rows=<n> target=<t> write_through=<w> surface=cli`
-//! (plus ` redacted=<k>` when the A13.7 redaction replaced a secret).
+//! (plus ` redacted=<k>` when the A13.7 redaction replaced a secret, and
+//! ` differs=<fields>` on a `hint_differs` write).
+//!
+//! `set --hint <v1>` (DT.12b) passes the caller's move-stable identity hint
+//! (`v1|<kind id>|<file>|<body:016x>|<local>`, the form `ls --json` and
+//! glia-export-engram's `<out>.hints.jsonl` carry) to the store, which
+//! refuses (exit 2) any other form or a hint whose kind contradicts
+//! `--kind`. The hint picks between nodes sharing the qname, re-binds a
+//! moved node, and is stored with the row; the qname still wins, as in the
+//! build. When the qname's node in the fresh layout has another hint, the
+//! write is applied and reported `target=hint_differs` with the differing
+//! fields (`kind`, `file`, `body`, `local`, or `no_identity`), and `set`
+//! prints a second stdout line naming the node's own hint.
 //!
 //! `ls` lists the sidecar rows. `ls --check` builds the graph the way a normal
 //! build does (`generate_one_opts` with the global `--no-overlay` flag, so
@@ -119,6 +131,14 @@ struct SetArgs {
     /// VECTOR only: the dimension count (the payload is dims * 4 bytes).
     #[arg(long)]
     dims: Option<u32>,
+    /// The node's move-stable v1 identity hint
+    /// (`v1|<kind id>|<file>|<body:016x>|<local>`, as `cell ls --json` and
+    /// glia-export-engram's <out>.hints.jsonl carry it): picks between nodes
+    /// sharing <qname>, re-binds a moved node, and is stored with the row;
+    /// the target reads `hint_differs` when the qname's node has another
+    /// hint.
+    #[arg(long, value_name = "HINT")]
+    hint: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -184,6 +204,14 @@ fn set(a: SetArgs) -> Result<i32, String> {
         out.qname,
         spoken(out.write_through)
     );
+    if !out.hint_differs.is_empty() {
+        println!(
+            "note: {}'s own hint is {}; --hint differs in {}",
+            out.qname,
+            out.node_hint.as_deref().unwrap_or("none"),
+            out.hint_differs.join(", ")
+        );
+    }
     Ok(EXIT_OK)
 }
 
@@ -193,7 +221,7 @@ fn cell_write(a: SetArgs) -> Result<CellWrite, String> {
     if cell == cell_type::VECTOR {
         let path = a.file.ok_or("a VECTOR payload is raw bytes: pass --file <path>")?;
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        return Ok(CellWrite::vector(a.qname, bytes, a.model, a.dims).with_kind(a.kind));
+        return Ok(CellWrite::vector(a.qname, bytes, a.model, a.dims).with_kind(a.kind).with_hint(a.hint));
     }
     if a.model.is_some() || a.dims.is_some() {
         return Err("--model / --dims apply to a VECTOR payload only".into());
@@ -207,7 +235,7 @@ fn cell_write(a: SetArgs) -> Result<CellWrite, String> {
         }
         (None, None, None) => return Err("pass one of --json, --text, --file".into()),
     };
-    Ok(CellWrite::entry(a.qname, cell, entry).with_kind(a.kind))
+    Ok(CellWrite::entry(a.qname, cell, entry).with_kind(a.kind).with_hint(a.hint))
 }
 
 fn parse_entry(cell: &str, text: &str) -> Result<Value, String> {
@@ -726,6 +754,9 @@ fn marker(verb: &str, o: &CellWriteOutcome) -> String {
     );
     if o.redacted > 0 {
         line.push_str(&format!(" redacted={}", o.redacted));
+    }
+    if !o.hint_differs.is_empty() {
+        line.push_str(&format!(" differs={}", o.hint_differs.join(",")));
     }
     line
 }

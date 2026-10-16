@@ -434,7 +434,7 @@ glia overlay accept <REPO> [--candidate <CANDIDATE>] [--dry-run] [--json] [--onl
     `glia check` could not evaluate, and moves the file to `version = 2` only when a
     written rule needs it. Exits 0 written (or --dry-run), 1 when validation refuses,
     2 on an error. The overlay commands refuse --no-overlay.
-glia cell set <REPO> <QNAME> <CELL> [--dims <DIMS>] [--file <PATH>] [--json <ENTRY>] [--kind <KIND>] [--model <MODEL>] [--text <TEXT>]
+glia cell set <REPO> <QNAME> <CELL> [--dims <DIMS>] [--file <PATH>] [--hint <HINT>] [--json <ENTRY>] [--kind <KIND>] [--model <MODEL>] [--text <TEXT>]
     Write a CONSTRAINT / DECISION / CONV entry (one of --json, --text, --file) or a
     VECTOR (--file, --model, --dims) on a node; kept in .glia/cells.jsonl /
     vectors.jsonl across rebuilds.

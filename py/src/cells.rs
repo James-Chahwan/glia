@@ -14,6 +14,15 @@
 //! root in the graph's `repo_roots` (a fresh build's paths, or the roots a
 //! loaded layout records); the stored row carries the node's move-stable hint.
 //!
+//! `hint=` (DT.12b, both writers) is the caller's v1 identity hint
+//! (`v1|<kind id>|<file>|<body:016x>|<local>`, as glia-export-engram's
+//! `<out>.hints.jsonl` carries it): it picks between nodes sharing the qname,
+//! re-binds a moved node and is stored with the row; the store refuses any
+//! other form, or a hint whose kind contradicts `kind=` (ValueError). When the
+//! qname's node has another hint the write is applied and `target` reads
+//! `hint_differs`, with `node_hint` and the differing fields in
+//! `hint_differs`; `set_cell` reports that against the live graph's binding.
+//!
 //! Payload: a `str` is one JSON entry object for CONSTRAINT / DECISION / CONV
 //! (`source` defaults to `api`; a CONV without `id` gets the next `000001`-style
 //! id); `bytes` is a VECTOR (`model`, `dims` optional). The answer is the
@@ -21,7 +30,8 @@
 //! removal prints the fired_on marker from its pyo3-free helper, the path the
 //! unit tests run:
 //! `[cells] write|remove qname=<q> cell=<C> id=<id|-> rows=<n> target=<t> write_through=<w> surface=pyo3`
-//! (plus ` redacted=<k>` when the A13.7 redaction replaced a secret).
+//! (plus ` redacted=<k>` when the A13.7 redaction replaced a secret, and
+//! ` differs=<fields>` on a `hint_differs` write).
 //!
 //! The helpers the bindings delegate to are pyo3-free (`cell_write`,
 //! `set_cell_in`, `write_cell_at`, `remove_cell_in`, `remove_cell_at`,
@@ -73,6 +83,7 @@ pub(crate) fn cell_write(
     kind: Option<String>,
     model: Option<String>,
     dims: Option<u32>,
+    hint: Option<String>,
 ) -> Result<CellWrite, String> {
     let id = cell_type_id(cell).ok_or_else(|| format!("unknown cell type {cell:?} (see cell_type_names())"))?;
     let is_vector = id == cell_type::VECTOR;
@@ -84,9 +95,9 @@ pub(crate) fn cell_write(
         }
         Payload::Entry(text) => {
             let v = serde_json::from_str(&text).map_err(|e| format!("the {cell} payload is not JSON: {e}"))?;
-            Ok(CellWrite::entry(qname, id, v).with_kind(kind))
+            Ok(CellWrite::entry(qname, id, v).with_kind(kind).with_hint(hint))
         }
-        Payload::Vector(bytes) => Ok(CellWrite::vector(qname, bytes, model, dims).with_kind(kind)),
+        Payload::Vector(bytes) => Ok(CellWrite::vector(qname, bytes, model, dims).with_kind(kind).with_hint(hint)),
     }
 }
 
@@ -114,6 +125,9 @@ pub(crate) fn marker(verb: &str, o: &CellWriteOutcome) -> String {
     );
     if o.redacted > 0 {
         line.push_str(&format!(" redacted={}", o.redacted));
+    }
+    if !o.hint_differs.is_empty() {
+        line.push_str(&format!(" differs={}", o.hint_differs.join(",")));
     }
     line
 }
@@ -172,7 +186,9 @@ fn root_of(roots: &BTreeMap<u64, String>, repo: RepoId) -> Result<&Path, String>
 
 /// `set_cell` minus pyo3: store the write for the repo that owns the node
 /// (sidecar + fresh default layout), then apply the stored entry to `merged`
-/// through the same resolver. The outcome's `target` is the live binding.
+/// through the same resolver. The outcome's `target` is the live binding, and
+/// its hint report compares the CALLER's hint with the live node's own (the
+/// store compared the filled hint against the layout, which may lag).
 pub(crate) fn set_cell_in(
     merged: &mut MergedGraph,
     roots: &BTreeMap<u64, String>,
@@ -180,6 +196,7 @@ pub(crate) fn set_cell_in(
 ) -> Result<CellWriteOutcome, String> {
     let (repo, node) = owning_repo(merged, &w.qname, w.kind.as_deref(), w.hint.as_deref())?;
     let root = root_of(roots, repo)?;
+    let caller = w.hint.clone();
     let hint = w.hint.clone().or_else(|| node.and_then(|id| identity_of(merged, id)).map(|i| i.hint()));
     let w = w.with_hint(hint);
     let mut out = store_write_cell(root, Some(&default_layout_dir(root)), Some(repo), &w).map_err(|e| e.to_string())?;
@@ -191,7 +208,7 @@ pub(crate) fn set_cell_in(
     .with_hint(out.hint.clone());
     let idx = QnameIndex::build(merged, Some(repo));
     let live = apply_cell_write(merged, &idx, &stored)?;
-    out.set_target(&live);
+    out.set_binding(merged, &live, caller.as_deref());
     eprintln!("{}", marker("write", &out));
     Ok(out)
 }
@@ -270,13 +287,19 @@ impl PyGraph {
     /// Write one cell on the node `qname` names: a CONSTRAINT / DECISION /
     /// CONV entry (`payload` a JSON object `str`) or a VECTOR (`payload`
     /// `bytes`, with optional `model` and `dims`). `kind` (a NodeKind NAME)
-    /// picks between nodes sharing a qname. The write goes to the repo's
-    /// `.glia` sidecar, into its default layout when that is fresh, and into
-    /// this graph. Returns the outcome dict (`entry_id`, `rows`, `target`,
-    /// `write_through`, ...). Raises ValueError for a cell type that is not
-    /// writable, a payload that breaks the entry rules, or a graph with no
-    /// root for the node's repo.
-    #[pyo3(signature = (qname, cell_type, payload, kind=None, model=None, dims=None))]
+    /// picks between nodes sharing a qname, and so does `hint`, the node's
+    /// move-stable v1 identity hint (`v1|<kind id>|<file>|<body:016x>|<local>`,
+    /// as glia-export-engram's `<out>.hints.jsonl` carries it), which also
+    /// re-binds a moved node and is stored with the row. The write goes to the
+    /// repo's `.glia` sidecar, into its default layout when that is fresh, and
+    /// into this graph. Returns the outcome dict (`entry_id`, `rows`,
+    /// `target`, `write_through`, `node_hint`, `hint_differs`, ...); `target`
+    /// is `hint_differs` when the qname's node has another hint than `hint`
+    /// (applied by the qname, the differing fields in `hint_differs`). Raises
+    /// ValueError for a cell type that is not writable, a payload that breaks
+    /// the entry rules, a hint that is not v1 or contradicts `kind`, or a
+    /// graph with no root for the node's repo.
+    #[pyo3(signature = (qname, cell_type, payload, kind=None, model=None, dims=None, hint=None))]
     #[allow(clippy::too_many_arguments)]
     fn set_cell(
         &mut self,
@@ -287,8 +310,9 @@ impl PyGraph {
         kind: Option<String>,
         model: Option<String>,
         dims: Option<u32>,
+        hint: Option<String>,
     ) -> PyResult<Py<PyAny>> {
-        let w = cell_write(qname, cell_type, payload_of(payload)?, kind, model, dims).map_err(PyValueError::new_err)?;
+        let w = cell_write(qname, cell_type, payload_of(payload)?, kind, model, dims, hint).map_err(PyValueError::new_err)?;
         let out = set_cell_in(&mut self.merged, &self.repo_roots, w).map_err(PyValueError::new_err)?;
         to_py(py, serde_json::to_string(&out))
     }
@@ -315,10 +339,12 @@ impl PyGraph {
 
 /// Write one cell for the repo at `repo_path` without a graph: the `.glia`
 /// sidecar, and the default layout when it is fresh and holds one repo (for a
-/// multi-repo layout use `PyGraph.set_cell`). Same payloads and outcome dict
-/// as `PyGraph.set_cell`; `target` is `pending` when no fresh layout was read.
+/// multi-repo layout use `PyGraph.set_cell`). Same payloads, `hint` (a v1
+/// identity hint; `target` `hint_differs` when the layout's node has another)
+/// and outcome dict as `PyGraph.set_cell`; `target` is `pending` when no
+/// fresh layout was read.
 #[pyfunction]
-#[pyo3(signature = (repo_path, qname, cell_type, payload, kind=None, model=None, dims=None))]
+#[pyo3(signature = (repo_path, qname, cell_type, payload, kind=None, model=None, dims=None, hint=None))]
 #[allow(clippy::too_many_arguments)]
 fn write_cell(
     py: Python<'_>,
@@ -329,8 +355,9 @@ fn write_cell(
     kind: Option<String>,
     model: Option<String>,
     dims: Option<u32>,
+    hint: Option<String>,
 ) -> PyResult<Py<PyAny>> {
-    let w = cell_write(qname, cell_type, payload_of(payload)?, kind, model, dims).map_err(PyValueError::new_err)?;
+    let w = cell_write(qname, cell_type, payload_of(payload)?, kind, model, dims, hint).map_err(PyValueError::new_err)?;
     let out = write_cell_at(repo_path, &w).map_err(PyValueError::new_err)?;
     to_py(py, serde_json::to_string(&out))
 }
@@ -377,7 +404,7 @@ mod tests {
     }
 
     fn conv(text: &str) -> CellWrite {
-        cell_write("app::charge", "CONV", Payload::Entry(format!("{{\"text\":\"{text}\"}}")), None, None, None)
+        cell_write("app::charge", "CONV", Payload::Entry(format!("{{\"text\":\"{text}\"}}")), None, None, None, None)
             .expect("a CONV write")
     }
 
@@ -391,17 +418,17 @@ mod tests {
     /// The payload shape must fit the cell, and model / dims are VECTOR-only.
     #[test]
     fn cell_write_checks_the_payload_shape() {
-        let w = cell_write("q", "DECISION", Payload::Entry(r#"{"id":"d","title":"t"}"#.into()), Some("CLASS".into()), None, None)
+        let w = cell_write("q", "DECISION", Payload::Entry(r#"{"id":"d","title":"t"}"#.into()), Some("CLASS".into()), None, None, None)
             .expect("a DECISION entry");
         assert_eq!((w.cell, w.kind.as_deref()), (cell_type::DECISION, Some("CLASS")));
-        let v = cell_write("q", "VECTOR", Payload::Vector(vec![0; 8]), None, Some("m".into()), Some(2)).expect("a vector");
+        let v = cell_write("q", "VECTOR", Payload::Vector(vec![0; 8]), None, Some("m".into()), Some(2), None).expect("a vector");
         assert_eq!(v.cell, cell_type::VECTOR);
         let err = |r: Result<CellWrite, String>| r.expect_err("refused");
-        assert!(err(cell_write("q", "NOPE", Payload::Entry("{}".into()), None, None, None)).contains("NOPE"));
-        assert!(err(cell_write("q", "CONV", Payload::Vector(vec![0; 4]), None, None, None)).contains("bytes are a VECTOR"));
-        assert!(err(cell_write("q", "VECTOR", Payload::Entry("{}".into()), None, None, None)).contains("bytes"));
-        assert!(err(cell_write("q", "CONV", Payload::Entry("{}".into()), None, None, Some(2))).contains("dims"));
-        assert!(err(cell_write("q", "CONV", Payload::Entry("not json".into()), None, None, None)).contains("not JSON"));
+        assert!(err(cell_write("q", "NOPE", Payload::Entry("{}".into()), None, None, None, None)).contains("NOPE"));
+        assert!(err(cell_write("q", "CONV", Payload::Vector(vec![0; 4]), None, None, None, None)).contains("bytes are a VECTOR"));
+        assert!(err(cell_write("q", "VECTOR", Payload::Entry("{}".into()), None, None, None, None)).contains("bytes"));
+        assert!(err(cell_write("q", "CONV", Payload::Entry("{}".into()), None, None, Some(2), None)).contains("dims"));
+        assert!(err(cell_write("q", "CONV", Payload::Entry("not json".into()), None, None, None, None)).contains("not JSON"));
     }
 
     /// `set_cell` on a graph whose default layout is fresh: the sidecar, the
@@ -437,6 +464,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// `hint=` (DT.12b): the node's own hint binds; a body-flipped one is
+    /// applied by the qname and reported against the live graph, the marker
+    /// naming the field; a non-v1 hint is refused and writes nothing.
+    #[test]
+    fn set_cell_reports_a_differing_hint() {
+        let root = repo("hint");
+        let r = built(&root);
+        let dir = default_layout_dir(&root);
+        write_merged_sharded(&r.merged, &dir).expect("persist");
+        let mut live = r.merged;
+        let hinted = |text: &str, hint: &str| {
+            cell_write(
+                "app::charge",
+                "CONV",
+                Payload::Entry(format!("{{\"text\":\"{text}\"}}")),
+                None,
+                None,
+                None,
+                Some(hint.to_string()),
+            )
+            .expect("a CONV write")
+        };
+        let own = set_cell_in(&mut live, &r.repo_roots, conv("first")).expect("write").hint.expect("the node's hint");
+        let agreed = set_cell_in(&mut live, &r.repo_roots, hinted("agreed", &own)).expect("write");
+        assert_eq!(agreed.target, "bound");
+        assert_eq!(agreed.node_hint.as_deref(), Some(own.as_str()));
+        assert!(agreed.hint_differs.is_empty());
+
+        let mut parts: Vec<&str> = own.split('|').collect();
+        parts[3] = if parts[3] == "0123456789abcdef" { "fedcba9876543210" } else { "0123456789abcdef" };
+        let flipped = parts.join("|");
+        let o = set_cell_in(&mut live, &r.repo_roots, hinted("moved on", &flipped)).expect("write");
+        assert_eq!((o.target.as_str(), o.hint_differs.as_slice()), ("hint_differs", ["body".to_string()].as_slice()));
+        assert_eq!(o.write_through, WriteThrough::Applied);
+        assert!(marker("write", &o).ends_with("surface=pyo3 differs=body"), "{}", marker("write", &o));
+        let rebuilt = built(&root).merged;
+        assert_eq!(conv_payload(&live), conv_payload(&rebuilt));
+        assert_eq!(conv_payload(&read_merged_sharded(&dir).expect("read")), conv_payload(&rebuilt));
+
+        let sidecar = std::fs::read(root.join(".glia/cells.jsonl")).expect("cells.jsonl");
+        let before = conv_payload(&live);
+        let bad = cell_write("app::charge", "CONV", Payload::Entry(r#"{"text":"x"}"#.into()), None, None, None, Some("x".into()))
+            .expect("cell_write takes any hint; the store validates it");
+        let err = set_cell_in(&mut live, &r.repo_roots, bad).expect_err("not v1");
+        assert!(err.contains("not a v1 identity hint"), "{err}");
+        assert_eq!(std::fs::read(root.join(".glia/cells.jsonl")).expect("cells.jsonl"), sidecar, "nothing is written");
+        assert_eq!(conv_payload(&live), before, "the live graph is untouched");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A graph with no root for the node's repo refuses, pointing at the
     /// path-taking module function; nothing is written.
     #[test]
@@ -455,7 +532,7 @@ mod tests {
     fn module_functions_and_node_cell_bytes() {
         let root = repo("module");
         let path = root.to_str().expect("utf-8");
-        let v = cell_write("app::charge", "VECTOR", Payload::Vector(vec![0, 0, 128, 63]), None, None, Some(1))
+        let v = cell_write("app::charge", "VECTOR", Payload::Vector(vec![0, 0, 128, 63]), None, None, Some(1), None)
             .expect("a vector");
         let out = write_cell_at(path, &v).expect("write");
         assert_eq!((out.write_through, out.target.as_str(), out.entry_id.as_deref()), (WriteThrough::NoGmap, "pending", None));
