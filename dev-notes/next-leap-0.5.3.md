@@ -149,8 +149,10 @@ links, so they must survive a rename.
   Python count over `git ls-files`): 3,640 text files (33.2 MB), 52,764 tokens, 4,779 in more than 16 files; 2.7 MB of
   JSONL per export, 0.6 MB deflated. Spec questions: tracked files from the git index vs the walk (which also reads
   untracked, unignored files); a full file per `--since` step vs a token / file diff. Substrate value beyond Engram:
-  `find`'s absence could say "no node named X, but X occurs in <files>" (a FACT-tier "named but not modelled"
-  signal, and a blind-spot candidate for `gaps`).
+  `find`'s absence says "no node named X, but X occurs in <files>" (a FACT-tier "named but not modelled" signal),
+  and `gaps` gains a named-but-not-modelled category over the same index. **Endorsed, 2026-10-16** (James: *"sick good
+  gaps coverage and enhancements for glia"*): the vocabulary index is a glia substrate feature first, with Engram's
+  `--vocab` export as one reader of it.
 - **Spec item: scope-level conventions.** In glia, CONV is a free-text note on ONE node (overlay `[[note]]`; the
   format spec's "conversation history"), not a convention. A convention that covers a scope ("modals are centred,
   never bottom-anchored": every modal component) has no home: until it has one, Engram writes it as a CONV note on the
