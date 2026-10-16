@@ -11,14 +11,22 @@
 //! `CatalogEntry` (GET /api/articles writes `[]models.CatalogEntry`), and the
 //! Go `models.Article` of the same name is never serialised.
 //!
-//! fired_on: `[models] client_wires hits=9 routed=9 ...`, printed below.
+//! DT.1m acceptance: `glia_graph::wire_pairs` over the same fixture. Each
+//! call site is compared with its handler's server side per direction:
+//! eleven pairs (nine responses, the POST and PATCH requests), the drift as
+//! flattened JSON paths, and the eight confirmed model pairs (never the Go
+//! `models.Article`).
+//!
+//! fired_on: `[models] client_wires hits=9 routed=9 ...` and `[models]
+//! pairs=11 response=9 request=2 model_pairs=8 ...`, printed below.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use glia_engine::generate_many;
 use glia_graph::{
-    ClientWire, ClientWires, MergedGraph, ResolvedShape, RouteHandler, WireDirection, client_wires,
+    ClientWire, ClientWires, MergedGraph, ResolvedShape, RouteHandler, WireDirection, WirePairs,
+    client_wires, wire_pairs,
 };
 
 fn fixture(name: &str) -> PathBuf {
@@ -319,5 +327,277 @@ fn client_wires_over_the_shop_fixture() {
 fn client_wires_are_deterministic() {
     let a = client_wires(&shop());
     let b = client_wires(&shop());
+    assert_eq!(a, b);
+}
+
+/// Each pair as (route, direction, [(path, rule, breaking)]).
+type PairRow = (String, &'static str, Vec<(String, &'static str, bool)>);
+
+fn pair_rows(wp: &WirePairs) -> Vec<PairRow> {
+    wp.pairs
+        .iter()
+        .map(|p| {
+            let changes = p
+                .changes
+                .iter()
+                .map(|c| (c.path.clone(), c.rule, c.breaking))
+                .collect();
+            (p.route_qname.clone(), p.direction.as_str(), changes)
+        })
+        .collect()
+}
+
+fn row(route: &str, dir: &'static str, changes: &[(&str, &'static str, bool)]) -> PairRow {
+    (
+        route.to_string(),
+        dir,
+        changes
+            .iter()
+            .map(|(p, r, b)| (p.to_string(), *r, *b))
+            .collect(),
+    )
+}
+
+#[test]
+fn wire_pairs_over_the_shop_fixture() {
+    let m = shop();
+    let wp = wire_pairs(&m);
+    let marker = wp.marker();
+    eprintln!("{marker}");
+    assert_eq!(
+        marker,
+        "[models] pairs=11 response=9 request=2 model_pairs=8 changes=16 breaking=4 \
+         ambiguous_server=0 open=0"
+    );
+
+    // The Invoice responses: the client reads `customerName`, the server
+    // writes `customer_name` (json tag), the client's optional `couponCode`
+    // is never written; `Note` (json:"-") is no change.
+    let invoice = [
+        ("couponCode", "json_field_optional_absent", false),
+        ("customerName", "json_field_missing", true),
+        ("customer_name", "json_field_unread", false),
+    ];
+    let paged: Vec<(String, &'static str, bool)> = invoice
+        .iter()
+        .map(|(p, r, b)| (format!("invoices[].{p}"), *r, *b))
+        .collect();
+    let expected = vec![
+        row("GET /api/articles", "response", &[]),
+        ("GET /api/invoice-pages/:n".to_string(), "response", paged),
+        row("GET /api/invoices/:id", "response", &invoice),
+        row("GET /api/listings", "response", &[]),
+        row(
+            "GET /api/listings/:id",
+            "response",
+            &[("sellerName", "json_field_optional_absent", false)],
+        ),
+        row(
+            "GET /api/summary/daily",
+            "response",
+            &[("day", "json_field_unread", false)],
+        ),
+        row(
+            "GET /api/summary/weekly",
+            "response",
+            &[("week", "json_field_unread", false)],
+        ),
+        row("PATCH /api/invoices/:id/status", "response", &invoice),
+        row("PATCH /api/invoices/:id/status", "request", &[]),
+        row("POST /api/invoices", "response", &invoice),
+        row(
+            "POST /api/invoices",
+            "request",
+            &[("couponCode", "json_field_dropped", false)],
+        ),
+    ];
+    assert_eq!(pair_rows(&wp), expected, "{wp:#?}");
+    for p in &wp.pairs {
+        assert!(p.notes.is_empty(), "{p:#?}");
+        assert_eq!(p.rule, "exact");
+        assert!(p.server_line.is_some());
+        for c in &p.changes {
+            assert!(!c.path.contains("Note"), "{c:#?}");
+        }
+    }
+
+    // `page` is not judged: the server's strconv.Atoi result is untyped.
+    let page = &wp.pairs[1];
+    assert!(page.changes.iter().all(|c| !c.path.starts_with("page")));
+    assert_eq!((page.client_model, page.server_model), (None, None));
+
+    let get = &wp.pairs[2];
+    assert_eq!(
+        (get.file.as_str(), get.line, get.server_line),
+        ("src/app/services/invoice.service.ts", 13, Some(39))
+    );
+    assert_eq!(
+        (qname(&m, get.client_model), qname(&m, get.server_model)),
+        (
+            "src::app::models::invoice::Invoice".to_string(),
+            "models::invoice::Invoice".to_string()
+        )
+    );
+    let missing = &get.changes[1];
+    assert_eq!(
+        (missing.client.as_deref(), missing.server.as_deref()),
+        (Some("string"), None)
+    );
+    let unread = &get.changes[2];
+    assert_eq!(
+        (unread.client.as_deref(), unread.server.as_deref()),
+        (None, Some("string"))
+    );
+
+    // The confirmed model pairs, by (client qname, server qname).
+    let pairs: Vec<(&str, &str, bool, usize)> = wp
+        .model_pairs
+        .iter()
+        .map(|p| {
+            (
+                p.client_qname.as_str(),
+                p.server_qname.as_str(),
+                p.diverged,
+                p.joins.len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        pairs,
+        [
+            (
+                "src::app::models::catalog::Article",
+                "models::catalog::CatalogEntry",
+                false,
+                1
+            ),
+            (
+                "src::app::models::catalog::Listing",
+                "models::catalog::Listing",
+                true,
+                1
+            ),
+            (
+                "src::app::models::catalog::Listing",
+                "models::catalog::ListingWithSeller",
+                false,
+                1
+            ),
+            (
+                "src::app::models::catalog::Summary",
+                "models::catalog::DailySummary",
+                true,
+                1
+            ),
+            (
+                "src::app::models::catalog::Summary",
+                "models::catalog::WeeklySummary",
+                true,
+                1
+            ),
+            (
+                "src::app::models::invoice::Invoice",
+                "models::invoice::Invoice",
+                true,
+                4
+            ),
+            (
+                "src::app::models::invoice::InvoiceItem",
+                "models::invoice::InvoiceItem",
+                false,
+                5
+            ),
+            (
+                "src::app::models::invoice::NewInvoice",
+                "models::invoice::CreateInvoiceRequest",
+                true,
+                1
+            ),
+        ],
+        "{:#?}",
+        wp.model_pairs
+    );
+    assert!(
+        wp.model_pairs
+            .iter()
+            .all(|p| p.server_qname != "models::catalog::Article"),
+        "the stored models.Article is never serialised"
+    );
+
+    // Where the models meet: the root, an envelope key, a nested array.
+    let joins = |client: &str, server: &str| -> Vec<(String, &'static str, String)> {
+        wp.model_pairs
+            .iter()
+            .find(|p| p.client_qname == client && p.server_qname == server)
+            .map(|p| {
+                p.joins
+                    .iter()
+                    .map(|j| (j.route_qname.clone(), j.direction.as_str(), j.path.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let s = |a: &str, d: &'static str, p: &str| (a.to_string(), d, p.to_string());
+    assert_eq!(
+        joins(
+            "src::app::models::invoice::Invoice",
+            "models::invoice::Invoice"
+        ),
+        [
+            s("GET /api/invoice-pages/:n", "response", "invoices[]"),
+            s("GET /api/invoices/:id", "response", ""),
+            s("PATCH /api/invoices/:id/status", "response", ""),
+            s("POST /api/invoices", "response", ""),
+        ]
+    );
+    assert_eq!(
+        joins(
+            "src::app::models::invoice::InvoiceItem",
+            "models::invoice::InvoiceItem"
+        ),
+        [
+            s(
+                "GET /api/invoice-pages/:n",
+                "response",
+                "invoices[].items[]"
+            ),
+            s("GET /api/invoices/:id", "response", "items[]"),
+            s("PATCH /api/invoices/:id/status", "response", "items[]"),
+            s("POST /api/invoices", "response", "items[]"),
+            s("POST /api/invoices", "request", "items[]"),
+        ]
+    );
+    assert_eq!(
+        joins(
+            "src::app::models::catalog::Article",
+            "models::catalog::CatalogEntry"
+        ),
+        [s("GET /api/articles", "response", "[]")]
+    );
+    assert_eq!(
+        joins(
+            "src::app::models::catalog::Listing",
+            "models::catalog::ListingWithSeller"
+        ),
+        [s("GET /api/listings", "response", "listings[]")]
+    );
+    let invoice_pair = &wp.model_pairs[5];
+    assert_eq!(
+        invoice_pair.overlap, 5,
+        "id, issuedAt, items, status, totalCents"
+    );
+    assert_eq!(
+        (
+            invoice_pair.joins[1].client_fields,
+            invoice_pair.joins[1].server_fields
+        ),
+        (7, 6)
+    );
+}
+
+#[test]
+fn wire_pairs_are_deterministic() {
+    let a = wire_pairs(&shop());
+    let b = wire_pairs(&shop());
     assert_eq!(a, b);
 }

@@ -61,7 +61,42 @@
 //! `[models] client_wires hits=<h> routed=<r> response=<a> request=<q>
 //! client_models=<m> unresolved_client=<u> server_sites=<s>
 //! server_unknown_status=<k> open=<o> weak_pairing=<w>`.
+//!
+//! **DT.1m: the compare.** [`wire_pairs`] turns every (call site, route,
+//! handler, direction) with a side on both ends into a [`WirePair`]. The
+//! server side ([`pick_server`]): of a handler's distinct known-2xx response
+//! shapes the one, or of several the one whose top-level names overlap the
+//! client's most (a tie: note `ambiguous_server`, nothing compared); of its
+//! binds exactly one distinct, else `ambiguous_server`. Names match exactly,
+//! and for a request into a Go server also ASCII case-insensitively
+//! (encoding/json's decode folding, an exact match first). A response
+//! (the server produces): a client-only name is `json_field_missing`
+//! (breaking) when required, else `json_field_optional_absent`; a
+//! server-only name `json_field_unread`; a name the client requires and the
+//! server may omit (omitempty) `json_field_may_be_absent`. A request (the
+//! client produces): a client-only name is `json_field_dropped`; a
+//! server-only name `json_required_missing` (breaking) when the binder
+//! requires it, else `json_field_unset`. Both: JSON kinds that differ while
+//! both are known, array against scalar included, are `json_type_mismatch`
+//! (breaking); an unknown name is an object only when it resolved to a
+//! model, else (like any / null, a call no builder typed, an open value)
+//! it is never judged. No name is claimed absent from an open side (note
+//! `open`); a union whose members are all objects is compared as their
+//! merged fields (note `union`). Paths flatten as `items[].sku`. Arrays and
+//! same-named fields recurse to [`MAX_DEPTH`], under inline roots too
+//! (`{ listings: Listing[] }` against `gin.H{"listings": ..}`). Where both
+//! sides are models with listed fields and [`confirms`] holds (at least one
+//! shared name, and at least half of the smaller side's) the two are a
+//! [`ModelPair`], diverged when a change sits at that model's level (a
+//! nested model level owns its own). Read by DT.1h (identity), DT.1i (drift
+//! rows in contract_fields).
+//!
+//! fired_on ([`WirePairs::marker`], printed by the engine test now, by the
+//! models resolver from DT.1h and by contract_fields from DT.1i):
+//! `[models] pairs=<p> response=<r> request=<q> model_pairs=<m> changes=<c>
+//! breaking=<b> ambiguous_server=<a> open=<o>`.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -1243,6 +1278,818 @@ impl<'m> Ctx<'m> {
     }
 }
 
+// ---- wire pairs (DT.1m) -----------------------------------------------------
+
+/// Response: a name the client requires and the server never writes.
+const FIELD_MISSING: &str = "json_field_missing";
+/// Response: an optional client name the server never writes.
+const FIELD_OPTIONAL_ABSENT: &str = "json_field_optional_absent";
+/// Response: a name the server writes and the client never reads.
+const FIELD_UNREAD: &str = "json_field_unread";
+/// Response: the client requires a name the server may omit (Go omitempty).
+const FIELD_MAY_BE_ABSENT: &str = "json_field_may_be_absent";
+/// Either direction: the two sides' JSON kinds differ, both known.
+const TYPE_MISMATCH: &str = "json_type_mismatch";
+/// Request: a name the client sends and the server never binds.
+const FIELD_DROPPED: &str = "json_field_dropped";
+/// Request: a name the server's binder requires and the client never sends.
+const REQUIRED_MISSING: &str = "json_required_missing";
+/// Request: a name the server binds and the client never sends.
+const FIELD_UNSET: &str = "json_field_unset";
+
+/// The handler has several distinct 2xx shapes and none overlaps the client
+/// most (a response), or several distinct binds (a request): nothing is
+/// compared.
+const NOTE_AMBIGUOUS_SERVER: &str = "ambiguous_server";
+/// A compared side is open: no name is claimed absent from it.
+const NOTE_OPEN: &str = "open";
+/// A side is a union, compared as its members' merged fields.
+const NOTE_UNION: &str = "union";
+
+/// One difference between a client and a server side, at a flattened JSON
+/// path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WireChange {
+    /// The flattened JSON path (`customerName`, `items[].sku`, `[].id` under
+    /// a root array): the client's names, the server's for a server-only
+    /// name.
+    pub path: String,
+    /// `json_field_missing`, `json_field_optional_absent`,
+    /// `json_field_unread`, `json_field_may_be_absent`,
+    /// `json_type_mismatch` (a response); `json_field_dropped`,
+    /// `json_required_missing`, `json_field_unset`, `json_type_mismatch` (a
+    /// request).
+    pub rule: &'static str,
+    /// `json_field_missing`, `json_required_missing` and
+    /// `json_type_mismatch` break the exchange.
+    pub breaking: bool,
+    /// The client's type text at `path` (declared, else as written); `None`
+    /// when the client does not list the name.
+    pub client: Option<String>,
+    /// The server's type text at `path`; `None` when the server does not
+    /// list the name.
+    pub server: Option<String>,
+}
+
+/// One client call site against one handler of one route it is paired with,
+/// in one direction: the server side picked and the changes between them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WirePair {
+    pub direction: WireDirection,
+    pub endpoint: NodeId,
+    pub endpoint_qname: String,
+    /// The endpoint's LB.8 owner segment, if any.
+    pub owner: Option<String>,
+    /// The call site's repo-relative file.
+    pub file: String,
+    /// The call site's 1-based line.
+    pub line: u32,
+    pub route: NodeId,
+    pub route_qname: String,
+    /// The HTTP tier of the pairing (`exact`, `base_fold`, ..).
+    pub rule: String,
+    pub handler: NodeId,
+    pub handler_qname: String,
+    /// The picked server site's 1-based line; `None` when ambiguous.
+    pub server_line: Option<u32>,
+    /// The client's type grammar.
+    pub client_format: Option<WireFormat>,
+    /// The server site's type grammar.
+    pub server_format: Option<WireFormat>,
+    /// The client root's model (an array's element model).
+    pub client_model: Option<NodeId>,
+    /// The picked server root's model; `None` for an inline envelope and
+    /// when ambiguous.
+    pub server_model: Option<NodeId>,
+    /// Sorted by (path, rule).
+    pub changes: Vec<WireChange>,
+    /// `ambiguous_server`, `open`, `union`, sorted.
+    pub notes: Vec<&'static str>,
+}
+
+/// One exchange position where a client model met a server model and
+/// `confirms` held (at least one shared JSON name, at least half of the
+/// smaller side's).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ModelJoin {
+    pub direction: WireDirection,
+    pub route_qname: String,
+    /// The joining call site's file.
+    pub file: String,
+    /// The joining call site's 1-based line.
+    pub line: u32,
+    pub handler_qname: String,
+    /// The models' position in the exchange: empty at the root, else the
+    /// flattened path holding them (`items[]`, `invoices[]`, `[]` for a root
+    /// array).
+    pub path: String,
+    /// JSON names matched on both sides at this position.
+    pub overlap: usize,
+    pub client_fields: usize,
+    pub server_fields: usize,
+    /// A change at this model's level (not inside a nested model level).
+    pub diverged: bool,
+}
+
+/// A client model and a server model the exchanges confirm are one model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ModelPair {
+    pub client: NodeId,
+    pub client_qname: String,
+    pub server: NodeId,
+    pub server_qname: String,
+    /// The largest overlap of any join.
+    pub overlap: usize,
+    /// Any join diverged.
+    pub diverged: bool,
+    /// Every position joining the two, sorted by (route qname, direction,
+    /// hit file, line, handler qname, path).
+    pub joins: Vec<ModelJoin>,
+}
+
+/// The counts behind [`WirePairs::marker`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WirePairStats {
+    pub pairs: usize,
+    /// Of `pairs`: response pairs.
+    pub response: usize,
+    /// Of `pairs`: request pairs.
+    pub request: usize,
+    /// Distinct (client model, server model) pairs.
+    pub model_pairs: usize,
+    /// Changes over every pair.
+    pub changes: usize,
+    /// Of `changes`: breaking.
+    pub breaking: usize,
+    /// Pairs noted `ambiguous_server`.
+    pub ambiguous_server: usize,
+    /// Pairs noted `open`.
+    pub open: usize,
+}
+
+/// Every [`WirePair`] and [`ModelPair`] of a merged graph, sorted, with its
+/// counts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WirePairs {
+    /// Sorted by (route qname, direction, hit file, line, handler qname).
+    pub pairs: Vec<WirePair>,
+    /// Sorted by (client qname, server qname, first join).
+    pub model_pairs: Vec<ModelPair>,
+    pub stats: WirePairStats,
+}
+
+impl WirePairs {
+    /// The fired_on line.
+    pub fn marker(&self) -> String {
+        let s = &self.stats;
+        format!(
+            "[models] pairs={} response={} request={} model_pairs={} changes={} breaking={} \
+             ambiguous_server={} open={}",
+            s.pairs,
+            s.response,
+            s.request,
+            s.model_pairs,
+            s.changes,
+            s.breaking,
+            s.ambiguous_server,
+            s.open,
+        )
+    }
+}
+
+/// Every [`client_wires`] call site compared with the server side of each
+/// handler it reaches, per direction (see the module doc's DT.1m part).
+pub fn wire_pairs(merged: &MergedGraph) -> WirePairs {
+    let cw = client_wires(merged);
+    let mut pairs: Vec<WirePair> = Vec::new();
+    let mut found: Vec<(FoundModel, ModelJoin)> = Vec::new();
+    for w in &cw.wires {
+        for side in &w.routes {
+            for h in &side.handlers {
+                for dir in WireDirection::ALL {
+                    let Some(client) = w.client(dir) else {
+                        continue;
+                    };
+                    let sites = h.sites(dir);
+                    let Some(first) = sites.first() else {
+                        continue;
+                    };
+                    let mut pair = WirePair {
+                        direction: dir,
+                        endpoint: w.endpoint,
+                        endpoint_qname: w.endpoint_qname.clone(),
+                        owner: w.owner.clone(),
+                        file: w.file.clone(),
+                        line: w.line,
+                        route: side.route,
+                        route_qname: side.route_qname.clone(),
+                        rule: side.rule.clone(),
+                        handler: h.handler,
+                        handler_qname: h.qname.clone(),
+                        server_line: None,
+                        client_format: w.format,
+                        server_format: first.shape.format,
+                        client_model: client.model,
+                        server_model: None,
+                        changes: Vec::new(),
+                        notes: Vec::new(),
+                    };
+                    let Some(site) = pick_server(dir, client, sites) else {
+                        pair.notes.push(NOTE_AMBIGUOUS_SERVER);
+                        pairs.push(pair);
+                        continue;
+                    };
+                    let cmp = compare(dir, client, &site.shape, "");
+                    pair.server_line = Some(site.line);
+                    pair.server_format = site.shape.format;
+                    pair.server_model = site.shape.model;
+                    pair.changes = cmp.changes;
+                    pair.notes = cmp.notes.into_iter().collect();
+                    for m in cmp.models {
+                        let join = ModelJoin {
+                            direction: dir,
+                            route_qname: pair.route_qname.clone(),
+                            file: pair.file.clone(),
+                            line: pair.line,
+                            handler_qname: pair.handler_qname.clone(),
+                            path: m.path.clone(),
+                            overlap: m.overlap,
+                            client_fields: m.client_fields,
+                            server_fields: m.server_fields,
+                            diverged: m.diverged,
+                        };
+                        found.push((m, join));
+                    }
+                    pairs.push(pair);
+                }
+            }
+        }
+    }
+    pairs.sort_by_cached_key(|p| {
+        (
+            p.route_qname.clone(),
+            p.direction,
+            p.file.clone(),
+            p.line,
+            p.handler_qname.clone(),
+            p.endpoint_qname.clone(),
+        )
+    });
+
+    let mut index: HashMap<(NodeId, NodeId), usize> = HashMap::new();
+    let mut model_pairs: Vec<ModelPair> = Vec::new();
+    for (m, join) in found {
+        let at = *index.entry((m.client, m.server)).or_insert_with(|| {
+            model_pairs.push(ModelPair {
+                client: m.client,
+                client_qname: qname_of(merged, m.client),
+                server: m.server,
+                server_qname: qname_of(merged, m.server),
+                overlap: 0,
+                diverged: false,
+                joins: Vec::new(),
+            });
+            model_pairs.len() - 1
+        });
+        if let Some(mp) = model_pairs.get_mut(at) {
+            mp.overlap = mp.overlap.max(join.overlap);
+            mp.diverged |= join.diverged;
+            mp.joins.push(join);
+        }
+    }
+    let join_key = |j: &ModelJoin| {
+        (
+            j.route_qname.clone(),
+            j.direction,
+            j.file.clone(),
+            j.line,
+            j.handler_qname.clone(),
+            j.path.clone(),
+        )
+    };
+    for mp in &mut model_pairs {
+        mp.joins.sort_by_cached_key(join_key);
+    }
+    model_pairs.sort_by_cached_key(|mp| {
+        (
+            mp.client_qname.clone(),
+            mp.server_qname.clone(),
+            mp.joins.first().map(join_key),
+        )
+    });
+
+    let count = |dir: WireDirection| pairs.iter().filter(|p| p.direction == dir).count();
+    let noted = |note: &str| pairs.iter().filter(|p| p.notes.contains(&note)).count();
+    let stats = WirePairStats {
+        pairs: pairs.len(),
+        response: count(WireDirection::Response),
+        request: count(WireDirection::Request),
+        model_pairs: model_pairs.len(),
+        changes: pairs.iter().map(|p| p.changes.len()).sum(),
+        breaking: pairs
+            .iter()
+            .flat_map(|p| &p.changes)
+            .filter(|c| c.breaking)
+            .count(),
+        ambiguous_server: noted(NOTE_AMBIGUOUS_SERVER),
+        open: noted(NOTE_OPEN),
+    };
+    WirePairs {
+        pairs,
+        model_pairs,
+        stats,
+    }
+}
+
+/// The qname of `id` in the first graph that names it.
+fn qname_of(m: &MergedGraph, id: NodeId) -> String {
+    m.graphs
+        .iter()
+        .find_map(|g| g.nav.qname_by_id.get(&id).cloned())
+        .unwrap_or_default()
+}
+
+/// The server site a client side is compared with. A response reads the
+/// handler's distinct known-2xx shapes ([`same_wire`]): one is it; of
+/// several, the one whose top-level names overlap the client's most, a tie
+/// none. A request needs exactly one distinct bind.
+fn pick_server<'s>(
+    dir: WireDirection,
+    client: &ResolvedShape,
+    sites: &'s [ServerSite],
+) -> Option<&'s ServerSite> {
+    let mut distinct: Vec<&ServerSite> = Vec::new();
+    for s in sites {
+        if !distinct.iter().any(|d| same_wire(&d.shape, &s.shape)) {
+            distinct.push(s);
+        }
+    }
+    match distinct.as_slice() {
+        [one] => return Some(one),
+        [] => return None,
+        _ if dir == WireDirection::Request => return None,
+        _ => {}
+    }
+    let names = |s: &ResolvedShape| -> Vec<String> {
+        object_view(s).map_or_else(Vec::new, |v| v.fields.keys().cloned().collect())
+    };
+    let theirs = names(client);
+    let scores: Vec<usize> = distinct
+        .iter()
+        .map(|d| {
+            let ours = names(&d.shape);
+            match_names(
+                theirs.iter().map(String::as_str),
+                ours.iter().map(String::as_str),
+                false,
+            )
+            .len()
+        })
+        .collect();
+    let best = scores.iter().copied().max()?;
+    let mut winners = distinct
+        .iter()
+        .zip(&scores)
+        .filter(|(_, s)| **s == best)
+        .map(|(d, _)| *d);
+    match (winners.next(), winners.next()) {
+        (Some(one), None) => Some(one),
+        _ => None,
+    }
+}
+
+/// Two server values travel alike: one model (with the same array-ness and
+/// openness), or inline values whose names, requiredness and values match,
+/// or scalars of one JSON kind (as written when no kind is known).
+fn same_wire(a: &ResolvedShape, b: &ResolvedShape) -> bool {
+    if a.model != b.model
+        || a.array != b.array
+        || a.open != b.open
+        || a.fields.len() != b.fields.len()
+        || a.members.len() != b.members.len()
+    {
+        return false;
+    }
+    if a.model.is_some() {
+        return true;
+    }
+    let fields = a.fields.iter().zip(&b.fields).all(|((ka, fa), (kb, fb))| {
+        ka == kb
+            && fa.required == fb.required
+            && fa.bind_required == fb.bind_required
+            && same_wire(&fa.value, &fb.value)
+    });
+    let members = a
+        .members
+        .iter()
+        .zip(&b.members)
+        .all(|(x, y)| same_wire(x, y));
+    let kinds = match (element_kind(a), element_kind(b)) {
+        (Some(x), Some(y)) => x == y,
+        (None, None) => a.written == b.written,
+        _ => false,
+    };
+    fields && members && kinds
+}
+
+/// The names of `client` and `server` that match: exact first, then, when
+/// `fold`, an ASCII case-insensitive match among the server names still
+/// free (encoding/json's decode folding; the least such name), each server
+/// name used once. Sorted by client name.
+fn match_names<'a>(
+    client: impl IntoIterator<Item = &'a str>,
+    server: impl IntoIterator<Item = &'a str>,
+    fold: bool,
+) -> Vec<(&'a str, &'a str)> {
+    let client: BTreeSet<&str> = client.into_iter().collect();
+    let server: BTreeSet<&str> = server.into_iter().collect();
+    let mut used: BTreeSet<&str> = BTreeSet::new();
+    let mut out: Vec<(&str, &str)> = Vec::new();
+    let mut rest: Vec<&str> = Vec::new();
+    for c in &client {
+        if server.contains(c) {
+            used.insert(c);
+            out.push((c, c));
+        } else {
+            rest.push(c);
+        }
+    }
+    if fold {
+        for c in rest {
+            if let Some(s) = server
+                .iter()
+                .find(|s| !used.contains(*s) && s.eq_ignore_ascii_case(c))
+            {
+                used.insert(s);
+                out.push((c, s));
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// The client and server names name one model: they overlap in at least
+/// one name, and in at least half of the smaller side's names. `fold` as in
+/// [`match_names`]. Returns the overlap. DT.1n / DT.1k confirm their pairs
+/// through it.
+pub(crate) fn confirms<'a>(
+    client: impl IntoIterator<Item = &'a str>,
+    server: impl IntoIterator<Item = &'a str>,
+    fold: bool,
+) -> Option<usize> {
+    let client: BTreeSet<&str> = client.into_iter().collect();
+    let server: BTreeSet<&str> = server.into_iter().collect();
+    let overlap = match_names(client.iter().copied(), server.iter().copied(), fold).len();
+    (overlap >= 1 && 2 * overlap >= client.len().min(server.len())).then_some(overlap)
+}
+
+/// A kind that can be judged: never any, null or an unknown name.
+fn judged(k: JsonKind) -> Option<JsonKind> {
+    (!matches!(k, JsonKind::Any | JsonKind::Null | JsonKind::Unknown(_))).then_some(k)
+}
+
+/// The JSON kind a value is judged by at its position: an array when one
+/// layer was peeled; else its declared text's kind (an unknown name is an
+/// object only when it resolved to a model; a TS tuple is an array whose
+/// elements are not judged); else its element's kind. `None` is never
+/// judged.
+fn outer_kind(declared: Option<&str>, v: &ResolvedShape) -> Option<JsonKind> {
+    if v.array {
+        return Some(JsonKind::Array);
+    }
+    match declared {
+        Some(d) => match kind_of(v.format, d) {
+            JsonKind::Unknown(_) => v.model.is_some().then_some(JsonKind::Object),
+            k => judged(k),
+        },
+        None => element_kind(v),
+    }
+}
+
+/// The JSON kind of `v`'s element (`v` itself when it is no array): a
+/// resolved model or an inline object is an object, a written name its
+/// format's kind, a union the kind its members share; a call or chain no
+/// builder typed, an open value and an unbound name are never judged.
+fn element_kind(v: &ResolvedShape) -> Option<JsonKind> {
+    if v.model.is_some() {
+        return Some(JsonKind::Object);
+    }
+    match &v.written {
+        Shape::Named { ty, .. } => judged(kind_of(v.format, ty)),
+        Shape::Object { .. } => Some(JsonKind::Object),
+        Shape::Union(_) => {
+            let mut kinds = v.members.iter().map(|m| outer_kind(None, m));
+            let first = kinds.next()??;
+            kinds.all(|k| k.as_ref() == Some(&first)).then_some(first)
+        }
+        Shape::Call { .. } | Shape::Chain { .. } | Shape::Open { .. } => None,
+    }
+}
+
+/// `v` as an object compared name by name: a model or an inline object
+/// itself; a union whose members all are (none an array) as their merged
+/// fields, a name required only when every member requires it, open when
+/// any member is.
+fn object_view(v: &ResolvedShape) -> Option<Cow<'_, ResolvedShape>> {
+    if v.model.is_some() || matches!(v.written, Shape::Object { .. }) {
+        return Some(Cow::Borrowed(v));
+    }
+    if !matches!(v.written, Shape::Union(_)) || v.members.is_empty() {
+        return None;
+    }
+    let mut views = Vec::with_capacity(v.members.len());
+    for m in &v.members {
+        if m.array {
+            return None;
+        }
+        views.push(object_view(m)?);
+    }
+    let mut fields: BTreeMap<String, ResolvedField> = BTreeMap::new();
+    for view in &views {
+        for (name, f) in &view.fields {
+            fields.entry(name.clone()).or_insert_with(|| f.clone());
+        }
+    }
+    for (name, f) in &mut fields {
+        let every = |pick: fn(&ResolvedField) -> bool| {
+            views
+                .iter()
+                .all(|view| view.fields.get(name).is_some_and(pick))
+        };
+        f.required = every(|g| g.required);
+        f.bind_required = every(|g| g.bind_required);
+    }
+    let merged = ResolvedShape {
+        written: v.written.clone(),
+        format: v.format,
+        model: None,
+        array: false,
+        fields,
+        members: Vec::new(),
+        open: views.iter().any(|view| view.open),
+    };
+    Some(Cow::Owned(merged))
+}
+
+/// A value's type text: its declared text, else as written (an array in its
+/// format's spelling).
+fn type_text(declared: Option<&str>, v: &ResolvedShape) -> String {
+    if let Some(d) = declared {
+        return d.trim().to_string();
+    }
+    match &v.written {
+        Shape::Named {
+            ty, array: true, ..
+        } => match v.format {
+            Some(WireFormat::Go) => format!("[]{ty}"),
+            Some(WireFormat::Dart) => format!("List<{ty}>"),
+            Some(WireFormat::Graphql) => format!("[{ty}]"),
+            Some(WireFormat::Ts) | None => format!("{ty}[]"),
+        },
+        Shape::Named { ty, .. } => ty.clone(),
+        Shape::Call { chain, .. } | Shape::Chain { chain, .. } => chain.clone(),
+        Shape::Object { .. } => "object".to_string(),
+        Shape::Union(_) => v
+            .members
+            .iter()
+            .map(|m| type_text(None, m))
+            .collect::<Vec<_>>()
+            .join(" | "),
+        Shape::Open { raw } => raw.clone(),
+    }
+}
+
+/// `path` extended by one JSON name.
+fn join_path(path: &str, name: &str) -> String {
+    if path.is_empty() {
+        name.to_string()
+    } else {
+        format!("{path}.{name}")
+    }
+}
+
+/// A confirmed model pair met inside one comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FoundModel {
+    client: NodeId,
+    server: NodeId,
+    path: String,
+    overlap: usize,
+    client_fields: usize,
+    server_fields: usize,
+    diverged: bool,
+}
+
+/// What [`compare`] found.
+#[derive(Debug)]
+struct Compared {
+    dir: WireDirection,
+    changes: Vec<WireChange>,
+    models: Vec<FoundModel>,
+    notes: BTreeSet<&'static str>,
+}
+
+/// The changes and the confirmed model pairs between a client side and a
+/// server side in `dir`, from `path` (empty: the root). Changes are sorted
+/// by (path, rule), model pairs by path.
+fn compare(
+    dir: WireDirection,
+    client: &ResolvedShape,
+    server: &ResolvedShape,
+    path: &str,
+) -> Compared {
+    let mut c = Compared {
+        dir,
+        changes: Vec::new(),
+        models: Vec::new(),
+        notes: BTreeSet::new(),
+    };
+    c.values(None, client, None, server, path, 0);
+    c.changes
+        .sort_by(|a, b| (&a.path, a.rule).cmp(&(&b.path, b.rule)));
+    c.models.sort_by(|a, b| a.path.cmp(&b.path));
+    c
+}
+
+impl Compared {
+    fn push(
+        &mut self,
+        path: &str,
+        rule: &'static str,
+        breaking: bool,
+        client: Option<String>,
+        server: Option<String>,
+    ) {
+        self.changes.push(WireChange {
+            path: path.to_string(),
+            rule,
+            breaking,
+            client,
+            server,
+        });
+    }
+
+    /// Two values at one position (a model field's with its declared text):
+    /// their kinds, then their array elements, then their names. Returns
+    /// how many changes it pushed that the enclosing level owns (a nested
+    /// model level owns its own).
+    fn values(
+        &mut self,
+        cd: Option<&str>,
+        c: &ResolvedShape,
+        sd: Option<&str>,
+        s: &ResolvedShape,
+        path: &str,
+        depth: usize,
+    ) -> usize {
+        if matches!(c.written, Shape::Union(_)) || matches!(s.written, Shape::Union(_)) {
+            self.notes.insert(NOTE_UNION);
+        }
+        let (kc, ks) = (outer_kind(cd, c), outer_kind(sd, s));
+        if let (Some(a), Some(b)) = (&kc, &ks)
+            && a != b
+        {
+            let (ct, st) = (type_text(cd, c), type_text(sd, s));
+            self.push(path, TYPE_MISMATCH, true, Some(ct), Some(st));
+            return 1;
+        }
+        match (kc == Some(JsonKind::Array), ks == Some(JsonKind::Array)) {
+            (true, true) => {
+                // A tuple's elements are no one type: not judged.
+                if !(c.array && s.array) {
+                    return 0;
+                }
+                let elem = format!("{path}[]");
+                if let (Some(a), Some(b)) = (element_kind(c), element_kind(s))
+                    && a != b
+                {
+                    let (ct, st) = (type_text(cd, c), type_text(sd, s));
+                    self.push(&elem, TYPE_MISMATCH, true, Some(ct), Some(st));
+                    return 1;
+                }
+                self.objects(c, s, &elem, depth)
+            }
+            (false, false) => self.objects(c, s, path, depth),
+            // An array against a value of no known kind: nothing is judged.
+            _ => {
+                if c.open || s.open {
+                    self.notes.insert(NOTE_OPEN);
+                }
+                0
+            }
+        }
+    }
+
+    /// Two elements compared name by name when both are objects; an object
+    /// against an open value claims nothing (noted).
+    fn objects(&mut self, c: &ResolvedShape, s: &ResolvedShape, path: &str, depth: usize) -> usize {
+        match (object_view(c), object_view(s)) {
+            (Some(co), Some(so)) => self.level(&co, &so, path, depth),
+            (Some(_), None) if s.open => {
+                self.notes.insert(NOTE_OPEN);
+                0
+            }
+            (None, Some(_)) if c.open => {
+                self.notes.insert(NOTE_OPEN);
+                0
+            }
+            _ => 0,
+        }
+    }
+
+    /// One object level: the names on one side only (none is claimed absent
+    /// from an open side), then each matched name's requiredness and value.
+    /// When both sides are models it is a model level: it owns its changes
+    /// and, when [`confirms`] holds, is a model pair.
+    fn level(&mut self, co: &ResolvedShape, so: &ResolvedShape, path: &str, depth: usize) -> usize {
+        if depth > MAX_DEPTH {
+            return 0;
+        }
+        if co.open || so.open {
+            self.notes.insert(NOTE_OPEN);
+        }
+        let fold = self.dir == WireDirection::Request && so.format == Some(WireFormat::Go);
+        let cnames = co.fields.keys().map(String::as_str);
+        let snames = so.fields.keys().map(String::as_str);
+        let matched = match_names(cnames.clone(), snames.clone(), fold);
+        let on_client: BTreeSet<&str> = matched.iter().map(|(c, _)| *c).collect();
+        let on_server: BTreeSet<&str> = matched.iter().map(|(_, s)| *s).collect();
+        let mut own = 0;
+        if !so.open {
+            for (name, f) in &co.fields {
+                if on_client.contains(name.as_str()) {
+                    continue;
+                }
+                let (rule, breaking) = match (self.dir, f.required) {
+                    (WireDirection::Response, true) => (FIELD_MISSING, true),
+                    (WireDirection::Response, false) => (FIELD_OPTIONAL_ABSENT, false),
+                    (WireDirection::Request, _) => (FIELD_DROPPED, false),
+                };
+                let text = type_text(f.declared.as_deref(), &f.value);
+                self.push(&join_path(path, name), rule, breaking, Some(text), None);
+                own += 1;
+            }
+        }
+        if !co.open {
+            for (name, f) in &so.fields {
+                if on_server.contains(name.as_str()) {
+                    continue;
+                }
+                let (rule, breaking) = match (self.dir, f.bind_required) {
+                    (WireDirection::Response, _) => (FIELD_UNREAD, false),
+                    (WireDirection::Request, true) => (REQUIRED_MISSING, true),
+                    (WireDirection::Request, false) => (FIELD_UNSET, false),
+                };
+                let text = type_text(f.declared.as_deref(), &f.value);
+                self.push(&join_path(path, name), rule, breaking, None, Some(text));
+                own += 1;
+            }
+        }
+        for (cn, sn) in &matched {
+            let (Some(cf), Some(sf)) = (co.fields.get(*cn), so.fields.get(*sn)) else {
+                continue;
+            };
+            let at = join_path(path, cn);
+            if self.dir == WireDirection::Response && cf.required && !sf.required {
+                let ct = type_text(cf.declared.as_deref(), &cf.value);
+                let st = type_text(sf.declared.as_deref(), &sf.value);
+                self.push(&at, FIELD_MAY_BE_ABSENT, false, Some(ct), Some(st));
+                own += 1;
+            }
+            own += self.values(
+                cf.declared.as_deref(),
+                &cf.value,
+                sf.declared.as_deref(),
+                &sf.value,
+                &at,
+                depth + 1,
+            );
+        }
+        let (Some(client), Some(server)) = (co.model, so.model) else {
+            return own;
+        };
+        if let Some(overlap) = confirms(cnames, snames, fold) {
+            self.models.push(FoundModel {
+                client,
+                server,
+                path: path.to_string(),
+                overlap,
+                client_fields: co.fields.len(),
+                server_fields: so.fields.len(),
+                diverged: own > 0,
+            });
+        }
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1994,5 +2841,773 @@ mod tests {
             };
         }
         assert_eq!(levels, MAX_DEPTH);
+    }
+
+    // ---- DT.1m: wire pairs ----------------------------------------------------
+
+    /// A value declared `ty` in `format`, resolved to no model.
+    fn val(format: WireFormat, ty: &str) -> ResolvedShape {
+        let (elem, array) = element_type(ty);
+        let kind = json_kind(format, &elem);
+        ResolvedShape {
+            written: Shape::Named {
+                ty: elem,
+                array,
+                model: None,
+            },
+            format: Some(format),
+            model: None,
+            array,
+            fields: BTreeMap::new(),
+            members: Vec::new(),
+            open: matches!(
+                kind,
+                JsonKind::Unknown(_) | JsonKind::Any | JsonKind::Object
+            ),
+        }
+    }
+
+    /// Model `id` (an array of it when `array`) with `fields`.
+    fn model_of(
+        format: WireFormat,
+        id: u64,
+        array: bool,
+        open: bool,
+        fields: Vec<ResolvedField>,
+    ) -> ResolvedShape {
+        ResolvedShape {
+            written: Shape::Named {
+                ty: format!("M{id}"),
+                array,
+                model: None,
+            },
+            format: Some(format),
+            model: Some(NodeId(id)),
+            array,
+            fields: fields.into_iter().map(|f| (f.name.clone(), f)).collect(),
+            members: Vec::new(),
+            open,
+        }
+    }
+
+    /// An inline object with `fields`.
+    fn inline(format: WireFormat, open: bool, fields: Vec<ResolvedField>) -> ResolvedShape {
+        ResolvedShape {
+            written: Shape::Object {
+                fields: Vec::new(),
+                open,
+            },
+            format: Some(format),
+            model: None,
+            array: false,
+            fields: fields.into_iter().map(|f| (f.name.clone(), f)).collect(),
+            members: Vec::new(),
+            open,
+        }
+    }
+
+    fn union_of(format: WireFormat, members: Vec<ResolvedShape>) -> ResolvedShape {
+        ResolvedShape {
+            written: Shape::Union(members.iter().map(|m| m.written.clone()).collect()),
+            format: Some(format),
+            model: None,
+            array: false,
+            fields: BTreeMap::new(),
+            open: members.iter().any(|m| m.open),
+            members,
+        }
+    }
+
+    fn fld(
+        name: &str,
+        declared: Option<&str>,
+        required: bool,
+        value: ResolvedShape,
+    ) -> ResolvedField {
+        ResolvedField {
+            name: name.to_string(),
+            member: None,
+            declared: declared.map(str::to_string),
+            required,
+            bind_required: false,
+            declared_in: None,
+            value,
+        }
+    }
+
+    /// A model field declared `ty`, its value read off `ty`.
+    fn mf(format: WireFormat, name: &str, ty: &str, required: bool) -> ResolvedField {
+        fld(name, Some(ty), required, val(format, ty))
+    }
+
+    /// `f` with the binder requiring it.
+    fn bound(mut f: ResolvedField) -> ResolvedField {
+        f.bind_required = true;
+        f
+    }
+
+    fn changes(c: &Compared) -> Vec<(&str, &'static str, bool)> {
+        c.changes
+            .iter()
+            .map(|x| (x.path.as_str(), x.rule, x.breaking))
+            .collect()
+    }
+
+    const TS: WireFormat = WireFormat::Ts;
+    const GO: WireFormat = WireFormat::Go;
+
+    #[test]
+    fn response_rules_name_every_change() {
+        let item = |format: WireFormat, sku: &str, qty: &str| {
+            vec![mf(format, "sku", sku, true), mf(format, "qty", qty, true)]
+        };
+        let client = model_of(
+            TS,
+            1,
+            false,
+            false,
+            vec![
+                mf(TS, "a", "string", true),
+                mf(TS, "b", "string", false),
+                mf(TS, "c", "string", true),
+                mf(TS, "n", "number", true),
+                mf(TS, "tags", "string[]", true),
+                mf(TS, "when", "Date", true),
+                fld(
+                    "items",
+                    Some("Item[]"),
+                    true,
+                    model_of(TS, 2, true, false, item(TS, "string", "number")),
+                ),
+            ],
+        );
+        let server = model_of(
+            GO,
+            11,
+            false,
+            false,
+            vec![
+                mf(GO, "a", "string", false),
+                mf(GO, "d", "string", true),
+                mf(GO, "n", "string", true),
+                mf(GO, "tags", "string", true),
+                mf(GO, "when", "int64", true),
+                fld(
+                    "items",
+                    Some("[]Item"),
+                    true,
+                    model_of(GO, 12, true, false, item(GO, "int", "int")),
+                ),
+            ],
+        );
+        let cmp = compare(WireDirection::Response, &client, &server, "");
+        assert_eq!(
+            changes(&cmp),
+            [
+                ("a", FIELD_MAY_BE_ABSENT, false),
+                ("b", FIELD_OPTIONAL_ABSENT, false),
+                ("c", FIELD_MISSING, true),
+                ("d", FIELD_UNREAD, false),
+                ("items[].sku", TYPE_MISMATCH, true),
+                ("n", TYPE_MISMATCH, true),
+                ("tags", TYPE_MISMATCH, true),
+            ],
+            "Date is any: never judged"
+        );
+        let tags = cmp.changes.iter().find(|c| c.path == "tags").unwrap();
+        assert_eq!(
+            (tags.client.as_deref(), tags.server.as_deref()),
+            (Some("string[]"), Some("string")),
+            "an array against a scalar"
+        );
+        assert!(cmp.notes.is_empty());
+        assert_eq!(
+            cmp.models
+                .iter()
+                .map(|m| (m.client.0, m.server.0, m.path.as_str(), m.diverged))
+                .collect::<Vec<_>>(),
+            [(1, 11, "", true), (2, 12, "items[]", true)]
+        );
+    }
+
+    #[test]
+    fn request_rules_fold_names_into_a_go_binder_only() {
+        let client = model_of(
+            TS,
+            1,
+            false,
+            false,
+            vec![
+                mf(TS, "customername", "string", true),
+                mf(TS, "extra", "string", false),
+                mf(TS, "id", "string", true),
+            ],
+        );
+        let server = |format: WireFormat| {
+            model_of(
+                format,
+                11,
+                false,
+                false,
+                vec![
+                    bound(mf(format, "customerName", "string", true)),
+                    mf(format, "id", "string", true),
+                    bound(mf(format, "note", "string", true)),
+                    mf(format, "memo", "string", true),
+                ],
+            )
+        };
+        let into_go = compare(WireDirection::Request, &client, &server(GO), "");
+        assert_eq!(
+            changes(&into_go),
+            [
+                ("extra", FIELD_DROPPED, false),
+                ("memo", FIELD_UNSET, false),
+                ("note", REQUIRED_MISSING, true),
+            ],
+            "encoding/json folds customername onto customerName"
+        );
+        let into_ts = compare(WireDirection::Request, &client, &server(TS), "");
+        assert_eq!(
+            changes(&into_ts),
+            [
+                ("customerName", REQUIRED_MISSING, true),
+                ("customername", FIELD_DROPPED, false),
+                ("extra", FIELD_DROPPED, false),
+                ("memo", FIELD_UNSET, false),
+                ("note", REQUIRED_MISSING, true),
+            ],
+            "no folding into a non-Go server"
+        );
+        let response = compare(WireDirection::Response, &client, &server(GO), "");
+        assert!(
+            changes(&response).contains(&("customername", FIELD_MISSING, true)),
+            "a response never folds: the client reads exact names"
+        );
+        assert_eq!(
+            match_names(["Name", "id"], ["ID", "id", "name"], true),
+            [("Name", "name"), ("id", "id")],
+            "an exact match first; ID stays free"
+        );
+        assert_eq!(match_names(["ID"], ["Id", "id"], true), [("ID", "Id")]);
+        assert!(match_names(["ID"], ["Id", "id"], false).is_empty());
+    }
+
+    #[test]
+    fn open_sides_are_never_claimed_to_lack_a_name() {
+        let closed = |id: u64, names: &[&str]| {
+            model_of(
+                TS,
+                id,
+                false,
+                false,
+                names.iter().map(|n| mf(TS, n, "string", true)).collect(),
+            )
+        };
+        let open_server = model_of(
+            GO,
+            11,
+            false,
+            true,
+            vec![mf(GO, "a", "string", true), mf(GO, "c", "string", true)],
+        );
+        let cmp = compare(
+            WireDirection::Response,
+            &closed(1, &["a", "b"]),
+            &open_server,
+            "",
+        );
+        assert_eq!(
+            changes(&cmp),
+            [("c", FIELD_UNREAD, false)],
+            "b may be written by the open server; c is unread by the closed client"
+        );
+        assert_eq!(cmp.notes.iter().copied().collect::<Vec<_>>(), [NOTE_OPEN]);
+
+        let open_client = union_of(TS, vec![closed(1, &["a", "b"]), val(TS, "any")]);
+        let server = model_of(
+            GO,
+            11,
+            false,
+            false,
+            vec![mf(GO, "a", "string", true), mf(GO, "c", "string", true)],
+        );
+        let cmp = compare(WireDirection::Response, &open_client, &server, "");
+        assert!(cmp.changes.is_empty(), "{:?}", cmp.changes);
+        assert_eq!(
+            cmp.notes.iter().copied().collect::<Vec<_>>(),
+            [NOTE_OPEN, NOTE_UNION],
+            "a union with an open member is open"
+        );
+
+        let body = |v: ResolvedShape| inline(GO, false, vec![fld("x", None, true, v)]);
+        let cmp = compare(
+            WireDirection::Response,
+            &inline(
+                TS,
+                false,
+                vec![fld("x", None, true, closed(2, &["p", "q"]))],
+            ),
+            &body(ResolvedShape {
+                written: Shape::Call {
+                    chain: "h.load()".into(),
+                    array: false,
+                    model: None,
+                },
+                format: Some(GO),
+                model: None,
+                array: false,
+                fields: BTreeMap::new(),
+                members: Vec::new(),
+                open: true,
+            }),
+            "",
+        );
+        assert!(cmp.changes.is_empty());
+        assert!(
+            cmp.notes.contains(NOTE_OPEN),
+            "a model against an untyped call"
+        );
+    }
+
+    #[test]
+    fn unions_of_objects_compare_their_merged_names() {
+        let a = model_of(
+            TS,
+            1,
+            false,
+            false,
+            vec![mf(TS, "id", "string", true), mf(TS, "x", "string", true)],
+        );
+        let b = model_of(
+            TS,
+            2,
+            false,
+            false,
+            vec![mf(TS, "id", "string", true), mf(TS, "y", "string", true)],
+        );
+        let server = model_of(
+            GO,
+            11,
+            false,
+            false,
+            vec![mf(GO, "id", "string", true), mf(GO, "z", "string", true)],
+        );
+        let cmp = compare(
+            WireDirection::Response,
+            &union_of(TS, vec![a, b]),
+            &server,
+            "",
+        );
+        assert_eq!(
+            changes(&cmp),
+            [
+                ("x", FIELD_OPTIONAL_ABSENT, false),
+                ("y", FIELD_OPTIONAL_ABSENT, false),
+                ("z", FIELD_UNREAD, false),
+            ],
+            "a name one member lacks is optional"
+        );
+        assert_eq!(cmp.notes.iter().copied().collect::<Vec<_>>(), [NOTE_UNION]);
+        assert!(cmp.models.is_empty(), "a union is no model");
+    }
+
+    #[test]
+    fn unknown_names_are_judged_only_as_models_and_tuples_only_as_arrays() {
+        let user = model_of(TS, 2, false, false, vec![mf(TS, "name", "string", true)]);
+        let client = inline(
+            TS,
+            false,
+            vec![
+                mf(TS, "status", "InvoiceStatus", true),
+                fld("owner", Some("User"), true, user),
+                mf(TS, "anything", "any", true),
+                mf(TS, "pair", "[string, number]", true),
+                mf(TS, "other", "[string, number]", true),
+                fld("page", None, true, val(TS, "number")),
+                mf(TS, "nothing", "null", true),
+            ],
+        );
+        let call = ResolvedShape {
+            written: Shape::Call {
+                chain: "strconv.Atoi()".into(),
+                array: false,
+                model: None,
+            },
+            format: Some(GO),
+            model: None,
+            array: false,
+            fields: BTreeMap::new(),
+            members: Vec::new(),
+            open: true,
+        };
+        let server = inline(
+            GO,
+            false,
+            vec![
+                mf(GO, "status", "string", true),
+                mf(GO, "owner", "string", true),
+                mf(GO, "anything", "int", true),
+                mf(GO, "pair", "[]int", true),
+                mf(GO, "other", "string", true),
+                fld("page", None, true, call),
+                mf(GO, "nothing", "string", true),
+            ],
+        );
+        let cmp = compare(WireDirection::Response, &client, &server, "");
+        assert_eq!(
+            changes(&cmp),
+            [
+                ("other", TYPE_MISMATCH, true),
+                ("owner", TYPE_MISMATCH, true)
+            ],
+            "an unbound alias, any, null and an untyped call are never judged; a tuple's elements neither"
+        );
+        assert!(
+            cmp.notes.is_empty(),
+            "no open side was compared field by field"
+        );
+    }
+
+    #[test]
+    fn confirms_needs_one_shared_name_and_half_the_smaller_side() {
+        assert_eq!(
+            confirms(["a"], ["a", "b", "c"], false),
+            Some(1),
+            "a 1-field side"
+        );
+        assert_eq!(confirms(["a"], ["b"], false), None);
+        assert_eq!(
+            confirms([] as [&str; 0], ["a"], false),
+            None,
+            "an empty side"
+        );
+        assert_eq!(
+            confirms(["a", "b", "c", "d"], ["a", "b", "x", "y"], false),
+            Some(2),
+            "half"
+        );
+        assert_eq!(
+            confirms(["a", "b", "c", "d"], ["a", "x", "y", "z"], false),
+            None,
+            "under half"
+        );
+        assert_eq!(confirms(["Id", "name"], ["id", "x"], false), None);
+        assert_eq!(
+            confirms(["Id", "name"], ["id", "x"], true),
+            Some(1),
+            "folded"
+        );
+    }
+
+    #[test]
+    fn model_pairs_recurse_into_same_named_models_under_inline_roots() {
+        let offer = |format: WireFormat, id: u64, extra: &str| {
+            model_of(
+                format,
+                id,
+                true,
+                false,
+                vec![
+                    mf(format, "id", "string", true),
+                    mf(format, "price", "number", true),
+                    mf(format, extra, "string", true),
+                ],
+            )
+        };
+        let account = |format: WireFormat, id: u64, names: &[&str]| {
+            model_of(
+                format,
+                id,
+                false,
+                false,
+                names
+                    .iter()
+                    .map(|n| mf(format, n, "string", true))
+                    .collect(),
+            )
+        };
+        let mut go_offer = offer(GO, 12, "seller");
+        go_offer
+            .fields
+            .insert("price".into(), mf(GO, "price", "int", true));
+        let client = inline(
+            TS,
+            false,
+            vec![
+                fld("offers", None, true, offer(TS, 2, "seller")),
+                fld("owner", None, true, account(TS, 3, &["a", "b", "c", "d"])),
+            ],
+        );
+        let server = inline(
+            GO,
+            false,
+            vec![
+                fld("offers", None, true, go_offer),
+                fld("owner", None, true, account(GO, 13, &["a", "x", "y", "z"])),
+            ],
+        );
+        let cmp = compare(WireDirection::Response, &client, &server, "");
+        assert_eq!(
+            cmp.models
+                .iter()
+                .map(|m| (
+                    m.client.0,
+                    m.server.0,
+                    m.path.as_str(),
+                    m.overlap,
+                    m.diverged
+                ))
+                .collect::<Vec<_>>(),
+            [(2, 12, "offers[]", 3, false)],
+            "owner shares one name of four: no pair"
+        );
+        assert_eq!(
+            changes(&cmp),
+            [
+                ("owner.b", FIELD_MISSING, true),
+                ("owner.c", FIELD_MISSING, true),
+                ("owner.d", FIELD_MISSING, true),
+                ("owner.x", FIELD_UNREAD, false),
+                ("owner.y", FIELD_UNREAD, false),
+                ("owner.z", FIELD_UNREAD, false),
+            ],
+            "an unconfirmed pair's drift is still drift"
+        );
+
+        // A nested change diverges the nested pair, not its parent.
+        let item = |format: WireFormat, id: u64, ty: &str| {
+            model_of(format, id, true, false, vec![mf(format, "sku", ty, true)])
+        };
+        let order = |format: WireFormat, id: u64, items: ResolvedShape, decl: &str| {
+            model_of(
+                format,
+                id,
+                false,
+                false,
+                vec![
+                    mf(format, "id", "string", true),
+                    fld("items", Some(decl), true, items),
+                ],
+            )
+        };
+        let cmp = compare(
+            WireDirection::Response,
+            &order(TS, 1, item(TS, 2, "string"), "Item[]"),
+            &order(GO, 11, item(GO, 12, "int"), "[]Item"),
+            "",
+        );
+        assert_eq!(changes(&cmp), [("items[].sku", TYPE_MISMATCH, true)]);
+        assert_eq!(
+            cmp.models
+                .iter()
+                .map(|m| (m.path.as_str(), m.diverged))
+                .collect::<Vec<_>>(),
+            [("", false), ("items[]", true)]
+        );
+    }
+
+    fn server_site(line: u32, form: WireForm, shape: ResolvedShape) -> ServerSite {
+        ServerSite {
+            handler: NodeId(99),
+            form,
+            line,
+            status: (form == WireForm::JsonResponse).then_some(200),
+            shape,
+        }
+    }
+
+    #[test]
+    fn the_server_side_is_the_one_distinct_shape_or_the_best_overlap() {
+        let names = |format: WireFormat, id: u64, names: &[&str]| {
+            model_of(
+                format,
+                id,
+                false,
+                false,
+                names
+                    .iter()
+                    .map(|n| mf(format, n, "string", true))
+                    .collect(),
+            )
+        };
+        let client = names(TS, 1, &["id", "name", "email"]);
+        let user = server_site(
+            10,
+            WireForm::JsonResponse,
+            names(GO, 11, &["id", "name", "email"]),
+        );
+        let again = server_site(
+            14,
+            WireForm::JsonResponse,
+            names(GO, 11, &["id", "name", "email"]),
+        );
+        let token = server_site(
+            18,
+            WireForm::JsonResponse,
+            inline(
+                GO,
+                true,
+                vec![fld("tokenSync", None, true, val(GO, "bool"))],
+            ),
+        );
+        let resp = WireDirection::Response;
+        let pick = |sites: &[ServerSite]| pick_server(resp, &client, sites).map(|s| s.line);
+        assert_eq!(
+            pick(&[user.clone(), again.clone()]),
+            Some(10),
+            "one model twice is one shape"
+        );
+        assert_eq!(
+            pick(&[token.clone(), user.clone(), again.clone()]),
+            Some(10),
+            "the largest top-level overlap wins"
+        );
+        let other = server_site(
+            22,
+            WireForm::JsonResponse,
+            names(GO, 12, &["id", "name", "email"]),
+        );
+        assert_eq!(
+            pick(&[user.clone(), other.clone()]),
+            None,
+            "a tie: ambiguous"
+        );
+        let bind =
+            |line: u32, id: u64| server_site(line, WireForm::JsonBind, names(GO, id, &["id"]));
+        let req = WireDirection::Request;
+        assert_eq!(
+            pick_server(req, &client, &[bind(5, 11), bind(9, 11)]).map(|s| s.line),
+            Some(5)
+        );
+        assert_eq!(
+            pick_server(req, &client, &[bind(5, 11), bind(9, 12)]).map(|s| s.line),
+            None,
+            "a request needs exactly one bind"
+        );
+        assert_eq!(pick_server(req, &client, &[]).map(|s| s.line), None);
+    }
+
+    #[test]
+    fn wire_pairs_compare_the_exchange_and_note_what_they_cannot_judge() {
+        let (w, s) = exchange();
+        let merged = merged_of(w, s, true);
+        let wp = wire_pairs(&merged);
+        assert_eq!(
+            wp.marker(),
+            "[models] pairs=4 response=3 request=1 model_pairs=1 changes=7 breaking=1 \
+             ambiguous_server=0 open=2"
+        );
+        let rows: Vec<(&str, &str, u32, Vec<(&str, &'static str, bool)>, Vec<&str>)> = wp
+            .pairs
+            .iter()
+            .map(|p| {
+                (
+                    p.route_qname.as_str(),
+                    p.direction.as_str(),
+                    p.line,
+                    p.changes
+                        .iter()
+                        .map(|c| (c.path.as_str(), c.rule, c.breaking))
+                        .collect(),
+                    p.notes.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (
+                    "GET /orders",
+                    "response",
+                    7,
+                    vec![
+                        ("inner", FIELD_UNREAD, false),
+                        ("items", FIELD_MISSING, true),
+                        ("title", FIELD_UNREAD, false),
+                    ],
+                    vec![],
+                ),
+                ("POST /orders", "response", 3, vec![], vec![NOTE_OPEN]),
+                (
+                    "POST /orders",
+                    "response",
+                    9,
+                    vec![],
+                    vec![NOTE_OPEN, NOTE_UNION]
+                ),
+                (
+                    "POST /orders",
+                    "request",
+                    9,
+                    vec![
+                        ("id", FIELD_UNSET, false),
+                        ("item", FIELD_DROPPED, false),
+                        ("tag", FIELD_DROPPED, false),
+                        ("title", FIELD_UNSET, false),
+                    ],
+                    vec![],
+                ),
+            ]
+        );
+        assert_eq!(
+            wp.model_pairs
+                .iter()
+                .map(|p| (
+                    p.client_qname.as_str(),
+                    p.server_qname.as_str(),
+                    p.overlap,
+                    p.diverged
+                ))
+                .collect::<Vec<_>>(),
+            [("m::Order", "models::m::Wide", 1, true)],
+            "one of Order's two names is half: confirmed"
+        );
+        let get = &wp.pairs[0];
+        assert_eq!(get.server_line, Some(22));
+        assert_eq!(get.server_format, Some(WireFormat::Go));
+        assert_eq!(get.client_format, Some(WireFormat::Ts));
+    }
+
+    #[test]
+    fn an_ambiguous_server_compares_nothing() {
+        let (w, mut s) = exchange();
+        let get =
+            s.g.nodes
+                .iter_mut()
+                .find(|n| s.g.nav.qname_by_id[&n.id] == "handlers::h::Get")
+                .unwrap();
+        get.cells.push(site(
+            WireForm::JsonResponse,
+            25,
+            Some(200),
+            modeled("models.Base", "models::m::Base"),
+        ));
+        let wp = wire_pairs(&merged_of(w, s, true));
+        let p = &wp.pairs[0];
+        assert_eq!(
+            (
+                p.route_qname.as_str(),
+                p.notes.as_slice(),
+                p.changes.len(),
+                p.server_line
+            ),
+            ("GET /orders", [NOTE_AMBIGUOUS_SERVER].as_slice(), 0, None),
+            "Wide and Base each share `id` with Order: a tie"
+        );
+        assert_eq!(wp.stats.ambiguous_server, 1);
+        assert!(wp.model_pairs.is_empty());
+    }
+
+    #[test]
+    fn wire_pairs_are_deterministic_across_graph_order() {
+        let (w, s) = exchange();
+        let a = wire_pairs(&merged_of(w, s, true));
+        let (w, s) = exchange();
+        let b = wire_pairs(&merged_of(w, s, false));
+        assert_eq!(a, b);
+        let (w, s) = exchange();
+        assert_eq!(a, wire_pairs(&merged_of(w, s, true)));
+        assert_eq!(wire_pairs(&MergedGraph::new(vec![])), WirePairs::default());
     }
 }
