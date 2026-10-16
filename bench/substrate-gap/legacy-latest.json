@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 401,
+  "fixtures": 404,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -1355,6 +1355,13 @@
       "language": "graphql",
       "per_category": {}
     },
+    "models-http-shop": {
+      "framework": "models-http-shop",
+      "language": "typescript",
+      "per_category": {
+        "HTTP_CALLS": 1.0
+      }
+    },
     "models-ts-wire-shapes": {
       "framework": "models-ts-wire-shapes",
       "language": "typescript",
@@ -2196,6 +2203,16 @@
         "USES": 1.0
       }
     },
+    "ts-ethers-contract-calls": {
+      "framework": "ts-ethers-contract-calls",
+      "language": "typescript",
+      "per_category": {
+        "EVENT_FLOWS": 1.0,
+        "HANDLED_BY": 1.0,
+        "RPC_CALLS": 1.0,
+        "USES": 1.0
+      }
+    },
     "ts-field-dispatch": {
       "framework": "ts-field-dispatch",
       "language": "typescript",
@@ -2346,6 +2363,14 @@
       "language": "typescript",
       "per_category": {
         "CALLS": 1.0
+      }
+    },
+    "ts-value-references": {
+      "framework": "ts-value-references",
+      "language": "typescript",
+      "per_category": {
+        "CALLS": 1.0,
+        "USES": 1.0
       }
     },
     "vue-http-calls": {
