@@ -222,6 +222,13 @@ Not candidates: each becomes packets in the spec run.
    evict, with a `[watch]` RSS marker and a gate.
    First data (DC.7a, W6): post-trim RSS 404 -> 432 -> 441 MB on glia and 180 -> 228 -> 241 MB on grpc-go over 3
    updates, with paired incremental builds in the same process; whether it levels off is still unmeasured.
+   **The rules evaluator joins this budget** (James, 2026-10-16, on 0.5.2 DA.17: *"Yeah do a then"*). DA.17's RSS gate
+   was restated from R1's proposed 150 MB to the measured 287,408 kB evaluator peak plus headroom (320 MB = 327,680 kB)
+   for CHECK20 over glia x10 (300,130 nodes, 1,019,544 edges; whole process 449,728 kB vs R1's spike at 1,654,172 kB).
+   Where the memory goes (DA.17, at x10): about 115 B per edge row before any rule runs (EDB rows plus Relation indexes
+   and the value table), the carry edge/3 relation 92,084 kB, node/2 46,104 kB, scc over carry 46,988 kB, reaches from
+   every ROUTE 87,788 kB, one direct forbid 99,388 kB. The representation work is in `rules/src/{relation,value,eval,
+   closure}.rs`; 0.5.3 sets one memory budget for watch and rules together.
 4. **One tier vocabulary.** `rules::value::Tier`, the string consts in `why.rs` / `check.rs` and `implementors.rs`'s
    enum become one code-domain type (§E W1, DA.3), before Engram's HEURISTIC rows add a fifth reading.
 5. **Runner fixes** (the 0.5.2 waves found both; the session landed them for the remaining 0.5.2 waves too):
