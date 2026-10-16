@@ -87,3 +87,18 @@ clone pairs at different directory names and depths (`git clone --no-hardlinks`,
   was already gone by 0.5.1. This confirms no regression; glia's own byte_identical gate covers DE.2's fix.
 - Measured speed: a full Kina export about 1 s, glia 2-3 s, a 30-step glia chain about 90 s. Workspace:
   `~/.cache/engram-eval/de-check`.
+
+**Engram status, engram-34, 2026-10-16** (Engram main, 222 tests):
+- DE.2 shown properly at `c4987609`: two archive copies of Kina a448fb3 and a remote-less clone - the 0.5.1 control's gmap
+  and meta.json differ between them; c4987609's gmap, files.json, meta.json and ppr.jsonl are identical.
+- PPR needle test registered (d880e5b) and built (2d63615): `flat-ppr` sums the direct hits' PPR rows, the top 6 join
+  the release pool, the sum is release feature 19 learned from 0. Smoke on Kina's first quarter at c4987609: 214 steps,
+  331,655 rows, 0 digest / header / key faults (DE.5's format holds).
+- Re-keys on the 0.5.1 caches, flat-fs (X1 on) vs flat-nox1 (X1 off): renamed Kina 15/16 vs 5/16, glia 22/36 vs 4/36.
+- Corrections writer built (`engram_live::corrections`, `engram-mcp --corrections REPO` at each consolidate): rows keep
+  the contract; a renamed node takes its row (a hint move only when names share a word, DE.4's rule); a gone node hands
+  its row to its nearest stored parent (James: a "don't re-add X" outlives X), else the row is removed; writes through
+  `glia cell set/rm/ls`, `glia build` first until `--hint` exists. Kina dry run: 12 transcripts, 180 turns, 29
+  corrections, 1 naming code (a DECISION on `frontend::src::app::app.routes::entryGuard`). About one row per repo-month.
+- The release-candidate replays wait for the RC commit, which now follows glia's 0.5.2 tweaks (T1-T11,
+  `dev-notes/tweaks-0.5.2.md`) and James's testing.
