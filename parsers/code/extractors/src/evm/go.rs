@@ -1,4 +1,4 @@
-//! The Go go-ethereum contract call reader (DT.10e).
+//! The Go go-ethereum contract call and event reader (DT.10e, DT.10k).
 //!
 //! 1. **Gate** ([`geth_imports`]). The file imports a
 //!    `github.com/ethereum/go-ethereum` package (single or grouped `import`,
@@ -8,18 +8,24 @@
 //! 2. **ABI declarations** ([`abi_decls`]). A package-level `const` / `var`
 //!    spec (single or grouped, with or without a type) whose value is one
 //!    string literal, raw or interpreted (unescaped per Go by
-//!    `scan::go_string_literal`), that `abi::read_json_abi` reads: ABI `<N>`.
-//!    The literal is read from the source at its offsets, so a JSON ABI's
-//!    braces never unbalance the view. A function-local `const` is no ABI
-//!    declaration.
+//!    `scan::go_string_literal`), that `abi::read_json_abi` reads: ABI `<N>`
+//!    (abigen v1's `const <X>ABI = ".."` is one). The literal is read from
+//!    the source at its offsets, so a JSON ABI's braces never unbalance the
+//!    view. A function-local `const` is no ABI declaration. An abigen
+//!    METADATA literal, `var <N> = &bind.MetaData{ .. ABI: <string> .. }`
+//!    (v1) or `var <N> = bind.MetaData{ .. }` (v2), whose `ABI` field reads,
+//!    is ABI `<N>` too ([`metadata_abi`]).
 //! 3. **Functions** ([`func_decls`]). Every top-level `func (<recv>
 //!    <Type>)? <Name>[<tparams>]?(<params>) <results> {..}` with its receiver
-//!    name, parameter names and balanced body. Parameters split at depth-0
-//!    commas, so the grouped `chainName, contractAddr, method string` names
-//!    every one, and a variadic `args ...any` is the last.
+//!    name, receiver type name (`*` and type parameters dropped), parameter
+//!    names and balanced body. Parameters split at depth-0 commas, so the
+//!    grouped `chainName, contractAddr, method string` names every one, and a
+//!    variadic `args ...any` is the last.
 //! 4. **Bindings.** The first left-hand element of `<x>(, <err>)? := ..`,
 //!    `var <x>(, <err>)? = ..` or `<x>(, <err>)? = ..`, or the field of a
 //!    composite literal `<field>: ..`, binds the value of
+//!    - `<N>.GetAbi()` / `<N>.ParseABI()` on a metadata declaration N of the
+//!      file (abigen v1 / v2): `Scope::Abi(N)` with N's entries;
 //!    - `abi.JSON(strings.NewReader(<N>))`: `Scope::Abi(N)` with N's entries
 //!      (none when N is declared in another file of the package, so the
 //!      resolver name-hints it); an inline literal that reads gives
@@ -28,8 +34,10 @@
 //!      resolves to (step 6), else `Scope::Abi(<v>'s last segment)` with no
 //!      entries.
 //!
-//!    Any other ABI argument (an `io.Reader`, a call) is DYNAMIC: counted, and
-//!    the binding's sites mint nothing. A declared binding (`:=`, `var`) is
+//!    The constructions bind in that order, so a bound contract built from a
+//!    metadata binding reads it. Any other ABI argument (an `io.Reader`, a
+//!    call) is DYNAMIC: counted, and the binding's sites mint nothing. A
+//!    declared binding (`:=`, `var`) is
 //!    visible from the end of its construction to the end of its innermost
 //!    block (the DT.10c rule); a package-level one, and an assignment to a
 //!    package `var`, in the whole file; any other assignment in its
@@ -39,38 +47,62 @@
 //! 5. **Hand-offs.** A bound identifier handed to a struct field, `<field>:
 //!    <x>` / `<field>: *<x>` / `<field>: &<x>` in a composite literal or
 //!    `<recv>.<field> = <x>` as a statement, gives the field x's value,
-//!    file-wide by field name and one hop (a field never hands on a field). A
-//!    selector left-hand side (`s.abi, err = abi.JSON(..)`) binds its text
-//!    and its last segment as a field. A field bound twice reads its first
-//!    binding, deterministically.
+//!    file-wide by field name and one hop (a field never hands on a field), so
+//!    abigen v2's `parsed, err := <N>.ParseABI(); return &<X>{abi: *parsed}`
+//!    binds the field `abi`. A selector left-hand side (`s.abi, err =
+//!    abi.JSON(..)`) binds its text and its last segment as a field. A field
+//!    bound twice reads its first binding, deterministically.
 //! 6. **Scope** ([`Reader::scope_of`]). A receiver is a selector chain `a.b.c`
 //!    directly before the needle's dot. It resolves through its full text
 //!    first (the visible binding of that text), then through its last segment
 //!    as a field; a chain hanging off a call or an index (`f().escrow`)
 //!    resolves through its field only. A bound receiver reads its binding's
-//!    scope and entries; an unbound one is `Scope::Recv(<last segment>)` with
-//!    no entries, which `resolver:evm` pairs by name_hint (HEURISTIC, Weak,
+//!    scope and entries. An unbound chain rooted at its method's receiver
+//!    (abigen v1's `_Escrow.contract`, whose field no statement of the file
+//!    binds) whose receiver type is `<X>` or `<X>` plus an abigen suffix
+//!    ([`ABIGEN_SUFFIXES`]: `EscrowCaller`, `EscrowFilterer`, ..), with an
+//!    ABI declaration `<X>MetaData` (else `<X>ABI`) in the same file, reads
+//!    that declaration ([`Reader::receiver_type_abi`]); an `abigen --type`
+//!    rename is honoured because the type and the metadata share its name.
+//!    Any other unbound receiver is `Scope::Recv(<last segment>)` with no
+//!    entries, which `resolver:evm` pairs by name_hint (HEURISTIC, Weak,
 //!    arity-checked).
 //! 7. **Sites.** Every needle is dot-preceded (so `RawTransact(` and
 //!    `NewKeyedTransactorWithChainID(` are none) and needs a string literal at
-//!    its name position:
+//!    its name position. Calls:
 //!    - `<r>.Pack("m", ..)`, `<r>.Methods["m"]`, `<r>.Transact(<opts>, "m", ..)`;
 //!    - `<r>.Call(<opts>, <out>, "m", ..)`, the third argument; a `.Call(<out>,
 //!      "eth_..")` with a string literal second is go-ethereum's `rpc.Client`
-//!      and is not read;
-//!    - `<r>.Unpack("m", ..)` / `<r>.UnpackIntoInterface(<out>, "m", ..)` when
-//!      r's ABI lists m as a function (an event is DT.10k's; no ABI, no site).
+//!      and is not read.
 //!
-//!    `args` counts the arguments after the name; a trailing `xs...` spread,
-//!    `Methods[..]` and the two Unpack forms (whose arguments are the bytes
-//!    decoded, not the call's) give unknown. `lib` is `geth`: exact arity,
-//!    no overrides argument. With entries known, a member that is no function
-//!    of them mints nothing and counts `not_in_abi`; with none
-//!    (`Scope::Recv`, an ABI of another file) every name-literal site mints and
-//!    the resolver decides. A name in a JSON-RPC namespace ([`JSON_RPC`])
-//!    never mints and is not counted. A non-literal name on a bound receiver
+//!    Events: `<r>.Events["E"]`, `<r>.FilterLogs(<opts>, "E", ..)`,
+//!    `<r>.WatchLogs(<opts>, "E", ..)`, `<r>.UnpackLog(<out>, "E", <log>)`
+//!    and `<r>.UnpackLogIntoMap(<out>, "E", <log>)`; ethclient's
+//!    `FilterLogs(ctx, query)` has no literal there and is none. The decoding
+//!    forms `<r>.Unpack("n", ..)` / `<r>.UnpackIntoInterface(<out>, "n", ..)`
+//!    are a call where r's ABI lists n as a function, else an event where it
+//!    lists n as an event; with no ABI, no site.
+//!
+//!    `args` counts a call's arguments after the name; a trailing `xs...`
+//!    spread, `Methods[..]` and the two Unpack forms (whose arguments are the
+//!    bytes decoded, not the call's) give unknown, and an event passes none.
+//!    `lib` is `geth`: exact arity, no overrides argument. With entries known,
+//!    a member that is no function (a call) or no event (an event) of them
+//!    mints nothing and counts `not_in_abi`; with none (`Scope::Recv`, an ABI
+//!    of another file) every name-literal site mints and the resolver decides.
+//!    A name in a JSON-RPC namespace ([`JSON_RPC`]) never mints and is not
+//!    counted. A non-literal name on a bound receiver
 //!    (`parsedABI.Pack(method, args...)`, Kina signer.go) mints nothing and
-//!    counts `dynamic` (DT.10f reads those through their wrappers).
+//!    counts `dynamic` (DT.10f reads those through their wrappers); the
+//!    receiver-type rule binds nothing, so abigen's forwarding `Raw` methods
+//!    (`_Escrow.Contract.EscrowCaller.contract.Call(opts, result, method,
+//!    ..)`) count nothing.
+//! 8. **Event switches** ([`Reader::switch_sites`]). A `for <k>(, <v>)? :?=
+//!    range <r>.Events {` loop, and inside its block a `switch <k> {` or
+//!    `switch <v>.Name {`: every string literal of a `case "A"(, "B")*:` list
+//!    of that switch's own body (a nested switch's cases are deeper) is an
+//!    event site of r's scope, read at the literal (Kina indexer.go
+//!    processLog). A switch on any other tag contributes nothing.
 
 use glia_code_domain::evm::{AbiEntry, ClientSide, EntryKind, Scope};
 
@@ -109,6 +141,26 @@ const LHS_KEYWORDS: &[&str] = &["var", "if", "for", "switch", "else"];
 /// Bytes before an `=` that make it no plain assignment (`==`, `!=`, `+=`..).
 const NOT_ASSIGN: &[u8] = b":=!<>+-*/%&|^";
 
+/// The suffixes abigen appends to a contract's type name `<X>` for its
+/// wrapper types, longest first, so `EscrowCallerSession` is `Escrow`'s
+/// before it could be read as `EscrowCaller`'s `Session` (step 6).
+const ABIGEN_SUFFIXES: &[&str] = &[
+    "TransactorSession",
+    "FiltererSession",
+    "CallerSession",
+    "TransactorRaw",
+    "Transactor",
+    "CallerRaw",
+    "Filterer",
+    "Session",
+    "Caller",
+    "Raw",
+];
+
+/// The two metadata members that parse a declaration's ABI (step 4): abigen
+/// v1's `GetAbi`, v2's `ParseABI`.
+const METADATA_PARSERS: &[&str] = &["GetAbi", "ParseABI"];
+
 /// What [`scan`] counted besides its sites.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct GoCounts {
@@ -126,6 +178,9 @@ pub(super) struct GoCounts {
 struct AbiDecl {
     name: String,
     entries: Vec<AbiEntry>,
+    /// An abigen `<bind>.MetaData{ABI: ..}` literal, whose `GetAbi()` /
+    /// `ParseABI()` bind (step 4).
+    meta: bool,
 }
 
 /// One package-level `const` / `var` spec: `<names> (<type>)? (= <values>)?`.
@@ -143,6 +198,9 @@ struct FuncDecl {
     /// The method receiver's name; `None` for a function or an unnamed
     /// receiver.
     receiver: Option<String>,
+    /// The method receiver's type name, `*` and type parameters dropped
+    /// (`(_Escrow *EscrowCaller)` is `EscrowCaller`); `None` for a function.
+    receiver_type: Option<String>,
     /// The parameter names in order; empty when the parameters are unnamed.
     params: Vec<String>,
     /// The offsets of the body's braces.
@@ -190,16 +248,18 @@ enum Target {
     Field(String),
 }
 
-/// The two binding constructions (step 4).
+/// The binding constructions (step 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ctor {
+    /// `<N>.GetAbi()` / `<N>.ParseABI()` on a metadata declaration.
+    Meta,
     /// `abi.JSON(..)`.
     Json,
     /// `bind.NewBoundContract(..)`.
     Bound,
 }
 
-/// The call-site needles (step 7).
+/// The site needles (step 7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Needle {
     Pack,
@@ -208,6 +268,11 @@ enum Needle {
     Call,
     Unpack,
     UnpackIntoInterface,
+    Events,
+    FilterLogs,
+    WatchLogs,
+    UnpackLog,
+    UnpackLogIntoMap,
 }
 
 /// Every needle and the member it is spelled as.
@@ -218,22 +283,49 @@ const NEEDLES: &[(&str, Needle)] = &[
     ("Call", Needle::Call),
     ("Unpack", Needle::Unpack),
     ("UnpackIntoInterface", Needle::UnpackIntoInterface),
+    ("Events", Needle::Events),
+    ("FilterLogs", Needle::FilterLogs),
+    ("WatchLogs", Needle::WatchLogs),
+    ("UnpackLog", Needle::UnpackLog),
+    ("UnpackLogIntoMap", Needle::UnpackLogIntoMap),
 ];
 
 impl Needle {
     /// The index of the name argument.
     fn name_arg(self) -> usize {
         match self {
-            Needle::Pack | Needle::Unpack | Needle::Methods => 0,
-            Needle::Transact | Needle::UnpackIntoInterface => 1,
+            Needle::Pack | Needle::Unpack | Needle::Methods | Needle::Events => 0,
+            Needle::Transact
+            | Needle::UnpackIntoInterface
+            | Needle::FilterLogs
+            | Needle::WatchLogs
+            | Needle::UnpackLog
+            | Needle::UnpackLogIntoMap => 1,
             Needle::Call => 2,
         }
     }
 
-    /// The decoding forms: a site only where the ABI lists a function, and
-    /// their arguments give no arity.
+    /// The index forms `<r>.<needle>["n"]`.
+    fn indexed(self) -> bool {
+        matches!(self, Needle::Methods | Needle::Events)
+    }
+
+    /// The decoding forms: a call where the ABI lists a function, an event
+    /// where it lists an event, and their arguments give no arity.
     fn decodes(self) -> bool {
         matches!(self, Needle::Unpack | Needle::UnpackIntoInterface)
+    }
+
+    /// The event forms.
+    fn event(self) -> bool {
+        matches!(
+            self,
+            Needle::Events
+                | Needle::FilterLogs
+                | Needle::WatchLogs
+                | Needle::UnpackLog
+                | Needle::UnpackLogIntoMap
+        )
     }
 }
 
@@ -257,36 +349,40 @@ pub(super) fn scan(source: &str, view: &str) -> (Vec<Site>, GoCounts) {
     if imports.is_empty() {
         return (Vec::new(), counts);
     }
-    let specs = package_specs(view);
-    let decls = abi_decls(source, &specs);
-    counts.abis = decls.len();
-    let package_vars = specs
-        .iter()
-        .filter(|s| s.var)
-        .flat_map(|s| s.names.iter().cloned())
-        .collect();
-    let mut reader = Reader {
-        source,
-        view,
-        decls,
-        package_vars,
-        funcs: func_decls(view),
-        locals: Vec::new(),
-        fields: Vec::new(),
-    };
     let package = |paths: &[&str]| {
         imports
             .iter()
             .find(|(path, _)| paths.contains(&path.as_str()))
             .map(|(_, name)| name.as_str())
     };
-    for (ctor, pkg, member) in [
-        (Ctor::Json, package(&[ABI_PKG]), "JSON"),
-        (Ctor::Bound, package(BIND_PKGS), "NewBoundContract"),
-    ] {
-        let Some(pkg) = pkg else {
-            continue;
-        };
+    let specs = package_specs(view);
+    let decls = abi_decls(source, view, &specs, package(BIND_PKGS));
+    counts.abis = decls.len();
+    let package_vars = specs
+        .iter()
+        .filter(|s| s.var)
+        .flat_map(|s| s.names.iter().cloned())
+        .collect();
+    // Step 4's constructions in binding order: metadata parsers first, so a
+    // bound contract built from their result reads it.
+    let mut ctors: Vec<(Ctor, &str, &str)> = Vec::new();
+    for decl in decls.iter().filter(|d| d.meta) {
+        for &member in METADATA_PARSERS {
+            ctors.push((Ctor::Meta, decl.name.as_str(), member));
+        }
+    }
+    ctors.extend(package(&[ABI_PKG]).map(|pkg| (Ctor::Json, pkg, "JSON")));
+    ctors.extend(package(BIND_PKGS).map(|pkg| (Ctor::Bound, pkg, "NewBoundContract")));
+    let mut reader = Reader {
+        source,
+        view,
+        decls: &decls,
+        package_vars,
+        funcs: func_decls(view),
+        locals: Vec::new(),
+        fields: Vec::new(),
+    };
+    for (ctor, pkg, member) in ctors {
         let first = reader.locals.len();
         reader.bind(ctor, pkg, member, &mut counts);
         reader.hand_off(first);
@@ -371,11 +467,16 @@ fn line_end(vb: &[u8], from: usize) -> usize {
 
 /// The offsets of `hits` (ascending) outside every `{..}` of the view.
 fn top_level(view: &str, hits: Vec<usize>) -> Vec<usize> {
-    let vb = view.as_bytes();
+    brace_depth0(view.as_bytes(), 0, view.len(), hits)
+}
+
+/// The offsets of `hits` (ascending) in `[from, to)` outside every `{..}`
+/// that opens in that range.
+fn brace_depth0(vb: &[u8], from: usize, to: usize, hits: Vec<usize>) -> Vec<usize> {
     let mut depth = 0usize;
-    let mut k = 0;
+    let mut k = from;
     let mut out = Vec::new();
-    for h in hits {
+    for h in hits.into_iter().filter(|&h| from <= h && h < to) {
         while k < h {
             match vb[k] {
                 b'{' => depth += 1,
@@ -494,22 +595,62 @@ fn value_spec(view: &str, from: usize, end: usize, var: bool) -> Option<ValueSpe
     Some(ValueSpec { var, names, values })
 }
 
-/// The ABI declarations among `specs` (step 2).
-fn abi_decls(source: &str, specs: &[ValueSpec]) -> Vec<AbiDecl> {
+/// The ABI declarations among `specs` (step 2); `bind` is the imported name
+/// of go-ethereum's bind package, which spells a metadata literal.
+fn abi_decls(source: &str, view: &str, specs: &[ValueSpec], bind: Option<&str>) -> Vec<AbiDecl> {
     let mut out = Vec::new();
     for spec in specs {
         for (name, &(s, e)) in spec.names.iter().zip(&spec.values) {
-            if let Some(text) = literal(source, s, e)
-                && let Some(entries) = read_json_abi(&text)
-            {
+            let (text, meta) = match literal(source, s, e) {
+                Some(text) => (text, false),
+                None => match bind.and_then(|b| metadata_abi(source, view, (s, e), b)) {
+                    Some(text) => (text, true),
+                    None => continue,
+                },
+            };
+            if let Some(entries) = read_json_abi(&text) {
                 out.push(AbiDecl {
                     name: name.clone(),
                     entries,
+                    meta,
                 });
             }
         }
     }
     out
+}
+
+/// The `ABI` field's string of the abigen literal `&<bind>.MetaData{..}`
+/// (v1) or `<bind>.MetaData{..}` (v2) spanning exactly `value` (step 2);
+/// `None` for any other value.
+fn metadata_abi(source: &str, view: &str, value: (usize, usize), bind: &str) -> Option<String> {
+    let vb = view.as_bytes();
+    let (mut k, e) = value;
+    if vb.get(k) == Some(&b'&') {
+        k = skip_ws(vb, k + 1);
+    }
+    let pkg_end = ident_end(vb, k).filter(|&p| &view[k..p] == bind)?;
+    let dot = skip_ws(vb, pkg_end);
+    if vb.get(dot) != Some(&b'.') {
+        return None;
+    }
+    let m = skip_ws(vb, dot + 1);
+    let m_end = ident_end(vb, m).filter(|&p| &view[m..p] == "MetaData")?;
+    let open = skip_ws(vb, m_end);
+    if vb.get(open) != Some(&b'{') {
+        return None;
+    }
+    let close = matching(view, open).filter(|&c| c + 1 == e)?;
+    split_args(view, open, close)
+        .into_iter()
+        .find_map(|(ps, pe)| {
+            let key_end = ident_end(vb, ps).filter(|&p| &view[ps..p] == "ABI")?;
+            let colon = skip_ws(vb, key_end);
+            if vb.get(colon) != Some(&b':') {
+                return None;
+            }
+            literal(source, skip_ws(vb, colon + 1), pe)
+        })
 }
 
 /// The value of the string literal spanning exactly `[s, e)` of `source`.
@@ -530,14 +671,15 @@ fn func_decls(view: &str) -> Vec<FuncDecl> {
             continue;
         }
         let mut k = skip_ws(vb, at + "func".len());
-        let mut receiver = None;
+        let (mut receiver, mut receiver_type) = (None, None);
         if vb.get(k) == Some(&b'(') {
             let Some(close) = matching(view, k) else {
                 continue;
             };
-            receiver = split_args(view, k, close)
-                .first()
-                .and_then(|&(s, e)| named_piece(view, s, e));
+            if let Some(&(s, e)) = split_args(view, k, close).first() {
+                receiver = named_piece(view, s, e);
+                receiver_type = receiver_type_name(view, s, e);
+            }
             k = skip_ws(vb, close + 1);
         }
         let Some(name_end) = ident_end(vb, k) else {
@@ -565,11 +707,26 @@ fn func_decls(view: &str) -> Vec<FuncDecl> {
         };
         out.push(FuncDecl {
             receiver,
+            receiver_type,
             params,
             body: (open, close),
         });
     }
     out
+}
+
+/// The type name of a receiver piece `(<name>)? *?<Type>([..])?`.
+fn receiver_type_name(view: &str, s: usize, e: usize) -> Option<String> {
+    let vb = view.as_bytes();
+    let mut k = s;
+    if named_piece(view, s, e).is_some() {
+        k = skip_ws(vb, ident_end(vb, s)?);
+    }
+    if vb.get(k) == Some(&b'*') {
+        k = skip_ws(vb, k + 1);
+    }
+    let t_end = ident_end(vb, k).filter(|&t| t <= e)?;
+    Some(view[k..t_end].to_string())
 }
 
 /// The name of a parameter piece `<name> <type>`; `None` for a piece that is
@@ -633,7 +790,7 @@ fn body_open(view: &str, from: usize) -> Option<usize> {
 struct Reader<'a> {
     source: &'a str,
     view: &'a str,
-    decls: Vec<AbiDecl>,
+    decls: &'a [AbiDecl],
     package_vars: Vec<String>,
     funcs: Vec<FuncDecl>,
     locals: Vec<Binding>,
@@ -658,6 +815,7 @@ impl Reader<'_> {
             };
             let args = split_args(view, open, close);
             let value = match ctor {
+                Ctor::Meta => self.meta_value(pkg),
                 Ctor::Json => self.json_value(&args, &target, counts),
                 Ctor::Bound => self.bound_value(&args, at),
             };
@@ -665,6 +823,19 @@ impl Reader<'_> {
                 counts.dynamic += 1;
             }
             self.push_target(target, value, close);
+        }
+    }
+
+    /// The value of `<name>.GetAbi()` / `<name>.ParseABI()` on the metadata
+    /// declaration `name` (step 4).
+    fn meta_value(&self, name: &str) -> Value {
+        Value {
+            scope: Some(Scope::Abi(name.to_string())),
+            entries: self
+                .decls
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.entries.clone()),
         }
     }
 
@@ -840,10 +1011,35 @@ impl Reader<'_> {
     /// The scope and entries a site on `chain` at `at` reads (step 6); `None`
     /// for a dynamic binding.
     fn scope_of(&self, chain: &Chain<'_>, at: usize) -> Option<(Scope, Option<Vec<AbiEntry>>)> {
-        match self.binding_of(chain, at) {
-            Some(value) => Some((value.scope.clone()?, value.entries.clone())),
-            None => Some((Scope::Recv(chain.last.to_string()), None)),
+        if let Some(value) = self.binding_of(chain, at) {
+            return Some((value.scope.clone()?, value.entries.clone()));
         }
+        Some(match self.receiver_type_abi(chain, at) {
+            Some(decl) => (Scope::Abi(decl.name.clone()), Some(decl.entries.clone())),
+            None => (Scope::Recv(chain.last.to_string()), None),
+        })
+    }
+
+    /// Step 6's receiver-type rule: the ABI declaration an unbound `chain`
+    /// at `at` reads when it is rooted at its method's receiver and that
+    /// receiver's type is `<X>` or `<X>` plus an abigen suffix, with
+    /// `<X>MetaData` (else `<X>ABI`) declared in the file.
+    fn receiver_type_abi(&self, chain: &Chain<'_>, at: usize) -> Option<&AbiDecl> {
+        let f = self.func_at(at)?;
+        let root = chain.text.split('.').next()?;
+        if !chain.rooted || f.receiver.as_deref() != Some(root) {
+            return None;
+        }
+        let ty = f.receiver_type.as_deref()?;
+        let bases = std::iter::once(ty).chain(
+            ABIGEN_SUFFIXES
+                .iter()
+                .filter_map(|s| ty.strip_suffix(s).filter(|x| !x.is_empty())),
+        );
+        let decl = |name: String| self.decls.iter().find(|d| d.name == name);
+        bases
+            .into_iter()
+            .find_map(|x| decl(format!("{x}MetaData")).or_else(|| decl(format!("{x}ABI"))))
     }
 
     /// Step 5: the fields the identifier bindings `locals[first..]` are handed
@@ -894,7 +1090,7 @@ impl Reader<'_> {
                     continue;
                 };
                 let after = skip_ws(vb, m_at + word.len());
-                let (name_at, args) = if needle == Needle::Methods {
+                let (name_at, args) = if needle.indexed() {
                     if vb.get(after) != Some(&b'[') {
                         continue;
                     }
@@ -922,7 +1118,7 @@ impl Reader<'_> {
                     let Some(&name_at) = pieces.get(i) else {
                         continue;
                     };
-                    let args = if needle.decodes() {
+                    let args = if needle.decodes() || needle.event() {
                         None
                     } else {
                         arg_count(view, &pieces[i + 1..])
@@ -949,19 +1145,30 @@ impl Reader<'_> {
                         .as_ref()
                         .is_some_and(|es| es.iter().any(|e| e.kind == kind && e.name == member))
                 };
-                if needle.decodes() && !lists(EntryKind::Fn) {
-                    // An event is DT.10k's; no ABI, no site.
-                    if entries.is_some() && !lists(EntryKind::Event) {
+                let side = if needle.event() {
+                    ClientSide::Event
+                } else if !needle.decodes() || lists(EntryKind::Fn) {
+                    ClientSide::Call
+                } else if lists(EntryKind::Event) {
+                    ClientSide::Event
+                } else {
+                    // A decoding form names a function or an event of the
+                    // ABI it reads; no ABI, no site.
+                    if entries.is_some() {
                         counts.not_in_abi += 1;
                     }
                     continue;
-                }
-                if entries.is_some() && !lists(EntryKind::Fn) {
+                };
+                let kind = match side {
+                    ClientSide::Call => EntryKind::Fn,
+                    ClientSide::Event => EntryKind::Event,
+                };
+                if entries.is_some() && !lists(kind) {
                     counts.not_in_abi += 1;
                     continue;
                 }
                 sites.push(Site {
-                    side: ClientSide::Call,
+                    side,
                     scope,
                     member,
                     args,
@@ -971,9 +1178,155 @@ impl Reader<'_> {
                 });
             }
         }
+        sites.extend(self.switch_sites(counts));
         sites.sort_by(|a, b| (a.at, &a.member).cmp(&(b.at, &b.member)));
         sites
     }
+
+    /// Step 8: the event sites of every `switch` on the key, or the value's
+    /// `.Name`, of a `range <r>.Events` loop.
+    fn switch_sites(&self, counts: &mut GoCounts) -> Vec<Site> {
+        let (source, view) = (self.source, self.view);
+        let vb = view.as_bytes();
+        let mut sites = Vec::new();
+        for e_at in word_hits(view, "Events") {
+            let Some(dot) = prev_non_ws(vb, e_at).filter(|&d| vb[d] == b'.') else {
+                continue;
+            };
+            let Some(chain) = chain_before(view, dot) else {
+                continue;
+            };
+            let open = skip_ws(vb, e_at + "Events".len());
+            if vb.get(open) != Some(&b'{') {
+                continue;
+            }
+            let Some((key, value)) = range_vars(view, chain.start) else {
+                continue;
+            };
+            let Some(close) = matching(view, open) else {
+                continue;
+            };
+            let cases = switch_cases(view, (open, close), key.as_deref(), value.as_deref());
+            if cases.is_empty() {
+                continue;
+            }
+            let Some((scope, entries)) = self.scope_of(&chain, e_at) else {
+                continue;
+            };
+            for (s, e) in cases {
+                let Some(event) = literal(source, s, e).filter(|n| is_ident(n)) else {
+                    continue;
+                };
+                if entries.as_ref().is_some_and(|es| {
+                    !es.iter()
+                        .any(|en| en.kind == EntryKind::Event && en.name == event)
+                }) {
+                    counts.not_in_abi += 1;
+                    continue;
+                }
+                sites.push(Site {
+                    side: ClientSide::Event,
+                    scope: scope.clone(),
+                    member: event,
+                    args: None,
+                    lib: LIB,
+                    abi: entries.clone(),
+                    at: s,
+                });
+            }
+        }
+        sites
+    }
+}
+
+/// The key and value names of the `for <k>(, <v>)? :?= range` header whose
+/// range expression starts at `at` (step 8); `_` names nothing. `None` when
+/// no such header stands there.
+fn range_vars(view: &str, at: usize) -> Option<(Option<String>, Option<String>)> {
+    let vb = view.as_bytes();
+    let r_end = prev_non_ws(vb, at)? + 1;
+    let r_start = ident_start_before(vb, r_end).filter(|&s| &view[s..r_end] == "range")?;
+    let eq = prev_non_ws(vb, r_start).filter(|&q| vb[q] == b'=')?;
+    let lhs_end = if eq > 0 && vb[eq - 1] == b':' {
+        eq - 1
+    } else {
+        eq
+    };
+    let start = vb[..lhs_end]
+        .iter()
+        .rposition(|c| matches!(c, b'\n' | b';' | b'{' | b'}'))
+        .map_or(0, |k| k + 1);
+    let lhs = view[start..lhs_end]
+        .trim()
+        .strip_prefix("for")
+        .filter(|rest| rest.starts_with(char::is_whitespace))?;
+    let names: Vec<&str> = lhs.split(',').map(str::trim).collect();
+    if names.len() > 2 || !names.iter().all(|n| is_ident(n)) {
+        return None;
+    }
+    let name = |i: usize| names.get(i).filter(|n| **n != "_").map(|n| n.to_string());
+    Some((name(0), name(1)))
+}
+
+/// The case value ranges of every `switch <key> {` / `switch <value>.Name {`
+/// inside the loop body `body` (its braces), each listed by a `case` of that
+/// switch's own body (step 8).
+fn switch_cases(
+    view: &str,
+    body: (usize, usize),
+    key: Option<&str>,
+    value: Option<&str>,
+) -> Vec<(usize, usize)> {
+    let vb = view.as_bytes();
+    let tags: Vec<String> = key
+        .map(str::to_string)
+        .into_iter()
+        .chain(value.map(|v| format!("{v}.Name")))
+        .collect();
+    let mut out = Vec::new();
+    if tags.is_empty() {
+        return out;
+    }
+    let cases = word_hits(view, "case");
+    for at in word_hits(view, "switch") {
+        if at <= body.0 || at >= body.1 {
+            continue;
+        }
+        let from = at + "switch".len();
+        let Some(brace) = vb[from..body.1].iter().position(|&c| c == b'{') else {
+            continue;
+        };
+        let brace = from + brace;
+        let tag = view[from..brace].trim();
+        if !tags.iter().any(|t| t == tag) {
+            continue;
+        }
+        let Some(s_close) = matching(view, brace) else {
+            continue;
+        };
+        for kw in brace_depth0(vb, brace + 1, s_close, cases.clone()) {
+            let list = kw + "case".len();
+            if let Some(colon) = case_colon(vb, list, s_close) {
+                out.extend(split_args(view, list - 1, colon));
+            }
+        }
+    }
+    out
+}
+
+/// The `:` closing a case list that starts at `from`, at bracket depth 0 and
+/// before `limit`.
+fn case_colon(vb: &[u8], from: usize, limit: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (k, &c) in vb.iter().enumerate().take(limit).skip(from) {
+        match c {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.checked_sub(1)?,
+            b':' if depth == 0 => return Some(k),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// `.<member>(` after the identifier ending at `from`: the offsets of its
@@ -1122,14 +1475,21 @@ mod tests {
     use super::*;
     use crate::evm::scan::code_view;
 
-    /// `call <scope key>.<member> args=<n|-> abi=<keys|-> line=<l>` per site,
-    /// in file order, and the counts.
+    /// `<call|event> <scope key>.<member> args=<n|-> abi=<keys|-> line=<l>`
+    /// per site, in file order, and the counts.
     fn read(src: &str) -> (Vec<String>, GoCounts) {
         let (sites, counts) = scan(src, &code_view(src, "go"));
         let rows = sites
             .iter()
             .map(|s| {
-                assert_eq!((s.side, s.lib), (ClientSide::Call, "geth"));
+                assert_eq!(s.lib, "geth");
+                let side = match s.side {
+                    ClientSide::Call => "call",
+                    ClientSide::Event => {
+                        assert_eq!(s.args, None, "an event passes no argument count");
+                        "event"
+                    }
+                };
                 let abi = s.abi.as_ref().map_or_else(
                     || "-".to_string(),
                     |e| e.iter().map(AbiEntry::to_key).collect::<Vec<_>>().join(","),
@@ -1137,7 +1497,7 @@ mod tests {
                 let args = s.args.map_or_else(|| "-".to_string(), |a| a.to_string());
                 let line = src[..s.at].matches('\n').count() + 1;
                 format!(
-                    "call {}.{} args={args} abi={abi} line={line}",
+                    "{side} {}.{} args={args} abi={abi} line={line}",
                     s.scope.key(),
                     s.member
                 )
@@ -1194,7 +1554,7 @@ func local() {
 }
 "#;
         let view = code_view(src, "go");
-        let decls: Vec<(String, Vec<String>)> = abi_decls(src, &package_specs(&view))
+        let decls: Vec<(String, Vec<String>)> = abi_decls(src, &view, &package_specs(&view), None)
             .into_iter()
             .map(|d| (d.name, d.entries.iter().map(AbiEntry::to_key).collect()))
             .collect();
@@ -1557,7 +1917,7 @@ func (s *PlatformSigner) submitTo(ctx context.Context, chainName, contractAddr, 
     }
 
     #[test]
-    fn unpack_reads_abi_functions_only() {
+    fn unpack_reads_abi_functions_and_events() {
         let src = format!(
             "{HEAD}{}",
             r#"
@@ -1566,6 +1926,7 @@ func f(data []byte) {
 	parsed.Unpack("deposit", data)
 	parsed.UnpackIntoInterface(&out, "release", data)
 	parsed.Unpack("Released", data)
+	parsed.UnpackIntoInterface(&ev, "Released", data)
 	parsed.Unpack("gone", data)
 }
 "#
@@ -1576,9 +1937,12 @@ func f(data []byte) {
             [
                 format!("call abi:escrowABI.deposit args=- abi={KEYS} line=18"),
                 format!("call abi:escrowABI.release args=- abi={KEYS} line=19"),
-            ]
+                format!("event abi:escrowABI.Released args=- abi={KEYS} line=20"),
+                format!("event abi:escrowABI.Released args=- abi={KEYS} line=21"),
+            ],
+            "a decoding form of an ABI event is an event site (DT.10k)"
         );
-        assert_eq!(c, counts(1, 1, 0), "an event is no miss; gone is");
+        assert_eq!(c, counts(1, 1, 0), "gone is in neither list");
     }
 
     #[test]
@@ -1649,34 +2013,563 @@ func (*Anon) unnamed(context.Context, string) struct{ a int } {
 func asm(x int) int
 
 func chans(c chan int, d <-chan int) {}
+
+func (_Escrow *EscrowCaller) Deposits(opts *bind.CallOpts) {}
+
+func (c Box[T]) Len() {}
 ";
         let view = code_view(src, "go");
         let funcs = func_decls(&view);
-        let decls: Vec<(Option<&str>, Vec<&str>, &str)> = funcs
+        // (receiver, receiver type, parameters, body)
+        type Decl<'a> = (Option<&'a str>, Option<&'a str>, Vec<&'a str>, &'a str);
+        let decls: Vec<Decl<'_>> = funcs
             .iter()
             .map(|f| {
                 (
                     f.receiver.as_deref(),
+                    f.receiver_type.as_deref(),
                     f.params.iter().map(String::as_str).collect(),
                     &src[f.body.0..=f.body.1],
                 )
             })
             .collect();
-        assert_eq!(decls.len(), 4, "{decls:?}");
+        assert_eq!(decls.len(), 6, "{decls:?}");
         assert_eq!(
             decls[0],
             (
                 Some("s"),
+                Some("PlatformSigner"),
                 vec!["ctx", "chainName", "contractAddr", "method", "args"],
                 "{\n\treturn \"\", nil\n}"
             )
         );
-        assert_eq!(decls[1], (None, vec!["m", "f"], "{ return m }"));
+        assert_eq!(decls[1], (None, None, vec!["m", "f"], "{ return m }"));
         assert_eq!(
             decls[2],
-            (None, vec![], "{\n\treturn struct{ a int }{}\n}"),
+            (
+                None,
+                Some("Anon"),
+                vec![],
+                "{\n\treturn struct{ a int }{}\n}"
+            ),
             "unnamed parameters name nothing; a struct result is stepped over"
         );
-        assert_eq!(decls[3], (None, vec!["c", "d"], "{}"));
+        assert_eq!(decls[3], (None, None, vec!["c", "d"], "{}"));
+        assert_eq!(
+            decls[4],
+            (Some("_Escrow"), Some("EscrowCaller"), vec!["opts"], "{}")
+        );
+        assert_eq!(
+            decls[5],
+            (Some("c"), Some("Box"), vec![], "{}"),
+            "type parameters are dropped"
+        );
+    }
+
+    #[test]
+    fn events_index_filter_watch_unpack_log() {
+        let src = format!(
+            "{HEAD}{}",
+            r#"
+func f(c *bind.BoundContract, client *ethclient.Client, q ethereum.FilterQuery, name string) {
+	parsed, _ := abi.JSON(strings.NewReader(escrowABI))
+	id := parsed.Events["Released"].ID
+	_ = parsed.Events["Gone"]
+	logs, sub, _ := c.FilterLogs(fopts, "Released", rule)
+	c.WatchLogs(wopts, "Deposited", rule)
+	c.UnpackLog(&ev, "Released", log)
+	c.UnpackLogIntoMap(m, "Released", log)
+	client.FilterLogs(ctx, q)
+	_ = parsed.Events[name]
+	bc := bind.NewBoundContract(addr, parsed, b, b, b)
+	bc.WatchLogs(wopts, "Released")
+	bc.FilterLogs(fopts, "deposit")
+	bc.Transact(opts, "Released")
+}
+"#
+        );
+        let (rows, c) = read(&src);
+        assert_eq!(
+            rows,
+            [
+                format!("event abi:escrowABI.Released args=- abi={KEYS} line=18"),
+                "event recv:c.Released args=- abi=- line=20".to_string(),
+                "event recv:c.Deposited args=- abi=- line=21".to_string(),
+                "event recv:c.Released args=- abi=- line=22".to_string(),
+                "event recv:c.Released args=- abi=- line=23".to_string(),
+                format!("event abi:escrowABI.Released args=- abi={KEYS} line=27"),
+            ],
+            "ethclient's FilterLogs(ctx, q) has no name literal"
+        );
+        assert_eq!(
+            c,
+            counts(1, 3, 1),
+            "Gone, the function deposit as an event and the event Released as a call \
+             are not in the ABI; Events[name] on a bound receiver is dynamic"
+        );
+    }
+
+    #[test]
+    fn events_switch_over_range_keys_and_value_name() {
+        let src = format!(
+            "{HEAD}{}",
+            r#"
+type Indexer struct {
+	parsedABI abi.ABI
+}
+
+func New() *Indexer {
+	parsed, _ := abi.JSON(strings.NewReader(escrowABI))
+	return &Indexer{parsedABI: parsed}
+}
+
+func (idx *Indexer) byKey(topic common.Hash, kind string) {
+	for name, event := range idx.parsedABI.Events {
+		if event.ID != topic {
+			continue
+		}
+		switch name {
+		case "Released", "Gone":
+			switch kind {
+			case "Deposited":
+			}
+		case "deposit":
+		default:
+		}
+		switch kind {
+		case "Released":
+		}
+	}
+}
+
+func (idx *Indexer) byName(c *bind.BoundContract, name string) {
+	for _, ev := range idx.parsedABI.Events {
+		switch ev.Name {
+		case "Released":
+		}
+		switch ev.ID {
+		case "Released":
+		}
+	}
+	for k := range c.Events {
+		switch k {
+		case "TradeCancelled", "TimeoutClaimed":
+		case cancelledName:
+		}
+	}
+	for _, v := range c.Methods {
+		switch v.Name {
+		case "release":
+		}
+	}
+	switch name {
+	case "Released":
+	}
+}
+"#
+        );
+        let (rows, c) = read(&src);
+        assert_eq!(
+            rows,
+            [
+                format!("event abi:escrowABI.Released args=- abi={KEYS} line=31"),
+                format!("event abi:escrowABI.Released args=- abi={KEYS} line=47"),
+                "event recv:c.TradeCancelled args=- abi=- line=55".to_string(),
+                "event recv:c.TimeoutClaimed args=- abi=- line=55".to_string(),
+            ],
+            "a nested or unrelated switch, a range over Methods and a switch outside \
+             the loop contribute nothing"
+        );
+        assert_eq!(c, counts(1, 2, 0), "Gone and the function deposit");
+    }
+
+    /// An abigen v1 binding's metadata ABI: deposit/1, deposits/1, the event
+    /// Released/1.
+    const META_ABI: &str = r#""[{\"type\":\"function\",\"name\":\"deposit\",\"inputs\":[{\"name\":\"orderId\",\"type\":\"bytes32\"}]},{\"type\":\"function\",\"name\":\"deposits\",\"inputs\":[{\"name\":\"\",\"type\":\"bytes32\"}]},{\"type\":\"event\",\"name\":\"Released\",\"inputs\":[{\"name\":\"orderId\",\"type\":\"bytes32\"}]}]""#;
+
+    /// META_ABI as `read` prints it.
+    const META_KEYS: &str = "f:deposit/1,f:deposits/1,e:Released/1";
+
+    #[test]
+    fn abigen_v1_metadata_and_receiver_type_scope() {
+        let src = format!(
+            r#"// Code generated - DO NOT EDIT.
+package escrowbind
+
+import (
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+)
+
+var EscrowMetaData = &bind.MetaData{{
+	ABI: {META_ABI},
+	Bin: "0x6080",
+}}
+
+var EscrowABI = EscrowMetaData.ABI
+
+func bindEscrow(address common.Address, caller bind.ContractCaller, transactor bind.ContractTransactor, filterer bind.ContractFilterer) (*bind.BoundContract, error) {{
+	parsed, err := EscrowMetaData.GetAbi()
+	if err != nil {{
+		return nil, err
+	}}
+	return bind.NewBoundContract(address, *parsed, caller, transactor, filterer), nil
+}}
+
+func (_Escrow *EscrowRaw) Call(opts *bind.CallOpts, result *[]interface{{}}, method string, params ...interface{{}}) error {{
+	return _Escrow.Contract.EscrowCaller.contract.Call(opts, result, method, params...)
+}}
+
+func (_Escrow *EscrowCaller) Deposits(opts *bind.CallOpts, arg0 [32]byte) (*big.Int, error) {{
+	var out []interface{{}}
+	err := _Escrow.contract.Call(opts, &out, "deposits", arg0)
+	return out[0].(*big.Int), err
+}}
+
+func (_Escrow *EscrowCallerSession) Deposits(arg0 [32]byte) (*big.Int, error) {{
+	return _Escrow.Contract.Deposits(&_Escrow.CallOpts, arg0)
+}}
+
+func (_Escrow *EscrowTransactor) Deposit(opts *bind.TransactOpts, orderId [32]byte) (*types.Transaction, error) {{
+	return _Escrow.contract.Transact(opts, "deposit", orderId)
+}}
+
+func (_Escrow *EscrowTransactor) Stray(opts *bind.TransactOpts) (*types.Transaction, error) {{
+	return _Escrow.contract.Transact(opts, "withdraw")
+}}
+
+func (_Escrow *EscrowFilterer) WatchReleased(opts *bind.WatchOpts, sink chan<- *EscrowReleased) (event.Subscription, error) {{
+	logs, sub, err := _Escrow.contract.WatchLogs(opts, "Released")
+	return event.NewSubscription(func(quit <-chan struct{{}}) error {{
+		for {{
+			select {{
+			case log := <-logs:
+				ev := new(EscrowReleased)
+				if err := _Escrow.contract.UnpackLog(ev, "Released", log); err != nil {{
+					return err
+				}}
+			}}
+		}}
+	}}), nil
+}}
+
+func (it *EscrowReleasedIterator) Next() bool {{
+	return it.contract.UnpackLog(it.Event, it.event, it.log) == nil
+}}
+
+func Data(id [32]byte) []byte {{
+	parsed, _ := EscrowMetaData.GetAbi()
+	b, _ := parsed.Pack("deposit", id)
+	return b
+}}
+"#
+        );
+        let (rows, c) = read(&src);
+        assert_eq!(
+            rows,
+            [
+                format!("call abi:EscrowMetaData.deposits args=1 abi={META_KEYS} line=29"),
+                format!("call abi:EscrowMetaData.deposit args=1 abi={META_KEYS} line=38"),
+                format!("event abi:EscrowMetaData.Released args=- abi={META_KEYS} line=46"),
+                format!("event abi:EscrowMetaData.Released args=- abi={META_KEYS} line=52"),
+                format!("call abi:EscrowMetaData.deposit args=1 abi={META_KEYS} line=66"),
+            ],
+            "the iterator's UnpackLog names no literal; Raw's forwarding Call is no site"
+        );
+        assert_eq!(
+            c,
+            counts(1, 1, 0),
+            "EscrowMetaData (EscrowABI = EscrowMetaData.ABI is no literal); withdraw"
+        );
+    }
+
+    #[test]
+    fn abigen_v1_abi_const() {
+        let src = r#"// Code generated - DO NOT EDIT.
+package escrowbind
+
+import (
+	"strings"
+
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+)
+
+const EscrowABI = "[{\"type\":\"function\",\"name\":\"release\",\"inputs\":[{\"name\":\"orderId\",\"type\":\"bytes32\"}]}]"
+
+func bindEscrow(address common.Address, caller bind.ContractCaller, transactor bind.ContractTransactor, filterer bind.ContractFilterer) (*bind.BoundContract, error) {
+	parsed, err := abi.JSON(strings.NewReader(EscrowABI))
+	if err != nil {
+		return nil, err
+	}
+	return bind.NewBoundContract(address, parsed, caller, transactor, filterer), nil
+}
+
+func (_Escrow *EscrowTransactor) Release(opts *bind.TransactOpts, orderId [32]byte) (*types.Transaction, error) {
+	return _Escrow.contract.Transact(opts, "release", orderId)
+}
+
+func (_Escrow *EscrowTransactorSession) Release(orderId [32]byte) (*types.Transaction, error) {
+	return _Escrow.Contract.contract.Transact(&_Escrow.TransactOpts, "release", orderId)
+}
+
+func (_Settle *SettleTransactor) Release(opts *bind.TransactOpts, orderId [32]byte) (*types.Transaction, error) {
+	return _Settle.contract.Transact(opts, "release", orderId)
+}
+"#;
+        let (rows, c) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call abi:EscrowABI.release args=1 abi=f:release/1 line=22",
+                "call abi:EscrowABI.release args=1 abi=f:release/1 line=26",
+                "call recv:contract.release args=1 abi=- line=30",
+            ],
+            "the longest suffix first; Settle declares no SettleMetaData / SettleABI"
+        );
+        assert_eq!(c, counts(1, 0, 0));
+    }
+
+    #[test]
+    fn abigen_v2_parse_abi_and_pointer_field() {
+        let src = format!(
+            r#"// Code generated via abigen V2 - DO NOT EDIT.
+package escrow
+
+import (
+	"errors"
+
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind/v2"
+)
+
+var EscrowMetaData = bind.MetaData{{
+	ABI: {META_ABI},
+	ID:  "Escrow",
+}}
+
+type Escrow struct {{
+	abi abi.ABI
+}}
+
+func NewEscrow() *Escrow {{
+	parsed, err := EscrowMetaData.ParseABI()
+	if err != nil {{
+		panic(errors.New("invalid ABI: " + err.Error()))
+	}}
+	return &Escrow{{abi: *parsed}}
+}}
+
+func (c *Escrow) Instance(backend bind.ContractBackend, addr common.Address) *bind.BoundContract {{
+	return bind.NewBoundContract(addr, c.abi, backend, backend, backend)
+}}
+
+func (escrow *Escrow) PackDeposit(orderId [32]byte) []byte {{
+	enc, err := escrow.abi.Pack("deposit", orderId)
+	if err != nil {{
+		panic(err)
+	}}
+	return enc
+}}
+
+func (c *Escrow) TryPackDeposit(orderId [32]byte) ([]byte, error) {{
+	return c.abi.Pack("deposit", orderId)
+}}
+
+func (escrow *Escrow) UnpackDeposits(data []byte) (*big.Int, error) {{
+	out, err := escrow.abi.Unpack("deposits", data)
+	return out[0].(*big.Int), err
+}}
+
+func (escrow *Escrow) UnpackReleasedEvent(log *types.Log) (*EscrowReleased, error) {{
+	event := "Released"
+	if log.Topics[0] != escrow.abi.Events[event].ID {{
+		return nil, errors.New("event signature mismatch")
+	}}
+	out := new(EscrowReleased)
+	if err := escrow.abi.UnpackIntoInterface(out, event, log.Data); err != nil {{
+		return nil, err
+	}}
+	return out, nil
+}}
+"#
+        );
+        let (rows, c) = read(&src);
+        assert_eq!(
+            rows,
+            [
+                format!("call abi:EscrowMetaData.deposit args=1 abi={META_KEYS} line=33"),
+                format!("call abi:EscrowMetaData.deposit args=1 abi={META_KEYS} line=41"),
+                format!("call abi:EscrowMetaData.deposits args=- abi={META_KEYS} line=45"),
+            ]
+        );
+        assert_eq!(
+            c,
+            counts(1, 0, 2),
+            "the event unpacker names Released through a local: Events[event] and \
+             UnpackIntoInterface(out, event, ..) on the bound field are dynamic"
+        );
+    }
+
+    #[test]
+    fn receiver_type_without_metadata_is_recv_scope() {
+        let src = r#"package chain
+
+import "github.com/ethereum/go-ethereum/accounts/abi/bind"
+
+const VaultABI = `[{"type":"function","name":"withdraw","inputs":[]}]`
+
+type EscrowCaller struct {
+	contract *bind.BoundContract
+}
+
+func (_Escrow *EscrowCaller) Deposits(opts *bind.CallOpts, id [32]byte) error {
+	return _Escrow.contract.Call(opts, &out, "deposits", id)
+}
+
+func (v *VaultCaller) Get(opts *bind.CallOpts, other *bind.BoundContract) error {
+	other.Call(opts, &out, "withdraw")
+	return v.contract.Call(opts, &out, "withdraw")
+}
+
+func Free(contract *bind.BoundContract, opts *bind.CallOpts) error {
+	return contract.Call(opts, &out, "withdraw")
+}
+"#;
+        let (rows, c) = read(src);
+        assert_eq!(
+            rows,
+            [
+                "call recv:contract.deposits args=1 abi=- line=12",
+                "call recv:other.withdraw args=0 abi=- line=16",
+                "call abi:VaultABI.withdraw args=0 abi=f:withdraw/0 line=17",
+                "call recv:contract.withdraw args=0 abi=- line=21",
+            ],
+            "no EscrowMetaData / EscrowABI; a chain not rooted at the receiver; a function"
+        );
+        assert_eq!(c, counts(1, 0, 0));
+    }
+
+    #[test]
+    fn kina_indexer_shape() {
+        // Kina backend/internal/indexer/indexer.go processLog, its 13 events.
+        let events = [
+            "TradeCreated",
+            "TradeFunded",
+            "PaymentConfirmed",
+            "FundsReleased",
+            "DisputeRaised",
+            "DisputeResolved",
+            "TradeCancelled",
+            "TimeoutClaimed",
+            "ResolutionProposed",
+            "ResolutionAccepted",
+            "TradeFrozen",
+            "TradeUnfrozen",
+            "FundsSeized",
+        ];
+        let abi = events
+            .iter()
+            .map(|e| {
+                format!(
+                    r#"  {{"anonymous":false,"inputs":[{{"indexed":true,"name":"tradeId","type":"uint256"}}],"name":"{e}","type":"event"}}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
+        let src = format!(
+            r#"package indexer
+
+import (
+	"context"
+	"strings"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
+)
+
+const escrowABI = `[
+{abi}
+]`
+
+type Indexer struct {{
+	client    *ethclient.Client
+	parsedABI abi.ABI
+}}
+
+func New(client *ethclient.Client) (*Indexer, error) {{
+	parsed, err := abi.JSON(strings.NewReader(escrowABI))
+	if err != nil {{
+		return nil, err
+	}}
+	return &Indexer{{
+		client:    client,
+		parsedABI: parsed,
+	}}, nil
+}}
+
+func (idx *Indexer) poll(ctx context.Context, query ethereum.FilterQuery) error {{
+	logs, err := idx.client.FilterLogs(ctx, query)
+	for _, vlog := range logs {{
+		idx.processLog(ctx, vlog)
+	}}
+	return err
+}}
+
+func (idx *Indexer) processLog(ctx context.Context, vlog types.Log) error {{
+	for name, event := range idx.parsedABI.Events {{
+		if event.ID != vlog.Topics[0] {{
+			continue
+		}}
+		switch name {{
+		case "TradeCreated":
+			return nil
+		case "TradeFunded":
+			return nil
+		case "PaymentConfirmed":
+			return nil
+		case "FundsReleased":
+			return nil
+		case "DisputeRaised":
+			return nil
+		case "DisputeResolved":
+			return nil
+		case "TradeCancelled", "TimeoutClaimed":
+			return nil
+		case "ResolutionProposed":
+			return nil
+		case "ResolutionAccepted":
+			if vals, derr := idx.parsedABI.Events["ResolutionAccepted"].Inputs.NonIndexed().Unpack(vlog.Data); derr == nil && len(vals) > 0 {{
+				return nil
+			}}
+			return nil
+		case "TradeFrozen", "TradeUnfrozen":
+			log.Printf("%s", name)
+			return nil
+		case "FundsSeized":
+			return nil
+		}}
+	}}
+	return nil
+}}
+"#
+        );
+        let out =
+            crate::evm::extract_evm_clients(&src, "go", glia_core::NodeId(1), glia_core::RepoId(1));
+        assert_eq!(
+            out.markers("backend/internal/indexer/indexer.go"),
+            [
+                "[evm-client] lang=go calls=0 events=13 sites=14 (ethers=0 hardhat=0 typechain=0 viem=0 web3=0 geth=14) abis=1 not_in_abi=0 dynamic=0 path=backend/internal/indexer/indexer.go"
+            ]
+        );
+        let mut qnames: Vec<&str> = out.nav.qname_by_id.values().map(String::as_str).collect();
+        qnames.sort_unstable();
+        let mut want: Vec<String> = events
+            .iter()
+            .map(|e| format!("evm_event:abi:escrowABI.{e}"))
+            .collect();
+        want.sort_unstable();
+        assert_eq!(qnames, want);
     }
 }

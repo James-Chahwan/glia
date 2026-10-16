@@ -1,0 +1,100 @@
+{
+  "framework": "go-ethereum-events-abigen",
+  "language": "go",
+  "dirs": [
+    "api",
+    "contracts"
+  ],
+  "note": "DT.10k (T10; Kina indexer.go shape, an abigen v1 binding). HEAD 7661c035 and DT.10e alone: no EVENT_HANDLER and no abigen RPC_CALL.",
+  "expect_nodes": [
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "evm_event:abi:escrowEventsABI.Deposited",
+      "exact": true
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "evm_event:abi:escrowEventsABI.Released",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:EscrowMetaData.deposit",
+      "exact": true
+    },
+    {
+      "kind": "RPC_CALL",
+      "name": "evm_call:abi:EscrowMetaData.deposits",
+      "exact": true
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "name": "evm_event:abi:EscrowMetaData.Released",
+      "exact": true
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "contracts::Escrow::Escrow::Deposited",
+      "to": "evm_event:abi:escrowEventsABI.Deposited",
+      "category": "EVENT_FLOWS",
+      "exact": true
+    },
+    {
+      "from": "contracts::Escrow::Escrow::Released",
+      "to": "evm_event:abi:escrowEventsABI.Released",
+      "category": "EVENT_FLOWS",
+      "exact": true
+    },
+    {
+      "from": "contracts::Escrow::Escrow::Released",
+      "to": "evm_event:abi:EscrowMetaData.Released",
+      "category": "EVENT_FLOWS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:EscrowMetaData.deposit",
+      "to": "evm:Escrow.deposit",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_call:abi:EscrowMetaData.deposits",
+      "to": "evm:Escrow.deposits",
+      "category": "RPC_CALLS",
+      "exact": true
+    },
+    {
+      "from": "evm_event:abi:escrowEventsABI.Released",
+      "to": "chain::indexer::Indexer::Handle",
+      "category": "HANDLED_BY",
+      "exact": true
+    },
+    {
+      "from": "evm_event:abi:EscrowMetaData.Released",
+      "to": "escrowbind::escrow::EscrowFilterer::FilterReleased",
+      "category": "HANDLED_BY",
+      "exact": true
+    }
+  ],
+  "forbid": [
+    {
+      "from": "contracts::Vault::Vault::Released",
+      "to": "evm_event:abi:escrowEventsABI.Released",
+      "category": "EVENT_FLOWS"
+    },
+    {
+      "from": "contracts::Vault::Vault::Released",
+      "to": "evm_event:abi:EscrowMetaData.Released",
+      "category": "EVENT_FLOWS"
+    },
+    {
+      "kind": "RPC_CALL",
+      "max_nodes": 2
+    },
+    {
+      "kind": "EVENT_HANDLER",
+      "max_nodes": 3
+    }
+  ]
+}
