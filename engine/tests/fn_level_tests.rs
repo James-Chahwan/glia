@@ -391,3 +391,70 @@ fn scalatest_case_blocks_test_their_callees() {
         "the case is no dead symbol: {dead:?}"
     );
 }
+
+const DECLARED_OVERLAY: &str =
+    include_str!("../../bench/substrate-gap/fixtures/test-paths-declared-tests/.glia/overlay.toml");
+const DECLARED_PACKAGE: &str =
+    include_str!("../../bench/substrate-gap/fixtures/test-paths-declared-tests/package.json");
+const DECLARED_QA_CART: &str =
+    include_str!("../../bench/substrate-gap/fixtures/test-paths-declared-tests/qa/flows/cart.ts");
+const DECLARED_SRC_CART: &str =
+    include_str!("../../bench/substrate-gap/fixtures/test-paths-declared-tests/src/cart.ts");
+
+/// DF.11: `.glia/overlay.toml [walk] tests = ["qa/"]` makes `qa/flows/cart.ts`
+/// a test module of the TESTS pass: it pairs `src/cart.ts` by its stem (rule
+/// `declared_name`), and CL.5b derives `TESTS addsAnItem -> addItem` from that
+/// pair and the case's CALLS edge. Before DF.11 the declared module only
+/// carried ORIGIN `test_fixture` (CJ.4) and paired nothing. Without the
+/// overlay the same files hold no TESTS edge.
+#[test]
+fn declared_tests_pair_module_and_functions() {
+    let app = [
+        ("package.json", DECLARED_PACKAGE),
+        ("qa/flows/cart.ts", DECLARED_QA_CART),
+        ("src/cart.ts", DECLARED_SRC_CART),
+    ];
+    let mut files = app.to_vec();
+    files.push((".glia/overlay.toml", DECLARED_OVERLAY));
+    let (_d, g) = build(&files);
+    let m = &g.merged;
+
+    let module = tests_edge(m, "qa::flows::cart", "src::cart");
+    assert_eq!(module.confidence, Confidence::Strong);
+    let ev = Evidence::of(module).expect("the module edge carries EVIDENCE");
+    assert_eq!(ev.emitter, "pass:tests");
+    assert_eq!(ev.rule.as_deref(), Some("declared_name"));
+
+    assert_eq!(
+        fn_tests(m),
+        [pair("qa::flows::cart::addsAnItem", "src::cart::addItem")]
+    );
+    let e = tests_edge(m, "qa::flows::cart::addsAnItem", "src::cart::addItem");
+    assert_eq!(e.confidence, Confidence::Medium);
+    let ev = Evidence::of(e).expect("the fn edge carries EVIDENCE");
+    assert_eq!(ev.emitter, "pass:tests");
+    assert_eq!(ev.rule.as_deref(), Some("calls_into_tested_module"));
+    assert_eq!(ev.file.as_deref(), Some("qa/flows/cart.ts"));
+    assert_eq!(ev.line, Some(3), "the call's own 0-based line");
+
+    // Never the other way round, and the app module tests nothing.
+    let reverse = m
+        .all_edges()
+        .filter(|e| e.category == edge_category::TESTS && qname_of(m, e.from) == "src::cart")
+        .count();
+    assert_eq!(reverse, 0);
+    // LE.3a lists the declared case on the unit's TEST cell.
+    assert_eq!(
+        test_cell(m, "src::cart::addItem"),
+        [pair("qa::flows::cart::addsAnItem", "FUNCTION")]
+    );
+
+    // The same files with no declaration: the name rule pairs nothing.
+    let (_p, plain) = build(&app);
+    let tests = plain
+        .merged
+        .all_edges()
+        .filter(|e| e.category == edge_category::TESTS)
+        .count();
+    assert_eq!(tests, 0);
+}

@@ -143,6 +143,15 @@ the built-in rules, and both are user config: applied with or without `--no-over
   (a contract operation, a region anchor) as it is. A node with no POSITION (a package
   dependency, a queue tag) is never matched.
 
+  A module under a declared path is also a test module for the TESTS pass: it pairs with the
+  app module of the same stem (`qa/flows/cart.ts` -> `src/cart.ts`; a test affix is stripped
+  first, `qa/cart.spec.ts` -> `src/cart.ts`), EVIDENCE rule `declared_name`, and its root
+  functions get function-level TESTS edges to what they call there. It never pairs another
+  test or declared file of its stem, and no test pairs it as the code under test. A layout
+  merge (`glia merge`) does not read the overlay, so it pairs declared tests by name only, like
+  any other module. The build's `[tests] module TESTS edges: <n> (snake=<s> camel=<c>
+  declared=<d>)` line counts these edges as `declared`.
+
 A build whose overlay declares `tests` prints, per repo,
 `[provenance] declared tests repo=<label> patterns=<n> tagged=<d>`, where `tagged` counts the
 node entries only a declared pattern tagged (modules included); the

@@ -219,7 +219,7 @@ pub(crate) const CODE_PASSES: PassRegistry<MergedGraph, CodeBuildCtx> = PassRegi
         stage: Stage::Post,
         after: &[],
         populates: &[],
-        run: |m, _| passes::emit_tests_edges(m),
+        run: |m, ctx| passes::emit_tests_edges(m, ctx),
     },
     // LE.3a: a TEST cell on every node a TESTS edge points at, listing its
     // direct tests - reads the parser's function-level edges, the module

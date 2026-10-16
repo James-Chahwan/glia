@@ -1670,28 +1670,56 @@ fn is_test_path(file: &str) -> Option<TestPathRule> {
 // ----------------------------------------------------------------------------
 
 /// Module-level TESTS edges emitted by one run, split by which affix family
-/// paired the test module with its target (A6.7).
+/// paired the test module with its target (A6.7), or by the repo's declared
+/// test paths (DF.11).
 #[derive(Debug, Default, PartialEq, Eq)]
 struct TestsEdgeStats {
     /// `test_x` / `x_test` / `x_spec` / `x.test` / `x.spec` — the pre-A6.7 rule.
     snake: usize,
     /// `XTest` / `XTests` / `XTestCase` / `XSpec` / `XSpecs` / `TestX`.
     camel: usize,
+    /// DF.11: a module under a declared `[walk] tests` path, rule
+    /// `declared_name` (counted here only, whatever affix it carries).
+    declared: usize,
 }
+
+impl TestsEdgeStats {
+    /// `[tests] module TESTS edges: <n> (snake=<s> camel=<c> declared=<d>)`,
+    /// when `n > 0`.
+    fn marker(&self) -> Option<String> {
+        let n = self.snake + self.camel + self.declared;
+        (n > 0).then(|| {
+            format!(
+                "[tests] module TESTS edges: {n} (snake={} camel={} declared={})",
+                self.snake, self.camel, self.declared
+            )
+        })
+    }
+}
+
+/// DF.11: the EVIDENCE rule of a module TESTS edge whose test module sits
+/// under its repo's declared `[walk] tests` paths (CJ.4).
+const DECLARED_TESTS_RULE: &str = "declared_name";
 
 /// The TESTS edges of the build: the module pairing (A6.7,
 /// [`tests_module_edges`]), then the function-level edges derived from it and
 /// the CALLS edges (CL.5b, [`tests_fn_edges`]).
-pub(crate) fn emit_tests_edges(merged: &mut MergedGraph) {
-    let (edges, stats) = tests_module_edges(merged);
+///
+/// DF.11: the pairing also reads each repo's declared `[walk] tests` paths
+/// (CJ.4, `ctx.inputs`, in that order), so a module under one is a test
+/// module. A layout merge runs with [`CodeBuildCtx::empty`], as for the
+/// declared ORIGIN `test_fixture` and the overlay `[[edge]]` stanzas: the
+/// declaration is a build-time input, and a merge pairs by name only.
+pub(crate) fn emit_tests_edges(merged: &mut MergedGraph, ctx: &CodeBuildCtx) {
+    let declared: Vec<(RepoId, TestPaths)> = ctx
+        .inputs
+        .iter()
+        .filter_map(|input| Some((input.repo, input.config.as_ref()?.config.walk.tests_matcher()?)))
+        .collect();
+    let (edges, stats) = tests_module_edges(merged, &declared);
     // A6.7 fired_on marker: `... 2>&1 | grep '^\[tests\] module TESTS edges:'`
-    if stats.snake + stats.camel > 0 {
-        eprintln!(
-            "[tests] module TESTS edges: {} (snake={} camel={})",
-            stats.snake + stats.camel,
-            stats.snake,
-            stats.camel
-        );
+    if let Some(line) = stats.marker() {
+        eprintln!("{line}");
     }
     let pairs: Vec<(NodeId, NodeId)> = edges.iter().map(|e| (e.from, e.to)).collect();
     let (fn_edges, fn_stats) = tests_fn_edges(merged, &pairs);
@@ -1953,11 +1981,27 @@ struct TestsModule {
     /// LB.13: its file's extension, from its POSITION (`ts` for
     /// `src/util.ts`): a test picks the same-stem sibling its language loads.
     ext: Option<String>,
+    /// DF.11: its POSITION file matches its repo's declared `[walk] tests`
+    /// paths (CJ.4): a test module whatever its name, and never a target.
+    declared: bool,
 }
 
 /// Pair each test MODULE with the module(s) it tests by stripping the test
 /// affix off its qname tail and looking the stem up among module tails.
-fn tests_module_edges(merged: &MergedGraph) -> (Vec<Edge>, TestsEdgeStats) {
+///
+/// DF.11: `declared` holds each repo's `[walk] tests` matcher. A MODULE whose
+/// POSITION file one matches is a test module too: its stem is its tail with
+/// a test affix stripped when it has one, else the tail itself
+/// (`qa/flows/cart.ts` -> `cart`). Its candidates leave out every test-named
+/// or declared module (a declared test never pairs another test file of its
+/// stem), then [`select_test_targets`] picks as for any test; the edge's rule
+/// is [`DECLARED_TESTS_RULE`]. A declared module is no candidate of any test.
+/// With `declared` empty no module is declared and the pairing is the A6.7
+/// one.
+fn tests_module_edges(
+    merged: &MergedGraph,
+    declared: &[(RepoId, TestPaths)],
+) -> (Vec<Edge>, TestsEdgeStats) {
     let mut edges = Vec::new();
     let mut stats = TestsEdgeStats::default();
     let mut modules_by_tail: HashMap<String, Vec<usize>> = HashMap::new();
@@ -1981,36 +2025,50 @@ fn tests_module_edges(merged: &MergedGraph) -> (Vec<Edge>, TestsEdgeStats) {
                     .or_default()
                     .push(module_info.len());
             }
-            let ext = position_file(&n.cells).and_then(|f| {
-                let file = f.rsplit('/').next().unwrap_or(&f);
-                file.rsplit_once('.').map(|(_, e)| e.to_string())
+            let file = position_file(&n.cells);
+            let ext = file.as_deref().and_then(|f| {
+                let base = f.rsplit('/').next().unwrap_or(f);
+                base.rsplit_once('.').map(|(_, e)| e.to_string())
             });
-            module_info.push(TestsModule { id: n.id, key, qualified, graph, ext });
+            let declared = file.as_deref().is_some_and(|f| {
+                declared
+                    .iter()
+                    .find(|(repo, _)| *repo == n.repo)
+                    .is_some_and(|(_, matcher)| matcher.matches(f))
+            });
+            module_info.push(TestsModule { id: n.id, key, qualified, graph, ext, declared });
         }
     }
     for test in &module_info {
         let qname = test.key.as_str();
-        if !is_test_module_qname(qname) {
+        if !test.declared && !is_test_module_qname(qname) {
             continue;
         }
         let Some(tail) = qname.rsplit("::").next() else { continue };
         let stripped = strip_test_affixes(tail);
-        if stripped.is_empty() || stripped == tail {
+        if stripped.is_empty() || (stripped == tail && !test.declared) {
             continue;
         }
         let Some(candidates) = modules_by_tail.get(stripped) else { continue };
         let snake = strip_snake_test_affixes(tail) != tail;
-        let candidates: Vec<&TestsModule> =
-            candidates.iter().filter_map(|&i| module_info.get(i)).collect();
+        let candidates: Vec<&TestsModule> = candidates
+            .iter()
+            .filter_map(|&i| module_info.get(i))
+            .filter(|c| !c.declared)
+            .filter(|c| !test.declared || !is_test_module_qname(&c.key))
+            .collect();
+        let rule = if test.declared { DECLARED_TESTS_RULE } else { "name_match" };
         for to_id in select_test_targets(test, &candidates) {
-            if snake {
+            if test.declared {
+                stats.declared += 1;
+            } else if snake {
                 stats.snake += 1;
             } else {
                 stats.camel += 1;
             }
             edges.push(
                 Edge::new(test.id, to_id, edge_category::TESTS, Confidence::Strong)
-                    .with_cell(Evidence::emitter("pass:tests").rule("name_match").to_cell()),
+                    .with_cell(Evidence::emitter("pass:tests").rule(rule).to_cell()),
             );
         }
     }
@@ -3570,7 +3628,7 @@ mod passes_tests {
         let _fastest = module("Fastest");
         let merged = MergedGraph::new(vec![h.graph()]);
 
-        let (edges, stats) = tests_module_edges(&merged);
+        let (edges, stats) = tests_module_edges(&merged, &[]);
         let mut got: Vec<(NodeId, NodeId)> = edges
             .iter()
             .inspect(|e| assert_eq!(e.category, edge_category::TESTS))
@@ -3586,7 +3644,116 @@ mod passes_tests {
         ];
         want.sort_by_key(|(f, t)| (f.0, t.0));
         assert_eq!(got, want);
-        assert_eq!(stats, TestsEdgeStats { snake: 2, camel: 3 });
+        assert_eq!(stats, TestsEdgeStats { snake: 2, camel: 3, declared: 0 });
+    }
+
+    /// DF.11: a module under its repo's declared `[walk] tests` path is a
+    /// test module. It pairs the app module of its stem (a test affix
+    /// stripped first when it has one), rule `declared_name`, counted
+    /// `declared`; its candidates leave out test-named and declared modules,
+    /// so two declared files of one stem never pair each other; and no test
+    /// pairs a declared module. Without the repo's matcher (none, or another
+    /// repo's) the A6.7 pairing is unchanged. `emit_tests_edges` reads the
+    /// matcher from the build context.
+    #[test]
+    fn declared_test_module_pairs_by_stem() {
+        use std::path::PathBuf;
+
+        use crate::external::RepoInputs;
+        use glia_code_domain::glia_config;
+
+        const OVERLAY: &str = "version = 1\n[walk]\ntests = [\"qa/\"]\n";
+        let at = |file: &str| Cell {
+            kind: cell_type::POSITION,
+            payload: CellPayload::Json(format!(r#"{{"file":"{file}","start_line":0,"end_line":4}}"#)),
+        };
+        let mut h = Hand::new("test://df11");
+        let mut module = |q: &str, file: &str| {
+            let tail = q.rsplit("::").next().unwrap_or(q).to_string();
+            h.add(node_kind::MODULE, &tail, q, vec![at(file)])
+        };
+        let cart = module("src::cart", "src/cart.ts");
+        let checkout = module("src::checkout", "src/checkout.ts");
+        let flow = module("qa::flows::cart", "qa/flows/cart.ts");
+        let smoke = module("qa::smoke::cart", "qa/smoke/cart.ts");
+        let spec = module("qa::flows::checkout.spec", "qa/flows/checkout.spec.ts");
+        let fixture = module("tests::cart", "tests/cart.ts");
+        let web = module("web::cart.test", "web/cart.test.ts");
+        let _orphan = module("qa::flows::orphan", "qa/flows/orphan.ts");
+        let merged = MergedGraph::new(vec![h.graph()]);
+        let repo = RepoId::from_canonical("test://df11");
+        let matcher = || {
+            glia_config::parse_str(OVERLAY).config.walk.tests_matcher().expect("a tests matcher")
+        };
+        let rules = |edges: &[Edge]| {
+            let mut got: Vec<(NodeId, NodeId, String)> = edges
+                .iter()
+                .inspect(|e| assert_eq!(e.category, edge_category::TESTS))
+                .map(|e| {
+                    let ev = Evidence::of(e).expect("EVIDENCE");
+                    assert_eq!(ev.emitter, "pass:tests");
+                    (e.from, e.to, ev.rule.unwrap_or_default())
+                })
+                .collect();
+            got.sort_by_key(|(f, t, _)| (f.0, t.0));
+            got
+        };
+        let sorted = |mut v: Vec<(NodeId, NodeId, &str)>| {
+            v.sort_by_key(|(f, t, _)| (f.0, t.0));
+            v.into_iter().map(|(f, t, r)| (f, t, r.to_string())).collect::<Vec<_>>()
+        };
+
+        let (edges, stats) = tests_module_edges(&merged, &[(repo, matcher())]);
+        assert_eq!(
+            rules(&edges),
+            sorted(vec![
+                (flow, cart, "declared_name"),
+                (smoke, cart, "declared_name"),
+                (spec, checkout, "declared_name"),
+                (web, cart, "name_match"),
+                (web, fixture, "name_match"),
+            ])
+        );
+        assert_eq!(stats, TestsEdgeStats { snake: 2, camel: 0, declared: 3 });
+        assert_eq!(
+            stats.marker().as_deref(),
+            Some("[tests] module TESTS edges: 5 (snake=2 camel=0 declared=3)")
+        );
+
+        // No matcher, or another repo's: the name rule alone.
+        let elsewhere = RepoId::from_canonical("test://df11-other");
+        for declared in [Vec::new(), vec![(elsewhere, matcher())]] {
+            let (edges, stats) = tests_module_edges(&merged, &declared);
+            assert_eq!(
+                rules(&edges),
+                sorted(vec![
+                    (spec, checkout, "name_match"),
+                    (web, cart, "name_match"),
+                    (web, flow, "name_match"),
+                    (web, smoke, "name_match"),
+                ])
+            );
+            assert_eq!(stats, TestsEdgeStats { snake: 4, camel: 0, declared: 0 });
+        }
+
+        // The pass reads the matcher from the context's inputs.
+        let ctx = CodeBuildCtx {
+            inputs: vec![RepoInputs {
+                repo,
+                root: PathBuf::from("df11"),
+                label: "df11".into(),
+                config: Some(glia_config::parse_str(OVERLAY)),
+            }],
+            overlay: true,
+            group_fills: Vec::new(),
+            scip_roots: Vec::new(),
+        };
+        let mut built = merged.clone();
+        emit_tests_edges(&mut built, &ctx);
+        assert_eq!(rules(&built.cross_edges), rules(&tests_module_edges(&merged, &[(repo, matcher())]).0));
+        let mut unbuilt = merged.clone();
+        emit_tests_edges(&mut unbuilt, &CodeBuildCtx::empty());
+        assert_eq!(rules(&unbuilt.cross_edges), rules(&tests_module_edges(&merged, &[]).0));
     }
 
     /// LB.13: a test pairs the one same-stem sibling its language loads; a
@@ -3602,6 +3769,7 @@ mod passes_tests {
             qualified,
             graph: 0,
             ext: Some(ext.to_string()),
+            declared: false,
         };
         let ts = module("src::util.ts", "src::util", true, "ts");
         let js = module("src::util.js", "src::util", true, "js");
@@ -3931,7 +4099,7 @@ mod passes_tests {
         );
 
         // The whole pass: the module pairing it names, then the fn edge.
-        emit_tests_edges(&mut merged);
+        emit_tests_edges(&mut merged, &CodeBuildCtx::empty());
         let pairs: Vec<(NodeId, NodeId)> = merged
             .cross_edges
             .iter()
@@ -4018,7 +4186,7 @@ mod passes_tests {
                 "[tests] fn TESTS edges: 0 (test fns=0, helpers skipped=0, module pairs=1, already joined=1)"
             )
         );
-        emit_tests_edges(&mut merged);
+        emit_tests_edges(&mut merged, &CodeBuildCtx::empty());
         let joined = merged
             .all_edges()
             .filter(|e| e.category == edge_category::TESTS && (e.from, e.to) == (test_add, add))

@@ -1,0 +1,27 @@
+{
+  "framework": "test-paths-declared-tests",
+  "language": "typescript",
+  "dirs": [
+    "."
+  ],
+  "note": "DF.11 ('[walk] tests feeding the TESTS pass', the CJ.4 integrator note): `.glia/overlay.toml [walk] tests = [\"qa/\"]` gives qa/flows/cart.ts ORIGIN test_fixture (CJ.4), but engine/src/passes.rs tests_module_edges reads only is_test_module_qname (a test affix or a tests/ segment), so the declared module pairs nothing and CL.5b mints no function-level TESTS. HEAD (84e2e71, leap wheel): TESTS 0/2, ORIGIN test_fixture on qa::flows::cart::addsAnItem present. After: a declared test module pairs by its stem (affix stripped when present) like any test module, rule declared_name, and CL.5b derives the function-level edge from that pair.",
+  "expect_edges": [
+    {
+      "from": "qa::flows::cart",
+      "to": "src::cart",
+      "category": "TESTS"
+    },
+    {
+      "from": "qa::flows::cart::addsAnItem",
+      "to": "src::cart::addItem",
+      "category": "TESTS"
+    }
+  ],
+  "forbid": [
+    {
+      "from": "src::cart",
+      "to": "qa::flows::cart",
+      "category": "TESTS"
+    }
+  ]
+}
