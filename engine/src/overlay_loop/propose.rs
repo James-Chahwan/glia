@@ -16,6 +16,12 @@
 //! `.glia/overlay.toml` is read like any other file. The snippet is the
 //! user's own source (what `read` shows); nothing is redacted or stored.
 //!
+//! No rule is drafted (DB.9a). A `[[constraint]]` states intent and the
+//! graph holds only what is: every rule structure could suggest (a scope pair
+//! with no edge, an acyclic module set, the observed layering) restates the
+//! code as law, and a rule nobody wrote is not a gap in the graph. The guide
+//! says how to write one from declared intent instead.
+//!
 //! Marker (the fired_on line), once per call:
 //! `[overlay] propose repo=<primary> rows=<n> snippets=<s> ambiguous_root=<a> surface=<cli|py|engine>`.
 
@@ -54,7 +60,13 @@ the build in [entrypoints] (section \"Example\"); `remove` marks an overlay rule
 nothing, that the extractor now emits, or whose `rule` this glia can no longer read: remove it \
 with `accept` and its gap id (section \
 \"The loop: gaps -> overlay -> overlay delta\"); `glia cell ls --check --rekey` repairs a \
-sidecar row, not the overlay. Write each stanza under a `# gap: <id>` comment naming its row, \
+sidecar row, not the overlay. A [[constraint]] rule (section \"Rules through the loop\"; \
+docs/rules.md for `rule`) is a candidate stanza too, and glia drafts none: a rule states intent \
+and the graph holds only what is, so write one only from declared intent (a prose invariant \
+`glia check` lists unchecked, an ADR or [[decision]], the person's request), under a fresh id, \
+with `version = 2` when it uses `rule` / `transitive` / `via` / `min_tier`, from structural \
+predicates only (SECURITY.md); never `kind = \"allow\"` (a waiver is a person's call) and never \
+a prose invariant (try cannot judge one). Write each stanza under a `# gap: <id>` comment naming its row, \
 keep the file loadable (section \"Validation\": a syntax error or an unknown key ignores the \
 whole file), try the candidate, and accept only what the verdict keeps.";
 

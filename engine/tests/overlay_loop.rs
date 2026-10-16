@@ -23,6 +23,13 @@
 //! 7425636): these tests do not compile - `glia_engine::overlay_loop` has no
 //! `propose` / `accept`, and `glia overlay propose /tmp` is
 //! `error: unrecognized subcommand 'overlay'`.
+//!
+//! Rules through the loop (DB.9a): a candidate may carry `[[constraint]]`
+//! rules (`constraint#<n>`). DB.9a's baseline (HEAD c2dd8d75): every new
+//! rule test fails - `parse_candidate` refuses any `[[constraint]]`
+//! (`candidate: [[constraint]]: a candidate carries only overlay sections and
+//! entrypoints (...)`, plus, version-less, ``[[constraint]] `rule` need
+//! `version = 2` (this file says version = 1)``).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -273,7 +280,7 @@ fn merge_preserves_the_user_file() {
     assert!(cand.stanzas()[1].gaps.is_empty());
     assert_eq!(
         cand.marker(Some("candidate.toml")),
-        "[overlay] candidate file=candidate.toml stanzas=3 (route_prefix=0 wrapper=0 edge=1 constants=1 entrypoints=1) gap_links=1 errors=0"
+        "[overlay] candidate file=candidate.toml stanzas=3 (route_prefix=0 wrapper=0 edge=1 constants=1 entrypoints=1 constraint=0) gap_links=1 errors=0"
     );
 
     let merged = merge(Some(BASE), &cand, None).expect("merge");
@@ -436,12 +443,17 @@ fn candidate_sections_are_limited() {
     let walk = parse_candidate("[walk]\nskip = [\"gen/\"]\n").expect_err("[walk] is user config");
     assert!(walk.contains("[walk]"), "{walk}");
     assert!(
-        walk.contains("a candidate carries only overlay sections and entrypoints"),
+        walk.contains("a candidate carries only overlay sections, entrypoints and rules"),
         "{walk}"
     );
+    // DB.9a: a rule is a candidate stanza, a prose invariant is not (try
+    // cannot judge it): a person declares one by hand.
     let rule = parse_candidate("[[constraint]]\nid = \"r\"\nkind = \"invariant\"\ntext = \"t\"\n")
-        .expect_err("[[constraint]] is declared knowledge");
-    assert!(rule.contains("[[constraint]]"), "{rule}");
+        .expect_err("a prose invariant is a person's");
+    assert!(
+        rule.contains("[[constraint]]") && rule.contains("has no `rule`"),
+        "{rule}"
+    );
 
     // An unknown key: the loader's own error, quoted, at the candidate's line.
     let bad = parse_candidate(
@@ -910,6 +922,14 @@ fn propose_lists_rows_with_snippets() {
     assert_eq!(full.snippets, with_snippet);
     assert_eq!(full.ambiguous_root, 0);
     assert!(full.guide.contains("docs/overlay.md"), "{}", full.guide);
+    // DB.9a: propose drafts no rule; its guide says how to write one.
+    assert!(
+        full.guide.contains("[[constraint]]")
+            && full.guide.contains("glia drafts none")
+            && full.guide.contains("SECURITY.md"),
+        "{}",
+        full.guide
+    );
     assert_eq!(
         full.counts.get(UNPAIRED_ROUTE),
         Some(&2),
@@ -1114,7 +1134,7 @@ fn accept_and_propose_markers() {
     assert_eq!(
         accept_lines,
         [&format!(
-            "[overlay] accept repo={repo} added=1 (route_prefix=0 wrapper=1 edge=0 constants=0 entrypoints=0) removed=0 duplicates=0 file=.glia/overlay.toml dry_run=false surface=engine"
+            "[overlay] accept repo={repo} added=1 (route_prefix=0 wrapper=1 edge=0 constants=0 entrypoints=0 constraint=0) removed=0 duplicates=0 file=.glia/overlay.toml dry_run=false surface=engine"
         )]
     );
     assert!(
@@ -1453,4 +1473,293 @@ fn accept_creates_the_file() {
         .collect();
     assert_eq!(names, ["overlay.toml"], "no temp file left behind");
     std::fs::remove_dir_all(root).ok();
+}
+
+// ---------------------------------------------------------------------------
+// Rules through the loop (DB.9a)
+// ---------------------------------------------------------------------------
+
+/// A transitive forbid_edge with every version-2 field but `rule`.
+const NO_STORE: &str = "[[constraint]]\nid = \"no-store\"\nkind = \"forbid_edge\"\nfrom = \"web\"\nto = \"store\"\ntransitive = true\nvia = [\"store/api\"]\nmin_tier = \"fact\"\n";
+/// An invariant with a `rule` that validates (`edge/3`, `in_scope/2`).
+const WEB_CALLS: &str = "[[constraint]]\nid = \"web-calls\"\nkind = \"invariant\"\ntext = \"t\"\nrule = \"violation(a) :- edge(a, _, \\\"CALLS\\\"), in_scope(a, \\\"web\\\").\"\n";
+/// A no_cycle: no version-2 field.
+const ACYCLIC: &str = "[[constraint]]\nid = \"acyclic\"\nkind = \"no_cycle\"\nscope = \"web\"\n";
+/// The user's file the rules merge into: comments, `version = 1 # schema`.
+const RULES_BASE: &str = "# team rules\nversion = 1 # schema\n\n# the store stays private\n[[edge]]\nfrom = \"a\"\nto = \"b\"\ncategory = \"CALLS\"\n";
+
+/// `constraint#1` no-store, `constraint#2` web-calls, `constraint#3` acyclic;
+/// no `version`.
+fn rules_candidate() -> String {
+    format!("{NO_STORE}\n{WEB_CALLS}\n{ACYCLIC}")
+}
+
+/// [`RULES_BASE`] with its version line raised to 2, the comment kept.
+fn raised_base() -> String {
+    RULES_BASE.replace("version = 1 # schema", "version = 2 # schema")
+}
+
+/// A fresh temp dir holding only `.glia/overlay.toml` = `base`: `accept` with
+/// a candidate and no `remove` builds nothing, so no source is needed.
+fn overlay_only_repo(tag: &str, base: &str) -> (PathBuf, String, PathBuf) {
+    let root = tmp(tag);
+    let repo = root.join("repo");
+    let file = repo.join(".glia/overlay.toml");
+    std::fs::create_dir_all(file.parent().expect("dir")).expect("mkdir");
+    std::fs::write(&file, base).expect("write");
+    let r = repo.to_str().expect("utf-8 temp path").to_string();
+    (root, r, file)
+}
+
+fn only(handles: &[&str]) -> AcceptOptions {
+    let mut o = AcceptOptions::default();
+    o.only = handles.iter().map(|s| s.to_string()).collect();
+    o
+}
+
+#[test]
+fn constraint_candidates_parse() {
+    let cand = parse_candidate(&rules_candidate()).expect("a version-less rule candidate");
+    let shown: Vec<String> = cand.stanzas().iter().map(StanzaRef::to_string).collect();
+    assert_eq!(shown, ["constraint#1", "constraint#2", "constraint#3"]);
+    let keys: Vec<Option<&str>> = cand.stanzas().iter().map(|s| s.key.as_deref()).collect();
+    assert_eq!(keys, [Some("no-store"), Some("web-calls"), Some("acyclic")]);
+    assert_eq!(
+        cand.marker(Some("c.toml")),
+        "[overlay] candidate file=c.toml stanzas=3 (route_prefix=0 wrapper=0 edge=0 constants=0 entrypoints=0 constraint=3) gap_links=0 errors=0"
+    );
+
+    // An explicit `version = 1` keeps DB.1's loader error at its line.
+    let v1 = parse_candidate(&format!("version = 1\n{}", rules_candidate()))
+        .expect_err("version-2 fields in a version-1 text");
+    assert!(
+        v1.contains("need `version = 2`") && v1.contains("candidate:"),
+        "{v1}"
+    );
+    // The two loop-only refusals, and the reflexion model's declarations.
+    let allow = parse_candidate(
+        "[[constraint]]\nid = \"waive\"\nkind = \"allow\"\nfrom = \"web\"\nto = \"store\"\n",
+    )
+    .expect_err("a waiver is a person's");
+    assert!(
+        allow.contains("constraint#1") && allow.contains("kind allow waives"),
+        "{allow}"
+    );
+    let prose = parse_candidate("[[constraint]]\nid = \"p\"\nkind = \"invariant\"\ntext = \"t\"\n")
+        .expect_err("a prose invariant is a person's");
+    assert!(
+        prose.contains("[[constraint]] invariant") && prose.contains("has no `rule`"),
+        "{prose}"
+    );
+    let model = parse_candidate("[[component]]\nname = \"web\"\npaths = [\"web\"]\n")
+        .expect_err("the reflexion model is declared by hand");
+    assert!(
+        model.contains("a candidate carries only overlay sections, entrypoints and rules"),
+        "{model}"
+    );
+}
+
+#[test]
+fn rule_merge_moves_the_version_in_place() {
+    let cand = parse_candidate(&rules_candidate()).expect("valid");
+    let web_calls = &cand.stanzas()[1..2];
+    let acyclic = &cand.stanzas()[2..3];
+
+    let merged = merge(Some(RULES_BASE), &cand, Some(web_calls)).expect("merge");
+    let text = &merged.text;
+    assert_eq!(*text, format!("{}\n{WEB_CALLS}", raised_base()), "{text}");
+    let without_version: String = RULES_BASE
+        .lines()
+        .filter(|l| *l != "version = 1 # schema")
+        .map(|l| format!("{l}\n"))
+        .collect();
+    assert!(is_subsequence(&without_version, text), "{text}");
+    let loaded = glia_config::parse_str(text);
+    assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+    assert_eq!(loaded.config.version, 2);
+    assert_eq!(
+        (count(&loaded, "constraint"), count(&loaded, "edge")),
+        (1, 1)
+    );
+    assert_eq!(merged.duplicates, 0);
+
+    // A rule with no version-2 field leaves the version line alone.
+    let plain = merge(Some(RULES_BASE), &cand, Some(acyclic)).expect("merge");
+    assert_eq!(
+        plain.text,
+        format!("{RULES_BASE}\n{ACYCLIC}"),
+        "{}",
+        plain.text
+    );
+    assert!(plain.text.contains("version = 1 # schema\n"));
+    assert_eq!(count(&glia_config::parse_str(&plain.text), "constraint"), 1);
+
+    // A new file starts from the version its rules need.
+    let fresh = merge(None, &cand, Some(web_calls)).expect("merge");
+    assert!(fresh.text.starts_with("version = 2\n"), "{}", fresh.text);
+    assert!(glia_config::parse_str(&fresh.text).errors.is_empty());
+    let fresh = merge(None, &cand, Some(acyclic)).expect("merge");
+    assert!(fresh.text.starts_with("version = 1\n"), "{}", fresh.text);
+
+    // Taking the rule back out removes exactly the table; the version stays.
+    let (r, at) = &merged.refs[0];
+    assert_eq!(r.to_string(), "constraint#2");
+    assert_eq!(
+        *at,
+        Location::Table {
+            section: "constraint",
+            index: 0
+        }
+    );
+    assert_eq!(merged.without(r).expect("without"), raised_base());
+}
+
+#[test]
+fn constraint_ids_collide() {
+    let base = "version = 1\n\n[[constraint]]\nid = \"no-store\"\nkind = \"forbid_edge\"\nfrom = \"web\"\nto = \"store\"\n";
+    // The same rule, re-indented, its keys reordered, a comment above it.
+    let same = parse_candidate(
+        "# the same rule\n[[constraint]]\n  id = \"no-store\"\n  kind   = \"forbid_edge\"\n  to = 'store'\n  from = \"web\"\n",
+    )
+    .expect("valid");
+    let merged = merge(Some(base), &same, None).expect("a duplicate");
+    assert_eq!(merged.refs[0].1, Location::AlreadyPresent);
+    assert_eq!(merged.duplicates, 1);
+    assert_eq!(merged.text, base);
+
+    // The same id with another body: refused, never an edit.
+    let other = parse_candidate(
+        "[[constraint]]\nid = \"no-store\"\nkind = \"forbid_edge\"\nfrom = \"web\"\nto = \"api\"\n",
+    )
+    .expect("valid");
+    let err = merge(Some(base), &other, None).expect_err("another body");
+    assert!(
+        err.starts_with(
+            "constraint \"no-store\" is already declared in .glia/overlay.toml with another body"
+        ),
+        "{err}"
+    );
+}
+
+const CHILD_RULE_ACCEPT_ENV: &str = "GLIA_DB9A_CHILD_ACCEPT";
+
+/// The child half of [`accept_writes_a_rule_stanza`]'s marker check: a no-op
+/// unless the parent set [`CHILD_RULE_ACCEPT_ENV`], in which case it accepts
+/// `constraint#2` of [`rules_candidate`] into that repo.
+#[test]
+fn child_rule_accept_for_stderr() {
+    if let Ok(dir) = std::env::var(CHILD_RULE_ACCEPT_ENV) {
+        accept(&dir, Some(&rules_candidate()), &only(&["constraint#2"])).expect("accept");
+    }
+}
+
+#[test]
+fn accept_writes_a_rule_stanza() {
+    let (root, repo, file) = overlay_only_repo("rule-accept", RULES_BASE);
+    let summary =
+        accept(&repo, Some(&rules_candidate()), &only(&["constraint#2"])).expect("accept");
+    assert_eq!(summary.added, BTreeMap::from([("constraint", 1)]));
+    assert_eq!((summary.removed, summary.duplicates), (0, 0));
+    assert!(summary.written);
+    for line in [
+        "\n-version = 1 # schema\n",
+        "\n+version = 2 # schema\n",
+        "\n+[[constraint]]\n",
+    ] {
+        assert!(summary.diff.contains(line), "{line:?}: {}", summary.diff);
+    }
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("read"),
+        format!("{}\n{WEB_CALLS}", raised_base())
+    );
+
+    // The marker, from a child process (the same accept on the base again).
+    std::fs::write(&file, RULES_BASE).expect("write");
+    let exe = std::env::current_exe().expect("test binary path");
+    let out = Command::new(exe)
+        .args([
+            "--exact",
+            "child_rule_accept_for_stderr",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_RULE_ACCEPT_ENV, &repo)
+        .output()
+        .expect("re-run the test binary");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "child accept failed: {stderr}");
+    let markers: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("[overlay] accept "))
+        .collect();
+    assert_eq!(
+        markers,
+        [format!(
+            "[overlay] accept repo={repo} added=1 (route_prefix=0 wrapper=0 edge=0 constants=0 entrypoints=0 constraint=1) removed=0 duplicates=0 file=.glia/overlay.toml dry_run=false surface=engine"
+        )]
+    );
+
+    // The same id with another body: refused, the file byte-identical.
+    let before = std::fs::read(&file).expect("read");
+    let colliding = WEB_CALLS.replace("\\\"web\\\"", "\\\"api\\\"");
+    assert_ne!(colliding, WEB_CALLS);
+    let err = accept(&repo, Some(&colliding), &AcceptOptions::default()).expect_err("collision");
+    assert!(
+        err.starts_with("overlay accept: constraint \"web-calls\" is already declared"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read(&file).expect("read"), before);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn accept_refuses_a_rule_check_cannot_read() {
+    let (root, repo, file) = overlay_only_repo("rule-rotten", RULES_BASE);
+    let rotten = "[[constraint]]\nid = \"rotten\"\nkind = \"invariant\"\ntext = \"t\"\nrule = \"violation(r) :- node(r, \\\"ROUTEE\\\").\"\n";
+    parse_candidate(rotten).expect("try judges it: the candidate parses");
+    let err = accept(&repo, Some(rotten), &AcceptOptions::default()).expect_err("unreadable");
+    assert!(
+        err.starts_with(
+            "overlay accept: candidate: constraint#1: rule \"rotten\" does not validate at 1:"
+        ) && err.contains("ROUTEE")
+            && err.contains("nothing written"),
+        "{err}"
+    );
+    let no_violation = rotten.replace(
+        "violation(r) :- node(r, \\\"ROUTEE\\\").",
+        "x(r) :- node(r, \\\"ROUTE\\\").",
+    );
+    assert_ne!(no_violation, rotten);
+    let err = accept(&repo, Some(&no_violation), &AcceptOptions::default())
+        .expect_err("no violation rule");
+    assert!(err.contains("defines no `violation` predicate"), "{err}");
+    assert_eq!(std::fs::read_to_string(&file).expect("read"), RULES_BASE);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn version_raise_refuses_hidden_stanzas() {
+    // A hand-written rule in a version-1 file: the loader drops it.
+    let base = "version = 1\n\n[[constraint]]\nid = \"legacy\"\nkind = \"invariant\"\ntext = \"t\"\nrule = \"violation(r) :- node(r, \\\"ROUTE\\\").\"\n";
+    let loaded = glia_config::parse_str(base);
+    assert!(
+        loaded
+            .errors
+            .iter()
+            .any(|e| e.contains("need `version = 2`")),
+        "{:?}",
+        loaded.errors
+    );
+    let cand = parse_candidate(&rules_candidate()).expect("valid");
+    let err = merge(Some(base), &cand, Some(&cand.stanzas()[1..2])).expect_err("a hidden raise");
+    assert!(
+        err.starts_with(
+            "the merged .glia/overlay.toml would also load constraint=1 stanza(s) that version = 1 drops"
+        ),
+        "{err}"
+    );
+    // No raise needed: the merge goes through, the version line unchanged.
+    let plain = merge(Some(base), &cand, Some(&cand.stanzas()[2..3])).expect("merge");
+    assert!(plain.text.starts_with("version = 1\n"), "{}", plain.text);
+    assert_eq!(plain.text, format!("{base}\n{ACYCLIC}"));
 }

@@ -11,7 +11,9 @@ Entry points (Rust): `rules::query(merged, text, &QueryOptions)` answers a progr
 `rules::validate(text)` checks one against the code schema without a graph, and
 `rules::evaluate_rule(merged, facts, source, text, "violation")` evaluates a rule invariant's
 program for `glia check`. The command-line, Python and `glia check` surfaces of 0.5.2 call them,
-so the language below is the same everywhere.
+so the language below is the same everywhere. A rule an agent proposes goes through
+`glia overlay propose / try / accept`, which judges it on the code as it is (docs/overlay.md,
+`Rules through the loop`).
 
 ## A first query
 

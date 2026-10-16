@@ -30,9 +30,15 @@
 //! marker, printed here before a try or an accept as the CLI prints it with
 //! the file path, says `file=-`:
 //! `[overlay] propose repo=<primary> rows=<n> snippets=<s> ambiguous_root=<a> surface=py`,
-//! `[overlay] candidate file=- stanzas=<n> (...) gap_links=<g> errors=<e>`,
+//! `[overlay] candidate file=- stanzas=<n> (... entrypoints=<e> constraint=<k>) gap_links=<g> errors=<x>`,
 //! `[overlay] try repo=<primary> stanzas=<n> builds=<b> verdicts keep=<k> review=<r> drop=<d> gaps <G0>→<G1> closed=<c> surface=py`,
-//! `[overlay] accept repo=<repo> added=<a> (...) removed=<r> duplicates=<u> file=.glia/overlay.toml dry_run=<bool> surface=py`.
+//! `[overlay] accept repo=<repo> added=<a> (... entrypoints=<n> constraint=<k>) removed=<r> duplicates=<u> file=.glia/overlay.toml dry_run=<bool> surface=py`.
+//!
+//! A candidate may carry `[[constraint]]` rules (DB.9a; handles
+//! `constraint#<n>`): `overlay_try` judges them, `overlay_accept` writes them
+//! (moving the file to `version = 2` only when a rule needs it) and refuses,
+//! as `ValueError`, a rule `glia check` could not evaluate or an id the file
+//! declares with another body.
 //!
 //! Transport only: the builds, verdicts, validation and markers live in the
 //! engine. The helpers the pyfunctions delegate to are pyo3-free, so
@@ -152,9 +158,11 @@ fn overlay_propose(
 /// `{stanzas, base, with, delta, verdict, closed, builds}` (`glia overlay
 /// try --json`).
 ///
-/// `candidate` is the candidate's TOML text (not a path): overlay sections
-/// and entrypoints only, each stanza under `# gap: <id>` comments naming the
-/// gaps it targets. The tree is built with the overlay as it is (`base`),
+/// `candidate` is the candidate's TOML text (not a path): overlay sections,
+/// entrypoints and `[[constraint]]` rules only (a `forbid_edge`, a
+/// `no_cycle`, or an `invariant` with `rule`; never `allow` or a prose
+/// invariant), each stanza under `# gap: <id>` comments naming the gaps it
+/// targets. The tree is built with the overlay as it is (`base`),
 /// with every stanza merged in (`with`) and, with `leave_one_out`, once per
 /// stanza without it. `base` / `with`: `{nodes_by_kind, edges_by_category,
 /// gaps_by_category}`; `delta`: `{nodes, edges, gaps}`, with minus base,
@@ -163,7 +171,7 @@ fn overlay_propose(
 /// overlay texts built (at most N + 2). `stanzas` (empty without
 /// `leave_one_out`): per stanza in candidate order `{stanza, gaps, closes,
 /// marginal, verdict}`, `stanza` its handle (`wrapper#1`, `edge#2`,
-/// `constants.GATEWAY`, `entrypoints#1`).
+/// `constants.GATEWAY`, `entrypoints#1`, `constraint#1`).
 ///
 /// `repo_paths`: the first is the primary repo, whose overlay file the
 /// candidate would join; the rest merge in. Raises `ValueError` for an empty
@@ -190,22 +198,26 @@ fn overlay_try(
 /// duplicates, file, dry_run, written, diff}` (`glia overlay accept --json`).
 ///
 /// `candidate` (TOML text, not a path): its stanzas named by `only` (their
-/// handles: `wrapper#1`, `constants.GATEWAY`; default every stanza) are
-/// merged in, keeping the file's comments and layout; a constant or pattern
-/// the file already holds counts in `duplicates`. `remove`: gap ids of
+/// handles: `wrapper#1`, `constants.GATEWAY`, `constraint#1`; default every
+/// stanza) are merged in, keeping the file's comments and layout; a
+/// constant, pattern or rule (same id, same body) the file already holds
+/// counts in `duplicates`. A rule that sets `rule` / `transitive` / `via` /
+/// `min_tier` moves the file to `version = 2` in place. `remove`: gap ids of
 /// `orphaned_rule` / `redundant_rule` / `rotted_rule` rows (from
 /// `overlay_propose` or `gaps`) whose stanzas are deleted by identity, never
 /// by line. The result must load as validated, and is written atomically
 /// unless `dry_run` or unchanged (`written`). `added`: stanzas written per
-/// section; `removed`: entries deleted; `diff`: the unified diff before ->
-/// after.
+/// section (`constraint` for a rule); `removed`: entries deleted; `diff`:
+/// the unified diff before -> after.
 ///
 /// Raises `ValueError` (nothing written) with the engine's message for:
 /// neither a candidate nor `remove` (`nothing to accept`), `only` without a
 /// candidate, a refused candidate (`candidate refused, nothing written`), an
 /// unknown stanza handle or gap id, a result the loader would drop, a
-/// constant already pinned to another value, or a failed read, build or
-/// write. Prints `[overlay] candidate file=- ...` (with a candidate) then
+/// constant already pinned to another value, a rule id the file declares
+/// with another body (`constraint "<id>" is already declared`), a rule `glia
+/// check` could not evaluate (`does not validate`, or no `violation`
+/// predicate), or a failed read, build or write. Prints `[overlay] candidate file=- ...` (with a candidate) then
 /// `[overlay] accept repo=<repo> ... dry_run=<bool> surface=py`.
 #[pyfunction]
 #[pyo3(signature = (repo_path, candidate=None, only=None, remove=None, dry_run=false))]

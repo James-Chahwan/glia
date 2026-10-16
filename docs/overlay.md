@@ -328,7 +328,8 @@ Rule text is declared only in this file (0.5.2 Q9). The cell API (`glia cell set
 `set_cell` / `write_cell`, a hand-edited `.glia/cells.jsonl` row) refuses a CONSTRAINT entry that
 carries a `rule` key, whatever its `source` says: `` `rule` (Datalog text) is declared only in
 .glia/overlay.toml [[constraint]] (0.5.2 Q9); the cell API cannot write one ``. A rule a model
-proposes goes through the overlay file like any other stanza.
+proposes goes through the overlay file like any other stanza, written by `glia overlay accept`
+(section "Rules through the loop").
 
 Until the evaluators land in this release, `glia check` lists a transitive `forbid_edge` and every
 `invariant` as unchecked (the `unchecked=` count of its `[check]` line) rather than judging them
@@ -403,15 +404,17 @@ the loop's commands and its rules.
    around it (`--snippet-lines`, default 3) and, on a `suspected_edge` row, a paste-ready `[[edge]]`
    draft. Its `guide` points each `suggest` value at its section of this file. It writes nothing.
 3. **Candidate.** The model step writes a candidate file holding only `[constants]`,
-   `[entrypoints]`, `[[route_prefix]]`, `[[wrapper]]` and `[[edge]]` (plus an optional
-   `version = 1`), each stanza under `# gap: <id>` comment lines naming the rows it targets
-   (above a constant's key, or above a pattern's item in a multi-line `qnames` array). A gap line
-   holds ids only. The links are comments, so a candidate is plain overlay text, and it is
-   all-valid or refused. Keep it outside `.glia/`, whose files are fingerprinted build inputs.
+   `[entrypoints]`, `[[route_prefix]]`, `[[wrapper]]`, `[[edge]]` and `[[constraint]]` rules
+   (section "Rules through the loop", below), plus an optional `version`, each stanza under
+   `# gap: <id>` comment lines naming the rows it targets (above a constant's key, or above a
+   pattern's item in a multi-line `qnames` array). A gap line holds ids only. The links are
+   comments, so a candidate is plain overlay text, and it is all-valid or refused. A candidate with
+   no `version` is checked as version 2. Keep it outside `.glia/`, whose files are fingerprinted
+   build inputs.
 4. **Try.** `glia overlay try <repo> --candidate <file>` builds the tree with the overlay as it is
    (base), with every candidate stanza merged in (with) and, per stanza, with every stanza but
    that one. It reports each node kind, edge category and gap category that moved, and per stanza
-   (`wrapper#1`, `edge#2`, `constants.GATEWAY`, `entrypoints#1`) its marginal effect (with, minus
+   (`wrapper#1`, `edge#2`, `constants.GATEWAY`, `entrypoints#1`, `constraint#1`) its marginal effect (with, minus
    the build without it), the linked gaps it `closes` (closed by it alone: back when it is left
    out; the report's `closed` also counts gaps several stanzas close together) and a verdict. An
    overlay never changes a parse, so every build reuses the cached parses; `builds` counts the
@@ -420,10 +423,12 @@ the loop's commands and its rules.
 5. **Accept.** `glia overlay accept <repo> --candidate <file> --only <stanza>` (repeatable; default
    every stanza) is the only writer of `.glia/overlay.toml`. It merges the chosen stanzas with their
    `# gap:` lines and keeps the file's own comments and layout, refuses any result the loader would
-   not load as validated, and writes atomically. A constant or pattern the file already holds is a
-   duplicate and writes nothing. `--dry-run` prints the diff and writes nothing. Exit 0 when written
-   (or a dry run, or nothing changed), 1 when the result would not validate (nothing written), 2 on
-   a usage or build error.
+   not load as validated, and writes atomically. A constant or pattern the file already holds, or a
+   rule with the same id and the same body, is a duplicate and writes nothing. A rule whose id the
+   file already declares with another body is refused, and so is a rule `glia check` could not
+   evaluate. `--dry-run` prints the diff and writes nothing. Exit 0 when written (or a dry run, or
+   nothing changed), 1 when the result would not validate (nothing written: a constant pinned to
+   another value and a colliding rule id included), 2 on a usage or build error.
 6. **Prune rot.** A rule that `gaps` reports as an `orphaned_rule` (it binds nothing: the code was
    renamed or deleted), a `redundant_rule` (the extractor now emits the same edge) or a
    `rotted_rule` (a `[[constraint]]` whose `rule` this glia can no longer read: a syntax error, or
@@ -451,9 +456,9 @@ root) and prints `[overlay] N rules, +M edges, orphans K→J, gaps G0→G1, verd
 `try` does.
 
 Each step prints one stderr line: `[overlay] propose repo=<label> rows=<n> ...`,
-`[overlay] candidate file=<path> stanzas=<n> (...) gap_links=<g> errors=<e>`,
+`[overlay] candidate file=<path> stanzas=<n> (route_prefix=<a> wrapper=<b> edge=<c> constants=<d> entrypoints=<e> constraint=<k>) gap_links=<g> errors=<x>`,
 `[overlay] try repo=<label> stanzas=<n> builds=<b> verdicts keep=<k> review=<r> drop=<d> ...` and
-`[overlay] accept repo=<label> added=<a> (...) removed=<r> duplicates=<u> ... dry_run=<bool> ...`.
+`[overlay] accept repo=<label> added=<a> (route_prefix=<p> wrapper=<w> edge=<e> constants=<c> entrypoints=<n> constraint=<k>) removed=<r> duplicates=<u> ... dry_run=<bool> ...`.
 
 On every build that finds the file, stderr carries
 `[overlay] loaded .glia/overlay.toml repo=<label> version=1 (walk=N project=N entrypoints=N constants=N route_prefix=N wrapper=N edge=N constraint=N decision=N note=N component=N layer=N) errors=E`.
@@ -469,6 +474,55 @@ is the candidate's TOML text, not a path. A refusal raises `ValueError` with the
 The markers end `surface=py`, and the candidate marker says `file=-`. They write what the
 commands write: `overlay_propose` nothing, `overlay_try` only the primary repo's parse cache (one
 repo), `overlay_accept` only `.glia/overlay.toml`.
+
+## Rules through the loop
+
+A rule that an agent proposes reaches `.glia/overlay.toml` the way any other stanza does: a
+candidate, `glia overlay try`, then `glia overlay accept`. A candidate may hold these
+`[[constraint]]` kinds, each with an optional `min_tier`:
+
+- `forbid_edge`, with `transitive` and `via` if it needs them;
+- `no_cycle`;
+- `invariant` with a `rule`.
+
+Each rule stanza has the handle `constraint#<n>` (its position among the candidate's rules), so
+`--only constraint#2` picks one. Its `id` is its identity in the file.
+
+Two kinds are refused in a candidate, and both still load from a file a person writes by hand:
+
+- `kind = "allow"`: it waives a reflexion divergence, and that is a person's decision. (It also
+  names `[[component]]`s that a candidate cannot declare.)
+- An `invariant` without `rule`: `glia check` never evaluates prose, so `try` has nothing to judge.
+
+`[[component]]`, `[[layer]]`, `[[decision]]` and `[[note]]` are never candidate sections.
+
+Version. The file moves to `version = 2` only when a written rule sets `rule`, `transitive`, `via`
+or `min_tier`. The move happens in place: `version = 1 # schema` becomes `version = 2 # schema`, and
+nothing else in the file moves. A file with no `version` key never gets one, and accept never
+lowers a version. A new file starts from `version = 2` when its first rule needs it, and from
+`version = 1` otherwise, so a 0.5.1 glia can still read it. The move is refused when version 2
+would also load a stanza the old version drops (typically a hand-written `rule` in a version-1
+file): `the merged .glia/overlay.toml would also load constraint=1 stanza(s) that version = 1 drops
+(...)`, and `accept` exits 1 with nothing written. Raise the version by hand, check those stanzas,
+then accept again.
+
+Ids. Give each rule a fresh id. A rule whose id and body match one already in the file is a
+duplicate. Bodies are compared by value, so formatting, key order and comments do not count. A
+rule with that id and another body is refused (`constraint "<id>" is already declared in
+.glia/overlay.toml with another body`, exit 1): a candidate adds rules and never edits one.
+
+Readable rules. Accept refuses a rule that `glia check` could not evaluate: one that does not
+validate against the code schema and the prelude (`rule "<id>" does not validate at
+<line>:<column>: <message>`, the check `rotted_rule` uses), or one that defines no `violation`
+predicate. Nothing is written. `try` builds such a stanza anyway and judges it.
+
+Origin. An unmarked stanza is `origin = "llm"`, the loader's default, so a rule a model wrote is
+marked as inference without any extra field.
+
+glia drafts no rule. `propose` lists no rule rows: a rule states intent, and the graph holds only
+what the code is. A rule glia could mine from structure would only restate the code as law, so the
+evidence of intent stays prose (an unchecked invariant, an ADR or `[[decision]]`, the person's
+request), and the model step translates it.
 
 ## History snapshot
 

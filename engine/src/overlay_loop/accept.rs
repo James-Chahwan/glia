@@ -3,12 +3,23 @@
 //! by the loader, written atomically, shown as a diff.
 //!
 //! [`accept`] runs, in order:
-//! 1. BASE: the file's text, or none (a new file starts from `version = 1`).
+//! 1. BASE: the file's text, or none (a new file starts from `version = 1`,
+//!    or `version = 2` when a written rule needs it).
 //! 2. ADD: with a candidate, [`parse_candidate`] + [`merge`] (CE.3b) of the
 //!    stanzas `only` names (their [`StanzaRef`] displays: `wrapper#1`,
-//!    `constants.GATEWAY`; empty = every stanza). An unknown ref is an `Err`
-//!    listing the candidate's refs. A constant or pattern the base already
-//!    holds is a duplicate: nothing written for it.
+//!    `constants.GATEWAY`, `constraint#1`; empty = every stanza). An unknown
+//!    ref is an `Err` listing the candidate's refs. A constant or pattern the
+//!    base already holds, or a `[[constraint]]` of the same id and body, is a
+//!    duplicate: nothing written for it; a same-id rule with another body is
+//!    an `Err`. A candidate may carry rules (DB.9a): a `forbid_edge`, a
+//!    `no_cycle`, or an `invariant` with `rule`. The file moves to
+//!    `version = 2` (in place, its comment kept) only when a written rule sets
+//!    `rule` / `transitive` / `via` / `min_tier`, and that raise is refused
+//!    when it would also load a stanza the old version drops. Before merging,
+//!    a chosen rule `glia check` could not evaluate - one that does not
+//!    validate against the code schema and prelude, or defines no
+//!    `violation` - is refused ([`Candidate::unreadable_rules`]); `try` still
+//!    judges such a stanza.
 //! 3. REMOVE: with gap ids, the repo is built with the file as it is (nothing
 //!    persisted, no parse cache written) and [`gaps_report`] run with its
 //!    root. Each id must be an `orphaned_rule`, `redundant_rule` or
@@ -38,7 +49,7 @@
 //! for a new file), from a line LCS written here, cut at 400 lines.
 //!
 //! Marker (the fired_on line), once per accepted call (a refusal prints none):
-//! `[overlay] accept repo=<repo> added=<a> (route_prefix=<p> wrapper=<w> edge=<e> constants=<c> entrypoints=<n>) removed=<r> duplicates=<u> file=.glia/overlay.toml dry_run=<bool> surface=<cli|py|engine>`.
+//! `[overlay] accept repo=<repo> added=<a> (route_prefix=<p> wrapper=<w> edge=<e> constants=<c> entrypoints=<n> constraint=<k>) removed=<r> duplicates=<u> file=.glia/overlay.toml dry_run=<bool> surface=<cli|py|engine>`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -54,15 +65,18 @@ use super::propose::{build_quiet, repo_roots};
 use super::writer::{Candidate, Location, StanzaRef, merge, parse_candidate};
 use crate::gaps::{GapRow, GapsOptions, ORPHANED_RULE, REDUNDANT_RULE, ROTTED_RULE, gaps_report};
 
-/// What a repo with no `.glia/overlay.toml` is measured against.
+/// What a repo with no `.glia/overlay.toml` is measured against. Every
+/// version-1 text loads the same under version 2 (DB.1), so this stays the
+/// base even when [`merge`] starts the new file from `version = 2`.
 const EMPTY_OVERLAY: &str = "version = 1\n";
 /// The candidate sections, in marker order.
-const MARKER_SECTIONS: [&str; 5] = [
+const MARKER_SECTIONS: [&str; 6] = [
     "route_prefix",
     "wrapper",
     "edge",
     "constants",
     "entrypoints",
+    "constraint",
 ];
 /// [`AcceptSummary::diff`] is cut at this many lines.
 const MAX_DIFF_LINES: usize = 400;
@@ -93,7 +107,8 @@ pub struct AcceptOptions {
 #[non_exhaustive]
 #[derive(Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct AcceptSummary {
-    /// Stanzas written, per candidate section (sections with none left out).
+    /// Stanzas written, per candidate section (sections with none left out;
+    /// `constraint` for a rule, DB.9a).
     pub added: BTreeMap<&'static str, usize>,
     /// Entries deleted from the file (twins counted each).
     pub removed: usize,
@@ -111,9 +126,10 @@ pub struct AcceptSummary {
 /// Accept into `repo_path`'s `.glia/overlay.toml`: `candidate_text`'s chosen
 /// stanzas added and `opts.remove`'s rule rows removed, validated, written:
 /// see the module doc. `Err` (nothing written) when there is nothing to
-/// accept, the candidate is refused, a ref or gap id is unknown, the file
-/// cannot be read, the new text would not load as validated, or the write
-/// fails.
+/// accept, the candidate is refused, a chosen rule is one `glia check` could
+/// not evaluate, a ref or gap id is unknown, a constant or rule id collides
+/// with another value or body, the file cannot be read, the new text would
+/// not load as validated, or the write fails.
 pub fn accept(
     repo_path: &str,
     candidate_text: Option<&str>,
@@ -146,6 +162,13 @@ pub fn accept(
         Some(text) => {
             let cand = parse_candidate(text).map_err(|e| format!("overlay accept: {e}"))?;
             let only = chosen_refs(&cand, &opts.only)?;
+            let unreadable = cand.unreadable_rules(only.as_deref());
+            if !unreadable.is_empty() {
+                return Err(format!(
+                    "overlay accept: {}; nothing written",
+                    unreadable.join("; ")
+                ));
+            }
             let merged = merge(base_text.as_deref(), &cand, only.as_deref())
                 .map_err(|e| format!("overlay accept: {e}"))?;
             for (r, at) in &merged.refs {
@@ -175,13 +198,14 @@ pub fn accept(
     }
     let n = |s: &str| added.get(s).copied().unwrap_or(0);
     eprintln!(
-        "[overlay] accept repo={repo_path} added={} (route_prefix={} wrapper={} edge={} constants={} entrypoints={}) removed={removed} duplicates={duplicates} file={OVERLAY_FILE} dry_run={} surface={surface}",
+        "[overlay] accept repo={repo_path} added={} (route_prefix={} wrapper={} edge={} constants={} entrypoints={} constraint={}) removed={removed} duplicates={duplicates} file={OVERLAY_FILE} dry_run={} surface={surface}",
         added.values().sum::<usize>(),
         n(MARKER_SECTIONS[0]),
         n(MARKER_SECTIONS[1]),
         n(MARKER_SECTIONS[2]),
         n(MARKER_SECTIONS[3]),
         n(MARKER_SECTIONS[4]),
+        n(MARKER_SECTIONS[5]),
         opts.dry_run,
     );
     Ok(AcceptSummary {

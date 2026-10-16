@@ -44,7 +44,7 @@ DEAD = [("dead_symbol", "chat_preview_repository::NewChatPreviewRepository"),
         ("dead_symbol", "collection::NewCollection"),
         ("dead_symbol", "collection::NewNamedCollection")]
 CANDIDATE_MARKER = ("[overlay] candidate file=- stanzas=2 (route_prefix=0 wrapper=1 edge=1 "
-                    "constants=0 entrypoints=0) gap_links=0 errors=0")
+                    "constants=0 entrypoints=0 constraint=0) gap_links=0 errors=0")
 
 
 def go_repo(tmp: str) -> pathlib.Path:
@@ -139,7 +139,7 @@ def main() -> int:
                 a.get("added") == {"edge": 1, "wrapper": 1} and a.get("written") is True, a)
         c.check("accept marker",
                 f"[overlay] accept repo={repo} added=2 (route_prefix=0 wrapper=1 edge=1 "
-                "constants=0 entrypoints=0) removed=0 duplicates=0 file=.glia/overlay.toml "
+                "constants=0 entrypoints=0 constraint=0) removed=0 duplicates=0 file=.glia/overlay.toml "
                 "dry_run=false surface=py" in err, err[-600:])
 
         # Prune rot: the edge binds nothing, so it is an orphaned rule.

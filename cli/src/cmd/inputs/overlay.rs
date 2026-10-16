@@ -13,9 +13,16 @@
 //!   marginal effect with a keep / review / drop verdict. Writes only the
 //!   parse cache.
 //! - `accept` is the only writer of `.glia/overlay.toml`: a candidate's
-//!   chosen stanzas in (`--only <ref>`, default all), orphaned / redundant
-//!   rules out by gap id (`--remove`), validated by the loader, written
-//!   atomically; `--dry-run` prints the diff and writes nothing.
+//!   chosen stanzas in (`--only <ref>`, default all), orphaned / redundant /
+//!   rotted rules out by gap id (`--remove`), validated by the loader,
+//!   written atomically; `--dry-run` prints the diff and writes nothing.
+//!
+//! A candidate may carry `[[constraint]]` rules (DB.9a; handles
+//! `constraint#<n>`): a `forbid_edge`, a `no_cycle`, or an `invariant` with
+//! `rule`. `allow` and a prose invariant are refused (a person writes them
+//! by hand). `accept` refuses a rule `glia check` could not evaluate and a
+//! rule whose id the file already declares with another body; `try` judges
+//! every rule it is given.
 //!
 //! Transport + rendering only: the builds, verdicts, validation and the
 //! `[overlay] propose|try|accept ... surface=cli` markers live in the engine.
@@ -25,8 +32,9 @@
 //! Exit codes: `propose` / `try` are reports, 0 whatever they find and 2 on a
 //! build or candidate error. `accept` exits 0 when written (or on a dry run,
 //! or when nothing changed), 1 when validation refuses the result (a
-//! candidate the loader would drop, a new file that would not load as
-//! written, a constant already pinned to another value: nothing written),
+//! candidate the loader would drop, a rule `glia check` could not evaluate,
+//! a new file that would not load as written, a constant already pinned to
+//! another value, a rule id declared with another body: nothing written),
 //! and 2 on a usage or build error (neither `--candidate` nor `--remove`, an
 //! unknown stanza ref or gap id, an unreadable file). The global
 //! `--no-overlay` is refused (exit 2): every step works on the overlay.
@@ -46,10 +54,19 @@ use crate::common::build_options;
 
 /// The engine's accept refusals that mean "the result would not validate"
 /// (exit 1), after its `overlay accept: ` prefix: the candidate refused by
-/// the loader (`candidate: ...`, `candidate:<line>: ...`), the merged or new
-/// file not loading as written, a constant the file pins to another value.
-/// Every other refusal is a usage, read, build or write error (exit 2).
-const VALIDATION_REFUSALS: [&str; 4] = ["candidate", "the merged ", "the new ", "constant "];
+/// the loader or holding a rule `glia check` could not evaluate
+/// (`candidate: ...`, `candidate:<line>: ...`), the merged or new file not
+/// loading as written (a version raise that would load hidden stanzas
+/// included), a constant the file pins to another value, a `[[constraint]]`
+/// id the file declares with another body (DB.9a). Every other refusal is a
+/// usage, read, build or write error (exit 2).
+const VALIDATION_REFUSALS: [&str; 5] = [
+    "candidate",
+    "the merged ",
+    "the new ",
+    "constant ",
+    "constraint ",
+];
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Args {
@@ -95,8 +112,9 @@ enum OverlayCmd {
         /// Path to the repo root whose `.glia/overlay.toml` the candidate
         /// would join.
         repo: String,
-        /// The candidate: overlay sections and entrypoints only, each stanza
-        /// under `# gap: <id>` comments naming the gaps it targets.
+        /// The candidate: overlay sections, entrypoints and [[constraint]]
+        /// rules only, each stanza under `# gap: <id>` comments naming the
+        /// gaps it targets.
         #[arg(long)]
         candidate: String,
         /// Additional repos to merge in (cross-service). Repeatable.
@@ -123,8 +141,8 @@ enum OverlayCmd {
         #[arg(long)]
         candidate: Option<String>,
         /// Add only this candidate stanza (`wrapper#1`, `edge#2`,
-        /// `constants.GATEWAY`, `entrypoints#1`). Repeatable; default: every
-        /// stanza of the candidate.
+        /// `constants.GATEWAY`, `entrypoints#1`, `constraint#1`). Repeatable;
+        /// default: every stanza of the candidate.
         #[arg(long, requires = "candidate")]
         only: Vec<String>,
         /// Remove the stanza of this `orphaned_rule` / `redundant_rule` /

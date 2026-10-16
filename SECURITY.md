@@ -54,7 +54,9 @@ categories, and cells. No value- or data-flow relation exists to query. The ship
 (`engine/src/rules/prelude.dl`, docs/rules.md) defines no authentication, authorization or security
 predicate (a test enforces it), and glia ships no rule that classifies routes by authentication.
 A repo owner can ask structural reachability questions of their own code; glia does not provide or
-curate security rules, and the list above is unchanged.
+curate security rules, and the list above is unchanged. `glia overlay propose` drafts no rule: a
+rule enters `.glia/overlay.toml` only as text its author wrote, through `glia overlay accept`
+(docs/overlay.md, `Rules through the loop`).
 
 ## Untrusted text is redacted before it is stored
 

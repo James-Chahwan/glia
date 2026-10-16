@@ -1,17 +1,36 @@
 //! Candidate overlays and the format-preserving `.glia/overlay.toml` writer
-//! (CE.3b).
+//! (CE.3b, + DB.9a: rules through the loop).
 //!
-//! A CANDIDATE is a TOML text holding only overlay sections and entrypoints -
-//! `[constants]`, `[entrypoints] qnames`, `[[route_prefix]]`, `[[wrapper]]`,
-//! `[[edge]]` - and an optional `version = 1`. Each entry is one stanza,
-//! named by a [`StanzaRef`] (`edge#1`, `constants.GATEWAY`, `entrypoints#2`).
-//! A stanza names the gap(s) it targets (`glia gaps` row ids, CE.3a) with
-//! comment lines `# gap: gap:<16 hex>` directly above its table header, above
-//! its key (a constant), or above its item in a multi-line `qnames` array (a
-//! pattern; the `[entrypoints]` header's links apply to every pattern). A link
-//! is a comment, invisible to the loader, so a candidate stays valid overlay
-//! text even pasted in by hand: a candidate-only KEY would default the whole
-//! file (`glia_config`: every struct is `deny_unknown_fields`).
+//! A CANDIDATE is a TOML text holding only overlay sections, entrypoints and
+//! rules - `[constants]`, `[entrypoints] qnames`, `[[route_prefix]]`,
+//! `[[wrapper]]`, `[[edge]]`, `[[constraint]]` - and an optional `version`.
+//! Each entry is one stanza, named by a [`StanzaRef`] (`edge#1`,
+//! `constants.GATEWAY`, `entrypoints#2`, `constraint#1`). A stanza names the
+//! gap(s) it targets (`glia gaps` row ids, CE.3a) with comment lines
+//! `# gap: gap:<16 hex>` directly above its table header, above its key (a
+//! constant), or above its item in a multi-line `qnames` array (a pattern; the
+//! `[entrypoints]` header's links apply to every pattern). A link is a
+//! comment, invisible to the loader, so a candidate stays valid overlay text
+//! even pasted in by hand: a candidate-only KEY would default the whole file
+//! (`glia_config`: every struct is `deny_unknown_fields`).
+//!
+//! RULES (DB.9a, 0.5.2 Q9). A `[[constraint]]` stanza is a `forbid_edge`
+//! (with DB.1's `transitive` / `via`), a `no_cycle`, or an `invariant` with a
+//! `rule`, each with an optional `min_tier`; it is keyed by its `id`. Two
+//! kinds stay hand-written and are refused here: `allow` (a waiver of a
+//! reflexion divergence is a person's call) and an invariant without `rule`
+//! (`glia check` never evaluates prose, so `try` cannot judge it). A
+//! version-less candidate is checked as `version = LATEST_VERSION` (2), so a
+//! bare rule candidate validates. [`merge`] starts a new file from
+//! `version = 2` only when a written rule sets one of
+//! [`V2_CONSTRAINT_FIELDS`], and raises an existing `version = 1` to 2 in
+//! place (its comment kept) in that case only, refusing the raise when it
+//! would also load a stanza the base's version drops. An id the base already
+//! declares is a duplicate when the bodies are equal by value, and refused
+//! otherwise: a candidate adds rules, never edits one.
+//! [`Candidate::unreadable_rules`] is `accept`'s guard against a rule
+//! `glia check` could not evaluate; parsing and merging never call it, so
+//! `try` still judges such a stanza.
 //!
 //! [`parse_candidate`] accepts a candidate only when the loader
 //! (`glia_config::parse_str`) reports no error on it: it is all-valid or
@@ -23,27 +42,40 @@
 //! back out. Both re-check their output with the loader, so the writer never
 //! produces a file the loader would drop. `[walk]` / `[[project]]` are never
 //! in a candidate: the walk reads them from the file on disk even when a build
-//! is given the overlay as text (`BuildOptions::overlay_text`).
+//! is given the overlay as text (`BuildOptions::overlay_text`). Nor are the
+//! reflexion model's `[[component]]` / `[[layer]]` or the prose `[[decision]]`
+//! / `[[note]]`: they are a person's declarations.
 //!
 //! Marker, printed by [`report_candidate`] (the caller that names the file):
-//! `[overlay] candidate file=<path or -> stanzas=<n> (route_prefix=<a> wrapper=<b> edge=<c> constants=<d> entrypoints=<e>) gap_links=<g> errors=<x>`.
+//! `[overlay] candidate file=<path or -> stanzas=<n> (route_prefix=<a> wrapper=<b> edge=<c> constants=<d> entrypoints=<e> constraint=<k>) gap_links=<g> errors=<x>`.
 
 use std::fmt;
 use std::str::FromStr;
 
-use glia_code_domain::glia_config::{self, LoadedConfig, OVERLAY_FILE};
-use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value};
+use glia_code_domain::glia_config::{
+    self, LATEST_VERSION, LoadedConfig, OVERLAY_FILE, V2_CONSTRAINT_FIELDS,
+};
+use glia_rules::parser::parse_program;
+use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, TableLike, Value};
 
-/// The sections a candidate may carry, in marker order.
-const CANDIDATE_SECTIONS: [&str; 5] = [
+/// The sections a candidate may carry, in marker order (`constraint` last,
+/// DB.9a, so every earlier marker field keeps its place).
+const CANDIDATE_SECTIONS: [&str; 6] = [
     "route_prefix",
     "wrapper",
     "edge",
     "constants",
     "entrypoints",
+    "constraint",
 ];
 /// The candidate sections written as `[[section]]` tables.
-const TABLE_SECTIONS: [&str; 3] = ["route_prefix", "wrapper", "edge"];
+const TABLE_SECTIONS: [&str; 4] = ["route_prefix", "wrapper", "edge", "constraint"];
+/// The rule output `glia check` evaluates (check.rs `RULE_OUTPUT`): a rule
+/// that defines no `violation` rule has nothing for check to report.
+const RULE_OUTPUT: &str = "violation";
+/// The version a file needs for a `[[constraint]]` that sets one of
+/// [`V2_CONSTRAINT_FIELDS`] (DB.1).
+const RULE_VERSION: i64 = LATEST_VERSION as i64;
 /// The comment that links a stanza to the gaps it targets.
 const GAP_LINK: &str = "gap:";
 /// Indent of a `qnames` item the writer puts on its own line.
@@ -51,15 +83,19 @@ const ITEM_INDENT: &str = "    ";
 
 /// One stanza of a candidate. Displays as the handle `try` / `accept` / the
 /// CLI name it by: `wrapper#2`, `edge#1`, `route_prefix#1`,
-/// `constants.GATEWAY`, `entrypoints#3`.
+/// `constants.GATEWAY`, `entrypoints#3`, `constraint#1`.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StanzaRef {
-    /// `route_prefix`, `wrapper`, `edge`, `constants` or `entrypoints`.
+    /// `route_prefix`, `wrapper`, `edge`, `constants`, `entrypoints` or
+    /// `constraint`.
     pub section: &'static str,
     /// 1-based, within its section of the candidate, in candidate order.
     pub index: usize,
-    /// The constant's name (`constants`) or the pattern (`entrypoints`).
+    /// The constant's name (`constants`), the pattern (`entrypoints`) or the
+    /// rule's `id` (`constraint`; its handle stays `constraint#<n>`, the table
+    /// convention: an id may hold any non-control char, a handle must survive
+    /// a shell).
     pub key: Option<String>,
     /// The `gap:<16 hex>` ids its `# gap:` comments link, in order, deduped.
     pub gaps: Vec<String>,
@@ -99,6 +135,46 @@ impl Candidate {
     pub fn marker(&self, file: Option<&str>) -> String {
         marker(file, &self.stanzas, 0)
     }
+
+    /// `accept`'s rule guard (DB.9a): per chosen `[[constraint]]` stanza (all,
+    /// or the ones `only` names) whose `rule` `glia check` could not evaluate,
+    /// one refusal line - a rule that does not validate against the code
+    /// schema and prelude ([`crate::rules::validate`], no graph; the reader
+    /// DB.4's `rotted_rule` uses), or one that defines no `violation` rule.
+    /// Empty when every chosen rule is readable. [`parse_candidate`] and
+    /// [`merge`] never call it: `try` builds such a stanza and judges it.
+    pub(crate) fn unreadable_rules(&self, only: Option<&[StanzaRef]>) -> Vec<String> {
+        let mut out = Vec::new();
+        for r in self.stanzas.iter().filter(|s| {
+            s.section == "constraint" && only.is_none_or(|o| o.iter().any(|x| x.names(s)))
+        }) {
+            let Some(rule) = cand_table(&self.doc, r)
+                .and_then(|t| t.get("rule"))
+                .and_then(Item::as_str)
+            else {
+                continue;
+            };
+            let id = r.key.as_deref().unwrap_or_default();
+            let diags = crate::rules::validate(rule);
+            if let Some(first) = diags.first() {
+                let mut line = format!(
+                    "candidate: {r}: rule {id:?} does not validate at {}:{}: {}",
+                    first.line, first.column, first.message
+                );
+                if diags.len() > 1 {
+                    line.push_str(&format!(" (+{} more)", diags.len() - 1));
+                }
+                out.push(line);
+            } else if !parse_program(id, rule)
+                .is_ok_and(|p| p.rules.iter().any(|x| x.head.pred == RULE_OUTPUT))
+            {
+                out.push(format!(
+                    "candidate: {r}: rule {id:?} defines no `{RULE_OUTPUT}` predicate, so `glia check` cannot evaluate it"
+                ));
+            }
+        }
+        out
+    }
 }
 
 /// Where a merged stanza landed in [`Merged::text`], so [`without`] removes
@@ -112,8 +188,9 @@ pub enum Location {
     Constant { name: String },
     /// Item `index` (0-based) of `[entrypoints] qnames`, holding `pattern`.
     Entrypoint { index: usize, pattern: String },
-    /// Already in the base (the same constant value, or the same pattern):
-    /// nothing was written, so taking it out changes nothing.
+    /// Already in the base (the same constant value, the same pattern, or a
+    /// `[[constraint]]` of the same id and body): nothing was written, so
+    /// taking it out changes nothing.
     AlreadyPresent,
 }
 
@@ -159,11 +236,17 @@ pub fn report_candidate(file: Option<&str>, text: &str) -> Result<Candidate, Str
 
 /// Merge `cand`'s stanzas (all, or the ones `only` names) into `base_text`
 /// (the user's `.glia/overlay.toml`; `None` when there is none, which starts
-/// the file from `version = 1`). Untouched text is kept byte for byte. A
-/// constant pinned in the base to another value is an `Err` (the same value,
-/// or a pattern already listed, is a duplicate: nothing written). The merged
-/// text must load with exactly the base's loader errors and with the base's
-/// section counts plus the stanzas written, else `Err` and nothing merged.
+/// the file from `version = 1`, or `version = 2` when a chosen
+/// `[[constraint]]` sets one of [`V2_CONSTRAINT_FIELDS`]). Untouched text is
+/// kept byte for byte; in that rule case only, an existing integer `version`
+/// below 2 is raised to 2 in place, its comment kept (never added, never
+/// lowered). A constant pinned in the base to another value, or a
+/// `[[constraint]]` id the base declares with another body, is an `Err` (the
+/// same value, a pattern already listed, or the same rule, is a duplicate:
+/// nothing written). A raise that would also load a stanza the base's version
+/// drops is an `Err`. The merged text must load with exactly the (raised)
+/// base's loader errors and with its section counts plus the stanzas written,
+/// else `Err` and nothing merged.
 pub fn merge(
     base_text: Option<&str>,
     cand: &Candidate,
@@ -180,21 +263,42 @@ pub fn merge(
             known.join(", ")
         ));
     }
-    let base_src = base_text.map_or("version = 1\n", strip_bom);
+    let chosen: Vec<&StanzaRef> = cand
+        .stanzas
+        .iter()
+        .filter(|s| only.is_none_or(|o| o.iter().any(|r| r.names(s))))
+        .collect();
+    let needs_v2 = chosen.iter().any(|r| {
+        r.section == "constraint"
+            && cand_table(&cand.doc, r)
+                .is_some_and(|t| t.iter().any(|(k, _)| V2_CONSTRAINT_FIELDS.contains(&k)))
+    });
+    let fresh = format!("version = {}\n", if needs_v2 { RULE_VERSION } else { 1 });
+    let base_src = base_text.map_or(fresh.as_str(), strip_bom);
     let mut doc = DocumentMut::from_str(base_src)
         .map_err(|e| format!("{OVERLAY_FILE} is not valid TOML: {}", flat(&e.to_string())))?;
+    // The base the merged text is judged against: the base itself, or the
+    // base with its version raised (refused when the raise alone would load
+    // more than the base does).
+    let mut base = glia_config::parse_str(base_src);
+    if needs_v2 && base_text.is_some() {
+        let mut raised = doc.clone();
+        if let Some(old) = require_version(&mut raised, RULE_VERSION) {
+            let raised_cfg = glia_config::parse_str(&raised.to_string());
+            hidden_stanzas(&base, &raised_cfg, old)?;
+            require_version(&mut doc, RULE_VERSION);
+            base = raised_cfg;
+        }
+    }
     let mut next_position = max_position(doc.as_table()) + 1;
     let mut refs = Vec::new();
     let mut duplicates = 0;
     let mut added = [0usize; CANDIDATE_SECTIONS.len()];
-    let chosen = cand
-        .stanzas
-        .iter()
-        .filter(|s| only.is_none_or(|o| o.iter().any(|r| r.names(s))));
     for r in chosen {
         let at = match r.section {
             "constants" => place_constant(&mut doc, &cand.doc, r, &mut next_position)?,
             "entrypoints" => place_pattern(&mut doc, r, &mut next_position)?,
+            "constraint" => place_constraint(&mut doc, &cand.doc, r, &mut next_position)?,
             _ => place_table(&mut doc, &cand.doc, r, &mut next_position)?,
         };
         if at == Location::AlreadyPresent {
@@ -205,7 +309,6 @@ pub fn merge(
         refs.push((r.clone(), at));
     }
     let text = doc.to_string();
-    let base = glia_config::parse_str(base_src);
     let after = glia_config::parse_str(&text);
     let (mut want, mut got) = (unlocated(&base), unlocated(&after));
     want.sort();
@@ -343,9 +446,15 @@ fn scan(text: &str) -> Scanned {
                     .copied()
                     .unwrap_or_default();
                 for (i, t) in tables.iter().enumerate() {
-                    let mut r = stanza(section, i + 1, None);
+                    let key = (section == "constraint")
+                        .then(|| t.get("id").and_then(Item::as_str).map(str::to_string))
+                        .flatten();
+                    let mut r = stanza(section, i + 1, key);
                     r.gaps =
                         gap_links(t.decor().prefix().and_then(|p| p.as_str()), &r, &mut errors);
+                    if section == "constraint" {
+                        loop_only_refusals(t, &r, &mut errors);
+                    }
                     found.push((t.position().unwrap_or(0), r));
                 }
             }
@@ -395,7 +504,7 @@ fn scan(text: &str) -> Scanned {
                     format!("[{section}]")
                 };
                 errors.push(format!(
-                    "candidate: {header}: a candidate carries only overlay sections and entrypoints ({})",
+                    "candidate: {header}: a candidate carries only overlay sections, entrypoints and rules ({})",
                     CANDIDATE_SECTIONS.join(", ")
                 ));
             }
@@ -404,11 +513,13 @@ fn scan(text: &str) -> Scanned {
     found.sort_by_key(|(position, _)| *position);
     let stanzas: Vec<StanzaRef> = found.into_iter().map(|(_, r)| r).collect();
     // The loader's verdict, at the candidate's own lines. A text with no
-    // `version` gets `version = 1` prepended, one line.
+    // `version` gets `version = LATEST_VERSION` prepended, one line: version 2
+    // loads every version-1 text exactly as before (DB.1), and a bare rule
+    // candidate validates.
     let (checked, shift) = if doc.contains_key("version") {
         (text.to_string(), 0)
     } else {
-        (format!("version = 1\n{text}"), 1)
+        (format!("version = {LATEST_VERSION}\n{text}"), 1)
     };
     for e in glia_config::parse_str(&checked).errors {
         let (line, msg) = split_location(&e);
@@ -475,10 +586,27 @@ fn is_gap_id(id: &str) -> bool {
     })
 }
 
+/// The two `[[constraint]]` refusals the loader does not make (DB.9a): both
+/// kinds load from a hand-written file, and neither goes through the loop.
+fn loop_only_refusals(t: &Table, r: &StanzaRef, errors: &mut Vec<String>) {
+    match t.get("kind").and_then(Item::as_str) {
+        Some("allow") => errors.push(format!(
+            "candidate: {r}: [[constraint]] kind allow waives a reflexion divergence; a person declares it by hand, never through the loop"
+        )),
+        Some("invariant") if !t.contains_key("rule") => {
+            let id = r.key.as_deref().unwrap_or_default();
+            errors.push(format!(
+                "candidate: {r}: [[constraint]] invariant {id:?} has no `rule`: `glia check` never evaluates a prose invariant, so `try` cannot judge it; a person declares it by hand"
+            ));
+        }
+        _ => {}
+    }
+}
+
 fn marker(file: Option<&str>, stanzas: &[StanzaRef], errors: usize) -> String {
     let n = |section: &str| stanzas.iter().filter(|r| r.section == section).count();
     format!(
-        "[overlay] candidate file={} stanzas={} (route_prefix={} wrapper={} edge={} constants={} entrypoints={}) gap_links={} errors={errors}",
+        "[overlay] candidate file={} stanzas={} (route_prefix={} wrapper={} edge={} constants={} entrypoints={} constraint={}) gap_links={} errors={errors}",
         file.unwrap_or("-"),
         stanzas.len(),
         n("route_prefix"),
@@ -486,6 +614,7 @@ fn marker(file: Option<&str>, stanzas: &[StanzaRef], errors: usize) -> String {
         n("edge"),
         n("constants"),
         n("entrypoints"),
+        n("constraint"),
         stanzas.iter().map(|r| r.gaps.len()).sum::<usize>(),
     )
 }
@@ -562,15 +691,7 @@ fn place_table(
     r: &StanzaRef,
     next: &mut usize,
 ) -> Result<Location, String> {
-    let src = r
-        .index
-        .checked_sub(1)
-        .and_then(|i| {
-            cand.get(r.section)
-                .and_then(Item::as_array_of_tables)
-                .and_then(|a| a.get(i))
-        })
-        .ok_or_else(|| format!("stanza {r} is not in the candidate"))?;
+    let src = cand_table(cand, r).ok_or_else(|| format!("stanza {r} is not in the candidate"))?;
     let mut table = src.clone();
     let prefix = format!(
         "\n{}",
@@ -601,6 +722,141 @@ fn place_table(
         section: r.section,
         index: tables.len() - 1,
     })
+}
+
+/// The candidate's `[[section]]` table `r` names.
+fn cand_table<'c>(cand: &'c DocumentMut, r: &StanzaRef) -> Option<&'c Table> {
+    let i = r.index.checked_sub(1)?;
+    cand.get(r.section)
+        .and_then(Item::as_array_of_tables)
+        .and_then(|a| a.get(i))
+}
+
+/// Place the candidate's `[[constraint]]` `r` (DB.9a): when `doc` already
+/// declares its id, the same body (by value) is a duplicate and another body
+/// an `Err` - a candidate adds rules and never edits one; otherwise
+/// [`place_table`].
+fn place_constraint(
+    doc: &mut DocumentMut,
+    cand: &DocumentMut,
+    r: &StanzaRef,
+    next: &mut usize,
+) -> Result<Location, String> {
+    let src = cand_table(cand, r).ok_or_else(|| format!("stanza {r} is not in the candidate"))?;
+    if let Some(id) = r.key.as_deref()
+        && let Some(declared) = declared_constraint(doc, id)
+    {
+        return if same_stanza(declared, src) {
+            Ok(Location::AlreadyPresent)
+        } else {
+            Err(format!(
+                "constraint {id:?} is already declared in {OVERLAY_FILE} with another body: a candidate adds rules and never edits one (edit it by hand, or give this one another id)"
+            ))
+        };
+    }
+    place_table(doc, cand, r, next)
+}
+
+/// The first `[[constraint]]` table (or inline table of a `constraint =
+/// [...]` array) of `doc` whose `id` is `id`: the one the loader keeps.
+fn declared_constraint<'d>(doc: &'d DocumentMut, id: &str) -> Option<&'d dyn TableLike> {
+    match doc.get("constraint")? {
+        Item::ArrayOfTables(tables) => tables
+            .iter()
+            .find(|t| t.get("id").and_then(Item::as_str) == Some(id))
+            .map(|t| t as &dyn TableLike),
+        Item::Value(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_inline_table)
+            .find(|t| t.get("id").and_then(Value::as_str) == Some(id))
+            .map(|t| t as &dyn TableLike),
+        _ => None,
+    }
+}
+
+/// Two stanza bodies are the same: the same keys, each with an equal value
+/// ([`canon_item`]); formatting, key order and comments ignored.
+fn same_stanza(a: &dyn TableLike, b: &dyn TableLike) -> bool {
+    canon_table(a) == canon_table(b)
+}
+
+/// A table's value, independent of how it is written: its `key=value` pairs
+/// sorted by key.
+fn canon_table(t: &dyn TableLike) -> String {
+    let mut pairs: Vec<String> = t
+        .iter()
+        .map(|(k, v)| format!("{k:?}={}", canon_item(v)))
+        .collect();
+    pairs.sort();
+    format!("{{{}}}", pairs.join(","))
+}
+
+fn canon_item(item: &Item) -> String {
+    match item {
+        Item::Value(v) => canon(v),
+        Item::Table(t) => canon_table(t),
+        Item::ArrayOfTables(tables) => {
+            let items: Vec<String> = tables.iter().map(|t| canon_table(t)).collect();
+            format!("[{}]", items.join(","))
+        }
+        Item::None => String::new(),
+    }
+}
+
+/// A value without its formatting: a string as its Rust debug form, a number,
+/// bool or datetime as itself, an array item by item, an inline table as
+/// [`canon_table`].
+fn canon(v: &Value) -> String {
+    match v {
+        Value::String(s) => format!("{:?}", s.value()),
+        Value::Integer(n) => n.value().to_string(),
+        Value::Float(f) => f.value().to_string(),
+        Value::Boolean(b) => b.value().to_string(),
+        Value::Datetime(d) => d.value().to_string(),
+        Value::Array(items) => {
+            let items: Vec<String> = items.iter().map(canon).collect();
+            format!("[{}]", items.join(","))
+        }
+        Value::InlineTable(t) => canon_table(t),
+    }
+}
+
+/// Raise `doc`'s top-level integer `version` to `to` in place, its decor
+/// (the ` # comment` after it) kept; the old version when it was raised.
+/// A missing, non-integer or already-high `version` is left as it is: a
+/// version is never added (that would start loading a file the loader
+/// ignores) and never lowered.
+fn require_version(doc: &mut DocumentMut, to: i64) -> Option<i64> {
+    let v = doc.get_mut("version").and_then(Item::as_value_mut)?;
+    let old = v.as_integer().filter(|n| *n < to)?;
+    let decor = v.decor().clone();
+    let mut raised = Value::from(to);
+    *raised.decor_mut() = decor;
+    *v = raised;
+    Some(old)
+}
+
+/// `Err` when raising the base's `version` (from `old`) would by itself load
+/// more stanzas than the base does: a stanza `old` drops, typically a
+/// hand-written `rule` / `transitive` / `via` / `min_tier` in a version-1
+/// file, would start applying unseen. The merged file must differ from the
+/// base only by the stanzas written and the version line.
+fn hidden_stanzas(base: &LoadedConfig, raised: &LoadedConfig, old: i64) -> Result<(), String> {
+    let more: Vec<String> = base
+        .section_counts()
+        .into_iter()
+        .zip(raised.section_counts())
+        .filter(|((_, b), (_, r))| r != b)
+        .map(|((section, b), (_, r))| format!("{section}={}", r.abs_diff(b)))
+        .collect();
+    if more.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "the merged {OVERLAY_FILE} would also load {} stanza(s) that version = {old} drops ({}): raise the version by hand, check those stanzas, then accept again",
+        more.join(" "),
+        unlocated(base).join("; ")
+    ))
 }
 
 /// Insert the candidate's constant into `doc`'s `[constants]` (created at the

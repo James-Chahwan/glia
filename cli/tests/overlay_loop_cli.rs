@@ -12,6 +12,12 @@
 //! `[overlay] try ... surface=cli` and `[overlay] accept ... surface=cli`
 //! stderr lines are the fired_on markers; asserting them here makes them a
 //! tested contract.
+//!
+//! DB.9a: a candidate may carry `[[constraint]]` rules. Baseline (HEAD
+//! c2dd8d75): `glia overlay try <repo> --candidate rules.toml` (one invariant
+//! with a `rule`) exits 2 and `glia overlay accept ... --dry-run` exits 1,
+//! both with `candidate: [[constraint]]: a candidate carries only overlay
+//! sections and entrypoints (...)`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -180,7 +186,7 @@ fn propose_try_accept_round_trip() {
     assert_eq!(t["builds"], 4, "{t}");
     assert!(
         stderr.contains(&format!(
-            "[overlay] candidate file={c} stanzas=2 (route_prefix=0 wrapper=1 edge=1 constants=0 entrypoints=0) gap_links=0 errors=0"
+            "[overlay] candidate file={c} stanzas=2 (route_prefix=0 wrapper=1 edge=1 constants=0 entrypoints=0 constraint=0) gap_links=0 errors=0"
         )),
         "{stderr}"
     );
@@ -263,7 +269,7 @@ fn propose_try_accept_round_trip() {
     assert!(stdout.contains("wrote "), "{stdout}");
     assert!(
         stderr.contains(&format!(
-            "[overlay] accept repo={r} added=1 (route_prefix=0 wrapper=1 edge=0 constants=0 entrypoints=0) removed=0 duplicates=0 file=.glia/overlay.toml dry_run=false surface=cli"
+            "[overlay] accept repo={r} added=1 (route_prefix=0 wrapper=1 edge=0 constants=0 entrypoints=0 constraint=0) removed=0 duplicates=0 file=.glia/overlay.toml dry_run=false surface=cli"
         )),
         "{stderr}"
     );
@@ -370,5 +376,124 @@ fn refused_accept_exits_1() {
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("already pinned"), "{stderr}");
     assert_eq!(std::fs::read_to_string(&file).expect("read"), before);
+    std::fs::remove_dir_all(root).ok();
+}
+
+/// `<root>/<name>`: one `[[constraint]]` invariant `id` with `rule`, no
+/// `version` (a candidate is checked as version 2).
+fn rule_candidate(root: &Path, name: &str, id: &str, rule: &str) -> PathBuf {
+    let path = root.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            "[[constraint]]\nid = \"{id}\"\nkind = \"invariant\"\nanchor = \"collection::NewCollection\"\ntext = \"t\"\nrule = '{rule}'\n"
+        ),
+    )
+    .expect("write");
+    path
+}
+
+/// DB.9a: a rule goes through accept (the file moves to `version = 2` in
+/// place), an identical one is a duplicate, a same-id other body and a rule
+/// `glia check` could not read are refused (exit 1, nothing written), an
+/// `allow` is refused, and `try` takes a rule candidate.
+#[test]
+fn rule_candidates_accept_and_collide() {
+    let root = tmp("rules");
+    let repo = go_repo(&root);
+    let (r, file) = (s(&repo), overlay_file(&repo));
+    std::fs::create_dir_all(file.parent().expect("dir")).expect("mkdir");
+    let base = "# team overlay\nversion = 1 # schema\n\n[constants]\nGATEWAY = \"/a\"\n";
+    std::fs::write(&file, base).expect("write");
+    // The tree has no ROUTE, so the rule holds whatever the Go call resolution.
+    let rules = rule_candidate(
+        &root,
+        "rules.toml",
+        "no-routes",
+        "violation(r) :- node(r, \"ROUTE\").",
+    );
+    let c = s(&rules);
+
+    let out = glia(&["overlay", "accept", r, "--candidate", c]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(stdout.contains("added: 1 (constraint=1)"), "{stdout}");
+    assert!(
+        stderr.contains(&format!(
+            "[overlay] accept repo={r} added=1 (route_prefix=0 wrapper=0 edge=0 constants=0 entrypoints=0 constraint=1) removed=0 duplicates=0 file=.glia/overlay.toml dry_run=false surface=cli"
+        )),
+        "{stderr}"
+    );
+    let written = std::fs::read_to_string(&file).expect("read");
+    assert!(
+        written
+            .starts_with("# team overlay\nversion = 2 # schema\n\n[constants]\nGATEWAY = \"/a\"\n"),
+        "{written}"
+    );
+    assert!(
+        written.contains("[[constraint]]\nid = \"no-routes\""),
+        "{written}"
+    );
+
+    // The same rule again: a duplicate, the file unchanged.
+    let out = glia(&["overlay", "accept", r, "--candidate", c]);
+    let stdout = text(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(stdout.contains("duplicates: 1"), "{stdout}");
+    assert_eq!(std::fs::read_to_string(&file).expect("read"), written);
+
+    // The same id with another body: refused, nothing written.
+    let other = rule_candidate(
+        &root,
+        "other.toml",
+        "no-routes",
+        "violation(e) :- node(e, \"ENDPOINT\").",
+    );
+    let out = glia(&["overlay", "accept", r, "--candidate", s(&other)]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("constraint \"no-routes\" is already declared"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).expect("read"), written);
+
+    // A rule `glia check` could not read: refused at accept, nothing written.
+    let rotten = rule_candidate(
+        &root,
+        "rotten.toml",
+        "rotten",
+        "violation(r) :- node(r, \"ROUTEE\").",
+    );
+    let out = glia(&["overlay", "accept", r, "--candidate", s(&rotten)]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("does not validate"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&file).expect("read"), written);
+
+    // A waiver is a person's: refused, nothing written.
+    let allow = root.join("allow.toml");
+    std::fs::write(
+        &allow,
+        "[[constraint]]\nid = \"waive\"\nkind = \"allow\"\nfrom = \"web\"\nto = \"store\"\n",
+    )
+    .expect("write");
+    let out = glia(&["overlay", "accept", r, "--candidate", s(&allow)]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("kind allow waives"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&file).expect("read"), written);
+
+    // try takes a rule candidate.
+    let out = glia(&["overlay", "try", r, "--candidate", c]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(
+        stderr
+            .lines()
+            .any(|l| l.starts_with(&format!("[overlay] candidate file={c} "))
+                && l.ends_with("entrypoints=0 constraint=1) gap_links=0 errors=0")),
+        "{stderr}"
+    );
     std::fs::remove_dir_all(root).ok();
 }
