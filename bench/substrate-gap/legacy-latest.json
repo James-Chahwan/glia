@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 374,
+  "fixtures": 375,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -1050,6 +1050,13 @@
     "identity-proto-diverged": {
       "framework": "identity-proto-diverged",
       "language": "proto",
+      "per_category": {
+        "SAME_AS": 1.0
+      }
+    },
+    "identity-scip-symbols": {
+      "framework": "identity-scip-symbols",
+      "language": "python",
       "per_category": {
         "SAME_AS": 1.0
       }

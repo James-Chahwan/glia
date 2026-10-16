@@ -908,7 +908,7 @@
     },
     "dart/amqp": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -918,17 +918,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "dart/calls": {
       "extract": [
@@ -1081,7 +1081,7 @@
     },
     "dart/eventbus": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -1091,17 +1091,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "eventbus"
     },
     "dart/flags": {
       "extract": [
@@ -1308,17 +1308,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "literal lost",
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "queue"
@@ -1349,7 +1346,7 @@
     },
     "dart/mqtt": {
       "extract": [
-        1,
+        2,
         2
       ],
       "fixtures": [
@@ -1359,23 +1356,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "queue"
     },
     "dart/nats": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -1385,21 +1380,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "dart/pubsub": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -1409,21 +1404,21 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "dart/redis": {
       "extract": [
-        1,
+        2,
         2
       ],
       "fixtures": [
@@ -1433,16 +1428,14 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "queue"
@@ -1499,7 +1492,7 @@
     },
     "dart/sqs_sns": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -1509,17 +1502,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "dart/subproject": {
       "extract": [
@@ -1549,7 +1542,7 @@
     },
     "dart/taskq": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -1559,17 +1552,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "queue"
     },
     "dart/tests": {
       "extract": [
@@ -1793,7 +1786,7 @@
     },
     "elixir/eventbus": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -1803,17 +1796,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "eventbus"
     },
     "elixir/flags": {
       "extract": [
@@ -1865,7 +1858,7 @@
     },
     "elixir/grpc": {
       "extract": [
-        1,
+        2,
         2
       ],
       "fixtures": [
@@ -1875,16 +1868,14 @@
         1,
         1
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "grpc"
@@ -4147,7 +4138,7 @@
     },
     "php/eventbus": {
       "extract": [
-        0,
+        2,
         2
       ],
       "fixtures": [
@@ -4157,17 +4148,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "eventbus"
     },
     "php/flags": {
       "extract": [
@@ -5593,7 +5584,7 @@
     },
     "ruby/eventbus": {
       "extract": [
-        1,
+        2,
         2
       ],
       "fixtures": [
@@ -5603,16 +5594,14 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        1,
+        2,
         2
       ],
-      "reasons": [
-        "extract partial: 1/2 expected kinds present; `none` is the all-of rule, not silence"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "eventbus"
@@ -6527,16 +6516,14 @@
         0,
         0
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
         1,
         1
       ],
-      "reasons": [
-        "routing edge missing"
-      ],
+      "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
       "via": "di"
@@ -7497,14 +7484,13 @@
         1,
         1
       ],
-      "level": "partial",
+      "level": "full",
       "literal": [
-        0,
+        2,
         2
       ],
       "reasons": [
-        "anchor mechanism: routing not applicable",
-        "literal lost"
+        "anchor mechanism: routing not applicable"
       ],
       "route": [
         0,
@@ -8609,6 +8595,7 @@
     "fixtures/identity-npm-package",
     "fixtures/identity-npm-workspace-lib",
     "fixtures/identity-proto-diverged",
+    "fixtures/identity-scip-symbols",
     "fixtures/identity-vendored-subtree",
     "fixtures/imports-local-filter",
     "fixtures/java-declarative-clients",
@@ -8850,11 +8837,11 @@
   "totals": {
     "covered": 346,
     "error": 0,
-    "full": 318,
+    "full": 333,
     "grid": 510,
     "n/a": 28,
-    "none": 22,
-    "partial": 6,
+    "none": 10,
+    "partial": 3,
     "unknown": 136
   },
   "vocabulary": {
