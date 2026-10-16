@@ -467,6 +467,17 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   |declared paths| bindings for `owns`.
 - W13 (DB.9c; joins W0's fmt item): `py/src/overlay_loop.rs` is rustfmt-dirty outside DB.9c's lines; the one formatting
   commit plus a fmt gate covers it.
+- W14 (DZ.2): the header comment of `engine/src/rules/reflexion.dl` still calls the native functions the parity oracle
+  "until DB.8b deletes them"; the goldens (`engine/tests/data/reflexion/`) are the oracle now (comment-only; engine is a
+  PARSER_STAMP root, so the first 0.5.3 packet in `engine/src/rules` or the release docs packet makes it).
+- W14 (DZ.2): **0.5.3's release docs packet merges `dev-notes/repo-graph-handoff-0.5.2.md`** (held, the 0.5.2 half) into
+  one combined repo-graph handoff with the `glia-py==0.5.3` pin; each row already names packet, commit, old -> new and the
+  wrapper site at repo-graph 0f8ecfa, but re-read the wrapper's line numbers at its HEAD then.
+- W14 (DZ.2): `scripts/check-neuropil.sh` still copies neuropil verbatim (open since the 0.5.0 handoff); the neuropil
+  handoff's NEUROPIL_DIR copy recipe stands in until neuropil renames.
+- W14 (DZ.1, DD.16): `scripts/eval_substrate.py:229` keeps a PackageResolver row for category 31, and
+  `bench/substrate-gap/matrix_vocab.py` REPO_PAIRWISE_CATEGORIES / AUTHORING.md's "SHARES_* (all seven)" still list
+  SHARES_DEPENDENCY, which no resolver emits since DD.16 (drop it while test_matrix.py stays green).
 
 ## 3. Open questions for James
 
