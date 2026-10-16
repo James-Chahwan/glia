@@ -624,6 +624,15 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
 - W20 (DT.10i, by design): an ethers class-field binding is read only inside its own class body (a subclass in another
   file calling `this.escrow.fn()` is not read); `R[name]` with a const-held name counts dynamic and is not folded through
   the const table; `this.x = new ..` outside any class (a JS function constructor) binds nothing.
+- W21 (DT.10k): go-ethereum `abi.ABI.UnpackIntoMap(m, "n", data)` (name argument 1, a function or an event) and
+  cross-package `escrowbind.EscrowMetaData.GetAbi()` / `.ParseABI()` bindings in user code are not read (only a same-file
+  metadata declaration binds).
+- W21 (DT.10d): hardhat-deploy `ethers.getContract('C')`, plain ethers `new ContractFactory(abi, bytecode, signer)`, waffle
+  `deployContract(wallet, Artifact)`, a factory rebinding `const f2 = F.connect(s)`, an inline
+  `(await ethers.getContractFactory('C')).deploy()` and a factory passed inline to deployProxy mint no contract client.
+- W21 (DT.10d, question for James): hardhat test sites hang off the test MODULE (CONTAINS, not a carry edge), so
+  `tests-for` on a Solidity function does not reach the mocha test; that needs FUNCTION nodes for `it(..)` / `beforeEach`
+  callbacks.
 
 ## 3. Open questions for James
 
