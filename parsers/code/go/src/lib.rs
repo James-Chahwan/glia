@@ -30,7 +30,7 @@ use glia_code_domain::endpoint::{
     ClientEndpoint, HitExtras, client_url_split, const_placeholder, join_path, mount_route_qname,
     push_client_endpoint_with,
 };
-use glia_code_domain::wire::{ModelField, ModelSchema, WireFormat};
+use glia_code_domain::wire::{ModelField, ModelSchema, ServerWire, Shape, ShapeField, WireForm, WireFormat};
 use glia_code_domain::{Mount, NavFact};
 
 // ============================================================================
@@ -259,6 +259,24 @@ pub fn parse_file_with_modules(
             ms.structs, ms.fields, ms.embeds, ms.skipped
         );
     }
+    // DT.1e: the handler wire sites given a MESSAGE_TYPE cell and the
+    // callables recorded with a slice result, per file.
+    let w = &acc.wire;
+    if w.responses + w.binds + w.slice_results > 0 {
+        eprintln!(
+            "[go-wire] responses={} binds={} skipped_status={} unknown_status={} shapes(type={} call={} chain={} object={} open={}) slice_results={} in {file_rel_path}",
+            w.responses,
+            w.binds,
+            w.skipped_status,
+            w.unknown_status,
+            w.shape_type,
+            w.shape_call,
+            w.shape_chain,
+            w.shape_object,
+            w.shape_open,
+            w.slice_results
+        );
+    }
     let gorm = &acc.gorm;
     if !gorm.models.is_empty() || !gorm.tables.is_empty() {
         eprintln!(
@@ -401,6 +419,9 @@ struct Acc {
     gorm: GormFile,
     /// DT.1c: the `[model-schemas] lang=go` counters.
     models: ModelStats,
+    /// DT.1e: the server wire detector's imports, local shapes and the
+    /// `[go-wire]` marker counters.
+    wire: WireFile,
 }
 
 /// A13.12: what one Go file shows of GORM. The two evidence flags gate the
@@ -640,6 +661,9 @@ fn collect_interface_elems(
                 {
                     acc.nav.record_return_type(id, &ty);
                 }
+                // DT.1e: a `[]T` first result, which `return_types` skips.
+                let elem_ty = slice_result_elem(elem.child_by_field_name("result"), src, &iface_params);
+                record_slice_result(acc, id, elem_ty);
                 // CA.3a: the element's normalised signature, the same text
                 // an implementation in another package records.
                 let sig = (!generic)
@@ -1436,6 +1460,9 @@ fn visit_function(
     if let Some(ty) = result_type(decl.child_by_field_name("result"), src, &acc.type_params) {
         acc.nav.record_return_type(id, &ty);
     }
+    // DT.1e: a `[]T` first result, which `return_types` skips.
+    let elem = slice_result_elem(decl.child_by_field_name("result"), src, &acc.type_params);
+    record_slice_result(acc, id, elem);
     record_params(decl.child_by_field_name("parameters"), src, id, acc);
 
     if let Some(body) = decl.child_by_field_name("body") {
@@ -1517,6 +1544,9 @@ fn visit_method(
     if let Some(ty) = result_type(decl.child_by_field_name("result"), src, &acc.type_params) {
         acc.nav.record_return_type(id, &ty);
     }
+    // DT.1e: a `[]T` first result, which `return_types` skips.
+    let elem = slice_result_elem(decl.child_by_field_name("result"), src, &acc.type_params);
+    record_slice_result(acc, id, elem);
     // CA.3a: the normalised signature, unless the receiver is generic (its
     // type parameters stand for whatever an instantiation picks).
     if !receiver_is_generic(receiver) {
@@ -1847,6 +1877,10 @@ fn record_import(
         }
     }
 
+    // DT.1e: the local name a web framework, net/http, encoding/json or chi
+    // render binds, through which the wire detector reads a handler's sites.
+    acc.wire.record_import(&path_str, alias.as_deref());
+
     // LA.13: the repo-local qname of an import under any of the repo's go.mod
     // modules, `None` for a stdlib / third-party path.
     let local = go.map_import(package_qname, &path_str);
@@ -1922,6 +1956,11 @@ fn package_clause_name<'a>(root: TsNode, src: &'a [u8]) -> Option<&'a str> {
     Some(text_of(ident, src)).filter(|name| !name.is_empty())
 }
 
+/// A Go module path's major-version segment (`v2`, `v4`): `v` then digits.
+fn is_go_major_version(s: &str) -> bool {
+    s.len() >= 2 && s.starts_with('v') && s[1..].bytes().all(|b| b.is_ascii_digit())
+}
+
 /// LA.18d: the name(s) an un-aliased Go import can bind. Go binds the imported
 /// package's declared name, which the path only suggests: normally its last
 /// segment, but a major-version suffix (`github.com/go-chi/chi/v5`) names the
@@ -1931,9 +1970,7 @@ fn package_clause_name<'a>(root: TsNode, src: &'a [u8]) -> Option<&'a str> {
 /// returned: the set is only used to SKIP calls, and none of the extras is a
 /// name an in-repo identifier could plausibly shadow.
 fn import_local_names(path: &str) -> Vec<&str> {
-    fn is_major_version(s: &str) -> bool {
-        s.len() >= 2 && s.starts_with('v') && s[1..].bytes().all(|b| b.is_ascii_digit())
-    }
+    let is_major_version = is_go_major_version;
     let mut segments = path.rsplit('/');
     let Some(mut last) = segments.next() else {
         return Vec::new();
@@ -2002,6 +2039,8 @@ fn collect_calls_at<'t>(
 ) {
     // CA.2a: the locals this statement binds, on the enclosing fn.
     record_body_locals(node, src, from, receiver_var, acc);
+    // DT.1e: and the wire shapes their declarations give them.
+    record_wire_locals(node, src, from, receiver_var, acc);
     if node.kind() == "call_expression" {
         if let Some(q) = classify_call(node, src, receiver_var) {
             acc.calls.push(CallSite {
@@ -2024,6 +2063,10 @@ fn collect_calls_at<'t>(
         // from the injector (`from`) to each provider (A7.6); from a
         // package var, `var Set = wire.NewSet(..)` (CI.1).
         try_detect_go_provider_set(node, src, from, acc);
+        // DT.1e: a handler's JSON response write or request bind (`c.JSON(
+        // http.StatusOK, v)`, `c.ShouldBindJSON(&req)`) -> a MESSAGE_TYPE
+        // cell on `from`.
+        try_detect_json_wire(node, src, from, receiver_var, acc);
     }
     if node.kind() == "func_literal" {
         closures.push(node);
@@ -2296,8 +2339,17 @@ fn record_params(params: Option<TsNode>, src: &[u8], scope: NodeId, acc: &mut Ac
         };
         let mut nc = param.walk();
         let names: Vec<TsNode> = param.children_by_field_name("name", &mut nc).collect();
+        // DT.1e: a parameter is a declaration too: a site writing it writes
+        // its declared type.
+        let wire_ty = (param.kind() == "parameter_declaration" && acc.wire.enabled())
+            .then(|| param.child_by_field_name("type"))
+            .flatten()
+            .map(|t| declared_wire_shape(t, src, &acc.wire));
         for name in names {
             record_local(acc, scope, text_of(name, src), &ty);
+            if let Some(shape) = &wire_ty {
+                acc.wire.declare(scope, text_of(name, src), shape.clone());
+            }
         }
     }
 }
@@ -2852,6 +2904,900 @@ fn record_package_vars(
         let ty = paired(&values, names.len(), i)
             .map_or_else(String::new, |v| go_value_type(v, src, None, acc));
         record_local(acc, module_id, name, &ty);
+    }
+}
+
+// ============================================================================
+// DT.1e: server wire sites (MESSAGE_TYPE) and slice results
+// ============================================================================
+//
+// Which model a handler serialises or binds: every JSON response write whose
+// status is a known 2xx or unknown, and every JSON request bind, is one
+// `wire::ServerWire` MESSAGE_TYPE cell (`window` `site`) on the enclosing
+// FUNCTION / METHOD, its value classified as written ([`wire_value`]): a
+// type, a call chain, a field chain, an envelope's keys, an inline struct, a
+// local replaced by its declaration. The parser only reads; the Go build types
+// each value to its in-repo STRUCT (DT.1f). A site's receiver is read through
+// its recorded type and this file's imports, never by the text `gin.`: a
+// framework context is a local typed `<pkg>.Context` / `<pkg>.Ctx` with
+// `<pkg>` this file's name for gin, echo or fiber; a net/http writer / request
+// a local typed `<http>.ResponseWriter` / `<http>.Request`.
+//
+// An error body is skipped by its STATUS, never by a key name: a known
+// non-2xx status leaves no cell (`skipped_status=`), a status that is not a
+// literal (`c.JSON(errorStatus(err), ..)`, `c.JSON(status, ..)`) is recorded
+// with `status` absent (`unknown_status=`), and DT.1g never judges it.
+//
+// Not read: a func-literal route handler's body (LA.18d leaves it to its
+// route, `collect_closure_calls`), a write through a helper that takes the
+// context (`respondJSON(c, v)`: the helper's own site is recorded on the
+// helper when its parameter is a context), and an encoder or context held in
+// a struct field or a local of another type.
+
+/// DT.1e: what an import is to the wire detector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WireImport {
+    /// A web framework whose handler context writes and binds JSON.
+    Framework(WireFramework),
+    /// `net/http`: `http.ResponseWriter`, `*http.Request`, `http.Status*`.
+    Http,
+    /// `encoding/json`: `json.NewEncoder(w).Encode(v)`,
+    /// `json.NewDecoder(r.Body).Decode(&v)`.
+    Json,
+    /// `github.com/go-chi/render`: `render.JSON(w, r, v)`,
+    /// `render.DecodeJSON(r.Body, &v)`, `render.Status(r, code)`.
+    Render,
+}
+
+/// DT.1e: a Go web framework whose handler context writes and binds JSON.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WireFramework {
+    /// `github.com/gin-gonic/gin`: `*gin.Context`, `gin.H`.
+    Gin,
+    /// `github.com/labstack/echo` (any major version): `echo.Context`,
+    /// `echo.Map`.
+    Echo,
+    /// `github.com/gofiber/fiber` (any major version): `*fiber.Ctx`,
+    /// `fiber.Map`, `fiber.Status*`; `c.JSON(v)` takes no status.
+    Fiber,
+}
+
+impl WireImport {
+    /// What import `path` is and the name its package declares (the name an
+    /// un-aliased import binds). A framework's major-version segment
+    /// (`echo/v4`, `fiber/v2`) is dropped.
+    fn from_path(path: &str) -> Option<(WireImport, &'static str)> {
+        let base = match path.rsplit_once('/') {
+            Some((b, last)) if is_go_major_version(last) => b,
+            _ => path,
+        };
+        let framework = match base {
+            "github.com/gin-gonic/gin" => Some((WireFramework::Gin, "gin")),
+            "github.com/labstack/echo" => Some((WireFramework::Echo, "echo")),
+            "github.com/gofiber/fiber" => Some((WireFramework::Fiber, "fiber")),
+            _ => None,
+        };
+        if let Some((f, name)) = framework {
+            return Some((WireImport::Framework(f), name));
+        }
+        match path {
+            "net/http" => Some((WireImport::Http, "http")),
+            "encoding/json" => Some((WireImport::Json, "json")),
+            "github.com/go-chi/render" => Some((WireImport::Render, "render")),
+            _ => None,
+        }
+    }
+}
+
+/// DT.1e: what one Go file's wire detector reads and counts.
+#[derive(Default)]
+struct WireFile {
+    /// Local import name -> the framework it binds (an alias honoured; a
+    /// blank or dot import binds none). Filled by `record_import`, before any
+    /// callable is visited (Go requires imports first); only looked up.
+    frameworks: HashMap<String, WireFramework>,
+    /// The local names of `net/http`, `encoding/json` and chi `render`.
+    http: std::collections::HashSet<String>,
+    json: std::collections::HashSet<String>,
+    render: std::collections::HashSet<String>,
+    /// (callable, local name) -> the shape its declarations give it
+    /// ([`WireFile::declare`]). Only looked up, never iterated.
+    locals: HashMap<(NodeId, String), Shape>,
+    /// The `[go-wire]` marker: cells written per form, response sites
+    /// skipped by a non-2xx status, response cells with no status, the
+    /// cells' shapes by form, and the `NavFact::SliceResult`s recorded.
+    responses: usize,
+    binds: usize,
+    skipped_status: usize,
+    unknown_status: usize,
+    shape_type: usize,
+    shape_call: usize,
+    shape_chain: usize,
+    shape_object: usize,
+    shape_open: usize,
+    slice_results: usize,
+}
+
+impl WireFile {
+    /// Remember the local name import `path` binds under `alias`.
+    fn record_import(&mut self, path: &str, alias: Option<&str>) {
+        let Some((role, declared)) = WireImport::from_path(path) else {
+            return;
+        };
+        let local = match alias {
+            Some("_") | Some(".") => return,
+            Some(a) => a,
+            None => declared,
+        };
+        let local = local.to_string();
+        match role {
+            WireImport::Framework(f) => {
+                self.frameworks.insert(local, f);
+            }
+            WireImport::Http => {
+                self.http.insert(local);
+            }
+            WireImport::Json => {
+                self.json.insert(local);
+            }
+            WireImport::Render => {
+                self.render.insert(local);
+            }
+        }
+    }
+
+    /// A site can exist in this file: it imports a framework, encoding/json
+    /// or chi render. Every wire step is skipped in any other file.
+    fn enabled(&self) -> bool {
+        !self.frameworks.is_empty() || !self.json.is_empty() || !self.render.is_empty()
+    }
+
+    /// Record that `scope` declares `name` with `shape`. A second declaration
+    /// with a different shape (a shadowing local, a re-declaring `:=`, a range
+    /// variable) leaves the name open: a local whose shape depends on which
+    /// declaration a site sees is unknown, never guessed. `_` binds nothing.
+    fn declare(&mut self, scope: NodeId, name: &str, shape: Shape) {
+        if name.is_empty() || name == "_" {
+            return;
+        }
+        match self.locals.entry((scope, name.to_string())) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(shape);
+            }
+            std::collections::hash_map::Entry::Occupied(mut o) => {
+                if *o.get() != shape {
+                    o.insert(Shape::open(name));
+                }
+            }
+        }
+    }
+
+    /// The shape `scope`'s declarations give `name`.
+    fn local(&self, scope: NodeId, name: &str) -> Option<&Shape> {
+        self.locals.get(&(scope, name.to_string()))
+    }
+
+    /// `pkg` (a selector operand) is this file's name for a framework of
+    /// kind `f`.
+    fn is_framework(&self, pkg: &str, f: WireFramework) -> bool {
+        self.frameworks.get(pkg) == Some(&f)
+    }
+
+    /// Count one written cell's shape for the marker.
+    fn count_shape(&mut self, shape: &Shape) {
+        match shape {
+            Shape::Named { .. } => self.shape_type += 1,
+            Shape::Call { .. } => self.shape_call += 1,
+            Shape::Chain { .. } => self.shape_chain += 1,
+            Shape::Object { .. } => self.shape_object += 1,
+            Shape::Union(_) | Shape::Open { .. } => self.shape_open += 1,
+        }
+    }
+}
+
+/// DT.1e: a response site's status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WireStatus {
+    /// A known 2xx code: written, or the implicit 200 of a form with none.
+    Known(u16),
+    /// Not a literal (a variable, `errorStatus(err)`): the cell is written
+    /// with `status` absent and never judged.
+    Unknown,
+    /// A known non-2xx code: an error body. No cell; counted.
+    Skip,
+}
+
+/// `net/http`'s 2xx status constants (`http.Status<Name>`; fiber's
+/// `fiber.Status<Name>` mirror them) and their codes. Every other
+/// `Status<Name>` is a 1xx / 3xx / 4xx / 5xx code.
+const STATUS_2XX: [(&str, u16); 10] = [
+    ("OK", 200),
+    ("Created", 201),
+    ("Accepted", 202),
+    ("NonAuthoritativeInfo", 203),
+    ("NoContent", 204),
+    ("ResetContent", 205),
+    ("PartialContent", 206),
+    ("MultiStatus", 207),
+    ("AlreadyReported", 208),
+    ("IMUsed", 226),
+];
+
+/// gin / echo context methods that write `(status, value)` as JSON.
+const CTX_JSON_WRITES: [&str; 7] = [
+    "JSON",
+    "IndentedJSON",
+    "PureJSON",
+    "SecureJSON",
+    "AsciiJSON",
+    "AbortWithStatusJSON",
+    "JSONPretty",
+];
+
+/// Context methods that bind the request body into their first argument
+/// (`&v`): gin `ShouldBindJSON` / `BindJSON` / `ShouldBind` / `Bind`, echo
+/// `Bind`, fiber `BodyParser`.
+const CTX_BINDS: [&str; 5] = ["ShouldBindJSON", "BindJSON", "ShouldBind", "Bind", "BodyParser"];
+
+/// The deepest envelope literal a wire shape opens; one nested deeper is
+/// open.
+const WIRE_DEPTH: usize = 3;
+
+/// DT.1e: one site: its form, the argument holding its value, its status
+/// (`Unknown` for a bind, which has none).
+struct WireSite<'t> {
+    form: WireForm,
+    value: TsNode<'t>,
+    status: WireStatus,
+}
+
+/// `node` with its wrapping parentheses removed.
+fn unparen_expr(mut node: TsNode) -> TsNode {
+    while node.kind() == "parenthesized_expression" {
+        let mut c = node.walk();
+        let Some(inner) = node.named_children(&mut c).find(|n| n.kind() != "comment") else {
+            break;
+        };
+        node = inner;
+    }
+    node
+}
+
+/// The arguments of a `call_expression`, comments left out.
+fn call_args(call: TsNode) -> Vec<TsNode> {
+    named_kids(call.child_by_field_name("arguments"))
+        .into_iter()
+        .filter(|a| a.kind() != "comment")
+        .collect()
+}
+
+/// The `(operand, field)` of a call whose function is a selector
+/// (`c.JSON(..)` -> (`c`, `JSON`)), the operand unparenthesised.
+fn selector_call<'t, 's>(call: TsNode<'t>, src: &'s [u8]) -> Option<(TsNode<'t>, &'s str)> {
+    let func = call.child_by_field_name("function")?;
+    if func.kind() != "selector_expression" {
+        return None;
+    }
+    let operand = unparen_expr(func.child_by_field_name("operand")?);
+    let field = func.child_by_field_name("field")?;
+    Some((operand, text_of(field, src)))
+}
+
+/// The first argument of `c` when it is the setter call `<name>.<setter>(x,
+/// ..)` (`w.WriteHeader(x)`, fiber `c.Status(x)`) -> `x`.
+fn named_setter_arg<'t>(c: TsNode<'t>, src: &[u8], name: &str, setter: &str) -> Option<TsNode<'t>> {
+    let (op, field) = selector_call(c, src)?;
+    (op.kind() == "identifier" && text_of(op, src) == name && field == setter)
+        .then(|| call_args(c).first().copied())
+        .flatten()
+}
+
+/// The status `arg` names: an int literal, or `<http>.Status<Name>` /
+/// `<fiber>.Status<Name>` through this file's imports. A known non-2xx
+/// code is [`WireStatus::Skip`]; anything else (a variable, a call, another
+/// package's constant) is [`WireStatus::Unknown`].
+fn wire_status(arg: TsNode, src: &[u8], wire: &WireFile) -> WireStatus {
+    let arg = unparen_expr(arg);
+    match arg.kind() {
+        "int_literal" => match text_of(arg, src).replace('_', "").parse::<u64>() {
+            Ok(n) if (200..300).contains(&n) => u16::try_from(n).map_or(WireStatus::Unknown, WireStatus::Known),
+            Ok(_) => WireStatus::Skip,
+            Err(_) => WireStatus::Unknown,
+        },
+        "selector_expression" => {
+            let (Some(pkg), Some(field)) = (arg.child_by_field_name("operand"), arg.child_by_field_name("field"))
+            else {
+                return WireStatus::Unknown;
+            };
+            let pkg_name = text_of(pkg, src);
+            let status_pkg = pkg.kind() == "identifier"
+                && (wire.http.contains(pkg_name) || wire.is_framework(pkg_name, WireFramework::Fiber));
+            match text_of(field, src).strip_prefix("Status").filter(|_| status_pkg) {
+                Some(name) => STATUS_2XX
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or(WireStatus::Skip, |&(_, code)| WireStatus::Known(code)),
+                None => WireStatus::Unknown,
+            }
+        }
+        _ => WireStatus::Unknown,
+    }
+}
+
+/// The status an implicit-200 site (`json.NewEncoder(w).Encode(v)`, fiber
+/// `c.JSON(v)`, `render.JSON(w, r, v)`) writes: the nearest status setter
+/// before it in a statement list that encloses it (its own block, then each
+/// enclosing block, up to the callable's body: a setter inside an `if` that
+/// the site follows does not dominate it), as [`wire_status`] reads the
+/// setter's argument; none -> 200. `setter` returns the status argument of a
+/// call that sets this site's status (`w.WriteHeader(x)`, `c.Status(x)`,
+/// `render.Status(r, x)`).
+fn implicit_status<'t>(
+    site: TsNode<'t>,
+    src: &[u8],
+    wire: &WireFile,
+    setter: impl Fn(TsNode<'t>) -> Option<TsNode<'t>>,
+) -> WireStatus {
+    let mut cur = site;
+    while let Some(parent) = cur.parent() {
+        if matches!(
+            parent.kind(),
+            "function_declaration" | "method_declaration" | "func_literal" | "source_file"
+        ) {
+            break;
+        }
+        let mut prev = cur.prev_named_sibling();
+        while let Some(stmt) = prev {
+            if stmt.kind() == "expression_statement"
+                && let Some(call) = stmt.named_child(0).filter(|c| c.kind() == "call_expression")
+                && let Some(arg) = setter(call)
+            {
+                return wire_status(arg, src, wire);
+            }
+            prev = stmt.prev_named_sibling();
+        }
+        cur = parent;
+    }
+    WireStatus::Known(200)
+}
+
+/// The JSON write or bind `call` is, read through the recorded types of
+/// `scope`'s locals and this file's imports; `None` for any other call.
+fn wire_site<'t>(call: TsNode<'t>, src: &[u8], scope: NodeId, acc: &Acc) -> Option<WireSite<'t>> {
+    let wire = &acc.wire;
+    let func = call.child_by_field_name("function")?;
+    if func.kind() != "selector_expression" {
+        return None;
+    }
+    let operand = unparen_expr(func.child_by_field_name("operand")?);
+    let method = text_of(func.child_by_field_name("field")?, src);
+    let args = call_args(call);
+    let locals = acc.nav.local_types.get(&scope);
+    let local_ty = |name: &str| locals.and_then(|l| l.get(name)).map(String::as_str);
+    // A package name a local of the same name does not shadow.
+    let is_pkg = |set: &std::collections::HashSet<String>, n: TsNode| {
+        let name = text_of(n, src);
+        n.kind() == "identifier" && set.contains(name) && local_ty(name).is_none()
+    };
+    // The framework whose handler context the identifier `n` is.
+    let ctx = |n: TsNode| -> Option<WireFramework> {
+        if n.kind() != "identifier" {
+            return None;
+        }
+        let (pkg, ty) = local_ty(text_of(n, src))?.split_once('.')?;
+        if !matches!(ty, "Context" | "Ctx") {
+            return None;
+        }
+        wire.frameworks.get(pkg).copied()
+    };
+    // The identifier `n` is a local typed `<http>.<want>`.
+    let http_typed = |n: TsNode, want: &str| {
+        n.kind() == "identifier"
+            && local_ty(text_of(n, src))
+                .and_then(|t| t.split_once('.'))
+                .is_some_and(|(pkg, ty)| ty == want && wire.http.contains(pkg))
+    };
+    let response = |value: TsNode<'t>, status| Some(WireSite { form: WireForm::JsonResponse, value, status });
+    let bind = |value: TsNode<'t>| {
+        Some(WireSite {
+            form: WireForm::JsonBind,
+            value,
+            status: WireStatus::Unknown,
+        })
+    };
+
+    match operand.kind() {
+        "identifier" => {
+            if let Some(fw) = ctx(operand) {
+                if CTX_BINDS.contains(&method) {
+                    return bind(*args.first()?);
+                }
+                if fw == WireFramework::Fiber {
+                    // fiber `c.JSON(v)`: no status argument; a `c.Status(n)`
+                    // statement before it sets one.
+                    if method != "JSON" {
+                        return None;
+                    }
+                    let name = text_of(operand, src);
+                    let setter = |c| named_setter_arg(c, src, name, "Status");
+                    let status = implicit_status(call, src, wire, setter);
+                    return response(*args.first()?, status);
+                }
+                if !CTX_JSON_WRITES.contains(&method) || args.len() < 2 {
+                    return None;
+                }
+                return response(args[1], wire_status(args[0], src, wire));
+            }
+            if is_pkg(&wire.render, operand) {
+                return match method {
+                    // `render.JSON(w, r, v)`; `render.Status(r, code)` before
+                    // it sets the status.
+                    "JSON" if args.len() >= 3 => {
+                        let req = text_of(args[1], src);
+                        let render_status = |c: TsNode<'t>| -> Option<TsNode<'t>> {
+                            let (op, field) = selector_call(c, src)?;
+                            let a = call_args(c);
+                            (field == "Status"
+                                && is_pkg(&wire.render, op)
+                                && a.len() >= 2
+                                && text_of(a[0], src) == req)
+                                .then(|| a[1])
+                        };
+                        response(args[2], implicit_status(call, src, wire, render_status))
+                    }
+                    "DecodeJSON" if args.len() >= 2 => bind(args[1]),
+                    _ => None,
+                };
+            }
+            None
+        }
+        "call_expression" => {
+            let (inner_op, inner_method) = selector_call(operand, src)?;
+            let inner_args = call_args(operand);
+            // fiber `c.Status(n).JSON(v)`.
+            if inner_method == "Status" && method == "JSON" && ctx(inner_op) == Some(WireFramework::Fiber) {
+                return response(*args.first()?, wire_status(*inner_args.first()?, src, wire));
+            }
+            if !is_pkg(&wire.json, inner_op) {
+                return None;
+            }
+            match (inner_method, method) {
+                // `json.NewEncoder(w).Encode(v)`, `w` an http.ResponseWriter;
+                // a `w.WriteHeader(x)` before it sets the status.
+                ("NewEncoder", "Encode") => {
+                    let w = *inner_args.first()?;
+                    if !http_typed(w, "ResponseWriter") {
+                        return None;
+                    }
+                    let name = text_of(w, src);
+                    let setter = |c| named_setter_arg(c, src, name, "WriteHeader");
+                    let status = implicit_status(call, src, wire, setter);
+                    response(*args.first()?, status)
+                }
+                // `json.NewDecoder(r.Body).Decode(&v)`, `r` an *http.Request.
+                ("NewDecoder", "Decode") => {
+                    let body = unparen_expr(*inner_args.first()?);
+                    let from_request = body.kind() == "selector_expression"
+                        && body.child_by_field_name("field").is_some_and(|f| text_of(f, src) == "Body")
+                        && body.child_by_field_name("operand").is_some_and(|r| http_typed(r, "Request"));
+                    if !from_request {
+                        return None;
+                    }
+                    bind(*args.first()?)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// DT.1e: a handler's JSON write or bind at `call` -> one ServerWire
+/// MESSAGE_TYPE cell on `from` when `from` is a FUNCTION / METHOD (a package
+/// var's initialiser is skipped). A response with a known non-2xx status
+/// writes nothing and is counted; a bind carries no status. An identical
+/// payload already on the node is kept once.
+fn try_detect_json_wire(call: TsNode, src: &[u8], from: NodeId, receiver_var: Option<&str>, acc: &mut Acc) {
+    if !acc.wire.enabled() {
+        return;
+    }
+    let callable = acc
+        .nav
+        .kind_by_id
+        .get(&from)
+        .is_some_and(|k| *k == node_kind::FUNCTION || *k == node_kind::METHOD);
+    if !callable {
+        return;
+    }
+    let Some(site) = wire_site(call, src, from, acc) else {
+        return;
+    };
+    let status = match (site.form, site.status) {
+        (WireForm::JsonResponse, WireStatus::Skip) => {
+            acc.wire.skipped_status += 1;
+            return;
+        }
+        (WireForm::JsonResponse, WireStatus::Known(code)) => Some(code),
+        _ => None,
+    };
+    let shape = wire_value(site.value, src, from, receiver_var, &acc.wire, 1);
+    let raw = collapse_go_ws(text_of(site.value, src));
+    let mut w = ServerWire::new(site.form, &raw, line_at(call).saturating_add(1), shape);
+    w.status = status;
+    let payload = w.to_payload();
+    let Some(node) = acc.nodes.iter_mut().rev().find(|n| n.id == from) else {
+        return;
+    };
+    let seen = node.cells.iter().any(|c| {
+        c.kind == cell_type::MESSAGE_TYPE && matches!(&c.payload, CellPayload::Json(j) if *j == payload)
+    });
+    if seen {
+        return;
+    }
+    node.cells.push(Cell {
+        kind: cell_type::MESSAGE_TYPE,
+        payload: CellPayload::Json(payload),
+    });
+    if site.form == WireForm::JsonResponse {
+        acc.wire.responses += 1;
+        if status.is_none() {
+            acc.wire.unknown_status += 1;
+        }
+    } else {
+        acc.wire.binds += 1;
+    }
+    acc.wire.count_shape(&w.shape);
+}
+
+/// DT.1e: the value `expr` a site writes or binds, classified as written,
+/// at envelope depth `depth` (1 at the site):
+/// * `T{..}` / `&T{..}` / `[]T{..}` / `[]*T{..}` -> [`Shape::Named`] (one
+///   array layer peeled, [`Shape::named`]); `make([]T, ..)` and `new(T)` too;
+/// * a `gin.H` / `echo.Map` / `fiber.Map` (through this file's import) or
+///   `map[string]V` literal -> an envelope [`Shape::Object`] of its
+///   string-literal keys, each value read at `depth + 1` (a non-literal key
+///   leaves it open; deeper than [`WIRE_DEPTH`] it is open);
+/// * an anonymous struct literal -> an Object of its fields by their json
+///   tags (DT.1c's [`go_struct_schema`]);
+/// * an identifier -> the shape `scope`'s declarations give it
+///   ([`WireFile::declare`]), else open;
+/// * any other call -> [`Shape::Call`] of its [`chain_text`] (an untyped
+///   builtin such as `len` -> open, `append(xs, ..)` -> `xs`'s shape, a
+///   predeclared conversion `string(b)` -> that type); a selector ->
+///   [`Shape::Chain`];
+/// * a string / int / float / bool literal -> its predeclared type;
+/// * parentheses, `&` and `*` are unwrapped; anything else is open.
+fn wire_value(
+    expr: TsNode,
+    src: &[u8],
+    scope: NodeId,
+    receiver_var: Option<&str>,
+    wire: &WireFile,
+    depth: usize,
+) -> Shape {
+    let mut e = unparen_expr(expr);
+    while e.kind() == "unary_expression"
+        && e
+            .child_by_field_name("operator")
+            .is_some_and(|o| matches!(o.kind(), "&" | "*"))
+        && let Some(inner) = e.child_by_field_name("operand")
+    {
+        e = unparen_expr(inner);
+    }
+    let open = || Shape::open(&collapse_go_ws(text_of(e, src)));
+    match e.kind() {
+        "composite_literal" => composite_shape(e, src, scope, receiver_var, wire, depth),
+        "call_expression" => call_shape(e, src, scope, receiver_var, wire, depth),
+        "identifier" => wire.local(scope, text_of(e, src)).cloned().unwrap_or_else(open),
+        "selector_expression" => chain_text(e, src, receiver_var).map_or_else(open, |chain| Shape::Chain {
+            chain,
+            array: false,
+            model: None,
+        }),
+        "interpreted_string_literal" | "raw_string_literal" => Shape::named("string"),
+        "int_literal" => Shape::named("int"),
+        "float_literal" => Shape::named("float64"),
+        "true" | "false" => Shape::named("bool"),
+        _ => open(),
+    }
+}
+
+/// [`wire_value`] of a composite literal.
+fn composite_shape(
+    lit: TsNode,
+    src: &[u8],
+    scope: NodeId,
+    receiver_var: Option<&str>,
+    wire: &WireFile,
+    depth: usize,
+) -> Shape {
+    let open = || Shape::open(&collapse_go_ws(text_of(lit, src)));
+    let Some(ty) = lit.child_by_field_name("type") else {
+        return open();
+    };
+    let body = lit.child_by_field_name("body");
+    let envelope = match ty.kind() {
+        "struct_type" => return anon_struct_shape(ty, src),
+        "map_type" => ty.child_by_field_name("key").is_some_and(|k| text_of(k, src) == "string"),
+        "qualified_type" => is_envelope_type(ty, src, wire),
+        // A slice or array of an anonymous struct names no element type.
+        "slice_type" | "array_type" | "implicit_length_array_type" => {
+            if ty
+                .child_by_field_name("element")
+                .is_some_and(|el| unwrap_pointer(el).kind() == "struct_type")
+            {
+                return open();
+            }
+            false
+        }
+        _ => false,
+    };
+    match (envelope, ty.kind(), body) {
+        (true, _, Some(b)) => envelope_shape(b, src, scope, receiver_var, wire, depth),
+        (false, "map_type", _) | (true, _, None) => open(),
+        _ => Shape::named(&collapse_go_ws(text_of(ty, src))),
+    }
+}
+
+/// `ty` (a `qualified_type`) is a framework's envelope map through this
+/// file's import: `gin.H`, `echo.Map`, `fiber.Map`.
+fn is_envelope_type(ty: TsNode, src: &[u8], wire: &WireFile) -> bool {
+    let (Some(pkg), Some(name)) = (ty.child_by_field_name("package"), ty.child_by_field_name("name")) else {
+        return false;
+    };
+    let (pkg, name) = (text_of(pkg, src), text_of(name, src));
+    match wire.frameworks.get(pkg) {
+        Some(WireFramework::Gin) => name == "H",
+        Some(WireFramework::Echo | WireFramework::Fiber) => name == "Map",
+        None => false,
+    }
+}
+
+/// An envelope literal's `literal_value` as an Object: each string-literal
+/// key (always written: `required`) with its value's shape at `depth + 1`; a
+/// non-literal key or an unkeyed element leaves the Object open. Deeper than
+/// [`WIRE_DEPTH`] the literal is open.
+fn envelope_shape(
+    body: TsNode,
+    src: &[u8],
+    scope: NodeId,
+    receiver_var: Option<&str>,
+    wire: &WireFile,
+    depth: usize,
+) -> Shape {
+    if depth > WIRE_DEPTH {
+        return Shape::open(&collapse_go_ws(text_of(body, src)));
+    }
+    let mut fields = Vec::new();
+    let mut open = false;
+    for el in named_kids(Some(body)) {
+        match el.kind() {
+            "keyed_element" => {
+                let key = el
+                    .child_by_field_name("key")
+                    .and_then(literal_element_expr)
+                    .and_then(|k| go_string_literal(k, src));
+                let Some(key) = key else {
+                    open = true;
+                    continue;
+                };
+                let shape = match el.child_by_field_name("value") {
+                    Some(v) => match literal_element_expr(v) {
+                        Some(v) => wire_value(v, src, scope, receiver_var, wire, depth + 1),
+                        // An elided-type literal (`{..}` as a map value).
+                        None => Shape::open(&collapse_go_ws(text_of(v, src))),
+                    },
+                    None => Shape::open(""),
+                };
+                fields.push(ShapeField::new(&key, true, shape));
+            }
+            "comment" => {}
+            _ => open = true,
+        }
+    }
+    Shape::Object { fields, open }
+}
+
+/// The expression a `literal_element` holds; `None` for a nested
+/// `literal_value` (an elided-type literal).
+fn literal_element_expr(el: TsNode) -> Option<TsNode> {
+    let mut c = el.walk();
+    let inner = el.named_children(&mut c).find(|n| n.kind() != "comment")?;
+    (inner.kind() != "literal_value").then_some(inner)
+}
+
+/// The value of a Go string literal: an interpreted string unquoted
+/// ([`go_unquote`]), a raw string between its backticks (carriage returns
+/// dropped); `None` for any other node.
+fn go_string_literal(node: TsNode, src: &[u8]) -> Option<String> {
+    let t = text_of(node, src);
+    match node.kind() {
+        "interpreted_string_literal" => go_unquote(t),
+        "raw_string_literal" => Some(t.strip_prefix('`')?.strip_suffix('`')?.replace('\r', "")),
+        _ => None,
+    }
+}
+
+/// An anonymous struct type (a literal's, or a `var req struct{..}`'s) as
+/// an Object of its fields by encoding/json's rules (DT.1c's
+/// [`go_struct_schema`]): each field's JSON name, its `omitempty`
+/// optionality, its `binding:"required"` and its declared type; an untagged
+/// embed promotes fields not listed, so the Object is open. A value's struct
+/// is no model: its fields stay out of the `[model-schemas]` counts.
+fn anon_struct_shape(ty: TsNode, src: &[u8]) -> Shape {
+    let mut stats = ModelStats::default();
+    let schema = named_kids(Some(ty))
+        .into_iter()
+        .find(|c| c.kind() == "field_declaration_list")
+        .and_then(|list| go_struct_schema(list, src, &mut stats));
+    let Some(schema) = schema else {
+        return Shape::Object { fields: Vec::new(), open: false };
+    };
+    let fields = schema
+        .fields
+        .iter()
+        .map(|f| {
+            let mut sf = ShapeField::new(&f.name, f.required, Shape::named(&f.ty));
+            sf.bind_required = f.bind_required;
+            sf
+        })
+        .collect();
+    Shape::Object {
+        fields,
+        open: !schema.extends.is_empty(),
+    }
+}
+
+/// [`wire_value`] of a call.
+fn call_shape(
+    call: TsNode,
+    src: &[u8],
+    scope: NodeId,
+    receiver_var: Option<&str>,
+    wire: &WireFile,
+    depth: usize,
+) -> Shape {
+    let open = || Shape::open(&collapse_go_ws(text_of(call, src)));
+    let args = call_args(call);
+    if let Some(f) = call.child_by_field_name("function").filter(|f| f.kind() == "identifier") {
+        let name = text_of(f, src);
+        match name {
+            "make" => {
+                return args
+                    .first()
+                    .filter(|t| matches!(t.kind(), "slice_type" | "array_type"))
+                    .map_or_else(open, |t| Shape::named(&collapse_go_ws(text_of(*t, src))));
+            }
+            "new" => {
+                return args
+                    .first()
+                    .map_or_else(open, |t| Shape::named(&collapse_go_ws(text_of(*t, src))));
+            }
+            "append" => {
+                return args
+                    .first()
+                    .map_or_else(open, |a| wire_value(*a, src, scope, receiver_var, wire, depth));
+            }
+            "any" | "error" | "comparable" => return open(),
+            _ if is_untyped_builtin(name) => return open(),
+            _ if is_predeclared_type(name) => return Shape::named(name),
+            _ => {}
+        }
+    }
+    chain_text(call, src, receiver_var).map_or_else(open, |chain| Shape::Call {
+        chain,
+        array: false,
+        model: None,
+    })
+}
+
+/// The shape a declared type gives a local or parameter: an anonymous struct
+/// -> its Object ([`anon_struct_shape`]); a map, interface, func or chan type,
+/// `any` or a framework envelope map -> open (keys added later are unknown);
+/// any other type -> [`Shape::Named`] of its text.
+fn declared_wire_shape(ty: TsNode, src: &[u8], wire: &WireFile) -> Shape {
+    let text = collapse_go_ws(text_of(ty, src));
+    match ty.kind() {
+        "struct_type" => anon_struct_shape(ty, src),
+        "map_type" | "interface_type" | "function_type" | "channel_type" => Shape::open(&text),
+        "qualified_type" if is_envelope_type(ty, src, wire) => Shape::open(&text),
+        _ if text == "any" => Shape::open(&text),
+        _ => Shape::named(&text),
+    }
+}
+
+/// DT.1e: the wire shapes one statement's declarations give their names on
+/// `scope` ([`WireFile::declare`]), in body order, beside
+/// [`record_body_locals`]: `x := v` / `x, err := f()` (paired as
+/// [`paired`] pairs them: `x` the call, `err` nothing), `var x T` (the
+/// declared type, slice kept: `var xs []T` -> `T`, array; `var req struct{..}`
+/// -> its Object) or `var x = v`; a range / receive / type-switch name is
+/// open. A later `x = ..` assignment changes nothing.
+fn record_wire_locals(node: TsNode, src: &[u8], scope: NodeId, receiver_var: Option<&str>, acc: &mut Acc) {
+    if !acc.wire.enabled() {
+        return;
+    }
+    let declare_paired = |names: &[TsNode], values: &[TsNode], acc: &mut Acc| {
+        for (i, name) in names.iter().enumerate() {
+            if name.kind() != "identifier" {
+                continue;
+            }
+            if let Some(v) = paired(values, names.len(), i) {
+                let shape = wire_value(v, src, scope, receiver_var, &acc.wire, 1);
+                acc.wire.declare(scope, text_of(*name, src), shape);
+            }
+        }
+    };
+    match node.kind() {
+        "short_var_declaration" => {
+            let names = named_kids(node.child_by_field_name("left"));
+            let values = named_kids(node.child_by_field_name("right"));
+            declare_paired(&names, &values, acc);
+        }
+        "var_spec" => {
+            let mut nc = node.walk();
+            let names: Vec<TsNode> = node.children_by_field_name("name", &mut nc).collect();
+            if let Some(ty) = node.child_by_field_name("type") {
+                let shape = declared_wire_shape(ty, src, &acc.wire);
+                for name in names {
+                    acc.wire.declare(scope, text_of(name, src), shape.clone());
+                }
+            } else {
+                let values = named_kids(node.child_by_field_name("value"));
+                declare_paired(&names, &values, acc);
+            }
+        }
+        "range_clause" | "receive_statement" if declares(node) => {
+            for name in named_kids(node.child_by_field_name("left")) {
+                if name.kind() == "identifier" {
+                    acc.wire.declare(scope, text_of(name, src), Shape::open(text_of(name, src)));
+                }
+            }
+        }
+        "type_switch_statement" => {
+            for name in named_kids(node.child_by_field_name("alias")) {
+                if name.kind() == "identifier" {
+                    acc.wire.declare(scope, text_of(name, src), Shape::open(text_of(name, src)));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// DT.1e: the element type of a callable's first result when it is a slice
+/// or array of a named type (`[]T`, `[]*T`, `[N]T`, `[]pkg.T`), as
+/// [`fact_type`] names it (pointer stripped, qualifier kept); `None` for any
+/// other result, a predeclared element (`[]string`, `[]byte`) or one of
+/// `type_params`. A named slice type (`type Vehicles []Vehicle`) is no slice
+/// here: `return_types` records it.
+fn slice_result_elem(result: Option<TsNode>, src: &[u8], type_params: &[String]) -> Option<String> {
+    let result = result?;
+    let mut ty = if result.kind() == "parameter_list" {
+        let mut c = result.walk();
+        let first = result
+            .named_children(&mut c)
+            .find(|p| p.kind() == "parameter_declaration");
+        first?.child_by_field_name("type")?
+    } else {
+        result
+    };
+    while ty.kind() == "parenthesized_type" {
+        let mut c = ty.walk();
+        ty = ty.named_children(&mut c).next()?;
+    }
+    match ty.kind() {
+        "slice_type" | "array_type" => fact_type(ty.child_by_field_name("element")?, src, type_params),
+        _ => None,
+    }
+}
+
+/// DT.1e: record [`NavFact::SliceResult`] for callable `id` when `elem` is
+/// set, and count it for the `[go-wire]` marker.
+fn record_slice_result(acc: &mut Acc, id: NodeId, elem: Option<String>) {
+    if let Some(elem) = elem {
+        acc.nav.record_fact(id, NavFact::SliceResult { elem });
+        acc.wire.slice_results += 1;
     }
 }
 
@@ -10663,5 +11609,555 @@ type Outer struct{ *Base }
                 assert_eq!(schema.cell(), *c);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    fn repo() -> RepoId {
+        RepoId::from_canonical("test://go_wire")
+    }
+
+    fn parse(src: &str) -> FileParse {
+        parse_file(src, "web/h.go", "web::h", "example.com/app", repo()).expect("parse")
+    }
+
+    fn id(kind: glia_core::NodeKindId, qname: &str) -> NodeId {
+        NodeId::from_parts(GRAPH_TYPE, repo(), kind, qname)
+    }
+
+    /// Every MESSAGE_TYPE payload on the node `kind` `qname`, in order.
+    fn payloads(p: &FileParse, kind: glia_core::NodeKindId, qname: &str) -> Vec<String> {
+        let id = id(kind, qname);
+        p.nodes
+            .iter()
+            .filter(|n| n.id == id)
+            .flat_map(|n| n.cells.iter())
+            .filter(|c| c.kind == cell_type::MESSAGE_TYPE)
+            .map(|c| match &c.payload {
+                CellPayload::Json(j) => j.clone(),
+                other => panic!("MESSAGE_TYPE must be Json, got {other:?}"),
+            })
+            .collect()
+    }
+
+    /// The sites of METHOD `qname` (else FUNCTION), parsed back.
+    fn sites(p: &FileParse, qname: &str) -> Vec<ServerWire> {
+        let mut out = payloads(p, node_kind::METHOD, qname);
+        out.extend(payloads(p, node_kind::FUNCTION, qname));
+        out.iter()
+            .map(|j| ServerWire::parse(j).unwrap_or_else(|| panic!("a ServerWire payload: {j}")))
+            .collect()
+    }
+
+    fn call(chain: &str) -> Shape {
+        Shape::Call { chain: chain.into(), array: false, model: None }
+    }
+
+    fn chain(chain: &str) -> Shape {
+        Shape::Chain { chain: chain.into(), array: false, model: None }
+    }
+
+    fn named(ty: &str, array: bool) -> Shape {
+        Shape::Named { ty: ty.into(), array, model: None }
+    }
+
+    fn field(name: &str, shape: Shape) -> ShapeField {
+        ShapeField::new(name, true, shape)
+    }
+
+    const GIN_HEAD: &str = "package h
+
+import (
+\t\"net/http\"
+
+\t\"github.com/gin-gonic/gin\"
+
+\t\"example.com/app/models\"
+)
+
+type Fleet struct{ store *Store }
+";
+
+    #[test]
+    fn gin_ok_call_chain() {
+        let src = format!(
+            "{GIN_HEAD}
+func (f *Fleet) List(c *gin.Context) {{
+\tc.JSON(http.StatusOK, f.store.Vehicles())
+}}
+"
+        );
+        let p = parse(&src);
+        assert_eq!(
+            payloads(&p, node_kind::METHOD, "web::h::Fleet::List"),
+            vec![
+                "{\"type\":\"\",\"raw\":\"f.store.Vehicles()\",\"form\":\"json_response\",\"window\":\"site\",\
+                 \"line\":14,\"status\":200,\"shape\":{\"call\":\"self.store.Vehicles()\"}}"
+                    .to_string()
+            ]
+        );
+        let ws = sites(&p, "web::h::Fleet::List");
+        assert_eq!(ws[0].cell(), ServerWire::from_cell(&ws[0].cell()).expect("round trip").cell());
+    }
+
+    #[test]
+    fn local_from_two_result_call() {
+        let src = format!(
+            "{GIN_HEAD}
+func (f *Fleet) Get(c *gin.Context) {{
+\tv, ok := f.store.Vehicle(c.Param(\"id\"))
+\tif !ok {{
+\t\treturn
+\t}}
+\tc.JSON(http.StatusOK, v)
+\tc.JSON(http.StatusOK, ok)
+}}
+"
+        );
+        let p = parse(&src);
+        let ws = sites(&p, "web::h::Fleet::Get");
+        assert_eq!(ws.len(), 2, "{ws:?}");
+        assert_eq!(ws[0].shape, call("self.store.Vehicle()"));
+        assert_eq!(ws[0].raw, "v");
+        assert_eq!(ws[0].ty, "");
+        // `ok` (the second of one call's results) is declared by nothing.
+        assert_eq!(ws[1].shape, Shape::open("ok"));
+    }
+
+    #[test]
+    fn composite_and_slice_literals() {
+        let src = format!(
+            "{GIN_HEAD}
+func (f *Fleet) Many(c *gin.Context) {{
+\tv := &models.Vehicle{{ID: \"v-1\"}}
+\tc.JSON(http.StatusCreated, v)
+\tc.JSON(http.StatusOK, []*models.Vehicle{{v}})
+\titems := []models.Item{{}}
+\titems = append(items, models.Item{{}})
+\tc.JSON(http.StatusOK, items)
+\tvar xs []models.Trip
+\tc.JSON(http.StatusOK, xs)
+\tc.JSON(http.StatusOK, make([]models.Trip, 0))
+\tc.JSON(http.StatusOK, new(models.Report))
+\tc.JSON(http.StatusOK, (*v))
+\tc.JSON(http.StatusAccepted, \"queued\")
+}}
+"
+        );
+        let p = parse(&src);
+        let ws = sites(&p, "web::h::Fleet::Many");
+        let shapes: Vec<&Shape> = ws.iter().map(|w| &w.shape).collect();
+        assert_eq!(
+            shapes,
+            vec![
+                &named("models.Vehicle", false),
+                &named("models.Vehicle", true),
+                &named("models.Item", true),
+                &named("models.Trip", true),
+                &named("models.Trip", true),
+                &named("models.Report", false),
+                &named("models.Vehicle", false),
+                &named("string", false),
+            ]
+        );
+        assert_eq!(ws[0].ty, "Vehicle", "A12.1's type is the simple name");
+        assert_eq!(ws[0].status, Some(201));
+        assert_eq!(ws[7].status, Some(202));
+        // `xs` and `make(..)` give one payload each: two lines, two cells.
+        assert_eq!(ws[3].raw, "xs");
+    }
+
+    #[test]
+    fn envelope_keys_with_values() {
+        let src = format!(
+            "{GIN_HEAD}
+func (f *Fleet) Trips(c *gin.Context) {{
+\ttrips := f.store.Trips(c.Param(\"id\"))
+\tc.JSON(http.StatusOK, gin.H{{\"trips\": trips, \"count\": len(trips), \"meta\": gin.H{{\"page\": f.page, `raw`: 1}}}})
+\tc.JSON(http.StatusOK, map[string]any{{\"ok\": true, key: 2}})
+\tc.JSON(http.StatusOK, gin.H{{\"a\": gin.H{{\"b\": gin.H{{\"c\": gin.H{{\"d\": 1}}}}}}}})
+}}
+"
+        );
+        let p = parse(&src);
+        let ws = sites(&p, "web::h::Fleet::Trips");
+        assert_eq!(
+            ws[0].shape,
+            Shape::Object {
+                fields: vec![
+                    field("trips", call("self.store.Trips()")),
+                    field("count", Shape::open("len(trips)")),
+                    field(
+                        "meta",
+                        Shape::Object {
+                            fields: vec![field("page", chain("self.page")), field("raw", named("int", false))],
+                            open: false,
+                        }
+                    ),
+                ],
+                open: false,
+            }
+        );
+        assert_eq!(ws[0].ty, "");
+        // A non-literal key leaves the envelope open.
+        assert_eq!(
+            ws[1].shape,
+            Shape::Object { fields: vec![field("ok", named("bool", false))], open: true }
+        );
+        // Three envelope levels are read; the fourth is open.
+        let Shape::Object { fields: a, .. } = &ws[2].shape else { panic!("{:?}", ws[2].shape) };
+        let Shape::Object { fields: b, .. } = &a[0].shape else { panic!("{a:?}") };
+        let Shape::Object { fields: cf, .. } = &b[0].shape else { panic!("{b:?}") };
+        assert_eq!(cf[0].name, "c");
+        assert!(matches!(&cf[0].shape, Shape::Open { .. }), "{:?}", cf[0].shape);
+    }
+
+    #[test]
+    fn bind_var_and_inline_struct() {
+        let src = format!(
+            "{GIN_HEAD}
+func (f *Fleet) Register(c *gin.Context) {{
+\tvar req models.RegisterVehicle
+\tif err := c.ShouldBindJSON(&req); err != nil {{
+\t\treturn
+\t}}
+\tvar in struct {{
+\t\tPlate string `json:\"plate\" binding:\"required\"`
+\t\tNote  string `json:\"note,omitempty\"`
+\t}}
+\t_ = c.BindJSON(&in)
+\tc.JSON(http.StatusOK, struct {{
+\t\tID string `json:\"id\"`
+\t}}{{ID: \"x\"}})
+}}
+"
+        );
+        let p = parse(&src);
+        let ws = sites(&p, "web::h::Fleet::Register");
+        assert_eq!(ws.len(), 3, "{ws:?}");
+        assert_eq!(ws[0].form, WireForm::JsonBind);
+        assert_eq!(ws[0].shape, named("models.RegisterVehicle", false));
+        assert_eq!(ws[0].raw, "&req");
+        assert_eq!(ws[0].status, None, "a bind has no status");
+        let mut plate = field("plate", named("string", false));
+        plate.bind_required = true;
+        let note = ShapeField::new("note", false, named("string", false));
+        assert_eq!(ws[1].form, WireForm::JsonBind);
+        assert_eq!(ws[1].shape, Shape::Object { fields: vec![plate, note], open: false });
+        assert_eq!(ws[2].form, WireForm::JsonResponse);
+        assert_eq!(
+            ws[2].shape,
+            Shape::Object { fields: vec![field("id", named("string", false))], open: false }
+        );
+        // The value's struct is no model: no SCHEMA_FIELDS anywhere.
+        assert!(p.nodes.iter().all(|n| n.cells.iter().all(|c| c.kind != cell_type::SCHEMA_FIELDS)));
+    }
+
+    #[test]
+    fn non_2xx_skipped_and_unknown_status_recorded_without_status() {
+        let src = format!(
+            "{GIN_HEAD}
+func (f *Fleet) Get(c *gin.Context) {{
+\tv, err := f.store.Get()
+\tif err != nil {{
+\t\tc.JSON(errorStatus(err), gin.H{{\"error\": err.Error()}})
+\t\tc.JSON(http.StatusNotFound, models.Problem{{Code: \"nf\"}})
+\t\tc.AbortWithStatusJSON(400, gin.H{{\"error\": \"bad\"}})
+\t\tc.JSON(http.StatusTeapot, gin.H{{\"error\": \"tea\"}})
+\t\treturn
+\t}}
+\tstatus := pick()
+\tc.JSON(status, v)
+\tc.JSON(204, v)
+}}
+"
+        );
+        let p = parse(&src);
+        let ws = sites(&p, "web::h::Fleet::Get");
+        let got: Vec<(Option<u16>, &str)> = ws.iter().map(|w| (w.status, w.raw.as_str())).collect();
+        assert_eq!(
+            got,
+            vec![(None, "gin.H{\"error\": err.Error()}"), (None, "v"), (Some(204), "v")],
+            "the 404 / 400 / 418 bodies are skipped by status, never by key"
+        );
+        assert!(ws.iter().all(|w| !w.raw.contains("Problem")));
+        assert!(!ws[0].known_2xx() && ws[2].known_2xx());
+    }
+
+    #[test]
+    fn aliased_gin_import() {
+        let src = "package h
+
+import (
+\tnethttp \"net/http\"
+
+\tg \"github.com/gin-gonic/gin\"
+)
+
+func List(c *g.Context) {
+\tc.JSON(nethttp.StatusOK, g.H{\"ok\": 1})
+\tc.JSON(nethttp.StatusBadRequest, g.H{\"error\": 1})
+}
+
+func NotGin(c *gin.Context) {
+\tc.JSON(200, 1)
+}
+";
+        let p = parse(src);
+        let ws = sites(&p, "web::h::List");
+        assert_eq!(ws.len(), 1, "{ws:?}");
+        assert_eq!(ws[0].status, Some(200));
+        assert_eq!(ws[0].shape, Shape::Object { fields: vec![field("ok", named("int", false))], open: false });
+        // `gin.` is not this file's name for gin: no import binds it.
+        assert!(sites(&p, "web::h::NotGin").is_empty());
+    }
+
+    #[test]
+    fn echo_and_fiber_forms() {
+        let echo = "package h
+
+import (
+\t\"net/http\"
+
+\t\"github.com/labstack/echo/v4\"
+)
+
+func Get(c echo.Context) error {
+\tvar req Order
+\tif err := c.Bind(&req); err != nil {
+\t\treturn c.JSON(http.StatusBadRequest, echo.Map{\"error\": err.Error()})
+\t}
+\treturn c.JSON(http.StatusOK, echo.Map{\"order\": req})
+}
+";
+        let p = parse(echo);
+        let ws = sites(&p, "web::h::Get");
+        assert_eq!(ws.len(), 2, "{ws:?}");
+        assert_eq!((ws[0].form, &ws[0].shape), (WireForm::JsonBind, &named("Order", false)));
+        assert_eq!(ws[1].status, Some(200));
+        assert_eq!(
+            ws[1].shape,
+            Shape::Object { fields: vec![field("order", named("Order", false))], open: false }
+        );
+
+        let fiber = "package h
+
+import \"github.com/gofiber/fiber/v2\"
+
+func List(c *fiber.Ctx) error {
+\treturn c.JSON(fiber.Map{\"items\": list()})
+}
+
+func Create(c *fiber.Ctx) error {
+\tin := new(Order)
+\tif err := c.BodyParser(in); err != nil {
+\t\treturn c.Status(fiber.StatusBadRequest).JSON(fiber.Map{\"error\": err.Error()})
+\t}
+\treturn c.Status(fiber.StatusCreated).JSON(in)
+}
+
+func Gone(c *fiber.Ctx) error {
+\tc.Status(410)
+\treturn c.JSON(fiber.Map{\"error\": \"gone\"})
+}
+";
+        let p = parse(fiber);
+        let ws = sites(&p, "web::h::List");
+        assert_eq!(ws.len(), 1, "{ws:?}");
+        assert_eq!(ws[0].status, Some(200), "fiber c.JSON(v) is an implicit 200");
+        assert_eq!(ws[0].shape, Shape::Object { fields: vec![field("items", call("list()"))], open: false });
+        let ws = sites(&p, "web::h::Create");
+        let got: Vec<(WireForm, Option<u16>)> = ws.iter().map(|w| (w.form, w.status)).collect();
+        assert_eq!(got, vec![(WireForm::JsonBind, None), (WireForm::JsonResponse, Some(201))]);
+        assert_eq!(ws[0].shape, named("Order", false));
+        assert_eq!(ws[1].shape, named("Order", false));
+        assert!(sites(&p, "web::h::Gone").is_empty(), "a c.Status(410) statement before it");
+    }
+
+    #[test]
+    fn net_http_encoder_decoder() {
+        let src = "package h
+
+import (
+\t\"encoding/json\"
+\t\"net/http\"
+
+\t\"github.com/go-chi/render\"
+)
+
+func Report(w http.ResponseWriter, r *http.Request) {
+\trep := Report{Vehicles: 3}
+\t_ = json.NewEncoder(w).Encode(rep)
+}
+
+func Create(w http.ResponseWriter, r *http.Request) {
+\tvar in NewOrder
+\tif err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+\t\tw.WriteHeader(http.StatusBadRequest)
+\t\tjson.NewEncoder(w).Encode(Problem{})
+\t\treturn
+\t}
+\tw.WriteHeader(http.StatusCreated)
+\tjson.NewEncoder(w).Encode(in)
+}
+
+func Odd(w http.ResponseWriter, r *http.Request) {
+\tw.WriteHeader(code(r))
+\tjson.NewEncoder(w).Encode(1)
+}
+
+func Chi(w http.ResponseWriter, r *http.Request) {
+\tvar in NewOrder
+\t_ = render.DecodeJSON(r.Body, &in)
+\trender.Status(r, http.StatusAccepted)
+\trender.JSON(w, r, in)
+}
+
+func Plain(w http.ResponseWriter, r *http.Request) {
+\trender.JSON(w, r, []Order{})
+}
+";
+        let p = parse(src);
+        let ws = sites(&p, "web::h::Report");
+        assert_eq!(ws.len(), 1);
+        assert_eq!((ws[0].status, &ws[0].shape), (Some(200), &named("Report", false)));
+        let ws = sites(&p, "web::h::Create");
+        let got: Vec<(WireForm, Option<u16>, &Shape)> = ws.iter().map(|w| (w.form, w.status, &w.shape)).collect();
+        assert_eq!(
+            got,
+            vec![
+                (WireForm::JsonBind, None, &named("NewOrder", false)),
+                (WireForm::JsonResponse, Some(201), &named("NewOrder", false)),
+            ],
+            "the 400 Problem is skipped; the WriteHeader inside the if does not reach the last write"
+        );
+        let ws = sites(&p, "web::h::Odd");
+        assert_eq!((ws.len(), ws[0].status), (1, None));
+        let ws = sites(&p, "web::h::Chi");
+        let got: Vec<(WireForm, Option<u16>)> = ws.iter().map(|w| (w.form, w.status)).collect();
+        assert_eq!(got, vec![(WireForm::JsonBind, None), (WireForm::JsonResponse, Some(202))]);
+        let ws = sites(&p, "web::h::Plain");
+        assert_eq!((ws[0].status, &ws[0].shape), (Some(200), &named("Order", true)));
+    }
+
+    #[test]
+    fn slice_result_fact() {
+        let src = "package store
+
+import \"example.com/app/models\"
+
+type Store struct{}
+
+type Repo interface {
+\tAll() ([]models.Trip, error)
+}
+
+func (s *Store) Vehicles() []*models.Vehicle { return nil }
+func (s *Store) Trips() (out [3]models.Trip, err error) { return }
+func (s *Store) Vehicle() *models.Vehicle { return nil }
+func (s *Store) Names() []string { return nil }
+func Map[T any]() []T { return nil }
+func Grid() [][]models.Trip { return nil }
+";
+        let p = parse_file(src, "store/store.go", "store::store", "example.com/app", repo()).expect("parse");
+        let fact = |kind, q: &str| -> Vec<NavFact> {
+            p.nav
+                .nav_facts
+                .get(&id(kind, q))
+                .map(|fs| fs.iter().filter(|f| matches!(f, NavFact::SliceResult { .. })).cloned().collect())
+                .unwrap_or_default()
+        };
+        let slice = |e: &str| vec![NavFact::SliceResult { elem: e.into() }];
+        assert_eq!(fact(node_kind::METHOD, "store::store::Store::Vehicles"), slice("models.Vehicle"));
+        assert_eq!(fact(node_kind::METHOD, "store::store::Store::Trips"), slice("models.Trip"));
+        assert_eq!(fact(node_kind::METHOD, "store::store::Repo::All"), slice("models.Trip"));
+        // A named result type is a return type, never a slice result.
+        assert!(fact(node_kind::METHOD, "store::store::Store::Vehicle").is_empty());
+        assert_eq!(
+            p.nav.return_types.get(&id(node_kind::METHOD, "store::store::Store::Vehicle")).map(String::as_str),
+            Some("models.Vehicle")
+        );
+        assert!(fact(node_kind::METHOD, "store::store::Store::Names").is_empty(), "predeclared element");
+        assert!(fact(node_kind::FUNCTION, "store::store::Map").is_empty(), "a type parameter");
+        assert!(fact(node_kind::FUNCTION, "store::store::Grid").is_empty(), "a slice of slices");
+    }
+
+    #[test]
+    fn receiver_not_a_context_ignored() {
+        let src = "package h
+
+import (
+\t\"encoding/json\"
+\t\"net/http\"
+
+\t\"github.com/gin-gonic/gin\"
+\t\"github.com/gorilla/websocket\"
+)
+
+type client struct{}
+
+func (k *client) JSON(code int, v any) {}
+
+func Hub(conn *websocket.Conn, c *client, nc Conn, g *gin.Engine) {
+\t_ = conn.WriteJSON(Order{})
+\tb, _ := json.Marshal(Order{})
+\tnc.Publish(\"orders\", b)
+\tc.JSON(http.StatusOK, Order{})
+\tg.JSON(http.StatusOK, Order{})
+}
+
+var Pkg = func() int { return 0 }()
+
+func Writer(c *gin.Context) {
+\tjson.NewEncoder(c.Writer).Encode(Order{})
+}
+";
+        let p = parse(src);
+        assert!(
+            p.nodes.iter().all(|n| n.cells.iter().all(|c| c.kind != cell_type::MESSAGE_TYPE)),
+            "no site: {:?}",
+            p.nodes.iter().flat_map(|n| n.cells.iter()).filter(|c| c.kind == cell_type::MESSAGE_TYPE).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn identical_payloads_kept_once_and_package_scope_skipped() {
+        let src = format!(
+            "{GIN_HEAD}
+func (f *Fleet) Twice(c *gin.Context) {{
+\tif f.a {{ c.JSON(http.StatusOK, f.a) }} else {{ c.JSON(http.StatusOK, f.a) }}
+}}
+
+func (f *Fleet) Shadow(c *gin.Context) {{
+\tv := f.store.A()
+\tif f.b {{
+\t\tv := models.Vehicle{{}}
+\t\tc.JSON(http.StatusOK, v)
+\t}}
+\tc.JSON(http.StatusOK, v)
+}}
+
+var Handler = func(c *gin.Context) {{
+\tc.JSON(http.StatusOK, models.Vehicle{{}})
+}}
+"
+        );
+        let p = parse(&src);
+        assert_eq!(payloads(&p, node_kind::METHOD, "web::h::Fleet::Twice").len(), 1);
+        let ws = sites(&p, "web::h::Fleet::Shadow");
+        // `v` is declared with two shapes before either write (body order):
+        // each write sees it open, never a guess.
+        let shapes: Vec<&Shape> = ws.iter().map(|w| &w.shape).collect();
+        assert_eq!(shapes, vec![&Shape::open("v"), &Shape::open("v")]);
+        // A package var's initialiser is no handler: its site writes nothing.
+        let total: usize = p
+            .nodes
+            .iter()
+            .map(|n| n.cells.iter().filter(|c| c.kind == cell_type::MESSAGE_TYPE).count())
+            .sum();
+        assert_eq!(total, 3);
     }
 }

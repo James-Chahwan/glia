@@ -1035,6 +1035,9 @@ mod tests {
             NavFact::GoPackageName {
                 name: "server".into(),
             },
+            NavFact::SliceResult {
+                elem: "models.Order".into(),
+            },
         ]
     }
 

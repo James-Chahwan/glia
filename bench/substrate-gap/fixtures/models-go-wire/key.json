@@ -1,0 +1,15 @@
+{
+  "framework": "models-go-wire",
+  "language": "go",
+  "dirs": ["."],
+  "note": "DT.1e: every known-2xx / unknown-status JSON write and every JSON bind in a Go handler (gin, echo, fiber, net/http encoding/json, chi render) is one MESSAGE_TYPE cell (code-domain wire::ServerWire, window site) on the handler, its value classified as written: a call chain (self. for the receiver), a type, a field chain, an envelope's keys, an inline struct; a local is replaced by its declaration (`v, ok := f.store.Vehicle(..)` -> the call; `var req models.RegisterVehicle` -> the type). The receiver must be typed by the framework's Context / Ctx through this file's import. A non-2xx write (the 404 Problem, the 400 gin.H error) is skipped by its STATUS, never by key name. DT.1f resolves each value to its in-repo STRUCT.",
+  "expect_cells": [
+    {"kind": "METHOD", "node": "web::fleet::Fleet::List", "cell": "MESSAGE_TYPE", "contains": "\"form\":\"json_response\"", "note": "c.JSON(http.StatusOK, ..) is a JSON response"},
+    {"kind": "METHOD", "node": "web::fleet::Fleet::List", "cell": "MESSAGE_TYPE", "contains": "\"call\":\"self.store.Vehicles()\"", "note": "the call chain, the receiver written self"},
+    {"kind": "METHOD", "node": "web::fleet::Fleet::Get", "cell": "MESSAGE_TYPE", "contains": "\"call\":\"self.store.Vehicle()\"", "note": "a local from a two-result call is that call"},
+    {"kind": "METHOD", "node": "web::fleet::Fleet::Register", "cell": "MESSAGE_TYPE", "contains": "\"form\":\"json_bind\"", "note": "c.ShouldBindJSON(&req)"},
+    {"kind": "METHOD", "node": "web::fleet::Fleet::Register", "cell": "MESSAGE_TYPE", "contains": "\"type\":\"models.Vehicle\"", "note": "v := &models.Vehicle{..}, the composite's type"},
+    {"kind": "METHOD", "node": "web::fleet::Fleet::Trips", "cell": "MESSAGE_TYPE", "contains": "\"name\":\"trips\"", "note": "a gin.H envelope's keys"},
+    {"kind": "FUNCTION", "node": "legacy::report::Report", "cell": "MESSAGE_TYPE", "contains": "\"type\":\"models.Report\"", "note": "json.NewEncoder(w).Encode(rep) with w an http.ResponseWriter, implicit 200"}
+  ]
+}
