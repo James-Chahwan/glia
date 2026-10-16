@@ -1,6 +1,6 @@
 {
   "engine": "0.5.1",
-  "fixtures": 412,
+  "fixtures": 413,
   "recall": {
     "angular-base-url": {
       "framework": "angular-base-url",
@@ -651,6 +651,13 @@
         "EVENT_FLOWS": 1.0,
         "HANDLED_BY": 1.0,
         "USES": 1.0
+      }
+    },
+    "evm-abi-cross-file": {
+      "framework": "evm-abi-cross-file",
+      "language": "typescript",
+      "per_category": {
+        "RPC_CALLS": 1.0
       }
     },
     "external-cells-sidecar": {
@@ -1387,7 +1394,8 @@
       "framework": "models-graphql-stock",
       "language": "graphql",
       "per_category": {
-        "GRAPHQL_CALLS": 1.0
+        "GRAPHQL_CALLS": 1.0,
+        "SAME_AS": 1.0
       }
     },
     "models-http-contract": {

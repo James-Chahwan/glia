@@ -8558,6 +8558,7 @@
     "fixtures/event-publish-precision",
     "fixtures/event-verb-fallback",
     "fixtures/event-verb-receivers",
+    "fixtures/evm-abi-cross-file",
     "fixtures/external-cells-sidecar",
     "fixtures/external-channel-clients",
     "fixtures/framework-invoked-members",
