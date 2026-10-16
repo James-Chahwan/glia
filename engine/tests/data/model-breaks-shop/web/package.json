@@ -1,0 +1,9 @@
+{
+  "name": "shop-web",
+  "private": true,
+  "dependencies": {
+    "@angular/common": "17.3.0",
+    "@angular/core": "17.3.0",
+    "rxjs": "7.8.1"
+  }
+}

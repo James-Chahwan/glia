@@ -1,0 +1,14 @@
+type Product {
+  id: ID!
+  name: String!
+  priceCents: Int!
+  stock: Int!
+}
+
+type Query {
+  products(first: Int): [Product!]!
+}
+
+type Mutation {
+  restock(id: ID!, qty: Int!): Product!
+}

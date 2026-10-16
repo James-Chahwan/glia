@@ -65,6 +65,9 @@ pub use models::ModelResolver;
 // DT.1n: GraphQL selection drift (each GRAPHQL_CALLS op's selection against
 // the schema type its root field returns).
 pub use models::{GraphqlChange, GraphqlPair, GraphqlPairStats, GraphqlPairs, graphql_pairs};
+// DT.1o: one side of an exchange flattened to JSON / schema-field paths, read
+// by the engine's model_breaks to judge a side across a git rev.
+pub use models::{WireField, WireFields, graphql_fields, graphql_fields_all, wire_fields};
 pub use http::normalise_http_path;
 // A10.2 — the route index + tiers 1-4 for passes that pair a DECLARED path
 // (a contract operation) with the ROUTE serving it.

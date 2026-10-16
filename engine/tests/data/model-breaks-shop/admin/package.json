@@ -1,0 +1,8 @@
+{
+  "name": "shop-admin",
+  "private": true,
+  "dependencies": {
+    "@apollo/client": "3.9.9",
+    "graphql": "16.8.1"
+  }
+}

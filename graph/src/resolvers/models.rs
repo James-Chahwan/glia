@@ -140,6 +140,14 @@
 //! document binds to its `gql` STATE_VAR, the op minted in that const's span
 //! is the GRAPHQL_CALLS side, each result key's root field names the type,
 //! and field names confirm both members (see [`graphql_model_identity_in`]).
+//!
+//! **DT.1o: one side flattened.** [`wire_fields`] lists one HTTP side (a
+//! call site's resolved shape, a handler site's) as JSON paths, and
+//! [`graphql_fields`] a GraphQL pair's selection and the schema type it is
+//! served from, by schema-field path. Each entry keeps its member, kind,
+//! requiredness and declaring node; the paths below which a name may travel
+//! unlisted are `open`. The engine's `contract_breaks::model_breaks` judges a
+//! side at a git rev against the same side in the working tree through them.
 
 use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
@@ -3848,6 +3856,392 @@ fn generated_model(
     }
 }
 
+// ---- DT.1o: one side flattened ---------------------------------------------
+
+/// One JSON name of a flattened side ([`WireFields`]), at its path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WireField {
+    /// The JSON name (a GraphQL response key); empty at the root.
+    pub name: String,
+    /// The source member: a Go field, a TS / Dart property (a `@JsonKey`
+    /// rename's member), a GraphQL schema field; the root's own name at the
+    /// root.
+    pub member: String,
+    /// Always present on the wire (a GraphQL field: non-null; a selection:
+    /// always).
+    pub required: bool,
+    /// A request binder rejects a body without it.
+    pub bind_required: bool,
+    /// `string` | `number` | `boolean` | `array` | `object` | `any` | `null`
+    /// ([`json_kind`] of the declared text); `None` when no kind is known: a
+    /// name that resolved to no model, a call no builder typed, a selection.
+    pub kind: Option<&'static str>,
+    /// The value is an array of its element (one layer).
+    pub array: bool,
+    /// The declared type text, as written; else the value as written; empty
+    /// for a selection.
+    pub ty: String,
+    /// The model (a GraphQL MESSAGE_TYPE) the value resolved to.
+    pub model: Option<NodeId>,
+    /// The node whose SCHEMA_FIELDS declares the name: the model, or the
+    /// `extends` base it was flattened from. `None` at the root, for an
+    /// inline object's key and for a selection.
+    pub declared_by: Option<NodeId>,
+}
+
+/// One side of an exchange flattened to JSON paths: the root is `""`, a
+/// field `name`, a nested model's field `owner.email`, an array's element
+/// field `lines[].productId` (a root array's element fields unprefixed:
+/// `id`); a GraphQL side keys the schema-field path (`owner.email`, no `[]`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WireFields {
+    pub fields: BTreeMap<String, WireField>,
+    /// Paths below which names may travel that `fields` does not list: an
+    /// object / any value with no model, an open model, union or shape, a
+    /// model met again on its own path; `""` when the whole side is open.
+    pub open: BTreeSet<String>,
+}
+
+/// The kind name of `k`; an unknown name is an object only when it resolved
+/// to a model.
+fn kind_name(k: &JsonKind, model: bool) -> Option<&'static str> {
+    match k {
+        JsonKind::Unknown(_) => model.then_some(JsonKind::Object.as_str()),
+        k => Some(k.as_str()),
+    }
+}
+
+/// The kind a value takes at its position: an array when one layer was
+/// peeled; else its declared text's; else its element's.
+fn wire_kind(declared: Option<&str>, v: &ResolvedShape) -> Option<&'static str> {
+    if v.array {
+        return Some(JsonKind::Array.as_str());
+    }
+    match declared {
+        Some(d) => kind_name(&kind_of(v.format, d), v.model.is_some()),
+        None => element_wire_kind(v),
+    }
+}
+
+/// The kind of `v`'s element (`v` itself when it is no array): a model or an
+/// inline object is an object, a written name its format's kind, a union the
+/// kind its members share; a call or chain no builder typed and an open
+/// value have none.
+fn element_wire_kind(v: &ResolvedShape) -> Option<&'static str> {
+    if v.model.is_some() {
+        return Some(JsonKind::Object.as_str());
+    }
+    match &v.written {
+        Shape::Named { ty, .. } => kind_name(&kind_of(v.format, ty), false),
+        Shape::Object { .. } => Some(JsonKind::Object.as_str()),
+        Shape::Union(_) => {
+            let mut kinds = v.members.iter().map(|m| wire_kind(None, m));
+            let first = kinds.next()??;
+            kinds.all(|k| k == Some(first)).then_some(first)
+        }
+        Shape::Call { .. } | Shape::Chain { .. } | Shape::Open { .. } => None,
+    }
+}
+
+/// One side of an HTTP exchange ([`ClientWire::client`] or a
+/// [`ServerSite::shape`]) flattened to its JSON paths (see [`WireFields`]).
+/// The shape was resolved for its direction already: a model's custom
+/// `MarshalJSON` / `UnmarshalJSON`, its open schema or an unbound base made
+/// it open, and nested models expand to `MAX_DEPTH` (4) levels. A model met
+/// again on its own path is not re-entered (its path is open). No map is
+/// iterated into the output: both maps are sorted.
+pub fn wire_fields(side: &ResolvedShape) -> WireFields {
+    let mut out = WireFields::default();
+    out.fields.insert(
+        String::new(),
+        WireField {
+            required: true,
+            kind: wire_kind(None, side),
+            array: side.array,
+            ty: type_text(None, side),
+            model: side.model,
+            ..WireField::default()
+        },
+    );
+    let mut on_path: Vec<NodeId> = Vec::new();
+    flatten_into(side, "", true, &mut on_path, &mut out);
+    out
+}
+
+/// The names below the value `v` held at `path` (its own entry already
+/// listed), and the open paths it marks.
+fn flatten_into(
+    v: &ResolvedShape,
+    path: &str,
+    root: bool,
+    on_path: &mut Vec<NodeId>,
+    out: &mut WireFields,
+) {
+    if v.open {
+        out.open.insert(path.to_string());
+    }
+    if matches!(v.written, Shape::Union(_)) {
+        out.open.insert(path.to_string());
+        return;
+    }
+    let expanded = v.model.is_some() || matches!(v.written, Shape::Object { .. });
+    if !expanded {
+        // A value whose names are unknown: an object or any value no model
+        // lists, a name that bound nothing.
+        if matches!(element_wire_kind(v), None | Some("object") | Some("any")) {
+            out.open.insert(path.to_string());
+        }
+        return;
+    }
+    if let Some(m) = v.model {
+        if on_path.contains(&m) {
+            out.open.insert(path.to_string());
+            return;
+        }
+        on_path.push(m);
+    }
+    let prefix = if v.array && !root {
+        format!("{path}[]")
+    } else {
+        path.to_string()
+    };
+    for (name, f) in &v.fields {
+        let at = join_path(&prefix, name);
+        out.fields.insert(
+            at.clone(),
+            WireField {
+                name: name.clone(),
+                member: f.member.clone().unwrap_or_else(|| name.clone()),
+                required: f.required,
+                bind_required: f.bind_required,
+                kind: wire_kind(f.declared.as_deref(), &f.value),
+                array: f.value.array,
+                ty: type_text(f.declared.as_deref(), &f.value),
+                model: f.value.model,
+                declared_by: f.declared_in,
+            },
+        );
+        flatten_into(&f.value, &at, false, on_path, out);
+    }
+    if v.model.is_some() {
+        on_path.pop();
+    }
+}
+
+/// One GraphQL pair's two sides flattened by schema-field path: `(selection,
+/// served)`. The selection is the op's root entry for the pair's root field
+/// (its response keys' sub-selections merged, [`GraphqlPair::selection`]):
+/// each selected field keyed by its schema field (an alias's `field`), `name`
+/// its response key, `member` the schema field, always required, no kind; an
+/// open selection level (a spread, an inline fragment) is an open path. The
+/// served side is the schema type the root field returns: its SCHEMA_FIELDS
+/// (format graphql, required = non-null), each declared by the type's
+/// MESSAGE_TYPE, recursing into a MESSAGE_TYPE-typed field of the same owner
+/// where the selection sub-selects it (as [`graphql_pairs`] compares); an
+/// open type or interface, and a sub-selected field whose type names no
+/// MESSAGE_TYPE here, are open paths, and a pair with no schema type is open
+/// at `""`. One index per call: [`graphql_fields_all`] reads many pairs.
+pub fn graphql_fields(merged: &MergedGraph, pair: &GraphqlPair) -> (WireFields, WireFields) {
+    graphql_fields_all(merged, std::slice::from_ref(pair))
+        .pop()
+        .unwrap_or_default()
+}
+
+/// [`graphql_fields`] of every pair in `pairs`, in order, over one index.
+pub fn graphql_fields_all(
+    merged: &MergedGraph,
+    pairs: &[GraphqlPair],
+) -> Vec<(WireFields, WireFields)> {
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+    let ix = GqlIndex::new(merged);
+    pairs.iter().map(|p| gql_fields(&ix, p)).collect()
+}
+
+fn gql_fields(ix: &GqlIndex<'_>, p: &GraphqlPair) -> (WireFields, WireFields) {
+    let mut sel = WireFields::default();
+    sel.fields.insert(
+        String::new(),
+        WireField {
+            name: p
+                .response_keys
+                .first()
+                .cloned()
+                .unwrap_or_else(|| p.root_field.clone()),
+            member: p.root_field.clone(),
+            required: true,
+            ..WireField::default()
+        },
+    );
+    selection_into(&p.selection, "", 0, &mut sel);
+
+    let mut served = WireFields::default();
+    let repo = ix.fields.get(&p.resolver.0).map(|r| r.repo);
+    served.fields.insert(
+        String::new(),
+        WireField {
+            name: p.root_field.clone(),
+            member: p.root_field.clone(),
+            required: p.returns.trim_end().ends_with('!'),
+            kind: kind_name(
+                &json_kind(WireFormat::Graphql, &p.returns),
+                p.schema_type.is_some(),
+            ),
+            array: element_type(&p.returns).1,
+            ty: p.returns.clone(),
+            model: p.schema_type,
+            ..WireField::default()
+        },
+    );
+    let found = repo.map(|r| (r, ix.type_at(r, p.owner.as_deref(), &p.type_name)));
+    match found {
+        Some((
+            r,
+            TypeAt::Found {
+                id,
+                schema,
+                interface,
+            },
+        )) if p.schema_type == Some(NodeId(id)) => {
+            let ty = ServedType {
+                id,
+                schema: &schema,
+                interface,
+            };
+            let at = ServedAt {
+                ix,
+                repo: r,
+                owner: p.owner.as_deref(),
+            };
+            at.served_into(&ty, &p.selection, "", 0, &mut served);
+        }
+        _ => {
+            served.open.insert(String::new());
+        }
+    }
+    (sel, served)
+}
+
+/// A selection's fields below `prefix`, by schema-field path.
+fn selection_into(sel: &Shape, prefix: &str, depth: usize, out: &mut WireFields) {
+    let Shape::Object { fields, open } = sel else {
+        return;
+    };
+    if *open {
+        out.open.insert(prefix.to_string());
+    }
+    for f in fields {
+        let member = f.field.as_deref().unwrap_or(&f.name);
+        let at = dotted(prefix, member);
+        out.fields.entry(at.clone()).or_insert_with(|| WireField {
+            name: f.name.clone(),
+            member: member.to_string(),
+            required: true,
+            ..WireField::default()
+        });
+        if depth + 1 < GRAPHQL_MAX_LEVELS {
+            selection_into(&f.shape, &at, depth + 1, out);
+        } else if matches!(f.shape, Shape::Object { .. }) {
+            out.open.insert(at);
+        }
+    }
+}
+
+/// The sub-selection a selection level gives schema field `field`: every
+/// response key's merged ([`merge_selection_into`]); `None` for a leaf.
+fn sub_selection(sel: &Shape, field: &str) -> Option<Shape> {
+    let Shape::Object { fields, .. } = sel else {
+        return None;
+    };
+    let mut out: Option<Shape> = None;
+    for f in fields
+        .iter()
+        .filter(|f| f.field.as_deref().unwrap_or(&f.name) == field)
+    {
+        match &mut out {
+            None => out = Some(f.shape.clone()),
+            Some(have) => merge_selection_into(have, &f.shape),
+        }
+    }
+    out.filter(|s| matches!(s, Shape::Object { .. }))
+}
+
+/// Where a served side's types are looked up: the root field's repo and owner.
+struct ServedAt<'i, 'm> {
+    ix: &'i GqlIndex<'m>,
+    repo: u64,
+    owner: Option<&'i str>,
+}
+
+/// One schema type a served level lists.
+struct ServedType<'a> {
+    id: u64,
+    schema: &'a ModelSchema,
+    interface: bool,
+}
+
+impl ServedAt<'_, '_> {
+    /// `ty`'s fields below `prefix`, recursing where `sel` sub-selects.
+    fn served_into(
+        &self,
+        ty: &ServedType<'_>,
+        sel: &Shape,
+        prefix: &str,
+        depth: usize,
+        out: &mut WireFields,
+    ) {
+        if ty.schema.open || ty.interface {
+            out.open.insert(prefix.to_string());
+        }
+        for f in &ty.schema.fields {
+            let at = dotted(prefix, &f.name);
+            let named = graphql_named(&f.ty);
+            let found = self.ix.type_at(self.repo, self.owner, &named);
+            let model = match &found {
+                TypeAt::Found { id, .. } => Some(NodeId(*id)),
+                _ => None,
+            };
+            out.fields.insert(
+                at.clone(),
+                WireField {
+                    name: f.name.clone(),
+                    member: f.member().to_string(),
+                    required: f.required,
+                    bind_required: false,
+                    kind: kind_name(&json_kind(WireFormat::Graphql, &f.ty), model.is_some()),
+                    array: f.array,
+                    ty: f.ty.clone(),
+                    model,
+                    declared_by: Some(NodeId(ty.id)),
+                },
+            );
+            let Some(sub) = sub_selection(sel, &f.name) else {
+                continue;
+            };
+            match found {
+                TypeAt::Found {
+                    id,
+                    schema,
+                    interface,
+                } if depth + 1 < GRAPHQL_MAX_LEVELS => {
+                    let inner = ServedType {
+                        id,
+                        schema: &schema,
+                        interface,
+                    };
+                    self.served_into(&inner, &sub, &at, depth + 1, out);
+                }
+                _ => {
+                    out.open.insert(at);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6913,5 +7307,288 @@ mod tests {
             ModelResolver.resolve(&mut m);
             assert_eq!(gql_same_as(&m).len(), 2, "{doc}");
         }
+    }
+
+    // ---- DT.1o: one side flattened ----------------------------------------
+
+    fn keys(w: &WireFields) -> Vec<&str> {
+        w.fields.keys().map(String::as_str).collect()
+    }
+
+    fn opens(w: &WireFields) -> Vec<&str> {
+        w.open.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn wire_fields_flatten_nested_models_by_json_path() {
+        let order = model_of(
+            TS,
+            1,
+            false,
+            false,
+            vec![
+                mf(TS, "id", "string", true),
+                fld(
+                    "lines",
+                    Some("OrderLine[]"),
+                    true,
+                    model_of(
+                        TS,
+                        2,
+                        true,
+                        false,
+                        vec![mf(TS, "productId", "string", true)],
+                    ),
+                ),
+                fld(
+                    "owner",
+                    Some("Owner"),
+                    false,
+                    model_of(TS, 3, false, false, vec![mf(TS, "email", "string", true)]),
+                ),
+                mf(TS, "tags", "string[]", true),
+            ],
+        );
+        let w = wire_fields(&order);
+        assert_eq!(
+            keys(&w),
+            [
+                "",
+                "id",
+                "lines",
+                "lines[].productId",
+                "owner",
+                "owner.email",
+                "tags"
+            ]
+        );
+        assert!(w.open.is_empty(), "{:?}", w.open);
+        let root = &w.fields[""];
+        assert_eq!(
+            (root.kind, root.model, root.required),
+            (Some("object"), Some(NodeId(1)), true)
+        );
+        let lines = &w.fields["lines"];
+        assert_eq!(
+            (lines.kind, lines.array, lines.model, lines.ty.as_str()),
+            (Some("array"), true, Some(NodeId(2)), "OrderLine[]")
+        );
+        let owner = &w.fields["owner"];
+        assert_eq!(
+            (owner.kind, owner.required),
+            (Some("object"), false),
+            "an unknown name that resolved to a model is an object"
+        );
+        assert_eq!(w.fields["owner.email"].kind, Some("string"));
+    }
+
+    #[test]
+    fn a_root_array_lists_its_elements_unprefixed_and_an_envelope_its_key() {
+        let list = model_of(TS, 1, true, false, vec![mf(TS, "id", "string", true)]);
+        let w = wire_fields(&list);
+        assert_eq!(keys(&w), ["", "id"]);
+        assert_eq!(
+            (w.fields[""].kind, w.fields[""].array),
+            (Some("array"), true)
+        );
+        let envelope = inline(
+            GO,
+            false,
+            vec![fld(
+                "invoices",
+                None,
+                true,
+                model_of(
+                    GO,
+                    4,
+                    true,
+                    false,
+                    vec![mf(GO, "customerName", "string", true)],
+                ),
+            )],
+        );
+        let w = wire_fields(&envelope);
+        assert_eq!(keys(&w), ["", "invoices", "invoices[].customerName"]);
+        assert_eq!(w.fields["invoices"].kind, Some("array"));
+        assert_eq!(w.fields[""].kind, Some("object"));
+    }
+
+    #[test]
+    fn wire_fields_mark_the_paths_whose_names_are_unknown() {
+        let side = model_of(
+            TS,
+            1,
+            false,
+            false,
+            vec![
+                mf(TS, "meta", "Record<string, string>", true),
+                mf(TS, "status", "OrderStatus", true),
+                mf(TS, "tags", "string[]", true),
+                fld(
+                    "extra",
+                    Some("Extra"),
+                    true,
+                    model_of(TS, 5, false, true, vec![mf(TS, "a", "string", true)]),
+                ),
+                fld(
+                    "parent",
+                    Some("Order"),
+                    false,
+                    model_of(TS, 1, false, false, vec![mf(TS, "id", "string", true)]),
+                ),
+                fld(
+                    "either",
+                    None,
+                    true,
+                    union_of(TS, vec![val(TS, "string"), val(TS, "number")]),
+                ),
+            ],
+        );
+        let w = wire_fields(&side);
+        assert_eq!(
+            opens(&w),
+            ["either", "extra", "meta", "parent", "status"],
+            "an object no model lists, a name bound to nothing, an open model, a union and a \
+             model met again on its own path"
+        );
+        assert!(
+            w.fields.contains_key("extra.a") && !w.fields.contains_key("parent.id"),
+            "an open model still lists its names; a model on its own path is not re-entered"
+        );
+        assert_eq!(w.fields["status"].kind, None, "an unbound name has no kind");
+        assert_eq!(
+            opens(&wire_fields(&ResolvedShape {
+                written: Shape::open("res.body"),
+                format: Some(TS),
+                model: None,
+                array: false,
+                fields: BTreeMap::new(),
+                members: Vec::new(),
+                open: true,
+            })),
+            [""],
+            "an open root opens the whole side"
+        );
+    }
+
+    #[test]
+    fn wire_fields_keep_the_member_the_declaring_base_and_a_codecs_direction() {
+        let mut renamed = mf(GO, "customer_name", "string", true);
+        renamed.member = Some("CustomerName".into());
+        renamed.declared_in = Some(NodeId(9));
+        let w = wire_fields(&model_of(GO, 9, false, false, vec![renamed]));
+        let f = &w.fields["customer_name"];
+        assert_eq!(
+            (f.name.as_str(), f.member.as_str(), f.declared_by),
+            ("customer_name", "CustomerName", Some(NodeId(9)))
+        );
+        let (s, ids) = server_graph();
+        let merged = MergedGraph::new(vec![s.g]);
+        let ctx = Ctx::new(&merged);
+        let resolve = |q: &str, dir| {
+            let shape = modeled("models.X", q);
+            wire_fields(&ctx.resolve(0, Names::Written, &shape, Some(GO), dir, 0))
+        };
+        let wide = resolve("models::m::Wide", WireDirection::Response);
+        assert_eq!(
+            wide.fields["id"].declared_by,
+            Some(ids["base"]),
+            "an extends base's field"
+        );
+        assert_eq!(wide.fields["title"].declared_by, Some(ids["wide"]));
+        assert_eq!(
+            wide.fields["title"].member, "title",
+            "no `field` recorded: the member is the JSON name"
+        );
+        assert_eq!(
+            opens(&resolve("models::m::Geo", WireDirection::Response)),
+            [""],
+            "MarshalJSON writes what it likes"
+        );
+        assert!(
+            resolve("models::m::Geo", WireDirection::Request)
+                .open
+                .is_empty()
+        );
+        assert_eq!(
+            opens(&resolve("models::m::Decoded", WireDirection::Request)),
+            [""]
+        );
+    }
+
+    #[test]
+    fn graphql_fields_key_both_sides_by_schema_field_path() {
+        let m = stock(true);
+        let gp = graphql_pairs(&m);
+        let sides = graphql_fields_all(&m, &gp.pairs);
+        assert_eq!(sides.len(), gp.pairs.len());
+        let of = |name: &str| {
+            let i = gp
+                .pairs
+                .iter()
+                .position(|p| p.op_name == name)
+                .unwrap_or_else(|| panic!("{name}"));
+            (&gp.pairs[i], &sides[i])
+        };
+        let (aliased, (sel, served)) = of("Aliased");
+        assert_eq!(
+            keys(sel),
+            ["", "barcode", "id", "label", "owner", "owner.name"],
+            "two response keys of one root field merged"
+        );
+        let code = &sel.fields["barcode"];
+        assert_eq!(
+            (
+                code.name.as_str(),
+                code.member.as_str(),
+                code.required,
+                code.kind
+            ),
+            ("code", "barcode", true, None),
+            "an alias keys its schema field"
+        );
+        assert_eq!(
+            keys(served),
+            ["", "id", "label", "owner", "owner.name", "tags"],
+            "Item's fields, recursing into Owner where the selection does"
+        );
+        let item = aliased.schema_type;
+        assert_eq!(served.fields["id"].declared_by, item);
+        assert_eq!(
+            (
+                served.fields["owner"].kind,
+                served.fields["owner"].ty.as_str()
+            ),
+            (Some("object"), "Owner!")
+        );
+        assert_ne!(
+            served.fields["owner.name"].declared_by, item,
+            "Owner declares it"
+        );
+        assert_eq!(
+            (
+                served.fields[""].kind,
+                served.fields[""].required,
+                served.fields[""].ty.as_str()
+            ),
+            (Some("array"), true, "[Item!]!")
+        );
+        assert_eq!(served.fields["tags"].required, false, "nullable");
+        assert!(sel.open.is_empty() && served.open.is_empty());
+        assert_eq!(
+            graphql_fields(&m, aliased),
+            (sel.clone(), served.clone()),
+            "one pair alone reads the same"
+        );
+
+        let (_, (sel, _)) = of("Spread");
+        assert_eq!(opens(sel), [""], "a spread opens the selection");
+        let (_, (_, served)) = of("Draft");
+        assert_eq!(opens(served), [""], "an extend-only type is open");
+        let (_, (_, served)) = of("Node");
+        assert_eq!(opens(served), [""], "an interface is open");
+        let (_, (_, served)) = of("Search");
+        assert_eq!(opens(served), [""], "no schema type: the side is open");
+        assert!(graphql_fields_all(&m, &[]).is_empty());
     }
 }

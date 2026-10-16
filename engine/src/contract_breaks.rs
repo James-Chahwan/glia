@@ -80,6 +80,17 @@
 //! rows plus the orphans. An answer with no row carries an [`Absence`]
 //! (reason `no_match`, FACT) saying why.
 //!
+//! INFERRED MODELS (DT.1o). The child module `models` judges the contracts
+//! nobody declared: every client <-> server model exchange the graph pairs
+//! (DT.1m's `http_model` call site against handler, DT.1n's
+//! `graphql_selection` operation against schema type), the server's change
+//! against what its client reads or sends and the client's against what is
+//! served, one row per (client model, server model) pair with located field
+//! lines. [`model_breaks`] answers from a [`RevDelta`]; rows break under the
+//! advisory gate (`check::is_blocking` at min tier `fact` by default, so a
+//! derived pairing never blocks unless the caller opts in with `derived`).
+//! See `contract_breaks/models.rs`.
+//!
 //! Language-level public API (cargo-semver-checks parity) stays out: the
 //! graph has no visibility or signature cell.
 //!
@@ -108,6 +119,13 @@ use crate::contract_fields::{
 use crate::build::{BuildOptions, GenerateResult, generate_many_as};
 use crate::delta::{RevDelta, graph_delta_vs_rev, located_delta_with};
 use crate::git_rev;
+
+mod models;
+
+pub use models::{
+    MODEL_MIN_TIERS, ModelBreak, ModelBreakArgs, ModelBreaks, ModelChange, ModelExchange, ModelSite,
+    model_breaks,
+};
 
 /// The accepted [`ContractBreakArgs::avro_mode`] values, default first.
 pub const AVRO_MODES: &[&str] = &["backward", "forward", "full"];
