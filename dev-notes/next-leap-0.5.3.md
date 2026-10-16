@@ -302,6 +302,18 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   rooted at AmqpWriteSettings / WriteMessage.
 - W4 (DE.4): `engram-export/tests/keep_v6.rs`'s list of tests pinning `--since` accuracy could name DE.4's four
   `diff.rs` rename tests (no 0.5.2 packet owns the file).
+- W5 (DG.13b): Rust DI depth: a handler extracting a wrapper struct (`State<AppState>` holding the services) injects
+  AppState, not its fields; following AppState's field types would reach the services.
+- W5 (DH.12): elixir-grpc: a file only handed a channel (`GRPC.Channel`, no `GRPC.Stub`) gets nothing for a service
+  without a Service / Svc suffix; the server side (`use GRPC.Server, service: ..`) mints no GRPC_SERVER.
+- W5 (DD.7): the SCIP snapshot is read and its fresh documents re-hashed twice per build (the Resolve identity pass,
+  then the Post SCIP stage); a cache on CodeBuildCtx could share the read.
+- W5 (DH.7): Laravel string events (`Event::dispatch('order.placed')`, `Event::listen('order.*', ..)`), the
+  EventServiceProvider `$listen` array, `broadcast(new X)`, paren-less Elixir remote calls and Rails
+  `ActiveSupport::Notifications.monotonic_subscribe` / `subscribed` are unread.
+- W5 (DH.3): Dart SNS (`aws_sns_api` `sns.publish(topicArn: ..)`) has no row; redis_task_queue's
+  `worker.handle(type, handlerFn)` and dart_amqp's `consumer.listen(cb)` bind no HANDLED_BY; dart_amqp
+  `exchange.publish(msg, 'routing.key')` never reads the routing key.
 
 ## 3. Open questions for James
 
