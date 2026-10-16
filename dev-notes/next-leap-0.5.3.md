@@ -652,6 +652,11 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   and tsconfig path aliases (TsAliasSet could be passed in). A Go ABI held in a package `var` of another file is not a
   GoStringConst (DF.7's FileConsts records consts only). ClientHit could fold into graph/src/resolvers/evm.rs ClientFacts
   (change the test helper `cell()` to `..Default::default()` first).
+- W25 (DT.1p; joins W0's D0.6 `git_mv` item): a spec file moved with `git mv` and otherwise untouched reads in
+  contract-breaks as its op `removed` (breaking) + `added`; the op should pair through the move, as LB.6 moves pair nodes.
+  The move test is the missing user of engine/tests/git_fixture's `git_mv` (the contract_breaks crate's dead_code warning).
+- W25 (DT.1p, DT.1m): WirePair.client_model is None for a union client root, so a union-judged model break is keyed on
+  its ENDPOINT, not the model; naming the picked member there would fold it into the model pair's row.
 
 ## 3. Open questions for James
 
