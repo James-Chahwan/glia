@@ -7,7 +7,7 @@
 //! per-file reuse and optional stat stamps. [`walk_source_files`] is their
 //! composition, so a clean build prints and returns what it always did.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -239,9 +239,11 @@ pub(crate) struct WalkPlan {
     /// The files to read, in walk (name) order.
     pub(crate) pending: Vec<Pending>,
     regions: Vec<RegionAnchor>,
-    /// Manifest-detected roots in discovery order, before the `[[project]]`
-    /// merge and the sort, which [`read_walk`] does.
+    /// Manifest-detected roots and sbt members in discovery order, before the
+    /// `[[project]]` merge and the sort, which [`read_walk`] does.
     roots: Vec<ProjectRoot>,
+    /// The sub-projects root `build.sbt`s declared (DG.12).
+    sbt: SbtMembers,
     declared: DeclaredDirs,
     /// The user config's `[[project]]` stanzas (LF.3a).
     projects: Vec<Spanned<ProjectDecl>>,
@@ -322,6 +324,7 @@ pub(crate) fn plan_walk(root: &Path) -> WalkPlan {
         pending: Vec::new(),
         regions: Vec::new(),
         roots: Vec::new(),
+        sbt: SbtMembers::default(),
         declared: DeclaredDirs::new(&config.project),
         projects: config.project,
         counts: GateCounts::default(),
@@ -378,10 +381,10 @@ pub(crate) type Reuse<'a> = dyn Fn(&Pending) -> Option<Read> + Sync + 'a;
 /// (`n` = `m + j + s`, the queued files by class; a `.md` that falls through to
 /// the source rule counts as md), then with `reuse` only
 ///   `[walk] reuse root=<root> reused=<r> read=<k> of <n>` (`r + k = n`),
-/// then the `[roots] declared` lines, `[contract] json sniffed=`, `[contract]
-/// json over_cap=`, `[roots] <n> project roots`, the `[walk]` gate tally and
-/// the `[walk] gitignore` / `[walk] config skip` lines, each gated on non-zero
-/// as before.
+/// then the `[roots] sbt` lines ([`SbtMembers`]), the `[roots] declared`
+/// lines, `[contract] json sniffed=`, `[contract] json over_cap=`, `[roots]
+/// <n> project roots`, the `[walk]` gate tally and the `[walk] gitignore` /
+/// `[walk] config skip` lines, each gated on non-zero as before.
 pub(crate) fn read_walk(
     root: &Path,
     plan: &WalkPlan,
@@ -436,6 +439,10 @@ pub(crate) fn read_walk(
             plan.pending.len() - reused,
             plan.pending.len()
         );
+    }
+    // DG.12 fired_on: `grep '^\[roots\] sbt '`.
+    for line in &plan.sbt.lines {
+        eprintln!("{line}");
     }
     let mut roots = plan.roots.clone();
     merge_declared_roots(&plan.projects, &plan.declared, &plan.regions, &mut roots);
@@ -495,12 +502,19 @@ struct DeclaredCounts {
     added: usize,
     shadowed: usize,
     missing: usize,
+    relabelled: usize,
 }
 
 /// Merge the `[[project]]` roots into the manifest-detected ones (LF.3a). Config
 /// extends, never replaces: a detected root at the same path wins (`shadowed`),
 /// and a declared path the walk never entered is reported and dropped
-/// (`missing`). Called before the explicit sort, which fixes node order.
+/// (`missing`). One exception, the DE.9 hand-off (taken by DG.12): a detected
+/// root whose manifest names no project (its label is the directory basename
+/// or `root`, [`project_roots::LABEL_DIR`] / [`project_roots::LABEL_ROOT`])
+/// takes the declared label, when that label passes the label rules, and
+/// keeps its own ecosystem and manifest (`relabelled`): a `requirements.txt`
+/// names nothing, so the user's name for the project is the better one.
+/// Called before the explicit sort, which fixes node order.
 fn merge_declared_roots(
     decls: &[Spanned<ProjectDecl>],
     declared: &DeclaredDirs,
@@ -519,7 +533,19 @@ fn merge_declared_roots(
             n.missing += 1;
             continue;
         }
-        if let Some(found) = roots.iter().find(|r| r.rel_path == rel) {
+        let root = ProjectRoot::declared(rel.to_string(), decl.label.as_deref());
+        if let Some(found) = roots.iter_mut().find(|r| r.rel_path == rel) {
+            let unnamed = [project_roots::LABEL_DIR, project_roots::LABEL_ROOT].contains(&found.label_source);
+            if unnamed && root.label_source == project_roots::LABEL_DECLARED {
+                eprintln!(
+                    "[roots] declared root {rel} labels {} manifest {}: {:?} over the directory label {:?}",
+                    found.ecosystem, found.manifest, root.label, found.label
+                );
+                found.label = root.label;
+                found.label_source = project_roots::LABEL_DECLARED;
+                n.relabelled += 1;
+                continue;
+            }
             eprintln!(
                 "[roots] declared root {rel} shadowed by {} manifest {}",
                 found.ecosystem, found.manifest
@@ -527,7 +553,6 @@ fn merge_declared_roots(
             n.shadowed += 1;
             continue;
         }
-        let root = ProjectRoot::declared(rel.to_string(), decl.label.as_deref());
         if let Some(label) = decl.label.as_deref()
             && label.trim() != root.label
         {
@@ -539,9 +564,95 @@ fn merge_declared_roots(
         roots.push(root);
         n.added += 1;
     }
-    // LF.3a fired_on: `grep '^\[roots\] declared='`.
-    eprintln!("[roots] declared={} shadowed={} missing={}", n.added, n.shadowed, n.missing);
+    // LF.3a fired_on: `grep '^\[roots\] declared='`; DG.12 appends `relabelled=`.
+    eprintln!(
+        "[roots] declared={} shadowed={} missing={} relabelled={}",
+        n.added, n.shadowed, n.missing, n.relabelled
+    );
     n
+}
+
+/// The sub-projects root `build.sbt`s declared (DG.12), resolved as the
+/// descent enters their directories. sbt's canonical multi-project build
+/// declares every project in ONE `build.sbt` and the sub-directories carry no
+/// manifest, so the per-directory [`project_roots::detect_root`] alone finds
+/// only the root.
+///
+/// A member becomes a root only when the walk ENTERS its directory, so every
+/// gate a directory passes (hard skip, `.gitignore`, a region, `[walk] skip`,
+/// a nested repo) decides a member exactly as it decides any directory; one
+/// the walk never enters is skipped and counted `missing`. A member directory
+/// with its own manifest (a `build.sbt` of settings, a `package.json`) is
+/// rooted by that manifest instead: a manifest always wins over a
+/// declaration, and a directory pushes at most one root, so no `rel_path` is
+/// ever duplicated. The final sort in [`read_walk`] fixes the roots' order.
+///
+/// fired_on, in walk order, printed by [`read_walk`]: per member
+///   `[roots] sbt member <rel> has its own <eco> manifest <manifest>` or
+///   `[roots] sbt member <rel> skipped: <reason>`,
+/// then once per `build.sbt` that declares members
+///   `[roots] sbt members=<n> missing=<m> manifest=<rel>/build.sbt`
+/// (`manifest=build.sbt` at the repo root; `n` counts the members this file
+/// declared, `m` those the walk never entered).
+#[derive(Debug, Default)]
+struct SbtMembers {
+    /// A member's repo-relative dir -> (sbt project id, the declaring
+    /// `build.sbt`'s repo-relative path), until the walk enters it.
+    wanted: BTreeMap<String, (String, String)>,
+    lines: Vec<String>,
+}
+
+impl SbtMembers {
+    /// Register the members `text`, the `build.sbt` at `manifest` in directory
+    /// `dir_rel`, declares, and return their repo-relative dirs in declaration
+    /// order. A dir an enclosing `build.sbt` already declared stays that
+    /// file's member.
+    fn declare(&mut self, dir_rel: &str, manifest: &str, text: &str) -> Vec<String> {
+        let mut mine = Vec::new();
+        for (dir, id) in project_roots::sbt_subprojects(text) {
+            let rel = if dir_rel.is_empty() { dir } else { format!("{dir_rel}/{dir}") };
+            if self.wanted.contains_key(&rel) {
+                continue;
+            }
+            self.wanted.insert(rel.clone(), (id, manifest.to_string()));
+            mine.push(rel);
+        }
+        mine
+    }
+
+    /// The walk entered `dir_rel`: the root it gets, if a `build.sbt`
+    /// declared it. `own` is the directory's own manifest root, which wins.
+    fn enter(&mut self, dir_rel: &str, own: Option<ProjectRoot>) -> Option<ProjectRoot> {
+        let Some((id, manifest)) = self.wanted.remove(dir_rel) else {
+            return own;
+        };
+        match own {
+            Some(own) => {
+                self.lines.push(format!(
+                    "[roots] sbt member {dir_rel} has its own {} manifest {}",
+                    own.ecosystem, own.manifest
+                ));
+                Some(own)
+            }
+            None => Some(ProjectRoot::sbt_member(dir_rel.to_string(), &id, manifest)),
+        }
+    }
+
+    /// The walk is done under the `build.sbt` at `manifest`: every member of
+    /// `mine` still wanted was never entered. Records the tally line.
+    fn finish(&mut self, manifest: &str, mine: &[String], regions: &[RegionAnchor]) {
+        let mut missing = 0usize;
+        for rel in mine {
+            if self.wanted.remove(rel).is_some() {
+                self.lines.push(format!("[roots] sbt member {rel} skipped: {}", missing_reason(rel, regions)));
+                missing += 1;
+            }
+        }
+        self.lines.push(format!(
+            "[roots] sbt members={} missing={missing} manifest={manifest}",
+            mine.len()
+        ));
+    }
 }
 
 /// Why the walk never entered a declared directory: it sits at or under a
@@ -588,11 +699,31 @@ fn walk_dir(root: &Path, dir: &Path, ignores: &mut IgnoreStack, plan: &mut WalkP
             rel => format!("{rel}/.gitignore"),
         });
     }
-    if let Some((ecosystem, manifest, label)) = project_roots::detect_root(&names, |base| {
-        std::fs::read_to_string(dir.join(base)).unwrap_or_default()
-    }) {
-        plan.roots.push(ProjectRoot::new(dir_rel.clone(), ecosystem, &manifest, label));
+    // DG.12: a `build.sbt` is read once, by `detect_root` when it decides the
+    // root, else here (a Scala.js build whose `package.json` decides it).
+    let mut sbt_text: Option<String> = None;
+    let own = project_roots::detect_root(&names, |base| {
+        let text = std::fs::read_to_string(dir.join(base)).unwrap_or_default();
+        if base == project_roots::SBT_MANIFEST {
+            sbt_text = Some(text.clone());
+        }
+        text
+    })
+    .map(|(ecosystem, manifest, label)| ProjectRoot::new(dir_rel.clone(), ecosystem, &manifest, label));
+    if let Some(root) = plan.sbt.enter(&dir_rel, own) {
+        plan.roots.push(root);
     }
+    let sbt_members = names.iter().any(|n| n == project_roots::SBT_MANIFEST).then(|| {
+        let text = sbt_text
+            .take()
+            .unwrap_or_else(|| std::fs::read_to_string(dir.join(project_roots::SBT_MANIFEST)).unwrap_or_default());
+        let manifest = match dir_rel.as_str() {
+            "" => project_roots::SBT_MANIFEST.to_string(),
+            rel => format!("{rel}/{}", project_roots::SBT_MANIFEST),
+        };
+        let mine = plan.sbt.declare(&dir_rel, &manifest, &text);
+        (manifest, mine)
+    });
     plan.dirs.push(WalkedDir { rel: dir_rel, mtime });
     for entry in entries {
         let path = entry.path();
@@ -695,6 +826,13 @@ fn walk_dir(root: &Path, dir: &Path, ignores: &mut IgnoreStack, plan: &mut WalkP
                 });
             }
         }
+    }
+    // DG.12: every member of this directory's `build.sbt` lies under it, so
+    // the descent is done with all of them.
+    if let Some((manifest, mine)) = sbt_members
+        && !mine.is_empty()
+    {
+        plan.sbt.finish(&manifest, &mine, &plan.regions);
     }
 }
 
@@ -1662,9 +1800,278 @@ mod walk_tests {
         for rel in ["", "svc", "svc/api", "tools", "tools/migrator"] {
             declared.enter(rel);
         }
-        let mut detected = vec![ProjectRoot::new("svc/api".into(), "python", "pyproject.toml", None)];
+        // The walk's own svc/api root: pyproject.toml names it `api-svc`.
+        let mut detected =
+            vec![ProjectRoot::new("svc/api".into(), "python", "pyproject.toml", Some("api-svc".into()))];
         let n = merge_declared_roots(&cfg.project, &declared, &regions, &mut detected);
-        assert_eq!(n, DeclaredCounts { added: 1, shadowed: 1, missing: 3 });
+        assert_eq!(n, DeclaredCounts { added: 1, shadowed: 1, missing: 3, relabelled: 0 });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The DE.9 hand-off (DG.12): a `[[project]]` label names a detected root
+    /// whose manifest names nothing (a `requirements.txt`, a label-less
+    /// `package.json`), keeping its ecosystem and manifest; a manifest's own
+    /// name still shadows the declaration, and so does a rejected label.
+    #[test]
+    fn declared_label_names_an_unnamed_detected_root() {
+        let root = walk_tmp("relabel");
+        for d in ["svc/email", "svc/api", "web", "tools", ".glia"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for (rel, body) in [
+            ("svc/email/requirements.txt", "flask==3.0.0\n"),
+            ("svc/email/server.py", "def send():\n    return 1\n"),
+            ("svc/api/pyproject.toml", "[project]\nname = \"api-svc\"\n"),
+            ("web/package.json", r#"{"private":true}"#),
+            ("tools/requirements.txt", "click\n"),
+            ("tools/cli.py", "x = 1\n"),
+            (
+                ".glia/overlay.toml",
+                concat!(
+                    "version = 1\n",
+                    "[[project]]\npath = \"svc/email\"\nlabel = \"email-sender\"\n",
+                    "[[project]]\npath = \"svc/api\"\nlabel = \"declared-api\"\n",
+                    "[[project]]\npath = \"web\"\nlabel = \"storefront\"\n",
+                    "[[project]]\npath = \"tools\"\nlabel = \"a::b\"\n",
+                ),
+            ),
+        ] {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+        let (_files, _regions, _md, roots) = walk_source_files(&root);
+        let got: Vec<(&str, &str, &str, &str, &str)> = roots
+            .iter()
+            .map(|r| (r.rel_path.as_str(), r.label.as_str(), r.label_source, r.ecosystem, r.manifest.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("svc/api", "api-svc", "manifest", "python", "svc/api/pyproject.toml"),
+                ("svc/email", "email-sender", "declared", "python", "svc/email/requirements.txt"),
+                ("tools", "tools", "dir", "python", "tools/requirements.txt"),
+                ("web", "storefront", "declared", "npm", "web/package.json"),
+            ]
+        );
+        let cfg = glia_config::load(&root).expect("overlay").config;
+        let mut declared = DeclaredDirs::new(&cfg.project);
+        for rel in ["svc/email", "svc/api", "web", "tools"] {
+            declared.enter(rel);
+        }
+        let mut detected = vec![
+            ProjectRoot::new("svc/api".into(), "python", "pyproject.toml", Some("api-svc".into())),
+            ProjectRoot::new("svc/email".into(), "python", "requirements.txt", None),
+            ProjectRoot::new("tools".into(), "python", "requirements.txt", None),
+            ProjectRoot::new("web".into(), "npm", "package.json", None),
+        ];
+        let n = merge_declared_roots(&cfg.project, &declared, &[], &mut detected);
+        assert_eq!(n, DeclaredCounts { added: 0, shadowed: 2, missing: 0, relabelled: 2 });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The matrix fixture `scala/subproject`: ONE root build.sbt declaring
+    /// `api` and `worker`, neither carrying a build.sbt of its own.
+    fn sbt_tree(tag: &str, build_sbt: &str) -> std::path::PathBuf {
+        let root = walk_tmp(tag);
+        for d in ["api/src/main/scala", "worker/src/main/scala"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("build.sbt"), build_sbt).unwrap();
+        for svc in ["api", "worker"] {
+            std::fs::write(
+                root.join(format!("{svc}/src/main/scala/App.scala")),
+                format!("object App {{\n  def run(): String = \"{svc}\"\n}}\n"),
+            )
+            .unwrap();
+        }
+        root
+    }
+
+    /// The `(rel_path, label, label_source, ecosystem, manifest)` of each root.
+    fn root_rows(roots: &[ProjectRoot]) -> Vec<(String, String, &'static str, &'static str, String)> {
+        roots
+            .iter()
+            .map(|r| (r.rel_path.clone(), r.label.clone(), r.label_source, r.ecosystem, r.manifest.clone()))
+            .collect()
+    }
+
+    fn row(
+        rel: &str,
+        label: &str,
+        source: &'static str,
+        eco: &'static str,
+        manifest: &str,
+    ) -> (String, String, &'static str, &'static str, String) {
+        (rel.into(), label.into(), source, eco, manifest.into())
+    }
+
+    /// The PROJECT qnames a build of `root` emits, sorted.
+    fn project_qnames(root: &Path) -> Vec<String> {
+        let r = crate::build::generate_one(root.to_str().unwrap()).unwrap();
+        let mut qs: Vec<String> = r
+            .merged
+            .graphs
+            .iter()
+            .flat_map(|g| {
+                g.nodes
+                    .iter()
+                    .filter(move |n| g.nav.kind_by_id.get(&n.id) == Some(&node_kind::PROJECT))
+                    .map(move |n| g.nav.qname_by_id[&n.id].clone())
+            })
+            .collect();
+        qs.sort();
+        qs
+    }
+
+    /// DG.12: the sub-projects a root build.sbt declares are PROJECT roots,
+    /// labelled by their sbt ids, their manifest the declaring build.sbt.
+    #[test]
+    fn sbt_members_become_roots() {
+        let root = sbt_tree(
+            "sbt_members",
+            concat!(
+                "lazy val api = project.in(file(\"api\"))\n",
+                "lazy val worker = project.in(file(\"worker\"))\n",
+                "lazy val root = project.in(file(\".\")).aggregate(api, worker)\n",
+            ),
+        );
+        let plan = plan_walk(&root);
+        assert_eq!(plan.sbt.lines, ["[roots] sbt members=2 missing=0 manifest=build.sbt"]);
+        assert!(plan.sbt.wanted.is_empty(), "every member resolved: {:?}", plan.sbt.wanted);
+        let (_files, _regions, _md, roots) = read_walk(&root, &plan, None, false).0;
+        assert_eq!(
+            root_rows(&roots),
+            [
+                row("", "root", "root", "sbt", "build.sbt"),
+                row("api", "api", "manifest", "sbt", "build.sbt"),
+                row("worker", "worker", "manifest", "sbt", "build.sbt"),
+            ]
+        );
+        assert_eq!(project_roots::marker(&roots), "3 project roots (sbt=3)");
+        assert_eq!(project_qnames(&root), ["project:.", "project:api", "project:worker"]);
+
+        // A nested build: members join its directory, the manifest is its
+        // repo-relative path; a `package.json` deciding the directory's root
+        // (Scala.js) does not hide the build.sbt's members.
+        let nested = walk_tmp("sbt_nested");
+        for d in ["scala/core/src", "scala/web"] {
+            std::fs::create_dir_all(nested.join(d)).unwrap();
+        }
+        std::fs::write(
+            nested.join("scala/build.sbt"),
+            "lazy val core = (project in file(\"core\"))\nlazy val web = project\n",
+        )
+        .unwrap();
+        std::fs::write(nested.join("scala/package.json"), r#"{"name":"shop-js"}"#).unwrap();
+        let plan = plan_walk(&nested);
+        assert_eq!(plan.sbt.lines, ["[roots] sbt members=2 missing=0 manifest=scala/build.sbt"]);
+        let (.., roots) = read_walk(&nested, &plan, None, false).0;
+        assert_eq!(
+            root_rows(&roots),
+            [
+                row("scala", "shop-js", "manifest", "npm", "scala/package.json"),
+                row("scala/core", "core", "manifest", "sbt", "scala/build.sbt"),
+                row("scala/web", "web", "manifest", "sbt", "scala/build.sbt"),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&nested);
+    }
+
+    /// DG.12: a member directory with its own manifest is rooted by it, once;
+    /// a `[[project]]` at a member sees the member as an existing root.
+    #[test]
+    fn sbt_member_with_its_own_manifest_is_not_duplicated() {
+        let root = sbt_tree(
+            "sbt_own",
+            concat!(
+                "lazy val root = (project in file(\".\")).aggregate(api, worker, web)\n",
+                "lazy val api = project.in(file(\"api\"))\n",
+                "lazy val worker = project.in(file(\"worker\"))\n",
+                "lazy val web = project in file(\"web\")\n",
+            ),
+        );
+        std::fs::create_dir_all(root.join("web")).unwrap();
+        std::fs::create_dir_all(root.join(".glia")).unwrap();
+        for (rel, body) in [
+            ("api/build.sbt", "name := \"api-svc\"\n"),
+            ("web/package.json", r#"{"name":"@shop/web"}"#),
+            (".glia/overlay.toml", "version = 1\n[[project]]\npath = \"worker\"\nlabel = \"w\"\n"),
+        ] {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+        let plan = plan_walk(&root);
+        assert_eq!(
+            plan.sbt.lines,
+            [
+                "[roots] sbt member api has its own sbt manifest api/build.sbt",
+                "[roots] sbt member web has its own npm manifest web/package.json",
+                "[roots] sbt members=3 missing=0 manifest=build.sbt",
+            ]
+        );
+        let (.., roots) = read_walk(&root, &plan, None, false).0;
+        assert_eq!(
+            root_rows(&roots),
+            [
+                row("", "root", "root", "sbt", "build.sbt"),
+                row("api", "api", "dir", "sbt", "api/build.sbt"),
+                row("web", "@shop/web", "manifest", "npm", "web/package.json"),
+                row("worker", "worker", "manifest", "sbt", "build.sbt"),
+            ],
+            "the manifests win; the declared `w` is shadowed by the sbt member"
+        );
+        assert_eq!(
+            project_qnames(&root),
+            ["project:.", "project:api", "project:web", "project:worker"],
+            "one PROJECT per directory"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// DG.12: a member the walk never enters (absent, a file, gitignored, under
+    /// `[walk] skip`, a nested repo) is no root, and each is reported.
+    #[test]
+    fn sbt_member_dir_missing_is_skipped() {
+        let root = sbt_tree(
+            "sbt_missing",
+            concat!(
+                "lazy val api = project.in(file(\"api\"))\n",
+                "lazy val gone = project.in(file(\"gone\"))\n",
+                "lazy val gen = project in file(\"gen\")\n",
+                "lazy val readme = project in file(\"README\")\n",
+                "lazy val legacy = project.in(file(\"old/legacy\"))\n",
+                "lazy val sdk = project in file(\"libs/sdk\")\n",
+                "lazy val calc = project.in(file(base + \"/x\"))\n",
+            ),
+        );
+        for d in ["gen", "old/legacy", "libs/sdk", ".glia"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for (rel, body) in [
+            (".gitignore", "/gen\n"),
+            ("gen/Gen.scala", "object Gen\n"),
+            ("README", "readme\n"),
+            ("old/legacy/Old.scala", "object Old\n"),
+            ("libs/sdk/.git", "gitdir: ../../.git/modules/sdk\n"),
+            (".glia/overlay.toml", "version = 1\n[walk]\nskip = [\"old\"]\n"),
+        ] {
+            std::fs::write(root.join(rel), body).unwrap();
+        }
+        let plan = plan_walk(&root);
+        assert_eq!(
+            plan.sbt.lines,
+            [
+                "[roots] sbt member gone skipped: not a directory the walk reads (absent, a file, or under a skipped directory)",
+                "[roots] sbt member gen skipped: inside region gen (build_output)",
+                "[roots] sbt member README skipped: not a directory the walk reads (absent, a file, or under a skipped directory)",
+                "[roots] sbt member old/legacy skipped: inside region old (excluded)",
+                "[roots] sbt member libs/sdk skipped: inside region libs/sdk (submodule)",
+                "[roots] sbt members=6 missing=5 manifest=build.sbt",
+            ]
+        );
+        assert!(plan.sbt.wanted.is_empty());
+        let (.., roots) = read_walk(&root, &plan, None, false).0;
+        let rels: Vec<&str> = roots.iter().map(|r| r.rel_path.as_str()).collect();
+        assert_eq!(rels, ["", "api"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

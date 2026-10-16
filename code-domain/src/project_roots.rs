@@ -44,7 +44,10 @@ pub const LABEL_DIR: &str = "dir";
 /// [`ProjectRoot::label_source`]: no usable label at the repo root, so `"root"`.
 pub const LABEL_ROOT: &str = "root";
 /// [`ProjectRoot::label_source`]: the label a `[[project]]` entry in
-/// `.glia/overlay.toml` declared (LF.3a).
+/// `.glia/overlay.toml` declared (LF.3a): on a declared root, or on a
+/// detected root at the same path whose manifest names no project (a
+/// [`LABEL_DIR`] or [`LABEL_ROOT`] label, the DE.9 hand-off taken by DG.12),
+/// which keeps its ecosystem and manifest.
 pub const LABEL_DECLARED: &str = "declared";
 
 /// The tail of the label fallback chain [`ProjectRoot::new`] and
@@ -107,11 +110,38 @@ impl ProjectRoot {
             manifest: crate::glia_config::OVERLAY_FILE.to_string(),
         }
     }
+
+    /// A sub-project a root `build.sbt` declares (DG.12): ecosystem
+    /// [`SBT_ECOSYSTEM`], `manifest` the repo-relative path of the DECLARING
+    /// `build.sbt` (the member's own directory usually holds none), and the
+    /// label the sbt project id [`sbt_subprojects`] read. The id is a name the
+    /// manifest declared, so its source is [`LABEL_MANIFEST`] (DD.4); one that
+    /// breaks the label rules falls back like [`ProjectRoot::new`].
+    pub fn sbt_member(rel_path: String, label: &str, manifest: String) -> Self {
+        let (label, label_source) = match clean_label(label) {
+            Some(l) => (l, LABEL_MANIFEST),
+            None => fallback_label(&rel_path),
+        };
+        Self {
+            rel_path,
+            label,
+            label_source,
+            ecosystem: SBT_ECOSYSTEM,
+            manifest,
+        }
+    }
 }
 
 /// The ecosystem of a `[[project]]` root declared in `.glia/overlay.toml`
 /// (LF.3a) rather than found by a manifest.
 pub const DECLARED_ECOSYSTEM: &str = "declared";
+
+/// The ecosystem a `build.sbt` roots ([`MANIFESTS`]), and of every sub-project
+/// one declares ([`ProjectRoot::sbt_member`], DG.12).
+pub const SBT_ECOSYSTEM: &str = "sbt";
+
+/// The sbt build definition's basename, whose `val`s [`sbt_subprojects`] reads.
+pub const SBT_MANIFEST: &str = "build.sbt";
 
 /// Manifest basename → ecosystem, in precedence order. The first entry present
 /// (and confirmed, see [`confirms`]) decides the ecosystem; ties never happen
@@ -140,7 +170,7 @@ pub const MANIFESTS: &[(&str, &str)] = &[
     ("Gemfile", "ruby"),
     ("Package.swift", "swift"),
     ("CMakeLists.txt", "cmake"),
-    ("build.sbt", "sbt"),
+    (SBT_MANIFEST, SBT_ECOSYSTEM),
     ("deps.edn", "clojure"),
     ("project.clj", "clojure"),
     ("requirements.txt", "python"),
@@ -471,6 +501,396 @@ fn json_string(b: &[u8], start: usize) -> Option<(String, usize)> {
             }
         }
     }
+}
+
+/// The sub-projects a root `build.sbt` declares (DG.12), as `(dir, id)` in
+/// declaration order: `dir` is the member's directory relative to the
+/// `build.sbt`, `id` its sbt project id. sbt's canonical multi-project build
+/// declares every project in ONE root `build.sbt` and the sub-directories carry
+/// no manifest of their own, so the per-directory [`detect_root`] finds only
+/// the root.
+///
+/// A token scan, comments (`//`, nesting `/* */`) dropped and strings read
+/// whole. Each form is a top-level `val` / `lazy val` (an optional `: Type`
+/// before the `=`) whose right side starts, after any `(`, with:
+/// - `project in file("d")` or `project.in(file("d"))`, settings chained
+///   before or after it (`.settings(..)`, `.dependsOn(..)`, a leading-`.`
+///   line);
+/// - a bare `project` with no `in`: sbt's default base, the directory named
+///   like the val;
+/// - `Project("id", file("d"))` / `Project(id = "id", base = file("d"))`
+///   (sbt 0.13), whose id is the string sbt names the project by.
+///
+/// For the first two forms the id is the val name, as sbt's `project` macro
+/// takes it. A directory sbt computes (`file(base + "/api")`, an
+/// interpolated or escaped string, a `Seq` of projects) is not read, and that
+/// val gives no member. `./x`, `x/` and `x//y` normalise to `x` / `x/y`;
+/// `file(".")` (the root itself, normalised to empty) is not a member; a
+/// `..` segment, an absolute or drive path, `~`, `${`, `\`, `::` or a control
+/// character rejects the val. A directory two vals name is listed once, for
+/// the first.
+pub fn sbt_subprojects(text: &str) -> Vec<(String, String)> {
+    let toks = sbt_tokens(text);
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut depth = 0usize;
+    for (i, t) in toks.iter().enumerate() {
+        match t {
+            SbtTok::Punct('(' | '[' | '{') => depth += 1,
+            SbtTok::Punct(')' | ']' | '}') => depth = depth.saturating_sub(1),
+            SbtTok::Ident(v) if v == "val" && depth == 0 => {
+                if let Some((dir, id)) = sbt_val(&toks, i + 1)
+                    && !dir.is_empty()
+                    && !out.iter().any(|(d, _)| *d == dir)
+                {
+                    out.push((dir, id));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// One `build.sbt` token. A `Str` is a string literal's text and whether it is
+/// plain: an escape (`\`) makes it not, since its text is not the path sbt
+/// reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SbtTok {
+    Ident(String),
+    Str { text: String, plain: bool },
+    Punct(char),
+    Newline,
+}
+
+/// Lex `text` into [`SbtTok`]s over chars (never byte offsets). An
+/// identifier is a run of alphanumerics, `_` and `$` (numbers lex as one
+/// too); a backquoted name is one identifier; a char literal is dropped;
+/// every other non-space char is a `Punct`. A block comment spanning lines
+/// leaves one `Newline`, so it still ends a statement.
+fn sbt_tokens(text: &str) -> Vec<SbtTok> {
+    let c: Vec<char> = text.chars().collect();
+    let ident = |ch: char| ch.is_alphanumeric() || ch == '_' || ch == '$';
+    let triple = |i: usize| c.get(i..i + 3).is_some_and(|s| s == ['"', '"', '"']);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < c.len() {
+        let ch = c[i];
+        let next = c.get(i + 1).copied();
+        if ch == '\n' {
+            out.push(SbtTok::Newline);
+            i += 1;
+        } else if ch.is_whitespace() {
+            i += 1;
+        } else if ch == '/' && next == Some('/') {
+            while i < c.len() && c[i] != '\n' {
+                i += 1;
+            }
+        } else if ch == '/' && next == Some('*') {
+            // Scala block comments nest.
+            let (mut depth, mut newline) = (0usize, false);
+            while i < c.len() {
+                if c[i] == '/' && c.get(i + 1) == Some(&'*') {
+                    depth += 1;
+                    i += 2;
+                } else if c[i] == '*' && c.get(i + 1) == Some(&'/') {
+                    depth = depth.saturating_sub(1);
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    newline |= c[i] == '\n';
+                    i += 1;
+                }
+            }
+            if newline {
+                out.push(SbtTok::Newline);
+            }
+        } else if triple(i) {
+            let start = i + 3;
+            let mut j = start;
+            while j < c.len() && !triple(j) {
+                j += 1;
+            }
+            out.push(SbtTok::Str {
+                text: c[start..j].iter().collect(),
+                plain: true,
+            });
+            i = (j + 3).min(c.len());
+        } else if ch == '"' {
+            let (mut j, mut plain) = (i + 1, true);
+            while j < c.len() && c[j] != '"' && c[j] != '\n' {
+                if c[j] == '\\' {
+                    plain = false;
+                    j += 1;
+                }
+                j += 1;
+            }
+            let end = j.min(c.len());
+            out.push(SbtTok::Str {
+                text: c[i + 1..end].iter().collect(),
+                plain,
+            });
+            i = if c.get(end) == Some(&'"') { end + 1 } else { end };
+        } else if ch == '\'' {
+            // A char literal (`'x'`, `'\n'`) is dropped, so a quote inside one
+            // never opens a string; a lone `'` (a Scala 2 symbol) is a Punct.
+            if c.get(i + 2) == Some(&'\'') {
+                i += 3;
+            } else if next == Some('\\') {
+                let close = (i + 2..c.len().min(i + 9)).find(|&j| c[j] == '\'');
+                i = close.map_or(i + 1, |j| j + 1);
+            } else {
+                out.push(SbtTok::Punct('\''));
+                i += 1;
+            }
+        } else if ch == '`' {
+            let mut j = i + 1;
+            while j < c.len() && c[j] != '`' && c[j] != '\n' {
+                j += 1;
+            }
+            out.push(SbtTok::Ident(c[i + 1..j.min(c.len())].iter().collect()));
+            i = if c.get(j) == Some(&'`') { j + 1 } else { j };
+        } else if ident(ch) {
+            let mut j = i;
+            while j < c.len() && ident(c[j]) {
+                j += 1;
+            }
+            out.push(SbtTok::Ident(c[i..j].iter().collect()));
+            i = j;
+        } else {
+            out.push(SbtTok::Punct(ch));
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Where a declared sbt project lives: its own directory (`in file("d")`,
+/// `base = file("d")`), or sbt's default base, the directory named like the val.
+enum SbtBase {
+    Default,
+    Dir(String),
+}
+
+/// The index of the first token at or after `i` that is not a `Newline`.
+fn sbt_skip_newlines(t: &[SbtTok], mut i: usize) -> usize {
+    while matches!(t.get(i), Some(SbtTok::Newline)) {
+        i += 1;
+    }
+    i
+}
+
+/// The tokens inside the bracket group opening at `t[open]`, and the index
+/// just past its closer; `None` when the group never closes.
+fn sbt_group(t: &[SbtTok], open: usize) -> Option<(&[SbtTok], usize)> {
+    let mut depth = 0usize;
+    for (j, tok) in t.iter().enumerate().skip(open) {
+        match tok {
+            SbtTok::Punct('(' | '[' | '{') => depth += 1,
+            SbtTok::Punct(')' | ']' | '}') => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some((&t[open + 1..j], j + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `t` with its `Newline`s dropped: inside brackets they are whitespace.
+fn sbt_dense(t: &[SbtTok]) -> Vec<&SbtTok> {
+    t.iter().filter(|x| **x != SbtTok::Newline).collect()
+}
+
+/// A single plain string literal, `"d"`.
+fn sbt_str_arg(t: &[SbtTok]) -> Option<String> {
+    match sbt_dense(t)[..] {
+        [SbtTok::Str { text, plain: true }] => Some(text.clone()),
+        _ => None,
+    }
+}
+
+/// Exactly `file("d")`.
+fn sbt_file_arg(t: &[SbtTok]) -> Option<String> {
+    match sbt_dense(t)[..] {
+        [
+            SbtTok::Ident(f),
+            SbtTok::Punct('('),
+            SbtTok::Str { text, plain: true },
+            SbtTok::Punct(')'),
+        ] if f == "file" => Some(text.clone()),
+        _ => None,
+    }
+}
+
+/// The `(dir, id)` of the val whose name is `t[i]`, or `None` when its right
+/// side declares no project sbt_subprojects reads.
+fn sbt_val(t: &[SbtTok], mut i: usize) -> Option<(String, String)> {
+    let SbtTok::Ident(name) = t.get(i)? else {
+        return None;
+    };
+    i += 1;
+    // An optional `: Type` before the `=`, on the val's own line.
+    loop {
+        match t.get(i)? {
+            SbtTok::Punct('=') => {
+                if matches!(t.get(i + 1), Some(SbtTok::Punct('=' | '>'))) {
+                    return None;
+                }
+                i += 1;
+                break;
+            }
+            SbtTok::Newline | SbtTok::Punct(';') => return None,
+            _ => i += 1,
+        }
+    }
+    let (base, id) = sbt_project_expr(t, i)?;
+    let dir = match base {
+        SbtBase::Default => name.clone(),
+        SbtBase::Dir(d) => d,
+    };
+    Some((sbt_dir(&dir)?, id.unwrap_or_else(|| name.clone())))
+}
+
+/// The right side of a val starting at `t[i]`: a `project` chain or a
+/// `Project(..)` call, after any `(`. The id is `Some` only for `Project(..)`.
+fn sbt_project_expr(t: &[SbtTok], i: usize) -> Option<(SbtBase, Option<String>)> {
+    let mut i = sbt_skip_newlines(t, i);
+    let mut open = 0usize;
+    while matches!(t.get(i), Some(SbtTok::Punct('('))) {
+        open += 1;
+        i = sbt_skip_newlines(t, i + 1);
+    }
+    match t.get(i)? {
+        SbtTok::Ident(h) if h == "project" => sbt_project_chain(t, i + 1, open).map(|b| (b, None)),
+        SbtTok::Ident(h) if h == "Project" && matches!(t.get(i + 1), Some(SbtTok::Punct('('))) => {
+            let (args, _) = sbt_group(t, i + 1)?;
+            sbt_project_apply(args)
+        }
+        _ => None,
+    }
+}
+
+/// The calls chained on `project` from `t[i]`, `open` parens still open:
+/// `in file("d")` (infix) or `.in(file("d"))` names the base (the last one
+/// wins, as in sbt), any other `.method(..)` / `.method { .. }` is skipped. A
+/// newline outside the parens continues the chain only before a leading `.`.
+/// An `in` whose argument is not `file("d")` is a computed base: `None`.
+fn sbt_project_chain(t: &[SbtTok], mut i: usize, mut open: usize) -> Option<SbtBase> {
+    let mut base = SbtBase::Default;
+    loop {
+        let j = sbt_skip_newlines(t, i);
+        if j > i && open == 0 && !matches!(t.get(j), Some(SbtTok::Punct('.'))) {
+            break;
+        }
+        match t.get(j) {
+            Some(SbtTok::Punct(')')) if open > 0 => {
+                open -= 1;
+                i = j + 1;
+            }
+            Some(SbtTok::Punct('.')) => {
+                let Some(SbtTok::Ident(method)) = t.get(j + 1) else {
+                    break;
+                };
+                let k = j + 2;
+                if matches!(t.get(k), Some(SbtTok::Punct('(' | '{'))) {
+                    let (inner, after) = sbt_group(t, k)?;
+                    if method == "in" {
+                        base = SbtBase::Dir(sbt_file_arg(inner)?);
+                    }
+                    i = after;
+                } else {
+                    i = k;
+                }
+            }
+            Some(SbtTok::Ident(w)) if w == "in" => match (t.get(j + 1), t.get(j + 2)) {
+                (Some(SbtTok::Ident(f)), Some(SbtTok::Punct('('))) if f == "file" => {
+                    let (inner, after) = sbt_group(t, j + 2)?;
+                    base = SbtBase::Dir(sbt_str_arg(inner)?);
+                    i = after;
+                }
+                _ => return None,
+            },
+            _ => break,
+        }
+    }
+    Some(base)
+}
+
+/// `Project("id", file("d"))` / `Project(id = "id", base = file("d"))`: the
+/// args split at their top-level commas, each named (`base = ..`) or by
+/// position (id first, base second). A base that is not `file("d")` gives
+/// `None`; an id that is not a plain string leaves the val name.
+fn sbt_project_apply(args: &[SbtTok]) -> Option<(SbtBase, Option<String>)> {
+    let mut parts: Vec<&[SbtTok]> = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (j, tok) in args.iter().enumerate() {
+        match tok {
+            SbtTok::Punct('(' | '[' | '{') => depth += 1,
+            SbtTok::Punct(')' | ']' | '}') => depth = depth.saturating_sub(1),
+            SbtTok::Punct(',') if depth == 0 => {
+                parts.push(&args[start..j]);
+                start = j + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&args[start..]);
+    let (mut id, mut base) = (None, None);
+    let mut position = 0usize;
+    for part in parts {
+        let p = sbt_skip_newlines(part, 0);
+        let named = match (part.get(p), part.get(p + 1), part.get(p + 2)) {
+            (Some(SbtTok::Ident(n)), Some(SbtTok::Punct('=')), next)
+                if !matches!(next, Some(SbtTok::Punct('=' | '>'))) =>
+            {
+                Some((n.as_str(), &part[p + 2..]))
+            }
+            _ => None,
+        };
+        let (slot, value) = match named {
+            Some((n, v)) => (n, v),
+            None => {
+                position += 1;
+                (if position == 1 { "id" } else if position == 2 { "base" } else { "" }, part)
+            }
+        };
+        match slot {
+            "id" => id = sbt_str_arg(value),
+            "base" => base = Some(sbt_file_arg(value)?),
+            _ => {}
+        }
+    }
+    Some((SbtBase::Dir(base?), id))
+}
+
+/// A declared directory, normalised (`./x`, `x/`, `x//y`), or `None` when sbt
+/// would resolve it outside the build or it cannot be a walked path: a `..`
+/// segment, an absolute, drive or `~` path, `${`, `\`, `::` or a control
+/// char. The root itself (`.`) is `Some("")`.
+fn sbt_dir(raw: &str) -> Option<String> {
+    let rejected = raw.starts_with('/')
+        || raw.starts_with('~')
+        || raw.as_bytes().get(1) == Some(&b':')
+        || raw.contains("${")
+        || raw.contains('\\')
+        || raw.contains("::")
+        || raw.chars().any(char::is_control);
+    if rejected {
+        return None;
+    }
+    let mut segs: Vec<&str> = Vec::new();
+    for s in raw.split('/') {
+        match s {
+            "" | "." => {}
+            ".." => return None,
+            s => segs.push(s),
+        }
+    }
+    Some(segs.join("/"))
 }
 
 /// Manifests [`project_name`] reads, in priority order.
@@ -934,6 +1354,150 @@ mod tests {
         assert_eq!(project_name(&tmp.0), Some("q".to_string()));
 
         assert_eq!(project_name(Path::new("/")), None);
+    }
+
+    fn sbt(text: &str) -> Vec<(String, String)> {
+        sbt_subprojects(text)
+    }
+
+    fn pairs(ps: &[(&str, &str)]) -> Vec<(String, String)> {
+        ps.iter().map(|(d, i)| (d.to_string(), i.to_string())).collect()
+    }
+
+    /// DG.12: every declaration form sbt documents, comments and strings read
+    /// as Scala does, the root and every path sbt resolves outside the build
+    /// rejected.
+    #[test]
+    fn sbt_subprojects_forms() {
+        // The matrix fixture: two members, the root `file(".")` skipped.
+        assert_eq!(
+            sbt(concat!(
+                "lazy val api = project.in(file(\"api\"))\n",
+                "lazy val worker = project.in(file(\"worker\"))\n",
+                "lazy val root = project.in(file(\".\")).aggregate(api, worker)\n",
+            )),
+            pairs(&[("api", "api"), ("worker", "worker")])
+        );
+        // sbt docs' multi-project forms: infix `in` in parens, settings
+        // chained after it on leading-`.` lines, a typed val, a bare
+        // `project` (dir = the val), `(project)`, nested dirs, normalised.
+        let text = r#"
+ThisBuild / scalaVersion := "2.13.12"
+lazy val root = (project in file("."))
+  .aggregate(core, util)
+  .settings(name := "hello")
+lazy val core = (project in file("modules/core/"))
+  .settings(libraryDependencies += "org" %% "x" % "1")
+  .dependsOn(util % "compile->compile;test->test")
+lazy val util: Project = project.settings(name := "util")
+val bare = project
+lazy val paren = (project)
+  .enablePlugins(JavaAppPackaging)
+lazy val dotted = project.in(file("./svc/dotted"))
+lazy val late = project
+  .settings(publish := {})
+  .in(file("late-dir"))
+"#;
+        assert_eq!(
+            sbt(text),
+            pairs(&[
+                ("modules/core", "core"),
+                ("util", "util"),
+                ("bare", "bare"),
+                ("paren", "paren"),
+                ("svc/dotted", "dotted"),
+                ("late-dir", "late"),
+            ])
+        );
+        // sbt 0.13: the id is the string sbt names the project by, positional
+        // or named, in either order.
+        assert_eq!(
+            sbt(concat!(
+                "lazy val a = Project(\"core-api\", file(\"api\"))\n",
+                "lazy val b = Project(id = \"svc\", base = file(\"svc\")).settings(x)\n",
+                "lazy val c = Project(base = file(\"c-dir\"), id = \"cee\")\n",
+                "lazy val d = Project(idOf(\"d\"), file(\"d-dir\"))\n",
+            )),
+            pairs(&[("api", "core-api"), ("svc", "svc"), ("c-dir", "cee"), ("d-dir", "d")])
+        );
+        // Comments: line, block, nested block; a `//` inside a string is text.
+        assert_eq!(
+            sbt(concat!(
+                "// lazy val gone = project.in(file(\"gone\"))\n",
+                "/* lazy val also = project\n /* nested */ lazy val still = project */\n",
+                "lazy val kept = project.in(file(\"a//b\")) // trailing\n",
+                "lazy val url = project.settings(homepage := Some(url(\"https://x/y\")))\n",
+            )),
+            pairs(&[("a/b", "kept"), ("url", "url")])
+        );
+        // Rejected: `..`, absolute, home, drive, `${`, escapes, computed and
+        // interpolated dirs; not a project; a val inside a block.
+        assert_eq!(
+            sbt(concat!(
+                "lazy val up = project.in(file(\"../shared\"))\n",
+                "lazy val mid = project.in(file(\"a/../b\"))\n",
+                "lazy val abs = project in file(\"/opt/x\")\n",
+                "lazy val home = project in file(\"~/x\")\n",
+                "lazy val win = project in file(\"C:/x\")\n",
+                "lazy val env = project in file(\"${HOME}\")\n",
+                "lazy val esc = project in file(\"a\\\\b\")\n",
+                "lazy val calc = project.in(file(base + \"/api\"))\n",
+                "lazy val interp = project.in(file(s\"$base/api\"))\n",
+                "lazy val ext = RootProject(file(\"other\"))\n",
+                "lazy val settings = Seq(scalacOptions += \"-deprecation\")\n",
+                "val version = \"1.0\"\n",
+                "object Build { lazy val inner = project }\n",
+                "lazy val dup = project.in(file(\"x\"))\n",
+                "lazy val dup2 = project.in(file(\"x\"))\n",
+                "lazy val dot = project in file(\".\")\n",
+                "lazy val empty = project in file(\"\")\n",
+            )),
+            pairs(&[("x", "dup")])
+        );
+        // Strings and char literals never open a declaration; `==` / `=>` are
+        // not a val's `=`.
+        assert_eq!(
+            sbt(concat!(
+                "val q = '\"'\n",
+                "val s = \"\"\"lazy val no = project\"\"\"\n",
+                "lazy val yes = project\n",
+                "val f = (x: Int) => x\n",
+            )),
+            pairs(&[("yes", "yes")])
+        );
+        // The lexer walks chars, never byte offsets: a non-ASCII id and dir
+        // round-trip.
+        assert_eq!(
+            sbt("lazy val ü = project in file(\"dienst-ü\")\n"),
+            pairs(&[("dienst-ü", "ü")])
+        );
+        assert!(sbt("").is_empty());
+        assert!(sbt("name := \"single\"\nscalaVersion := \"3.3.1\"\n").is_empty());
+        assert!(sbt("lazy val broken = project.in(file(\"x\"").is_empty(), "an unclosed group");
+    }
+
+    /// DG.12: a member is an sbt root labelled by its project id (a manifest
+    /// name, DD.4) whose manifest is the declaring build.sbt.
+    #[test]
+    fn sbt_member_label_and_manifest() {
+        let r = ProjectRoot::sbt_member("api".into(), "api", "build.sbt".into());
+        assert_eq!(
+            (r.rel_path.as_str(), r.label.as_str(), r.label_source, r.ecosystem, r.manifest.as_str()),
+            ("api", "api", LABEL_MANIFEST, "sbt", "build.sbt")
+        );
+        let r = ProjectRoot::sbt_member("scala/svc/core".into(), "core-api", "scala/build.sbt".into());
+        assert_eq!(
+            (r.label.as_str(), r.label_source, r.manifest.as_str()),
+            ("core-api", LABEL_MANIFEST, "scala/build.sbt")
+        );
+        // An id that breaks the label rules falls back to the directory.
+        let r = ProjectRoot::sbt_member("svc/core".into(), "a::b", "build.sbt".into());
+        assert_eq!((r.label.as_str(), r.label_source), ("core", LABEL_DIR));
+        // The ecosystem is the one a build.sbt roots.
+        let (eco, base, label) =
+            detect_root(&names(&["build.sbt"]), |_| "lazy val api = project\n".into()).unwrap();
+        assert_eq!((eco, base.as_str(), label), (SBT_ECOSYSTEM, "build.sbt", None));
+        assert_eq!(marker(&[r]), "1 project roots (sbt=1)");
     }
 
     /// LF.3a: a `[[project]]` root names the overlay file as its manifest and
