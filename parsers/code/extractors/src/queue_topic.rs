@@ -43,6 +43,21 @@ pub struct TopicHit {
     /// resolved here: the engine folds it through the repo const table after
     /// the parse cache (`queues::extract_queue_nodes_with_consts`).
     pub expr: Option<String>,
+    /// DT.2c: a [`TopicRule::NatsSubject`] / [`TopicRule::NatsFilter`] slot
+    /// that held a shape no rule could read: a token only partly dynamic
+    /// (`"orders-" + region`), a call that is no one-return subject function,
+    /// an interpolated filter. Never set beside `topic` or `expr`, and never
+    /// for any other rule. The extractor counts it as an expression, so CL.1
+    /// rule (ii) never explains a dynamic NATS call away.
+    pub dynamic: bool,
+    /// DT.2c: `expr` is a `fmt.Sprintf` FORMAT (`fmt.Sprintf(RefundSubject,
+    /// n)`), so the LA.4 fold reads its value through
+    /// [`subject_from_format`], never as the topic itself.
+    pub format: bool,
+    /// DT.2c: how a NATS publish subject was folded to its `*`-token form
+    /// (`topic` is then that form), for the `[queues] subject-fold` marker.
+    /// `None` for a literal and for every other rule.
+    pub fold: Option<SubjectFold>,
 }
 
 /// A2.6: the shape a topic literal had before [`fold_topic`] reduced it to a
@@ -205,18 +220,24 @@ pub enum TopicRule {
     /// fold has a slot for.
     KeyedIn(&'static [&'static str]),
     // --- DT.2b: nats.go / JetStream, A SUBJECT THAT MAY SIT BEHIND A ctx -----
-    /// DT.2b: a nats.go / JetStream PUBLISH subject: positional argument #0,
-    /// or argument #1 when argument #0 is a context expression
-    /// ([`nats_subject_slot`]: the new jetstream API's `js.Publish(ctx,
-    /// "orders.new", d)`). The slot reads as [`TopicRule::ArgLiteral`] does: its
-    /// first quoted literal, else the identifier expression for the LA.4 fold.
-    /// DT.2c replaces the reading.
+    /// DT.2b: a NATS PUBLISH subject: positional argument #0, or argument #1
+    /// when argument #0 is a context expression ([`nats_subject_slot`]: the
+    /// new jetstream API's `js.Publish(ctx, "orders.new", d)`). DT.2c: the slot
+    /// reads on the subject grammar ([`nats_subject`]): a literal is the
+    /// subject; a concatenation, an interpolated literal, a `fmt.Sprintf`
+    /// with a literal format or a same-file one-return subject function folds
+    /// each WHOLE dynamic token to `*` (`"shop.shipments." + id` ->
+    /// `shop.shipments.*`); an identifier chain, or a `fmt.Sprintf` whose
+    /// format is one, is the LA.4 fold's expression; anything else, a token
+    /// only partly dynamic included, is dynamic ([`TopicHit::dynamic`]).
+    /// The nats.go rows and the HEAD `nc.publish` / `nc.Publish` rows.
     NatsSubject,
-    /// DT.2b: a nats.go / JetStream SUBSCRIBE filter (`conn.Subscribe("orders.*",
-    /// cb)`, `js.PullSubscribe(subj, durable)`), read exactly as
-    /// [`TopicRule::NatsSubject`] reads a publish subject. Its own variant
-    /// because a filter may hold wildcards a subject never does; DT.2c
-    /// replaces the reading.
+    /// DT.2b: a NATS SUBSCRIBE filter (`conn.Subscribe("orders.*", cb)`,
+    /// `js.PullSubscribe(subj, durable)`), in the slot
+    /// [`TopicRule::NatsSubject`] reads. DT.2c ([`nats_filter`]): a literal
+    /// or an identifier chain reads as before; a concatenation,
+    /// interpolation, format or call is dynamic, never folded, because a
+    /// filter's `*` is a real wildcard and a runtime token is not one.
     NatsFilter,
 }
 
@@ -346,6 +367,11 @@ pub(crate) fn scan_guarded(
             continue;
         }
         let after = offset.saturating_add(needle.len());
+        // DT.2c: a NATS subject or filter reads on the subject grammar.
+        if matches!(rule, TopicRule::NatsSubject | TopicRule::NatsFilter) {
+            hits.push(nats_hit(source, after, needle, rule, offset));
+            continue;
+        }
         let read = match rule {
             // DH.1: a Declared call names its queue elsewhere (the file's
             // declaration), so it reads nothing here.
@@ -408,6 +434,9 @@ pub(crate) fn scan_guarded(
             form,
             offset,
             expr,
+            dynamic: false,
+            format: false,
+            fold: None,
         });
     }
     hits
@@ -558,14 +587,10 @@ fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option
             let region = region?;
             keyed_literal(region, keys).or_else(|| arg_literal(region, 0))
         }
-        // DT.2b: arg #0, or arg #1 behind a context expression.
-        TopicRule::NatsSubject | TopicRule::NatsFilter => {
-            let region = region?;
-            arg_literal(region, nats_subject_slot(region))
-        }
         // `NoIdentity`, the A2.5 identity rules, DH.1's `Declared` /
-        // `BareArg`, DH.3's `CommandArg` and DH.4's `KeyedIn` never read an
-        // argument region here; `scan` dispatches them before it gets here.
+        // `BareArg`, DH.3's `CommandArg`, DH.4's `KeyedIn` and DT.2c's NATS
+        // rules ([`nats_hit`]) never read an argument region here; `scan`
+        // dispatches them before it gets here.
         _ => None,
     }
 }
@@ -609,10 +634,7 @@ fn expr_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option<
             let region = region?;
             keyed_expr(region, keys).or_else(|| arg_expr(region, 0))
         }
-        TopicRule::NatsSubject | TopicRule::NatsFilter => {
-            let region = region?;
-            arg_expr(region, nats_subject_slot(region))
-        }
+        // DT.2c: the NATS rules read their expression in [`nats_hit`].
         _ => None,
     }
 }
@@ -2262,6 +2284,688 @@ fn read_literal(s: &str, mut j: usize) -> Option<Folded> {
         }
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// DT.2c — the NATS subject grammar
+// ---------------------------------------------------------------------------
+
+/// DT.2c: the token a dynamic piece of a NATS PUBLISH subject folds to. A
+/// publisher cannot publish to a wildcard subject, so a `*` token in a
+/// QUEUE_PRODUCER topic is unambiguously this fold's marker, and the queue
+/// resolver pairs such a producer through the NATS wildcard walk only.
+pub const SUBJECT_PLACEHOLDER: &str = "*";
+
+/// DT.2c: how a NATS publish subject was folded to its `*`-token form, the
+/// `[queues] subject-fold` marker's counters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubjectFold {
+    /// Top-level `+` pieces: `"shop.shipments." + id`.
+    Concat,
+    /// One interpolated literal: `` `orders.${id}.placed` ``,
+    /// `f"orders.{order_id}.placed"`, `"orders.#{id}"`, `"orders.$id"`.
+    Template,
+    /// `fmt.Sprintf("shop.orders.%s.placed", id)`.
+    Sprintf,
+    /// A same-file one-return subject function: `shipment(id)`, whose body is
+    /// `return "shop.shipments." + id`.
+    Func,
+}
+
+/// DT.2c: what a NATS subject slot reads as.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SubjectRead {
+    /// One quoted literal with no interpolation, through [`fold_topic`].
+    Literal(Folded),
+    /// A subject whose whole dynamic tokens folded to `*`.
+    Folded { topic: String, how: SubjectFold },
+    /// LA.4: an identifier chain (`format: false`), or the identifier-chain
+    /// format of a `fmt.Sprintf` (`format: true`), for the post-cache fold.
+    Expr { chain: String, format: bool },
+    /// A shape no rule reads: the unresolved tag.
+    Dynamic,
+}
+
+/// DT.2c: one piece of a subject: literal text, or a value only known at run
+/// time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Piece<'a> {
+    Lit(&'a str),
+    Dyn,
+}
+
+/// DT.2c: how a quoted literal interpolates, read off its prefix and quote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Interp {
+    /// Python `f"..{x}.."`, C# `$"..{x}.."`: `{..}` spans, `{{` / `}}` literal.
+    Brace,
+    /// JS / TS backtick: `${..}` spans.
+    Template,
+    /// Kotlin / Scala / Dart / Groovy `${..}` and `$name`, Ruby `#{..}` (in a
+    /// `"` literal only). A `$NAME` whose name holds no lower-case letter is
+    /// text: NATS system subjects (`$JS.API..`, `$KV.<bucket>..`) begin so.
+    Dollar,
+    /// Python `r` / `b` / `u`, C# `@`: no interpolation.
+    Raw,
+}
+
+/// DT.2c: the NATS PUBLISH subject `arg` (one trimmed argument, the slot
+/// [`nats_subject_slot`] picks) reads as. `source` is the whole file, read
+/// for a same-file one-return subject function ([`go_single_return`]).
+/// Shapes, in order:
+///
+/// * a named argument (`subject="x"`, `subject: "x"`) reads its value;
+/// * top-level `+` pieces ([`split_plus`], quotes and brackets respected):
+///   each quoted literal is literal text (its interpolations dynamic), any
+///   other piece dynamic, then [`subject_from_pieces`] (`Concat`);
+/// * one quoted literal: no interpolation is the [`SubjectRead::Literal`];
+///   with one, its spans are dynamic pieces (`Template`);
+/// * `fmt.Sprintf(<fmt>, ..)`: a literal format through
+///   [`subject_from_format`] (`Sprintf`); an identifier-chain format is the
+///   LA.4 expression with `format: true`;
+/// * a call `name(..)` whose callee is a bare identifier naming a same-file
+///   top-level `func name(..) string { return <expr> }`: `<expr>` read by the
+///   same rules at depth 1, where every non-literal (its parameters,
+///   `strings.TrimSpace(x)`, a constant) is a dynamic piece and no further
+///   function is followed (`Func`);
+/// * an identifier chain (`subject`, `cfg.Subject`, `subject()`): the LA.4
+///   expression, as before;
+/// * anything else: [`SubjectRead::Dynamic`].
+pub(crate) fn nats_subject(arg: &str, source: &str) -> SubjectRead {
+    subject_read(named_value(arg.trim()), source, 0)
+}
+
+/// DT.2c: the NATS SUBSCRIBE filter `arg` reads as. A literal with no
+/// interpolation, or an identifier chain, reads as it always has; any
+/// concatenation, interpolation, format or call is [`SubjectRead::Dynamic`]
+/// and is never folded: a filter's `*` is a real wildcard, a runtime token is
+/// not one.
+pub(crate) fn nats_filter(arg: &str) -> SubjectRead {
+    let arg = named_value(arg.trim());
+    if let Some(lit) = quoted_literal(arg) {
+        if lit.interpolates() {
+            return SubjectRead::Dynamic;
+        }
+        return literal_read(arg, lit);
+    }
+    match ident_chain(arg) {
+        Some((chain, len)) if len == arg.len() => SubjectRead::Expr {
+            chain: chain.to_string(),
+            format: false,
+        },
+        _ => SubjectRead::Dynamic,
+    }
+}
+
+/// DT.2c: [`nats_subject`] at `depth` (0 at the call site, 1 inside a
+/// one-return subject function).
+fn subject_read(arg: &str, source: &str, depth: usize) -> SubjectRead {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return SubjectRead::Dynamic;
+    }
+    let parts = split_plus(arg);
+    if parts.len() > 1 {
+        let mut pieces: Vec<Piece<'_>> = Vec::new();
+        for part in &parts {
+            let part = part.trim();
+            match quoted_literal(part) {
+                Some(lit) => match lit.pieces() {
+                    Some(p) => pieces.extend(p),
+                    None => return SubjectRead::Dynamic,
+                },
+                None => pieces.push(Piece::Dyn),
+            }
+        }
+        return folded(subject_from_pieces(&pieces), SubjectFold::Concat);
+    }
+    if let Some(lit) = quoted_literal(arg) {
+        if !lit.interpolates() {
+            return literal_read(arg, lit);
+        }
+        let pieces = lit.pieces().unwrap_or_default();
+        return folded(subject_from_pieces(&pieces), SubjectFold::Template);
+    }
+    if let Some(inner) = call_args(arg, "fmt.Sprintf") {
+        let fmt = split_args(inner).first().map_or("", |a| a.trim());
+        if let Some(lit) = quoted_literal(fmt) {
+            return folded(subject_from_format(lit.body), SubjectFold::Sprintf);
+        }
+        return match ident_chain(fmt) {
+            Some((chain, len)) if depth == 0 && len == fmt.len() => SubjectRead::Expr {
+                chain: chain.to_string(),
+                format: true,
+            },
+            _ => SubjectRead::Dynamic,
+        };
+    }
+    if depth > 0 {
+        return SubjectRead::Dynamic;
+    }
+    if let Some(body) = bare_callee(arg).and_then(|name| go_single_return(source, name)) {
+        return match subject_read(&body, source, depth + 1) {
+            SubjectRead::Literal((topic, _)) | SubjectRead::Folded { topic, .. } => {
+                SubjectRead::Folded {
+                    topic,
+                    how: SubjectFold::Func,
+                }
+            }
+            _ => SubjectRead::Dynamic,
+        };
+    }
+    match ident_chain(arg) {
+        Some((chain, len)) if len == arg.len() => SubjectRead::Expr {
+            chain: chain.to_string(),
+            format: false,
+        },
+        _ => SubjectRead::Dynamic,
+    }
+}
+
+fn folded(topic: Option<String>, how: SubjectFold) -> SubjectRead {
+    match topic {
+        Some(topic) => SubjectRead::Folded { topic, how },
+        None => SubjectRead::Dynamic,
+    }
+}
+
+/// DT.2c: a literal with no interpolation read exactly as
+/// [`TopicRule::ArgLiteral`] reads it ([`read_literal`] at its quote); a
+/// literal [`fold_topic`] refuses (too long, a newline) is unreadable.
+fn literal_read(arg: &str, lit: QuotedLiteral<'_>) -> SubjectRead {
+    match read_literal(arg, lit.quote_at) {
+        Some(f) => SubjectRead::Literal(f),
+        None => SubjectRead::Dynamic,
+    }
+}
+
+/// DT.2c: the value of a named argument (`subject="orders"` in Python /
+/// Kotlin / Scala, `subject: "orders"` in C# / Dart / Ruby), else `arg`. The
+/// name is a bare identifier followed by `=` (never `==` / `=>`) or `:`
+/// (never `::`), so a ternary, a comparison and a path are left alone.
+fn named_value(arg: &str) -> &str {
+    let b = arg.as_bytes();
+    if !matches!(b.first(), Some(c) if c.is_ascii_alphabetic() || *c == b'_') {
+        return arg;
+    }
+    let mut i = 1usize;
+    while matches!(b.get(i), Some(c) if c.is_ascii_alphanumeric() || *c == b'_') {
+        i += 1;
+    }
+    let j = skip_ws(b, i);
+    let sep = match (b.get(j), b.get(j + 1)) {
+        (Some(b'='), Some(b'=' | b'>')) | (Some(b':'), Some(b':')) => return arg,
+        (Some(b'=' | b':'), _) => j + 1,
+        _ => return arg,
+    };
+    // Every byte stepped over is ASCII, so `sep` is a char boundary.
+    arg.get(sep..).map_or(arg, str::trim)
+}
+
+/// DT.2c: `arg` split on its top-level `+` operators: quotes (with `\`
+/// escapes) and brackets respected, so `${a + b}` and `f(a + b)` stay one
+/// piece. A `+` right after another `+` or at either end makes no pieces of
+/// its own (empty pieces are dropped by the caller's literal test).
+fn split_plus(arg: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let b = arg.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+        } else {
+            match c {
+                b'\'' | b'"' | b'`' => quote = Some(c),
+                b'(' | b'{' | b'[' => depth += 1,
+                b')' | b'}' | b']' => depth -= 1,
+                b'+' if depth == 0 => {
+                    if let Some(piece) = arg.get(start..i) {
+                        out.push(piece);
+                    }
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    if let Some(piece) = arg.get(start..) {
+        out.push(piece);
+    }
+    out
+}
+
+/// DT.2c: one quoted literal that is a WHOLE piece: an optional one- or
+/// two-byte prefix (`f`, `r`, `b`, `u`, `s`, `$`, `@`, either case), the
+/// quote, a body with no unescaped closing quote, and the closing quote as
+/// the piece's last byte.
+#[derive(Clone, Copy, Debug)]
+struct QuotedLiteral<'a> {
+    /// Byte index of the opening quote in the piece.
+    quote_at: usize,
+    quote: u8,
+    body: &'a str,
+    interp: Interp,
+}
+
+fn quoted_literal(piece: &str) -> Option<QuotedLiteral<'_>> {
+    let b = piece.as_bytes();
+    let mut q = 0usize;
+    while q < 2 && matches!(b.get(q), Some(c) if is_string_prefix(*c)) {
+        q += 1;
+    }
+    let quote = *b.get(q).filter(|c| matches!(c, b'\'' | b'"' | b'`'))?;
+    if b.len() < q + 2 || b.last() != Some(&quote) {
+        return None;
+    }
+    let end = b.len() - 1;
+    let mut i = q + 1;
+    while i < end {
+        match b[i] {
+            b'\\' => i += 2,
+            c if c == quote => return None,
+            _ => i += 1,
+        }
+    }
+    if i != end {
+        return None;
+    }
+    let prefix = piece.get(..q)?;
+    let interp = if prefix.contains(['f', 'F', '$']) {
+        Interp::Brace
+    } else if !prefix.is_empty() && !prefix.contains(['s', 'S']) {
+        Interp::Raw
+    } else if quote == b'`' {
+        Interp::Template
+    } else {
+        Interp::Dollar
+    };
+    Some(QuotedLiteral {
+        quote_at: q,
+        quote,
+        body: piece.get(q + 1..end)?,
+        interp,
+    })
+}
+
+/// A string-literal prefix byte: Python `f r b u`, Scala `s`, C# `$ @`.
+fn is_string_prefix(c: u8) -> bool {
+    matches!(
+        c,
+        b'f' | b'F' | b'r' | b'R' | b'b' | b'B' | b'u' | b'U' | b's' | b'S' | b'$' | b'@'
+    )
+}
+
+impl<'a> QuotedLiteral<'a> {
+    /// Does the body hold an interpolation span its dialect reads?
+    fn interpolates(&self) -> bool {
+        self.pieces().is_none_or(|p| p.contains(&Piece::Dyn))
+    }
+
+    /// The body as literal text and dynamic pieces. `None` when a span never
+    /// closes: the literal is unreadable.
+    fn pieces(&self) -> Option<Vec<Piece<'a>>> {
+        let body = self.body;
+        let b = body.as_bytes();
+        let mut out = Vec::new();
+        let mut lit = 0usize;
+        let mut i = 0usize;
+        // Every index `lit` / `i` takes sits right after an ASCII byte, or at
+        // 0 / the body's end, so each `get` lands on a char boundary.
+        let flush = |out: &mut Vec<Piece<'a>>, from: usize, to: usize| {
+            if let Some(s) = body.get(from..to).filter(|s| !s.is_empty()) {
+                out.push(Piece::Lit(s));
+            }
+        };
+        while i < b.len() {
+            let c = b[i];
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            let span = match (self.interp, c, b.get(i + 1)) {
+                (Interp::Brace, b'{', Some(b'{')) | (Interp::Brace, b'}', Some(b'}')) => {
+                    // `{{` / `}}`: one literal brace.
+                    flush(&mut out, lit, i + 1);
+                    i += 2;
+                    lit = i;
+                    continue;
+                }
+                (Interp::Brace, b'{', _) => Some(close_brace(b, i + 1)?),
+                (Interp::Template | Interp::Dollar, b'$', Some(b'{')) => {
+                    Some(close_brace(b, i + 2)?)
+                }
+                (Interp::Dollar, b'#', Some(b'{')) if self.quote == b'"' => {
+                    Some(close_brace(b, i + 2)?)
+                }
+                (Interp::Dollar, b'$', Some(n)) if n.is_ascii_alphabetic() || *n == b'_' => {
+                    let mut j = i + 1;
+                    while matches!(b.get(j), Some(c) if c.is_ascii_alphanumeric() || *c == b'_') {
+                        j += 1;
+                    }
+                    let name = body.get(i + 1..j).unwrap_or("");
+                    if name.bytes().any(|c| c.is_ascii_lowercase()) {
+                        Some(j)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            match span {
+                Some(end) => {
+                    flush(&mut out, lit, i);
+                    out.push(Piece::Dyn);
+                    i = end;
+                    lit = end;
+                }
+                None => i += 1,
+            }
+        }
+        flush(&mut out, lit, b.len().max(lit));
+        Some(out)
+    }
+}
+
+/// DT.2c: the index just past the `}` closing a span whose body starts at
+/// `from` (nested `{}` counted), or `None` when it never closes.
+fn close_brace(b: &[u8], from: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut i = from;
+    while let Some(&c) = b.get(i) {
+        match c {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// DT.2c: the subject `pieces` spell, each dynamic piece the token `*`, or
+/// `None` (dynamic) when a dynamic piece is not a WHOLE dot-delimited token
+/// (preceded by `.` or the start, followed by `.` or the end:
+/// `"orders-" + region` has no token of its own), when no literal token
+/// remains (`PREFIX + "." + id`), when a token is empty or holds whitespace
+/// (no NATS subject does), or when the subject fails [`fold_topic`]'s
+/// length gate. A literal text holding `*` or `>` is no publish subject a
+/// fold may read, so it is `None` too.
+fn subject_from_pieces(pieces: &[Piece<'_>]) -> Option<String> {
+    let mut out = String::new();
+    for (k, p) in pieces.iter().enumerate() {
+        match p {
+            Piece::Lit(s) => {
+                if s.contains(['*', '>']) {
+                    return None;
+                }
+                out.push_str(s);
+            }
+            Piece::Dyn => {
+                let before = out.is_empty() || out.ends_with('.');
+                let after = match pieces.get(k + 1) {
+                    None => true,
+                    Some(Piece::Lit(s)) => s.starts_with('.'),
+                    Some(Piece::Dyn) => false,
+                };
+                if !before || !after {
+                    return None;
+                }
+                out.push_str(SUBJECT_PLACEHOLDER);
+            }
+        }
+    }
+    let tokens: Vec<&str> = out.split('.').collect();
+    if tokens
+        .iter()
+        .any(|t| t.is_empty() || t.contains(|c: char| c.is_whitespace()))
+        || tokens.iter().all(|t| *t == SUBJECT_PLACEHOLDER)
+    {
+        return None;
+    }
+    let (topic, _) = fold_topic(&out)?;
+    (topic == out).then_some(topic)
+}
+
+/// DT.2c: the subject a `fmt.Sprintf` format spells ([`subject_from_pieces`]):
+/// `%s %d %v %x %X %o %b %t` are dynamic pieces and `%%` a literal `%`; any
+/// other verb (`%q`), a flag or a width (`%05d`, `%-8s`) or an explicit
+/// argument index is `None`, so the call is dynamic. `shop.orders.%s.placed`
+/// -> `shop.orders.*.placed`. Also the LA.4 fold's reading of a format held
+/// in a constant (`queues::read_hit`).
+pub fn subject_from_format(fmt: &str) -> Option<String> {
+    let b = fmt.as_bytes();
+    let mut pieces = Vec::new();
+    let mut lit = 0usize;
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        // `%` is ASCII, so `lit..i` and `i + 2` are char boundaries.
+        if let Some(s) = fmt.get(lit..i).filter(|s| !s.is_empty()) {
+            pieces.push(Piece::Lit(s));
+        }
+        match b.get(i + 1) {
+            Some(b'%') => pieces.push(Piece::Lit("%")),
+            Some(b's' | b'd' | b'v' | b'x' | b'X' | b'o' | b'b' | b't') => pieces.push(Piece::Dyn),
+            _ => return None,
+        }
+        i += 2;
+        lit = i;
+    }
+    if let Some(s) = fmt.get(lit..).filter(|s| !s.is_empty()) {
+        pieces.push(Piece::Lit(s));
+    }
+    subject_from_pieces(&pieces)
+}
+
+/// DT.2c: the argument region of `arg` when `arg` is exactly one call of
+/// `callee` (`fmt.Sprintf("x.%s", id)`): the callee, `(`, a balanced region
+/// ([`region_body`]) and its `)` as the last byte.
+fn call_args<'a>(arg: &'a str, callee: &str) -> Option<&'a str> {
+    let open = arg.strip_prefix(callee)?.strip_prefix('(')?;
+    let inner = region_body(open)?;
+    (open.get(inner.len()..) == Some(")")).then_some(inner)
+}
+
+/// DT.2c: the callee of `arg` when `arg` is exactly one call of a BARE
+/// identifier (`shipment(id)`, never `p.subject(id)` or `fmt.Sprintf(..)`).
+fn bare_callee(arg: &str) -> Option<&str> {
+    let b = arg.as_bytes();
+    if !matches!(b.first(), Some(c) if c.is_ascii_alphabetic() || *c == b'_') {
+        return None;
+    }
+    let mut i = 1usize;
+    while matches!(b.get(i), Some(c) if c.is_ascii_alphanumeric() || *c == b'_') {
+        i += 1;
+    }
+    let name = arg.get(..i)?;
+    call_args(arg, name)?;
+    Some(name)
+}
+
+/// DT.2c: the returned expression of the same-file TOP-LEVEL Go function
+/// `func <name>(..) string { return <expr> }` (a line opening with `func `,
+/// so never a method, whose receiver comes first), when its body is exactly
+/// that one statement, on one line or several, `//` comments dropped. A
+/// named or multiple result, a missing body, or a body with any other
+/// statement (quokka's `roomSubject` and its error branches) is `None`. The
+/// first `func <name>(` decides: Go declares one per package.
+fn go_single_return(source: &str, name: &str) -> Option<String> {
+    let b = source.as_bytes();
+    for (at, _) in source.match_indices("func ") {
+        if at > 0 && b.get(at - 1) != Some(&b'\n') {
+            continue;
+        }
+        let rest = source.get(at + "func ".len()..)?.trim_start_matches([' ', '\t']);
+        let Some(params) = rest
+            .strip_prefix(name)
+            .map(|r| r.trim_start_matches([' ', '\t']))
+            .and_then(|r| r.strip_prefix('('))
+        else {
+            continue;
+        };
+        let inner = region_body(params)?;
+        let result = params.get(inner.len()..)?.strip_prefix(')')?;
+        let open = result
+            .trim_start_matches([' ', '\t'])
+            .strip_prefix("string")?
+            .trim_start_matches([' ', '\t'])
+            .strip_prefix('{')?;
+        let body = region_body(open)?;
+        if !open.get(body.len()..)?.starts_with('}') {
+            return None;
+        }
+        return single_return(body);
+    }
+    None
+}
+
+/// DT.2c: `<expr>` when `body` (a function body, without its braces) is
+/// exactly `return <expr>`. A depth-0 `;` with more after it, or a line
+/// break after a complete operand (Go inserts a `;` there) with more after
+/// it, is a second statement.
+fn single_return(body: &str) -> Option<String> {
+    let text = strip_line_comments(body);
+    let expr = text.trim().strip_prefix("return")?;
+    if !expr.starts_with(|c: char| c.is_whitespace()) {
+        return None;
+    }
+    let expr = expr.trim();
+    let b = expr.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' && q != b'`' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+        } else {
+            match c {
+                b'\'' | b'"' | b'`' => quote = Some(c),
+                b'(' | b'{' | b'[' => depth += 1,
+                b')' | b'}' | b']' => depth -= 1,
+                b';' if depth == 0 && !expr.get(i + 1..)?.trim().is_empty() => return None,
+                b'\n' if depth == 0 => {
+                    let line = expr.get(..i)?.trim_end();
+                    let continues = line.ends_with([
+                        '+', '-', '*', '/', '%', '&', '|', '^', '<', '>', '=', '!', ',', '(', '[',
+                        '{', '.',
+                    ]);
+                    if !continues && !expr.get(i + 1..)?.trim().is_empty() {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    Some(expr.trim_end_matches(';').trim_end().to_string())
+}
+
+/// DT.2c: `s` with every `//` line comment outside a quoted literal dropped
+/// (the line break kept).
+fn strip_line_comments(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut quote: Option<u8> = None;
+    let mut from = 0usize;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            if c == b'\\' && q != b'`' {
+                i += 2;
+                continue;
+            }
+            if c == q {
+                quote = None;
+            }
+        } else if matches!(c, b'\'' | b'"' | b'`') {
+            quote = Some(c);
+        } else if c == b'/' && b.get(i + 1) == Some(&b'/') {
+            out.push_str(s.get(from..i).unwrap_or(""));
+            // Skip to the line break, which stays.
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+            from = i;
+            continue;
+        }
+        i += 1;
+    }
+    out.push_str(s.get(from.min(s.len())..).unwrap_or(""));
+    out
+}
+
+/// DT.2c: one [`TopicRule::NatsSubject`] / [`TopicRule::NatsFilter`]
+/// occurrence: the slot [`nats_subject_slot`] picks in the call's argument
+/// region, read by [`nats_subject`] / [`nats_filter`]. No region (a needle
+/// that prefix-matches `nc.PublishMsg(`) or an empty slot reads nothing and
+/// is not dynamic: there is no subject to judge.
+fn nats_hit(source: &str, after: usize, needle: &str, rule: TopicRule, offset: usize) -> TopicHit {
+    let mut hit = TopicHit {
+        topic: None,
+        form: TopicForm::Literal,
+        offset,
+        expr: None,
+        dynamic: false,
+        format: false,
+        fold: None,
+    };
+    let Some(region) = arg_region(source, after, needle) else {
+        return hit;
+    };
+    let arg = split_args(region)
+        .get(nats_subject_slot(region))
+        .map_or("", |a| a.trim());
+    if arg.is_empty() {
+        return hit;
+    }
+    let read = match rule {
+        TopicRule::NatsFilter => nats_filter(arg),
+        _ => nats_subject(arg, source),
+    };
+    match read {
+        SubjectRead::Literal((topic, form)) => {
+            hit.topic = Some(topic);
+            hit.form = form;
+        }
+        SubjectRead::Folded { topic, how } => {
+            hit.topic = Some(topic);
+            hit.fold = Some(how);
+        }
+        SubjectRead::Expr { chain, format } => {
+            hit.expr = Some(chain);
+            hit.format = format;
+        }
+        SubjectRead::Dynamic => hit.dynamic = true,
+    }
+    hit
 }
 
 #[cfg(test)]
@@ -3952,5 +4656,255 @@ mod tests {
             one("x |> Other.new() |> Oban.insert(MyApp.Oban)", "Oban.insert", TopicRule::ArgReceiver),
             None
         );
+    }
+
+    // ---- DT.2c: the NATS subject grammar ----------------------------------
+
+    fn folded_as(topic: &str, how: SubjectFold) -> SubjectRead {
+        SubjectRead::Folded {
+            topic: topic.to_string(),
+            how,
+        }
+    }
+
+    fn lit(topic: &str) -> SubjectRead {
+        SubjectRead::Literal((topic.to_string(), TopicForm::Literal))
+    }
+
+    /// The one hit `src` holds for `needle` under `rule`.
+    fn nats(src: &str, needle: &str, rule: TopicRule) -> TopicHit {
+        let mut hits = scan(src, needle, rule);
+        assert_eq!(hits.len(), 1, "{src}");
+        hits.remove(0)
+    }
+
+    #[test]
+    fn concat_whole_token_folds() {
+        assert_eq!(
+            nats_subject("\"shop.shipments.\" + id", ""),
+            folded_as("shop.shipments.*", SubjectFold::Concat)
+        );
+        assert_eq!(nats_subject("id + \".created\"", ""), folded_as("*.created", SubjectFold::Concat));
+        assert_eq!(nats_subject("\"a.\" + \"b\"", ""), folded_as("a.b", SubjectFold::Concat));
+        assert_eq!(
+            nats_subject("\"orders.\" + strconv.Itoa(n)", ""),
+            folded_as("orders.*", SubjectFold::Concat)
+        );
+        let h = nats(
+            "conn.Publish(\"shop.shipments.\" + id, []byte(id))",
+            ".Publish(",
+            TopicRule::NatsSubject,
+        );
+        assert_eq!(h.topic.as_deref(), Some("shop.shipments.*"));
+        assert_eq!(h.fold, Some(SubjectFold::Concat));
+        assert!(h.expr.is_none() && !h.dynamic && !h.format);
+    }
+
+    #[test]
+    fn concat_partial_token_is_dynamic() {
+        for arg in [
+            "\"orders-\" + region",
+            "\"orders.\" + a + b",
+            "PREFIX + \".\" + id",
+            "\"orders\" + id",
+            "\"orders. \" + id",
+            "\"orders..\" + id",
+            "\"orders.*.\" + id",
+        ] {
+            assert_eq!(nats_subject(arg, ""), SubjectRead::Dynamic, "{arg}");
+        }
+        let h = nats("nc.Publish(\"orders-\"+region, nil)", "nc.Publish", TopicRule::NatsSubject);
+        assert_eq!(h.topic, None, "never the leading literal `orders-`");
+        assert!(h.dynamic && h.expr.is_none() && h.fold.is_none());
+    }
+
+    #[test]
+    fn concat_inner_token_folds() {
+        assert_eq!(
+            nats_subject("\"audit.\"+id+\".created\"", ""),
+            folded_as("audit.*.created", SubjectFold::Concat)
+        );
+        assert_eq!(
+            nats_subject("\"a.\" + x + \".\" + y", ""),
+            folded_as("a.*.*", SubjectFold::Concat)
+        );
+    }
+
+    #[test]
+    fn sprintf_literal_format_folds() {
+        assert_eq!(
+            nats_subject("fmt.Sprintf(\"shop.orders.%s.placed\", id)", ""),
+            folded_as("shop.orders.*.placed", SubjectFold::Sprintf)
+        );
+        assert_eq!(
+            nats_subject("fmt.Sprintf(\"a.%d.%v.%x\", n, v, x)", ""),
+            folded_as("a.*.*.*", SubjectFold::Sprintf)
+        );
+        for arg in [
+            "fmt.Sprintf(\"orders-%s\", r)",
+            "fmt.Sprintf(\"orders.%q\", r)",
+            "fmt.Sprintf(\"orders.%05d\", n)",
+            "fmt.Sprintf(\"orders.%[1]s\", r)",
+            "fmt.Sprintf(\"%s\", r)",
+            "fmt.Sprintf(\"a.%s\", r) + x",
+        ] {
+            assert_eq!(nats_subject(arg, ""), SubjectRead::Dynamic, "{arg}");
+        }
+        assert_eq!(subject_from_format("rate.100%%"), Some("rate.100%".to_string()));
+        assert_eq!(subject_from_format("shop.refunds.%d").as_deref(), Some("shop.refunds.*"));
+        assert_eq!(subject_from_format("plain.subject").as_deref(), Some("plain.subject"));
+        let h = nats(
+            "nc.Publish(fmt.Sprintf(\"shop.orders.%s.placed\", id), nil)",
+            "nc.Publish",
+            TopicRule::NatsSubject,
+        );
+        assert_eq!(h.topic.as_deref(), Some("shop.orders.*.placed"));
+        assert_eq!(h.fold, Some(SubjectFold::Sprintf));
+    }
+
+    #[test]
+    fn sprintf_identifier_format_is_a_format_expression() {
+        assert_eq!(
+            nats_subject("fmt.Sprintf(RefundSubject, n)", ""),
+            SubjectRead::Expr {
+                chain: "RefundSubject".to_string(),
+                format: true
+            }
+        );
+        let h = nats(
+            "p.conn.Publish(fmt.Sprintf(p.template, o.ID), payload)",
+            ".Publish(",
+            TopicRule::NatsSubject,
+        );
+        assert_eq!(h.expr.as_deref(), Some("p.template"));
+        assert!(h.format && h.topic.is_none() && !h.dynamic);
+        // A plain identifier is the LA.4 expression it always was.
+        let h = nats("nc.Publish(SubjectOrders, d)", "nc.Publish", TopicRule::NatsSubject);
+        assert_eq!(h.expr.as_deref(), Some("SubjectOrders"));
+        assert!(!h.format);
+    }
+
+    #[test]
+    fn same_file_single_return_func_folds() {
+        let one_line = "package p\n\n// shipment names the subject.\nfunc shipment(id string) string { return \"shop.shipments.\" + id }\n\nfunc P(conn *nats.Conn, id string) error {\n\treturn conn.Publish(shipment(id), []byte(id))\n}\n";
+        let h = nats(one_line, ".Publish(", TopicRule::NatsSubject);
+        assert_eq!(h.topic.as_deref(), Some("shop.shipments.*"));
+        assert_eq!(h.fold, Some(SubjectFold::Func));
+        let multi = "package p\n\n// notifSubject is one user's subject.\nfunc notifSubject(user string) string {\n\t// trimmed, the user id is the last token\n\treturn \"notif.\" +\n\t\tstrings.TrimSpace(user) // the token\n}\n\nfunc N(nc *nats.Conn, u string) { nc.Publish(notifSubject(u), nil) }\n";
+        let h = nats(multi, "nc.Publish", TopicRule::NatsSubject);
+        assert_eq!(h.topic.as_deref(), Some("notif.*"));
+        assert_eq!(h.fold, Some(SubjectFold::Func));
+        // A literal or a Sprintf body folds the same way, at depth 1.
+        let src = "func subj() string {\n\treturn \"orders.created\"\n}\nfunc fs(id string) string { return fmt.Sprintf(\"orders.%s\", id) }\n";
+        assert_eq!(nats_subject("subj()", src), folded_as("orders.created", SubjectFold::Func));
+        assert_eq!(nats_subject("fs(id)", src), folded_as("orders.*", SubjectFold::Func));
+    }
+
+    #[test]
+    fn multi_statement_func_is_dynamic() {
+        let room = "func roomSubject(id string) (string, error) {\n\treturn \"rooms.\" + id, nil\n}\nfunc guarded(id string) string {\n\tif id == \"\" {\n\t\treturn \"rooms.lobby\"\n\t}\n\treturn \"rooms.\" + id\n}\nfunc local(id string) string {\n\ts := \"rooms.\" + id\n\treturn s\n}\nfunc semi(id string) string { x := id; return \"rooms.\" + x }\nfunc (p *P) method(id string) string { return \"rooms.\" + id }\nfunc nested(id string) string { return shipment(id) }\nfunc shipment(id string) string { return \"shop.shipments.\" + id }\nfunc param(id string) string { return id }\n";
+        for arg in [
+            "roomSubject(id)",
+            "guarded(id)",
+            "local(id)",
+            "semi(id)",
+            "method(id)",
+            "nested(id)",
+            "param(id)",
+            "elsewhere(id)",
+            "p.subject(id)",
+        ] {
+            assert_eq!(nats_subject(arg, room), SubjectRead::Dynamic, "{arg}");
+        }
+        // A zero-argument call no function explains stays the LA.4 chain.
+        assert_eq!(
+            nats_subject("subject()", room),
+            SubjectRead::Expr {
+                chain: "subject()".to_string(),
+                format: false
+            }
+        );
+    }
+
+    #[test]
+    fn js_template_python_fstring_ruby_interp_fold() {
+        let cases: &[(&str, &str)] = &[
+            ("`orders.${id}.placed`", "orders.*.placed"),
+            ("f\"orders.{order_id}.placed\"", "orders.*.placed"),
+            ("rf'orders.{order_id}'", "orders.*"),
+            ("\"orders.#{id}.placed\"", "orders.*.placed"),
+            ("\"orders.$id.placed\"", "orders.*.placed"),
+            ("\"orders.${order.id}\"", "orders.*"),
+            ("s\"orders.$id\"", "orders.*"),
+            ("$\"orders.{id}.placed\"", "orders.*.placed"),
+        ];
+        for (arg, want) in cases {
+            assert_eq!(nats_subject(arg, ""), folded_as(want, SubjectFold::Template), "{arg}");
+        }
+        // The measured HEAD shapes, through the needles that read them.
+        let js = nats("nc.publish(`orders.${id}.placed`)", "nc.publish", TopicRule::NatsSubject);
+        assert_eq!(js.topic.as_deref(), Some("orders.*.placed"));
+        let js = nats("nc.publish('orders.' + id)", "nc.publish", TopicRule::NatsSubject);
+        assert_eq!(js.topic.as_deref(), Some("orders.*"));
+        let py = nats(
+            "await nc.publish(f\"orders.{order_id}.placed\", b\"\")",
+            "nc.publish",
+            TopicRule::NatsSubject,
+        );
+        assert_eq!(py.topic.as_deref(), Some("orders.*.placed"));
+        // No interpolation reads as the literal; a NATS system subject's
+        // `$JS` is text; a partial interpolated token is dynamic.
+        assert_eq!(nats_subject("\"orders.created\"", ""), lit("orders.created"));
+        assert_eq!(nats_subject("'$JS.API.STREAM.INFO'", ""), lit("$JS.API.STREAM.INFO"));
+        assert_eq!(nats_subject("`orders-${region}`", ""), SubjectRead::Dynamic);
+        assert_eq!(nats_subject("`orders.${id`", ""), SubjectRead::Dynamic);
+        // A named argument reads its value.
+        assert_eq!(nats_subject("subject=\"orders\"", ""), lit("orders"));
+        assert_eq!(
+            nats_subject("subject: \"orders.\" + id", ""),
+            folded_as("orders.*", SubjectFold::Concat)
+        );
+    }
+
+    #[test]
+    fn consumer_filter_never_folds() {
+        assert_eq!(nats_filter("\"orders.*\""), lit("orders.*"));
+        assert_eq!(nats_filter("'orders.>'"), lit("orders.>"));
+        assert_eq!(
+            nats_filter("subj"),
+            SubjectRead::Expr {
+                chain: "subj".to_string(),
+                format: false
+            }
+        );
+        for arg in [
+            "\"orders.\"+r",
+            "`orders.${id}`",
+            "f\"orders.{x}\"",
+            "fmt.Sprintf(\"orders.%s\", r)",
+            "subjectFor(r)",
+        ] {
+            assert_eq!(nats_filter(arg), SubjectRead::Dynamic, "{arg}");
+        }
+        let h = nats("nc.Subscribe(\"orders.\"+r, h)", "nc.Subscribe", TopicRule::NatsFilter);
+        assert_eq!(h.topic, None, "never the leading literal `orders.`");
+        assert!(h.dynamic);
+    }
+
+    #[test]
+    fn nats_hits_keep_the_head_slot_rules() {
+        // Behind a context the subject is argument #1; a prefix-matched
+        // `nc.PublishMsg(` holds no region and reads nothing, not dynamic.
+        let h = nats("js.Publish(ctx, \"orders.\" + id, d)", ".Publish(", TopicRule::NatsSubject);
+        assert_eq!(h.topic.as_deref(), Some("orders.*"));
+        let h = nats("nc.PublishMsg(&nats.Msg{Subject: \"orders\"})", "nc.Publish", TopicRule::NatsSubject);
+        assert!(h.topic.is_none() && h.expr.is_none() && !h.dynamic);
+        let h = nats("nc.Publish()", "nc.Publish", TopicRule::NatsSubject);
+        assert!(h.topic.is_none() && h.expr.is_none() && !h.dynamic);
+        // A multibyte subject never panics.
+        let h = nats("nc.Publish(\"ordérs.\" + id, nil)", "nc.Publish", TopicRule::NatsSubject);
+        assert_eq!(h.topic.as_deref(), Some("ordérs.*"));
+        let h = nats("nc.Publish(`é${x}`, nil)", "nc.Publish", TopicRule::NatsSubject);
+        assert!(h.dynamic);
     }
 }

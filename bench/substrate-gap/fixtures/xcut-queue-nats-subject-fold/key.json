@@ -1,0 +1,33 @@
+{
+  "framework": "xcut-queue-nats-subject-fold",
+  "language": "go",
+  "dirs": ["producer", "consumer"],
+  "mechanism": "nats",
+  "note": "DT.2c. NATS publish subjects read on the subject grammar (the examples-glia api/internal/events and quokka turps/Services/chat shapes): a concatenation, an interpolated literal or fmt.Sprintf folds each WHOLE dynamic token to `*` (`\"shop.shipments.\" + id` -> `shop.shipments.*`, `shop.orders.%s.placed` -> `shop.orders.*.placed`), a same-file one-return subject function folds the same way, a const format folds through LA.4 (`fmt.Sprintf(RefundSubject, n)`, `const RefundSubject = \"shop.refunds.%d\"`), a token only partly dynamic (`\"orders-\" + region`) is the unresolved tag, and a `*` producer pairs only through the NATS wildcard walk (rule pattern, Weak), never a literal consumer token (`notif.alice`). HEAD BASELINE (DT.2c fixture-first, debug CLI at 15a627b2, `merge producer consumer`): producers `queue_producer:audit.` (USES Audit), `queue_producer:shop.orders.%s.placed` (USES PublishPlaced) and `queue_producer:orders-` (USES PublishRegion), because the subject slot read its first literal; PublishShipment, Notify and Refund minted nothing; QUEUE_FLOWS `shop.orders.%s.placed` -> `shop.orders.>` only, a raw format paired by accident; `[queues] resolver paired=1 skipped_unresolved=0 family_mismatch=0 wildcard=1 skipped_catchall=0 binding=0`.",
+  "expect_nodes": [
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:shop.shipments.*", "exact": true, "note": "conn.Publish(shipment(id), ..), shipment returns \"shop.shipments.\" + id (func fold)"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:shop.orders.*.placed", "exact": true, "note": "fmt.Sprintf(\"shop.orders.%s.placed\", id) (sprintf fold)"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:shop.refunds.*", "exact": true, "note": "fmt.Sprintf(RefundSubject, n), the same-file const format folded through LA.4"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:audit.*.created", "exact": true, "note": "\"audit.\" + id + \".created\" (concat fold, an inner token)"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:notif.*", "exact": true, "note": "notifSubject(user) returns \"notif.\" + strings.TrimSpace(user) (func fold)"},
+    {"kind": "QUEUE_PRODUCER", "name": "queue_producer:unresolved:nats", "exact": true, "note": "\"orders-\" + region: a partial token is the tag, never a leading literal"}
+  ],
+  "expect_edges": [
+    {"from": "queue_producer:shop.shipments.*", "to": "queue_consumer:shop.shipments.*", "category": "QUEUE_FLOWS", "exact": true, "note": "the wildcard walk, never the exact pass"},
+    {"from": "queue_producer:shop.orders.*.placed", "to": "queue_consumer:shop.orders.>", "category": "QUEUE_FLOWS", "exact": true},
+    {"from": "queue_producer:shop.refunds.*", "to": "queue_consumer:shop.refunds.*", "category": "QUEUE_FLOWS", "exact": true},
+    {"from": "queue_producer:audit.*.created", "to": "queue_consumer:audit.*.created", "category": "QUEUE_FLOWS", "exact": true},
+    {"from": "publish::PublishShipment", "to": "queue_producer:shop.shipments.*", "category": "USES", "exact": true},
+    {"from": "notify::Notify", "to": "queue_producer:notif.*", "category": "USES", "exact": true},
+    {"from": "notify::Refund", "to": "queue_producer:shop.refunds.*", "category": "USES", "exact": true},
+    {"from": "publish::PublishRegion", "to": "queue_producer:unresolved:nats", "category": "USES", "exact": true, "note": "a dynamic subject is never explained away beside a named NATS topic (CL.1 rule (ii))"}
+  ],
+  "forbid": [
+    {"from": "queue_producer:notif.*", "to": "queue_consumer:notif.alice", "category": "QUEUE_FLOWS", "note": "a runtime token never pairs a literal token"},
+    {"from": "queue_producer:unresolved:nats", "to": "queue_consumer:orders-eu", "category": "QUEUE_FLOWS"},
+    {"kind": "QUEUE_PRODUCER", "name": "orders-", "note": "the HEAD leading-literal reading"},
+    {"kind": "QUEUE_PRODUCER", "name": "orders-*", "note": "a partial token never folds"},
+    {"kind": "QUEUE_PRODUCER", "name": "audit.", "note": "the HEAD leading-literal reading"},
+    {"kind": "QUEUE_PRODUCER", "name": "shop.orders.%s.placed", "note": "the HEAD raw format"}
+  ]
+}

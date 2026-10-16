@@ -8,6 +8,7 @@ use std::str::Split;
 
 use glia_code_domain::endpoint::split_owner;
 use glia_code_domain::{cell_type, edge_category, infra, node_kind};
+use glia_code_extractors::queue_topic::SUBJECT_PLACEHOLDER;
 use glia_code_extractors::queues::{QueueFramework, UNRESOLVED_PREFIX};
 use glia_core::{Cell, CellPayload, Confidence, Edge, NodeId};
 
@@ -54,14 +55,28 @@ impl CrossGraphResolver for QueueStackResolver {
     /// `Medium` (a declared binding is DERIVED, never a literal identity).
     /// Its exact entry under S is untouched.
     ///
+    /// DT.2c: a NATS producer whose subject the extractor folded to a
+    /// placeholder (`queue_producer:shop.shipments.*`, a runtime token read as
+    /// `*`, [`is_placeholder_topic`]) names a FAMILY of subjects, not one, so
+    /// it skips the exact pass (the exact index keys a wildcard consumer under
+    /// its raw pattern, and string equality would pair it) and runs the
+    /// wildcard walk with no `w.topic != topic` filter: it pairs only a
+    /// subscription whose token at each placeholder position is a wildcard
+    /// (`shop.shipments.*`, `shop.>`), never a literal one (`notif.alice`),
+    /// rule `pattern`, `Weak`.
+    ///
     /// fired_on marker (one line per build, only when a counter is non-zero):
     ///   `... 2>&1 | grep '^\[queues\] resolver paired='`
+    /// and (DT.2c), once per build with a placeholder producer:
+    ///   `[queues] resolver placeholder producers=<p> paired=<q>`
     fn resolve(&self, merged: &mut MergedGraph) {
         let bindings = pubsub_bindings(&merged.graphs);
         let index = build_queue_index(&merged.graphs, &bindings);
         let mut skipped_unresolved = index.skipped_unresolved;
         let (mut paired, mut family_mismatch, mut wildcard) = (0usize, 0usize, 0usize);
         let mut binding = 0usize;
+        // DT.2c: placeholder producers, and the edges they paired.
+        let (mut placeholders, mut placeholder_paired) = (0usize, 0usize);
         // LC.3c: `exact` for a consumer keyed on the producer's topic,
         // `pattern` for a compiled wildcard subscription that covers it,
         // `binding` (DF.14) for a Pub/Sub subscription bound to it.
@@ -82,7 +97,10 @@ impl CrossGraphResolver for QueueStackResolver {
                     continue;
                 }
                 let families = node_families(&n.cells);
-                for t in index.exact.get(topic).into_iter().flatten() {
+                let placeholder = is_placeholder_topic(topic, &families);
+                placeholders += usize::from(placeholder);
+                let exact = if placeholder { None } else { index.exact.get(topic) };
+                for t in exact.into_iter().flatten() {
                     if !families_compatible(&families, &t.families) {
                         family_mismatch += 1;
                         continue;
@@ -102,8 +120,9 @@ impl CrossGraphResolver for QueueStackResolver {
                     paired += 1;
                 }
                 // Rare path: O(producers × wildcard consumers). A consumer whose
-                // pattern string equals the topic was already decided above.
-                for w in index.wildcard.iter().filter(|w| w.topic != topic) {
+                // pattern string equals the topic was already decided above,
+                // except for a placeholder producer, which the exact pass skips.
+                for w in index.wildcard.iter().filter(|w| placeholder || w.topic != topic) {
                     let mut hits = w.arms.iter().filter(|(_, p)| p.matches(w.topic, topic)).peekable();
                     if hits.peek().is_none() {
                         continue;
@@ -118,6 +137,7 @@ impl CrossGraphResolver for QueueStackResolver {
                     );
                     paired += 1;
                     wildcard += 1;
+                    placeholder_paired += usize::from(placeholder);
                 }
             }
         }
@@ -133,8 +153,23 @@ impl CrossGraphResolver for QueueStackResolver {
                  skipped_catchall={skipped_catchall} binding={binding}"
             );
         }
+        if placeholders > 0 {
+            eprintln!(
+                "[queues] resolver placeholder producers={placeholders} paired={placeholder_paired}"
+            );
+        }
         rules.report();
     }
+}
+
+/// DT.2c: is the producer `topic` a NATS subject the extractor folded to a
+/// placeholder? Its families name NATS and one of its `.`-tokens is the
+/// placeholder `*` ([`SUBJECT_PLACEHOLDER`]). A publisher cannot publish to a
+/// wildcard subject, so in a NATS producer that token is only ever the fold's;
+/// in another family (`orders.*` as a Kafka topic string) it is left alone.
+fn is_placeholder_topic(topic: &str, families: &[&str]) -> bool {
+    families.contains(&QueueFramework::Nats.family())
+        && topic.split('.').any(|t| t == SUBJECT_PLACEHOLDER)
 }
 
 /// A family that pairs with every family. Nothing emits it today —
@@ -533,6 +568,109 @@ mod tests {
         assert_eq!(
             cross_pairs(&m, edge_category::QUEUE_FLOWS),
             [p("orders", "audit"), p("orders", "billing"), p("returns", "audit"), p("returns", "billing")]
+        );
+    }
+
+    /// DT.2c: every node of `g` carries one A2.8 CODE cell naming `family`
+    /// (the shape `queues::finish` writes), so the resolver's family gate and
+    /// its wildcard dialects see it.
+    fn with_family(mut g: RepoGraph, family: &str) -> RepoGraph {
+        for n in &mut g.nodes {
+            n.cells.push(Cell {
+                kind: cell_type::CODE,
+                payload: CellPayload::Json(format!(
+                    r#"{{"framework":"X","family":"{family}","sites":[{{"file":"a.go","line":3}}]}}"#
+                )),
+            });
+        }
+        g
+    }
+
+    /// `(from, to, confidence, rule)` of every QUEUE_FLOWS cross edge, sorted.
+    fn flows(m: &MergedGraph) -> Vec<(String, String, Confidence, Option<String>)> {
+        let q = |id: NodeId| {
+            m.graphs.iter().find_map(|g| g.nav.qname_by_id.get(&id).cloned()).unwrap_or_default()
+        };
+        let mut out: Vec<_> = m
+            .cross_edges
+            .iter()
+            .filter(|e| e.category == edge_category::QUEUE_FLOWS)
+            .map(|e| {
+                let rule = glia_code_domain::evidence::Evidence::of(e).and_then(|ev| ev.rule);
+                (q(e.from), q(e.to), e.confidence, rule)
+            })
+            .collect();
+        out.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        out
+    }
+
+    /// DT.2c: a NATS producer whose runtime token folded to `*` pairs a
+    /// subscription only through the wildcard walk: a pattern whose token at
+    /// the placeholder is `*` or `>` (rule pattern, Weak), never a literal
+    /// token at that position, and never the exact pass, whose index keys the
+    /// `shop.shipments.*` subscription under its raw pattern.
+    #[test]
+    fn placeholder_producer_pairs_wildcard_only() {
+        let g = with_family(
+            channel_graph(
+                "queue-placeholder",
+                &[
+                    (node_kind::QUEUE_PRODUCER, "queue_producer:shop.shipments.*"),
+                    (node_kind::QUEUE_CONSUMER, "queue_consumer:shop.shipments.*"),
+                    (node_kind::QUEUE_CONSUMER, "queue_consumer:shop.>"),
+                    (node_kind::QUEUE_CONSUMER, "queue_consumer:shop.shipments.42"),
+                    (node_kind::QUEUE_CONSUMER, "queue_consumer:shop.*.42"),
+                    (node_kind::QUEUE_CONSUMER, "queue_consumer:shop.orders.*"),
+                    (node_kind::QUEUE_CONSUMER, "queue_consumer:shop.shipments"),
+                ],
+            ),
+            "nats",
+        );
+        let mut m = MergedGraph::new(vec![g]);
+        QueueStackResolver.resolve(&mut m);
+        let row = |to: &str| {
+            (
+                "queue_producer:shop.shipments.*".to_string(),
+                format!("queue_consumer:{to}"),
+                Confidence::Weak,
+                Some("pattern".to_string()),
+            )
+        };
+        assert_eq!(flows(&m), [row("shop.>"), row("shop.shipments.*")]);
+    }
+
+    /// DT.2c: the placeholder reading is NATS's alone. A Kafka-family
+    /// producer whose topic string holds a `*` token keeps the exact pass
+    /// (a pattern-equal consumer pairs by string equality, as at HEAD), and
+    /// a producer with no family cell is no placeholder either.
+    #[test]
+    fn placeholder_needs_nats_family() {
+        assert!(is_placeholder_topic("orders.*", &["nats"]));
+        assert!(is_placeholder_topic("audit.*.created", &["rabbitmq", "nats"]));
+        assert!(!is_placeholder_topic("orders.*", &["kafka"]));
+        assert!(!is_placeholder_topic("orders.*", &[]));
+        assert!(!is_placeholder_topic("orders.created", &["nats"]));
+        assert!(!is_placeholder_topic("orders.*x", &["nats"]));
+        let g = with_family(
+            channel_graph(
+                "queue-placeholder-kafka",
+                &[
+                    (node_kind::QUEUE_PRODUCER, "queue_producer:orders.*"),
+                    (node_kind::QUEUE_CONSUMER, "queue_consumer:orders.*"),
+                ],
+            ),
+            "kafka",
+        );
+        let mut m = MergedGraph::new(vec![g]);
+        QueueStackResolver.resolve(&mut m);
+        assert_eq!(
+            flows(&m),
+            [(
+                "queue_producer:orders.*".to_string(),
+                "queue_consumer:orders.*".to_string(),
+                Confidence::Strong,
+                Some("exact".to_string()),
+            )]
         );
     }
 }

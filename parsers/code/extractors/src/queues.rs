@@ -9,7 +9,7 @@ use glia_core::{Cell, CellPayload, Confidence, Edge, Node, NodeId, NodeKindId, R
 use crate::anchor::{self, Anchor};
 use crate::code_guard::LazyGuard;
 use crate::marker_swap;
-use crate::queue_topic::{self, TopicForm, TopicRule};
+use crate::queue_topic::{self, SubjectFold, TopicForm, TopicRule};
 
 pub struct QueueConsumer {
     pub from: NodeId,
@@ -197,11 +197,13 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // the broker queue, the second is the job.
     ("sidekiq_options", QueueFramework::Sidekiq, &[], TopicRule::Keyed(&["queue"])),
     // `nc.subscribe` collides with Backbone events / Redis pubsub vars; gate.
-    ("nc.subscribe", QueueFramework::Nats, &["nats"], TopicRule::ArgLiteral),
+    // DT.2c: a NATS filter, read by `queue_topic::nats_filter`: a literal or
+    // an identifier chain as before, any built filter dynamic.
+    ("nc.subscribe", QueueFramework::Nats, &["nats"], TopicRule::NatsFilter),
     // Go's nats.go exports Capitalized APIs (`nc.Subscribe`, `nc.QueueSubscribe`);
     // the lowercase JS needles never match Go source, so Go queues went blind.
-    ("nc.Subscribe", QueueFramework::Nats, &["nats"], TopicRule::ArgLiteral),
-    ("nc.QueueSubscribe", QueueFramework::Nats, &["nats"], TopicRule::ArgLiteral),
+    ("nc.Subscribe", QueueFramework::Nats, &["nats"], TopicRule::NatsFilter),
+    ("nc.QueueSubscribe", QueueFramework::Nats, &["nats"], TopicRule::NatsFilter),
     ("channel.consume", QueueFramework::RabbitMQ, &["amqp", "amqplib", "rabbitmq"], TopicRule::ArgLiteral),
     ("KafkaConsumer", QueueFramework::Kafka, &[], TopicRule::ArgLiteral),
     // `consumer.subscribe` is generic; require kafka library presence.
@@ -739,10 +741,14 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // A2.5: nothing precedes `Oban.insert`; the worker is the callee of its
     // first argument, `Oban.insert(EmailWorker.new(%{}))`.
     ("Oban.insert", QueueFramework::Oban, &[], TopicRule::ArgReceiver),
-    ("nc.publish", QueueFramework::Nats, &["nats"], TopicRule::ArgLiteral),
+    // DT.2c: a NATS subject, read on the subject grammar
+    // (`queue_topic::nats_subject`): `nc.publish('orders.' + id)`,
+    // `` nc.publish(`orders.${id}.placed`) ``, nats-py's
+    // `f"orders.{order_id}.placed"` fold each whole dynamic token to `*`.
+    ("nc.publish", QueueFramework::Nats, &["nats"], TopicRule::NatsSubject),
     // Go's nats.go exports Capitalized `nc.Publish`; the lowercase JS needle
     // never matches Go source, so Go NATS producers went blind.
-    ("nc.Publish", QueueFramework::Nats, &["nats"], TopicRule::ArgLiteral),
+    ("nc.Publish", QueueFramework::Nats, &["nats"], TopicRule::NatsSubject),
     // amqplib `channel.publish(exchange, routingKey, content)`. CL.1: the
     // routing key (arg #1) names the queue on the default and direct
     // exchanges; an EMPTY key (fanout) falls back to the exchange (arg #0),
@@ -1685,6 +1691,50 @@ impl GoNatsTally {
     }
 }
 
+/// DT.2c: what the NATS subject reading ([`TopicRule::NatsSubject`] /
+/// [`TopicRule::NatsFilter`] rows) read in one file, per side: the hits
+/// that folded (by shape), that carry an LA.4 expression and that read as
+/// dynamic. A plain literal is not counted.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct SubjectTally {
+    concat: usize,
+    template: usize,
+    sprintf: usize,
+    func: usize,
+    expr: usize,
+    dynamic: usize,
+}
+
+impl SubjectTally {
+    /// Records one kept hit of a NATS row.
+    fn add(&mut self, h: &queue_topic::TopicHit) {
+        match h.fold {
+            Some(SubjectFold::Concat) => self.concat += 1,
+            Some(SubjectFold::Template) => self.template += 1,
+            Some(SubjectFold::Sprintf) => self.sprintf += 1,
+            Some(SubjectFold::Func) => self.func += 1,
+            None if h.expr.is_some() => self.expr += 1,
+            None if h.dynamic => self.dynamic += 1,
+            None => {}
+        }
+    }
+
+    /// fired_on (DT.2c, per-file pass only), once per side per file whose
+    /// NATS rows folded a subject, recorded an expression or read a dynamic
+    /// one:
+    ///   `[queues] subject-fold side=<producer|consumer> folded=<n> (concat=<c>
+    ///   template=<t> sprintf=<p> func=<f>) expr=<e> dynamic=<d> path=<file>`
+    fn marker(&self, side: &str, path: &str) -> Option<String> {
+        let folded = self.concat + self.template + self.sprintf + self.func;
+        (folded + self.expr + self.dynamic > 0).then(|| {
+            format!(
+                "[queues] subject-fold side={side} folded={folded} (concat={} template={} sprintf={} func={}) expr={} dynamic={} path={path}",
+                self.concat, self.template, self.sprintf, self.func, self.expr, self.dynamic
+            )
+        })
+    }
+}
+
 /// CL.1: rows whose library gate a Python file may miss while still calling
 /// the task. The canonical Celery caller (`from tasks import process_order` +
 /// `process_order.delay(order_id)`) never mentions `celery`. When such a row's
@@ -2075,7 +2125,9 @@ struct HitSpan<'p> {
     named: Option<usize>,
     /// The row is `NoIdentity`: a liveness call, never a site and never a tag.
     no_identity: bool,
-    /// The hit recorded an identifier expression in its topic slot.
+    /// The hit recorded an identifier expression in its topic slot, or (DT.2c)
+    /// a NATS subject slot no rule could read ([`queue_topic::TopicHit::dynamic`]),
+    /// so CL.1 rule (ii) never explains a dynamic NATS call away.
     has_expr: bool,
     /// Pending index of the declared queue the declare pass bound it to.
     declared: Option<usize>,
@@ -2207,6 +2259,14 @@ fn explain_hit(spans: &[HitSpan<'_>], i: usize, named: &[usize]) -> Option<Expla
 /// LA.4 (A11.7): the topic one hit names — its literal, else its identifier
 /// expression folded through `folds` (a fold that names nothing counts as
 /// unresolved).
+///
+/// DT.2c: a NATS `fmt.Sprintf` whose format is an identifier chain
+/// ([`queue_topic::TopicHit::format`]) resolves the chain the same way (a
+/// same-file binding, else `ConstTable::resolve_identity`, overlay
+/// `[constants]` pins included) and reads the value as a FORMAT
+/// ([`queue_topic::subject_from_format`]): `const RefundSubject =
+/// "shop.refunds.%d"` folds `fmt.Sprintf(RefundSubject, n)` to
+/// `shop.refunds.*`.
 fn read_hit(
     h: &queue_topic::TopicHit,
     folds: Option<TopicResolver<'_>>,
@@ -2217,7 +2277,13 @@ fn read_hit(
     match (&h.topic, folds, h.expr.as_deref()) {
         (Some(t), _, _) => Some((t.clone(), h.form)),
         (None, Some(resolve), Some(expr)) => {
-            let folded = resolve(expr).and_then(|v| queue_topic::fold_topic(&v));
+            let folded = resolve(expr).and_then(|v| {
+                if h.format {
+                    queue_topic::subject_from_format(v.trim()).map(|t| (t, TopicForm::Literal))
+                } else {
+                    queue_topic::fold_topic(&v)
+                }
+            });
             match &folded {
                 Some((t, _)) => {
                     counts.folded += 1;
@@ -2428,6 +2494,8 @@ fn emit_queue_nodes(
     // DT.2b: the file's nats.go qualifiers and receiver tally, read when the
     // first nats.go row runs.
     let mut go_nats: Option<GoNatsFile> = None;
+    // DT.2c: what the NATS subject reading read, for the subject-fold marker.
+    let mut subjects = SubjectTally::default();
     let side = if kind == node_kind::QUEUE_CONSUMER {
         "consumer"
     } else {
@@ -2588,6 +2656,9 @@ fn emit_queue_nodes(
             }
         }
         claimed.extend(hits.iter().map(|h| (h.offset, h.offset + pattern.len())));
+        if matches!(rule, TopicRule::NatsSubject | TopicRule::NatsFilter) {
+            hits.iter().for_each(|h| subjects.add(h));
+        }
         let topics: Vec<&str> = reads.iter().flatten().map(|(t, _)| t.as_str()).collect();
         if debug_enabled() && !topics.is_empty() {
             eprintln!(
@@ -2654,7 +2725,7 @@ fn emit_queue_nodes(
                 handler,
                 named,
                 no_identity,
-                has_expr: h.expr.is_some(),
+                has_expr: h.expr.is_some() || h.dynamic,
                 declared: None,
                 row,
             });
@@ -2844,6 +2915,10 @@ fn emit_queue_nodes(
         }
         // DT.2b: what the nats.go receiver rule kept and dropped, per side.
         if let Some(line) = go_nats.as_ref().and_then(|g| g.tally.marker(side, path)) {
+            eprintln!("{line}");
+        }
+        // DT.2c: what the NATS subject reading folded, per side.
+        if let Some(line) = subjects.marker(side, path) {
             eprintln!("{line}");
         }
     }
@@ -9883,5 +9958,174 @@ await myconsumer.run({ eachMessage: notMine });\n";
             t.marker("producer", "api/internal/events/publisher.go").as_deref(),
             Some("[queues] go-nats side=producer sites=2 (typed=1 untyped=1) dropped=2 (foreign=1 multi_broker=1) path=api/internal/events/publisher.go")
         );
+    }
+
+    // ---- DT.2c: NATS subjects read on the subject grammar ------------------
+
+    /// examples-glia / the DT.2c fixture's producer/publish.go.
+    const DT2C_PUBLISH: &str = "package producer\n\nimport (\n\t\"fmt\"\n\n\t\"github.com/nats-io/nats.go\"\n)\n\n// shipment names the subject one order's shipment events travel on.\nfunc shipment(id string) string { return \"shop.shipments.\" + id }\n\nfunc PublishShipment(conn *nats.Conn, id string) error {\n\treturn conn.Publish(shipment(id), []byte(id))\n}\n\nfunc PublishPlaced(nc *nats.Conn, id string) error {\n\treturn nc.Publish(fmt.Sprintf(\"shop.orders.%s.placed\", id), nil)\n}\n\nfunc PublishRegion(nc *nats.Conn, region string) error {\n\treturn nc.Publish(\"orders-\"+region, nil)\n}\n";
+
+    /// The DT.2c fixture's producer/notify.go (quokka's notifSubject shape).
+    const DT2C_NOTIFY: &str = "package producer\n\nimport (\n\t\"fmt\"\n\t\"strings\"\n\n\t\"github.com/nats-io/nats.go\"\n)\n\nconst RefundSubject = \"shop.refunds.%d\"\n\nfunc notifSubject(user string) string {\n\treturn \"notif.\" + strings.TrimSpace(user)\n}\n\nfunc Notify(nc *nats.Conn, user string) error {\n\treturn nc.Publish(notifSubject(user), nil)\n}\n\nfunc Refund(nc *nats.Conn, n int) error {\n\treturn nc.Publish(fmt.Sprintf(RefundSubject, n), nil)\n}\n\nfunc Audit(nc *nats.Conn, id string) error {\n\treturn nc.Publish(\"audit.\"+id+\".created\", nil)\n}\n";
+
+    /// The 0-based lines `qname`'s anchors sit at.
+    fn anchor_lines(r: &QueueNodes, qname: &str) -> Vec<u32> {
+        let id = r
+            .nav
+            .qname_by_id
+            .iter()
+            .find(|(_, q)| q.as_str() == qname)
+            .map(|(id, _)| *id);
+        let mut lines: Vec<u32> = r
+            .anchors
+            .iter()
+            .filter(|a| Some(a.node) == id)
+            .map(|a| a.line)
+            .collect();
+        lines.sort();
+        lines
+    }
+
+    fn line_at(src: &str, needle: &str) -> u32 {
+        let at = src.find(needle).expect("needle in source");
+        u32::try_from(queue_topic::line_of(src, at)).expect("line fits u32")
+    }
+
+    #[test]
+    fn concat_partial_token_is_dynamic() {
+        let p = extract_queue_producer_nodes(DT2C_PUBLISH, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(
+            qnames(&p),
+            strs(&[
+                "queue_producer:shop.orders.*.placed",
+                "queue_producer:shop.shipments.*",
+                "queue_producer:unresolved:nats",
+            ]),
+            "never `orders-`, never the raw `shop.orders.%s.placed`"
+        );
+        // The tag holds the partial-token call's site even beside two named
+        // NATS topics: a dynamic subject is never explained away (rule (ii)).
+        assert_eq!(
+            anchor_lines(&p, "queue_producer:unresolved:nats"),
+            [line_at(DT2C_PUBLISH, "nc.Publish(\"orders-")]
+        );
+        assert_eq!(
+            anchor_lines(&p, "queue_producer:shop.shipments.*"),
+            [line_at(DT2C_PUBLISH, "conn.Publish(shipment")]
+        );
+    }
+
+    #[test]
+    fn sprintf_const_format_folds_through_la4() {
+        let p = extract_queue_producer_nodes(DT2C_NOTIFY, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(
+            qnames(&p),
+            strs(&[
+                "queue_producer:audit.*.created",
+                "queue_producer:notif.*",
+                "queue_producer:unresolved:nats",
+            ]),
+            "the format constant is the post-cache fold's"
+        );
+        assert_eq!(
+            anchor_lines(&p, "queue_producer:unresolved:nats"),
+            [line_at(DT2C_NOTIFY, "nc.Publish(fmt.Sprintf(RefundSubject")]
+        );
+        // The same-file binding resolves the format, the way the engine's
+        // resolver reads the file's own A11.1 scan.
+        let table = crate::constants::ConstTable::scan_file(DT2C_NOTIFY, "go");
+        let resolve = |e: &str| table.resolve_expr_strict(e).map(str::to_string);
+        let fold = extract_queue_nodes_with_consts(DT2C_NOTIFY, NATS_GO_PATH, module_id(), repo(), &resolve);
+        assert_eq!(
+            qnames(&fold.producers),
+            strs(&[
+                "queue_producer:audit.*.created",
+                "queue_producer:notif.*",
+                "queue_producer:shop.refunds.*",
+            ])
+        );
+        assert_eq!(fold.counts, ConstFoldCounts { folded: 1, unresolved: 0 });
+        // A format value that is no subject (a partial token) stays the tag.
+        let fold = extract_queue_nodes_with_consts(DT2C_NOTIFY, NATS_GO_PATH, module_id(), repo(), &|e| {
+            (e == "RefundSubject").then(|| "refunds-%d".to_string())
+        });
+        assert!(qnames(&fold.producers).contains(&"queue_producer:unresolved:nats".to_string()));
+        assert_eq!(fold.counts, ConstFoldCounts { folded: 0, unresolved: 1 });
+    }
+
+    #[test]
+    fn sprintf_pinned_format_folds() {
+        // examples-glia's `Publisher.OrderPlaced`: the format is a struct
+        // field, so only an overlay `[constants]` pin names it.
+        let src = "import \"github.com/nats-io/nats.go\"\n\ntype Publisher struct {\n\tconn     *nats.Conn\n\ttemplate string\n}\n\nfunc (p *Publisher) OrderPlaced(o Order) error {\n\treturn p.conn.Publish(fmt.Sprintf(p.template, o.ID), nil)\n}\n";
+        let p = extract_queue_producer_nodes(src, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:unresolved:nats"]));
+        let mut table = crate::constants::ConstTable::default();
+        assert!(table.pin("p.template", "shop.orders.%s.placed"));
+        let resolve = |e: &str| table.resolve_identity(e).map(str::to_string);
+        let fold = extract_queue_nodes_with_consts(src, NATS_GO_PATH, module_id(), repo(), &resolve);
+        assert_eq!(qnames(&fold.producers), strs(&["queue_producer:shop.orders.*.placed"]));
+        assert_eq!(fold.counts.folded, 1);
+        // No pin: the field has no binding, and the tag holds.
+        let empty = crate::constants::ConstTable::default();
+        let resolve = |e: &str| empty.resolve_identity(e).map(str::to_string);
+        let fold = extract_queue_nodes_with_consts(src, NATS_GO_PATH, module_id(), repo(), &resolve);
+        assert_eq!(qnames(&fold.producers), strs(&["queue_producer:unresolved:nats"]));
+        assert_eq!(fold.counts, ConstFoldCounts { folded: 0, unresolved: 1 });
+    }
+
+    #[test]
+    fn js_template_python_fstring_ruby_interp_fold() {
+        let js = "import { connect } from 'nats';\nnc.publish(`orders.${id}.placed`);\nnc.publish('orders.' + id);\nnc.publish(`orders-${region}`);\n";
+        let p = extract_queue_producer_nodes(js, "src/pub.ts", module_id(), repo());
+        assert_eq!(
+            qnames(&p),
+            strs(&["queue_producer:orders.*", "queue_producer:orders.*.placed", "queue_producer:unresolved:nats"])
+        );
+        let py = "import nats\n\nasync def placed(nc, order_id):\n    await nc.publish(f\"orders.{order_id}.placed\", b\"\")\n";
+        let p = extract_queue_producer_nodes(py, "app/pub.py", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders.*.placed"]));
+        let rb = "require 'nats/client'\n\nnc.publish(\"orders.#{id}\", msg)\n";
+        let p = extract_queue_producer_nodes(rb, "app/pub.rb", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders.*"]));
+    }
+
+    #[test]
+    fn consumer_concat_is_dynamic() {
+        let src = "import \"github.com/nats-io/nats.go\"\n\nfunc f(nc *nats.Conn, r string) {\n\tnc.Subscribe(\"audit\", onAudit)\n\tnc.Subscribe(\"orders.\"+r, onOrder)\n\tnc.Subscribe(fmt.Sprintf(\"refunds.%s\", r), onRefund)\n}\n";
+        let c = extract_queue_consumer_nodes(src, NATS_GO_PATH, module_id(), repo());
+        assert_eq!(
+            qnames(&c),
+            strs(&["queue_consumer:audit", "queue_consumer:unresolved:nats"]),
+            "never `orders.` or `refunds.%s`"
+        );
+        assert_eq!(
+            anchor_lines(&c, "queue_consumer:unresolved:nats"),
+            [line_at(src, "nc.Subscribe(\"orders."), line_at(src, "nc.Subscribe(fmt")]
+        );
+        let js = "import { connect } from 'nats';\nnc.subscribe(`orders.${id}`);\n";
+        let c = extract_queue_consumer_nodes(js, "src/sub.ts", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:unresolved:nats"]));
+    }
+
+    #[test]
+    fn subject_fold_marker() {
+        let t = SubjectTally::default();
+        assert!(t.marker("producer", "a.go").is_none());
+        let t = SubjectTally {
+            func: 1,
+            expr: 1,
+            ..SubjectTally::default()
+        };
+        assert_eq!(
+            t.marker("producer", "api/internal/events/publisher.go").as_deref(),
+            Some("[queues] subject-fold side=producer folded=1 (concat=0 template=0 sprintf=0 func=1) expr=1 dynamic=0 path=api/internal/events/publisher.go")
+        );
+        // A literal NATS call counts nothing.
+        let mut t = SubjectTally::default();
+        for h in queue_topic::scan("nc.Publish(\"orders\", d)", "nc.Publish", TopicRule::NatsSubject) {
+            t.add(&h);
+        }
+        assert_eq!(t, SubjectTally::default());
     }
 }
