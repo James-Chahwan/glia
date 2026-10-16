@@ -4,7 +4,8 @@
 //! reached by module path (`glia_engine::rules::<item>`): its owners declare
 //! their files here, namely facts.rs (DB.2a), query.rs (DB.2b, +DB.7c),
 //! prelude.rs and prelude.dl (DB.2c), and reflexion.rs, reflexion.dl and the
-//! `#[cfg(test)]` reflexion_parity.rs (DB.8a). Filled by DB.2a, DB.2b and DB.2c.
+//! `#[cfg(test)]` reflexion_parity.rs (DB.8a). Filled by DB.2a, DB.2b, DB.2c and
+//! DB.8a.
 
 /// CodeFacts, the code domain's FactSource over a MergedGraph (DB.2a). The module
 /// is crate-visible so check reaches `rules::facts::{located_edge, tier_name,
@@ -29,3 +30,15 @@ pub use query::{
 mod prelude;
 
 pub use prelude::{PRELUDE, prelude_predicates};
+
+/// The reflexion model as rules: reflexion.dl evaluated over check's model EDB and
+/// read back into check's `ReflexionFacts` (DB.8a). `#[cfg(test)]` while check still
+/// derives natively and only the parity tests call `derive`: DB.8b, which makes
+/// `check_rules` call `reflexion::derive`, drops the attribute.
+#[cfg(test)]
+pub(crate) mod reflexion;
+
+/// Native vs rules-layer reflexion parity on seven fixtures and a quokka probe
+/// (DB.8a).
+#[cfg(test)]
+mod reflexion_parity;

@@ -200,6 +200,17 @@
 //! | `absence(C1, C2)` | `allow(C1, C2), not dep(C1, C2, _)` |
 //! | `unmapped(N, F)` | `located(N, F), not in_component(N, _)` |
 //!
+//! The same relations are a rules program, `engine/src/rules/reflexion.dl`
+//! (DB.8a): `rules::reflexion::derive` feeds it this EDB (an edge as its
+//! dedup index `E`, `edge_site(E, A, B)`; a strict flag as `"strict"` /
+//! `"lax"`; `R2 = R1 + 1` as a `next_rank(R1, R2)` fact; `dependent(C1, C2)`
+//! for `dep(C1, C2, _)`) and reads the relations back into
+//! [`ReflexionFacts`]. Both derivations render through one function, and the
+//! parity tests (`rules::reflexion_parity`) hold them to byte-identical
+//! [`CheckReport`] JSON on seven fixtures, each equal to a golden captured
+//! from this native path (`engine/tests/data/reflexion/`). The native
+//! functions stay the oracle until DB.8b deletes them.
+//!
 //! Membership is a pure function of (node file, declared paths): the longest
 //! declared path on a path-segment boundary above the file (`web/admin` owns
 //! `web/admin/panel.py` over `web`; it does not own `web/admin.py`), a PROJECT
@@ -529,6 +540,17 @@ pub fn check(merged: &MergedGraph) -> CheckReport {
 /// rule) against `merged`, whichever graph they were read from: a review
 /// checks the working tree's rules against the base graph. Emits the marker.
 pub(crate) fn check_rules(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule)]) -> CheckReport {
+    check_rules_with(merged, rules, native_derive)
+}
+
+/// [`check_rules`] with the reflexion model's relations derived by `derive`
+/// (DB.8a: the native derivation, or the rules layer's, held to the same
+/// report byte for byte).
+pub(crate) fn check_rules_with(
+    merged: &MergedGraph,
+    rules: &[(NodeId, ConstraintRule)],
+    derive: DeriveModel,
+) -> CheckReport {
     // Component and layer entries declare the model; every other entry, an
     // allow included, is a rule.
     let (decls, rules): (Vec<&ConstraintRule>, Vec<&ConstraintRule>) = rules
@@ -579,13 +601,19 @@ pub(crate) fn check_rules(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule
         [stats.imports, stats.symbols, stats.mixed] = ctx.path_hits;
         report.errors.append(&mut model.errors);
         if !model.components.is_empty() {
-            let (reflexion, mut divergences) = evaluate_model(&mut ctx, model);
-            // The model has no per-rule gate.
-            for v in &mut divergences {
-                v.blocking = is_blocking(v.tier, DEFAULT_MIN_TIER);
+            let checked = model.checked();
+            match derive(&ctx.facts, merged, model, checked) {
+                Ok(facts) => {
+                    let (reflexion, mut divergences) = render_model(&ctx, facts);
+                    // The model has no per-rule gate.
+                    for v in &mut divergences {
+                        v.blocking = is_blocking(v.tier, DEFAULT_MIN_TIER);
+                    }
+                    report.violations.extend(divergences);
+                    report.reflexion = Some(reflexion);
+                }
+                Err(msg) => report.errors.push(("reflexion".to_string(), msg)),
             }
-            report.violations.extend(divergences);
-            report.reflexion = Some(reflexion);
         }
     }
     // Stable: a rule's cycles keep their order.
@@ -801,16 +829,6 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// Every node of every graph with the file the locator places it in.
-    fn files(&self) -> &HashMap<NodeId, Option<String>> {
-        self.facts.files()
-    }
-
-    /// PROJECT node -> its repo-relative path (`.` = the root).
-    fn projects(&self) -> &HashMap<NodeId, String> {
-        self.facts.projects()
-    }
-
     /// The nodes strictly in `scope` (`CodeFacts::members`: literal, no label
     /// resolution), or the error that names the empty scope.
     fn scope(&self, scope: &str, role: &str) -> Result<Rc<HashSet<NodeId>>, String> {
@@ -947,7 +965,7 @@ fn sort_rows(rows: &mut [ViolationEdge]) {
 
 /// The dedup key of an edge as reported (an edge two graphs both hold is one
 /// row).
-fn edge_site(e: &Edge, ev: Option<&Evidence>) -> EdgeSite {
+pub(crate) fn edge_site(e: &Edge, ev: Option<&Evidence>) -> EdgeSite {
     (
         e.from,
         e.category.0,
@@ -963,7 +981,7 @@ fn edge_site(e: &Edge, ev: Option<&Evidence>) -> EdgeSite {
 
 /// One forbidden edge as reported: `(from, category, to, file, 0-based line)`.
 /// An edge two graphs both hold is one row.
-type EdgeSite = (NodeId, u32, NodeId, Option<String>, Option<u32>);
+pub(crate) type EdgeSite = (NodeId, u32, NodeId, Option<String>, Option<u32>);
 
 fn forbid_edge(
     ctx: &mut Ctx<'_>,
@@ -1549,39 +1567,39 @@ fn norm_path(p: &str) -> String {
 }
 
 /// One declared component: every entry that names it, merged.
-struct ComponentDecl {
-    name: String,
+pub(crate) struct ComponentDecl {
+    pub(crate) name: String,
     /// Stored paths, deduplicated, in entry order.
-    paths: Vec<String>,
+    pub(crate) paths: Vec<String>,
     /// The first entry's decl and id.
-    decl: Option<String>,
+    pub(crate) decl: Option<String>,
     id: String,
 }
 
 /// `layer_of(C, Rank, Strict)`, with the layer's name for `allowed_by`.
-struct LayerFact {
-    name: String,
-    rank: u32,
-    strict: bool,
+pub(crate) struct LayerFact {
+    pub(crate) name: String,
+    pub(crate) rank: u32,
+    pub(crate) strict: bool,
 }
 
 /// The allows of one component pair, `(id, decl)`, in rule order.
-type Allows = Vec<(String, Option<String>)>;
+pub(crate) type Allows = Vec<(String, Option<String>)>;
 
 /// The model's base relations (EDB), read from the stored entries. A
 /// component is its index in `components` (sorted by name), so every
 /// index-keyed collection iterates in name order.
-struct ModelEdb {
-    components: Vec<ComponentDecl>,
+pub(crate) struct ModelEdb {
+    pub(crate) components: Vec<ComponentDecl>,
     index: BTreeMap<String, usize>,
     /// `component_path(C, Path)`: each normalised path with its owner.
-    component_path: BTreeMap<String, usize>,
+    pub(crate) component_path: BTreeMap<String, usize>,
     /// `layer_of(C, Rank, Strict)`.
-    layer_of: BTreeMap<usize, LayerFact>,
+    pub(crate) layer_of: BTreeMap<usize, LayerFact>,
     /// `allow(C1, C2)`: the admitted allows.
-    allow: BTreeMap<(usize, usize), Allows>,
+    pub(crate) allow: BTreeMap<(usize, usize), Allows>,
     /// The union of the admitted allows' `categories`.
-    allow_categories: Vec<EdgeCategoryId>,
+    pub(crate) allow_categories: Vec<EdgeCategoryId>,
     /// `(entry id, message)` of the declarations in error.
     errors: Vec<(String, String)>,
 }
@@ -1594,7 +1612,7 @@ impl ModelEdb {
     /// the smaller name, an error on the other. A layer entry naming an
     /// undeclared component, or one another layer holds, leaves it out, an
     /// error on the layer.
-    fn declare(decls: &[&ConstraintRule]) -> Self {
+    pub(crate) fn declare(decls: &[&ConstraintRule]) -> Self {
         let mut by_name: BTreeMap<String, ComponentDecl> = BTreeMap::new();
         let mut layers: Vec<(&ConstraintRule, &str, u32, &[String], bool)> = Vec::new();
         for r in decls {
@@ -1701,7 +1719,12 @@ impl ModelEdb {
     /// Admit one allow into `allow(C1, C2)`, or the rule error that skips
     /// it: a `from` / `to` no component entry declares, a component allowed
     /// to use itself, an unknown edge category.
-    fn admit_allow(&mut self, rule: &ConstraintRule, from: &str, to: &str) -> Result<(), String> {
+    pub(crate) fn admit_allow(
+        &mut self,
+        rule: &ConstraintRule,
+        from: &str,
+        to: &str,
+    ) -> Result<(), String> {
         let (Some(&c1), Some(&c2)) = (self.index.get(from), self.index.get(to)) else {
             let mut unknown: Vec<String> = [from, to]
                 .iter()
@@ -1732,58 +1755,93 @@ impl ModelEdb {
         }
         Ok(())
     }
+
+    /// The categories `edge(From, Category, To, E)` ranges over: the union of
+    /// the admitted allows' `categories` when any sets them, else
+    /// [`default_forbid_categories`].
+    pub(crate) fn checked(&self) -> Vec<EdgeCategoryId> {
+        if self.allow_categories.is_empty() {
+            default_forbid_categories()
+        } else {
+            self.allow_categories.clone()
+        }
+    }
 }
 
 /// One distinct `dep` edge, with its `why` tier and note.
-struct DepEdge<'m> {
-    edge: &'m Edge,
-    ev: Option<Evidence>,
-    tier: &'static str,
-    note: Option<String>,
+pub(crate) struct DepEdge<'m> {
+    pub(crate) edge: &'m Edge,
+    pub(crate) ev: Option<Evidence>,
+    pub(crate) tier: &'static str,
+    pub(crate) note: Option<String>,
 }
 
 /// The model as named relations (module doc "Reflexion model"): the EDB
-/// ([`ModelEdb`]'s, moved in, plus `located` = `Ctx::files` and `edge` = the
-/// `checked` categories) and every IDB relation, one field each. Components
-/// are [`ModelEdb::components`] indices.
-struct ReflexionFacts<'m> {
-    components: Vec<ComponentDecl>,
-    component_path: BTreeMap<String, usize>,
-    layer_of: BTreeMap<usize, LayerFact>,
-    allow: BTreeMap<(usize, usize), Allows>,
+/// ([`ModelEdb`]'s, moved in, plus `located` = `CodeFacts::files` and `edge` =
+/// the `checked` categories) and every IDB relation, one field each.
+/// Components are [`ModelEdb::components`] indices. Two derivations fill it,
+/// the native [`ReflexionFacts::derive`] and the rules layer's
+/// `rules::reflexion::derive` (engine/src/rules/reflexion.dl, DB.8a), and
+/// [`render_model`] reads it, whichever filled it.
+pub(crate) struct ReflexionFacts<'m> {
+    pub(crate) components: Vec<ComponentDecl>,
+    pub(crate) component_path: BTreeMap<String, usize>,
+    pub(crate) layer_of: BTreeMap<usize, LayerFact>,
+    pub(crate) allow: BTreeMap<(usize, usize), Allows>,
     /// The categories `edge(From, Category, To, E)` ranges over.
-    checked: Vec<EdgeCategoryId>,
+    pub(crate) checked: Vec<EdgeCategoryId>,
     /// `in_component(N, C)`.
-    in_component: HashMap<NodeId, usize>,
+    pub(crate) in_component: HashMap<NodeId, usize>,
     /// `unmapped(N, F)`.
-    unmapped: HashMap<NodeId, String>,
-    /// `dep(C1, C2, E)`: each pair's distinct edges.
-    dep: BTreeMap<(usize, usize), Vec<DepEdge<'m>>>,
+    pub(crate) unmapped: HashMap<NodeId, String>,
+    /// `dep(C1, C2, E)`: each pair's distinct edges, in `all_edges` order.
+    pub(crate) dep: BTreeMap<(usize, usize), Vec<DepEdge<'m>>>,
     /// Distinct checked edges between an `unmapped` node and an
     /// `in_component` one, either direction.
-    unmapped_edges: usize,
+    pub(crate) unmapped_edges: usize,
     /// `allowed(C1, C2)`, with what allows it.
-    allowed: BTreeMap<(usize, usize), String>,
+    pub(crate) allowed: BTreeMap<(usize, usize), String>,
     /// `closed()`.
-    closed: bool,
+    pub(crate) closed: bool,
     /// `convergence(C1, C2)`.
-    convergence: BTreeSet<(usize, usize)>,
+    pub(crate) convergence: BTreeSet<(usize, usize)>,
     /// `divergence(C1, C2, E)`: the pairs; their edges are `dep`'s.
-    divergence: BTreeSet<(usize, usize)>,
+    pub(crate) divergence: BTreeSet<(usize, usize)>,
     /// `absence(C1, C2)`.
-    absence: BTreeSet<(usize, usize)>,
+    pub(crate) absence: BTreeSet<(usize, usize)>,
+}
+
+/// A derivation of the model's relations from its EDB over the `checked`
+/// categories ([`ModelEdb::checked`]): [`native_derive`], or the rules
+/// layer's `rules::reflexion::derive`, the two DB.8a holds to byte-identical
+/// reports. An `Err` is a [`CheckReport::errors`] row `("reflexion", msg)`.
+pub(crate) type DeriveModel = for<'f, 'm> fn(
+    &'f CodeFacts<'m>,
+    &'m MergedGraph,
+    ModelEdb,
+    Vec<EdgeCategoryId>,
+) -> Result<ReflexionFacts<'m>, String>;
+
+/// [`ReflexionFacts::derive`] as a [`DeriveModel`]: it never fails.
+pub(crate) fn native_derive<'m>(
+    facts: &CodeFacts<'m>,
+    merged: &'m MergedGraph,
+    edb: ModelEdb,
+    checked: Vec<EdgeCategoryId>,
+) -> Result<ReflexionFacts<'m>, String> {
+    Ok(ReflexionFacts::derive(facts, merged, edb, checked))
 }
 
 impl<'m> ReflexionFacts<'m> {
     /// Derive every IDB relation from `edb`, stratum by stratum: membership,
     /// then the edge pass, then the verdicts (each negation reads a relation
     /// already complete).
-    fn derive(ctx: &Ctx<'m>, edb: ModelEdb) -> Self {
-        let checked = if edb.allow_categories.is_empty() {
-            default_forbid_categories()
-        } else {
-            edb.allow_categories
-        };
+    fn derive(
+        facts: &CodeFacts<'m>,
+        merged: &'m MergedGraph,
+        edb: ModelEdb,
+        checked: Vec<EdgeCategoryId>,
+    ) -> Self {
         let mut f = ReflexionFacts {
             components: edb.components,
             component_path: edb.component_path,
@@ -1800,9 +1858,9 @@ impl<'m> ReflexionFacts<'m> {
             divergence: BTreeSet::new(),
             absence: BTreeSet::new(),
         };
-        f.in_component = in_component_rel(ctx, &f.component_path);
-        f.unmapped = unmapped_rel(ctx, &f.in_component);
-        (f.dep, f.unmapped_edges) = dep_rel(ctx.merged, &f.checked, &f.in_component, &f.unmapped);
+        f.in_component = in_component_rel(facts, &f.component_path);
+        f.unmapped = unmapped_rel(facts, &f.in_component);
+        (f.dep, f.unmapped_edges) = dep_rel(merged, &f.checked, &f.in_component, &f.unmapped);
         f.allowed = allowed_rel(&f.allow, &f.layer_of);
         f.closed = closed_rel(&f.allow, &f.layer_of);
         f.convergence = convergence_rel(&f.dep, &f.allowed);
@@ -1818,12 +1876,12 @@ impl<'m> ReflexionFacts<'m> {
 /// path at or above the node's file ([`owner`]). A PROJECT is placed by its
 /// own path, as scope membership places it.
 fn in_component_rel(
-    ctx: &Ctx<'_>,
+    facts: &CodeFacts<'_>,
     component_path: &BTreeMap<String, usize>,
 ) -> HashMap<NodeId, usize> {
     let mut out = HashMap::new();
-    let projects = ctx.projects();
-    for (id, file) in ctx.files() {
+    let projects = facts.projects();
+    for (id, file) in facts.files() {
         let place = projects.get(id).or(file.as_ref());
         if let Some(c) = place.and_then(|p| owner(component_path, p)) {
             out.insert(*id, c);
@@ -1854,8 +1912,12 @@ fn owner(component_path: &BTreeMap<String, usize>, path: &str) -> Option<usize> 
 }
 
 /// `unmapped(N, F) :- located(N, F), not in_component(N, _).`
-fn unmapped_rel(ctx: &Ctx<'_>, in_component: &HashMap<NodeId, usize>) -> HashMap<NodeId, String> {
-    ctx.files()
+fn unmapped_rel(
+    facts: &CodeFacts<'_>,
+    in_component: &HashMap<NodeId, usize>,
+) -> HashMap<NodeId, String> {
+    facts
+        .files()
         .iter()
         .filter(|(id, _)| !in_component.contains_key(id))
         .filter_map(|(id, f)| f.clone().map(|f| (*id, f)))
@@ -1982,12 +2044,11 @@ fn absence_rel(
         .collect()
 }
 
-/// Evaluate the model: derive [`ReflexionFacts`], then render the report
-/// and one [`DIVERGENCE`] [`Violation`] per divergent pair. Emits the
-/// `[reflexion]` marker.
-fn evaluate_model(ctx: &mut Ctx<'_>, edb: ModelEdb) -> (Reflexion, Vec<Violation>) {
+/// Render the derived model ([`ReflexionFacts`], from either derivation):
+/// the report and one [`DIVERGENCE`] [`Violation`] per divergent pair. Emits
+/// the `[reflexion]` marker.
+fn render_model(ctx: &Ctx<'_>, facts: ReflexionFacts<'_>) -> (Reflexion, Vec<Violation>) {
     let merged = ctx.merged;
-    let facts = ReflexionFacts::derive(ctx, edb);
     let name = |c: usize| facts.components[c].name.clone();
 
     let mut owned = vec![0usize; facts.components.len()];

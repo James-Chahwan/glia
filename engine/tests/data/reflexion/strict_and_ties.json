@@ -1,0 +1,107 @@
+{
+  "rules": 2,
+  "checked": 2,
+  "unchecked": [],
+  "errors": [],
+  "violations": [
+    {
+      "rule_id": "reflexion:web->store",
+      "rule_kind": "divergence",
+      "decl": ".glia/overlay.toml:3",
+      "severity": "VIOLATION",
+      "tier": "fact",
+      "blocking": true,
+      "count": 2,
+      "evidence": [
+        {
+          "from_qname": "web::admin",
+          "to_qname": "store::db",
+          "category": "IMPORTS",
+          "file": "web/admin.py",
+          "line": 1,
+          "emitter": "graph:imports",
+          "tier": "fact",
+          "note": null
+        },
+        {
+          "from_qname": "web::admin::audit",
+          "to_qname": "store::db::load",
+          "category": "CALLS",
+          "file": "web/admin.py",
+          "line": 5,
+          "emitter": "graph:calls",
+          "tier": "fact",
+          "note": null
+        }
+      ]
+    }
+  ],
+  "reflexion": {
+    "closed": true,
+    "components": [
+      {
+        "name": "api",
+        "paths": [
+          "services/api"
+        ],
+        "layer": "core",
+        "nodes": 3,
+        "decl": ".glia/overlay.toml:7"
+      },
+      {
+        "name": "store",
+        "paths": [
+          "store",
+          "scripts"
+        ],
+        "layer": "data",
+        "nodes": 4,
+        "decl": ".glia/overlay.toml:11"
+      },
+      {
+        "name": "web",
+        "paths": [
+          "web"
+        ],
+        "layer": "ui",
+        "nodes": 5,
+        "decl": ".glia/overlay.toml:3"
+      }
+    ],
+    "matrix": [
+      {
+        "from": "api",
+        "to": "store",
+        "edges": 2,
+        "status": "convergence",
+        "tier": "fact",
+        "allowed_by": "a-api-store"
+      },
+      {
+        "from": "web",
+        "to": "api",
+        "edges": 2,
+        "status": "convergence",
+        "tier": "fact",
+        "allowed_by": "layer:ui>core"
+      },
+      {
+        "from": "web",
+        "to": "store",
+        "edges": 2,
+        "status": "divergence",
+        "tier": "fact",
+        "allowed_by": null
+      }
+    ],
+    "absences": [],
+    "unmapped": {
+      "files": 0,
+      "nodes": 0,
+      "edges_to_mapped": 0,
+      "sample": []
+    },
+    "convergences": 2,
+    "divergences": 1
+  }
+}

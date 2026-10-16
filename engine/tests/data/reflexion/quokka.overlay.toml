@@ -1,0 +1,53 @@
+# DB.8a: the quokka-stack reflexion model of the parity probe
+# (engine/src/rules/reflexion_parity.rs `quokka_parity`): seven components, five
+# lax layers. Install it as <copy>/.glia/overlay.toml of a git archive of
+# quokka-stack and point GLIA_PARITY_REPO at the copy.
+version = 1
+
+[[component]]
+name = "web"
+paths = ["quokka_web"]
+
+[[component]]
+name = "android"
+paths = ["quokka_android"]
+
+[[component]]
+name = "server"
+paths = ["turps/Server"]
+
+[[component]]
+name = "services"
+paths = ["turps/Services"]
+
+[[component]]
+name = "repositories"
+paths = ["turps/Services/Repositories"]
+
+[[component]]
+name = "models"
+paths = ["turps/models"]
+
+[[component]]
+name = "tasks"
+paths = ["turps/Tasks"]
+
+[[layer]]
+name = "clients"
+components = ["web", "android"]
+
+[[layer]]
+name = "api"
+components = ["server"]
+
+[[layer]]
+name = "domain"
+components = ["services", "tasks"]
+
+[[layer]]
+name = "data"
+components = ["repositories"]
+
+[[layer]]
+name = "schema"
+components = ["models"]

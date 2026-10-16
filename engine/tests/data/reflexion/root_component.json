@@ -1,0 +1,106 @@
+{
+  "rules": 2,
+  "checked": 2,
+  "unchecked": [],
+  "errors": [],
+  "violations": [
+    {
+      "rule_id": "reflexion:rest->web",
+      "rule_kind": "divergence",
+      "decl": ".glia/overlay.toml:3",
+      "severity": "VIOLATION",
+      "tier": "fact",
+      "blocking": true,
+      "count": 2,
+      "evidence": [
+        {
+          "from_qname": "webhooks::hook",
+          "to_qname": "web::app",
+          "category": "IMPORTS",
+          "file": "webhooks/hook.py",
+          "line": 1,
+          "emitter": "graph:imports",
+          "tier": "fact",
+          "note": null
+        },
+        {
+          "from_qname": "webhooks::hook::hook",
+          "to_qname": "web::app::show",
+          "category": "CALLS",
+          "file": "webhooks/hook.py",
+          "line": 5,
+          "emitter": "graph:calls",
+          "tier": "fact",
+          "note": null
+        }
+      ]
+    }
+  ],
+  "reflexion": {
+    "closed": true,
+    "components": [
+      {
+        "name": "rest",
+        "paths": [
+          "."
+        ],
+        "layer": null,
+        "nodes": 9,
+        "decl": ".glia/overlay.toml:3"
+      },
+      {
+        "name": "tool",
+        "paths": [
+          "scripts/tool.py"
+        ],
+        "layer": null,
+        "nodes": 1,
+        "decl": ".glia/overlay.toml:11"
+      },
+      {
+        "name": "web",
+        "paths": [
+          "web"
+        ],
+        "layer": null,
+        "nodes": 5,
+        "decl": ".glia/overlay.toml:7"
+      }
+    ],
+    "matrix": [
+      {
+        "from": "rest",
+        "to": "web",
+        "edges": 2,
+        "status": "divergence",
+        "tier": "fact",
+        "allowed_by": null
+      },
+      {
+        "from": "tool",
+        "to": "rest",
+        "edges": 1,
+        "status": "convergence",
+        "tier": "fact",
+        "allowed_by": "tool-uses-rest"
+      },
+      {
+        "from": "web",
+        "to": "rest",
+        "edges": 4,
+        "status": "convergence",
+        "tier": "fact",
+        "allowed_by": "web-uses-rest"
+      }
+    ],
+    "absences": [],
+    "unmapped": {
+      "files": 0,
+      "nodes": 0,
+      "edges_to_mapped": 0,
+      "sample": []
+    },
+    "convergences": 2,
+    "divergences": 1
+  }
+}

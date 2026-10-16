@@ -1,0 +1,146 @@
+{
+  "rules": 2,
+  "checked": 2,
+  "unchecked": [],
+  "errors": [],
+  "violations": [],
+  "reflexion": {
+    "closed": true,
+    "components": [
+      {
+        "name": "api",
+        "paths": [
+          "services/api"
+        ],
+        "layer": null,
+        "nodes": 3,
+        "decl": ".glia/overlay.toml:7"
+      },
+      {
+        "name": "web",
+        "paths": [
+          "web"
+        ],
+        "layer": null,
+        "nodes": 5,
+        "decl": ".glia/overlay.toml:3"
+      }
+    ],
+    "matrix": [
+      {
+        "from": "web",
+        "to": "api",
+        "edges": 2,
+        "status": "convergence",
+        "tier": "fact",
+        "allowed_by": "web-uses-api"
+      }
+    ],
+    "absences": [
+      {
+        "from": "api",
+        "to": "web",
+        "rule_id": "api-uses-web",
+        "decl": ".glia/overlay.toml:17",
+        "tier": "fact",
+        "caveats": [
+          {
+            "language": "*",
+            "edge_category": "CALLS",
+            "note": "calls through reflection, dynamic dispatch, or higher-order indirection are not resolved",
+            "verify": "grep the callee name",
+            "edges_found": 3
+          },
+          {
+            "language": "*",
+            "edge_category": "HTTP_CALLS",
+            "note": "URLs built dynamically (string concat / variables / base-url config) may not pair to a route",
+            "verify": "grep the path literal or base URL",
+            "edges_found": 0
+          },
+          {
+            "language": "*",
+            "edge_category": "QUEUE_FLOWS",
+            "note": "topics passed as parameters, runtime variables or env vars - and constants that are ambiguous, or lower-case bindings in another file - are extracted as an unresolved framework tag and never paired; literal constants the repo table resolves are folded",
+            "verify": "grep the topic constant or env var name",
+            "edges_found": 0
+          },
+          {
+            "language": "*",
+            "edge_category": "QUEUE_FLOWS",
+            "note": "GCP Pub/Sub subscribers name a subscription, not a topic: a subscriber pairs with a topic's publishers when both name the topic, or when a Terraform `google_pubsub_subscription` of the same repo binds its subscription to the topic (`topic = \"orders\"` or `projects/<p>/topics/orders`, or a `google_pubsub_topic.<r>.name` / `.id` reference; DERIVED, Medium, rule binding). A subscription created in code (`create_subscription`) or by gcloud / the console, a Terraform subscription name or topic that is interpolated (`\"${var.env}-orders\"`) or read from a variable or a module output (`var.topic`, `module.x.name`), a topic resource declared in another repo of the build, and a subscription bound to two topics pair nothing",
+            "verify": "check the subscription-to-topic binding in IaC (google_pubsub_subscription.topic) or the code that creates the subscription",
+            "edges_found": 0
+          },
+          {
+            "language": "*",
+            "edge_category": "QUEUE_FLOWS",
+            "note": "SNS→SQS fan-out is declared in infrastructure, not code — a producer to an SNS topic will not pair with the SQS consumers it feeds",
+            "verify": "grep the SNS subscription in terraform/CDK",
+            "edges_found": 0
+          },
+          {
+            "language": "*",
+            "edge_category": "GRAPHQL_CALLS",
+            "note": "GraphQL SDL embedded in code is read only from a GraphQL-marked literal: a gql / graphql tag or call, a buildSchema / MustParseSchema / ParseSchema / from_definition argument, a /* GraphQL */ or #graphql literal, a GRAPHQL / GQL heredoc, or a literal bound to a variable or key named typeDefs / type_defs. SDL kept unmarked in a differently named variable (a plain template in `const schema = ...`, a Go string passed to MustParseSchema by name) is not read: its root types and fields mint no GRAPHQL_RESOLVER, so its clients' operations pair with nothing. `.graphql` / `.graphqls` / `.gql` files are read whole. A client's base URL narrows its project's operations to one server only when it is one literal absolute URL (Apollo `uri`, HttpLink / createHttpLink, urql createClient / new Client, graphql-request GraphQLClient) whose host names a nested project or an IaC service; a relative, env-var or interpolated URL leaves an operation paired with every server that declares the field. An operation whose every client URL is a literal public host (a dotted DNS name: not localhost, an IP, an internal TLD or a documentation domain) that no configuration constant of the repo names (a SCREAMING_CASE or dotted key, a `.glia/overlay.toml [constants]` pin) and that names no project or IaC service of the build is external (its ENDPOINT_HIT carries `\"external\":true`) and pairs with no server, even one declaring the field; a client with one host-less or internal site still pairs.",
+            "verify": "grep 'type Query {' / 'type Mutation {' outside .graphql / .graphqls / .gql files and read the variable that holds it; for an operation paired with several servers, or with none, read the client's uri / url",
+            "edges_found": 0
+          },
+          {
+            "language": "*",
+            "edge_category": "WS_CONNECTS",
+            "note": "a WebSocket upgrade whose route is registered more than one call away from the upgrading function, or through a router glia does not extract, stays unpaired; a client whose URL has no static path is not paired; a client matching several same-path handlers narrows to one service only when its URL's static head carries a literal host naming a nested project or an IaC service (compose / Kubernetes service, deployment, statefulset, image), otherwise it pairs with all of them; a client whose every site dials a literal public host (a dotted DNS name: not localhost, an IP, an internal TLD or a documentation domain) that no configuration constant of the repo names and that names no project or IaC service of the build is external (its ENDPOINT_HIT carries `\"external\":true`) and pairs with no handler, even one of the same path; a client with one host-less or internal site still pairs",
+            "verify": "grep the upgrade call and the route registration; for a client paired with several handlers, or with none, read its URL",
+            "edges_found": 0
+          },
+          {
+            "language": "*",
+            "edge_category": "GRPC_CALLS",
+            "note": "a gRPC client stub whose service several projects declare narrows to one only when its dial target is a literal (the constructor's own argument, or the nearest dial above it in the same function: grpc.Dial / DialContext / NewClient, grpc(.aio).*_channel, forTarget / forAddress, GrpcChannel.ForAddress, tonic from_static, ClientChannel) whose host names a nested project or an IaC service; a target read from config or env, or a unix: / xds: target, names no host, so the stub stays unnarrowed: paired with every such service, or with none when the pick is ambiguous; a stub whose every dial target is a literal public host (a dotted DNS name: not localhost, an IP, an internal TLD or a documentation domain) that no configuration constant of the repo names and that names no project or IaC service of the build is external (its ENDPOINT_HIT carries `\"external\":true`) and pairs with no service, even one of the same name; a stub with one host-less or internal target still pairs",
+            "verify": "grep the dial call and the address it is given",
+            "edges_found": 0
+          },
+          {
+            "language": "*",
+            "edge_category": "RPC_CALLS",
+            "note": "Connect/Twirp procedures and calls are read only when the service's .proto is in the build; a client stored in one file and called from another, and connect-node / non-Go Twirp code, are not extracted; a procedure whose implementing type lives in another file than its registration is contained by the module, not HANDLED_BY the method; a tRPC call narrows to one server's procedure only when its link's `url` (httpBatchLink / httpLink / httpBatchStreamLink) is one literal absolute URL whose host names a nested project or an IaC service, otherwise it pairs with every same-named procedure",
+            "verify": "grep New<Service>Client / createClient(<Service> and the method name; for a tRPC call paired twice, read the link's url",
+            "edges_found": 0
+          },
+          {
+            "language": "*",
+            "edge_category": "HANDLED_BY",
+            "note": "a queue consumer is HANDLED_BY its callback only for kafkajs eachMessage/eachBatch, amqplib consume, BullMQ Worker, nats subscribe (JS callback, Go Subscribe/QueueSubscribe), pika basic_consume, asynq HandleFunc / Handle and apalis `.build_fn(` / `.build(` workers (the handler fn), and only when the callback is a name, a member, this/self.method or a one-call inline function; a Laravel queued job's consumer sits on its `ShouldQueue` class line, CONTAINED by the job class and HANDLED_BY nothing (not its `handle()` method); other consumers are HANDLED_BY the function that subscribes",
+            "verify": "grep the consumer call and read its callback argument",
+            "edges_found": 0
+          },
+          {
+            "language": "python",
+            "edge_category": "HTTP_CALLS",
+            "note": "requests / httpx / aiohttp clients are extracted; urllib / http.client are not",
+            "verify": "grep urllib / http.client",
+            "edges_found": 0
+          },
+          {
+            "language": "python",
+            "edge_category": "HANDLED_BY",
+            "note": "Flask typed route converters (e.g. <int:id>) may not normalize to the client's path param",
+            "verify": "check the @app.route decorator vs the caller path",
+            "edges_found": 0
+          }
+        ]
+      }
+    ],
+    "unmapped": {
+      "files": 2,
+      "nodes": 3,
+      "edges_to_mapped": 4,
+      "sample": [
+        "scripts/tool.py",
+        "store/db.py"
+      ]
+    },
+    "convergences": 1,
+    "divergences": 0
+  }
+}

@@ -1,0 +1,77 @@
+// The reflexion model (CC-2, check v2) as rules (DB.8a): engine/src/check.rs module doc
+// `# Reflexion model (check v2)` states every relation, and its native functions are
+// the parity oracle (rules::reflexion_parity) until DB.8b deletes them.
+//
+// A component is an Int: its index in check's ModelEdb.components (sorted by name), so
+// every relation keys as the native maps do. The EDB is engine/src/rules/reflexion.rs's
+// domain builtins, each FACT but edge_site:
+//   component_path(C, P)  each declared path, normalised, with the one component owning it
+//   layer_of(C, R, S)     C's layer rank (0 is the top) and "strict" | "lax"
+//   next_rank(R, R2)      R2 = R + 1, for each rank a layer holds (none past u32::MAX)
+//   allow(C1, C2, Id)     each admitted allow entry
+//   located(N, F)         the file one Locator places N in
+//   project_path(N, P)    a PROJECT's repo-relative path (`.` the root)
+//   edge_site(E, A, B)    E: the index of each distinct checked edge site (from,
+//                         category, to, evidence file, evidence line) in all_edges
+//                         order, tiered as `why` tiers its first edge
+// `under(Path, Prefix)` is the code facts' segment test: `.` holds every path.
+
+// N is a PROJECT, placed by its own path.
+project_placed(N) :- project_path(N, _).
+
+// Where membership places N: a PROJECT's path, else its located file.
+place(N, P) :- project_path(N, P).
+
+// Any other node is placed by its file.
+place(N, F) :- located(N, F), !project_placed(N).
+
+// Component C declares path P at or above N's place.
+owns(N, C, P) :- place(N, F), component_path(C, P), under(F, P).
+
+// A longer declared path P2 than P also sits above N.
+shadowed(N, P) :- owns(N, _, P), owns(N, _, P2), under(P2, P), P2 != P.
+
+// N belongs to the component of the longest declared path above its place.
+in_component(N, C) :- owns(N, C, P), !shadowed(N, P).
+
+// N belongs to some component.
+mapped(N) :- in_component(N, _).
+
+// A located node no component owns, with its file.
+unmapped(N, F) :- located(N, F), !mapped(N).
+
+// Edge site E runs from component C1 into another component C2.
+dep(C1, C2, E) :- edge_site(E, A, B), in_component(A, C1), in_component(B, C2), C1 != C2.
+
+// C1 depends on C2 (tiered by its strongest edge).
+dependent(C1, C2) :- dep(C1, C2, _).
+
+// An allow entry lets C1 use C2.
+allowed(C1, C2) :- allow(C1, C2, _).
+
+// A lax layer may use every layer below it.
+allowed(C1, C2) :- layer_of(C1, R1, "lax"), layer_of(C2, R2, _), R1 < R2.
+
+// A strict layer may use only the layer right below it.
+allowed(C1, C2) :- layer_of(C1, R1, "strict"), layer_of(C2, R2, _), next_rank(R1, R2).
+
+// An allow closes the model.
+closed(1) :- allow(_, _, _).
+
+// So does a layer.
+closed(1) :- layer_of(_, _, _).
+
+// An allowed dependency the code realises.
+convergence(C1, C2) :- dependent(C1, C2), allowed(C1, C2).
+
+// In a closed model, a dependency nothing allows.
+divergence(C1, C2) :- closed(1), dependent(C1, C2), !allowed(C1, C2).
+
+// An allow the code never realises.
+absence(C1, C2) :- allow(C1, C2, _), !dependent(C1, C2).
+
+// A checked edge site from a mapped node to an unmapped one.
+unmapped_edge(E) :- edge_site(E, A, B), mapped(A), unmapped(B, _).
+
+// A checked edge site from an unmapped node to a mapped one.
+unmapped_edge(E) :- edge_site(E, A, B), unmapped(A, _), mapped(B).

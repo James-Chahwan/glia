@@ -1,0 +1,53 @@
+{
+  "rules": 0,
+  "checked": 0,
+  "unchecked": [],
+  "errors": [],
+  "violations": [],
+  "reflexion": {
+    "closed": false,
+    "components": [
+      {
+        "name": "api",
+        "paths": [
+          "services/api"
+        ],
+        "layer": null,
+        "nodes": 3,
+        "decl": ".glia/overlay.toml:7"
+      },
+      {
+        "name": "web",
+        "paths": [
+          "web"
+        ],
+        "layer": null,
+        "nodes": 5,
+        "decl": ".glia/overlay.toml:3"
+      }
+    ],
+    "matrix": [
+      {
+        "from": "web",
+        "to": "api",
+        "edges": 2,
+        "status": "observed",
+        "tier": "fact",
+        "allowed_by": null
+      }
+    ],
+    "absences": [],
+    "unmapped": {
+      "files": 3,
+      "nodes": 5,
+      "edges_to_mapped": 6,
+      "sample": [
+        "scripts/run.py",
+        "scripts/tool.py",
+        "store/db.py"
+      ]
+    },
+    "convergences": 0,
+    "divergences": 0
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "rules": 1,
+  "checked": 1,
+  "unchecked": [],
+  "errors": [],
+  "violations": [],
+  "reflexion": {
+    "closed": true,
+    "components": [
+      {
+        "name": "api",
+        "paths": [
+          "services/api"
+        ],
+        "layer": "core",
+        "nodes": 3,
+        "decl": ".glia/overlay.toml:7"
+      },
+      {
+        "name": "store",
+        "paths": [
+          "store"
+        ],
+        "layer": "data",
+        "nodes": 3,
+        "decl": ".glia/overlay.toml:11"
+      },
+      {
+        "name": "web",
+        "paths": [
+          "web"
+        ],
+        "layer": "ui",
+        "nodes": 5,
+        "decl": ".glia/overlay.toml:3"
+      }
+    ],
+    "matrix": [
+      {
+        "from": "api",
+        "to": "store",
+        "edges": 2,
+        "status": "convergence",
+        "tier": "fact",
+        "allowed_by": "layer:core>data"
+      },
+      {
+        "from": "web",
+        "to": "api",
+        "edges": 2,
+        "status": "convergence",
+        "tier": "fact",
+        "allowed_by": "layer:ui>core"
+      },
+      {
+        "from": "web",
+        "to": "store",
+        "edges": 2,
+        "status": "convergence",
+        "tier": "fact",
+        "allowed_by": "web-uses-store-cache"
+      }
+    ],
+    "absences": [],
+    "unmapped": {
+      "files": 1,
+      "nodes": 1,
+      "edges_to_mapped": 1,
+      "sample": [
+        "scripts/tool.py"
+      ]
+    },
+    "convergences": 3,
+    "divergences": 0
+  }
+}

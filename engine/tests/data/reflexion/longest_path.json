@@ -1,0 +1,93 @@
+{
+  "rules": 0,
+  "checked": 0,
+  "unchecked": [],
+  "errors": [],
+  "violations": [],
+  "reflexion": {
+    "closed": false,
+    "components": [
+      {
+        "name": "admin",
+        "paths": [
+          "web/admin"
+        ],
+        "layer": null,
+        "nodes": 2,
+        "decl": ".glia/overlay.toml:15"
+      },
+      {
+        "name": "api",
+        "paths": [
+          "services/api"
+        ],
+        "layer": null,
+        "nodes": 3,
+        "decl": ".glia/overlay.toml:7"
+      },
+      {
+        "name": "store",
+        "paths": [
+          "store"
+        ],
+        "layer": null,
+        "nodes": 3,
+        "decl": ".glia/overlay.toml:11"
+      },
+      {
+        "name": "web",
+        "paths": [
+          "web"
+        ],
+        "layer": null,
+        "nodes": 5,
+        "decl": ".glia/overlay.toml:3"
+      }
+    ],
+    "matrix": [
+      {
+        "from": "admin",
+        "to": "store",
+        "edges": 2,
+        "status": "observed",
+        "tier": "fact",
+        "allowed_by": null
+      },
+      {
+        "from": "api",
+        "to": "store",
+        "edges": 2,
+        "status": "observed",
+        "tier": "fact",
+        "allowed_by": null
+      },
+      {
+        "from": "web",
+        "to": "api",
+        "edges": 2,
+        "status": "observed",
+        "tier": "fact",
+        "allowed_by": null
+      },
+      {
+        "from": "web",
+        "to": "store",
+        "edges": 2,
+        "status": "observed",
+        "tier": "fact",
+        "allowed_by": null
+      }
+    ],
+    "absences": [],
+    "unmapped": {
+      "files": 1,
+      "nodes": 1,
+      "edges_to_mapped": 1,
+      "sample": [
+        "scripts/tool.py"
+      ]
+    },
+    "convergences": 0,
+    "divergences": 0
+  }
+}
