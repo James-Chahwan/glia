@@ -13,7 +13,7 @@
 //!
 //! | category | what | tier | suggest |
 //! |---|---|---|---|
-//! | `unpaired_endpoint` | an ENDPOINT (not `<unresolved>`) with no outgoing HTTP_CALLS, and not one whose ORIGIN provenance is `external` (every call site names a public host outside the build, CA-13: a third-party API is not a gap) | fact; heuristic when its ENDPOINT_HIT records a `host` (it may be a third-party API) | `constants` for a `${…}` / `/{}` path, `route_prefix\|edge` when a route of its method (or `ANY`) has a path that is a proper suffix of it (`detail` names it; never a test-file route, DT.6b), else `edge` |
+//! | `unpaired_endpoint` | an ENDPOINT (not `<unresolved>`) with no outgoing HTTP_CALLS, and not one whose ORIGIN provenance is `external` (every call site names a public host outside the build, CA-13: a third-party API is not a gap), and not a GraphQL transport (DT.11b: ENDPOINT_HIT `"via":"graphql"`) whose own (repo, LB.8 owner) has a GRAPHQL_OPERATION with a GRAPHQL_CALLS into a resolver, when no server project those resolvers sit in holds a ROUTE (no page, no test-only route) at the transport's last normalised path segment (DT.11c: the server serves its transport where glia reads no route, Apollo Server standalone or a NestJS GraphQLModule); any other unpaired transport is a row whose `detail` starts `graphql transport; `, plus `route_at_server=<qname> (<repo>)` naming the least such route when one exists (glia reads the mount: a real path mismatch) | fact; heuristic when its ENDPOINT_HIT records a `host` (it may be a third-party API) | `constants` for a `${…}` / `/{}` path, `route_prefix\|edge` when a route of its method (or `ANY`) has a path that is a proper suffix of it (`detail` names it; never a test-file route, DT.6b), else `edge` |
 //! | `ambiguous_endpoint` | an ENDPOINT whose HTTP_CALLS targets span >= 2 repos or >= 2 project roots | fact | `constants\|route_prefix` |
 //! | `unresolved_endpoint` | `endpoint:<M>:<unresolved>` with no outgoing HTTP_CALLS; `detail` names its owner (the CALLS / USES predecessor) | fact | `wrapper` |
 //! | `wrapped_sink` | an `unresolved_endpoint` whose every owner is named like a declared http `[[wrapper]]` (the owner's last qname segment equals the stanza's `call` after its last `.` / `::`, in the owner's repo): the sink is real, its identity now lives at the wrapper's call sites (LF.2e mints them); informational | fact | `none` |
@@ -110,6 +110,11 @@
 //!   when `n > 0` ROUTEs with no incoming HTTP_CALLS are kept out of
 //!   `unpaired_route` because a WebSocket client connects through them
 //!   (DT.3c);
+//! - `[gaps] graphql transports implied=<n> unpaired=<m>` once per report
+//!   that computes `unpaired_endpoint`, before its `rows=` line, when
+//!   `n + m > 0`: `n` unpaired GraphQL transports kept out because their
+//!   project's operations pair a resolver on a server with no route at
+//!   their segment, `m` kept as `graphql transport` rows (DT.11c);
 //! - `[dead-framework] dead_symbol rows withheld: invoked=<i> generated=<g>`
 //!   once per report that computes `dead_symbol` (and per [`graph_counts`])
 //!   when the DT.5d rules keep any row out: `g` generated-code candidates
@@ -453,9 +458,14 @@ pub fn gaps_report(
     let Collected {
         mut rows,
         ws_served,
+        gql_implied,
+        gql_unpaired,
     } = collect_rows(merged, roots, &wanted, &wrapped);
     if ws_served > 0 {
         eprintln!("[gaps] ws-served routes={ws_served}");
+    }
+    if gql_implied + gql_unpaired > 0 {
+        eprintln!("[gaps] graphql transports implied={gql_implied} unpaired={gql_unpaired}");
     }
     rows.sort_by(row_order);
     debug_assert!(
@@ -704,6 +714,17 @@ struct View<'a> {
     /// Never an `unpaired_route` row, a `suffix_of=` candidate or a
     /// `suspected_edge` side. Only looked up, never iterated.
     test_routes: HashSet<NodeId>,
+    /// DT.11c: per (repo, LB.8 owner from [`split_owner`]) of a
+    /// GRAPHQL_OPERATION with an outgoing GRAPHQL_CALLS into a
+    /// GRAPHQL_RESOLVER, the (repo, owner) of each resolver it reaches, in
+    /// edge order: the server projects a project's operations pair. Only
+    /// looked up, never iterated.
+    gql_paired: HashMap<(u64, Option<&'a str>), Vec<(u64, Option<&'a str>)>>,
+    /// DT.11c: per (repo, owner, last normalised path segment, [`path_tail`])
+    /// of a server ROUTE (no client-router page, no route only test code
+    /// registers), the least (qname, id) such route: where glia reads a
+    /// server's mount. Only looked up, never iterated.
+    route_tails: HashMap<(u64, Option<&'a str>, String), NodeId>,
 }
 
 impl<'a> View<'a> {
@@ -725,8 +746,12 @@ impl<'a> View<'a> {
             project_roots: BTreeMap::new(),
             ws_served: glia_graph::WebSocketStackResolver::served_routes(&merged.graphs),
             test_routes: crate::passes::test_route_ids(merged, &CodeBuildCtx::empty()),
+            gql_paired: HashMap::new(),
+            route_tails: HashMap::new(),
         };
         let mut methods: HashSet<NodeId> = HashSet::new();
+        // DT.11c: the two GraphQL sides, for `gql_paired`. Only looked up.
+        let (mut gql_ops, mut gql_resolvers) = (HashSet::new(), HashSet::new());
         // The CALLS / USES edges into each METHOD from another node, in edge
         // order: what the dispatch rule below reads (the edge, not only its
         // `from`, for its EVIDENCE rule). Only looked up, never iterated.
@@ -745,6 +770,29 @@ impl<'a> View<'a> {
                 v.qname_of.insert(n.id, qname.as_str());
                 if *kind == node_kind::METHOD {
                     methods.insert(n.id);
+                }
+                if *kind == node_kind::GRAPHQL_OPERATION {
+                    gql_ops.insert(n.id);
+                }
+                if *kind == node_kind::GRAPHQL_RESOLVER {
+                    gql_resolvers.insert(n.id);
+                }
+                if *kind == node_kind::ROUTE
+                    && !is_nav_route(&n.cells)
+                    && !v.test_routes.contains(&n.id)
+                    && let Some(path) = nav_route_path(qname)
+                {
+                    let key = (g.repo.0, split_owner(qname).1, path_tail(path));
+                    let qname_of = &v.qname_of;
+                    v.route_tails
+                        .entry(key)
+                        .and_modify(|least| {
+                            let q = qname_of.get(least).copied().unwrap_or_default();
+                            if (qname.as_str(), n.id.0) < (q, least.0) {
+                                *least = n.id;
+                            }
+                        })
+                        .or_insert(n.id);
                 }
                 if *kind == node_kind::PROJECT
                     && let Some(dir) = qname.strip_prefix("project:")
@@ -778,6 +826,21 @@ impl<'a> View<'a> {
             }
             if c == edge_category::HANDLED_BY {
                 v.handlers.entry(e.from).or_default().push(e.to);
+            }
+            if c == edge_category::GRAPHQL_CALLS
+                && gql_ops.contains(&e.from)
+                && gql_resolvers.contains(&e.to)
+                && let (Some(fr), Some(fq), Some(tr), Some(tq)) = (
+                    v.repo_of.get(&e.from),
+                    v.qname_of.get(&e.from),
+                    v.repo_of.get(&e.to),
+                    v.qname_of.get(&e.to),
+                )
+            {
+                v.gql_paired
+                    .entry((*fr, split_owner(fq).1))
+                    .or_default()
+                    .push((*tr, split_owner(tq).1));
             }
             if CODE_PROFILE.tables.carries(c) && e.from != e.to {
                 v.carry_in.insert(e.to);
@@ -881,6 +944,30 @@ fn endpoint_host(cells: &[Cell]) -> Option<String> {
     })
 }
 
+/// The `via` an ENDPOINT_HIT recorded: `graphql` on DT.11b's GraphQL
+/// transport (an Apollo / urql / graphql-request client's HTTP call). The
+/// first hit that names one.
+fn endpoint_via(cells: &[Cell]) -> Option<String> {
+    cells.iter().find_map(|c| match &c.payload {
+        CellPayload::Json(j) if c.kind == cell_type::ENDPOINT_HIT => {
+            serde_json::from_str::<serde_json::Value>(j)
+                .ok()?
+                .get("via")?
+                .as_str()
+                .map(str::to_string)
+        }
+        _ => None,
+    })
+}
+
+/// The last segment of `path`, normalised as HttpStackResolver reads it
+/// ([`normalise_http_path`]: a parameter is `{}`, trailing `/` dropped);
+/// empty for `/`.
+fn path_tail(path: &str) -> String {
+    let norm = normalise_http_path(path);
+    norm.rsplit('/').next().unwrap_or_default().to_string()
+}
+
 /// ORIGIN `provenance` of a node, when it has one.
 fn provenance_is(cells: &[Cell], provenance: &str) -> bool {
     let needle = format!("\"provenance\":\"{provenance}\"");
@@ -937,13 +1024,17 @@ fn declared_wrappers(roots: &[(u64, PathBuf)]) -> Wrapped {
     out
 }
 
-/// What [`collect_rows`] returns: the rows, unsorted, and how many ROUTEs
-/// the DT.3c WebSocket rule kept out of `unpaired_route` (counted only when
-/// that category is wanted). The DT.6b test routes it keeps out are printed
-/// by `collect_rows` itself.
+/// What [`collect_rows`] returns: the rows, unsorted, how many ROUTEs the
+/// DT.3c WebSocket rule kept out of `unpaired_route`, and how many unpaired
+/// GraphQL transports the DT.11c rule kept out of `unpaired_endpoint`
+/// (`gql_implied`) or kept as `graphql transport` rows (`gql_unpaired`),
+/// each counted only when its category is wanted. The DT.6b test routes it
+/// keeps out are printed by `collect_rows` itself.
 struct Collected {
     rows: Vec<GapRow>,
     ws_served: usize,
+    gql_implied: usize,
+    gql_unpaired: usize,
 }
 
 /// Every row of the `wanted` categories, unsorted. `wrapped` is
@@ -993,6 +1084,9 @@ fn collect_rows(
     let mut ws_served = 0usize;
     // DT.6b: routes only test code registers.
     let mut test_withheld = 0usize;
+    // DT.11c: unpaired GraphQL transports the project's paired operations
+    // imply (no row), and the ones kept as rows.
+    let (mut gql_implied, mut gql_unpaired) = (0usize, 0usize);
 
     for n in &view.nodes {
         let mut node_row =
@@ -1062,6 +1156,36 @@ fn collect_rows(
                 } else if targets.is_empty() {
                     // CG.4b: a third-party endpoint is labelled, not missing.
                     if want(UNPAIRED_ENDPOINT) && !provenance_is(n.cells, "external") {
+                        // DT.11c: a GraphQL transport (DT.11b) whose own
+                        // project's operations pair a resolver is served
+                        // where glia reads no route, unless a reached server
+                        // project holds a route at its last path segment:
+                        // then glia reads the mount, and the miss is a real
+                        // path mismatch.
+                        let transport = endpoint_via(n.cells).as_deref() == Some("graphql");
+                        let mut route_at_server = None;
+                        if transport {
+                            let repo = view.repo_of.get(&n.id).copied().unwrap_or_default();
+                            if let Some(servers) =
+                                view.gql_paired.get(&(repo, split_owner(n.qname).1))
+                            {
+                                let tail = path_tail(path);
+                                route_at_server = servers
+                                    .iter()
+                                    .filter_map(|(r, o)| {
+                                        view.route_tails.get(&(*r, *o, tail.clone()))
+                                    })
+                                    .copied()
+                                    .min_by(|a, b| {
+                                        view.qname(*a).cmp(view.qname(*b)).then(a.0.cmp(&b.0))
+                                    });
+                                if route_at_server.is_none() {
+                                    gql_implied += 1;
+                                    continue;
+                                }
+                            }
+                            gql_unpaired += 1;
+                        }
                         let norm = normalise_http_path(path);
                         let suffix = routes
                             .iter()
@@ -1081,7 +1205,19 @@ fn collect_rows(
                             "edge"
                         };
                         let host = endpoint_host(n.cells);
-                        let mut detail = vec!["no HTTP_CALLS target".to_string()];
+                        let mut detail = Vec::new();
+                        if transport {
+                            detail.push("graphql transport".to_string());
+                        }
+                        if let Some(r) = route_at_server {
+                            let repo = view.repo_of.get(&r).copied().unwrap_or_default();
+                            detail.push(format!(
+                                "route_at_server={} ({})",
+                                view.qname(r),
+                                label_of(&labels, repo)
+                            ));
+                        }
+                        detail.push("no HTTP_CALLS target".to_string());
                         if let Some(c) = view.named(callers) {
                             detail.push(format!("caller={c}"));
                         }
@@ -1274,7 +1410,12 @@ fn collect_rows(
             }
         }
     }
-    Collected { rows, ws_served }
+    Collected {
+        rows,
+        ws_served,
+        gql_implied,
+        gql_unpaired,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2213,6 +2354,16 @@ mod tests {
             }
         }
 
+        /// An ENDPOINT_HIT cell `json` on node `id`.
+        fn hit(&mut self, id: NodeId, json: &str) {
+            if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
+                n.cells.push(Cell {
+                    kind: cell_type::ENDPOINT_HIT,
+                    payload: CellPayload::Json(json.to_string()),
+                });
+            }
+        }
+
         fn edge(&mut self, from: NodeId, to: NodeId, category: EdgeCategoryId) {
             self.edges.push(Edge {
                 from,
@@ -2372,6 +2523,212 @@ mod tests {
             graph_counts(&plain).gaps_by_category.get(UNPAIRED_ROUTE),
             Some(&2)
         );
+    }
+
+    /// DT.11b's GraphQL transport hit: an Apollo client on
+    /// `http://users-svc/graphql`.
+    const TRANSPORT_HIT: &str = r#"{"method":"POST","path":"/graphql","file":"src/apollo.ts","line":3,"col":31,"confidence":"strong","raw":"http://users-svc/graphql","host":"users-svc","via":"graphql"}"#;
+
+    /// DT.11c: a monorepo (graphql-rpc-host-narrowing's shape): the web app
+    /// at `apps/web` dials `/graphql` (a transport ENDPOINT when `via`, else a
+    /// plain client call to the same path) and its `getUser` operation pairs
+    /// `services/users`' resolver when `paired`; the users service holds a
+    /// route `users_route` (when given), and `services/catalog`, which no
+    /// operation reaches, holds `POST /api/graphql`.
+    fn gql_build(via: bool, paired: bool, users_route: Option<&str>) -> MergedGraph {
+        let mut g = G::new("mono");
+        let ep = g.node(node_kind::ENDPOINT, "endpoint:POST:/graphql @apps/web");
+        if via {
+            g.hit(ep, TRANSPORT_HIT);
+        } else {
+            g.hit(
+                ep,
+                r#"{"method":"POST","path":"/graphql","raw":"http://users-svc/graphql","host":"users-svc"}"#,
+            );
+        }
+        let client = g.node(node_kind::STATE_VAR, "apps::web::src::apollo::client");
+        g.edge(client, ep, edge_category::CALLS);
+        let op = g.node(node_kind::GRAPHQL_OPERATION, "graphql_op:getUser @apps/web");
+        let users = g.node(
+            node_kind::GRAPHQL_RESOLVER,
+            "graphql_resolver:getUser @services/users",
+        );
+        g.node(
+            node_kind::GRAPHQL_RESOLVER,
+            "graphql_resolver:getUser @services/catalog",
+        );
+        if paired {
+            g.edge(op, users, edge_category::GRAPHQL_CALLS);
+        }
+        g.node(node_kind::ROUTE, "GET /health @services/users");
+        if let Some(r) = users_route {
+            g.node(node_kind::ROUTE, &format!("{r} @services/users"));
+        }
+        g.node(node_kind::ROUTE, "POST /api/graphql @services/catalog");
+        MergedGraph::new(vec![g.build()])
+    }
+
+    /// The `unpaired_endpoint` rows of `m` as (qname, detail, tier), and the
+    /// (implied, unpaired) transport counts `[gaps] graphql transports`
+    /// prints.
+    fn endpoint_rows(m: &MergedGraph) -> (Vec<(String, String, &'static str)>, (usize, usize)) {
+        let o = GapsOptions {
+            category: Some(UNPAIRED_ENDPOINT.into()),
+            ..GapsOptions::default()
+        };
+        let rep = gaps_report(m, &[], &o).expect("known category");
+        assert_eq!(rep.count(UNPAIRED_ENDPOINT), rep.rows.len());
+        let c = collect_rows(m, &[], &[UNPAIRED_ENDPOINT], &Wrapped::new());
+        (
+            rep.rows
+                .into_iter()
+                .map(|r| (r.qname, r.detail, r.tier))
+                .collect(),
+            (c.gql_implied, c.gql_unpaired),
+        )
+    }
+
+    /// DT.11c: an unpaired GraphQL transport whose own project's operation
+    /// pairs a resolver, on a server project holding no route at `graphql`,
+    /// is served where glia reads no route: no row, counted implied. A
+    /// route at the segment on a server no operation reaches
+    /// (`services/catalog`) changes nothing. The same path dialled by a
+    /// plain client call (no `via`) stays an ordinary row.
+    #[test]
+    fn graphql_transport_implied_by_paired_ops_is_no_gap() {
+        let m = gql_build(true, true, None);
+        assert_eq!(endpoint_rows(&m), (Vec::new(), (1, 0)));
+        assert_eq!(
+            graph_counts(&m).gaps_by_category.get(UNPAIRED_ENDPOINT),
+            Some(&0)
+        );
+        // A route at another segment of the reached server is no mount.
+        let m = gql_build(true, true, Some("GET /graphql/playground"));
+        assert_eq!(endpoint_rows(&m), (Vec::new(), (1, 0)));
+
+        let plain = gql_build(false, true, None);
+        assert_eq!(
+            endpoint_rows(&plain),
+            (
+                vec![(
+                    "endpoint:POST:/graphql @apps/web".to_string(),
+                    "no HTTP_CALLS target; caller=apps::web::src::apollo::client; host=users-svc"
+                        .to_string(),
+                    HEURISTIC
+                )],
+                (0, 0)
+            )
+        );
+    }
+
+    /// DT.11c: a transport no operation of its project pairs stays a row,
+    /// labelled `graphql transport`, at today's tier; an `external` one is
+    /// skipped before the rule (CG.4b) and counted neither way.
+    #[test]
+    fn graphql_transport_without_paired_ops_stays_labelled() {
+        let m = gql_build(true, false, None);
+        assert_eq!(
+            endpoint_rows(&m),
+            (
+                vec![(
+                    "endpoint:POST:/graphql @apps/web".to_string(),
+                    "graphql transport; no HTTP_CALLS target; caller=apps::web::src::apollo::client; host=users-svc"
+                        .to_string(),
+                    HEURISTIC
+                )],
+                (0, 1)
+            )
+        );
+        assert_eq!(
+            graph_counts(&m).gaps_by_category.get(UNPAIRED_ENDPOINT),
+            Some(&1)
+        );
+
+        let mut g = G::new("ext");
+        let ep = g.node(node_kind::ENDPOINT, "endpoint:POST:/graphql");
+        g.hit(ep, TRANSPORT_HIT);
+        g.stamp(ep, "external");
+        assert_eq!(
+            endpoint_rows(&MergedGraph::new(vec![g.build()])),
+            (Vec::new(), (0, 0))
+        );
+    }
+
+    /// DT.11c: only the transport's own (repo, owner) operations imply it:
+    /// `apps/admin`'s paired operation says nothing of `apps/web`'s
+    /// transport, and another repo's unowned operation nothing of this
+    /// repo's unowned one.
+    #[test]
+    fn other_owner_ops_do_not_imply_a_transport() {
+        let mut g = G::new("mono");
+        let ep = g.node(node_kind::ENDPOINT, "endpoint:POST:/graphql @apps/web");
+        g.hit(ep, TRANSPORT_HIT);
+        let op = g.node(
+            node_kind::GRAPHQL_OPERATION,
+            "graphql_op:getUser @apps/admin",
+        );
+        let res = g.node(
+            node_kind::GRAPHQL_RESOLVER,
+            "graphql_resolver:getUser @services/users",
+        );
+        g.edge(op, res, edge_category::GRAPHQL_CALLS);
+        let (rows, counts) = endpoint_rows(&MergedGraph::new(vec![g.build()]));
+        assert_eq!(counts, (0, 1));
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(
+            rows[0]
+                .1
+                .starts_with("graphql transport; no HTTP_CALLS target"),
+            "{rows:?}"
+        );
+
+        let mut client = G::new("client");
+        let ep = client.node(node_kind::ENDPOINT, "endpoint:POST:/graphql");
+        client.hit(ep, TRANSPORT_HIT);
+        let mut other = G::new("other-client");
+        let op = other.node(node_kind::GRAPHQL_OPERATION, "graphql_op:Products");
+        let mut server = G::new("server");
+        let res = server.node(node_kind::GRAPHQL_RESOLVER, "graphql_resolver:products");
+        other.edge(op, res, edge_category::GRAPHQL_CALLS);
+        let m = MergedGraph::new(vec![client.build(), other.build(), server.build()]);
+        let (rows, counts) = endpoint_rows(&m);
+        assert_eq!(counts, (0, 1));
+        assert_eq!(rows.len(), 1, "{rows:?}");
+
+        // The same operation in the transport's own repo implies it.
+        let mut client = G::new("client");
+        let ep = client.node(node_kind::ENDPOINT, "endpoint:POST:/graphql");
+        client.hit(ep, TRANSPORT_HIT);
+        let op = client.node(node_kind::GRAPHQL_OPERATION, "graphql_op:Products");
+        let mut server = G::new("server");
+        let res = server.node(node_kind::GRAPHQL_RESOLVER, "graphql_resolver:products");
+        client.edge(op, res, edge_category::GRAPHQL_CALLS);
+        let m = MergedGraph::new(vec![client.build(), server.build()]);
+        assert_eq!(endpoint_rows(&m), (Vec::new(), (1, 0)));
+    }
+
+    /// DT.11c: a reached server project holding a route at the transport's
+    /// last path segment (`POST /api/graphql` against a client `/graphql`)
+    /// means glia reads its mount: the unpaired transport is a real path
+    /// mismatch, kept, its detail naming the route. Method-agnostic: a
+    /// `GET /graphql` mount is read too.
+    #[test]
+    fn a_route_at_the_server_keeps_the_transport_row() {
+        for route in ["POST /api/graphql", "GET /graphql/"] {
+            let m = gql_build(true, true, Some(route));
+            let (rows, counts) = endpoint_rows(&m);
+            assert_eq!(counts, (0, 1), "{route}");
+            assert_eq!(rows.len(), 1, "{route}: {rows:?}");
+            let want = format!("graphql transport; route_at_server={route} @services/users (repo");
+            assert!(rows[0].1.starts_with(&want), "{route}: {rows:?}");
+            assert!(
+                rows[0].1.contains(
+                    "; no HTTP_CALLS target; caller=apps::web::src::apollo::client; host=users-svc"
+                ),
+                "{rows:?}"
+            );
+            assert_eq!(rows[0].2, HEURISTIC);
+        }
     }
 
     #[test]
