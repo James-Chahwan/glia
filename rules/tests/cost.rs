@@ -3,7 +3,10 @@
 //! - `cost_check20_glia`: the 20 check-shaped rules of [`CHECK20`] over glia x1, median
 //!   of 5 evaluations under 200 ms;
 //! - `cost_check20_x10_rss`: [`CHECK20`] over glia x10 (`testkit::scaled`) evaluates,
-//!   with the evaluator's own peak under 150 MB (153,600 kB);
+//!   with the evaluator's own peak under 320 MB ([`X10_RSS_GATE_KB`], 327,680 kB). R1's
+//!   150 MB (153,600 kB) was restated by James's ruling of 2026-10-16 (option A): the
+//!   first run measured 287,408 kB at defff629, so the gate is that plus headroom, and the
+//!   evaluator's memory work moves to 0.5.3 (`dev-notes/next-leap-0.5.3.md` §F.3);
 //! - `cost_blowup_x10`: the unseeded carry closure over glia x10 (R1's 7.25 M-row case;
 //!   13,551,390 rows at 22c65ee) stops at the default budget as `RulesError::Budget`
 //!   for `tcc/2`, the evaluator's peak under 512 MB.
@@ -688,6 +691,12 @@ fn cost_check20_glia() {
     );
 }
 
+/// The x10 evaluator-peak gate, 320 MB. R1 section 9 spike 1 set 150 MB (153,600 kB);
+/// the first DA.17 run (40959286, HEAD defff629) measured 287,408 kB, and James's ruling
+/// of 2026-10-16 (option A) restated the gate to that number plus headroom. Shrinking the
+/// evaluator's peak is 0.5.3 work (`dev-notes/next-leap-0.5.3.md` §F.3), not this test's.
+const X10_RSS_GATE_KB: u64 = 327_680;
+
 #[test]
 #[ignore = "release cost gate: GLIA_RULES_DUMP=<dump> cargo test --release --test cost -- --ignored --exact"]
 fn cost_check20_x10_rss() {
@@ -702,7 +711,11 @@ fn cost_check20_x10_rss() {
     let ms = t.elapsed().as_secs_f64() * 1_000.0;
     let inc = bench("check20-x10", &g10, ms, rows(&ev, &CHECK20_OUTPUTS), &base);
     drop(ev);
-    assert!(inc < 153_600, "CHECK20 over glia x10: evaluator peak {inc} kB, gate 153,600 kB");
+    assert!(
+        inc < X10_RSS_GATE_KB,
+        "CHECK20 over glia x10: evaluator peak {inc} kB, gate {X10_RSS_GATE_KB} kB \
+         (320 MB, restated from R1's 153,600 kB by James's 2026-10-16 ruling)"
+    );
     drop((g10, g1, dump));
 }
 
