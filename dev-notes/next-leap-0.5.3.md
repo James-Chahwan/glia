@@ -569,6 +569,22 @@ Close-out followups that name no 0.5.2 packet are appended here as each wave lan
   the overlay schema, so 0.5.2 has only the CLI / pyo3 flag. Not judged by DT.1o: DT.1i's client_contract pairing (a
   typed client against an OpenAPI op; a server-side op change is already a contract-breaks schema row), DT.1k's TS
   result model against its own selection, and GraphQL argument / input evolution.
+- W16 (DT.10a): the Solidity noise gate never fires: `is_literal_primitive` should unwrap tree-sitter's `expression`
+  wrapper (unwrap_expression). Fixing it drops STATE_VAR nodes for literal-primitive public constants (a declared node
+  removal); gated public constants then take the module-CONTAINS procedure path.
+- W16 (DT.5e, James's call): a Riverpod provider passed by name (`ref.watch(xProvider)`, 77 on quokka-stack) as USES ->
+  STATE_VAR? The graph half: a USES-by-value ref kind binding only FUNCTION / METHOD targets, so imported top-level
+  functions passed by name become USES too (graph/src/calls.rs resolve_refs binds a Bare ref to any symbol kind today).
+- W16 (DT.5e): a widget whose in-repo base extends a Flutter widget (`class X extends BaseScreen`) gets no ROLE
+  COMPONENT; only the base does. A graph pass following in-repo INHERITS_FROM to a COMPONENT base closes it.
+- W16 (DT.6a): ENDPOINT provenance still uses the first POSITION plus the qname rule (`endpoint:GET:/api/ab_test` stays
+  test_fixture), and HttpRouteMatcher (the contract linker, `glia serves`) still indexes test-only routes.
+- W16 (DT.3b, DF.8): to never mark a const-sourced WS host `external` (CG.4a's reading for HTTP), endpoint_fold.rs needs
+  to tell folded WS hits apart: a payload field, or the fold reporting its folded site ids.
+- W16 (DT.7b, DT.7a): a sub-scoped `[[decision]]` orphans with the exact-PROJECT rule `(no PROJECT)`; decisions and notes
+  are records, so declared_misses does not list them (gaps' orphaned_rule reports stale-anchor ones).
+- W16 (DT.1j, self-graph hygiene): embedded SDL (resolvers and now types) is unguarded in `.rs` files by design (CJ.1b);
+  only the line-start rule keeps it out of glia's own one-line test strings.
 
 ## 3. Open questions for James
 
