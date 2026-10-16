@@ -5,15 +5,18 @@
 //! cannot be evaluated.
 //!
 //! DB.3d renders DB.3a's rule-invariant rows (`_violation <k>: ..`, with the
-//! subject, its location, the witness edges and the Q5 caveats) and DB.3b's
-//! transitive forbid_edge hits (`_path <k> into ..`, the witness in path
-//! order), marks an advisory violation on its tier line, and prints the
-//! summary `- violations: <V> (blocking <B>, advisory <A>)`.
+//! subject, its location and the witness edges; the rule's Q5 caveats print
+//! once under its heading, DT.8a) and DB.3b's transitive forbid_edge hits
+//! (`_path <k> into ..`, the witness in path order), marks an advisory
+//! violation on its tier line, and prints the summary `- violations: <V>
+//! (blocking <B>, advisory <A>)`.
 //!
 //! The `[check]` stderr line is the LE.8 fired_on marker, followed on a
 //! violation by CC.3's `[check] tiers ..` line and DB.3a's `[check] gate
-//! blocking=<B> advisory=<A>` line; asserting them here makes
-//! their counts a tested contract, and relaying them lets
+//! blocking=<B> advisory=<A>` line, then, when a rule printed its caveat
+//! block (DT.8a: once under the rule heading, not under each row), the
+//! `[check] caveats rules=<r> lines=<l> folded=<f>` line; asserting them
+//! here makes their counts a tested contract, and relaying them lets
 //! `cargo test -p glia-cli --test check_cli -- --nocapture 2>&1 | grep '^\[check\]'`
 //! show it. A repo that declares a reflexion model (CC.5b) prints CC.5b's
 //! `[reflexion]` line before them, relayed the same way (grep
@@ -603,7 +606,7 @@ fn rule_violation_section_and_exit_1() {
     let (code, stdout, markers) = glia(&["check", &fx.path()]);
     assert_eq!(code, 1, "{stdout}");
     assert_eq!(
-        markers,
+        markers.iter().take(3).collect::<Vec<_>>(),
         vec![
             "[check] rules=2 checked=2 violations=2 (forbid_edge=0 no_cycle=0) unchecked=0 errors=0",
             "[check] tiers fact=2 derived=0 heuristic=0",
@@ -646,6 +649,12 @@ fn rule_violation_section_and_exit_1() {
                 |l| (l.starts_with("  ⚠ CALLS (") || l.starts_with("  ⚠ * (")) && l.contains("): ")
             ),
         "`  ⚠ <category> (<language>): <note>`, the rows for CALLS: {section}"
+    );
+    // DT.8a: one rule printed a caveat block; its one row folds nothing.
+    assert_eq!(
+        markers.get(3..),
+        Some(&[format!("[check] caveats rules=1 lines={caveats} folded=0")][..]),
+        "{markers:?}"
     );
 }
 
@@ -843,6 +852,113 @@ via = [\"services/api/public\"]
         "| 1 | CALLS | `web::app::page` | `shared::util::helper` | web/app.py:6 | graph:calls | fact |",
         "| 2 | CALLS | `shared::util::helper` | `services::api::internal::db::query` | shared/util.py:5 | graph:calls | fact |",
     ]);
+}
+
+/// DB3A's handlers.py with three functions nothing calls (`get_order` is
+/// still web/app.py's callee).
+const THREE_UNCALLED: &str = "from store.db import load\n\n\ndef get_order(o):\n    return load(o)\n\n\ndef unused_a():\n    return 1\n\n\ndef unused_b():\n    return 2\n\n\ndef unused_c():\n    return 3\n";
+
+/// The line a rule's caveat block opens with (DT.8a).
+const CAVEAT_BLOCK: &str = "_coverage caveats (the categories this rule's negations read; a blind extraction looks like a missing edge):_";
+
+/// (DT.8a) A rule's coverage caveats print once, in one block under its
+/// heading before its first row, never under each row; `--json` keeps every
+/// row's list. HEAD printed the same `⚠` lines under each of the three rows.
+#[test]
+fn caveats_print_once_per_rule() {
+    let overlay = r#"version = 2
+
+[[constraint]]
+id = "api-called"
+kind = "invariant"
+text = "every api handler is called"
+rule = "violation(f) :- node(f, \"FUNCTION\"), in_scope(f, \"services/api/handlers.py\"), !called(f). called(f) :- edge(_, f, \"CALLS\")."
+"#;
+    let files: Vec<(&str, &str)> = DB3A_SOURCES
+        .iter()
+        .map(|&(p, t)| {
+            if p == "services/api/handlers.py" {
+                (p, THREE_UNCALLED)
+            } else {
+                (p, t)
+            }
+        })
+        .chain(std::iter::once((".glia/overlay.toml", overlay)))
+        .collect();
+    let fx = Fixture::new("caveats-once", &files);
+    let (code, stdout, markers) = glia(&["check", &fx.path()]);
+    assert_eq!(code, 1, "{stdout}");
+    let heading = "### api-called (rule, .glia/overlay.toml:3) - 3 violation(s)";
+    let section = &stdout[stdout
+        .find(heading)
+        .unwrap_or_else(|| panic!("missing {heading:?}:\n{stdout}"))..];
+    for k in 1..=3 {
+        assert!(
+            section.contains(&format!(
+                "_violation {k}: `services::api::handlers::unused_"
+            )),
+            "row {k}: {section}"
+        );
+    }
+    let first_row = section.find("_violation 1: ").expect("row 1");
+    let caveats: Vec<&str> = section.lines().filter(|l| l.starts_with("  ⚠ ")).collect();
+    assert!(!caveats.is_empty(), "the negation reads CALLS: {section}");
+    for c in &caveats {
+        assert_eq!(
+            caveats.iter().filter(|o| *o == c).count(),
+            1,
+            "each caveat line once per rule, {c:?}: {section}"
+        );
+    }
+    let head = &section[..first_row];
+    assert_eq!(
+        head.lines().filter(|l| l.starts_with("  ⚠ ")).count(),
+        caveats.len(),
+        "every caveat line under the heading, before the first row: {section}"
+    );
+    assert!(head.contains(CAVEAT_BLOCK), "{section}");
+    // The per-row layout printed `l` lines under each of the 3 rows.
+    let l = caveats.len();
+    let marker = format!("[check] caveats rules=1 lines={l} folded={}", 2 * l);
+    assert_eq!(
+        markers.last().map(String::as_str),
+        Some(marker.as_str()),
+        "{markers:?}"
+    );
+
+    let (code, json, json_markers) = glia(&["check", &fx.path(), "--json"]);
+    assert_eq!(code, 1);
+    assert!(
+        !json_markers
+            .iter()
+            .any(|m| m.starts_with("[check] caveats")),
+        "the caveat fold is markdown only: {json_markers:?}"
+    );
+    let v: serde_json::Value = serde_json::from_str(json.trim()).expect("JSON report");
+    let rows = v["violations"].as_array().expect("violations");
+    assert_eq!(rows.len(), 3, "{json}");
+    for r in rows {
+        assert!(
+            r["caveats"].as_array().is_some_and(|c| !c.is_empty()),
+            "--json keeps every row's caveats: {r}"
+        );
+        assert_eq!(r["caveats"], rows[0]["caveats"], "one rule, one negation");
+    }
+    // The block is the rows' caveats, deduplicated, at most 5.
+    let mut want: Vec<String> = Vec::new();
+    for c in rows[0]["caveats"].as_array().expect("caveats") {
+        let line = format!(
+            "  ⚠ {} ({}): {}",
+            c["edge_category"].as_str().unwrap_or_default(),
+            c["language"].as_str().unwrap_or_default(),
+            c["note"].as_str().unwrap_or_default()
+        );
+        if !want.contains(&line) {
+            want.push(line);
+        }
+    }
+    want.truncate(5);
+    assert_eq!(caveats, want);
 }
 
 /// More than 50 violations in one rule: the first 50 and a note; `--json`
