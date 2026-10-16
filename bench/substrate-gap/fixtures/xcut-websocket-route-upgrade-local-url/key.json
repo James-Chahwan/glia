@@ -1,0 +1,77 @@
+{
+  "framework": "xcut-websocket-route-upgrade-local-url",
+  "language": "typescript",
+  "dirs": [
+    "client",
+    "server"
+  ],
+  "mechanism": "ws",
+  "note": "DT.3a (tweaks T3): a WebSocket client whose URL sits in a local. The gin server upgrades inside the handlers of GET /live/orders (Hub::Serve) and GET /api/chat/ws (chatWS), so LA.18b's RouteReach lends the generic ws:ws both paths; /admin/live is a plain page. The client binds each URL to a local first: `const url = `${environment.liveUrl}/live/orders`` (examples-glia's shape), `const url = this.urls.buildWsUrl('api/chat/ws')` (quokka's shape, a URL builder: root-relative, Weak) and a mutable `let url` that is reassigned (never read). Baseline at HEAD a584c98a (debug CLI merge client server, and grade.py on the wave-14 wheel): one ws_client:ws with USES from connect, chat and admin; `[ws-resolve] 0 pairs (exact=0 suffix=0 param=0 inherited=0 wildcard=0 host=0) dropped-generic=1 narrowed-by-host=0`; recall 1/7 (only ws:ws).",
+  "expect_nodes": [
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:/live/orders",
+      "exact": true,
+      "note": "the const's template: the static tail after ${environment.liveUrl}"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "ws_client:/api/chat/ws",
+      "exact": true,
+      "note": "the builder call's one literal, root-relative"
+    },
+    {
+      "kind": "WS_HANDLER",
+      "name": "ws:ws",
+      "exact": true,
+      "note": "gorilla upgrade sites, generic name"
+    }
+  ],
+  "expect_edges": [
+    {
+      "from": "ws_client:/live/orders",
+      "to": "ws:ws",
+      "category": "WS_CONNECTS",
+      "exact": true,
+      "note": "LA.18b inherited: GET /live/orders HANDLED_BY Hub::Serve, which upgrades"
+    },
+    {
+      "from": "ws_client:/api/chat/ws",
+      "to": "ws:ws",
+      "category": "WS_CONNECTS",
+      "exact": true,
+      "note": "LA.18b inherited: the /api group's GET /chat/ws HANDLED_BY chatWS; Weak (builder read)"
+    },
+    {
+      "from": "Feed::connect",
+      "to": "ws_client:/live/orders",
+      "category": "USES",
+      "note": "the call site anchors in connect"
+    },
+    {
+      "from": "Feed::chat",
+      "to": "ws_client:/api/chat/ws",
+      "category": "USES",
+      "note": "the call site anchors in chat"
+    }
+  ],
+  "forbid": [
+    {
+      "kind": "WS_CLIENT",
+      "name": "/admin/live",
+      "note": "PRECISION: a `let` that is reassigned is never read (CH.3a's mutable rule)"
+    },
+    {
+      "from": "ws_client:ws",
+      "to": "ws:ws",
+      "category": "WS_CONNECTS",
+      "note": "PRECISION: the generic client asserts no path and pairs nothing"
+    },
+    {
+      "kind": "WS_CLIENT",
+      "name": "/api/chat/ws",
+      "max_nodes": 1,
+      "note": "one node for the builder read, never a second spelling"
+    }
+  ]
+}

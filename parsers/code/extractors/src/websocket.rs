@@ -59,6 +59,17 @@
 //! ([`PathRead::ClientUri`]); a Dart literal's `$name` / `${expr}` is a
 //! dynamic piece of it ([`Interp::Dart`]).
 //!
+//! DT.3a: a client URL is read through the code that builds it
+//! ([`client_url`], depth one): a bare identifier through the `const` /
+//! `final` / Go `:=` binding in a scope enclosing the call ([`local_binding`],
+//! an indentation walk; a `let` / `var` / reassignment or a parameter of that
+//! name reads nothing), `this.<m>` through the file's one `readonly` field
+//! ([`class_field_init`]), Go's `u.String()` through `u := url.URL{.. Path: ..}`
+//! ([`go_url_struct_path`]), and a URL builder call with one literal
+//! (`this.urls.buildWsUrl('api/chat/ws')` -> `/api/chat/ws`,
+//! [`builder_literal`]). A node every one of whose sites read it through a
+//! builder is Weak; the resolver's WS_CONNECTS takes the weakest side.
+//!
 //! Anchors: the name is read per site, so EVERY site is anchored and
 //! `anchor::attach` gives each owning function its HANDLED_BY (server) or USES
 //! (client) edge. Python decorators anchor at the decorated `def` line
@@ -84,6 +95,11 @@
 //!   `[ws] clients framework=dart_io n=1 in bin/feed.dart`
 //! and one per file whose client sites named a host (CB.21):
 //!   `[ws] client hosts sites=1 in web/chat.ts`
+//! and one per file with an identifier / member / builder URL argument
+//! (DT.3a; `builder` and `url_struct` count the subset of reads whose text
+//! came from a builder call / a Go `url.URL`, `unread` the arguments still
+//! unreadable):
+//!   `[ws] client urls read=1 (local=1 field=0 builder=0 url_struct=0) unread=0 in web/src/app/core/live/order-feed.service.ts`
 //!
 //! Self-scan precision (CJ.1b): in a Rust or Python file a needle whose first
 //! byte sits in a string literal or comment is no site ([`LazyGuard`], CJ.1a's
@@ -523,7 +539,7 @@ struct Side {
     prefix: &'static str,
     label: &'static str,
     /// CB.21: every site stacks one ENDPOINT_HIT on its node, `host` when the
-    /// site's URL names a literal authority ([`site_host`]). Clients only.
+    /// site's URL names a literal authority ([`ClientUrl::host`]). Clients only.
     hits: bool,
 }
 
@@ -544,15 +560,25 @@ fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -
     let mut guard = LazyGuard::new(path, source);
     // DG.5: the file's code blocks, lexed on the first site that reads them.
     let mut blocks: Option<Blocks> = None;
+    // DT.3a: client URLs read through a binding or a builder, for the marker.
+    let mut reads = UrlReads::default();
+    // DT.3a, per node (index-aligned with `nodes`): some site read it through
+    // a URL builder / some site read it any other way.
+    let mut builder_site: Vec<bool> = Vec::new();
+    let mut plain_site: Vec<bool> = Vec::new();
 
     for r in side.rows {
         if !gate_holds(source, r.gate) {
             continue;
         }
         for offset in sites(source, r.needle, &mut guard) {
-            let Some(name) = read_name(source, offset, r, &mut blocks)
-                .or_else(|| fallback(r).map(str::to_string))
-            else {
+            let url = client_url(source, offset, r);
+            let read = read_name(source, offset, r, url.as_ref(), &mut blocks);
+            if let Some(u) = &url {
+                reads.count(u, read.is_some());
+            }
+            let via_builder = read.is_some() && url.as_ref().is_some_and(|u| u.builder);
+            let Some(name) = read.or_else(|| fallback(r).map(str::to_string)) else {
                 continue;
             };
             let at = match by_name.get(&name) {
@@ -566,17 +592,26 @@ fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -
                         confidence: Confidence::Medium,
                         cells: vec![],
                     });
+                    builder_site.push(false);
+                    plain_site.push(false);
                     nav.record(id, &name, &qname, side.kind, Some(module_id));
                     by_name.insert(name, nodes.len() - 1);
                     nodes.len() - 1
                 }
             };
+            if let Some(seen) = if via_builder {
+                builder_site.get_mut(at)
+            } else {
+                plain_site.get_mut(at)
+            } {
+                *seen = true;
+            }
             let Some(node) = nodes.get_mut(at) else {
                 continue;
             };
             let id = node.id;
             if side.hits {
-                let host = site_host(source, offset, r);
+                let host = url.as_ref().and_then(ClientUrl::host);
                 if host.is_some() {
                     hosted += 1;
                 }
@@ -612,6 +647,19 @@ fn scan(source: &str, path: &str, module_id: NodeId, repo: RepoId, side: Side) -
     }
     if hosted > 0 {
         eprintln!("[ws] client hosts sites={hosted} in {path}");
+    }
+    // DT.3a: a node every one of whose sites read it through a URL builder is
+    // Weak (CH.3a arm a's tier: the builder may transform the path).
+    for (node, (builder, plain)) in nodes.iter_mut().zip(builder_site.iter().zip(&plain_site)) {
+        if *builder && !*plain {
+            node.confidence = Confidence::Weak;
+        }
+    }
+    if reads.read + reads.unread > 0 {
+        eprintln!(
+            "[ws] client urls read={} (local={} field={} builder={} url_struct={}) unread={} in {path}",
+            reads.read, reads.local, reads.field, reads.builder, reads.url_struct, reads.unread
+        );
     }
     guard.report(if side.kind == node_kind::WS_HANDLER {
         "ws_handler"
@@ -665,12 +713,14 @@ fn fallback(r: &WsRow) -> Option<&'static str> {
     })
 }
 
-/// The name one site reads, or `None` when the row reads none there. `blocks`
-/// is the scan's [`Blocks`], built here on the first site that needs it.
+/// The name one site reads, or `None` when the row reads none there. `url` is
+/// the site's [`ClientUrl`] (client URL rows only, [`client_url`]); `blocks` is
+/// the scan's [`Blocks`], built here on the first site that needs it.
 fn read_name(
     source: &str,
     offset: usize,
     r: &WsRow,
+    url: Option<&ClientUrl<'_>>,
     blocks: &mut Option<Blocks>,
 ) -> Option<String> {
     let after = offset.checked_add(r.needle.len())?;
@@ -689,10 +739,7 @@ fn read_name(
             let open = after_angle(source, after)?;
             server_literal(split_top(call_region(source, open)?, b',').first()?)?
         }
-        PathRead::Client(_) | PathRead::ClientUri(_) => {
-            let (arg, interp) = client_url_arg(source, after, r.read)?;
-            client_path(arg, interp)?
-        }
+        PathRead::Client(_) | PathRead::ClientUri(_) => url?.path()?,
         PathRead::ClassBeforeLt => class_before(source, offset, after)?,
         PathRead::LineLiteral => line_literal(source, offset)?,
         PathRead::AxumRoute => {
@@ -991,7 +1038,11 @@ fn after_angle(source: &str, start: usize) -> Option<usize> {
 /// `` `${base}/ws/admin` `` -> `/ws/admin`,
 /// `"wss://api.example.com/echo"` -> `/echo`, `url` -> `None`.
 fn client_path(arg: &str, interp: Interp) -> Option<String> {
-    let text = client_text(arg, interp)?;
+    path_of_text(client_text(arg, interp)?)
+}
+
+/// [`client_path`]'s rule on a URL already read as text ([`client_text`]).
+fn path_of_text(text: String) -> Option<String> {
     let candidate = match (text.find(DYNAMIC), text.rfind(DYNAMIC)) {
         (Some(first), Some(last)) => {
             let tail = text.get(last + DYNAMIC.len_utf8()..).unwrap_or("");
@@ -1025,7 +1076,8 @@ enum Interp {
 /// The URL argument a client row reads at the call whose `(` ends just before
 /// `after`, and how its literals interpolate; `None` for a row that reads no
 /// URL ([`PathRead::Client`] / [`PathRead::ClientUri`] only). The one reader
-/// of that argument, so [`read_name`] and [`site_host`] see the same text.
+/// of that argument: [`client_url`] resolves it once per site, so the path
+/// ([`read_name`]) and the host ([`ClientUrl::host`]) see the same text.
 fn client_url_arg(source: &str, after: usize, read: PathRead) -> Option<(&str, Interp)> {
     let (n, interp) = match read {
         PathRead::Client(n) => (n, Interp::Backtick),
@@ -1125,15 +1177,6 @@ fn client_host(arg: &str, interp: Interp) -> Option<String> {
     client_url_split(head).0
 }
 
-/// CB.21: the host one client site dials. Only a row that reads a client URL
-/// ([`PathRead::Client`], [`PathRead::ClientUri`]) can name one; every other
-/// client row (a channel class, a topic, an import line) records none.
-fn site_host(source: &str, offset: usize, r: &WsRow) -> Option<String> {
-    let after = offset.checked_add(r.needle.len())?;
-    let (arg, interp) = client_url_arg(source, after, r.read)?;
-    client_host(arg, interp)
-}
-
 /// Template-literal content into `out`, each `${...}` span as [`DYNAMIC`].
 fn push_template(out: &mut String, lit: &str) {
     let mut rest = lit;
@@ -1217,6 +1260,708 @@ fn normalise_ws_path(url: &str) -> String {
         }
     }
     url.to_string()
+}
+
+// ---- DT.3a: a client URL read through the code that builds it -------------
+
+/// How far [`local_binding`] walks up from a client call, in lines.
+const LOCAL_LOOKBACK_LINES: usize = 40;
+
+/// Where a client site's URL text came from (DT.3a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UrlVia {
+    /// The call's own argument.
+    Direct,
+    /// The initializer of a `const` / `final` / `:=` binding in a scope
+    /// enclosing the call ([`local_binding`]).
+    Local,
+    /// The initializer of the file's one `readonly` class field, for a
+    /// `this.<m>` argument ([`class_field_init`]).
+    Field,
+}
+
+/// One client site's URL ([`client_url`]): the text its path and host are
+/// read from, a slice of the source, and how that text was reached. A
+/// binding is followed once (depth one), never to a second binding.
+#[derive(Debug, Clone, Copy)]
+struct ClientUrl<'s> {
+    text: &'s str,
+    interp: Interp,
+    via: UrlVia,
+    /// `text` is a URL builder call's one literal ([`builder_literal`]): read
+    /// root-relative ([`root_relative`]), and the node is Weak.
+    builder: bool,
+    /// `text` is a Go `url.URL{..}`'s `Path` literal ([`go_url_struct_path`]).
+    url_struct: bool,
+    /// The site's argument is an identifier, a member or a builder call, the
+    /// shapes the `[ws] client urls` marker counts (read or unread).
+    counted: bool,
+}
+
+impl ClientUrl<'_> {
+    /// The request path the site names ([`client_path`]'s rule).
+    fn path(&self) -> Option<String> {
+        if self.builder {
+            path_of_text(root_relative(client_text(self.text, self.interp)?))
+        } else {
+            client_path(self.text, self.interp)
+        }
+    }
+
+    /// CB.21: the literal authority the site dials ([`client_host`]).
+    fn host(&self) -> Option<String> {
+        client_host(self.text, self.interp)
+    }
+}
+
+/// The `[ws] client urls` marker's counts for one file.
+#[derive(Debug, Default)]
+struct UrlReads {
+    /// Sites whose URL was read through a binding or a builder.
+    read: usize,
+    local: usize,
+    field: usize,
+    /// Subsets of `read`: text from a builder call / a Go `url.URL`.
+    builder: usize,
+    url_struct: usize,
+    /// Identifier / member / builder arguments whose URL stayed unreadable.
+    unread: usize,
+}
+
+impl UrlReads {
+    fn count(&mut self, url: &ClientUrl<'_>, named: bool) {
+        if !url.counted {
+            return;
+        }
+        let indirect = url.via != UrlVia::Direct || url.builder || url.url_struct;
+        if !(named && indirect) {
+            self.unread += 1;
+            return;
+        }
+        self.read += 1;
+        match url.via {
+            UrlVia::Local => self.local += 1,
+            UrlVia::Field => self.field += 1,
+            UrlVia::Direct => {}
+        }
+        self.builder += usize::from(url.builder);
+        self.url_struct += usize::from(url.url_struct);
+    }
+}
+
+/// DT.3a: the [`ClientUrl`] of the client site at `offset`; `None` for a row
+/// that reads no URL. The argument ([`client_url_arg`], Dart's `Uri.parse(..)`
+/// already stepped into) is resolved once:
+/// - a URL builder call with one literal reads that literal ([`builder_literal`]);
+/// - a bare identifier reads the initializer of its binding in a scope
+///   enclosing the call ([`local_binding`]);
+/// - `this.<m>` reads the file's one `readonly <m> = ..` ([`class_field_init`]);
+/// - Go's `<ident>.String()` reads the `Path` of the `url.URL{..}` the
+///   identifier binds ([`go_url_struct_path`]).
+///
+/// An initializer is read like an argument: a builder call in it is a builder
+/// read, and under [`Interp::Dart`] its `Uri.parse(..)` is stepped into again.
+/// Anything else, or a binding that cannot be found, is the argument itself.
+fn client_url<'s>(source: &'s str, offset: usize, r: &WsRow) -> Option<ClientUrl<'s>> {
+    let after = offset.checked_add(r.needle.len())?;
+    let (arg, interp) = client_url_arg(source, after, r.read)?;
+    let direct = ClientUrl {
+        text: arg,
+        interp,
+        via: UrlVia::Direct,
+        builder: false,
+        url_struct: false,
+        counted: false,
+    };
+    let shape = arg.trim();
+    if let Some(lit) = builder_literal(shape) {
+        return Some(ClientUrl {
+            text: lit,
+            builder: true,
+            counted: true,
+            ..direct
+        });
+    }
+    let (init, via, go_string) =
+        if let Some(m) = shape.strip_prefix("this.").filter(|m| is_js_ident(m)) {
+            (class_field_init(source, m), UrlVia::Field, false)
+        } else if is_js_ident(shape) {
+            (local_binding(source, offset, shape), UrlVia::Local, false)
+        } else if let Some(v) = shape.strip_suffix(".String()").filter(|v| is_js_ident(v)) {
+            (local_binding(source, offset, v), UrlVia::Local, true)
+        } else {
+            return Some(ClientUrl {
+                counted: is_member_chain(shape),
+                ..direct
+            });
+        };
+    let unread = ClientUrl {
+        counted: true,
+        ..direct
+    };
+    let Some(init) = init.map(str::trim) else {
+        return Some(unread);
+    };
+    if go_string {
+        return Some(match go_url_struct_path(init) {
+            Some(path) => ClientUrl {
+                text: path,
+                via,
+                url_struct: true,
+                ..unread
+            },
+            None => unread,
+        });
+    }
+    let init = match interp {
+        Interp::Dart => client_uri_arg(init),
+        Interp::Backtick => init,
+    };
+    Some(match builder_literal(init) {
+        Some(lit) => ClientUrl {
+            text: lit,
+            via,
+            builder: true,
+            ..unread
+        },
+        None => ClientUrl {
+            text: init,
+            via,
+            ..unread
+        },
+    })
+}
+
+/// A JS / TS / Dart / Go identifier byte (`$` included, so `$url` is not `url`).
+fn is_js_ident_byte(b: u8) -> bool {
+    is_ident_byte(b) || b == b'$'
+}
+
+/// `s` is exactly one identifier.
+fn is_js_ident(s: &str) -> bool {
+    s.as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_' || *b == b'$')
+        && s.bytes().all(is_js_ident_byte)
+}
+
+/// `s` is a dotted chain of identifiers (`this.urls.buildWsUrl`,
+/// `environment.wsUrl`, `buildUrl`); a `#private` member is allowed.
+fn is_member_chain(s: &str) -> bool {
+    !s.is_empty()
+        && s.split('.')
+            .all(|seg| is_js_ident(seg.strip_prefix('#').unwrap_or(seg)))
+}
+
+/// DT.3a, CH.3a arm a / rule f: `<member chain>(<one string or template
+/// literal>)` whose static text holds a `/` (a trailing `!` allowed): that
+/// literal, quotes included. The builder may transform it, so a read through
+/// it is Weak.
+///
+/// `this.urls.buildWsUrl('api/chat/ws')` -> `'api/chat/ws'`,
+/// `buildUrl(`rooms/${id}`)` -> the template, `t('hello')` -> `None`.
+fn builder_literal(expr: &str) -> Option<&str> {
+    let expr = expr.trim();
+    let expr = expr.strip_suffix(';').map_or(expr, str::trim_end);
+    let open = expr.find('(')?;
+    if !is_member_chain(expr.get(..open)?) {
+        return None;
+    }
+    let region = call_region(expr, open + 1)?;
+    let tail = expr
+        .get(open + 1 + region.len()..)?
+        .strip_prefix(')')?
+        .trim();
+    if !(tail.is_empty() || tail == "!") {
+        return None;
+    }
+    let mut args = split_top(region, b',')
+        .into_iter()
+        .map(str::trim)
+        .filter(|a| !a.is_empty());
+    let (arg, None) = (args.next()?, args.next()) else {
+        return None;
+    };
+    let (lit, rest) = leading_literal(arg)?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    if arg.starts_with('`') {
+        push_template(&mut text, lit);
+    } else {
+        text.push_str(lit);
+    }
+    text.contains('/').then_some(arg)
+}
+
+/// DT.3a: a builder literal with no scheme and no leading `/` is
+/// root-relative (`api/chat/ws` -> `/api/chat/ws`, LB.5's canonical form). A
+/// text that starts with a dynamic piece is left as it is.
+fn root_relative(text: String) -> String {
+    if text.starts_with('/') || text.starts_with(DYNAMIC) || text.contains("://") {
+        text
+    } else {
+        format!("/{text}")
+    }
+}
+
+/// DT.3a: gorilla's canonical client URL, `[&]url.URL{.. Path: "/echo" ..}`:
+/// the `Path` field's literal, quotes included. Any other shape, or a `Path`
+/// that is not one literal, is `None`.
+fn go_url_struct_path(init: &str) -> Option<&str> {
+    let s = init.trim();
+    let s = s.strip_prefix('&').map_or(s, str::trim_start);
+    let body = s.strip_prefix("url.URL")?.trim_start().strip_prefix('{')?;
+    let region = call_region(body, 0)?;
+    if !body
+        .get(region.len()..)?
+        .strip_prefix('}')?
+        .trim()
+        .is_empty()
+    {
+        return None;
+    }
+    split_top(region, b',').into_iter().find_map(|field| {
+        let value = field
+            .trim()
+            .strip_prefix("Path")?
+            .trim_start()
+            .strip_prefix(':')?
+            .trim();
+        let (_, rest) = leading_literal(value)?;
+        rest.trim().is_empty().then_some(value)
+    })
+}
+
+/// Leading-whitespace width of `line`, in bytes (a tab counts one, as gofmt
+/// indents with tabs only).
+fn indent(line: &str) -> usize {
+    line.len() - line.trim_start_matches([' ', '\t']).len()
+}
+
+/// `ident` occurs in `text` as a whole word that is not a member access
+/// (`this.url` / `cfg.url` are not `url`).
+fn mentions(text: &str, ident: &str) -> bool {
+    let b = text.as_bytes();
+    text.match_indices(ident).any(|(i, _)| {
+        let before = i.checked_sub(1).and_then(|j| b.get(j));
+        let after = b.get(i + ident.len());
+        before.is_none_or(|c| !is_js_ident_byte(*c) && *c != b'.')
+            && after.is_none_or(|c| !is_js_ident_byte(*c))
+    })
+}
+
+/// The leading identifier-ish word of `s` (`export`, `const`, `func`).
+fn first_word(s: &str) -> &str {
+    let end = s
+        .bytes()
+        .position(|b| !is_js_ident_byte(b))
+        .unwrap_or(s.len());
+    s.get(..end).unwrap_or("")
+}
+
+/// `s` with its first word and the whitespace after it removed.
+fn after_word<'a>(s: &'a str, word: &str) -> Option<&'a str> {
+    let rest = s.strip_prefix(word)?;
+    rest.starts_with([' ', '\t']).then(|| rest.trim_start())
+}
+
+/// Statement-opening words that start a block but bind no parameter.
+const CONTROL_WORDS: &[&str] = &[
+    "if",
+    "else",
+    "while",
+    "switch",
+    "do",
+    "try",
+    "with",
+    "return",
+    "when",
+    "using",
+    "lock",
+    "synchronized",
+    "foreach",
+    "select",
+    "defer",
+    "go",
+];
+
+/// A shallower line `t` (trimmed) the walk climbs through binds `ident`:
+/// a function / method / arrow / constructor header (TS `function`, Go
+/// `func`, a line ending `=>` / `=> {`, `<name>(<params>)<ret?> {`,
+/// `constructor(`) or a `for` / `catch` header, whose text names `ident`.
+/// `if` / `while` / `switch` / `} else {` never bind.
+fn binds_param(t: &str, ident: &str) -> bool {
+    let t = t.trim_start_matches(['}', ' ', '\t']);
+    let first = first_word(t);
+    let header = matches!(first, "for" | "catch" | "function" | "func" | "constructor")
+        || mentions_word(t, "function")
+        || mentions_word(t, "func")
+        || t.contains("=>")
+        || (t.ends_with('{') && t.contains('(') && !CONTROL_WORDS.contains(&first));
+    header && mentions(t, ident)
+}
+
+/// `word` occurs in `t` as a whole word.
+fn mentions_word(t: &str, word: &str) -> bool {
+    let b = t.as_bytes();
+    t.match_indices(word).any(|(i, _)| {
+        i.checked_sub(1)
+            .and_then(|j| b.get(j))
+            .is_none_or(|c| !is_js_ident_byte(*c))
+            && b.get(i + word.len()).is_none_or(|c| !is_js_ident_byte(*c))
+    })
+}
+
+/// What one statement line at the walk's level says about `ident`.
+enum LineBinding {
+    /// An immutable binding of `ident`; the initializer starts at this byte
+    /// offset of the trimmed line.
+    Init(usize),
+    /// A mutable or unreadable binding of `ident`, or an assignment to it:
+    /// the walk ends with no read (CH.3a's rule).
+    Mutable,
+    /// Nothing about `ident`.
+    Other,
+}
+
+/// Words that open a declaration whose binding cannot change.
+const IMMUTABLE_DECL: &[&str] = &["const", "final"];
+/// Words that open a declaration whose binding can (or that cannot be read).
+const MUTABLE_DECL: &[&str] = &["let", "var", "import"];
+/// Modifiers a declaration may carry before its keyword.
+const DECL_MODIFIERS: &[&str] = &["export", "static", "late", "public", "private", "protected"];
+/// Words that start a statement, never a `<Type> <name> =` declaration.
+const NOT_A_TYPE: &[&str] = &[
+    "return", "await", "throw", "new", "case", "yield", "typeof", "delete", "void", "else", "in",
+    "of", "if", "for", "while", "readonly", "default", "type",
+];
+
+/// The byte offset in `s` just after its first top-level assignment `=` (not
+/// `==` / `=>` / `<=` / `>=` / `!=`), or `None`.
+fn assign_at(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            match c {
+                b'\\' => i += 1,
+                _ if c == q => quote = None,
+                _ => {}
+            }
+        } else {
+            match c {
+                b'\'' | b'"' | b'`' => quote = Some(c),
+                b'(' | b'[' | b'{' | b'<' => depth += 1,
+                b')' | b']' | b'}' | b'>' => depth -= 1,
+                b'=' if depth <= 0 => {
+                    let prev = i.checked_sub(1).and_then(|j| b.get(j)).copied();
+                    let next = b.get(i + 1).copied();
+                    let compare = matches!(prev, Some(b'=' | b'!' | b'<' | b'>'))
+                        || matches!(next, Some(b'=' | b'>'));
+                    if !compare {
+                        return Some(i + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// DT.3a: what the statement line `t` (trimmed) says about `ident`.
+///
+/// Immutable: TS / JS `const x =` / `const x: T =` (optionally `export`), Dart
+/// `final [T ]x =` / `const [T ]x =` (`static` / `late` allowed), Go `x :=`
+/// and `const x [T] =`. Mutable: `let` / `var` / `import` naming `ident`
+/// (destructuring included), a `<Type> x =` declaration with no immutable
+/// keyword, a multi-name `a, x :=`, and an assignment `x =` / `x +=` / `x++`.
+fn binding_on(t: &str, ident: &str) -> LineBinding {
+    let mut s = t;
+    while let Some(rest) = DECL_MODIFIERS.iter().find_map(|m| after_word(s, m)) {
+        s = rest;
+    }
+    let first = first_word(s);
+    if IMMUTABLE_DECL.contains(&first) || MUTABLE_DECL.contains(&first) {
+        let Some(rest) = after_word(s, first) else {
+            return LineBinding::Other;
+        };
+        let at = assign_at(rest);
+        let declared = at.and_then(|a| rest.get(..a - 1)).unwrap_or(rest);
+        if !mentions(declared, ident) {
+            return LineBinding::Other;
+        }
+        if MUTABLE_DECL.contains(&first) {
+            return LineBinding::Mutable;
+        }
+        // `x`, `x: T`, `x T` (Go) or `T x` (Dart / C#), and nothing else.
+        let declared = declared.trim();
+        let simple = declared == ident
+            || declared.strip_prefix(ident).is_some_and(|tail| {
+                let ty = tail.trim_start();
+                tail.starts_with([' ', '\t', ':'])
+                    && (ty.starts_with(':')
+                        || (ty.starts_with(|c: char| c.is_ascii_alphabetic()) && !ty.contains(',')))
+            })
+            || declared
+                .rsplit_once([' ', '\t'])
+                .is_some_and(|(ty, name)| name == ident && !ty.contains([',', '{', '[', '=']));
+        return match at {
+            Some(a) if simple => LineBinding::Init(t.len() - rest.len() + a),
+            _ => LineBinding::Mutable,
+        };
+    }
+    // Go `x :=` / `a, x :=`.
+    if let Some(at) = s.find(":=") {
+        let lhs = s.get(..at).unwrap_or("").trim();
+        if lhs == ident {
+            return LineBinding::Init(t.len() - s.len() + at + 2);
+        }
+        let names = lhs.split(',').map(str::trim);
+        if lhs.contains(',')
+            && names.clone().all(is_js_ident)
+            && names.into_iter().any(|n| n == ident)
+        {
+            return LineBinding::Mutable;
+        }
+    }
+    // An assignment to `ident`.
+    if let Some(rest) = s.strip_prefix(ident)
+        && !rest.starts_with(is_js_ident_byte_char)
+    {
+        let rest = rest.trim_start();
+        let op = rest.trim_start_matches(['+', '-', '*', '/', '%', '|', '&', '?', '^']);
+        let assigns = (op.starts_with('=') && !op.starts_with("==") && !op.starts_with("=>"))
+            || rest.starts_with("++")
+            || rest.starts_with("--");
+        if assigns {
+            return LineBinding::Mutable;
+        }
+    }
+    // `<Type> x =` / `<Type> x;` with no immutable keyword (Dart, C#, Java).
+    if !first.is_empty() && !NOT_A_TYPE.contains(&first) {
+        let mut words = s.split_whitespace();
+        if let (Some(ty), Some(name)) = (words.next(), words.next()) {
+            let name = name.trim_end_matches(';');
+            let next = words.next().unwrap_or("");
+            let declares = name == ident
+                && (s.trim_end().ends_with(';')
+                    || (next.starts_with('=') && !next.starts_with("==")))
+                && ty
+                    .bytes()
+                    .all(|b| is_js_ident_byte(b) || b"<>?.[]".contains(&b));
+            if declares {
+                return LineBinding::Mutable;
+            }
+        }
+    }
+    LineBinding::Other
+}
+
+fn is_js_ident_byte_char(c: char) -> bool {
+    u8::try_from(c).is_ok_and(is_js_ident_byte)
+}
+
+/// DT.3a: the initializer text of the statement whose value starts at
+/// `start`, up to its top-level `;`, a trailing `//` comment, or the end of
+/// its continuation lines (lines deeper than `base`, the statement line's
+/// indentation). Bounded by `limit` and [`MAX_REGION`]; `None` when the
+/// statement does not end before either.
+fn initializer(source: &str, start: usize, limit: usize, base: usize) -> Option<&str> {
+    let region = clip(source.get(start..limit.min(source.len()))?, MAX_REGION);
+    let b = region.as_bytes();
+    let mut depth = 0i32;
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if let Some(q) = quote {
+            match c {
+                b'\\' => i += 1,
+                b'\n' if q != b'`' => quote = None,
+                _ if c == q => quote = None,
+                _ => {}
+            }
+        } else {
+            match c {
+                b'\'' | b'"' | b'`' => quote = Some(c),
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    if depth == 0 {
+                        return region.get(..i);
+                    }
+                    depth -= 1;
+                }
+                b';' if depth == 0 => return region.get(..i),
+                b'/' if b.get(i + 1) == Some(&b'/') => {
+                    if depth == 0 {
+                        return region.get(..i);
+                    }
+                    i = region.get(i..)?.find('\n').map_or(b.len(), |nl| i + nl) - 1;
+                }
+                b'\n' if depth == 0 => {
+                    let continues = region
+                        .get(i + 1..)?
+                        .split('\n')
+                        .find(|l| !l.trim().is_empty())
+                        .is_some_and(|l| indent(l) > base);
+                    if !continues {
+                        return region.get(..i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// A line that is only a comment (`//`, `/* .. */`, a `*` doc line, `# `).
+fn is_comment_line(t: &str) -> bool {
+    t.starts_with("//")
+        || t.starts_with("/*")
+        || t.starts_with("*/")
+        || t == "*"
+        || t.starts_with("* ")
+        || t.starts_with("# ")
+}
+
+/// DT.3a: the initializer of the immutable binding of `ident` in a scope
+/// enclosing the call at `call`, or `None`.
+///
+/// The walk goes up from the call line, at most [`LOCAL_LOOKBACK_LINES`].
+/// `level` starts at the call line's indentation; a deeper line is skipped (a
+/// closed nested block or a continuation), unless it assigns `ident`. A
+/// shallower line opens an enclosing block and lowers `level`: when it is a
+/// function / method / arrow / constructor or `for` / `catch` header whose
+/// text names `ident` ([`binds_param`]), or the `)` closing a multi-line
+/// parameter list whose lines name it, `ident` is that parameter and the walk
+/// ends with `None`; a shallower line that is a complete statement (ends `;`)
+/// or a bare `}` means the layout was lost, and the walk ends too. At `level`,
+/// a binding line ([`binding_on`]) ends the walk: an immutable one returns
+/// its initializer ([`initializer`]), a mutable one `None`. A call line whose
+/// text before the needle opens a scope (`{` / `=>`) naming `ident` reads
+/// nothing.
+fn local_binding<'s>(source: &'s str, call: usize, ident: &str) -> Option<&'s str> {
+    let line_start = source.get(..call)?.rfind('\n').map_or(0, |nl| nl + 1);
+    let before = source.get(line_start..call)?;
+    if (before.contains('{') || before.contains("=>")) && mentions(before, ident) {
+        return None;
+    }
+    let mut level = indent(before);
+    let mut params_above = false;
+    let mut pos = line_start;
+    for _ in 0..LOCAL_LOOKBACK_LINES {
+        if pos == 0 {
+            break;
+        }
+        let end = pos - 1;
+        let start = source.get(..end)?.rfind('\n').map_or(0, |nl| nl + 1);
+        pos = start;
+        let raw = source.get(start..end)?;
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let t = line.trim();
+        if t.is_empty() || is_comment_line(t) {
+            continue;
+        }
+        let ind = indent(line);
+        if ind > level {
+            if params_above && mentions(t, ident) {
+                return None;
+            }
+            if matches!(binding_on(t, ident), LineBinding::Mutable) && t.starts_with(ident) {
+                return None;
+            }
+            continue;
+        }
+        if ind < level {
+            if t.ends_with(';') || t == "}" || binds_param(t, ident) {
+                return None;
+            }
+            params_above = t.starts_with(')');
+            level = ind;
+            continue;
+        }
+        if params_above {
+            params_above = false;
+            if mentions(t, ident) {
+                return None;
+            }
+            continue;
+        }
+        match binding_on(t, ident) {
+            LineBinding::Init(at) => {
+                let value = start + (line.len() - line.trim_start().len()) + at;
+                return initializer(source, value, line_start, ind);
+            }
+            LineBinding::Mutable => return None,
+            LineBinding::Other => {}
+        }
+    }
+    None
+}
+
+/// DT.3a: for a `this.<m>` client argument, the initializer of the file's
+/// one `readonly <m> = <expr>` (a TS / JS class field; `private` / `public` /
+/// `protected` / `static` allowed). Any other declaration of `<m>` in the
+/// file (a non-readonly field, a getter, a parameter property, a second
+/// field) makes it `None`.
+fn class_field_init<'s>(source: &'s str, member: &str) -> Option<&'s str> {
+    let mut found: Option<(usize, usize)> = None;
+    let mut decls = 0usize;
+    let mut offset = 0usize;
+    for raw in source.split_inclusive('\n') {
+        let line_at = offset;
+        offset += raw.len();
+        let line = raw.trim_end_matches(['\n', '\r']);
+        let t = line.trim_start();
+        let mut s = t;
+        let mut readonly = false;
+        loop {
+            if let Some(rest) = [
+                "private",
+                "public",
+                "protected",
+                "static",
+                "override",
+                "declare",
+            ]
+            .iter()
+            .find_map(|m| after_word(s, m))
+            {
+                s = rest;
+            } else if let Some(rest) = after_word(s, "readonly") {
+                s = rest;
+                readonly = true;
+            } else {
+                break;
+            }
+        }
+        let accessor = ["get", "set"].iter().find_map(|w| after_word(s, w));
+        let Some(rest) = accessor.unwrap_or(s).strip_prefix(member) else {
+            continue;
+        };
+        let rest = rest.trim_start_matches(['?', '!']).trim_start();
+        if rest.starts_with(is_js_ident_byte_char)
+            || !(rest.starts_with([':', '=', ';', '(']) || rest.is_empty())
+        {
+            continue;
+        }
+        decls += 1;
+        if readonly && accessor.is_none() {
+            let at = assign_at(rest).map(|a| t.len() - rest.len() + a);
+            found = at.map(|a| (line_at + (line.len() - t.len()) + a, indent(line)));
+        }
+    }
+    let (value, base) = found.filter(|_| decls == 1)?;
+    initializer(source, value, source.len(), base)
 }
 
 // ---- DG.5: paths read off the file's routing structure -------------------
@@ -2786,5 +3531,403 @@ mod tests {
         assert_eq!(qnames(&clients(js)), vec!["ws_client:/ws/js"]);
         // Nor is a Dart client ever a handler.
         assert!(handlers(DART_CHANNEL).nodes.is_empty());
+    }
+
+    // ---- DT.3a: a client URL read through the code that builds it -------
+
+    /// The `[ws] client urls` counts one file's client sites give, by the
+    /// scan's own per-site steps.
+    fn url_reads(src: &str) -> UrlReads {
+        let mut reads = UrlReads::default();
+        let mut guard = LazyGuard::new("t.src", src);
+        let mut blocks = None;
+        for r in CLIENT_ROWS.iter().filter(|r| gate_holds(src, r.gate)) {
+            for offset in sites(src, r.needle, &mut guard) {
+                let url = client_url(src, offset, r);
+                let read = read_name(src, offset, r, url.as_ref(), &mut blocks);
+                if let Some(u) = &url {
+                    reads.count(u, read.is_some());
+                }
+            }
+        }
+        reads
+    }
+
+    /// `(read, local, field, builder, url_struct, unread)`.
+    fn counts(r: &UrlReads) -> (usize, usize, usize, usize, usize, usize) {
+        (r.read, r.local, r.field, r.builder, r.url_struct, r.unread)
+    }
+
+    /// examples-glia's `OrderFeedService::connect`.
+    const ORDER_FEED: &str = "import { environment } from '../../../environments/environment';\n\
+        \n\
+        @Injectable({ providedIn: 'root' })\n\
+        export class OrderFeedService {\n\
+        \x20 readonly updates = new Subject<Order>();\n\
+        \x20 private socket?: WebSocket;\n\
+        \n\
+        \x20 connect(): void {\n\
+        \x20   const url = `${environment.liveUrl}/live/orders`;\n\
+        \x20   this.socket = new WebSocket(url);\n\
+        \x20   this.socket.onmessage = (event) => this.updates.next(JSON.parse(event.data));\n\
+        \x20 }\n\
+        }\n";
+
+    #[test]
+    fn const_local_template_reads_its_tail() {
+        let out = clients(ORDER_FEED);
+        assert_eq!(
+            anchored(&out),
+            vec![("ws_client:/live/orders".to_string(), 9)]
+        );
+        assert_eq!(out.nodes[0].confidence, Confidence::Medium);
+        assert_eq!(hits(&out)[0].1, vec![r#"{"via":"ws"}"#.to_string()]);
+        assert_eq!(counts(&url_reads(ORDER_FEED)), (1, 1, 0, 0, 0, 0));
+        // `export const`, a type annotation and a continuation line read too.
+        let src = "export function open() {\n\
+                   \x20 const url: string =\n\
+                   \x20   `${base}/ws/typed`;\n\
+                   \x20 return new WebSocket(url);\n}\n";
+        assert_eq!(qnames(&clients(src)), vec!["ws_client:/ws/typed"]);
+    }
+
+    /// quokka's `ChatWebSocketTransport::openSocket`.
+    #[test]
+    fn builder_local_reads_its_literal() {
+        let src = "export class ChatWebSocketTransport {\n\
+                   \x20 constructor(\n\
+                   \x20   private readonly apiUrlBuilder: ApiUrlBuilderService\n\
+                   \x20 ) {}\n\
+                   \n\
+                   \x20 private openSocket(isReconnect: boolean): void {\n\
+                   \x20   if (this.manuallyDisconnected || this.authRequired) {\n\
+                   \x20     this.setConnectionState('DISCONNECTED');\n\
+                   \x20     return;\n\
+                   \x20   }\n\
+                   \n\
+                   \x20   this.setConnectionState(isReconnect ? 'RECONNECTING' : 'CONNECTING');\n\
+                   \n\
+                   \x20   const url = this.apiUrlBuilder.buildWsUrl('api/protected/chat/ws');\n\
+                   \x20   const nextSocket = new WebSocket(url);\n\
+                   \x20   this.socket = nextSocket;\n\
+                   \x20 }\n\
+                   }\n";
+        let out = clients(src);
+        assert_eq!(
+            anchored(&out),
+            vec![("ws_client:/api/protected/chat/ws".to_string(), 14)]
+        );
+        assert_eq!(
+            out.nodes[0].confidence,
+            Confidence::Weak,
+            "a builder read is Weak"
+        );
+        assert_eq!(counts(&url_reads(src)), (1, 1, 0, 1, 0, 0));
+        // The call's own argument reads through a builder as well; a literal
+        // with a leading `/` stays as written, a template's static tail reads.
+        let src = "connect() {\n  return new WebSocket(this.urls.buildWsUrl('/ws/direct'));\n}\n\
+                   rooms(id) {\n  return new WebSocket(buildUrl(`rooms/${id}/ws`));\n}\n";
+        let out = clients(src);
+        assert_eq!(qnames(&out), vec!["ws_client:/ws/direct", "ws_client:/ws"]);
+        assert!(out.nodes.iter().all(|n| n.confidence == Confidence::Weak));
+        assert_eq!(counts(&url_reads(src)), (2, 0, 0, 2, 0, 0));
+        // A literal read once through a builder and once directly is Medium.
+        let src = "a() {\n  const url = this.urls.buildWsUrl('/ws/mix');\n  return new WebSocket(url);\n}\n\
+                   b() {\n  return new WebSocket('/ws/mix');\n}\n";
+        assert_eq!(clients(src).nodes[0].confidence, Confidence::Medium);
+        // A builder argument with no `/` is no URL; two arguments are no builder.
+        for arg in ["this.i18n.t('hello')", "this.urls.build('api/ws', opts)"] {
+            let src = format!("f() {{\n  const url = {arg};\n  return new WebSocket(url);\n}}\n");
+            assert_eq!(qnames(&clients(&src)), vec!["ws_client:ws"], "{arg}");
+        }
+    }
+
+    #[test]
+    fn let_or_reassigned_local_is_unread() {
+        let src = "admin() {\n\
+                   \x20 let url = '/admin/live';\n\
+                   \x20 url = url + '?x';\n\
+                   \x20 return new WebSocket(url);\n}\n";
+        assert_eq!(qnames(&clients(src)), vec!["ws_client:ws"]);
+        assert_eq!(counts(&url_reads(src)), (0, 0, 0, 0, 0, 1));
+        for decl in [
+            "let url = '/a';",
+            "var url = '/a';",
+            "url = '/a';",
+            "url += '/a';",
+            "const { url } = cfg;",
+            "String url = '/a';",
+        ] {
+            let src = format!("f() {{\n  {decl}\n  return new WebSocket(url);\n}}\n");
+            assert_eq!(qnames(&clients(&src)), vec!["ws_client:ws"], "{decl}");
+        }
+        // A reassignment in a closed nested block also blocks the read.
+        let src = "f() {\n  u := \"ws://h/a\"\n  if x {\n    u = other\n  }\n  websocket.DefaultDialer.Dial(u, nil)\n}\n";
+        let go = format!("import \"github.com/gorilla/websocket\"\n{src}");
+        assert_eq!(qnames(&clients(&go)), vec!["ws_client:ws"]);
+    }
+
+    #[test]
+    fn const_in_another_function_is_not_read() {
+        let src = "export class Feed {\n\
+                   \x20 first(): void {\n\
+                   \x20   const url = '/ws/first';\n\
+                   \x20   this.log(url);\n\
+                   \x20 }\n\
+                   \n\
+                   \x20 second(): WebSocket {\n\
+                   \x20   return new WebSocket(url);\n\
+                   \x20 }\n\
+                   }\n";
+        assert_eq!(qnames(&clients(src)), vec!["ws_client:ws"]);
+        // A nested closure reads the const of the function enclosing it, and
+        // a module const reads through a function that does not shadow it.
+        let src = "const WS_URL = 'wss://feed.example.com/ws/module';\n\
+                   export function outer() {\n\
+                   \x20 const url = '/ws/outer';\n\
+                   \x20 return () => {\n\
+                   \x20   return new WebSocket(url);\n\
+                   \x20 };\n\
+                   }\n\
+                   export function module() {\n\
+                   \x20 return new WebSocket(WS_URL);\n\
+                   }\n";
+        assert_eq!(
+            qnames(&clients(src)),
+            vec!["ws_client:/ws/outer", "ws_client:/ws/module"]
+        );
+    }
+
+    #[test]
+    fn parameter_is_not_followed() {
+        let module = "const url = '/ws/module';\n";
+        for body in [
+            "export function connect(url: string) {\n  return new WebSocket(url);\n}\n",
+            "class C {\n  connect(url: string): WebSocket {\n    return new WebSocket(url);\n  }\n}\n",
+            "class C {\n  connect(\n    url: string,\n  ): WebSocket {\n    return new WebSocket(url);\n  }\n}\n",
+            "const open = (url: string) => {\n  return new WebSocket(url);\n};\n",
+            "const open = (url) => new WebSocket(url);\n",
+            "for (const url of urls) {\n  new WebSocket(url);\n}\n",
+            "class C {\n  constructor(url: string) {\n    this.ws = new WebSocket(url);\n  }\n}\n",
+        ] {
+            let src = format!("{module}{body}");
+            assert_eq!(qnames(&clients(&src)), vec!["ws_client:ws"], "{body}");
+        }
+        let go = "import \"github.com/gorilla/websocket\"\n\
+                  const u = \"ws://h/module\"\n\
+                  func dial(u string) {\n\
+                  \tc, _, _ := websocket.DefaultDialer.Dial(u, nil)\n\
+                  }\n";
+        assert_eq!(qnames(&clients(go)), vec!["ws_client:ws"]);
+    }
+
+    #[test]
+    fn else_branch_does_not_read_the_if_branch() {
+        let src = "f(a) {\n\
+                   \x20 if (a) {\n\
+                   \x20   const url = '/a';\n\
+                   \x20 } else {\n\
+                   \x20   return new WebSocket(url);\n\
+                   \x20 }\n}\n";
+        assert_eq!(qnames(&clients(src)), vec!["ws_client:ws"]);
+        let one_line = "if (a) { const url = '/a' } else { new WebSocket(url) }\n";
+        assert_eq!(qnames(&clients(one_line)), vec!["ws_client:ws"]);
+        // A const before the `if` is in an enclosing scope of both branches.
+        let src = "f(a) {\n\
+                   \x20 const url = '/ws/both';\n\
+                   \x20 if (a) {\n\
+                   \x20   log(a);\n\
+                   \x20 } else {\n\
+                   \x20   return new WebSocket(url);\n\
+                   \x20 }\n}\n";
+        assert_eq!(qnames(&clients(src)), vec!["ws_client:/ws/both"]);
+    }
+
+    #[test]
+    fn readonly_field_reads() {
+        let src = "export class Feed {\n\
+                   \x20 private readonly wsUrl = 'ws://h/feed';\n\
+                   \n\
+                   \x20 open(): WebSocket {\n\
+                   \x20   return new WebSocket(this.wsUrl);\n\
+                   \x20 }\n\
+                   }\n";
+        let out = clients(src);
+        assert_eq!(
+            hits(&out),
+            vec![(
+                "ws_client:/feed".to_string(),
+                vec![r#"{"via":"ws","host":"h"}"#.to_string()]
+            )]
+        );
+        assert_eq!(counts(&url_reads(src)), (1, 0, 1, 0, 0, 0));
+        // A non-readonly field, a readonly with no initializer, a getter and
+        // two declarations read nothing.
+        for fields in [
+            "  private wsUrl = 'ws://h/feed';\n",
+            "  readonly wsUrl: string;\n",
+            "  get wsUrl() { return 'ws://h/feed'; }\n",
+            "  readonly wsUrl = 'ws://h/feed';\n  readonly wsUrl = 'ws://h/other';\n",
+        ] {
+            let src = format!(
+                "export class Feed {{\n{fields}  open() {{\n    return new WebSocket(this.wsUrl);\n  }}\n}}\n"
+            );
+            assert_eq!(qnames(&clients(&src)), vec!["ws_client:ws"], "{fields}");
+            assert_eq!(counts(&url_reads(&src)), (0, 0, 0, 0, 0, 1), "{fields}");
+        }
+        // A member chain beyond `this.<m>` stays unread.
+        let src = "f() { return new WebSocket(environment.wsUrl); }\n";
+        assert_eq!(counts(&url_reads(src)), (0, 0, 0, 0, 0, 1));
+    }
+
+    #[test]
+    fn dart_final_uri_reads() {
+        let src = "import 'package:web_socket_channel/web_socket_channel.dart';\n\
+                   \n\
+                   WebSocketChannel live() {\n\
+                   \x20 final uri = Uri.parse('ws://h/live');\n\
+                   \x20 return WebSocketChannel.connect(uri);\n\
+                   }\n\
+                   \n\
+                   WebSocketChannel feed() {\n\
+                   \x20 const String url = 'ws://h/feed/$room';\n\
+                   \x20 final ok = 1;\n\
+                   \x20 return WebSocketChannel.connect(Uri.parse(url));\n\
+                   }\n";
+        let out = clients(src);
+        assert_eq!(
+            hits(&out),
+            vec![
+                (
+                    "ws_client:/live".to_string(),
+                    vec![r#"{"via":"ws","host":"h"}"#.to_string()]
+                ),
+                (
+                    "ws_client:/feed/".to_string(),
+                    vec![r#"{"via":"ws","host":"h"}"#.to_string()]
+                ),
+            ]
+        );
+        assert_eq!(counts(&url_reads(src)), (2, 2, 0, 0, 0, 0));
+        // A Dart class's `final` field is in scope of its methods by bare name.
+        let src = "import 'package:web_socket_channel/io.dart';\n\
+                   class Feed {\n\
+                   \x20 static final url = 'ws://h/ws/field';\n\
+                   \x20 IOWebSocketChannel open() {\n\
+                   \x20   return IOWebSocketChannel.connect(url);\n\
+                   \x20 }\n\
+                   }\n";
+        assert_eq!(qnames(&clients(src)), vec!["ws_client:/ws/field"]);
+    }
+
+    #[test]
+    fn go_url_struct_reads() {
+        let src = "package main\n\
+                   \n\
+                   import (\n\
+                   \t\"net/url\"\n\
+                   \n\
+                   \t\"github.com/gorilla/websocket\"\n\
+                   )\n\
+                   \n\
+                   func main() {\n\
+                   \tu := url.URL{Scheme: \"ws\", Host: *addr, Path: \"/echo\"}\n\
+                   \tlog.Printf(\"connecting to %s\", u.String())\n\
+                   \n\
+                   \tc, _, err := websocket.DefaultDialer.Dial(u.String(), nil)\n\
+                   \tdefer c.Close()\n\
+                   }\n\
+                   \n\
+                   func feed() {\n\
+                   \tf := &url.URL{\n\
+                   \t\tScheme: \"wss\",\n\
+                   \t\tHost:   host,\n\
+                   \t\tPath:   \"/ws/feed\", // the feed socket\n\
+                   \t}\n\
+                   \tw := \"ws://chat-svc:8080/ws/raw\"\n\
+                   \twebsocket.DefaultDialer.Dial(f.String(), nil)\n\
+                   \twebsocket.DefaultDialer.Dial(w, nil)\n\
+                   }\n";
+        let out = clients(src);
+        assert_eq!(
+            anchored(&out),
+            vec![
+                ("ws_client:/echo".to_string(), 12),
+                ("ws_client:/ws/feed".to_string(), 23),
+                ("ws_client:/ws/raw".to_string(), 24),
+            ]
+        );
+        assert_eq!(counts(&url_reads(src)), (3, 3, 0, 0, 2, 0));
+        // `.String()` of anything but a url.URL reads nothing.
+        let src = "import \"github.com/gorilla/websocket\"\n\
+                   func f() {\n\tu := build()\n\twebsocket.DefaultDialer.Dial(u.String(), nil)\n}\n";
+        assert_eq!(qnames(&clients(src)), vec!["ws_client:ws"]);
+        assert_eq!(counts(&url_reads(src)), (0, 0, 0, 0, 0, 1));
+    }
+
+    #[test]
+    fn host_read_through_local() {
+        let src = "export function chat() {\n\
+                   \x20 // the chat service\n\
+                   \x20 const u = 'ws://chat-svc:8080/ws';\n\
+                   \x20 return new WebSocket(u);\n}\n";
+        assert_eq!(
+            hits(&clients(src)),
+            vec![(
+                "ws_client:/ws".to_string(),
+                vec![r#"{"via":"ws","host":"chat-svc:8080"}"#.to_string()]
+            )]
+        );
+    }
+
+    /// The walk is bounded and never panics on odd text.
+    #[test]
+    fn local_walk_is_bounded_and_total() {
+        let mut src = String::from("const url = '/ws/far';\n");
+        src.push_str(&"log(1);\n".repeat(LOCAL_LOOKBACK_LINES));
+        src.push_str("new WebSocket(url);\n");
+        assert_eq!(qnames(&clients(&src)), vec!["ws_client:ws"]);
+        for src in [
+            "new WebSocket(url",
+            "const url = 'ß/ws\nnew WebSocket(url)",
+            "const url = `${\nnew WebSocket(url)",
+            "\u{feff}const url = '/é';\r\nnew WebSocket(url);\r\n",
+            "  const url = '/ws/a';\nnew WebSocket(url)",
+        ] {
+            let _ = clients(src);
+        }
+        // CRLF line ends read like LF.
+        let src = "f() {\r\n  const url = '/ws/crlf';\r\n  return new WebSocket(url);\r\n}\r\n";
+        assert_eq!(qnames(&clients(src)), vec!["ws_client:/ws/crlf"]);
+    }
+
+    #[test]
+    fn builder_and_struct_readers() {
+        assert_eq!(
+            builder_literal("this.urls.buildWsUrl('api/chat/ws')"),
+            Some("'api/chat/ws'")
+        );
+        assert_eq!(builder_literal("this.#urls.ws(\"/x\")!;"), Some("\"/x\""));
+        assert_eq!(builder_literal("buildUrl(`a/${b}`)"), Some("`a/${b}`"));
+        assert_eq!(builder_literal("new URL('/x')"), None);
+        assert_eq!(
+            builder_literal("this.urls.ws('/x').replace('a', 'b')"),
+            None
+        );
+        assert_eq!(builder_literal("this.urls.ws(`${x}`)"), None);
+        assert_eq!(builder_literal("this.urls.ws(path)"), None);
+        assert_eq!(root_relative("api/ws".into()), "/api/ws");
+        assert_eq!(root_relative("/api/ws".into()), "/api/ws");
+        assert_eq!(root_relative("ws://h/x".into()), "ws://h/x");
+        assert_eq!(go_url_struct_path("url.URL{Path: \"/a\"}"), Some("\"/a\""));
+        assert_eq!(
+            go_url_struct_path("&url.URL{Scheme: \"ws\", RawPath: \"/r\"}"),
+            None
+        );
+        assert_eq!(go_url_struct_path("url.URL{Path: p}"), None);
+        assert_eq!(
+            go_url_struct_path("url.URL{Path: \"/a\"}.ResolveReference(b)"),
+            None
+        );
     }
 }
