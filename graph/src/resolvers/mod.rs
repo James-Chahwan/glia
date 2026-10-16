@@ -17,6 +17,8 @@ mod grpc;
 mod rpc;
 mod queue;
 mod graphql;
+// DT.5f: gqlgen's schema-first resolver sets (SDL field -> Go method).
+mod gqlgen;
 mod websocket;
 mod eventbus;
 mod shared_schema;
@@ -36,6 +38,7 @@ pub use grpc::GrpcStackResolver;
 pub use rpc::RpcStackResolver;
 pub use queue::QueueStackResolver;
 pub use graphql::GraphQLStackResolver;
+pub use gqlgen::GqlgenResolver;
 pub use websocket::WebSocketStackResolver;
 pub use eventbus::EventBusResolver;
 pub use shared_schema::SharedSchemaResolver;
