@@ -10,9 +10,8 @@
 //! label.
 //!
 //! - `forbid_edge {from, to}` (`transitive` false): every DIRECT edge (the
-//!   observed fact; transitive reach is `effects` / `diff-impact` business)
-//!   whose category is in the rule's set, `from` end in scope `from` and `to`
-//!   end in scope `to`.
+//!   observed fact) whose category is in the rule's set, `from` end in scope
+//!   `from` and `to` end in scope `to`.
 //!   The set is the rule's `categories` (edge category NAMES), else
 //!   [`default_forbid_categories`]: IMPORTS plus the code profile's carry
 //!   edges, minus TESTS and DOCUMENTS (a test or a doc legitimately crosses
@@ -30,10 +29,12 @@
 //!   text, DB.1): evaluated through the rules layer, one [`RULE`]
 //!   [`Violation`] per `violation` row (module doc "Rule invariants and
 //!   min_tier").
-//! - `invariant {text}` without a `rule`, a `forbid_edge` with `transitive`
-//!   (DB.1, evaluated once DB.3b lands) and any kind this crate cannot
-//!   evaluate: listed in [`CheckReport::unchecked`], never dropped, never
-//!   mis-evaluated as a direct-edge rule.
+//! - `forbid_edge {from, to, via}` with `transitive` (overlay version 2,
+//!   DB.1): every PATH from `from` into `to` through any third scope, a
+//!   `via` facade allowed, one [`FORBID_PATH`] [`Violation`] per node of
+//!   `to` reached (module doc "Transitive forbid_edge (Q3)").
+//! - `invariant {text}` without a `rule`, and any kind this crate cannot
+//!   evaluate: listed in [`CheckReport::unchecked`], never dropped.
 //!
 //! # Tiers (CC.3)
 //!
@@ -59,6 +60,58 @@
 //!
 //! - rule: the row's tier, the rules layer's lattice (the min over its
 //!   derivations of the max over their inputs), named as `why` names it.
+//! - forbid_path: the first of three walks (FACT edges, + DERIVED, all) that
+//!   reaches the hit, which is its best path's weakest hop: a HEURISTIC short
+//!   path never masks a FACT long one. Each witness row keeps its own edge's
+//!   tier.
+//!
+//! # Transitive forbid_edge (Q3)
+//!
+//! A `forbid_edge` with `transitive = true` forbids reaching `to` at all: a
+//! path from scope `from` through any third scope to its FIRST node in `to`
+//! is a violation, unless it enters `to` through a `via` facade, which is
+//! never walked through. Seeds are the nodes of `from` outside `to` and the
+//! facades, in (qname, id) order; a walk stops at every node of `to` and of
+//! a facade (it enters, never leaves), so a node only a facade reaches is no
+//! hit. A `via` scope no node sits in is a rule error, like an empty `from`
+//! or `to`.
+//!
+//! IMPORTS and the symbol categories chain separately (0.5.2 Q3): a module
+//! import is not a call path. The `imports` chain walks the module import
+//! graph (`cycles::module_import_graph`, the graph no_cycle's import rules
+//! use; a MODULE is in a scope by its file); the `symbols` chain walks the
+//! rule's other categories over the node graph. A rule that NAMES both
+//! IMPORTS and CALLS walks one `mixed` chain over every category it names.
+//! The default set (no `categories`) is [`default_forbid_categories`], so it
+//! walks both separate chains. A node two chains hit is one violation: the
+//! stronger tier, then fewer hops, then the imports chain.
+//!
+//! Each walk is `activation::algo::reach::bfs_levels`, the levelled BFS the
+//! rules layer's `reaches` runs, over each edge's `why` tier (a lifted import
+//! takes its first import's), so `glia query` and `glia check` tier a path
+//! alike. One [`FORBID_PATH`] [`Violation`] per hit, sorted by subject:
+//! `subject` the hit's qname, `file` / `line` its location, `tier` its pass's,
+//! `count` its hop count, `evidence` one shortest witness at that tier IN
+//! PATH ORDER (a witness, not a tier-sorted list): each depth layer is
+//! expanded in (qname, id) order, so a hop's parent is the lowest-ranked one,
+//! and between parallel edges the hop is the strongest tier, then the
+//! smallest category name, then the first in edge order. The hit set and
+//! tiers are checkout-stable; two equally short, equally tiered witnesses
+//! can differ between checkouts only where qnames tie. A direct forbid_edge
+//! keeps its own function and output.
+//!
+//! fx1 (web/app.py imports shared.util and services.api.public.facade;
+//! `page` calls `shared.util.helper`, which calls
+//! `services.api.internal.db.query`; `other` calls the facade's `get`, which
+//! calls `db.write`), rule `from = "web"`, `to = "services/api"`, `via =
+//! ["services/api/public"]`: two hits, `services::api::internal::db` over
+//! `web::app -> shared::util -> services::api::internal::db` (imports) and
+//! `services::api::internal::db::query` over `web::app::page ->
+//! shared::util::helper -> services::api::internal::db::query` (symbols),
+//! both FACT with 2 hops. The facade and `db::write` (reached only through
+//! it) are not; without `via` the facade and `get` are hits too, and
+//! `db::write` still is not (the walk stops at `get`, the first node of
+//! `to`).
 //!
 //! # Rule invariants and min_tier
 //!
@@ -175,9 +228,10 @@
 //! Fired-on marker, one line per call (three when a rule is violated):
 //! `[check] rules=<R> checked=<C> violations=<V> (forbid_edge=<F> no_cycle=<N>) unchecked=<U> errors=<E>`,
 //! where `V` counts [`Violation`] records (a forbid_edge rule makes at most
-//! one, a no_cycle rule one per cycle, a rule invariant one per row, the
-//! reflexion model one per divergent pair) and `F` / `N` split out the
-//! forbid_edge and no_cycle ones only; when `V` > 0 a second line
+//! one, a transitive one one per hit, a no_cycle rule one per cycle, a rule
+//! invariant one per row, the reflexion model one per divergent pair) and
+//! `F` / `N` split out the direct forbid_edge and no_cycle ones only; when
+//! `V` > 0 a second line
 //! `[check] tiers fact=<F> derived=<D> heuristic=<H>` splits them by tier
 //! (CC.3) — grep `^\[check\] tiers` — and a third
 //! `[check] gate blocking=<B> advisory=<A>` splits them by `blocking`
@@ -185,9 +239,10 @@
 //! invariant or transitive forbid_edge was evaluated, a last line
 //! `[rules] check invariant=<I> rows=<R> transitive=<T> hits=<H> (imports=<a> symbols=<b> mixed=<c>)`
 //! counts the rule invariants evaluated and their rows, and the transitive
-//! rules, their hits and the chains walked (DB.3b) — grep
-//! `^\[rules\] check`. The rules layer's own `[rules] prelude` / `[rules]
-//! eval` lines print during each rule's evaluation, before these. A check
+//! rules evaluated, their hits and the hits each chain reported (`a + b + c =
+//! H`, DB.3b) — grep `^\[rules\] check`. The rules layer's own `[rules]
+//! prelude` / `[rules] eval` lines print during each rule's evaluation,
+//! before these. A check
 //! with a model prints, before them, `[reflexion] components=<C>
 //! closed=<true|false> deps=<P> convergences=<V> divergences=<D>
 //! absences=<A> unmapped_files=<U>` (`P` counts dependent component pairs)
@@ -197,18 +252,20 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 use glia_activation::algo::cycles::{strongly_connected, witness_cycle};
-use glia_activation::algo::{Adjacency, CategorySet, GraphSource};
+use glia_activation::algo::reach::{LevelReached, LevelWalk, bfs_levels};
+use glia_activation::algo::{Adjacency, CategorySet, GraphSource, Walk};
 use glia_code_domain::evidence::Evidence;
 use glia_code_domain::external_inputs::{ConstraintKind, ConstraintRule};
 use glia_code_domain::{edge_category, node_kind};
 use glia_core::{Edge, EdgeCategoryId, NodeId, NodeKindId};
 use glia_graph::MergedGraph;
+use glia_rules::value::Tier;
 
 use crate::coverage::{CoverageNote, caveats_for};
-use crate::cycles::module_import_graph;
+use crate::cycles::{ModuleImports, module_import_graph};
 use crate::external::declared::declared_constraints;
 use crate::profile::CODE_PROFILE;
-use crate::rules::facts::located_edge;
+use crate::rules::facts::{edge_tier_of, located_edge, tier_name};
 use crate::rules::{CodeFacts, evaluate_rule};
 use crate::why::tier_of;
 
@@ -279,9 +336,10 @@ pub struct ViolationEdge {
     pub note: Option<String>,
 }
 
-/// One broken rule: all of a forbid_edge rule's edges, one cycle of a
-/// no_cycle rule, one `violation` row of a rule invariant, or one divergent
-/// component pair of the reflexion model.
+/// One broken rule: all of a forbid_edge rule's edges, one hit of a
+/// transitive forbid_edge, one cycle of a no_cycle rule, one `violation` row
+/// of a rule invariant, or one divergent component pair of the reflexion
+/// model.
 #[non_exhaustive]
 #[derive(serde::Serialize, Debug, Clone)]
 pub struct Violation {
@@ -297,7 +355,9 @@ pub struct Violation {
     pub severity: &'static str,
     /// forbid_edge and divergence: the strongest evidence row's tier.
     /// no_cycle: [`DERIVED`], or [`HEURISTIC`] when a hop of the witness is
-    /// (module doc "Tiers"). rule: the row's tier.
+    /// (module doc "Tiers"). rule: the row's tier. forbid_path: the first
+    /// tiered pass that reached the hit (module doc "Transitive forbid_edge
+    /// (Q3)").
     pub tier: &'static str,
     /// Whether it fails CI: `tier` is at least as strong as its rule's
     /// `min_tier` and is not [`HEURISTIC`] ([`is_blocking`]; module doc
@@ -307,7 +367,8 @@ pub struct Violation {
     /// at most [`MAX_EVIDENCE`]). no_cycle: the nodes (modules, for an import
     /// rule) in the cycle's strongly-connected component; the evidence is
     /// one shortest cycle through it. rule: the row's witness leaf edges,
-    /// all of them.
+    /// all of them. forbid_path: the witness's hops, its evidence in path
+    /// order.
     pub count: usize,
     pub evidence: Vec<ViolationEdge>,
     /// rule: the row's head values rendered (a node's qname, a string as is,
@@ -336,23 +397,24 @@ pub struct CheckReport {
     /// CONSTRAINT rules read: every entry but the reflexion model's component
     /// and layer declarations (an allow is a rule).
     pub rules: usize,
-    /// forbid_edge + no_cycle rules and rule invariants evaluated, plus the
-    /// allows of an evaluated model (a rule with an error is not: a rule
+    /// forbid_edge (direct and transitive) + no_cycle rules and rule
+    /// invariants evaluated, plus the allows of an evaluated model (a rule with an error is not: a rule
     /// invariant whose text does not parse or analyse is an error, not
     /// checked).
     pub checked: usize,
     /// Ids of the rules no graph query evaluates (an `invariant` without a
-    /// `rule`, a transitive forbid_edge until DB.3b), in rule order.
+    /// `rule`, a kind this crate cannot evaluate), in rule order.
     pub unchecked: Vec<String>,
     /// `(entry id, message)`: a rule that could not be evaluated (an unknown
-    /// edge category, a scope no node sits in, an allow naming an undeclared
-    /// component, a rule invariant's parse / analysis / evaluation error) is
-    /// skipped; a model declaration in error (a layer naming an undeclared
+    /// edge category, a scope or `via` facade no node sits in, an allow
+    /// naming an undeclared component, a rule invariant's parse / analysis /
+    /// evaluation error) is skipped; a model declaration in error (a layer naming an undeclared
     /// component, a component on a path another owns) keeps the rest of its
     /// entry. Rules first, in rule order; then the model's.
     pub errors: Vec<(String, String)>,
     /// Sorted by rule id; a rule's cycles in the order of their first member,
-    /// a rule invariant's rows in the rules layer's rendered order. A closed
+    /// a transitive rule's hits by subject, a rule invariant's rows in the
+    /// rules layer's rendered order. A closed
     /// reflexion model's divergences are here too.
     pub violations: Vec<Violation>,
     /// The reflexion model, evaluated (module doc "Reflexion model"); `None`
@@ -502,6 +564,10 @@ pub(crate) fn check_rules(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule
                         stats.invariant += 1;
                         stats.rows += found.len();
                     }
+                    if is_transitive(rule) {
+                        stats.transitive += 1;
+                        stats.hits += found.len();
+                    }
                     let min_tier = min_tier_of(rule);
                     for v in &mut found {
                         v.blocking = is_blocking(v.tier, min_tier);
@@ -510,6 +576,7 @@ pub(crate) fn check_rules(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule
                 }
             }
         }
+        [stats.imports, stats.symbols, stats.mixed] = ctx.path_hits;
         report.errors.append(&mut model.errors);
         if !model.components.is_empty() {
             let (reflexion, mut divergences) = evaluate_model(&mut ctx, model);
@@ -572,8 +639,8 @@ pub(crate) fn check_rules(merged: &MergedGraph, rules: &[(NodeId, ConstraintRule
 
 /// What the `[rules] check` marker counts (module doc): the rule invariants
 /// evaluated and their `violation` rows; the transitive forbid_edge rules
-/// evaluated, their hits and the chains walked, by chain (`imports`,
-/// `symbols`, `mixed`), which DB.3b's evaluator adds to.
+/// evaluated and their hits (one [`FORBID_PATH`] violation each), split by
+/// the [`Chain`] that reported each hit (`imports + symbols + mixed = hits`).
 #[derive(Default)]
 struct RuleStats {
     invariant: usize,
@@ -588,6 +655,17 @@ struct RuleStats {
 /// An invariant with Datalog `rule` text: evaluated by [`rule_invariant`].
 fn is_rule_invariant(rule: &ConstraintRule) -> bool {
     matches!(rule.kind, ConstraintKind::Invariant { rule: Some(_), .. })
+}
+
+/// A forbid_edge with `transitive`: evaluated by [`forbid_path`].
+fn is_transitive(rule: &ConstraintRule) -> bool {
+    matches!(
+        rule.kind,
+        ConstraintKind::ForbidEdge {
+            transitive: true,
+            ..
+        }
+    )
 }
 
 /// The weakest tier that makes `rule`'s violations block: its `min_tier`
@@ -627,15 +705,10 @@ enum Outcome {
 
 fn evaluate(ctx: &mut Ctx<'_>, rule: &ConstraintRule) -> Outcome {
     // Only the kinds this module evaluates reach the category check: an
-    // invariant's categories are never read.
-    // A transitive forbid_edge (DB.3b) and an invariant without a Datalog
-    // `rule` are listed unchecked: the direct-edge walk below would
-    // under-report a transitive rule, and prose has no query.
+    // invariant's categories are never read. An invariant without a Datalog
+    // `rule` is listed unchecked: prose has no query.
     match &rule.kind {
-        ConstraintKind::ForbidEdge {
-            transitive: false, ..
-        }
-        | ConstraintKind::NoCycle { .. } => {}
+        ConstraintKind::ForbidEdge { .. } | ConstraintKind::NoCycle { .. } => {}
         ConstraintKind::Invariant {
             rule: Some(text), ..
         } => {
@@ -651,13 +724,23 @@ fn evaluate(ctx: &mut Ctx<'_>, rule: &ConstraintRule) -> Outcome {
         Err(e) => return Outcome::Error(e),
     };
     let result = match &rule.kind {
-        ConstraintKind::ForbidEdge { from, to, .. } => {
-            let cats = if categories.is_empty() {
-                default_forbid_categories()
-            } else {
+        ConstraintKind::ForbidEdge {
+            from,
+            to,
+            transitive,
+            via,
+        } => {
+            let named = !categories.is_empty();
+            let cats = if named {
                 categories
+            } else {
+                default_forbid_categories()
             };
-            forbid_edge(ctx, rule, from, to, &cats).map(|v| v.into_iter().collect())
+            if *transitive {
+                forbid_path(ctx, rule, (from, to, via), &cats, named)
+            } else {
+                forbid_edge(ctx, rule, from, to, &cats).map(|v| v.into_iter().collect())
+            }
         }
         ConstraintKind::NoCycle { scope } => no_cycle(ctx, rule, scope.as_deref(), &categories),
         _ => return Outcome::Unchecked,
@@ -703,6 +786,9 @@ struct Ctx<'a> {
     merged: &'a MergedGraph,
     facts: CodeFacts<'a>,
     qnames: HashMap<NodeId, String>,
+    /// Transitive forbid_edge hits so far, by [`Chain`] (the `[rules]
+    /// check` marker's `imports=` / `symbols=` / `mixed=`).
+    path_hits: [usize; 3],
 }
 
 impl<'a> Ctx<'a> {
@@ -711,6 +797,7 @@ impl<'a> Ctx<'a> {
             merged,
             facts: CodeFacts::new(merged),
             qnames: HashMap::new(),
+            path_hits: [0; 3],
         }
     }
 
@@ -915,6 +1002,399 @@ fn forbid_edge(
         count,
         rows,
     )))
+}
+
+// ============================================================================
+// transitive forbid_edge (module doc "Transitive forbid_edge (Q3)")
+// ============================================================================
+
+/// The tiered passes of a transitive walk: FACT edges, + DERIVED, all
+/// ([`Tier::level`] 0, 1, 2).
+const LEVELS: u8 = 3;
+/// An empty slot of a [`HopIndex`].
+const NO_EDGE: u32 = u32::MAX;
+
+/// Which walk reported a transitive hit. The order is the tie-break between
+/// two chains hitting one node at one tier and depth: imports first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Chain {
+    /// IMPORTS over the module import graph (`cycles::module_import_graph`).
+    Imports = 0,
+    /// The rule's other categories over the node graph.
+    Symbols = 1,
+    /// A rule naming both IMPORTS and CALLS: every category over the node
+    /// graph, one walk.
+    Mixed = 2,
+}
+
+/// A graph one [`Chain`] walks, with the `why` tier of each of its edges.
+trait PathGraph: GraphSource {
+    /// The edge's [`Tier::level`]: the first pass that may walk it.
+    fn level(&self, e: &Edge) -> u8;
+    /// Where the edge is asserted and its `why` tier and note, for its
+    /// witness row.
+    fn site(&self, e: &Edge) -> (Option<Evidence>, (&'static str, Option<String>));
+}
+
+/// The node graph: each edge tiered as the rules layer tiers it (DB.2a,
+/// `why::tier_of`), so `glia query`'s `reaches` and `glia check` agree.
+impl PathGraph for MergedGraph {
+    fn level(&self, e: &Edge) -> u8 {
+        edge_tier_of(e).level()
+    }
+
+    fn site(&self, e: &Edge) -> (Option<Evidence>, (&'static str, Option<String>)) {
+        let ev = Evidence::of(e);
+        let tier = tier_of(ev.as_ref(), e);
+        (ev, tier)
+    }
+}
+
+/// The module import graph: a lifted edge is tiered and located by its first
+/// import's evidence, as no_cycle's import rules tier it (module doc
+/// "Tiers").
+impl PathGraph for ModuleImports {
+    fn level(&self, e: &Edge) -> u8 {
+        word_level(tier_of(self.evidence(e.from, e.to), e).0)
+    }
+
+    fn site(&self, e: &Edge) -> (Option<Evidence>, (&'static str, Option<String>)) {
+        let ev = self.evidence(e.from, e.to);
+        let tier = tier_of(ev, e);
+        (ev.cloned(), tier)
+    }
+}
+
+/// A `why` tier word as a level: `why`'s own fallback (DERIVED) for any other
+/// word, as `rules::facts` reads it.
+fn word_level(word: &str) -> u8 {
+    match word {
+        FACT => Tier::Fact.level(),
+        HEURISTIC => Tier::Heuristic.level(),
+        _ => Tier::Derived.level(),
+    }
+}
+
+/// The scopes of one transitive rule: `to`, and every node of its `via`
+/// facades.
+struct PathScopes {
+    to: Rc<HashSet<NodeId>>,
+    via: HashSet<NodeId>,
+}
+
+impl PathScopes {
+    /// A node the walk enters but never leaves: in `to` or in a facade.
+    fn stops(&self, id: NodeId) -> bool {
+        self.to.contains(&id) || self.via.contains(&id)
+    }
+
+    /// A node whose reach is a violation: in `to`, in no facade.
+    fn is_hit(&self, id: NodeId) -> bool {
+        self.to.contains(&id) && !self.via.contains(&id)
+    }
+}
+
+/// `inner` without the edges that leave a stop node ([`PathScopes::stops`]):
+/// a walk ends at the first node of `to` it meets, and never passes a facade.
+struct Barred<'g, G: ?Sized> {
+    inner: &'g G,
+    scopes: &'g PathScopes,
+}
+
+impl<G: GraphSource + ?Sized> GraphSource for Barred<'_, G> {
+    fn node_ids(&self) -> Vec<NodeId> {
+        self.inner.node_ids()
+    }
+
+    fn edges(&self) -> Box<dyn Iterator<Item = &Edge> + '_> {
+        let scopes = self.scopes;
+        Box::new(self.inner.edges().filter(move |e| !scopes.stops(e.from)))
+    }
+}
+
+/// `(from, category, to)` -> the first kept edge (in edge order) of that key
+/// at each level, or [`NO_EDGE`].
+type HopIndex = HashMap<(NodeId, EdgeCategoryId, NodeId), [u32; LEVELS as usize]>;
+
+/// One node of `to` a chain reached first in pass `level`, with its shortest
+/// witness at that level (hops in path order, located).
+struct PathHit {
+    node: NodeId,
+    level: u8,
+    chain: Chain,
+    hops: Vec<ViolationEdge>,
+}
+
+impl PathHit {
+    /// The hit two chains disagree on keeps the stronger tier, then fewer
+    /// hops, then imports first.
+    fn rank(&self) -> (u8, usize, Chain) {
+        (self.level, self.hops.len(), self.chain)
+    }
+}
+
+/// A transitive forbid_edge (0.5.2 Q3): every node of `to` that a path from
+/// `from` reaches, through any third scope, as its first node of `to`; a path
+/// through a `via` facade is allowed. One [`FORBID_PATH`] [`Violation`] per
+/// hit, sorted by subject (module doc "Transitive forbid_edge (Q3)").
+fn forbid_path(
+    ctx: &mut Ctx<'_>,
+    rule: &ConstraintRule,
+    (from, to, via): (&str, &str, &[String]),
+    cats: &[EdgeCategoryId],
+    named: bool,
+) -> Result<Vec<Violation>, String> {
+    let from_set = ctx.scope(from, "from")?;
+    let to_set = ctx.scope(to, "to")?;
+    let mut via_set: HashSet<NodeId> = HashSet::new();
+    for v in via {
+        via_set.extend(ctx.scope(v, "via")?.iter().copied());
+    }
+    let scopes = PathScopes {
+        to: to_set,
+        via: via_set,
+    };
+    // Sorted by rendered qname, then id: the walk order is checkout-stable.
+    let starts: Vec<NodeId> = from_set
+        .iter()
+        .copied()
+        .filter(|id| !scopes.stops(*id))
+        .collect();
+    let mut keyed: Vec<(String, u64)> =
+        starts.into_iter().map(|id| (ctx.qname(id), id.0)).collect();
+    keyed.sort_unstable();
+    let seeds: Vec<NodeId> = keyed.into_iter().map(|(_, id)| NodeId(id)).collect();
+
+    let merged = ctx.merged;
+    let has = |c: EdgeCategoryId| cats.contains(&c);
+    let mut found: Vec<PathHit> = Vec::new();
+    if named && has(edge_category::IMPORTS) && has(edge_category::CALLS) {
+        found.extend(walk_chain(ctx, merged, Chain::Mixed, cats, &seeds, &scopes));
+    } else {
+        if has(edge_category::IMPORTS) {
+            let imports = module_import_graph(merged);
+            found.extend(walk_chain(
+                ctx,
+                &imports,
+                Chain::Imports,
+                &[edge_category::IMPORTS],
+                &seeds,
+                &scopes,
+            ));
+        }
+        let symbols: Vec<EdgeCategoryId> = cats
+            .iter()
+            .copied()
+            .filter(|c| *c != edge_category::IMPORTS)
+            .collect();
+        if !symbols.is_empty() {
+            found.extend(walk_chain(
+                ctx,
+                merged,
+                Chain::Symbols,
+                &symbols,
+                &seeds,
+                &scopes,
+            ));
+        }
+    }
+
+    // One violation per node.
+    let mut best: HashMap<NodeId, PathHit> = HashMap::new();
+    for h in found {
+        match best.get(&h.node) {
+            Some(held) if held.rank() <= h.rank() => {}
+            _ => {
+                best.insert(h.node, h);
+            }
+        }
+    }
+    let mut out: Vec<(u64, Violation)> = Vec::with_capacity(best.len());
+    for h in best.into_values() {
+        ctx.path_hits[h.chain as usize] += 1;
+        let tier = tier_name(Tier::from_level(h.level).unwrap_or(Tier::Heuristic));
+        let count = h.hops.len();
+        let mut v = violation(id_decl(rule), FORBID_PATH, tier, count, h.hops);
+        let at = ctx.facts.locator().locate(h.node);
+        v.subject = vec![at.qname];
+        v.file = at.file;
+        v.line = at.line;
+        out.push((h.node.0, v));
+    }
+    // A qname two merged repos share breaks its tie by location, then id.
+    out.sort_by(|(a_id, a), (b_id, b)| {
+        (&a.subject, &a.file, a.line, a_id).cmp(&(&b.subject, &b.file, b.line, b_id))
+    });
+    Ok(out.into_iter().map(|(_, v)| v).collect())
+}
+
+/// One chain of a transitive rule: the levelled multi-source BFS
+/// (`activation::algo::reach::bfs_levels`, the walk the rules layer's
+/// `reaches` runs) over `graph`'s `cats` edges, barred at the stop nodes, in
+/// [`LEVELS`] passes; each reached node of `to` outside the facades is a hit
+/// at its first pass's level. Its witness is a shortest path at that level
+/// from a seed: one single-level walk per level that holds a hit, each depth
+/// layer expanded in (qname, id) order so the parent is the lowest-ranked
+/// node one hop up, and each hop the edge from that parent of the strongest
+/// tier, then the smallest category name, then first in edge order.
+fn walk_chain<G: PathGraph + ?Sized>(
+    ctx: &mut Ctx<'_>,
+    graph: &G,
+    chain: Chain,
+    cats: &[EdgeCategoryId],
+    seeds: &[NodeId],
+    scopes: &PathScopes,
+) -> Vec<PathHit> {
+    let barred = Barred {
+        inner: graph,
+        scopes,
+    };
+    let keep = CategorySet::of(cats);
+    let adj = Adjacency::build(&barred, &keep);
+    // The kept edges in index order (`Adjacency::build` keeps the global edge
+    // order filtered by `keep`), each with its tier level.
+    let kept: Vec<&Edge> = barred
+        .edges()
+        .filter(|e| keep.contains(e.category))
+        .collect();
+    let levels: Vec<u8> = kept.iter().map(|e| graph.level(e)).collect();
+    let starts: Vec<(NodeId, u8)> = seeds.iter().map(|&s| (s, 0)).collect();
+    let walk = bfs_levels(
+        &adj,
+        &starts,
+        &levels,
+        &LevelWalk::new(Walk::Forward, LEVELS),
+    );
+    let hits: Vec<&LevelReached> = walk
+        .reached
+        .iter()
+        .filter(|r| scopes.is_hit(r.id))
+        .collect();
+    if hits.is_empty() {
+        return Vec::new();
+    }
+
+    // Every node a witness can pass: the started seeds and the reached.
+    let mut on = vec![false; adj.len()];
+    let mut order: Vec<(String, u64, u32)> = Vec::new();
+    for id in walk
+        .seeds
+        .iter()
+        .map(|s| s.0)
+        .chain(walk.reached.iter().map(|r| r.id))
+    {
+        if let Some(ix) = adj.index_of(id) {
+            on[ix as usize] = true;
+            order.push((ctx.qname(id), id.0, ix));
+        }
+    }
+    order.sort_unstable();
+    let mut rank = vec![u32::MAX; adj.len()];
+    for (r, (_, _, ix)) in order.iter().enumerate() {
+        rank[*ix as usize] = u32::try_from(r).unwrap_or(u32::MAX);
+    }
+    let walked = |id: NodeId| adj.index_of(id).is_some_and(|ix| on[ix as usize]);
+    let mut index: HopIndex = HashMap::new();
+    for (k, (e, lvl)) in kept.iter().zip(&levels).enumerate() {
+        let slot = usize::from(*lvl);
+        if slot >= usize::from(LEVELS) || !(walked(e.from) && walked(e.to)) {
+            continue;
+        }
+        let first = &mut index
+            .entry((e.from, e.category, e.to))
+            .or_insert([NO_EDGE; LEVELS as usize])[slot];
+        if *first == NO_EDGE {
+            *first = u32::try_from(k).unwrap_or(NO_EDGE);
+        }
+    }
+    let mut by_name: Vec<EdgeCategoryId> = cats.to_vec();
+    by_name.sort_by_key(|c| (edge_category::name(*c), c.0));
+    by_name.dedup();
+
+    let mut out = Vec::with_capacity(hits.len());
+    for level in 0..LEVELS {
+        let at_level: Vec<NodeId> = hits
+            .iter()
+            .filter(|h| h.level == level)
+            .map(|h| h.id)
+            .collect();
+        if at_level.is_empty() {
+            continue;
+        }
+        // A shortest path at one level is a one-level walk over the edges of
+        // that level or stronger (`bfs_levels`' doc).
+        let one: Vec<u8> = levels
+            .iter()
+            .map(|&l| if l <= level { 0 } else { u8::MAX })
+            .collect();
+        let mut how = LevelWalk::new(Walk::Forward, 1);
+        how.parent_rank = Some(&rank);
+        let ranked = bfs_levels(&adj, &starts, &one, &how);
+        let mut record = vec![usize::MAX; adj.len()];
+        for (i, r) in ranked.reached.iter().enumerate() {
+            if let Some(ix) = adj.index_of(r.id) {
+                record[ix as usize] = i;
+            }
+        }
+        let reached_at = |id: NodeId| {
+            adj.index_of(id)
+                .and_then(|ix| ranked.reached.get(record[ix as usize]))
+        };
+        for node in at_level {
+            let mut path: Vec<&Edge> = Vec::new();
+            let mut at = node;
+            // Each parent sits one layer up, so the chain ends at depth 1,
+            // on a seed.
+            while let Some(r) = reached_at(at) {
+                let hop = pick_hop(&kept, &index, &by_name, r.parent, at, level)
+                    .or_else(|| kept.get(r.kept_edge as usize).copied());
+                let Some(e) = hop else { break };
+                path.push(e);
+                if r.depth <= 1 || path.len() > adj.len() {
+                    break;
+                }
+                at = r.parent;
+            }
+            path.reverse();
+            let hops = path
+                .into_iter()
+                .map(|e| {
+                    let (ev, tier) = graph.site(e);
+                    ctx.row(e.from, e.category, e.to, ev.as_ref(), tier)
+                })
+                .collect();
+            out.push(PathHit {
+                node,
+                level,
+                chain,
+                hops,
+            });
+        }
+    }
+    out
+}
+
+/// The witness hop `from -> to` walkable at `level`: the strongest tier,
+/// then the smallest category name (`by_name` order), then the first in edge
+/// order, as the rules layer's closure picks a hop between parallel edges.
+fn pick_hop<'e>(
+    kept: &[&'e Edge],
+    index: &HopIndex,
+    by_name: &[EdgeCategoryId],
+    from: NodeId,
+    to: NodeId,
+    level: u8,
+) -> Option<&'e Edge> {
+    for slot in 0..=usize::from(level).min(usize::from(LEVELS) - 1) {
+        for c in by_name {
+            if let Some(k) = index.get(&(from, *c, to)).map(|s| s[slot])
+                && k != NO_EDGE
+            {
+                return kept.get(k as usize).copied();
+            }
+        }
+    }
+    None
 }
 
 // ============================================================================
@@ -1756,12 +2236,14 @@ mod tests {
         assert_eq!(min_tier_of(&r), DEFAULT_MIN_TIER, "a hand-edited spelling");
     }
 
-    /// A transitive forbid_edge is listed unchecked until DB.3b - never
-    /// judged by the direct walk - while the direct rule over the same scopes
-    /// still is, and a rule invariant (overlay version 2) is evaluated: its
-    /// prelude predicate has no row here, so it is checked and clean.
+    /// A transitive forbid_edge (DB.3b) is evaluated by the path walk, never
+    /// the direct one: one forbid_path violation for the module its IMPORTS
+    /// chain reaches, beside the direct rule's one forbid_edge violation over
+    /// the same scopes; a rule invariant (overlay version 2) is evaluated
+    /// too: its prelude predicate has no row here, so it is checked and
+    /// clean.
     #[test]
-    fn transitive_forbid_is_unchecked_and_rule_invariant_is_evaluated() {
+    fn transitive_forbid_and_rule_invariant_are_evaluated() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let overlay = "version = 2
 
@@ -1804,16 +2286,91 @@ rule = \"violation(r) :- unhandled_route(r).\"
         }
         let r = crate::generate_one(tmp.path().to_str().expect("utf-8")).expect("generate_one");
         let report = check(&r.merged);
-        assert_eq!((report.rules, report.checked), (3, 2), "{report:?}");
-        assert_eq!(report.unchecked, ["transitive"]);
+        assert_eq!((report.rules, report.checked), (3, 3), "{report:?}");
+        assert!(report.unchecked.is_empty(), "{report:?}");
         assert!(report.errors.is_empty(), "{:?}", report.errors);
-        let ids: Vec<&str> = report
+        let ids: Vec<(&str, &str)> = report
             .violations
             .iter()
-            .map(|v| v.rule_id.as_str())
+            .map(|v| (v.rule_id.as_str(), v.rule_kind))
             .collect();
-        assert_eq!(ids, ["direct"], "no route, so the rule has no row");
+        assert_eq!(
+            ids,
+            [("direct", FORBID_EDGE), ("transitive", FORBID_PATH)],
+            "no route, so the rule has no row"
+        );
         assert!(report.violations[0].blocking, "a fact import blocks");
+        let path = &report.violations[1];
+        assert_eq!(path.subject, ["services::api::internal"], "{path:?}");
+        assert_eq!((path.tier, path.count), (FACT, 1), "{path:?}");
+        assert!(path.blocking, "a fact path blocks under min_tier = fact");
+        assert_eq!(
+            path.evidence
+                .iter()
+                .map(|e| (e.category, e.from_qname.as_str(), e.to_qname.as_str()))
+                .collect::<Vec<_>>(),
+            [("IMPORTS", "web::app", "services::api::internal")]
+        );
+    }
+
+    /// The tie-break between two chains hitting one node: the stronger tier,
+    /// then fewer hops, then the imports chain.
+    #[test]
+    fn path_hit_rank_orders_tier_then_hops_then_imports() {
+        let hit = |level, hops: usize, chain| PathHit {
+            node: NodeId(1),
+            level,
+            chain,
+            hops: (0..hops)
+                .map(|_| ViolationEdge {
+                    from_qname: String::new(),
+                    to_qname: String::new(),
+                    category: "CALLS",
+                    file: None,
+                    line: None,
+                    emitter: None,
+                    tier: FACT,
+                    note: None,
+                })
+                .collect(),
+        };
+        assert!(hit(0, 5, Chain::Symbols).rank() < hit(1, 1, Chain::Imports).rank());
+        assert!(hit(1, 1, Chain::Symbols).rank() < hit(1, 2, Chain::Imports).rank());
+        assert!(hit(1, 2, Chain::Imports).rank() < hit(1, 2, Chain::Symbols).rank());
+        assert_eq!(word_level(FACT), 0);
+        assert_eq!(word_level(DERIVED), 1);
+        assert_eq!(word_level(HEURISTIC), 2);
+        assert_eq!(word_level("other"), 1, "why's own fallback");
+    }
+
+    /// A barred view drops exactly the edges that leave a stop node (a node
+    /// of `to` or a facade), so a walk enters them and goes no further.
+    #[test]
+    fn barred_drops_the_edges_leaving_a_stop() {
+        let calls = edge_category::CALLS;
+        let edges = vec![
+            Edge::new(NodeId(1), NodeId(2), calls, glia_core::Confidence::Strong),
+            Edge::new(NodeId(2), NodeId(3), calls, glia_core::Confidence::Strong),
+            Edge::new(NodeId(4), NodeId(5), calls, glia_core::Confidence::Strong),
+            Edge::new(NodeId(1), NodeId(4), calls, glia_core::Confidence::Strong),
+        ];
+        let sub = Sub {
+            nodes: (1..=5).map(NodeId).collect(),
+            edges,
+        };
+        let scopes = PathScopes {
+            to: Rc::new([NodeId(2), NodeId(3)].into_iter().collect()),
+            via: [NodeId(4)].into_iter().collect(),
+        };
+        let barred = Barred {
+            inner: &sub,
+            scopes: &scopes,
+        };
+        let kept: Vec<(u64, u64)> = barred.edges().map(|e| (e.from.0, e.to.0)).collect();
+        assert_eq!(kept, [(1, 2), (1, 4)]);
+        assert_eq!(barred.node_ids().len(), 5);
+        assert!(scopes.is_hit(NodeId(2)) && !scopes.is_hit(NodeId(4)));
+        assert!(scopes.stops(NodeId(4)) && !scopes.stops(NodeId(1)));
     }
 
     /// Rule text is declared only in the overlay (Q9): a `rule` on an entry
