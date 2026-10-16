@@ -1760,7 +1760,7 @@
     },
     "elixir/db": {
       "extract": [
-        0,
+        1,
         1
       ],
       "fixtures": [
@@ -1770,17 +1770,17 @@
         0,
         0
       ],
-      "level": "none",
+      "level": "full",
       "literal": [
-        0,
+        1,
         1
       ],
       "reasons": [],
       "route": [
-        0,
+        1,
         1
       ],
-      "via": null
+      "via": "db"
     },
     "elixir/eventbus": {
       "extract": [
@@ -8832,10 +8832,10 @@
   "totals": {
     "covered": 346,
     "error": 0,
-    "full": 344,
+    "full": 345,
     "grid": 510,
     "n/a": 28,
-    "none": 1,
+    "none": 0,
     "partial": 1,
     "unknown": 136
   },

@@ -1,8 +1,8 @@
 {
-  "measured_at_head": "6ca16ebe",
-  "after_wave": 7,
+  "measured_at_head": "9bbf002c",
+  "after_wave": 8,
   "cargo_test_workspace": {
-    "passed": 5337,
+    "passed": 5397,
     "failed": 0
   },
   "history_passed": [
@@ -96,7 +96,8 @@
     5106,
     5191,
     5257,
-    5337
+    5337,
+    5397
   ],
   "run_py": {
     "fixtures": 377,
@@ -113,9 +114,9 @@
     "missing_nodes_list": []
   },
   "matrix_py": {
-    "full": 344,
+    "full": 345,
     "partial": 1,
-    "none": 1,
+    "none": 0,
     "unknown": 136,
     "covered": 346,
     "grid": 482,

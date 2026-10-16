@@ -86,7 +86,7 @@ c_cpp            ●       ?       ?       ?       ?       ?       ?       ?    
 scala            ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 clojure          ●       ●       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       ●       ●       ?       ?       ?       ?       ?
 dart             ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ◐       ●       ●
-elixir           ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ●       ●       ●       ·       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
+elixir           ●       ●       ●       ●       ●       ●       ?       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 rust             ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●       ●
 solidity         -       -       -       -       -       -       -       -       -       -       -       -       -       -       ●       -       -       -       -       -       -       -       -       ●       ●       ?       ●       ?       ?       ?
 terraform        ?       ?       ?       ?       ?       ?       ?       ?       -       ?       -       ?       ?       ?       ?       ?       ?       ?       ?       ?       ?       -       ?       -       ?       -       -       ?       ?       ?
@@ -108,7 +108,7 @@ PER-MECHANISM  across 17 languages:
   graphql      ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
   ws           ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
   eventbus     ● 12  ◐ 0   · 0   ? 5   - 0   ! 0
-  db           ● 10  ◐ 0   · 1   ? 5   - 1   ! 0
+  db           ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
   migrations   ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
   config       ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
   secrets      ● 11  ◐ 0   · 0   ? 5   - 1   ! 0
@@ -137,14 +137,14 @@ PER-LANGUAGE  across 30 mechanisms:
   scala        ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   clojure      ● 4   ◐ 0   · 0   ? 26  - 0   ! 0
   dart         ● 28  ◐ 1   · 0   ? 1   - 0   ! 0
-  elixir       ● 28  ◐ 0   · 1   ? 1   - 0   ! 0
+  elixir       ● 29  ◐ 0   · 0   ? 1   - 0   ! 0
   rust         ● 30  ◐ 0   · 0   ? 0   - 0   ! 0
   solidity     ● 4   ◐ 0   · 0   ? 4   - 22  ! 0
   terraform    ● 0   ◐ 0   · 0   ? 24  - 6   ! 0
   kotlin       ● 6   ◐ 0   · 0   ? 24  - 0   ! 0
 ```
 
-COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 344 full, 1 partial, 1 none, 136 unknown, 0 error, 28 n/a.
+COVERAGE OF THE COVERAGE: 346/482 applicable cells have a fixture (71.8%) — 345 full, 1 partial, 0 none, 136 unknown, 0 error, 28 n/a.
 
 `legacy_only` (fixtures with no `cells`, graded by run.py only): 219
 
