@@ -600,6 +600,68 @@ const CONSUMER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // redis_task_queue: `worker.handle('email:welcome', (task, ctx) async {
     // .. })`, the task TYPE string (the CL.4 asynq `.HandleFunc(` shape).
     (".handle(", QueueFramework::RedisTaskQueue, REDIS_TASK_QUEUE_GATE, TopicRule::ArgLiteral),
+    // ---- DH.4: Elixir clients ---------------------------------------------------
+    // Elixir calls a library through its module, so every needle spells the
+    // module (`Gnat.sub(`, `Redix.PubSub.subscribe(`) and every gate is the
+    // library's module token, lowercased (the DH.4 gate consts after
+    // REDIS_TASK_QUEUE_GATE). Every gate joins `broker_signals`, so eventbus.rs
+    // mints no generic `.subscribe(` / `.on(` EVENT row in a file that passes
+    // one: none may be a substring of ordinary text (the bare word `gnat` is
+    // in `signature`, so the Gnat gate is its call spellings, [`GNAT_GATE`]).
+    // Every row sits BEFORE the A2.9 block, so the Redis / MQTT generic
+    // `.subscribe(` rows yield to a call one of these read.
+    // amqp (hexdocs.pm/amqp): `AMQP.Basic.consume(chan, "orders")`, the queue
+    // arg #1; the publish row's arg #2 is its routing key.
+    ("AMQP.Basic.consume(", QueueFramework::RabbitMQ, &["amqp"], TopicRule::ArgIndex(1)),
+    // broadway_kafka: the Broadway producer tuple `{BroadwayKafka.Producer,
+    // hosts: [..], group_id: "g", topics: ["orders"]}`, a keyword list often
+    // spread over several lines, read in the tuple around the needle (the
+    // first topic of the list, `TopicRule::KeyedIn`). A tuple with no
+    // `topics:` (its options in a variable) and an `alias` line are no site.
+    ("BroadwayKafka.Producer", QueueFramework::Kafka, BROADWAY_KAFKA_GATE, TopicRule::KeyedIn(&["topics"])),
+    // brod: `:brod.start_link_group_subscriber(client, group_id, ["orders"],
+    // ..)`, the topics list arg #2 (its first literal), and
+    // `:brod.start_link_topic_subscriber(client, "orders", ..)`, arg #1.
+    (":brod.start_link_group_subscriber(", QueueFramework::Kafka, BROD_GATE, TopicRule::ArgIndex(2)),
+    (":brod.start_link_topic_subscriber(", QueueFramework::Kafka, BROD_GATE, TopicRule::ArgIndex(1)),
+    // tortoise311 and the original tortoise: a connection's `subscriptions:
+    // [{"sensors/temp", 0}]` option (the first topic), and the runtime
+    // `Tortoise311.Connection.subscribe(client_id, {"sensors/temp", 0})`, arg
+    // #1. A connection that subscribes to nothing is a publisher's: no site.
+    // Library rows: the MQTT generic verb guard spares them (DH.2's
+    // `mqtt_generic_guard_spares_builder_rows`).
+    ("Tortoise311.Supervisor.start_child(", QueueFramework::Mqtt, TORTOISE_GATE, TopicRule::KeyedIn(&["subscriptions"])),
+    ("Tortoise311.Connection.start_link(", QueueFramework::Mqtt, TORTOISE_GATE, TopicRule::KeyedIn(&["subscriptions"])),
+    ("Tortoise.Supervisor.start_child(", QueueFramework::Mqtt, TORTOISE_GATE, TopicRule::KeyedIn(&["subscriptions"])),
+    ("Tortoise.Connection.start_link(", QueueFramework::Mqtt, TORTOISE_GATE, TopicRule::KeyedIn(&["subscriptions"])),
+    ("Tortoise311.Connection.subscribe(", QueueFramework::Mqtt, TORTOISE_GATE, TopicRule::ArgIndex(1)),
+    ("Tortoise311.Connection.subscribe_sync(", QueueFramework::Mqtt, TORTOISE_GATE, TopicRule::ArgIndex(1)),
+    ("Tortoise.Connection.subscribe(", QueueFramework::Mqtt, TORTOISE_GATE, TopicRule::ArgIndex(1)),
+    ("Tortoise.Connection.subscribe_sync(", QueueFramework::Mqtt, TORTOISE_GATE, TopicRule::ArgIndex(1)),
+    // gnat (hexdocs.pm/gnat): `Gnat.sub(gnat, self(), "orders")`, the subject
+    // arg #2, and the consumer supervisor's `{Gnat.ConsumerSupervisor, %{..,
+    // subscription_topics: [%{topic: "rpc.example"}]}}` (the first `topic:`
+    // in the tuple). Its documented `{Gnat.ConsumerSupervisor, settings}`
+    // names its topics elsewhere: no site.
+    ("Gnat.sub(", QueueFramework::Nats, GNAT_GATE, TopicRule::ArgIndex(2)),
+    ("Gnat.ConsumerSupervisor", QueueFramework::Nats, GNAT_GATE, TopicRule::KeyedIn(&["topic"])),
+    // broadway_cloud_pub_sub: `{BroadwayCloudPubSub.Producer, subscription:
+    // "projects/shop/subscriptions/orders"}`, folded to its last segment (the
+    // A2.6 GCP rule); google_api_pub_sub's generated client
+    // `Projects.pubsub_projects_subscriptions_pull(conn, "shop", "orders",
+    // ..)`, the subscription arg #2. A subscription pairs only when spelled
+    // like its topic (the JS `.subscription(` row's COVERAGE_CAVEATS gap).
+    ("BroadwayCloudPubSub.Producer", QueueFramework::PubSub, BROADWAY_PUBSUB_GATE, TopicRule::KeyedIn(&["subscription"])),
+    ("pubsub_projects_subscriptions_pull(", QueueFramework::PubSub, GOOGLE_API_PUBSUB_GATE, TopicRule::ArgIndex(2)),
+    // Redix (hexdocs.pm/redix): `Redix.PubSub.subscribe(pubsub, "orders",
+    // self())`, the channel arg #1 (a list's first), and `psubscribe(` (a
+    // glob, paired only literally). The file never spells `redis`, so HEAD's
+    // A2.9 rows never read it; the gate is the module, `redix`.
+    ("Redix.PubSub.subscribe(", QueueFramework::RedisPubSub, REDIX_GATE, TopicRule::ArgIndex(1)),
+    ("Redix.PubSub.psubscribe(", QueueFramework::RedisPubSub, REDIX_GATE, TopicRule::ArgIndex(1)),
+    // ex_aws_sqs: `ExAws.SQS.receive_message("orders") |> ExAws.request()`,
+    // the queue arg #0 (a URL folds).
+    ("ExAws.SQS.receive_message(", QueueFramework::Sqs, EX_AWS_SQS_GATE, TopicRule::ArgLiteral),
     // ---- A2.9: broker pub/sub that used to live in eventbus.rs ----------
     // These verbs are the broadest needles in the table, so every row below is
     // a GENERIC-VERB row ([`is_generic_verb_row`]): it yields to any earlier
@@ -1038,6 +1100,38 @@ const PRODUCER_PATTERNS: &[(&str, QueueFramework, &[&str], TopicRule)] = &[
     // queue: 'default')`; arg #0 is the Task constructor, whose first literal
     // is the task TYPE. The `queue:` is broker routing, never the job.
     (".enqueue(", QueueFramework::RedisTaskQueue, REDIS_TASK_QUEUE_GATE, TopicRule::ArgLiteral),
+    // ---- DH.4: Elixir clients (see the CONSUMER_PATTERNS block) -----------------
+    // brod: `:brod.produce_sync(:client, "orders", partition, key, value)` and
+    // `:brod.produce(..)`, the topic arg #1. The `(` keeps the first off the
+    // second.
+    (":brod.produce_sync(", QueueFramework::Kafka, BROD_GATE, TopicRule::ArgIndex(1)),
+    (":brod.produce(", QueueFramework::Kafka, BROD_GATE, TopicRule::ArgIndex(1)),
+    // tortoise311 / tortoise: `Tortoise311.publish("client_id", "sensors/temp",
+    // payload, qos: 0)`, the topic arg #1 (arg #0 is the client id). Library
+    // rows, never the generic `.publish(` verb.
+    ("Tortoise311.publish(", QueueFramework::Mqtt, TORTOISE_GATE, TopicRule::ArgIndex(1)),
+    ("Tortoise311.publish_sync(", QueueFramework::Mqtt, TORTOISE_GATE, TopicRule::ArgIndex(1)),
+    ("Tortoise.publish(", QueueFramework::Mqtt, TORTOISE_GATE, TopicRule::ArgIndex(1)),
+    ("Tortoise.publish_sync(", QueueFramework::Mqtt, TORTOISE_GATE, TopicRule::ArgIndex(1)),
+    // gnat: `Gnat.pub(gnat, "orders", body)`, the subject arg #1.
+    ("Gnat.pub(", QueueFramework::Nats, GNAT_GATE, TopicRule::ArgIndex(1)),
+    // google_api_pub_sub: `Projects.pubsub_projects_topics_publish(conn,
+    // "shop", "orders", body: ..)`, the topic arg #2 (arg #1 is the project).
+    ("pubsub_projects_topics_publish(", QueueFramework::PubSub, GOOGLE_API_PUBSUB_GATE, TopicRule::ArgIndex(2)),
+    // Redix: pub/sub publishes through the command API, `Redix.command(conn,
+    // ["PUBLISH", "orders", body])`, and a pipeline's `[[..], ["PUBLISH", ..]]`
+    // (DH.3's `TopicRule::CommandArg`). Any other command (`["GET", "k"]`) is
+    // no site at all. Library rows: `Redix.command(` is no shared verb.
+    ("Redix.command(", QueueFramework::RedisPubSub, REDIX_GATE, TopicRule::CommandArg("publish")),
+    ("Redix.command!(", QueueFramework::RedisPubSub, REDIX_GATE, TopicRule::CommandArg("publish")),
+    ("Redix.noreply_command(", QueueFramework::RedisPubSub, REDIX_GATE, TopicRule::CommandArg("publish")),
+    ("Redix.noreply_command!(", QueueFramework::RedisPubSub, REDIX_GATE, TopicRule::CommandArg("publish")),
+    ("Redix.pipeline(", QueueFramework::RedisPubSub, REDIX_GATE, TopicRule::CommandArg("publish")),
+    ("Redix.pipeline!(", QueueFramework::RedisPubSub, REDIX_GATE, TopicRule::CommandArg("publish")),
+    // ex_aws_sqs: `ExAws.SQS.send_message("orders", body) |> ExAws.request()`
+    // and `send_message_batch("orders", entries)`, the queue arg #0.
+    ("ExAws.SQS.send_message(", QueueFramework::Sqs, EX_AWS_SQS_GATE, TopicRule::ArgLiteral),
+    ("ExAws.SQS.send_message_batch(", QueueFramework::Sqs, EX_AWS_SQS_GATE, TopicRule::ArgLiteral),
     // ---- A2.9: broker pub/sub (see the CONSUMER_PATTERNS block) -----------
     // Redis pub/sub — `r.publish('notifications', payload)`. Placed AFTER the
     // NATS / RabbitMQ / SNS rows: a file importing both is attributed to the
@@ -1192,6 +1286,37 @@ const AWS_SQS_DART_GATE: &str = "package:aws_sqs_api/";
 /// redis_task_queue: `import 'package:redis_task_queue/redis_task_queue.dart';`.
 /// A task queue, so never a broker signal ([`is_broker`]).
 const REDIS_TASK_QUEUE_GATE: &[&str] = &["package:redis_task_queue/"];
+
+// ---- DH.4: Elixir library gates, shared by both tables -----------------------
+// Each is the library's MODULE as an Elixir call or alias spells it,
+// lowercased (the gate reads the lowercased file). Every one joins
+// `broker_signals`, which eventbus.rs reads in EVERY language, so none may be
+// a substring of ordinary text.
+/// broadway_kafka: `BroadwayKafka.Producer`.
+const BROADWAY_KAFKA_GATE: &[&str] = &["broadwaykafka"];
+/// brod, an Erlang module: `:brod.produce_sync(`.
+const BROD_GATE: &[&str] = &[":brod"];
+/// tortoise311 and tortoise: `Tortoise311.publish(`, `Tortoise.Connection`.
+const TORTOISE_GATE: &[&str] = &["tortoise"];
+/// gnat: its module calls, never the bare word `gnat`, which `signature` and
+/// `designated` contain (a TS file mentioning a signature would otherwise
+/// lose its in-process `.on(` / `.subscribe(` EVENT nodes).
+const GNAT_GATE: &[&str] = &[
+    "gnat.pub",
+    "gnat.sub",
+    "gnat.request",
+    "gnat.consumersupervisor",
+    "gnat.connectionsupervisor",
+    "gnat.start_link",
+];
+/// broadway_cloud_pub_sub: `BroadwayCloudPubSub.Producer`.
+const BROADWAY_PUBSUB_GATE: &[&str] = &["broadwaycloudpubsub"];
+/// google_api_pub_sub: `GoogleApi.PubSub.V1.Api.Projects`.
+const GOOGLE_API_PUBSUB_GATE: &[&str] = &["googleapi.pubsub"];
+/// redix: `Redix.command(`, `Redix.PubSub`.
+const REDIX_GATE: &[&str] = &["redix"];
+/// ex_aws_sqs: `ExAws.SQS`.
+const EX_AWS_SQS_GATE: &[&str] = &["exaws.sqs"];
 
 /// CL.1: rows whose library gate a Python file may miss while still calling
 /// the task. The canonical Celery caller (`from tasks import process_order` +
@@ -1955,7 +2080,7 @@ fn emit_queue_nodes(
         // LA.4: the resolver only ever sees a row that may name a topic by an
         // identifier; everything else reads exactly as it always has.
         // DH.1: a Declared or BareArg hit never carries an expression to fold;
-        // DH.3: nor does a CommandArg hit.
+        // DH.3: nor does a CommandArg hit; DH.4: nor a KeyedIn one.
         let folds = resolve.filter(|_| {
             !is_generic_verb_row(pattern, framework)
                 && !is_identity_rule(rule)
@@ -1965,6 +2090,7 @@ fn emit_queue_nodes(
                         | TopicRule::Declared
                         | TopicRule::BareArg
                         | TopicRule::CommandArg(_)
+                        | TopicRule::KeyedIn(_)
                 )
         });
         let mut reads: Vec<Option<(String, TopicForm)>> = hits
@@ -8482,5 +8608,288 @@ await myconsumer.run({ eachMessage: notMine });\n";
             assert_eq!(qnames(&with), qnames(&without), "{path}");
             assert!(!qnames(&with).is_empty(), "{path}");
         }
+    }
+
+    // ---- DH.4: Elixir clients -----------------------------------------------
+
+    const EX_PATH: &str = "lib/client.ex";
+
+    fn ex(src: &str) -> (Vec<String>, Vec<String>) {
+        at(src, EX_PATH)
+    }
+
+    fn ex_tag(side: &str, framework: &str) -> Vec<String> {
+        vec![format!("queue_{side}:{UNRESOLVED_PREFIX}{framework}")]
+    }
+
+    #[test]
+    fn elixir_amqp_consume_reads_queue() {
+        // matrix/elixir/amqp, both files.
+        let worker = "defmodule Worker do\n  def start(chan) do\n    AMQP.Queue.declare(chan, \"orders\", durable: true)\n    AMQP.Basic.consume(chan, \"orders\")\n  end\nend\n";
+        let publisher = "defmodule Publisher do\n  def publish(chan, body) do\n    AMQP.Basic.publish(chan, \"\", \"orders\", body)\n  end\nend\n";
+        let c = extract_queue_consumer_nodes(worker, "client/lib/worker.ex", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"RabbitMQ""#));
+        // The site is the consume call (line 3), never the declaration.
+        assert_eq!(c.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![3]);
+        assert_eq!(ex(worker).1, Vec::<String>::new());
+        // The producer is HEAD's `AMQP.Basic.publish(` row, unchanged.
+        assert_eq!(ex(publisher), (vec![], strs(&["queue_producer:orders"])));
+        // A queue in a variable is the framework tag.
+        let var = worker.replace("AMQP.Basic.consume(chan, \"orders\")", "AMQP.Basic.consume(chan, queue)");
+        assert_eq!(ex(&var).0, ex_tag("consumer", "rabbitmq"));
+    }
+
+    /// matrix/elixir/kafka, both files.
+    const BROADWAY_KAFKA_PIPELINE: &str = "defmodule Orders.Pipeline do\n  use Broadway\n\n  def start_link(_) do\n    Broadway.start_link(__MODULE__,\n      name: __MODULE__,\n      producer: [module: {BroadwayKafka.Producer, hosts: [localhost: 9092], group_id: \"orders\", topics: [\"orders\"]}],\n      processors: [default: []]\n    )\n  end\n\n  def handle_message(_, message, _), do: message\nend\n";
+    const BROD_PUBLISHER: &str = "defmodule Orders.Publisher do\n  def publish(body) do\n    :brod.produce_sync(:kafka_client, \"orders\", :hash, \"key\", body)\n  end\nend\n";
+
+    #[test]
+    fn broadway_kafka_topics_list_multiline() {
+        let c = extract_queue_consumer_nodes(BROADWAY_KAFKA_PIPELINE, "client/lib/orders/pipeline.ex", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"Kafka""#));
+        assert_eq!(c.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![6]);
+        // The hexdocs.pm/broadway_kafka config: a keyword list spread over
+        // five lines inside the tuple; the second topic is not read.
+        let hexdocs = "defmodule MyBroadway do\n  use Broadway\n\n  def start_link(_opts) do\n    Broadway.start_link(__MODULE__,\n      name: __MODULE__,\n      producer: [\n        module:\n          {BroadwayKafka.Producer,\n           [\n             hosts: [localhost: 9092],\n             group_id: \"group_1\",\n             topics: [\"orders\", \"audit\"]\n           ]},\n        concurrency: 1\n      ],\n      processors: [default: [concurrency: 10]]\n    )\n  end\nend\n";
+        assert_eq!(ex(hexdocs), (strs(&["queue_consumer:orders"]), vec![]));
+        // Topics in a module attribute: a consumer whose topic is unknown.
+        let attr = BROADWAY_KAFKA_PIPELINE.replace("topics: [\"orders\"]", "topics: @topics");
+        assert_eq!(ex(&attr).0, ex_tag("consumer", "kafka"));
+        // Options in a variable, and an alias line: no site, no tag.
+        let opts = BROADWAY_KAFKA_PIPELINE.replace(
+            "{BroadwayKafka.Producer, hosts: [localhost: 9092], group_id: \"orders\", topics: [\"orders\"]}",
+            "{BroadwayKafka.Producer, kafka_opts()}",
+        );
+        assert_eq!(ex(&opts), (vec![], vec![]));
+        let alias = "defmodule P do\n  alias BroadwayKafka.Producer\nend\n";
+        assert_eq!(ex(alias), (vec![], vec![]));
+        // Two producers in one children list: each reads only its own tuple.
+        let two = "children = [\n  {Broadway, producer: [module: {BroadwayKafka.Producer, group_id: \"a\", topics: [\"payments\"]}]},\n  {Broadway, producer: [module: {BroadwayKafka.Producer, group_id: \"b\", topics: [\"orders\"]}]}\n]\n";
+        assert_eq!(ex(two).0, strs(&["queue_consumer:orders", "queue_consumer:payments"]));
+    }
+
+    #[test]
+    fn brod_produce_sync_and_group_subscriber() {
+        let p = extract_queue_producer_nodes(BROD_PUBLISHER, "server/lib/orders/publisher.ex", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"Kafka""#));
+        // `:brod.produce(`, and a value that is the payload, never the topic.
+        let produce = "defmodule P do\n  def f(v) do\n    :brod.produce(:client, \"payments\", 0, \"k\", \"orders\")\n  end\nend\n";
+        assert_eq!(ex(produce), (vec![], strs(&["queue_producer:payments"])));
+        // The group subscriber's topics list (arg #2, its first) and the
+        // topic subscriber's topic (arg #1).
+        let group = "defmodule C do\n  def start do\n    :brod.start_link_group_subscriber(:client, \"group\", [\"orders\"], [], [], __MODULE__, [])\n  end\nend\n";
+        assert_eq!(ex(group), (strs(&["queue_consumer:orders"]), vec![]));
+        let topic = "defmodule C do\n  def start do\n    :brod.start_link_topic_subscriber(:client, \"orders\", :all, [], __MODULE__, [])\n  end\nend\n";
+        assert_eq!(ex(topic), (strs(&["queue_consumer:orders"]), vec![]));
+        // A topic in a variable is the tag.
+        let var = BROD_PUBLISHER.replace("\"orders\", :hash", "topic, :hash");
+        assert_eq!(ex(&var).1, ex_tag("producer", "kafka"));
+    }
+
+    #[test]
+    fn tortoise311_publish_and_subscriptions() {
+        // matrix/elixir/mqtt, both files.
+        let listener = "defmodule Listener do\n  def start do\n    Tortoise311.Supervisor.start_child(\n      client_id: \"listener\",\n      handler: {Tortoise311.Handler.Logger, []},\n      server: {Tortoise311.Transport.Tcp, host: \"broker\", port: 1883},\n      subscriptions: [{\"sensors/temp\", 0}]\n    )\n  end\nend\n";
+        let sensor = "defmodule Sensor do\n  def report do\n    Tortoise311.publish(\"sensor\", \"sensors/temp\", \"21\", qos: 0)\n  end\nend\n";
+        let c = extract_queue_consumer_nodes(listener, "client/lib/listener.ex", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:sensors/temp"]));
+        assert!(framework_of(&c).contains(r#""framework":"Mqtt""#));
+        let p = extract_queue_producer_nodes(sensor, "server/lib/sensor.ex", module_id(), repo());
+        // The client id (arg #0) is never the topic.
+        assert_eq!(qnames(&p), strs(&["queue_producer:sensors/temp"]));
+        assert!(framework_of(&p).contains(r#""framework":"Mqtt""#));
+        // The original tortoise, `publish_sync`, `Connection.start_link`, and
+        // the runtime subscribe.
+        let tortoise = "defmodule T do\n  def f do\n    Tortoise.Connection.start_link(client_id: T, server: {Tortoise.Transport.Tcp, host: 'localhost', port: 1883}, handler: {Tortoise.Handler.Logger, []}, subscriptions: [{\"a/b\", 0}])\n    Tortoise.Connection.subscribe(T, {\"c/d\", 0})\n    Tortoise.publish_sync(T, \"e/f\", \"x\")\n    Tortoise311.publish_sync(T, \"g/h\", \"x\")\n  end\nend\n";
+        assert_eq!(
+            ex(tortoise),
+            (strs(&["queue_consumer:a/b", "queue_consumer:c/d"]), strs(&["queue_producer:e/f", "queue_producer:g/h"]))
+        );
+        // A publisher's connection subscribes to nothing: no consumer, no tag.
+        let publisher = "defmodule Pub do\n  def start do\n    Tortoise311.Supervisor.start_child(client_id: \"pub\", handler: {Tortoise311.Handler.Logger, []}, server: {Tortoise311.Transport.Tcp, host: \"b\", port: 1883})\n    Tortoise311.publish(\"pub\", \"sensors/temp\", \"21\")\n  end\nend\n";
+        assert_eq!(ex(publisher), (vec![], strs(&["queue_producer:sensors/temp"])));
+        // Library rows, exempt from the MQTT generic-verb guard; a file that
+        // also says `mqtt` still reads them, and the A2.9 rows yield.
+        for needle in ["Tortoise311.publish(", "Tortoise.publish(", "Tortoise311.Supervisor.start_child("] {
+            assert!(!is_generic_verb_row(needle, &QueueFramework::Mqtt), "{needle}");
+        }
+        let with_word = format!("# an MQTT sensor\n{sensor}");
+        assert_eq!(ex(&with_word), (vec![], strs(&["queue_producer:sensors/temp"])));
+    }
+
+    #[test]
+    fn gnat_pub_sub_and_consumer_supervisor() {
+        // matrix/elixir/nats, both files.
+        let sub = "defmodule Sub do\n  def listen(gnat) do\n    {:ok, _sid} = Gnat.sub(gnat, self(), \"orders\")\n  end\nend\n";
+        let publisher = "defmodule Pub do\n  def publish(gnat, body) do\n    Gnat.pub(gnat, \"orders\", body)\n  end\nend\n";
+        let c = extract_queue_consumer_nodes(sub, "client/lib/sub.ex", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"Nats""#));
+        let p = extract_queue_producer_nodes(publisher, "server/lib/pub.ex", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"Nats""#));
+        // The consumer supervisor's inline settings name the topic.
+        let supervisor = "children = [\n  {Gnat.ConnectionSupervisor, gnat_supervisor_settings},\n  {Gnat.ConsumerSupervisor, %{connection_name: :gnat, module: MyApp.Server, subscription_topics: [%{topic: \"rpc.example\", queue_group: \"rpc\"}]}}\n]\n";
+        assert_eq!(ex(supervisor), (strs(&["queue_consumer:rpc.example"]), vec![]));
+        // Its documented `{Gnat.ConsumerSupervisor, settings}` names the
+        // topics elsewhere: no site, no tag.
+        let settings = "children = [\n  {Gnat.ConnectionSupervisor, gnat_supervisor_settings},\n  {Gnat.ConsumerSupervisor, consumer_supervisor_settings}\n]\n";
+        assert_eq!(ex(settings), (vec![], vec![]));
+        // `MyGnat.subscribe(` style calls are no `Gnat.sub(`.
+        let other = "defmodule X do\n  def f(c), do: Gnat.subscribe_later(c, \"orders\")\nend\n";
+        assert_eq!(ex(other), (vec![], vec![]));
+    }
+
+    #[test]
+    fn broadway_cloud_pubsub_subscription_folds() {
+        // matrix/elixir/pubsub client.
+        let listener = "defmodule Listener do\n  use Broadway\n\n  def start_link(_) do\n    Broadway.start_link(__MODULE__,\n      name: __MODULE__,\n      producer: [module: {BroadwayCloudPubSub.Producer, subscription: \"projects/shop/subscriptions/orders\"}],\n      processors: [default: []]\n    )\n  end\n\n  def handle_message(_, message, _), do: message\nend\n";
+        let c = extract_queue_consumer_nodes(listener, "client/lib/listener.ex", module_id(), repo());
+        // The resource path folds to its last segment (the A2.6 GCP rule).
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"PubSub""#));
+        // google_api_pub_sub's pull, the subscription arg #2.
+        let pull = "defmodule L do\n  alias GoogleApi.PubSub.V1.Api.Projects\n  def pull(conn) do\n    Projects.pubsub_projects_subscriptions_pull(conn, \"shop\", \"orders\", body: %{maxMessages: 10})\n  end\nend\n";
+        assert_eq!(ex(pull), (strs(&["queue_consumer:orders"]), vec![]));
+    }
+
+    #[test]
+    fn google_api_pubsub_topics_publish() {
+        // matrix/elixir/pubsub server.
+        let publisher = "defmodule Publisher do\n  alias GoogleApi.PubSub.V1.Api.Projects\n\n  def publish(conn, body) do\n    Projects.pubsub_projects_topics_publish(conn, \"shop\", \"orders\", body: %{messages: [%{data: Base.encode64(body)}]})\n  end\nend\n";
+        let p = extract_queue_producer_nodes(publisher, "server/lib/publisher.ex", module_id(), repo());
+        // The project (arg #1) is never the topic.
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"PubSub""#));
+        // Without the GoogleApi.PubSub module the call is nobody's.
+        let other = publisher.replace("GoogleApi.PubSub.V1.Api.Projects", "MyApp.Projects");
+        assert_eq!(ex(&other), (vec![], vec![]));
+    }
+
+    #[test]
+    fn redix_publish_command_and_pubsub_subscribe() {
+        // matrix/elixir/redis, both files.
+        let listener = "defmodule Listener do\n  def listen(pubsub) do\n    {:ok, _ref} = Redix.PubSub.subscribe(pubsub, \"orders\", self())\n  end\nend\n";
+        let notifier = "defmodule Notifier do\n  def notify(conn, body) do\n    Redix.command(conn, [\"PUBLISH\", \"orders\", body])\n  end\nend\n";
+        let c = extract_queue_consumer_nodes(listener, "client/lib/listener.ex", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"RedisPubSub""#));
+        let p = extract_queue_producer_nodes(notifier, "server/lib/notifier.ex", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"RedisPubSub""#));
+        // Any other command is no publish: no node and no tag.
+        let get = notifier.replace("[\"PUBLISH\", \"orders\", body]", "[\"GET\", \"k\"]");
+        assert_eq!(ex(&get), (vec![], vec![]));
+        // `command!`, `noreply_command` and a pipeline's PUBLISH; a pattern
+        // subscription; a channel list's first.
+        let more = "defmodule N do\n  def f(c, ps) do\n    Redix.command!(c, [\"PUBLISH\", \"a\", 1])\n    Redix.noreply_command(c, [\"PUBLISH\", \"b\", 1])\n    Redix.pipeline(c, [[\"INCR\", \"n\"], [\"PUBLISH\", \"c\", 1]])\n    Redix.PubSub.psubscribe(ps, \"d.*\", self())\n    Redix.PubSub.subscribe(ps, [\"e\", \"f\"], self())\n  end\nend\n";
+        assert_eq!(
+            ex(more),
+            (
+                strs(&["queue_consumer:d.*", "queue_consumer:e"]),
+                strs(&["queue_producer:a", "queue_producer:b", "queue_producer:c"])
+            )
+        );
+        // A channel in a variable: a publish whose topic is unknown.
+        let var = notifier.replace("\"PUBLISH\", \"orders\",", "\"PUBLISH\", channel,");
+        assert_eq!(ex(&var).1, ex_tag("producer", "redispubsub"));
+        // A Redix file that also spells `redis` (its URL): the A2.9
+        // `.subscribe(` row yields to the Redix row that read the call.
+        let with_url = listener.replace("def listen(pubsub) do\n", "def listen(pubsub) do\n    {:ok, _} = Redix.PubSub.start_link(\"redis://localhost:6379\")\n");
+        let c = extract_queue_consumer_nodes(&with_url, EX_PATH, module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        // A Redix file is a broker file: eventbus.rs mints no verb-fallback
+        // `.subscribe(` EVENT_HANDLER beside the queue node.
+        let ev = crate::eventbus::extract_event_handler_nodes(listener, EX_PATH, module_id(), repo());
+        assert!(ev.nodes.is_empty(), "{:?}", ev.nav.qname_by_id.values().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn ex_aws_sqs_send_and_receive() {
+        // matrix/elixir/sqs_sns, both files.
+        let poller = "defmodule Poller do\n  def poll do\n    ExAws.SQS.receive_message(\"orders\") |> ExAws.request()\n  end\nend\n";
+        let enqueue = "defmodule Enqueue do\n  def enqueue(body) do\n    ExAws.SQS.send_message(\"orders\", body) |> ExAws.request()\n  end\nend\n";
+        let c = extract_queue_consumer_nodes(poller, "client/lib/poller.ex", module_id(), repo());
+        assert_eq!(qnames(&c), strs(&["queue_consumer:orders"]));
+        assert!(framework_of(&c).contains(r#""framework":"Sqs""#));
+        let p = extract_queue_producer_nodes(enqueue, "server/lib/enqueue.ex", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:orders"]));
+        assert!(framework_of(&p).contains(r#""framework":"Sqs""#));
+        // The batch form, and a queue URL that folds; the body is never the
+        // queue.
+        let batch = "defmodule B do\n  def f(entries) do\n    ExAws.SQS.send_message_batch(\"https://sqs.us-east-1.amazonaws.com/123/payments\", entries)\n  end\nend\n";
+        assert_eq!(ex(batch), (vec![], strs(&["queue_producer:payments"])));
+        let var = enqueue.replace("send_message(\"orders\", body)", "send_message(queue, \"orders\")");
+        assert_eq!(ex(&var).1, ex_tag("producer", "sqs"));
+    }
+
+    #[test]
+    fn oban_pipe_insert_reads_the_worker() {
+        // matrix/elixir/taskq signup.ex: was [`queue_producer:unresolved:oban`].
+        let signup = "defmodule MyApp.Signup do\n  def register(user_id) do\n    %{user_id: user_id}\n    |> MyApp.MailerWorker.new()\n    |> Oban.insert()\n  end\nend\n";
+        let p = extract_queue_producer_nodes(signup, "server/lib/signup.ex", module_id(), repo());
+        assert_eq!(qnames(&p), strs(&["queue_producer:MailerWorker"]));
+        assert!(framework_of(&p).contains(r#""framework":"Oban""#));
+        // The site is the insert call's line.
+        assert_eq!(p.anchors.iter().map(|a| a.line).collect::<Vec<_>>(), vec![4]);
+        // `Oban.insert!` reads through the same needle; a non-`new` stage
+        // keeps the tag.
+        let bang = signup.replace("|> Oban.insert()", "|> Oban.insert!()");
+        assert_eq!(ex(&bang).1, strs(&["queue_producer:MailerWorker"]));
+        let other = signup.replace("|> MyApp.MailerWorker.new()", "|> build_job()");
+        assert_eq!(ex(&other).1, ex_tag("producer", "oban"));
+    }
+
+    #[test]
+    fn oban_insert_argument_form_unchanged() {
+        // HEAD's argument form, a named instance first, and a variable.
+        assert_eq!(ex("Oban.insert(EmailWorker.new(%{id: 1}))\n").1, strs(&["queue_producer:EmailWorker"]));
+        assert_eq!(ex("Oban.insert(changeset)\n").1, ex_tag("producer", "oban"));
+        assert_eq!(ex("Oban.insert(MyApp.Oban, changeset)\n").1, ex_tag("producer", "oban"));
+        assert_eq!(ex("{:ok, job} = Oban.insert(MailerWorker.new(args))\n").1, strs(&["queue_producer:MailerWorker"]));
+    }
+
+    #[test]
+    fn broker_gate_ignores_signature_text() {
+        // The bare word `gnat` is in `signature` / `designated`: the Gnat gate
+        // is its call spellings, so ordinary text is no broker signal.
+        for text in [
+            "const signature = sign(payload)",
+            "the designated handler",
+        ] {
+            assert!(!broker_signal_present(&text.to_ascii_lowercase()), "{text}");
+        }
+        assert!(!broker_signals().contains(&"gnat"));
+        for s in GNAT_GATE {
+            assert!(broker_signals().contains(s), "{s}");
+        }
+        // Every DH.4 gate joins the derived broker gate, lowercase.
+        for gate in [
+            BROADWAY_KAFKA_GATE,
+            BROD_GATE,
+            TORTOISE_GATE,
+            BROADWAY_PUBSUB_GATE,
+            GOOGLE_API_PUBSUB_GATE,
+            REDIX_GATE,
+            EX_AWS_SQS_GATE,
+        ] {
+            for s in gate {
+                assert_eq!(s.to_string(), s.to_ascii_lowercase(), "{s}");
+                assert!(broker_signals().contains(s), "{s}");
+            }
+        }
+        // A TS file whose only near-miss is `signature` keeps its in-process
+        // EVENT_HANDLER.
+        let ts = "const signature = sign(payload);\nemitter.on('saved', h);\n";
+        let ev = crate::eventbus::extract_event_handler_nodes(ts, "", module_id(), repo());
+        assert_eq!(
+            ev.nav.qname_by_id.values().cloned().collect::<Vec<_>>(),
+            strs(&["event_handle:saved"])
+        );
+        // A Gnat call does make it a broker file.
+        assert!(broker_signal_present("{:ok, _} = gnat.sub(gnat, self(), \"orders\")"));
     }
 }

@@ -186,6 +186,24 @@ pub enum TopicRule {
     /// (`['PUBLISH', channel, m]`) is a site that reads no topic, so it keeps
     /// the framework tag. Never an expression: the LA.4 fold has no slot here.
     CommandArg(&'static str),
+    // --- DH.4: A KEYWORD OPTION INSIDE THE ENCLOSING TUPLE ------------------
+    /// DH.4: `<key>: <value>` read in the bracket the needle opens, else in the
+    /// innermost bracket group ENCLOSING the needle ([`enclosing_region`]):
+    /// Elixir's Broadway producer tuple `{BroadwayKafka.Producer, hosts: [..],
+    /// topics: ["orders"]}`, often spread over several lines, and Tortoise's
+    /// `Tortoise311.Supervisor.start_child(.., subscriptions: [{"sensors/temp",
+    /// 0}])`. Keys are tried in table order with [`TopicRule::Keyed`]'s key
+    /// search (word edges; `:` / `=>` / `=` separators); the value is a
+    /// literal, or the first literal inside up to two opening `[` / `{`
+    /// ([`keyed_in`]). No region, or a region where no key is followed by a
+    /// separator, is no site at all ([`scan_guarded`] drops it): an `alias
+    /// BroadwayKafka.Producer` line, a `{Gnat.ConsumerSupervisor, settings}`
+    /// tuple and a Tortoise connection that subscribes to nothing mint no
+    /// consumer. A key whose value is no literal (`topics: @topics`) is a site
+    /// that reads no topic, so it keeps the framework tag. Never an
+    /// expression: an option value held in a variable names nothing the LA.4
+    /// fold has a slot for.
+    KeyedIn(&'static [&'static str]),
 }
 
 /// Bound on occurrences examined per needle per file — generated files can
@@ -291,6 +309,11 @@ pub fn scan(source: &str, needle: &str, rule: TopicRule) -> Vec<TopicHit> {
 /// vector opened by the command is dropped at the same point (the command IS
 /// the site: a `send_object(['SET', k, v])` is no publish). One whose command
 /// has no literal after it stays a hit, with no topic and no expression.
+///
+/// DH.4: a [`TopicRule::KeyedIn`] occurrence with no region, or whose region
+/// holds none of its keys followed by a separator, is dropped at the same
+/// point (the option IS the site). One whose key holds no literal stays a
+/// hit, with no topic and no expression.
 pub(crate) fn scan_guarded(
     source: &str,
     needle: &str,
@@ -322,7 +345,7 @@ pub(crate) fn scan_guarded(
             // arguments, so they need the needle's own offset. A symbol is
             // never a URL/ARN, so its form is always `Literal`.
             TopicRule::Receiver => verbatim(receiver_before(source, offset)),
-            TopicRule::ArgReceiver => verbatim(arg_receiver(source, after, needle)),
+            TopicRule::ArgReceiver => verbatim(arg_receiver(source, offset, after, needle)),
             TopicRule::DeclaredSymbol => verbatim(declared_symbol(source, after)),
             TopicRule::EnclosingSymbol => verbatim(enclosing_symbol(source, offset)),
             TopicRule::LambdaCallee => verbatim(lambda_callee(source, after, needle)),
@@ -342,6 +365,16 @@ pub(crate) fn scan_guarded(
             // no vector opens with the command (see the doc above).
             TopicRule::CommandArg(cmd) => {
                 match arg_region(source, after, needle).and_then(|r| command_arg(r, cmd)) {
+                    Some(read) => read,
+                    None => continue,
+                }
+            }
+            // DH.4: the keyed option, or no site at all when no region holds
+            // one of its keys (see the doc above).
+            TopicRule::KeyedIn(keys) => {
+                let region = arg_region(source, after, needle)
+                    .or_else(|| enclosing_region(source, offset));
+                match region.and_then(|r| keyed_in(r, keys)) {
                     Some(read) => read,
                     None => continue,
                 }
@@ -512,8 +545,8 @@ fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option
             keyed_literal(region, keys).or_else(|| arg_literal(region, 0))
         }
         // `NoIdentity`, the A2.5 identity rules, DH.1's `Declared` /
-        // `BareArg` and DH.3's `CommandArg` never read an argument region
-        // here; `scan` dispatches them before it gets here.
+        // `BareArg`, DH.3's `CommandArg` and DH.4's `KeyedIn` never read an
+        // argument region here; `scan` dispatches them before it gets here.
         _ => None,
     }
 }
@@ -521,12 +554,16 @@ fn topic_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option
 /// LA.4: the identifier expression in the slot [`topic_at`] read no literal
 /// from — the same region, the same argument, the same key, tried in the same
 /// order. `NoIdentity` and the A2.5 identity rules never carry one, nor do
-/// DH.1's `Declared` (no slot) and `BareArg` (a literal or no site) and DH.3's
-/// `CommandArg` (a command vector's literal, no expression slot).
+/// DH.1's `Declared` (no slot) and `BareArg` (a literal or no site), DH.3's
+/// `CommandArg` (a command vector's literal, no expression slot) and DH.4's
+/// `KeyedIn` (an option value in a variable names nothing).
 fn expr_at(source: &str, after: usize, needle: &str, rule: TopicRule) -> Option<String> {
     if matches!(
         rule,
-        TopicRule::Declared | TopicRule::BareArg | TopicRule::CommandArg(_)
+        TopicRule::Declared
+            | TopicRule::BareArg
+            | TopicRule::CommandArg(_)
+            | TopicRule::KeyedIn(_)
     ) {
         return None;
     }
@@ -916,6 +953,33 @@ fn arg_literal(region: &str, n: usize) -> Option<Folded> {
 /// when a `.` sits right before the key, so a bare call like `topic("x")` still
 /// does not.
 fn keyed_literal(region: &str, keys: &[&str]) -> Option<Folded> {
+    keyed_value(region, keys, 0).flatten()
+}
+
+/// DH.4 [`TopicRule::KeyedIn`] — [`keyed_literal`]'s key search, where the
+/// value may sit inside up to two opening `[` / `{` (whitespace and line
+/// breaks between them skipped): Broadway's `topics: ["orders"]`, Tortoise's
+/// `subscriptions: [{"sensors/temp", 0}]`, Gnat's `subscription_topics:
+/// [%{topic: "rpc.example"}]` (under the key `topic`). `Some(Some(t))`: a key
+/// read a literal. `Some(None)`: a key followed by a separator, no literal
+/// (`topics: @topics`), a site that names no topic. `None`: no key followed
+/// by a separator, so the occurrence is no site.
+fn keyed_in(region: &str, keys: &[&str]) -> Option<Option<Folded>> {
+    keyed_value(region, keys, MAX_KEYED_OPENS)
+}
+
+/// DH.4: the opening brackets [`keyed_in`] steps into at a value: the list,
+/// then the tuple or map inside it.
+const MAX_KEYED_OPENS: usize = 2;
+
+/// The keyed scan behind [`keyed_literal`] and [`keyed_in`]: `<key> <sep>
+/// <literal>` anywhere in the region, keys tried in table order, every
+/// occurrence of a key tried before the next key, and at the value at most
+/// `opens` opening `[` / `{` stepped into. `Some(Some(t))` is the first literal
+/// read; `Some(None)` means some key was followed by a separator but no value
+/// read a literal; `None` means no key was. With `opens == 0` the first
+/// literal is exactly what [`keyed_literal`] has always read.
+fn keyed_value(region: &str, keys: &[&str], opens: usize) -> Option<Option<Folded>> {
     // ASCII-lowercasing is byte-length preserving, so indices map 1:1 back onto
     // `region` and we can read the ORIGINAL bytes at an index found in `lower`.
     let lower = region.to_ascii_lowercase();
@@ -924,6 +988,7 @@ fn keyed_literal(region: &str, keys: &[&str]) -> Option<Folded> {
         return None;
     }
     let b = region.as_bytes();
+    let mut keyed = false;
     for key in keys {
         let k = key.to_ascii_lowercase();
         if k.is_empty() {
@@ -947,15 +1012,94 @@ fn keyed_literal(region: &str, keys: &[&str]) -> Option<Folded> {
             let Some(sep) = separator_len(b, j).or(builder.then_some(1)) else {
                 continue;
             };
+            keyed = true;
             j = skip_ws(b, j + sep);
             // CL.2: `QueueUrl: aws.String("..")` reads the literal inside.
             let j = step_into_helper(region, j).unwrap_or(j);
+            // DH.4: `topics: ["orders"]` reads the literal inside the list.
+            let j = step_into_opens(b, j, opens);
             if let Some(topic) = read_literal(region, j) {
-                return Some(topic);
+                return Some(Some(topic));
             }
         }
     }
+    keyed.then_some(None)
+}
+
+/// DH.4: `j` past at most `opens` opening `[` / `{`, the whitespace after each
+/// skipped. Every byte stepped over is ASCII, so the index stays on a char
+/// boundary.
+fn step_into_opens(b: &[u8], mut j: usize, opens: usize) -> usize {
+    for _ in 0..opens {
+        if !matches!(b.get(j), Some(b'[' | b'{')) {
+            break;
+        }
+        j = skip_ws(b, j + 1);
+    }
+    j
+}
+
+/// DH.4 [`TopicRule::KeyedIn`] — the innermost bracket group ENCLOSING the
+/// byte at `offset`, without its brackets: the nearest bracket still open at
+/// `offset` ([`unmatched_open_before`]), then forward to its match with
+/// [`region_body`]'s rules (balanced, quotes skipped, at most [`MAX_REGION`]
+/// bytes). `{BroadwayKafka.Producer, hosts: [localhost: 9092], topics:
+/// ["orders"]}` is the tuple's body; the whole of a sibling's tuple never is.
+/// `None` when no bracket is open within [`MAX_REGION`] bytes before the
+/// needle (an `alias BroadwayKafka.Producer` line).
+fn enclosing_region(source: &str, offset: usize) -> Option<&str> {
+    let open = unmatched_open_before(source.as_bytes(), offset)?;
+    // `open` indexes an ASCII bracket, so `open + 1` is a char boundary.
+    region_body(source.get(open + 1..)?)
+}
+
+/// DH.4: the byte index of the nearest `(` / `[` / `{` still open at `end`,
+/// walking BACK from `end` (exclusive) over at most [`MAX_REGION`] bytes: a
+/// closing bracket met on the way is a group the next opener closes, and
+/// `"`-quoted text is stepped over (a `"` after an odd run of `\` is inside
+/// the string). Only `"` delimits on the way back: it is Elixir's string, and
+/// an apostrophe in a `#` comment (`# don't`) must not swallow the walk. Byte
+/// comparisons only, so `end` may sit anywhere.
+fn unmatched_open_before(b: &[u8], end: usize) -> Option<usize> {
+    let end = end.min(b.len());
+    let floor = end.saturating_sub(MAX_REGION);
+    let mut depth = 0usize;
+    let mut quoted = false;
+    let mut i = end;
+    while i > floor {
+        i -= 1;
+        let c = b[i];
+        if c == b'"' && !escaped(b, i, floor) {
+            quoted = !quoted;
+            continue;
+        }
+        if quoted {
+            continue;
+        }
+        match c {
+            b')' | b']' | b'}' => depth += 1,
+            b'(' | b'[' | b'{' => {
+                if depth == 0 {
+                    return Some(i);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
     None
+}
+
+/// DH.4: is the byte at `i` escaped, an odd run of `\` right before it
+/// (counted no further back than `floor`)?
+fn escaped(b: &[u8], i: usize, floor: usize) -> bool {
+    let mut run = 0usize;
+    let mut k = i;
+    while k > floor && b.get(k - 1) == Some(&b'\\') {
+        run += 1;
+        k -= 1;
+    }
+    run % 2 == 1
 }
 
 /// CL.2: calls whose only job is to wrap a keyed value in a pointer, aws-sdk-go's
@@ -1301,11 +1445,55 @@ fn receiver_before(source: &str, offset: usize) -> Option<String> {
 }
 
 /// [`TopicRule::ArgReceiver`] — the callee of positional argument #0.
-fn arg_receiver(source: &str, after: usize, needle: &str) -> Option<String> {
-    let region = arg_region(source, after, needle)?;
-    let arg = *split_args(region).first()?;
+///
+/// DH.4: when argument #0 is ABSENT (no region after the needle, or an empty
+/// one), the job is read from the pipe stage before the needle instead
+/// ([`piped_receiver`]): Oban's documented `%{..} |> MyApp.MailerWorker.new()
+/// |> Oban.insert()`, and `Oban.insert!` / `Oban.insert_all` through the same
+/// `Oban.insert` needle. A present argument #0 reads exactly as before, so
+/// `Oban.insert(EmailWorker.new(%{}))` and `Oban.insert(changeset)` are
+/// unchanged.
+fn arg_receiver(source: &str, offset: usize, after: usize, needle: &str) -> Option<String> {
+    let arg = arg_region(source, after, needle)
+        .and_then(|region| split_args(region).first().copied())
+        .filter(|arg| !arg.trim().is_empty());
+    let Some(arg) = arg else {
+        return piped_receiver(source, offset);
+    };
     let call = arg.find('(')?;
     last_symbol(arg.get(..call)?)
+}
+
+/// DH.4: the job a pipe hands the needle at `offset`. Before the needle
+/// (whitespace and line breaks skipped) must stand `|>`, and the stage before
+/// that `|>` must END with `<Chain>.new(<args>)`: its last byte a `)` whose
+/// matching `(` ([`unmatched_open_before`]) follows `.new`. The job is the
+/// chain's last segment, `MyApp.MailerWorker.new(%{}) |> Oban.insert()` ->
+/// `MailerWorker`, the argument list may span lines, and the stage may sit
+/// on the line before. `x |> Repo.insert() |> Oban.insert()`, `jobs |>
+/// Oban.insert_all()` and a needle no `|>` precedes read nothing. Byte walks
+/// only: every index sliced at is an ASCII byte's.
+fn piped_receiver(source: &str, offset: usize) -> Option<String> {
+    let b = source.as_bytes();
+    let mut i = offset.min(b.len());
+    while i > 0 && b[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    if i < 2 || b.get(i - 2..i) != Some(b"|>".as_slice()) {
+        return None;
+    }
+    i -= 2;
+    while i > 0 && b[i - 1].is_ascii_whitespace() {
+        i -= 1;
+    }
+    if i == 0 || b[i - 1] != b')' {
+        return None;
+    }
+    let open = unmatched_open_before(b, i - 1)?;
+    if b.get(open) != Some(&b'(') {
+        return None;
+    }
+    ident_before(source.get(..open)?.strip_suffix(".new")?)
 }
 
 /// Byte just past `kw` in `line`, when `kw` starts at a word edge — so
@@ -3551,5 +3739,170 @@ mod tests {
             vec![(None, None)]
         );
         assert_eq!(command_arg("['PUBLISH']", "publish"), Some(None));
+    }
+
+    // ---- DH.4: KeyedIn and the Oban pipe ------------------------------------
+
+    /// (topic, expr) of every KeyedIn hit, in order.
+    fn keyed_in_hits(src: &str, needle: &str, keys: &'static [&'static str]) -> Vec<(Option<String>, Option<String>)> {
+        scan(src, needle, TopicRule::KeyedIn(keys))
+            .into_iter()
+            .map(|h| (h.topic, h.expr))
+            .collect()
+    }
+
+    #[test]
+    fn keyed_in_reads_the_enclosing_tuple() {
+        // matrix/elixir/kafka: the needle opens nothing, so the region is the
+        // tuple around it; `group_id: "orders"` is another key.
+        let one_line = "producer: [module: {BroadwayKafka.Producer, hosts: [localhost: 9092], group_id: \"g\", topics: [\"orders\"]}],\n";
+        assert_eq!(
+            keyed_in_hits(one_line, "BroadwayKafka.Producer", &["topics"]),
+            vec![(Some("orders".to_string()), None)]
+        );
+        // The hexdocs.pm/broadway_kafka config, spread over five lines.
+        let multiline = "producer: [\n  module:\n    {BroadwayKafka.Producer,\n     [hosts: [localhost: 9092],\n      group_id: \"group_1\",\n      topics: [\"orders\"]]},\n  concurrency: 1\n],\n";
+        assert_eq!(
+            keyed_in_hits(multiline, "BroadwayKafka.Producer", &["topics"]),
+            vec![(Some("orders".to_string()), None)]
+        );
+        // A quoted bracket before the needle is no group, and a sibling
+        // tuple's key never leaks in: each needle reads only its own group.
+        let two = "children = [\n  {Other, name: \"{x\", topics: [\"audit\"]},\n  {BroadwayKafka.Producer, topics: [\"orders\"]}\n]\n";
+        assert_eq!(
+            keyed_in_hits(two, "BroadwayKafka.Producer", &["topics"]),
+            vec![(Some("orders".to_string()), None)]
+        );
+        // A needle that opens its bracket reads that one (Tortoise's call).
+        let call = "Tortoise311.Supervisor.start_child(client_id: \"l\", subscriptions: [{\"sensors/temp\", 0}])\n";
+        assert_eq!(
+            keyed_in_hits(call, "Tortoise311.Supervisor.start_child(", &["subscriptions"]),
+            vec![(Some("sensors/temp".to_string()), None)]
+        );
+        // A GCP subscription path folds (the A2.6 rule).
+        let gcp = "{BroadwayCloudPubSub.Producer, subscription: \"projects/shop/subscriptions/orders\"}";
+        let hits = scan(gcp, "BroadwayCloudPubSub.Producer", TopicRule::KeyedIn(&["subscription"]));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].topic.as_deref(), Some("orders"));
+        assert_eq!(hits[0].form, TopicForm::Path);
+    }
+
+    #[test]
+    fn keyed_in_steps_into_a_list_of_tuples() {
+        // Tortoise's subscription tuple, a list of them (the first), Gnat's
+        // list of maps under the key `topic`, and a map value.
+        let cases: [(&str, &str, &'static [&'static str], &str); 4] = [
+            ("Tortoise.Connection.start_link(subscriptions: [{\"a/b\", 0}, {\"c/d\", 1}])", "Tortoise.Connection.start_link(", &["subscriptions"], "a/b"),
+            ("{Gnat.ConsumerSupervisor, %{connection_name: :gnat, module: S, subscription_topics: [%{topic: \"rpc.example\"}]}}", "Gnat.ConsumerSupervisor", &["topic"], "rpc.example"),
+            ("{X.Producer, opts: %{topics: [ \"spaced\" ]}}", "X.Producer", &["topics"], "spaced"),
+            ("{X.Producer, topics: \"plain\"}", "X.Producer", &["topics"], "plain"),
+        ];
+        for (src, needle, keys, want) in cases {
+            assert_eq!(keyed_in_hits(src, needle, keys), vec![(Some(want.to_string()), None)], "{src}");
+        }
+        // At most two levels: a literal three brackets deep is no value.
+        assert_eq!(
+            keyed_in_hits("{X.Producer, topics: [[[\"deep\"]]]}", "X.Producer", &["topics"]),
+            vec![(None, None)]
+        );
+        // `subscription_topics` is not the key `topic`, nor `topics`.
+        assert_eq!(keyed_in("subscription_topics: [\"x\"]", &["topic"]), None);
+        assert_eq!(keyed_in("subscription_topics: [\"x\"]", &["topics"]), None);
+    }
+
+    #[test]
+    fn keyed_in_variable_value_reads_nothing() {
+        // A key whose value is a variable: a site, no topic, no expression.
+        for src in [
+            "{BroadwayKafka.Producer, hosts: @hosts, topics: @topics}",
+            "{BroadwayKafka.Producer, topics: topics}",
+            "{BroadwayKafka.Producer, topics: [topic]}",
+        ] {
+            assert_eq!(
+                keyed_in_hits(src, "BroadwayKafka.Producer", &["topics"]),
+                vec![(None, None)],
+                "{src}"
+            );
+        }
+        // No key at all, or no group around the needle: no site. A Tortoise
+        // connection that subscribes to nothing is a publisher's.
+        let no_site: [(&str, &str, &'static [&'static str]); 4] = [
+            ("{BroadwayKafka.Producer, kafka_opts()}", "BroadwayKafka.Producer", &["topics"]),
+            ("{Gnat.ConsumerSupervisor, consumer_supervisor_settings}", "Gnat.ConsumerSupervisor", &["topic"]),
+            ("defmodule X do\n  alias BroadwayKafka.Producer\nend\n", "BroadwayKafka.Producer", &["topics"]),
+            ("Tortoise311.Supervisor.start_child(client_id: \"pub\", server: {Tcp, host: \"b\"})", "Tortoise311.Supervisor.start_child(", &["subscriptions"]),
+        ];
+        for (src, needle, keys) in no_site {
+            assert!(keyed_in_hits(src, needle, keys).is_empty(), "{src}");
+        }
+        // The walk back is bounded: a group opened more than MAX_REGION bytes
+        // before the needle is never found.
+        let far = format!("{{topics: [\"x\"], {}BroadwayKafka.Producer}}", " ".repeat(MAX_REGION + 1));
+        assert!(keyed_in_hits(&far, "BroadwayKafka.Producer", &["topics"]).is_empty());
+        // Byte walks never slice a char: multi-byte text around the needle.
+        let utf8 = "{é: \"ü\", BroadwayKafka.Producer, topics: [\"ørders\"]}";
+        assert_eq!(
+            keyed_in_hits(utf8, "BroadwayKafka.Producer", &["topics"]),
+            vec![(Some("ørders".to_string()), None)]
+        );
+    }
+
+    #[test]
+    fn unmatched_open_before_skips_strings_and_closed_groups() {
+        let s = b"f(a, [1, 2], \"(\\\"[\", x";
+        assert_eq!(unmatched_open_before(s, s.len()), Some(1));
+        // An apostrophe (a `# don't` comment) does not open a string.
+        let s = b"{ # don't\n  X.Producer";
+        assert_eq!(unmatched_open_before(s, s.len()), Some(0));
+        assert_eq!(unmatched_open_before(b"no brackets", 11), None);
+        assert_eq!(unmatched_open_before(b"(x)", 3), None);
+    }
+
+    #[test]
+    fn arg_receiver_reads_the_pipe_stage() {
+        // matrix/elixir/taskq signup.ex: the stage on the line before.
+        let signup = "defmodule MyApp.Signup do\n  def register(user_id) do\n    %{user_id: user_id}\n    |> MyApp.MailerWorker.new()\n    |> Oban.insert()\n  end\nend\n";
+        assert_eq!(one(signup, "Oban.insert", TopicRule::ArgReceiver), Some("MailerWorker".into()));
+        // One line, arguments to `new`, a multi-line argument list, a match
+        // on the result, and the `!` / `_all` spellings of the same needle.
+        for src in [
+            "%{id: 1} |> EmailWorker.new(queue: :mailers) |> Oban.insert()",
+            "EmailWorker.new(%{id: 1}) |> Oban.insert()",
+            "args\n|> EmailWorker.new(\n  %{id: 1},\n  max_attempts: 3\n)\n|> Oban.insert()",
+            "{:ok, _job} = EmailWorker.new(%{id: \")\"}) |> Oban.insert()",
+            "%{id: 1} |> EmailWorker.new() |> Oban.insert!()",
+            "%{id: 1} |> EmailWorker.new() |> Oban.insert",
+        ] {
+            assert_eq!(one(src, "Oban.insert", TopicRule::ArgReceiver), Some("EmailWorker".into()), "{src}");
+        }
+    }
+
+    #[test]
+    fn arg_receiver_pipe_needs_a_new_stage() {
+        for src in [
+            // The stage is another call.
+            "changeset |> Repo.insert() |> Oban.insert()",
+            "%{} |> EmailWorker.build() |> Oban.insert()",
+            // The `.new(` sits inside another call, not at the stage's end.
+            "args |> wrap(EmailWorker.new(args)) |> Oban.insert()",
+            // A list of jobs, a variable, no pipe at all.
+            "[EmailWorker.new(a)] |> Oban.insert_all()",
+            "jobs |> Oban.insert_all()",
+            "Oban.insert()",
+            "Oban.insert!(EmailWorker.new(%{}))",
+            // `.new` with no chain before it.
+            "x |> .new() |> Oban.insert()",
+        ] {
+            assert_eq!(one(src, "Oban.insert", TopicRule::ArgReceiver), None, "{src}");
+        }
+        // A present argument #0 reads exactly as before, pipe or no pipe.
+        assert_eq!(
+            one("Oban.insert(EmailWorker.new(%{}))", "Oban.insert", TopicRule::ArgReceiver),
+            Some("EmailWorker".into())
+        );
+        assert_eq!(
+            one("x |> Other.new() |> Oban.insert(MyApp.Oban)", "Oban.insert", TopicRule::ArgReceiver),
+            None
+        );
     }
 }
